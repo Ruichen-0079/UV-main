@@ -6,3 +6,7 @@ dist/
 *.log
 coverage/
 .turbo/
+
+# Environment files
+.env.*
+!.env.example
