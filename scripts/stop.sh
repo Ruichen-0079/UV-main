@@ -22,6 +22,7 @@ stop_pid_file() {
 
   if kill -0 "$pid" >/dev/null 2>&1; then
     echo "停止 $label，PID $pid"
+    pkill -TERM -P "$pid" >/dev/null 2>&1 || true
     kill "$pid"
     for _ in $(seq 1 10); do
       if ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -32,7 +33,6 @@ stop_pid_file() {
 
     if kill -0 "$pid" >/dev/null 2>&1; then
       echo "$label 未及时退出，发送 SIGTERM 后仍在运行" >&2
-      return 1
     fi
   else
     echo "$label PID $pid 已不存在"

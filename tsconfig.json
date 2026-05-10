@@ -8,6 +8,7 @@
     { "path": "packages/config" },
     { "path": "packages/providers" },
     { "path": "packages/core" },
-    { "path": "apps/server" }
+    { "path": "apps/server" },
+    { "path": "apps/web" }
   ]
 }

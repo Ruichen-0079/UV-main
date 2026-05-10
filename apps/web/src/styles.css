@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  body {
+    @apply m-0 bg-ink-100 text-ink-900 antialiased;
+    font-family:
+      Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      sans-serif;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply border border-ink-200 bg-white shadow-panel;
+    border-radius: 8px;
+  }
+
+  .field {
+    @apply w-full rounded-md border border-ink-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100;
+  }
+
+  .label {
+    @apply text-xs font-semibold uppercase tracking-normal text-ink-500;
+  }
+
+  .button-primary {
+    @apply inline-flex items-center justify-center rounded-md bg-cyan-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-cyan-800 disabled:cursor-not-allowed disabled:bg-ink-200 disabled:text-ink-500;
+  }
+
+  .button-secondary {
+    @apply inline-flex items-center justify-center rounded-md border border-ink-200 bg-white px-3 py-2 text-sm font-semibold text-ink-700 transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-ink-500;
+  }
+
+  .table-cell {
+    @apply border-b border-ink-100 px-3 py-2 text-left text-sm;
+  }
+}

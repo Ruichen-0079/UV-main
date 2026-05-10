@@ -1,17 +1,20 @@
+# Development-only infrastructure for AI Companion Runtime.
+# Intended for Docker Engine inside WSL/Linux. This is not production desktop infrastructure.
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: companion-postgres
     environment:
-      POSTGRES_USER: companion
-      POSTGRES_PASSWORD: companion
+      POSTGRES_USER: airi
+      POSTGRES_PASSWORD: airi_dev_password
       POSTGRES_DB: companion
     ports:
       - "5432:5432"
     volumes:
       - companion-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U companion -d companion"]
+      test: ["CMD-SHELL", "pg_isready -U airi -d companion"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -21,6 +24,8 @@ services:
     container_name: companion-redis
     ports:
       - "6379:6379"
+    volumes:
+      - companion-redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -30,12 +35,19 @@ services:
   nats:
     image: nats:2-alpine
     container_name: companion-nats
-    profiles:
-      - nats
     ports:
       - "4222:4222"
       - "8222:8222"
-    command: ["-js", "-m", "8222"]
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - companion-nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   companion-postgres-data:
+  companion-redis-data:
+  companion-nats-data:

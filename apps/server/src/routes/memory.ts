@@ -20,6 +20,12 @@ const RecentMemoryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20)
 });
 
+const SearchMemoryQuerySchema = z.object({
+  q: z.string().default(""),
+  type: MemoryTypeSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20)
+});
+
 export async function registerMemoryRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
   app.post("/memory", async (request, reply) => {
     const input = CreateMemoryRequestSchema.safeParse(request.body);
@@ -60,5 +66,28 @@ export async function registerMemoryRoutes(app: FastifyInstance, context: AppCon
 
     const memories = await context.memoryRepository.listRecentMemories(query.data.limit);
     return reply.send({ memories });
+  });
+
+  app.get("/memory/search", async (request, reply) => {
+    const query = SearchMemoryQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return reply.status(400).send({ error: "invalid_request", details: query.error.flatten() });
+    }
+
+    const searchQuery: { text: string; types?: MemoryType[]; limit: number } = {
+      text: query.data.q,
+      limit: query.data.limit
+    };
+
+    if (query.data.type) {
+      searchQuery.types = [query.data.type as MemoryType];
+    }
+
+    const memories = await context.memoryRepository.searchMemoriesByTextFallback(searchQuery);
+
+    return reply.send({
+      mock: false,
+      memories
+    });
   });
 }

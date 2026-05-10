@@ -38,6 +38,9 @@ if is_running "$server_pid_file"; then
   require_tool curl
   curl --fail --silent --show-error "$server_url"
   echo
+elif [ -f "$server_pid_file" ]; then
+  echo "Server PID 文件存在，但进程未运行：$(cat "$server_pid_file")" >&2
+  exit 1
 else
   echo "Server 未由 dev.sh 记录为运行中，跳过 /health"
 fi
@@ -47,6 +50,9 @@ if is_running "$web_pid_file"; then
   require_tool curl
   curl --fail --silent --show-error --output /dev/null "$web_url"
   echo "Web UI 可访问"
+elif [ -f "$web_pid_file" ]; then
+  echo "Web UI PID 文件存在，但进程未运行：$(cat "$web_pid_file")" >&2
+  exit 1
 else
   echo "Web UI 未由 dev.sh 记录为运行中，跳过 URL 检查"
 fi

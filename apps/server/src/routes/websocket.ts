@@ -1,15 +1,32 @@
 import { RuntimeEventSchema, UserMessageEventSchema, createEvent, type RuntimeEvent } from "@companion/protocol";
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 import type { AppContext } from "../context.js";
 
+const WebSocketQuerySchema = z.object({
+  dashboard: z.coerce.boolean().optional().default(false)
+});
+
 export async function registerWebSocketRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
-  app.get("/ws", { websocket: true }, (socket) => {
+  app.get("/ws", { websocket: true }, (socket, request) => {
+    const query = WebSocketQuerySchema.safeParse(request.query);
+    const dashboardMode = query.success ? query.data.dashboard : false;
     const activeTraceIds = new Set<string>();
     const subscription = context.eventBus.subscribe("*", (event) => {
-      if (activeTraceIds.has(event.traceId) && shouldForwardEvent(event)) {
+      if ((dashboardMode || activeTraceIds.has(event.traceId)) && shouldForwardEvent(event)) {
         sendJson(socket, event);
       }
     });
+
+    if (dashboardMode) {
+      sendJson(socket, {
+        type: "dashboard.connected",
+        traceId: crypto.randomUUID(),
+        payload: {
+          message: "Dashboard WebSocket connected. Recent event replay is available through GET /events/recent."
+        }
+      });
+    }
 
     socket.on("message", async (rawMessage: Buffer) => {
       let envelope: RuntimeEvent | undefined;

@@ -5,8 +5,18 @@ import type { AppContext } from "../context.js";
 
 const MessageRequestSchema = z.object({
   sessionId: z.string().min(1).default("default"),
-  content: z.string().min(1),
-  voiceOutput: z.boolean().optional().default(false)
+  content: z.string().min(1).optional(),
+  text: z.string().min(1).optional(),
+  voiceOutput: z.boolean().optional(),
+  options: z.object({
+    tts: z.boolean().optional(),
+    voiceOutput: z.boolean().optional(),
+    useMemory: z.boolean().optional(),
+    promptPreview: z.boolean().optional()
+  }).optional()
+}).refine((input) => input.content || input.text, {
+  message: "Either content or text is required.",
+  path: ["text"]
 });
 
 export async function registerMessageRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
@@ -16,18 +26,30 @@ export async function registerMessageRoutes(app: FastifyInstance, context: AppCo
       return reply.status(400).send({ error: "invalid_request", details: input.error.flatten() });
     }
 
+    const content = input.data.content ?? input.data.text ?? "";
+    const voiceOutput = Boolean(input.data.voiceOutput ?? input.data.options?.voiceOutput ?? input.data.options?.tts);
     const event = createEvent("user.message", {
       sessionId: input.data.sessionId,
-      content: input.data.content
+      content
     });
 
     request.log.info({ traceId: event.traceId, sessionId: input.data.sessionId }, "message request received");
 
-    const response = await context.runtime.handleUserMessage(event, {
-      voiceOutput: input.data.voiceOutput
-    });
-
-    return reply.send(response);
+    try {
+      const response = await context.runtime.handleUserMessage(event, { voiceOutput });
+      return reply.send({
+        ...response,
+        reply: response.payload.content,
+        traceId: response.traceId,
+        promptPreview: input.data.options?.promptPreview ? context.runtime.getLatestPromptPreview() : undefined
+      });
+    } catch (error) {
+      return reply.status(500).send({
+        error: "message_failed",
+        message: error instanceof Error ? error.message : "Message handling failed.",
+        traceId: event.traceId
+      });
+    }
   }
 
   app.post("/message", handleMessage);

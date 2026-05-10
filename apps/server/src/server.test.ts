@@ -24,6 +24,16 @@ describe("server", () => {
       });
       expect(message.statusCode).toBe(200);
       expect(message.json().type).toBe("agent.reply");
+      expect(message.json().reply).toContain("Mock reply");
+      expect(message.json().traceId).toBeTypeOf("string");
+
+      const prompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
+      expect(prompt.statusCode).toBe(200);
+      expect(prompt.json().promptPreview.sections.length).toBeGreaterThan(0);
+
+      const providers = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(providers.statusCode).toBe(200);
+      expect(providers.json().providers.chat.status).toBe("healthy");
 
       const memory = await app.inject({
         method: "POST",
@@ -40,6 +50,14 @@ describe("server", () => {
       expect(recent.statusCode).toBe(200);
       expect(recent.json().memories.length).toBeGreaterThan(0);
 
+      const search = await app.inject({ method: "GET", url: "/memory/search?q=Server&limit=5" });
+      expect(search.statusCode).toBe(200);
+      expect(search.json().memories.length).toBeGreaterThan(0);
+
+      const events = await app.inject({ method: "GET", url: "/events/recent?limit=20" });
+      expect(events.statusCode).toBe(200);
+      expect(events.json().events.some((event: { traceId?: string }) => event.traceId)).toBe(true);
+
       await app.close();
     } finally {
       restoreEnv(previous);
@@ -49,6 +67,7 @@ describe("server", () => {
 
 function setMockEnv(): void {
   process.env["NODE_ENV"] = "test";
+  process.env["RUNTIME_MODE"] = "development";
   process.env["PROVIDER_ALLOW_MOCKS"] = "true";
   process.env["MEMORY_REPOSITORY"] = "memory";
   process.env["DATABASE_URL"] = "postgres://companion:companion@localhost:5432/companion";

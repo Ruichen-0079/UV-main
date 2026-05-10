@@ -23,7 +23,7 @@ add_node_path() {
 
   if [ -d "$HOME/.nvm/versions/node" ]; then
     local node_bin
-    node_bin="$(find "$HOME/.nvm/versions/node" -mindepth 2 -maxdepth 2 -type f -name node -printf '%h\n' | sort -V | tail -n 1 || true)"
+    node_bin="$(find "$HOME/.nvm/versions/node" -mindepth 3 -maxdepth 3 -type f -name node -printf '%h\n' | sort -V | tail -n 1 || true)"
     if [ -n "$node_bin" ]; then
       export PATH="$node_bin:$PATH"
     fi
@@ -87,23 +87,18 @@ start_server() {
   fi
 
   echo "启动 Server: $server_url"
-  (
-    export NODE_ENV="${NODE_ENV:-development}"
-    export PROVIDER_ALLOW_MOCKS="${PROVIDER_ALLOW_MOCKS:-true}"
-    export MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-memory}"
-    export SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
-    export SERVER_PORT="${SERVER_PORT:-6121}"
-    pnpm --filter @companion/server dev
-  ) >"$server_log" 2>&1 &
+  env \
+    NODE_ENV="${NODE_ENV:-development}" \
+    PROVIDER_ALLOW_MOCKS="${PROVIDER_ALLOW_MOCKS:-true}" \
+    MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-memory}" \
+    DATABASE_URL="${DATABASE_URL:-postgres://airi:airi_dev_password@localhost:5432/companion}" \
+    SERVER_HOST="${SERVER_HOST:-127.0.0.1}" \
+    SERVER_PORT="${SERVER_PORT:-6121}" \
+    setsid bash -lc 'cd apps/server && exec ../../node_modules/.bin/tsx --conditions development src/index.ts' >"$server_log" 2>&1 < /dev/null &
 
   echo "$!" > "$server_pid_file"
-  sleep 2
 
-  if ! is_running "$server_pid_file"; then
-    echo "Server 启动失败，最近日志：" >&2
-    tail -n 80 "$server_log" >&2 || true
-    exit 1
-  fi
+  wait_for_server
 }
 
 start_web() {
@@ -118,10 +113,7 @@ start_web() {
   fi
 
   echo "启动 Web UI: $web_url"
-  (
-    cd apps/web
-    pnpm dev -- --host 0.0.0.0 --port 5173
-  ) >"$web_log" 2>&1 &
+  setsid bash -lc 'cd apps/web && exec pnpm dev -- --host 0.0.0.0 --port 5173' >"$web_log" 2>&1 < /dev/null &
 
   echo "$!" > "$web_pid_file"
   sleep 2
@@ -133,12 +125,35 @@ start_web() {
   fi
 }
 
+wait_for_server() {
+  for _ in $(seq 1 20); do
+    if ! is_running "$server_pid_file"; then
+      echo "Server 启动失败，最近日志：" >&2
+      tail -n 80 "$server_log" >&2 || true
+      rm -f "$server_pid_file"
+      exit 1
+    fi
+
+    if command -v curl >/dev/null 2>&1 && curl --fail --silent --show-error "$server_url/health" >/dev/null 2>&1; then
+      echo "Server health check 通过"
+      return
+    fi
+
+    sleep 1
+  done
+
+  echo "Server 已启动但 /health 暂未通过，最近日志：" >&2
+  tail -n 80 "$server_log" >&2 || true
+  exit 1
+}
+
 add_node_path
 
 echo "检查开发工具..."
 require_tool node
 require_tool pnpm
 require_tool docker
+require_tool setsid
 docker compose version >/dev/null
 
 node --version

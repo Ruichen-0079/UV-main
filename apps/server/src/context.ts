@@ -9,9 +9,11 @@ import {
 import { PromptBuilder } from "@companion/prompt-builder";
 import { createProviderRegistryFromEnv, type ProviderRegistry } from "@companion/providers";
 import type { FastifyBaseLogger } from "fastify";
+import { DashboardStateService } from "./services/dashboard.js";
 
 export type AppContext = {
   eventBus: InMemoryEventBus;
+  dashboard: DashboardStateService;
   memoryRepository: MemoryRepository;
   memory: MemoryService;
   providers: ProviderRegistry;
@@ -20,6 +22,10 @@ export type AppContext = {
 
 export function createAppContext(logger: FastifyBaseLogger): AppContext {
   const eventBus = new InMemoryEventBus();
+  const dashboard = new DashboardStateService();
+  eventBus.subscribe("*", (event) => {
+    dashboard.recordEvent(event);
+  });
   const memoryRepository = createMemoryRepositoryFromEnv();
   const memory = new MemoryService(memoryRepository);
   const promptBuilder = new PromptBuilder();
@@ -36,6 +42,7 @@ export function createAppContext(logger: FastifyBaseLogger): AppContext {
 
   return {
     eventBus,
+    dashboard,
     memoryRepository,
     memory,
     providers,

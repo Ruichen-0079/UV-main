@@ -67,7 +67,13 @@ export type HandleImageInputInput = VisionInput & {
 };
 
 export class RuntimeOrchestrator {
+  private latestPromptPreview: PromptBuildOutput | null = null;
+
   constructor(private readonly options: RuntimeOrchestratorOptions) {}
+
+  getLatestPromptPreview(): PromptBuildOutput | null {
+    return this.latestPromptPreview;
+  }
 
   async handleUserMessage(
     input: UserMessageEvent | HandleUserMessageInput,
@@ -160,6 +166,7 @@ export class RuntimeOrchestrator {
       tools: [],
       userMessage: event.payload.content
     });
+    this.latestPromptPreview = prompt;
 
     const chatProvider = this.options.providers.getChatProvider();
     const output = await this.measureProvider(

@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal
 
 echo [停止] YUVI Runtime 开发环境
@@ -16,6 +17,6 @@ if errorlevel 1 (
   exit /b 1
 )
 
-wsl -d Ubuntu bash -lc "set -euo pipefail; if [ -x \"$HOME/uv-main/scripts/stop.sh\" ]; then cd \"$HOME/uv-main\"; elif [ -x \"$HOME/uv-main/uv-main/scripts/stop.sh\" ]; then cd \"$HOME/uv-main/uv-main\"; else echo '[错误] 未找到 repo：请确认 WSL 路径 ~/uv-main 中存在 scripts/stop.sh' >&2; exit 1; fi; ./scripts/stop.sh"
+wsl -d Ubuntu bash -lc "set -euo pipefail; if [ -x ~/uv-main/scripts/stop.sh ]; then cd ~/uv-main; elif [ -x ~/uv-main/uv-main/scripts/stop.sh ]; then cd ~/uv-main/uv-main; else echo '[错误] 未找到 repo：请确认 WSL 路径 ~/uv-main 中存在 scripts/stop.sh' >&2; exit 1; fi; ./scripts/stop.sh"
 
 exit /b %ERRORLEVEL%
