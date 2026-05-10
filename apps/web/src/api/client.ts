@@ -34,7 +34,29 @@ export type RuntimeEvent = {
   payload: Record<string, unknown>;
 };
 
+export type DashboardWebSocketMessage =
+  | RuntimeEvent
+  | {
+      kind: "dashboard.connected";
+      traceId: string;
+      timestamp: string;
+      payload: {
+        message: string;
+      };
+    };
+
+export type SendMessageRequest = {
+  sessionId: string;
+  text: string;
+  options: {
+    useMemory: boolean;
+    voiceOutput: boolean;
+  };
+};
+
 export type MessageResponse = RuntimeEvent & {
+  reply: string;
+  promptPreview?: PromptPreviewResponse["promptPreview"];
   payload: {
     sessionId?: string;
     content?: string;
@@ -92,6 +114,7 @@ export type PromptPreviewResponse = {
 };
 
 const apiBaseUrl = import.meta.env["VITE_API_BASE_URL"] ?? "/api";
+const explicitWebSocketBaseUrl = import.meta.env["VITE_WS_BASE_URL"] as string | undefined;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -108,7 +131,7 @@ export const apiClient = {
     return request<HealthResponse>("/health");
   },
 
-  sendMessage(input: { sessionId: string; content: string; voiceOutput: boolean }): Promise<MessageResponse> {
+  sendMessage(input: SendMessageRequest): Promise<MessageResponse> {
     return request<MessageResponse>("/message", {
       method: "POST",
       body: JSON.stringify(input)
@@ -117,6 +140,18 @@ export const apiClient = {
 
   listRecentMemories(limit = 20): Promise<{ memories: MemoryRecord[] }> {
     return request<{ memories: MemoryRecord[] }>(`/memory/recent?limit=${limit}`);
+  },
+
+  searchMemories(query: string, options: { type?: string; limit?: number } = {}): Promise<{ mock: boolean; memories: MemoryRecord[] }> {
+    const params = new URLSearchParams({
+      q: query,
+      limit: String(options.limit ?? 20)
+    });
+    if (options.type && options.type !== "all") {
+      params.set("type", options.type);
+    }
+
+    return request<{ mock: boolean; memories: MemoryRecord[] }>(`/memory/search?${params.toString()}`);
   },
 
   createMemory(input: CreateMemoryRequest): Promise<MemoryRecord> {
@@ -136,6 +171,10 @@ export const apiClient = {
 
   getLatestPromptPreview(): Promise<PromptPreviewResponse> {
     return request<PromptPreviewResponse>("/debug/prompt/latest");
+  },
+
+  createDashboardWebSocket(): WebSocket {
+    return new WebSocket(getWebSocketUrl("/ws?dashboard=true"));
   }
 };
 
@@ -154,4 +193,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+function getWebSocketUrl(path: string): string {
+  if (explicitWebSocketBaseUrl) {
+    return `${explicitWebSocketBaseUrl.replace(/\/$/, "")}${path}`;
+  }
+
+  if (apiBaseUrl.startsWith("http://") || apiBaseUrl.startsWith("https://")) {
+    return `${apiBaseUrl.replace(/^http/, "ws").replace(/\/$/, "")}${path}`;
+  }
+
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.hostname}:6121${path}`;
 }

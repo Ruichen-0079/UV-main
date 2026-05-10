@@ -2,6 +2,7 @@ import { RuntimeEventSchema, UserMessageEventSchema, createEvent, type RuntimeEv
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
+import { redactValue } from "../services/dashboard.js";
 
 const WebSocketQuerySchema = z.object({
   dashboard: z.coerce.boolean().optional().default(false)
@@ -13,15 +14,21 @@ export async function registerWebSocketRoutes(app: FastifyInstance, context: App
     const dashboardMode = query.success ? query.data.dashboard : false;
     const activeTraceIds = new Set<string>();
     const subscription = context.eventBus.subscribe("*", (event) => {
-      if ((dashboardMode || activeTraceIds.has(event.traceId)) && shouldForwardEvent(event)) {
-        sendJson(socket, event);
+      if (dashboardMode) {
+        sendJson(socket, redactRuntimeEvent(event));
+        return;
+      }
+
+      if (activeTraceIds.has(event.traceId) && shouldForwardEvent(event)) {
+        sendJson(socket, redactRuntimeEvent(event));
       }
     });
 
     if (dashboardMode) {
       sendJson(socket, {
-        type: "dashboard.connected",
+        kind: "dashboard.connected",
         traceId: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
         payload: {
           message: "Dashboard WebSocket connected. Recent event replay is available through GET /events/recent."
         }
@@ -36,12 +43,12 @@ export async function registerWebSocketRoutes(app: FastifyInstance, context: App
         activeTraceIds.add(parsedEnvelope.traceId);
 
         if (parsedEnvelope.type !== "user.message") {
-          sendJson(socket, createEvent("runtime.error", {
+          sendJson(socket, redactRuntimeEvent(createEvent("runtime.error", {
             message: `Unsupported WebSocket event type '${parsedEnvelope.type}'.`
           }, {
             traceId: parsedEnvelope.traceId,
             parentId: parsedEnvelope.id
-          }));
+          })));
           return;
         }
 
@@ -50,12 +57,12 @@ export async function registerWebSocketRoutes(app: FastifyInstance, context: App
         app.log.info({ traceId: parsed.traceId, sessionId: parsed.payload.sessionId }, "websocket user.message received");
         await context.runtime.handleUserMessage(parsed);
       } catch (error) {
-        sendJson(socket, createEvent("runtime.error", {
+        sendJson(socket, redactRuntimeEvent(createEvent("runtime.error", {
           message: error instanceof Error ? error.message : "Invalid WebSocket event"
         }, {
           traceId: envelope?.traceId,
           parentId: envelope?.id
-        }));
+        })));
       }
     });
 
@@ -78,6 +85,13 @@ function shouldForwardEvent(event: RuntimeEvent): boolean {
     || event.type === "perception.vision"
     || event.type === "provider.error"
     || event.type === "runtime.error";
+}
+
+function redactRuntimeEvent(event: RuntimeEvent): RuntimeEvent {
+  return {
+    ...event,
+    payload: redactValue(event.payload)
+  };
 }
 
 function sendJson(socket: { readyState: number; OPEN: number; send(data: string): void }, payload: unknown): void {

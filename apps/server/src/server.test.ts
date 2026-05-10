@@ -19,7 +19,11 @@ describe("server", () => {
         url: "/message",
         payload: {
           sessionId: "test",
-          content: "hello"
+          text: "hello",
+          options: {
+            useMemory: true,
+            voiceOutput: false
+          }
         }
       });
       expect(message.statusCode).toBe(200);
@@ -34,6 +38,8 @@ describe("server", () => {
       const providers = await app.inject({ method: "GET", url: "/providers/status" });
       expect(providers.statusCode).toBe(200);
       expect(providers.json().providers.chat.status).toBe("healthy");
+      expect(providers.body).not.toContain("test_deepseek_secret");
+      expect(providers.body).not.toContain("Authorization");
 
       const memory = await app.inject({
         method: "POST",
@@ -57,6 +63,12 @@ describe("server", () => {
       const events = await app.inject({ method: "GET", url: "/events/recent?limit=20" });
       expect(events.statusCode).toBe(200);
       expect(events.json().events.some((event: { traceId?: string }) => event.traceId)).toBe(true);
+      expect(events.body).not.toContain("test_deepseek_secret");
+
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const dashboardMessage = await readFirstWebSocketMessage(`${getServerOrigin(app.server.address())}/ws?dashboard=true`);
+      expect(dashboardMessage.kind).toBe("dashboard.connected");
+      expect(dashboardMessage.traceId).toBeTypeOf("string");
 
       await app.close();
     } finally {
@@ -77,6 +89,9 @@ function setMockEnv(): void {
   process.env["DEFAULT_STT_PROVIDER"] = "dashscope";
   process.env["DEFAULT_VISION_PROVIDER"] = "xai";
   process.env["DEFAULT_EMBEDDING_PROVIDER"] = "mock";
+  process.env["DEEPSEEK_API_KEY"] = "test_deepseek_secret";
+  process.env["XAI_API_KEY"] = "test_xai_secret";
+  process.env["DASHSCOPE_API_KEY"] = "test_dashscope_secret";
 }
 
 function snapshotEnv(): NodeJS.ProcessEnv {
@@ -85,4 +100,38 @@ function snapshotEnv(): NodeJS.ProcessEnv {
 
 function restoreEnv(snapshot: NodeJS.ProcessEnv): void {
   process.env = snapshot;
+}
+
+function getServerOrigin(address: string | import("node:net").AddressInfo | null): string {
+  if (!address || typeof address === "string") {
+    throw new Error("Expected Fastify to listen on a TCP address.");
+  }
+
+  return `ws://${address.address}:${address.port}`;
+}
+
+async function readFirstWebSocketMessage(url: string): Promise<{ kind?: string; traceId?: string }> {
+  type MinimalWebSocket = {
+    addEventListener(event: "open" | "message" | "error", listener: (event: { data?: unknown }) => void): void;
+    close(): void;
+  };
+  const WebSocketCtor = (globalThis as unknown as { WebSocket: new (url: string) => MinimalWebSocket }).WebSocket;
+
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocketCtor(url);
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error("Timed out waiting for dashboard WebSocket message."));
+    }, 2000);
+
+    socket.addEventListener("message", (event) => {
+      clearTimeout(timeout);
+      socket.close();
+      resolve(JSON.parse(String(event.data)) as { kind?: string; traceId?: string });
+    });
+    socket.addEventListener("error", () => {
+      clearTimeout(timeout);
+      reject(new Error("Dashboard WebSocket connection failed."));
+    });
+  });
 }

@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { apiClient, type HealthResponse, type MemoryRecord, type PromptPreviewResponse, type ProvidersStatusResponse, type RuntimeEvent } from "./api/client.js";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { apiClient, type DashboardWebSocketMessage, type HealthResponse, type MemoryRecord, type PromptPreviewResponse, type ProvidersStatusResponse, type RuntimeEvent } from "./api/client.js";
 import { promptPreviewPlaceholder } from "./data/mock.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
 
@@ -10,6 +10,8 @@ type ChatMessage = {
   content: string;
   traceId?: string;
 };
+
+type WebSocketStatus = "connecting" | "connected" | "disconnected" | "reconnecting" | "paused" | "error";
 
 const pages: Array<{ id: PageId; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -30,10 +32,14 @@ export function App(): JSX.Element {
   const memories = useAsyncData(() => apiClient.listRecentMemories(20), []);
   const eventState = useAsyncData(() => apiClient.listRecentEvents(50), []);
   const [localEvents, setLocalEvents] = useState<RuntimeEvent[]>([]);
+  const [liveEvents, setLiveEvents] = useState<RuntimeEvent[]>([]);
   const [eventsPaused, setEventsPaused] = useState(false);
-  const [wsStatus, setWsStatus] = useState<"not connected" | "placeholder">("placeholder");
+  const wsStatus = useDashboardEventStream({
+    paused: eventsPaused,
+    onEvent: (event) => setLiveEvents((current) => [event, ...current].slice(0, 100))
+  });
 
-  const events = useMemo(() => [...localEvents, ...(eventState.data?.events ?? [])], [eventState.data?.events, localEvents]);
+  const events = useMemo(() => mergeEvents(liveEvents, localEvents, eventState.data?.events ?? []), [eventState.data?.events, liveEvents, localEvents]);
   const recentEvents = useMemo(() => events.slice(0, 8), [events]);
 
   return (
@@ -83,7 +89,6 @@ export function App(): JSX.Element {
               paused={eventsPaused}
               onTogglePaused={() => setEventsPaused((value) => !value)}
               wsStatus={wsStatus}
-              onSetWsStatus={setWsStatus}
             />
           )}
           {activePage === "prompt" && <PromptPreviewPage />}
@@ -134,7 +139,7 @@ function OverviewPage(props: {
         <StatusCard title="Server" status={props.health.data?.server.status ?? "unknown"} detail="Fastify runtime" />
         <StatusCard title="Database" status={props.health.data?.database.status ?? "unknown"} detail={props.health.data?.database.message ?? "No database health yet"} />
         <StatusCard title="Chat Provider" status={props.health.data?.providers.chat.status ?? "unknown"} detail={props.health.data?.providers.chat.provider ?? "DeepSeek"} />
-        <StatusCard title="WebSocket" status={props.wsStatus} detail="Event stream placeholder" mock />
+        <StatusCard title="WebSocket" status={props.wsStatus} detail="Live runtime event stream" />
       </div>
       <div className="grid grid-cols-[1.1fr_0.9fr] gap-4">
         <Panel title="Recent Events">
@@ -173,13 +178,20 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
     setMessages((current) => [...current, { role: "user", content }]);
 
     try {
-      const response = await apiClient.sendMessage({ sessionId, content, voiceOutput });
+      const response = await apiClient.sendMessage({
+        sessionId,
+        text: content,
+        options: {
+          useMemory,
+          voiceOutput
+        }
+      });
       props.onEvent(response);
       setMessages((current) => [
         ...current,
         {
           role: "assistant",
-          content: response.payload.content ?? "No assistant content returned.",
+          content: response.reply || response.payload.content || "No assistant content returned.",
           traceId: response.traceId
         }
       ]);
@@ -227,7 +239,7 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
             <Field label="Session ID">
               <input className="field" value={sessionId} onChange={(event) => setSessionId(event.target.value)} />
             </Field>
-            <Toggle label="Use memory" checked={useMemory} onChange={setUseMemory} note="UI toggle only until backend exposes a per-turn memory flag." />
+            <Toggle label="Use memory" checked={useMemory} onChange={setUseMemory} note="Sent as options.useMemory to /message." />
             <Toggle label="TTS output" checked={voiceOutput} onChange={setVoiceOutput} note="Sent as voiceOutput to /message." />
           </div>
         </Panel>
@@ -239,15 +251,53 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
 function MemoryPage(props: { state: ReturnType<typeof useAsyncData<{ memories: MemoryRecord[] }>> }): JSX.Element {
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
+  const [searchMemories, setSearchMemories] = useState<MemoryRecord[] | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [type, setType] = useState("semantic");
   const [source, setSource] = useState("dashboard");
   const [tags, setTags] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const memories = (props.state.data?.memories ?? []).filter((memory) => {
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setSearchMemories(null);
+      setSearchError(null);
+      setSearchLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      setSearchLoading(true);
+      setSearchError(null);
+      void apiClient.searchMemories(trimmed, { type: typeFilter, limit: 50 })
+        .then((result) => setSearchMemories(result.memories))
+        .catch((caught) => {
+          if (!controller.signal.aborted) {
+            setSearchError(caught instanceof Error ? caught.message : "Memory search failed");
+            setSearchMemories(null);
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setSearchLoading(false);
+          }
+        });
+    }, 250);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [query, typeFilter]);
+
+  const sourceMemories = searchMemories ?? props.state.data?.memories ?? [];
+  const memories = sourceMemories.filter((memory) => {
     const matchesType = typeFilter === "all" || memory.type === typeFilter;
-    const matchesQuery = query === "" || memory.content.toLowerCase().includes(query.toLowerCase());
+    const matchesQuery = searchMemories !== null || query === "" || memory.content.toLowerCase().includes(query.toLowerCase());
     return matchesType && matchesQuery;
   });
 
@@ -267,6 +317,10 @@ function MemoryPage(props: { state: ReturnType<typeof useAsyncData<{ memories: M
       setContent("");
       setTags("");
       await props.state.refresh();
+      if (query.trim()) {
+        const result = await apiClient.searchMemories(query.trim(), { type: typeFilter, limit: 50 });
+        setSearchMemories(result.memories);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Create memory failed");
     }
@@ -287,8 +341,9 @@ function MemoryPage(props: { state: ReturnType<typeof useAsyncData<{ memories: M
               <option value="procedural">procedural</option>
             </select>
           </div>
-          {props.state.loading && <Notice tone="info" title="Loading" message="Fetching recent memories." />}
+          {(props.state.loading || searchLoading) && <Notice tone="info" title="Loading" message={query.trim() ? "Searching memories." : "Fetching recent memories."} />}
           {props.state.error && <Notice tone="error" title="Memory load failed" message={props.state.error} />}
+          {searchError && <Notice tone="error" title="Memory search failed" message={`${searchError}. Showing local recent-memory fallback if available.`} />}
           {!props.state.loading && memories.length === 0 ? <EmptyState title="No matching memories" message="Create a memory or adjust the filter." /> : <MemoryTable memories={memories} />}
         </Panel>
         <Panel title="Create Memory">
@@ -369,14 +424,13 @@ function EventsPage(props: {
   paused: boolean;
   wsStatus: string;
   onTogglePaused(): void;
-  onSetWsStatus(status: "not connected" | "placeholder"): void;
 }): JSX.Element {
   const [filter, setFilter] = useState("all");
   const filtered = filter === "all" ? props.events : props.events.filter((event) => event.type === filter);
   const types = Array.from(new Set(props.events.map((event) => event.type)));
 
   return (
-    <PageShell title="Events" subtitle="Recent runtime events from the server. Live WebSocket streaming is still a dashboard follow-up.">
+    <PageShell title="Events" subtitle="Recent runtime events from the server, with live WebSocket updates when connected.">
       <Panel title="Event Stream" actions={<button className="button-secondary" onClick={props.onTogglePaused}>{props.paused ? "Resume" : "Pause"}</button>}>
         <div className="mb-3 grid grid-cols-[220px_1fr] gap-3">
           <select className="field" value={filter} onChange={(event) => setFilter(event.target.value)}>
@@ -389,6 +443,120 @@ function EventsPage(props: {
       </Panel>
     </PageShell>
   );
+}
+
+function useDashboardEventStream({ paused, onEvent }: { paused: boolean; onEvent(event: RuntimeEvent): void }): WebSocketStatus {
+  const [status, setStatus] = useState<WebSocketStatus>("connecting");
+  const pausedRef = useRef(paused);
+  const onEventRef = useRef(onEvent);
+  const reconnectTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    pausedRef.current = paused;
+    if (paused) {
+      setStatus((current) => current === "connected" ? "paused" : current);
+    } else {
+      setStatus((current) => current === "paused" ? "connected" : current);
+    }
+  }, [paused]);
+
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
+
+  useEffect(() => {
+    let closedByEffect = false;
+    let socket: WebSocket | null = null;
+
+    function connect(): void {
+      setStatus((current) => current === "disconnected" || current === "error" ? "reconnecting" : "connecting");
+      socket = apiClient.createDashboardWebSocket();
+
+      socket.addEventListener("open", () => {
+        setStatus(pausedRef.current ? "paused" : "connected");
+      });
+
+      socket.addEventListener("message", (message) => {
+        const parsed = parseDashboardMessage(message.data);
+        if (!parsed || isDashboardConnectedMessage(parsed) || pausedRef.current) {
+          return;
+        }
+        onEventRef.current(parsed);
+      });
+
+      socket.addEventListener("error", () => {
+        setStatus("error");
+      });
+
+      socket.addEventListener("close", () => {
+        if (closedByEffect) {
+          return;
+        }
+        setStatus("disconnected");
+        reconnectTimerRef.current = window.setTimeout(connect, 2000);
+      });
+    }
+
+    connect();
+
+    return () => {
+      closedByEffect = true;
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+      }
+      socket?.close();
+    };
+  }, []);
+
+  return status;
+}
+
+function parseDashboardMessage(raw: string): DashboardWebSocketMessage | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    if (isDashboardConnectedMessage(parsed)) {
+      return parsed;
+    }
+    if (isRuntimeEvent(parsed)) {
+      return parsed;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function isDashboardConnectedMessage(value: unknown): value is Extract<DashboardWebSocketMessage, { kind: "dashboard.connected" }> {
+  return Boolean(value && typeof value === "object" && "kind" in value && value.kind === "dashboard.connected");
+}
+
+function isRuntimeEvent(value: unknown): value is RuntimeEvent {
+  return Boolean(value && typeof value === "object" && "id" in value && "type" in value && "traceId" in value && "payload" in value);
+}
+
+function mergeEvents(...groups: RuntimeEvent[][]): RuntimeEvent[] {
+  const seen = new Set<string>();
+  const events: RuntimeEvent[] = [];
+
+  for (const group of groups) {
+    for (const event of group) {
+      if (seen.has(event.id)) {
+        continue;
+      }
+      seen.add(event.id);
+      events.push(event);
+    }
+  }
+
+  return events.sort((left, right) => {
+    const leftTime = new Date(left.timestamp ?? left.createdAt ?? "").getTime();
+    const rightTime = new Date(right.timestamp ?? right.createdAt ?? "").getTime();
+    return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime);
+  });
 }
 
 function PromptPreviewPage(): JSX.Element {
