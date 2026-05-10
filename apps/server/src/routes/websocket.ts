@@ -1,0 +1,70 @@
+import { RuntimeEventSchema, UserMessageEventSchema, createEvent, type RuntimeEvent } from "@companion/protocol";
+import type { FastifyInstance } from "fastify";
+import type { AppContext } from "../context.js";
+
+export async function registerWebSocketRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
+  app.get("/ws", { websocket: true }, (socket) => {
+    const activeTraceIds = new Set<string>();
+    const subscription = context.eventBus.subscribe("*", (event) => {
+      if (activeTraceIds.has(event.traceId) && shouldForwardEvent(event)) {
+        sendJson(socket, event);
+      }
+    });
+
+    socket.on("message", async (rawMessage: Buffer) => {
+      let envelope: RuntimeEvent | undefined;
+      try {
+        const parsedEnvelope = RuntimeEventSchema.parse(JSON.parse(rawMessage.toString())) as RuntimeEvent;
+        envelope = parsedEnvelope;
+        activeTraceIds.add(parsedEnvelope.traceId);
+
+        if (parsedEnvelope.type !== "user.message") {
+          sendJson(socket, createEvent("runtime.error", {
+            message: `Unsupported WebSocket event type '${parsedEnvelope.type}'.`
+          }, {
+            traceId: parsedEnvelope.traceId,
+            parentId: parsedEnvelope.id
+          }));
+          return;
+        }
+
+        const parsed = UserMessageEventSchema.parse(parsedEnvelope);
+        activeTraceIds.add(parsed.traceId);
+        app.log.info({ traceId: parsed.traceId, sessionId: parsed.payload.sessionId }, "websocket user.message received");
+        await context.runtime.handleUserMessage(parsed);
+      } catch (error) {
+        sendJson(socket, createEvent("runtime.error", {
+          message: error instanceof Error ? error.message : "Invalid WebSocket event"
+        }, {
+          traceId: envelope?.traceId,
+          parentId: envelope?.id
+        }));
+      }
+    });
+
+    socket.on("close", () => {
+      subscription.unsubscribe();
+      activeTraceIds.clear();
+    });
+  });
+
+  app.get("/v1/events", { websocket: true }, (socket) => {
+    socket.close(1000, "Use /ws");
+  });
+}
+
+function shouldForwardEvent(event: RuntimeEvent): boolean {
+  return event.type === "agent.reply"
+    || event.type === "avatar.speak"
+    || event.type === "tts.started"
+    || event.type === "vision.completed"
+    || event.type === "perception.vision"
+    || event.type === "provider.error"
+    || event.type === "runtime.error";
+}
+
+function sendJson(socket: { readyState: number; OPEN: number; send(data: string): void }, payload: unknown): void {
+  if (socket.readyState === socket.OPEN) {
+    socket.send(JSON.stringify(payload));
+  }
+}

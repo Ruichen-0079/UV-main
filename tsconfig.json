@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/protocol" },
+    { "path": "packages/event-bus" },
+    { "path": "packages/memory" },
+    { "path": "packages/prompt-builder" },
+    { "path": "packages/config" },
+    { "path": "packages/providers" },
+    { "path": "packages/core" },
+    { "path": "apps/server" }
+  ]
+}

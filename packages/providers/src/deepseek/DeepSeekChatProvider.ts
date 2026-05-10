@@ -1,0 +1,40 @@
+import type { ChatInput, ChatOutput, ChatProvider } from "../types/chat.js";
+import type { ProviderHealth } from "../types/common.js";
+import {
+  createDeepSeekChatCompletion,
+  healthCheckDeepSeek,
+  type DeepSeekProviderOptions
+} from "./common.js";
+
+export class DeepSeekChatProvider implements ChatProvider {
+  readonly name = "deepseek";
+
+  constructor(private readonly options: DeepSeekProviderOptions) {}
+
+  async healthCheck(): Promise<ProviderHealth> {
+    return healthCheckDeepSeek(this.name, "chat", this.options);
+  }
+
+  async generateReply(input: ChatInput): Promise<ChatOutput> {
+    const completion = await createDeepSeekChatCompletion(this.name, "chat", this.options, {
+      messages: input.messages,
+      model: input.model,
+      temperature: input.temperature,
+      maxTokens: input.maxTokens ?? input.maxOutputTokens,
+      stopSequences: input.stopSequences,
+      stream: input.stream ?? false
+    });
+
+    return {
+      message: {
+        role: "assistant",
+        content: completion.content
+      },
+      finishReason: completion.finishReason,
+      model: completion.model,
+      latencyMs: completion.latencyMs,
+      tokenUsage: completion.tokenUsage,
+      debug: completion.rawResponse ? { rawResponse: completion.rawResponse } : undefined
+    };
+  }
+}

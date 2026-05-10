@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/event-bus" },
+    { "path": "../../packages/memory" },
+    { "path": "../../packages/prompt-builder" },
+    { "path": "../../packages/providers" },
+    { "path": "../../packages/core" }
+  ]
+}
