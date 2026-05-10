@@ -81,8 +81,7 @@ function setMockEnv(): void {
   process.env["NODE_ENV"] = "test";
   process.env["RUNTIME_MODE"] = "development";
   process.env["PROVIDER_ALLOW_MOCKS"] = "true";
-  process.env["MEMORY_REPOSITORY"] = "memory";
-  process.env["DATABASE_URL"] = "postgres://companion:companion@localhost:5432/companion";
+  process.env["MEMORY_REPOSITORY"] = "in-memory";
   process.env["DEFAULT_CHAT_PROVIDER"] = "deepseek";
   process.env["DEFAULT_REASONING_PROVIDER"] = "deepseek";
   process.env["DEFAULT_TTS_PROVIDER"] = "xai";

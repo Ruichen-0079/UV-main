@@ -1,5 +1,5 @@
 export type RuntimeEnvironment = "development" | "test" | "production";
-export type MemoryRepositoryDriver = "memory" | "postgres";
+export type MemoryRepositoryDriver = "in-memory" | "postgres";
 
 export type ProviderCapability =
   | "chat"
@@ -82,7 +82,7 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
     environment,
     server: {
       host: readString(env["SERVER_HOST"], "127.0.0.1"),
-      port: parsePort(env["SERVER_PORT"], 3000),
+      port: parsePort(env["SERVER_PORT"], 6121),
       logLevel: readString(env["LOG_LEVEL"], "info")
     },
     memory: {
@@ -235,7 +235,7 @@ function parseMemoryRepository(value: string | undefined): MemoryRepositoryDrive
     return "postgres";
   }
 
-  return "memory";
+  return "in-memory";
 }
 
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {

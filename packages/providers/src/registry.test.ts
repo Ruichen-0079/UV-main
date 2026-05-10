@@ -14,7 +14,6 @@ describe("ProviderRegistry", () => {
     const registry = createProviderRegistryFromEnv({
       NODE_ENV: "test",
       PROVIDER_ALLOW_MOCKS: "true",
-      DATABASE_URL: "postgres://example",
       DEFAULT_CHAT_PROVIDER: "deepseek",
       DEFAULT_REASONING_PROVIDER: "deepseek",
       DEFAULT_TTS_PROVIDER: "xai",

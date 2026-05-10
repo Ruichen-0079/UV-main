@@ -6,8 +6,7 @@ const env = {
   SERVER_PORT: String(port),
   NODE_ENV: "development",
   PROVIDER_ALLOW_MOCKS: "true",
-  MEMORY_REPOSITORY: "memory",
-  DATABASE_URL: "postgres://companion:companion@localhost:5432/companion",
+  MEMORY_REPOSITORY: "in-memory",
   DEFAULT_CHAT_PROVIDER: "deepseek",
   DEFAULT_REASONING_PROVIDER: "deepseek",
   DEFAULT_TTS_PROVIDER: "xai",
@@ -28,29 +27,47 @@ server.stderr.on("data", (chunk) => {
 
 try {
   await waitForHealth();
-  const health = await getJson(`http://127.0.0.1:${port}/health`);
+
+  const health = await step("GET /health", () => getJson(`http://127.0.0.1:${port}/health`));
   assert(health.ok === true, "GET /health should return ok=true");
 
-  const message = await postJson(`http://127.0.0.1:${port}/message`, {
+  const message = await step("POST /message", () => postJson(`http://127.0.0.1:${port}/message`, {
     sessionId: "smoke",
-    content: "hello"
-  });
+    text: "hello",
+    options: {
+      useMemory: true,
+      voiceOutput: false
+    }
+  }));
   assert(message.type === "agent.reply", "POST /message should return agent.reply");
 
-  const memory = await postJson(`http://127.0.0.1:${port}/memory`, {
+  const memory = await step("POST /memory", () => postJson(`http://127.0.0.1:${port}/memory`, {
     type: "semantic",
     content: "Smoke test memory.",
     source: "smoke",
     tags: ["smoke"]
-  });
+  }));
   assert(memory.type === "semantic", "POST /memory should create a memory");
 
-  const recent = await getJson(`http://127.0.0.1:${port}/memory/recent?limit=5`);
+  const recent = await step("GET /memory/recent", () => getJson(`http://127.0.0.1:${port}/memory/recent?limit=5`));
   assert(Array.isArray(recent.memories) && recent.memories.length > 0, "GET /memory/recent should return memories");
+
+  const search = await step("GET /memory/search", () => getJson(`http://127.0.0.1:${port}/memory/search?q=Smoke&limit=5`));
+  assert(Array.isArray(search.memories) && search.memories.length > 0, "GET /memory/search?q=... should return matching memories");
 
   console.log("Smoke checks passed.");
 } finally {
   server.kill("SIGTERM");
+}
+
+async function step<T>(label: string, run: () => Promise<T>): Promise<T> {
+  try {
+    const result = await run();
+    console.log(`✓ ${label}`);
+    return result;
+  } catch (error) {
+    throw new Error(`${label} failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 async function waitForHealth(): Promise<void> {

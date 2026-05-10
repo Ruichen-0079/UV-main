@@ -202,10 +202,6 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
 function validateRequiredProviderConfig(config: ProviderRegistryConfig): void {
   const errors: string[] = [];
 
-  if (!config.databaseUrl) {
-    errors.push("DATABASE_URL is required for the MVP memory database.");
-  }
-
   if (!config.allowMocks && config.defaults.chat === "deepseek" && !config.deepseek.apiKey) {
     errors.push("DEEPSEEK_API_KEY is required when DEFAULT_CHAT_PROVIDER=deepseek.");
   }

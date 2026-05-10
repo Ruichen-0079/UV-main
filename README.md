@@ -16,19 +16,44 @@ This repository starts as a small runnable TypeScript monorepo:
 
 ## Getting Started
 
+The recommended development environment is Windows LTSC + WSL2 Ubuntu with Docker Engine running inside WSL.
+
 ```bash
 pnpm install
-pnpm dev
+cp .env.example .env
+./scripts/dev.sh
 ```
 
-The server defaults to `http://127.0.0.1:3000`.
+Development URLs:
+
+- Server: `http://localhost:6121`
+- Web UI: `http://localhost:5173`
+- WebSocket: `ws://localhost:6121/ws`
+
+On Windows LTSC, use the wrapper from the repository root:
+
+```cmd
+scripts\start-dev.cmd
+```
+
+Check and stop the WSL development services:
+
+```bash
+./scripts/health.sh
+./scripts/stop.sh
+```
 
 ## Scripts
 
-- `pnpm dev`: run the Fastify server in development mode.
+- `./scripts/dev.sh`: WSL/Linux development entry point. Loads `.env`, starts Docker infra, starts the server, and starts the web dashboard when present.
+- `./scripts/health.sh`: check Docker Compose status plus server and web health when started by `dev.sh`.
+- `./scripts/stop.sh`: stop development processes and Docker Compose services.
+- `scripts\start-dev.cmd`: Windows LTSC convenience wrapper that calls WSL Ubuntu.
+- `pnpm dev`: run only the Fastify server in development mode.
 - `pnpm build`: build all workspace packages.
 - `pnpm check`: type-check all workspace packages.
 - `pnpm test`: run package tests where present.
+- `pnpm smoke`: build the repo and verify the runtime health, message, and memory endpoints in mock/in-memory mode.
 
 ## Infrastructure
 
@@ -37,3 +62,18 @@ docker compose -f infra/docker-compose.yml up -d
 ```
 
 This starts PostgreSQL with pgvector, Redis, and NATS for future event bus work.
+
+Development memory defaults to in-memory storage:
+
+```env
+MEMORY_REPOSITORY=in-memory
+```
+
+To switch memory to PostgreSQL, set:
+
+```env
+MEMORY_REPOSITORY=postgres
+DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+```
+
+Then start infra and apply the migrations in `packages/memory/migrations` before using memory endpoints. `.env` is local sensitive state and must not be committed or printed.

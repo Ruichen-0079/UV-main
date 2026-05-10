@@ -1,13 +1,13 @@
 # Developer Quickstart
 
-This guide gets the MVP runtime running locally with PostgreSQL + pgvector, Redis, the in-memory event bus, and mock optional providers when real keys are not configured.
+This guide gets the MVP runtime running locally with WSL/Linux scripts, Docker development infra, in-memory memory by default, and mock optional providers when real keys are not configured.
 
 ## 1. Prerequisites
 
 - Node.js 22 or newer
 - pnpm 9 or newer
 - Docker, or WSL2 with Docker Engine
-- PostgreSQL + pgvector through `infra/docker-compose.yml`
+- Docker development infra through `infra/docker-compose.yml`
 
 Check local tools:
 
@@ -34,10 +34,15 @@ PowerShell:
 Copy-Item .env.example .env
 ```
 
-Fill the required MVP values:
+Development defaults to in-memory memory:
 
 ```env
-DATABASE_URL=postgres://companion:companion@localhost:5432/companion
+MEMORY_REPOSITORY=in-memory
+```
+
+Fill DeepSeek values when you want real provider calls:
+
+```env
 DEEPSEEK_API_BASEURL=https://api.deepseek.com
 DEEPSEEK_API_KEY=replace-with-your-key
 DEEPSEEK_CHAT_MODEL=replace-with-chat-model
@@ -70,7 +75,7 @@ PROVIDER_ALLOW_MOCKS=true
 DEFAULT_EMBEDDING_PROVIDER=mock
 ```
 
-The server currently reads from `process.env`; load `.env` into your shell before starting it.
+`./scripts/dev.sh` loads `.env` automatically and does not print secret values. If you start the server without the scripts, load `.env` into your shell first.
 
 Bash or WSL:
 
@@ -105,38 +110,41 @@ Check containers:
 docker compose -f infra/docker-compose.yml ps
 ```
 
-NATS is prepared but optional. To start it too:
+This starts PostgreSQL with pgvector, Redis, and NATS with JetStream enabled.
 
-```bash
-docker compose -f infra/docker-compose.yml --profile nats up -d
+## 4. Optional PostgreSQL Memory Mode
+
+The development default is in-memory memory. To switch to PostgreSQL memory, set:
+
+```env
+MEMORY_REPOSITORY=postgres
+DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
 ```
 
-## 4. Run Migrations
-
-There is not a migration runner script yet. Apply the SQL file directly.
+Then apply the SQL migration. There is not a migration runner script yet.
 
 Bash or WSL:
 
 ```bash
 docker compose -f infra/docker-compose.yml exec -T postgres \
-  psql -U companion -d companion < packages/memory/migrations/001_init_memory.sql
+  psql -U airi -d companion < packages/memory/migrations/001_init_memory.sql
 ```
 
 PowerShell:
 
 ```powershell
 Get-Content packages/memory/migrations/001_init_memory.sql |
-  docker compose -f infra/docker-compose.yml exec -T postgres psql -U companion -d companion
+  docker compose -f infra/docker-compose.yml exec -T postgres psql -U airi -d companion
 ```
 
 Verify the memory table exists:
 
 ```bash
 docker compose -f infra/docker-compose.yml exec postgres \
-  psql -U companion -d companion -c "\dt"
+  psql -U airi -d companion -c "\dt"
 ```
 
-## 5. Start Server
+## 5. Start Development Services
 
 Install dependencies if needed:
 
@@ -144,28 +152,37 @@ Install dependencies if needed:
 pnpm install
 ```
 
-Start the server:
+Start the server and web dashboard:
 
 ```bash
-pnpm dev
+./scripts/dev.sh
 ```
 
-PowerShell:
+Windows LTSC wrapper:
 
-```powershell
-pnpm.cmd dev
+```cmd
+scripts\start-dev.cmd
 ```
 
-Default URL:
+Development URLs:
 
 ```text
-http://127.0.0.1:3000
+Server: http://localhost:6121
+Web UI: http://localhost:5173
+WebSocket: ws://localhost:6121/ws
+```
+
+Check or stop services:
+
+```bash
+./scripts/health.sh
+./scripts/stop.sh
 ```
 
 ## 6. Test Health Endpoint
 
 ```bash
-curl http://127.0.0.1:3000/health
+curl http://127.0.0.1:6121/health
 ```
 
 Expected shape:
@@ -181,9 +198,9 @@ Expected shape:
 ## 7. Test Message Endpoint
 
 ```bash
-curl -X POST http://127.0.0.1:3000/message \
+curl -X POST http://127.0.0.1:6121/message \
   -H "content-type: application/json" \
-  -d '{"sessionId":"dev","content":"Hello companion runtime"}'
+  -d '{"sessionId":"dev","text":"Hello companion runtime","options":{"useMemory":true,"voiceOutput":false}}'
 ```
 
 PowerShell:
@@ -191,9 +208,9 @@ PowerShell:
 ```powershell
 Invoke-RestMethod `
   -Method Post `
-  -Uri http://127.0.0.1:3000/message `
+  -Uri http://127.0.0.1:6121/message `
   -ContentType "application/json" `
-  -Body '{"sessionId":"dev","content":"Hello companion runtime"}'
+  -Body '{"sessionId":"dev","text":"Hello companion runtime","options":{"useMemory":true,"voiceOutput":false}}'
 ```
 
 With mocks enabled, the reply starts with `Mock reply:` when real provider keys are unavailable.
@@ -203,7 +220,7 @@ With mocks enabled, the reply starts with `Mock reply:` when real provider keys 
 Create a memory:
 
 ```bash
-curl -X POST http://127.0.0.1:3000/memory \
+curl -X POST http://127.0.0.1:6121/memory \
   -H "content-type: application/json" \
   -d '{"type":"semantic","content":"The developer is testing the quickstart.","source":"quickstart","tags":["dev"]}'
 ```
@@ -211,7 +228,13 @@ curl -X POST http://127.0.0.1:3000/memory \
 Read recent memories:
 
 ```bash
-curl "http://127.0.0.1:3000/memory/recent?limit=5"
+curl "http://127.0.0.1:6121/memory/recent?limit=5"
+```
+
+Search memory:
+
+```bash
+curl "http://127.0.0.1:6121/memory/search?q=developer&limit=5"
 ```
 
 PowerShell:
@@ -219,14 +242,22 @@ PowerShell:
 ```powershell
 Invoke-RestMethod `
   -Method Post `
-  -Uri http://127.0.0.1:3000/memory `
+  -Uri http://127.0.0.1:6121/memory `
   -ContentType "application/json" `
   -Body '{"type":"semantic","content":"The developer is testing the quickstart.","source":"quickstart","tags":["dev"]}'
 
-Invoke-RestMethod "http://127.0.0.1:3000/memory/recent?limit=5"
+Invoke-RestMethod "http://127.0.0.1:6121/memory/recent?limit=5"
 ```
 
-## 9. Common Errors
+## 9. Smoke Test
+
+```bash
+pnpm smoke
+```
+
+The smoke script builds the repo, starts the built server in mock/in-memory mode, and verifies `GET /health`, `POST /message`, `POST /memory`, `GET /memory/recent`, and `GET /memory/search?q=...`.
+
+## 10. Common Errors
 
 ### Missing API Key
 
@@ -261,7 +292,7 @@ docker compose -f infra/docker-compose.yml up -d postgres
 Confirm `DATABASE_URL` matches:
 
 ```env
-DATABASE_URL=postgres://companion:companion@localhost:5432/companion
+DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
 ```
 
 ### Provider Unavailable
@@ -331,6 +362,5 @@ docker ps
 - Prefer WSL2 + Ubuntu + Docker Engine.
 - Avoid relying on Docker Desktop if your Windows LTSC version is unsupported.
 - Keep project files inside the WSL filesystem, for example `~/src/ai-companion-runtime`, for better file watcher and dependency install performance.
-- Run `pnpm install`, `pnpm dev`, and Docker commands inside WSL when possible.
+- Run `pnpm install`, `./scripts/dev.sh`, and Docker commands inside WSL when possible.
 - If working from PowerShell, use `pnpm.cmd` when the `pnpm.ps1` shim is blocked.
-

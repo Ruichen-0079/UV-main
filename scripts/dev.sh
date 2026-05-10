@@ -53,8 +53,22 @@ check_file_presence() {
   if [ -f ".env" ]; then
     echo "已找到 .env（不会打印内容）"
   else
-    echo "未找到 .env；开发模式会依赖当前 shell 环境和 mock fallback"
+    echo "警告：未找到 .env；请运行 cp .env.example .env 后填写本地配置。" >&2
+    echo "开发模式将继续使用当前 shell 环境和 mock fallback。" >&2
   fi
+}
+
+load_env_file() {
+  if [ ! -f ".env" ]; then
+    return
+  fi
+
+  echo "加载 .env（不会打印内容）"
+  set -a
+  # .env is local developer state. Keep it shell-compatible and never commit it.
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
 }
 
 start_infra() {
@@ -90,8 +104,7 @@ start_server() {
   env \
     NODE_ENV="${NODE_ENV:-development}" \
     PROVIDER_ALLOW_MOCKS="${PROVIDER_ALLOW_MOCKS:-true}" \
-    MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-memory}" \
-    DATABASE_URL="${DATABASE_URL:-postgres://airi:airi_dev_password@localhost:5432/companion}" \
+    MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-in-memory}" \
     SERVER_HOST="${SERVER_HOST:-127.0.0.1}" \
     SERVER_PORT="${SERVER_PORT:-6121}" \
     setsid bash -lc 'cd apps/server && exec ../../node_modules/.bin/tsx --conditions development src/index.ts' >"$server_log" 2>&1 < /dev/null &
@@ -162,6 +175,7 @@ docker --version
 docker compose version
 
 check_file_presence
+load_env_file
 start_infra
 install_dependencies_if_needed
 start_server

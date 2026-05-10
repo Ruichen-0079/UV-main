@@ -36,6 +36,7 @@ pnpm.cmd smoke
   - `POST /message`
   - `POST /memory`
   - `GET /memory/recent`
+  - `GET /memory/search?q=...`
 
 ## Smoke Test
 
@@ -46,12 +47,13 @@ pnpm.cmd smoke
 3. `POST /message` returns `agent.reply`.
 4. A memory record can be created.
 5. Recent memories can be retrieved.
+6. Memory search returns a matching record.
 
 The smoke script sets:
 
 ```env
 PROVIDER_ALLOW_MOCKS=true
-MEMORY_REPOSITORY=memory
+MEMORY_REPOSITORY=in-memory
 DEFAULT_EMBEDDING_PROVIDER=mock
 ```
 
@@ -76,5 +78,5 @@ docker compose -f infra/docker-compose.yml up -d postgres
 ```
 
 2. Apply migrations from `packages/memory/migrations`.
-3. Run the server without `MEMORY_REPOSITORY=memory`.
+3. Run the server with `MEMORY_REPOSITORY=postgres` and a valid `DATABASE_URL`.
 4. Use `POST /memory` and `GET /memory/recent`.

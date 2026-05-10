@@ -31,6 +31,8 @@ describe("runtime config", () => {
   it("uses architecture default provider selection", () => {
     const config = parseRuntimeConfig({});
 
+    expect(config.memory.repository).toBe("in-memory");
+    expect(config.server.port).toBe(6121);
     expect(config.providers.defaults).toEqual({
       chat: "deepseek",
       reasoning: "deepseek",

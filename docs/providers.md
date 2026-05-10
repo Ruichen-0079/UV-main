@@ -53,7 +53,7 @@ For the MVP, these are required in production-like mode:
 ```env
 NODE_ENV=production
 SERVER_HOST=127.0.0.1
-SERVER_PORT=3000
+SERVER_PORT=6121
 
 DATABASE_URL=postgres://...
 REDIS_URL=redis://...
@@ -146,7 +146,7 @@ Development and tests can run without real provider credentials:
 ```env
 NODE_ENV=development
 PROVIDER_ALLOW_MOCKS=true
-MEMORY_REPOSITORY=memory
+MEMORY_REPOSITORY=in-memory
 ```
 
 Mock providers are useful for:

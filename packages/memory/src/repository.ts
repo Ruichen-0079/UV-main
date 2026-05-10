@@ -251,8 +251,14 @@ export class InMemoryMemoryRepository implements MemoryRepository {
 }
 
 export function createMemoryRepositoryFromEnv(env: Record<string, string | undefined> = process.env): MemoryRepository {
+  const repositoryMode = env["MEMORY_REPOSITORY"] ?? "in-memory";
   const databaseUrl = env["DATABASE_URL"];
-  if (databaseUrl && env["MEMORY_REPOSITORY"] !== "memory") {
+
+  if (repositoryMode === "postgres") {
+    if (!databaseUrl) {
+      throw new Error("MEMORY_REPOSITORY=postgres requires DATABASE_URL.");
+    }
+
     return new PostgresMemoryRepository(databaseUrl);
   }
 
