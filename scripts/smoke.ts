@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 
 const port = 3137;
+const memoryRepository = process.env["MEMORY_REPOSITORY"] ?? "in-memory";
 const env = {
   ...process.env,
   SERVER_PORT: String(port),
   NODE_ENV: "development",
   PROVIDER_ALLOW_MOCKS: "true",
-  MEMORY_REPOSITORY: "in-memory",
+  MEMORY_REPOSITORY: memoryRepository,
   DEFAULT_CHAT_PROVIDER: "deepseek",
   DEFAULT_REASONING_PROVIDER: "deepseek",
   DEFAULT_TTS_PROVIDER: "xai",

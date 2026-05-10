@@ -121,20 +121,12 @@ MEMORY_REPOSITORY=postgres
 DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
 ```
 
-Then apply the SQL migration. There is not a migration runner script yet.
+Then apply the SQL migration:
 
 Bash or WSL:
 
 ```bash
-docker compose -f infra/docker-compose.yml exec -T postgres \
-  psql -U airi -d companion < packages/memory/migrations/001_init_memory.sql
-```
-
-PowerShell:
-
-```powershell
-Get-Content packages/memory/migrations/001_init_memory.sql |
-  docker compose -f infra/docker-compose.yml exec -T postgres psql -U airi -d companion
+pnpm db:migrate
 ```
 
 Verify the memory table exists:
@@ -143,6 +135,28 @@ Verify the memory table exists:
 docker compose -f infra/docker-compose.yml exec postgres \
   psql -U airi -d companion -c "\dt"
 ```
+
+Run a Postgres-backed smoke test:
+
+```bash
+pnpm smoke:postgres
+```
+
+Reset development database volumes only when you intentionally want to delete local development data:
+
+```bash
+docker compose -f infra/docker-compose.yml down -v
+```
+
+Warning: `down -v` deletes the development PostgreSQL data volume.
+
+The guarded helper asks for an exact confirmation phrase before deleting volumes:
+
+```bash
+pnpm db:reset:dev
+```
+
+Changing `POSTGRES_USER` or `POSTGRES_PASSWORD` in `infra/docker-compose.yml` only affects a brand-new database volume. Existing Postgres volumes keep the role and password they were initialized with.
 
 ## 5. Start Development Services
 
@@ -257,6 +271,12 @@ pnpm smoke
 
 The smoke script builds the repo, starts the built server in mock/in-memory mode, and verifies `GET /health`, `POST /message`, `POST /memory`, `GET /memory/recent`, and `GET /memory/search?q=...`.
 
+For PostgreSQL memory mode, start Docker infra and run:
+
+```bash
+pnpm smoke:postgres
+```
+
 ## 10. Common Errors
 
 ### Missing API Key
@@ -293,6 +313,49 @@ Confirm `DATABASE_URL` matches:
 
 ```env
 DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+```
+
+### Role "airi" Does Not Exist
+
+Symptoms:
+
+- `Role "airi" does not exist`
+- `password authentication failed for user "airi"`
+- `pnpm db:migrate` fails even though `infra/docker-compose.yml` contains `POSTGRES_USER=airi`
+
+Cause:
+
+PostgreSQL initializes roles only when the Docker data volume is created. If the existing volume was created by an older compose file, it may still contain the previous `companion/companion` role. Changing `POSTGRES_USER` later does not rewrite an existing volume.
+
+Option A, reset development data and recreate the volume with current credentials:
+
+```bash
+pnpm db:reset:dev
+docker compose -f infra/docker-compose.yml up -d
+pnpm db:migrate
+```
+
+Warning: resetting volumes deletes development database data.
+
+Option B, keep using the old local volume credentials:
+
+```env
+DATABASE_URL=postgres://companion:companion@localhost:5432/companion
+```
+
+Option C, manually create the current role inside the existing development database:
+
+```bash
+docker exec -it companion-postgres psql -U companion -d companion
+```
+
+Then run SQL equivalent to:
+
+```sql
+create role airi with login password 'airi_dev_password';
+grant all privileges on database companion to airi;
+grant all privileges on all tables in schema public to airi;
+grant all privileges on all sequences in schema public to airi;
 ```
 
 ### Provider Unavailable

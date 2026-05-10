@@ -54,6 +54,9 @@ Check and stop the WSL development services:
 - `pnpm check`: type-check all workspace packages.
 - `pnpm test`: run package tests where present.
 - `pnpm smoke`: build the repo and verify the runtime health, message, and memory endpoints in mock/in-memory mode.
+- `pnpm db:migrate`: apply PostgreSQL memory migrations using `DATABASE_URL` from `.env` or the current environment.
+- `pnpm db:reset:dev`: interactively delete development Docker volumes after a strong confirmation prompt.
+- `pnpm smoke:postgres`: apply migrations against the development Postgres container, then run the smoke test in `MEMORY_REPOSITORY=postgres` mode.
 
 ## Infrastructure
 
@@ -77,3 +80,28 @@ DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
 ```
 
 Then start infra and apply the migrations in `packages/memory/migrations` before using memory endpoints. `.env` is local sensitive state and must not be committed or printed.
+
+```bash
+pnpm db:migrate
+```
+
+To verify Postgres memory mode against the development container:
+
+```bash
+docker compose -f infra/docker-compose.yml up -d
+pnpm smoke:postgres
+```
+
+To reset development database volumes:
+
+```bash
+docker compose -f infra/docker-compose.yml down -v
+```
+
+This deletes development database data.
+
+You can also use the guarded helper:
+
+```bash
+pnpm db:reset:dev
+```

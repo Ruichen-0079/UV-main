@@ -84,4 +84,16 @@ describe("runtime config", () => {
 
     expect(() => validateRuntimeConfig(config)).not.toThrow();
   });
+
+  it("requires DATABASE_URL only when postgres memory is enabled", () => {
+    const inMemoryConfig = parseRuntimeConfig({
+      MEMORY_REPOSITORY: "in-memory"
+    });
+    const postgresConfig = parseRuntimeConfig({
+      MEMORY_REPOSITORY: "postgres"
+    });
+
+    expect(() => validateRuntimeConfig(inMemoryConfig)).not.toThrow();
+    expect(() => validateRuntimeConfig(postgresConfig)).toThrow(ConfigValidationError);
+  });
 });

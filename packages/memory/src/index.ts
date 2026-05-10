@@ -19,3 +19,11 @@ export {
 export { MemoryScorer } from "./scorer.js";
 export { MemoryRetriever } from "./retriever.js";
 export { MemoryService } from "./service.js";
+export {
+  MissingDatabaseUrlError,
+  parseDotEnv,
+  readSqlMigrations,
+  resolveDatabaseUrl,
+  runPostgresMigrations,
+  type SqlMigration
+} from "./migrations.js";
