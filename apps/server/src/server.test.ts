@@ -34,6 +34,9 @@ describe("server", () => {
       const prompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
       expect(prompt.statusCode).toBe(200);
       expect(prompt.json().promptPreview.sections.length).toBeGreaterThan(0);
+      expect(prompt.json().traceId).toBe(message.json().traceId);
+      expect(prompt.json().retrievedMemoryCount).toBe(0);
+      expect(prompt.body).not.toContain("test_deepseek_secret");
 
       const providers = await app.inject({ method: "GET", url: "/providers/status" });
       expect(providers.statusCode).toBe(200);
@@ -51,6 +54,47 @@ describe("server", () => {
         }
       });
       expect(memory.statusCode).toBe(200);
+
+      const messageWithMemory = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "What do you know about Server test details?",
+          options: {
+            useMemory: true,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(messageWithMemory.statusCode).toBe(200);
+
+      const promptWithMemory = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
+      const relevantMemory = findPromptSection(promptWithMemory.json().sections, "RelevantMemory");
+      expect(promptWithMemory.json().useMemory).toBe(true);
+      expect(promptWithMemory.json().retrievedMemoryCount).toBeGreaterThan(0);
+      expect(relevantMemory?.content).toContain("Server test memory");
+
+      const messageWithoutMemory = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "What do you know about Server test details?",
+          options: {
+            useMemory: false,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(messageWithoutMemory.statusCode).toBe(200);
+
+      const promptWithoutMemory = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
+      const emptyRelevantMemory = findPromptSection(promptWithoutMemory.json().sections, "RelevantMemory");
+      expect(promptWithoutMemory.json().useMemory).toBe(false);
+      expect(promptWithoutMemory.json().retrievedMemoryCount).toBe(0);
+      expect(emptyRelevantMemory?.content).toBe("Memory was disabled for this turn.");
+      expect(promptWithoutMemory.body).not.toContain("Server test memory");
 
       const recent = await app.inject({ method: "GET", url: "/memory/recent?limit=5" });
       expect(recent.statusCode).toBe(200);
@@ -91,6 +135,10 @@ function setMockEnv(): void {
   process.env["DEEPSEEK_API_KEY"] = "test_deepseek_secret";
   process.env["XAI_API_KEY"] = "test_xai_secret";
   process.env["DASHSCOPE_API_KEY"] = "test_dashscope_secret";
+}
+
+function findPromptSection(sections: Array<{ name: string; content: string }>, name: string): { name: string; content: string } | undefined {
+  return sections.find((section) => section.name === name);
 }
 
 function snapshotEnv(): NodeJS.ProcessEnv {

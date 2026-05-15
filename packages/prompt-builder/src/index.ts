@@ -34,6 +34,7 @@ export type PromptBuildInput = {
   characterStyle?: string;
   relationshipContext?: string;
   retrievedMemories?: Array<string | RetrievedMemoryForPrompt>;
+  memoryEnabled?: boolean;
   currentSituation?: string;
   tools?: ToolContext[];
   userMessage: string;
@@ -73,13 +74,17 @@ export class PromptBuilder {
     const sections = this.createSections(input);
     const budgetedSections = this.enforceBudget(sections, maxCharacters);
     const prompt = budgetedSections.map(formatSection).join("\n\n");
+    const systemPrompt = budgetedSections
+      .filter((section) => section.name !== "UserMessage")
+      .map(formatSection)
+      .join("\n\n");
 
     return {
       sections: budgetedSections,
       messages: [
         {
           role: "system",
-          content: prompt
+          content: systemPrompt
         },
         {
           role: "user",
@@ -137,7 +142,7 @@ export class PromptBuilder {
       },
       {
         name: "RelevantMemory",
-        content: this.compressMemoryNarrative(input.retrievedMemories ?? []),
+        content: this.compressMemoryNarrative(input.retrievedMemories ?? [], input.memoryEnabled ?? true),
         priority: 70,
         stable: false
       },
@@ -152,11 +157,21 @@ export class PromptBuilder {
         content: formatTools(input.tools ?? []),
         priority: 50,
         stable: false
+      },
+      {
+        name: "UserMessage",
+        content: input.userMessage,
+        priority: 100,
+        stable: false
       }
     ];
   }
 
-  private compressMemoryNarrative(memories: Array<string | RetrievedMemoryForPrompt>): string {
+  private compressMemoryNarrative(memories: Array<string | RetrievedMemoryForPrompt>, memoryEnabled: boolean): string {
+    if (!memoryEnabled) {
+      return "Memory was disabled for this turn.";
+    }
+
     if (memories.length === 0) {
       return "No relevant reconstructed memories are available.";
     }

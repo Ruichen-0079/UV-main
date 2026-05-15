@@ -23,6 +23,7 @@ export type RuntimeOrchestratorOptions = {
   memory: RuntimeMemoryPort;
   promptBuilder: RuntimePromptBuilderPort;
   providers: ProviderResolver;
+  memoryRepository?: string | undefined;
   logger?: RuntimeLogger;
 };
 
@@ -51,6 +52,22 @@ export type HandleUserMessageInput = {
 
 export type HandleUserMessageOptions = {
   voiceOutput?: boolean | undefined;
+  useMemory?: boolean | undefined;
+};
+
+export type RuntimePromptPreview = {
+  traceId: string;
+  timestamp: string;
+  userMessage: string;
+  useMemory: boolean;
+  memoryRepository: string;
+  retrievedMemoryCount: number;
+  sections: PromptBuildOutput["sections"];
+  finalMessages: PromptBuildOutput["messages"];
+  finalPrompt: string;
+  characterCount: number;
+  estimatedTokens: number;
+  truncated: boolean;
 };
 
 export type HandleAudioInputInput = STTInput & {
@@ -67,11 +84,11 @@ export type HandleImageInputInput = VisionInput & {
 };
 
 export class RuntimeOrchestrator {
-  private latestPromptPreview: PromptBuildOutput | null = null;
+  private latestPromptPreview: RuntimePromptPreview | null = null;
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {}
 
-  getLatestPromptPreview(): PromptBuildOutput | null {
+  getLatestPromptPreview(): RuntimePromptPreview | null {
     return this.latestPromptPreview;
   }
 
@@ -91,7 +108,8 @@ export class RuntimeOrchestrator {
 
     await this.options.eventBus.publish(userEvent);
     const voiceOutput = isRuntimeUserMessageEvent(input) ? Boolean(options.voiceOutput) : Boolean(input.voiceOutput);
-    const reply = await this.generateReply(userEvent, voiceOutput);
+    const useMemory = options.useMemory ?? true;
+    const reply = await this.generateReply(userEvent, { voiceOutput, useMemory });
     await this.maybeStoreMemory(userEvent, reply);
     await this.maybeSynthesizeSpeech(reply, voiceOutput);
 
@@ -118,7 +136,7 @@ export class RuntimeOrchestrator {
     });
 
     await this.options.eventBus.publish(transcriptEvent);
-    const reply = await this.generateReply(transcriptEvent, Boolean(input.voiceOutput));
+    const reply = await this.generateReply(transcriptEvent, { voiceOutput: Boolean(input.voiceOutput), useMemory: true });
     await this.maybeStoreMemory(transcriptEvent, reply);
     await this.maybeSynthesizeSpeech(reply, Boolean(input.voiceOutput));
     return reply;
@@ -148,8 +166,13 @@ export class RuntimeOrchestrator {
     return event;
   }
 
-  async generateReply(event: UserMessageEvent | UserVoiceTranscriptEvent, voiceOutput = false): Promise<AgentReplyEvent> {
-    const memories = await this.retrieveMemories(event);
+  async generateReply(
+    event: UserMessageEvent | UserVoiceTranscriptEvent,
+    options: { voiceOutput?: boolean | undefined; useMemory?: boolean | undefined } = {}
+  ): Promise<AgentReplyEvent> {
+    const voiceOutput = Boolean(options.voiceOutput);
+    const useMemory = options.useMemory ?? true;
+    const memories = useMemory ? await this.retrieveMemories(event) : [];
     const prompt = this.options.promptBuilder.buildPrompt({
       systemIdentity: "You are Companion, a local-first AI companion runtime agent.",
       characterStyle: "Warm, concise, emotionally aware, and practical.",
@@ -162,11 +185,25 @@ export class RuntimeOrchestrator {
         lastAccessedAt: memory.lastAccessedAt,
         tags: memory.tags
       })),
+      memoryEnabled: useMemory,
       currentSituation: voiceOutput ? "The user is interacting through voice." : "The user is interacting through text.",
       tools: [],
       userMessage: event.payload.content
     });
-    this.latestPromptPreview = prompt;
+    this.latestPromptPreview = {
+      traceId: event.traceId,
+      timestamp: new Date().toISOString(),
+      userMessage: event.payload.content,
+      useMemory,
+      memoryRepository: this.options.memoryRepository ?? "in-memory",
+      retrievedMemoryCount: memories.length,
+      sections: prompt.sections,
+      finalMessages: prompt.messages,
+      finalPrompt: prompt.prompt,
+      characterCount: prompt.characterCount,
+      estimatedTokens: prompt.estimatedTokens,
+      truncated: prompt.truncated
+    };
 
     const chatProvider = this.options.providers.getChatProvider();
     const output = await this.measureProvider(

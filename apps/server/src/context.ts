@@ -37,6 +37,7 @@ export function createAppContext(logger: FastifyBaseLogger): AppContext {
     memory,
     promptBuilder,
     providers,
+    memoryRepository: process.env["MEMORY_REPOSITORY"] ?? "in-memory",
     logger: runtimeLogger
   });
 

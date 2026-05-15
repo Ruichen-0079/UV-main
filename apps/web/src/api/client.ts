@@ -3,11 +3,14 @@ export type ProviderHealth = {
   status: "healthy" | "degraded" | "unavailable";
   checkedAt?: string;
   message?: string;
+  baseUrl?: string;
+  model?: string;
 };
 
 export type HealthResponse = {
   ok: boolean;
   service: string;
+  runtimeMode?: string;
   server: { status: string };
   database: {
     status: "healthy" | "degraded" | "unavailable";
@@ -57,6 +60,8 @@ export type SendMessageRequest = {
 export type MessageResponse = RuntimeEvent & {
   reply: string;
   promptPreview?: PromptPreviewResponse["promptPreview"];
+  provider?: string;
+  mock?: boolean;
   payload: {
     sessionId?: string;
     content?: string;
@@ -75,12 +80,14 @@ export type MemoryRecord = {
   tags: string[];
   createdAt: string;
   updatedAt?: string;
+  lastAccessedAt?: string;
 };
 
 export type CreateMemoryRequest = {
   type: string;
   content: string;
   summary?: string;
+  importance?: number;
   source: string;
   tags: string[];
 };
@@ -99,14 +106,28 @@ export type ProvidersStatusResponse = {
 export type PromptPreviewResponse = {
   mock: boolean;
   message?: string;
+  traceId?: string;
+  timestamp?: string;
+  userMessage?: string;
+  useMemory?: boolean;
+  memoryRepository?: string;
+  retrievedMemoryCount?: number;
   promptPreview: null | {
+    traceId?: string;
+    timestamp?: string;
+    userMessage?: string;
+    useMemory?: boolean;
+    memoryRepository?: string;
+    retrievedMemoryCount?: number;
     sections: Array<{
       name: string;
       content: string;
       priority: number;
       stable: boolean;
     }>;
-    prompt: string;
+    prompt?: string;
+    finalPrompt?: string;
+    finalMessages?: Array<{ role: string; content: string }>;
     characterCount: number;
     estimatedTokens: number;
     truncated: boolean;

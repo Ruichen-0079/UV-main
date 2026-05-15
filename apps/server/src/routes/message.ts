@@ -36,7 +36,10 @@ export async function registerMessageRoutes(app: FastifyInstance, context: AppCo
     request.log.info({ traceId: event.traceId, sessionId: input.data.sessionId }, "message request received");
 
     try {
-      const response = await context.runtime.handleUserMessage(event, { voiceOutput });
+      const response = await context.runtime.handleUserMessage(event, {
+        voiceOutput,
+        useMemory: input.data.options?.useMemory ?? true
+      });
       return reply.send({
         ...response,
         reply: response.payload.content,

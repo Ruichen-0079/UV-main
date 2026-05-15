@@ -22,6 +22,7 @@ export async function registerDebugRoutes(app: FastifyInstance, context: AppCont
 
     return reply.send({
       mock: false,
+      ...promptPreview,
       promptPreview
     });
   });
