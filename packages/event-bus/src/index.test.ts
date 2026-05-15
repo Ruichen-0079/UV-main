@@ -20,10 +20,12 @@ describe("InMemoryEventBus", () => {
       received.push(event.type);
     });
 
-    await bus.publish(createEvent("user.message", {
-      sessionId: "test-session",
-      content: "hello"
-    }));
+    await bus.publish(
+      createEvent("user.message", {
+        sessionId: "test-session",
+        content: "hello"
+      })
+    );
 
     expect(received).toEqual(["user.message"]);
   });
@@ -38,10 +40,12 @@ describe("InMemoryEventBus", () => {
 
     subscription.unsubscribe();
 
-    await bus.publish(createEvent("user.message", {
-      sessionId: "test-session",
-      content: "hello"
-    }));
+    await bus.publish(
+      createEvent("user.message", {
+        sessionId: "test-session",
+        content: "hello"
+      })
+    );
 
     expect(count).toBe(0);
   });
@@ -51,22 +55,27 @@ describe("InMemoryEventBus", () => {
     let reply: RuntimeEvent<"agent.reply", { sessionId: string; content: string }> | undefined;
 
     bus.subscribe<UserMessageEvent>("user.message", async (event) => {
-      await bus.publish(createEvent(
-        "agent.reply",
-        {
-          sessionId: event.payload.sessionId,
-          content: "hello back"
-        },
-        {
-          traceId: event.traceId,
-          parentId: event.id
-        }
-      ));
+      await bus.publish(
+        createEvent(
+          "agent.reply",
+          {
+            sessionId: event.payload.sessionId,
+            content: "hello back"
+          },
+          {
+            traceId: event.traceId,
+            parentId: event.id
+          }
+        )
+      );
     });
 
-    bus.subscribe<RuntimeEvent<"agent.reply", { sessionId: string; content: string }>>("agent.*", (event) => {
-      reply = event;
-    });
+    bus.subscribe<RuntimeEvent<"agent.reply", { sessionId: string; content: string }>>(
+      "agent.*",
+      (event) => {
+        reply = event;
+      }
+    );
 
     const userMessage = createEvent("user.message", {
       sessionId: "test-session",
@@ -90,10 +99,14 @@ describe("InMemoryEventBus", () => {
       received.push(event.type);
     });
 
-    await expect(bus.publish(createEvent("user.message", {
-      sessionId: "test-session",
-      content: "hello"
-    }))).resolves.toBeUndefined();
+    await expect(
+      bus.publish(
+        createEvent("user.message", {
+          sessionId: "test-session",
+          content: "hello"
+        })
+      )
+    ).resolves.toBeUndefined();
 
     expect(received).toEqual(["user.message"]);
   });

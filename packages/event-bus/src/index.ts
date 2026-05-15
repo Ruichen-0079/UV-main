@@ -54,8 +54,9 @@ export class InMemoryEventBus implements EventBus {
 
   async publish<TEvent extends RuntimeEvent>(event: TEvent): Promise<void> {
     const eventWithTrace = this.withTraceId(event);
-    const matchingHandlers = Array.from(this.handlers)
-      .filter((entry) => matchesEventType(entry.pattern, eventWithTrace.type));
+    const matchingHandlers = Array.from(this.handlers).filter((entry) =>
+      matchesEventType(entry.pattern, eventWithTrace.type)
+    );
 
     this.log("event published", {
       type: eventWithTrace.type,
@@ -64,20 +65,22 @@ export class InMemoryEventBus implements EventBus {
       subscriberCount: matchingHandlers.length
     });
 
-    await Promise.all(matchingHandlers.map(async (entry) => {
-      try {
-        await entry.handler(eventWithTrace);
-      } catch (error) {
-        this.logWarn("event handler failed", {
-          type: eventWithTrace.type,
-          id: eventWithTrace.id,
-          traceId: eventWithTrace.traceId,
-          pattern: entry.pattern,
-          errorName: error instanceof Error ? error.name : typeof error,
-          errorMessage: error instanceof Error ? error.message : "Unknown event handler error."
-        });
-      }
-    }));
+    await Promise.all(
+      matchingHandlers.map(async (entry) => {
+        try {
+          await entry.handler(eventWithTrace);
+        } catch (error) {
+          this.logWarn("event handler failed", {
+            type: eventWithTrace.type,
+            id: eventWithTrace.id,
+            traceId: eventWithTrace.traceId,
+            pattern: entry.pattern,
+            errorName: error instanceof Error ? error.name : typeof error,
+            errorMessage: error instanceof Error ? error.message : "Unknown event handler error."
+          });
+        }
+      })
+    );
   }
 
   subscribe<TEvent extends RuntimeEvent>(

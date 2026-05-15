@@ -40,7 +40,9 @@ try {
   await main();
 } catch (error) {
   if (error instanceof MissingDatabaseUrlError) {
-    console.error("DATABASE_URL is missing. Copy .env.example to .env or export DATABASE_URL before running pnpm db:migrate.");
+    console.error(
+      "DATABASE_URL is missing. Copy .env.example to .env or export DATABASE_URL before running pnpm db:migrate."
+    );
     process.exitCode = 1;
   } else {
     console.error(error instanceof Error ? error.message : String(error));

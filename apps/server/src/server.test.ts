@@ -90,7 +90,10 @@ describe("server", () => {
       expect(messageWithoutMemory.statusCode).toBe(200);
 
       const promptWithoutMemory = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
-      const emptyRelevantMemory = findPromptSection(promptWithoutMemory.json().sections, "RelevantMemory");
+      const emptyRelevantMemory = findPromptSection(
+        promptWithoutMemory.json().sections,
+        "RelevantMemory"
+      );
       expect(promptWithoutMemory.json().useMemory).toBe(false);
       expect(promptWithoutMemory.json().retrievedMemoryCount).toBe(0);
       expect(emptyRelevantMemory?.content).toBe("Memory was disabled for this turn.");
@@ -110,7 +113,9 @@ describe("server", () => {
       expect(events.body).not.toContain("test_deepseek_secret");
 
       await app.listen({ host: "127.0.0.1", port: 0 });
-      const dashboardMessage = await readFirstWebSocketMessage(`${getServerOrigin(app.server.address())}/ws?dashboard=true`);
+      const dashboardMessage = await readFirstWebSocketMessage(
+        `${getServerOrigin(app.server.address())}/ws?dashboard=true`
+      );
       expect(dashboardMessage.kind).toBe("dashboard.connected");
       expect(dashboardMessage.traceId).toBeTypeOf("string");
 
@@ -137,7 +142,10 @@ function setMockEnv(): void {
   process.env["DASHSCOPE_API_KEY"] = "test_dashscope_secret";
 }
 
-function findPromptSection(sections: Array<{ name: string; content: string }>, name: string): { name: string; content: string } | undefined {
+function findPromptSection(
+  sections: Array<{ name: string; content: string }>,
+  name: string
+): { name: string; content: string } | undefined {
   return sections.find((section) => section.name === name);
 }
 
@@ -157,12 +165,19 @@ function getServerOrigin(address: string | import("node:net").AddressInfo | null
   return `ws://${address.address}:${address.port}`;
 }
 
-async function readFirstWebSocketMessage(url: string): Promise<{ kind?: string; traceId?: string }> {
+async function readFirstWebSocketMessage(
+  url: string
+): Promise<{ kind?: string; traceId?: string }> {
   type MinimalWebSocket = {
-    addEventListener(event: "open" | "message" | "error", listener: (event: { data?: unknown }) => void): void;
+    addEventListener(
+      event: "open" | "message" | "error",
+      listener: (event: { data?: unknown }) => void
+    ): void;
     close(): void;
   };
-  const WebSocketCtor = (globalThis as unknown as { WebSocket: new (url: string) => MinimalWebSocket }).WebSocket;
+  const WebSocketCtor = (
+    globalThis as unknown as { WebSocket: new (url: string) => MinimalWebSocket }
+  ).WebSocket;
 
   return new Promise((resolve, reject) => {
     const socket = new WebSocketCtor(url);

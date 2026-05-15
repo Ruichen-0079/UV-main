@@ -40,10 +40,12 @@ function redactEvent(event: RuntimeEvent): RuntimeEvent {
 
 function isSensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase();
-  return normalized.includes("apikey")
-    || normalized.includes("api_key")
-    || normalized.includes("authorization")
-    || normalized.includes("token")
-    || normalized.includes("secret")
-    || normalized.includes("password");
+  return (
+    normalized.includes("apikey") ||
+    normalized.includes("api_key") ||
+    normalized.includes("authorization") ||
+    normalized.includes("token") ||
+    normalized.includes("secret") ||
+    normalized.includes("password")
+  );
 }

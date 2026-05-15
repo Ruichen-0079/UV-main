@@ -1,11 +1,6 @@
 import type { ProviderHealth } from "../types/common.js";
 import type { TTSInput, TTSOutput, TTSProvider } from "../types/tts.js";
-import {
-  ensureXAIConfig,
-  healthCheckXAI,
-  xaiFetch,
-  type XAIProviderOptions
-} from "./common.js";
+import { ensureXAIConfig, healthCheckXAI, xaiFetch, type XAIProviderOptions } from "./common.js";
 
 export type XAITTSProviderOptions = XAIProviderOptions & {
   defaultVoice?: string | undefined;

@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  ProviderError,
-  ProviderErrorCode,
-  createProviderRegistryFromEnv
-} from "./index.js";
+import { ProviderError, ProviderErrorCode, createProviderRegistryFromEnv } from "./index.js";
 
 describe("ProviderRegistry", () => {
   afterEach(() => {
@@ -50,22 +46,29 @@ describe("ProviderRegistry", () => {
   });
 
   it("omits raw provider responses unless explicitly enabled", async () => {
-    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
-      model: "deepseek-test",
-      choices: [
-        {
-          finish_reason: "stop",
-          message: {
-            content: "hello from deepseek"
-          }
-        }
-      ],
-      usage: {
-        prompt_tokens: 2,
-        completion_tokens: 3,
-        total_tokens: 5
-      }
-    }), { status: 200 }));
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            model: "deepseek-test",
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  content: "hello from deepseek"
+                }
+              }
+            ],
+            usage: {
+              prompt_tokens: 2,
+              completion_tokens: 3,
+              total_tokens: 5
+            }
+          }),
+          { status: 200 }
+        )
+    );
 
     const registry = createProviderRegistryFromEnv({
       NODE_ENV: "production",
@@ -86,17 +89,24 @@ describe("ProviderRegistry", () => {
   });
 
   it("can include raw provider responses behind an explicit debug flag", async () => {
-    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
-      model: "deepseek-test",
-      choices: [
-        {
-          finish_reason: "stop",
-          message: {
-            content: "hello from deepseek"
-          }
-        }
-      ]
-    }), { status: 200 }));
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            model: "deepseek-test",
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  content: "hello from deepseek"
+                }
+              }
+            ]
+          }),
+          { status: 200 }
+        )
+    );
 
     const registry = createProviderRegistryFromEnv({
       NODE_ENV: "production",

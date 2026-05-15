@@ -5,7 +5,9 @@ export type ServerConfig = {
   runtimeMode: "development" | "test" | "production";
 };
 
-export function loadServerConfig(env: Record<string, string | undefined> = process.env): ServerConfig {
+export function loadServerConfig(
+  env: Record<string, string | undefined> = process.env
+): ServerConfig {
   return {
     host: env["SERVER_HOST"] ?? "127.0.0.1",
     port: Number.parseInt(env["SERVER_PORT"] ?? "6121", 10),

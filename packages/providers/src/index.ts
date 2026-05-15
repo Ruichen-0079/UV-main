@@ -8,11 +8,7 @@ export type {
   TextMessageRole,
   TokenUsage
 } from "./types/common.js";
-export {
-  ProviderError,
-  ProviderErrorCode,
-  isRetryableProviderError
-} from "./types/errors.js";
+export { ProviderError, ProviderErrorCode, isRetryableProviderError } from "./types/errors.js";
 export type {
   ProviderErrorCode as ProviderErrorCodeType,
   ProviderErrorOptions

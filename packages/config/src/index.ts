@@ -1,13 +1,7 @@
 export type RuntimeEnvironment = "development" | "test" | "production";
 export type MemoryRepositoryDriver = "in-memory" | "postgres";
 
-export type ProviderCapability =
-  | "chat"
-  | "reasoning"
-  | "tts"
-  | "stt"
-  | "vision"
-  | "embedding";
+export type ProviderCapability = "chat" | "reasoning" | "tts" | "stt" | "vision" | "embedding";
 
 export type ProviderSelection = Record<ProviderCapability, string>;
 
@@ -58,7 +52,9 @@ export class ConfigValidationError extends Error {
   readonly issues: ConfigValidationIssue[];
 
   constructor(issues: ConfigValidationIssue[]) {
-    super(`Runtime configuration is invalid:\n- ${issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n- ")}`);
+    super(
+      `Runtime configuration is invalid:\n- ${issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n- ")}`
+    );
     this.name = "ConfigValidationError";
     this.issues = issues;
   }
@@ -97,14 +93,22 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
         chat: {
           provider: defaults.chat,
           enabled: true,
-          baseUrl: readProviderBaseUrl(defaults.chat, env["DEEPSEEK_API_BASEURL"], "https://api.deepseek.com"),
+          baseUrl: readProviderBaseUrl(
+            defaults.chat,
+            env["DEEPSEEK_API_BASEURL"],
+            "https://api.deepseek.com"
+          ),
           apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
           model: emptyToUndefined(env["DEEPSEEK_CHAT_MODEL"])
         },
         reasoning: {
           provider: defaults.reasoning,
           enabled: true,
-          baseUrl: readProviderBaseUrl(defaults.reasoning, env["DEEPSEEK_API_BASEURL"], "https://api.deepseek.com"),
+          baseUrl: readProviderBaseUrl(
+            defaults.reasoning,
+            env["DEEPSEEK_API_BASEURL"],
+            "https://api.deepseek.com"
+          ),
           apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
           model: emptyToUndefined(env["DEEPSEEK_REASONING_MODEL"])
         },
@@ -119,14 +123,22 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
         stt: {
           provider: defaults.stt,
           enabled: parseBoolean(env["STT_ENABLED"], true),
-          baseUrl: readProviderBaseUrl(defaults.stt, env["DASHSCOPE_API_BASEURL"], "https://dashscope.aliyuncs.com/api/v1"),
+          baseUrl: readProviderBaseUrl(
+            defaults.stt,
+            env["DASHSCOPE_API_BASEURL"],
+            "https://dashscope.aliyuncs.com/api/v1"
+          ),
           apiKey: emptyToUndefined(env["DASHSCOPE_API_KEY"]),
           model: emptyToUndefined(env["DASHSCOPE_STT_MODEL"])
         },
         vision: {
           provider: defaults.vision,
           enabled: parseBoolean(env["VISION_ENABLED"], true),
-          baseUrl: readProviderBaseUrl(defaults.vision, env["XAI_API_BASEURL"], "https://api.x.ai/v1"),
+          baseUrl: readProviderBaseUrl(
+            defaults.vision,
+            env["XAI_API_BASEURL"],
+            "https://api.x.ai/v1"
+          ),
           apiKey: emptyToUndefined(env["XAI_API_KEY"]),
           model: emptyToUndefined(env["XAI_VISION_MODEL"])
         },
@@ -209,7 +221,14 @@ export function redactConfig<T>(value: T): T {
   return redactValue(value) as T;
 }
 
-const providerCapabilities: ProviderCapability[] = ["chat", "reasoning", "tts", "stt", "vision", "embedding"];
+const providerCapabilities: ProviderCapability[] = [
+  "chat",
+  "reasoning",
+  "tts",
+  "stt",
+  "vision",
+  "embedding"
+];
 
 function parseProviderSelection(env: RuntimeConfigEnv): ProviderSelection {
   return {
@@ -218,7 +237,10 @@ function parseProviderSelection(env: RuntimeConfigEnv): ProviderSelection {
     tts: readString(env["DEFAULT_TTS_PROVIDER"], defaultProviderSelection.tts),
     stt: readString(env["DEFAULT_STT_PROVIDER"], defaultProviderSelection.stt),
     vision: readString(env["DEFAULT_VISION_PROVIDER"], defaultProviderSelection.vision),
-    embedding: readString(env["DEFAULT_EMBEDDING_PROVIDER"] ?? env["EMBEDDING_PROVIDER"], defaultProviderSelection.embedding)
+    embedding: readString(
+      env["DEFAULT_EMBEDDING_PROVIDER"] ?? env["EMBEDDING_PROVIDER"],
+      defaultProviderSelection.embedding
+    )
   };
 }
 
@@ -264,7 +286,11 @@ function readString(value: string | undefined, fallback: string): string {
   return emptyToUndefined(value) ?? fallback;
 }
 
-function readProviderBaseUrl(provider: string, value: string | undefined, fallback: string): string | undefined {
+function readProviderBaseUrl(
+  provider: string,
+  value: string | undefined,
+  fallback: string
+): string | undefined {
   if (provider === "mock") {
     return undefined;
   }
@@ -303,9 +329,10 @@ function redactValue(value: unknown): unknown {
     const result: Record<string, unknown> = {};
 
     for (const [key, nestedValue] of Object.entries(value)) {
-      result[key] = isSensitiveKey(key) && typeof nestedValue === "string"
-        ? redactSecret(nestedValue)
-        : redactValue(nestedValue);
+      result[key] =
+        isSensitiveKey(key) && typeof nestedValue === "string"
+          ? redactSecret(nestedValue)
+          : redactValue(nestedValue);
     }
 
     return result;
@@ -316,10 +343,12 @@ function redactValue(value: unknown): unknown {
 
 function isSensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase();
-  return normalized.includes("apikey")
-    || normalized.includes("api_key")
-    || normalized.includes("authorization")
-    || normalized.includes("token")
-    || normalized.includes("secret")
-    || normalized.includes("password");
+  return (
+    normalized.includes("apikey") ||
+    normalized.includes("api_key") ||
+    normalized.includes("authorization") ||
+    normalized.includes("token") ||
+    normalized.includes("secret") ||
+    normalized.includes("password")
+  );
 }

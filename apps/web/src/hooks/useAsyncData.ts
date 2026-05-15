@@ -30,4 +30,3 @@ export function useAsyncData<T>(loader: () => Promise<T>, deps: unknown[] = []):
 
   return { data, error, loading, refresh };
 }
-

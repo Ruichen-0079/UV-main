@@ -1,7 +1,14 @@
 import { InMemoryEventBus } from "@companion/event-bus";
 import type { Memory } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
-import { ProviderError, ProviderErrorCode, createMockChatProvider, createMockReasoningProvider, createMockSTTProvider, createMockVisionProvider } from "@companion/providers";
+import {
+  ProviderError,
+  ProviderErrorCode,
+  createMockChatProvider,
+  createMockReasoningProvider,
+  createMockSTTProvider,
+  createMockVisionProvider
+} from "@companion/providers";
 import { describe, expect, it } from "vitest";
 import { RuntimeOrchestrator, type RuntimeMemoryPort } from "./index.js";
 

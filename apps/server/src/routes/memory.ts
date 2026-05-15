@@ -26,7 +26,10 @@ const SearchMemoryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20)
 });
 
-export async function registerMemoryRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
+export async function registerMemoryRoutes(
+  app: FastifyInstance,
+  context: AppContext
+): Promise<void> {
   app.post("/memory", async (request, reply) => {
     const input = CreateMemoryRequestSchema.safeParse(request.body);
     if (!input.success) {

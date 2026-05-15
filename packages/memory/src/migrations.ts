@@ -15,14 +15,18 @@ export class MissingDatabaseUrlError extends Error {
   }
 }
 
-export async function readSqlMigrations(migrationsDir = defaultMigrationsDir()): Promise<SqlMigration[]> {
+export async function readSqlMigrations(
+  migrationsDir = defaultMigrationsDir()
+): Promise<SqlMigration[]> {
   const entries = await readdir(migrationsDir);
   const sqlFiles = entries.filter((entry) => entry.endsWith(".sql")).sort();
 
-  return Promise.all(sqlFiles.map(async (name) => ({
-    name,
-    sql: await readFile(join(migrationsDir, name), "utf8")
-  })));
+  return Promise.all(
+    sqlFiles.map(async (name) => ({
+      name,
+      sql: await readFile(join(migrationsDir, name), "utf8")
+    }))
+  );
 }
 
 export async function runPostgresMigrations(input: {
@@ -31,7 +35,7 @@ export async function runPostgresMigrations(input: {
   migrationsDir?: string | undefined;
   logger?: Pick<Console, "log"> | undefined;
 }): Promise<string[]> {
-  const migrations = input.migrations ?? await readSqlMigrations(input.migrationsDir);
+  const migrations = input.migrations ?? (await readSqlMigrations(input.migrationsDir));
   const pool = new Pool({ connectionString: input.databaseUrl });
 
   try {
@@ -46,7 +50,10 @@ export async function runPostgresMigrations(input: {
   }
 }
 
-export function resolveDatabaseUrl(env: Record<string, string | undefined>, envFileText?: string | undefined): string {
+export function resolveDatabaseUrl(
+  env: Record<string, string | undefined>,
+  envFileText?: string | undefined
+): string {
   const fileEnv = envFileText ? parseDotEnv(envFileText) : {};
   const databaseUrl = env["DATABASE_URL"] ?? fileEnv["DATABASE_URL"];
 
@@ -80,7 +87,10 @@ export function parseDotEnv(text: string): Record<string, string> {
 }
 
 function stripOptionalQuotes(value: string): string {
-  if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
     return value.slice(1, -1);
   }
 

@@ -142,7 +142,10 @@ export class PromptBuilder {
       },
       {
         name: "RelevantMemory",
-        content: this.compressMemoryNarrative(input.retrievedMemories ?? [], input.memoryEnabled ?? true),
+        content: this.compressMemoryNarrative(
+          input.retrievedMemories ?? [],
+          input.memoryEnabled ?? true
+        ),
         priority: 70,
         stable: false
       },
@@ -167,7 +170,10 @@ export class PromptBuilder {
     ];
   }
 
-  private compressMemoryNarrative(memories: Array<string | RetrievedMemoryForPrompt>, memoryEnabled: boolean): string {
+  private compressMemoryNarrative(
+    memories: Array<string | RetrievedMemoryForPrompt>,
+    memoryEnabled: boolean
+  ): string {
     if (!memoryEnabled) {
       return "Memory was disabled for this turn.";
     }
@@ -176,10 +182,7 @@ export class PromptBuilder {
       return "No relevant reconstructed memories are available.";
     }
 
-    const ranked = memories
-      .map(normalizeMemory)
-      .sort(compareMemoryForPrompt)
-      .slice(0, 8);
+    const ranked = memories.map(normalizeMemory).sort(compareMemoryForPrompt).slice(0, 8);
 
     return ranked
       .map((memory) => `- ${compressMemoryText(memory.summary ?? memory.content)}`)
@@ -198,7 +201,10 @@ export class PromptBuilder {
         break;
       }
 
-      candidate.content = truncateText(candidate.content, Math.max(120, Math.floor(candidate.content.length * 0.75)));
+      candidate.content = truncateText(
+        candidate.content,
+        Math.max(120, Math.floor(candidate.content.length * 0.75))
+      );
     }
 
     return result;
@@ -213,7 +219,9 @@ function sectionsToText(sections: PromptSection[]): string {
   return sections.map(formatSection).join("\n\n");
 }
 
-function normalizeMemory(memory: string | RetrievedMemoryForPrompt): Required<Pick<RetrievedMemoryForPrompt, "content">> & RetrievedMemoryForPrompt {
+function normalizeMemory(
+  memory: string | RetrievedMemoryForPrompt
+): Required<Pick<RetrievedMemoryForPrompt, "content">> & RetrievedMemoryForPrompt {
   if (typeof memory === "string") {
     return {
       content: memory,
@@ -225,13 +233,18 @@ function normalizeMemory(memory: string | RetrievedMemoryForPrompt): Required<Pi
   return memory;
 }
 
-function compareMemoryForPrompt(left: RetrievedMemoryForPrompt, right: RetrievedMemoryForPrompt): number {
+function compareMemoryForPrompt(
+  left: RetrievedMemoryForPrompt,
+  right: RetrievedMemoryForPrompt
+): number {
   const importanceDelta = (right.importance ?? 0.5) - (left.importance ?? 0.5);
   if (importanceDelta !== 0) {
     return importanceDelta;
   }
 
-  return toTime(right.lastAccessedAt ?? right.createdAt) - toTime(left.lastAccessedAt ?? left.createdAt);
+  return (
+    toTime(right.lastAccessedAt ?? right.createdAt) - toTime(left.lastAccessedAt ?? left.createdAt)
+  );
 }
 
 function compressMemoryText(text: string): string {

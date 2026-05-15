@@ -57,7 +57,10 @@ export const UserVoiceTranscriptPayloadSchema = z.object({
 });
 
 export type UserVoiceTranscriptPayload = z.infer<typeof UserVoiceTranscriptPayloadSchema>;
-export type UserVoiceTranscriptEvent = RuntimeEvent<"user.voice.transcript", UserVoiceTranscriptPayload>;
+export type UserVoiceTranscriptEvent = RuntimeEvent<
+  "user.voice.transcript",
+  UserVoiceTranscriptPayload
+>;
 
 export const AssistantMessagePayloadSchema = z.object({
   sessionId: z.string().min(1),

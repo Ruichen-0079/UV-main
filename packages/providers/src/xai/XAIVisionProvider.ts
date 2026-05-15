@@ -80,27 +80,35 @@ async function resolveImageUrl(input: VisionInput): Promise<string> {
 
   if (input.localFilePath) {
     const file = await readFile(input.localFilePath);
-    return toDataUrl(file.toString("base64"), input.mimeType ?? mimeTypeFromPath(input.localFilePath));
+    return toDataUrl(
+      file.toString("base64"),
+      input.mimeType ?? mimeTypeFromPath(input.localFilePath)
+    );
   }
 
   throw new ProviderError({
     provider: "xai",
     capability: "vision",
     code: ProviderErrorCode.UnsupportedInput,
-    message: "Vision input must include imageUrl, localFilePath, imageBase64, imageBuffer, or image.",
+    message:
+      "Vision input must include imageUrl, localFilePath, imageBase64, imageBuffer, or image.",
     retryable: false
   });
 }
 
-function buildVisionMessages(input: VisionInput, imageUrl: string): Array<{
+function buildVisionMessages(
+  input: VisionInput,
+  imageUrl: string
+): Array<{
   role: TextMessage["role"];
   content: string | Array<Record<string, unknown>>;
 }> {
   const prompt = input.prompt ?? "Analyze this image.";
-  const priorMessages = input.messages?.map((message) => ({
-    role: message.role,
-    content: message.content
-  })) ?? [];
+  const priorMessages =
+    input.messages?.map((message) => ({
+      role: message.role,
+      content: message.content
+    })) ?? [];
 
   return [
     ...priorMessages,
@@ -158,7 +166,9 @@ function normalizeVisionResponse(rawResponse: unknown): {
 }
 
 function isXAIChatResponse(value: unknown): value is XAIChatResponse {
-  return typeof value === "object" && value !== null && Array.isArray((value as XAIChatResponse).choices);
+  return (
+    typeof value === "object" && value !== null && Array.isArray((value as XAIChatResponse).choices)
+  );
 }
 
 function normalizeUsage(usage: XAIChatResponse["usage"]): TokenUsage | undefined {

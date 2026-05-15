@@ -147,8 +147,11 @@ async function createStatusError(
     capability,
     code,
     statusCode: response.status,
-    message: safeBody ? `xAI request failed with ${response.status}: ${safeBody}` : `xAI request failed with ${response.status}.`,
-    retryable: code === ProviderErrorCode.RateLimited || code === ProviderErrorCode.ProviderUnavailable
+    message: safeBody
+      ? `xAI request failed with ${response.status}: ${safeBody}`
+      : `xAI request failed with ${response.status}.`,
+    retryable:
+      code === ProviderErrorCode.RateLimited || code === ProviderErrorCode.ProviderUnavailable
   });
 }
 

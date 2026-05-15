@@ -1,8 +1,8 @@
-# AI Companion Runtime
+# YUVI Runtime
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-AI Companion Runtime 是一个本地优先、事件驱动的 AI Companion 运行时。它受到 Project AIRI 架构愿景启发，但本仓库是原创实现，不复制 AIRI 代码。
+YUVI Runtime 是一个本地优先、事件驱动的 AI Companion Runtime。它受到 Project AIRI 架构愿景启发，但本仓库是原创实现，不复制 AIRI 代码。
 
 项目目标是构建一个可扩展的 Companion Runtime，而不是只做一个聊天页面。当前重点包括：
 

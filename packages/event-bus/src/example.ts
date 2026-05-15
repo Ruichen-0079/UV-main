@@ -6,7 +6,9 @@ type AgentReplyPayload = {
   content: string;
 };
 
-export async function runUserMessageToAgentReplyExample(): Promise<RuntimeEvent<"agent.reply", AgentReplyPayload>> {
+export async function runUserMessageToAgentReplyExample(): Promise<
+  RuntimeEvent<"agent.reply", AgentReplyPayload>
+> {
   const bus = new InMemoryEventBus({ development: true });
   let reply: RuntimeEvent<"agent.reply", AgentReplyPayload> | undefined;
 
@@ -30,10 +32,12 @@ export async function runUserMessageToAgentReplyExample(): Promise<RuntimeEvent<
     reply = event;
   });
 
-  await bus.publish(createEvent("user.message", {
-    sessionId: "example-session",
-    content: "hello"
-  }));
+  await bus.publish(
+    createEvent("user.message", {
+      sessionId: "example-session",
+      content: "hello"
+    })
+  );
 
   if (!reply) {
     throw new Error("Expected agent.reply event to be published.");

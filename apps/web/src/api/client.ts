@@ -163,7 +163,10 @@ export const apiClient = {
     return request<{ memories: MemoryRecord[] }>(`/memory/recent?limit=${limit}`);
   },
 
-  searchMemories(query: string, options: { type?: string; limit?: number } = {}): Promise<{ mock: boolean; memories: MemoryRecord[] }> {
+  searchMemories(
+    query: string,
+    options: { type?: string; limit?: number } = {}
+  ): Promise<{ mock: boolean; memories: MemoryRecord[] }> {
     const params = new URLSearchParams({
       q: query,
       limit: String(options.limit ?? 20)
@@ -172,7 +175,9 @@ export const apiClient = {
       params.set("type", options.type);
     }
 
-    return request<{ mock: boolean; memories: MemoryRecord[] }>(`/memory/search?${params.toString()}`);
+    return request<{ mock: boolean; memories: MemoryRecord[] }>(
+      `/memory/search?${params.toString()}`
+    );
   },
 
   createMemory(input: CreateMemoryRequest): Promise<MemoryRecord> {

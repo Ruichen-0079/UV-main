@@ -10,6 +10,8 @@
     "check": "tsc -b --pretty false",
     "test": "pnpm -r test",
     "smoke": "pnpm build && tsx scripts/smoke.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:reset:dev": "bash scripts/db-reset-dev.sh",
     "smoke:postgres": "DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion pnpm db:migrate && MEMORY_REPOSITORY=postgres DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion pnpm smoke"
@@ -18,6 +20,7 @@
   "devDependencies": {
     "@types/node": "^22.10.7",
     "tsx": "^4.19.2",
+    "prettier": "^3.6.2",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"
   }

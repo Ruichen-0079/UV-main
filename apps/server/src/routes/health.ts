@@ -4,7 +4,11 @@ import type { AppContext } from "../context.js";
 
 const startedAt = Date.now();
 
-export async function registerHealthRoutes(app: FastifyInstance, context: AppContext, config: ServerConfig): Promise<void> {
+export async function registerHealthRoutes(
+  app: FastifyInstance,
+  context: AppContext,
+  config: ServerConfig
+): Promise<void> {
   app.get("/health", async () => {
     const [database, chat, tts, stt, vision, embedding] = await Promise.all([
       context.memoryRepository.healthCheck(),

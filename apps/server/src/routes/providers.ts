@@ -2,7 +2,10 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../context.js";
 import { redactValue } from "../services/dashboard.js";
 
-export async function registerProviderRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
+export async function registerProviderRoutes(
+  app: FastifyInstance,
+  context: AppContext
+): Promise<void> {
   app.get("/providers/status", async (_request, reply) => {
     try {
       const [chat, reasoning, tts, stt, vision, embedding] = await Promise.all([
@@ -14,16 +17,18 @@ export async function registerProviderRoutes(app: FastifyInstance, context: AppC
         context.providers.getEmbeddingProvider().healthCheck()
       ]);
 
-      return reply.send(redactValue({
-        providers: {
-          chat,
-          reasoning,
-          tts,
-          stt,
-          vision,
-          embedding
-        }
-      }));
+      return reply.send(
+        redactValue({
+          providers: {
+            chat,
+            reasoning,
+            tts,
+            stt,
+            vision,
+            embedding
+          }
+        })
+      );
     } catch (error) {
       return reply.status(500).send({
         error: "provider_status_failed",
@@ -32,4 +37,3 @@ export async function registerProviderRoutes(app: FastifyInstance, context: AppC
     }
   });
 }
-

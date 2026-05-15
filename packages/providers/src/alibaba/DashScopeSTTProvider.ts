@@ -77,34 +77,41 @@ export class DashScopeSTTProvider implements STTProvider {
     ensureDashScopeConfig(this.options);
 
     const start = performance.now();
-    const audio = await resolveAudioInput(input, this.options.maxInlineAudioBytes ?? 10 * 1024 * 1024);
-    const response = await dashScopeFetch(this.options, "/services/aigc/multimodal-generation/generation", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        model: this.options.model,
-        input: {
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  audio
-                }
-              ]
-            }
-          ]
+    const audio = await resolveAudioInput(
+      input,
+      this.options.maxInlineAudioBytes ?? 10 * 1024 * 1024
+    );
+    const response = await dashScopeFetch(
+      this.options,
+      "/services/aigc/multimodal-generation/generation",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
         },
-        parameters: {
-          asr_options: {
-            language: input.language,
-            enable_itn: input.metadata?.["enableItn"] ?? false
+        body: JSON.stringify({
+          model: this.options.model,
+          input: {
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    audio
+                  }
+                ]
+              }
+            ]
+          },
+          parameters: {
+            asr_options: {
+              language: input.language,
+              enable_itn: input.metadata?.["enableItn"] ?? false
+            }
           }
-        }
-      })
-    });
+        })
+      }
+    );
 
     const rawResponse = await parseJsonResponse(response);
     const normalized = normalizeDashScopeResponse(rawResponse);
@@ -177,7 +184,10 @@ async function resolveAudioInput(input: STTInput, maxInlineAudioBytes: number): 
 
     const file = await readFile(input.localFilePath);
     validateBufferSize(file.byteLength, maxInlineAudioBytes);
-    return toDataUrl(file.toString("base64"), input.mimeType ?? mimeTypeFromPath(input.localFilePath));
+    return toDataUrl(
+      file.toString("base64"),
+      input.mimeType ?? mimeTypeFromPath(input.localFilePath)
+    );
   }
 
   throw new ProviderError({
@@ -248,8 +258,11 @@ async function createStatusError(response: Response): Promise<ProviderError> {
     capability: "stt",
     code,
     statusCode: response.status,
-    message: safeBody ? `DashScope STT request failed with ${response.status}: ${safeBody}` : `DashScope STT request failed with ${response.status}.`,
-    retryable: code === ProviderErrorCode.RateLimited || code === ProviderErrorCode.ProviderUnavailable
+    message: safeBody
+      ? `DashScope STT request failed with ${response.status}: ${safeBody}`
+      : `DashScope STT request failed with ${response.status}.`,
+    retryable:
+      code === ProviderErrorCode.RateLimited || code === ProviderErrorCode.ProviderUnavailable
   });
 }
 
@@ -301,7 +314,9 @@ function normalizeDashScopeResponse(rawResponse: unknown): {
   usage?: unknown;
 } {
   if (isDashScopeSyncResponse(rawResponse)) {
-    const text = rawResponse.output?.choices?.[0]?.message?.content?.find((item) => typeof item.text === "string")?.text;
+    const text = rawResponse.output?.choices?.[0]?.message?.content?.find(
+      (item) => typeof item.text === "string"
+    )?.text;
     if (typeof text === "string") {
       return {
         text,
@@ -339,7 +354,11 @@ function isDashScopeSyncResponse(value: unknown): value is DashScopeSyncResponse
 }
 
 function isOpenAICompatibleASRResponse(value: unknown): value is OpenAICompatibleASRResponse {
-  return typeof value === "object" && value !== null && Array.isArray((value as OpenAICompatibleASRResponse).choices);
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as OpenAICompatibleASRResponse).choices)
+  );
 }
 
 function normalizeUsage(usage: OpenAICompatibleASRResponse["usage"]): TokenUsage | undefined {
@@ -355,7 +374,9 @@ function normalizeUsage(usage: OpenAICompatibleASRResponse["usage"]): TokenUsage
 }
 
 function validateInlineAudioSize(base64OrDataUrl: string, maxInlineAudioBytes: number): void {
-  const base64 = base64OrDataUrl.includes(",") ? base64OrDataUrl.split(",").at(-1) ?? "" : base64OrDataUrl;
+  const base64 = base64OrDataUrl.includes(",")
+    ? (base64OrDataUrl.split(",").at(-1) ?? "")
+    : base64OrDataUrl;
   validateBufferSize(Math.ceil(base64.length * 0.75), maxInlineAudioBytes);
 }
 

@@ -10,7 +10,12 @@ import type {
   UserVoiceTranscriptEvent
 } from "@companion/protocol";
 import { createEvent } from "@companion/protocol";
-import { ProviderError, type ProviderResolver, type STTInput, type VisionInput } from "@companion/providers";
+import {
+  ProviderError,
+  type ProviderResolver,
+  type STTInput,
+  type VisionInput
+} from "@companion/providers";
 
 export type RuntimeLogger = {
   info(message: string, context?: Record<string, unknown>): void;
@@ -98,16 +103,22 @@ export class RuntimeOrchestrator {
   ): Promise<AgentReplyEvent> {
     const userEvent = isRuntimeUserMessageEvent(input)
       ? input
-      : createEvent("user.message", {
-        sessionId: input.sessionId,
-        content: input.content
-      }, {
-        traceId: input.traceId,
-        parentId: input.parentId
-      });
+      : createEvent(
+          "user.message",
+          {
+            sessionId: input.sessionId,
+            content: input.content
+          },
+          {
+            traceId: input.traceId,
+            parentId: input.parentId
+          }
+        );
 
     await this.options.eventBus.publish(userEvent);
-    const voiceOutput = isRuntimeUserMessageEvent(input) ? Boolean(options.voiceOutput) : Boolean(input.voiceOutput);
+    const voiceOutput = isRuntimeUserMessageEvent(input)
+      ? Boolean(options.voiceOutput)
+      : Boolean(input.voiceOutput);
     const useMemory = options.useMemory ?? true;
     const reply = await this.generateReply(userEvent, { voiceOutput, useMemory });
     await this.maybeStoreMemory(userEvent, reply);
@@ -125,18 +136,25 @@ export class RuntimeOrchestrator {
       { traceId: input.traceId, parentId: input.parentId }
     );
 
-    const transcriptEvent = createEvent("user.voice.transcript", {
-      sessionId: input.sessionId,
-      content: transcript.text,
-      language: transcript.language,
-      confidence: transcript.confidence
-    }, {
-      traceId: input.traceId,
-      parentId: input.parentId
-    });
+    const transcriptEvent = createEvent(
+      "user.voice.transcript",
+      {
+        sessionId: input.sessionId,
+        content: transcript.text,
+        language: transcript.language,
+        confidence: transcript.confidence
+      },
+      {
+        traceId: input.traceId,
+        parentId: input.parentId
+      }
+    );
 
     await this.options.eventBus.publish(transcriptEvent);
-    const reply = await this.generateReply(transcriptEvent, { voiceOutput: Boolean(input.voiceOutput), useMemory: true });
+    const reply = await this.generateReply(transcriptEvent, {
+      voiceOutput: Boolean(input.voiceOutput),
+      useMemory: true
+    });
     await this.maybeStoreMemory(transcriptEvent, reply);
     await this.maybeSynthesizeSpeech(reply, Boolean(input.voiceOutput));
     return reply;
@@ -151,16 +169,20 @@ export class RuntimeOrchestrator {
       { traceId: input.traceId, parentId: input.parentId }
     );
 
-    const event = createEvent("perception.vision", {
-      sessionId: input.sessionId,
-      text: vision.text,
-      objects: vision.objects,
-      sceneSummary: vision.sceneSummary,
-      confidence: vision.confidence
-    }, {
-      traceId: input.traceId,
-      parentId: input.parentId
-    });
+    const event = createEvent(
+      "perception.vision",
+      {
+        sessionId: input.sessionId,
+        text: vision.text,
+        objects: vision.objects,
+        sceneSummary: vision.sceneSummary,
+        confidence: vision.confidence
+      },
+      {
+        traceId: input.traceId,
+        parentId: input.parentId
+      }
+    );
 
     await this.options.eventBus.publish(event);
     return event;
@@ -176,7 +198,8 @@ export class RuntimeOrchestrator {
     const prompt = this.options.promptBuilder.buildPrompt({
       systemIdentity: "You are Companion, a local-first AI companion runtime agent.",
       characterStyle: "Warm, concise, emotionally aware, and practical.",
-      relationshipContext: "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
+      relationshipContext:
+        "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
       retrievedMemories: memories.map((memory) => ({
         content: memory.content,
         summary: memory.summary,
@@ -186,7 +209,9 @@ export class RuntimeOrchestrator {
         tags: memory.tags
       })),
       memoryEnabled: useMemory,
-      currentSituation: voiceOutput ? "The user is interacting through voice." : "The user is interacting through text.",
+      currentSituation: voiceOutput
+        ? "The user is interacting through voice."
+        : "The user is interacting through text.",
       tools: [],
       userMessage: event.payload.content
     });
@@ -209,16 +234,20 @@ export class RuntimeOrchestrator {
     const output = await this.measureProvider(
       "chat",
       chatProvider.name,
-      () => chatProvider.generateReply({
-        messages: prompt.messages
-      }),
+      () =>
+        chatProvider.generateReply({
+          messages: prompt.messages
+        }),
       { traceId: event.traceId, parentId: event.id }
     );
 
     return this.publishAgentReply(event, output.message.content);
   }
 
-  async maybeSynthesizeSpeech(reply: AgentReplyEvent, voiceOutput: boolean): Promise<AvatarSpeakEvent | null> {
+  async maybeSynthesizeSpeech(
+    reply: AgentReplyEvent,
+    voiceOutput: boolean
+  ): Promise<AvatarSpeakEvent | null> {
     if (!voiceOutput) {
       return null;
     }
@@ -228,34 +257,47 @@ export class RuntimeOrchestrator {
       const speech = await this.measureProvider(
         "tts",
         ttsProvider.name,
-        () => ttsProvider.synthesizeSpeech({
-          text: reply.payload.content
-        }),
+        () =>
+          ttsProvider.synthesizeSpeech({
+            text: reply.payload.content
+          }),
         { traceId: reply.traceId, parentId: reply.id }
       );
 
-      const event = createEvent("avatar.speak", {
-        sessionId: reply.payload.sessionId,
-        text: reply.payload.content,
-        audioBase64: speech.audioBase64,
-        mimeType: speech.mimeType,
-        durationMs: speech.durationMs
-      }, {
-        traceId: reply.traceId,
-        parentId: reply.id
-      });
+      const event = createEvent(
+        "avatar.speak",
+        {
+          sessionId: reply.payload.sessionId,
+          text: reply.payload.content,
+          audioBase64: speech.audioBase64,
+          mimeType: speech.mimeType,
+          durationMs: speech.durationMs
+        },
+        {
+          traceId: reply.traceId,
+          parentId: reply.id
+        }
+      );
 
       await this.options.eventBus.publish(event);
       return event;
     } catch (error) {
-      this.options.logger?.warn?.("optional tts synthesis failed", this.errorLogContext(error, reply.traceId));
+      this.options.logger?.warn?.(
+        "optional tts synthesis failed",
+        this.errorLogContext(error, reply.traceId)
+      );
       return null;
     }
   }
 
-  async maybeStoreMemory(sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent, reply: AgentReplyEvent): Promise<void> {
+  async maybeStoreMemory(
+    sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
+    reply: AgentReplyEvent
+  ): Promise<void> {
     try {
-      const importance = this.options.memory.scoreImportance(`${sourceEvent.payload.content}\n${reply.payload.content}`);
+      const importance = this.options.memory.scoreImportance(
+        `${sourceEvent.payload.content}\n${reply.payload.content}`
+      );
       if (importance < 0.1) {
         return;
       }
@@ -271,18 +313,28 @@ export class RuntimeOrchestrator {
         traceId: reply.traceId,
         parentId: reply.id
       });
-      this.options.logger?.warn?.("optional memory write failed", this.errorLogContext(error, reply.traceId));
+      this.options.logger?.warn?.(
+        "optional memory write failed",
+        this.errorLogContext(error, reply.traceId)
+      );
     }
   }
 
-  async publishAgentReply(sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent, content: string): Promise<AgentReplyEvent> {
-    const reply = createEvent("agent.reply", {
-      sessionId: sourceEvent.payload.sessionId,
-      content
-    }, {
-      traceId: sourceEvent.traceId,
-      parentId: sourceEvent.id
-    });
+  async publishAgentReply(
+    sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
+    content: string
+  ): Promise<AgentReplyEvent> {
+    const reply = createEvent(
+      "agent.reply",
+      {
+        sessionId: sourceEvent.payload.sessionId,
+        content
+      },
+      {
+        traceId: sourceEvent.traceId,
+        parentId: sourceEvent.id
+      }
+    );
 
     await this.options.eventBus.publish(reply);
     return reply;
@@ -293,15 +345,19 @@ export class RuntimeOrchestrator {
     purpose: "planning" | "reflection" | "memory_consolidation";
   }): Promise<string> {
     const reasoningProvider = this.options.providers.getReasoningProvider();
-    const output = await this.measureProvider("reasoning", reasoningProvider.name, () => reasoningProvider.generateReasoning({
-      messages: input.messages,
-      effort: input.purpose === "planning" ? "high" : "medium"
-    }));
+    const output = await this.measureProvider("reasoning", reasoningProvider.name, () =>
+      reasoningProvider.generateReasoning({
+        messages: input.messages,
+        effort: input.purpose === "planning" ? "high" : "medium"
+      })
+    );
 
     return output.reasoning;
   }
 
-  private async retrieveMemories(event: UserMessageEvent | UserVoiceTranscriptEvent): Promise<Memory[]> {
+  private async retrieveMemories(
+    event: UserMessageEvent | UserVoiceTranscriptEvent
+  ): Promise<Memory[]> {
     let memories: Memory[];
     try {
       memories = await this.options.memory.retrieveRelevantMemories({
@@ -309,21 +365,34 @@ export class RuntimeOrchestrator {
         limit: 6
       });
     } catch (error) {
-      await this.publishRuntimeError("Memory retrieval failed; continuing without retrieved memories.", error, {
-        traceId: event.traceId,
-        parentId: event.id
-      });
-      this.options.logger?.warn?.("memory retrieval failed", this.errorLogContext(error, event.traceId));
+      await this.publishRuntimeError(
+        "Memory retrieval failed; continuing without retrieved memories.",
+        error,
+        {
+          traceId: event.traceId,
+          parentId: event.id
+        }
+      );
+      this.options.logger?.warn?.(
+        "memory retrieval failed",
+        this.errorLogContext(error, event.traceId)
+      );
       return [];
     }
 
-    await this.options.eventBus.publish(createEvent("memory.retrieved", {
-      sessionId: event.payload.sessionId,
-      count: memories.length
-    }, {
-      traceId: event.traceId,
-      parentId: event.id
-    }));
+    await this.options.eventBus.publish(
+      createEvent(
+        "memory.retrieved",
+        {
+          sessionId: event.payload.sessionId,
+          count: memories.length
+        },
+        {
+          traceId: event.traceId,
+          parentId: event.id
+        }
+      )
+    );
 
     return memories;
   }
@@ -369,18 +438,24 @@ export class RuntimeOrchestrator {
     }
   ): Promise<void> {
     const providerError = error instanceof ProviderError ? error : null;
-    await this.publishDiagnosticEvent(createEvent("provider.error", {
-      provider: providerError?.provider ?? context.provider,
-      capability: providerError?.capability ?? context.capability,
-      code: providerError?.code ?? "PROVIDER_UNAVAILABLE",
-      message: providerError?.message ?? safeErrorMessage(error),
-      retryable: providerError?.retryable ?? false,
-      statusCode: providerError?.statusCode,
-      latencyMs: context.latencyMs
-    }, {
-      traceId: context.traceId,
-      parentId: context.parentId
-    }));
+    await this.publishDiagnosticEvent(
+      createEvent(
+        "provider.error",
+        {
+          provider: providerError?.provider ?? context.provider,
+          capability: providerError?.capability ?? context.capability,
+          code: providerError?.code ?? "PROVIDER_UNAVAILABLE",
+          message: providerError?.message ?? safeErrorMessage(error),
+          retryable: providerError?.retryable ?? false,
+          statusCode: providerError?.statusCode,
+          latencyMs: context.latencyMs
+        },
+        {
+          traceId: context.traceId,
+          parentId: context.parentId
+        }
+      )
+    );
     this.options.logger?.warn?.("provider call failed", {
       provider: providerError?.provider ?? context.provider,
       capability: providerError?.capability ?? context.capability,
@@ -395,17 +470,26 @@ export class RuntimeOrchestrator {
     error: unknown,
     context: { traceId?: string | undefined; parentId?: string | undefined }
   ): Promise<void> {
-    await this.publishDiagnosticEvent(createEvent("runtime.error", {
-      message,
-      detail: safeErrorMessage(error)
-    }, context));
+    await this.publishDiagnosticEvent(
+      createEvent(
+        "runtime.error",
+        {
+          message,
+          detail: safeErrorMessage(error)
+        },
+        context
+      )
+    );
   }
 
   private async publishDiagnosticEvent(event: RuntimeEvent): Promise<void> {
     try {
       await this.options.eventBus.publish(event);
     } catch (publishError) {
-      this.options.logger?.error?.("failed to publish diagnostic event", this.errorLogContext(publishError, event.traceId));
+      this.options.logger?.error?.(
+        "failed to publish diagnostic event",
+        this.errorLogContext(publishError, event.traceId)
+      );
     }
   }
 
@@ -418,7 +502,9 @@ export class RuntimeOrchestrator {
   }
 }
 
-function isRuntimeUserMessageEvent(input: UserMessageEvent | HandleUserMessageInput): input is UserMessageEvent {
+function isRuntimeUserMessageEvent(
+  input: UserMessageEvent | HandleUserMessageInput
+): input is UserMessageEvent {
   return "type" in input && input.type === "user.message";
 }
 

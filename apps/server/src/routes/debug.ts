@@ -2,7 +2,11 @@ import type { FastifyInstance } from "fastify";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
 
-export async function registerDebugRoutes(app: FastifyInstance, context: AppContext, config: ServerConfig): Promise<void> {
+export async function registerDebugRoutes(
+  app: FastifyInstance,
+  context: AppContext,
+  config: ServerConfig
+): Promise<void> {
   app.get("/debug/prompt/latest", async (_request, reply) => {
     if (config.runtimeMode !== "development") {
       return reply.status(404).send({

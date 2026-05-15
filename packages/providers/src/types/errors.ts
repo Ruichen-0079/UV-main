@@ -13,7 +13,7 @@ export const ProviderErrorCode = {
   ProviderUnavailable: "PROVIDER_UNAVAILABLE"
 } as const;
 
-export type ProviderErrorCode = typeof ProviderErrorCode[keyof typeof ProviderErrorCode];
+export type ProviderErrorCode = (typeof ProviderErrorCode)[keyof typeof ProviderErrorCode];
 
 export type ProviderErrorOptions = {
   provider: string;
@@ -58,8 +58,10 @@ export class ProviderError extends Error {
 }
 
 export function isRetryableProviderError(code: ProviderErrorCode): boolean {
-  return code === ProviderErrorCode.RateLimited
-    || code === ProviderErrorCode.Timeout
-    || code === ProviderErrorCode.NetworkError
-    || code === ProviderErrorCode.ProviderUnavailable;
+  return (
+    code === ProviderErrorCode.RateLimited ||
+    code === ProviderErrorCode.Timeout ||
+    code === ProviderErrorCode.NetworkError ||
+    code === ProviderErrorCode.ProviderUnavailable
+  );
 }

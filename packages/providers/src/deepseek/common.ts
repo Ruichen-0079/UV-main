@@ -1,4 +1,9 @@
-import type { ProviderCapability, ProviderHealth, TextMessage, TokenUsage } from "../types/common.js";
+import type {
+  ProviderCapability,
+  ProviderHealth,
+  TextMessage,
+  TokenUsage
+} from "../types/common.js";
 import { ProviderError, ProviderErrorCode } from "../types/errors.js";
 
 export type DeepSeekProviderOptions = {
@@ -208,8 +213,11 @@ async function createStatusError(
     capability,
     code,
     statusCode: response.status,
-    message: safeBody ? `DeepSeek request failed with ${response.status}: ${safeBody}` : `DeepSeek request failed with ${response.status}.`,
-    retryable: code === ProviderErrorCode.RateLimited || code === ProviderErrorCode.ProviderUnavailable
+    message: safeBody
+      ? `DeepSeek request failed with ${response.status}: ${safeBody}`
+      : `DeepSeek request failed with ${response.status}.`,
+    retryable:
+      code === ProviderErrorCode.RateLimited || code === ProviderErrorCode.ProviderUnavailable
   });
 }
 
@@ -291,7 +299,11 @@ function normalizeDeepSeekChatCompletion(
 }
 
 function isOpenAICompatibleResponse(value: unknown): value is OpenAICompatibleResponse {
-  return typeof value === "object" && value !== null && Array.isArray((value as OpenAICompatibleResponse).choices);
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as OpenAICompatibleResponse).choices)
+  );
 }
 
 function normalizeUsage(usage: OpenAICompatibleUsage | undefined): TokenUsage | undefined {
@@ -306,8 +318,15 @@ function normalizeUsage(usage: OpenAICompatibleUsage | undefined): TokenUsage | 
   };
 }
 
-function normalizeFinishReason(value: string | null | undefined): DeepSeekChatCompletion["finishReason"] {
-  if (value === "stop" || value === "length" || value === "tool_call" || value === "content_filter") {
+function normalizeFinishReason(
+  value: string | null | undefined
+): DeepSeekChatCompletion["finishReason"] {
+  if (
+    value === "stop" ||
+    value === "length" ||
+    value === "tool_call" ||
+    value === "content_filter"
+  ) {
     return value;
   }
 

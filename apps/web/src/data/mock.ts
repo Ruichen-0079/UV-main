@@ -29,4 +29,3 @@ export const promptPreviewPlaceholder = [
     content: "The final user request and runtime context will appear here before provider dispatch."
   }
 ];
-

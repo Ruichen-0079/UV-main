@@ -32,29 +32,43 @@ try {
   const health = await step("GET /health", () => getJson(`http://127.0.0.1:${port}/health`));
   assert(health.ok === true, "GET /health should return ok=true");
 
-  const message = await step("POST /message", () => postJson(`http://127.0.0.1:${port}/message`, {
-    sessionId: "smoke",
-    text: "hello",
-    options: {
-      useMemory: true,
-      voiceOutput: false
-    }
-  }));
+  const message = await step("POST /message", () =>
+    postJson(`http://127.0.0.1:${port}/message`, {
+      sessionId: "smoke",
+      text: "hello",
+      options: {
+        useMemory: true,
+        voiceOutput: false
+      }
+    })
+  );
   assert(message.type === "agent.reply", "POST /message should return agent.reply");
 
-  const memory = await step("POST /memory", () => postJson(`http://127.0.0.1:${port}/memory`, {
-    type: "semantic",
-    content: "Smoke test memory.",
-    source: "smoke",
-    tags: ["smoke"]
-  }));
+  const memory = await step("POST /memory", () =>
+    postJson(`http://127.0.0.1:${port}/memory`, {
+      type: "semantic",
+      content: "Smoke test memory.",
+      source: "smoke",
+      tags: ["smoke"]
+    })
+  );
   assert(memory.type === "semantic", "POST /memory should create a memory");
 
-  const recent = await step("GET /memory/recent", () => getJson(`http://127.0.0.1:${port}/memory/recent?limit=5`));
-  assert(Array.isArray(recent.memories) && recent.memories.length > 0, "GET /memory/recent should return memories");
+  const recent = await step("GET /memory/recent", () =>
+    getJson(`http://127.0.0.1:${port}/memory/recent?limit=5`)
+  );
+  assert(
+    Array.isArray(recent.memories) && recent.memories.length > 0,
+    "GET /memory/recent should return memories"
+  );
 
-  const search = await step("GET /memory/search", () => getJson(`http://127.0.0.1:${port}/memory/search?q=Smoke&limit=5`));
-  assert(Array.isArray(search.memories) && search.memories.length > 0, "GET /memory/search?q=... should return matching memories");
+  const search = await step("GET /memory/search", () =>
+    getJson(`http://127.0.0.1:${port}/memory/search?q=Smoke&limit=5`)
+  );
+  assert(
+    Array.isArray(search.memories) && search.memories.length > 0,
+    "GET /memory/search?q=... should return matching memories"
+  );
 
   console.log("Smoke checks passed.");
 } finally {

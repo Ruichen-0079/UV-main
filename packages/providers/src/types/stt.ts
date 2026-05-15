@@ -15,12 +15,14 @@ export type STTOutput = ProviderMetadata & {
   text: string;
   language?: string | undefined;
   confidence?: number | undefined;
-  segments?: Array<{
-    text: string;
-    startMs?: number | undefined;
-    endMs?: number | undefined;
-    confidence?: number | undefined;
-  }> | undefined;
+  segments?:
+    | Array<{
+        text: string;
+        startMs?: number | undefined;
+        endMs?: number | undefined;
+        confidence?: number | undefined;
+      }>
+    | undefined;
 };
 
 export interface STTProvider {

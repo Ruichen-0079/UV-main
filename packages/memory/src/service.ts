@@ -94,22 +94,31 @@ export class MemoryService {
     }
 
     const recent = await this.repository.listRecentMemories(Math.max(query.limit ?? 6, 20));
-    return this.scorer.rank(recent.filter((memory) => {
-      const haystack = `${memory.content} ${memory.summary ?? ""} ${memory.tags.join(" ")}`.toLowerCase();
-      return tokens.some((token) => haystack.includes(token));
-    })).slice(0, query.limit ?? 6);
+    return this.scorer
+      .rank(
+        recent.filter((memory) => {
+          const haystack =
+            `${memory.content} ${memory.summary ?? ""} ${memory.tags.join(" ")}`.toLowerCase();
+          return tokens.some((token) => haystack.includes(token));
+        })
+      )
+      .slice(0, query.limit ?? 6);
   }
 }
 
 export type { CreateMemoryInput };
 
 function tokenize(text: string): string[] {
-  return Array.from(new Set(text
-    .toLowerCase()
-    .split(/[^a-z0-9\u4e00-\u9fff]+/u)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 3)
-    .filter((token) => !stopWords.has(token))));
+  return Array.from(
+    new Set(
+      text
+        .toLowerCase()
+        .split(/[^a-z0-9\u4e00-\u9fff]+/u)
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 3)
+        .filter((token) => !stopWords.has(token))
+    )
+  );
 }
 
 const stopWords = new Set([

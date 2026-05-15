@@ -1,12 +1,6 @@
-export const MemoryTypes = [
-  "working",
-  "episodic",
-  "semantic",
-  "emotional",
-  "procedural"
-] as const;
+export const MemoryTypes = ["working", "episodic", "semantic", "emotional", "procedural"] as const;
 
-export type MemoryType = typeof MemoryTypes[number];
+export type MemoryType = (typeof MemoryTypes)[number];
 
 export type Memory = {
   id: string;

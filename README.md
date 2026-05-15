@@ -1,8 +1,8 @@
-# AI Companion Runtime
+# YUVI Runtime
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-A local-first, event-driven AI companion runtime inspired by Project AIRI architecture goals, without copying AIRI code.
+YUVI Runtime is a local-first, event-driven AI Companion Runtime inspired by Project AIRI architecture goals, without copying AIRI code.
 
 This repository starts as a small runnable TypeScript monorepo:
 
@@ -92,16 +92,16 @@ docker compose -f infra/docker-compose.yml up -d
 pnpm smoke:postgres
 ```
 
-To reset development database volumes:
-
-```bash
-docker compose -f infra/docker-compose.yml down -v
-```
-
-This deletes development database data.
-
-You can also use the guarded helper:
+To reset development database volumes, prefer the guarded helper:
 
 ```bash
 pnpm db:reset:dev
+```
+
+This asks for an exact confirmation phrase and then deletes development database data.
+
+Advanced/manual reset:
+
+```bash
+docker compose -f infra/docker-compose.yml down -v
 ```

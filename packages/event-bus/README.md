@@ -13,10 +13,12 @@ Responsibilities:
 Modules publish `RuntimeEvent` objects. Events carry `traceId`, so follow-up events can preserve the same runtime trace.
 
 ```ts
-await eventBus.publish(createEvent("user.message", {
-  sessionId: "session-1",
-  content: "hello"
-}));
+await eventBus.publish(
+  createEvent("user.message", {
+    sessionId: "session-1",
+    content: "hello"
+  })
+);
 ```
 
 ## Subscribing

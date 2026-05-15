@@ -101,7 +101,11 @@ export class ProviderRegistry implements ProviderResolver {
   }
 
   getReasoningProvider(): ReasoningProvider {
-    return this.getRequiredProvider(this.reasoningProviders, this.config.defaults.reasoning, "reasoning");
+    return this.getRequiredProvider(
+      this.reasoningProviders,
+      this.config.defaults.reasoning,
+      "reasoning"
+    );
   }
 
   getTTSProvider(): TTSProvider {
@@ -117,7 +121,11 @@ export class ProviderRegistry implements ProviderResolver {
   }
 
   getEmbeddingProvider(): EmbeddingProvider {
-    return this.getRequiredProvider(this.embeddingProviders, this.config.defaults.embedding, "embedding");
+    return this.getRequiredProvider(
+      this.embeddingProviders,
+      this.config.defaults.embedding,
+      "embedding"
+    );
   }
 
   private getRequiredProvider<TProvider>(
@@ -170,11 +178,15 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       tts: env["DEFAULT_TTS_PROVIDER"] ?? "xai",
       stt: env["DEFAULT_STT_PROVIDER"] ?? "dashscope",
       vision: env["DEFAULT_VISION_PROVIDER"] ?? "xai",
-      embedding: env["DEFAULT_EMBEDDING_PROVIDER"] ?? env["EMBEDDING_PROVIDER"] ?? (hasValue(env["EMBEDDING_API_KEY"]) ? "openai-compatible" : "mock")
+      embedding:
+        env["DEFAULT_EMBEDDING_PROVIDER"] ??
+        env["EMBEDDING_PROVIDER"] ??
+        (hasValue(env["EMBEDDING_API_KEY"]) ? "openai-compatible" : "mock")
     },
     deepseek: {
       apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
-      baseUrl: env["DEEPSEEK_API_BASEURL"] ?? env["DEEPSEEK_BASE_URL"] ?? "https://api.deepseek.com",
+      baseUrl:
+        env["DEEPSEEK_API_BASEURL"] ?? env["DEEPSEEK_BASE_URL"] ?? "https://api.deepseek.com",
       chatModel: emptyToUndefined(env["DEEPSEEK_CHAT_MODEL"]),
       reasoningModel: emptyToUndefined(env["DEEPSEEK_REASONING_MODEL"])
     },
@@ -187,12 +199,17 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
     },
     dashscope: {
       apiKey: emptyToUndefined(env["DASHSCOPE_API_KEY"]),
-      baseUrl: env["DASHSCOPE_API_BASEURL"] ?? env["DASHSCOPE_BASE_URL"] ?? "https://dashscope.aliyuncs.com/api/v1",
+      baseUrl:
+        env["DASHSCOPE_API_BASEURL"] ??
+        env["DASHSCOPE_BASE_URL"] ??
+        "https://dashscope.aliyuncs.com/api/v1",
       sttModel: emptyToUndefined(env["DASHSCOPE_STT_MODEL"])
     },
     embedding: {
       apiKey: emptyToUndefined(env["EMBEDDING_API_KEY"]),
-      baseUrl: emptyToUndefined(env["EMBEDDING_API_BASEURL"]) ?? emptyToUndefined(env["EMBEDDING_BASE_URL"]),
+      baseUrl:
+        emptyToUndefined(env["EMBEDDING_API_BASEURL"]) ??
+        emptyToUndefined(env["EMBEDDING_BASE_URL"]),
       model: emptyToUndefined(env["EMBEDDING_MODEL"]),
       dimensions: parsePositiveInteger(env["EMBEDDING_DIMENSIONS"], 1536)
     }
@@ -214,7 +231,11 @@ function validateRequiredProviderConfig(config: ProviderRegistryConfig): void {
     errors.push("DEEPSEEK_API_KEY is required when DEFAULT_REASONING_PROVIDER=deepseek.");
   }
 
-  if (!config.allowMocks && config.defaults.reasoning === "deepseek" && !config.deepseek.reasoningModel) {
+  if (
+    !config.allowMocks &&
+    config.defaults.reasoning === "deepseek" &&
+    !config.deepseek.reasoningModel
+  ) {
     errors.push("DEEPSEEK_REASONING_MODEL is required when DEFAULT_REASONING_PROVIDER=deepseek.");
   }
 
@@ -326,7 +347,11 @@ function resolveChatProvider(config: ProviderRegistryConfig): ChatProvider {
     name: config.defaults.chat,
     factories: chatProviderFactories,
     createMock: createMockChatProvider,
-    createUnavailable: (name) => new UnavailableChatProvider(name, "Chat provider config is missing or provider is not implemented.")
+    createUnavailable: (name) =>
+      new UnavailableChatProvider(
+        name,
+        "Chat provider config is missing or provider is not implemented."
+      )
   });
 }
 
@@ -337,7 +362,11 @@ function resolveReasoningProvider(config: ProviderRegistryConfig): ReasoningProv
     name: config.defaults.reasoning,
     factories: reasoningProviderFactories,
     createMock: createMockReasoningProvider,
-    createUnavailable: (name) => new UnavailableReasoningProvider(name, "Reasoning provider config is missing or provider is not implemented.")
+    createUnavailable: (name) =>
+      new UnavailableReasoningProvider(
+        name,
+        "Reasoning provider config is missing or provider is not implemented."
+      )
   });
 }
 
@@ -348,7 +377,11 @@ function resolveTTSProvider(config: ProviderRegistryConfig): TTSProvider {
     name: config.defaults.tts,
     factories: ttsProviderFactories,
     createMock: createMockTTSProvider,
-    createUnavailable: (name) => new UnavailableTTSProvider(name, "TTS provider config is missing or provider is not implemented.")
+    createUnavailable: (name) =>
+      new UnavailableTTSProvider(
+        name,
+        "TTS provider config is missing or provider is not implemented."
+      )
   });
 }
 
@@ -359,7 +392,11 @@ function resolveSTTProvider(config: ProviderRegistryConfig): STTProvider {
     name: config.defaults.stt,
     factories: sttProviderFactories,
     createMock: createMockSTTProvider,
-    createUnavailable: (name) => new UnavailableSTTProvider(name, "STT provider config is missing or provider is not implemented.")
+    createUnavailable: (name) =>
+      new UnavailableSTTProvider(
+        name,
+        "STT provider config is missing or provider is not implemented."
+      )
   });
 }
 
@@ -370,7 +407,11 @@ function resolveVisionProvider(config: ProviderRegistryConfig): VisionProvider {
     name: config.defaults.vision,
     factories: visionProviderFactories,
     createMock: createMockVisionProvider,
-    createUnavailable: (name) => new UnavailableVisionProvider(name, "Vision provider config is missing or provider is not implemented.")
+    createUnavailable: (name) =>
+      new UnavailableVisionProvider(
+        name,
+        "Vision provider config is missing or provider is not implemented."
+      )
   });
 }
 
@@ -381,11 +422,12 @@ function resolveEmbeddingProvider(config: ProviderRegistryConfig): EmbeddingProv
     name: config.defaults.embedding,
     factories: embeddingProviderFactories,
     createMock: () => new MockEmbeddingProvider(config.embedding.dimensions),
-    createUnavailable: (name) => new UnavailableEmbeddingProvider(
-      name,
-      config.embedding.dimensions,
-      "Embedding provider config is missing or provider is not implemented."
-    )
+    createUnavailable: (name) =>
+      new UnavailableEmbeddingProvider(
+        name,
+        config.embedding.dimensions,
+        "Embedding provider config is missing or provider is not implemented."
+      )
   });
 }
 
@@ -410,7 +452,10 @@ function resolveConfiguredProvider<TProvider>(input: {
 }
 
 class UnimplementedChatProvider implements ChatProvider {
-  constructor(readonly name: string, private readonly message: string) {}
+  constructor(
+    readonly name: string,
+    private readonly message: string
+  ) {}
 
   async healthCheck(): Promise<ProviderHealth> {
     return providerHealth(this.name, "unavailable", this.message);
@@ -422,7 +467,10 @@ class UnimplementedChatProvider implements ChatProvider {
 }
 
 class UnimplementedReasoningProvider implements ReasoningProvider {
-  constructor(readonly name: string, private readonly message: string) {}
+  constructor(
+    readonly name: string,
+    private readonly message: string
+  ) {}
 
   async healthCheck(): Promise<ProviderHealth> {
     return providerHealth(this.name, "unavailable", this.message);
@@ -434,7 +482,10 @@ class UnimplementedReasoningProvider implements ReasoningProvider {
 }
 
 class UnimplementedTTSProvider implements TTSProvider {
-  constructor(readonly name: string, private readonly message: string) {}
+  constructor(
+    readonly name: string,
+    private readonly message: string
+  ) {}
 
   async healthCheck(): Promise<ProviderHealth> {
     return providerHealth(this.name, "unavailable", this.message);
@@ -446,7 +497,10 @@ class UnimplementedTTSProvider implements TTSProvider {
 }
 
 class UnimplementedSTTProvider implements STTProvider {
-  constructor(readonly name: string, private readonly message: string) {}
+  constructor(
+    readonly name: string,
+    private readonly message: string
+  ) {}
 
   async healthCheck(): Promise<ProviderHealth> {
     return providerHealth(this.name, "unavailable", this.message);
@@ -458,7 +512,10 @@ class UnimplementedSTTProvider implements STTProvider {
 }
 
 class UnimplementedVisionProvider implements VisionProvider {
-  constructor(readonly name: string, private readonly message: string) {}
+  constructor(
+    readonly name: string,
+    private readonly message: string
+  ) {}
 
   async healthCheck(): Promise<ProviderHealth> {
     return providerHealth(this.name, "unavailable", this.message);
@@ -470,7 +527,11 @@ class UnimplementedVisionProvider implements VisionProvider {
 }
 
 class UnimplementedEmbeddingProvider implements EmbeddingProvider {
-  constructor(readonly name: string, readonly dimensions: number, private readonly message: string) {}
+  constructor(
+    readonly name: string,
+    readonly dimensions: number,
+    private readonly message: string
+  ) {}
 
   async healthCheck(): Promise<ProviderHealth> {
     return providerHealth(this.name, "unavailable", this.message);
@@ -494,7 +555,11 @@ class UnavailableEmbeddingProvider extends UnimplementedEmbeddingProvider {}
 
 class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
   constructor(config: ProviderRegistryConfig) {
-    super("openai-compatible", config.embedding.dimensions, "OpenAI-compatible embedding placeholder. Real HTTP calls are not implemented yet.");
+    super(
+      "openai-compatible",
+      config.embedding.dimensions,
+      "OpenAI-compatible embedding placeholder. Real HTTP calls are not implemented yet."
+    );
   }
 }
 
@@ -506,16 +571,22 @@ export function createMockChatProvider(name = "mock-chat"): ChatProvider {
     },
     async generateReply(input: ChatInput) {
       const start = performance.now();
-      const lastUserMessage = [...input.messages].reverse().find((message) => message.role === "user");
+      const lastUserMessage = [...input.messages]
+        .reverse()
+        .find((message) => message.role === "user");
       const content = `Mock reply: ${lastUserMessage?.content ?? ""}`;
 
       return {
         message: { role: "assistant", content },
         latencyMs: Math.round(performance.now() - start),
         tokenUsage: {
-          inputTokens: estimateTokenCount(input.messages.map((message) => message.content).join("\n")),
+          inputTokens: estimateTokenCount(
+            input.messages.map((message) => message.content).join("\n")
+          ),
           outputTokens: estimateTokenCount(content),
-          totalTokens: estimateTokenCount(input.messages.map((message) => message.content).join("\n") + content)
+          totalTokens: estimateTokenCount(
+            input.messages.map((message) => message.content).join("\n") + content
+          )
         },
         finishReason: "stop"
       };

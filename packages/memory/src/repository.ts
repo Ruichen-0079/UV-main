@@ -26,9 +26,8 @@ export class PostgresMemoryRepository implements MemoryRepository {
   private readonly pool: Pool;
 
   constructor(connectionString: string | Pool) {
-    this.pool = typeof connectionString === "string"
-      ? new Pool({ connectionString })
-      : connectionString;
+    this.pool =
+      typeof connectionString === "string" ? new Pool({ connectionString }) : connectionString;
   }
 
   async healthCheck(): Promise<{ status: "healthy" | "unavailable"; message?: string }> {
@@ -207,8 +206,15 @@ export class InMemoryMemoryRepository implements MemoryRepository {
     const searchText = (query.text ?? "").toLowerCase();
     return this.memories
       .filter((memory) => !query.types?.length || query.types.includes(memory.type))
-      .filter((memory) => !query.tags?.length || query.tags.some((tag) => memory.tags.includes(tag)))
-      .filter((memory) => !searchText || memory.content.toLowerCase().includes(searchText) || memory.summary?.toLowerCase().includes(searchText))
+      .filter(
+        (memory) => !query.tags?.length || query.tags.some((tag) => memory.tags.includes(tag))
+      )
+      .filter(
+        (memory) =>
+          !searchText ||
+          memory.content.toLowerCase().includes(searchText) ||
+          memory.summary?.toLowerCase().includes(searchText)
+      )
       .sort((left, right) => right.importance - left.importance)
       .slice(0, query.limit ?? 10);
   }
@@ -250,7 +256,9 @@ export class InMemoryMemoryRepository implements MemoryRepository {
   }
 }
 
-export function createMemoryRepositoryFromEnv(env: Record<string, string | undefined> = process.env): MemoryRepository {
+export function createMemoryRepositoryFromEnv(
+  env: Record<string, string | undefined> = process.env
+): MemoryRepository {
   const repositoryMode = env["MEMORY_REPOSITORY"] ?? "in-memory";
   const databaseUrl = env["DATABASE_URL"];
 
@@ -326,7 +334,11 @@ function parseVector(value: unknown): number[] | null {
   }
 
   if (typeof value === "string") {
-    return value.replace(/^\[|\]$/g, "").split(",").filter(Boolean).map(Number);
+    return value
+      .replace(/^\[|\]$/g, "")
+      .split(",")
+      .filter(Boolean)
+      .map(Number);
   }
 
   return null;
