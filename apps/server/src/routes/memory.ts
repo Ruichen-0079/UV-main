@@ -86,7 +86,7 @@ export async function registerMemoryRoutes(
       searchQuery.types = [query.data.type as MemoryType];
     }
 
-    const memories = await context.memoryRepository.searchMemoriesByTextFallback(searchQuery);
+    const memories = await context.memory.retrieveRelevantMemories(searchQuery);
 
     return reply.send({
       mock: false,

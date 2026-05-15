@@ -88,37 +88,103 @@ export class MemoryService {
       return memories;
     }
 
-    const tokens = tokenize(query.text);
-    if (tokens.length === 0) {
+    const keywords = extractSearchKeywords(query.text);
+    if (keywords.length === 0) {
       return memories;
     }
 
+    const keywordMatches = await this.retrieveByKeywords(query, keywords);
+    if (keywordMatches.length > 0) {
+      return keywordMatches;
+    }
+
     const recent = await this.repository.listRecentMemories(Math.max(query.limit ?? 6, 20));
-    return this.scorer
-      .rank(
-        recent.filter((memory) => {
-          const haystack =
-            `${memory.content} ${memory.summary ?? ""} ${memory.tags.join(" ")}`.toLowerCase();
-          return tokens.some((token) => haystack.includes(token));
-        })
-      )
-      .slice(0, query.limit ?? 6);
+    return this.rankKeywordMatches(recent, keywords).slice(0, query.limit ?? 6);
+  }
+
+  private async retrieveByKeywords(
+    query: MemorySearchQuery,
+    keywords: string[]
+  ): Promise<Memory[]> {
+    const matches = new Map<string, Memory>();
+    for (const keyword of keywords.slice(0, 8)) {
+      const results = await this.repository.searchMemoriesByTextFallback({
+        ...query,
+        text: keyword,
+        limit: Math.max(query.limit ?? 6, 10)
+      });
+      for (const memory of results) {
+        matches.set(memory.id, memory);
+      }
+    }
+
+    return this.rankKeywordMatches([...matches.values()], keywords).slice(0, query.limit ?? 6);
+  }
+
+  private rankKeywordMatches(memories: Memory[], keywords: string[]): Memory[] {
+    const scored = memories
+      .map((memory) => ({
+        memory,
+        score: keywordScore(memory, keywords)
+      }))
+      .filter((entry) => entry.score > 0);
+
+    return scored
+      .sort((left, right) => {
+        const scoreDelta = right.score - left.score;
+        if (scoreDelta !== 0) {
+          return scoreDelta;
+        }
+
+        return this.scorer.rank([left.memory, right.memory])[0]?.id === left.memory.id ? -1 : 1;
+      })
+      .map((entry) => entry.memory);
   }
 }
 
 export type { CreateMemoryInput };
 
-function tokenize(text: string): string[] {
-  return Array.from(
-    new Set(
-      text
-        .toLowerCase()
-        .split(/[^a-z0-9\u4e00-\u9fff]+/u)
-        .map((token) => token.trim())
-        .filter((token) => token.length >= 3)
-        .filter((token) => !stopWords.has(token))
-    )
-  );
+export function extractSearchKeywords(text: string): string[] {
+  const normalized = text.toLowerCase();
+  const latinTokens = normalized
+    .match(/[a-z0-9][a-z0-9_-]*/gu)
+    ?.map((token) => token.trim())
+    .filter((token) => token.length >= 2)
+    .filter((token) => !stopWords.has(token));
+  const cjkTokens = normalized
+    .match(/[\u4e00-\u9fff]{2,}/gu)
+    ?.flatMap((token) => cjkKeywordCandidates(token));
+
+  return Array.from(new Set([...(latinTokens ?? []), ...(cjkTokens ?? [])])).slice(0, 16);
+}
+
+function cjkKeywordCandidates(token: string): string[] {
+  const candidates = new Set<string>();
+  if (token.length <= 6 && !cjkStopWords.has(token)) {
+    candidates.add(token);
+  }
+
+  for (let size = 2; size <= Math.min(4, token.length); size += 1) {
+    for (let index = 0; index <= token.length - size; index += 1) {
+      const gram = token.slice(index, index + size);
+      if (!cjkStopWords.has(gram)) {
+        candidates.add(gram);
+      }
+    }
+  }
+
+  return [...candidates];
+}
+
+function keywordScore(memory: Memory, keywords: string[]): number {
+  const haystack =
+    `${memory.content} ${memory.summary ?? ""} ${memory.tags.join(" ")}`.toLowerCase();
+  const matchCount = keywords.filter((keyword) => haystack.includes(keyword)).length;
+  if (matchCount === 0) {
+    return 0;
+  }
+
+  return matchCount + memory.importance + memory.lastAccessedAt.getTime() / 1_000_000_000_000_000;
 }
 
 const stopWords = new Set([
@@ -133,3 +199,5 @@ const stopWords = new Set([
   "this",
   "for"
 ]);
+
+const cjkStopWords = new Set(["什么", "是什", "是什么", "的吗", "这个", "那个"]);

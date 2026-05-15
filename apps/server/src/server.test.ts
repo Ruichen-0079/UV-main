@@ -55,6 +55,18 @@ describe("server", () => {
       });
       expect(memory.statusCode).toBe(200);
 
+      const yuviMemory = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          type: "semantic",
+          content: "用户正在开发 YUVI Runtime，一个类 AIRI 的 AI Companion Runtime。",
+          source: "test",
+          tags: ["yuvi", "runtime"]
+        }
+      });
+      expect(yuviMemory.statusCode).toBe(200);
+
       const messageWithMemory = await app.inject({
         method: "POST",
         url: "/message",
@@ -75,12 +87,40 @@ describe("server", () => {
       expect(promptWithMemory.json().retrievedMemoryCount).toBeGreaterThan(0);
       expect(relevantMemory?.content).toContain("Server test memory");
 
+      const yuviMessageWithMemory = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "YUVI Runtime 是什么项目？",
+          options: {
+            useMemory: true,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(yuviMessageWithMemory.statusCode).toBe(200);
+
+      const yuviPromptWithMemory = await app.inject({
+        method: "GET",
+        url: "/debug/prompt/latest"
+      });
+      const yuviRelevantMemory = findPromptSection(
+        yuviPromptWithMemory.json().sections,
+        "RelevantMemory"
+      );
+      expect(yuviPromptWithMemory.json().useMemory).toBe(true);
+      expect(yuviPromptWithMemory.json().userMessage).toBe("YUVI Runtime 是什么项目？");
+      expect(yuviPromptWithMemory.json().retrievedMemoryCount).toBeGreaterThan(0);
+      expect(yuviRelevantMemory?.content).toMatch(/YUVI Runtime|AI Companion Runtime/);
+      expect(yuviPromptWithMemory.body).not.toContain("test_deepseek_secret");
+
       const messageWithoutMemory = await app.inject({
         method: "POST",
         url: "/message",
         payload: {
           sessionId: "test",
-          text: "What do you know about Server test details?",
+          text: "YUVI Runtime 是什么项目？",
           options: {
             useMemory: false,
             voiceOutput: false
@@ -98,6 +138,7 @@ describe("server", () => {
       expect(promptWithoutMemory.json().retrievedMemoryCount).toBe(0);
       expect(emptyRelevantMemory?.content).toBe("Memory was disabled for this turn.");
       expect(promptWithoutMemory.body).not.toContain("Server test memory");
+      expect(promptWithoutMemory.body).not.toContain("用户正在开发 YUVI Runtime");
 
       const recent = await app.inject({ method: "GET", url: "/memory/recent?limit=5" });
       expect(recent.statusCode).toBe(200);
@@ -106,6 +147,14 @@ describe("server", () => {
       const search = await app.inject({ method: "GET", url: "/memory/search?q=Server&limit=5" });
       expect(search.statusCode).toBe(200);
       expect(search.json().memories.length).toBeGreaterThan(0);
+
+      const encodedChineseSearch = await app.inject({
+        method: "GET",
+        url: `/memory/search?${new URLSearchParams({ q: "项目", limit: "5" }).toString()}`
+      });
+      expect(encodedChineseSearch.statusCode).toBe(200);
+      expect(encodedChineseSearch.json().memories.length).toBeGreaterThan(0);
+      expect(encodedChineseSearch.json().memories[0].content).toContain("YUVI Runtime");
 
       const events = await app.inject({ method: "GET", url: "/events/recent?limit=20" });
       expect(events.statusCode).toBe(200);

@@ -10,6 +10,7 @@ import {
   createMemoryRepositoryFromEnv,
   PostgresMemoryRepository
 } from "./repository.js";
+import { extractSearchKeywords, MemoryService } from "./service.js";
 
 describe("MemoryRepository", () => {
   it("creates and retrieves memory records", async () => {
@@ -26,6 +27,31 @@ describe("MemoryRepository", () => {
 
     expect(byId?.content).toBe("The user is testing memory.");
     expect(recent.map((memory) => memory.id)).toContain(created.id);
+  });
+
+  it("retrieves mixed Chinese and English memories from a natural-language turn", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "semantic",
+      content: "用户正在开发 YUVI Runtime，一个类 AIRI 的 AI Companion Runtime。",
+      source: "test",
+      tags: ["yuvi", "runtime"]
+    });
+
+    const memories = await service.retrieveRelevantMemories({
+      text: "YUVI Runtime 是什么项目？",
+      limit: 5
+    });
+
+    expect(memories.length).toBeGreaterThan(0);
+    expect(memories[0]?.content).toContain("YUVI Runtime");
+  });
+
+  it("extracts useful keywords from mixed Chinese and English input", () => {
+    expect(extractSearchKeywords("YUVI Runtime 是什么项目？")).toEqual(
+      expect.arrayContaining(["yuvi", "runtime", "项目"])
+    );
   });
 
   it("uses in-memory storage by default unless postgres is explicit", () => {

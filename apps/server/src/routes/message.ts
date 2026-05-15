@@ -23,6 +23,8 @@ const MessageRequestSchema = z
     path: ["text"]
   });
 
+const defaultUseMemory = true;
+
 export async function registerMessageRoutes(
   app: FastifyInstance,
   context: AppContext
@@ -56,7 +58,7 @@ export async function registerMessageRoutes(
     try {
       const response = await context.runtime.handleUserMessage(event, {
         voiceOutput,
-        useMemory: input.data.options?.useMemory ?? true
+        useMemory: input.data.options?.useMemory ?? defaultUseMemory
       });
       return reply.send({
         ...response,
