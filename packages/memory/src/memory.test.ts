@@ -10,7 +10,7 @@ import {
   createMemoryRepositoryFromEnv,
   PostgresMemoryRepository
 } from "./repository.js";
-import { extractSearchKeywords, MemoryService } from "./service.js";
+import { createMemoryDisplayText, extractSearchKeywords, MemoryService } from "./service.js";
 
 describe("MemoryRepository", () => {
   it("creates and retrieves memory records", async () => {
@@ -46,6 +46,78 @@ describe("MemoryRepository", () => {
 
     expect(memories.length).toBeGreaterThan(0);
     expect(memories[0]?.content).toContain("YUVI Runtime");
+  });
+
+  it("deduplicates display-equivalent memories and prefers semantic memory", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const content = "用户正在开发 YUVI Runtime，一个类 AIRI 的 AI Companion Runtime。";
+    await repository.createMemory({
+      type: "working",
+      content,
+      importance: 1,
+      source: "test"
+    });
+    await repository.createMemory({
+      type: "semantic",
+      content: `" ${content} "`,
+      importance: 0.5,
+      source: "test"
+    });
+
+    const result = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "YUVI Runtime 是什么项目？",
+      limit: 5
+    });
+
+    expect(result.rawCount).toBeGreaterThan(1);
+    expect(result.count).toBe(1);
+    expect(result.memories[0]?.type).toBe("semantic");
+    expect(result.memories[0]?.displayText).toBe(content);
+    expect(result.rawMemories.some((memory) => memory.excludedReason?.startsWith("deduped"))).toBe(
+      true
+    );
+  });
+
+  it("ranks concise semantic memories ahead of verbose runtime episodic memories", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "episodic",
+      content: [
+        "User intent: YUVI Runtime 是什么项目？",
+        `Assistant response summary: ${"This was a long generated answer. ".repeat(30)}`
+      ].join("\n"),
+      importance: 1,
+      source: "runtime"
+    });
+    await repository.createMemory({
+      type: "semantic",
+      content: "用户正在开发 YUVI Runtime，一个类 AIRI 的 AI Companion Runtime。",
+      importance: 0.4,
+      source: "manual"
+    });
+
+    const result = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "YUVI Runtime 是什么项目？",
+      limit: 5
+    });
+
+    expect(result.memories[0]?.type).toBe("semantic");
+    expect(result.memories[0]?.displayText).toContain("AI Companion Runtime");
+  });
+
+  it("normalizes noisy display text without mutating stored content", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const stored = await repository.createMemory({
+      type: "semantic",
+      content: "“  - - 用户偏好 DeepSeek。\n\n\n  ”",
+      source: "test"
+    });
+
+    expect(createMemoryDisplayText(stored)).toBe("用户偏好 DeepSeek。");
+    expect(stored.content).toContain("“");
+    expect(stored.content).toContain("- -");
   });
 
   it("extracts useful keywords from mixed Chinese and English input", () => {

@@ -60,12 +60,24 @@ describe("server", () => {
         url: "/memory",
         payload: {
           type: "semantic",
-          content: "用户正在开发 YUVI Runtime，一个类 AIRI 的 AI Companion Runtime。",
+          content: "“  用户正在开发 YUVI Runtime，一个类 AIRI 的 AI Companion Runtime。  ”",
           source: "test",
           tags: ["yuvi", "runtime"]
         }
       });
       expect(yuviMemory.statusCode).toBe(200);
+
+      const duplicateWorkingMemory = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          type: "working",
+          content: "用户正在开发 YUVI Runtime，一个类 AIRI 的 AI Companion Runtime。",
+          importance: 1,
+          source: "test"
+        }
+      });
+      expect(duplicateWorkingMemory.statusCode).toBe(200);
 
       const messageWithMemory = await app.inject({
         method: "POST",
@@ -111,8 +123,25 @@ describe("server", () => {
       );
       expect(yuviPromptWithMemory.json().useMemory).toBe(true);
       expect(yuviPromptWithMemory.json().userMessage).toBe("YUVI Runtime 是什么项目？");
+      expect(yuviPromptWithMemory.json().retrievedMemoryCountRaw).toBeGreaterThan(
+        yuviPromptWithMemory.json().retrievedMemoryCount
+      );
       expect(yuviPromptWithMemory.json().retrievedMemoryCount).toBeGreaterThan(0);
       expect(yuviRelevantMemory?.content).toMatch(/YUVI Runtime|AI Companion Runtime/);
+      expect(countOccurrences(yuviRelevantMemory?.content ?? "", "YUVI Runtime")).toBe(1);
+      expect(yuviRelevantMemory?.content).not.toContain("“");
+      expect(yuviPromptWithMemory.json().retrievedMemories[0]).toMatchObject({
+        type: "semantic",
+        source: "test",
+        displayText: "用户正在开发 YUVI Runtime，一个类 AIRI 的 AI Companion Runtime。"
+      });
+      expect(
+        yuviPromptWithMemory
+          .json()
+          .promptPreview.retrievedMemories.some((memory: { excludedReason?: string }) =>
+            memory.excludedReason?.startsWith("deduped")
+          )
+      ).toBe(true);
       expect(yuviPromptWithMemory.body).not.toContain("test_deepseek_secret");
 
       const messageWithoutMemory = await app.inject({
@@ -135,6 +164,7 @@ describe("server", () => {
         "RelevantMemory"
       );
       expect(promptWithoutMemory.json().useMemory).toBe(false);
+      expect(promptWithoutMemory.json().retrievedMemoryCountRaw).toBe(0);
       expect(promptWithoutMemory.json().retrievedMemoryCount).toBe(0);
       expect(emptyRelevantMemory?.content).toBe("Memory was disabled for this turn.");
       expect(promptWithoutMemory.body).not.toContain("Server test memory");
@@ -146,6 +176,9 @@ describe("server", () => {
 
       const search = await app.inject({ method: "GET", url: "/memory/search?q=Server&limit=5" });
       expect(search.statusCode).toBe(200);
+      expect(search.json().query).toBe("Server");
+      expect(search.json().repository).toBe("in-memory");
+      expect(search.json().rawCount).toBeGreaterThanOrEqual(search.json().count);
       expect(search.json().memories.length).toBeGreaterThan(0);
 
       const encodedChineseSearch = await app.inject({
@@ -174,6 +207,10 @@ describe("server", () => {
     }
   });
 });
+
+function countOccurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1;
+}
 
 function setMockEnv(): void {
   process.env["NODE_ENV"] = "test";

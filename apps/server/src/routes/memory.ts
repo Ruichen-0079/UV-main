@@ -86,11 +86,15 @@ export async function registerMemoryRoutes(
       searchQuery.types = [query.data.type as MemoryType];
     }
 
-    const memories = await context.memory.retrieveRelevantMemories(searchQuery);
+    const result = await context.memory.retrieveRelevantMemoriesWithMetadata(searchQuery);
 
     return reply.send({
       mock: false,
-      memories
+      query: result.query,
+      repository: process.env["MEMORY_REPOSITORY"] ?? "in-memory",
+      rawCount: result.rawCount,
+      count: result.count,
+      memories: result.selectedMemories
     });
   });
 }

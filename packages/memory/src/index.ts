@@ -4,9 +4,13 @@ export type {
   CreateRelationInput,
   Entity,
   Memory,
+  MemoryMatchReason,
   MemoryQuery,
+  MemoryRetrievalResult,
   MemorySearchQuery,
   MemoryType,
+  RetrievedMemoryCandidate,
+  RetrievedMemoryDebug,
   Relation
 } from "./types.js";
 export { MemoryTypes } from "./types.js";

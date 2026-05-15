@@ -1,5 +1,5 @@
 import type { EventBus } from "@companion/event-bus";
-import type { Memory } from "@companion/memory";
+import type { Memory, MemoryRetrievalResult, RetrievedMemoryDebug } from "@companion/memory";
 import type { PromptBuildInput, PromptBuildOutput } from "@companion/prompt-builder";
 import type {
   AgentReplyEvent,
@@ -34,6 +34,10 @@ export type RuntimeOrchestratorOptions = {
 
 export type RuntimeMemoryPort = {
   retrieveRelevantMemories(input: { text: string; limit?: number }): Promise<Memory[]>;
+  retrieveRelevantMemoriesWithMetadata?(input: {
+    text: string;
+    limit?: number;
+  }): Promise<MemoryRetrievalResult>;
   scoreImportance(text: string): number;
   rememberInteraction(input: {
     userMessage: string;
@@ -66,7 +70,9 @@ export type RuntimePromptPreview = {
   userMessage: string;
   useMemory: boolean;
   memoryRepository: string;
+  retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
+  retrievedMemories: RetrievedMemoryDebug[];
   sections: PromptBuildOutput["sections"];
   finalMessages: PromptBuildOutput["messages"];
   finalPrompt: string;
@@ -194,19 +200,17 @@ export class RuntimeOrchestrator {
   ): Promise<AgentReplyEvent> {
     const voiceOutput = Boolean(options.voiceOutput);
     const useMemory = options.useMemory ?? true;
-    const memories = useMemory ? await this.retrieveMemories(event) : [];
+    const memoryContext = useMemory ? await this.retrieveMemories(event) : emptyMemoryContext();
     const prompt = this.options.promptBuilder.buildPrompt({
       systemIdentity: "You are Companion, a local-first AI companion runtime agent.",
       characterStyle: "Warm, concise, emotionally aware, and practical.",
       relationshipContext:
         "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
-      retrievedMemories: memories.map((memory) => ({
-        content: memory.content,
-        summary: memory.summary,
+      retrievedMemories: memoryContext.promptMemories.map((memory) => ({
+        content: memory.displayText,
+        displayText: memory.displayText,
         importance: memory.importance,
-        createdAt: memory.createdAt,
-        lastAccessedAt: memory.lastAccessedAt,
-        tags: memory.tags
+        createdAt: memory.createdAt
       })),
       memoryEnabled: useMemory,
       currentSituation: voiceOutput
@@ -221,7 +225,9 @@ export class RuntimeOrchestrator {
       userMessage: event.payload.content,
       useMemory,
       memoryRepository: this.options.memoryRepository ?? "in-memory",
-      retrievedMemoryCount: memories.length,
+      retrievedMemoryCountRaw: memoryContext.retrievedMemoryCountRaw,
+      retrievedMemoryCount: memoryContext.retrievedMemoryCount,
+      retrievedMemories: memoryContext.retrievedMemories,
       sections: prompt.sections,
       finalMessages: prompt.messages,
       finalPrompt: prompt.prompt,
@@ -357,13 +363,32 @@ export class RuntimeOrchestrator {
 
   private async retrieveMemories(
     event: UserMessageEvent | UserVoiceTranscriptEvent
-  ): Promise<Memory[]> {
-    let memories: Memory[];
+  ): Promise<MemoryContext> {
+    let memoryContext: MemoryContext;
     try {
-      memories = await this.options.memory.retrieveRelevantMemories({
-        text: event.payload.content,
-        limit: 6
-      });
+      if (this.options.memory.retrieveRelevantMemoriesWithMetadata) {
+        const result = await this.options.memory.retrieveRelevantMemoriesWithMetadata({
+          text: event.payload.content,
+          limit: 5
+        });
+        memoryContext = {
+          retrievedMemoryCountRaw: result.rawCount,
+          retrievedMemoryCount: result.count,
+          retrievedMemories: result.rawMemories,
+          promptMemories: result.memories
+        };
+      } else {
+        const memories = await this.options.memory.retrieveRelevantMemories({
+          text: event.payload.content,
+          limit: 5
+        });
+        memoryContext = {
+          retrievedMemoryCountRaw: memories.length,
+          retrievedMemoryCount: memories.length,
+          retrievedMemories: memories.map(memoryToDebug),
+          promptMemories: memories.map(memoryToDebug)
+        };
+      }
     } catch (error) {
       await this.publishRuntimeError(
         "Memory retrieval failed; continuing without retrieved memories.",
@@ -377,7 +402,7 @@ export class RuntimeOrchestrator {
         "memory retrieval failed",
         this.errorLogContext(error, event.traceId)
       );
-      return [];
+      return emptyMemoryContext();
     }
 
     await this.options.eventBus.publish(
@@ -385,7 +410,8 @@ export class RuntimeOrchestrator {
         "memory.retrieved",
         {
           sessionId: event.payload.sessionId,
-          count: memories.length
+          count: memoryContext.retrievedMemoryCount,
+          rawCount: memoryContext.retrievedMemoryCountRaw
         },
         {
           traceId: event.traceId,
@@ -394,7 +420,7 @@ export class RuntimeOrchestrator {
       )
     );
 
-    return memories;
+    return memoryContext;
   }
 
   private async measureProvider<TOutput>(
@@ -500,6 +526,34 @@ export class RuntimeOrchestrator {
       errorMessage: safeErrorMessage(error)
     };
   }
+}
+
+type MemoryContext = {
+  retrievedMemoryCountRaw: number;
+  retrievedMemoryCount: number;
+  retrievedMemories: RetrievedMemoryDebug[];
+  promptMemories: RetrievedMemoryDebug[];
+};
+
+function emptyMemoryContext(): MemoryContext {
+  return {
+    retrievedMemoryCountRaw: 0,
+    retrievedMemoryCount: 0,
+    retrievedMemories: [],
+    promptMemories: []
+  };
+}
+
+function memoryToDebug(memory: Memory): RetrievedMemoryDebug {
+  return {
+    id: memory.id,
+    type: memory.type,
+    source: memory.source,
+    importance: memory.importance,
+    createdAt: memory.createdAt,
+    displayText: memory.summary ?? memory.content,
+    matchedBy: "original-query"
+  };
 }
 
 function isRuntimeUserMessageEvent(

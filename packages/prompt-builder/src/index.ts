@@ -17,6 +17,7 @@ export type PromptSection = {
 export type RetrievedMemoryForPrompt = {
   content: string;
   summary?: string | null;
+  displayText?: string;
   importance?: number;
   createdAt?: Date | string;
   lastAccessedAt?: Date | string;
@@ -179,13 +180,15 @@ export class PromptBuilder {
     }
 
     if (memories.length === 0) {
-      return "No relevant reconstructed memories are available.";
+      return "No relevant memory retrieved.";
     }
 
-    const ranked = memories.map(normalizeMemory).sort(compareMemoryForPrompt).slice(0, 8);
+    const ranked = dedupePromptMemories(
+      memories.map(normalizeMemory).sort(compareMemoryForPrompt)
+    ).slice(0, 5);
 
     return ranked
-      .map((memory) => `- ${compressMemoryText(memory.summary ?? memory.content)}`)
+      .map((memory) => `- ${compressMemoryText(displayTextForMemory(memory))}`)
       .join("\n");
   }
 
@@ -250,10 +253,58 @@ function compareMemoryForPrompt(
 function compressMemoryText(text: string): string {
   const compact = text.replace(/\s+/g, " ").trim();
   const withoutTranscriptMarkers = compact
+    .replace(/User intent:\s*/gi, "")
     .replace(/^User said:\s*/i, "User expressed: ")
     .replace(/^Assistant replied:\s*/i, "Assistant response summary: ");
 
-  return truncateText(withoutTranscriptMarkers, 240);
+  const withoutAssistantSummary = withoutTranscriptMarkers.replace(
+    /Assistant response summary:\s*.*$/gis,
+    ""
+  );
+
+  return truncateText(stripLeadingListMarkers(withoutAssistantSummary.trim()), 220);
+}
+
+function stripLeadingListMarkers(text: string): string {
+  let result = text.trim();
+  let previous = "";
+
+  while (result && result !== previous) {
+    previous = result;
+    result = result
+      .replace(/^>\s*/, "")
+      .replace(/^(?:[-*+•]\s+|\d+[.)]\s+)/u, "")
+      .trimStart();
+  }
+
+  return result;
+}
+
+function displayTextForMemory(memory: RetrievedMemoryForPrompt): string {
+  return memory.displayText ?? memory.summary ?? memory.content;
+}
+
+function dedupePromptMemories(memories: RetrievedMemoryForPrompt[]): RetrievedMemoryForPrompt[] {
+  const result: RetrievedMemoryForPrompt[] = [];
+  for (const memory of memories) {
+    const text = normalizeForPromptDedupe(displayTextForMemory(memory));
+    const duplicate = result.some((kept) => {
+      const keptText = normalizeForPromptDedupe(displayTextForMemory(kept));
+      return (
+        text === keptText ||
+        (text.length >= 24 && keptText.includes(text)) ||
+        (keptText.length >= 24 && text.includes(keptText))
+      );
+    });
+    if (!duplicate) {
+      result.push(memory);
+    }
+  }
+  return result;
+}
+
+function normalizeForPromptDedupe(text: string): string {
+  return text.toLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu, "");
 }
 
 function formatTools(tools: ToolContext[]): string {

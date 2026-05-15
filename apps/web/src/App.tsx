@@ -954,7 +954,7 @@ function PromptPreviewPage(): JSX.Element {
             status={String(
               promptPreview.retrievedMemoryCount ?? preview.data?.retrievedMemoryCount ?? 0
             )}
-            detail="memories used in prompt"
+            detail={`raw: ${promptPreview.retrievedMemoryCountRaw ?? preview.data?.retrievedMemoryCountRaw ?? 0}`}
           />
           <StatusCard
             title="Tokens"
@@ -974,6 +974,34 @@ function PromptPreviewPage(): JSX.Element {
           </Panel>
         ))}
       </div>
+      {promptPreview?.retrievedMemories && promptPreview.retrievedMemories.length > 0 && (
+        <Panel title="Retrieved Memory Debug">
+          <div className="max-h-[280px] overflow-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="text-ink-500">
+                <tr>
+                  <th className="px-2 py-2">Type</th>
+                  <th className="px-2 py-2">Match</th>
+                  <th className="px-2 py-2">Importance</th>
+                  <th className="px-2 py-2">Display Text</th>
+                  <th className="px-2 py-2">Excluded</th>
+                </tr>
+              </thead>
+              <tbody>
+                {promptPreview.retrievedMemories.map((memory) => (
+                  <tr key={memory.id} className="border-t border-ink-100">
+                    <td className="px-2 py-2 font-mono">{memory.type}</td>
+                    <td className="px-2 py-2">{memory.matchedBy ?? "unknown"}</td>
+                    <td className="px-2 py-2">{memory.importance.toFixed(2)}</td>
+                    <td className="px-2 py-2 text-ink-700">{memory.displayText}</td>
+                    <td className="px-2 py-2 text-amber-700">{memory.excludedReason ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
       {promptPreview?.finalMessages && (
         <Panel title="Final Messages">
           <div className="max-h-[360px] space-y-3 overflow-auto">

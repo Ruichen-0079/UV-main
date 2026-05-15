@@ -38,6 +38,37 @@ export type MemorySearchQuery = {
   limit?: number;
 };
 
+export type MemoryMatchReason = "original-query" | "keyword" | "fallback-recent";
+
+export type RetrievedMemoryDebug = {
+  id: string;
+  type: MemoryType;
+  source: string;
+  importance: number;
+  createdAt: Date;
+  displayText: string;
+  matchedBy: MemoryMatchReason;
+  excludedReason?: string;
+};
+
+export type RetrievedMemoryCandidate = {
+  memory: Memory;
+  displayText: string;
+  matchedBy: MemoryMatchReason;
+  score: number;
+  excludedReason?: string;
+};
+
+export type MemoryRetrievalResult = {
+  query: string;
+  keywords: string[];
+  rawCount: number;
+  count: number;
+  rawMemories: RetrievedMemoryDebug[];
+  memories: RetrievedMemoryDebug[];
+  selectedMemories: Memory[];
+};
+
 export type Entity = {
   id: string;
   name: string;

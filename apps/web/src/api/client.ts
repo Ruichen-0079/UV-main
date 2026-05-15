@@ -103,6 +103,17 @@ export type ProvidersStatusResponse = {
   };
 };
 
+export type RetrievedMemoryDebug = {
+  id: string;
+  type: string;
+  source: string;
+  importance: number;
+  createdAt: string;
+  displayText: string;
+  matchedBy?: "original-query" | "keyword" | "fallback-recent";
+  excludedReason?: string;
+};
+
 export type PromptPreviewResponse = {
   mock: boolean;
   message?: string;
@@ -111,14 +122,18 @@ export type PromptPreviewResponse = {
   userMessage?: string;
   useMemory?: boolean;
   memoryRepository?: string;
+  retrievedMemoryCountRaw?: number;
   retrievedMemoryCount?: number;
+  retrievedMemories?: RetrievedMemoryDebug[];
   promptPreview: null | {
     traceId?: string;
     timestamp?: string;
     userMessage?: string;
     useMemory?: boolean;
     memoryRepository?: string;
+    retrievedMemoryCountRaw?: number;
     retrievedMemoryCount?: number;
+    retrievedMemories?: RetrievedMemoryDebug[];
     sections: Array<{
       name: string;
       content: string;
@@ -166,7 +181,14 @@ export const apiClient = {
   searchMemories(
     query: string,
     options: { type?: string; limit?: number } = {}
-  ): Promise<{ mock: boolean; memories: MemoryRecord[] }> {
+  ): Promise<{
+    mock: boolean;
+    memories: MemoryRecord[];
+    rawCount?: number;
+    count?: number;
+    query?: string;
+    repository?: string;
+  }> {
     const params = new URLSearchParams({
       q: query,
       limit: String(options.limit ?? 20)
@@ -175,9 +197,14 @@ export const apiClient = {
       params.set("type", options.type);
     }
 
-    return request<{ mock: boolean; memories: MemoryRecord[] }>(
-      `/memory/search?${params.toString()}`
-    );
+    return request<{
+      mock: boolean;
+      memories: MemoryRecord[];
+      rawCount?: number;
+      count?: number;
+      query?: string;
+      repository?: string;
+    }>(`/memory/search?${params.toString()}`);
   },
 
   createMemory(input: CreateMemoryRequest): Promise<MemoryRecord> {
