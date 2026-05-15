@@ -12,8 +12,12 @@ import type {
 import { createEvent } from "@companion/protocol";
 import {
   ProviderError,
+  type ProviderCapability,
+  type ProviderHealth,
+  type ProviderMetadata,
   type ProviderResolver,
   type STTInput,
+  type TokenUsage,
   type VisionInput
 } from "@companion/providers";
 
@@ -79,6 +83,22 @@ export type RuntimePromptPreview = {
   characterCount: number;
   estimatedTokens: number;
   truncated: boolean;
+  providerName?: string | undefined;
+  providerModel?: string | undefined;
+  providerMock?: boolean | undefined;
+  providerLatencyMs?: number | undefined;
+  providerHealthStatus?: string | undefined;
+  tokenUsage?: TokenUsage | undefined;
+};
+
+export type SafeProviderCallMetadata = {
+  name: string;
+  capability: ProviderCapability;
+  model?: string | undefined;
+  mock: boolean;
+  latencyMs?: number | undefined;
+  tokenUsage?: TokenUsage | undefined;
+  healthStatus?: ProviderHealth["status"] | undefined;
 };
 
 export type HandleAudioInputInput = STTInput & {
@@ -237,6 +257,7 @@ export class RuntimeOrchestrator {
     };
 
     const chatProvider = this.options.providers.getChatProvider();
+    const chatStatus = this.getProviderStatus("chat");
     const output = await this.measureProvider(
       "chat",
       chatProvider.name,
@@ -246,8 +267,23 @@ export class RuntimeOrchestrator {
         }),
       { traceId: event.traceId, parentId: event.id }
     );
+    const providerMetadata = this.safeProviderCallMetadata(
+      "chat",
+      chatProvider.name,
+      output,
+      chatStatus
+    );
+    this.latestPromptPreview = {
+      ...this.latestPromptPreview,
+      providerName: providerMetadata.name,
+      providerModel: providerMetadata.model,
+      providerMock: providerMetadata.mock,
+      providerLatencyMs: providerMetadata.latencyMs,
+      providerHealthStatus: providerMetadata.healthStatus,
+      tokenUsage: providerMetadata.tokenUsage
+    };
 
-    return this.publishAgentReply(event, output.message.content);
+    return this.publishAgentReply(event, output.message.content, providerMetadata);
   }
 
   async maybeSynthesizeSpeech(
@@ -328,13 +364,15 @@ export class RuntimeOrchestrator {
 
   async publishAgentReply(
     sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
-    content: string
+    content: string,
+    provider?: SafeProviderCallMetadata | undefined
   ): Promise<AgentReplyEvent> {
     const reply = createEvent(
       "agent.reply",
       {
         sessionId: sourceEvent.payload.sessionId,
-        content
+        content,
+        ...(provider ? { provider } : {})
       },
       {
         traceId: sourceEvent.traceId,
@@ -524,6 +562,29 @@ export class RuntimeOrchestrator {
       traceId,
       errorName: error instanceof Error ? error.name : typeof error,
       errorMessage: safeErrorMessage(error)
+    };
+  }
+
+  private getProviderStatus(capability: ProviderCapability): ProviderHealth | undefined {
+    const status = this.options.providers.getStatus?.();
+    return status?.providers[capability];
+  }
+
+  private safeProviderCallMetadata(
+    capability: ProviderCapability,
+    providerName: string,
+    output: ProviderMetadata,
+    status: ProviderHealth | undefined
+  ): SafeProviderCallMetadata {
+    const mock = Boolean(status?.mock);
+    return {
+      name: mock ? "mock" : providerName,
+      capability,
+      model: output.model ?? status?.model,
+      mock,
+      latencyMs: output.latencyMs,
+      tokenUsage: output.tokenUsage,
+      healthStatus: status?.status
     };
   }
 }

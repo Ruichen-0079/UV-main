@@ -8,27 +8,7 @@ export async function registerProviderRoutes(
 ): Promise<void> {
   app.get("/providers/status", async (_request, reply) => {
     try {
-      const [chat, reasoning, tts, stt, vision, embedding] = await Promise.all([
-        context.providers.getChatProvider().healthCheck(),
-        context.providers.getReasoningProvider().healthCheck(),
-        context.providers.getTTSProvider().healthCheck(),
-        context.providers.getSTTProvider().healthCheck(),
-        context.providers.getVisionProvider().healthCheck(),
-        context.providers.getEmbeddingProvider().healthCheck()
-      ]);
-
-      return reply.send(
-        redactValue({
-          providers: {
-            chat,
-            reasoning,
-            tts,
-            stt,
-            vision,
-            embedding
-          }
-        })
-      );
+      return reply.send(redactValue(context.providers.getStatus()));
     } catch (error) {
       return reply.status(500).send({
         error: "provider_status_failed",

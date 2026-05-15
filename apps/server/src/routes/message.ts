@@ -60,10 +60,12 @@ export async function registerMessageRoutes(
         voiceOutput,
         useMemory: input.data.options?.useMemory ?? defaultUseMemory
       });
+      const provider = response.payload.provider;
       return reply.send({
         ...response,
         reply: response.payload.content,
         traceId: response.traceId,
+        provider,
         promptPreview: input.data.options?.promptPreview
           ? context.runtime.getLatestPromptPreview()
           : undefined

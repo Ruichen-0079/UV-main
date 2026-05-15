@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadServerConfig } from "./config.js";
 import { buildServer } from "./server.js";
 
@@ -13,6 +13,7 @@ describe("server", () => {
       const health = await app.inject({ method: "GET", url: "/health" });
       expect(health.statusCode).toBe(200);
       expect(health.json().ok).toBe(true);
+      expect(health.body).not.toContain("test_deepseek_secret");
 
       const message = await app.inject({
         method: "POST",
@@ -30,17 +31,42 @@ describe("server", () => {
       expect(message.json().type).toBe("agent.reply");
       expect(message.json().reply).toContain("Mock reply");
       expect(message.json().traceId).toBeTypeOf("string");
+      expect(message.json().provider).toMatchObject({
+        name: "mock",
+        capability: "chat",
+        mock: true,
+        healthStatus: "healthy"
+      });
+      expect(message.json().provider.latencyMs).toBeTypeOf("number");
+      expect(message.json().provider.tokenUsage.totalTokens).toBeTypeOf("number");
 
       const prompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
       expect(prompt.statusCode).toBe(200);
       expect(prompt.json().promptPreview.sections.length).toBeGreaterThan(0);
       expect(prompt.json().traceId).toBe(message.json().traceId);
       expect(prompt.json().retrievedMemoryCount).toBe(0);
+      expect(prompt.json().providerName).toBe("mock");
+      expect(prompt.json().providerMock).toBe(true);
       expect(prompt.body).not.toContain("test_deepseek_secret");
 
       const providers = await app.inject({ method: "GET", url: "/providers/status" });
       expect(providers.statusCode).toBe(200);
-      expect(providers.json().providers.chat.status).toBe("healthy");
+      expect(providers.json().providers.chat).toMatchObject({
+        provider: "deepseek",
+        capability: "chat",
+        configured: false,
+        available: true,
+        mock: true,
+        required: true
+      });
+      expect(providers.json().providers.reasoning).toMatchObject({
+        provider: "deepseek",
+        capability: "reasoning",
+        configured: false,
+        available: true,
+        mock: true,
+        required: false
+      });
       expect(providers.body).not.toContain("test_deepseek_secret");
       expect(providers.body).not.toContain("Authorization");
 
@@ -206,6 +232,84 @@ describe("server", () => {
       restoreEnv(previous);
     }
   });
+
+  it("includes safe real-provider metadata when DeepSeek chat is configured", async () => {
+    const previous = snapshotEnv();
+    setConfiguredDeepSeekEnv();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          model: "deepseek-chat",
+          choices: [
+            {
+              finish_reason: "stop",
+              message: {
+                content: "Real provider test reply."
+              }
+            }
+          ],
+          usage: {
+            prompt_tokens: 11,
+            completion_tokens: 4,
+            total_tokens: 15
+          }
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      )
+    );
+
+    try {
+      const app = await buildServer(loadServerConfig(process.env));
+      const message = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "hello real DeepSeek",
+          options: {
+            useMemory: false,
+            voiceOutput: false
+          }
+        }
+      });
+
+      expect(message.statusCode).toBe(200);
+      expect(message.json().reply).toBe("Real provider test reply.");
+      expect(message.json().provider).toMatchObject({
+        name: "deepseek",
+        capability: "chat",
+        model: "deepseek-chat",
+        mock: false,
+        healthStatus: "degraded",
+        tokenUsage: {
+          inputTokens: 11,
+          outputTokens: 4,
+          totalTokens: 15
+        }
+      });
+      expect(message.json().provider.latencyMs).toBeTypeOf("number");
+      expect(message.body).not.toContain("configured_deepseek_secret");
+      expect(message.body).not.toContain("Authorization");
+
+      const prompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
+      expect(prompt.statusCode).toBe(200);
+      expect(prompt.json().providerName).toBe("deepseek");
+      expect(prompt.json().providerModel).toBe("deepseek-chat");
+      expect(prompt.json().providerMock).toBe(false);
+      expect(prompt.body).not.toContain("configured_deepseek_secret");
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      await app.close();
+    } finally {
+      vi.restoreAllMocks();
+      restoreEnv(previous);
+    }
+  });
 });
 
 function countOccurrences(text: string, needle: string): number {
@@ -226,6 +330,22 @@ function setMockEnv(): void {
   process.env["DEEPSEEK_API_KEY"] = "test_deepseek_secret";
   process.env["XAI_API_KEY"] = "test_xai_secret";
   process.env["DASHSCOPE_API_KEY"] = "test_dashscope_secret";
+}
+
+function setConfiguredDeepSeekEnv(): void {
+  process.env["NODE_ENV"] = "test";
+  process.env["RUNTIME_MODE"] = "development";
+  process.env["PROVIDER_ALLOW_MOCKS"] = "true";
+  process.env["MEMORY_REPOSITORY"] = "in-memory";
+  process.env["DEFAULT_CHAT_PROVIDER"] = "deepseek";
+  process.env["DEFAULT_REASONING_PROVIDER"] = "deepseek";
+  process.env["DEFAULT_TTS_PROVIDER"] = "xai";
+  process.env["DEFAULT_STT_PROVIDER"] = "dashscope";
+  process.env["DEFAULT_VISION_PROVIDER"] = "xai";
+  process.env["DEFAULT_EMBEDDING_PROVIDER"] = "mock";
+  process.env["DEEPSEEK_API_KEY"] = "configured_deepseek_secret";
+  process.env["DEEPSEEK_CHAT_MODEL"] = "deepseek-chat";
+  process.env["DEEPSEEK_REASONING_MODEL"] = "deepseek-reasoner";
 }
 
 function findPromptSection(

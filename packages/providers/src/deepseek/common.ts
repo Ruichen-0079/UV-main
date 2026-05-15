@@ -55,36 +55,53 @@ export async function healthCheckDeepSeek(
   capability: ProviderCapability,
   options: DeepSeekProviderOptions
 ): Promise<ProviderHealth> {
-  const start = performance.now();
-
   try {
     ensureDeepSeekConfig(provider, capability, options);
-    await deepSeekFetch(provider, capability, options, "/models", {
-      method: "GET"
-    });
 
     return {
       provider,
-      status: "healthy",
+      name: provider,
+      capability,
+      configured: true,
+      available: true,
+      mock: false,
+      required: capability === "chat",
+      baseUrl: options.baseUrl,
+      model: options.model,
+      status: "degraded",
       checkedAt: new Date().toISOString(),
-      latencyMs: Math.round(performance.now() - start)
+      message: "DeepSeek is configured but not verified by health check."
     };
   } catch (error) {
     if (error instanceof ProviderError) {
       return {
         provider,
+        name: provider,
+        capability,
+        configured: false,
+        available: false,
+        mock: false,
+        required: capability === "chat",
+        baseUrl: options.baseUrl,
+        model: options.model,
         status: "unavailable",
         checkedAt: new Date().toISOString(),
-        latencyMs: Math.round(performance.now() - start),
         message: error.message
       };
     }
 
     return {
       provider,
+      name: provider,
+      capability,
+      configured: false,
+      available: false,
+      mock: false,
+      required: capability === "chat",
+      baseUrl: options.baseUrl,
+      model: options.model,
       status: "unavailable",
       checkedAt: new Date().toISOString(),
-      latencyMs: Math.round(performance.now() - start),
       message: "DeepSeek health check failed."
     };
   }

@@ -25,6 +25,50 @@ describe("ProviderRegistry", () => {
 
     expect(reply.message.content).toContain("Mock reply");
     expect((await registry.getEmbeddingProvider().embedText("hello")).length).toBe(1536);
+
+    const status = registry.getStatus();
+    expect(status.providers.chat).toMatchObject({
+      provider: "deepseek",
+      capability: "chat",
+      configured: false,
+      available: true,
+      mock: true,
+      required: true
+    });
+    expect(JSON.stringify(status)).not.toContain("API_KEY");
+  });
+
+  it("reports configured DeepSeek providers without making health HTTP calls", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEFAULT_REASONING_PROVIDER: "deepseek",
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat",
+      DEEPSEEK_REASONING_MODEL: "deepseek-reasoner"
+    });
+
+    const status = registry.getStatus();
+    expect(status.providers.chat).toMatchObject({
+      configured: true,
+      available: true,
+      mock: false,
+      required: true,
+      baseUrl: "https://api.deepseek.com",
+      model: "deepseek-chat"
+    });
+    expect(status.providers.reasoning).toMatchObject({
+      configured: true,
+      available: true,
+      mock: false,
+      required: false,
+      model: "deepseek-reasoner"
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(JSON.stringify(status)).not.toContain("test-key");
   });
 
   it("normalizes provider errors", () => {

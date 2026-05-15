@@ -10,16 +10,11 @@ export async function registerHealthRoutes(
   config: ServerConfig
 ): Promise<void> {
   app.get("/health", async () => {
-    const [database, chat, tts, stt, vision, embedding] = await Promise.all([
-      context.memoryRepository.healthCheck(),
-      context.providers.getChatProvider().healthCheck(),
-      context.providers.getTTSProvider().healthCheck(),
-      context.providers.getSTTProvider().healthCheck(),
-      context.providers.getVisionProvider().healthCheck(),
-      context.providers.getEmbeddingProvider().healthCheck()
-    ]);
+    const database = await context.memoryRepository.healthCheck();
+    const providerStatus = context.providers.getStatus();
+    const chat = providerStatus.providers.chat;
 
-    const ok = database.status === "healthy" && chat.status === "healthy";
+    const ok = database.status === "healthy" && chat.available === true;
 
     return {
       ok,
@@ -34,11 +29,11 @@ export async function registerHealthRoutes(
       providers: {
         chat,
         optional: {
-          reasoning: await context.providers.getReasoningProvider().healthCheck(),
-          tts,
-          stt,
-          vision,
-          embedding
+          reasoning: providerStatus.providers.reasoning,
+          tts: providerStatus.providers.tts,
+          stt: providerStatus.providers.stt,
+          vision: providerStatus.providers.vision,
+          embedding: providerStatus.providers.embedding
         }
       }
     };

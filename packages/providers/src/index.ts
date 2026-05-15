@@ -34,7 +34,7 @@ export {
   createProviderRegistryConfigFromEnv,
   createProviderRegistryFromEnv
 } from "./registry.js";
-export type { ProviderRegistryConfig } from "./registry.js";
+export type { ProviderRegistryConfig, ProviderStatusMap } from "./registry.js";
 export type { ProviderResolver } from "./registry.js";
 export { DeepSeekChatProvider } from "./deepseek/DeepSeekChatProvider.js";
 export { DeepSeekReasoningProvider } from "./deepseek/DeepSeekReasoningProvider.js";

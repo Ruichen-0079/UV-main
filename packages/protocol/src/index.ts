@@ -64,7 +64,24 @@ export type UserVoiceTranscriptEvent = RuntimeEvent<
 
 export const AssistantMessagePayloadSchema = z.object({
   sessionId: z.string().min(1),
-  content: z.string()
+  content: z.string(),
+  provider: z
+    .object({
+      name: z.string(),
+      capability: z.string(),
+      model: z.string().optional(),
+      mock: z.boolean(),
+      latencyMs: z.number().optional(),
+      tokenUsage: z
+        .object({
+          inputTokens: z.number().optional(),
+          outputTokens: z.number().optional(),
+          totalTokens: z.number().optional()
+        })
+        .optional(),
+      healthStatus: z.string().optional()
+    })
+    .optional()
 });
 
 export type AssistantMessagePayload = z.infer<typeof AssistantMessagePayloadSchema>;

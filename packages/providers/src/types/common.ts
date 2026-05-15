@@ -5,6 +5,14 @@ export type ProviderHealthStatus = "healthy" | "degraded" | "unavailable";
 export type ProviderHealth = {
   status: ProviderHealthStatus;
   provider: string;
+  name?: string | undefined;
+  capability?: ProviderCapability | undefined;
+  configured?: boolean | undefined;
+  available?: boolean | undefined;
+  mock?: boolean | undefined;
+  required?: boolean | undefined;
+  baseUrl?: string | undefined;
+  model?: string | undefined;
   latencyMs?: number;
   checkedAt: string;
   message?: string;

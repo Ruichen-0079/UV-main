@@ -1,8 +1,14 @@
 export type ProviderHealth = {
   provider: string;
+  name?: string;
+  capability?: string;
   status: "healthy" | "degraded" | "unavailable";
   checkedAt?: string;
   message?: string;
+  configured?: boolean;
+  available?: boolean;
+  mock?: boolean;
+  required?: boolean;
   baseUrl?: string;
   model?: string;
 };
@@ -37,6 +43,22 @@ export type RuntimeEvent = {
   payload: Record<string, unknown>;
 };
 
+export type TokenUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
+
+export type ProviderCallMetadata = {
+  name: string;
+  capability: string;
+  model?: string;
+  mock: boolean;
+  latencyMs?: number;
+  tokenUsage?: TokenUsage;
+  healthStatus?: string;
+};
+
 export type DashboardWebSocketMessage =
   | RuntimeEvent
   | {
@@ -60,11 +82,11 @@ export type SendMessageRequest = {
 export type MessageResponse = RuntimeEvent & {
   reply: string;
   promptPreview?: PromptPreviewResponse["promptPreview"];
-  provider?: string;
-  mock?: boolean;
+  provider?: ProviderCallMetadata;
   payload: {
     sessionId?: string;
     content?: string;
+    provider?: ProviderCallMetadata;
     traceId?: string;
     audio?: unknown;
   };
@@ -125,6 +147,12 @@ export type PromptPreviewResponse = {
   retrievedMemoryCountRaw?: number;
   retrievedMemoryCount?: number;
   retrievedMemories?: RetrievedMemoryDebug[];
+  providerName?: string;
+  providerModel?: string;
+  providerMock?: boolean;
+  providerLatencyMs?: number;
+  providerHealthStatus?: string;
+  tokenUsage?: TokenUsage;
   promptPreview: null | {
     traceId?: string;
     timestamp?: string;
@@ -146,6 +174,12 @@ export type PromptPreviewResponse = {
     characterCount: number;
     estimatedTokens: number;
     truncated: boolean;
+    providerName?: string;
+    providerModel?: string;
+    providerMock?: boolean;
+    providerLatencyMs?: number;
+    providerHealthStatus?: string;
+    tokenUsage?: TokenUsage;
   };
 };
 

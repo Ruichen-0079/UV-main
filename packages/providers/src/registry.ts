@@ -1,6 +1,6 @@
 import type { ChatInput, ChatOutput, ChatProvider } from "./types/chat.js";
 import type { EmbeddingProvider } from "./types/embedding.js";
-import type { ProviderHealth } from "./types/common.js";
+import type { ProviderCapability, ProviderHealth } from "./types/common.js";
 import type { ReasoningInput, ReasoningOutput, ReasoningProvider } from "./types/reasoning.js";
 import type { STTInput, STTOutput, STTProvider } from "./types/stt.js";
 import type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
@@ -60,7 +60,12 @@ export interface ProviderResolver {
   getSTTProvider(): STTProvider;
   getVisionProvider(): VisionProvider;
   getEmbeddingProvider(): EmbeddingProvider;
+  getStatus?(): ProviderStatusMap;
 }
+
+export type ProviderStatusMap = {
+  providers: Record<ProviderCapability, ProviderHealth>;
+};
 
 export class ProviderRegistry implements ProviderResolver {
   private readonly chatProviders = new Map<string, ChatProvider>();
@@ -128,6 +133,19 @@ export class ProviderRegistry implements ProviderResolver {
     );
   }
 
+  getStatus(): ProviderStatusMap {
+    return {
+      providers: {
+        chat: this.createStatus("chat", this.config.defaults.chat),
+        reasoning: this.createStatus("reasoning", this.config.defaults.reasoning),
+        tts: this.createStatus("tts", this.config.defaults.tts),
+        stt: this.createStatus("stt", this.config.defaults.stt),
+        vision: this.createStatus("vision", this.config.defaults.vision),
+        embedding: this.createStatus("embedding", this.config.defaults.embedding)
+      }
+    };
+  }
+
   private getRequiredProvider<TProvider>(
     providers: Map<string, TProvider>,
     name: string,
@@ -146,6 +164,118 @@ export class ProviderRegistry implements ProviderResolver {
 
     return provider;
   }
+
+  private createStatus(capability: ProviderCapability, name: string): ProviderHealth {
+    const configured = this.isConfigured(capability, name);
+    const mock = !configured && this.config.allowMocks;
+    const required = capability === "chat";
+    const available = configured || mock;
+    const status = available ? (configured ? "degraded" : "healthy") : "unavailable";
+
+    return {
+      provider: name,
+      name,
+      capability,
+      configured,
+      available,
+      mock,
+      required,
+      status,
+      checkedAt: new Date().toISOString(),
+      ...this.safeProviderMetadata(capability, name),
+      message: providerStatusMessage({ capability, name, configured, mock, required })
+    };
+  }
+
+  private isConfigured(capability: ProviderCapability, name: string): boolean {
+    if ((capability === "chat" || capability === "reasoning") && name === "deepseek") {
+      return Boolean(
+        this.config.deepseek.apiKey &&
+        (capability === "chat"
+          ? this.config.deepseek.chatModel
+          : this.config.deepseek.reasoningModel)
+      );
+    }
+
+    if (capability === "tts" && name === "xai") {
+      return Boolean(this.config.xai.apiKey && this.config.xai.ttsModel);
+    }
+
+    if (capability === "vision" && name === "xai") {
+      return Boolean(this.config.xai.apiKey && this.config.xai.visionModel);
+    }
+
+    if (capability === "stt" && name === "dashscope") {
+      return Boolean(this.config.dashscope.apiKey && this.config.dashscope.sttModel);
+    }
+
+    if (capability === "embedding") {
+      if (name === "mock") {
+        return true;
+      }
+      return Boolean(this.config.embedding.apiKey && this.config.embedding.model);
+    }
+
+    return false;
+  }
+
+  private safeProviderMetadata(
+    capability: ProviderCapability,
+    name: string
+  ): Pick<ProviderHealth, "baseUrl" | "model"> {
+    if ((capability === "chat" || capability === "reasoning") && name === "deepseek") {
+      return {
+        baseUrl: this.config.deepseek.baseUrl,
+        model:
+          capability === "chat"
+            ? this.config.deepseek.chatModel
+            : this.config.deepseek.reasoningModel
+      };
+    }
+
+    if ((capability === "tts" || capability === "vision") && name === "xai") {
+      return {
+        baseUrl: this.config.xai.baseUrl,
+        model: capability === "tts" ? this.config.xai.ttsModel : this.config.xai.visionModel
+      };
+    }
+
+    if (capability === "stt" && name === "dashscope") {
+      return {
+        baseUrl: this.config.dashscope.baseUrl,
+        model: this.config.dashscope.sttModel
+      };
+    }
+
+    if (capability === "embedding") {
+      return {
+        baseUrl: this.config.embedding.baseUrl,
+        model: this.config.embedding.model ?? (name === "mock" ? "mock" : undefined)
+      };
+    }
+
+    return {};
+  }
+}
+
+function providerStatusMessage(input: {
+  capability: ProviderCapability;
+  name: string;
+  configured: boolean;
+  mock: boolean;
+  required: boolean;
+}): string {
+  if (input.configured) {
+    return `${input.name} ${input.capability} provider is configured; health is config-only and unverified.`;
+  }
+
+  if (input.mock) {
+    return `${input.name} ${input.capability} provider is using mock fallback.`;
+  }
+
+  return input.required
+    ? `${input.name} ${input.capability} provider is required but not configured.`
+    : `${input.name} ${input.capability} provider is optional and not configured.`;
 }
 
 export function createProviderRegistryFromEnv(env: ProviderEnv = process.env): ProviderRegistry {

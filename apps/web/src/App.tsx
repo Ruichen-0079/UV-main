@@ -4,6 +4,7 @@ import {
   type DashboardWebSocketMessage,
   type HealthResponse,
   type MemoryRecord,
+  type ProviderCallMetadata,
   type PromptPreviewResponse,
   type ProvidersStatusResponse,
   type RuntimeEvent
@@ -28,7 +29,7 @@ type ChatMessage = {
   traceId?: string;
   useMemory?: boolean;
   voiceOutput?: boolean;
-  providerKind?: string;
+  provider?: ProviderCallMetadata;
 };
 
 type WebSocketStatus =
@@ -271,13 +272,14 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
       });
       props.onEvent(response);
       setLastTraceId(response.traceId);
+      const provider = response.provider ?? response.payload.provider;
       setMessages((current) => [
         ...current,
         {
           role: "assistant",
           content: response.reply || response.payload.content || "No assistant content returned.",
           traceId: response.traceId,
-          providerKind: inferProviderKind(response)
+          ...(provider ? { provider } : {})
         }
       ]);
       setRequestStatus("success");
@@ -318,10 +320,8 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
                         <span>voice output: {message.voiceOutput ? "enabled" : "disabled"}</span>
                       </div>
                     )}
-                    {message.role === "assistant" && message.providerKind && (
-                      <div className="mt-2 text-xs text-ink-500">
-                        provider signal: {message.providerKind}
-                      </div>
+                    {message.role === "assistant" && (
+                      <ProviderMetadataSummary provider={message.provider} />
                     )}
                   </div>
                 ))}
@@ -691,6 +691,11 @@ function ProvidersPage(props: {
           detail="TTS, STT, and Vision are placeholders in the dashboard."
         />
       </div>
+      <Notice
+        tone="info"
+        title="Status meanings"
+        message="configured=false + mock=true means the dashboard is using development mock fallback. configured=true + mock=false + degraded means config is present, but remote health is intentionally unverified. unavailable means the provider cannot be used with the current config."
+      />
       <Panel title="Provider Status">
         <div className="overflow-auto rounded-md border border-ink-100">
           <table className="w-full border-collapse">
@@ -700,7 +705,8 @@ function ProvidersPage(props: {
                 <th className="table-cell">Requirement</th>
                 <th className="table-cell">Provider</th>
                 <th className="table-cell">Status</th>
-                <th className="table-cell">Config</th>
+                <th className="table-cell">Configured</th>
+                <th className="table-cell">Mode</th>
                 <th className="table-cell">Base URL</th>
                 <th className="table-cell">Model</th>
                 <th className="table-cell">Message</th>
@@ -716,8 +722,9 @@ function ProvidersPage(props: {
                     <Pill status={row.health?.status ?? "unknown"} />
                   </td>
                   <td className="table-cell text-ink-500">
-                    {providerConfigurationHint(row.health)}
+                    {row.health?.configured ? "configured" : "missing config"}
                   </td>
+                  <td className="table-cell text-ink-500">{row.health?.mock ? "mock" : "real"}</td>
                   <td className="table-cell text-ink-500">
                     {row.health?.baseUrl ?? "Not exposed by status endpoint"}
                   </td>
@@ -938,7 +945,7 @@ function PromptPreviewPage(): JSX.Element {
         />
       )}
       {promptPreview && (
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-5 gap-3">
           <StatusCard
             title="Trace"
             status={shortTrace(promptPreview.traceId ?? preview.data?.traceId)}
@@ -960,6 +967,11 @@ function PromptPreviewPage(): JSX.Element {
             title="Tokens"
             status={String(promptPreview.estimatedTokens)}
             detail={promptPreview.truncated ? "Prompt truncated" : "Within budget"}
+          />
+          <StatusCard
+            title="Provider"
+            status={promptPreview.providerName ?? preview.data?.providerName ?? "unknown"}
+            detail={providerPreviewDetail(promptPreview, preview.data)}
           />
         </div>
       )}
@@ -1163,6 +1175,30 @@ function Notice(props: { tone: "info" | "error"; title: string; message: string 
   );
 }
 
+function ProviderMetadataSummary(props: {
+  provider?: ProviderCallMetadata | undefined;
+}): JSX.Element {
+  const provider = props.provider;
+  if (!provider) {
+    return (
+      <div className="mt-2 text-xs text-ink-500">
+        provider: unknown · model: unknown · mode: unknown
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 flex flex-wrap gap-2 text-xs text-ink-500">
+      <span>provider: {provider.name}</span>
+      <span>model: {provider.model ?? "unknown"}</span>
+      <span>{provider.mock ? "mock" : "real"}</span>
+      <span>latency: {formatLatency(provider.latencyMs)}</span>
+      {provider.healthStatus && <span>health: {provider.healthStatus}</span>}
+      {provider.tokenUsage && <span>tokens: {formatTokenUsage(provider.tokenUsage)}</span>}
+    </div>
+  );
+}
+
 function EmptyState(props: { title: string; message: string }): JSX.Element {
   return (
     <div className="rounded-md border border-dashed border-ink-200 bg-ink-50 px-4 py-8 text-center">
@@ -1254,30 +1290,16 @@ function providerConfigurationHint(
   if (!health) {
     return "Not configured";
   }
-  if (health.message?.toLowerCase().includes("mock")) {
+  if (health.mock) {
     return "Mock fallback";
   }
-  if (health.status === "healthy") {
-    return "Configured";
+  if (health.configured) {
+    return health.available ? "Configured, unverified" : "Configured, unavailable";
   }
-  if (health.status === "unavailable") {
+  if (health.required) {
     return "Missing config or unavailable";
   }
-  return "Check provider message";
-}
-
-function inferProviderKind(response: {
-  reply?: string;
-  mock?: boolean;
-  provider?: string;
-}): string {
-  if (response.mock || response.reply?.startsWith("Mock reply")) {
-    return "mock provider";
-  }
-  if (response.provider) {
-    return response.provider;
-  }
-  return "not reported by API";
+  return "Optional, not configured";
 }
 
 function parseImportance(value: string): number | undefined {
@@ -1286,6 +1308,33 @@ function parseImportance(value: string): number | undefined {
     return undefined;
   }
   return Math.min(1, Math.max(0, parsed));
+}
+
+function formatLatency(latencyMs: number | undefined): string {
+  return typeof latencyMs === "number" ? `${latencyMs}ms` : "unknown";
+}
+
+function formatTokenUsage(tokenUsage: {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}): string {
+  if (typeof tokenUsage.totalTokens === "number") {
+    return String(tokenUsage.totalTokens);
+  }
+  const input = tokenUsage.inputTokens ?? 0;
+  const output = tokenUsage.outputTokens ?? 0;
+  return String(input + output);
+}
+
+function providerPreviewDetail(
+  promptPreview: NonNullable<PromptPreviewResponse["promptPreview"]>,
+  response: PromptPreviewResponse | null | undefined
+): string {
+  const model = promptPreview.providerModel ?? response?.providerModel ?? "unknown model";
+  const mock = promptPreview.providerMock ?? response?.providerMock;
+  const latency = promptPreview.providerLatencyMs ?? response?.providerLatencyMs;
+  return `${mock ? "mock" : "real/unverified"} · ${model} · ${formatLatency(latency)}`;
 }
 
 function EventTable(props: { events: RuntimeEvent[] }): JSX.Element {
