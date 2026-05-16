@@ -80,7 +80,8 @@ load_env_file() {
 
 start_infra() {
   if [ "${SKIP_INFRA:-0}" = "1" ]; then
-    echo "SKIP_INFRA=1，跳过 Docker infra 启动。适用于 MEMORY_REPOSITORY=in-memory 的轻量开发。"
+    echo "SKIP_INFRA=1 set; skipping Docker infrastructure startup."
+    echo "适用于 MEMORY_REPOSITORY=in-memory 的轻量开发。"
     return
   fi
 

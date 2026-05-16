@@ -609,6 +609,53 @@ describe("server", () => {
     }
   });
 
+  it("requires the optional dashboard dev token for sensitive development endpoints", async () => {
+    const previous = snapshotEnv();
+    setMockEnv();
+
+    try {
+      const app = await buildServer(
+        loadServerConfig({
+          ...process.env,
+          DASHBOARD_DEV_TOKEN: "dev-token"
+        })
+      );
+
+      const blockedSettings = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: { values: { SERVER_PORT: "6121" } }
+      });
+      expect(blockedSettings.statusCode).toBe(401);
+      expect(blockedSettings.body).not.toContain("dev-token");
+
+      const blockedVerify = await app.inject({
+        method: "POST",
+        url: "/providers/verify/chat"
+      });
+      expect(blockedVerify.statusCode).toBe(401);
+      expect(blockedVerify.body).not.toContain("dev-token");
+
+      const allowedVerify = await app.inject({
+        method: "POST",
+        url: "/providers/verify/chat",
+        headers: {
+          "X-YUVI-Dev-Token": "dev-token"
+        }
+      });
+      expect(allowedVerify.statusCode).toBe(200);
+      expect(allowedVerify.json()).toMatchObject({
+        ok: true,
+        capability: "chat"
+      });
+      expect(allowedVerify.body).not.toContain("dev-token");
+
+      await app.close();
+    } finally {
+      restoreEnv(previous);
+    }
+  });
+
   it("parses optional memory extractor mode", () => {
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe("rule-based");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractor).toBe("llm");
@@ -622,6 +669,15 @@ describe("server", () => {
     expect(() => loadServerConfig({ MEMORY_EXTRACTOR: "external" })).toThrow(
       "Unsupported MEMORY_EXTRACTOR"
     );
+  });
+
+  it("parses event bus boundary values", async () => {
+    expect(loadServerConfig({ EVENT_BUS: "in-memory" }).eventBus).toBe("in-memory");
+    expect(loadServerConfig({ EVENT_BUS: "nats" }).eventBus).toBe("nats");
+    await expect(buildServer(loadServerConfig({ EVENT_BUS: "nats" }))).rejects.toThrow(
+      "EVENT_BUS=nats is reserved"
+    );
+    expect(() => loadServerConfig({ EVENT_BUS: "external" })).toThrow("Unsupported EVENT_BUS");
   });
 
   it("returns and updates safe runtime settings without exposing secrets", async () => {

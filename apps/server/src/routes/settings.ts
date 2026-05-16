@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
+import { requireDashboardDevToken } from "./security.js";
 
 const editableKeys = [
   "MEMORY_REPOSITORY",
@@ -52,6 +53,10 @@ export async function registerSettingsRoutes(
   });
 
   app.post("/settings/runtime", async (request, reply) => {
+    if (!requireDashboardDevToken(config, request, reply)) {
+      return reply;
+    }
+
     if (config.runtimeMode !== "development") {
       return reply.status(404).send({
         error: "not_found",
@@ -95,6 +100,10 @@ export async function registerSettingsRoutes(
   });
 
   app.post("/settings/runtime/reload", async (request, reply) => {
+    if (!requireDashboardDevToken(config, request, reply)) {
+      return reply;
+    }
+
     if (config.runtimeMode !== "development") {
       return reply.status(404).send({
         error: "not_found",

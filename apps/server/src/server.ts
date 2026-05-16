@@ -33,7 +33,7 @@ export async function buildServer(config: ServerConfig) {
     );
   }
   if (config.dashboardDevToken) {
-    app.log.info("DASHBOARD_DEV_TOKEN is configured; dashboard token enforcement is reserved.");
+    app.log.info("DASHBOARD_DEV_TOKEN is configured for sensitive development endpoints.");
   }
 
   const context = createAppContext(app.log, config);
@@ -43,7 +43,7 @@ export async function buildServer(config: ServerConfig) {
   });
 
   await registerHealthRoutes(app, context, config);
-  await registerProviderRoutes(app, context);
+  await registerProviderRoutes(app, context, config);
   await registerSettingsRoutes(app, context, config);
   await registerMessageRoutes(app, context);
   await registerMemoryRoutes(app, context);

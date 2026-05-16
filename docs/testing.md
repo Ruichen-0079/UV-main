@@ -60,8 +60,17 @@ The smoke script sets:
 ```env
 PROVIDER_ALLOW_MOCKS=true
 MEMORY_REPOSITORY=in-memory
+EVENT_BUS=in-memory
 DEFAULT_EMBEDDING_PROVIDER=mock
 ```
+
+`EVENT_BUS=nats` is reserved for future support and is expected to fail clearly until the NATS runtime adapter is implemented. For lightweight local smoke checks that do not need Docker infrastructure, start development with:
+
+```bash
+SKIP_INFRA=1 ./scripts/dev.sh
+```
+
+If `DASHBOARD_DEV_TOKEN` is configured, sensitive development endpoints require the `X-YUVI-Dev-Token` header. Default tests leave it unset so local development remains frictionless.
 
 ## Real Provider Tests
 
@@ -112,6 +121,8 @@ docker compose -f infra/docker-compose.yml down -v
 ```
 
 Changing `POSTGRES_USER` or `POSTGRES_PASSWORD` in `infra/docker-compose.yml` does not change an existing Postgres data volume. PostgreSQL roles are initialized only when the volume is first created.
+
+The server registers a shutdown hook that calls the active memory repository `close()` method. In PostgreSQL memory mode this closes the underlying pg pool; in-memory mode is unaffected.
 
 ## Troubleshooting Old Dev Volumes
 

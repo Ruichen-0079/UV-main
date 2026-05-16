@@ -1,10 +1,13 @@
 import type { FastifyInstance } from "fastify";
+import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
 import { redactValue } from "../services/dashboard.js";
+import { requireDashboardDevToken } from "./security.js";
 
 export async function registerProviderRoutes(
   app: FastifyInstance,
-  context: AppContext
+  context: AppContext,
+  config: ServerConfig
 ): Promise<void> {
   app.get("/providers/status", async (_request, reply) => {
     try {
@@ -17,7 +20,11 @@ export async function registerProviderRoutes(
     }
   });
 
-  app.post("/providers/verify/chat", async (_request, reply) => {
+  app.post("/providers/verify/chat", async (request, reply) => {
+    if (!requireDashboardDevToken(config, request, reply)) {
+      return reply;
+    }
+
     const status = context.providers.getStatus().providers.chat;
     const provider = context.providers.getChatProvider();
     const startedAt = performance.now();
@@ -60,7 +67,11 @@ export async function registerProviderRoutes(
     }
   });
 
-  app.post("/providers/verify/reasoning", async (_request, reply) => {
+  app.post("/providers/verify/reasoning", async (request, reply) => {
+    if (!requireDashboardDevToken(config, request, reply)) {
+      return reply;
+    }
+
     const status = context.providers.getStatus().providers.reasoning;
     const provider = context.providers.getReasoningProvider();
     const startedAt = performance.now();

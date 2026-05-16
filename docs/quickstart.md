@@ -38,7 +38,10 @@ Development defaults to in-memory memory:
 
 ```env
 MEMORY_REPOSITORY=in-memory
+EVENT_BUS=in-memory
 ```
+
+`EVENT_BUS=in-memory` is the only implemented event bus runtime mode today. `EVENT_BUS=nats` is a reserved future boundary and will fail clearly until NATS integration is implemented.
 
 Fill DeepSeek values when you want real provider calls:
 
@@ -67,6 +70,14 @@ DASHSCOPE_API_KEY=replace-with-your-key
 DASHSCOPE_STT_MODEL=replace-with-stt-model
 ```
 
+Optional local Dashboard/API development guard:
+
+```env
+DASHBOARD_DEV_TOKEN=replace-with-local-dev-token
+```
+
+When set, sensitive development endpoints such as runtime settings updates and provider verification require the `X-YUVI-Dev-Token` header. The token is never returned by the API and should not be logged.
+
 For local development without real optional provider keys, keep:
 
 ```env
@@ -74,6 +85,8 @@ NODE_ENV=development
 PROVIDER_ALLOW_MOCKS=true
 DEFAULT_EMBEDDING_PROVIDER=mock
 ```
+
+Keep `SERVER_HOST=127.0.0.1` for local development. If you intentionally set `SERVER_HOST=0.0.0.0`, the server prints a warning because the development API may be reachable from the local network.
 
 `./scripts/dev.sh` loads `.env` automatically and does not print secret values. If you start the server without the scripts, load `.env` into your shell first.
 
@@ -171,6 +184,14 @@ Start the server and web dashboard:
 ```bash
 ./scripts/dev.sh
 ```
+
+For lightweight in-memory development without starting Docker infrastructure:
+
+```bash
+SKIP_INFRA=1 ./scripts/dev.sh
+```
+
+`dev.sh` still loads `.env` first and `.env.local` second, and it does not print secret values.
 
 Windows LTSC wrapper:
 

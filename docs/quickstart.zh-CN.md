@@ -104,13 +104,18 @@ PROVIDER_ALLOW_MOCKS=true
 DEFAULT_EMBEDDING_PROVIDER=mock
 ```
 
+本地开发默认保持 `SERVER_HOST=127.0.0.1`。如果显式设置 `SERVER_HOST=0.0.0.0`，server 会打印强警告，因为开发 API 可能被局域网访问。
+
 默认开发记忆模式是：
 
 ```env
 MEMORY_REPOSITORY=in-memory
+EVENT_BUS=in-memory
 ```
 
 `in-memory` 适合快速开发和测试，服务器重启后数据会丢失。要启用 PostgreSQL 持久化记忆，需要同时设置：
+
+`EVENT_BUS=in-memory` 是当前唯一已实现的 event bus 运行模式。`EVENT_BUS=nats` 是未来 NATS 集成的保留边界，现在选择它会给出明确的未支持错误。
 
 ```env
 MEMORY_REPOSITORY=postgres
@@ -151,6 +156,7 @@ Dashboard 的 Settings 页面用于开发期配置 provider、模型和 memory m
 - `/health` 和 `/providers/status` 不会自动消耗 provider token。
 - Chat/Reasoning 的 provider 配置可以热加载；保存 DeepSeek key 后点击 **Apply Now**，Chat 就可以从 mock fallback 切换到真实 DeepSeek provider。
 - `MEMORY_REPOSITORY`、`SERVER_HOST`、`SERVER_PORT`、`EVENT_BUS` 这类运行边界仍需要重启服务器。切换到 `MEMORY_REPOSITORY=postgres` 后，还需要确认 `DATABASE_URL` 已配置并运行 `pnpm db:migrate`。
+- 可选设置 `DASHBOARD_DEV_TOKEN` 后，`POST /settings/runtime`、`POST /settings/runtime/reload`、`POST /providers/verify/chat` 和 `POST /providers/verify/reasoning` 需要请求头 `X-YUVI-Dev-Token`。token 不会被 API 返回，也不应该出现在日志中。
 
 如果 Settings 显示 DeepSeek 已配置，但 Chat 仍然是 mock mode，点击 **Apply Now / Reload Runtime Config** 或重启开发服务器。
 
@@ -175,6 +181,14 @@ NATS_URL=nats://localhost:4222
 ```bash
 docker compose -f infra/docker-compose.yml up -d
 ```
+
+如果当前只使用 `MEMORY_REPOSITORY=in-memory`，可以跳过 Docker infra 启动：
+
+```bash
+SKIP_INFRA=1 ./scripts/dev.sh
+```
+
+脚本仍会先加载 `.env`，再加载 `.env.local`，且不会打印 secret。
 
 停止 infra：
 
