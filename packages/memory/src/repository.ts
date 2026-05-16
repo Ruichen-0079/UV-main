@@ -6,14 +6,18 @@ import type {
   Entity,
   Memory,
   MemorySearchQuery,
+  MemorySubtype,
   MemoryType,
-  Relation
+  Relation,
+  UpdateMemoryInput
 } from "./types.js";
 
 export interface MemoryRepository {
   healthCheck(): Promise<{ status: "healthy" | "unavailable"; message?: string }>;
   createMemory(input: CreateMemoryInput): Promise<Memory>;
   getMemoryById(id: string): Promise<Memory | null>;
+  updateMemory(id: string, input: UpdateMemoryInput): Promise<Memory | null>;
+  deleteMemory(id: string): Promise<boolean>;
   listRecentMemories(limit?: number): Promise<Memory[]>;
   searchMemoriesByTextFallback(query: MemorySearchQuery): Promise<Memory[]>;
   searchMemoriesByEmbedding(query: MemorySearchQuery): Promise<Memory[]>;
@@ -74,6 +78,64 @@ export class PostgresMemoryRepository implements MemoryRepository {
     const result = await this.pool.query("select * from memories where id = $1", [id]);
     const row = result.rows[0];
     return row ? mapMemoryRow(row) : null;
+  }
+
+  async updateMemory(id: string, input: UpdateMemoryInput): Promise<Memory | null> {
+    const assignments: string[] = [];
+    const values: unknown[] = [];
+
+    function set(column: string, value: unknown): void {
+      values.push(value);
+      assignments.push(`${column} = $${values.length}`);
+    }
+
+    if (input.type !== undefined) {
+      set("type", input.type);
+    }
+    if (input.subtype !== undefined) {
+      set("subtype", input.subtype);
+    }
+    if (input.content !== undefined) {
+      set("content", input.content);
+    }
+    if (input.summary !== undefined) {
+      set("summary", input.summary);
+    }
+    if (input.importance !== undefined) {
+      set("importance", input.importance);
+    }
+    if (input.emotionValence !== undefined) {
+      set("emotion_valence", input.emotionValence);
+    }
+    if (input.emotionArousal !== undefined) {
+      set("emotion_arousal", input.emotionArousal);
+    }
+    if (input.metadata !== undefined) {
+      set("metadata", JSON.stringify(input.metadata));
+    }
+    if (input.tags !== undefined) {
+      set("tags", input.tags);
+    }
+
+    if (assignments.length === 0) {
+      return this.getMemoryById(id);
+    }
+
+    values.push(id);
+    const result = await this.pool.query(
+      `update memories
+       set ${assignments.join(", ")}, updated_at = now()
+       where id = $${values.length}
+       returning *`,
+      values
+    );
+    const row = result.rows[0];
+    return row ? mapMemoryRow(row) : null;
+  }
+
+  async deleteMemory(id: string): Promise<boolean> {
+    const result = await this.pool.query("delete from memories where id = $1", [id]);
+    return (result.rowCount ?? 0) > 0;
   }
 
   async listRecentMemories(limit = 20): Promise<Memory[]> {
@@ -220,6 +282,52 @@ export class InMemoryMemoryRepository implements MemoryRepository {
 
   async getMemoryById(id: string): Promise<Memory | null> {
     return this.memories.find((memory) => memory.id === id) ?? null;
+  }
+
+  async updateMemory(id: string, input: UpdateMemoryInput): Promise<Memory | null> {
+    const memory = this.memories.find((candidate) => candidate.id === id);
+    if (!memory) {
+      return null;
+    }
+
+    if (input.type !== undefined) {
+      memory.type = input.type;
+    }
+    if (input.subtype !== undefined) {
+      memory.subtype = input.subtype as MemorySubtype | null;
+    }
+    if (input.content !== undefined) {
+      memory.content = input.content;
+    }
+    if (input.summary !== undefined) {
+      memory.summary = input.summary;
+    }
+    if (input.importance !== undefined) {
+      memory.importance = input.importance;
+    }
+    if (input.emotionValence !== undefined) {
+      memory.emotionValence = input.emotionValence;
+    }
+    if (input.emotionArousal !== undefined) {
+      memory.emotionArousal = input.emotionArousal;
+    }
+    if (input.metadata !== undefined) {
+      memory.metadata = input.metadata;
+    }
+    if (input.tags !== undefined) {
+      memory.tags = input.tags;
+    }
+    memory.updatedAt = new Date();
+    return memory;
+  }
+
+  async deleteMemory(id: string): Promise<boolean> {
+    const index = this.memories.findIndex((memory) => memory.id === id);
+    if (index === -1) {
+      return false;
+    }
+    this.memories.splice(index, 1);
+    return true;
   }
 
   async listRecentMemories(limit = 20): Promise<Memory[]> {

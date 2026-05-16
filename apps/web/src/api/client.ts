@@ -109,6 +109,8 @@ export type MemoryRecord = {
   content: string;
   summary?: string | null;
   importance: number;
+  emotionValence?: number;
+  emotionArousal?: number;
   source: string;
   sourceTraceId?: string | null;
   metadata?: Record<string, unknown>;
@@ -128,6 +130,18 @@ export type CreateMemoryRequest = {
   sourceTraceId?: string | null;
   metadata?: Record<string, unknown>;
   tags: string[];
+};
+
+export type UpdateMemoryRequest = {
+  type?: string;
+  subtype?: string | null;
+  content?: string;
+  summary?: string | null;
+  importance?: number;
+  emotionValence?: number;
+  emotionArousal?: number;
+  metadata?: Record<string, unknown>;
+  tags?: string[];
 };
 
 export type ProvidersStatusResponse = {
@@ -361,6 +375,30 @@ export const apiClient = {
     });
   },
 
+  getMemory(id: string): Promise<MemoryRecord> {
+    return request<MemoryRecord>(`/memory/${encodeURIComponent(id)}`);
+  },
+
+  updateMemory(id: string, input: UpdateMemoryRequest): Promise<MemoryRecord> {
+    return request<MemoryRecord>(`/memory/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  },
+
+  deleteMemory(id: string): Promise<{ ok: boolean; id: string }> {
+    return request<{ ok: boolean; id: string }>(`/memory/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    });
+  },
+
+  bulkDeleteMemories(ids: string[]): Promise<{ ok: boolean; deleted: number }> {
+    return request<{ ok: boolean; deleted: number }>("/memory/bulk-delete", {
+      method: "POST",
+      body: JSON.stringify({ ids })
+    });
+  },
+
   getProviderStatus(): Promise<ProvidersStatusResponse> {
     return request<ProvidersStatusResponse>("/providers/status");
   },
@@ -398,12 +436,14 @@ export const apiClient = {
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body !== undefined && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
-    headers: {
-      "content-type": "application/json",
-      ...init?.headers
-    }
+    headers
   });
 
   if (!response.ok) {

@@ -302,7 +302,7 @@ Dashboard 页面作用：
 
 - Overview：查看 server、database、provider、WebSocket、recent events、recent memories。
 - Chat：发送文本消息，查看 reply 和 traceId。
-- Memory：查看、筛选、创建 memory。
+- Memory：查看、搜索、筛选、创建、编辑和删除 manual memory；可调试 type、subtype、importance、tags、sourceTraceId 和 metadata。
 - Providers：查看 DeepSeek、xAI、DashScope、Embedding provider 状态。
 - Events：查看 recent runtime events，按 event type 过滤。
 - Prompt Preview：查看 latest prompt sections，仅 development mode。

@@ -35,6 +35,48 @@ describe("MemoryRepository", () => {
     expect(recent.map((memory) => memory.id)).toContain(created.id);
   });
 
+  it("updates and deletes in-memory memory records", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const created = await repository.createMemory({
+      type: "working",
+      content: "Temporary memory.",
+      source: "test",
+      tags: ["draft"]
+    });
+
+    const updated = await repository.updateMemory(created.id, {
+      type: "semantic",
+      subtype: "fact",
+      content: "Stable memory.",
+      summary: "Stable summary.",
+      importance: 0.9,
+      emotionValence: 0.2,
+      emotionArousal: 0.3,
+      metadata: { edited: true },
+      tags: ["stable"]
+    });
+
+    expect(updated).toMatchObject({
+      id: created.id,
+      type: "semantic",
+      subtype: "fact",
+      content: "Stable memory.",
+      summary: "Stable summary.",
+      importance: 0.9,
+      emotionValence: 0.2,
+      emotionArousal: 0.3,
+      metadata: { edited: true },
+      tags: ["stable"]
+    });
+    expect(updated?.createdAt).toEqual(created.createdAt);
+    expect(updated?.updatedAt.getTime()).toBeGreaterThanOrEqual(created.updatedAt.getTime());
+
+    await expect(repository.updateMemory("missing", { content: "nope" })).resolves.toBeNull();
+    await expect(repository.deleteMemory(created.id)).resolves.toBe(true);
+    await expect(repository.getMemoryById(created.id)).resolves.toBeNull();
+    await expect(repository.deleteMemory(created.id)).resolves.toBe(false);
+  });
+
   it("retrieves mixed Chinese and English memories from a natural-language turn", async () => {
     const repository = new InMemoryMemoryRepository();
     const service = new MemoryService(repository);

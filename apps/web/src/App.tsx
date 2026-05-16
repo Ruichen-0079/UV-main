@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   apiClient,
+  type CreateMemoryRequest,
   type DashboardWebSocketMessage,
   type HealthResponse,
   type MemoryRecord,
@@ -8,8 +9,9 @@ import {
   type ProviderVerificationResponse,
   type PromptPreviewResponse,
   type ProvidersStatusResponse,
+  type RuntimeEvent,
   type RuntimeSettingsResponse,
-  type RuntimeEvent
+  type UpdateMemoryRequest
 } from "./api/client.js";
 import { promptPreviewPlaceholder } from "./data/mock.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
@@ -45,6 +47,22 @@ type WebSocketStatus =
   | "error";
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type MemoryResultSource = "/memory/recent" | "/memory/search" | "local fallback";
+
+const memoryTypes = ["working", "episodic", "semantic", "emotional", "procedural", "relationship"];
+
+const memorySubtypes = [
+  "preference",
+  "fact",
+  "project",
+  "provider-choice",
+  "path",
+  "repo",
+  "command",
+  "workflow",
+  "milestone",
+  "emotion",
+  "relationship"
+];
 
 const pages: Array<{ id: PageId; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -429,15 +447,21 @@ function MemoryPage(props: {
 }): JSX.Element {
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
+  const [subtypeFilter, setSubtypeFilter] = useState("all");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [minImportance, setMinImportance] = useState("0");
   const [searchMemories, setSearchMemories] = useState<MemoryRecord[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [resultSource, setResultSource] = useState<MemoryResultSource>("/memory/recent");
-  const [content, setContent] = useState("");
-  const [type, setType] = useState("semantic");
-  const [importance, setImportance] = useState("0.5");
-  const [source, setSource] = useState("dashboard");
-  const [tags, setTags] = useState("");
+  const [createForm, setCreateForm] = useState<MemoryForm>(() => emptyMemoryForm());
+  const [selectedMemory, setSelectedMemory] = useState<MemoryRecord | null>(null);
+  const [editingMemory, setEditingMemory] = useState<MemoryRecord | null>(null);
+  const [editForm, setEditForm] = useState<MemoryForm>(() => emptyMemoryForm());
+  const [deleteTarget, setDeleteTarget] = useState<MemoryRecord | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [busyMemoryId, setBusyMemoryId] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const memoryMode = memoryModeFromHealth(props.health);
 
@@ -484,52 +508,124 @@ function MemoryPage(props: {
   const sourceMemories = searchMemories ?? props.state.data?.memories ?? [];
   const memories = sourceMemories.filter((memory) => {
     const matchesType = typeFilter === "all" || memory.type === typeFilter;
+    const matchesSubtype = subtypeFilter === "all" || memory.subtype === subtypeFilter;
+    const matchesSource = sourceFilter === "all" || memory.source === sourceFilter;
+    const min = parseImportance(minImportance) ?? 0;
+    const matchesImportance = memory.importance >= min;
     const matchesQuery =
       searchMemories !== null ||
       query === "" ||
       memory.content.toLowerCase().includes(query.toLowerCase());
-    return matchesType && matchesQuery;
+    return matchesType && matchesSubtype && matchesSource && matchesImportance && matchesQuery;
   });
+  const sources = Array.from(new Set(sourceMemories.map((memory) => memory.source))).sort();
 
   async function createMemory(): Promise<void> {
-    if (!content.trim()) {
+    if (!createForm.content.trim()) {
       return;
     }
 
     setError(null);
+    setSuccess(null);
     try {
-      const createInput = {
-        type,
-        content: content.trim(),
-        source,
-        tags: tags
-          .split(",")
-          .map((tag) => tag.trim())
-          .filter(Boolean)
-      };
-      const parsedImportance = parseImportance(importance);
-      await apiClient.createMemory(
-        parsedImportance === undefined
-          ? createInput
-          : { ...createInput, importance: parsedImportance }
-      );
-      setContent("");
-      setTags("");
-      await props.state.refresh();
-      if (query.trim()) {
-        const result = await apiClient.searchMemories(query.trim(), {
-          type: typeFilter,
-          limit: 50
-        });
-        setSearchMemories(result.memories);
-      }
+      await apiClient.createMemory(toCreateMemoryRequest(createForm));
+      setCreateForm(emptyMemoryForm());
+      setSuccess("Memory created.");
+      await refreshMemories();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Create memory failed");
     }
   }
 
+  async function loadMemory(id: string, mode: "view" | "edit"): Promise<void> {
+    setDetailLoading(true);
+    setError(null);
+    try {
+      const memory = await apiClient.getMemory(id);
+      if (mode === "view") {
+        setSelectedMemory(memory);
+      } else {
+        setEditingMemory(memory);
+        setEditForm(memoryFormFromRecord(memory));
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Load memory failed");
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  async function saveEdit(): Promise<void> {
+    if (!editingMemory) {
+      return;
+    }
+
+    setBusyMemoryId(editingMemory.id);
+    setError(null);
+    setSuccess(null);
+    try {
+      const updated = await apiClient.updateMemory(
+        editingMemory.id,
+        toUpdateMemoryRequest(editForm)
+      );
+      setEditingMemory(null);
+      setSelectedMemory(updated);
+      setSuccess("Memory updated.");
+      await refreshMemories();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Update memory failed");
+    } finally {
+      setBusyMemoryId(null);
+    }
+  }
+
+  async function confirmDelete(): Promise<void> {
+    if (!deleteTarget) {
+      return;
+    }
+
+    setBusyMemoryId(deleteTarget.id);
+    setError(null);
+    setSuccess(null);
+    try {
+      await apiClient.deleteMemory(deleteTarget.id);
+      setDeleteTarget(null);
+      setSelectedMemory((current) => (current?.id === deleteTarget.id ? null : current));
+      setEditingMemory((current) => (current?.id === deleteTarget.id ? null : current));
+      setSuccess("Memory deleted.");
+      await refreshMemories();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Delete memory failed");
+    } finally {
+      setBusyMemoryId(null);
+    }
+  }
+
+  async function refreshMemories(): Promise<void> {
+    await props.state.refresh();
+    if (query.trim()) {
+      const result = await apiClient.searchMemories(query.trim(), {
+        type: typeFilter,
+        limit: 50
+      });
+      setSearchMemories(result.memories);
+      setResultSource("/memory/search");
+    }
+  }
+
+  function clearFilters(): void {
+    setQuery("");
+    setTypeFilter("all");
+    setSubtypeFilter("all");
+    setSourceFilter("all");
+    setMinImportance("0");
+    setSearchMemories(null);
+    setSearchError(null);
+    setResultSource("/memory/recent");
+  }
+
   return (
-    <PageShell title="Memory" subtitle="Inspect and create development memories.">
+    <PageShell title="Memory" subtitle="Manual memory management console for development.">
       <div className="grid grid-cols-3 gap-4">
         <StatusCard title="Repository" status={memoryMode} detail={memoryModeDetail(memoryMode)} />
         <StatusCard
@@ -543,9 +639,14 @@ function MemoryPage(props: {
           detail={props.state.error ?? searchError ?? "Current filtered result count"}
         />
       </div>
+      <Notice
+        tone="info"
+        title="Memory mode"
+        message="in-memory resets on server restart. postgres persists after DATABASE_URL is configured and pnpm db:migrate has been applied. Do not store secrets in memory."
+      />
       <div className="grid grid-cols-[1fr_340px] gap-4">
-        <Panel title="Recent Memories">
-          <div className="mb-3 grid grid-cols-[1fr_180px] gap-3">
+        <Panel title="Memory Records">
+          <div className="mb-3 grid grid-cols-[1fr_150px_170px_150px_150px_auto] gap-3">
             <input
               className="field"
               placeholder="Search memory content"
@@ -558,12 +659,49 @@ function MemoryPage(props: {
               onChange={(event) => setTypeFilter(event.target.value)}
             >
               <option value="all">All types</option>
-              <option value="working">working</option>
-              <option value="episodic">episodic</option>
-              <option value="semantic">semantic</option>
-              <option value="emotional">emotional</option>
-              <option value="procedural">procedural</option>
+              {memoryTypes.map((memoryType) => (
+                <option key={memoryType} value={memoryType}>
+                  {memoryType}
+                </option>
+              ))}
             </select>
+            <select
+              className="field"
+              value={subtypeFilter}
+              onChange={(event) => setSubtypeFilter(event.target.value)}
+            >
+              <option value="all">All subtypes</option>
+              {memorySubtypes.map((memorySubtype) => (
+                <option key={memorySubtype} value={memorySubtype}>
+                  {memorySubtype}
+                </option>
+              ))}
+            </select>
+            <select
+              className="field"
+              value={sourceFilter}
+              onChange={(event) => setSourceFilter(event.target.value)}
+            >
+              <option value="all">All sources</option>
+              {sources.map((memorySource) => (
+                <option key={memorySource} value={memorySource}>
+                  {memorySource}
+                </option>
+              ))}
+            </select>
+            <input
+              className="field"
+              type="number"
+              min="0"
+              max="1"
+              step="0.1"
+              value={minImportance}
+              onChange={(event) => setMinImportance(event.target.value)}
+              aria-label="Minimum importance"
+            />
+            <button className="button-secondary" type="button" onClick={clearFilters}>
+              Clear
+            </button>
           </div>
           {(props.state.loading || searchLoading) && (
             <Notice
@@ -582,72 +720,96 @@ function MemoryPage(props: {
               message={`${searchError}. Showing local recent-memory fallback if available.`}
             />
           )}
+          {success && <Notice tone="info" title="Saved" message={success} />}
+          {error && <Notice tone="error" title="Memory action failed" message={error} />}
           {!props.state.loading && memories.length === 0 ? (
             <EmptyState
               title="No matching memories"
               message="Create a memory or adjust the filter."
             />
           ) : (
-            <MemoryTable memories={memories} />
+            <MemoryTable
+              memories={memories}
+              onView={(memory) => void loadMemory(memory.id, "view")}
+              onEdit={(memory) => void loadMemory(memory.id, "edit")}
+              onDelete={setDeleteTarget}
+            />
           )}
         </Panel>
         <Panel title="Create Memory">
-          <div className="space-y-3">
-            <Field label="Type">
-              <select
-                className="field"
-                value={type}
-                onChange={(event) => setType(event.target.value)}
-              >
-                <option value="working">working</option>
-                <option value="episodic">episodic</option>
-                <option value="semantic">semantic</option>
-                <option value="emotional">emotional</option>
-                <option value="procedural">procedural</option>
-              </select>
-            </Field>
-            <Field label="Content">
-              <textarea
-                className="field min-h-28"
-                value={content}
-                onChange={(event) => setContent(event.target.value)}
+          <MemoryFormFields form={createForm} setForm={setCreateForm} includeSource />
+          <button
+            className="button-primary mt-3 w-full"
+            onClick={() => void createMemory()}
+            disabled={!createForm.content.trim()}
+          >
+            Create memory
+          </button>
+        </Panel>
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        <Panel title="Memory Details">
+          {detailLoading && (
+            <Notice tone="info" title="Loading" message="Fetching memory detail." />
+          )}
+          {!selectedMemory && !detailLoading ? (
+            <EmptyState title="No memory selected" message="Use View to inspect a memory." />
+          ) : selectedMemory ? (
+            <MemoryDetail memory={selectedMemory} />
+          ) : null}
+        </Panel>
+        <Panel title="Edit / Delete">
+          {editingMemory ? (
+            <div>
+              <MemoryFormFields form={editForm} setForm={setEditForm} />
+              <div className="mt-3 flex gap-2">
+                <button
+                  className="button-primary"
+                  disabled={busyMemoryId === editingMemory.id}
+                  onClick={() => void saveEdit()}
+                >
+                  Save changes
+                </button>
+                <button
+                  className="button-secondary"
+                  type="button"
+                  onClick={() => setEditingMemory(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : deleteTarget ? (
+            <div className="space-y-3">
+              <Notice
+                tone="error"
+                title="Confirm delete"
+                message="Deletion cannot be undone in this development console."
               />
-            </Field>
-            <Field label="Importance">
-              <input
-                className="field"
-                type="number"
-                min="0"
-                max="1"
-                step="0.1"
-                value={importance}
-                onChange={(event) => setImportance(event.target.value)}
-              />
-            </Field>
-            <Field label="Source">
-              <input
-                className="field"
-                value={source}
-                onChange={(event) => setSource(event.target.value)}
-              />
-            </Field>
-            <Field label="Tags">
-              <input
-                className="field"
-                placeholder="comma,separated"
-                value={tags}
-                onChange={(event) => setTags(event.target.value)}
-              />
-            </Field>
-            {error && <Notice tone="error" title="Create failed" message={error} />}
-            <button
-              className="button-primary w-full"
-              onClick={() => void createMemory()}
-              disabled={!content.trim()}
-            >
-              Create memory
-            </button>
-          </div>
+              <p className="text-sm text-ink-600">{memoryPreview(deleteTarget)}</p>
+              <div className="flex gap-2">
+                <button
+                  className="button-primary"
+                  disabled={busyMemoryId === deleteTarget.id}
+                  onClick={() => void confirmDelete()}
+                >
+                  Delete memory
+                </button>
+                <button
+                  className="button-secondary"
+                  type="button"
+                  onClick={() => setDeleteTarget(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <EmptyState
+              title="No edit active"
+              message="Use Edit or Delete from the memory table."
+            />
+          )}
         </Panel>
       </div>
     </PageShell>
@@ -1645,9 +1807,7 @@ function ProviderMetadataSummary(props: {
   );
 }
 
-function ProviderVerificationResult(props: {
-  result: ProviderVerificationResponse;
-}): JSX.Element {
+function ProviderVerificationResult(props: { result: ProviderVerificationResponse }): JSX.Element {
   const result = props.result;
   return (
     <div className="grid grid-cols-6 gap-3 rounded-md border border-ink-100 bg-ink-50 p-3 text-sm">
@@ -1774,12 +1934,108 @@ function providerConfigurationHint(
   return "Optional, not configured";
 }
 
+type MemoryForm = {
+  type: string;
+  subtype: string;
+  content: string;
+  summary: string;
+  importance: string;
+  emotionValence: string;
+  emotionArousal: string;
+  source: string;
+  tags: string;
+};
+
+function emptyMemoryForm(): MemoryForm {
+  return {
+    type: "semantic",
+    subtype: "",
+    content: "",
+    summary: "",
+    importance: "0.5",
+    emotionValence: "0",
+    emotionArousal: "0",
+    source: "dashboard",
+    tags: ""
+  };
+}
+
+function memoryFormFromRecord(memory: MemoryRecord): MemoryForm {
+  return {
+    type: memory.type,
+    subtype: memory.subtype ?? "",
+    content: memory.content,
+    summary: memory.summary ?? "",
+    importance: String(memory.importance),
+    emotionValence: String(memory.emotionValence ?? 0),
+    emotionArousal: String(memory.emotionArousal ?? 0),
+    source: memory.source,
+    tags: memory.tags.join(", ")
+  };
+}
+
+function toCreateMemoryRequest(form: MemoryForm): CreateMemoryRequest {
+  const input: CreateMemoryRequest = {
+    type: form.type,
+    subtype: form.subtype.trim() ? form.subtype.trim() : null,
+    content: form.content.trim(),
+    importance: parseImportance(form.importance) ?? 0.5,
+    source: form.source.trim() || "dashboard",
+    tags: parseTags(form.tags)
+  };
+  const summary = form.summary.trim();
+  if (summary) {
+    input.summary = summary;
+  }
+  return input;
+}
+
+function toUpdateMemoryRequest(form: MemoryForm): UpdateMemoryRequest {
+  return {
+    type: form.type,
+    subtype: form.subtype.trim() ? form.subtype.trim() : null,
+    content: form.content.trim(),
+    summary: form.summary.trim() || null,
+    importance: parseImportance(form.importance) ?? 0.5,
+    emotionValence: parseEmotionValue(form.emotionValence),
+    emotionArousal: parseImportance(form.emotionArousal) ?? 0,
+    tags: parseTags(form.tags)
+  };
+}
+
+function parseTags(value: string): string[] {
+  return value
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+}
+
+function memoryPreview(memory: MemoryRecord): string {
+  const text = (memory.summary || memory.content).replace(/\s+/g, " ").trim();
+  return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+}
+
+function safeMetadataText(metadata: Record<string, unknown> | undefined): string {
+  if (!metadata || Object.keys(metadata).length === 0) {
+    return "{}";
+  }
+  return JSON.stringify(metadata, null, 2);
+}
+
 function parseImportance(value: string): number | undefined {
   const parsed = Number.parseFloat(value);
   if (!Number.isFinite(parsed)) {
     return undefined;
   }
   return Math.min(1, Math.max(0, parsed));
+}
+
+function parseEmotionValue(value: string): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return Math.min(1, Math.max(-1, parsed));
 }
 
 function formatLatency(latencyMs: number | undefined): string {
@@ -1840,34 +2096,237 @@ function EventTable(props: { events: RuntimeEvent[] }): JSX.Element {
   );
 }
 
-function MemoryTable(props: { memories: MemoryRecord[]; compact?: boolean }): JSX.Element {
+function MemoryFormFields(props: {
+  form: MemoryForm;
+  setForm: Dispatch<SetStateAction<MemoryForm>>;
+  includeSource?: boolean;
+}): JSX.Element {
+  const update = (key: keyof MemoryForm, value: string): void => {
+    props.setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Type">
+          <select
+            className="field"
+            value={props.form.type}
+            onChange={(event) => update("type", event.target.value)}
+          >
+            {memoryTypes.map((memoryType) => (
+              <option key={memoryType} value={memoryType}>
+                {memoryType}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Subtype">
+          <select
+            className="field"
+            value={props.form.subtype}
+            onChange={(event) => update("subtype", event.target.value)}
+          >
+            <option value="">none</option>
+            {memorySubtypes.map((memorySubtype) => (
+              <option key={memorySubtype} value={memorySubtype}>
+                {memorySubtype}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      <Field label="Content">
+        <textarea
+          className="field min-h-28"
+          value={props.form.content}
+          onChange={(event) => update("content", event.target.value)}
+        />
+      </Field>
+      <Field label="Summary">
+        <textarea
+          className="field min-h-20"
+          value={props.form.summary}
+          onChange={(event) => update("summary", event.target.value)}
+        />
+      </Field>
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="Importance">
+          <input
+            className="field"
+            type="number"
+            min="0"
+            max="1"
+            step="0.05"
+            value={props.form.importance}
+            onChange={(event) => update("importance", event.target.value)}
+          />
+        </Field>
+        <Field label="Emotion Valence">
+          <input
+            className="field"
+            type="number"
+            min="-1"
+            max="1"
+            step="0.1"
+            value={props.form.emotionValence}
+            onChange={(event) => update("emotionValence", event.target.value)}
+          />
+        </Field>
+        <Field label="Emotion Arousal">
+          <input
+            className="field"
+            type="number"
+            min="0"
+            max="1"
+            step="0.1"
+            value={props.form.emotionArousal}
+            onChange={(event) => update("emotionArousal", event.target.value)}
+          />
+        </Field>
+      </div>
+      {props.includeSource && (
+        <Field label="Source">
+          <input
+            className="field"
+            value={props.form.source}
+            onChange={(event) => update("source", event.target.value)}
+          />
+        </Field>
+      )}
+      <Field label="Tags">
+        <input
+          className="field"
+          placeholder="comma,separated"
+          value={props.form.tags}
+          onChange={(event) => update("tags", event.target.value)}
+        />
+      </Field>
+    </div>
+  );
+}
+
+function MemoryDetail(props: { memory: MemoryRecord }): JSX.Element {
+  const metadata = safeMetadataText(props.memory.metadata);
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="grid grid-cols-3 gap-3">
+        <Definition label="Type" value={props.memory.type} />
+        <Definition label="Subtype" value={props.memory.subtype ?? "none"} />
+        <Definition label="Importance" value={props.memory.importance.toFixed(2)} />
+        <Definition label="Source" value={props.memory.source} />
+        <Definition label="Source Trace" value={props.memory.sourceTraceId ?? "none"} />
+        <Definition label="Created" value={formatDate(props.memory.createdAt)} />
+        <Definition label="Updated" value={formatDate(props.memory.updatedAt ?? "")} />
+        <Definition label="Last Accessed" value={formatDate(props.memory.lastAccessedAt ?? "")} />
+        <Definition
+          label="Emotion"
+          value={`${props.memory.emotionValence ?? 0} / ${props.memory.emotionArousal ?? 0}`}
+        />
+      </div>
+      <div>
+        <div className="label">Content</div>
+        <p className="mt-1 whitespace-pre-wrap rounded-md border border-ink-100 bg-ink-50 p-3 text-ink-700">
+          {props.memory.content}
+        </p>
+      </div>
+      <div>
+        <div className="label">Summary</div>
+        <p className="mt-1 whitespace-pre-wrap rounded-md border border-ink-100 bg-ink-50 p-3 text-ink-700">
+          {props.memory.summary || "none"}
+        </p>
+      </div>
+      <Definition label="Tags" value={props.memory.tags.join(", ") || "none"} />
+      <div>
+        <div className="label">Safe Metadata</div>
+        <pre className="mt-1 max-h-52 overflow-auto rounded-md border border-ink-100 bg-ink-950 p-3 text-xs text-ink-50">
+          {metadata}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function MemoryTable(props: {
+  memories: MemoryRecord[];
+  compact?: boolean;
+  onView?(memory: MemoryRecord): void;
+  onEdit?(memory: MemoryRecord): void;
+  onDelete?(memory: MemoryRecord): void;
+}): JSX.Element {
   return (
     <div className="max-h-[420px] overflow-auto rounded-md border border-ink-100">
       <table className="w-full border-collapse">
         <thead className="sticky top-0 bg-ink-50">
           <tr>
             <th className="table-cell">Type</th>
+            {!props.compact && <th className="table-cell">Subtype</th>}
             <th className="table-cell">Content</th>
             {!props.compact && <th className="table-cell">Importance</th>}
             {!props.compact && <th className="table-cell">Tags</th>}
+            {!props.compact && <th className="table-cell">Source</th>}
+            {!props.compact && <th className="table-cell">Trace</th>}
             <th className="table-cell">Created</th>
             {!props.compact && <th className="table-cell">Updated</th>}
+            {(props.onView || props.onEdit || props.onDelete) && (
+              <th className="table-cell">Actions</th>
+            )}
           </tr>
         </thead>
         <tbody>
           {props.memories.map((memory) => (
             <tr key={memory.id}>
               <td className="table-cell">{memory.type}</td>
-              <td className="table-cell">{memory.summary ?? memory.content}</td>
+              {!props.compact && <td className="table-cell">{memory.subtype ?? "none"}</td>}
+              <td className="table-cell">{memoryPreview(memory)}</td>
               {!props.compact && (
                 <td className="table-cell text-ink-500">{memory.importance.toFixed(2)}</td>
               )}
               {!props.compact && (
                 <td className="table-cell text-ink-500">{memory.tags.join(", ") || "none"}</td>
               )}
+              {!props.compact && <td className="table-cell text-ink-500">{memory.source}</td>}
+              {!props.compact && (
+                <td className="table-cell font-mono text-xs text-ink-500">
+                  {shortTrace(memory.sourceTraceId ?? undefined)}
+                </td>
+              )}
               <td className="table-cell text-ink-500">{formatDate(memory.createdAt)}</td>
               {!props.compact && (
                 <td className="table-cell text-ink-500">{formatDate(memory.updatedAt ?? "")}</td>
+              )}
+              {(props.onView || props.onEdit || props.onDelete) && (
+                <td className="table-cell">
+                  <div className="flex gap-2">
+                    {props.onView && (
+                      <button
+                        className="button-secondary"
+                        type="button"
+                        onClick={() => props.onView?.(memory)}
+                      >
+                        View
+                      </button>
+                    )}
+                    {props.onEdit && (
+                      <button
+                        className="button-secondary"
+                        type="button"
+                        onClick={() => props.onEdit?.(memory)}
+                      >
+                        Edit
+                      </button>
+                    )}
+                    {props.onDelete && (
+                      <button
+                        className="button-secondary"
+                        type="button"
+                        onClick={() => props.onDelete?.(memory)}
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                </td>
               )}
             </tr>
           ))}

@@ -36,6 +36,9 @@ pnpm.cmd smoke
   - `GET /health`
   - `POST /message`
   - `POST /memory`
+  - `GET /memory/:id`
+  - `PATCH /memory/:id`
+  - `DELETE /memory/:id`
   - `GET /memory/recent`
   - `GET /memory/search?q=...`
 
@@ -49,6 +52,8 @@ pnpm.cmd smoke
 4. A memory record can be created.
 5. Recent memories can be retrieved.
 6. Memory search returns a matching record.
+
+Manual memory management endpoint tests cover reading memory details, editing safe structured fields, rejecting invalid importance values, rejecting unsafe metadata keys, and deleting records so they no longer appear in search.
 
 The smoke script sets:
 

@@ -1,6 +1,7 @@
 export type {
   CreateEntityInput,
   CreateMemoryInput,
+  UpdateMemoryInput,
   CreateRelationInput,
   Entity,
   Memory,

@@ -83,6 +83,109 @@ describe("server", () => {
         }
       });
       expect(memory.statusCode).toBe(200);
+      const memoryId = memory.json().id as string;
+
+      const memoryDetail = await app.inject({ method: "GET", url: `/memory/${memoryId}` });
+      expect(memoryDetail.statusCode).toBe(200);
+      expect(memoryDetail.json()).toMatchObject({
+        id: memoryId,
+        type: "semantic",
+        content: "Server test memory.",
+        source: "test"
+      });
+
+      const invalidImportance = await app.inject({
+        method: "PATCH",
+        url: `/memory/${memoryId}`,
+        payload: { importance: 2 }
+      });
+      expect(invalidImportance.statusCode).toBe(400);
+
+      const unsafeMetadata = await app.inject({
+        method: "PATCH",
+        url: `/memory/${memoryId}`,
+        payload: { metadata: { apiKey: "secret-value" } }
+      });
+      expect(unsafeMetadata.statusCode).toBe(400);
+      expect(unsafeMetadata.body).not.toContain("secret-value");
+
+      const updatedMemory = await app.inject({
+        method: "PATCH",
+        url: `/memory/${memoryId}`,
+        payload: {
+          type: "procedural",
+          subtype: "workflow",
+          content: "Server test memory updated.",
+          summary: "Server test memory updated.",
+          importance: 0.8,
+          tags: ["updated", "server"]
+        }
+      });
+      expect(updatedMemory.statusCode).toBe(200);
+      expect(updatedMemory.json()).toMatchObject({
+        id: memoryId,
+        type: "procedural",
+        subtype: "workflow",
+        content: "Server test memory updated.",
+        summary: "Server test memory updated.",
+        importance: 0.8,
+        tags: ["updated", "server"]
+      });
+
+      const missingUpdate = await app.inject({
+        method: "PATCH",
+        url: "/memory/missing",
+        payload: { content: "nope" }
+      });
+      expect(missingUpdate.statusCode).toBe(404);
+
+      const deleteCandidate = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          type: "semantic",
+          content: "Delete me from memory.",
+          source: "test"
+        }
+      });
+      expect(deleteCandidate.statusCode).toBe(200);
+      const deleteId = deleteCandidate.json().id as string;
+      const deleteMemory = await app.inject({ method: "DELETE", url: `/memory/${deleteId}` });
+      expect(deleteMemory.statusCode).toBe(200);
+      expect(deleteMemory.json()).toMatchObject({ ok: true, id: deleteId });
+
+      const noBodyDeleteCandidate = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          type: "semantic",
+          content: "Delete me with no JSON content type.",
+          source: "test"
+        }
+      });
+      expect(noBodyDeleteCandidate.statusCode).toBe(200);
+      const noBodyDeleteId = noBodyDeleteCandidate.json().id as string;
+      const noBodyDelete = await app.inject({
+        method: "DELETE",
+        url: `/memory/${noBodyDeleteId}`,
+        headers: {}
+      });
+      expect(noBodyDelete.statusCode).toBe(200);
+      expect(noBodyDelete.json()).toMatchObject({ ok: true, id: noBodyDeleteId });
+
+      const deletedDetail = await app.inject({ method: "GET", url: `/memory/${deleteId}` });
+      expect(deletedDetail.statusCode).toBe(404);
+      const deletedSearch = await app.inject({
+        method: "GET",
+        url: "/memory/search?q=Delete%20me&limit=5"
+      });
+      expect(deletedSearch.statusCode).toBe(200);
+      expect(
+        deletedSearch.json().memories.some((candidate: { id: string }) => candidate.id === deleteId)
+      ).toBe(false);
+
+      const missingDelete = await app.inject({ method: "DELETE", url: "/memory/missing" });
+      expect(missingDelete.statusCode).toBe(404);
 
       const yuviMemory = await app.inject({
         method: "POST",
@@ -507,9 +610,7 @@ describe("server", () => {
   });
 
   it("parses optional memory extractor mode", () => {
-    expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe(
-      "rule-based"
-    );
+    expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe("rule-based");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractor).toBe("llm");
     expect(() => loadServerConfig({ MEMORY_EXTRACTOR: "external" })).toThrow(
       "Unsupported MEMORY_EXTRACTOR"

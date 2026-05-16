@@ -59,6 +59,18 @@ export type CreateMemoryInput = {
   tags?: string[];
 };
 
+export type UpdateMemoryInput = {
+  type?: MemoryType;
+  subtype?: MemorySubtype | null;
+  content?: string;
+  summary?: string | null;
+  importance?: number;
+  emotionValence?: number;
+  emotionArousal?: number;
+  metadata?: Record<string, unknown>;
+  tags?: string[];
+};
+
 export type MemoryCandidate = {
   type: MemoryType;
   subtype?: MemorySubtype | null;

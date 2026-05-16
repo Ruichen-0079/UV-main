@@ -12,7 +12,7 @@
 
 ## Storage
 
-持久记忆存储使用 PostgreSQL + pgvector。Migration 位于：
+开发默认值是 `MEMORY_REPOSITORY=in-memory`，适合快速迭代，但服务器重启后会清空。持久化开发记忆使用 PostgreSQL + pgvector，需要配置 `MEMORY_REPOSITORY=postgres`、`DATABASE_URL` 并运行 migrations。Migration 位于：
 
 ```text
 packages/memory/migrations/
@@ -25,6 +25,18 @@ packages/memory/migrations/
 - `relations`
 
 仓库层把向量搜索暴露为接口；在 MVP 阶段，如果未配置 embedding，则已实现基于 `ILIKE` 的文本 fallback 搜索。
+
+## Manual Management
+
+Dashboard 的 Memory 页面是开发期手动记忆管理控制台。它可以：
+
+- 查看 memory detail 和 debug metadata
+- 创建带 type、subtype、summary、importance、source、tags 的 manual memory
+- 编辑 content、summary、type、subtype、importance、emotion fields、tags 和安全 metadata
+- 从当前 repository 删除 memory
+- 按 type、subtype、source、importance 搜索和筛选 memory
+
+手动创建的 memory 应使用 `source=dashboard` 或 `source=manual`。删除 memory 后，它不会再进入检索结果。不要把 API key、password、token、Authorization header 或其他 secret 写入 memory content 或 metadata。
 
 ## Prompt Safety
 

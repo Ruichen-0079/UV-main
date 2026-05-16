@@ -12,7 +12,7 @@ Memory is not raw chat log injection. The runtime stores structured memories, re
 
 ## Storage
 
-The durable memory store uses PostgreSQL with pgvector. Migrations live in:
+Development defaults to `MEMORY_REPOSITORY=in-memory`, which is useful for quick iteration but resets when the server restarts. Durable development memory uses PostgreSQL with pgvector after `MEMORY_REPOSITORY=postgres`, `DATABASE_URL`, and migrations are configured. Migrations live in:
 
 ```text
 packages/memory/migrations/
@@ -25,6 +25,18 @@ Core tables:
 - `relations`
 
 The repository exposes vector search as an interface, but text fallback search with `ILIKE` is implemented for the MVP when embeddings are not configured.
+
+## Manual Management
+
+The Dashboard Memory page is a development console for manual memory management. It can:
+
+- view memory details and debug metadata
+- create manual memories with type, subtype, summary, importance, source, and tags
+- edit content, summary, type, subtype, importance, emotion fields, tags, and safe metadata
+- delete memories from the active repository
+- search and filter memories by type, subtype, source, and importance
+
+Manual memories should use `source=dashboard` or `source=manual`. Deleted memories are removed from retrieval results. Do not store API keys, passwords, tokens, Authorization headers, or other secrets in memory metadata or content.
 
 ## Prompt Safety
 
