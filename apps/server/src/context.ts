@@ -52,10 +52,13 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
   const runtimeLogger = createRuntimeLogger(logger);
   const activeMemoryRepository = process.env["MEMORY_REPOSITORY"] ?? "in-memory";
 
-  function createMemoryService(providers: ProviderRegistry): MemoryService {
+  function createMemoryService(
+    providers: ProviderRegistry,
+    extractorMode = config.memoryExtractor
+  ): MemoryService {
     const reasoningStatus = providers.getStatus().providers.reasoning;
     const memoryExtractor =
-      config.memoryExtractor === "llm"
+      extractorMode === "llm"
         ? new LlmMemoryExtractor(providers.getReasoningProvider(), ruleBasedExtractor, {
             enabled: true,
             providerConfigured: Boolean(reasoningStatus.configured && !reasoningStatus.mock),
@@ -91,7 +94,10 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
     activeMemoryRepository,
     reloadRuntimeConfig(env) {
       const nextProviders = createProviderRegistryFromEnv(env);
-      const nextMemory = createMemoryService(nextProviders);
+      const nextMemory = createMemoryService(
+        nextProviders,
+        parseMemoryExtractorMode(env["MEMORY_EXTRACTOR"])
+      );
       context.providers = nextProviders;
       context.memory = nextMemory;
       context.runtime = createRuntime(nextProviders, nextMemory);
@@ -131,10 +137,11 @@ function collectNotHotReloadedSettings(
   if ((env["EVENT_BUS"] ?? config.eventBus) !== config.eventBus) {
     notHotReloaded.push("EVENT_BUS");
   }
-  if ((env["MEMORY_EXTRACTOR"] ?? config.memoryExtractor) !== config.memoryExtractor) {
-    notHotReloaded.push("MEMORY_EXTRACTOR");
-  }
   return notHotReloaded;
+}
+
+function parseMemoryExtractorMode(value: string | undefined): "rule-based" | "llm" {
+  return value === "rule-based" ? "rule-based" : "llm";
 }
 
 function createRuntimeLogger(logger: FastifyBaseLogger): RuntimeLogger {

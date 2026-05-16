@@ -50,7 +50,8 @@ describe("server", () => {
       expect(prompt.json().retrievedMemoryCount).toBe(0);
       expect(prompt.json().providerName).toBe("mock");
       expect(prompt.json().providerMock).toBe(true);
-      expect(prompt.json().memoryExtractorMode).toBe("rule-based");
+      expect(prompt.json().memoryExtractorMode).toBe("llm");
+      expect(prompt.json().fallbackUsed).toBe(true);
       expect(prompt.json().memoryExtractionCandidateCount).toBeTypeOf("number");
       expect(prompt.json().storedMemoryCount).toBeTypeOf("number");
       expect(prompt.json().rejectedMemoryCount).toBeTypeOf("number");
@@ -457,6 +458,7 @@ describe("server", () => {
         writeMemory: false,
         retrievedMemoryCount: 0
       });
+      expect(disabledPrompt.json().memoryCandidates).toEqual([]);
       expect(disabledPrompt.body).not.toContain("用户偏好 Chat 使用 DeepSeek");
       expect(
         (await app.inject({ method: "GET", url: "/memory/recent?limit=10" })).json().memories
@@ -491,6 +493,48 @@ describe("server", () => {
         source: "runtime",
         sourceTraceId: writeOnly.json().traceId
       });
+      expect(writeOnlyPrompt.json().memoryCandidates[0]).toMatchObject({
+        type: "semantic",
+        subtype: "provider-choice",
+        decision: "stored",
+        sourceTraceId: writeOnly.json().traceId
+      });
+
+      const recentCandidates = await app.inject({
+        method: "GET",
+        url: "/memory/candidates/recent?limit=5"
+      });
+      expect(recentCandidates.statusCode).toBe(200);
+      const candidateId = recentCandidates.json().candidates[0].id as string;
+      expect(recentCandidates.body).not.toContain("test_deepseek_secret");
+
+      const acceptedCandidate = await app.inject({
+        method: "POST",
+        url: `/memory/candidates/${candidateId}/accept`,
+        payload: {
+          content: "用户偏好 Reasoning 使用 DeepSeek。",
+          summary: "用户偏好 Reasoning 使用 DeepSeek。",
+          importance: 0.9,
+          tags: ["accepted"]
+        }
+      });
+      expect(acceptedCandidate.statusCode).toBe(200);
+      expect(acceptedCandidate.json().memory).toMatchObject({
+        source: "dashboard",
+        content: "用户偏好 Reasoning 使用 DeepSeek。"
+      });
+
+      const rejectedCandidate = await app.inject({
+        method: "POST",
+        url: `/memory/candidates/${candidateId}/reject`,
+        payload: { reason: "Not useful now." }
+      });
+      expect(rejectedCandidate.statusCode).toBe(200);
+      expect(rejectedCandidate.json().candidate).toMatchObject({
+        id: candidateId,
+        decision: "rejected",
+        rejectedReason: "Not useful now."
+      });
 
       const readOnly = await app.inject({
         method: "POST",
@@ -512,7 +556,7 @@ describe("server", () => {
       expect(readOnlyPrompt.json().retrievedMemoryCount).toBeGreaterThan(0);
       expect(readOnlyPrompt.body).toContain("用户偏好 Chat 使用 DeepSeek");
       const afterReadOnly = await app.inject({ method: "GET", url: "/memory/recent?limit=10" });
-      expect(afterReadOnly.json().memories).toHaveLength(2);
+      expect(afterReadOnly.json().memories).toHaveLength(3);
 
       const enabled = await app.inject({
         method: "POST",
@@ -661,6 +705,7 @@ describe("server", () => {
   });
 
   it("parses optional memory extractor mode", () => {
+    expect(loadServerConfig({}).memoryExtractor).toBe("llm");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe("rule-based");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractor).toBe("llm");
     expect(() => loadServerConfig({ MEMORY_EXTRACTOR: "external" })).toThrow(
@@ -699,6 +744,12 @@ describe("server", () => {
       expect(settings.json().providers.deepseek.apiKeyPreview.length).toBe(16);
       expect(settings.json().providers.xai.apiKeyConfigured).toBe(false);
       expect(settings.json().providers.xai.apiKeyPreview).toBeUndefined();
+      expect(settings.json().memory).toMatchObject({
+        memoryExtractor: "llm",
+        activeMemoryExtractor: "llm",
+        memoryExtractorDefault: "llm",
+        reasoningProviderConfigured: true
+      });
       expect(settings.body).not.toContain("configured_deepseek_secret");
       expect(settings.body).not.toContain("Authorization");
 
@@ -714,12 +765,25 @@ describe("server", () => {
       expect(unsafe.statusCode).toBe(400);
       expect(unsafe.json().error).toBe("unsafe_keys");
 
+      const invalidExtractor = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: {
+          values: {
+            MEMORY_EXTRACTOR: "external"
+          }
+        }
+      });
+      expect(invalidExtractor.statusCode).toBe(400);
+      expect(invalidExtractor.json().error).toBe("invalid_memory_extractor");
+
       const update = await app.inject({
         method: "POST",
         url: "/settings/runtime",
         payload: {
           values: {
             MEMORY_REPOSITORY: "postgres",
+            MEMORY_EXTRACTOR: "rule-based",
             DEEPSEEK_API_KEY: "new_deepseek_secret",
             DEEPSEEK_CHAT_MODEL: "deepseek-chat"
           }
@@ -731,14 +795,21 @@ describe("server", () => {
         restartRequired: true
       });
       expect(update.json().changedKeys).toEqual(
-        expect.arrayContaining(["MEMORY_REPOSITORY", "DEEPSEEK_API_KEY"])
+        expect.arrayContaining(["MEMORY_REPOSITORY", "MEMORY_EXTRACTOR", "DEEPSEEK_API_KEY"])
       );
       expect(update.json().settings.memory.memoryRepository).toBe("postgres");
+      expect(update.json().settings.memory.memoryExtractor).toBe("rule-based");
       expect(update.json().settings.configFiles[".env.local"].exists).toBe(true);
       expect(update.json().settings.settings.MEMORY_REPOSITORY).toMatchObject({
         base: "",
         localOverride: "postgres",
         effective: "postgres",
+        source: ".env.local"
+      });
+      expect(update.json().settings.settings.MEMORY_EXTRACTOR).toMatchObject({
+        base: "",
+        localOverride: "rule-based",
+        effective: "rule-based",
         source: ".env.local"
       });
       expect(update.json().settings.settings.DEEPSEEK_API_KEY).toMatchObject({
@@ -885,7 +956,8 @@ describe("server", () => {
           values: {
             DEEPSEEK_API_KEY: "reload_deepseek_secret",
             DEEPSEEK_CHAT_MODEL: "deepseek-chat",
-            DEEPSEEK_REASONING_MODEL: "deepseek-reasoner"
+            DEEPSEEK_REASONING_MODEL: "deepseek-reasoner",
+            MEMORY_EXTRACTOR: "rule-based"
           }
         }
       });
@@ -899,6 +971,7 @@ describe("server", () => {
         applied: true,
         restartRequired: false
       });
+      expect(reload.json().settings.memory.activeMemoryExtractor).toBe("rule-based");
       expect(reload.json().active.providers.chat).toMatchObject({
         provider: "deepseek",
         configured: true,

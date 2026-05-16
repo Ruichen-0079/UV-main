@@ -42,6 +42,27 @@ const secretKeys = new Set([
   "EMBEDDING_API_KEY"
 ]);
 
+const hotReloadableKeys = new Set([
+  "DEEPSEEK_API_BASEURL",
+  "DEEPSEEK_API_KEY",
+  "DEEPSEEK_CHAT_MODEL",
+  "DEEPSEEK_REASONING_MODEL",
+  "MEMORY_EXTRACTOR",
+  "XAI_API_BASEURL",
+  "XAI_API_KEY",
+  "XAI_TTS_MODEL",
+  "XAI_TTS_VOICE",
+  "XAI_VISION_MODEL",
+  "DASHSCOPE_API_BASEURL",
+  "DASHSCOPE_API_KEY",
+  "DASHSCOPE_STT_MODEL",
+  "EMBEDDING_PROVIDER",
+  "EMBEDDING_API_BASEURL",
+  "EMBEDDING_API_KEY",
+  "EMBEDDING_MODEL",
+  "EMBEDDING_DIMENSIONS"
+]);
+
 export async function registerSettingsRoutes(
   app: FastifyInstance,
   context: AppContext,
@@ -88,11 +109,18 @@ export async function registerSettingsRoutes(
         unsafeKeys
       });
     }
+    const invalidMemoryExtractor = validateMemoryExtractorUpdate(parsed.data.values);
+    if (invalidMemoryExtractor) {
+      return reply.status(400).send({
+        error: "invalid_memory_extractor",
+        message: invalidMemoryExtractor
+      });
+    }
 
     const changedKeys = await writeLocalRuntimeSettings(parsed.data.values);
     return reply.send({
       ok: true,
-      restartRequired: changedKeys.length > 0,
+      restartRequired: changedKeys.some((key) => !hotReloadableKeys.has(key)),
       changedKeys,
       settings: await buildRuntimeSettings(context, config)
     });
@@ -144,6 +172,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
   const env = { ...baseEnv, ...process.env, ...localEnv };
   const providerStatus = context.providers.getStatus();
   const memoryRepository = env["MEMORY_REPOSITORY"] ?? "in-memory";
+  const memoryExtractor = normalizeMemoryExtractor(env["MEMORY_EXTRACTOR"]);
   const pendingRestart = hasRestartRequiredLocalOverrides(
     localEnv,
     config,
@@ -169,6 +198,8 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       serverPort: config.port,
       eventBus: config.eventBus,
       memoryRepository: context.activeMemoryRepository,
+      memoryExtractor: context.memory.getExtractorStatus().mode,
+      memoryExtractorActive: context.memory.getExtractorStatus().active,
       providers: {
         chat: providerStatus.providers.chat,
         reasoning: providerStatus.providers.reasoning
@@ -192,7 +223,14 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       restartRequiredForChanges: true,
       postgresRequiresDatabaseUrl: memoryRepository === "postgres",
       postgresMigrationReminder:
-        memoryRepository === "postgres" ? "Run pnpm db:migrate before using Postgres memory." : ""
+        memoryRepository === "postgres" ? "Run pnpm db:migrate before using Postgres memory." : "",
+      memoryExtractor,
+      activeMemoryExtractor: context.memory.getExtractorStatus().mode,
+      memoryExtractorActive: context.memory.getExtractorStatus().active,
+      memoryExtractorDefault: "llm",
+      memoryExtractorFallbackUsed: Boolean(context.memory.getExtractorStatus().fallbackUsed),
+      memoryExtractorSkippedReason: context.memory.getExtractorStatus().skippedReason,
+      reasoningProviderConfigured: Boolean(providerStatus.providers.reasoning.configured)
     },
     providers: {
       deepseek: {
@@ -236,6 +274,21 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
     restartRequired: pendingRestart,
     editableKeys
   };
+}
+
+function validateMemoryExtractorUpdate(values: Record<string, string | null>): string | null {
+  if (!("MEMORY_EXTRACTOR" in values)) {
+    return null;
+  }
+  const value = values["MEMORY_EXTRACTOR"] || "llm";
+  if (value === "llm" || value === "rule-based") {
+    return null;
+  }
+  return "MEMORY_EXTRACTOR must be one of: llm, rule-based.";
+}
+
+function normalizeMemoryExtractor(value: string | undefined): "rule-based" | "llm" {
+  return value === "rule-based" ? "rule-based" : "llm";
 }
 
 function hasRestartRequiredLocalOverrides(

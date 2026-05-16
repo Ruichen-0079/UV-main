@@ -144,6 +144,30 @@ export type UpdateMemoryRequest = {
   tags?: string[];
 };
 
+export type MemoryCandidateReview = {
+  id: string;
+  traceId: string;
+  timestamp: string;
+  type: string;
+  subtype?: string | null;
+  content: string;
+  contentPreview: string;
+  summary?: string | null;
+  importance: number;
+  confidence?: number;
+  tags: string[];
+  reason: string;
+  decision: "candidate" | "stored" | "rejected";
+  rejectedReason?: string;
+  sourceTraceId?: string | null;
+  storedMemoryId?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type AcceptMemoryCandidateRequest = Partial<
+  Pick<MemoryCandidateReview, "type" | "subtype" | "content" | "summary" | "importance" | "tags">
+>;
+
 export type ProvidersStatusResponse = {
   providers: {
     chat: ProviderHealth;
@@ -204,6 +228,7 @@ export type PromptPreviewResponse = {
   fallbackUsed?: boolean;
   llmExtractionError?: string;
   memoryExtractionSkippedReason?: string;
+  memoryCandidates?: MemoryCandidateReview[];
   retrievedMemoryCountRaw?: number;
   retrievedMemoryCount?: number;
   retrievalMode?: string;
@@ -236,6 +261,7 @@ export type PromptPreviewResponse = {
     fallbackUsed?: boolean;
     llmExtractionError?: string;
     memoryExtractionSkippedReason?: string;
+    memoryCandidates?: MemoryCandidateReview[];
     retrievedMemoryCountRaw?: number;
     retrievedMemoryCount?: number;
     retrievalMode?: string;
@@ -280,6 +306,8 @@ export type RuntimeSettingsResponse = {
     serverPort: number;
     eventBus: string;
     memoryRepository: string;
+    memoryExtractor?: string;
+    memoryExtractorActive?: string;
     providers: {
       chat: ProviderHealth;
       reasoning: ProviderHealth;
@@ -303,6 +331,13 @@ export type RuntimeSettingsResponse = {
     restartRequiredForChanges: boolean;
     postgresRequiresDatabaseUrl: boolean;
     postgresMigrationReminder: string;
+    memoryExtractor?: string;
+    activeMemoryExtractor?: string;
+    memoryExtractorActive?: string;
+    memoryExtractorDefault?: string;
+    memoryExtractorFallbackUsed?: boolean;
+    memoryExtractorSkippedReason?: string;
+    reasoningProviderConfigured?: boolean;
   };
   providers: {
     deepseek: {
@@ -475,6 +510,40 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify({ ids })
     });
+  },
+
+  listRecentMemoryCandidates(
+    limit = 20
+  ): Promise<{ mock: boolean; candidates: MemoryCandidateReview[] }> {
+    return request<{ mock: boolean; candidates: MemoryCandidateReview[] }>(
+      `/memory/candidates/recent?limit=${limit}`
+    );
+  },
+
+  acceptMemoryCandidate(
+    id: string,
+    input: AcceptMemoryCandidateRequest
+  ): Promise<{ ok: boolean; memory: MemoryRecord }> {
+    return request<{ ok: boolean; memory: MemoryRecord }>(
+      `/memory/candidates/${encodeURIComponent(id)}/accept`,
+      {
+        method: "POST",
+        body: JSON.stringify(input)
+      }
+    );
+  },
+
+  rejectMemoryCandidate(
+    id: string,
+    reason?: string
+  ): Promise<{ ok: boolean; candidate: MemoryCandidateReview }> {
+    return request<{ ok: boolean; candidate: MemoryCandidateReview }>(
+      `/memory/candidates/${encodeURIComponent(id)}/reject`,
+      {
+        method: "POST",
+        body: JSON.stringify(reason ? { reason } : {})
+      }
+    );
   },
 
   getProviderStatus(): Promise<ProvidersStatusResponse> {

@@ -272,11 +272,14 @@ function parseMemoryRepository(value: string | undefined): MemoryRepositoryDrive
 }
 
 function parseMemoryExtractor(value: string | undefined): MemoryExtractorDriver {
-  if (value === "llm") {
+  if (!value || value === "llm") {
     return "llm";
   }
+  if (value === "rule-based") {
+    return "rule-based";
+  }
 
-  return "rule-based";
+  return "llm";
 }
 
 function parseEventBus(value: string | undefined): EventBusDriver {

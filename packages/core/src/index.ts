@@ -134,7 +134,30 @@ export type RuntimePromptPreview = {
   rejectedReasons: string[];
   fallbackUsed: boolean;
   llmExtractionError?: string | undefined;
+  memoryCandidates: RuntimeMemoryCandidateReview[];
   memoryExtractionSkippedReason?: string | undefined;
+};
+
+export type RuntimeMemoryCandidateDecision = "candidate" | "stored" | "rejected";
+
+export type RuntimeMemoryCandidateReview = {
+  id: string;
+  traceId: string;
+  timestamp: string;
+  type: MemoryCandidate["type"];
+  subtype?: MemoryCandidate["subtype"];
+  content: string;
+  contentPreview: string;
+  summary?: string | null | undefined;
+  importance: number;
+  confidence?: number | undefined;
+  tags: string[];
+  reason: string;
+  decision: RuntimeMemoryCandidateDecision;
+  rejectedReason?: string | undefined;
+  sourceTraceId?: string | null | undefined;
+  storedMemoryId?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
 };
 
 export type SafeProviderCallMetadata = {
@@ -162,11 +185,74 @@ export type HandleImageInputInput = VisionInput & {
 
 export class RuntimeOrchestrator {
   private latestPromptPreview: RuntimePromptPreview | null = null;
+  private readonly memoryCandidateHistory: RuntimeMemoryCandidateReview[] = [];
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {}
 
   getLatestPromptPreview(): RuntimePromptPreview | null {
     return this.latestPromptPreview;
+  }
+
+  getRecentMemoryCandidates(limit = 20): RuntimeMemoryCandidateReview[] {
+    return this.memoryCandidateHistory.slice(0, limit);
+  }
+
+  async acceptMemoryCandidate(
+    id: string,
+    patch: Partial<
+      Pick<MemoryCandidate, "type" | "subtype" | "content" | "summary" | "importance" | "tags">
+    > = {}
+  ): Promise<Memory | null> {
+    const review = this.memoryCandidateHistory.find((candidate) => candidate.id === id);
+    if (!review || !this.options.memory.rememberCandidate) {
+      return null;
+    }
+
+    const candidate: MemoryCandidate = {
+      type: patch.type ?? review.type,
+      content: patch.content ?? review.content,
+      summary: patch.summary ?? review.summary ?? null,
+      importance: patch.importance ?? review.importance,
+      metadata: {
+        ...(review.metadata ?? {}),
+        acceptedBy: "dashboard",
+        acceptedFromCandidateId: review.id
+      },
+      tags: patch.tags ?? review.tags,
+      reason: review.reason
+    };
+    const subtype = patch.subtype ?? review.subtype;
+    if (subtype !== undefined) {
+      candidate.subtype = subtype;
+    }
+    if (review.confidence !== undefined) {
+      candidate.confidence = review.confidence;
+    }
+    if (review.sourceTraceId !== undefined) {
+      candidate.sourceTraceId = review.sourceTraceId;
+    }
+
+    const memory = await this.options.memory.rememberCandidate(candidate, {
+      source: "dashboard",
+      tags: candidate.tags
+    });
+    review.decision = "stored";
+    review.storedMemoryId = memory.id;
+    review.rejectedReason = undefined;
+    return memory;
+  }
+
+  rejectMemoryCandidate(
+    id: string,
+    reason = "Rejected in Dashboard."
+  ): RuntimeMemoryCandidateReview | null {
+    const review = this.memoryCandidateHistory.find((candidate) => candidate.id === id);
+    if (!review) {
+      return null;
+    }
+    review.decision = "rejected";
+    review.rejectedReason = reason;
+    return review;
   }
 
   async handleUserMessage(
@@ -444,7 +530,7 @@ export class RuntimeOrchestrator {
             .filter((candidate) => candidate.importance < 0.65)
             .map((candidate) => `runtime-threshold:${candidate.reason}`)
         ];
-        await Promise.all(
+        const storedMemories = await Promise.all(
           selected.map((candidate) =>
             this.options.memory.rememberCandidate?.(candidate, {
               source: "runtime",
@@ -452,6 +538,13 @@ export class RuntimeOrchestrator {
             })
           )
         );
+        const reviewedCandidates = this.recordMemoryCandidates({
+          candidates,
+          selected,
+          storedMemories: storedMemories.filter((memory): memory is Memory => Boolean(memory)),
+          sourceTraceId: sourceEvent.traceId,
+          rejectedReasons
+        });
         return {
           ...extractorStatus,
           used: true,
@@ -459,6 +552,7 @@ export class RuntimeOrchestrator {
           storedMemoryCount: selected.length,
           rejectedCount: Math.max(candidates.length - selected.length, 0),
           rejectedReasons,
+          candidates: reviewedCandidates,
           ...(selected.length > 0
             ? {}
             : { skippedReason: "Extractor produced no candidates above threshold." })
@@ -476,6 +570,7 @@ export class RuntimeOrchestrator {
           storedMemoryCount: 0,
           rejectedCount: 0,
           rejectedReasons: [],
+          candidates: [],
           skippedReason: "Legacy memory score was below write threshold."
         };
       }
@@ -493,7 +588,8 @@ export class RuntimeOrchestrator {
         candidateCount: 1,
         storedMemoryCount: 1,
         rejectedCount: 0,
-        rejectedReasons: []
+        rejectedReasons: [],
+        candidates: []
       };
     } catch (error) {
       await this.publishRuntimeError("Memory write failed after reply generation.", error, {
@@ -511,6 +607,7 @@ export class RuntimeOrchestrator {
         storedMemoryCount: 0,
         rejectedCount: 0,
         rejectedReasons: [],
+        candidates: [],
         error: safeErrorMessage(error),
         skippedReason: "Memory extraction failed and was skipped."
       };
@@ -776,6 +873,7 @@ export class RuntimeOrchestrator {
     | "rejectedReasons"
     | "fallbackUsed"
     | "llmExtractionError"
+    | "memoryCandidates"
     | "memoryExtractionSkippedReason"
   > {
     return {
@@ -787,6 +885,7 @@ export class RuntimeOrchestrator {
       rejectedMemoryCount: debug.rejectedCount ?? 0,
       rejectedReasons: debug.rejectedReasons ?? [],
       fallbackUsed: Boolean(debug.fallbackUsed),
+      memoryCandidates: debug.candidates ?? [],
       ...(debug.provider ? { memoryExtractorProvider: debug.provider } : {}),
       ...(debug.error ? { llmExtractionError: debug.error } : {}),
       ...(debug.skippedReason ? { memoryExtractionSkippedReason: debug.skippedReason } : {})
@@ -803,12 +902,42 @@ export class RuntimeOrchestrator {
       ...this.extractorPreviewFields(debug)
     };
   }
+
+  private recordMemoryCandidates(input: {
+    candidates: MemoryCandidate[];
+    selected: MemoryCandidate[];
+    storedMemories: Memory[];
+    sourceTraceId: string;
+    rejectedReasons: string[];
+  }): RuntimeMemoryCandidateReview[] {
+    const storedMemories = [...input.storedMemories];
+    const reviews = input.candidates.map((candidate) => {
+      const stored = input.selected.includes(candidate);
+      const storedMemory = stored ? storedMemories.shift() : undefined;
+      const rejectedReason = stored
+        ? undefined
+        : (input.rejectedReasons.find((reason) => reason.includes(candidate.reason)) ??
+          `runtime-threshold:${candidate.reason}`);
+      return toMemoryCandidateReview({
+        candidate,
+        decision: stored ? "stored" : "rejected",
+        rejectedReason,
+        sourceTraceId: input.sourceTraceId,
+        storedMemoryId: storedMemory?.id
+      });
+    });
+
+    this.memoryCandidateHistory.unshift(...reviews);
+    this.memoryCandidateHistory.splice(50);
+    return reviews;
+  }
 }
 
 type MemoryExtractionRuntimeDebug = MemoryExtractorStatus & {
   used: boolean;
   storedMemoryCount?: number | undefined;
   skippedReason?: string | undefined;
+  candidates?: RuntimeMemoryCandidateReview[] | undefined;
 };
 
 type MemoryContext = {
@@ -855,6 +984,68 @@ function memoryToDebug(memory: Memory): RetrievedMemoryDebug {
     displayText: memory.summary ?? memory.content,
     matchedBy: "original-query"
   };
+}
+
+function toMemoryCandidateReview(input: {
+  candidate: MemoryCandidate;
+  decision: RuntimeMemoryCandidateDecision;
+  rejectedReason?: string | undefined;
+  sourceTraceId: string;
+  storedMemoryId?: string | undefined;
+}): RuntimeMemoryCandidateReview {
+  const content = redactUnsafeText(input.candidate.content);
+  return {
+    id: crypto.randomUUID(),
+    traceId: input.sourceTraceId,
+    timestamp: new Date().toISOString(),
+    type: input.candidate.type,
+    subtype: input.candidate.subtype,
+    content,
+    contentPreview: previewText(content),
+    summary: input.candidate.summary ? redactUnsafeText(input.candidate.summary) : null,
+    importance: input.candidate.importance,
+    confidence: input.candidate.confidence,
+    tags: input.candidate.tags.map(redactUnsafeText),
+    reason: redactUnsafeText(input.candidate.reason),
+    decision: input.decision,
+    rejectedReason: input.rejectedReason,
+    sourceTraceId: input.candidate.sourceTraceId ?? input.sourceTraceId,
+    storedMemoryId: input.storedMemoryId,
+    metadata: redactUnsafeMetadata(input.candidate.metadata)
+  };
+}
+
+function previewText(text: string): string {
+  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
+function redactUnsafeText(text: string): string {
+  return text
+    .replace(
+      /(api[-_]?key|authorization|bearer|token|password|secret)\s*[:=]\s*\S+/gi,
+      "$1=[redacted]"
+    )
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-[redacted]");
+}
+
+function redactUnsafeMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (/api[-_]?key|authorization|bearer|token|password|secret/i.test(key)) {
+      output[key] = "[redacted]";
+    } else if (child && typeof child === "object" && !Array.isArray(child)) {
+      output[key] = redactUnsafeMetadata(child) ?? {};
+    } else if (typeof child === "string") {
+      output[key] = redactUnsafeText(child);
+    } else {
+      output[key] = child;
+    }
+  }
+  return output;
 }
 
 function isRuntimeUserMessageEvent(

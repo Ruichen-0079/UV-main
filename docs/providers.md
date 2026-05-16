@@ -71,6 +71,14 @@ DEFAULT_REASONING_PROVIDER=deepseek
 DEEPSEEK_REASONING_MODEL=...
 ```
 
+Memory extraction defaults to LLM-assisted mode:
+
+```env
+MEMORY_EXTRACTOR=llm
+```
+
+`MEMORY_EXTRACTOR=llm` uses DeepSeek Reasoning only when the reasoning provider is configured and a message turn has `writeMemory=true`. It is not called from `/health` or `/providers/status`. If DeepSeek Reasoning is missing, YUVI falls back safely to the rule-based extractor. Use `MEMORY_EXTRACTOR=rule-based` for deterministic extraction with no token usage.
+
 ## Optional Providers
 
 These are optional for the first text-chat MVP:

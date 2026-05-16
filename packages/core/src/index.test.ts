@@ -112,6 +112,24 @@ describe("RuntimeOrchestrator", () => {
               }
             ];
           }
+          if (input.userMessage.startsWith("secret metadata")) {
+            return [
+              {
+                type: "semantic",
+                subtype: "fact",
+                content: "apiKey=sk-super-secret should be redacted",
+                summary: "authorization: Bearer secret should be redacted",
+                importance: 0.2,
+                tags: ["token=secret"],
+                reason: "low-quality-secret-test",
+                sourceTraceId: input.sourceTraceId ?? null,
+                metadata: {
+                  apiKey: "sk-super-secret",
+                  nested: { authorization: "Bearer secret" }
+                }
+              }
+            ];
+          }
           return [];
         },
         async rememberCandidate(candidate): Promise<Memory> {
@@ -143,11 +161,16 @@ describe("RuntimeOrchestrator", () => {
       sessionId: "test-session",
       content: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
     });
+    await runtime.handleUserMessage({
+      sessionId: "test-session",
+      content: "secret metadata candidate"
+    });
 
     expect(written).toHaveLength(1);
     expect(extractionInputs).toEqual([
       "hi",
-      "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+      "记住：我的项目路径是 /home/administrator/uv-main/uv-main",
+      "secret metadata candidate"
     ]);
     expect(written[0]).toMatchObject({
       type: "semantic",
@@ -155,6 +178,15 @@ describe("RuntimeOrchestrator", () => {
       reason: "explicit-remember",
       sourceTraceId: reply.traceId
     });
+    const history = runtime.getRecentMemoryCandidates(5);
+    expect(history.some((candidate) => candidate.decision === "stored")).toBe(true);
+    const rejected = history.find((candidate) => candidate.reason === "low-quality-secret-test");
+    expect(rejected).toMatchObject({
+      decision: "rejected",
+      rejectedReason: "runtime-threshold:low-quality-secret-test"
+    });
+    expect(JSON.stringify(rejected)).not.toContain("sk-super-secret");
+    expect(JSON.stringify(rejected)).not.toContain("Bearer secret");
   });
 });
 

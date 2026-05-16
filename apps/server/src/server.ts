@@ -46,7 +46,7 @@ export async function buildServer(config: ServerConfig) {
   await registerProviderRoutes(app, context, config);
   await registerSettingsRoutes(app, context, config);
   await registerMessageRoutes(app, context);
-  await registerMemoryRoutes(app, context);
+  await registerMemoryRoutes(app, context, config);
   await registerEventRoutes(app, context);
   await registerDebugRoutes(app, context, config);
   await registerWebSocketRoutes(app, context);

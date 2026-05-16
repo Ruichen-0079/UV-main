@@ -38,13 +38,13 @@ Development defaults to in-memory memory:
 
 ```env
 MEMORY_REPOSITORY=in-memory
-MEMORY_EXTRACTOR=rule-based
+MEMORY_EXTRACTOR=llm
 EVENT_BUS=in-memory
 ```
 
 `EVENT_BUS=in-memory` is the only implemented event bus runtime mode today. `EVENT_BUS=nats` is a reserved future boundary and will fail clearly until NATS integration is implemented.
 
-`MEMORY_EXTRACTOR=llm` is optional and uses DeepSeek Reasoning to propose memory candidates. It consumes reasoning tokens only on turns where `writeMemory=true`, and candidates are still validated/scored by `MemoryService` before storage.
+`MEMORY_EXTRACTOR=llm` is the default and uses DeepSeek Reasoning to propose memory candidates when configured. It consumes reasoning tokens only on turns where `writeMemory=true`, and candidates are still validated/scored by `MemoryService` before storage. If DeepSeek Reasoning is not configured, YUVI falls back safely to `rule-based`. Use `MEMORY_EXTRACTOR=rule-based` for deterministic no-token extraction.
 
 Fill DeepSeek values when you want real provider calls:
 

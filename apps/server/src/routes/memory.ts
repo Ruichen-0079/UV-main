@@ -7,6 +7,7 @@ import type {
 } from "@companion/memory";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
 
 const MemoryTypeSchema = z.enum([
@@ -79,11 +80,37 @@ const BulkDeleteMemoryRequestSchema = z.object({
   ids: z.array(z.string().min(1)).min(1).max(100)
 });
 
+const RecentCandidatesQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20)
+});
+
+const CandidateParamsSchema = z.object({
+  id: z.string().min(1)
+});
+
+const AcceptCandidateRequestSchema = z
+  .object({
+    type: MemoryTypeSchema.optional(),
+    subtype: MemorySubtypeSchema.nullable().optional(),
+    content: z.string().min(1).optional(),
+    summary: z.string().nullable().optional(),
+    importance: z.number().min(0).max(1).optional(),
+    tags: z.array(z.string()).optional()
+  })
+  .strict();
+
+const RejectCandidateRequestSchema = z
+  .object({
+    reason: z.string().min(1).max(200).optional()
+  })
+  .strict();
+
 const unsafeMetadataKeyPattern = /api[-_]?key|authorization|bearer|token|password|secret/i;
 
 export async function registerMemoryRoutes(
   app: FastifyInstance,
-  context: AppContext
+  context: AppContext,
+  config?: ServerConfig
 ): Promise<void> {
   app.post("/memory", async (request, reply) => {
     const input = CreateMemoryRequestSchema.safeParse(request.body);
@@ -184,6 +211,82 @@ export async function registerMemoryRoutes(
     }
 
     return reply.send({ ok: true, deleted });
+  });
+
+  app.get("/memory/candidates/recent", async (request, reply) => {
+    if (config?.runtimeMode && config.runtimeMode !== "development") {
+      return reply.status(404).send({
+        error: "not_found",
+        message: "Memory candidate review is only available in development mode."
+      });
+    }
+    const query = RecentCandidatesQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return reply.status(400).send({ error: "invalid_request", details: query.error.flatten() });
+    }
+
+    return reply.send({
+      mock: false,
+      candidates: context.runtime.getRecentMemoryCandidates(query.data.limit)
+    });
+  });
+
+  app.post("/memory/candidates/:id/accept", async (request, reply) => {
+    if (config?.runtimeMode && config.runtimeMode !== "development") {
+      return reply.status(404).send({
+        error: "not_found",
+        message: "Memory candidate review is only available in development mode."
+      });
+    }
+    const params = CandidateParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: "invalid_request", details: params.error.flatten() });
+    }
+    const input = AcceptCandidateRequestSchema.safeParse(request.body ?? {});
+    if (!input.success) {
+      return reply.status(400).send({ error: "invalid_request", details: input.error.flatten() });
+    }
+
+    const memory = await context.runtime.acceptMemoryCandidate(params.data.id, {
+      ...(input.data.type ? { type: input.data.type as MemoryType } : {}),
+      ...(input.data.subtype !== undefined
+        ? { subtype: input.data.subtype as MemorySubtype | null }
+        : {}),
+      ...(input.data.content !== undefined ? { content: input.data.content } : {}),
+      ...(input.data.summary !== undefined ? { summary: input.data.summary } : {}),
+      ...(input.data.importance !== undefined ? { importance: input.data.importance } : {}),
+      ...(input.data.tags !== undefined ? { tags: input.data.tags } : {})
+    });
+
+    if (!memory) {
+      return reply.status(404).send({ error: "not_found", message: "Memory candidate not found." });
+    }
+
+    return reply.send({ ok: true, memory: toSafeMemory(memory) });
+  });
+
+  app.post("/memory/candidates/:id/reject", async (request, reply) => {
+    if (config?.runtimeMode && config.runtimeMode !== "development") {
+      return reply.status(404).send({
+        error: "not_found",
+        message: "Memory candidate review is only available in development mode."
+      });
+    }
+    const params = CandidateParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: "invalid_request", details: params.error.flatten() });
+    }
+    const input = RejectCandidateRequestSchema.safeParse(request.body ?? {});
+    if (!input.success) {
+      return reply.status(400).send({ error: "invalid_request", details: input.error.flatten() });
+    }
+
+    const candidate = context.runtime.rejectMemoryCandidate(params.data.id, input.data.reason);
+    if (!candidate) {
+      return reply.status(404).send({ error: "not_found", message: "Memory candidate not found." });
+    }
+
+    return reply.send({ ok: true, candidate });
   });
 
   app.get("/memory/:id", async (request, reply) => {

@@ -5,6 +5,7 @@ import {
   type DashboardWebSocketMessage,
   type HealthResponse,
   type LayeredSetting,
+  type MemoryCandidateReview,
   type MemoryRecord,
   type ProviderCallMetadata,
   type ProviderVerificationResponse,
@@ -465,8 +466,10 @@ function MemoryPage(props: {
   const [deleteTarget, setDeleteTarget] = useState<MemoryRecord | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [busyMemoryId, setBusyMemoryId] = useState<string | null>(null);
+  const [busyCandidateId, setBusyCandidateId] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const candidates = useAsyncData(() => apiClient.listRecentMemoryCandidates(20), []);
   const memoryMode = memoryModeFromHealth(props.health);
 
   useEffect(() => {
@@ -603,6 +606,58 @@ function MemoryPage(props: {
     } finally {
       setBusyMemoryId(null);
     }
+  }
+
+  async function acceptCandidate(candidate: MemoryCandidateReview): Promise<void> {
+    setBusyCandidateId(candidate.id);
+    setError(null);
+    setSuccess(null);
+    try {
+      await apiClient.acceptMemoryCandidate(candidate.id, {
+        type: candidate.type,
+        subtype: candidate.subtype ?? null,
+        content: candidate.content,
+        summary: candidate.summary ?? null,
+        importance: candidate.importance,
+        tags: candidate.tags
+      });
+      setSuccess("Memory candidate accepted and saved.");
+      await Promise.all([refreshMemories(), candidates.refresh()]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Accept candidate failed");
+    } finally {
+      setBusyCandidateId(null);
+    }
+  }
+
+  async function rejectCandidate(candidate: MemoryCandidateReview): Promise<void> {
+    setBusyCandidateId(candidate.id);
+    setError(null);
+    setSuccess(null);
+    try {
+      await apiClient.rejectMemoryCandidate(candidate.id, "Rejected from Memory page.");
+      setSuccess("Memory candidate rejected.");
+      await candidates.refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Reject candidate failed");
+    } finally {
+      setBusyCandidateId(null);
+    }
+  }
+
+  function copyCandidate(candidate: MemoryCandidateReview): void {
+    setCreateForm({
+      type: candidate.type,
+      subtype: candidate.subtype ?? "",
+      content: candidate.content,
+      summary: candidate.summary ?? "",
+      importance: String(candidate.importance),
+      emotionValence: "0",
+      emotionArousal: "0",
+      tags: candidate.tags.join(", "),
+      source: "manual"
+    });
+    setSuccess("Candidate copied to the manual memory form.");
   }
 
   async function refreshMemories(): Promise<void> {
@@ -752,6 +807,28 @@ function MemoryPage(props: {
         </Panel>
       </div>
       <div className="grid grid-cols-2 gap-4">
+        <Panel title="Recent Memory Candidates" badge="Debug">
+          {candidates.loading && (
+            <Notice tone="info" title="Loading" message="Fetching recent extraction candidates." />
+          )}
+          {candidates.error && (
+            <Notice tone="error" title="Candidate load failed" message={candidates.error} />
+          )}
+          {!candidates.loading && (candidates.data?.candidates.length ?? 0) === 0 ? (
+            <EmptyState
+              title="No recent candidates"
+              message="Send a message with Write Memory enabled to see extractor suggestions."
+            />
+          ) : (
+            <MemoryCandidateList
+              candidates={candidates.data?.candidates ?? []}
+              busyCandidateId={busyCandidateId}
+              onAccept={(candidate) => void acceptCandidate(candidate)}
+              onReject={(candidate) => void rejectCandidate(candidate)}
+              onCopy={copyCandidate}
+            />
+          )}
+        </Panel>
         <Panel title="Memory Details">
           {detailLoading && (
             <Notice tone="info" title="Loading" message="Fetching memory detail." />
@@ -1307,6 +1384,11 @@ function PromptPreviewPage(): JSX.Element {
           </div>
         </Panel>
       )}
+      {promptPreview?.memoryCandidates && promptPreview.memoryCandidates.length > 0 && (
+        <Panel title="Memory Candidates from this turn" badge="Review">
+          <MemoryCandidateList candidates={promptPreview.memoryCandidates} compact />
+        </Panel>
+      )}
     </PageShell>
   );
 }
@@ -1416,6 +1498,7 @@ function SettingsPage(): JSX.Element {
     Boolean(
       settings.data &&
       (settings.data.memory.memoryRepository !== settings.data.memory.activeMemoryRepository ||
+        settings.data.memory.memoryExtractor !== settings.data.memory.activeMemoryExtractor ||
         settings.data.runtime.serverHost !== settings.data.runtime.activeServerHost ||
         settings.data.runtime.serverPort !== settings.data.runtime.activeServerPort ||
         settings.data.runtime.eventBus !== settings.data.runtime.activeEventBus)
@@ -1425,6 +1508,7 @@ function SettingsPage(): JSX.Element {
     "SERVER_PORT",
     "EVENT_BUS",
     "MEMORY_REPOSITORY",
+    "MEMORY_EXTRACTOR",
     "DEEPSEEK_API_BASEURL",
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_CHAT_MODEL",
@@ -1517,6 +1601,56 @@ function SettingsPage(): JSX.Element {
               message="This change is config-only for now. Restart the server after ensuring DATABASE_URL is set and migrations have been applied."
             />
           )}
+          <div className="mt-4 border-t border-ink-100 pt-4">
+            <Field label="MEMORY_EXTRACTOR">
+              <select
+                className="field"
+                value={form.MEMORY_EXTRACTOR}
+                onChange={(event) => setFormValue(setForm, "MEMORY_EXTRACTOR", event.target.value)}
+              >
+                <option value="llm">llm - recommended/default</option>
+                <option value="rule-based">rule-based - no token usage</option>
+              </select>
+            </Field>
+            <p className="mt-2 text-sm leading-6 text-ink-600">
+              llm uses DeepSeek Reasoning for higher-quality memory candidates and may consume
+              tokens only when Write Memory is ON. rule-based is simpler and never consumes model
+              tokens.
+            </p>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Definition
+                label="Saved extractor"
+                value={settings.data?.memory.memoryExtractor ?? "llm"}
+              />
+              <Definition
+                label="Active extractor"
+                value={`${settings.data?.memory.activeMemoryExtractor ?? "unknown"} / ${settings.data?.memory.memoryExtractorActive ?? "unknown"}`}
+              />
+              <Definition
+                label="Reasoning configured"
+                value={settings.data?.memory.reasoningProviderConfigured ? "yes" : "no"}
+              />
+              <Definition
+                label="Fallback used"
+                value={settings.data?.memory.memoryExtractorFallbackUsed ? "true" : "false"}
+              />
+            </div>
+            {form.MEMORY_EXTRACTOR === "llm" &&
+              settings.data?.memory.reasoningProviderConfigured === false && (
+                <Notice
+                  tone="info"
+                  title="Reasoning provider not configured"
+                  message="LLM extractor is selected, but DeepSeek Reasoning is not configured. YUVI will fall back to rule-based extraction without crashing normal chat."
+                />
+              )}
+            {settings.data?.memory.memoryExtractorSkippedReason && (
+              <Notice
+                tone="info"
+                title="Extractor note"
+                message={settings.data.memory.memoryExtractorSkippedReason}
+              />
+            )}
+          </div>
         </Panel>
       </div>
       <Panel title="Active Runtime">
@@ -1538,6 +1672,10 @@ function SettingsPage(): JSX.Element {
           <Definition
             label="Memory Repository"
             value={settings.data?.memory.activeMemoryRepository ?? "unknown"}
+          />
+          <Definition
+            label="Memory Extractor"
+            value={`${settings.data?.memory.activeMemoryExtractor ?? "unknown"} / ${settings.data?.memory.memoryExtractorActive ?? "unknown"}`}
           />
         </div>
       </Panel>
@@ -1681,6 +1819,7 @@ type SettingsKey =
   | "SERVER_PORT"
   | "EVENT_BUS"
   | "MEMORY_REPOSITORY"
+  | "MEMORY_EXTRACTOR"
   | "DEEPSEEK_API_BASEURL"
   | "DEEPSEEK_API_KEY"
   | "DEEPSEEK_CHAT_MODEL"
@@ -1705,6 +1844,7 @@ function emptySettingsForm(): SettingsForm {
     SERVER_PORT: "6121",
     EVENT_BUS: "in-memory",
     MEMORY_REPOSITORY: "in-memory",
+    MEMORY_EXTRACTOR: "llm",
     DEEPSEEK_API_BASEURL: "",
     DEEPSEEK_API_KEY: "",
     DEEPSEEK_CHAT_MODEL: "",
@@ -1731,6 +1871,7 @@ function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsFo
     SERVER_PORT: String(settings.runtime.serverPort),
     EVENT_BUS: settings.runtime.eventBus,
     MEMORY_REPOSITORY: settings.memory.memoryRepository,
+    MEMORY_EXTRACTOR: settings.memory.memoryExtractor ?? "llm",
     DEEPSEEK_API_BASEURL: settings.providers.deepseek.baseUrl,
     DEEPSEEK_API_KEY: "",
     DEEPSEEK_CHAT_MODEL: settings.providers.deepseek.chatModel,
@@ -2555,6 +2696,84 @@ function MemoryTable(props: {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function MemoryCandidateList(props: {
+  candidates: MemoryCandidateReview[];
+  compact?: boolean;
+  busyCandidateId?: string | null;
+  onAccept?(candidate: MemoryCandidateReview): void;
+  onReject?(candidate: MemoryCandidateReview): void;
+  onCopy?(candidate: MemoryCandidateReview): void;
+}): JSX.Element {
+  return (
+    <div className="max-h-[360px] space-y-3 overflow-auto">
+      {props.candidates.map((candidate) => (
+        <div key={candidate.id} className="rounded-md border border-ink-100 bg-white p-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+            <span className="badge">{candidate.decision}</span>
+            <span className="font-mono text-ink-500">{candidate.type}</span>
+            <span className="text-ink-500">{candidate.subtype ?? "none"}</span>
+            <span className="text-ink-500">importance {candidate.importance.toFixed(2)}</span>
+            {candidate.confidence !== undefined && (
+              <span className="text-ink-500">confidence {candidate.confidence.toFixed(2)}</span>
+            )}
+            <span className="font-mono text-ink-500">
+              trace {shortTrace(candidate.sourceTraceId ?? candidate.traceId)}
+            </span>
+          </div>
+          <p className="whitespace-pre-wrap text-sm text-ink-700">
+            {props.compact ? candidate.contentPreview : candidate.content}
+          </p>
+          {candidate.summary && (
+            <p className="mt-2 text-xs text-ink-500">Summary: {candidate.summary}</p>
+          )}
+          <div className="mt-2 text-xs text-ink-500">
+            Reason: {candidate.reason}
+            {candidate.rejectedReason ? ` · Rejected: ${candidate.rejectedReason}` : ""}
+          </div>
+          {!props.compact && (
+            <div className="mt-2 text-xs text-ink-500">
+              Tags: {candidate.tags.join(", ") || "none"}
+            </div>
+          )}
+          {(props.onAccept || props.onReject || props.onCopy) && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {props.onAccept && (
+                <button
+                  className="button-secondary"
+                  type="button"
+                  disabled={props.busyCandidateId === candidate.id}
+                  onClick={() => props.onAccept?.(candidate)}
+                >
+                  Accept
+                </button>
+              )}
+              {props.onCopy && (
+                <button
+                  className="button-secondary"
+                  type="button"
+                  onClick={() => props.onCopy?.(candidate)}
+                >
+                  Edit & Save
+                </button>
+              )}
+              {props.onReject && (
+                <button
+                  className="button-secondary"
+                  type="button"
+                  disabled={props.busyCandidateId === candidate.id}
+                  onClick={() => props.onReject?.(candidate)}
+                >
+                  Reject
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

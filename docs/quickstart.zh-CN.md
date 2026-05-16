@@ -110,7 +110,7 @@ DEFAULT_EMBEDDING_PROVIDER=mock
 
 ```env
 MEMORY_REPOSITORY=in-memory
-MEMORY_EXTRACTOR=rule-based
+MEMORY_EXTRACTOR=llm
 EVENT_BUS=in-memory
 ```
 
@@ -118,7 +118,7 @@ EVENT_BUS=in-memory
 
 `EVENT_BUS=in-memory` 是当前唯一已实现的 event bus 运行模式。`EVENT_BUS=nats` 是未来 NATS 集成的保留边界，现在选择它会给出明确的未支持错误。
 
-`MEMORY_EXTRACTOR=llm` 是可选模式，会使用 DeepSeek Reasoning 提出候选记忆。它只会在 `writeMemory=true` 的回合消耗 reasoning token，并且候选记忆仍会先经过 `MemoryService` 校验和评分，才可能写入。
+`MEMORY_EXTRACTOR=llm` 是默认模式，在 DeepSeek Reasoning 已配置时会用它提出候选记忆。它只会在 `writeMemory=true` 的回合消耗 reasoning token，并且候选记忆仍会先经过 `MemoryService` 校验和评分，才可能写入。如果 DeepSeek Reasoning 未配置，YUVI 会安全回退到 `rule-based`。如需确定性且不消耗 token 的抽取，可设置 `MEMORY_EXTRACTOR=rule-based`。
 
 ```env
 MEMORY_REPOSITORY=postgres

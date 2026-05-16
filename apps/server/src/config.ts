@@ -42,11 +42,11 @@ function parseEventBus(value: string | undefined): "in-memory" | "nats" {
 }
 
 function parseMemoryExtractor(value: string | undefined): "rule-based" | "llm" {
-  if (!value || value === "rule-based") {
-    return "rule-based";
-  }
-  if (value === "llm") {
+  if (!value || value === "llm") {
     return "llm";
+  }
+  if (value === "rule-based") {
+    return "rule-based";
   }
 
   throw new Error(`Unsupported MEMORY_EXTRACTOR '${value}'. Supported values: rule-based, llm.`);

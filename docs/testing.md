@@ -60,9 +60,12 @@ The smoke script sets:
 ```env
 PROVIDER_ALLOW_MOCKS=true
 MEMORY_REPOSITORY=in-memory
+MEMORY_EXTRACTOR=llm
 EVENT_BUS=in-memory
 DEFAULT_EMBEDDING_PROVIDER=mock
 ```
+
+`MEMORY_EXTRACTOR=llm` is the default, but smoke tests without real DeepSeek Reasoning credentials fall back safely to rule-based extraction and do not require tokens. Set `MEMORY_EXTRACTOR=rule-based` when you need deterministic no-token extractor behavior.
 
 `EVENT_BUS=nats` is reserved for future support and is expected to fail clearly until the NATS runtime adapter is implemented. For lightweight local smoke checks that do not need Docker infrastructure, start development with:
 

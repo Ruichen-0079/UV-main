@@ -44,7 +44,13 @@ Dashboard 的 Memory 页面是开发期手动记忆管理控制台。它可以�
 
 Rule-based extractor 只会为稳定信号提出候选记忆，例如明确的 `remember` / `记住`、`from now on` / `以后`、长期偏好、provider choice、项目路径、仓库路径、启动命令、配置决策、排错结论、稳定 workflow instruction 和项目里程碑。普通问题、问候、失败回答、无法确定或缺少上下文的 assistant response 不会被自动存储。需要精确修正时，请使用 Dashboard Memory 页面手动管理。
 
-`MEMORY_EXTRACTOR=rule-based` 是默认模式，不消耗模型 token。`MEMORY_EXTRACTOR=llm` 是显式 opt-in 模式，会使用已配置的 DeepSeek Reasoning provider，因此只会在 `writeMemory=true` 时消耗 reasoning token。LLM 只能提出候选记忆，最终仍由 `MemoryService` 负责校验、评分、去重和决定是否写入。无效 JSON 会 fail closed，Reasoning provider 不可用时会回退到 rule-based extractor。
+`MEMORY_EXTRACTOR=llm` 是默认模式，在 DeepSeek Reasoning provider 已配置时会使用它，因此只会在 `writeMemory=true` 时消耗 reasoning token。LLM 只能提出候选记忆，最终仍由 `MemoryService` 负责校验、评分、去重和决定是否写入。无效 JSON 会 fail closed，Reasoning provider 不可用时会回退到 rule-based extractor。`MEMORY_EXTRACTOR=rule-based` 仍可用于确定性、无 token 消耗的抽取。
+
+## Candidate Review
+
+Dashboard 会把最近的 memory extraction candidates 作为开发期 debug state 展示出来。Candidate 只是建议，不是新的持久化来源。界面会显示 extractor mode、source trace、type/subtype、preview text、summary、importance、confidence、tags、reason，以及 decision（`stored` 或 `rejected`）。疑似 secret 的 metadata key，例如 API key、token、password、bearer 值和 Authorization header，会被脱敏。
+
+开发者可以在 Dashboard 中 accept、edit-and-save 或 reject 最近的 candidate。Accept 会通过正常 MemoryService 路径写成 dashboard/manual memory；Reject 只更新内存中的 candidate history。LLM extraction 不会绕过校验、评分或手动 memory controls。
 
 ## Prompt Safety
 

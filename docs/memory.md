@@ -44,7 +44,13 @@ Automatic memory writes are conservative. `readMemory` controls retrieval for pr
 
 The rule-based extractor only proposes memories for durable signals such as explicit `remember` / `记住`, `from now on` / `以后`, long-term preferences, provider choices, project paths, repository paths, startup commands, configuration decisions, troubleshooting conclusions, stable workflow instructions, and project milestones. Ordinary questions, greetings, failed answers, and uncertain assistant responses are not stored automatically. Use the Dashboard Memory page for explicit manual corrections.
 
-`MEMORY_EXTRACTOR=rule-based` is the default and does not consume model tokens. `MEMORY_EXTRACTOR=llm` is opt-in and uses the configured DeepSeek Reasoning provider, so it consumes reasoning tokens only when `writeMemory=true`. The LLM can only propose candidates; `MemoryService` validates, scores, deduplicates, and decides what to store. Invalid JSON fails closed, and unavailable reasoning providers fall back to the rule-based extractor.
+`MEMORY_EXTRACTOR=llm` is the default and uses the configured DeepSeek Reasoning provider when available, so it consumes reasoning tokens only when `writeMemory=true`. The LLM can only propose candidates; `MemoryService` validates, scores, deduplicates, and decides what to store. Invalid JSON fails closed, and unavailable reasoning providers fall back to the rule-based extractor. `MEMORY_EXTRACTOR=rule-based` remains available for deterministic no-token extraction.
+
+## Candidate Review
+
+The Dashboard exposes recent memory extraction candidates as development-only debug state. Candidates are suggestions, not a separate source of truth. They show the extractor mode, source trace, type/subtype, preview text, summary, importance, confidence, tags, reason, and decision (`stored` or `rejected`). Suspicious metadata keys such as API keys, tokens, passwords, bearer values, and Authorization headers are redacted.
+
+From the Dashboard, a developer can accept, edit-and-save, or reject a recent candidate. Accepting a candidate writes it through the normal memory service path as a dashboard/manual memory; rejecting it only updates the in-memory candidate history. LLM extraction never bypasses validation, scoring, or manual memory controls.
 
 ## Prompt Safety
 
