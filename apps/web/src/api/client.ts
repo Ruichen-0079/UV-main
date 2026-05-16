@@ -196,6 +196,13 @@ export type PromptPreviewResponse = {
   memoryExtractorMode?: string;
   memoryExtractorActive?: string;
   memoryExtractorUsed?: boolean;
+  memoryExtractorProvider?: string;
+  memoryExtractionCandidateCount?: number;
+  storedMemoryCount?: number;
+  rejectedMemoryCount?: number;
+  rejectedReasons?: string[];
+  fallbackUsed?: boolean;
+  llmExtractionError?: string;
   memoryExtractionSkippedReason?: string;
   retrievedMemoryCountRaw?: number;
   retrievedMemoryCount?: number;
@@ -221,6 +228,13 @@ export type PromptPreviewResponse = {
     memoryExtractorMode?: string;
     memoryExtractorActive?: string;
     memoryExtractorUsed?: boolean;
+    memoryExtractorProvider?: string;
+    memoryExtractionCandidateCount?: number;
+    storedMemoryCount?: number;
+    rejectedMemoryCount?: number;
+    rejectedReasons?: string[];
+    fallbackUsed?: boolean;
+    llmExtractionError?: string;
     memoryExtractionSkippedReason?: string;
     retrievedMemoryCountRaw?: number;
     retrievedMemoryCount?: number;

@@ -51,6 +51,7 @@ export type RuntimeMemoryPort = {
   }): Promise<MemoryRetrievalResult>;
   scoreImportance(text: string): number;
   extractCandidates?(input: {
+    sessionId?: string | undefined;
     userMessage: string;
     assistantMessage?: string | undefined;
     sourceTraceId?: string | null | undefined;
@@ -126,6 +127,13 @@ export type RuntimePromptPreview = {
   memoryExtractorMode: string;
   memoryExtractorActive: string;
   memoryExtractorUsed: boolean;
+  memoryExtractorProvider?: string | undefined;
+  memoryExtractionCandidateCount: number;
+  storedMemoryCount: number;
+  rejectedMemoryCount: number;
+  rejectedReasons: string[];
+  fallbackUsed: boolean;
+  llmExtractionError?: string | undefined;
   memoryExtractionSkippedReason?: string | undefined;
 };
 
@@ -414,10 +422,11 @@ export class RuntimeOrchestrator {
       writeMemory: true
     }
   ): Promise<MemoryExtractionRuntimeDebug> {
-    const extractorStatus = this.getMemoryExtractorStatus();
+    const initialExtractorStatus = this.getMemoryExtractorStatus();
     try {
       if (this.options.memory.extractCandidates && this.options.memory.rememberCandidate) {
         const candidates = await this.options.memory.extractCandidates({
+          sessionId: sourceEvent.payload.sessionId,
           userMessage: sourceEvent.payload.content,
           assistantMessage: reply.payload.content,
           sourceTraceId: sourceEvent.traceId,
@@ -428,6 +437,13 @@ export class RuntimeOrchestrator {
           memoryOptions
         });
         const selected = candidates.filter((candidate) => candidate.importance >= 0.65);
+        const extractorStatus = this.getMemoryExtractorStatus();
+        const rejectedReasons = [
+          ...(extractorStatus.rejectedReasons ?? []),
+          ...candidates
+            .filter((candidate) => candidate.importance < 0.65)
+            .map((candidate) => `runtime-threshold:${candidate.reason}`)
+        ];
         await Promise.all(
           selected.map((candidate) =>
             this.options.memory.rememberCandidate?.(candidate, {
@@ -436,13 +452,17 @@ export class RuntimeOrchestrator {
             })
           )
         );
-        return selected.length > 0
-          ? { ...extractorStatus, used: true }
-          : {
-              ...extractorStatus,
-              used: true,
-              skippedReason: "Extractor produced no candidates above threshold."
-            };
+        return {
+          ...extractorStatus,
+          used: true,
+          candidateCount: candidates.length,
+          storedMemoryCount: selected.length,
+          rejectedCount: Math.max(candidates.length - selected.length, 0),
+          rejectedReasons,
+          ...(selected.length > 0
+            ? {}
+            : { skippedReason: "Extractor produced no candidates above threshold." })
+        };
       }
 
       const importance = this.options.memory.scoreImportance(
@@ -450,8 +470,12 @@ export class RuntimeOrchestrator {
       );
       if (importance < 0.65) {
         return {
-          ...extractorStatus,
+          ...initialExtractorStatus,
           used: false,
+          candidateCount: 0,
+          storedMemoryCount: 0,
+          rejectedCount: 0,
+          rejectedReasons: [],
           skippedReason: "Legacy memory score was below write threshold."
         };
       }
@@ -464,8 +488,12 @@ export class RuntimeOrchestrator {
         tags: [sourceEvent.payload.sessionId]
       });
       return {
-        ...extractorStatus,
-        used: true
+        ...initialExtractorStatus,
+        used: true,
+        candidateCount: 1,
+        storedMemoryCount: 1,
+        rejectedCount: 0,
+        rejectedReasons: []
       };
     } catch (error) {
       await this.publishRuntimeError("Memory write failed after reply generation.", error, {
@@ -477,8 +505,13 @@ export class RuntimeOrchestrator {
         this.errorLogContext(error, reply.traceId)
       );
       return {
-        ...extractorStatus,
+        ...initialExtractorStatus,
         used: false,
+        candidateCount: 0,
+        storedMemoryCount: 0,
+        rejectedCount: 0,
+        rejectedReasons: [],
+        error: safeErrorMessage(error),
         skippedReason: "Memory extraction failed and was skipped."
       };
     }
@@ -736,12 +769,26 @@ export class RuntimeOrchestrator {
     | "memoryExtractorMode"
     | "memoryExtractorActive"
     | "memoryExtractorUsed"
+    | "memoryExtractorProvider"
+    | "memoryExtractionCandidateCount"
+    | "storedMemoryCount"
+    | "rejectedMemoryCount"
+    | "rejectedReasons"
+    | "fallbackUsed"
+    | "llmExtractionError"
     | "memoryExtractionSkippedReason"
   > {
     return {
       memoryExtractorMode: debug.mode,
       memoryExtractorActive: debug.active,
       memoryExtractorUsed: debug.used,
+      memoryExtractionCandidateCount: debug.candidateCount ?? 0,
+      storedMemoryCount: debug.storedMemoryCount ?? 0,
+      rejectedMemoryCount: debug.rejectedCount ?? 0,
+      rejectedReasons: debug.rejectedReasons ?? [],
+      fallbackUsed: Boolean(debug.fallbackUsed),
+      ...(debug.provider ? { memoryExtractorProvider: debug.provider } : {}),
+      ...(debug.error ? { llmExtractionError: debug.error } : {}),
       ...(debug.skippedReason ? { memoryExtractionSkippedReason: debug.skippedReason } : {})
     };
   }
@@ -760,6 +807,7 @@ export class RuntimeOrchestrator {
 
 type MemoryExtractionRuntimeDebug = MemoryExtractorStatus & {
   used: boolean;
+  storedMemoryCount?: number | undefined;
   skippedReason?: string | undefined;
 };
 

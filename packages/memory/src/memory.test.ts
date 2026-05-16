@@ -357,9 +357,11 @@ describe("MemoryRepository", () => {
   });
 
   it("extracts validated LLM memory candidates from strict JSON", async () => {
+    let calls = 0;
     const extractor = new LlmMemoryExtractor(
       {
         async generateReasoning() {
+          calls += 1;
           return {
             reasoning: JSON.stringify({
               candidates: [
@@ -380,7 +382,7 @@ describe("MemoryRepository", () => {
         }
       },
       new RuleBasedMemoryExtractor(),
-      { enabled: true }
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
     );
 
     const candidates = await extractor.extractCandidates({
@@ -398,6 +400,14 @@ describe("MemoryRepository", () => {
         sourceTraceId: "trace-llm"
       })
     ]);
+    expect(calls).toBe(1);
+    expect(extractor.getStatus()).toMatchObject({
+      mode: "llm",
+      active: "llm",
+      provider: "deepseek",
+      fallbackUsed: false,
+      candidateCount: 1
+    });
   });
 
   it("rejects low-confidence LLM memory candidates", async () => {
@@ -423,7 +433,7 @@ describe("MemoryRepository", () => {
         }
       },
       new RuleBasedMemoryExtractor(),
-      { enabled: true }
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
     );
 
     await expect(
@@ -431,7 +441,7 @@ describe("MemoryRepository", () => {
     ).resolves.toEqual([]);
   });
 
-  it("falls back to rule-based extraction when LLM output is invalid", async () => {
+  it("fails closed when LLM output is invalid JSON", async () => {
     const extractor = new LlmMemoryExtractor(
       {
         async generateReasoning() {
@@ -441,7 +451,31 @@ describe("MemoryRepository", () => {
         }
       },
       new RuleBasedMemoryExtractor(),
-      { enabled: true }
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main",
+      sourceTraceId: "trace-rule"
+    });
+
+    expect(candidates).toEqual([]);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "llm",
+      fallbackUsed: false,
+      rejectedReasons: ["invalid-json"]
+    });
+  });
+
+  it("falls back to rule-based extraction when the reasoning provider call fails", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          throw new Error("network unavailable with sk-secret");
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
     );
 
     const candidates = await extractor.extractCandidates({
@@ -456,6 +490,11 @@ describe("MemoryRepository", () => {
         sourceTraceId: "trace-rule"
       })
     );
+    expect(extractor.getStatus()).toMatchObject({
+      active: "fallback-rule-based",
+      fallbackUsed: true
+    });
+    expect(extractor.getStatus().error).not.toContain("sk-secret");
   });
 
   it("does not call the reasoning provider unless LLM extraction is explicitly enabled", async () => {
@@ -485,6 +524,38 @@ describe("MemoryRepository", () => {
       expect.objectContaining({
         subtype: "provider-choice",
         sourceTraceId: "trace-disabled-llm"
+      })
+    );
+  });
+
+  it("falls back without calling the reasoning provider when it is not configured", async () => {
+    let calls = 0;
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          calls += 1;
+          throw new Error("should not be called");
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: false, providerName: "deepseek" }
+    );
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "以后 chat 用 DeepSeek",
+      sourceTraceId: "trace-unconfigured"
+    });
+
+    expect(calls).toBe(0);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "fallback-rule-based",
+      fallbackUsed: true,
+      skippedReason: "Reasoning provider is not configured; falling back to rule-based extraction."
+    });
+    expect(candidates).toContainEqual(
+      expect.objectContaining({
+        subtype: "provider-choice",
+        sourceTraceId: "trace-unconfigured"
       })
     );
   });

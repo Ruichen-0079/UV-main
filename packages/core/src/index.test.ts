@@ -86,6 +86,7 @@ describe("RuntimeOrchestrator", () => {
   it("uses memory extractor candidates for runtime writes and skips ordinary turns", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const written: MemoryCandidate[] = [];
+    const extractionInputs: string[] = [];
     const runtime = new RuntimeOrchestrator({
       eventBus,
       memory: {
@@ -96,6 +97,7 @@ describe("RuntimeOrchestrator", () => {
           return 0;
         },
         async extractCandidates(input) {
+          extractionInputs.push(input.userMessage);
           if (input.userMessage.startsWith("记住")) {
             return [
               {
@@ -143,6 +145,10 @@ describe("RuntimeOrchestrator", () => {
     });
 
     expect(written).toHaveLength(1);
+    expect(extractionInputs).toEqual([
+      "hi",
+      "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    ]);
     expect(written[0]).toMatchObject({
       type: "semantic",
       subtype: "path",

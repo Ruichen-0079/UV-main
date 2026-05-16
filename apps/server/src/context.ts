@@ -49,19 +49,17 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
   const memoryRepository = createMemoryRepositoryFromEnv();
   const promptBuilder = new PromptBuilder();
   const ruleBasedExtractor = new RuleBasedMemoryExtractor();
-  if (config.memoryExtractor === "llm" && !config.memoryExtractorLlmEnabled) {
-    logger.warn(
-      "MEMORY_EXTRACTOR=llm selected, but MEMORY_EXTRACTOR_LLM_ENABLED is not true. Falling back to rule-based extraction without calling the reasoning provider."
-    );
-  }
   const runtimeLogger = createRuntimeLogger(logger);
   const activeMemoryRepository = process.env["MEMORY_REPOSITORY"] ?? "in-memory";
 
   function createMemoryService(providers: ProviderRegistry): MemoryService {
+    const reasoningStatus = providers.getStatus().providers.reasoning;
     const memoryExtractor =
       config.memoryExtractor === "llm"
         ? new LlmMemoryExtractor(providers.getReasoningProvider(), ruleBasedExtractor, {
-            enabled: config.memoryExtractorLlmEnabled
+            enabled: true,
+            providerConfigured: Boolean(reasoningStatus.configured && !reasoningStatus.mock),
+            providerName: reasoningStatus.provider
           })
         : ruleBasedExtractor;
 
@@ -135,12 +133,6 @@ function collectNotHotReloadedSettings(
   }
   if ((env["MEMORY_EXTRACTOR"] ?? config.memoryExtractor) !== config.memoryExtractor) {
     notHotReloaded.push("MEMORY_EXTRACTOR");
-  }
-  if (
-    /^(1|true|yes|on)$/iu.test(env["MEMORY_EXTRACTOR_LLM_ENABLED"]?.trim() ?? "") !==
-    config.memoryExtractorLlmEnabled
-  ) {
-    notHotReloaded.push("MEMORY_EXTRACTOR_LLM_ENABLED");
   }
   return notHotReloaded;
 }

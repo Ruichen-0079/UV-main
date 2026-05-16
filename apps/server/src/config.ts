@@ -5,7 +5,6 @@ export type ServerConfig = {
   runtimeMode: "development" | "test" | "production";
   eventBus: "in-memory" | "nats";
   memoryExtractor: "rule-based" | "llm";
-  memoryExtractorLlmEnabled: boolean;
   dashboardDevToken?: string | undefined;
 };
 
@@ -19,7 +18,6 @@ export function loadServerConfig(
     runtimeMode: parseRuntimeMode(env["RUNTIME_MODE"] ?? env["NODE_ENV"]),
     eventBus: parseEventBus(env["EVENT_BUS"] ?? env["EVENT_BUS_DRIVER"]),
     memoryExtractor: parseMemoryExtractor(env["MEMORY_EXTRACTOR"]),
-    memoryExtractorLlmEnabled: parseBoolean(env["MEMORY_EXTRACTOR_LLM_ENABLED"]),
     dashboardDevToken: emptyToUndefined(env["DASHBOARD_DEV_TOKEN"])
   };
 }
@@ -57,8 +55,4 @@ function parseMemoryExtractor(value: string | undefined): "rule-based" | "llm" {
 function emptyToUndefined(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
-}
-
-function parseBoolean(value: string | undefined): boolean {
-  return /^(1|true|yes|on)$/iu.test(value?.trim() ?? "");
 }

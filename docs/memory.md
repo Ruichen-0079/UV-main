@@ -44,7 +44,7 @@ Automatic memory writes are conservative. `readMemory` controls retrieval for pr
 
 The rule-based extractor only proposes memories for durable signals such as explicit `remember` / `记住`, `from now on` / `以后`, long-term preferences, provider choices, project paths, repository paths, startup commands, configuration decisions, troubleshooting conclusions, stable workflow instructions, and project milestones. Ordinary questions, greetings, failed answers, and uncertain assistant responses are not stored automatically. Use the Dashboard Memory page for explicit manual corrections.
 
-`MEMORY_EXTRACTOR=rule-based` is the default and does not consume model tokens. `MEMORY_EXTRACTOR=llm` is reserved for a future DeepSeek Reasoning-assisted extractor, but it still falls back to rule-based extraction unless `MEMORY_EXTRACTOR_LLM_ENABLED=true` is explicitly set.
+`MEMORY_EXTRACTOR=rule-based` is the default and does not consume model tokens. `MEMORY_EXTRACTOR=llm` is opt-in and uses the configured DeepSeek Reasoning provider, so it consumes reasoning tokens only when `writeMemory=true`. The LLM can only propose candidates; `MemoryService` validates, scores, deduplicates, and decides what to store. Invalid JSON fails closed, and unavailable reasoning providers fall back to the rule-based extractor.
 
 ## Prompt Safety
 

@@ -80,6 +80,7 @@ export type MemoryCandidate = {
   summary?: string | null;
   importance: number;
   confidence?: number;
+  metadata?: Record<string, unknown>;
   tags: string[];
   reason: string;
   sourceTraceId?: string | null;
@@ -92,10 +93,17 @@ export type MemoryExtractorStatus = {
   mode: MemoryExtractorMode;
   active: MemoryExtractorActive;
   enabled: boolean;
+  provider?: string;
+  fallbackUsed?: boolean;
+  candidateCount?: number;
+  rejectedCount?: number;
+  rejectedReasons?: string[];
+  error?: string;
   skippedReason?: string;
 };
 
 export type MemoryExtractionInput = {
+  sessionId?: string | undefined;
   userMessage: string;
   assistantMessage?: string | undefined;
   sourceTraceId?: string | null | undefined;

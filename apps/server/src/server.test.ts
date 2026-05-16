@@ -50,6 +50,10 @@ describe("server", () => {
       expect(prompt.json().retrievedMemoryCount).toBe(0);
       expect(prompt.json().providerName).toBe("mock");
       expect(prompt.json().providerMock).toBe(true);
+      expect(prompt.json().memoryExtractorMode).toBe("rule-based");
+      expect(prompt.json().memoryExtractionCandidateCount).toBeTypeOf("number");
+      expect(prompt.json().storedMemoryCount).toBeTypeOf("number");
+      expect(prompt.json().rejectedMemoryCount).toBeTypeOf("number");
       expect(prompt.body).not.toContain("test_deepseek_secret");
 
       const providers = await app.inject({ method: "GET", url: "/providers/status" });
@@ -659,13 +663,6 @@ describe("server", () => {
   it("parses optional memory extractor mode", () => {
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe("rule-based");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractor).toBe("llm");
-    expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractorLlmEnabled).toBe(false);
-    expect(
-      loadServerConfig({
-        MEMORY_EXTRACTOR: "llm",
-        MEMORY_EXTRACTOR_LLM_ENABLED: "true"
-      }).memoryExtractorLlmEnabled
-    ).toBe(true);
     expect(() => loadServerConfig({ MEMORY_EXTRACTOR: "external" })).toThrow(
       "Unsupported MEMORY_EXTRACTOR"
     );

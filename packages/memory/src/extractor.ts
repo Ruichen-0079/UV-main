@@ -9,6 +9,7 @@ import type {
 import { z } from "zod";
 
 export type MemoryExtractionReasoner = {
+  readonly name?: string;
   generateReasoning(input: {
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
     effort?: "low" | "medium" | "high" | undefined;
@@ -20,34 +21,36 @@ export type MemoryExtractionReasoner = {
 
 export type LlmMemoryExtractorOptions = {
   enabled?: boolean;
+  providerConfigured?: boolean;
+  providerName?: string;
 };
 
 export class LlmMemoryExtractor implements MemoryExtractor {
+  private lastStatus: MemoryExtractorStatus;
+
   constructor(
     private readonly reasoner: MemoryExtractionReasoner,
     private readonly fallback: MemoryExtractor = new RuleBasedMemoryExtractor(),
     private readonly options: LlmMemoryExtractorOptions = {}
-  ) {}
+  ) {
+    this.lastStatus = this.createBaseStatus();
+  }
 
   getStatus(): MemoryExtractorStatus {
-    if (!this.options.enabled) {
-      return {
-        mode: "llm",
-        active: "fallback-rule-based",
-        enabled: false,
-        skippedReason: "LLM memory extraction is disabled until explicitly enabled."
-      };
-    }
-
-    return {
-      mode: "llm",
-      active: "llm",
-      enabled: true
-    };
+    return this.lastStatus;
   }
 
   async extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
-    if (!this.options.enabled) {
+    this.lastStatus = this.createBaseStatus();
+    if (!this.options.enabled || !this.options.providerConfigured) {
+      this.lastStatus = {
+        ...this.createBaseStatus(),
+        active: "fallback-rule-based",
+        fallbackUsed: true,
+        skippedReason: !this.options.enabled
+          ? "LLM memory extraction is disabled until explicitly enabled."
+          : "Reasoning provider is not configured; falling back to rule-based extraction."
+      };
       return this.fallback.extractCandidates(input);
     }
 
@@ -64,6 +67,7 @@ export class LlmMemoryExtractor implements MemoryExtractor {
           {
             role: "user",
             content: JSON.stringify({
+              sessionId: input.sessionId ?? null,
               userMessage: input.userMessage,
               assistantMessage: input.assistantMessage ?? "",
               sourceTraceId: input.sourceTraceId ?? null,
@@ -76,22 +80,84 @@ export class LlmMemoryExtractor implements MemoryExtractor {
       });
       const parsed = parseLlmExtractorJson(output.answer ?? output.reasoning);
       const validated = LlmExtractorOutputSchema.parse(parsed);
-      return validated.candidates
-        .filter((candidate) => candidate.confidence >= 0.7 && candidate.importance >= 0.65)
-        .map((candidate) => ({
+      const accepted: MemoryCandidate[] = [];
+      const rejectedReasons: string[] = [];
+      for (const candidate of validated.candidates) {
+        if (candidate.confidence < 0.7) {
+          rejectedReasons.push(`low-confidence:${candidate.reason}`);
+          continue;
+        }
+        if (candidate.importance < 0.65) {
+          rejectedReasons.push(`low-importance:${candidate.reason}`);
+          continue;
+        }
+        accepted.push({
           type: candidate.type,
           subtype: candidate.subtype ?? null,
           content: candidate.content.trim(),
           summary: candidate.summary?.trim() || candidate.content.trim(),
           importance: candidate.importance,
           confidence: candidate.confidence,
+          metadata: candidate.metadata ?? {},
           tags: candidate.tags,
           reason: candidate.reason,
           sourceTraceId: candidate.sourceTraceId ?? input.sourceTraceId ?? null
-        }));
-    } catch {
-      return this.fallback.extractCandidates(input);
+        });
+      }
+      this.lastStatus = {
+        ...this.createBaseStatus(),
+        active: "llm",
+        fallbackUsed: false,
+        candidateCount: accepted.length,
+        rejectedCount: rejectedReasons.length,
+        rejectedReasons
+      };
+      return accepted;
+    } catch (error) {
+      const message = safeExtractorError(error);
+      if (isJsonValidationError(error)) {
+        this.lastStatus = {
+          ...this.createBaseStatus(),
+          active: "llm",
+          fallbackUsed: false,
+          candidateCount: 0,
+          rejectedCount: 0,
+          rejectedReasons: ["invalid-json"],
+          error: message,
+          skippedReason: "LLM extractor output was invalid and was rejected."
+        };
+        return [];
+      }
+
+      const fallbackCandidates = await this.fallback.extractCandidates(input);
+      this.lastStatus = {
+        ...this.createBaseStatus(),
+        active: "fallback-rule-based",
+        fallbackUsed: true,
+        candidateCount: fallbackCandidates.length,
+        error: message,
+        skippedReason: "Reasoning provider failed; falling back to rule-based extraction."
+      };
+      return fallbackCandidates;
     }
+  }
+
+  private createBaseStatus(): MemoryExtractorStatus {
+    const enabled = Boolean(this.options.enabled && this.options.providerConfigured);
+    return {
+      mode: "llm",
+      active: enabled ? "llm" : "fallback-rule-based",
+      enabled,
+      provider: this.options.providerName ?? this.reasoner.name ?? "reasoning",
+      fallbackUsed: !enabled,
+      ...(enabled
+        ? {}
+        : {
+            skippedReason: !this.options.enabled
+              ? "LLM memory extraction is disabled until explicitly enabled."
+              : "Reasoning provider is not configured; falling back to rule-based extraction."
+          })
+    };
   }
 }
 
@@ -233,6 +299,7 @@ function candidate(input: {
     tags: createTags(content, input.subtype),
     reason: input.reason,
     confidence: 1,
+    metadata: { generatedBy: "rule-based-memory-extractor" },
     sourceTraceId: input.sourceTraceId
   };
 }
@@ -416,6 +483,11 @@ const LlmExtractorCandidateSchema = z
     confidence: z.number().min(0).max(1),
     tags: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
     reason: z.string().trim().min(3).max(120),
+    metadata: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .default({})
+      .transform(redactUnsafeMetadata),
     sourceTraceId: z.string().trim().min(1).max(120).nullable().optional()
   })
   .strict();
@@ -443,16 +515,50 @@ function parseLlmExtractorJson(text: string): unknown {
     return JSON.parse(trimmed.slice(start, end + 1));
   }
 
-  throw new Error("LLM memory extractor did not return JSON.");
+  throw new SyntaxError("LLM memory extractor did not return JSON.");
+}
+
+function isJsonValidationError(error: unknown): boolean {
+  return error instanceof SyntaxError || error instanceof z.ZodError;
+}
+
+function safeExtractorError(error: unknown): string {
+  if (error instanceof z.ZodError) {
+    return "LLM memory extractor returned invalid candidate JSON.";
+  }
+  if (error instanceof SyntaxError) {
+    return "LLM memory extractor returned malformed JSON.";
+  }
+  if (error instanceof Error) {
+    return error.message.replace(/Bearer\s+[^\s]+|sk-[A-Za-z0-9_-]+/giu, "[redacted]");
+  }
+  return "LLM memory extraction failed.";
+}
+
+function redactUnsafeMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (/api[_-]?key|authorization|token|password|secret/iu.test(key)) {
+      safe[key] = "[redacted]";
+      continue;
+    }
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      safe[key] = value;
+    }
+  }
+  return safe;
 }
 
 const llmExtractorSystemPrompt = [
   "You are YUVI's memory extraction filter.",
-  "Return ONLY strict JSON with this shape:",
-  '{"candidates":[{"type":"semantic","subtype":"preference","content":"...","summary":"...","importance":0.8,"confidence":0.9,"tags":["..."],"reason":"...","sourceTraceId":null}]}',
+  "Return strict JSON only. No markdown. No explanations outside JSON.",
+  "Use this shape:",
+  '{"candidates":[{"type":"semantic","subtype":"preference","content":"...","summary":"...","importance":0.8,"confidence":0.9,"tags":["..."],"reason":"...","metadata":{},"sourceTraceId":null}]}',
   "Allowed type values: working, episodic, semantic, emotional, procedural, relationship.",
-  "Allowed subtype values: preference, fact, project, workflow, milestone, provider-choice, path, repo, command, emotion, relationship, or null.",
-  "Extract only durable user/project memory. Reject greetings, ordinary Q&A, uncertain assistant answers, and transient chatter.",
+  "Allowed subtype values: preference, fact, project, workflow, milestone, provider-choice, path, repo, command, troubleshooting, config, emotion, relationship, or null.",
+  "Extract only stable, useful, long-term memories.",
+  "Do not store trivial chat, generic Q&A, transient chatter, failed answers, or assistant uncertainty.",
+  "Prefer explicit user statements: project facts, preferences, paths, repos, commands, provider choices, milestones, troubleshooting conclusions.",
   "Use provider metadata only as safe context, never as memory content.",
   "Prefer concise memories. Never include API keys, Authorization headers, raw env files, or secrets."
 ].join("\n");

@@ -38,10 +38,13 @@ Development defaults to in-memory memory:
 
 ```env
 MEMORY_REPOSITORY=in-memory
+MEMORY_EXTRACTOR=rule-based
 EVENT_BUS=in-memory
 ```
 
 `EVENT_BUS=in-memory` is the only implemented event bus runtime mode today. `EVENT_BUS=nats` is a reserved future boundary and will fail clearly until NATS integration is implemented.
+
+`MEMORY_EXTRACTOR=llm` is optional and uses DeepSeek Reasoning to propose memory candidates. It consumes reasoning tokens only on turns where `writeMemory=true`, and candidates are still validated/scored by `MemoryService` before storage.
 
 Fill DeepSeek values when you want real provider calls:
 

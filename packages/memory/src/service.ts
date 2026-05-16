@@ -85,7 +85,8 @@ export class MemoryService {
       source: options.source ?? "runtime",
       sourceTraceId: candidate.sourceTraceId ?? null,
       metadata: {
-        generatedBy: "rule-based-memory-extractor",
+        ...(candidate.metadata ?? {}),
+        generatedBy: candidate.metadata?.["generatedBy"] ?? "memory-extractor",
         reason: candidate.reason,
         confidence: candidate.confidence ?? null,
         sourceTraceId: candidate.sourceTraceId ?? null
