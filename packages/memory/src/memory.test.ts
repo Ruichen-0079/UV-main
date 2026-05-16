@@ -10,6 +10,7 @@ import {
   createMemoryRepositoryFromEnv,
   PostgresMemoryRepository
 } from "./repository.js";
+import { MemoryScorer } from "./scorer.js";
 import { createMemoryDisplayText, extractSearchKeywords, MemoryService } from "./service.js";
 
 describe("MemoryRepository", () => {
@@ -26,6 +27,8 @@ describe("MemoryRepository", () => {
     const recent = await repository.listRecentMemories(5);
 
     expect(byId?.content).toBe("The user is testing memory.");
+    expect(byId?.subtype).toBeNull();
+    expect(byId?.sourceTraceId).toBeNull();
     expect(recent.map((memory) => memory.id)).toContain(created.id);
   });
 
@@ -118,6 +121,39 @@ describe("MemoryRepository", () => {
     expect(createMemoryDisplayText(stored)).toBe("用户偏好 DeepSeek。");
     expect(stored.content).toContain("“");
     expect(stored.content).toContain("- -");
+  });
+
+  it("scores only durable memory-worthy interactions highly", () => {
+    const scorer = new MemoryScorer();
+
+    expect(scorer.scoreImportance("hi")).toBe(0);
+    expect(scorer.scoreImportance("What is TypeScript?")).toBe(0);
+    expect(scorer.scoreImportance("记住：用户偏好 Chat 使用 DeepSeek。")).toBeGreaterThan(0.9);
+    expect(
+      scorer.scoreImportance("用户偏好 Chat/Reasoning 使用 DeepSeek，TTS 使用 xAI。")
+    ).toBeGreaterThanOrEqual(0.8);
+    expect(scorer.scoreImportance("项目里程碑：Dashboard provider observability 已完成。")).toBe(
+      0.75
+    );
+  });
+
+  it("stores runtime source trace and subtype metadata", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+
+    const memory = await service.rememberInteraction({
+      userMessage: "记住：用户偏好 Chat 使用 DeepSeek。",
+      assistantMessage: "OK",
+      source: "runtime",
+      sourceTraceId: "trace-123"
+    });
+
+    expect(memory).toMatchObject({
+      type: "semantic",
+      subtype: "provider-choice",
+      source: "runtime",
+      sourceTraceId: "trace-123"
+    });
   });
 
   it("extracts useful keywords from mixed Chinese and English input", () => {

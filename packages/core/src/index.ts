@@ -47,6 +47,7 @@ export type RuntimeMemoryPort = {
     userMessage: string;
     assistantMessage: string;
     source?: string;
+    sourceTraceId?: string | null;
     tags?: string[];
   }): Promise<Memory>;
 };
@@ -66,6 +67,8 @@ export type HandleUserMessageInput = {
 export type HandleUserMessageOptions = {
   voiceOutput?: boolean | undefined;
   useMemory?: boolean | undefined;
+  readMemory?: boolean | undefined;
+  writeMemory?: boolean | undefined;
 };
 
 export type RuntimePromptPreview = {
@@ -73,6 +76,8 @@ export type RuntimePromptPreview = {
   timestamp: string;
   userMessage: string;
   useMemory: boolean;
+  readMemory: boolean;
+  writeMemory: boolean;
   memoryRepository: string;
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
@@ -145,9 +150,15 @@ export class RuntimeOrchestrator {
     const voiceOutput = isRuntimeUserMessageEvent(input)
       ? Boolean(options.voiceOutput)
       : Boolean(input.voiceOutput);
-    const useMemory = options.useMemory ?? true;
-    const reply = await this.generateReply(userEvent, { voiceOutput, useMemory });
-    await this.maybeStoreMemory(userEvent, reply);
+    const memoryOptions = resolveMemoryOptions(options);
+    const reply = await this.generateReply(userEvent, {
+      voiceOutput,
+      readMemory: memoryOptions.readMemory,
+      writeMemory: memoryOptions.writeMemory
+    });
+    if (memoryOptions.writeMemory) {
+      await this.maybeStoreMemory(userEvent, reply);
+    }
     await this.maybeSynthesizeSpeech(reply, voiceOutput);
 
     return reply;
@@ -179,7 +190,8 @@ export class RuntimeOrchestrator {
     await this.options.eventBus.publish(transcriptEvent);
     const reply = await this.generateReply(transcriptEvent, {
       voiceOutput: Boolean(input.voiceOutput),
-      useMemory: true
+      readMemory: true,
+      writeMemory: true
     });
     await this.maybeStoreMemory(transcriptEvent, reply);
     await this.maybeSynthesizeSpeech(reply, Boolean(input.voiceOutput));
@@ -216,11 +228,18 @@ export class RuntimeOrchestrator {
 
   async generateReply(
     event: UserMessageEvent | UserVoiceTranscriptEvent,
-    options: { voiceOutput?: boolean | undefined; useMemory?: boolean | undefined } = {}
+    options: {
+      voiceOutput?: boolean | undefined;
+      useMemory?: boolean | undefined;
+      readMemory?: boolean | undefined;
+      writeMemory?: boolean | undefined;
+    } = {}
   ): Promise<AgentReplyEvent> {
     const voiceOutput = Boolean(options.voiceOutput);
-    const useMemory = options.useMemory ?? true;
-    const memoryContext = useMemory ? await this.retrieveMemories(event) : emptyMemoryContext();
+    const memoryOptions = resolveMemoryOptions(options);
+    const memoryContext = memoryOptions.readMemory
+      ? await this.retrieveMemories(event)
+      : emptyMemoryContext();
     const prompt = this.options.promptBuilder.buildPrompt({
       systemIdentity: "You are Companion, a local-first AI companion runtime agent.",
       characterStyle: "Warm, concise, emotionally aware, and practical.",
@@ -232,7 +251,7 @@ export class RuntimeOrchestrator {
         importance: memory.importance,
         createdAt: memory.createdAt
       })),
-      memoryEnabled: useMemory,
+      memoryEnabled: memoryOptions.readMemory,
       currentSituation: voiceOutput
         ? "The user is interacting through voice."
         : "The user is interacting through text.",
@@ -243,7 +262,9 @@ export class RuntimeOrchestrator {
       traceId: event.traceId,
       timestamp: new Date().toISOString(),
       userMessage: event.payload.content,
-      useMemory,
+      useMemory: memoryOptions.readMemory && memoryOptions.writeMemory,
+      readMemory: memoryOptions.readMemory,
+      writeMemory: memoryOptions.writeMemory,
       memoryRepository: this.options.memoryRepository ?? "in-memory",
       retrievedMemoryCountRaw: memoryContext.retrievedMemoryCountRaw,
       retrievedMemoryCount: memoryContext.retrievedMemoryCount,
@@ -340,7 +361,7 @@ export class RuntimeOrchestrator {
       const importance = this.options.memory.scoreImportance(
         `${sourceEvent.payload.content}\n${reply.payload.content}`
       );
-      if (importance < 0.1) {
+      if (importance < 0.65) {
         return;
       }
 
@@ -348,6 +369,7 @@ export class RuntimeOrchestrator {
         userMessage: sourceEvent.payload.content,
         assistantMessage: reply.payload.content,
         source: "runtime",
+        sourceTraceId: sourceEvent.traceId,
         tags: [sourceEvent.payload.sessionId]
       });
     } catch (error) {
@@ -596,6 +618,18 @@ type MemoryContext = {
   promptMemories: RetrievedMemoryDebug[];
 };
 
+function resolveMemoryOptions(options: {
+  useMemory?: boolean | undefined;
+  readMemory?: boolean | undefined;
+  writeMemory?: boolean | undefined;
+}): { readMemory: boolean; writeMemory: boolean } {
+  const defaultEnabled = options.useMemory ?? true;
+  return {
+    readMemory: options.readMemory ?? defaultEnabled,
+    writeMemory: options.writeMemory ?? defaultEnabled
+  };
+}
+
 function emptyMemoryContext(): MemoryContext {
   return {
     retrievedMemoryCountRaw: 0,
@@ -609,7 +643,9 @@ function memoryToDebug(memory: Memory): RetrievedMemoryDebug {
   return {
     id: memory.id,
     type: memory.type,
+    subtype: memory.subtype,
     source: memory.source,
+    sourceTraceId: memory.sourceTraceId,
     importance: memory.importance,
     createdAt: memory.createdAt,
     displayText: memory.summary ?? memory.content,

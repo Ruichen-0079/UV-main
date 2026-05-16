@@ -4,7 +4,13 @@ create extension if not exists pg_trgm;
 
 create table if not exists memories (
   id uuid primary key default gen_random_uuid(),
-  type text not null check (type in ('working', 'episodic', 'semantic', 'emotional', 'procedural')),
+  type text not null check (type in ('working', 'episodic', 'semantic', 'emotional', 'procedural', 'relationship')),
+  subtype text null check (
+    subtype is null or subtype in (
+      'preference', 'fact', 'project', 'workflow', 'milestone',
+      'provider-choice', 'path', 'repo', 'command', 'emotion', 'relationship'
+    )
+  ),
   content text not null,
   summary text null,
   embedding vector null,
@@ -12,11 +18,26 @@ create table if not exists memories (
   emotion_valence real not null default 0,
   emotion_arousal real not null default 0,
   source text not null,
+  source_trace_id text null,
   tags text[] not null default '{}',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   last_accessed_at timestamptz not null default now()
 );
+
+alter table memories add column if not exists subtype text null;
+alter table memories add column if not exists source_trace_id text null;
+alter table memories drop constraint if exists memories_type_check;
+alter table memories add constraint memories_type_check
+  check (type in ('working', 'episodic', 'semantic', 'emotional', 'procedural', 'relationship'));
+alter table memories drop constraint if exists memories_subtype_check;
+alter table memories add constraint memories_subtype_check
+  check (
+    subtype is null or subtype in (
+      'preference', 'fact', 'project', 'workflow', 'milestone',
+      'provider-choice', 'path', 'repo', 'command', 'emotion', 'relationship'
+    )
+  );
 
 create table if not exists entities (
   id uuid primary key default gen_random_uuid(),

@@ -1,18 +1,40 @@
-import type { CreateMemoryInput, MemoryType } from "@companion/memory";
+import type { CreateMemoryInput, MemorySubtype, MemoryType } from "@companion/memory";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 
-const MemoryTypeSchema = z.enum(["working", "episodic", "semantic", "emotional", "procedural"]);
+const MemoryTypeSchema = z.enum([
+  "working",
+  "episodic",
+  "semantic",
+  "emotional",
+  "procedural",
+  "relationship"
+]);
+const MemorySubtypeSchema = z.enum([
+  "preference",
+  "fact",
+  "project",
+  "workflow",
+  "milestone",
+  "provider-choice",
+  "path",
+  "repo",
+  "command",
+  "emotion",
+  "relationship"
+]);
 
 const CreateMemoryRequestSchema = z.object({
   type: MemoryTypeSchema.default("working"),
+  subtype: MemorySubtypeSchema.nullable().optional(),
   content: z.string().min(1),
   summary: z.string().nullable().optional(),
   importance: z.number().min(0).max(1).optional(),
   emotionValence: z.number().min(-1).max(1).optional(),
   emotionArousal: z.number().min(0).max(1).optional(),
   source: z.string().min(1).default("manual"),
+  sourceTraceId: z.string().min(1).nullable().optional(),
   tags: z.array(z.string()).default([])
 });
 
@@ -43,6 +65,12 @@ export async function registerMemoryRoutes(
       tags: input.data.tags
     };
 
+    if (input.data.subtype !== undefined) {
+      createInput.subtype = input.data.subtype as MemorySubtype | null;
+    }
+    if (input.data.sourceTraceId !== undefined) {
+      createInput.sourceTraceId = input.data.sourceTraceId;
+    }
     if (input.data.summary !== undefined) {
       createInput.summary = input.data.summary;
     }

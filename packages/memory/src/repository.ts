@@ -45,13 +45,14 @@ export class PostgresMemoryRepository implements MemoryRepository {
   async createMemory(input: CreateMemoryInput): Promise<Memory> {
     const result = await this.pool.query(
       `insert into memories (
-        type, content, summary, embedding, importance, emotion_valence,
-        emotion_arousal, source, tags
+        type, subtype, content, summary, embedding, importance, emotion_valence,
+        emotion_arousal, source, source_trace_id, tags
       ) values (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
       ) returning *`,
       [
         input.type,
+        input.subtype ?? null,
         input.content,
         input.summary ?? null,
         input.embedding ? vectorLiteral(input.embedding) : null,
@@ -59,6 +60,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
         input.emotionValence ?? 0,
         input.emotionArousal ?? 0,
         input.source,
+        input.sourceTraceId ?? null,
         input.tags ?? []
       ]
     );
@@ -176,6 +178,7 @@ export class InMemoryMemoryRepository implements MemoryRepository {
     const memory: Memory = {
       id: crypto.randomUUID(),
       type: input.type,
+      subtype: input.subtype ?? null,
       content: input.content,
       summary: input.summary ?? null,
       embedding: input.embedding ?? null,
@@ -183,6 +186,7 @@ export class InMemoryMemoryRepository implements MemoryRepository {
       emotionValence: input.emotionValence ?? 0,
       emotionArousal: input.emotionArousal ?? 0,
       source: input.source,
+      sourceTraceId: input.sourceTraceId ?? null,
       tags: input.tags ?? [],
       createdAt: now,
       updatedAt: now,
@@ -277,6 +281,7 @@ function mapMemoryRow(row: QueryResultRow): Memory {
   return {
     id: row["id"],
     type: row["type"] as MemoryType,
+    subtype: row["subtype"] ?? null,
     content: row["content"],
     summary: row["summary"],
     embedding: parseVector(row["embedding"]),
@@ -284,6 +289,7 @@ function mapMemoryRow(row: QueryResultRow): Memory {
     emotionValence: Number(row["emotion_valence"]),
     emotionArousal: Number(row["emotion_arousal"]),
     source: row["source"],
+    sourceTraceId: row["source_trace_id"] ?? null,
     tags: row["tags"] ?? [],
     createdAt: row["created_at"],
     updatedAt: row["updated_at"],

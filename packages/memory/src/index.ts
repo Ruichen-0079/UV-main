@@ -8,6 +8,7 @@ export type {
   MemoryQuery,
   MemoryRetrievalResult,
   MemorySearchQuery,
+  MemorySubtype,
   MemoryType,
   RetrievedMemoryCandidate,
   RetrievedMemoryDebug,

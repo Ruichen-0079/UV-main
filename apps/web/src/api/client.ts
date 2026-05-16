@@ -75,6 +75,8 @@ export type SendMessageRequest = {
   text: string;
   options: {
     useMemory: boolean;
+    readMemory?: boolean;
+    writeMemory?: boolean;
     voiceOutput: boolean;
   };
 };
@@ -95,10 +97,12 @@ export type MessageResponse = RuntimeEvent & {
 export type MemoryRecord = {
   id: string;
   type: string;
+  subtype?: string | null;
   content: string;
   summary?: string | null;
   importance: number;
   source: string;
+  sourceTraceId?: string | null;
   tags: string[];
   createdAt: string;
   updatedAt?: string;
@@ -107,10 +111,12 @@ export type MemoryRecord = {
 
 export type CreateMemoryRequest = {
   type: string;
+  subtype?: string | null;
   content: string;
   summary?: string;
   importance?: number;
   source: string;
+  sourceTraceId?: string | null;
   tags: string[];
 };
 
@@ -129,6 +135,7 @@ export type RetrievedMemoryDebug = {
   id: string;
   type: string;
   source: string;
+  sourceTraceId: string | null;
   importance: number;
   createdAt: string;
   displayText: string;
@@ -143,6 +150,8 @@ export type PromptPreviewResponse = {
   timestamp?: string;
   userMessage?: string;
   useMemory?: boolean;
+  readMemory?: boolean;
+  writeMemory?: boolean;
   memoryRepository?: string;
   retrievedMemoryCountRaw?: number;
   retrievedMemoryCount?: number;
@@ -158,6 +167,8 @@ export type PromptPreviewResponse = {
     timestamp?: string;
     userMessage?: string;
     useMemory?: boolean;
+    readMemory?: boolean;
+    writeMemory?: boolean;
     memoryRepository?: string;
     retrievedMemoryCountRaw?: number;
     retrievedMemoryCount?: number;

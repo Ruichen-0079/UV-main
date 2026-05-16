@@ -8,6 +8,7 @@ import type {
   MemoryQuery,
   MemoryRetrievalResult,
   MemorySearchQuery,
+  MemorySubtype,
   MemoryType,
   RetrievedMemoryCandidate,
   RetrievedMemoryDebug
@@ -30,6 +31,7 @@ export class MemoryService {
     userMessage: string;
     assistantMessage: string;
     source?: string;
+    sourceTraceId?: string | null;
     tags?: string[];
   }): Promise<Memory> {
     const content = [
@@ -38,13 +40,15 @@ export class MemoryService {
     ].join("\n");
 
     return this.repository.createMemory({
-      type: "episodic",
+      type: inferRuntimeMemoryType(input.userMessage),
+      subtype: inferMemorySubtype(input.userMessage),
       content,
       summary: this.compressForStorage(content),
       importance: this.scoreImportance(content),
       emotionValence: 0,
       emotionArousal: 0,
       source: input.source ?? "interaction",
+      sourceTraceId: input.sourceTraceId ?? null,
       tags: input.tags ?? []
     });
   }
@@ -75,6 +79,7 @@ export class MemoryService {
   async remember(_sessionId: string, content: string): Promise<void> {
     await this.repository.createMemory({
       type: "working",
+      subtype: inferMemorySubtype(content),
       content,
       summary: this.compressForStorage(content),
       importance: this.scoreImportance(content),
@@ -122,7 +127,7 @@ export class MemoryService {
     return this.buildRetrievalResultFromCandidates(
       query,
       keywords,
-      this.rankKeywordMatches(recent, keywords, "fallback-recent")
+      this.rankFallbackRecent(recent)
     );
   }
 
@@ -169,6 +174,17 @@ export class MemoryService {
         score: scoreMemory(memory, keywords)
       }))
       .filter((entry) => entry.score > 0);
+  }
+
+  private rankFallbackRecent(memories: Memory[]): RetrievedMemoryCandidate[] {
+    return memories
+      .map((memory) => ({
+        memory,
+        displayText: createMemoryDisplayText(memory),
+        matchedBy: "fallback-recent" as const,
+        score: typePriority(memory.type) + memory.importance
+      }))
+      .sort(compareCandidates);
   }
 
   private buildRetrievalResult(
@@ -421,6 +437,8 @@ function typePriority(type: MemoryType): number {
       return 5;
     case "procedural":
       return 4;
+    case "relationship":
+      return 4;
     case "emotional":
       return 3;
     case "episodic":
@@ -434,13 +452,66 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
   return {
     id: candidate.memory.id,
     type: candidate.memory.type,
+    subtype: candidate.memory.subtype,
     source: candidate.memory.source,
+    sourceTraceId: candidate.memory.sourceTraceId,
     importance: candidate.memory.importance,
     createdAt: candidate.memory.createdAt,
     displayText: candidate.displayText,
     matchedBy: candidate.matchedBy,
     ...(candidate.excludedReason ? { excludedReason: candidate.excludedReason } : {})
   };
+}
+
+function inferRuntimeMemoryType(text: string): MemoryType {
+  const normalized = text.toLowerCase();
+  if (/workflow|流程|步骤|command|命令|脚本|script/u.test(normalized)) {
+    return "procedural";
+  }
+  if (/relationship|关系|称呼/u.test(normalized)) {
+    return "relationship";
+  }
+  if (/prefer|preference|偏好|默认|provider|deepseek|xai|dashscope|使用/u.test(normalized)) {
+    return "semantic";
+  }
+  return "episodic";
+}
+
+function inferMemorySubtype(text: string): MemorySubtype | null {
+  const normalized = text.toLowerCase();
+  if (
+    /deepseek|xai|dashscope|provider|chat|reasoning|tts|stt|vision|供应商|模型/u.test(normalized)
+  ) {
+    return "provider-choice";
+  }
+  if (/repo|repository|仓库|github/u.test(normalized)) {
+    return "repo";
+  }
+  if (/\/home\/|c:\\|\\\\wsl|路径|目录|workspace|工作区/u.test(normalized)) {
+    return "path";
+  }
+  if (/workflow|流程|步骤/u.test(normalized)) {
+    return "workflow";
+  }
+  if (/command|命令|pnpm|docker|script|脚本/u.test(normalized)) {
+    return "command";
+  }
+  if (/完成|implemented|finished|milestone|里程碑|通过验证/u.test(normalized)) {
+    return "milestone";
+  }
+  if (/prefer|preference|偏好|默认|喜欢/u.test(normalized)) {
+    return "preference";
+  }
+  if (/project|项目|yuvi|runtime/u.test(normalized)) {
+    return "project";
+  }
+  if (/emotion|情绪|感受/u.test(normalized)) {
+    return "emotion";
+  }
+  if (/relationship|关系|称呼/u.test(normalized)) {
+    return "relationship";
+  }
+  return null;
 }
 
 const stopWords = new Set([

@@ -93,6 +93,21 @@ PROVIDER_ALLOW_MOCKS=true
 DEFAULT_EMBEDDING_PROVIDER=mock
 ```
 
+默认开发记忆模式是：
+
+```env
+MEMORY_REPOSITORY=in-memory
+```
+
+`in-memory` 适合快速开发和测试，服务器重启后数据会丢失。要启用 PostgreSQL 持久化记忆，需要同时设置：
+
+```env
+MEMORY_REPOSITORY=postgres
+DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+```
+
+启用 PostgreSQL 记忆前必须先运行 migration。
+
 服务器当前直接读取 `process.env`；启动前请把 `.env` 加载进 shell。
 
 Bash 或 WSL：
@@ -162,31 +177,40 @@ docker compose -f infra/docker-compose.yml logs -f redis
 docker compose -f infra/docker-compose.yml logs -f nats
 ```
 
-重置 development volumes：
+推荐使用安全的开发数据库重置脚本：
+
+```bash
+pnpm db:reset:dev
+```
+
+重置 development volumes 的手动方式：
 
 ```bash
 docker compose -f infra/docker-compose.yml down -v
 docker compose -f infra/docker-compose.yml up -d
 ```
 
-警告：`down -v` 会删除 development 数据库、Redis 数据和 NATS JetStream 数据。只在你确定可以丢弃本地开发数据时使用。
+警告：`pnpm db:reset:dev` 和 `down -v` 都会删除 development 数据库、Redis 数据和 NATS JetStream 数据。只在你确定可以丢弃本地开发数据时使用。
 
 ## 4. Run Migrations
 
-目前还没有 migration runner script。请直接应用 SQL 文件。
+PostgreSQL memory mode 使用内置 migration runner：
 
-Bash 或 WSL：
+```bash
+pnpm db:migrate
+```
+
+验证 PostgreSQL memory smoke：
+
+```bash
+pnpm smoke:postgres
+```
+
+手动应用 SQL 文件仅作为高级排错方式：
 
 ```bash
 docker compose -f infra/docker-compose.yml exec -T postgres \
   psql -U airi -d companion < packages/memory/migrations/001_init_memory.sql
-```
-
-PowerShell:
-
-```powershell
-Get-Content packages/memory/migrations/001_init_memory.sql |
-  docker compose -f infra/docker-compose.yml exec -T postgres psql -U airi -d companion
 ```
 
 验证 memory table 存在：
@@ -195,6 +219,20 @@ Get-Content packages/memory/migrations/001_init_memory.sql |
 docker compose -f infra/docker-compose.yml exec postgres \
   psql -U airi -d companion -c "\dt"
 ```
+
+如果 `MEMORY_REPOSITORY=postgres` 但没有 `DATABASE_URL`，服务器会拒绝启动并提示需要 `DATABASE_URL`。如果忘记运行 migration，memory table 或 pgvector extension 相关操作会失败。
+
+## 4.1 YUVI Memory Core and future external backends
+
+YUVI 拥有自己的 MemoryService 和 MemoryBackend / MemoryRepository 边界。当前 Phase 1 目标是保证记忆读写开关、来源追踪、类型/子类型、检索排序和 prompt 注入的正确性。
+
+未来可以把外部系统作为 adapter 接入，而不是让它们成为 core dependency：
+
+- Mem0 可以作为 `Mem0MemoryBackend` 接入，用于实验外部长期记忆服务。
+- Graphiti 可以作为 `GraphitiMemoryBackend` 的参考方向，用于研究 temporal graph memory。
+- Letta 只作为 architecture reference，不作为 YUVI Runtime core dependency。
+
+当前不要把 raw chat logs 直接塞进 prompt。记忆必须经过检索、排序、压缩和重构后再进入 `RelevantMemory`。
 
 ## 5. Start Server
 

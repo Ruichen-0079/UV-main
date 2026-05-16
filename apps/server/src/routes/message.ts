@@ -14,6 +14,8 @@ const MessageRequestSchema = z
         tts: z.boolean().optional(),
         voiceOutput: z.boolean().optional(),
         useMemory: z.boolean().optional(),
+        readMemory: z.boolean().optional(),
+        writeMemory: z.boolean().optional(),
         promptPreview: z.boolean().optional()
       })
       .optional()
@@ -58,7 +60,9 @@ export async function registerMessageRoutes(
     try {
       const response = await context.runtime.handleUserMessage(event, {
         voiceOutput,
-        useMemory: input.data.options?.useMemory ?? defaultUseMemory
+        useMemory: input.data.options?.useMemory ?? defaultUseMemory,
+        readMemory: input.data.options?.readMemory,
+        writeMemory: input.data.options?.writeMemory
       });
       const provider = response.payload.provider;
       return reply.send({

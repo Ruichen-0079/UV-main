@@ -310,6 +310,198 @@ describe("server", () => {
       restoreEnv(previous);
     }
   });
+
+  it("separates memory read and write behavior", async () => {
+    const previous = snapshotEnv();
+    setMockEnv();
+
+    try {
+      const app = await buildServer(loadServerConfig(process.env));
+      const seeded = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          type: "semantic",
+          content: "用户偏好 Chat 使用 DeepSeek。",
+          source: "dashboard"
+        }
+      });
+      expect(seeded.statusCode).toBe(200);
+
+      const disabled = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "用户偏好什么 Chat provider？",
+          options: {
+            useMemory: false,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(disabled.statusCode).toBe(200);
+      const disabledPrompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
+      expect(disabledPrompt.json()).toMatchObject({
+        readMemory: false,
+        writeMemory: false,
+        retrievedMemoryCount: 0
+      });
+      expect(disabledPrompt.body).not.toContain("用户偏好 Chat 使用 DeepSeek");
+      expect(
+        (await app.inject({ method: "GET", url: "/memory/recent?limit=10" })).json().memories
+      ).toHaveLength(1);
+
+      const writeOnly = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "记住：用户偏好 Reasoning 使用 DeepSeek。",
+          options: {
+            useMemory: false,
+            readMemory: false,
+            writeMemory: true,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(writeOnly.statusCode).toBe(200);
+      const writeOnlyPrompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
+      expect(writeOnlyPrompt.json()).toMatchObject({
+        readMemory: false,
+        writeMemory: true,
+        retrievedMemoryCount: 0
+      });
+      const afterWriteOnly = await app.inject({ method: "GET", url: "/memory/recent?limit=10" });
+      expect(afterWriteOnly.json().memories).toHaveLength(2);
+      expect(afterWriteOnly.json().memories[0]).toMatchObject({
+        type: "semantic",
+        subtype: "provider-choice",
+        source: "runtime",
+        sourceTraceId: writeOnly.json().traceId
+      });
+
+      const readOnly = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "Chat provider 偏好是什么？",
+          options: {
+            readMemory: true,
+            writeMemory: false,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(readOnly.statusCode).toBe(200);
+      const readOnlyPrompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
+      expect(readOnlyPrompt.json().readMemory).toBe(true);
+      expect(readOnlyPrompt.json().writeMemory).toBe(false);
+      expect(readOnlyPrompt.json().retrievedMemoryCount).toBeGreaterThan(0);
+      expect(readOnlyPrompt.body).toContain("用户偏好 Chat 使用 DeepSeek");
+      const afterReadOnly = await app.inject({ method: "GET", url: "/memory/recent?limit=10" });
+      expect(afterReadOnly.json().memories).toHaveLength(2);
+
+      const enabled = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "记住：项目里程碑是 provider observability 已完成。",
+          options: {
+            useMemory: true,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(enabled.statusCode).toBe(200);
+      const enabledPrompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
+      expect(enabledPrompt.json().readMemory).toBe(true);
+      expect(enabledPrompt.json().writeMemory).toBe(true);
+
+      await app.close();
+    } finally {
+      restoreEnv(previous);
+    }
+  });
+
+  it("avoids writing low-value runtime memories", async () => {
+    const previous = snapshotEnv();
+    setMockEnv();
+
+    try {
+      const app = await buildServer(loadServerConfig(process.env));
+      const greeting = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "hi",
+          options: {
+            useMemory: true,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(greeting.statusCode).toBe(200);
+
+      const ordinaryQuestion = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "test",
+          text: "What is the weather?",
+          options: {
+            useMemory: true,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(ordinaryQuestion.statusCode).toBe(200);
+
+      const recent = await app.inject({ method: "GET", url: "/memory/recent?limit=10" });
+      expect(recent.json().memories).toHaveLength(0);
+      await app.close();
+    } finally {
+      restoreEnv(previous);
+    }
+  });
+
+  it("verifies providers only when explicit endpoints are called", async () => {
+    const previous = snapshotEnv();
+    setMockEnv();
+
+    try {
+      const app = await buildServer(loadServerConfig(process.env));
+      const chat = await app.inject({ method: "POST", url: "/providers/verify/chat" });
+      expect(chat.statusCode).toBe(200);
+      expect(chat.json()).toMatchObject({
+        ok: true,
+        provider: "mock",
+        capability: "chat",
+        mock: true
+      });
+      expect(chat.body).not.toContain("test_deepseek_secret");
+
+      const reasoning = await app.inject({
+        method: "POST",
+        url: "/providers/verify/reasoning"
+      });
+      expect(reasoning.statusCode).toBe(200);
+      expect(reasoning.json()).toMatchObject({
+        ok: true,
+        provider: "mock",
+        capability: "reasoning",
+        mock: true
+      });
+      expect(reasoning.body).not.toContain("test_deepseek_secret");
+      await app.close();
+    } finally {
+      restoreEnv(previous);
+    }
+  });
 });
 
 function countOccurrences(text: string, needle: string): number {

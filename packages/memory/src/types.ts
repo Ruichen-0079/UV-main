@@ -1,10 +1,34 @@
-export const MemoryTypes = ["working", "episodic", "semantic", "emotional", "procedural"] as const;
+export const MemoryTypes = [
+  "working",
+  "episodic",
+  "semantic",
+  "emotional",
+  "procedural",
+  "relationship"
+] as const;
 
 export type MemoryType = (typeof MemoryTypes)[number];
+
+export const MemorySubtypes = [
+  "preference",
+  "fact",
+  "project",
+  "workflow",
+  "milestone",
+  "provider-choice",
+  "path",
+  "repo",
+  "command",
+  "emotion",
+  "relationship"
+] as const;
+
+export type MemorySubtype = (typeof MemorySubtypes)[number];
 
 export type Memory = {
   id: string;
   type: MemoryType;
+  subtype: MemorySubtype | null;
   content: string;
   summary: string | null;
   embedding: number[] | null;
@@ -12,6 +36,7 @@ export type Memory = {
   emotionValence: number;
   emotionArousal: number;
   source: string;
+  sourceTraceId: string | null;
   tags: string[];
   createdAt: Date;
   updatedAt: Date;
@@ -20,6 +45,7 @@ export type Memory = {
 
 export type CreateMemoryInput = {
   type: MemoryType;
+  subtype?: MemorySubtype | null;
   content: string;
   summary?: string | null;
   embedding?: number[] | null;
@@ -27,6 +53,7 @@ export type CreateMemoryInput = {
   emotionValence?: number;
   emotionArousal?: number;
   source: string;
+  sourceTraceId?: string | null;
   tags?: string[];
 };
 
@@ -43,7 +70,9 @@ export type MemoryMatchReason = "original-query" | "keyword" | "fallback-recent"
 export type RetrievedMemoryDebug = {
   id: string;
   type: MemoryType;
+  subtype: MemorySubtype | null;
   source: string;
+  sourceTraceId: string | null;
   importance: number;
   createdAt: Date;
   displayText: string;
