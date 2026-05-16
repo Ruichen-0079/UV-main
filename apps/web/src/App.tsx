@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   apiClient,
+  type AcceptMemoryCandidateRequest,
   type CreateMemoryRequest,
   type DashboardWebSocketMessage,
   type HealthResponse,
@@ -464,6 +465,8 @@ function MemoryPage(props: {
   const [editingMemory, setEditingMemory] = useState<MemoryRecord | null>(null);
   const [editForm, setEditForm] = useState<MemoryForm>(() => emptyMemoryForm());
   const [deleteTarget, setDeleteTarget] = useState<MemoryRecord | null>(null);
+  const [editingCandidate, setEditingCandidate] = useState<MemoryCandidateReview | null>(null);
+  const [candidateEditForm, setCandidateEditForm] = useState<MemoryForm>(() => emptyMemoryForm());
   const [detailLoading, setDetailLoading] = useState(false);
   const [busyMemoryId, setBusyMemoryId] = useState<string | null>(null);
   const [busyCandidateId, setBusyCandidateId] = useState<string | null>(null);
@@ -613,7 +616,7 @@ function MemoryPage(props: {
     setError(null);
     setSuccess(null);
     try {
-      await apiClient.acceptMemoryCandidate(candidate.id, {
+      const result = await apiClient.acceptMemoryCandidate(candidate.id, {
         type: candidate.type,
         subtype: candidate.subtype ?? null,
         content: candidate.content,
@@ -621,7 +624,7 @@ function MemoryPage(props: {
         importance: candidate.importance,
         tags: candidate.tags
       });
-      setSuccess("Memory candidate accepted and saved.");
+      setSuccess(result.message ?? "Memory candidate accepted and saved.");
       await Promise.all([refreshMemories(), candidates.refresh()]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Accept candidate failed");
@@ -631,11 +634,15 @@ function MemoryPage(props: {
   }
 
   async function rejectCandidate(candidate: MemoryCandidateReview): Promise<void> {
+    const reason = window.prompt("Optional rejection reason", "Rejected from Memory page.");
+    if (reason === null) {
+      return;
+    }
     setBusyCandidateId(candidate.id);
     setError(null);
     setSuccess(null);
     try {
-      await apiClient.rejectMemoryCandidate(candidate.id, "Rejected from Memory page.");
+      await apiClient.rejectMemoryCandidate(candidate.id, reason || undefined);
       setSuccess("Memory candidate rejected.");
       await candidates.refresh();
     } catch (caught) {
@@ -645,8 +652,9 @@ function MemoryPage(props: {
     }
   }
 
-  function copyCandidate(candidate: MemoryCandidateReview): void {
-    setCreateForm({
+  function editCandidate(candidate: MemoryCandidateReview): void {
+    setEditingCandidate(candidate);
+    setCandidateEditForm({
       type: candidate.type,
       subtype: candidate.subtype ?? "",
       content: candidate.content,
@@ -655,9 +663,30 @@ function MemoryPage(props: {
       emotionValence: "0",
       emotionArousal: "0",
       tags: candidate.tags.join(", "),
-      source: "manual"
+      source: "dashboard"
     });
-    setSuccess("Candidate copied to the manual memory form.");
+  }
+
+  async function saveCandidateEdit(): Promise<void> {
+    if (!editingCandidate) {
+      return;
+    }
+    setBusyCandidateId(editingCandidate.id);
+    setError(null);
+    setSuccess(null);
+    try {
+      const result = await apiClient.acceptMemoryCandidate(
+        editingCandidate.id,
+        toAcceptCandidateRequest(candidateEditForm)
+      );
+      setEditingCandidate(null);
+      setSuccess(result.message ?? "Edited candidate saved as memory.");
+      await Promise.all([refreshMemories(), candidates.refresh()]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Save candidate failed");
+    } finally {
+      setBusyCandidateId(null);
+    }
   }
 
   async function refreshMemories(): Promise<void> {
@@ -808,6 +837,38 @@ function MemoryPage(props: {
       </div>
       <div className="grid grid-cols-2 gap-4">
         <Panel title="Recent Memory Candidates" badge="Debug">
+          <div className="mb-3 grid grid-cols-4 gap-2 text-xs text-ink-600">
+            <div className="rounded-md bg-ink-50 p-2">
+              <div className="label">Total</div>
+              <div className="font-semibold text-ink-800">{candidates.data?.count ?? 0}</div>
+            </div>
+            <div className="rounded-md bg-ink-50 p-2">
+              <div className="label">Stored</div>
+              <div className="font-semibold text-ink-800">{candidates.data?.storedCount ?? 0}</div>
+            </div>
+            <div className="rounded-md bg-ink-50 p-2">
+              <div className="label">Rejected</div>
+              <div className="font-semibold text-ink-800">
+                {candidates.data?.rejectedCount ?? 0}
+              </div>
+            </div>
+            <div className="rounded-md bg-ink-50 p-2">
+              <div className="label">Fallback</div>
+              <div className="font-semibold text-ink-800">
+                {String(candidates.data?.fallbackUsed ?? false)}
+              </div>
+            </div>
+          </div>
+          {candidates.data?.volatile && (
+            <Notice
+              tone="info"
+              title="Volatile history"
+              message={
+                candidates.data.message ??
+                "Candidate history is in-memory and resets when the server restarts."
+              }
+            />
+          )}
           {candidates.loading && (
             <Notice tone="info" title="Loading" message="Fetching recent extraction candidates." />
           )}
@@ -825,7 +886,7 @@ function MemoryPage(props: {
               busyCandidateId={busyCandidateId}
               onAccept={(candidate) => void acceptCandidate(candidate)}
               onReject={(candidate) => void rejectCandidate(candidate)}
-              onCopy={copyCandidate}
+              onEdit={editCandidate}
             />
           )}
         </Panel>
@@ -840,7 +901,33 @@ function MemoryPage(props: {
           ) : null}
         </Panel>
         <Panel title="Edit / Delete">
-          {editingMemory ? (
+          {editingCandidate ? (
+            <div>
+              <div className="mb-3 rounded-md border border-ink-100 bg-ink-50 p-3 text-xs text-ink-600">
+                Editing candidate {shortTrace(editingCandidate.id)} from trace{" "}
+                {shortTrace(editingCandidate.sourceTraceId ?? editingCandidate.traceId)}.
+              </div>
+              <MemoryFormFields form={candidateEditForm} setForm={setCandidateEditForm} />
+              <div className="mt-3 flex gap-2">
+                <button
+                  className="button-primary"
+                  disabled={
+                    busyCandidateId === editingCandidate.id || !candidateEditForm.content.trim()
+                  }
+                  onClick={() => void saveCandidateEdit()}
+                >
+                  Save as memory
+                </button>
+                <button
+                  className="button-secondary"
+                  type="button"
+                  onClick={() => setEditingCandidate(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : editingMemory ? (
             <div>
               <MemoryFormFields form={editForm} setForm={setEditForm} />
               <div className="mt-3 flex gap-2">
@@ -2367,6 +2454,17 @@ function toUpdateMemoryRequest(form: MemoryForm): UpdateMemoryRequest {
   };
 }
 
+function toAcceptCandidateRequest(form: MemoryForm): AcceptMemoryCandidateRequest {
+  return {
+    type: form.type,
+    subtype: form.subtype.trim() ? form.subtype.trim() : null,
+    content: form.content.trim(),
+    summary: form.summary.trim() || null,
+    importance: parseImportance(form.importance) ?? 0.5,
+    tags: parseTags(form.tags)
+  };
+}
+
 function parseTags(value: string): string[] {
   return value
     .split(",")
@@ -2706,7 +2804,7 @@ function MemoryCandidateList(props: {
   busyCandidateId?: string | null;
   onAccept?(candidate: MemoryCandidateReview): void;
   onReject?(candidate: MemoryCandidateReview): void;
-  onCopy?(candidate: MemoryCandidateReview): void;
+  onEdit?(candidate: MemoryCandidateReview): void;
 }): JSX.Element {
   return (
     <div className="max-h-[360px] space-y-3 overflow-auto">
@@ -2723,6 +2821,14 @@ function MemoryCandidateList(props: {
             <span className="font-mono text-ink-500">
               trace {shortTrace(candidate.sourceTraceId ?? candidate.traceId)}
             </span>
+            {!props.compact && (
+              <>
+                <span className="text-ink-500">extractor {candidate.extractorMode ?? "n/a"}</span>
+                <span className="text-ink-500">
+                  fallback {String(candidate.fallbackUsed ?? false)}
+                </span>
+              </>
+            )}
           </div>
           <p className="whitespace-pre-wrap text-sm text-ink-700">
             {props.compact ? candidate.contentPreview : candidate.content}
@@ -2739,23 +2845,31 @@ function MemoryCandidateList(props: {
               Tags: {candidate.tags.join(", ") || "none"}
             </div>
           )}
-          {(props.onAccept || props.onReject || props.onCopy) && (
+          {!props.compact && candidate.createdAt && (
+            <div className="mt-2 text-xs text-ink-500">
+              Created: {formatDate(candidate.createdAt)} · Source: {candidate.source ?? "runtime"}
+              {candidate.extractorProvider ? ` · Provider: ${candidate.extractorProvider}` : ""}
+            </div>
+          )}
+          {(props.onAccept || props.onReject || props.onEdit) && (
             <div className="mt-3 flex flex-wrap gap-2">
               {props.onAccept && (
                 <button
                   className="button-secondary"
                   type="button"
-                  disabled={props.busyCandidateId === candidate.id}
+                  disabled={
+                    props.busyCandidateId === candidate.id || Boolean(candidate.storedMemoryId)
+                  }
                   onClick={() => props.onAccept?.(candidate)}
                 >
-                  Accept
+                  {candidate.storedMemoryId ? "Stored" : "Accept"}
                 </button>
               )}
-              {props.onCopy && (
+              {props.onEdit && (
                 <button
                   className="button-secondary"
                   type="button"
-                  onClick={() => props.onCopy?.(candidate)}
+                  onClick={() => props.onEdit?.(candidate)}
                 >
                   Edit & Save
                 </button>

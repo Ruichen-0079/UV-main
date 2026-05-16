@@ -155,10 +155,29 @@ export type RuntimeMemoryCandidateReview = {
   reason: string;
   decision: RuntimeMemoryCandidateDecision;
   rejectedReason?: string | undefined;
+  source: "runtime" | "dashboard";
   sourceTraceId?: string | null | undefined;
   storedMemoryId?: string | undefined;
+  createdAt: string;
+  extractorMode: string;
+  extractorProvider?: string | undefined;
+  fallbackUsed: boolean;
   metadata?: Record<string, unknown> | undefined;
 };
+
+export type RuntimeMemoryCandidateAcceptResult =
+  | {
+      alreadyStored: false;
+      memory: Memory;
+      memoryId: string;
+      message: string;
+    }
+  | {
+      alreadyStored: true;
+      memory: null;
+      memoryId: string;
+      message: string;
+    };
 
 export type SafeProviderCallMetadata = {
   name: string;
@@ -202,10 +221,20 @@ export class RuntimeOrchestrator {
     patch: Partial<
       Pick<MemoryCandidate, "type" | "subtype" | "content" | "summary" | "importance" | "tags">
     > = {}
-  ): Promise<Memory | null> {
+  ): Promise<RuntimeMemoryCandidateAcceptResult | null> {
     const review = this.memoryCandidateHistory.find((candidate) => candidate.id === id);
     if (!review || !this.options.memory.rememberCandidate) {
       return null;
+    }
+    if (review.storedMemoryId) {
+      review.decision = "stored";
+      review.rejectedReason = undefined;
+      return {
+        alreadyStored: true,
+        memory: null,
+        memoryId: review.storedMemoryId,
+        message: "Memory candidate was already stored; no duplicate memory was created."
+      };
     }
 
     const candidate: MemoryCandidate = {
@@ -239,7 +268,12 @@ export class RuntimeOrchestrator {
     review.decision = "stored";
     review.storedMemoryId = memory.id;
     review.rejectedReason = undefined;
-    return memory;
+    return {
+      alreadyStored: false,
+      memory,
+      memoryId: memory.id,
+      message: "Memory candidate accepted and saved."
+    };
   }
 
   rejectMemoryCandidate(
@@ -249,6 +283,11 @@ export class RuntimeOrchestrator {
     const review = this.memoryCandidateHistory.find((candidate) => candidate.id === id);
     if (!review) {
       return null;
+    }
+    if (review.storedMemoryId) {
+      review.decision = "stored";
+      review.rejectedReason = "Candidate is already stored and was not rejected.";
+      return review;
     }
     review.decision = "rejected";
     review.rejectedReason = reason;
@@ -543,7 +582,8 @@ export class RuntimeOrchestrator {
           selected,
           storedMemories: storedMemories.filter((memory): memory is Memory => Boolean(memory)),
           sourceTraceId: sourceEvent.traceId,
-          rejectedReasons
+          rejectedReasons,
+          extractorStatus
         });
         return {
           ...extractorStatus,
@@ -909,6 +949,7 @@ export class RuntimeOrchestrator {
     storedMemories: Memory[];
     sourceTraceId: string;
     rejectedReasons: string[];
+    extractorStatus: MemoryExtractionRuntimeDebug;
   }): RuntimeMemoryCandidateReview[] {
     const storedMemories = [...input.storedMemories];
     const reviews = input.candidates.map((candidate) => {
@@ -923,7 +964,8 @@ export class RuntimeOrchestrator {
         decision: stored ? "stored" : "rejected",
         rejectedReason,
         sourceTraceId: input.sourceTraceId,
-        storedMemoryId: storedMemory?.id
+        storedMemoryId: storedMemory?.id,
+        extractorStatus: input.extractorStatus
       });
     });
 
@@ -992,12 +1034,14 @@ function toMemoryCandidateReview(input: {
   rejectedReason?: string | undefined;
   sourceTraceId: string;
   storedMemoryId?: string | undefined;
+  extractorStatus: MemoryExtractionRuntimeDebug;
 }): RuntimeMemoryCandidateReview {
   const content = redactUnsafeText(input.candidate.content);
+  const timestamp = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
     traceId: input.sourceTraceId,
-    timestamp: new Date().toISOString(),
+    timestamp,
     type: input.candidate.type,
     subtype: input.candidate.subtype,
     content,
@@ -1009,8 +1053,15 @@ function toMemoryCandidateReview(input: {
     reason: redactUnsafeText(input.candidate.reason),
     decision: input.decision,
     rejectedReason: input.rejectedReason,
+    source: "runtime",
     sourceTraceId: input.candidate.sourceTraceId ?? input.sourceTraceId,
     storedMemoryId: input.storedMemoryId,
+    createdAt: timestamp,
+    extractorMode: input.extractorStatus.mode,
+    ...(input.extractorStatus.provider
+      ? { extractorProvider: redactUnsafeText(input.extractorStatus.provider) }
+      : {}),
+    fallbackUsed: Boolean(input.extractorStatus.fallbackUsed),
     metadata: redactUnsafeMetadata(input.candidate.metadata)
   };
 }

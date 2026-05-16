@@ -48,9 +48,9 @@ The rule-based extractor only proposes memories for durable signals such as expl
 
 ## Candidate Review
 
-The Dashboard exposes recent memory extraction candidates as development-only debug state. Candidates are suggestions, not a separate source of truth. They show the extractor mode, source trace, type/subtype, preview text, summary, importance, confidence, tags, reason, and decision (`stored` or `rejected`). Suspicious metadata keys such as API keys, tokens, passwords, bearer values, and Authorization headers are redacted.
+The Dashboard exposes recent memory extraction candidates as development-only debug state. Candidate history is currently in-memory and volatile; it resets when the server restarts. Candidates are suggestions, not a separate source of truth. They show the extractor mode, source trace, type/subtype, preview text, summary, importance, confidence, tags, reason, and decision (`stored`, `rejected`, or `candidate`). Suspicious metadata keys such as API keys, tokens, passwords, bearer values, and Authorization headers are redacted.
 
-From the Dashboard, a developer can accept, edit-and-save, or reject a recent candidate. Accepting a candidate writes it through the normal memory service path as a dashboard/manual memory; rejecting it only updates the in-memory candidate history. LLM extraction never bypasses validation, scoring, or manual memory controls.
+From the Dashboard, a developer can accept, edit-and-save, or reject a recent candidate. Accepting a candidate writes it through the normal memory service path as a dashboard/manual memory; accepting an already stored candidate does not create a duplicate. Rejecting a candidate only updates the in-memory candidate history. LLM extraction never bypasses validation, scoring, or manual memory controls.
 
 ## Prompt Safety
 

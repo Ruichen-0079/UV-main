@@ -225,9 +225,13 @@ export async function registerMemoryRoutes(
       return reply.status(400).send({ error: "invalid_request", details: query.error.flatten() });
     }
 
+    const candidates = context.runtime.getRecentMemoryCandidates(query.data.limit);
     return reply.send({
       mock: false,
-      candidates: context.runtime.getRecentMemoryCandidates(query.data.limit)
+      volatile: true,
+      message: "Memory candidate history is development-only and resets when the server restarts.",
+      ...summarizeCandidates(candidates),
+      candidates
     });
   });
 
@@ -247,7 +251,7 @@ export async function registerMemoryRoutes(
       return reply.status(400).send({ error: "invalid_request", details: input.error.flatten() });
     }
 
-    const memory = await context.runtime.acceptMemoryCandidate(params.data.id, {
+    const result = await context.runtime.acceptMemoryCandidate(params.data.id, {
       ...(input.data.type ? { type: input.data.type as MemoryType } : {}),
       ...(input.data.subtype !== undefined
         ? { subtype: input.data.subtype as MemorySubtype | null }
@@ -258,11 +262,26 @@ export async function registerMemoryRoutes(
       ...(input.data.tags !== undefined ? { tags: input.data.tags } : {})
     });
 
-    if (!memory) {
+    if (!result) {
       return reply.status(404).send({ error: "not_found", message: "Memory candidate not found." });
     }
+    if (result.alreadyStored) {
+      const existing = await context.memoryRepository.getMemoryById(result.memoryId);
+      return reply.send({
+        ok: true,
+        alreadyStored: true,
+        message: result.message,
+        memoryId: result.memoryId,
+        memory: existing ? toSafeMemory(existing) : null
+      });
+    }
 
-    return reply.send({ ok: true, memory: toSafeMemory(memory) });
+    return reply.send({
+      ok: true,
+      alreadyStored: false,
+      message: result.message,
+      memory: toSafeMemory(result.memory)
+    });
   });
 
   app.post("/memory/candidates/:id/reject", async (request, reply) => {
@@ -410,4 +429,20 @@ function redactUnsafeMetadata(value: Record<string, unknown>): Record<string, un
     }
   }
   return output;
+}
+
+function summarizeCandidates(candidates: Array<{ decision: string; fallbackUsed?: boolean }>): {
+  count: number;
+  storedCount: number;
+  rejectedCount: number;
+  candidateCount: number;
+  fallbackUsed: boolean;
+} {
+  return {
+    count: candidates.length,
+    storedCount: candidates.filter((candidate) => candidate.decision === "stored").length,
+    rejectedCount: candidates.filter((candidate) => candidate.decision === "rejected").length,
+    candidateCount: candidates.filter((candidate) => candidate.decision === "candidate").length,
+    fallbackUsed: candidates.some((candidate) => Boolean(candidate.fallbackUsed))
+  };
 }

@@ -505,7 +505,20 @@ describe("server", () => {
         url: "/memory/candidates/recent?limit=5"
       });
       expect(recentCandidates.statusCode).toBe(200);
+      expect(recentCandidates.json()).toMatchObject({
+        volatile: true,
+        count: expect.any(Number),
+        storedCount: expect.any(Number),
+        rejectedCount: expect.any(Number),
+        fallbackUsed: expect.any(Boolean)
+      });
       const candidateId = recentCandidates.json().candidates[0].id as string;
+      expect(recentCandidates.json().candidates[0]).toMatchObject({
+        source: "runtime",
+        extractorMode: "llm",
+        fallbackUsed: true,
+        createdAt: expect.any(String)
+      });
       expect(recentCandidates.body).not.toContain("test_deepseek_secret");
 
       const acceptedCandidate = await app.inject({
@@ -519,10 +532,22 @@ describe("server", () => {
         }
       });
       expect(acceptedCandidate.statusCode).toBe(200);
-      expect(acceptedCandidate.json().memory).toMatchObject({
-        source: "dashboard",
-        content: "用户偏好 Reasoning 使用 DeepSeek。"
+      expect(acceptedCandidate.json()).toMatchObject({
+        ok: true,
+        alreadyStored: true,
+        message: expect.stringContaining("already stored")
       });
+      const afterAlreadyStoredAccept = await app.inject({
+        method: "GET",
+        url: "/memory/recent?limit=10"
+      });
+      expect(
+        afterAlreadyStoredAccept
+          .json()
+          .memories.filter(
+            (memory: { content: string }) => memory.content === "用户偏好 Reasoning 使用 DeepSeek。"
+          )
+      ).toHaveLength(1);
 
       const rejectedCandidate = await app.inject({
         method: "POST",
@@ -532,8 +557,8 @@ describe("server", () => {
       expect(rejectedCandidate.statusCode).toBe(200);
       expect(rejectedCandidate.json().candidate).toMatchObject({
         id: candidateId,
-        decision: "rejected",
-        rejectedReason: "Not useful now."
+        decision: "stored",
+        rejectedReason: "Candidate is already stored and was not rejected."
       });
 
       const readOnly = await app.inject({
@@ -556,7 +581,7 @@ describe("server", () => {
       expect(readOnlyPrompt.json().retrievedMemoryCount).toBeGreaterThan(0);
       expect(readOnlyPrompt.body).toContain("用户偏好 Chat 使用 DeepSeek");
       const afterReadOnly = await app.inject({ method: "GET", url: "/memory/recent?limit=10" });
-      expect(afterReadOnly.json().memories).toHaveLength(3);
+      expect(afterReadOnly.json().memories).toHaveLength(2);
 
       const enabled = await app.inject({
         method: "POST",

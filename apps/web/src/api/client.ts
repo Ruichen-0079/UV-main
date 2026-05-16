@@ -159,8 +159,13 @@ export type MemoryCandidateReview = {
   reason: string;
   decision: "candidate" | "stored" | "rejected";
   rejectedReason?: string;
+  source?: string;
   sourceTraceId?: string | null;
   storedMemoryId?: string;
+  createdAt?: string;
+  extractorMode?: string;
+  extractorProvider?: string;
+  fallbackUsed?: boolean;
   metadata?: Record<string, unknown>;
 };
 
@@ -512,25 +517,50 @@ export const apiClient = {
     });
   },
 
-  listRecentMemoryCandidates(
-    limit = 20
-  ): Promise<{ mock: boolean; candidates: MemoryCandidateReview[] }> {
-    return request<{ mock: boolean; candidates: MemoryCandidateReview[] }>(
-      `/memory/candidates/recent?limit=${limit}`
-    );
+  listRecentMemoryCandidates(limit = 20): Promise<{
+    mock: boolean;
+    volatile: boolean;
+    message?: string;
+    count: number;
+    storedCount: number;
+    rejectedCount: number;
+    candidateCount: number;
+    fallbackUsed: boolean;
+    candidates: MemoryCandidateReview[];
+  }> {
+    return request<{
+      mock: boolean;
+      volatile: boolean;
+      message?: string;
+      count: number;
+      storedCount: number;
+      rejectedCount: number;
+      candidateCount: number;
+      fallbackUsed: boolean;
+      candidates: MemoryCandidateReview[];
+    }>(`/memory/candidates/recent?limit=${limit}`);
   },
 
   acceptMemoryCandidate(
     id: string,
     input: AcceptMemoryCandidateRequest
-  ): Promise<{ ok: boolean; memory: MemoryRecord }> {
-    return request<{ ok: boolean; memory: MemoryRecord }>(
-      `/memory/candidates/${encodeURIComponent(id)}/accept`,
-      {
-        method: "POST",
-        body: JSON.stringify(input)
-      }
-    );
+  ): Promise<{
+    ok: boolean;
+    alreadyStored?: boolean;
+    message?: string;
+    memoryId?: string;
+    memory: MemoryRecord | null;
+  }> {
+    return request<{
+      ok: boolean;
+      alreadyStored?: boolean;
+      message?: string;
+      memoryId?: string;
+      memory: MemoryRecord | null;
+    }>(`/memory/candidates/${encodeURIComponent(id)}/accept`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
   },
 
   rejectMemoryCandidate(

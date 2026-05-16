@@ -48,9 +48,9 @@ Rule-based extractor 只会为稳定信号提出候选记忆，例如明确的 `
 
 ## Candidate Review
 
-Dashboard 会把最近的 memory extraction candidates 作为开发期 debug state 展示出来。Candidate 只是建议，不是新的持久化来源。界面会显示 extractor mode、source trace、type/subtype、preview text、summary、importance、confidence、tags、reason，以及 decision（`stored` 或 `rejected`）。疑似 secret 的 metadata key，例如 API key、token、password、bearer 值和 Authorization header，会被脱敏。
+Dashboard 会把最近的 memory extraction candidates 作为开发期 debug state 展示出来。Candidate history 目前是 in-memory 且 volatile 的，服务器重启后会清空。Candidate 只是建议，不是新的持久化来源。界面会显示 extractor mode、source trace、type/subtype、preview text、summary、importance、confidence、tags、reason，以及 decision（`stored`、`rejected` 或 `candidate`）。疑似 secret 的 metadata key，例如 API key、token、password、bearer 值和 Authorization header，会被脱敏。
 
-开发者可以在 Dashboard 中 accept、edit-and-save 或 reject 最近的 candidate。Accept 会通过正常 MemoryService 路径写成 dashboard/manual memory；Reject 只更新内存中的 candidate history。LLM extraction 不会绕过校验、评分或手动 memory controls。
+开发者可以在 Dashboard 中 accept、edit-and-save 或 reject 最近的 candidate。Accept 会通过正常 MemoryService 路径写成 dashboard/manual memory；如果 candidate 已经被 stored，再次 accept 不会创建重复 memory。Reject 只更新内存中的 candidate history。LLM extraction 不会绕过校验、评分或手动 memory controls。
 
 ## Prompt Safety
 
