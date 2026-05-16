@@ -12,6 +12,7 @@ import {
 } from "./repository.js";
 import { MemoryScorer } from "./scorer.js";
 import { createMemoryDisplayText, extractSearchKeywords, MemoryService } from "./service.js";
+import { LlmMemoryExtractor, RuleBasedMemoryExtractor } from "./extractor.js";
 
 describe("MemoryRepository", () => {
   it("creates and retrieves memory records", async () => {
@@ -20,6 +21,7 @@ describe("MemoryRepository", () => {
       type: "semantic",
       content: "The user is testing memory.",
       source: "test",
+      metadata: { origin: "unit-test" },
       tags: ["test"]
     });
 
@@ -29,6 +31,7 @@ describe("MemoryRepository", () => {
     expect(byId?.content).toBe("The user is testing memory.");
     expect(byId?.subtype).toBeNull();
     expect(byId?.sourceTraceId).toBeNull();
+    expect(byId?.metadata).toEqual({ origin: "unit-test" });
     expect(recent.map((memory) => memory.id)).toContain(created.id);
   });
 
@@ -73,6 +76,7 @@ describe("MemoryRepository", () => {
       limit: 5
     });
 
+    expect(result.retrievalMode).toBe("hybrid-keyword");
     expect(result.rawCount).toBeGreaterThan(1);
     expect(result.count).toBe(1);
     expect(result.memories[0]?.type).toBe("semantic");
@@ -123,6 +127,32 @@ describe("MemoryRepository", () => {
     expect(stored.content).toContain("- -");
   });
 
+  it("searches memory tags and metadata through the local repository fallback", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "semantic",
+      subtype: "project",
+      content: "A stable project memory.",
+      source: "dashboard",
+      metadata: { project: "YUVI Runtime" },
+      tags: ["项目", "runtime"]
+    });
+
+    const tagResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "项目",
+      limit: 5
+    });
+    const metadataResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "YUVI",
+      limit: 5
+    });
+
+    expect(tagResult.count).toBeGreaterThan(0);
+    expect(metadataResult.count).toBeGreaterThan(0);
+    expect(metadataResult.memories[0]?.metadata).toMatchObject({ project: "YUVI Runtime" });
+  });
+
   it("scores only durable memory-worthy interactions highly", () => {
     const scorer = new MemoryScorer();
 
@@ -154,6 +184,161 @@ describe("MemoryRepository", () => {
       source: "runtime",
       sourceTraceId: "trace-123"
     });
+    expect(memory.metadata).toMatchObject({
+      generatedBy: "rule-based-memory-extractor",
+      reason: expect.any(String)
+    });
+  });
+
+  it("extracts explicit remembered project paths as semantic path memories", async () => {
+    const extractor = new RuleBasedMemoryExtractor();
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main",
+      sourceTraceId: "trace-path"
+    });
+
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        type: "semantic",
+        subtype: "path",
+        content: "我的项目路径是 /home/administrator/uv-main/uv-main",
+        importance: expect.any(Number),
+        sourceTraceId: "trace-path"
+      })
+    ]);
+    expect(candidates[0]?.importance).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("extracts provider preferences as provider-choice memories", async () => {
+    const extractor = new RuleBasedMemoryExtractor();
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "以后 chat 用 DeepSeek，TTS 用 xAI"
+    });
+
+    expect(candidates).toContainEqual(
+      expect.objectContaining({
+        type: "semantic",
+        subtype: "provider-choice",
+        reason: "provider-choice"
+      })
+    );
+  });
+
+  it("does not extract trivial greetings or ordinary questions", async () => {
+    const extractor = new RuleBasedMemoryExtractor();
+
+    await expect(extractor.extractCandidates({ userMessage: "hi" })).resolves.toEqual([]);
+    await expect(
+      extractor.extractCandidates({ userMessage: "What is TypeScript?" })
+    ).resolves.toEqual([]);
+  });
+
+  it("extracts project milestones as episodic milestone memories", async () => {
+    const extractor = new RuleBasedMemoryExtractor();
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "项目里程碑：Dashboard provider observability 已完成，并且 validation passed"
+    });
+
+    expect(candidates).toContainEqual(
+      expect.objectContaining({
+        type: "episodic",
+        subtype: "milestone",
+        reason: "project-milestone"
+      })
+    );
+  });
+
+  it("extracts validated LLM memory candidates from strict JSON", async () => {
+    const extractor = new LlmMemoryExtractor({
+      async generateReasoning() {
+        return {
+          reasoning: JSON.stringify({
+            candidates: [
+              {
+                type: "semantic",
+                subtype: "provider-choice",
+                content: "用户偏好 chat 使用 DeepSeek。",
+                summary: "用户偏好 chat 使用 DeepSeek。",
+                importance: 0.86,
+                confidence: 0.91,
+                tags: ["deepseek", "provider-choice"],
+                reason: "provider preference",
+                sourceTraceId: "trace-llm"
+              }
+            ]
+          })
+        };
+      }
+    });
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "以后 chat 用 DeepSeek",
+      sourceTraceId: "trace-fallback"
+    });
+
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        type: "semantic",
+        subtype: "provider-choice",
+        content: "用户偏好 chat 使用 DeepSeek。",
+        importance: 0.86,
+        reason: "provider preference",
+        sourceTraceId: "trace-llm"
+      })
+    ]);
+  });
+
+  it("rejects low-confidence LLM memory candidates", async () => {
+    const extractor = new LlmMemoryExtractor({
+      async generateReasoning() {
+        return {
+          reasoning: JSON.stringify({
+            candidates: [
+              {
+                type: "semantic",
+                subtype: "fact",
+                content: "Maybe this ordinary answer matters.",
+                summary: "Maybe this ordinary answer matters.",
+                importance: 0.9,
+                confidence: 0.2,
+                tags: [],
+                reason: "uncertain"
+              }
+            ]
+          })
+        };
+      }
+    });
+
+    await expect(
+      extractor.extractCandidates({ userMessage: "What is TypeScript?" })
+    ).resolves.toEqual([]);
+  });
+
+  it("falls back to rule-based extraction when LLM output is invalid", async () => {
+    const extractor = new LlmMemoryExtractor({
+      async generateReasoning() {
+        return {
+          reasoning: "not json"
+        };
+      }
+    });
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main",
+      sourceTraceId: "trace-rule"
+    });
+
+    expect(candidates).toContainEqual(
+      expect.objectContaining({
+        type: "semantic",
+        subtype: "path",
+        sourceTraceId: "trace-rule"
+      })
+    );
   });
 
   it("extracts useful keywords from mixed Chinese and English input", () => {
@@ -201,8 +386,12 @@ describe("MemoryRepository", () => {
       .toLowerCase();
 
     expect(combinedSql).toContain("create extension if not exists vector");
+    expect(combinedSql).toContain("create extension if not exists pg_trgm");
+    expect(combinedSql).toContain("metadata jsonb");
     expect(combinedSql).toContain("create table if not exists memories");
     expect(combinedSql).toContain("create table if not exists entities");
     expect(combinedSql).toContain("create table if not exists relations");
+    expect(combinedSql).toContain("memories_summary_trgm_idx");
+    expect(combinedSql).toContain("memories_metadata_idx");
   });
 });

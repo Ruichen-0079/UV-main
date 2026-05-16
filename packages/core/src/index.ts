@@ -1,5 +1,11 @@
 import type { EventBus } from "@companion/event-bus";
-import type { Memory, MemoryRetrievalResult, RetrievedMemoryDebug } from "@companion/memory";
+import type {
+  Memory,
+  MemoryCandidate,
+  MemoryRetrievalMode,
+  MemoryRetrievalResult,
+  RetrievedMemoryDebug
+} from "@companion/memory";
 import type { PromptBuildInput, PromptBuildOutput } from "@companion/prompt-builder";
 import type {
   AgentReplyEvent,
@@ -43,6 +49,15 @@ export type RuntimeMemoryPort = {
     limit?: number;
   }): Promise<MemoryRetrievalResult>;
   scoreImportance(text: string): number;
+  extractCandidates?(input: {
+    userMessage: string;
+    assistantMessage?: string | undefined;
+    sourceTraceId?: string | null | undefined;
+  }): Promise<MemoryCandidate[]>;
+  rememberCandidate?(
+    candidate: MemoryCandidate,
+    options?: { source?: string; tags?: string[] }
+  ): Promise<Memory>;
   rememberInteraction(input: {
     userMessage: string;
     assistantMessage: string;
@@ -75,12 +90,16 @@ export type RuntimePromptPreview = {
   traceId: string;
   timestamp: string;
   userMessage: string;
+  legacyUseMemory: boolean | undefined;
   useMemory: boolean;
   readMemory: boolean;
   writeMemory: boolean;
+  memoryReadEnabled: boolean;
+  memoryWriteEnabled: boolean;
   memoryRepository: string;
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
+  retrievalMode: MemoryRetrievalMode;
   retrievedMemories: RetrievedMemoryDebug[];
   sections: PromptBuildOutput["sections"];
   finalMessages: PromptBuildOutput["messages"];
@@ -262,12 +281,16 @@ export class RuntimeOrchestrator {
       traceId: event.traceId,
       timestamp: new Date().toISOString(),
       userMessage: event.payload.content,
+      legacyUseMemory: memoryOptions.legacyUseMemory,
       useMemory: memoryOptions.readMemory && memoryOptions.writeMemory,
       readMemory: memoryOptions.readMemory,
       writeMemory: memoryOptions.writeMemory,
+      memoryReadEnabled: memoryOptions.readMemory,
+      memoryWriteEnabled: memoryOptions.writeMemory,
       memoryRepository: this.options.memoryRepository ?? "in-memory",
       retrievedMemoryCountRaw: memoryContext.retrievedMemoryCountRaw,
       retrievedMemoryCount: memoryContext.retrievedMemoryCount,
+      retrievalMode: memoryContext.retrievalMode,
       retrievedMemories: memoryContext.retrievedMemories,
       sections: prompt.sections,
       finalMessages: prompt.messages,
@@ -358,6 +381,24 @@ export class RuntimeOrchestrator {
     reply: AgentReplyEvent
   ): Promise<void> {
     try {
+      if (this.options.memory.extractCandidates && this.options.memory.rememberCandidate) {
+        const candidates = await this.options.memory.extractCandidates({
+          userMessage: sourceEvent.payload.content,
+          assistantMessage: reply.payload.content,
+          sourceTraceId: sourceEvent.traceId
+        });
+        const selected = candidates.filter((candidate) => candidate.importance >= 0.65);
+        await Promise.all(
+          selected.map((candidate) =>
+            this.options.memory.rememberCandidate?.(candidate, {
+              source: "runtime",
+              tags: [sourceEvent.payload.sessionId]
+            })
+          )
+        );
+        return;
+      }
+
       const importance = this.options.memory.scoreImportance(
         `${sourceEvent.payload.content}\n${reply.payload.content}`
       );
@@ -434,6 +475,7 @@ export class RuntimeOrchestrator {
         memoryContext = {
           retrievedMemoryCountRaw: result.rawCount,
           retrievedMemoryCount: result.count,
+          retrievalMode: result.retrievalMode,
           retrievedMemories: result.rawMemories,
           promptMemories: result.memories
         };
@@ -445,6 +487,7 @@ export class RuntimeOrchestrator {
         memoryContext = {
           retrievedMemoryCountRaw: memories.length,
           retrievedMemoryCount: memories.length,
+          retrievalMode: "direct",
           retrievedMemories: memories.map(memoryToDebug),
           promptMemories: memories.map(memoryToDebug)
         };
@@ -471,7 +514,8 @@ export class RuntimeOrchestrator {
         {
           sessionId: event.payload.sessionId,
           count: memoryContext.retrievedMemoryCount,
-          rawCount: memoryContext.retrievedMemoryCountRaw
+          rawCount: memoryContext.retrievedMemoryCountRaw,
+          retrievalMode: memoryContext.retrievalMode
         },
         {
           traceId: event.traceId,
@@ -614,6 +658,7 @@ export class RuntimeOrchestrator {
 type MemoryContext = {
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
+  retrievalMode: MemoryRetrievalMode;
   retrievedMemories: RetrievedMemoryDebug[];
   promptMemories: RetrievedMemoryDebug[];
 };
@@ -622,9 +667,10 @@ function resolveMemoryOptions(options: {
   useMemory?: boolean | undefined;
   readMemory?: boolean | undefined;
   writeMemory?: boolean | undefined;
-}): { readMemory: boolean; writeMemory: boolean } {
+}): { legacyUseMemory: boolean | undefined; readMemory: boolean; writeMemory: boolean } {
   const defaultEnabled = options.useMemory ?? true;
   return {
+    legacyUseMemory: options.useMemory,
     readMemory: options.readMemory ?? defaultEnabled,
     writeMemory: options.writeMemory ?? defaultEnabled
   };
@@ -634,6 +680,7 @@ function emptyMemoryContext(): MemoryContext {
   return {
     retrievedMemoryCountRaw: 0,
     retrievedMemoryCount: 0,
+    retrievalMode: "direct",
     retrievedMemories: [],
     promptMemories: []
   };
@@ -646,6 +693,7 @@ function memoryToDebug(memory: Memory): RetrievedMemoryDebug {
     subtype: memory.subtype,
     source: memory.source,
     sourceTraceId: memory.sourceTraceId,
+    metadata: memory.metadata,
     importance: memory.importance,
     createdAt: memory.createdAt,
     displayText: memory.summary ?? memory.content,

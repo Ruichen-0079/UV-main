@@ -4,8 +4,12 @@ export type {
   CreateRelationInput,
   Entity,
   Memory,
+  MemoryCandidate,
+  MemoryExtractionInput,
+  MemoryExtractor,
   MemoryMatchReason,
   MemoryQuery,
+  MemoryRetrievalMode,
   MemoryRetrievalResult,
   MemorySearchQuery,
   MemorySubtype,
@@ -23,6 +27,11 @@ export {
 } from "./repository.js";
 export { MemoryScorer } from "./scorer.js";
 export { MemoryRetriever } from "./retriever.js";
+export {
+  LlmMemoryExtractor,
+  RuleBasedMemoryExtractor,
+  type MemoryExtractionReasoner
+} from "./extractor.js";
 export { MemoryService } from "./service.js";
 export {
   MissingDatabaseUrlError,

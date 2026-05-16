@@ -60,7 +60,7 @@ Copy-Item .env.example .env
 复制后在 `.env` 中填写 MVP 必需值。DeepSeek 和数据库是当前 MVP 必需项。不要把真实 key 写入 `.env.example`：
 
 ```env
-DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 DEEPSEEK_API_BASEURL=https://api.deepseek.com
 DEEPSEEK_API_KEY=
 DEEPSEEK_CHAT_MODEL=
@@ -103,7 +103,7 @@ MEMORY_REPOSITORY=in-memory
 
 ```env
 MEMORY_REPOSITORY=postgres
-DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 
 启用 PostgreSQL 记忆前必须先运行 migration。
@@ -140,7 +140,7 @@ Get-Content .env |
 开发数据库连接示例：
 
 ```env
-DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 REDIS_URL=redis://localhost:6379
 NATS_URL=nats://localhost:4222
 ```
@@ -210,14 +210,14 @@ pnpm smoke:postgres
 
 ```bash
 docker compose -f infra/docker-compose.yml exec -T postgres \
-  psql -U airi -d companion < packages/memory/migrations/001_init_memory.sql
+  psql -U yuvi -d yuvi < packages/memory/migrations/001_init_memory.sql
 ```
 
 验证 memory table 存在：
 
 ```bash
 docker compose -f infra/docker-compose.yml exec postgres \
-  psql -U airi -d companion -c "\dt"
+  psql -U yuvi -d yuvi -c "\dt"
 ```
 
 如果 `MEMORY_REPOSITORY=postgres` 但没有 `DATABASE_URL`，服务器会拒绝启动并提示需要 `DATABASE_URL`。如果忘记运行 migration，memory table 或 pgvector extension 相关操作会失败。
@@ -492,17 +492,21 @@ docker compose -f infra/docker-compose.yml up -d postgres
 确认 `DATABASE_URL` 匹配：
 
 ```env
-DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 
 如果之前使用过旧 development volume，确认是否需要重置本地开发数据：
 
 ```bash
-docker compose -f infra/docker-compose.yml down -v
+pnpm db:reset:dev
 docker compose -f infra/docker-compose.yml up -d
+pnpm db:migrate
+pnpm smoke:postgres
 ```
 
-警告：`down -v` 会删除 development database data。
+警告：`pnpm db:reset:dev` 会删除 development database data。`docker compose -f infra/docker-compose.yml down -v` 只作为高级手动重置方式使用。
+
+如果已有 Docker volume 是用旧的 `airi` 或 `companion` 凭据初始化的，仅修改 `infra/docker-compose.yml` 不会更新既有 volume。出现 `Role "yuvi" does not exist` 或 `password authentication failed for user "yuvi"` 时，请重置 development DB volumes，或临时使用旧 volume 对应的 `DATABASE_URL` 排错。
 
 ### 端口被占用
 
@@ -561,7 +565,25 @@ DASHSCOPE_STT_MODEL=...
 
 不要在 source file 中硬编码 model name。
 
-## 10. Notes For Windows LTSC Users
+## 10. Dashboard Settings
+
+Dashboard 的 `Settings` 页面可以写入本地 development 配置到 `.env.local`。
+
+- `.env.local` 是本地状态，不要提交。
+- `./scripts/dev.sh` 会先加载 `.env`，再加载 `.env.local`，因此 `.env.local` 会在重启后覆盖 `.env` 中的同名变量。
+- Dashboard 不会返回完整 API key，也不会返回 Authorization header 或 raw `.env`。
+- Dashboard 只显示固定长度的 masked API key，例如 `••••••••••••abcd`。
+- 保存后返回 `restartRequired=true` 时，需要重启 server 才会生效。
+- `MEMORY_REPOSITORY=in-memory` 是默认开发模式，server 重启后数据会丢失。
+- `MEMORY_REPOSITORY=postgres` 需要 `DATABASE_URL`，并先运行：
+
+```bash
+pnpm db:migrate
+```
+
+Dashboard 当前不会热切换 memory backend；切换 memory repository 只是写入配置，重启后生效。
+
+## 11. Notes For Windows LTSC Users
 
 - 优先使用 WSL2 + Ubuntu + Docker Engine。
 - 如果你的 Windows LTSC 版本不受支持，避免依赖 Docker Desktop。

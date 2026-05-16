@@ -74,10 +74,11 @@ export type SendMessageRequest = {
   sessionId: string;
   text: string;
   options: {
-    useMemory: boolean;
+    useMemory?: boolean;
     readMemory?: boolean;
     writeMemory?: boolean;
     voiceOutput: boolean;
+    promptPreview?: boolean;
   };
 };
 
@@ -85,6 +86,13 @@ export type MessageResponse = RuntimeEvent & {
   reply: string;
   promptPreview?: PromptPreviewResponse["promptPreview"];
   provider?: ProviderCallMetadata;
+  memory?: {
+    legacyUseMemory?: boolean;
+    readMemory: boolean;
+    writeMemory: boolean;
+    memoryReadEnabled: boolean;
+    memoryWriteEnabled: boolean;
+  };
   payload: {
     sessionId?: string;
     content?: string;
@@ -103,6 +111,7 @@ export type MemoryRecord = {
   importance: number;
   source: string;
   sourceTraceId?: string | null;
+  metadata?: Record<string, unknown>;
   tags: string[];
   createdAt: string;
   updatedAt?: string;
@@ -117,6 +126,7 @@ export type CreateMemoryRequest = {
   importance?: number;
   source: string;
   sourceTraceId?: string | null;
+  metadata?: Record<string, unknown>;
   tags: string[];
 };
 
@@ -131,11 +141,24 @@ export type ProvidersStatusResponse = {
   };
 };
 
+export type ProviderVerificationResponse = {
+  ok: boolean;
+  provider: string;
+  capability: "chat" | "reasoning";
+  model?: string;
+  mock: boolean;
+  latencyMs?: number;
+  tokenUsage?: TokenUsage;
+  error?: string;
+};
+
 export type RetrievedMemoryDebug = {
   id: string;
   type: string;
+  subtype?: string | null;
   source: string;
   sourceTraceId: string | null;
+  metadata?: Record<string, unknown>;
   importance: number;
   createdAt: string;
   displayText: string;
@@ -149,12 +172,16 @@ export type PromptPreviewResponse = {
   traceId?: string;
   timestamp?: string;
   userMessage?: string;
+  legacyUseMemory?: boolean;
   useMemory?: boolean;
   readMemory?: boolean;
   writeMemory?: boolean;
+  memoryReadEnabled?: boolean;
+  memoryWriteEnabled?: boolean;
   memoryRepository?: string;
   retrievedMemoryCountRaw?: number;
   retrievedMemoryCount?: number;
+  retrievalMode?: string;
   retrievedMemories?: RetrievedMemoryDebug[];
   providerName?: string;
   providerModel?: string;
@@ -166,12 +193,16 @@ export type PromptPreviewResponse = {
     traceId?: string;
     timestamp?: string;
     userMessage?: string;
+    legacyUseMemory?: boolean;
     useMemory?: boolean;
     readMemory?: boolean;
     writeMemory?: boolean;
+    memoryReadEnabled?: boolean;
+    memoryWriteEnabled?: boolean;
     memoryRepository?: string;
     retrievedMemoryCountRaw?: number;
     retrievedMemoryCount?: number;
+    retrievalMode?: string;
     retrievedMemories?: RetrievedMemoryDebug[];
     sections: Array<{
       name: string;
@@ -192,6 +223,75 @@ export type PromptPreviewResponse = {
     providerHealthStatus?: string;
     tokenUsage?: TokenUsage;
   };
+};
+
+export type RuntimeSettingsResponse = {
+  runtime: {
+    serverHost: string;
+    serverPort: number;
+    activeServerHost: string;
+    activeServerPort: number;
+    runtimeMode: string;
+    eventBus: string;
+    activeEventBus: string;
+    pendingRestart: boolean;
+  };
+  memory: {
+    memoryRepository: string;
+    activeMemoryRepository: string;
+    databaseUrlConfigured: boolean;
+    restartRequiredForChanges: boolean;
+    postgresRequiresDatabaseUrl: boolean;
+    postgresMigrationReminder: string;
+  };
+  providers: {
+    deepseek: {
+      baseUrl: string;
+      apiKeyConfigured: boolean;
+      apiKeyPreview?: string;
+      chatModel: string;
+      reasoningModel: string;
+    };
+    xai: {
+      baseUrl: string;
+      apiKeyConfigured: boolean;
+      apiKeyPreview?: string;
+      ttsModel: string;
+      ttsVoice: string;
+      visionModel: string;
+      optional: boolean;
+      implemented: boolean;
+    };
+    dashscope: {
+      baseUrl: string;
+      apiKeyConfigured: boolean;
+      apiKeyPreview?: string;
+      sttModel: string;
+      optional: boolean;
+      implemented: boolean;
+    };
+    embedding: {
+      provider: string;
+      baseUrl: string;
+      apiKeyConfigured: boolean;
+      apiKeyPreview?: string;
+      model: string;
+      dimensions: string;
+    };
+  };
+  restartRequired: boolean;
+  editableKeys: string[];
+};
+
+export type RuntimeSettingsUpdateRequest = {
+  values: Record<string, string | null>;
+};
+
+export type RuntimeSettingsUpdateResponse = {
+  ok: boolean;
+  restartRequired: boolean;
+  changedKeys: string[];
+  settings: RuntimeSettingsResponse;
 };
 
 const apiBaseUrl = import.meta.env["VITE_API_BASE_URL"] ?? "/api";
@@ -231,6 +331,7 @@ export const apiClient = {
     memories: MemoryRecord[];
     rawCount?: number;
     count?: number;
+    retrievalMode?: string;
     query?: string;
     repository?: string;
   }> {
@@ -247,6 +348,7 @@ export const apiClient = {
       memories: MemoryRecord[];
       rawCount?: number;
       count?: number;
+      retrievalMode?: string;
       query?: string;
       repository?: string;
     }>(`/memory/search?${params.toString()}`);
@@ -263,12 +365,31 @@ export const apiClient = {
     return request<ProvidersStatusResponse>("/providers/status");
   },
 
+  verifyProvider(capability: "chat" | "reasoning"): Promise<ProviderVerificationResponse> {
+    return request<ProviderVerificationResponse>(`/providers/verify/${capability}`, {
+      method: "POST"
+    });
+  },
+
   listRecentEvents(limit = 50): Promise<{ mock: boolean; events: RuntimeEvent[] }> {
     return request<{ mock: boolean; events: RuntimeEvent[] }>(`/events/recent?limit=${limit}`);
   },
 
   getLatestPromptPreview(): Promise<PromptPreviewResponse> {
     return request<PromptPreviewResponse>("/debug/prompt/latest");
+  },
+
+  getRuntimeSettings(): Promise<RuntimeSettingsResponse> {
+    return request<RuntimeSettingsResponse>("/settings/runtime");
+  },
+
+  updateRuntimeSettings(
+    input: RuntimeSettingsUpdateRequest
+  ): Promise<RuntimeSettingsUpdateResponse> {
+    return request<RuntimeSettingsUpdateResponse>("/settings/runtime", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
   },
 
   createDashboardWebSocket(): WebSocket {

@@ -1,10 +1,15 @@
 import type { MemoryRepository } from "./repository.js";
+import { RuleBasedMemoryExtractor } from "./extractor.js";
 import { MemoryRetriever } from "./retriever.js";
 import { MemoryScorer } from "./scorer.js";
 import type {
   CreateMemoryInput,
   Memory,
+  MemoryCandidate,
+  MemoryExtractionInput,
+  MemoryExtractor,
   MemoryMatchReason,
+  MemoryRetrievalMode,
   MemoryQuery,
   MemoryRetrievalResult,
   MemorySearchQuery,
@@ -21,7 +26,8 @@ export class MemoryService {
   constructor(
     private readonly repository: MemoryRepository,
     scorer = new MemoryScorer(),
-    retriever?: MemoryRetriever
+    retriever?: MemoryRetriever,
+    private readonly extractor: MemoryExtractor = new RuleBasedMemoryExtractor()
   ) {
     this.scorer = scorer;
     this.retriever = retriever ?? new MemoryRetriever(repository, scorer);
@@ -34,6 +40,19 @@ export class MemoryService {
     sourceTraceId?: string | null;
     tags?: string[];
   }): Promise<Memory> {
+    const candidates = await this.extractCandidates({
+      userMessage: input.userMessage,
+      assistantMessage: input.assistantMessage,
+      sourceTraceId: input.sourceTraceId
+    });
+    const selected = candidates.find((candidate) => candidate.importance >= 0.65);
+    if (selected) {
+      return this.rememberCandidate(selected, {
+        source: input.source ?? "runtime",
+        tags: input.tags ?? []
+      });
+    }
+
     const content = [
       `User intent: ${input.userMessage.trim()}`,
       `Assistant response summary: ${input.assistantMessage.trim()}`
@@ -49,7 +68,38 @@ export class MemoryService {
       emotionArousal: 0,
       source: input.source ?? "interaction",
       sourceTraceId: input.sourceTraceId ?? null,
+      metadata: {
+        generatedBy: "runtime",
+        sourceTraceId: input.sourceTraceId ?? null
+      },
       tags: input.tags ?? []
+    });
+  }
+
+  async extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
+    return this.extractor.extractCandidates(input);
+  }
+
+  async rememberCandidate(
+    candidate: MemoryCandidate,
+    options: { source?: string; tags?: string[] } = {}
+  ): Promise<Memory> {
+    return this.repository.createMemory({
+      type: candidate.type,
+      subtype: candidate.subtype ?? null,
+      content: candidate.content,
+      summary: candidate.summary ?? this.compressForStorage(candidate.content),
+      importance: candidate.importance,
+      emotionValence: 0,
+      emotionArousal: 0,
+      source: options.source ?? "runtime",
+      sourceTraceId: candidate.sourceTraceId ?? null,
+      metadata: {
+        generatedBy: "rule-based-memory-extractor",
+        reason: candidate.reason,
+        sourceTraceId: candidate.sourceTraceId ?? null
+      },
+      tags: Array.from(new Set([...(candidate.tags ?? []), ...(options.tags ?? [])]))
     });
   }
 
@@ -84,6 +134,7 @@ export class MemoryService {
       summary: this.compressForStorage(content),
       importance: this.scoreImportance(content),
       source: "runtime",
+      metadata: { generatedBy: "runtime" },
       tags: []
     });
   }
@@ -111,7 +162,7 @@ export class MemoryService {
     const keywords = queryText ? extractSearchKeywords(queryText) : [];
     const memories = await this.retriever.retrieve(query);
     if (!queryText || keywords.length === 0) {
-      return this.buildRetrievalResult(query, keywords, memories, "original-query");
+      return this.buildRetrievalResult(query, keywords, memories, "original-query", "direct");
     }
 
     const candidates = [
@@ -120,14 +171,15 @@ export class MemoryService {
     ].sort(compareCandidates);
 
     if (candidates.length > 0) {
-      return this.buildRetrievalResultFromCandidates(query, keywords, candidates);
+      return this.buildRetrievalResultFromCandidates(query, keywords, candidates, "hybrid-keyword");
     }
 
     const recent = await this.repository.listRecentMemories(Math.max(query.limit ?? 6, 20));
     return this.buildRetrievalResultFromCandidates(
       query,
       keywords,
-      this.rankFallbackRecent(recent)
+      this.rankFallbackRecent(recent),
+      "fallback-recent"
     );
   }
 
@@ -182,7 +234,7 @@ export class MemoryService {
         memory,
         displayText: createMemoryDisplayText(memory),
         matchedBy: "fallback-recent" as const,
-        score: typePriority(memory.type) + memory.importance
+        score: typePriority(memory.type) + memory.importance + sourceQuality(memory.source)
       }))
       .sort(compareCandidates);
   }
@@ -191,7 +243,8 @@ export class MemoryService {
     query: MemorySearchQuery,
     keywords: string[],
     memories: Memory[],
-    matchedBy: MemoryMatchReason
+    matchedBy: MemoryMatchReason,
+    retrievalMode: MemoryRetrievalMode
   ): MemoryRetrievalResult {
     return this.buildRetrievalResultFromCandidates(
       query,
@@ -203,14 +256,16 @@ export class MemoryService {
           matchedBy,
           score: scoreMemory(memory, keywords)
         }))
-        .sort(compareCandidates)
+        .sort(compareCandidates),
+      retrievalMode
     );
   }
 
   private buildRetrievalResultFromCandidates(
     query: MemorySearchQuery,
     keywords: string[],
-    candidates: RetrievedMemoryCandidate[]
+    candidates: RetrievedMemoryCandidate[],
+    retrievalMode: MemoryRetrievalMode
   ): MemoryRetrievalResult {
     const { selected, all } = dedupeCandidates(candidates);
     const selectedLimited = selected.slice(0, query.limit ?? 6);
@@ -228,6 +283,7 @@ export class MemoryService {
       keywords,
       rawCount: candidates.length,
       count: selectedLimited.length,
+      retrievalMode,
       rawMemories: debug,
       memories: debug.filter((memory) => !memory.excludedReason),
       selectedMemories: selectedLimited.map((candidate) => candidate.memory)
@@ -345,7 +401,7 @@ function stripLeadingListMarkers(text: string): string {
 
 function scoreMemory(memory: Memory, keywords: string[]): number {
   const haystack =
-    `${memory.content} ${memory.summary ?? ""} ${memory.tags.join(" ")}`.toLowerCase();
+    `${memory.content} ${memory.summary ?? ""} ${memory.source} ${memory.subtype ?? ""} ${memory.tags.join(" ")} ${JSON.stringify(memory.metadata)}`.toLowerCase();
   const matchCount = keywords.filter((keyword) => haystack.includes(keyword)).length;
   if (keywords.length > 0 && matchCount === 0) {
     return 0;
@@ -354,11 +410,14 @@ function scoreMemory(memory: Memory, keywords: string[]): number {
   const isRuntimeNoise = isVerboseRuntimeSummary(memory.summary ?? memory.content);
   const effectiveMatchCount = isRuntimeNoise ? Math.min(matchCount, 1) : matchCount;
   const runtimeNoisePenalty = isRuntimeNoise ? 3 : 0;
+  const recencyBonus = recencyScore(memory.createdAt);
   return (
     effectiveMatchCount * 4 +
     typePriority(memory.type) +
     memory.importance * 2 -
-    runtimeNoisePenalty
+    runtimeNoisePenalty +
+    sourceQuality(memory.source) +
+    recencyBonus
   );
 }
 
@@ -431,6 +490,25 @@ function compareCandidates(
   return right.memory.createdAt.getTime() - left.memory.createdAt.getTime();
 }
 
+function sourceQuality(source: string): number {
+  if (source === "dashboard" || source === "manual") {
+    return 1.5;
+  }
+  if (source === "runtime") {
+    return -0.4;
+  }
+  return 0;
+}
+
+function recencyScore(createdAt: Date): number {
+  const ageMs = Date.now() - createdAt.getTime();
+  if (!Number.isFinite(ageMs) || ageMs < 0) {
+    return 0;
+  }
+  const ageDays = ageMs / 86_400_000;
+  return Math.max(0, 1 - ageDays / 30) * 0.5;
+}
+
 function typePriority(type: MemoryType): number {
   switch (type) {
     case "semantic":
@@ -455,6 +533,7 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
     subtype: candidate.memory.subtype,
     source: candidate.memory.source,
     sourceTraceId: candidate.memory.sourceTraceId,
+    metadata: candidate.memory.metadata,
     importance: candidate.memory.importance,
     createdAt: candidate.memory.createdAt,
     displayText: candidate.displayText,

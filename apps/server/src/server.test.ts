@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { loadServerConfig } from "./config.js";
 import { buildServer } from "./server.js";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 describe("server", () => {
   it("handles health, message, and memory endpoints with mock providers", async () => {
@@ -499,6 +502,139 @@ describe("server", () => {
       expect(reasoning.body).not.toContain("test_deepseek_secret");
       await app.close();
     } finally {
+      restoreEnv(previous);
+    }
+  });
+
+  it("parses optional memory extractor mode", () => {
+    expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe(
+      "rule-based"
+    );
+    expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractor).toBe("llm");
+    expect(() => loadServerConfig({ MEMORY_EXTRACTOR: "external" })).toThrow(
+      "Unsupported MEMORY_EXTRACTOR"
+    );
+  });
+
+  it("returns and updates safe runtime settings without exposing secrets", async () => {
+    const previous = snapshotEnv();
+    const previousCwd = process.cwd();
+    const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-"));
+    setConfiguredDeepSeekEnv();
+
+    try {
+      process.chdir(tempDir);
+      const app = await buildServer(loadServerConfig(process.env));
+
+      const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
+      expect(settings.statusCode).toBe(200);
+      expect(settings.json().providers.deepseek.apiKeyConfigured).toBe(true);
+      expect(settings.json().providers.deepseek.apiKeyPreview).toBe("••••••••••••cret");
+      expect(settings.json().providers.deepseek.apiKeyPreview).not.toBe(
+        "configured_deepseek_secret"
+      );
+      expect(settings.json().providers.deepseek.apiKeyPreview.length).toBe(16);
+      expect(settings.json().providers.xai.apiKeyConfigured).toBe(false);
+      expect(settings.json().providers.xai.apiKeyPreview).toBeUndefined();
+      expect(settings.body).not.toContain("configured_deepseek_secret");
+      expect(settings.body).not.toContain("Authorization");
+
+      const unsafe = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: {
+          values: {
+            NODE_ENV: "production"
+          }
+        }
+      });
+      expect(unsafe.statusCode).toBe(400);
+      expect(unsafe.json().error).toBe("unsafe_keys");
+
+      const update = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: {
+          values: {
+            MEMORY_REPOSITORY: "postgres",
+            DEEPSEEK_API_KEY: "new_deepseek_secret",
+            DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+          }
+        }
+      });
+      expect(update.statusCode).toBe(200);
+      expect(update.json()).toMatchObject({
+        ok: true,
+        restartRequired: true
+      });
+      expect(update.json().changedKeys).toEqual(
+        expect.arrayContaining(["MEMORY_REPOSITORY", "DEEPSEEK_API_KEY"])
+      );
+      expect(update.json().settings.memory.memoryRepository).toBe("postgres");
+      expect(update.body).not.toContain("new_deepseek_secret");
+      expect(update.body).not.toContain("configured_deepseek_secret");
+      expect(update.json().settings.providers.deepseek.apiKeyConfigured).toBe(true);
+      expect(update.json().settings.providers.deepseek.apiKeyPreview).toBe("••••••••••••cret");
+
+      const localEnv = await readFile(path.join(tempDir, ".env.local"), "utf8");
+      expect(localEnv.match(/^DEEPSEEK_API_KEY=/gmu)).toHaveLength(1);
+      expect(localEnv).toContain("DEEPSEEK_API_KEY=new_deepseek_secret");
+
+      const updateExisting = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: {
+          values: {
+            DEEPSEEK_API_KEY: "second_secret_value"
+          }
+        }
+      });
+      expect(updateExisting.statusCode).toBe(200);
+      const updatedLocalEnv = await readFile(path.join(tempDir, ".env.local"), "utf8");
+      expect(updatedLocalEnv.match(/^DEEPSEEK_API_KEY=/gmu)).toHaveLength(1);
+      expect(updatedLocalEnv).toContain("DEEPSEEK_API_KEY=second_secret_value");
+      expect(updateExisting.body).not.toContain("second_secret_value");
+
+      await app.close();
+    } finally {
+      process.chdir(previousCwd);
+      await rm(tempDir, { recursive: true, force: true });
+      restoreEnv(previous);
+    }
+  });
+
+  it("shows .env.local overrides as pending safe settings without mutating .env", async () => {
+    const previous = snapshotEnv();
+    const previousCwd = process.cwd();
+    const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-overlay-"));
+    setMockEnv();
+
+    try {
+      process.chdir(tempDir);
+      await writeFile(path.join(tempDir, ".env"), "DEEPSEEK_CHAT_MODEL=from-env\n", "utf8");
+      await writeFile(
+        path.join(tempDir, ".env.local"),
+        "DEEPSEEK_CHAT_MODEL=from-local\nXAI_API_KEY=local_xai_secret\n",
+        "utf8"
+      );
+
+      const app = await buildServer(loadServerConfig(process.env));
+      const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
+
+      expect(settings.statusCode).toBe(200);
+      expect(settings.json().providers.deepseek.chatModel).toBe("from-local");
+      expect(settings.json().providers.xai.apiKeyConfigured).toBe(true);
+      expect(settings.json().providers.xai.apiKeyPreview).toBe("••••••••••••cret");
+      expect(settings.json().restartRequired).toBe(true);
+      expect(settings.body).not.toContain("local_xai_secret");
+      expect(await readFile(path.join(tempDir, ".env"), "utf8")).toBe(
+        "DEEPSEEK_CHAT_MODEL=from-env\n"
+      );
+
+      await app.close();
+    } finally {
+      process.chdir(previousCwd);
+      await rm(tempDir, { recursive: true, force: true });
       restoreEnv(previous);
     }
   });

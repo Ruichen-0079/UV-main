@@ -18,6 +18,7 @@ export interface MemoryRepository {
   searchMemoriesByTextFallback(query: MemorySearchQuery): Promise<Memory[]>;
   searchMemoriesByEmbedding(query: MemorySearchQuery): Promise<Memory[]>;
   updateMemoryAccess(id: string): Promise<void>;
+  close?(): Promise<void>;
   createEntity(input: CreateEntityInput): Promise<Entity>;
   createRelation(input: CreateRelationInput): Promise<Relation>;
 }
@@ -46,9 +47,9 @@ export class PostgresMemoryRepository implements MemoryRepository {
     const result = await this.pool.query(
       `insert into memories (
         type, subtype, content, summary, embedding, importance, emotion_valence,
-        emotion_arousal, source, source_trace_id, tags
+        emotion_arousal, source, source_trace_id, metadata, tags
       ) values (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
       ) returning *`,
       [
         input.type,
@@ -61,6 +62,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
         input.emotionArousal ?? 0,
         input.source,
         input.sourceTraceId ?? null,
+        JSON.stringify(input.metadata ?? {}),
         input.tags ?? []
       ]
     );
@@ -86,8 +88,23 @@ export class PostgresMemoryRepository implements MemoryRepository {
   }
 
   async searchMemoriesByTextFallback(query: MemorySearchQuery): Promise<Memory[]> {
-    const clauses = ["(content ilike $1 or summary ilike $1 or $1 = '%%')"];
-    const values: unknown[] = [`%${escapeLike(query.text ?? "")}%`];
+    const text = query.text?.trim() ?? "";
+    const likeText = `%${escapeLike(text)}%`;
+    const clauses = [
+      `(
+        $1 = ''
+        or content ilike $2 escape '\\'
+        or coalesce(summary, '') ilike $2 escape '\\'
+        or source ilike $2 escape '\\'
+        or coalesce(subtype, '') ilike $2 escape '\\'
+        or exists (
+          select 1 from unnest(tags) as tag
+          where tag ilike $2 escape '\\'
+        )
+        or metadata::text ilike $2 escape '\\'
+      )`
+    ];
+    const values: unknown[] = [text, likeText];
 
     if (query.types?.length) {
       values.push(query.types);
@@ -104,7 +121,11 @@ export class PostgresMemoryRepository implements MemoryRepository {
     const result = await this.pool.query(
       `select * from memories
        where ${clauses.join(" and ")}
-       order by importance desc, last_accessed_at desc, created_at desc
+       order by
+         greatest(similarity(content, $1), similarity(coalesce(summary, ''), $1)) desc,
+         importance desc,
+         last_accessed_at desc,
+         created_at desc
        limit $${values.length}`,
       values
     );
@@ -187,6 +208,7 @@ export class InMemoryMemoryRepository implements MemoryRepository {
       emotionArousal: input.emotionArousal ?? 0,
       source: input.source,
       sourceTraceId: input.sourceTraceId ?? null,
+      metadata: input.metadata ?? {},
       tags: input.tags ?? [],
       createdAt: now,
       updatedAt: now,
@@ -217,7 +239,11 @@ export class InMemoryMemoryRepository implements MemoryRepository {
         (memory) =>
           !searchText ||
           memory.content.toLowerCase().includes(searchText) ||
-          memory.summary?.toLowerCase().includes(searchText)
+          memory.summary?.toLowerCase().includes(searchText) ||
+          memory.source.toLowerCase().includes(searchText) ||
+          memory.subtype?.toLowerCase().includes(searchText) ||
+          memory.tags.some((tag) => tag.toLowerCase().includes(searchText)) ||
+          JSON.stringify(memory.metadata).toLowerCase().includes(searchText)
       )
       .sort((left, right) => right.importance - left.importance)
       .slice(0, query.limit ?? 10);
@@ -290,11 +316,32 @@ function mapMemoryRow(row: QueryResultRow): Memory {
     emotionArousal: Number(row["emotion_arousal"]),
     source: row["source"],
     sourceTraceId: row["source_trace_id"] ?? null,
+    metadata: parseMetadata(row["metadata"]),
     tags: row["tags"] ?? [],
     createdAt: row["created_at"],
     updatedAt: row["updated_at"],
     lastAccessedAt: row["last_accessed_at"]
   };
+}
+
+function parseMetadata(value: unknown): Record<string, unknown> {
+  if (!value) {
+    return {};
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
 }
 
 function mapEntityRow(row: QueryResultRow): Entity {

@@ -2,13 +2,16 @@ import type { RuntimeLogger } from "@companion/core";
 import { RuntimeOrchestrator } from "@companion/core";
 import { InMemoryEventBus } from "@companion/event-bus";
 import {
+  LlmMemoryExtractor,
   MemoryService,
+  RuleBasedMemoryExtractor,
   createMemoryRepositoryFromEnv,
   type MemoryRepository
 } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
 import { createProviderRegistryFromEnv, type ProviderRegistry } from "@companion/providers";
 import type { FastifyBaseLogger } from "fastify";
+import type { ServerConfig } from "./config.js";
 import { DashboardStateService } from "./services/dashboard.js";
 
 export type AppContext = {
@@ -20,16 +23,25 @@ export type AppContext = {
   runtime: RuntimeOrchestrator;
 };
 
-export function createAppContext(logger: FastifyBaseLogger): AppContext {
+export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig): AppContext {
+  if (config.eventBus === "nats") {
+    throw new Error("EVENT_BUS=nats is reserved for future NATS support and is not implemented.");
+  }
+
   const eventBus = new InMemoryEventBus();
   const dashboard = new DashboardStateService();
   eventBus.subscribe("*", (event) => {
     dashboard.recordEvent(event);
   });
   const memoryRepository = createMemoryRepositoryFromEnv();
-  const memory = new MemoryService(memoryRepository);
   const promptBuilder = new PromptBuilder();
   const providers = createProviderRegistryFromEnv();
+  const ruleBasedExtractor = new RuleBasedMemoryExtractor();
+  const memoryExtractor =
+    config.memoryExtractor === "llm"
+      ? new LlmMemoryExtractor(providers.getReasoningProvider(), ruleBasedExtractor)
+      : ruleBasedExtractor;
+  const memory = new MemoryService(memoryRepository, undefined, undefined, memoryExtractor);
   const runtimeLogger = createRuntimeLogger(logger);
 
   const runtime = new RuntimeOrchestrator({

@@ -118,7 +118,7 @@ The development default is in-memory memory. To switch to PostgreSQL memory, set
 
 ```env
 MEMORY_REPOSITORY=postgres
-DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 
 Then apply the SQL migration:
@@ -133,7 +133,7 @@ Verify the memory table exists:
 
 ```bash
 docker compose -f infra/docker-compose.yml exec postgres \
-  psql -U airi -d companion -c "\dt"
+  psql -U yuvi -d yuvi -c "\dt"
 ```
 
 Run a Postgres-backed smoke test:
@@ -142,18 +142,18 @@ Run a Postgres-backed smoke test:
 pnpm smoke:postgres
 ```
 
-Reset development database volumes only when you intentionally want to delete local development data:
-
-```bash
-docker compose -f infra/docker-compose.yml down -v
-```
-
-Warning: `down -v` deletes the development PostgreSQL data volume.
-
-The guarded helper asks for an exact confirmation phrase before deleting volumes:
+Reset development database volumes only when you intentionally want to delete local development data. Prefer the guarded helper:
 
 ```bash
 pnpm db:reset:dev
+```
+
+Warning: this deletes the development PostgreSQL data volume.
+
+Advanced/manual reset:
+
+```bash
+docker compose -f infra/docker-compose.yml down -v
 ```
 
 Changing `POSTGRES_USER` or `POSTGRES_PASSWORD` in `infra/docker-compose.yml` only affects a brand-new database volume. Existing Postgres volumes keep the role and password they were initialized with.
@@ -312,20 +312,20 @@ docker compose -f infra/docker-compose.yml up -d postgres
 Confirm `DATABASE_URL` matches:
 
 ```env
-DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 
-### Role "airi" Does Not Exist
+### Role "yuvi" Does Not Exist
 
 Symptoms:
 
-- `Role "airi" does not exist`
-- `password authentication failed for user "airi"`
-- `pnpm db:migrate` fails even though `infra/docker-compose.yml` contains `POSTGRES_USER=airi`
+- `Role "yuvi" does not exist`
+- `password authentication failed for user "yuvi"`
+- `pnpm db:migrate` fails even though `infra/docker-compose.yml` contains `POSTGRES_USER=yuvi`
 
 Cause:
 
-PostgreSQL initializes roles only when the Docker data volume is created. If the existing volume was created by an older compose file, it may still contain the previous `companion/companion` role. Changing `POSTGRES_USER` later does not rewrite an existing volume.
+PostgreSQL initializes roles only when the Docker data volume is created. If the existing volume was created by an older compose file, it may still contain previous `airi/airi_dev_password` or `companion/companion` credentials. Changing `POSTGRES_USER` later does not rewrite an existing volume.
 
 Option A, reset development data and recreate the volume with current credentials:
 
@@ -343,6 +343,12 @@ Option B, keep using the old local volume credentials:
 DATABASE_URL=postgres://companion:companion@localhost:5432/companion
 ```
 
+For an intermediate old volume, you may need:
+
+```env
+DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+```
+
 Option C, manually create the current role inside the existing development database:
 
 ```bash
@@ -352,10 +358,11 @@ docker exec -it companion-postgres psql -U companion -d companion
 Then run SQL equivalent to:
 
 ```sql
-create role airi with login password 'airi_dev_password';
-grant all privileges on database companion to airi;
-grant all privileges on all tables in schema public to airi;
-grant all privileges on all sequences in schema public to airi;
+create role yuvi with login password 'yuvi_dev_password';
+create database yuvi owner yuvi;
+grant all privileges on database yuvi to yuvi;
+grant all privileges on all tables in schema public to yuvi;
+grant all privileges on all sequences in schema public to yuvi;
 ```
 
 ### Provider Unavailable

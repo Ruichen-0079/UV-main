@@ -35,6 +35,7 @@ const CreateMemoryRequestSchema = z.object({
   emotionArousal: z.number().min(0).max(1).optional(),
   source: z.string().min(1).default("manual"),
   sourceTraceId: z.string().min(1).nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
   tags: z.array(z.string()).default([])
 });
 
@@ -70,6 +71,9 @@ export async function registerMemoryRoutes(
     }
     if (input.data.sourceTraceId !== undefined) {
       createInput.sourceTraceId = input.data.sourceTraceId;
+    }
+    if (input.data.metadata !== undefined) {
+      createInput.metadata = input.data.metadata;
     }
     if (input.data.summary !== undefined) {
       createInput.summary = input.data.summary;
@@ -122,6 +126,7 @@ export async function registerMemoryRoutes(
       repository: process.env["MEMORY_REPOSITORY"] ?? "in-memory",
       rawCount: result.rawCount,
       count: result.count,
+      retrievalMode: result.retrievalMode,
       memories: result.selectedMemories
     });
   });

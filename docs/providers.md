@@ -168,6 +168,18 @@ PROVIDER_INCLUDE_RAW_RESPONSES=true
 
 Runtime events must not include raw provider responses. Treat them as sensitive because they can contain prompts, transcripts, media metadata, or vendor-specific payload details.
 
+## Dashboard Provider Settings
+
+The Dashboard `Settings` page can write local development settings to `.env.local`.
+
+- Full API keys are never returned by `GET /settings/runtime`.
+- Secret previews use a fixed-length mask such as `••••••••••••abcd`; the raw value and full key length are not exposed.
+- `scripts/dev.sh` loads `.env` first and `.env.local` second, so `.env.local` overrides base local values after restart.
+- `POST /settings/runtime` only accepts an allowlist of development provider and memory keys.
+- Provider verification buttons call `POST /providers/verify/chat` or `POST /providers/verify/reasoning` explicitly.
+- `/health` and `/providers/status` do not consume provider tokens.
+- Changes are env-driven and should be treated as restart-required.
+
 ## Future Work
 
 Planned provider extensions:

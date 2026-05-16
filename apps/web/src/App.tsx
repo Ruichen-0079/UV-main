@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   apiClient,
   type DashboardWebSocketMessage,
   type HealthResponse,
   type MemoryRecord,
   type ProviderCallMetadata,
+  type ProviderVerificationResponse,
   type PromptPreviewResponse,
   type ProvidersStatusResponse,
+  type RuntimeSettingsResponse,
   type RuntimeEvent
 } from "./api/client.js";
 import { promptPreviewPlaceholder } from "./data/mock.js";
@@ -28,6 +30,8 @@ type ChatMessage = {
   content: string;
   traceId?: string;
   useMemory?: boolean;
+  readMemory?: boolean;
+  writeMemory?: boolean;
   voiceOutput?: boolean;
   provider?: ProviderCallMetadata;
 };
@@ -232,7 +236,9 @@ function OverviewPage(props: {
 function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState("dashboard");
-  const [useMemory, setUseMemory] = useState(true);
+  const [readMemory, setReadMemory] = useState(true);
+  const [writeMemory, setWriteMemory] = useState(true);
+  const [promptPreview, setPromptPreview] = useState(true);
   const [voiceOutput, setVoiceOutput] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
@@ -243,11 +249,13 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
     () => ({
       text: input.trim() || "<message text>",
       options: {
-        useMemory,
+        readMemory,
+        writeMemory,
+        promptPreview,
         voiceOutput
       }
     }),
-    [input, useMemory, voiceOutput]
+    [input, promptPreview, readMemory, voiceOutput, writeMemory]
   );
 
   async function send(): Promise<void> {
@@ -259,15 +267,27 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
     setInput("");
     setRequestStatus("sending");
     setError(null);
-    setMessages((current) => [...current, { role: "user", content, useMemory, voiceOutput }]);
+    setMessages((current) => [
+      ...current,
+      {
+        role: "user",
+        content,
+        useMemory: readMemory && writeMemory,
+        readMemory,
+        writeMemory,
+        voiceOutput
+      }
+    ]);
 
     try {
       const response = await apiClient.sendMessage({
         sessionId,
         text: content,
         options: {
-          useMemory,
-          voiceOutput
+          readMemory,
+          writeMemory,
+          voiceOutput,
+          promptPreview
         }
       });
       props.onEvent(response);
@@ -316,7 +336,8 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
                     )}
                     {message.role === "user" && message.useMemory !== undefined && (
                       <div className="mt-2 flex flex-wrap gap-2 text-xs text-ink-500">
-                        <span>memory: {message.useMemory ? "enabled" : "disabled"}</span>
+                        <span>readMemory: {message.readMemory ? "true" : "false"}</span>
+                        <span>writeMemory: {message.writeMemory ? "true" : "false"}</span>
                         <span>voice output: {message.voiceOutput ? "enabled" : "disabled"}</span>
                       </div>
                     )}
@@ -362,10 +383,22 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
               />
             </Field>
             <Toggle
-              label="Use memory"
-              checked={useMemory}
-              onChange={setUseMemory}
-              note="Sent as options.useMemory to /message."
+              label="Read Memory"
+              checked={readMemory}
+              onChange={setReadMemory}
+              note="Controls retrieval and prompt injection."
+            />
+            <Toggle
+              label="Write Memory"
+              checked={writeMemory}
+              onChange={setWriteMemory}
+              note="Controls whether this turn can create runtime memory."
+            />
+            <Toggle
+              label="Prompt Preview"
+              checked={promptPreview}
+              onChange={setPromptPreview}
+              note="Requests promptPreview metadata in the /message response."
             />
             <Toggle
               label="TTS output"
@@ -624,6 +657,9 @@ function MemoryPage(props: {
 function ProvidersPage(props: {
   state: ReturnType<typeof useAsyncData<ProvidersStatusResponse>>;
 }): JSX.Element {
+  const [verifying, setVerifying] = useState<"chat" | "reasoning" | null>(null);
+  const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
+  const [verificationError, setVerificationError] = useState<string | null>(null);
   const rows = [
     {
       label: "DeepSeek Chat",
@@ -663,6 +699,19 @@ function ProvidersPage(props: {
     }
   ];
 
+  async function verify(capability: "chat" | "reasoning"): Promise<void> {
+    setVerifying(capability);
+    setVerification(null);
+    setVerificationError(null);
+    try {
+      setVerification(await apiClient.verifyProvider(capability));
+    } catch (caught) {
+      setVerificationError(caught instanceof Error ? caught.message : "Provider verify failed");
+    } finally {
+      setVerifying(null);
+    }
+  }
+
   return (
     <PageShell
       title="Providers"
@@ -696,6 +745,36 @@ function ProvidersPage(props: {
         title="Status meanings"
         message="configured=false + mock=true means the dashboard is using development mock fallback. configured=true + mock=false + degraded means config is present, but remote health is intentionally unverified. unavailable means the provider cannot be used with the current config."
       />
+      <Panel
+        title="Manual Verification"
+        actions={
+          <div className="flex gap-2">
+            <button
+              className="button-secondary"
+              disabled={verifying !== null}
+              onClick={() => void verify("chat")}
+            >
+              {verifying === "chat" ? "Verifying Chat" : "Verify Chat"}
+            </button>
+            <button
+              className="button-secondary"
+              disabled={verifying !== null}
+              onClick={() => void verify("reasoning")}
+            >
+              {verifying === "reasoning" ? "Verifying Reasoning" : "Verify Reasoning"}
+            </button>
+          </div>
+        }
+      >
+        <p className="mb-3 text-sm leading-6 text-ink-600">
+          Verification is explicit and may call the selected provider. Results show only safe
+          metadata; API keys and Authorization headers are never displayed.
+        </p>
+        {verificationError && (
+          <Notice tone="error" title="Verification failed" message={verificationError} />
+        )}
+        {verification && <ProviderVerificationResult result={verification} />}
+      </Panel>
       <Panel title="Provider Status">
         <div className="overflow-auto rounded-md border border-ink-100">
           <table className="w-full border-collapse">
@@ -952,16 +1031,16 @@ function PromptPreviewPage(): JSX.Element {
             detail={formatDate(promptPreview.timestamp ?? preview.data?.timestamp ?? "")}
           />
           <StatusCard
-            title="Memory"
-            status={String(promptPreview.useMemory ?? preview.data?.useMemory ?? false)}
-            detail={`Repository: ${promptPreview.memoryRepository ?? preview.data?.memoryRepository ?? "unknown"}`}
+            title="Read / Write"
+            status={`${String(promptPreview.readMemory ?? preview.data?.readMemory ?? false)} / ${String(promptPreview.writeMemory ?? preview.data?.writeMemory ?? false)}`}
+            detail={`Legacy aggregate: ${String(promptPreview.legacyUseMemory ?? preview.data?.legacyUseMemory ?? "not sent")} · repo: ${promptPreview.memoryRepository ?? preview.data?.memoryRepository ?? "unknown"}`}
           />
           <StatusCard
             title="Retrieved"
             status={String(
               promptPreview.retrievedMemoryCount ?? preview.data?.retrievedMemoryCount ?? 0
             )}
-            detail={`raw: ${promptPreview.retrievedMemoryCountRaw ?? preview.data?.retrievedMemoryCountRaw ?? 0}`}
+            detail={`raw: ${promptPreview.retrievedMemoryCountRaw ?? preview.data?.retrievedMemoryCountRaw ?? 0} · mode: ${promptPreview.retrievalMode ?? preview.data?.retrievalMode ?? "unknown"}`}
           />
           <StatusCard
             title="Tokens"
@@ -980,9 +1059,21 @@ function PromptPreviewPage(): JSX.Element {
           <Panel
             key={section.title}
             title={section.title}
-            {...(section.mock ? { badge: "Placeholder" } : {})}
+            {...(section.mock
+              ? { badge: "Placeholder" }
+              : section.title === "RelevantMemory"
+                ? { badge: "Memory Context" }
+                : {})}
           >
-            <p className="text-sm leading-6 text-ink-600 whitespace-pre-wrap">{section.content}</p>
+            <p
+              className={`whitespace-pre-wrap text-sm leading-6 ${
+                section.title === "RelevantMemory"
+                  ? "rounded-md border border-cyan-200 bg-cyan-50 p-3 text-cyan-950"
+                  : "text-ink-600"
+              }`}
+            >
+              {section.content}
+            </p>
           </Panel>
         ))}
       </div>
@@ -993,8 +1084,11 @@ function PromptPreviewPage(): JSX.Element {
               <thead className="text-ink-500">
                 <tr>
                   <th className="px-2 py-2">Type</th>
+                  <th className="px-2 py-2">Subtype</th>
+                  <th className="px-2 py-2">Source</th>
                   <th className="px-2 py-2">Match</th>
                   <th className="px-2 py-2">Importance</th>
+                  <th className="px-2 py-2">Trace</th>
                   <th className="px-2 py-2">Display Text</th>
                   <th className="px-2 py-2">Excluded</th>
                 </tr>
@@ -1003,8 +1097,13 @@ function PromptPreviewPage(): JSX.Element {
                 {promptPreview.retrievedMemories.map((memory) => (
                   <tr key={memory.id} className="border-t border-ink-100">
                     <td className="px-2 py-2 font-mono">{memory.type}</td>
+                    <td className="px-2 py-2">{memory.subtype ?? ""}</td>
+                    <td className="px-2 py-2">{memory.source}</td>
                     <td className="px-2 py-2">{memory.matchedBy ?? "unknown"}</td>
                     <td className="px-2 py-2">{memory.importance.toFixed(2)}</td>
+                    <td className="px-2 py-2 font-mono">
+                      {shortTrace(memory.sourceTraceId ?? undefined)}
+                    </td>
                     <td className="px-2 py-2 text-ink-700">{memory.displayText}</td>
                     <td className="px-2 py-2 text-amber-700">{memory.excludedReason ?? ""}</td>
                   </tr>
@@ -1063,22 +1162,369 @@ function CapabilityPlaceholder(props: { title: string; status: string }): JSX.El
 }
 
 function SettingsPage(): JSX.Element {
+  const settings = useAsyncData(() => apiClient.getRuntimeSettings(), []);
+  const [form, setForm] = useState<SettingsForm>(() => emptySettingsForm());
+  const [saving, setSaving] = useState(false);
+  const [saveResult, setSaveResult] = useState<{
+    changedKeys: string[];
+    restartRequired: boolean;
+  } | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState<"chat" | "reasoning" | null>(null);
+  const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
+  const [clearedSecrets, setClearedSecrets] = useState<Set<SettingsKey>>(() => new Set());
+
+  useEffect(() => {
+    if (settings.data) {
+      setForm(settingsFormFromResponse(settings.data));
+    }
+  }, [settings.data]);
+
+  async function save(): Promise<void> {
+    setSaving(true);
+    setSaveError(null);
+    setSaveResult(null);
+    try {
+      const response = await apiClient.updateRuntimeSettings({
+        values: buildSettingsUpdate(form, clearedSecrets)
+      });
+      setSaveResult({
+        changedKeys: response.changedKeys,
+        restartRequired: response.restartRequired
+      });
+      setForm(settingsFormFromResponse(response.settings));
+      setClearedSecrets(new Set());
+      await settings.refresh();
+    } catch (caught) {
+      setSaveError(caught instanceof Error ? caught.message : "Settings update failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function verify(capability: "chat" | "reasoning"): Promise<void> {
+    setVerifying(capability);
+    setVerification(null);
+    try {
+      setVerification(await apiClient.verifyProvider(capability));
+    } finally {
+      setVerifying(null);
+    }
+  }
+
   return (
-    <PageShell title="Settings" subtitle="Read-only local development settings.">
+    <PageShell title="Settings" subtitle="Local development runtime configuration.">
+      {settings.loading && (
+        <Notice tone="info" title="Loading" message="Fetching safe runtime settings." />
+      )}
+      {settings.error && (
+        <Notice tone="error" title="Settings load failed" message={settings.error} />
+      )}
+      {saveError && <Notice tone="error" title="Save failed" message={saveError} />}
+      {saveResult && (
+        <Notice
+          tone="info"
+          title="Settings saved"
+          message={`${saveResult.changedKeys.length || 0} field(s) changed. ${saveResult.restartRequired ? "Restart the dev server for env-driven settings to take effect." : "No restart needed."}`}
+        />
+      )}
       <div className="grid grid-cols-2 gap-4">
-        <Panel title="Runtime URLs">
-          <Definition label="API proxy" value="/api" />
-          <Definition label="Server" value="http://localhost:6121" />
-          <Definition label="WebSocket" value="ws://localhost:6121/ws" />
-        </Panel>
-        <Panel title="Security">
-          <p className="text-sm leading-6 text-ink-600">
-            API keys are intentionally not displayed. Edit local `.env` outside the dashboard and
-            never paste secrets into logs or issue reports.
+        <Panel title="Runtime">
+          <SettingsInput form={form} name="SERVER_HOST" setForm={setForm} />
+          <SettingsInput form={form} name="SERVER_PORT" setForm={setForm} />
+          <SettingsInput form={form} name="EVENT_BUS" setForm={setForm} />
+          <Definition
+            label="Runtime mode"
+            value={settings.data?.runtime.runtimeMode ?? "unknown"}
+          />
+          <p className="text-xs leading-5 text-ink-500">
+            Active: {settings.data?.runtime.activeServerHost ?? "unknown"}:
+            {settings.data?.runtime.activeServerPort ?? "unknown"} · event bus{" "}
+            {settings.data?.runtime.activeEventBus ?? "unknown"}
           </p>
+          {settings.data?.runtime.pendingRestart && (
+            <Notice
+              tone="info"
+              title="Restart required"
+              message=".env.local contains pending overrides. Restart the dev server for active runtime values to match."
+            />
+          )}
+        </Panel>
+        <Panel title="Memory">
+          <Field label="MEMORY_REPOSITORY">
+            <select
+              className="field"
+              value={form.MEMORY_REPOSITORY}
+              onChange={(event) => setFormValue(setForm, "MEMORY_REPOSITORY", event.target.value)}
+            >
+              <option value="in-memory">in-memory</option>
+              <option value="postgres">postgres</option>
+            </select>
+          </Field>
+          <p className="mt-3 text-sm leading-6 text-ink-600">
+            Active mode: {settings.data?.memory.activeMemoryRepository ?? "unknown"}. in-memory
+            resets on server restart. postgres requires DATABASE_URL and pnpm db:migrate.
+          </p>
+          {form.MEMORY_REPOSITORY === "postgres" && (
+            <Notice
+              tone="info"
+              title="Postgres reminder"
+              message="This change is config-only for now. Restart the server after ensuring DATABASE_URL is set and migrations have been applied."
+            />
+          )}
         </Panel>
       </div>
+      <div className="grid grid-cols-3 gap-4">
+        <Panel
+          title="DeepSeek"
+          actions={
+            <div className="flex gap-2">
+              <button
+                className="button-secondary"
+                disabled={verifying !== null}
+                onClick={() => void verify("chat")}
+              >
+                Verify Chat
+              </button>
+              <button
+                className="button-secondary"
+                disabled={verifying !== null}
+                onClick={() => void verify("reasoning")}
+              >
+                Verify Reasoning
+              </button>
+            </div>
+          }
+        >
+          <SettingsInput form={form} name="DEEPSEEK_API_BASEURL" setForm={setForm} />
+          <SecretInput
+            label="DEEPSEEK_API_KEY"
+            configured={settings.data?.providers.deepseek.apiKeyConfigured}
+            preview={settings.data?.providers.deepseek.apiKeyPreview}
+            value={form.DEEPSEEK_API_KEY}
+            onChange={(value) => setFormValue(setForm, "DEEPSEEK_API_KEY", value)}
+            onClear={() => clearSecret(setForm, setClearedSecrets, "DEEPSEEK_API_KEY")}
+          />
+          <SettingsInput form={form} name="DEEPSEEK_CHAT_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="DEEPSEEK_REASONING_MODEL" setForm={setForm} />
+          {verification && <ProviderVerificationResult result={verification} />}
+        </Panel>
+        <Panel title="xAI" badge="Optional / placeholder">
+          <SettingsInput form={form} name="XAI_API_BASEURL" setForm={setForm} />
+          <SecretInput
+            label="XAI_API_KEY"
+            configured={settings.data?.providers.xai.apiKeyConfigured}
+            preview={settings.data?.providers.xai.apiKeyPreview}
+            value={form.XAI_API_KEY}
+            onChange={(value) => setFormValue(setForm, "XAI_API_KEY", value)}
+            onClear={() => clearSecret(setForm, setClearedSecrets, "XAI_API_KEY")}
+          />
+          <SettingsInput form={form} name="XAI_TTS_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="XAI_TTS_VOICE" setForm={setForm} />
+          <SettingsInput form={form} name="XAI_VISION_MODEL" setForm={setForm} />
+        </Panel>
+        <Panel title="DashScope / Embedding" badge="Optional / placeholder">
+          <SettingsInput form={form} name="DASHSCOPE_API_BASEURL" setForm={setForm} />
+          <SecretInput
+            label="DASHSCOPE_API_KEY"
+            configured={settings.data?.providers.dashscope.apiKeyConfigured}
+            preview={settings.data?.providers.dashscope.apiKeyPreview}
+            value={form.DASHSCOPE_API_KEY}
+            onChange={(value) => setFormValue(setForm, "DASHSCOPE_API_KEY", value)}
+            onClear={() => clearSecret(setForm, setClearedSecrets, "DASHSCOPE_API_KEY")}
+          />
+          <SettingsInput form={form} name="DASHSCOPE_STT_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="EMBEDDING_PROVIDER" setForm={setForm} />
+          <SettingsInput form={form} name="EMBEDDING_API_BASEURL" setForm={setForm} />
+          <SettingsInput form={form} name="EMBEDDING_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="EMBEDDING_DIMENSIONS" setForm={setForm} />
+          <SecretInput
+            label="EMBEDDING_API_KEY"
+            configured={settings.data?.providers.embedding.apiKeyConfigured}
+            preview={settings.data?.providers.embedding.apiKeyPreview}
+            value={form.EMBEDDING_API_KEY}
+            onChange={(value) => setFormValue(setForm, "EMBEDDING_API_KEY", value)}
+            onClear={() => clearSecret(setForm, setClearedSecrets, "EMBEDDING_API_KEY")}
+          />
+        </Panel>
+      </div>
+      <div className="flex justify-end">
+        <button className="button-primary" disabled={saving} onClick={() => void save()}>
+          {saving ? "Saving" : "Save to .env.local"}
+        </button>
+      </div>
     </PageShell>
+  );
+}
+
+type SettingsForm = Record<SettingsKey, string>;
+
+type SettingsKey =
+  | "SERVER_HOST"
+  | "SERVER_PORT"
+  | "EVENT_BUS"
+  | "MEMORY_REPOSITORY"
+  | "DEEPSEEK_API_BASEURL"
+  | "DEEPSEEK_API_KEY"
+  | "DEEPSEEK_CHAT_MODEL"
+  | "DEEPSEEK_REASONING_MODEL"
+  | "XAI_API_BASEURL"
+  | "XAI_API_KEY"
+  | "XAI_TTS_MODEL"
+  | "XAI_TTS_VOICE"
+  | "XAI_VISION_MODEL"
+  | "DASHSCOPE_API_BASEURL"
+  | "DASHSCOPE_API_KEY"
+  | "DASHSCOPE_STT_MODEL"
+  | "EMBEDDING_PROVIDER"
+  | "EMBEDDING_API_BASEURL"
+  | "EMBEDDING_API_KEY"
+  | "EMBEDDING_MODEL"
+  | "EMBEDDING_DIMENSIONS";
+
+function emptySettingsForm(): SettingsForm {
+  return {
+    SERVER_HOST: "127.0.0.1",
+    SERVER_PORT: "6121",
+    EVENT_BUS: "in-memory",
+    MEMORY_REPOSITORY: "in-memory",
+    DEEPSEEK_API_BASEURL: "",
+    DEEPSEEK_API_KEY: "",
+    DEEPSEEK_CHAT_MODEL: "",
+    DEEPSEEK_REASONING_MODEL: "",
+    XAI_API_BASEURL: "",
+    XAI_API_KEY: "",
+    XAI_TTS_MODEL: "",
+    XAI_TTS_VOICE: "",
+    XAI_VISION_MODEL: "",
+    DASHSCOPE_API_BASEURL: "",
+    DASHSCOPE_API_KEY: "",
+    DASHSCOPE_STT_MODEL: "",
+    EMBEDDING_PROVIDER: "mock",
+    EMBEDDING_API_BASEURL: "",
+    EMBEDDING_API_KEY: "",
+    EMBEDDING_MODEL: "",
+    EMBEDDING_DIMENSIONS: "1024"
+  };
+}
+
+function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsForm {
+  return {
+    SERVER_HOST: settings.runtime.serverHost,
+    SERVER_PORT: String(settings.runtime.serverPort),
+    EVENT_BUS: settings.runtime.eventBus,
+    MEMORY_REPOSITORY: settings.memory.memoryRepository,
+    DEEPSEEK_API_BASEURL: settings.providers.deepseek.baseUrl,
+    DEEPSEEK_API_KEY: "",
+    DEEPSEEK_CHAT_MODEL: settings.providers.deepseek.chatModel,
+    DEEPSEEK_REASONING_MODEL: settings.providers.deepseek.reasoningModel,
+    XAI_API_BASEURL: settings.providers.xai.baseUrl,
+    XAI_API_KEY: "",
+    XAI_TTS_MODEL: settings.providers.xai.ttsModel,
+    XAI_TTS_VOICE: settings.providers.xai.ttsVoice,
+    XAI_VISION_MODEL: settings.providers.xai.visionModel,
+    DASHSCOPE_API_BASEURL: settings.providers.dashscope.baseUrl,
+    DASHSCOPE_API_KEY: "",
+    DASHSCOPE_STT_MODEL: settings.providers.dashscope.sttModel,
+    EMBEDDING_PROVIDER: settings.providers.embedding.provider,
+    EMBEDDING_API_BASEURL: settings.providers.embedding.baseUrl,
+    EMBEDDING_API_KEY: "",
+    EMBEDDING_MODEL: settings.providers.embedding.model,
+    EMBEDDING_DIMENSIONS: settings.providers.embedding.dimensions
+  };
+}
+
+function setFormValue(
+  setForm: Dispatch<SetStateAction<SettingsForm>>,
+  key: SettingsKey,
+  value: string
+): void {
+  setForm((current) => ({ ...current, [key]: value }));
+}
+
+function clearSecret(
+  setForm: Dispatch<SetStateAction<SettingsForm>>,
+  setClearedSecrets: Dispatch<SetStateAction<Set<SettingsKey>>>,
+  key: SettingsKey
+): void {
+  setFormValue(setForm, key, "");
+  setClearedSecrets((current) => new Set([...current, key]));
+}
+
+function buildSettingsUpdate(
+  form: SettingsForm,
+  clearedSecrets: Set<SettingsKey>
+): Record<string, string | null> {
+  const values: Record<string, string | null> = {};
+  for (const [key, value] of Object.entries(form) as Array<[SettingsKey, string]>) {
+    if (isSecretSettingsKey(key) && value === "" && !clearedSecrets.has(key)) {
+      continue;
+    }
+    values[key] = value;
+  }
+  return values;
+}
+
+function isSecretSettingsKey(key: SettingsKey): boolean {
+  return (
+    key === "DEEPSEEK_API_KEY" ||
+    key === "XAI_API_KEY" ||
+    key === "DASHSCOPE_API_KEY" ||
+    key === "EMBEDDING_API_KEY"
+  );
+}
+
+function SettingsInput(props: {
+  form: SettingsForm;
+  name: SettingsKey;
+  setForm: Dispatch<SetStateAction<SettingsForm>>;
+}): JSX.Element {
+  return (
+    <Field label={props.name}>
+      <input
+        className="field"
+        value={props.form[props.name]}
+        onChange={(event) => setFormValue(props.setForm, props.name, event.target.value)}
+      />
+    </Field>
+  );
+}
+
+function SecretInput(props: {
+  label: SettingsKey;
+  configured: boolean | undefined;
+  preview: string | undefined;
+  value: string;
+  onChange(value: string): void;
+  onClear(): void;
+}): JSX.Element {
+  return (
+    <Field label={props.label}>
+      <div className="space-y-2">
+        <div className="rounded-md border border-ink-100 bg-ink-50 px-3 py-2 text-xs text-ink-600">
+          {props.configured ? (
+            <span>
+              Configured:{" "}
+              <span className="font-mono text-ink-800">{props.preview ?? "••••••••••••"}</span>
+            </span>
+          ) : (
+            "Not configured / 未配置"
+          )}
+        </div>
+        <input
+          className="field"
+          type="password"
+          placeholder={props.configured ? "Enter a new value to replace saved key" : "Enter key"}
+          value={props.value}
+          onChange={(event) => props.onChange(event.target.value)}
+        />
+        {props.configured && (
+          <button className="button-secondary w-full" type="button" onClick={props.onClear}>
+            Clear saved key on next save
+          </button>
+        )}
+      </div>
+    </Field>
   );
 }
 
@@ -1195,6 +1641,32 @@ function ProviderMetadataSummary(props: {
       <span>latency: {formatLatency(provider.latencyMs)}</span>
       {provider.healthStatus && <span>health: {provider.healthStatus}</span>}
       {provider.tokenUsage && <span>tokens: {formatTokenUsage(provider.tokenUsage)}</span>}
+    </div>
+  );
+}
+
+function ProviderVerificationResult(props: {
+  result: ProviderVerificationResponse;
+}): JSX.Element {
+  const result = props.result;
+  return (
+    <div className="grid grid-cols-6 gap-3 rounded-md border border-ink-100 bg-ink-50 p-3 text-sm">
+      <Definition label="Status" value={result.ok ? "ok" : "failed"} />
+      <Definition label="Capability" value={result.capability} />
+      <Definition label="Provider" value={result.provider} />
+      <Definition label="Mode" value={result.mock ? "mock" : "real"} />
+      <Definition label="Model" value={result.model ?? "unknown"} />
+      <Definition label="Latency" value={formatLatency(result.latencyMs)} />
+      {result.tokenUsage && (
+        <div className="col-span-3">
+          <Definition label="Token Usage" value={formatTokenUsage(result.tokenUsage)} />
+        </div>
+      )}
+      {result.error && (
+        <div className="col-span-6 text-rose-700">
+          <span className="font-semibold">Error:</span> {result.error}
+        </div>
+      )}
     </div>
   );
 }

@@ -19,6 +19,7 @@ create table if not exists memories (
   emotion_arousal real not null default 0,
   source text not null,
   source_trace_id text null,
+  metadata jsonb not null default '{}'::jsonb,
   tags text[] not null default '{}',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -27,6 +28,7 @@ create table if not exists memories (
 
 alter table memories add column if not exists subtype text null;
 alter table memories add column if not exists source_trace_id text null;
+alter table memories add column if not exists metadata jsonb not null default '{}'::jsonb;
 alter table memories drop constraint if exists memories_type_check;
 alter table memories add constraint memories_type_check
   check (type in ('working', 'episodic', 'semantic', 'emotional', 'procedural', 'relationship'));
@@ -56,8 +58,13 @@ create table if not exists relations (
 );
 
 create index if not exists memories_type_created_at_idx on memories (type, created_at desc);
+create index if not exists memories_source_created_at_idx on memories (source, created_at desc);
+create index if not exists memories_importance_created_at_idx on memories (importance desc, created_at desc);
 create index if not exists memories_tags_idx on memories using gin (tags);
 create index if not exists memories_content_trgm_idx on memories using gin (content gin_trgm_ops);
+create index if not exists memories_summary_trgm_idx on memories using gin (summary gin_trgm_ops);
+create index if not exists memories_source_trgm_idx on memories using gin (source gin_trgm_ops);
+create index if not exists memories_metadata_idx on memories using gin (metadata);
 create index if not exists entities_name_idx on entities (name);
 create index if not exists relations_source_entity_idx on relations (source_entity);
 create index if not exists relations_target_entity_idx on relations (target_entity);

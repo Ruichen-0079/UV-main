@@ -76,7 +76,7 @@ To switch memory to PostgreSQL, set:
 
 ```env
 MEMORY_REPOSITORY=postgres
-DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 
 Then start infra and apply the migrations in `packages/memory/migrations` before using memory endpoints. `.env` is local sensitive state and must not be committed or printed.
@@ -89,6 +89,7 @@ To verify Postgres memory mode against the development container:
 
 ```bash
 docker compose -f infra/docker-compose.yml up -d
+pnpm db:migrate
 pnpm smoke:postgres
 ```
 
@@ -105,3 +106,5 @@ Advanced/manual reset:
 ```bash
 docker compose -f infra/docker-compose.yml down -v
 ```
+
+If an old Docker volume was initialized with earlier `airi` or `companion` credentials, changing `infra/docker-compose.yml` will not update that existing volume. Run `pnpm db:reset:dev`, then `docker compose -f infra/docker-compose.yml up -d`, `pnpm db:migrate`, and `pnpm smoke:postgres` to recreate fresh development data with `yuvi / yuvi_dev_password / yuvi`.

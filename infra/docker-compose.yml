@@ -6,15 +6,15 @@ services:
     image: pgvector/pgvector:pg16
     container_name: companion-postgres
     environment:
-      POSTGRES_USER: airi
-      POSTGRES_PASSWORD: airi_dev_password
-      POSTGRES_DB: companion
+      POSTGRES_USER: yuvi
+      POSTGRES_PASSWORD: yuvi_dev_password
+      POSTGRES_DB: yuvi
     ports:
       - "5432:5432"
     volumes:
       - companion-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airi -d companion"]
+      test: ["CMD-SHELL", "pg_isready -U yuvi -d yuvi"]
       interval: 10s
       timeout: 5s
       retries: 5

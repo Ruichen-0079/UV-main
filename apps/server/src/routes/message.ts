@@ -47,6 +47,7 @@ export async function registerMessageRoutes(
     const voiceOutput = Boolean(
       input.data.voiceOutput ?? input.data.options?.voiceOutput ?? input.data.options?.tts
     );
+    const memoryOptions = normalizeMessageMemoryOptions(input.data.options);
     const event = createEvent("user.message", {
       sessionId: input.data.sessionId,
       content
@@ -60,9 +61,9 @@ export async function registerMessageRoutes(
     try {
       const response = await context.runtime.handleUserMessage(event, {
         voiceOutput,
-        useMemory: input.data.options?.useMemory ?? defaultUseMemory,
-        readMemory: input.data.options?.readMemory,
-        writeMemory: input.data.options?.writeMemory
+        useMemory: memoryOptions.legacyUseMemory,
+        readMemory: memoryOptions.readMemory,
+        writeMemory: memoryOptions.writeMemory
       });
       const provider = response.payload.provider;
       return reply.send({
@@ -70,6 +71,13 @@ export async function registerMessageRoutes(
         reply: response.payload.content,
         traceId: response.traceId,
         provider,
+        memory: {
+          legacyUseMemory: memoryOptions.legacyUseMemory,
+          readMemory: memoryOptions.readMemory,
+          writeMemory: memoryOptions.writeMemory,
+          memoryReadEnabled: memoryOptions.readMemory,
+          memoryWriteEnabled: memoryOptions.writeMemory
+        },
         promptPreview: input.data.options?.promptPreview
           ? context.runtime.getLatestPromptPreview()
           : undefined
@@ -85,4 +93,26 @@ export async function registerMessageRoutes(
 
   app.post("/message", handleMessage);
   app.post("/v1/messages", handleMessage);
+}
+
+function normalizeMessageMemoryOptions(
+  options:
+    | {
+        useMemory?: boolean | undefined;
+        readMemory?: boolean | undefined;
+        writeMemory?: boolean | undefined;
+      }
+    | undefined
+): {
+  legacyUseMemory: boolean | undefined;
+  readMemory: boolean;
+  writeMemory: boolean;
+} {
+  const legacyUseMemory = options?.useMemory;
+  const defaultEnabled = legacyUseMemory ?? defaultUseMemory;
+  return {
+    legacyUseMemory,
+    readMemory: options?.readMemory ?? defaultEnabled,
+    writeMemory: options?.writeMemory ?? defaultEnabled
+  };
 }

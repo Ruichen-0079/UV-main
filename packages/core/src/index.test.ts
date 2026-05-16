@@ -1,5 +1,5 @@
 import { InMemoryEventBus } from "@companion/event-bus";
-import type { Memory } from "@companion/memory";
+import type { Memory, MemoryCandidate } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
 import {
   ProviderError,
@@ -82,6 +82,64 @@ describe("RuntimeOrchestrator", () => {
     expect(diagnostics).toContain("runtime.error");
     expect(diagnostics).toContain("provider.error");
   });
+
+  it("uses memory extractor candidates for runtime writes and skips ordinary turns", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const written: MemoryCandidate[] = [];
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: {
+        async retrieveRelevantMemories() {
+          return [];
+        },
+        scoreImportance() {
+          return 0;
+        },
+        async extractCandidates(input) {
+          if (input.userMessage.startsWith("记住")) {
+            return [
+              {
+                type: "semantic",
+                subtype: "path",
+                content: "我的项目路径是 /home/administrator/uv-main/uv-main",
+                summary: "我的项目路径是 /home/administrator/uv-main/uv-main",
+                importance: 0.95,
+                tags: ["path"],
+                reason: "explicit-remember",
+                sourceTraceId: input.sourceTraceId ?? null
+              }
+            ];
+          }
+          return [];
+        },
+        async rememberCandidate(candidate): Promise<Memory> {
+          written.push(candidate);
+          return createMemory(candidate);
+        },
+        async rememberInteraction(): Promise<Memory> {
+          throw new Error("legacy memory write should not be used");
+        }
+      },
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    await runtime.handleUserMessage({
+      sessionId: "test-session",
+      content: "hi"
+    });
+    await runtime.handleUserMessage({
+      sessionId: "test-session",
+      content: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    });
+
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatchObject({
+      type: "semantic",
+      subtype: "path",
+      reason: "explicit-remember"
+    });
+  });
 });
 
 function createFailingMemory(): RuntimeMemoryPort {
@@ -95,5 +153,71 @@ function createFailingMemory(): RuntimeMemoryPort {
     async rememberInteraction(): Promise<Memory> {
       throw new Error("memory database unavailable");
     }
+  };
+}
+
+function createMockProviders() {
+  return {
+    getChatProvider: () => createMockChatProvider("mock-chat"),
+    getReasoningProvider: () => createMockReasoningProvider("mock-reasoning"),
+    getTTSProvider: () => ({
+      name: "mock-tts",
+      async healthCheck() {
+        return {
+          provider: "mock-tts",
+          status: "healthy" as const,
+          checkedAt: new Date().toISOString()
+        };
+      },
+      async synthesizeSpeech() {
+        return {
+          audio: new Uint8Array(),
+          audioBase64: "",
+          mimeType: "audio/wav",
+          durationMs: 0
+        };
+      }
+    }),
+    getSTTProvider: () => createMockSTTProvider("mock-stt"),
+    getVisionProvider: () => createMockVisionProvider("mock-vision"),
+    getEmbeddingProvider: () => ({
+      name: "mock-embedding",
+      dimensions: 3,
+      async healthCheck() {
+        return {
+          provider: "mock-embedding",
+          status: "healthy" as const,
+          checkedAt: new Date().toISOString()
+        };
+      },
+      async embedText() {
+        return [0, 0, 0];
+      },
+      async embedBatch(texts: string[]) {
+        return texts.map(() => [0, 0, 0]);
+      }
+    })
+  };
+}
+
+function createMemory(candidate: MemoryCandidate): Memory {
+  const now = new Date();
+  return {
+    id: "memory-id",
+    type: candidate.type,
+    subtype: candidate.subtype ?? null,
+    content: candidate.content,
+    summary: candidate.summary ?? null,
+    embedding: null,
+    importance: candidate.importance,
+    emotionValence: 0,
+    emotionArousal: 0,
+    source: "runtime",
+    sourceTraceId: candidate.sourceTraceId ?? null,
+    metadata: {},
+    tags: candidate.tags,
+    createdAt: now,
+    updatedAt: now,
+    lastAccessedAt: now
   };
 }

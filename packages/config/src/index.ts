@@ -1,5 +1,7 @@
 export type RuntimeEnvironment = "development" | "test" | "production";
 export type MemoryRepositoryDriver = "in-memory" | "postgres";
+export type MemoryExtractorDriver = "rule-based" | "llm";
+export type EventBusDriver = "in-memory" | "nats";
 
 export type ProviderCapability = "chat" | "reasoning" | "tts" | "stt" | "vision" | "embedding";
 
@@ -31,13 +33,14 @@ export type RuntimeConfig = {
   };
   memory: {
     repository: MemoryRepositoryDriver;
+    extractor: MemoryExtractorDriver;
     databaseUrl?: string | undefined;
   };
   providers: RuntimeProviderConfig;
   infrastructure: {
     redisUrl?: string | undefined;
     natsUrl?: string | undefined;
-    eventBusDriver: string;
+    eventBusDriver: EventBusDriver;
   };
 };
 
@@ -83,6 +86,7 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
     },
     memory: {
       repository: parseMemoryRepository(env["MEMORY_REPOSITORY"]),
+      extractor: parseMemoryExtractor(env["MEMORY_EXTRACTOR"]),
       databaseUrl: emptyToUndefined(env["DATABASE_URL"])
     },
     providers: {
@@ -155,7 +159,7 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
     infrastructure: {
       redisUrl: emptyToUndefined(env["REDIS_URL"]),
       natsUrl: emptyToUndefined(env["NATS_URL"]),
-      eventBusDriver: readString(env["EVENT_BUS_DRIVER"], "memory")
+      eventBusDriver: parseEventBus(env["EVENT_BUS"] ?? env["EVENT_BUS_DRIVER"])
     }
   };
 }
@@ -175,6 +179,13 @@ export function collectRuntimeConfigIssues(config: RuntimeConfig): ConfigValidat
     issues.push({
       path: "memory.databaseUrl",
       message: "DATABASE_URL is required when MEMORY_REPOSITORY=postgres."
+    });
+  }
+
+  if (config.infrastructure.eventBusDriver === "nats") {
+    issues.push({
+      path: "infrastructure.eventBusDriver",
+      message: "EVENT_BUS=nats is reserved for future NATS support and is not implemented yet."
     });
   }
 
@@ -255,6 +266,25 @@ function parseEnvironment(value: string | undefined): RuntimeEnvironment {
 function parseMemoryRepository(value: string | undefined): MemoryRepositoryDriver {
   if (value === "postgres") {
     return "postgres";
+  }
+
+  return "in-memory";
+}
+
+function parseMemoryExtractor(value: string | undefined): MemoryExtractorDriver {
+  if (value === "llm") {
+    return "llm";
+  }
+
+  return "rule-based";
+}
+
+function parseEventBus(value: string | undefined): EventBusDriver {
+  if (!value || value === "memory" || value === "in-memory") {
+    return "in-memory";
+  }
+  if (value === "nats") {
+    return "nats";
   }
 
   return "in-memory";

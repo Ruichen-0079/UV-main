@@ -1,4 +1,6 @@
 .env
+.env.example
+scripts/*.sh
 node_modules
 dist
 *.tsbuildinfo

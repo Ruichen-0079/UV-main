@@ -25,13 +25,16 @@ describe("runtime config", () => {
       logLevel: "debug"
     });
     expect(config.memory.repository).toBe("postgres");
+    expect(config.memory.extractor).toBe("rule-based");
     expect(config.memory.databaseUrl).toBe("postgres://example");
+    expect(config.infrastructure.eventBusDriver).toBe("in-memory");
   });
 
   it("uses architecture default provider selection", () => {
     const config = parseRuntimeConfig({});
 
     expect(config.memory.repository).toBe("in-memory");
+    expect(config.memory.extractor).toBe("rule-based");
     expect(config.server.port).toBe(6121);
     expect(config.providers.defaults).toEqual({
       chat: "deepseek",
@@ -95,5 +98,21 @@ describe("runtime config", () => {
 
     expect(() => validateRuntimeConfig(inMemoryConfig)).not.toThrow();
     expect(() => validateRuntimeConfig(postgresConfig)).toThrow(ConfigValidationError);
+  });
+
+  it("marks NATS event bus as reserved but unsupported", () => {
+    const config = parseRuntimeConfig({
+      EVENT_BUS: "nats"
+    });
+
+    expect(config.infrastructure.eventBusDriver).toBe("nats");
+    expect(() => validateRuntimeConfig(config)).toThrow(ConfigValidationError);
+  });
+
+  it("parses optional memory extractor mode", () => {
+    expect(parseRuntimeConfig({ MEMORY_EXTRACTOR: "rule-based" }).memory.extractor).toBe(
+      "rule-based"
+    );
+    expect(parseRuntimeConfig({ MEMORY_EXTRACTOR: "llm" }).memory.extractor).toBe("llm");
   });
 });

@@ -92,35 +92,35 @@ pnpm smoke:postgres
 
 4. Or run the server with `MEMORY_REPOSITORY=postgres` and a valid `DATABASE_URL`, then use `POST /memory`, `GET /memory/recent`, and `GET /memory/search?q=...`.
 
-To reset development database volumes:
+To reset development database volumes, prefer the guarded helper:
 
 ```bash
-docker compose -f infra/docker-compose.yml down -v
+pnpm db:reset:dev
 ```
 
 Warning: this deletes development PostgreSQL data.
 
-The guarded helper asks for an exact confirmation phrase before deleting volumes:
+Advanced/manual reset:
 
 ```bash
-pnpm db:reset:dev
+docker compose -f infra/docker-compose.yml down -v
 ```
 
 Changing `POSTGRES_USER` or `POSTGRES_PASSWORD` in `infra/docker-compose.yml` does not change an existing Postgres data volume. PostgreSQL roles are initialized only when the volume is first created.
 
 ## Troubleshooting Old Dev Volumes
 
-### Role "airi" Does Not Exist
+### Role "yuvi" Does Not Exist
 
 Symptoms:
 
-- `Role "airi" does not exist`
-- `password authentication failed for user "airi"`
+- `Role "yuvi" does not exist`
+- `password authentication failed for user "yuvi"`
 - `pnpm db:migrate` fails against a container that otherwise starts normally
 
 Cause:
 
-The Docker volume was initialized before the current `airi/airi_dev_password` development credentials. The old volume may still contain the previous `companion/companion` role.
+The Docker volume was initialized before the current `yuvi/yuvi_dev_password` development credentials. The old volume may still contain previous `airi/airi_dev_password` or `companion/companion` credentials.
 
 Option A, reset development volumes:
 
@@ -138,6 +138,12 @@ Option B, keep the old local credentials:
 DATABASE_URL=postgres://companion:companion@localhost:5432/companion
 ```
 
+For an intermediate old volume, you may need:
+
+```env
+DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+```
+
 Option C, manually create the current role in the existing dev database:
 
 ```bash
@@ -147,8 +153,9 @@ docker exec -it companion-postgres psql -U companion -d companion
 Then run SQL equivalent to:
 
 ```sql
-create role airi with login password 'airi_dev_password';
-grant all privileges on database companion to airi;
-grant all privileges on all tables in schema public to airi;
-grant all privileges on all sequences in schema public to airi;
+create role yuvi with login password 'yuvi_dev_password';
+create database yuvi owner yuvi;
+grant all privileges on database yuvi to yuvi;
+grant all privileges on all tables in schema public to yuvi;
+grant all privileges on all sequences in schema public to yuvi;
 ```

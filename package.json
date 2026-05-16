@@ -10,11 +10,12 @@
     "check": "tsc -b --pretty false",
     "test": "pnpm -r test",
     "smoke": "pnpm build && tsx scripts/smoke.ts",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
+    "format:shell": "shfmt -w scripts/*.sh",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:reset:dev": "bash scripts/db-reset-dev.sh",
-    "smoke:postgres": "DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion pnpm db:migrate && MEMORY_REPOSITORY=postgres DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion pnpm smoke"
+    "smoke:postgres": "DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi pnpm db:migrate && MEMORY_REPOSITORY=postgres DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi pnpm smoke"
   },
   "packageManager": "pnpm@9.15.4",
   "devDependencies": {

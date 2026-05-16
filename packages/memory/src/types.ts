@@ -37,6 +37,7 @@ export type Memory = {
   emotionArousal: number;
   source: string;
   sourceTraceId: string | null;
+  metadata: Record<string, unknown>;
   tags: string[];
   createdAt: Date;
   updatedAt: Date;
@@ -54,7 +55,29 @@ export type CreateMemoryInput = {
   emotionArousal?: number;
   source: string;
   sourceTraceId?: string | null;
+  metadata?: Record<string, unknown>;
   tags?: string[];
+};
+
+export type MemoryCandidate = {
+  type: MemoryType;
+  subtype?: MemorySubtype | null;
+  content: string;
+  summary?: string | null;
+  importance: number;
+  tags: string[];
+  reason: string;
+  sourceTraceId?: string | null;
+};
+
+export type MemoryExtractionInput = {
+  userMessage: string;
+  assistantMessage?: string | undefined;
+  sourceTraceId?: string | null | undefined;
+};
+
+export type MemoryExtractor = {
+  extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]>;
 };
 
 export type MemorySearchQuery = {
@@ -66,6 +89,7 @@ export type MemorySearchQuery = {
 };
 
 export type MemoryMatchReason = "original-query" | "keyword" | "fallback-recent";
+export type MemoryRetrievalMode = "direct" | "hybrid-keyword" | "fallback-recent";
 
 export type RetrievedMemoryDebug = {
   id: string;
@@ -73,6 +97,7 @@ export type RetrievedMemoryDebug = {
   subtype: MemorySubtype | null;
   source: string;
   sourceTraceId: string | null;
+  metadata?: Record<string, unknown>;
   importance: number;
   createdAt: Date;
   displayText: string;
@@ -93,6 +118,7 @@ export type MemoryRetrievalResult = {
   keywords: string[];
   rawCount: number;
   count: number;
+  retrievalMode: MemoryRetrievalMode;
   rawMemories: RetrievedMemoryDebug[];
   memories: RetrievedMemoryDebug[];
   selectedMemories: Memory[];
