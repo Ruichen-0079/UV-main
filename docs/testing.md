@@ -137,16 +137,14 @@ pnpm db:migrate
 
 This deletes development database data.
 
-Option B, keep the old local credentials:
+Option B, keep the old local credentials by setting `DATABASE_URL` to the exact user, password, and
+database name that originally initialized your local Docker volume.
+
+Older local volumes may have used `companion/companion` or `airi/airi_dev_password`, but those are
+not current defaults. Fresh development environments should use:
 
 ```env
-DATABASE_URL=postgres://companion:companion@localhost:5432/companion
-```
-
-For an intermediate old volume, you may need:
-
-```env
-DATABASE_URL=postgres://airi:airi_dev_password@localhost:5432/companion
+DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 
 Option C, manually create the current role in the existing dev database:
