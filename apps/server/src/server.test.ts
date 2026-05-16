@@ -612,6 +612,13 @@ describe("server", () => {
   it("parses optional memory extractor mode", () => {
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe("rule-based");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractor).toBe("llm");
+    expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractorLlmEnabled).toBe(false);
+    expect(
+      loadServerConfig({
+        MEMORY_EXTRACTOR: "llm",
+        MEMORY_EXTRACTOR_LLM_ENABLED: "true"
+      }).memoryExtractorLlmEnabled
+    ).toBe(true);
     expect(() => loadServerConfig({ MEMORY_EXTRACTOR: "external" })).toThrow(
       "Unsupported MEMORY_EXTRACTOR"
     );

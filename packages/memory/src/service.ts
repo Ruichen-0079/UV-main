@@ -8,6 +8,7 @@ import type {
   MemoryCandidate,
   MemoryExtractionInput,
   MemoryExtractor,
+  MemoryExtractorStatus,
   MemoryMatchReason,
   MemoryRetrievalMode,
   MemoryQuery,
@@ -59,6 +60,16 @@ export class MemoryService {
     return this.extractor.extractCandidates(input);
   }
 
+  getExtractorStatus(): MemoryExtractorStatus {
+    return (
+      this.extractor.getStatus?.() ?? {
+        mode: "rule-based",
+        active: "rule-based",
+        enabled: true
+      }
+    );
+  }
+
   async rememberCandidate(
     candidate: MemoryCandidate,
     options: { source?: string; tags?: string[] } = {}
@@ -76,6 +87,7 @@ export class MemoryService {
       metadata: {
         generatedBy: "rule-based-memory-extractor",
         reason: candidate.reason,
+        confidence: candidate.confidence ?? null,
         sourceTraceId: candidate.sourceTraceId ?? null
       },
       tags: Array.from(new Set([...(candidate.tags ?? []), ...(options.tags ?? [])]))

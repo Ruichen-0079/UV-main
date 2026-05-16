@@ -8,6 +8,9 @@ export type {
   MemoryCandidate,
   MemoryExtractionInput,
   MemoryExtractor,
+  MemoryExtractorActive,
+  MemoryExtractorMode,
+  MemoryExtractorStatus,
   MemoryMatchReason,
   MemoryQuery,
   MemoryRetrievalMode,
@@ -31,6 +34,7 @@ export { MemoryRetriever } from "./retriever.js";
 export {
   LlmMemoryExtractor,
   RuleBasedMemoryExtractor,
+  type LlmMemoryExtractorOptions,
   type MemoryExtractionReasoner
 } from "./extractor.js";
 export { MemoryService } from "./service.js";

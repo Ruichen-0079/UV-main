@@ -44,6 +44,8 @@ Automatic memory writes are conservative. `readMemory` controls retrieval for pr
 
 The rule-based extractor only proposes memories for durable signals such as explicit `remember` / `记住`, `from now on` / `以后`, long-term preferences, provider choices, project paths, repository paths, startup commands, configuration decisions, troubleshooting conclusions, stable workflow instructions, and project milestones. Ordinary questions, greetings, failed answers, and uncertain assistant responses are not stored automatically. Use the Dashboard Memory page for explicit manual corrections.
 
+`MEMORY_EXTRACTOR=rule-based` is the default and does not consume model tokens. `MEMORY_EXTRACTOR=llm` is reserved for a future DeepSeek Reasoning-assisted extractor, but it still falls back to rule-based extraction unless `MEMORY_EXTRACTOR_LLM_ENABLED=true` is explicitly set.
+
 ## Prompt Safety
 
 Raw chat logs are noisy and can overfit the companion to irrelevant phrasing. Before prompt injection, memory must be compressed into concise reconstructed context:

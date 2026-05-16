@@ -7,6 +7,8 @@ import type { AppContext } from "../context.js";
 
 const editableKeys = [
   "MEMORY_REPOSITORY",
+  "MEMORY_EXTRACTOR",
+  "MEMORY_EXTRACTOR_LLM_ENABLED",
   "EVENT_BUS",
   "SERVER_HOST",
   "SERVER_PORT",

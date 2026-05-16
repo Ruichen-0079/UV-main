@@ -1190,7 +1190,7 @@ function PromptPreviewPage(): JSX.Element {
         />
       )}
       {promptPreview && (
-        <div className="grid grid-cols-5 gap-3">
+        <div className="grid grid-cols-6 gap-3">
           <StatusCard
             title="Trace"
             status={shortTrace(promptPreview.traceId ?? preview.data?.traceId)}
@@ -1207,6 +1207,15 @@ function PromptPreviewPage(): JSX.Element {
               promptPreview.retrievedMemoryCount ?? preview.data?.retrievedMemoryCount ?? 0
             )}
             detail={`raw: ${promptPreview.retrievedMemoryCountRaw ?? preview.data?.retrievedMemoryCountRaw ?? 0} · mode: ${promptPreview.retrievalMode ?? preview.data?.retrievalMode ?? "unknown"}`}
+          />
+          <StatusCard
+            title="Extractor"
+            status={
+              promptPreview.memoryExtractorActive ??
+              preview.data?.memoryExtractorActive ??
+              "unknown"
+            }
+            detail={`mode: ${promptPreview.memoryExtractorMode ?? preview.data?.memoryExtractorMode ?? "unknown"} · used: ${String(promptPreview.memoryExtractorUsed ?? preview.data?.memoryExtractorUsed ?? false)}${(promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason) ? ` · ${promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason}` : ""}`}
           />
           <StatusCard
             title="Tokens"

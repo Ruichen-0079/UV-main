@@ -79,18 +79,46 @@ export type MemoryCandidate = {
   content: string;
   summary?: string | null;
   importance: number;
+  confidence?: number;
   tags: string[];
   reason: string;
   sourceTraceId?: string | null;
+};
+
+export type MemoryExtractorMode = "rule-based" | "llm";
+export type MemoryExtractorActive = "rule-based" | "llm" | "fallback-rule-based" | "disabled";
+
+export type MemoryExtractorStatus = {
+  mode: MemoryExtractorMode;
+  active: MemoryExtractorActive;
+  enabled: boolean;
+  skippedReason?: string;
 };
 
 export type MemoryExtractionInput = {
   userMessage: string;
   assistantMessage?: string | undefined;
   sourceTraceId?: string | null | undefined;
+  timestamp?: string | undefined;
+  providerMetadata?:
+    | {
+        name?: string | undefined;
+        capability?: string | undefined;
+        model?: string | undefined;
+        mock?: boolean | undefined;
+        latencyMs?: number | undefined;
+      }
+    | undefined;
+  memoryOptions?:
+    | {
+        readMemory: boolean;
+        writeMemory: boolean;
+      }
+    | undefined;
 };
 
 export type MemoryExtractor = {
+  getStatus?(): MemoryExtractorStatus;
   extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]>;
 };
 

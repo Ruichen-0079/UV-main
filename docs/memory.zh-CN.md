@@ -44,6 +44,8 @@ Dashboard 的 Memory 页面是开发期手动记忆管理控制台。它可以�
 
 Rule-based extractor 只会为稳定信号提出候选记忆，例如明确的 `remember` / `记住`、`from now on` / `以后`、长期偏好、provider choice、项目路径、仓库路径、启动命令、配置决策、排错结论、稳定 workflow instruction 和项目里程碑。普通问题、问候、失败回答、无法确定或缺少上下文的 assistant response 不会被自动存储。需要精确修正时，请使用 Dashboard Memory 页面手动管理。
 
+`MEMORY_EXTRACTOR=rule-based` 是默认模式，不消耗模型 token。`MEMORY_EXTRACTOR=llm` 预留给未来的 DeepSeek Reasoning 辅助抽取，但除非显式设置 `MEMORY_EXTRACTOR_LLM_ENABLED=true`，否则仍会回退到 rule-based extractor。
+
 ## Prompt Safety
 
 原始聊天日志噪声很高，容易让 companion 过度拟合无关措辞。进入提示词之前，记忆必须被压缩成简洁的重构上下文：

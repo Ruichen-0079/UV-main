@@ -2,6 +2,7 @@ import type {
   MemoryCandidate,
   MemoryExtractionInput,
   MemoryExtractor,
+  MemoryExtractorStatus,
   MemorySubtype,
   MemoryType
 } from "./types.js";
@@ -17,13 +18,39 @@ export type MemoryExtractionReasoner = {
   }): Promise<{ reasoning: string; answer?: string | undefined }>;
 };
 
+export type LlmMemoryExtractorOptions = {
+  enabled?: boolean;
+};
+
 export class LlmMemoryExtractor implements MemoryExtractor {
   constructor(
     private readonly reasoner: MemoryExtractionReasoner,
-    private readonly fallback: MemoryExtractor = new RuleBasedMemoryExtractor()
+    private readonly fallback: MemoryExtractor = new RuleBasedMemoryExtractor(),
+    private readonly options: LlmMemoryExtractorOptions = {}
   ) {}
 
+  getStatus(): MemoryExtractorStatus {
+    if (!this.options.enabled) {
+      return {
+        mode: "llm",
+        active: "fallback-rule-based",
+        enabled: false,
+        skippedReason: "LLM memory extraction is disabled until explicitly enabled."
+      };
+    }
+
+    return {
+      mode: "llm",
+      active: "llm",
+      enabled: true
+    };
+  }
+
   async extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
+    if (!this.options.enabled) {
+      return this.fallback.extractCandidates(input);
+    }
+
     try {
       const output = await this.reasoner.generateReasoning({
         effort: "low",
@@ -39,7 +66,10 @@ export class LlmMemoryExtractor implements MemoryExtractor {
             content: JSON.stringify({
               userMessage: input.userMessage,
               assistantMessage: input.assistantMessage ?? "",
-              sourceTraceId: input.sourceTraceId ?? null
+              sourceTraceId: input.sourceTraceId ?? null,
+              timestamp: input.timestamp ?? new Date().toISOString(),
+              providerMetadata: input.providerMetadata ?? null,
+              memoryOptions: input.memoryOptions ?? null
             })
           }
         ]
@@ -54,6 +84,7 @@ export class LlmMemoryExtractor implements MemoryExtractor {
           content: candidate.content.trim(),
           summary: candidate.summary?.trim() || candidate.content.trim(),
           importance: candidate.importance,
+          confidence: candidate.confidence,
           tags: candidate.tags,
           reason: candidate.reason,
           sourceTraceId: candidate.sourceTraceId ?? input.sourceTraceId ?? null
@@ -65,6 +96,14 @@ export class LlmMemoryExtractor implements MemoryExtractor {
 }
 
 export class RuleBasedMemoryExtractor implements MemoryExtractor {
+  getStatus(): MemoryExtractorStatus {
+    return {
+      mode: "rule-based",
+      active: "rule-based",
+      enabled: true
+    };
+  }
+
   async extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
     const text = normalizeInput(input.userMessage);
     if (!text || isTrivialConversation(text) || isOrdinaryQuestion(text)) {
@@ -193,6 +232,7 @@ function candidate(input: {
     importance: input.importance,
     tags: createTags(content, input.subtype),
     reason: input.reason,
+    confidence: 1,
     sourceTraceId: input.sourceTraceId
   };
 }
@@ -413,5 +453,6 @@ const llmExtractorSystemPrompt = [
   "Allowed type values: working, episodic, semantic, emotional, procedural, relationship.",
   "Allowed subtype values: preference, fact, project, workflow, milestone, provider-choice, path, repo, command, emotion, relationship, or null.",
   "Extract only durable user/project memory. Reject greetings, ordinary Q&A, uncertain assistant answers, and transient chatter.",
+  "Use provider metadata only as safe context, never as memory content.",
   "Prefer concise memories. Never include API keys, Authorization headers, raw env files, or secrets."
 ].join("\n");

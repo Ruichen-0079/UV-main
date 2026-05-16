@@ -2,6 +2,7 @@ import type { EventBus } from "@companion/event-bus";
 import type {
   Memory,
   MemoryCandidate,
+  MemoryExtractorStatus,
   MemoryRetrievalMode,
   MemoryRetrievalResult,
   RetrievedMemoryDebug
@@ -53,7 +54,16 @@ export type RuntimeMemoryPort = {
     userMessage: string;
     assistantMessage?: string | undefined;
     sourceTraceId?: string | null | undefined;
+    timestamp?: string | undefined;
+    providerMetadata?: SafeProviderCallMetadata | undefined;
+    memoryOptions?:
+      | {
+          readMemory: boolean;
+          writeMemory: boolean;
+        }
+      | undefined;
   }): Promise<MemoryCandidate[]>;
+  getExtractorStatus?(): MemoryExtractorStatus;
   rememberCandidate?(
     candidate: MemoryCandidate,
     options?: { source?: string; tags?: string[] }
@@ -113,6 +123,10 @@ export type RuntimePromptPreview = {
   providerLatencyMs?: number | undefined;
   providerHealthStatus?: string | undefined;
   tokenUsage?: TokenUsage | undefined;
+  memoryExtractorMode: string;
+  memoryExtractorActive: string;
+  memoryExtractorUsed: boolean;
+  memoryExtractionSkippedReason?: string | undefined;
 };
 
 export type SafeProviderCallMetadata = {
@@ -176,7 +190,14 @@ export class RuntimeOrchestrator {
       writeMemory: memoryOptions.writeMemory
     });
     if (memoryOptions.writeMemory) {
-      await this.maybeStoreMemory(userEvent, reply);
+      const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
+      this.updateLatestPromptPreviewExtraction(extraction);
+    } else {
+      this.updateLatestPromptPreviewExtraction({
+        ...this.getMemoryExtractorStatus(),
+        used: false,
+        skippedReason: "Memory write was disabled for this turn."
+      });
     }
     await this.maybeSynthesizeSpeech(reply, voiceOutput);
 
@@ -297,7 +318,12 @@ export class RuntimeOrchestrator {
       finalPrompt: prompt.prompt,
       characterCount: prompt.characterCount,
       estimatedTokens: prompt.estimatedTokens,
-      truncated: prompt.truncated
+      truncated: prompt.truncated,
+      ...this.extractorPreviewFields(
+        this.getMemoryExtractorStatus(
+          memoryOptions.writeMemory ? undefined : "Memory write was disabled for this turn."
+        )
+      )
     };
 
     const chatProvider = this.options.providers.getChatProvider();
@@ -324,7 +350,11 @@ export class RuntimeOrchestrator {
       providerMock: providerMetadata.mock,
       providerLatencyMs: providerMetadata.latencyMs,
       providerHealthStatus: providerMetadata.healthStatus,
-      tokenUsage: providerMetadata.tokenUsage
+      tokenUsage: providerMetadata.tokenUsage,
+      ...this.extractorPreviewFields({
+        ...this.getMemoryExtractorStatus(),
+        used: false
+      })
     };
 
     return this.publishAgentReply(event, output.message.content, providerMetadata);
@@ -378,14 +408,24 @@ export class RuntimeOrchestrator {
 
   async maybeStoreMemory(
     sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
-    reply: AgentReplyEvent
-  ): Promise<void> {
+    reply: AgentReplyEvent,
+    memoryOptions: { readMemory: boolean; writeMemory: boolean } = {
+      readMemory: true,
+      writeMemory: true
+    }
+  ): Promise<MemoryExtractionRuntimeDebug> {
+    const extractorStatus = this.getMemoryExtractorStatus();
     try {
       if (this.options.memory.extractCandidates && this.options.memory.rememberCandidate) {
         const candidates = await this.options.memory.extractCandidates({
           userMessage: sourceEvent.payload.content,
           assistantMessage: reply.payload.content,
-          sourceTraceId: sourceEvent.traceId
+          sourceTraceId: sourceEvent.traceId,
+          timestamp: new Date().toISOString(),
+          providerMetadata: isSafeProviderCallMetadata(reply.payload.provider)
+            ? reply.payload.provider
+            : undefined,
+          memoryOptions
         });
         const selected = candidates.filter((candidate) => candidate.importance >= 0.65);
         await Promise.all(
@@ -396,14 +436,24 @@ export class RuntimeOrchestrator {
             })
           )
         );
-        return;
+        return selected.length > 0
+          ? { ...extractorStatus, used: true }
+          : {
+              ...extractorStatus,
+              used: true,
+              skippedReason: "Extractor produced no candidates above threshold."
+            };
       }
 
       const importance = this.options.memory.scoreImportance(
         `${sourceEvent.payload.content}\n${reply.payload.content}`
       );
       if (importance < 0.65) {
-        return;
+        return {
+          ...extractorStatus,
+          used: false,
+          skippedReason: "Legacy memory score was below write threshold."
+        };
       }
 
       await this.options.memory.rememberInteraction({
@@ -413,6 +463,10 @@ export class RuntimeOrchestrator {
         sourceTraceId: sourceEvent.traceId,
         tags: [sourceEvent.payload.sessionId]
       });
+      return {
+        ...extractorStatus,
+        used: true
+      };
     } catch (error) {
       await this.publishRuntimeError("Memory write failed after reply generation.", error, {
         traceId: reply.traceId,
@@ -422,6 +476,11 @@ export class RuntimeOrchestrator {
         "optional memory write failed",
         this.errorLogContext(error, reply.traceId)
       );
+      return {
+        ...extractorStatus,
+        used: false,
+        skippedReason: "Memory extraction failed and was skipped."
+      };
     }
   }
 
@@ -653,7 +712,56 @@ export class RuntimeOrchestrator {
       healthStatus: status?.status
     };
   }
+
+  private getMemoryExtractorStatus(
+    skippedReason?: string | undefined
+  ): MemoryExtractionRuntimeDebug {
+    const status = this.options.memory.getExtractorStatus?.() ?? {
+      mode: "rule-based",
+      active: "rule-based",
+      enabled: true
+    };
+    const reason = skippedReason ?? status.skippedReason;
+    return {
+      ...status,
+      used: false,
+      ...(reason ? { skippedReason: reason } : {})
+    };
+  }
+
+  private extractorPreviewFields(
+    debug: MemoryExtractionRuntimeDebug
+  ): Pick<
+    RuntimePromptPreview,
+    | "memoryExtractorMode"
+    | "memoryExtractorActive"
+    | "memoryExtractorUsed"
+    | "memoryExtractionSkippedReason"
+  > {
+    return {
+      memoryExtractorMode: debug.mode,
+      memoryExtractorActive: debug.active,
+      memoryExtractorUsed: debug.used,
+      ...(debug.skippedReason ? { memoryExtractionSkippedReason: debug.skippedReason } : {})
+    };
+  }
+
+  private updateLatestPromptPreviewExtraction(debug: MemoryExtractionRuntimeDebug): void {
+    if (!this.latestPromptPreview) {
+      return;
+    }
+
+    this.latestPromptPreview = {
+      ...this.latestPromptPreview,
+      ...this.extractorPreviewFields(debug)
+    };
+  }
 }
+
+type MemoryExtractionRuntimeDebug = MemoryExtractorStatus & {
+  used: boolean;
+  skippedReason?: string | undefined;
+};
 
 type MemoryContext = {
   retrievedMemoryCountRaw: number;
@@ -705,6 +813,25 @@ function isRuntimeUserMessageEvent(
   input: UserMessageEvent | HandleUserMessageInput
 ): input is UserMessageEvent {
   return "type" in input && input.type === "user.message";
+}
+
+function isSafeProviderCallMetadata(value: unknown): value is SafeProviderCallMetadata {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<SafeProviderCallMetadata>;
+  return typeof candidate.name === "string" && isProviderCapability(candidate.capability);
+}
+
+function isProviderCapability(value: unknown): value is ProviderCapability {
+  return (
+    value === "chat" ||
+    value === "reasoning" ||
+    value === "tts" ||
+    value === "stt" ||
+    value === "vision" ||
+    value === "embedding"
+  );
 }
 
 function safeErrorMessage(error: unknown): string {

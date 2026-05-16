@@ -357,27 +357,31 @@ describe("MemoryRepository", () => {
   });
 
   it("extracts validated LLM memory candidates from strict JSON", async () => {
-    const extractor = new LlmMemoryExtractor({
-      async generateReasoning() {
-        return {
-          reasoning: JSON.stringify({
-            candidates: [
-              {
-                type: "semantic",
-                subtype: "provider-choice",
-                content: "用户偏好 chat 使用 DeepSeek。",
-                summary: "用户偏好 chat 使用 DeepSeek。",
-                importance: 0.86,
-                confidence: 0.91,
-                tags: ["deepseek", "provider-choice"],
-                reason: "provider preference",
-                sourceTraceId: "trace-llm"
-              }
-            ]
-          })
-        };
-      }
-    });
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            reasoning: JSON.stringify({
+              candidates: [
+                {
+                  type: "semantic",
+                  subtype: "provider-choice",
+                  content: "用户偏好 chat 使用 DeepSeek。",
+                  summary: "用户偏好 chat 使用 DeepSeek。",
+                  importance: 0.86,
+                  confidence: 0.91,
+                  tags: ["deepseek", "provider-choice"],
+                  reason: "provider preference",
+                  sourceTraceId: "trace-llm"
+                }
+              ]
+            })
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true }
+    );
 
     const candidates = await extractor.extractCandidates({
       userMessage: "以后 chat 用 DeepSeek",
@@ -397,26 +401,30 @@ describe("MemoryRepository", () => {
   });
 
   it("rejects low-confidence LLM memory candidates", async () => {
-    const extractor = new LlmMemoryExtractor({
-      async generateReasoning() {
-        return {
-          reasoning: JSON.stringify({
-            candidates: [
-              {
-                type: "semantic",
-                subtype: "fact",
-                content: "Maybe this ordinary answer matters.",
-                summary: "Maybe this ordinary answer matters.",
-                importance: 0.9,
-                confidence: 0.2,
-                tags: [],
-                reason: "uncertain"
-              }
-            ]
-          })
-        };
-      }
-    });
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            reasoning: JSON.stringify({
+              candidates: [
+                {
+                  type: "semantic",
+                  subtype: "fact",
+                  content: "Maybe this ordinary answer matters.",
+                  summary: "Maybe this ordinary answer matters.",
+                  importance: 0.9,
+                  confidence: 0.2,
+                  tags: [],
+                  reason: "uncertain"
+                }
+              ]
+            })
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true }
+    );
 
     await expect(
       extractor.extractCandidates({ userMessage: "What is TypeScript?" })
@@ -424,13 +432,17 @@ describe("MemoryRepository", () => {
   });
 
   it("falls back to rule-based extraction when LLM output is invalid", async () => {
-    const extractor = new LlmMemoryExtractor({
-      async generateReasoning() {
-        return {
-          reasoning: "not json"
-        };
-      }
-    });
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            reasoning: "not json"
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true }
+    );
 
     const candidates = await extractor.extractCandidates({
       userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main",
@@ -442,6 +454,37 @@ describe("MemoryRepository", () => {
         type: "semantic",
         subtype: "path",
         sourceTraceId: "trace-rule"
+      })
+    );
+  });
+
+  it("does not call the reasoning provider unless LLM extraction is explicitly enabled", async () => {
+    let calls = 0;
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          calls += 1;
+          throw new Error("should not be called");
+        }
+      },
+      new RuleBasedMemoryExtractor()
+    );
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "记住：以后 chat 用 DeepSeek",
+      sourceTraceId: "trace-disabled-llm"
+    });
+
+    expect(calls).toBe(0);
+    expect(extractor.getStatus()).toMatchObject({
+      mode: "llm",
+      active: "fallback-rule-based",
+      enabled: false
+    });
+    expect(candidates).toContainEqual(
+      expect.objectContaining({
+        subtype: "provider-choice",
+        sourceTraceId: "trace-disabled-llm"
       })
     );
   });
