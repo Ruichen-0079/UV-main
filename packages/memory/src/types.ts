@@ -19,6 +19,8 @@ export const MemorySubtypes = [
   "path",
   "repo",
   "command",
+  "troubleshooting",
+  "config",
   "emotion",
   "relationship"
 ] as const;

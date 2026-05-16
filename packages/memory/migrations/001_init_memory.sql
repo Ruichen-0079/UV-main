@@ -8,7 +8,8 @@ create table if not exists memories (
   subtype text null check (
     subtype is null or subtype in (
       'preference', 'fact', 'project', 'workflow', 'milestone',
-      'provider-choice', 'path', 'repo', 'command', 'emotion', 'relationship'
+      'provider-choice', 'path', 'repo', 'command', 'troubleshooting',
+      'config', 'emotion', 'relationship'
     )
   ),
   content text not null,
@@ -37,7 +38,8 @@ alter table memories add constraint memories_subtype_check
   check (
     subtype is null or subtype in (
       'preference', 'fact', 'project', 'workflow', 'milestone',
-      'provider-choice', 'path', 'repo', 'command', 'emotion', 'relationship'
+      'provider-choice', 'path', 'repo', 'command', 'troubleshooting',
+      'config', 'emotion', 'relationship'
     )
   );
 

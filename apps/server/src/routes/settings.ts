@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -32,6 +32,13 @@ const editableKeys = [
 const RuntimeSettingsUpdateSchema = z.object({
   values: z.record(z.string(), z.string().nullable())
 });
+
+const secretKeys = new Set([
+  "DEEPSEEK_API_KEY",
+  "XAI_API_KEY",
+  "DASHSCOPE_API_KEY",
+  "EMBEDDING_API_KEY"
+]);
 
 export async function registerSettingsRoutes(
   app: FastifyInstance,
@@ -84,19 +91,80 @@ export async function registerSettingsRoutes(
       settings: await buildRuntimeSettings(context, config)
     });
   });
+
+  app.post("/settings/runtime/reload", async (request, reply) => {
+    if (config.runtimeMode !== "development") {
+      return reply.status(404).send({
+        error: "not_found",
+        message: "Runtime settings reload is only available in development mode."
+      });
+    }
+
+    if (!isLocalRequest(request)) {
+      return reply.status(403).send({
+        error: "forbidden",
+        message: "Runtime settings can only be reloaded from localhost."
+      });
+    }
+
+    const effectiveEnv = await readEffectiveRuntimeEnv(app);
+    const result = context.reloadRuntimeConfig(effectiveEnv);
+    const settings = await buildRuntimeSettings(context, config);
+
+    return reply.send({
+      ok: true,
+      applied: true,
+      restartRequired: result.restartRequired,
+      active: {
+        providers: result.providers.providers,
+        memoryRepository: context.activeMemoryRepository
+      },
+      notHotReloaded: result.notHotReloaded,
+      message: result.message,
+      settings
+    });
+  });
 }
 
 async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
-  const baseEnv = await readLocalEnv(path.join(process.cwd(), ".env"));
-  const localEnv = await readLocalEnv(path.join(process.cwd(), ".env.local"));
+  const baseEnvFile = await readLocalEnvFile(path.join(process.cwd(), ".env"));
+  const localEnvFile = await readLocalEnvFile(path.join(process.cwd(), ".env.local"));
+  const baseEnv = baseEnvFile.values;
+  const localEnv = localEnvFile.values;
   const env = { ...baseEnv, ...process.env, ...localEnv };
   const providerStatus = context.providers.getStatus();
   const memoryRepository = env["MEMORY_REPOSITORY"] ?? "in-memory";
-  const pendingRestart = Object.entries(localEnv).some(
-    ([key, value]) => process.env[key] !== value
+  const pendingRestart = hasRestartRequiredLocalOverrides(
+    localEnv,
+    config,
+    context.activeMemoryRepository
   );
 
   return {
+    configFiles: {
+      ".env": {
+        exists: baseEnvFile.exists,
+        gitIgnored: true
+      },
+      ".env.local": {
+        exists: localEnvFile.exists,
+        gitIgnored: true
+      }
+    },
+    baseConfig: buildSafeConfig(baseEnv),
+    localOverrideConfig: buildSafeConfig(localEnv),
+    effectiveConfig: buildSafeConfig(env),
+    activeRuntimeConfig: {
+      serverHost: config.host,
+      serverPort: config.port,
+      eventBus: config.eventBus,
+      memoryRepository: context.activeMemoryRepository,
+      providers: {
+        chat: providerStatus.providers.chat,
+        reasoning: providerStatus.providers.reasoning
+      }
+    },
+    settings: buildLayeredSettings(baseEnv, localEnv, env),
     runtime: {
       serverHost: env["SERVER_HOST"] ?? config.host,
       serverPort: Number.parseInt(env["SERVER_PORT"] ?? String(config.port), 10),
@@ -109,7 +177,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
     },
     memory: {
       memoryRepository,
-      activeMemoryRepository: process.env["MEMORY_REPOSITORY"] ?? "in-memory",
+      activeMemoryRepository: context.activeMemoryRepository,
       databaseUrlConfigured: Boolean(env["DATABASE_URL"]),
       restartRequiredForChanges: true,
       postgresRequiresDatabaseUrl: memoryRepository === "postgres",
@@ -158,6 +226,107 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
     restartRequired: pendingRestart,
     editableKeys
   };
+}
+
+function hasRestartRequiredLocalOverrides(
+  localEnv: Record<string, string>,
+  config: ServerConfig,
+  activeMemoryRepository: string
+): boolean {
+  if (
+    localEnv["MEMORY_REPOSITORY"] &&
+    (localEnv["MEMORY_REPOSITORY"] ?? "in-memory") !== activeMemoryRepository
+  ) {
+    return true;
+  }
+  if (localEnv["SERVER_HOST"] && localEnv["SERVER_HOST"] !== config.host) {
+    return true;
+  }
+  if (localEnv["SERVER_PORT"] && Number.parseInt(localEnv["SERVER_PORT"], 10) !== config.port) {
+    return true;
+  }
+  return Boolean(localEnv["EVENT_BUS"] && localEnv["EVENT_BUS"] !== config.eventBus);
+}
+
+async function readEffectiveRuntimeEnv(
+  app: FastifyInstance
+): Promise<Record<string, string | undefined>> {
+  const envPath = path.join(process.cwd(), ".env");
+  const localEnvPath = path.join(process.cwd(), ".env.local");
+  const baseEnv = await readLocalEnv(envPath);
+  const localEnv = await readLocalEnv(localEnvPath);
+  if (Object.keys(baseEnv).length > 0) {
+    app.log.info("[env] Loaded .env");
+  }
+  if (Object.keys(localEnv).length > 0) {
+    app.log.info("[env] Loaded .env.local");
+  }
+  return { ...baseEnv, ...process.env, ...localEnv };
+}
+
+async function readLocalEnvFile(
+  envPath: string
+): Promise<{ exists: boolean; values: Record<string, string> }> {
+  try {
+    await access(envPath);
+    return {
+      exists: true,
+      values: await readLocalEnv(envPath)
+    };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return {
+        exists: false,
+        values: {}
+      };
+    }
+    throw error;
+  }
+}
+
+function buildSafeConfig(env: Record<string, string | undefined>): Record<string, unknown> {
+  const safeConfig: Record<string, unknown> = {};
+  for (const key of editableKeys) {
+    const value = env[key];
+    if (secretKeys.has(key)) {
+      safeConfig[key] = {
+        configured: Boolean(value),
+        maskedValue: maskSecret(value)
+      };
+      continue;
+    }
+    safeConfig[key] = value ?? "";
+  }
+  return safeConfig;
+}
+
+function buildLayeredSettings(
+  baseEnv: Record<string, string | undefined>,
+  localEnv: Record<string, string | undefined>,
+  effectiveEnv: Record<string, string | undefined>
+): Record<string, unknown> {
+  const layeredSettings: Record<string, unknown> = {};
+  for (const key of editableKeys) {
+    const source = key in localEnv ? ".env.local" : key in baseEnv ? ".env" : "process.env/default";
+    if (secretKeys.has(key)) {
+      layeredSettings[key] = {
+        baseConfigured: Boolean(baseEnv[key]),
+        localOverrideConfigured: Boolean(localEnv[key]),
+        effectiveConfigured: Boolean(effectiveEnv[key]),
+        maskedValue: maskSecret(effectiveEnv[key]),
+        source
+      };
+      continue;
+    }
+
+    layeredSettings[key] = {
+      base: baseEnv[key] ?? "",
+      localOverride: localEnv[key] ?? "",
+      effective: effectiveEnv[key] ?? "",
+      source
+    };
+  }
+  return layeredSettings;
 }
 
 async function writeLocalRuntimeSettings(

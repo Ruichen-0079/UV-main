@@ -200,6 +200,9 @@ describe("MemoryRepository", () => {
 
     expect(scorer.scoreImportance("hi")).toBe(0);
     expect(scorer.scoreImportance("What is TypeScript?")).toBe(0);
+    expect(scorer.scoreImportance("What is the current repo? I cannot determine the answer.")).toBe(
+      0
+    );
     expect(scorer.scoreImportance("记住：用户偏好 Chat 使用 DeepSeek。")).toBeGreaterThan(0.9);
     expect(
       scorer.scoreImportance("用户偏好 Chat/Reasoning 使用 DeepSeek，TTS 使用 xAI。")
@@ -226,10 +229,25 @@ describe("MemoryRepository", () => {
       source: "runtime",
       sourceTraceId: "trace-123"
     });
-    expect(memory.metadata).toMatchObject({
+    expect(memory?.metadata).toMatchObject({
       generatedBy: "rule-based-memory-extractor",
       reason: expect.any(String)
     });
+  });
+
+  it("does not store ordinary interactions without extractor candidates", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+
+    const memory = await service.rememberInteraction({
+      userMessage: "What is TypeScript?",
+      assistantMessage: "TypeScript is JavaScript with types.",
+      source: "runtime",
+      sourceTraceId: "trace-ordinary"
+    });
+
+    expect(memory).toBeNull();
+    await expect(repository.listRecentMemories()).resolves.toEqual([]);
   });
 
   it("extracts explicit remembered project paths as semantic path memories", async () => {
@@ -268,12 +286,57 @@ describe("MemoryRepository", () => {
     );
   });
 
+  it("extracts startup commands, config decisions, and troubleshooting conclusions", async () => {
+    const extractor = new RuleBasedMemoryExtractor();
+
+    await expect(
+      extractor.extractCandidates({
+        userMessage: "以后启动开发环境使用命令 pnpm dev"
+      })
+    ).resolves.toContainEqual(
+      expect.objectContaining({
+        type: "procedural",
+        subtype: "command",
+        reason: "command-or-startup-instruction"
+      })
+    );
+
+    await expect(
+      extractor.extractCandidates({
+        userMessage: "默认使用 SERVER_PORT=6121 作为本地开发端口"
+      })
+    ).resolves.toContainEqual(
+      expect.objectContaining({
+        type: "semantic",
+        subtype: "preference"
+      })
+    );
+
+    await expect(
+      extractor.extractCandidates({
+        userMessage: "排错结论：Memory action failed 的原因是 DELETE 请求带了空 JSON body"
+      })
+    ).resolves.toContainEqual(
+      expect.objectContaining({
+        type: "procedural",
+        subtype: "troubleshooting",
+        reason: "troubleshooting-conclusion"
+      })
+    );
+  });
+
   it("does not extract trivial greetings or ordinary questions", async () => {
     const extractor = new RuleBasedMemoryExtractor();
 
     await expect(extractor.extractCandidates({ userMessage: "hi" })).resolves.toEqual([]);
     await expect(
       extractor.extractCandidates({ userMessage: "What is TypeScript?" })
+    ).resolves.toEqual([]);
+    await expect(
+      extractor.extractCandidates({
+        userMessage: "What is the current project path?",
+        assistantMessage: "I cannot determine the answer because I lack context."
+      })
     ).resolves.toEqual([]);
   });
 
@@ -430,6 +493,8 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("create extension if not exists vector");
     expect(combinedSql).toContain("create extension if not exists pg_trgm");
     expect(combinedSql).toContain("metadata jsonb");
+    expect(combinedSql).toContain("troubleshooting");
+    expect(combinedSql).toContain("config");
     expect(combinedSql).toContain("create table if not exists memories");
     expect(combinedSql).toContain("create table if not exists entities");
     expect(combinedSql).toContain("create table if not exists relations");

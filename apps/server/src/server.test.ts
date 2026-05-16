@@ -629,6 +629,8 @@ describe("server", () => {
 
       const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
       expect(settings.statusCode).toBe(200);
+      expect(settings.json().configFiles[".env"].exists).toBe(false);
+      expect(settings.json().configFiles[".env.local"].exists).toBe(false);
       expect(settings.json().providers.deepseek.apiKeyConfigured).toBe(true);
       expect(settings.json().providers.deepseek.apiKeyPreview).toBe("••••••••••••cret");
       expect(settings.json().providers.deepseek.apiKeyPreview).not.toBe(
@@ -672,6 +674,20 @@ describe("server", () => {
         expect.arrayContaining(["MEMORY_REPOSITORY", "DEEPSEEK_API_KEY"])
       );
       expect(update.json().settings.memory.memoryRepository).toBe("postgres");
+      expect(update.json().settings.configFiles[".env.local"].exists).toBe(true);
+      expect(update.json().settings.settings.MEMORY_REPOSITORY).toMatchObject({
+        base: "",
+        localOverride: "postgres",
+        effective: "postgres",
+        source: ".env.local"
+      });
+      expect(update.json().settings.settings.DEEPSEEK_API_KEY).toMatchObject({
+        baseConfigured: false,
+        localOverrideConfigured: true,
+        effectiveConfigured: true,
+        maskedValue: "••••••••••••cret",
+        source: ".env.local"
+      });
       expect(update.body).not.toContain("new_deepseek_secret");
       expect(update.body).not.toContain("configured_deepseek_secret");
       expect(update.json().settings.providers.deepseek.apiKeyConfigured).toBe(true);
@@ -723,10 +739,34 @@ describe("server", () => {
       const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
 
       expect(settings.statusCode).toBe(200);
+      expect(settings.json().configFiles[".env"]).toMatchObject({
+        exists: true,
+        gitIgnored: true
+      });
+      expect(settings.json().configFiles[".env.local"]).toMatchObject({
+        exists: true,
+        gitIgnored: true
+      });
       expect(settings.json().providers.deepseek.chatModel).toBe("from-local");
+      expect(settings.json().settings.DEEPSEEK_CHAT_MODEL).toMatchObject({
+        base: "from-env",
+        localOverride: "from-local",
+        effective: "from-local",
+        source: ".env.local"
+      });
+      expect(settings.json().baseConfig.DEEPSEEK_CHAT_MODEL).toBe("from-env");
+      expect(settings.json().localOverrideConfig.DEEPSEEK_CHAT_MODEL).toBe("from-local");
+      expect(settings.json().effectiveConfig.DEEPSEEK_CHAT_MODEL).toBe("from-local");
       expect(settings.json().providers.xai.apiKeyConfigured).toBe(true);
       expect(settings.json().providers.xai.apiKeyPreview).toBe("••••••••••••cret");
-      expect(settings.json().restartRequired).toBe(true);
+      expect(settings.json().settings.XAI_API_KEY).toMatchObject({
+        baseConfigured: false,
+        localOverrideConfigured: true,
+        effectiveConfigured: true,
+        maskedValue: "••••••••••••cret",
+        source: ".env.local"
+      });
+      expect(settings.json().restartRequired).toBe(false);
       expect(settings.body).not.toContain("local_xai_secret");
       expect(await readFile(path.join(tempDir, ".env"), "utf8")).toBe(
         "DEEPSEEK_CHAT_MODEL=from-env\n"
@@ -734,6 +774,130 @@ describe("server", () => {
 
       await app.close();
     } finally {
+      process.chdir(previousCwd);
+      await rm(tempDir, { recursive: true, force: true });
+      restoreEnv(previous);
+    }
+  });
+
+  it("reloads saved provider config into the active runtime without leaking secrets", async () => {
+    const previous = snapshotEnv();
+    const previousCwd = process.cwd();
+    const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-reload-"));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          model: "deepseek-chat",
+          choices: [
+            {
+              finish_reason: "stop",
+              message: { role: "assistant", content: "Reloaded provider reply." }
+            }
+          ],
+          usage: {
+            prompt_tokens: 12,
+            completion_tokens: 5,
+            total_tokens: 17
+          }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    setMockEnv();
+
+    try {
+      process.chdir(tempDir);
+      delete process.env["DEEPSEEK_CHAT_MODEL"];
+      delete process.env["DEEPSEEK_REASONING_MODEL"];
+      const app = await buildServer(loadServerConfig(process.env));
+
+      const initialProviders = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(initialProviders.statusCode).toBe(200);
+      expect(initialProviders.json().providers.chat).toMatchObject({
+        configured: false,
+        mock: true
+      });
+
+      const update = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: {
+          values: {
+            DEEPSEEK_API_KEY: "reload_deepseek_secret",
+            DEEPSEEK_CHAT_MODEL: "deepseek-chat",
+            DEEPSEEK_REASONING_MODEL: "deepseek-reasoner"
+          }
+        }
+      });
+      expect(update.statusCode).toBe(200);
+      expect(update.body).not.toContain("reload_deepseek_secret");
+
+      const reload = await app.inject({ method: "POST", url: "/settings/runtime/reload" });
+      expect(reload.statusCode).toBe(200);
+      expect(reload.json()).toMatchObject({
+        ok: true,
+        applied: true,
+        restartRequired: false
+      });
+      expect(reload.json().active.providers.chat).toMatchObject({
+        provider: "deepseek",
+        configured: true,
+        mock: false,
+        model: "deepseek-chat"
+      });
+      expect(reload.body).not.toContain("reload_deepseek_secret");
+
+      const providers = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(providers.statusCode).toBe(200);
+      expect(providers.json().providers.chat).toMatchObject({
+        configured: true,
+        mock: false,
+        model: "deepseek-chat"
+      });
+      expect(providers.body).not.toContain("reload_deepseek_secret");
+
+      const message = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "reload",
+          text: "hello after reload",
+          options: {
+            readMemory: false,
+            writeMemory: false,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(message.statusCode).toBe(200);
+      expect(message.json().reply).toBe("Reloaded provider reply.");
+      expect(message.json().provider).toMatchObject({
+        name: "deepseek",
+        capability: "chat",
+        mock: false,
+        model: "deepseek-chat"
+      });
+      expect(message.body).not.toContain("reload_deepseek_secret");
+
+      const memoryUpdate = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: {
+          values: {
+            MEMORY_REPOSITORY: "postgres"
+          }
+        }
+      });
+      expect(memoryUpdate.statusCode).toBe(200);
+      const memoryReload = await app.inject({ method: "POST", url: "/settings/runtime/reload" });
+      expect(memoryReload.statusCode).toBe(200);
+      expect(memoryReload.json().restartRequired).toBe(true);
+      expect(memoryReload.json().notHotReloaded).toContain("MEMORY_REPOSITORY");
+      expect(memoryReload.json().active.memoryRepository).toBe("in-memory");
+
+      await app.close();
+    } finally {
+      fetchSpy.mockRestore();
       process.chdir(previousCwd);
       await rm(tempDir, { recursive: true, force: true });
       restoreEnv(previous);

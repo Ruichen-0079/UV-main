@@ -176,9 +176,17 @@ The Dashboard `Settings` page can write local development settings to `.env.loca
 - Secret previews use a fixed-length mask such as `••••••••••••abcd`; the raw value and full key length are not exposed.
 - `scripts/dev.sh` loads `.env` first and `.env.local` second, so `.env.local` overrides base local values after restart.
 - `POST /settings/runtime` only accepts an allowlist of development provider and memory keys.
+- `POST /settings/runtime/reload` reloads `.env` and `.env.local`, rebuilds the active provider registry, and applies provider config without restarting the HTTP server.
 - Provider verification buttons call `POST /providers/verify/chat` or `POST /providers/verify/reasoning` explicitly.
 - `/health` and `/providers/status` do not consume provider tokens.
-- Changes are env-driven and should be treated as restart-required.
+- Provider config changes can be applied with **Apply Now / Reload Runtime Config**. Memory repository, server host/port, and event bus changes remain restart-required.
+- If DeepSeek config is saved but chat still reports mock mode, click **Apply Now** or restart the dev server.
+- `GET /settings/runtime` reports safe config layering: base `.env`, local override `.env.local`, effective merged values, and active runtime values.
+- The Dashboard does not automatically copy `.env.local` back into `.env`. This prevents accidental secret commits and makes local overrides explicit.
+
+The reload endpoint never returns API keys, raw `.env` contents, request headers, `Authorization` headers, tokens, or passwords. It returns only safe active provider metadata such as configured state, model name, mock/real mode, and restart-required boundaries.
+
+There is intentionally no automatic “sync `.env.local` into `.env`” behavior. A future manual promotion command may copy non-secret allowlisted values only, but API keys and other secrets should remain local overrides unless the developer explicitly edits their private `.env`.
 
 ## Future Work
 

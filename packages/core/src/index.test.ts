@@ -128,7 +128,16 @@ describe("RuntimeOrchestrator", () => {
       sessionId: "test-session",
       content: "hi"
     });
-    await runtime.handleUserMessage({
+    await runtime.handleUserMessage(
+      {
+        sessionId: "test-session",
+        content: "记住：这个不应该写入，因为 writeMemory=false"
+      },
+      {
+        writeMemory: false
+      }
+    );
+    const reply = await runtime.handleUserMessage({
       sessionId: "test-session",
       content: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
     });
@@ -137,7 +146,8 @@ describe("RuntimeOrchestrator", () => {
     expect(written[0]).toMatchObject({
       type: "semantic",
       subtype: "path",
-      reason: "explicit-remember"
+      reason: "explicit-remember",
+      sourceTraceId: reply.traceId
     });
   });
 });

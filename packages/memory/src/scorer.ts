@@ -8,7 +8,11 @@ export class MemoryScorer {
     }
 
     const normalized = trimmed.toLowerCase();
-    if (isTrivialConversation(normalized) || isOrdinaryQuestion(normalized)) {
+    if (
+      isTrivialConversation(normalized) ||
+      isOrdinaryQuestion(normalized) ||
+      mentionsFailedOrUncertainAnswer(normalized)
+    ) {
       return 0;
     }
 
@@ -30,6 +34,10 @@ export class MemoryScorer {
 
     if (mentionsStablePreferenceOrWorkflow(normalized)) {
       return 0.7;
+    }
+
+    if (mentionsTroubleshootingOrConfig(normalized)) {
+      return 0.68;
     }
 
     return Math.min(0.5, Math.max(0, trimmed.length / 1800));
@@ -87,12 +95,25 @@ function mentionsStablePreferenceOrWorkflow(text: string): boolean {
   );
 }
 
+function mentionsTroubleshootingOrConfig(text: string): boolean {
+  return /(root cause|原因是|排错结论|解决办法|config|配置|\.env|端口|port|database_url|memory_repository)/iu.test(
+    text
+  );
+}
+
+function mentionsFailedOrUncertainAnswer(text: string): boolean {
+  return /(i don'?t know|cannot determine|can't determine|not enough context|lack context|lacks context|unable to answer|无法确定|不知道|缺少上下文|没有足够上下文|不能判断|无法判断)/iu.test(
+    text
+  );
+}
+
 function mentionsStableSignal(text: string): boolean {
   return (
     mentionsExplicitRemember(text) ||
     mentionsStableProviderChoice(text) ||
     mentionsStablePathOrRepository(text) ||
     mentionsProjectMilestone(text) ||
-    mentionsStablePreferenceOrWorkflow(text)
+    mentionsStablePreferenceOrWorkflow(text) ||
+    mentionsTroubleshootingOrConfig(text)
   );
 }

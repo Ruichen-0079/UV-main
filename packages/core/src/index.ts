@@ -64,7 +64,7 @@ export type RuntimeMemoryPort = {
     source?: string;
     sourceTraceId?: string | null;
     tags?: string[];
-  }): Promise<Memory>;
+  }): Promise<Memory | null>;
 };
 
 export type RuntimePromptBuilderPort = {

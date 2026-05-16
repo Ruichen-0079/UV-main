@@ -39,7 +39,7 @@ export class MemoryService {
     source?: string;
     sourceTraceId?: string | null;
     tags?: string[];
-  }): Promise<Memory> {
+  }): Promise<Memory | null> {
     const candidates = await this.extractCandidates({
       userMessage: input.userMessage,
       assistantMessage: input.assistantMessage,
@@ -52,28 +52,7 @@ export class MemoryService {
         tags: input.tags ?? []
       });
     }
-
-    const content = [
-      `User intent: ${input.userMessage.trim()}`,
-      `Assistant response summary: ${input.assistantMessage.trim()}`
-    ].join("\n");
-
-    return this.repository.createMemory({
-      type: inferRuntimeMemoryType(input.userMessage),
-      subtype: inferMemorySubtype(input.userMessage),
-      content,
-      summary: this.compressForStorage(content),
-      importance: this.scoreImportance(content),
-      emotionValence: 0,
-      emotionArousal: 0,
-      source: input.source ?? "interaction",
-      sourceTraceId: input.sourceTraceId ?? null,
-      metadata: {
-        generatedBy: "runtime",
-        sourceTraceId: input.sourceTraceId ?? null
-      },
-      tags: input.tags ?? []
-    });
+    return null;
   }
 
   async extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]> {

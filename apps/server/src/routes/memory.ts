@@ -27,6 +27,8 @@ const MemorySubtypeSchema = z.enum([
   "path",
   "repo",
   "command",
+  "troubleshooting",
+  "config",
   "emotion",
   "relationship"
 ]);

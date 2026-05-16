@@ -240,6 +240,30 @@ export type PromptPreviewResponse = {
 };
 
 export type RuntimeSettingsResponse = {
+  configFiles: {
+    ".env": {
+      exists: boolean;
+      gitIgnored: boolean;
+    };
+    ".env.local": {
+      exists: boolean;
+      gitIgnored: boolean;
+    };
+  };
+  baseConfig: Record<string, unknown>;
+  localOverrideConfig: Record<string, unknown>;
+  effectiveConfig: Record<string, unknown>;
+  activeRuntimeConfig: {
+    serverHost: string;
+    serverPort: number;
+    eventBus: string;
+    memoryRepository: string;
+    providers: {
+      chat: ProviderHealth;
+      reasoning: ProviderHealth;
+    };
+  };
+  settings: Record<string, LayeredSetting>;
   runtime: {
     serverHost: string;
     serverPort: number;
@@ -265,6 +289,10 @@ export type RuntimeSettingsResponse = {
       apiKeyPreview?: string;
       chatModel: string;
       reasoningModel: string;
+      status?: {
+        chat: ProviderHealth;
+        reasoning: ProviderHealth;
+      };
     };
     xai: {
       baseUrl: string;
@@ -297,6 +325,21 @@ export type RuntimeSettingsResponse = {
   editableKeys: string[];
 };
 
+export type LayeredSetting =
+  | {
+      base: string;
+      localOverride: string;
+      effective: string;
+      source: string;
+    }
+  | {
+      baseConfigured: boolean;
+      localOverrideConfigured: boolean;
+      effectiveConfigured: boolean;
+      maskedValue?: string;
+      source: string;
+    };
+
 export type RuntimeSettingsUpdateRequest = {
   values: Record<string, string | null>;
 };
@@ -305,6 +348,19 @@ export type RuntimeSettingsUpdateResponse = {
   ok: boolean;
   restartRequired: boolean;
   changedKeys: string[];
+  settings: RuntimeSettingsResponse;
+};
+
+export type RuntimeSettingsReloadResponse = {
+  ok: boolean;
+  applied: boolean;
+  restartRequired: boolean;
+  active: {
+    providers: ProvidersStatusResponse["providers"];
+    memoryRepository: string;
+  };
+  notHotReloaded: string[];
+  message: string;
   settings: RuntimeSettingsResponse;
 };
 
@@ -427,6 +483,12 @@ export const apiClient = {
     return request<RuntimeSettingsUpdateResponse>("/settings/runtime", {
       method: "POST",
       body: JSON.stringify(input)
+    });
+  },
+
+  reloadRuntimeSettings(): Promise<RuntimeSettingsReloadResponse> {
+    return request<RuntimeSettingsReloadResponse>("/settings/runtime/reload", {
+      method: "POST"
     });
   },
 

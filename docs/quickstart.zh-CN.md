@@ -57,6 +57,17 @@ Copy-Item .env.example .env
 
 `.env.example` 只保存占位配置和空 secret。`.env` 是敏感本地状态，只能保存在本机，不要打印、提交或粘贴其中的 API key、Authorization header、token 或 password。
 
+Dashboard Settings 保存的本地覆盖配置会写入 `.env.local`，不会修改已提交的 `.env.example`，也不会直接显示原始 API key。开发脚本会先加载 `.env`，再加载 `.env.local`，因此 `.env.local` 会在重启后覆盖 `.env`。
+
+Settings 页面会显示配置分层：
+
+- Base `.env`：基础本地配置文件。
+- Local override `.env.local`：Dashboard 写入的本地覆盖文件。
+- Effective value：`.env`、当前环境变量和 `.env.local` 合并后的安全值。
+- Active runtime value：当前运行中的 provider / memory 状态。
+
+`.env.local` 不会自动同步回 `.env`。这是有意的安全边界，用来降低误提交 secret 的风险。保存后如果 active runtime 仍旧显示旧 provider 或 mock mode，请点击 **Apply Now / Reload Runtime Config**，或者重启开发服务器。
+
 复制后在 `.env` 中填写 MVP 必需值。DeepSeek 和数据库是当前 MVP 必需项。不要把真实 key 写入 `.env.example`：
 
 ```env
@@ -108,13 +119,14 @@ DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 
 启用 PostgreSQL 记忆前必须先运行 migration。
 
-服务器当前直接读取 `process.env`；启动前请把 `.env` 加载进 shell。
+如果你手动启动服务，启动前请把 `.env` 和 `.env.local` 加载进 shell；使用 `./scripts/dev.sh` 时脚本会自动加载。
 
 Bash 或 WSL：
 
 ```bash
 set -a
 source .env
+[ -f .env.local ] && source .env.local
 set +a
 ```
 
@@ -128,6 +140,19 @@ Get-Content .env |
     Set-Item -Path "Env:$name" -Value $value
   }
 ```
+
+## 2.1 Dashboard Settings 与 Apply Now
+
+Dashboard 的 Settings 页面用于开发期配置 provider、模型和 memory mode：
+
+- **Save Settings** 会把允许的配置写入 `.env.local`。
+- **Apply Now / Reload Runtime Config** 会重新加载 `.env` 和 `.env.local`，并重建运行中的 provider registry。
+- DeepSeek API key、xAI API key、DashScope API key 和 embedding key 只会以固定长度脱敏形式显示，例如 `••••••••••••abcd`。
+- `/health` 和 `/providers/status` 不会自动消耗 provider token。
+- Chat/Reasoning 的 provider 配置可以热加载；保存 DeepSeek key 后点击 **Apply Now**，Chat 就可以从 mock fallback 切换到真实 DeepSeek provider。
+- `MEMORY_REPOSITORY`、`SERVER_HOST`、`SERVER_PORT`、`EVENT_BUS` 这类运行边界仍需要重启服务器。切换到 `MEMORY_REPOSITORY=postgres` 后，还需要确认 `DATABASE_URL` 已配置并运行 `pnpm db:migrate`。
+
+如果 Settings 显示 DeepSeek 已配置，但 Chat 仍然是 mock mode，点击 **Apply Now / Reload Runtime Config** 或重启开发服务器。
 
 ## 3. Development Infrastructure
 
@@ -309,6 +334,8 @@ Dashboard 页面作用：
 - Voice：未来 voice/STT/TTS 调试页，目前是占位。
 - Vision：未来 vision 调试页，目前是占位。
 - Settings：查看开发期 URL 和 secret safety 提示。
+
+自动记忆写入是保守的：`readMemory` 控制检索，`writeMemory` 控制自动写入。普通聊天、问候、一次性问题或 assistant 明确表示缺少上下文的失败回答不会自动写入。明确说“记住”、长期偏好、provider choice、项目路径、启动命令、配置决策、排错结论和项目里程碑更适合自动写入；需要精确编辑时使用 Dashboard 的 Memory 页面。
 
 ## 6. Test Health Endpoint
 

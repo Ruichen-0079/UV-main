@@ -70,6 +70,12 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
     if (!text || isTrivialConversation(text) || isOrdinaryQuestion(text)) {
       return [];
     }
+    if (
+      isFailedOrUncertainAssistantAnswer(input.assistantMessage) &&
+      !mentionsExplicitRemember(text)
+    ) {
+      return [];
+    }
 
     const candidates: MemoryCandidate[] = [];
     const explicitContent = stripExplicitRememberPrefix(text);
@@ -133,9 +139,22 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
           text: explicitContent,
           sourceTraceId,
           type: "procedural",
-          subtype: "command",
+          subtype: mentionsConfigDecision(text) ? "config" : "command",
           importance: 0.82,
           reason: "command-or-startup-instruction"
+        })
+      );
+    }
+
+    if (mentionsTroubleshootingConclusion(text)) {
+      candidates.push(
+        candidate({
+          text: explicitContent,
+          sourceTraceId,
+          type: "procedural",
+          subtype: "troubleshooting",
+          importance: 0.8,
+          reason: "troubleshooting-conclusion"
         })
       );
     }
@@ -204,7 +223,10 @@ function inferSubtype(text: string): MemorySubtype | null {
     return inferPathSubtype(text);
   }
   if (mentionsCommandOrStartup(text)) {
-    return "command";
+    return mentionsConfigDecision(text) ? "config" : "command";
+  }
+  if (mentionsTroubleshootingConclusion(text)) {
+    return "troubleshooting";
   }
   if (mentionsProjectMilestone(text)) {
     return "milestone";
@@ -233,6 +255,8 @@ function createTags(text: string, subtype: MemorySubtype | null): string[] {
   if (/xai|x\.ai/iu.test(text)) tags.add("xai");
   if (/dashscope|阿里云|通义/iu.test(text)) tags.add("dashscope");
   if (/postgres|pgvector/iu.test(text)) tags.add("postgres");
+  if (/config|配置|env|\.env/iu.test(text)) tags.add("config");
+  if (/troubleshoot|排错|原因|root cause/iu.test(text)) tags.add("troubleshooting");
   return [...tags];
 }
 
@@ -266,6 +290,8 @@ function mentionsDurableSignal(text: string): boolean {
     mentionsStablePreference(text) ||
     mentionsPathOrRepository(text) ||
     mentionsCommandOrStartup(text) ||
+    mentionsConfigDecision(text) ||
+    mentionsTroubleshootingConclusion(text) ||
     mentionsProjectMilestone(text)
   );
 }
@@ -291,13 +317,34 @@ function mentionsPathOrRepository(text: string): boolean {
 }
 
 function mentionsCommandOrStartup(text: string): boolean {
-  return /(\bcommand\b|命令|\bpnpm\b|docker compose|\bdocker\b|脚本|\bstartup\b|启动|start-dev|dev\.sh|health\.sh|stop\.sh)/iu.test(
+  return /(\bcommand\b|命令|\bpnpm\b|docker compose|\bdocker\b|脚本|\bstartup\b|启动|start-dev|dev\.sh|health\.sh|stop\.sh|curl\s+http|npm\s+run)/iu.test(
+    text
+  );
+}
+
+function mentionsConfigDecision(text: string): boolean {
+  return /(\bport\b|端口|配置|config|\.env|env var|environment variable|database_url|memory_repository|server_port|server_host|默认端口|默认使用)/iu.test(
+    text
+  );
+}
+
+function mentionsTroubleshootingConclusion(text: string): boolean {
+  return /(root cause|原因是|结论是|排错结论|解决办法|fix is|修复方式|failed because|失败原因)/iu.test(
     text
   );
 }
 
 function mentionsProjectMilestone(text: string): boolean {
   return /(项目里程碑|milestone|完成|已完成|implemented|finished|done|通过验证|validation passed|all validation passed|上线)/iu.test(
+    text
+  );
+}
+
+function isFailedOrUncertainAssistantAnswer(text: string | undefined): boolean {
+  if (!text) {
+    return false;
+  }
+  return /(i don'?t know|cannot determine|can't determine|not enough context|lack context|lacks context|unable to answer|无法确定|不知道|缺少上下文|没有足够上下文|不能判断|无法判断)/iu.test(
     text
   );
 }
@@ -316,6 +363,8 @@ const LlmExtractorCandidateSchema = z
         "path",
         "repo",
         "command",
+        "troubleshooting",
+        "config",
         "emotion",
         "relationship"
       ])

@@ -9,7 +9,11 @@ import {
   type MemoryRepository
 } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
-import { createProviderRegistryFromEnv, type ProviderRegistry } from "@companion/providers";
+import {
+  createProviderRegistryFromEnv,
+  type ProviderRegistry,
+  type ProviderStatusMap
+} from "@companion/providers";
 import type { FastifyBaseLogger } from "fastify";
 import type { ServerConfig } from "./config.js";
 import { DashboardStateService } from "./services/dashboard.js";
@@ -21,6 +25,15 @@ export type AppContext = {
   memory: MemoryService;
   providers: ProviderRegistry;
   runtime: RuntimeOrchestrator;
+  activeMemoryRepository: string;
+  reloadRuntimeConfig(env: Record<string, string | undefined>): RuntimeConfigReloadResult;
+};
+
+export type RuntimeConfigReloadResult = {
+  providers: ProviderStatusMap;
+  restartRequired: boolean;
+  notHotReloaded: string[];
+  message: string;
 };
 
 export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig): AppContext {
@@ -35,32 +48,85 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
   });
   const memoryRepository = createMemoryRepositoryFromEnv();
   const promptBuilder = new PromptBuilder();
-  const providers = createProviderRegistryFromEnv();
   const ruleBasedExtractor = new RuleBasedMemoryExtractor();
-  const memoryExtractor =
-    config.memoryExtractor === "llm"
-      ? new LlmMemoryExtractor(providers.getReasoningProvider(), ruleBasedExtractor)
-      : ruleBasedExtractor;
-  const memory = new MemoryService(memoryRepository, undefined, undefined, memoryExtractor);
   const runtimeLogger = createRuntimeLogger(logger);
+  const activeMemoryRepository = process.env["MEMORY_REPOSITORY"] ?? "in-memory";
 
-  const runtime = new RuntimeOrchestrator({
-    eventBus,
-    memory,
-    promptBuilder,
-    providers,
-    memoryRepository: process.env["MEMORY_REPOSITORY"] ?? "in-memory",
-    logger: runtimeLogger
-  });
+  function createMemoryService(providers: ProviderRegistry): MemoryService {
+    const memoryExtractor =
+      config.memoryExtractor === "llm"
+        ? new LlmMemoryExtractor(providers.getReasoningProvider(), ruleBasedExtractor)
+        : ruleBasedExtractor;
 
-  return {
+    return new MemoryService(memoryRepository, undefined, undefined, memoryExtractor);
+  }
+
+  function createRuntime(providers: ProviderRegistry, memory: MemoryService): RuntimeOrchestrator {
+    return new RuntimeOrchestrator({
+      eventBus,
+      memory,
+      promptBuilder,
+      providers,
+      memoryRepository: activeMemoryRepository,
+      logger: runtimeLogger
+    });
+  }
+
+  const providers = createProviderRegistryFromEnv();
+  const memory = createMemoryService(providers);
+  const runtime = createRuntime(providers, memory);
+
+  const context: AppContext = {
     eventBus,
     dashboard,
     memoryRepository,
     memory,
     providers,
-    runtime
+    runtime,
+    activeMemoryRepository,
+    reloadRuntimeConfig(env) {
+      const nextProviders = createProviderRegistryFromEnv(env);
+      const nextMemory = createMemoryService(nextProviders);
+      context.providers = nextProviders;
+      context.memory = nextMemory;
+      context.runtime = createRuntime(nextProviders, nextMemory);
+
+      const notHotReloaded = collectNotHotReloadedSettings(env, config, activeMemoryRepository);
+      const restartRequired = notHotReloaded.length > 0;
+
+      return {
+        providers: nextProviders.getStatus(),
+        restartRequired,
+        notHotReloaded,
+        message: restartRequired
+          ? "Runtime provider config reloaded. Some settings require server restart."
+          : "Runtime provider config reloaded."
+      };
+    }
   };
+
+  return context;
+}
+
+function collectNotHotReloadedSettings(
+  env: Record<string, string | undefined>,
+  config: ServerConfig,
+  activeMemoryRepository: string
+): string[] {
+  const notHotReloaded: string[] = [];
+  if ((env["MEMORY_REPOSITORY"] ?? "in-memory") !== activeMemoryRepository) {
+    notHotReloaded.push("MEMORY_REPOSITORY");
+  }
+  if ((env["SERVER_HOST"] ?? config.host) !== config.host) {
+    notHotReloaded.push("SERVER_HOST");
+  }
+  if (Number.parseInt(env["SERVER_PORT"] ?? String(config.port), 10) !== config.port) {
+    notHotReloaded.push("SERVER_PORT");
+  }
+  if ((env["EVENT_BUS"] ?? config.eventBus) !== config.eventBus) {
+    notHotReloaded.push("EVENT_BUS");
+  }
+  return notHotReloaded;
 }
 
 function createRuntimeLogger(logger: FastifyBaseLogger): RuntimeLogger {

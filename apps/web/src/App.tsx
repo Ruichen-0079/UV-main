@@ -4,12 +4,14 @@ import {
   type CreateMemoryRequest,
   type DashboardWebSocketMessage,
   type HealthResponse,
+  type LayeredSetting,
   type MemoryRecord,
   type ProviderCallMetadata,
   type ProviderVerificationResponse,
   type PromptPreviewResponse,
   type ProvidersStatusResponse,
   type RuntimeEvent,
+  type RuntimeSettingsReloadResponse,
   type RuntimeSettingsResponse,
   type UpdateMemoryRequest
 } from "./api/client.js";
@@ -58,6 +60,8 @@ const memorySubtypes = [
   "path",
   "repo",
   "command",
+  "troubleshooting",
+  "config",
   "workflow",
   "milestone",
   "emotion",
@@ -1332,6 +1336,9 @@ function SettingsPage(): JSX.Element {
     restartRequired: boolean;
   } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [applyResult, setApplyResult] = useState<RuntimeSettingsReloadResponse | null>(null);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState<"chat" | "reasoning" | null>(null);
   const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
   const [clearedSecrets, setClearedSecrets] = useState<Set<SettingsKey>>(() => new Set());
@@ -1364,6 +1371,23 @@ function SettingsPage(): JSX.Element {
     }
   }
 
+  async function applyRuntimeConfig(): Promise<void> {
+    setApplying(true);
+    setApplyError(null);
+    setApplyResult(null);
+    try {
+      const response = await apiClient.reloadRuntimeSettings();
+      setApplyResult(response);
+      setForm(settingsFormFromResponse(response.settings));
+      setClearedSecrets(new Set());
+      await settings.refresh();
+    } catch (caught) {
+      setApplyError(caught instanceof Error ? caught.message : "Runtime config reload failed");
+    } finally {
+      setApplying(false);
+    }
+  }
+
   async function verify(capability: "chat" | "reasoning"): Promise<void> {
     setVerifying(capability);
     setVerification(null);
@@ -1374,6 +1398,34 @@ function SettingsPage(): JSX.Element {
     }
   }
 
+  const activeChat = settings.data?.providers.deepseek.status?.chat;
+  const activeReasoning = settings.data?.providers.deepseek.status?.reasoning;
+  const savedDeepSeekButRuntimeMock =
+    Boolean(settings.data?.providers.deepseek.apiKeyConfigured) && activeChat?.mock === true;
+  const savedConfigDiffersFromActive =
+    savedDeepSeekButRuntimeMock ||
+    Boolean(
+      settings.data &&
+      (settings.data.memory.memoryRepository !== settings.data.memory.activeMemoryRepository ||
+        settings.data.runtime.serverHost !== settings.data.runtime.activeServerHost ||
+        settings.data.runtime.serverPort !== settings.data.runtime.activeServerPort ||
+        settings.data.runtime.eventBus !== settings.data.runtime.activeEventBus)
+    );
+  const configLayerKeys = [
+    "SERVER_HOST",
+    "SERVER_PORT",
+    "EVENT_BUS",
+    "MEMORY_REPOSITORY",
+    "DEEPSEEK_API_BASEURL",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_CHAT_MODEL",
+    "DEEPSEEK_REASONING_MODEL",
+    "XAI_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "EMBEDDING_PROVIDER",
+    "EMBEDDING_API_KEY"
+  ];
+
   return (
     <PageShell title="Settings" subtitle="Local development runtime configuration.">
       {settings.loading && (
@@ -1383,11 +1435,33 @@ function SettingsPage(): JSX.Element {
         <Notice tone="error" title="Settings load failed" message={settings.error} />
       )}
       {saveError && <Notice tone="error" title="Save failed" message={saveError} />}
+      {applyError && <Notice tone="error" title="Apply failed" message={applyError} />}
       {saveResult && (
         <Notice
           tone="info"
-          title="Settings saved"
-          message={`${saveResult.changedKeys.length || 0} field(s) changed. ${saveResult.restartRequired ? "Restart the dev server for env-driven settings to take effect." : "No restart needed."}`}
+          title="Saved to .env.local"
+          message={`${saveResult.changedKeys.length || 0} field(s) changed. Click Apply Now to reload provider config without restarting. Memory/server setting changes may still require restart.`}
+        />
+      )}
+      {applyResult && (
+        <Notice
+          tone="info"
+          title="Applied to active runtime"
+          message={`${applyResult.message} ${applyResult.restartRequired ? `Restart required for: ${applyResult.notHotReloaded.join(", ")}` : "No restart required for the applied provider config."}`}
+        />
+      )}
+      {savedDeepSeekButRuntimeMock && (
+        <Notice
+          tone="info"
+          title="Saved config is not active yet"
+          message="DeepSeek config is saved, but active runtime is still mock. Click Apply Now or restart the server."
+        />
+      )}
+      {savedConfigDiffersFromActive && (
+        <Notice
+          tone="info"
+          title="Saved config differs from active runtime"
+          message="Dashboard writes to .env.local. Click Apply Now to reload hot-reloadable provider config, or restart for memory/server boundary changes."
         />
       )}
       <div className="grid grid-cols-2 gap-4">
@@ -1436,6 +1510,71 @@ function SettingsPage(): JSX.Element {
           )}
         </Panel>
       </div>
+      <Panel title="Active Runtime">
+        <div className="grid grid-cols-5 gap-3">
+          <Definition label="Chat Provider" value={activeChat?.provider ?? "unknown"} />
+          <Definition label="Chat Model" value={activeChat?.model ?? "unknown"} />
+          <Definition
+            label="Chat Mode"
+            value={activeChat ? (activeChat.mock ? "mock" : "real") : "unknown"}
+          />
+          <Definition
+            label="Reasoning"
+            value={
+              activeReasoning
+                ? `${activeReasoning.provider} / ${activeReasoning.mock ? "mock" : "real"}`
+                : "unknown"
+            }
+          />
+          <Definition
+            label="Memory Repository"
+            value={settings.data?.memory.activeMemoryRepository ?? "unknown"}
+          />
+        </div>
+      </Panel>
+      <Panel title="Config Layering">
+        <Notice
+          tone="info"
+          title="How settings are saved"
+          message=".env.local overrides .env. Dashboard writes to .env.local for safety and does not modify .env automatically."
+        />
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <Definition
+            label="Base .env"
+            value={
+              settings.data?.configFiles[".env"].exists
+                ? "exists / git ignored"
+                : "missing / git ignored"
+            }
+          />
+          <Definition
+            label="Local override .env.local"
+            value={
+              settings.data?.configFiles[".env.local"].exists
+                ? "exists / git ignored"
+                : "missing / git ignored"
+            }
+          />
+        </div>
+        <div className="mt-4 max-h-[340px] overflow-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="text-ink-500">
+              <tr>
+                <th className="px-2 py-2">Key</th>
+                <th className="px-2 py-2">Base .env</th>
+                <th className="px-2 py-2">Local override .env.local</th>
+                <th className="px-2 py-2">Effective value</th>
+                <th className="px-2 py-2">Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {configLayerKeys.map((key) => (
+                <ConfigLayerRow key={key} name={key} setting={settings.data?.settings[key]} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
       <div className="grid grid-cols-3 gap-4">
         <Panel
           title="DeepSeek"
@@ -1510,7 +1649,14 @@ function SettingsPage(): JSX.Element {
           />
         </Panel>
       </div>
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-3">
+        <button
+          className="button-secondary"
+          disabled={applying}
+          onClick={() => void applyRuntimeConfig()}
+        >
+          {applying ? "Applying" : "Apply Now / Reload Runtime Config"}
+        </button>
         <button className="button-primary" disabled={saving} onClick={() => void save()}>
           {saving ? "Saving" : "Save to .env.local"}
         </button>
@@ -1690,6 +1836,63 @@ function SecretInput(props: {
   );
 }
 
+function ConfigLayerRow(props: { name: string; setting: LayeredSetting | undefined }): JSX.Element {
+  const setting = props.setting;
+  const isSecret = Boolean(setting && "effectiveConfigured" in setting);
+
+  return (
+    <tr className="border-t border-ink-100">
+      <td className="px-2 py-2 font-mono text-ink-700">{props.name}</td>
+      <td className="px-2 py-2">{setting ? formatLayerValue(setting, "base") : "unknown"}</td>
+      <td className="px-2 py-2">
+        {setting ? formatLayerValue(setting, "localOverride") : "unknown"}
+      </td>
+      <td className="px-2 py-2 font-medium text-ink-700">
+        {setting ? formatLayerValue(setting, "effective") : "unknown"}
+      </td>
+      <td className="px-2 py-2">
+        <span
+          className={`rounded-full px-2 py-0.5 ${
+            setting?.source === ".env.local"
+              ? "bg-cyan-50 text-cyan-700"
+              : "bg-ink-100 text-ink-600"
+          }`}
+        >
+          {isSecret
+            ? `${setting?.source ?? "unknown"} / secret masked`
+            : (setting?.source ?? "unknown")}
+        </span>
+      </td>
+    </tr>
+  );
+}
+
+function formatLayerValue(
+  setting: LayeredSetting,
+  layer: "base" | "localOverride" | "effective"
+): string {
+  if ("effectiveConfigured" in setting) {
+    const configured =
+      layer === "base"
+        ? setting.baseConfigured
+        : layer === "localOverride"
+          ? setting.localOverrideConfigured
+          : setting.effectiveConfigured;
+    if (!configured) {
+      return "Not configured";
+    }
+    return layer === "effective" ? (setting.maskedValue ?? "Configured") : "Configured";
+  }
+
+  const value =
+    layer === "base"
+      ? setting.base
+      : layer === "localOverride"
+        ? setting.localOverride
+        : setting.effective;
+  return value || "Not set";
+}
+
 function PageShell(props: {
   title: string;
   subtitle: string;
@@ -1797,12 +2000,23 @@ function ProviderMetadataSummary(props: {
 
   return (
     <div className="mt-2 flex flex-wrap gap-2 text-xs text-ink-500">
+      <span
+        className={`rounded-full px-2 py-0.5 font-semibold ${
+          provider.mock ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"
+        }`}
+      >
+        {provider.mock ? "MOCK MODE" : `REAL PROVIDER / ${provider.name}`}
+      </span>
       <span>provider: {provider.name}</span>
       <span>model: {provider.model ?? "unknown"}</span>
-      <span>{provider.mock ? "mock" : "real"}</span>
       <span>latency: {formatLatency(provider.latencyMs)}</span>
       {provider.healthStatus && <span>health: {provider.healthStatus}</span>}
       {provider.tokenUsage && <span>tokens: {formatTokenUsage(provider.tokenUsage)}</span>}
+      {provider.mock && (
+        <span className="basis-full text-amber-700">
+          Use Settings → Apply Now after saving a DeepSeek API key, or restart the server.
+        </span>
+      )}
     </div>
   );
 }
