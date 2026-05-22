@@ -22,6 +22,23 @@ describe("PromptBuilder", () => {
     expect(output.prompt).toContain("<RelevantMemory>");
   });
 
+  it("includes current time context for temporal reasoning", () => {
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "You are Companion.",
+      retrievedMemories: [],
+      currentTime: {
+        isoTimestamp: "2026-05-22T10:00:00.000Z",
+        timezone: "Asia/Shanghai",
+        localDate: "2026-05-22"
+      },
+      userMessage: "What is current?"
+    });
+
+    expect(output.prompt).toContain("<CurrentTime>");
+    expect(output.prompt).toContain("2026-05-22T10:00:00.000Z");
+    expect(output.sections.some((section) => section.name === "CurrentTime")).toBe(true);
+  });
+
   it("renders memory text that already has list markers as single bullets", () => {
     const output = new PromptBuilder().buildPrompt({
       systemIdentity: "You are Companion.",

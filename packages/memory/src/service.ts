@@ -77,6 +77,10 @@ export class MemoryService {
     return this.repository.createMemory({
       type: candidate.type,
       subtype: candidate.subtype ?? null,
+      scope: candidate.scope ?? inferMemoryScope(candidate),
+      scopeId: candidate.scopeId ?? inferMemoryScopeId(candidate),
+      memoryLayer:
+        candidate.memoryLayer ?? inferMemoryLayer(candidate.type, candidate.subtype ?? null),
       content: candidate.content,
       summary: candidate.summary ?? this.compressForStorage(candidate.content),
       importance: candidate.importance,
@@ -91,7 +95,14 @@ export class MemoryService {
         confidence: candidate.confidence ?? null,
         sourceTraceId: candidate.sourceTraceId ?? null
       },
-      tags: Array.from(new Set([...(candidate.tags ?? []), ...(options.tags ?? [])]))
+      tags: Array.from(new Set([...(candidate.tags ?? []), ...(options.tags ?? [])])),
+      observedAt: candidate.observedAt ?? new Date(),
+      eventTime: candidate.eventTime ?? null,
+      validFrom: candidate.validFrom ?? candidate.observedAt ?? new Date(),
+      validUntil: candidate.validUntil ?? null,
+      expiresAt: candidate.expiresAt ?? null,
+      supersedes: candidate.possibleSupersedes ?? [],
+      contradicts: candidate.possibleContradictions ?? []
     });
   }
 
@@ -154,16 +165,26 @@ export class MemoryService {
     const keywords = queryText ? extractSearchKeywords(queryText) : [];
     const memories = await this.retriever.retrieve(query);
     if (!queryText || keywords.length === 0) {
-      return this.buildRetrievalResult(query, keywords, memories, "original-query", "direct");
+      return this.buildRetrievalResult(
+        query,
+        keywords,
+        memories,
+        this.repository.getRetrievalMode?.() ?? "keyword"
+      );
     }
 
     const candidates = [
-      ...this.toCandidates(memories, keywords, "original-query"),
+      ...this.toCandidates(memories, keywords),
       ...(await this.retrieveByKeywords(query, keywords))
     ].sort(compareCandidates);
 
     if (candidates.length > 0) {
-      return this.buildRetrievalResultFromCandidates(query, keywords, candidates, "hybrid-keyword");
+      return this.buildRetrievalResultFromCandidates(
+        query,
+        keywords,
+        candidates,
+        this.resolveRetrievalMode(true)
+      );
     }
 
     const recent = await this.repository.listRecentMemories(Math.max(query.limit ?? 6, 20));
@@ -186,7 +207,7 @@ export class MemoryService {
         text: keyword,
         limit: Math.max(query.limit ?? 6, 10)
       });
-      for (const candidate of this.rankKeywordMatches(results, keywords, "keyword")) {
+      for (const candidate of this.rankKeywordMatches(results, keywords)) {
         const current = matches.get(candidate.memory.id);
         if (!current || candidate.score > current.score) {
           matches.set(candidate.memory.id, candidate);
@@ -197,24 +218,17 @@ export class MemoryService {
     return [...matches.values()].sort(compareCandidates);
   }
 
-  private rankKeywordMatches(
-    memories: Memory[],
-    keywords: string[],
-    matchedBy: MemoryMatchReason
-  ): RetrievedMemoryCandidate[] {
-    return this.toCandidates(memories, keywords, matchedBy).sort(compareCandidates);
+  private rankKeywordMatches(memories: Memory[], keywords: string[]): RetrievedMemoryCandidate[] {
+    return this.toCandidates(memories, keywords).sort(compareCandidates);
   }
 
-  private toCandidates(
-    memories: Memory[],
-    keywords: string[],
-    matchedBy: MemoryMatchReason
-  ): RetrievedMemoryCandidate[] {
+  private toCandidates(memories: Memory[], keywords: string[]): RetrievedMemoryCandidate[] {
     return memories
+      .filter(isPromptRetrievableMemory)
       .map((memory) => ({
         memory,
         displayText: createMemoryDisplayText(memory),
-        matchedBy,
+        matchedBy: detectMatchReason(memory, keywords),
         score: scoreMemory(memory, keywords)
       }))
       .filter((entry) => entry.score > 0);
@@ -222,10 +236,11 @@ export class MemoryService {
 
   private rankFallbackRecent(memories: Memory[]): RetrievedMemoryCandidate[] {
     return memories
+      .filter(isPromptRetrievableMemory)
       .map((memory) => ({
         memory,
         displayText: createMemoryDisplayText(memory),
-        matchedBy: "fallback-recent" as const,
+        matchedBy: "fallback" as const,
         score: typePriority(memory.type) + memory.importance + sourceQuality(memory.source)
       }))
       .sort(compareCandidates);
@@ -235,22 +250,30 @@ export class MemoryService {
     query: MemorySearchQuery,
     keywords: string[],
     memories: Memory[],
-    matchedBy: MemoryMatchReason,
     retrievalMode: MemoryRetrievalMode
   ): MemoryRetrievalResult {
     return this.buildRetrievalResultFromCandidates(
       query,
       keywords,
       memories
+        .filter(isPromptRetrievableMemory)
         .map((memory) => ({
           memory,
           displayText: createMemoryDisplayText(memory),
-          matchedBy,
+          matchedBy: detectMatchReason(memory, keywords),
           score: scoreMemory(memory, keywords)
         }))
         .sort(compareCandidates),
       retrievalMode
     );
+  }
+
+  private resolveRetrievalMode(hasKeywordFallback: boolean): MemoryRetrievalMode {
+    const repositoryMode = this.repository.getRetrievalMode?.() ?? "keyword";
+    if (repositoryMode === "postgres-trigram") {
+      return "postgres-trigram";
+    }
+    return hasKeywordFallback ? "hybrid-keyword" : "keyword";
   }
 
   private buildRetrievalResultFromCandidates(
@@ -392,9 +415,13 @@ function stripLeadingListMarkers(text: string): string {
 }
 
 function scoreMemory(memory: Memory, keywords: string[]): number {
-  const haystack =
-    `${memory.content} ${memory.summary ?? ""} ${memory.source} ${memory.subtype ?? ""} ${memory.tags.join(" ")} ${JSON.stringify(memory.metadata)}`.toLowerCase();
-  const matchCount = keywords.filter((keyword) => haystack.includes(keyword)).length;
+  if (!isPromptRetrievableMemory(memory)) {
+    return 0;
+  }
+  const matchCount = keywords.reduce(
+    (score, keyword) => score + keywordMatchWeight(memory, keyword),
+    0
+  );
   if (keywords.length > 0 && matchCount === 0) {
     return 0;
   }
@@ -411,6 +438,74 @@ function scoreMemory(memory: Memory, keywords: string[]): number {
     sourceQuality(memory.source) +
     recencyBonus
   );
+}
+
+function detectMatchReason(memory: Memory, keywords: string[]): MemoryMatchReason {
+  if (keywords.length === 0) {
+    return "keyword";
+  }
+
+  for (const keyword of keywords) {
+    if (includesKeyword(memory.content, keyword)) {
+      return "content";
+    }
+    if (memory.summary && includesKeyword(memory.summary, keyword)) {
+      return "summary";
+    }
+    if (memory.tags.some((tag) => includesKeyword(tag, keyword))) {
+      return "tag";
+    }
+    if (
+      includesKeyword(memory.type, keyword) ||
+      (memory.subtype && includesKeyword(memory.subtype, keyword))
+    ) {
+      return "type";
+    }
+    if (
+      includesKeyword(memory.source, keyword) ||
+      (memory.sourceTraceId && includesKeyword(memory.sourceTraceId, keyword))
+    ) {
+      return "source";
+    }
+    if (includesKeyword(JSON.stringify(memory.metadata), keyword)) {
+      return "metadata";
+    }
+  }
+
+  return "keyword";
+}
+
+function keywordMatchWeight(memory: Memory, keyword: string): number {
+  let score = 0;
+  if (includesKeyword(memory.content, keyword)) {
+    score += 2.5;
+  }
+  if (memory.summary && includesKeyword(memory.summary, keyword)) {
+    score += 3;
+  }
+  if (memory.tags.some((tag) => includesKeyword(tag, keyword))) {
+    score += 3.5;
+  }
+  if (
+    includesKeyword(memory.type, keyword) ||
+    (memory.subtype && includesKeyword(memory.subtype, keyword))
+  ) {
+    score += 2.25;
+  }
+  if (
+    includesKeyword(memory.source, keyword) ||
+    (memory.sourceTraceId && includesKeyword(memory.sourceTraceId, keyword))
+  ) {
+    score += 1.5;
+  }
+  if (includesKeyword(JSON.stringify(memory.metadata), keyword)) {
+    score += 1.25;
+  }
+  return score;
+}
+
+function includesKeyword(value: string, keyword: string): boolean {
+  return value.toLowerCase().includes(keyword.toLowerCase());
 }
 
 function dedupeCandidates(candidates: RetrievedMemoryCandidate[]): {
@@ -523,15 +618,70 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
     id: candidate.memory.id,
     type: candidate.memory.type,
     subtype: candidate.memory.subtype,
+    scope: candidate.memory.scope,
+    scopeId: candidate.memory.scopeId,
+    memoryLayer: candidate.memory.memoryLayer,
+    status: candidate.memory.status,
     source: candidate.memory.source,
     sourceTraceId: candidate.memory.sourceTraceId,
     metadata: candidate.memory.metadata,
     importance: candidate.memory.importance,
     createdAt: candidate.memory.createdAt,
+    observedAt: candidate.memory.observedAt,
+    validFrom: candidate.memory.validFrom,
+    validUntil: candidate.memory.validUntil,
+    expiresAt: candidate.memory.expiresAt,
+    supersededAt: candidate.memory.supersededAt,
     displayText: candidate.displayText,
     matchedBy: candidate.matchedBy,
+    score: candidate.score,
     ...(candidate.excludedReason ? { excludedReason: candidate.excludedReason } : {})
   };
+}
+
+function isPromptRetrievableMemory(memory: Memory): boolean {
+  const now = Date.now();
+  return (
+    memory.status === "active" &&
+    (!memory.expiresAt || memory.expiresAt.getTime() > now) &&
+    (!memory.validUntil || memory.validUntil.getTime() > now)
+  );
+}
+
+function inferMemoryScope(
+  candidate: MemoryCandidate
+): "user" | "project" | "agent" | "plugin" | "session" {
+  if (candidate.type === "working") {
+    return "session";
+  }
+  const haystack =
+    `${candidate.content} ${candidate.summary ?? ""} ${candidate.tags.join(" ")}`.toLowerCase();
+  return haystack.includes("yuvi") || haystack.includes("runtime") ? "project" : "user";
+}
+
+function inferMemoryScopeId(candidate: MemoryCandidate): string | null {
+  return inferMemoryScope(candidate) === "project" ? "yuvi-runtime" : null;
+}
+
+function inferMemoryLayer(
+  type: MemoryType,
+  subtype: MemorySubtype | null
+): "core" | "recall" | "archival" | "working" {
+  if (type === "working") {
+    return "working";
+  }
+  if (
+    type === "semantic" ||
+    subtype === "preference" ||
+    subtype === "project" ||
+    subtype === "provider-choice"
+  ) {
+    return "core";
+  }
+  if (type === "episodic" || subtype === "milestone" || subtype === "troubleshooting") {
+    return "recall";
+  }
+  return "recall";
 }
 
 function inferRuntimeMemoryType(text: string): MemoryType {

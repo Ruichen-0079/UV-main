@@ -1,11 +1,15 @@
 import type {
   CreateMemoryInput,
   Memory,
+  MemoryLayer,
+  MemoryScope,
+  MemoryStatus,
   MemorySubtype,
   MemoryType,
   UpdateMemoryInput
 } from "@companion/memory";
-import type { FastifyInstance } from "fastify";
+import type { RetrievedMemoryDebug } from "@companion/memory";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
@@ -33,10 +37,18 @@ const MemorySubtypeSchema = z.enum([
   "emotion",
   "relationship"
 ]);
+const MemoryScopeSchema = z.enum(["user", "project", "agent", "plugin", "session"]);
+const MemoryLayerSchema = z.enum(["core", "recall", "archival", "working"]);
+const MemoryStatusSchema = z.enum(["active", "superseded", "archived", "forgotten", "expired"]);
+const OptionalDateStringSchema = z.string().min(1).nullable().optional();
 
 const CreateMemoryRequestSchema = z.object({
   type: MemoryTypeSchema.default("working"),
   subtype: MemorySubtypeSchema.nullable().optional(),
+  scope: MemoryScopeSchema.optional(),
+  scopeId: z.string().min(1).nullable().optional(),
+  memoryLayer: MemoryLayerSchema.optional(),
+  status: MemoryStatusSchema.optional(),
   content: z.string().min(1),
   summary: z.string().nullable().optional(),
   importance: z.number().min(0).max(1).optional(),
@@ -45,20 +57,42 @@ const CreateMemoryRequestSchema = z.object({
   source: z.string().min(1).default("manual"),
   sourceTraceId: z.string().min(1).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
-  tags: z.array(z.string()).default([])
+  tags: z.array(z.string()).default([]),
+  observedAt: OptionalDateStringSchema,
+  eventTime: OptionalDateStringSchema,
+  validFrom: OptionalDateStringSchema,
+  validUntil: OptionalDateStringSchema,
+  expiresAt: OptionalDateStringSchema,
+  supersededAt: OptionalDateStringSchema,
+  supersedes: z.array(z.string().min(1)).optional(),
+  supersededBy: z.string().min(1).nullable().optional(),
+  contradicts: z.array(z.string().min(1)).optional()
 });
 
 const UpdateMemoryRequestSchema = z
   .object({
     type: MemoryTypeSchema.optional(),
     subtype: MemorySubtypeSchema.nullable().optional(),
+    scope: MemoryScopeSchema.optional(),
+    scopeId: z.string().min(1).nullable().optional(),
+    memoryLayer: MemoryLayerSchema.optional(),
+    status: MemoryStatusSchema.optional(),
     content: z.string().min(1).optional(),
     summary: z.string().nullable().optional(),
     importance: z.number().min(0).max(1).optional(),
     emotionValence: z.number().min(-1).max(1).optional(),
     emotionArousal: z.number().min(0).max(1).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
-    tags: z.array(z.string()).optional()
+    tags: z.array(z.string()).optional(),
+    observedAt: OptionalDateStringSchema,
+    eventTime: OptionalDateStringSchema,
+    validFrom: OptionalDateStringSchema,
+    validUntil: OptionalDateStringSchema,
+    expiresAt: OptionalDateStringSchema,
+    supersededAt: OptionalDateStringSchema,
+    supersedes: z.array(z.string().min(1)).optional(),
+    supersededBy: z.string().min(1).nullable().optional(),
+    contradicts: z.array(z.string().min(1)).optional()
   })
   .strict();
 
@@ -69,6 +103,10 @@ const RecentMemoryQuerySchema = z.object({
 const SearchMemoryQuerySchema = z.object({
   q: z.string().default(""),
   type: MemoryTypeSchema.optional(),
+  scope: MemoryScopeSchema.optional(),
+  scopeId: z.string().min(1).optional(),
+  includeArchived: z.coerce.boolean().optional(),
+  includeHistory: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20)
 });
 
@@ -92,10 +130,20 @@ const AcceptCandidateRequestSchema = z
   .object({
     type: MemoryTypeSchema.optional(),
     subtype: MemorySubtypeSchema.nullable().optional(),
+    scope: MemoryScopeSchema.optional(),
+    scopeId: z.string().min(1).nullable().optional(),
+    memoryLayer: MemoryLayerSchema.optional(),
     content: z.string().min(1).optional(),
     summary: z.string().nullable().optional(),
     importance: z.number().min(0).max(1).optional(),
-    tags: z.array(z.string()).optional()
+    tags: z.array(z.string()).optional(),
+    observedAt: OptionalDateStringSchema,
+    eventTime: OptionalDateStringSchema,
+    validFrom: OptionalDateStringSchema,
+    validUntil: OptionalDateStringSchema,
+    expiresAt: OptionalDateStringSchema,
+    possibleSupersedes: z.array(z.string().min(1)).optional(),
+    possibleContradictions: z.array(z.string().min(1)).optional()
   })
   .strict();
 
@@ -135,6 +183,18 @@ export async function registerMemoryRoutes(
     if (input.data.subtype !== undefined) {
       createInput.subtype = input.data.subtype as MemorySubtype | null;
     }
+    if (input.data.scope !== undefined) {
+      createInput.scope = input.data.scope as MemoryScope;
+    }
+    if (input.data.scopeId !== undefined) {
+      createInput.scopeId = input.data.scopeId;
+    }
+    if (input.data.memoryLayer !== undefined) {
+      createInput.memoryLayer = input.data.memoryLayer as MemoryLayer;
+    }
+    if (input.data.status !== undefined) {
+      createInput.status = input.data.status as MemoryStatus;
+    }
     if (input.data.sourceTraceId !== undefined) {
       createInput.sourceTraceId = input.data.sourceTraceId;
     }
@@ -153,6 +213,8 @@ export async function registerMemoryRoutes(
     if (input.data.emotionArousal !== undefined) {
       createInput.emotionArousal = input.data.emotionArousal;
     }
+    assignTemporalFields(createInput, input.data);
+    assignSupersessionFields(createInput, input.data);
 
     const memory = await context.memoryRepository.createMemory(createInput);
 
@@ -175,13 +237,33 @@ export async function registerMemoryRoutes(
       return reply.status(400).send({ error: "invalid_request", details: query.error.flatten() });
     }
 
-    const searchQuery: { text: string; types?: MemoryType[]; limit: number } = {
+    const searchQuery: {
+      text: string;
+      types?: MemoryType[];
+      limit: number;
+      scope?: MemoryScope;
+      scopeId?: string;
+      includeArchived?: boolean;
+      includeHistory?: boolean;
+    } = {
       text: query.data.q,
       limit: query.data.limit
     };
 
     if (query.data.type) {
       searchQuery.types = [query.data.type as MemoryType];
+    }
+    if (query.data.scope) {
+      searchQuery.scope = query.data.scope as MemoryScope;
+    }
+    if (query.data.scopeId) {
+      searchQuery.scopeId = query.data.scopeId;
+    }
+    if (query.data.includeArchived !== undefined) {
+      searchQuery.includeArchived = query.data.includeArchived;
+    }
+    if (query.data.includeHistory !== undefined) {
+      searchQuery.includeHistory = query.data.includeHistory;
     }
 
     const result = await context.memory.retrieveRelevantMemoriesWithMetadata(searchQuery);
@@ -193,6 +275,7 @@ export async function registerMemoryRoutes(
       rawCount: result.rawCount,
       count: result.count,
       retrievalMode: result.retrievalMode,
+      debugMemories: result.memories.map(toSafeRetrievedMemory),
       memories: result.selectedMemories.map(toSafeMemory)
     });
   });
@@ -256,10 +339,24 @@ export async function registerMemoryRoutes(
       ...(input.data.subtype !== undefined
         ? { subtype: input.data.subtype as MemorySubtype | null }
         : {}),
+      ...(input.data.scope ? { scope: input.data.scope as MemoryScope } : {}),
+      ...(input.data.scopeId !== undefined ? { scopeId: input.data.scopeId } : {}),
+      ...(input.data.memoryLayer ? { memoryLayer: input.data.memoryLayer as MemoryLayer } : {}),
       ...(input.data.content !== undefined ? { content: input.data.content } : {}),
       ...(input.data.summary !== undefined ? { summary: input.data.summary } : {}),
       ...(input.data.importance !== undefined ? { importance: input.data.importance } : {}),
-      ...(input.data.tags !== undefined ? { tags: input.data.tags } : {})
+      ...(input.data.tags !== undefined ? { tags: input.data.tags } : {}),
+      ...(input.data.observedAt !== undefined ? { observedAt: input.data.observedAt } : {}),
+      ...(input.data.eventTime !== undefined ? { eventTime: input.data.eventTime } : {}),
+      ...(input.data.validFrom !== undefined ? { validFrom: input.data.validFrom } : {}),
+      ...(input.data.validUntil !== undefined ? { validUntil: input.data.validUntil } : {}),
+      ...(input.data.expiresAt !== undefined ? { expiresAt: input.data.expiresAt } : {}),
+      ...(input.data.possibleSupersedes !== undefined
+        ? { possibleSupersedes: input.data.possibleSupersedes }
+        : {}),
+      ...(input.data.possibleContradictions !== undefined
+        ? { possibleContradictions: input.data.possibleContradictions }
+        : {})
     });
 
     if (!result) {
@@ -346,6 +443,18 @@ export async function registerMemoryRoutes(
     if (input.data.subtype !== undefined) {
       updateInput.subtype = input.data.subtype as MemorySubtype | null;
     }
+    if (input.data.scope !== undefined) {
+      updateInput.scope = input.data.scope as MemoryScope;
+    }
+    if (input.data.scopeId !== undefined) {
+      updateInput.scopeId = input.data.scopeId;
+    }
+    if (input.data.memoryLayer !== undefined) {
+      updateInput.memoryLayer = input.data.memoryLayer as MemoryLayer;
+    }
+    if (input.data.status !== undefined) {
+      updateInput.status = input.data.status as MemoryStatus;
+    }
     if (input.data.content !== undefined) {
       updateInput.content = input.data.content;
     }
@@ -367,6 +476,8 @@ export async function registerMemoryRoutes(
     if (input.data.tags !== undefined) {
       updateInput.tags = input.data.tags;
     }
+    assignTemporalFields(updateInput, input.data);
+    assignSupersessionFields(updateInput, input.data);
 
     const updated = await context.memoryRepository.updateMemory(params.data.id, updateInput);
     if (!updated) {
@@ -389,12 +500,83 @@ export async function registerMemoryRoutes(
 
     return reply.send({ ok: true, id: params.data.id });
   });
+
+  app.post("/memory/:id/archive", async (request, reply) => {
+    return updateMemoryStatus(request.params, reply, context, "archived");
+  });
+
+  app.post("/memory/:id/restore", async (request, reply) => {
+    return updateMemoryStatus(request.params, reply, context, "active");
+  });
+
+  app.post("/memory/:id/forget", async (request, reply) => {
+    return updateMemoryStatus(request.params, reply, context, "forgotten");
+  });
+}
+
+async function updateMemoryStatus(
+  rawParams: unknown,
+  reply: FastifyReply,
+  context: AppContext,
+  status: MemoryStatus
+): Promise<unknown> {
+  const params = MemoryParamsSchema.safeParse(rawParams);
+  if (!params.success) {
+    return reply.status(400).send({ error: "invalid_request", details: params.error.flatten() });
+  }
+
+  const updated = await context.memoryRepository.updateMemory(params.data.id, { status });
+  if (!updated) {
+    return reply.status(404).send({ error: "not_found", message: "Memory not found." });
+  }
+
+  return reply.send({ ok: true, id: params.data.id, memory: toSafeMemory(updated) });
+}
+
+function assignTemporalFields(
+  target: CreateMemoryInput | UpdateMemoryInput,
+  input: {
+    observedAt?: string | null | undefined;
+    eventTime?: string | null | undefined;
+    validFrom?: string | null | undefined;
+    validUntil?: string | null | undefined;
+    expiresAt?: string | null | undefined;
+    supersededAt?: string | null | undefined;
+  }
+): void {
+  if (input.observedAt !== undefined) target.observedAt = input.observedAt;
+  if (input.eventTime !== undefined) target.eventTime = input.eventTime;
+  if (input.validFrom !== undefined) target.validFrom = input.validFrom;
+  if (input.validUntil !== undefined) target.validUntil = input.validUntil;
+  if (input.expiresAt !== undefined) target.expiresAt = input.expiresAt;
+  if (input.supersededAt !== undefined) target.supersededAt = input.supersededAt;
+}
+
+function assignSupersessionFields(
+  target: CreateMemoryInput | UpdateMemoryInput,
+  input: {
+    supersedes?: string[] | undefined;
+    supersededBy?: string | null | undefined;
+    contradicts?: string[] | undefined;
+  }
+): void {
+  if (input.supersedes !== undefined) target.supersedes = input.supersedes;
+  if (input.supersededBy !== undefined) target.supersededBy = input.supersededBy;
+  if (input.contradicts !== undefined) target.contradicts = input.contradicts;
 }
 
 function toSafeMemory(memory: Memory): Memory {
   return {
     ...memory,
     metadata: redactUnsafeMetadata(memory.metadata)
+  };
+}
+
+function toSafeRetrievedMemory(memory: RetrievedMemoryDebug): RetrievedMemoryDebug {
+  const metadata = memory.metadata ? redactUnsafeMetadata(memory.metadata) : undefined;
+  return {
+    ...memory,
+    ...(metadata ? { metadata } : {})
   };
 }
 

@@ -134,6 +134,8 @@ export type RuntimePromptPreview = {
   rejectedReasons: string[];
   fallbackUsed: boolean;
   llmExtractionError?: string | undefined;
+  llmExtractionRawPreview?: string | undefined;
+  validationIssues?: string[] | undefined;
   memoryCandidates: RuntimeMemoryCandidateReview[];
   memoryExtractionSkippedReason?: string | undefined;
 };
@@ -146,6 +148,9 @@ export type RuntimeMemoryCandidateReview = {
   timestamp: string;
   type: MemoryCandidate["type"];
   subtype?: MemoryCandidate["subtype"];
+  scope?: MemoryCandidate["scope"];
+  scopeId?: MemoryCandidate["scopeId"];
+  memoryLayer?: MemoryCandidate["memoryLayer"];
   content: string;
   contentPreview: string;
   summary?: string | null | undefined;
@@ -163,6 +168,13 @@ export type RuntimeMemoryCandidateReview = {
   extractorProvider?: string | undefined;
   fallbackUsed: boolean;
   metadata?: Record<string, unknown> | undefined;
+  observedAt?: string | undefined;
+  eventTime?: string | null | undefined;
+  validFrom?: string | undefined;
+  validUntil?: string | null | undefined;
+  expiresAt?: string | null | undefined;
+  possibleSupersedes?: string[] | undefined;
+  possibleContradictions?: string[] | undefined;
 };
 
 export type RuntimeMemoryCandidateAcceptResult =
@@ -219,7 +231,25 @@ export class RuntimeOrchestrator {
   async acceptMemoryCandidate(
     id: string,
     patch: Partial<
-      Pick<MemoryCandidate, "type" | "subtype" | "content" | "summary" | "importance" | "tags">
+      Pick<
+        MemoryCandidate,
+        | "type"
+        | "subtype"
+        | "scope"
+        | "scopeId"
+        | "memoryLayer"
+        | "content"
+        | "summary"
+        | "importance"
+        | "tags"
+        | "observedAt"
+        | "eventTime"
+        | "validFrom"
+        | "validUntil"
+        | "expiresAt"
+        | "possibleSupersedes"
+        | "possibleContradictions"
+      >
     > = {}
   ): Promise<RuntimeMemoryCandidateAcceptResult | null> {
     const review = this.memoryCandidateHistory.find((candidate) => candidate.id === id);
@@ -254,6 +284,26 @@ export class RuntimeOrchestrator {
     if (subtype !== undefined) {
       candidate.subtype = subtype;
     }
+    const scope = patch.scope ?? review.scope;
+    if (scope !== undefined) {
+      candidate.scope = scope;
+    }
+    if ((patch.scopeId ?? review.scopeId) !== undefined) {
+      candidate.scopeId = patch.scopeId ?? review.scopeId ?? null;
+    }
+    const memoryLayer = patch.memoryLayer ?? review.memoryLayer;
+    if (memoryLayer !== undefined) {
+      candidate.memoryLayer = memoryLayer;
+    }
+    candidate.observedAt = patch.observedAt ?? review.observedAt ?? review.createdAt;
+    candidate.eventTime = patch.eventTime ?? review.eventTime ?? null;
+    candidate.validFrom =
+      patch.validFrom ?? review.validFrom ?? review.observedAt ?? review.createdAt;
+    candidate.validUntil = patch.validUntil ?? review.validUntil ?? null;
+    candidate.expiresAt = patch.expiresAt ?? review.expiresAt ?? null;
+    candidate.possibleSupersedes = patch.possibleSupersedes ?? review.possibleSupersedes ?? [];
+    candidate.possibleContradictions =
+      patch.possibleContradictions ?? review.possibleContradictions ?? [];
     if (review.confidence !== undefined) {
       candidate.confidence = review.confidence;
     }
@@ -425,6 +475,7 @@ export class RuntimeOrchestrator {
         createdAt: memory.createdAt
       })),
       memoryEnabled: memoryOptions.readMemory,
+      currentTime: currentTimeContext(),
       currentSituation: voiceOutput
         ? "The user is interacting through voice."
         : "The user is interacting through text.",
@@ -716,7 +767,7 @@ export class RuntimeOrchestrator {
         memoryContext = {
           retrievedMemoryCountRaw: memories.length,
           retrievedMemoryCount: memories.length,
-          retrievalMode: "direct",
+          retrievalMode: "keyword",
           retrievedMemories: memories.map(memoryToDebug),
           promptMemories: memories.map(memoryToDebug)
         };
@@ -913,6 +964,8 @@ export class RuntimeOrchestrator {
     | "rejectedReasons"
     | "fallbackUsed"
     | "llmExtractionError"
+    | "llmExtractionRawPreview"
+    | "validationIssues"
     | "memoryCandidates"
     | "memoryExtractionSkippedReason"
   > {
@@ -928,6 +981,8 @@ export class RuntimeOrchestrator {
       memoryCandidates: debug.candidates ?? [],
       ...(debug.provider ? { memoryExtractorProvider: debug.provider } : {}),
       ...(debug.error ? { llmExtractionError: debug.error } : {}),
+      ...(debug.rawPreview ? { llmExtractionRawPreview: debug.rawPreview } : {}),
+      ...(debug.validationIssues ? { validationIssues: debug.validationIssues } : {}),
       ...(debug.skippedReason ? { memoryExtractionSkippedReason: debug.skippedReason } : {})
     };
   }
@@ -1007,7 +1062,7 @@ function emptyMemoryContext(): MemoryContext {
   return {
     retrievedMemoryCountRaw: 0,
     retrievedMemoryCount: 0,
-    retrievalMode: "direct",
+    retrievalMode: "keyword",
     retrievedMemories: [],
     promptMemories: []
   };
@@ -1018,13 +1073,23 @@ function memoryToDebug(memory: Memory): RetrievedMemoryDebug {
     id: memory.id,
     type: memory.type,
     subtype: memory.subtype,
+    scope: memory.scope,
+    scopeId: memory.scopeId,
+    memoryLayer: memory.memoryLayer,
+    status: memory.status,
     source: memory.source,
     sourceTraceId: memory.sourceTraceId,
     metadata: memory.metadata,
     importance: memory.importance,
     createdAt: memory.createdAt,
+    observedAt: memory.observedAt,
+    validFrom: memory.validFrom,
+    validUntil: memory.validUntil,
+    expiresAt: memory.expiresAt,
+    supersededAt: memory.supersededAt,
     displayText: memory.summary ?? memory.content,
-    matchedBy: "original-query"
+    matchedBy: "content",
+    score: memory.importance
   };
 }
 
@@ -1038,12 +1103,16 @@ function toMemoryCandidateReview(input: {
 }): RuntimeMemoryCandidateReview {
   const content = redactUnsafeText(input.candidate.content);
   const timestamp = new Date().toISOString();
+  const metadata = redactUnsafeMetadata(input.candidate.metadata);
   return {
     id: crypto.randomUUID(),
     traceId: input.sourceTraceId,
     timestamp,
     type: input.candidate.type,
     subtype: input.candidate.subtype,
+    ...(input.candidate.scope ? { scope: input.candidate.scope } : {}),
+    ...(input.candidate.scopeId !== undefined ? { scopeId: input.candidate.scopeId } : {}),
+    ...(input.candidate.memoryLayer ? { memoryLayer: input.candidate.memoryLayer } : {}),
     content,
     contentPreview: previewText(content),
     summary: input.candidate.summary ? redactUnsafeText(input.candidate.summary) : null,
@@ -1062,8 +1131,47 @@ function toMemoryCandidateReview(input: {
       ? { extractorProvider: redactUnsafeText(input.extractorStatus.provider) }
       : {}),
     fallbackUsed: Boolean(input.extractorStatus.fallbackUsed),
-    metadata: redactUnsafeMetadata(input.candidate.metadata)
+    ...(metadata ? { metadata } : {}),
+    ...optionalIsoField("observedAt", input.candidate.observedAt),
+    ...optionalIsoField("eventTime", input.candidate.eventTime),
+    ...optionalIsoField("validFrom", input.candidate.validFrom),
+    ...optionalIsoField("validUntil", input.candidate.validUntil),
+    ...optionalIsoField("expiresAt", input.candidate.expiresAt),
+    ...(input.candidate.possibleSupersedes
+      ? { possibleSupersedes: input.candidate.possibleSupersedes }
+      : {}),
+    ...(input.candidate.possibleContradictions
+      ? { possibleContradictions: input.candidate.possibleContradictions }
+      : {})
   };
+}
+
+function optionalIsoField(
+  key: "observedAt" | "eventTime" | "validFrom" | "validUntil" | "expiresAt",
+  value: Date | string | null | undefined
+): Partial<Record<typeof key, string>> {
+  const iso = toIsoString(value);
+  return iso === undefined || iso === null ? {} : { [key]: iso };
+}
+
+function currentTimeContext(): NonNullable<PromptBuildInput["currentTime"]> {
+  const now = new Date();
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return {
+    isoTimestamp: now.toISOString(),
+    timezone,
+    localDate: now.toLocaleDateString("en-CA", { timeZone: timezone })
+  };
+}
+
+function toIsoString(value: Date | string | null | undefined): string | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || value === "") {
+    return null;
+  }
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
 function previewText(text: string): string {

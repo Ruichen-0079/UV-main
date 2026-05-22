@@ -26,17 +26,36 @@ packages/memory/migrations/
 
 仓库层把向量搜索暴露为接口；在 MVP 阶段，如果未配置 embedding，则已实现基于 `ILIKE` 的文本 fallback 搜索。
 
+PostgreSQL 模式现在使用 `pg_trgm` 改善本地关键词检索。Migration 会为 content / summary 建立 trigram index，为 tags / metadata 建立 GIN index，并为 type、subtype、source、sourceTraceId、createdAt、importance 建立辅助索引。检索会覆盖 content、summary、tags、type、subtype、source/sourceTraceId 和安全 metadata 文本，可以处理中文、英文、中英混合、Windows 路径、端口和 `pnpm db:migrate` 这类命令。Prompt Preview 和 Dashboard search debug 会显示 `retrievalMode`、`matchedBy`、`score` 和 `sourceTraceId`。
+
+## Memory Model v2
+
+Memory record 现在包含 scoped memory、temporal memory、supersession 和 forgetting 的基础字段：
+
+- `scope`: `user`、`project`、`agent`、`plugin`、`session`
+- `scopeId`: 可选 scope 标识，例如 `yuvi-runtime`
+- `memoryLayer`: `core`、`recall`、`archival`、`working`
+- `status`: `active`、`superseded`、`archived`、`forgotten`、`expired`
+- temporal fields: `observedAt`、`eventTime`、`validFrom`、`validUntil`、`expiresAt`、`lastAccessedAt`、`supersededAt`
+- lightweight relation fields: `supersedes`、`supersededBy`、`contradicts`
+
+默认 prompt retrieval 只使用当前有效窗口内的 `active` memories。`forgotten`、`expired`、`superseded` 默认不会进入 prompt。`archived` memories 可在手动管理中查看，但默认不会注入 prompt。
+
+默认 scope 是 `user`。如果内容明显属于 YUVI 项目，可以推断为 `scope=project`、`scopeId=yuvi-runtime`。`working` memory 映射到 `working` layer；稳定的 semantic preference 和 project fact 映射到 `core`；episodic milestone 和 troubleshooting 记录映射到 `recall`。
+
 ## Manual Management
 
 Dashboard 的 Memory 页面是开发期手动记忆管理控制台。它可以：
 
 - 查看 memory detail 和 debug metadata
-- 创建带 type、subtype、summary、importance、source、tags 的 manual memory
-- 编辑 content、summary、type、subtype、importance、emotion fields、tags 和安全 metadata
-- 从当前 repository 删除 memory
+- 创建带 type、subtype、scope、layer、status、summary、importance、source、tags 和 temporal fields 的 manual memory
+- 编辑 content、summary、type、subtype、scope、layer、status、importance、emotion fields、tags、temporal fields 和安全 metadata
+- archive、restore、forget 或 delete 当前 repository 中的 memory
 - 按 type、subtype、source、importance 搜索和筛选 memory
 
 手动创建的 memory 应使用 `source=dashboard` 或 `source=manual`。删除 memory 后，它不会再进入检索结果。不要把 API key、password、token、Authorization header 或其他 secret 写入 memory content 或 metadata。
+
+Archive / restore / forget 是第一版 forgetting foundation。Archive 会让 memory 继续可被手动管理，但不会进入 prompt injection。Forget 会把 memory 标记为 `forgotten`，默认检索会排除它。
 
 ## Automatic Writes
 

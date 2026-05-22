@@ -236,6 +236,8 @@ docker compose -f infra/docker-compose.yml up -d
 
 ## 4. Run Migrations
 
+PostgreSQL memory mode 使用 `pnpm db:migrate` 应用 schema。Migration 会启用 `vector`、`pgcrypto` 和 `pg_trgm`，并为 memory 的 content、summary、tags、type、subtype、source、sourceTraceId、createdAt、importance 和 metadata 建立开发期检索索引。`pg_trgm` 用于在 embeddings 尚未启用前改善 Postgres keyword search；in-memory 模式仍然适合快速调试，但 server restart 后会丢失数据。
+
 PostgreSQL memory mode 使用内置 migration runner：
 
 ```bash
@@ -627,7 +629,19 @@ pnpm db:migrate
 
 Dashboard 当前不会热切换 memory backend；切换 memory repository 只是写入配置，重启后生效。
 
-## 11. Notes For Windows LTSC Users
+## 11. Memory Model v2
+
+YUVI Memory Core 现在包含 scope、memoryLayer、status、temporal validity 和 lightweight supersession 字段。
+
+- 默认 prompt retrieval 只注入 `status=active` 且当前有效的 memories。
+- `archived` memories 可在 Dashboard 手动查看，但默认不会注入 prompt。
+- `forgotten`、`expired`、`superseded` memories 默认不会进入 prompt retrieval。
+- Dashboard Memory 页面可以编辑 scope、layer、status、observedAt、validFrom、validUntil 和 expiresAt。
+- Archive / Restore / Forget 是开发期 forgetting foundation；Hard Delete 仍然只作为开发控制台操作使用。
+
+Prompt Preview 会显示 `CurrentTime` section，包含当前 ISO timestamp、timezone 和 local date，帮助后续 Chat / Reasoning 理解 recency 和 temporal validity。
+
+## 12. Notes For Windows LTSC Users
 
 - 优先使用 WSL2 + Ubuntu + Docker Engine。
 - 如果你的 Windows LTSC 版本不受支持，避免依赖 Docker Desktop。

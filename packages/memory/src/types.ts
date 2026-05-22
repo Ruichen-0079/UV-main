@@ -27,10 +27,23 @@ export const MemorySubtypes = [
 
 export type MemorySubtype = (typeof MemorySubtypes)[number];
 
+export const MemoryScopes = ["user", "project", "agent", "plugin", "session"] as const;
+export type MemoryScope = (typeof MemoryScopes)[number];
+
+export const MemoryLayers = ["core", "recall", "archival", "working"] as const;
+export type MemoryLayer = (typeof MemoryLayers)[number];
+
+export const MemoryStatuses = ["active", "superseded", "archived", "forgotten", "expired"] as const;
+export type MemoryStatus = (typeof MemoryStatuses)[number];
+
 export type Memory = {
   id: string;
   type: MemoryType;
   subtype: MemorySubtype | null;
+  scope: MemoryScope;
+  scopeId: string | null;
+  memoryLayer: MemoryLayer;
+  status: MemoryStatus;
   content: string;
   summary: string | null;
   embedding: number[] | null;
@@ -43,12 +56,25 @@ export type Memory = {
   tags: string[];
   createdAt: Date;
   updatedAt: Date;
+  observedAt: Date;
+  eventTime: Date | null;
+  validFrom: Date;
+  validUntil: Date | null;
+  expiresAt: Date | null;
   lastAccessedAt: Date;
+  supersededAt: Date | null;
+  supersedes: string[];
+  supersededBy: string | null;
+  contradicts: string[];
 };
 
 export type CreateMemoryInput = {
   type: MemoryType;
   subtype?: MemorySubtype | null;
+  scope?: MemoryScope;
+  scopeId?: string | null;
+  memoryLayer?: MemoryLayer;
+  status?: MemoryStatus;
   content: string;
   summary?: string | null;
   embedding?: number[] | null;
@@ -59,11 +85,24 @@ export type CreateMemoryInput = {
   sourceTraceId?: string | null;
   metadata?: Record<string, unknown>;
   tags?: string[];
+  observedAt?: Date | string | null;
+  eventTime?: Date | string | null;
+  validFrom?: Date | string | null;
+  validUntil?: Date | string | null;
+  expiresAt?: Date | string | null;
+  supersededAt?: Date | string | null;
+  supersedes?: string[];
+  supersededBy?: string | null;
+  contradicts?: string[];
 };
 
 export type UpdateMemoryInput = {
   type?: MemoryType;
   subtype?: MemorySubtype | null;
+  scope?: MemoryScope;
+  scopeId?: string | null;
+  memoryLayer?: MemoryLayer;
+  status?: MemoryStatus;
   content?: string;
   summary?: string | null;
   importance?: number;
@@ -71,11 +110,23 @@ export type UpdateMemoryInput = {
   emotionArousal?: number;
   metadata?: Record<string, unknown>;
   tags?: string[];
+  observedAt?: Date | string | null;
+  eventTime?: Date | string | null;
+  validFrom?: Date | string | null;
+  validUntil?: Date | string | null;
+  expiresAt?: Date | string | null;
+  supersededAt?: Date | string | null;
+  supersedes?: string[];
+  supersededBy?: string | null;
+  contradicts?: string[];
 };
 
 export type MemoryCandidate = {
   type: MemoryType;
   subtype?: MemorySubtype | null;
+  scope?: MemoryScope;
+  scopeId?: string | null;
+  memoryLayer?: MemoryLayer;
   content: string;
   summary?: string | null;
   importance: number;
@@ -84,6 +135,13 @@ export type MemoryCandidate = {
   tags: string[];
   reason: string;
   sourceTraceId?: string | null;
+  observedAt?: Date | string | null;
+  eventTime?: Date | string | null;
+  validFrom?: Date | string | null;
+  validUntil?: Date | string | null;
+  expiresAt?: Date | string | null;
+  possibleSupersedes?: string[];
+  possibleContradictions?: string[];
 };
 
 export type MemoryExtractorMode = "rule-based" | "llm";
@@ -99,6 +157,8 @@ export type MemoryExtractorStatus = {
   rejectedCount?: number;
   rejectedReasons?: string[];
   error?: string;
+  rawPreview?: string;
+  validationIssues?: string[];
   skippedReason?: string;
 };
 
@@ -135,23 +195,49 @@ export type MemorySearchQuery = {
   embedding?: number[];
   types?: MemoryType[];
   tags?: string[];
+  scope?: MemoryScope;
+  scopeId?: string;
+  includeArchived?: boolean;
+  includeHistory?: boolean;
   limit?: number;
 };
 
-export type MemoryMatchReason = "original-query" | "keyword" | "fallback-recent";
-export type MemoryRetrievalMode = "direct" | "hybrid-keyword" | "fallback-recent";
+export type MemoryMatchReason =
+  | "content"
+  | "summary"
+  | "tag"
+  | "type"
+  | "metadata"
+  | "source"
+  | "keyword"
+  | "fallback";
+export type MemoryRetrievalMode =
+  | "keyword"
+  | "postgres-trigram"
+  | "hybrid-keyword"
+  | "fallback-recent";
 
 export type RetrievedMemoryDebug = {
   id: string;
   type: MemoryType;
   subtype: MemorySubtype | null;
+  scope: MemoryScope;
+  scopeId: string | null;
+  memoryLayer: MemoryLayer;
+  status: MemoryStatus;
   source: string;
   sourceTraceId: string | null;
   metadata?: Record<string, unknown>;
   importance: number;
   createdAt: Date;
+  observedAt?: Date;
+  validFrom?: Date;
+  validUntil?: Date | null;
+  expiresAt?: Date | null;
+  supersededAt?: Date | null;
   displayText: string;
   matchedBy: MemoryMatchReason;
+  score?: number;
   excludedReason?: string;
 };
 

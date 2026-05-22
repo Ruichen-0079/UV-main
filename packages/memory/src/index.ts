@@ -11,18 +11,21 @@ export type {
   MemoryExtractorActive,
   MemoryExtractorMode,
   MemoryExtractorStatus,
+  MemoryLayer,
+  MemoryScope,
   MemoryMatchReason,
   MemoryQuery,
   MemoryRetrievalMode,
   MemoryRetrievalResult,
   MemorySearchQuery,
+  MemoryStatus,
   MemorySubtype,
   MemoryType,
   RetrievedMemoryCandidate,
   RetrievedMemoryDebug,
   Relation
 } from "./types.js";
-export { MemoryTypes } from "./types.js";
+export { MemoryLayers, MemoryScopes, MemoryStatuses, MemoryTypes } from "./types.js";
 export {
   InMemoryMemoryRepository,
   PostgresMemoryRepository,

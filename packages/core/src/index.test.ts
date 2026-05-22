@@ -254,6 +254,10 @@ function createMemory(candidate: MemoryCandidate): Memory {
     id: "memory-id",
     type: candidate.type,
     subtype: candidate.subtype ?? null,
+    scope: candidate.scope ?? "user",
+    scopeId: candidate.scopeId ?? null,
+    memoryLayer: candidate.memoryLayer ?? "core",
+    status: "active",
     content: candidate.content,
     summary: candidate.summary ?? null,
     embedding: null,
@@ -266,6 +270,15 @@ function createMemory(candidate: MemoryCandidate): Memory {
     tags: candidate.tags,
     createdAt: now,
     updatedAt: now,
-    lastAccessedAt: now
+    observedAt: candidate.observedAt ? new Date(candidate.observedAt) : now,
+    eventTime: null,
+    validFrom: now,
+    validUntil: null,
+    expiresAt: null,
+    lastAccessedAt: now,
+    supersededAt: null,
+    supersedes: [],
+    supersededBy: null,
+    contradicts: []
   };
 }

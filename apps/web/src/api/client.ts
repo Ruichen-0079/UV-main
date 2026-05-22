@@ -106,6 +106,10 @@ export type MemoryRecord = {
   id: string;
   type: string;
   subtype?: string | null;
+  scope?: "user" | "project" | "agent" | "plugin" | "session";
+  scopeId?: string | null;
+  memoryLayer?: "core" | "recall" | "archival" | "working";
+  status?: "active" | "superseded" | "archived" | "forgotten" | "expired";
   content: string;
   summary?: string | null;
   importance: number;
@@ -117,12 +121,25 @@ export type MemoryRecord = {
   tags: string[];
   createdAt: string;
   updatedAt?: string;
+  observedAt?: string;
+  eventTime?: string | null;
+  validFrom?: string;
+  validUntil?: string | null;
+  expiresAt?: string | null;
   lastAccessedAt?: string;
+  supersededAt?: string | null;
+  supersedes?: string[];
+  supersededBy?: string | null;
+  contradicts?: string[];
 };
 
 export type CreateMemoryRequest = {
   type: string;
   subtype?: string | null;
+  scope?: string;
+  scopeId?: string | null;
+  memoryLayer?: string;
+  status?: string;
   content: string;
   summary?: string;
   importance?: number;
@@ -130,11 +147,23 @@ export type CreateMemoryRequest = {
   sourceTraceId?: string | null;
   metadata?: Record<string, unknown>;
   tags: string[];
+  observedAt?: string | null;
+  eventTime?: string | null;
+  validFrom?: string | null;
+  validUntil?: string | null;
+  expiresAt?: string | null;
+  supersedes?: string[];
+  supersededBy?: string | null;
+  contradicts?: string[];
 };
 
 export type UpdateMemoryRequest = {
   type?: string;
   subtype?: string | null;
+  scope?: string;
+  scopeId?: string | null;
+  memoryLayer?: string;
+  status?: string;
   content?: string;
   summary?: string | null;
   importance?: number;
@@ -142,6 +171,15 @@ export type UpdateMemoryRequest = {
   emotionArousal?: number;
   metadata?: Record<string, unknown>;
   tags?: string[];
+  observedAt?: string | null;
+  eventTime?: string | null;
+  validFrom?: string | null;
+  validUntil?: string | null;
+  expiresAt?: string | null;
+  supersededAt?: string | null;
+  supersedes?: string[];
+  supersededBy?: string | null;
+  contradicts?: string[];
 };
 
 export type MemoryCandidateReview = {
@@ -150,6 +188,9 @@ export type MemoryCandidateReview = {
   timestamp: string;
   type: string;
   subtype?: string | null;
+  scope?: string;
+  scopeId?: string | null;
+  memoryLayer?: string;
   content: string;
   contentPreview: string;
   summary?: string | null;
@@ -167,10 +208,35 @@ export type MemoryCandidateReview = {
   extractorProvider?: string;
   fallbackUsed?: boolean;
   metadata?: Record<string, unknown>;
+  observedAt?: string | null;
+  eventTime?: string | null;
+  validFrom?: string | null;
+  validUntil?: string | null;
+  expiresAt?: string | null;
+  possibleSupersedes?: string[];
+  possibleContradictions?: string[];
 };
 
 export type AcceptMemoryCandidateRequest = Partial<
-  Pick<MemoryCandidateReview, "type" | "subtype" | "content" | "summary" | "importance" | "tags">
+  Pick<
+    MemoryCandidateReview,
+    | "type"
+    | "subtype"
+    | "scope"
+    | "scopeId"
+    | "memoryLayer"
+    | "content"
+    | "summary"
+    | "importance"
+    | "tags"
+    | "observedAt"
+    | "eventTime"
+    | "validFrom"
+    | "validUntil"
+    | "expiresAt"
+    | "possibleSupersedes"
+    | "possibleContradictions"
+  >
 >;
 
 export type ProvidersStatusResponse = {
@@ -199,13 +265,31 @@ export type RetrievedMemoryDebug = {
   id: string;
   type: string;
   subtype?: string | null;
+  scope?: string;
+  scopeId?: string | null;
+  memoryLayer?: string;
+  status?: string;
   source: string;
   sourceTraceId: string | null;
   metadata?: Record<string, unknown>;
   importance: number;
   createdAt: string;
+  observedAt?: string;
+  validFrom?: string;
+  validUntil?: string | null;
+  expiresAt?: string | null;
+  supersededAt?: string | null;
   displayText: string;
-  matchedBy?: "original-query" | "keyword" | "fallback-recent";
+  matchedBy?:
+    | "content"
+    | "summary"
+    | "tag"
+    | "type"
+    | "metadata"
+    | "source"
+    | "keyword"
+    | "fallback";
+  score?: number;
   excludedReason?: string;
 };
 
@@ -232,6 +316,8 @@ export type PromptPreviewResponse = {
   rejectedReasons?: string[];
   fallbackUsed?: boolean;
   llmExtractionError?: string;
+  llmExtractionRawPreview?: string;
+  validationIssues?: string[];
   memoryExtractionSkippedReason?: string;
   memoryCandidates?: MemoryCandidateReview[];
   retrievedMemoryCountRaw?: number;
@@ -265,6 +351,8 @@ export type PromptPreviewResponse = {
     rejectedReasons?: string[];
     fallbackUsed?: boolean;
     llmExtractionError?: string;
+    llmExtractionRawPreview?: string;
+    validationIssues?: string[];
     memoryExtractionSkippedReason?: string;
     memoryCandidates?: MemoryCandidateReview[];
     retrievedMemoryCountRaw?: number;
@@ -464,6 +552,7 @@ export const apiClient = {
     rawCount?: number;
     count?: number;
     retrievalMode?: string;
+    debugMemories?: RetrievedMemoryDebug[];
     query?: string;
     repository?: string;
   }> {
@@ -481,6 +570,7 @@ export const apiClient = {
       rawCount?: number;
       count?: number;
       retrievalMode?: string;
+      debugMemories?: RetrievedMemoryDebug[];
       query?: string;
       repository?: string;
     }>(`/memory/search?${params.toString()}`);
@@ -508,6 +598,27 @@ export const apiClient = {
     return request<{ ok: boolean; id: string }>(`/memory/${encodeURIComponent(id)}`, {
       method: "DELETE"
     });
+  },
+
+  archiveMemory(id: string): Promise<{ ok: boolean; id: string; memory: MemoryRecord }> {
+    return request<{ ok: boolean; id: string; memory: MemoryRecord }>(
+      `/memory/${encodeURIComponent(id)}/archive`,
+      { method: "POST" }
+    );
+  },
+
+  restoreMemory(id: string): Promise<{ ok: boolean; id: string; memory: MemoryRecord }> {
+    return request<{ ok: boolean; id: string; memory: MemoryRecord }>(
+      `/memory/${encodeURIComponent(id)}/restore`,
+      { method: "POST" }
+    );
+  },
+
+  forgetMemory(id: string): Promise<{ ok: boolean; id: string; memory: MemoryRecord }> {
+    return request<{ ok: boolean; id: string; memory: MemoryRecord }>(
+      `/memory/${encodeURIComponent(id)}/forget`,
+      { method: "POST" }
+    );
   },
 
   bulkDeleteMemories(ids: string[]): Promise<{ ok: boolean; deleted: number }> {

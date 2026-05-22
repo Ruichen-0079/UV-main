@@ -38,6 +38,9 @@ pnpm.cmd smoke
   - `POST /memory`
   - `GET /memory/:id`
   - `PATCH /memory/:id`
+  - `POST /memory/:id/archive`
+  - `POST /memory/:id/restore`
+  - `POST /memory/:id/forget`
   - `DELETE /memory/:id`
   - `GET /memory/recent`
   - `GET /memory/search?q=...`
@@ -53,7 +56,7 @@ pnpm.cmd smoke
 5. Recent memories can be retrieved.
 6. Memory search returns a matching record.
 
-Manual memory management endpoint tests cover reading memory details, editing safe structured fields, rejecting invalid importance values, rejecting unsafe metadata keys, and deleting records so they no longer appear in search.
+Manual memory management endpoint tests cover reading memory details, editing safe structured fields, rejecting invalid importance values, rejecting unsafe metadata keys, archiving/restoring/forgetting records, and deleting records so they no longer appear in search.
 
 The smoke script sets:
 
@@ -108,6 +111,8 @@ pnpm smoke:postgres
 ```
 
 4. Or run the server with `MEMORY_REPOSITORY=postgres` and a valid `DATABASE_URL`, then use `POST /memory`, `GET /memory/recent`, and `GET /memory/search?q=...`.
+
+Postgres memory search is still keyword/structured retrieval, not embeddings. Migrations enable `pg_trgm` and create indexes for content, summary, tags, type/subtype, scope/scopeId, memoryLayer, status, source/sourceTraceId, temporal fields, createdAt, importance, and metadata so mixed Chinese/English queries, paths, ports, and commands can be found before vector search is added.
 
 To reset development database volumes, prefer the guarded helper:
 

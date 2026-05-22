@@ -35,6 +35,30 @@ describe("MemoryRepository", () => {
     expect(recent.map((memory) => memory.id)).toContain(created.id);
   });
 
+  it("assigns Memory Model v2 defaults for existing create paths", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const created = await repository.createMemory({
+      type: "semantic",
+      subtype: "project",
+      content: "用户正在开发 YUVI Runtime。",
+      source: "test",
+      tags: ["yuvi"]
+    });
+
+    expect(created).toMatchObject({
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      memoryLayer: "core",
+      status: "active",
+      supersedes: [],
+      supersededBy: null,
+      contradicts: []
+    });
+    expect(created.observedAt).toBeInstanceOf(Date);
+    expect(created.validFrom).toBeInstanceOf(Date);
+    expect(created.expiresAt).toBeNull();
+  });
+
   it("updates and deletes in-memory memory records", async () => {
     const repository = new InMemoryMemoryRepository();
     const created = await repository.createMemory({
@@ -94,6 +118,90 @@ describe("MemoryRepository", () => {
 
     expect(memories.length).toBeGreaterThan(0);
     expect(memories[0]?.content).toContain("YUVI Runtime");
+  });
+
+  it("excludes non-active or temporally invalid memories from prompt retrieval", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "semantic",
+      content: "Active YUVI Runtime memory.",
+      source: "test",
+      tags: ["yuvi"]
+    });
+    await repository.createMemory({
+      type: "semantic",
+      content: "Forgotten YUVI Runtime memory.",
+      source: "test",
+      status: "forgotten",
+      tags: ["yuvi"]
+    });
+    await repository.createMemory({
+      type: "semantic",
+      content: "Archived YUVI Runtime memory.",
+      source: "test",
+      status: "archived",
+      tags: ["yuvi"]
+    });
+    await repository.createMemory({
+      type: "semantic",
+      content: "Superseded YUVI Runtime memory.",
+      source: "test",
+      status: "superseded",
+      tags: ["yuvi"]
+    });
+    await repository.createMemory({
+      type: "semantic",
+      content: "Expired YUVI Runtime memory.",
+      source: "test",
+      expiresAt: new Date(Date.now() - 1000),
+      tags: ["yuvi"]
+    });
+    await repository.createMemory({
+      type: "semantic",
+      content: "Future-valid YUVI Runtime memory.",
+      source: "test",
+      validFrom: new Date(Date.now() + 60_000),
+      tags: ["yuvi"]
+    });
+
+    const result = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "YUVI Runtime",
+      limit: 10
+    });
+
+    expect(result.memories.map((memory) => memory.displayText)).toEqual([
+      "Active YUVI Runtime memory."
+    ]);
+  });
+
+  it("supports scope-filtered retrieval", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "semantic",
+      content: "Project-scoped YUVI Runtime memory.",
+      source: "test",
+      scope: "project",
+      scopeId: "yuvi-runtime"
+    });
+    await repository.createMemory({
+      type: "semantic",
+      content: "User-scoped YUVI Runtime memory.",
+      source: "test",
+      scope: "user"
+    });
+
+    const projectResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "YUVI Runtime",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      limit: 10
+    });
+
+    expect(projectResult.memories).toHaveLength(1);
+    expect(projectResult.memories[0]?.scope).toBe("project");
+    expect(projectResult.memories[0]?.scopeId).toBe("yuvi-runtime");
   });
 
   it("deduplicates display-equivalent memories and prefers semantic memory", async () => {
@@ -193,6 +301,57 @@ describe("MemoryRepository", () => {
     expect(tagResult.count).toBeGreaterThan(0);
     expect(metadataResult.count).toBeGreaterThan(0);
     expect(metadataResult.memories[0]?.metadata).toMatchObject({ project: "YUVI Runtime" });
+  });
+
+  it("returns retrieval debug metadata for summary, tag, command, and path matches", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "semantic",
+      subtype: "project",
+      content: "A concise project fact.",
+      summary: "YUVI Runtime is an AI Companion Runtime.",
+      source: "manual",
+      tags: ["runtime"]
+    });
+    await repository.createMemory({
+      type: "procedural",
+      subtype: "command",
+      content: "Run pnpm db:migrate before Postgres smoke tests.",
+      source: "manual",
+      tags: ["command"]
+    });
+    await repository.createMemory({
+      type: "semantic",
+      subtype: "path",
+      content: "Windows source path is C:\\Users\\Administrator.DESKTOP-NPU6DHJ\\Desktop\\uv-main.",
+      source: "manual",
+      tags: ["path"]
+    });
+
+    const summaryResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "AI Companion Runtime",
+      limit: 5
+    });
+    const tagResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "command",
+      limit: 5
+    });
+    const commandResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "pnpm db:migrate",
+      limit: 5
+    });
+    const pathResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "C:\\Users\\Administrator.DESKTOP-NPU6DHJ\\Desktop\\uv-main",
+      limit: 5
+    });
+
+    expect(summaryResult.memories[0]).toMatchObject({ matchedBy: "summary" });
+    expect(summaryResult.retrievalMode).toBe("hybrid-keyword");
+    expect(summaryResult.memories[0]?.score).toBeGreaterThan(0);
+    expect(tagResult.memories[0]?.matchedBy).toBe("tag");
+    expect(commandResult.memories[0]?.displayText).toContain("pnpm db:migrate");
+    expect(pathResult.memories[0]?.displayText).toContain("Administrator.DESKTOP-NPU6DHJ");
   });
 
   it("scores only durable memory-worthy interactions highly", () => {
@@ -410,6 +569,77 @@ describe("MemoryRepository", () => {
     });
   });
 
+  it("recovers common LLM JSON formatting variants", async () => {
+    const outputs = [
+      '```json\n{"candidates":[{"type":"semantic","subtype":"provider-choice","content":"用户偏好 Chat 和 Reasoning 使用 DeepSeek。","summary":"用户偏好 DeepSeek。","importance":"0.9","tags":["deepseek"],"reason":"provider preference"}]}\n```',
+      'Here is the JSON:\n{"candidates":[{"type":"fact","content":"用户正在开发 YUVI Runtime。","summary":"用户正在开发 YUVI Runtime。","importance":0.8,"confidence":0.8,"tags":["yuvi"],"reason":"project fact"}]}',
+      '[{"type":"preference","content":"用户偏好简洁的调试输出。","summary":"用户偏好简洁调试输出。","importance":0.82,"confidence":0.8,"tags":["preference"],"reason":"stable preference"}]',
+      '{"memories":[{"type":"procedure","content":"启动开发环境使用 ./scripts/dev.sh。","summary":"使用 dev.sh 启动开发环境。","importance":0.83,"confidence":0.8,"tags":["command"],"reason":"startup command"}]}'
+    ];
+
+    for (const output of outputs) {
+      const extractor = createLlmExtractor(output);
+      const candidates = await extractor.extractCandidates({
+        userMessage: "记住：以后 chat 用 DeepSeek",
+        sourceTraceId: "trace-format"
+      });
+
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]?.importance).toBeGreaterThanOrEqual(0.8);
+      expect(candidates[0]?.confidence).toBeGreaterThanOrEqual(0.7);
+      expect(extractor.getStatus()).toMatchObject({
+        active: "llm",
+        fallbackUsed: false
+      });
+    }
+  });
+
+  it("rejects unsafe or malformed LLM candidates without storing them", async () => {
+    const extractor = createLlmExtractor({
+      candidates: [
+        {
+          type: "unknown",
+          content: "用户偏好 Chat 使用 DeepSeek。",
+          summary: "用户偏好 DeepSeek。",
+          importance: 0.9,
+          confidence: 0.9,
+          tags: [],
+          reason: "unknown type"
+        },
+        {
+          type: "semantic",
+          subtype: "fact",
+          content: "",
+          summary: "empty",
+          importance: 0.9,
+          confidence: 0.9,
+          tags: [],
+          reason: "empty content"
+        },
+        {
+          type: "semantic",
+          subtype: "fact",
+          content: "用户偏好 Chat 使用 DeepSeek。",
+          summary: "用户偏好 DeepSeek。",
+          importance: 0.9,
+          confidence: 0.9,
+          tags: [],
+          metadata: { apiKey: "sk-secret-value" },
+          reason: "unsafe metadata"
+        }
+      ]
+    });
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "What should be remembered?",
+      sourceTraceId: "trace-invalid-candidates"
+    });
+
+    expect(candidates).toEqual([]);
+    expect(extractor.getStatus().rejectedCount).toBe(3);
+    expect(extractor.getStatus().validationIssues?.join("\n")).not.toContain("sk-secret-value");
+  });
+
   it("rejects low-confidence LLM memory candidates", async () => {
     const extractor = new LlmMemoryExtractor(
       {
@@ -441,12 +671,12 @@ describe("MemoryRepository", () => {
     ).resolves.toEqual([]);
   });
 
-  it("fails closed when LLM output is invalid JSON", async () => {
+  it("falls back to rule-based extraction when LLM output is invalid JSON", async () => {
     const extractor = new LlmMemoryExtractor(
       {
         async generateReasoning() {
           return {
-            reasoning: "not json"
+            reasoning: "not json with apiKey=sk-secret-value"
           };
         }
       },
@@ -459,12 +689,21 @@ describe("MemoryRepository", () => {
       sourceTraceId: "trace-rule"
     });
 
-    expect(candidates).toEqual([]);
+    expect(candidates).toContainEqual(
+      expect.objectContaining({
+        type: "semantic",
+        subtype: "path",
+        sourceTraceId: "trace-rule"
+      })
+    );
     expect(extractor.getStatus()).toMatchObject({
-      active: "llm",
-      fallbackUsed: false,
-      rejectedReasons: ["invalid-json"]
+      active: "fallback-rule-based",
+      fallbackUsed: true,
+      rejectedReasons: ["invalid-llm-output"],
+      skippedReason: "LLM extractor output was invalid; falling back to rule-based extraction."
     });
+    expect(extractor.getStatus().rawPreview).toContain("apiKey=[redacted]");
+    expect(extractor.getStatus().rawPreview).not.toContain("sk-secret-value");
   });
 
   it("falls back to rule-based extraction when the reasoning provider call fails", async () => {
@@ -614,5 +853,31 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("create table if not exists relations");
     expect(combinedSql).toContain("memories_summary_trgm_idx");
     expect(combinedSql).toContain("memories_metadata_idx");
+    expect(combinedSql).toContain("memories_subtype_idx");
+    expect(combinedSql).toContain("memories_source_trace_id_idx");
+    expect(combinedSql).toContain("memories_created_at_idx");
+    expect(combinedSql).toContain("scope text not null default 'user'");
+    expect(combinedSql).toContain("memory_layer text not null default 'recall'");
+    expect(combinedSql).toContain("status text not null default 'active'");
+    expect(combinedSql).toContain("valid_until");
+    expect(combinedSql).toContain("expires_at");
+    expect(combinedSql).toContain("superseded_by");
+    expect(combinedSql).toContain("memories_scope_scope_id_idx");
+    expect(combinedSql).toContain("memories_memory_layer_idx");
+    expect(combinedSql).toContain("memories_status_idx");
   });
 });
+
+function createLlmExtractor(output: string | Record<string, unknown>): LlmMemoryExtractor {
+  return new LlmMemoryExtractor(
+    {
+      async generateReasoning() {
+        return {
+          reasoning: typeof output === "string" ? output : JSON.stringify(output)
+        };
+      }
+    },
+    new RuleBasedMemoryExtractor(),
+    { enabled: true, providerConfigured: true, providerName: "deepseek" }
+  );
+}

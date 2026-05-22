@@ -12,6 +12,7 @@ import {
   type ProviderVerificationResponse,
   type PromptPreviewResponse,
   type ProvidersStatusResponse,
+  type RetrievedMemoryDebug,
   type RuntimeEvent,
   type RuntimeSettingsReloadResponse,
   type RuntimeSettingsResponse,
@@ -69,6 +70,10 @@ const memorySubtypes = [
   "emotion",
   "relationship"
 ];
+
+const memoryScopes = ["user", "project", "agent", "plugin", "session"];
+const memoryLayers = ["core", "recall", "archival", "working"];
+const memoryStatuses = ["active", "superseded", "archived", "forgotten", "expired"];
 
 const pages: Array<{ id: PageId; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -457,6 +462,8 @@ function MemoryPage(props: {
   const [sourceFilter, setSourceFilter] = useState("all");
   const [minImportance, setMinImportance] = useState("0");
   const [searchMemories, setSearchMemories] = useState<MemoryRecord[] | null>(null);
+  const [searchDebug, setSearchDebug] = useState<RetrievedMemoryDebug[]>([]);
+  const [searchRetrievalMode, setSearchRetrievalMode] = useState<string | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [resultSource, setResultSource] = useState<MemoryResultSource>("/memory/recent");
@@ -479,6 +486,8 @@ function MemoryPage(props: {
     const trimmed = query.trim();
     if (!trimmed) {
       setSearchMemories(null);
+      setSearchDebug([]);
+      setSearchRetrievalMode(null);
       setSearchError(null);
       setSearchLoading(false);
       setResultSource("/memory/recent");
@@ -493,12 +502,16 @@ function MemoryPage(props: {
         .searchMemories(trimmed, { type: typeFilter, limit: 50 })
         .then((result) => {
           setSearchMemories(result.memories);
+          setSearchDebug(result.debugMemories ?? []);
+          setSearchRetrievalMode(result.retrievalMode ?? null);
           setResultSource("/memory/search");
         })
         .catch((caught) => {
           if (!controller.signal.aborted) {
             setSearchError(caught instanceof Error ? caught.message : "Memory search failed");
             setSearchMemories(null);
+            setSearchDebug([]);
+            setSearchRetrievalMode(null);
             setResultSource("local fallback");
           }
         })
@@ -516,6 +529,10 @@ function MemoryPage(props: {
   }, [query, typeFilter]);
 
   const sourceMemories = searchMemories ?? props.state.data?.memories ?? [];
+  const searchDebugById = useMemo(
+    () => new Map(searchDebug.map((memory) => [memory.id, memory])),
+    [searchDebug]
+  );
   const memories = sourceMemories.filter((memory) => {
     const matchesType = typeFilter === "all" || memory.type === typeFilter;
     const matchesSubtype = subtypeFilter === "all" || memory.subtype === subtypeFilter;
@@ -611,19 +628,64 @@ function MemoryPage(props: {
     }
   }
 
+  async function updateMemoryLifecycle(
+    memory: MemoryRecord,
+    action: "archive" | "restore" | "forget"
+  ): Promise<void> {
+    setBusyMemoryId(memory.id);
+    setError(null);
+    setSuccess(null);
+    try {
+      const result =
+        action === "archive"
+          ? await apiClient.archiveMemory(memory.id)
+          : action === "restore"
+            ? await apiClient.restoreMemory(memory.id)
+            : await apiClient.forgetMemory(memory.id);
+      setSelectedMemory(result.memory);
+      setSuccess(
+        action === "archive"
+          ? "Memory archived."
+          : action === "restore"
+            ? "Memory restored."
+            : "Memory marked forgotten."
+      );
+      await refreshMemories();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : `Memory ${action} failed`);
+    } finally {
+      setBusyMemoryId(null);
+    }
+  }
+
   async function acceptCandidate(candidate: MemoryCandidateReview): Promise<void> {
     setBusyCandidateId(candidate.id);
     setError(null);
     setSuccess(null);
     try {
-      const result = await apiClient.acceptMemoryCandidate(candidate.id, {
+      const acceptInput: AcceptMemoryCandidateRequest = {
         type: candidate.type,
         subtype: candidate.subtype ?? null,
+        scopeId: candidate.scopeId ?? null,
         content: candidate.content,
         summary: candidate.summary ?? null,
         importance: candidate.importance,
-        tags: candidate.tags
-      });
+        tags: candidate.tags,
+        observedAt: candidate.observedAt ?? null,
+        eventTime: candidate.eventTime ?? null,
+        validFrom: candidate.validFrom ?? null,
+        validUntil: candidate.validUntil ?? null,
+        expiresAt: candidate.expiresAt ?? null,
+        ...(candidate.scope ? { scope: candidate.scope } : {}),
+        ...(candidate.memoryLayer ? { memoryLayer: candidate.memoryLayer } : {}),
+        ...(candidate.possibleSupersedes
+          ? { possibleSupersedes: candidate.possibleSupersedes }
+          : {}),
+        ...(candidate.possibleContradictions
+          ? { possibleContradictions: candidate.possibleContradictions }
+          : {})
+      };
+      const result = await apiClient.acceptMemoryCandidate(candidate.id, acceptInput);
       setSuccess(result.message ?? "Memory candidate accepted and saved.");
       await Promise.all([refreshMemories(), candidates.refresh()]);
     } catch (caught) {
@@ -657,13 +719,22 @@ function MemoryPage(props: {
     setCandidateEditForm({
       type: candidate.type,
       subtype: candidate.subtype ?? "",
+      scope: candidate.scope ?? "user",
+      scopeId: candidate.scopeId ?? "",
+      memoryLayer: candidate.memoryLayer ?? "core",
+      status: "active",
       content: candidate.content,
       summary: candidate.summary ?? "",
       importance: String(candidate.importance),
       emotionValence: "0",
       emotionArousal: "0",
       tags: candidate.tags.join(", "),
-      source: "dashboard"
+      source: "dashboard",
+      observedAt: toDateTimeLocalValue(candidate.observedAt),
+      eventTime: toDateTimeLocalValue(candidate.eventTime),
+      validFrom: toDateTimeLocalValue(candidate.validFrom),
+      validUntil: toDateTimeLocalValue(candidate.validUntil),
+      expiresAt: toDateTimeLocalValue(candidate.expiresAt)
     });
   }
 
@@ -697,6 +768,8 @@ function MemoryPage(props: {
         limit: 50
       });
       setSearchMemories(result.memories);
+      setSearchDebug(result.debugMemories ?? []);
+      setSearchRetrievalMode(result.retrievalMode ?? null);
       setResultSource("/memory/search");
     }
   }
@@ -708,6 +781,8 @@ function MemoryPage(props: {
     setSourceFilter("all");
     setMinImportance("0");
     setSearchMemories(null);
+    setSearchDebug([]);
+    setSearchRetrievalMode(null);
     setSearchError(null);
     setResultSource("/memory/recent");
   }
@@ -719,7 +794,11 @@ function MemoryPage(props: {
         <StatusCard
           title="Result Source"
           status={resultSource}
-          detail={query.trim() ? "Search query is active" : "Showing recent memories"}
+          detail={
+            query.trim()
+              ? `Search query is active · mode: ${searchRetrievalMode ?? "unknown"}`
+              : "Showing recent memories"
+          }
         />
         <StatusCard
           title="Records Shown"
@@ -818,8 +897,12 @@ function MemoryPage(props: {
           ) : (
             <MemoryTable
               memories={memories}
+              debugById={searchDebugById}
               onView={(memory) => void loadMemory(memory.id, "view")}
               onEdit={(memory) => void loadMemory(memory.id, "edit")}
+              onArchive={(memory) => void updateMemoryLifecycle(memory, "archive")}
+              onRestore={(memory) => void updateMemoryLifecycle(memory, "restore")}
+              onForget={(memory) => void updateMemoryLifecycle(memory, "forget")}
               onDelete={setDeleteTarget}
             />
           )}
@@ -1379,7 +1462,7 @@ function PromptPreviewPage(): JSX.Element {
               preview.data?.memoryExtractorActive ??
               "unknown"
             }
-            detail={`mode: ${promptPreview.memoryExtractorMode ?? preview.data?.memoryExtractorMode ?? "unknown"} · provider: ${promptPreview.memoryExtractorProvider ?? preview.data?.memoryExtractorProvider ?? "n/a"} · candidates: ${promptPreview.memoryExtractionCandidateCount ?? preview.data?.memoryExtractionCandidateCount ?? 0} · stored: ${promptPreview.storedMemoryCount ?? preview.data?.storedMemoryCount ?? 0} · rejected: ${promptPreview.rejectedMemoryCount ?? preview.data?.rejectedMemoryCount ?? 0} · fallback: ${String(promptPreview.fallbackUsed ?? preview.data?.fallbackUsed ?? false)}${(promptPreview.llmExtractionError ?? preview.data?.llmExtractionError) ? ` · ${promptPreview.llmExtractionError ?? preview.data?.llmExtractionError}` : ""}${(promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason) ? ` · ${promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason}` : ""}`}
+            detail={`mode: ${promptPreview.memoryExtractorMode ?? preview.data?.memoryExtractorMode ?? "unknown"} · provider: ${promptPreview.memoryExtractorProvider ?? preview.data?.memoryExtractorProvider ?? "n/a"} · candidates: ${promptPreview.memoryExtractionCandidateCount ?? preview.data?.memoryExtractionCandidateCount ?? 0} · stored: ${promptPreview.storedMemoryCount ?? preview.data?.storedMemoryCount ?? 0} · rejected: ${promptPreview.rejectedMemoryCount ?? preview.data?.rejectedMemoryCount ?? 0} · fallback: ${String(promptPreview.fallbackUsed ?? preview.data?.fallbackUsed ?? false)}${(promptPreview.llmExtractionError ?? preview.data?.llmExtractionError) ? ` · ${promptPreview.llmExtractionError ?? preview.data?.llmExtractionError}` : ""}${(promptPreview.validationIssues ?? preview.data?.validationIssues)?.length ? ` · validation: ${(promptPreview.validationIssues ?? preview.data?.validationIssues)?.join("; ")}` : ""}${(promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason) ? ` · ${promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason}` : ""}`}
           />
           <StatusCard
             title="Tokens"
@@ -1392,6 +1475,15 @@ function PromptPreviewPage(): JSX.Element {
             detail={providerPreviewDetail(promptPreview, preview.data)}
           />
         </div>
+      )}
+      {(promptPreview?.llmExtractionRawPreview ?? preview.data?.llmExtractionRawPreview) && (
+        <Notice
+          tone="info"
+          title="LLM extractor raw preview"
+          message={
+            promptPreview?.llmExtractionRawPreview ?? preview.data?.llmExtractionRawPreview ?? ""
+          }
+        />
       )}
       <div className="grid grid-cols-3 gap-4">
         {promptSections(preview.data).map((section) => (
@@ -2388,6 +2480,10 @@ function providerConfigurationHint(
 type MemoryForm = {
   type: string;
   subtype: string;
+  scope: string;
+  scopeId: string;
+  memoryLayer: string;
+  status: string;
   content: string;
   summary: string;
   importance: string;
@@ -2395,19 +2491,33 @@ type MemoryForm = {
   emotionArousal: string;
   source: string;
   tags: string;
+  observedAt: string;
+  eventTime: string;
+  validFrom: string;
+  validUntil: string;
+  expiresAt: string;
 };
 
 function emptyMemoryForm(): MemoryForm {
   return {
     type: "semantic",
     subtype: "",
+    scope: "user",
+    scopeId: "",
+    memoryLayer: "core",
+    status: "active",
     content: "",
     summary: "",
     importance: "0.5",
     emotionValence: "0",
     emotionArousal: "0",
     source: "dashboard",
-    tags: ""
+    tags: "",
+    observedAt: "",
+    eventTime: "",
+    validFrom: "",
+    validUntil: "",
+    expiresAt: ""
   };
 }
 
@@ -2415,13 +2525,22 @@ function memoryFormFromRecord(memory: MemoryRecord): MemoryForm {
   return {
     type: memory.type,
     subtype: memory.subtype ?? "",
+    scope: memory.scope ?? "user",
+    scopeId: memory.scopeId ?? "",
+    memoryLayer: memory.memoryLayer ?? "core",
+    status: memory.status ?? "active",
     content: memory.content,
     summary: memory.summary ?? "",
     importance: String(memory.importance),
     emotionValence: String(memory.emotionValence ?? 0),
     emotionArousal: String(memory.emotionArousal ?? 0),
     source: memory.source,
-    tags: memory.tags.join(", ")
+    tags: memory.tags.join(", "),
+    observedAt: toDateTimeLocalValue(memory.observedAt),
+    eventTime: toDateTimeLocalValue(memory.eventTime),
+    validFrom: toDateTimeLocalValue(memory.validFrom),
+    validUntil: toDateTimeLocalValue(memory.validUntil),
+    expiresAt: toDateTimeLocalValue(memory.expiresAt)
   };
 }
 
@@ -2429,6 +2548,10 @@ function toCreateMemoryRequest(form: MemoryForm): CreateMemoryRequest {
   const input: CreateMemoryRequest = {
     type: form.type,
     subtype: form.subtype.trim() ? form.subtype.trim() : null,
+    scope: form.scope,
+    scopeId: form.scopeId.trim() ? form.scopeId.trim() : null,
+    memoryLayer: form.memoryLayer,
+    status: form.status,
     content: form.content.trim(),
     importance: parseImportance(form.importance) ?? 0.5,
     source: form.source.trim() || "dashboard",
@@ -2438,13 +2561,18 @@ function toCreateMemoryRequest(form: MemoryForm): CreateMemoryRequest {
   if (summary) {
     input.summary = summary;
   }
+  assignMemoryFormDates(input, form);
   return input;
 }
 
 function toUpdateMemoryRequest(form: MemoryForm): UpdateMemoryRequest {
-  return {
+  const input: UpdateMemoryRequest = {
     type: form.type,
     subtype: form.subtype.trim() ? form.subtype.trim() : null,
+    scope: form.scope,
+    scopeId: form.scopeId.trim() ? form.scopeId.trim() : null,
+    memoryLayer: form.memoryLayer,
+    status: form.status,
     content: form.content.trim(),
     summary: form.summary.trim() || null,
     importance: parseImportance(form.importance) ?? 0.5,
@@ -2452,17 +2580,35 @@ function toUpdateMemoryRequest(form: MemoryForm): UpdateMemoryRequest {
     emotionArousal: parseImportance(form.emotionArousal) ?? 0,
     tags: parseTags(form.tags)
   };
+  assignMemoryFormDates(input, form);
+  return input;
 }
 
 function toAcceptCandidateRequest(form: MemoryForm): AcceptMemoryCandidateRequest {
-  return {
+  const input: AcceptMemoryCandidateRequest = {
     type: form.type,
     subtype: form.subtype.trim() ? form.subtype.trim() : null,
+    scope: form.scope,
+    scopeId: form.scopeId.trim() ? form.scopeId.trim() : null,
+    memoryLayer: form.memoryLayer,
     content: form.content.trim(),
     summary: form.summary.trim() || null,
     importance: parseImportance(form.importance) ?? 0.5,
     tags: parseTags(form.tags)
   };
+  assignMemoryFormDates(input, form);
+  return input;
+}
+
+function assignMemoryFormDates(
+  input: CreateMemoryRequest | UpdateMemoryRequest | AcceptMemoryCandidateRequest,
+  form: MemoryForm
+): void {
+  if (form.observedAt) input.observedAt = fromDateTimeLocalValue(form.observedAt);
+  if (form.eventTime) input.eventTime = fromDateTimeLocalValue(form.eventTime);
+  if (form.validFrom) input.validFrom = fromDateTimeLocalValue(form.validFrom);
+  if (form.validUntil) input.validUntil = fromDateTimeLocalValue(form.validUntil);
+  if (form.expiresAt) input.expiresAt = fromDateTimeLocalValue(form.expiresAt);
 }
 
 function parseTags(value: string): string[] {
@@ -2475,6 +2621,25 @@ function parseTags(value: string): string[] {
 function memoryPreview(memory: MemoryRecord): string {
   const text = (memory.summary || memory.content).replace(/\s+/g, " ").trim();
   return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+}
+
+function formatScope(memory: MemoryRecord): string {
+  return `${memory.scope ?? "user"}${memory.scopeId ? `/${memory.scopeId}` : ""}`;
+}
+
+function toDateTimeLocalValue(value: string | null | undefined): string {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toISOString().slice(0, 16);
+}
+
+function fromDateTimeLocalValue(value: string): string {
+  return new Date(value).toISOString();
 }
 
 function safeMetadataText(metadata: Record<string, unknown> | undefined): string {
@@ -2598,6 +2763,55 @@ function MemoryFormFields(props: {
           </select>
         </Field>
       </div>
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="Scope">
+          <select
+            className="field"
+            value={props.form.scope}
+            onChange={(event) => update("scope", event.target.value)}
+          >
+            {memoryScopes.map((scope) => (
+              <option key={scope} value={scope}>
+                {scope}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Scope ID">
+          <input
+            className="field"
+            placeholder="yuvi-runtime"
+            value={props.form.scopeId}
+            onChange={(event) => update("scopeId", event.target.value)}
+          />
+        </Field>
+        <Field label="Layer">
+          <select
+            className="field"
+            value={props.form.memoryLayer}
+            onChange={(event) => update("memoryLayer", event.target.value)}
+          >
+            {memoryLayers.map((layer) => (
+              <option key={layer} value={layer}>
+                {layer}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      <Field label="Status">
+        <select
+          className="field"
+          value={props.form.status}
+          onChange={(event) => update("status", event.target.value)}
+        >
+          {memoryStatuses.map((status) => (
+            <option key={status} value={status}>
+              {status}
+            </option>
+          ))}
+        </select>
+      </Field>
       <Field label="Content">
         <textarea
           className="field min-h-28"
@@ -2664,6 +2878,48 @@ function MemoryFormFields(props: {
           onChange={(event) => update("tags", event.target.value)}
         />
       </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Observed At">
+          <input
+            className="field"
+            type="datetime-local"
+            value={props.form.observedAt}
+            onChange={(event) => update("observedAt", event.target.value)}
+          />
+        </Field>
+        <Field label="Event Time">
+          <input
+            className="field"
+            type="datetime-local"
+            value={props.form.eventTime}
+            onChange={(event) => update("eventTime", event.target.value)}
+          />
+        </Field>
+        <Field label="Valid From">
+          <input
+            className="field"
+            type="datetime-local"
+            value={props.form.validFrom}
+            onChange={(event) => update("validFrom", event.target.value)}
+          />
+        </Field>
+        <Field label="Valid Until">
+          <input
+            className="field"
+            type="datetime-local"
+            value={props.form.validUntil}
+            onChange={(event) => update("validUntil", event.target.value)}
+          />
+        </Field>
+        <Field label="Expires At">
+          <input
+            className="field"
+            type="datetime-local"
+            value={props.form.expiresAt}
+            onChange={(event) => update("expiresAt", event.target.value)}
+          />
+        </Field>
+      </div>
     </div>
   );
 }
@@ -2675,12 +2931,20 @@ function MemoryDetail(props: { memory: MemoryRecord }): JSX.Element {
       <div className="grid grid-cols-3 gap-3">
         <Definition label="Type" value={props.memory.type} />
         <Definition label="Subtype" value={props.memory.subtype ?? "none"} />
+        <Definition label="Scope" value={formatScope(props.memory)} />
+        <Definition label="Layer" value={props.memory.memoryLayer ?? "unknown"} />
+        <Definition label="Status" value={props.memory.status ?? "active"} />
         <Definition label="Importance" value={props.memory.importance.toFixed(2)} />
         <Definition label="Source" value={props.memory.source} />
         <Definition label="Source Trace" value={props.memory.sourceTraceId ?? "none"} />
         <Definition label="Created" value={formatDate(props.memory.createdAt)} />
         <Definition label="Updated" value={formatDate(props.memory.updatedAt ?? "")} />
+        <Definition label="Observed" value={formatDate(props.memory.observedAt ?? "")} />
+        <Definition label="Valid From" value={formatDate(props.memory.validFrom ?? "")} />
+        <Definition label="Valid Until" value={formatDate(props.memory.validUntil ?? "")} />
+        <Definition label="Expires" value={formatDate(props.memory.expiresAt ?? "")} />
         <Definition label="Last Accessed" value={formatDate(props.memory.lastAccessedAt ?? "")} />
+        <Definition label="Superseded" value={formatDate(props.memory.supersededAt ?? "")} />
         <Definition
           label="Emotion"
           value={`${props.memory.emotionValence ?? 0} / ${props.memory.emotionArousal ?? 0}`}
@@ -2711,9 +2975,13 @@ function MemoryDetail(props: { memory: MemoryRecord }): JSX.Element {
 
 function MemoryTable(props: {
   memories: MemoryRecord[];
+  debugById?: Map<string, RetrievedMemoryDebug>;
   compact?: boolean;
   onView?(memory: MemoryRecord): void;
   onEdit?(memory: MemoryRecord): void;
+  onArchive?(memory: MemoryRecord): void;
+  onRestore?(memory: MemoryRecord): void;
+  onForget?(memory: MemoryRecord): void;
   onDelete?(memory: MemoryRecord): void;
 }): JSX.Element {
   return (
@@ -2723,75 +2991,132 @@ function MemoryTable(props: {
           <tr>
             <th className="table-cell">Type</th>
             {!props.compact && <th className="table-cell">Subtype</th>}
+            {!props.compact && <th className="table-cell">Layer</th>}
+            {!props.compact && <th className="table-cell">Status</th>}
+            {!props.compact && <th className="table-cell">Scope</th>}
             <th className="table-cell">Content</th>
             {!props.compact && <th className="table-cell">Importance</th>}
             {!props.compact && <th className="table-cell">Tags</th>}
             {!props.compact && <th className="table-cell">Source</th>}
+            {!props.compact && <th className="table-cell">Matched</th>}
             {!props.compact && <th className="table-cell">Trace</th>}
             <th className="table-cell">Created</th>
             {!props.compact && <th className="table-cell">Updated</th>}
-            {(props.onView || props.onEdit || props.onDelete) && (
-              <th className="table-cell">Actions</th>
-            )}
+            {(props.onView ||
+              props.onEdit ||
+              props.onArchive ||
+              props.onRestore ||
+              props.onForget ||
+              props.onDelete) && <th className="table-cell">Actions</th>}
           </tr>
         </thead>
         <tbody>
-          {props.memories.map((memory) => (
-            <tr key={memory.id}>
-              <td className="table-cell">{memory.type}</td>
-              {!props.compact && <td className="table-cell">{memory.subtype ?? "none"}</td>}
-              <td className="table-cell">{memoryPreview(memory)}</td>
-              {!props.compact && (
-                <td className="table-cell text-ink-500">{memory.importance.toFixed(2)}</td>
-              )}
-              {!props.compact && (
-                <td className="table-cell text-ink-500">{memory.tags.join(", ") || "none"}</td>
-              )}
-              {!props.compact && <td className="table-cell text-ink-500">{memory.source}</td>}
-              {!props.compact && (
-                <td className="table-cell font-mono text-xs text-ink-500">
-                  {shortTrace(memory.sourceTraceId ?? undefined)}
-                </td>
-              )}
-              <td className="table-cell text-ink-500">{formatDate(memory.createdAt)}</td>
-              {!props.compact && (
-                <td className="table-cell text-ink-500">{formatDate(memory.updatedAt ?? "")}</td>
-              )}
-              {(props.onView || props.onEdit || props.onDelete) && (
-                <td className="table-cell">
-                  <div className="flex gap-2">
-                    {props.onView && (
-                      <button
-                        className="button-secondary"
-                        type="button"
-                        onClick={() => props.onView?.(memory)}
-                      >
-                        View
-                      </button>
-                    )}
-                    {props.onEdit && (
-                      <button
-                        className="button-secondary"
-                        type="button"
-                        onClick={() => props.onEdit?.(memory)}
-                      >
-                        Edit
-                      </button>
-                    )}
-                    {props.onDelete && (
-                      <button
-                        className="button-secondary"
-                        type="button"
-                        onClick={() => props.onDelete?.(memory)}
-                      >
-                        Delete
-                      </button>
-                    )}
-                  </div>
-                </td>
-              )}
-            </tr>
-          ))}
+          {props.memories.map((memory) => {
+            const debug = props.debugById?.get(memory.id);
+            return (
+              <tr key={memory.id}>
+                <td className="table-cell">{memory.type}</td>
+                {!props.compact && <td className="table-cell">{memory.subtype ?? "none"}</td>}
+                {!props.compact && (
+                  <td className="table-cell text-ink-500">{memory.memoryLayer ?? "unknown"}</td>
+                )}
+                {!props.compact && (
+                  <td className="table-cell text-ink-500">{memory.status ?? "active"}</td>
+                )}
+                {!props.compact && (
+                  <td className="table-cell text-ink-500">{formatScope(memory)}</td>
+                )}
+                <td className="table-cell">{memoryPreview(memory)}</td>
+                {!props.compact && (
+                  <td className="table-cell text-ink-500">{memory.importance.toFixed(2)}</td>
+                )}
+                {!props.compact && (
+                  <td className="table-cell text-ink-500">{memory.tags.join(", ") || "none"}</td>
+                )}
+                {!props.compact && <td className="table-cell text-ink-500">{memory.source}</td>}
+                {!props.compact && (
+                  <td className="table-cell text-ink-500">
+                    {debug?.matchedBy ?? "n/a"}
+                    {debug?.score !== undefined ? ` · ${debug.score.toFixed(2)}` : ""}
+                  </td>
+                )}
+                {!props.compact && (
+                  <td className="table-cell font-mono text-xs text-ink-500">
+                    {shortTrace(memory.sourceTraceId ?? undefined)}
+                  </td>
+                )}
+                <td className="table-cell text-ink-500">{formatDate(memory.createdAt)}</td>
+                {!props.compact && (
+                  <td className="table-cell text-ink-500">{formatDate(memory.updatedAt ?? "")}</td>
+                )}
+                {(props.onView ||
+                  props.onEdit ||
+                  props.onArchive ||
+                  props.onRestore ||
+                  props.onForget ||
+                  props.onDelete) && (
+                  <td className="table-cell">
+                    <div className="flex flex-wrap gap-2">
+                      {props.onView && (
+                        <button
+                          className="button-secondary"
+                          type="button"
+                          onClick={() => props.onView?.(memory)}
+                        >
+                          View
+                        </button>
+                      )}
+                      {props.onEdit && (
+                        <button
+                          className="button-secondary"
+                          type="button"
+                          onClick={() => props.onEdit?.(memory)}
+                        >
+                          Edit
+                        </button>
+                      )}
+                      {props.onArchive && memory.status !== "archived" && (
+                        <button
+                          className="button-secondary"
+                          type="button"
+                          onClick={() => props.onArchive?.(memory)}
+                        >
+                          Archive
+                        </button>
+                      )}
+                      {props.onRestore && memory.status !== "active" && (
+                        <button
+                          className="button-secondary"
+                          type="button"
+                          onClick={() => props.onRestore?.(memory)}
+                        >
+                          Restore
+                        </button>
+                      )}
+                      {props.onForget && memory.status !== "forgotten" && (
+                        <button
+                          className="button-secondary"
+                          type="button"
+                          onClick={() => props.onForget?.(memory)}
+                        >
+                          Forget
+                        </button>
+                      )}
+                      {props.onDelete && (
+                        <button
+                          className="button-secondary"
+                          type="button"
+                          onClick={() => props.onDelete?.(memory)}
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                )}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -2814,6 +3139,10 @@ function MemoryCandidateList(props: {
             <span className="badge">{candidate.decision}</span>
             <span className="font-mono text-ink-500">{candidate.type}</span>
             <span className="text-ink-500">{candidate.subtype ?? "none"}</span>
+            <span className="text-ink-500">
+              {candidate.memoryLayer ?? "unknown"} · {candidate.scope ?? "user"}
+              {candidate.scopeId ? `/${candidate.scopeId}` : ""}
+            </span>
             <span className="text-ink-500">importance {candidate.importance.toFixed(2)}</span>
             {candidate.confidence !== undefined && (
               <span className="text-ink-500">confidence {candidate.confidence.toFixed(2)}</span>
@@ -2851,6 +3180,22 @@ function MemoryCandidateList(props: {
               {candidate.extractorProvider ? ` · Provider: ${candidate.extractorProvider}` : ""}
             </div>
           )}
+          {!props.compact && (
+            <div className="mt-2 text-xs text-ink-500">
+              Observed: {formatDate(candidate.observedAt ?? "")} · Valid:{" "}
+              {formatDate(candidate.validFrom ?? "") || "now"} →{" "}
+              {formatDate(candidate.validUntil ?? "") || "open"}
+              {candidate.expiresAt ? ` · Expires: ${formatDate(candidate.expiresAt)}` : ""}
+            </div>
+          )}
+          {!props.compact &&
+            ((candidate.possibleSupersedes?.length ?? 0) > 0 ||
+              (candidate.possibleContradictions?.length ?? 0) > 0) && (
+              <div className="mt-2 text-xs text-ink-500">
+                Possible supersedes: {candidate.possibleSupersedes?.join(", ") || "none"} ·
+                Contradictions: {candidate.possibleContradictions?.join(", ") || "none"}
+              </div>
+            )}
           {(props.onAccept || props.onReject || props.onEdit) && (
             <div className="mt-3 flex flex-wrap gap-2">
               {props.onAccept && (

@@ -95,6 +95,9 @@ describe("server", () => {
       expect(memoryDetail.json()).toMatchObject({
         id: memoryId,
         type: "semantic",
+        scope: "user",
+        memoryLayer: "core",
+        status: "active",
         content: "Server test memory.",
         source: "test"
       });
@@ -120,10 +123,15 @@ describe("server", () => {
         payload: {
           type: "procedural",
           subtype: "workflow",
+          scope: "project",
+          scopeId: "yuvi-runtime",
+          memoryLayer: "recall",
+          status: "active",
           content: "Server test memory updated.",
           summary: "Server test memory updated.",
           importance: 0.8,
-          tags: ["updated", "server"]
+          tags: ["updated", "server"],
+          validUntil: new Date(Date.now() + 60_000).toISOString()
         }
       });
       expect(updatedMemory.statusCode).toBe(200);
@@ -131,11 +139,49 @@ describe("server", () => {
         id: memoryId,
         type: "procedural",
         subtype: "workflow",
+        scope: "project",
+        scopeId: "yuvi-runtime",
+        memoryLayer: "recall",
+        status: "active",
         content: "Server test memory updated.",
         summary: "Server test memory updated.",
         importance: 0.8,
         tags: ["updated", "server"]
       });
+
+      const archiveMemory = await app.inject({
+        method: "POST",
+        url: `/memory/${memoryId}/archive`
+      });
+      expect(archiveMemory.statusCode).toBe(200);
+      expect(archiveMemory.json().memory.status).toBe("archived");
+      const archivedPromptSearch = await app.inject({
+        method: "GET",
+        url: "/memory/search?q=Server%20test%20memory%20updated&limit=5"
+      });
+      expect(
+        archivedPromptSearch
+          .json()
+          .memories.some((memory: { id: string }) => memory.id === memoryId)
+      ).toBe(false);
+      const restoreMemory = await app.inject({
+        method: "POST",
+        url: `/memory/${memoryId}/restore`
+      });
+      expect(restoreMemory.statusCode).toBe(200);
+      expect(restoreMemory.json().memory.status).toBe("active");
+      const forgetMemory = await app.inject({
+        method: "POST",
+        url: `/memory/${memoryId}/forget`
+      });
+      expect(forgetMemory.statusCode).toBe(200);
+      expect(forgetMemory.json().memory.status).toBe("forgotten");
+      const restoreForgottenMemory = await app.inject({
+        method: "POST",
+        url: `/memory/${memoryId}/restore`
+      });
+      expect(restoreForgottenMemory.statusCode).toBe(200);
+      expect(restoreForgottenMemory.json().memory.status).toBe("active");
 
       const missingUpdate = await app.inject({
         method: "PATCH",
@@ -234,6 +280,9 @@ describe("server", () => {
       const relevantMemory = findPromptSection(promptWithMemory.json().sections, "RelevantMemory");
       expect(promptWithMemory.json().useMemory).toBe(true);
       expect(promptWithMemory.json().retrievedMemoryCount).toBeGreaterThan(0);
+      expect(findPromptSection(promptWithMemory.json().sections, "CurrentTime")?.content).toContain(
+        "ISO timestamp:"
+      );
       expect(relevantMemory?.content).toContain("Server test memory");
 
       const yuviMessageWithMemory = await app.inject({

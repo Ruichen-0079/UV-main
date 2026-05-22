@@ -3,6 +3,7 @@ export type PromptSectionName =
   | "CharacterStyle"
   | "RelationshipContext"
   | "RelevantMemory"
+  | "CurrentTime"
   | "CurrentSituation"
   | "Tools"
   | "UserMessage";
@@ -36,6 +37,11 @@ export type PromptBuildInput = {
   relationshipContext?: string;
   retrievedMemories?: Array<string | RetrievedMemoryForPrompt>;
   memoryEnabled?: boolean;
+  currentTime?: {
+    isoTimestamp?: string;
+    timezone?: string;
+    localDate?: string;
+  };
   currentSituation?: string;
   tools?: ToolContext[];
   userMessage: string;
@@ -151,6 +157,12 @@ export class PromptBuilder {
         stable: false
       },
       {
+        name: "CurrentTime",
+        content: formatCurrentTime(input.currentTime),
+        priority: 65,
+        stable: false
+      },
+      {
         name: "CurrentSituation",
         content: input.currentSituation ?? "No additional situation context is available.",
         priority: 60,
@@ -212,6 +224,19 @@ export class PromptBuilder {
 
     return result;
   }
+}
+
+function formatCurrentTime(currentTime?: PromptBuildInput["currentTime"]): string {
+  const now = new Date();
+  const isoTimestamp = currentTime?.isoTimestamp ?? now.toISOString();
+  const timezone = currentTime?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const localDate =
+    currentTime?.localDate ?? now.toLocaleDateString("en-CA", { timeZone: timezone });
+  return [
+    `ISO timestamp: ${isoTimestamp}`,
+    `Timezone: ${timezone}`,
+    `Local date: ${localDate}`
+  ].join("\n");
 }
 
 function formatSection(section: PromptSection): string {

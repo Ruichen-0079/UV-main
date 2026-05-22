@@ -3,6 +3,8 @@ import type {
   MemoryExtractionInput,
   MemoryExtractor,
   MemoryExtractorStatus,
+  MemoryLayer,
+  MemoryScope,
   MemorySubtype,
   MemoryType
 } from "./types.js";
@@ -54,6 +56,7 @@ export class LlmMemoryExtractor implements MemoryExtractor {
       return this.fallback.extractCandidates(input);
     }
 
+    let rawOutput = "";
     try {
       const output = await this.reasoner.generateReasoning({
         effort: "low",
@@ -78,11 +81,22 @@ export class LlmMemoryExtractor implements MemoryExtractor {
           }
         ]
       });
-      const parsed = parseLlmExtractorJson(output.answer ?? output.reasoning);
-      const validated = LlmExtractorOutputSchema.parse(parsed);
+      rawOutput = output.answer ?? output.reasoning;
+      const parsed = parseLlmExtractorJson(rawOutput);
+      const normalized = normalizeLlmExtractorOutput(parsed);
       const accepted: MemoryCandidate[] = [];
       const rejectedReasons: string[] = [];
-      for (const candidate of validated.candidates) {
+      const validationIssues: string[] = [];
+      for (const candidateInput of normalized.candidates) {
+        const candidateResult = LlmExtractorCandidateSchema.safeParse(
+          normalizeLlmCandidateInput(candidateInput)
+        );
+        if (!candidateResult.success) {
+          validationIssues.push(summarizeZodIssue(candidateResult.error));
+          rejectedReasons.push(`invalid-candidate:${summarizeZodIssue(candidateResult.error)}`);
+          continue;
+        }
+        const candidate = candidateResult.data;
         if (candidate.confidence < 0.7) {
           rejectedReasons.push(`low-confidence:${candidate.reason}`);
           continue;
@@ -94,6 +108,9 @@ export class LlmMemoryExtractor implements MemoryExtractor {
         accepted.push({
           type: candidate.type,
           subtype: candidate.subtype ?? null,
+          scope: candidate.scope ?? inferScope(candidate.content),
+          scopeId: candidate.scopeId ?? inferScopeId(candidate.content, candidate.scope),
+          memoryLayer: candidate.memoryLayer ?? inferMemoryLayer(candidate.type, candidate.subtype),
           content: candidate.content.trim(),
           summary: candidate.summary?.trim() || candidate.content.trim(),
           importance: candidate.importance,
@@ -101,7 +118,18 @@ export class LlmMemoryExtractor implements MemoryExtractor {
           metadata: candidate.metadata ?? {},
           tags: candidate.tags,
           reason: candidate.reason,
-          sourceTraceId: candidate.sourceTraceId ?? input.sourceTraceId ?? null
+          sourceTraceId: candidate.sourceTraceId ?? input.sourceTraceId ?? null,
+          observedAt: candidate.observedAt ?? input.timestamp ?? new Date().toISOString(),
+          eventTime: candidate.eventTime ?? null,
+          validFrom: candidate.validFrom ?? candidate.observedAt ?? input.timestamp ?? null,
+          validUntil: candidate.validUntil ?? null,
+          expiresAt: candidate.expiresAt ?? null,
+          ...(candidate.possibleSupersedes
+            ? { possibleSupersedes: candidate.possibleSupersedes }
+            : {}),
+          ...(candidate.possibleContradictions
+            ? { possibleContradictions: candidate.possibleContradictions }
+            : {})
         });
       }
       this.lastStatus = {
@@ -110,23 +138,31 @@ export class LlmMemoryExtractor implements MemoryExtractor {
         fallbackUsed: false,
         candidateCount: accepted.length,
         rejectedCount: rejectedReasons.length,
-        rejectedReasons
+        rejectedReasons,
+        validationIssues
       };
       return accepted;
     } catch (error) {
       const message = safeExtractorError(error);
       if (isJsonValidationError(error)) {
+        const fallbackCandidates = await this.fallback.extractCandidates(input);
+        const failedRawOutput =
+          error instanceof LlmExtractorParseError ? error.rawOutput : rawOutput;
+        const validationIssues =
+          error instanceof LlmExtractorParseError ? error.validationIssues : [message];
         this.lastStatus = {
           ...this.createBaseStatus(),
-          active: "llm",
-          fallbackUsed: false,
-          candidateCount: 0,
-          rejectedCount: 0,
-          rejectedReasons: ["invalid-json"],
+          active: "fallback-rule-based",
+          fallbackUsed: true,
+          candidateCount: fallbackCandidates.length,
+          rejectedCount: 1,
+          rejectedReasons: ["invalid-llm-output"],
           error: message,
-          skippedReason: "LLM extractor output was invalid and was rejected."
+          validationIssues,
+          ...(failedRawOutput ? { rawPreview: createRawPreview(failedRawOutput) } : {}),
+          skippedReason: "LLM extractor output was invalid; falling back to rule-based extraction."
         };
-        return [];
+        return fallbackCandidates;
       }
 
       const fallbackCandidates = await this.fallback.extractCandidates(input);
@@ -293,6 +329,9 @@ function candidate(input: {
   return {
     type: input.type,
     subtype: input.subtype,
+    scope: inferScope(content),
+    scopeId: inferScopeId(content),
+    memoryLayer: inferMemoryLayer(input.type, input.subtype),
     content,
     summary: content.length > 180 ? `${content.slice(0, 177).trim()}...` : content,
     importance: input.importance,
@@ -300,7 +339,8 @@ function candidate(input: {
     reason: input.reason,
     confidence: 1,
     metadata: { generatedBy: "rule-based-memory-extractor" },
-    sourceTraceId: input.sourceTraceId
+    sourceTraceId: input.sourceTraceId,
+    observedAt: new Date().toISOString()
   };
 }
 
@@ -365,6 +405,44 @@ function createTags(text: string, subtype: MemorySubtype | null): string[] {
   if (/config|配置|env|\.env/iu.test(text)) tags.add("config");
   if (/troubleshoot|排错|原因|root cause/iu.test(text)) tags.add("troubleshooting");
   return [...tags];
+}
+
+function inferScope(text: string): MemoryScope {
+  if (/yuvi|runtime|repo|repository|项目|仓库|workspace|工作区/iu.test(text)) {
+    return "project";
+  }
+  if (/session|本次会话|temporary|临时/iu.test(text)) {
+    return "session";
+  }
+  return "user";
+}
+
+function inferScopeId(text: string, scope: MemoryScope = inferScope(text)): string | null {
+  if (scope === "project") {
+    return "yuvi-runtime";
+  }
+  return null;
+}
+
+function inferMemoryLayer(
+  type: MemoryType,
+  subtype: MemorySubtype | null | undefined
+): MemoryLayer {
+  if (type === "working") {
+    return "working";
+  }
+  if (
+    type === "semantic" ||
+    subtype === "preference" ||
+    subtype === "project" ||
+    subtype === "provider-choice"
+  ) {
+    return "core";
+  }
+  if (type === "episodic" || subtype === "milestone" || subtype === "troubleshooting") {
+    return "recall";
+  }
+  return "recall";
 }
 
 function dedupeCandidates(candidates: MemoryCandidate[]): MemoryCandidate[] {
@@ -477,49 +555,245 @@ const LlmExtractorCandidateSchema = z
       ])
       .nullable()
       .optional(),
+    scope: z.enum(["user", "project", "agent", "plugin", "session"]).optional(),
+    scopeId: z.string().trim().min(1).max(120).nullable().optional(),
+    memoryLayer: z.enum(["core", "recall", "archival", "working"]).optional(),
     content: z.string().trim().min(8).max(500),
     summary: z.string().trim().min(1).max(240).nullable().optional(),
     importance: z.number().min(0).max(1),
-    confidence: z.number().min(0).max(1),
+    confidence: z.number().min(0).max(1).default(0.7),
     tags: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
     reason: z.string().trim().min(3).max(120),
     metadata: z
       .record(z.string(), z.unknown())
       .optional()
       .default({})
+      .refine((metadata) => !hasUnsafeMetadataKey(metadata), {
+        message: "metadata contains secret-like keys"
+      })
       .transform(redactUnsafeMetadata),
-    sourceTraceId: z.string().trim().min(1).max(120).nullable().optional()
+    sourceTraceId: z.string().trim().min(1).max(120).nullable().optional(),
+    observedAt: z.string().trim().min(1).max(80).nullable().optional(),
+    eventTime: z.string().trim().min(1).max(80).nullable().optional(),
+    validFrom: z.string().trim().min(1).max(80).nullable().optional(),
+    validUntil: z.string().trim().min(1).max(80).nullable().optional(),
+    expiresAt: z.string().trim().min(1).max(80).nullable().optional(),
+    possibleSupersedes: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
+    possibleContradictions: z.array(z.string().trim().min(1).max(120)).max(8).optional()
   })
   .strict();
 
 const LlmExtractorOutputSchema = z
   .object({
-    candidates: z.array(LlmExtractorCandidateSchema).max(5)
+    candidates: z.array(z.unknown()).max(5)
   })
   .strict();
 
+class LlmExtractorParseError extends Error {
+  constructor(
+    message: string,
+    readonly rawOutput: string,
+    readonly validationIssues: string[] = []
+  ) {
+    super(message);
+    this.name = "LlmExtractorParseError";
+  }
+}
+
 function parseLlmExtractorJson(text: string): unknown {
   const trimmed = text.trim();
-  if (trimmed.startsWith("{")) {
-    return JSON.parse(trimmed);
+  const unfenced = stripJsonFence(trimmed);
+  try {
+    if (unfenced.startsWith("{") || unfenced.startsWith("[")) {
+      return JSON.parse(unfenced);
+    }
+
+    const slice = extractSingleJsonValue(unfenced);
+    return JSON.parse(slice);
+  } catch (error) {
+    throw new LlmExtractorParseError(safeExtractorError(error), text, [safeExtractorError(error)]);
+  }
+}
+
+function normalizeLlmExtractorOutput(value: unknown): { candidates: unknown[] } {
+  if (Array.isArray(value)) {
+    return LlmExtractorOutputSchema.parse({ candidates: value });
   }
 
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/iu)?.[1];
-  if (fenced) {
-    return JSON.parse(fenced.trim());
+  if (!value || typeof value !== "object") {
+    throw new LlmExtractorParseError("LLM memory extractor did not return a JSON object.", "", [
+      "root:not-object"
+    ]);
   }
 
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    return JSON.parse(trimmed.slice(start, end + 1));
+  const record = value as Record<string, unknown>;
+  const candidates = record["candidates"] ?? record["memories"];
+  return LlmExtractorOutputSchema.parse({ candidates });
+}
+
+function normalizeLlmCandidateInput(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const record = { ...(value as Record<string, unknown>) };
+  const normalizedType = normalizeLlmType(record["type"], record["subtype"]);
+  if (normalizedType) {
+    record["type"] = normalizedType.type;
+    record["subtype"] = record["subtype"] ?? normalizedType.subtype;
+  }
+  if (!("subtype" in record)) {
+    record["subtype"] = null;
+  }
+  if (!("tags" in record)) {
+    record["tags"] = [];
+  }
+  if (!("confidence" in record)) {
+    record["confidence"] = 0.7;
+  }
+  record["importance"] = normalizeScore(record["importance"]);
+  record["confidence"] = normalizeScore(record["confidence"]);
+  return record;
+}
+
+function normalizeLlmType(
+  type: unknown,
+  subtype: unknown
+): { type: MemoryType; subtype: MemorySubtype | null } | null {
+  const rawType = typeof type === "string" ? type.trim().toLowerCase() : "";
+  const rawSubtype = typeof subtype === "string" ? subtype.trim().toLowerCase() : "";
+  if (isMemoryType(rawType)) {
+    return { type: rawType, subtype: isMemorySubtype(rawSubtype) ? rawSubtype : null };
+  }
+  if (rawType === "fact") {
+    return { type: "semantic", subtype: "fact" };
+  }
+  if (rawType === "preference") {
+    return { type: "semantic", subtype: "preference" };
+  }
+  if (rawType === "procedure") {
+    return { type: "procedural", subtype: "workflow" };
+  }
+  if (rawType === "troubleshooting") {
+    return { type: "procedural", subtype: "troubleshooting" };
+  }
+  if (rawType === "milestone") {
+    return { type: "episodic", subtype: "milestone" };
+  }
+  return null;
+}
+
+function normalizeScore(value: unknown): unknown {
+  const numberValue = typeof value === "string" ? Number(value) : value;
+  if (typeof numberValue !== "number" || Number.isNaN(numberValue)) {
+    return value;
+  }
+  if (numberValue >= 0 && numberValue <= 1) {
+    return numberValue;
+  }
+  if (numberValue > 1 && numberValue <= 1.05) {
+    return 1;
+  }
+  if (numberValue < 0 && numberValue >= -0.05) {
+    return 0;
+  }
+  return numberValue;
+}
+
+function isMemoryType(value: string): value is MemoryType {
+  return (
+    value === "working" ||
+    value === "episodic" ||
+    value === "semantic" ||
+    value === "emotional" ||
+    value === "procedural" ||
+    value === "relationship"
+  );
+}
+
+function isMemorySubtype(value: string): value is MemorySubtype {
+  return (
+    value === "preference" ||
+    value === "fact" ||
+    value === "project" ||
+    value === "workflow" ||
+    value === "milestone" ||
+    value === "provider-choice" ||
+    value === "path" ||
+    value === "repo" ||
+    value === "command" ||
+    value === "troubleshooting" ||
+    value === "config" ||
+    value === "emotion" ||
+    value === "relationship"
+  );
+}
+
+function stripJsonFence(text: string): string {
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu)?.[1];
+  return fenced ? fenced.trim() : text;
+}
+
+function extractSingleJsonValue(text: string): string {
+  const starts = [
+    { char: "{", index: text.indexOf("{") },
+    { char: "[", index: text.indexOf("[") }
+  ].filter((item) => item.index >= 0);
+  starts.sort((a, b) => a.index - b.index);
+  const start = starts[0];
+  if (!start) {
+    throw new SyntaxError("LLM memory extractor did not return JSON.");
   }
 
-  throw new SyntaxError("LLM memory extractor did not return JSON.");
+  const end = findJsonValueEnd(text, start.index, start.char === "{" ? "}" : "]");
+  const rest = text.slice(end + 1);
+  if (/[{[]/.test(rest)) {
+    throw new SyntaxError("LLM memory extractor returned multiple JSON values.");
+  }
+  return text.slice(start.index, end + 1);
+}
+
+function findJsonValueEnd(text: string, start: number, closing: string): number {
+  const opening = text[start];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === opening) {
+      depth += 1;
+    } else if (char === closing) {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  throw new SyntaxError("LLM memory extractor returned incomplete JSON.");
 }
 
 function isJsonValidationError(error: unknown): boolean {
-  return error instanceof SyntaxError || error instanceof z.ZodError;
+  return (
+    error instanceof SyntaxError ||
+    error instanceof z.ZodError ||
+    error instanceof LlmExtractorParseError
+  );
 }
 
 function safeExtractorError(error: unknown): string {
@@ -533,6 +807,33 @@ function safeExtractorError(error: unknown): string {
     return error.message.replace(/Bearer\s+[^\s]+|sk-[A-Za-z0-9_-]+/giu, "[redacted]");
   }
   return "LLM memory extraction failed.";
+}
+
+function summarizeZodIssue(error: z.ZodError): string {
+  const first = error.issues[0];
+  if (!first) {
+    return "invalid-candidate";
+  }
+  return `${first.path.join(".") || "candidate"}:${first.message}`;
+}
+
+function createRawPreview(text: string): string {
+  return redactUnsafeText(text).replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+function redactUnsafeText(text: string): string {
+  return text
+    .replace(
+      /(api[-_]?key|authorization|bearer|token|password|secret)\s*[:=]\s*["']?[^"',\s}]+/gi,
+      "$1=[redacted]"
+    )
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-[redacted]");
+}
+
+function hasUnsafeMetadataKey(metadata: Record<string, unknown>): boolean {
+  return Object.keys(metadata).some((key) =>
+    /api[_-]?key|authorization|bearer|token|password|secret/iu.test(key)
+  );
 }
 
 function redactUnsafeMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
@@ -551,11 +852,17 @@ function redactUnsafeMetadata(metadata: Record<string, unknown>): Record<string,
 
 const llmExtractorSystemPrompt = [
   "You are YUVI's memory extraction filter.",
-  "Return strict JSON only. No markdown. No explanations outside JSON.",
-  "Use this shape:",
-  '{"candidates":[{"type":"semantic","subtype":"preference","content":"...","summary":"...","importance":0.8,"confidence":0.9,"tags":["..."],"reason":"...","metadata":{},"sourceTraceId":null}]}',
+  "Return JSON only.",
+  "Do not use markdown.",
+  "Do not use code fences.",
+  "Do not include explanations.",
+  "Do not include natural language before or after JSON.",
+  'The root object must be exactly: {"candidates":[]}.',
+  "Example:",
+  '{"candidates":[{"type":"semantic","subtype":"provider-choice","content":"用户偏好 Chat 和 Reasoning 使用 DeepSeek。","summary":"用户偏好 DeepSeek 作为 Chat/Reasoning provider。","importance":0.9,"confidence":0.9,"tags":["provider","deepseek","yuvi"],"reason":"The user stated a stable provider preference."}]}',
   "Allowed type values: working, episodic, semantic, emotional, procedural, relationship.",
   "Allowed subtype values: preference, fact, project, workflow, milestone, provider-choice, path, repo, command, troubleshooting, config, emotion, relationship, or null.",
+  "Optional v2 fields: scope (user/project/agent/plugin/session), scopeId, memoryLayer (core/recall/archival/working), observedAt, eventTime, validFrom, validUntil, expiresAt, possibleSupersedes, possibleContradictions.",
   "Extract only stable, useful, long-term memories.",
   "Do not store trivial chat, generic Q&A, transient chatter, failed answers, or assistant uncertainty.",
   "Prefer explicit user statements: project facts, preferences, paths, repos, commands, provider choices, milestones, troubleshooting conclusions.",
