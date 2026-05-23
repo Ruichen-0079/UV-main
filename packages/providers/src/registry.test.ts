@@ -15,7 +15,8 @@ describe("ProviderRegistry", () => {
       DEFAULT_TTS_PROVIDER: "xai",
       DEFAULT_STT_PROVIDER: "dashscope",
       DEFAULT_VISION_PROVIDER: "xai",
-      DEFAULT_EMBEDDING_PROVIDER: "mock"
+      DEFAULT_EMBEDDING_PROVIDER: "mock",
+      EMBEDDING_DIMENSIONS: "1024"
     });
 
     const chat = registry.getChatProvider();
@@ -24,7 +25,9 @@ describe("ProviderRegistry", () => {
     });
 
     expect(reply.message.content).toContain("Mock reply");
-    expect((await registry.getEmbeddingProvider().embedText("hello")).length).toBe(1536);
+    const embedding = await registry.getEmbeddingProvider().embedText("hello");
+    expect(embedding.length).toBe(1024);
+    await expect(registry.getEmbeddingProvider().embedText("hello")).resolves.toEqual(embedding);
 
     const status = registry.getStatus();
     expect(status.providers.chat).toMatchObject({
@@ -36,6 +39,66 @@ describe("ProviderRegistry", () => {
       required: true
     });
     expect(JSON.stringify(status)).not.toContain("API_KEY");
+  });
+
+  it("uses real-provider-first behavior unless mock fallback is explicitly allowed", async () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEFAULT_REASONING_PROVIDER: "deepseek"
+    });
+
+    const status = registry.getStatus();
+    expect(status.providers.chat).toMatchObject({
+      provider: "deepseek",
+      capability: "chat",
+      configured: false,
+      available: false,
+      mock: false,
+      required: true,
+      status: "unavailable"
+    });
+    expect(status.providers.embedding).toMatchObject({
+      provider: "openai-compatible",
+      capability: "embedding",
+      configured: false,
+      available: false,
+      mock: false,
+      status: "unavailable"
+    });
+    await expect(
+      registry.getChatProvider().generateReply({ messages: [{ role: "user", content: "hello" }] })
+    ).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+      provider: "deepseek",
+      capability: "chat"
+    });
+  });
+
+  it("reports embedding provider status without leaking secrets", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "test",
+      DEFAULT_EMBEDDING_PROVIDER: "openai-compatible",
+      EMBEDDING_API_KEY: "embedding-secret-key",
+      EMBEDDING_API_BASEURL: "https://embedding.example/v1",
+      EMBEDDING_MODEL: "text-embedding-test",
+      EMBEDDING_DIMENSIONS: "3"
+    });
+
+    const status = registry.getStatus().providers.embedding;
+
+    expect(status).toMatchObject({
+      provider: "openai-compatible",
+      capability: "embedding",
+      configured: true,
+      available: true,
+      mock: false,
+      baseUrl: "https://embedding.example/v1",
+      model: "text-embedding-test",
+      dimensions: 3
+    });
+    expect(status.semanticEmbedding).toBe(true);
+    expect(JSON.stringify(status)).not.toContain("embedding-secret-key");
   });
 
   it("reports configured DeepSeek providers without making health HTTP calls", async () => {

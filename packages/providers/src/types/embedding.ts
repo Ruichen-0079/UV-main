@@ -11,6 +11,8 @@ export type EmbeddingBatchOutput = ProviderMetadata & {
 export interface EmbeddingProvider {
   readonly name: string;
   readonly dimensions: number;
+  readonly model?: string | undefined;
+  readonly mock?: boolean | undefined;
   healthCheck(): Promise<ProviderHealth>;
   embedText(text: string): Promise<number[]>;
   embedBatch(texts: string[]): Promise<number[][]>;

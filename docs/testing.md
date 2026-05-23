@@ -44,6 +44,7 @@ pnpm.cmd smoke
   - `DELETE /memory/:id`
   - `GET /memory/recent`
   - `GET /memory/search?q=...`
+  - `POST /memory/search`
 
 ## Smoke Test
 
@@ -54,7 +55,7 @@ pnpm.cmd smoke
 3. `POST /message` returns `agent.reply`.
 4. A memory record can be created.
 5. Recent memories can be retrieved.
-6. Memory search returns a matching record.
+6. Memory search returns a matching record through both GET and JSON POST.
 
 Manual memory management endpoint tests cover reading memory details, editing safe structured fields, rejecting invalid importance values, rejecting unsafe metadata keys, archiving/restoring/forgetting records, and deleting records so they no longer appear in search.
 
@@ -76,6 +77,8 @@ DEFAULT_EMBEDDING_PROVIDER=mock
 ```
 
 `MEMORY_EXTRACTOR=llm` is the default, but smoke tests without real DeepSeek Reasoning credentials fall back safely to rule-based extraction and do not require tokens. Set `MEMORY_EXTRACTOR=rule-based` when you need deterministic no-token extractor behavior.
+
+Normal development/runtime is real-provider-first (`PROVIDER_ALLOW_MOCKS=false`). Tests and CI explicitly set `PROVIDER_ALLOW_MOCKS=true` and `DEFAULT_EMBEDDING_PROVIDER=mock` so they never require real API keys. Mock embeddings report `semanticEmbedding=false`; they validate the pipeline but do not provide real semantic similarity.
 
 `EVENT_BUS=nats` is reserved for future support and is expected to fail clearly until the NATS runtime adapter is implemented. For lightweight local smoke checks that do not need Docker infrastructure, start development with:
 
@@ -119,7 +122,15 @@ pnpm smoke:postgres
 
 4. Or run the server with `MEMORY_REPOSITORY=postgres` and a valid `DATABASE_URL`, then use `POST /memory`, `GET /memory/recent`, and `GET /memory/search?q=...`.
 
-Postgres memory search is still keyword/structured retrieval, not embeddings. Migrations enable `pg_trgm`, trigram search, built-in full-text search with the PostgreSQL `simple` config, and indexes for content, summary, tags, type/subtype, scope/scopeId, memoryLayer, status, source/sourceTraceId, temporal fields, createdAt, importance, and metadata so mixed Chinese/English queries, paths, URLs, ports, env keys, provider names, and commands can be found before vector search is added.
+Postgres memory search uses hybrid retrieval. Migrations enable `pg_trgm`, trigram search, built-in full-text search with the PostgreSQL `simple` config, pgvector storage, embedding metadata columns, and indexes for content, summary, tags, type/subtype, scope/scopeId, memoryLayer, status, source/sourceTraceId, temporal fields, createdAt, importance, metadata, and embedding metadata. Mixed Chinese/English queries, paths, URLs, ports, env keys, provider names, and commands remain keyword/trigram-first so exact technical matches outrank vague vector matches.
+
+Embedding retrieval is optional. `EMBEDDING_PROVIDER=openai-compatible` is the real-provider-first mode when configured. `EMBEDDING_PROVIDER=mock` is reserved for deterministic local/CI/offline behavior and reports `semanticEmbedding=false`. Real OpenAI-compatible embedding providers may consume tokens. If embedding generation fails, writes still succeed without vectors and retrieval falls back to keyword/trigram/full-text search. Existing Postgres memories can be backfilled after `pnpm db:migrate`:
+
+```bash
+pnpm memory:embed:backfill
+pnpm memory:embed:backfill -- --dry-run
+pnpm memory:embed:backfill -- --force --limit=500
+```
 
 Graph reasoning over supersession/contradiction fields and automatic expiry scheduling are intentionally not part of the default tests yet. They are future work on top of the status and temporal fields.
 

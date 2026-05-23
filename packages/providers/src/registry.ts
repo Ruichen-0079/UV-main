@@ -167,10 +167,11 @@ export class ProviderRegistry implements ProviderResolver {
 
   private createStatus(capability: ProviderCapability, name: string): ProviderHealth {
     const configured = this.isConfigured(capability, name);
-    const mock = !configured && this.config.allowMocks;
+    const mock =
+      (capability === "embedding" && name === "mock") || (!configured && this.config.allowMocks);
     const required = capability === "chat";
     const available = configured || mock;
-    const status = available ? (configured ? "degraded" : "healthy") : "unavailable";
+    const status = available ? (mock ? "healthy" : "degraded") : "unavailable";
 
     return {
       provider: name,
@@ -183,6 +184,15 @@ export class ProviderRegistry implements ProviderResolver {
       status,
       checkedAt: new Date().toISOString(),
       ...this.safeProviderMetadata(capability, name),
+      ...(capability === "embedding" && name === "mock"
+        ? {
+            semanticEmbedding: false,
+            embeddingNote:
+              "Mock embeddings validate the retrieval pipeline but do not provide real semantic similarity."
+          }
+        : capability === "embedding"
+          ? { semanticEmbedding: configured }
+          : {}),
       message: providerStatusMessage({ capability, name, configured, mock, required })
     };
   }
@@ -222,7 +232,7 @@ export class ProviderRegistry implements ProviderResolver {
   private safeProviderMetadata(
     capability: ProviderCapability,
     name: string
-  ): Pick<ProviderHealth, "baseUrl" | "model"> {
+  ): Pick<ProviderHealth, "baseUrl" | "model" | "dimensions"> {
     if ((capability === "chat" || capability === "reasoning") && name === "deepseek") {
       return {
         baseUrl: this.config.deepseek.baseUrl,
@@ -250,7 +260,8 @@ export class ProviderRegistry implements ProviderResolver {
     if (capability === "embedding") {
       return {
         baseUrl: this.config.embedding.baseUrl,
-        model: this.config.embedding.model ?? (name === "mock" ? "mock" : undefined)
+        model: this.config.embedding.model ?? (name === "mock" ? "mock" : undefined),
+        dimensions: this.config.embedding.dimensions
       };
     }
 
@@ -280,7 +291,6 @@ function providerStatusMessage(input: {
 
 export function createProviderRegistryFromEnv(env: ProviderEnv = process.env): ProviderRegistry {
   const config = createProviderRegistryConfigFromEnv(env);
-  validateRequiredProviderConfig(config);
 
   const registry = new ProviderRegistry(config);
   registry.registerChatProvider(resolveChatProvider(config));
@@ -295,7 +305,7 @@ export function createProviderRegistryFromEnv(env: ProviderEnv = process.env): P
 
 export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderRegistryConfig {
   const environment = parseEnvironment(env["NODE_ENV"]);
-  const allowMocks = parseBoolean(env["PROVIDER_ALLOW_MOCKS"]) || environment !== "production";
+  const allowMocks = parseBoolean(env["PROVIDER_ALLOW_MOCKS"]);
 
   return {
     environment,
@@ -311,7 +321,7 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       embedding:
         env["DEFAULT_EMBEDDING_PROVIDER"] ??
         env["EMBEDDING_PROVIDER"] ??
-        (hasValue(env["EMBEDDING_API_KEY"]) ? "openai-compatible" : "mock")
+        (allowMocks ? "mock" : "openai-compatible")
     },
     deepseek: {
       apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
@@ -346,7 +356,7 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
   };
 }
 
-function validateRequiredProviderConfig(config: ProviderRegistryConfig): void {
+export function validateRequiredProviderConfig(config: ProviderRegistryConfig): void {
   const errors: string[] = [];
 
   if (!config.allowMocks && config.defaults.chat === "deepseek" && !config.deepseek.apiKey) {
@@ -667,11 +677,11 @@ class UnimplementedEmbeddingProvider implements EmbeddingProvider {
     return providerHealth(this.name, "unavailable", this.message);
   }
 
-  async embedText(): Promise<number[]> {
+  async embedText(_text: string): Promise<number[]> {
     throw unavailableError(this.name, "embedding", this.message);
   }
 
-  async embedBatch(): Promise<number[][]> {
+  async embedBatch(_texts: string[]): Promise<number[][]> {
     throw unavailableError(this.name, "embedding", this.message);
   }
 }
@@ -684,12 +694,126 @@ class UnavailableVisionProvider extends UnimplementedVisionProvider {}
 class UnavailableEmbeddingProvider extends UnimplementedEmbeddingProvider {}
 
 class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
-  constructor(config: ProviderRegistryConfig) {
-    super(
-      "openai-compatible",
-      config.embedding.dimensions,
-      "OpenAI-compatible embedding placeholder. Real HTTP calls are not implemented yet."
-    );
+  readonly model: string | undefined;
+  readonly mock = false;
+  private readonly apiKey: string | undefined;
+  private readonly baseUrl: string;
+  private readonly timeoutMs = 30000;
+
+  constructor(private readonly config: ProviderRegistryConfig) {
+    super("openai-compatible", config.embedding.dimensions, "OpenAI-compatible embeddings.");
+    this.model = config.embedding.model;
+    this.apiKey = config.embedding.apiKey;
+    this.baseUrl = config.embedding.baseUrl ?? "https://api.openai.com/v1";
+  }
+
+  override async healthCheck(): Promise<ProviderHealth> {
+    return {
+      provider: this.name,
+      name: this.name,
+      capability: "embedding",
+      configured: Boolean(this.apiKey && this.model),
+      available: Boolean(this.apiKey && this.model),
+      mock: false,
+      required: false,
+      baseUrl: this.baseUrl,
+      model: this.model,
+      dimensions: this.dimensions,
+      semanticEmbedding: true,
+      status: this.apiKey && this.model ? "degraded" : "unavailable",
+      checkedAt: new Date().toISOString(),
+      message:
+        this.apiKey && this.model
+          ? "OpenAI-compatible embedding provider is configured but not verified by health check."
+          : "EMBEDDING_API_KEY and EMBEDDING_MODEL are required for real embeddings."
+    };
+  }
+
+  override async embedText(text: string): Promise<number[]> {
+    const [vector] = await this.embedBatch([text]);
+    return vector ?? [];
+  }
+
+  override async embedBatch(texts: string[]): Promise<number[][]> {
+    if (!this.apiKey) {
+      throw unavailableError(this.name, "embedding", "EMBEDDING_API_KEY is required.");
+    }
+    if (!this.model) {
+      throw unavailableError(this.name, "embedding", "EMBEDDING_MODEL is required.");
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(`${trimTrailingSlash(this.baseUrl)}/embeddings`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.apiKey}`
+        },
+        body: JSON.stringify({
+          model: this.model,
+          input: texts
+        }),
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "embedding",
+          code:
+            response.status === 401
+              ? ProviderErrorCode.InvalidApiKey
+              : ProviderErrorCode.ProviderUnavailable,
+          statusCode: response.status,
+          message: `Embedding request failed with ${response.status}.`,
+          retryable: response.status >= 500 || response.status === 429
+        });
+      }
+      const raw = (await response.json()) as {
+        data?: Array<{ embedding?: unknown; index?: number }>;
+      };
+      const vectors = raw.data
+        ?.slice()
+        .sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
+        .map((item) => item.embedding)
+        .filter(
+          (embedding): embedding is number[] =>
+            Array.isArray(embedding) && embedding.every((value) => typeof value === "number")
+        );
+      if (!vectors || vectors.length !== texts.length) {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "embedding",
+          code: ProviderErrorCode.MalformedResponse,
+          message: "Embedding response did not include one vector per input.",
+          retryable: false
+        });
+      }
+      return vectors;
+    } catch (error) {
+      if (error instanceof ProviderError) {
+        throw error;
+      }
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "embedding",
+          code: ProviderErrorCode.Timeout,
+          message: "Embedding request timed out.",
+          cause: error
+        });
+      }
+      throw new ProviderError({
+        provider: this.name,
+        capability: "embedding",
+        code: ProviderErrorCode.NetworkError,
+        message: "Embedding network request failed.",
+        cause: error
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -793,11 +917,26 @@ export function createMockVisionProvider(name = "mock-vision"): VisionProvider {
 
 export class MockEmbeddingProvider implements EmbeddingProvider {
   readonly name = "mock";
+  readonly model = "mock";
+  readonly mock = true;
 
   constructor(readonly dimensions: number) {}
 
   async healthCheck(): Promise<ProviderHealth> {
-    return providerHealth(this.name, "healthy", "Mock embedding provider is available.");
+    return {
+      ...providerHealth(this.name, "healthy", "Mock embedding provider is available."),
+      name: this.name,
+      capability: "embedding",
+      configured: true,
+      available: true,
+      mock: true,
+      required: false,
+      model: this.model,
+      dimensions: this.dimensions,
+      semanticEmbedding: false,
+      embeddingNote:
+        "Mock embeddings validate the retrieval pipeline but do not provide real semantic similarity."
+    };
   }
 
   async embedText(text: string): Promise<number[]> {
@@ -853,10 +992,6 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function hasValue(value: string | undefined): boolean {
-  return Boolean(emptyToUndefined(value));
-}
-
 function emptyToUndefined(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
@@ -877,4 +1012,8 @@ function stableMockVector(text: string, dimensions: number): number[] {
     const value = Math.sin(seed + index * 101) * 10000;
     return Number((value - Math.floor(value)).toFixed(6));
   });
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
 }

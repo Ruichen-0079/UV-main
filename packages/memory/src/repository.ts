@@ -20,7 +20,13 @@ import type {
 
 export interface MemoryRepository {
   healthCheck(): Promise<{ status: "healthy" | "unavailable"; message?: string }>;
-  getRetrievalMode?(): "keyword" | "postgres-trigram" | "postgres-hybrid-keyword";
+  getRetrievalMode?():
+    | "in-memory-keyword"
+    | "in-memory-hybrid"
+    | "keyword"
+    | "postgres-trigram"
+    | "postgres-hybrid-keyword"
+    | "postgres-hybrid";
   createMemory(input: CreateMemoryInput): Promise<Memory>;
   getMemoryById(id: string): Promise<Memory | null>;
   updateMemory(id: string, input: UpdateMemoryInput): Promise<Memory | null>;
@@ -67,12 +73,14 @@ export class PostgresMemoryRepository implements MemoryRepository {
     const result = await this.pool.query(
       `insert into memories (
         type, subtype, scope, scope_id, memory_layer, status, content, summary, embedding,
+        embedding_model, embedding_provider, embedding_dimensions, embedded_at,
         importance, emotion_valence, emotion_arousal, source, source_trace_id, metadata, tags,
         observed_at, event_time, valid_from, valid_until, expires_at, superseded_at,
         supersedes, superseded_by, contradicts
       ) values (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21, $22, $23, $24, $25
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+        $14, $15, $16, $17, $18, $19, $20,
+        $21, $22, $23, $24, $25, $26, $27, $28, $29
       ) returning *`,
       [
         input.type,
@@ -84,6 +92,10 @@ export class PostgresMemoryRepository implements MemoryRepository {
         input.content,
         input.summary ?? null,
         input.embedding ? vectorLiteral(input.embedding) : null,
+        input.embeddingModel ?? null,
+        input.embeddingProvider ?? null,
+        input.embeddingDimensions ?? input.embedding?.length ?? null,
+        toNullableDate(input.embeddedAt),
         input.importance ?? 0.5,
         input.emotionValence ?? 0,
         input.emotionArousal ?? 0,
@@ -144,6 +156,21 @@ export class PostgresMemoryRepository implements MemoryRepository {
     }
     if (input.summary !== undefined) {
       set("summary", input.summary);
+    }
+    if (input.embedding !== undefined) {
+      set("embedding", input.embedding ? vectorLiteral(input.embedding) : null);
+    }
+    if (input.embeddingModel !== undefined) {
+      set("embedding_model", input.embeddingModel);
+    }
+    if (input.embeddingProvider !== undefined) {
+      set("embedding_provider", input.embeddingProvider);
+    }
+    if (input.embeddingDimensions !== undefined) {
+      set("embedding_dimensions", input.embeddingDimensions);
+    }
+    if (input.embeddedAt !== undefined) {
+      set("embedded_at", toNullableDate(input.embeddedAt));
     }
     if (input.importance !== undefined) {
       set("importance", input.importance);
@@ -421,13 +448,82 @@ export class PostgresMemoryRepository implements MemoryRepository {
       return this.searchMemoriesByTextFallback(query);
     }
 
+    const clauses = [
+      `embedding is not null`,
+      `vector_dims(embedding) = $2`,
+      activeMemorySql(visibilityModeForQuery(query))
+    ];
+    const values: unknown[] = [vectorLiteral(query.embedding), query.embedding.length];
+
+    if (query.types?.length) {
+      values.push(query.types);
+      clauses.push(`type = any($${values.length}::text[])`);
+    }
+    if (query.subtypes?.length) {
+      values.push(query.subtypes);
+      clauses.push(`subtype = any($${values.length}::text[])`);
+    }
+    if (query.memoryLayers?.length) {
+      values.push(query.memoryLayers);
+      clauses.push(`memory_layer = any($${values.length}::text[])`);
+    }
+    if (query.statuses?.length) {
+      values.push(query.statuses);
+      clauses.push(`status = any($${values.length}::text[])`);
+    }
+    if (query.sources?.length) {
+      values.push(query.sources);
+      clauses.push(`source = any($${values.length}::text[])`);
+    }
+    if (query.minImportance !== undefined) {
+      values.push(query.minImportance);
+      clauses.push(`importance >= $${values.length}`);
+    }
+    if (query.scopes?.length) {
+      values.push(query.scopes);
+      clauses.push(`scope = any($${values.length}::text[])`);
+    } else if (query.scope) {
+      values.push(query.scope);
+      clauses.push(`scope = $${values.length}`);
+    }
+    if (query.scopeId) {
+      values.push(query.scopeId);
+      clauses.push(`scope_id = $${values.length}`);
+    }
+    if (query.tags?.length) {
+      values.push(query.tags);
+      clauses.push(`tags && $${values.length}::text[]`);
+    }
+
+    values.push(query.limit ?? 10);
     const result = await this.pool.query(
-      `select * from memories
-       where embedding is not null
-         and ${activeMemorySql(visibilityModeForQuery(query))}
-       order by embedding <=> $1::vector
-       limit $2`,
-      [vectorLiteral(query.embedding), query.limit ?? 10]
+      `select *
+       from (
+         select memories.*,
+           1 - least(embedding <=> $1::vector, 1) as vector_score,
+           (1 - least(embedding <=> $1::vector, 1)) * 10 as hybrid_score,
+           case
+             when scope = 'user' then 1.2
+             when scope = 'project' and coalesce(scope_id, '') = 'yuvi-runtime' then 1.4
+             when scope = 'session' then 1.1
+             else 0.4
+           end as scope_score,
+           importance * 2 as importance_score,
+           greatest(
+             0,
+             1 - extract(epoch from (now() - created_at)) / (86400 * 30)
+           ) * 0.5 as recency_score,
+           'vector' as search_matched_by
+         from memories
+         where ${clauses.join(" and ")}
+       ) ranked_memories
+       order by
+         (hybrid_score + scope_score + importance_score + recency_score) desc,
+         importance desc,
+         last_accessed_at desc,
+         created_at desc
+       limit $${values.length}`,
+      values
     );
 
     return result.rows.map(mapMemoryRow);
@@ -478,8 +574,8 @@ export class InMemoryMemoryRepository implements MemoryRepository {
     return { status: "healthy", message: "Using in-memory memory repository." };
   }
 
-  getRetrievalMode(): "keyword" {
-    return "keyword";
+  getRetrievalMode(): "in-memory-keyword" {
+    return "in-memory-keyword";
   }
 
   async createMemory(input: CreateMemoryInput): Promise<Memory> {
@@ -498,6 +594,10 @@ export class InMemoryMemoryRepository implements MemoryRepository {
       content: input.content,
       summary: input.summary ?? null,
       embedding: input.embedding ?? null,
+      embeddingModel: input.embeddingModel ?? null,
+      embeddingProvider: input.embeddingProvider ?? null,
+      embeddingDimensions: input.embeddingDimensions ?? input.embedding?.length ?? null,
+      embeddedAt: toNullableDate(input.embeddedAt),
       importance: input.importance ?? 0.5,
       emotionValence: input.emotionValence ?? 0,
       emotionArousal: input.emotionArousal ?? 0,
@@ -555,6 +655,21 @@ export class InMemoryMemoryRepository implements MemoryRepository {
     }
     if (input.summary !== undefined) {
       memory.summary = input.summary;
+    }
+    if (input.embedding !== undefined) {
+      memory.embedding = input.embedding;
+    }
+    if (input.embeddingModel !== undefined) {
+      memory.embeddingModel = input.embeddingModel;
+    }
+    if (input.embeddingProvider !== undefined) {
+      memory.embeddingProvider = input.embeddingProvider;
+    }
+    if (input.embeddingDimensions !== undefined) {
+      memory.embeddingDimensions = input.embeddingDimensions;
+    }
+    if (input.embeddedAt !== undefined) {
+      memory.embeddedAt = toNullableDate(input.embeddedAt);
     }
     if (input.importance !== undefined) {
       memory.importance = input.importance;
@@ -621,12 +736,7 @@ export class InMemoryMemoryRepository implements MemoryRepository {
   async searchMemoriesByTextFallback(query: MemorySearchQuery): Promise<Memory[]> {
     const searchText = (query.text ?? "").toLowerCase();
     return this.memories
-	      .filter((memory) =>
-	        isMemoryVisible(
-	          memory,
-	          visibilityModeForQuery(query)
-	        )
-	      )
+      .filter((memory) => isMemoryVisible(memory, visibilityModeForQuery(query)))
       .filter((memory) => !query.types?.length || query.types.includes(memory.type))
       .filter(
         (memory) =>
@@ -670,7 +780,51 @@ export class InMemoryMemoryRepository implements MemoryRepository {
   }
 
   async searchMemoriesByEmbedding(query: MemorySearchQuery): Promise<Memory[]> {
-    return this.searchMemoriesByTextFallback(query);
+    if (!query.embedding?.length) {
+      return this.searchMemoriesByTextFallback(query);
+    }
+    return this.memories
+      .filter((memory) => memory.embedding?.length === query.embedding?.length)
+      .filter((memory) => isMemoryVisible(memory, visibilityModeForQuery(query)))
+      .filter((memory) => !query.types?.length || query.types.includes(memory.type))
+      .filter(
+        (memory) =>
+          !query.subtypes?.length ||
+          (memory.subtype !== null && query.subtypes.includes(memory.subtype))
+      )
+      .filter(
+        (memory) => !query.memoryLayers?.length || query.memoryLayers.includes(memory.memoryLayer)
+      )
+      .filter((memory) => !query.statuses?.length || query.statuses.includes(memory.status))
+      .filter((memory) => !query.sources?.length || query.sources.includes(memory.source))
+      .filter(
+        (memory) => query.minImportance === undefined || memory.importance >= query.minImportance
+      )
+      .filter((memory) =>
+        query.scopes?.length
+          ? query.scopes.includes(memory.scope)
+          : !query.scope || memory.scope === query.scope
+      )
+      .filter((memory) => !query.scopeId || memory.scopeId === query.scopeId)
+      .filter(
+        (memory) => !query.tags?.length || query.tags.some((tag) => memory.tags.includes(tag))
+      )
+      .map((memory) => {
+        const vectorScore = cosineSimilarity(memory.embedding ?? [], query.embedding ?? []);
+        return {
+          ...memory,
+          searchScore: vectorScore * 10,
+          searchMatchedBy: "vector" as const,
+          searchRetrievalMode: "in-memory-hybrid" as const,
+          searchRankComponents: {
+            vectorScore,
+            hybridScore: vectorScore * 10,
+            importanceScore: memory.importance * 2
+          }
+        };
+      })
+      .sort((left, right) => (right.searchScore ?? 0) - (left.searchScore ?? 0))
+      .slice(0, query.limit ?? 10);
   }
 
   async updateMemoryAccess(id: string): Promise<void> {
@@ -736,6 +890,10 @@ function mapMemoryRow(row: QueryResultRow): Memory {
     content: row["content"],
     summary: row["summary"],
     embedding: parseVector(row["embedding"]),
+    embeddingModel: row["embedding_model"] ?? null,
+    embeddingProvider: row["embedding_provider"] ?? null,
+    embeddingDimensions: row["embedding_dimensions"] ? Number(row["embedding_dimensions"]) : null,
+    embeddedAt: row["embedded_at"] ?? null,
     importance: Number(row["importance"]),
     emotionValence: Number(row["emotion_valence"]),
     emotionArousal: Number(row["emotion_arousal"]),
@@ -752,16 +910,14 @@ function mapMemoryRow(row: QueryResultRow): Memory {
     expiresAt: row["expires_at"] ?? null,
     lastAccessedAt: row["last_accessed_at"],
     supersededAt: row["superseded_at"] ?? null,
-      supersedes: row["supersedes"] ?? [],
-      supersededBy: row["superseded_by"] ?? null,
-      contradicts: row["contradicts"] ?? [],
-      ...searchMetadataFromRow(row)
-    };
+    supersedes: row["supersedes"] ?? [],
+    supersededBy: row["superseded_by"] ?? null,
+    contradicts: row["contradicts"] ?? [],
+    ...searchMetadataFromRow(row)
+  };
 }
 
-function searchMetadataFromRow(
-  row: QueryResultRow
-): {
+function searchMetadataFromRow(row: QueryResultRow): {
   searchScore?: number;
   searchMatchedBy?: MemoryMatchReason;
   searchRetrievalMode?: MemoryRetrievalMode;
@@ -787,6 +943,8 @@ function rankComponentsFromRow(row: QueryResultRow): MemorySearchRankComponents 
   setFiniteNumber(output, "tagScore", row["tag_score"]);
   setFiniteNumber(output, "trigramScore", row["trigram_score"]);
   setFiniteNumber(output, "fullTextScore", row["full_text_score"]);
+  setFiniteNumber(output, "vectorScore", row["vector_score"]);
+  setFiniteNumber(output, "hybridScore", row["hybrid_score"]);
   setFiniteNumber(output, "scopeScore", row["scope_score"]);
   setFiniteNumber(output, "importanceScore", row["importance_score"]);
   setFiniteNumber(output, "recencyScore", row["recency_score"]);
@@ -805,6 +963,15 @@ function setFiniteNumber(
 }
 
 function retrievalModeFromRank(rank: MemorySearchRankComponents): MemoryRetrievalMode {
+  if (
+    (rank.hybridScore ?? 0) > 0 &&
+    ((rank.keywordScore ?? 0) > 0 || (rank.trigramScore ?? 0) > 0 || (rank.fullTextScore ?? 0) > 0)
+  ) {
+    return "postgres-hybrid";
+  }
+  if ((rank.hybridScore ?? 0) > 0 || (rank.vectorScore ?? 0) > 0) {
+    return "postgres-vector";
+  }
   if ((rank.fullTextScore ?? 0) > 0 && (rank.trigramScore ?? 0) > 0) {
     return "postgres-hybrid-keyword";
   }
@@ -846,6 +1013,7 @@ function matchReasonFromRow(
 function isMemoryMatchReason(value: unknown): value is MemoryMatchReason {
   return (
     value === "content" ||
+    value === "vector" ||
     value === "summary" ||
     value === "tag" ||
     value === "type" ||
@@ -929,6 +1097,26 @@ function parseVector(value: unknown): number[] | null {
   }
 
   return null;
+}
+
+function cosineSimilarity(left: number[], right: number[]): number {
+  if (left.length === 0 || left.length !== right.length) {
+    return 0;
+  }
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    const leftValue = left[index] ?? 0;
+    const rightValue = right[index] ?? 0;
+    dot += leftValue * rightValue;
+    leftNorm += leftValue * leftValue;
+    rightNorm += rightValue * rightValue;
+  }
+  if (leftNorm === 0 || rightNorm === 0) {
+    return 0;
+  }
+  return Math.max(0, dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm)));
 }
 
 function escapeLike(value: string): string {

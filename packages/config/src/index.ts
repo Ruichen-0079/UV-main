@@ -69,12 +69,12 @@ const defaultProviderSelection: ProviderSelection = {
   tts: "xai",
   stt: "dashscope",
   vision: "xai",
-  embedding: "mock"
+  embedding: "openai-compatible"
 };
 
 export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): RuntimeConfig {
   const environment = parseEnvironment(env["NODE_ENV"]);
-  const allowMocks = parseBoolean(env["PROVIDER_ALLOW_MOCKS"], environment !== "production");
+  const allowMocks = parseBoolean(env["PROVIDER_ALLOW_MOCKS"], false);
   const defaults = parseProviderSelection(env);
 
   return {
@@ -196,7 +196,9 @@ export function collectRuntimeConfigIssues(config: RuntimeConfig): ConfigValidat
       continue;
     }
 
-    const requiresSecrets = !config.providers.allowMocks;
+    const requiresSecrets =
+      !config.providers.allowMocks &&
+      (capability === "chat" || capability === "reasoning" || capability === "embedding");
 
     if (requiresSecrets && !endpoint.apiKey) {
       issues.push({
@@ -205,7 +207,7 @@ export function collectRuntimeConfigIssues(config: RuntimeConfig): ConfigValidat
       });
     }
 
-    if (requiresSecrets && !endpoint.model && capability !== "embedding") {
+    if (requiresSecrets && !endpoint.model) {
       issues.push({
         path: `providers.endpoints.${capability}.model`,
         message: `Model is required when ${capability} provider '${endpoint.provider}' is enabled.`

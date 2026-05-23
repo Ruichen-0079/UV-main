@@ -98,12 +98,14 @@ DASHSCOPE_STT_MODEL=...
 DEFAULT_VISION_PROVIDER=xai
 XAI_VISION_MODEL=...
 
-EMBEDDING_PROVIDER=mock
+EMBEDDING_PROVIDER=openai-compatible
 EMBEDDING_API_BASEURL=...
 EMBEDDING_API_KEY=...
 EMBEDDING_MODEL=...
 EMBEDDING_DIMENSIONS=1536
 ```
+
+YUVI is real-provider-first by default. `EMBEDDING_PROVIDER=openai-compatible` uses an OpenAI-style `/embeddings` endpoint when `EMBEDDING_API_BASEURL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSIONS` are configured. `EMBEDDING_PROVIDER=mock` is deterministic and requires no network, but it reports `semanticEmbedding=false` because it validates the retrieval pipeline without real semantic similarity. Embedding status reports provider, model, dimensions, mock/configured/available state, and never returns API keys.
 
 If optional providers are missing and mocks are disabled, the registry returns an unavailable provider. `healthCheck()` reports `unavailable`, and actual calls throw normalized `ProviderError`s.
 
@@ -149,12 +151,13 @@ Fastify logging is configured to redact authorization headers and key-like field
 
 ## Mock Providers
 
-Development and tests can run without real provider credentials:
+Normal development/runtime no longer silently falls back to mock providers. Development tests, CI, and intentional offline sessions can run without real provider credentials by opting in:
 
 ```env
 NODE_ENV=development
 PROVIDER_ALLOW_MOCKS=true
 MEMORY_REPOSITORY=in-memory
+EMBEDDING_PROVIDER=mock
 ```
 
 Mock providers are useful for:

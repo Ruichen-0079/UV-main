@@ -24,9 +24,29 @@ Core tables:
 - `entities`
 - `relations`
 
-The repository exposes vector search as an interface, but embeddings are intentionally not required yet. PostgreSQL mode uses YUVI Postgres Search v2 before embeddings: `pg_trgm` is enabled by migration, content and summary have trigram indexes, tags and metadata use GIN indexes, and structured fields such as scope, scopeId, memoryLayer, status, type, subtype, source, sourceTraceId, timestamps, and importance have supporting indexes for filtering and ranking. A built-in PostgreSQL full-text expression index using the `simple` config complements keyword and trigram matching.
+PostgreSQL mode uses YUVI Postgres Search v2 plus optional pgvector retrieval. `pg_trgm` is enabled by migration, content and summary have trigram indexes, tags and metadata use GIN indexes, and structured fields such as scope, scopeId, memoryLayer, status, type, subtype, source, sourceTraceId, timestamps, and importance have supporting indexes for filtering and ranking. A built-in PostgreSQL full-text expression index using the `simple` config complements keyword and trigram matching.
 
 Search covers content, summary, tags, type, subtype, scope, scopeId, memoryLayer, source/sourceTraceId, and safe metadata text. This supports Chinese, English, mixed Chinese/English queries such as `YUVI Runtime 是什么项目`, local paths like `C:\Users\...`, ports such as `6121`, URLs such as `ws://127.0.0.1:6121`, env keys such as `MEMORY_EXTRACTOR`, and commands such as `pnpm db:migrate`. Prompt Preview and memory search debug metadata can report `retrievalMode`, `matchedBy`, `score`, rank components, type/subtype/source/importance, and `sourceTraceId`.
+
+Embeddings augment this keyword/trigram/full-text path; they do not replace it. Exact technical matches such as paths, ports, commands, provider names, model names, env vars, tags, and error messages remain high-priority signals. Real-provider-first development uses `EMBEDDING_PROVIDER=openai-compatible` when configured. `EMBEDDING_PROVIDER=mock` is explicit offline/test mode and reports `semanticEmbedding=false` because it validates the retrieval pipeline without real semantic similarity. Real embeddings may consume provider tokens:
+
+```env
+EMBEDDING_PROVIDER=openai-compatible
+EMBEDDING_API_BASEURL=https://example-embedding-provider.test/v1
+EMBEDDING_API_KEY=replace-with-embedding-api-key
+EMBEDDING_MODEL=replace-with-embedding-model
+EMBEDDING_DIMENSIONS=1536
+```
+
+New memory writes generate embeddings when the configured provider is available. If embedding generation fails, YUVI stores the memory without a vector and retrieval falls back to keyword/trigram/full-text search. Existing Postgres memories can be backfilled after migrations:
+
+```bash
+pnpm memory:embed:backfill
+pnpm memory:embed:backfill -- --dry-run
+pnpm memory:embed:backfill -- --force --limit=500
+```
+
+The API and Dashboard expose safe embedding metadata such as `embeddedAt`, `embeddingProvider`, `embeddingModel`, and debug flags like `vectorUsed`, but raw embedding vectors are not returned by default.
 
 ## Memory Model v2
 
@@ -64,7 +84,7 @@ Long-term prompt retrieval remains scope-aware, status-aware, and time-aware:
 
 Ranking combines keyword relevance, type/subtype priority, memory layer priority, importance, recency, access recency, source quality, and scope match quality. Core active memories in the current project/user scope are favored; low-importance verbose runtime episodic summaries, archival records, and unrelated scoped records are down-ranked or excluded.
 
-Prompt Preview exposes explainable debug fields such as `retrievalScope`, `includedScopes`, `includeArchived`, `includeSuperseded`, `includeExpired`, `excludedByStatus`, `excludedByTime`, `excludedByScope`, `currentTime`, and per-memory `matchedBy`, `score`, optional rank components (`keywordScore`, `tagScore`, `trigramScore`, `fullTextScore`, `scopeScore`, `importanceScore`, `recencyScore`), `scope`, `memoryLayer`, `status`, temporal fields, and `excludedReason`.
+Prompt Preview exposes explainable debug fields such as `retrievalScope`, `includedScopes`, `includeArchived`, `includeSuperseded`, `includeExpired`, `excludedByStatus`, `excludedByTime`, `excludedByScope`, `currentTime`, `vectorEnabled`, `vectorUsed`, `embeddingProvider`, `embeddingModel`, `queryEmbeddingGenerated`, `vectorResultCount`, `keywordResultCount`, `hybridResultCount`, `fallbackUsed`, and per-memory `matchedBy`, `score`, optional rank components (`keywordScore`, `tagScore`, `trigramScore`, `fullTextScore`, `vectorScore`, `hybridScore`, `scopeScore`, `importanceScore`, `recencyScore`), `scope`, `memoryLayer`, `status`, temporal fields, and `excludedReason`.
 
 PromptBuilder also injects a `CurrentTime` section containing the current ISO timestamp, timezone, and local date. RelevantMemory bullets may include compact hints such as `[project:yuvi-runtime][core][active]` so the model can reason about scope and freshness without receiving verbose metadata.
 

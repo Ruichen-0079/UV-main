@@ -70,6 +70,17 @@ try {
     "GET /memory/search?q=... should return matching memories"
   );
 
+  const unicodeSearch = await step("POST /memory/search", () =>
+    postJson(`http://127.0.0.1:${port}/memory/search`, {
+      q: "Smoke test memory.",
+      limit: 5
+    })
+  );
+  assert(
+    Array.isArray(unicodeSearch.memories) && unicodeSearch.memories.length > 0,
+    "POST /memory/search should return matching memories"
+  );
+
   console.log("Smoke checks passed.");
 } finally {
   server.kill("SIGTERM");

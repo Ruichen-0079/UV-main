@@ -116,7 +116,7 @@ start_server() {
   echo "启动 Server: $server_url"
   env \
     NODE_ENV="${NODE_ENV:-development}" \
-    PROVIDER_ALLOW_MOCKS="${PROVIDER_ALLOW_MOCKS:-true}" \
+    PROVIDER_ALLOW_MOCKS="${PROVIDER_ALLOW_MOCKS:-false}" \
     MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-in-memory}" \
     SERVER_HOST="${SERVER_HOST:-127.0.0.1}" \
     SERVER_PORT="${SERVER_PORT:-6121}" \

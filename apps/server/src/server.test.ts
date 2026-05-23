@@ -75,6 +75,15 @@ describe("server", () => {
         mock: true,
         required: false
       });
+      expect(providers.json().providers.embedding).toMatchObject({
+        provider: "mock",
+        capability: "embedding",
+        configured: true,
+        available: true,
+        mock: true,
+        semanticEmbedding: false,
+        embeddingNote: expect.stringContaining("do not provide real semantic similarity")
+      });
       expect(providers.body).not.toContain("test_deepseek_secret");
       expect(providers.body).not.toContain("Authorization");
 
@@ -383,46 +392,71 @@ describe("server", () => {
       expect(recent.statusCode).toBe(200);
       expect(recent.json().memories.length).toBeGreaterThan(0);
 
-	      const search = await app.inject({ method: "GET", url: "/memory/search?q=Server&limit=5" });
-	      expect(search.statusCode).toBe(200);
-	      expect(search.json().query).toBe("Server");
-	      expect(search.json().repository).toBe("in-memory");
-	      expect(search.json().rawCount).toBeGreaterThanOrEqual(search.json().count);
-	      expect(search.json().memories.length).toBeGreaterThan(0);
-	      expect(search.json().retrievalScope).toBeTruthy();
-	      expect(search.json().excludedByStatus).toBeGreaterThanOrEqual(0);
+      const search = await app.inject({ method: "GET", url: "/memory/search?q=Server&limit=5" });
+      expect(search.statusCode).toBe(200);
+      expect(search.json().query).toBe("Server");
+      expect(search.json().repository).toBe("in-memory");
+      expect(search.json().retrievalMode).toMatch(/^in-memory-|fallback-recent$/);
+      expect(search.json().semanticEmbedding).toBe(false);
+      expect(search.json().embeddingNote).toContain("Mock embeddings");
+      expect(search.json().rawCount).toBeGreaterThanOrEqual(search.json().count);
+      expect(search.json().memories.length).toBeGreaterThan(0);
+      expect(search.json().retrievalScope).toBeTruthy();
+      expect(search.json().excludedByStatus).toBeGreaterThanOrEqual(0);
 
-	      const filteredSearch = await app.inject({
-	        method: "GET",
-	        url: `/memory/search?${new URLSearchParams({
-	          q: "Server test memory updated",
-	          type: "procedural",
-	          subtype: "workflow",
-	          source: "test",
-	          scope: "project",
-	          scopeId: "yuvi-runtime",
-	          memoryLayer: "recall",
-	          status: "active",
-	          tags: "updated,server",
-	          minImportance: "0.7",
-	          limit: "5"
-	        }).toString()}`
-	      });
-	      expect(filteredSearch.statusCode).toBe(200);
-	      expect(filteredSearch.json().memories[0]).toMatchObject({
-	        id: memoryId,
-	        type: "procedural",
-	        subtype: "workflow",
-	        source: "test",
-	        scope: "project",
-	        scopeId: "yuvi-runtime",
-	        memoryLayer: "recall",
-	        status: "active"
-	      });
-	      expect(filteredSearch.json().debugMemories[0]).toMatchObject({
-	        matchedBy: expect.any(String),
-	        score: expect.any(Number)
-	      });
+      const filteredSearch = await app.inject({
+        method: "GET",
+        url: `/memory/search?${new URLSearchParams({
+          q: "Server test memory updated",
+          type: "procedural",
+          subtype: "workflow",
+          source: "test",
+          scope: "project",
+          scopeId: "yuvi-runtime",
+          memoryLayer: "recall",
+          status: "active",
+          tags: "updated,server",
+          minImportance: "0.7",
+          limit: "5"
+        }).toString()}`
+      });
+      expect(filteredSearch.statusCode).toBe(200);
+      expect(filteredSearch.json().memories[0]).toMatchObject({
+        id: memoryId,
+        type: "procedural",
+        subtype: "workflow",
+        source: "test",
+        scope: "project",
+        scopeId: "yuvi-runtime",
+        memoryLayer: "recall",
+        status: "active"
+      });
+      expect(filteredSearch.json().debugMemories[0]).toMatchObject({
+        matchedBy: expect.any(String),
+        score: expect.any(Number)
+      });
+
+      const postChineseSearch = await app.inject({
+        method: "POST",
+        url: "/memory/search",
+        payload: {
+          q: "模型供应商偏好",
+          limit: 10,
+          scope: "project",
+          scopeId: "yuvi-runtime"
+        }
+      });
+      expect(postChineseSearch.statusCode).toBe(200);
+      expect(postChineseSearch.json().query).toBe("模型供应商偏好");
+      expect(postChineseSearch.json().repository).toBe("in-memory");
+      expect(postChineseSearch.json().retrievalMode).not.toMatch(/^postgres-/);
+
+      const invalidSearch = await app.inject({
+        method: "GET",
+        url: "/memory/search?limit=999"
+      });
+      expect(invalidSearch.statusCode).toBe(400);
+      expect(invalidSearch.json().message).toContain("POST /memory/search");
 
       const encodedChineseSearch = await app.inject({
         method: "GET",
@@ -547,6 +581,57 @@ describe("server", () => {
       await app.close();
     } finally {
       vi.restoreAllMocks();
+      restoreEnv(previous);
+    }
+  });
+
+  it("does not silently mock required chat provider in real-first mode", async () => {
+    const previous = snapshotEnv();
+    process.env = {
+      NODE_ENV: "development",
+      RUNTIME_MODE: "development",
+      PROVIDER_ALLOW_MOCKS: "false",
+      MEMORY_REPOSITORY: "in-memory",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEFAULT_REASONING_PROVIDER: "deepseek",
+      DEFAULT_EMBEDDING_PROVIDER: "openai-compatible"
+    };
+
+    try {
+      const app = await buildServer(loadServerConfig(process.env));
+      const providers = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(providers.statusCode).toBe(200);
+      expect(providers.json().providers.chat).toMatchObject({
+        configured: false,
+        available: false,
+        mock: false,
+        status: "unavailable"
+      });
+
+      const message = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "real-first",
+          text: "hello",
+          options: {
+            readMemory: false,
+            writeMemory: false,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(message.statusCode).toBe(503);
+      expect(message.json()).toMatchObject({
+        error: "provider_unavailable",
+        provider: "deepseek",
+        capability: "chat"
+      });
+      expect(message.json().setup).toContain("PROVIDER_ALLOW_MOCKS=true");
+      expect(message.body).not.toContain("API_KEY");
+
+      await app.close();
+    } finally {
       restoreEnv(previous);
     }
   });

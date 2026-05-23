@@ -92,12 +92,14 @@ DASHSCOPE_STT_MODEL=...
 DEFAULT_VISION_PROVIDER=xai
 XAI_VISION_MODEL=...
 
-EMBEDDING_PROVIDER=mock
+EMBEDDING_PROVIDER=openai-compatible
 EMBEDDING_API_BASEURL=...
 EMBEDDING_API_KEY=...
 EMBEDDING_MODEL=...
 EMBEDDING_DIMENSIONS=1536
 ```
+
+YUVI 默认采用 real-provider-first。`EMBEDDING_PROVIDER=openai-compatible` 会在配置 `EMBEDDING_API_BASEURL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL` 和 `EMBEDDING_DIMENSIONS` 后调用 OpenAI-style `/embeddings` endpoint。`EMBEDDING_PROVIDER=mock` 只用于测试、CI 或显式离线模式，并会报告 `semanticEmbedding=false`，表示它只能验证检索管线，不能提供真实语义相似度。Embedding status 只返回 provider、model、dimensions、mock/configured/available 状态，绝不返回 API key。
 
 如果缺少可选提供商配置并且禁用了 mock，注册表会返回 unavailable provider。`healthCheck()` 会报告 `unavailable`，实际调用会抛出标准化的 `ProviderError`。
 
@@ -143,12 +145,13 @@ Fastify logging 已配置为 redact authorization header 和 key-like field。
 
 ## Mock Providers
 
-开发和测试可以在没有真实提供商凭据时运行：
+正常开发/运行不再静默 fallback 到 mock。测试、CI 或显式离线开发可以开启：
 
 ```env
 NODE_ENV=development
 PROVIDER_ALLOW_MOCKS=true
-MEMORY_REPOSITORY=memory
+MEMORY_REPOSITORY=in-memory
+EMBEDDING_PROVIDER=mock
 ```
 
 Mock provider 适用于：

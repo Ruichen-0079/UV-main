@@ -125,6 +125,18 @@ export type RuntimePromptPreview = {
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
   retrievalMode: MemoryRetrievalMode;
+  vectorEnabled: boolean;
+  vectorUsed: boolean;
+  embeddingProvider?: string | undefined;
+  embeddingModel?: string | undefined;
+  semanticEmbedding?: boolean | undefined;
+  embeddingNote?: string | undefined;
+  queryEmbeddingGenerated: boolean;
+  vectorResultCount: number;
+  keywordResultCount: number;
+  hybridResultCount: number;
+  retrievalFallbackUsed: boolean;
+  retrievalFallbackReason?: string | undefined;
   retrievalScope: string;
   includedScopes: Array<{ scope: string; scopeId?: string | null }>;
   includeArchived: boolean;
@@ -555,6 +567,18 @@ export class RuntimeOrchestrator {
       retrievedMemoryCountRaw: memoryContext.retrievedMemoryCountRaw,
       retrievedMemoryCount: memoryContext.retrievedMemoryCount,
       retrievalMode: memoryContext.retrievalMode,
+      vectorEnabled: memoryContext.vectorEnabled,
+      vectorUsed: memoryContext.vectorUsed,
+      embeddingProvider: memoryContext.embeddingProvider,
+      embeddingModel: memoryContext.embeddingModel,
+      semanticEmbedding: memoryContext.semanticEmbedding,
+      embeddingNote: memoryContext.embeddingNote,
+      queryEmbeddingGenerated: memoryContext.queryEmbeddingGenerated,
+      vectorResultCount: memoryContext.vectorResultCount,
+      keywordResultCount: memoryContext.keywordResultCount,
+      hybridResultCount: memoryContext.hybridResultCount,
+      retrievalFallbackUsed: memoryContext.retrievalFallbackUsed,
+      retrievalFallbackReason: memoryContext.retrievalFallbackReason,
       retrievedMemories: memoryContext.retrievedMemories,
       retrievalScope: memoryContext.retrievalScope,
       includedScopes: memoryContext.includedScopes,
@@ -833,6 +857,18 @@ export class RuntimeOrchestrator {
           retrievedMemoryCountRaw: result.rawCount,
           retrievedMemoryCount: result.count,
           retrievalMode: result.retrievalMode,
+          vectorEnabled: result.vectorEnabled,
+          vectorUsed: result.vectorUsed,
+          embeddingProvider: result.embeddingProvider,
+          embeddingModel: result.embeddingModel,
+          semanticEmbedding: result.semanticEmbedding,
+          embeddingNote: result.embeddingNote,
+          queryEmbeddingGenerated: result.queryEmbeddingGenerated,
+          vectorResultCount: result.vectorResultCount,
+          keywordResultCount: result.keywordResultCount,
+          hybridResultCount: result.hybridResultCount,
+          retrievalFallbackUsed: result.fallbackUsed,
+          retrievalFallbackReason: result.fallbackReason,
           retrievalScope: result.retrievalScope,
           includedScopes: result.includedScopes,
           includeArchived: result.includeArchived,
@@ -857,6 +893,13 @@ export class RuntimeOrchestrator {
           retrievedMemoryCountRaw: memories.length,
           retrievedMemoryCount: memories.length,
           retrievalMode: "keyword",
+          vectorEnabled: false,
+          vectorUsed: false,
+          queryEmbeddingGenerated: false,
+          vectorResultCount: 0,
+          keywordResultCount: memories.length,
+          hybridResultCount: memories.length,
+          retrievalFallbackUsed: false,
           retrievedMemories: memories.map(memoryToDebug),
           promptMemories: memories.map(memoryToDebug)
         };
@@ -1190,6 +1233,18 @@ type MemoryContext = {
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
   retrievalMode: MemoryRetrievalMode;
+  vectorEnabled: boolean;
+  vectorUsed: boolean;
+  embeddingProvider?: string | undefined;
+  embeddingModel?: string | undefined;
+  semanticEmbedding?: boolean | undefined;
+  embeddingNote?: string | undefined;
+  queryEmbeddingGenerated: boolean;
+  vectorResultCount: number;
+  keywordResultCount: number;
+  hybridResultCount: number;
+  retrievalFallbackUsed: boolean;
+  retrievalFallbackReason?: string | undefined;
   retrievalScope: string;
   includedScopes: Array<{ scope: string; scopeId?: string | null }>;
   includeArchived: boolean;
@@ -1221,6 +1276,13 @@ function emptyMemoryContext(): MemoryContext {
     retrievedMemoryCountRaw: 0,
     retrievedMemoryCount: 0,
     retrievalMode: "keyword",
+    vectorEnabled: false,
+    vectorUsed: false,
+    queryEmbeddingGenerated: false,
+    vectorResultCount: 0,
+    keywordResultCount: 0,
+    hybridResultCount: 0,
+    retrievalFallbackUsed: false,
     retrievalScope: "user,project:yuvi-runtime",
     includedScopes: [{ scope: "user" }, { scope: "project", scopeId: "yuvi-runtime" }],
     includeArchived: false,

@@ -86,7 +86,7 @@ DASHBOARD_DEV_TOKEN=replace-with-local-dev-token
 
 When set, sensitive development endpoints such as runtime settings updates and provider verification require the `X-YUVI-Dev-Token` header. The token is never returned by the API and should not be logged.
 
-For local development without real optional provider keys, keep:
+Normal development/runtime is real-provider-first. Use explicit mock mode only for CI, tests, or intentional offline work:
 
 ```env
 NODE_ENV=development
@@ -150,7 +150,20 @@ Bash or WSL:
 pnpm db:migrate
 ```
 
-Migrations enable Postgres Search v2 for long-term memory: `pg_trgm` trigram indexes, structured filters, tag/metadata indexes, and a built-in full-text index. In-memory mode remains simpler and resets on restart; Postgres mode persists memory and improves keyword retrieval for mixed Chinese/English text, commands, paths, URLs, ports, env keys, and provider names.
+Migrations enable Postgres Search v2 and optional pgvector retrieval for long-term memory: `pg_trgm` trigram indexes, structured filters, tag/metadata indexes, a built-in full-text index, embedding metadata columns, and pgvector storage. In-memory mode remains simpler and resets on restart; Postgres mode persists memory and improves retrieval for mixed Chinese/English text, commands, paths, URLs, ports, env keys, provider names, and semantic matches.
+
+Embeddings are optional. Real-provider-first configuration uses:
+
+```env
+EMBEDDING_PROVIDER=openai-compatible
+EMBEDDING_DIMENSIONS=1536
+```
+
+Mock embeddings remain available for explicit offline/test mode with `PROVIDER_ALLOW_MOCKS=true` and `EMBEDDING_PROVIDER=mock`; they report `semanticEmbedding=false` because they do not provide real semantic similarity. Real OpenAI-compatible embeddings may consume provider tokens. Keyword/trigram/full-text search remains important for exact technical queries, so paths, ports, commands, env vars, provider names, and error messages can still outrank vague vector matches. Existing Postgres memories can be embedded after migrations:
+
+```bash
+pnpm memory:embed:backfill
+```
 
 Verify the memory table exists:
 
@@ -282,6 +295,15 @@ Search memory:
 curl "http://127.0.0.1:6121/memory/search?q=developer&limit=5"
 ```
 
+For Unicode queries, prefer URL encoding or the JSON POST endpoint:
+
+```bash
+curl -G "http://127.0.0.1:6121/memory/search" --data-urlencode "q=模型供应商偏好"
+curl -X POST "http://127.0.0.1:6121/memory/search" \
+  -H "content-type: application/json" \
+  -d '{"q":"模型供应商偏好","limit":10}'
+```
+
 PowerShell:
 
 ```powershell
@@ -300,7 +322,7 @@ Invoke-RestMethod "http://127.0.0.1:6121/memory/recent?limit=5"
 pnpm smoke
 ```
 
-The smoke script builds the repo, starts the built server in mock/in-memory mode, and verifies `GET /health`, `POST /message`, `POST /memory`, `GET /memory/recent`, and `GET /memory/search?q=...`.
+The smoke script builds the repo, starts the built server in explicit mock/in-memory mode (`PROVIDER_ALLOW_MOCKS=true`, `EMBEDDING_PROVIDER=mock`), and verifies `GET /health`, `POST /message`, `POST /memory`, `GET /memory/recent`, `GET /memory/search?q=...`, and `POST /memory/search`.
 
 For PostgreSQL memory mode, start Docker infra and run:
 
@@ -404,8 +426,8 @@ Symptoms:
 Fix:
 
 - For optional providers, this is acceptable in MVP development.
-- Set `PROVIDER_ALLOW_MOCKS=true` for local work.
 - Fill the provider-specific API key and model variables when you need real calls.
+- Use `PROVIDER_ALLOW_MOCKS=true` only for explicit test/CI/offline mock mode.
 
 ### Model Not Found
 

@@ -1,4 +1,5 @@
 import { createEvent } from "@companion/protocol";
+import { ProviderError } from "@companion/providers";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
@@ -83,6 +84,18 @@ export async function registerMessageRoutes(
           : undefined
       });
     } catch (error) {
+      if (error instanceof ProviderError) {
+        return reply.status(error.statusCode ?? 503).send({
+          error: "provider_unavailable",
+          code: error.code,
+          provider: error.provider,
+          capability: error.capability,
+          message: error.message,
+          setup:
+            "Configure the selected provider in .env.local and use Settings > Apply Now, or set PROVIDER_ALLOW_MOCKS=true for explicit offline/mock development.",
+          traceId: event.traceId
+        });
+      }
       return reply.status(500).send({
         error: "message_failed",
         message: error instanceof Error ? error.message : "Message handling failed.",

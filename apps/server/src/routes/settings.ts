@@ -10,6 +10,7 @@ const editableKeys = [
   "MEMORY_REPOSITORY",
   "MEMORY_EXTRACTOR",
   "EVENT_BUS",
+  "PROVIDER_ALLOW_MOCKS",
   "SERVER_HOST",
   "SERVER_PORT",
   "DEEPSEEK_API_BASEURL",
@@ -48,6 +49,7 @@ const hotReloadableKeys = new Set([
   "DEEPSEEK_CHAT_MODEL",
   "DEEPSEEK_REASONING_MODEL",
   "MEMORY_EXTRACTOR",
+  "PROVIDER_ALLOW_MOCKS",
   "XAI_API_BASEURL",
   "XAI_API_KEY",
   "XAI_TTS_MODEL",
@@ -202,7 +204,8 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       memoryExtractorActive: context.memory.getExtractorStatus().active,
       providers: {
         chat: providerStatus.providers.chat,
-        reasoning: providerStatus.providers.reasoning
+        reasoning: providerStatus.providers.reasoning,
+        embedding: providerStatus.providers.embedding
       }
     },
     settings: buildLayeredSettings(baseEnv, localEnv, env),
@@ -214,6 +217,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       runtimeMode: config.runtimeMode,
       eventBus: env["EVENT_BUS"] ?? config.eventBus,
       activeEventBus: config.eventBus,
+      providerAllowMocks: parseBooleanString(env["PROVIDER_ALLOW_MOCKS"]),
       pendingRestart
     },
     memory: {
@@ -263,12 +267,13 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
         implemented: false
       },
       embedding: {
-        provider: env["EMBEDDING_PROVIDER"] ?? "mock",
+        provider: env["EMBEDDING_PROVIDER"] ?? "openai-compatible",
         baseUrl: env["EMBEDDING_API_BASEURL"] ?? "",
         apiKeyConfigured: Boolean(env["EMBEDDING_API_KEY"]),
         apiKeyPreview: maskSecret(env["EMBEDDING_API_KEY"]),
         model: env["EMBEDDING_MODEL"] ?? "",
-        dimensions: env["EMBEDDING_DIMENSIONS"] ?? ""
+        dimensions: env["EMBEDDING_DIMENSIONS"] ?? "",
+        status: providerStatus.providers.embedding
       }
     },
     restartRequired: pendingRestart,
@@ -289,6 +294,10 @@ function validateMemoryExtractorUpdate(values: Record<string, string | null>): s
 
 function normalizeMemoryExtractor(value: string | undefined): "rule-based" | "llm" {
   return value === "rule-based" ? "rule-based" : "llm";
+}
+
+function parseBooleanString(value: string | undefined): boolean {
+  return value === "1" || value === "true" || value === "TRUE";
 }
 
 function hasRestartRequiredLocalOverrides(

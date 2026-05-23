@@ -47,6 +47,10 @@ export type Memory = {
   content: string;
   summary: string | null;
   embedding: number[] | null;
+  embeddingModel: string | null;
+  embeddingProvider: string | null;
+  embeddingDimensions: number | null;
+  embeddedAt: Date | null;
   importance: number;
   emotionValence: number;
   emotionArousal: number;
@@ -82,6 +86,10 @@ export type CreateMemoryInput = {
   content: string;
   summary?: string | null;
   embedding?: number[] | null;
+  embeddingModel?: string | null;
+  embeddingProvider?: string | null;
+  embeddingDimensions?: number | null;
+  embeddedAt?: Date | string | null;
   importance?: number;
   emotionValence?: number;
   emotionArousal?: number;
@@ -109,6 +117,11 @@ export type UpdateMemoryInput = {
   status?: MemoryStatus;
   content?: string;
   summary?: string | null;
+  embedding?: number[] | null;
+  embeddingModel?: string | null;
+  embeddingProvider?: string | null;
+  embeddingDimensions?: number | null;
+  embeddedAt?: Date | string | null;
   importance?: number;
   emotionValence?: number;
   emotionArousal?: number;
@@ -197,6 +210,7 @@ export type MemoryExtractor = {
 export type MemorySearchQuery = {
   text?: string;
   embedding?: number[];
+  vectorEnabled?: boolean;
   types?: MemoryType[];
   subtypes?: MemorySubtype[];
   memoryLayers?: MemoryLayer[];
@@ -220,6 +234,7 @@ export type MemorySearchQuery = {
 };
 
 export type MemoryMatchReason =
+  | "vector"
   | "content"
   | "summary"
   | "tag"
@@ -231,14 +246,20 @@ export type MemoryMatchReason =
   | "keyword"
   | "fallback";
 export type MemoryRetrievalMode =
+  | "in-memory-keyword"
+  | "in-memory-hybrid"
   | "keyword"
   | "postgres-trigram"
   | "postgres-full-text"
+  | "postgres-vector"
+  | "postgres-hybrid"
   | "postgres-hybrid-keyword"
   | "hybrid-keyword"
   | "fallback-recent";
 
 export type MemorySearchRankComponents = {
+  vectorScore?: number;
+  hybridScore?: number;
   keywordScore?: number;
   tagScore?: number;
   trigramScore?: number;
@@ -269,6 +290,9 @@ export type RetrievedMemoryDebug = {
   lastAccessedAt?: Date;
   displayText: string;
   matchedBy: MemoryMatchReason;
+  retrievalMode?: MemoryRetrievalMode;
+  vectorScore?: number;
+  hybridScore?: number;
   score?: number;
   rankComponents?: MemorySearchRankComponents;
   excludedReason?: string;
@@ -289,6 +313,18 @@ export type MemoryRetrievalResult = {
   rawCount: number;
   count: number;
   retrievalMode: MemoryRetrievalMode;
+  vectorEnabled: boolean;
+  vectorUsed: boolean;
+  embeddingProvider?: string;
+  embeddingModel?: string;
+  semanticEmbedding?: boolean;
+  embeddingNote?: string;
+  queryEmbeddingGenerated: boolean;
+  vectorResultCount: number;
+  keywordResultCount: number;
+  hybridResultCount: number;
+  fallbackUsed: boolean;
+  fallbackReason?: string;
   retrievalScope: string;
   includedScopes: Array<{ scope: MemoryScope; scopeId?: string | null }>;
   includeArchived: boolean;

@@ -1329,7 +1329,7 @@ function ProvidersPage(props: {
       <Notice
         tone="info"
         title="Status meanings"
-        message="configured=false + mock=true means the dashboard is using development mock fallback. configured=true + mock=false + degraded means config is present, but remote health is intentionally unverified. unavailable means the provider cannot be used with the current config."
+        message="YUVI is real-provider-first by default. configured=false + mock=false means the provider is unavailable until configured. configured=false + mock=true only appears when PROVIDER_ALLOW_MOCKS=true. configured=true + mock=false + degraded means config is present, but remote health is intentionally unverified."
       />
       <Panel
         title="Manual Verification"
@@ -1396,7 +1396,12 @@ function ProvidersPage(props: {
                   <td className="table-cell text-ink-500">
                     {row.health?.model ?? "Not exposed by status endpoint"}
                   </td>
-                  <td className="table-cell text-ink-500">{row.health?.message ?? "No message"}</td>
+                  <td className="table-cell text-ink-500">
+                    {row.health?.message ?? "No message"}
+                    {row.health?.embeddingNote ? (
+                      <div className="mt-1 text-xs text-amber-700">{row.health.embeddingNote}</div>
+                    ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -1629,6 +1634,17 @@ function PromptPreviewPage(): JSX.Element {
             detail={`raw: ${promptPreview.retrievedMemoryCountRaw ?? preview.data?.retrievedMemoryCountRaw ?? 0} · mode: ${promptPreview.retrievalMode ?? preview.data?.retrievalMode ?? "unknown"} · scope: ${promptPreview.retrievalScope ?? preview.data?.retrievalScope ?? "unknown"}`}
           />
           <StatusCard
+            title="Vector"
+            status={
+              (promptPreview.vectorUsed ?? preview.data?.vectorUsed)
+                ? "used"
+                : (promptPreview.vectorEnabled ?? preview.data?.vectorEnabled)
+                  ? "enabled"
+                  : "off"
+            }
+            detail={`provider: ${promptPreview.embeddingProvider ?? preview.data?.embeddingProvider ?? "n/a"} · model: ${promptPreview.embeddingModel ?? preview.data?.embeddingModel ?? "n/a"} · query: ${String(promptPreview.queryEmbeddingGenerated ?? preview.data?.queryEmbeddingGenerated ?? false)} · vector/keyword/hybrid: ${promptPreview.vectorResultCount ?? preview.data?.vectorResultCount ?? 0}/${promptPreview.keywordResultCount ?? preview.data?.keywordResultCount ?? 0}/${promptPreview.hybridResultCount ?? preview.data?.hybridResultCount ?? 0}${(promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason) ? ` · fallback: ${promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason}` : ""}`}
+          />
+          <StatusCard
             title="Extractor"
             status={
               promptPreview.memoryExtractorActive ??
@@ -1747,16 +1763,16 @@ function PromptPreviewPage(): JSX.Element {
                     <td className="px-2 py-2">{memory.memoryLayer ?? ""}</td>
                     <td className="px-2 py-2">{memory.status ?? ""}</td>
                     <td className="px-2 py-2">{memory.source}</td>
-	                    <td className="px-2 py-2">{memory.matchedBy ?? "unknown"}</td>
-	                    <td className="px-2 py-2">{memory.importance.toFixed(2)}</td>
-	                    <td className="px-2 py-2">
-	                      {memory.score?.toFixed(2) ?? ""}
-	                      {memory.rankComponents ? (
-	                        <span className="block text-[10px] text-ink-400">
-	                          {formatRankComponents(memory.rankComponents)}
-	                        </span>
-	                      ) : null}
-	                    </td>
+                    <td className="px-2 py-2">{memory.matchedBy ?? "unknown"}</td>
+                    <td className="px-2 py-2">{memory.importance.toFixed(2)}</td>
+                    <td className="px-2 py-2">
+                      {memory.score?.toFixed(2) ?? ""}
+                      {memory.rankComponents ? (
+                        <span className="block text-[10px] text-ink-400">
+                          {formatRankComponents(memory.rankComponents)}
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="px-2 py-2 font-mono">
                       {shortTrace(memory.sourceTraceId ?? undefined)}
                     </td>
@@ -1911,6 +1927,7 @@ function SettingsPage(): JSX.Element {
     "SERVER_HOST",
     "SERVER_PORT",
     "EVENT_BUS",
+    "PROVIDER_ALLOW_MOCKS",
     "MEMORY_REPOSITORY",
     "MEMORY_EXTRACTOR",
     "DEEPSEEK_API_BASEURL",
@@ -1966,9 +1983,14 @@ function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="SERVER_HOST" setForm={setForm} />
           <SettingsInput form={form} name="SERVER_PORT" setForm={setForm} />
           <SettingsInput form={form} name="EVENT_BUS" setForm={setForm} />
+          <SettingsInput form={form} name="PROVIDER_ALLOW_MOCKS" setForm={setForm} />
           <Definition
             label="Runtime mode"
             value={settings.data?.runtime.runtimeMode ?? "unknown"}
+          />
+          <Definition
+            label="Mock fallback allowed"
+            value={settings.data?.runtime.providerAllowMocks ? "true" : "false"}
           />
           <p className="text-xs leading-5 text-ink-500">
             Active: {settings.data?.runtime.activeServerHost ?? "unknown"}:
@@ -2187,6 +2209,18 @@ function SettingsPage(): JSX.Element {
           />
           <SettingsInput form={form} name="DASHSCOPE_STT_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="EMBEDDING_PROVIDER" setForm={setForm} />
+          <div className="rounded-md border border-ink-100 bg-ink-50 p-2 text-xs text-ink-600">
+            Status: {settings.data?.providers.embedding.status?.status ?? "unknown"} · mock:{" "}
+            {String(settings.data?.providers.embedding.status?.mock ?? false)} · dimensions:{" "}
+            {settings.data?.providers.embedding.status?.dimensions ??
+              (settings.data?.providers.embedding.dimensions || "unknown")}
+            {settings.data?.providers.embedding.status?.semanticEmbedding === false && (
+              <div className="mt-1 text-amber-700">
+                {settings.data.providers.embedding.status.embeddingNote ??
+                  "Mock embeddings validate the pipeline but do not provide real semantic similarity."}
+              </div>
+            )}
+          </div>
           <SettingsInput form={form} name="EMBEDDING_API_BASEURL" setForm={setForm} />
           <SettingsInput form={form} name="EMBEDDING_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="EMBEDDING_DIMENSIONS" setForm={setForm} />
@@ -2222,6 +2256,7 @@ type SettingsKey =
   | "SERVER_HOST"
   | "SERVER_PORT"
   | "EVENT_BUS"
+  | "PROVIDER_ALLOW_MOCKS"
   | "MEMORY_REPOSITORY"
   | "MEMORY_EXTRACTOR"
   | "DEEPSEEK_API_BASEURL"
@@ -2247,6 +2282,7 @@ function emptySettingsForm(): SettingsForm {
     SERVER_HOST: "127.0.0.1",
     SERVER_PORT: "6121",
     EVENT_BUS: "in-memory",
+    PROVIDER_ALLOW_MOCKS: "false",
     MEMORY_REPOSITORY: "in-memory",
     MEMORY_EXTRACTOR: "llm",
     DEEPSEEK_API_BASEURL: "",
@@ -2261,11 +2297,11 @@ function emptySettingsForm(): SettingsForm {
     DASHSCOPE_API_BASEURL: "",
     DASHSCOPE_API_KEY: "",
     DASHSCOPE_STT_MODEL: "",
-    EMBEDDING_PROVIDER: "mock",
+    EMBEDDING_PROVIDER: "openai-compatible",
     EMBEDDING_API_BASEURL: "",
     EMBEDDING_API_KEY: "",
     EMBEDDING_MODEL: "",
-    EMBEDDING_DIMENSIONS: "1024"
+    EMBEDDING_DIMENSIONS: "1536"
   };
 }
 
@@ -2274,6 +2310,7 @@ function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsFo
     SERVER_HOST: settings.runtime.serverHost,
     SERVER_PORT: String(settings.runtime.serverPort),
     EVENT_BUS: settings.runtime.eventBus,
+    PROVIDER_ALLOW_MOCKS: settings.runtime.providerAllowMocks ? "true" : "false",
     MEMORY_REPOSITORY: settings.memory.memoryRepository,
     MEMORY_EXTRACTOR: settings.memory.memoryExtractor ?? "llm",
     DEEPSEEK_API_BASEURL: settings.providers.deepseek.baseUrl,
@@ -3240,6 +3277,7 @@ function MemoryTable(props: {
             {!props.compact && <th className="table-cell">Importance</th>}
             {!props.compact && <th className="table-cell">Tags</th>}
             {!props.compact && <th className="table-cell">Source</th>}
+            {!props.compact && <th className="table-cell">Embedding</th>}
             {!props.compact && <th className="table-cell">Matched</th>}
             {!props.compact && <th className="table-cell">Trace</th>}
             <th className="table-cell">Created</th>
@@ -3276,17 +3314,31 @@ function MemoryTable(props: {
                   <td className="table-cell text-ink-500">{memory.tags.join(", ") || "none"}</td>
                 )}
                 {!props.compact && <td className="table-cell text-ink-500">{memory.source}</td>}
-	                {!props.compact && (
-	                  <td className="table-cell text-ink-500">
-	                    {debug?.matchedBy ?? "n/a"}
-	                    {debug?.score !== undefined ? ` · ${debug.score.toFixed(2)}` : ""}
-	                    {debug?.rankComponents ? (
-	                      <span className="block text-[10px] text-ink-400">
-	                        {formatRankComponents(debug.rankComponents)}
-	                      </span>
-	                    ) : null}
-	                  </td>
-	                )}
+                {!props.compact && (
+                  <td className="table-cell text-ink-500">
+                    {memory.embeddedAt ? "embedded" : "missing"}
+                    {memory.embeddingProvider ? (
+                      <span className="block text-[10px] text-ink-400">
+                        {memory.embeddingProvider}
+                        {memory.embeddingModel ? ` · ${memory.embeddingModel}` : ""}
+                      </span>
+                    ) : null}
+                  </td>
+                )}
+                {!props.compact && (
+                  <td className="table-cell text-ink-500">
+                    {debug?.matchedBy ?? "n/a"}
+                    {debug?.retrievalMode ? (
+                      <span className="block text-[10px] text-ink-400">{debug.retrievalMode}</span>
+                    ) : null}
+                    {debug?.score !== undefined ? ` · ${debug.score.toFixed(2)}` : ""}
+                    {debug?.rankComponents ? (
+                      <span className="block text-[10px] text-ink-400">
+                        {formatRankComponents(debug.rankComponents)}
+                      </span>
+                    ) : null}
+                  </td>
+                )}
                 {!props.compact && (
                   <td className="table-cell font-mono text-xs text-ink-500">
                     {shortTrace(memory.sourceTraceId ?? undefined)}

@@ -19,21 +19,97 @@ import type {
   MemorySubtype,
   MemoryType,
   RetrievedMemoryCandidate,
-  RetrievedMemoryDebug
+  RetrievedMemoryDebug,
+  UpdateMemoryInput
 } from "./types.js";
+
+export type MemoryEmbeddingProvider = {
+  readonly name: string;
+  readonly dimensions: number;
+  readonly model?: string | undefined;
+  readonly mock?: boolean | undefined;
+  embedText(text: string): Promise<number[]>;
+};
+
+export type MemoryEmbeddingConfig = {
+  provider?: MemoryEmbeddingProvider | undefined;
+  enabled?: boolean | undefined;
+  logger?: { warn?(message: string, context?: Record<string, unknown>): void } | undefined;
+};
 
 export class MemoryService {
   private readonly scorer: MemoryScorer;
   private readonly retriever: MemoryRetriever;
+  private readonly embeddingProvider: MemoryEmbeddingProvider | undefined;
+  private readonly embeddingEnabled: boolean;
+  private readonly embeddingLogger: MemoryEmbeddingConfig["logger"];
 
   constructor(
     private readonly repository: MemoryRepository,
     scorer = new MemoryScorer(),
     retriever?: MemoryRetriever,
-    private readonly extractor: MemoryExtractor = new RuleBasedMemoryExtractor()
+    private readonly extractor: MemoryExtractor = new RuleBasedMemoryExtractor(),
+    embedding?: MemoryEmbeddingConfig
   ) {
     this.scorer = scorer;
     this.retriever = retriever ?? new MemoryRetriever(repository, scorer);
+    this.embeddingProvider = embedding?.provider;
+    this.embeddingEnabled = embedding?.enabled ?? Boolean(embedding?.provider);
+    this.embeddingLogger = embedding?.logger;
+  }
+
+  async createMemory(input: CreateMemoryInput): Promise<Memory> {
+    return this.repository.createMemory(await this.withEmbedding(input));
+  }
+
+  async updateMemory(id: string, input: UpdateMemoryInput): Promise<Memory | null> {
+    const shouldRegenerate =
+      input.content !== undefined || input.summary !== undefined || input.tags !== undefined;
+    if (!shouldRegenerate) {
+      return this.repository.updateMemory(id, input);
+    }
+    const current = await this.repository.getMemoryById(id);
+    if (!current) {
+      return null;
+    }
+    const nextInput: CreateMemoryInput = {
+      type: input.type ?? current.type,
+      subtype: input.subtype ?? current.subtype,
+      scope: input.scope ?? current.scope,
+      scopeId: input.scopeId ?? current.scopeId,
+      memoryLayer: input.memoryLayer ?? current.memoryLayer,
+      status: input.status ?? current.status,
+      content: input.content ?? current.content,
+      summary: input.summary ?? current.summary,
+      importance: input.importance ?? current.importance,
+      emotionValence: input.emotionValence ?? current.emotionValence,
+      emotionArousal: input.emotionArousal ?? current.emotionArousal,
+      source: current.source,
+      sourceTraceId: current.sourceTraceId,
+      metadata: input.metadata ?? current.metadata,
+      tags: input.tags ?? current.tags,
+      observedAt: input.observedAt ?? current.observedAt,
+      eventTime: input.eventTime ?? current.eventTime,
+      validFrom: input.validFrom ?? current.validFrom,
+      validUntil: input.validUntil ?? current.validUntil,
+      expiresAt: input.expiresAt ?? current.expiresAt,
+      supersededAt: input.supersededAt ?? current.supersededAt,
+      supersedes: input.supersedes ?? current.supersedes,
+      supersededBy: input.supersededBy ?? current.supersededBy,
+      contradicts: input.contradicts ?? current.contradicts
+    };
+    const embedded = await this.withEmbedding(nextInput);
+    const updateInput: UpdateMemoryInput = { ...input };
+    if (embedded.embedding !== undefined) updateInput.embedding = embedded.embedding;
+    if (embedded.embeddingProvider !== undefined) {
+      updateInput.embeddingProvider = embedded.embeddingProvider;
+    }
+    if (embedded.embeddingModel !== undefined) updateInput.embeddingModel = embedded.embeddingModel;
+    if (embedded.embeddingDimensions !== undefined) {
+      updateInput.embeddingDimensions = embedded.embeddingDimensions;
+    }
+    if (embedded.embeddedAt !== undefined) updateInput.embeddedAt = embedded.embeddedAt;
+    return this.repository.updateMemory(id, updateInput);
   }
 
   async rememberInteraction(input: {
@@ -76,7 +152,7 @@ export class MemoryService {
     candidate: MemoryCandidate,
     options: { source?: string; tags?: string[] } = {}
   ): Promise<Memory> {
-    return this.repository.createMemory({
+    return this.createMemory({
       type: candidate.type,
       subtype: candidate.subtype ?? null,
       scope: candidate.scope ?? inferMemoryScope(candidate),
@@ -132,7 +208,7 @@ export class MemoryService {
   }
 
   async remember(_sessionId: string, content: string): Promise<void> {
-    await this.repository.createMemory({
+    await this.createMemory({
       type: "working",
       subtype: inferMemorySubtype(content),
       content,
@@ -153,6 +229,111 @@ export class MemoryService {
     return memories.map((memory) => this.reconstructForPrompt(memory));
   }
 
+  private async withEmbedding(input: CreateMemoryInput): Promise<CreateMemoryInput> {
+    if (!this.embeddingEnabled || !this.embeddingProvider) {
+      return input;
+    }
+
+    const embeddingInput = buildEmbeddingInput(input);
+    if (!embeddingInput) {
+      return input;
+    }
+
+    try {
+      const vector = await this.embeddingProvider.embedText(embeddingInput);
+      validateEmbeddingDimensions(vector, this.embeddingProvider.dimensions);
+      return {
+        ...input,
+        embedding: vector,
+        embeddingProvider: this.embeddingProvider.name,
+        embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+        embeddingDimensions: this.embeddingProvider.dimensions,
+        embeddedAt: new Date()
+      };
+    } catch (error) {
+      this.embeddingLogger?.warn?.("memory embedding generation failed; storing without vector", {
+        provider: this.embeddingProvider.name,
+        message: safeErrorMessage(error)
+      });
+      return {
+        ...input,
+        embedding: input.embedding ?? null,
+        embeddingProvider: input.embeddingProvider ?? null,
+        embeddingModel: input.embeddingModel ?? null,
+        embeddingDimensions: input.embeddingDimensions ?? null,
+        embeddedAt: input.embeddedAt ?? null
+      };
+    }
+  }
+
+  private async generateQueryEmbedding(
+    queryText: string,
+    query: MemorySearchQuery
+  ): Promise<RetrievalEmbeddingDebug> {
+    if (!shouldUseVectorRetrieval(query) || !this.embeddingEnabled || !this.embeddingProvider) {
+      return emptyRetrievalEmbeddingDebug();
+    }
+    if (!shouldEmbedQuery(queryText)) {
+      return {
+        ...emptyRetrievalEmbeddingDebug(),
+        vectorEnabled: true,
+        embeddingProvider: this.embeddingProvider.name,
+        embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+        semanticEmbedding: !this.embeddingProvider.mock,
+        ...(this.embeddingProvider.mock
+          ? {
+              embeddingNote:
+                "Mock embeddings validate the retrieval pipeline but do not provide real semantic similarity."
+            }
+          : {}),
+        fallbackUsed: true,
+        fallbackReason: "Query was empty or too trivial for vector retrieval."
+      };
+    }
+
+    try {
+      const embedding = query.embedding ?? (await this.embeddingProvider.embedText(queryText));
+      validateEmbeddingDimensions(embedding, this.embeddingProvider.dimensions);
+      return {
+        vectorEnabled: true,
+        vectorUsed: true,
+        queryEmbeddingGenerated: true,
+        embedding,
+        embeddingProvider: this.embeddingProvider.name,
+        embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+        semanticEmbedding: !this.embeddingProvider.mock,
+        ...(this.embeddingProvider.mock
+          ? {
+              embeddingNote:
+                "Mock embeddings validate the retrieval pipeline but do not provide real semantic similarity."
+            }
+          : {}),
+        fallbackUsed: false
+      };
+    } catch (error) {
+      this.embeddingLogger?.warn?.("query embedding generation failed; using keyword retrieval", {
+        provider: this.embeddingProvider.name,
+        message: safeErrorMessage(error)
+      });
+      return {
+        vectorEnabled: true,
+        vectorUsed: false,
+        queryEmbeddingGenerated: false,
+        embeddingProvider: this.embeddingProvider.name,
+        embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+        semanticEmbedding: !this.embeddingProvider.mock,
+        ...(this.embeddingProvider.mock
+          ? {
+              embeddingNote:
+                "Mock embeddings validate the retrieval pipeline but do not provide real semantic similarity."
+            }
+          : {}),
+        fallbackUsed: true,
+        fallbackReason: safeErrorMessage(error)
+      };
+    }
+  }
+
   private compressForStorage(content: string): string {
     const compact = content.replace(/\s+/g, " ").trim();
     return compact.length > 500 ? `${compact.slice(0, 497)}...` : compact;
@@ -166,12 +347,12 @@ export class MemoryService {
     const policy = createRetrievalPolicy(query);
     const queryText = query.text?.trim() ?? "";
     const keywords = queryText ? extractSearchKeywords(queryText) : [];
+    const embeddingDebug = await this.generateQueryEmbedding(queryText, query);
     const broadQuery: MemorySearchQuery = {
       includeHistory: true,
       limit: Math.max(query.limit ?? 6, 20)
     };
     if (query.text !== undefined) broadQuery.text = query.text;
-    if (query.embedding !== undefined) broadQuery.embedding = query.embedding;
     if (query.types !== undefined) broadQuery.types = query.types;
     if (query.subtypes !== undefined) broadQuery.subtypes = query.subtypes;
     if (query.memoryLayers !== undefined) broadQuery.memoryLayers = query.memoryLayers;
@@ -180,18 +361,36 @@ export class MemoryService {
     if (query.minImportance !== undefined) broadQuery.minImportance = query.minImportance;
     if (query.tags !== undefined) broadQuery.tags = query.tags;
     const memories = await this.retriever.retrieve(broadQuery);
+    const vectorCandidates =
+      embeddingDebug.embedding && shouldUseVectorRetrieval(query)
+        ? this.toCandidates(
+            await this.repository.searchMemoriesByEmbedding({
+              ...broadQuery,
+              embedding: embeddingDebug.embedding,
+              limit: Math.max(query.limit ?? 6, 10)
+            }),
+            keywords,
+            policy
+          )
+        : [];
     if (!queryText || keywords.length === 0) {
       return this.buildRetrievalResult(
         query,
         policy,
         keywords,
-        memories,
-        this.repository.getRetrievalMode?.() ?? "keyword"
+        [...memories, ...vectorCandidates.map((candidate) => candidate.memory)],
+        vectorCandidates.length > 0
+          ? this.hybridRetrievalMode()
+          : (this.repository.getRetrievalMode?.() ?? "in-memory-keyword"),
+        embeddingDebug,
+        vectorCandidates.length,
+        memories.length
       );
     }
 
     const candidates = [
       ...this.toCandidates(memories, keywords, policy),
+      ...vectorCandidates,
       ...(await this.retrieveByKeywords(query, keywords, policy))
     ].sort(compareCandidates);
 
@@ -201,7 +400,10 @@ export class MemoryService {
         policy,
         keywords,
         candidates,
-        this.resolveRetrievalMode(true)
+        vectorCandidates.length > 0 ? this.hybridRetrievalMode() : this.resolveRetrievalMode(true),
+        embeddingDebug,
+        vectorCandidates.length,
+        memories.length
       );
     }
 
@@ -211,7 +413,14 @@ export class MemoryService {
       policy,
       keywords,
       this.rankFallbackRecent(recent, policy),
-      "fallback-recent"
+      "fallback-recent",
+      {
+        ...embeddingDebug,
+        fallbackUsed: true,
+        fallbackReason: "No keyword or vector candidates matched."
+      },
+      vectorCandidates.length,
+      memories.length
     );
   }
 
@@ -259,14 +468,27 @@ export class MemoryService {
     policy: RetrievalPolicy
   ): RetrievedMemoryCandidate[] {
     return memories
-      .map((memory) => ({
-        memory,
-        displayText: createMemoryDisplayText(memory),
-        matchedBy: memory.searchMatchedBy ?? detectMatchReason(memory, keywords),
-        score: scoreMemory(memory, keywords, policy) + (memory.searchScore ?? 0),
-        ...(memory.searchRankComponents ? { rankComponents: memory.searchRankComponents } : {}),
-        ...memoryExclusion(memory, policy)
-      }))
+      .map((memory) => {
+        const lexicalScore = scoreMemory(memory, keywords, policy);
+        const matchedBy = memory.searchMatchedBy ?? detectMatchReason(memory, keywords);
+        const vectorScore = memory.searchRankComponents?.vectorScore ?? 0;
+        const vectorOnlyMatch = matchedBy === "vector" && keywords.length > 0 && lexicalScore <= 0;
+        const vectorThreshold = this.embeddingProvider?.mock ? 0.95 : 0.78;
+        const vectorExclusion =
+          vectorOnlyMatch && vectorScore < vectorThreshold
+            ? { excludedReason: `vector-below-threshold:${vectorScore.toFixed(3)}` }
+            : {};
+
+        return {
+          memory,
+          displayText: createMemoryDisplayText(memory),
+          matchedBy,
+          score: lexicalScore + (memory.searchScore ?? 0),
+          ...(memory.searchRankComponents ? { rankComponents: memory.searchRankComponents } : {}),
+          ...memoryExclusion(memory, policy),
+          ...vectorExclusion
+        };
+      })
       .filter((entry) => entry.score > 0 || Boolean(entry.excludedReason));
   }
 
@@ -295,7 +517,10 @@ export class MemoryService {
     policy: RetrievalPolicy,
     keywords: string[],
     memories: Memory[],
-    retrievalMode: MemoryRetrievalMode
+    retrievalMode: MemoryRetrievalMode,
+    embeddingDebug: RetrievalEmbeddingDebug = emptyRetrievalEmbeddingDebug(),
+    vectorResultCount = 0,
+    keywordResultCount = memories.length
   ): MemoryRetrievalResult {
     return this.buildRetrievalResultFromCandidates(
       query,
@@ -311,16 +536,30 @@ export class MemoryService {
           ...memoryExclusion(memory, policy)
         }))
         .sort(compareCandidates),
-      retrievalMode
+      retrievalMode,
+      embeddingDebug,
+      vectorResultCount,
+      keywordResultCount
     );
   }
 
   private resolveRetrievalMode(hasKeywordFallback: boolean): MemoryRetrievalMode {
-    const repositoryMode = this.repository.getRetrievalMode?.() ?? "keyword";
-    if (repositoryMode === "postgres-hybrid-keyword" || repositoryMode === "postgres-trigram") {
+    const repositoryMode = this.repository.getRetrievalMode?.() ?? "in-memory-keyword";
+    if (
+      repositoryMode === "postgres-hybrid" ||
+      repositoryMode === "postgres-hybrid-keyword" ||
+      repositoryMode === "postgres-trigram" ||
+      repositoryMode === "in-memory-hybrid" ||
+      repositoryMode === "in-memory-keyword"
+    ) {
       return repositoryMode;
     }
     return hasKeywordFallback ? "hybrid-keyword" : "keyword";
+  }
+
+  private hybridRetrievalMode(): MemoryRetrievalMode {
+    const repositoryMode = this.repository.getRetrievalMode?.() ?? "in-memory-keyword";
+    return repositoryMode.startsWith("postgres") ? "postgres-hybrid" : "in-memory-hybrid";
   }
 
   private buildRetrievalResultFromCandidates(
@@ -328,7 +567,10 @@ export class MemoryService {
     policy: RetrievalPolicy,
     keywords: string[],
     candidates: RetrievedMemoryCandidate[],
-    retrievalMode: MemoryRetrievalMode
+    retrievalMode: MemoryRetrievalMode,
+    embeddingDebug: RetrievalEmbeddingDebug = emptyRetrievalEmbeddingDebug(),
+    vectorResultCount = candidates.filter((candidate) => candidate.matchedBy === "vector").length,
+    keywordResultCount = candidates.length - vectorResultCount
   ): MemoryRetrievalResult {
     const mergedCandidates = mergeCandidateMatches(candidates);
     const { selected, all } = dedupeCandidates(
@@ -351,6 +593,22 @@ export class MemoryService {
       rawCount: candidates.length,
       count: selectedLimited.length,
       retrievalMode,
+      vectorEnabled: embeddingDebug.vectorEnabled,
+      vectorUsed: embeddingDebug.vectorUsed || vectorResultCount > 0,
+      ...(embeddingDebug.embeddingProvider
+        ? { embeddingProvider: embeddingDebug.embeddingProvider }
+        : {}),
+      ...(embeddingDebug.embeddingModel ? { embeddingModel: embeddingDebug.embeddingModel } : {}),
+      ...(embeddingDebug.semanticEmbedding !== undefined
+        ? { semanticEmbedding: embeddingDebug.semanticEmbedding }
+        : {}),
+      ...(embeddingDebug.embeddingNote ? { embeddingNote: embeddingDebug.embeddingNote } : {}),
+      queryEmbeddingGenerated: embeddingDebug.queryEmbeddingGenerated,
+      vectorResultCount,
+      keywordResultCount,
+      hybridResultCount: selectedLimited.length,
+      fallbackUsed: Boolean(embeddingDebug.fallbackUsed || retrievalMode === "fallback-recent"),
+      ...(embeddingDebug.fallbackReason ? { fallbackReason: embeddingDebug.fallbackReason } : {}),
       retrievalScope: policy.retrievalScope,
       includedScopes: policy.includedScopes,
       includeArchived: policy.includeArchived,
@@ -483,6 +741,65 @@ type RetrievalPolicy = {
   includeExpired: boolean;
   currentTime: Date;
 };
+
+type RetrievalEmbeddingDebug = {
+  vectorEnabled: boolean;
+  vectorUsed: boolean;
+  queryEmbeddingGenerated: boolean;
+  embedding?: number[] | undefined;
+  embeddingProvider?: string | undefined;
+  embeddingModel?: string | undefined;
+  semanticEmbedding?: boolean | undefined;
+  embeddingNote?: string | undefined;
+  fallbackUsed?: boolean | undefined;
+  fallbackReason?: string | undefined;
+};
+
+function emptyRetrievalEmbeddingDebug(): RetrievalEmbeddingDebug {
+  return {
+    vectorEnabled: false,
+    vectorUsed: false,
+    queryEmbeddingGenerated: false,
+    fallbackUsed: false
+  };
+}
+
+function shouldUseVectorRetrieval(query: MemorySearchQuery): boolean {
+  return query.vectorEnabled !== false;
+}
+
+function shouldEmbedQuery(text: string): boolean {
+  const normalized = text.trim();
+  if (normalized.length < 3) {
+    return false;
+  }
+  return !/^(hi|hey|hello|你好|在吗)[!.。！\s]*$/iu.test(normalized);
+}
+
+function buildEmbeddingInput(input: CreateMemoryInput): string {
+  return [input.summary, input.content, input.tags?.join(" ")]
+    .filter((part): part is string => Boolean(part?.trim()))
+    .join("\n")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 8000);
+}
+
+function validateEmbeddingDimensions(vector: number[], expected: number): void {
+  if (vector.length !== expected) {
+    throw new Error(
+      `Embedding dimension mismatch: expected ${expected}, received ${vector.length}.`
+    );
+  }
+  if (!vector.every((value) => Number.isFinite(value))) {
+    throw new Error("Embedding vector contained non-finite values.");
+  }
+}
+
+function safeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [REDACTED]").slice(0, 300);
+}
 
 function createRetrievalPolicy(query: MemorySearchQuery): RetrievalPolicy {
   const includedScopes = resolveIncludedScopes(query);
@@ -722,11 +1039,41 @@ function mergeCandidateMatches(candidates: RetrievedMemoryCandidate[]): Retrieve
   const byId = new Map<string, RetrievedMemoryCandidate>();
   for (const candidate of candidates) {
     const current = byId.get(candidate.memory.id);
-    if (!current || candidate.score > current.score) {
+    if (!current) {
       byId.set(candidate.memory.id, candidate);
+      continue;
+    }
+
+    const merged = mergeCandidateScore(current, candidate);
+    if (candidate.score > current.score) {
+      byId.set(candidate.memory.id, merged);
+    } else {
+      byId.set(candidate.memory.id, {
+        ...merged,
+        matchedBy:
+          current.matchedBy === "vector" && candidate.matchedBy !== "vector"
+            ? candidate.matchedBy
+            : current.matchedBy
+      });
     }
   }
   return [...byId.values()].sort(compareCandidates);
+}
+
+function mergeCandidateScore(
+  left: RetrievedMemoryCandidate,
+  right: RetrievedMemoryCandidate
+): RetrievedMemoryCandidate {
+  const keywordCandidate =
+    left.matchedBy === "vector" && right.matchedBy !== "vector" ? right : left;
+  return {
+    ...keywordCandidate,
+    score: Math.max(left.score, right.score) + Math.min(left.score, right.score) * 0.15,
+    rankComponents: {
+      ...(left.rankComponents ?? {}),
+      ...(right.rankComponents ?? {})
+    }
+  };
 }
 
 function countUniqueExcluded(memories: RetrievedMemoryDebug[], prefix: string): number {
@@ -884,6 +1231,15 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
     supersededAt: candidate.memory.supersededAt,
     displayText: candidate.displayText,
     matchedBy: candidate.matchedBy,
+    ...(candidate.memory.searchRetrievalMode
+      ? { retrievalMode: candidate.memory.searchRetrievalMode }
+      : {}),
+    ...(candidate.rankComponents?.vectorScore !== undefined
+      ? { vectorScore: candidate.rankComponents.vectorScore }
+      : {}),
+    ...(candidate.rankComponents?.hybridScore !== undefined
+      ? { hybridScore: candidate.rankComponents.hybridScore }
+      : {}),
     score: candidate.score,
     ...(candidate.rankComponents ? { rankComponents: candidate.rankComponents } : {}),
     ...(candidate.excludedReason ? { excludedReason: candidate.excludedReason } : {})

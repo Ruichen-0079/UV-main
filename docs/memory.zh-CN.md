@@ -24,7 +24,15 @@ packages/memory/migrations/
 - `entities`
 - `relations`
 
-仓库层把向量搜索暴露为接口；在 MVP 阶段，embedding 仍然不是必需项。PostgreSQL 模式会先使用 YUVI Postgres Search v2：`pg_trgm` trigram、PostgreSQL 内置 `simple` full-text index、结构化 filter，以及 tag / metadata GIN index。
+PostgreSQL 模式会使用 YUVI Postgres Search v2，并可选启用 pgvector retrieval。`pg_trgm` trigram、PostgreSQL 内置 `simple` full-text index、结构化 filter、tag / metadata GIN index 和 embedding metadata 会一起工作。
+
+Embedding 是增强信号，不会替代 keyword/trigram/full-text。路径、端口、命令、provider 名称、model 名称、env var、tag 和错误信息这类精确技术匹配仍然优先。real-provider-first 模式推荐 `EMBEDDING_PROVIDER=openai-compatible`；`EMBEDDING_PROVIDER=mock` 只用于测试、CI 或显式离线模式，并会报告 `semanticEmbedding=false`，表示它只能验证检索管线，不能提供真实语义相似度。真实 provider 可能消耗 token。新写入的 memory 会在 provider 可用时生成 embedding；如果 embedding 失败，memory 仍会保存，并回退到 keyword/trigram/full-text 检索。已有 Postgres memory 可在 migration 后回填：
+
+```bash
+pnpm memory:embed:backfill
+pnpm memory:embed:backfill -- --dry-run
+pnpm memory:embed:backfill -- --force --limit=500
+```
 
 Migration 会为 content / summary 建立 trigram index，为 tags / metadata 建立 GIN index，并为 scope、scopeId、memoryLayer、status、type、subtype、source、sourceTraceId、timestamp 和 importance 建立辅助索引。检索会覆盖 content、summary、tags、type、subtype、scope、scopeId、memoryLayer、source/sourceTraceId 和安全 metadata 文本，可以处理中文、英文、中英混合、Windows 路径、URL、端口、`MEMORY_EXTRACTOR` 这类 env key，以及 `pnpm db:migrate` 这类命令。Prompt Preview 和 Dashboard search debug 会显示 `retrievalMode`、`matchedBy`、`score`、rank components 和 `sourceTraceId`。
 

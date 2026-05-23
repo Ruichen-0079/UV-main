@@ -11,6 +11,9 @@ export type ProviderHealth = {
   required?: boolean;
   baseUrl?: string;
   model?: string;
+  dimensions?: number;
+  semanticEmbedding?: boolean;
+  embeddingNote?: string;
 };
 
 export type HealthResponse = {
@@ -131,6 +134,11 @@ export type MemoryRecord = {
   supersedes?: string[];
   supersededBy?: string | null;
   contradicts?: string[];
+  embedding?: null;
+  embeddingModel?: string | null;
+  embeddingProvider?: string | null;
+  embeddingDimensions?: number | null;
+  embeddedAt?: string | null;
 };
 
 export type CreateMemoryRequest = {
@@ -282,6 +290,7 @@ export type RetrievedMemoryDebug = {
   lastAccessedAt?: string;
   displayText: string;
   matchedBy?:
+    | "vector"
     | "content"
     | "summary"
     | "tag"
@@ -293,7 +302,12 @@ export type RetrievedMemoryDebug = {
     | "keyword"
     | "fallback";
   score?: number;
+  retrievalMode?: string;
+  vectorScore?: number;
+  hybridScore?: number;
   rankComponents?: {
+    vectorScore?: number;
+    hybridScore?: number;
     keywordScore?: number;
     tagScore?: number;
     trigramScore?: number;
@@ -335,6 +349,18 @@ export type PromptPreviewResponse = {
   retrievedMemoryCountRaw?: number;
   retrievedMemoryCount?: number;
   retrievalMode?: string;
+  vectorEnabled?: boolean;
+  vectorUsed?: boolean;
+  embeddingProvider?: string;
+  embeddingModel?: string;
+  semanticEmbedding?: boolean;
+  embeddingNote?: string;
+  queryEmbeddingGenerated?: boolean;
+  vectorResultCount?: number;
+  keywordResultCount?: number;
+  hybridResultCount?: number;
+  retrievalFallbackUsed?: boolean;
+  retrievalFallbackReason?: string;
   retrievalScope?: string;
   includedScopes?: Array<{ scope: string; scopeId?: string | null }>;
   includeArchived?: boolean;
@@ -384,6 +410,18 @@ export type PromptPreviewResponse = {
     retrievedMemoryCountRaw?: number;
     retrievedMemoryCount?: number;
     retrievalMode?: string;
+    vectorEnabled?: boolean;
+    vectorUsed?: boolean;
+    embeddingProvider?: string;
+    embeddingModel?: string;
+    semanticEmbedding?: boolean;
+    embeddingNote?: string;
+    queryEmbeddingGenerated?: boolean;
+    vectorResultCount?: number;
+    keywordResultCount?: number;
+    hybridResultCount?: number;
+    retrievalFallbackUsed?: boolean;
+    retrievalFallbackReason?: string;
     retrievalScope?: string;
     includedScopes?: Array<{ scope: string; scopeId?: string | null }>;
     includeArchived?: boolean;
@@ -444,6 +482,7 @@ export type RuntimeSettingsResponse = {
     providers: {
       chat: ProviderHealth;
       reasoning: ProviderHealth;
+      embedding?: ProviderHealth;
     };
   };
   settings: Record<string, LayeredSetting>;
@@ -455,6 +494,7 @@ export type RuntimeSettingsResponse = {
     runtimeMode: string;
     eventBus: string;
     activeEventBus: string;
+    providerAllowMocks?: boolean;
     pendingRestart: boolean;
   };
   memory: {
@@ -509,6 +549,7 @@ export type RuntimeSettingsResponse = {
       apiKeyPreview?: string;
       model: string;
       dimensions: string;
+      status?: ProviderHealth;
     };
   };
   restartRequired: boolean;
@@ -606,6 +647,18 @@ export const apiClient = {
     rawCount?: number;
     count?: number;
     retrievalMode?: string;
+    vectorEnabled?: boolean;
+    vectorUsed?: boolean;
+    embeddingProvider?: string;
+    embeddingModel?: string;
+    semanticEmbedding?: boolean;
+    embeddingNote?: string;
+    queryEmbeddingGenerated?: boolean;
+    vectorResultCount?: number;
+    keywordResultCount?: number;
+    hybridResultCount?: number;
+    fallbackUsed?: boolean;
+    fallbackReason?: string;
     retrievalScope?: string;
     includedScopes?: Array<{ scope: string; scopeId?: string | null }>;
     includeArchived?: boolean;
@@ -618,45 +671,45 @@ export const apiClient = {
     query?: string;
     repository?: string;
   }> {
-    const params = new URLSearchParams({
+    const body: Record<string, string | number | boolean> = {
       q: query,
       limit: String(options.limit ?? 20)
-    });
+    };
     if (options.type && options.type !== "all") {
-      params.set("type", options.type);
+      body["type"] = options.type;
     }
     if (options.subtype && options.subtype !== "all") {
-      params.set("subtype", options.subtype);
+      body["subtype"] = options.subtype;
     }
     if (options.source && options.source !== "all") {
-      params.set("source", options.source);
+      body["source"] = options.source;
     }
     if (options.scope && options.scope !== "all") {
-      params.set("scope", options.scope);
+      body["scope"] = options.scope;
     }
     if (options.scopeId?.trim()) {
-      params.set("scopeId", options.scopeId.trim());
+      body["scopeId"] = options.scopeId.trim();
     }
     if (options.memoryLayer && options.memoryLayer !== "all") {
-      params.set("memoryLayer", options.memoryLayer);
+      body["memoryLayer"] = options.memoryLayer;
     }
     if (options.status && options.status !== "all") {
-      params.set("status", options.status);
+      body["status"] = options.status;
     }
     if (options.tags?.trim()) {
-      params.set("tags", options.tags.trim());
+      body["tags"] = options.tags.trim();
     }
     if (options.minImportance?.trim()) {
-      params.set("minImportance", options.minImportance.trim());
+      body["minImportance"] = options.minImportance.trim();
     }
     if (options.includeArchived) {
-      params.set("includeArchived", "true");
+      body["includeArchived"] = true;
     }
     if (options.includeSuperseded) {
-      params.set("includeSuperseded", "true");
+      body["includeSuperseded"] = true;
     }
     if (options.includeExpired) {
-      params.set("includeExpired", "true");
+      body["includeExpired"] = true;
     }
 
     return request<{
@@ -665,6 +718,18 @@ export const apiClient = {
       rawCount?: number;
       count?: number;
       retrievalMode?: string;
+      vectorEnabled?: boolean;
+      vectorUsed?: boolean;
+      embeddingProvider?: string;
+      embeddingModel?: string;
+      semanticEmbedding?: boolean;
+      embeddingNote?: string;
+      queryEmbeddingGenerated?: boolean;
+      vectorResultCount?: number;
+      keywordResultCount?: number;
+      hybridResultCount?: number;
+      fallbackUsed?: boolean;
+      fallbackReason?: string;
       retrievalScope?: string;
       includedScopes?: Array<{ scope: string; scopeId?: string | null }>;
       includeArchived?: boolean;
@@ -676,7 +741,10 @@ export const apiClient = {
       debugMemories?: RetrievedMemoryDebug[];
       query?: string;
       repository?: string;
-    }>(`/memory/search?${params.toString()}`);
+    }>("/memory/search", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
   },
 
   createMemory(input: CreateMemoryRequest): Promise<MemoryRecord> {

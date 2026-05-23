@@ -42,8 +42,10 @@ describe("runtime config", () => {
       tts: "xai",
       stt: "dashscope",
       vision: "xai",
-      embedding: "mock"
+      embedding: "openai-compatible"
     });
+    expect(config.providers.allowMocks).toBe(false);
+    expect(config.providers.endpoints.embedding.dimensions).toBe(1536);
   });
 
   it("redacts secrets and authorization-like fields", () => {
@@ -90,10 +92,12 @@ describe("runtime config", () => {
 
   it("requires DATABASE_URL only when postgres memory is enabled", () => {
     const inMemoryConfig = parseRuntimeConfig({
-      MEMORY_REPOSITORY: "in-memory"
+      MEMORY_REPOSITORY: "in-memory",
+      PROVIDER_ALLOW_MOCKS: "true"
     });
     const postgresConfig = parseRuntimeConfig({
-      MEMORY_REPOSITORY: "postgres"
+      MEMORY_REPOSITORY: "postgres",
+      PROVIDER_ALLOW_MOCKS: "true"
     });
 
     expect(() => validateRuntimeConfig(inMemoryConfig)).not.toThrow();

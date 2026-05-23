@@ -66,7 +66,11 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
           })
         : ruleBasedExtractor;
 
-    return new MemoryService(memoryRepository, undefined, undefined, memoryExtractor);
+    return new MemoryService(memoryRepository, undefined, undefined, memoryExtractor, {
+      provider: providers.getEmbeddingProvider(),
+      enabled: true,
+      logger: runtimeLogger
+    });
   }
 
   function createRuntime(

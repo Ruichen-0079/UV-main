@@ -120,6 +120,102 @@ describe("MemoryRepository", () => {
     expect(memories[0]?.content).toContain("YUVI Runtime");
   });
 
+  it("stores deterministic embedding metadata when an embedding provider is available", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository, undefined, undefined, undefined, {
+      provider: createTestEmbeddingProvider()
+    });
+
+    const created = await service.createMemory({
+      type: "semantic",
+      content: "YUVI Runtime uses DeepSeek for chat.",
+      summary: "YUVI provider choice.",
+      source: "test",
+      tags: ["yuvi", "deepseek"]
+    });
+
+    expect(created.embedding).toEqual([0.1, 0.2, 0.3]);
+    expect(created.embeddingProvider).toBe("mock-test");
+    expect(created.embeddingModel).toBe("mock-test-model");
+    expect(created.embeddingDimensions).toBe(3);
+    expect(created.embeddedAt).toBeInstanceOf(Date);
+  });
+
+  it("stores memory without embedding if embedding generation fails", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository, undefined, undefined, undefined, {
+      provider: createFailingEmbeddingProvider()
+    });
+
+    const created = await service.createMemory({
+      type: "semantic",
+      content: "YUVI Runtime survives embedding outages.",
+      source: "test",
+      tags: ["yuvi"]
+    });
+
+    expect(created.content).toContain("survives");
+    expect(created.embedding).toBeNull();
+    expect(created.embeddingProvider).toBeNull();
+  });
+
+  it("regenerates embedding metadata when memory text changes", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository, undefined, undefined, undefined, {
+      provider: createTestEmbeddingProvider()
+    });
+    const created = await service.createMemory({
+      type: "semantic",
+      content: "Old content",
+      source: "test",
+      tags: ["old"]
+    });
+
+    const updated = await service.updateMemory(created.id, {
+      content: "New content for embedding regeneration.",
+      tags: ["new"]
+    });
+
+    expect(updated?.embedding).toEqual([0.1, 0.2, 0.3]);
+    expect(updated?.embeddingProvider).toBe("mock-test");
+    expect(updated?.embeddedAt).toBeInstanceOf(Date);
+  });
+
+  it("uses vector retrieval when configured but keeps exact keyword matches ranked first", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository, undefined, undefined, undefined, {
+      provider: createTestEmbeddingProvider()
+    });
+    await service.createMemory({
+      type: "semantic",
+      subtype: "provider-choice",
+      content: "用户偏好 Chat 和 Reasoning 使用 DeepSeek。",
+      source: "manual",
+      tags: ["provider", "deepseek"],
+      importance: 0.9
+    });
+    await service.createMemory({
+      type: "semantic",
+      content: "A vague companion architecture preference.",
+      source: "manual",
+      tags: ["general"],
+      importance: 0.2
+    });
+
+    const result = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "DeepSeek provider",
+      limit: 5
+    });
+
+    expect(result.vectorEnabled).toBe(true);
+    expect(result.vectorUsed).toBe(true);
+    expect(result.queryEmbeddingGenerated).toBe(true);
+    expect(result.vectorResultCount).toBeGreaterThan(0);
+    expect(result.retrievalMode).toBe("in-memory-hybrid");
+    expect(result.memories[0]?.displayText).toContain("DeepSeek");
+    expect(result.memories[0]?.matchedBy).not.toBe("vector");
+  });
+
   it("excludes non-active or temporally invalid memories from prompt retrieval", async () => {
     const repository = new InMemoryMemoryRepository();
     const service = new MemoryService(repository);
@@ -328,7 +424,7 @@ describe("MemoryRepository", () => {
       limit: 5
     });
 
-    expect(result.retrievalMode).toBe("hybrid-keyword");
+    expect(result.retrievalMode).toBe("in-memory-keyword");
     expect(result.rawCount).toBeGreaterThan(1);
     expect(result.count).toBe(1);
     expect(result.memories[0]?.type).toBe("semantic");
@@ -449,7 +545,7 @@ describe("MemoryRepository", () => {
     });
 
     expect(summaryResult.memories[0]).toMatchObject({ matchedBy: "summary" });
-    expect(summaryResult.retrievalMode).toBe("hybrid-keyword");
+    expect(summaryResult.retrievalMode).toBe("in-memory-keyword");
     expect(summaryResult.memories[0]?.score).toBeGreaterThan(0);
     expect(tagResult.memories[0]?.matchedBy).toBe("tag");
     expect(commandResult.memories[0]?.displayText).toContain("pnpm db:migrate");
@@ -1073,6 +1169,11 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("memories_type_subtype_idx");
     expect(combinedSql).toContain("memories_source_trace_id_trgm_idx");
     expect(combinedSql).toContain("to_tsvector('simple'");
+    expect(combinedSql).toContain("embedding_model");
+    expect(combinedSql).toContain("embedding_provider");
+    expect(combinedSql).toContain("embedding_dimensions");
+    expect(combinedSql).toContain("embedded_at");
+    expect(combinedSql).toContain("memories_embedding_provider_model_idx");
   });
 });
 
@@ -1088,4 +1189,28 @@ function createLlmExtractor(output: string | Record<string, unknown>): LlmMemory
     new RuleBasedMemoryExtractor(),
     { enabled: true, providerConfigured: true, providerName: "deepseek" }
   );
+}
+
+function createTestEmbeddingProvider() {
+  return {
+    name: "mock-test",
+    model: "mock-test-model",
+    dimensions: 3,
+    mock: true,
+    async embedText(_text: string): Promise<number[]> {
+      return [0.1, 0.2, 0.3];
+    }
+  };
+}
+
+function createFailingEmbeddingProvider() {
+  return {
+    name: "failing-test",
+    model: "failing-test-model",
+    dimensions: 3,
+    mock: true,
+    async embedText(_text: string): Promise<number[]> {
+      throw new Error("embedding unavailable");
+    }
+  };
 }

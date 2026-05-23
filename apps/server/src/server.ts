@@ -4,7 +4,7 @@ import type { ServerConfig } from "./config.js";
 import { createAppContext } from "./context.js";
 import { registerDebugRoutes } from "./routes/debug.js";
 import { registerHealthRoutes } from "./routes/health.js";
-import { registerMemoryRoutes } from "./routes/memory.js";
+import { memorySearchValidationError, registerMemoryRoutes } from "./routes/memory.js";
 import { registerMessageRoutes } from "./routes/message.js";
 import { registerProviderRoutes } from "./routes/providers.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
@@ -23,6 +23,26 @@ export async function buildServer(config: ServerConfig) {
         "*.Authorization"
       ]
     }
+  });
+
+  app.setErrorHandler((error, request, reply) => {
+    const normalizedError = normalizeError(error);
+    const requestUrl = request.raw.url ?? "";
+    if (requestUrl.startsWith("/memory/search") && isMalformedQueryError(normalizedError)) {
+      return reply.status(400).send(memorySearchValidationError());
+    }
+
+    const statusCode =
+      normalizedError.statusCode && normalizedError.statusCode >= 400
+        ? normalizedError.statusCode
+        : 500;
+    if (statusCode >= 500) {
+      request.log.error({ err: normalizedError }, "request failed");
+    }
+    return reply.status(statusCode).send({
+      error: statusCode >= 500 ? "internal_server_error" : "bad_request",
+      message: normalizedError.message
+    });
   });
 
   await app.register(websocket);
@@ -52,4 +72,22 @@ export async function buildServer(config: ServerConfig) {
   await registerWebSocketRoutes(app, context);
 
   return app;
+}
+
+function normalizeError(error: unknown): Error & { statusCode?: number } {
+  if (error instanceof Error) {
+    return error as Error & { statusCode?: number };
+  }
+  return new Error("Unknown request error.");
+}
+
+function isMalformedQueryError(error: Error & { statusCode?: number }): boolean {
+  const message = error.message.toLowerCase();
+  return (
+    error.statusCode === 400 &&
+    (message.includes("uri") ||
+      message.includes("url") ||
+      message.includes("malformed") ||
+      message.includes("invalid"))
+  );
 }

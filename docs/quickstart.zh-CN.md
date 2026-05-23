@@ -96,7 +96,7 @@ DASHSCOPE_API_KEY=
 DASHSCOPE_STT_MODEL=
 ```
 
-如果本地开发时没有真实 optional provider key，保留：
+正常开发/运行默认是 real-provider-first。只有在 CI、测试或显式离线开发时才开启 mock：
 
 ```env
 NODE_ENV=development
@@ -132,7 +132,7 @@ DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 
 启用 PostgreSQL 记忆前必须先运行 migration。
 
-Migration 会启用 Postgres Search v2：`pg_trgm` trigram index、PostgreSQL 内置 full-text index、结构化 filters、tags / metadata indexes。Postgres 模式会持久化记忆，并能更好地检索中英混合文本、命令、Windows/WSL 路径、URL、端口、env key 和 provider 名称；`in-memory` 模式仍然更简单，但服务器重启后会清空。
+Migration 会启用 Postgres Search v2 和可选 pgvector retrieval：`pg_trgm` trigram index、PostgreSQL 内置 full-text index、结构化 filters、tags / metadata indexes、embedding metadata columns 和 pgvector storage。Postgres 模式会持久化记忆，并能更好地检索中英混合文本、命令、Windows/WSL 路径、URL、端口、env key、provider 名称和语义近似内容；`in-memory` 模式仍然更简单，但服务器重启后会清空。
 
 如果你手动启动服务，启动前请把 `.env` 和 `.env.local` 加载进 shell；使用 `./scripts/dev.sh` 时脚本会自动加载。
 
@@ -243,7 +243,29 @@ docker compose -f infra/docker-compose.yml up -d
 
 ## 4. Run Migrations
 
-PostgreSQL memory mode 使用 `pnpm db:migrate` 应用 schema。Migration 会启用 `vector`、`pgcrypto` 和 `pg_trgm`，并为 memory 的 content、summary、tags、type、subtype、source、sourceTraceId、createdAt、importance 和 metadata 建立开发期检索索引。`pg_trgm` 用于在 embeddings 尚未启用前改善 Postgres keyword search；in-memory 模式仍然适合快速调试，但 server restart 后会丢失数据。
+PostgreSQL memory mode 使用 `pnpm db:migrate` 应用 schema。Migration 会启用 `vector`、`pgcrypto` 和 `pg_trgm`，并为 memory 的 content、summary、tags、type、subtype、source、sourceTraceId、createdAt、importance、metadata 和 embedding metadata 建立开发期检索索引。`pg_trgm` 和 full-text 仍然负责精确技术查询；embedding 用于增强语义近似检索，失败时会安全回退。in-memory 模式仍然适合快速调试，但 server restart 后会丢失数据。
+
+Embedding 默认推荐 real-provider-first 的 openai-compatible 配置；mock 仅用于测试、CI 或显式离线模式，并会在 API 元数据中标记 `semanticEmbedding=false`：
+
+```env
+EMBEDDING_PROVIDER=openai-compatible
+EMBEDDING_DIMENSIONS=1536
+```
+
+真实 OpenAI-compatible embedding provider 需要显式配置，可能消耗 provider token。已有 Postgres memory 可在 migration 后回填：
+
+```bash
+pnpm memory:embed:backfill
+```
+
+中文或 Unicode memory search 推荐使用 URL encoding 或 JSON POST，避免 Windows CMD/raw URL 编码差异：
+
+```bash
+curl -G "http://127.0.0.1:6121/memory/search" --data-urlencode "q=模型供应商偏好"
+curl -X POST "http://127.0.0.1:6121/memory/search" \
+  -H "content-type: application/json" \
+  -d '{"q":"模型供应商偏好","limit":10}'
+```
 
 PostgreSQL memory mode 使用内置 migration runner：
 
@@ -595,8 +617,8 @@ docker compose -f infra/docker-compose.yml ps
 修复：
 
 - 对 optional providers 来说，这在 MVP development 中是可接受的。
-- 本地工作设置 `PROVIDER_ALLOW_MOCKS=true`。
 - 需要真实调用时，填写对应 provider 的 API key 和 model 变量。
+- 只有在测试、CI 或显式离线 mock 模式下才设置 `PROVIDER_ALLOW_MOCKS=true`。
 
 ### Model Not Found
 

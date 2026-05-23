@@ -13,6 +13,9 @@ export type ProviderHealth = {
   required?: boolean | undefined;
   baseUrl?: string | undefined;
   model?: string | undefined;
+  dimensions?: number | undefined;
+  semanticEmbedding?: boolean | undefined;
+  embeddingNote?: string | undefined;
   latencyMs?: number;
   checkedAt: string;
   message?: string;

@@ -55,6 +55,8 @@ MEMORY_REPOSITORY=memory
 DEFAULT_EMBEDDING_PROVIDER=mock
 ```
 
+正常开发/运行默认是 real-provider-first（`PROVIDER_ALLOW_MOCKS=false`）。测试和 CI 会显式设置 `PROVIDER_ALLOW_MOCKS=true` 与 `DEFAULT_EMBEDDING_PROVIDER=mock`，因此不需要真实 API key。Mock embedding 会报告 `semanticEmbedding=false`，它只验证管线，不提供真实语义相似度。
+
 ## Real Provider Tests
 
 真实 provider 调用刻意不放进默认测试套件。之后可以添加可选 integration tests，并在相关 env var 缺失时跳过。

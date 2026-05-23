@@ -2,7 +2,9 @@ import type {
   CreateMemoryInput,
   Memory,
   MemoryLayer,
+  MemoryRetrievalMode,
   MemoryScope,
+  MemorySearchQuery,
   MemoryStatus,
   MemorySubtype,
   MemoryType,
@@ -100,6 +102,14 @@ const RecentMemoryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20)
 });
 
+const BooleanishSchema = z.preprocess((value) => {
+  if (typeof value === "string") {
+    if (["true", "1", "yes", "on"].includes(value.toLowerCase())) return true;
+    if (["false", "0", "no", "off"].includes(value.toLowerCase())) return false;
+  }
+  return value;
+}, z.boolean());
+
 const SearchMemoryQuerySchema = z.object({
   q: z.string().default(""),
   type: MemoryTypeSchema.optional(),
@@ -119,12 +129,16 @@ const SearchMemoryQuerySchema = z.object({
       return splitTags(value);
     }),
   minImportance: z.coerce.number().min(0).max(1).optional(),
-  includeArchived: z.coerce.boolean().optional(),
-  includeSuperseded: z.coerce.boolean().optional(),
-  includeExpired: z.coerce.boolean().optional(),
-  includeHistory: z.coerce.boolean().optional(),
+  includeArchived: BooleanishSchema.optional(),
+  includeSuperseded: BooleanishSchema.optional(),
+  includeExpired: BooleanishSchema.optional(),
+  includeHistory: BooleanishSchema.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20)
 });
+
+const SearchMemoryBodySchema = SearchMemoryQuerySchema.extend({
+  q: z.string().default("")
+}).strict();
 
 const MemoryParamsSchema = z.object({
   id: z.string().min(1)
@@ -232,7 +246,7 @@ export async function registerMemoryRoutes(
     assignTemporalFields(createInput, input.data);
     assignSupersessionFields(createInput, input.data);
 
-    const memory = await context.memoryRepository.createMemory(createInput);
+    const memory = await context.memory.createMemory(createInput);
 
     return reply.send(toSafeMemory(memory));
   });
@@ -250,96 +264,19 @@ export async function registerMemoryRoutes(
   app.get("/memory/search", async (request, reply) => {
     const query = SearchMemoryQuerySchema.safeParse(request.query);
     if (!query.success) {
-      return reply.status(400).send({ error: "invalid_request", details: query.error.flatten() });
+      return reply.status(400).send(memorySearchValidationError(query.error.flatten()));
     }
 
-    const searchQuery: {
-      text: string;
-      types?: MemoryType[];
-      subtypes?: MemorySubtype[];
-      memoryLayers?: MemoryLayer[];
-      statuses?: MemoryStatus[];
-      sources?: string[];
-      tags?: string[];
-      minImportance?: number;
-      limit: number;
-      scope?: MemoryScope;
-      scopeId?: string;
-      includeArchived?: boolean;
-      includeSuperseded?: boolean;
-      includeExpired?: boolean;
-      includeHistory?: boolean;
-    } = {
-      text: query.data.q,
-      limit: query.data.limit
-    };
+    return reply.send(await runMemorySearch(context, query.data));
+  });
 
-    if (query.data.type) {
-      searchQuery.types = [query.data.type as MemoryType];
-    }
-    if (query.data.subtype) {
-      searchQuery.subtypes = [query.data.subtype as MemorySubtype];
-    }
-    if (query.data.memoryLayer) {
-      searchQuery.memoryLayers = [query.data.memoryLayer as MemoryLayer];
-    }
-    if (query.data.status) {
-      const status = query.data.status as MemoryStatus;
-      searchQuery.statuses = [status];
-      if (status === "archived") searchQuery.includeArchived = true;
-      if (status === "superseded") searchQuery.includeSuperseded = true;
-      if (status === "expired") searchQuery.includeExpired = true;
-      if (status === "forgotten") searchQuery.includeHistory = true;
-    }
-    if (query.data.source) {
-      searchQuery.sources = [query.data.source];
-    }
-    if (query.data.tags?.length) {
-      searchQuery.tags = query.data.tags;
-    }
-    if (query.data.minImportance !== undefined) {
-      searchQuery.minImportance = query.data.minImportance;
-    }
-    if (query.data.scope) {
-      searchQuery.scope = query.data.scope as MemoryScope;
-    }
-    if (query.data.scopeId) {
-      searchQuery.scopeId = query.data.scopeId;
-    }
-    if (query.data.includeArchived !== undefined) {
-      searchQuery.includeArchived = query.data.includeArchived;
-    }
-    if (query.data.includeSuperseded !== undefined) {
-      searchQuery.includeSuperseded = query.data.includeSuperseded;
-    }
-    if (query.data.includeExpired !== undefined) {
-      searchQuery.includeExpired = query.data.includeExpired;
-    }
-    if (query.data.includeHistory !== undefined) {
-      searchQuery.includeHistory = query.data.includeHistory;
+  app.post("/memory/search", async (request, reply) => {
+    const query = SearchMemoryBodySchema.safeParse(request.body ?? {});
+    if (!query.success) {
+      return reply.status(400).send(memorySearchValidationError(query.error.flatten()));
     }
 
-    const result = await context.memory.retrieveRelevantMemoriesWithMetadata(searchQuery);
-
-    return reply.send({
-      mock: false,
-      query: result.query,
-      repository: process.env["MEMORY_REPOSITORY"] ?? "in-memory",
-      rawCount: result.rawCount,
-      count: result.count,
-      retrievalMode: result.retrievalMode,
-      retrievalScope: result.retrievalScope,
-      includedScopes: result.includedScopes,
-      includeArchived: result.includeArchived,
-      includeSuperseded: result.includeSuperseded,
-      includeExpired: result.includeExpired,
-      excludedByStatus: result.excludedByStatus,
-      excludedByTime: result.excludedByTime,
-      excludedByScope: result.excludedByScope,
-      debugMemories: result.rawMemories
-        .map(toSafeRetrievedMemory),
-      memories: result.selectedMemories.map(toSafeMemory)
-    });
+    return reply.send(await runMemorySearch(context, query.data));
   });
 
   app.post("/memory/bulk-delete", async (request, reply) => {
@@ -541,7 +478,7 @@ export async function registerMemoryRoutes(
     assignTemporalFields(updateInput, input.data);
     assignSupersessionFields(updateInput, input.data);
 
-    const updated = await context.memoryRepository.updateMemory(params.data.id, updateInput);
+    const updated = await context.memory.updateMemory(params.data.id, updateInput);
     if (!updated) {
       return reply.status(404).send({ error: "not_found", message: "Memory not found." });
     }
@@ -595,6 +532,102 @@ async function updateMemoryStatus(
   return reply.send({ ok: true, id: params.data.id, memory: toSafeMemory(updated) });
 }
 
+type SearchMemoryInput = z.infer<typeof SearchMemoryQuerySchema>;
+
+async function runMemorySearch(context: AppContext, input: SearchMemoryInput) {
+  const searchQuery: MemorySearchQuery = {
+    text: input.q,
+    limit: input.limit
+  };
+  if (input.includeArchived !== undefined) searchQuery.includeArchived = input.includeArchived;
+  if (input.includeSuperseded !== undefined)
+    searchQuery.includeSuperseded = input.includeSuperseded;
+  if (input.includeExpired !== undefined) searchQuery.includeExpired = input.includeExpired;
+  if (input.includeHistory !== undefined) searchQuery.includeHistory = input.includeHistory;
+  if (input.type) searchQuery.types = [input.type as MemoryType];
+  if (input.subtype) searchQuery.subtypes = [input.subtype as MemorySubtype];
+  if (input.source) searchQuery.sources = [input.source];
+  if (input.scope) searchQuery.scope = input.scope as MemoryScope;
+  if (input.scopeId) searchQuery.scopeId = input.scopeId;
+  if (input.memoryLayer) searchQuery.memoryLayers = [input.memoryLayer as MemoryLayer];
+  if (input.status) searchQuery.statuses = [input.status as MemoryStatus];
+  if (input.tags?.length) searchQuery.tags = input.tags;
+  if (input.minImportance !== undefined) searchQuery.minImportance = input.minImportance;
+
+  const result = await context.memory.retrieveRelevantMemoriesWithMetadata(searchQuery);
+  const retrievalMode = normalizeRetrievalModeForRepository(
+    result.retrievalMode,
+    context.activeMemoryRepository
+  );
+
+  return {
+    mock: false,
+    query: result.query,
+    repository: context.activeMemoryRepository,
+    rawCount: result.rawCount,
+    count: result.count,
+    retrievalMode,
+    vectorEnabled: result.vectorEnabled,
+    vectorUsed: result.vectorUsed,
+    embeddingProvider: result.embeddingProvider,
+    embeddingModel: result.embeddingModel,
+    semanticEmbedding: result.semanticEmbedding,
+    embeddingNote: result.embeddingNote,
+    queryEmbeddingGenerated: result.queryEmbeddingGenerated,
+    vectorResultCount: result.vectorResultCount,
+    keywordResultCount: result.keywordResultCount,
+    hybridResultCount: result.hybridResultCount,
+    fallbackUsed: result.fallbackUsed,
+    fallbackReason: result.fallbackReason,
+    retrievalScope: result.retrievalScope,
+    includedScopes: result.includedScopes,
+    excludedByStatus: result.excludedByStatus,
+    excludedByTime: result.excludedByTime,
+    excludedByScope: result.excludedByScope,
+    includeArchived: result.includeArchived,
+    includeSuperseded: result.includeSuperseded,
+    includeExpired: result.includeExpired,
+    debugMemories: result.rawMemories.map(toSafeRetrievedMemory),
+    memories: result.selectedMemories.map(toSafeMemory)
+  };
+}
+
+function normalizeRetrievalModeForRepository(
+  mode: MemoryRetrievalMode,
+  repository: string
+): MemoryRetrievalMode {
+  if (repository === "postgres") {
+    return mode;
+  }
+  if (mode.startsWith("postgres-")) {
+    return mode.includes("hybrid") || mode.includes("vector")
+      ? "in-memory-hybrid"
+      : "in-memory-keyword";
+  }
+  if (mode === "hybrid-keyword") {
+    return "in-memory-hybrid";
+  }
+  if (mode === "keyword") {
+    return "in-memory-keyword";
+  }
+  return mode;
+}
+
+export function memorySearchValidationError(details?: unknown) {
+  return {
+    error: "invalid_memory_search_query",
+    message:
+      "Invalid memory search query. URL-encode Unicode query strings for GET /memory/search, or use POST /memory/search with a JSON body.",
+    details,
+    examples: {
+      getEncoded:
+        'curl -G "http://localhost:6121/memory/search" --data-urlencode "q=模型供应商偏好"',
+      postJson:
+        'curl -X POST "http://localhost:6121/memory/search" -H "Content-Type: application/json" -d \'{"q":"模型供应商偏好","limit":10}\''
+    }
+  };
+}
+
 function assignTemporalFields(
   target: CreateMemoryInput | UpdateMemoryInput,
   input: {
@@ -637,6 +670,7 @@ function splitTags(value: string | undefined): string[] {
 function toSafeMemory(memory: Memory): Memory {
   return {
     ...memory,
+    embedding: null,
     metadata: redactUnsafeMetadata(memory.metadata)
   };
 }
