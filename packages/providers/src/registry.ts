@@ -531,10 +531,7 @@ function resolveChatProvider(config: ProviderRegistryConfig): ChatProvider {
     factories: chatProviderFactories,
     createMock: createMockChatProvider,
     createUnavailable: (name) =>
-      new UnavailableChatProvider(
-        name,
-        unavailableProviderMessage("chat", name, config)
-      )
+      new UnavailableChatProvider(name, unavailableProviderMessage("chat", name, config))
   });
 }
 
@@ -546,10 +543,7 @@ function resolveReasoningProvider(config: ProviderRegistryConfig): ReasoningProv
     factories: reasoningProviderFactories,
     createMock: createMockReasoningProvider,
     createUnavailable: (name) =>
-      new UnavailableReasoningProvider(
-        name,
-        unavailableProviderMessage("reasoning", name, config)
-      )
+      new UnavailableReasoningProvider(name, unavailableProviderMessage("reasoning", name, config))
   });
 }
 
@@ -561,10 +555,7 @@ function resolveTTSProvider(config: ProviderRegistryConfig): TTSProvider {
     factories: ttsProviderFactories,
     createMock: createMockTTSProvider,
     createUnavailable: (name) =>
-      new UnavailableTTSProvider(
-        name,
-        unavailableProviderMessage("tts", name, config)
-      )
+      new UnavailableTTSProvider(name, unavailableProviderMessage("tts", name, config))
   });
 }
 
@@ -576,10 +567,7 @@ function resolveSTTProvider(config: ProviderRegistryConfig): STTProvider {
     factories: sttProviderFactories,
     createMock: createMockSTTProvider,
     createUnavailable: (name) =>
-      new UnavailableSTTProvider(
-        name,
-        unavailableProviderMessage("stt", name, config)
-      )
+      new UnavailableSTTProvider(name, unavailableProviderMessage("stt", name, config))
   });
 }
 
@@ -591,10 +579,7 @@ function resolveVisionProvider(config: ProviderRegistryConfig): VisionProvider {
     factories: visionProviderFactories,
     createMock: createMockVisionProvider,
     createUnavailable: (name) =>
-      new UnavailableVisionProvider(
-        name,
-        unavailableProviderMessage("vision", name, config)
-      )
+      new UnavailableVisionProvider(name, unavailableProviderMessage("vision", name, config))
   });
 }
 
@@ -847,7 +832,8 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
         },
         body: JSON.stringify({
           model: this.model,
-          input: texts
+          input: texts,
+          dimensions: this.dimensions
         }),
         signal: controller.signal
       });
