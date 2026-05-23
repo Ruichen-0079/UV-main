@@ -66,6 +66,10 @@ export type Memory = {
   supersedes: string[];
   supersededBy: string | null;
   contradicts: string[];
+  searchScore?: number;
+  searchMatchedBy?: MemoryMatchReason;
+  searchRetrievalMode?: MemoryRetrievalMode;
+  searchRankComponents?: MemorySearchRankComponents;
 };
 
 export type CreateMemoryInput = {
@@ -194,6 +198,11 @@ export type MemorySearchQuery = {
   text?: string;
   embedding?: number[];
   types?: MemoryType[];
+  subtypes?: MemorySubtype[];
+  memoryLayers?: MemoryLayer[];
+  statuses?: MemoryStatus[];
+  sources?: string[];
+  minImportance?: number;
   tags?: string[];
   scope?: MemoryScope;
   scopeId?: string;
@@ -215,6 +224,8 @@ export type MemoryMatchReason =
   | "summary"
   | "tag"
   | "type"
+  | "subtype"
+  | "scope"
   | "metadata"
   | "source"
   | "keyword"
@@ -222,8 +233,20 @@ export type MemoryMatchReason =
 export type MemoryRetrievalMode =
   | "keyword"
   | "postgres-trigram"
+  | "postgres-full-text"
+  | "postgres-hybrid-keyword"
   | "hybrid-keyword"
   | "fallback-recent";
+
+export type MemorySearchRankComponents = {
+  keywordScore?: number;
+  tagScore?: number;
+  trigramScore?: number;
+  fullTextScore?: number;
+  scopeScore?: number;
+  recencyScore?: number;
+  importanceScore?: number;
+};
 
 export type RetrievedMemoryDebug = {
   id: string;
@@ -247,6 +270,7 @@ export type RetrievedMemoryDebug = {
   displayText: string;
   matchedBy: MemoryMatchReason;
   score?: number;
+  rankComponents?: MemorySearchRankComponents;
   excludedReason?: string;
 };
 
@@ -255,6 +279,7 @@ export type RetrievedMemoryCandidate = {
   displayText: string;
   matchedBy: MemoryMatchReason;
   score: number;
+  rankComponents?: MemorySearchRankComponents;
   excludedReason?: string;
 };
 

@@ -286,11 +286,22 @@ export type RetrievedMemoryDebug = {
     | "summary"
     | "tag"
     | "type"
+    | "subtype"
+    | "scope"
     | "metadata"
     | "source"
     | "keyword"
     | "fallback";
   score?: number;
+  rankComponents?: {
+    keywordScore?: number;
+    tagScore?: number;
+    trigramScore?: number;
+    fullTextScore?: number;
+    scopeScore?: number;
+    recencyScore?: number;
+    importanceScore?: number;
+  };
   excludedReason?: string;
 };
 
@@ -576,10 +587,14 @@ export const apiClient = {
     query: string,
     options: {
       type?: string;
+      subtype?: string;
+      source?: string;
       scope?: string;
       scopeId?: string;
       memoryLayer?: string;
       status?: string;
+      tags?: string;
+      minImportance?: string;
       includeArchived?: boolean;
       includeSuperseded?: boolean;
       includeExpired?: boolean;
@@ -610,6 +625,12 @@ export const apiClient = {
     if (options.type && options.type !== "all") {
       params.set("type", options.type);
     }
+    if (options.subtype && options.subtype !== "all") {
+      params.set("subtype", options.subtype);
+    }
+    if (options.source && options.source !== "all") {
+      params.set("source", options.source);
+    }
     if (options.scope && options.scope !== "all") {
       params.set("scope", options.scope);
     }
@@ -621,6 +642,12 @@ export const apiClient = {
     }
     if (options.status && options.status !== "all") {
       params.set("status", options.status);
+    }
+    if (options.tags?.trim()) {
+      params.set("tags", options.tags.trim());
+    }
+    if (options.minImportance?.trim()) {
+      params.set("minImportance", options.minImportance.trim());
     }
     if (options.includeArchived) {
       params.set("includeArchived", "true");

@@ -456,6 +456,107 @@ describe("MemoryRepository", () => {
     expect(pathResult.memories[0]?.displayText).toContain("Administrator.DESKTOP-NPU6DHJ");
   });
 
+  it("supports Postgres Search v2 filter shape in the in-memory fallback", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "semantic",
+      subtype: "provider-choice",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      memoryLayer: "core",
+      status: "active",
+      content: "用户偏好 Chat 和 Reasoning 使用 DeepSeek。",
+      source: "dashboard",
+      tags: ["provider", "deepseek"],
+      importance: 0.9
+    });
+    await repository.createMemory({
+      type: "procedural",
+      subtype: "command",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      memoryLayer: "recall",
+      status: "active",
+      content: "Run pnpm db:migrate before Postgres smoke tests.",
+      source: "manual",
+      tags: ["command", "postgres"],
+      importance: 0.7
+    });
+    await repository.createMemory({
+      type: "semantic",
+      subtype: "path",
+      scope: "user",
+      memoryLayer: "core",
+      status: "active",
+      content: "Windows source path is C:\\Users\\Administrator.DESKTOP-NPU6DHJ\\Desktop\\uv-main.",
+      source: "manual",
+      tags: ["path"],
+      importance: 0.8
+    });
+    await repository.createMemory({
+      type: "episodic",
+      subtype: "milestone",
+      scope: "project",
+      scopeId: "other-project",
+      memoryLayer: "recall",
+      status: "archived",
+      content: "Other project archived milestone.",
+      source: "runtime",
+      tags: ["provider"],
+      importance: 1
+    });
+
+    const providerResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "DashScope STT DeepSeek provider",
+      subtypes: ["provider-choice"],
+      memoryLayers: ["core"],
+      statuses: ["active"],
+      sources: ["dashboard"],
+      tags: ["provider"],
+      minImportance: 0.8,
+      projectId: "yuvi-runtime",
+      limit: 5
+    });
+    const commandResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "pnpm db:migrate",
+      subtypes: ["command"],
+      tags: ["command"],
+      projectId: "yuvi-runtime",
+      limit: 5
+    });
+    const pathResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "C:\\Users\\Administrator.DESKTOP-NPU6DHJ\\Desktop\\uv-main",
+      subtypes: ["path"],
+      limit: 5
+    });
+    const archivedDefault = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "archived milestone",
+      statuses: ["archived"],
+      limit: 5
+    });
+    const archivedIncluded = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "archived milestone",
+      statuses: ["archived"],
+      includeArchived: true,
+      includeSuperseded: true,
+      includeExpired: true,
+      projectId: "other-project",
+      limit: 5
+    });
+
+    expect(providerResult.memories).toHaveLength(1);
+    expect(providerResult.memories[0]).toMatchObject({
+      subtype: "provider-choice",
+      source: "dashboard"
+    });
+    expect(["content", "tag"]).toContain(providerResult.memories[0]?.matchedBy);
+    expect(commandResult.memories[0]).toMatchObject({ subtype: "command" });
+    expect(pathResult.memories[0]?.displayText).toContain("Administrator.DESKTOP-NPU6DHJ");
+    expect(archivedDefault.memories).toHaveLength(0);
+    expect(archivedIncluded.memories[0]).toMatchObject({ status: "archived" });
+  });
+
   it("scores only durable memory-worthy interactions highly", () => {
     const scorer = new MemoryScorer();
 
@@ -967,6 +1068,11 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("memories_scope_scope_id_idx");
     expect(combinedSql).toContain("memories_memory_layer_idx");
     expect(combinedSql).toContain("memories_status_idx");
+    expect(combinedSql).toContain("memories_search_tsv_idx");
+    expect(combinedSql).toContain("memories_scope_scope_id_status_idx");
+    expect(combinedSql).toContain("memories_type_subtype_idx");
+    expect(combinedSql).toContain("memories_source_trace_id_trgm_idx");
+    expect(combinedSql).toContain("to_tsvector('simple'");
   });
 });
 

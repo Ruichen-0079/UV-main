@@ -383,14 +383,46 @@ describe("server", () => {
       expect(recent.statusCode).toBe(200);
       expect(recent.json().memories.length).toBeGreaterThan(0);
 
-      const search = await app.inject({ method: "GET", url: "/memory/search?q=Server&limit=5" });
-      expect(search.statusCode).toBe(200);
-      expect(search.json().query).toBe("Server");
-      expect(search.json().repository).toBe("in-memory");
-      expect(search.json().rawCount).toBeGreaterThanOrEqual(search.json().count);
-      expect(search.json().memories.length).toBeGreaterThan(0);
-      expect(search.json().retrievalScope).toBeTruthy();
-      expect(search.json().excludedByStatus).toBeGreaterThanOrEqual(0);
+	      const search = await app.inject({ method: "GET", url: "/memory/search?q=Server&limit=5" });
+	      expect(search.statusCode).toBe(200);
+	      expect(search.json().query).toBe("Server");
+	      expect(search.json().repository).toBe("in-memory");
+	      expect(search.json().rawCount).toBeGreaterThanOrEqual(search.json().count);
+	      expect(search.json().memories.length).toBeGreaterThan(0);
+	      expect(search.json().retrievalScope).toBeTruthy();
+	      expect(search.json().excludedByStatus).toBeGreaterThanOrEqual(0);
+
+	      const filteredSearch = await app.inject({
+	        method: "GET",
+	        url: `/memory/search?${new URLSearchParams({
+	          q: "Server test memory updated",
+	          type: "procedural",
+	          subtype: "workflow",
+	          source: "test",
+	          scope: "project",
+	          scopeId: "yuvi-runtime",
+	          memoryLayer: "recall",
+	          status: "active",
+	          tags: "updated,server",
+	          minImportance: "0.7",
+	          limit: "5"
+	        }).toString()}`
+	      });
+	      expect(filteredSearch.statusCode).toBe(200);
+	      expect(filteredSearch.json().memories[0]).toMatchObject({
+	        id: memoryId,
+	        type: "procedural",
+	        subtype: "workflow",
+	        source: "test",
+	        scope: "project",
+	        scopeId: "yuvi-runtime",
+	        memoryLayer: "recall",
+	        status: "active"
+	      });
+	      expect(filteredSearch.json().debugMemories[0]).toMatchObject({
+	        matchedBy: expect.any(String),
+	        score: expect.any(Number)
+	      });
 
       const encodedChineseSearch = await app.inject({
         method: "GET",

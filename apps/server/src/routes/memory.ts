@@ -103,10 +103,22 @@ const RecentMemoryQuerySchema = z.object({
 const SearchMemoryQuerySchema = z.object({
   q: z.string().default(""),
   type: MemoryTypeSchema.optional(),
+  subtype: MemorySubtypeSchema.optional(),
+  source: z.string().min(1).optional(),
   scope: MemoryScopeSchema.optional(),
   scopeId: z.string().min(1).optional(),
   memoryLayer: MemoryLayerSchema.optional(),
   status: MemoryStatusSchema.optional(),
+  tags: z
+    .union([z.string(), z.array(z.string())])
+    .optional()
+    .transform((value) => {
+      if (Array.isArray(value)) {
+        return value.flatMap(splitTags).filter(Boolean);
+      }
+      return splitTags(value);
+    }),
+  minImportance: z.coerce.number().min(0).max(1).optional(),
   includeArchived: z.coerce.boolean().optional(),
   includeSuperseded: z.coerce.boolean().optional(),
   includeExpired: z.coerce.boolean().optional(),
@@ -244,6 +256,12 @@ export async function registerMemoryRoutes(
     const searchQuery: {
       text: string;
       types?: MemoryType[];
+      subtypes?: MemorySubtype[];
+      memoryLayers?: MemoryLayer[];
+      statuses?: MemoryStatus[];
+      sources?: string[];
+      tags?: string[];
+      minImportance?: number;
       limit: number;
       scope?: MemoryScope;
       scopeId?: string;
@@ -258,6 +276,29 @@ export async function registerMemoryRoutes(
 
     if (query.data.type) {
       searchQuery.types = [query.data.type as MemoryType];
+    }
+    if (query.data.subtype) {
+      searchQuery.subtypes = [query.data.subtype as MemorySubtype];
+    }
+    if (query.data.memoryLayer) {
+      searchQuery.memoryLayers = [query.data.memoryLayer as MemoryLayer];
+    }
+    if (query.data.status) {
+      const status = query.data.status as MemoryStatus;
+      searchQuery.statuses = [status];
+      if (status === "archived") searchQuery.includeArchived = true;
+      if (status === "superseded") searchQuery.includeSuperseded = true;
+      if (status === "expired") searchQuery.includeExpired = true;
+      if (status === "forgotten") searchQuery.includeHistory = true;
+    }
+    if (query.data.source) {
+      searchQuery.sources = [query.data.source];
+    }
+    if (query.data.tags?.length) {
+      searchQuery.tags = query.data.tags;
+    }
+    if (query.data.minImportance !== undefined) {
+      searchQuery.minImportance = query.data.minImportance;
     }
     if (query.data.scope) {
       searchQuery.scope = query.data.scope as MemoryScope;
@@ -296,27 +337,8 @@ export async function registerMemoryRoutes(
       excludedByTime: result.excludedByTime,
       excludedByScope: result.excludedByScope,
       debugMemories: result.rawMemories
-        .filter((memory) => {
-          if (query.data.memoryLayer && memory.memoryLayer !== query.data.memoryLayer) {
-            return false;
-          }
-          if (query.data.status && memory.status !== query.data.status) {
-            return false;
-          }
-          return true;
-        })
         .map(toSafeRetrievedMemory),
-      memories: result.selectedMemories
-        .filter((memory) => {
-          if (query.data.memoryLayer && memory.memoryLayer !== query.data.memoryLayer) {
-            return false;
-          }
-          if (query.data.status && memory.status !== query.data.status) {
-            return false;
-          }
-          return true;
-        })
-        .map(toSafeMemory)
+      memories: result.selectedMemories.map(toSafeMemory)
     });
   });
 
@@ -603,6 +625,13 @@ function assignSupersessionFields(
   if (input.supersedes !== undefined) target.supersedes = input.supersedes;
   if (input.supersededBy !== undefined) target.supersededBy = input.supersededBy;
   if (input.contradicts !== undefined) target.contradicts = input.contradicts;
+}
+
+function splitTags(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
 }
 
 function toSafeMemory(memory: Memory): Memory {

@@ -58,7 +58,7 @@ pnpm.cmd smoke
 
 Manual memory management endpoint tests cover reading memory details, editing safe structured fields, rejecting invalid importance values, rejecting unsafe metadata keys, archiving/restoring/forgetting records, and deleting records so they no longer appear in search.
 
-Memory read pipeline tests cover scope-aware, status-aware, and time-aware retrieval. Active scoped memories are eligible for prompt context, while forgotten, expired, superseded, archived, future-valid, and unrelated project/plugin memories are excluded by default. Manual search can opt into archived, superseded, or expired records for debugging. Prompt Preview tests assert `CurrentTime`, retrieval scope metadata, exclusion counters, and safe per-memory debug details.
+Memory read pipeline tests cover scope-aware, status-aware, and time-aware retrieval. Active scoped memories are eligible for prompt context, while forgotten, expired, superseded, archived, future-valid, and unrelated project/plugin memories are excluded by default. Manual search can opt into archived, superseded, or expired records for debugging. Prompt Preview tests assert `CurrentTime`, retrieval scope metadata, exclusion counters, retrieval mode, matched fields, scores, rank components where available, and safe per-memory debug details.
 
 Direct Context tests cover same-session recent-turn injection, unrelated-session isolation, oldest-turn trimming by turn/character budget, separation from `RelevantMemory`, and redaction of secret-like strings. Direct Context is short-term prompt context only; it does not create long-term memories unless the normal `writeMemory` extraction path independently accepts a candidate.
 
@@ -119,7 +119,7 @@ pnpm smoke:postgres
 
 4. Or run the server with `MEMORY_REPOSITORY=postgres` and a valid `DATABASE_URL`, then use `POST /memory`, `GET /memory/recent`, and `GET /memory/search?q=...`.
 
-Postgres memory search is still keyword/structured retrieval, not embeddings. Migrations enable `pg_trgm` and create indexes for content, summary, tags, type/subtype, scope/scopeId, memoryLayer, status, source/sourceTraceId, temporal fields, createdAt, importance, and metadata so mixed Chinese/English queries, paths, ports, and commands can be found before vector search is added.
+Postgres memory search is still keyword/structured retrieval, not embeddings. Migrations enable `pg_trgm`, trigram search, built-in full-text search with the PostgreSQL `simple` config, and indexes for content, summary, tags, type/subtype, scope/scopeId, memoryLayer, status, source/sourceTraceId, temporal fields, createdAt, importance, and metadata so mixed Chinese/English queries, paths, URLs, ports, env keys, provider names, and commands can be found before vector search is added.
 
 Graph reasoning over supersession/contradiction fields and automatic expiry scheduling are intentionally not part of the default tests yet. They are future work on top of the status and temporal fields.
 

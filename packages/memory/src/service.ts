@@ -173,6 +173,11 @@ export class MemoryService {
     if (query.text !== undefined) broadQuery.text = query.text;
     if (query.embedding !== undefined) broadQuery.embedding = query.embedding;
     if (query.types !== undefined) broadQuery.types = query.types;
+    if (query.subtypes !== undefined) broadQuery.subtypes = query.subtypes;
+    if (query.memoryLayers !== undefined) broadQuery.memoryLayers = query.memoryLayers;
+    if (query.statuses !== undefined) broadQuery.statuses = query.statuses;
+    if (query.sources !== undefined) broadQuery.sources = query.sources;
+    if (query.minImportance !== undefined) broadQuery.minImportance = query.minImportance;
     if (query.tags !== undefined) broadQuery.tags = query.tags;
     const memories = await this.retriever.retrieve(broadQuery);
     if (!queryText || keywords.length === 0) {
@@ -222,6 +227,11 @@ export class MemoryService {
         includeHistory: true,
         limit: Math.max(query.limit ?? 6, 10),
         ...(query.types !== undefined ? { types: query.types } : {}),
+        ...(query.subtypes !== undefined ? { subtypes: query.subtypes } : {}),
+        ...(query.memoryLayers !== undefined ? { memoryLayers: query.memoryLayers } : {}),
+        ...(query.statuses !== undefined ? { statuses: query.statuses } : {}),
+        ...(query.sources !== undefined ? { sources: query.sources } : {}),
+        ...(query.minImportance !== undefined ? { minImportance: query.minImportance } : {}),
         ...(query.tags !== undefined ? { tags: query.tags } : {})
       });
       for (const candidate of this.rankKeywordMatches(results, keywords, policy)) {
@@ -252,8 +262,9 @@ export class MemoryService {
       .map((memory) => ({
         memory,
         displayText: createMemoryDisplayText(memory),
-        matchedBy: detectMatchReason(memory, keywords),
-        score: scoreMemory(memory, keywords, policy),
+        matchedBy: memory.searchMatchedBy ?? detectMatchReason(memory, keywords),
+        score: scoreMemory(memory, keywords, policy) + (memory.searchScore ?? 0),
+        ...(memory.searchRankComponents ? { rankComponents: memory.searchRankComponents } : {}),
         ...memoryExclusion(memory, policy)
       }))
       .filter((entry) => entry.score > 0 || Boolean(entry.excludedReason));
@@ -294,8 +305,9 @@ export class MemoryService {
         .map((memory) => ({
           memory,
           displayText: createMemoryDisplayText(memory),
-          matchedBy: detectMatchReason(memory, keywords),
-          score: scoreMemory(memory, keywords, policy),
+          matchedBy: memory.searchMatchedBy ?? detectMatchReason(memory, keywords),
+          score: scoreMemory(memory, keywords, policy) + (memory.searchScore ?? 0),
+          ...(memory.searchRankComponents ? { rankComponents: memory.searchRankComponents } : {}),
           ...memoryExclusion(memory, policy)
         }))
         .sort(compareCandidates),
@@ -305,8 +317,8 @@ export class MemoryService {
 
   private resolveRetrievalMode(hasKeywordFallback: boolean): MemoryRetrievalMode {
     const repositoryMode = this.repository.getRetrievalMode?.() ?? "keyword";
-    if (repositoryMode === "postgres-trigram") {
-      return "postgres-trigram";
+    if (repositoryMode === "postgres-hybrid-keyword" || repositoryMode === "postgres-trigram") {
+      return repositoryMode;
     }
     return hasKeywordFallback ? "hybrid-keyword" : "keyword";
   }
@@ -618,7 +630,14 @@ function detectMatchReason(memory: Memory, keywords: string[]): MemoryMatchReaso
       includesKeyword(memory.type, keyword) ||
       (memory.subtype && includesKeyword(memory.subtype, keyword))
     ) {
-      return "type";
+      return memory.subtype && includesKeyword(memory.subtype, keyword) ? "subtype" : "type";
+    }
+    if (
+      includesKeyword(memory.scope, keyword) ||
+      (memory.scopeId && includesKeyword(memory.scopeId, keyword)) ||
+      includesKeyword(memory.memoryLayer, keyword)
+    ) {
+      return "scope";
     }
     if (
       includesKeyword(memory.source, keyword) ||
@@ -650,6 +669,13 @@ function keywordMatchWeight(memory: Memory, keyword: string): number {
     (memory.subtype && includesKeyword(memory.subtype, keyword))
   ) {
     score += 2.25;
+  }
+  if (
+    includesKeyword(memory.scope, keyword) ||
+    (memory.scopeId && includesKeyword(memory.scopeId, keyword)) ||
+    includesKeyword(memory.memoryLayer, keyword)
+  ) {
+    score += 1.75;
   }
   if (
     includesKeyword(memory.source, keyword) ||
@@ -859,6 +885,7 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
     displayText: candidate.displayText,
     matchedBy: candidate.matchedBy,
     score: candidate.score,
+    ...(candidate.rankComponents ? { rankComponents: candidate.rankComponents } : {}),
     ...(candidate.excludedReason ? { excludedReason: candidate.excludedReason } : {})
   };
 }

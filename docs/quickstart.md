@@ -150,6 +150,8 @@ Bash or WSL:
 pnpm db:migrate
 ```
 
+Migrations enable Postgres Search v2 for long-term memory: `pg_trgm` trigram indexes, structured filters, tag/metadata indexes, and a built-in full-text index. In-memory mode remains simpler and resets on restart; Postgres mode persists memory and improves keyword retrieval for mixed Chinese/English text, commands, paths, URLs, ports, env keys, and provider names.
+
 Verify the memory table exists:
 
 ```bash

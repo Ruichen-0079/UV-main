@@ -24,9 +24,9 @@ packages/memory/migrations/
 - `entities`
 - `relations`
 
-仓库层把向量搜索暴露为接口；在 MVP 阶段，如果未配置 embedding，则已实现基于 `ILIKE` 的文本 fallback 搜索。
+仓库层把向量搜索暴露为接口；在 MVP 阶段，embedding 仍然不是必需项。PostgreSQL 模式会先使用 YUVI Postgres Search v2：`pg_trgm` trigram、PostgreSQL 内置 `simple` full-text index、结构化 filter，以及 tag / metadata GIN index。
 
-PostgreSQL 模式现在使用 `pg_trgm` 改善本地关键词检索。Migration 会为 content / summary 建立 trigram index，为 tags / metadata 建立 GIN index，并为 type、subtype、source、sourceTraceId、createdAt、importance 建立辅助索引。检索会覆盖 content、summary、tags、type、subtype、source/sourceTraceId 和安全 metadata 文本，可以处理中文、英文、中英混合、Windows 路径、端口和 `pnpm db:migrate` 这类命令。Prompt Preview 和 Dashboard search debug 会显示 `retrievalMode`、`matchedBy`、`score` 和 `sourceTraceId`。
+Migration 会为 content / summary 建立 trigram index，为 tags / metadata 建立 GIN index，并为 scope、scopeId、memoryLayer、status、type、subtype、source、sourceTraceId、timestamp 和 importance 建立辅助索引。检索会覆盖 content、summary、tags、type、subtype、scope、scopeId、memoryLayer、source/sourceTraceId 和安全 metadata 文本，可以处理中文、英文、中英混合、Windows 路径、URL、端口、`MEMORY_EXTRACTOR` 这类 env key，以及 `pnpm db:migrate` 这类命令。Prompt Preview 和 Dashboard search debug 会显示 `retrievalMode`、`matchedBy`、`score`、rank components 和 `sourceTraceId`。
 
 ## Memory Model v2
 
@@ -64,7 +64,7 @@ Direct Context 默认配置为 `DIRECT_CONTEXT_ENABLED=true`、`DIRECT_CONTEXT_M
 
 Ranking 会综合 keyword relevance、type/subtype priority、memoryLayer priority、importance、recency、access recency、source quality 和 scope match quality。当前 user/project scope 中的 active core memory 优先；低价值 verbose runtime episodic summary、archival record 和无关 scope record 会被降权或排除。
 
-Prompt Preview 会显示可解释的 debug metadata，包括 `retrievalScope`、`includedScopes`、`includeArchived`、`includeSuperseded`、`includeExpired`、`excludedByStatus`、`excludedByTime`、`excludedByScope`、`currentTime`，以及每条 memory 的 `matchedBy`、`score`、`scope`、`memoryLayer`、`status`、temporal fields 和 `excludedReason`。
+Prompt Preview 会显示可解释的 debug metadata，包括 `retrievalScope`、`includedScopes`、`includeArchived`、`includeSuperseded`、`includeExpired`、`excludedByStatus`、`excludedByTime`、`excludedByScope`、`currentTime`，以及每条 memory 的 `matchedBy`、`score`、rank components、`scope`、`memoryLayer`、`status`、temporal fields 和 `excludedReason`。
 
 PromptBuilder 会继续注入 `CurrentTime` section，包含当前 ISO timestamp、timezone 和 local date。RelevantMemory bullet 会使用紧凑 hint，例如 `[project:yuvi-runtime][core][active]`，帮助模型理解 scope 和 freshness，但不会把冗长 metadata 倒进 prompt。
 

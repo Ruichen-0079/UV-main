@@ -6,8 +6,11 @@ import type {
   Entity,
   Memory,
   MemoryLayer,
+  MemoryMatchReason,
+  MemoryRetrievalMode,
   MemoryScope,
   MemorySearchQuery,
+  MemorySearchRankComponents,
   MemoryStatus,
   MemorySubtype,
   MemoryType,
@@ -17,7 +20,7 @@ import type {
 
 export interface MemoryRepository {
   healthCheck(): Promise<{ status: "healthy" | "unavailable"; message?: string }>;
-  getRetrievalMode?(): "keyword" | "postgres-trigram";
+  getRetrievalMode?(): "keyword" | "postgres-trigram" | "postgres-hybrid-keyword";
   createMemory(input: CreateMemoryInput): Promise<Memory>;
   getMemoryById(id: string): Promise<Memory | null>;
   updateMemory(id: string, input: UpdateMemoryInput): Promise<Memory | null>;
@@ -51,8 +54,8 @@ export class PostgresMemoryRepository implements MemoryRepository {
     }
   }
 
-  getRetrievalMode(): "postgres-trigram" {
-    return "postgres-trigram";
+  getRetrievalMode(): "postgres-hybrid-keyword" {
+    return "postgres-hybrid-keyword";
   }
 
   async createMemory(input: CreateMemoryInput): Promise<Memory> {
@@ -221,15 +224,29 @@ export class PostgresMemoryRepository implements MemoryRepository {
   async searchMemoriesByTextFallback(query: MemorySearchQuery): Promise<Memory[]> {
     const text = query.text?.trim() ?? "";
     const likeText = `%${escapeLike(text)}%`;
+    const searchDocument = `(
+      setweight(to_tsvector('simple', coalesce(content, '')), 'A') ||
+      setweight(to_tsvector('simple', coalesce(summary, '')), 'A') ||
+      setweight(to_tsvector('simple', coalesce(type, '')), 'B') ||
+      setweight(to_tsvector('simple', coalesce(subtype, '')), 'B') ||
+      setweight(to_tsvector('simple', coalesce(scope, '')), 'C') ||
+      setweight(to_tsvector('simple', coalesce(scope_id, '')), 'C') ||
+      setweight(to_tsvector('simple', coalesce(memory_layer, '')), 'C') ||
+      setweight(to_tsvector('simple', coalesce(source, '')), 'C') ||
+      setweight(to_tsvector('simple', coalesce(source_trace_id, '')), 'C')
+    )`;
     const clauses = [
       `(
         $1 = ''
         or content ilike $2 escape '\\'
         or coalesce(summary, '') ilike $2 escape '\\'
         or type ilike $2 escape '\\'
+        or coalesce(subtype, '') ilike $2 escape '\\'
+        or scope ilike $2 escape '\\'
+        or coalesce(scope_id, '') ilike $2 escape '\\'
+        or memory_layer ilike $2 escape '\\'
         or source ilike $2 escape '\\'
         or coalesce(source_trace_id, '') ilike $2 escape '\\'
-        or coalesce(subtype, '') ilike $2 escape '\\'
         or exists (
           select 1 from unnest(tags) as tag
           where tag ilike $2 escape '\\'
@@ -237,6 +254,11 @@ export class PostgresMemoryRepository implements MemoryRepository {
         or metadata::text ilike $2 escape '\\'
         or similarity(content, $1) > 0.18
         or similarity(coalesce(summary, ''), $1) > 0.18
+        or similarity(array_to_string(tags, ' '), $1) > 0.18
+        or similarity(coalesce(subtype, ''), $1) > 0.28
+        or similarity(coalesce(scope_id, ''), $1) > 0.28
+        or similarity(coalesce(source_trace_id, ''), $1) > 0.28
+        or ${searchDocument} @@ plainto_tsquery('simple', $1)
       )`
     ];
     const values: unknown[] = [text, likeText];
@@ -244,6 +266,31 @@ export class PostgresMemoryRepository implements MemoryRepository {
     if (query.types?.length) {
       values.push(query.types);
       clauses.push(`type = any($${values.length}::text[])`);
+    }
+
+    if (query.subtypes?.length) {
+      values.push(query.subtypes);
+      clauses.push(`subtype = any($${values.length}::text[])`);
+    }
+
+    if (query.memoryLayers?.length) {
+      values.push(query.memoryLayers);
+      clauses.push(`memory_layer = any($${values.length}::text[])`);
+    }
+
+    if (query.statuses?.length) {
+      values.push(query.statuses);
+      clauses.push(`status = any($${values.length}::text[])`);
+    }
+
+    if (query.sources?.length) {
+      values.push(query.sources);
+      clauses.push(`source = any($${values.length}::text[])`);
+    }
+
+    if (query.minImportance !== undefined) {
+      values.push(query.minImportance);
+      clauses.push(`importance >= $${values.length}`);
     }
 
     if (query.scopes?.length) {
@@ -259,15 +306,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
       clauses.push(`scope_id = $${values.length}`);
     }
 
-    clauses.push(
-      activeMemorySql(
-        query.includeHistory || query.includeExpired || query.includeSuperseded
-          ? "history"
-          : query.includeArchived
-            ? "manual"
-            : "prompt"
-      )
-    );
+    clauses.push(activeMemorySql(visibilityModeForQuery(query)));
 
     if (query.tags?.length) {
       values.push(query.tags);
@@ -283,24 +322,90 @@ export class PostgresMemoryRepository implements MemoryRepository {
            case
              when $1 = '' then 0
              else
+               case when lower(content) = lower($1) then 12 else 0 end +
+               case when lower(coalesce(summary, '')) = lower($1) then 11 else 0 end +
                case when content ilike $2 escape '\\' then 8 else 0 end +
                case when coalesce(summary, '') ilike $2 escape '\\' then 7 else 0 end +
                case when exists (
                  select 1 from unnest(tags) as tag
+                 where lower(tag) = lower($1)
+               ) then 10 else 0 end +
+               case when exists (
+                 select 1 from unnest(tags) as tag
                  where tag ilike $2 escape '\\'
-               ) then 6 else 0 end +
+               ) then 7 else 0 end +
                case when type ilike $2 escape '\\' then 5 else 0 end +
-               case when coalesce(subtype, '') ilike $2 escape '\\' then 5 else 0 end +
+               case when coalesce(subtype, '') ilike $2 escape '\\' then 5.5 else 0 end +
+               case when scope ilike $2 escape '\\' then 4 else 0 end +
+               case when coalesce(scope_id, '') ilike $2 escape '\\' then 4 else 0 end +
+               case when memory_layer ilike $2 escape '\\' then 3.5 else 0 end +
                case when source ilike $2 escape '\\' then 3 else 0 end +
                case when coalesce(source_trace_id, '') ilike $2 escape '\\' then 3 else 0 end +
-               case when metadata::text ilike $2 escape '\\' then 2 else 0 end +
-               greatest(similarity(content, $1), similarity(coalesce(summary, ''), $1)) * 4
-           end as keyword_score
-         from memories
+               case when metadata::text ilike $2 escape '\\' then 2 else 0 end
+           end as keyword_score,
+           case
+             when $1 = '' then 0
+             else case when exists (
+               select 1 from unnest(tags) as tag
+               where lower(tag) = lower($1)
+             ) then 10 else 0 end +
+             case when exists (
+               select 1 from unnest(tags) as tag
+               where tag ilike $2 escape '\\'
+             ) then 7 else 0 end +
+             similarity(array_to_string(tags, ' '), $1) * 4
+           end as tag_score,
+           case
+             when $1 = '' then 0
+             else greatest(
+               similarity(content, $1),
+               similarity(coalesce(summary, ''), $1),
+               similarity(array_to_string(tags, ' '), $1),
+               similarity(coalesce(subtype, ''), $1),
+               similarity(coalesce(scope_id, ''), $1),
+               similarity(coalesce(source_trace_id, ''), $1)
+             ) * 6
+           end as trigram_score,
+           case
+             when $1 = '' then 0
+             else ts_rank_cd(${searchDocument}, plainto_tsquery('simple', $1)) * 8
+           end as full_text_score,
+           case
+             when scope = 'user' then 1.2
+             when scope = 'project' and coalesce(scope_id, '') = 'yuvi-runtime' then 1.4
+             when scope = 'session' then 1.1
+             else 0.4
+           end as scope_score,
+           importance * 2 as importance_score,
+	           greatest(
+	             0,
+	             1 - extract(epoch from (now() - created_at)) / (86400 * 30)
+	           ) * 0.5 as recency_score,
+	           case
+	             when $1 = '' then 'keyword'
+	             when exists (
+	               select 1 from unnest(tags) as tag
+	               where tag ilike $2 escape '\\'
+	             ) then 'tag'
+	             when content ilike $2 escape '\\' or similarity(content, $1) > 0.18 then 'content'
+	             when coalesce(summary, '') ilike $2 escape '\\'
+	               or similarity(coalesce(summary, ''), $1) > 0.18 then 'summary'
+	             when type ilike $2 escape '\\' then 'type'
+	             when coalesce(subtype, '') ilike $2 escape '\\'
+	               or similarity(coalesce(subtype, ''), $1) > 0.28 then 'subtype'
+	             when scope ilike $2 escape '\\'
+	               or coalesce(scope_id, '') ilike $2 escape '\\'
+	               or memory_layer ilike $2 escape '\\' then 'scope'
+	             when source ilike $2 escape '\\'
+	               or coalesce(source_trace_id, '') ilike $2 escape '\\' then 'source'
+	             when metadata::text ilike $2 escape '\\' then 'metadata'
+	             else 'keyword'
+	           end as search_matched_by
+	         from memories
          where ${clauses.join(" and ")}
        ) ranked_memories
        order by
-         keyword_score desc,
+         (keyword_score + tag_score + trigram_score + full_text_score + scope_score + importance_score + recency_score) desc,
          importance desc,
          last_accessed_at desc,
          created_at desc
@@ -319,13 +424,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
     const result = await this.pool.query(
       `select * from memories
        where embedding is not null
-         and ${activeMemorySql(
-           query.includeHistory || query.includeExpired || query.includeSuperseded
-             ? "history"
-             : query.includeArchived
-               ? "manual"
-               : "prompt"
-         )}
+         and ${activeMemorySql(visibilityModeForQuery(query))}
        order by embedding <=> $1::vector
        limit $2`,
       [vectorLiteral(query.embedding), query.limit ?? 10]
@@ -522,17 +621,26 @@ export class InMemoryMemoryRepository implements MemoryRepository {
   async searchMemoriesByTextFallback(query: MemorySearchQuery): Promise<Memory[]> {
     const searchText = (query.text ?? "").toLowerCase();
     return this.memories
-      .filter((memory) =>
-        isMemoryVisible(
-          memory,
-          query.includeHistory || query.includeExpired || query.includeSuperseded
-            ? "history"
-            : query.includeArchived
-              ? "manual"
-              : "prompt"
-        )
-      )
+	      .filter((memory) =>
+	        isMemoryVisible(
+	          memory,
+	          visibilityModeForQuery(query)
+	        )
+	      )
       .filter((memory) => !query.types?.length || query.types.includes(memory.type))
+      .filter(
+        (memory) =>
+          !query.subtypes?.length ||
+          (memory.subtype !== null && query.subtypes.includes(memory.subtype))
+      )
+      .filter(
+        (memory) => !query.memoryLayers?.length || query.memoryLayers.includes(memory.memoryLayer)
+      )
+      .filter((memory) => !query.statuses?.length || query.statuses.includes(memory.status))
+      .filter((memory) => !query.sources?.length || query.sources.includes(memory.source))
+      .filter(
+        (memory) => query.minImportance === undefined || memory.importance >= query.minImportance
+      )
       .filter((memory) =>
         query.scopes?.length
           ? query.scopes.includes(memory.scope)
@@ -547,7 +655,12 @@ export class InMemoryMemoryRepository implements MemoryRepository {
           !searchText ||
           memory.content.toLowerCase().includes(searchText) ||
           memory.summary?.toLowerCase().includes(searchText) ||
+          memory.type.toLowerCase().includes(searchText) ||
+          memory.scope.toLowerCase().includes(searchText) ||
+          memory.scopeId?.toLowerCase().includes(searchText) ||
+          memory.memoryLayer.toLowerCase().includes(searchText) ||
           memory.source.toLowerCase().includes(searchText) ||
+          memory.sourceTraceId?.toLowerCase().includes(searchText) ||
           memory.subtype?.toLowerCase().includes(searchText) ||
           memory.tags.some((tag) => tag.toLowerCase().includes(searchText)) ||
           JSON.stringify(memory.metadata).toLowerCase().includes(searchText)
@@ -639,10 +752,110 @@ function mapMemoryRow(row: QueryResultRow): Memory {
     expiresAt: row["expires_at"] ?? null,
     lastAccessedAt: row["last_accessed_at"],
     supersededAt: row["superseded_at"] ?? null,
-    supersedes: row["supersedes"] ?? [],
-    supersededBy: row["superseded_by"] ?? null,
-    contradicts: row["contradicts"] ?? []
+      supersedes: row["supersedes"] ?? [],
+      supersededBy: row["superseded_by"] ?? null,
+      contradicts: row["contradicts"] ?? [],
+      ...searchMetadataFromRow(row)
+    };
+}
+
+function searchMetadataFromRow(
+  row: QueryResultRow
+): {
+  searchScore?: number;
+  searchMatchedBy?: MemoryMatchReason;
+  searchRetrievalMode?: MemoryRetrievalMode;
+  searchRankComponents?: MemorySearchRankComponents;
+} {
+  const rankComponents = rankComponentsFromRow(row);
+  const score = Object.values(rankComponents).reduce((sum, value) => sum + (value ?? 0), 0);
+  if (score <= 0 && Object.keys(rankComponents).length === 0) {
+    return {};
+  }
+
+  return {
+    searchScore: score,
+    searchMatchedBy: matchReasonFromRow(row, rankComponents),
+    searchRetrievalMode: retrievalModeFromRank(rankComponents),
+    searchRankComponents: rankComponents
   };
+}
+
+function rankComponentsFromRow(row: QueryResultRow): MemorySearchRankComponents {
+  const output: MemorySearchRankComponents = {};
+  setFiniteNumber(output, "keywordScore", row["keyword_score"]);
+  setFiniteNumber(output, "tagScore", row["tag_score"]);
+  setFiniteNumber(output, "trigramScore", row["trigram_score"]);
+  setFiniteNumber(output, "fullTextScore", row["full_text_score"]);
+  setFiniteNumber(output, "scopeScore", row["scope_score"]);
+  setFiniteNumber(output, "importanceScore", row["importance_score"]);
+  setFiniteNumber(output, "recencyScore", row["recency_score"]);
+  return output;
+}
+
+function setFiniteNumber(
+  output: MemorySearchRankComponents,
+  key: keyof MemorySearchRankComponents,
+  value: unknown
+): void {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    output[key] = numeric;
+  }
+}
+
+function retrievalModeFromRank(rank: MemorySearchRankComponents): MemoryRetrievalMode {
+  if ((rank.fullTextScore ?? 0) > 0 && (rank.trigramScore ?? 0) > 0) {
+    return "postgres-hybrid-keyword";
+  }
+  if ((rank.fullTextScore ?? 0) > 0) {
+    return "postgres-full-text";
+  }
+  if ((rank.trigramScore ?? 0) > 0) {
+    return "postgres-trigram";
+  }
+  return "postgres-hybrid-keyword";
+}
+
+function matchReasonFromRow(
+  row: QueryResultRow,
+  rank: MemorySearchRankComponents
+): MemoryMatchReason {
+  const reason = row["search_matched_by"];
+  if (isMemoryMatchReason(reason)) {
+    return reason;
+  }
+  if ((rank.tagScore ?? 0) >= Math.max(rank.keywordScore ?? 0, rank.trigramScore ?? 0)) {
+    return "tag";
+  }
+  if (row["subtype"] && (rank.keywordScore ?? 0) > 0) {
+    return "subtype";
+  }
+  if ((rank.scopeScore ?? 0) > 1.3 && (rank.keywordScore ?? 0) > 0) {
+    return "scope";
+  }
+  if ((rank.fullTextScore ?? 0) > 0) {
+    return "content";
+  }
+  if ((rank.trigramScore ?? 0) > 0) {
+    return "content";
+  }
+  return "keyword";
+}
+
+function isMemoryMatchReason(value: unknown): value is MemoryMatchReason {
+  return (
+    value === "content" ||
+    value === "summary" ||
+    value === "tag" ||
+    value === "type" ||
+    value === "subtype" ||
+    value === "scope" ||
+    value === "metadata" ||
+    value === "source" ||
+    value === "keyword" ||
+    value === "fallback"
+  );
 }
 
 function parseMetadata(value: unknown): Record<string, unknown> {
@@ -723,6 +936,21 @@ function escapeLike(value: string): string {
 }
 
 type VisibilityMode = "prompt" | "manual" | "history";
+
+function visibilityModeForQuery(query: MemorySearchQuery): VisibilityMode {
+  if (
+    query.includeHistory ||
+    query.includeExpired ||
+    query.includeSuperseded ||
+    query.statuses?.some((status) => status === "forgotten" || status === "expired")
+  ) {
+    return "history";
+  }
+  if (query.includeArchived || query.statuses?.includes("archived")) {
+    return "manual";
+  }
+  return "prompt";
+}
 
 function activeMemorySql(mode: VisibilityMode): string {
   const activeWindow = `(expires_at is null or expires_at > now())

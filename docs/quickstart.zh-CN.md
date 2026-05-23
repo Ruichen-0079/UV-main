@@ -132,6 +132,8 @@ DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 
 启用 PostgreSQL 记忆前必须先运行 migration。
 
+Migration 会启用 Postgres Search v2：`pg_trgm` trigram index、PostgreSQL 内置 full-text index、结构化 filters、tags / metadata indexes。Postgres 模式会持久化记忆，并能更好地检索中英混合文本、命令、Windows/WSL 路径、URL、端口、env key 和 provider 名称；`in-memory` 模式仍然更简单，但服务器重启后会清空。
+
 如果你手动启动服务，启动前请把 `.env` 和 `.env.local` 加载进 shell；使用 `./scripts/dev.sh` 时脚本会自动加载。
 
 Bash 或 WSL：

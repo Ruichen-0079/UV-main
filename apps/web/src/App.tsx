@@ -460,6 +460,7 @@ function MemoryPage(props: {
   const [typeFilter, setTypeFilter] = useState("all");
   const [subtypeFilter, setSubtypeFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [tagsFilter, setTagsFilter] = useState("");
   const [scopeFilter, setScopeFilter] = useState("all");
   const [scopeIdFilter, setScopeIdFilter] = useState("");
   const [layerFilter, setLayerFilter] = useState("all");
@@ -514,10 +515,14 @@ function MemoryPage(props: {
       void apiClient
         .searchMemories(trimmed, {
           type: typeFilter,
+          subtype: subtypeFilter,
+          source: sourceFilter,
           scope: scopeFilter,
           scopeId: scopeIdFilter,
           memoryLayer: layerFilter,
           status: statusFilter,
+          tags: tagsFilter,
+          minImportance,
           includeArchived,
           includeSuperseded,
           includeExpired,
@@ -558,10 +563,14 @@ function MemoryPage(props: {
   }, [
     query,
     typeFilter,
+    subtypeFilter,
+    sourceFilter,
+    tagsFilter,
     scopeFilter,
     scopeIdFilter,
     layerFilter,
     statusFilter,
+    minImportance,
     includeArchived,
     includeSuperseded,
     includeExpired
@@ -578,6 +587,15 @@ function MemoryPage(props: {
     const matchesSource = sourceFilter === "all" || memory.source === sourceFilter;
     const matchesScope = scopeFilter === "all" || memory.scope === scopeFilter;
     const matchesScopeId = scopeIdFilter.trim() === "" || memory.scopeId === scopeIdFilter.trim();
+    const requestedTags = tagsFilter
+      .split(",")
+      .map((tag) => tag.trim().toLowerCase())
+      .filter(Boolean);
+    const matchesTags =
+      requestedTags.length === 0 ||
+      requestedTags.some((tag) =>
+        memory.tags.some((memoryTag) => memoryTag.toLowerCase().includes(tag))
+      );
     const matchesLayer = layerFilter === "all" || memory.memoryLayer === layerFilter;
     const matchesStatus = statusFilter === "all" || memory.status === statusFilter;
     const min = parseImportance(minImportance) ?? 0;
@@ -592,6 +610,7 @@ function MemoryPage(props: {
       matchesSource &&
       matchesScope &&
       matchesScopeId &&
+      matchesTags &&
       matchesLayer &&
       matchesStatus &&
       matchesImportance &&
@@ -818,10 +837,14 @@ function MemoryPage(props: {
     if (query.trim()) {
       const result = await apiClient.searchMemories(query.trim(), {
         type: typeFilter,
+        subtype: subtypeFilter,
+        source: sourceFilter,
         scope: scopeFilter,
         scopeId: scopeIdFilter,
         memoryLayer: layerFilter,
         status: statusFilter,
+        tags: tagsFilter,
+        minImportance,
         includeArchived,
         includeSuperseded,
         includeExpired,
@@ -844,6 +867,7 @@ function MemoryPage(props: {
     setTypeFilter("all");
     setSubtypeFilter("all");
     setSourceFilter("all");
+    setTagsFilter("");
     setScopeFilter("all");
     setScopeIdFilter("");
     setLayerFilter("all");
@@ -945,7 +969,7 @@ function MemoryPage(props: {
               Clear
             </button>
           </div>
-          <div className="mb-3 grid grid-cols-[140px_1fr_140px_140px_100px_110px_90px] gap-3">
+          <div className="mb-3 grid grid-cols-[140px_1fr_160px_140px_140px_100px_110px_90px] gap-3">
             <select
               className="field"
               value={scopeFilter}
@@ -963,6 +987,12 @@ function MemoryPage(props: {
               placeholder="scopeId, e.g. yuvi-runtime"
               value={scopeIdFilter}
               onChange={(event) => setScopeIdFilter(event.target.value)}
+            />
+            <input
+              className="field"
+              placeholder="tags, comma-separated"
+              value={tagsFilter}
+              onChange={(event) => setTagsFilter(event.target.value)}
             />
             <select
               className="field"
@@ -1717,9 +1747,16 @@ function PromptPreviewPage(): JSX.Element {
                     <td className="px-2 py-2">{memory.memoryLayer ?? ""}</td>
                     <td className="px-2 py-2">{memory.status ?? ""}</td>
                     <td className="px-2 py-2">{memory.source}</td>
-                    <td className="px-2 py-2">{memory.matchedBy ?? "unknown"}</td>
-                    <td className="px-2 py-2">{memory.importance.toFixed(2)}</td>
-                    <td className="px-2 py-2">{memory.score?.toFixed(2) ?? ""}</td>
+	                    <td className="px-2 py-2">{memory.matchedBy ?? "unknown"}</td>
+	                    <td className="px-2 py-2">{memory.importance.toFixed(2)}</td>
+	                    <td className="px-2 py-2">
+	                      {memory.score?.toFixed(2) ?? ""}
+	                      {memory.rankComponents ? (
+	                        <span className="block text-[10px] text-ink-400">
+	                          {formatRankComponents(memory.rankComponents)}
+	                        </span>
+	                      ) : null}
+	                    </td>
                     <td className="px-2 py-2 font-mono">
                       {shortTrace(memory.sourceTraceId ?? undefined)}
                     </td>
@@ -2548,6 +2585,13 @@ function formatIncludedScopes(scopes: Array<{ scope: string; scopeId?: string | 
     .join(", ");
 }
 
+function formatRankComponents(rank: NonNullable<RetrievedMemoryDebug["rankComponents"]>): string {
+  return Object.entries(rank)
+    .filter(([, value]) => typeof value === "number" && value > 0)
+    .map(([key, value]) => `${key.replace(/Score$/, "")}:${Number(value).toFixed(1)}`)
+    .join(" · ");
+}
+
 function ProviderVerificationResult(props: { result: ProviderVerificationResponse }): JSX.Element {
   const result = props.result;
   return (
@@ -3232,12 +3276,17 @@ function MemoryTable(props: {
                   <td className="table-cell text-ink-500">{memory.tags.join(", ") || "none"}</td>
                 )}
                 {!props.compact && <td className="table-cell text-ink-500">{memory.source}</td>}
-                {!props.compact && (
-                  <td className="table-cell text-ink-500">
-                    {debug?.matchedBy ?? "n/a"}
-                    {debug?.score !== undefined ? ` · ${debug.score.toFixed(2)}` : ""}
-                  </td>
-                )}
+	                {!props.compact && (
+	                  <td className="table-cell text-ink-500">
+	                    {debug?.matchedBy ?? "n/a"}
+	                    {debug?.score !== undefined ? ` · ${debug.score.toFixed(2)}` : ""}
+	                    {debug?.rankComponents ? (
+	                      <span className="block text-[10px] text-ink-400">
+	                        {formatRankComponents(debug.rankComponents)}
+	                      </span>
+	                    ) : null}
+	                  </td>
+	                )}
                 {!props.compact && (
                   <td className="table-cell font-mono text-xs text-ink-500">
                     {shortTrace(memory.sourceTraceId ?? undefined)}

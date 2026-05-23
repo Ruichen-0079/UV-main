@@ -17,6 +17,7 @@ export type {
   MemoryQuery,
   MemoryRetrievalMode,
   MemoryRetrievalResult,
+  MemorySearchRankComponents,
   MemorySearchQuery,
   MemoryStatus,
   MemorySubtype,

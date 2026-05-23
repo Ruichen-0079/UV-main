@@ -24,9 +24,9 @@ Core tables:
 - `entities`
 - `relations`
 
-The repository exposes vector search as an interface, but embeddings are intentionally not required yet. PostgreSQL mode uses structured keyword retrieval before embeddings: `pg_trgm` is enabled by migration, content and summary have trigram indexes, tags and metadata use GIN indexes, and type/subtype/source/sourceTraceId/createdAt/importance have supporting indexes for filtering and ranking.
+The repository exposes vector search as an interface, but embeddings are intentionally not required yet. PostgreSQL mode uses YUVI Postgres Search v2 before embeddings: `pg_trgm` is enabled by migration, content and summary have trigram indexes, tags and metadata use GIN indexes, and structured fields such as scope, scopeId, memoryLayer, status, type, subtype, source, sourceTraceId, timestamps, and importance have supporting indexes for filtering and ranking. A built-in PostgreSQL full-text expression index using the `simple` config complements keyword and trigram matching.
 
-Search covers content, summary, tags, type, subtype, source/sourceTraceId, and safe metadata text. This supports Chinese, English, mixed Chinese/English queries such as `YUVI Runtime 是什么项目`, local paths like `C:\Users\...`, ports such as `6121`, and commands such as `pnpm db:migrate`. Prompt Preview and memory search debug metadata can report `retrievalMode`, `matchedBy`, `score`, type/subtype/source/importance, and `sourceTraceId`.
+Search covers content, summary, tags, type, subtype, scope, scopeId, memoryLayer, source/sourceTraceId, and safe metadata text. This supports Chinese, English, mixed Chinese/English queries such as `YUVI Runtime 是什么项目`, local paths like `C:\Users\...`, ports such as `6121`, URLs such as `ws://127.0.0.1:6121`, env keys such as `MEMORY_EXTRACTOR`, and commands such as `pnpm db:migrate`. Prompt Preview and memory search debug metadata can report `retrievalMode`, `matchedBy`, `score`, rank components, type/subtype/source/importance, and `sourceTraceId`.
 
 ## Memory Model v2
 
@@ -64,7 +64,7 @@ Long-term prompt retrieval remains scope-aware, status-aware, and time-aware:
 
 Ranking combines keyword relevance, type/subtype priority, memory layer priority, importance, recency, access recency, source quality, and scope match quality. Core active memories in the current project/user scope are favored; low-importance verbose runtime episodic summaries, archival records, and unrelated scoped records are down-ranked or excluded.
 
-Prompt Preview exposes explainable debug fields such as `retrievalScope`, `includedScopes`, `includeArchived`, `includeSuperseded`, `includeExpired`, `excludedByStatus`, `excludedByTime`, `excludedByScope`, `currentTime`, and per-memory `matchedBy`, `score`, `scope`, `memoryLayer`, `status`, temporal fields, and `excludedReason`.
+Prompt Preview exposes explainable debug fields such as `retrievalScope`, `includedScopes`, `includeArchived`, `includeSuperseded`, `includeExpired`, `excludedByStatus`, `excludedByTime`, `excludedByScope`, `currentTime`, and per-memory `matchedBy`, `score`, optional rank components (`keywordScore`, `tagScore`, `trigramScore`, `fullTextScore`, `scopeScore`, `importanceScore`, `recencyScore`), `scope`, `memoryLayer`, `status`, temporal fields, and `excludedReason`.
 
 PromptBuilder also injects a `CurrentTime` section containing the current ISO timestamp, timezone, and local date. RelevantMemory bullets may include compact hints such as `[project:yuvi-runtime][core][active]` so the model can reason about scope and freshness without receiving verbose metadata.
 
