@@ -197,8 +197,16 @@ export type MemorySearchQuery = {
   tags?: string[];
   scope?: MemoryScope;
   scopeId?: string;
+  scopes?: MemoryScope[];
+  sessionId?: string;
+  userId?: string;
+  projectId?: string;
+  agentId?: string;
+  pluginId?: string;
   includeArchived?: boolean;
+  includeSuperseded?: boolean;
   includeHistory?: boolean;
+  includeExpired?: boolean;
   limit?: number;
 };
 
@@ -235,6 +243,7 @@ export type RetrievedMemoryDebug = {
   validUntil?: Date | null;
   expiresAt?: Date | null;
   supersededAt?: Date | null;
+  lastAccessedAt?: Date;
   displayText: string;
   matchedBy: MemoryMatchReason;
   score?: number;
@@ -255,6 +264,15 @@ export type MemoryRetrievalResult = {
   rawCount: number;
   count: number;
   retrievalMode: MemoryRetrievalMode;
+  retrievalScope: string;
+  includedScopes: Array<{ scope: MemoryScope; scopeId?: string | null }>;
+  includeArchived: boolean;
+  includeSuperseded: boolean;
+  includeExpired: boolean;
+  currentTime: string;
+  excludedByStatus: number;
+  excludedByTime: number;
+  excludedByScope: number;
   rawMemories: RetrievedMemoryDebug[];
   memories: RetrievedMemoryDebug[];
   selectedMemories: Memory[];

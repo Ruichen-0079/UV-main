@@ -188,6 +188,79 @@ describe("RuntimeOrchestrator", () => {
     expect(JSON.stringify(rejected)).not.toContain("sk-super-secret");
     expect(JSON.stringify(rejected)).not.toContain("Bearer secret");
   });
+
+  it("injects bounded same-session DirectContext without mixing unrelated sessions", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const written: MemoryCandidate[] = [];
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory(written),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders(),
+      directContext: {
+        enabled: true,
+        maxTurns: 1,
+        maxChars: 220
+      }
+    });
+
+    await runtime.handleUserMessage(
+      {
+        sessionId: "session-a",
+        content: "First context turn with token=super-secret-value"
+      },
+      { writeMemory: false }
+    );
+    await runtime.handleUserMessage(
+      {
+        sessionId: "session-b",
+        content: "Unrelated session content should not appear"
+      },
+      { writeMemory: false }
+    );
+    await runtime.handleUserMessage(
+      {
+        sessionId: "session-a",
+        content: "Second context turn"
+      },
+      { writeMemory: false }
+    );
+    const secondPreview = runtime.getLatestPromptPreview();
+    const directContext = secondPreview?.sections.find(
+      (section) => section.name === "DirectContext"
+    );
+    const relevantMemory = secondPreview?.sections.find(
+      (section) => section.name === "RelevantMemory"
+    );
+
+    expect(directContext?.content).toContain("First context turn");
+    expect(directContext?.content).not.toContain("super-secret-value");
+    expect(directContext?.content).not.toContain("Unrelated session content");
+    expect(relevantMemory?.content).toBe("No relevant memory retrieved.");
+    expect(secondPreview).toMatchObject({
+      directContextEnabled: true,
+      directContextTurnCount: 1,
+      directContextTruncated: false,
+      directContextSource: "session-turns"
+    });
+    expect(secondPreview?.directContextCharCount).toBeGreaterThan(0);
+    expect(written).toHaveLength(0);
+
+    await runtime.handleUserMessage(
+      {
+        sessionId: "session-a",
+        content: "Third context turn"
+      },
+      { writeMemory: false }
+    );
+    const thirdPreview = runtime.getLatestPromptPreview();
+    const thirdDirectContext = thirdPreview?.sections.find(
+      (section) => section.name === "DirectContext"
+    );
+    expect(thirdDirectContext?.content).not.toContain("First context turn");
+    expect(thirdDirectContext?.content).toContain("Second context turn");
+    expect(thirdPreview?.directContextTruncated).toBe(true);
+  });
 });
 
 function createFailingMemory(): RuntimeMemoryPort {
@@ -200,6 +273,48 @@ function createFailingMemory(): RuntimeMemoryPort {
     },
     async rememberInteraction(): Promise<Memory> {
       throw new Error("memory database unavailable");
+    }
+  };
+}
+
+function createRecordingMemory(written: MemoryCandidate[]): RuntimeMemoryPort {
+  return {
+    async retrieveRelevantMemories() {
+      return [];
+    },
+    async retrieveRelevantMemoriesWithMetadata() {
+      return {
+        query: "",
+        keywords: [],
+        rawCount: 0,
+        count: 0,
+        retrievalMode: "keyword",
+        retrievalScope: "user,project:yuvi-runtime",
+        includedScopes: [{ scope: "user" }, { scope: "project", scopeId: "yuvi-runtime" }],
+        includeArchived: false,
+        includeSuperseded: false,
+        includeExpired: false,
+        currentTime: new Date().toISOString(),
+        excludedByStatus: 0,
+        excludedByTime: 0,
+        excludedByScope: 0,
+        rawMemories: [],
+        memories: [],
+        selectedMemories: []
+      };
+    },
+    scoreImportance() {
+      return 0;
+    },
+    async extractCandidates() {
+      return [];
+    },
+    async rememberCandidate(candidate): Promise<Memory> {
+      written.push(candidate);
+      return createMemory(candidate);
+    },
+    async rememberInteraction(): Promise<Memory | null> {
+      return null;
     }
   };
 }

@@ -40,14 +40,28 @@ export type RuntimeOrchestratorOptions = {
   promptBuilder: RuntimePromptBuilderPort;
   providers: ProviderResolver;
   memoryRepository?: string | undefined;
+  directContext?: Partial<DirectContextConfig> | undefined;
   logger?: RuntimeLogger;
 };
 
+export type DirectContextConfig = {
+  enabled: boolean;
+  maxTurns: number;
+  maxChars: number;
+};
+
 export type RuntimeMemoryPort = {
-  retrieveRelevantMemories(input: { text: string; limit?: number }): Promise<Memory[]>;
+  retrieveRelevantMemories(input: {
+    text: string;
+    limit?: number;
+    sessionId?: string;
+    projectId?: string;
+  }): Promise<Memory[]>;
   retrieveRelevantMemoriesWithMetadata?(input: {
     text: string;
     limit?: number;
+    sessionId?: string;
+    projectId?: string;
   }): Promise<MemoryRetrievalResult>;
   scoreImportance(text: string): number;
   extractCandidates?(input: {
@@ -111,6 +125,20 @@ export type RuntimePromptPreview = {
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
   retrievalMode: MemoryRetrievalMode;
+  retrievalScope: string;
+  includedScopes: Array<{ scope: string; scopeId?: string | null }>;
+  includeArchived: boolean;
+  includeSuperseded: boolean;
+  includeExpired: boolean;
+  currentTime: string;
+  directContextEnabled: boolean;
+  directContextTurnCount: number;
+  directContextCharCount: number;
+  directContextTruncated: boolean;
+  directContextSource: string;
+  excludedByStatus: number;
+  excludedByTime: number;
+  excludedByScope: number;
   retrievedMemories: RetrievedMemoryDebug[];
   sections: PromptBuildOutput["sections"];
   finalMessages: PromptBuildOutput["messages"];
@@ -201,6 +229,22 @@ export type SafeProviderCallMetadata = {
   healthStatus?: ProviderHealth["status"] | undefined;
 };
 
+type DirectContextTurn = {
+  traceId: string;
+  timestamp: string;
+  userMessage: string;
+  assistantReply: string;
+};
+
+type DirectContextBuildResult = {
+  enabled: boolean;
+  content: string;
+  turnCount: number;
+  charCount: number;
+  truncated: boolean;
+  source: string;
+};
+
 export type HandleAudioInputInput = STTInput & {
   sessionId: string;
   voiceOutput?: boolean | undefined;
@@ -217,8 +261,12 @@ export type HandleImageInputInput = VisionInput & {
 export class RuntimeOrchestrator {
   private latestPromptPreview: RuntimePromptPreview | null = null;
   private readonly memoryCandidateHistory: RuntimeMemoryCandidateReview[] = [];
+  private readonly sessionTurns = new Map<string, DirectContextTurn[]>();
+  private readonly directContextConfig: DirectContextConfig;
 
-  constructor(private readonly options: RuntimeOrchestratorOptions) {}
+  constructor(private readonly options: RuntimeOrchestratorOptions) {
+    this.directContextConfig = normalizeDirectContextConfig(options.directContext);
+  }
 
   getLatestPromptPreview(): RuntimePromptPreview | null {
     return this.latestPromptPreview;
@@ -463,6 +511,7 @@ export class RuntimeOrchestrator {
     const memoryContext = memoryOptions.readMemory
       ? await this.retrieveMemories(event)
       : emptyMemoryContext();
+    const directContext = this.buildDirectContext(event.payload.sessionId);
     const prompt = this.options.promptBuilder.buildPrompt({
       systemIdentity: "You are Companion, a local-first AI companion runtime agent.",
       characterStyle: "Warm, concise, emotionally aware, and practical.",
@@ -472,10 +521,20 @@ export class RuntimeOrchestrator {
         content: memory.displayText,
         displayText: memory.displayText,
         importance: memory.importance,
-        createdAt: memory.createdAt
+        scope: memory.scope,
+        scopeId: memory.scopeId,
+        memoryLayer: memory.memoryLayer,
+        status: memory.status,
+        ...(memory.validFrom !== undefined ? { validFrom: memory.validFrom } : {}),
+        ...(memory.validUntil !== undefined ? { validUntil: memory.validUntil } : {}),
+        ...(memory.expiresAt !== undefined ? { expiresAt: memory.expiresAt } : {}),
+        createdAt: memory.createdAt,
+        ...(memory.lastAccessedAt !== undefined ? { lastAccessedAt: memory.lastAccessedAt } : {})
       })),
       memoryEnabled: memoryOptions.readMemory,
       currentTime: currentTimeContext(),
+      directContext: directContext.content,
+      directContextEnabled: directContext.enabled,
       currentSituation: voiceOutput
         ? "The user is interacting through voice."
         : "The user is interacting through text.",
@@ -497,6 +556,20 @@ export class RuntimeOrchestrator {
       retrievedMemoryCount: memoryContext.retrievedMemoryCount,
       retrievalMode: memoryContext.retrievalMode,
       retrievedMemories: memoryContext.retrievedMemories,
+      retrievalScope: memoryContext.retrievalScope,
+      includedScopes: memoryContext.includedScopes,
+      includeArchived: memoryContext.includeArchived,
+      includeSuperseded: memoryContext.includeSuperseded,
+      includeExpired: memoryContext.includeExpired,
+      currentTime: memoryContext.currentTime,
+      directContextEnabled: directContext.enabled,
+      directContextTurnCount: directContext.turnCount,
+      directContextCharCount: directContext.charCount,
+      directContextTruncated: directContext.truncated,
+      directContextSource: directContext.source,
+      excludedByStatus: memoryContext.excludedByStatus,
+      excludedByTime: memoryContext.excludedByTime,
+      excludedByScope: memoryContext.excludedByScope,
       sections: prompt.sections,
       finalMessages: prompt.messages,
       finalPrompt: prompt.prompt,
@@ -541,7 +614,9 @@ export class RuntimeOrchestrator {
       })
     };
 
-    return this.publishAgentReply(event, output.message.content, providerMetadata);
+    const reply = await this.publishAgentReply(event, output.message.content, providerMetadata);
+    this.recordDirectContextTurn(event, reply);
+    return reply;
   }
 
   async maybeSynthesizeSpeech(
@@ -750,21 +825,35 @@ export class RuntimeOrchestrator {
       if (this.options.memory.retrieveRelevantMemoriesWithMetadata) {
         const result = await this.options.memory.retrieveRelevantMemoriesWithMetadata({
           text: event.payload.content,
-          limit: 5
+          limit: 5,
+          sessionId: event.payload.sessionId,
+          projectId: "yuvi-runtime"
         });
         memoryContext = {
           retrievedMemoryCountRaw: result.rawCount,
           retrievedMemoryCount: result.count,
           retrievalMode: result.retrievalMode,
+          retrievalScope: result.retrievalScope,
+          includedScopes: result.includedScopes,
+          includeArchived: result.includeArchived,
+          includeSuperseded: result.includeSuperseded,
+          includeExpired: result.includeExpired,
+          currentTime: result.currentTime,
+          excludedByStatus: result.excludedByStatus,
+          excludedByTime: result.excludedByTime,
+          excludedByScope: result.excludedByScope,
           retrievedMemories: result.rawMemories,
           promptMemories: result.memories
         };
       } else {
         const memories = await this.options.memory.retrieveRelevantMemories({
           text: event.payload.content,
-          limit: 5
+          limit: 5,
+          sessionId: event.payload.sessionId,
+          projectId: "yuvi-runtime"
         });
         memoryContext = {
+          ...emptyMemoryContext(),
           retrievedMemoryCountRaw: memories.length,
           retrievedMemoryCount: memories.length,
           retrievalMode: "keyword",
@@ -805,6 +894,66 @@ export class RuntimeOrchestrator {
     );
 
     return memoryContext;
+  }
+
+  private buildDirectContext(sessionId: string): DirectContextBuildResult {
+    if (!this.directContextConfig.enabled) {
+      return {
+        enabled: false,
+        content: "",
+        turnCount: 0,
+        charCount: 0,
+        truncated: false,
+        source: "disabled"
+      };
+    }
+
+    const turns = this.sessionTurns.get(sessionId) ?? [];
+    const selected = turns.slice(-this.directContextConfig.maxTurns);
+    const lines = selected.map(formatDirectContextTurn);
+    let content = lines.join("\n");
+    let truncated = selected.length < turns.length;
+
+    while (content.length > this.directContextConfig.maxChars && lines.length > 0) {
+      lines.shift();
+      content = lines.join("\n");
+      truncated = true;
+    }
+
+    if (content.length > this.directContextConfig.maxChars) {
+      content = content.slice(-this.directContextConfig.maxChars).trimStart();
+      truncated = true;
+    }
+
+    return {
+      enabled: true,
+      content,
+      turnCount: lines.length,
+      charCount: content.length,
+      truncated,
+      source: "session-turns"
+    };
+  }
+
+  private recordDirectContextTurn(
+    userEvent: UserMessageEvent | UserVoiceTranscriptEvent,
+    reply: AgentReplyEvent
+  ): void {
+    if (!this.directContextConfig.enabled) {
+      return;
+    }
+
+    const sessionId = userEvent.payload.sessionId;
+    const turns = this.sessionTurns.get(sessionId) ?? [];
+    turns.push({
+      traceId: userEvent.traceId,
+      timestamp: new Date().toISOString(),
+      userMessage: redactUnsafeText(userEvent.payload.content),
+      assistantReply: redactUnsafeText(reply.payload.content)
+    });
+
+    const maxStoredTurns = Math.max(this.directContextConfig.maxTurns * 3, 12);
+    this.sessionTurns.set(sessionId, turns.slice(-maxStoredTurns));
   }
 
   private async measureProvider<TOutput>(
@@ -1041,6 +1190,15 @@ type MemoryContext = {
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
   retrievalMode: MemoryRetrievalMode;
+  retrievalScope: string;
+  includedScopes: Array<{ scope: string; scopeId?: string | null }>;
+  includeArchived: boolean;
+  includeSuperseded: boolean;
+  includeExpired: boolean;
+  currentTime: string;
+  excludedByStatus: number;
+  excludedByTime: number;
+  excludedByScope: number;
   retrievedMemories: RetrievedMemoryDebug[];
   promptMemories: RetrievedMemoryDebug[];
 };
@@ -1063,6 +1221,15 @@ function emptyMemoryContext(): MemoryContext {
     retrievedMemoryCountRaw: 0,
     retrievedMemoryCount: 0,
     retrievalMode: "keyword",
+    retrievalScope: "user,project:yuvi-runtime",
+    includedScopes: [{ scope: "user" }, { scope: "project", scopeId: "yuvi-runtime" }],
+    includeArchived: false,
+    includeSuperseded: false,
+    includeExpired: false,
+    currentTime: new Date().toISOString(),
+    excludedByStatus: 0,
+    excludedByTime: 0,
+    excludedByScope: 0,
     retrievedMemories: [],
     promptMemories: []
   };
@@ -1162,6 +1329,36 @@ function currentTimeContext(): NonNullable<PromptBuildInput["currentTime"]> {
     timezone,
     localDate: now.toLocaleDateString("en-CA", { timeZone: timezone })
   };
+}
+
+function normalizeDirectContextConfig(
+  input: Partial<DirectContextConfig> | undefined
+): DirectContextConfig {
+  return {
+    enabled: input?.enabled ?? true,
+    maxTurns: clampInteger(input?.maxTurns ?? 6, 0, 20),
+    maxChars: clampInteger(input?.maxChars ?? 6000, 500, 20_000)
+  };
+}
+
+function clampInteger(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+function formatDirectContextTurn(turn: DirectContextTurn): string {
+  return [
+    `- Previous turn (${turn.timestamp}, trace ${turn.traceId.slice(0, 8)}):`,
+    `  User: ${truncateDirectContextLine(turn.userMessage)}`,
+    `  Assistant: ${truncateDirectContextLine(turn.assistantReply)}`
+  ].join("\n");
+}
+
+function truncateDirectContextLine(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 800 ? `${normalized.slice(0, 797)}...` : normalized;
 }
 
 function toIsoString(value: Date | string | null | undefined): string | null | undefined {

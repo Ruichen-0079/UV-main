@@ -43,6 +43,49 @@ Default prompt retrieval only uses `active` memories whose validity window curre
 
 The default scope is `user`. YUVI project memories can be inferred as `scope=project` and `scopeId=yuvi-runtime`. `working` memories map to the `working` layer; stable semantic preferences and project facts map to `core`; episodic milestones and troubleshooting records map to `recall`.
 
+## Read Pipeline v2
+
+Prompt assembly now combines short-term Direct Context with long-term RelevantMemory. They are separate on purpose:
+
+- `DirectContext` is bounded recent same-session context. It improves conversational continuity for recent turns, immediate confirmations, current task intent, and recent errors. It is not persisted by default.
+- `RelevantMemory` is durable long-term memory retrieved from `MemoryService`, filtered by scope/status/time and ranked before prompt injection.
+
+Default Direct Context settings are `DIRECT_CONTEXT_ENABLED=true`, `DIRECT_CONTEXT_MAX_TURNS=6`, and `DIRECT_CONTEXT_MAX_CHARS=6000`. The runtime trims oldest turns first, does not use LLM summarization, and redacts secret-like values before prompt injection.
+
+Long-term prompt retrieval remains scope-aware, status-aware, and time-aware:
+
+- Default prompt reads include `user` and `project:yuvi-runtime`; current-session reads also include `session:<sessionId>`.
+- `agent` and `plugin` scopes are only included when the request supplies matching context.
+- Unrelated project, plugin, or agent memories are filtered out before prompt injection.
+- `forgotten`, `expired`, `superseded`, and `archived` memories are excluded from prompt injection by default.
+- `includeArchived`, `includeSuperseded`, and `includeExpired` are manual/debug search options, not normal prompt defaults.
+- `expiresAt`, `validUntil`, and future `validFrom` values are respected during retrieval.
+- `lastAccessedAt` is updated when a memory is selected, so future ranking can use access recency.
+
+Ranking combines keyword relevance, type/subtype priority, memory layer priority, importance, recency, access recency, source quality, and scope match quality. Core active memories in the current project/user scope are favored; low-importance verbose runtime episodic summaries, archival records, and unrelated scoped records are down-ranked or excluded.
+
+Prompt Preview exposes explainable debug fields such as `retrievalScope`, `includedScopes`, `includeArchived`, `includeSuperseded`, `includeExpired`, `excludedByStatus`, `excludedByTime`, `excludedByScope`, `currentTime`, and per-memory `matchedBy`, `score`, `scope`, `memoryLayer`, `status`, temporal fields, and `excludedReason`.
+
+PromptBuilder also injects a `CurrentTime` section containing the current ISO timestamp, timezone, and local date. RelevantMemory bullets may include compact hints such as `[project:yuvi-runtime][core][active]` so the model can reason about scope and freshness without receiving verbose metadata.
+
+Prompt Preview reports Direct Context budget metadata: `directContextEnabled`, `directContextTurnCount`, `directContextCharCount`, `directContextTruncated`, and `directContextSource`. The prompt sections remain distinct:
+
+```text
+<CurrentTime>
+...
+</CurrentTime>
+
+<DirectContext>
+...
+</DirectContext>
+
+<RelevantMemory>
+...
+</RelevantMemory>
+```
+
+Graph reasoning over `supersedes`, `supersededBy`, and `contradicts` is future work. Automatic expiry and retention scheduling are also future work; forgetting is status-based for now.
+
 ## Manual Management
 
 The Dashboard Memory page is a development console for manual memory management. It can:
@@ -51,7 +94,7 @@ The Dashboard Memory page is a development console for manual memory management.
 - create manual memories with type, subtype, scope, layer, status, summary, importance, source, tags, and temporal fields
 - edit content, summary, type, subtype, scope, layer, status, importance, emotion fields, tags, temporal fields, and safe metadata
 - archive, restore, forget, or delete memories from the active repository
-- search and filter memories by type, subtype, source, and importance
+- search and filter memories by type, subtype, source, scope, scopeId, memory layer, status, importance, and opt-in archived/superseded/expired history
 
 Manual memories should use `source=dashboard` or `source=manual`. Deleted memories are removed from retrieval results. Do not store API keys, passwords, tokens, Authorization headers, or other secrets in memory metadata or content.
 

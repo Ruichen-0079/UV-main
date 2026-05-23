@@ -279,6 +279,7 @@ export type RetrievedMemoryDebug = {
   validUntil?: string | null;
   expiresAt?: string | null;
   supersededAt?: string | null;
+  lastAccessedAt?: string;
   displayText: string;
   matchedBy?:
     | "content"
@@ -323,6 +324,20 @@ export type PromptPreviewResponse = {
   retrievedMemoryCountRaw?: number;
   retrievedMemoryCount?: number;
   retrievalMode?: string;
+  retrievalScope?: string;
+  includedScopes?: Array<{ scope: string; scopeId?: string | null }>;
+  includeArchived?: boolean;
+  includeSuperseded?: boolean;
+  includeExpired?: boolean;
+  currentTime?: string;
+  directContextEnabled?: boolean;
+  directContextTurnCount?: number;
+  directContextCharCount?: number;
+  directContextTruncated?: boolean;
+  directContextSource?: string;
+  excludedByStatus?: number;
+  excludedByTime?: number;
+  excludedByScope?: number;
   retrievedMemories?: RetrievedMemoryDebug[];
   providerName?: string;
   providerModel?: string;
@@ -358,6 +373,20 @@ export type PromptPreviewResponse = {
     retrievedMemoryCountRaw?: number;
     retrievedMemoryCount?: number;
     retrievalMode?: string;
+    retrievalScope?: string;
+    includedScopes?: Array<{ scope: string; scopeId?: string | null }>;
+    includeArchived?: boolean;
+    includeSuperseded?: boolean;
+    includeExpired?: boolean;
+    currentTime?: string;
+    directContextEnabled?: boolean;
+    directContextTurnCount?: number;
+    directContextCharCount?: number;
+    directContextTruncated?: boolean;
+    directContextSource?: string;
+    excludedByStatus?: number;
+    excludedByTime?: number;
+    excludedByScope?: number;
     retrievedMemories?: RetrievedMemoryDebug[];
     sections: Array<{
       name: string;
@@ -545,13 +574,31 @@ export const apiClient = {
 
   searchMemories(
     query: string,
-    options: { type?: string; limit?: number } = {}
+    options: {
+      type?: string;
+      scope?: string;
+      scopeId?: string;
+      memoryLayer?: string;
+      status?: string;
+      includeArchived?: boolean;
+      includeSuperseded?: boolean;
+      includeExpired?: boolean;
+      limit?: number;
+    } = {}
   ): Promise<{
     mock: boolean;
     memories: MemoryRecord[];
     rawCount?: number;
     count?: number;
     retrievalMode?: string;
+    retrievalScope?: string;
+    includedScopes?: Array<{ scope: string; scopeId?: string | null }>;
+    includeArchived?: boolean;
+    includeSuperseded?: boolean;
+    includeExpired?: boolean;
+    excludedByStatus?: number;
+    excludedByTime?: number;
+    excludedByScope?: number;
     debugMemories?: RetrievedMemoryDebug[];
     query?: string;
     repository?: string;
@@ -563,6 +610,27 @@ export const apiClient = {
     if (options.type && options.type !== "all") {
       params.set("type", options.type);
     }
+    if (options.scope && options.scope !== "all") {
+      params.set("scope", options.scope);
+    }
+    if (options.scopeId?.trim()) {
+      params.set("scopeId", options.scopeId.trim());
+    }
+    if (options.memoryLayer && options.memoryLayer !== "all") {
+      params.set("memoryLayer", options.memoryLayer);
+    }
+    if (options.status && options.status !== "all") {
+      params.set("status", options.status);
+    }
+    if (options.includeArchived) {
+      params.set("includeArchived", "true");
+    }
+    if (options.includeSuperseded) {
+      params.set("includeSuperseded", "true");
+    }
+    if (options.includeExpired) {
+      params.set("includeExpired", "true");
+    }
 
     return request<{
       mock: boolean;
@@ -570,6 +638,14 @@ export const apiClient = {
       rawCount?: number;
       count?: number;
       retrievalMode?: string;
+      retrievalScope?: string;
+      includedScopes?: Array<{ scope: string; scopeId?: string | null }>;
+      includeArchived?: boolean;
+      includeSuperseded?: boolean;
+      includeExpired?: boolean;
+      excludedByStatus?: number;
+      excludedByTime?: number;
+      excludedByScope?: number;
       debugMemories?: RetrievedMemoryDebug[];
       query?: string;
       repository?: string;

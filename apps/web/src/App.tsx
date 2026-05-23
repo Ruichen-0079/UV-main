@@ -460,10 +460,22 @@ function MemoryPage(props: {
   const [typeFilter, setTypeFilter] = useState("all");
   const [subtypeFilter, setSubtypeFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [scopeFilter, setScopeFilter] = useState("all");
+  const [scopeIdFilter, setScopeIdFilter] = useState("");
+  const [layerFilter, setLayerFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const [includeSuperseded, setIncludeSuperseded] = useState(false);
+  const [includeExpired, setIncludeExpired] = useState(false);
   const [minImportance, setMinImportance] = useState("0");
   const [searchMemories, setSearchMemories] = useState<MemoryRecord[] | null>(null);
   const [searchDebug, setSearchDebug] = useState<RetrievedMemoryDebug[]>([]);
   const [searchRetrievalMode, setSearchRetrievalMode] = useState<string | null>(null);
+  const [searchExclusions, setSearchExclusions] = useState<{
+    status?: number;
+    time?: number;
+    scope?: number;
+  }>({});
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [resultSource, setResultSource] = useState<MemoryResultSource>("/memory/recent");
@@ -488,6 +500,7 @@ function MemoryPage(props: {
       setSearchMemories(null);
       setSearchDebug([]);
       setSearchRetrievalMode(null);
+      setSearchExclusions({});
       setSearchError(null);
       setSearchLoading(false);
       setResultSource("/memory/recent");
@@ -499,11 +512,26 @@ function MemoryPage(props: {
       setSearchLoading(true);
       setSearchError(null);
       void apiClient
-        .searchMemories(trimmed, { type: typeFilter, limit: 50 })
+        .searchMemories(trimmed, {
+          type: typeFilter,
+          scope: scopeFilter,
+          scopeId: scopeIdFilter,
+          memoryLayer: layerFilter,
+          status: statusFilter,
+          includeArchived,
+          includeSuperseded,
+          includeExpired,
+          limit: 50
+        })
         .then((result) => {
           setSearchMemories(result.memories);
           setSearchDebug(result.debugMemories ?? []);
           setSearchRetrievalMode(result.retrievalMode ?? null);
+          setSearchExclusions({
+            status: result.excludedByStatus ?? 0,
+            time: result.excludedByTime ?? 0,
+            scope: result.excludedByScope ?? 0
+          });
           setResultSource("/memory/search");
         })
         .catch((caught) => {
@@ -512,6 +540,7 @@ function MemoryPage(props: {
             setSearchMemories(null);
             setSearchDebug([]);
             setSearchRetrievalMode(null);
+            setSearchExclusions({});
             setResultSource("local fallback");
           }
         })
@@ -526,7 +555,17 @@ function MemoryPage(props: {
       controller.abort();
       window.clearTimeout(timeout);
     };
-  }, [query, typeFilter]);
+  }, [
+    query,
+    typeFilter,
+    scopeFilter,
+    scopeIdFilter,
+    layerFilter,
+    statusFilter,
+    includeArchived,
+    includeSuperseded,
+    includeExpired
+  ]);
 
   const sourceMemories = searchMemories ?? props.state.data?.memories ?? [];
   const searchDebugById = useMemo(
@@ -537,13 +576,27 @@ function MemoryPage(props: {
     const matchesType = typeFilter === "all" || memory.type === typeFilter;
     const matchesSubtype = subtypeFilter === "all" || memory.subtype === subtypeFilter;
     const matchesSource = sourceFilter === "all" || memory.source === sourceFilter;
+    const matchesScope = scopeFilter === "all" || memory.scope === scopeFilter;
+    const matchesScopeId = scopeIdFilter.trim() === "" || memory.scopeId === scopeIdFilter.trim();
+    const matchesLayer = layerFilter === "all" || memory.memoryLayer === layerFilter;
+    const matchesStatus = statusFilter === "all" || memory.status === statusFilter;
     const min = parseImportance(minImportance) ?? 0;
     const matchesImportance = memory.importance >= min;
     const matchesQuery =
       searchMemories !== null ||
       query === "" ||
       memory.content.toLowerCase().includes(query.toLowerCase());
-    return matchesType && matchesSubtype && matchesSource && matchesImportance && matchesQuery;
+    return (
+      matchesType &&
+      matchesSubtype &&
+      matchesSource &&
+      matchesScope &&
+      matchesScopeId &&
+      matchesLayer &&
+      matchesStatus &&
+      matchesImportance &&
+      matchesQuery
+    );
   });
   const sources = Array.from(new Set(sourceMemories.map((memory) => memory.source))).sort();
 
@@ -765,11 +818,23 @@ function MemoryPage(props: {
     if (query.trim()) {
       const result = await apiClient.searchMemories(query.trim(), {
         type: typeFilter,
+        scope: scopeFilter,
+        scopeId: scopeIdFilter,
+        memoryLayer: layerFilter,
+        status: statusFilter,
+        includeArchived,
+        includeSuperseded,
+        includeExpired,
         limit: 50
       });
       setSearchMemories(result.memories);
       setSearchDebug(result.debugMemories ?? []);
       setSearchRetrievalMode(result.retrievalMode ?? null);
+      setSearchExclusions({
+        status: result.excludedByStatus ?? 0,
+        time: result.excludedByTime ?? 0,
+        scope: result.excludedByScope ?? 0
+      });
       setResultSource("/memory/search");
     }
   }
@@ -779,10 +844,18 @@ function MemoryPage(props: {
     setTypeFilter("all");
     setSubtypeFilter("all");
     setSourceFilter("all");
+    setScopeFilter("all");
+    setScopeIdFilter("");
+    setLayerFilter("all");
+    setStatusFilter("all");
+    setIncludeArchived(false);
+    setIncludeSuperseded(false);
+    setIncludeExpired(false);
     setMinImportance("0");
     setSearchMemories(null);
     setSearchDebug([]);
     setSearchRetrievalMode(null);
+    setSearchExclusions({});
     setSearchError(null);
     setResultSource("/memory/recent");
   }
@@ -796,7 +869,9 @@ function MemoryPage(props: {
           status={resultSource}
           detail={
             query.trim()
-              ? `Search query is active · mode: ${searchRetrievalMode ?? "unknown"}`
+              ? `Search active · mode: ${searchRetrievalMode ?? "unknown"} · excluded status/time/scope: ${
+                  searchExclusions.status ?? 0
+                }/${searchExclusions.time ?? 0}/${searchExclusions.scope ?? 0}`
               : "Showing recent memories"
           }
         />
@@ -869,6 +944,74 @@ function MemoryPage(props: {
             <button className="button-secondary" type="button" onClick={clearFilters}>
               Clear
             </button>
+          </div>
+          <div className="mb-3 grid grid-cols-[140px_1fr_140px_140px_100px_110px_90px] gap-3">
+            <select
+              className="field"
+              value={scopeFilter}
+              onChange={(event) => setScopeFilter(event.target.value)}
+            >
+              <option value="all">All scopes</option>
+              {memoryScopes.map((scope) => (
+                <option key={scope} value={scope}>
+                  {scope}
+                </option>
+              ))}
+            </select>
+            <input
+              className="field"
+              placeholder="scopeId, e.g. yuvi-runtime"
+              value={scopeIdFilter}
+              onChange={(event) => setScopeIdFilter(event.target.value)}
+            />
+            <select
+              className="field"
+              value={layerFilter}
+              onChange={(event) => setLayerFilter(event.target.value)}
+            >
+              <option value="all">All layers</option>
+              {memoryLayers.map((layer) => (
+                <option key={layer} value={layer}>
+                  {layer}
+                </option>
+              ))}
+            </select>
+            <select
+              className="field"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+            >
+              <option value="all">All statuses</option>
+              {memoryStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </select>
+            <label className="inline-flex items-center gap-2 text-xs text-ink-600">
+              <input
+                type="checkbox"
+                checked={includeArchived}
+                onChange={(event) => setIncludeArchived(event.target.checked)}
+              />
+              archived
+            </label>
+            <label className="inline-flex items-center gap-2 text-xs text-ink-600">
+              <input
+                type="checkbox"
+                checked={includeSuperseded}
+                onChange={(event) => setIncludeSuperseded(event.target.checked)}
+              />
+              superseded
+            </label>
+            <label className="inline-flex items-center gap-2 text-xs text-ink-600">
+              <input
+                type="checkbox"
+                checked={includeExpired}
+                onChange={(event) => setIncludeExpired(event.target.checked)}
+              />
+              expired
+            </label>
           </div>
           {(props.state.loading || searchLoading) && (
             <Notice
@@ -1453,7 +1596,7 @@ function PromptPreviewPage(): JSX.Element {
             status={String(
               promptPreview.retrievedMemoryCount ?? preview.data?.retrievedMemoryCount ?? 0
             )}
-            detail={`raw: ${promptPreview.retrievedMemoryCountRaw ?? preview.data?.retrievedMemoryCountRaw ?? 0} · mode: ${promptPreview.retrievalMode ?? preview.data?.retrievalMode ?? "unknown"}`}
+            detail={`raw: ${promptPreview.retrievedMemoryCountRaw ?? preview.data?.retrievedMemoryCountRaw ?? 0} · mode: ${promptPreview.retrievalMode ?? preview.data?.retrievalMode ?? "unknown"} · scope: ${promptPreview.retrievalScope ?? preview.data?.retrievalScope ?? "unknown"}`}
           />
           <StatusCard
             title="Extractor"
@@ -1474,7 +1617,41 @@ function PromptPreviewPage(): JSX.Element {
             status={promptPreview.providerName ?? preview.data?.providerName ?? "unknown"}
             detail={providerPreviewDetail(promptPreview, preview.data)}
           />
+          <StatusCard
+            title="Direct Context"
+            status={
+              (promptPreview.directContextEnabled ?? preview.data?.directContextEnabled)
+                ? "enabled"
+                : "disabled"
+            }
+            detail={`turns: ${promptPreview.directContextTurnCount ?? preview.data?.directContextTurnCount ?? 0} · chars: ${
+              promptPreview.directContextCharCount ?? preview.data?.directContextCharCount ?? 0
+            } · truncated: ${String(
+              promptPreview.directContextTruncated ?? preview.data?.directContextTruncated ?? false
+            )} · source: ${
+              promptPreview.directContextSource ?? preview.data?.directContextSource ?? "unknown"
+            }`}
+          />
         </div>
+      )}
+      {promptPreview && (
+        <Notice
+          tone="info"
+          title="Retrieval policy"
+          message={`included: ${formatIncludedScopes(
+            promptPreview.includedScopes ?? preview.data?.includedScopes ?? []
+          )} · include archived/superseded/expired: ${String(
+            promptPreview.includeArchived ?? preview.data?.includeArchived ?? false
+          )}/${String(
+            promptPreview.includeSuperseded ?? preview.data?.includeSuperseded ?? false
+          )}/${String(
+            promptPreview.includeExpired ?? preview.data?.includeExpired ?? false
+          )} · excluded status/time/scope: ${
+            promptPreview.excludedByStatus ?? preview.data?.excludedByStatus ?? 0
+          }/${promptPreview.excludedByTime ?? preview.data?.excludedByTime ?? 0}/${
+            promptPreview.excludedByScope ?? preview.data?.excludedByScope ?? 0
+          } · currentTime: ${promptPreview.currentTime ?? preview.data?.currentTime ?? "unknown"}`}
+        />
       )}
       {(promptPreview?.llmExtractionRawPreview ?? preview.data?.llmExtractionRawPreview) && (
         <Notice
@@ -1516,9 +1693,13 @@ function PromptPreviewPage(): JSX.Element {
                 <tr>
                   <th className="px-2 py-2">Type</th>
                   <th className="px-2 py-2">Subtype</th>
+                  <th className="px-2 py-2">Scope</th>
+                  <th className="px-2 py-2">Layer</th>
+                  <th className="px-2 py-2">Status</th>
                   <th className="px-2 py-2">Source</th>
                   <th className="px-2 py-2">Match</th>
                   <th className="px-2 py-2">Importance</th>
+                  <th className="px-2 py-2">Score</th>
                   <th className="px-2 py-2">Trace</th>
                   <th className="px-2 py-2">Display Text</th>
                   <th className="px-2 py-2">Excluded</th>
@@ -1529,9 +1710,16 @@ function PromptPreviewPage(): JSX.Element {
                   <tr key={memory.id} className="border-t border-ink-100">
                     <td className="px-2 py-2 font-mono">{memory.type}</td>
                     <td className="px-2 py-2">{memory.subtype ?? ""}</td>
+                    <td className="px-2 py-2">
+                      {memory.scope}
+                      {memory.scopeId ? `:${memory.scopeId}` : ""}
+                    </td>
+                    <td className="px-2 py-2">{memory.memoryLayer ?? ""}</td>
+                    <td className="px-2 py-2">{memory.status ?? ""}</td>
                     <td className="px-2 py-2">{memory.source}</td>
                     <td className="px-2 py-2">{memory.matchedBy ?? "unknown"}</td>
                     <td className="px-2 py-2">{memory.importance.toFixed(2)}</td>
+                    <td className="px-2 py-2">{memory.score?.toFixed(2) ?? ""}</td>
                     <td className="px-2 py-2 font-mono">
                       {shortTrace(memory.sourceTraceId ?? undefined)}
                     </td>
@@ -2348,6 +2536,16 @@ function ProviderMetadataSummary(props: {
       )}
     </div>
   );
+}
+
+function formatIncludedScopes(scopes: Array<{ scope: string; scopeId?: string | null }>): string {
+  if (scopes.length === 0) {
+    return "none";
+  }
+
+  return scopes
+    .map((entry) => `${entry.scope}${entry.scopeId ? `:${entry.scopeId}` : ""}`)
+    .join(", ");
 }
 
 function ProviderVerificationResult(props: { result: ProviderVerificationResponse }): JSX.Element {

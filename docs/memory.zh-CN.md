@@ -43,6 +43,49 @@ Memory record 现在包含 scoped memory、temporal memory、supersession 和 fo
 
 默认 scope 是 `user`。如果内容明显属于 YUVI 项目，可以推断为 `scope=project`、`scopeId=yuvi-runtime`。`working` memory 映射到 `working` layer；稳定的 semantic preference 和 project fact 映射到 `core`；episodic milestone 和 troubleshooting 记录映射到 `recall`。
 
+## Read Pipeline v2
+
+Prompt assembly 现在会组合短期 Direct Context 和长期 RelevantMemory，但二者保持分离：
+
+- `DirectContext` 是有边界的同会话近期上下文，用于最近对话、即时确认、当前任务意图和近期错误。它默认不会持久化为长期记忆。
+- `RelevantMemory` 是从 `MemoryService` 检索出的长期记忆，会先经过 scope/status/time 过滤和 ranking，再进入 prompt。
+
+Direct Context 默认配置为 `DIRECT_CONTEXT_ENABLED=true`、`DIRECT_CONTEXT_MAX_TURNS=6`、`DIRECT_CONTEXT_MAX_CHARS=6000`。Runtime 会优先裁剪最旧 turn，不使用 LLM summarization，并在注入 prompt 前脱敏疑似 secret 的值。
+
+长期 prompt retrieval 仍然是 scope-aware、status-aware、time-aware 的：
+
+- 默认 prompt 读取 `user` 和 `project:yuvi-runtime`；当前会话有 `sessionId` 时也读取 `session:<sessionId>`。
+- `agent` 和 `plugin` scope 只有在请求提供对应上下文时才会参与。
+- 无关 project、plugin 或 agent memory 会在 prompt injection 前被排除。
+- `forgotten`、`expired`、`superseded` 和 `archived` 默认不会进入 prompt。
+- `includeArchived`、`includeSuperseded`、`includeExpired` 是手动/调试搜索选项，不是正常 prompt 默认行为。
+- `expiresAt`、`validUntil` 和未来的 `validFrom` 会影响检索结果。
+- 被选中的 memory 会更新 `lastAccessedAt`，后续 ranking 可以使用访问新近度。
+
+Ranking 会综合 keyword relevance、type/subtype priority、memoryLayer priority、importance、recency、access recency、source quality 和 scope match quality。当前 user/project scope 中的 active core memory 优先；低价值 verbose runtime episodic summary、archival record 和无关 scope record 会被降权或排除。
+
+Prompt Preview 会显示可解释的 debug metadata，包括 `retrievalScope`、`includedScopes`、`includeArchived`、`includeSuperseded`、`includeExpired`、`excludedByStatus`、`excludedByTime`、`excludedByScope`、`currentTime`，以及每条 memory 的 `matchedBy`、`score`、`scope`、`memoryLayer`、`status`、temporal fields 和 `excludedReason`。
+
+PromptBuilder 会继续注入 `CurrentTime` section，包含当前 ISO timestamp、timezone 和 local date。RelevantMemory bullet 会使用紧凑 hint，例如 `[project:yuvi-runtime][core][active]`，帮助模型理解 scope 和 freshness，但不会把冗长 metadata 倒进 prompt。
+
+Prompt Preview 会显示 Direct Context budget metadata：`directContextEnabled`、`directContextTurnCount`、`directContextCharCount`、`directContextTruncated`、`directContextSource`。Prompt section 保持分离：
+
+```text
+<CurrentTime>
+...
+</CurrentTime>
+
+<DirectContext>
+...
+</DirectContext>
+
+<RelevantMemory>
+...
+</RelevantMemory>
+```
+
+`supersedes`、`supersededBy`、`contradicts` 的 graph reasoning 是未来工作。自动 expiry / retention scheduler 也是未来工作；当前 forgetting 主要基于 status 字段。
+
 ## Manual Management
 
 Dashboard 的 Memory 页面是开发期手动记忆管理控制台。它可以：
@@ -51,7 +94,7 @@ Dashboard 的 Memory 页面是开发期手动记忆管理控制台。它可以�
 - 创建带 type、subtype、scope、layer、status、summary、importance、source、tags 和 temporal fields 的 manual memory
 - 编辑 content、summary、type、subtype、scope、layer、status、importance、emotion fields、tags、temporal fields 和安全 metadata
 - archive、restore、forget 或 delete 当前 repository 中的 memory
-- 按 type、subtype、source、importance 搜索和筛选 memory
+- 按 type、subtype、source、scope、scopeId、memoryLayer、status、importance 搜索和筛选 memory，并可显式包含 archived / superseded / expired 历史记录
 
 手动创建的 memory 应使用 `source=dashboard` 或 `source=manual`。删除 memory 后，它不会再进入检索结果。不要把 API key、password、token、Authorization header 或其他 secret 写入 memory content 或 metadata。
 

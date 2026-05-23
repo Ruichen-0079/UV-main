@@ -105,7 +105,11 @@ const SearchMemoryQuerySchema = z.object({
   type: MemoryTypeSchema.optional(),
   scope: MemoryScopeSchema.optional(),
   scopeId: z.string().min(1).optional(),
+  memoryLayer: MemoryLayerSchema.optional(),
+  status: MemoryStatusSchema.optional(),
   includeArchived: z.coerce.boolean().optional(),
+  includeSuperseded: z.coerce.boolean().optional(),
+  includeExpired: z.coerce.boolean().optional(),
   includeHistory: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20)
 });
@@ -244,6 +248,8 @@ export async function registerMemoryRoutes(
       scope?: MemoryScope;
       scopeId?: string;
       includeArchived?: boolean;
+      includeSuperseded?: boolean;
+      includeExpired?: boolean;
       includeHistory?: boolean;
     } = {
       text: query.data.q,
@@ -262,6 +268,12 @@ export async function registerMemoryRoutes(
     if (query.data.includeArchived !== undefined) {
       searchQuery.includeArchived = query.data.includeArchived;
     }
+    if (query.data.includeSuperseded !== undefined) {
+      searchQuery.includeSuperseded = query.data.includeSuperseded;
+    }
+    if (query.data.includeExpired !== undefined) {
+      searchQuery.includeExpired = query.data.includeExpired;
+    }
     if (query.data.includeHistory !== undefined) {
       searchQuery.includeHistory = query.data.includeHistory;
     }
@@ -275,8 +287,36 @@ export async function registerMemoryRoutes(
       rawCount: result.rawCount,
       count: result.count,
       retrievalMode: result.retrievalMode,
-      debugMemories: result.memories.map(toSafeRetrievedMemory),
-      memories: result.selectedMemories.map(toSafeMemory)
+      retrievalScope: result.retrievalScope,
+      includedScopes: result.includedScopes,
+      includeArchived: result.includeArchived,
+      includeSuperseded: result.includeSuperseded,
+      includeExpired: result.includeExpired,
+      excludedByStatus: result.excludedByStatus,
+      excludedByTime: result.excludedByTime,
+      excludedByScope: result.excludedByScope,
+      debugMemories: result.rawMemories
+        .filter((memory) => {
+          if (query.data.memoryLayer && memory.memoryLayer !== query.data.memoryLayer) {
+            return false;
+          }
+          if (query.data.status && memory.status !== query.data.status) {
+            return false;
+          }
+          return true;
+        })
+        .map(toSafeRetrievedMemory),
+      memories: result.selectedMemories
+        .filter((memory) => {
+          if (query.data.memoryLayer && memory.memoryLayer !== query.data.memoryLayer) {
+            return false;
+          }
+          if (query.data.status && memory.status !== query.data.status) {
+            return false;
+          }
+          return true;
+        })
+        .map(toSafeMemory)
     });
   });
 

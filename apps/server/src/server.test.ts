@@ -307,17 +307,40 @@ describe("server", () => {
         yuviPromptWithMemory.json().sections,
         "RelevantMemory"
       );
+      const yuviDirectContext = findPromptSection(
+        yuviPromptWithMemory.json().sections,
+        "DirectContext"
+      );
       expect(yuviPromptWithMemory.json().useMemory).toBe(true);
       expect(yuviPromptWithMemory.json().userMessage).toBe("YUVI Runtime 是什么项目？");
+      expect(yuviPromptWithMemory.json().directContextEnabled).toBe(true);
+      expect(yuviPromptWithMemory.json().directContextTurnCount).toBeGreaterThan(0);
+      expect(yuviPromptWithMemory.json().directContextCharCount).toBeGreaterThan(0);
+      expect(yuviDirectContext?.content).toContain("Server test details");
+      expect(yuviDirectContext?.content).not.toContain("test_deepseek_secret");
       expect(yuviPromptWithMemory.json().retrievedMemoryCountRaw).toBeGreaterThan(
         yuviPromptWithMemory.json().retrievedMemoryCount
       );
       expect(yuviPromptWithMemory.json().retrievedMemoryCount).toBeGreaterThan(0);
+      expect(yuviPromptWithMemory.json().retrievalScope).toContain("project:yuvi-runtime");
+      expect(yuviPromptWithMemory.json().includedScopes).toContainEqual({
+        scope: "session",
+        scopeId: "test"
+      });
+      expect(yuviPromptWithMemory.json().excludedByStatus).toBeGreaterThanOrEqual(0);
+      expect(yuviPromptWithMemory.json().excludedByTime).toBeGreaterThanOrEqual(0);
+      expect(yuviPromptWithMemory.json().excludedByScope).toBeGreaterThanOrEqual(0);
+      expect(yuviPromptWithMemory.json().currentTime).toMatch(/T/);
       expect(yuviRelevantMemory?.content).toMatch(/YUVI Runtime|AI Companion Runtime/);
+      expect(yuviRelevantMemory?.content).toContain("[project:yuvi-runtime][core][active]");
       expect(countOccurrences(yuviRelevantMemory?.content ?? "", "YUVI Runtime")).toBe(1);
       expect(yuviRelevantMemory?.content).not.toContain("“");
       expect(yuviPromptWithMemory.json().retrievedMemories[0]).toMatchObject({
         type: "semantic",
+        scope: "project",
+        scopeId: "yuvi-runtime",
+        memoryLayer: "core",
+        status: "active",
         source: "test",
         displayText: "用户正在开发 YUVI Runtime，一个类 AIRI 的 AI Companion Runtime。"
       });
@@ -366,6 +389,8 @@ describe("server", () => {
       expect(search.json().repository).toBe("in-memory");
       expect(search.json().rawCount).toBeGreaterThanOrEqual(search.json().count);
       expect(search.json().memories.length).toBeGreaterThan(0);
+      expect(search.json().retrievalScope).toBeTruthy();
+      expect(search.json().excludedByStatus).toBeGreaterThanOrEqual(0);
 
       const encodedChineseSearch = await app.inject({
         method: "GET",
@@ -374,6 +399,29 @@ describe("server", () => {
       expect(encodedChineseSearch.statusCode).toBe(200);
       expect(encodedChineseSearch.json().memories.length).toBeGreaterThan(0);
       expect(encodedChineseSearch.json().memories[0].content).toContain("YUVI Runtime");
+
+      const archived = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          type: "semantic",
+          content: "Archived manual search memory for YUVI Runtime.",
+          status: "archived",
+          source: "test",
+          tags: ["yuvi"]
+        }
+      });
+      expect(archived.statusCode).toBe(200);
+      const archivedDefaultSearch = await app.inject({
+        method: "GET",
+        url: "/memory/search?q=Archived%20manual%20search&limit=5"
+      });
+      expect(archivedDefaultSearch.json().memories).toHaveLength(0);
+      const archivedIncludedSearch = await app.inject({
+        method: "GET",
+        url: "/memory/search?q=Archived%20manual%20search&includeArchived=true&limit=5"
+      });
+      expect(archivedIncludedSearch.json().memories[0].status).toBe("archived");
 
       const events = await app.inject({ method: "GET", url: "/events/recent?limit=20" });
       expect(events.statusCode).toBe(200);

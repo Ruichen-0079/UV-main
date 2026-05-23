@@ -2,8 +2,9 @@ export type PromptSectionName =
   | "SystemIdentity"
   | "CharacterStyle"
   | "RelationshipContext"
-  | "RelevantMemory"
   | "CurrentTime"
+  | "DirectContext"
+  | "RelevantMemory"
   | "CurrentSituation"
   | "Tools"
   | "UserMessage";
@@ -20,6 +21,13 @@ export type RetrievedMemoryForPrompt = {
   summary?: string | null;
   displayText?: string;
   importance?: number;
+  scope?: string;
+  scopeId?: string | null;
+  memoryLayer?: string;
+  status?: string;
+  validFrom?: Date | string;
+  validUntil?: Date | string | null;
+  expiresAt?: Date | string | null;
   createdAt?: Date | string;
   lastAccessedAt?: Date | string;
   tags?: string[];
@@ -42,6 +50,8 @@ export type PromptBuildInput = {
     timezone?: string;
     localDate?: string;
   };
+  directContext?: string;
+  directContextEnabled?: boolean;
   currentSituation?: string;
   tools?: ToolContext[];
   userMessage: string;
@@ -148,18 +158,24 @@ export class PromptBuilder {
         stable: false
       },
       {
+        name: "CurrentTime",
+        content: formatCurrentTime(input.currentTime),
+        priority: 85,
+        stable: true
+      },
+      {
+        name: "DirectContext",
+        content: formatDirectContext(input.directContext, input.directContextEnabled ?? true),
+        priority: 68,
+        stable: false
+      },
+      {
         name: "RelevantMemory",
         content: this.compressMemoryNarrative(
           input.retrievedMemories ?? [],
           input.memoryEnabled ?? true
         ),
         priority: 70,
-        stable: false
-      },
-      {
-        name: "CurrentTime",
-        content: formatCurrentTime(input.currentTime),
-        priority: 65,
         stable: false
       },
       {
@@ -199,9 +215,7 @@ export class PromptBuilder {
       memories.map(normalizeMemory).sort(compareMemoryForPrompt)
     ).slice(0, 5);
 
-    return ranked
-      .map((memory) => `- ${compressMemoryText(displayTextForMemory(memory))}`)
-      .join("\n");
+    return ranked.map((memory) => `- ${formatMemoryForPrompt(memory)}`).join("\n");
   }
 
   private enforceBudget(sections: PromptSection[], maxCharacters: number): PromptSection[] {
@@ -237,6 +251,14 @@ function formatCurrentTime(currentTime?: PromptBuildInput["currentTime"]): strin
     `Timezone: ${timezone}`,
     `Local date: ${localDate}`
   ].join("\n");
+}
+
+function formatDirectContext(context: string | undefined, enabled: boolean): string {
+  if (!enabled) {
+    return "Direct context was disabled for this turn.";
+  }
+  const trimmed = context?.trim();
+  return trimmed ? trimmed : "No recent direct context available.";
 }
 
 function formatSection(section: PromptSection): string {
@@ -307,6 +329,35 @@ function stripLeadingListMarkers(text: string): string {
 
 function displayTextForMemory(memory: RetrievedMemoryForPrompt): string {
   return memory.displayText ?? memory.summary ?? memory.content;
+}
+
+function formatMemoryForPrompt(memory: RetrievedMemoryForPrompt): string {
+  const hints = [
+    memory.scope ? (memory.scopeId ? `${memory.scope}:${memory.scopeId}` : memory.scope) : null,
+    memory.memoryLayer ?? null,
+    memory.status ?? null
+  ].filter(Boolean);
+  const temporalHint = formatTemporalHint(memory);
+  const prefix = [...hints, temporalHint]
+    .filter(Boolean)
+    .map((hint) => `[${hint}]`)
+    .join("");
+  return `${prefix ? `${prefix} ` : ""}${compressMemoryText(displayTextForMemory(memory))}`;
+}
+
+function formatTemporalHint(memory: RetrievedMemoryForPrompt): string | null {
+  if (memory.validUntil) {
+    return `validUntil:${formatDateOnly(memory.validUntil)}`;
+  }
+  if (memory.expiresAt) {
+    return `expires:${formatDateOnly(memory.expiresAt)}`;
+  }
+  return null;
+}
+
+function formatDateOnly(value: Date | string): string {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toISOString().slice(0, 10);
 }
 
 function dedupePromptMemories(memories: RetrievedMemoryForPrompt[]): RetrievedMemoryForPrompt[] {

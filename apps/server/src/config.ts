@@ -5,6 +5,11 @@ export type ServerConfig = {
   runtimeMode: "development" | "test" | "production";
   eventBus: "in-memory" | "nats";
   memoryExtractor: "rule-based" | "llm";
+  directContext: {
+    enabled: boolean;
+    maxTurns: number;
+    maxChars: number;
+  };
   dashboardDevToken?: string | undefined;
 };
 
@@ -18,6 +23,11 @@ export function loadServerConfig(
     runtimeMode: parseRuntimeMode(env["RUNTIME_MODE"] ?? env["NODE_ENV"]),
     eventBus: parseEventBus(env["EVENT_BUS"] ?? env["EVENT_BUS_DRIVER"]),
     memoryExtractor: parseMemoryExtractor(env["MEMORY_EXTRACTOR"]),
+    directContext: {
+      enabled: parseBoolean(env["DIRECT_CONTEXT_ENABLED"], true),
+      maxTurns: parsePositiveInteger(env["DIRECT_CONTEXT_MAX_TURNS"], 6),
+      maxChars: parsePositiveInteger(env["DIRECT_CONTEXT_MAX_CHARS"], 6000)
+    },
     dashboardDevToken: emptyToUndefined(env["DASHBOARD_DEV_TOKEN"])
   };
 }
@@ -55,4 +65,19 @@ function parseMemoryExtractor(value: string | undefined): "rule-based" | "llm" {
 function emptyToUndefined(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  return value === "true" || value === "1" || value === "yes";
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }

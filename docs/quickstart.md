@@ -40,11 +40,16 @@ Development defaults to in-memory memory:
 MEMORY_REPOSITORY=in-memory
 MEMORY_EXTRACTOR=llm
 EVENT_BUS=in-memory
+DIRECT_CONTEXT_ENABLED=true
+DIRECT_CONTEXT_MAX_TURNS=6
+DIRECT_CONTEXT_MAX_CHARS=6000
 ```
 
 `EVENT_BUS=in-memory` is the only implemented event bus runtime mode today. `EVENT_BUS=nats` is a reserved future boundary and will fail clearly until NATS integration is implemented.
 
 `MEMORY_EXTRACTOR=llm` is the default and uses DeepSeek Reasoning to propose memory candidates when configured. It consumes reasoning tokens only on turns where `writeMemory=true`, and candidates are still validated/scored by `MemoryService` before storage. If DeepSeek Reasoning is not configured, YUVI falls back safely to `rule-based`. Use `MEMORY_EXTRACTOR=rule-based` for deterministic no-token extraction.
+
+Direct Context is enabled by default. It injects bounded recent same-session turns into a separate `<DirectContext>` prompt section for conversational continuity. It is not long-term memory and is trimmed by `DIRECT_CONTEXT_MAX_TURNS` and `DIRECT_CONTEXT_MAX_CHARS`.
 
 Fill DeepSeek values when you want real provider calls:
 

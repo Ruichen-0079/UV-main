@@ -39,6 +39,37 @@ describe("PromptBuilder", () => {
     expect(output.sections.some((section) => section.name === "CurrentTime")).toBe(true);
   });
 
+  it("keeps DirectContext separate from RelevantMemory", () => {
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "You are Companion.",
+      directContext: "- Previous turn: User confirmed Candidate Review v1 is complete.",
+      retrievedMemories: [
+        {
+          content: "用户偏好 Chat/Reasoning 使用 DeepSeek。",
+          scope: "project",
+          scopeId: "yuvi-runtime",
+          memoryLayer: "core",
+          status: "active"
+        }
+      ],
+      userMessage: "Continue."
+    });
+
+    const directContext = output.sections.find((section) => section.name === "DirectContext");
+    const relevantMemory = output.sections.find((section) => section.name === "RelevantMemory");
+
+    expect(directContext?.content).toContain("Candidate Review v1");
+    expect(directContext?.content).not.toContain("DeepSeek");
+    expect(relevantMemory?.content).toContain("DeepSeek");
+    expect(relevantMemory?.content).not.toContain("Candidate Review v1");
+    expect(output.prompt.indexOf("<CurrentTime>")).toBeLessThan(
+      output.prompt.indexOf("<DirectContext>")
+    );
+    expect(output.prompt.indexOf("<DirectContext>")).toBeLessThan(
+      output.prompt.indexOf("<RelevantMemory>")
+    );
+  });
+
   it("renders memory text that already has list markers as single bullets", () => {
     const output = new PromptBuilder().buildPrompt({
       systemIdentity: "You are Companion.",
@@ -60,5 +91,28 @@ describe("PromptBuilder", () => {
     expect(relevantMemory?.content).toContain("- 用户正在调试记忆。");
     expect(relevantMemory?.content).not.toContain("- - 用户");
     expect(output.prompt).not.toContain("- - 用户");
+  });
+
+  it("renders concise scope, layer, status, and temporal hints for retrieved memories", () => {
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "You are Companion.",
+      retrievedMemories: [
+        {
+          content: "用户偏好 Chat/Reasoning 使用 DeepSeek。",
+          scope: "project",
+          scopeId: "yuvi-runtime",
+          memoryLayer: "core",
+          status: "active",
+          validUntil: "2026-12-31T00:00:00.000Z",
+          importance: 0.9
+        }
+      ],
+      userMessage: "YUVI provider preference?"
+    });
+
+    const relevantMemory = output.sections.find((section) => section.name === "RelevantMemory");
+    expect(relevantMemory?.content).toContain(
+      "- [project:yuvi-runtime][core][active][validUntil:2026-12-31] 用户偏好 Chat/Reasoning 使用 DeepSeek。"
+    );
   });
 });

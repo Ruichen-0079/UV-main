@@ -112,6 +112,9 @@ DEFAULT_EMBEDDING_PROVIDER=mock
 MEMORY_REPOSITORY=in-memory
 MEMORY_EXTRACTOR=llm
 EVENT_BUS=in-memory
+DIRECT_CONTEXT_ENABLED=true
+DIRECT_CONTEXT_MAX_TURNS=6
+DIRECT_CONTEXT_MAX_CHARS=6000
 ```
 
 `in-memory` 适合快速开发和测试，服务器重启后数据会丢失。要启用 PostgreSQL 持久化记忆，需要同时设置：
@@ -119,6 +122,8 @@ EVENT_BUS=in-memory
 `EVENT_BUS=in-memory` 是当前唯一已实现的 event bus 运行模式。`EVENT_BUS=nats` 是未来 NATS 集成的保留边界，现在选择它会给出明确的未支持错误。
 
 `MEMORY_EXTRACTOR=llm` 是默认模式，在 DeepSeek Reasoning 已配置时会用它提出候选记忆。它只会在 `writeMemory=true` 的回合消耗 reasoning token，并且候选记忆仍会先经过 `MemoryService` 校验和评分，才可能写入。如果 DeepSeek Reasoning 未配置，YUVI 会安全回退到 `rule-based`。如需确定性且不消耗 token 的抽取，可设置 `MEMORY_EXTRACTOR=rule-based`。
+
+Direct Context 默认开启。它会把有边界的同会话近期 turn 注入单独的 `<DirectContext>` prompt section，用于对话连续性。它不是长期记忆，默认不会持久化，并受 `DIRECT_CONTEXT_MAX_TURNS` 和 `DIRECT_CONTEXT_MAX_CHARS` 限制。
 
 ```env
 MEMORY_REPOSITORY=postgres

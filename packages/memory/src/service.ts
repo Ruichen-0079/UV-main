@@ -9,8 +9,10 @@ import type {
   MemoryExtractionInput,
   MemoryExtractor,
   MemoryExtractorStatus,
+  MemoryLayer,
   MemoryMatchReason,
   MemoryRetrievalMode,
+  MemoryScope,
   MemoryQuery,
   MemoryRetrievalResult,
   MemorySearchQuery,
@@ -161,12 +163,22 @@ export class MemoryService {
   }
 
   private async retrieveWithFallback(query: MemorySearchQuery): Promise<MemoryRetrievalResult> {
+    const policy = createRetrievalPolicy(query);
     const queryText = query.text?.trim() ?? "";
     const keywords = queryText ? extractSearchKeywords(queryText) : [];
-    const memories = await this.retriever.retrieve(query);
+    const broadQuery: MemorySearchQuery = {
+      includeHistory: true,
+      limit: Math.max(query.limit ?? 6, 20)
+    };
+    if (query.text !== undefined) broadQuery.text = query.text;
+    if (query.embedding !== undefined) broadQuery.embedding = query.embedding;
+    if (query.types !== undefined) broadQuery.types = query.types;
+    if (query.tags !== undefined) broadQuery.tags = query.tags;
+    const memories = await this.retriever.retrieve(broadQuery);
     if (!queryText || keywords.length === 0) {
       return this.buildRetrievalResult(
         query,
+        policy,
         keywords,
         memories,
         this.repository.getRetrievalMode?.() ?? "keyword"
@@ -174,13 +186,14 @@ export class MemoryService {
     }
 
     const candidates = [
-      ...this.toCandidates(memories, keywords),
-      ...(await this.retrieveByKeywords(query, keywords))
+      ...this.toCandidates(memories, keywords, policy),
+      ...(await this.retrieveByKeywords(query, keywords, policy))
     ].sort(compareCandidates);
 
     if (candidates.length > 0) {
       return this.buildRetrievalResultFromCandidates(
         query,
+        policy,
         keywords,
         candidates,
         this.resolveRetrievalMode(true)
@@ -190,24 +203,28 @@ export class MemoryService {
     const recent = await this.repository.listRecentMemories(Math.max(query.limit ?? 6, 20));
     return this.buildRetrievalResultFromCandidates(
       query,
+      policy,
       keywords,
-      this.rankFallbackRecent(recent),
+      this.rankFallbackRecent(recent, policy),
       "fallback-recent"
     );
   }
 
   private async retrieveByKeywords(
     query: MemorySearchQuery,
-    keywords: string[]
+    keywords: string[],
+    policy: RetrievalPolicy
   ): Promise<RetrievedMemoryCandidate[]> {
     const matches = new Map<string, RetrievedMemoryCandidate>();
     for (const keyword of keywords.slice(0, 8)) {
       const results = await this.repository.searchMemoriesByTextFallback({
-        ...query,
         text: keyword,
-        limit: Math.max(query.limit ?? 6, 10)
+        includeHistory: true,
+        limit: Math.max(query.limit ?? 6, 10),
+        ...(query.types !== undefined ? { types: query.types } : {}),
+        ...(query.tags !== undefined ? { tags: query.tags } : {})
       });
-      for (const candidate of this.rankKeywordMatches(results, keywords)) {
+      for (const candidate of this.rankKeywordMatches(results, keywords, policy)) {
         const current = matches.get(candidate.memory.id);
         if (!current || candidate.score > current.score) {
           matches.set(candidate.memory.id, candidate);
@@ -218,50 +235,68 @@ export class MemoryService {
     return [...matches.values()].sort(compareCandidates);
   }
 
-  private rankKeywordMatches(memories: Memory[], keywords: string[]): RetrievedMemoryCandidate[] {
-    return this.toCandidates(memories, keywords).sort(compareCandidates);
+  private rankKeywordMatches(
+    memories: Memory[],
+    keywords: string[],
+    policy: RetrievalPolicy
+  ): RetrievedMemoryCandidate[] {
+    return this.toCandidates(memories, keywords, policy).sort(compareCandidates);
   }
 
-  private toCandidates(memories: Memory[], keywords: string[]): RetrievedMemoryCandidate[] {
+  private toCandidates(
+    memories: Memory[],
+    keywords: string[],
+    policy: RetrievalPolicy
+  ): RetrievedMemoryCandidate[] {
     return memories
-      .filter(isPromptRetrievableMemory)
       .map((memory) => ({
         memory,
         displayText: createMemoryDisplayText(memory),
         matchedBy: detectMatchReason(memory, keywords),
-        score: scoreMemory(memory, keywords)
+        score: scoreMemory(memory, keywords, policy),
+        ...memoryExclusion(memory, policy)
       }))
-      .filter((entry) => entry.score > 0);
+      .filter((entry) => entry.score > 0 || Boolean(entry.excludedReason));
   }
 
-  private rankFallbackRecent(memories: Memory[]): RetrievedMemoryCandidate[] {
+  private rankFallbackRecent(
+    memories: Memory[],
+    policy: RetrievalPolicy
+  ): RetrievedMemoryCandidate[] {
     return memories
-      .filter(isPromptRetrievableMemory)
       .map((memory) => ({
         memory,
         displayText: createMemoryDisplayText(memory),
         matchedBy: "fallback" as const,
-        score: typePriority(memory.type) + memory.importance + sourceQuality(memory.source)
+        score:
+          typePriority(memory.type) +
+          layerPriority(memory.memoryLayer) +
+          memory.importance +
+          sourceQuality(memory.source) +
+          scopeQuality(memory, policy),
+        ...memoryExclusion(memory, policy)
       }))
       .sort(compareCandidates);
   }
 
   private buildRetrievalResult(
     query: MemorySearchQuery,
+    policy: RetrievalPolicy,
     keywords: string[],
     memories: Memory[],
     retrievalMode: MemoryRetrievalMode
   ): MemoryRetrievalResult {
     return this.buildRetrievalResultFromCandidates(
       query,
+      policy,
       keywords,
       memories
-        .filter(isPromptRetrievableMemory)
         .map((memory) => ({
           memory,
           displayText: createMemoryDisplayText(memory),
           matchedBy: detectMatchReason(memory, keywords),
-          score: scoreMemory(memory, keywords)
+          score: scoreMemory(memory, keywords, policy),
+          ...memoryExclusion(memory, policy)
         }))
         .sort(compareCandidates),
       retrievalMode
@@ -278,14 +313,19 @@ export class MemoryService {
 
   private buildRetrievalResultFromCandidates(
     query: MemorySearchQuery,
+    policy: RetrievalPolicy,
     keywords: string[],
     candidates: RetrievedMemoryCandidate[],
     retrievalMode: MemoryRetrievalMode
   ): MemoryRetrievalResult {
-    const { selected, all } = dedupeCandidates(candidates);
+    const mergedCandidates = mergeCandidateMatches(candidates);
+    const { selected, all } = dedupeCandidates(
+      mergedCandidates.filter((candidate) => !candidate.excludedReason)
+    );
+    const excluded = mergedCandidates.filter((candidate) => candidate.excludedReason);
     const selectedLimited = selected.slice(0, query.limit ?? 6);
     const selectedIds = new Set(selectedLimited.map((candidate) => candidate.memory.id));
-    const debug = all.map((candidate) =>
+    const debug = [...all, ...excluded].map((candidate) =>
       toDebugMemory(
         selectedIds.has(candidate.memory.id)
           ? candidate
@@ -299,6 +339,15 @@ export class MemoryService {
       rawCount: candidates.length,
       count: selectedLimited.length,
       retrievalMode,
+      retrievalScope: policy.retrievalScope,
+      includedScopes: policy.includedScopes,
+      includeArchived: policy.includeArchived,
+      includeSuperseded: policy.includeSuperseded,
+      includeExpired: policy.includeExpired,
+      currentTime: policy.currentTime.toISOString(),
+      excludedByStatus: countUniqueExcluded(debug, "status:"),
+      excludedByTime: countUniqueExcluded(debug, "time:"),
+      excludedByScope: countUniqueExcluded(debug, "scope:"),
       rawMemories: debug,
       memories: debug.filter((memory) => !memory.excludedReason),
       selectedMemories: selectedLimited.map((candidate) => candidate.memory)
@@ -414,10 +463,116 @@ function stripLeadingListMarkers(text: string): string {
   return result;
 }
 
-function scoreMemory(memory: Memory, keywords: string[]): number {
-  if (!isPromptRetrievableMemory(memory)) {
-    return 0;
+type RetrievalPolicy = {
+  retrievalScope: string;
+  includedScopes: Array<{ scope: MemoryScope; scopeId?: string | null }>;
+  includeArchived: boolean;
+  includeSuperseded: boolean;
+  includeExpired: boolean;
+  currentTime: Date;
+};
+
+function createRetrievalPolicy(query: MemorySearchQuery): RetrievalPolicy {
+  const includedScopes = resolveIncludedScopes(query);
+  return {
+    retrievalScope: includedScopes
+      .map((entry) => `${entry.scope}${entry.scopeId ? `:${entry.scopeId}` : ""}`)
+      .join(","),
+    includedScopes,
+    includeArchived: Boolean(query.includeArchived),
+    includeSuperseded: Boolean(query.includeSuperseded || query.includeHistory),
+    includeExpired: Boolean(query.includeExpired || query.includeHistory),
+    currentTime: new Date()
+  };
+}
+
+function resolveIncludedScopes(
+  query: MemorySearchQuery
+): Array<{ scope: MemoryScope; scopeId?: string | null }> {
+  if (query.scope) {
+    return [{ scope: query.scope, ...(query.scopeId ? { scopeId: query.scopeId } : {}) }];
   }
+  if (query.scopes?.length) {
+    return query.scopes.map((scope) => scopeEntryForQuery(scope, query));
+  }
+
+  const scopes: MemoryScope[] = ["user", "project"];
+  if (query.sessionId) scopes.push("session");
+  if (query.agentId) scopes.push("agent");
+  if (query.pluginId) scopes.push("plugin");
+  return scopes.map((scope) => scopeEntryForQuery(scope, query));
+}
+
+function scopeEntryForQuery(
+  scope: MemoryScope,
+  query: MemorySearchQuery
+): { scope: MemoryScope; scopeId?: string | null } {
+  if (scope === "project") {
+    return { scope, scopeId: query.projectId ?? query.scopeId ?? "yuvi-runtime" };
+  }
+  if (scope === "session" && query.sessionId) {
+    return { scope, scopeId: query.sessionId };
+  }
+  if (scope === "agent" && query.agentId) {
+    return { scope, scopeId: query.agentId };
+  }
+  if (scope === "plugin" && query.pluginId) {
+    return { scope, scopeId: query.pluginId };
+  }
+  return { scope };
+}
+
+function memoryExclusion(
+  memory: Memory,
+  policy: RetrievalPolicy
+): Pick<RetrievedMemoryCandidate, "excludedReason"> {
+  const scopeReason = scopeExclusion(memory, policy);
+  if (scopeReason) return { excludedReason: scopeReason };
+
+  const statusReason = statusExclusion(memory, policy);
+  if (statusReason) return { excludedReason: statusReason };
+
+  const timeReason = timeExclusion(memory, policy);
+  if (timeReason) return { excludedReason: timeReason };
+
+  return {};
+}
+
+function scopeExclusion(memory: Memory, policy: RetrievalPolicy): string | null {
+  const match = policy.includedScopes.some((entry) => {
+    if (entry.scope !== memory.scope) return false;
+    if (!entry.scopeId) return true;
+    if (!memory.scopeId && memory.scope === "session") return true;
+    return memory.scopeId === entry.scopeId;
+  });
+  return match
+    ? null
+    : `scope:not-included:${memory.scope}${memory.scopeId ? `:${memory.scopeId}` : ""}`;
+}
+
+function statusExclusion(memory: Memory, policy: RetrievalPolicy): string | null {
+  if (memory.status === "active") return null;
+  if (memory.status === "archived" && policy.includeArchived) return null;
+  if (memory.status === "superseded" && policy.includeSuperseded) return null;
+  if (memory.status === "expired" && policy.includeExpired) return null;
+  return `status:${memory.status}`;
+}
+
+function timeExclusion(memory: Memory, policy: RetrievalPolicy): string | null {
+  const now = policy.currentTime.getTime();
+  if (!policy.includeExpired && memory.expiresAt && memory.expiresAt.getTime() <= now) {
+    return "time:expiresAt";
+  }
+  if (!policy.includeExpired && memory.validUntil && memory.validUntil.getTime() <= now) {
+    return "time:validUntil";
+  }
+  if (memory.validFrom && memory.validFrom.getTime() > now) {
+    return "time:validFrom";
+  }
+  return null;
+}
+
+function scoreMemory(memory: Memory, keywords: string[], policy: RetrievalPolicy): number {
   const matchCount = keywords.reduce(
     (score, keyword) => score + keywordMatchWeight(memory, keyword),
     0
@@ -430,13 +585,17 @@ function scoreMemory(memory: Memory, keywords: string[]): number {
   const effectiveMatchCount = isRuntimeNoise ? Math.min(matchCount, 1) : matchCount;
   const runtimeNoisePenalty = isRuntimeNoise ? 3 : 0;
   const recencyBonus = recencyScore(memory.createdAt);
+  const accessBonus = accessScore(memory.lastAccessedAt);
   return (
     effectiveMatchCount * 4 +
     typePriority(memory.type) +
+    layerPriority(memory.memoryLayer) +
     memory.importance * 2 -
     runtimeNoisePenalty +
     sourceQuality(memory.source) +
-    recencyBonus
+    scopeQuality(memory, policy) +
+    recencyBonus +
+    accessBonus
   );
 }
 
@@ -533,6 +692,25 @@ function dedupeCandidates(candidates: RetrievedMemoryCandidate[]): {
   return { selected, all };
 }
 
+function mergeCandidateMatches(candidates: RetrievedMemoryCandidate[]): RetrievedMemoryCandidate[] {
+  const byId = new Map<string, RetrievedMemoryCandidate>();
+  for (const candidate of candidates) {
+    const current = byId.get(candidate.memory.id);
+    if (!current || candidate.score > current.score) {
+      byId.set(candidate.memory.id, candidate);
+    }
+  }
+  return [...byId.values()].sort(compareCandidates);
+}
+
+function countUniqueExcluded(memories: RetrievedMemoryDebug[], prefix: string): number {
+  return new Set(
+    memories
+      .filter((memory) => memory.excludedReason?.startsWith(prefix))
+      .map((memory) => memory.id)
+  ).size;
+}
+
 function isDuplicateDisplayText(left: string, right: string): boolean {
   const normalizedLeft = normalizeForDedup(left);
   const normalizedRight = normalizeForDedup(right);
@@ -569,6 +747,12 @@ function compareCandidates(
     return typeDelta;
   }
 
+  const layerDelta =
+    layerPriority(right.memory.memoryLayer) - layerPriority(left.memory.memoryLayer);
+  if (layerDelta !== 0) {
+    return layerDelta;
+  }
+
   const importanceDelta = right.memory.importance - left.memory.importance;
   if (importanceDelta !== 0) {
     return importanceDelta;
@@ -594,6 +778,45 @@ function recencyScore(createdAt: Date): number {
   }
   const ageDays = ageMs / 86_400_000;
   return Math.max(0, 1 - ageDays / 30) * 0.5;
+}
+
+function accessScore(lastAccessedAt: Date): number {
+  const ageMs = Date.now() - lastAccessedAt.getTime();
+  if (!Number.isFinite(ageMs) || ageMs < 0) {
+    return 0;
+  }
+  const ageDays = ageMs / 86_400_000;
+  return Math.max(0, 1 - ageDays / 14) * 0.25;
+}
+
+function scopeQuality(memory: Memory, policy: RetrievalPolicy): number {
+  const matchingScope = policy.includedScopes.find((entry) => entry.scope === memory.scope);
+  if (!matchingScope) {
+    return -6;
+  }
+  if (!matchingScope.scopeId) {
+    return memory.scope === "user" ? 1.2 : 0.6;
+  }
+  if (memory.scopeId === matchingScope.scopeId) {
+    return 2;
+  }
+  if (!memory.scopeId && memory.scope === "session") {
+    return 0.5;
+  }
+  return -6;
+}
+
+function layerPriority(layer: MemoryLayer): number {
+  switch (layer) {
+    case "core":
+      return 3;
+    case "working":
+      return 2.5;
+    case "recall":
+      return 1.5;
+    case "archival":
+      return -0.5;
+  }
 }
 
 function typePriority(type: MemoryType): number {
@@ -631,6 +854,7 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
     validFrom: candidate.memory.validFrom,
     validUntil: candidate.memory.validUntil,
     expiresAt: candidate.memory.expiresAt,
+    lastAccessedAt: candidate.memory.lastAccessedAt,
     supersededAt: candidate.memory.supersededAt,
     displayText: candidate.displayText,
     matchedBy: candidate.matchedBy,
@@ -644,6 +868,7 @@ function isPromptRetrievableMemory(memory: Memory): boolean {
   return (
     memory.status === "active" &&
     (!memory.expiresAt || memory.expiresAt.getTime() > now) &&
+    (!memory.validFrom || memory.validFrom.getTime() <= now) &&
     (!memory.validUntil || memory.validUntil.getTime() > now)
   );
 }

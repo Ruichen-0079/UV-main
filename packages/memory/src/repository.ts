@@ -246,7 +246,10 @@ export class PostgresMemoryRepository implements MemoryRepository {
       clauses.push(`type = any($${values.length}::text[])`);
     }
 
-    if (query.scope) {
+    if (query.scopes?.length) {
+      values.push(query.scopes);
+      clauses.push(`scope = any($${values.length}::text[])`);
+    } else if (query.scope) {
       values.push(query.scope);
       clauses.push(`scope = $${values.length}`);
     }
@@ -258,7 +261,11 @@ export class PostgresMemoryRepository implements MemoryRepository {
 
     clauses.push(
       activeMemorySql(
-        query.includeHistory ? "history" : query.includeArchived ? "manual" : "prompt"
+        query.includeHistory || query.includeExpired || query.includeSuperseded
+          ? "history"
+          : query.includeArchived
+            ? "manual"
+            : "prompt"
       )
     );
 
@@ -312,7 +319,13 @@ export class PostgresMemoryRepository implements MemoryRepository {
     const result = await this.pool.query(
       `select * from memories
        where embedding is not null
-         and ${activeMemorySql(query.includeHistory ? "history" : query.includeArchived ? "manual" : "prompt")}
+         and ${activeMemorySql(
+           query.includeHistory || query.includeExpired || query.includeSuperseded
+             ? "history"
+             : query.includeArchived
+               ? "manual"
+               : "prompt"
+         )}
        order by embedding <=> $1::vector
        limit $2`,
       [vectorLiteral(query.embedding), query.limit ?? 10]
@@ -512,11 +525,19 @@ export class InMemoryMemoryRepository implements MemoryRepository {
       .filter((memory) =>
         isMemoryVisible(
           memory,
-          query.includeHistory ? "history" : query.includeArchived ? "manual" : "prompt"
+          query.includeHistory || query.includeExpired || query.includeSuperseded
+            ? "history"
+            : query.includeArchived
+              ? "manual"
+              : "prompt"
         )
       )
       .filter((memory) => !query.types?.length || query.types.includes(memory.type))
-      .filter((memory) => !query.scope || memory.scope === query.scope)
+      .filter((memory) =>
+        query.scopes?.length
+          ? query.scopes.includes(memory.scope)
+          : !query.scope || memory.scope === query.scope
+      )
       .filter((memory) => !query.scopeId || memory.scopeId === query.scopeId)
       .filter(
         (memory) => !query.tags?.length || query.tags.some((tag) => memory.tags.includes(tag))
@@ -708,7 +729,7 @@ function activeMemorySql(mode: VisibilityMode): string {
     and (valid_from is null or valid_from <= now())
     and (valid_until is null or valid_until > now())`;
   if (mode === "history") {
-    return activeWindow;
+    return "true";
   }
   if (mode === "manual") {
     return `status in ('active', 'archived') and ${activeWindow}`;
@@ -718,6 +739,9 @@ function activeMemorySql(mode: VisibilityMode): string {
 
 function isMemoryVisible(memory: Memory, mode: VisibilityMode): boolean {
   const now = Date.now();
+  if (mode === "history") {
+    return true;
+  }
   if (memory.expiresAt && memory.expiresAt.getTime() <= now) {
     return false;
   }
@@ -726,9 +750,6 @@ function isMemoryVisible(memory: Memory, mode: VisibilityMode): boolean {
   }
   if (memory.validFrom && memory.validFrom.getTime() > now) {
     return false;
-  }
-  if (mode === "history") {
-    return true;
   }
   if (mode === "manual") {
     return memory.status === "active" || memory.status === "archived";

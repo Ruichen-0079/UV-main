@@ -173,6 +173,9 @@ describe("MemoryRepository", () => {
     expect(result.memories.map((memory) => memory.displayText)).toEqual([
       "Active YUVI Runtime memory."
     ]);
+    expect(result.excludedByStatus).toBeGreaterThanOrEqual(3);
+    expect(result.excludedByTime).toBeGreaterThanOrEqual(2);
+    expect(result.currentTime).toMatch(/T/);
   });
 
   it("supports scope-filtered retrieval", async () => {
@@ -204,6 +207,103 @@ describe("MemoryRepository", () => {
     expect(projectResult.memories[0]?.scopeId).toBe("yuvi-runtime");
   });
 
+  it("excludes unrelated project scope memories while keeping matching project and session memory", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "semantic",
+      content: "YUVI Runtime uses DeepSeek for chat.",
+      source: "test",
+      scope: "project",
+      scopeId: "yuvi-runtime"
+    });
+    await repository.createMemory({
+      type: "semantic",
+      content: "Other project uses a different provider.",
+      source: "test",
+      scope: "project",
+      scopeId: "other-project",
+      tags: ["provider"]
+    });
+    await repository.createMemory({
+      type: "working",
+      content: "This session is debugging Memory Read Pipeline v2.",
+      source: "test",
+      scope: "session",
+      scopeId: "session-1"
+    });
+
+    const projectResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "provider",
+      projectId: "yuvi-runtime",
+      limit: 10
+    });
+    const sessionResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "Memory Read Pipeline",
+      sessionId: "session-1",
+      projectId: "yuvi-runtime",
+      limit: 10
+    });
+
+    expect(projectResult.memories.map((memory) => memory.scopeId)).not.toContain("other-project");
+    expect(projectResult.excludedByScope).toBeGreaterThan(0);
+    expect(sessionResult.memories.some((memory) => memory.scope === "session")).toBe(true);
+    expect(sessionResult.includedScopes).toContainEqual({
+      scope: "session",
+      scopeId: "session-1"
+    });
+  });
+
+  it("allows archived memories only when manual search opts in", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "semantic",
+      content: "Archived YUVI Runtime provider decision.",
+      source: "test",
+      status: "archived",
+      tags: ["yuvi"]
+    });
+
+    const defaultResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "YUVI Runtime",
+      limit: 10
+    });
+    const includedResult = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "YUVI Runtime",
+      includeArchived: true,
+      limit: 10
+    });
+
+    expect(defaultResult.memories).toHaveLength(0);
+    expect(defaultResult.excludedByStatus).toBe(1);
+    expect(includedResult.memories).toHaveLength(1);
+    expect(includedResult.memories[0]?.status).toBe("archived");
+    expect(includedResult.includeArchived).toBe(true);
+  });
+
+  it("updates lastAccessedAt when a memory is selected", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const created = await repository.createMemory({
+      type: "semantic",
+      content: "YUVI Runtime prompt retrieval uses scoped memory.",
+      source: "test",
+      tags: ["yuvi"]
+    });
+    const before = created.lastAccessedAt.getTime();
+    await new Promise((resolve) => setTimeout(resolve, 2));
+
+    const result = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "scoped memory",
+      limit: 5
+    });
+    const after = await repository.getMemoryById(created.id);
+
+    expect(result.memories[0]?.id).toBe(created.id);
+    expect(after?.lastAccessedAt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
   it("deduplicates display-equivalent memories and prefers semantic memory", async () => {
     const repository = new InMemoryMemoryRepository();
     const service = new MemoryService(repository);
@@ -212,7 +312,9 @@ describe("MemoryRepository", () => {
       type: "working",
       content,
       importance: 1,
-      source: "test"
+      source: "test",
+      scope: "project",
+      scopeId: "yuvi-runtime"
     });
     await repository.createMemory({
       type: "semantic",

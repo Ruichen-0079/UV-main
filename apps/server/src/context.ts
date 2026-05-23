@@ -69,13 +69,18 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
     return new MemoryService(memoryRepository, undefined, undefined, memoryExtractor);
   }
 
-  function createRuntime(providers: ProviderRegistry, memory: MemoryService): RuntimeOrchestrator {
+  function createRuntime(
+    providers: ProviderRegistry,
+    memory: MemoryService,
+    directContext = config.directContext
+  ): RuntimeOrchestrator {
     return new RuntimeOrchestrator({
       eventBus,
       memory,
       promptBuilder,
       providers,
       memoryRepository: activeMemoryRepository,
+      directContext,
       logger: runtimeLogger
     });
   }
@@ -100,7 +105,17 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
       );
       context.providers = nextProviders;
       context.memory = nextMemory;
-      context.runtime = createRuntime(nextProviders, nextMemory);
+      context.runtime = createRuntime(nextProviders, nextMemory, {
+        enabled: parseBoolean(env["DIRECT_CONTEXT_ENABLED"], config.directContext.enabled),
+        maxTurns: parsePositiveInteger(
+          env["DIRECT_CONTEXT_MAX_TURNS"],
+          config.directContext.maxTurns
+        ),
+        maxChars: parsePositiveInteger(
+          env["DIRECT_CONTEXT_MAX_CHARS"],
+          config.directContext.maxChars
+        )
+      });
 
       const notHotReloaded = collectNotHotReloadedSettings(env, config, activeMemoryRepository);
       const restartRequired = notHotReloaded.length > 0;
@@ -138,6 +153,21 @@ function collectNotHotReloadedSettings(
     notHotReloaded.push("EVENT_BUS");
   }
   return notHotReloaded;
+}
+
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  return value === "true" || value === "1" || value === "yes";
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function parseMemoryExtractorMode(value: string | undefined): "rule-based" | "llm" {
