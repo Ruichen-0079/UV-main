@@ -1,13 +1,14 @@
-import { access, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { writeFile } from "node:fs/promises";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
+import { getRuntimeEnvPath, quoteEnvValue, readRuntimeEnvFiles } from "../env.js";
 import { requireDashboardDevToken } from "./security.js";
 
 const editableKeys = [
   "MEMORY_REPOSITORY",
+  "DATABASE_URL",
   "MEMORY_EXTRACTOR",
   "EVENT_BUS",
   "PROVIDER_ALLOW_MOCKS",
@@ -37,6 +38,7 @@ const RuntimeSettingsUpdateSchema = z.object({
 });
 
 const secretKeys = new Set([
+  "DATABASE_URL",
   "DEEPSEEK_API_KEY",
   "XAI_API_KEY",
   "DASHSCOPE_API_KEY",
@@ -167,11 +169,12 @@ export async function registerSettingsRoutes(
 }
 
 async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
-  const baseEnvFile = await readLocalEnvFile(path.join(process.cwd(), ".env"));
-  const localEnvFile = await readLocalEnvFile(path.join(process.cwd(), ".env.local"));
+  const runtimeEnvFiles = await readRuntimeEnvFiles();
+  const baseEnvFile = runtimeEnvFiles.base;
+  const localEnvFile = runtimeEnvFiles.local;
   const baseEnv = baseEnvFile.values;
   const localEnv = localEnvFile.values;
-  const env = { ...baseEnv, ...process.env, ...localEnv };
+  const env = runtimeEnvFiles.env;
   const providerStatus = context.providers.getStatus();
   const memoryRepository = env["MEMORY_REPOSITORY"] ?? "in-memory";
   const memoryExtractor = normalizeMemoryExtractor(env["MEMORY_EXTRACTOR"]);
@@ -185,11 +188,13 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
     configFiles: {
       ".env": {
         exists: baseEnvFile.exists,
-        gitIgnored: true
+        gitIgnored: true,
+        path: baseEnvFile.path
       },
       ".env.local": {
         exists: localEnvFile.exists,
-        gitIgnored: true
+        gitIgnored: true,
+        path: localEnvFile.path
       }
     },
     baseConfig: buildSafeConfig(baseEnv),
@@ -323,37 +328,14 @@ function hasRestartRequiredLocalOverrides(
 async function readEffectiveRuntimeEnv(
   app: FastifyInstance
 ): Promise<Record<string, string | undefined>> {
-  const envPath = path.join(process.cwd(), ".env");
-  const localEnvPath = path.join(process.cwd(), ".env.local");
-  const baseEnv = await readLocalEnv(envPath);
-  const localEnv = await readLocalEnv(localEnvPath);
-  if (Object.keys(baseEnv).length > 0) {
+  const runtimeEnvFiles = await readRuntimeEnvFiles();
+  if (runtimeEnvFiles.base.exists) {
     app.log.info("[env] Loaded .env");
   }
-  if (Object.keys(localEnv).length > 0) {
+  if (runtimeEnvFiles.local.exists) {
     app.log.info("[env] Loaded .env.local");
   }
-  return { ...baseEnv, ...process.env, ...localEnv };
-}
-
-async function readLocalEnvFile(
-  envPath: string
-): Promise<{ exists: boolean; values: Record<string, string> }> {
-  try {
-    await access(envPath);
-    return {
-      exists: true,
-      values: await readLocalEnv(envPath)
-    };
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return {
-        exists: false,
-        values: {}
-      };
-    }
-    throw error;
-  }
+  return runtimeEnvFiles.env;
 }
 
 function buildSafeConfig(env: Record<string, string | undefined>): Record<string, unknown> {
@@ -404,8 +386,8 @@ function buildLayeredSettings(
 async function writeLocalRuntimeSettings(
   updates: Record<string, string | null>
 ): Promise<string[]> {
-  const envPath = path.join(process.cwd(), ".env.local");
-  const existing = await readLocalEnv(envPath);
+  const envPath = getRuntimeEnvPath(".env.local");
+  const existing = (await readRuntimeEnvFiles()).local.values;
   const changedKeys: string[] = [];
 
   for (const [key, value] of Object.entries(updates)) {
@@ -423,33 +405,6 @@ async function writeLocalRuntimeSettings(
   return changedKeys;
 }
 
-async function readLocalEnv(envPath: string): Promise<Record<string, string>> {
-  try {
-    return parseEnvText(await readFile(envPath, "utf8"));
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return {};
-    }
-    throw error;
-  }
-}
-
-function parseEnvText(text: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const line of text.split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    const separator = trimmed.indexOf("=");
-    if (separator <= 0) {
-      continue;
-    }
-    result[trimmed.slice(0, separator)] = unquoteEnvValue(trimmed.slice(separator + 1));
-  }
-  return result;
-}
-
 function serializeLocalEnv(values: Record<string, string>): string {
   const lines = [
     "# YUVI Runtime local development settings.",
@@ -459,24 +414,6 @@ function serializeLocalEnv(values: Record<string, string>): string {
     lines.push(`${key}=${quoteEnvValue(values[key] ?? "")}`);
   }
   return `${lines.join("\n")}\n`;
-}
-
-function quoteEnvValue(value: string): string {
-  if (/^[A-Za-z0-9_./:@-]*$/u.test(value)) {
-    return value;
-  }
-  return JSON.stringify(value);
-}
-
-function unquoteEnvValue(value: string): string {
-  const trimmed = value.trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
 }
 
 function maskSecret(value: string | undefined): string | undefined {

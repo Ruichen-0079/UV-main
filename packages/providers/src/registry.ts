@@ -172,6 +172,7 @@ export class ProviderRegistry implements ProviderResolver {
     const required = capability === "chat";
     const available = configured || mock;
     const status = available ? (mock ? "healthy" : "degraded") : "unavailable";
+    const missingFields = configured || mock ? [] : this.missingFieldsFor(capability, name);
 
     return {
       provider: name,
@@ -180,6 +181,9 @@ export class ProviderRegistry implements ProviderResolver {
       configured,
       available,
       mock,
+      mode: mock ? "mock" : configured ? "real" : "unavailable",
+      mockAllowed: this.config.allowMocks,
+      missingFields,
       required,
       status,
       checkedAt: new Date().toISOString(),
@@ -227,6 +231,45 @@ export class ProviderRegistry implements ProviderResolver {
     }
 
     return false;
+  }
+
+  private missingFieldsFor(capability: ProviderCapability, name: string): string[] {
+    if ((capability === "chat" || capability === "reasoning") && name === "deepseek") {
+      return [
+        ...(!this.config.deepseek.apiKey ? ["DEEPSEEK_API_KEY"] : []),
+        ...(capability === "chat" && !this.config.deepseek.chatModel
+          ? ["DEEPSEEK_CHAT_MODEL"]
+          : []),
+        ...(capability === "reasoning" && !this.config.deepseek.reasoningModel
+          ? ["DEEPSEEK_REASONING_MODEL"]
+          : [])
+      ];
+    }
+    if (capability === "tts" && name === "xai") {
+      return [
+        ...(!this.config.xai.apiKey ? ["XAI_API_KEY"] : []),
+        ...(!this.config.xai.ttsModel ? ["XAI_TTS_MODEL"] : [])
+      ];
+    }
+    if (capability === "vision" && name === "xai") {
+      return [
+        ...(!this.config.xai.apiKey ? ["XAI_API_KEY"] : []),
+        ...(!this.config.xai.visionModel ? ["XAI_VISION_MODEL"] : [])
+      ];
+    }
+    if (capability === "stt" && name === "dashscope") {
+      return [
+        ...(!this.config.dashscope.apiKey ? ["DASHSCOPE_API_KEY"] : []),
+        ...(!this.config.dashscope.sttModel ? ["DASHSCOPE_STT_MODEL"] : [])
+      ];
+    }
+    if (capability === "embedding" && name === "openai-compatible") {
+      return [
+        ...(!this.config.embedding.apiKey ? ["EMBEDDING_API_KEY"] : []),
+        ...(!this.config.embedding.model ? ["EMBEDDING_MODEL"] : [])
+      ];
+    }
+    return [];
   }
 
   private safeProviderMetadata(
@@ -469,7 +512,7 @@ const visionProviderFactories: Record<string, ProviderFactory<VisionProvider>> =
 
 const embeddingProviderFactories: Record<string, ProviderFactory<EmbeddingProvider>> = {
   "openai-compatible"(config) {
-    if (!config.embedding.apiKey) {
+    if (!config.embedding.apiKey || !config.embedding.model) {
       return undefined;
     }
 
@@ -490,7 +533,7 @@ function resolveChatProvider(config: ProviderRegistryConfig): ChatProvider {
     createUnavailable: (name) =>
       new UnavailableChatProvider(
         name,
-        "Chat provider config is missing or provider is not implemented."
+        unavailableProviderMessage("chat", name, config)
       )
   });
 }
@@ -505,7 +548,7 @@ function resolveReasoningProvider(config: ProviderRegistryConfig): ReasoningProv
     createUnavailable: (name) =>
       new UnavailableReasoningProvider(
         name,
-        "Reasoning provider config is missing or provider is not implemented."
+        unavailableProviderMessage("reasoning", name, config)
       )
   });
 }
@@ -520,7 +563,7 @@ function resolveTTSProvider(config: ProviderRegistryConfig): TTSProvider {
     createUnavailable: (name) =>
       new UnavailableTTSProvider(
         name,
-        "TTS provider config is missing or provider is not implemented."
+        unavailableProviderMessage("tts", name, config)
       )
   });
 }
@@ -535,7 +578,7 @@ function resolveSTTProvider(config: ProviderRegistryConfig): STTProvider {
     createUnavailable: (name) =>
       new UnavailableSTTProvider(
         name,
-        "STT provider config is missing or provider is not implemented."
+        unavailableProviderMessage("stt", name, config)
       )
   });
 }
@@ -550,7 +593,7 @@ function resolveVisionProvider(config: ProviderRegistryConfig): VisionProvider {
     createUnavailable: (name) =>
       new UnavailableVisionProvider(
         name,
-        "Vision provider config is missing or provider is not implemented."
+        unavailableProviderMessage("vision", name, config)
       )
   });
 }
@@ -566,9 +609,60 @@ function resolveEmbeddingProvider(config: ProviderRegistryConfig): EmbeddingProv
       new UnavailableEmbeddingProvider(
         name,
         config.embedding.dimensions,
-        "Embedding provider config is missing or provider is not implemented."
+        unavailableProviderMessage("embedding", name, config)
       )
   });
+}
+
+function unavailableProviderMessage(
+  capability: ProviderCapability,
+  name: string,
+  config: ProviderRegistryConfig
+): string {
+  const fields = missingFieldsForConfig(capability, name, config);
+  const missing = fields.length ? " Missing required credentials or model configuration." : "";
+  return `${name} ${capability} provider is unavailable.${missing} Configure the required environment variables or set PROVIDER_ALLOW_MOCKS=true for intentional offline/mock mode.`;
+}
+
+function missingFieldsForConfig(
+  capability: ProviderCapability,
+  name: string,
+  config: ProviderRegistryConfig
+): string[] {
+  if ((capability === "chat" || capability === "reasoning") && name === "deepseek") {
+    return [
+      ...(!config.deepseek.apiKey ? ["DEEPSEEK_API_KEY"] : []),
+      ...(capability === "chat" && !config.deepseek.chatModel ? ["DEEPSEEK_CHAT_MODEL"] : []),
+      ...(capability === "reasoning" && !config.deepseek.reasoningModel
+        ? ["DEEPSEEK_REASONING_MODEL"]
+        : [])
+    ];
+  }
+  if (capability === "tts" && name === "xai") {
+    return [
+      ...(!config.xai.apiKey ? ["XAI_API_KEY"] : []),
+      ...(!config.xai.ttsModel ? ["XAI_TTS_MODEL"] : [])
+    ];
+  }
+  if (capability === "vision" && name === "xai") {
+    return [
+      ...(!config.xai.apiKey ? ["XAI_API_KEY"] : []),
+      ...(!config.xai.visionModel ? ["XAI_VISION_MODEL"] : [])
+    ];
+  }
+  if (capability === "stt" && name === "dashscope") {
+    return [
+      ...(!config.dashscope.apiKey ? ["DASHSCOPE_API_KEY"] : []),
+      ...(!config.dashscope.sttModel ? ["DASHSCOPE_STT_MODEL"] : [])
+    ];
+  }
+  if (capability === "embedding" && name === "openai-compatible") {
+    return [
+      ...(!config.embedding.apiKey ? ["EMBEDDING_API_KEY"] : []),
+      ...(!config.embedding.model ? ["EMBEDDING_MODEL"] : [])
+    ];
+  }
+  return [];
 }
 
 function resolveConfiguredProvider<TProvider>(input: {

@@ -10,6 +10,9 @@ export type ProviderHealth = {
   configured?: boolean | undefined;
   available?: boolean | undefined;
   mock?: boolean | undefined;
+  mode?: "real" | "mock" | "unavailable" | undefined;
+  mockAllowed?: boolean | undefined;
+  missingFields?: string[] | undefined;
   required?: boolean | undefined;
   baseUrl?: string | undefined;
   model?: string | undefined;

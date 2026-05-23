@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
+import { requireDashboardDevToken } from "./security.js";
 
 const MemoryTypeSchema = z.enum([
   "working",
@@ -191,6 +192,8 @@ export async function registerMemoryRoutes(
   config?: ServerConfig
 ): Promise<void> {
   app.post("/memory", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     const input = CreateMemoryRequestSchema.safeParse(request.body);
     if (!input.success) {
       return reply.status(400).send({ error: "invalid_request", details: input.error.flatten() });
@@ -262,6 +265,10 @@ export async function registerMemoryRoutes(
   });
 
   app.get("/memory/search", async (request, reply) => {
+    if (hasMalformedPercentEncoding(request.url)) {
+      return reply.status(400).send(memorySearchValidationError());
+    }
+
     const query = SearchMemoryQuerySchema.safeParse(request.query);
     if (!query.success) {
       return reply.status(400).send(memorySearchValidationError(query.error.flatten()));
@@ -280,6 +287,8 @@ export async function registerMemoryRoutes(
   });
 
   app.post("/memory/bulk-delete", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     const input = BulkDeleteMemoryRequestSchema.safeParse(request.body);
     if (!input.success) {
       return reply.status(400).send({ error: "invalid_request", details: input.error.flatten() });
@@ -296,6 +305,8 @@ export async function registerMemoryRoutes(
   });
 
   app.get("/memory/candidates/recent", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     if (config?.runtimeMode && config.runtimeMode !== "development") {
       return reply.status(404).send({
         error: "not_found",
@@ -318,6 +329,8 @@ export async function registerMemoryRoutes(
   });
 
   app.post("/memory/candidates/:id/accept", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     if (config?.runtimeMode && config.runtimeMode !== "development") {
       return reply.status(404).send({
         error: "not_found",
@@ -381,6 +394,8 @@ export async function registerMemoryRoutes(
   });
 
   app.post("/memory/candidates/:id/reject", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     if (config?.runtimeMode && config.runtimeMode !== "development") {
       return reply.status(404).send({
         error: "not_found",
@@ -419,6 +434,8 @@ export async function registerMemoryRoutes(
   });
 
   app.patch("/memory/:id", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     const params = MemoryParamsSchema.safeParse(request.params);
     if (!params.success) {
       return reply.status(400).send({ error: "invalid_request", details: params.error.flatten() });
@@ -487,6 +504,8 @@ export async function registerMemoryRoutes(
   });
 
   app.delete("/memory/:id", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     const params = MemoryParamsSchema.safeParse(request.params);
     if (!params.success) {
       return reply.status(400).send({ error: "invalid_request", details: params.error.flatten() });
@@ -501,14 +520,20 @@ export async function registerMemoryRoutes(
   });
 
   app.post("/memory/:id/archive", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     return updateMemoryStatus(request.params, reply, context, "archived");
   });
 
   app.post("/memory/:id/restore", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     return updateMemoryStatus(request.params, reply, context, "active");
   });
 
   app.post("/memory/:id/forget", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+
     return updateMemoryStatus(request.params, reply, context, "forgotten");
   });
 }
@@ -626,6 +651,15 @@ export function memorySearchValidationError(details?: unknown) {
         'curl -X POST "http://localhost:6121/memory/search" -H "Content-Type: application/json" -d \'{"q":"模型供应商偏好","limit":10}\''
     }
   };
+}
+
+function hasMalformedPercentEncoding(url: string): boolean {
+  try {
+    decodeURIComponent(url);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 function assignTemporalFields(

@@ -45,15 +45,15 @@ Check and stop the WSL development services:
 
 ## Scripts
 
-- `./scripts/dev.sh`: WSL/Linux development entry point. Loads `.env`, starts Docker infra, starts the server, and starts the web dashboard when present.
+- `./scripts/dev.sh`: WSL/Linux development entry point. Sets `YUVI_RUNTIME_ENV_DIR` to the repo root, loads `.env` plus `.env.local`, starts Docker infra, starts the server, and starts the web dashboard when present.
 - `./scripts/health.sh`: check Docker Compose status plus server and web health when started by `dev.sh`.
 - `./scripts/stop.sh`: stop development processes and Docker Compose services.
 - `scripts\start-dev.cmd`: Windows LTSC convenience wrapper that calls WSL Ubuntu.
-- `pnpm dev`: run only the Fastify server in development mode.
+- `pnpm dev`: run only the Fastify server in development mode. The server resolves runtime env files from `YUVI_RUNTIME_ENV_DIR` when set, otherwise it walks up to the workspace root and reads root `.env` plus `.env.local`.
 - `pnpm build`: build all workspace packages.
 - `pnpm check`: type-check all workspace packages.
 - `pnpm test`: run package tests where present.
-- `pnpm smoke`: build the repo and verify the runtime health, message, and memory endpoints in mock/in-memory mode.
+- `pnpm smoke`: build the repo and verify the runtime health, message, and memory endpoints in explicit mock/in-memory mode. Provider verification is the path for checking real remote APIs.
 - `pnpm db:migrate`: apply PostgreSQL memory migrations using `DATABASE_URL` from `.env` or the current environment.
 - `pnpm db:reset:dev`: interactively delete development Docker volumes after a strong confirmation prompt.
 - `pnpm smoke:postgres`: apply migrations against the development Postgres container, then run the smoke test in `MEMORY_REPOSITORY=postgres` mode.

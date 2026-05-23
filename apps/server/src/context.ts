@@ -6,6 +6,7 @@ import {
   MemoryService,
   RuleBasedMemoryExtractor,
   createMemoryRepositoryFromEnv,
+  parseMemoryRepositoryEnv,
   type MemoryRepository
 } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
@@ -50,7 +51,7 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
   const promptBuilder = new PromptBuilder();
   const ruleBasedExtractor = new RuleBasedMemoryExtractor();
   const runtimeLogger = createRuntimeLogger(logger);
-  const activeMemoryRepository = process.env["MEMORY_REPOSITORY"] ?? "in-memory";
+  const activeMemoryRepository = parseMemoryRepositoryEnv().kind;
 
   function createMemoryService(
     providers: ProviderRegistry,
@@ -144,7 +145,7 @@ function collectNotHotReloadedSettings(
   activeMemoryRepository: string
 ): string[] {
   const notHotReloaded: string[] = [];
-  if ((env["MEMORY_REPOSITORY"] ?? "in-memory") !== activeMemoryRepository) {
+  if (parseMemoryRepositoryEnv(env).kind !== activeMemoryRepository) {
     notHotReloaded.push("MEMORY_REPOSITORY");
   }
   if ((env["SERVER_HOST"] ?? config.host) !== config.host) {

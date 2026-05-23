@@ -27,6 +27,7 @@ export type {
   Relation
 } from "./types.js";
 export { MemoryLayers, MemoryScopes, MemoryStatuses, MemoryTypes } from "./types.js";
+export { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
 export {
   InMemoryMemoryRepository,
   PostgresMemoryRepository,

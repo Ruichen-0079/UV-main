@@ -952,6 +952,17 @@ export class RuntimeOrchestrator {
     }
 
     const turns = this.sessionTurns.get(sessionId) ?? [];
+    if (this.directContextConfig.maxTurns === 0) {
+      return {
+        enabled: true,
+        content: "",
+        turnCount: 0,
+        charCount: 0,
+        truncated: turns.length > 0,
+        source: "session-turns"
+      };
+    }
+
     const selected = turns.slice(-this.directContextConfig.maxTurns);
     const lines = selected.map(formatDirectContextTurn);
     let content = lines.join("\n");
@@ -988,6 +999,11 @@ export class RuntimeOrchestrator {
 
     const sessionId = userEvent.payload.sessionId;
     const turns = this.sessionTurns.get(sessionId) ?? [];
+    if (this.directContextConfig.maxTurns === 0) {
+      this.sessionTurns.set(sessionId, []);
+      return;
+    }
+
     turns.push({
       traceId: userEvent.traceId,
       timestamp: new Date().toISOString(),

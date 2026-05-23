@@ -1,6 +1,9 @@
 node_modules/
 dist/
+apps/*/dist/
+packages/*/dist/
 dist-types/
+apps/web/dist-types/
 *.tsbuildinfo
 .env
 .env.local

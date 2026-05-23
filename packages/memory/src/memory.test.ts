@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parseMemoryRepositoryEnv } from "./env.js";
 import {
   MissingDatabaseUrlError,
   parseDotEnv,
@@ -33,6 +34,19 @@ describe("MemoryRepository", () => {
     expect(byId?.sourceTraceId).toBeNull();
     expect(byId?.metadata).toEqual({ origin: "unit-test" });
     expect(recent.map((memory) => memory.id)).toContain(created.id);
+  });
+
+  it("normalizes supported MEMORY_REPOSITORY values", () => {
+    expect(parseMemoryRepositoryEnv({ MEMORY_REPOSITORY: "memory" }).kind).toBe("in-memory");
+    expect(parseMemoryRepositoryEnv({ MEMORY_REPOSITORY: "in-memory" }).kind).toBe("in-memory");
+    expect(parseMemoryRepositoryEnv({ MEMORY_REPOSITORY: "postgres" }).kind).toBe("postgres");
+    expect(createMemoryRepositoryFromEnv({ MEMORY_REPOSITORY: "memory" }).kind).toBe("in-memory");
+  });
+
+  it("fails clearly for invalid MEMORY_REPOSITORY values", () => {
+    expect(() => parseMemoryRepositoryEnv({ MEMORY_REPOSITORY: "sqlite" })).toThrow(
+      /Valid values/
+    );
   });
 
   it("assigns Memory Model v2 defaults for existing create paths", async () => {

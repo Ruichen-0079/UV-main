@@ -17,8 +17,10 @@ import type {
   Relation,
   UpdateMemoryInput
 } from "./types.js";
+import { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
 
 export interface MemoryRepository {
+  readonly kind: MemoryRepositoryKind;
   healthCheck(): Promise<{ status: "healthy" | "unavailable"; message?: string }>;
   getRetrievalMode?():
     | "in-memory-keyword"
@@ -41,6 +43,7 @@ export interface MemoryRepository {
 }
 
 export class PostgresMemoryRepository implements MemoryRepository {
+  readonly kind = "postgres";
   private readonly pool: Pool;
 
   constructor(connectionString: string | Pool) {
@@ -566,6 +569,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
 }
 
 export class InMemoryMemoryRepository implements MemoryRepository {
+  readonly kind = "in-memory";
   private readonly memories: Memory[] = [];
   private readonly entities: Entity[] = [];
   private readonly relations: Relation[] = [];
@@ -863,10 +867,10 @@ export class InMemoryMemoryRepository implements MemoryRepository {
 export function createMemoryRepositoryFromEnv(
   env: Record<string, string | undefined> = process.env
 ): MemoryRepository {
-  const repositoryMode = env["MEMORY_REPOSITORY"] ?? "in-memory";
+  const repositoryMode = parseMemoryRepositoryEnv(env);
   const databaseUrl = env["DATABASE_URL"];
 
-  if (repositoryMode === "postgres") {
+  if (repositoryMode.kind === "postgres") {
     if (!databaseUrl) {
       throw new Error("MEMORY_REPOSITORY=postgres requires DATABASE_URL.");
     }

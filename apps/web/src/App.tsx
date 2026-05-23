@@ -1853,6 +1853,7 @@ function SettingsPage(): JSX.Element {
   const [verifying, setVerifying] = useState<"chat" | "reasoning" | null>(null);
   const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
   const [clearedSecrets, setClearedSecrets] = useState<Set<SettingsKey>>(() => new Set());
+  const [dashboardDevToken, setDashboardDevTokenState] = useState("");
 
   useEffect(() => {
     if (settings.data) {
@@ -1929,6 +1930,7 @@ function SettingsPage(): JSX.Element {
     "EVENT_BUS",
     "PROVIDER_ALLOW_MOCKS",
     "MEMORY_REPOSITORY",
+    "DATABASE_URL",
     "MEMORY_EXTRACTOR",
     "DEEPSEEK_API_BASEURL",
     "DEEPSEEK_API_KEY",
@@ -1939,6 +1941,11 @@ function SettingsPage(): JSX.Element {
     "EMBEDDING_PROVIDER",
     "EMBEDDING_API_KEY"
   ];
+
+  function updateDashboardDevToken(value: string): void {
+    setDashboardDevTokenState(value);
+    apiClient.setDashboardDevToken(value.trim());
+  }
 
   return (
     <PageShell title="Settings" subtitle="Local development runtime configuration.">
@@ -1992,6 +1999,20 @@ function SettingsPage(): JSX.Element {
             label="Mock fallback allowed"
             value={settings.data?.runtime.providerAllowMocks ? "true" : "false"}
           />
+          <Field label="X-YUVI-Dev-Token">
+            <input
+              className="field"
+              type="password"
+              value={dashboardDevToken}
+              autoComplete="off"
+              onChange={(event) => updateDashboardDevToken(event.target.value)}
+              placeholder="Local dashboard token"
+            />
+          </Field>
+          <p className="text-xs leading-5 text-ink-500">
+            Stored only in this browser session and sent as a header for protected local POST,
+            PATCH, and DELETE requests.
+          </p>
           <p className="text-xs leading-5 text-ink-500">
             Active: {settings.data?.runtime.activeServerHost ?? "unknown"}:
             {settings.data?.runtime.activeServerPort ?? "unknown"} · event bus{" "}
@@ -2027,6 +2048,14 @@ function SettingsPage(): JSX.Element {
               message="This change is config-only for now. Restart the server after ensuring DATABASE_URL is set and migrations have been applied."
             />
           )}
+          <SecretInput
+            label="DATABASE_URL"
+            configured={settings.data?.memory.databaseUrlConfigured}
+            preview={undefined}
+            value={form.DATABASE_URL}
+            onChange={(value) => setFormValue(setForm, "DATABASE_URL", value)}
+            onClear={() => clearSecret(setForm, setClearedSecrets, "DATABASE_URL")}
+          />
           <div className="mt-4 border-t border-ink-100 pt-4">
             <Field label="MEMORY_EXTRACTOR">
               <select
@@ -2258,6 +2287,7 @@ type SettingsKey =
   | "EVENT_BUS"
   | "PROVIDER_ALLOW_MOCKS"
   | "MEMORY_REPOSITORY"
+  | "DATABASE_URL"
   | "MEMORY_EXTRACTOR"
   | "DEEPSEEK_API_BASEURL"
   | "DEEPSEEK_API_KEY"
@@ -2284,6 +2314,7 @@ function emptySettingsForm(): SettingsForm {
     EVENT_BUS: "in-memory",
     PROVIDER_ALLOW_MOCKS: "false",
     MEMORY_REPOSITORY: "in-memory",
+    DATABASE_URL: "",
     MEMORY_EXTRACTOR: "llm",
     DEEPSEEK_API_BASEURL: "",
     DEEPSEEK_API_KEY: "",
@@ -2312,6 +2343,7 @@ function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsFo
     EVENT_BUS: settings.runtime.eventBus,
     PROVIDER_ALLOW_MOCKS: settings.runtime.providerAllowMocks ? "true" : "false",
     MEMORY_REPOSITORY: settings.memory.memoryRepository,
+    DATABASE_URL: "",
     MEMORY_EXTRACTOR: settings.memory.memoryExtractor ?? "llm",
     DEEPSEEK_API_BASEURL: settings.providers.deepseek.baseUrl,
     DEEPSEEK_API_KEY: "",
@@ -2367,6 +2399,7 @@ function buildSettingsUpdate(
 function isSecretSettingsKey(key: SettingsKey): boolean {
   return (
     key === "DEEPSEEK_API_KEY" ||
+    key === "DATABASE_URL" ||
     key === "XAI_API_KEY" ||
     key === "DASHSCOPE_API_KEY" ||
     key === "EMBEDDING_API_KEY"

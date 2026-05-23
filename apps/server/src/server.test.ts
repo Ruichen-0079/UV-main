@@ -969,6 +969,7 @@ describe("server", () => {
 
     try {
       process.chdir(tempDir);
+      process.env["YUVI_RUNTIME_ENV_DIR"] = tempDir;
       const app = await buildServer(loadServerConfig(process.env));
 
       const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
@@ -1098,6 +1099,7 @@ describe("server", () => {
 
     try {
       process.chdir(tempDir);
+      process.env["YUVI_RUNTIME_ENV_DIR"] = tempDir;
       await writeFile(path.join(tempDir, ".env"), "DEEPSEEK_CHAT_MODEL=from-env\n", "utf8");
       await writeFile(
         path.join(tempDir, ".env.local"),
@@ -1177,6 +1179,7 @@ describe("server", () => {
 
     try {
       process.chdir(tempDir);
+      process.env["YUVI_RUNTIME_ENV_DIR"] = tempDir;
       delete process.env["DEEPSEEK_CHAT_MODEL"];
       delete process.env["DEEPSEEK_REASONING_MODEL"];
       const app = await buildServer(loadServerConfig(process.env));

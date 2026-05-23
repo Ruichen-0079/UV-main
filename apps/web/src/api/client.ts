@@ -8,6 +8,7 @@ export type ProviderHealth = {
   configured?: boolean;
   available?: boolean;
   mock?: boolean;
+  mode?: "real" | "mock" | "unavailable";
   required?: boolean;
   baseUrl?: string;
   model?: string;
@@ -463,10 +464,12 @@ export type RuntimeSettingsResponse = {
     ".env": {
       exists: boolean;
       gitIgnored: boolean;
+      path?: string;
     };
     ".env.local": {
       exists: boolean;
       gitIgnored: boolean;
+      path?: string;
     };
   };
   baseConfig: Record<string, unknown>;
@@ -597,6 +600,7 @@ export type RuntimeSettingsReloadResponse = {
 
 const apiBaseUrl = import.meta.env["VITE_API_BASE_URL"] ?? "/api";
 const explicitWebSocketBaseUrl = import.meta.env["VITE_WS_BASE_URL"] as string | undefined;
+let dashboardDevToken = "";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -609,6 +613,14 @@ export class ApiError extends Error {
 }
 
 export const apiClient = {
+  setDashboardDevToken(token: string): void {
+    dashboardDevToken = token;
+  },
+
+  getDashboardDevTokenConfigured(): boolean {
+    return dashboardDevToken.length > 0;
+  },
+
   getHealth(): Promise<HealthResponse> {
     return request<HealthResponse>("/health");
   },
@@ -905,6 +917,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
+  if (dashboardDevToken && shouldAttachDashboardDevToken(path, init?.method)) {
+    headers.set("x-yuvi-dev-token", dashboardDevToken);
+  }
 
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
@@ -917,6 +932,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+function shouldAttachDashboardDevToken(path: string, method: string | undefined): boolean {
+  if (path.startsWith("/memory/candidates")) {
+    return true;
+  }
+  const normalized = method?.toUpperCase() ?? "GET";
+  return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";
 }
 
 function getWebSocketUrl(path: string): string {

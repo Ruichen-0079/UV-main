@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+export YUVI_RUNTIME_ENV_DIR="$repo_root"
 
 state_dir="${XDG_RUNTIME_DIR:-/tmp}/yuvi-runtime-dev"
 mkdir -p "$state_dir"
@@ -54,7 +55,7 @@ check_file_presence() {
     echo "已找到 .env（不会打印内容）"
   else
     echo "警告：未找到 .env；请运行 cp .env.example .env 后填写本地配置。" >&2
-    echo "开发模式将继续使用当前 shell 环境和 mock fallback。" >&2
+    echo "开发模式将继续使用当前 shell 环境；mock fallback 仅在 PROVIDER_ALLOW_MOCKS=true 时启用。" >&2
   fi
 }
 
@@ -114,8 +115,10 @@ start_server() {
   fi
 
   echo "启动 Server: $server_url"
+  echo "Provider fallback: PROVIDER_ALLOW_MOCKS=${PROVIDER_ALLOW_MOCKS:-false} (real-provider-first unless explicitly true)"
   env \
     NODE_ENV="${NODE_ENV:-development}" \
+    YUVI_RUNTIME_ENV_DIR="$YUVI_RUNTIME_ENV_DIR" \
     PROVIDER_ALLOW_MOCKS="${PROVIDER_ALLOW_MOCKS:-false}" \
     MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-in-memory}" \
     SERVER_HOST="${SERVER_HOST:-127.0.0.1}" \

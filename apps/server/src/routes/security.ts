@@ -6,7 +6,7 @@ export function requireDashboardDevToken(
   request: FastifyRequest,
   reply: FastifyReply
 ): boolean {
-  if (!config.dashboardDevToken) {
+  if (config.runtimeMode !== "development" || !config.dashboardDevToken) {
     return true;
   }
 
