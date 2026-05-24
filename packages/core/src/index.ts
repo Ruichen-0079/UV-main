@@ -2,6 +2,7 @@ import type { EventBus } from "@companion/event-bus";
 import type {
   Memory,
   MemoryCandidate,
+  MemoryCandidateStorageResult,
   MemoryExtractorStatus,
   MemoryRetrievalMode,
   MemoryRetrievalResult,
@@ -83,6 +84,10 @@ export type RuntimeMemoryPort = {
     candidate: MemoryCandidate,
     options?: { source?: string; tags?: string[] }
   ): Promise<Memory>;
+  processCandidateForStorage?(
+    candidate: MemoryCandidate,
+    options?: { source?: string; tags?: string[] }
+  ): Promise<MemoryCandidateStorageResult>;
   rememberInteraction(input: {
     userMessage: string;
     assistantMessage: string;
@@ -129,6 +134,7 @@ export type RuntimePromptPreview = {
   vectorUsed: boolean;
   embeddingProvider?: string | undefined;
   embeddingModel?: string | undefined;
+  embeddingDimensions?: number | undefined;
   semanticEmbedding?: boolean | undefined;
   embeddingNote?: string | undefined;
   queryEmbeddingGenerated: boolean;
@@ -180,7 +186,7 @@ export type RuntimePromptPreview = {
   memoryExtractionSkippedReason?: string | undefined;
 };
 
-export type RuntimeMemoryCandidateDecision = "candidate" | "stored" | "rejected";
+export type RuntimeMemoryCandidateDecision = "stored" | "rejected";
 
 export type RuntimeMemoryCandidateReview = {
   id: string;
@@ -533,11 +539,14 @@ export class RuntimeOrchestrator {
         content: memory.displayText,
         displayText: memory.displayText,
         importance: memory.importance,
+        type: memory.type,
+        subtype: memory.subtype,
         scope: memory.scope,
         scopeId: memory.scopeId,
         memoryLayer: memory.memoryLayer,
         status: memory.status,
         ...(memory.validFrom !== undefined ? { validFrom: memory.validFrom } : {}),
+        ...(memory.eventTime !== undefined ? { eventTime: memory.eventTime } : {}),
         ...(memory.validUntil !== undefined ? { validUntil: memory.validUntil } : {}),
         ...(memory.expiresAt !== undefined ? { expiresAt: memory.expiresAt } : {}),
         createdAt: memory.createdAt,
@@ -571,6 +580,7 @@ export class RuntimeOrchestrator {
       vectorUsed: memoryContext.vectorUsed,
       embeddingProvider: memoryContext.embeddingProvider,
       embeddingModel: memoryContext.embeddingModel,
+      embeddingDimensions: memoryContext.embeddingDimensions,
       semanticEmbedding: memoryContext.semanticEmbedding,
       embeddingNote: memoryContext.embeddingNote,
       queryEmbeddingGenerated: memoryContext.queryEmbeddingGenerated,
@@ -699,7 +709,7 @@ export class RuntimeOrchestrator {
   ): Promise<MemoryExtractionRuntimeDebug> {
     const initialExtractorStatus = this.getMemoryExtractorStatus();
     try {
-      if (this.options.memory.extractCandidates && this.options.memory.rememberCandidate) {
+      if (this.options.memory.extractCandidates) {
         const candidates = await this.options.memory.extractCandidates({
           sessionId: sourceEvent.payload.sessionId,
           userMessage: sourceEvent.payload.content,
@@ -711,26 +721,31 @@ export class RuntimeOrchestrator {
             : undefined,
           memoryOptions
         });
-        const selected = candidates.filter((candidate) => candidate.importance >= 0.65);
         const extractorStatus = this.getMemoryExtractorStatus();
-        const rejectedReasons = [
-          ...(extractorStatus.rejectedReasons ?? []),
-          ...candidates
-            .filter((candidate) => candidate.importance < 0.65)
-            .map((candidate) => `runtime-threshold:${candidate.reason}`)
-        ];
-        const storedMemories = await Promise.all(
-          selected.map((candidate) =>
-            this.options.memory.rememberCandidate?.(candidate, {
+        const decisions = await Promise.all(
+          candidates.map((candidate) =>
+            this.processCandidateForStorage(candidate, {
               source: "runtime",
               tags: [sourceEvent.payload.sessionId]
             })
           )
         );
+        const selected = decisions
+          .filter((decision) => decision.decision === "stored")
+          .map((decision) => decision.candidate);
+        const storedMemories = decisions
+          .map((decision) => decision.memory)
+          .filter((memory): memory is Memory => Boolean(memory));
+        const rejectedReasons = [
+          ...(extractorStatus.rejectedReasons ?? []),
+          ...decisions
+            .filter((decision) => decision.decision === "rejected")
+            .map((decision) => decision.rejectedReason ?? "rejected")
+        ];
         const reviewedCandidates = this.recordMemoryCandidates({
           candidates,
-          selected,
-          storedMemories: storedMemories.filter((memory): memory is Memory => Boolean(memory)),
+          decisions,
+          storedMemories,
           sourceTraceId: sourceEvent.traceId,
           rejectedReasons,
           extractorStatus
@@ -740,12 +755,12 @@ export class RuntimeOrchestrator {
           used: true,
           candidateCount: candidates.length,
           storedMemoryCount: selected.length,
-          rejectedCount: Math.max(candidates.length - selected.length, 0),
+          rejectedCount: decisions.filter((decision) => decision.decision === "rejected").length,
           rejectedReasons,
           candidates: reviewedCandidates,
           ...(selected.length > 0
             ? {}
-            : { skippedReason: "Extractor produced no candidates above threshold." })
+            : { skippedReason: "Memory service rejected all extracted candidates." })
         };
       }
 
@@ -861,6 +876,7 @@ export class RuntimeOrchestrator {
           vectorUsed: result.vectorUsed,
           embeddingProvider: result.embeddingProvider,
           embeddingModel: result.embeddingModel,
+          embeddingDimensions: result.embeddingDimensions,
           semanticEmbedding: result.semanticEmbedding,
           embeddingNote: result.embeddingNote,
           queryEmbeddingGenerated: result.queryEmbeddingGenerated,
@@ -937,6 +953,36 @@ export class RuntimeOrchestrator {
     );
 
     return memoryContext;
+  }
+
+  private async processCandidateForStorage(
+    candidate: MemoryCandidate,
+    options: { source?: string; tags?: string[] }
+  ): Promise<MemoryCandidateStorageResult> {
+    if (this.options.memory.processCandidateForStorage) {
+      return this.options.memory.processCandidateForStorage(candidate, options);
+    }
+    if (!this.options.memory.rememberCandidate) {
+      return {
+        decision: "rejected",
+        candidate,
+        rejectedReason: "memory service cannot store candidates"
+      };
+    }
+    if (candidate.importance < 0.65) {
+      return {
+        decision: "rejected",
+        candidate,
+        rejectedReason: `runtime-threshold:${candidate.reason}`
+      };
+    }
+    const memory = await this.options.memory.rememberCandidate(candidate, options);
+    return {
+      decision: "stored",
+      candidate,
+      memory,
+      storageReason: "legacy importance threshold"
+    };
   }
 
   private buildDirectContext(sessionId: string): DirectContextBuildResult {
@@ -1208,22 +1254,24 @@ export class RuntimeOrchestrator {
 
   private recordMemoryCandidates(input: {
     candidates: MemoryCandidate[];
-    selected: MemoryCandidate[];
+    decisions: MemoryCandidateStorageResult[];
     storedMemories: Memory[];
     sourceTraceId: string;
     rejectedReasons: string[];
     extractorStatus: MemoryExtractionRuntimeDebug;
   }): RuntimeMemoryCandidateReview[] {
     const storedMemories = [...input.storedMemories];
-    const reviews = input.candidates.map((candidate) => {
-      const stored = input.selected.includes(candidate);
+    const reviews = input.candidates.map((candidate, index) => {
+      const decision = input.decisions[index];
+      const stored = decision?.decision === "stored";
       const storedMemory = stored ? storedMemories.shift() : undefined;
       const rejectedReason = stored
         ? undefined
-        : (input.rejectedReasons.find((reason) => reason.includes(candidate.reason)) ??
-          `runtime-threshold:${candidate.reason}`);
+        : (decision?.rejectedReason ??
+          input.rejectedReasons.find((reason) => reason.includes(candidate.reason)) ??
+          "rejected");
       return toMemoryCandidateReview({
-        candidate,
+        candidate: decision?.candidate ?? candidate,
         decision: stored ? "stored" : "rejected",
         rejectedReason,
         sourceTraceId: input.sourceTraceId,
@@ -1253,6 +1301,7 @@ type MemoryContext = {
   vectorUsed: boolean;
   embeddingProvider?: string | undefined;
   embeddingModel?: string | undefined;
+  embeddingDimensions?: number | undefined;
   semanticEmbedding?: boolean | undefined;
   embeddingNote?: string | undefined;
   queryEmbeddingGenerated: boolean;
@@ -1314,6 +1363,10 @@ function emptyMemoryContext(): MemoryContext {
 }
 
 function memoryToDebug(memory: Memory): RetrievedMemoryDebug {
+  const semanticEmbedding =
+    memory.embeddingProvider === null || memory.embeddingProvider === undefined
+      ? undefined
+      : memory.embeddingProvider !== "mock";
   return {
     id: memory.id,
     type: memory.type,
@@ -1328,12 +1381,19 @@ function memoryToDebug(memory: Memory): RetrievedMemoryDebug {
     importance: memory.importance,
     createdAt: memory.createdAt,
     observedAt: memory.observedAt,
+    eventTime: memory.eventTime,
     validFrom: memory.validFrom,
     validUntil: memory.validUntil,
     expiresAt: memory.expiresAt,
     supersededAt: memory.supersededAt,
     displayText: memory.summary ?? memory.content,
     matchedBy: "content",
+    hasEmbedding: Boolean(memory.embedding?.length),
+    embeddingProvider: memory.embeddingProvider,
+    embeddingModel: memory.embeddingModel,
+    embeddingDimensions: memory.embeddingDimensions,
+    embeddedAt: memory.embeddedAt,
+    ...(semanticEmbedding !== undefined ? { semanticEmbedding } : {}),
     score: memory.importance
   };
 }

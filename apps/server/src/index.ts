@@ -1,9 +1,5 @@
 import { loadServerConfig } from "./config.js";
-import {
-  applyRuntimeEnv,
-  getLegacyServerLocalEnvWarning,
-  readRuntimeEnvFiles
-} from "./env.js";
+import { applyRuntimeEnv, getLegacyServerLocalEnvWarning, readRuntimeEnvFiles } from "./env.js";
 import { buildServer } from "./server.js";
 
 const runtimeEnvFiles = await readRuntimeEnvFiles();

@@ -7,21 +7,41 @@ type BackfillRow = {
   content: string;
   summary: string | null;
   tags: string[] | null;
+  scope: string;
+  scope_id: string | null;
+  status: string;
+  embedding: unknown | null;
+  embedded_at: Date | null;
+};
+
+type BackfillOptions = {
+  dryRun: boolean;
+  limit: number;
+  force: boolean;
+  missingOnly: boolean;
+  scope?: string;
+  scopeId?: string;
+  status?: string;
+};
+
+type BackfillSummary = {
+  scanned: number;
+  skipped: number;
+  embedded: number;
+  failed: number;
 };
 
 const DEFAULT_LIMIT = 100;
 
 async function main(): Promise<void> {
   await loadEnvFiles();
+  const options = parseArgs(process.argv.slice(2));
 
   const databaseUrl = process.env["DATABASE_URL"];
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required for pnpm memory:embed:backfill.");
   }
 
-  const force = process.argv.includes("--force");
-  const dryRun = process.argv.includes("--dry-run");
-  const limit = readLimit();
   const registry = createProviderRegistryFromEnv(process.env);
   const provider = registry.getEmbeddingProvider();
   const health = await provider.healthCheck();
@@ -32,68 +52,163 @@ async function main(): Promise<void> {
     );
   }
 
+  console.log(
+    `Embedding backfill provider=${provider.name} model=${provider.model ?? provider.name} dimensions=${provider.dimensions} semanticEmbedding=${String(!provider.mock)}`
+  );
+  console.log(
+    `Options dryRun=${String(options.dryRun)} force=${String(options.force)} missingOnly=${String(options.missingOnly)} limit=${options.limit}`
+  );
+
   const pool = new Pool({ connectionString: databaseUrl });
+  const summary: BackfillSummary = { scanned: 0, skipped: 0, embedded: 0, failed: 0 };
+
   try {
-    const rows = await listRows(pool, force, limit);
-    console.log(
-      `Found ${rows.length} memory row(s) ${force ? "eligible for re-embedding" : "missing embeddings"}.`
-    );
+    const rows = await listRows(pool, options);
+    summary.scanned = rows.length;
+    console.log(`Scanned ${rows.length} memory row(s).`);
 
-    if (dryRun) {
-      console.log("Dry run enabled; no rows were updated.");
-      return;
-    }
-
-    let updated = 0;
-    for (const row of rows) {
-      const input = buildEmbeddingInput(row);
-      if (!input) continue;
-      const embedding = await provider.embedText(input);
-      if (embedding.length !== provider.dimensions) {
-        throw new Error(
-          `Embedding dimension mismatch for ${row.id}: expected ${provider.dimensions}, got ${embedding.length}.`
-        );
+    for (const [index, row] of rows.entries()) {
+      const prefix = `[${index + 1}/${rows.length}] ${row.id}`;
+      if (!options.force && hasStoredEmbedding(row)) {
+        summary.skipped += 1;
+        console.log(`${prefix} skipped: already embedded.`);
+        continue;
       }
-      await pool.query(
-        `
-          update memories
-          set embedding = $2::vector,
-              embedding_provider = $3,
-              embedding_model = $4,
-              embedding_dimensions = $5,
-              embedded_at = now(),
-              updated_at = now()
-          where id = $1
-        `,
-        [
-          row.id,
-          vectorLiteral(embedding),
-          provider.name,
-          provider.model ?? provider.name,
-          provider.dimensions
-        ]
-      );
-      updated += 1;
-    }
 
-    console.log(`Backfilled embeddings for ${updated} memory row(s).`);
+      const input = buildEmbeddingInput(row);
+      if (!input) {
+        summary.skipped += 1;
+        console.log(`${prefix} skipped: empty embedding input.`);
+        continue;
+      }
+
+      if (options.dryRun) {
+        summary.skipped += 1;
+        console.log(`${prefix} dry-run: would embed.`);
+        continue;
+      }
+
+      try {
+        const embedding = await provider.embedText(input);
+        if (embedding.length !== provider.dimensions) {
+          summary.failed += 1;
+          console.error(
+            `${prefix} failed: dimension mismatch expectedDimensions=${provider.dimensions} actualDimensions=${embedding.length} provider=${provider.name} model=${provider.model ?? provider.name}`
+          );
+          continue;
+        }
+        await pool.query(
+          `
+            update memories
+            set embedding = $2::vector,
+                embedding_provider = $3,
+                embedding_model = $4,
+                embedding_dimensions = $5,
+                embedded_at = now(),
+                updated_at = now()
+            where id = $1
+          `,
+          [
+            row.id,
+            vectorLiteral(embedding),
+            provider.name,
+            provider.model ?? provider.name,
+            provider.dimensions
+          ]
+        );
+        summary.embedded += 1;
+        console.log(`${prefix} embedded.`);
+      } catch (error) {
+        summary.failed += 1;
+        console.error(`${prefix} failed: ${safeErrorMessage(error)}`);
+      }
+    }
   } finally {
     await pool.end();
   }
+
+  console.log(
+    `Summary scanned=${summary.scanned} skipped=${summary.skipped} embedded=${summary.embedded} failed=${summary.failed}`
+  );
+
+  if (summary.failed > 0) {
+    process.exitCode = 1;
+  }
 }
 
-async function listRows(pool: Pool, force: boolean, limit: number): Promise<BackfillRow[]> {
+async function listRows(pool: Pool, options: BackfillOptions): Promise<BackfillRow[]> {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (options.missingOnly && !options.force) {
+    clauses.push("(embedding is null or embedded_at is null)");
+  }
+  if (options.scope) {
+    values.push(options.scope);
+    clauses.push(`scope = $${values.length}`);
+  }
+  if (options.scopeId) {
+    values.push(options.scopeId);
+    clauses.push(`scope_id = $${values.length}`);
+  }
+  if (options.status) {
+    values.push(options.status);
+    clauses.push(`status = $${values.length}`);
+  }
+
+  values.push(options.limit);
+  const where = clauses.length ? `where ${clauses.join(" and ")}` : "";
   const result = await pool.query<BackfillRow>(
     `
-      select id, content, summary, tags
+      select id, content, summary, tags, scope, scope_id, status, embedding, embedded_at
       from memories
-      where $1::boolean or embedding is null or embedded_at is null
+      ${where}
       order by created_at asc
-      limit $2
+      limit $${values.length}
     `,
-    [force, limit]
+    values
   );
   return result.rows;
+}
+
+function parseArgs(args: string[]): BackfillOptions {
+  const options: BackfillOptions = {
+    dryRun: false,
+    limit: DEFAULT_LIMIT,
+    force: false,
+    missingOnly: true
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") continue;
+    if (arg === "--dry-run") options.dryRun = true;
+    else if (arg === "--force") {
+      options.force = true;
+      options.missingOnly = false;
+    } else if (arg === "--missing-only") options.missingOnly = true;
+    else if (arg === "--limit") options.limit = parsePositiveInteger(args[++index], DEFAULT_LIMIT);
+    else if (arg.startsWith("--limit=")) {
+      options.limit = parsePositiveInteger(arg.slice("--limit=".length), DEFAULT_LIMIT);
+    } else if (arg === "--scope") options.scope = args[++index];
+    else if (arg.startsWith("--scope=")) options.scope = arg.slice("--scope=".length);
+    else if (arg === "--scopeId") options.scopeId = args[++index];
+    else if (arg.startsWith("--scopeId=")) options.scopeId = arg.slice("--scopeId=".length);
+    else if (arg === "--status") options.status = args[++index];
+    else if (arg.startsWith("--status=")) options.status = arg.slice("--status=".length);
+    else throw new Error(`Unsupported option '${arg}'.`);
+  }
+
+  return options;
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function hasStoredEmbedding(row: BackfillRow): boolean {
+  return Boolean(row.embedding || row.embedded_at);
 }
 
 function buildEmbeddingInput(row: BackfillRow): string {
@@ -105,13 +220,6 @@ function buildEmbeddingInput(row: BackfillRow): string {
 
 function vectorLiteral(embedding: number[]): string {
   return `[${embedding.map((value) => Number(value).toFixed(8)).join(",")}]`;
-}
-
-function readLimit(): number {
-  const flag = process.argv.find((arg) => arg.startsWith("--limit="));
-  if (!flag) return DEFAULT_LIMIT;
-  const parsed = Number.parseInt(flag.slice("--limit=".length), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LIMIT;
 }
 
 async function loadEnvFiles(): Promise<void> {
@@ -133,7 +241,7 @@ async function loadEnvFiles(): Promise<void> {
 
 function parseDotEnv(text: string): Array<[string, string]> {
   const entries: Array<[string, string]> = [];
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of text.split(/\r?\n/u)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const equals = trimmed.indexOf("=");
@@ -151,9 +259,14 @@ function parseDotEnv(text: string): Array<[string, string]> {
   return entries;
 }
 
+function safeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [REDACTED]").slice(0, 300);
+}
+
 try {
   await main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(safeErrorMessage(error));
   process.exitCode = 1;
 }

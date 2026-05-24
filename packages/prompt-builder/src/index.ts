@@ -23,9 +23,12 @@ export type RetrievedMemoryForPrompt = {
   importance?: number;
   scope?: string;
   scopeId?: string | null;
+  type?: string;
+  subtype?: string | null;
   memoryLayer?: string;
   status?: string;
   validFrom?: Date | string;
+  eventTime?: Date | string | null;
   validUntil?: Date | string | null;
   expiresAt?: Date | string | null;
   createdAt?: Date | string;
@@ -333,6 +336,8 @@ function displayTextForMemory(memory: RetrievedMemoryForPrompt): string {
 
 function formatMemoryForPrompt(memory: RetrievedMemoryForPrompt): string {
   const hints = [
+    formatEventTimeHint(memory),
+    memory.type ?? null,
     memory.scope ? (memory.scopeId ? `${memory.scope}:${memory.scopeId}` : memory.scope) : null,
     memory.memoryLayer ?? null,
     memory.status ?? null
@@ -353,6 +358,20 @@ function formatTemporalHint(memory: RetrievedMemoryForPrompt): string | null {
     return `expires:${formatDateOnly(memory.expiresAt)}`;
   }
   return null;
+}
+
+function formatEventTimeHint(memory: RetrievedMemoryForPrompt): string | null {
+  if (!memory.eventTime && !memory.validFrom) {
+    return null;
+  }
+  const source = memory.eventTime ?? memory.validFrom;
+  if (!source) return null;
+  const date = source instanceof Date ? source : new Date(source);
+  if (Number.isNaN(date.getTime())) return null;
+  const hour = date.getUTCHours();
+  const daypart =
+    hour < 11 ? "morning" : hour < 15 ? "midday" : hour < 19 ? "afternoon" : "evening";
+  return `${date.toISOString().slice(0, 10)} ${daypart}`;
 }
 
 function formatDateOnly(value: Date | string): string {

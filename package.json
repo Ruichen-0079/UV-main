@@ -19,6 +19,9 @@
     "smoke:postgres": "DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi pnpm db:migrate && MEMORY_REPOSITORY=postgres DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi pnpm smoke"
   },
   "packageManager": "pnpm@9.15.4",
+  "dependencies": {
+    "pg": "^8.20.0"
+  },
   "devDependencies": {
     "@types/node": "^22.10.7",
     "tsx": "^4.19.2",

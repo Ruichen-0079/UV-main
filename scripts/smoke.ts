@@ -1,10 +1,15 @@
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const port = 3137;
 const memoryRepository = process.env["MEMORY_REPOSITORY"] ?? "in-memory";
+const runtimeEnvDir = mkdtempSync(join(tmpdir(), "yuvi-smoke-env-"));
 const env = {
   ...process.env,
   SERVER_PORT: String(port),
+  YUVI_RUNTIME_ENV_DIR: runtimeEnvDir,
   NODE_ENV: "development",
   PROVIDER_ALLOW_MOCKS: "true",
   MEMORY_REPOSITORY: memoryRepository,
@@ -84,6 +89,7 @@ try {
   console.log("Smoke checks passed.");
 } finally {
   server.kill("SIGTERM");
+  rmSync(runtimeEnvDir, { recursive: true, force: true });
 }
 
 async function step<T>(label: string, run: () => Promise<T>): Promise<T> {

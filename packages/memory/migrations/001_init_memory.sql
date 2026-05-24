@@ -7,7 +7,7 @@ create table if not exists memories (
   type text not null check (type in ('working', 'episodic', 'semantic', 'emotional', 'procedural', 'relationship')),
   subtype text null check (
     subtype is null or subtype in (
-      'preference', 'fact', 'project', 'workflow', 'milestone',
+      'preference', 'fact', 'project', 'workflow', 'event', 'milestone',
       'provider-choice', 'path', 'repo', 'command', 'troubleshooting',
       'config', 'emotion', 'relationship'
     )
@@ -63,7 +63,7 @@ alter table memories drop constraint if exists memories_subtype_check;
 alter table memories add constraint memories_subtype_check
   check (
     subtype is null or subtype in (
-      'preference', 'fact', 'project', 'workflow', 'milestone',
+      'preference', 'fact', 'project', 'workflow', 'event', 'milestone',
       'provider-choice', 'path', 'repo', 'command', 'troubleshooting',
       'config', 'emotion', 'relationship'
     )

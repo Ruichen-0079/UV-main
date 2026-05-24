@@ -97,6 +97,14 @@ describe("server", () => {
         }
       });
       expect(memory.statusCode).toBe(200);
+      expect(memory.json()).toMatchObject({
+        embedding: null,
+        hasEmbedding: true,
+        embeddingProvider: "mock",
+        embeddingModel: "mock",
+        semanticEmbedding: false
+      });
+      expect(memory.body).not.toContain("[0.");
       const memoryId = memory.json().id as string;
 
       const memoryDetail = await app.inject({ method: "GET", url: `/memory/${memoryId}` });
@@ -108,7 +116,10 @@ describe("server", () => {
         memoryLayer: "core",
         status: "active",
         content: "Server test memory.",
-        source: "test"
+        source: "test",
+        embedding: null,
+        hasEmbedding: true,
+        semanticEmbedding: false
       });
 
       const invalidImportance = await app.inject({
@@ -507,6 +518,55 @@ describe("server", () => {
     }
   });
 
+  it("rejects ordinary relative-time daily events from runtime long-term memory", async () => {
+    const previous = snapshotEnv();
+    setMockEnv();
+    process.env["MEMORY_EXTRACTOR"] = "rule-based";
+
+    try {
+      const app = await buildServer(loadServerConfig(process.env));
+      const response = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "temporal",
+          text: "我今早吃了芒果蛋糕",
+          options: {
+            readMemory: false,
+            writeMemory: true,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(response.statusCode).toBe(200);
+
+      const memories = await app.inject({ method: "GET", url: "/memory/recent?limit=10" });
+      expect(memories.statusCode).toBe(200);
+      expect(
+        memories
+          .json()
+          .memories.some((memory: { content: string }) => memory.content.includes("芒果蛋糕"))
+      ).toBe(false);
+
+      const candidates = await app.inject({
+        method: "GET",
+        url: "/memory/candidates/recent?limit=5"
+      });
+      expect(candidates.statusCode).toBe(200);
+      expect(candidates.json().candidates[0]).toMatchObject({
+        type: "episodic",
+        subtype: "event",
+        memoryLayer: "recall",
+        decision: "rejected",
+        rejectedReason: "ordinary one-off daily event"
+      });
+      expect(candidates.json().candidates[0].content).not.toContain("今早");
+      expect(candidates.body).not.toContain("test_deepseek_secret");
+    } finally {
+      restoreEnv(previous);
+    }
+  });
+
   it("includes safe real-provider metadata when DeepSeek chat is configured", async () => {
     const previous = snapshotEnv();
     setConfiguredDeepSeekEnv();
@@ -890,8 +950,74 @@ describe("server", () => {
         mock: true
       });
       expect(reasoning.body).not.toContain("test_deepseek_secret");
+
+      const embedding = await app.inject({
+        method: "POST",
+        url: "/providers/verify/embedding"
+      });
+      expect(embedding.statusCode).toBe(200);
+      expect(embedding.json()).toMatchObject({
+        ok: true,
+        provider: "mock",
+        capability: "embedding",
+        mock: true,
+        semanticEmbedding: false
+      });
+      expect(embedding.json().dimensions).toBeTypeOf("number");
+      expect(embedding.json().expectedDimensions).toBe(embedding.json().dimensions);
+      expect(embedding.json().actualDimensions).toBe(embedding.json().dimensions);
+      expect(embedding.body).not.toContain("test_deepseek_secret");
       await app.close();
     } finally {
+      restoreEnv(previous);
+    }
+  });
+
+  it("verify embedding reports dimension mismatches safely", async () => {
+    const previous = snapshotEnv();
+    setMockEnv();
+    process.env["DEFAULT_EMBEDDING_PROVIDER"] = "openai-compatible";
+    process.env["EMBEDDING_API_BASEURL"] = "https://embedding.example/v1";
+    process.env["EMBEDDING_API_KEY"] = "embedding-secret-key";
+    process.env["EMBEDDING_MODEL"] = "text-embedding-test";
+    process.env["EMBEDDING_DIMENSIONS"] = "3";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ index: 0, embedding: [0.1, 0.2] }]
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        }
+      )
+    );
+
+    try {
+      const app = await buildServer(loadServerConfig(process.env));
+      const embedding = await app.inject({
+        method: "POST",
+        url: "/providers/verify/embedding"
+      });
+
+      expect(embedding.statusCode).toBe(200);
+      expect(embedding.json()).toMatchObject({
+        ok: false,
+        provider: "openai-compatible",
+        capability: "embedding",
+        mock: false,
+        semanticEmbedding: true,
+        expectedDimensions: 3,
+        actualDimensions: 2,
+        dimensions: 2,
+        error: expect.stringContaining("Provider returned 2 dimensions")
+      });
+      expect(embedding.body).not.toContain("embedding-secret-key");
+      expect(embedding.body).not.toContain("Authorization");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      await app.close();
+    } finally {
+      vi.restoreAllMocks();
       restoreEnv(previous);
     }
   });

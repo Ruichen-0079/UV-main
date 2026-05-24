@@ -30,6 +30,7 @@ const MemorySubtypeSchema = z.enum([
   "fact",
   "project",
   "workflow",
+  "event",
   "milestone",
   "provider-choice",
   "path",
@@ -132,6 +133,7 @@ const SearchMemoryQuerySchema = z.object({
   minImportance: z.coerce.number().min(0).max(1).optional(),
   includeArchived: BooleanishSchema.optional(),
   includeSuperseded: BooleanishSchema.optional(),
+  includeHistoricalEpisodic: BooleanishSchema.optional(),
   includeExpired: BooleanishSchema.optional(),
   includeHistory: BooleanishSchema.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20)
@@ -569,6 +571,9 @@ async function runMemorySearch(context: AppContext, input: SearchMemoryInput) {
     searchQuery.includeSuperseded = input.includeSuperseded;
   if (input.includeExpired !== undefined) searchQuery.includeExpired = input.includeExpired;
   if (input.includeHistory !== undefined) searchQuery.includeHistory = input.includeHistory;
+  if (input.includeHistoricalEpisodic !== undefined) {
+    searchQuery.includeHistoricalEpisodic = input.includeHistoricalEpisodic;
+  }
   if (input.type) searchQuery.types = [input.type as MemoryType];
   if (input.subtype) searchQuery.subtypes = [input.subtype as MemorySubtype];
   if (input.source) searchQuery.sources = [input.source];
@@ -596,6 +601,7 @@ async function runMemorySearch(context: AppContext, input: SearchMemoryInput) {
     vectorUsed: result.vectorUsed,
     embeddingProvider: result.embeddingProvider,
     embeddingModel: result.embeddingModel,
+    embeddingDimensions: result.embeddingDimensions,
     semanticEmbedding: result.semanticEmbedding,
     embeddingNote: result.embeddingNote,
     queryEmbeddingGenerated: result.queryEmbeddingGenerated,
@@ -705,7 +711,17 @@ function toSafeMemory(memory: Memory): Memory {
   return {
     ...memory,
     embedding: null,
-    metadata: redactUnsafeMetadata(memory.metadata)
+    metadata: redactUnsafeMetadata(memory.metadata),
+    hasEmbedding: Boolean(memory.embedding?.length),
+    semanticEmbedding:
+      memory.embeddingProvider === null || memory.embeddingProvider === undefined
+        ? undefined
+        : memory.embeddingProvider !== "mock",
+    embeddingError: safeEmbeddingError(memory.metadata)
+  } as Memory & {
+    hasEmbedding: boolean;
+    semanticEmbedding?: boolean;
+    embeddingError?: string;
   };
 }
 
@@ -748,6 +764,14 @@ function redactUnsafeMetadata(value: Record<string, unknown>): Record<string, un
     }
   }
   return output;
+}
+
+function safeEmbeddingError(metadata: Record<string, unknown>): string | undefined {
+  const value = metadata["embeddingError"];
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+  return value.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [REDACTED]").slice(0, 300);
 }
 
 function summarizeCandidates(candidates: Array<{ decision: string; fallbackUsed?: boolean }>): {

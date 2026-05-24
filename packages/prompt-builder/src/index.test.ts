@@ -115,4 +115,28 @@ describe("PromptBuilder", () => {
       "- [project:yuvi-runtime][core][active][validUntil:2026-12-31] 用户偏好 Chat/Reasoning 使用 DeepSeek。"
     );
   });
+
+  it("renders absolute event hints for time-bound episodic memories", () => {
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "You are Companion.",
+      retrievedMemories: [
+        {
+          content: "用户吃了芒果蛋糕。",
+          type: "episodic",
+          subtype: "event",
+          memoryLayer: "recall",
+          status: "active",
+          eventTime: "2026-05-23T08:00:00.000Z",
+          importance: 0.5
+        }
+      ],
+      userMessage: "我之前吃了什么？"
+    });
+
+    const relevantMemory = output.sections.find((section) => section.name === "RelevantMemory");
+    expect(relevantMemory?.content).toContain(
+      "- [2026-05-23 morning][episodic][recall][active] 用户吃了芒果蛋糕。"
+    );
+    expect(relevantMemory?.content).not.toContain("今早");
+  });
 });
