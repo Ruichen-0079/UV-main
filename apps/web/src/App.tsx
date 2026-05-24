@@ -3115,6 +3115,37 @@ function memoryPreview(memory: MemoryRecord): string {
   return text.length > 140 ? `${text.slice(0, 137)}...` : text;
 }
 
+function relationshipPreviews(
+  candidate: MemoryCandidateReview
+): Array<{ id: string; relation: string; contentPreview: string }> {
+  const value = candidate.metadata?.["relationshipMemoryPreviews"];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return null;
+      }
+      const record = entry as Record<string, unknown>;
+      if (
+        typeof record["id"] !== "string" ||
+        typeof record["relation"] !== "string" ||
+        typeof record["contentPreview"] !== "string"
+      ) {
+        return null;
+      }
+      return {
+        id: record["id"],
+        relation: record["relation"],
+        contentPreview: record["contentPreview"]
+      };
+    })
+    .filter((entry): entry is { id: string; relation: string; contentPreview: string } =>
+      Boolean(entry)
+    );
+}
+
 function temporalWarningForText(text: string): string | null {
   const match = text.match(
     /今早|今天|昨天|前天|刚才|刚刚|早上|中午|晚上|上周|这周|最近|\btoday\b|\byesterday\b|\bthis morning\b|\blast night\b|\brecently\b/iu
@@ -3760,8 +3791,21 @@ function MemoryCandidateList(props: {
               <div className="mt-2 text-xs text-ink-500">
                 Possible supersedes: {candidate.possibleSupersedes?.join(", ") || "none"} ·
                 Contradictions: {candidate.possibleContradictions?.join(", ") || "none"}
+                {candidate.relationshipConfidence !== undefined
+                  ? ` · Confidence: ${candidate.relationshipConfidence.toFixed(2)}`
+                  : ""}
+                {candidate.relationshipReason ? ` · Reason: ${candidate.relationshipReason}` : ""}
               </div>
             )}
+          {!props.compact && relationshipPreviews(candidate).length > 0 && (
+            <div className="mt-2 space-y-1 text-xs text-ink-500">
+              {relationshipPreviews(candidate).map((preview) => (
+                <div key={`${preview.relation}-${preview.id}`}>
+                  {preview.relation}: {preview.contentPreview}
+                </div>
+              ))}
+            </div>
+          )}
           {(props.onAccept || props.onReject || props.onEdit) && (
             <div className="mt-3 flex flex-wrap gap-2">
               {props.onAccept && (

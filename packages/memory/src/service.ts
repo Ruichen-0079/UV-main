@@ -7,6 +7,11 @@ import {
   isDurableTemporalText,
   normalizeTemporalCandidate
 } from "./temporal.js";
+import {
+  detectMemoryRelationships,
+  relationshipSearchText,
+  type MemoryRelationshipSuggestion
+} from "./relationships.js";
 import type {
   CreateMemoryInput,
   Memory,
@@ -181,7 +186,7 @@ export class MemoryService {
         reason: normalized.reason,
         confidence: normalized.confidence ?? null,
         sourceTraceId: normalized.sourceTraceId ?? null,
-        storageReason: "explicit-save"
+        storageReason: normalized.metadata?.["storageReason"] ?? "explicit-save"
       },
       tags: Array.from(new Set([...(normalized.tags ?? []), ...(options.tags ?? [])])),
       observedAt: normalized.observedAt ?? new Date(),
@@ -199,28 +204,44 @@ export class MemoryService {
     options: { source?: string; tags?: string[] } = {}
   ): Promise<MemoryCandidateStorageResult> {
     const normalized = this.normalizeCandidateForStorage(candidate);
+    const relationships = await this.detectCandidateRelationships(normalized);
+    const candidateWithRelationships = applyRelationshipSuggestions(normalized, relationships);
     const decision = decideCandidateStorage(normalized);
     if (decision.decision === "rejected") {
       return {
         decision: "rejected",
-        candidate: normalized,
+        candidate: candidateWithRelationships,
         rejectedReason: decision.reason
       };
     }
 
+    const storageCandidate: MemoryCandidate = {
+      ...candidateWithRelationships,
+      ...(relationships.autoSupersedes.length > 0
+        ? { possibleSupersedes: relationships.autoSupersedes }
+        : normalized.possibleSupersedes
+          ? { possibleSupersedes: normalized.possibleSupersedes }
+          : {}),
+      ...(relationships.contradicts.length > 0
+        ? { possibleContradictions: relationships.contradicts }
+        : normalized.possibleContradictions
+          ? { possibleContradictions: normalized.possibleContradictions }
+          : {})
+    };
     const memory = await this.rememberCandidate(
       {
-        ...normalized,
+        ...storageCandidate,
         metadata: {
-          ...(normalized.metadata ?? {}),
+          ...(storageCandidate.metadata ?? {}),
           storageReason: decision.reason
         }
       },
       options
     );
+    await this.applyAutomaticSupersession(memory, relationships.autoSupersedes);
     return {
       decision: "stored",
-      candidate: normalized,
+      candidate: candidateWithRelationships,
       memory,
       storageReason: decision.reason
     };
@@ -393,6 +414,39 @@ export class MemoryService {
     return normalizeTemporalCandidate(candidate, {
       timestamp: candidate.observedAt ?? new Date()
     }).candidate;
+  }
+
+  private async detectCandidateRelationships(
+    candidate: MemoryCandidate
+  ): Promise<MemoryRelationshipSuggestion> {
+    const scope = candidate.scope ?? inferMemoryScope(candidate);
+    const scopeId = candidate.scopeId ?? inferMemoryScopeId({ ...candidate, scope });
+    const textMatches = await this.repository.searchMemoriesByTextFallback({
+      text: relationshipSearchText({ ...candidate, scope, scopeId }),
+      includeHistory: true,
+      includeExpired: true,
+      limit: 30,
+      scope,
+      ...(scopeId ? { scopeId } : {})
+    });
+    const recent = await this.repository.listRecentMemories(30);
+    const existing = [...textMatches, ...recent].filter(
+      (memory, index, memories) => memories.findIndex((entry) => entry.id === memory.id) === index
+    );
+    return detectMemoryRelationships({ ...candidate, scope, scopeId }, existing);
+  }
+
+  private async applyAutomaticSupersession(memory: Memory, supersededIds: string[]): Promise<void> {
+    if (supersededIds.length === 0) return;
+    await Promise.all(
+      supersededIds.map((id) =>
+        this.repository.updateMemory(id, {
+          status: "superseded",
+          supersededBy: memory.id,
+          supersededAt: new Date()
+        })
+      )
+    );
   }
 
   private reconstructForPrompt(memory: Memory): string {
@@ -1414,6 +1468,45 @@ function decideCandidateStorage(candidate: MemoryCandidate): {
   }
 
   return { decision: "rejected", reason: "below durable storage threshold" };
+}
+
+function applyRelationshipSuggestions(
+  candidate: MemoryCandidate,
+  relationships: MemoryRelationshipSuggestion
+): MemoryCandidate {
+  if (
+    relationships.supersedes.length === 0 &&
+    relationships.contradicts.length === 0 &&
+    relationships.relationshipConfidence <= 0
+  ) {
+    return candidate;
+  }
+
+  return {
+    ...candidate,
+    ...(relationships.supersedes.length > 0
+      ? { possibleSupersedes: relationships.supersedes }
+      : candidate.possibleSupersedes
+        ? { possibleSupersedes: candidate.possibleSupersedes }
+        : {}),
+    ...(relationships.contradicts.length > 0
+      ? { possibleContradictions: relationships.contradicts }
+      : candidate.possibleContradictions
+        ? { possibleContradictions: candidate.possibleContradictions }
+        : {}),
+    relationshipConfidence: relationships.relationshipConfidence,
+    ...(relationships.relationshipReason
+      ? { relationshipReason: relationships.relationshipReason }
+      : {}),
+    metadata: {
+      ...(candidate.metadata ?? {}),
+      relationshipConfidence: relationships.relationshipConfidence,
+      ...(relationships.relationshipReason
+        ? { relationshipReason: relationships.relationshipReason }
+        : {}),
+      relationshipMemoryPreviews: relationships.relationshipMemoryPreviews
+    }
+  };
 }
 
 function isDurableCandidate(candidate: MemoryCandidate, text: string): boolean {

@@ -42,6 +42,11 @@ export {
   type TemporalNormalizationResult,
   type TemporalResolution
 } from "./temporal.js";
+export {
+  detectMemoryRelationships,
+  relationshipSearchText,
+  type MemoryRelationshipSuggestion
+} from "./relationships.js";
 export { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
 export {
   InMemoryMemoryRepository,

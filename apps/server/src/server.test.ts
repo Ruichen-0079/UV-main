@@ -1,18 +1,27 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadServerConfig } from "./config.js";
 import { buildServer } from "./server.js";
+import { mkdtempSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+const originalEnv = { ...process.env };
+const createdRuntimeEnvDirs: string[] = [];
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  process.env = { ...originalEnv };
+  for (const dir of createdRuntimeEnvDirs.splice(0)) {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 describe("server", () => {
   it("handles health, message, and memory endpoints with mock providers", async () => {
-    const previous = snapshotEnv();
-    setMockEnv();
+    const app = await buildTestServer();
 
     try {
-      const app = await buildServer(loadServerConfig(process.env));
-
       const health = await app.inject({ method: "GET", url: "/health" });
       expect(health.statusCode).toBe(200);
       expect(health.json().ok).toBe(true);
@@ -511,20 +520,15 @@ describe("server", () => {
       );
       expect(dashboardMessage.kind).toBe("dashboard.connected");
       expect(dashboardMessage.traceId).toBeTypeOf("string");
-
-      await app.close();
     } finally {
-      restoreEnv(previous);
+      await app.close();
     }
   });
 
   it("rejects ordinary relative-time daily events from runtime long-term memory", async () => {
-    const previous = snapshotEnv();
-    setMockEnv();
-    process.env["MEMORY_EXTRACTOR"] = "rule-based";
+    const app = await buildTestServer({ MEMORY_EXTRACTOR: "rule-based" });
 
     try {
-      const app = await buildServer(loadServerConfig(process.env));
       const response = await app.inject({
         method: "POST",
         url: "/message",
@@ -563,13 +567,11 @@ describe("server", () => {
       expect(candidates.json().candidates[0].content).not.toContain("今早");
       expect(candidates.body).not.toContain("test_deepseek_secret");
     } finally {
-      restoreEnv(previous);
+      await app.close();
     }
   });
 
   it("includes safe real-provider metadata when DeepSeek chat is configured", async () => {
-    const previous = snapshotEnv();
-    setConfiguredDeepSeekEnv();
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -598,7 +600,12 @@ describe("server", () => {
     );
 
     try {
-      const app = await buildServer(loadServerConfig(process.env));
+      const app = await buildTestServer({
+        PROVIDER_ALLOW_MOCKS: "false",
+        DEEPSEEK_API_KEY: "configured_deepseek_secret",
+        DEEPSEEK_CHAT_MODEL: "deepseek-chat",
+        DEEPSEEK_REASONING_MODEL: "deepseek-reasoner"
+      });
       const message = await app.inject({
         method: "POST",
         url: "/message",
@@ -640,25 +647,18 @@ describe("server", () => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       await app.close();
     } finally {
-      vi.restoreAllMocks();
-      restoreEnv(previous);
+      fetchSpy.mockRestore();
     }
   });
 
   it("does not silently mock required chat provider in real-first mode", async () => {
-    const previous = snapshotEnv();
-    process.env = {
-      NODE_ENV: "development",
-      RUNTIME_MODE: "development",
+    const app = await buildTestServer({
       PROVIDER_ALLOW_MOCKS: "false",
-      MEMORY_REPOSITORY: "in-memory",
-      DEFAULT_CHAT_PROVIDER: "deepseek",
-      DEFAULT_REASONING_PROVIDER: "deepseek",
+      EMBEDDING_PROVIDER: "openai-compatible",
       DEFAULT_EMBEDDING_PROVIDER: "openai-compatible"
-    };
+    });
 
     try {
-      const app = await buildServer(loadServerConfig(process.env));
       const providers = await app.inject({ method: "GET", url: "/providers/status" });
       expect(providers.statusCode).toBe(200);
       expect(providers.json().providers.chat).toMatchObject({
@@ -689,19 +689,15 @@ describe("server", () => {
       });
       expect(message.json().setup).toContain("PROVIDER_ALLOW_MOCKS=true");
       expect(message.body).not.toContain("API_KEY");
-
-      await app.close();
     } finally {
-      restoreEnv(previous);
+      await app.close();
     }
   });
 
   it("separates memory read and write behavior", async () => {
-    const previous = snapshotEnv();
-    setMockEnv();
+    const app = await buildTestServer();
 
     try {
-      const app = await buildServer(loadServerConfig(process.env));
       const seeded = await app.inject({
         method: "POST",
         url: "/memory",
@@ -873,19 +869,15 @@ describe("server", () => {
       const enabledPrompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
       expect(enabledPrompt.json().readMemory).toBe(true);
       expect(enabledPrompt.json().writeMemory).toBe(true);
-
-      await app.close();
     } finally {
-      restoreEnv(previous);
+      await app.close();
     }
   });
 
   it("avoids writing low-value runtime memories", async () => {
-    const previous = snapshotEnv();
-    setMockEnv();
+    const app = await buildTestServer();
 
     try {
-      const app = await buildServer(loadServerConfig(process.env));
       const greeting = await app.inject({
         method: "POST",
         url: "/message",
@@ -916,18 +908,15 @@ describe("server", () => {
 
       const recent = await app.inject({ method: "GET", url: "/memory/recent?limit=10" });
       expect(recent.json().memories).toHaveLength(0);
-      await app.close();
     } finally {
-      restoreEnv(previous);
+      await app.close();
     }
   });
 
   it("verifies providers only when explicit endpoints are called", async () => {
-    const previous = snapshotEnv();
-    setMockEnv();
+    const app = await buildTestServer();
 
     try {
-      const app = await buildServer(loadServerConfig(process.env));
       const chat = await app.inject({ method: "POST", url: "/providers/verify/chat" });
       expect(chat.statusCode).toBe(200);
       expect(chat.json()).toMatchObject({
@@ -967,20 +956,12 @@ describe("server", () => {
       expect(embedding.json().expectedDimensions).toBe(embedding.json().dimensions);
       expect(embedding.json().actualDimensions).toBe(embedding.json().dimensions);
       expect(embedding.body).not.toContain("test_deepseek_secret");
-      await app.close();
     } finally {
-      restoreEnv(previous);
+      await app.close();
     }
   });
 
   it("verify embedding reports dimension mismatches safely", async () => {
-    const previous = snapshotEnv();
-    setMockEnv();
-    process.env["DEFAULT_EMBEDDING_PROVIDER"] = "openai-compatible";
-    process.env["EMBEDDING_API_BASEURL"] = "https://embedding.example/v1";
-    process.env["EMBEDDING_API_KEY"] = "embedding-secret-key";
-    process.env["EMBEDDING_MODEL"] = "text-embedding-test";
-    process.env["EMBEDDING_DIMENSIONS"] = "3";
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -994,7 +975,14 @@ describe("server", () => {
     );
 
     try {
-      const app = await buildServer(loadServerConfig(process.env));
+      const app = await buildTestServer({
+        EMBEDDING_PROVIDER: "openai-compatible",
+        DEFAULT_EMBEDDING_PROVIDER: "openai-compatible",
+        EMBEDDING_API_BASEURL: "https://embedding.example/v1",
+        EMBEDDING_API_KEY: "embedding-secret-key",
+        EMBEDDING_MODEL: "text-embedding-test",
+        EMBEDDING_DIMENSIONS: "3"
+      });
       const embedding = await app.inject({
         method: "POST",
         url: "/providers/verify/embedding"
@@ -1017,23 +1005,14 @@ describe("server", () => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       await app.close();
     } finally {
-      vi.restoreAllMocks();
-      restoreEnv(previous);
+      fetchSpy.mockRestore();
     }
   });
 
   it("requires the optional dashboard dev token for sensitive development endpoints", async () => {
-    const previous = snapshotEnv();
-    setMockEnv();
+    const app = await buildTestServer({ DASHBOARD_DEV_TOKEN: "dev-token" });
 
     try {
-      const app = await buildServer(
-        loadServerConfig({
-          ...process.env,
-          DASHBOARD_DEV_TOKEN: "dev-token"
-        })
-      );
-
       const blockedSettings = await app.inject({
         method: "POST",
         url: "/settings/runtime",
@@ -1062,10 +1041,60 @@ describe("server", () => {
         capability: "chat"
       });
       expect(allowedVerify.body).not.toContain("dev-token");
-
-      await app.close();
     } finally {
-      restoreEnv(previous);
+      await app.close();
+    }
+  });
+
+  it("ignores unrelated ambient env and runtime env files in ordinary server tests", async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-ambient-env-"));
+    process.env["YUVI_RUNTIME_ENV_DIR"] = tempDir;
+    process.env["DASHBOARD_DEV_TOKEN"] = "ambient-token";
+    process.env["PROVIDER_ALLOW_MOCKS"] = "false";
+    process.env["DEEPSEEK_API_KEY"] = "ambient_deepseek_secret";
+    await writeFile(
+      path.join(tempDir, ".env.local"),
+      [
+        "DASHBOARD_DEV_TOKEN=file-token",
+        "PROVIDER_ALLOW_MOCKS=false",
+        "DEEPSEEK_API_KEY=file_deepseek_secret"
+      ].join("\n"),
+      "utf8"
+    );
+
+    const app = await buildTestServer();
+
+    try {
+      const message = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "ambient",
+          text: "hello",
+          options: {
+            readMemory: false,
+            writeMemory: false,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(message.statusCode).toBe(200);
+      expect(message.json().reply).toContain("Mock reply");
+
+      const verify = await app.inject({ method: "POST", url: "/providers/verify/chat" });
+      expect(verify.statusCode).toBe(200);
+      expect(verify.json()).toMatchObject({
+        ok: true,
+        provider: "mock",
+        mock: true
+      });
+      expect(`${message.body}\n${verify.body}`).not.toContain("ambient_deepseek_secret");
+      expect(`${message.body}\n${verify.body}`).not.toContain("file_deepseek_secret");
+      expect(`${message.body}\n${verify.body}`).not.toContain("ambient-token");
+      expect(`${message.body}\n${verify.body}`).not.toContain("file-token");
+    } finally {
+      await app.close();
+      await rm(tempDir, { recursive: true, force: true });
     }
   });
 
@@ -1088,15 +1117,20 @@ describe("server", () => {
   });
 
   it("returns and updates safe runtime settings without exposing secrets", async () => {
-    const previous = snapshotEnv();
     const previousCwd = process.cwd();
     const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-"));
-    setConfiguredDeepSeekEnv();
+    const env = createTestEnv({
+      YUVI_RUNTIME_ENV_DIR: tempDir,
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEEPSEEK_API_KEY: "configured_deepseek_secret",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat",
+      DEEPSEEK_REASONING_MODEL: "deepseek-reasoner"
+    });
 
     try {
       process.chdir(tempDir);
-      process.env["YUVI_RUNTIME_ENV_DIR"] = tempDir;
-      const app = await buildServer(loadServerConfig(process.env));
+      process.env = { ...env };
+      const app = await buildServer(loadServerConfig(env));
 
       const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
       expect(settings.statusCode).toBe(200);
@@ -1213,19 +1247,16 @@ describe("server", () => {
     } finally {
       process.chdir(previousCwd);
       await rm(tempDir, { recursive: true, force: true });
-      restoreEnv(previous);
     }
   });
 
   it("shows .env.local overrides as pending safe settings without mutating .env", async () => {
-    const previous = snapshotEnv();
     const previousCwd = process.cwd();
     const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-overlay-"));
-    setMockEnv();
+    const env = createTestEnv({ YUVI_RUNTIME_ENV_DIR: tempDir });
 
     try {
       process.chdir(tempDir);
-      process.env["YUVI_RUNTIME_ENV_DIR"] = tempDir;
       await writeFile(path.join(tempDir, ".env"), "DEEPSEEK_CHAT_MODEL=from-env\n", "utf8");
       await writeFile(
         path.join(tempDir, ".env.local"),
@@ -1233,7 +1264,8 @@ describe("server", () => {
         "utf8"
       );
 
-      const app = await buildServer(loadServerConfig(process.env));
+      process.env = { ...env };
+      const app = await buildServer(loadServerConfig(env));
       const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
 
       expect(settings.statusCode).toBe(200);
@@ -1274,14 +1306,13 @@ describe("server", () => {
     } finally {
       process.chdir(previousCwd);
       await rm(tempDir, { recursive: true, force: true });
-      restoreEnv(previous);
     }
   });
 
   it("reloads saved provider config into the active runtime without leaking secrets", async () => {
-    const previous = snapshotEnv();
     const previousCwd = process.cwd();
     const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-reload-"));
+    const env = createTestEnv({ YUVI_RUNTIME_ENV_DIR: tempDir });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -1301,14 +1332,11 @@ describe("server", () => {
         { status: 200, headers: { "content-type": "application/json" } }
       )
     );
-    setMockEnv();
 
     try {
       process.chdir(tempDir);
-      process.env["YUVI_RUNTIME_ENV_DIR"] = tempDir;
-      delete process.env["DEEPSEEK_CHAT_MODEL"];
-      delete process.env["DEEPSEEK_REASONING_MODEL"];
-      const app = await buildServer(loadServerConfig(process.env));
+      process.env = { ...env };
+      const app = await buildServer(loadServerConfig(env));
 
       const initialProviders = await app.inject({ method: "GET", url: "/providers/status" });
       expect(initialProviders.statusCode).toBe(200);
@@ -1401,7 +1429,6 @@ describe("server", () => {
       fetchSpy.mockRestore();
       process.chdir(previousCwd);
       await rm(tempDir, { recursive: true, force: true });
-      restoreEnv(previous);
     }
   });
 });
@@ -1410,36 +1437,47 @@ function countOccurrences(text: string, needle: string): number {
   return text.split(needle).length - 1;
 }
 
-function setMockEnv(): void {
-  process.env["NODE_ENV"] = "test";
-  process.env["RUNTIME_MODE"] = "development";
-  process.env["PROVIDER_ALLOW_MOCKS"] = "true";
-  process.env["MEMORY_REPOSITORY"] = "in-memory";
-  process.env["DEFAULT_CHAT_PROVIDER"] = "deepseek";
-  process.env["DEFAULT_REASONING_PROVIDER"] = "deepseek";
-  process.env["DEFAULT_TTS_PROVIDER"] = "xai";
-  process.env["DEFAULT_STT_PROVIDER"] = "dashscope";
-  process.env["DEFAULT_VISION_PROVIDER"] = "xai";
-  process.env["DEFAULT_EMBEDDING_PROVIDER"] = "mock";
-  process.env["DEEPSEEK_API_KEY"] = "test_deepseek_secret";
-  process.env["XAI_API_KEY"] = "test_xai_secret";
-  process.env["DASHSCOPE_API_KEY"] = "test_dashscope_secret";
+type TestEnvOverrides = Record<string, string | undefined>;
+
+function createTestEnv(overrides: TestEnvOverrides = {}): NodeJS.ProcessEnv {
+  const runtimeEnvDir =
+    overrides["YUVI_RUNTIME_ENV_DIR"] ?? mkdtempSync(path.join(tmpdir(), "yuvi-server-test-env-"));
+  if (!overrides["YUVI_RUNTIME_ENV_DIR"]) {
+    createdRuntimeEnvDirs.push(runtimeEnvDir);
+  }
+
+  const env: NodeJS.ProcessEnv = {
+    NODE_ENV: "test",
+    RUNTIME_MODE: "development",
+    YUVI_RUNTIME_ENV_DIR: runtimeEnvDir,
+    PROVIDER_ALLOW_MOCKS: "true",
+    MEMORY_REPOSITORY: "in-memory",
+    MEMORY_EXTRACTOR: "llm",
+    EVENT_BUS: "in-memory",
+    DEFAULT_CHAT_PROVIDER: "deepseek",
+    DEFAULT_REASONING_PROVIDER: "deepseek",
+    DEFAULT_TTS_PROVIDER: "xai",
+    DEFAULT_STT_PROVIDER: "dashscope",
+    DEFAULT_VISION_PROVIDER: "xai",
+    EMBEDDING_PROVIDER: "mock",
+    DEFAULT_EMBEDDING_PROVIDER: "mock"
+  };
+
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete env[key];
+    } else {
+      env[key] = value;
+    }
+  }
+
+  return env;
 }
 
-function setConfiguredDeepSeekEnv(): void {
-  process.env["NODE_ENV"] = "test";
-  process.env["RUNTIME_MODE"] = "development";
-  process.env["PROVIDER_ALLOW_MOCKS"] = "true";
-  process.env["MEMORY_REPOSITORY"] = "in-memory";
-  process.env["DEFAULT_CHAT_PROVIDER"] = "deepseek";
-  process.env["DEFAULT_REASONING_PROVIDER"] = "deepseek";
-  process.env["DEFAULT_TTS_PROVIDER"] = "xai";
-  process.env["DEFAULT_STT_PROVIDER"] = "dashscope";
-  process.env["DEFAULT_VISION_PROVIDER"] = "xai";
-  process.env["DEFAULT_EMBEDDING_PROVIDER"] = "mock";
-  process.env["DEEPSEEK_API_KEY"] = "configured_deepseek_secret";
-  process.env["DEEPSEEK_CHAT_MODEL"] = "deepseek-chat";
-  process.env["DEEPSEEK_REASONING_MODEL"] = "deepseek-reasoner";
+async function buildTestServer(overrides: TestEnvOverrides = {}) {
+  const env = createTestEnv(overrides);
+  process.env = { ...env };
+  return buildServer(loadServerConfig(env));
 }
 
 function findPromptSection(
@@ -1447,14 +1485,6 @@ function findPromptSection(
   name: string
 ): { name: string; content: string } | undefined {
   return sections.find((section) => section.name === name);
-}
-
-function snapshotEnv(): NodeJS.ProcessEnv {
-  return { ...process.env };
-}
-
-function restoreEnv(snapshot: NodeJS.ProcessEnv): void {
-  process.env = snapshot;
 }
 
 function getServerOrigin(address: string | import("node:net").AddressInfo | null): string {

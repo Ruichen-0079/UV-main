@@ -148,7 +148,30 @@ Prompt Preview reports Direct Context budget metadata: `directContextEnabled`, `
 </RelevantMemory>
 ```
 
-Graph reasoning over `supersedes`, `supersededBy`, and `contradicts` is future work. Automatic expiry and retention scheduling are also future work; forgetting is status-based for now.
+## Lightweight Supersession And Contradiction Suggestions
+
+YUVI has a lightweight, rule-based relationship pass in `packages/memory`. It is not a graph reasoning engine. When a candidate is being processed, `MemoryService` compares it with memories from compatible scopes and records safe relationship hints:
+
+- `supersedes`: the new memory may replace an older memory.
+- `supersededBy` / `supersededAt`: set on an older memory only for high-confidence safe replacements.
+- `contradicts`: the new memory appears to conflict with another memory but should be reviewed.
+
+Scope boundaries are conservative. User memories compare with user memories. Project, plugin, agent, and session memories only compare when the relevant `scopeId` matches. A memory from another project must not supersede the current project.
+
+The v1 rules only cover obvious structured categories: provider choices, config decisions, project paths, ports/endpoints, model choices, memory mode, workflow/procedure notes, troubleshooting conclusions, and stable preferences. Exact structured evidence such as tags, subtype, provider names, config keys, paths, ports, model names, and project scope dominates; embedding similarity may help find candidates but cannot supersede by itself.
+
+High-confidence safe examples can auto-supersede:
+
+- `用户偏好 Chat provider 使用 OpenAI。` -> `用户偏好 Chat provider 使用 DeepSeek。`
+- `项目路径是 C:\old-path` -> `项目路径改为 C:\Users\Administrator.DESKTOP-NPU6DHJ\Desktop\uv-main`
+
+Risky or ambiguous categories are suggestion-only. Health/safety notes, emotional or relationship memories, legal/financial-like notes, ambiguous personal facts, and cross-scope conflicts are never automatically superseded in v1. They may receive `contradicts` debug metadata for review.
+
+Superseded memories are retained for history/debug but excluded from normal prompt injection. Manual or historical/debug search can include them with `includeSuperseded=true`. Forgotten memories remain excluded by default.
+
+Candidate Review shows possible supersessions, contradictions, confidence, reason, and safe old-memory previews when available. This remains developer/debug tooling; normal runtime decisions are still only `stored` or `rejected`.
+
+Full graph reasoning over `supersedes`, `supersededBy`, and `contradicts` is future work. Automatic expiry and retention scheduling are also future work; forgetting is status-based for now.
 
 ## Manual Management
 

@@ -229,6 +229,8 @@ export type MemoryCandidateReview = {
   expiresAt?: string | null;
   possibleSupersedes?: string[];
   possibleContradictions?: string[];
+  relationshipConfidence?: number;
+  relationshipReason?: string;
 };
 
 export type AcceptMemoryCandidateRequest = Partial<

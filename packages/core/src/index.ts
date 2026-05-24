@@ -221,6 +221,8 @@ export type RuntimeMemoryCandidateReview = {
   expiresAt?: string | null | undefined;
   possibleSupersedes?: string[] | undefined;
   possibleContradictions?: string[] | undefined;
+  relationshipConfidence?: number | undefined;
+  relationshipReason?: string | undefined;
 };
 
 export type RuntimeMemoryCandidateAcceptResult =
@@ -1447,6 +1449,12 @@ function toMemoryCandidateReview(input: {
       : {}),
     ...(input.candidate.possibleContradictions
       ? { possibleContradictions: input.candidate.possibleContradictions }
+      : {}),
+    ...(input.candidate.relationshipConfidence !== undefined
+      ? { relationshipConfidence: input.candidate.relationshipConfidence }
+      : {}),
+    ...(input.candidate.relationshipReason
+      ? { relationshipReason: redactUnsafeText(input.candidate.relationshipReason) }
       : {})
   };
 }

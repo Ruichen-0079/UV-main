@@ -160,6 +160,8 @@ export type MemoryCandidate = {
   expiresAt?: Date | string | null;
   possibleSupersedes?: string[];
   possibleContradictions?: string[];
+  relationshipConfidence?: number;
+  relationshipReason?: string;
 };
 
 export type MemoryCandidateStorageDecision = "stored" | "rejected";

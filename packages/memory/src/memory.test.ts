@@ -946,6 +946,168 @@ describe("MemoryRepository", () => {
     });
   });
 
+  it("auto-supersedes provider preferences in the same project scope", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const old = await repository.createMemory({
+      type: "semantic",
+      subtype: "provider-choice",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      memoryLayer: "core",
+      content: "用户偏好 Chat provider 使用 OpenAI。",
+      source: "test",
+      tags: ["provider", "chat", "openai"],
+      importance: 0.9
+    });
+
+    const result = await service.processCandidateForStorage({
+      type: "semantic",
+      subtype: "provider-choice",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      memoryLayer: "core",
+      content: "用户偏好 Chat provider 使用 DeepSeek。",
+      importance: 0.9,
+      tags: ["provider", "chat", "deepseek"],
+      reason: "provider-choice"
+    });
+
+    expect(result.decision).toBe("stored");
+    expect(result.candidate.possibleSupersedes).toContain(old.id);
+    expect(result.candidate.relationshipConfidence).toBeGreaterThanOrEqual(0.9);
+    expect(result.memory?.supersedes).toContain(old.id);
+    const superseded = await repository.getMemoryById(old.id);
+    expect(superseded).toMatchObject({
+      status: "superseded",
+      supersededBy: result.memory?.id
+    });
+    expect(superseded?.supersededAt).toBeInstanceOf(Date);
+  });
+
+  it("auto-supersedes project paths in the same project scope only", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const sameProjectOld = await repository.createMemory({
+      type: "semantic",
+      subtype: "path",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      memoryLayer: "core",
+      content: "项目路径是 C:\\old-path",
+      source: "test",
+      tags: ["path", "project"],
+      importance: 0.9
+    });
+    const otherProjectOld = await repository.createMemory({
+      type: "semantic",
+      subtype: "path",
+      scope: "project",
+      scopeId: "other-project",
+      memoryLayer: "core",
+      content: "项目路径是 C:\\other-old-path",
+      source: "test",
+      tags: ["path", "project"],
+      importance: 0.9
+    });
+
+    const result = await service.processCandidateForStorage({
+      type: "semantic",
+      subtype: "path",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      memoryLayer: "core",
+      content: "项目路径改为 C:\\Users\\Administrator.DESKTOP-NPU6DHJ\\Desktop\\uv-main",
+      importance: 0.9,
+      tags: ["path", "project"],
+      reason: "project-path"
+    });
+
+    expect(result.decision).toBe("stored");
+    expect(result.candidate.possibleSupersedes).toContain(sameProjectOld.id);
+    expect(result.candidate.possibleSupersedes).not.toContain(otherProjectOld.id);
+    expect((await repository.getMemoryById(sameProjectOld.id))?.status).toBe("superseded");
+    expect((await repository.getMemoryById(otherProjectOld.id))?.status).toBe("active");
+  });
+
+  it("suggests but does not auto-apply safety-sensitive contradictions", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const old = await repository.createMemory({
+      type: "semantic",
+      subtype: "fact",
+      scope: "user",
+      memoryLayer: "core",
+      content: "用户对芒果过敏。",
+      source: "test",
+      tags: ["health", "allergy"],
+      importance: 0.9
+    });
+
+    const result = await service.processCandidateForStorage({
+      type: "semantic",
+      subtype: "fact",
+      scope: "user",
+      memoryLayer: "core",
+      content: "用户不过敏芒果。",
+      importance: 0.9,
+      tags: ["health", "allergy"],
+      reason: "health-note"
+    });
+
+    expect(result.decision).toBe("stored");
+    expect(result.candidate.possibleContradictions).toContain(old.id);
+    expect(result.memory?.supersedes).not.toContain(old.id);
+    expect(result.memory?.contradicts).toContain(old.id);
+    expect((await repository.getMemoryById(old.id))?.status).toBe("active");
+  });
+
+  it("keeps superseded memories out of normal retrieval but available in historical search", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const old = await repository.createMemory({
+      type: "semantic",
+      subtype: "provider-choice",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      memoryLayer: "core",
+      content: "用户偏好 Chat provider 使用 OpenAI。",
+      source: "test",
+      tags: ["provider", "chat", "openai"],
+      importance: 0.9
+    });
+    await service.processCandidateForStorage({
+      type: "semantic",
+      subtype: "provider-choice",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      memoryLayer: "core",
+      content: "用户偏好 Chat provider 使用 DeepSeek。",
+      importance: 0.9,
+      tags: ["provider", "chat", "deepseek"],
+      reason: "provider-choice"
+    });
+
+    const normal = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "Chat provider",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      limit: 10
+    });
+    const historical = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "Chat provider",
+      scope: "project",
+      scopeId: "yuvi-runtime",
+      includeSuperseded: true,
+      limit: 10
+    });
+
+    expect(normal.memories.map((memory) => memory.id)).not.toContain(old.id);
+    expect(normal.rawMemories.some((memory) => memory.id === old.id)).toBe(true);
+    expect(historical.memories.map((memory) => memory.id)).toContain(old.id);
+    expect(JSON.stringify(historical)).not.toContain("secret");
+  });
+
   it("extracts startup commands, config decisions, and troubleshooting conclusions", async () => {
     const extractor = new RuleBasedMemoryExtractor();
 
