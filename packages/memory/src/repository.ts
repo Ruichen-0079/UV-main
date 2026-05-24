@@ -1132,6 +1132,7 @@ type VisibilityMode = "prompt" | "manual" | "history";
 function visibilityModeForQuery(query: MemorySearchQuery): VisibilityMode {
   if (
     query.includeHistory ||
+    query.includeHistoricalEpisodic ||
     query.includeExpired ||
     query.includeSuperseded ||
     query.statuses?.some((status) => status === "forgotten" || status === "expired")

@@ -8,6 +8,7 @@ import type {
   MemorySubtype,
   MemoryType
 } from "./types.js";
+import { hasRelativeTemporalExpression, isOrdinaryDailyEvent } from "./temporal.js";
 import { z } from "zod";
 
 export type MemoryExtractionReasoner = {
@@ -99,10 +100,6 @@ export class LlmMemoryExtractor implements MemoryExtractor {
         const candidate = candidateResult.data;
         if (candidate.confidence < 0.7) {
           rejectedReasons.push(`low-confidence:${candidate.reason}`);
-          continue;
-        }
-        if (candidate.importance < 0.65) {
-          rejectedReasons.push(`low-importance:${candidate.reason}`);
           continue;
         }
         accepted.push({
@@ -221,6 +218,7 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
     const candidates: MemoryCandidate[] = [];
     const explicitContent = stripExplicitRememberPrefix(text);
     const sourceTraceId = input.sourceTraceId ?? null;
+    const observedAt = input.timestamp ?? new Date().toISOString();
 
     if (mentionsExplicitRemember(text)) {
       candidates.push(
@@ -229,8 +227,23 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
           sourceTraceId,
           type: inferType(explicitContent, "semantic"),
           subtype: inferSubtype(explicitContent),
-          importance: 0.95,
-          reason: "explicit-remember"
+          importance: isOrdinaryDailyEvent(explicitContent) ? 0.55 : 0.95,
+          reason: "explicit-remember",
+          observedAt
+        })
+      );
+    }
+
+    if (!mentionsExplicitRemember(text) && isOrdinaryDailyEvent(text)) {
+      candidates.push(
+        candidate({
+          text: explicitContent,
+          sourceTraceId,
+          type: "episodic",
+          subtype: "event",
+          importance: 0.45,
+          reason: "ordinary-one-off-daily-event",
+          observedAt
         })
       );
     }
@@ -243,7 +256,8 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
           type: "semantic",
           subtype: "provider-choice",
           importance: 0.88,
-          reason: "provider-choice"
+          reason: "provider-choice",
+          observedAt
         })
       );
     }
@@ -256,7 +270,8 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
           type: "semantic",
           subtype: mentionsProviderChoice(text) ? "provider-choice" : "preference",
           importance: mentionsProviderChoice(text) ? 0.88 : 0.78,
-          reason: "stable-preference"
+          reason: "stable-preference",
+          observedAt
         })
       );
     }
@@ -269,7 +284,8 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
           type: "semantic",
           subtype: inferPathSubtype(explicitContent),
           importance: 0.86,
-          reason: "path-or-repository"
+          reason: "path-or-repository",
+          observedAt
         })
       );
     }
@@ -282,7 +298,8 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
           type: "procedural",
           subtype: mentionsConfigDecision(text) ? "config" : "command",
           importance: 0.82,
-          reason: "command-or-startup-instruction"
+          reason: "command-or-startup-instruction",
+          observedAt
         })
       );
     }
@@ -295,7 +312,8 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
           type: "procedural",
           subtype: "troubleshooting",
           importance: 0.8,
-          reason: "troubleshooting-conclusion"
+          reason: "troubleshooting-conclusion",
+          observedAt
         })
       );
     }
@@ -308,7 +326,8 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
           type: "episodic",
           subtype: "milestone",
           importance: 0.76,
-          reason: "project-milestone"
+          reason: "project-milestone",
+          observedAt
         })
       );
     }
@@ -324,6 +343,7 @@ function candidate(input: {
   subtype: MemorySubtype | null;
   importance: number;
   reason: string;
+  observedAt?: string;
 }): MemoryCandidate {
   const content = normalizeInput(input.text);
   return {
@@ -338,9 +358,12 @@ function candidate(input: {
     tags: createTags(content, input.subtype),
     reason: input.reason,
     confidence: 1,
-    metadata: { generatedBy: "rule-based-memory-extractor" },
+    metadata: {
+      generatedBy: "rule-based-memory-extractor",
+      ...(input.reason === "explicit-remember" ? { explicitRemember: true } : {})
+    },
     sourceTraceId: input.sourceTraceId,
-    observedAt: new Date().toISOString()
+    observedAt: input.observedAt ?? new Date().toISOString()
   };
 }
 
@@ -357,6 +380,9 @@ function inferType(text: string, fallback: MemoryType): MemoryType {
     return "procedural";
   }
   if (mentionsProjectMilestone(text)) {
+    return "episodic";
+  }
+  if (hasRelativeTemporalExpression(text) && isOrdinaryDailyEvent(text)) {
     return "episodic";
   }
   return fallback;
@@ -377,6 +403,9 @@ function inferSubtype(text: string): MemorySubtype | null {
   }
   if (mentionsProjectMilestone(text)) {
     return "milestone";
+  }
+  if (hasRelativeTemporalExpression(text) && isOrdinaryDailyEvent(text)) {
+    return "event";
   }
   if (/项目|project|yuvi|runtime/iu.test(text)) {
     return "project";
@@ -486,7 +515,9 @@ function mentionsExplicitRemember(text: string): boolean {
 }
 
 function mentionsStablePreference(text: string): boolean {
-  return /\bfrom now on\b|\bprefer\b|\bpreference\b|以后|默认使用|默认|偏好|以后都/u.test(text);
+  return /\bfrom now on\b|\bprefer\b|\bpreference\b|以后|默认使用|默认|偏好|以后都|喜欢|不喜欢|不吃/u.test(
+    text
+  );
 }
 
 function mentionsProviderChoice(text: string): boolean {
@@ -543,6 +574,7 @@ const LlmExtractorCandidateSchema = z
         "fact",
         "project",
         "workflow",
+        "event",
         "milestone",
         "provider-choice",
         "path",
@@ -679,6 +711,9 @@ function normalizeLlmType(
   if (rawType === "milestone") {
     return { type: "episodic", subtype: "milestone" };
   }
+  if (rawType === "event") {
+    return { type: "episodic", subtype: "event" };
+  }
   return null;
 }
 
@@ -716,6 +751,7 @@ function isMemorySubtype(value: string): value is MemorySubtype {
     value === "fact" ||
     value === "project" ||
     value === "workflow" ||
+    value === "event" ||
     value === "milestone" ||
     value === "provider-choice" ||
     value === "path" ||
@@ -861,9 +897,13 @@ const llmExtractorSystemPrompt = [
   "Example:",
   '{"candidates":[{"type":"semantic","subtype":"provider-choice","content":"用户偏好 Chat 和 Reasoning 使用 DeepSeek。","summary":"用户偏好 DeepSeek 作为 Chat/Reasoning provider。","importance":0.9,"confidence":0.9,"tags":["provider","deepseek","yuvi"],"reason":"The user stated a stable provider preference."}]}',
   "Allowed type values: working, episodic, semantic, emotional, procedural, relationship.",
-  "Allowed subtype values: preference, fact, project, workflow, milestone, provider-choice, path, repo, command, troubleshooting, config, emotion, relationship, or null.",
+  "Allowed subtype values: preference, fact, project, workflow, event, milestone, provider-choice, path, repo, command, troubleshooting, config, emotion, relationship, or null.",
   "Optional v2 fields: scope (user/project/agent/plugin/session), scopeId, memoryLayer (core/recall/archival/working), observedAt, eventTime, validFrom, validUntil, expiresAt, possibleSupersedes, possibleContradictions.",
-  "Extract only stable, useful, long-term memories.",
+  "Never preserve relative time expressions such as 今早, 今天, 昨天, 刚才, today, yesterday, this morning, or last night as-is in stored memory content.",
+  "Resolve relative times against the provided timestamp/observedAt. Return absolute content plus eventTime, validFrom, validUntil, expiresAt, and safe temporal metadata when applicable.",
+  "Classify one-off daily events as episodic/event/recall with low or medium importance. Do not upgrade one-off events to semantic/core just because the user said remember.",
+  "Use semantic/core only for stable facts, preferences, health/allergy notes, schedules, project facts, workflows, provider/config choices, and troubleshooting conclusions.",
+  "Extract only stable, useful, long-term memories or explicit remember requests.",
   "Do not store trivial chat, generic Q&A, transient chatter, failed answers, or assistant uncertainty.",
   "Prefer explicit user statements: project facts, preferences, paths, repos, commands, provider choices, milestones, troubleshooting conclusions.",
   "Use provider metadata only as safe context, never as memory content.",

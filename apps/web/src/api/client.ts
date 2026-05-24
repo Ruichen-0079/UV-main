@@ -9,6 +9,8 @@ export type ProviderHealth = {
   available?: boolean;
   mock?: boolean;
   mode?: "real" | "mock" | "unavailable";
+  mockAllowed?: boolean;
+  missingFields?: string[];
   required?: boolean;
   baseUrl?: string;
   model?: string;
@@ -140,6 +142,9 @@ export type MemoryRecord = {
   embeddingProvider?: string | null;
   embeddingDimensions?: number | null;
   embeddedAt?: string | null;
+  hasEmbedding?: boolean;
+  semanticEmbedding?: boolean;
+  embeddingError?: string;
 };
 
 export type CreateMemoryRequest = {
@@ -207,7 +212,7 @@ export type MemoryCandidateReview = {
   confidence?: number;
   tags: string[];
   reason: string;
-  decision: "candidate" | "stored" | "rejected";
+  decision: "stored" | "rejected";
   rejectedReason?: string;
   source?: string;
   sourceTraceId?: string | null;
@@ -262,8 +267,13 @@ export type ProvidersStatusResponse = {
 export type ProviderVerificationResponse = {
   ok: boolean;
   provider: string;
-  capability: "chat" | "reasoning";
+  capability: "chat" | "reasoning" | "embedding";
   model?: string;
+  dimensions?: number;
+  expectedDimensions?: number;
+  actualDimensions?: number | null;
+  configuredDimensions?: number;
+  semanticEmbedding?: boolean;
   mock: boolean;
   latencyMs?: number;
   tokenUsage?: TokenUsage;
@@ -290,6 +300,13 @@ export type RetrievedMemoryDebug = {
   supersededAt?: string | null;
   lastAccessedAt?: string;
   displayText: string;
+  hasEmbedding: boolean;
+  embeddingProvider?: string | null;
+  embeddingModel?: string | null;
+  embeddingDimensions?: number | null;
+  embeddedAt?: string | null;
+  semanticEmbedding?: boolean;
+  embeddingError?: string;
   matchedBy?:
     | "vector"
     | "content"
@@ -305,6 +322,7 @@ export type RetrievedMemoryDebug = {
   score?: number;
   retrievalMode?: string;
   vectorScore?: number;
+  keywordScore?: number;
   hybridScore?: number;
   rankComponents?: {
     vectorScore?: number;
@@ -354,6 +372,7 @@ export type PromptPreviewResponse = {
   vectorUsed?: boolean;
   embeddingProvider?: string;
   embeddingModel?: string;
+  embeddingDimensions?: number;
   semanticEmbedding?: boolean;
   embeddingNote?: string;
   queryEmbeddingGenerated?: boolean;
@@ -367,6 +386,7 @@ export type PromptPreviewResponse = {
   includeArchived?: boolean;
   includeSuperseded?: boolean;
   includeExpired?: boolean;
+  includeHistoricalEpisodic?: boolean;
   currentTime?: string;
   directContextEnabled?: boolean;
   directContextTurnCount?: number;
@@ -415,6 +435,7 @@ export type PromptPreviewResponse = {
     vectorUsed?: boolean;
     embeddingProvider?: string;
     embeddingModel?: string;
+    embeddingDimensions?: number;
     semanticEmbedding?: boolean;
     embeddingNote?: string;
     queryEmbeddingGenerated?: boolean;
@@ -428,6 +449,7 @@ export type PromptPreviewResponse = {
     includeArchived?: boolean;
     includeSuperseded?: boolean;
     includeExpired?: boolean;
+    includeHistoricalEpisodic?: boolean;
     currentTime?: string;
     directContextEnabled?: boolean;
     directContextTurnCount?: number;
@@ -651,6 +673,7 @@ export const apiClient = {
       includeArchived?: boolean;
       includeSuperseded?: boolean;
       includeExpired?: boolean;
+      includeHistoricalEpisodic?: boolean;
       limit?: number;
     } = {}
   ): Promise<{
@@ -663,6 +686,7 @@ export const apiClient = {
     vectorUsed?: boolean;
     embeddingProvider?: string;
     embeddingModel?: string;
+    embeddingDimensions?: number;
     semanticEmbedding?: boolean;
     embeddingNote?: string;
     queryEmbeddingGenerated?: boolean;
@@ -676,6 +700,7 @@ export const apiClient = {
     includeArchived?: boolean;
     includeSuperseded?: boolean;
     includeExpired?: boolean;
+    includeHistoricalEpisodic?: boolean;
     excludedByStatus?: number;
     excludedByTime?: number;
     excludedByScope?: number;
@@ -723,6 +748,9 @@ export const apiClient = {
     if (options.includeExpired) {
       body["includeExpired"] = true;
     }
+    if (options.includeHistoricalEpisodic) {
+      body["includeHistoricalEpisodic"] = true;
+    }
 
     return request<{
       mock: boolean;
@@ -734,6 +762,7 @@ export const apiClient = {
       vectorUsed?: boolean;
       embeddingProvider?: string;
       embeddingModel?: string;
+      embeddingDimensions?: number;
       semanticEmbedding?: boolean;
       embeddingNote?: string;
       queryEmbeddingGenerated?: boolean;
@@ -747,6 +776,7 @@ export const apiClient = {
       includeArchived?: boolean;
       includeSuperseded?: boolean;
       includeExpired?: boolean;
+      includeHistoricalEpisodic?: boolean;
       excludedByStatus?: number;
       excludedByTime?: number;
       excludedByScope?: number;
@@ -874,7 +904,9 @@ export const apiClient = {
     return request<ProvidersStatusResponse>("/providers/status");
   },
 
-  verifyProvider(capability: "chat" | "reasoning"): Promise<ProviderVerificationResponse> {
+  verifyProvider(
+    capability: "chat" | "reasoning" | "embedding"
+  ): Promise<ProviderVerificationResponse> {
     return request<ProviderVerificationResponse>(`/providers/verify/${capability}`, {
       method: "POST"
     });

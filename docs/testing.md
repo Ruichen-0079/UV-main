@@ -80,6 +80,8 @@ DEFAULT_EMBEDDING_PROVIDER=mock
 
 Normal development/runtime is real-provider-first (`PROVIDER_ALLOW_MOCKS=false`). Tests and CI explicitly set `PROVIDER_ALLOW_MOCKS=true` and `DEFAULT_EMBEDDING_PROVIDER=mock` so they never require real API keys. Mock embeddings report `semanticEmbedding=false`; they validate the pipeline but do not provide real semantic similarity.
 
+Embedding verification is explicit. `POST /providers/verify/embedding` and the Dashboard **Verify Embedding** button call the active embedding provider with a small test string, may consume provider usage, and return only safe provider/model/dimension/latency metadata. Default tests use mock embedding or stubbed HTTP responses. A dimension mismatch returns `ok=false` with expected and actual dimensions, and raw vectors/API keys are never returned.
+
 `EVENT_BUS=nats` is reserved for future support and is expected to fail clearly until the NATS runtime adapter is implemented. For lightweight local smoke checks that do not need Docker infrastructure, start development with:
 
 ```bash
@@ -126,11 +128,24 @@ Postgres memory search uses hybrid retrieval. Migrations enable `pg_trgm`, trigr
 
 Embedding retrieval is optional. `EMBEDDING_PROVIDER=openai-compatible` is the real-provider-first mode when configured. `EMBEDDING_PROVIDER=mock` is reserved for deterministic local/CI/offline behavior and reports `semanticEmbedding=false`. Real OpenAI-compatible embedding providers may consume tokens. If embedding generation fails, writes still succeed without vectors and retrieval falls back to keyword/trigram/full-text search. Existing Postgres memories can be backfilled after `pnpm db:migrate`:
 
+DashScope `text-embedding-v4` can be tested through OpenAI-compatible mode:
+
+```env
+EMBEDDING_PROVIDER=openai-compatible
+EMBEDDING_API_BASEURL=https://dashscope.aliyuncs.com/compatible-mode/v1
+EMBEDDING_API_KEY=<DashScope API key>
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSIONS=1536
+```
+
 ```bash
 pnpm memory:embed:backfill
 pnpm memory:embed:backfill -- --dry-run
-pnpm memory:embed:backfill -- --force --limit=500
+pnpm memory:embed:backfill -- --limit 100
+pnpm memory:embed:backfill -- --force
 ```
+
+Backfill skips already embedded memories by default. `--force` re-embeds them, `--dry-run` reports what would happen without writes, and `--scope`, `--scopeId`, and `--status` bound the scanned set. The script summarizes scanned/skipped/embedded/failed rows and fails clearly on provider unavailability or vector dimension mismatch without printing secrets.
 
 Graph reasoning over supersession/contradiction fields and automatic expiry scheduling are intentionally not part of the default tests yet. They are future work on top of the status and temporal fields.
 

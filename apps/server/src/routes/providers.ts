@@ -113,8 +113,64 @@ export async function registerProviderRoutes(
       );
     }
   });
+
+  app.post("/providers/verify/embedding", async (request, reply) => {
+    if (!requireDashboardDevToken(config, request, reply)) {
+      return reply;
+    }
+
+    const status = context.providers.getStatus().providers.embedding;
+    const provider = context.providers.getEmbeddingProvider();
+    const startedAt = performance.now();
+    const expectedDimensions = provider.dimensions;
+
+    try {
+      const vector = await provider.embedText("YUVI embedding verification");
+      const actualDimensions = vector.length;
+      const dimensionMismatch = actualDimensions !== expectedDimensions;
+      return reply.send(
+        redactValue({
+          ok: !dimensionMismatch,
+          provider: status.mock ? "mock" : provider.name,
+          capability: "embedding",
+          model: provider.model ?? status.model,
+          expectedDimensions,
+          actualDimensions,
+          dimensions: actualDimensions,
+          mock: Boolean(status.mock),
+          semanticEmbedding: provider.mock ? false : Boolean(status.semanticEmbedding ?? true),
+          latencyMs: Math.round(performance.now() - startedAt),
+          ...(dimensionMismatch
+            ? {
+                error: `Provider returned ${actualDimensions} dimensions while YUVI expected ${expectedDimensions}. Check EMBEDDING_DIMENSIONS and model/provider compatibility.`
+              }
+            : {})
+        })
+      );
+    } catch (error) {
+      return reply.send(
+        redactValue({
+          ok: false,
+          provider: provider.name,
+          capability: "embedding",
+          model: status.model,
+          expectedDimensions,
+          actualDimensions: null,
+          dimensions: status.dimensions,
+          mock: Boolean(status.mock),
+          semanticEmbedding: Boolean(status.semanticEmbedding),
+          latencyMs: Math.round(performance.now() - startedAt),
+          error: safeProviderError(error)
+        })
+      );
+    }
+  });
 }
 
 function safeProviderError(error: unknown): string {
-  return error instanceof Error ? error.message : "Provider verification failed.";
+  const message = error instanceof Error ? error.message : "Provider verification failed.";
+  return message
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [REDACTED]")
+    .replace(/(api[-_]?key|authorization|token|password|secret)=([^&\s]+)/gi, "$1=[REDACTED]")
+    .slice(0, 300);
 }

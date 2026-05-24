@@ -66,6 +66,7 @@ const memorySubtypes = [
   "troubleshooting",
   "config",
   "workflow",
+  "event",
   "milestone",
   "emotion",
   "relationship"
@@ -465,6 +466,9 @@ function MemoryPage(props: {
   const [scopeIdFilter, setScopeIdFilter] = useState("");
   const [layerFilter, setLayerFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [embeddingFilter, setEmbeddingFilter] = useState("all");
+  const [embeddingProviderFilter, setEmbeddingProviderFilter] = useState("all");
+  const [embeddingModelFilter, setEmbeddingModelFilter] = useState("all");
   const [includeArchived, setIncludeArchived] = useState(false);
   const [includeSuperseded, setIncludeSuperseded] = useState(false);
   const [includeExpired, setIncludeExpired] = useState(false);
@@ -570,6 +574,9 @@ function MemoryPage(props: {
     scopeIdFilter,
     layerFilter,
     statusFilter,
+    embeddingFilter,
+    embeddingProviderFilter,
+    embeddingModelFilter,
     minImportance,
     includeArchived,
     includeSuperseded,
@@ -598,6 +605,15 @@ function MemoryPage(props: {
       );
     const matchesLayer = layerFilter === "all" || memory.memoryLayer === layerFilter;
     const matchesStatus = statusFilter === "all" || memory.status === statusFilter;
+    const hasEmbedding = Boolean(memory.hasEmbedding ?? memory.embeddedAt);
+    const matchesEmbedding =
+      embeddingFilter === "all" ||
+      (embeddingFilter === "embedded" && hasEmbedding) ||
+      (embeddingFilter === "missing" && !hasEmbedding);
+    const matchesEmbeddingProvider =
+      embeddingProviderFilter === "all" || memory.embeddingProvider === embeddingProviderFilter;
+    const matchesEmbeddingModel =
+      embeddingModelFilter === "all" || memory.embeddingModel === embeddingModelFilter;
     const min = parseImportance(minImportance) ?? 0;
     const matchesImportance = memory.importance >= min;
     const matchesQuery =
@@ -613,11 +629,28 @@ function MemoryPage(props: {
       matchesTags &&
       matchesLayer &&
       matchesStatus &&
+      matchesEmbedding &&
+      matchesEmbeddingProvider &&
+      matchesEmbeddingModel &&
       matchesImportance &&
       matchesQuery
     );
   });
   const sources = Array.from(new Set(sourceMemories.map((memory) => memory.source))).sort();
+  const embeddingProviders = Array.from(
+    new Set(
+      sourceMemories
+        .map((memory) => memory.embeddingProvider)
+        .filter((value): value is string => Boolean(value))
+    )
+  ).sort();
+  const embeddingModels = Array.from(
+    new Set(
+      sourceMemories
+        .map((memory) => memory.embeddingModel)
+        .filter((value): value is string => Boolean(value))
+    )
+  ).sort();
 
   async function createMemory(): Promise<void> {
     if (!createForm.content.trim()) {
@@ -872,6 +905,9 @@ function MemoryPage(props: {
     setScopeIdFilter("");
     setLayerFilter("all");
     setStatusFilter("all");
+    setEmbeddingFilter("all");
+    setEmbeddingProviderFilter("all");
+    setEmbeddingModelFilter("all");
     setIncludeArchived(false);
     setIncludeSuperseded(false);
     setIncludeExpired(false);
@@ -1042,6 +1078,45 @@ function MemoryPage(props: {
               />
               expired
             </label>
+          </div>
+          <div className="mb-3 grid grid-cols-[150px_180px_180px_1fr] gap-3">
+            <select
+              className="field"
+              value={embeddingFilter}
+              onChange={(event) => setEmbeddingFilter(event.target.value)}
+            >
+              <option value="all">All embeddings</option>
+              <option value="embedded">Embedded</option>
+              <option value="missing">Missing embedding</option>
+            </select>
+            <select
+              className="field"
+              value={embeddingProviderFilter}
+              onChange={(event) => setEmbeddingProviderFilter(event.target.value)}
+            >
+              <option value="all">All embedding providers</option>
+              {embeddingProviders.map((provider) => (
+                <option key={provider} value={provider ?? ""}>
+                  {provider}
+                </option>
+              ))}
+            </select>
+            <select
+              className="field"
+              value={embeddingModelFilter}
+              onChange={(event) => setEmbeddingModelFilter(event.target.value)}
+            >
+              <option value="all">All embedding models</option>
+              {embeddingModels.map((model) => (
+                <option key={model} value={model ?? ""}>
+                  {model}
+                </option>
+              ))}
+            </select>
+            <div className="rounded-md border border-ink-100 bg-ink-50 px-3 py-2 text-xs text-ink-600">
+              Re-embed existing Postgres memories with{" "}
+              <span className="font-mono">pnpm memory:embed:backfill</span>.
+            </div>
           </div>
           {(props.state.loading || searchLoading) && (
             <Notice
@@ -1243,7 +1318,7 @@ function MemoryPage(props: {
 function ProvidersPage(props: {
   state: ReturnType<typeof useAsyncData<ProvidersStatusResponse>>;
 }): JSX.Element {
-  const [verifying, setVerifying] = useState<"chat" | "reasoning" | null>(null);
+  const [verifying, setVerifying] = useState<"chat" | "reasoning" | "embedding" | null>(null);
   const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
   const [verificationError, setVerificationError] = useState<string | null>(null);
   const rows = [
@@ -1285,7 +1360,7 @@ function ProvidersPage(props: {
     }
   ];
 
-  async function verify(capability: "chat" | "reasoning"): Promise<void> {
+  async function verify(capability: "chat" | "reasoning" | "embedding"): Promise<void> {
     setVerifying(capability);
     setVerification(null);
     setVerificationError(null);
@@ -1348,6 +1423,13 @@ function ProvidersPage(props: {
               onClick={() => void verify("reasoning")}
             >
               {verifying === "reasoning" ? "Verifying Reasoning" : "Verify Reasoning"}
+            </button>
+            <button
+              className="button-secondary"
+              disabled={verifying !== null}
+              onClick={() => void verify("embedding")}
+            >
+              {verifying === "embedding" ? "Verifying Embedding" : "Verify Embedding"}
             </button>
           </div>
         }
@@ -1642,7 +1724,7 @@ function PromptPreviewPage(): JSX.Element {
                   ? "enabled"
                   : "off"
             }
-            detail={`provider: ${promptPreview.embeddingProvider ?? preview.data?.embeddingProvider ?? "n/a"} · model: ${promptPreview.embeddingModel ?? preview.data?.embeddingModel ?? "n/a"} · query: ${String(promptPreview.queryEmbeddingGenerated ?? preview.data?.queryEmbeddingGenerated ?? false)} · vector/keyword/hybrid: ${promptPreview.vectorResultCount ?? preview.data?.vectorResultCount ?? 0}/${promptPreview.keywordResultCount ?? preview.data?.keywordResultCount ?? 0}/${promptPreview.hybridResultCount ?? preview.data?.hybridResultCount ?? 0}${(promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason) ? ` · fallback: ${promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason}` : ""}`}
+            detail={`provider: ${promptPreview.embeddingProvider ?? preview.data?.embeddingProvider ?? "n/a"} · model: ${promptPreview.embeddingModel ?? preview.data?.embeddingModel ?? "n/a"} · dims: ${promptPreview.embeddingDimensions ?? preview.data?.embeddingDimensions ?? "n/a"} · semantic: ${String(promptPreview.semanticEmbedding ?? preview.data?.semanticEmbedding ?? false)} · query: ${String(promptPreview.queryEmbeddingGenerated ?? preview.data?.queryEmbeddingGenerated ?? false)} · vector/keyword/hybrid: ${promptPreview.vectorResultCount ?? preview.data?.vectorResultCount ?? 0}/${promptPreview.keywordResultCount ?? preview.data?.keywordResultCount ?? 0}/${promptPreview.hybridResultCount ?? preview.data?.hybridResultCount ?? 0}${(promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason) ? ` · fallback: ${promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason}` : ""}`}
           />
           <StatusCard
             title="Extractor"
@@ -1744,6 +1826,7 @@ function PromptPreviewPage(): JSX.Element {
                   <th className="px-2 py-2">Status</th>
                   <th className="px-2 py-2">Source</th>
                   <th className="px-2 py-2">Match</th>
+                  <th className="px-2 py-2">Embedding</th>
                   <th className="px-2 py-2">Importance</th>
                   <th className="px-2 py-2">Score</th>
                   <th className="px-2 py-2">Trace</th>
@@ -1764,6 +1847,17 @@ function PromptPreviewPage(): JSX.Element {
                     <td className="px-2 py-2">{memory.status ?? ""}</td>
                     <td className="px-2 py-2">{memory.source}</td>
                     <td className="px-2 py-2">{memory.matchedBy ?? "unknown"}</td>
+                    <td className="px-2 py-2">
+                      {memory.hasEmbedding ? "embedded" : "missing"}
+                      <span className="block text-[10px] text-ink-400">
+                        {[memory.embeddingProvider, memory.embeddingModel, memory.embeddedAt]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                      {memory.semanticEmbedding === false ? (
+                        <span className="block text-[10px] text-amber-700">non-semantic</span>
+                      ) : null}
+                    </td>
                     <td className="px-2 py-2">{memory.importance.toFixed(2)}</td>
                     <td className="px-2 py-2">
                       {memory.score?.toFixed(2) ?? ""}
@@ -1850,7 +1944,7 @@ function SettingsPage(): JSX.Element {
   const [applying, setApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<RuntimeSettingsReloadResponse | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
-  const [verifying, setVerifying] = useState<"chat" | "reasoning" | null>(null);
+  const [verifying, setVerifying] = useState<"chat" | "reasoning" | "embedding" | null>(null);
   const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
   const [clearedSecrets, setClearedSecrets] = useState<Set<SettingsKey>>(() => new Set());
   const [dashboardDevToken, setDashboardDevTokenState] = useState("");
@@ -1900,7 +1994,7 @@ function SettingsPage(): JSX.Element {
     }
   }
 
-  async function verify(capability: "chat" | "reasoning"): Promise<void> {
+  async function verify(capability: "chat" | "reasoning" | "embedding"): Promise<void> {
     setVerifying(capability);
     setVerification(null);
     try {
@@ -2226,7 +2320,19 @@ function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="XAI_TTS_VOICE" setForm={setForm} />
           <SettingsInput form={form} name="XAI_VISION_MODEL" setForm={setForm} />
         </Panel>
-        <Panel title="DashScope / Embedding" badge="Optional / placeholder">
+        <Panel
+          title="DashScope / Embedding"
+          badge="Optional / placeholder"
+          actions={
+            <button
+              className="button-secondary"
+              disabled={verifying !== null}
+              onClick={() => void verify("embedding")}
+            >
+              {verifying === "embedding" ? "Verifying Embedding" : "Verify Embedding"}
+            </button>
+          }
+        >
           <SettingsInput form={form} name="DASHSCOPE_API_BASEURL" setForm={setForm} />
           <SecretInput
             label="DASHSCOPE_API_KEY"
@@ -2239,16 +2345,25 @@ function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="DASHSCOPE_STT_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="EMBEDDING_PROVIDER" setForm={setForm} />
           <div className="rounded-md border border-ink-100 bg-ink-50 p-2 text-xs text-ink-600">
-            Status: {settings.data?.providers.embedding.status?.status ?? "unknown"} · mock:{" "}
+            Status: {settings.data?.providers.embedding.status?.status ?? "unknown"} · mode:{" "}
+            {settings.data?.providers.embedding.status?.mode ?? "unknown"} · mock:{" "}
             {String(settings.data?.providers.embedding.status?.mock ?? false)} · dimensions:{" "}
             {settings.data?.providers.embedding.status?.dimensions ??
               (settings.data?.providers.embedding.dimensions || "unknown")}
+            {" · semantic: "}
+            {String(settings.data?.providers.embedding.status?.semanticEmbedding ?? false)}
             {settings.data?.providers.embedding.status?.semanticEmbedding === false && (
               <div className="mt-1 text-amber-700">
                 {settings.data.providers.embedding.status.embeddingNote ??
                   "Mock embeddings validate the pipeline but do not provide real semantic similarity."}
               </div>
             )}
+            {settings.data?.providers.embedding.status?.missingFields?.length ? (
+              <div className="mt-1 text-rose-700">
+                Missing: {settings.data.providers.embedding.status.missingFields.join(", ")}
+              </div>
+            ) : null}
+            {embeddingSettingsHint(settings.data?.providers.embedding.status)}
           </div>
           <SettingsInput form={form} name="EMBEDDING_API_BASEURL" setForm={setForm} />
           <SettingsInput form={form} name="EMBEDDING_MODEL" setForm={setForm} />
@@ -2672,6 +2787,38 @@ function ProviderVerificationResult(props: { result: ProviderVerificationRespons
       <Definition label="Mode" value={result.mock ? "mock" : "real"} />
       <Definition label="Model" value={result.model ?? "unknown"} />
       <Definition label="Latency" value={formatLatency(result.latencyMs)} />
+      {result.capability === "embedding" && (
+        <>
+          <Definition
+            label="Expected Dims"
+            value={String(
+              result.expectedDimensions ??
+                result.configuredDimensions ??
+                result.dimensions ??
+                "unknown"
+            )}
+          />
+          <Definition
+            label="Actual Dims"
+            value={String(result.actualDimensions ?? result.dimensions ?? "unknown")}
+          />
+          <Definition label="Semantic" value={String(result.semanticEmbedding ?? false)} />
+          {result.mock && (
+            <div className="col-span-6 text-amber-700">
+              Mock embeddings validate the pipeline but do not provide real semantic similarity.
+            </div>
+          )}
+          {result.expectedDimensions &&
+            result.actualDimensions &&
+            result.expectedDimensions !== result.actualDimensions && (
+              <div className="col-span-6 text-rose-700">
+                Provider returned {result.actualDimensions} dimensions while YUVI expected{" "}
+                {result.expectedDimensions}. Check EMBEDDING_DIMENSIONS and model/provider
+                compatibility.
+              </div>
+            )}
+        </>
+      )}
       {result.tokenUsage && (
         <div className="col-span-3">
           <Definition label="Token Usage" value={formatTokenUsage(result.tokenUsage)} />
@@ -2787,6 +2934,39 @@ function providerConfigurationHint(
     return "Missing config or unavailable";
   }
   return "Optional, not configured";
+}
+
+function embeddingSettingsHint(
+  health: ProvidersStatusResponse["providers"]["embedding"] | undefined
+): JSX.Element | null {
+  if (!health) {
+    return null;
+  }
+  if (health.mock) {
+    return (
+      <div className="mt-1 text-amber-700">
+        Mock embeddings validate the retrieval pipeline but do not provide real semantic similarity.
+      </div>
+    );
+  }
+  if (health.mode === "unavailable" || health.status === "unavailable") {
+    return (
+      <div className="mt-1 text-rose-700">
+        OpenAI-compatible embedding provider is selected but not configured or unavailable. Fill
+        EMBEDDING_API_BASEURL, EMBEDDING_API_KEY, EMBEDDING_MODEL, and EMBEDDING_DIMENSIONS, then
+        Save and Apply Now.
+      </div>
+    );
+  }
+  if (health.configured && health.semanticEmbedding) {
+    return (
+      <div className="mt-1 text-emerald-700">
+        Real embedding provider configured. Run Verify Embedding if available, then run pnpm
+        memory:embed:backfill for existing memories.
+      </div>
+    );
+  }
+  return null;
 }
 
 type MemoryForm = {
@@ -2935,6 +3115,24 @@ function memoryPreview(memory: MemoryRecord): string {
   return text.length > 140 ? `${text.slice(0, 137)}...` : text;
 }
 
+function temporalWarningForText(text: string): string | null {
+  const match = text.match(
+    /今早|今天|昨天|前天|刚才|刚刚|早上|中午|晚上|上周|这周|最近|\btoday\b|\byesterday\b|\bthis morning\b|\blast night\b|\brecently\b/iu
+  );
+  if (!match) {
+    return null;
+  }
+  const date = new Date().toISOString().slice(0, 10);
+  const phrase = /今早|早上|this morning/iu.test(match[0])
+    ? `在 ${date} 早上`
+    : /中午/iu.test(match[0])
+      ? `在 ${date} 中午`
+      : /晚上|last night/iu.test(match[0])
+        ? `在 ${date} 晚上`
+        : `在 ${date}`;
+  return text.replace(match[0], phrase).replace(/^我/u, "用户").trim();
+}
+
 function formatScope(memory: MemoryRecord): string {
   return `${memory.scope ?? "user"}${memory.scopeId ? `/${memory.scopeId}` : ""}`;
 }
@@ -3043,6 +3241,7 @@ function MemoryFormFields(props: {
   const update = (key: keyof MemoryForm, value: string): void => {
     props.setForm((current) => ({ ...current, [key]: value }));
   };
+  const temporalWarning = temporalWarningForText(props.form.content);
 
   return (
     <div className="space-y-3">
@@ -3131,6 +3330,13 @@ function MemoryFormFields(props: {
           onChange={(event) => update("content", event.target.value)}
         />
       </Field>
+      {temporalWarning && (
+        <Notice
+          tone="info"
+          title="Relative time detected"
+          message={`Relative time detected. Consider resolving it to an absolute date before saving.${temporalWarning ? ` Suggested: ${temporalWarning}` : ""}`}
+        />
+      )}
       <Field label="Summary">
         <textarea
           className="field min-h-20"
@@ -3349,11 +3555,33 @@ function MemoryTable(props: {
                 {!props.compact && <td className="table-cell text-ink-500">{memory.source}</td>}
                 {!props.compact && (
                   <td className="table-cell text-ink-500">
-                    {memory.embeddedAt ? "embedded" : "missing"}
+                    <span
+                      className={`rounded px-2 py-1 text-[10px] font-semibold ${
+                        (memory.hasEmbedding ?? memory.embeddedAt)
+                          ? "bg-emerald-50 text-emerald-700"
+                          : "bg-amber-50 text-amber-700"
+                      }`}
+                    >
+                      {(memory.hasEmbedding ?? memory.embeddedAt) ? "Embedded" : "Missing"}
+                    </span>
                     {memory.embeddingProvider ? (
                       <span className="block text-[10px] text-ink-400">
                         {memory.embeddingProvider}
                         {memory.embeddingModel ? ` · ${memory.embeddingModel}` : ""}
+                        {memory.embeddingDimensions ? ` · ${memory.embeddingDimensions}d` : ""}
+                      </span>
+                    ) : null}
+                    {memory.embeddedAt ? (
+                      <span className="block text-[10px] text-ink-400">
+                        {formatDate(memory.embeddedAt)}
+                      </span>
+                    ) : null}
+                    {memory.semanticEmbedding === false ? (
+                      <span className="block text-[10px] text-amber-700">non-semantic mock</span>
+                    ) : null}
+                    {memory.embeddingError ? (
+                      <span className="block text-[10px] text-rose-700">
+                        {memory.embeddingError}
                       </span>
                     ) : null}
                   </td>
@@ -3494,6 +3722,12 @@ function MemoryCandidateList(props: {
           <p className="whitespace-pre-wrap text-sm text-ink-700">
             {props.compact ? candidate.contentPreview : candidate.content}
           </p>
+          {!props.compact && temporalWarningForText(candidate.content) && (
+            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+              Relative time detected. Consider resolving it to an absolute date before saving.
+              Suggested: {temporalWarningForText(candidate.content)}
+            </div>
+          )}
           {candidate.summary && (
             <p className="mt-2 text-xs text-ink-500">Summary: {candidate.summary}</p>
           )}

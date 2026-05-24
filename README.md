@@ -57,6 +57,7 @@ Check and stop the WSL development services:
 - `pnpm db:migrate`: apply PostgreSQL memory migrations using `DATABASE_URL` from `.env` or the current environment.
 - `pnpm db:reset:dev`: interactively delete development Docker volumes after a strong confirmation prompt.
 - `pnpm smoke:postgres`: apply migrations against the development Postgres container, then run the smoke test in `MEMORY_REPOSITORY=postgres` mode.
+- `pnpm memory:embed:backfill`: embed existing PostgreSQL memories with the configured embedding provider. Use `pnpm memory:embed:backfill -- --dry-run` first, and `--force` when intentionally re-embedding existing vectors.
 
 ## Infrastructure
 
@@ -92,6 +93,26 @@ docker compose -f infra/docker-compose.yml up -d
 pnpm db:migrate
 pnpm smoke:postgres
 ```
+
+Embeddings are optional but recommended for semantic memory search. DashScope `text-embedding-v4` can be used through OpenAI-compatible mode:
+
+```env
+EMBEDDING_PROVIDER=openai-compatible
+EMBEDDING_API_BASEURL=https://dashscope.aliyuncs.com/compatible-mode/v1
+EMBEDDING_API_KEY=<DashScope API key>
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSIONS=1536
+```
+
+Mock embeddings are non-semantic and should be used only for tests, CI, or intentional offline mode. Existing PostgreSQL memories need backfill after enabling a real embedding provider:
+
+```bash
+pnpm memory:embed:backfill -- --dry-run
+pnpm memory:embed:backfill
+pnpm memory:embed:backfill -- --force
+```
+
+Dashboard **Verify Embedding** is explicit and may consume provider usage. Keyword, trigram, and full-text retrieval remain important for env vars, commands, paths, ports, provider names, model names, error messages, and tags. ANN vector indexing is future work.
 
 To reset development database volumes, prefer the guarded helper:
 

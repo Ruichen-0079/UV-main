@@ -14,6 +14,7 @@ export const MemorySubtypes = [
   "fact",
   "project",
   "workflow",
+  "event",
   "milestone",
   "provider-choice",
   "path",
@@ -161,6 +162,16 @@ export type MemoryCandidate = {
   possibleContradictions?: string[];
 };
 
+export type MemoryCandidateStorageDecision = "stored" | "rejected";
+
+export type MemoryCandidateStorageResult = {
+  decision: MemoryCandidateStorageDecision;
+  candidate: MemoryCandidate;
+  memory?: Memory;
+  storageReason?: string;
+  rejectedReason?: string;
+};
+
 export type MemoryExtractorMode = "rule-based" | "llm";
 export type MemoryExtractorActive = "rule-based" | "llm" | "fallback-rule-based" | "disabled";
 
@@ -229,7 +240,9 @@ export type MemorySearchQuery = {
   includeArchived?: boolean;
   includeSuperseded?: boolean;
   includeHistory?: boolean;
+  includeHistoricalEpisodic?: boolean;
   includeExpired?: boolean;
+  currentTime?: Date | string;
   limit?: number;
 };
 
@@ -283,6 +296,7 @@ export type RetrievedMemoryDebug = {
   importance: number;
   createdAt: Date;
   observedAt?: Date;
+  eventTime?: Date | null;
   validFrom?: Date;
   validUntil?: Date | null;
   expiresAt?: Date | null;
@@ -291,7 +305,15 @@ export type RetrievedMemoryDebug = {
   displayText: string;
   matchedBy: MemoryMatchReason;
   retrievalMode?: MemoryRetrievalMode;
+  hasEmbedding: boolean;
+  embeddingProvider?: string | null;
+  embeddingModel?: string | null;
+  embeddingDimensions?: number | null;
+  embeddedAt?: Date | null;
+  semanticEmbedding?: boolean;
+  embeddingError?: string;
   vectorScore?: number;
+  keywordScore?: number;
   hybridScore?: number;
   score?: number;
   rankComponents?: MemorySearchRankComponents;
@@ -317,6 +339,7 @@ export type MemoryRetrievalResult = {
   vectorUsed: boolean;
   embeddingProvider?: string;
   embeddingModel?: string;
+  embeddingDimensions?: number;
   semanticEmbedding?: boolean;
   embeddingNote?: string;
   queryEmbeddingGenerated: boolean;

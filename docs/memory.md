@@ -38,15 +38,32 @@ EMBEDDING_MODEL=replace-with-embedding-model
 EMBEDDING_DIMENSIONS=1536
 ```
 
+DashScope `text-embedding-v4` works through OpenAI-compatible mode:
+
+```env
+EMBEDDING_PROVIDER=openai-compatible
+EMBEDDING_API_BASEURL=https://dashscope.aliyuncs.com/compatible-mode/v1
+EMBEDDING_API_KEY=<DashScope API key>
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSIONS=1536
+```
+
+Use Dashboard **Verify Embedding** or `POST /providers/verify/embedding` only when you explicitly want to call the active embedding provider. Verification returns safe provider/model/dimension/latency metadata and may consume provider usage. It never returns API keys or raw embedding vectors.
+
 New memory writes generate embeddings when the configured provider is available. If embedding generation fails, YUVI stores the memory without a vector and retrieval falls back to keyword/trigram/full-text search. Existing Postgres memories can be backfilled after migrations:
 
 ```bash
 pnpm memory:embed:backfill
 pnpm memory:embed:backfill -- --dry-run
-pnpm memory:embed:backfill -- --force --limit=500
+pnpm memory:embed:backfill -- --limit 100
+pnpm memory:embed:backfill -- --force
 ```
 
-The API and Dashboard expose safe embedding metadata such as `embeddedAt`, `embeddingProvider`, `embeddingModel`, and debug flags like `vectorUsed`, but raw embedding vectors are not returned by default.
+Backfill defaults to missing embeddings only. Use `--force` to re-embed existing vectors, and optional filters such as `--scope project`, `--scopeId yuvi-runtime`, and `--status active` to keep a run bounded. The script prints provider/model/dimensions, progress counts, and a summary of `scanned`, `skipped`, `embedded`, and `failed`. It does not print API keys or raw vectors. If a provider returns a vector whose size differs from `EMBEDDING_DIMENSIONS`, YUVI does not store that vector and reports a safe diagnostic with expected dimensions, actual dimensions, provider, and model.
+
+The API and Dashboard expose safe embedding metadata such as `hasEmbedding`, `embeddedAt`, `embeddingProvider`, `embeddingModel`, `embeddingDimensions`, `semanticEmbedding`, and safe `embeddingError` text when available. Raw embedding vectors are not returned by default.
+
+Keyword/trigram/full-text retrieval remains important for technical memories. Exact env vars, commands, paths, ports, provider names, model names, error messages, and tags should outrank vague vector similarity. ANN vector indexing is future work.
 
 ## Memory Model v2
 
@@ -62,6 +79,32 @@ Memory records now carry the foundation for scoped and temporal memory:
 Default prompt retrieval only uses `active` memories whose validity window currently applies. `forgotten`, `expired`, and `superseded` memories are excluded by default. `archived` memories remain available for manual inspection but are not injected into prompts unless a future debug/history mode opts into them.
 
 The default scope is `user`. YUVI project memories can be inferred as `scope=project` and `scopeId=yuvi-runtime`. `working` memories map to the `working` layer; stable semantic preferences and project facts map to `core`; episodic milestones and troubleshooting records map to `recall`.
+
+## Temporal Normalization
+
+Long-term memory must not preserve unresolved relative time phrases such as `今早`, `今天`, `昨天`, `刚才`, `today`, `yesterday`, `this morning`, or `last night`. Before storage, `MemoryService` resolves relative temporal text against the candidate `observedAt`, extraction time, user timezone when available, and server timezone as a fallback.
+
+For example, if the current observed date is `2026-05-23`:
+
+```text
+我今早吃了芒果蛋糕
+=> 用户在 2026-05-23 早上吃了芒果蛋糕。
+```
+
+Temporal normalization stores safe metadata such as `originalTemporalText`, `normalizedTemporalText`, and `temporalResolution` with the detected relative expression, resolved date, resolution source, confidence, and a suggested rewrite when available. Low-confidence phrases such as broad `最近` style claims are not aggressively rewritten; they are rejected by automatic storage or surfaced as warning-only metadata in manual/debug flows.
+
+Ordinary one-off daily events are not durable facts. A message like `我今早吃了芒果蛋糕` is classified as `episodic / event / recall`, tagged with signals such as `meal` or `activity`, assigned low-to-medium importance, and rejected by default as an ordinary one-off daily event. An explicit request such as `记住：我今早吃了芒果蛋糕` may store the event, but it remains time-bound episodic recall and is not upgraded to `semantic / core`.
+
+Stable implications can still become core memory: preferences, allergy or health notes, schedules and future commitments, project facts, workflows, provider/config choices, and troubleshooting conclusions. For example, `我喜欢芒果蛋糕` remains `semantic / preference / core`.
+
+Temporal fields use these meanings:
+
+- `eventTime`: the resolved event time when known.
+- `validFrom`: when the memory becomes current, usually the event or observed time.
+- `validUntil`: when the memory is no longer current, commonly the end of the resolved local day for daily events.
+- `expiresAt`: when the memory should no longer be normally retrieved or injected; ordinary stored episodic events default to about seven days.
+
+Direct Context may preserve words like `刚才` or `今天` because it is short-term same-session context. Long-term memory content should use absolute time or be rejected/warning-marked.
 
 ## Read Pipeline v2
 
@@ -79,6 +122,7 @@ Long-term prompt retrieval remains scope-aware, status-aware, and time-aware:
 - Unrelated project, plugin, or agent memories are filtered out before prompt injection.
 - `forgotten`, `expired`, `superseded`, and `archived` memories are excluded from prompt injection by default.
 - `includeArchived`, `includeSuperseded`, and `includeExpired` are manual/debug search options, not normal prompt defaults.
+- `includeHistoricalEpisodic` is used for history-intent queries such as `我那天吃了什么`, `之前吃过什么`, `history`, `previously`, or `before`; it may include stale episodic recall but still excludes forgotten memories by default.
 - `expiresAt`, `validUntil`, and future `validFrom` values are respected during retrieval.
 - `lastAccessedAt` is updated when a memory is selected, so future ranking can use access recency.
 
@@ -86,7 +130,7 @@ Ranking combines keyword relevance, type/subtype priority, memory layer priority
 
 Prompt Preview exposes explainable debug fields such as `retrievalScope`, `includedScopes`, `includeArchived`, `includeSuperseded`, `includeExpired`, `excludedByStatus`, `excludedByTime`, `excludedByScope`, `currentTime`, `vectorEnabled`, `vectorUsed`, `embeddingProvider`, `embeddingModel`, `queryEmbeddingGenerated`, `vectorResultCount`, `keywordResultCount`, `hybridResultCount`, `fallbackUsed`, and per-memory `matchedBy`, `score`, optional rank components (`keywordScore`, `tagScore`, `trigramScore`, `fullTextScore`, `vectorScore`, `hybridScore`, `scopeScore`, `importanceScore`, `recencyScore`), `scope`, `memoryLayer`, `status`, temporal fields, and `excludedReason`.
 
-PromptBuilder also injects a `CurrentTime` section containing the current ISO timestamp, timezone, and local date. RelevantMemory bullets may include compact hints such as `[project:yuvi-runtime][core][active]` so the model can reason about scope and freshness without receiving verbose metadata.
+PromptBuilder also injects a `CurrentTime` section containing the current ISO timestamp, timezone, and local date. RelevantMemory bullets may include compact hints such as `[project:yuvi-runtime][core][active]` or `[2026-05-23 morning][episodic][recall]` so the model can reason about scope and freshness without receiving verbose metadata. Time-bound memories should carry absolute time hints and should not inject unresolved relative phrases.
 
 Prompt Preview reports Direct Context budget metadata: `directContextEnabled`, `directContextTurnCount`, `directContextCharCount`, `directContextTruncated`, and `directContextSource`. The prompt sections remain distinct:
 
@@ -120,19 +164,21 @@ Manual memories should use `source=dashboard` or `source=manual`. Deleted memori
 
 Archive/restore/forget are the first forgetting foundation. Archive keeps a memory visible for manual management but excludes it from prompt injection. Forget marks a memory as `forgotten`, which excludes it from normal retrieval.
 
+Manual create/edit and Candidate Review show a warning when content still contains unresolved relative temporal text. The guard is warning-only in v1 and may include a suggested absolute rewrite, but saving is not blocked.
+
 ## Automatic Writes
 
 Automatic memory writes are conservative. `readMemory` controls retrieval for prompt context, while `writeMemory` controls whether the runtime may write new memories after a turn. When `writeMemory=false`, the runtime must not write memory.
 
-The rule-based extractor only proposes memories for durable signals such as explicit `remember` / `记住`, `from now on` / `以后`, long-term preferences, provider choices, project paths, repository paths, startup commands, configuration decisions, troubleshooting conclusions, stable workflow instructions, and project milestones. Ordinary questions, greetings, failed answers, and uncertain assistant responses are not stored automatically. Use the Dashboard Memory page for explicit manual corrections.
+The rule-based extractor only proposes memories for durable signals such as explicit `remember` / `记住`, `from now on` / `以后`, long-term preferences, provider choices, project paths, repository paths, startup commands, configuration decisions, troubleshooting conclusions, stable workflow instructions, and project milestones. Ordinary questions, greetings, failed answers, uncertain assistant responses, and ordinary one-off daily events are not stored automatically. Explicit remember can store a daily event, but it remains `episodic / event / recall` with temporal bounds and low-to-medium importance. Use the Dashboard Memory page for explicit manual corrections.
 
-`MEMORY_EXTRACTOR=llm` is the default and uses the configured DeepSeek Reasoning provider when available, so it consumes reasoning tokens only when `writeMemory=true`. The LLM can only propose candidates; `MemoryService` validates, scores, deduplicates, and decides what to store. Invalid JSON fails closed, and unavailable reasoning providers fall back to the rule-based extractor. `MEMORY_EXTRACTOR=rule-based` remains available for deterministic no-token extraction.
+`MEMORY_EXTRACTOR=llm` is the default and uses the configured DeepSeek Reasoning provider when available, so it consumes reasoning tokens only when `writeMemory=true`. The LLM can only propose internal/debug candidates; `MemoryService` owns normalization, classification correction, scoring, deduplication, storage decisions, and `storageReason` / `rejectedReason`. Normal runtime decisions are `stored` or `rejected`. Invalid JSON fails closed, and unavailable reasoning providers fall back to the rule-based extractor. `MEMORY_EXTRACTOR=rule-based` remains available for deterministic no-token extraction.
 
 ## Candidate Review
 
-The Dashboard exposes recent memory extraction candidates as development-only debug state. Candidate history is currently in-memory and volatile; it resets when the server restarts. Candidates are suggestions, not a separate source of truth. They show the extractor mode, source trace, type/subtype, preview text, summary, importance, confidence, tags, reason, and decision (`stored`, `rejected`, or `candidate`). Suspicious metadata keys such as API keys, tokens, passwords, bearer values, and Authorization headers are redacted.
+The Dashboard exposes recent memory extraction candidates as development-only debug state. Candidate history is currently in-memory and volatile; it resets when the server restarts. Candidates are suggestions, not a separate product-facing workflow or source of truth. They show the extractor mode, source trace, type/subtype, preview text, summary, importance, confidence, tags, reason, and final normal-runtime decision (`stored` or `rejected`). Suspicious metadata keys such as API keys, tokens, passwords, bearer values, and Authorization headers are redacted.
 
-From the Dashboard, a developer can accept, edit-and-save, or reject a recent candidate. Accepting a candidate writes it through the normal memory service path as a dashboard/manual memory; accepting an already stored candidate does not create a duplicate. Rejecting a candidate only updates the in-memory candidate history. LLM extraction never bypasses validation, scoring, or manual memory controls.
+From the Dashboard, a developer can accept, edit-and-save, or reject a recent candidate. Accepting a candidate writes it through the normal memory service path as a dashboard/manual memory; accepting an already stored candidate does not create a duplicate. Rejecting a candidate only updates the in-memory candidate history. LLM extraction never bypasses validation, temporal normalization, scoring, or manual memory controls.
 
 ## Prompt Safety
 

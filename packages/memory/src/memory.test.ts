@@ -44,9 +44,7 @@ describe("MemoryRepository", () => {
   });
 
   it("fails clearly for invalid MEMORY_REPOSITORY values", () => {
-    expect(() => parseMemoryRepositoryEnv({ MEMORY_REPOSITORY: "sqlite" })).toThrow(
-      /Valid values/
-    );
+    expect(() => parseMemoryRepositoryEnv({ MEMORY_REPOSITORY: "sqlite" })).toThrow(/Valid values/);
   });
 
   it("assigns Memory Model v2 defaults for existing create paths", async () => {
@@ -171,6 +169,38 @@ describe("MemoryRepository", () => {
     expect(created.content).toContain("survives");
     expect(created.embedding).toBeNull();
     expect(created.embeddingProvider).toBeNull();
+    expect(created.metadata["embeddingError"]).toContain("embedding unavailable");
+    expect(created.metadata["embeddingError"]).toContain("provider=failing-test");
+
+    const retrieved = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "embedding outages",
+      limit: 5
+    });
+    expect(retrieved.memories[0]?.displayText).toContain("embedding outages");
+    expect(retrieved.vectorEnabled).toBe(true);
+    expect(retrieved.vectorUsed).toBe(false);
+    expect(retrieved.fallbackUsed).toBe(true);
+    expect(retrieved.fallbackReason).toContain("embedding unavailable");
+  });
+
+  it("does not store vectors when embedding dimensions mismatch", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository, undefined, undefined, undefined, {
+      provider: createWrongDimensionEmbeddingProvider()
+    });
+
+    const created = await service.createMemory({
+      type: "semantic",
+      content: "YUVI Runtime avoids storing wrong-size vectors.",
+      source: "test",
+      tags: ["yuvi"]
+    });
+
+    expect(created.embedding).toBeNull();
+    expect(created.embeddingProvider).toBeNull();
+    expect(created.embeddingDimensions).toBeNull();
+    expect(created.metadata["embeddingError"]).toContain("expectedDimensions=3");
+    expect(created.metadata["embeddingError"]).not.toContain("Bearer");
   });
 
   it("regenerates embedding metadata when memory text changes", async () => {
@@ -758,6 +788,164 @@ describe("MemoryRepository", () => {
     );
   });
 
+  it("classifies ordinary relative-time daily events as rejected episodic candidates", async () => {
+    const extractor = new RuleBasedMemoryExtractor();
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository, undefined, undefined, extractor);
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "我今早吃了芒果蛋糕",
+      timestamp: "2026-05-23T02:00:00.000Z",
+      sourceTraceId: "trace-mango"
+    });
+    const result = await service.processCandidateForStorage(candidates[0]!, {
+      source: "runtime",
+      tags: ["session-1"]
+    });
+
+    expect(candidates[0]).toMatchObject({
+      type: "episodic",
+      subtype: "event",
+      memoryLayer: "recall"
+    });
+    expect(result.decision).toBe("rejected");
+    expect(result.rejectedReason).toBe("ordinary one-off daily event");
+    expect(result.candidate.content).toContain("2026-05-23");
+    expect(result.candidate.content).not.toContain("今早");
+    expect(result.candidate.importance).toBeLessThan(0.65);
+    expect(result.candidate.eventTime).toBeTruthy();
+    expect(result.candidate.validFrom).toBeTruthy();
+    expect(result.candidate.validUntil).toBeTruthy();
+    expect(result.candidate.metadata).toMatchObject({
+      originalTemporalText: "我今早吃了芒果蛋糕",
+      temporalResolution: {
+        relativeExpression: "今早",
+        resolvedDate: "2026-05-23"
+      }
+    });
+    await expect(repository.listRecentMemories()).resolves.toEqual([]);
+  });
+
+  it("stores explicit remembered daily events as time-bound episodic recall memories", async () => {
+    const extractor = new RuleBasedMemoryExtractor();
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository, undefined, undefined, extractor);
+    const candidates = await extractor.extractCandidates({
+      userMessage: "记住：我今早吃了芒果蛋糕",
+      timestamp: "2026-05-23T02:00:00.000Z",
+      sourceTraceId: "trace-explicit-mango"
+    });
+
+    const result = await service.processCandidateForStorage(candidates[0]!, {
+      source: "runtime",
+      tags: ["session-1"]
+    });
+
+    expect(result.decision).toBe("stored");
+    expect(result.memory).toMatchObject({
+      type: "episodic",
+      subtype: "event",
+      memoryLayer: "recall",
+      sourceTraceId: "trace-explicit-mango"
+    });
+    expect(result.memory?.content).toContain("2026-05-23");
+    expect(result.memory?.content).not.toContain("今早");
+    expect(result.memory?.importance).toBeLessThan(0.65);
+    expect(result.memory?.eventTime?.toISOString()).toContain("2026-05-23");
+    expect(result.memory?.validFrom.toISOString()).toContain("2026-05-23");
+    expect(result.memory?.validUntil?.toISOString()).toContain("2026-05-23");
+    expect(result.memory?.expiresAt?.toISOString()).toContain("2026-05-30");
+  });
+
+  it("keeps stable mango cake preferences semantic core memories", async () => {
+    const extractor = new RuleBasedMemoryExtractor();
+    const candidates = await extractor.extractCandidates({
+      userMessage: "我喜欢芒果蛋糕",
+      timestamp: "2026-05-23T02:00:00.000Z"
+    });
+
+    expect(candidates).toContainEqual(
+      expect.objectContaining({
+        type: "semantic",
+        subtype: "preference",
+        memoryLayer: "core"
+      })
+    );
+  });
+
+  it("excludes stale episodic memories from normal retrieval but allows historical episodic lookup", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    await repository.createMemory({
+      type: "episodic",
+      subtype: "event",
+      memoryLayer: "recall",
+      content: "用户在 2026-05-23 早上吃了芒果蛋糕。",
+      source: "test",
+      tags: ["meal"],
+      observedAt: "2026-05-23T02:00:00.000Z",
+      eventTime: "2026-05-23T08:00:00.000Z",
+      validFrom: "2026-05-23T08:00:00.000Z",
+      validUntil: "2026-05-23T23:59:59.999Z",
+      expiresAt: "2026-05-30T02:00:00.000Z"
+    });
+    await repository.createMemory({
+      type: "episodic",
+      subtype: "event",
+      memoryLayer: "recall",
+      status: "forgotten",
+      content: "用户在 2026-05-23 晚上吃了芒果蛋糕秘密甜点。",
+      source: "test",
+      tags: ["meal"],
+      validUntil: "2026-05-23T23:59:59.999Z",
+      expiresAt: "2026-05-30T02:00:00.000Z"
+    });
+
+    const normal = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "芒果蛋糕",
+      currentTime: "2026-06-02T00:00:00.000Z",
+      limit: 5
+    });
+    const historical = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "之前吃过什么芒果蛋糕",
+      includeHistoricalEpisodic: true,
+      currentTime: "2026-06-02T00:00:00.000Z",
+      limit: 5
+    });
+
+    expect(normal.memories).toHaveLength(0);
+    expect(normal.excludedByTime).toBeGreaterThan(0);
+    expect(historical.memories).toHaveLength(1);
+    expect(historical.memories[0]?.displayText).toContain("芒果蛋糕");
+    expect(historical.rawMemories.some((memory) => memory.status === "forgotten")).toBe(true);
+    expect(historical.memories.some((memory) => memory.status === "forgotten")).toBe(false);
+  });
+
+  it("rejects low-confidence temporal normalization instead of rewriting aggressively", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const result = await service.processCandidateForStorage({
+      type: "episodic",
+      subtype: "event",
+      memoryLayer: "recall",
+      content: "最近我看了电影",
+      importance: 0.5,
+      tags: ["activity"],
+      reason: "ordinary-one-off-daily-event",
+      observedAt: "2026-05-23T02:00:00.000Z"
+    });
+
+    expect(result.decision).toBe("rejected");
+    expect(result.rejectedReason).toBe("low-confidence temporal resolution");
+    expect(result.candidate.content).toContain("最近");
+    expect(result.candidate.metadata).toMatchObject({
+      temporalResolution: {
+        relativeExpression: "最近",
+        confidence: 0.55
+      }
+    });
+  });
+
   it("extracts startup commands, config decisions, and troubleshooting conclusions", async () => {
     const extractor = new RuleBasedMemoryExtractor();
 
@@ -1225,6 +1413,18 @@ function createFailingEmbeddingProvider() {
     mock: true,
     async embedText(_text: string): Promise<number[]> {
       throw new Error("embedding unavailable");
+    }
+  };
+}
+
+function createWrongDimensionEmbeddingProvider() {
+  return {
+    name: "wrong-dimension-test",
+    model: "wrong-dimension-test-model",
+    dimensions: 3,
+    mock: false,
+    async embedText(_text: string): Promise<number[]> {
+      return [0.1, 0.2];
     }
   };
 }

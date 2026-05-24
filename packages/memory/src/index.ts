@@ -6,6 +6,7 @@ export type {
   Entity,
   Memory,
   MemoryCandidate,
+  MemoryCandidateStorageResult,
   MemoryExtractionInput,
   MemoryExtractor,
   MemoryExtractorActive,
@@ -26,7 +27,21 @@ export type {
   RetrievedMemoryDebug,
   Relation
 } from "./types.js";
-export { MemoryLayers, MemoryScopes, MemoryStatuses, MemoryTypes } from "./types.js";
+export {
+  MemoryLayers,
+  MemoryScopes,
+  MemoryStatuses,
+  MemorySubtypes,
+  MemoryTypes
+} from "./types.js";
+export {
+  hasHistoricalEpisodicIntent,
+  hasRelativeTemporalExpression,
+  normalizeTemporalCandidate,
+  temporalWarningForText,
+  type TemporalNormalizationResult,
+  type TemporalResolution
+} from "./temporal.js";
 export { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
 export {
   InMemoryMemoryRepository,

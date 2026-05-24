@@ -2,10 +2,16 @@ import type { MemoryRepository } from "./repository.js";
 import { RuleBasedMemoryExtractor } from "./extractor.js";
 import { MemoryRetriever } from "./retriever.js";
 import { MemoryScorer } from "./scorer.js";
+import {
+  hasHistoricalEpisodicIntent,
+  isDurableTemporalText,
+  normalizeTemporalCandidate
+} from "./temporal.js";
 import type {
   CreateMemoryInput,
   Memory,
   MemoryCandidate,
+  MemoryCandidateStorageResult,
   MemoryExtractionInput,
   MemoryExtractor,
   MemoryExtractorStatus,
@@ -124,12 +130,14 @@ export class MemoryService {
       assistantMessage: input.assistantMessage,
       sourceTraceId: input.sourceTraceId
     });
-    const selected = candidates.find((candidate) => candidate.importance >= 0.65);
-    if (selected) {
-      return this.rememberCandidate(selected, {
+    for (const candidate of candidates) {
+      const result = await this.processCandidateForStorage(candidate, {
         source: input.source ?? "runtime",
         tags: input.tags ?? []
       });
+      if (result.decision === "stored") {
+        return result.memory ?? null;
+      }
     }
     return null;
   }
@@ -152,36 +160,70 @@ export class MemoryService {
     candidate: MemoryCandidate,
     options: { source?: string; tags?: string[] } = {}
   ): Promise<Memory> {
+    const normalized = this.normalizeCandidateForStorage(candidate);
     return this.createMemory({
-      type: candidate.type,
-      subtype: candidate.subtype ?? null,
-      scope: candidate.scope ?? inferMemoryScope(candidate),
-      scopeId: candidate.scopeId ?? inferMemoryScopeId(candidate),
+      type: normalized.type,
+      subtype: normalized.subtype ?? null,
+      scope: normalized.scope ?? inferMemoryScope(normalized),
+      scopeId: normalized.scopeId ?? inferMemoryScopeId(normalized),
       memoryLayer:
-        candidate.memoryLayer ?? inferMemoryLayer(candidate.type, candidate.subtype ?? null),
-      content: candidate.content,
-      summary: candidate.summary ?? this.compressForStorage(candidate.content),
-      importance: candidate.importance,
+        normalized.memoryLayer ?? inferMemoryLayer(normalized.type, normalized.subtype ?? null),
+      content: normalized.content,
+      summary: normalized.summary ?? this.compressForStorage(normalized.content),
+      importance: normalized.importance,
       emotionValence: 0,
       emotionArousal: 0,
       source: options.source ?? "runtime",
-      sourceTraceId: candidate.sourceTraceId ?? null,
+      sourceTraceId: normalized.sourceTraceId ?? null,
       metadata: {
-        ...(candidate.metadata ?? {}),
-        generatedBy: candidate.metadata?.["generatedBy"] ?? "memory-extractor",
-        reason: candidate.reason,
-        confidence: candidate.confidence ?? null,
-        sourceTraceId: candidate.sourceTraceId ?? null
+        ...(normalized.metadata ?? {}),
+        generatedBy: normalized.metadata?.["generatedBy"] ?? "memory-extractor",
+        reason: normalized.reason,
+        confidence: normalized.confidence ?? null,
+        sourceTraceId: normalized.sourceTraceId ?? null,
+        storageReason: "explicit-save"
       },
-      tags: Array.from(new Set([...(candidate.tags ?? []), ...(options.tags ?? [])])),
-      observedAt: candidate.observedAt ?? new Date(),
-      eventTime: candidate.eventTime ?? null,
-      validFrom: candidate.validFrom ?? candidate.observedAt ?? new Date(),
-      validUntil: candidate.validUntil ?? null,
-      expiresAt: candidate.expiresAt ?? null,
-      supersedes: candidate.possibleSupersedes ?? [],
-      contradicts: candidate.possibleContradictions ?? []
+      tags: Array.from(new Set([...(normalized.tags ?? []), ...(options.tags ?? [])])),
+      observedAt: normalized.observedAt ?? new Date(),
+      eventTime: normalized.eventTime ?? null,
+      validFrom: normalized.validFrom ?? normalized.observedAt ?? new Date(),
+      validUntil: normalized.validUntil ?? null,
+      expiresAt: normalized.expiresAt ?? null,
+      supersedes: normalized.possibleSupersedes ?? [],
+      contradicts: normalized.possibleContradictions ?? []
     });
+  }
+
+  async processCandidateForStorage(
+    candidate: MemoryCandidate,
+    options: { source?: string; tags?: string[] } = {}
+  ): Promise<MemoryCandidateStorageResult> {
+    const normalized = this.normalizeCandidateForStorage(candidate);
+    const decision = decideCandidateStorage(normalized);
+    if (decision.decision === "rejected") {
+      return {
+        decision: "rejected",
+        candidate: normalized,
+        rejectedReason: decision.reason
+      };
+    }
+
+    const memory = await this.rememberCandidate(
+      {
+        ...normalized,
+        metadata: {
+          ...(normalized.metadata ?? {}),
+          storageReason: decision.reason
+        }
+      },
+      options
+    );
+    return {
+      decision: "stored",
+      candidate: normalized,
+      memory,
+      storageReason: decision.reason
+    };
   }
 
   async retrieveRelevantMemories(query: MemorySearchQuery): Promise<Memory[]> {
@@ -251,9 +293,10 @@ export class MemoryService {
         embeddedAt: new Date()
       };
     } catch (error) {
+      const embeddingError = embeddingFailureDiagnostic(error, this.embeddingProvider);
       this.embeddingLogger?.warn?.("memory embedding generation failed; storing without vector", {
         provider: this.embeddingProvider.name,
-        message: safeErrorMessage(error)
+        message: embeddingError
       });
       return {
         ...input,
@@ -261,7 +304,11 @@ export class MemoryService {
         embeddingProvider: input.embeddingProvider ?? null,
         embeddingModel: input.embeddingModel ?? null,
         embeddingDimensions: input.embeddingDimensions ?? null,
-        embeddedAt: input.embeddedAt ?? null
+        embeddedAt: input.embeddedAt ?? null,
+        metadata: {
+          ...(input.metadata ?? {}),
+          embeddingError
+        }
       };
     }
   }
@@ -279,6 +326,7 @@ export class MemoryService {
         vectorEnabled: true,
         embeddingProvider: this.embeddingProvider.name,
         embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+        embeddingDimensions: this.embeddingProvider.dimensions,
         semanticEmbedding: !this.embeddingProvider.mock,
         ...(this.embeddingProvider.mock
           ? {
@@ -301,6 +349,7 @@ export class MemoryService {
         embedding,
         embeddingProvider: this.embeddingProvider.name,
         embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+        embeddingDimensions: this.embeddingProvider.dimensions,
         semanticEmbedding: !this.embeddingProvider.mock,
         ...(this.embeddingProvider.mock
           ? {
@@ -321,6 +370,7 @@ export class MemoryService {
         queryEmbeddingGenerated: false,
         embeddingProvider: this.embeddingProvider.name,
         embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+        embeddingDimensions: this.embeddingProvider.dimensions,
         semanticEmbedding: !this.embeddingProvider.mock,
         ...(this.embeddingProvider.mock
           ? {
@@ -339,6 +389,12 @@ export class MemoryService {
     return compact.length > 500 ? `${compact.slice(0, 497)}...` : compact;
   }
 
+  private normalizeCandidateForStorage(candidate: MemoryCandidate): MemoryCandidate {
+    return normalizeTemporalCandidate(candidate, {
+      timestamp: candidate.observedAt ?? new Date()
+    }).candidate;
+  }
+
   private reconstructForPrompt(memory: Memory): string {
     return memory.summary ?? this.compressForStorage(memory.content);
   }
@@ -350,6 +406,8 @@ export class MemoryService {
     const embeddingDebug = await this.generateQueryEmbedding(queryText, query);
     const broadQuery: MemorySearchQuery = {
       includeHistory: true,
+      includeHistoricalEpisodic:
+        query.includeHistoricalEpisodic ?? hasHistoricalEpisodicIntent(query.text),
       limit: Math.max(query.limit ?? 6, 20)
     };
     if (query.text !== undefined) broadQuery.text = query.text;
@@ -599,6 +657,9 @@ export class MemoryService {
         ? { embeddingProvider: embeddingDebug.embeddingProvider }
         : {}),
       ...(embeddingDebug.embeddingModel ? { embeddingModel: embeddingDebug.embeddingModel } : {}),
+      ...(embeddingDebug.embeddingDimensions
+        ? { embeddingDimensions: embeddingDebug.embeddingDimensions }
+        : {}),
       ...(embeddingDebug.semanticEmbedding !== undefined
         ? { semanticEmbedding: embeddingDebug.semanticEmbedding }
         : {}),
@@ -739,6 +800,7 @@ type RetrievalPolicy = {
   includeArchived: boolean;
   includeSuperseded: boolean;
   includeExpired: boolean;
+  includeHistoricalEpisodic: boolean;
   currentTime: Date;
 };
 
@@ -749,6 +811,7 @@ type RetrievalEmbeddingDebug = {
   embedding?: number[] | undefined;
   embeddingProvider?: string | undefined;
   embeddingModel?: string | undefined;
+  embeddingDimensions?: number | undefined;
   semanticEmbedding?: boolean | undefined;
   embeddingNote?: string | undefined;
   fallbackUsed?: boolean | undefined;
@@ -787,12 +850,30 @@ function buildEmbeddingInput(input: CreateMemoryInput): string {
 
 function validateEmbeddingDimensions(vector: number[], expected: number): void {
   if (vector.length !== expected) {
-    throw new Error(
-      `Embedding dimension mismatch: expected ${expected}, received ${vector.length}.`
-    );
+    throw new EmbeddingDimensionMismatchError(expected, vector.length);
   }
   if (!vector.every((value) => Number.isFinite(value))) {
     throw new Error("Embedding vector contained non-finite values.");
+  }
+}
+
+function embeddingFailureDiagnostic(error: unknown, provider: MemoryEmbeddingProvider): string {
+  return [
+    safeErrorMessage(error),
+    `provider=${provider.name}`,
+    `model=${provider.model ?? provider.name}`,
+    `expectedDimensions=${provider.dimensions}`
+  ].join(" ");
+}
+
+class EmbeddingDimensionMismatchError extends Error {
+  constructor(
+    readonly expectedDimensions: number,
+    readonly actualDimensions: number
+  ) {
+    super(
+      `Embedding dimension mismatch: expected ${expectedDimensions}, received ${actualDimensions}.`
+    );
   }
 }
 
@@ -801,8 +882,19 @@ function safeErrorMessage(error: unknown): string {
   return message.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [REDACTED]").slice(0, 300);
 }
 
+function safeEmbeddingError(metadata: Record<string, unknown>): string | undefined {
+  const value = metadata["embeddingError"];
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+  return safeErrorMessage(value);
+}
+
 function createRetrievalPolicy(query: MemorySearchQuery): RetrievalPolicy {
   const includedScopes = resolveIncludedScopes(query);
+  const currentTime = toValidDate(query.currentTime) ?? new Date();
+  const includeHistoricalEpisodic =
+    Boolean(query.includeHistoricalEpisodic) || hasHistoricalEpisodicIntent(query.text);
   return {
     retrievalScope: includedScopes
       .map((entry) => `${entry.scope}${entry.scopeId ? `:${entry.scopeId}` : ""}`)
@@ -810,8 +902,9 @@ function createRetrievalPolicy(query: MemorySearchQuery): RetrievalPolicy {
     includedScopes,
     includeArchived: Boolean(query.includeArchived),
     includeSuperseded: Boolean(query.includeSuperseded || query.includeHistory),
-    includeExpired: Boolean(query.includeExpired || query.includeHistory),
-    currentTime: new Date()
+    includeExpired: Boolean(query.includeExpired),
+    includeHistoricalEpisodic,
+    currentTime
   };
 }
 
@@ -889,10 +982,24 @@ function statusExclusion(memory: Memory, policy: RetrievalPolicy): string | null
 
 function timeExclusion(memory: Memory, policy: RetrievalPolicy): string | null {
   const now = policy.currentTime.getTime();
-  if (!policy.includeExpired && memory.expiresAt && memory.expiresAt.getTime() <= now) {
+  const historicalEpisodic =
+    policy.includeHistoricalEpisodic &&
+    memory.type === "episodic" &&
+    memory.memoryLayer === "recall";
+  if (
+    !policy.includeExpired &&
+    !historicalEpisodic &&
+    memory.expiresAt &&
+    memory.expiresAt.getTime() <= now
+  ) {
     return "time:expiresAt";
   }
-  if (!policy.includeExpired && memory.validUntil && memory.validUntil.getTime() <= now) {
+  if (
+    !policy.includeExpired &&
+    !historicalEpisodic &&
+    memory.validUntil &&
+    memory.validUntil.getTime() <= now
+  ) {
     return "time:validUntil";
   }
   if (memory.validFrom && memory.validFrom.getTime() > now) {
@@ -1210,6 +1317,11 @@ function typePriority(type: MemoryType): number {
 }
 
 function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebug {
+  const embeddingError = safeEmbeddingError(candidate.memory.metadata);
+  const semanticEmbedding =
+    candidate.memory.embeddingProvider === null || candidate.memory.embeddingProvider === undefined
+      ? undefined
+      : candidate.memory.embeddingProvider !== "mock";
   return {
     id: candidate.memory.id,
     type: candidate.memory.type,
@@ -1224,6 +1336,7 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
     importance: candidate.memory.importance,
     createdAt: candidate.memory.createdAt,
     observedAt: candidate.memory.observedAt,
+    eventTime: candidate.memory.eventTime,
     validFrom: candidate.memory.validFrom,
     validUntil: candidate.memory.validUntil,
     expiresAt: candidate.memory.expiresAt,
@@ -1231,11 +1344,21 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
     supersededAt: candidate.memory.supersededAt,
     displayText: candidate.displayText,
     matchedBy: candidate.matchedBy,
+    hasEmbedding: Boolean(candidate.memory.embedding?.length),
+    embeddingProvider: candidate.memory.embeddingProvider,
+    embeddingModel: candidate.memory.embeddingModel,
+    embeddingDimensions: candidate.memory.embeddingDimensions,
+    embeddedAt: candidate.memory.embeddedAt,
+    ...(semanticEmbedding !== undefined ? { semanticEmbedding } : {}),
+    ...(embeddingError ? { embeddingError } : {}),
     ...(candidate.memory.searchRetrievalMode
       ? { retrievalMode: candidate.memory.searchRetrievalMode }
       : {}),
     ...(candidate.rankComponents?.vectorScore !== undefined
       ? { vectorScore: candidate.rankComponents.vectorScore }
+      : {}),
+    ...(candidate.rankComponents?.keywordScore !== undefined
+      ? { keywordScore: candidate.rankComponents.keywordScore }
       : {}),
     ...(candidate.rankComponents?.hybridScore !== undefined
       ? { hybridScore: candidate.rankComponents.hybridScore }
@@ -1254,6 +1377,77 @@ function isPromptRetrievableMemory(memory: Memory): boolean {
     (!memory.validFrom || memory.validFrom.getTime() <= now) &&
     (!memory.validUntil || memory.validUntil.getTime() > now)
   );
+}
+
+function decideCandidateStorage(candidate: MemoryCandidate): {
+  decision: "stored" | "rejected";
+  reason: string;
+} {
+  const text = `${candidate.content} ${candidate.summary ?? ""} ${(candidate.tags ?? []).join(" ")}`;
+  const explicitRemember =
+    candidate.reason === "explicit-remember" || candidate.metadata?.["explicitRemember"] === true;
+
+  const temporalConfidence = temporalResolutionConfidence(candidate.metadata);
+  if (temporalConfidence !== null && temporalConfidence < 0.7) {
+    return { decision: "rejected", reason: "low-confidence temporal resolution" };
+  }
+
+  if (
+    candidate.type === "episodic" &&
+    candidate.subtype === "event" &&
+    !isDurableTemporalText(text) &&
+    !explicitRemember
+  ) {
+    return { decision: "rejected", reason: "ordinary one-off daily event" };
+  }
+
+  if (explicitRemember) {
+    return { decision: "stored", reason: "explicit remember" };
+  }
+
+  if (isDurableCandidate(candidate, text)) {
+    return { decision: "stored", reason: "durable memory signal" };
+  }
+
+  if (candidate.importance >= 0.65) {
+    return { decision: "stored", reason: "importance threshold" };
+  }
+
+  return { decision: "rejected", reason: "below durable storage threshold" };
+}
+
+function isDurableCandidate(candidate: MemoryCandidate, text: string): boolean {
+  if (candidate.type === "semantic" && candidate.memoryLayer === "core") {
+    return true;
+  }
+  if (
+    candidate.subtype === "preference" ||
+    candidate.subtype === "project" ||
+    candidate.subtype === "provider-choice" ||
+    candidate.subtype === "workflow" ||
+    candidate.subtype === "command" ||
+    candidate.subtype === "config" ||
+    candidate.subtype === "troubleshooting" ||
+    candidate.subtype === "milestone"
+  ) {
+    return true;
+  }
+  return isDurableTemporalText(text);
+}
+
+function toValidDate(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function temporalResolutionConfidence(
+  metadata: Record<string, unknown> | undefined
+): number | null {
+  const value = metadata?.["temporalResolution"];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const confidence = (value as Record<string, unknown>)["confidence"];
+  return typeof confidence === "number" ? confidence : null;
 }
 
 function inferMemoryScope(

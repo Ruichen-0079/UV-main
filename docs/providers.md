@@ -9,7 +9,7 @@ The runtime uses provider interfaces and a `ProviderRegistry` so core orchestrat
 - TTS: xAI
 - STT: Alibaba Cloud DashScope
 - Vision: xAI
-- Embedding: configurable, mock by default for local development
+- Embedding: OpenAI-compatible when configured; mock only for explicit tests, CI, or offline mode
 
 ## Why Core Does Not Import Provider SDKs
 
@@ -105,7 +105,19 @@ EMBEDDING_MODEL=...
 EMBEDDING_DIMENSIONS=1536
 ```
 
-YUVI is real-provider-first by default. `EMBEDDING_PROVIDER=openai-compatible` uses an OpenAI-style `/embeddings` endpoint when `EMBEDDING_API_BASEURL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSIONS` are configured. `EMBEDDING_PROVIDER=mock` is deterministic and requires no network, but it reports `semanticEmbedding=false` because it validates the retrieval pipeline without real semantic similarity. Embedding status reports provider, model, dimensions, mock/configured/available state, and never returns API keys.
+YUVI is real-provider-first by default. `EMBEDDING_PROVIDER=openai-compatible` uses an OpenAI-style `/embeddings` endpoint when `EMBEDDING_API_BASEURL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSIONS` are configured. DashScope `text-embedding-v4` can be used through compatible mode:
+
+```env
+EMBEDDING_PROVIDER=openai-compatible
+EMBEDDING_API_BASEURL=https://dashscope.aliyuncs.com/compatible-mode/v1
+EMBEDDING_API_KEY=<DashScope API key>
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSIONS=1536
+```
+
+`EMBEDDING_PROVIDER=mock` is deterministic and requires no network, but it reports `semanticEmbedding=false` because it validates the retrieval pipeline without real semantic similarity. Embedding status reports provider, model, dimensions, mock/configured/available state, semantic/non-semantic mode, and never returns API keys.
+
+`POST /providers/verify/embedding` is explicit and may consume provider usage. It calls the active embedding provider with a small test string and returns only safe metadata: provider, model, expected dimensions, actual dimensions, latency, mock/real mode, semanticEmbedding, and a redacted error if verification fails. If the provider returns a vector dimension that does not match `EMBEDDING_DIMENSIONS`, YUVI returns `ok=false` and does not expose the raw vector.
 
 If optional providers are missing and mocks are disabled, the registry returns an unavailable provider. `healthCheck()` reports `unavailable`, and actual calls throw normalized `ProviderError`s.
 
@@ -188,7 +200,8 @@ The Dashboard `Settings` page can write local development settings to `.env.loca
 - `scripts/dev.sh` loads `.env` first and `.env.local` second, so `.env.local` overrides base local values after restart.
 - `POST /settings/runtime` only accepts an allowlist of development provider and memory keys.
 - `POST /settings/runtime/reload` reloads `.env` and `.env.local`, rebuilds the active provider registry, and applies provider config without restarting the HTTP server.
-- Provider verification buttons call `POST /providers/verify/chat` or `POST /providers/verify/reasoning` explicitly.
+- Provider verification buttons call `POST /providers/verify/chat`, `POST /providers/verify/reasoning`, or `POST /providers/verify/embedding` explicitly.
+- Save writes `.env.local`; **Apply Now** reloads hot-reloadable provider config; **Verify** is a separate explicit remote/provider call and may consume tokens.
 - `/health` and `/providers/status` do not consume provider tokens.
 - Provider config changes can be applied with **Apply Now / Reload Runtime Config**. Memory repository, server host/port, and event bus changes remain restart-required.
 - If DeepSeek config is saved but chat still reports mock mode, click **Apply Now** or restart the dev server.
