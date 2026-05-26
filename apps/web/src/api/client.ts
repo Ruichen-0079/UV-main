@@ -68,6 +68,21 @@ export type ProviderCallMetadata = {
   latencyMs?: number;
   tokenUsage?: TokenUsage;
   healthStatus?: string;
+  fallbackUsed?: boolean;
+  attemptedProviders?: ProviderAttempt[];
+  finalProvider?: string;
+};
+
+export type ProviderAttempt = {
+  provider: string;
+  model?: string;
+  status: "skipped" | "success" | "failed" | "unavailable";
+  errorCode?: string;
+  error?: string;
+  latencyMs?: number;
+  configured?: boolean;
+  enabled?: boolean;
+  priority?: number;
 };
 
 export type DashboardWebSocketMessage =
@@ -306,7 +321,7 @@ export type ProvidersStatusResponse = {
 export type ProviderVerificationResponse = {
   ok: boolean;
   provider: string;
-  capability: "chat" | "reasoning" | "embedding";
+  capability: "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision";
   model?: string;
   dimensions?: number;
   expectedDimensions?: number;
@@ -314,9 +329,55 @@ export type ProviderVerificationResponse = {
   configuredDimensions?: number;
   semanticEmbedding?: boolean;
   mock: boolean;
+  configured?: boolean;
+  configOnly?: boolean;
+  missingFields?: string[];
   latencyMs?: number;
   tokenUsage?: TokenUsage;
   error?: string;
+};
+
+export type CapabilityRuntimeMetadata = {
+  capability: "tts" | "stt" | "vision";
+  fallbackUsed: boolean;
+  attemptedProviders: ProviderAttempt[];
+  finalProvider: string;
+  provider: string;
+  model?: string;
+  mock: boolean;
+  latencyMs?: number;
+};
+
+export type TranscriptionResponse = CapabilityRuntimeMetadata & {
+  text: string;
+  language?: string;
+  confidence?: number;
+  speakerId?: string | null;
+  voiceProfileId?: string | null;
+};
+
+export type VoiceMessageResponse = {
+  transcription: TranscriptionResponse;
+  reply: string;
+  traceId: string;
+  provider?: ProviderCallMetadata;
+  stt: CapabilityRuntimeMetadata;
+  chat?: ProviderCallMetadata;
+  promptPreview?: PromptPreviewResponse["promptPreview"];
+};
+
+export type TTSResponse = CapabilityRuntimeMetadata & {
+  audioBase64: string;
+  mimeType: string;
+  durationMs?: number;
+};
+
+export type VisionAnalyzeResponse = CapabilityRuntimeMetadata & {
+  analysis: string;
+  labels?: string[];
+  objects?: string[];
+  sceneSummary?: string;
+  confidence?: number;
 };
 
 export type RetrievedMemoryDebug = {
@@ -1082,10 +1143,89 @@ export const apiClient = {
   },
 
   verifyProvider(
-    capability: "chat" | "reasoning" | "embedding"
+    capability: "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision"
   ): Promise<ProviderVerificationResponse> {
     return request<ProviderVerificationResponse>(`/providers/verify/${capability}`, {
       method: "POST"
+    });
+  },
+
+  verifyProviderChain(capability: "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision") {
+    return request<{
+      ok: boolean;
+      capability: string;
+      configOnly?: boolean;
+      routes: ProviderHealth[];
+      attemptedProviders?: ProviderAttempt[];
+      message?: string;
+    }>(`/providers/verify-chain/${capability}`, { method: "POST" });
+  },
+
+  transcribeAudio(input: {
+    audioBase64?: string;
+    mimeType?: string;
+    language?: string;
+    sessionId?: string;
+    speakerId?: string;
+    voiceProfileId?: string;
+    subjectUserId?: string;
+    createdByUserId?: string;
+    mockText?: string;
+  }): Promise<TranscriptionResponse> {
+    return request<TranscriptionResponse>("/v1/audio/transcriptions", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
+  sendVoiceMessage(input: {
+    audioBase64?: string;
+    mimeType?: string;
+    language?: string;
+    sessionId?: string;
+    speakerId?: string;
+    voiceProfileId?: string;
+    subjectUserId?: string;
+    createdByUserId?: string;
+    mockText?: string;
+    options?: {
+      readMemory?: boolean;
+      writeMemory?: boolean;
+      promptPreview?: boolean;
+      voiceOutput?: boolean;
+    };
+  }): Promise<VoiceMessageResponse> {
+    return request<VoiceMessageResponse>("/v1/voice/message", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
+  synthesizeSpeech(input: {
+    text: string;
+    voice?: string;
+    format?: "mp3" | "wav" | "opus" | "pcm" | "mulaw" | "alaw";
+    sessionId?: string;
+  }): Promise<TTSResponse> {
+    return request<TTSResponse>("/v1/tts", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
+  analyzeVision(input: {
+    imageBase64?: string;
+    imageUrl?: string;
+    mimeType?: string;
+    prompt?: string;
+    sessionId?: string;
+    speakerId?: string;
+    subjectUserId?: string;
+    createdByUserId?: string;
+  }): Promise<VisionAnalyzeResponse> {
+    return request<VisionAnalyzeResponse>("/v1/vision/analyze", {
+      method: "POST",
+      body: JSON.stringify(input)
     });
   },
 

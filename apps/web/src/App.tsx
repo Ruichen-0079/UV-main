@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
+  ApiError,
   apiClient,
   type AcceptMemoryCandidateRequest,
   type CreateMemoryRequest,
@@ -13,6 +14,7 @@ import {
   type MemoryRecord,
   type MemoryVectorIndexStatus,
   type ProviderCallMetadata,
+  type ProviderHealth,
   type ProviderVerificationResponse,
   type PromptPreviewResponse,
   type ProvidersStatusResponse,
@@ -177,12 +179,8 @@ export function App(): JSX.Element {
             />
           )}
           {activePage === "prompt" && <PromptPreviewPage />}
-          {activePage === "voice" && (
-            <CapabilityPlaceholder title="Voice" status="Not implemented" />
-          )}
-          {activePage === "vision" && (
-            <CapabilityPlaceholder title="Vision" status="Not implemented" />
-          )}
+          {activePage === "voice" && <VoicePage providerStatus={providerStatus.data} />}
+          {activePage === "vision" && <VisionPage providerStatus={providerStatus.data} />}
           {activePage === "settings" && <SettingsPage />}
         </main>
       </div>
@@ -1427,7 +1425,9 @@ function MemoryPage(props: {
 function ProvidersPage(props: {
   state: ReturnType<typeof useAsyncData<ProvidersStatusResponse>>;
 }): JSX.Element {
-  const [verifying, setVerifying] = useState<"chat" | "reasoning" | "embedding" | null>(null);
+  const [verifying, setVerifying] = useState<
+    "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision" | null
+  >(null);
   const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
   const [verificationError, setVerificationError] = useState<string | null>(null);
   const rows = [
@@ -1452,13 +1452,13 @@ function ProvidersPage(props: {
     {
       label: "xAI Vision",
       capability: "vision",
-      requirement: "Optional / future UI",
+      requirement: "Optional",
       health: props.state.data?.providers.vision
     },
     {
       label: "Alibaba DashScope STT",
       capability: "stt",
-      requirement: "Optional / future UI",
+      requirement: "Optional",
       health: props.state.data?.providers.stt
     },
     {
@@ -1507,7 +1507,7 @@ function ProvidersPage(props: {
         <StatusCard
           title="Optional Media"
           status={optionalProviderSummary(props.state.data)}
-          detail="TTS, STT, and Vision are placeholders in the dashboard."
+          detail="TTS, STT, and Vision use provider-chain runtime routes."
         />
       </div>
       <Notice
@@ -2059,29 +2059,451 @@ function PromptPreviewPage(): JSX.Element {
   );
 }
 
-function CapabilityPlaceholder(props: { title: string; status: string }): JSX.Element {
+function VoicePage(props: { providerStatus: ProvidersStatusResponse | null }): JSX.Element {
+  const [sessionId, setSessionId] = useState("dashboard-voice");
+  const [language, setLanguage] = useState("zh");
+  const [speakerId, setSpeakerId] = useState("");
+  const [voiceProfileId, setVoiceProfileId] = useState("");
+  const [subjectUserId, setSubjectUserId] = useState("");
+  const [audioBase64, setAudioBase64] = useState("");
+  const [mockText, setMockText] = useState("烦死了，这个报错我看不懂");
+  const [readMemory, setReadMemory] = useState(true);
+  const [writeMemory, setWriteMemory] = useState(false);
+  const [transcriptionResult, setTranscriptionResult] = useState<unknown>(null);
+  const [voiceMessageResult, setVoiceMessageResult] = useState<unknown>(null);
+  const [ttsText, setTtsText] = useState("YUVI runtime is online.");
+  const [ttsVoice, setTtsVoice] = useState("");
+  const [ttsResult, setTtsResult] = useState<unknown>(null);
+  const [busy, setBusy] = useState<"transcribe" | "voice" | "tts" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const basePayload = {
+    sessionId,
+    mimeType: "audio/wav",
+    ...(language.trim() ? { language: language.trim() } : {}),
+    ...(speakerId.trim() ? { speakerId: speakerId.trim() } : {}),
+    ...(voiceProfileId.trim() ? { voiceProfileId: voiceProfileId.trim() } : {}),
+    ...(subjectUserId.trim() ? { subjectUserId: subjectUserId.trim() } : {}),
+    ...(subjectUserId.trim() ? { createdByUserId: subjectUserId.trim() } : {}),
+    ...(audioBase64.trim() ? { audioBase64: audioBase64.trim() } : {}),
+    ...(mockText.trim() ? { mockText: mockText.trim() } : {})
+  };
+
+  async function transcribe(): Promise<void> {
+    setBusy("transcribe");
+    setError(null);
+    try {
+      setTranscriptionResult(await apiClient.transcribeAudio(basePayload));
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? friendlyMediaError(caught.message) : "Transcription failed"
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function sendVoiceMessage(): Promise<void> {
+    setBusy("voice");
+    setError(null);
+    try {
+      setVoiceMessageResult(
+        await apiClient.sendVoiceMessage({
+          ...basePayload,
+          options: {
+            readMemory,
+            writeMemory,
+            promptPreview: true,
+            voiceOutput: false
+          }
+        })
+      );
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? friendlyMediaError(caught.message) : "Voice message failed"
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function synthesize(): Promise<void> {
+    setBusy("tts");
+    setError(null);
+    try {
+      setTtsResult(
+        await apiClient.synthesizeSpeech({
+          sessionId,
+          text: ttsText,
+          format: "wav",
+          ...(ttsVoice.trim() ? { voice: ttsVoice.trim() } : {})
+        })
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? friendlyMediaError(caught.message) : "TTS failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
-    <PageShell
-      title={props.title}
-      subtitle={`${props.title} debugging controls will be added after backend support exists.`}
-    >
-      <div className="grid grid-cols-3 gap-4">
-        <StatusCard
-          title={`${props.title} status`}
-          status={props.status}
-          detail="No backend endpoint yet"
-          mock
-        />
-        <Panel title="Expected Controls" badge="Future">
-          <ul className="space-y-2 text-sm text-ink-600">
-            <li>Provider health and model metadata</li>
-            <li>Input/output inspection without exposing secrets</li>
-            <li>Runtime events emitted for each operation</li>
-          </ul>
+    <PageShell title="Voice" subtitle="Developer controls for STT, voice message, and TTS routes.">
+      {error && <Notice tone="error" title="Voice request failed" message={error} />}
+      <div className="grid grid-cols-2 gap-4">
+        <ProviderChainBlock title="STT chain" routes={props.providerStatus?.routes?.stt ?? []} />
+        <ProviderChainBlock title="TTS chain" routes={props.providerStatus?.routes?.tts ?? []} />
+      </div>
+      <div className="grid grid-cols-[1fr_0.9fr] gap-4">
+        <Panel title="Speech Input">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="sessionId">
+              <input
+                className="field"
+                value={sessionId}
+                onChange={(event) => setSessionId(event.target.value)}
+              />
+            </Field>
+            <Field label="language">
+              <input
+                className="field"
+                value={language}
+                onChange={(event) => setLanguage(event.target.value)}
+              />
+            </Field>
+            <Field label="speakerId">
+              <input
+                className="field"
+                value={speakerId}
+                onChange={(event) => setSpeakerId(event.target.value)}
+              />
+            </Field>
+            <Field label="voiceProfileId">
+              <input
+                className="field"
+                value={voiceProfileId}
+                onChange={(event) => setVoiceProfileId(event.target.value)}
+              />
+            </Field>
+            <Field label="subjectUserId">
+              <input
+                className="field"
+                value={subjectUserId}
+                onChange={(event) => setSubjectUserId(event.target.value)}
+              />
+            </Field>
+          </div>
+          <Field label="audio file">
+            <input
+              className="field"
+              type="file"
+              accept="audio/*"
+              onChange={(event) =>
+                void loadFileAsBase64(event.currentTarget.files?.[0], setAudioBase64)
+              }
+            />
+          </Field>
+          <Field label="audioBase64">
+            <textarea
+              className="field min-h-24"
+              value={audioBase64}
+              onChange={(event) => setAudioBase64(event.target.value)}
+              placeholder="Paste base64 audio, or use mockText when mock mode is enabled."
+            />
+          </Field>
+          <Field label="mockText">
+            <input
+              className="field"
+              value={mockText}
+              onChange={(event) => setMockText(event.target.value)}
+            />
+          </Field>
+          <div className="flex items-center gap-4 text-sm text-ink-600">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={readMemory}
+                onChange={(event) => setReadMemory(event.target.checked)}
+              />
+              Read memory
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={writeMemory}
+                onChange={(event) => setWriteMemory(event.target.checked)}
+              />
+              Write memory
+            </label>
+          </div>
+          <div className="mt-4 flex gap-2">
+            <button
+              className="button-secondary"
+              disabled={busy !== null}
+              onClick={() => void transcribe()}
+            >
+              {busy === "transcribe" ? "Transcribing" : "Transcribe"}
+            </button>
+            <button
+              className="button-primary"
+              disabled={busy !== null}
+              onClick={() => void sendVoiceMessage()}
+            >
+              {busy === "voice" ? "Sending" : "Send Voice Message"}
+            </button>
+          </div>
+        </Panel>
+        <Panel title="Voice Results">
+          <ResultBlock title="Transcription" value={transcriptionResult} />
+          <ResultBlock title="Voice Message" value={voiceMessageResult} />
+        </Panel>
+      </div>
+      <div className="grid grid-cols-[1fr_0.9fr] gap-4">
+        <Panel title="Text to Speech">
+          <Field label="text">
+            <textarea
+              className="field min-h-28"
+              value={ttsText}
+              onChange={(event) => setTtsText(event.target.value)}
+            />
+          </Field>
+          <Field label="voice">
+            <input
+              className="field"
+              value={ttsVoice}
+              onChange={(event) => setTtsVoice(event.target.value)}
+            />
+          </Field>
+          <button
+            className="button-secondary"
+            disabled={busy !== null || !ttsText.trim()}
+            onClick={() => void synthesize()}
+          >
+            {busy === "tts" ? "Generating" : "Generate Speech"}
+          </button>
+        </Panel>
+        <Panel title="TTS Output">
+          <ResultBlock title="TTS Metadata" value={ttsResult} />
+          {isTTSResult(ttsResult) && ttsResult.audioBase64 ? (
+            <audio
+              className="mt-3 w-full"
+              controls
+              src={`data:${ttsResult.mimeType};base64,${ttsResult.audioBase64}`}
+            />
+          ) : null}
         </Panel>
       </div>
     </PageShell>
   );
+}
+
+function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): JSX.Element {
+  const [sessionId, setSessionId] = useState("dashboard-vision");
+  const [subjectUserId, setSubjectUserId] = useState("");
+  const [speakerId, setSpeakerId] = useState("");
+  const [imageBase64, setImageBase64] = useState("");
+  const [imageUrl, setImageUrl] = useState("");
+  const [prompt, setPrompt] = useState("Describe the image safely and concisely.");
+  const [result, setResult] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function analyze(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(
+        await apiClient.analyzeVision({
+          sessionId,
+          mimeType: "image/png",
+          prompt,
+          ...(subjectUserId.trim() ? { subjectUserId: subjectUserId.trim() } : {}),
+          ...(subjectUserId.trim() ? { createdByUserId: subjectUserId.trim() } : {}),
+          ...(speakerId.trim() ? { speakerId: speakerId.trim() } : {}),
+          ...(imageBase64.trim() ? { imageBase64: imageBase64.trim() } : {}),
+          ...(imageUrl.trim() ? { imageUrl: imageUrl.trim() } : {})
+        })
+      );
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? friendlyMediaError(caught.message) : "Vision analysis failed"
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <PageShell
+      title="Vision"
+      subtitle="Developer image analysis controls using the vision provider chain."
+    >
+      {error && <Notice tone="error" title="Vision request failed" message={error} />}
+      <ProviderChainBlock
+        title="Vision chain"
+        routes={props.providerStatus?.routes?.vision ?? []}
+      />
+      <div className="grid grid-cols-[1fr_0.9fr] gap-4">
+        <Panel title="Image Input">
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="sessionId">
+              <input
+                className="field"
+                value={sessionId}
+                onChange={(event) => setSessionId(event.target.value)}
+              />
+            </Field>
+            <Field label="subjectUserId">
+              <input
+                className="field"
+                value={subjectUserId}
+                onChange={(event) => setSubjectUserId(event.target.value)}
+              />
+            </Field>
+            <Field label="speakerId">
+              <input
+                className="field"
+                value={speakerId}
+                onChange={(event) => setSpeakerId(event.target.value)}
+              />
+            </Field>
+          </div>
+          <Field label="image file">
+            <input
+              className="field"
+              type="file"
+              accept="image/*"
+              onChange={(event) =>
+                void loadFileAsBase64(event.currentTarget.files?.[0], setImageBase64)
+              }
+            />
+          </Field>
+          <Field label="imageUrl">
+            <input
+              className="field"
+              value={imageUrl}
+              onChange={(event) => setImageUrl(event.target.value)}
+            />
+          </Field>
+          <Field label="imageBase64">
+            <textarea
+              className="field min-h-24"
+              value={imageBase64}
+              onChange={(event) => setImageBase64(event.target.value)}
+            />
+          </Field>
+          <Field label="prompt">
+            <textarea
+              className="field min-h-24"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+            />
+          </Field>
+          <button className="button-primary" disabled={busy} onClick={() => void analyze()}>
+            {busy ? "Analyzing" : "Analyze"}
+          </button>
+        </Panel>
+        <Panel title="Vision Result">
+          <ResultBlock title="Analysis" value={result} />
+        </Panel>
+      </div>
+    </PageShell>
+  );
+}
+
+function ProviderChainBlock(props: { title: string; routes: ProviderHealth[] }): JSX.Element {
+  const routes = props.routes;
+  return (
+    <Panel title={props.title} badge="Fallback order">
+      {routes.length === 0 ? (
+        <EmptyState title="No route data" message="Provider status has not loaded yet." />
+      ) : (
+        <ol className="space-y-2">
+          {routes.map((route) => (
+            <li
+              key={`${route.provider}-${route.priority}`}
+              className="grid grid-cols-[28px_1fr_auto] items-center gap-2 text-xs"
+            >
+              <span className="font-mono text-ink-500">{route.priority ?? "-"}</span>
+              <span>
+                <span className="font-medium text-ink-800">{route.provider}</span>
+                <span className="ml-2 text-ink-500">{route.model ?? "no model"}</span>
+                {route.missingFields?.length ? (
+                  <div className="text-rose-700">Missing: {route.missingFields.join(", ")}</div>
+                ) : null}
+              </span>
+              <span className="flex items-center gap-2">
+                <Pill status={route.status ?? "unknown"} />
+                <span className="text-ink-500">{route.mock ? "mock" : "real"}</span>
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </Panel>
+  );
+}
+
+function ResultBlock(props: { title: string; value: unknown }): JSX.Element {
+  return (
+    <div className="mb-3 rounded-md border border-ink-100 bg-ink-50 p-3">
+      <div className="mb-2 text-xs font-semibold uppercase text-ink-500">{props.title}</div>
+      {props.value ? (
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs leading-5 text-ink-700">
+          {JSON.stringify(props.value, null, 2)}
+        </pre>
+      ) : (
+        <div className="text-sm text-ink-500">No result yet.</div>
+      )}
+    </div>
+  );
+}
+
+async function loadFileAsBase64(
+  file: File | undefined,
+  setValue: (value: string) => void
+): Promise<void> {
+  if (!file) return;
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error("File read failed"));
+    reader.readAsDataURL(file);
+  });
+  setValue(dataUrl.split(",", 2)[1] ?? "");
+}
+
+function isTTSResult(value: unknown): value is { audioBase64: string; mimeType: string } {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    typeof (value as { audioBase64?: unknown }).audioBase64 === "string" &&
+    typeof (value as { mimeType?: unknown }).mimeType === "string"
+  );
+}
+
+function friendlyMediaError(message: string): string {
+  if (message.includes("401")) {
+    return "Dashboard dev token required. Enter DASHBOARD_DEV_TOKEN in the dashboard token field.";
+  }
+  return message;
+}
+
+function deepRestartErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 409) {
+      return "Deep restart requires supervisor mode. Start with: YUVI_DEV_SUPERVISOR=1 ./scripts/dev.sh";
+    }
+    if (error.status === 401) {
+      return "Dashboard dev token required. Enter DASHBOARD_DEV_TOKEN in the dashboard token field.";
+    }
+    if (error.status === 403) {
+      return "Deep restart is localhost-only.";
+    }
+    if (error.status === 404 || error.status === 405) {
+      return "Deep restart is disabled in production.";
+    }
+  }
+  return error instanceof Error ? error.message : "Deep restart failed";
 }
 
 function SettingsPage(): JSX.Element {
@@ -2096,7 +2518,9 @@ function SettingsPage(): JSX.Element {
   const [applying, setApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<RuntimeSettingsReloadResponse | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
-  const [verifying, setVerifying] = useState<"chat" | "reasoning" | "embedding" | null>(null);
+  const [verifying, setVerifying] = useState<
+    "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision" | null
+  >(null);
   const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
   const [clearedSecrets, setClearedSecrets] = useState<Set<SettingsKey>>(() => new Set());
   const [dashboardDevToken, setDashboardDevTokenState] = useState("");
@@ -2149,7 +2573,9 @@ function SettingsPage(): JSX.Element {
     }
   }
 
-  async function verify(capability: "chat" | "reasoning" | "embedding"): Promise<void> {
+  async function verify(
+    capability: "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision"
+  ): Promise<void> {
     setVerifying(capability);
     setVerification(null);
     try {
@@ -2174,7 +2600,7 @@ function SettingsPage(): JSX.Element {
       const response = await apiClient.deepRestartRuntime();
       setRestartResult(response.message);
     } catch (caught) {
-      setRestartError(caught instanceof Error ? caught.message : "Deep restart failed");
+      setRestartError(deepRestartErrorMessage(caught));
     } finally {
       setRestartBusy(false);
     }
@@ -2211,6 +2637,12 @@ function SettingsPage(): JSX.Element {
     "EMBEDDING_PROVIDER",
     "EMBEDDING_API_KEY"
   ];
+  const restartStatus = settings.data?.runtime.devSupervisor;
+  const restartSupported = restartStatus?.restartSupported;
+  const deepRestartDisabled =
+    restartBusy ||
+    settings.data?.runtime.runtimeMode === "production" ||
+    restartSupported === false;
 
   function updateDashboardDevToken(value: string): void {
     setDashboardDevTokenState(value);
@@ -2311,18 +2743,6 @@ function SettingsPage(): JSX.Element {
                 value={settings.data?.runtime.devSupervisor?.runtimeEnvDir ?? "unknown"}
               />
             </div>
-            <button
-              className="button-secondary mt-2"
-              type="button"
-              disabled={restartBusy || settings.data?.runtime.runtimeMode !== "development"}
-              onClick={() => void deepRestart()}
-            >
-              Deep Restart Runtime
-            </button>
-            <p className="mt-2 text-xs leading-5 text-ink-500">
-              This restarts the local runtime, reloads env files, and may run db:migrate. It is
-              dev-only.
-            </p>
           </div>
           {settings.data?.runtime.pendingRestart && (
             <Notice
@@ -2438,6 +2858,64 @@ function SettingsPage(): JSX.Element {
             label="Memory Extractor"
             value={`${settings.data?.memory.activeMemoryExtractor ?? "unknown"} / ${settings.data?.memory.memoryExtractorActive ?? "unknown"}`}
           />
+        </div>
+      </Panel>
+      <Panel title="Developer Tools / Deep Restart" badge="Development only">
+        <div className="grid grid-cols-[1fr_1fr] gap-4">
+          <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
+            <h3 className="mb-2 text-sm font-semibold text-ink-800">Apply Now</h3>
+            <ul className="space-y-1 text-sm leading-6 text-ink-600">
+              <li>Reloads supported runtime config in-process.</li>
+              <li>Does not restart the server.</li>
+              <li>Does not run migrations.</li>
+            </ul>
+          </div>
+          <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
+            <h3 className="mb-2 text-sm font-semibold text-ink-800">Deep Restart</h3>
+            <ul className="space-y-1 text-sm leading-6 text-ink-600">
+              <li>Fully restarts the supervised local runtime.</li>
+              <li>Reloads .env and .env.local.</li>
+              <li>May run pnpm db:migrate when Postgres mode is active.</li>
+              <li>Requires YUVI_DEV_SUPERVISOR=1.</li>
+            </ul>
+          </div>
+        </div>
+        <div className="mt-4 grid grid-cols-3 gap-3">
+          <Definition label="Supervisor active" value={restartStatus?.active ? "true" : "false"} />
+          <Definition label="Auto migrate" value={restartStatus?.autoMigrate ? "true" : "false"} />
+          <Definition
+            label="Restart supported"
+            value={restartSupported === undefined ? "unknown" : restartSupported ? "true" : "false"}
+          />
+          <Definition label="Runtime env dir" value={restartStatus?.runtimeEnvDir ?? "unknown"} />
+          <Definition
+            label="Memory repository"
+            value={settings.data?.memory.activeMemoryRepository ?? "unknown"}
+          />
+          <Definition
+            label="Database configured"
+            value={settings.data?.memory.databaseUrlConfigured ? "true" : "false"}
+          />
+        </div>
+        <Notice
+          tone="info"
+          title="Deep Restart Runtime"
+          message="Deep Restart reloads .env/.env.local, may run pnpm db:migrate, and restarts the local supervised runtime. Development only."
+        />
+        <div className="mt-3 flex items-center gap-3">
+          <button
+            className="button-primary"
+            type="button"
+            disabled={deepRestartDisabled}
+            onClick={() => void deepRestart()}
+          >
+            {restartBusy ? "Requesting Restart" : "Deep Restart Runtime"}
+          </button>
+          {restartSupported === false && (
+            <span className="text-sm text-ink-500">
+              Start with: YUVI_DEV_SUPERVISOR=1 ./scripts/dev.sh
+            </span>
+          )}
         </div>
       </Panel>
       <Panel title="Config Layering">
@@ -2576,13 +3054,36 @@ function SettingsPage(): JSX.Element {
           title="DashScope / Embedding"
           badge="Optional / placeholder"
           actions={
-            <button
-              className="button-secondary"
-              disabled={verifying !== null}
-              onClick={() => void verify("embedding")}
-            >
-              {verifying === "embedding" ? "Verifying Embedding" : "Verify Embedding"}
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="button-secondary"
+                disabled={verifying !== null}
+                onClick={() => void verify("embedding")}
+              >
+                {verifying === "embedding" ? "Verifying Embedding" : "Verify Embedding"}
+              </button>
+              <button
+                className="button-secondary"
+                disabled={verifying !== null}
+                onClick={() => void verify("stt")}
+              >
+                {verifying === "stt" ? "Verifying STT" : "Verify STT"}
+              </button>
+              <button
+                className="button-secondary"
+                disabled={verifying !== null}
+                onClick={() => void verify("tts")}
+              >
+                {verifying === "tts" ? "Verifying TTS" : "Verify TTS"}
+              </button>
+              <button
+                className="button-secondary"
+                disabled={verifying !== null}
+                onClick={() => void verify("vision")}
+              >
+                {verifying === "vision" ? "Verifying Vision" : "Verify Vision"}
+              </button>
+            </div>
           }
         >
           <SettingsInput form={form} name="DASHSCOPE_API_BASEURL" setForm={setForm} />

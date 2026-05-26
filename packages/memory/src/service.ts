@@ -169,7 +169,49 @@ export class MemoryService {
   }
 
   async extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
-    return this.extractor.extractCandidates(input);
+    const candidates = await this.extractor.extractCandidates(input);
+    return candidates.map((candidate) => ({
+      ...candidate,
+      ...(candidate.personaId !== undefined
+        ? {}
+        : input.personaId !== undefined
+          ? { personaId: input.personaId }
+          : {}),
+      ...(candidate.subjectUserId !== undefined
+        ? {}
+        : input.subjectUserId !== undefined
+          ? { subjectUserId: input.subjectUserId }
+          : {}),
+      ...(candidate.createdByUserId !== undefined
+        ? {}
+        : input.createdByUserId !== undefined
+          ? { createdByUserId: input.createdByUserId }
+          : {}),
+      ...(candidate.speakerId !== undefined
+        ? {}
+        : input.speakerId !== undefined
+          ? { speakerId: input.speakerId }
+          : {}),
+      ...(candidate.voiceProfileId !== undefined
+        ? {}
+        : input.voiceProfileId !== undefined
+          ? { voiceProfileId: input.voiceProfileId }
+          : {}),
+      ...(candidate.sessionId !== undefined
+        ? {}
+        : input.sessionId !== undefined
+          ? { sessionId: input.sessionId }
+          : {}),
+      metadata: {
+        ...(candidate.metadata ?? {}),
+        ...(input.personaId !== undefined ? { personaId: input.personaId } : {}),
+        ...(input.subjectUserId !== undefined ? { subjectUserId: input.subjectUserId } : {}),
+        ...(input.createdByUserId !== undefined ? { createdByUserId: input.createdByUserId } : {}),
+        ...(input.speakerId !== undefined ? { speakerId: input.speakerId } : {}),
+        ...(input.voiceProfileId !== undefined ? { voiceProfileId: input.voiceProfileId } : {}),
+        ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {})
+      }
+    }));
   }
 
   getExtractorStatus(): MemoryExtractorStatus {

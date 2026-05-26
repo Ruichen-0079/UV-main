@@ -230,6 +230,11 @@ export type MemoryExtractionInput = {
   assistantMessage?: string | undefined;
   sourceTraceId?: string | null | undefined;
   timestamp?: string | undefined;
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+  createdByUserId?: string | null | undefined;
+  speakerId?: string | null | undefined;
+  voiceProfileId?: string | null | undefined;
   providerMetadata?:
     | {
         name?: string | undefined;

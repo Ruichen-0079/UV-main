@@ -22,7 +22,7 @@ STT_PROVIDER_CHAIN=dashscope,local,mock
 VISION_PROVIDER_CHAIN=xai,nvidia,local,mock
 ```
 
-The current runtime fallback path is implemented for chat, reasoning, and embedding. TTS, STT, and vision expose route/status configuration for future feature work. Mock providers are skipped unless `PROVIDER_ALLOW_MOCKS=true`.
+The current runtime fallback path is implemented for chat, reasoning, embedding, TTS, STT, and vision. Mock providers are skipped unless `PROVIDER_ALLOW_MOCKS=true`, and unconfigured real providers are reported as unavailable in the attempted-provider trace instead of silently pretending to be real.
 
 ## Why Core Does Not Import Provider SDKs
 
@@ -155,6 +155,32 @@ EMBEDDING_DIMENSIONS=1536
 
 If optional providers are missing and mocks are disabled, the registry returns an unavailable provider. `healthCheck()` reports `unavailable`, and actual calls throw normalized `ProviderError`s.
 
+## Media Runtime Routes
+
+Media routes are developer/runtime surfaces, not a finished voice product:
+
+- `POST /v1/audio/transcriptions` uses the STT chain: DashScope, local, then mock when explicitly enabled.
+- `POST /v1/voice/message` transcribes through STT, then sends the transcript through the normal message runtime. It preserves `speakerId`, `voiceProfileId`, `subjectUserId`, `createdByUserId`, and `sessionId` metadata for future identity-aware memory. It does not implement diarization or voiceprint recognition.
+- `POST /v1/tts` uses the TTS chain: xAI, local, then mock when explicitly enabled.
+- `POST /v1/vision/analyze` uses the vision chain: xAI, NVIDIA, local, then mock when explicitly enabled.
+
+All media responses include safe fallback metadata:
+
+- `capability`
+- `fallbackUsed`
+- `attemptedProviders`
+- `finalProvider`
+- `provider`
+- `model`
+- `mock`
+- `latencyMs`
+
+Attempt records include provider, model, status, safe error code, latency, and priority where known. They never include raw audio, images, API keys, Authorization headers, `DATABASE_URL`, or dashboard tokens.
+
+NVIDIA vision is a fallback interface in v1. Configure model IDs explicitly; suitable candidates may include chat-style vision models such as `meta/llama-3.2-11b-vision-instruct` or `nvidia/cosmos-reason2-8b` when available through the selected API. `nvclip` is image-text embedding/retrieval, not a chat-style vision analysis model.
+
+Local media providers are interface boundaries in v1. A local OpenAI-compatible server may be configured and reported in status, but STT/TTS/Vision runtime adapters can still return a clear unavailable error until a compatible adapter is implemented. Mock media providers remain deterministic test/offline tools only.
+
 ## Swapping Providers
 
 To add or replace a provider:
@@ -234,7 +260,8 @@ The Dashboard `Settings` page can write local development settings to `.env.loca
 - `scripts/dev.sh` loads `.env` first and `.env.local` second, so `.env.local` overrides base local values after restart.
 - `POST /settings/runtime` only accepts an allowlist of development provider and memory keys.
 - `POST /settings/runtime/reload` reloads `.env` and `.env.local`, rebuilds the active provider registry, and applies provider config without restarting the HTTP server.
-- Provider verification buttons call `POST /providers/verify/chat`, `POST /providers/verify/reasoning`, or `POST /providers/verify/embedding` explicitly.
+- Provider verification buttons call `POST /providers/verify/chat`, `POST /providers/verify/reasoning`, `POST /providers/verify/embedding`, `POST /providers/verify/stt`, `POST /providers/verify/tts`, or `POST /providers/verify/vision` explicitly.
+- `POST /providers/verify-chain/:capability` returns safe configured route order and config-only attempted-provider metadata for the selected chain.
 - Save writes `.env.local`; **Apply Now** reloads hot-reloadable provider config; **Verify** is a separate explicit remote/provider call and may consume tokens.
 - `/health` and `/providers/status` do not consume provider tokens.
 - Provider config changes can be applied with **Apply Now / Reload Runtime Config**. Memory repository, server host/port, and event bus changes remain restart-required.

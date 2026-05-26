@@ -130,11 +130,21 @@ Provider routing is priority-based. The default chain keeps DeepSeek first for c
 CHAT_PROVIDER_CHAIN=deepseek,nvidia,local,mock
 REASONING_PROVIDER_CHAIN=deepseek,nvidia,local,mock
 EMBEDDING_PROVIDER_CHAIN=openai-compatible,nvidia,local,mock
+TTS_PROVIDER_CHAIN=xai,local,mock
+STT_PROVIDER_CHAIN=dashscope,local,mock
+VISION_PROVIDER_CHAIN=xai,nvidia,local,mock
 NVIDIA_API_BASEURL=https://integrate.api.nvidia.com/v1
 LOCAL_MODEL_BASEURL=http://localhost:11434/v1
 ```
 
-Fallback metadata is returned as safe attempted-provider summaries without API keys, Authorization headers, or database URLs.
+Fallback metadata is returned as safe attempted-provider summaries without API keys, Authorization headers, raw media, or database URLs. Developer media routes are available for STT, voice message, TTS, and vision:
+
+- `POST /v1/audio/transcriptions`
+- `POST /v1/voice/message`
+- `POST /v1/tts`
+- `POST /v1/vision/analyze`
+
+These wire provider-chain fallback into the runtime, but do not implement speaker diarization, voiceprint enrollment, Tauri, or production voice/vision UX.
 
 For development Deep Restart support from the Dashboard, run `./scripts/dev.sh` with:
 
@@ -143,7 +153,7 @@ YUVI_DEV_SUPERVISOR=1
 YUVI_AUTO_MIGRATE=1
 ```
 
-Deep Restart is dev-only, requires the dashboard token when configured, reloads root env files on restart, and runs `pnpm db:migrate` automatically only when PostgreSQL memory is active and `YUVI_AUTO_MIGRATE` is not `0`.
+The Dashboard Settings page distinguishes **Apply Now** from **Deep Restart**. Apply Now reloads supported runtime config in-process and does not run migrations. Deep Restart is dev-only, requires the dashboard token when configured, reloads root env files on restart, and runs `pnpm db:migrate` automatically only when PostgreSQL memory is active and `YUVI_AUTO_MIGRATE` is not `0`.
 
 To reset development database volumes, prefer the guarded helper:
 

@@ -37,7 +37,12 @@ export type RuntimeEvent<TType extends string = EventType, TPayload = unknown> =
 
 export const UserMessagePayloadSchema = z.object({
   sessionId: z.string().min(1),
-  content: z.string().min(1)
+  content: z.string().min(1),
+  personaId: z.string().min(1).nullable().optional(),
+  subjectUserId: z.string().min(1).nullable().optional(),
+  createdByUserId: z.string().min(1).nullable().optional(),
+  speakerId: z.string().min(1).nullable().optional(),
+  voiceProfileId: z.string().min(1).nullable().optional()
 });
 
 export type UserMessagePayload = z.infer<typeof UserMessagePayloadSchema>;
@@ -53,7 +58,12 @@ export const UserVoiceTranscriptPayloadSchema = z.object({
   sessionId: z.string().min(1),
   content: z.string().min(1),
   language: z.string().optional(),
-  confidence: z.number().optional()
+  confidence: z.number().optional(),
+  personaId: z.string().min(1).nullable().optional(),
+  subjectUserId: z.string().min(1).nullable().optional(),
+  createdByUserId: z.string().min(1).nullable().optional(),
+  speakerId: z.string().min(1).nullable().optional(),
+  voiceProfileId: z.string().min(1).nullable().optional()
 });
 
 export type UserVoiceTranscriptPayload = z.infer<typeof UserVoiceTranscriptPayloadSchema>;

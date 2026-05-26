@@ -114,6 +114,8 @@ Memory records now include identity foundation fields for future multi-user and 
 
 Single-user behavior remains unchanged. When no identity is supplied, YUVI defaults `personaId` to `default-persona` and user fields to `default-user`. Retrieval can filter by persona, subject user, speaker, session, and existing scope/scopeId so unrelated users do not mix once identity fields are present. This is foundation only; YUVI does not implement STT diarization or voiceprint recognition yet.
 
+The developer voice route (`POST /v1/voice/message`) preserves supplied `speakerId`, `voiceProfileId`, `subjectUserId`, `createdByUserId`, and `sessionId` metadata when it transcribes audio and calls the normal message runtime. `writeMemory=false` still prevents memory creation. These fields are metadata only in v1 and do not imply actual speaker recognition.
+
 Automatic extraction favors durable user information: explicit name/nickname, long-term preferences, project/provider/model choices, device or environment facts, workflow habits, communication/accessibility preferences, stable constraints, explicit important relationships, and explicit useful health/safety notes. It avoids storing trivial daily events, casual temporary moods, ambiguous guesses, and sensitive inferences that the user did not state.
 
 Current affect is short-term prompt context, not long-term memory by default. Rule-based detection can label obvious immediate states such as frustrated, anxious, confused, angry, sad, tired, excited, calm, or neutral from the current user turn. PromptBuilder may inject a compact section:

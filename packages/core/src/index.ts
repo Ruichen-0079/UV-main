@@ -59,12 +59,18 @@ export type RuntimeMemoryPort = {
     limit?: number;
     sessionId?: string;
     projectId?: string;
+    personaId?: string;
+    subjectUserId?: string;
+    speakerId?: string;
   }): Promise<Memory[]>;
   retrieveRelevantMemoriesWithMetadata?(input: {
     text: string;
     limit?: number;
     sessionId?: string;
     projectId?: string;
+    personaId?: string;
+    subjectUserId?: string;
+    speakerId?: string;
   }): Promise<MemoryRetrievalResult>;
   scoreImportance(text: string): number;
   extractCandidates?(input: {
@@ -73,6 +79,11 @@ export type RuntimeMemoryPort = {
     assistantMessage?: string | undefined;
     sourceTraceId?: string | null | undefined;
     timestamp?: string | undefined;
+    personaId?: string | null | undefined;
+    subjectUserId?: string | null | undefined;
+    createdByUserId?: string | null | undefined;
+    speakerId?: string | null | undefined;
+    voiceProfileId?: string | null | undefined;
     providerMetadata?: SafeProviderCallMetadata | undefined;
     memoryOptions?:
       | {
@@ -109,6 +120,11 @@ export type HandleUserMessageInput = {
   voiceOutput?: boolean | undefined;
   traceId?: string | undefined;
   parentId?: string | undefined;
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+  createdByUserId?: string | null | undefined;
+  speakerId?: string | null | undefined;
+  voiceProfileId?: string | null | undefined;
 };
 
 export type HandleUserMessageOptions = {
@@ -280,12 +296,22 @@ export type HandleAudioInputInput = STTInput & {
   voiceOutput?: boolean | undefined;
   traceId?: string | undefined;
   parentId?: string | undefined;
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+  createdByUserId?: string | null | undefined;
+  speakerId?: string | null | undefined;
+  voiceProfileId?: string | null | undefined;
 };
 
 export type HandleImageInputInput = VisionInput & {
   sessionId: string;
   traceId?: string | undefined;
   parentId?: string | undefined;
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+  createdByUserId?: string | null | undefined;
+  speakerId?: string | null | undefined;
+  voiceProfileId?: string | null | undefined;
 };
 
 export class RuntimeOrchestrator {
@@ -432,7 +458,8 @@ export class RuntimeOrchestrator {
           "user.message",
           {
             sessionId: input.sessionId,
-            content: input.content
+            content: input.content,
+            ...identityPayload(input)
           },
           {
             traceId: input.traceId,
@@ -480,7 +507,8 @@ export class RuntimeOrchestrator {
         sessionId: input.sessionId,
         content: transcript.text,
         language: transcript.language,
-        confidence: transcript.confidence
+        confidence: transcript.confidence,
+        ...identityPayload(input)
       },
       {
         traceId: input.traceId,
@@ -734,6 +762,7 @@ export class RuntimeOrchestrator {
           assistantMessage: reply.payload.content,
           sourceTraceId: sourceEvent.traceId,
           timestamp: new Date().toISOString(),
+          ...identityPayload(sourceEvent.payload),
           providerMetadata: isSafeProviderCallMetadata(reply.payload.provider)
             ? reply.payload.provider
             : undefined,
@@ -884,7 +913,8 @@ export class RuntimeOrchestrator {
           text: event.payload.content,
           limit: 5,
           sessionId: event.payload.sessionId,
-          projectId: "yuvi-runtime"
+          projectId: "yuvi-runtime",
+          ...retrievalIdentityPayload(event.payload)
         });
         memoryContext = {
           retrievedMemoryCountRaw: result.rawCount,
@@ -920,7 +950,8 @@ export class RuntimeOrchestrator {
           text: event.payload.content,
           limit: 5,
           sessionId: event.payload.sessionId,
-          projectId: "yuvi-runtime"
+          projectId: "yuvi-runtime",
+          ...retrievalIdentityPayload(event.payload)
         });
         memoryContext = {
           ...emptyMemoryContext(),
@@ -1554,6 +1585,36 @@ function toIsoString(value: Date | string | null | undefined): string | null | u
     return null;
   }
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
+type RuntimeIdentityPayload = {
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+  createdByUserId?: string | null | undefined;
+  speakerId?: string | null | undefined;
+  voiceProfileId?: string | null | undefined;
+};
+
+function identityPayload(input: RuntimeIdentityPayload): RuntimeIdentityPayload {
+  return {
+    ...(input.personaId !== undefined ? { personaId: input.personaId } : {}),
+    ...(input.subjectUserId !== undefined ? { subjectUserId: input.subjectUserId } : {}),
+    ...(input.createdByUserId !== undefined ? { createdByUserId: input.createdByUserId } : {}),
+    ...(input.speakerId !== undefined ? { speakerId: input.speakerId } : {}),
+    ...(input.voiceProfileId !== undefined ? { voiceProfileId: input.voiceProfileId } : {})
+  };
+}
+
+function retrievalIdentityPayload(input: RuntimeIdentityPayload): {
+  personaId?: string;
+  subjectUserId?: string;
+  speakerId?: string;
+} {
+  return {
+    ...(typeof input.personaId === "string" ? { personaId: input.personaId } : {}),
+    ...(typeof input.subjectUserId === "string" ? { subjectUserId: input.subjectUserId } : {}),
+    ...(typeof input.speakerId === "string" ? { speakerId: input.speakerId } : {})
+  };
 }
 
 function previewText(text: string): string {

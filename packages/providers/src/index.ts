@@ -4,6 +4,7 @@ export type {
   ProviderHealth,
   ProviderHealthStatus,
   ProviderMetadata,
+  ProviderAttempt,
   TextMessage,
   TextMessageRole,
   TokenUsage

@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
 import { redactValue } from "../services/dashboard.js";
@@ -175,6 +175,18 @@ export async function registerProviderRoutes(
     }
   });
 
+  app.post("/providers/verify/tts", async (request, reply) => {
+    return verifyConfigOnlyCapability("tts", request, reply, context, config);
+  });
+
+  app.post("/providers/verify/stt", async (request, reply) => {
+    return verifyConfigOnlyCapability("stt", request, reply, context, config);
+  });
+
+  app.post("/providers/verify/vision", async (request, reply) => {
+    return verifyConfigOnlyCapability("vision", request, reply, context, config);
+  });
+
   app.post("/providers/verify-chain/:capability", async (request, reply) => {
     if (!requireDashboardDevToken(config, request, reply)) {
       return reply;
@@ -193,12 +205,54 @@ export async function registerProviderRoutes(
       redactValue({
         ok: true,
         capability,
+        configOnly: true,
         routes,
+        attemptedProviders: routes.map((route) => ({
+          provider: route.provider,
+          model: route.model,
+          status: route.available ? "success" : "unavailable",
+          configured: route.configured,
+          enabled: route.enabled,
+          priority: route.priority,
+          errorCode: route.available ? undefined : "PROVIDER_UNAVAILABLE"
+        })),
         message:
           "Chain verification is explicit. This v1 endpoint returns safe configured route order; use individual Verify buttons for live provider calls."
       })
     );
   });
+}
+
+function verifyConfigOnlyCapability(
+  capability: "tts" | "stt" | "vision",
+  request: FastifyRequest,
+  reply: FastifyReply,
+  context: AppContext,
+  config: ServerConfig
+): unknown {
+  if (!requireDashboardDevToken(config, request, reply)) {
+    return reply;
+  }
+
+  const status = context.providers.getStatus().providers[capability];
+  return reply.send(
+    redactValue({
+      ok: Boolean(status.available),
+      provider: status.provider,
+      capability,
+      model: status.model,
+      mock: Boolean(status.mock),
+      configured: Boolean(status.configured),
+      missingFields: status.missingFields ?? [],
+      configOnly: true,
+      message:
+        capability === "stt"
+          ? "STT verification is config-only in v1; upload audio to /v1/audio/transcriptions to test runtime transcription."
+          : capability === "vision"
+            ? "Vision verification is config-only in v1; use /v1/vision/analyze with an explicit image to test runtime analysis."
+            : "TTS verification is config-only in v1; use /v1/tts with explicit text to test runtime synthesis."
+    })
+  );
 }
 
 function safeProviderError(error: unknown): string {

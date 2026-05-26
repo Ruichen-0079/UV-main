@@ -99,6 +99,119 @@ describe("server", () => {
       expect(providers.body).not.toContain("test_deepseek_secret");
       expect(providers.body).not.toContain("Authorization");
 
+      const stt = await app.inject({
+        method: "POST",
+        url: "/v1/audio/transcriptions",
+        payload: {
+          sessionId: "voice",
+          mockText: "烦死了，这个报错我看不懂",
+          language: "zh",
+          speakerId: "speaker-1",
+          voiceProfileId: "voice-1",
+          subjectUserId: "user-1"
+        }
+      });
+      expect(stt.statusCode).toBe(200);
+      expect(stt.json()).toMatchObject({
+        text: "烦死了，这个报错我看不懂",
+        capability: "stt",
+        provider: "mock",
+        mock: true,
+        speakerId: "speaker-1",
+        voiceProfileId: "voice-1"
+      });
+      expect(stt.json().attemptedProviders.at(-1)).toMatchObject({
+        provider: "mock",
+        status: "success"
+      });
+      expect(stt.body).not.toContain("test_deepseek_secret");
+
+      const beforeVoiceMemories = await app.inject({
+        method: "GET",
+        url: "/memory/recent?limit=20"
+      });
+      const voiceMessage = await app.inject({
+        method: "POST",
+        url: "/v1/voice/message",
+        payload: {
+          sessionId: "voice",
+          mockText: "烦死了，这个报错我看不懂",
+          language: "zh",
+          speakerId: "speaker-1",
+          voiceProfileId: "voice-1",
+          subjectUserId: "user-1",
+          options: {
+            readMemory: false,
+            writeMemory: false,
+            promptPreview: true
+          }
+        }
+      });
+      expect(voiceMessage.statusCode).toBe(200);
+      expect(voiceMessage.json().transcription).toMatchObject({
+        text: "烦死了，这个报错我看不懂",
+        finalProvider: "mock"
+      });
+      expect(voiceMessage.json().reply).toContain("Mock reply");
+      expect(voiceMessage.json().promptPreview.currentAffect).toMatchObject({
+        affectLabel: expect.stringMatching(/frustrated|confused/)
+      });
+      expect(voiceMessage.json().chat).toMatchObject({
+        capability: "chat",
+        mock: true
+      });
+      const afterVoiceMemories = await app.inject({
+        method: "GET",
+        url: "/memory/recent?limit=20"
+      });
+      expect(afterVoiceMemories.json().memories).toHaveLength(
+        beforeVoiceMemories.json().memories.length
+      );
+      expect(voiceMessage.body).not.toContain("test_deepseek_secret");
+
+      const tts = await app.inject({
+        method: "POST",
+        url: "/v1/tts",
+        payload: {
+          sessionId: "voice",
+          text: "hello"
+        }
+      });
+      expect(tts.statusCode).toBe(200);
+      expect(tts.json()).toMatchObject({
+        capability: "tts",
+        provider: "mock",
+        mock: true,
+        mimeType: "audio/wav"
+      });
+
+      const vision = await app.inject({
+        method: "POST",
+        url: "/v1/vision/analyze",
+        payload: {
+          sessionId: "vision",
+          imageBase64: "",
+          prompt: "Describe"
+        }
+      });
+      expect(vision.statusCode).toBe(200);
+      expect(vision.json()).toMatchObject({
+        capability: "vision",
+        provider: "mock",
+        mock: true,
+        analysis: "Mock image analysis."
+      });
+
+      const verifyStt = await app.inject({
+        method: "POST",
+        url: "/providers/verify/stt"
+      });
+      expect(verifyStt.statusCode).toBe(200);
+      expect(verifyStt.json()).toMatchObject({
+        capability: "stt",
+        configOnly: true
+      });
+
       const memory = await app.inject({
         method: "POST",
         url: "/memory",
@@ -751,6 +864,42 @@ describe("server", () => {
       });
       expect(message.json().setup).toContain("PROVIDER_ALLOW_MOCKS=true");
       expect(message.body).not.toContain("API_KEY");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns clear STT setup errors when media mocks are disabled", async () => {
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      EMBEDDING_PROVIDER: "openai-compatible",
+      DEFAULT_EMBEDDING_PROVIDER: "openai-compatible"
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/audio/transcriptions",
+        payload: {
+          sessionId: "voice",
+          mockText: "this should not be used"
+        }
+      });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({
+        error: "provider_unavailable",
+        capability: "stt"
+      });
+      expect(response.json().attemptedProviders).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            provider: "dashscope",
+            status: "unavailable"
+          })
+        ])
+      );
+      expect(response.body).not.toContain("API_KEY");
+      expect(response.body).not.toContain("Authorization");
     } finally {
       await app.close();
     }

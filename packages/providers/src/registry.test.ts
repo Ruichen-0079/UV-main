@@ -306,4 +306,50 @@ describe("ProviderRegistry", () => {
     });
     expect(JSON.stringify(routes)).not.toContain("nvidia-secret");
   });
+
+  it("uses mock STT/TTS/Vision runtime fallback only when explicitly enabled", async () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "test",
+      PROVIDER_ALLOW_MOCKS: "true",
+      DEFAULT_STT_PROVIDER: "dashscope",
+      DEFAULT_TTS_PROVIDER: "xai",
+      DEFAULT_VISION_PROVIDER: "xai",
+      STT_PROVIDER_CHAIN: "dashscope,local,mock",
+      TTS_PROVIDER_CHAIN: "xai,local,mock",
+      VISION_PROVIDER_CHAIN: "xai,nvidia,local,mock"
+    });
+
+    const transcript = await registry.getSTTProvider().transcribeAudio({
+      metadata: { mockTranscription: "烦死了，这个报错我看不懂" }
+    });
+    expect(transcript.text).toContain("烦死了");
+    expect(transcript.fallbackUsed).toBe(true);
+    expect(transcript.finalProvider).toBe("mock");
+    expect(transcript.attemptedProviders?.at(-1)).toMatchObject({
+      provider: "mock",
+      status: "success"
+    });
+
+    const speech = await registry.getTTSProvider().synthesizeSpeech({ text: "hello" });
+    expect(speech.mimeType).toBe("audio/wav");
+    expect(speech.finalProvider).toBe("mock");
+
+    const vision = await registry.getVisionProvider().analyzeImage({ prompt: "describe" });
+    expect(vision.text).toContain("Mock image analysis");
+    expect(vision.finalProvider).toBe("mock");
+  });
+
+  it("does not silently mock STT when mock fallback is disabled", async () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_STT_PROVIDER: "dashscope",
+      STT_PROVIDER_CHAIN: "dashscope,local,mock"
+    });
+
+    await expect(registry.getSTTProvider().transcribeAudio({})).rejects.toMatchObject({
+      capability: "stt",
+      code: "PROVIDER_UNAVAILABLE"
+    });
+  });
 });

@@ -40,10 +40,13 @@ export type ProviderRouteStatus = ProviderHealth & {
 export type ProviderAttempt = {
   provider: string;
   model?: string | undefined;
-  status: "success" | "failed" | "skipped";
+  status: "success" | "failed" | "skipped" | "unavailable";
   errorCode?: string | undefined;
   error?: string | undefined;
   latencyMs?: number | undefined;
+  configured?: boolean | undefined;
+  enabled?: boolean | undefined;
+  priority?: number | undefined;
 };
 
 export type TokenUsage = {

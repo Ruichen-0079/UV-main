@@ -493,6 +493,10 @@ export function createProviderRegistryFromEnv(env: ProviderEnv = process.env): P
 export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderRegistryConfig {
   const environment = parseEnvironment(env["NODE_ENV"]);
   const allowMocks = parseBoolean(env["PROVIDER_ALLOW_MOCKS"]);
+  const defaultEmbeddingProvider =
+    env["DEFAULT_EMBEDDING_PROVIDER"] ??
+    env["EMBEDDING_PROVIDER"] ??
+    (allowMocks ? "mock" : "openai-compatible");
 
   return {
     environment,
@@ -505,10 +509,7 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       tts: env["DEFAULT_TTS_PROVIDER"] ?? "xai",
       stt: env["DEFAULT_STT_PROVIDER"] ?? "dashscope",
       vision: env["DEFAULT_VISION_PROVIDER"] ?? "xai",
-      embedding:
-        env["DEFAULT_EMBEDDING_PROVIDER"] ??
-        env["EMBEDDING_PROVIDER"] ??
-        (allowMocks ? "mock" : "openai-compatible")
+      embedding: defaultEmbeddingProvider
     },
     chains: {
       chat: parseProviderChain(
@@ -523,7 +524,9 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       ),
       embedding: parseProviderChain(
         env["EMBEDDING_PROVIDER_CHAIN"],
-        ["openai-compatible", "nvidia", "local", "mock"],
+        defaultEmbeddingProvider === "mock"
+          ? ["mock"]
+          : ["openai-compatible", "nvidia", "local", "mock"],
         allowMocks
       ),
       tts: parseProviderChain(env["TTS_PROVIDER_CHAIN"], ["xai", "local", "mock"], allowMocks),
@@ -706,6 +709,16 @@ const ttsProviderFactories: Record<string, ProviderFactory<TTSProvider>> = {
       model: config.xai.ttsModel,
       defaultVoice: config.xai.ttsVoice
     });
+  },
+  local(config) {
+    if (!config.local.baseUrl || !config.local.ttsModel) {
+      return undefined;
+    }
+
+    return new UnimplementedTTSProvider(
+      "local",
+      "Local TTS provider is configured, but runtime synthesis is not implemented in v1."
+    );
   }
 };
 
@@ -721,6 +734,16 @@ const sttProviderFactories: Record<string, ProviderFactory<STTProvider>> = {
       model: config.dashscope.sttModel,
       includeRawResponse: config.includeRawProviderResponses
     });
+  },
+  local(config) {
+    if (!config.local.baseUrl || !config.local.sttModel) {
+      return undefined;
+    }
+
+    return new UnimplementedSTTProvider(
+      "local",
+      "Local STT provider is configured, but runtime transcription is not implemented in v1."
+    );
   }
 };
 
@@ -736,6 +759,26 @@ const visionProviderFactories: Record<string, ProviderFactory<VisionProvider>> =
       model: config.xai.visionModel,
       includeRawResponse: config.includeRawProviderResponses
     });
+  },
+  nvidia(config) {
+    if (!config.nvidia.apiKey || !config.nvidia.visionModel) {
+      return undefined;
+    }
+
+    return new UnimplementedVisionProvider(
+      "nvidia",
+      "NVIDIA vision provider is configured, but chat-style image analysis compatibility is not implemented in v1."
+    );
+  },
+  local(config) {
+    if (!config.local.baseUrl || !config.local.visionModel) {
+      return undefined;
+    }
+
+    return new UnimplementedVisionProvider(
+      "local",
+      "Local vision provider is configured, but runtime image analysis is not implemented in v1."
+    );
   }
 };
 
@@ -802,39 +845,43 @@ function resolveReasoningProvider(config: ProviderRegistryConfig): ReasoningProv
 }
 
 function resolveTTSProvider(config: ProviderRegistryConfig): TTSProvider {
-  return resolveConfiguredProvider({
-    config,
-    capability: "tts",
-    name: config.defaults.tts,
-    factories: ttsProviderFactories,
-    createMock: createMockTTSProvider,
-    createUnavailable: (name) =>
-      new UnavailableTTSProvider(name, unavailableProviderMessage("tts", name, config))
-  });
+  return new FallbackTTSProvider(
+    createProviderChain(
+      config,
+      "tts",
+      ttsProviderFactories,
+      createMockTTSProvider,
+      (name) => new UnavailableTTSProvider(name, unavailableProviderMessage("tts", name, config))
+    ),
+    config.defaults.tts
+  );
 }
 
 function resolveSTTProvider(config: ProviderRegistryConfig): STTProvider {
-  return resolveConfiguredProvider({
-    config,
-    capability: "stt",
-    name: config.defaults.stt,
-    factories: sttProviderFactories,
-    createMock: createMockSTTProvider,
-    createUnavailable: (name) =>
-      new UnavailableSTTProvider(name, unavailableProviderMessage("stt", name, config))
-  });
+  return new FallbackSTTProvider(
+    createProviderChain(
+      config,
+      "stt",
+      sttProviderFactories,
+      createMockSTTProvider,
+      (name) => new UnavailableSTTProvider(name, unavailableProviderMessage("stt", name, config))
+    ),
+    config.defaults.stt
+  );
 }
 
 function resolveVisionProvider(config: ProviderRegistryConfig): VisionProvider {
-  return resolveConfiguredProvider({
-    config,
-    capability: "vision",
-    name: config.defaults.vision,
-    factories: visionProviderFactories,
-    createMock: createMockVisionProvider,
-    createUnavailable: (name) =>
-      new UnavailableVisionProvider(name, unavailableProviderMessage("vision", name, config))
-  });
+  return new FallbackVisionProvider(
+    createProviderChain(
+      config,
+      "vision",
+      visionProviderFactories,
+      createMockVisionProvider,
+      (name) =>
+        new UnavailableVisionProvider(name, unavailableProviderMessage("vision", name, config))
+    ),
+    config.defaults.vision
+  );
 }
 
 function resolveEmbeddingProvider(config: ProviderRegistryConfig): EmbeddingProvider {
@@ -947,7 +994,7 @@ function resolveConfiguredProvider<TProvider>(input: {
     return provider;
   }
 
-  if (input.config.allowMocks) {
+  if (input.config.allowMocks && input.name === "mock") {
     return input.createMock(input.name);
   }
 
@@ -1021,6 +1068,72 @@ class FallbackReasoningProvider implements ReasoningProvider {
   }
 }
 
+class FallbackTTSProvider implements TTSProvider {
+  readonly name: string;
+
+  constructor(
+    private readonly providers: TTSProvider[],
+    name?: string
+  ) {
+    this.name = name ?? providers[0]?.name ?? "unavailable";
+  }
+
+  async healthCheck(): Promise<ProviderHealth> {
+    return (
+      this.providers[0]?.healthCheck() ??
+      providerHealth("unavailable", "unavailable", "No TTS providers configured.")
+    );
+  }
+
+  async synthesizeSpeech(input: TTSInput): Promise<TTSOutput> {
+    return runProviderChain(this.providers, "tts", (provider) => provider.synthesizeSpeech(input));
+  }
+}
+
+class FallbackSTTProvider implements STTProvider {
+  readonly name: string;
+
+  constructor(
+    private readonly providers: STTProvider[],
+    name?: string
+  ) {
+    this.name = name ?? providers[0]?.name ?? "unavailable";
+  }
+
+  async healthCheck(): Promise<ProviderHealth> {
+    return (
+      this.providers[0]?.healthCheck() ??
+      providerHealth("unavailable", "unavailable", "No STT providers configured.")
+    );
+  }
+
+  async transcribeAudio(input: STTInput): Promise<STTOutput> {
+    return runProviderChain(this.providers, "stt", (provider) => provider.transcribeAudio(input));
+  }
+}
+
+class FallbackVisionProvider implements VisionProvider {
+  readonly name: string;
+
+  constructor(
+    private readonly providers: VisionProvider[],
+    name?: string
+  ) {
+    this.name = name ?? providers[0]?.name ?? "unavailable";
+  }
+
+  async healthCheck(): Promise<ProviderHealth> {
+    return (
+      this.providers[0]?.healthCheck() ??
+      providerHealth("unavailable", "unavailable", "No vision providers configured.")
+    );
+  }
+
+  async analyzeImage(input: VisionInput): Promise<VisionOutput> {
+    return runProviderChain(this.providers, "vision", (provider) => provider.analyzeImage(input));
+  }
+}
+
 class FallbackEmbeddingProvider implements EmbeddingProvider {
   readonly name: string;
   readonly dimensions: number;
@@ -1082,7 +1195,7 @@ async function runProviderChain<
   const attempts: ProviderAttempt[] = [];
   let lastError: unknown;
 
-  for (const provider of providers) {
+  for (const [index, provider] of providers.entries()) {
     const startedAt = performance.now();
     try {
       const output = await operation(provider);
@@ -1091,7 +1204,9 @@ async function runProviderChain<
         provider: provider.name,
         model: output.model,
         status: "success",
-        latencyMs: output.latencyMs ?? latencyMs
+        latencyMs: output.latencyMs ?? latencyMs,
+        enabled: true,
+        priority: index + 1
       });
       return {
         ...output,
@@ -1110,10 +1225,16 @@ async function runProviderChain<
       const providerError = error instanceof ProviderError ? error : null;
       attempts.push({
         provider: providerError?.provider ?? provider.name,
-        status: "failed",
+        status:
+          providerError?.code === ProviderErrorCode.ProviderUnavailable &&
+          providerError.statusCode === undefined
+            ? "unavailable"
+            : "failed",
         errorCode: providerError?.code ?? "PROVIDER_UNAVAILABLE",
         error: safeProviderErrorMessage(error),
-        latencyMs: Math.round(performance.now() - startedAt)
+        latencyMs: Math.round(performance.now() - startedAt),
+        enabled: true,
+        priority: index + 1
       });
     }
   }
@@ -1121,7 +1242,7 @@ async function runProviderChain<
   const message = `All ${capability} providers failed: ${attempts
     .map((attempt) => `${attempt.provider}:${attempt.errorCode ?? attempt.status}`)
     .join(", ")}`;
-  throw new ProviderError({
+  const providerError = new ProviderError({
     provider: providers[0]?.name ?? "provider-chain",
     capability,
     code:
@@ -1129,6 +1250,8 @@ async function runProviderChain<
     message,
     retryable: false
   });
+  Object.assign(providerError, { attemptedProviders: attempts });
+  throw providerError;
 }
 
 class UnimplementedChatProvider implements ChatProvider {
@@ -1521,8 +1644,10 @@ export function createMockTTSProvider(name = "mock-tts"): TTSProvider {
     async synthesizeSpeech(_input: TTSInput) {
       return {
         audio: new Uint8Array(),
+        audioBase64: "",
         mimeType: "audio/wav",
         durationMs: 0,
+        model: "mock",
         latencyMs: 0
       };
     }
@@ -1535,10 +1660,17 @@ export function createMockSTTProvider(name = "mock-stt"): STTProvider {
     async healthCheck() {
       return providerHealth(name, "healthy", "Mock STT provider is available.");
     },
-    async transcribeAudio(_input: STTInput) {
+    async transcribeAudio(input: STTInput) {
+      const metadataText = input.metadata?.["mockTranscription"];
+      const text =
+        typeof metadataText === "string" && metadataText.trim()
+          ? metadataText
+          : (decodeMockText(input.audioBase64) ?? "Mock transcription.");
       return {
-        text: "",
-        confidence: 0,
+        text,
+        language: input.language,
+        confidence: 1,
+        model: "mock",
         latencyMs: 0
       };
     }
@@ -1555,6 +1687,7 @@ export function createMockVisionProvider(name = "mock-vision"): VisionProvider {
       return {
         text: "Mock image analysis.",
         labels: [],
+        model: "mock",
         latencyMs: 0
       };
     }
@@ -1789,6 +1922,18 @@ function stableMockVector(text: string, dimensions: number): number[] {
     const value = Math.sin(seed + index * 101) * 10000;
     return Number((value - Math.floor(value)).toFixed(6));
   });
+}
+
+function decodeMockText(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    const decoded = Buffer.from(value, "base64").toString("utf8").trim();
+    return decoded || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function trimTrailingSlash(value: string): string {
