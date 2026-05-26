@@ -47,6 +47,15 @@ export {
   relationshipSearchText,
   type MemoryRelationshipSuggestion
 } from "./relationships.js";
+export {
+  MemoryMaintenanceService,
+  getMemoryHealth,
+  runMemoryMaintenance,
+  type MemoryHealthSummary,
+  type MemoryMaintenanceOptions,
+  type MemoryMaintenanceSummary,
+  type MemoryMaintenanceWarning
+} from "./maintenance.js";
 export { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
 export {
   InMemoryMemoryRepository,

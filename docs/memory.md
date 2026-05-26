@@ -171,7 +171,35 @@ Superseded memories are retained for history/debug but excluded from normal prom
 
 Candidate Review shows possible supersessions, contradictions, confidence, reason, and safe old-memory previews when available. This remains developer/debug tooling; normal runtime decisions are still only `stored` or `rejected`.
 
-Full graph reasoning over `supersedes`, `supersededBy`, and `contradicts` is future work. Automatic expiry and retention scheduling are also future work; forgetting is status-based for now.
+Full graph reasoning over `supersedes`, `supersededBy`, and `contradicts` is future work. Automatic background retention scheduling is also future work; forgetting is status-based for now.
+
+## Memory Maintenance v1
+
+Memory Maintenance v1 is a safe cleanup pass for long-term memory. It never hard-deletes records. Instead, it marks elapsed memories, reports health, and audits obvious supersession inconsistencies so the memory store stays understandable without losing history.
+
+Run it from the repository root:
+
+```bash
+pnpm memory:maintenance -- --dry-run
+pnpm memory:maintenance
+pnpm memory:maintenance -- --limit 100
+pnpm memory:maintenance -- --scope project --scopeId yuvi-runtime
+```
+
+Dry-run mode is the recommended first step. It scans the active repository and reports `scanned`, `expired`, `stale`, `supersessionWarnings`, `skipped`, and `failed` without modifying data. The script prints safe repository/provider-style metadata only; it does not print API keys, tokens, Authorization headers, `DATABASE_URL`, or raw vectors.
+
+Expired and stale mean different things:
+
+- `expired`: an `active` memory whose `expiresAt` is before the maintenance `now`. A non-dry-run marks it `status=expired`, updates `updatedAt`, and writes safe metadata such as `maintenanceReason="expiresAt elapsed"` and `expiredByMaintenance=true`.
+- `stale`: an `active` `episodic / recall` memory whose `validUntil` is before `now`. It is no longer current, but it is not marked expired unless `expiresAt` has also elapsed. Maintenance reports it and may add `staleByValidity=true` metadata.
+
+Retrieval behavior stays the same. Normal prompt injection excludes `forgotten`, `expired`, `superseded`, archived, and stale episodic memories. Historical-intent retrieval can include stale episodic memories through `includeHistoricalEpisodic`, but forgotten memories remain excluded by default.
+
+Maintenance also audits supersession state. It can safely fix active memories that already have `supersededBy` set and superseded memories missing `supersededAt`. It reports memories that claim to supersede missing or deleted IDs as warnings only.
+
+The Dashboard Memory page shows a lightweight health summary: active, expired, archived, superseded, forgotten, stale episodic, and missing embedding counts. In development, `POST /memory/maintenance/run` is protected like other sensitive dashboard actions and can run dry-run or real maintenance from the UI.
+
+Recommended scheduling is manual for now: run a dry run, inspect the summary, then run the non-dry command when it looks right. A background retention scheduler is future work and is not implemented in v1.
 
 ## Manual Management
 

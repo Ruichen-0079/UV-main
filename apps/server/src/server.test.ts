@@ -1028,6 +1028,14 @@ describe("server", () => {
       expect(blockedVerify.statusCode).toBe(401);
       expect(blockedVerify.body).not.toContain("dev-token");
 
+      const blockedMaintenance = await app.inject({
+        method: "POST",
+        url: "/memory/maintenance/run",
+        payload: { dryRun: true }
+      });
+      expect(blockedMaintenance.statusCode).toBe(401);
+      expect(blockedMaintenance.body).not.toContain("dev-token");
+
       const allowedVerify = await app.inject({
         method: "POST",
         url: "/providers/verify/chat",
@@ -1041,6 +1049,30 @@ describe("server", () => {
         capability: "chat"
       });
       expect(allowedVerify.body).not.toContain("dev-token");
+
+      const allowedMaintenance = await app.inject({
+        method: "POST",
+        url: "/memory/maintenance/run",
+        headers: {
+          "X-YUVI-Dev-Token": "dev-token"
+        },
+        payload: { dryRun: true, limit: 10 }
+      });
+      expect(allowedMaintenance.statusCode).toBe(200);
+      expect(allowedMaintenance.json()).toMatchObject({
+        ok: true,
+        repository: "in-memory",
+        summary: {
+          dryRun: true,
+          scanned: expect.any(Number),
+          expired: expect.any(Number),
+          stale: expect.any(Number),
+          supersessionWarnings: expect.any(Number),
+          skipped: expect.any(Number),
+          failed: 0
+        }
+      });
+      expect(allowedMaintenance.body).not.toContain("dev-token");
     } finally {
       await app.close();
     }

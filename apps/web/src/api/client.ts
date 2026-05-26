@@ -622,6 +622,36 @@ export type RuntimeSettingsReloadResponse = {
   settings: RuntimeSettingsResponse;
 };
 
+export type MemoryHealthSummary = {
+  scanned: number;
+  active: number;
+  expired: number;
+  archived: number;
+  superseded: number;
+  forgotten: number;
+  staleEpisodic: number;
+  missingEmbedding: number;
+};
+
+export type MemoryMaintenanceSummary = {
+  dryRun: boolean;
+  scanned: number;
+  expired: number;
+  stale: number;
+  supersessionWarnings: number;
+  skipped: number;
+  failed: number;
+  expiredIds: string[];
+  staleIds: string[];
+  warnings: Array<{
+    memoryId: string;
+    kind: string;
+    message: string;
+    relatedId?: string;
+    fixed?: boolean;
+  }>;
+};
+
 const apiBaseUrl = import.meta.env["VITE_API_BASE_URL"] ?? "/api";
 const explicitWebSocketBaseUrl = import.meta.env["VITE_WS_BASE_URL"] as string | undefined;
 let dashboardDevToken = "";
@@ -840,6 +870,36 @@ export const apiClient = {
     return request<{ ok: boolean; deleted: number }>("/memory/bulk-delete", {
       method: "POST",
       body: JSON.stringify({ ids })
+    });
+  },
+
+  getMemoryMaintenanceHealth(): Promise<{
+    ok: boolean;
+    repository: string;
+    health: MemoryHealthSummary;
+  }> {
+    return request<{ ok: boolean; repository: string; health: MemoryHealthSummary }>(
+      "/memory/maintenance/health"
+    );
+  },
+
+  runMemoryMaintenance(input: {
+    dryRun: boolean;
+    limit?: number;
+    scope?: string;
+    scopeId?: string;
+  }): Promise<{
+    ok: boolean;
+    repository: string;
+    summary: MemoryMaintenanceSummary;
+  }> {
+    return request<{
+      ok: boolean;
+      repository: string;
+      summary: MemoryMaintenanceSummary;
+    }>("/memory/maintenance/run", {
+      method: "POST",
+      body: JSON.stringify(input)
     });
   },
 

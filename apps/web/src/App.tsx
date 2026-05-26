@@ -7,6 +7,8 @@ import {
   type HealthResponse,
   type LayeredSetting,
   type MemoryCandidateReview,
+  type MemoryHealthSummary,
+  type MemoryMaintenanceSummary,
   type MemoryRecord,
   type ProviderCallMetadata,
   type ProviderVerificationResponse,
@@ -494,9 +496,12 @@ function MemoryPage(props: {
   const [detailLoading, setDetailLoading] = useState(false);
   const [busyMemoryId, setBusyMemoryId] = useState<string | null>(null);
   const [busyCandidateId, setBusyCandidateId] = useState<string | null>(null);
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
+  const [maintenanceResult, setMaintenanceResult] = useState<MemoryMaintenanceSummary | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const candidates = useAsyncData(() => apiClient.listRecentMemoryCandidates(20), []);
+  const maintenanceHealth = useAsyncData(() => apiClient.getMemoryMaintenanceHealth(), []);
   const memoryMode = memoryModeFromHealth(props.health);
 
   useEffect(() => {
@@ -867,6 +872,7 @@ function MemoryPage(props: {
 
   async function refreshMemories(): Promise<void> {
     await props.state.refresh();
+    await maintenanceHealth.refresh();
     if (query.trim()) {
       const result = await apiClient.searchMemories(query.trim(), {
         type: typeFilter,
@@ -920,6 +926,30 @@ function MemoryPage(props: {
     setResultSource("/memory/recent");
   }
 
+  async function runMaintenance(dryRun: boolean): Promise<void> {
+    if (!dryRun && !window.confirm("Run memory maintenance and mark eligible records expired?")) {
+      return;
+    }
+    setMaintenanceBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const result = await apiClient.runMemoryMaintenance({
+        dryRun,
+        limit: 100,
+        ...(scopeFilter !== "all" ? { scope: scopeFilter } : {}),
+        ...(scopeIdFilter.trim() ? { scopeId: scopeIdFilter.trim() } : {})
+      });
+      setMaintenanceResult(result.summary);
+      setSuccess(dryRun ? "Maintenance dry run completed." : "Maintenance completed.");
+      await refreshMemories();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Memory maintenance failed");
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  }
+
   return (
     <PageShell title="Memory" subtitle="Manual memory management console for development.">
       <div className="grid grid-cols-3 gap-4">
@@ -946,6 +976,42 @@ function MemoryPage(props: {
         title="Memory mode"
         message="in-memory resets on server restart. postgres persists after DATABASE_URL is configured and pnpm db:migrate has been applied. Do not store secrets in memory."
       />
+      <Panel title="Memory Health" badge={maintenanceHealth.data?.repository ?? memoryMode}>
+        <div className="grid grid-cols-8 gap-2 text-xs text-ink-600">
+          {memoryHealthEntries(maintenanceHealth.data?.health).map((entry) => (
+            <div key={entry.label} className="rounded-md bg-ink-50 p-2">
+              <div className="label">{entry.label}</div>
+              <div className="font-semibold text-ink-800">{entry.value}</div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            className="button-secondary"
+            type="button"
+            disabled={maintenanceBusy}
+            onClick={() => void runMaintenance(true)}
+          >
+            Run Maintenance Dry Run
+          </button>
+          <button
+            className="button-secondary"
+            type="button"
+            disabled={maintenanceBusy}
+            onClick={() => void runMaintenance(false)}
+          >
+            Run Maintenance
+          </button>
+          <span className="font-mono text-xs text-ink-500">
+            pnpm memory:maintenance -- --dry-run
+          </span>
+        </div>
+        {maintenanceResult && (
+          <div className="mt-3 rounded-md border border-ink-100 bg-ink-50 p-3 text-xs text-ink-600">
+            {`scanned=${maintenanceResult.scanned} expired=${maintenanceResult.expired} stale=${maintenanceResult.stale} supersessionWarnings=${maintenanceResult.supersessionWarnings} skipped=${maintenanceResult.skipped} failed=${maintenanceResult.failed}`}
+          </div>
+        )}
+      </Panel>
       <div className="grid grid-cols-[1fr_340px] gap-4">
         <Panel title="Memory Records">
           <div className="mb-3 grid grid-cols-[1fr_150px_170px_150px_150px_auto] gap-3">
@@ -2891,6 +2957,21 @@ function memoryModeFromHealth(health: HealthResponse | null): string {
     return "postgres";
   }
   return "unknown";
+}
+
+function memoryHealthEntries(
+  health: MemoryHealthSummary | undefined
+): Array<{ label: string; value: number }> {
+  return [
+    { label: "active", value: health?.active ?? 0 },
+    { label: "expired", value: health?.expired ?? 0 },
+    { label: "archived", value: health?.archived ?? 0 },
+    { label: "superseded", value: health?.superseded ?? 0 },
+    { label: "forgotten", value: health?.forgotten ?? 0 },
+    { label: "stale", value: health?.staleEpisodic ?? 0 },
+    { label: "missing emb", value: health?.missingEmbedding ?? 0 },
+    { label: "scanned", value: health?.scanned ?? 0 }
+  ];
 }
 
 function memoryModeDetail(mode: string): string {

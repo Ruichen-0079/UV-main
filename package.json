@@ -16,6 +16,7 @@
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:reset:dev": "bash scripts/db-reset-dev.sh",
     "memory:embed:backfill": "tsx scripts/memory-embed-backfill.ts",
+    "memory:maintenance": "tsx scripts/memory-maintenance.ts",
     "smoke:postgres": "DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi pnpm db:migrate && MEMORY_REPOSITORY=postgres DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi pnpm smoke"
   },
   "packageManager": "pnpm@9.15.4",

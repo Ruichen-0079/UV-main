@@ -10,6 +10,7 @@ import type {
   MemoryType,
   UpdateMemoryInput
 } from "@companion/memory";
+import { MemoryMaintenanceService } from "@companion/memory";
 import type { RetrievedMemoryDebug } from "@companion/memory";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
@@ -186,6 +187,24 @@ const RejectCandidateRequestSchema = z
   })
   .strict();
 
+const MaintenanceRequestSchema = z
+  .object({
+    dryRun: z.boolean().default(true),
+    limit: z.number().int().min(1).max(1000).default(100),
+    scope: MemoryScopeSchema.optional(),
+    scopeId: z.string().min(1).optional(),
+    now: z.string().min(1).optional(),
+    includeArchived: z.boolean().optional(),
+    includeSuperseded: z.boolean().optional()
+  })
+  .strict();
+
+const MaintenanceHealthQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(1000).default(1000),
+  scope: MemoryScopeSchema.optional(),
+  scopeId: z.string().min(1).optional()
+});
+
 const unsafeMetadataKeyPattern = /api[-_]?key|authorization|bearer|token|password|secret/i;
 
 export async function registerMemoryRoutes(
@@ -304,6 +323,56 @@ export async function registerMemoryRoutes(
     }
 
     return reply.send({ ok: true, deleted });
+  });
+
+  app.get("/memory/maintenance/health", async (request, reply) => {
+    const query = MaintenanceHealthQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return reply.status(400).send({ error: "invalid_request", details: query.error.flatten() });
+    }
+
+    const maintenance = new MemoryMaintenanceService(context.memoryRepository);
+    const health = await maintenance.getHealth({
+      limit: query.data.limit,
+      ...(query.data.scope ? { scope: query.data.scope as MemoryScope } : {}),
+      ...(query.data.scopeId ? { scopeId: query.data.scopeId } : {})
+    });
+    return reply.send({ ok: true, repository: context.activeMemoryRepository, health });
+  });
+
+  app.post("/memory/maintenance/run", async (request, reply) => {
+    if (config && !requireDashboardDevToken(config, request, reply)) return;
+    if (config && config.runtimeMode !== "development" && !config.dashboardDevToken) {
+      return reply.status(404).send({
+        error: "not_found",
+        message: "Memory maintenance endpoint is only available in development or secured mode."
+      });
+    }
+
+    const input = MaintenanceRequestSchema.safeParse(request.body ?? {});
+    if (!input.success) {
+      return reply.status(400).send({ error: "invalid_request", details: input.error.flatten() });
+    }
+
+    const maintenance = new MemoryMaintenanceService(context.memoryRepository);
+    const summary = await maintenance.run({
+      dryRun: input.data.dryRun,
+      limit: input.data.limit,
+      ...(input.data.scope ? { scope: input.data.scope as MemoryScope } : {}),
+      ...(input.data.scopeId ? { scopeId: input.data.scopeId } : {}),
+      ...(input.data.now ? { now: input.data.now } : {}),
+      ...(input.data.includeArchived !== undefined
+        ? { includeArchived: input.data.includeArchived }
+        : {}),
+      ...(input.data.includeSuperseded !== undefined
+        ? { includeSuperseded: input.data.includeSuperseded }
+        : {})
+    });
+    return reply.send({
+      ok: summary.failed === 0,
+      repository: context.activeMemoryRepository,
+      summary
+    });
   });
 
   app.get("/memory/candidates/recent", async (request, reply) => {

@@ -11,6 +11,7 @@ import {
   createMemoryRepositoryFromEnv,
   PostgresMemoryRepository
 } from "./repository.js";
+import { MemoryMaintenanceService } from "./maintenance.js";
 import { MemoryScorer } from "./scorer.js";
 import { createMemoryDisplayText, extractSearchKeywords, MemoryService } from "./service.js";
 import { LlmMemoryExtractor, RuleBasedMemoryExtractor } from "./extractor.js";
@@ -944,6 +945,137 @@ describe("MemoryRepository", () => {
         confidence: 0.55
       }
     });
+  });
+
+  it("marks elapsed active memories expired without deleting them", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const maintenance = new MemoryMaintenanceService(repository);
+    const memory = await repository.createMemory({
+      type: "semantic",
+      subtype: "fact",
+      content: "Temporary preference expires.",
+      source: "test",
+      status: "active",
+      expiresAt: "2026-05-20T00:00:00.000Z",
+      metadata: { safe: true }
+    });
+
+    const summary = await maintenance.run({ now: "2026-05-24T00:00:00.000Z" });
+    const updated = await repository.getMemoryById(memory.id);
+
+    expect(summary).toMatchObject({
+      scanned: 1,
+      expired: 1,
+      failed: 0
+    });
+    expect(updated).toMatchObject({
+      id: memory.id,
+      status: "expired",
+      content: "Temporary preference expires.",
+      metadata: {
+        safe: true,
+        maintenanceReason: "expiresAt elapsed",
+        expiredByMaintenance: true
+      }
+    });
+  });
+
+  it("dry-runs maintenance without modifying expired memories", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const maintenance = new MemoryMaintenanceService(repository);
+    const memory = await repository.createMemory({
+      type: "semantic",
+      content: "Dry run expired memory.",
+      source: "test",
+      status: "active",
+      expiresAt: "2026-05-20T00:00:00.000Z"
+    });
+
+    const summary = await maintenance.run({
+      dryRun: true,
+      now: "2026-05-24T00:00:00.000Z"
+    });
+    const unchanged = await repository.getMemoryById(memory.id);
+
+    expect(summary.expired).toBe(1);
+    expect(unchanged?.status).toBe("active");
+    expect(unchanged?.metadata).toEqual({});
+  });
+
+  it("reports stale episodic validity without expiring the memory", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const maintenance = new MemoryMaintenanceService(repository);
+    const memory = await repository.createMemory({
+      type: "episodic",
+      subtype: "event",
+      memoryLayer: "recall",
+      content: "用户在 2026-05-20 早上吃了早餐。",
+      source: "test",
+      status: "active",
+      validUntil: "2026-05-20T23:59:59.999Z",
+      expiresAt: "2026-05-30T00:00:00.000Z"
+    });
+
+    const summary = await maintenance.run({ now: "2026-05-24T00:00:00.000Z" });
+    const updated = await repository.getMemoryById(memory.id);
+
+    expect(summary.expired).toBe(0);
+    expect(summary.stale).toBe(1);
+    expect(updated).toMatchObject({
+      status: "active",
+      metadata: {
+        maintenanceReason: "validUntil elapsed",
+        staleByValidity: true
+      }
+    });
+  });
+
+  it("audits and safely fixes obvious supersession inconsistencies", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const maintenance = new MemoryMaintenanceService(repository);
+    const target = await repository.createMemory({
+      type: "semantic",
+      content: "Old provider choice.",
+      source: "test"
+    });
+    const activeWithSupersededBy = await repository.createMemory({
+      type: "semantic",
+      content: "Active but points at newer memory.",
+      source: "test",
+      status: "active",
+      supersededBy: target.id
+    });
+    const supersededMissingAt = await repository.createMemory({
+      type: "semantic",
+      content: "Superseded without timestamp.",
+      source: "test",
+      status: "superseded"
+    });
+    const missingRelation = await repository.createMemory({
+      type: "semantic",
+      content: "Supersedes missing memory id.",
+      source: "test",
+      supersedes: ["missing-memory-id"]
+    });
+
+    const summary = await maintenance.run({ now: "2026-05-24T00:00:00.000Z" });
+
+    expect(summary.supersessionWarnings).toBe(3);
+    expect(summary.warnings.map((warning) => warning.kind)).toEqual(
+      expect.arrayContaining([
+        "active-has-supersededBy",
+        "superseded-missing-supersededAt",
+        "supersedes-missing-memory"
+      ])
+    );
+    expect((await repository.getMemoryById(activeWithSupersededBy.id))?.status).toBe("superseded");
+    expect((await repository.getMemoryById(supersededMissingAt.id))?.supersededAt).toBeInstanceOf(
+      Date
+    );
+    expect((await repository.getMemoryById(missingRelation.id))?.supersedes).toEqual([
+      "missing-memory-id"
+    ]);
+    expect(JSON.stringify(summary)).not.toContain("Bearer");
   });
 
   it("auto-supersedes provider preferences in the same project scope", async () => {
