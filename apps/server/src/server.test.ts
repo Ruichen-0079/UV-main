@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryMaintenanceService } from "@companion/memory";
 import { loadServerConfig } from "./config.js";
 import { buildServer } from "./server.js";
 import { mkdtempSync } from "node:fs";
@@ -11,6 +12,7 @@ const createdRuntimeEnvDirs: string[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   process.env = { ...originalEnv };
   for (const dir of createdRuntimeEnvDirs.splice(0)) {
     await rm(dir, { recursive: true, force: true });
@@ -1078,6 +1080,173 @@ describe("server", () => {
     }
   });
 
+  it("keeps memory maintenance scheduler disabled by default", async () => {
+    const app = await buildTestServer();
+
+    try {
+      const status = await app.inject({ method: "GET", url: "/memory/maintenance/status" });
+      expect(status.statusCode).toBe(200);
+      expect(status.json()).toMatchObject({
+        ok: true,
+        repository: "in-memory",
+        scheduler: {
+          enabled: false,
+          runOnStartup: false,
+          intervalMinutes: 0,
+          limit: 500,
+          running: false,
+          lastRunAt: null,
+          lastSummary: null,
+          lastError: null,
+          nextRunAt: null
+        }
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("runs memory maintenance once on startup when enabled", async () => {
+    const app = await buildTestServer({
+      MEMORY_MAINTENANCE_ENABLED: "true",
+      MEMORY_MAINTENANCE_RUN_ON_STARTUP: "true",
+      MEMORY_MAINTENANCE_LIMIT: "25"
+    });
+
+    try {
+      await vi.waitFor(async () => {
+        const status = await app.inject({ method: "GET", url: "/memory/maintenance/status" });
+        expect(status.json().scheduler.lastSummary).toMatchObject({
+          dryRun: false,
+          scanned: expect.any(Number),
+          failed: 0
+        });
+      });
+      const status = await app.inject({ method: "GET", url: "/memory/maintenance/status" });
+      expect(status.json().scheduler).toMatchObject({
+        enabled: true,
+        runOnStartup: true,
+        limit: 25,
+        running: false
+      });
+      expect(status.body).not.toContain("test_deepseek_secret");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("runs interval maintenance and clears the timer on close", async () => {
+    vi.useFakeTimers();
+    const runSpy = vi.spyOn(MemoryMaintenanceService.prototype, "run");
+    const app = await buildTestServer({
+      MEMORY_MAINTENANCE_ENABLED: "true",
+      MEMORY_MAINTENANCE_INTERVAL_MINUTES: "1",
+      MEMORY_MAINTENANCE_LIMIT: "7"
+    });
+    let closed = false;
+
+    try {
+      expect(runSpy).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(runSpy).toHaveBeenCalledTimes(1);
+      });
+      expect(runSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          dryRun: false,
+          limit: 7
+        })
+      );
+      const status = await app.inject({ method: "GET", url: "/memory/maintenance/status" });
+      expect(status.json().scheduler).toMatchObject({
+        enabled: true,
+        intervalMinutes: 1,
+        running: false,
+        lastSummary: expect.any(Object)
+      });
+
+      await app.close();
+      closed = true;
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(runSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      if (!closed) {
+        await app.close();
+      }
+    }
+  });
+
+  it("manual memory maintenance updates scheduler status and respects limit without deleting", async () => {
+    const app = await buildTestServer();
+
+    try {
+      const first = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          type: "semantic",
+          content: "Expired maintenance content SECRET_SHOULD_NOT_LEAK one.",
+          source: "test",
+          expiresAt: "2026-05-20T00:00:00.000Z"
+        }
+      });
+      const second = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          type: "semantic",
+          content: "Expired maintenance content SECRET_SHOULD_NOT_LEAK two.",
+          source: "test",
+          expiresAt: "2026-05-20T00:00:00.000Z"
+        }
+      });
+      expect(first.statusCode).toBe(200);
+      expect(second.statusCode).toBe(200);
+
+      const run = await app.inject({
+        method: "POST",
+        url: "/memory/maintenance/run",
+        payload: {
+          dryRun: false,
+          limit: 1,
+          now: "2026-05-24T00:00:00.000Z"
+        }
+      });
+      expect(run.statusCode).toBe(200);
+      expect(run.json().summary).toMatchObject({
+        dryRun: false,
+        scanned: 1,
+        expired: 1,
+        failed: 0
+      });
+      expect(run.body).not.toContain("SECRET_SHOULD_NOT_LEAK");
+
+      const status = await app.inject({ method: "GET", url: "/memory/maintenance/status" });
+      expect(status.json().scheduler.lastSummary).toMatchObject({
+        scanned: 1,
+        expired: 1,
+        failed: 0
+      });
+      expect(status.body).not.toContain("SECRET_SHOULD_NOT_LEAK");
+
+      const firstDetail = await app.inject({
+        method: "GET",
+        url: `/memory/${first.json().id as string}`
+      });
+      const secondDetail = await app.inject({
+        method: "GET",
+        url: `/memory/${second.json().id as string}`
+      });
+      expect([firstDetail.statusCode, secondDetail.statusCode]).toEqual([200, 200]);
+      expect([firstDetail.json().status, secondDetail.json().status].sort()).toEqual([
+        "active",
+        "expired"
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("ignores unrelated ambient env and runtime env files in ordinary server tests", async () => {
     const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-ambient-env-"));
     process.env["YUVI_RUNTIME_ENV_DIR"] = tempDir;
@@ -1492,7 +1661,11 @@ function createTestEnv(overrides: TestEnvOverrides = {}): NodeJS.ProcessEnv {
     DEFAULT_STT_PROVIDER: "dashscope",
     DEFAULT_VISION_PROVIDER: "xai",
     EMBEDDING_PROVIDER: "mock",
-    DEFAULT_EMBEDDING_PROVIDER: "mock"
+    DEFAULT_EMBEDDING_PROVIDER: "mock",
+    MEMORY_MAINTENANCE_ENABLED: "false",
+    MEMORY_MAINTENANCE_RUN_ON_STARTUP: "false",
+    MEMORY_MAINTENANCE_INTERVAL_MINUTES: "0",
+    MEMORY_MAINTENANCE_LIMIT: "500"
   };
 
   for (const [key, value] of Object.entries(overrides)) {

@@ -9,6 +9,7 @@ import { registerMessageRoutes } from "./routes/message.js";
 import { registerProviderRoutes } from "./routes/providers.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerEventRoutes } from "./routes/events.js";
+import { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
 import { registerWebSocketRoutes } from "./routes/websocket.js";
 
 export async function buildServer(config: ServerConfig) {
@@ -57,8 +58,12 @@ export async function buildServer(config: ServerConfig) {
   }
 
   const context = createAppContext(app.log, config);
+  const maintenanceScheduler = new MemoryMaintenanceScheduler(context, config, app.log);
+  context.memoryMaintenanceScheduler = maintenanceScheduler;
+  maintenanceScheduler.start();
 
   app.addHook("onClose", async () => {
+    maintenanceScheduler.close();
     await context.memoryRepository.close?.();
   });
 

@@ -652,6 +652,18 @@ export type MemoryMaintenanceSummary = {
   }>;
 };
 
+export type MemoryMaintenanceSchedulerStatus = {
+  enabled: boolean;
+  runOnStartup: boolean;
+  intervalMinutes: number;
+  limit: number;
+  running: boolean;
+  lastRunAt: string | null;
+  lastSummary: MemoryMaintenanceSummary | null;
+  lastError: string | null;
+  nextRunAt: string | null;
+};
+
 const apiBaseUrl = import.meta.env["VITE_API_BASE_URL"] ?? "/api";
 const explicitWebSocketBaseUrl = import.meta.env["VITE_WS_BASE_URL"] as string | undefined;
 let dashboardDevToken = "";
@@ -881,6 +893,18 @@ export const apiClient = {
     return request<{ ok: boolean; repository: string; health: MemoryHealthSummary }>(
       "/memory/maintenance/health"
     );
+  },
+
+  getMemoryMaintenanceStatus(): Promise<{
+    ok: boolean;
+    repository: string;
+    scheduler: MemoryMaintenanceSchedulerStatus | null;
+  }> {
+    return request<{
+      ok: boolean;
+      repository: string;
+      scheduler: MemoryMaintenanceSchedulerStatus | null;
+    }>("/memory/maintenance/status");
   },
 
   runMemoryMaintenance(input: {

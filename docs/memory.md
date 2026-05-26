@@ -197,9 +197,20 @@ Retrieval behavior stays the same. Normal prompt injection excludes `forgotten`,
 
 Maintenance also audits supersession state. It can safely fix active memories that already have `supersededBy` set and superseded memories missing `supersededAt`. It reports memories that claim to supersede missing or deleted IDs as warnings only.
 
-The Dashboard Memory page shows a lightweight health summary: active, expired, archived, superseded, forgotten, stale episodic, and missing embedding counts. In development, `POST /memory/maintenance/run` is protected like other sensitive dashboard actions and can run dry-run or real maintenance from the UI.
+The Dashboard Memory page shows a lightweight health summary: active, expired, archived, superseded, forgotten, stale episodic, and missing embedding counts. In development, `POST /memory/maintenance/run` is protected like other sensitive dashboard actions and can run dry-run or real maintenance from the UI. `GET /memory/maintenance/status` reports safe in-memory scheduler state: enabled flags, interval, limit, running state, last run, last summary, last safe error, and next run time.
 
-Recommended scheduling is manual for now: run a dry run, inspect the summary, then run the non-dry command when it looks right. A background retention scheduler is future work and is not implemented in v1.
+Memory Maintenance Scheduler v1 is optional and disabled by default:
+
+```env
+MEMORY_MAINTENANCE_ENABLED=true
+MEMORY_MAINTENANCE_RUN_ON_STARTUP=true
+MEMORY_MAINTENANCE_INTERVAL_MINUTES=360
+MEMORY_MAINTENANCE_LIMIT=500
+```
+
+`MEMORY_MAINTENANCE_ENABLED=false` disables all automatic maintenance. `MEMORY_MAINTENANCE_INTERVAL_MINUTES=0` means no interval timer. Startup maintenance only runs when both `MEMORY_MAINTENANCE_ENABLED=true` and `MEMORY_MAINTENANCE_RUN_ON_STARTUP=true`. All scheduled runs are bounded by `MEMORY_MAINTENANCE_LIMIT`, log only safe summary counts, and clear their timer on server shutdown.
+
+Recommended local development settings are a startup run plus a long interval such as 360 minutes when using PostgreSQL memory. Keep it disabled for tests unless a test explicitly enables it. A future retention scheduler may add richer policies, but v1 only marks expired/stale state and audits supersession; it does not delete or purge memories.
 
 ## Manual Management
 

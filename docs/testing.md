@@ -90,6 +90,17 @@ SKIP_INFRA=1 ./scripts/dev.sh
 
 If `DASHBOARD_DEV_TOKEN` is configured, sensitive development endpoints require the `X-YUVI-Dev-Token` header. Default tests leave it unset so local development remains frictionless.
 
+Memory Maintenance Scheduler v1 is disabled by default in tests:
+
+```env
+MEMORY_MAINTENANCE_ENABLED=false
+MEMORY_MAINTENANCE_RUN_ON_STARTUP=false
+MEMORY_MAINTENANCE_INTERVAL_MINUTES=0
+MEMORY_MAINTENANCE_LIMIT=500
+```
+
+Scheduler-specific tests enable it explicitly and assert startup runs, interval runs, status reporting, bounded limits, no hard delete, and Fastify `onClose` timer cleanup. The scheduler only calls Memory Maintenance v1, so it marks expired/stale state and audits supersession inconsistencies; it does not purge memories.
+
 ## Real Provider Tests
 
 Real provider calls are intentionally not part of the default test suite. Add optional integration tests later and skip them unless the relevant env vars are present.
@@ -147,7 +158,7 @@ pnpm memory:embed:backfill -- --force
 
 Backfill skips already embedded memories by default. `--force` re-embeds them, `--dry-run` reports what would happen without writes, and `--scope`, `--scopeId`, and `--status` bound the scanned set. The script summarizes scanned/skipped/embedded/failed rows and fails clearly on provider unavailability or vector dimension mismatch without printing secrets.
 
-Graph reasoning over supersession/contradiction fields and automatic expiry scheduling are intentionally not part of the default tests yet. They are future work on top of the status and temporal fields.
+Graph reasoning over supersession/contradiction fields and retention purge scheduling are intentionally not part of the default tests yet. They are future work on top of the status and temporal fields.
 
 To reset development database volumes, prefer the guarded helper:
 

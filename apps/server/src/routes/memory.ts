@@ -340,6 +340,14 @@ export async function registerMemoryRoutes(
     return reply.send({ ok: true, repository: context.activeMemoryRepository, health });
   });
 
+  app.get("/memory/maintenance/status", async (_request, reply) => {
+    return reply.send({
+      ok: true,
+      repository: context.activeMemoryRepository,
+      scheduler: context.memoryMaintenanceScheduler?.getStatus() ?? null
+    });
+  });
+
   app.post("/memory/maintenance/run", async (request, reply) => {
     if (config && !requireDashboardDevToken(config, request, reply)) return;
     if (config && config.runtimeMode !== "development" && !config.dashboardDevToken) {
@@ -354,8 +362,7 @@ export async function registerMemoryRoutes(
       return reply.status(400).send({ error: "invalid_request", details: input.error.flatten() });
     }
 
-    const maintenance = new MemoryMaintenanceService(context.memoryRepository);
-    const summary = await maintenance.run({
+    const options = {
       dryRun: input.data.dryRun,
       limit: input.data.limit,
       ...(input.data.scope ? { scope: input.data.scope as MemoryScope } : {}),
@@ -367,7 +374,10 @@ export async function registerMemoryRoutes(
       ...(input.data.includeSuperseded !== undefined
         ? { includeSuperseded: input.data.includeSuperseded }
         : {})
-    });
+    };
+    const summary = context.memoryMaintenanceScheduler
+      ? await context.memoryMaintenanceScheduler.run("manual", options)
+      : await new MemoryMaintenanceService(context.memoryRepository).run(options);
     return reply.send({
       ok: summary.failed === 0,
       repository: context.activeMemoryRepository,

@@ -8,6 +8,7 @@ import {
   type LayeredSetting,
   type MemoryCandidateReview,
   type MemoryHealthSummary,
+  type MemoryMaintenanceSchedulerStatus,
   type MemoryMaintenanceSummary,
   type MemoryRecord,
   type ProviderCallMetadata,
@@ -502,6 +503,7 @@ function MemoryPage(props: {
   const [error, setError] = useState<string | null>(null);
   const candidates = useAsyncData(() => apiClient.listRecentMemoryCandidates(20), []);
   const maintenanceHealth = useAsyncData(() => apiClient.getMemoryMaintenanceHealth(), []);
+  const maintenanceStatus = useAsyncData(() => apiClient.getMemoryMaintenanceStatus(), []);
   const memoryMode = memoryModeFromHealth(props.health);
 
   useEffect(() => {
@@ -873,6 +875,7 @@ function MemoryPage(props: {
   async function refreshMemories(): Promise<void> {
     await props.state.refresh();
     await maintenanceHealth.refresh();
+    await maintenanceStatus.refresh();
     if (query.trim()) {
       const result = await apiClient.searchMemories(query.trim(), {
         type: typeFilter,
@@ -943,6 +946,7 @@ function MemoryPage(props: {
       setMaintenanceResult(result.summary);
       setSuccess(dryRun ? "Maintenance dry run completed." : "Maintenance completed.");
       await refreshMemories();
+      await maintenanceStatus.refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Memory maintenance failed");
     } finally {
@@ -982,6 +986,14 @@ function MemoryPage(props: {
             <div key={entry.label} className="rounded-md bg-ink-50 p-2">
               <div className="label">{entry.label}</div>
               <div className="font-semibold text-ink-800">{entry.value}</div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-3 grid grid-cols-4 gap-2 text-xs text-ink-600">
+          {memoryMaintenanceStatusEntries(maintenanceStatus.data?.scheduler).map((entry) => (
+            <div key={entry.label} className="rounded-md border border-ink-100 bg-white p-2">
+              <div className="label">{entry.label}</div>
+              <div className="font-mono text-[11px] text-ink-700">{entry.value}</div>
             </div>
           ))}
         </div>
@@ -2971,6 +2983,28 @@ function memoryHealthEntries(
     { label: "stale", value: health?.staleEpisodic ?? 0 },
     { label: "missing emb", value: health?.missingEmbedding ?? 0 },
     { label: "scanned", value: health?.scanned ?? 0 }
+  ];
+}
+
+function memoryMaintenanceStatusEntries(
+  status: MemoryMaintenanceSchedulerStatus | null | undefined
+): Array<{ label: string; value: string }> {
+  return [
+    { label: "scheduler", value: status?.enabled ? "enabled" : "disabled" },
+    { label: "startup", value: status?.runOnStartup ? "enabled" : "disabled" },
+    { label: "interval", value: status ? `${status.intervalMinutes} min` : "0 min" },
+    { label: "limit", value: String(status?.limit ?? 0) },
+    { label: "running", value: status?.running ? "yes" : "no" },
+    { label: "last run", value: formatDate(status?.lastRunAt ?? "") },
+    { label: "next run", value: formatDate(status?.nextRunAt ?? "") },
+    {
+      label: "last summary",
+      value: status?.lastSummary
+        ? `expired=${status.lastSummary.expired} stale=${status.lastSummary.stale} failed=${status.lastSummary.failed}`
+        : status?.lastError
+          ? `error=${status.lastError}`
+          : "none"
+    }
   ];
 }
 

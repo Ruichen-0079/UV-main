@@ -18,6 +18,7 @@ import {
 import type { FastifyBaseLogger } from "fastify";
 import type { ServerConfig } from "./config.js";
 import { DashboardStateService } from "./services/dashboard.js";
+import type { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
 
 export type AppContext = {
   eventBus: InMemoryEventBus;
@@ -27,6 +28,7 @@ export type AppContext = {
   providers: ProviderRegistry;
   runtime: RuntimeOrchestrator;
   activeMemoryRepository: string;
+  memoryMaintenanceScheduler?: MemoryMaintenanceScheduler | undefined;
   reloadRuntimeConfig(env: Record<string, string | undefined>): RuntimeConfigReloadResult;
 };
 
@@ -157,6 +159,27 @@ function collectNotHotReloadedSettings(
   if ((env["EVENT_BUS"] ?? config.eventBus) !== config.eventBus) {
     notHotReloaded.push("EVENT_BUS");
   }
+  if (parseBoolean(env["MEMORY_MAINTENANCE_ENABLED"], false) !== config.memoryMaintenance.enabled) {
+    notHotReloaded.push("MEMORY_MAINTENANCE_ENABLED");
+  }
+  if (
+    parseBoolean(env["MEMORY_MAINTENANCE_RUN_ON_STARTUP"], false) !==
+    config.memoryMaintenance.runOnStartup
+  ) {
+    notHotReloaded.push("MEMORY_MAINTENANCE_RUN_ON_STARTUP");
+  }
+  if (
+    parsePositiveInteger(env["MEMORY_MAINTENANCE_INTERVAL_MINUTES"], 0) !==
+    config.memoryMaintenance.intervalMinutes
+  ) {
+    notHotReloaded.push("MEMORY_MAINTENANCE_INTERVAL_MINUTES");
+  }
+  if (
+    parseStrictPositiveInteger(env["MEMORY_MAINTENANCE_LIMIT"], 500) !==
+    config.memoryMaintenance.limit
+  ) {
+    notHotReloaded.push("MEMORY_MAINTENANCE_LIMIT");
+  }
   return notHotReloaded;
 }
 
@@ -173,6 +196,14 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseStrictPositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function parseMemoryExtractorMode(value: string | undefined): "rule-based" | "llm" {

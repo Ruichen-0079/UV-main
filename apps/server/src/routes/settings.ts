@@ -10,6 +10,10 @@ const editableKeys = [
   "MEMORY_REPOSITORY",
   "DATABASE_URL",
   "MEMORY_EXTRACTOR",
+  "MEMORY_MAINTENANCE_ENABLED",
+  "MEMORY_MAINTENANCE_RUN_ON_STARTUP",
+  "MEMORY_MAINTENANCE_INTERVAL_MINUTES",
+  "MEMORY_MAINTENANCE_LIMIT",
   "EVENT_BUS",
   "PROVIDER_ALLOW_MOCKS",
   "SERVER_HOST",
@@ -239,6 +243,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       memoryExtractorDefault: "llm",
       memoryExtractorFallbackUsed: Boolean(context.memory.getExtractorStatus().fallbackUsed),
       memoryExtractorSkippedReason: context.memory.getExtractorStatus().skippedReason,
+      maintenanceScheduler: context.memoryMaintenanceScheduler?.getStatus() ?? null,
       reasoningProviderConfigured: Boolean(providerStatus.providers.reasoning.configured)
     },
     providers: {
@@ -320,6 +325,14 @@ function hasRestartRequiredLocalOverrides(
     return true;
   }
   if (localEnv["SERVER_PORT"] && Number.parseInt(localEnv["SERVER_PORT"], 10) !== config.port) {
+    return true;
+  }
+  if (
+    localEnv["MEMORY_MAINTENANCE_ENABLED"] ||
+    localEnv["MEMORY_MAINTENANCE_RUN_ON_STARTUP"] ||
+    localEnv["MEMORY_MAINTENANCE_INTERVAL_MINUTES"] ||
+    localEnv["MEMORY_MAINTENANCE_LIMIT"]
+  ) {
     return true;
   }
   return Boolean(localEnv["EVENT_BUS"] && localEnv["EVENT_BUS"] !== config.eventBus);

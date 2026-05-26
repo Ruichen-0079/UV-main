@@ -10,6 +10,12 @@ export type ServerConfig = {
     maxTurns: number;
     maxChars: number;
   };
+  memoryMaintenance: {
+    enabled: boolean;
+    runOnStartup: boolean;
+    intervalMinutes: number;
+    limit: number;
+  };
   dashboardDevToken?: string | undefined;
 };
 
@@ -27,6 +33,12 @@ export function loadServerConfig(
       enabled: parseBoolean(env["DIRECT_CONTEXT_ENABLED"], true),
       maxTurns: parsePositiveInteger(env["DIRECT_CONTEXT_MAX_TURNS"], 6),
       maxChars: parsePositiveInteger(env["DIRECT_CONTEXT_MAX_CHARS"], 6000)
+    },
+    memoryMaintenance: {
+      enabled: parseBoolean(env["MEMORY_MAINTENANCE_ENABLED"], false),
+      runOnStartup: parseBoolean(env["MEMORY_MAINTENANCE_RUN_ON_STARTUP"], false),
+      intervalMinutes: parsePositiveInteger(env["MEMORY_MAINTENANCE_INTERVAL_MINUTES"], 0),
+      limit: parseStrictPositiveInteger(env["MEMORY_MAINTENANCE_LIMIT"], 500)
     },
     dashboardDevToken: emptyToUndefined(env["DASHBOARD_DEV_TOKEN"])
   };
@@ -80,4 +92,12 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseStrictPositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
