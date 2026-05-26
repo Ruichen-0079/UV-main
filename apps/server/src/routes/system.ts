@@ -11,10 +11,10 @@ export async function registerSystemRoutes(
 ): Promise<void> {
   app.post("/system/restart/deep", async (request, reply) => {
     if (!requireDashboardDevToken(config, request, reply)) return;
-    if (config.runtimeMode !== "development") {
+    if (config.runtimeMode === "production") {
       return reply.status(404).send({
         error: "not_found",
-        message: "Deep restart is only available in development mode."
+        message: "Deep restart is unavailable in production mode."
       });
     }
     if (!isLocalAddress(request.ip)) {

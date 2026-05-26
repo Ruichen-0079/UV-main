@@ -227,6 +227,80 @@ describe("MemoryRepository", () => {
     expect(smoke.metadata["testMemory"]).toBe(true);
   });
 
+  it("keeps smoke/test memories out of normal retrieval and fallback recent", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const smoke = await service.createMemory({
+      type: "semantic",
+      content: "Smoke test memory.",
+      source: "smoke",
+      tags: ["smoke"]
+    });
+    await service.createMemory({
+      type: "semantic",
+      content: "Durable provider preference uses DeepSeek.",
+      source: "manual",
+      tags: ["provider"]
+    });
+
+    expect(smoke.metadata["testMemory"]).toBe(true);
+    expect(smoke.memoryLayer).not.toBe("core");
+    expect(smoke.importance).toBeLessThanOrEqual(0.3);
+    expect(smoke.expiresAt).toBeInstanceOf(Date);
+
+    const normal = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "Smoke test memory.",
+      limit: 5
+    });
+    expect(normal.selectedMemories.map((memory) => memory.id)).not.toContain(smoke.id);
+    expect(normal.rawMemories.find((memory) => memory.id === smoke.id)?.excludedReason).toBe(
+      "test-memory"
+    );
+
+    const fallback = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "zzzz-no-match",
+      limit: 5
+    });
+    expect(fallback.retrievalMode).toBe("fallback-recent");
+    expect(fallback.selectedMemories.map((memory) => memory.id)).not.toContain(smoke.id);
+
+    const included = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "Smoke test memory.",
+      includeTestMemories: true,
+      limit: 5
+    });
+    expect(included.selectedMemories.map((memory) => memory.id)).toContain(smoke.id);
+  });
+
+  it("maintenance repairs legacy smoke memories without hard delete", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const legacy = await repository.createMemory({
+      type: "semantic",
+      memoryLayer: "core",
+      content: "Smoke test memory.",
+      source: "runtime",
+      importance: 0.95,
+      observedAt: "2026-05-20T00:00:00.000Z",
+      validFrom: "2026-05-20T00:00:00.000Z"
+    });
+    expect(legacy.expiresAt).toBeNull();
+
+    const maintenance = new MemoryMaintenanceService(repository);
+    const summary = await maintenance.run({
+      now: "2026-05-28T00:00:00.000Z"
+    });
+    const repaired = await repository.getMemoryById(legacy.id);
+
+    expect(summary.expired).toBe(1);
+    expect(repaired).toMatchObject({
+      id: legacy.id,
+      status: "expired",
+      memoryLayer: "recall"
+    });
+    expect(repaired?.expiresAt?.getTime()).toBe((repaired?.createdAt.getTime() ?? 0) + 86_400_000);
+    expect(repaired?.metadata["testMemory"]).toBe(true);
+  });
+
   it("updates and deletes in-memory memory records", async () => {
     const repository = new InMemoryMemoryRepository();
     const created = await repository.createMemory({

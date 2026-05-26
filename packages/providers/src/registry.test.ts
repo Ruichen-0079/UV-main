@@ -235,4 +235,75 @@ describe("ProviderRegistry", () => {
       model: "deepseek-test"
     });
   });
+
+  it("falls back from primary chat provider to local provider with safe attempt metadata", async () => {
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("api.deepseek.com")) {
+        return new Response(JSON.stringify({ error: "bad upstream sk-secret-value" }), {
+          status: 500
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          model: "local-chat",
+          choices: [{ finish_reason: "stop", message: { content: "hello from local" } }]
+        }),
+        { status: 200 }
+      );
+    });
+
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek,local",
+      DEEPSEEK_API_KEY: "deepseek-secret",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat",
+      LOCAL_MODEL_BASEURL: "https://local.example/v1",
+      LOCAL_CHAT_MODEL: "local-chat"
+    });
+
+    const reply = await registry.getChatProvider().generateReply({
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    expect(reply.message.content).toBe("hello from local");
+    expect(reply.fallbackUsed).toBe(true);
+    expect(reply.finalProvider).toBe("local");
+    expect(reply.attemptedProviders?.map((attempt) => attempt.status)).toEqual([
+      "failed",
+      "success"
+    ]);
+    expect(JSON.stringify(reply.attemptedProviders)).not.toContain("deepseek-secret");
+    expect(JSON.stringify(reply.attemptedProviders)).not.toContain("sk-secret-value");
+  });
+
+  it("reports local and NVIDIA provider routes without health calls or secret leakage", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "false",
+      CHAT_PROVIDER_CHAIN: "deepseek,nvidia,local",
+      NVIDIA_API_KEY: "nvidia-secret",
+      NVIDIA_CHAT_MODEL: "nvidia-chat",
+      LOCAL_MODEL_BASEURL: "https://local.example/v1",
+      LOCAL_CHAT_MODEL: "local-chat"
+    });
+
+    const routes = registry.getStatus().routes?.chat ?? [];
+
+    expect(routes.map((route) => route.provider)).toEqual(["deepseek", "nvidia", "local"]);
+    expect(routes.find((route) => route.provider === "nvidia")).toMatchObject({
+      configured: true,
+      available: true,
+      model: "nvidia-chat"
+    });
+    expect(routes.find((route) => route.provider === "local")).toMatchObject({
+      configured: true,
+      available: true,
+      baseUrl: "https://local.example/v1",
+      model: "local-chat"
+    });
+    expect(JSON.stringify(routes)).not.toContain("nvidia-secret");
+  });
 });

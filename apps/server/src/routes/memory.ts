@@ -162,6 +162,7 @@ const SearchMemoryQuerySchema = z.object({
   includeSuperseded: BooleanishSchema.optional(),
   includeHistoricalEpisodic: BooleanishSchema.optional(),
   includeExpired: BooleanishSchema.optional(),
+  includeTestMemories: BooleanishSchema.optional(),
   includeHistory: BooleanishSchema.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20)
 });
@@ -694,6 +695,9 @@ async function runMemorySearch(context: AppContext, input: SearchMemoryInput) {
   if (input.includeSuperseded !== undefined)
     searchQuery.includeSuperseded = input.includeSuperseded;
   if (input.includeExpired !== undefined) searchQuery.includeExpired = input.includeExpired;
+  if (input.includeTestMemories !== undefined) {
+    searchQuery.includeTestMemories = input.includeTestMemories;
+  }
   if (input.includeHistory !== undefined) searchQuery.includeHistory = input.includeHistory;
   if (input.includeHistoricalEpisodic !== undefined) {
     searchQuery.includeHistoricalEpisodic = input.includeHistoricalEpisodic;

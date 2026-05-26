@@ -294,6 +294,22 @@ describe("server", () => {
       });
       expect(duplicateWorkingMemory.statusCode).toBe(200);
 
+      const smokeMemory = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          type: "semantic",
+          subtype: "test",
+          memoryLayer: "recall",
+          content: "Smoke test memory.",
+          source: "smoke",
+          importance: 0.2,
+          metadata: { testMemory: true },
+          tags: ["smoke", "test"]
+        }
+      });
+      expect(smokeMemory.statusCode).toBe(200);
+
       const messageWithMemory = await app.inject({
         method: "POST",
         url: "/message",
@@ -316,6 +332,7 @@ describe("server", () => {
         "ISO timestamp:"
       );
       expect(relevantMemory?.content).toContain("Server test memory");
+      expect(relevantMemory?.content).not.toContain("Smoke test memory.");
 
       const yuviMessageWithMemory = await app.inject({
         method: "POST",

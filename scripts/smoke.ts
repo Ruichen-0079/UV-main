@@ -51,13 +51,20 @@ try {
 
   const memory = await step("POST /memory", () =>
     postJson(`http://127.0.0.1:${port}/memory`, {
-      type: "semantic",
+      type: "episodic",
+      subtype: "test",
+      memoryLayer: "recall",
       content: "Smoke test memory.",
       source: "smoke",
-      tags: ["smoke"]
+      importance: 0.2,
+      metadata: { testMemory: true },
+      tags: ["smoke", "test"]
     })
   );
-  assert(memory.type === "semantic", "POST /memory should create a memory");
+  assert(memory.type === "episodic", "POST /memory should create a smoke memory");
+  assert(memory.metadata?.testMemory === true, "Smoke memory should be marked as test memory");
+  assert(memory.memoryLayer !== "core", "Smoke memory should not be core memory");
+  assert(Boolean(memory.expiresAt), "Smoke memory should expire quickly");
 
   const recent = await step("GET /memory/recent", () =>
     getJson(`http://127.0.0.1:${port}/memory/recent?limit=5`)
@@ -68,7 +75,7 @@ try {
   );
 
   const search = await step("GET /memory/search", () =>
-    getJson(`http://127.0.0.1:${port}/memory/search?q=Smoke&limit=5`)
+    getJson(`http://127.0.0.1:${port}/memory/search?q=Smoke&includeTestMemories=true&limit=5`)
   );
   assert(
     Array.isArray(search.memories) && search.memories.length > 0,
@@ -78,6 +85,7 @@ try {
   const unicodeSearch = await step("POST /memory/search", () =>
     postJson(`http://127.0.0.1:${port}/memory/search`, {
       q: "Smoke test memory.",
+      includeTestMemories: true,
       limit: 5
     })
   );

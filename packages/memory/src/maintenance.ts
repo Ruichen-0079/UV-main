@@ -72,6 +72,11 @@ export class MemoryMaintenanceService {
       }
 
       try {
+        const repaired = await this.repairTestMemory(memory, now, dryRun, summary);
+        if (repaired) {
+          continue;
+        }
+
         const auditFixed = await this.auditSupersession(memory, now, dryRun, summary);
         if (auditFixed) {
           continue;
@@ -135,7 +140,7 @@ export class MemoryMaintenanceService {
   }
 
   private async listMaintenanceMemories(options: MemoryMaintenanceOptions): Promise<Memory[]> {
-    return this.repository.searchMemoriesByTextFallback({
+    const memories = await this.repository.searchMemoriesByTextFallback({
       text: "",
       includeHistory: true,
       includeExpired: true,
@@ -145,6 +150,52 @@ export class MemoryMaintenanceService {
       ...(options.scope ? { scope: options.scope } : {}),
       ...(options.scopeId ? { scopeId: options.scopeId } : {})
     });
+    if (memories.length > 0) {
+      return memories;
+    }
+
+    return this.repository.listRecentMemories(options.limit ?? DEFAULT_LIMIT);
+  }
+
+  private async repairTestMemory(
+    memory: Memory,
+    now: Date,
+    dryRun: boolean,
+    summary: MemoryMaintenanceSummary
+  ): Promise<boolean> {
+    if (!isTestMemoryRecord(memory) || memory.expiresAt) {
+      return false;
+    }
+
+    const expiresAt = new Date(memory.createdAt.getTime() + 86_400_000);
+    const expired = expiresAt.getTime() <= now.getTime() && memory.status === "active";
+    if (expired) {
+      summary.expired += 1;
+      summary.expiredIds.push(memory.id);
+    } else {
+      summary.stale += 1;
+      summary.staleIds.push(memory.id);
+    }
+
+    if (!dryRun) {
+      await this.repository.updateMemory(memory.id, {
+        ...(expired ? { status: "expired" as const } : {}),
+        expiresAt,
+        memoryLayer: memory.memoryLayer === "core" ? "recall" : memory.memoryLayer,
+        importance: Math.min(memory.importance, 0.3),
+        metadata: {
+          ...memory.metadata,
+          testMemory: true,
+          retentionClass: "test",
+          retentionReason: "smoke/test memory should expire quickly",
+          computedExpiresAt: expiresAt.toISOString(),
+          maintenanceReason: expired ? "test memory ttl elapsed" : "test memory missing expiresAt",
+          ...(expired ? { expiredByMaintenance: true } : {})
+        }
+      });
+    }
+
+    return true;
   }
 
   private async auditSupersession(
@@ -244,6 +295,22 @@ function isStaleEpisodicMemory(memory: Memory, now: Date): boolean {
     Boolean(memory.validUntil) &&
     memory.validUntil!.getTime() <= now.getTime()
   );
+}
+
+function isTestMemoryRecord(memory: Memory): boolean {
+  return (
+    memory.source === "smoke" ||
+    memory.source === "mock" ||
+    memory.subtype === "test" ||
+    memory.metadata["testMemory"] === true ||
+    memory.tags.some((tag) => ["smoke", "mock", "test"].includes(tag)) ||
+    normalizeText(memory.content) === "smoke test memory." ||
+    (memory.summary !== null && normalizeText(memory.summary) === "smoke test memory.")
+  );
+}
+
+function normalizeText(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function toDate(value: Date | string | undefined): Date | null {

@@ -281,6 +281,7 @@ export type MemorySearchQuery = {
   includeHistory?: boolean;
   includeHistoricalEpisodic?: boolean;
   includeExpired?: boolean;
+  includeTestMemories?: boolean;
   currentTime?: Date | string;
   limit?: number;
 };

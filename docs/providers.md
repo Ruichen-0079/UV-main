@@ -11,6 +11,19 @@ The runtime uses provider interfaces and a `ProviderRegistry` so core orchestrat
 - Vision: xAI
 - Embedding: OpenAI-compatible when configured; mock only for explicit tests, CI, or offline mode
 
+Provider Priority/Fallback v1 lets each capability define an ordered provider chain:
+
+```env
+CHAT_PROVIDER_CHAIN=deepseek,nvidia,local,mock
+REASONING_PROVIDER_CHAIN=deepseek,nvidia,local,mock
+EMBEDDING_PROVIDER_CHAIN=openai-compatible,nvidia,local,mock
+TTS_PROVIDER_CHAIN=xai,local,mock
+STT_PROVIDER_CHAIN=dashscope,local,mock
+VISION_PROVIDER_CHAIN=xai,nvidia,local,mock
+```
+
+The current runtime fallback path is implemented for chat, reasoning, and embedding. TTS, STT, and vision expose route/status configuration for future feature work. Mock providers are skipped unless `PROVIDER_ALLOW_MOCKS=true`.
+
 ## Why Core Does Not Import Provider SDKs
 
 `packages/core` must stay provider-neutral. It should not import DeepSeek, xAI, Alibaba, OpenAI-compatible clients, or vendor SDKs directly.
@@ -37,6 +50,8 @@ const reply = await chat.generateReply(input);
 ```
 
 The registry decides whether that provider is DeepSeek, xAI, DashScope, a mock, or an unavailable placeholder.
+
+When a chain is used, calls try configured providers by priority. The response includes safe fallback metadata such as `fallbackUsed`, `attemptedProviders`, and `finalProvider`. Attempt records include provider name, status, safe error code, and latency, but never API keys, Authorization headers, `DATABASE_URL`, or raw secret values.
 
 Internally, provider construction is organized as provider-name factory maps per capability. Adding another chat, TTS, STT, vision, or embedding provider should add a new factory entry instead of branching through runtime code.
 
@@ -104,6 +119,25 @@ EMBEDDING_API_KEY=...
 EMBEDDING_MODEL=...
 EMBEDDING_DIMENSIONS=1536
 ```
+
+NVIDIA API and local model providers use OpenAI-compatible request shapes in v1 where the capability is currently wired:
+
+```env
+NVIDIA_API_BASEURL=https://integrate.api.nvidia.com/v1
+NVIDIA_API_KEY=...
+NVIDIA_CHAT_MODEL=...
+NVIDIA_REASONING_MODEL=...
+NVIDIA_EMBEDDING_MODEL=...
+NVIDIA_EMBEDDING_DIMENSIONS=1536
+
+LOCAL_MODEL_BASEURL=http://localhost:11434/v1
+LOCAL_CHAT_MODEL=...
+LOCAL_REASONING_MODEL=...
+LOCAL_EMBEDDING_MODEL=...
+LOCAL_EMBEDDING_DIMENSIONS=1536
+```
+
+Local means a developer-controlled OpenAI-compatible gateway such as Ollama, llama.cpp server, vLLM, LM Studio, or another local adapter. Configuration does not prove the local server is running; explicit Verify actions are the check.
 
 YUVI is real-provider-first by default. `EMBEDDING_PROVIDER=openai-compatible` uses an OpenAI-style `/embeddings` endpoint when `EMBEDDING_API_BASEURL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSIONS` are configured. DashScope `text-embedding-v4` can be used through compatible mode:
 
@@ -207,7 +241,8 @@ The Dashboard `Settings` page can write local development settings to `.env.loca
 - If DeepSeek config is saved but chat still reports mock mode, click **Apply Now** or restart the dev server.
 - `GET /settings/runtime` reports safe config layering: base `.env`, local override `.env.local`, effective merged values, and active runtime values.
 - The Dashboard does not automatically copy `.env.local` back into `.env`. This prevents accidental secret commits and makes local overrides explicit.
-- In dev supervisor mode, Dashboard **Deep Restart Runtime** can request a graceful local restart after settings changes that need a process restart. It is development/localhost-only, requires `X-YUVI-Dev-Token` when configured, and is unsupported unless `scripts/dev.sh` is running with `YUVI_DEV_SUPERVISOR=1`.
+- In dev supervisor mode, Dashboard **Deep Restart Runtime** can request a graceful local restart after settings changes that need a process restart. It is non-production/localhost-only, requires `Authorization: Bearer <DASHBOARD_DEV_TOKEN>` when configured, and is unsupported unless `scripts/dev.sh` is running with `YUVI_DEV_SUPERVISOR=1`.
+- **Apply Now** reloads hot-reloadable runtime config in the current process. **Deep Restart** exits with the restart-specific code after responding, then the `scripts/dev.sh` supervisor reloads `.env`/`.env.local`, optionally runs `pnpm db:migrate`, and starts the server again.
 
 The reload endpoint never returns API keys, raw `.env` contents, request headers, `Authorization` headers, tokens, or passwords. It returns only safe active provider metadata such as configured state, model name, mock/real mode, and restart-required boundaries.
 

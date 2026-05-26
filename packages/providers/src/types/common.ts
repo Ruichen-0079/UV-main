@@ -22,6 +22,28 @@ export type ProviderHealth = {
   latencyMs?: number;
   checkedAt: string;
   message?: string;
+  enabled?: boolean | undefined;
+  priority?: number | undefined;
+  fallbackEligible?: boolean | undefined;
+  lastVerifiedAt?: string | undefined;
+  lastError?: string | undefined;
+};
+
+export type ProviderRouteStatus = ProviderHealth & {
+  capability: ProviderCapability;
+  provider: string;
+  enabled: boolean;
+  priority: number;
+  fallbackEligible: boolean;
+};
+
+export type ProviderAttempt = {
+  provider: string;
+  model?: string | undefined;
+  status: "success" | "failed" | "skipped";
+  errorCode?: string | undefined;
+  error?: string | undefined;
+  latencyMs?: number | undefined;
 };
 
 export type TokenUsage = {
@@ -39,6 +61,9 @@ export type ProviderMetadata = {
   latencyMs?: number | undefined;
   tokenUsage?: TokenUsage | undefined;
   providerMetadata?: Record<string, unknown> | undefined;
+  fallbackUsed?: boolean | undefined;
+  attemptedProviders?: ProviderAttempt[] | undefined;
+  finalProvider?: string | undefined;
   /**
    * Debug metadata is opt-in and must never be emitted in runtime protocol events.
    */

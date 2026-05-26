@@ -1,6 +1,11 @@
 import type { ChatInput, ChatOutput, ChatProvider } from "./types/chat.js";
 import type { EmbeddingProvider } from "./types/embedding.js";
-import type { ProviderCapability, ProviderHealth } from "./types/common.js";
+import type {
+  ProviderAttempt,
+  ProviderCapability,
+  ProviderHealth,
+  ProviderRouteStatus
+} from "./types/common.js";
 import type { ReasoningInput, ReasoningOutput, ReasoningProvider } from "./types/reasoning.js";
 import type { STTInput, STTOutput, STTProvider } from "./types/stt.js";
 import type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
@@ -25,6 +30,7 @@ export type ProviderRegistryConfig = {
     vision: string;
     embedding: string;
   };
+  chains: Record<ProviderCapability, string[]>;
   deepseek: {
     apiKey: string | undefined;
     baseUrl: string;
@@ -49,6 +55,25 @@ export type ProviderRegistryConfig = {
     model: string | undefined;
     dimensions: number;
   };
+  nvidia: {
+    apiKey: string | undefined;
+    baseUrl: string;
+    chatModel: string | undefined;
+    reasoningModel: string | undefined;
+    embeddingModel: string | undefined;
+    embeddingDimensions: number;
+    visionModel: string | undefined;
+  };
+  local: {
+    baseUrl: string | undefined;
+    chatModel: string | undefined;
+    reasoningModel: string | undefined;
+    embeddingModel: string | undefined;
+    embeddingDimensions: number;
+    ttsModel: string | undefined;
+    sttModel: string | undefined;
+    visionModel: string | undefined;
+  };
 };
 
 type ProviderEnv = Record<string, string | undefined>;
@@ -65,6 +90,7 @@ export interface ProviderResolver {
 
 export type ProviderStatusMap = {
   providers: Record<ProviderCapability, ProviderHealth>;
+  routes?: Record<ProviderCapability, ProviderRouteStatus[]>;
 };
 
 export class ProviderRegistry implements ProviderResolver {
@@ -142,8 +168,31 @@ export class ProviderRegistry implements ProviderResolver {
         stt: this.createStatus("stt", this.config.defaults.stt),
         vision: this.createStatus("vision", this.config.defaults.vision),
         embedding: this.createStatus("embedding", this.config.defaults.embedding)
+      },
+      routes: {
+        chat: this.createRouteStatuses("chat"),
+        reasoning: this.createRouteStatuses("reasoning"),
+        tts: this.createRouteStatuses("tts"),
+        stt: this.createRouteStatuses("stt"),
+        vision: this.createRouteStatuses("vision"),
+        embedding: this.createRouteStatuses("embedding")
       }
     };
+  }
+
+  private createRouteStatuses(capability: ProviderCapability): ProviderRouteStatus[] {
+    return this.config.chains[capability].map((name, index) => {
+      const status = this.createStatus(capability, name);
+      return {
+        ...status,
+        capability,
+        provider: name,
+        name,
+        enabled: true,
+        priority: index + 1,
+        fallbackEligible: Boolean(status.available)
+      };
+    });
   }
 
   private getRequiredProvider<TProvider>(
@@ -211,6 +260,33 @@ export class ProviderRegistry implements ProviderResolver {
       );
     }
 
+    if (name === "nvidia") {
+      if (capability === "chat")
+        return Boolean(this.config.nvidia.apiKey && this.config.nvidia.chatModel);
+      if (capability === "reasoning")
+        return Boolean(this.config.nvidia.apiKey && this.config.nvidia.reasoningModel);
+      if (capability === "embedding")
+        return Boolean(this.config.nvidia.apiKey && this.config.nvidia.embeddingModel);
+      if (capability === "vision")
+        return Boolean(this.config.nvidia.apiKey && this.config.nvidia.visionModel);
+      return false;
+    }
+
+    if (name === "local") {
+      if (capability === "chat")
+        return Boolean(this.config.local.baseUrl && this.config.local.chatModel);
+      if (capability === "reasoning")
+        return Boolean(this.config.local.baseUrl && this.config.local.reasoningModel);
+      if (capability === "embedding")
+        return Boolean(this.config.local.baseUrl && this.config.local.embeddingModel);
+      if (capability === "tts")
+        return Boolean(this.config.local.baseUrl && this.config.local.ttsModel);
+      if (capability === "stt")
+        return Boolean(this.config.local.baseUrl && this.config.local.sttModel);
+      if (capability === "vision")
+        return Boolean(this.config.local.baseUrl && this.config.local.visionModel);
+    }
+
     if (capability === "tts" && name === "xai") {
       return Boolean(this.config.xai.apiKey && this.config.xai.ttsModel);
     }
@@ -243,6 +319,36 @@ export class ProviderRegistry implements ProviderResolver {
         ...(capability === "reasoning" && !this.config.deepseek.reasoningModel
           ? ["DEEPSEEK_REASONING_MODEL"]
           : [])
+      ];
+    }
+    if (name === "nvidia") {
+      return [
+        ...(!this.config.nvidia.apiKey ? ["NVIDIA_API_KEY"] : []),
+        ...(capability === "chat" && !this.config.nvidia.chatModel ? ["NVIDIA_CHAT_MODEL"] : []),
+        ...(capability === "reasoning" && !this.config.nvidia.reasoningModel
+          ? ["NVIDIA_REASONING_MODEL"]
+          : []),
+        ...(capability === "embedding" && !this.config.nvidia.embeddingModel
+          ? ["NVIDIA_EMBEDDING_MODEL"]
+          : []),
+        ...(capability === "vision" && !this.config.nvidia.visionModel
+          ? ["NVIDIA_VISION_MODEL"]
+          : [])
+      ];
+    }
+    if (name === "local") {
+      return [
+        ...(!this.config.local.baseUrl ? ["LOCAL_MODEL_BASEURL"] : []),
+        ...(capability === "chat" && !this.config.local.chatModel ? ["LOCAL_CHAT_MODEL"] : []),
+        ...(capability === "reasoning" && !this.config.local.reasoningModel
+          ? ["LOCAL_REASONING_MODEL"]
+          : []),
+        ...(capability === "embedding" && !this.config.local.embeddingModel
+          ? ["LOCAL_EMBEDDING_MODEL"]
+          : []),
+        ...(capability === "tts" && !this.config.local.ttsModel ? ["LOCAL_TTS_MODEL"] : []),
+        ...(capability === "stt" && !this.config.local.sttModel ? ["LOCAL_STT_MODEL"] : []),
+        ...(capability === "vision" && !this.config.local.visionModel ? ["LOCAL_VISION_MODEL"] : [])
       ];
     }
     if (capability === "tts" && name === "xai") {
@@ -283,6 +389,44 @@ export class ProviderRegistry implements ProviderResolver {
           capability === "chat"
             ? this.config.deepseek.chatModel
             : this.config.deepseek.reasoningModel
+      };
+    }
+
+    if (name === "nvidia") {
+      return {
+        baseUrl: this.config.nvidia.baseUrl,
+        model:
+          capability === "chat"
+            ? this.config.nvidia.chatModel
+            : capability === "reasoning"
+              ? this.config.nvidia.reasoningModel
+              : capability === "embedding"
+                ? this.config.nvidia.embeddingModel
+                : capability === "vision"
+                  ? this.config.nvidia.visionModel
+                  : undefined,
+        dimensions: capability === "embedding" ? this.config.nvidia.embeddingDimensions : undefined
+      };
+    }
+
+    if (name === "local") {
+      return {
+        baseUrl: this.config.local.baseUrl,
+        model:
+          capability === "chat"
+            ? this.config.local.chatModel
+            : capability === "reasoning"
+              ? this.config.local.reasoningModel
+              : capability === "embedding"
+                ? this.config.local.embeddingModel
+                : capability === "tts"
+                  ? this.config.local.ttsModel
+                  : capability === "stt"
+                    ? this.config.local.sttModel
+                    : capability === "vision"
+                      ? this.config.local.visionModel
+                      : undefined,
+        dimensions: capability === "embedding" ? this.config.local.embeddingDimensions : undefined
       };
     }
 
@@ -366,6 +510,34 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
         env["EMBEDDING_PROVIDER"] ??
         (allowMocks ? "mock" : "openai-compatible")
     },
+    chains: {
+      chat: parseProviderChain(
+        env["CHAT_PROVIDER_CHAIN"],
+        ["deepseek", "nvidia", "local", "mock"],
+        allowMocks
+      ),
+      reasoning: parseProviderChain(
+        env["REASONING_PROVIDER_CHAIN"],
+        ["deepseek", "nvidia", "local", "mock"],
+        allowMocks
+      ),
+      embedding: parseProviderChain(
+        env["EMBEDDING_PROVIDER_CHAIN"],
+        ["openai-compatible", "nvidia", "local", "mock"],
+        allowMocks
+      ),
+      tts: parseProviderChain(env["TTS_PROVIDER_CHAIN"], ["xai", "local", "mock"], allowMocks),
+      stt: parseProviderChain(
+        env["STT_PROVIDER_CHAIN"],
+        ["dashscope", "local", "mock"],
+        allowMocks
+      ),
+      vision: parseProviderChain(
+        env["VISION_PROVIDER_CHAIN"],
+        ["xai", "nvidia", "local", "mock"],
+        allowMocks
+      )
+    },
     deepseek: {
       apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
       baseUrl:
@@ -395,6 +567,25 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
         emptyToUndefined(env["EMBEDDING_BASE_URL"]),
       model: emptyToUndefined(env["EMBEDDING_MODEL"]),
       dimensions: parsePositiveInteger(env["EMBEDDING_DIMENSIONS"], 1536)
+    },
+    nvidia: {
+      apiKey: emptyToUndefined(env["NVIDIA_API_KEY"]),
+      baseUrl: env["NVIDIA_API_BASEURL"] ?? "https://integrate.api.nvidia.com/v1",
+      chatModel: emptyToUndefined(env["NVIDIA_CHAT_MODEL"]),
+      reasoningModel: emptyToUndefined(env["NVIDIA_REASONING_MODEL"]),
+      embeddingModel: emptyToUndefined(env["NVIDIA_EMBEDDING_MODEL"]),
+      embeddingDimensions: parsePositiveInteger(env["NVIDIA_EMBEDDING_DIMENSIONS"], 1536),
+      visionModel: emptyToUndefined(env["NVIDIA_VISION_MODEL"])
+    },
+    local: {
+      baseUrl: emptyToUndefined(env["LOCAL_MODEL_BASEURL"]),
+      chatModel: emptyToUndefined(env["LOCAL_CHAT_MODEL"]),
+      reasoningModel: emptyToUndefined(env["LOCAL_REASONING_MODEL"]),
+      embeddingModel: emptyToUndefined(env["LOCAL_EMBEDDING_MODEL"]),
+      embeddingDimensions: parsePositiveInteger(env["LOCAL_EMBEDDING_DIMENSIONS"], 1536),
+      ttsModel: emptyToUndefined(env["LOCAL_TTS_MODEL"]),
+      sttModel: emptyToUndefined(env["LOCAL_STT_MODEL"]),
+      visionModel: emptyToUndefined(env["LOCAL_VISION_MODEL"])
     }
   };
 }
@@ -447,6 +638,25 @@ const chatProviderFactories: Record<string, ProviderFactory<ChatProvider>> = {
       model: config.deepseek.chatModel,
       includeRawResponse: config.includeRawProviderResponses
     });
+  },
+  nvidia(config) {
+    if (!config.nvidia.apiKey || !config.nvidia.chatModel) return undefined;
+    return new OpenAICompatibleChatProvider({
+      provider: "nvidia",
+      apiKey: config.nvidia.apiKey,
+      baseUrl: config.nvidia.baseUrl,
+      model: config.nvidia.chatModel,
+      includeRawResponse: config.includeRawProviderResponses
+    });
+  },
+  local(config) {
+    if (!config.local.baseUrl || !config.local.chatModel) return undefined;
+    return new OpenAICompatibleChatProvider({
+      provider: "local",
+      baseUrl: config.local.baseUrl,
+      model: config.local.chatModel,
+      includeRawResponse: config.includeRawProviderResponses
+    });
   }
 };
 
@@ -460,6 +670,25 @@ const reasoningProviderFactories: Record<string, ProviderFactory<ReasoningProvid
       apiKey: config.deepseek.apiKey,
       baseUrl: config.deepseek.baseUrl,
       model: config.deepseek.reasoningModel,
+      includeRawResponse: config.includeRawProviderResponses
+    });
+  },
+  nvidia(config) {
+    if (!config.nvidia.apiKey || !config.nvidia.reasoningModel) return undefined;
+    return new OpenAICompatibleReasoningProvider({
+      provider: "nvidia",
+      apiKey: config.nvidia.apiKey,
+      baseUrl: config.nvidia.baseUrl,
+      model: config.nvidia.reasoningModel,
+      includeRawResponse: config.includeRawProviderResponses
+    });
+  },
+  local(config) {
+    if (!config.local.baseUrl || !config.local.reasoningModel) return undefined;
+    return new OpenAICompatibleReasoningProvider({
+      provider: "local",
+      baseUrl: config.local.baseUrl,
+      model: config.local.reasoningModel,
       includeRawResponse: config.includeRawProviderResponses
     });
   }
@@ -518,33 +747,58 @@ const embeddingProviderFactories: Record<string, ProviderFactory<EmbeddingProvid
 
     return new OpenAICompatibleEmbeddingProvider(config);
   },
+  nvidia(config) {
+    if (!config.nvidia.apiKey || !config.nvidia.embeddingModel) return undefined;
+    return new OpenAICompatibleEmbeddingProvider(config, {
+      provider: "nvidia",
+      apiKey: config.nvidia.apiKey,
+      baseUrl: config.nvidia.baseUrl,
+      model: config.nvidia.embeddingModel,
+      dimensions: config.nvidia.embeddingDimensions
+    });
+  },
+  local(config) {
+    if (!config.local.baseUrl || !config.local.embeddingModel) return undefined;
+    return new OpenAICompatibleEmbeddingProvider(config, {
+      provider: "local",
+      baseUrl: config.local.baseUrl,
+      model: config.local.embeddingModel,
+      dimensions: config.local.embeddingDimensions
+    });
+  },
   mock(config) {
     return new MockEmbeddingProvider(config.embedding.dimensions);
   }
 };
 
 function resolveChatProvider(config: ProviderRegistryConfig): ChatProvider {
-  return resolveConfiguredProvider({
-    config,
-    capability: "chat",
-    name: config.defaults.chat,
-    factories: chatProviderFactories,
-    createMock: createMockChatProvider,
-    createUnavailable: (name) =>
-      new UnavailableChatProvider(name, unavailableProviderMessage("chat", name, config))
-  });
+  return new FallbackChatProvider(
+    createProviderChain(
+      config,
+      "chat",
+      chatProviderFactories,
+      createMockChatProvider,
+      (name) => new UnavailableChatProvider(name, unavailableProviderMessage("chat", name, config))
+    ),
+    config.defaults.chat
+  );
 }
 
 function resolveReasoningProvider(config: ProviderRegistryConfig): ReasoningProvider {
-  return resolveConfiguredProvider({
-    config,
-    capability: "reasoning",
-    name: config.defaults.reasoning,
-    factories: reasoningProviderFactories,
-    createMock: createMockReasoningProvider,
-    createUnavailable: (name) =>
-      new UnavailableReasoningProvider(name, unavailableProviderMessage("reasoning", name, config))
-  });
+  return new FallbackReasoningProvider(
+    createProviderChain(
+      config,
+      "reasoning",
+      reasoningProviderFactories,
+      createMockReasoningProvider,
+      (name) =>
+        new UnavailableReasoningProvider(
+          name,
+          unavailableProviderMessage("reasoning", name, config)
+        )
+    ),
+    config.defaults.reasoning
+  );
 }
 
 function resolveTTSProvider(config: ProviderRegistryConfig): TTSProvider {
@@ -584,19 +838,21 @@ function resolveVisionProvider(config: ProviderRegistryConfig): VisionProvider {
 }
 
 function resolveEmbeddingProvider(config: ProviderRegistryConfig): EmbeddingProvider {
-  return resolveConfiguredProvider({
-    config,
-    capability: "embedding",
-    name: config.defaults.embedding,
-    factories: embeddingProviderFactories,
-    createMock: () => new MockEmbeddingProvider(config.embedding.dimensions),
-    createUnavailable: (name) =>
-      new UnavailableEmbeddingProvider(
-        name,
-        config.embedding.dimensions,
-        unavailableProviderMessage("embedding", name, config)
-      )
-  });
+  return new FallbackEmbeddingProvider(
+    createProviderChain(
+      config,
+      "embedding",
+      embeddingProviderFactories,
+      () => new MockEmbeddingProvider(config.embedding.dimensions),
+      (name) =>
+        new UnavailableEmbeddingProvider(
+          name,
+          config.embedding.dimensions,
+          unavailableProviderMessage("embedding", name, config)
+        )
+    ),
+    config.defaults.embedding
+  );
 }
 
 function unavailableProviderMessage(
@@ -621,6 +877,34 @@ function missingFieldsForConfig(
       ...(capability === "reasoning" && !config.deepseek.reasoningModel
         ? ["DEEPSEEK_REASONING_MODEL"]
         : [])
+    ];
+  }
+  if (name === "nvidia") {
+    return [
+      ...(!config.nvidia.apiKey ? ["NVIDIA_API_KEY"] : []),
+      ...(capability === "chat" && !config.nvidia.chatModel ? ["NVIDIA_CHAT_MODEL"] : []),
+      ...(capability === "reasoning" && !config.nvidia.reasoningModel
+        ? ["NVIDIA_REASONING_MODEL"]
+        : []),
+      ...(capability === "embedding" && !config.nvidia.embeddingModel
+        ? ["NVIDIA_EMBEDDING_MODEL"]
+        : []),
+      ...(capability === "vision" && !config.nvidia.visionModel ? ["NVIDIA_VISION_MODEL"] : [])
+    ];
+  }
+  if (name === "local") {
+    return [
+      ...(!config.local.baseUrl ? ["LOCAL_MODEL_BASEURL"] : []),
+      ...(capability === "chat" && !config.local.chatModel ? ["LOCAL_CHAT_MODEL"] : []),
+      ...(capability === "reasoning" && !config.local.reasoningModel
+        ? ["LOCAL_REASONING_MODEL"]
+        : []),
+      ...(capability === "embedding" && !config.local.embeddingModel
+        ? ["LOCAL_EMBEDDING_MODEL"]
+        : []),
+      ...(capability === "tts" && !config.local.ttsModel ? ["LOCAL_TTS_MODEL"] : []),
+      ...(capability === "stt" && !config.local.sttModel ? ["LOCAL_STT_MODEL"] : []),
+      ...(capability === "vision" && !config.local.visionModel ? ["LOCAL_VISION_MODEL"] : [])
     ];
   }
   if (capability === "tts" && name === "xai") {
@@ -668,6 +952,183 @@ function resolveConfiguredProvider<TProvider>(input: {
   }
 
   return input.createUnavailable(input.name);
+}
+
+function createProviderChain<TProvider>(
+  config: ProviderRegistryConfig,
+  capability: ProviderCapability,
+  factories: Record<string, ProviderFactory<TProvider>>,
+  createMock: (name: string) => TProvider,
+  createUnavailable: (name: string) => TProvider
+): TProvider[] {
+  const chain = config.chains[capability];
+  const providers = chain.map((name) =>
+    resolveConfiguredProvider({
+      config,
+      capability,
+      name,
+      factories,
+      createMock,
+      createUnavailable
+    })
+  );
+  return providers.length > 0 ? providers : [createUnavailable("unavailable")];
+}
+
+class FallbackChatProvider implements ChatProvider {
+  readonly name: string;
+
+  constructor(
+    private readonly providers: ChatProvider[],
+    name?: string
+  ) {
+    this.name = name ?? providers[0]?.name ?? "unavailable";
+  }
+
+  async healthCheck(): Promise<ProviderHealth> {
+    return (
+      this.providers[0]?.healthCheck() ??
+      providerHealth("unavailable", "unavailable", "No chat providers configured.")
+    );
+  }
+
+  async generateReply(input: ChatInput): Promise<ChatOutput> {
+    return runProviderChain(this.providers, "chat", (provider) => provider.generateReply(input));
+  }
+}
+
+class FallbackReasoningProvider implements ReasoningProvider {
+  readonly name: string;
+
+  constructor(
+    private readonly providers: ReasoningProvider[],
+    name?: string
+  ) {
+    this.name = name ?? providers[0]?.name ?? "unavailable";
+  }
+
+  async healthCheck(): Promise<ProviderHealth> {
+    return (
+      this.providers[0]?.healthCheck() ??
+      providerHealth("unavailable", "unavailable", "No reasoning providers configured.")
+    );
+  }
+
+  async generateReasoning(input: ReasoningInput): Promise<ReasoningOutput> {
+    return runProviderChain(this.providers, "reasoning", (provider) =>
+      provider.generateReasoning(input)
+    );
+  }
+}
+
+class FallbackEmbeddingProvider implements EmbeddingProvider {
+  readonly name: string;
+  readonly dimensions: number;
+  readonly model: string | undefined;
+  readonly mock: boolean | undefined;
+
+  constructor(
+    private readonly providers: EmbeddingProvider[],
+    name?: string
+  ) {
+    const first = providers[0];
+    this.name = name ?? first?.name ?? "unavailable";
+    this.dimensions = first?.dimensions ?? 1536;
+    this.model = first?.model;
+    this.mock = first?.mock;
+  }
+
+  async healthCheck(): Promise<ProviderHealth> {
+    return (
+      this.providers[0]?.healthCheck() ??
+      providerHealth("unavailable", "unavailable", "No embedding providers configured.")
+    );
+  }
+
+  async embedText(text: string): Promise<number[]> {
+    const output = await runProviderChain(this.providers, "embedding", async (provider) => ({
+      vector: await provider.embedText(text),
+      model: provider.model,
+      latencyMs: 0
+    }));
+    return output.vector;
+  }
+
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    const output = await runProviderChain(this.providers, "embedding", async (provider) => ({
+      vectors: await provider.embedBatch(texts),
+      model: provider.model,
+      latencyMs: 0
+    }));
+    return output.vectors;
+  }
+}
+
+async function runProviderChain<
+  TProvider extends { name: string },
+  TOutput extends {
+    model?: string | undefined;
+    latencyMs?: number | undefined;
+    providerMetadata?: Record<string, unknown> | undefined;
+    fallbackUsed?: boolean | undefined;
+    attemptedProviders?: ProviderAttempt[] | undefined;
+    finalProvider?: string | undefined;
+  }
+>(
+  providers: TProvider[],
+  capability: ProviderCapability,
+  operation: (provider: TProvider) => Promise<TOutput>
+): Promise<TOutput> {
+  const attempts: ProviderAttempt[] = [];
+  let lastError: unknown;
+
+  for (const provider of providers) {
+    const startedAt = performance.now();
+    try {
+      const output = await operation(provider);
+      const latencyMs = Math.round(performance.now() - startedAt);
+      attempts.push({
+        provider: provider.name,
+        model: output.model,
+        status: "success",
+        latencyMs: output.latencyMs ?? latencyMs
+      });
+      return {
+        ...output,
+        fallbackUsed: attempts.length > 1,
+        attemptedProviders: attempts,
+        finalProvider: provider.name,
+        providerMetadata: {
+          ...(output.providerMetadata ?? {}),
+          fallbackUsed: attempts.length > 1,
+          attemptedProviders: attempts,
+          finalProvider: provider.name
+        }
+      };
+    } catch (error) {
+      lastError = error;
+      const providerError = error instanceof ProviderError ? error : null;
+      attempts.push({
+        provider: providerError?.provider ?? provider.name,
+        status: "failed",
+        errorCode: providerError?.code ?? "PROVIDER_UNAVAILABLE",
+        error: safeProviderErrorMessage(error),
+        latencyMs: Math.round(performance.now() - startedAt)
+      });
+    }
+  }
+
+  const message = `All ${capability} providers failed: ${attempts
+    .map((attempt) => `${attempt.provider}:${attempt.errorCode ?? attempt.status}`)
+    .join(", ")}`;
+  throw new ProviderError({
+    provider: providers[0]?.name ?? "provider-chain",
+    capability,
+    code:
+      lastError instanceof ProviderError ? lastError.code : ProviderErrorCode.ProviderUnavailable,
+    message,
+    retryable: false
+  });
 }
 
 class UnimplementedChatProvider implements ChatProvider {
@@ -772,6 +1233,98 @@ class UnavailableSTTProvider extends UnimplementedSTTProvider {}
 class UnavailableVisionProvider extends UnimplementedVisionProvider {}
 class UnavailableEmbeddingProvider extends UnimplementedEmbeddingProvider {}
 
+type OpenAICompatibleTextOptions = {
+  provider: string;
+  apiKey?: string | undefined;
+  baseUrl: string;
+  model: string;
+  includeRawResponse?: boolean | undefined;
+};
+
+class OpenAICompatibleChatProvider implements ChatProvider {
+  readonly name: string;
+
+  constructor(private readonly options: OpenAICompatibleTextOptions) {
+    this.name = options.provider;
+  }
+
+  async healthCheck(): Promise<ProviderHealth> {
+    return {
+      provider: this.name,
+      name: this.name,
+      capability: "chat",
+      configured: true,
+      available: true,
+      mock: false,
+      required: false,
+      baseUrl: this.options.baseUrl,
+      model: this.options.model,
+      status: "degraded",
+      checkedAt: new Date().toISOString(),
+      message: `${this.name} chat provider is configured but not verified by health check.`
+    };
+  }
+
+  async generateReply(input: ChatInput): Promise<ChatOutput> {
+    const completion = await createOpenAICompatibleChatCompletion(this.options, "chat", {
+      messages: input.messages,
+      temperature: input.temperature,
+      maxTokens: input.maxTokens ?? input.maxOutputTokens,
+      stopSequences: input.stopSequences
+    });
+    return {
+      message: { role: "assistant", content: completion.content },
+      finishReason: completion.finishReason,
+      model: completion.model,
+      latencyMs: completion.latencyMs,
+      tokenUsage: completion.tokenUsage,
+      debug: completion.rawResponse ? { rawResponse: completion.rawResponse } : undefined
+    };
+  }
+}
+
+class OpenAICompatibleReasoningProvider implements ReasoningProvider {
+  readonly name: string;
+
+  constructor(private readonly options: OpenAICompatibleTextOptions) {
+    this.name = options.provider;
+  }
+
+  async healthCheck(): Promise<ProviderHealth> {
+    return {
+      provider: this.name,
+      name: this.name,
+      capability: "reasoning",
+      configured: true,
+      available: true,
+      mock: false,
+      required: false,
+      baseUrl: this.options.baseUrl,
+      model: this.options.model,
+      status: "degraded",
+      checkedAt: new Date().toISOString(),
+      message: `${this.name} reasoning provider is configured but not verified by health check.`
+    };
+  }
+
+  async generateReasoning(input: ReasoningInput): Promise<ReasoningOutput> {
+    const completion = await createOpenAICompatibleChatCompletion(this.options, "reasoning", {
+      messages: input.messages,
+      temperature: input.temperature,
+      maxTokens: input.maxTokens ?? input.maxOutputTokens
+    });
+    return {
+      reasoning: completion.reasoningContent ?? completion.content,
+      answer: completion.reasoningContent ? completion.content : undefined,
+      finishReason: completion.finishReason,
+      model: completion.model,
+      latencyMs: completion.latencyMs,
+      tokenUsage: completion.tokenUsage,
+      debug: completion.rawResponse ? { rawResponse: completion.rawResponse } : undefined
+    };
+  }
+}
+
 class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
   readonly model: string | undefined;
   readonly mock = false;
@@ -779,11 +1332,24 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
   private readonly baseUrl: string;
   private readonly timeoutMs = 30000;
 
-  constructor(private readonly config: ProviderRegistryConfig) {
-    super("openai-compatible", config.embedding.dimensions, "OpenAI-compatible embeddings.");
-    this.model = config.embedding.model;
-    this.apiKey = config.embedding.apiKey;
-    this.baseUrl = config.embedding.baseUrl ?? "https://api.openai.com/v1";
+  constructor(
+    private readonly config: ProviderRegistryConfig,
+    override?: {
+      provider: string;
+      apiKey?: string | undefined;
+      baseUrl?: string | undefined;
+      model?: string | undefined;
+      dimensions?: number | undefined;
+    }
+  ) {
+    super(
+      override?.provider ?? "openai-compatible",
+      override?.dimensions ?? config.embedding.dimensions,
+      "OpenAI-compatible embeddings."
+    );
+    this.model = override?.model ?? config.embedding.model;
+    this.apiKey = override?.apiKey ?? config.embedding.apiKey;
+    this.baseUrl = override?.baseUrl ?? config.embedding.baseUrl ?? "https://api.openai.com/v1";
   }
 
   override async healthCheck(): Promise<ProviderHealth> {
@@ -1055,6 +1621,124 @@ function unavailableError(
   });
 }
 
+type OpenAICompatibleChatCompletion = {
+  content: string;
+  reasoningContent?: string | undefined;
+  finishReason?: "stop" | "length" | "tool_call" | "content_filter" | "unknown" | undefined;
+  model?: string | undefined;
+  tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined;
+  rawResponse?: unknown | undefined;
+  latencyMs: number;
+};
+
+async function createOpenAICompatibleChatCompletion(
+  options: OpenAICompatibleTextOptions,
+  capability: "chat" | "reasoning",
+  request: {
+    messages: ChatInput["messages"];
+    temperature?: number | undefined;
+    maxTokens?: number | undefined;
+    stopSequences?: string[] | undefined;
+  }
+): Promise<OpenAICompatibleChatCompletion> {
+  const startedAt = performance.now();
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (options.apiKey) {
+    headers["authorization"] = `Bearer ${options.apiKey}`;
+  }
+  const response = await fetch(`${trimTrailingSlash(options.baseUrl)}/chat/completions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: options.model,
+      messages: request.messages,
+      temperature: request.temperature,
+      max_tokens: request.maxTokens,
+      stop: request.stopSequences,
+      stream: false
+    })
+  });
+
+  if (!response.ok) {
+    throw new ProviderError({
+      provider: options.provider,
+      capability,
+      code:
+        response.status === 401
+          ? ProviderErrorCode.InvalidApiKey
+          : response.status === 429
+            ? ProviderErrorCode.RateLimited
+            : ProviderErrorCode.ProviderUnavailable,
+      statusCode: response.status,
+      message: `${options.provider} ${capability} request failed with ${response.status}.`,
+      retryable: response.status >= 500 || response.status === 429
+    });
+  }
+
+  const raw = (await response.json()) as {
+    model?: string;
+    choices?: Array<{
+      finish_reason?: string | null;
+      message?: { content?: string | null; reasoning_content?: string | null };
+    }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
+  const choice = raw.choices?.[0];
+  const content = choice?.message?.content;
+  if (typeof content !== "string") {
+    throw new ProviderError({
+      provider: options.provider,
+      capability,
+      code: ProviderErrorCode.MalformedResponse,
+      message: `${options.provider} ${capability} response did not include assistant content.`,
+      retryable: false
+    });
+  }
+
+  return {
+    content,
+    reasoningContent: choice?.message?.reasoning_content ?? undefined,
+    finishReason: normalizeFinishReason(choice?.finish_reason),
+    model: raw.model ?? options.model,
+    latencyMs: Math.round(performance.now() - startedAt),
+    tokenUsage: raw.usage
+      ? {
+          ...(raw.usage.prompt_tokens !== undefined
+            ? { inputTokens: raw.usage.prompt_tokens }
+            : {}),
+          ...(raw.usage.completion_tokens !== undefined
+            ? { outputTokens: raw.usage.completion_tokens }
+            : {}),
+          ...(raw.usage.total_tokens !== undefined ? { totalTokens: raw.usage.total_tokens } : {})
+        }
+      : undefined,
+    rawResponse: options.includeRawResponse ? raw : undefined
+  };
+}
+
+function normalizeFinishReason(
+  value: string | null | undefined
+): OpenAICompatibleChatCompletion["finishReason"] {
+  if (
+    value === "stop" ||
+    value === "length" ||
+    value === "tool_call" ||
+    value === "content_filter"
+  ) {
+    return value;
+  }
+  return value ? "unknown" : undefined;
+}
+
+function safeProviderErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9._~+/=-]+/g, "sk-[REDACTED]")
+    .replace(/(api[-_]?key|authorization|token|password|secret)=([^&\s]+)/gi, "$1=[REDACTED]")
+    .slice(0, 300);
+}
+
 function parseEnvironment(value: string | undefined): ProviderRegistryConfig["environment"] {
   if (value === "production" || value === "test" || value === "development") {
     return value;
@@ -1065,6 +1749,19 @@ function parseEnvironment(value: string | undefined): ProviderRegistryConfig["en
 
 function parseBoolean(value: string | undefined): boolean {
   return value === "1" || value === "true" || value === "TRUE";
+}
+
+function parseProviderChain(
+  value: string | undefined,
+  fallback: string[],
+  allowMocks: boolean
+): string[] {
+  const parsed = value
+    ?.split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const chain = parsed?.length ? parsed : fallback;
+  return Array.from(new Set(chain.filter((provider) => allowMocks || provider !== "mock")));
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number): number {

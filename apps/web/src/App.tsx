@@ -1515,6 +1515,7 @@ function ProvidersPage(props: {
         title="Status meanings"
         message="YUVI is real-provider-first by default. configured=false + mock=false means the provider is unavailable until configured. configured=false + mock=true only appears when PROVIDER_ALLOW_MOCKS=true. configured=true + mock=false + degraded means config is present, but remote health is intentionally unverified."
       />
+      {props.state.data?.routes && <ProviderPriorityPanel routes={props.state.data.routes} />}
       <Panel
         title="Manual Verification"
         actions={
@@ -1600,6 +1601,48 @@ function ProvidersPage(props: {
         </div>
       </Panel>
     </PageShell>
+  );
+}
+
+function ProviderPriorityPanel(props: {
+  routes: NonNullable<ProvidersStatusResponse["routes"]>;
+}): JSX.Element {
+  const capabilities = ["chat", "reasoning", "embedding", "tts", "stt", "vision"] as const;
+  return (
+    <Panel title="Provider Priority" badge="Read-only v1">
+      <div className="grid grid-cols-2 gap-3">
+        {capabilities.map((capability) => (
+          <div key={capability} className="rounded-md border border-ink-100 bg-white p-3">
+            <div className="mb-2 text-sm font-semibold capitalize text-ink-800">{capability}</div>
+            <ol className="space-y-2">
+              {(props.routes[capability] ?? []).map((route) => (
+                <li
+                  key={`${capability}-${route.provider}-${route.priority}`}
+                  className="grid grid-cols-[28px_1fr_auto] items-center gap-2 text-xs"
+                >
+                  <span className="font-mono text-ink-500">{route.priority ?? "-"}</span>
+                  <span>
+                    <span className="font-medium text-ink-800">{route.provider}</span>
+                    <span className="ml-2 text-ink-500">{route.model ?? "no model"}</span>
+                    {route.missingFields?.length ? (
+                      <div className="text-rose-700">Missing: {route.missingFields.join(", ")}</div>
+                    ) : null}
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <Pill status={route.status ?? "unknown"} />
+                    <span className="text-ink-500">{route.mock ? "mock" : "real"}</span>
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        ))}
+      </div>
+      <p className="mt-3 text-xs leading-5 text-ink-500">
+        Priority is configured through *_PROVIDER_CHAIN values. Apply Now reloads supported runtime
+        config; Deep Restart restarts the supervised local runtime and reloads env files.
+      </p>
+    </Panel>
   );
 }
 
@@ -2440,6 +2483,20 @@ function SettingsPage(): JSX.Element {
           </table>
         </div>
       </Panel>
+      <Panel title="Model Priority Chains" badge="Provider fallback">
+        <div className="grid grid-cols-3 gap-3">
+          <SettingsInput form={form} name="CHAT_PROVIDER_CHAIN" setForm={setForm} />
+          <SettingsInput form={form} name="REASONING_PROVIDER_CHAIN" setForm={setForm} />
+          <SettingsInput form={form} name="EMBEDDING_PROVIDER_CHAIN" setForm={setForm} />
+          <SettingsInput form={form} name="TTS_PROVIDER_CHAIN" setForm={setForm} />
+          <SettingsInput form={form} name="STT_PROVIDER_CHAIN" setForm={setForm} />
+          <SettingsInput form={form} name="VISION_PROVIDER_CHAIN" setForm={setForm} />
+        </div>
+        <p className="mt-3 text-sm leading-6 text-ink-600">
+          Provider chains are tried left to right. Mock is ignored unless PROVIDER_ALLOW_MOCKS=true.
+          Apply Now reloads supported runtime config; Deep Restart restarts the supervised runtime.
+        </p>
+      </Panel>
       <div className="grid grid-cols-3 gap-4">
         <Panel
           title="DeepSeek"
@@ -2488,6 +2545,32 @@ function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="XAI_TTS_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="XAI_TTS_VOICE" setForm={setForm} />
           <SettingsInput form={form} name="XAI_VISION_MODEL" setForm={setForm} />
+        </Panel>
+        <Panel title="NVIDIA API" badge="OpenAI-compatible v1">
+          <SettingsInput form={form} name="NVIDIA_API_BASEURL" setForm={setForm} />
+          <SecretInput
+            label="NVIDIA_API_KEY"
+            configured={secretSettingConfigured(settings.data, "NVIDIA_API_KEY")}
+            preview={secretSettingPreview(settings.data, "NVIDIA_API_KEY")}
+            value={form.NVIDIA_API_KEY}
+            onChange={(value) => setFormValue(setForm, "NVIDIA_API_KEY", value)}
+            onClear={() => clearSecret(setForm, setClearedSecrets, "NVIDIA_API_KEY")}
+          />
+          <SettingsInput form={form} name="NVIDIA_CHAT_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="NVIDIA_REASONING_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="NVIDIA_EMBEDDING_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="NVIDIA_EMBEDDING_DIMENSIONS" setForm={setForm} />
+          <SettingsInput form={form} name="NVIDIA_VISION_MODEL" setForm={setForm} />
+        </Panel>
+        <Panel title="Local Models" badge="OpenAI-compatible">
+          <SettingsInput form={form} name="LOCAL_MODEL_BASEURL" setForm={setForm} />
+          <SettingsInput form={form} name="LOCAL_CHAT_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="LOCAL_REASONING_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="LOCAL_EMBEDDING_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="LOCAL_EMBEDDING_DIMENSIONS" setForm={setForm} />
+          <SettingsInput form={form} name="LOCAL_TTS_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="LOCAL_STT_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="LOCAL_VISION_MODEL" setForm={setForm} />
         </Panel>
         <Panel
           title="DashScope / Embedding"
@@ -2573,10 +2656,31 @@ type SettingsKey =
   | "MEMORY_REPOSITORY"
   | "DATABASE_URL"
   | "MEMORY_EXTRACTOR"
+  | "CHAT_PROVIDER_CHAIN"
+  | "REASONING_PROVIDER_CHAIN"
+  | "EMBEDDING_PROVIDER_CHAIN"
+  | "TTS_PROVIDER_CHAIN"
+  | "STT_PROVIDER_CHAIN"
+  | "VISION_PROVIDER_CHAIN"
   | "DEEPSEEK_API_BASEURL"
   | "DEEPSEEK_API_KEY"
   | "DEEPSEEK_CHAT_MODEL"
   | "DEEPSEEK_REASONING_MODEL"
+  | "NVIDIA_API_BASEURL"
+  | "NVIDIA_API_KEY"
+  | "NVIDIA_CHAT_MODEL"
+  | "NVIDIA_REASONING_MODEL"
+  | "NVIDIA_EMBEDDING_MODEL"
+  | "NVIDIA_EMBEDDING_DIMENSIONS"
+  | "NVIDIA_VISION_MODEL"
+  | "LOCAL_MODEL_BASEURL"
+  | "LOCAL_CHAT_MODEL"
+  | "LOCAL_REASONING_MODEL"
+  | "LOCAL_EMBEDDING_MODEL"
+  | "LOCAL_EMBEDDING_DIMENSIONS"
+  | "LOCAL_TTS_MODEL"
+  | "LOCAL_STT_MODEL"
+  | "LOCAL_VISION_MODEL"
   | "XAI_API_BASEURL"
   | "XAI_API_KEY"
   | "XAI_TTS_MODEL"
@@ -2600,10 +2704,31 @@ function emptySettingsForm(): SettingsForm {
     MEMORY_REPOSITORY: "in-memory",
     DATABASE_URL: "",
     MEMORY_EXTRACTOR: "llm",
+    CHAT_PROVIDER_CHAIN: "deepseek,nvidia,local,mock",
+    REASONING_PROVIDER_CHAIN: "deepseek,nvidia,local,mock",
+    EMBEDDING_PROVIDER_CHAIN: "openai-compatible,nvidia,local,mock",
+    TTS_PROVIDER_CHAIN: "xai,local,mock",
+    STT_PROVIDER_CHAIN: "dashscope,local,mock",
+    VISION_PROVIDER_CHAIN: "xai,nvidia,local,mock",
     DEEPSEEK_API_BASEURL: "",
     DEEPSEEK_API_KEY: "",
     DEEPSEEK_CHAT_MODEL: "",
     DEEPSEEK_REASONING_MODEL: "",
+    NVIDIA_API_BASEURL: "https://integrate.api.nvidia.com/v1",
+    NVIDIA_API_KEY: "",
+    NVIDIA_CHAT_MODEL: "",
+    NVIDIA_REASONING_MODEL: "",
+    NVIDIA_EMBEDDING_MODEL: "",
+    NVIDIA_EMBEDDING_DIMENSIONS: "1536",
+    NVIDIA_VISION_MODEL: "",
+    LOCAL_MODEL_BASEURL: "",
+    LOCAL_CHAT_MODEL: "",
+    LOCAL_REASONING_MODEL: "",
+    LOCAL_EMBEDDING_MODEL: "",
+    LOCAL_EMBEDDING_DIMENSIONS: "1536",
+    LOCAL_TTS_MODEL: "",
+    LOCAL_STT_MODEL: "",
+    LOCAL_VISION_MODEL: "",
     XAI_API_BASEURL: "",
     XAI_API_KEY: "",
     XAI_TTS_MODEL: "",
@@ -2629,10 +2754,31 @@ function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsFo
     MEMORY_REPOSITORY: settings.memory.memoryRepository,
     DATABASE_URL: "",
     MEMORY_EXTRACTOR: settings.memory.memoryExtractor ?? "llm",
+    CHAT_PROVIDER_CHAIN: runtimeSetting(settings, "CHAT_PROVIDER_CHAIN"),
+    REASONING_PROVIDER_CHAIN: runtimeSetting(settings, "REASONING_PROVIDER_CHAIN"),
+    EMBEDDING_PROVIDER_CHAIN: runtimeSetting(settings, "EMBEDDING_PROVIDER_CHAIN"),
+    TTS_PROVIDER_CHAIN: runtimeSetting(settings, "TTS_PROVIDER_CHAIN"),
+    STT_PROVIDER_CHAIN: runtimeSetting(settings, "STT_PROVIDER_CHAIN"),
+    VISION_PROVIDER_CHAIN: runtimeSetting(settings, "VISION_PROVIDER_CHAIN"),
     DEEPSEEK_API_BASEURL: settings.providers.deepseek.baseUrl,
     DEEPSEEK_API_KEY: "",
     DEEPSEEK_CHAT_MODEL: settings.providers.deepseek.chatModel,
     DEEPSEEK_REASONING_MODEL: settings.providers.deepseek.reasoningModel,
+    NVIDIA_API_BASEURL: runtimeSetting(settings, "NVIDIA_API_BASEURL"),
+    NVIDIA_API_KEY: "",
+    NVIDIA_CHAT_MODEL: runtimeSetting(settings, "NVIDIA_CHAT_MODEL"),
+    NVIDIA_REASONING_MODEL: runtimeSetting(settings, "NVIDIA_REASONING_MODEL"),
+    NVIDIA_EMBEDDING_MODEL: runtimeSetting(settings, "NVIDIA_EMBEDDING_MODEL"),
+    NVIDIA_EMBEDDING_DIMENSIONS: runtimeSetting(settings, "NVIDIA_EMBEDDING_DIMENSIONS"),
+    NVIDIA_VISION_MODEL: runtimeSetting(settings, "NVIDIA_VISION_MODEL"),
+    LOCAL_MODEL_BASEURL: runtimeSetting(settings, "LOCAL_MODEL_BASEURL"),
+    LOCAL_CHAT_MODEL: runtimeSetting(settings, "LOCAL_CHAT_MODEL"),
+    LOCAL_REASONING_MODEL: runtimeSetting(settings, "LOCAL_REASONING_MODEL"),
+    LOCAL_EMBEDDING_MODEL: runtimeSetting(settings, "LOCAL_EMBEDDING_MODEL"),
+    LOCAL_EMBEDDING_DIMENSIONS: runtimeSetting(settings, "LOCAL_EMBEDDING_DIMENSIONS"),
+    LOCAL_TTS_MODEL: runtimeSetting(settings, "LOCAL_TTS_MODEL"),
+    LOCAL_STT_MODEL: runtimeSetting(settings, "LOCAL_STT_MODEL"),
+    LOCAL_VISION_MODEL: runtimeSetting(settings, "LOCAL_VISION_MODEL"),
     XAI_API_BASEURL: settings.providers.xai.baseUrl,
     XAI_API_KEY: "",
     XAI_TTS_MODEL: settings.providers.xai.ttsModel,
@@ -2647,6 +2793,28 @@ function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsFo
     EMBEDDING_MODEL: settings.providers.embedding.model,
     EMBEDDING_DIMENSIONS: settings.providers.embedding.dimensions
   };
+}
+
+function runtimeSetting(settings: RuntimeSettingsResponse, key: string): string {
+  const setting = settings.settings[key];
+  const value = setting && "effective" in setting ? setting.effective : "";
+  return typeof value === "string" ? value : "";
+}
+
+function secretSettingConfigured(
+  settings: RuntimeSettingsResponse | null | undefined,
+  key: string
+): boolean {
+  const setting = settings?.settings[key];
+  return Boolean(setting && "effectiveConfigured" in setting && setting.effectiveConfigured);
+}
+
+function secretSettingPreview(
+  settings: RuntimeSettingsResponse | null | undefined,
+  key: string
+): string | undefined {
+  const setting = settings?.settings[key];
+  return setting && "maskedValue" in setting ? setting.maskedValue : undefined;
 }
 
 function setFormValue(
@@ -2684,6 +2852,7 @@ function isSecretSettingsKey(key: SettingsKey): boolean {
   return (
     key === "DEEPSEEK_API_KEY" ||
     key === "DATABASE_URL" ||
+    key === "NVIDIA_API_KEY" ||
     key === "XAI_API_KEY" ||
     key === "DASHSCOPE_API_KEY" ||
     key === "EMBEDDING_API_KEY"

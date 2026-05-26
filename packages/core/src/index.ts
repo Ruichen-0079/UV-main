@@ -254,6 +254,9 @@ export type SafeProviderCallMetadata = {
   latencyMs?: number | undefined;
   tokenUsage?: TokenUsage | undefined;
   healthStatus?: ProviderHealth["status"] | undefined;
+  fallbackUsed?: boolean | undefined;
+  attemptedProviders?: ProviderMetadata["attemptedProviders"];
+  finalProvider?: string | undefined;
 };
 
 type DirectContextTurn = {
@@ -1199,7 +1202,10 @@ export class RuntimeOrchestrator {
       mock,
       latencyMs: output.latencyMs,
       tokenUsage: output.tokenUsage,
-      healthStatus: status?.status
+      healthStatus: status?.status,
+      ...(output.fallbackUsed !== undefined ? { fallbackUsed: output.fallbackUsed } : {}),
+      ...(output.attemptedProviders ? { attemptedProviders: output.attemptedProviders } : {}),
+      ...(output.finalProvider ? { finalProvider: output.finalProvider } : {})
     };
   }
 

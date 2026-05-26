@@ -71,7 +71,9 @@ export class MemoryService {
   }
 
   async createMemory(input: CreateMemoryInput): Promise<Memory> {
-    return this.repository.createMemory(await this.withEmbedding(input));
+    return this.repository.createMemory(
+      await this.withEmbedding(this.applyTestMemoryPolicy(input))
+    );
   }
 
   async updateMemory(id: string, input: UpdateMemoryInput): Promise<Memory | null> {
@@ -479,6 +481,33 @@ export class MemoryService {
           ? { testMemory: true }
           : {})
       }
+    };
+  }
+
+  private applyTestMemoryPolicy(input: CreateMemoryInput): CreateMemoryInput {
+    if (!isTestMemoryInput(input)) {
+      return input;
+    }
+    const createdAt = toValidDate(input.observedAt) ?? new Date();
+    const expiresAt = input.expiresAt
+      ? (toValidDate(input.expiresAt) ?? input.expiresAt)
+      : addDays(createdAt, 1);
+    return {
+      ...input,
+      memoryLayer:
+        input.memoryLayer === "core" || input.memoryLayer === undefined
+          ? "recall"
+          : input.memoryLayer,
+      importance: Math.min(input.importance ?? 0.3, 0.3),
+      expiresAt,
+      metadata: {
+        ...(input.metadata ?? {}),
+        testMemory: true,
+        retentionClass: "test",
+        retentionReason: "smoke/test memory should expire quickly",
+        computedExpiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : String(expiresAt)
+      },
+      tags: Array.from(new Set([...(input.tags ?? []), "test"]))
     };
   }
 
@@ -935,6 +964,7 @@ type RetrievalPolicy = {
   includeSuperseded: boolean;
   includeExpired: boolean;
   includeHistoricalEpisodic: boolean;
+  includeTestMemories: boolean;
   currentTime: Date;
 };
 
@@ -1038,6 +1068,7 @@ function createRetrievalPolicy(query: MemorySearchQuery): RetrievalPolicy {
     includeSuperseded: Boolean(query.includeSuperseded || query.includeHistory),
     includeExpired: Boolean(query.includeExpired),
     includeHistoricalEpisodic,
+    includeTestMemories: Boolean(query.includeTestMemories),
     currentTime
   };
 }
@@ -1082,6 +1113,10 @@ function memoryExclusion(
   memory: Memory,
   policy: RetrievalPolicy
 ): Pick<RetrievedMemoryCandidate, "excludedReason"> {
+  if (!policy.includeTestMemories && isTestMemoryRecord(memory)) {
+    return { excludedReason: "test-memory" };
+  }
+
   const scopeReason = scopeExclusion(memory, policy);
   if (scopeReason) return { excludedReason: scopeReason };
 
@@ -1401,6 +1436,34 @@ function accessScore(lastAccessedAt: Date): number {
   }
   const ageDays = ageMs / 86_400_000;
   return Math.max(0, 1 - ageDays / 14) * 0.25;
+}
+
+function isTestMemoryInput(input: CreateMemoryInput): boolean {
+  return (
+    input.source === "smoke" ||
+    input.source === "mock" ||
+    input.subtype === "test" ||
+    input.metadata?.["testMemory"] === true ||
+    input.tags?.some((tag) => ["smoke", "mock", "test"].includes(tag)) === true ||
+    normalizeDisplayText(input.content).toLowerCase() === "smoke test memory."
+  );
+}
+
+function isTestMemoryRecord(memory: Memory): boolean {
+  return (
+    memory.source === "smoke" ||
+    memory.source === "mock" ||
+    memory.subtype === "test" ||
+    memory.metadata["testMemory"] === true ||
+    memory.tags.some((tag) => ["smoke", "mock", "test"].includes(tag)) ||
+    normalizeDisplayText(memory.content).toLowerCase() === "smoke test memory." ||
+    (memory.summary !== null &&
+      normalizeDisplayText(memory.summary).toLowerCase() === "smoke test memory.")
+  );
+}
+
+function addDays(date: Date, days: number): Date {
+  return new Date(date.getTime() + days * 86_400_000);
 }
 
 function scopeQuality(memory: Memory, policy: RetrievalPolicy): number {

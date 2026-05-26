@@ -145,7 +145,7 @@ Default retention is category and importance based:
 - working/session memories: hours to one day
 - smoke/mock/test memories: expire within one day
 
-Higher importance extends retention. Durable memories at `importance >= 0.9` generally avoid short expiry. Smoke/mock/test memories are marked with safe metadata such as `testMemory=true` and are meant to be marked expired by maintenance after their short TTL. No retention rule hard-deletes data.
+Higher importance extends retention. Durable memories at `importance >= 0.9` generally avoid short expiry. Smoke/mock/test memories are marked with safe metadata such as `testMemory=true` and are meant to be marked expired by maintenance after their short TTL. Normal prompt retrieval and fallback-recent retrieval exclude smoke/mock/test memories by default so local validation text such as `Smoke test memory.` does not pollute `RelevantMemory`. Manual/debug search can opt into those records with `includeTestMemories=true`. No retention rule hard-deletes data.
 
 ## Memory Model v2
 

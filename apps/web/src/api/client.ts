@@ -17,6 +17,11 @@ export type ProviderHealth = {
   dimensions?: number;
   semanticEmbedding?: boolean;
   embeddingNote?: string;
+  enabled?: boolean;
+  priority?: number;
+  fallbackEligible?: boolean;
+  lastVerifiedAt?: string;
+  lastError?: string;
 };
 
 export type HealthResponse = {
@@ -287,6 +292,14 @@ export type ProvidersStatusResponse = {
     stt: ProviderHealth;
     vision: ProviderHealth;
     embedding: ProviderHealth;
+  };
+  routes?: {
+    chat: ProviderHealth[];
+    reasoning: ProviderHealth[];
+    tts: ProviderHealth[];
+    stt: ProviderHealth[];
+    vision: ProviderHealth[];
+    embedding: ProviderHealth[];
   };
 };
 
@@ -1127,7 +1140,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("content-type", "application/json");
   }
   if (dashboardDevToken && shouldAttachDashboardDevToken(path, init?.method)) {
-    headers.set("x-yuvi-dev-token", dashboardDevToken);
+    headers.set("authorization", `Bearer ${dashboardDevToken}`);
   }
 
   const response = await fetch(`${apiBaseUrl}${path}`, {

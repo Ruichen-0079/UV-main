@@ -4,6 +4,15 @@ import type { AppContext } from "../context.js";
 import { redactValue } from "../services/dashboard.js";
 import { requireDashboardDevToken } from "./security.js";
 
+const ProviderCapabilitySchema = {
+  chat: true,
+  reasoning: true,
+  embedding: true,
+  tts: true,
+  stt: true,
+  vision: true
+} as const;
+
 export async function registerProviderRoutes(
   app: FastifyInstance,
   context: AppContext,
@@ -164,6 +173,31 @@ export async function registerProviderRoutes(
         })
       );
     }
+  });
+
+  app.post("/providers/verify-chain/:capability", async (request, reply) => {
+    if (!requireDashboardDevToken(config, request, reply)) {
+      return reply;
+    }
+    const capability = (request.params as { capability?: string }).capability;
+    if (!capability || !(capability in ProviderCapabilitySchema)) {
+      return reply.status(400).send({
+        error: "invalid_capability",
+        message: "Capability must be one of chat, reasoning, embedding, tts, stt, vision."
+      });
+    }
+    const routes =
+      context.providers.getStatus().routes?.[capability as keyof typeof ProviderCapabilitySchema] ??
+      [];
+    return reply.send(
+      redactValue({
+        ok: true,
+        capability,
+        routes,
+        message:
+          "Chain verification is explicit. This v1 endpoint returns safe configured route order; use individual Verify buttons for live provider calls."
+      })
+    );
   });
 }
 

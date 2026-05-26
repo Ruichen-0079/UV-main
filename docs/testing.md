@@ -80,7 +80,11 @@ DEFAULT_EMBEDDING_PROVIDER=mock
 
 `MEMORY_EXTRACTOR=llm` is the default, but smoke tests without real DeepSeek Reasoning credentials fall back safely to rule-based extraction and do not require tokens. Set `MEMORY_EXTRACTOR=rule-based` when you need deterministic no-token extractor behavior.
 
+Smoke-created memory is marked as validation data: `source=smoke`, `metadata.testMemory=true`, `subtype=test`, low importance, `memoryLayer=recall`, and a one-day TTL. Normal prompt retrieval and fallback-recent retrieval exclude smoke/mock/test memories by default; smoke/debug search opts in with `includeTestMemories=true` when it needs to assert the record exists.
+
 Normal development/runtime is real-provider-first (`PROVIDER_ALLOW_MOCKS=false`). Tests and CI explicitly set `PROVIDER_ALLOW_MOCKS=true` and `DEFAULT_EMBEDDING_PROVIDER=mock` so they never require real API keys. Mock embeddings report `semanticEmbedding=false`; they validate the pipeline but do not provide real semantic similarity.
+
+Provider fallback tests cover chat chains where DeepSeek fails and a local OpenAI-compatible provider succeeds, route status for NVIDIA/local providers, mock opt-in behavior, and redaction of API keys and `sk-...` style tokens in attempted-provider metadata.
 
 Embedding verification is explicit. `POST /providers/verify/embedding` and the Dashboard **Verify Embedding** button call the active embedding provider with a small test string, may consume provider usage, and return only safe provider/model/dimension/latency metadata. Default tests use mock embedding or stubbed HTTP responses. A dimension mismatch returns `ok=false` with expected and actual dimensions, and raw vectors/API keys are never returned.
 

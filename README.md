@@ -124,6 +124,18 @@ MEMORY_VECTOR_DISTANCE=cosine
 
 If HNSW/IVFFLAT is unavailable, retrieval still works without ANN acceleration. Check status with `pnpm memory:index:status` or the Dashboard memory status panel.
 
+Provider routing is priority-based. The default chain keeps DeepSeek first for chat/reasoning, then NVIDIA API, then a local OpenAI-compatible server, with mock only when explicitly enabled:
+
+```env
+CHAT_PROVIDER_CHAIN=deepseek,nvidia,local,mock
+REASONING_PROVIDER_CHAIN=deepseek,nvidia,local,mock
+EMBEDDING_PROVIDER_CHAIN=openai-compatible,nvidia,local,mock
+NVIDIA_API_BASEURL=https://integrate.api.nvidia.com/v1
+LOCAL_MODEL_BASEURL=http://localhost:11434/v1
+```
+
+Fallback metadata is returned as safe attempted-provider summaries without API keys, Authorization headers, or database URLs.
+
 For development Deep Restart support from the Dashboard, run `./scripts/dev.sh` with:
 
 ```env
