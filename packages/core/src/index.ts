@@ -3,11 +3,13 @@ import type {
   Memory,
   MemoryCandidate,
   MemoryCandidateStorageResult,
+  CurrentAffect,
   MemoryExtractorStatus,
   MemoryRetrievalMode,
   MemoryRetrievalResult,
   RetrievedMemoryDebug
 } from "@companion/memory";
+import { detectCurrentAffect } from "@companion/memory";
 import type { PromptBuildInput, PromptBuildOutput } from "@companion/prompt-builder";
 import type {
   AgentReplyEvent,
@@ -149,6 +151,7 @@ export type RuntimePromptPreview = {
   includeSuperseded: boolean;
   includeExpired: boolean;
   currentTime: string;
+  currentAffect?: CurrentAffect | undefined;
   directContextEnabled: boolean;
   directContextTurnCount: number;
   directContextCharCount: number;
@@ -214,6 +217,10 @@ export type RuntimeMemoryCandidateReview = {
   extractorProvider?: string | undefined;
   fallbackUsed: boolean;
   metadata?: Record<string, unknown> | undefined;
+  retentionClass?: string | undefined;
+  computedExpiresAt?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+  speakerId?: string | null | undefined;
   observedAt?: string | undefined;
   eventTime?: string | null | undefined;
   validFrom?: string | undefined;
@@ -528,6 +535,10 @@ export class RuntimeOrchestrator {
   ): Promise<AgentReplyEvent> {
     const voiceOutput = Boolean(options.voiceOutput);
     const memoryOptions = resolveMemoryOptions(options);
+    const currentAffect = detectCurrentAffect({
+      text: event.payload.content,
+      sourceTraceId: event.traceId
+    });
     const memoryContext = memoryOptions.readMemory
       ? await this.retrieveMemories(event)
       : emptyMemoryContext();
@@ -556,6 +567,7 @@ export class RuntimeOrchestrator {
       })),
       memoryEnabled: memoryOptions.readMemory,
       currentTime: currentTimeContext(),
+      ...(currentAffect ? { currentAffect: formatCurrentAffectForPrompt(currentAffect) } : {}),
       directContext: directContext.content,
       directContextEnabled: directContext.enabled,
       currentSituation: voiceOutput
@@ -598,6 +610,7 @@ export class RuntimeOrchestrator {
       includeSuperseded: memoryContext.includeSuperseded,
       includeExpired: memoryContext.includeExpired,
       currentTime: memoryContext.currentTime,
+      ...(currentAffect ? { currentAffect } : {}),
       directContextEnabled: directContext.enabled,
       directContextTurnCount: directContext.turnCount,
       directContextCharCount: directContext.charCount,
@@ -1439,6 +1452,17 @@ function toMemoryCandidateReview(input: {
       : {}),
     fallbackUsed: Boolean(input.extractorStatus.fallbackUsed),
     ...(metadata ? { metadata } : {}),
+    ...(typeof metadata?.["retentionClass"] === "string"
+      ? { retentionClass: metadata["retentionClass"] }
+      : {}),
+    ...(typeof metadata?.["computedExpiresAt"] === "string" ||
+    metadata?.["computedExpiresAt"] === null
+      ? { computedExpiresAt: metadata["computedExpiresAt"] as string | null }
+      : {}),
+    ...(input.candidate.subjectUserId !== undefined
+      ? { subjectUserId: input.candidate.subjectUserId }
+      : {}),
+    ...(input.candidate.speakerId !== undefined ? { speakerId: input.candidate.speakerId } : {}),
     ...optionalIsoField("observedAt", input.candidate.observedAt),
     ...optionalIsoField("eventTime", input.candidate.eventTime),
     ...optionalIsoField("validFrom", input.candidate.validFrom),
@@ -1475,6 +1499,15 @@ function currentTimeContext(): NonNullable<PromptBuildInput["currentTime"]> {
     timezone,
     localDate: now.toLocaleDateString("en-CA", { timeZone: timezone })
   };
+}
+
+function formatCurrentAffectForPrompt(affect: CurrentAffect): string {
+  const tentative = affect.confidence < 0.75 ? "Tentative: " : "";
+  return [
+    `${tentative}User appears ${affect.affectLabel} in the current turn.`,
+    `Valence: ${affect.affectValence.toFixed(2)}; arousal: ${affect.affectArousal.toFixed(2)}; confidence: ${affect.confidence.toFixed(2)}.`,
+    affect.promptHint
+  ].join("\n");
 }
 
 function normalizeDirectContextConfig(

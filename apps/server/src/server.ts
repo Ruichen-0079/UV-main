@@ -8,6 +8,7 @@ import { memorySearchValidationError, registerMemoryRoutes } from "./routes/memo
 import { registerMessageRoutes } from "./routes/message.js";
 import { registerProviderRoutes } from "./routes/providers.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
+import { registerSystemRoutes } from "./routes/system.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
 import { registerWebSocketRoutes } from "./routes/websocket.js";
@@ -70,6 +71,7 @@ export async function buildServer(config: ServerConfig) {
   await registerHealthRoutes(app, context, config);
   await registerProviderRoutes(app, context, config);
   await registerSettingsRoutes(app, context, config);
+  await registerSystemRoutes(app, config);
   await registerMessageRoutes(app, context);
   await registerMemoryRoutes(app, context, config);
   await registerEventRoutes(app, context);

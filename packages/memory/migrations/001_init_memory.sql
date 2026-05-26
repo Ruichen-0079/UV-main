@@ -9,7 +9,9 @@ create table if not exists memories (
     subtype is null or subtype in (
       'preference', 'fact', 'project', 'workflow', 'event', 'milestone',
       'provider-choice', 'path', 'repo', 'command', 'troubleshooting',
-      'config', 'emotion', 'relationship'
+      'config', 'identity', 'project-fact', 'config-decision',
+      'emotional-state', 'emotional-pattern', 'health-note', 'schedule',
+      'test', 'emotion', 'relationship'
     )
   ),
   scope text not null default 'user' check (scope in ('user', 'project', 'agent', 'plugin', 'session')),
@@ -24,6 +26,12 @@ create table if not exists memories (
   emotion_arousal real not null default 0,
   source text not null,
   source_trace_id text null,
+  persona_id text null,
+  subject_user_id text null,
+  created_by_user_id text null,
+  speaker_id text null,
+  voice_profile_id text null,
+  session_id text null,
   metadata jsonb not null default '{}'::jsonb,
   tags text[] not null default '{}',
   created_at timestamptz not null default now(),
@@ -46,6 +54,12 @@ alter table memories add column if not exists scope_id text null;
 alter table memories add column if not exists memory_layer text not null default 'recall';
 alter table memories add column if not exists status text not null default 'active';
 alter table memories add column if not exists source_trace_id text null;
+alter table memories add column if not exists persona_id text null;
+alter table memories add column if not exists subject_user_id text null;
+alter table memories add column if not exists created_by_user_id text null;
+alter table memories add column if not exists speaker_id text null;
+alter table memories add column if not exists voice_profile_id text null;
+alter table memories add column if not exists session_id text null;
 alter table memories add column if not exists metadata jsonb not null default '{}'::jsonb;
 alter table memories add column if not exists observed_at timestamptz not null default now();
 alter table memories add column if not exists event_time timestamptz null;
@@ -65,7 +79,9 @@ alter table memories add constraint memories_subtype_check
     subtype is null or subtype in (
       'preference', 'fact', 'project', 'workflow', 'event', 'milestone',
       'provider-choice', 'path', 'repo', 'command', 'troubleshooting',
-      'config', 'emotion', 'relationship'
+      'config', 'identity', 'project-fact', 'config-decision',
+      'emotional-state', 'emotional-pattern', 'health-note', 'schedule',
+      'test', 'emotion', 'relationship'
     )
   );
 alter table memories drop constraint if exists memories_scope_check;
@@ -128,6 +144,10 @@ create index if not exists memories_valid_until_idx on memories (valid_until);
 create index if not exists memories_expires_at_idx on memories (expires_at);
 create index if not exists memories_source_created_at_idx on memories (source, created_at desc);
 create index if not exists memories_source_trace_id_idx on memories (source_trace_id);
+create index if not exists memories_persona_subject_idx on memories (persona_id, subject_user_id);
+create index if not exists memories_subject_user_idx on memories (subject_user_id);
+create index if not exists memories_speaker_idx on memories (speaker_id);
+create index if not exists memories_session_id_idx on memories (session_id);
 create index if not exists memories_created_at_idx on memories (created_at desc);
 create index if not exists memories_last_accessed_at_idx on memories (last_accessed_at desc);
 create index if not exists memories_importance_created_at_idx on memories (importance desc, created_at desc);

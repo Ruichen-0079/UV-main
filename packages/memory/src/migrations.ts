@@ -34,11 +34,18 @@ export async function runPostgresMigrations(input: {
   migrations?: SqlMigration[] | undefined;
   migrationsDir?: string | undefined;
   logger?: Pick<Console, "log"> | undefined;
+  settings?: Record<string, string | undefined> | undefined;
 }): Promise<string[]> {
   const migrations = input.migrations ?? (await readSqlMigrations(input.migrationsDir));
   const pool = new Pool({ connectionString: input.databaseUrl });
 
   try {
+    for (const [key, value] of Object.entries(input.settings ?? {})) {
+      if (value !== undefined) {
+        await pool.query("select set_config($1, $2, false)", [key, value]);
+      }
+    }
+
     for (const migration of migrations) {
       await pool.query(migration.sql);
       input.logger?.log(`Applied migration: ${migration.name}`);

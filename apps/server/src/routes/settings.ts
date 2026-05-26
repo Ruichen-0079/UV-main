@@ -14,6 +14,13 @@ const editableKeys = [
   "MEMORY_MAINTENANCE_RUN_ON_STARTUP",
   "MEMORY_MAINTENANCE_INTERVAL_MINUTES",
   "MEMORY_MAINTENANCE_LIMIT",
+  "MEMORY_VECTOR_INDEX_ENABLED",
+  "MEMORY_VECTOR_INDEX_TYPE",
+  "MEMORY_VECTOR_DISTANCE",
+  "MEMORY_VECTOR_IVFFLAT_PROBES",
+  "MEMORY_VECTOR_HNSW_EF_SEARCH",
+  "YUVI_AUTO_MIGRATE",
+  "YUVI_DEV_SUPERVISOR",
   "EVENT_BUS",
   "PROVIDER_ALLOW_MOCKS",
   "SERVER_HOST",
@@ -227,6 +234,14 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       eventBus: env["EVENT_BUS"] ?? config.eventBus,
       activeEventBus: config.eventBus,
       providerAllowMocks: parseBooleanString(env["PROVIDER_ALLOW_MOCKS"]),
+      devSupervisor: {
+        active: config.devSupervisor.active,
+        autoMigrate: config.devSupervisor.autoMigrate,
+        restartSupported: Boolean(
+          config.devSupervisor.active && config.devSupervisor.restartMarkerPath
+        ),
+        runtimeEnvDir: process.env["YUVI_RUNTIME_ENV_DIR"] ?? process.cwd()
+      },
       pendingRestart
     },
     memory: {
@@ -244,6 +259,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       memoryExtractorFallbackUsed: Boolean(context.memory.getExtractorStatus().fallbackUsed),
       memoryExtractorSkippedReason: context.memory.getExtractorStatus().skippedReason,
       maintenanceScheduler: context.memoryMaintenanceScheduler?.getStatus() ?? null,
+      vectorIndex: config.memoryVectorIndex,
       reasoningProviderConfigured: Boolean(providerStatus.providers.reasoning.configured)
     },
     providers: {
@@ -331,7 +347,10 @@ function hasRestartRequiredLocalOverrides(
     localEnv["MEMORY_MAINTENANCE_ENABLED"] ||
     localEnv["MEMORY_MAINTENANCE_RUN_ON_STARTUP"] ||
     localEnv["MEMORY_MAINTENANCE_INTERVAL_MINUTES"] ||
-    localEnv["MEMORY_MAINTENANCE_LIMIT"]
+    localEnv["MEMORY_MAINTENANCE_LIMIT"] ||
+    localEnv["MEMORY_VECTOR_INDEX_ENABLED"] ||
+    localEnv["MEMORY_VECTOR_INDEX_TYPE"] ||
+    localEnv["MEMORY_VECTOR_DISTANCE"]
   ) {
     return true;
   }

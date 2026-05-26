@@ -39,6 +39,14 @@ const MemorySubtypeSchema = z.enum([
   "command",
   "troubleshooting",
   "config",
+  "identity",
+  "project-fact",
+  "config-decision",
+  "emotional-state",
+  "emotional-pattern",
+  "health-note",
+  "schedule",
+  "test",
   "emotion",
   "relationship"
 ]);
@@ -61,6 +69,12 @@ const CreateMemoryRequestSchema = z.object({
   emotionArousal: z.number().min(0).max(1).optional(),
   source: z.string().min(1).default("manual"),
   sourceTraceId: z.string().min(1).nullable().optional(),
+  personaId: z.string().min(1).nullable().optional(),
+  subjectUserId: z.string().min(1).nullable().optional(),
+  createdByUserId: z.string().min(1).nullable().optional(),
+  speakerId: z.string().min(1).nullable().optional(),
+  voiceProfileId: z.string().min(1).nullable().optional(),
+  sessionId: z.string().min(1).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   tags: z.array(z.string()).default([]),
   observedAt: OptionalDateStringSchema,
@@ -87,6 +101,12 @@ const UpdateMemoryRequestSchema = z
     importance: z.number().min(0).max(1).optional(),
     emotionValence: z.number().min(-1).max(1).optional(),
     emotionArousal: z.number().min(0).max(1).optional(),
+    personaId: z.string().min(1).nullable().optional(),
+    subjectUserId: z.string().min(1).nullable().optional(),
+    createdByUserId: z.string().min(1).nullable().optional(),
+    speakerId: z.string().min(1).nullable().optional(),
+    voiceProfileId: z.string().min(1).nullable().optional(),
+    sessionId: z.string().min(1).nullable().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
     tags: z.array(z.string()).optional(),
     observedAt: OptionalDateStringSchema,
@@ -118,6 +138,12 @@ const SearchMemoryQuerySchema = z.object({
   type: MemoryTypeSchema.optional(),
   subtype: MemorySubtypeSchema.optional(),
   source: z.string().min(1).optional(),
+  personaId: z.string().min(1).optional(),
+  subjectUserId: z.string().min(1).optional(),
+  createdByUserId: z.string().min(1).optional(),
+  speakerId: z.string().min(1).optional(),
+  voiceProfileId: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
   scope: MemoryScopeSchema.optional(),
   scopeId: z.string().min(1).optional(),
   memoryLayer: MemoryLayerSchema.optional(),
@@ -252,6 +278,7 @@ export async function registerMemoryRoutes(
     if (input.data.sourceTraceId !== undefined) {
       createInput.sourceTraceId = input.data.sourceTraceId;
     }
+    assignIdentityFields(createInput, input.data);
     if (input.data.metadata !== undefined) {
       createInput.metadata = input.data.metadata;
     }
@@ -346,6 +373,23 @@ export async function registerMemoryRoutes(
       repository: context.activeMemoryRepository,
       scheduler: context.memoryMaintenanceScheduler?.getStatus() ?? null
     });
+  });
+
+  app.get("/memory/vector-index/status", async (_request, reply) => {
+    const status = context.memoryRepository.getVectorIndexStatus
+      ? await context.memoryRepository.getVectorIndexStatus()
+      : {
+          vectorIndexEnabled: false,
+          vectorIndexType: "unavailable",
+          vectorDistance: "cosine",
+          indexCreated: false,
+          indexAvailable: false,
+          indexFallbackReason: "Memory repository does not expose vector index diagnostics.",
+          embeddedCount: 0,
+          missingEmbeddingCount: 0,
+          annAccelerationActive: false
+        };
+    return reply.send({ ok: true, repository: context.activeMemoryRepository, status });
   });
 
   app.post("/memory/maintenance/run", async (request, reply) => {
@@ -567,6 +611,7 @@ export async function registerMemoryRoutes(
     if (input.data.emotionArousal !== undefined) {
       updateInput.emotionArousal = input.data.emotionArousal;
     }
+    assignIdentityFields(updateInput, input.data);
     if (input.data.metadata !== undefined) {
       updateInput.metadata = input.data.metadata;
     }
@@ -656,6 +701,12 @@ async function runMemorySearch(context: AppContext, input: SearchMemoryInput) {
   if (input.type) searchQuery.types = [input.type as MemoryType];
   if (input.subtype) searchQuery.subtypes = [input.subtype as MemorySubtype];
   if (input.source) searchQuery.sources = [input.source];
+  if (input.personaId) searchQuery.personaId = input.personaId;
+  if (input.subjectUserId) searchQuery.subjectUserId = input.subjectUserId;
+  if (input.createdByUserId) searchQuery.createdByUserId = input.createdByUserId;
+  if (input.speakerId) searchQuery.speakerId = input.speakerId;
+  if (input.voiceProfileId) searchQuery.voiceProfileId = input.voiceProfileId;
+  if (input.sessionId) searchQuery.sessionId = input.sessionId;
   if (input.scope) searchQuery.scope = input.scope as MemoryScope;
   if (input.scopeId) searchQuery.scopeId = input.scopeId;
   if (input.memoryLayer) searchQuery.memoryLayers = [input.memoryLayer as MemoryLayer];
@@ -779,6 +830,25 @@ function assignSupersessionFields(
   if (input.contradicts !== undefined) target.contradicts = input.contradicts;
 }
 
+function assignIdentityFields(
+  target: CreateMemoryInput | UpdateMemoryInput,
+  input: {
+    personaId?: string | null | undefined;
+    subjectUserId?: string | null | undefined;
+    createdByUserId?: string | null | undefined;
+    speakerId?: string | null | undefined;
+    voiceProfileId?: string | null | undefined;
+    sessionId?: string | null | undefined;
+  }
+): void {
+  if (input.personaId !== undefined) target.personaId = input.personaId;
+  if (input.subjectUserId !== undefined) target.subjectUserId = input.subjectUserId;
+  if (input.createdByUserId !== undefined) target.createdByUserId = input.createdByUserId;
+  if (input.speakerId !== undefined) target.speakerId = input.speakerId;
+  if (input.voiceProfileId !== undefined) target.voiceProfileId = input.voiceProfileId;
+  if (input.sessionId !== undefined) target.sessionId = input.sessionId;
+}
+
 function splitTags(value: string | undefined): string[] {
   return (value ?? "")
     .split(",")
@@ -791,6 +861,14 @@ function toSafeMemory(memory: Memory): Memory {
     ...memory,
     embedding: null,
     metadata: redactUnsafeMetadata(memory.metadata),
+    retentionClass:
+      typeof memory.metadata["retentionClass"] === "string"
+        ? memory.metadata["retentionClass"]
+        : undefined,
+    retentionReason:
+      typeof memory.metadata["retentionReason"] === "string"
+        ? memory.metadata["retentionReason"]
+        : undefined,
     hasEmbedding: Boolean(memory.embedding?.length),
     semanticEmbedding:
       memory.embeddingProvider === null || memory.embeddingProvider === undefined

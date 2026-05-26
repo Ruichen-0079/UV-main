@@ -19,6 +19,12 @@ async function main(): Promise<void> {
   await runPostgresMigrations({
     databaseUrl,
     migrations,
+    settings: {
+      "yuvi.memory_vector_index_enabled": process.env["MEMORY_VECTOR_INDEX_ENABLED"] ?? "true",
+      "yuvi.memory_vector_index_type": process.env["MEMORY_VECTOR_INDEX_TYPE"] ?? "hnsw",
+      "yuvi.memory_vector_distance": process.env["MEMORY_VECTOR_DISTANCE"] ?? "cosine",
+      "yuvi.memory_vector_dimensions": process.env["EMBEDDING_DIMENSIONS"] ?? "1536"
+    },
     logger: console
   });
   console.log("PostgreSQL memory migrations completed.");

@@ -180,6 +180,15 @@ function collectNotHotReloadedSettings(
   ) {
     notHotReloaded.push("MEMORY_MAINTENANCE_LIMIT");
   }
+  if (parseBoolean(env["MEMORY_VECTOR_INDEX_ENABLED"], true) !== config.memoryVectorIndex.enabled) {
+    notHotReloaded.push("MEMORY_VECTOR_INDEX_ENABLED");
+  }
+  if ((env["MEMORY_VECTOR_INDEX_TYPE"] ?? "hnsw") !== config.memoryVectorIndex.type) {
+    notHotReloaded.push("MEMORY_VECTOR_INDEX_TYPE");
+  }
+  if ((env["MEMORY_VECTOR_DISTANCE"] ?? "cosine") !== config.memoryVectorIndex.distance) {
+    notHotReloaded.push("MEMORY_VECTOR_DISTANCE");
+  }
   return notHotReloaded;
 }
 

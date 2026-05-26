@@ -16,6 +16,18 @@ export type ServerConfig = {
     intervalMinutes: number;
     limit: number;
   };
+  memoryVectorIndex: {
+    enabled: boolean;
+    type: "hnsw" | "ivfflat" | "none";
+    distance: "cosine";
+    ivfflatProbes?: number | undefined;
+    hnswEfSearch?: number | undefined;
+  };
+  devSupervisor: {
+    active: boolean;
+    autoMigrate: boolean;
+    restartMarkerPath?: string | undefined;
+  };
   dashboardDevToken?: string | undefined;
 };
 
@@ -39,6 +51,18 @@ export function loadServerConfig(
       runOnStartup: parseBoolean(env["MEMORY_MAINTENANCE_RUN_ON_STARTUP"], false),
       intervalMinutes: parsePositiveInteger(env["MEMORY_MAINTENANCE_INTERVAL_MINUTES"], 0),
       limit: parseStrictPositiveInteger(env["MEMORY_MAINTENANCE_LIMIT"], 500)
+    },
+    memoryVectorIndex: {
+      enabled: parseBoolean(env["MEMORY_VECTOR_INDEX_ENABLED"], true),
+      type: parseVectorIndexType(env["MEMORY_VECTOR_INDEX_TYPE"]),
+      distance: parseVectorDistance(env["MEMORY_VECTOR_DISTANCE"]),
+      ivfflatProbes: parseOptionalStrictPositiveInteger(env["MEMORY_VECTOR_IVFFLAT_PROBES"]),
+      hnswEfSearch: parseOptionalStrictPositiveInteger(env["MEMORY_VECTOR_HNSW_EF_SEARCH"])
+    },
+    devSupervisor: {
+      active: parseBoolean(env["YUVI_DEV_SUPERVISOR"], false),
+      autoMigrate: env["YUVI_AUTO_MIGRATE"] !== "0",
+      restartMarkerPath: emptyToUndefined(env["YUVI_RESTART_MARKER"])
     },
     dashboardDevToken: emptyToUndefined(env["DASHBOARD_DEV_TOKEN"])
   };
@@ -100,4 +124,31 @@ function parseStrictPositiveInteger(value: string | undefined, fallback: number)
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseOptionalStrictPositiveInteger(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function parseVectorIndexType(value: string | undefined): "hnsw" | "ivfflat" | "none" {
+  if (!value || value === "hnsw") {
+    return "hnsw";
+  }
+  if (value === "ivfflat" || value === "none") {
+    return value;
+  }
+  throw new Error(
+    `Unsupported MEMORY_VECTOR_INDEX_TYPE '${value}'. Supported values: hnsw, ivfflat, none.`
+  );
+}
+
+function parseVectorDistance(value: string | undefined): "cosine" {
+  if (!value || value === "cosine") {
+    return "cosine";
+  }
+  throw new Error(`Unsupported MEMORY_VECTOR_DISTANCE '${value}'. Supported value: cosine.`);
 }

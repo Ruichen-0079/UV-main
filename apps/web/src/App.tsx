@@ -11,6 +11,7 @@ import {
   type MemoryMaintenanceSchedulerStatus,
   type MemoryMaintenanceSummary,
   type MemoryRecord,
+  type MemoryVectorIndexStatus,
   type ProviderCallMetadata,
   type ProviderVerificationResponse,
   type PromptPreviewResponse,
@@ -68,6 +69,14 @@ const memorySubtypes = [
   "command",
   "troubleshooting",
   "config",
+  "identity",
+  "project-fact",
+  "config-decision",
+  "emotional-state",
+  "emotional-pattern",
+  "health-note",
+  "schedule",
+  "test",
   "workflow",
   "event",
   "milestone",
@@ -504,6 +513,7 @@ function MemoryPage(props: {
   const candidates = useAsyncData(() => apiClient.listRecentMemoryCandidates(20), []);
   const maintenanceHealth = useAsyncData(() => apiClient.getMemoryMaintenanceHealth(), []);
   const maintenanceStatus = useAsyncData(() => apiClient.getMemoryMaintenanceStatus(), []);
+  const vectorIndexStatus = useAsyncData(() => apiClient.getMemoryVectorIndexStatus(), []);
   const memoryMode = memoryModeFromHealth(props.health);
 
   useEffect(() => {
@@ -876,6 +886,7 @@ function MemoryPage(props: {
     await props.state.refresh();
     await maintenanceHealth.refresh();
     await maintenanceStatus.refresh();
+    await vectorIndexStatus.refresh();
     if (query.trim()) {
       const result = await apiClient.searchMemories(query.trim(), {
         type: typeFilter,
@@ -1022,6 +1033,26 @@ function MemoryPage(props: {
           <div className="mt-3 rounded-md border border-ink-100 bg-ink-50 p-3 text-xs text-ink-600">
             {`scanned=${maintenanceResult.scanned} expired=${maintenanceResult.expired} stale=${maintenanceResult.stale} supersessionWarnings=${maintenanceResult.supersessionWarnings} skipped=${maintenanceResult.skipped} failed=${maintenanceResult.failed}`}
           </div>
+        )}
+      </Panel>
+      <Panel
+        title="ANN Vector Index"
+        badge={vectorIndexStatus.data?.status.vectorIndexType ?? "unknown"}
+      >
+        <div className="grid grid-cols-6 gap-2 text-xs text-ink-600">
+          {vectorIndexEntries(vectorIndexStatus.data?.status).map((entry) => (
+            <div key={entry.label} className="rounded-md bg-ink-50 p-2">
+              <div className="label">{entry.label}</div>
+              <div className="font-mono text-[11px] text-ink-700">{entry.value}</div>
+            </div>
+          ))}
+        </div>
+        {vectorIndexStatus.data?.status.indexFallbackReason && (
+          <Notice
+            tone="info"
+            title="ANN fallback"
+            message={`${vectorIndexStatus.data.status.indexFallbackReason} Retrieval still works without ANN acceleration.`}
+          />
         )}
       </Panel>
       <div className="grid grid-cols-[1fr_340px] gap-4">
@@ -2026,6 +2057,9 @@ function SettingsPage(): JSX.Element {
   const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
   const [clearedSecrets, setClearedSecrets] = useState<Set<SettingsKey>>(() => new Set());
   const [dashboardDevToken, setDashboardDevTokenState] = useState("");
+  const [restartBusy, setRestartBusy] = useState(false);
+  const [restartResult, setRestartResult] = useState<string | null>(null);
+  const [restartError, setRestartError] = useState<string | null>(null);
 
   useEffect(() => {
     if (settings.data) {
@@ -2082,6 +2116,27 @@ function SettingsPage(): JSX.Element {
     }
   }
 
+  async function deepRestart(): Promise<void> {
+    if (
+      !window.confirm(
+        "Restart the local runtime, reload env files, and possibly run db:migrate? This is dev-only."
+      )
+    ) {
+      return;
+    }
+    setRestartBusy(true);
+    setRestartResult(null);
+    setRestartError(null);
+    try {
+      const response = await apiClient.deepRestartRuntime();
+      setRestartResult(response.message);
+    } catch (caught) {
+      setRestartError(caught instanceof Error ? caught.message : "Deep restart failed");
+    } finally {
+      setRestartBusy(false);
+    }
+  }
+
   const activeChat = settings.data?.providers.deepseek.status?.chat;
   const activeReasoning = settings.data?.providers.deepseek.status?.reasoning;
   const savedDeepSeekButRuntimeMock =
@@ -2129,6 +2184,10 @@ function SettingsPage(): JSX.Element {
       )}
       {saveError && <Notice tone="error" title="Save failed" message={saveError} />}
       {applyError && <Notice tone="error" title="Apply failed" message={applyError} />}
+      {restartError && <Notice tone="error" title="Deep restart failed" message={restartError} />}
+      {restartResult && (
+        <Notice tone="info" title="Deep restart requested" message={restartResult} />
+      )}
       {saveResult && (
         <Notice
           tone="info"
@@ -2190,6 +2249,38 @@ function SettingsPage(): JSX.Element {
             {settings.data?.runtime.activeServerPort ?? "unknown"} · event bus{" "}
             {settings.data?.runtime.activeEventBus ?? "unknown"}
           </p>
+          <div className="mt-4 rounded-md border border-ink-100 bg-ink-50 p-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Definition
+                label="Supervisor active"
+                value={settings.data?.runtime.devSupervisor?.active ? "true" : "false"}
+              />
+              <Definition
+                label="Auto migrate"
+                value={settings.data?.runtime.devSupervisor?.autoMigrate ? "true" : "false"}
+              />
+              <Definition
+                label="Restart supported"
+                value={settings.data?.runtime.devSupervisor?.restartSupported ? "true" : "false"}
+              />
+              <Definition
+                label="Env dir"
+                value={settings.data?.runtime.devSupervisor?.runtimeEnvDir ?? "unknown"}
+              />
+            </div>
+            <button
+              className="button-secondary mt-2"
+              type="button"
+              disabled={restartBusy || settings.data?.runtime.runtimeMode !== "development"}
+              onClick={() => void deepRestart()}
+            >
+              Deep Restart Runtime
+            </button>
+            <p className="mt-2 text-xs leading-5 text-ink-500">
+              This restarts the local runtime, reloads env files, and may run db:migrate. It is
+              dev-only.
+            </p>
+          </div>
           {settings.data?.runtime.pendingRestart && (
             <Notice
               tone="info"
@@ -3008,6 +3099,21 @@ function memoryMaintenanceStatusEntries(
   ];
 }
 
+function vectorIndexEntries(
+  status: MemoryVectorIndexStatus | undefined
+): Array<{ label: string; value: string }> {
+  return [
+    { label: "ANN", value: status?.annAccelerationActive ? "active" : "inactive" },
+    { label: "enabled", value: status?.vectorIndexEnabled ? "true" : "false" },
+    { label: "type", value: status?.vectorIndexType ?? "unknown" },
+    { label: "distance", value: status?.vectorDistance ?? "cosine" },
+    { label: "dimensions", value: String(status?.embeddingDimensions ?? "unknown") },
+    { label: "embedded", value: String(status?.embeddedCount ?? 0) },
+    { label: "missing", value: String(status?.missingEmbeddingCount ?? 0) },
+    { label: "created", value: status?.indexCreated ? "yes" : "no" }
+  ];
+}
+
 function memoryModeDetail(mode: string): string {
   if (mode === "in-memory") {
     return "Temporary storage; resets when the server restarts.";
@@ -3601,6 +3707,11 @@ function MemoryDetail(props: { memory: MemoryRecord }): JSX.Element {
         <Definition label="Importance" value={props.memory.importance.toFixed(2)} />
         <Definition label="Source" value={props.memory.source} />
         <Definition label="Source Trace" value={props.memory.sourceTraceId ?? "none"} />
+        <Definition label="Persona" value={props.memory.personaId ?? "default-persona"} />
+        <Definition label="Subject User" value={props.memory.subjectUserId ?? "default-user"} />
+        <Definition label="Speaker" value={props.memory.speakerId ?? "none"} />
+        <Definition label="Retention" value={props.memory.retentionClass ?? "unspecified"} />
+        <Definition label="Retention Reason" value={props.memory.retentionReason ?? "none"} />
         <Definition label="Created" value={formatDate(props.memory.createdAt)} />
         <Definition label="Updated" value={formatDate(props.memory.updatedAt ?? "")} />
         <Definition label="Observed" value={formatDate(props.memory.observedAt ?? "")} />

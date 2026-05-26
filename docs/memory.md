@@ -63,7 +63,89 @@ Backfill defaults to missing embeddings only. Use `--force` to re-embed existing
 
 The API and Dashboard expose safe embedding metadata such as `hasEmbedding`, `embeddedAt`, `embeddingProvider`, `embeddingModel`, `embeddingDimensions`, `semanticEmbedding`, and safe `embeddingError` text when available. Raw embedding vectors are not returned by default.
 
-Keyword/trigram/full-text retrieval remains important for technical memories. Exact env vars, commands, paths, ports, provider names, model names, error messages, and tags should outrank vague vector similarity. ANN vector indexing is future work.
+Keyword/trigram/full-text retrieval remains important for technical memories. Exact env vars, commands, paths, ports, provider names, model names, error messages, and tags should outrank vague vector similarity. ANN vector indexing is optional acceleration only.
+
+## ANN Vector Index v1
+
+PostgreSQL memory can optionally add a pgvector ANN index to accelerate vector candidate lookup. This is a performance feature only. It does not change retrieval semantics, prompt policy, scope/status/time filtering, Direct Context behavior, supersession exclusions, or the keyword-first ranking rules for technical memories.
+
+The ANN index migration is idempotent and non-destructive. It prefers HNSW when supported by the installed pgvector version, then falls back to IVFFLAT if HNSW creation is unavailable. Both indexes use cosine distance and a fixed-dimension expression over the existing `embedding` column; the migration does not change stored vectors or embedding dimensions.
+
+Configuration:
+
+```env
+MEMORY_VECTOR_INDEX_ENABLED=true
+MEMORY_VECTOR_INDEX_TYPE=hnsw
+MEMORY_VECTOR_DISTANCE=cosine
+MEMORY_VECTOR_IVFFLAT_PROBES=10
+MEMORY_VECTOR_HNSW_EF_SEARCH=
+```
+
+Allowed index types are `hnsw`, `ivfflat`, and `none`. Set `MEMORY_VECTOR_INDEX_ENABLED=false` or `MEMORY_VECTOR_INDEX_TYPE=none` to skip index creation in small development setups. `EMBEDDING_DIMENSIONS` controls the fixed-dimension expression used during migration; DashScope `text-embedding-v4` commonly uses `1536`.
+
+Run migrations normally:
+
+```bash
+pnpm db:migrate
+```
+
+Check safe index diagnostics:
+
+```bash
+pnpm memory:index:status
+```
+
+The status command reports whether embedding-related indexes exist, their type, vector dimensions present in memory rows, embedded count, and missing embedding count. It does not print API keys, `DATABASE_URL`, raw vectors, or memory content.
+
+HNSW generally has better recall/latency behavior for growing datasets. IVFFLAT is a fallback and may require tuning with `MEMORY_VECTOR_IVFFLAT_PROBES`. HNSW can optionally use `MEMORY_VECTOR_HNSW_EF_SEARCH`. These settings tune vector candidate lookup only; exact keyword/tag/path/env-var matches still remain crucial and should outrank weak vector similarity.
+
+Dashboard memory/status panels expose the same safe ANN visibility where available: configured index type, cosine distance, configured dimensions, embedded count, missing embedding count, and whether ANN acceleration is active. If no index is available, the Dashboard shows a safe fallback notice; retrieval still works through keyword, trigram, full-text, and non-indexed vector search when configured.
+
+## Personalization And Retention v1
+
+Memory records now include identity foundation fields for future multi-user and multi-persona use:
+
+- `personaId`: which YUVI persona or agent owns/uses the memory.
+- `subjectUserId`: who the memory is about.
+- `createdByUserId`: who stated the information.
+- `speakerId`: UI/STT speaker identity when supplied.
+- `voiceProfileId`: future voiceprint binding.
+- `sessionId`: originating session.
+
+Single-user behavior remains unchanged. When no identity is supplied, YUVI defaults `personaId` to `default-persona` and user fields to `default-user`. Retrieval can filter by persona, subject user, speaker, session, and existing scope/scopeId so unrelated users do not mix once identity fields are present. This is foundation only; YUVI does not implement STT diarization or voiceprint recognition yet.
+
+Automatic extraction favors durable user information: explicit name/nickname, long-term preferences, project/provider/model choices, device or environment facts, workflow habits, communication/accessibility preferences, stable constraints, explicit important relationships, and explicit useful health/safety notes. It avoids storing trivial daily events, casual temporary moods, ambiguous guesses, and sensitive inferences that the user did not state.
+
+Current affect is short-term prompt context, not long-term memory by default. Rule-based detection can label obvious immediate states such as frustrated, anxious, confused, angry, sad, tired, excited, calm, or neutral from the current user turn. PromptBuilder may inject a compact section:
+
+```text
+<CurrentAffect>
+User appears frustrated/confused in the current turn. Respond with concise, concrete debugging steps.
+</CurrentAffect>
+```
+
+This affects response tone and strategy for the turn. One-off messages such as “今天有点烦” are not stored as durable emotional memory. Long-term emotional memory is reserved for explicit communication preferences, repeated patterns over time, or useful safety/health-relevant notes such as a stable preference for direct step-by-step debugging when project failures become stressful.
+
+Retention Policy v1 computes safe metadata during storage:
+
+- `retentionClass`
+- `retentionReason`
+- `computedExpiresAt` when a TTL is applied
+
+Default retention is category and importance based:
+
+- semantic/core identity and stable preferences: no default expiry unless low confidence
+- project facts, provider choices, config decisions, workflows: 180-365 days, or no expiry when highly important
+- troubleshooting conclusions: 90-180 days
+- emotional patterns: 90-365 days depending on importance
+- explicit stable relationships: long retention; no expiry only when explicit and high importance
+- explicit health/safety notes: long retention, no short TTL, and no unsafe inference
+- schedule/task memories: expire after the event/deadline plus a small buffer
+- ordinary episodic daily events: rejected by default; if explicitly remembered/manual, expire after about seven days
+- working/session memories: hours to one day
+- smoke/mock/test memories: expire within one day
+
+Higher importance extends retention. Durable memories at `importance >= 0.9` generally avoid short expiry. Smoke/mock/test memories are marked with safe metadata such as `testMemory=true` and are meant to be marked expired by maintenance after their short TTL. No retention rule hard-deletes data.
 
 ## Memory Model v2
 

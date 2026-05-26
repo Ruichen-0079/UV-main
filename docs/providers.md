@@ -207,6 +207,7 @@ The Dashboard `Settings` page can write local development settings to `.env.loca
 - If DeepSeek config is saved but chat still reports mock mode, click **Apply Now** or restart the dev server.
 - `GET /settings/runtime` reports safe config layering: base `.env`, local override `.env.local`, effective merged values, and active runtime values.
 - The Dashboard does not automatically copy `.env.local` back into `.env`. This prevents accidental secret commits and makes local overrides explicit.
+- In dev supervisor mode, Dashboard **Deep Restart Runtime** can request a graceful local restart after settings changes that need a process restart. It is development/localhost-only, requires `X-YUVI-Dev-Token` when configured, and is unsupported unless `scripts/dev.sh` is running with `YUVI_DEV_SUPERVISOR=1`.
 
 The reload endpoint never returns API keys, raw `.env` contents, request headers, `Authorization` headers, tokens, or passwords. It returns only safe active provider metadata such as configured state, model name, mock/real mode, and restart-required boundaries.
 

@@ -7,6 +7,8 @@ export type {
   Memory,
   MemoryCandidate,
   MemoryCandidateStorageResult,
+  CurrentAffect,
+  CurrentAffectLabel,
   MemoryExtractionInput,
   MemoryExtractor,
   MemoryExtractorActive,
@@ -23,10 +25,13 @@ export type {
   MemoryStatus,
   MemorySubtype,
   MemoryType,
+  MemoryVectorIndexStatus,
   RetrievedMemoryCandidate,
   RetrievedMemoryDebug,
   Relation
 } from "./types.js";
+export { detectCurrentAffect } from "./affect.js";
+export { computeRetentionPolicy, type RetentionPolicy } from "./retention.js";
 export {
   MemoryLayers,
   MemoryScopes,

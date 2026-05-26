@@ -12,6 +12,7 @@ import {
   relationshipSearchText,
   type MemoryRelationshipSuggestion
 } from "./relationships.js";
+import { computeRetentionPolicy } from "./retention.js";
 import type {
   CreateMemoryInput,
   Memory,
@@ -109,6 +110,14 @@ export class MemoryService {
       supersededBy: input.supersededBy ?? current.supersededBy,
       contradicts: input.contradicts ?? current.contradicts
     };
+    assignDefinedIdentity(nextInput, {
+      personaId: input.personaId ?? current.personaId,
+      subjectUserId: input.subjectUserId ?? current.subjectUserId,
+      createdByUserId: input.createdByUserId ?? current.createdByUserId,
+      speakerId: input.speakerId ?? current.speakerId,
+      voiceProfileId: input.voiceProfileId ?? current.voiceProfileId,
+      sessionId: input.sessionId ?? current.sessionId
+    });
     const embedded = await this.withEmbedding(nextInput);
     const updateInput: UpdateMemoryInput = { ...input };
     if (embedded.embedding !== undefined) updateInput.embedding = embedded.embedding;
@@ -120,6 +129,16 @@ export class MemoryService {
       updateInput.embeddingDimensions = embedded.embeddingDimensions;
     }
     if (embedded.embeddedAt !== undefined) updateInput.embeddedAt = embedded.embeddedAt;
+    if (embedded.personaId !== undefined) updateInput.personaId = embedded.personaId;
+    if (embedded.subjectUserId !== undefined) updateInput.subjectUserId = embedded.subjectUserId;
+    if (embedded.createdByUserId !== undefined) {
+      updateInput.createdByUserId = embedded.createdByUserId;
+    }
+    if (embedded.speakerId !== undefined) updateInput.speakerId = embedded.speakerId;
+    if (embedded.voiceProfileId !== undefined) {
+      updateInput.voiceProfileId = embedded.voiceProfileId;
+    }
+    if (embedded.sessionId !== undefined) updateInput.sessionId = embedded.sessionId;
     return this.repository.updateMemory(id, updateInput);
   }
 
@@ -165,7 +184,10 @@ export class MemoryService {
     candidate: MemoryCandidate,
     options: { source?: string; tags?: string[] } = {}
   ): Promise<Memory> {
-    const normalized = this.normalizeCandidateForStorage(candidate);
+    const normalized = this.applyRetentionPolicy(
+      this.normalizeCandidateForStorage(candidate),
+      options
+    );
     return this.createMemory({
       type: normalized.type,
       subtype: normalized.subtype ?? null,
@@ -180,6 +202,12 @@ export class MemoryService {
       emotionArousal: 0,
       source: options.source ?? "runtime",
       sourceTraceId: normalized.sourceTraceId ?? null,
+      personaId: normalized.personaId ?? "default-persona",
+      subjectUserId: normalized.subjectUserId ?? "default-user",
+      createdByUserId: normalized.createdByUserId ?? normalized.subjectUserId ?? "default-user",
+      speakerId: normalized.speakerId ?? null,
+      voiceProfileId: normalized.voiceProfileId ?? null,
+      sessionId: normalized.sessionId ?? null,
       metadata: {
         ...(normalized.metadata ?? {}),
         generatedBy: normalized.metadata?.["generatedBy"] ?? "memory-extractor",
@@ -411,9 +439,47 @@ export class MemoryService {
   }
 
   private normalizeCandidateForStorage(candidate: MemoryCandidate): MemoryCandidate {
-    return normalizeTemporalCandidate(candidate, {
+    const normalized = normalizeTemporalCandidate(candidate, {
       timestamp: candidate.observedAt ?? new Date()
     }).candidate;
+    const metadata = normalized.metadata ?? {};
+    return {
+      ...normalized,
+      personaId: normalized.personaId ?? metadataString(metadata, "personaId") ?? "default-persona",
+      subjectUserId:
+        normalized.subjectUserId ?? metadataString(metadata, "subjectUserId") ?? "default-user",
+      createdByUserId:
+        normalized.createdByUserId ??
+        metadataString(metadata, "createdByUserId") ??
+        normalized.subjectUserId ??
+        "default-user",
+      speakerId: normalized.speakerId ?? metadataString(metadata, "speakerId") ?? null,
+      voiceProfileId:
+        normalized.voiceProfileId ?? metadataString(metadata, "voiceProfileId") ?? null,
+      sessionId: normalized.sessionId ?? metadataString(metadata, "sessionId") ?? null
+    };
+  }
+
+  private applyRetentionPolicy(
+    candidate: MemoryCandidate,
+    options: { source?: string; tags?: string[] }
+  ): MemoryCandidate {
+    const source = options.source ?? "runtime";
+    const policy = computeRetentionPolicy({ candidate, source });
+    return {
+      ...candidate,
+      expiresAt: candidate.expiresAt ?? policy.expiresAt ?? null,
+      validUntil: candidate.validUntil ?? policy.validUntil ?? null,
+      metadata: {
+        ...(candidate.metadata ?? {}),
+        retentionClass: policy.retentionClass,
+        retentionReason: policy.retentionReason,
+        computedExpiresAt: (candidate.expiresAt ?? policy.expiresAt)?.toString() ?? null,
+        ...(source === "smoke" || source === "test" || candidate.subtype === "test"
+          ? { testMemory: true }
+          : {})
+      }
+    };
   }
 
   private async detectCandidateRelationships(
@@ -470,6 +536,13 @@ export class MemoryService {
     if (query.memoryLayers !== undefined) broadQuery.memoryLayers = query.memoryLayers;
     if (query.statuses !== undefined) broadQuery.statuses = query.statuses;
     if (query.sources !== undefined) broadQuery.sources = query.sources;
+    if (query.personaId !== undefined) broadQuery.personaId = query.personaId;
+    if (query.subjectUserId !== undefined) broadQuery.subjectUserId = query.subjectUserId;
+    if (query.createdByUserId !== undefined) broadQuery.createdByUserId = query.createdByUserId;
+    if (query.speakerId !== undefined) broadQuery.speakerId = query.speakerId;
+    if (query.voiceProfileId !== undefined) broadQuery.voiceProfileId = query.voiceProfileId;
+    if (query.userId !== undefined) broadQuery.userId = query.userId;
+    if (query.sessionId !== undefined) broadQuery.sessionId = query.sessionId;
     if (query.minImportance !== undefined) broadQuery.minImportance = query.minImportance;
     if (query.tags !== undefined) broadQuery.tags = query.tags;
     const memories = await this.retriever.retrieve(broadQuery);
@@ -552,6 +625,13 @@ export class MemoryService {
         ...(query.memoryLayers !== undefined ? { memoryLayers: query.memoryLayers } : {}),
         ...(query.statuses !== undefined ? { statuses: query.statuses } : {}),
         ...(query.sources !== undefined ? { sources: query.sources } : {}),
+        ...(query.personaId !== undefined ? { personaId: query.personaId } : {}),
+        ...(query.subjectUserId !== undefined ? { subjectUserId: query.subjectUserId } : {}),
+        ...(query.createdByUserId !== undefined ? { createdByUserId: query.createdByUserId } : {}),
+        ...(query.speakerId !== undefined ? { speakerId: query.speakerId } : {}),
+        ...(query.voiceProfileId !== undefined ? { voiceProfileId: query.voiceProfileId } : {}),
+        ...(query.userId !== undefined ? { userId: query.userId } : {}),
+        ...(query.sessionId !== undefined ? { sessionId: query.sessionId } : {}),
         ...(query.minImportance !== undefined ? { minImportance: query.minImportance } : {}),
         ...(query.tags !== undefined ? { tags: query.tags } : {})
       });
@@ -1386,6 +1466,18 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
     status: candidate.memory.status,
     source: candidate.memory.source,
     sourceTraceId: candidate.memory.sourceTraceId,
+    ...(candidate.memory.personaId !== undefined ? { personaId: candidate.memory.personaId } : {}),
+    ...(candidate.memory.subjectUserId !== undefined
+      ? { subjectUserId: candidate.memory.subjectUserId }
+      : {}),
+    ...(candidate.memory.createdByUserId !== undefined
+      ? { createdByUserId: candidate.memory.createdByUserId }
+      : {}),
+    ...(candidate.memory.speakerId !== undefined ? { speakerId: candidate.memory.speakerId } : {}),
+    ...(candidate.memory.voiceProfileId !== undefined
+      ? { voiceProfileId: candidate.memory.voiceProfileId }
+      : {}),
+    ...(candidate.memory.sessionId !== undefined ? { sessionId: candidate.memory.sessionId } : {}),
     metadata: candidate.memory.metadata,
     importance: candidate.memory.importance,
     createdAt: candidate.memory.createdAt,
@@ -1394,6 +1486,12 @@ function toDebugMemory(candidate: RetrievedMemoryCandidate): RetrievedMemoryDebu
     validFrom: candidate.memory.validFrom,
     validUntil: candidate.memory.validUntil,
     expiresAt: candidate.memory.expiresAt,
+    ...(typeof candidate.memory.metadata["retentionClass"] === "string"
+      ? { retentionClass: candidate.memory.metadata["retentionClass"] }
+      : {}),
+    ...(typeof candidate.memory.metadata["retentionReason"] === "string"
+      ? { retentionReason: candidate.memory.metadata["retentionReason"] }
+      : {}),
     lastAccessedAt: candidate.memory.lastAccessedAt,
     supersededAt: candidate.memory.supersededAt,
     displayText: candidate.displayText,
@@ -1515,13 +1613,19 @@ function isDurableCandidate(candidate: MemoryCandidate, text: string): boolean {
   }
   if (
     candidate.subtype === "preference" ||
+    candidate.subtype === "identity" ||
     candidate.subtype === "project" ||
+    candidate.subtype === "project-fact" ||
     candidate.subtype === "provider-choice" ||
     candidate.subtype === "workflow" ||
     candidate.subtype === "command" ||
     candidate.subtype === "config" ||
+    candidate.subtype === "config-decision" ||
     candidate.subtype === "troubleshooting" ||
-    candidate.subtype === "milestone"
+    candidate.subtype === "milestone" ||
+    candidate.subtype === "emotional-pattern" ||
+    candidate.subtype === "health-note" ||
+    candidate.subtype === "schedule"
   ) {
     return true;
   }
@@ -1541,6 +1645,30 @@ function temporalResolutionConfidence(
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const confidence = (value as Record<string, unknown>)["confidence"];
   return typeof confidence === "number" ? confidence : null;
+}
+
+function metadataString(metadata: Record<string, unknown> | undefined, key: string): string | null {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function assignDefinedIdentity(
+  target: CreateMemoryInput,
+  identity: {
+    personaId?: string | null | undefined;
+    subjectUserId?: string | null | undefined;
+    createdByUserId?: string | null | undefined;
+    speakerId?: string | null | undefined;
+    voiceProfileId?: string | null | undefined;
+    sessionId?: string | null | undefined;
+  }
+): void {
+  if (identity.personaId !== undefined) target.personaId = identity.personaId;
+  if (identity.subjectUserId !== undefined) target.subjectUserId = identity.subjectUserId;
+  if (identity.createdByUserId !== undefined) target.createdByUserId = identity.createdByUserId;
+  if (identity.speakerId !== undefined) target.speakerId = identity.speakerId;
+  if (identity.voiceProfileId !== undefined) target.voiceProfileId = identity.voiceProfileId;
+  if (identity.sessionId !== undefined) target.sessionId = identity.sessionId;
 }
 
 function inferMemoryScope(
@@ -1568,7 +1696,9 @@ function inferMemoryLayer(
   if (
     type === "semantic" ||
     subtype === "preference" ||
+    subtype === "identity" ||
     subtype === "project" ||
+    subtype === "project-fact" ||
     subtype === "provider-choice"
   ) {
     return "core";
@@ -1618,8 +1748,11 @@ function inferMemorySubtype(text: string): MemorySubtype | null {
   if (/prefer|preference|偏好|默认|喜欢/u.test(normalized)) {
     return "preference";
   }
+  if (/my name is|call me|我叫|我的名字|叫我/u.test(normalized)) {
+    return "identity";
+  }
   if (/project|项目|yuvi|runtime/u.test(normalized)) {
-    return "project";
+    return "project-fact";
   }
   if (/emotion|情绪|感受/u.test(normalized)) {
     return "emotion";

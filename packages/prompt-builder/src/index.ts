@@ -3,6 +3,7 @@ export type PromptSectionName =
   | "CharacterStyle"
   | "RelationshipContext"
   | "CurrentTime"
+  | "CurrentAffect"
   | "DirectContext"
   | "RelevantMemory"
   | "CurrentSituation"
@@ -53,6 +54,7 @@ export type PromptBuildInput = {
     timezone?: string;
     localDate?: string;
   };
+  currentAffect?: string;
   directContext?: string;
   directContextEnabled?: boolean;
   currentSituation?: string;
@@ -167,6 +169,12 @@ export class PromptBuilder {
         stable: true
       },
       {
+        name: "CurrentAffect",
+        content: formatCurrentAffect(input.currentAffect),
+        priority: 84,
+        stable: false
+      },
+      {
         name: "DirectContext",
         content: formatDirectContext(input.directContext, input.directContextEnabled ?? true),
         priority: 68,
@@ -241,6 +249,10 @@ export class PromptBuilder {
 
     return result;
   }
+}
+
+function formatCurrentAffect(currentAffect: string | undefined): string {
+  return currentAffect?.trim() || "No high-confidence immediate affect detected.";
 }
 
 function formatCurrentTime(currentTime?: PromptBuildInput["currentTime"]): string {

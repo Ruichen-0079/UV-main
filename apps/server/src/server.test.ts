@@ -13,6 +13,7 @@ const createdRuntimeEnvDirs: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
   vi.useRealTimers();
+  process.exitCode = undefined;
   process.env = { ...originalEnv };
   for (const dir of createdRuntimeEnvDirs.splice(0)) {
     await rm(dir, { recursive: true, force: true });
@@ -573,6 +574,48 @@ describe("server", () => {
     }
   });
 
+  it("adds CurrentAffect to prompt preview for obvious immediate emotion without storing mood", async () => {
+    const app = await buildTestServer({ MEMORY_EXTRACTOR: "rule-based" });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/message",
+        payload: {
+          sessionId: "affect",
+          text: "烦死了，这个报错我完全看不懂",
+          options: {
+            readMemory: false,
+            writeMemory: true,
+            voiceOutput: false
+          }
+        }
+      });
+      expect(response.statusCode).toBe(200);
+
+      const prompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
+      expect(prompt.statusCode).toBe(200);
+      expect(prompt.json().currentAffect).toMatchObject({
+        affectLabel: expect.stringMatching(/frustrated|confused/),
+        confidence: expect.any(Number)
+      });
+      expect(findPromptSection(prompt.json().sections, "CurrentAffect")?.content).toContain(
+        "current turn"
+      );
+      expect(prompt.body).not.toContain("test_deepseek_secret");
+
+      const memories = await app.inject({ method: "GET", url: "/memory/recent?limit=10" });
+      expect(memories.statusCode).toBe(200);
+      expect(
+        memories
+          .json()
+          .memories.some((memory: { subtype?: string }) => memory.subtype === "emotional-state")
+      ).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("includes safe real-provider metadata when DeepSeek chat is configured", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
@@ -1077,6 +1120,115 @@ describe("server", () => {
       expect(allowedMaintenance.body).not.toContain("dev-token");
     } finally {
       await app.close();
+    }
+  });
+
+  it("reports ANN/vector index status safely", async () => {
+    const app = await buildTestServer();
+
+    try {
+      const status = await app.inject({ method: "GET", url: "/memory/vector-index/status" });
+      expect(status.statusCode).toBe(200);
+      expect(status.json()).toMatchObject({
+        ok: true,
+        status: {
+          vectorIndexEnabled: expect.any(Boolean),
+          vectorIndexType: expect.stringMatching(/^(none|hnsw|ivfflat|unavailable)$/),
+          vectorDistance: "cosine",
+          indexCreated: expect.any(Boolean),
+          indexAvailable: expect.any(Boolean),
+          annAccelerationActive: expect.any(Boolean),
+          embeddedCount: expect.any(Number),
+          missingEmbeddingCount: expect.any(Number)
+        }
+      });
+      expect(status.body).not.toContain("DATABASE_URL");
+      expect(status.body).not.toContain("test_deepseek_secret");
+      expect(status.body).not.toContain("[0.");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps deep restart dev-only, token-protected, and unsupported without supervisor", async () => {
+    const productionApp = await buildTestServer({
+      RUNTIME_MODE: "production",
+      DASHBOARD_DEV_TOKEN: "restart-token"
+    });
+    try {
+      const production = await productionApp.inject({
+        method: "POST",
+        url: "/system/restart/deep",
+        headers: { "X-YUVI-Dev-Token": "restart-token" }
+      });
+      expect(production.statusCode).toBe(404);
+      expect(production.body).not.toContain("restart-token");
+    } finally {
+      await productionApp.close();
+    }
+
+    const app = await buildTestServer({ DASHBOARD_DEV_TOKEN: "restart-token" });
+    try {
+      const unauthorized = await app.inject({
+        method: "POST",
+        url: "/system/restart/deep"
+      });
+      expect(unauthorized.statusCode).toBe(401);
+      expect(unauthorized.body).not.toContain("restart-token");
+
+      const unsupported = await app.inject({
+        method: "POST",
+        url: "/system/restart/deep",
+        headers: { "X-YUVI-Dev-Token": "restart-token" }
+      });
+      expect(unsupported.statusCode).toBe(409);
+      expect(unsupported.json()).toMatchObject({
+        error: "unsupported",
+        supervisorActive: false
+      });
+      expect(unsupported.body).not.toContain("restart-token");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("requests supervised deep restart with a safe marker", async () => {
+    vi.useFakeTimers();
+    const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-restart-marker-"));
+    const markerPath = path.join(tempDir, "restart-request.json");
+    const app = await buildTestServer({
+      YUVI_DEV_SUPERVISOR: "1",
+      YUVI_RESTART_MARKER: markerPath,
+      YUVI_AUTO_MIGRATE: "1"
+    });
+
+    try {
+      const restart = await app.inject({
+        method: "POST",
+        url: "/system/restart/deep"
+      });
+      expect(restart.statusCode).toBe(200);
+      expect(restart.json()).toMatchObject({
+        ok: true,
+        restartRequested: true,
+        supervisorActive: true,
+        autoMigrate: true
+      });
+      expect(restart.body).not.toContain("DATABASE_URL");
+
+      const marker = JSON.parse(await readFile(markerPath, "utf8")) as {
+        reason?: string;
+        requestedAt?: string;
+      };
+      expect(marker).toMatchObject({
+        reason: "dashboard-deep-restart",
+        requestedAt: expect.any(String)
+      });
+
+      await vi.advanceTimersByTimeAsync(150);
+      expect(process.exitCode).toBe(42);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
     }
   });
 

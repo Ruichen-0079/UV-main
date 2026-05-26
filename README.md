@@ -45,7 +45,7 @@ Check and stop the WSL development services:
 
 ## Scripts
 
-- `./scripts/dev.sh`: WSL/Linux development entry point. Sets `YUVI_RUNTIME_ENV_DIR` to the repo root, loads `.env` plus `.env.local`, starts Docker infra, starts the server, and starts the web dashboard when present.
+- `./scripts/dev.sh`: WSL/Linux development entry point. Sets `YUVI_RUNTIME_ENV_DIR` to the repo root, loads `.env` plus `.env.local`, starts Docker infra, optionally auto-runs `pnpm db:migrate` for PostgreSQL memory, starts the server, and starts the web dashboard when present.
 - `./scripts/health.sh`: check Docker Compose status plus server and web health when started by `dev.sh`.
 - `./scripts/stop.sh`: stop development processes and Docker Compose services.
 - `scripts\start-dev.cmd`: Windows LTSC convenience wrapper that calls WSL Ubuntu.
@@ -58,6 +58,8 @@ Check and stop the WSL development services:
 - `pnpm db:reset:dev`: interactively delete development Docker volumes after a strong confirmation prompt.
 - `pnpm smoke:postgres`: apply migrations against the development Postgres container, then run the smoke test in `MEMORY_REPOSITORY=postgres` mode.
 - `pnpm memory:embed:backfill`: embed existing PostgreSQL memories with the configured embedding provider. Use `pnpm memory:embed:backfill -- --dry-run` first, and `--force` when intentionally re-embedding existing vectors.
+- `pnpm memory:index:status`: report safe pgvector/ANN index diagnostics.
+- `pnpm memory:maintenance`: mark expired memories, report stale episodic memories, and audit supersession state without hard delete.
 
 ## Infrastructure
 
@@ -112,7 +114,24 @@ pnpm memory:embed:backfill
 pnpm memory:embed:backfill -- --force
 ```
 
-Dashboard **Verify Embedding** is explicit and may consume provider usage. Keyword, trigram, and full-text retrieval remain important for env vars, commands, paths, ports, provider names, model names, error messages, and tags. ANN vector indexing is future work.
+Dashboard **Verify Embedding** is explicit and may consume provider usage. Keyword, trigram, and full-text retrieval remain important for env vars, commands, paths, ports, provider names, model names, error messages, and tags. ANN vector indexing is optional acceleration only:
+
+```env
+MEMORY_VECTOR_INDEX_ENABLED=true
+MEMORY_VECTOR_INDEX_TYPE=hnsw
+MEMORY_VECTOR_DISTANCE=cosine
+```
+
+If HNSW/IVFFLAT is unavailable, retrieval still works without ANN acceleration. Check status with `pnpm memory:index:status` or the Dashboard memory status panel.
+
+For development Deep Restart support from the Dashboard, run `./scripts/dev.sh` with:
+
+```env
+YUVI_DEV_SUPERVISOR=1
+YUVI_AUTO_MIGRATE=1
+```
+
+Deep Restart is dev-only, requires the dashboard token when configured, reloads root env files on restart, and runs `pnpm db:migrate` automatically only when PostgreSQL memory is active and `YUVI_AUTO_MIGRATE` is not `0`.
 
 To reset development database volumes, prefer the guarded helper:
 

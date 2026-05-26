@@ -22,6 +22,14 @@ export const MemorySubtypes = [
   "command",
   "troubleshooting",
   "config",
+  "identity",
+  "project-fact",
+  "config-decision",
+  "emotional-state",
+  "emotional-pattern",
+  "health-note",
+  "schedule",
+  "test",
   "emotion",
   "relationship"
 ] as const;
@@ -57,6 +65,12 @@ export type Memory = {
   emotionArousal: number;
   source: string;
   sourceTraceId: string | null;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  createdByUserId?: string | null;
+  speakerId?: string | null;
+  voiceProfileId?: string | null;
+  sessionId?: string | null;
   metadata: Record<string, unknown>;
   tags: string[];
   createdAt: Date;
@@ -96,6 +110,12 @@ export type CreateMemoryInput = {
   emotionArousal?: number;
   source: string;
   sourceTraceId?: string | null;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  createdByUserId?: string | null;
+  speakerId?: string | null;
+  voiceProfileId?: string | null;
+  sessionId?: string | null;
   metadata?: Record<string, unknown>;
   tags?: string[];
   observedAt?: Date | string | null;
@@ -126,6 +146,12 @@ export type UpdateMemoryInput = {
   importance?: number;
   emotionValence?: number;
   emotionArousal?: number;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  createdByUserId?: string | null;
+  speakerId?: string | null;
+  voiceProfileId?: string | null;
+  sessionId?: string | null;
   metadata?: Record<string, unknown>;
   tags?: string[];
   observedAt?: Date | string | null;
@@ -153,6 +179,12 @@ export type MemoryCandidate = {
   tags: string[];
   reason: string;
   sourceTraceId?: string | null;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  createdByUserId?: string | null;
+  speakerId?: string | null;
+  voiceProfileId?: string | null;
+  sessionId?: string | null;
   observedAt?: Date | string | null;
   eventTime?: Date | string | null;
   validFrom?: Date | string | null;
@@ -229,6 +261,11 @@ export type MemorySearchQuery = {
   memoryLayers?: MemoryLayer[];
   statuses?: MemoryStatus[];
   sources?: string[];
+  personaId?: string;
+  subjectUserId?: string;
+  createdByUserId?: string;
+  speakerId?: string;
+  voiceProfileId?: string;
   minImportance?: number;
   tags?: string[];
   scope?: MemoryScope;
@@ -246,6 +283,19 @@ export type MemorySearchQuery = {
   includeExpired?: boolean;
   currentTime?: Date | string;
   limit?: number;
+};
+
+export type MemoryVectorIndexStatus = {
+  vectorIndexEnabled: boolean;
+  vectorIndexType: "hnsw" | "ivfflat" | "none" | "unavailable";
+  vectorDistance: "cosine";
+  embeddingDimensions?: number | undefined;
+  indexCreated: boolean;
+  indexAvailable: boolean;
+  indexFallbackReason?: string | undefined;
+  embeddedCount: number;
+  missingEmbeddingCount: number;
+  annAccelerationActive: boolean;
 };
 
 export type MemoryMatchReason =
@@ -294,6 +344,12 @@ export type RetrievedMemoryDebug = {
   status: MemoryStatus;
   source: string;
   sourceTraceId: string | null;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  createdByUserId?: string | null;
+  speakerId?: string | null;
+  voiceProfileId?: string | null;
+  sessionId?: string | null;
   metadata?: Record<string, unknown>;
   importance: number;
   createdAt: Date;
@@ -302,6 +358,8 @@ export type RetrievedMemoryDebug = {
   validFrom?: Date;
   validUntil?: Date | null;
   expiresAt?: Date | null;
+  retentionClass?: string;
+  retentionReason?: string;
   supersededAt?: Date | null;
   lastAccessedAt?: Date;
   displayText: string;
@@ -362,6 +420,28 @@ export type MemoryRetrievalResult = {
   rawMemories: RetrievedMemoryDebug[];
   memories: RetrievedMemoryDebug[];
   selectedMemories: Memory[];
+};
+
+export type CurrentAffectLabel =
+  | "frustrated"
+  | "anxious"
+  | "excited"
+  | "tired"
+  | "confused"
+  | "angry"
+  | "sad"
+  | "calm"
+  | "neutral";
+
+export type CurrentAffect = {
+  affectLabel: CurrentAffectLabel;
+  affectValence: number;
+  affectArousal: number;
+  confidence: number;
+  evidenceSnippet: string;
+  timestamp: string;
+  sourceTraceId?: string | null;
+  promptHint: string;
 };
 
 export type Entity = {

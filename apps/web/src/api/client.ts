@@ -123,6 +123,12 @@ export type MemoryRecord = {
   emotionArousal?: number;
   source: string;
   sourceTraceId?: string | null;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  createdByUserId?: string | null;
+  speakerId?: string | null;
+  voiceProfileId?: string | null;
+  sessionId?: string | null;
   metadata?: Record<string, unknown>;
   tags: string[];
   createdAt: string;
@@ -145,6 +151,8 @@ export type MemoryRecord = {
   hasEmbedding?: boolean;
   semanticEmbedding?: boolean;
   embeddingError?: string;
+  retentionClass?: string;
+  retentionReason?: string;
 };
 
 export type CreateMemoryRequest = {
@@ -159,6 +167,12 @@ export type CreateMemoryRequest = {
   importance?: number;
   source: string;
   sourceTraceId?: string | null;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  createdByUserId?: string | null;
+  speakerId?: string | null;
+  voiceProfileId?: string | null;
+  sessionId?: string | null;
   metadata?: Record<string, unknown>;
   tags: string[];
   observedAt?: string | null;
@@ -183,6 +197,12 @@ export type UpdateMemoryRequest = {
   importance?: number;
   emotionValence?: number;
   emotionArousal?: number;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  createdByUserId?: string | null;
+  speakerId?: string | null;
+  voiceProfileId?: string | null;
+  sessionId?: string | null;
   metadata?: Record<string, unknown>;
   tags?: string[];
   observedAt?: string | null;
@@ -231,6 +251,10 @@ export type MemoryCandidateReview = {
   possibleContradictions?: string[];
   relationshipConfidence?: number;
   relationshipReason?: string;
+  retentionClass?: string;
+  computedExpiresAt?: string | null;
+  subjectUserId?: string | null;
+  speakerId?: string | null;
 };
 
 export type AcceptMemoryCandidateRequest = Partial<
@@ -338,6 +362,22 @@ export type RetrievedMemoryDebug = {
     importanceScore?: number;
   };
   excludedReason?: string;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  speakerId?: string | null;
+  retentionClass?: string;
+  retentionReason?: string;
+};
+
+export type CurrentAffectDebug = {
+  affectLabel: string;
+  affectValence: number;
+  affectArousal: number;
+  confidence: number;
+  evidenceSnippet: string;
+  timestamp: string;
+  sourceTraceId?: string | null;
+  promptHint: string;
 };
 
 export type PromptPreviewResponse = {
@@ -390,6 +430,7 @@ export type PromptPreviewResponse = {
   includeExpired?: boolean;
   includeHistoricalEpisodic?: boolean;
   currentTime?: string;
+  currentAffect?: CurrentAffectDebug;
   directContextEnabled?: boolean;
   directContextTurnCount?: number;
   directContextCharCount?: number;
@@ -453,6 +494,7 @@ export type PromptPreviewResponse = {
     includeExpired?: boolean;
     includeHistoricalEpisodic?: boolean;
     currentTime?: string;
+    currentAffect?: CurrentAffectDebug;
     directContextEnabled?: boolean;
     directContextTurnCount?: number;
     directContextCharCount?: number;
@@ -522,6 +564,12 @@ export type RuntimeSettingsResponse = {
     eventBus: string;
     activeEventBus: string;
     providerAllowMocks?: boolean;
+    devSupervisor?: {
+      active: boolean;
+      autoMigrate: boolean;
+      restartSupported: boolean;
+      runtimeEnvDir: string;
+    };
     pendingRestart: boolean;
   };
   memory: {
@@ -538,6 +586,13 @@ export type RuntimeSettingsResponse = {
     memoryExtractorFallbackUsed?: boolean;
     memoryExtractorSkippedReason?: string;
     reasoningProviderConfigured?: boolean;
+    vectorIndex?: {
+      enabled: boolean;
+      type: string;
+      distance: string;
+      ivfflatProbes?: number;
+      hnswEfSearch?: number;
+    };
   };
   providers: {
     deepseek: {
@@ -662,6 +717,19 @@ export type MemoryMaintenanceSchedulerStatus = {
   lastSummary: MemoryMaintenanceSummary | null;
   lastError: string | null;
   nextRunAt: string | null;
+};
+
+export type MemoryVectorIndexStatus = {
+  vectorIndexEnabled: boolean;
+  vectorIndexType: "hnsw" | "ivfflat" | "none" | "unavailable";
+  vectorDistance: "cosine";
+  embeddingDimensions?: number;
+  indexCreated: boolean;
+  indexAvailable: boolean;
+  indexFallbackReason?: string;
+  embeddedCount: number;
+  missingEmbeddingCount: number;
+  annAccelerationActive: boolean;
 };
 
 const apiBaseUrl = import.meta.env["VITE_API_BASE_URL"] ?? "/api";
@@ -907,6 +975,16 @@ export const apiClient = {
     }>("/memory/maintenance/status");
   },
 
+  getMemoryVectorIndexStatus(): Promise<{
+    ok: boolean;
+    repository: string;
+    status: MemoryVectorIndexStatus;
+  }> {
+    return request<{ ok: boolean; repository: string; status: MemoryVectorIndexStatus }>(
+      "/memory/vector-index/status"
+    );
+  },
+
   runMemoryMaintenance(input: {
     dryRun: boolean;
     limit?: number;
@@ -1021,6 +1099,19 @@ export const apiClient = {
 
   reloadRuntimeSettings(): Promise<RuntimeSettingsReloadResponse> {
     return request<RuntimeSettingsReloadResponse>("/settings/runtime/reload", {
+      method: "POST"
+    });
+  },
+
+  deepRestartRuntime(): Promise<{
+    ok?: boolean;
+    restartRequested?: boolean;
+    message: string;
+    supervisorActive?: boolean;
+    autoMigrate?: boolean;
+    runtimeEnvDir?: string;
+  }> {
+    return request("/system/restart/deep", {
       method: "POST"
     });
   },

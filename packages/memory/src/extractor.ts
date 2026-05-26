@@ -262,6 +262,48 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
       );
     }
 
+    if (mentionsIdentityStatement(text)) {
+      candidates.push(
+        candidate({
+          text: explicitContent,
+          sourceTraceId,
+          type: "semantic",
+          subtype: "identity",
+          importance: 0.9,
+          reason: "explicit-user-identity",
+          observedAt
+        })
+      );
+    }
+
+    if (mentionsCommunicationPreference(text)) {
+      candidates.push(
+        candidate({
+          text: explicitContent,
+          sourceTraceId,
+          type: "semantic",
+          subtype: "preference",
+          importance: 0.82,
+          reason: "communication-preference",
+          observedAt
+        })
+      );
+    }
+
+    if (mentionsDurableEmotionalPattern(text)) {
+      candidates.push(
+        candidate({
+          text: explicitContent,
+          sourceTraceId,
+          type: "emotional",
+          subtype: "emotional-pattern",
+          importance: 0.72,
+          reason: "durable-emotional-pattern",
+          observedAt
+        })
+      );
+    }
+
     if (mentionsStablePreference(text)) {
       candidates.push(
         candidate({
@@ -408,7 +450,13 @@ function inferSubtype(text: string): MemorySubtype | null {
     return "event";
   }
   if (/项目|project|yuvi|runtime/iu.test(text)) {
-    return "project";
+    return "project-fact";
+  }
+  if (mentionsIdentityStatement(text)) {
+    return "identity";
+  }
+  if (mentionsDurableEmotionalPattern(text)) {
+    return "emotional-pattern";
   }
   if (mentionsStablePreference(text)) {
     return "preference";
@@ -502,6 +550,9 @@ function mentionsDurableSignal(text: string): boolean {
     mentionsExplicitRemember(text) ||
     mentionsProviderChoice(text) ||
     mentionsStablePreference(text) ||
+    mentionsIdentityStatement(text) ||
+    mentionsCommunicationPreference(text) ||
+    mentionsDurableEmotionalPattern(text) ||
     mentionsPathOrRepository(text) ||
     mentionsCommandOrStartup(text) ||
     mentionsConfigDecision(text) ||
@@ -516,6 +567,24 @@ function mentionsExplicitRemember(text: string): boolean {
 
 function mentionsStablePreference(text: string): boolean {
   return /\bfrom now on\b|\bprefer\b|\bpreference\b|以后|默认使用|默认|偏好|以后都|喜欢|不喜欢|不吃/u.test(
+    text
+  );
+}
+
+function mentionsIdentityStatement(text: string): boolean {
+  return /(?:我叫|我的名字是|叫我|可以叫我|my name is|call me|i am called)\s*[\p{Letter}\p{Number}_-]{1,40}/iu.test(
+    text
+  );
+}
+
+function mentionsCommunicationPreference(text: string): boolean {
+  return /(请直接|一步步|分步骤|少废话|详细解释|用中文|用英文|prefer.*(?:concise|steps|direct)|communication preference)/iu.test(
+    text
+  );
+}
+
+function mentionsDurableEmotionalPattern(text: string): boolean {
+  return /(我.*(?:长期|总是|经常).*(?:焦虑|紧张|烦|崩溃)|容易.*(?:焦虑|紧张|崩溃)|prefer.*when.*(?:anxious|frustrated))/iu.test(
     text
   );
 }
@@ -582,6 +651,14 @@ const LlmExtractorCandidateSchema = z
         "command",
         "troubleshooting",
         "config",
+        "identity",
+        "project-fact",
+        "config-decision",
+        "emotional-state",
+        "emotional-pattern",
+        "health-note",
+        "schedule",
+        "test",
         "emotion",
         "relationship"
       ])
@@ -759,6 +836,14 @@ function isMemorySubtype(value: string): value is MemorySubtype {
     value === "command" ||
     value === "troubleshooting" ||
     value === "config" ||
+    value === "identity" ||
+    value === "project-fact" ||
+    value === "config-decision" ||
+    value === "emotional-state" ||
+    value === "emotional-pattern" ||
+    value === "health-note" ||
+    value === "schedule" ||
+    value === "test" ||
     value === "emotion" ||
     value === "relationship"
   );

@@ -7,6 +7,7 @@ cd "$repo_root"
 state_dir="${XDG_RUNTIME_DIR:-/tmp}/yuvi-runtime-dev"
 server_pid_file="$state_dir/server.pid"
 web_pid_file="$state_dir/web.pid"
+restart_marker="$state_dir/restart-request.json"
 
 stop_pid_file() {
   local label="$1"
@@ -44,6 +45,7 @@ stop_pid_file() {
 echo "停止开发进程..."
 stop_pid_file "Web UI" "$web_pid_file"
 stop_pid_file "Server" "$server_pid_file"
+rm -f "$restart_marker"
 
 if [ -f "infra/docker-compose.yml" ]; then
   echo "停止 Docker infra..."
@@ -53,3 +55,4 @@ else
 fi
 
 echo "停止完成"
+echo "Next ./scripts/dev.sh will run db:migrate automatically when postgres mode is active unless YUVI_AUTO_MIGRATE=0."

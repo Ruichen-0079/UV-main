@@ -15,6 +15,7 @@ import { MemoryMaintenanceService } from "./maintenance.js";
 import { MemoryScorer } from "./scorer.js";
 import { createMemoryDisplayText, extractSearchKeywords, MemoryService } from "./service.js";
 import { LlmMemoryExtractor, RuleBasedMemoryExtractor } from "./extractor.js";
+import { detectCurrentAffect } from "./affect.js";
 
 describe("MemoryRepository", () => {
   it("creates and retrieves memory records", async () => {
@@ -70,6 +71,160 @@ describe("MemoryRepository", () => {
     expect(created.observedAt).toBeInstanceOf(Date);
     expect(created.validFrom).toBeInstanceOf(Date);
     expect(created.expiresAt).toBeNull();
+  });
+
+  it("defaults identity fields safely and filters by subject user and persona", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const defaultMemory = await repository.createMemory({
+      type: "semantic",
+      subtype: "identity",
+      content: "用户的名字是 Alex。",
+      source: "test",
+      tags: ["identity"]
+    });
+    await repository.createMemory({
+      type: "semantic",
+      subtype: "preference",
+      content: "另一个用户喜欢深色主题。",
+      source: "test",
+      personaId: "default-persona",
+      subjectUserId: "other-user",
+      createdByUserId: "other-user",
+      tags: ["preference"]
+    });
+
+    expect(defaultMemory.personaId).toBe("default-persona");
+    expect(defaultMemory.subjectUserId).toBe("default-user");
+    expect(defaultMemory.createdByUserId).toBe("default-user");
+
+    const results = await repository.searchMemoriesByTextFallback({
+      text: "用户",
+      personaId: "default-persona",
+      subjectUserId: "default-user",
+      limit: 10
+    });
+    expect(results.map((memory) => memory.content)).toContain("用户的名字是 Alex。");
+    expect(results.map((memory) => memory.content)).not.toContain("另一个用户喜欢深色主题。");
+  });
+
+  it("detects CurrentAffect without storing one-off mood as long-term memory", async () => {
+    const affect = detectCurrentAffect({
+      text: "这个报错我看不懂，快崩溃了",
+      sourceTraceId: "trace-affect"
+    });
+    expect(affect?.affectLabel).toBe("frustrated");
+    expect(affect?.sourceTraceId).toBe("trace-affect");
+
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const candidates = await service.extractCandidates({
+      userMessage: "今天有点烦。",
+      timestamp: "2026-05-26T10:00:00.000Z"
+    });
+    expect(candidates).toHaveLength(0);
+  });
+
+  it("stores stable user preferences as semantic core memory", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(
+      repository,
+      undefined,
+      undefined,
+      new RuleBasedMemoryExtractor()
+    );
+    const candidates = await service.extractCandidates({
+      userMessage: "我喜欢芒果蛋糕。",
+      timestamp: "2026-05-26T10:00:00.000Z"
+    });
+
+    expect(candidates[0]).toMatchObject({
+      type: "semantic",
+      subtype: "preference",
+      memoryLayer: "core",
+      reason: "stable-preference"
+    });
+
+    const stored = await service.processCandidateForStorage(candidates[0]!, { source: "runtime" });
+    expect(stored.decision).toBe("stored");
+    expect(stored.memory).toMatchObject({
+      type: "semantic",
+      subtype: "preference",
+      memoryLayer: "core",
+      status: "active"
+    });
+    expect(stored.memory?.metadata["retentionClass"]).toBe("durable-user");
+    expect(stored.memory?.expiresAt).toBeNull();
+  });
+
+  it("stores durable emotional patterns but not one-off emotional state", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(
+      repository,
+      undefined,
+      undefined,
+      new RuleBasedMemoryExtractor()
+    );
+    const stored = await service.processCandidateForStorage(
+      {
+        type: "emotional",
+        subtype: "emotional-pattern",
+        memoryLayer: "recall",
+        content: "用户在长时间项目调试失败时容易焦虑，偏好直接、分步骤排错。",
+        importance: 0.72,
+        tags: ["emotional-pattern", "debugging"],
+        reason: "durable-emotional-pattern",
+        observedAt: "2026-05-26T10:00:00.000Z"
+      },
+      { source: "runtime" }
+    );
+    expect(stored.decision).toBe("stored");
+    expect(stored.memory?.metadata["retentionClass"]).toBe("emotional-pattern");
+    expect(stored.memory?.expiresAt).toBeInstanceOf(Date);
+
+    const oneOff = await service.extractCandidates({
+      userMessage: "今天有点焦虑。",
+      timestamp: "2026-05-26T10:00:00.000Z"
+    });
+    expect(oneOff).toHaveLength(0);
+  });
+
+  it("applies retention policy for explicit daily and smoke memories", async () => {
+    const repository = new InMemoryMemoryRepository();
+    const service = new MemoryService(repository);
+    const daily = await service.processCandidateForStorage(
+      {
+        type: "episodic",
+        subtype: "event",
+        memoryLayer: "recall",
+        content: "记住：用户在 2026-05-26 早上吃了芒果蛋糕。",
+        importance: 0.55,
+        tags: ["meal"],
+        reason: "explicit-remember",
+        metadata: { explicitRemember: true },
+        observedAt: "2026-05-26T08:00:00.000Z"
+      },
+      { source: "runtime" }
+    );
+    expect(daily.decision).toBe("stored");
+    expect(daily.memory?.expiresAt?.toISOString()).toBe("2026-06-02T08:00:00.000Z");
+    expect(daily.memory?.metadata["retentionClass"]).toBe("episodic-daily");
+
+    const smoke = await service.rememberCandidate(
+      {
+        type: "semantic",
+        subtype: "test",
+        content: "Smoke test memory should expire quickly.",
+        importance: 0.5,
+        tags: ["smoke"],
+        reason: "smoke-test"
+      },
+      { source: "smoke" }
+    );
+    expect(smoke.expiresAt).toBeInstanceOf(Date);
+    expect((smoke.expiresAt?.getTime() ?? 0) - smoke.createdAt.getTime()).toBeLessThanOrEqual(
+      86_400_000 + 1000
+    );
+    expect(smoke.metadata["testMemory"]).toBe(true);
   });
 
   it("updates and deletes in-memory memory records", async () => {
@@ -1670,6 +1825,15 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("embedding_dimensions");
     expect(combinedSql).toContain("embedded_at");
     expect(combinedSql).toContain("memories_embedding_provider_model_idx");
+    expect(combinedSql).toContain("create index if not exists memories_embedding_hnsw_idx");
+    expect(combinedSql).toContain("using hnsw");
+    expect(combinedSql).toContain("create index if not exists memories_embedding_ivfflat_idx");
+    expect(combinedSql).toContain("using ivfflat");
+    expect(combinedSql).toContain("exception");
+    expect(combinedSql).toContain("vector_cosine_ops");
+    expect(combinedSql).toContain("memory_vector_index_enabled");
+    expect(combinedSql).toContain("memory_vector_index_type");
+    expect(combinedSql).toContain("memory_vector_distance");
   });
 });
 

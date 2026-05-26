@@ -63,6 +63,8 @@ Memory read pipeline tests cover scope-aware, status-aware, and time-aware retri
 
 Direct Context tests cover same-session recent-turn injection, unrelated-session isolation, oldest-turn trimming by turn/character budget, separation from `RelevantMemory`, and redaction of secret-like strings. Direct Context is short-term prompt context only; it does not create long-term memories unless the normal `writeMemory` extraction path independently accepts a candidate.
 
+Personalization and retention tests cover default identity fields, subject/persona filtering, durable preference extraction, CurrentAffect detection, rejection of one-off moods as long-term memory, explicit remembered daily-event TTLs, smoke/test TTLs, and safe retention metadata. CurrentAffect is asserted through prompt/debug output and should not create `emotional-state` long-term memories by default.
+
 The smoke script sets:
 
 ```env
@@ -100,6 +102,8 @@ MEMORY_MAINTENANCE_LIMIT=500
 ```
 
 Scheduler-specific tests enable it explicitly and assert startup runs, interval runs, status reporting, bounded limits, no hard delete, and Fastify `onClose` timer cleanup. The scheduler only calls Memory Maintenance v1, so it marks expired/stale state and audits supersession inconsistencies; it does not purge memories.
+
+Deep Restart tests are development-only and hermetic. They assert production disables `/system/restart/deep`, dashboard dev token protection still applies, unsupported mode returns safe guidance when the supervisor is inactive, and supervised mode writes a safe restart marker without shell injection. Under `NODE_ENV=test`, the route sets the restart exit code but does not terminate the Vitest process.
 
 ## Real Provider Tests
 
@@ -157,6 +161,31 @@ pnpm memory:embed:backfill -- --force
 ```
 
 Backfill skips already embedded memories by default. `--force` re-embeds them, `--dry-run` reports what would happen without writes, and `--scope`, `--scopeId`, and `--status` bound the scanned set. The script summarizes scanned/skipped/embedded/failed rows and fails clearly on provider unavailability or vector dimension mismatch without printing secrets.
+
+ANN vector indexing is optional for PostgreSQL memory. `pnpm db:migrate` attempts an idempotent HNSW pgvector index first and falls back to IVFFLAT when HNSW is unavailable. It can be skipped with:
+
+```env
+MEMORY_VECTOR_INDEX_ENABLED=false
+```
+
+or:
+
+```env
+MEMORY_VECTOR_INDEX_TYPE=none
+```
+
+The default local development configuration is:
+
+```env
+MEMORY_VECTOR_INDEX_ENABLED=true
+MEMORY_VECTOR_INDEX_TYPE=hnsw
+MEMORY_VECTOR_DISTANCE=cosine
+MEMORY_VECTOR_IVFFLAT_PROBES=10
+```
+
+ANN changes performance, not retrieval semantics. Scope/status/time filters still apply, missing-embedding memories remain keyword-searchable, and exact technical matches such as env vars, commands, paths, ports, provider names, model names, error messages, and tags should outrank weak vector similarity. Use `pnpm memory:index:status` for safe diagnostics about embedding counts, missing embeddings, vector dimensions, and index type.
+
+Dashboard/server status tests also cover `GET /memory/vector-index/status`, which returns safe cosine-only ANN visibility, embedded/missing counts, fallback state, and no raw vectors or secrets.
 
 Graph reasoning over supersession/contradiction fields and retention purge scheduling are intentionally not part of the default tests yet. They are future work on top of the status and temporal fields.
 

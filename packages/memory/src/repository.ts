@@ -14,6 +14,7 @@ import type {
   MemoryStatus,
   MemorySubtype,
   MemoryType,
+  MemoryVectorIndexStatus,
   Relation,
   UpdateMemoryInput
 } from "./types.js";
@@ -37,6 +38,7 @@ export interface MemoryRepository {
   searchMemoriesByTextFallback(query: MemorySearchQuery): Promise<Memory[]>;
   searchMemoriesByEmbedding(query: MemorySearchQuery): Promise<Memory[]>;
   updateMemoryAccess(id: string): Promise<void>;
+  getVectorIndexStatus?(): Promise<MemoryVectorIndexStatus>;
   close?(): Promise<void>;
   createEntity(input: CreateEntityInput): Promise<Entity>;
   createRelation(input: CreateRelationInput): Promise<Relation>;
@@ -77,13 +79,17 @@ export class PostgresMemoryRepository implements MemoryRepository {
       `insert into memories (
         type, subtype, scope, scope_id, memory_layer, status, content, summary, embedding,
         embedding_model, embedding_provider, embedding_dimensions, embedded_at,
-        importance, emotion_valence, emotion_arousal, source, source_trace_id, metadata, tags,
+        importance, emotion_valence, emotion_arousal, source, source_trace_id,
+        persona_id, subject_user_id, created_by_user_id, speaker_id, voice_profile_id, session_id,
+        metadata, tags,
         observed_at, event_time, valid_from, valid_until, expires_at, superseded_at,
         supersedes, superseded_by, contradicts
       ) values (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20,
-        $21, $22, $23, $24, $25, $26, $27, $28, $29
+        $14, $15, $16, $17, $18,
+        $19, $20, $21, $22, $23, $24,
+        $25, $26,
+        $27, $28, $29, $30, $31, $32, $33, $34, $35
       ) returning *`,
       [
         input.type,
@@ -104,6 +110,15 @@ export class PostgresMemoryRepository implements MemoryRepository {
         input.emotionArousal ?? 0,
         input.source,
         input.sourceTraceId ?? null,
+        input.personaId ?? metadataString(input.metadata, "personaId") ?? "default-persona",
+        input.subjectUserId ?? metadataString(input.metadata, "subjectUserId") ?? "default-user",
+        input.createdByUserId ??
+          metadataString(input.metadata, "createdByUserId") ??
+          input.subjectUserId ??
+          "default-user",
+        input.speakerId ?? metadataString(input.metadata, "speakerId") ?? null,
+        input.voiceProfileId ?? metadataString(input.metadata, "voiceProfileId") ?? null,
+        input.sessionId ?? metadataString(input.metadata, "sessionId") ?? null,
         JSON.stringify(input.metadata ?? {}),
         input.tags ?? [],
         observedAt,
@@ -184,6 +199,24 @@ export class PostgresMemoryRepository implements MemoryRepository {
     if (input.emotionArousal !== undefined) {
       set("emotion_arousal", input.emotionArousal);
     }
+    if (input.personaId !== undefined) {
+      set("persona_id", input.personaId);
+    }
+    if (input.subjectUserId !== undefined) {
+      set("subject_user_id", input.subjectUserId);
+    }
+    if (input.createdByUserId !== undefined) {
+      set("created_by_user_id", input.createdByUserId);
+    }
+    if (input.speakerId !== undefined) {
+      set("speaker_id", input.speakerId);
+    }
+    if (input.voiceProfileId !== undefined) {
+      set("voice_profile_id", input.voiceProfileId);
+    }
+    if (input.sessionId !== undefined) {
+      set("session_id", input.sessionId);
+    }
     if (input.metadata !== undefined) {
       set("metadata", JSON.stringify(input.metadata));
     }
@@ -249,6 +282,72 @@ export class PostgresMemoryRepository implements MemoryRepository {
     );
 
     return result.rows.map(mapMemoryRow);
+  }
+
+  async getVectorIndexStatus(): Promise<MemoryVectorIndexStatus> {
+    try {
+      const [indexes, counts] = await Promise.all([
+        this.pool.query<{ indexname: string; indexdef: string }>(
+          `select indexname, indexdef
+           from pg_indexes
+           where schemaname = current_schema()
+             and tablename = 'memories'
+             and indexdef ilike '%embedding%'
+           order by indexname`
+        ),
+        this.pool.query<{
+          embedded_count: string;
+          missing_embedding_count: string;
+          dimensions: number[] | null;
+        }>(
+          `select
+             count(*) filter (where embedding is not null)::text as embedded_count,
+             count(*) filter (where embedding is null)::text as missing_embedding_count,
+             coalesce(
+               array_agg(distinct embedding_dimensions order by embedding_dimensions)
+                 filter (where embedding_dimensions is not null),
+               '{}'::integer[]
+             ) as dimensions
+           from memories`
+        )
+      ]);
+      const annIndex = indexes.rows.find(
+        (index) => index.indexdef.includes("USING hnsw") || index.indexdef.includes("USING ivfflat")
+      );
+      const vectorIndexType = annIndex?.indexdef.includes("USING hnsw")
+        ? "hnsw"
+        : annIndex?.indexdef.includes("USING ivfflat")
+          ? "ivfflat"
+          : "none";
+      const countRow = counts.rows[0];
+      const dimensions = countRow?.dimensions?.[0];
+      return {
+        vectorIndexEnabled: parseBoolean(process.env["MEMORY_VECTOR_INDEX_ENABLED"], true),
+        vectorIndexType,
+        vectorDistance: "cosine",
+        ...(dimensions ? { embeddingDimensions: dimensions } : {}),
+        indexCreated: Boolean(annIndex),
+        indexAvailable: Boolean(annIndex),
+        ...(annIndex
+          ? {}
+          : { indexFallbackReason: "No HNSW or IVFFLAT embedding index was found." }),
+        embeddedCount: Number(countRow?.embedded_count ?? 0),
+        missingEmbeddingCount: Number(countRow?.missing_embedding_count ?? 0),
+        annAccelerationActive: Boolean(annIndex)
+      };
+    } catch (error) {
+      return {
+        vectorIndexEnabled: parseBoolean(process.env["MEMORY_VECTOR_INDEX_ENABLED"], true),
+        vectorIndexType: "unavailable",
+        vectorDistance: "cosine",
+        indexCreated: false,
+        indexAvailable: false,
+        indexFallbackReason: safeRepositoryError(error),
+        embeddedCount: 0,
+        missingEmbeddingCount: 0,
+        annAccelerationActive: false
+      };
+    }
   }
 
   async searchMemoriesByTextFallback(query: MemorySearchQuery): Promise<Memory[]> {
@@ -317,6 +416,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
       values.push(query.sources);
       clauses.push(`source = any($${values.length}::text[])`);
     }
+    addIdentityClauses(query, clauses, values);
 
     if (query.minImportance !== undefined) {
       values.push(query.minImportance);
@@ -450,6 +550,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
     if (!query.embedding?.length) {
       return this.searchMemoriesByTextFallback(query);
     }
+    await this.applyVectorSearchTuning();
 
     const clauses = [
       `embedding is not null`,
@@ -478,6 +579,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
       values.push(query.sources);
       clauses.push(`source = any($${values.length}::text[])`);
     }
+    addIdentityClauses(query, clauses, values);
     if (query.minImportance !== undefined) {
       values.push(query.minImportance);
       clauses.push(`importance >= $${values.length}`);
@@ -530,6 +632,31 @@ export class PostgresMemoryRepository implements MemoryRepository {
     );
 
     return result.rows.map(mapMemoryRow);
+  }
+
+  private async applyVectorSearchTuning(): Promise<void> {
+    const vectorIndexEnabled = parseBoolean(process.env["MEMORY_VECTOR_INDEX_ENABLED"], true);
+    if (!vectorIndexEnabled) {
+      return;
+    }
+
+    const indexType = parseVectorIndexType(process.env["MEMORY_VECTOR_INDEX_TYPE"]);
+    try {
+      if (indexType === "hnsw") {
+        const efSearch = parsePositiveInteger(process.env["MEMORY_VECTOR_HNSW_EF_SEARCH"]);
+        if (efSearch !== null) {
+          await this.pool.query(`set hnsw.ef_search = ${efSearch}`);
+        }
+      }
+      if (indexType === "ivfflat") {
+        const probes = parsePositiveInteger(process.env["MEMORY_VECTOR_IVFFLAT_PROBES"]);
+        if (probes !== null) {
+          await this.pool.query(`set ivfflat.probes = ${probes}`);
+        }
+      }
+    } catch {
+      // ANN tuning is an optimization only; retrieval semantics must not depend on it.
+    }
   }
 
   async updateMemoryAccess(id: string): Promise<void> {
@@ -607,6 +734,19 @@ export class InMemoryMemoryRepository implements MemoryRepository {
       emotionArousal: input.emotionArousal ?? 0,
       source: input.source,
       sourceTraceId: input.sourceTraceId ?? null,
+      personaId:
+        input.personaId ?? metadataString(input.metadata, "personaId") ?? "default-persona",
+      subjectUserId:
+        input.subjectUserId ?? metadataString(input.metadata, "subjectUserId") ?? "default-user",
+      createdByUserId:
+        input.createdByUserId ??
+        metadataString(input.metadata, "createdByUserId") ??
+        input.subjectUserId ??
+        "default-user",
+      speakerId: input.speakerId ?? metadataString(input.metadata, "speakerId") ?? null,
+      voiceProfileId:
+        input.voiceProfileId ?? metadataString(input.metadata, "voiceProfileId") ?? null,
+      sessionId: input.sessionId ?? metadataString(input.metadata, "sessionId") ?? null,
       metadata: input.metadata ?? {},
       tags: input.tags ?? [],
       createdAt: now,
@@ -684,6 +824,24 @@ export class InMemoryMemoryRepository implements MemoryRepository {
     if (input.emotionArousal !== undefined) {
       memory.emotionArousal = input.emotionArousal;
     }
+    if (input.personaId !== undefined) {
+      memory.personaId = input.personaId;
+    }
+    if (input.subjectUserId !== undefined) {
+      memory.subjectUserId = input.subjectUserId;
+    }
+    if (input.createdByUserId !== undefined) {
+      memory.createdByUserId = input.createdByUserId;
+    }
+    if (input.speakerId !== undefined) {
+      memory.speakerId = input.speakerId;
+    }
+    if (input.voiceProfileId !== undefined) {
+      memory.voiceProfileId = input.voiceProfileId;
+    }
+    if (input.sessionId !== undefined) {
+      memory.sessionId = input.sessionId;
+    }
     if (input.metadata !== undefined) {
       memory.metadata = input.metadata;
     }
@@ -752,6 +910,7 @@ export class InMemoryMemoryRepository implements MemoryRepository {
       )
       .filter((memory) => !query.statuses?.length || query.statuses.includes(memory.status))
       .filter((memory) => !query.sources?.length || query.sources.includes(memory.source))
+      .filter((memory) => matchesIdentityQuery(memory, query))
       .filter(
         (memory) => query.minImportance === undefined || memory.importance >= query.minImportance
       )
@@ -801,6 +960,7 @@ export class InMemoryMemoryRepository implements MemoryRepository {
       )
       .filter((memory) => !query.statuses?.length || query.statuses.includes(memory.status))
       .filter((memory) => !query.sources?.length || query.sources.includes(memory.source))
+      .filter((memory) => matchesIdentityQuery(memory, query))
       .filter(
         (memory) => query.minImportance === undefined || memory.importance >= query.minImportance
       )
@@ -837,6 +997,21 @@ export class InMemoryMemoryRepository implements MemoryRepository {
       memory.lastAccessedAt = new Date();
       memory.updatedAt = new Date();
     }
+  }
+
+  async getVectorIndexStatus(): Promise<MemoryVectorIndexStatus> {
+    const embeddedCount = this.memories.filter((memory) => memory.embedding?.length).length;
+    return {
+      vectorIndexEnabled: false,
+      vectorIndexType: "none",
+      vectorDistance: "cosine",
+      indexCreated: false,
+      indexAvailable: false,
+      indexFallbackReason: "ANN indexes are only available for PostgreSQL memory repositories.",
+      embeddedCount,
+      missingEmbeddingCount: this.memories.length - embeddedCount,
+      annAccelerationActive: false
+    };
   }
 
   async createEntity(input: CreateEntityInput): Promise<Entity> {
@@ -903,6 +1078,27 @@ function mapMemoryRow(row: QueryResultRow): Memory {
     emotionArousal: Number(row["emotion_arousal"]),
     source: row["source"],
     sourceTraceId: row["source_trace_id"] ?? null,
+    personaId:
+      row["persona_id"] ??
+      metadataString(parseMetadata(row["metadata"]), "personaId") ??
+      "default-persona",
+    subjectUserId:
+      row["subject_user_id"] ??
+      metadataString(parseMetadata(row["metadata"]), "subjectUserId") ??
+      "default-user",
+    createdByUserId:
+      row["created_by_user_id"] ??
+      metadataString(parseMetadata(row["metadata"]), "createdByUserId") ??
+      row["subject_user_id"] ??
+      "default-user",
+    speakerId:
+      row["speaker_id"] ?? metadataString(parseMetadata(row["metadata"]), "speakerId") ?? null,
+    voiceProfileId:
+      row["voice_profile_id"] ??
+      metadataString(parseMetadata(row["metadata"]), "voiceProfileId") ??
+      null,
+    sessionId:
+      row["session_id"] ?? metadataString(parseMetadata(row["metadata"]), "sessionId") ?? null,
     metadata: parseMetadata(row["metadata"]),
     tags: row["tags"] ?? [],
     createdAt: row["created_at"],
@@ -1125,6 +1321,79 @@ function cosineSimilarity(left: number[], right: number[]): number {
 
 function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+function addIdentityClauses(query: MemorySearchQuery, clauses: string[], values: unknown[]): void {
+  if (query.personaId) {
+    values.push(query.personaId);
+    clauses.push(`persona_id = $${values.length}`);
+  }
+  if (query.subjectUserId || query.userId) {
+    values.push(query.subjectUserId ?? query.userId);
+    clauses.push(`subject_user_id = $${values.length}`);
+  }
+  if (query.createdByUserId) {
+    values.push(query.createdByUserId);
+    clauses.push(`created_by_user_id = $${values.length}`);
+  }
+  if (query.speakerId) {
+    values.push(query.speakerId);
+    clauses.push(`speaker_id = $${values.length}`);
+  }
+  if (query.voiceProfileId) {
+    values.push(query.voiceProfileId);
+    clauses.push(`voice_profile_id = $${values.length}`);
+  }
+  if (query.sessionId) {
+    values.push(query.sessionId);
+    clauses.push(`(session_id = $${values.length} or (session_id is null and scope = 'session'))`);
+  }
+}
+
+function matchesIdentityQuery(memory: Memory, query: MemorySearchQuery): boolean {
+  if (query.personaId && memory.personaId !== query.personaId) return false;
+  const subjectUserId = query.subjectUserId ?? query.userId;
+  if (subjectUserId && memory.subjectUserId !== subjectUserId) return false;
+  if (query.createdByUserId && memory.createdByUserId !== query.createdByUserId) return false;
+  if (query.speakerId && memory.speakerId !== query.speakerId) return false;
+  if (query.voiceProfileId && memory.voiceProfileId !== query.voiceProfileId) return false;
+  if (query.sessionId && memory.sessionId && memory.sessionId !== query.sessionId) return false;
+  return true;
+}
+
+function metadataString(metadata: Record<string, unknown> | undefined, key: string): string | null {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function safeRepositoryError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [REDACTED]")
+    .replace(/(DATABASE_URL|API_KEY|TOKEN|SECRET|PASSWORD)=([^\s]+)/giu, "$1=[REDACTED]")
+    .slice(0, 240);
+}
+
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  return ["true", "1", "yes", "on"].includes(value.toLowerCase());
+}
+
+function parsePositiveInteger(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseVectorIndexType(value: string | undefined): "hnsw" | "ivfflat" | "none" {
+  if (value === "ivfflat" || value === "none") {
+    return value;
+  }
+  return "hnsw";
 }
 
 type VisibilityMode = "prompt" | "manual" | "history";

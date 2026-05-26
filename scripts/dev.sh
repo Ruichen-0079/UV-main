@@ -12,6 +12,7 @@ server_pid_file="$state_dir/server.pid"
 web_pid_file="$state_dir/web.pid"
 server_log="$state_dir/server.log"
 web_log="$state_dir/web.log"
+restart_marker="$state_dir/restart-request.json"
 
 server_url="http://localhost:6121"
 web_url="http://localhost:5173"
@@ -103,6 +104,36 @@ install_dependencies_if_needed() {
   fi
 }
 
+run_auto_migrate_if_needed() {
+  if [ "${MEMORY_REPOSITORY:-in-memory}" != "postgres" ]; then
+    return
+  fi
+  if [ -z "${DATABASE_URL:-}" ]; then
+    echo "MEMORY_REPOSITORY=postgres but DATABASE_URL is not configured; skipping db:migrate." >&2
+    return
+  fi
+  if [ "${YUVI_AUTO_MIGRATE:-1}" = "0" ]; then
+    echo "YUVI_AUTO_MIGRATE=0 set; skipping db:migrate."
+    return
+  fi
+  echo "Running pnpm db:migrate for PostgreSQL memory（不会打印 DATABASE_URL）..."
+  pnpm db:migrate
+}
+
+server_command() {
+  env \
+    NODE_ENV="${NODE_ENV:-development}" \
+    YUVI_RUNTIME_ENV_DIR="$YUVI_RUNTIME_ENV_DIR" \
+    YUVI_DEV_SUPERVISOR="${YUVI_DEV_SUPERVISOR:-0}" \
+    YUVI_AUTO_MIGRATE="${YUVI_AUTO_MIGRATE:-1}" \
+    YUVI_RESTART_MARKER="$restart_marker" \
+    PROVIDER_ALLOW_MOCKS="${PROVIDER_ALLOW_MOCKS:-false}" \
+    MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-in-memory}" \
+    SERVER_HOST="${SERVER_HOST:-127.0.0.1}" \
+    SERVER_PORT="${SERVER_PORT:-6121}" \
+    bash -lc 'cd apps/server && exec ../../node_modules/.bin/tsx --conditions development src/index.ts'
+}
+
 start_server() {
   if [ ! -f "apps/server/package.json" ]; then
     echo "未找到 apps/server，跳过 server"
@@ -116,14 +147,46 @@ start_server() {
 
   echo "启动 Server: $server_url"
   echo "Provider fallback: PROVIDER_ALLOW_MOCKS=${PROVIDER_ALLOW_MOCKS:-false} (real-provider-first unless explicitly true)"
-  env \
-    NODE_ENV="${NODE_ENV:-development}" \
-    YUVI_RUNTIME_ENV_DIR="$YUVI_RUNTIME_ENV_DIR" \
-    PROVIDER_ALLOW_MOCKS="${PROVIDER_ALLOW_MOCKS:-false}" \
-    MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-in-memory}" \
-    SERVER_HOST="${SERVER_HOST:-127.0.0.1}" \
-    SERVER_PORT="${SERVER_PORT:-6121}" \
-    setsid bash -lc 'cd apps/server && exec ../../node_modules/.bin/tsx --conditions development src/index.ts' >"$server_log" 2>&1 < /dev/null &
+  run_auto_migrate_if_needed
+  if [ "${YUVI_DEV_SUPERVISOR:-0}" = "1" ]; then
+    setsid bash -lc '
+      set -euo pipefail
+      repo_root="$1"
+      restart_marker="$2"
+      while true; do
+        rm -f "$restart_marker"
+        cd "$repo_root/apps/server"
+        set +e
+        NODE_ENV="${NODE_ENV:-development}" \
+        YUVI_RUNTIME_ENV_DIR="$repo_root" \
+        YUVI_DEV_SUPERVISOR=1 \
+        YUVI_AUTO_MIGRATE="${YUVI_AUTO_MIGRATE:-1}" \
+        YUVI_RESTART_MARKER="$restart_marker" \
+        PROVIDER_ALLOW_MOCKS="${PROVIDER_ALLOW_MOCKS:-false}" \
+        MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-in-memory}" \
+        SERVER_HOST="${SERVER_HOST:-127.0.0.1}" \
+        SERVER_PORT="${SERVER_PORT:-6121}" \
+        ../../node_modules/.bin/tsx --conditions development src/index.ts
+        code=$?
+        set -e
+        if [ "$code" != "42" ] && [ ! -f "$restart_marker" ]; then
+          exit "$code"
+        fi
+        echo "[supervisor] Deep restart requested; reloading env and restarting."
+        cd "$repo_root"
+        set -a
+        [ -f .env ] && . ./.env
+        [ -f .env.local ] && . ./.env.local
+        set +a
+        if [ "${MEMORY_REPOSITORY:-in-memory}" = "postgres" ] && [ -n "${DATABASE_URL:-}" ] && [ "${YUVI_AUTO_MIGRATE:-1}" != "0" ]; then
+          pnpm db:migrate
+        fi
+        sleep 1
+      done
+    ' supervisor "$repo_root" "$restart_marker" >"$server_log" 2>&1 < /dev/null &
+  else
+    setsid bash -lc "$(declare -f server_command); server_command" >"$server_log" 2>&1 < /dev/null &
+  fi
 
   echo "$!" > "$server_pid_file"
 
