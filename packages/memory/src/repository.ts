@@ -19,6 +19,7 @@ import type {
   UpdateMemoryInput
 } from "./types.js";
 import { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
+import { normalizePostgresConnectionString } from "./postgres-connection.js";
 
 export interface MemoryRepository {
   readonly kind: MemoryRepositoryKind;
@@ -50,7 +51,12 @@ export class PostgresMemoryRepository implements MemoryRepository {
 
   constructor(connectionString: string | Pool) {
     this.pool =
-      typeof connectionString === "string" ? new Pool({ connectionString }) : connectionString;
+      typeof connectionString === "string"
+        ? new Pool({
+            connectionString: normalizePostgresConnectionString(connectionString),
+            connectionTimeoutMillis: 10_000
+          })
+        : connectionString;
   }
 
   async healthCheck(): Promise<{ status: "healthy" | "unavailable"; message?: string }> {

@@ -62,6 +62,7 @@ export {
   type MemoryMaintenanceWarning
 } from "./maintenance.js";
 export { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
+export { normalizePostgresConnectionString } from "./postgres-connection.js";
 export {
   InMemoryMemoryRepository,
   PostgresMemoryRepository,
