@@ -1,14 +1,19 @@
-import { readFile } from "node:fs/promises";
+import { applyRuntimeEnv, readRuntimeEnvFiles } from "../packages/config/src/index.js";
 import {
   MissingDatabaseUrlError,
   readSqlMigrations,
-  resolveDatabaseUrl,
   runPostgresMigrations
 } from "../packages/memory/src/migrations.js";
 
 async function main(): Promise<void> {
-  const envFileText = await readLocalEnvFile();
-  const databaseUrl = resolveDatabaseUrl(process.env, envFileText);
+  const runtimeEnvFiles = await readRuntimeEnvFiles();
+  applyRuntimeEnv(runtimeEnvFiles.env);
+  logLoadedEnvFiles(runtimeEnvFiles);
+
+  const databaseUrl = runtimeEnvFiles.env["DATABASE_URL"];
+  if (!databaseUrl?.trim()) {
+    throw new MissingDatabaseUrlError();
+  }
   const migrations = await readSqlMigrations();
 
   if (migrations.length === 0) {
@@ -20,25 +25,26 @@ async function main(): Promise<void> {
     databaseUrl,
     migrations,
     settings: {
-      "yuvi.memory_vector_index_enabled": process.env["MEMORY_VECTOR_INDEX_ENABLED"] ?? "true",
-      "yuvi.memory_vector_index_type": process.env["MEMORY_VECTOR_INDEX_TYPE"] ?? "hnsw",
-      "yuvi.memory_vector_distance": process.env["MEMORY_VECTOR_DISTANCE"] ?? "cosine",
-      "yuvi.memory_vector_dimensions": process.env["EMBEDDING_DIMENSIONS"] ?? "1536"
+      "yuvi.memory_vector_index_enabled":
+        runtimeEnvFiles.env["MEMORY_VECTOR_INDEX_ENABLED"] ?? "true",
+      "yuvi.memory_vector_index_type": runtimeEnvFiles.env["MEMORY_VECTOR_INDEX_TYPE"] ?? "hnsw",
+      "yuvi.memory_vector_distance": runtimeEnvFiles.env["MEMORY_VECTOR_DISTANCE"] ?? "cosine",
+      "yuvi.memory_vector_dimensions": runtimeEnvFiles.env["EMBEDDING_DIMENSIONS"] ?? "1536"
     },
     logger: console
   });
   console.log("PostgreSQL memory migrations completed.");
 }
 
-async function readLocalEnvFile(): Promise<string | undefined> {
-  try {
-    return await readFile(".env", "utf8");
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return undefined;
+function logLoadedEnvFiles(runtimeEnvFiles: Awaited<ReturnType<typeof readRuntimeEnvFiles>>): void {
+  console.log(`[env] runtimeEnvDir=${runtimeEnvFiles.runtimeEnvDir}`);
+  for (const [label, file] of [
+    [".env", runtimeEnvFiles.base],
+    [".env.local", runtimeEnvFiles.local]
+  ] as const) {
+    if (file.exists) {
+      console.log(`[env] Loaded ${label}: keys=${Object.keys(file.values).sort().join(",")}`);
     }
-
-    throw error;
   }
 }
 
