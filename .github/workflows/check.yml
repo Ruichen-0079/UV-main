@@ -9,7 +9,10 @@ env:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -36,5 +39,26 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: PowerShell syntax
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-ChildItem scripts -Filter *.ps1 -Recurse | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File):$($_.Extent.StartLineNumber): $($_.Message)" }
+              throw "PowerShell syntax validation failed."
+            }
+          }
+
+      - name: Process ownership regression
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/test-process-ownership.ps1
+
       - name: Smoke
+        if: matrix.os == 'ubuntu-latest'
         run: pnpm smoke

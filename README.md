@@ -16,12 +16,13 @@ This repository starts as a small runnable TypeScript monorepo:
 
 ## Getting Started
 
-The recommended development environment is Windows LTSC + WSL2 Ubuntu with Docker Engine running inside WSL.
+The recommended Windows development environment is Windows 11 with Docker Desktop.
+Linux/WSL development remains supported through the Bash scripts.
 
-```bash
+```powershell
 pnpm install
-cp .env.example .env
-./scripts/dev.sh
+Copy-Item .env.example .env
+.\scripts\dev.ps1
 ```
 
 Development URLs:
@@ -30,31 +31,41 @@ Development URLs:
 - Web UI: `http://localhost:5173`
 - WebSocket: `ws://localhost:6121/ws`
 
-On Windows LTSC, use the wrapper from the repository root:
+Check and stop Windows development services:
 
-```cmd
-scripts\start-dev.cmd
+```powershell
+.\scripts\health.ps1
+.\scripts\stop.ps1
 ```
 
-Check and stop the WSL development services:
+Bash/Linux:
 
 ```bash
+pnpm install
+cp .env.example .env
+./scripts/dev.sh
 ./scripts/health.sh
 ./scripts/stop.sh
 ```
+
+See [docs/windows-development.md](docs/windows-development.md) for Windows setup, Docker Desktop,
+PowerShell 5.1 notes, and Deep Restart supervisor behavior.
 
 ## Scripts
 
 - `./scripts/dev.sh`: WSL/Linux development entry point. Sets `YUVI_RUNTIME_ENV_DIR` to the repo root, loads `.env` plus `.env.local`, starts Docker infra, optionally auto-runs `pnpm db:migrate` for PostgreSQL memory, starts the server, and starts the web dashboard when present.
 - `./scripts/health.sh`: check Docker Compose status plus server and web health when started by `dev.sh`.
 - `./scripts/stop.sh`: stop development processes and Docker Compose services.
-- `scripts\start-dev.cmd`: Windows LTSC convenience wrapper that calls WSL Ubuntu.
+- `.\scripts\dev.ps1`: Windows PowerShell development entry point. Uses Docker Desktop, loads root `.env`, shell environment, then root `.env.local`, starts server and web, and stores PID/log state under `%LOCALAPPDATA%\YUVI\Runtime`.
+- `.\scripts\stop.ps1`: stop Windows server and web process trees. Use `-Infra` to also stop Docker Compose services.
+- `.\scripts\health.ps1`: check Docker Engine, PostgreSQL, Redis, NATS, server `/health`, web, and PID files.
+- `scripts\start-dev.cmd`: Windows convenience wrapper that calls `scripts\dev.ps1`.
 - `pnpm dev`: run only the Fastify server in development mode. The server resolves runtime env files from `YUVI_RUNTIME_ENV_DIR` when set, otherwise it walks up to the workspace root and reads root `.env` plus `.env.local`.
 - `pnpm build`: build all workspace packages.
 - `pnpm check`: type-check all workspace packages.
 - `pnpm test`: run package tests where present.
 - `pnpm smoke`: build the repo and verify the runtime health, message, and memory endpoints in explicit mock/in-memory mode. Provider verification is the path for checking real remote APIs.
-- `pnpm db:migrate`: apply PostgreSQL memory migrations using `DATABASE_URL` from `.env` or the current environment.
+- `pnpm db:migrate`: apply PostgreSQL memory migrations using merged root runtime env. Precedence is `.env`, process environment, then `.env.local`.
 - `pnpm db:reset:dev`: interactively delete development Docker volumes after a strong confirmation prompt.
 - `pnpm smoke:postgres`: apply migrations against the development Postgres container, then run the smoke test in `MEMORY_REPOSITORY=postgres` mode.
 - `pnpm memory:embed:backfill`: embed existing PostgreSQL memories with the configured embedding provider. Use `pnpm memory:embed:backfill -- --dry-run` first, and `--force` when intentionally re-embedding existing vectors.
@@ -67,7 +78,9 @@ Check and stop the WSL development services:
 docker compose -f infra/docker-compose.yml up -d
 ```
 
-This starts PostgreSQL with pgvector, Redis, and NATS for future event bus work.
+This starts PostgreSQL with pgvector, Redis, and NATS for future event bus work. It supports Docker
+Desktop on Windows and Docker Engine on Linux/WSL, binds service ports to `127.0.0.1` only, and uses
+named volumes rather than Windows bind mounts for database data.
 
 Development memory defaults to in-memory storage:
 
