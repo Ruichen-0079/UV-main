@@ -18,11 +18,15 @@ import { LlmMemoryExtractor, RuleBasedMemoryExtractor } from "./extractor.js";
 import type { MemoryCandidate, MemoryExtractionInput, MemoryExtractor } from "./types.js";
 import { detectCurrentAffect } from "./affect.js";
 import { buildCandidateFingerprint } from "./candidate-dedupe.js";
-import { detectExplicitRememberRequest } from "./intent.js";
+import { detectCorrectionRequest, detectExplicitRememberRequest } from "./intent.js";
 import {
   canonicalEventDate,
+  hasUnresolvedRelativeTime,
   normalizeContentForFingerprint,
-  normalizeTemporalCandidate
+  normalizeTemporalCandidate,
+  resolveCanonicalTemporalBounds,
+  resolveTemporalDebug,
+  resolveTimezoneFromObservedAt
 } from "./temporal.js";
 
 describe("MemoryRepository", () => {
@@ -1375,6 +1379,214 @@ describe("MemoryRepository", () => {
         decision: "stored",
         storageReason: "manual-accept"
       });
+    });
+
+    it("A stores user corrections over ordinary one-off daily event rejection", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const first = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      await service.processCandidateForStorage(first[0]!, { source: "runtime" });
+
+      const correction = await service.extractCandidates({
+        userMessage: "不对，我后来想起来了，今天早上其实吃了一个面包。",
+        timestamp: "2026-06-22T10:45:58+08:00"
+      });
+      expect(correction[0]).toMatchObject({
+        correctionRequested: true,
+        originRole: "user"
+      });
+      const result = await service.processCandidateForStorage(correction[0]!, {
+        source: "runtime"
+      });
+      expect(result).toMatchObject({
+        decision: "stored",
+        storageReason: "user-correction"
+      });
+    });
+
+    it("B auto-supersedes stale breakfast memory after user correction", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const first = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      const stored = await service.processCandidateForStorage(first[0]!, { source: "runtime" });
+      const oldId = stored.memory?.id;
+      expect(oldId).toBeTruthy();
+
+      const correction = await service.extractCandidates({
+        userMessage: "不对，我后来想起来了，今天早上其实吃了一个面包。",
+        timestamp: "2026-06-22T10:45:58+08:00"
+      });
+      const result = await service.processCandidateForStorage(correction[0]!, {
+        source: "runtime"
+      });
+      const old = await repository.getMemoryById(oldId!);
+      expect(result.memory?.status).toBe("active");
+      expect(result.memory?.supersedes).toContain(oldId);
+      expect(old).toMatchObject({
+        status: "superseded",
+        supersededBy: result.memory?.id
+      });
+    });
+
+    it("C does not treat unrelated 其实 statements as correction without prior memory", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      expect(detectCorrectionRequest("其实我今天下午喝了一杯水。")).toBe(true);
+      const candidates = await service.extractCandidates({
+        userMessage: "其实我今天下午喝了一杯水。",
+        timestamp: observedAt
+      });
+      const result = await service.processCandidateForStorage(candidates[0]!, {
+        source: "runtime"
+      });
+      expect(result.decision).toBe("rejected");
+      expect(result.storageReason).toBeUndefined();
+    });
+
+    it("D marks canonicalized breakfast content as resolved temporal status", () => {
+      const candidate: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        content: "在2026-06-22早上，用户没吃早饭。",
+        importance: 0.4,
+        tags: ["meal"],
+        reason: "test",
+        observedAt,
+        metadata: {
+          temporalNormalized: true,
+          canonicalEventDate: "2026-06-22"
+        }
+      };
+      expect(hasUnresolvedRelativeTime(candidate)).toBe(false);
+      expect(resolveTemporalDebug(candidate)).toMatchObject({
+        temporalStatus: "normalized"
+      });
+      expect(resolveTemporalDebug(candidate).temporalSuggestion).toBeUndefined();
+    });
+
+    it("E reports unresolved relative time only before canonical normalization", () => {
+      const unresolved: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        content: "用户今天早上没吃早饭。",
+        importance: 0.4,
+        tags: ["meal"],
+        reason: "test",
+        observedAt
+      };
+      expect(hasUnresolvedRelativeTime(unresolved)).toBe(true);
+      const normalized = normalizeTemporalCandidate(unresolved, {
+        timestamp: observedAt,
+        timezone: "Asia/Shanghai"
+      }).candidate;
+      expect(hasUnresolvedRelativeTime(normalized)).toBe(false);
+    });
+
+    it("G uses local day boundaries for validFrom and validUntil", () => {
+      const candidate: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        content: "用户在 2026-06-22 早上没吃早饭。",
+        importance: 0.4,
+        tags: ["meal"],
+        reason: "test",
+        observedAt: "2026-06-22T10:45:58+08:00"
+      };
+      const normalized = normalizeTemporalCandidate(candidate, {
+        timestamp: "2026-06-22T10:45:58+08:00",
+        timezone: "Asia/Shanghai"
+      }).candidate;
+      const bounds = resolveCanonicalTemporalBounds(normalized, "Asia/Shanghai");
+      expect(bounds?.validFrom).toBe("2026-06-21T16:00:00.000Z");
+      expect(bounds?.validUntil).toBe("2026-06-22T16:00:00.000Z");
+      expect(normalized.observedAt).toBe("2026-06-22T10:45:58+08:00");
+    });
+
+    it("H recomputes temporal fields after edited canonical content", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(repository);
+      const original = await service.processCandidateForStorage(
+        {
+          type: "episodic",
+          subtype: "event",
+          content: "用户在 2026-06-22 早上没吃早饭。",
+          importance: 0.4,
+          tags: ["meal"],
+          reason: "test",
+          observedAt,
+          metadata: { temporalNormalized: true, canonicalEventDate: "2026-06-22" }
+        },
+        { source: "dashboard", skipAdmissionPolicy: true, storageReason: "manual-accept" }
+      );
+      const edited = await service.processCandidateForStorage(
+        {
+          ...original.candidate,
+          content: "用户在 2026-06-23 早上吃了一个面包。",
+          metadata: {
+            ...(original.candidate.metadata ?? {}),
+            temporalNormalized: false,
+            canonicalEventDate: undefined,
+            canonicalFingerprint: undefined,
+            canonicalEventKey: undefined
+          }
+        },
+        { source: "dashboard", skipAdmissionPolicy: true, storageReason: "manual-accept" }
+      );
+      expect(canonicalEventDate(edited.candidate)).toBe("2026-06-23");
+      expect(edited.candidate.metadata?.["canonicalEventDate"]).toBe("2026-06-23");
+    });
+
+    it("I retrieves corrected breakfast fact instead of superseded memory", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const first = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      await service.processCandidateForStorage(first[0]!, { source: "runtime" });
+      const correction = await service.extractCandidates({
+        userMessage: "不对，我后来想起来了，今天早上其实吃了一个面包。",
+        timestamp: "2026-06-22T10:45:58+08:00"
+      });
+      await service.processCandidateForStorage(correction[0]!, { source: "runtime" });
+
+      const result = await service.retrieveRelevantMemoriesWithMetadata({
+        text: "我今天早上到底吃饭了吗",
+        currentTime: "2026-06-22T12:00:00+08:00",
+        limit: 5
+      });
+      expect(result.memories.some((memory) => memory.displayText.includes("面包"))).toBe(true);
+      expect(
+        result.memories.every(
+          (memory) => !memory.displayText.includes("没吃早饭") || memory.status === "superseded"
+        )
+      ).toBe(true);
     });
 
     it("K keeps canonical event date stable across near-identical phrasing", async () => {

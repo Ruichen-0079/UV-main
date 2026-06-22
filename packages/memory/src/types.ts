@@ -181,6 +181,8 @@ export type MemoryCandidate = {
   tags: string[];
   reason: string;
   explicitRememberRequested?: boolean;
+  correctionRequested?: boolean;
+  userIntent?: "remember" | "correct" | "state" | "recall" | "other";
   originRole?: MemoryOriginRole;
   evidenceText?: string;
   sourceTraceId?: string | null;

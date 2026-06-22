@@ -3,13 +3,18 @@ import { RuleBasedMemoryExtractor } from "./extractor.js";
 import { MemoryRetriever } from "./retriever.js";
 import { MemoryScorer } from "./scorer.js";
 import { buildCandidateFingerprint, deduplicateCandidateBatch } from "./candidate-dedupe.js";
+import { detectEpisodicCorrectionRelationships, hasCorrectionRelatedMemory } from "./correction.js";
 import { detectExplicitRememberRequest } from "./intent.js";
 import { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
 import {
+  canonicalEventKey,
   hasHistoricalEpisodicIntent,
   isDurableTemporalText,
   isOrdinaryDailyEvent,
-  normalizeTemporalCandidate
+  normalizeTemporalCandidate,
+  resolveCanonicalTemporalBounds,
+  resolveTemporalDebug,
+  resolveTimezoneFromObservedAt
 } from "./temporal.js";
 import {
   detectMemoryRelationships,
@@ -246,8 +251,21 @@ export class MemoryService {
       tags: Array.from(new Set([...(normalized.tags ?? []), ...(options.tags ?? [])])),
       observedAt: normalized.observedAt ?? new Date(),
       eventTime: normalized.eventTime ?? null,
-      validFrom: normalized.validFrom ?? normalized.observedAt ?? new Date(),
-      validUntil: normalized.validUntil ?? null,
+      validFrom:
+        normalized.validFrom ??
+        resolveCanonicalTemporalBounds(
+          normalized,
+          resolveTimezoneFromObservedAt(normalized.observedAt)
+        )?.validFrom ??
+        normalized.observedAt ??
+        new Date(),
+      validUntil:
+        normalized.validUntil ??
+        resolveCanonicalTemporalBounds(
+          normalized,
+          resolveTimezoneFromObservedAt(normalized.observedAt)
+        )?.validUntil ??
+        null,
       expiresAt: normalized.expiresAt ?? null,
       supersedes: normalized.possibleSupersedes ?? [],
       contradicts: normalized.possibleContradictions ?? []
@@ -274,10 +292,18 @@ export class MemoryService {
 
     const normalized = this.normalizeCandidateForStorage(candidate);
     const relationships = await this.detectCandidateRelationships(normalized);
-    const candidateWithRelationships = applyRelationshipSuggestions(normalized, relationships);
+    const correctionRelationships = await this.detectCorrectionRelationships(normalized);
+    const mergedRelationships = mergeRelationshipSuggestions(
+      relationships,
+      correctionRelationships
+    );
+    const candidateWithRelationships = applyRelationshipSuggestions(
+      normalized,
+      mergedRelationships
+    );
 
     if (!options.skipAdmissionPolicy) {
-      const admission = decideCandidateStorage(normalized);
+      const admission = decideCandidateStorage(normalized, mergedRelationships);
       if (admission.decision === "rejected") {
         return {
           decision: "rejected",
@@ -286,36 +312,46 @@ export class MemoryService {
         };
       }
 
-      const repositoryDuplicate = await this.findRepositoryDuplicate(normalized);
-      if (repositoryDuplicate) {
-        return {
-          decision: "rejected",
-          candidate: {
-            ...candidateWithRelationships,
-            metadata: {
-              ...(candidateWithRelationships.metadata ?? {}),
-              duplicateOfMemoryId: repositoryDuplicate.id
-            }
-          },
-          rejectedReason: "duplicate-candidate"
-        };
+      const skipDuplicateCheck =
+        hasCorrectionRequest(normalized) &&
+        hasCorrectionRelatedMemory({
+          supersedes: mergedRelationships.supersedes,
+          contradicts: mergedRelationships.contradicts,
+          autoSupersedes: mergedRelationships.autoSupersedes,
+          correctionRelated: correctionRelationships.relatedMemoryIds
+        });
+      if (!skipDuplicateCheck) {
+        const repositoryDuplicate = await this.findRepositoryDuplicate(normalized);
+        if (repositoryDuplicate) {
+          return {
+            decision: "rejected",
+            candidate: {
+              ...candidateWithRelationships,
+              metadata: {
+                ...(candidateWithRelationships.metadata ?? {}),
+                duplicateOfMemoryId: repositoryDuplicate.id
+              }
+            },
+            rejectedReason: "duplicate-candidate"
+          };
+        }
       }
     }
 
     const decision = {
       decision: "stored" as const,
-      reason: options.storageReason ?? decideCandidateStorage(normalized).reason
+      reason:
+        options.storageReason ?? decideCandidateStorage(normalized, mergedRelationships).reason
     };
 
+    const supersedeIds = [
+      ...new Set([...mergedRelationships.autoSupersedes, ...correctionRelationships.supersedes])
+    ];
     const storageCandidate: MemoryCandidate = {
       ...candidateWithRelationships,
-      ...(relationships.autoSupersedes.length > 0
-        ? { possibleSupersedes: relationships.autoSupersedes }
-        : normalized.possibleSupersedes
-          ? { possibleSupersedes: normalized.possibleSupersedes }
-          : {}),
-      ...(relationships.contradicts.length > 0
-        ? { possibleContradictions: relationships.contradicts }
+      ...(supersedeIds.length > 0 ? { possibleSupersedes: supersedeIds } : {}),
+      ...(mergedRelationships.contradicts.length > 0
+        ? { possibleContradictions: mergedRelationships.contradicts }
         : normalized.possibleContradictions
           ? { possibleContradictions: normalized.possibleContradictions }
           : {})
@@ -325,12 +361,18 @@ export class MemoryService {
         ...storageCandidate,
         metadata: {
           ...(storageCandidate.metadata ?? {}),
-          storageReason: decision.reason
+          storageReason: decision.reason,
+          ...(hasCorrectionRequest(normalized)
+            ? {
+                correctionRequested: true,
+                correctedMemoryIds: correctionRelationships.relatedMemoryIds
+              }
+            : {})
         }
       },
       options
     );
-    await this.applyAutomaticSupersession(memory, relationships.autoSupersedes);
+    await this.applyAutomaticSupersession(memory, supersedeIds);
     return {
       decision: "stored",
       candidate: candidateWithRelationships,
@@ -595,25 +637,72 @@ export class MemoryService {
     return null;
   }
 
+  private async detectCorrectionRelationships(
+    candidate: MemoryCandidate
+  ): Promise<ReturnType<typeof detectEpisodicCorrectionRelationships>> {
+    const scope = candidate.scope ?? inferMemoryScope(candidate);
+    const scopeId = candidate.scopeId ?? inferMemoryScopeId(candidate);
+    const recent = await this.repository.listRecentMemories(80);
+    const scoped = recent.filter(
+      (memory) =>
+        memory.scope === scope &&
+        (memory.scopeId ?? "") === (scopeId ?? "") &&
+        (memory.subjectUserId ?? "default-user") === (candidate.subjectUserId ?? "default-user")
+    );
+    return detectEpisodicCorrectionRelationships(candidate, scoped);
+  }
+
   private normalizeCandidateForStorage(candidate: MemoryCandidate): MemoryCandidate {
+    const timezone = resolveTimezoneFromObservedAt(candidate.observedAt);
     const normalized = normalizeTemporalCandidate(candidate, {
-      timestamp: candidate.observedAt ?? new Date()
+      timestamp: candidate.observedAt ?? new Date(),
+      timezone
     }).candidate;
-    const metadata = normalized.metadata ?? {};
-    return {
+    const bounds = resolveCanonicalTemporalBounds(normalized, timezone);
+    const temporalDebug = resolveTemporalDebug({
       ...normalized,
-      personaId: normalized.personaId ?? metadataString(metadata, "personaId") ?? "default-persona",
+      ...(bounds
+        ? {
+            validFrom: bounds.validFrom,
+            validUntil: bounds.validUntil
+          }
+        : {})
+    });
+    const metadata = normalized.metadata ?? {};
+    const withBounds = {
+      ...normalized,
+      ...(bounds
+        ? {
+            validFrom: bounds.validFrom,
+            validUntil: bounds.validUntil
+          }
+        : {})
+    };
+    const fingerprint = buildCandidateFingerprint(withBounds);
+    const eventKey = canonicalEventKey(withBounds);
+    return {
+      ...withBounds,
+      personaId: withBounds.personaId ?? metadataString(metadata, "personaId") ?? "default-persona",
       subjectUserId:
-        normalized.subjectUserId ?? metadataString(metadata, "subjectUserId") ?? "default-user",
+        withBounds.subjectUserId ?? metadataString(metadata, "subjectUserId") ?? "default-user",
       createdByUserId:
-        normalized.createdByUserId ??
+        withBounds.createdByUserId ??
         metadataString(metadata, "createdByUserId") ??
-        normalized.subjectUserId ??
+        withBounds.subjectUserId ??
         "default-user",
-      speakerId: normalized.speakerId ?? metadataString(metadata, "speakerId") ?? null,
+      speakerId: withBounds.speakerId ?? metadataString(metadata, "speakerId") ?? null,
       voiceProfileId:
-        normalized.voiceProfileId ?? metadataString(metadata, "voiceProfileId") ?? null,
-      sessionId: normalized.sessionId ?? metadataString(metadata, "sessionId") ?? null
+        withBounds.voiceProfileId ?? metadataString(metadata, "voiceProfileId") ?? null,
+      sessionId: withBounds.sessionId ?? metadataString(metadata, "sessionId") ?? null,
+      metadata: {
+        ...metadata,
+        canonicalFingerprint: fingerprint,
+        ...(eventKey ? { canonicalEventKey: eventKey } : {}),
+        temporalStatus: temporalDebug.temporalStatus,
+        ...(temporalDebug.temporalSuggestion
+          ? { temporalSuggestion: temporalDebug.temporalSuggestion }
+          : {})
+      }
     };
   }
 
@@ -1749,7 +1838,32 @@ function isPromptRetrievableMemory(memory: Memory): boolean {
   );
 }
 
-function decideCandidateStorage(candidate: MemoryCandidate): {
+function mergeRelationshipSuggestions(
+  relationships: MemoryRelationshipSuggestion,
+  correction: ReturnType<typeof detectEpisodicCorrectionRelationships>
+): MemoryRelationshipSuggestion & { correctionRelated: string[] } {
+  const supersedes = new Set([...relationships.supersedes, ...correction.supersedes]);
+  const autoSupersedes = new Set([...relationships.autoSupersedes, ...correction.supersedes]);
+  const contradicts = new Set([...relationships.contradicts, ...correction.contradicts]);
+  return {
+    ...relationships,
+    supersedes: [...supersedes],
+    autoSupersedes: [...autoSupersedes],
+    contradicts: [...contradicts],
+    correctionRelated: correction.relatedMemoryIds
+  };
+}
+
+function hasCorrectionRequest(candidate: MemoryCandidate): boolean {
+  return Boolean(
+    candidate.correctionRequested || candidate.metadata?.["correctionRequested"] === true
+  );
+}
+
+function decideCandidateStorage(
+  candidate: MemoryCandidate,
+  relationships?: (MemoryRelationshipSuggestion & { correctionRelated?: string[] }) | null
+): {
   decision: "stored" | "rejected";
   reason: string;
 } {
@@ -1781,6 +1895,24 @@ function decideCandidateStorage(candidate: MemoryCandidate): {
 
   if (explicitRemember) {
     return { decision: "stored", reason: "explicit-user-memory-request" };
+  }
+
+  if (
+    hasCorrectionRequest(candidate) &&
+    hasCorrectionRelatedMemory(
+      relationships
+        ? {
+            supersedes: relationships.supersedes,
+            contradicts: relationships.contradicts,
+            autoSupersedes: relationships.autoSupersedes,
+            ...(relationships.correctionRelated
+              ? { correctionRelated: relationships.correctionRelated }
+              : {})
+          }
+        : null
+    )
+  ) {
+    return { decision: "stored", reason: "user-correction" };
   }
 
   if (

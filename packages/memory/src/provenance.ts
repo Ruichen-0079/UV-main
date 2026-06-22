@@ -1,5 +1,11 @@
 import type { MemoryCandidate, MemoryOriginRole } from "./types.js";
-import { detectExplicitRememberRequest, stripExplicitRememberPrefix } from "./intent.js";
+import {
+  detectCorrectionRequest,
+  detectExplicitRememberRequest,
+  extractCorrectionEvidence,
+  inferUserMemoryIntent,
+  stripExplicitRememberPrefix
+} from "./intent.js";
 
 export type ProvenanceEnrichmentInput = {
   userMessage: string;
@@ -14,20 +20,32 @@ export function enrichCandidateProvenance(
   const assistantMessage = normalizeMessage(input.assistantMessage);
   const explicitRememberRequested =
     candidate.explicitRememberRequested ?? detectExplicitRememberRequest(userMessage);
+  const correctionRequested =
+    candidate.correctionRequested ??
+    (candidate.originRole === "assistant" ? false : detectCorrectionRequest(userMessage));
+  const userIntent = candidate.userIntent ?? inferUserMemoryIntent(userMessage);
   const originRole = inferOriginRole(candidate, userMessage, assistantMessage);
   const evidenceText =
     candidate.evidenceText ?? extractEvidenceText(userMessage, candidate.content);
+  const correctionEvidence = correctionRequested
+    ? extractCorrectionEvidence(userMessage)
+    : undefined;
 
   return {
     ...candidate,
     explicitRememberRequested,
+    correctionRequested,
+    userIntent,
     originRole,
     ...(evidenceText ? { evidenceText } : {}),
     metadata: {
       ...(candidate.metadata ?? {}),
       explicitRememberRequested,
+      correctionRequested,
+      userIntent,
       originRole,
-      ...(evidenceText ? { evidenceText } : {})
+      ...(evidenceText ? { evidenceText } : {}),
+      ...(correctionEvidence ? { correctionEvidence } : {})
     }
   };
 }
@@ -42,7 +60,11 @@ export function isAssistantOnlyRestatement(
   if (candidate.explicitRememberRequested || candidate.metadata?.["explicitRememberRequested"]) {
     return false;
   }
-  if (isUserCorrection(candidate, input.userMessage)) {
+  if (
+    candidate.correctionRequested ||
+    candidate.metadata?.["correctionRequested"] === true ||
+    isUserCorrection(candidate, input.userMessage)
+  ) {
     return false;
   }
 
