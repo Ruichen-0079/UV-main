@@ -99,7 +99,12 @@ export type RuntimeMemoryPort = {
   ): Promise<Memory>;
   processCandidateForStorage?(
     candidate: MemoryCandidate,
-    options?: { source?: string; tags?: string[] }
+    options?: {
+      source?: string;
+      tags?: string[];
+      skipAdmissionPolicy?: boolean;
+      storageReason?: string;
+    }
   ): Promise<MemoryCandidateStorageResult>;
   rememberInteraction(input: {
     userMessage: string;
@@ -225,6 +230,10 @@ export type RuntimeMemoryCandidateReview = {
   reason: string;
   decision: RuntimeMemoryCandidateDecision;
   rejectedReason?: string | undefined;
+  storageReason?: string | undefined;
+  explicitRememberRequested?: boolean | undefined;
+  originRole?: "user" | "assistant" | "mixed" | undefined;
+  canonicalFingerprint?: string | undefined;
   source: "runtime" | "dashboard";
   sourceTraceId?: string | null | undefined;
   storedMemoryId?: string | undefined;
@@ -415,6 +424,28 @@ export class RuntimeOrchestrator {
       candidate.sourceTraceId = review.sourceTraceId;
     }
 
+    if (this.options.memory.processCandidateForStorage) {
+      const result = await this.options.memory.processCandidateForStorage(candidate, {
+        source: "dashboard",
+        tags: candidate.tags,
+        skipAdmissionPolicy: true,
+        storageReason: "manual-accept"
+      });
+      if (result.decision !== "stored" || !result.memory) {
+        return null;
+      }
+      review.decision = "stored";
+      review.storedMemoryId = result.memory.id;
+      review.rejectedReason = undefined;
+      review.storageReason = result.storageReason ?? "manual-accept";
+      return {
+        alreadyStored: false,
+        memory: result.memory,
+        memoryId: result.memory.id,
+        message: "Memory candidate accepted and saved."
+      };
+    }
+
     const memory = await this.options.memory.rememberCandidate(candidate, {
       source: "dashboard",
       tags: candidate.tags
@@ -422,6 +453,7 @@ export class RuntimeOrchestrator {
     review.decision = "stored";
     review.storedMemoryId = memory.id;
     review.rejectedReason = undefined;
+    review.storageReason = "manual-accept";
     return {
       alreadyStored: false,
       memory,
@@ -1326,6 +1358,7 @@ export class RuntimeOrchestrator {
         candidate: decision?.candidate ?? candidate,
         decision: stored ? "stored" : "rejected",
         rejectedReason,
+        storageReason: decision?.storageReason,
         sourceTraceId: input.sourceTraceId,
         storedMemoryId: storedMemory?.id,
         extractorStatus: input.extractorStatus
@@ -1454,6 +1487,7 @@ function toMemoryCandidateReview(input: {
   candidate: MemoryCandidate;
   decision: RuntimeMemoryCandidateDecision;
   rejectedReason?: string | undefined;
+  storageReason?: string | undefined;
   sourceTraceId: string;
   storedMemoryId?: string | undefined;
   extractorStatus: MemoryExtractionRuntimeDebug;
@@ -1479,6 +1513,20 @@ function toMemoryCandidateReview(input: {
     reason: redactUnsafeText(input.candidate.reason),
     decision: input.decision,
     rejectedReason: input.rejectedReason,
+    storageReason: input.storageReason,
+    explicitRememberRequested: Boolean(
+      input.candidate.explicitRememberRequested ??
+      input.candidate.metadata?.["explicitRememberRequested"]
+    ),
+    originRole:
+      input.candidate.originRole ??
+      (typeof input.candidate.metadata?.["originRole"] === "string"
+        ? (input.candidate.metadata["originRole"] as "user" | "assistant" | "mixed")
+        : undefined),
+    canonicalFingerprint:
+      typeof input.candidate.metadata?.["canonicalFingerprint"] === "string"
+        ? input.candidate.metadata["canonicalFingerprint"]
+        : undefined,
     source: "runtime",
     sourceTraceId: input.candidate.sourceTraceId ?? input.sourceTraceId,
     storedMemoryId: input.storedMemoryId,

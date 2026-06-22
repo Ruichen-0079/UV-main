@@ -8,6 +8,7 @@ import type {
   MemorySubtype,
   MemoryType
 } from "./types.js";
+import { detectExplicitRememberRequest, stripExplicitRememberPrefix } from "./intent.js";
 import { hasRelativeTemporalExpression, isOrdinaryDailyEvent } from "./temporal.js";
 import { z } from "zod";
 
@@ -102,6 +103,9 @@ export class LlmMemoryExtractor implements MemoryExtractor {
           rejectedReasons.push(`low-confidence:${candidate.reason}`);
           continue;
         }
+        const explicitRememberRequested =
+          candidate.explicitRememberRequested ?? detectExplicitRememberRequest(input.userMessage);
+        const originRole = candidate.originRole ?? "user";
         accepted.push({
           type: candidate.type,
           subtype: candidate.subtype ?? null,
@@ -112,9 +116,17 @@ export class LlmMemoryExtractor implements MemoryExtractor {
           summary: candidate.summary?.trim() || candidate.content.trim(),
           importance: candidate.importance,
           confidence: candidate.confidence,
-          metadata: candidate.metadata ?? {},
+          metadata: {
+            ...(candidate.metadata ?? {}),
+            explicitRememberRequested,
+            originRole,
+            ...(candidate.evidenceText ? { evidenceText: candidate.evidenceText } : {})
+          },
           tags: candidate.tags,
           reason: candidate.reason,
+          explicitRememberRequested,
+          originRole,
+          ...(candidate.evidenceText ? { evidenceText: candidate.evidenceText } : {}),
           sourceTraceId: candidate.sourceTraceId ?? input.sourceTraceId ?? null,
           observedAt: candidate.observedAt ?? input.timestamp ?? new Date().toISOString(),
           eventTime: candidate.eventTime ?? null,
@@ -229,7 +241,9 @@ export class RuleBasedMemoryExtractor implements MemoryExtractor {
           subtype: inferSubtype(explicitContent),
           importance: isOrdinaryDailyEvent(explicitContent) ? 0.55 : 0.95,
           reason: "explicit-remember",
-          observedAt
+          observedAt,
+          explicitRememberRequested: true,
+          originRole: "user"
         })
       );
     }
@@ -386,6 +400,8 @@ function candidate(input: {
   importance: number;
   reason: string;
   observedAt?: string;
+  explicitRememberRequested?: boolean;
+  originRole?: "user" | "assistant" | "mixed";
 }): MemoryCandidate {
   const content = normalizeInput(input.text);
   return {
@@ -400,9 +416,14 @@ function candidate(input: {
     tags: createTags(content, input.subtype),
     reason: input.reason,
     confidence: 1,
+    ...(input.explicitRememberRequested ? { explicitRememberRequested: true } : {}),
+    ...(input.originRole ? { originRole: input.originRole } : {}),
     metadata: {
       generatedBy: "rule-based-memory-extractor",
-      ...(input.reason === "explicit-remember" ? { explicitRemember: true } : {})
+      ...(input.reason === "explicit-remember" || input.explicitRememberRequested
+        ? { explicitRemember: true, explicitRememberRequested: true }
+        : {}),
+      ...(input.originRole ? { originRole: input.originRole } : { originRole: "user" })
     },
     sourceTraceId: input.sourceTraceId,
     observedAt: input.observedAt ?? new Date().toISOString()
@@ -411,10 +432,6 @@ function candidate(input: {
 
 function normalizeInput(text: string): string {
   return text.replace(/\s+/g, " ").trim();
-}
-
-function stripExplicitRememberPrefix(text: string): string {
-  return text.replace(/^(?:记住|请记住|remember|note this|for future)\s*[:：,-]?\s*/iu, "").trim();
 }
 
 function inferType(text: string, fallback: MemoryType): MemoryType {
@@ -562,7 +579,7 @@ function mentionsDurableSignal(text: string): boolean {
 }
 
 function mentionsExplicitRemember(text: string): boolean {
-  return /\bremember\b|\bnote this\b|\bfor future\b|记住|请记住/u.test(text);
+  return detectExplicitRememberRequest(text);
 }
 
 function mentionsStablePreference(text: string): boolean {
@@ -688,7 +705,10 @@ const LlmExtractorCandidateSchema = z
     validUntil: z.string().trim().min(1).max(80).nullable().optional(),
     expiresAt: z.string().trim().min(1).max(80).nullable().optional(),
     possibleSupersedes: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
-    possibleContradictions: z.array(z.string().trim().min(1).max(120)).max(8).optional()
+    possibleContradictions: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
+    explicitRememberRequested: z.boolean().optional(),
+    originRole: z.enum(["user", "assistant", "mixed"]).optional(),
+    evidenceText: z.string().trim().min(1).max(240).optional()
   })
   .strict();
 
@@ -989,6 +1009,11 @@ const llmExtractorSystemPrompt = [
   "Classify one-off daily events as episodic/event/recall with low or medium importance. Do not upgrade one-off events to semantic/core just because the user said remember.",
   "Use semantic/core only for stable facts, preferences, health/allergy notes, schedules, project facts, workflows, provider/config choices, and troubleshooting conclusions.",
   "Extract only stable, useful, long-term memories or explicit remember requests.",
+  "Only extract user facts grounded in the user message. The assistant message is context only.",
+  "Do not extract a candidate merely because the assistant repeated, inferred, or acknowledged a fact.",
+  "Set originRole to user, assistant, or mixed. Use assistant only when the fact is not grounded in the current user message.",
+  "Set explicitRememberRequested=true only when the user explicitly asked to remember the fact in the user message.",
+  "Include evidenceText with the shortest user-message span that supports the candidate when possible.",
   "Do not store trivial chat, generic Q&A, transient chatter, failed answers, or assistant uncertainty.",
   "Prefer explicit user statements: project facts, preferences, paths, repos, commands, provider choices, milestones, troubleshooting conclusions.",
   "Use provider metadata only as safe context, never as memory content.",

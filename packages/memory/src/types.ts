@@ -165,6 +165,8 @@ export type UpdateMemoryInput = {
   contradicts?: string[];
 };
 
+export type MemoryOriginRole = "user" | "assistant" | "mixed";
+
 export type MemoryCandidate = {
   type: MemoryType;
   subtype?: MemorySubtype | null;
@@ -178,6 +180,9 @@ export type MemoryCandidate = {
   metadata?: Record<string, unknown>;
   tags: string[];
   reason: string;
+  explicitRememberRequested?: boolean;
+  originRole?: MemoryOriginRole;
+  evidenceText?: string;
   sourceTraceId?: string | null;
   personaId?: string | null;
   subjectUserId?: string | null;
