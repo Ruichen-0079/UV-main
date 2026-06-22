@@ -696,7 +696,7 @@ describe("server", () => {
         subtype: "event",
         memoryLayer: "recall",
         decision: "rejected",
-        rejectedReason: "ordinary one-off daily event"
+        rejectedReason: "ordinary-one-off-daily-event"
       });
       expect(candidates.json().candidates[0].content).not.toContain("今早");
       expect(candidates.body).not.toContain("test_deepseek_secret");
@@ -1961,7 +1961,8 @@ type TestEnvOverrides = Record<string, string | undefined>;
 
 function createTestEnv(overrides: TestEnvOverrides = {}): NodeJS.ProcessEnv {
   const runtimeEnvDir =
-    overrides["YUVI_RUNTIME_ENV_DIR"] ?? mkdtempSync(path.join(testTmpDir, "yuvi-server-test-env-"));
+    overrides["YUVI_RUNTIME_ENV_DIR"] ??
+    mkdtempSync(path.join(testTmpDir, "yuvi-server-test-env-"));
   if (!overrides["YUVI_RUNTIME_ENV_DIR"]) {
     createdRuntimeEnvDirs.push(runtimeEnvDir);
   }

@@ -1,7 +1,11 @@
 import type { MemoryCandidate, MemorySubtype } from "./types.js";
 
 export const relativeTemporalPattern =
-  /今早|今天|昨天|前天|刚才|刚刚|早上|中午|晚上|上周|这周|最近|\btoday\b|\byesterday\b|\bthis morning\b|\blast night\b|\brecently\b/iu;
+  /今早|今天早上|今天上午|今天|昨天|前天|刚才|刚刚|早上|中午|晚上|上周|这周|最近|\btoday\b|\byesterday\b|\bthis morning\b|\blast night\b|\brecently\b/iu;
+
+export const absoluteDatePattern = /\d{4}-\d{2}-\d{2}|\d{4}年\d{1,2}月\d{1,2}日/gu;
+
+export const standaloneDayPartPattern = /^(早上|上午|中午|下午|晚上|凌晨)$/u;
 
 export type TemporalResolution = {
   relativeExpression: string;
@@ -9,6 +13,7 @@ export type TemporalResolution = {
   resolutionSource: "observedAt" | "timestamp" | "server-timezone";
   confidence: number;
   suggestedRewrite?: string;
+  eventTimePeriod?: "morning" | "noon" | "evening" | "night" | "day";
 };
 
 export type TemporalNormalizationResult = {
@@ -19,34 +24,101 @@ export type TemporalNormalizationResult = {
 };
 
 export function hasRelativeTemporalExpression(text: string): boolean {
+  if (hasAbsoluteDateExpression(text)) {
+    return hasUnresolvedRelativeTemporalExpression(text);
+  }
   relativeTemporalPattern.lastIndex = 0;
   return relativeTemporalPattern.test(text);
+}
+
+export function hasAbsoluteDateExpression(text: string): boolean {
+  absoluteDatePattern.lastIndex = 0;
+  return absoluteDatePattern.test(text);
 }
 
 export function normalizeTemporalCandidate(
   candidate: MemoryCandidate,
   input: { timestamp?: Date | string | null; timezone?: string | null } = {}
 ): TemporalNormalizationResult {
-  const text = candidate.content.trim();
-  const expression = detectRelativeExpression(text);
-  if (!expression) {
-    return { hasRelativeTemporalExpression: false, confidence: 1, candidate };
+  if (candidate.metadata?.["temporalNormalized"] === true) {
+    return {
+      hasRelativeTemporalExpression: Boolean(candidate.metadata?.["hasRelativeTemporalExpression"]),
+      confidence: temporalResolutionConfidence(candidate.metadata) ?? 1,
+      candidate
+    };
   }
 
+  const text = candidate.content.trim();
   const observedAt = toDate(candidate.observedAt) ?? toDate(input.timestamp) ?? new Date();
   const timezone = input.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  if (hasAbsoluteDateExpression(text) && !hasUnresolvedRelativeTemporalExpression(text)) {
+    const eventDate = extractCanonicalEventDate(text, observedAt, timezone);
+    const dayPart = detectDayPart(text);
+    const eventTime = eventDate ? eventTimeForDate(eventDate, dayPart, observedAt, timezone) : null;
+    const validWindow = eventDate ? dayBoundaries(eventDate, timezone) : null;
+    const next = finalizeTemporalCandidate(candidate, {
+      content: canonicalizeAbsoluteDateContent(text, eventDate, dayPart),
+      observedAt,
+      eventTime,
+      ...(validWindow?.validFrom || candidate.validFrom
+        ? { validFrom: validWindow?.validFrom ?? candidate.validFrom ?? null }
+        : {}),
+      ...(validWindow?.validUntil || candidate.validUntil
+        ? { validUntil: validWindow?.validUntil ?? candidate.validUntil ?? null }
+        : {}),
+      metadata: {
+        ...(candidate.metadata ?? {}),
+        temporalNormalized: true,
+        hasRelativeTemporalExpression: false,
+        canonicalEventDate: eventDate
+      }
+    });
+    return { hasRelativeTemporalExpression: false, confidence: 1, candidate: next };
+  }
+
+  const expression = detectRelativeExpression(text);
+  if (!expression) {
+    return {
+      hasRelativeTemporalExpression: false,
+      confidence: 1,
+      candidate: finalizeTemporalCandidate(candidate, {
+        content: text,
+        observedAt,
+        metadata: {
+          ...(candidate.metadata ?? {}),
+          temporalNormalized: true,
+          hasRelativeTemporalExpression: false
+        }
+      })
+    };
+  }
+
   const resolution = resolveTemporalExpression(expression, observedAt, timezone);
-  const rewritten = resolution.confidence >= 0.7 ? rewriteTemporalText(text, resolution) : text;
+  const rewritten =
+    resolution.confidence >= 0.7
+      ? rewriteTemporalText(text, resolution, observedAt, timezone)
+      : text;
   const isDailyEvent = isOrdinaryDailyEvent(text);
-  const eventTime = resolution.resolvedDate ? eventTimeForResolution(resolution, observedAt) : null;
-  const validFrom = eventTime ?? observedAt;
-  const validUntil = eventTime ? endOfLocalDay(eventTime) : null;
-  const expiresAt = addDays(observedAt, 7);
+  const eventDate =
+    resolution.resolvedDate ?? extractCanonicalEventDate(rewritten, observedAt, timezone);
+  const eventTime = eventDate
+    ? eventTimeForDate(
+        eventDate,
+        resolution.eventTimePeriod ?? detectDayPart(text),
+        observedAt,
+        timezone
+      )
+    : null;
+  const validWindow = eventDate ? dayBoundaries(eventDate, timezone) : null;
   const metadata = {
     ...(candidate.metadata ?? {}),
-    originalTemporalText: text,
+    originalTemporalText: candidate.metadata?.["originalTemporalText"] ?? text,
     normalizedTemporalText: rewritten,
-    temporalResolution: resolution
+    temporalResolution: resolution,
+    temporalNormalized: true,
+    hasRelativeTemporalExpression: true,
+    canonicalEventDate: eventDate
   };
 
   const next: MemoryCandidate = {
@@ -58,19 +130,24 @@ export function normalizeTemporalCandidate(
           memoryLayer: "recall" as const,
           importance: Math.min(
             candidate.importance,
-            mentionsExplicitRememberReason(candidate) ? 0.6 : 0.5
+            mentionsExplicitRememberCandidate(candidate) ? 0.6 : 0.5
           ),
-          tags: Array.from(new Set([...candidate.tags, ...dailyEventTags(text)]))
+          tags: Array.from(new Set([...(candidate.tags ?? []), ...dailyEventTags(text)]))
         }
       : {}),
     content: rewritten,
-    summary: candidate.summary && candidate.summary !== text ? candidate.summary : rewritten,
+    summary:
+      candidate.summary &&
+      candidate.summary !== text &&
+      !hasAbsoluteDateExpression(candidate.summary)
+        ? candidate.summary
+        : rewritten,
     metadata,
     observedAt: candidate.observedAt ?? observedAt.toISOString(),
-    ...(eventTime ? { eventTime: eventTime.toISOString() } : {}),
-    validFrom: candidate.validFrom ?? validFrom.toISOString(),
-    ...(validUntil ? { validUntil: candidate.validUntil ?? validUntil.toISOString() } : {}),
-    expiresAt: candidate.expiresAt ?? expiresAt.toISOString()
+    ...(eventTime ? { eventTime: candidate.eventTime ?? eventTime.toISOString() } : {}),
+    ...optionalTemporalField("validFrom", candidate.validFrom, validWindow?.validFrom ?? null),
+    ...optionalTemporalField("validUntil", candidate.validUntil, validWindow?.validUntil ?? null),
+    ...(candidate.expiresAt !== undefined ? { expiresAt: candidate.expiresAt } : {})
   };
 
   return {
@@ -81,10 +158,48 @@ export function normalizeTemporalCandidate(
   };
 }
 
+export function canonicalEventDate(candidate: MemoryCandidate): string | null {
+  const metadataDate = candidate.metadata?.["canonicalEventDate"];
+  if (typeof metadataDate === "string" && metadataDate.length > 0) {
+    return metadataDate;
+  }
+  const observedAt = toDate(candidate.observedAt) ?? new Date();
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return (
+    extractCanonicalEventDate(candidate.content, observedAt, timezone) ??
+    (candidate.eventTime ? toDateOnlyInTimezone(toDate(candidate.eventTime)!, timezone) : null) ??
+    (candidate.validFrom ? toDateOnlyInTimezone(toDate(candidate.validFrom)!, timezone) : null)
+  );
+}
+
+export function normalizeContentForFingerprint(content: string): string {
+  return content
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[，,。！!？?.；;：:""''「」【】（）()]/gu, "")
+    .replace(/\d{4}年(\d{1,2})月(\d{1,2})日/gu, (_, month: string, day: string) => {
+      const year = content.match(/(\d{4})年/)?.[1] ?? "0000";
+      return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+    })
+    .replace(/用户在/gu, "用户")
+    .replace(/用户于/gu, "用户")
+    .replace(/在(\d{4}-\d{2}-\d{2})+/gu, "$1")
+    .replace(/(\d{4}-\d{2}-\d{2})(?:\1)+/gu, "$1")
+    .replace(/未/gu, "没")
+    .replace(/早餐/gu, "早饭")
+    .replace(/没吃早饭/gu, "没吃早饭")
+    .replace(/没早饭$/gu, "没吃早饭")
+    .replace(/上午/gu, "早上")
+    .replace(/没吃早饭饭/gu, "没吃早饭")
+    .replace(/明确要求记住/gu, "");
+}
+
 export function isOrdinaryDailyEvent(text: string): boolean {
   return (
     hasRelativeTemporalExpression(text) &&
-    /(吃|喝|去了|去|买了|看了|做了|喝了|ate|drank|went|bought|watched|did)/iu.test(text) &&
+    /(吃|喝|去了|去|买了|看了|做了|喝了|饭|早饭|早餐|ate|drank|went|bought|watched|did|breakfast|meal)/iu.test(
+      text
+    ) &&
     !isDurableTemporalText(text)
   );
 }
@@ -119,7 +234,55 @@ export function temporalWarningForText(text: string): TemporalNormalizationResul
   );
 }
 
+function hasUnresolvedRelativeTemporalExpression(text: string): boolean {
+  return /今天|昨天|前天|今早|今天早上|今天上午|今晚|昨晚|刚才|刚刚|上周|这周|最近|\btoday\b|\byesterday\b|\bthis morning\b|\blast night\b|\brecently\b/iu.test(
+    text
+  );
+}
+
 function detectRelativeExpression(text: string): string | null {
+  if (hasAbsoluteDateExpression(text) && !hasUnresolvedRelativeTemporalExpression(text)) {
+    return null;
+  }
+
+  const prioritized = [
+    "今天早上",
+    "今天上午",
+    "今早",
+    "今天早上",
+    "昨晚",
+    "今天",
+    "昨天",
+    "前天",
+    "刚才",
+    "刚刚",
+    "上周",
+    "这周",
+    "最近",
+    "this morning",
+    "last night",
+    "today",
+    "yesterday",
+    "recently",
+    "早上",
+    "中午",
+    "晚上"
+  ];
+
+  for (const expression of prioritized) {
+    if (text.includes(expression)) {
+      if (
+        hasAbsoluteDateExpression(text) &&
+        standaloneDayPartPattern.test(expression) &&
+        !hasUnresolvedRelativeTemporalExpression(text)
+      ) {
+        continue;
+      }
+      return expression;
+    }
+  }
+
+  relativeTemporalPattern.lastIndex = 0;
   const match = text.match(relativeTemporalPattern);
   return match?.[0] ?? null;
 }
@@ -127,89 +290,248 @@ function detectRelativeExpression(text: string): string | null {
 function resolveTemporalExpression(
   expression: string,
   observedAt: Date,
-  _timezone: string
+  timezone: string
 ): TemporalResolution {
-  const base = new Date(observedAt);
   const lower = expression.toLowerCase();
-  let date = new Date(base);
+  let date = observedAt;
   let confidence = 0.85;
+  let eventTimePeriod: TemporalResolution["eventTimePeriod"];
+
+  if (/今早|今天早上|今天上午|this morning|早上|上午/u.test(expression)) {
+    eventTimePeriod = "morning";
+  } else if (/中午/u.test(expression)) {
+    eventTimePeriod = "noon";
+  } else if (/晚上|昨晚|last night/u.test(expression)) {
+    eventTimePeriod = /昨晚|last night/u.test(expression) ? "night" : "evening";
+  }
 
   if (expression === "昨天" || lower === "yesterday" || lower === "last night") {
-    date = addDays(base, -1);
+    date = addDaysInTimezone(observedAt, -1, timezone);
   } else if (expression === "前天") {
-    date = addDays(base, -2);
+    date = addDaysInTimezone(observedAt, -2, timezone);
   } else if (expression === "上周") {
-    date = addDays(base, -7);
+    date = addDaysInTimezone(observedAt, -7, timezone);
     confidence = 0.65;
   } else if (expression === "最近" || lower === "recently" || expression === "这周") {
     confidence = 0.55;
   }
 
-  const resolvedDate = confidence >= 0.65 ? toDateOnly(date) : undefined;
+  const resolvedDate = confidence >= 0.65 ? toDateOnlyInTimezone(date, timezone) : undefined;
   return {
     relativeExpression: expression,
     ...(resolvedDate ? { resolvedDate } : {}),
     resolutionSource: "observedAt",
     confidence,
-    ...(resolvedDate ? { suggestedRewrite: absoluteTimePhrase(expression, resolvedDate) } : {})
+    ...(eventTimePeriod ? { eventTimePeriod } : {}),
+    ...(resolvedDate
+      ? { suggestedRewrite: absoluteTimePhrase(expression, resolvedDate, eventTimePeriod) }
+      : {})
   };
 }
 
-function rewriteTemporalText(text: string, resolution: TemporalResolution): string {
+function rewriteTemporalText(
+  text: string,
+  resolution: TemporalResolution,
+  observedAt: Date,
+  timezone: string
+): string {
   if (!resolution.resolvedDate) {
     return text;
   }
-  const phrase = absoluteTimePhrase(resolution.relativeExpression, resolution.resolvedDate);
-  return text
-    .replace(/^(记住|请记住|remember|note this|for future)\s*[:：,-]?\s*/iu, "")
+  const phrase = absoluteTimePhrase(
+    resolution.relativeExpression,
+    resolution.resolvedDate,
+    resolution.eventTimePeriod
+  );
+  const stripped = text
+    .replace(
+      /^(?:请记住|记住|帮我记住|帮我记一下|记一下|please\s+remember|remember\s+that|remember|don't\s+forget|make\s+a\s+note)\s*[:：,，-]?\s*/iu,
+      ""
+    )
     .replace(resolution.relativeExpression, phrase)
-    .replace(/^我/u, "用户")
-    .trim()
-    .replace(/[。.!！]?$/u, "。");
+    .replace(/^我/u, "用户");
+  return canonicalizeAbsoluteDateContent(
+    stripped,
+    resolution.resolvedDate,
+    resolution.eventTimePeriod,
+    {
+      observedAt,
+      timezone
+    }
+  );
 }
 
-function absoluteTimePhrase(expression: string, date: string): string {
-  if (/今早|早上|this morning/iu.test(expression)) return `在 ${date} 早上`;
-  if (/中午/iu.test(expression)) return `在 ${date} 中午`;
-  if (/晚上|last night/iu.test(expression)) return `在 ${date} 晚上`;
-  if (/刚才|刚刚/iu.test(expression)) return `在 ${date}`;
+function canonicalizeAbsoluteDateContent(
+  text: string,
+  eventDate: string | null,
+  dayPart?: TemporalResolution["eventTimePeriod"],
+  context?: { observedAt: Date; timezone: string }
+): string {
+  let content = text.trim();
+  content = content.replace(/\d{4}年\d{1,2}月\d{1,2}日/gu, (match) => {
+    const parts = match.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/u);
+    if (!parts) return match;
+    return `${parts[1]}-${parts[2]!.padStart(2, "0")}-${parts[3]!.padStart(2, "0")}`;
+  });
+  content = content.replace(/在\s*(\d{4}-\d{2}-\d{2})\s*在\s*\1/gu, "在 $1");
+  content = content.replace(/(\d{4}-\d{2}-\d{2})\s*[（(]\s*\1\s*[）)]/gu, "$1");
+  content = content.replace(/(\d{4}-\d{2}-\d{2})(?:\s*[（(]\s*\1\s*[）)])+/gu, "$1");
+
+  const date =
+    eventDate ??
+    (context ? extractCanonicalEventDate(content, context.observedAt, context.timezone) : null);
+  if (date) {
+    const period = dayPartLabel(dayPart ?? detectDayPart(content));
+    const canonicalPrefix = period ? `用户在 ${date} ${period}` : `用户在 ${date}`;
+    if (/^用户/u.test(content) && content.includes(date)) {
+      content = content
+        .replace(/^用户在\s*/u, "")
+        .replace(new RegExp(`(?:在\\s*)?${date}(?:\\s*[（(]\\s*${date}\\s*[）)])?`, "gu"), "")
+        .replace(/^(?:在\s*)?(?:早上|上午|中午|下午|晚上|凌晨)\s*/u, "")
+        .trim();
+      content = `${canonicalPrefix}${content ? content : "。"}`;
+    }
+  }
+
+  return content.trim().replace(/[。.!！]?$/u, "。");
+}
+
+function absoluteTimePhrase(
+  expression: string,
+  date: string,
+  dayPart?: TemporalResolution["eventTimePeriod"]
+): string {
+  const period = dayPart ?? detectDayPart(expression);
+  if (period) {
+    return `在 ${date} ${dayPartLabel(period)}`;
+  }
   return `在 ${date}`;
 }
 
-function eventTimeForResolution(resolution: TemporalResolution, observedAt: Date): Date | null {
-  if (!resolution.resolvedDate) return null;
-  const [year, month, day] = resolution.resolvedDate.split("-").map(Number);
-  if (!year || !month || !day) return null;
-  const hour = /早上|今早|this morning/iu.test(resolution.relativeExpression)
-    ? 8
-    : /中午/iu.test(resolution.relativeExpression)
-      ? 12
-      : /晚上|last night/iu.test(resolution.relativeExpression)
-        ? 20
-        : observedAt.getHours();
-  return new Date(Date.UTC(year, month - 1, day, hour, 0, 0));
+function detectDayPart(text: string): TemporalResolution["eventTimePeriod"] | undefined {
+  if (/今早|今天早上|今天上午|早上|上午|this morning/iu.test(text)) return "morning";
+  if (/中午/iu.test(text)) return "noon";
+  if (/晚上|今晚/iu.test(text)) return "evening";
+  if (/昨晚|last night|凌晨/iu.test(text)) return "night";
+  return undefined;
 }
 
-function endOfLocalDay(date: Date): Date {
-  const end = new Date(date);
-  end.setUTCHours(23, 59, 59, 999);
-  return end;
+function dayPartLabel(dayPart: TemporalResolution["eventTimePeriod"]): string {
+  switch (dayPart) {
+    case "morning":
+      return "早上";
+    case "noon":
+      return "中午";
+    case "evening":
+      return "晚上";
+    case "night":
+      return "晚上";
+    default:
+      return "";
+  }
 }
 
-function addDays(date: Date, days: number): Date {
-  const next = new Date(date);
-  next.setUTCDate(next.getUTCDate() + days);
-  return next;
+function eventTimeForDate(
+  eventDate: string,
+  dayPart: TemporalResolution["eventTimePeriod"] | undefined,
+  observedAt: Date,
+  timezone: string
+): Date {
+  const hour =
+    dayPart === "morning"
+      ? 8
+      : dayPart === "noon"
+        ? 12
+        : dayPart === "evening" || dayPart === "night"
+          ? 20
+          : getLocalHour(observedAt, timezone);
+  return zonedDateTime(eventDate, hour, 0, 0, timezone);
 }
 
-function toDateOnly(date: Date): string {
-  return date.toISOString().slice(0, 10);
+function dayBoundaries(eventDate: string, timezone: string): { validFrom: Date; validUntil: Date } {
+  return {
+    validFrom: zonedDateTime(eventDate, 0, 0, 0, timezone),
+    validUntil: zonedDateTime(eventDate, 0, 0, 0, timezone, 1)
+  };
 }
 
-function toDate(value: Date | string | null | undefined): Date | null {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
+function extractCanonicalEventDate(
+  text: string,
+  observedAt: Date,
+  timezone: string
+): string | null {
+  const iso = text.match(/(\d{4}-\d{2}-\d{2})/u)?.[1];
+  if (iso) {
+    return iso;
+  }
+  const chinese = text.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/u);
+  if (chinese) {
+    return `${chinese[1]}-${chinese[2]!.padStart(2, "0")}-${chinese[3]!.padStart(2, "0")}`;
+  }
+  if (hasUnresolvedRelativeTemporalExpression(text)) {
+    return toDateOnlyInTimezone(observedAt, timezone);
+  }
+  return null;
+}
+
+function optionalTemporalField(
+  key: "validFrom" | "validUntil",
+  existing: Date | string | null | undefined,
+  fallback: Date | null
+): Partial<Pick<MemoryCandidate, "validFrom" | "validUntil">> {
+  const value = existing ?? (fallback ? fallback.toISOString() : null);
+  if (value === null || value === undefined) {
+    return {};
+  }
+  return { [key]: value } as Partial<Pick<MemoryCandidate, "validFrom" | "validUntil">>;
+}
+
+function finalizeTemporalCandidate(
+  candidate: MemoryCandidate,
+  input: {
+    content: string;
+    observedAt: Date;
+    eventTime?: Date | null;
+    validFrom?: Date | string | null;
+    validUntil?: Date | string | null;
+    metadata: Record<string, unknown>;
+  }
+): MemoryCandidate {
+  return {
+    ...candidate,
+    content: input.content,
+    summary:
+      candidate.summary &&
+      candidate.summary !== candidate.content &&
+      !hasAbsoluteDateExpression(candidate.summary)
+        ? candidate.summary
+        : input.content,
+    observedAt: candidate.observedAt ?? input.observedAt.toISOString(),
+    ...(input.eventTime ? { eventTime: candidate.eventTime ?? input.eventTime.toISOString() } : {}),
+    ...(input.validFrom ? { validFrom: candidate.validFrom ?? toIso(input.validFrom) } : {}),
+    ...(input.validUntil ? { validUntil: candidate.validUntil ?? toIso(input.validUntil) } : {}),
+    metadata: input.metadata
+  };
+}
+
+function mentionsExplicitRememberCandidate(candidate: MemoryCandidate): boolean {
+  return Boolean(
+    candidate.explicitRememberRequested ||
+    candidate.reason === "explicit-remember" ||
+    candidate.metadata?.["explicitRemember"] === true ||
+    candidate.metadata?.["explicitRememberRequested"] === true
+  );
+}
+
+function temporalResolutionConfidence(
+  metadata: Record<string, unknown> | undefined
+): number | null {
+  const value = metadata?.["temporalResolution"];
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const confidence = (value as TemporalResolution).confidence;
+  return typeof confidence === "number" ? confidence : null;
 }
 
 function dailyEventTags(text: string): string[] {
@@ -222,8 +544,76 @@ function dailyEventTags(text: string): string[] {
   return tags;
 }
 
-function mentionsExplicitRememberReason(candidate: MemoryCandidate): boolean {
-  return (
-    candidate.reason === "explicit-remember" || candidate.metadata?.["explicitRemember"] === true
+function zonedDateTime(
+  dateOnly: string,
+  hour: number,
+  minute: number,
+  second: number,
+  timezone: string,
+  dayOffset = 0
+): Date {
+  const [year, month, day] = dateOnly.split("-").map(Number);
+  if (!year || !month || !day) {
+    return new Date();
+  }
+  const utcGuess = new Date(Date.UTC(year, month - 1, day + dayOffset, hour, minute, second));
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(utcGuess).map((part) => [part.type, part.value])
   );
+  const actual = Date.UTC(
+    Number(parts["year"]),
+    Number(parts["month"]) - 1,
+    Number(parts["day"]),
+    Number(parts["hour"]),
+    Number(parts["minute"]),
+    Number(parts["second"])
+  );
+  const desired = Date.UTC(year, month - 1, day + dayOffset, hour, minute, second);
+  return new Date(utcGuess.getTime() + (desired - actual));
+}
+
+function toDateOnlyInTimezone(date: Date, timezone: string): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  return formatter.format(date);
+}
+
+function getLocalHour(date: Date, timezone: string): number {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "2-digit",
+    hourCycle: "h23"
+  });
+  return Number(formatter.format(date));
+}
+
+function addDaysInTimezone(date: Date, days: number, timezone: string): Date {
+  const base = toDateOnlyInTimezone(date, timezone);
+  const [year, month, day] = base.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year!, month! - 1, day! + days, 12, 0, 0));
+  return shifted;
+}
+
+function toIso(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function toDate(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }

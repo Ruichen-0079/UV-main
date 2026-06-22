@@ -6,6 +6,7 @@ export type {
   Entity,
   Memory,
   MemoryCandidate,
+  MemoryOriginRole,
   MemoryCandidateStorageResult,
   CurrentAffect,
   CurrentAffectLabel,
@@ -39,6 +40,13 @@ export {
   MemorySubtypes,
   MemoryTypes
 } from "./types.js";
+export {
+  buildCandidateFingerprint,
+  deduplicateCandidateBatch,
+  type CandidateDedupeResult
+} from "./candidate-dedupe.js";
+export { detectExplicitRememberRequest, stripExplicitRememberPrefix } from "./intent.js";
+export { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
 export {
   hasHistoricalEpisodicIntent,
   hasRelativeTemporalExpression,
