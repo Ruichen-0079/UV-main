@@ -61,12 +61,8 @@ export function normalizeTemporalCandidate(
       content: canonicalizeAbsoluteDateContent(text, eventDate, dayPart),
       observedAt,
       eventTime,
-      ...(validWindow?.validFrom || candidate.validFrom
-        ? { validFrom: validWindow?.validFrom ?? candidate.validFrom ?? null }
-        : {}),
-      ...(validWindow?.validUntil || candidate.validUntil
-        ? { validUntil: validWindow?.validUntil ?? candidate.validUntil ?? null }
-        : {}),
+      validFrom: validWindow?.validFrom ?? null,
+      validUntil: validWindow?.validUntil ?? null,
       metadata: {
         ...(candidate.metadata ?? {}),
         temporalNormalized: true,
@@ -145,8 +141,12 @@ export function normalizeTemporalCandidate(
     metadata,
     observedAt: candidate.observedAt ?? observedAt.toISOString(),
     ...(eventTime ? { eventTime: candidate.eventTime ?? eventTime.toISOString() } : {}),
-    ...optionalTemporalField("validFrom", candidate.validFrom, validWindow?.validFrom ?? null),
-    ...optionalTemporalField("validUntil", candidate.validUntil, validWindow?.validUntil ?? null),
+    ...(validWindow
+      ? {
+          validFrom: validWindow.validFrom.toISOString(),
+          validUntil: validWindow.validUntil.toISOString()
+        }
+      : {}),
     ...(candidate.expiresAt !== undefined ? { expiresAt: candidate.expiresAt } : {})
   };
 
@@ -217,8 +217,106 @@ export function hasHistoricalEpisodicIntent(text: string | undefined): boolean {
   );
 }
 
+export type TemporalDebugStatus = "not-needed" | "normalized" | "unresolved";
+
+export type TemporalDebugInfo = {
+  temporalStatus: TemporalDebugStatus;
+  temporalSuggestion?: string;
+};
+
+export function hasUnresolvedRelativeTime(input: string | MemoryCandidate): boolean {
+  const text = typeof input === "string" ? input : input.content;
+  const candidate = typeof input === "string" ? null : input;
+
+  if (candidate?.metadata?.["temporalNormalized"] === true) {
+    return hasUnresolvedRelativeTemporalExpression(text);
+  }
+
+  if (hasAbsoluteDateExpression(text) && !hasUnresolvedRelativeTemporalExpression(text)) {
+    return false;
+  }
+
+  if (
+    canonicalEventDate(
+      candidate ?? { type: "episodic", content: text, importance: 0, tags: [], reason: "probe" }
+    )
+  ) {
+    return hasUnresolvedRelativeTemporalExpression(text);
+  }
+
+  return (
+    hasUnresolvedRelativeTemporalExpression(text) ||
+    (!hasAbsoluteDateExpression(text) && hasRelativeTemporalExpression(text))
+  );
+}
+
+export function resolveTemporalDebug(candidate: MemoryCandidate): TemporalDebugInfo {
+  if (!hasUnresolvedRelativeTime(candidate)) {
+    if (candidate.metadata?.["temporalNormalized"] === true || canonicalEventDate(candidate)) {
+      return { temporalStatus: "normalized" };
+    }
+    return { temporalStatus: "not-needed" };
+  }
+
+  const suggestion = buildTemporalSuggestion(candidate.content);
+  return {
+    temporalStatus: "unresolved",
+    ...(suggestion ? { temporalSuggestion: suggestion } : {})
+  };
+}
+
+export function resolveTimezoneFromObservedAt(
+  observedAt: Date | string | null | undefined,
+  fallback?: string
+): string {
+  if (typeof observedAt === "string") {
+    if (/\+08:00$/.test(observedAt) || /\+08:00:/.test(observedAt)) {
+      return "Asia/Shanghai";
+    }
+    const offsetMatch = observedAt.match(/([+-]\d{2}:\d{2})$/u);
+    if (offsetMatch?.[1] === "+08:00") {
+      return "Asia/Shanghai";
+    }
+  }
+  return fallback ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
+export function resolveCanonicalTemporalBounds(
+  candidate: MemoryCandidate,
+  timezone?: string
+): { validFrom: string; validUntil: string } | null {
+  const eventDate = canonicalEventDate(candidate);
+  if (!eventDate) {
+    return null;
+  }
+  const tz = timezone ?? resolveTimezoneFromObservedAt(candidate.observedAt);
+  const window = dayBoundaries(eventDate, tz);
+  return {
+    validFrom: window.validFrom.toISOString(),
+    validUntil: window.validUntil.toISOString()
+  };
+}
+
+export function canonicalEventKey(candidate: MemoryCandidate): string | null {
+  const eventDate = canonicalEventDate(candidate);
+  if (!eventDate) {
+    return null;
+  }
+  const slot = detectDayPart(candidate.content) ?? "day";
+  const topic = detectEventTopic(candidate.content);
+  return [
+    candidate.subjectUserId ?? candidate.metadata?.["subjectUserId"] ?? "default-user",
+    candidate.personaId ?? candidate.metadata?.["personaId"] ?? "default-persona",
+    candidate.scope ?? "user",
+    candidate.scopeId ?? "",
+    eventDate,
+    slot,
+    topic
+  ].join("|");
+}
+
 export function temporalWarningForText(text: string): TemporalNormalizationResult | null {
-  if (!hasRelativeTemporalExpression(text)) {
+  if (!hasUnresolvedRelativeTime(text)) {
     return null;
   }
   return normalizeTemporalCandidate(
@@ -232,6 +330,11 @@ export function temporalWarningForText(text: string): TemporalNormalizationResul
     },
     {}
   );
+}
+
+export function buildTemporalSuggestion(text: string): string | null {
+  const result = temporalWarningForText(text);
+  return result?.candidate.content ?? null;
 }
 
 function hasUnresolvedRelativeTemporalExpression(text: string): boolean {
@@ -474,16 +577,14 @@ function extractCanonicalEventDate(
   return null;
 }
 
-function optionalTemporalField(
-  key: "validFrom" | "validUntil",
-  existing: Date | string | null | undefined,
-  fallback: Date | null
-): Partial<Pick<MemoryCandidate, "validFrom" | "validUntil">> {
-  const value = existing ?? (fallback ? fallback.toISOString() : null);
-  if (value === null || value === undefined) {
-    return {};
+function detectEventTopic(text: string): string {
+  if (/吃|喝|饭|早饭|早餐|面包|蛋糕|meal|breakfast|bread|ate|drank/iu.test(text)) {
+    return "meal";
   }
-  return { [key]: value } as Partial<Pick<MemoryCandidate, "validFrom" | "validUntil">>;
+  if (/喝|水|茶|coffee|tea|drink/iu.test(text)) {
+    return "drink";
+  }
+  return "activity";
 }
 
 function finalizeTemporalCandidate(
@@ -507,9 +608,9 @@ function finalizeTemporalCandidate(
         ? candidate.summary
         : input.content,
     observedAt: candidate.observedAt ?? input.observedAt.toISOString(),
-    ...(input.eventTime ? { eventTime: candidate.eventTime ?? input.eventTime.toISOString() } : {}),
-    ...(input.validFrom ? { validFrom: candidate.validFrom ?? toIso(input.validFrom) } : {}),
-    ...(input.validUntil ? { validUntil: candidate.validUntil ?? toIso(input.validUntil) } : {}),
+    ...(input.eventTime ? { eventTime: input.eventTime.toISOString() } : {}),
+    ...(input.validFrom ? { validFrom: toIso(input.validFrom) } : {}),
+    ...(input.validUntil ? { validUntil: toIso(input.validUntil) } : {}),
     metadata: input.metadata
   };
 }

@@ -256,8 +256,12 @@ export type MemoryCandidateReview = {
   rejectedReason?: string;
   storageReason?: string;
   explicitRememberRequested?: boolean;
+  correctionRequested?: boolean;
   originRole?: "user" | "assistant" | "mixed";
   canonicalFingerprint?: string;
+  canonicalEventKey?: string;
+  temporalStatus?: "not-needed" | "normalized" | "unresolved";
+  temporalSuggestion?: string;
   source?: string;
   sourceTraceId?: string | null;
   storedMemoryId?: string;

@@ -4649,10 +4649,10 @@ function MemoryCandidateList(props: {
           <p className="whitespace-pre-wrap text-sm text-ink-700">
             {props.compact ? candidate.contentPreview : candidate.content}
           </p>
-          {!props.compact && temporalWarningForText(candidate.content) && (
+          {!props.compact && candidate.temporalStatus === "unresolved" && (
             <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
               Relative time detected. Consider resolving it to an absolute date before saving.
-              Suggested: {temporalWarningForText(candidate.content)}
+              {candidate.temporalSuggestion ? ` Suggested: ${candidate.temporalSuggestion}` : ""}
             </div>
           )}
           {candidate.summary && (
@@ -4666,7 +4666,8 @@ function MemoryCandidateList(props: {
           {!props.compact && (
             <div className="mt-2 text-xs text-ink-500">
               Origin: {candidate.originRole ?? "n/a"} · Explicit remember:{" "}
-              {String(candidate.explicitRememberRequested ?? false)}
+              {String(candidate.explicitRememberRequested ?? false)} · Correction:{" "}
+              {String(candidate.correctionRequested ?? false)}
               {candidate.canonicalFingerprint
                 ? ` · Fingerprint: ${candidate.canonicalFingerprint}`
                 : ""}

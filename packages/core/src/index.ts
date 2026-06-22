@@ -232,8 +232,12 @@ export type RuntimeMemoryCandidateReview = {
   rejectedReason?: string | undefined;
   storageReason?: string | undefined;
   explicitRememberRequested?: boolean | undefined;
+  correctionRequested?: boolean | undefined;
   originRole?: "user" | "assistant" | "mixed" | undefined;
   canonicalFingerprint?: string | undefined;
+  canonicalEventKey?: string | undefined;
+  temporalStatus?: "not-needed" | "normalized" | "unresolved" | undefined;
+  temporalSuggestion?: string | undefined;
   source: "runtime" | "dashboard";
   sourceTraceId?: string | null | undefined;
   storedMemoryId?: string | undefined;
@@ -380,6 +384,8 @@ export class RuntimeOrchestrator {
       };
     }
 
+    const contentChanged =
+      patch.content !== undefined && patch.content.trim() !== review.content.trim();
     const candidate: MemoryCandidate = {
       type: patch.type ?? review.type,
       content: patch.content ?? review.content,
@@ -388,7 +394,17 @@ export class RuntimeOrchestrator {
       metadata: {
         ...(review.metadata ?? {}),
         acceptedBy: "dashboard",
-        acceptedFromCandidateId: review.id
+        acceptedFromCandidateId: review.id,
+        ...(contentChanged
+          ? {
+              temporalNormalized: false,
+              canonicalEventDate: undefined,
+              canonicalFingerprint: undefined,
+              canonicalEventKey: undefined,
+              temporalStatus: undefined,
+              temporalSuggestion: undefined
+            }
+          : {})
       },
       tags: patch.tags ?? review.tags,
       reason: review.reason
@@ -409,11 +425,20 @@ export class RuntimeOrchestrator {
       candidate.memoryLayer = memoryLayer;
     }
     candidate.observedAt = patch.observedAt ?? review.observedAt ?? review.createdAt;
-    candidate.eventTime = patch.eventTime ?? review.eventTime ?? null;
-    candidate.validFrom =
-      patch.validFrom ?? review.validFrom ?? review.observedAt ?? review.createdAt;
-    candidate.validUntil = patch.validUntil ?? review.validUntil ?? null;
-    candidate.expiresAt = patch.expiresAt ?? review.expiresAt ?? null;
+    if (contentChanged) {
+      candidate.eventTime = patch.eventTime ?? null;
+      candidate.validUntil = patch.validUntil ?? null;
+      candidate.expiresAt = patch.expiresAt ?? null;
+      if (patch.validFrom !== undefined) {
+        candidate.validFrom = patch.validFrom;
+      }
+    } else {
+      candidate.eventTime = patch.eventTime ?? review.eventTime ?? null;
+      candidate.validFrom =
+        patch.validFrom ?? review.validFrom ?? review.observedAt ?? review.createdAt;
+      candidate.validUntil = patch.validUntil ?? review.validUntil ?? null;
+      candidate.expiresAt = patch.expiresAt ?? review.expiresAt ?? null;
+    }
     candidate.possibleSupersedes = patch.possibleSupersedes ?? review.possibleSupersedes ?? [];
     candidate.possibleContradictions =
       patch.possibleContradictions ?? review.possibleContradictions ?? [];
@@ -1526,6 +1551,23 @@ function toMemoryCandidateReview(input: {
     canonicalFingerprint:
       typeof input.candidate.metadata?.["canonicalFingerprint"] === "string"
         ? input.candidate.metadata["canonicalFingerprint"]
+        : undefined,
+    canonicalEventKey:
+      typeof input.candidate.metadata?.["canonicalEventKey"] === "string"
+        ? input.candidate.metadata["canonicalEventKey"]
+        : undefined,
+    correctionRequested: Boolean(
+      input.candidate.correctionRequested ?? input.candidate.metadata?.["correctionRequested"]
+    ),
+    temporalStatus:
+      input.candidate.metadata?.["temporalStatus"] === "not-needed" ||
+      input.candidate.metadata?.["temporalStatus"] === "normalized" ||
+      input.candidate.metadata?.["temporalStatus"] === "unresolved"
+        ? input.candidate.metadata["temporalStatus"]
+        : undefined,
+    temporalSuggestion:
+      typeof input.candidate.metadata?.["temporalSuggestion"] === "string"
+        ? input.candidate.metadata["temporalSuggestion"]
         : undefined,
     source: "runtime",
     sourceTraceId: input.candidate.sourceTraceId ?? input.sourceTraceId,

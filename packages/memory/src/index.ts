@@ -45,13 +45,33 @@ export {
   deduplicateCandidateBatch,
   type CandidateDedupeResult
 } from "./candidate-dedupe.js";
-export { detectExplicitRememberRequest, stripExplicitRememberPrefix } from "./intent.js";
+export {
+  detectCorrectionRequest,
+  detectExplicitRememberRequest,
+  extractCorrectionEvidence,
+  inferUserMemoryIntent,
+  stripExplicitRememberPrefix,
+  type UserMemoryIntent
+} from "./intent.js";
+export {
+  detectEpisodicCorrectionRelationships,
+  hasCorrectionRelatedMemory,
+  type EpisodicCorrectionSuggestion
+} from "./correction.js";
 export { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
 export {
+  buildTemporalSuggestion,
+  canonicalEventKey,
   hasHistoricalEpisodicIntent,
   hasRelativeTemporalExpression,
+  hasUnresolvedRelativeTime,
   normalizeTemporalCandidate,
+  resolveCanonicalTemporalBounds,
+  resolveTemporalDebug,
+  resolveTimezoneFromObservedAt,
   temporalWarningForText,
+  type TemporalDebugInfo,
+  type TemporalDebugStatus,
   type TemporalNormalizationResult,
   type TemporalResolution
 } from "./temporal.js";
