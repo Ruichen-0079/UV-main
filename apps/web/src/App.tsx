@@ -4660,8 +4660,18 @@ function MemoryCandidateList(props: {
           )}
           <div className="mt-2 text-xs text-ink-500">
             Reason: {candidate.reason}
+            {candidate.storageReason ? ` · Stored: ${candidate.storageReason}` : ""}
             {candidate.rejectedReason ? ` · Rejected: ${candidate.rejectedReason}` : ""}
           </div>
+          {!props.compact && (
+            <div className="mt-2 text-xs text-ink-500">
+              Origin: {candidate.originRole ?? "n/a"} · Explicit remember:{" "}
+              {String(candidate.explicitRememberRequested ?? false)}
+              {candidate.canonicalFingerprint
+                ? ` · Fingerprint: ${candidate.canonicalFingerprint}`
+                : ""}
+            </div>
+          )}
           {!props.compact && (
             <div className="mt-2 text-xs text-ink-500">
               Tags: {candidate.tags.join(", ") || "none"}

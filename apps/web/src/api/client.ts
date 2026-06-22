@@ -254,6 +254,10 @@ export type MemoryCandidateReview = {
   reason: string;
   decision: "stored" | "rejected";
   rejectedReason?: string;
+  storageReason?: string;
+  explicitRememberRequested?: boolean;
+  originRole?: "user" | "assistant" | "mixed";
+  canonicalFingerprint?: string;
   source?: string;
   sourceTraceId?: string | null;
   storedMemoryId?: string;
