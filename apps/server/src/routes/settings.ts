@@ -1,4 +1,5 @@
 import { writeFile } from "node:fs/promises";
+import type { MemoryExtractorStatus } from "@companion/memory";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
@@ -299,8 +300,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       activeMemoryExtractor: context.memory.getExtractorStatus().mode,
       memoryExtractorActive: context.memory.getExtractorStatus().active,
       memoryExtractorDefault: "llm",
-      memoryExtractorFallbackUsed: Boolean(context.memory.getExtractorStatus().fallbackUsed),
-      memoryExtractorSkippedReason: context.memory.getExtractorStatus().skippedReason,
+      ...buildMemoryExtractorDiagnostics(context.memory.getExtractorStatus(), config.runtimeMode),
       maintenanceScheduler: context.memoryMaintenanceScheduler?.getStatus() ?? null,
       vectorIndex: config.memoryVectorIndex,
       reasoningProviderConfigured: Boolean(providerStatus.providers.reasoning.configured)
@@ -489,6 +489,34 @@ function serializeLocalEnv(values: Record<string, string>): string {
     lines.push(`${key}=${quoteEnvValue(values[key] ?? "")}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+function buildMemoryExtractorDiagnostics(
+  status: MemoryExtractorStatus,
+  runtimeMode: string
+): Record<string, unknown> {
+  const base = {
+    memoryExtractorFallbackUsed: Boolean(status.fallbackUsed),
+    memoryExtractorSkippedReason: status.skippedReason
+  };
+  if (runtimeMode !== "development") {
+    return base;
+  }
+  return {
+    ...base,
+    memoryExtractorFailureStage: status.failureStage ?? null,
+    memoryExtractorError: status.error ?? null,
+    memoryExtractorValidationIssues: status.validationIssues ?? null,
+    memoryExtractorRejectedReasons: status.rejectedReasons ?? null,
+    memoryExtractorRawPreview: status.rawPreview ?? null,
+    memoryExtractorCandidateCount: status.candidateCount ?? null,
+    memoryExtractorRejectedCount: status.rejectedCount ?? null,
+    memoryExtractorFinishReason: status.finishReason ?? null,
+    memoryExtractorSelectedOutputSource: status.selectedOutputSource ?? null,
+    memoryExtractorAnswerLength: status.answerLength ?? null,
+    memoryExtractorReasoningLength: status.reasoningLength ?? null,
+    memoryExtractorLastAttemptAt: status.lastAttemptAt ?? null
+  };
 }
 
 function maskSecret(value: string | undefined): string | undefined {

@@ -65,7 +65,9 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
         ? new LlmMemoryExtractor(providers.getReasoningProvider(), ruleBasedExtractor, {
             enabled: true,
             providerConfigured: Boolean(reasoningStatus.configured && !reasoningStatus.mock),
-            providerName: reasoningStatus.provider
+            providerName: reasoningStatus.provider,
+            logger: runtimeLogger,
+            includeRawPreview: config.runtimeMode === "development"
           })
         : ruleBasedExtractor;
 

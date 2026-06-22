@@ -667,6 +667,18 @@ export type RuntimeSettingsResponse = {
     memoryExtractorDefault?: string;
     memoryExtractorFallbackUsed?: boolean;
     memoryExtractorSkippedReason?: string;
+    memoryExtractorFailureStage?: string;
+    memoryExtractorError?: string;
+    memoryExtractorValidationIssues?: string[];
+    memoryExtractorRejectedReasons?: string[];
+    memoryExtractorRawPreview?: string;
+    memoryExtractorCandidateCount?: number;
+    memoryExtractorRejectedCount?: number;
+    memoryExtractorFinishReason?: string;
+    memoryExtractorSelectedOutputSource?: string;
+    memoryExtractorAnswerLength?: number;
+    memoryExtractorReasoningLength?: number;
+    memoryExtractorLastAttemptAt?: string;
     reasoningProviderConfigured?: boolean;
     vectorIndex?: {
       enabled: boolean;

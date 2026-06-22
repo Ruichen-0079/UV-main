@@ -2831,6 +2831,62 @@ function SettingsPage(): JSX.Element {
                 message={settings.data.memory.memoryExtractorSkippedReason}
               />
             )}
+            {(settings.data?.memory.memoryExtractorFallbackUsed ||
+              (settings.data?.memory.memoryExtractorValidationIssues?.length ?? 0) > 0) && (
+              <div className="mt-3 rounded-md border border-ink-100 bg-ink-50 p-3">
+                <h4 className="text-sm font-semibold text-ink-800">Extractor diagnostics</h4>
+                <div className="mt-2 grid grid-cols-2 gap-3">
+                  {settings.data?.memory.memoryExtractorFailureStage && (
+                    <Definition
+                      label="Failure stage"
+                      value={settings.data.memory.memoryExtractorFailureStage}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorFinishReason && (
+                    <Definition
+                      label="Finish reason"
+                      value={settings.data.memory.memoryExtractorFinishReason}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorSelectedOutputSource && (
+                    <Definition
+                      label="Selected output"
+                      value={settings.data.memory.memoryExtractorSelectedOutputSource}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorAnswerLength !== undefined && (
+                    <Definition
+                      label="Answer length"
+                      value={String(settings.data.memory.memoryExtractorAnswerLength)}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorReasoningLength !== undefined && (
+                    <Definition
+                      label="Reasoning length"
+                      value={String(settings.data.memory.memoryExtractorReasoningLength)}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorLastAttemptAt && (
+                    <Definition
+                      label="Last attempt"
+                      value={settings.data.memory.memoryExtractorLastAttemptAt}
+                    />
+                  )}
+                </div>
+                {settings.data?.memory.memoryExtractorValidationIssues &&
+                  settings.data.memory.memoryExtractorValidationIssues.length > 0 && (
+                    <p className="mt-2 text-sm leading-6 text-ink-600">
+                      Validation issues:{" "}
+                      {settings.data.memory.memoryExtractorValidationIssues.join("; ")}
+                    </p>
+                  )}
+                {settings.data?.memory.memoryExtractorRawPreview && (
+                  <p className="mt-2 break-all text-sm leading-6 text-ink-600">
+                    Raw preview: {settings.data.memory.memoryExtractorRawPreview}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </Panel>
       </div>

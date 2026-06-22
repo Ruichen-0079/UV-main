@@ -1951,6 +1951,34 @@ describe("server", () => {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("exposes memory extractor diagnostics only in development runtime settings", async () => {
+    const devApp = await buildTestServer({ RUNTIME_MODE: "development" });
+    try {
+      const devSettings = await devApp.inject({ method: "GET", url: "/settings/runtime" });
+      expect(devSettings.statusCode).toBe(200);
+      const devMemory = devSettings.json().memory;
+      expect(devMemory).toHaveProperty("memoryExtractorFailureStage");
+      expect(devMemory).toHaveProperty("memoryExtractorSelectedOutputSource");
+      expect(devMemory).toHaveProperty("memoryExtractorAnswerLength");
+      expect(devMemory).toHaveProperty("memoryExtractorReasoningLength");
+      expect(devMemory).toHaveProperty("memoryExtractorValidationIssues");
+      expect(devMemory).toHaveProperty("memoryExtractorRawPreview");
+    } finally {
+      await devApp.close();
+    }
+
+    const prodApp = await buildTestServer({ RUNTIME_MODE: "production" });
+    try {
+      const prodSettings = await prodApp.inject({ method: "GET", url: "/settings/runtime" });
+      expect(prodSettings.statusCode).toBe(200);
+      expect(prodSettings.json().memory).not.toHaveProperty("memoryExtractorRawPreview");
+      expect(prodSettings.json().memory).not.toHaveProperty("memoryExtractorFailureStage");
+      expect(prodSettings.json().memory).not.toHaveProperty("memoryExtractorValidationIssues");
+    } finally {
+      await prodApp.close();
+    }
+  });
 });
 
 function countOccurrences(text: string, needle: string): number {
