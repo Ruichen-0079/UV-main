@@ -2,6 +2,8 @@ import type {
   MemoryCandidate,
   MemoryExtractionInput,
   MemoryExtractor,
+  MemoryExtractorFailureStage,
+  MemoryExtractorSelectedOutputSource,
   MemoryExtractorStatus,
   MemoryLayer,
   MemoryScope,
@@ -20,14 +22,26 @@ export type MemoryExtractionReasoner = {
     temperature?: number | undefined;
     maxTokens?: number | undefined;
     maxOutputTokens?: number | undefined;
-  }): Promise<{ reasoning: string; answer?: string | undefined }>;
+  }): Promise<{
+    reasoning: string;
+    answer?: string | undefined;
+    finishReason?: string | undefined;
+    model?: string | undefined;
+    tokenUsage?: unknown;
+  }>;
 };
 
 export type LlmMemoryExtractorOptions = {
   enabled?: boolean;
   providerConfigured?: boolean;
   providerName?: string;
+  logger?: {
+    warn?(message: string, context?: Record<string, unknown>): void;
+  };
+  includeRawPreview?: boolean;
 };
+
+const MEMORY_EXTRACTOR_MAX_OUTPUT_TOKENS = 1600;
 
 export class LlmMemoryExtractor implements MemoryExtractor {
   private lastStatus: MemoryExtractorStatus;
@@ -46,11 +60,13 @@ export class LlmMemoryExtractor implements MemoryExtractor {
 
   async extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
     this.lastStatus = this.createBaseStatus();
+    const attemptAt = new Date().toISOString();
     if (!this.options.enabled || !this.options.providerConfigured) {
       this.lastStatus = {
         ...this.createBaseStatus(),
         active: "fallback-rule-based",
         fallbackUsed: true,
+        lastAttemptAt: attemptAt,
         skippedReason: !this.options.enabled
           ? "LLM memory extraction is disabled until explicitly enabled."
           : "Reasoning provider is not configured; falling back to rule-based extraction."
@@ -59,11 +75,15 @@ export class LlmMemoryExtractor implements MemoryExtractor {
     }
 
     let rawOutput = "";
+    let selectedOutputSource: MemoryExtractorSelectedOutputSource = "none";
+    let answerLength = 0;
+    let reasoningLength = 0;
+    let finishReason: string | undefined;
     try {
       const output = await this.reasoner.generateReasoning({
         effort: "low",
         temperature: 0,
-        maxOutputTokens: 800,
+        maxOutputTokens: MEMORY_EXTRACTOR_MAX_OUTPUT_TOKENS,
         messages: [
           {
             role: "system",
@@ -83,17 +103,43 @@ export class LlmMemoryExtractor implements MemoryExtractor {
           }
         ]
       });
-      rawOutput = output.answer ?? output.reasoning;
+      finishReason = output.finishReason;
+      const selection = selectModelOutput(output);
+      rawOutput = selection.rawOutput;
+      selectedOutputSource = selection.selectedOutputSource;
+      answerLength = selection.answerLength;
+      reasoningLength = selection.reasoningLength;
+
+      if (isTruncatedOutput(finishReason)) {
+        throw new LlmExtractorParseError(
+          "LLM memory extractor output was truncated.",
+          rawOutput,
+          ["root:output-truncated"],
+          "truncated-output"
+        );
+      }
+
+      if (!rawOutput) {
+        throw new LlmExtractorParseError(
+          "LLM memory extractor returned empty output.",
+          "",
+          ["root:empty-output"],
+          "empty-output"
+        );
+      }
+
       const parsed = parseLlmExtractorJson(rawOutput);
       const normalized = normalizeLlmExtractorOutput(parsed);
       const accepted: MemoryCandidate[] = [];
       const rejectedReasons: string[] = [];
       const validationIssues: string[] = [];
+      let structuralRejections = 0;
       for (const candidateInput of normalized.candidates) {
         const candidateResult = LlmExtractorCandidateSchema.safeParse(
           normalizeLlmCandidateInput(candidateInput)
         );
         if (!candidateResult.success) {
+          structuralRejections += 1;
           validationIssues.push(summarizeZodIssue(candidateResult.error));
           rejectedReasons.push(`invalid-candidate:${summarizeZodIssue(candidateResult.error)}`);
           continue;
@@ -103,9 +149,8 @@ export class LlmMemoryExtractor implements MemoryExtractor {
           rejectedReasons.push(`low-confidence:${candidate.reason}`);
           continue;
         }
-        const explicitRememberRequested =
-          candidate.explicitRememberRequested ?? detectExplicitRememberRequest(input.userMessage);
-        const originRole = candidate.originRole ?? "user";
+        const explicitRememberRequested = detectExplicitRememberRequest(input.userMessage);
+        const originRole = "user" as const;
         accepted.push({
           type: candidate.type,
           subtype: candidate.subtype ?? null,
@@ -119,14 +164,12 @@ export class LlmMemoryExtractor implements MemoryExtractor {
           metadata: {
             ...(candidate.metadata ?? {}),
             explicitRememberRequested,
-            originRole,
-            ...(candidate.evidenceText ? { evidenceText: candidate.evidenceText } : {})
+            originRole
           },
           tags: candidate.tags,
           reason: candidate.reason,
           explicitRememberRequested,
           originRole,
-          ...(candidate.evidenceText ? { evidenceText: candidate.evidenceText } : {}),
           sourceTraceId: candidate.sourceTraceId ?? input.sourceTraceId ?? null,
           observedAt: candidate.observedAt ?? input.timestamp ?? new Date().toISOString(),
           eventTime: candidate.eventTime ?? null,
@@ -141,6 +184,20 @@ export class LlmMemoryExtractor implements MemoryExtractor {
             : {})
         });
       }
+
+      if (
+        normalized.candidates.length > 0 &&
+        accepted.length === 0 &&
+        structuralRejections === normalized.candidates.length
+      ) {
+        throw new LlmExtractorParseError(
+          "LLM memory extractor returned only invalid candidates.",
+          rawOutput,
+          validationIssues.length > 0 ? validationIssues : ["candidate:invalid"],
+          "candidate-schema"
+        );
+      }
+
       this.lastStatus = {
         ...this.createBaseStatus(),
         active: "llm",
@@ -148,29 +205,63 @@ export class LlmMemoryExtractor implements MemoryExtractor {
         candidateCount: accepted.length,
         rejectedCount: rejectedReasons.length,
         rejectedReasons,
-        validationIssues
+        ...(validationIssues.length > 0 ? { validationIssues } : {}),
+        selectedOutputSource,
+        ...(finishReason ? { finishReason } : {}),
+        answerLength,
+        reasoningLength,
+        lastAttemptAt: attemptAt
       };
       return accepted;
     } catch (error) {
       const message = safeExtractorError(error);
-      if (isJsonValidationError(error)) {
+      const failureStage = resolveFailureStage(error);
+      if (isRecoverableExtractorError(error)) {
         const fallbackCandidates = await this.fallback.extractCandidates(input);
         const failedRawOutput =
           error instanceof LlmExtractorParseError ? error.rawOutput : rawOutput;
         const validationIssues =
-          error instanceof LlmExtractorParseError ? error.validationIssues : [message];
-        this.lastStatus = {
+          error instanceof LlmExtractorParseError && error.validationIssues.length > 0
+            ? error.validationIssues
+            : [message];
+        const skippedReason =
+          failureStage === "truncated-output"
+            ? "LLM memory extractor output was truncated; falling back to rule-based extraction."
+            : "LLM extractor output was invalid; falling back to rule-based extraction.";
+        const status: MemoryExtractorStatus = {
           ...this.createBaseStatus(),
           active: "fallback-rule-based",
           fallbackUsed: true,
           candidateCount: fallbackCandidates.length,
-          rejectedCount: 1,
-          rejectedReasons: ["invalid-llm-output"],
+          rejectedCount: validationIssues.length,
+          rejectedReasons: validationIssues,
           error: message,
           validationIssues,
-          ...(failedRawOutput ? { rawPreview: createRawPreview(failedRawOutput) } : {}),
-          skippedReason: "LLM extractor output was invalid; falling back to rule-based extraction."
+          failureStage,
+          selectedOutputSource,
+          ...(finishReason ? { finishReason } : {}),
+          answerLength,
+          reasoningLength,
+          lastAttemptAt: attemptAt,
+          skippedReason,
+          ...(this.options.includeRawPreview !== false && failedRawOutput
+            ? { rawPreview: createRawPreview(failedRawOutput) }
+            : {})
         };
+        this.lastStatus = status;
+        this.options.logger?.warn?.("LLM memory extraction fell back to rule-based", {
+          provider: this.options.providerName,
+          failureStage,
+          finishReason,
+          selectedOutputSource,
+          answerLength,
+          reasoningLength,
+          candidateCount: fallbackCandidates.length,
+          rejectedCount: validationIssues.length,
+          error: message,
+          validationIssues,
+          ...(status.rawPreview ? { rawPreview: status.rawPreview } : {})
+        });
         return fallbackCandidates;
       }
 
@@ -181,8 +272,23 @@ export class LlmMemoryExtractor implements MemoryExtractor {
         fallbackUsed: true,
         candidateCount: fallbackCandidates.length,
         error: message,
+        failureStage: "provider-call",
+        selectedOutputSource,
+        ...(finishReason ? { finishReason } : {}),
+        answerLength,
+        reasoningLength,
+        lastAttemptAt: attemptAt,
         skippedReason: "Reasoning provider failed; falling back to rule-based extraction."
       };
+      this.options.logger?.warn?.("LLM memory extraction fell back to rule-based", {
+        provider: this.options.providerName,
+        failureStage: "provider-call",
+        finishReason,
+        selectedOutputSource,
+        answerLength,
+        reasoningLength,
+        error: message
+      });
       return fallbackCandidates;
     }
   }
@@ -705,10 +811,7 @@ const LlmExtractorCandidateSchema = z
     validUntil: z.string().trim().min(1).max(80).nullable().optional(),
     expiresAt: z.string().trim().min(1).max(80).nullable().optional(),
     possibleSupersedes: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
-    possibleContradictions: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
-    explicitRememberRequested: z.boolean().optional(),
-    originRole: z.enum(["user", "assistant", "mixed"]).optional(),
-    evidenceText: z.string().trim().min(1).max(240).optional()
+    possibleContradictions: z.array(z.string().trim().min(1).max(120)).max(8).optional()
   })
   .strict();
 
@@ -722,11 +825,120 @@ class LlmExtractorParseError extends Error {
   constructor(
     message: string,
     readonly rawOutput: string,
-    readonly validationIssues: string[] = []
+    readonly validationIssues: string[] = [],
+    readonly failureStage: MemoryExtractorFailureStage = "json-parse"
   ) {
     super(message);
     this.name = "LlmExtractorParseError";
   }
+}
+
+const allowedCandidateKeys = [
+  "type",
+  "subtype",
+  "scope",
+  "scopeId",
+  "memoryLayer",
+  "content",
+  "summary",
+  "importance",
+  "confidence",
+  "tags",
+  "reason",
+  "metadata",
+  "sourceTraceId",
+  "observedAt",
+  "eventTime",
+  "validFrom",
+  "validUntil",
+  "expiresAt",
+  "possibleSupersedes",
+  "possibleContradictions"
+] as const;
+
+function pickAllowedCandidateFields(value: Record<string, unknown>): Record<string, unknown> {
+  const record: Record<string, unknown> = {};
+  for (const key of allowedCandidateKeys) {
+    if (key in value) {
+      record[key] = value[key];
+    }
+  }
+  return record;
+}
+
+function normalizeModelOutputText(value: string | undefined): string {
+  return value?.trim() ?? "";
+}
+
+function selectModelOutput(output: { answer?: string | undefined; reasoning: string }): {
+  rawOutput: string;
+  selectedOutputSource: MemoryExtractorSelectedOutputSource;
+  answerLength: number;
+  reasoningLength: number;
+} {
+  const answer = normalizeModelOutputText(output.answer);
+  const reasoning = normalizeModelOutputText(output.reasoning);
+  if (answer) {
+    return {
+      rawOutput: answer,
+      selectedOutputSource: "answer",
+      answerLength: answer.length,
+      reasoningLength: reasoning.length
+    };
+  }
+  if (reasoning) {
+    return {
+      rawOutput: reasoning,
+      selectedOutputSource: "reasoning",
+      answerLength: answer.length,
+      reasoningLength: reasoning.length
+    };
+  }
+  return {
+    rawOutput: "",
+    selectedOutputSource: "none",
+    answerLength: 0,
+    reasoningLength: 0
+  };
+}
+
+function isTruncatedOutput(finishReason: string | undefined): boolean {
+  return finishReason === "length";
+}
+
+function resolveFailureStage(error: unknown): MemoryExtractorFailureStage {
+  if (error instanceof LlmExtractorParseError) {
+    return error.failureStage;
+  }
+  if (error instanceof z.ZodError) {
+    return "root-schema";
+  }
+  if (error instanceof SyntaxError) {
+    return classifySyntaxFailureStage(error);
+  }
+  return "provider-call";
+}
+
+function classifySyntaxFailureStage(error: SyntaxError): MemoryExtractorFailureStage {
+  const message = error.message.toLowerCase();
+  if (message.includes("did not return json")) {
+    return "json-extraction";
+  }
+  if (message.includes("multiple json values")) {
+    return "json-extraction";
+  }
+  if (message.includes("incomplete json")) {
+    return "json-parse";
+  }
+  return "json-parse";
+}
+
+function isRecoverableExtractorError(error: unknown): boolean {
+  return (
+    error instanceof SyntaxError ||
+    error instanceof z.ZodError ||
+    error instanceof LlmExtractorParseError
+  );
 }
 
 function parseLlmExtractorJson(text: string): unknown {
@@ -740,31 +952,102 @@ function parseLlmExtractorJson(text: string): unknown {
     const slice = extractSingleJsonValue(unfenced);
     return JSON.parse(slice);
   } catch (error) {
-    throw new LlmExtractorParseError(safeExtractorError(error), text, [safeExtractorError(error)]);
+    const issue = classifyJsonParseIssue(error);
+    const failureStage =
+      error instanceof SyntaxError ? classifySyntaxFailureStage(error) : "json-parse";
+    throw new LlmExtractorParseError(safeExtractorError(error), text, [issue], failureStage);
   }
+}
+
+function classifyJsonParseIssue(error: unknown): string {
+  if (error instanceof SyntaxError) {
+    const message = error.message.toLowerCase();
+    if (message.includes("did not return json")) {
+      return "no-json-value";
+    }
+    if (message.includes("multiple json values")) {
+      return "multiple-json-values";
+    }
+    if (
+      message.includes("incomplete json") ||
+      message.includes("unexpected end of json input") ||
+      message.includes("unterminated string") ||
+      (message.includes("expected") && (message.includes("property") || message.includes("json")))
+    ) {
+      return "incomplete-json";
+    }
+    return "malformed-json";
+  }
+  return "malformed-json";
 }
 
 function normalizeLlmExtractorOutput(value: unknown): { candidates: unknown[] } {
   if (Array.isArray(value)) {
-    return LlmExtractorOutputSchema.parse({ candidates: value });
+    try {
+      return LlmExtractorOutputSchema.parse({ candidates: value });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        throw new LlmExtractorParseError(
+          "LLM memory extractor returned an invalid root object.",
+          "",
+          summarizeRootSchemaIssues(error),
+          "root-schema"
+        );
+      }
+      throw error;
+    }
   }
 
   if (!value || typeof value !== "object") {
-    throw new LlmExtractorParseError("LLM memory extractor did not return a JSON object.", "", [
-      "root:not-object"
-    ]);
+    throw new LlmExtractorParseError(
+      "LLM memory extractor did not return a JSON object.",
+      "",
+      ["root-not-object"],
+      "root-schema"
+    );
   }
 
   const record = value as Record<string, unknown>;
   const candidates = record["candidates"] ?? record["memories"];
-  return LlmExtractorOutputSchema.parse({ candidates });
+  if (candidates === undefined) {
+    throw new LlmExtractorParseError(
+      "LLM memory extractor root object is missing candidates.",
+      "",
+      ["root-candidates-missing"],
+      "root-schema"
+    );
+  }
+
+  try {
+    return LlmExtractorOutputSchema.parse({ candidates });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      throw new LlmExtractorParseError(
+        "LLM memory extractor returned an invalid root object.",
+        "",
+        summarizeRootSchemaIssues(error),
+        "root-schema"
+      );
+    }
+    throw error;
+  }
+}
+
+function summarizeRootSchemaIssues(error: z.ZodError): string[] {
+  return error.issues.map((issue) => {
+    const path = issue.path.join(".") || "root";
+    if (path === "candidates" || path.startsWith("candidates")) {
+      return `root-candidates-missing`;
+    }
+    return `root:${path}:${issue.message}`;
+  });
 }
 
 function normalizeLlmCandidateInput(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return value;
   }
-  const record = { ...(value as Record<string, unknown>) };
+  const record = pickAllowedCandidateFields(value as Record<string, unknown>);
   const normalizedType = normalizeLlmType(record["type"], record["subtype"]);
   if (normalizedType) {
     record["type"] = normalizedType.type;
@@ -929,14 +1212,6 @@ function findJsonValueEnd(text: string, start: number, closing: string): number 
   throw new SyntaxError("LLM memory extractor returned incomplete JSON.");
 }
 
-function isJsonValidationError(error: unknown): boolean {
-  return (
-    error instanceof SyntaxError ||
-    error instanceof z.ZodError ||
-    error instanceof LlmExtractorParseError
-  );
-}
-
 function safeExtractorError(error: unknown): string {
   if (error instanceof z.ZodError) {
     return "LLM memory extractor returned invalid candidate JSON.";
@@ -964,6 +1239,10 @@ function createRawPreview(text: string): string {
 
 function redactUnsafeText(text: string): string {
   return text
+    .replace(
+      /"(api[_-]?key|authorization|bearer|token|password|secret)"\s*:\s*"[^"]*"/gi,
+      '"$1":"[redacted]"'
+    )
     .replace(
       /(api[-_]?key|authorization|bearer|token|password|secret)\s*[:=]\s*["']?[^"',\s}]+/gi,
       "$1=[redacted]"
@@ -999,6 +1278,11 @@ const llmExtractorSystemPrompt = [
   "Do not include explanations.",
   "Do not include natural language before or after JSON.",
   'The root object must be exactly: {"candidates":[]}.',
+  "Return only fields documented in the schema.",
+  "Do not return originRole, explicitRememberRequested, correctionRequested, userIntent, evidenceText, canonicalFingerprint, canonicalEventKey, temporalNormalized, temporalStatus, or storageReason. These fields are computed by the server.",
+  "Return at most 3 concise candidates unless multiple independent durable facts are explicitly present.",
+  "Keep content and summary concise.",
+  "Omit optional temporal fields when uncertain instead of inventing values.",
   "Example:",
   '{"candidates":[{"type":"semantic","subtype":"provider-choice","content":"用户偏好 Chat 和 Reasoning 使用 DeepSeek。","summary":"用户偏好 DeepSeek 作为 Chat/Reasoning provider。","importance":0.9,"confidence":0.9,"tags":["provider","deepseek","yuvi"],"reason":"The user stated a stable provider preference."}]}',
   "Allowed type values: working, episodic, semantic, emotional, procedural, relationship.",
@@ -1011,9 +1295,6 @@ const llmExtractorSystemPrompt = [
   "Extract only stable, useful, long-term memories or explicit remember requests.",
   "Only extract user facts grounded in the user message. The assistant message is context only.",
   "Do not extract a candidate merely because the assistant repeated, inferred, or acknowledged a fact.",
-  "Set originRole to user, assistant, or mixed. Use assistant only when the fact is not grounded in the current user message.",
-  "Set explicitRememberRequested=true only when the user explicitly asked to remember the fact in the user message.",
-  "Include evidenceText with the shortest user-message span that supports the candidate when possible.",
   "Do not store trivial chat, generic Q&A, transient chatter, failed answers, or assistant uncertainty.",
   "Prefer explicit user statements: project facts, preferences, paths, repos, commands, provider choices, milestones, troubleshooting conclusions.",
   "Use provider metadata only as safe context, never as memory content.",

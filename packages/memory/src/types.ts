@@ -216,6 +216,17 @@ export type MemoryCandidateStorageResult = {
 export type MemoryExtractorMode = "rule-based" | "llm";
 export type MemoryExtractorActive = "rule-based" | "llm" | "fallback-rule-based" | "disabled";
 
+export type MemoryExtractorFailureStage =
+  | "empty-output"
+  | "truncated-output"
+  | "json-extraction"
+  | "json-parse"
+  | "root-schema"
+  | "candidate-schema"
+  | "provider-call";
+
+export type MemoryExtractorSelectedOutputSource = "answer" | "reasoning" | "none";
+
 export type MemoryExtractorStatus = {
   mode: MemoryExtractorMode;
   active: MemoryExtractorActive;
@@ -229,6 +240,12 @@ export type MemoryExtractorStatus = {
   rawPreview?: string;
   validationIssues?: string[];
   skippedReason?: string;
+  failureStage?: MemoryExtractorFailureStage;
+  selectedOutputSource?: MemoryExtractorSelectedOutputSource;
+  finishReason?: string;
+  answerLength?: number;
+  reasoningLength?: number;
+  lastAttemptAt?: string;
 };
 
 export type MemoryExtractionInput = {

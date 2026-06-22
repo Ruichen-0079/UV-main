@@ -2181,12 +2181,16 @@ describe("MemoryRepository", () => {
     });
 
     const candidates = await extractor.extractCandidates({
-      userMessage: "What should be remembered?",
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main",
       sourceTraceId: "trace-invalid-candidates"
     });
 
-    expect(candidates).toEqual([]);
-    expect(extractor.getStatus().rejectedCount).toBe(3);
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "fallback-rule-based",
+      fallbackUsed: true,
+      failureStage: "candidate-schema"
+    });
     expect(extractor.getStatus().validationIssues?.join("\n")).not.toContain("sk-secret-value");
   });
 
@@ -2249,11 +2253,345 @@ describe("MemoryRepository", () => {
     expect(extractor.getStatus()).toMatchObject({
       active: "fallback-rule-based",
       fallbackUsed: true,
-      rejectedReasons: ["invalid-llm-output"],
+      failureStage: "json-extraction",
+      validationIssues: ["no-json-value"],
       skippedReason: "LLM extractor output was invalid; falling back to rule-based extraction."
     });
     expect(extractor.getStatus().rawPreview).toContain("apiKey=[redacted]");
     expect(extractor.getStatus().rawPreview).not.toContain("sk-secret-value");
+  });
+
+  it("uses reasoning when answer is empty but reasoning contains valid JSON", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            answer: "",
+            reasoning: JSON.stringify({
+              candidates: [
+                {
+                  type: "episodic",
+                  subtype: "event",
+                  content: "用户在2026-06-22早上没吃早饭。",
+                  summary: "用户未吃早饭。",
+                  importance: 0.4,
+                  confidence: 0.95,
+                  tags: ["meal"],
+                  reason: "Explicit request."
+                }
+              ]
+            })
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "请记住，我今天早上没吃早饭。"
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "llm",
+      fallbackUsed: false,
+      selectedOutputSource: "reasoning"
+    });
+  });
+
+  it("uses reasoning when answer is whitespace only", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            answer: "   ",
+            reasoning: JSON.stringify({
+              candidates: [
+                {
+                  type: "semantic",
+                  subtype: "fact",
+                  content: "用户偏好简洁的调试输出。",
+                  summary: "用户偏好简洁调试输出。",
+                  importance: 0.82,
+                  confidence: 0.8,
+                  tags: ["preference"],
+                  reason: "stable preference"
+                }
+              ]
+            })
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    await extractor.extractCandidates({ userMessage: "记住这个偏好" });
+    expect(extractor.getStatus().selectedOutputSource).toBe("reasoning");
+    expect(extractor.getStatus().fallbackUsed).toBe(false);
+  });
+
+  it("prefers answer over reasoning when answer is valid JSON", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            answer: JSON.stringify({
+              candidates: [
+                {
+                  type: "semantic",
+                  subtype: "provider-choice",
+                  content: "用户偏好 chat 使用 DeepSeek。",
+                  summary: "用户偏好 chat 使用 DeepSeek。",
+                  importance: 0.86,
+                  confidence: 0.91,
+                  tags: ["deepseek"],
+                  reason: "provider preference"
+                }
+              ]
+            }),
+            reasoning: "internal chain-of-thought should not be parsed"
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "以后 chat 用 DeepSeek"
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "llm",
+      selectedOutputSource: "answer",
+      fallbackUsed: false
+    });
+  });
+
+  it("falls back with empty-output when both answer and reasoning are empty", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return { answer: "", reasoning: "" };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    });
+
+    expect(extractor.getStatus()).toMatchObject({
+      fallbackUsed: true,
+      failureStage: "empty-output",
+      validationIssues: ["root:empty-output"]
+    });
+  });
+
+  it("falls back with truncated-output when finishReason is length", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            answer: '{"candidates":[{"type":"semantic","subtype":"fact","content":"truncated',
+            reasoning: "",
+            finishReason: "length" as const
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    });
+
+    expect(extractor.getStatus()).toMatchObject({
+      fallbackUsed: true,
+      failureStage: "truncated-output",
+      validationIssues: ["root:output-truncated"]
+    });
+  });
+
+  it("falls back on incomplete JSON with bounded rawPreview", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            reasoning: '{"candidates":[{"type":"semantic","content":"incomplete'
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    });
+
+    const status = extractor.getStatus();
+    expect(status.fallbackUsed).toBe(true);
+    expect(status.failureStage).toBe("json-parse");
+    expect(status.validationIssues).toContain("incomplete-json");
+    expect(status.rawPreview?.length ?? 0).toBeLessThanOrEqual(500);
+  });
+
+  it("falls back on natural language without JSON", async () => {
+    const extractor = createLlmExtractor("I cannot extract any memories.");
+
+    await extractor.extractCandidates({ userMessage: "记住这个" });
+
+    expect(extractor.getStatus()).toMatchObject({
+      fallbackUsed: true,
+      validationIssues: ["no-json-value"]
+    });
+  });
+
+  it("ignores harmless extra LLM fields and keeps server provenance", async () => {
+    const extractor = createLlmExtractor({
+      candidates: [
+        {
+          type: "episodic",
+          subtype: "event",
+          content: "用户在2026-06-22早上没吃早饭。",
+          summary: "用户未吃早饭。",
+          importance: 0.4,
+          confidence: 0.95,
+          tags: ["meal"],
+          reason: "Explicit request.",
+          originRole: "user",
+          explicitRememberRequested: true
+        }
+      ]
+    });
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "请记住，我今天早上没吃早饭。"
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(extractor.getStatus().fallbackUsed).toBe(false);
+    expect(candidates[0]?.explicitRememberRequested).toBe(true);
+    expect(candidates[0]?.originRole).toBe("user");
+  });
+
+  it("returns valid candidates when one candidate is invalid without global fallback", async () => {
+    const extractor = createLlmExtractor({
+      candidates: [
+        {
+          type: "semantic",
+          subtype: "fact",
+          content: "用户偏好 Chat 使用 DeepSeek。",
+          summary: "用户偏好 DeepSeek。",
+          importance: 0.9,
+          confidence: 0.9,
+          tags: [],
+          reason: "valid candidate"
+        },
+        {
+          type: "unknown",
+          content: "bad candidate content here.",
+          summary: "bad",
+          importance: 0.9,
+          confidence: 0.9,
+          tags: [],
+          reason: "invalid type"
+        }
+      ]
+    });
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "以后 chat 用 DeepSeek"
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "llm",
+      fallbackUsed: false,
+      rejectedCount: 1
+    });
+    expect(extractor.getStatus().validationIssues?.length).toBeGreaterThan(0);
+  });
+
+  it("rejects metadata secrets without leaking them in rawPreview", async () => {
+    const extractor = createLlmExtractor({
+      candidates: [
+        {
+          type: "semantic",
+          subtype: "fact",
+          content: "用户偏好 Chat 使用 DeepSeek。",
+          summary: "用户偏好 DeepSeek。",
+          importance: 0.9,
+          confidence: 0.9,
+          tags: [],
+          metadata: { apiKey: "secret" },
+          reason: "unsafe metadata"
+        }
+      ]
+    });
+
+    await extractor.extractCandidates({ userMessage: "记住这个" });
+
+    expect(extractor.getStatus().fallbackUsed).toBe(true);
+    expect(extractor.getStatus().failureStage).toBe("candidate-schema");
+    expect(extractor.getStatus().rawPreview).toContain("apiKey");
+    expect(extractor.getStatus().rawPreview).toContain("[redacted]");
+    expect(extractor.getStatus().rawPreview).not.toContain('"secret"');
+  });
+
+  it("clears previous extractor errors after a successful extraction", async () => {
+    let call = 0;
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          call += 1;
+          if (call === 1) {
+            return { reasoning: "not json" };
+          }
+          return {
+            reasoning: JSON.stringify({
+              candidates: [
+                {
+                  type: "semantic",
+                  subtype: "provider-choice",
+                  content: "用户偏好 chat 使用 DeepSeek。",
+                  summary: "用户偏好 chat 使用 DeepSeek。",
+                  importance: 0.86,
+                  confidence: 0.91,
+                  tags: ["deepseek"],
+                  reason: "provider preference"
+                }
+              ]
+            })
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek", includeRawPreview: true }
+    );
+
+    await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    });
+    expect(extractor.getStatus().fallbackUsed).toBe(true);
+    expect(extractor.getStatus().rawPreview).toBeDefined();
+
+    await extractor.extractCandidates({ userMessage: "以后 chat 用 DeepSeek" });
+
+    expect(extractor.getStatus()).toMatchObject({
+      active: "llm",
+      fallbackUsed: false
+    });
+    expect(extractor.getStatus().failureStage).toBeUndefined();
+    expect(extractor.getStatus().error).toBeUndefined();
+    expect(extractor.getStatus().rawPreview).toBeUndefined();
   });
 
   it("falls back to rule-based extraction when the reasoning provider call fails", async () => {
@@ -2507,17 +2845,25 @@ function createNearDuplicateExtractor(): MemoryExtractor {
   };
 }
 
-function createLlmExtractor(output: string | Record<string, unknown>): LlmMemoryExtractor {
+function createLlmExtractor(
+  output: string | Record<string, unknown>,
+  options?: {
+    answer?: string;
+    finishReason?: string;
+  }
+): LlmMemoryExtractor {
   return new LlmMemoryExtractor(
     {
       async generateReasoning() {
         return {
-          reasoning: typeof output === "string" ? output : JSON.stringify(output)
+          answer: options?.answer,
+          reasoning: typeof output === "string" ? output : JSON.stringify(output),
+          finishReason: options?.finishReason
         };
       }
     },
     new RuleBasedMemoryExtractor(),
-    { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    { enabled: true, providerConfigured: true, providerName: "deepseek", includeRawPreview: true }
   );
 }
 

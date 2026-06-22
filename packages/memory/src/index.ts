@@ -15,6 +15,8 @@ export type {
   MemoryExtractorActive,
   MemoryExtractorMode,
   MemoryExtractorStatus,
+  MemoryExtractorFailureStage,
+  MemoryExtractorSelectedOutputSource,
   MemoryLayer,
   MemoryScope,
   MemoryMatchReason,
