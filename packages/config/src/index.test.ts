@@ -1,9 +1,14 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   ConfigValidationError,
+  getLegacyServerLocalEnvWarning,
   parseRuntimeConfig,
   redactConfig,
   redactSecret,
+  readRuntimeEnvFiles,
   validateRuntimeConfig
 } from "./index.js";
 
@@ -120,4 +125,71 @@ describe("runtime config", () => {
     );
     expect(parseRuntimeConfig({ MEMORY_EXTRACTOR: "llm" }).memory.extractor).toBe("llm");
   });
+
+  it("merges runtime env as .env, process env, then .env.local", async () => {
+    await withTempWorkspace(async (root) => {
+      await writeFile(path.join(root, ".env"), "DATABASE_URL=base\nBASE_ONLY=base\n", "utf8");
+      await writeFile(
+        path.join(root, ".env.local"),
+        "DATABASE_URL=local\nLOCAL_ONLY=local\n",
+        "utf8"
+      );
+
+      const files = await readRuntimeEnvFiles({
+        cwd: root,
+        env: { DATABASE_URL: "shell", SHELL_ONLY: "shell" }
+      });
+
+      expect(files.env["DATABASE_URL"]).toBe("local");
+      expect(files.env["BASE_ONLY"]).toBe("base");
+      expect(files.env["SHELL_ONLY"]).toBe("shell");
+      expect(files.env["LOCAL_ONLY"]).toBe("local");
+    });
+  });
+
+  it("supports only .env, only process env, only .env.local, and missing files", async () => {
+    await withTempWorkspace(async (root) => {
+      await writeFile(path.join(root, ".env"), "DATABASE_URL=base\n", "utf8");
+      expect((await readRuntimeEnvFiles({ cwd: root, env: {} })).env["DATABASE_URL"]).toBe("base");
+
+      await rm(path.join(root, ".env"));
+      expect(
+        (await readRuntimeEnvFiles({ cwd: root, env: { DATABASE_URL: "shell" } })).env[
+          "DATABASE_URL"
+        ]
+      ).toBe("shell");
+
+      await writeFile(path.join(root, ".env.local"), "DATABASE_URL=local\n", "utf8");
+      expect((await readRuntimeEnvFiles({ cwd: root, env: {} })).env["DATABASE_URL"]).toBe("local");
+
+      await rm(path.join(root, ".env.local"));
+      const files = await readRuntimeEnvFiles({ cwd: root, env: {} });
+      expect(files.base.exists).toBe(false);
+      expect(files.local.exists).toBe(false);
+      expect(files.env["DATABASE_URL"]).toBeUndefined();
+    });
+  });
+
+  it("warns about legacy apps/server/.env.local without loading it", async () => {
+    await withTempWorkspace(async (root) => {
+      await mkdir(path.join(root, "apps", "server"), { recursive: true });
+      await writeFile(path.join(root, "apps", "server", ".env.local"), "DATABASE_URL=legacy\n");
+
+      const files = await readRuntimeEnvFiles({ cwd: root, env: {} });
+      const warning = await getLegacyServerLocalEnvWarning({ cwd: root, env: {} });
+
+      expect(files.env["DATABASE_URL"]).toBeUndefined();
+      expect(warning).toContain("legacy misplaced file will not be used");
+    });
+  });
 });
+
+async function withTempWorkspace(run: (root: string) => Promise<void>): Promise<void> {
+  const root = await mkdtemp(path.join(tmpdir(), "yuvi-config-test-"));
+  try {
+    await writeFile(path.join(root, "pnpm-workspace.yaml"), "packages: []\n", "utf8");
+    await run(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}

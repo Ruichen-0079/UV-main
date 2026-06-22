@@ -287,7 +287,7 @@ describe("MemoryRepository", () => {
 
     const maintenance = new MemoryMaintenanceService(repository);
     const summary = await maintenance.run({
-      now: "2026-05-28T00:00:00.000Z"
+      now: new Date(legacy.createdAt.getTime() + 8 * 86_400_000)
     });
     const repaired = await repository.getMemoryById(legacy.id);
 

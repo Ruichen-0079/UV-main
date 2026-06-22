@@ -30,6 +30,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@companion/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       '@companion/core':
         specifier: workspace:*
         version: link:../../packages/core

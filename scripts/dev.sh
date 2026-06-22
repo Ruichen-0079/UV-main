@@ -15,7 +15,9 @@ web_log="$state_dir/web.log"
 restart_marker="$state_dir/restart-request.json"
 
 server_url="http://localhost:6121"
-web_url="http://localhost:5173"
+web_host="${YUVI_WEB_HOST:-${WEB_HOST:-127.0.0.1}}"
+web_port="${YUVI_WEB_PORT:-${WEB_PORT:-5173}}"
+web_url="http://$web_host:$web_port"
 websocket_url="ws://localhost:6121/ws"
 
 add_node_path() {
@@ -204,8 +206,12 @@ start_web() {
     return
   fi
 
+  if [ "$web_host" = "0.0.0.0" ]; then
+    echo "警告：YUVI_WEB_HOST=0.0.0.0 会将开发 Dashboard 暴露到局域网。" >&2
+  fi
+
   echo "启动 Web UI: $web_url"
-  setsid bash -lc 'cd apps/web && exec pnpm dev -- --host 0.0.0.0 --port 5173' >"$web_log" 2>&1 < /dev/null &
+  setsid bash -lc 'cd apps/web && exec pnpm dev' >"$web_log" 2>&1 < /dev/null &
 
   echo "$!" > "$web_pid_file"
   sleep 2

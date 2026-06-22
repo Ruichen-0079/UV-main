@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { applyRuntimeEnv, readRuntimeEnvFiles } from "../packages/config/src/index.js";
+import { normalizePostgresConnectionString } from "../packages/memory/src/index.js";
 import { Pool } from "pg";
 import { createProviderRegistryFromEnv } from "../packages/providers/src/index.js";
 
@@ -34,7 +35,7 @@ type BackfillSummary = {
 const DEFAULT_LIMIT = 100;
 
 async function main(): Promise<void> {
-  await loadEnvFiles();
+  await loadRuntimeEnv();
   const options = parseArgs(process.argv.slice(2));
 
   const databaseUrl = process.env["DATABASE_URL"];
@@ -59,7 +60,10 @@ async function main(): Promise<void> {
     `Options dryRun=${String(options.dryRun)} force=${String(options.force)} missingOnly=${String(options.missingOnly)} limit=${options.limit}`
   );
 
-  const pool = new Pool({ connectionString: databaseUrl });
+  const pool = new Pool({
+    connectionString: normalizePostgresConnectionString(databaseUrl),
+    connectionTimeoutMillis: 10_000
+  });
   const summary: BackfillSummary = { scanned: 0, skipped: 0, embedded: 0, failed: 0 };
 
   try {
@@ -222,41 +226,17 @@ function vectorLiteral(embedding: number[]): string {
   return `[${embedding.map((value) => Number(value).toFixed(8)).join(",")}]`;
 }
 
-async function loadEnvFiles(): Promise<void> {
-  for (const file of [".env", ".env.local"]) {
-    try {
-      const text = await readFile(file, "utf8");
-      for (const [key, value] of parseDotEnv(text)) {
-        process.env[key] = value;
-      }
-      console.log(`[env] Loaded ${file}`);
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-        continue;
-      }
-      throw error;
+async function loadRuntimeEnv(): Promise<void> {
+  const runtimeEnvFiles = await readRuntimeEnvFiles();
+  applyRuntimeEnv(runtimeEnvFiles.env);
+  for (const [label, file] of [
+    [".env", runtimeEnvFiles.base],
+    [".env.local", runtimeEnvFiles.local]
+  ] as const) {
+    if (file.exists) {
+      console.log(`[env] Loaded ${label}: keys=${Object.keys(file.values).sort().join(",")}`);
     }
   }
-}
-
-function parseDotEnv(text: string): Array<[string, string]> {
-  const entries: Array<[string, string]> = [];
-  for (const line of text.split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const equals = trimmed.indexOf("=");
-    if (equals <= 0) continue;
-    const key = trimmed.slice(0, equals).trim();
-    let value = trimmed.slice(equals + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    entries.push([key, value]);
-  }
-  return entries;
 }
 
 function safeErrorMessage(error: unknown): string {

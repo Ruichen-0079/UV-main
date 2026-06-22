@@ -1,14 +1,18 @@
-import { readFile } from "node:fs/promises";
+import { applyRuntimeEnv, readRuntimeEnvFiles } from "../packages/config/src/index.js";
+import { normalizePostgresConnectionString } from "../packages/memory/src/index.js";
 import { Pool } from "pg";
 
 async function main(): Promise<void> {
-  await loadEnvFiles();
+  await loadRuntimeEnv();
   const databaseUrl = process.env["DATABASE_URL"];
   if (!databaseUrl?.trim()) {
     throw new Error("DATABASE_URL is required for memory index status.");
   }
 
-  const pool = new Pool({ connectionString: databaseUrl });
+  const pool = new Pool({
+    connectionString: normalizePostgresConnectionString(databaseUrl),
+    connectionTimeoutMillis: 10_000
+  });
   try {
     const [indexes, counts] = await Promise.all([
       pool.query<{
@@ -61,40 +65,17 @@ async function main(): Promise<void> {
   }
 }
 
-async function loadEnvFiles(): Promise<void> {
-  for (const file of [".env", ".env.local"]) {
-    try {
-      const text = await readFile(file, "utf8");
-      for (const [key, value] of parseDotEnv(text)) {
-        process.env[key] = value;
-      }
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-        continue;
-      }
-      throw error;
+async function loadRuntimeEnv(): Promise<void> {
+  const runtimeEnvFiles = await readRuntimeEnvFiles();
+  applyRuntimeEnv(runtimeEnvFiles.env);
+  for (const [label, file] of [
+    [".env", runtimeEnvFiles.base],
+    [".env.local", runtimeEnvFiles.local]
+  ] as const) {
+    if (file.exists) {
+      console.log(`[env] Loaded ${label}: keys=${Object.keys(file.values).sort().join(",")}`);
     }
   }
-}
-
-function parseDotEnv(text: string): Array<[string, string]> {
-  const entries: Array<[string, string]> = [];
-  for (const line of text.split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const equals = trimmed.indexOf("=");
-    if (equals <= 0) continue;
-    const key = trimmed.slice(0, equals).trim();
-    let value = trimmed.slice(equals + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    entries.push([key, value]);
-  }
-  return entries;
 }
 
 function safeErrorMessage(error: unknown): string {

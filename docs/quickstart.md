@@ -1,13 +1,13 @@
 # Developer Quickstart
 
-This guide gets the MVP runtime running locally with WSL/Linux scripts, Docker development infra, in-memory memory by default, and mock optional providers when real keys are not configured.
+This guide gets the MVP runtime running locally with Windows PowerShell or WSL/Linux scripts, Docker development infra, in-memory memory by default, and mock optional providers when real keys are not configured.
 
 ## 1. Prerequisites
 
 - Node.js 22 or newer
 - pnpm 9 or newer
-- Docker, or WSL2 with Docker Engine
-- Docker development infra through `infra/docker-compose.yml`
+- Docker Desktop on Windows, or Docker Engine on Linux/WSL
+- Docker development infra through `infra/docker-compose.yml`, with ports bound to `127.0.0.1` only
 
 Check local tools:
 
@@ -18,7 +18,7 @@ docker --version
 docker compose version
 ```
 
-On Windows PowerShell, use `pnpm.cmd` if `pnpm` is blocked by execution policy.
+On Windows PowerShell, use `pnpm.cmd` if `pnpm` is blocked by execution policy. The recommended Windows checkout path is `C:\Dev\UV-main`.
 
 ## 2. Environment Setup
 
@@ -96,7 +96,9 @@ DEFAULT_EMBEDDING_PROVIDER=mock
 
 Keep `SERVER_HOST=127.0.0.1` for local development. If you intentionally set `SERVER_HOST=0.0.0.0`, the server prints a warning because the development API may be reachable from the local network.
 
-`./scripts/dev.sh` loads `.env` automatically and does not print secret values. If you start the server without the scripts, load `.env` into your shell first.
+Runtime env files are loaded from the workspace root as `.env`, then the current process environment, then `.env.local`. `apps/server/.env.local` is a legacy path and is not loaded.
+
+`./scripts/dev.sh` and `.\scripts\dev.ps1` load env automatically and do not print secret values. If you start the server without the scripts, load `.env` into your shell first.
 
 Bash or WSL:
 
@@ -202,7 +204,13 @@ Install dependencies if needed:
 pnpm install
 ```
 
-Start the server and web dashboard:
+Start the server and web dashboard on Windows:
+
+```powershell
+.\scripts\dev.ps1
+```
+
+Start the server and web dashboard on Bash/Linux:
 
 ```bash
 ./scripts/dev.sh
@@ -214,9 +222,9 @@ For lightweight in-memory development without starting Docker infrastructure:
 SKIP_INFRA=1 ./scripts/dev.sh
 ```
 
-`dev.sh` still loads `.env` first and `.env.local` second, and it does not print secret values.
+The web dashboard binds to `127.0.0.1` by default. Set `YUVI_WEB_HOST=0.0.0.0` only when you intentionally expose it on the LAN.
 
-Windows LTSC wrapper:
+Windows `.cmd` wrapper:
 
 ```cmd
 scripts\start-dev.cmd
@@ -235,6 +243,13 @@ Check or stop services:
 ```bash
 ./scripts/health.sh
 ./scripts/stop.sh
+```
+
+PowerShell:
+
+```powershell
+.\scripts\health.ps1
+.\scripts\stop.ps1
 ```
 
 ## 6. Test Health Endpoint

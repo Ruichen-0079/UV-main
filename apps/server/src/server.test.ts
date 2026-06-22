@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const originalEnv = { ...process.env };
+const testTmpDir = tmpdir();
 const createdRuntimeEnvDirs: string[] = [];
 
 afterEach(async () => {
@@ -1960,7 +1961,7 @@ type TestEnvOverrides = Record<string, string | undefined>;
 
 function createTestEnv(overrides: TestEnvOverrides = {}): NodeJS.ProcessEnv {
   const runtimeEnvDir =
-    overrides["YUVI_RUNTIME_ENV_DIR"] ?? mkdtempSync(path.join(tmpdir(), "yuvi-server-test-env-"));
+    overrides["YUVI_RUNTIME_ENV_DIR"] ?? mkdtempSync(path.join(testTmpDir, "yuvi-server-test-env-"));
   if (!overrides["YUVI_RUNTIME_ENV_DIR"]) {
     createdRuntimeEnvDirs.push(runtimeEnvDir);
   }

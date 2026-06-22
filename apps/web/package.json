@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 5173",
+    "dev": "vite",
     "build": "tsc -b tsconfig.json && vite build",
     "check": "tsc -b tsconfig.json --pretty false",
-    "preview": "vite preview --host 0.0.0.0 --port 5173"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
