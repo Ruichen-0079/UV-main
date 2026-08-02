@@ -1,14 +1,15 @@
-# Memory
+# 记忆
 
-记忆不是原始聊天日志注入。运行时会存储结构化记忆，检索候选项，对它们排序、压缩，并重构成 prompt-safe 的上下文。
+记忆不是原始聊天日志注入。运行时会存储结构化记忆，检索候选记忆，对它们排序、压缩，并重构成提示词安全的上下文。完整用词见[统一术语表](terminology.zh-CN.md)。
 
 ## Categories
 
-- `working`: 短期任务/会话状态，例如当前目标或活跃偏好。
-- `episodic`: 被记住的交互和事件，以紧凑摘要而不是原始 transcript 存储。
-- `semantic`: 关于用户、companion、世界、项目或实体的稳定事实。
-- `emotional`: 情绪信号，例如 valence、arousal、反复出现的压力源，以及正向锚点。
-- `procedural`: 学到的惯例、指令、工作流，以及“我们如何做这件事”的模式。
+- `working`（工作记忆）：短期任务/会话状态，例如当前目标或活跃偏好。
+- `episodic`（情景记忆）：被记住的交互和事件，以紧凑摘要而不是原始对话记录存储。
+- `semantic`（语义记忆）：关于用户、AI 伴侣、项目或实体的稳定事实。
+- `emotional`（情感记忆）：情绪信号，例如效价、唤醒度、反复出现的压力源和正向锚点。
+- `procedural`（程序性记忆）：学到的惯例、指令、工作流，以及“我们如何做这件事”的模式。
+- `relationship`（关系记忆）：用户、AI 伴侣或其他实体之间的关系信息。
 
 ## Storage
 
@@ -34,7 +35,7 @@ pnpm memory:embed:backfill -- --dry-run
 pnpm memory:embed:backfill -- --force --limit=500
 ```
 
-Migration 会为 content / summary 建立 trigram index，为 tags / metadata 建立 GIN index，并为 scope、scopeId、memoryLayer、status、type、subtype、source、sourceTraceId、timestamp 和 importance 建立辅助索引。检索会覆盖 content、summary、tags、type、subtype、scope、scopeId、memoryLayer、source/sourceTraceId 和安全 metadata 文本，可以处理中文、英文、中英混合、Windows 路径、URL、端口、`MEMORY_EXTRACTOR` 这类 env key，以及 `pnpm db:migrate` 这类命令。Prompt Preview 和 Dashboard search debug 会显示 `retrievalMode`、`matchedBy`、`score`、rank components 和 `sourceTraceId`。
+Migration 会为 content / summary 建立 trigram index，为 tags / metadata 建立 GIN index，并为 scope、scopeId、memoryLayer、status、type、subtype、source、sourceTraceId、timestamp 和 importance 建立辅助索引。检索会覆盖 content、summary、tags、type、subtype、scope、scopeId、memoryLayer、source/sourceTraceId 和安全 metadata 文本，可以处理中文、英文、中英混合、Windows 路径、URL、端口、`MEMORY_EXTRACTOR` 这类环境变量键，以及 `pnpm db:migrate` 这类命令。提示词预览和控制台搜索调试会显示 `retrievalMode`、`matchedBy`、`score`、rank components 和 `sourceTraceId`。
 
 ## Memory Model v2
 
@@ -96,7 +97,7 @@ Prompt Preview 会显示 Direct Context budget metadata：`directContextEnabled`
 
 ## Manual Management
 
-Dashboard 的 Memory 页面是开发期手动记忆管理控制台。它可以：
+控制台的记忆页面是开发期手动记忆管理界面。它可以：
 
 - 查看 memory detail 和 debug metadata
 - 创建带 type、subtype、scope、layer、status、summary、importance、source、tags 和 temporal fields 的 manual memory
@@ -112,15 +113,15 @@ Archive / restore / forget 是第一版 forgetting foundation。Archive 会让 m
 
 自动写入 memory 采用保守策略。`readMemory` 控制是否检索记忆进入 prompt context，`writeMemory` 控制 runtime 是否可以在一次对话后写入新 memory。`writeMemory=false` 时 runtime 不能写入 memory。
 
-Rule-based extractor 只会为稳定信号提出候选记忆，例如明确的 `remember` / `记住`、`from now on` / `以后`、长期偏好、provider choice、项目路径、仓库路径、启动命令、配置决策、排错结论、稳定 workflow instruction 和项目里程碑。普通问题、问候、失败回答、无法确定或缺少上下文的 assistant response 不会被自动存储。需要精确修正时，请使用 Dashboard Memory 页面手动管理。
+基于规则的记忆提取器只会为稳定信号提出候选记忆，例如明确的 `remember` / `记住`、`from now on` / `以后`、长期偏好、提供方选择、项目路径、仓库路径、启动命令、配置决策、排障结论、稳定工作流指令和项目里程碑。普通问题、问候、失败回答、无法确定或缺少上下文的助手回复不会被自动存储。需要精确修正时，请使用控制台的记忆页面手动管理。
 
 `MEMORY_EXTRACTOR=llm` 是默认模式，在 DeepSeek Reasoning provider 已配置时会使用它，因此只会在 `writeMemory=true` 时消耗 reasoning token。LLM 只能提出候选记忆，最终仍由 `MemoryService` 负责校验、评分、去重和决定是否写入。无效 JSON 会 fail closed，Reasoning provider 不可用时会回退到 rule-based extractor。`MEMORY_EXTRACTOR=rule-based` 仍可用于确定性、无 token 消耗的抽取。
 
-## Candidate Review
+## 候选记忆审核
 
-Dashboard 会把最近的 memory extraction candidates 作为开发期 debug state 展示出来。Candidate history 目前是 in-memory 且 volatile 的，服务器重启后会清空。Candidate 只是建议，不是新的持久化来源。界面会显示 extractor mode、source trace、type/subtype、preview text、summary、importance、confidence、tags、reason，以及 decision（`stored`、`rejected` 或 `candidate`）。疑似 secret 的 metadata key，例如 API key、token、password、bearer 值和 Authorization header，会被脱敏。
+控制台会把最近的候选记忆作为开发期调试状态展示出来。候选记忆历史当前仅在内存中保存，服务器重启后会清空。候选记忆只是建议，不是新的持久化来源。界面会显示提取器模式、来源链路、类型/细分类型、预览文本、摘要、重要性、置信度、标签、理由，以及决策（`stored`、`rejected` 或 `candidate`）。疑似密钥的元数据键会被脱敏。
 
-开发者可以在 Dashboard 中 accept、edit-and-save 或 reject 最近的 candidate。Accept 会通过正常 MemoryService 路径写成 dashboard/manual memory；如果 candidate 已经被 stored，再次 accept 不会创建重复 memory。Reject 只更新内存中的 candidate history。LLM extraction 不会绕过校验、评分或手动 memory controls。
+开发者可以在控制台中接受、编辑并保存或拒绝最近的候选记忆。接受会通过正常 `MemoryService` 路径写成 `dashboard`/`manual` 记忆；如果候选记忆已被 `stored`，再次接受不会创建重复记忆。拒绝只更新内存中的候选记忆历史。LLM 提取不会绕过校验、评分或手动记忆控制。
 
 ## Prompt Safety
 

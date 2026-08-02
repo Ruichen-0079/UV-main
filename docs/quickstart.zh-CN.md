@@ -57,12 +57,12 @@ Copy-Item .env.example .env
 
 `.env.example` 只保存占位配置和空 secret。`.env` 是敏感本地状态，只能保存在本机，不要打印、提交或粘贴其中的 API key、Authorization header、token 或 password。
 
-Dashboard Settings 保存的本地覆盖配置会写入 `.env.local`，不会修改已提交的 `.env.example`，也不会直接显示原始 API key。开发脚本会先加载 `.env`，再加载 `.env.local`，因此 `.env.local` 会在重启后覆盖 `.env`。
+控制台设置保存的本地覆盖配置会写入 `.env.local`，不会修改已提交的 `.env.example`，也不会直接显示原始 API key。开发脚本会先加载 `.env`，再加载 `.env.local`，因此 `.env.local` 会在重启后覆盖 `.env`。
 
 Settings 页面会显示配置分层：
 
 - Base `.env`：基础本地配置文件。
-- Local override `.env.local`：Dashboard 写入的本地覆盖文件。
+- Local override `.env.local`：控制台写入的本地覆盖文件。
 - Effective value：`.env`、当前环境变量和 `.env.local` 合并后的安全值。
 - Active runtime value：当前运行中的 provider / memory 状态。
 
@@ -156,9 +156,9 @@ Get-Content .env |
   }
 ```
 
-## 2.1 Dashboard Settings 与 Apply Now
+## 2.1 控制台设置与立即应用
 
-Dashboard 的 Settings 页面用于开发期配置 provider、模型和 memory mode：
+控制台的设置页面用于开发期配置提供方、模型和记忆模式：
 
 - **Save Settings** 会把允许的配置写入 `.env.local`。
 - **Apply Now / Reload Runtime Config** 会重新加载 `.env` 和 `.env.local`，并重建运行中的 provider registry。
@@ -365,13 +365,13 @@ scripts\stop-dev.cmd
 
 `./scripts/dev.sh` 会检查 Node.js、pnpm、Docker、docker compose、`.env` 和 `.env.example`，在存在 `infra/docker-compose.yml` 时启动 PostgreSQL + pgvector 和 Redis。如果缺少 `node_modules`，它会执行 `pnpm install`。它会启动已有的 `apps/server`，并在未来 `apps/web` 存在时启动 Web dev server。
 
-当前 Dashboard 已由 `apps/web` 提供。启动后打开：
+当前 Web 控制台由 `apps/web` 提供。启动后打开：
 
 ```text
 http://localhost:5173
 ```
 
-Dashboard 页面作用：
+控制台页面作用：
 
 - Overview：查看 server、database、provider、WebSocket、recent events、recent memories。
 - Chat：发送文本消息，查看 reply 和 traceId。
@@ -383,7 +383,7 @@ Dashboard 页面作用：
 - Vision：未来 vision 调试页，目前是占位。
 - Settings：查看开发期 URL 和 secret safety 提示。
 
-自动记忆写入是保守的：`readMemory` 控制检索，`writeMemory` 控制自动写入。普通聊天、问候、一次性问题或 assistant 明确表示缺少上下文的失败回答不会自动写入。明确说“记住”、长期偏好、provider choice、项目路径、启动命令、配置决策、排错结论和项目里程碑更适合自动写入；需要精确编辑时使用 Dashboard 的 Memory 页面。
+自动记忆写入是保守的：`readMemory` 控制检索，`writeMemory` 控制自动写入。普通聊天、问候、一次性问题或助手明确表示缺少上下文的失败回答不会自动写入。明确说“记住”、长期偏好、提供方选择、项目路径、启动命令、配置决策、排障结论和项目里程碑更适合自动写入；需要精确编辑时使用控制台的记忆页面。
 
 ## 6. Test Health Endpoint
 
@@ -640,14 +640,14 @@ DASHSCOPE_STT_MODEL=...
 
 不要在 source file 中硬编码 model name。
 
-## 10. Dashboard Settings
+## 10. 控制台设置
 
-Dashboard 的 `Settings` 页面可以写入本地 development 配置到 `.env.local`。
+控制台的“设置”页面可以把本地开发配置写入 `.env.local`。
 
 - `.env.local` 是本地状态，不要提交。
 - `./scripts/dev.sh` 会先加载 `.env`，再加载 `.env.local`，因此 `.env.local` 会在重启后覆盖 `.env` 中的同名变量。
-- Dashboard 不会返回完整 API key，也不会返回 Authorization header 或 raw `.env`。
-- Dashboard 只显示固定长度的 masked API key，例如 `••••••••••••abcd`。
+- 控制台不会返回完整 API key，也不会返回 Authorization header 或原始 `.env`。
+- 控制台只显示固定长度的脱敏 API key，例如 `••••••••••••abcd`。
 - 保存后返回 `restartRequired=true` 时，需要重启 server 才会生效。
 - `MEMORY_REPOSITORY=in-memory` 是默认开发模式，server 重启后数据会丢失。
 - `MEMORY_REPOSITORY=postgres` 需要 `DATABASE_URL`，并先运行：
@@ -656,16 +656,16 @@ Dashboard 的 `Settings` 页面可以写入本地 development 配置到 `.env.lo
 pnpm db:migrate
 ```
 
-Dashboard 当前不会热切换 memory backend；切换 memory repository 只是写入配置，重启后生效。
+控制台当前不会热切换记忆后端；切换记忆仓储只是写入配置，重启后生效。
 
 ## 11. Memory Model v2
 
 YUVI Memory Core 现在包含 scope、memoryLayer、status、temporal validity 和 lightweight supersession 字段。
 
 - 默认 prompt retrieval 只注入 `status=active` 且当前有效的 memories。
-- `archived` memories 可在 Dashboard 手动查看，但默认不会注入 prompt。
+- `archived` 记忆可在控制台手动查看，但默认不会注入提示词。
 - `forgotten`、`expired`、`superseded` memories 默认不会进入 prompt retrieval。
-- Dashboard Memory 页面可以编辑 scope、layer、status、observedAt、validFrom、validUntil 和 expiresAt。
+- 控制台的记忆页面可以编辑 scope、layer、status、observedAt、validFrom、validUntil 和 expiresAt。
 - Archive / Restore / Forget 是开发期 forgetting foundation；Hard Delete 仍然只作为开发控制台操作使用。
 
 Prompt Preview 会显示 `CurrentTime` section，包含当前 ISO timestamp、timezone 和 local date，帮助后续 Chat / Reasoning 理解 recency 和 temporal validity。

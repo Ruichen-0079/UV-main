@@ -1,6 +1,6 @@
 # Providers
 
-运行时使用提供商接口和 `ProviderRegistry`，让核心编排可以调用模型能力，而不需要知道背后是哪一个 vendor SDK 或 HTTP API。
+运行时使用能力提供方接口和 `ProviderRegistry`，让核心编排可以调用模型能力，而不需要知道背后是哪一个厂商 SDK 或 HTTP API。中文术语以[统一术语表](terminology.zh-CN.md)为准。
 
 ## Default Mapping
 
@@ -13,21 +13,21 @@
 
 ## Why Core Does Not Import Provider SDKs
 
-`packages/core` 必须保持提供商中立。它不应该直接 import DeepSeek、xAI、Alibaba、OpenAI-compatible client 或 vendor SDK。
+`packages/core` 必须保持提供方中立。它不应直接 import DeepSeek、xAI、Alibaba、OpenAI-compatible client 或厂商 SDK。
 
 这样可以让运行时：
 
-- 更容易用 mock provider 测试
+- 更容易用模拟提供方测试
 - 在没有配置所有 API key 时更安全地本地运行
-- 之后更容易替换提供商
-- 更不容易把 vendor-specific 响应形状泄漏到提示词、记忆或 protocol event 中
-- 在某个 provider API 变化时更有韧性
+- 之后更容易替换提供方
+- 更不容易把厂商专用响应形状泄漏到提示词、记忆或协议事件中
+- 在某个提供方 API 变化时更有韧性
 
-具体提供商代码属于 `packages/providers/src/<vendor>/`。
+具体提供方代码属于 `packages/providers/src/<vendor>/`。
 
 ## ProviderRegistry
 
-`ProviderRegistry` 是组合边界。它负责提供商选择、env 解析和 fallback 行为。运行时核心依赖 `ProviderResolver` 形状，而不是具体 vendor class。
+`ProviderRegistry` 是组合边界。它负责提供方选择、环境变量解析和回退行为。运行时核心依赖 `ProviderResolver` 形状，而不是具体厂商类。
 
 运行时代码应该按能力请求：
 
@@ -36,9 +36,9 @@ const chat = providers.getChatProvider();
 const reply = await chat.generateReply(input);
 ```
 
-注册表决定这个提供商是 DeepSeek、xAI、DashScope、mock，还是 unavailable placeholder。
+注册表决定这个提供方是 DeepSeek、xAI、DashScope、模拟提供方，还是不可用占位实现。
 
-内部实现中，提供商构造按能力组织为 provider-name factory map。要添加另一个 chat、TTS、STT、vision 或 embedding provider，应添加新的 factory entry，而不是在运行时代码里分支。
+内部实现中，提供方构造按能力组织为 provider-name factory map。要添加另一个对话、语音合成、语音转写、视觉理解或向量嵌入提供方，应添加新的 factory entry，而不是在运行时代码里分支。
 
 当前注册表入口：
 
@@ -101,11 +101,11 @@ EMBEDDING_DIMENSIONS=1536
 
 YUVI 默认采用 real-provider-first。`EMBEDDING_PROVIDER=openai-compatible` 会在配置 `EMBEDDING_API_BASEURL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL` 和 `EMBEDDING_DIMENSIONS` 后调用 OpenAI-style `/embeddings` endpoint。`EMBEDDING_PROVIDER=mock` 只用于测试、CI 或显式离线模式，并会报告 `semanticEmbedding=false`，表示它只能验证检索管线，不能提供真实语义相似度。Embedding status 只返回 provider、model、dimensions、mock/configured/available 状态，绝不返回 API key。
 
-如果缺少可选提供商配置并且禁用了 mock，注册表会返回 unavailable provider。`healthCheck()` 会报告 `unavailable`，实际调用会抛出标准化的 `ProviderError`。
+如果缺少可选提供方配置并且禁用了模拟实现，注册表会返回不可用提供方。`healthCheck()` 会报告 `unavailable`，实际调用会抛出标准化的 `ProviderError`。
 
 ## Swapping Providers
 
-添加或替换提供商：
+添加或替换提供方：
 
 1. 在 `packages/providers/src/types/*` 实现 capability interface。
 2. 把 vendor-specific 请求/响应格式化留在 `packages/providers/src/<vendor>/`。
@@ -117,7 +117,7 @@ YUVI 默认采用 real-provider-first。`EMBEDDING_PROVIDER=openai-compatible` �
 
 ## Error Normalization
 
-提供商实现应该抛出 `ProviderError`，并使用以下 code 之一：
+提供方实现应该抛出 `ProviderError`，并使用以下 code 之一：
 
 - `MISSING_API_KEY`
 - `INVALID_API_KEY`
@@ -161,7 +161,7 @@ Mock provider 适用于：
 - runtime orchestration tests
 - CI without vendor credentials
 
-Mock 应该是确定性的、提供商中立的。它们不应该伪装成生产质量。
+模拟提供方应该是确定性的、提供方中立的。它们不应该伪装成生产质量。
 
 ## Raw Provider Responses
 

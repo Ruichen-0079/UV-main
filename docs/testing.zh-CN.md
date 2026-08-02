@@ -26,7 +26,7 @@ pnpm.cmd smoke
 - 事件总线可以 publish、subscribe、wildcard-match 和 unsubscribe。
 - 事件总线会隔离 subscriber failure，避免一个 listener 破坏另一个 listener。
 - 提示词构建器会遵守配置的字符预算。
-- 提供商注册表可以在没有真实 key 时初始化 mock provider。
+- 提供方注册表可以在没有真实 key 时初始化模拟提供方。
 - Provider error 会标准化为共享的 `ProviderError` code。
 - 原始 provider response 默认省略，并且需要 `PROVIDER_INCLUDE_RAW_RESPONSES=true`。
 - 即使可选的 reply 后记忆/TTS 副作用失败，运行时编排也会返回 reply。

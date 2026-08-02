@@ -2,19 +2,19 @@
 
 ## 项目目标
 
-AI Companion Runtime 是一个事件驱动、本地优先的 companion runtime。它受到 Project AIRI 架构愿景启发，但本仓库是原创实现，不复制 AIRI 代码。
+YUVI Runtime 是一个本地优先、事件驱动的 AI 伴侣运行时。它受到 Project AIRI 架构愿景启发，但本仓库是原创实现，不复制 AIRI 代码。中文用词以[统一术语表](terminology.zh-CN.md)为准。
 
 最终目标是一个面向 Windows、macOS、Linux 的一体化桌面应用。当前阶段先构建可运行、可调试、可扩展的 runtime 基础。
 
 核心方向：
 
-- runtime core
-- protocol event
-- memory subsystem
-- prompt builder
-- provider abstraction
-- developer dashboard
-- future Tauri desktop app
+- 运行时核心
+- 协议事件
+- 记忆子系统
+- 提示词构建器
+- 提供方抽象
+- 开发期 Web 控制台
+- 规划中的 Tauri 桌面模式
 - future Live2D / VRM / voice / vision integration
 
 ## 当前开发环境
@@ -44,17 +44,19 @@ C:\Users\Administrator.DESKTOP-NPU6DHJ\Desktop\uv-main
 - WSL filesystem 中安装依赖和运行 watcher 通常更快。
 - Node.js、pnpm、Docker、docker compose 可以统一在 Ubuntu 中运行。
 - Windows PowerShell execution policy 不会影响 WSL 内 pnpm。
-- 生产 desktop mode 必须与开发 infra 解耦。
+- 规划中的桌面模式必须与开发基础设施解耦。
 
 ## 核心原则
 
-运行时是核心产品。Avatar、Dashboard、terminal client、future desktop shell 都应该通过同一个 runtime 通信。
+运行时是核心产品。虚拟形象、Web 控制台、终端客户端和规划中的桌面外壳都应通过同一个运行时通信。
 
 `packages/core` 只依赖接口，不直接 import DeepSeek、xAI、Alibaba concrete class。provider-specific 代码属于 `packages/providers`。
 
 记忆不是把原始聊天日志直接塞进 prompt。记忆必须被检索、排序、压缩、重构，然后再注入 prompt。
 
 所有主要输入/输出都应该表示为 runtime event。
+
+事件语义中，`agent.reply` 是运行时编排器产生的内部回复，`assistant.message` 是最终向用户发布的文本消息。主对话流当前产生 `agent.reply`；面向最终发布语义的传输层或消费者应使用或转换为 `assistant.message`。两者不是可随意互换的同义事件。
 
 HTTP 和 WebSocket handler 应保持轻薄，业务逻辑属于 `packages/core` 或 service。
 
@@ -90,11 +92,12 @@ Image or screen input
 
 Fastify HTTP/WebSocket runtime server。负责 route、transport、health、startup/shutdown。Handler 应保持轻薄。
 
-当前 Dashboard 需要的主要 endpoint：
+当前 Web 控制台需要的主要 API 端点：
 
 - `GET /health`
 - `GET /providers/status`
-- `POST /message`
+- `POST /v1/messages`（版本化端点）
+- `POST /message`（兼容端点）
 - `GET /memory/recent`
 - `POST /memory`
 - `GET /memory/search?q=`
@@ -104,7 +107,7 @@ Fastify HTTP/WebSocket runtime server。负责 route、transport、health、star
 
 ### `apps/web`
 
-Vite + React + TypeScript + Tailwind CSS developer dashboard。它用于调试 runtime，不是 Live2D UI。
+Vite + React + TypeScript + Tailwind CSS 开发期 Web 控制台。它用于调试运行时，不是 Live2D 用户界面。
 
 ### `packages/protocol`
 
@@ -112,15 +115,15 @@ Vite + React + TypeScript + Tailwind CSS developer dashboard。它用于调试 r
 
 ### `packages/event-bus`
 
-event bus 抽象。MVP 使用 in-memory implementation，未来可在同一接口背后接入 NATS / JetStream。
+事件总线抽象。MVP 使用内存实现，未来可在同一接口背后接入 NATS / JetStream。
 
 ### `packages/memory`
 
-memory repository 和 service。开发期使用 PostgreSQL + pgvector 或 in-memory fallback。负责 memory 类型、检索、评分、prompt-safe reconstruction。
+记忆仓储和记忆服务。开发期使用 PostgreSQL + pgvector 或内存回退实现，负责记忆类型、检索、评分和提示词安全的记忆重构。
 
 ### `packages/prompt-builder`
 
-把 identity、character style、relationship context、retrieved memories、current situation、tools、user message 组装为 provider-neutral prompt。
+把系统身份、角色风格、关系上下文、相关记忆、当前情境、可用工具和用户消息组装为提供方中立的提示词。
 
 ### `packages/config`
 
@@ -128,11 +131,11 @@ typed runtime configuration boundary。负责 env parsing、provider selection�
 
 ### `packages/providers`
 
-provider interfaces、registry、normalized errors、vendor-specific implementation。DeepSeek、xAI、DashScope 具体请求/响应处理都属于这里。
+提供方接口、注册表、标准化错误和厂商专用实现。DeepSeek、xAI、DashScope 的具体请求/响应处理都属于这里。
 
 ### `packages/core`
 
-runtime orchestration。负责接收事件、检索记忆、构建 prompt、调用 provider interface、写入重要交互、发布 runtime event。
+运行时编排。负责接收事件、检索记忆、构建提示词、调用提供方接口、写入重要交互和发布运行时事件。
 
 ## Provider Mapping
 
@@ -145,7 +148,7 @@ runtime orchestration。负责接收事件、检索记忆、构建 prompt、调�
 - STT: Alibaba Cloud DashScope
 - Embedding: configurable
 
-secret 只应存在于本地 `.env` 或安全配置来源中，不应出现在日志、Dashboard、event payload 或错误响应中。
+密钥只应存在于本地 `.env` 或安全配置来源中，不应出现在日志、控制台、事件负载或错误响应中。
 
 ## 开发与生产模式
 
@@ -159,7 +162,7 @@ development mode 可以依赖：
 - Redis
 - NATS
 
-future production desktop mode 不得要求用户安装这些开发依赖。生产桌面模式应转向 embedded local store，例如 SQLite + vector extension 或 LanceDB。
+规划中的桌面模式不得要求用户安装这些开发依赖。其本地存储应转向嵌入式本地存储，例如 SQLite + 向量扩展或 LanceDB。
 
 ## MVP 非目标
 

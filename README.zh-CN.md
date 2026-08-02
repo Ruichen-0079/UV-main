@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-YUVI Runtime 是一个本地优先、事件驱动的 AI Companion Runtime。它受到 Project AIRI 架构愿景启发，但本仓库是原创实现，不复制 AIRI 代码。
+YUVI Runtime 是一个本地优先、事件驱动的 AI 伴侣运行时。它受到 Project AIRI 架构愿景启发，但本仓库是原创实现，不复制 AIRI 代码。术语以[统一术语表](docs/terminology.zh-CN.md)为准。
 
 项目目标是构建一个可扩展的 Companion Runtime，而不是只做一个聊天页面。当前重点包括：
 
@@ -10,7 +10,7 @@ YUVI Runtime 是一个本地优先、事件驱动的 AI Companion Runtime。它�
 - 记忆系统
 - prompt builder
 - provider abstraction
-- 开发期 Web Dashboard
+- 开发期 Web 控制台
 - 未来 Tauri desktop app
 - 未来 Live2D / VRM / voice / vision 集成
 - 最终面向 Windows、macOS、Linux 的一体化桌面应用
@@ -42,15 +42,15 @@ C:\Users\Administrator.DESKTOP-NPU6DHJ\Desktop\uv-main
 
 ## 仓库结构
 
-- `apps/server`: Fastify HTTP 和 WebSocket runtime server。
-- `apps/web`: Vite + React + TypeScript + Tailwind CSS developer dashboard。
-- `packages/protocol`: runtime event 类型和 schema。
-- `packages/event-bus`: event bus 抽象和内存实现。
-- `packages/memory`: memory repository/service。
-- `packages/prompt-builder`: prompt assembly。
-- `packages/providers`: provider interfaces、registry、vendor-specific provider 实现。
-- `packages/core`: runtime orchestration。
-- `packages/config`: typed runtime config boundary。
+- `apps/server`: Fastify HTTP 和 WebSocket 运行时服务器。
+- `apps/web`: Vite + React + TypeScript + Tailwind CSS 开发期 Web 控制台。
+- `packages/protocol`: 运行时事件类型和 Schema。
+- `packages/event-bus`: 事件总线抽象和内存实现。
+- `packages/memory`: 记忆仓储和记忆服务。
+- `packages/prompt-builder`: 提示词构建。
+- `packages/providers`: 提供方接口、注册表和厂商专用实现。
+- `packages/core`: 运行时编排。
+- `packages/config`: 类型化运行时配置边界。
 - `infra/docker-compose.yml`: development-only PostgreSQL + pgvector、Redis、NATS。
 
 ## 快速启动
@@ -73,7 +73,7 @@ Windows host convenience wrapper：
 scripts\start-dev.cmd
 ```
 
-打开 Dashboard：
+打开控制台：
 
 ```text
 http://localhost:5173

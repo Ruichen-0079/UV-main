@@ -1,6 +1,6 @@
-# Dashboard
+# Web 控制台
 
-`apps/web` 是 AI Companion Runtime 的开发调试 Dashboard。它不是 Live2D avatar UI，也不是最终桌面应用界面。
+`apps/web` 是 YUVI 运行时的开发调试 Web 控制台。它不是 Live2D 虚拟形象界面，也不是最终桌面应用界面；完整用词见[统一术语表](terminology.zh-CN.md)。
 
 ## 启动方式
 
@@ -10,7 +10,7 @@
 ./scripts/dev.sh
 ```
 
-打开 Dashboard：
+打开控制台：
 
 ```text
 http://localhost:5173
@@ -22,7 +22,7 @@ http://localhost:5173
 pnpm --filter @companion/web dev
 ```
 
-Dashboard 默认通过 Vite proxy 调用后端：
+控制台默认通过 Vite 代理调用后端：
 
 ```text
 Server: http://localhost:6121
@@ -33,7 +33,7 @@ WebSocket: ws://localhost:6121/ws
 
 ### Overview
 
-展示 runtime 总览：
+展示运行时概览：
 
 - server status
 - database status
@@ -44,7 +44,7 @@ WebSocket: ws://localhost:6121/ws
 
 ### Chat
 
-用于发送开发期文本消息，验证 `POST /message`：
+用于发送开发期文本消息，验证 `POST /v1/messages`（`POST /message` 为兼容端点）：
 
 - text input
 - send button
@@ -57,7 +57,7 @@ WebSocket: ws://localhost:6121/ws
 
 ### Memory
 
-用于查看和创建 memory：
+用于查看和创建记忆：
 
 - `GET /memory/recent`
 - `POST /memory`
@@ -68,20 +68,20 @@ WebSocket: ws://localhost:6121/ws
 
 ### Providers
 
-用于查看 provider health：
+用于查看提供方健康状态：
 
 - DeepSeek Chat
 - DeepSeek Reasoning
 - xAI TTS
 - xAI Vision
-- Alibaba DashScope STT
-- Embedding provider
+- 阿里云 DashScope 语音转写
+- 向量嵌入提供方
 
-Dashboard 不显示 API key，不显示 Authorization header，不显示 raw secret。
+控制台不显示 API key、Authorization header 或原始密钥。
 
 ### Events
 
-用于查看 runtime event：
+用于查看运行时事件：
 
 - `GET /events/recent`
 - event type filter
@@ -95,11 +95,11 @@ WebSocket 实时事件后续通过 `ws://localhost:6121/ws` 接入。
 
 - `GET /debug/prompt/latest`
 
-该能力只应在 development mode 启用。它用于调试 prompt sections、memory reconstruction、token estimate 等，不应该暴露 secret。
+该能力只应在开发模式启用。它用于调试提示词分段、记忆重构、Token 估算等，不应暴露密钥。
 
 ### Voice
 
-用于未来 voice 调试：
+用于未来语音调试：
 
 - Alibaba Cloud DashScope STT
 - xAI TTS
@@ -109,7 +109,7 @@ WebSocket 实时事件后续通过 `ws://localhost:6121/ws` 接入。
 
 ### Vision
 
-用于未来 vision 调试：
+用于未来视觉调试：
 
 - xAI Vision
 - image/screen perception
@@ -121,17 +121,17 @@ WebSocket 实时事件后续通过 `ws://localhost:6121/ws` 接入。
 
 展示开发期只读配置提示：
 
-- API proxy
-- server URL
+- API 代理
+- 服务器 URL
 - WebSocket URL
-- secret safety reminder
+- 密钥安全提醒
 
-不要在 Dashboard 中输入或展示 API key。
+不要在控制台中输入或展示 API key。
 
 ## 架构边界
 
-- Dashboard 只能通过 `apps/server` 暴露的 HTTP/WebSocket API 通信。
-- Dashboard 不直接连接 PostgreSQL、Redis、NATS。
-- Dashboard 不直接调用 DeepSeek、xAI、DashScope API。
-- Dashboard 不保存或打印 `.env` secret。
-- Live2D / VRM 不在当前 Dashboard 范围内。
+- 控制台只能通过 `apps/server` 暴露的 HTTP/WebSocket API 端点通信。
+- 控制台不直接连接 PostgreSQL、Redis、NATS。
+- 控制台不直接调用 DeepSeek、xAI、DashScope API。
+- 控制台不保存或打印 `.env` 密钥。
+- Live2D / VRM 不在当前控制台范围内。

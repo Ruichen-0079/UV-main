@@ -95,8 +95,13 @@ export const AssistantMessagePayloadSchema = z.object({
 });
 
 export type AssistantMessagePayload = z.infer<typeof AssistantMessagePayloadSchema>;
+/** Final assistant text that has been selected for publication to the user. */
 export type AssistantMessageEvent = RuntimeEvent<"assistant.message", AssistantMessagePayload>;
 
+/**
+ * Internal reply produced by the runtime orchestrator before any transport-specific publication.
+ * Consumers that need the final user-facing publication semantic should use `assistant.message`.
+ */
 export type AgentReplyEvent = RuntimeEvent<"agent.reply", AssistantMessagePayload>;
 
 export type AvatarSpeakPayload = {

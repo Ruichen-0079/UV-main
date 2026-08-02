@@ -91,15 +91,15 @@ const memoryLayers = ["core", "recall", "archival", "working"];
 const memoryStatuses = ["active", "superseded", "archived", "forgotten", "expired"];
 
 const pages: Array<{ id: PageId; label: string }> = [
-  { id: "overview", label: "Overview" },
-  { id: "chat", label: "Chat" },
-  { id: "memory", label: "Memory" },
-  { id: "providers", label: "Providers" },
-  { id: "events", label: "Events" },
-  { id: "prompt", label: "Prompt Preview" },
-  { id: "voice", label: "Voice" },
-  { id: "vision", label: "Vision" },
-  { id: "settings", label: "Settings" }
+  { id: "overview", label: "概览" },
+  { id: "chat", label: "对话" },
+  { id: "memory", label: "记忆" },
+  { id: "providers", label: "提供方" },
+  { id: "events", label: "事件" },
+  { id: "prompt", label: "提示词预览" },
+  { id: "voice", label: "语音" },
+  { id: "vision", label: "视觉" },
+  { id: "settings", label: "设置" }
 ];
 
 export function App(): JSX.Element {
@@ -127,7 +127,7 @@ export function App(): JSX.Element {
       <aside className="flex w-60 shrink-0 flex-col border-r border-ink-200 bg-white">
         <div className="border-b border-ink-200 px-4 py-4">
           <div className="text-sm font-semibold text-ink-500">YUVI Runtime</div>
-          <h1 className="mt-1 text-lg font-semibold text-ink-900">Developer Dashboard</h1>
+          <h1 className="mt-1 text-lg font-semibold text-ink-900">YUVI 开发控制台</h1>
         </div>
         <nav className="flex-1 space-y-1 p-3">
           {pages.map((page) => (
@@ -241,7 +241,7 @@ function OverviewPage(props: {
         <StatusCard
           title="WebSocket"
           status={props.wsStatus}
-          detail="Dashboard runtime event stream"
+          detail="控制台运行时事件流"
         />
         <StatusCard
           title="Memory"
@@ -1274,7 +1274,7 @@ function MemoryPage(props: {
         </Panel>
       </div>
       <div className="grid grid-cols-2 gap-4">
-        <Panel title="Recent Memory Candidates" badge="Debug">
+        <Panel title="最近候选记忆" badge="调试">
           <div className="mb-3 grid grid-cols-4 gap-2 text-xs text-ink-600">
             <div className="rounded-md bg-ink-50 p-2">
               <div className="label">Total</div>
@@ -2051,7 +2051,7 @@ function PromptPreviewPage(): JSX.Element {
         </Panel>
       )}
       {promptPreview?.memoryCandidates && promptPreview.memoryCandidates.length > 0 && (
-        <Panel title="Memory Candidates from this turn" badge="Review">
+        <Panel title="本轮候选记忆" badge="审核">
           <MemoryCandidateList candidates={promptPreview.memoryCandidates} compact />
         </Panel>
       )}
