@@ -109,6 +109,20 @@ export {
 } from "./extractor.js";
 export { MemoryService } from "./service.js";
 export {
+  InMemoryConversationRepository,
+  PostgresConversationRepository,
+  createConversationRepositoryFromEnv,
+  parseConversationRepositoryEnv,
+  type ConversationDatabaseClient,
+  type ConversationListOptions,
+  type ConversationMessage,
+  type ConversationMessageInput,
+  type ConversationMessageRole,
+  type ConversationMessageStatus,
+  type ConversationRepository,
+  type ConversationRepositoryKind
+} from "./conversation-repository.js";
+export {
   MissingDatabaseUrlError,
   parseDotEnv,
   readSqlMigrations,

@@ -2761,6 +2761,11 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("superseded_by");
     expect(combinedSql).toContain("memories_scope_scope_id_idx");
     expect(combinedSql).toContain("memories_memory_layer_idx");
+    expect(combinedSql).toContain("create table if not exists conversation_sessions");
+    expect(combinedSql).toContain("create table if not exists conversation_messages");
+    expect(combinedSql).toContain("sequence bigserial");
+    expect(combinedSql).not.toMatch(/max\s*\(\s*sequence\s*\)/i);
+    expect(combinedSql).toContain("conversation_messages_session_sequence_idx");
     expect(combinedSql).toContain("memories_status_idx");
     expect(combinedSql).toContain("memories_search_tsv_idx");
     expect(combinedSql).toContain("memories_scope_scope_id_status_idx");

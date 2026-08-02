@@ -59,7 +59,7 @@ Event bus abstraction. The MVP uses an in-memory implementation with wildcard su
 
 ### `packages/memory`
 
-Memory repository and service layer. Uses PostgreSQL with pgvector for durable memory, plus an in-memory development fallback. Owns memory categories, retrieval, scoring placeholders, and prompt-safe reconstruction.
+Memory and conversation persistence repositories plus the memory service layer. Uses PostgreSQL with pgvector for durable memory and raw conversation recovery, plus in-memory development fallbacks. Conversation persistence is separate from long-term memory: the in-memory conversation store can restore context only when a Runtime is rebuilt in the same process, while PostgreSQL supports recovery after process restart. Core consumes the Conversation Repository port; Server creates and injects the concrete implementation.
 
 ### `packages/prompt-builder`
 

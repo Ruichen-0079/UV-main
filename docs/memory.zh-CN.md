@@ -56,7 +56,7 @@ Memory record 现在包含 scoped memory、temporal memory、supersession 和 fo
 
 Prompt assembly 现在会组合短期 Direct Context 和长期 RelevantMemory，但二者保持分离：
 
-- `DirectContext` 是有边界的同会话近期上下文，用于最近对话、即时确认、当前任务意图和近期错误。它默认不会持久化为长期记忆。
+- `DirectContext` 是有边界的同会话近期上下文，用于最近对话、即时确认、当前任务意图和近期错误。它不是长期记忆；原始会话持久化由独立的 Conversation Repository 负责。
 - `RelevantMemory` 是从 `MemoryService` 检索出的长期记忆，会先经过 scope/status/time 过滤和 ranking，再进入 prompt。
 
 Direct Context 默认配置为 `DIRECT_CONTEXT_ENABLED=true`、`DIRECT_CONTEXT_MAX_TURNS=6`、`DIRECT_CONTEXT_MAX_CHARS=6000`。Runtime 会优先裁剪最旧 turn，不使用 LLM summarization，并在注入 prompt 前脱敏疑似 secret 的值。

@@ -59,7 +59,7 @@ export async function buildServer(config: ServerConfig) {
     app.log.info("DASHBOARD_DEV_TOKEN is configured for sensitive development endpoints.");
   }
 
-  const context = createAppContext(app.log, config);
+  const context = await createAppContext(app.log, config);
   const maintenanceScheduler = new MemoryMaintenanceScheduler(context, config, app.log);
   context.memoryMaintenanceScheduler = maintenanceScheduler;
   maintenanceScheduler.start();
@@ -67,6 +67,7 @@ export async function buildServer(config: ServerConfig) {
   app.addHook("onClose", async () => {
     maintenanceScheduler.close();
     await context.memoryRepository.close?.();
+    await context.conversationRepository.close?.();
   });
 
   await registerHealthRoutes(app, context, config);

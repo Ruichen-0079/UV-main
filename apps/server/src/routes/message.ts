@@ -1,3 +1,4 @@
+import { ConversationPersistenceError } from "@companion/core";
 import { createEvent } from "@companion/protocol";
 import { ProviderError } from "@companion/providers";
 import type { FastifyInstance } from "fastify";
@@ -84,6 +85,14 @@ export async function registerMessageRoutes(
           : undefined
       });
     } catch (error) {
+      if (error instanceof ConversationPersistenceError) {
+        return reply.status(503).send({
+          error: "persistence_failed",
+          operation: error.operation,
+          message: error.message,
+          traceId: event.traceId
+        });
+      }
       if (error instanceof ProviderError) {
         return reply.status(error.statusCode ?? 503).send({
           error: "provider_unavailable",

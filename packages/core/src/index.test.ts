@@ -1,5 +1,9 @@
 import { InMemoryEventBus } from "@companion/event-bus";
-import type { Memory, MemoryCandidate } from "@companion/memory";
+import {
+  InMemoryConversationRepository,
+  type Memory,
+  type MemoryCandidate
+} from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
 import {
   ProviderError,
@@ -18,9 +22,19 @@ describe("RuntimeOrchestrator", () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const diagnostics: string[] = [];
     const published: RuntimeEvent[] = [];
+    const conversation = new InMemoryConversationRepository();
+    const persistenceOrder: string[] = [];
+    const appendMessage = conversation.appendMessage.bind(conversation);
+    conversation.appendMessage = async (message) => {
+      persistenceOrder.push(`${message.role}:save`);
+      return appendMessage(message);
+    };
 
     eventBus.subscribe("*", (event) => {
       published.push(event);
+      if (["user.message", "agent.reply", "assistant.message"].includes(event.type)) {
+        persistenceOrder.push(event.type);
+      }
     });
     eventBus.subscribe("runtime.error", (event) => {
       diagnostics.push(event.type);
@@ -32,6 +46,7 @@ describe("RuntimeOrchestrator", () => {
     const runtime = new RuntimeOrchestrator({
       eventBus,
       memory: createFailingMemory(),
+      conversation,
       promptBuilder: new PromptBuilder(),
       providers: {
         getChatProvider: () => createMockChatProvider("mock-chat"),
@@ -107,6 +122,13 @@ describe("RuntimeOrchestrator", () => {
       content: reply.payload.content,
       provider: reply.payload.provider
     });
+    expect(persistenceOrder).toEqual([
+      "user:save",
+      "user.message",
+      "assistant:save",
+      "agent.reply",
+      "assistant.message"
+    ]);
   });
 
   it("publishes no reply events when every chat provider fails", async () => {
@@ -177,6 +199,151 @@ describe("RuntimeOrchestrator", () => {
       content: reply.payload.content
     });
     expect(published.filter((event) => event.type === "runtime.error")).toHaveLength(1);
+  });
+
+  it("restores direct context from the repository when a Runtime is rebuilt", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const runtimeA = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    await runtimeA.handleUserMessage(
+      { sessionId: "persisted-session", content: "remember this direct context" },
+      { readMemory: false, writeMemory: false }
+    );
+
+    const runtimeB = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    await runtimeB.handleUserMessage(
+      { sessionId: "persisted-session", content: "what did I say?" },
+      { readMemory: false, writeMemory: false }
+    );
+
+    const restored = runtimeB
+      .getLatestPromptPreview()
+      ?.sections.find((section) => section.name === "DirectContext");
+    expect(restored?.content).toContain("remember this direct context");
+
+    const isolated = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    await isolated.handleUserMessage(
+      { sessionId: "other-session", content: "isolated" },
+      { readMemory: false, writeMemory: false }
+    );
+    expect(
+      isolated
+        .getLatestPromptPreview()
+        ?.sections.find((section) => section.name === "DirectContext")?.content
+    ).not.toContain("remember this direct context");
+  });
+
+  it("blocks provider execution when the user message cannot be persisted", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    let providerCalls = 0;
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory([]),
+      conversation: {
+        kind: "in-memory",
+        async healthCheck() {
+          return { status: "healthy" as const };
+        },
+        async ensureSession() {
+          throw new Error("session store unavailable");
+        },
+        async appendMessage() {
+          throw new Error("unreachable");
+        },
+        async listRecentMessages() {
+          return [];
+        }
+      },
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => {
+          providerCalls += 1;
+          return createMockProviders().getChatProvider();
+        }
+      }
+    });
+
+    await expect(
+      runtime.handleUserMessage({ sessionId: "save-failed", content: "hello" })
+    ).rejects.toMatchObject({
+      name: "ConversationPersistenceError",
+      operation: "session_create"
+    });
+    expect(providerCalls).toBe(0);
+    expect(published.filter((event) => event.type === "user.message")).toHaveLength(0);
+    expect(published.filter((event) => event.type === "assistant.message")).toHaveLength(0);
+    expect(published.find((event) => event.type === "runtime.error")?.payload).toMatchObject({
+      category: "persistence",
+      operation: "session_create"
+    });
+  });
+
+  it("does not publish or cache an assistant message when assistant persistence fails", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    let appends = 0;
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory([]),
+      conversation: {
+        kind: "in-memory",
+        async healthCheck() {
+          return { status: "healthy" as const };
+        },
+        async ensureSession() {},
+        async appendMessage(message) {
+          appends += 1;
+          if (appends > 1) {
+            throw new Error("assistant store unavailable");
+          }
+          return { ...message, sequence: 1 };
+        },
+        async listRecentMessages() {
+          return [];
+        }
+      },
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    await expect(
+      runtime.handleUserMessage({
+        sessionId: "assistant-save-failed",
+        content: "hello"
+      })
+    ).rejects.toMatchObject({
+      name: "ConversationPersistenceError",
+      operation: "assistant_message_save"
+    });
+    expect(published.filter((event) => event.type === "user.message")).toHaveLength(1);
+    expect(published.filter((event) => event.type === "agent.reply")).toHaveLength(0);
+    expect(published.filter((event) => event.type === "assistant.message")).toHaveLength(0);
   });
 
   it("uses memory extractor candidates for runtime writes and skips ordinary turns", async () => {

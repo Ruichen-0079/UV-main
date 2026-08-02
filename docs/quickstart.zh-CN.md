@@ -110,6 +110,8 @@ DEFAULT_EMBEDDING_PROVIDER=mock
 
 ```env
 MEMORY_REPOSITORY=in-memory
+# 未设置时，Conversation persistence 会回退使用 MEMORY_REPOSITORY。
+CONVERSATION_REPOSITORY=in-memory
 MEMORY_EXTRACTOR=llm
 EVENT_BUS=in-memory
 DIRECT_CONTEXT_ENABLED=true
@@ -123,10 +125,13 @@ DIRECT_CONTEXT_MAX_CHARS=6000
 
 `MEMORY_EXTRACTOR=llm` 是默认模式，在 DeepSeek Reasoning 已配置时会用它提出候选记忆。它只会在 `writeMemory=true` 的回合消耗 reasoning token，并且候选记忆仍会先经过 `MemoryService` 校验和评分，才可能写入。如果 DeepSeek Reasoning 未配置，YUVI 会安全回退到 `rule-based`。如需确定性且不消耗 token 的抽取，可设置 `MEMORY_EXTRACTOR=rule-based`。
 
-Direct Context 默认开启。它会把有边界的同会话近期 turn 注入单独的 `<DirectContext>` prompt section，用于对话连续性。它不是长期记忆，默认不会持久化，并受 `DIRECT_CONTEXT_MAX_TURNS` 和 `DIRECT_CONTEXT_MAX_CHARS` 限制。
+Direct Context 默认开启。它会把有边界的同会话近期 turn 注入单独的 `<DirectContext>` prompt section，用于对话连续性。它不写入长期记忆；原始消息是否持久化由 Conversation Repository 决定，并受 `DIRECT_CONTEXT_MAX_TURNS` 和 `DIRECT_CONTEXT_MAX_CHARS` 限制。
+
+会话持久化会把用户和助手原始消息独立保存，不写入长期记忆。`CONVERSATION_REPOSITORY` 支持 `in-memory`、`memory`、`postgres`；未设置时回退到 `MEMORY_REPOSITORY`，其中 `memory` 和 `in-memory` 都规范化为内存仓储。In-Memory 只能在同一进程内重建 Runtime 实例时恢复上下文，不能跨进程重启恢复；需要跨重启恢复时使用 PostgreSQL。
 
 ```env
 MEMORY_REPOSITORY=postgres
+CONVERSATION_REPOSITORY=postgres
 DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 

@@ -119,7 +119,7 @@ Vite + React + TypeScript + Tailwind CSS 开发期 Web 控制台。它用于调�
 
 ### `packages/memory`
 
-记忆仓储和记忆服务。开发期使用 PostgreSQL + pgvector 或内存回退实现，负责记忆类型、检索、评分和提示词安全的记忆重构。
+记忆与会话持久化仓储以及记忆服务。长期记忆使用 PostgreSQL + pgvector 或内存回退实现；原始会话消息使用独立的 Conversation Repository。In-Memory 会话仓储只能在同一进程内重建 Runtime 时恢复上下文，PostgreSQL 才支持进程重启后的恢复。Core 只依赖 Conversation Repository 端口，由 Server 创建并注入具体实现；会话原始消息不等同于长期记忆。
 
 ### `packages/prompt-builder`
 

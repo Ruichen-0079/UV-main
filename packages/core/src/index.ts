@@ -1,5 +1,8 @@
 import type { EventBus } from "@companion/event-bus";
 import type {
+  ConversationMessage,
+  ConversationMessageInput,
+  ConversationRepository,
   Memory,
   MemoryCandidate,
   MemoryCandidateStorageResult,
@@ -43,10 +46,30 @@ export type RuntimeOrchestratorOptions = {
   memory: RuntimeMemoryPort;
   promptBuilder: RuntimePromptBuilderPort;
   providers: ProviderResolver;
+  conversation?: ConversationRepository | undefined;
   memoryRepository?: string | undefined;
   directContext?: Partial<DirectContextConfig> | undefined;
   logger?: RuntimeLogger;
 };
+
+export type ConversationPersistenceOperation =
+  | "session_create"
+  | "user_message_save"
+  | "assistant_message_save"
+  | "context_restore";
+
+export class ConversationPersistenceError extends Error {
+  readonly operation: ConversationPersistenceOperation;
+
+  constructor(
+    operation: ConversationPersistenceOperation,
+    message = "Conversation persistence failed."
+  ) {
+    super(message);
+    this.name = "ConversationPersistenceError";
+    this.operation = operation;
+  }
+}
 
 export type DirectContextConfig = {
   enabled: boolean;
@@ -525,7 +548,9 @@ export class RuntimeOrchestrator {
           }
         );
 
+    await this.persistUserMessage(userEvent);
     await this.options.eventBus.publish(userEvent);
+    await this.restoreDirectContext(userEvent.payload.sessionId);
     const voiceOutput = isRuntimeUserMessageEvent(input)
       ? Boolean(options.voiceOutput)
       : Boolean(input.voiceOutput);
@@ -533,11 +558,12 @@ export class RuntimeOrchestrator {
     const reply = await this.generateReply(userEvent, {
       voiceOutput,
       readMemory: memoryOptions.readMemory,
-      writeMemory: memoryOptions.writeMemory
+      writeMemory: memoryOptions.writeMemory,
+      publishAgentReply: false
     });
-    // Publish the final user-facing text only after the internal reply and direct context
-    // are settled. Later memory/TTS side effects must not duplicate or retract this event.
-    await this.publishAssistantMessage(reply);
+    // Persist the final text before publishing either reply event to transports. Later
+    // direct-context, memory, and TTS side effects must not duplicate or retract it.
+    await this.publishAssistantMessage(userEvent, reply);
     if (memoryOptions.writeMemory) {
       const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
       this.updateLatestPromptPreviewExtraction(extraction);
@@ -583,6 +609,7 @@ export class RuntimeOrchestrator {
       readMemory: true,
       writeMemory: true
     });
+    this.recordDirectContextTurn(transcriptEvent, reply);
     await this.maybeStoreMemory(transcriptEvent, reply);
     await this.maybeSynthesizeSpeech(reply, Boolean(input.voiceOutput));
     return reply;
@@ -623,6 +650,7 @@ export class RuntimeOrchestrator {
       useMemory?: boolean | undefined;
       readMemory?: boolean | undefined;
       writeMemory?: boolean | undefined;
+      publishAgentReply?: boolean | undefined;
     } = {}
   ): Promise<AgentReplyEvent> {
     const voiceOutput = Boolean(options.voiceOutput);
@@ -755,8 +783,10 @@ export class RuntimeOrchestrator {
       })
     };
 
-    const reply = await this.publishAgentReply(event, output.message.content, providerMetadata);
-    this.recordDirectContextTurn(event, reply);
+    const reply = this.createAgentReply(event, output.message.content, providerMetadata);
+    if (options.publishAgentReply !== false) {
+      await this.options.eventBus.publish(reply);
+    }
     return reply;
   }
 
@@ -932,7 +962,17 @@ export class RuntimeOrchestrator {
     content: string,
     provider?: SafeProviderCallMetadata | undefined
   ): Promise<AgentReplyEvent> {
-    const reply = createEvent(
+    const reply = this.createAgentReply(sourceEvent, content, provider);
+    await this.options.eventBus.publish(reply);
+    return reply;
+  }
+
+  private createAgentReply(
+    sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
+    content: string,
+    provider?: SafeProviderCallMetadata | undefined
+  ): AgentReplyEvent {
+    return createEvent(
       "agent.reply",
       {
         sessionId: sourceEvent.payload.sessionId,
@@ -944,12 +984,12 @@ export class RuntimeOrchestrator {
         parentId: sourceEvent.id
       }
     );
-
-    await this.options.eventBus.publish(reply);
-    return reply;
   }
 
-  private async publishAssistantMessage(reply: AgentReplyEvent): Promise<AssistantMessageEvent> {
+  private async publishAssistantMessage(
+    sourceEvent: UserMessageEvent,
+    reply: AgentReplyEvent
+  ): Promise<AssistantMessageEvent> {
     const assistantMessage = createEvent(
       "assistant.message",
       {
@@ -963,8 +1003,103 @@ export class RuntimeOrchestrator {
       }
     );
 
+    try {
+      await this.options.conversation?.appendMessage(
+        conversationMessageFromEvent(assistantMessage, "assistant", "completed")
+      );
+    } catch (error) {
+      await this.publishPersistenceError(
+        "assistant_message_save",
+        "Assistant message persistence failed.",
+        error,
+        { traceId: reply.traceId, parentId: reply.id }
+      );
+      this.options.logger?.error?.("assistant message persistence failed", {
+        ...this.errorLogContext(error, reply.traceId),
+        operation: "assistant_message_save"
+      });
+      throw new ConversationPersistenceError(
+        "assistant_message_save",
+        "The assistant response could not be saved."
+      );
+    }
+
+    // Persist the final text before exposing the compatibility reply to transports.
+    await this.options.eventBus.publish(reply);
+    this.recordDirectContextTurn(sourceEvent, reply);
     await this.options.eventBus.publish(assistantMessage);
     return assistantMessage;
+  }
+
+  private async persistUserMessage(userEvent: UserMessageEvent): Promise<void> {
+    if (!this.options.conversation) {
+      return;
+    }
+
+    try {
+      await this.options.conversation.ensureSession(userEvent.payload.sessionId);
+    } catch (error) {
+      await this.publishPersistenceError("session_create", "Session persistence failed.", error, {
+        traceId: userEvent.traceId,
+        parentId: userEvent.parentId
+      });
+      this.options.logger?.error?.("session persistence failed", {
+        ...this.errorLogContext(error, userEvent.traceId),
+        operation: "session_create"
+      });
+      throw new ConversationPersistenceError("session_create", "The session could not be saved.");
+    }
+
+    try {
+      await this.options.conversation.appendMessage(
+        conversationMessageFromEvent(userEvent, "user", "completed")
+      );
+    } catch (error) {
+      await this.publishPersistenceError(
+        "user_message_save",
+        "User message persistence failed.",
+        error,
+        { traceId: userEvent.traceId, parentId: userEvent.parentId }
+      );
+      this.options.logger?.error?.("user message persistence failed", {
+        ...this.errorLogContext(error, userEvent.traceId),
+        operation: "user_message_save"
+      });
+      throw new ConversationPersistenceError(
+        "user_message_save",
+        "The user message could not be saved."
+      );
+    }
+  }
+
+  private async restoreDirectContext(sessionId: string): Promise<void> {
+    const conversation = this.options.conversation;
+    if (!conversation || !this.directContextConfig.enabled || this.sessionTurns.has(sessionId)) {
+      return;
+    }
+
+    try {
+      const maxStoredTurns = Math.max(this.directContextConfig.maxTurns * 3, 12);
+      const messages = await conversation.listRecentMessages(sessionId, {
+        limit: maxStoredTurns * 2,
+        maxCharacters: this.directContextConfig.maxChars * 2
+      });
+      const turns = buildDirectContextTurns(messages).slice(-maxStoredTurns);
+      this.sessionTurns.set(sessionId, turns);
+    } catch (error) {
+      await this.publishPersistenceError(
+        "context_restore",
+        "Conversation context restore failed; continuing without persisted context.",
+        error,
+        { traceId: undefined, parentId: undefined }
+      );
+      this.options.logger?.warn?.("conversation context restore failed", {
+        ...this.errorLogContext(error),
+        operation: "context_restore",
+        sessionId
+      });
+      this.sessionTurns.set(sessionId, []);
+    }
   }
 
   async maybeGenerateReasoning(input: {
@@ -1260,18 +1395,38 @@ export class RuntimeOrchestrator {
   private async publishRuntimeError(
     message: string,
     error: unknown,
-    context: { traceId?: string | undefined; parentId?: string | undefined }
+    context: {
+      traceId?: string | undefined;
+      parentId?: string | undefined;
+      category?: string | undefined;
+      operation?: string | undefined;
+    }
   ): Promise<void> {
     await this.publishDiagnosticEvent(
       createEvent(
         "runtime.error",
         {
           message,
-          detail: safeErrorMessage(error)
+          detail: redactUnsafeText(safeErrorMessage(error)),
+          ...(context.category ? { category: context.category } : {}),
+          ...(context.operation ? { operation: context.operation } : {})
         },
         context
       )
     );
+  }
+
+  private async publishPersistenceError(
+    operation: ConversationPersistenceOperation,
+    message: string,
+    error: unknown,
+    context: { traceId?: string | undefined; parentId?: string | undefined }
+  ): Promise<void> {
+    await this.publishRuntimeError(message, error, {
+      ...context,
+      category: "persistence",
+      operation
+    });
   }
 
   private async publishDiagnosticEvent(event: RuntimeEvent): Promise<void> {
@@ -1674,6 +1829,53 @@ function clampInteger(value: number, min: number, max: number): number {
     return min;
   }
   return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+function conversationMessageFromEvent(
+  event: UserMessageEvent | AssistantMessageEvent,
+  role: "user" | "assistant",
+  status: "completed" | "failed"
+): ConversationMessageInput {
+  return {
+    id: event.id,
+    sessionId: event.payload.sessionId,
+    traceId: event.traceId,
+    parentMessageId: event.parentId ?? null,
+    role,
+    content: event.payload.content,
+    status,
+    createdAt: event.timestamp,
+    completedAt: status === "completed" ? event.timestamp : null,
+    metadata: {}
+  };
+}
+
+function buildDirectContextTurns(messages: ConversationMessage[]): DirectContextTurn[] {
+  const turns: DirectContextTurn[] = [];
+  let pendingUser: ConversationMessage | undefined;
+
+  for (const message of messages) {
+    if (message.status !== "completed") {
+      continue;
+    }
+    if (message.role === "user") {
+      pendingUser = message;
+      continue;
+    }
+    if (!pendingUser) {
+      continue;
+    }
+
+    turns.push({
+      traceId: pendingUser.traceId,
+      timestamp: message.completedAt ?? message.createdAt,
+      userMessage: redactUnsafeText(pendingUser.content),
+      assistantReply: redactUnsafeText(message.content)
+    });
+    pendingUser = undefined;
+  }
+
+  return turns;
 }
 
 function formatDirectContextTurn(turn: DirectContextTurn): string {
