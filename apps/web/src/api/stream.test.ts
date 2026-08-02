@@ -78,6 +78,22 @@ describe("MessageSseParser", () => {
     expect(events[1]).toMatchObject(completed);
   });
 
+  it("preserves newlines across multiple SSE text deltas", () => {
+    const firstText = "第一行\n";
+    const secondText = "\n第三行🙂";
+    const events = collect([
+      encoder.encode(frame("text-delta", { ...textDelta, text: firstText })),
+      encoder.encode(
+        frame("text-delta", { ...textDelta, text: secondText }) +
+          frame("completed", { ...completed, content: firstText + secondText })
+      )
+    ]);
+
+    expect(events.filter((event) => event.type === "text-delta").map((event) => event.text).join(""))
+      .toBe("第一行\n\n第三行🙂");
+    expect(events.at(-1)).toMatchObject({ type: "completed", content: "第一行\n\n第三行🙂" });
+  });
+
   it("does not let escaped user text inject an SSE frame", () => {
     const event = {
       ...textDelta,

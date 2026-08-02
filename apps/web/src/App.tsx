@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction
+} from "react";
 import {
   ApiError,
   apiClient,
@@ -27,6 +35,11 @@ import {
 } from "./api/client.js";
 import { promptPreviewPlaceholder } from "./data/mock.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
+import {
+  reduceChatMessages,
+  shouldSubmitChatKey,
+  type ChatMessage
+} from "./chat-state.js";
 
 type PageId =
   | "overview"
@@ -38,22 +51,6 @@ type PageId =
   | "voice"
   | "vision"
   | "settings";
-
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  status?: ChatMessageStatus;
-  error?: string;
-  traceId?: string;
-  useMemory?: boolean;
-  readMemory?: boolean;
-  writeMemory?: boolean;
-  voiceOutput?: boolean;
-  provider?: ProviderCallMetadata | string;
-};
-
-type ChatMessageStatus = "streaming" | "completed" | "failed" | "cancelled";
 
 type WebSocketStatus =
   | "connecting"
@@ -285,7 +282,7 @@ function ChatPage(): JSX.Element {
   const [writeMemory, setWriteMemory] = useState(true);
   const [promptPreview, setPromptPreview] = useState(true);
   const [voiceOutput, setVoiceOutput] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, dispatchMessages] = useReducer(reduceChatMessages, [] as ChatMessage[]);
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [lastTraceId, setLastTraceId] = useState<string | null>(null);
@@ -308,7 +305,7 @@ function ChatPage(): JSX.Element {
 
   const outgoingPayload = useMemo(
     () => ({
-      text: input.trim() || "<message text>",
+      text: input || "<message text>",
       options: {
         readMemory,
         writeMemory,
@@ -324,7 +321,7 @@ function ChatPage(): JSX.Element {
       return;
     }
 
-    const content = input.trim();
+    const content = input;
     const requestId = createChatMessageId("turn");
     const assistantId = createChatMessageId("assistant");
     const controller = new AbortController();
@@ -337,10 +334,11 @@ function ChatPage(): JSX.Element {
     setInput("");
     setRequestStatus("sending");
     setError(null);
-    setMessages((current) => [
-      ...current,
-      {
+    dispatchMessages({
+      type: "append-turn",
+      user: {
         id: createChatMessageId("user"),
+        requestId,
         role: "user",
         content,
         useMemory: readMemory && writeMemory,
@@ -349,24 +347,14 @@ function ChatPage(): JSX.Element {
         voiceOutput,
         status: "completed"
       },
-      {
+      assistant: {
         id: assistantId,
+        requestId,
         role: "assistant",
         content: "",
         status: "streaming"
       }
-    ]);
-
-    const updateAssistant = (update: Partial<ChatMessage>): void => {
-      if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
-        return;
-      }
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantId ? { ...message, ...update } : message
-        )
-      );
-    };
+    });
 
     try {
       const response = await apiClient.streamMessage(
@@ -388,32 +376,27 @@ function ChatPage(): JSX.Element {
             }
             if (event.type === "text-delta") {
               setLastTraceId(event.traceId);
-              setMessages((current) =>
-                current.map((message) =>
-                  message.id === assistantId && message.status !== "completed"
-                    ? {
-                        ...message,
-                        content: message.content + event.text,
-                        traceId: event.traceId,
-                        status: "streaming"
-                      }
-                    : message
-                )
-              );
+              dispatchMessages({
+                type: "append-delta",
+                assistantId,
+                text: event.text,
+                traceId: event.traceId
+              });
               return;
             }
             if (event.type === "error") {
-              updateAssistant({ status: "failed", error: event.message });
+              dispatchMessages({ type: "fail", assistantId, error: event.message });
               setError(event.message);
               return;
             }
             activeRequestRef.current.completedObserved = true;
             setLastTraceId(event.traceId);
-            updateAssistant({
+            dispatchMessages({
+              type: "complete",
+              assistantId,
               content: event.content,
-              provider: event.provider,
               traceId: event.traceId,
-              status: "completed"
+              provider: event.provider
             });
             setRequestStatus("success");
           }
@@ -423,11 +406,12 @@ function ChatPage(): JSX.Element {
       if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
         return;
       }
-      updateAssistant({
+      dispatchMessages({
+        type: "complete",
+        assistantId,
         content: response.content,
-        provider: response.provider,
         traceId: response.traceId,
-        status: "completed"
+        provider: response.provider
       });
       setLastTraceId(response.traceId);
       setRequestStatus("success");
@@ -436,12 +420,16 @@ function ChatPage(): JSX.Element {
         return;
       }
       if (controller.signal.aborted) {
-        updateAssistant({ status: "cancelled", error: "生成已取消，保留已生成内容。" });
+        dispatchMessages({
+          type: "cancel",
+          assistantId,
+          error: "生成已取消，以上内容可能不完整。"
+        });
         setRequestStatus("idle");
         return;
       }
       const message = friendlyChatError(caught);
-      updateAssistant({ status: "failed", error: message });
+      dispatchMessages({ type: "fail", assistantId, error: message });
       setError(message);
       setRequestStatus("error");
     } finally {
@@ -461,13 +449,11 @@ function ChatPage(): JSX.Element {
     if (!mountedRef.current) {
       return;
     }
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === active.assistantId
-          ? { ...message, status: "cancelled", error: "生成已取消，保留已生成内容。" }
-          : message
-      )
-    );
+    dispatchMessages({
+      type: "cancel",
+      assistantId: active.assistantId,
+      error: "生成已取消，以上内容可能不完整。"
+    });
     setRequestStatus("idle");
   }
 
@@ -491,7 +477,9 @@ function ChatPage(): JSX.Element {
                         <span aria-live="polite">{chatStatusLabel(message.status)}</span>
                       )}
                     </div>
-                    <div className="text-sm leading-6">{message.content}</div>
+                    <div className="text-sm leading-6 whitespace-pre-wrap [overflow-wrap:anywhere]">
+                      {message.content}
+                    </div>
                     {message.error && (
                       <div className="mt-2 text-xs text-red-700" role="alert">
                         {message.error}
@@ -531,6 +519,12 @@ function ChatPage(): JSX.Element {
               placeholder="Type a runtime test message"
               value={input}
               onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (shouldSubmitChatKey(event)) {
+                  event.preventDefault();
+                  void send();
+                }
+              }}
               aria-label="Chat message"
             />
             {requestStatus === "sending" && activeRequestRef.current ? (
@@ -611,16 +605,16 @@ function createChatMessageId(prefix: string): string {
   return `${prefix}-${uuid ?? chatMessageSequence}`;
 }
 
-function chatStatusLabel(status: ChatMessageStatus): string {
+function chatStatusLabel(status: NonNullable<ChatMessage["status"]>): string {
   switch (status) {
     case "streaming":
-      return "Streaming";
+      return "生成中";
     case "completed":
-      return "Completed";
+      return "已完成";
     case "failed":
-      return "Failed";
+      return "失败";
     case "cancelled":
-      return "Cancelled";
+      return "已取消";
   }
 }
 
@@ -3799,17 +3793,13 @@ function ProviderMetadataSummary(props: {
 }): JSX.Element {
   const provider = props.provider;
   if (!provider) {
-    return (
-      <div className="mt-2 text-xs text-ink-500">
-        provider: unknown · model: unknown · mode: unknown
-      </div>
-    );
+    return <></>;
   }
 
   if (typeof provider === "string") {
     return (
       <div className="mt-2 text-xs text-ink-500">
-        provider: {provider} · model: unknown · mode: unknown
+        provider: {provider}
       </div>
     );
   }
@@ -3823,9 +3813,9 @@ function ProviderMetadataSummary(props: {
       >
         {provider.mock ? "MOCK MODE" : `REAL PROVIDER / ${provider.name}`}
       </span>
-      <span>provider: {provider.name}</span>
-      <span>model: {provider.model ?? "unknown"}</span>
-      <span>latency: {formatLatency(provider.latencyMs)}</span>
+      {provider.name && <span>provider: {provider.name}</span>}
+      {provider.model && <span>model: {provider.model}</span>}
+      {provider.latencyMs !== undefined && <span>latency: {formatLatency(provider.latencyMs)}</span>}
       {provider.healthStatus && <span>health: {provider.healthStatus}</span>}
       {provider.tokenUsage && <span>tokens: {formatTokenUsage(provider.tokenUsage)}</span>}
       {provider.mock && (
