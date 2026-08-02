@@ -9,6 +9,7 @@ import {
   createMockSTTProvider,
   createMockVisionProvider
 } from "@companion/providers";
+import type { RuntimeEvent } from "@companion/protocol";
 import { describe, expect, it } from "vitest";
 import { RuntimeOrchestrator, type RuntimeMemoryPort } from "./index.js";
 
@@ -16,7 +17,11 @@ describe("RuntimeOrchestrator", () => {
   it("returns the agent reply when optional memory and TTS side effects fail", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const diagnostics: string[] = [];
+    const published: RuntimeEvent[] = [];
 
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
     eventBus.subscribe("runtime.error", (event) => {
       diagnostics.push(event.type);
     });
@@ -81,6 +86,97 @@ describe("RuntimeOrchestrator", () => {
     expect(reply.payload.content).toContain("Mock reply");
     expect(diagnostics).toContain("runtime.error");
     expect(diagnostics).toContain("provider.error");
+
+    const messageEvents = published.filter((event) =>
+      ["user.message", "agent.reply", "assistant.message"].includes(event.type)
+    );
+    expect(messageEvents.map((event) => event.type)).toEqual([
+      "user.message",
+      "agent.reply",
+      "assistant.message"
+    ]);
+    const userMessage = messageEvents[0]!;
+    const agentReply = messageEvents[1]!;
+    const assistantMessage = messageEvents[2]!;
+    expect(agentReply.traceId).toBe(userMessage.traceId);
+    expect(assistantMessage.traceId).toBe(userMessage.traceId);
+    expect(agentReply.parentId).toBe(userMessage.id);
+    expect(assistantMessage.parentId).toBe(agentReply.id);
+    expect(assistantMessage.payload).toMatchObject({
+      sessionId: "test-session",
+      content: reply.payload.content,
+      provider: reply.payload.provider
+    });
+  });
+
+  it("publishes no reply events when every chat provider fails", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    const providers = createMockProviders();
+    providers.getChatProvider = () => ({
+      name: "failing-chat",
+      async healthCheck() {
+        return {
+          provider: "failing-chat",
+          status: "unavailable" as const,
+          checkedAt: new Date().toISOString()
+        };
+      },
+      async generateReply() {
+        throw new ProviderError({
+          provider: "failing-chat",
+          capability: "chat",
+          code: ProviderErrorCode.ProviderUnavailable,
+          message: "Chat provider is unavailable."
+        });
+      }
+    });
+
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory([]),
+      promptBuilder: new PromptBuilder(),
+      providers
+    });
+
+    await expect(
+      runtime.handleUserMessage({ sessionId: "failed-session", content: "hello" })
+    ).rejects.toBeInstanceOf(ProviderError);
+    expect(published.filter((event) => event.type === "agent.reply")).toHaveLength(0);
+    expect(published.filter((event) => event.type === "assistant.message")).toHaveLength(0);
+    expect(published.filter((event) => event.type === "provider.error")).toHaveLength(1);
+  });
+
+  it("publishes one assistant message when memory retrieval fails", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    const memory = createRecordingMemory([]);
+    memory.retrieveRelevantMemoriesWithMetadata = async () => {
+      throw new Error("memory read unavailable");
+    };
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory,
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    const reply = await runtime.handleUserMessage({
+      sessionId: "read-failed-session",
+      content: "hello"
+    });
+
+    expect(published.filter((event) => event.type === "assistant.message")).toHaveLength(1);
+    expect(published.find((event) => event.type === "assistant.message")?.payload).toMatchObject({
+      content: reply.payload.content
+    });
+    expect(published.filter((event) => event.type === "runtime.error")).toHaveLength(1);
   });
 
   it("uses memory extractor candidates for runtime writes and skips ordinary turns", async () => {

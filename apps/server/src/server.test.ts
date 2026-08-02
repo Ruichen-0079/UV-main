@@ -56,6 +56,27 @@ describe("server", () => {
       expect(message.json().provider.latencyMs).toBeTypeOf("number");
       expect(message.json().provider.tokenUsage.totalTokens).toBeTypeOf("number");
 
+      const messageEvents = (await app.inject({ method: "GET", url: "/events/recent?limit=50" }))
+        .json()
+        .events.filter((event: { traceId?: string }) => event.traceId === message.json().traceId);
+      expect(
+        messageEvents.filter((event: { type: string }) => event.type === "user.message")
+      ).toHaveLength(1);
+      expect(
+        messageEvents.filter((event: { type: string }) => event.type === "agent.reply")
+      ).toHaveLength(1);
+      const assistantMessages = messageEvents.filter(
+        (event: { type: string }) => event.type === "assistant.message"
+      );
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0]).toMatchObject({
+        payload: {
+          sessionId: "test",
+          content: message.json().reply
+        }
+      });
+      expect(assistantMessages[0].payload.provider.name).toBe(message.json().provider.name);
+
       const prompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
       expect(prompt.statusCode).toBe(200);
       expect(prompt.json().promptPreview.sections.length).toBeGreaterThan(0);

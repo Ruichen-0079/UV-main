@@ -110,6 +110,10 @@ export async function registerWebSocketRoutes(
 }
 
 function shouldForwardEvent(event: RuntimeEvent): boolean {
+  // Keep agent.reply as the sole non-dashboard reply transport for compatibility with
+  // existing WebSocket clients. Forwarding both reply events here would render the same
+  // completed text twice; assistant.message remains available on the event bus and the
+  // dashboard diagnostic stream.
   return (
     event.type === "agent.reply" ||
     event.type === "avatar.speak" ||

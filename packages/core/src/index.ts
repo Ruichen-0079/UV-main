@@ -13,6 +13,7 @@ import { detectCurrentAffect } from "@companion/memory";
 import type { PromptBuildInput, PromptBuildOutput } from "@companion/prompt-builder";
 import type {
   AgentReplyEvent,
+  AssistantMessageEvent,
   AvatarSpeakEvent,
   PerceptionVisionEvent,
   RuntimeEvent,
@@ -534,6 +535,9 @@ export class RuntimeOrchestrator {
       readMemory: memoryOptions.readMemory,
       writeMemory: memoryOptions.writeMemory
     });
+    // Publish the final user-facing text only after the internal reply and direct context
+    // are settled. Later memory/TTS side effects must not duplicate or retract this event.
+    await this.publishAssistantMessage(reply);
     if (memoryOptions.writeMemory) {
       const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
       this.updateLatestPromptPreviewExtraction(extraction);
@@ -943,6 +947,24 @@ export class RuntimeOrchestrator {
 
     await this.options.eventBus.publish(reply);
     return reply;
+  }
+
+  private async publishAssistantMessage(reply: AgentReplyEvent): Promise<AssistantMessageEvent> {
+    const assistantMessage = createEvent(
+      "assistant.message",
+      {
+        sessionId: reply.payload.sessionId,
+        content: reply.payload.content,
+        ...(reply.payload.provider ? { provider: reply.payload.provider } : {})
+      },
+      {
+        traceId: reply.traceId,
+        parentId: reply.id
+      }
+    );
+
+    await this.options.eventBus.publish(assistantMessage);
+    return assistantMessage;
   }
 
   async maybeGenerateReasoning(input: {
