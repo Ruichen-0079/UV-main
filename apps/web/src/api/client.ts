@@ -870,8 +870,8 @@ export const apiClient = {
     return dashboardDevToken.length > 0;
   },
 
-  getHealth(): Promise<HealthResponse> {
-    return request<HealthResponse>("/health");
+  getHealth(signal?: AbortSignal): Promise<HealthResponse> {
+    return request<HealthResponse>("/health", signalRequestInit(signal));
   },
 
   sendMessage(input: SendMessageRequest): Promise<MessageResponse> {
@@ -963,8 +963,11 @@ export const apiClient = {
     }
   },
 
-  listRecentMemories(limit = 20): Promise<{ memories: MemoryRecord[] }> {
-    return request<{ memories: MemoryRecord[] }>(`/memory/recent?limit=${limit}`);
+  listRecentMemories(limit = 20, signal?: AbortSignal): Promise<{ memories: MemoryRecord[] }> {
+    return request<{ memories: MemoryRecord[] }>(
+      `/memory/recent?limit=${limit}`,
+      signalRequestInit(signal)
+    );
   },
 
   searchMemories(
@@ -1150,17 +1153,18 @@ export const apiClient = {
     });
   },
 
-  getMemoryMaintenanceHealth(): Promise<{
+  getMemoryMaintenanceHealth(signal?: AbortSignal): Promise<{
     ok: boolean;
     repository: string;
     health: MemoryHealthSummary;
   }> {
     return request<{ ok: boolean; repository: string; health: MemoryHealthSummary }>(
-      "/memory/maintenance/health"
+      "/memory/maintenance/health",
+      signalRequestInit(signal)
     );
   },
 
-  getMemoryMaintenanceStatus(): Promise<{
+  getMemoryMaintenanceStatus(signal?: AbortSignal): Promise<{
     ok: boolean;
     repository: string;
     scheduler: MemoryMaintenanceSchedulerStatus | null;
@@ -1169,16 +1173,17 @@ export const apiClient = {
       ok: boolean;
       repository: string;
       scheduler: MemoryMaintenanceSchedulerStatus | null;
-    }>("/memory/maintenance/status");
+    }>("/memory/maintenance/status", signalRequestInit(signal));
   },
 
-  getMemoryVectorIndexStatus(): Promise<{
+  getMemoryVectorIndexStatus(signal?: AbortSignal): Promise<{
     ok: boolean;
     repository: string;
     status: MemoryVectorIndexStatus;
   }> {
     return request<{ ok: boolean; repository: string; status: MemoryVectorIndexStatus }>(
-      "/memory/vector-index/status"
+      "/memory/vector-index/status",
+      signalRequestInit(signal)
     );
   },
 
@@ -1202,7 +1207,10 @@ export const apiClient = {
     });
   },
 
-  listRecentMemoryCandidates(limit = 20): Promise<{
+  listRecentMemoryCandidates(
+    limit = 20,
+    signal?: AbortSignal
+  ): Promise<{
     mock: boolean;
     volatile: boolean;
     message?: string;
@@ -1223,7 +1231,7 @@ export const apiClient = {
       candidateCount: number;
       fallbackUsed: boolean;
       candidates: MemoryCandidateReview[];
-    }>(`/memory/candidates/recent?limit=${limit}`);
+    }>(`/memory/candidates/recent?limit=${limit}`, signalRequestInit(signal));
   },
 
   acceptMemoryCandidate(
@@ -1261,8 +1269,8 @@ export const apiClient = {
     );
   },
 
-  getProviderStatus(): Promise<ProvidersStatusResponse> {
-    return request<ProvidersStatusResponse>("/providers/status");
+  getProviderStatus(signal?: AbortSignal): Promise<ProvidersStatusResponse> {
+    return request<ProvidersStatusResponse>("/providers/status", signalRequestInit(signal));
   },
 
   verifyProvider(
@@ -1352,16 +1360,22 @@ export const apiClient = {
     });
   },
 
-  listRecentEvents(limit = 50): Promise<{ mock: boolean; events: RuntimeEvent[] }> {
-    return request<{ mock: boolean; events: RuntimeEvent[] }>(`/events/recent?limit=${limit}`);
+  listRecentEvents(
+    limit = 50,
+    signal?: AbortSignal
+  ): Promise<{ mock: boolean; events: RuntimeEvent[] }> {
+    return request<{ mock: boolean; events: RuntimeEvent[] }>(
+      `/events/recent?limit=${limit}`,
+      signalRequestInit(signal)
+    );
   },
 
-  getLatestPromptPreview(): Promise<PromptPreviewResponse> {
-    return request<PromptPreviewResponse>("/debug/prompt/latest");
+  getLatestPromptPreview(signal?: AbortSignal): Promise<PromptPreviewResponse> {
+    return request<PromptPreviewResponse>("/debug/prompt/latest", signalRequestInit(signal));
   },
 
-  getRuntimeSettings(): Promise<RuntimeSettingsResponse> {
-    return request<RuntimeSettingsResponse>("/settings/runtime");
+  getRuntimeSettings(signal?: AbortSignal): Promise<RuntimeSettingsResponse> {
+    return request<RuntimeSettingsResponse>("/settings/runtime", signalRequestInit(signal));
   },
 
   updateRuntimeSettings(
@@ -1396,6 +1410,10 @@ export const apiClient = {
     return new WebSocket(getWebSocketUrl("/ws?dashboard=true"));
   }
 };
+
+function signalRequestInit(signal: AbortSignal | undefined): RequestInit | undefined {
+  return signal ? { signal } : undefined;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);

@@ -35,11 +35,16 @@ import {
 } from "./api/client.js";
 import { promptPreviewPlaceholder } from "./data/mock.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
+import { reduceChatMessages, shouldSubmitChatKey, type ChatMessage } from "./chat-state.js";
 import {
-  reduceChatMessages,
-  shouldSubmitChatKey,
-  type ChatMessage
-} from "./chat-state.js";
+  compareSettingsForms,
+  isCurrentSettingsOperation,
+  settingsDraftDiffers,
+  settingsFingerprint,
+  settingsStateLabels,
+  shouldReplaceSettingsDraft,
+  type SettingsApplyState
+} from "./settings-state.js";
 
 type PageId =
   | "overview"
@@ -108,10 +113,10 @@ const pages: Array<{ id: PageId; label: string }> = [
 
 export function App(): JSX.Element {
   const [activePage, setActivePage] = useState<PageId>("overview");
-  const health = useAsyncData(() => apiClient.getHealth(), []);
-  const providerStatus = useAsyncData(() => apiClient.getProviderStatus(), []);
-  const memories = useAsyncData(() => apiClient.listRecentMemories(20), []);
-  const eventState = useAsyncData(() => apiClient.listRecentEvents(50), []);
+  const health = useAsyncData((signal) => apiClient.getHealth(signal), []);
+  const providerStatus = useAsyncData((signal) => apiClient.getProviderStatus(signal), []);
+  const memories = useAsyncData((signal) => apiClient.listRecentMemories(20, signal), []);
+  const eventState = useAsyncData((signal) => apiClient.listRecentEvents(50, signal), []);
   const [localEvents, setLocalEvents] = useState<RuntimeEvent[]>([]);
   const [liveEvents, setLiveEvents] = useState<RuntimeEvent[]>([]);
   const [eventsPaused, setEventsPaused] = useState(false);
@@ -194,7 +199,7 @@ function TopStatusBar(props: {
   health: HealthResponse | null;
   loading: boolean;
   error: string | null;
-  onRefresh(): Promise<void>;
+  onRefresh(): Promise<unknown>;
 }): JSX.Element {
   const status = props.loading
     ? "loading"
@@ -240,11 +245,7 @@ function OverviewPage(props: {
           status={props.health.data?.server.status ?? "unknown"}
           detail={`Runtime mode: ${props.health.data?.runtimeMode ?? "unknown"}`}
         />
-        <StatusCard
-          title="WebSocket"
-          status={props.wsStatus}
-          detail="控制台运行时事件流"
-        />
+        <StatusCard title="WebSocket" status={props.wsStatus} detail="控制台运行时事件流" />
         <StatusCard
           title="Memory"
           status={memoryModeFromHealth(props.health.data)}
@@ -676,10 +677,19 @@ function MemoryPage(props: {
   const [maintenanceResult, setMaintenanceResult] = useState<MemoryMaintenanceSummary | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const candidates = useAsyncData(() => apiClient.listRecentMemoryCandidates(20), []);
-  const maintenanceHealth = useAsyncData(() => apiClient.getMemoryMaintenanceHealth(), []);
-  const maintenanceStatus = useAsyncData(() => apiClient.getMemoryMaintenanceStatus(), []);
-  const vectorIndexStatus = useAsyncData(() => apiClient.getMemoryVectorIndexStatus(), []);
+  const candidates = useAsyncData((signal) => apiClient.listRecentMemoryCandidates(20, signal), []);
+  const maintenanceHealth = useAsyncData(
+    (signal) => apiClient.getMemoryMaintenanceHealth(signal),
+    []
+  );
+  const maintenanceStatus = useAsyncData(
+    (signal) => apiClient.getMemoryMaintenanceStatus(signal),
+    []
+  );
+  const vectorIndexStatus = useAsyncData(
+    (signal) => apiClient.getMemoryVectorIndexStatus(signal),
+    []
+  );
   const memoryMode = memoryModeFromHealth(props.health);
 
   useEffect(() => {
@@ -1995,7 +2005,7 @@ function mergeEvents(...groups: RuntimeEvent[][]): RuntimeEvent[] {
 }
 
 function PromptPreviewPage(): JSX.Element {
-  const preview = useAsyncData(() => apiClient.getLatestPromptPreview(), []);
+  const preview = useAsyncData((signal) => apiClient.getLatestPromptPreview(signal), []);
   const promptPreview = preview.data?.promptPreview;
 
   return (
@@ -2675,8 +2685,11 @@ function deepRestartErrorMessage(error: unknown): string {
 }
 
 function SettingsPage(): JSX.Element {
-  const settings = useAsyncData(() => apiClient.getRuntimeSettings(), []);
+  const settings = useAsyncData((signal) => apiClient.getRuntimeSettings(signal), []);
   const [form, setForm] = useState<SettingsForm>(() => emptySettingsForm());
+  const [loadedForm, setLoadedForm] = useState<SettingsForm | null>(null);
+  const [lastAppliedForm, setLastAppliedForm] = useState<SettingsForm | null>(null);
+  const [settingsState, setSettingsState] = useState<SettingsApplyState>("clean");
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{
     changedKeys: string[];
@@ -2695,49 +2708,241 @@ function SettingsPage(): JSX.Element {
   const [restartBusy, setRestartBusy] = useState(false);
   const [restartResult, setRestartResult] = useState<string | null>(null);
   const [restartError, setRestartError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const operationSeqRef = useRef(0);
+  const seededRef = useRef(false);
+  const draftTouchedBeforeLoadRef = useRef(false);
+  const formRef = useRef(form);
+  const clearedSecretsRef = useRef(clearedSecrets);
+  formRef.current = form;
+  clearedSecretsRef.current = clearedSecrets;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      operationSeqRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!seededRef.current && !settings.data) {
+      draftTouchedBeforeLoadRef.current =
+        settingsFingerprint(form, clearedSecrets) !==
+        settingsFingerprint(emptySettingsForm(), new Set());
+    }
+  }, [form, clearedSecrets, settings.data]);
 
   useEffect(() => {
     if (settings.data) {
-      setForm(settingsFormFromResponse(settings.data));
+      const next = settingsFormFromResponse(settings.data);
+      setLoadedForm((current) => current ?? next);
+      setLastAppliedForm((current) => current ?? next);
+      if (!seededRef.current) {
+        const replaceDraft = shouldReplaceSettingsDraft(
+          seededRef.current,
+          draftTouchedBeforeLoadRef.current
+        );
+        seededRef.current = true;
+        if (replaceDraft) setForm(next);
+        else setSettingsState("dirty");
+      }
     }
   }, [settings.data]);
 
-  async function save(): Promise<void> {
-    setSaving(true);
+  const draftDirty = settingsDraftDiffers(form, loadedForm, clearedSecrets);
+  const operationBusy = saving || applying;
+
+  useEffect(() => {
+    if (
+      draftDirty &&
+      !operationBusy &&
+      settingsState !== "failed" &&
+      settingsState !== "restart-required"
+    ) {
+      setSettingsState("dirty");
+    }
+  }, [draftDirty, operationBusy, settingsState]);
+
+  function beginOperation(): number {
+    const operation = ++operationSeqRef.current;
     setSaveError(null);
+    setApplyError(null);
     setSaveResult(null);
+    setApplyResult(null);
+    return operation;
+  }
+
+  function operationIsCurrent(operation: number): boolean {
+    return isCurrentSettingsOperation(mountedRef.current, operation, operationSeqRef.current);
+  }
+
+  function localValidation(snapshot: SettingsForm): string | null {
+    const port = Number(snapshot.SERVER_PORT);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return "SERVER_PORT 必须是 1 到 65535 之间的整数。";
+    }
+    if (!snapshot.MEMORY_REPOSITORY.trim()) return "MEMORY_REPOSITORY 不能为空。";
+    return null;
+  }
+
+  function updateBaselineAfterSave(snapshot: SettingsForm, refreshed: SettingsForm): void {
+    setLoadedForm((current) => {
+      const baseline = { ...(current ?? refreshed) };
+      for (const key of Object.keys(refreshed) as SettingsKey[]) {
+        baseline[key] = isSecretSettingsKey(key) ? snapshot[key] : refreshed[key];
+      }
+      return baseline;
+    });
+  }
+
+  async function saveAndApply(): Promise<void> {
+    if (operationBusy) return;
+    const snapshot = { ...form };
+    const snapshotClearedSecrets = new Set(clearedSecrets);
+    const validationError = localValidation(snapshot);
+    if (validationError) {
+      setSettingsState("failed");
+      setSaveError(validationError);
+      return;
+    }
+    const operation = beginOperation();
+    const fingerprint = settingsFingerprint(snapshot, snapshotClearedSecrets);
+    let stage: "save" | "reload" | "refresh" = "save";
+    setSaving(true);
+    setSettingsState("saving");
     try {
       const response = await apiClient.updateRuntimeSettings({
-        values: buildSettingsUpdate(form, clearedSecrets)
+        values: buildSettingsUpdate(snapshot, snapshotClearedSecrets)
       });
+      if (!operationIsCurrent(operation)) return;
       setSaveResult({
         changedKeys: response.changedKeys,
         restartRequired: response.restartRequired
       });
-      setForm(settingsFormFromResponse(response.settings));
-      setClearedSecrets(new Set());
-      await settings.refresh();
+      setSettingsState("reloading");
+      setApplying(true);
+      stage = "reload";
+      const reloadResponse = await apiClient.reloadRuntimeSettings();
+      if (!operationIsCurrent(operation)) return;
+      setApplyResult(reloadResponse);
+      setSettingsState("refreshing");
+      stage = "refresh";
+      const refreshedResponse = await settings.refresh();
+      if (!operationIsCurrent(operation)) return;
+      if (!refreshedResponse) {
+        setSettingsState("failed");
+        setApplyError("配置已保存，但重新读取生效值失败。");
+        return;
+      }
+      const refreshedForm = settingsFormFromResponse(refreshedResponse);
+      const comparison = compareSettingsForms(snapshot, refreshedForm, new Set(settingsSecretKeys));
+      updateBaselineAfterSave(snapshot, refreshedForm);
+      const currentFingerprint = settingsFingerprint(formRef.current, clearedSecretsRef.current);
+      const draftChangedDuringSave = currentFingerprint !== fingerprint;
+      if (!draftChangedDuringSave) {
+        setClearedSecrets(new Set());
+      }
+      if (reloadResponse.notHotReloaded.length > 0 || response.restartRequired) {
+        setSettingsState("restart-required");
+        setApplyError(
+          reloadResponse.notHotReloaded.length > 0
+            ? `配置已保存，需要重启后生效：${reloadResponse.notHotReloaded.join(", ")}`
+            : "配置已保存，需要重启后生效。"
+        );
+      } else if (comparison.mismatchedKeys.length > 0) {
+        setSettingsState("failed");
+        setApplyError(`配置已保存，但实际生效值不一致：${comparison.mismatchedKeys.join(", ")}`);
+      } else {
+        setLastAppliedForm(snapshot);
+        setSettingsState(draftChangedDuringSave ? "dirty" : "applied");
+      }
     } catch (caught) {
-      setSaveError(caught instanceof Error ? caught.message : "Settings update failed");
+      if (!operationIsCurrent(operation)) return;
+      setSettingsState("failed");
+      const message = caught instanceof Error ? caught.message : "保存或应用配置失败";
+      if (stage === "save") setSaveError(message);
+      else setApplyError(message);
     } finally {
-      setSaving(false);
+      if (operationIsCurrent(operation)) {
+        setSaving(false);
+        setApplying(false);
+      }
     }
   }
 
-  async function applyRuntimeConfig(): Promise<void> {
-    setApplying(true);
-    setApplyError(null);
-    setApplyResult(null);
+  async function saveOnly(): Promise<void> {
+    if (operationBusy) return;
+    const snapshot = { ...form };
+    const snapshotClearedSecrets = new Set(clearedSecrets);
+    const validationError = localValidation(snapshot);
+    if (validationError) {
+      setSettingsState("failed");
+      setSaveError(validationError);
+      return;
+    }
+    const operation = beginOperation();
+    setSaving(true);
+    setSettingsState("saving");
     try {
-      const response = await apiClient.reloadRuntimeSettings();
-      setApplyResult(response);
-      setForm(settingsFormFromResponse(response.settings));
-      setClearedSecrets(new Set());
-      await settings.refresh();
+      const response = await apiClient.updateRuntimeSettings({
+        values: buildSettingsUpdate(snapshot, snapshotClearedSecrets)
+      });
+      if (!operationIsCurrent(operation)) return;
+      const refreshed = await settings.refresh();
+      if (!operationIsCurrent(operation)) return;
+      if (!refreshed) {
+        setSettingsState("failed");
+        setApplyError("配置已保存，但重新读取配置失败。");
+        return;
+      }
+      updateBaselineAfterSave(snapshot, settingsFormFromResponse(refreshed));
+      setSaveResult({
+        changedKeys: response.changedKeys,
+        restartRequired: response.restartRequired
+      });
+      setSettingsState(response.restartRequired ? "restart-required" : "clean");
+      if (
+        settingsFingerprint(formRef.current, clearedSecretsRef.current) ===
+        settingsFingerprint(snapshot, snapshotClearedSecrets)
+      ) {
+        setClearedSecrets(new Set());
+      }
     } catch (caught) {
-      setApplyError(caught instanceof Error ? caught.message : "Runtime config reload failed");
+      if (!operationIsCurrent(operation)) return;
+      setSettingsState("failed");
+      setSaveError(caught instanceof Error ? caught.message : "保存配置失败");
     } finally {
-      setApplying(false);
+      if (operationIsCurrent(operation)) setSaving(false);
+    }
+  }
+
+  async function reloadCurrentConfig(): Promise<void> {
+    if (operationBusy) return;
+    if (draftDirty && !window.confirm("当前有未保存更改，重新载入会丢弃草稿。继续吗？")) return;
+    const operation = beginOperation();
+    setApplying(true);
+    setSettingsState("refreshing");
+    try {
+      const refreshed = await settings.refresh();
+      if (!operationIsCurrent(operation)) return;
+      if (!refreshed) {
+        setSettingsState("failed");
+        setApplyError("重新载入配置失败。");
+        return;
+      }
+      const next = settingsFormFromResponse(refreshed);
+      setForm(next);
+      setLoadedForm(next);
+      setLastAppliedForm(next);
+      setClearedSecrets(new Set());
+      setSettingsState("clean");
+    } catch (caught) {
+      if (!operationIsCurrent(operation)) return;
+      setSettingsState("failed");
+      setApplyError(caught instanceof Error ? caught.message : "重新载入配置失败");
+    } finally {
+      if (operationIsCurrent(operation)) setApplying(false);
     }
   }
 
@@ -2747,9 +2952,20 @@ function SettingsPage(): JSX.Element {
     setVerifying(capability);
     setVerification(null);
     try {
-      setVerification(await apiClient.verifyProvider(capability));
+      const result = await apiClient.verifyProvider(capability);
+      if (mountedRef.current) setVerification(result);
+    } catch (caught) {
+      if (mountedRef.current) {
+        setVerification({
+          ok: false,
+          provider: "unknown",
+          capability,
+          mock: false,
+          error: caught instanceof Error ? caught.message : "Provider 验证失败"
+        });
+      }
     } finally {
-      setVerifying(null);
+      if (mountedRef.current) setVerifying(null);
     }
   }
 
@@ -2766,11 +2982,11 @@ function SettingsPage(): JSX.Element {
     setRestartError(null);
     try {
       const response = await apiClient.deepRestartRuntime();
-      setRestartResult(response.message);
+      if (mountedRef.current) setRestartResult(response.message);
     } catch (caught) {
-      setRestartError(deepRestartErrorMessage(caught));
+      if (mountedRef.current) setRestartError(deepRestartErrorMessage(caught));
     } finally {
-      setRestartBusy(false);
+      if (mountedRef.current) setRestartBusy(false);
     }
   }
 
@@ -2825,8 +3041,45 @@ function SettingsPage(): JSX.Element {
       {settings.error && (
         <Notice tone="error" title="Settings load failed" message={settings.error} />
       )}
-      {saveError && <Notice tone="error" title="Save failed" message={saveError} />}
-      {applyError && <Notice tone="error" title="Apply failed" message={applyError} />}
+      {(draftDirty || settingsState === "dirty") && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels.dirty}
+          message="草稿尚未保存到 .env.local。"
+        />
+      )}
+      {settingsState === "saving" && (
+        <Notice tone="info" title={settingsStateLabels.saving} message="正在保存配置草稿。" />
+      )}
+      {settingsState === "reloading" && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels.reloading}
+          message="正在将配置应用到 Runtime。"
+        />
+      )}
+      {settingsState === "refreshing" && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels.refreshing}
+          message="正在重新读取配置以确认生效。"
+        />
+      )}
+      {settingsState === "applied" && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels.applied}
+          message="配置已保存并确认在 Runtime 中生效。"
+        />
+      )}
+      {saveError && <Notice tone="error" title="保存失败" message={saveError} />}
+      {applyError && (
+        <Notice
+          tone="error"
+          title={settingsState === "restart-required" ? "已保存，需要重启" : "应用失败"}
+          message={applyError}
+        />
+      )}
       {restartError && <Notice tone="error" title="Deep restart failed" message={restartError} />}
       {restartResult && (
         <Notice tone="info" title="Deep restart requested" message={restartResult} />
@@ -2834,29 +3087,29 @@ function SettingsPage(): JSX.Element {
       {saveResult && (
         <Notice
           tone="info"
-          title="Saved to .env.local"
-          message={`${saveResult.changedKeys.length || 0} field(s) changed. Click Apply Now to reload provider config without restarting. Memory/server setting changes may still require restart.`}
+          title="配置已保存"
+          message={`${saveResult.changedKeys.length || 0} 项发生变化。${saveResult.restartRequired ? "部分配置需要重启。" : ""}`}
         />
       )}
       {applyResult && (
         <Notice
           tone="info"
-          title="Applied to active runtime"
-          message={`${applyResult.message} ${applyResult.restartRequired ? `Restart required for: ${applyResult.notHotReloaded.join(", ")}` : "No restart required for the applied provider config."}`}
+          title="Runtime 应用结果"
+          message={`${applyResult.message}${applyResult.notHotReloaded.length ? `；需要重启：${applyResult.notHotReloaded.join(", ")}` : ""}`}
         />
       )}
       {savedDeepSeekButRuntimeMock && (
         <Notice
           tone="info"
-          title="Saved config is not active yet"
-          message="DeepSeek config is saved, but active runtime is still mock. Click Apply Now or restart the server."
+          title="已保存但尚未生效"
+          message="DeepSeek 配置已保存，但当前 Runtime 仍是 mock。请点击“保存并应用”或重启服务。"
         />
       )}
       {savedConfigDiffersFromActive && (
         <Notice
           tone="info"
-          title="Saved config differs from active runtime"
-          message="Dashboard writes to .env.local. Click Apply Now to reload hot-reloadable provider config, or restart for memory/server boundary changes."
+          title="保存配置与 Runtime 不一致"
+          message="配置已写入 .env.local。请点击“保存并应用”重新加载可热更新配置；记忆或服务边界变更需要重启。"
         />
       )}
       <div className="grid grid-cols-2 gap-4">
@@ -3087,7 +3340,7 @@ function SettingsPage(): JSX.Element {
       <Panel title="Developer Tools / Deep Restart" badge="Development only">
         <div className="grid grid-cols-[1fr_1fr] gap-4">
           <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
-            <h3 className="mb-2 text-sm font-semibold text-ink-800">Apply Now</h3>
+            <h3 className="mb-2 text-sm font-semibold text-ink-800">保存并应用</h3>
             <ul className="space-y-1 text-sm leading-6 text-ink-600">
               <li>Reloads supported runtime config in-process.</li>
               <li>Does not restart the server.</li>
@@ -3196,7 +3449,7 @@ function SettingsPage(): JSX.Element {
         </div>
         <p className="mt-3 text-sm leading-6 text-ink-600">
           Provider chains are tried left to right. Mock is ignored unless PROVIDER_ALLOW_MOCKS=true.
-          Apply Now reloads supported runtime config; Deep Restart restarts the supervised runtime.
+          保存并应用会重新加载可热更新的 Runtime 配置；Deep Restart 会重启受监管的 Runtime。
         </p>
       </Panel>
       <div className="grid grid-cols-3 gap-4">
@@ -3358,13 +3611,37 @@ function SettingsPage(): JSX.Element {
       <div className="flex justify-end gap-3">
         <button
           className="button-secondary"
-          disabled={applying}
-          onClick={() => void applyRuntimeConfig()}
+          disabled={operationBusy}
+          onClick={() => void reloadCurrentConfig()}
         >
-          {applying ? "Applying" : "Apply Now / Reload Runtime Config"}
+          {applying ? "正在重新载入" : "重新载入当前配置"}
         </button>
-        <button className="button-primary" disabled={saving} onClick={() => void save()}>
-          {saving ? "Saving" : "Save to .env.local"}
+        <button
+          className="button-secondary"
+          disabled={operationBusy || !draftDirty}
+          onClick={() => {
+            if (loadedForm) {
+              setForm(loadedForm);
+              setClearedSecrets(new Set());
+              setSettingsState("clean");
+            }
+          }}
+        >
+          重置草稿
+        </button>
+        <button
+          className="button-secondary"
+          disabled={operationBusy}
+          onClick={() => void saveOnly()}
+        >
+          {saving ? "正在保存" : "仅保存"}
+        </button>
+        <button
+          className="button-primary"
+          disabled={operationBusy}
+          onClick={() => void saveAndApply()}
+        >
+          {saving ? "正在保存" : applying ? "正在应用" : "保存并应用"}
         </button>
       </div>
     </PageShell>
@@ -3419,6 +3696,15 @@ type SettingsKey =
   | "EMBEDDING_API_KEY"
   | "EMBEDDING_MODEL"
   | "EMBEDDING_DIMENSIONS";
+
+const settingsSecretKeys: SettingsKey[] = [
+  "DATABASE_URL",
+  "DEEPSEEK_API_KEY",
+  "NVIDIA_API_KEY",
+  "XAI_API_KEY",
+  "DASHSCOPE_API_KEY",
+  "EMBEDDING_API_KEY"
+];
 
 function emptySettingsForm(): SettingsForm {
   return {
@@ -3797,11 +4083,7 @@ function ProviderMetadataSummary(props: {
   }
 
   if (typeof provider === "string") {
-    return (
-      <div className="mt-2 text-xs text-ink-500">
-        provider: {provider}
-      </div>
-    );
+    return <div className="mt-2 text-xs text-ink-500">provider: {provider}</div>;
   }
 
   return (
@@ -3815,7 +4097,9 @@ function ProviderMetadataSummary(props: {
       </span>
       {provider.name && <span>provider: {provider.name}</span>}
       {provider.model && <span>model: {provider.model}</span>}
-      {provider.latencyMs !== undefined && <span>latency: {formatLatency(provider.latencyMs)}</span>}
+      {provider.latencyMs !== undefined && (
+        <span>latency: {formatLatency(provider.latencyMs)}</span>
+      )}
       {provider.healthStatus && <span>health: {provider.healthStatus}</span>}
       {provider.tokenUsage && <span>tokens: {formatTokenUsage(provider.tokenUsage)}</span>}
       {provider.mock && (
