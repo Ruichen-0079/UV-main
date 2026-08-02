@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseMemoryRepositoryEnv } from "./env.js";
 import {
   MissingDatabaseUrlError,
@@ -1112,6 +1112,15 @@ describe("MemoryRepository", () => {
 
   describe("explicit intent, provenance, temporal, and dedupe fixes", () => {
     const observedAt = "2026-06-22T09:44:28+08:00";
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-06-22T12:00:00+08:00"));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
 
     it("A stores explicit breakfast remember requests even when ordinary one-off", async () => {
       const repository = new InMemoryMemoryRepository();
