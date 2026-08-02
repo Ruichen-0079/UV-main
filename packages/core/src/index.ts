@@ -26,6 +26,11 @@ import type {
 import { createEvent } from "@companion/protocol";
 import {
   ProviderError,
+  ProviderErrorCode,
+  type ChatInput,
+  type ChatOutput,
+  type ChatProvider,
+  type ChatStreamEvent,
   type ProviderCapability,
   type ProviderHealth,
   type ProviderMetadata,
@@ -56,6 +61,10 @@ export type ConversationPersistenceOperation =
   | "session_create"
   | "user_message_save"
   | "assistant_message_save"
+  | "assistant_stream_create"
+  | "assistant_stream_append"
+  | "assistant_stream_complete"
+  | "assistant_stream_fail"
   | "context_restore";
 
 export class ConversationPersistenceError extends Error {
@@ -161,6 +170,27 @@ export type HandleUserMessageOptions = {
   useMemory?: boolean | undefined;
   readMemory?: boolean | undefined;
   writeMemory?: boolean | undefined;
+};
+
+export type RuntimeReplyStreamEvent =
+  | {
+      type: "text-delta";
+      text: string;
+      messageId: string;
+      sessionId: string;
+      traceId: string;
+    }
+  | {
+      type: "completed";
+      messageId: string;
+      sessionId: string;
+      traceId: string;
+      content: string;
+      provider: string;
+    };
+
+export type StreamUserMessageOptions = HandleUserMessageOptions & {
+  signal?: AbortSignal | undefined;
 };
 
 export type RuntimePromptPreview = {
@@ -579,6 +609,311 @@ export class RuntimeOrchestrator {
     return reply;
   }
 
+  async *streamUserMessage(
+    input: UserMessageEvent | HandleUserMessageInput,
+    options: StreamUserMessageOptions = {}
+  ): AsyncIterable<RuntimeReplyStreamEvent> {
+    if (options.signal?.aborted) {
+      throw createRuntimeCancelledError();
+    }
+
+    const userEvent = isRuntimeUserMessageEvent(input)
+      ? input
+      : createEvent(
+          "user.message",
+          {
+            sessionId: input.sessionId,
+            content: input.content,
+            ...identityPayload(input)
+          },
+          {
+            traceId: input.traceId,
+            parentId: input.parentId
+          }
+        );
+    const agentReplyId = crypto.randomUUID();
+    const assistantMessageId = crypto.randomUUID();
+    const voiceOutput = isRuntimeUserMessageEvent(input)
+      ? Boolean(options.voiceOutput)
+      : Boolean(input.voiceOutput ?? options.voiceOutput);
+
+    await this.persistUserMessage(userEvent);
+    await this.options.eventBus.publish(userEvent);
+    await this.restoreDirectContext(userEvent.payload.sessionId);
+    const { prompt, memoryOptions } = await this.prepareChatPrompt(userEvent, {
+      voiceOutput,
+      useMemory: options.useMemory,
+      readMemory: options.readMemory,
+      writeMemory: options.writeMemory
+    });
+
+    const chatProvider = this.options.providers.getChatProvider();
+    const chatStatus = this.getProviderStatus("chat");
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (options.signal?.aborted) {
+      controller.abort();
+    } else {
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+    }
+
+    let providerIterator: AsyncIterator<ChatStreamEvent> | undefined;
+    let assistantCreated = false;
+    let accumulatedText = "";
+    let finalOutput: ChatOutput | undefined;
+    let sawCompleted = false;
+    let terminalStatus: "completed" | "failed" | "cancelled" | undefined;
+    let finalized = false;
+    let failure: unknown;
+    const startedAt = performance.now();
+
+    try {
+      if (controller.signal.aborted) {
+        throw createRuntimeCancelledError(chatProvider.name);
+      }
+      const providerStream = chatProvider.streamReply
+        ? chatProvider.streamReply({ messages: prompt.messages }, { signal: controller.signal })
+        : compatibleRuntimeStream(chatProvider, { messages: prompt.messages }, controller.signal);
+      providerIterator = providerStream[Symbol.asyncIterator]();
+
+      while (true) {
+        let next: IteratorResult<ChatStreamEvent>;
+        try {
+          next = await providerIterator.next();
+        } catch (error) {
+          throw normalizeRuntimeStreamError(error, chatProvider.name, controller.signal);
+        }
+        if (next.done) {
+          break;
+        }
+        const event = next.value;
+        if (controller.signal.aborted) {
+          throw createRuntimeCancelledError(chatProvider.name);
+        }
+        if (sawCompleted) {
+          throw runtimeStreamProtocolError(
+            chatProvider.name,
+            "Provider emitted an event after completed."
+          );
+        }
+
+        if (event.type === "text-delta") {
+          if (!event.text) {
+            throw runtimeStreamProtocolError(
+              chatProvider.name,
+              "Provider emitted an empty text delta."
+            );
+          }
+          if (!assistantCreated && this.options.conversation) {
+            await this.createStreamingAssistantMessage({
+              id: assistantMessageId,
+              sessionId: userEvent.payload.sessionId,
+              traceId: userEvent.traceId,
+              parentMessageId: agentReplyId,
+              content: event.text,
+              createdAt: new Date().toISOString()
+            });
+            assistantCreated = true;
+          } else if (assistantCreated) {
+            await this.appendStreamingAssistantContent(assistantMessageId, event.text);
+          }
+          accumulatedText += event.text;
+          yield {
+            type: "text-delta",
+            text: event.text,
+            messageId: assistantMessageId,
+            sessionId: userEvent.payload.sessionId,
+            traceId: userEvent.traceId
+          };
+          continue;
+        }
+
+        if (event.type === "completed") {
+          if (sawCompleted) {
+            throw runtimeStreamProtocolError(
+              chatProvider.name,
+              "Provider emitted multiple completed events."
+            );
+          }
+          if (event.output.message.content !== accumulatedText) {
+            throw runtimeStreamProtocolError(
+              chatProvider.name,
+              "Provider completed output did not match persisted text deltas."
+            );
+          }
+          sawCompleted = true;
+          finalOutput = event.output;
+          continue;
+        }
+
+        throw runtimeStreamProtocolError(
+          chatProvider.name,
+          "Provider emitted an unknown stream event."
+        );
+      }
+
+      if (!finalOutput || !sawCompleted) {
+        throw runtimeStreamProtocolError(
+          chatProvider.name,
+          "Provider stream ended without completion."
+        );
+      }
+
+      const providerMetadata = this.safeProviderCallMetadata(
+        "chat",
+        chatProvider.name,
+        finalOutput,
+        chatStatus
+      );
+      if (this.latestPromptPreview) {
+        this.latestPromptPreview = {
+          ...this.latestPromptPreview,
+          providerName: providerMetadata.name,
+          providerModel: providerMetadata.model,
+          providerMock: providerMetadata.mock,
+          providerLatencyMs: finalOutput.latencyMs ?? Math.round(performance.now() - startedAt),
+          providerHealthStatus: providerMetadata.healthStatus,
+          tokenUsage: providerMetadata.tokenUsage,
+          ...this.extractorPreviewFields({
+            ...this.getMemoryExtractorStatus(),
+            used: false
+          })
+        };
+      }
+
+      if (this.options.conversation && !assistantCreated) {
+        await this.createStreamingAssistantMessage({
+          id: assistantMessageId,
+          sessionId: userEvent.payload.sessionId,
+          traceId: userEvent.traceId,
+          parentMessageId: agentReplyId,
+          content: accumulatedText,
+          createdAt: new Date().toISOString()
+        });
+        assistantCreated = true;
+      }
+      if (this.options.conversation) {
+        await this.completeStreamingAssistantMessage(assistantMessageId, {
+          provider: providerMetadata,
+          model: providerMetadata.model,
+          tokenUsage: providerMetadata.tokenUsage
+        });
+      }
+
+      const reply = this.createAgentReply(
+        userEvent,
+        finalOutput.message.content,
+        providerMetadata,
+        agentReplyId
+      );
+      await this.options.eventBus.publish(reply);
+      this.recordDirectContextTurn(userEvent, reply);
+      const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
+      await this.options.eventBus.publish(assistantMessage);
+
+      // Final persistence and user-visible events establish the completed reply.
+      // Optional post-processing must not move it back to failed/cancelled or
+      // prevent the Runtime completed event from being delivered.
+      finalized = true;
+      terminalStatus = "completed";
+      if (!options.signal?.aborted) {
+        try {
+          if (memoryOptions.writeMemory) {
+            const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
+            this.updateLatestPromptPreviewExtraction(extraction);
+          } else {
+            this.updateLatestPromptPreviewExtraction({
+              ...this.getMemoryExtractorStatus(),
+              used: false,
+              skippedReason: "Memory write was disabled for this turn."
+            });
+          }
+        } catch (error) {
+          await this.publishRuntimeError("Optional memory post-processing failed.", error, {
+            traceId: reply.traceId,
+            parentId: reply.id
+          });
+          this.options.logger?.warn?.(
+            "optional memory post-processing failed",
+            this.errorLogContext(error, reply.traceId)
+          );
+        }
+      }
+      if (!options.signal?.aborted) {
+        try {
+          await this.maybeSynthesizeSpeech(reply, voiceOutput);
+        } catch (error) {
+          await this.publishRuntimeError("Optional TTS post-processing failed.", error, {
+            traceId: reply.traceId,
+            parentId: reply.id
+          });
+          this.options.logger?.warn?.(
+            "optional TTS post-processing failed",
+            this.errorLogContext(error, reply.traceId)
+          );
+        }
+      }
+      yield {
+        type: "completed",
+        messageId: assistantMessageId,
+        sessionId: userEvent.payload.sessionId,
+        traceId: userEvent.traceId,
+        content: finalOutput.message.content,
+        provider: providerMetadata.finalProvider ?? providerMetadata.name
+      };
+    } catch (error) {
+      failure = error;
+    } finally {
+      controller.abort();
+      try {
+        await providerIterator?.return?.();
+      } catch (closeError) {
+        this.options.logger?.warn?.(
+          "failed to close runtime provider stream",
+          this.errorLogContext(closeError, userEvent.traceId)
+        );
+      }
+
+      if (!finalized) {
+        const cancelled =
+          failure === undefined ||
+          (failure instanceof ProviderError && failure.code === ProviderErrorCode.Cancelled);
+        terminalStatus = cancelled ? "cancelled" : "failed";
+        if (assistantCreated) {
+          await this.failStreamingAssistantMessage(assistantMessageId, terminalStatus, {
+            error:
+              failure instanceof Error ? redactUnsafeText(safeErrorMessage(failure)) : undefined
+          });
+        }
+        if (failure === undefined && terminalStatus === "cancelled") {
+          failure = createRuntimeCancelledError(chatProvider.name);
+        }
+        if (failure !== undefined && !(failure instanceof ConversationPersistenceError)) {
+          if (failure instanceof ProviderError) {
+            await this.publishProviderError(failure, {
+              capability: "chat",
+              provider: chatProvider.name,
+              latencyMs: Math.round(performance.now() - startedAt),
+              traceId: userEvent.traceId,
+              parentId: userEvent.id
+            });
+          } else {
+            await this.publishRuntimeError("Runtime stream failed.", failure, {
+              traceId: userEvent.traceId,
+              parentId: userEvent.id,
+              category: "stream"
+            });
+          }
+        }
+      }
+      options.signal?.removeEventListener("abort", onAbort);
+    }
+
+    if (failure !== undefined) {
+      throw failure;
+    }
+  }
+
   async handleAudioInput(input: HandleAudioInputInput): Promise<AgentReplyEvent> {
     const sttProvider = this.options.providers.getSTTProvider();
     const transcript = await this.measureProvider(
@@ -643,16 +978,18 @@ export class RuntimeOrchestrator {
     return event;
   }
 
-  async generateReply(
+  private async prepareChatPrompt(
     event: UserMessageEvent | UserVoiceTranscriptEvent,
     options: {
       voiceOutput?: boolean | undefined;
       useMemory?: boolean | undefined;
       readMemory?: boolean | undefined;
       writeMemory?: boolean | undefined;
-      publishAgentReply?: boolean | undefined;
     } = {}
-  ): Promise<AgentReplyEvent> {
+  ): Promise<{
+    prompt: PromptBuildOutput;
+    memoryOptions: ResolvedMemoryOptions;
+  }> {
     const voiceOutput = Boolean(options.voiceOutput);
     const memoryOptions = resolveMemoryOptions(options);
     const currentAffect = detectCurrentAffect({
@@ -752,6 +1089,21 @@ export class RuntimeOrchestrator {
       )
     };
 
+    return { prompt, memoryOptions };
+  }
+
+  async generateReply(
+    event: UserMessageEvent | UserVoiceTranscriptEvent,
+    options: {
+      voiceOutput?: boolean | undefined;
+      useMemory?: boolean | undefined;
+      readMemory?: boolean | undefined;
+      writeMemory?: boolean | undefined;
+      publishAgentReply?: boolean | undefined;
+    } = {}
+  ): Promise<AgentReplyEvent> {
+    const { prompt, memoryOptions } = await this.prepareChatPrompt(event, options);
+
     const chatProvider = this.options.providers.getChatProvider();
     const chatStatus = this.getProviderStatus("chat");
     const output = await this.measureProvider(
@@ -769,19 +1121,21 @@ export class RuntimeOrchestrator {
       output,
       chatStatus
     );
-    this.latestPromptPreview = {
-      ...this.latestPromptPreview,
-      providerName: providerMetadata.name,
-      providerModel: providerMetadata.model,
-      providerMock: providerMetadata.mock,
-      providerLatencyMs: providerMetadata.latencyMs,
-      providerHealthStatus: providerMetadata.healthStatus,
-      tokenUsage: providerMetadata.tokenUsage,
-      ...this.extractorPreviewFields({
-        ...this.getMemoryExtractorStatus(),
-        used: false
-      })
-    };
+    if (this.latestPromptPreview) {
+      this.latestPromptPreview = {
+        ...this.latestPromptPreview,
+        providerName: providerMetadata.name,
+        providerModel: providerMetadata.model,
+        providerMock: providerMetadata.mock,
+        providerLatencyMs: providerMetadata.latencyMs,
+        providerHealthStatus: providerMetadata.healthStatus,
+        tokenUsage: providerMetadata.tokenUsage,
+        ...this.extractorPreviewFields({
+          ...this.getMemoryExtractorStatus(),
+          used: false
+        })
+      };
+    }
 
     const reply = this.createAgentReply(event, output.message.content, providerMetadata);
     if (options.publishAgentReply !== false) {
@@ -970,9 +1324,10 @@ export class RuntimeOrchestrator {
   private createAgentReply(
     sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
     content: string,
-    provider?: SafeProviderCallMetadata | undefined
+    provider?: SafeProviderCallMetadata | undefined,
+    id?: string | undefined
   ): AgentReplyEvent {
-    return createEvent(
+    const event = createEvent(
       "agent.reply",
       {
         sessionId: sourceEvent.payload.sessionId,
@@ -984,13 +1339,14 @@ export class RuntimeOrchestrator {
         parentId: sourceEvent.id
       }
     );
+    return id ? { ...event, id } : event;
   }
 
-  private async publishAssistantMessage(
-    sourceEvent: UserMessageEvent,
-    reply: AgentReplyEvent
-  ): Promise<AssistantMessageEvent> {
-    const assistantMessage = createEvent(
+  private createAssistantMessageEvent(
+    reply: AgentReplyEvent,
+    id?: string | undefined
+  ): AssistantMessageEvent {
+    const event = createEvent(
       "assistant.message",
       {
         sessionId: reply.payload.sessionId,
@@ -1002,6 +1358,14 @@ export class RuntimeOrchestrator {
         parentId: reply.id
       }
     );
+    return id ? { ...event, id } : event;
+  }
+
+  private async publishAssistantMessage(
+    sourceEvent: UserMessageEvent,
+    reply: AgentReplyEvent
+  ): Promise<AssistantMessageEvent> {
+    const assistantMessage = this.createAssistantMessageEvent(reply);
 
     try {
       await this.options.conversation?.appendMessage(
@@ -1029,6 +1393,115 @@ export class RuntimeOrchestrator {
     this.recordDirectContextTurn(sourceEvent, reply);
     await this.options.eventBus.publish(assistantMessage);
     return assistantMessage;
+  }
+
+  private async createStreamingAssistantMessage(input: {
+    id: string;
+    sessionId: string;
+    traceId: string;
+    parentMessageId: string;
+    content: string;
+    createdAt: string;
+  }): Promise<void> {
+    const conversation = this.options.conversation;
+    if (!conversation) {
+      return;
+    }
+    try {
+      await conversation.appendMessage({
+        id: input.id,
+        sessionId: input.sessionId,
+        traceId: input.traceId,
+        parentMessageId: input.parentMessageId,
+        role: "assistant",
+        content: input.content,
+        status: "streaming",
+        createdAt: input.createdAt,
+        completedAt: null,
+        metadata: {}
+      });
+    } catch (error) {
+      await this.publishPersistenceError(
+        "assistant_stream_create",
+        "Streaming assistant message creation failed.",
+        error,
+        { traceId: input.traceId, parentId: input.parentMessageId }
+      );
+      throw new ConversationPersistenceError(
+        "assistant_stream_create",
+        "The streaming assistant response could not be created."
+      );
+    }
+  }
+
+  private async appendStreamingAssistantContent(messageId: string, delta: string): Promise<void> {
+    const conversation = this.options.conversation;
+    if (!conversation) {
+      return;
+    }
+    try {
+      await conversation.appendMessageContent(messageId, delta);
+    } catch (error) {
+      await this.publishPersistenceError(
+        "assistant_stream_append",
+        "Streaming assistant message append failed.",
+        error,
+        { traceId: undefined, parentId: messageId }
+      );
+      throw new ConversationPersistenceError(
+        "assistant_stream_append",
+        "The streaming assistant response could not be saved."
+      );
+    }
+  }
+
+  private async completeStreamingAssistantMessage(
+    messageId: string,
+    metadata: Record<string, unknown>
+  ): Promise<void> {
+    const conversation = this.options.conversation;
+    if (!conversation) {
+      return;
+    }
+    try {
+      await conversation.completeMessage(messageId, metadata);
+    } catch (error) {
+      await this.publishPersistenceError(
+        "assistant_stream_complete",
+        "Streaming assistant message completion failed.",
+        error,
+        { traceId: undefined, parentId: messageId }
+      );
+      throw new ConversationPersistenceError(
+        "assistant_stream_complete",
+        "The streaming assistant response could not be finalized."
+      );
+    }
+  }
+
+  private async failStreamingAssistantMessage(
+    messageId: string,
+    status: "failed" | "cancelled",
+    metadata: Record<string, unknown>
+  ): Promise<void> {
+    const conversation = this.options.conversation;
+    if (!conversation) {
+      return;
+    }
+    try {
+      await conversation.failMessage(messageId, status, metadata);
+    } catch (error) {
+      await this.publishPersistenceError(
+        "assistant_stream_fail",
+        "Streaming assistant message failure state could not be saved.",
+        error,
+        { traceId: undefined, parentId: messageId }
+      );
+      this.options.logger?.warn?.(
+        "streaming assistant failure state could not be saved",
+        this.errorLogContext(error)
+      );
+    }
   }
 
   private async persistUserMessage(userEvent: UserMessageEvent): Promise<void> {
@@ -1610,11 +2083,17 @@ type MemoryContext = {
   promptMemories: RetrievedMemoryDebug[];
 };
 
+type ResolvedMemoryOptions = {
+  legacyUseMemory: boolean | undefined;
+  readMemory: boolean;
+  writeMemory: boolean;
+};
+
 function resolveMemoryOptions(options: {
   useMemory?: boolean | undefined;
   readMemory?: boolean | undefined;
   writeMemory?: boolean | undefined;
-}): { legacyUseMemory: boolean | undefined; readMemory: boolean; writeMemory: boolean } {
+}): ResolvedMemoryOptions {
   const defaultEnabled = options.useMemory ?? true;
   return {
     legacyUseMemory: options.useMemory,
@@ -1647,6 +2126,70 @@ function emptyMemoryContext(): MemoryContext {
     retrievedMemories: [],
     promptMemories: []
   };
+}
+
+async function* compatibleRuntimeStream(
+  provider: ChatProvider,
+  input: ChatInput,
+  signal: AbortSignal
+): AsyncIterable<ChatStreamEvent> {
+  if (signal.aborted) {
+    throw createRuntimeCancelledError(provider.name);
+  }
+  // A compatible provider may not be able to physically abort generateReply().
+  // Runtime cancellation therefore only suppresses output, fallback, and completion.
+  const output = await provider.generateReply(input);
+  if (signal.aborted) {
+    throw createRuntimeCancelledError(provider.name);
+  }
+  if (output.message.content) {
+    yield { type: "text-delta", text: output.message.content };
+  }
+  if (signal.aborted) {
+    throw createRuntimeCancelledError(provider.name);
+  }
+  yield { type: "completed", output };
+}
+
+function normalizeRuntimeStreamError(
+  error: unknown,
+  provider: string,
+  signal: AbortSignal
+): ProviderError {
+  if (signal.aborted) {
+    return createRuntimeCancelledError(provider, error);
+  }
+  if (error instanceof ProviderError) {
+    return error;
+  }
+  return new ProviderError({
+    provider,
+    capability: "chat",
+    code: ProviderErrorCode.NetworkError,
+    message: "Chat stream failed.",
+    cause: error
+  });
+}
+
+function createRuntimeCancelledError(provider = "chat", cause?: unknown): ProviderError {
+  return new ProviderError({
+    provider,
+    capability: "chat",
+    code: ProviderErrorCode.Cancelled,
+    message: "Chat stream was cancelled.",
+    retryable: false,
+    cause
+  });
+}
+
+function runtimeStreamProtocolError(provider: string, message: string): ProviderError {
+  return new ProviderError({
+    provider,
+    capability: "chat",
+    code: ProviderErrorCode.MalformedResponse,
+    message,
+    retryable: false
+  });
 }
 
 function memoryToDebug(memory: Memory): RetrievedMemoryDebug {
@@ -1834,7 +2377,7 @@ function clampInteger(value: number, min: number, max: number): number {
 function conversationMessageFromEvent(
   event: UserMessageEvent | AssistantMessageEvent,
   role: "user" | "assistant",
-  status: "completed" | "failed"
+  status: ConversationMessage["status"]
 ): ConversationMessageInput {
   return {
     id: event.id,

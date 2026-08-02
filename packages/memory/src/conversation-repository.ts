@@ -4,7 +4,7 @@ import { normalizePostgresConnectionString } from "./postgres-connection.js";
 
 export type ConversationRepositoryKind = MemoryRepositoryKind;
 export type ConversationMessageRole = "user" | "assistant";
-export type ConversationMessageStatus = "completed" | "failed";
+export type ConversationMessageStatus = "streaming" | "completed" | "failed" | "cancelled";
 
 export type ConversationMessage = {
   id: string;
@@ -32,6 +32,16 @@ export interface ConversationRepository {
   healthCheck(): Promise<{ status: "healthy" | "unavailable"; message?: string }>;
   ensureSession(sessionId: string): Promise<void>;
   appendMessage(message: ConversationMessageInput): Promise<ConversationMessage>;
+  appendMessageContent(messageId: string, delta: string): Promise<ConversationMessage>;
+  completeMessage(
+    messageId: string,
+    metadata?: Record<string, unknown>
+  ): Promise<ConversationMessage>;
+  failMessage(
+    messageId: string,
+    status: "failed" | "cancelled",
+    metadata?: Record<string, unknown>
+  ): Promise<ConversationMessage>;
   listRecentMessages(
     sessionId: string,
     options?: ConversationListOptions
@@ -114,6 +124,108 @@ export class PostgresConversationRepository implements ConversationRepository {
     return mapConversationMessageRow(requireConversationRow(existing.rows));
   }
 
+  async appendMessageContent(messageId: string, delta: string): Promise<ConversationMessage> {
+    if (!delta) {
+      throw new Error("Conversation message delta must not be empty.");
+    }
+
+    const result = await this.pool.query(
+      `update conversation_messages
+       set content = content || $2
+       where id = $1 and status = 'streaming'
+       returning *`,
+      [messageId, delta]
+    );
+    if (result.rows.length > 0) {
+      return mapConversationMessageRow(result.rows[0]);
+    }
+
+    const existing = await this.requireMessageForTransition(messageId, "append content");
+    if (existing.status === "streaming") {
+      throw new Error(
+        `Conversation message '${messageId}' append content update affected no rows while status is 'streaming'.`
+      );
+    }
+    throw new Error(
+      `Conversation message '${messageId}' cannot append content in status '${existing.status}'.`
+    );
+  }
+
+  async completeMessage(
+    messageId: string,
+    metadata: Record<string, unknown> = {}
+  ): Promise<ConversationMessage> {
+    const result = await this.pool.query(
+      `update conversation_messages
+       set status = 'completed', completed_at = coalesce(completed_at, now()),
+           metadata = metadata || $2::jsonb
+       where id = $1 and status = 'streaming'
+       returning *`,
+      [messageId, JSON.stringify(metadata)]
+    );
+    if (result.rows.length > 0) {
+      return mapConversationMessageRow(result.rows[0]);
+    }
+
+    const existing = await this.requireMessageForTransition(messageId, "complete");
+    if (existing.status === "completed") {
+      return existing;
+    }
+    if (existing.status === "streaming") {
+      throw new Error(
+        `Conversation message '${messageId}' complete update affected no rows while status is 'streaming'.`
+      );
+    }
+    throw new Error(
+      `Conversation message '${messageId}' cannot transition from '${existing.status}' to 'completed'.`
+    );
+  }
+
+  async failMessage(
+    messageId: string,
+    status: "failed" | "cancelled",
+    metadata: Record<string, unknown> = {}
+  ): Promise<ConversationMessage> {
+    const result = await this.pool.query(
+      `update conversation_messages
+       set status = $2, metadata = metadata || $3::jsonb
+       where id = $1 and status = 'streaming'
+       returning *`,
+      [messageId, status, JSON.stringify(metadata)]
+    );
+    if (result.rows.length > 0) {
+      return mapConversationMessageRow(result.rows[0]);
+    }
+
+    const existing = await this.requireMessageForTransition(messageId, "finalize");
+    if (existing.status === status) {
+      return existing;
+    }
+    if (existing.status === "streaming") {
+      throw new Error(
+        `Conversation message '${messageId}' finalize update affected no rows while status is 'streaming'.`
+      );
+    }
+    throw new Error(
+      `Conversation message '${messageId}' cannot transition from '${existing.status}' to '${status}'.`
+    );
+  }
+
+  private async requireMessageForTransition(
+    messageId: string,
+    operation: string
+  ): Promise<ConversationMessage> {
+    const result = await this.pool.query("select * from conversation_messages where id = $1", [
+      messageId
+    ]);
+    if (result.rows.length === 0) {
+      throw new Error(
+        `Conversation message '${messageId}' was not found while attempting to ${operation}.`
+      );
+    }
+    return mapConversationMessageRow(result.rows[0]);
+  }
+
   async listRecentMessages(
     sessionId: string,
     options: ConversationListOptions = {}
@@ -172,6 +284,62 @@ export class InMemoryConversationRepository implements ConversationRepository {
     return cloneConversationMessage(stored);
   }
 
+  async appendMessageContent(messageId: string, delta: string): Promise<ConversationMessage> {
+    if (!delta) {
+      throw new Error("Conversation message delta must not be empty.");
+    }
+
+    const message = this.findMessage(messageId);
+    if (!message) {
+      throw new Error(`Conversation message '${messageId}' was not found while appending content.`);
+    }
+    if (message.status !== "streaming") {
+      throw new Error(
+        `Conversation message '${messageId}' cannot append content in status '${message.status}'.`
+      );
+    }
+    message.content += delta;
+    return cloneConversationMessage(message);
+  }
+
+  async completeMessage(
+    messageId: string,
+    metadata: Record<string, unknown> = {}
+  ): Promise<ConversationMessage> {
+    const message = this.requireMessage(messageId, "complete");
+    if (message.status === "completed") {
+      return cloneConversationMessage(message);
+    }
+    if (message.status !== "streaming") {
+      throw new Error(
+        `Conversation message '${messageId}' cannot transition from '${message.status}' to 'completed'.`
+      );
+    }
+    message.status = "completed";
+    message.completedAt = new Date().toISOString();
+    message.metadata = { ...message.metadata, ...metadata };
+    return cloneConversationMessage(message);
+  }
+
+  async failMessage(
+    messageId: string,
+    status: "failed" | "cancelled",
+    metadata: Record<string, unknown> = {}
+  ): Promise<ConversationMessage> {
+    const message = this.requireMessage(messageId, "finalize");
+    if (message.status === status) {
+      return cloneConversationMessage(message);
+    }
+    if (message.status !== "streaming") {
+      throw new Error(
+        `Conversation message '${messageId}' cannot transition from '${message.status}' to '${status}'.`
+      );
+    }
+    message.status = status;
+    message.metadata = { ...message.metadata, ...metadata };
+    return cloneConversationMessage(message);
+  }
+
   async listRecentMessages(
     sessionId: string,
     options: ConversationListOptions = {}
@@ -181,6 +349,26 @@ export class InMemoryConversationRepository implements ConversationRepository {
       messages.slice(-(options.limit ?? 24)).map(cloneConversationMessage),
       options
     );
+  }
+
+  private findMessage(messageId: string): ConversationMessage | undefined {
+    for (const messages of this.messages.values()) {
+      const message = messages.find((candidate) => candidate.id === messageId);
+      if (message) {
+        return message;
+      }
+    }
+    return undefined;
+  }
+
+  private requireMessage(messageId: string, operation: string): ConversationMessage {
+    const message = this.findMessage(messageId);
+    if (!message) {
+      throw new Error(
+        `Conversation message '${messageId}' was not found while attempting to ${operation}.`
+      );
+    }
+    return message;
   }
 }
 

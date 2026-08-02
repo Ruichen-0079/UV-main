@@ -47,6 +47,39 @@ describe("ConversationRepository", () => {
     expect((await repository.listRecentMessages("session-a"))[0]?.metadata).toEqual({});
   });
 
+  it("appends streaming content atomically and enforces terminal transitions in memory", async () => {
+    const repository = new InMemoryConversationRepository();
+    await repository.appendMessage({
+      ...message("stream", "session-a", "assistant", "hel"),
+      status: "streaming",
+      completedAt: null
+    });
+
+    await repository.appendMessageContent("stream", "lo");
+    expect((await repository.listRecentMessages("session-a"))[0]).toMatchObject({
+      content: "hello",
+      status: "streaming",
+      completedAt: null
+    });
+
+    await repository.completeMessage("stream", { provider: "mock" });
+    await repository.completeMessage("stream", { ignored: true });
+    expect((await repository.listRecentMessages("session-a"))[0]).toMatchObject({
+      content: "hello",
+      status: "completed",
+      metadata: { provider: "mock" }
+    });
+    await expect(repository.appendMessageContent("stream", "!")).rejects.toThrow(
+      /cannot append content in status 'completed'/
+    );
+    await expect(repository.failMessage("stream", "failed")).rejects.toThrow(
+      /cannot transition from 'completed'/
+    );
+    await expect(repository.appendMessageContent("missing", "x")).rejects.toThrow(
+      /message 'missing' was not found/
+    );
+  });
+
   it("uses the injectable PostgreSQL client for append and ordered reads", async () => {
     const rows: Array<Record<string, unknown>> = [];
     const queries: string[] = [];
@@ -103,6 +136,133 @@ describe("ConversationRepository", () => {
     const messageInsert = queries.find((sql) => sql.includes("insert into conversation_messages"));
     expect(messageInsert).toContain("on conflict (id) do nothing");
     expect(messageInsert).not.toMatch(/max\s*\(\s*sequence\s*\)/i);
+  });
+
+  it("uses parameterized atomic SQL for streaming updates", async () => {
+    const row: Record<string, unknown> = {
+      id: "stream",
+      session_id: "session-a",
+      trace_id: "trace-stream",
+      parent_message_id: "agent-reply",
+      role: "assistant",
+      content: "hel",
+      status: "streaming",
+      created_at: "2026-01-01T00:00:00Z",
+      completed_at: null,
+      metadata: {},
+      sequence: 1
+    };
+    const queries: Array<{ sql: string; values: unknown[] }> = [];
+    const client = {
+      async query(sql: string, values: unknown[] = []) {
+        queries.push({ sql, values });
+        if (sql.includes("update conversation_messages") && sql.includes("content = content ||")) {
+          row["content"] = `${row["content"]}${values[1]}`;
+          return { rows: [row] };
+        }
+        if (sql.includes("update conversation_messages") && sql.includes("status = 'completed'")) {
+          row["status"] = "completed";
+          row["completed_at"] = "2026-01-01T00:00:01Z";
+          row["metadata"] = { provider: "mock" };
+          return { rows: [row] };
+        }
+        if (sql.includes("insert into conversation_messages")) {
+          return { rows: [row] };
+        }
+        if (sql.includes("select * from conversation_messages where id")) {
+          return { rows: [row] };
+        }
+        return { rows: [] };
+      },
+      async end() {}
+    };
+    const repository = new PostgresConversationRepository(client);
+
+    await repository.appendMessage({
+      ...message("stream", "session-a", "assistant", "hel"),
+      status: "streaming",
+      completedAt: null
+    });
+    await repository.appendMessageContent("stream", "lo");
+    await repository.completeMessage("stream", { provider: "mock" });
+
+    const appendQuery = queries.find((query) => query.sql.includes("content = content ||"));
+    expect(appendQuery?.sql).toMatch(/where id = \$1 and status = 'streaming'/);
+    expect(appendQuery?.values).toEqual(["stream", "lo"]);
+    expect(appendQuery?.sql).not.toMatch(/select content/i);
+    const completeQuery = queries.find((query) => query.sql.includes("status = 'completed'"));
+    expect(completeQuery?.sql).toContain("metadata = metadata || $2::jsonb");
+    expect(completeQuery?.values).toEqual(["stream", JSON.stringify({ provider: "mock" })]);
+  });
+
+  it("does not treat zero-row streaming updates as successful", async () => {
+    const rows: Record<string, unknown>[] = [
+      {
+        id: "completed",
+        session_id: "session-a",
+        trace_id: "trace-completed",
+        parent_message_id: null,
+        role: "assistant",
+        content: "done",
+        status: "completed",
+        created_at: "2026-01-01T00:00:00Z",
+        completed_at: "2026-01-01T00:00:01Z",
+        metadata: {},
+        sequence: 1
+      },
+      {
+        id: "streaming",
+        session_id: "session-a",
+        trace_id: "trace-streaming",
+        parent_message_id: null,
+        role: "assistant",
+        content: "partial",
+        status: "streaming",
+        created_at: "2026-01-01T00:00:00Z",
+        completed_at: null,
+        metadata: {},
+        sequence: 2
+      }
+    ];
+    const updates: string[] = [];
+    const client = {
+      async query(sql: string, values: unknown[] = []) {
+        if (sql.trimStart().startsWith("update conversation_messages")) {
+          updates.push(sql);
+          return { rows: [] };
+        }
+        if (sql.includes("select * from conversation_messages where id")) {
+          return { rows: rows.filter((row) => row["id"] === values[0]) };
+        }
+        return { rows: [] };
+      },
+      async end() {}
+    };
+    const repository = new PostgresConversationRepository(client);
+
+    await expect(repository.appendMessageContent("completed", "!")).rejects.toThrow(
+      /cannot append content in status 'completed'/
+    );
+    await expect(repository.completeMessage("completed")).resolves.toMatchObject({
+      id: "completed",
+      status: "completed"
+    });
+    await expect(repository.failMessage("completed", "cancelled")).rejects.toThrow(
+      /cannot transition from 'completed'/
+    );
+    await expect(repository.failMessage("streaming", "failed")).rejects.toThrow(
+      /update affected no rows while status is 'streaming'/
+    );
+    await expect(repository.appendMessageContent("streaming", "!")).rejects.toThrow(
+      /update affected no rows while status is 'streaming'/
+    );
+    await expect(repository.completeMessage("streaming")).rejects.toThrow(
+      /update affected no rows while status is 'streaming'/
+    );
+    await expect(repository.appendMessageContent("missing", "x")).rejects.toThrow(
+      /was not found/
+    );
+    expect(updates).toHaveLength(7);
   });
 
   it("allows an explicit conversation repository driver and reuses the memory default", () => {
