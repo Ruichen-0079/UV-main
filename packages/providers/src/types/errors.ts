@@ -7,6 +7,7 @@ export const ProviderErrorCode = {
   ModelNotFound: "MODEL_NOT_FOUND",
   RateLimited: "RATE_LIMITED",
   Timeout: "TIMEOUT",
+  Cancelled: "CANCELLED",
   NetworkError: "NETWORK_ERROR",
   MalformedResponse: "MALFORMED_RESPONSE",
   UnsupportedInput: "UNSUPPORTED_INPUT",

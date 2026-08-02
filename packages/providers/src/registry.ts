@@ -1,4 +1,11 @@
-import type { ChatInput, ChatOutput, ChatProvider } from "./types/chat.js";
+import type {
+  ChatInput,
+  ChatOutput,
+  ChatProvider,
+  ChatStreamEvent,
+  ChatStreamOptions,
+  ChatStreamingMode
+} from "./types/chat.js";
 import type { EmbeddingProvider } from "./types/embedding.js";
 import type {
   ProviderAttempt,
@@ -80,6 +87,7 @@ type ProviderEnv = Record<string, string | undefined>;
 
 export interface ProviderResolver {
   getChatProvider(): ChatProvider;
+  getChatStreamingMode?(): ChatStreamingMode;
   getReasoningProvider(): ReasoningProvider;
   getTTSProvider(): TTSProvider;
   getSTTProvider(): STTProvider;
@@ -129,6 +137,10 @@ export class ProviderRegistry implements ProviderResolver {
 
   getChatProvider(): ChatProvider {
     return this.getRequiredProvider(this.chatProviders, this.config.defaults.chat, "chat");
+  }
+
+  getChatStreamingMode(): ChatStreamingMode {
+    return getChatStreamingMode(this.getChatProvider());
   }
 
   getReasoningProvider(): ReasoningProvider {
@@ -1022,14 +1034,16 @@ function createProviderChain<TProvider>(
   return providers.length > 0 ? providers : [createUnavailable("unavailable")];
 }
 
-class FallbackChatProvider implements ChatProvider {
+export class FallbackChatProvider implements ChatProvider {
   readonly name: string;
+  readonly streamingMode: ChatStreamingMode;
 
   constructor(
     private readonly providers: ChatProvider[],
     name?: string
   ) {
     this.name = name ?? providers[0]?.name ?? "unavailable";
+    this.streamingMode = providers[0] ? getChatStreamingMode(providers[0]) : "unsupported";
   }
 
   async healthCheck(): Promise<ProviderHealth> {
@@ -1041,6 +1055,13 @@ class FallbackChatProvider implements ChatProvider {
 
   async generateReply(input: ChatInput): Promise<ChatOutput> {
     return runProviderChain(this.providers, "chat", (provider) => provider.generateReply(input));
+  }
+
+  async *streamReply(
+    input: ChatInput,
+    options: ChatStreamOptions = {}
+  ): AsyncIterable<ChatStreamEvent> {
+    yield* runProviderStreamChain(this.providers, input, options);
   }
 }
 
@@ -1252,6 +1273,232 @@ async function runProviderChain<
   });
   Object.assign(providerError, { attemptedProviders: attempts });
   throw providerError;
+}
+
+export function getChatStreamingMode(provider: ChatProvider): ChatStreamingMode {
+  return provider.streamingMode ?? (provider.streamReply ? "native" : "compatible");
+}
+
+async function* runProviderStreamChain(
+  providers: ChatProvider[],
+  input: ChatInput,
+  options: ChatStreamOptions
+): AsyncIterable<ChatStreamEvent> {
+  const attempts: ProviderAttempt[] = [];
+  let lastError: ProviderError | undefined;
+
+  for (const [index, provider] of providers.entries()) {
+    if (options.signal?.aborted) {
+      throw attachAttemptedProviders(createCancelledError(provider.name), attempts);
+    }
+
+    const startedAt = performance.now();
+    let emittedText = false;
+    let completion: ChatOutput | undefined;
+
+    try {
+      const stream = streamProvider(provider, input, options);
+      let text = "";
+
+      for await (const event of stream) {
+        if (options.signal?.aborted) {
+          throw createCancelledError(provider.name);
+        }
+        if (completion) {
+          throw streamProtocolError(provider.name, "Stream emitted an event after completed.");
+        }
+
+        if (event?.type === "text-delta") {
+          if (!event.text) {
+            throw streamProtocolError(provider.name, "Stream emitted an empty text delta.");
+          }
+          emittedText = true;
+          text += event.text;
+          yield event;
+          continue;
+        }
+
+        if (event?.type === "completed") {
+          completion = event.output;
+          if (completion.message.content !== text) {
+            throw streamProtocolError(
+              provider.name,
+              "Completed output did not match the concatenated text deltas."
+            );
+          }
+          continue;
+        }
+
+        throw streamProtocolError(provider.name, "Stream emitted an unknown event.");
+      }
+
+      if (!completion) {
+        throw streamProtocolError(provider.name, "Stream ended without a completed event.");
+      }
+
+      const latencyMs = Math.round(performance.now() - startedAt);
+      const providerAttempt: ProviderAttempt = {
+        provider: provider.name,
+        model: completion.model,
+        status: "success",
+        latencyMs: completion.latencyMs ?? latencyMs,
+        enabled: true,
+        priority: index + 1
+      };
+      attempts.push(providerAttempt);
+      const output: ChatOutput = {
+        ...completion,
+        fallbackUsed: attempts.length > 1,
+        attemptedProviders: attempts,
+        finalProvider: provider.name,
+        providerMetadata: {
+          ...(completion.providerMetadata ?? {}),
+          fallbackUsed: attempts.length > 1,
+          attemptedProviders: attempts,
+          finalProvider: provider.name
+        }
+      };
+
+      if (options.signal?.aborted) {
+        throw createCancelledError(provider.name);
+      }
+      yield { type: "completed", output };
+      return;
+    } catch (error) {
+      const providerError = normalizeStreamError(error, provider.name, options.signal);
+      lastError = providerError;
+      attempts.push({
+        provider: providerError.provider,
+        status:
+          providerError.code === ProviderErrorCode.ProviderUnavailable &&
+          providerError.statusCode === undefined
+            ? "unavailable"
+            : "failed",
+        errorCode: providerError.code,
+        error: safeProviderErrorMessage(providerError),
+        latencyMs: Math.round(performance.now() - startedAt),
+        enabled: true,
+        priority: index + 1
+      });
+      attachAttemptedProviders(providerError, attempts);
+
+      if (
+        providerError.code === ProviderErrorCode.Cancelled ||
+        options.signal?.aborted ||
+        emittedText ||
+        completion
+      ) {
+        throw providerError;
+      }
+    }
+  }
+
+  const chainError = new ProviderError({
+    provider: providers[0]?.name ?? "provider-chain",
+    capability: "chat",
+    code: lastError?.code ?? ProviderErrorCode.ProviderUnavailable,
+    message: `All chat providers failed: ${attempts
+      .map((attempt) => `${attempt.provider}:${attempt.errorCode ?? attempt.status}`)
+      .join(", ")}`,
+    retryable: false
+  });
+  attachAttemptedProviders(chainError, attempts);
+  throw chainError;
+}
+
+function streamProvider(
+  provider: ChatProvider,
+  input: ChatInput,
+  options: ChatStreamOptions
+): AsyncIterable<ChatStreamEvent> {
+  if (provider.streamingMode === "unsupported") {
+    throw unavailableError(provider.name, "chat", "Streaming is not supported by this provider.");
+  }
+  return provider.streamReply
+    ? provider.streamReply(input, options)
+    : adaptNonStreamingProvider(provider, input, options);
+}
+
+async function* adaptNonStreamingProvider(
+  provider: ChatProvider,
+  input: ChatInput,
+  options: ChatStreamOptions
+): AsyncIterable<ChatStreamEvent> {
+  if (options.signal?.aborted) {
+    throw createCancelledError(provider.name);
+  }
+  // A legacy generateReply() may already own a network request that cannot be
+  // physically aborted. Once its promise settles, the adapter only guarantees
+  // that no further output, fallback, or completed event is produced.
+  const output = await provider.generateReply(input);
+  if (options.signal?.aborted) {
+    throw createCancelledError(provider.name);
+  }
+  if (output.message.content) {
+    yield { type: "text-delta", text: output.message.content };
+  }
+  if (options.signal?.aborted) {
+    throw createCancelledError(provider.name);
+  }
+  yield { type: "completed", output };
+}
+
+function normalizeStreamError(
+  error: unknown,
+  provider: string,
+  signal?: AbortSignal | undefined
+): ProviderError {
+  if (signal?.aborted) {
+    return createCancelledError(provider, error);
+  }
+  if (error instanceof ProviderError) {
+    return error;
+  }
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return new ProviderError({
+      provider,
+      capability: "chat",
+      code: ProviderErrorCode.Timeout,
+      message: "Chat stream timed out.",
+      cause: error
+    });
+  }
+  return new ProviderError({
+    provider,
+    capability: "chat",
+    code: ProviderErrorCode.NetworkError,
+    message: "Chat stream failed.",
+    cause: error
+  });
+}
+
+function createCancelledError(provider: string, cause?: unknown): ProviderError {
+  return new ProviderError({
+    provider,
+    capability: "chat",
+    code: ProviderErrorCode.Cancelled,
+    message: "Chat stream was cancelled.",
+    retryable: false,
+    cause
+  });
+}
+
+function streamProtocolError(provider: string, message: string): ProviderError {
+  return new ProviderError({
+    provider,
+    capability: "chat",
+    code: ProviderErrorCode.MalformedResponse,
+    message,
+    retryable: false
+  });
+}
+
+function attachAttemptedProviders(
+  error: ProviderError,
+  attempts: ProviderAttempt[]
+): ProviderError {
+  Object.assign(error, { attemptedProviders: attempts });
+  return error;
 }
 
 class UnimplementedChatProvider implements ChatProvider {
@@ -1615,6 +1862,114 @@ export function createMockChatProvider(name = "mock-chat"): ChatProvider {
       };
     }
   };
+}
+
+export type MockStreamingChatProviderOptions = {
+  chunks?: string[];
+  delayMs?: number;
+  failBeforeFirst?: Error | (() => Error);
+  failAfterChunks?: number;
+  failAfter?: Error | (() => Error);
+  output?: Partial<Omit<ChatOutput, "message">>;
+};
+
+function resolveMockStreamingFailure(
+  failure: Error | (() => Error) | undefined
+): Error | undefined {
+  return typeof failure === "function" ? failure() : failure;
+}
+
+export function createMockStreamingChatProvider(
+  name = "mock-stream-chat",
+  options: MockStreamingChatProviderOptions = {}
+): ChatProvider {
+  return {
+    name,
+    streamingMode: "native",
+    async healthCheck() {
+      return providerHealth(name, "healthy", "Mock streaming chat provider is available.");
+    },
+    async generateReply(input: ChatInput): Promise<ChatOutput> {
+      if (options.failBeforeFirst) {
+        throw resolveMockStreamingFailure(options.failBeforeFirst);
+      }
+      const lastUserMessage = [...input.messages]
+        .reverse()
+        .find((message) => message.role === "user");
+      const chunks = options.chunks ?? [`Mock reply: ${lastUserMessage?.content ?? ""}`];
+      return {
+        ...options.output,
+        message: { role: "assistant", content: chunks.join("") },
+        finishReason: options.output?.finishReason ?? "stop"
+      };
+    },
+    async *streamReply(
+      input: ChatInput,
+      streamOptions: ChatStreamOptions = {}
+    ): AsyncIterable<ChatStreamEvent> {
+      const lastUserMessage = [...input.messages]
+        .reverse()
+        .find((message) => message.role === "user");
+      const chunks = options.chunks ?? [`Mock reply: ${lastUserMessage?.content ?? ""}`];
+
+      if (streamOptions.signal?.aborted) {
+        throw createCancelledError(name);
+      }
+      if (options.failBeforeFirst) {
+        throw resolveMockStreamingFailure(options.failBeforeFirst);
+      }
+
+      let emittedChunks = 0;
+      for (const chunk of chunks) {
+        if (options.failAfterChunks !== undefined && emittedChunks >= options.failAfterChunks) {
+          const afterFailure = resolveMockStreamingFailure(options.failAfter);
+          throw afterFailure ?? new Error("Mock streaming provider failed after partial output.");
+        }
+        await waitForStreamDelay(options.delayMs ?? 0, streamOptions.signal, name);
+        if (!chunk) {
+          yield { type: "text-delta", text: chunk };
+        } else {
+          yield { type: "text-delta", text: chunk };
+        }
+        emittedChunks += 1;
+      }
+
+      const content = chunks.join("");
+      yield {
+        type: "completed",
+        output: {
+          ...options.output,
+          message: { role: "assistant", content },
+          finishReason: options.output?.finishReason ?? "stop"
+        }
+      };
+    }
+  };
+}
+
+async function waitForStreamDelay(
+  delayMs: number,
+  signal: AbortSignal | undefined,
+  provider: string
+): Promise<void> {
+  if (delayMs <= 0) {
+    if (signal?.aborted) {
+      throw createCancelledError(provider);
+    }
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(createCancelledError(provider));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export function createMockReasoningProvider(name = "mock-reasoning"): ReasoningProvider {
