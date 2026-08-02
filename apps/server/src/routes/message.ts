@@ -5,7 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 
-const MessageRequestSchema = z
+export const MessageRequestSchema = z
   .object({
     sessionId: z.string().min(1).default("default"),
     content: z.string().min(1).optional(),
@@ -85,32 +85,7 @@ export async function registerMessageRoutes(
           : undefined
       });
     } catch (error) {
-      if (error instanceof ConversationPersistenceError) {
-        return reply.status(503).send({
-          error: "persistence_failed",
-          operation: error.operation,
-          message: error.message,
-          traceId: event.traceId
-        });
-      }
-      if (error instanceof ProviderError) {
-        return reply.status(error.statusCode ?? 503).send({
-          error: "provider_unavailable",
-          code: error.code,
-          provider: error.provider,
-          capability: error.capability,
-          message: error.message,
-          attemptedProviders: (error as { attemptedProviders?: unknown }).attemptedProviders,
-          setup:
-            "Configure the selected provider in .env.local and use Settings > Apply Now, or set PROVIDER_ALLOW_MOCKS=true for explicit offline/mock development.",
-          traceId: event.traceId
-        });
-      }
-      return reply.status(500).send({
-        error: "message_failed",
-        message: error instanceof Error ? error.message : "Message handling failed.",
-        traceId: event.traceId
-      });
+      return sendMessageError(reply, error, event.traceId);
     }
   }
 
@@ -118,7 +93,7 @@ export async function registerMessageRoutes(
   app.post("/v1/messages", handleMessage);
 }
 
-function normalizeMessageMemoryOptions(
+export function normalizeMessageMemoryOptions(
   options:
     | {
         useMemory?: boolean | undefined;
@@ -138,4 +113,39 @@ function normalizeMessageMemoryOptions(
     readMemory: options?.readMemory ?? defaultEnabled,
     writeMemory: options?.writeMemory ?? defaultEnabled
   };
+}
+
+export function sendMessageError(
+  reply: {
+    status(code: number): { send(payload: unknown): unknown };
+  },
+  error: unknown,
+  traceId: string
+): unknown {
+  if (error instanceof ConversationPersistenceError) {
+    return reply.status(503).send({
+      error: "persistence_failed",
+      operation: error.operation,
+      message: error.message,
+      traceId
+    });
+  }
+  if (error instanceof ProviderError) {
+    return reply.status(error.statusCode ?? 503).send({
+      error: "provider_unavailable",
+      code: error.code,
+      provider: error.provider,
+      capability: error.capability,
+      message: error.message,
+      attemptedProviders: (error as { attemptedProviders?: unknown }).attemptedProviders,
+      setup:
+        "Configure the selected provider in .env.local and use Settings > Apply Now, or set PROVIDER_ALLOW_MOCKS=true for explicit offline/mock development.",
+      traceId
+    });
+  }
+  return reply.status(500).send({
+    error: "message_failed",
+    message: error instanceof Error ? error.message : "Message handling failed.",
+    traceId
+  });
 }

@@ -293,6 +293,12 @@ Invoke-RestMethod `
 
 With mocks enabled, the reply starts with `Mock reply:` when real provider keys are unavailable.
 
+For the versioned Runtime text stream, use `POST /v1/messages/stream` with the same JSON body
+(`sessionId`, `content` or `text`, and the existing memory options). Read the response with
+`fetch()` and consume the `text/event-stream` body one frame at a time. Browser `EventSource`
+cannot send a JSON body with `POST`, so it is not the client for this endpoint. The existing
+`POST /message` and `POST /v1/messages` endpoints remain non-streaming compatibility APIs.
+
 ## 8. Test Memory Endpoint
 
 Create a memory:

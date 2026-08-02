@@ -7,6 +7,7 @@ import { registerHealthRoutes } from "./routes/health.js";
 import { memorySearchValidationError, registerMemoryRoutes } from "./routes/memory.js";
 import { registerMediaRoutes } from "./routes/media.js";
 import { registerMessageRoutes } from "./routes/message.js";
+import { registerMessageStreamRoutes } from "./routes/message-stream.js";
 import { registerProviderRoutes } from "./routes/providers.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerSystemRoutes } from "./routes/system.js";
@@ -75,6 +76,7 @@ export async function buildServer(config: ServerConfig) {
   await registerSettingsRoutes(app, context, config);
   await registerSystemRoutes(app, config);
   await registerMessageRoutes(app, context);
+  await registerMessageStreamRoutes(app, context);
   await registerMediaRoutes(app, context);
   await registerMemoryRoutes(app, context, config);
   await registerEventRoutes(app, context);
