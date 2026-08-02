@@ -1,3 +1,24 @@
+import {
+  MessageSseParser,
+  MessageStreamError,
+  MessageStreamProtocolError,
+  type CompletedMessage,
+  type MessageStreamEvent
+} from "./stream.js";
+
+export {
+  MessageSseParser,
+  MessageStreamError,
+  MessageStreamProtocolError
+} from "./stream.js";
+export type {
+  CompletedMessage,
+  MessageStreamCompleted,
+  MessageStreamErrorEvent,
+  MessageStreamEvent,
+  MessageStreamTextDelta
+} from "./stream.js";
+
 export type ProviderHealth = {
   provider: string;
   name?: string;
@@ -860,6 +881,88 @@ export const apiClient = {
     });
   },
 
+  async streamMessage(
+    input: SendMessageRequest,
+    options: {
+      signal?: AbortSignal;
+      onEvent?: (event: MessageStreamEvent) => void;
+    } = {}
+  ): Promise<CompletedMessage> {
+    const headers = new Headers({ "content-type": "application/json" });
+    if (dashboardDevToken && shouldAttachDashboardDevToken("/v1/messages/stream", "POST")) {
+      headers.set("authorization", `Bearer ${dashboardDevToken}`);
+    }
+
+    const requestInit: RequestInit = {
+      method: "POST",
+      headers,
+      body: JSON.stringify(input)
+    };
+    if (options.signal) {
+      requestInit.signal = options.signal;
+    }
+    const response = await fetch(`${apiBaseUrl}/v1/messages/stream`, requestInit);
+
+    if (!response.ok) {
+      throw new ApiError(await safeHttpStreamError(response), response.status);
+    }
+
+    if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+      throw new MessageStreamProtocolError("The streaming response was not SSE.");
+    }
+    if (!response.body) {
+      throw new MessageStreamProtocolError("The streaming response has no body.");
+    }
+
+    const parser = new MessageSseParser();
+    const reader = response.body.getReader();
+    let accumulatedText = "";
+    let completed: CompletedMessage | undefined;
+    let readerDone = false;
+
+    try {
+      while (true) {
+        const result = await reader.read();
+        if (result.done) {
+          readerDone = true;
+          break;
+        }
+        for (const event of parser.push(result.value)) {
+          if (event.type === "text-delta") {
+            if (completed) {
+              throw new MessageStreamProtocolError("The message stream continued after completion.");
+            }
+            accumulatedText += event.text;
+            options.onEvent?.(event);
+            continue;
+          }
+          if (event.type === "error") {
+            options.onEvent?.(event);
+            throw new MessageStreamError(event);
+          }
+          if (event.content !== accumulatedText) {
+            throw new MessageStreamProtocolError(
+              "The completed message does not match its text deltas."
+            );
+          }
+          completed = event;
+          options.onEvent?.(event);
+        }
+      }
+
+      parser.finish();
+      if (!completed) {
+        throw new MessageStreamProtocolError("The message stream ended before completion.");
+      }
+      return completed;
+    } finally {
+      if (!readerDone) {
+        await reader.cancel().catch(() => undefined);
+      }
+      reader.releaseLock();
+    }
+  },
+
   listRecentMemories(limit = 20): Promise<{ memories: MemoryRecord[] }> {
     return request<{ memories: MemoryRecord[] }>(`/memory/recent?limit=${limit}`);
   },
@@ -1322,6 +1425,51 @@ function shouldAttachDashboardDevToken(path: string, method: string | undefined)
   }
   const normalized = method?.toUpperCase() ?? "GET";
   return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";
+}
+
+async function safeHttpStreamError(response: Response): Promise<string> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return response.status === 400 ? "请求内容无效。" : "消息流请求失败。";
+  }
+
+  if (isRecord(payload)) {
+    if (payload["error"] === "invalid_request") {
+      return "请求内容无效。";
+    }
+    if (typeof payload["code"] === "string") {
+      return safeClientErrorMessage(payload["code"]);
+    }
+    if (payload["error"] === "persistence_failed") {
+      return "消息保存失败，请稍后重试。";
+    }
+  }
+  return response.status === 400 ? "请求内容无效。" : "消息流请求失败。";
+}
+
+function safeClientErrorMessage(code: string): string {
+  switch (code) {
+    case "MISSING_API_KEY":
+    case "INVALID_API_KEY":
+    case "PERMISSION_DENIED":
+      return "Provider 认证失败。";
+    case "RATE_LIMITED":
+      return "Provider 请求过于频繁。";
+    case "TIMEOUT":
+      return "Provider 请求超时。";
+    case "CANCELLED":
+      return "生成已取消。";
+    case "PROVIDER_UNAVAILABLE":
+      return "Provider 当前不可用。";
+    default:
+      return "消息流请求失败。";
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function getWebSocketUrl(path: string): string {

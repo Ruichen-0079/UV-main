@@ -44,16 +44,20 @@ WebSocket: ws://localhost:6121/ws
 
 ### Chat
 
-用于发送开发期文本消息，验证 `POST /v1/messages`（`POST /message` 为兼容端点）：
+用于发送开发期文本消息，默认通过浏览器 `fetch()` 调用 `POST /v1/messages/stream`：
 
 - text input
 - send button
+- streaming / completed / failed / cancelled 状态
+- 停止生成按钮
 - chat history
 - traceId display
 - memory usage toggle
 - TTS output toggle
 
-`Use memory` 目前是 UI 选项，后端尚未提供 per-turn memory flag。`TTS output` 会映射到 `voiceOutput`。
+`POST /message` 和 `POST /v1/messages` 仍保留为非流式兼容端点。停止生成会取消当前 Server 流，刷新页面暂时不会恢复聊天历史，因为当前没有会话历史查询接口。Dashboard WebSocket 仅用于事件诊断，不会把 `agent.reply` 再插入 Chat 消息。
+
+`TTS output` 会映射到 `voiceOutput`。
 
 ### Memory
 

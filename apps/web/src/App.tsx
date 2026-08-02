@@ -22,7 +22,8 @@ import {
   type RuntimeEvent,
   type RuntimeSettingsReloadResponse,
   type RuntimeSettingsResponse,
-  type UpdateMemoryRequest
+  type UpdateMemoryRequest,
+  type MessageStreamEvent
 } from "./api/client.js";
 import { promptPreviewPlaceholder } from "./data/mock.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
@@ -39,15 +40,20 @@ type PageId =
   | "settings";
 
 type ChatMessage = {
+  id: string;
   role: "user" | "assistant";
   content: string;
+  status?: ChatMessageStatus;
+  error?: string;
   traceId?: string;
   useMemory?: boolean;
   readMemory?: boolean;
   writeMemory?: boolean;
   voiceOutput?: boolean;
-  provider?: ProviderCallMetadata;
+  provider?: ProviderCallMetadata | string;
 };
+
+type ChatMessageStatus = "streaming" | "completed" | "failed" | "cancelled";
 
 type WebSocketStatus =
   | "connecting"
@@ -89,6 +95,7 @@ const memorySubtypes = [
 const memoryScopes = ["user", "project", "agent", "plugin", "session"];
 const memoryLayers = ["core", "recall", "archival", "working"];
 const memoryStatuses = ["active", "superseded", "archived", "forgotten", "expired"];
+let chatMessageSequence = 0;
 
 const pages: Array<{ id: PageId; label: string }> = [
   { id: "overview", label: "概览" },
@@ -165,9 +172,7 @@ export function App(): JSX.Element {
               memories={memories.data?.memories ?? []}
             />
           )}
-          {activePage === "chat" && (
-            <ChatPage onEvent={(event) => setLocalEvents((current) => [event, ...current])} />
-          )}
+          {activePage === "chat" && <ChatPage />}
           {activePage === "memory" && <MemoryPage state={memories} health={health.data} />}
           {activePage === "providers" && <ProvidersPage state={providerStatus} />}
           {activePage === "events" && (
@@ -273,7 +278,7 @@ function OverviewPage(props: {
   );
 }
 
-function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
+function ChatPage(): JSX.Element {
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState("dashboard");
   const [readMemory, setReadMemory] = useState(true);
@@ -284,6 +289,22 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [lastTraceId, setLastTraceId] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const activeRequestRef = useRef<{
+    id: string;
+    assistantId: string;
+    controller: AbortController;
+    completedObserved: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      activeRequestRef.current?.controller.abort();
+      activeRequestRef.current = null;
+    };
+  }, []);
 
   const outgoingPayload = useMemo(
     () => ({
@@ -299,60 +320,159 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
   );
 
   async function send(): Promise<void> {
-    if (!input.trim()) {
+    if (!input.trim() || activeRequestRef.current) {
       return;
     }
 
     const content = input.trim();
+    const requestId = createChatMessageId("turn");
+    const assistantId = createChatMessageId("assistant");
+    const controller = new AbortController();
+    activeRequestRef.current = {
+      id: requestId,
+      assistantId,
+      controller,
+      completedObserved: false
+    };
     setInput("");
     setRequestStatus("sending");
     setError(null);
     setMessages((current) => [
       ...current,
       {
+        id: createChatMessageId("user"),
         role: "user",
         content,
         useMemory: readMemory && writeMemory,
         readMemory,
         writeMemory,
-        voiceOutput
+        voiceOutput,
+        status: "completed"
+      },
+      {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        status: "streaming"
       }
     ]);
 
+    const updateAssistant = (update: Partial<ChatMessage>): void => {
+      if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+        return;
+      }
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId ? { ...message, ...update } : message
+        )
+      );
+    };
+
     try {
-      const response = await apiClient.sendMessage({
-        sessionId,
-        text: content,
-        options: {
-          readMemory,
-          writeMemory,
-          voiceOutput,
-          promptPreview
-        }
-      });
-      props.onEvent(response);
-      setLastTraceId(response.traceId);
-      const provider = response.provider ?? response.payload.provider;
-      setMessages((current) => [
-        ...current,
+      const response = await apiClient.streamMessage(
         {
-          role: "assistant",
-          content: response.reply || response.payload.content || "No assistant content returned.",
-          traceId: response.traceId,
-          ...(provider ? { provider } : {})
+          sessionId,
+          text: content,
+          options: {
+            readMemory,
+            writeMemory,
+            voiceOutput,
+            promptPreview
+          }
+        },
+        {
+          signal: controller.signal,
+          onEvent: (event: MessageStreamEvent) => {
+            if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+              return;
+            }
+            if (event.type === "text-delta") {
+              setLastTraceId(event.traceId);
+              setMessages((current) =>
+                current.map((message) =>
+                  message.id === assistantId && message.status !== "completed"
+                    ? {
+                        ...message,
+                        content: message.content + event.text,
+                        traceId: event.traceId,
+                        status: "streaming"
+                      }
+                    : message
+                )
+              );
+              return;
+            }
+            if (event.type === "error") {
+              updateAssistant({ status: "failed", error: event.message });
+              setError(event.message);
+              return;
+            }
+            activeRequestRef.current.completedObserved = true;
+            setLastTraceId(event.traceId);
+            updateAssistant({
+              content: event.content,
+              provider: event.provider,
+              traceId: event.traceId,
+              status: "completed"
+            });
+            setRequestStatus("success");
+          }
         }
-      ]);
+      );
+
+      if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+        return;
+      }
+      updateAssistant({
+        content: response.content,
+        provider: response.provider,
+        traceId: response.traceId,
+        status: "completed"
+      });
+      setLastTraceId(response.traceId);
       setRequestStatus("success");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Message request failed");
+      if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+        return;
+      }
+      if (controller.signal.aborted) {
+        updateAssistant({ status: "cancelled", error: "生成已取消，保留已生成内容。" });
+        setRequestStatus("idle");
+        return;
+      }
+      const message = friendlyChatError(caught);
+      updateAssistant({ status: "failed", error: message });
+      setError(message);
       setRequestStatus("error");
     } finally {
-      // Keep success/error visible after the request completes.
+      if (activeRequestRef.current?.id === requestId) {
+        activeRequestRef.current = null;
+      }
     }
   }
 
+  function stopGeneration(): void {
+    const active = activeRequestRef.current;
+    if (!active || active.completedObserved) {
+      return;
+    }
+    active.controller.abort();
+    activeRequestRef.current = null;
+    if (!mountedRef.current) {
+      return;
+    }
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === active.assistantId
+          ? { ...message, status: "cancelled", error: "生成已取消，保留已生成内容。" }
+          : message
+      )
+    );
+    setRequestStatus("idle");
+  }
+
   return (
-    <PageShell title="Chat" subtitle="Send text turns through the runtime server.">
+    <PageShell title="Chat" subtitle="Send text turns through the persistent Runtime stream.">
       <div className="grid grid-cols-[1fr_280px] gap-4">
         <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
           <div className="h-[420px] overflow-auto rounded-md border border-ink-100 bg-ink-50 p-3">
@@ -360,15 +480,23 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
               <EmptyState title="No chat yet" message="Send a message to exercise the runtime." />
             ) : (
               <div className="space-y-3">
-                {messages.map((message, index) => (
+                {messages.map((message) => (
                   <div
-                    key={`${message.role}-${index}`}
+                    key={message.id}
                     className={`rounded-md border p-3 ${message.role === "user" ? "border-cyan-100 bg-white" : "border-ink-200 bg-white"}`}
                   >
-                    <div className="mb-1 text-xs font-semibold uppercase text-ink-500">
-                      {message.role}
+                    <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase text-ink-500">
+                      <span>{message.role}</span>
+                      {message.role === "assistant" && message.status && (
+                        <span aria-live="polite">{chatStatusLabel(message.status)}</span>
+                      )}
                     </div>
                     <div className="text-sm leading-6">{message.content}</div>
+                    {message.error && (
+                      <div className="mt-2 text-xs text-red-700" role="alert">
+                        {message.error}
+                      </div>
+                    )}
                     {message.traceId && (
                       <div className="mt-2 font-mono text-xs text-ink-500">
                         traceId: {message.traceId}
@@ -403,14 +531,28 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
               placeholder="Type a runtime test message"
               value={input}
               onChange={(event) => setInput(event.target.value)}
+              aria-label="Chat message"
             />
-            <button
-              className="button-primary h-20 w-24"
-              disabled={requestStatus === "sending" || !input.trim()}
-              onClick={() => void send()}
-            >
-              {requestStatus === "sending" ? "Sending" : "Send"}
-            </button>
+            {requestStatus === "sending" && activeRequestRef.current ? (
+              <button
+                type="button"
+                className="button-secondary h-20 w-24"
+                onClick={stopGeneration}
+                aria-label="Stop generating"
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="button-primary h-20 w-24"
+                disabled={Boolean(activeRequestRef.current) || !input.trim()}
+                onClick={() => void send()}
+                aria-label="Send message"
+              >
+                Send
+              </button>
+            )}
           </div>
         </Panel>
         <Panel title="Turn Options">
@@ -438,13 +580,13 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
               label="Prompt Preview"
               checked={promptPreview}
               onChange={setPromptPreview}
-              note="Requests promptPreview metadata in the /message response."
+              note="The latest prompt preview remains available in the Prompt page."
             />
             <Toggle
               label="TTS output"
               checked={voiceOutput}
               onChange={setVoiceOutput}
-              note="Sent as voiceOutput to /message."
+              note="Sent as voiceOutput to the streaming message endpoint."
             />
             <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
               <div className="label mb-2">Outgoing Payload</div>
@@ -453,14 +595,46 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
               </pre>
             </div>
             <p className="text-xs leading-5 text-ink-500">
-              After sending, Prompt Preview shows the latest prompt sections and memory usage for
-              the returned trace.
+              Chat uses the persistent SSE endpoint. Refreshing the page does not restore chat
+              history yet because no session-history API is available.
             </p>
           </div>
         </Panel>
       </div>
     </PageShell>
   );
+}
+
+function createChatMessageId(prefix: string): string {
+  chatMessageSequence += 1;
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return `${prefix}-${uuid ?? chatMessageSequence}`;
+}
+
+function chatStatusLabel(status: ChatMessageStatus): string {
+  switch (status) {
+    case "streaming":
+      return "Streaming";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+  }
+}
+
+function friendlyChatError(error: unknown): string {
+  if (error instanceof ApiError) {
+    return error.message || "消息请求失败。";
+  }
+  if (error instanceof Error && error.name === "MessageStreamProtocolError") {
+    return "消息流协议错误，回复未完成。";
+  }
+  if (error instanceof Error && error.name === "MessageStreamError") {
+    return error.message || "消息流处理失败。";
+  }
+  return "网络连接中断，回复未完成。";
 }
 
 function MemoryPage(props: {
@@ -3621,13 +3795,21 @@ function Notice(props: { tone: "info" | "error"; title: string; message: string 
 }
 
 function ProviderMetadataSummary(props: {
-  provider?: ProviderCallMetadata | undefined;
+  provider?: ProviderCallMetadata | string | undefined;
 }): JSX.Element {
   const provider = props.provider;
   if (!provider) {
     return (
       <div className="mt-2 text-xs text-ink-500">
         provider: unknown · model: unknown · mode: unknown
+      </div>
+    );
+  }
+
+  if (typeof provider === "string") {
+    return (
+      <div className="mt-2 text-xs text-ink-500">
+        provider: {provider} · model: unknown · mode: unknown
       </div>
     );
   }
