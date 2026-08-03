@@ -36,6 +36,7 @@ import {
 import { promptPreviewPlaceholder } from "./data/mock.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
 import { reduceChatMessages, shouldSubmitChatKey, type ChatMessage } from "./chat-state.js";
+import { ChatMessageContent } from "./markdown-message.js";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
@@ -478,9 +479,7 @@ function ChatPage(): JSX.Element {
                         <span aria-live="polite">{chatStatusLabel(message.status)}</span>
                       )}
                     </div>
-                    <div className="text-sm leading-6 whitespace-pre-wrap [overflow-wrap:anywhere]">
-                      {message.content}
-                    </div>
+                    <ChatMessageContent role={message.role} content={message.content} />
                     {message.error && (
                       <div className="mt-2 text-xs text-red-700" role="alert">
                         {message.error}
