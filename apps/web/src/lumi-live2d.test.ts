@@ -99,6 +99,57 @@ describe("Lumi presence and audio envelope", () => {
     expect(controller.getPresence()).toBe("idle");
   });
 
+  it("keeps speaking mouth ownership with RMS while presence animates eyes and breath", async () => {
+    const adapter = {
+      load: vi.fn(async () => undefined),
+      setMouthOpen: vi.fn(),
+      setMouthForm: vi.fn(),
+      setParameter: vi.fn(),
+      setBreath: vi.fn(),
+      setFraming: vi.fn(),
+      resetMouth: vi.fn(),
+      resize: vi.fn(),
+      dispose: vi.fn()
+    };
+    const controller = new LumiController(() => adapter, "model3.json");
+    await controller.load();
+    adapter.setParameter.mockClear();
+    adapter.setMouthOpen.mockClear();
+    adapter.setBreath.mockClear();
+
+    controller.setPresence("speaking");
+    controller.setPresenceAnimation(0.7, 0.2);
+
+    expect(adapter.setParameter.mock.calls[0]?.[0]).toBe(lumiMapping.eyeLeft);
+    expect(adapter.setParameter.mock.calls[0]?.[1]).toBeCloseTo(0.3);
+    expect(adapter.setParameter.mock.calls[1]?.[0]).toBe(lumiMapping.eyeRight);
+    expect(adapter.setParameter.mock.calls[1]?.[1]).toBeCloseTo(0.3);
+    expect(adapter.setBreath).toHaveBeenCalledWith(0.2);
+    expect(adapter.setMouthOpen).not.toHaveBeenCalled();
+  });
+
+  it("does not write presence parameters after the controller is disposed", async () => {
+    const adapter = {
+      load: vi.fn(async () => undefined),
+      setMouthOpen: vi.fn(),
+      setMouthForm: vi.fn(),
+      setParameter: vi.fn(),
+      setBreath: vi.fn(),
+      setFraming: vi.fn(),
+      resetMouth: vi.fn(),
+      resize: vi.fn(),
+      dispose: vi.fn()
+    };
+    const controller = new LumiController(() => adapter, "model3.json");
+    await controller.load();
+    controller.dispose();
+    adapter.setParameter.mockClear();
+    adapter.setBreath.mockClear();
+    controller.setPresenceAnimation(1, 0.2);
+    expect(adapter.setParameter).not.toHaveBeenCalled();
+    expect(adapter.setBreath).not.toHaveBeenCalled();
+  });
+
   it("runs the controlled mouth range and restores zero", async () => {
     vi.useFakeTimers();
     try {

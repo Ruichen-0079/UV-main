@@ -12,13 +12,13 @@ describe("CompanionPage Tauri chrome", () => {
     const markup = renderToStaticMarkup(<CompanionPage />);
     expect(markup).toContain("Lumi avatar");
     expect(markup).not.toContain("data-tauri-drag-region");
-    expect(markup).not.toContain("调整窗口大小");
+    expect(markup).not.toContain("Resize window");
   });
 
   it("renders the drag bar and resize handle only inside Tauri", () => {
     (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
     const markup = renderToStaticMarkup(<CompanionPage />);
     expect(markup).toContain("data-tauri-drag-region");
-    expect(markup).toContain('aria-label="调整窗口大小"');
+    expect(markup).toContain('aria-label="Resize window"');
   });
 });

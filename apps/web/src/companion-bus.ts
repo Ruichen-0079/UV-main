@@ -15,7 +15,7 @@ import type { SpeechQueueState } from "./speech-queue.js";
 
 export type CompanionBusRole = "main" | "companion";
 
-export type CompanionGenerationState = "thinking" | "idle" | "interrupted";
+export type CompanionGenerationState = "listening" | "thinking" | "idle" | "interrupted";
 
 export type CompanionBusMessage =
   | { kind: "user-gesture" }

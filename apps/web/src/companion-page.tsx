@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { apiClient } from "./api/client.js";
 import { CompanionBus, type CompanionBusMessage } from "./companion-bus.js";
-import { reduceCompanionPresence } from "./companion-presence.js";
+import {
+  createCompanionBlinkScheduler,
+  createInterruptedResetScheduler,
+  getCompanionAnimation,
+  reduceCompanionPresence,
+  type CompanionPresenceState
+} from "./companion-presence.js";
+import { createCompanionSpeechBuffer } from "./companion-speech-buffer.js";
 import { createCompanionReadyAnnouncer } from "./companion-voice-sync.js";
 import { createSpeechSegmentDeduper } from "./speech-segment-dedup.js";
 import { LumiCanvas } from "./lumi-canvas.js";
@@ -30,12 +37,19 @@ export function CompanionPage(): JSX.Element {
     queue: SpeechPlaybackQueue;
     deduper: ReturnType<typeof createSpeechSegmentDeduper>;
   } | null>(null);
+  const speechBufferRef = useRef(createCompanionSpeechBuffer());
   const announcerRef = useRef<ReturnType<typeof createCompanionReadyAnnouncer> | null>(null);
-  const [presence, setPresence] = useState<PresenceState>("idle");
+  const [presence, setPresence] = useState<CompanionPresenceState>("idle");
   const [voiceStatus, setVoiceStatus] = useState<SpeechQueueState>("idle");
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const voiceEnabledRef = useRef(true);
   const [framing, setFraming] = useState<LumiFraming>("half");
+  const presenceRef = useRef<CompanionPresenceState>(presence);
+  const blinkSchedulerRef = useRef<ReturnType<typeof createCompanionBlinkScheduler> | null>(null);
+  const interruptedResetRef = useRef<ReturnType<typeof createInterruptedResetScheduler> | null>(
+    null
+  );
+  presenceRef.current = presence;
 
   useEffect(() => {
     const bus = new CompanionBus("companion");
@@ -43,10 +57,64 @@ export function CompanionPage(): JSX.Element {
     announcerRef.current = announcer;
     announcer.start();
     void preloadTauriWindowApi();
+    const speechBuffer = speechBufferRef.current;
+
+    function recordSpeechLedger(
+      requestId: string,
+      sequence: number | null,
+      stage: string,
+      extra?: Record<string, unknown>
+    ): void {
+      if (!import.meta.env.DEV || typeof window === "undefined") return;
+      const debugWindow = window as typeof window & {
+        __yuviSpeechLedger?: Array<Record<string, unknown>>;
+      };
+      const ledger = (debugWindow.__yuviSpeechLedger ??= []);
+      ledger.push({
+        at: performance.now(),
+        requestId,
+        sequence,
+        stage,
+        ...extra
+      });
+      // Keep the ledger bounded for multi-turn sessions.
+      if (ledger.length > 400) ledger.splice(0, ledger.length - 400);
+    }
+
+    function enqueueSpeak(
+      session: NonNullable<typeof sessionRef.current>,
+      segment: { sequence: number; text: string; language: string }
+    ): void {
+      if (!session.deduper.isNew(session.requestId, segment.sequence)) {
+        recordSpeechLedger(session.requestId, segment.sequence, "dedup-drop");
+        return;
+      }
+      recordSpeechLedger(session.requestId, segment.sequence, "queued", {
+        text: segment.text,
+        language: segment.language
+      });
+      session.queue.enqueue(
+        { text: segment.text, language: segment.language },
+        String(segment.sequence)
+      );
+    }
 
     function startGeneration(requestId: string, sessionId: string): void {
       // A new turn replaces the previous speech session: old audio stops,
       // stale presence is reset and synthesis restarts from a fresh queue.
+      recordSpeechLedger(requestId, null, "turn-start");
+      const previous = sessionRef.current;
+      previous?.queue.cancel();
+      sessionRef.current = null;
+      speechBuffer.setActiveTurn(requestId);
+      setPresence((current) =>
+        reduceCompanionPresence(current, { type: "generation", state: "thinking" })
+      );
+      if (!voiceEnabledRef.current) {
+        setVoiceStatus("idle");
+        speechBuffer.clear();
+        return;
+      }
       const queue = new SpeechPlaybackQueue(
         (item, signal) =>
           apiClient.synthesizeSpeech({
@@ -66,12 +134,14 @@ export function CompanionPage(): JSX.Element {
             bus.post({ kind: "speech-status", requestId: session.requestId, state });
           },
           onItemState: (id, state) => {
+            const requestIdForItem = sessionRef.current?.requestId ?? "unknown";
+            const sequence = id === undefined ? null : Number(id);
+            recordSpeechLedger(requestIdForItem, Number.isFinite(sequence) ? sequence : null, state);
             if (import.meta.env.DEV && id !== undefined) {
-              const requestId = sessionRef.current?.requestId ?? "unknown";
               const states = ((window as unknown as {
                 __yuviSpeechStates?: Record<string, string>;
               }).__yuviSpeechStates ??= {});
-              states[`${requestId}:${id}`] = state;
+              states[`${requestIdForItem}:${id}`] = state;
             }
           },
           onError: () => {
@@ -85,52 +155,77 @@ export function CompanionPage(): JSX.Element {
           },
           onPlaybackEvent: (event) => {
             if (sessionRef.current?.queue !== queue) return;
+            if (event.type === "playbackStarted") {
+              recordSpeechLedger(requestId, event.sequence, "audio.play");
+            }
             lumiRef.current?.handlePlaybackEvent(event);
           }
         }
       );
-      const previous = sessionRef.current;
-      sessionRef.current = { requestId, queue, deduper: createSpeechSegmentDeduper() };
-      previous?.queue.cancel();
-      setPresence((current) =>
-        reduceCompanionPresence(current, { type: "generation", state: "thinking" })
-      );
+      const session = { requestId, queue, deduper: createSpeechSegmentDeduper() };
+      sessionRef.current = session;
       setVoiceStatus("synthesizing");
+
+      // Flush any segments that arrived before the session existed. Buffer is
+      // scoped to the active turn only — never replays old turns.
+      for (const buffered of speechBuffer.drain(requestId)) {
+        recordSpeechLedger(requestId, buffered.sequence, "pre-ready-flush");
+        enqueueSpeak(session, buffered);
+      }
+    }
+
+    function handleSpeak(message: Extract<CompanionBusMessage, { kind: "speak" }>): void {
+      if (!voiceEnabledRef.current) {
+        recordSpeechLedger(message.requestId, message.sequence, "voice-disabled-drop");
+        return;
+      }
+      recordSpeechLedger(message.requestId, message.sequence, "companion-receive", {
+        text: message.text,
+        language: message.language
+      });
+      const session = sessionRef.current;
+      if (session && session.requestId === message.requestId) {
+        enqueueSpeak(session, message);
+        return;
+      }
+      // Session not ready yet: keep a bounded pre-ready buffer for this turn.
+      // Do not silently discard sequence 0 while start-generation is in flight.
+      const accepted = speechBuffer.push({
+        requestId: message.requestId,
+        sequence: message.sequence,
+        text: message.text,
+        language: message.language
+      });
+      recordSpeechLedger(message.requestId, message.sequence, accepted ? "pre-ready-buffer" : "buffer-reject");
     }
 
     function handleMessage(message: CompanionBusMessage): void {
       switch (message.kind) {
         case "user-gesture":
+          setPresence((current) =>
+            reduceCompanionPresence(current, { type: "generation", state: "listening" })
+          );
           lumiRef.current?.resumeAudio();
           return;
         case "start-generation":
-          if (voiceEnabledRef.current) {
-            startGeneration(message.requestId, message.sessionId);
-          }
+          startGeneration(message.requestId, message.sessionId);
           return;
         case "voice-enabled":
+          // Preference sync must never cancel an in-flight turn. Only an
+          // explicit disable stops speech; enable is a no-op for the queue.
           announcerRef.current?.markSynced();
           voiceEnabledRef.current = message.enabled;
           setVoiceEnabled(message.enabled);
+          recordSpeechLedger("sync", null, "voice-enabled", { enabled: message.enabled });
           if (!message.enabled) {
-            // The main window stops forwarding segments; cancel any speech
-            // that is already queued or playing so mouth/audio settle now.
             const session = sessionRef.current;
             if (session) session.queue.cancel();
+            speechBuffer.clear();
           }
           return;
-        case "speak": {
-          if (!voiceEnabledRef.current) return;
-          const session = sessionRef.current;
-          if (session && session.requestId === message.requestId) {
-            if (!session.deduper.isNew(message.requestId, message.sequence)) return;
-            session.queue.enqueue(
-              { text: message.text, language: message.language },
-              String(message.sequence)
-            );
-          }
+        case "speak":
+          handleSpeak(message);
           return;
-        }
         case "speech-end": {
           const session = sessionRef.current;
           if (session && session.requestId === message.requestId) {
@@ -140,9 +235,14 @@ export function CompanionPage(): JSX.Element {
         }
         case "stop-speech": {
           const session = sessionRef.current;
+          setPresence((current) =>
+            reduceCompanionPresence(current, { type: "queue", state: "stopped" })
+          );
           if (session && session.requestId === message.requestId) {
             session.queue.cancel();
           }
+          speechBuffer.clear();
+          recordSpeechLedger(message.requestId, null, "stop-speech");
           return;
         }
         case "generation-state":
@@ -163,25 +263,116 @@ export function CompanionPage(): JSX.Element {
       announcerRef.current = null;
       sessionRef.current?.queue.cancel();
       sessionRef.current = null;
+      speechBuffer.clear();
       bus.close();
     };
   }, []);
 
+  useEffect(() => {
+    // Own the interrupted timer in this effect so React StrictMode remounts
+    // get a live scheduler instead of a permanently disposed ref instance.
+    const resetScheduler = createInterruptedResetScheduler(() => {
+      setPresence((current) => (current === "interrupted" ? "idle" : current));
+    });
+    interruptedResetRef.current = resetScheduler;
+    return () => {
+      resetScheduler.dispose();
+      if (interruptedResetRef.current === resetScheduler) {
+        interruptedResetRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (presence === "interrupted") {
+      interruptedResetRef.current?.schedule();
+    } else {
+      interruptedResetRef.current?.invalidate();
+    }
+  }, [presence]);
+
+  useEffect(() => {
+    // Create the blink scheduler inside the effect so StrictMode's mount →
+    // cleanup → remount cycle cannot leave a disposed scheduler in a ref.
+    const scheduler = createCompanionBlinkScheduler(Math.random, performance.now());
+    blinkSchedulerRef.current = scheduler;
+    let frame = 0;
+    let alive = true;
+    const animate = (now: number) => {
+      if (!alive) return;
+      const currentPresence = presenceRef.current;
+      // Speaking continues to blink; only interrupted freezes eyes open.
+      const blink =
+        currentPresence === "interrupted" ? 0 : scheduler.sample(now, currentPresence);
+      const animation = getCompanionAnimation(currentPresence, now, blink);
+      lumiRef.current?.setPresenceAnimation(animation.blink, animation.breath);
+      if (import.meta.env.DEV && typeof window !== "undefined") {
+        const debugWindow = window as typeof window & {
+          __yuviPresenceDiagnostics?: Record<string, unknown>;
+        };
+        const controller = lumiRef.current?.getDebugInfo();
+        debugWindow.__yuviPresenceDiagnostics = {
+          running: true,
+          presence: currentPresence,
+          nextBlinkAt: scheduler.getNextBlinkAt(),
+          blinkPhase: scheduler.getPhase(now),
+          eyeOpen: 1 - animation.blink,
+          eyeLeft: 1 - animation.blink,
+          eyeRight: 1 - animation.blink,
+          blinkValue: animation.blink,
+          breathValue: animation.breath,
+          pendingEyeLeft: controller?.pendingEyeLeft ?? null,
+          pendingEyeRight: controller?.pendingEyeRight ?? null,
+          pendingBreath: controller?.pendingBreath ?? null,
+          controllerInstanceId: controller?.instanceId ?? null,
+          controllerGeneration: controller?.generation ?? null,
+          now
+        };
+      }
+      frame = requestAnimationFrame(animate);
+    };
+    frame = requestAnimationFrame(animate);
+    return () => {
+      alive = false;
+      cancelAnimationFrame(frame);
+      scheduler.dispose();
+      if (blinkSchedulerRef.current === scheduler) {
+        blinkSchedulerRef.current = null;
+      }
+      lumiRef.current?.setPresenceAnimation(0, 0);
+      if (import.meta.env.DEV && typeof window !== "undefined") {
+        const debugWindow = window as typeof window & {
+          __yuviPresenceDiagnostics?: Record<string, unknown>;
+        };
+        if (debugWindow.__yuviPresenceDiagnostics) {
+          debugWindow.__yuviPresenceDiagnostics = {
+            ...debugWindow.__yuviPresenceDiagnostics,
+            running: false,
+            presence: "idle",
+            blinkPhase: "waiting",
+            eyeOpen: 1,
+            blinkValue: 0
+          };
+        }
+      }
+    };
+  }, []);
+
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-ink-900 text-white">
+    <div className="relative h-screen w-screen overflow-hidden bg-transparent text-white">
       {isTauriRuntime() && (
         <div
           data-tauri-drag-region
           className="absolute inset-x-0 top-0 z-0 h-6 cursor-grab touch-none select-none border-b border-white/5 bg-white/5"
-          aria-label="拖动窗口"
-          title="拖动窗口"
+          aria-label="Drag window"
+          title="Drag window"
         >
           <div className="pointer-events-none absolute left-1/2 top-1/2 h-1 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/25" />
         </div>
       )}
       <LumiCanvas
         ref={lumiRef}
-        requestedPresence={presence}
+        requestedPresence={toLumiPresence(presence)}
         className="h-full w-full rounded-none"
         showFramingToggle={false}
       />
@@ -189,7 +380,8 @@ export function CompanionPage(): JSX.Element {
         className="pointer-events-none absolute left-2 top-2 rounded bg-black/40 px-2 py-1 text-xs"
         aria-live="polite"
       >
-        {presenceLabel(presence)} · {voiceStatusLabel(voiceStatus)} · 语音{voiceEnabled ? "开" : "关"}
+        {presenceLabel(presence)} · {voiceStatusLabel(voiceStatus)} · voice{" "}
+        {voiceEnabled ? "on" : "off"}
       </div>
       <button
         type="button"
@@ -203,12 +395,13 @@ export function CompanionPage(): JSX.Element {
           })
         }
       >
-        {framing === "half" ? "显示全身" : "显示半身"}
+        {/* Label is the action target (not the current mode). Default is portrait/half. */}
+        {framing === "half" ? "Full body" : "Portrait"}
       </button>
       {isTauriRuntime() && (
         <button
           type="button"
-          aria-label="调整窗口大小"
+          aria-label="Resize window"
           className="absolute bottom-0 right-0 z-20 flex h-5 w-5 cursor-se-resize items-end justify-end rounded-tl-md bg-white/10 p-0.5 text-white/70 hover:bg-white/20 hover:text-white"
           onPointerDown={(event) => {
             event.preventDefault();
@@ -236,32 +429,36 @@ export function CompanionPage(): JSX.Element {
   );
 }
 
-function presenceLabel(state: PresenceState): string {
+function presenceLabel(state: CompanionPresenceState): string {
   switch (state) {
     case "thinking":
-      return "正在思考";
+      return "thinking";
+    case "listening":
+      return "listening";
     case "speaking":
-      return "正在说话";
+      return "speaking";
     case "interrupted":
-      return "已中断";
-    case "unavailable":
-      return "形象暂不可用";
+      return "interrupted";
     case "idle":
-      return "待机";
+      return "idle";
   }
+}
+
+function toLumiPresence(state: CompanionPresenceState): PresenceState {
+  return state === "listening" ? "idle" : state;
 }
 
 function voiceStatusLabel(state: SpeechQueueState): string {
   switch (state) {
     case "synthesizing":
-      return "合成中";
+      return "synthesizing";
     case "playing":
-      return "播放中";
+      return "playing";
     case "stopped":
-      return "已停止";
+      return "stopped";
     case "error":
-      return "出错";
+      return "error";
     case "idle":
-      return "空闲";
+      return "idle";
   }
 }

@@ -48,8 +48,11 @@ export function reducePresence(state: PresenceState, event: PresenceEvent): Pres
 export interface Live2DAdapter extends MouthParameterTarget {
   load(source: string): Promise<void>;
   setParameter(id: string, value: number): void;
+  getPendingParameter?(id: string): number | undefined;
   setBreath(value: number): void;
   setFraming(framing: LumiFraming): void;
+  getFraming?(): LumiFraming;
+  getFramingDiagnostics?(): import("./lumi-framing.js").LumiFramingDiagnostics | null;
   resize(width: number, height: number): void;
   dispose(): void;
 }
@@ -84,6 +87,10 @@ export class CubismLive2DAdapter implements Live2DAdapter {
     this.model?.setParameter(id, value);
   }
 
+  getPendingParameter(id: string): number | undefined {
+    return this.model?.getPendingParameter(id);
+  }
+
   setMouthOpen(value: number): void {
     this.setParameter(
       lumiMapping.mouthOpen.id,
@@ -107,6 +114,14 @@ export class CubismLive2DAdapter implements Live2DAdapter {
 
   setFraming(framing: LumiFraming): void {
     this.model?.setFraming(framing);
+  }
+
+  getFraming(): LumiFraming {
+    return this.model?.getFraming() ?? "half";
+  }
+
+  getFramingDiagnostics(): import("./lumi-framing.js").LumiFramingDiagnostics | null {
+    return this.model?.getFramingDiagnostics() ?? null;
   }
 
   resetMouth(): void {
@@ -146,14 +161,27 @@ export type LumiControllerHandle = {
   runMouthCalibration(): Promise<void>;
   setFraming(framing: LumiFraming): void;
   setPresence(state: PresenceState): void;
+  setPresenceAnimation(blink: number, breath: number): void;
   resumeAudio(): void;
   handlePlaybackEvent(event: SpeechPlaybackEvent): void;
   resize(width: number, height: number): void;
   dispose(): void;
   getPresence(): PresenceState;
+  getFramingDiagnostics(): import("./lumi-framing.js").LumiFramingDiagnostics | null;
+  getDebugInfo(): {
+    instanceId: number;
+    generation: number;
+    pendingEyeLeft?: number;
+    pendingEyeRight?: number;
+    pendingBreath?: number;
+    pendingMouth?: number;
+  };
 };
 
+let nextLumiControllerInstanceId = 1;
+
 export class LumiController {
+  private readonly instanceId = nextLumiControllerInstanceId++;
   private adapter: Live2DAdapter | null = null;
   private envelope: AudioEnvelopeHost | null = null;
   private state: PresenceState = "unavailable";
@@ -207,6 +235,15 @@ export class LumiController {
     // mouth; playbackEnded remains the authoritative transition to idle.
     if (state === "idle" && this.state === "speaking") return;
     this.applyPresence(state);
+  }
+
+  setPresenceAnimation(blink: number, breath: number): void {
+    if (!this.adapter) return;
+    // Presence owns only eyes and breath. ParamMouthOpenY remains exclusively
+    // driven by the active AudioMouthEnvelope while playback is speaking.
+    this.adapter.setParameter(lumiMapping.eyeLeft, 1 - clamp(blink, 0, 1));
+    this.adapter.setParameter(lumiMapping.eyeRight, 1 - clamp(blink, 0, 1));
+    this.adapter.setBreath(clamp(breath, 0, 1));
   }
 
   private applyPresence(state: PresenceState): void {
@@ -264,6 +301,10 @@ export class LumiController {
     this.adapter?.setFraming(framing);
   }
 
+  getFramingDiagnostics(): import("./lumi-framing.js").LumiFramingDiagnostics | null {
+    return this.adapter?.getFramingDiagnostics?.() ?? null;
+  }
+
   dispose(): void {
     this.generation += 1;
     this.envelope?.dispose();
@@ -274,6 +315,36 @@ export class LumiController {
 
   getPresence(): PresenceState {
     return this.state;
+  }
+
+  getDebugInfo(): {
+    instanceId: number;
+    generation: number;
+    pendingEyeLeft?: number;
+    pendingEyeRight?: number;
+    pendingBreath?: number;
+    pendingMouth?: number;
+  } {
+    const info: {
+      instanceId: number;
+      generation: number;
+      pendingEyeLeft?: number;
+      pendingEyeRight?: number;
+      pendingBreath?: number;
+      pendingMouth?: number;
+    } = {
+      instanceId: this.instanceId,
+      generation: this.generation
+    };
+    const eyeLeft = this.adapter?.getPendingParameter?.(lumiMapping.eyeLeft);
+    const eyeRight = this.adapter?.getPendingParameter?.(lumiMapping.eyeRight);
+    const breath = this.adapter?.getPendingParameter?.(lumiMapping.breath.id);
+    const mouth = this.adapter?.getPendingParameter?.(lumiMapping.mouthOpen.id);
+    if (eyeLeft !== undefined) info.pendingEyeLeft = eyeLeft;
+    if (eyeRight !== undefined) info.pendingEyeRight = eyeRight;
+    if (breath !== undefined) info.pendingBreath = breath;
+    if (mouth !== undefined) info.pendingMouth = mouth;
+    return info;
   }
 
   private transition(event: PresenceEvent): void {
