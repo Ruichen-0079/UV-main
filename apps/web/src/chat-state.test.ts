@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  beginControlledDraftSubmit,
   reduceChatMessages,
   shouldSubmitChatKey,
+  getSubmittedChatText,
   type ChatMessage
 } from "./chat-state.js";
 
@@ -140,5 +142,26 @@ describe("chat keyboard submission", () => {
     expect(shouldSubmitChatKey({ key: "Enter", shiftKey: true })).toBe(false);
     expect(shouldSubmitChatKey({ key: "Enter", shiftKey: false, isComposing: true })).toBe(false);
     expect(shouldSubmitChatKey({ key: "Enter", shiftKey: false, keyCode: 229 })).toBe(false);
+  });
+
+  it("preserves the exact submitted payload while rejecting blank input", () => {
+    const submitted = "第一行\n\n第二行  ";
+    expect(getSubmittedChatText(submitted)).toBe(submitted);
+    expect(getSubmittedChatText(" \n\t ")).toBeNull();
+  });
+
+  it("clears the controlled draft immediately while keeping the original payload", () => {
+    const draft = "こんにちは。\n次の行";
+    const first = beginControlledDraftSubmit(draft);
+    expect(first).toEqual({ submittedText: draft, nextDraft: "" });
+    expect(beginControlledDraftSubmit(first?.nextDraft ?? "")).toBeNull();
+    expect(beginControlledDraftSubmit("   ")).toBeNull();
+  });
+
+  it("keeps Shift+Enter and IME composition from submitting while Enter submits", () => {
+    expect(shouldSubmitChatKey({ key: "Enter", shiftKey: false, isComposing: false })).toBe(true);
+    expect(shouldSubmitChatKey({ key: "Enter", shiftKey: true, isComposing: false })).toBe(false);
+    expect(shouldSubmitChatKey({ key: "Enter", shiftKey: false, isComposing: true })).toBe(false);
+    expect(shouldSubmitChatKey({ key: "a", shiftKey: false })).toBe(false);
   });
 });

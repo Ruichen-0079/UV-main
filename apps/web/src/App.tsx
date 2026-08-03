@@ -367,13 +367,18 @@ function ChatPage(): JSX.Element {
   );
 
   async function send(): Promise<void> {
-    if (!input.trim() || activeRequestRef.current) {
+    // Capture the draft once, clear the controlled textarea immediately, then
+    // use only the captured payload for the rest of the turn.
+    const submittedText = input.trim() ? input : null;
+    if (submittedText === null || activeRequestRef.current) {
       return;
     }
 
     speechSessionRef.current?.queue.cancel();
     speechSessionRef.current = null;
-    const content = input;
+    const content = submittedText;
+    setInput("");
+    setError(null);
     const requestId = createChatMessageId("turn");
     const assistantId = createChatMessageId("assistant");
     const controller = new AbortController();
@@ -442,10 +447,8 @@ function ChatPage(): JSX.Element {
       );
       speechSessionRef.current = { generation, segmenter, queue };
     }
-    setInput("");
     setPresenceRequest("thinking");
     setRequestStatus("sending");
-    setError(null);
     dispatchMessages({
       type: "append-turn",
       user: {

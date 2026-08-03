@@ -1,6 +1,11 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { ApiError, apiClient, type MessageStreamEvent } from "./api/client.js";
-import { reduceChatMessages, shouldSubmitChatKey, type ChatMessage } from "./chat-state.js";
+import {
+  beginControlledDraftSubmit,
+  reduceChatMessages,
+  shouldSubmitChatKey,
+  type ChatMessage
+} from "./chat-state.js";
 import { ChatMessageContent } from "./markdown-message.js";
 import { detectSpeechLanguage, type SpeechQueueState } from "./speech-queue.js";
 import { SpeechSegmenter } from "./speech-segmenter.js";
@@ -10,6 +15,7 @@ import {
   readVoiceOutputPreference,
   writeVoiceOutputPreference
 } from "./voice-output.js";
+import { controlCompanionWindow, isTauriRuntime } from "./tauri-window.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
@@ -40,8 +46,10 @@ export function MainPage(): JSX.Element {
   const [voicePlaybackStatus, setVoicePlaybackStatus] = useState<VoicePlaybackStatus>("idle");
   const [companionReady, setCompanionReady] = useState(false);
   const [input, setInput] = useState("");
+  const [companionActionError, setCompanionActionError] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const busRef = useRef<CompanionBus | null>(null);
   const voiceOutputRef = useRef(voiceOutput);
   const speechSessionRef = useRef<{
@@ -99,8 +107,14 @@ export function MainPage(): JSX.Element {
   }
 
   async function send(): Promise<void> {
-    const content = input;
-    if (!content.trim() || activeRequestRef.current) return;
+    // Capture the exact draft once, then clear the controlled state immediately
+    // so async work never re-reads or restores the textarea contents.
+    const submit = beginControlledDraftSubmit(input);
+    if (submit === null || activeRequestRef.current) return;
+    const content = submit.submittedText;
+    setInput(submit.nextDraft);
+    setError(null);
+    inputRef.current?.focus();
     const requestId = createSurfaceId("turn");
     const assistantId = createSurfaceId("assistant");
     const controller = new AbortController();
@@ -113,10 +127,10 @@ export function MainPage(): JSX.Element {
     setRequestStatus("sending");
     const bus = busRef.current;
     bus?.post({ kind: "user-gesture" });
-    bus?.post({ kind: "voice-enabled", enabled: voiceOutput });
+    bus?.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
     bus?.post({ kind: "start-generation", requestId, sessionId });
     const segmenter = new SpeechSegmenter();
-    if (voiceOutput) {
+    if (voiceOutputRef.current) {
       speechSessionRef.current = { generation: requestId, segmenter, sequence: 0, ended: false };
     }
     dispatchMessages({
@@ -129,7 +143,7 @@ export function MainPage(): JSX.Element {
         useMemory: readMemory && writeMemory,
         readMemory,
         writeMemory,
-        voiceOutput,
+        voiceOutput: voiceOutputRef.current,
         status: "completed"
       },
       assistant: {
@@ -298,6 +312,17 @@ export function MainPage(): JSX.Element {
     setVoicePlaybackStatus("stopped");
   }
 
+  async function controlCompanion(
+    action: "show_companion" | "hide_companion" | "reopen_companion"
+  ): Promise<void> {
+    setCompanionActionError(null);
+    try {
+      await controlCompanionWindow(action);
+    } catch {
+      setCompanionActionError("无法控制 companion 窗口。");
+    }
+  }
+
   return (
     <div className="min-h-screen bg-ink-100 p-6">
       <div className="mx-auto max-w-3xl space-y-4">
@@ -309,7 +334,34 @@ export function MainPage(): JSX.Element {
               window.
             </p>
           </div>
-          <Pill status={companionReady ? "companion connected" : "companion offline"} />
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Pill status={companionReady ? "companion connected" : "companion offline"} />
+            {isTauriRuntime() && (
+              <>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => void controlCompanion("show_companion")}
+                >
+                  显示形象
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => void controlCompanion("hide_companion")}
+                >
+                  隐藏形象
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => void controlCompanion("reopen_companion")}
+                >
+                  重新打开
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
@@ -345,6 +397,11 @@ export function MainPage(): JSX.Element {
               <Notice tone="error" title="Send failed" message={error} />
             </div>
           )}
+          {companionActionError && (
+            <div className="mt-2">
+              <Notice tone="error" title="Companion" message={companionActionError} />
+            </div>
+          )}
           {lastTraceId && (
             <div className="mt-2">
               <Notice tone="info" title="Latest trace" message={lastTraceId} />
@@ -352,6 +409,7 @@ export function MainPage(): JSX.Element {
           )}
           <div className="mt-3 flex gap-2">
             <textarea
+              ref={inputRef}
               className="field min-h-20"
               placeholder="Type a runtime test message"
               value={input}
@@ -364,7 +422,7 @@ export function MainPage(): JSX.Element {
               }}
               aria-label="Chat message"
             />
-            {requestStatus === "sending" && activeRequestRef.current ? (
+            {requestStatus === "sending" ? (
               <button
                 type="button"
                 className="button-secondary h-20 w-24"
@@ -377,7 +435,7 @@ export function MainPage(): JSX.Element {
               <button
                 type="button"
                 className="button-primary h-20 w-24"
-                disabled={requestStatus === "sending" || !input.trim()}
+                disabled={!input.trim()}
                 onClick={() => void send()}
                 aria-label="Send message"
               >

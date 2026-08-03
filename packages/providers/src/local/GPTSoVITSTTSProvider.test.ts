@@ -47,6 +47,26 @@ describe("GPTSoVITSTTSProvider", () => {
       ref_audio_path: "D:/alice.wav",
       prompt_text: "reference"
     });
+    // English must never be forced through the Japanese-only wrapper.
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("9881");
+    fetchMock.mockRestore();
+  });
+
+  it("does not mark English synthesis as Japanese", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(new Uint8Array([4, 5]), {
+        status: 200,
+        headers: { "content-type": "audio/wav" }
+      })
+    );
+    const output = await new GPTSoVITSTTSProvider(options).synthesizeSpeech({
+      text: "Hello.",
+      metadata: { language: "en" }
+    });
+    expect(output.providerMetadata).toMatchObject({
+      language: "en",
+      transport: "api_v2"
+    });
     fetchMock.mockRestore();
   });
 

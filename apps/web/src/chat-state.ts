@@ -88,6 +88,24 @@ export function shouldSubmitChatKey(event: {
   return event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229;
 }
 
+/** Preserve the exact submitted text while rejecting blank-only messages. */
+export function getSubmittedChatText(input: string): string | null {
+  return input.trim() ? input : null;
+}
+
+/**
+ * Begin a controlled-draft submit: capture payload and the empty next draft in
+ * one step so callers never re-read the textarea for the request body.
+ */
+export function beginControlledDraftSubmit(draft: string): {
+  submittedText: string;
+  nextDraft: "";
+} | null {
+  const submittedText = getSubmittedChatText(draft);
+  if (submittedText === null) return null;
+  return { submittedText, nextDraft: "" };
+}
+
 function replaceAssistant(
   messages: ChatMessage[],
   assistantId: string,

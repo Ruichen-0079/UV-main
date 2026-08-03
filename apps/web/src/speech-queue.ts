@@ -181,7 +181,11 @@ export class SpeechPlaybackQueue {
     if (this.playbackRunning) return;
     this.playbackRunning = true;
     try {
+      // Always play the lowest ready sequence next so concurrent synthesis
+      // completion cannot reorder audio (sequence 0 must always lead).
       while (!this.controller.signal.aborted) {
+        if (this.ready.length === 0) break;
+        this.ready.sort((left, right) => left.sequence - right.sequence);
         const next = this.ready.shift();
         if (!next) break;
         this.playingItem = { sequence: next.sequence, id: next.id };
@@ -199,6 +203,8 @@ export class SpeechPlaybackQueue {
         } catch (error) {
           this.playingItem = null;
           if (this.controller.signal.aborted) break;
+          // First play failure (including autoplay policy) is a terminal
+          // failed state for that segment — never treat it as completed.
           this.callbacks.onItemState?.(next.id, "failed");
           this.callbacks.onState?.("error");
           this.callbacks.onError?.(error);

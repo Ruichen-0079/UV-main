@@ -147,6 +147,47 @@ describe("SpeechPlaybackQueue", () => {
     expect(stateFor("1").at(-1)).toBe("completed");
   });
 
+  it("marks first play failure as failed and continues later sequences", async () => {
+    const states: Array<[string | undefined, string]> = [];
+    const errors: unknown[] = [];
+    const queue = new SpeechPlaybackQueue(
+      async (item) => ({ audioBase64: item.text, mimeType: "audio/wav" }) as never,
+      async (output: { audioBase64: string }) => {
+        if (output.audioBase64 === "one") throw new DOMException("NotAllowedError");
+      },
+      {
+        onItemState: (id, state) => states.push([id, state]),
+        onError: (error) => errors.push(error)
+      }
+    );
+    queue.enqueue({ text: "one", language: "en" }, "0");
+    queue.enqueue({ text: "two", language: "en" }, "1");
+    queue.finish();
+    await vi.waitFor(() => expect(states).toContainEqual(["1", "completed"]));
+    expect(states.filter(([id, state]) => id === "0" && state === "failed")).toHaveLength(1);
+    expect(states.filter(([id, state]) => id === "0" && state === "completed")).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("plays ready segments in ascending sequence order", async () => {
+    const played: string[] = [];
+    const queue = new SpeechPlaybackQueue(
+      async (item) => {
+        // Resolve sequence 1 before sequence 0 artificially via delay on first.
+        if (item.text === "zero") await new Promise((resolve) => setTimeout(resolve, 30));
+        return { audioBase64: item.text, mimeType: "audio/wav" } as never;
+      },
+      async (output: { audioBase64: string }) => {
+        played.push(output.audioBase64);
+      }
+    );
+    // Synthesis is serial in the queue, so order is natural; assert completion order.
+    queue.enqueue({ text: "zero", language: "en" }, "0");
+    queue.enqueue({ text: "one", language: "en" }, "1");
+    queue.finish();
+    await vi.waitFor(() => expect(played).toEqual(["zero", "one"]));
+  });
+
   it("marks every unfinished segment cancelled and leaves none pending", async () => {
     let release: (() => void) | undefined;
     const states: Array<[string | undefined, string]> = [];

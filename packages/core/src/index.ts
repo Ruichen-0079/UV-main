@@ -1001,8 +1001,10 @@ export class RuntimeOrchestrator {
       : emptyMemoryContext();
     const directContext = this.buildDirectContext(event.payload.sessionId);
     const prompt = this.options.promptBuilder.buildPrompt({
-      systemIdentity: "You are Companion, a local-first AI companion runtime agent.",
-      characterStyle: "Warm, concise, emotionally aware, and practical.",
+      systemIdentity:
+        "You are YUVI, a local-first AI companion runtime agent. Unless the user clearly asks for another language, reply in natural spoken English by default.",
+      characterStyle:
+        "Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail. Do not default to Japanese or Chinese, do not auto-translate English into Japanese for voice, and do not produce bilingual replies. If the user mainly writes Chinese or Japanese, or explicitly requests Chinese or Japanese, reply in that language.",
       relationshipContext:
         "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
       retrievedMemories: memoryContext.promptMemories.map((memory) => ({
