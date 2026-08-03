@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { SpeechPlaybackQueue, type SpeechQueueItem } from "./speech-queue.js";
+import {
+  createBrowserSpeechPlayer,
+  SpeechPlaybackQueue,
+  type SpeechQueueItem
+} from "./speech-queue.js";
 
 describe("SpeechPlaybackQueue", () => {
   it("synthesizes and plays queued segments in order", async () => {
@@ -48,6 +52,22 @@ describe("SpeechPlaybackQueue", () => {
     expect(events).toEqual(["synth:one", "play:one", "synth:two", "play:two"]);
   });
 
+  it("reports a completed synthesis before that segment starts playing", async () => {
+    const events: string[] = [];
+    const queue = new SpeechPlaybackQueue(
+      async (item) => ({ audioBase64: item.text, mimeType: "audio/wav" }) as never,
+      async (output: { audioBase64: string }) => {
+        events.push(`play:${output.audioBase64}`);
+      },
+      {
+        onSynthesisCompleted: (item) => events.push(`ready:${item.sequence}:${item.item.text}`)
+      }
+    );
+    queue.enqueue({ text: "one", language: "en" });
+    queue.finish();
+    await vi.waitFor(() => expect(events).toEqual(["ready:0:one", "play:one"]));
+  });
+
   it("does not synthesize pending work after cancellation", async () => {
     let release: (() => void) | undefined;
     const synthesize = vi.fn(
@@ -63,5 +83,76 @@ describe("SpeechPlaybackQueue", () => {
     await Promise.resolve();
     expect(synthesize).toHaveBeenCalledTimes(1);
     expect(play).not.toHaveBeenCalled();
+  });
+
+  it("reports playback failure without affecting the text queue caller", async () => {
+    const errors: unknown[] = [];
+    const states: string[] = [];
+    const queue = new SpeechPlaybackQueue(
+      async () => ({ audioBase64: "audio", mimeType: "audio/wav" }) as never,
+      async () => {
+        throw new Error("audio failed");
+      },
+      {
+        onError: (error) => errors.push(error),
+        onState: (state) => states.push(state)
+      }
+    );
+    queue.enqueue({ text: "one", language: "en" });
+    queue.finish();
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(states).toContain("error");
+    expect(errors[0]).toMatchObject({ message: "audio failed" });
+  });
+
+  it("exposes playback lifecycle only after the player starts", async () => {
+    const audio = {} as HTMLAudioElement;
+    const events: string[] = [];
+    const queue = new SpeechPlaybackQueue(
+      async () => ({ audioBase64: "", mimeType: "audio/wav" }) as never,
+      async (_output, _signal, lifecycle) => {
+        lifecycle?.emit({ type: "audioElementAttached", audio });
+        lifecycle?.emit({ type: "playbackStarted", audio });
+        lifecycle?.emit({ type: "playbackEnded", audio });
+      },
+      { onPlaybackEvent: (event) => events.push(event.type) }
+    );
+    queue.enqueue({ text: "one", language: "en" });
+    queue.finish();
+    await vi.waitFor(() =>
+      expect(events).toEqual(["audioElementAttached", "playbackStarted", "playbackEnded"])
+    );
+  });
+
+  it("does not emit playbackStarted after a cancelled play promise settles", async () => {
+    let resolvePlay: (() => void) | undefined;
+    const playPromise = new Promise<void>((resolve) => {
+      resolvePlay = resolve;
+    });
+    const audio = {
+      play: vi.fn(() => playPromise),
+      pause: vi.fn(),
+      onended: null,
+      onerror: null
+    } as unknown as HTMLAudioElement;
+    vi.stubGlobal("Audio", vi.fn(() => audio));
+    vi.stubGlobal("atob", vi.fn(() => ""));
+    vi.stubGlobal("URL", {
+      createObjectURL: vi.fn(() => "blob:test"),
+      revokeObjectURL: vi.fn()
+    });
+    const controller = new AbortController();
+    const events: string[] = [];
+    const player = createBrowserSpeechPlayer();
+    const playback = player(
+      { audioBase64: "", mimeType: "audio/wav" } as never,
+      controller.signal,
+      { sequence: 0, emit: (event) => events.push(event.type) }
+    );
+    controller.abort();
+    resolvePlay?.();
+    await expect(playback).rejects.toMatchObject({ name: "AbortError" });
+    expect(events).toEqual(["audioElementAttached", "playbackStopped", "audioElementDetached"]);
+    expect(audio.pause).toHaveBeenCalledTimes(1);
   });
 });

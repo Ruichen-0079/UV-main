@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type Dispatch,
+  type MutableRefObject,
   type SetStateAction
 } from "react";
 import {
@@ -42,8 +43,11 @@ import {
   createBrowserSpeechPlayer,
   detectSpeechLanguage,
   SpeechPlaybackQueue,
-  type SpeechQueueState
+  type SpeechQueueState,
+  type SpeechPlaybackEvent
 } from "./speech-queue.js";
+import { LumiCanvas } from "./lumi-canvas.js";
+import type { LumiControllerHandle, PresenceState } from "./lumi-live2d.js";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
@@ -74,7 +78,31 @@ type WebSocketStatus =
   | "error";
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
+type ChatTimingMetrics = {
+  userSendAt: number;
+  firstTextDeltaAt?: number;
+  firstSegmentSubmittedAt?: number;
+  firstTtsCompletedAt?: number;
+  firstAudioStartedAt?: number;
+  presenceSpeakingAt?: number;
+  stopRequestedAt?: number;
+  audioPausedAt?: number;
+  mouthZeroAt?: number;
+  finalAudioEndedAt?: number;
+  assistantCompletedAt?: number;
+};
 type MemoryResultSource = "/memory/recent" | "/memory/search" | "local fallback";
+
+function recordChatTiming(
+  timingRef: MutableRefObject<ChatTimingMetrics | null>,
+  patch: Partial<ChatTimingMetrics>
+): void {
+  if (!timingRef.current) return;
+  Object.assign(timingRef.current, patch);
+  if (import.meta.env.DEV && typeof window !== "undefined") {
+    document.documentElement.dataset["yuviLumiTiming"] = JSON.stringify(timingRef.current);
+  }
+}
 
 const memoryTypes = ["working", "episodic", "semantic", "emotional", "procedural", "relationship"];
 
@@ -292,12 +320,15 @@ function ChatPage(): JSX.Element {
   const [writeMemory, setWriteMemory] = useState(true);
   const [promptPreview, setPromptPreview] = useState(true);
   const [voiceOutput, setVoiceOutput] = useState(false);
+  const [presenceRequest, setPresenceRequest] = useState<PresenceState>("idle");
   const [messages, dispatchMessages] = useReducer(reduceChatMessages, [] as ChatMessage[]);
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [lastTraceId, setLastTraceId] = useState<string | null>(null);
   const [voicePlaybackStatus, setVoicePlaybackStatus] = useState<VoicePlaybackStatus>("idle");
   const mountedRef = useRef(true);
+  const lumiRef = useRef<LumiControllerHandle>(null);
+  const timingRef = useRef<ChatTimingMetrics | null>(null);
   const speechSessionRef = useRef<{
     generation: string;
     segmenter: SpeechSegmenter;
@@ -352,7 +383,11 @@ function ChatPage(): JSX.Element {
       controller,
       completedObserved: false
     };
+    timingRef.current = { userSendAt: performance.now() };
+    recordChatTiming(timingRef, {});
     if (voiceOutput) {
+      // Resume the shared Web Audio context while this send is still a user gesture.
+      lumiRef.current?.resumeAudio();
       const generation = requestId;
       const segmenter = new SpeechSegmenter();
       const queue = new SpeechPlaybackQueue(
@@ -375,12 +410,40 @@ function ChatPage(): JSX.Element {
             if (mountedRef.current && speechSessionRef.current?.generation === generation) {
               setVoicePlaybackStatus("error");
             }
+          },
+          onSynthesisCompleted: () => {
+            const timing = timingRef.current;
+            if (timing) recordChatTiming(timingRef, { firstTtsCompletedAt: timing.firstTtsCompletedAt ?? performance.now() });
+          },
+          onPlaybackEvent: (event: SpeechPlaybackEvent) => {
+            if (mountedRef.current && speechSessionRef.current?.generation === generation) {
+              lumiRef.current?.handlePlaybackEvent(event);
+              if (event.type === "playbackStarted") {
+                timingRef.current ??= { userSendAt: performance.now() };
+                const now = performance.now();
+                recordChatTiming(timingRef, {
+                  firstAudioStartedAt: timingRef.current.firstAudioStartedAt ?? now,
+                  presenceSpeakingAt: timingRef.current.presenceSpeakingAt ?? now
+                });
+              } else if (event.type === "playbackStopped") {
+                recordChatTiming(timingRef, {
+                  audioPausedAt: performance.now(),
+                  mouthZeroAt: performance.now()
+                });
+              } else if (event.type === "playbackEnded") {
+                recordChatTiming(timingRef, {
+                  finalAudioEndedAt: performance.now(),
+                  mouthZeroAt: performance.now()
+                });
+              }
+            }
           }
         }
       );
       speechSessionRef.current = { generation, segmenter, queue };
     }
     setInput("");
+    setPresenceRequest("thinking");
     setRequestStatus("sending");
     setError(null);
     dispatchMessages({
@@ -426,6 +489,9 @@ function ChatPage(): JSX.Element {
               return;
             }
             if (event.type === "text-delta") {
+              if (timingRef.current && timingRef.current.firstTextDeltaAt === undefined) {
+                recordChatTiming(timingRef, { firstTextDeltaAt: performance.now() });
+              }
               setLastTraceId(event.traceId);
               dispatchMessages({
                 type: "append-delta",
@@ -436,6 +502,9 @@ function ChatPage(): JSX.Element {
               const speech = speechSessionRef.current;
               if (speech?.generation === requestId) {
                 for (const text of speech.segmenter.push(event.text)) {
+                  if (timingRef.current && timingRef.current.firstSegmentSubmittedAt === undefined) {
+                    recordChatTiming(timingRef, { firstSegmentSubmittedAt: performance.now() });
+                  }
                   speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
                 }
               }
@@ -463,6 +532,8 @@ function ChatPage(): JSX.Element {
               provider: event.provider
             });
             setRequestStatus("success");
+            setPresenceRequest("idle");
+            recordChatTiming(timingRef, { assistantCompletedAt: performance.now() });
             const speech = speechSessionRef.current;
             if (speech?.generation === requestId) {
               for (const text of speech.segmenter.flush("completed")) {
@@ -486,6 +557,8 @@ function ChatPage(): JSX.Element {
       });
       setLastTraceId(response.traceId);
       setRequestStatus("success");
+      setPresenceRequest("idle");
+      recordChatTiming(timingRef, { assistantCompletedAt: performance.now() });
       const speech = speechSessionRef.current;
       if (speech?.generation === requestId) {
         for (const text of speech.segmenter.flush("completed")) {
@@ -509,6 +582,7 @@ function ChatPage(): JSX.Element {
           error: "生成已取消，以上内容可能不完整。"
         });
         setRequestStatus("idle");
+        setPresenceRequest("idle");
         return;
       }
       const message = friendlyChatError(caught);
@@ -534,6 +608,8 @@ function ChatPage(): JSX.Element {
     if (!active || active.completedObserved) {
       return;
     }
+    recordChatTiming(timingRef, { stopRequestedAt: performance.now() });
+    interruptLumi();
     active.controller.abort();
     if (speechSessionRef.current?.generation === active.id) {
       speechSessionRef.current.queue.cancel();
@@ -552,9 +628,18 @@ function ChatPage(): JSX.Element {
   }
 
   function stopSpeech(): void {
+    recordChatTiming(timingRef, { stopRequestedAt: performance.now() });
+    interruptLumi();
     speechSessionRef.current?.queue.cancel();
     speechSessionRef.current = null;
     if (mountedRef.current) setVoicePlaybackStatus("stopped");
+  }
+
+  function interruptLumi(): void {
+    lumiRef.current?.setPresence("interrupted");
+    queueMicrotask(() => {
+      if (mountedRef.current) lumiRef.current?.setPresence("idle");
+    });
   }
 
   return (
@@ -665,51 +750,60 @@ function ChatPage(): JSX.Element {
             </div>
           )}
         </Panel>
-        <Panel title="Turn Options">
-          <div className="space-y-4">
-            <Field label="Session ID">
-              <input
-                className="field"
-                value={sessionId}
-                onChange={(event) => setSessionId(event.target.value)}
+        <div className="space-y-4">
+          <Panel title="Lumi">
+            <LumiCanvas
+              ref={lumiRef}
+              requestedPresence={presenceRequest}
+              className="h-[420px] rounded-md bg-ink-900"
+            />
+          </Panel>
+          <Panel title="Turn Options">
+            <div className="space-y-4">
+              <Field label="Session ID">
+                <input
+                  className="field"
+                  value={sessionId}
+                  onChange={(event) => setSessionId(event.target.value)}
+                />
+              </Field>
+              <Toggle
+                label="Read Memory"
+                checked={readMemory}
+                onChange={setReadMemory}
+                note="Controls retrieval and prompt injection."
               />
-            </Field>
-            <Toggle
-              label="Read Memory"
-              checked={readMemory}
-              onChange={setReadMemory}
-              note="Controls retrieval and prompt injection."
-            />
-            <Toggle
-              label="Write Memory"
-              checked={writeMemory}
-              onChange={setWriteMemory}
-              note="Controls whether this turn can create runtime memory."
-            />
-            <Toggle
-              label="Prompt Preview"
-              checked={promptPreview}
-              onChange={setPromptPreview}
-              note="The latest prompt preview remains available in the Prompt page."
-            />
-            <Toggle
-              label="TTS output"
-              checked={voiceOutput}
-              onChange={setVoiceOutput}
-              note="Synthesizes sentence segments locally while the text stream is arriving."
-            />
-            <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
-              <div className="label mb-2">Outgoing Payload</div>
-              <pre className="max-h-52 overflow-auto whitespace-pre-wrap text-xs leading-5 text-ink-700">
-                {JSON.stringify(outgoingPayload, null, 2)}
-              </pre>
+              <Toggle
+                label="Write Memory"
+                checked={writeMemory}
+                onChange={setWriteMemory}
+                note="Controls whether this turn can create runtime memory."
+              />
+              <Toggle
+                label="Prompt Preview"
+                checked={promptPreview}
+                onChange={setPromptPreview}
+                note="The latest prompt preview remains available in the Prompt page."
+              />
+              <Toggle
+                label="TTS output"
+                checked={voiceOutput}
+                onChange={setVoiceOutput}
+                note="Synthesizes sentence segments locally while the text stream is arriving."
+              />
+              <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
+                <div className="label mb-2">Outgoing Payload</div>
+                <pre className="max-h-52 overflow-auto whitespace-pre-wrap text-xs leading-5 text-ink-700">
+                  {JSON.stringify(outgoingPayload, null, 2)}
+                </pre>
+              </div>
+              <p className="text-xs leading-5 text-ink-500">
+                Chat uses the persistent SSE endpoint. Refreshing the page does not restore chat
+                history yet because no session-history API is available.
+              </p>
             </div>
-            <p className="text-xs leading-5 text-ink-500">
-              Chat uses the persistent SSE endpoint. Refreshing the page does not restore chat
-              history yet because no session-history API is available.
-            </p>
-          </div>
-        </Panel>
+          </Panel>
+        </div>
       </div>
     </PageShell>
   );

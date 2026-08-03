@@ -12,12 +12,45 @@ export type SpeechSynthesizer = (
   signal: AbortSignal
 ) => Promise<TTSResponse>;
 
-export type SpeechPlayer = (output: TTSResponse, signal: AbortSignal) => Promise<void>;
+export type SpeechPlayer = (
+  output: TTSResponse,
+  signal: AbortSignal,
+  lifecycle?: SpeechPlayerLifecycle
+) => Promise<void>;
 
 export type SpeechQueueCallbacks = {
   onState?: (state: SpeechQueueState) => void;
   onError?: (error: unknown) => void;
+  onSynthesisCompleted?: (item: PendingSpeech) => void;
+  onPlaybackEvent?: (event: SpeechPlaybackEvent) => void;
 };
+
+export type SpeechPlaybackEventInput =
+  | { type: "audioElementAttached"; audio: HTMLAudioElement }
+  | { type: "playbackStarted"; audio: HTMLAudioElement }
+  | { type: "playbackEnded"; audio: HTMLAudioElement }
+  | { type: "playbackStopped"; audio: HTMLAudioElement }
+  | { type: "playbackError"; audio: HTMLAudioElement; error: unknown }
+  | { type: "audioElementDetached"; audio: HTMLAudioElement };
+
+export type SpeechPlaybackEvent = SpeechPlaybackEventInput & { sequence: number };
+
+export type SpeechPlayerLifecycle = {
+  sequence: number;
+  emit(event: SpeechPlaybackEventInput): void;
+};
+
+let nextSpeechAudioDebugId = 1;
+const speechAudioDebugIds = new WeakMap<HTMLAudioElement, number>();
+
+/** Development-only identity for correlating queue, playback and analyser logs. */
+export function getSpeechAudioDebugId(audio: HTMLAudioElement): number {
+  const existing = speechAudioDebugIds.get(audio);
+  if (existing !== undefined) return existing;
+  const id = nextSpeechAudioDebugId++;
+  speechAudioDebugIds.set(audio, id);
+  return id;
+}
 
 type PendingSpeech = {
   sequence: number;
@@ -80,6 +113,7 @@ export class SpeechPlaybackQueue {
         const output = await this.synthesize(pending.item, this.controller.signal);
         if (this.controller.signal.aborted) break;
         this.ready.set(pending.sequence, output);
+        this.callbacks.onSynthesisCompleted?.(pending);
         void this.pumpPlayback();
       }
     } catch (error) {
@@ -106,7 +140,14 @@ export class SpeechPlaybackQueue {
         this.ready.delete(this.nextPlaybackSequence);
         this.nextPlaybackSequence += 1;
         this.callbacks.onState?.("playing");
-        await this.play(output, this.controller.signal);
+        await this.play(output, this.controller.signal, {
+          sequence: this.nextPlaybackSequence - 1,
+          emit: (event) =>
+            this.callbacks.onPlaybackEvent?.({
+              ...event,
+              sequence: this.nextPlaybackSequence - 1
+            } as SpeechPlaybackEvent)
+        });
       }
     } catch (error) {
       if (!this.controller.signal.aborted) {
@@ -143,11 +184,12 @@ export function detectSpeechLanguage(text: string): string {
 
 export function createBrowserSpeechPlayer(): SpeechPlayer {
   let current: HTMLAudioElement | null = null;
-  return (output, signal) =>
+  return (output, signal, lifecycle) =>
     new Promise<void>((resolve, reject) => {
       const bytes = Uint8Array.from(atob(output.audioBase64), (char) => char.charCodeAt(0));
       const url = URL.createObjectURL(new Blob([bytes], { type: output.mimeType || "audio/wav" }));
       const audio = new Audio(url);
+      getSpeechAudioDebugId(audio);
       current = audio;
       let settled = false;
       const cleanup = () => {
@@ -157,19 +199,42 @@ export function createBrowserSpeechPlayer(): SpeechPlayer {
         signal.removeEventListener("abort", abort);
         if (current === audio) current = null;
       };
+      const emit = (event: SpeechPlaybackEventInput) => lifecycle?.emit(event);
       const finish = (error?: unknown) => {
         if (settled) return;
         settled = true;
         cleanup();
+        emit({ type: "audioElementDetached", audio });
         error ? reject(error) : resolve();
       };
       const abort = () => {
         audio.pause();
+        emit({ type: "playbackStopped", audio });
         finish(new DOMException("Speech playback cancelled.", "AbortError"));
       };
-      audio.onended = () => finish();
-      audio.onerror = () => finish(new Error("Speech playback failed."));
+      audio.onended = () => {
+        emit({ type: "playbackEnded", audio });
+        finish();
+      };
+      audio.onerror = () => {
+        const error = new Error("Speech playback failed.");
+        emit({ type: "playbackError", audio, error });
+        finish(error);
+      };
+      emit({ type: "audioElementAttached", audio });
       signal.addEventListener("abort", abort, { once: true });
-      void audio.play().catch(finish);
+      void audio
+        .play()
+        .then(() => {
+          // A pending play() promise may settle after cancellation. Once the
+          // lifecycle is settled, the old generation must not revive speech
+          // presence or the mouth analyser.
+          if (!settled) emit({ type: "playbackStarted", audio });
+        })
+        .catch((error) => {
+          if (settled) return;
+          emit({ type: "playbackError", audio, error });
+          finish(error);
+        });
     });
 }

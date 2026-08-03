@@ -14,6 +14,7 @@ import { registerSystemRoutes } from "./routes/system.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
 import { registerWebSocketRoutes } from "./routes/websocket.js";
+import { registerLive2DCoreRoute, registerLive2DRoutes } from "./routes/live2d.js";
 
 export async function buildServer(config: ServerConfig) {
   const app = Fastify({
@@ -82,6 +83,8 @@ export async function buildServer(config: ServerConfig) {
   await registerEventRoutes(app, context);
   await registerDebugRoutes(app, context, config);
   await registerWebSocketRoutes(app, context);
+  await registerLive2DRoutes(app, config);
+  await registerLive2DCoreRoute(app, config);
 
   return app;
 }
