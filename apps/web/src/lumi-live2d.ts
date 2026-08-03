@@ -6,6 +6,7 @@ import {
 import type { SpeechPlaybackEvent } from "./speech-queue.js";
 import {
   loadLumiCubismModel,
+  type LumiParameterInfo,
   type LumiCubismModel,
   type LumiFraming
 } from "./lumi-cubism-model.js";
@@ -17,6 +18,31 @@ export const lumiMapping = {
   eyeLeft: "ParamEyeLOpen",
   eyeRight: "ParamEyeROpen"
 } as const;
+
+/** Central mapping for the Presence-owned gaze, head, and body channels. */
+export const LUMI_PRESENCE_PARAMETER_MAP = {
+  eyeBallX: { id: "ParamEyeBallX", min: -1, max: 1, neutral: 0 },
+  eyeBallY: { id: "ParamEyeBallY", min: -1, max: 1, neutral: 0 },
+  headAngleX: { id: "ParamAngleX", min: -30, max: 30, neutral: 0 },
+  headAngleY: { id: "ParamAngleY", min: -30, max: 30, neutral: 0 },
+  headAngleZ: { id: "ParamAngleZ", min: -30, max: 30, neutral: 0 },
+  bodyAngleX: { id: "ParamBodyAngleX", min: -30, max: 30, neutral: 0 },
+  bodyAngleY: { id: "ParamBodyAngleY", min: -30, max: 30, neutral: 0 },
+  bodyAngleZ: { id: "ParamBodyAngleZ", min: -30, max: 30, neutral: 0 }
+} as const;
+
+export type LumiPresenceAnimation = {
+  blink?: number;
+  breath?: number;
+  eyeBallX?: number;
+  eyeBallY?: number;
+  headAngleX?: number;
+  headAngleY?: number;
+  headAngleZ?: number;
+  bodyAngleX?: number;
+  bodyAngleY?: number;
+  bodyAngleZ?: number;
+};
 
 export type PresenceState = "idle" | "thinking" | "speaking" | "interrupted" | "unavailable";
 
@@ -49,6 +75,10 @@ export interface Live2DAdapter extends MouthParameterTarget {
   load(source: string): Promise<void>;
   setParameter(id: string, value: number): void;
   getPendingParameter?(id: string): number | undefined;
+  getParameterInfo?(id: string): LumiParameterInfo | undefined;
+  getCoreParameterValue?(id: string): number | undefined;
+  getLastPreUpdateParameters?(): Readonly<Record<string, number>>;
+  getOwnedParameterIds?(): ReadonlySet<string>;
   setBreath(value: number): void;
   setFraming(framing: LumiFraming): void;
   getFraming?(): LumiFraming;
@@ -89,6 +119,22 @@ export class CubismLive2DAdapter implements Live2DAdapter {
 
   getPendingParameter(id: string): number | undefined {
     return this.model?.getPendingParameter(id);
+  }
+
+  getParameterInfo(id: string): LumiParameterInfo | undefined {
+    return this.model?.getParameterInfo?.(id);
+  }
+
+  getCoreParameterValue(id: string): number | undefined {
+    return this.model?.getCoreParameterValue?.(id);
+  }
+
+  getLastPreUpdateParameters(): Readonly<Record<string, number>> {
+    return this.model?.getLastPreUpdateParameters?.() ?? {};
+  }
+
+  getOwnedParameterIds(): ReadonlySet<string> {
+    return this.model?.parameterIds ?? new Set();
   }
 
   setMouthOpen(value: number): void {
@@ -161,6 +207,7 @@ export type LumiControllerHandle = {
   runMouthCalibration(): Promise<void>;
   setFraming(framing: LumiFraming): void;
   setPresence(state: PresenceState): void;
+  setPresenceAnimation(animation: LumiPresenceAnimation): void;
   setPresenceAnimation(blink: number, breath: number): void;
   resumeAudio(): void;
   handlePlaybackEvent(event: SpeechPlaybackEvent): void;
@@ -175,6 +222,25 @@ export type LumiControllerHandle = {
     pendingEyeRight?: number;
     pendingBreath?: number;
     pendingMouth?: number;
+    pendingEyeBallX?: number;
+    pendingEyeBallY?: number;
+    pendingHeadAngleX?: number;
+    pendingHeadAngleY?: number;
+    pendingHeadAngleZ?: number;
+    pendingBodyAngleX?: number;
+    pendingBodyAngleY?: number;
+    pendingBodyAngleZ?: number;
+    preUpdateEyeBallX?: number;
+    preUpdateEyeBallY?: number;
+    preUpdateAngleX?: number;
+    preUpdateAngleY?: number;
+    preUpdateAngleZ?: number;
+    preUpdateBodyAngleX?: number;
+    preUpdateBodyAngleY?: number;
+    preUpdateBodyAngleZ?: number;
+    preUpdateEyeBallPhysicsX?: number;
+    preUpdateEyeBallPhysicsY?: number;
+    ownedParameterIds?: string[];
   };
 };
 
@@ -237,13 +303,35 @@ export class LumiController {
     this.applyPresence(state);
   }
 
-  setPresenceAnimation(blink: number, breath: number): void {
+  setPresenceAnimation(animation: LumiPresenceAnimation): void;
+  setPresenceAnimation(blink: number, breath: number): void;
+  setPresenceAnimation(
+    animationOrBlink: LumiPresenceAnimation | number,
+    positionalBreath?: number
+  ): void {
     if (!this.adapter) return;
+    const animation: LumiPresenceAnimation =
+      typeof animationOrBlink === "number"
+        ? positionalBreath === undefined
+          ? { blink: animationOrBlink }
+          : { blink: animationOrBlink, breath: positionalBreath }
+        : animationOrBlink;
     // Presence owns only eyes and breath. ParamMouthOpenY remains exclusively
     // driven by the active AudioMouthEnvelope while playback is speaking.
-    this.adapter.setParameter(lumiMapping.eyeLeft, 1 - clamp(blink, 0, 1));
-    this.adapter.setParameter(lumiMapping.eyeRight, 1 - clamp(blink, 0, 1));
-    this.adapter.setBreath(clamp(breath, 0, 1));
+    if (animation.blink !== undefined) {
+      const eyeOpen = 1 - clamp(animation.blink, 0, 1);
+      this.adapter.setParameter(lumiMapping.eyeLeft, eyeOpen);
+      this.adapter.setParameter(lumiMapping.eyeRight, eyeOpen);
+    }
+    if (animation.breath !== undefined) this.adapter.setBreath(clamp(animation.breath, 0, 1));
+    this.setOwnedParameter("eyeBallX", animation.eyeBallX);
+    this.setOwnedParameter("eyeBallY", animation.eyeBallY);
+    this.setOwnedParameter("headAngleX", animation.headAngleX);
+    this.setOwnedParameter("headAngleY", animation.headAngleY);
+    this.setOwnedParameter("headAngleZ", animation.headAngleZ);
+    this.setOwnedParameter("bodyAngleX", animation.bodyAngleX);
+    this.setOwnedParameter("bodyAngleY", animation.bodyAngleY);
+    this.setOwnedParameter("bodyAngleZ", animation.bodyAngleZ);
   }
 
   private applyPresence(state: PresenceState): void {
@@ -307,6 +395,19 @@ export class LumiController {
 
   dispose(): void {
     this.generation += 1;
+    this.setPresenceAnimation({
+      blink: 0,
+      breath: 0,
+      eyeBallX: 0,
+      eyeBallY: 0,
+      headAngleX: 0,
+      headAngleY: 0,
+      headAngleZ: 0,
+      bodyAngleX: 0,
+      bodyAngleY: 0,
+      bodyAngleZ: 0
+    });
+    this.adapter?.resetMouth();
     this.envelope?.dispose();
     this.envelope = null;
     this.adapter?.dispose();
@@ -324,6 +425,25 @@ export class LumiController {
     pendingEyeRight?: number;
     pendingBreath?: number;
     pendingMouth?: number;
+    pendingEyeBallX?: number;
+    pendingEyeBallY?: number;
+    pendingHeadAngleX?: number;
+    pendingHeadAngleY?: number;
+    pendingHeadAngleZ?: number;
+    pendingBodyAngleX?: number;
+    pendingBodyAngleY?: number;
+    pendingBodyAngleZ?: number;
+    preUpdateEyeBallX?: number;
+    preUpdateEyeBallY?: number;
+    preUpdateAngleX?: number;
+    preUpdateAngleY?: number;
+    preUpdateAngleZ?: number;
+    preUpdateBodyAngleX?: number;
+    preUpdateBodyAngleY?: number;
+    preUpdateBodyAngleZ?: number;
+    preUpdateEyeBallPhysicsX?: number;
+    preUpdateEyeBallPhysicsY?: number;
+    ownedParameterIds?: string[];
   } {
     const info: {
       instanceId: number;
@@ -332,6 +452,25 @@ export class LumiController {
       pendingEyeRight?: number;
       pendingBreath?: number;
       pendingMouth?: number;
+      pendingEyeBallX?: number;
+      pendingEyeBallY?: number;
+      pendingHeadAngleX?: number;
+      pendingHeadAngleY?: number;
+      pendingHeadAngleZ?: number;
+      pendingBodyAngleX?: number;
+      pendingBodyAngleY?: number;
+      pendingBodyAngleZ?: number;
+      preUpdateEyeBallX?: number;
+      preUpdateEyeBallY?: number;
+      preUpdateAngleX?: number;
+      preUpdateAngleY?: number;
+      preUpdateAngleZ?: number;
+      preUpdateBodyAngleX?: number;
+      preUpdateBodyAngleY?: number;
+      preUpdateBodyAngleZ?: number;
+      preUpdateEyeBallPhysicsX?: number;
+      preUpdateEyeBallPhysicsY?: number;
+      ownedParameterIds?: string[];
     } = {
       instanceId: this.instanceId,
       generation: this.generation
@@ -344,7 +483,57 @@ export class LumiController {
     if (eyeRight !== undefined) info.pendingEyeRight = eyeRight;
     if (breath !== undefined) info.pendingBreath = breath;
     if (mouth !== undefined) info.pendingMouth = mouth;
+    const eyeBallX = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.eyeBallX.id);
+    const eyeBallY = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.eyeBallY.id);
+    const headAngleX = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.headAngleX.id);
+    const headAngleY = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.headAngleY.id);
+    const headAngleZ = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.headAngleZ.id);
+    const bodyAngleX = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.bodyAngleX.id);
+    const bodyAngleY = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.bodyAngleY.id);
+    const bodyAngleZ = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.bodyAngleZ.id);
+    if (eyeBallX !== undefined) info.pendingEyeBallX = eyeBallX;
+    if (eyeBallY !== undefined) info.pendingEyeBallY = eyeBallY;
+    if (headAngleX !== undefined) info.pendingHeadAngleX = headAngleX;
+    if (headAngleY !== undefined) info.pendingHeadAngleY = headAngleY;
+    if (headAngleZ !== undefined) info.pendingHeadAngleZ = headAngleZ;
+    if (bodyAngleX !== undefined) info.pendingBodyAngleX = bodyAngleX;
+    if (bodyAngleY !== undefined) info.pendingBodyAngleY = bodyAngleY;
+    if (bodyAngleZ !== undefined) info.pendingBodyAngleZ = bodyAngleZ;
+    const preUpdate = this.adapter?.getLastPreUpdateParameters?.() ?? {};
+    if (preUpdate["ParamEyeBallX"] !== undefined) info.preUpdateEyeBallX = preUpdate["ParamEyeBallX"];
+    if (preUpdate["ParamEyeBallY"] !== undefined) info.preUpdateEyeBallY = preUpdate["ParamEyeBallY"];
+    if (preUpdate["ParamAngleX"] !== undefined) info.preUpdateAngleX = preUpdate["ParamAngleX"];
+    if (preUpdate["ParamAngleY"] !== undefined) info.preUpdateAngleY = preUpdate["ParamAngleY"];
+    if (preUpdate["ParamAngleZ"] !== undefined) info.preUpdateAngleZ = preUpdate["ParamAngleZ"];
+    if (preUpdate["ParamBodyAngleX"] !== undefined) info.preUpdateBodyAngleX = preUpdate["ParamBodyAngleX"];
+    if (preUpdate["ParamBodyAngleY"] !== undefined) info.preUpdateBodyAngleY = preUpdate["ParamBodyAngleY"];
+    if (preUpdate["ParamBodyAngleZ"] !== undefined) info.preUpdateBodyAngleZ = preUpdate["ParamBodyAngleZ"];
+    if (preUpdate["ParamEyeBallPhysicsX"] !== undefined) {
+      info.preUpdateEyeBallPhysicsX = preUpdate["ParamEyeBallPhysicsX"];
+    }
+    if (preUpdate["ParamEyeBallPhysicsY"] !== undefined) {
+      info.preUpdateEyeBallPhysicsY = preUpdate["ParamEyeBallPhysicsY"];
+    }
+    const owned = this.adapter?.getOwnedParameterIds?.();
+    if (owned) info.ownedParameterIds = [...owned];
     return info;
+  }
+
+  private setOwnedParameter(
+    key: keyof typeof LUMI_PRESENCE_PARAMETER_MAP,
+    value: number | undefined
+  ): void {
+    if (value === undefined || !this.adapter) return;
+    const configured = LUMI_PRESENCE_PARAMETER_MAP[key];
+    const actual = this.adapter.getParameterInfo?.(configured.id);
+    // A real Cubism adapter exposes the model's parameter table. Missing
+    // optional gaze/head channels are a supported degradation; do not stage a
+    // value for an ID the model does not actually contain.
+    if (this.adapter.getParameterInfo && !actual) return;
+    this.adapter.setParameter(
+      configured.id,
+      clamp(value, actual?.min ?? configured.min, actual?.max ?? configured.max)
+    );
   }
 
   private transition(event: PresenceEvent): void {

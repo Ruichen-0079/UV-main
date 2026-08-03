@@ -3,6 +3,7 @@ import {
   LumiController,
   CubismLive2DAdapter,
   type LumiControllerHandle,
+  type LumiPresenceAnimation,
   type PresenceState
 } from "./lumi-live2d.js";
 import type { LumiFraming } from "./lumi-cubism-model.js";
@@ -41,8 +42,13 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       runMouthCalibration: () => controllerRef.current?.runMouthCalibration() ?? Promise.resolve(),
       setFraming: (next) => controllerRef.current?.setFraming(next),
       setPresence: (next) => controllerRef.current?.setPresence(next),
-      setPresenceAnimation: (blink, breath) =>
-        controllerRef.current?.setPresenceAnimation(blink, breath),
+      setPresenceAnimation: ((animationOrBlink: LumiPresenceAnimation | number, breath?: number) => {
+        if (typeof animationOrBlink === "number") {
+          controllerRef.current?.setPresenceAnimation(animationOrBlink, breath ?? 0);
+        } else {
+          controllerRef.current?.setPresenceAnimation(animationOrBlink);
+        }
+      }) as LumiControllerHandle["setPresenceAnimation"],
       resumeAudio: () => controllerRef.current?.resumeAudio(),
       handlePlaybackEvent: (event) => controllerRef.current?.handlePlaybackEvent(event),
       resize: (width, height) => controllerRef.current?.resize(width, height),

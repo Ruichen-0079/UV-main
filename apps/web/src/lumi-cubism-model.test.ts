@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  applyYuviParameters,
   applyYuviParametersThenUpdate,
   getLumiFramingZoom,
   getLumiRenderMetrics,
-  LUMI_DEVICE_PIXEL_RATIO_CAP
+  LUMI_DEVICE_PIXEL_RATIO_CAP,
+  runYuviCubismParameterFrame
 } from "./lumi-cubism-model.js";
 
 describe("Lumi render sizing", () => {
@@ -51,5 +53,63 @@ describe("Lumi render sizing", () => {
     expect(values.get("ParamEyeLOpen")).toBe(0.05);
     expect(values.get("bakedEye")).toBe(0.05);
     expect(coreModel.update).toHaveBeenCalledOnce();
+  });
+
+  it("applies gaze/head pending before physics so physics inputs are non-zero this frame", () => {
+    const order: string[] = [];
+    const values = new Map<string, number>();
+    const coreModel = {
+      loadParameters: vi.fn(() => {
+        order.push("load");
+        values.clear();
+      }),
+      update: vi.fn(() => {
+        order.push("update");
+        values.set("bakedEyeBall", values.get("ParamEyeBallX") ?? -1);
+        values.set("bakedAngle", values.get("ParamAngleX") ?? -1);
+      }),
+      setParameterValueById: (id: unknown, value: number) => {
+        order.push(`set:${String(id)}=${value}`);
+        values.set(String(id), value);
+      }
+    };
+    const evaluatePhysics = vi.fn(() => {
+      order.push("physics");
+      // Physics reads ParamEyeBallX as an input; record what it saw.
+      values.set("physicsSawEyeBall", values.get("ParamEyeBallX") ?? -1);
+      values.set("physicsSawAngle", values.get("ParamAngleX") ?? -1);
+      // Secondary output channel used by Lumi.
+      values.set("ParamEyeBallPhysicsX", (values.get("ParamEyeBallX") ?? 0) * 0.5);
+    });
+    runYuviCubismParameterFrame(
+      coreModel,
+      (id) => id,
+      new Map([
+        ["ParamEyeBallX", 1],
+        ["ParamAngleX", 20]
+      ]),
+      evaluatePhysics
+    );
+    expect(order[0]).toBe("load");
+    expect(order).toContain("physics");
+    expect(order.at(-1)).toBe("update");
+    // Physics must observe the forced values from the pre-physics apply.
+    expect(values.get("physicsSawEyeBall")).toBe(1);
+    expect(values.get("physicsSawAngle")).toBe(20);
+    // Final bake still has the YUVI-owned values.
+    expect(values.get("bakedEyeBall")).toBe(1);
+    expect(values.get("bakedAngle")).toBe(20);
+    // Pending is applied both before and after physics.
+    expect(order.filter((step) => step.startsWith("set:ParamEyeBallX")).length).toBe(2);
+  });
+
+  it("can stage parameters without immediately updating the mesh", () => {
+    const coreModel = {
+      update: vi.fn(),
+      setParameterValueById: vi.fn()
+    };
+    applyYuviParameters(coreModel, (id) => id, new Map([["ParamAngleY", 10]]));
+    expect(coreModel.setParameterValueById).toHaveBeenCalledWith("ParamAngleY", 10);
+    expect(coreModel.update).not.toHaveBeenCalled();
   });
 });

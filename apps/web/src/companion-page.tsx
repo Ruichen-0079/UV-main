@@ -8,6 +8,7 @@ import {
   reduceCompanionPresence,
   type CompanionPresenceState
 } from "./companion-presence.js";
+import { createGazeScheduler } from "./companion-gaze.js";
 import { createCompanionSpeechBuffer } from "./companion-speech-buffer.js";
 import { createCompanionReadyAnnouncer } from "./companion-voice-sync.js";
 import { createSpeechSegmentDeduper } from "./speech-segment-dedup.js";
@@ -46,6 +47,7 @@ export function CompanionPage(): JSX.Element {
   const [framing, setFraming] = useState<LumiFraming>("half");
   const presenceRef = useRef<CompanionPresenceState>(presence);
   const blinkSchedulerRef = useRef<ReturnType<typeof createCompanionBlinkScheduler> | null>(null);
+  const gazeSchedulerRef = useRef<ReturnType<typeof createGazeScheduler> | null>(null);
   const interruptedResetRef = useRef<ReturnType<typeof createInterruptedResetScheduler> | null>(
     null
   );
@@ -292,20 +294,88 @@ export function CompanionPage(): JSX.Element {
   }, [presence]);
 
   useEffect(() => {
-    // Create the blink scheduler inside the effect so StrictMode's mount →
-    // cleanup → remount cycle cannot leave a disposed scheduler in a ref.
-    const scheduler = createCompanionBlinkScheduler(Math.random, performance.now());
-    blinkSchedulerRef.current = scheduler;
+    // Schedulers MUST be created inside this effect. StrictMode mount → cleanup
+    // → remount disposes the first pair; remount must allocate brand-new
+    // instances and must never keep sampling a disposed ref.
+    let blinkScheduler = createCompanionBlinkScheduler(Math.random, performance.now());
+    let gazeScheduler = createGazeScheduler(Math.random, performance.now());
+    blinkSchedulerRef.current = blinkScheduler;
+    gazeSchedulerRef.current = gazeScheduler;
+
     let frame = 0;
     let alive = true;
+    let previousNow = performance.now();
+    // Generation token: any in-flight rAF from a previous StrictMode mount
+    // must no-op even if cancelAnimationFrame races.
+    const effectGeneration = Symbol("presence-raf");
+    let activeGeneration: symbol | null = effectGeneration;
+
     const animate = (now: number) => {
-      if (!alive) return;
+      if (!alive || activeGeneration !== effectGeneration) {
+        frame = 0;
+        return;
+      }
+      // Re-check visibility every frame. Do not permanently kill the loop on a
+      // single "hidden" event — Tauri multi-window can miss the matching show.
+      const hidden =
+        typeof document !== "undefined" && document.visibilityState === "hidden";
+      if (hidden) {
+        previousNow = now;
+        frame = requestAnimationFrame(animate);
+        return;
+      }
+
+      const frameDelta = Math.max(0, now - previousNow);
+      previousNow = now;
       const currentPresence = presenceRef.current;
+      const interrupted = currentPresence === "interrupted";
+
+      // Self-heal: if a disposed scheduler was ever left in place, replace it.
+      if (gazeScheduler.isDisposed()) {
+        gazeScheduler = createGazeScheduler(Math.random, now);
+        gazeSchedulerRef.current = gazeScheduler;
+      }
+
       // Speaking continues to blink; only interrupted freezes eyes open.
-      const blink =
-        currentPresence === "interrupted" ? 0 : scheduler.sample(now, currentPresence);
+      const blink = interrupted ? 0 : blinkScheduler.sample(now, currentPresence);
       const animation = getCompanionAnimation(currentPresence, now, blink);
-      lumiRef.current?.setPresenceAnimation(animation.blink, animation.breath);
+      // Explicit (now, dt, interrupted) so hold clocks advance from frameDelta
+      // even if wall-clock origins differ between rAF and performance.now().
+      const gaze = gazeScheduler.sample(now, frameDelta, interrupted);
+
+      // DEV force path only overrides the final output — the scheduler keeps
+      // ticking underneath so natural motion resumes when force is cleared.
+      const forceGaze =
+        import.meta.env.DEV &&
+        typeof window !== "undefined" &&
+        (window as typeof window & { __yuviForceGaze?: boolean }).__yuviForceGaze === true;
+      const presenceAnimation = forceGaze
+        ? {
+            blink: animation.blink,
+            breath: animation.breath,
+            eyeBallX: 1,
+            eyeBallY: 0.5,
+            headAngleX: 20,
+            headAngleY: 10,
+            headAngleZ: 8,
+            bodyAngleX: 6,
+            bodyAngleY: 3,
+            bodyAngleZ: 4
+          }
+        : {
+            blink: animation.blink,
+            breath: animation.breath,
+            eyeBallX: gaze.currentX,
+            eyeBallY: gaze.currentY,
+            headAngleX: gaze.headCurrentX,
+            headAngleY: gaze.headCurrentY,
+            headAngleZ: gaze.headCurrentZ,
+            bodyAngleX: gaze.bodyCurrentX,
+            bodyAngleY: gaze.bodyCurrentY,
+            bodyAngleZ: gaze.bodyCurrentZ
+          };
+      lumiRef.current?.setPresenceAnimation(presenceAnimation);
+
       if (import.meta.env.DEV && typeof window !== "undefined") {
         const debugWindow = window as typeof window & {
           __yuviPresenceDiagnostics?: Record<string, unknown>;
@@ -314,8 +384,15 @@ export function CompanionPage(): JSX.Element {
         debugWindow.__yuviPresenceDiagnostics = {
           running: true,
           presence: currentPresence,
-          nextBlinkAt: scheduler.getNextBlinkAt(),
-          blinkPhase: scheduler.getPhase(now),
+          interrupted,
+          forceGaze: forceGaze === true,
+          schedulerDisposed: gazeScheduler.isDisposed(),
+          schedulerPaused: false,
+          hiddenDocument: hidden,
+          frameNow: now,
+          frameDelta,
+          nextBlinkAt: blinkScheduler.getNextBlinkAt(),
+          blinkPhase: blinkScheduler.getPhase(now),
           eyeOpen: 1 - animation.blink,
           eyeLeft: 1 - animation.blink,
           eyeRight: 1 - animation.blink,
@@ -324,22 +401,86 @@ export function CompanionPage(): JSX.Element {
           pendingEyeLeft: controller?.pendingEyeLeft ?? null,
           pendingEyeRight: controller?.pendingEyeRight ?? null,
           pendingBreath: controller?.pendingBreath ?? null,
+          pendingEyeBallX: controller?.pendingEyeBallX ?? null,
+          pendingEyeBallY: controller?.pendingEyeBallY ?? null,
+          pendingAngleX: controller?.pendingHeadAngleX ?? null,
+          pendingAngleY: controller?.pendingHeadAngleY ?? null,
+          pendingAngleZ: controller?.pendingHeadAngleZ ?? null,
+          preUpdateEyeBallX: controller?.preUpdateEyeBallX ?? null,
+          preUpdateEyeBallY: controller?.preUpdateEyeBallY ?? null,
+          preUpdateAngleX: controller?.preUpdateAngleX ?? null,
+          preUpdateAngleY: controller?.preUpdateAngleY ?? null,
+          preUpdateAngleZ: controller?.preUpdateAngleZ ?? null,
+          preUpdateEyeBallPhysicsX: controller?.preUpdateEyeBallPhysicsX ?? null,
+          preUpdateEyeBallPhysicsY: controller?.preUpdateEyeBallPhysicsY ?? null,
+          ownedParameterIds: controller?.ownedParameterIds ?? null,
           controllerInstanceId: controller?.instanceId ?? null,
           controllerGeneration: controller?.generation ?? null,
+          gazeSchedulerRunning: gaze.running,
+          gazeElapsedMs: gaze.elapsedMs,
+          gazeTargetX: gaze.targetX,
+          gazeTargetY: gaze.targetY,
+          gazeCurrentX: gaze.currentX,
+          gazeCurrentY: gaze.currentY,
+          gazeTargetRegion: gaze.targetRegion,
+          holdUntil: gaze.holdUntil,
+          nextTargetAt: gaze.nextTargetAt,
+          headCurrentX: gaze.headCurrentX,
+          headCurrentY: gaze.headCurrentY,
+          headCurrentZ: gaze.headCurrentZ,
+          headTargetX: gaze.headTargetX,
+          headTargetY: gaze.headTargetY,
+          headTargetZ: gaze.headTargetZ,
+          bodyCurrentX: gaze.bodyCurrentX,
+          bodyCurrentY: gaze.bodyCurrentY,
+          bodyCurrentZ: gaze.bodyCurrentZ,
+          bodyTargetX: gaze.bodyTargetX,
+          bodyTargetY: gaze.bodyTargetY,
+          bodyTargetZ: gaze.bodyTargetZ,
+          pendingBodyAngleX: controller?.pendingBodyAngleX ?? null,
+          pendingBodyAngleY: controller?.pendingBodyAngleY ?? null,
+          pendingBodyAngleZ: controller?.pendingBodyAngleZ ?? null,
+          appliedEyeBallX: presenceAnimation.eyeBallX,
+          appliedEyeBallY: presenceAnimation.eyeBallY,
+          appliedHeadAngleX: presenceAnimation.headAngleX,
+          appliedHeadAngleY: presenceAnimation.headAngleY,
+          appliedHeadAngleZ: presenceAnimation.headAngleZ,
+          appliedBodyAngleX: presenceAnimation.bodyAngleX,
+          appliedBodyAngleY: presenceAnimation.bodyAngleY,
+          appliedBodyAngleZ: presenceAnimation.bodyAngleZ,
+          activeRafCount: 1,
           now
         };
       }
       frame = requestAnimationFrame(animate);
     };
+
     frame = requestAnimationFrame(animate);
     return () => {
       alive = false;
+      activeGeneration = null;
       cancelAnimationFrame(frame);
-      scheduler.dispose();
-      if (blinkSchedulerRef.current === scheduler) {
+      frame = 0;
+      blinkScheduler.dispose();
+      gazeScheduler.dispose();
+      if (blinkSchedulerRef.current === blinkScheduler) {
         blinkSchedulerRef.current = null;
       }
-      lumiRef.current?.setPresenceAnimation(0, 0);
+      if (gazeSchedulerRef.current === gazeScheduler) {
+        gazeSchedulerRef.current = null;
+      }
+      lumiRef.current?.setPresenceAnimation({
+        blink: 0,
+        breath: 0,
+        eyeBallX: 0,
+        eyeBallY: 0,
+        headAngleX: 0,
+        headAngleY: 0,
+        headAngleZ: 0,
+        bodyAngleX: 0,
+        bodyAngleY: 0,
+        bodyAngleZ: 0
+      });
       if (import.meta.env.DEV && typeof window !== "undefined") {
         const debugWindow = window as typeof window & {
           __yuviPresenceDiagnostics?: Record<string, unknown>;
@@ -348,6 +489,9 @@ export function CompanionPage(): JSX.Element {
           debugWindow.__yuviPresenceDiagnostics = {
             ...debugWindow.__yuviPresenceDiagnostics,
             running: false,
+            gazeSchedulerRunning: false,
+            schedulerDisposed: true,
+            activeRafCount: 0,
             presence: "idle",
             blinkPhase: "waiting",
             eyeOpen: 1,

@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { gatedEnvelope, rmsFromTimeDomain, smoothMouthEnvelope } from "./lumi-audio.js";
-import { LumiController, lumiMapping, reducePresence } from "./lumi-live2d.js";
+import {
+  LUMI_PRESENCE_PARAMETER_MAP,
+  LumiController,
+  lumiMapping,
+  reducePresence
+} from "./lumi-live2d.js";
 
 describe("Lumi presence and audio envelope", () => {
   it("keeps the presence lifecycle tied to real playback", () => {
@@ -126,6 +131,100 @@ describe("Lumi presence and audio envelope", () => {
     expect(adapter.setParameter.mock.calls[1]?.[1]).toBeCloseTo(0.3);
     expect(adapter.setBreath).toHaveBeenCalledWith(0.2);
     expect(adapter.setMouthOpen).not.toHaveBeenCalled();
+  });
+
+  it("keeps gaze/head ownership separate from blink, breath and RMS mouth", async () => {
+    const adapter = {
+      load: vi.fn(async () => undefined),
+      setMouthOpen: vi.fn(),
+      setMouthForm: vi.fn(),
+      setParameter: vi.fn(),
+      setBreath: vi.fn(),
+      setFraming: vi.fn(),
+      resetMouth: vi.fn(),
+      resize: vi.fn(),
+      dispose: vi.fn()
+    };
+    const controller = new LumiController(() => adapter, "model3.json");
+    await controller.load();
+    adapter.setParameter.mockClear();
+    adapter.setMouthOpen.mockClear();
+    controller.setPresenceAnimation({
+      blink: 0.2,
+      breath: 0.3,
+      eyeBallX: 0.25,
+      eyeBallY: -0.1,
+      headAngleX: 4,
+      headAngleY: -2,
+      headAngleZ: 1
+    });
+    expect(adapter.setParameter.mock.calls.map(([id]) => id)).toEqual([
+      lumiMapping.eyeLeft,
+      lumiMapping.eyeRight,
+      LUMI_PRESENCE_PARAMETER_MAP.eyeBallX.id,
+      LUMI_PRESENCE_PARAMETER_MAP.eyeBallY.id,
+      LUMI_PRESENCE_PARAMETER_MAP.headAngleX.id,
+      LUMI_PRESENCE_PARAMETER_MAP.headAngleY.id,
+      LUMI_PRESENCE_PARAMETER_MAP.headAngleZ.id
+    ]);
+    expect(adapter.setMouthOpen).not.toHaveBeenCalled();
+  });
+
+  it("clamps presence-owned gaze and head values to the centralized ranges", async () => {
+    const adapter = {
+      load: vi.fn(async () => undefined),
+      setMouthOpen: vi.fn(),
+      setMouthForm: vi.fn(),
+      setParameter: vi.fn(),
+      setBreath: vi.fn(),
+      setFraming: vi.fn(),
+      resetMouth: vi.fn(),
+      resize: vi.fn(),
+      dispose: vi.fn()
+    };
+    const controller = new LumiController(() => adapter, "model3.json");
+    await controller.load();
+    adapter.setParameter.mockClear();
+    controller.setPresenceAnimation({ eyeBallX: 9, eyeBallY: -9, headAngleX: 99 });
+    expect(adapter.setParameter).toHaveBeenCalledWith(
+      LUMI_PRESENCE_PARAMETER_MAP.eyeBallX.id,
+      LUMI_PRESENCE_PARAMETER_MAP.eyeBallX.max
+    );
+    expect(adapter.setParameter).toHaveBeenCalledWith(
+      LUMI_PRESENCE_PARAMETER_MAP.eyeBallY.id,
+      LUMI_PRESENCE_PARAMETER_MAP.eyeBallY.min
+    );
+    expect(adapter.setParameter).toHaveBeenCalledWith(
+      LUMI_PRESENCE_PARAMETER_MAP.headAngleX.id,
+      LUMI_PRESENCE_PARAMETER_MAP.headAngleX.max
+    );
+  });
+
+  it("skips optional gaze channels when the loaded model does not expose them", async () => {
+    const adapter = {
+      load: vi.fn(async () => undefined),
+      setMouthOpen: vi.fn(),
+      setMouthForm: vi.fn(),
+      setParameter: vi.fn(),
+      getParameterInfo: vi.fn(() => undefined),
+      setBreath: vi.fn(),
+      setFraming: vi.fn(),
+      resetMouth: vi.fn(),
+      resize: vi.fn(),
+      dispose: vi.fn()
+    };
+    const controller = new LumiController(() => adapter, "model3.json");
+    await controller.load();
+    adapter.setParameter.mockClear();
+    controller.setPresenceAnimation({ eyeBallX: 0.2, headAngleX: 3 });
+    expect(adapter.setParameter).not.toHaveBeenCalledWith(
+      LUMI_PRESENCE_PARAMETER_MAP.eyeBallX.id,
+      expect.anything()
+    );
+    expect(adapter.setParameter).not.toHaveBeenCalledWith(
+      LUMI_PRESENCE_PARAMETER_MAP.headAngleX.id,
+      expect.anything()
+    );
   });
 
   it("does not write presence parameters after the controller is disposed", async () => {

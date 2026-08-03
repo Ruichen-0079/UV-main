@@ -58,6 +58,11 @@ type CubismModel = {
   saveParameters(): void;
   update(): void;
   getParameterIndex(id: unknown): number;
+  getParameterMinimumValue?(parameterIndex: number): number;
+  getParameterMaximumValue?(parameterIndex: number): number;
+  getParameterDefaultValue?(parameterIndex: number): number;
+  getParameterValueById?(id: unknown): number;
+  getParameterValueByIndex?(parameterIndex: number): number;
   setParameterValueById(id: unknown, value: number, weight?: number): void;
   getCanvasWidth(): number;
   getCanvasHeight(): number;
@@ -86,9 +91,15 @@ type UserModel = {
 
 export type LumiCubismModel = {
   readonly parameterIds: ReadonlySet<string>;
+  readonly parameterInfo: ReadonlyMap<string, LumiParameterInfo>;
   setParameter(id: string, value: number): void;
   /** Development/diagnostics: last value staged for the next Core update. */
   getPendingParameter(id: string): number | undefined;
+  getParameterInfo?(id: string): LumiParameterInfo | undefined;
+  /** Live Cubism core value (post set, pre or post update depending on call site). */
+  getCoreParameterValue?(id: string): number | undefined;
+  /** Snapshot of values applied immediately before the last coreModel.update(). */
+  getLastPreUpdateParameters?(): Readonly<Record<string, number>>;
   setFraming(framing: LumiFraming): void;
   getFraming(): LumiFraming;
   resize(width: number, height: number): void;
@@ -99,6 +110,30 @@ export type LumiCubismModel = {
   /** Development-only projection diagnostics. */
   getFramingDiagnostics(): LumiFramingDiagnostics | null;
 };
+
+export type LumiParameterInfo = {
+  id: string;
+  min: number;
+  max: number;
+  defaultValue: number;
+};
+
+/**
+ * Write YUVI-owned parameters onto the Core model without baking the mesh.
+ *
+ * Physics inputs such as ParamEyeBallX / ParamAngle* must be present **before**
+ * physics.evaluate(); final authority values (mouth, eye open, gaze, head) are
+ * re-applied after physics and before update().
+ */
+export function applyYuviParameters(
+  coreModel: Pick<CubismModel, "setParameterValueById">,
+  getId: (id: string) => unknown,
+  pending: ReadonlyMap<string, number>
+): void {
+  for (const [id, value] of pending) {
+    coreModel.setParameterValueById(getId(id), value);
+  }
+}
 
 /**
  * Apply YUVI-owned parameters, then run Cubism Core update so the same-frame
@@ -111,14 +146,35 @@ export function applyYuviParametersThenUpdate(
   getId: (id: string) => unknown,
   pending: ReadonlyMap<string, number>
 ): void {
-  for (const [id, value] of pending) {
-    coreModel.setParameterValueById(getId(id), value);
-  }
+  applyYuviParameters(coreModel, getId, pending);
   coreModel.update();
 }
 
 /** @deprecated Use applyYuviParametersThenUpdate. Kept name only for migration. */
 export const updateAndApplyFinalCubismParameters = applyYuviParametersThenUpdate;
+
+/**
+ * Official YUVI frame parameter order for models whose physics takes gaze/head
+ * as inputs (Lumi: ParamEyeBallX → ParamEyeBallPhysicsX, ParamAngle* → body).
+ *
+ * 1. loadParameters — restore baseline
+ * 2. apply pending — physics inputs available this frame
+ * 3. physics.evaluate — secondary outputs (hair, eye physics channels)
+ * 4. apply pending again — final authority for YUVI-owned channels
+ * 5. update — bake mesh for draw
+ */
+export function runYuviCubismParameterFrame(
+  coreModel: Pick<CubismModel, "loadParameters" | "update" | "setParameterValueById">,
+  getId: (id: string) => unknown,
+  pending: ReadonlyMap<string, number>,
+  evaluatePhysics: (() => void) | null | undefined
+): void {
+  coreModel.loadParameters();
+  applyYuviParameters(coreModel, getId, pending);
+  evaluatePhysics?.();
+  applyYuviParameters(coreModel, getId, pending);
+  coreModel.update();
+}
 
 /**
  * Minimal, official-Framework model host.  It intentionally has no motion or
@@ -171,14 +227,34 @@ export async function loadLumiCubismModel(
     "ParamMouthForm",
     "ParamBreath",
     "ParamEyeLOpen",
-    "ParamEyeROpen"
+    "ParamEyeROpen",
+    "ParamEyeBallX",
+    "ParamEyeBallY",
+    "ParamAngleX",
+    "ParamAngleY",
+    "ParamAngleZ",
+    "ParamBodyAngleX",
+    "ParamBodyAngleY",
+    "ParamBodyAngleZ"
   ];
-  const parameterIds = new Set(
-    ids.filter(
-      (id) =>
-        model.getModel().getParameterIndex(runtime.CubismFramework.getIdManager().getId(id)) >= 0
-    )
-  );
+  const coreModel = model.getModel();
+  const parameterInfo = new Map<string, LumiParameterInfo>();
+  for (const id of ids) {
+    const index = coreModel.getParameterIndex(runtime.CubismFramework.getIdManager().getId(id));
+    if (index < 0) continue;
+    const min = coreModel.getParameterMinimumValue?.(index);
+    const max = coreModel.getParameterMaximumValue?.(index);
+    const defaultValue = coreModel.getParameterDefaultValue?.(index);
+    parameterInfo.set(id, {
+      id,
+      min: Number.isFinite(min) ? Number(min) : fallbackParameterRange(id).min,
+      max: Number.isFinite(max) ? Number(max) : fallbackParameterRange(id).max,
+      defaultValue: Number.isFinite(defaultValue)
+        ? Number(defaultValue)
+        : fallbackParameterRange(id).defaultValue
+    });
+  }
+  const parameterIds = new Set(parameterInfo.keys());
   const pending = new Map<string, number>();
   // CSS viewport for model matrix; pixel size for the GL backing store only.
   let cssWidth = Math.max(1, canvas.clientWidth || 320);
@@ -193,6 +269,23 @@ export async function loadLumiCubismModel(
   let cachedMatrix: unknown = null;
   let cachedTransform: LumiUniformTransform | null = null;
   let cachedDiagnostics: LumiFramingDiagnostics | null = null;
+  let lastPreUpdateParameters: Record<string, number> = {};
+
+  const getId = (id: string) => runtime.CubismFramework.getIdManager().getId(id);
+
+  const readCoreParameterValue = (id: string): number | undefined => {
+    const live = model.getModel();
+    const handle = getId(id);
+    const index = live.getParameterIndex(handle);
+    if (index < 0) return undefined;
+    if (typeof live.getParameterValueById === "function") {
+      const value = live.getParameterValueById(handle);
+      return Number.isFinite(value) ? Number(value) : undefined;
+    }
+    if (typeof live.getParameterValueByIndex !== "function") return undefined;
+    const value = live.getParameterValueByIndex(index);
+    return Number.isFinite(value) ? Number(value) : undefined;
+  };
 
   const resize = (nextWidth: number, nextHeight: number) => {
     if (disposed || nextWidth <= 0 || nextHeight <= 0) return;
@@ -216,11 +309,24 @@ export async function loadLumiCubismModel(
 
   return {
     parameterIds,
+    parameterInfo,
     setParameter(id, value) {
-      if (!disposed && parameterIds.has(id)) pending.set(id, value);
+      if (!disposed && parameterIds.has(id)) {
+        const info = parameterInfo.get(id);
+        pending.set(id, clampParameter(value, info?.min ?? -Infinity, info?.max ?? Infinity));
+      }
     },
     getPendingParameter(id) {
       return pending.get(id);
+    },
+    getParameterInfo(id) {
+      return parameterInfo.get(id);
+    },
+    getCoreParameterValue(id) {
+      return readCoreParameterValue(id);
+    },
+    getLastPreUpdateParameters() {
+      return lastPreUpdateParameters;
     },
     setFraming(nextFraming) {
       if (disposed || framing === nextFraming) return;
@@ -242,18 +348,50 @@ export async function loadLumiCubismModel(
     },
     render(deltaSeconds) {
       if (disposed) return;
-      const coreModel = model.getModel();
-      // Official Cubism order: restore baseline → physics → YUVI overrides →
-      // Core update (bake mesh) → draw.
-      coreModel.loadParameters();
-      model._physics?.evaluate(coreModel, Math.min(0.1, Math.max(0, deltaSeconds)));
-      applyYuviParametersThenUpdate(
-        coreModel,
-        (id) => runtime.CubismFramework.getIdManager().getId(id),
-        pending
-      );
-      const modelWidth = Math.max(0.001, coreModel.getCanvasWidth());
-      const modelHeight = Math.max(0.001, coreModel.getCanvasHeight());
+      const liveCore = model.getModel();
+      // Gaze/head (ParamEyeBall*, ParamAngle*) are physics inputs on Lumi.
+      // Write pending before physics so secondary channels (e.g.
+      // ParamEyeBallPhysicsX) receive this frame's target, then re-apply
+      // pending after physics as final authority before update().
+      const delta = Math.min(0.1, Math.max(0, deltaSeconds));
+      liveCore.loadParameters();
+      applyYuviParameters(liveCore, getId, pending);
+      model._physics?.evaluate(liveCore, delta);
+      applyYuviParameters(liveCore, getId, pending);
+      // Snapshot Core values immediately before update() bakes the mesh.
+      const diagnosticIds = [
+        ...parameterIds,
+        "ParamEyeBallPhysicsX",
+        "ParamEyeBallPhysicsY"
+      ];
+      lastPreUpdateParameters = {};
+      for (const id of diagnosticIds) {
+        const value = readCoreParameterValue(id);
+        if (value !== undefined) lastPreUpdateParameters[id] = value;
+      }
+      if (import.meta.env.DEV && typeof window !== "undefined") {
+        const debugWindow = window as typeof window & {
+          __yuviCubismParameterFrame?: Record<string, unknown>;
+        };
+        debugWindow.__yuviCubismParameterFrame = {
+          pending: Object.fromEntries(pending.entries()),
+          preUpdate: { ...lastPreUpdateParameters },
+          coreEyeBallX: lastPreUpdateParameters["ParamEyeBallX"] ?? null,
+          coreEyeBallY: lastPreUpdateParameters["ParamEyeBallY"] ?? null,
+          coreAngleX: lastPreUpdateParameters["ParamAngleX"] ?? null,
+          coreAngleY: lastPreUpdateParameters["ParamAngleY"] ?? null,
+          coreAngleZ: lastPreUpdateParameters["ParamAngleZ"] ?? null,
+          coreBodyAngleX: lastPreUpdateParameters["ParamBodyAngleX"] ?? null,
+          coreBodyAngleY: lastPreUpdateParameters["ParamBodyAngleY"] ?? null,
+          coreBodyAngleZ: lastPreUpdateParameters["ParamBodyAngleZ"] ?? null,
+          coreEyeBallPhysicsX: lastPreUpdateParameters["ParamEyeBallPhysicsX"] ?? null,
+          coreEyeBallPhysicsY: lastPreUpdateParameters["ParamEyeBallPhysicsY"] ?? null,
+          parameterIds: [...parameterIds]
+        };
+      }
+      liveCore.update();
+      const modelWidth = Math.max(0.001, liveCore.getCanvasWidth());
+      const modelHeight = Math.max(0.001, liveCore.getCanvasHeight());
       const key: LumiFitCacheKey = {
         framing,
         cssWidth,
@@ -299,6 +437,7 @@ export async function loadLumiCubismModel(
       if (disposed) return;
       disposed = true;
       pending.clear();
+      lastPreUpdateParameters = {};
       fitCacheKey = null;
       cachedMatrix = null;
       cachedTransform = null;
@@ -383,4 +522,35 @@ async function createTexture(gl: WebGL2RenderingContext, blob: Blob): Promise<We
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
   bitmap.close();
   return texture;
+}
+
+function fallbackParameterRange(id: string): LumiParameterInfo {
+  switch (id) {
+    case "ParamEyeBallX":
+    case "ParamEyeBallY":
+      return { id, min: -1, max: 1, defaultValue: 0 };
+    case "ParamAngleX":
+    case "ParamAngleY":
+    case "ParamAngleZ":
+    case "ParamBodyAngleX":
+    case "ParamBodyAngleY":
+    case "ParamBodyAngleZ":
+      return { id, min: -30, max: 30, defaultValue: 0 };
+    case "ParamBreath":
+      return { id, min: 0, max: 1, defaultValue: 0 };
+    case "ParamEyeLOpen":
+    case "ParamEyeROpen":
+      return { id, min: 0, max: 1, defaultValue: 1 };
+    case "ParamMouthOpenY":
+      return { id, min: 0, max: 2.1, defaultValue: 0 };
+    case "ParamMouthForm":
+      return { id, min: -1, max: 1, defaultValue: 0 };
+    default:
+      return { id, min: -Infinity, max: Infinity, defaultValue: 0 };
+  }
+}
+
+function clampParameter(value: number, min: number, max: number): number {
+  const safe = Number.isFinite(value) ? value : min;
+  return Math.min(max, Math.max(min, safe));
 }
