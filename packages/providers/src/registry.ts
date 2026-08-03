@@ -23,6 +23,7 @@ import { DeepSeekReasoningProvider } from "./deepseek/DeepSeekReasoningProvider.
 import { XAITTSProvider } from "./xai/XAITTSProvider.js";
 import { XAIVisionProvider } from "./xai/XAIVisionProvider.js";
 import { DashScopeSTTProvider } from "./alibaba/DashScopeSTTProvider.js";
+import { streamOpenAICompatibleChatCompletion } from "./openai-compatible-stream.js";
 
 export type ProviderRegistryConfig = {
   environment: "development" | "test" | "production";
@@ -1613,6 +1614,7 @@ type OpenAICompatibleTextOptions = {
 
 class OpenAICompatibleChatProvider implements ChatProvider {
   readonly name: string;
+  readonly streamingMode = "native" as const;
 
   constructor(private readonly options: OpenAICompatibleTextOptions) {
     this.name = options.provider;
@@ -1650,6 +1652,10 @@ class OpenAICompatibleChatProvider implements ChatProvider {
       tokenUsage: completion.tokenUsage,
       debug: completion.rawResponse ? { rawResponse: completion.rawResponse } : undefined
     };
+  }
+
+  streamReply(input: ChatInput, options: ChatStreamOptions = {}) {
+    return streamOpenAICompatibleChatCompletion(this.options, "chat", input, options);
   }
 }
 

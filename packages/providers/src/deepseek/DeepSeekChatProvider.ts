@@ -3,11 +3,13 @@ import type { ProviderHealth } from "../types/common.js";
 import {
   createDeepSeekChatCompletion,
   healthCheckDeepSeek,
+  streamDeepSeekChatCompletion,
   type DeepSeekProviderOptions
 } from "./common.js";
 
 export class DeepSeekChatProvider implements ChatProvider {
   readonly name = "deepseek";
+  readonly streamingMode = "native" as const;
 
   constructor(private readonly options: DeepSeekProviderOptions) {}
 
@@ -36,5 +38,9 @@ export class DeepSeekChatProvider implements ChatProvider {
       tokenUsage: completion.tokenUsage,
       debug: completion.rawResponse ? { rawResponse: completion.rawResponse } : undefined
     };
+  }
+
+  streamReply(input: ChatInput, options = {}) {
+    return streamDeepSeekChatCompletion(this.name, this.options, input, options);
   }
 }

@@ -4,7 +4,12 @@ import type {
   TextMessage,
   TokenUsage
 } from "../types/common.js";
+import type { ChatInput, ChatStreamEvent, ChatStreamOptions } from "../types/chat.js";
 import { ProviderError, ProviderErrorCode } from "../types/errors.js";
+import {
+  streamOpenAICompatibleChatCompletion,
+  type OpenAICompatibleStreamOptions
+} from "../openai-compatible-stream.js";
 
 export type DeepSeekProviderOptions = {
   apiKey: string | undefined;
@@ -146,6 +151,41 @@ export async function createDeepSeekChatCompletion(
     rawResponse: options.includeRawResponse ? rawResponse : undefined,
     latencyMs: Math.round(performance.now() - start)
   };
+}
+
+export function streamDeepSeekChatCompletion(
+  provider: string,
+  options: DeepSeekProviderOptions,
+  input: ChatInput,
+  streamOptions?: ChatStreamOptions
+): AsyncIterable<ChatStreamEvent> {
+  const streamOptionsForClient: OpenAICompatibleStreamOptions = {
+    provider,
+    apiKey: options.apiKey,
+    baseUrl: options.baseUrl,
+    model: input.model ?? options.model ?? "",
+    includeRawResponse: options.includeRawResponse,
+    timeoutMs: options.timeoutMs
+  };
+  if (!streamOptionsForClient.model) {
+    throw new ProviderError({
+      provider,
+      capability: "chat",
+      code: ProviderErrorCode.ModelNotFound,
+      message: `${provider} chat model is not configured.`,
+      retryable: false
+    });
+  }
+  if (!options.apiKey) {
+    throw new ProviderError({
+      provider,
+      capability: "chat",
+      code: ProviderErrorCode.MissingApiKey,
+      message: "DEEPSEEK_API_KEY is required.",
+      retryable: false
+    });
+  }
+  return streamOpenAICompatibleChatCompletion(streamOptionsForClient, "chat", input, streamOptions);
 }
 
 function ensureDeepSeekConfig(
