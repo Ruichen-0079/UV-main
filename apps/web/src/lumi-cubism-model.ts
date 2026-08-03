@@ -1,8 +1,20 @@
 import { type CubismFrameworkRuntime, loadCubismFramework } from "./cubism-framework.js";
+import {
+  buildFramingDiagnostics,
+  computeLumiFramingTransform,
+  LUMI_FULL_BODY_FIT,
+  LUMI_PORTRAIT_HEAD_BOUNDS,
+  LUMI_PORTRAIT_MARGINS,
+  sameFitKey,
+  type LumiFitCacheKey,
+  type LumiFramingDiagnostics,
+  type LumiFramingMode,
+  type LumiUniformTransform
+} from "./lumi-framing.js";
 
 const shaderDirectory = "/cubism-shaders/";
 
-export type LumiFraming = "half" | "full";
+export type LumiFraming = LumiFramingMode;
 
 export const LUMI_DEVICE_PIXEL_RATIO_CAP = 2;
 
@@ -11,7 +23,13 @@ export function getLumiRenderMetrics(
   cssWidth: number,
   cssHeight: number,
   devicePixelRatio = typeof window === "undefined" ? 1 : window.devicePixelRatio
-): { cssWidth: number; cssHeight: number; devicePixelRatio: number; pixelWidth: number; pixelHeight: number } {
+): {
+  cssWidth: number;
+  cssHeight: number;
+  devicePixelRatio: number;
+  pixelWidth: number;
+  pixelHeight: number;
+} {
   const safeWidth = Math.max(1, Math.round(cssWidth));
   const safeHeight = Math.max(1, Math.round(cssHeight));
   const ratio = Math.min(
@@ -27,8 +45,12 @@ export function getLumiRenderMetrics(
   };
 }
 
+/**
+ * Legacy zoom helper used by older tests. Portrait no longer uses a fixed
+ * zoom — head-safe fit computes a uniform pixel scale instead.
+ */
 export function getLumiFramingZoom(framing: LumiFraming): number {
-  return framing === "half" ? 3.35 : 0.92;
+  return framing === "half" ? 3.35 : LUMI_FULL_BODY_FIT;
 }
 
 type CubismModel = {
@@ -65,11 +87,38 @@ type UserModel = {
 export type LumiCubismModel = {
   readonly parameterIds: ReadonlySet<string>;
   setParameter(id: string, value: number): void;
+  /** Development/diagnostics: last value staged for the next Core update. */
+  getPendingParameter(id: string): number | undefined;
   setFraming(framing: LumiFraming): void;
+  getFraming(): LumiFraming;
   resize(width: number, height: number): void;
   render(deltaSeconds: number): void;
   dispose(): void;
+  /** Last computed framing transform (null before first render). */
+  getFramingTransform(): LumiUniformTransform | null;
+  /** Development-only projection diagnostics. */
+  getFramingDiagnostics(): LumiFramingDiagnostics | null;
 };
+
+/**
+ * Apply YUVI-owned parameters, then run Cubism Core update so the same-frame
+ * draw uses those values. Core `update()` bakes current parameter values into
+ * drawable vertices; writing after update leaves the mesh on the previous
+ * values and the next `loadParameters()` wipes the pending override.
+ */
+export function applyYuviParametersThenUpdate(
+  coreModel: Pick<CubismModel, "update" | "setParameterValueById">,
+  getId: (id: string) => unknown,
+  pending: ReadonlyMap<string, number>
+): void {
+  for (const [id, value] of pending) {
+    coreModel.setParameterValueById(getId(id), value);
+  }
+  coreModel.update();
+}
+
+/** @deprecated Use applyYuviParametersThenUpdate. Kept name only for migration. */
+export const updateAndApplyFinalCubismParameters = applyYuviParametersThenUpdate;
 
 /**
  * Minimal, official-Framework model host.  It intentionally has no motion or
@@ -125,82 +174,181 @@ export async function loadLumiCubismModel(
     "ParamEyeROpen"
   ];
   const parameterIds = new Set(
-    ids.filter((id) => model.getModel().getParameterIndex(runtime.CubismFramework.getIdManager().getId(id)) >= 0)
+    ids.filter(
+      (id) =>
+        model.getModel().getParameterIndex(runtime.CubismFramework.getIdManager().getId(id)) >= 0
+    )
   );
   const pending = new Map<string, number>();
-  let width = Math.max(1, canvas.clientWidth || canvas.width || 320);
-  let height = Math.max(1, canvas.clientHeight || canvas.height || 420);
+  // CSS viewport for model matrix; pixel size for the GL backing store only.
+  let cssWidth = Math.max(1, canvas.clientWidth || 320);
+  let cssHeight = Math.max(1, canvas.clientHeight || 420);
+  let pixelWidth = Math.max(1, canvas.width || cssWidth);
+  let pixelHeight = Math.max(1, canvas.height || cssHeight);
+  let devicePixelRatio = 1;
+  // Default portrait (half). Full-body only after an explicit user toggle.
   let framing: LumiFraming = "half";
   let disposed = false;
+  let fitCacheKey: LumiFitCacheKey | null = null;
+  let cachedMatrix: unknown = null;
+  let cachedTransform: LumiUniformTransform | null = null;
+  let cachedDiagnostics: LumiFramingDiagnostics | null = null;
 
   const resize = (nextWidth: number, nextHeight: number) => {
     if (disposed || nextWidth <= 0 || nextHeight <= 0) return;
     const metrics = getLumiRenderMetrics(nextWidth, nextHeight);
-    width = metrics.pixelWidth;
-    height = metrics.pixelHeight;
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
+    cssWidth = metrics.cssWidth;
+    cssHeight = metrics.cssHeight;
+    pixelWidth = metrics.pixelWidth;
+    pixelHeight = metrics.pixelHeight;
+    devicePixelRatio = metrics.devicePixelRatio;
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
     }
+    // Invalidate matrix cache so the next render recomputes head-safe fit.
+    fitCacheKey = null;
+    cachedMatrix = null;
+    cachedTransform = null;
+    cachedDiagnostics = null;
   };
-  resize(width, height);
+  resize(cssWidth, cssHeight);
 
   return {
     parameterIds,
     setParameter(id, value) {
       if (!disposed && parameterIds.has(id)) pending.set(id, value);
     },
+    getPendingParameter(id) {
+      return pending.get(id);
+    },
     setFraming(nextFraming) {
-      if (!disposed) framing = nextFraming;
+      if (disposed || framing === nextFraming) return;
+      framing = nextFraming;
+      fitCacheKey = null;
+      cachedMatrix = null;
+      cachedTransform = null;
+      cachedDiagnostics = null;
+    },
+    getFraming() {
+      return framing;
     },
     resize,
+    getFramingTransform() {
+      return cachedTransform;
+    },
+    getFramingDiagnostics() {
+      return cachedDiagnostics;
+    },
     render(deltaSeconds) {
       if (disposed) return;
       const coreModel = model.getModel();
-      // Restore the baseline, apply physics, then reapply YUVI's final mouth
-      // values so neither physics nor a future motion can overwrite speech.
+      // Official Cubism order: restore baseline → physics → YUVI overrides →
+      // Core update (bake mesh) → draw.
       coreModel.loadParameters();
       model._physics?.evaluate(coreModel, Math.min(0.1, Math.max(0, deltaSeconds)));
-      for (const [id, value] of pending) {
-        coreModel.setParameterValueById(runtime.CubismFramework.getIdManager().getId(id), value);
+      applyYuviParametersThenUpdate(
+        coreModel,
+        (id) => runtime.CubismFramework.getIdManager().getId(id),
+        pending
+      );
+      const modelWidth = Math.max(0.001, coreModel.getCanvasWidth());
+      const modelHeight = Math.max(0.001, coreModel.getCanvasHeight());
+      const key: LumiFitCacheKey = {
+        framing,
+        cssWidth,
+        cssHeight,
+        modelWidth,
+        modelHeight
+      };
+      if (!sameFitKey(fitCacheKey, key) || cachedMatrix === null || cachedTransform === null) {
+        const transform = computeLumiFramingTransform(
+          framing,
+          cssWidth,
+          cssHeight,
+          modelWidth,
+          modelHeight
+        );
+        cachedMatrix = createFitMatrixFromTransform(runtime, transform);
+        cachedTransform = transform;
+        fitCacheKey = key;
+        cachedDiagnostics = buildFramingDiagnostics(transform, {
+          backingWidth: pixelWidth,
+          backingHeight: pixelHeight,
+          devicePixelRatio,
+          headBounds: LUMI_PORTRAIT_HEAD_BOUNDS,
+          margins: LUMI_PORTRAIT_MARGINS
+        });
+        if (import.meta.env.DEV && typeof window !== "undefined") {
+          const debugWindow = window as typeof window & {
+            __yuviFramingDiagnostics?: LumiFramingDiagnostics;
+          };
+          debugWindow.__yuviFramingDiagnostics = cachedDiagnostics;
+        }
       }
-      coreModel.update();
-      const matrix = createFitMatrix(runtime, coreModel, width, height, framing);
-      gl.viewport(0, 0, width, height);
+      // DPR only for the backing store / gl.viewport — never re-multiplied into
+      // the model matrix (matrix uses CSS viewport dimensions above).
+      gl.viewport(0, 0, pixelWidth, pixelHeight);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
-      renderer.setRenderState(null, [0, 0, width, height]);
-      renderer.setMvpMatrix(matrix);
+      renderer.setRenderState(null, [0, 0, pixelWidth, pixelHeight]);
+      renderer.setMvpMatrix(cachedMatrix);
       renderer.drawModel(shaderDirectory);
     },
     dispose() {
       if (disposed) return;
       disposed = true;
       pending.clear();
+      fitCacheKey = null;
+      cachedMatrix = null;
+      cachedTransform = null;
+      cachedDiagnostics = null;
       for (const texture of textures) gl.deleteTexture(texture);
       model.release();
     }
   };
 }
 
-function createFitMatrix(
+/**
+ * Build a Cubism MVP matrix from a uniform transform.
+ *
+ * CubismMatrix44.scale(x,y) **assigns** the diagonal (it does not multiply).
+ * CubismMatrix44.translate(x,y) **assigns** the translation. Therefore the
+ * final matrix must be written in a single assign of scale then translate —
+ * never "aspect scale" followed by a second scale() that would wipe it.
+ *
+ * Resulting map: ndc = model * ndcScale + translate
+ */
+export function createFitMatrixFromTransform(
   runtime: CubismFrameworkRuntime,
-  model: CubismModel,
-  width: number,
-  height: number,
-  framing: LumiFraming
+  transform: LumiUniformTransform
 ): unknown {
   const matrix = new runtime.CubismMatrix44();
-  const modelWidth = Math.max(0.001, model.getCanvasWidth());
-  const modelHeight = Math.max(0.001, model.getCanvasHeight());
-  const canvasAspect = width / height;
-  const modelAspect = modelWidth / modelHeight;
-  if (canvasAspect > modelAspect) matrix.scale(1 / canvasAspect, 1);
-  else matrix.scale(1, canvasAspect);
-  const zoom = getLumiFramingZoom(framing);
-  matrix.scale(zoom / modelWidth * modelHeight, zoom);
-  matrix.translate(0, framing === "half" ? -1.25 : -0.08);
+  matrix.scale(transform.ndcScaleX, transform.ndcScaleY);
+  matrix.translate(transform.translateX, transform.translateY);
   return matrix;
+}
+
+/**
+ * @deprecated Prefer createFitMatrixFromTransform with computeLumiFramingTransform.
+ * Kept so existing imports keep working.
+ */
+export function createFitMatrix(
+  runtime: CubismFrameworkRuntime,
+  modelWidth: number,
+  modelHeight: number,
+  cssWidth: number,
+  cssHeight: number,
+  framing: LumiFraming
+): unknown {
+  const transform = computeLumiFramingTransform(
+    framing,
+    cssWidth,
+    cssHeight,
+    modelWidth,
+    modelHeight
+  );
+  return createFitMatrixFromTransform(runtime, transform);
 }
 
 function resolveResource(modelUrl: URL, name: string): URL {

@@ -6,8 +6,15 @@ import {
   type PresenceState
 } from "./lumi-live2d.js";
 import type { LumiFraming } from "./lumi-cubism-model.js";
+import type { LumiFramingDiagnostics } from "./lumi-framing.js";
 
 const defaultModelUrl = "/api/live2d/Lumi/Lumi.model3.json";
+
+function isHeadBoundsOverlayEnabled(): boolean {
+  if (!import.meta.env.DEV || typeof window === "undefined") return false;
+  const flag = (window as typeof window & { __yuviShowHeadBounds?: boolean }).__yuviShowHeadBounds;
+  return flag === true;
+}
 
 export const LumiCanvas = forwardRef(function LumiCanvas(
   props: {
@@ -22,7 +29,9 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   const containerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<LumiController | null>(null);
   const [state, setState] = useState<PresenceState>("unavailable");
+  // Default portrait (half). Full-body only after an explicit user toggle.
   const [framing, setFraming] = useState<LumiFraming>("half");
+  const [overlay, setOverlay] = useState<LumiFramingDiagnostics | null>(null);
 
   useImperativeHandle(ref, () => {
     return {
@@ -32,11 +41,19 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       runMouthCalibration: () => controllerRef.current?.runMouthCalibration() ?? Promise.resolve(),
       setFraming: (next) => controllerRef.current?.setFraming(next),
       setPresence: (next) => controllerRef.current?.setPresence(next),
+      setPresenceAnimation: (blink, breath) =>
+        controllerRef.current?.setPresenceAnimation(blink, breath),
       resumeAudio: () => controllerRef.current?.resumeAudio(),
       handlePlaybackEvent: (event) => controllerRef.current?.handlePlaybackEvent(event),
       resize: (width, height) => controllerRef.current?.resize(width, height),
       dispose: () => controllerRef.current?.dispose(),
-      getPresence: () => controllerRef.current?.getPresence() ?? "unavailable"
+      getPresence: () => controllerRef.current?.getPresence() ?? "unavailable",
+      getFramingDiagnostics: () => controllerRef.current?.getFramingDiagnostics() ?? null,
+      getDebugInfo: () =>
+        controllerRef.current?.getDebugInfo() ?? {
+          instanceId: 0,
+          generation: 0
+        }
     };
   }, []);
 
@@ -57,11 +74,30 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
     const resize = () => controller.resize(container.clientWidth, container.clientHeight);
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
     observer?.observe(container);
+    // DPR / zoom changes do not always fire ResizeObserver; listen as well.
+    window.addEventListener("resize", resize);
     resize();
     void controller.load();
+
+    let overlayFrame = 0;
+    const tickOverlay = () => {
+      if (disposed) return;
+      if (isHeadBoundsOverlayEnabled()) {
+        setOverlay(controller.getFramingDiagnostics());
+      } else {
+        setOverlay((current) => (current === null ? current : null));
+      }
+      overlayFrame = requestAnimationFrame(tickOverlay);
+    };
+    if (import.meta.env.DEV) {
+      overlayFrame = requestAnimationFrame(tickOverlay);
+    }
+
     return () => {
       disposed = true;
       observer?.disconnect();
+      window.removeEventListener("resize", resize);
+      if (overlayFrame) cancelAnimationFrame(overlayFrame);
       controller.dispose();
       controllerRef.current = null;
     };
@@ -83,7 +119,63 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       data-presence={state}
       data-framing={framing}
     >
-      <canvas ref={canvasRef} className="h-full w-full" aria-hidden="true" />
+      {/*
+        display:block avoids the inline-canvas baseline gap. No CSS transform /
+        aspect-ratio so the WebGL buffer is never stretched by the browser.
+      */}
+      <canvas
+        ref={canvasRef}
+        className="block h-full w-full"
+        style={{ display: "block", width: "100%", height: "100%" }}
+        aria-hidden="true"
+      />
+      {overlay && (
+        <div className="pointer-events-none absolute inset-0 z-10" aria-hidden="true">
+          {/* Viewport safe margins */}
+          <div
+            className="absolute border border-cyan-400/70"
+            style={{
+              left: overlay.safeViewportPx.left,
+              top: overlay.safeViewportPx.top,
+              width: Math.max(
+                0,
+                overlay.safeViewportPx.right - overlay.safeViewportPx.left
+              ),
+              height: Math.max(
+                0,
+                overlay.safeViewportPx.bottom - overlay.safeViewportPx.top
+              )
+            }}
+          />
+          {/* Projected head bounds */}
+          <div
+            className="absolute border-2 border-amber-400/90"
+            style={{
+              left: overlay.headProjectionPx.left,
+              top: overlay.headProjectionPx.top,
+              width: Math.max(
+                0,
+                overlay.headProjectionPx.right - overlay.headProjectionPx.left
+              ),
+              height: Math.max(
+                0,
+                overlay.headProjectionPx.bottom - overlay.headProjectionPx.top
+              )
+            }}
+          />
+          <div className="absolute left-2 top-8 max-w-[90%] rounded bg-black/60 px-2 py-1 text-[10px] leading-snug text-white">
+            framing={overlay.framing} css={overlay.cssWidth}×{overlay.cssHeight} dpr=
+            {overlay.devicePixelRatio.toFixed(2)}
+            <br />
+            uniformScale={overlay.uniformScale.toFixed(2)} px/unit x=
+            {overlay.pixelsPerUnitX.toFixed(2)} y={overlay.pixelsPerUnitY.toFixed(2)}
+            <br />
+            head px L{overlay.headProjectionPx.left.toFixed(0)} R
+            {overlay.headProjectionPx.right.toFixed(0)} T{overlay.headProjectionPx.top.toFixed(0)} B
+            {overlay.headProjectionPx.bottom.toFixed(0)}
+          </div>
+        </div>
+      )}
       <div
         className="pointer-events-none absolute bottom-2 left-2 rounded bg-ink-900/70 px-2 py-1 text-xs text-white"
         aria-live="polite"
@@ -106,6 +198,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
           aria-pressed={framing === "full"}
           onClick={() => setFraming((current) => (current === "half" ? "full" : "half"))}
         >
+          {/* Label is the action target, not the current mode. */}
           {framing === "half" ? "显示全身" : "显示半身"}
         </button>
       )}
