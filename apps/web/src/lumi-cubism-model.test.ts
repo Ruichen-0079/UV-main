@@ -10,17 +10,26 @@ import {
 
 describe("Lumi render sizing", () => {
   it("keeps CSS dimensions while using a capped high-resolution backing store", () => {
-    expect(getLumiRenderMetrics(281, 420, 1.5)).toEqual({
+    // Explicit renderScale=1 matches the historical pixel math (CSS * DPR).
+    expect(getLumiRenderMetrics(281, 420, 1.5, 1)).toEqual({
       cssWidth: 281,
       cssHeight: 420,
       devicePixelRatio: 1.5,
+      renderScale: 1,
       pixelWidth: 422,
       pixelHeight: 630
     });
   });
 
+  it("applies balanced canvasRenderScale on top of capped DPR by default", () => {
+    const metrics = getLumiRenderMetrics(320, 480, 1);
+    expect(metrics.renderScale).toBe(1.25);
+    expect(metrics.pixelWidth).toBe(Math.round(320 * 1 * 1.25));
+    expect(metrics.pixelHeight).toBe(Math.round(480 * 1 * 1.25));
+  });
+
   it("caps very dense displays at the configured DPR limit", () => {
-    const metrics = getLumiRenderMetrics(320, 480, 4);
+    const metrics = getLumiRenderMetrics(320, 480, 4, 1);
     expect(metrics.devicePixelRatio).toBe(LUMI_DEVICE_PIXEL_RATIO_CAP);
     expect(metrics.pixelWidth).toBe(640);
     expect(metrics.pixelHeight).toBe(960);

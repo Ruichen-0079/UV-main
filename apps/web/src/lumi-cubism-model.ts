@@ -11,39 +11,41 @@ import {
   type LumiFramingMode,
   type LumiUniformTransform
 } from "./lumi-framing.js";
+import {
+  clampMaskFeatherTexels,
+  createLumiWebgl2Context,
+  getLive2dRenderQuality,
+  getLumiRenderMetrics,
+  LIVE2D_RENDER_QUALITY_SAFE,
+  LUMI_DEVICE_PIXEL_RATIO_CAP,
+  readFirstGlError,
+  readWebglContextAttributes,
+  resolveLive2dRenderQualityProfile,
+  resolveMaskBufferSize,
+  resolveMsaaSamples,
+  type Live2dRenderQualityConfig,
+  type Live2dRenderQualityDiagnostics
+} from "./lumi-render-quality.js";
+
+export {
+  getLumiRenderMetrics,
+  LUMI_DEVICE_PIXEL_RATIO_CAP,
+  LIVE2D_RENDER_QUALITY,
+  LIVE2D_RENDER_QUALITY_PROFILES,
+  LIVE2D_RENDER_QUALITY_SAFE,
+  LIVE2D_WEBGL_CONTEXT_ATTRIBUTES,
+  getLive2dRenderQuality,
+  resolveMaskBufferSize,
+  resolveMsaaSamples,
+  clampMaskFeatherTexels,
+  readWebglContextAttributes,
+  createLumiWebgl2Context,
+  readFirstGlError
+} from "./lumi-render-quality.js";
 
 const shaderDirectory = "/cubism-shaders/";
 
 export type LumiFraming = LumiFramingMode;
-
-export const LUMI_DEVICE_PIXEL_RATIO_CAP = 2;
-
-/** Convert CSS pixels to a capped canvas backing-store size. */
-export function getLumiRenderMetrics(
-  cssWidth: number,
-  cssHeight: number,
-  devicePixelRatio = typeof window === "undefined" ? 1 : window.devicePixelRatio
-): {
-  cssWidth: number;
-  cssHeight: number;
-  devicePixelRatio: number;
-  pixelWidth: number;
-  pixelHeight: number;
-} {
-  const safeWidth = Math.max(1, Math.round(cssWidth));
-  const safeHeight = Math.max(1, Math.round(cssHeight));
-  const ratio = Math.min(
-    LUMI_DEVICE_PIXEL_RATIO_CAP,
-    Math.max(1, Number.isFinite(devicePixelRatio) ? devicePixelRatio : 1)
-  );
-  return {
-    cssWidth: safeWidth,
-    cssHeight: safeHeight,
-    devicePixelRatio: ratio,
-    pixelWidth: Math.max(1, Math.round(safeWidth * ratio)),
-    pixelHeight: Math.max(1, Math.round(safeHeight * ratio))
-  };
-}
 
 /**
  * Legacy zoom helper used by older tests. Portrait no longer uses a fixed
@@ -77,6 +79,9 @@ type CubismRenderer = {
   setMvpMatrix(matrix: unknown): void;
   drawModel(shaderPath: string): void;
   release(): void;
+  /** Official Cubism API: square clipping-mask buffer edge length in texels. */
+  setClippingMaskBufferSize?(size: number): void;
+  getClippingMaskBufferSize?(): number;
 };
 
 type UserModel = {
@@ -109,6 +114,8 @@ export type LumiCubismModel = {
   getFramingTransform(): LumiUniformTransform | null;
   /** Development-only projection diagnostics. */
   getFramingDiagnostics(): LumiFramingDiagnostics | null;
+  /** Live2D WebGL quality diagnostics (AA / mask supersampling). */
+  getRenderQualityDiagnostics(): Live2dRenderQualityDiagnostics;
 };
 
 export type LumiParameterInfo = {
@@ -187,12 +194,33 @@ export async function loadLumiCubismModel(
   signal?: AbortSignal
 ): Promise<LumiCubismModel> {
   const runtime = await loadCubismFramework();
-  const gl = canvas.getContext("webgl2", {
-    alpha: true,
-    antialias: true,
-    premultipliedAlpha: true
-  });
-  if (!gl) throw new Error("WebGL2 is unavailable.");
+  const qualityProfile = resolveLive2dRenderQualityProfile();
+  const requestedQuality = getLive2dRenderQuality(qualityProfile);
+  // Applied quality may fall back to SAFE (1/1) if mask or scale init fails.
+  let quality: Live2dRenderQualityConfig = { ...requestedQuality };
+  let qualityFallbackApplied = false;
+  let qualityFallbackReason: string | null = null;
+  let contextCreationError: string | null = null;
+  let firstGlError: string | null = null;
+
+  // Prefer WebGL2 with progressive attribute fallback. Do not assume antialias
+  // stayed true — WebView2 may report false; canvasRenderScale then supersamples.
+  const { gl, creationError } = createLumiWebgl2Context(canvas);
+  contextCreationError = creationError;
+  if (!gl) {
+    throw new Error(
+      `WebGL2 is unavailable${creationError ? ` (${creationError})` : ""}.`
+    );
+  }
+
+  const contextInfo = readWebglContextAttributes(gl);
+  const maxTextureSize = contextInfo.maxTextureSize ?? 4096;
+  // Official Cubism mask path has no MSAA FBO API; main-canvas MSAA is browser-driven.
+  const maskMsaaSamples = resolveMsaaSamples(
+    quality.preferredMsaaSamples,
+    contextInfo.maxSamples
+  );
+  const maskMsaaActive = false;
 
   const modelUrl = new URL(source, window.location.href);
   const modelBuffer = await fetchBuffer(modelUrl, signal);
@@ -210,8 +238,64 @@ export async function loadLumiCubismModel(
 
   model.createRenderer(canvas.width || 1, canvas.height || 1);
   const renderer = model.getRenderer();
+
+  /**
+   * CRITICAL: setClippingMaskBufferSize must run **before** startUp.
+   *
+   * Official Cubism recreates `_drawableClippingManager` without calling
+   * setGL(gl). If size is changed after startUp, setupClippingContext does
+   * `this.gl.viewport(...)` with gl === undefined and the whole draw aborts
+   * (model fully invisible). startUp is the only place that setGL + creates
+   * mask FBOs at the manager's current size.
+   */
+  let appliedMaskBufferSize = quality.baseMaskBufferSize;
+  const desiredMaskSize = resolveMaskBufferSize(
+    quality.baseMaskBufferSize,
+    quality.maskScale,
+    maxTextureSize
+  );
+  if (
+    quality.maskScale > 1 &&
+    desiredMaskSize !== quality.baseMaskBufferSize &&
+    typeof renderer.setClippingMaskBufferSize === "function"
+  ) {
+    try {
+      renderer.setClippingMaskBufferSize(desiredMaskSize);
+      appliedMaskBufferSize = desiredMaskSize;
+    } catch (error) {
+      quality = { ...LIVE2D_RENDER_QUALITY_SAFE };
+      qualityFallbackApplied = true;
+      qualityFallbackReason = `setClippingMaskBufferSize failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+      appliedMaskBufferSize = LIVE2D_RENDER_QUALITY_SAFE.baseMaskBufferSize;
+      try {
+        renderer.setClippingMaskBufferSize(appliedMaskBufferSize);
+      } catch {
+        /* keep default manager from createRenderer */
+      }
+      if (import.meta.env.DEV) {
+        console.warn("[YUVI Live2D] mask supersampling disabled:", qualityFallbackReason);
+      }
+    }
+  }
+
   renderer.startUp(gl);
   renderer.setIsPremultipliedAlpha(true);
+
+  // Capture first GL error after startup (mask FBO creation happens in startUp).
+  firstGlError = readFirstGlError(gl) ?? firstGlError;
+  if (firstGlError && !qualityFallbackApplied && quality.maskScale > 1) {
+    // Mask FBO may have failed at larger size — drop to safe quality for visibility.
+    quality = { ...LIVE2D_RENDER_QUALITY_SAFE };
+    qualityFallbackApplied = true;
+    qualityFallbackReason = `GL error after startUp: ${firstGlError}`;
+    appliedMaskBufferSize = LIVE2D_RENDER_QUALITY_SAFE.baseMaskBufferSize;
+    if (import.meta.env.DEV) {
+      console.warn("[YUVI Live2D] falling back to safe quality:", qualityFallbackReason);
+    }
+  }
+
   const textures = await Promise.all(
     Array.from({ length: setting.getTextureCount() }, async (_, index) => {
       const name = setting.getTextureFileName(index);
@@ -221,6 +305,7 @@ export async function loadLumiCubismModel(
   );
   textures.forEach((texture, index) => renderer.bindTexture(index, texture));
   renderer.loadShaders(shaderDirectory);
+  firstGlError = firstGlError ?? readFirstGlError(gl);
 
   const ids = [
     "ParamMouthOpenY",
@@ -257,11 +342,15 @@ export async function loadLumiCubismModel(
   const parameterIds = new Set(parameterInfo.keys());
   const pending = new Map<string, number>();
   // CSS viewport for model matrix; pixel size for the GL backing store only.
+  // renderScale enlarges the backing store — never multiplies into the MVP.
   let cssWidth = Math.max(1, canvas.clientWidth || 320);
   let cssHeight = Math.max(1, canvas.clientHeight || 420);
   let pixelWidth = Math.max(1, canvas.width || cssWidth);
   let pixelHeight = Math.max(1, canvas.height || cssHeight);
   let devicePixelRatio = 1;
+  let renderScale = quality.canvasRenderScale;
+  let lastFrameMs: number | null = null;
+  let avgFrameMs: number | null = null;
   // Default portrait (half). Full-body only after an explicit user toggle.
   let framing: LumiFraming = "half";
   let disposed = false;
@@ -270,6 +359,46 @@ export async function loadLumiCubismModel(
   let cachedTransform: LumiUniformTransform | null = null;
   let cachedDiagnostics: LumiFramingDiagnostics | null = null;
   let lastPreUpdateParameters: Record<string, number> = {};
+
+  const buildQualityDiagnostics = (): Live2dRenderQualityDiagnostics => {
+    const attrs = readWebglContextAttributes(gl);
+    const reportedMask =
+      typeof renderer.getClippingMaskBufferSize === "function"
+        ? renderer.getClippingMaskBufferSize()
+        : appliedMaskBufferSize;
+    return {
+      profile: qualityProfile,
+      canvasRenderScale: renderScale,
+      maskScale: quality.maskScale,
+      qualityFallbackApplied,
+      qualityFallbackReason,
+      maskBufferSize:
+        Number.isFinite(reportedMask) && (reportedMask as number) > 0
+          ? (reportedMask as number)
+          : appliedMaskBufferSize,
+      baseMaskBufferSize: quality.baseMaskBufferSize,
+      preferredMsaaSamples: quality.preferredMsaaSamples,
+      maskMsaaSamples,
+      maskMsaaActive,
+      maskFeatherTexels: clampMaskFeatherTexels(quality.maskFeatherTexels),
+      devicePixelRatio,
+      cssWidth,
+      cssHeight,
+      backingWidth: pixelWidth,
+      backingHeight: pixelHeight,
+      contextAntialias: attrs.antialias,
+      contextAlpha: attrs.alpha,
+      contextPremultipliedAlpha: attrs.premultipliedAlpha,
+      contextPreserveDrawingBuffer: attrs.preserveDrawingBuffer,
+      webglVersion: attrs.webglVersion,
+      maxTextureSize: attrs.maxTextureSize,
+      maxSamples: attrs.maxSamples,
+      firstGlError,
+      contextCreationError,
+      avgFrameMs,
+      lastFrameMs
+    };
+  };
 
   const getId = (id: string) => runtime.CubismFramework.getIdManager().getId(id);
 
@@ -289,12 +418,21 @@ export async function loadLumiCubismModel(
 
   const resize = (nextWidth: number, nextHeight: number) => {
     if (disposed || nextWidth <= 0 || nextHeight <= 0) return;
-    const metrics = getLumiRenderMetrics(nextWidth, nextHeight);
+    // Use *applied* quality.canvasRenderScale (may be SAFE after fallback).
+    // Never call setClippingMaskBufferSize here — post-startUp size changes
+    // drop the GL handle on the clipping manager (see init comment above).
+    const metrics = getLumiRenderMetrics(
+      nextWidth,
+      nextHeight,
+      typeof window === "undefined" ? devicePixelRatio : window.devicePixelRatio,
+      quality.canvasRenderScale
+    );
     cssWidth = metrics.cssWidth;
     cssHeight = metrics.cssHeight;
     pixelWidth = metrics.pixelWidth;
     pixelHeight = metrics.pixelHeight;
     devicePixelRatio = metrics.devicePixelRatio;
+    renderScale = metrics.renderScale;
     if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
       canvas.width = pixelWidth;
       canvas.height = pixelHeight;
@@ -346,92 +484,134 @@ export async function loadLumiCubismModel(
     getFramingDiagnostics() {
       return cachedDiagnostics;
     },
+    getRenderQualityDiagnostics() {
+      return buildQualityDiagnostics();
+    },
     render(deltaSeconds) {
       if (disposed) return;
-      const liveCore = model.getModel();
-      // Gaze/head (ParamEyeBall*, ParamAngle*) are physics inputs on Lumi.
-      // Write pending before physics so secondary channels (e.g.
-      // ParamEyeBallPhysicsX) receive this frame's target, then re-apply
-      // pending after physics as final authority before update().
-      const delta = Math.min(0.1, Math.max(0, deltaSeconds));
-      liveCore.loadParameters();
-      applyYuviParameters(liveCore, getId, pending);
-      model._physics?.evaluate(liveCore, delta);
-      applyYuviParameters(liveCore, getId, pending);
-      // Snapshot Core values immediately before update() bakes the mesh.
-      const diagnosticIds = [
-        ...parameterIds,
-        "ParamEyeBallPhysicsX",
-        "ParamEyeBallPhysicsY"
-      ];
-      lastPreUpdateParameters = {};
-      for (const id of diagnosticIds) {
-        const value = readCoreParameterValue(id);
-        if (value !== undefined) lastPreUpdateParameters[id] = value;
-      }
-      if (import.meta.env.DEV && typeof window !== "undefined") {
-        const debugWindow = window as typeof window & {
-          __yuviCubismParameterFrame?: Record<string, unknown>;
-        };
-        debugWindow.__yuviCubismParameterFrame = {
-          pending: Object.fromEntries(pending.entries()),
-          preUpdate: { ...lastPreUpdateParameters },
-          coreEyeBallX: lastPreUpdateParameters["ParamEyeBallX"] ?? null,
-          coreEyeBallY: lastPreUpdateParameters["ParamEyeBallY"] ?? null,
-          coreAngleX: lastPreUpdateParameters["ParamAngleX"] ?? null,
-          coreAngleY: lastPreUpdateParameters["ParamAngleY"] ?? null,
-          coreAngleZ: lastPreUpdateParameters["ParamAngleZ"] ?? null,
-          coreBodyAngleX: lastPreUpdateParameters["ParamBodyAngleX"] ?? null,
-          coreBodyAngleY: lastPreUpdateParameters["ParamBodyAngleY"] ?? null,
-          coreBodyAngleZ: lastPreUpdateParameters["ParamBodyAngleZ"] ?? null,
-          coreEyeBallPhysicsX: lastPreUpdateParameters["ParamEyeBallPhysicsX"] ?? null,
-          coreEyeBallPhysicsY: lastPreUpdateParameters["ParamEyeBallPhysicsY"] ?? null,
-          parameterIds: [...parameterIds]
-        };
-      }
-      liveCore.update();
-      const modelWidth = Math.max(0.001, liveCore.getCanvasWidth());
-      const modelHeight = Math.max(0.001, liveCore.getCanvasHeight());
-      const key: LumiFitCacheKey = {
-        framing,
-        cssWidth,
-        cssHeight,
-        modelWidth,
-        modelHeight
-      };
-      if (!sameFitKey(fitCacheKey, key) || cachedMatrix === null || cachedTransform === null) {
-        const transform = computeLumiFramingTransform(
+      const frameStarted =
+        typeof performance !== "undefined" && typeof performance.now === "function"
+          ? performance.now()
+          : 0;
+      try {
+        const liveCore = model.getModel();
+        // Gaze/head (ParamEyeBall*, ParamAngle*) are physics inputs on Lumi.
+        // Write pending before physics so secondary channels (e.g.
+        // ParamEyeBallPhysicsX) receive this frame's target, then re-apply
+        // pending after physics as final authority before update().
+        const delta = Math.min(0.1, Math.max(0, deltaSeconds));
+        liveCore.loadParameters();
+        applyYuviParameters(liveCore, getId, pending);
+        model._physics?.evaluate(liveCore, delta);
+        applyYuviParameters(liveCore, getId, pending);
+        // Snapshot Core values immediately before update() bakes the mesh.
+        const diagnosticIds = [
+          ...parameterIds,
+          "ParamEyeBallPhysicsX",
+          "ParamEyeBallPhysicsY"
+        ];
+        lastPreUpdateParameters = {};
+        for (const id of diagnosticIds) {
+          const value = readCoreParameterValue(id);
+          if (value !== undefined) lastPreUpdateParameters[id] = value;
+        }
+        if (import.meta.env.DEV && typeof window !== "undefined") {
+          const debugWindow = window as typeof window & {
+            __yuviCubismParameterFrame?: Record<string, unknown>;
+          };
+          debugWindow.__yuviCubismParameterFrame = {
+            pending: Object.fromEntries(pending.entries()),
+            preUpdate: { ...lastPreUpdateParameters },
+            coreEyeBallX: lastPreUpdateParameters["ParamEyeBallX"] ?? null,
+            coreEyeBallY: lastPreUpdateParameters["ParamEyeBallY"] ?? null,
+            coreAngleX: lastPreUpdateParameters["ParamAngleX"] ?? null,
+            coreAngleY: lastPreUpdateParameters["ParamAngleY"] ?? null,
+            coreAngleZ: lastPreUpdateParameters["ParamAngleZ"] ?? null,
+            coreBodyAngleX: lastPreUpdateParameters["ParamBodyAngleX"] ?? null,
+            coreBodyAngleY: lastPreUpdateParameters["ParamBodyAngleY"] ?? null,
+            coreBodyAngleZ: lastPreUpdateParameters["ParamBodyAngleZ"] ?? null,
+            coreEyeBallPhysicsX: lastPreUpdateParameters["ParamEyeBallPhysicsX"] ?? null,
+            coreEyeBallPhysicsY: lastPreUpdateParameters["ParamEyeBallPhysicsY"] ?? null,
+            parameterIds: [...parameterIds]
+          };
+        }
+        liveCore.update();
+        const modelWidth = Math.max(0.001, liveCore.getCanvasWidth());
+        const modelHeight = Math.max(0.001, liveCore.getCanvasHeight());
+        const key: LumiFitCacheKey = {
           framing,
           cssWidth,
           cssHeight,
           modelWidth,
           modelHeight
-        );
-        cachedMatrix = createFitMatrixFromTransform(runtime, transform);
-        cachedTransform = transform;
-        fitCacheKey = key;
-        cachedDiagnostics = buildFramingDiagnostics(transform, {
-          backingWidth: pixelWidth,
-          backingHeight: pixelHeight,
-          devicePixelRatio,
-          headBounds: LUMI_PORTRAIT_HEAD_BOUNDS,
-          margins: LUMI_PORTRAIT_MARGINS
-        });
-        if (import.meta.env.DEV && typeof window !== "undefined") {
-          const debugWindow = window as typeof window & {
-            __yuviFramingDiagnostics?: LumiFramingDiagnostics;
-          };
-          debugWindow.__yuviFramingDiagnostics = cachedDiagnostics;
+        };
+        if (!sameFitKey(fitCacheKey, key) || cachedMatrix === null || cachedTransform === null) {
+          const transform = computeLumiFramingTransform(
+            framing,
+            cssWidth,
+            cssHeight,
+            modelWidth,
+            modelHeight
+          );
+          cachedMatrix = createFitMatrixFromTransform(runtime, transform);
+          cachedTransform = transform;
+          fitCacheKey = key;
+          cachedDiagnostics = buildFramingDiagnostics(transform, {
+            backingWidth: pixelWidth,
+            backingHeight: pixelHeight,
+            devicePixelRatio,
+            headBounds: LUMI_PORTRAIT_HEAD_BOUNDS,
+            margins: LUMI_PORTRAIT_MARGINS
+          });
+          if (import.meta.env.DEV && typeof window !== "undefined") {
+            const debugWindow = window as typeof window & {
+              __yuviFramingDiagnostics?: LumiFramingDiagnostics;
+              __yuviLive2dRenderQualityDiagnostics?: Live2dRenderQualityDiagnostics;
+            };
+            debugWindow.__yuviFramingDiagnostics = cachedDiagnostics;
+            debugWindow.__yuviLive2dRenderQualityDiagnostics = buildQualityDiagnostics();
+          }
+        }
+        // DPR * renderScale only for the backing store / gl.viewport — never
+        // re-multiplied into the model matrix (matrix uses CSS viewport above).
+        gl.viewport(0, 0, pixelWidth, pixelHeight);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        renderer.setRenderState(null, [0, 0, pixelWidth, pixelHeight]);
+        renderer.setMvpMatrix(cachedMatrix);
+        renderer.drawModel(shaderDirectory);
+        if (firstGlError == null) {
+          firstGlError = readFirstGlError(gl);
+        }
+      } catch (error) {
+        // Never leave the companion blank due to a quality/mask draw fault.
+        // Drop to SAFE metrics on the next resize path and surface the cause.
+        if (!qualityFallbackApplied) {
+          quality = { ...LIVE2D_RENDER_QUALITY_SAFE };
+          qualityFallbackApplied = true;
+          qualityFallbackReason = `render threw: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+          renderScale = 1;
+          if (import.meta.env.DEV) {
+            console.error("[YUVI Live2D] render failed; quality forced to SAFE:", error);
+          }
+        }
+        if (firstGlError == null) {
+          firstGlError = readFirstGlError(gl) ?? qualityFallbackReason;
         }
       }
-      // DPR only for the backing store / gl.viewport — never re-multiplied into
-      // the model matrix (matrix uses CSS viewport dimensions above).
-      gl.viewport(0, 0, pixelWidth, pixelHeight);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      renderer.setRenderState(null, [0, 0, pixelWidth, pixelHeight]);
-      renderer.setMvpMatrix(cachedMatrix);
-      renderer.drawModel(shaderDirectory);
+      if (frameStarted > 0 && typeof performance !== "undefined") {
+        lastFrameMs = performance.now() - frameStarted;
+        avgFrameMs =
+          avgFrameMs == null ? lastFrameMs : avgFrameMs * 0.9 + lastFrameMs * 0.1;
+      }
+      if (import.meta.env.DEV && typeof window !== "undefined") {
+        const debugWindow = window as typeof window & {
+          __yuviLive2dRenderQualityDiagnostics?: Live2dRenderQualityDiagnostics;
+        };
+        debugWindow.__yuviLive2dRenderQualityDiagnostics = buildQualityDiagnostics();
+      }
     },
     dispose() {
       if (disposed) return;
@@ -442,7 +622,10 @@ export async function loadLumiCubismModel(
       cachedMatrix = null;
       cachedTransform = null;
       cachedDiagnostics = null;
+      lastFrameMs = null;
+      avgFrameMs = null;
       for (const texture of textures) gl.deleteTexture(texture);
+      // model.release() frees Cubism renderer + mask FBOs / textures.
       model.release();
     }
   };
