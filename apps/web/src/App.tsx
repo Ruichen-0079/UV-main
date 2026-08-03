@@ -37,6 +37,13 @@ import { promptPreviewPlaceholder } from "./data/mock.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
 import { reduceChatMessages, shouldSubmitChatKey, type ChatMessage } from "./chat-state.js";
 import { ChatMessageContent } from "./markdown-message.js";
+import { SpeechSegmenter } from "./speech-segmenter.js";
+import {
+  createBrowserSpeechPlayer,
+  detectSpeechLanguage,
+  SpeechPlaybackQueue,
+  type SpeechQueueState
+} from "./speech-queue.js";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
@@ -66,6 +73,7 @@ type WebSocketStatus =
   | "paused"
   | "error";
 type RequestStatus = "idle" | "sending" | "success" | "error";
+type VoicePlaybackStatus = SpeechQueueState;
 type MemoryResultSource = "/memory/recent" | "/memory/search" | "local fallback";
 
 const memoryTypes = ["working", "episodic", "semantic", "emotional", "procedural", "relationship"];
@@ -288,7 +296,13 @@ function ChatPage(): JSX.Element {
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [lastTraceId, setLastTraceId] = useState<string | null>(null);
+  const [voicePlaybackStatus, setVoicePlaybackStatus] = useState<VoicePlaybackStatus>("idle");
   const mountedRef = useRef(true);
+  const speechSessionRef = useRef<{
+    generation: string;
+    segmenter: SpeechSegmenter;
+    queue: SpeechPlaybackQueue;
+  } | null>(null);
   const activeRequestRef = useRef<{
     id: string;
     assistantId: string;
@@ -302,6 +316,8 @@ function ChatPage(): JSX.Element {
       mountedRef.current = false;
       activeRequestRef.current?.controller.abort();
       activeRequestRef.current = null;
+      speechSessionRef.current?.queue.cancel();
+      speechSessionRef.current = null;
     };
   }, []);
 
@@ -312,7 +328,8 @@ function ChatPage(): JSX.Element {
         readMemory,
         writeMemory,
         promptPreview,
-        voiceOutput
+        voiceOutput: false,
+        browserVoiceOutput: voiceOutput
       }
     }),
     [input, promptPreview, readMemory, voiceOutput, writeMemory]
@@ -323,6 +340,8 @@ function ChatPage(): JSX.Element {
       return;
     }
 
+    speechSessionRef.current?.queue.cancel();
+    speechSessionRef.current = null;
     const content = input;
     const requestId = createChatMessageId("turn");
     const assistantId = createChatMessageId("assistant");
@@ -333,6 +352,34 @@ function ChatPage(): JSX.Element {
       controller,
       completedObserved: false
     };
+    if (voiceOutput) {
+      const generation = requestId;
+      const segmenter = new SpeechSegmenter();
+      const queue = new SpeechPlaybackQueue(
+        (item, signal) =>
+          apiClient.synthesizeSpeech({
+            text: item.text,
+            language: item.language,
+            format: "wav",
+            sessionId,
+            signal
+          }),
+        createBrowserSpeechPlayer(),
+        {
+          onState: (state) => {
+            if (mountedRef.current && speechSessionRef.current?.generation === generation) {
+              setVoicePlaybackStatus(state);
+            }
+          },
+          onError: () => {
+            if (mountedRef.current && speechSessionRef.current?.generation === generation) {
+              setVoicePlaybackStatus("error");
+            }
+          }
+        }
+      );
+      speechSessionRef.current = { generation, segmenter, queue };
+    }
     setInput("");
     setRequestStatus("sending");
     setError(null);
@@ -366,7 +413,9 @@ function ChatPage(): JSX.Element {
           options: {
             readMemory,
             writeMemory,
-            voiceOutput,
+            // Browser playback owns sentence-level TTS for this path. Avoid
+            // asking Runtime to synthesize the complete reply a second time.
+            voiceOutput: false,
             promptPreview
           }
         },
@@ -384,11 +433,24 @@ function ChatPage(): JSX.Element {
                 text: event.text,
                 traceId: event.traceId
               });
+              const speech = speechSessionRef.current;
+              if (speech?.generation === requestId) {
+                for (const text of speech.segmenter.push(event.text)) {
+                  speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+                }
+              }
               return;
             }
             if (event.type === "error") {
               dispatchMessages({ type: "fail", assistantId, error: event.message });
               setError(event.message);
+              const speech = speechSessionRef.current;
+              if (speech?.generation === requestId) {
+                for (const text of speech.segmenter.flush("failed")) {
+                  speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+                }
+                speech.queue.finish();
+              }
               return;
             }
             activeRequestRef.current.completedObserved = true;
@@ -401,6 +463,13 @@ function ChatPage(): JSX.Element {
               provider: event.provider
             });
             setRequestStatus("success");
+            const speech = speechSessionRef.current;
+            if (speech?.generation === requestId) {
+              for (const text of speech.segmenter.flush("completed")) {
+                speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+              }
+              speech.queue.finish();
+            }
           }
         }
       );
@@ -417,11 +486,23 @@ function ChatPage(): JSX.Element {
       });
       setLastTraceId(response.traceId);
       setRequestStatus("success");
+      const speech = speechSessionRef.current;
+      if (speech?.generation === requestId) {
+        for (const text of speech.segmenter.flush("completed")) {
+          speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+        }
+        speech.queue.finish();
+      }
     } catch (caught) {
       if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
         return;
       }
       if (controller.signal.aborted) {
+        const speech = speechSessionRef.current;
+        if (speech?.generation === requestId) {
+          speech.queue.cancel();
+          speech.segmenter.reset();
+        }
         dispatchMessages({
           type: "cancel",
           assistantId,
@@ -431,6 +512,13 @@ function ChatPage(): JSX.Element {
         return;
       }
       const message = friendlyChatError(caught);
+      const speech = speechSessionRef.current;
+      if (speech?.generation === requestId) {
+        for (const text of speech.segmenter.flush("failed")) {
+          speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+        }
+        speech.queue.finish();
+      }
       dispatchMessages({ type: "fail", assistantId, error: message });
       setError(message);
       setRequestStatus("error");
@@ -447,6 +535,10 @@ function ChatPage(): JSX.Element {
       return;
     }
     active.controller.abort();
+    if (speechSessionRef.current?.generation === active.id) {
+      speechSessionRef.current.queue.cancel();
+      speechSessionRef.current = null;
+    }
     activeRequestRef.current = null;
     if (!mountedRef.current) {
       return;
@@ -457,6 +549,12 @@ function ChatPage(): JSX.Element {
       error: "生成已取消，以上内容可能不完整。"
     });
     setRequestStatus("idle");
+  }
+
+  function stopSpeech(): void {
+    speechSessionRef.current?.queue.cancel();
+    speechSessionRef.current = null;
+    if (mountedRef.current) setVoicePlaybackStatus("stopped");
   }
 
   return (
@@ -547,7 +645,25 @@ function ChatPage(): JSX.Element {
                 Send
               </button>
             )}
+            {(voicePlaybackStatus === "synthesizing" || voicePlaybackStatus === "playing") && (
+              <button
+                type="button"
+                className="button-secondary h-20 w-24"
+                onClick={stopSpeech}
+                aria-label="Stop speech"
+              >
+                Stop speech
+              </button>
+            )}
           </div>
+          {voiceOutput && voicePlaybackStatus !== "idle" && (
+            <div className="mt-2 text-xs text-ink-500" aria-live="polite">
+              {voicePlaybackStatus === "synthesizing" && "Preparing speech…"}
+              {voicePlaybackStatus === "playing" && "Speaking…"}
+              {voicePlaybackStatus === "stopped" && "Speech stopped; generated text is preserved."}
+              {voicePlaybackStatus === "error" && "Speech unavailable; text response is preserved."}
+            </div>
+          )}
         </Panel>
         <Panel title="Turn Options">
           <div className="space-y-4">
@@ -580,7 +696,7 @@ function ChatPage(): JSX.Element {
               label="TTS output"
               checked={voiceOutput}
               onChange={setVoiceOutput}
-              note="Sent as voiceOutput to the streaming message endpoint."
+              note="Synthesizes sentence segments locally while the text stream is arriving."
             />
             <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
               <div className="label mb-2">Outgoing Payload</div>

@@ -24,6 +24,7 @@ import { XAITTSProvider } from "./xai/XAITTSProvider.js";
 import { XAIVisionProvider } from "./xai/XAIVisionProvider.js";
 import { DashScopeSTTProvider } from "./alibaba/DashScopeSTTProvider.js";
 import { streamOpenAICompatibleChatCompletion } from "./openai-compatible-stream.js";
+import { GPTSoVITSTTSProvider } from "./local/GPTSoVITSTTSProvider.js";
 
 export type ProviderRegistryConfig = {
   environment: "development" | "test" | "production";
@@ -81,6 +82,26 @@ export type ProviderRegistryConfig = {
     ttsModel: string | undefined;
     sttModel: string | undefined;
     visionModel: string | undefined;
+  };
+  gptSovits: {
+    wrapperBaseUrl: string;
+    upstreamBaseUrl: string;
+    gptWeightsPath: string | undefined;
+    sovitsWeightsPath: string | undefined;
+    defaultLanguage: string;
+    speaker: string;
+    style: string;
+    referenceRank: number;
+    referenceAudioPath: string | undefined;
+    referenceText: string | undefined;
+    referenceLanguage: string;
+    textSplitMethod: string;
+    topK: number;
+    topP: number;
+    temperature: number;
+    repetitionPenalty: number;
+    sampleSteps: number;
+    timeoutMs: number;
   };
 };
 
@@ -292,8 +313,7 @@ export class ProviderRegistry implements ProviderResolver {
         return Boolean(this.config.local.baseUrl && this.config.local.reasoningModel);
       if (capability === "embedding")
         return Boolean(this.config.local.baseUrl && this.config.local.embeddingModel);
-      if (capability === "tts")
-        return Boolean(this.config.local.baseUrl && this.config.local.ttsModel);
+      if (capability === "tts") return Boolean(this.config.local.ttsModel);
       if (capability === "stt")
         return Boolean(this.config.local.baseUrl && this.config.local.sttModel);
       if (capability === "vision")
@@ -424,7 +444,8 @@ export class ProviderRegistry implements ProviderResolver {
 
     if (name === "local") {
       return {
-        baseUrl: this.config.local.baseUrl,
+        baseUrl:
+          capability === "tts" ? this.config.gptSovits.wrapperBaseUrl : this.config.local.baseUrl,
         model:
           capability === "chat"
             ? this.config.local.chatModel
@@ -602,6 +623,26 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       ttsModel: emptyToUndefined(env["LOCAL_TTS_MODEL"]),
       sttModel: emptyToUndefined(env["LOCAL_STT_MODEL"]),
       visionModel: emptyToUndefined(env["LOCAL_VISION_MODEL"])
+    },
+    gptSovits: {
+      wrapperBaseUrl: env["GPT_SOVITS_TTS_BASE_URL"] ?? "http://127.0.0.1:9881",
+      upstreamBaseUrl: env["GPT_SOVITS_TTS_UPSTREAM_URL"] ?? "http://127.0.0.1:9880",
+      gptWeightsPath: emptyToUndefined(env["GPT_SOVITS_TTS_GPT_WEIGHTS"]),
+      sovitsWeightsPath: emptyToUndefined(env["GPT_SOVITS_TTS_SOVITS_WEIGHTS"]),
+      defaultLanguage: env["GPT_SOVITS_TTS_LANGUAGE"] ?? "ja",
+      speaker: env["GPT_SOVITS_TTS_SPEAKER"] ?? "alice",
+      style: env["GPT_SOVITS_TTS_STYLE"] ?? "neutral",
+      referenceRank: parseBoundedInteger(env["GPT_SOVITS_TTS_REFERENCE_RANK"], 0, 3, 0),
+      referenceAudioPath: emptyToUndefined(env["GPT_SOVITS_TTS_REFERENCE_AUDIO"]),
+      referenceText: emptyToUndefined(env["GPT_SOVITS_TTS_REFERENCE_TEXT"]),
+      referenceLanguage: env["GPT_SOVITS_TTS_REFERENCE_LANGUAGE"] ?? "ja",
+      textSplitMethod: env["GPT_SOVITS_TTS_TEXT_SPLIT_METHOD"] ?? "cut0",
+      topK: parseBoundedInteger(env["GPT_SOVITS_TTS_TOP_K"], 1, 100, 15),
+      topP: parseBoundedNumber(env["GPT_SOVITS_TTS_TOP_P"], 0, 1, 1),
+      temperature: parseBoundedNumber(env["GPT_SOVITS_TTS_TEMPERATURE"], 0, 2, 1),
+      repetitionPenalty: parseBoundedNumber(env["GPT_SOVITS_TTS_REPETITION_PENALTY"], 0.1, 5, 1.35),
+      sampleSteps: parseBoundedInteger(env["GPT_SOVITS_TTS_SAMPLE_STEPS"], 1, 100, 32),
+      timeoutMs: parseBoundedInteger(env["GPT_SOVITS_TTS_TIMEOUT_MS"], 1000, 300000, 60000)
     }
   };
 }
@@ -724,14 +765,31 @@ const ttsProviderFactories: Record<string, ProviderFactory<TTSProvider>> = {
     });
   },
   local(config) {
-    if (!config.local.baseUrl || !config.local.ttsModel) {
+    if (!config.local.ttsModel) {
       return undefined;
     }
 
-    return new UnimplementedTTSProvider(
-      "local",
-      "Local TTS provider is configured, but runtime synthesis is not implemented in v1."
-    );
+    return new GPTSoVITSTTSProvider({
+      wrapperBaseUrl: config.gptSovits.wrapperBaseUrl,
+      upstreamBaseUrl: config.gptSovits.upstreamBaseUrl,
+      model: config.local.ttsModel,
+      gptWeightsPath: config.gptSovits.gptWeightsPath,
+      sovitsWeightsPath: config.gptSovits.sovitsWeightsPath,
+      defaultLanguage: config.gptSovits.defaultLanguage,
+      speaker: config.gptSovits.speaker,
+      style: config.gptSovits.style,
+      referenceRank: config.gptSovits.referenceRank,
+      referenceAudioPath: config.gptSovits.referenceAudioPath,
+      referenceText: config.gptSovits.referenceText,
+      referenceLanguage: config.gptSovits.referenceLanguage,
+      textSplitMethod: config.gptSovits.textSplitMethod,
+      topK: config.gptSovits.topK,
+      topP: config.gptSovits.topP,
+      temperature: config.gptSovits.temperature,
+      repetitionPenalty: config.gptSovits.repetitionPenalty,
+      sampleSteps: config.gptSovits.sampleSteps,
+      timeoutMs: config.gptSovits.timeoutMs
+    });
   }
 };
 
@@ -954,7 +1012,7 @@ function missingFieldsForConfig(
   }
   if (name === "local") {
     return [
-      ...(!config.local.baseUrl ? ["LOCAL_MODEL_BASEURL"] : []),
+      ...(capability !== "tts" && !config.local.baseUrl ? ["LOCAL_MODEL_BASEURL"] : []),
       ...(capability === "chat" && !config.local.chatModel ? ["LOCAL_CHAT_MODEL"] : []),
       ...(capability === "reasoning" && !config.local.reasoningModel
         ? ["LOCAL_REASONING_MODEL"]
@@ -2261,6 +2319,26 @@ function parseProviderChain(
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoundedInteger(
+  value: string | undefined,
+  minimum: number,
+  maximum: number,
+  fallback: number
+): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+}
+
+function parseBoundedNumber(
+  value: string | undefined,
+  minimum: number,
+  maximum: number,
+  fallback: number
+): number {
+  const parsed = Number.parseFloat(value ?? "");
+  return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
 }
 
 function emptyToUndefined(value: string | undefined): string | undefined {

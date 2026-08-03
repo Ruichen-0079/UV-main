@@ -5,6 +5,7 @@ export type TTSInput = {
   voice?: string | undefined;
   format?: "mp3" | "wav" | "opus" | "pcm" | "mulaw" | "alaw" | undefined;
   speed?: number | undefined;
+  signal?: AbortSignal | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 

@@ -6,11 +6,7 @@ import {
   type MessageStreamEvent
 } from "./stream.js";
 
-export {
-  MessageSseParser,
-  MessageStreamError,
-  MessageStreamProtocolError
-} from "./stream.js";
+export { MessageSseParser, MessageStreamError, MessageStreamProtocolError } from "./stream.js";
 export type {
   CompletedMessage,
   MessageStreamCompleted,
@@ -930,7 +926,9 @@ export const apiClient = {
         for (const event of parser.push(result.value)) {
           if (event.type === "text-delta") {
             if (completed) {
-              throw new MessageStreamProtocolError("The message stream continued after completion.");
+              throw new MessageStreamProtocolError(
+                "The message stream continued after completion."
+              );
             }
             accumulatedText += event.text;
             options.onEvent?.(event);
@@ -1336,11 +1334,18 @@ export const apiClient = {
     text: string;
     voice?: string;
     format?: "mp3" | "wav" | "opus" | "pcm" | "mulaw" | "alaw";
+    language?: string;
     sessionId?: string;
+    signal?: AbortSignal;
   }): Promise<TTSResponse> {
-    return request<TTSResponse>("/v1/tts", {
+    const { signal, ...payload } = input;
+    const init: RequestInit = {
       method: "POST",
-      body: JSON.stringify(input)
+      body: JSON.stringify(payload)
+    };
+    if (signal) init.signal = signal;
+    return request<TTSResponse>("/v1/tts", {
+      ...init
     });
   },
 
