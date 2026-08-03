@@ -26,3 +26,18 @@ export function speechTextFromMarkdown(markdown: string): string {
   }
   return output.join(" ").replace(/\s+/g, " ").trim();
 }
+
+/**
+ * Emoji and decorative symbols are not speakable and break several local TTS
+ * backends (for example GPT-SoVITS rejects them with HTTP 400). Strip them
+ * before synthesis while keeping Japanese/Chinese text and punctuation.
+ */
+const NON_SPEECH_SYMBOLS =
+  /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}\u{1F1E6}-\u{1F1FF}]/gu;
+
+export function sanitizeSpeechText(text: string): string {
+  return text
+    .replace(NON_SPEECH_SYMBOLS, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}

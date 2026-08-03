@@ -105,6 +105,95 @@ describe("SpeechPlaybackQueue", () => {
     expect(errors[0]).toMatchObject({ message: "audio failed" });
   });
 
+  it("reports per-item lifecycle states through completion", async () => {
+    const states: Array<[string | undefined, string]> = [];
+    const queue = new SpeechPlaybackQueue(
+      async (item) => ({ audioBase64: item.text, mimeType: "audio/wav" }) as never,
+      async () => undefined,
+      { onItemState: (id, state) => states.push([id, state]) }
+    );
+    queue.enqueue({ text: "one", language: "en" }, "0");
+    queue.enqueue({ text: "two", language: "en" }, "1");
+    queue.finish();
+    await vi.waitFor(() => expect(states).toContainEqual(["1", "completed"]));
+    const stateFor = (id: string) =>
+      states.filter(([itemId]) => itemId === id).map(([, state]) => state);
+    expect(stateFor("0")).toEqual(["queued", "synthesizing", "ready", "playing", "completed"]);
+    expect(stateFor("1")).toEqual(["queued", "synthesizing", "ready", "playing", "completed"]);
+  });
+
+  it("skips a failed synthesis and continues with remaining segments", async () => {
+    const errors: unknown[] = [];
+    const states: Array<[string | undefined, string]> = [];
+    const queue = new SpeechPlaybackQueue(
+      async (item) => {
+        if (item.text === "bad") throw new Error("upstream rejected");
+        return { audioBase64: item.text, mimeType: "audio/wav" } as never;
+      },
+      async () => undefined,
+      {
+        onError: (error) => errors.push(error),
+        onItemState: (id, state) => states.push([id, state])
+      }
+    );
+    queue.enqueue({ text: "bad", language: "en" }, "0");
+    queue.enqueue({ text: "good", language: "en" }, "1");
+    queue.finish();
+    await vi.waitFor(() => expect(states).toContainEqual(["1", "completed"]));
+    expect(errors).toHaveLength(1);
+    const stateFor = (id: string) =>
+      states.filter(([itemId]) => itemId === id).map(([, state]) => state);
+    expect(stateFor("0").at(-1)).toBe("failed");
+    expect(stateFor("1").at(-1)).toBe("completed");
+  });
+
+  it("marks every unfinished segment cancelled and leaves none pending", async () => {
+    let release: (() => void) | undefined;
+    const states: Array<[string | undefined, string]> = [];
+    const queue = new SpeechPlaybackQueue(
+      () =>
+        new Promise<never>((resolve) => {
+          release = () => resolve(undefined as never);
+        }),
+      async () => undefined,
+      { onItemState: (id, state) => states.push([id, state]) }
+    );
+    queue.enqueue({ text: "one", language: "en" }, "0");
+    queue.enqueue({ text: "two", language: "en" }, "1");
+    await vi.waitFor(() => expect(release).toBeDefined());
+    queue.cancel();
+    release?.();
+    await Promise.resolve();
+    const cancelled = states.filter(([, state]) => state === "cancelled").length;
+    expect(cancelled).toBe(2);
+    expect(states.map(([, state]) => state)).not.toContain("completed");
+    expect(states.map(([, state]) => state)).not.toContain("ready");
+  });
+
+  it("restarts sequence state independently for a fresh turn", async () => {
+    const firstStates: Array<[string | undefined, string]> = [];
+    const first = new SpeechPlaybackQueue(
+      async (item) => ({ audioBase64: item.text, mimeType: "audio/wav" }) as never,
+      async () => undefined,
+      { onItemState: (id, state) => firstStates.push([id, state]) }
+    );
+    first.enqueue({ text: "one", language: "en" }, "0");
+    first.finish();
+    await vi.waitFor(() => expect(firstStates).toContainEqual(["0", "completed"]));
+
+    const secondStates: Array<[string | undefined, string]> = [];
+    const second = new SpeechPlaybackQueue(
+      async (item) => ({ audioBase64: item.text, mimeType: "audio/wav" }) as never,
+      async () => undefined,
+      { onItemState: (id, state) => secondStates.push([id, state]) }
+    );
+    second.enqueue({ text: "two", language: "en" }, "0");
+    second.finish();
+    await vi.waitFor(() => expect(secondStates).toContainEqual(["0", "completed"]));
+    expect(secondStates.filter(([id]) => id === "0").length).toBeGreaterThan(0);
+    expect(firstStates.filter(([id]) => id === "0").length).toBeGreaterThan(0);
+  });
+
   it("exposes playback lifecycle only after the player starts", async () => {
     const audio = {} as HTMLAudioElement;
     const events: string[] = [];

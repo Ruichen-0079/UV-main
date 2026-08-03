@@ -10,7 +10,12 @@ import type { LumiFraming } from "./lumi-cubism-model.js";
 const defaultModelUrl = "/api/live2d/Lumi/Lumi.model3.json";
 
 export const LumiCanvas = forwardRef(function LumiCanvas(
-  props: { requestedPresence: PresenceState; className?: string },
+  props: {
+    requestedPresence: PresenceState;
+    className?: string;
+    /** The companion window draws its own framing toggle outside the resize corner. */
+    showFramingToggle?: boolean;
+  },
   ref: Ref<LumiControllerHandle>
 ): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -94,14 +99,16 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
           测试口型
         </button>
       )}
-      <button
-        type="button"
-        className="absolute right-2 bottom-2 rounded bg-ink-900/70 px-2 py-1 text-xs text-white"
-        aria-pressed={framing === "full"}
-        onClick={() => setFraming((current) => (current === "half" ? "full" : "half"))}
-      >
-        {framing === "half" ? "显示全身" : "显示半身"}
-      </button>
+      {props.showFramingToggle !== false && (
+        <button
+          type="button"
+          className="absolute right-2 bottom-2 rounded bg-ink-900/70 px-2 py-1 text-xs text-white"
+          aria-pressed={framing === "full"}
+          onClick={() => setFraming((current) => (current === "half" ? "full" : "half"))}
+        >
+          {framing === "half" ? "显示全身" : "显示半身"}
+        </button>
+      )}
     </div>
   );
 });

@@ -7,9 +7,11 @@
     "dev": "vite",
     "build": "tsc -b tsconfig.json && vite build",
     "check": "tsc -b tsconfig.json --pretty false",
+    "test": "vitest run --passWithNoTests",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tauri-apps/api": "2",
     "@vitejs/plugin-react": "^4.3.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

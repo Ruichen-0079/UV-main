@@ -1,4 +1,4 @@
-import { speechTextFromMarkdown } from "./speech-text.js";
+import { sanitizeSpeechText, speechTextFromMarkdown } from "./speech-text.js";
 
 export type SpeechFlushReason = "completed" | "cancelled" | "failed";
 
@@ -18,7 +18,7 @@ export class SpeechSegmenter {
   }
 
   push(markdownDelta: string): string[] {
-    const text = speechTextFromMarkdown(markdownDelta);
+    const text = sanitizeSpeechText(speechTextFromMarkdown(markdownDelta));
     if (text) this.pending = joinSpeechText(this.pending, text);
     return this.drain(false);
   }

@@ -7,6 +7,21 @@ export type SpeechQueueItem = {
 
 export type SpeechQueueState = "idle" | "synthesizing" | "playing" | "stopped" | "error";
 
+/**
+ * Per-item lifecycle used for idempotent accounting: every enqueued segment
+ * moves through a subset of these states and always reaches a terminal state
+ * (completed / cancelled / failed) so a finished turn never leaves pending
+ * fragments behind.
+ */
+export type SpeechItemState =
+  | "queued"
+  | "synthesizing"
+  | "ready"
+  | "playing"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
 export type SpeechSynthesizer = (
   item: SpeechQueueItem,
   signal: AbortSignal
@@ -21,6 +36,7 @@ export type SpeechPlayer = (
 export type SpeechQueueCallbacks = {
   onState?: (state: SpeechQueueState) => void;
   onError?: (error: unknown) => void;
+  onItemState?: (id: string | undefined, state: SpeechItemState) => void;
   onSynthesisCompleted?: (item: PendingSpeech) => void;
   onPlaybackEvent?: (event: SpeechPlaybackEvent) => void;
 };
@@ -54,6 +70,7 @@ export function getSpeechAudioDebugId(audio: HTMLAudioElement): number {
 
 type PendingSpeech = {
   sequence: number;
+  id: string | undefined;
   item: SpeechQueueItem;
 };
 
@@ -64,13 +81,18 @@ type PendingSpeech = {
  */
 export class SpeechPlaybackQueue {
   private readonly pending: PendingSpeech[] = [];
-  private readonly ready = new Map<number, TTSResponse>();
+  private readonly ready: Array<{
+    sequence: number;
+    id: string | undefined;
+    output: TTSResponse;
+  }> = [];
   private readonly controller = new AbortController();
   private nextSequence = 0;
-  private nextPlaybackSequence = 0;
   private synthesisRunning = false;
   private playbackRunning = false;
   private accepting = true;
+  private synthesizingItem: { sequence: number; id: string | undefined } | null = null;
+  private playingItem: { sequence: number; id: string | undefined } | null = null;
 
   constructor(
     private readonly synthesize: SpeechSynthesizer,
@@ -78,9 +100,12 @@ export class SpeechPlaybackQueue {
     private readonly callbacks: SpeechQueueCallbacks = {}
   ) {}
 
-  enqueue(item: SpeechQueueItem): void {
+  enqueue(item: SpeechQueueItem, id?: string): void {
     if (!this.accepting || !item.text.trim()) return;
-    this.pending.push({ sequence: this.nextSequence++, item });
+    const sequence = this.nextSequence++;
+    const pending = { sequence, id: id as string | undefined, item };
+    this.pending.push(pending);
+    this.callbacks.onItemState?.(pending.id, "queued");
     void this.pumpSynthesis();
     void this.pumpPlayback();
   }
@@ -92,8 +117,24 @@ export class SpeechPlaybackQueue {
 
   cancel(): void {
     this.accepting = false;
+    if (!this.controller.signal.aborted) {
+      for (const pending of this.pending) {
+        this.callbacks.onItemState?.(pending.id, "cancelled");
+      }
+      for (const ready of this.ready) {
+        this.callbacks.onItemState?.(ready.id, "cancelled");
+      }
+      if (this.synthesizingItem) {
+        this.callbacks.onItemState?.(this.synthesizingItem.id, "cancelled");
+      }
+      if (this.playingItem) {
+        this.callbacks.onItemState?.(this.playingItem.id, "cancelled");
+      }
+    }
     this.pending.length = 0;
-    this.ready.clear();
+    this.ready.length = 0;
+    this.synthesizingItem = null;
+    this.playingItem = null;
     this.controller.abort();
     this.callbacks.onState?.("stopped");
   }
@@ -109,20 +150,26 @@ export class SpeechPlaybackQueue {
       while (this.pending.length > 0 && !this.controller.signal.aborted) {
         const pending = this.pending.shift();
         if (!pending) continue;
+        this.synthesizingItem = { sequence: pending.sequence, id: pending.id };
         this.callbacks.onState?.("synthesizing");
-        const output = await this.synthesize(pending.item, this.controller.signal);
+        this.callbacks.onItemState?.(pending.id, "synthesizing");
+        let output: TTSResponse;
+        try {
+          output = await this.synthesize(pending.item, this.controller.signal);
+        } catch (error) {
+          this.synthesizingItem = null;
+          if (this.controller.signal.aborted) break;
+          this.callbacks.onItemState?.(pending.id, "failed");
+          this.callbacks.onState?.("error");
+          this.callbacks.onError?.(error);
+          continue;
+        }
+        this.synthesizingItem = null;
         if (this.controller.signal.aborted) break;
-        this.ready.set(pending.sequence, output);
+        this.ready.push({ sequence: pending.sequence, id: pending.id, output });
+        this.callbacks.onItemState?.(pending.id, "ready");
         this.callbacks.onSynthesisCompleted?.(pending);
         void this.pumpPlayback();
-      }
-    } catch (error) {
-      if (!this.controller.signal.aborted) {
-        this.pending.length = 0;
-        this.ready.clear();
-        this.accepting = false;
-        this.callbacks.onState?.("error");
-        this.callbacks.onError?.(error);
       }
     } finally {
       this.synthesisRunning = false;
@@ -135,27 +182,30 @@ export class SpeechPlaybackQueue {
     this.playbackRunning = true;
     try {
       while (!this.controller.signal.aborted) {
-        const output = this.ready.get(this.nextPlaybackSequence);
-        if (!output) break;
-        this.ready.delete(this.nextPlaybackSequence);
-        this.nextPlaybackSequence += 1;
+        const next = this.ready.shift();
+        if (!next) break;
+        this.playingItem = { sequence: next.sequence, id: next.id };
         this.callbacks.onState?.("playing");
-        await this.play(output, this.controller.signal, {
-          sequence: this.nextPlaybackSequence - 1,
-          emit: (event) =>
-            this.callbacks.onPlaybackEvent?.({
-              ...event,
-              sequence: this.nextPlaybackSequence - 1
-            } as SpeechPlaybackEvent)
-        });
-      }
-    } catch (error) {
-      if (!this.controller.signal.aborted) {
-        this.pending.length = 0;
-        this.ready.clear();
-        this.accepting = false;
-        this.callbacks.onState?.("error");
-        this.callbacks.onError?.(error);
+        this.callbacks.onItemState?.(next.id, "playing");
+        try {
+          await this.play(next.output, this.controller.signal, {
+            sequence: next.sequence,
+            emit: (event) =>
+              this.callbacks.onPlaybackEvent?.({
+                ...event,
+                sequence: next.sequence
+              } as SpeechPlaybackEvent)
+          });
+        } catch (error) {
+          this.playingItem = null;
+          if (this.controller.signal.aborted) break;
+          this.callbacks.onItemState?.(next.id, "failed");
+          this.callbacks.onState?.("error");
+          this.callbacks.onError?.(error);
+          continue;
+        }
+        this.playingItem = null;
+        this.callbacks.onItemState?.(next.id, "completed");
       }
     } finally {
       this.playbackRunning = false;
@@ -167,7 +217,7 @@ export class SpeechPlaybackQueue {
     if (
       !this.controller.signal.aborted &&
       this.pending.length === 0 &&
-      this.ready.size === 0 &&
+      this.ready.length === 0 &&
       !this.synthesisRunning &&
       !this.playbackRunning
     ) {
