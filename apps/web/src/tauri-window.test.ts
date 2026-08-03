@@ -1,23 +1,41 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { startResizeDragging } = vi.hoisted(() => ({
-  startResizeDragging: vi.fn()
+const { startResizeDragging, invoke } = vi.hoisted(() => ({
+  startResizeDragging: vi.fn(),
+  invoke: vi.fn()
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ startResizeDragging })
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+
 import {
   isTauriRuntime,
   preloadTauriWindowApi,
   startWindowResizeDragging,
+  controlCompanionWindow,
   type TauriResizeDirection
 } from "./tauri-window.js";
 
 afterEach(() => {
   delete (globalThis as { window?: unknown }).window;
   startResizeDragging.mockClear();
+  invoke.mockClear();
+});
+
+describe("controlCompanionWindow", () => {
+  it("does not touch Tauri IPC in a browser", async () => {
+    await expect(controlCompanionWindow("show_companion")).resolves.toBeUndefined();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("invokes the requested command inside Tauri", async () => {
+    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
+    await controlCompanionWindow("reopen_companion");
+    expect(invoke).toHaveBeenCalledWith("reopen_companion");
+  });
 });
 
 describe("isTauriRuntime", () => {

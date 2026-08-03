@@ -33,5 +33,7 @@ function renderSurface(surface: Surface): JSX.Element {
   }
 }
 
+const surface = resolveSurface();
+document.documentElement.dataset["yuviSurface"] = surface;
 const rootElement = document.getElementById("root") as HTMLElement;
-createRoot(rootElement).render(<StrictMode>{renderSurface(resolveSurface())}</StrictMode>);
+createRoot(rootElement).render(<StrictMode>{renderSurface(surface)}</StrictMode>);
