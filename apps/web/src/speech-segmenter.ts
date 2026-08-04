@@ -48,7 +48,12 @@ export class SpeechSegmenter {
     this.pending = "";
     if (!isSpeakableSpeechText(value)) return [];
     if (reason !== "completed" && !/[。！？!?…\.]\s*$/.test(value)) return [];
-    return finalizeSegments([value]);
+    // completed is the only point where an unfinished tail is guaranteed to
+    // be final. Drain it through the same maxChars / safe-boundary logic as
+    // incremental deltas so a long response cannot become one oversized TTS
+    // request merely because its final punctuation arrived in a later frame.
+    this.pending = value;
+    return this.drain(true);
   }
 
   reset(): void {
@@ -57,8 +62,11 @@ export class SpeechSegmenter {
 
   private drain(force: boolean): string[] {
     const emitted: string[] = [];
-    while (this.pending.length >= this.minChars || force || hasNaturalBoundary(this.pending)) {
-      const boundary = findBoundary(this.pending, this.minChars, this.maxChars);
+    while (
+      this.pending.length > 0 &&
+      (this.pending.length >= this.minChars || force || hasNaturalBoundary(this.pending))
+    ) {
+      const boundary = findBoundary(this.pending, this.minChars, this.maxChars, force);
       if (boundary < 0) break;
       const segment = this.pending.slice(0, boundary).trim();
       if (isSpeakableSpeechText(segment)) emitted.push(segment);
@@ -81,7 +89,7 @@ function finalizeSegments(segments: string[]): string[] {
  * English sentence end: `.` / `!` / `?` / `…`, CJK terminals, newlines, then
  * soft punctuation near the length limit, then spaces, then hard cut.
  */
-function findBoundary(value: string, minChars: number, maxChars: number): number {
+function findBoundary(value: string, minChars: number, maxChars: number, force = false): number {
   const limit = Math.min(value.length, maxChars);
 
   // Prefer true sentence / paragraph ends anywhere in the visible window so
@@ -104,6 +112,7 @@ function findBoundary(value: string, minChars: number, maxChars: number): number
     // Space fallback already covered; hard cut last.
     return limit;
   }
+  if (force) return value.length;
   return -1;
 }
 

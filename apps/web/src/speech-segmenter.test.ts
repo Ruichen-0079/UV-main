@@ -86,11 +86,7 @@ describe("SpeechSegmenter", () => {
     emitted.push(...segmenter.push("こんにちは。今日は"));
     expect(emitted).toEqual(["こんにちは。"]);
     emitted.push(...segmenter.push("いい天気ですね。元気ですか？"));
-    expect(emitted).toEqual([
-      "こんにちは。",
-      "今日はいい天気ですね。",
-      "元気ですか？"
-    ]);
+    expect(emitted).toEqual(["こんにちは。", "今日はいい天気ですね。", "元気ですか？"]);
     expect(segmenter.flush("completed")).toEqual([]);
   });
 
@@ -189,11 +185,9 @@ describe("SpeechSegmenter", () => {
 
   it("normalizes CRLF, CR, and blank lines into single-line segments", () => {
     const segmenter = new SpeechSegmenter({ minChars: 2 });
-    expect(segmenter.push("Hello.\r\n\r\nThis is the second paragraph.\rThis is the final line.")).toEqual([
-      "Hello.",
-      "This is the second paragraph.",
-      "This is the final line."
-    ]);
+    expect(
+      segmenter.push("Hello.\r\n\r\nThis is the second paragraph.\rThis is the final line.")
+    ).toEqual(["Hello.", "This is the second paragraph.", "This is the final line."]);
   });
 
   it("keeps contractions and avoids splitting common abbreviations and versions", () => {
@@ -232,10 +226,54 @@ describe("SpeechSegmenter", () => {
     const segmenter = new SpeechSegmenter({ minChars: 8 });
     const emitted: string[] = [];
     const deltas = [
-      "こ", "ん", "に", "ち", "は", "！", "😊", " ", "なん", "と", "**", "9", "回", "目", "**",
-      "の", "「", "こ", "ん", "に", "ち", "は", "」", "ですね", "。", "しか", "も", "さ", "っ", "き",
-      "自己", "紹介", "をお", "願", "い", "して", "く", "れた", "のに", "、", "また", "この", "挨",
-      "拶", "に", "戻", "って", "きました"
+      "こ",
+      "ん",
+      "に",
+      "ち",
+      "は",
+      "！",
+      "😊",
+      " ",
+      "なん",
+      "と",
+      "**",
+      "9",
+      "回",
+      "目",
+      "**",
+      "の",
+      "「",
+      "こ",
+      "ん",
+      "に",
+      "ち",
+      "は",
+      "」",
+      "ですね",
+      "。",
+      "しか",
+      "も",
+      "さ",
+      "っ",
+      "き",
+      "自己",
+      "紹介",
+      "をお",
+      "願",
+      "い",
+      "して",
+      "く",
+      "れた",
+      "のに",
+      "、",
+      "また",
+      "この",
+      "挨",
+      "拶",
+      "に",
+      "戻",
+      "って",
+      "きました"
     ];
     for (const delta of deltas) {
       emitted.push(...segmenter.push(delta));
@@ -261,9 +299,7 @@ describe("SpeechSegmenter", () => {
 
   it("splits markdown lists into bounded, speakable segments", () => {
     const segmenter = new SpeechSegmenter({ minChars: 2 });
-    const segments = segmenter.push(
-      "- 一つ目の話です。\n- 二つ目の話です。\n- 三つ目の話です。"
-    );
+    const segments = segmenter.push("- 一つ目の話です。\n- 二つ目の話です。\n- 三つ目の話です。");
     expect(segments).toEqual(["一つ目の話です。", "二つ目の話です。", "三つ目の話です。"]);
     expect(segmenter.flush("completed")).toEqual([]);
   });
@@ -274,6 +310,47 @@ describe("SpeechSegmenter", () => {
     expect(segments.every((segment) => segment.length <= 13)).toBe(true);
     expect(segments.join("")).toContain("これはとても長い文章で");
     expect(segmenter.flush("completed").length).toBeLessThanOrEqual(1);
+  });
+
+  it("splits a long completed tail instead of sending one oversized TTS request", () => {
+    const segmenter = new SpeechSegmenter({ minChars: 2, maxChars: 12 });
+    const emitted = [
+      ...segmenter.push("これは句点を待つ長い尾部で、最後まで自然な終端がありません")
+    ];
+    emitted.push(...segmenter.flush("completed"));
+
+    expect(emitted.length).toBeGreaterThan(1);
+    expect(emitted.every((segment) => segment.length <= 12)).toBe(true);
+    expect(emitted.every((segment) => isSpeakableSpeechText(segment))).toBe(true);
+    expect(emitted.join("")).toContain("これは句点を待つ長い尾部");
+  });
+
+  it("applies the same maxChars rules to English completed tails with mixed newlines", () => {
+    const segmenter = new SpeechSegmenter({ minChars: 2, maxChars: 40 });
+    const body = [
+      "I want to tell you a slightly longer story today that will exceed the limit without a period",
+      "",
+      "When I opened the window, a cool breeze came into the room and lingered there"
+    ].join("\r\n");
+    const emitted = [...segmenter.push(body), ...segmenter.flush("completed")];
+    expect(emitted.length).toBeGreaterThan(1);
+    expect(emitted.every((segment) => segment.length <= 40)).toBe(true);
+    expect(emitted.every((segment) => isSpeakableSpeechText(segment))).toBe(true);
+    expect(emitted.every((segment) => !/\r|\n/.test(segment))).toBe(true);
+    expect(emitted.join(" ")).toContain("cool breeze");
+    // Buffer is fully consumed; a second completed flush must be empty.
+    expect(segmenter.flush("completed")).toEqual([]);
+  });
+
+  it("hard-cuts completed tails without safe boundaries while preserving order", () => {
+    const segmenter = new SpeechSegmenter({ minChars: 2, maxChars: 8 });
+    // No punctuation, no spaces — force path must still slice by maxChars.
+    const tail = "あいうえおかきくけこさしすせそ";
+    const emitted = [...segmenter.push(tail), ...segmenter.flush("completed")];
+    expect(emitted.length).toBeGreaterThan(1);
+    expect(emitted.every((segment) => segment.length <= 8)).toBe(true);
+    expect(emitted.join("")).toBe(prepareSpeechSegment(tail));
+    expect(segmenter.flush("completed")).toEqual([]);
   });
 
   it("emits multi-line Japanese deltas as ordered speakable segments without ornaments", () => {
