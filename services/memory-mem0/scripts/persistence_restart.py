@@ -27,7 +27,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST = os.environ.get("MEM0_SIDECAR_HOST", "127.0.0.1")
-# Default 6131 when 6130 is occupied by unrelated local agents.
+# Product default Mem0 sidecar port is 6131.
 PORT = int(os.environ.get("MEM0_SIDECAR_PORT", "6131"))
 BASE = f"http://{HOST}:{PORT}"
 SCOPE = "yuvi:v1:user:persist-test:character:alice"

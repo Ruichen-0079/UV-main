@@ -33,7 +33,7 @@ export function createMemoryBackend(options: MemoryBackendFactoryOptions = {}): 
     return new LegacyMemoryBackend(options.repository);
   }
   if (kind === "mem0") {
-    const baseUrl = options.mem0BaseUrl ?? process.env["MEM0_BASE_URL"] ?? "http://127.0.0.1:6130";
+    const baseUrl = options.mem0BaseUrl ?? process.env["MEM0_BASE_URL"] ?? "http://127.0.0.1:6131";
     const mem0Options: {
       baseUrl: string;
       timeoutMs?: number;

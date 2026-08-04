@@ -68,7 +68,28 @@ pub fn service_action(
   http_json("POST", &path, None, Some(&token))
 }
 
-pub fn bootstrap_supervisor(app: &AppHandle) -> Result<(), String> {
+/// Push latest user env overrides (incl. secrets + unsets) to a live Supervisor.
+/// Body is POSTed over loopback with control token — never via argv or disk files.
+pub fn push_runtime_config(
+  app: &AppHandle,
+  payload: &crate::config::env_export::SupervisorConfigPush,
+) -> Result<Value, String> {
+  let state = app.state::<SupervisorState>();
+  let (base, token) = require_endpoint(&state)?;
+  let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+  // Never log `body` — may contain secrets.
+  http_json(
+    "POST",
+    &format!("{base}/v1/config"),
+    Some(&body),
+    Some(&token),
+  )
+}
+
+pub fn bootstrap_supervisor(
+  app: &AppHandle,
+  env_overrides: Option<std::collections::BTreeMap<String, String>>,
+) -> Result<(), String> {
   let repo_root = discover_repo_root()?;
   let root_state_dir = desktop_state_dir();
   fs::create_dir_all(&root_state_dir).map_err(|e| e.to_string())?;
@@ -116,6 +137,20 @@ pub fn bootstrap_supervisor(app: &AppHandle) -> Result<(), String> {
       .arg(&repo_root);
     cmd
   };
+  // Inject non-secret public overrides only. Credential secrets are applied
+  // after the control plane is up via POST /v1/config so they stay in the
+  // dynamic override layer and can be cleared without poisoning baseEnv.
+  if let Some(overrides) = env_overrides {
+    for (key, value) in overrides {
+      if value.trim().is_empty() {
+        continue;
+      }
+      if is_secret_env_key(&key) {
+        continue;
+      }
+      command.env(key, value);
+    }
+  }
   command
     .current_dir(&repo_root)
     .stdin(Stdio::null())
@@ -164,14 +199,37 @@ pub fn bootstrap_supervisor(app: &AppHandle) -> Result<(), String> {
     guard.shutting_down = false;
   }
 
-  let bootstrap_url = format!("{}/v1/bootstrap", endpoint.base_url);
+  // Apply full user config (incl. secrets + unsets) as dynamic overrides, then bootstrap.
   let token = endpoint.control_token.clone();
+  let base_url = endpoint.base_url.clone();
+  let config_body = app
+    .try_state::<crate::config::ConfigState>()
+    .and_then(|cfg| cfg.service.supervisor_config_push().ok())
+    .and_then(|payload| serde_json::to_string(&payload).ok());
   thread::spawn(move || {
-    let _ = http_json("POST", &bootstrap_url, None, Some(&token));
+    if let Some(body) = config_body {
+      // Never log body — may contain secrets.
+      let _ = http_json(
+        "POST",
+        &format!("{base_url}/v1/config"),
+        Some(&body),
+        Some(&token),
+      );
+    }
+    let _ = http_json(
+      "POST",
+      &format!("{base_url}/v1/bootstrap"),
+      None,
+      Some(&token),
+    );
   });
 
   start_status_poller(app.clone());
   Ok(())
+}
+
+fn is_secret_env_key(key: &str) -> bool {
+  matches!(key, "DEEPSEEK_API_KEY" | "DATABASE_URL")
 }
 
 /// Idempotent application-level shutdown. Only owned services are stopped by the supervisor.
@@ -220,6 +278,7 @@ pub fn shutdown_supervisor(app: &AppHandle) {
 
 fn start_status_poller(app: AppHandle) {
   thread::spawn(move || {
+    let mut last_fingerprint: Option<String> = None;
     loop {
       let (base, token, stop) = {
         let state = app.state::<SupervisorState>();
@@ -242,14 +301,54 @@ fn start_status_poller(app: AppHandle) {
       if let (Some(base), Some(token)) = (base, token) {
         if let Ok(snapshot) = http_json("GET", &format!("{base}/v1/status"), None, Some(&token)) {
           // Snapshot must never contain the control token.
-          let _ = app.emit("service.status.changed", snapshot);
+          // Skip emit when UI-visible service fields are unchanged (reduces React churn).
+          let fingerprint = status_emit_fingerprint(&snapshot);
+          if last_fingerprint.as_ref() != Some(&fingerprint) {
+            last_fingerprint = Some(fingerprint);
+            let _ = app.emit("service.status.changed", snapshot);
+          }
         }
       } else {
         break;
       }
-      thread::sleep(Duration::from_secs(3));
+      thread::sleep(Duration::from_secs(5));
     }
   });
+}
+
+/// Stable fingerprint of status fields that affect the UI (ignores updatedAt).
+fn status_emit_fingerprint(snapshot: &Value) -> String {
+  let services = snapshot.get("services").cloned().unwrap_or(Value::Null);
+  let instance = snapshot
+    .get("instanceId")
+    .or_else(|| snapshot.get("instance_id"))
+    .cloned()
+    .unwrap_or(Value::Null);
+  let shutting = snapshot
+    .get("shuttingDown")
+    .or_else(|| snapshot.get("shutting_down"))
+    .cloned()
+    .unwrap_or(Value::Null);
+  // Strip per-check clocks from each service object.
+  let stripped = match services {
+    Value::Array(items) => Value::Array(
+      items
+        .into_iter()
+        .map(|item| match item {
+          Value::Object(mut map) => {
+            map.remove("checkedAt");
+            map.remove("checked_at");
+            map.remove("startedAt");
+            map.remove("started_at");
+            Value::Object(map)
+          }
+          other => other,
+        })
+        .collect(),
+    ),
+    other => other,
+  };
+  format!("{instance}|{shutting}|{stripped}")
 }
 
 fn require_endpoint(state: &State<'_, SupervisorState>) -> Result<(String, String), String> {

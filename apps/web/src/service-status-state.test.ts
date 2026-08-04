@@ -78,4 +78,51 @@ describe("service status reducer", () => {
       runtimeChatAvailability([svc({ id: "runtime", status: "healthy" })])
     ).toEqual({ available: true, reason: null });
   });
+
+  it("identical service snapshots do not replace state (no re-render)", () => {
+    const services = [svc({ id: "runtime", status: "healthy", ownership: "owned", summary: "ok" })];
+    let state = reduceServiceStatus(initialServiceStatusState, {
+      type: "snapshot",
+      instanceId: "i1",
+      shuttingDown: false,
+      updatedAt: "t1",
+      services
+    });
+    const next = reduceServiceStatus(state, {
+      type: "snapshot",
+      instanceId: "i1",
+      shuttingDown: false,
+      updatedAt: "t2",
+      services: [
+        svc({
+          id: "runtime",
+          status: "healthy",
+          ownership: "owned",
+          summary: "ok",
+          checkedAt: "different-clock"
+        })
+      ]
+    });
+    expect(next).toBe(state);
+    expect(next.updatedAt).toBe("t1");
+  });
+
+  it("status change updates snapshot state", () => {
+    let state = reduceServiceStatus(initialServiceStatusState, {
+      type: "snapshot",
+      instanceId: "i1",
+      shuttingDown: false,
+      updatedAt: "t1",
+      services: [svc({ id: "runtime", status: "healthy" })]
+    });
+    state = reduceServiceStatus(state, {
+      type: "snapshot",
+      instanceId: "i1",
+      shuttingDown: false,
+      updatedAt: "t2",
+      services: [svc({ id: "runtime", status: "unavailable", summary: "down" })]
+    });
+    expect(state.services[0]?.status).toBe("unavailable");
+    expect(state.updatedAt).toBe("t2");
+  });
 });

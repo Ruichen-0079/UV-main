@@ -9,5 +9,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src ./src
 ENV PYTHONPATH=/app/src
-EXPOSE 6130
+EXPOSE 6131
 CMD ["python", "-m", "yuvi_mem0"]

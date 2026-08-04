@@ -21,8 +21,8 @@ export function Panel(props: {
 
 export function Field(props: { label: string; children: ReactNode }): JSX.Element {
   return (
-    <label className="block space-y-1">
-      <span className="label">{props.label}</span>
+    <label className="setting-field">
+      <span className="setting-label">{props.label}</span>
       {props.children}
     </label>
   );
@@ -53,14 +53,16 @@ export function Toggle(props: {
 }
 
 export function Notice(props: {
-  tone: "info" | "error";
+  tone: "info" | "error" | "warning";
   title: string;
   message: string;
 }): JSX.Element {
   const styles =
     props.tone === "error"
       ? "border-rose-200 bg-rose-50 text-rose-800"
-      : "border-cyan-200 bg-cyan-50 text-cyan-800";
+      : props.tone === "warning"
+        ? "border-amber-200 bg-amber-50 text-amber-900"
+        : "border-cyan-200 bg-cyan-50 text-cyan-800";
   return (
     <div className={`rounded-md border px-3 py-2 text-sm ${styles}`}>
       <strong>{props.title}:</strong> {props.message}

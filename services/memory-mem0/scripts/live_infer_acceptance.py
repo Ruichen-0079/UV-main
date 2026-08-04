@@ -16,7 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 HOST = os.environ.get("MEM0_SIDECAR_HOST", "127.0.0.1")
-PORT = int(os.environ.get("MEM0_SIDECAR_PORT", "6130"))
+PORT = int(os.environ.get("MEM0_SIDECAR_PORT", "6131"))
 BASE = f"http://{HOST}:{PORT}"
 RUN = uuid.uuid4().hex[:8]
 

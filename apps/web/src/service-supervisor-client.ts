@@ -30,12 +30,21 @@ export function isServiceSupervisorAvailable(): boolean {
   return isTauriRuntime() || Boolean(debugSupervisorUrl);
 }
 
+/** Fallback poll when events are quiet. Prefer event-driven updates. */
+const STATUS_FALLBACK_POLL_MS = 5_000;
+
 export function subscribeServiceStatus(handlers: StatusHandlers): () => void {
   let cancelled = false;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let unlisten: (() => void) | null = null;
+  /** Skip redundant fallback poll briefly after a live event. */
+  let lastEventAt = 0;
 
-  const tick = async () => {
+  const tick = async (source: "poll" | "event" | "boot") => {
     if (cancelled) return;
+    if (source === "poll" && Date.now() - lastEventAt < STATUS_FALLBACK_POLL_MS - 250) {
+      return;
+    }
     try {
       const snapshot = await getServiceStatus();
       if (cancelled || !snapshot) return;
@@ -47,19 +56,20 @@ export function subscribeServiceStatus(handlers: StatusHandlers): () => void {
     }
   };
 
-  void tick();
-  // Low-frequency status only (not per-process thrash from React).
+  void tick("boot");
+  // Low-frequency fallback only — live path is service.status.changed.
   timer = setInterval(() => {
-    void tick();
-  }, 3_000);
+    void tick("poll");
+  }, STATUS_FALLBACK_POLL_MS);
 
-  let unlisten: (() => void) | null = null;
   if (isTauriRuntime()) {
     void (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
+        if (cancelled) return;
         unlisten = await listen<SupervisorSnapshotDto>("service.status.changed", (event) => {
           if (cancelled) return;
+          lastEventAt = Date.now();
           handlers.onConnected(event.payload.instanceId);
           handlers.onSnapshot(event.payload);
         });
@@ -71,8 +81,14 @@ export function subscribeServiceStatus(handlers: StatusHandlers): () => void {
 
   return () => {
     cancelled = true;
-    if (timer) clearInterval(timer);
-    unlisten?.();
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+    if (unlisten) {
+      unlisten();
+      unlisten = null;
+    }
   };
 }
 

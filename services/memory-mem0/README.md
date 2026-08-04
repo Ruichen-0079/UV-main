@@ -35,7 +35,7 @@ YUVI Runtime :6121
       └─ MemoryBackend
           ├─ LegacyMemoryBackend  (default)
           └─ Mem0MemoryBackend    (HTTP adapter)
-                └─ this sidecar :6130
+                └─ this sidecar :6131
                     ├─ Mem0 OSS (Python)
                     ├─ Ollama embedder :11434  yuvi-embedding:0.6b (1024-d, num_ctx=2048)
                     └─ PostgreSQL + pgvector collection yuvi_mem0_qwen3_1024_v1
@@ -68,7 +68,7 @@ Sidecar process lifecycle uses FastAPI **lifespan** (not deprecated `on_event`):
 
 | Item | Value |
 |------|--------|
-| Port | `6130` |
+| Port | `6131` |
 | Embedder | Ollama **`yuvi-embedding:0.6b`** |
 | Base weights | `qwen3-embedding:0.6b` (Q8_0, emb length 1024) |
 | `num_ctx` | **2048** (Modelfile) |
@@ -190,7 +190,7 @@ python -m yuvi_mem0
 Health:
 
 ```bash
-curl http://127.0.0.1:6130/health
+curl http://127.0.0.1:6131/health
 ```
 
 ## API
@@ -236,7 +236,7 @@ If you change model or dimensions:
 
 1. PostgreSQL
 2. Ollama `:11434`
-3. Mem0 Sidecar `:6130`
+3. Mem0 Sidecar `:6131`
 4. YUVI Runtime `:6121`
 5. Tauri / Vite
 

@@ -41,7 +41,7 @@ function cfg(): SupervisorConfig {
     autostartMem0: false,
     autostartTts: false,
     runtimeUrl: "http://127.0.0.1:6121",
-    mem0Url: "http://127.0.0.1:6130",
+    mem0Url: "http://127.0.0.1:6131",
     ttsWrapperUrl: "http://127.0.0.1:9881",
     ttsUpstreamUrl: "http://127.0.0.1:9880",
     ollamaUrl: "http://127.0.0.1:11434",
@@ -57,16 +57,22 @@ async function request(
   port: number,
   method: string,
   pathName: string,
-  token?: string
+  token?: string,
+  body?: string
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = token ? { [CONTROL_TOKEN_HEADER]: token } : {};
+    if (body != null) {
+      headers["content-type"] = "application/json";
+      headers["content-length"] = String(Buffer.byteLength(body));
+    }
     const req = http.request(
       {
         host: "127.0.0.1",
         port,
         path: pathName,
         method,
-        headers: token ? { [CONTROL_TOKEN_HEADER]: token } : {}
+        headers
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -77,6 +83,7 @@ async function request(
       }
     );
     req.on("error", reject);
+    if (body != null) req.write(body);
     req.end();
   });
 }
@@ -129,5 +136,72 @@ describe("control plane auth + loopback", () => {
     expect(a).toHaveLength(64);
     expect(b).toHaveLength(64);
     expect(a).not.toBe(b);
+  });
+
+  it("POST /v1/config requires token and does not echo secrets", async () => {
+    const config = cfg();
+    const supervisor = new DesktopSupervisor(config);
+    const { server, port } = await startSupervisorHttpServer(supervisor, {
+      host: "127.0.0.1",
+      controlToken: config.controlToken
+    });
+    servers.push(server);
+
+    const secret = "sk-http-secret-should-not-echo";
+    const payload = JSON.stringify({
+      env: {
+        DEEPSEEK_CHAT_MODEL: "model-B",
+        DEEPSEEK_API_KEY: secret,
+        MEM0_BASE_URL: "http://127.0.0.1:6133"
+      },
+      unsetEnv: []
+    });
+
+    const noTok = await request(port, "POST", "/v1/config", undefined, payload);
+    expect(noTok.status).toBe(401);
+
+    const badTok = await request(
+      port,
+      "POST",
+      "/v1/config",
+      "wrong-token-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      payload
+    );
+    expect(badTok.status).toBe(401);
+
+    const ok = await request(port, "POST", "/v1/config", config.controlToken, payload);
+    expect(ok.status).toBe(200);
+    expect(ok.body).not.toContain(secret);
+    expect(ok.body).not.toContain("DEEPSEEK_API_KEY");
+    const parsed = JSON.parse(ok.body) as { ok: boolean; appliedEnvKeys: string[] };
+    expect(parsed.ok).toBe(true);
+    expect(parsed.appliedEnvKeys).toContain("DEEPSEEK_CHAT_MODEL");
+    expect(parsed.appliedEnvKeys).toContain("MEM0_BASE_URL");
+
+    expect(supervisor.resolveHealthUrl("mem0")).toBe("http://127.0.0.1:6133/health");
+
+    const status = await request(port, "GET", "/v1/status", config.controlToken);
+    expect(status.status).toBe(200);
+    expect(status.body).not.toContain(secret);
+  });
+
+  it("POST /v1/config rejected during shutdown", async () => {
+    const config = cfg();
+    const supervisor = new DesktopSupervisor(config);
+    const { server, port } = await startSupervisorHttpServer(supervisor, {
+      host: "127.0.0.1",
+      controlToken: config.controlToken
+    });
+    servers.push(server);
+    await supervisor.shutdown();
+    const res = await request(
+      port,
+      "POST",
+      "/v1/config",
+      config.controlToken,
+      JSON.stringify({ env: { DEEPSEEK_CHAT_MODEL: "x" }, unsetEnv: [] })
+    );
+    expect(res.status).toBe(409);
+    expect(res.body).not.toContain("DEEPSEEK");
   });
 });

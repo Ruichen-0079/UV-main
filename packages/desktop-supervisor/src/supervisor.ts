@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
+import { buildChildProcessEnv, deriveConfigFromEnv } from "./config.js";
 import {
   mem0HealthOk,
   ollamaTagsOk,
@@ -26,6 +27,8 @@ import {
 import type {
   ManagedServiceSpec,
   ProcessMetadata,
+  RuntimeConfigUpdate,
+  RuntimeConfigUpdateResult,
   ServiceId,
   ServiceLifecycle,
   ServiceOwnership,
@@ -50,13 +53,38 @@ type InternalService = {
 
 export type SupervisorListener = (snapshot: SupervisorSnapshot) => void;
 
+/** Secret keys that must never leak into status/config responses. */
+const SECRET_ENV_KEYS = new Set(["DEEPSEEK_API_KEY", "DATABASE_URL"]);
+
 export class DesktopSupervisor {
   private readonly services = new Map<ServiceId, InternalService>();
   private shuttingDown = false;
   private readonly listeners = new Set<SupervisorListener>();
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Snapshot of process.env + initial config.env at construction.
+   * Dynamic user overrides never permanently destroy these fallbacks.
+   */
+  private readonly baseEnv: Record<string, string>;
+  /**
+   * Keys currently held only by the dynamic user-override layer.
+   * Cleared on unset so child env falls back to baseEnv.
+   */
+  private readonly dynamicOverrideKeys = new Set<string>();
+  /** Serializes config updates against service start/restart/stop. */
+  private configOp: Promise<void> | null = null;
 
-  constructor(private readonly config: SupervisorConfig) {
+  constructor(private config: SupervisorConfig) {
+    // Base layer: shell/process + bootstrap config.env (e.g. .env files).
+    const base: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (typeof value === "string") base[key] = value;
+    }
+    for (const [key, value] of Object.entries(config.env)) {
+      base[key] = value;
+    }
+    this.baseEnv = base;
+
     fs.mkdirSync(config.stateDirectory, { recursive: true });
     for (const spec of this.buildSpecs()) {
       this.services.set(spec.id, {
@@ -79,6 +107,116 @@ export class DesktopSupervisor {
     return this.config;
   }
 
+  /**
+   * Atomically apply env overrides from Tauri without restarting the Supervisor
+   * or any services. Subsequent start/restart use the new URLs and env.
+   * Does not spawn or kill processes (including external).
+   */
+  async applyRuntimeConfig(update: RuntimeConfigUpdate): Promise<RuntimeConfigUpdateResult> {
+    if (this.shuttingDown) {
+      throw new Error("Supervisor is shutting down.");
+    }
+
+    const appliedEnvKeys: string[] = [];
+    const unsetEnvKeys: string[] = [];
+
+    await this.withConfigLock(async () => {
+      // Wait for in-flight service ops so restart never reads a half-applied map.
+      const ops = [...this.services.values()].map((s) => s.op).filter(Boolean) as Promise<void>[];
+      if (ops.length > 0) {
+        await Promise.allSettled(ops);
+      }
+
+      const unset = Array.isArray(update.unsetEnv) ? update.unsetEnv : [];
+      for (const rawKey of unset) {
+        const key = String(rawKey ?? "").trim();
+        if (!key) continue;
+        this.clearDynamicOverride(key);
+        unsetEnvKeys.push(key);
+      }
+
+      const incoming = update.env && typeof update.env === "object" ? update.env : {};
+      for (const [rawKey, rawValue] of Object.entries(incoming)) {
+        const key = String(rawKey ?? "").trim();
+        if (!key) continue;
+        const value = rawValue == null ? "" : String(rawValue);
+        if (value.trim() === "") {
+          // Empty means unset, never store blank secrets.
+          this.clearDynamicOverride(key);
+          if (!unsetEnvKeys.includes(key)) unsetEnvKeys.push(key);
+          continue;
+        }
+        this.config.env[key] = value;
+        process.env[key] = value;
+        this.dynamicOverrideKeys.add(key);
+        appliedEnvKeys.push(key);
+      }
+
+      const derived = deriveConfigFromEnv(this.config.repositoryRoot, this.config.env);
+      // Preserve TTS start commands when the update payload does not re-supply them
+      // (Rust only sends user-settings keys, not YUVI_TTS_*_START_COMMAND).
+      const keepTtsWrapper = this.config.ttsWrapperStart;
+      const keepTtsUpstream = this.config.ttsUpstreamStart;
+      Object.assign(this.config, derived);
+      if (!derived.ttsWrapperStart && keepTtsWrapper) {
+        this.config.ttsWrapperStart = keepTtsWrapper;
+      }
+      if (!derived.ttsUpstreamStart && keepTtsUpstream) {
+        this.config.ttsUpstreamStart = keepTtsUpstream;
+      }
+
+      this.rebuildSpecsInPlace();
+    });
+
+    this.emit();
+    return {
+      ok: true,
+      // Key names only — never values. Secret names may appear so clients know unset ran.
+      appliedEnvKeys: appliedEnvKeys.filter((k) => !SECRET_ENV_KEYS.has(k)),
+      unsetEnvKeys: [...new Set(unsetEnvKeys)],
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  /**
+   * Remove a dynamic user override and restore base-env fallback when present.
+   * Never leaves a stale dynamic secret in config.env / process.env / child env.
+   */
+  private clearDynamicOverride(key: string): void {
+    this.dynamicOverrideKeys.delete(key);
+    const baseValue = this.baseEnv[key];
+    if (baseValue !== undefined) {
+      this.config.env[key] = baseValue;
+      process.env[key] = baseValue;
+    } else {
+      delete this.config.env[key];
+      delete process.env[key];
+    }
+  }
+
+  /** Effective env for managed child spawn: base + current config overrides + command.env. */
+  private effectiveChildEnv(commandEnv: Record<string, string>): NodeJS.ProcessEnv {
+    // baseEnv first, then live config.env (includes dynamic overrides or restored base),
+    // then per-command env. Do not read live process.env so shell pollution cannot leak.
+    return buildChildProcessEnv(
+      { ...this.baseEnv, ...this.config.env },
+      commandEnv,
+      []
+    );
+  }
+
+  /** Test/helper: env that would be used for the next spawn of a service. */
+  resolveSpawnEnv(id: ServiceId): NodeJS.ProcessEnv | null {
+    const svc = this.services.get(id);
+    if (!svc?.spec.startCommand) return null;
+    return this.effectiveChildEnv(svc.spec.startCommand.env);
+  }
+
+  /** Test/helper: current health URL for a service after config updates. */
+  resolveHealthUrl(id: ServiceId): string | null {
+    return this.services.get(id)?.spec.healthUrl ?? null;
+  }
+
   onChange(listener: SupervisorListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -94,7 +232,7 @@ export class DesktopSupervisor {
     };
   }
 
-  startBackgroundRefresh(intervalMs = 3_000): void {
+  startBackgroundRefresh(intervalMs = 5_000): void {
     if (this.refreshTimer) return;
     this.refreshTimer = setInterval(() => {
       void this.refreshAll().catch(() => {
@@ -169,15 +307,18 @@ export class DesktopSupervisor {
       }
       return this.snapshot();
     }
-    const svc = this.require(id);
-    await this.queue(svc, async () => {
-      svc.status = "restarting";
-      svc.summary = "Restarting…";
-      this.emit();
-      if (svc.ownership === "owned" && svc.pid) {
-        await this.stopOwned(svc);
-      }
-      await this.ensureService(id);
+    // Serialize against config updates so spawn always sees a consistent env map.
+    await this.withConfigLock(async () => {
+      const svc = this.require(id);
+      await this.queue(svc, async () => {
+        svc.status = "restarting";
+        svc.summary = "Restarting…";
+        this.emit();
+        if (svc.ownership === "owned" && svc.pid) {
+          await this.stopOwned(svc);
+        }
+        await this.startManagedIfNeeded(id);
+      });
     });
     return this.snapshot();
   }
@@ -202,86 +343,103 @@ export class DesktopSupervisor {
 
   async ensureService(id: ServiceId): Promise<void> {
     if (this.shuttingDown) return;
+    await this.withConfigLock(async () => {
+      const svc = this.require(id);
+      await this.queue(svc, async () => {
+        await this.startManagedIfNeeded(id);
+      });
+    });
+  }
+
+  /**
+   * Probe then spawn if needed. Must run inside a service queue (and config lock
+   * when racing with applyRuntimeConfig). Does not re-enter queue.
+   */
+  private async startManagedIfNeeded(id: ServiceId): Promise<void> {
+    if (this.shuttingDown) return;
     const svc = this.require(id);
-    await this.queue(svc, async () => {
-      await this.refreshService(id);
-      if (svc.status === "healthy" || svc.status === "degraded") {
+    await this.refreshService(id);
+    if (svc.status === "healthy" || svc.status === "degraded") {
+      return;
+    }
+    if (!svc.spec.managed || !svc.spec.startCommand) {
+      svc.status = "unavailable";
+      svc.summary = svc.spec.managed
+        ? "No start command configured."
+        : "External dependency — not managed by YUVI.";
+      return;
+    }
+    if (svc.ownership === "external") {
+      // Healthy external already handled; if external but unhealthy with protocol mismatch, do not take over.
+      if (svc.status === "unavailable" && svc.detail?.includes("protocol")) {
         return;
       }
-      if (!svc.spec.managed || !svc.spec.startCommand) {
-        svc.status = "unavailable";
-        svc.summary = svc.spec.managed
-          ? "No start command configured."
-          : "External dependency — not managed by YUVI.";
-        return;
-      }
-      if (svc.ownership === "external") {
-        // Healthy external already handled; if external but unhealthy with protocol mismatch, do not take over.
-        if (svc.status === "unavailable" && svc.detail?.includes("protocol")) {
-          return;
-        }
-      }
+    }
 
-      svc.status = "starting";
-      svc.summary = "Starting…";
-      svc.lastError = null;
-      this.emit();
+    svc.status = "starting";
+    svc.summary = "Starting…";
+    svc.lastError = null;
+    this.emit();
 
-      try {
-        const child = spawnManagedProcess(svc.spec.startCommand, {
+    try {
+      const spawnEnv = this.effectiveChildEnv(svc.spec.startCommand.env);
+      const child = spawnManagedProcess(
+        svc.spec.startCommand,
+        {
           out: svc.spec.logFile,
           err: `${svc.spec.logFile}.err`
-        });
-        const pid = child.pid;
-        if (!pid) {
-          throw new Error("spawn returned no pid");
-        }
-        // Wait briefly so process creation time is queryable.
-        await sleep(200);
-        const info = getProcessInfo(pid);
-        const startedAt = (info?.createdAtUtc ?? new Date()).toISOString();
-        const metadata: ProcessMetadata = {
-          schemaVersion: PROCESS_METADATA_VERSION,
-          role: svc.spec.role,
-          pid,
-          repositoryRoot: this.config.repositoryRoot,
-          stateDirectory: this.config.stateDirectory,
-          commandMarker: svc.spec.startCommand.commandMarker,
-          processStartedAtUtc: startedAt,
-          createdAtUtc: new Date().toISOString(),
-          ownershipToken: this.config.ownershipToken,
-          instanceId: this.config.instanceId
-        };
-        writeProcessMetadata(svc.spec.metadataFile, metadata);
-        svc.child = child;
-        svc.pid = pid;
-        svc.startedAt = startedAt;
-        svc.ownership = "owned";
-
-        child.on("exit", () => {
-          if (svc.pid === pid) {
-            svc.child = null;
-            // refresh will mark unavailable/stale
-          }
-        });
-
-        const ready = await this.waitReady(svc, svc.spec.startTimeoutMs);
-        if (!ready) {
-          svc.status = "unavailable";
-          svc.summary = "Started but readiness timed out.";
-          svc.lastError = "readiness timeout";
-          // Leave process owned so user can stop/restart; do not kill external-like failures automatically.
-          return;
-        }
-        await this.refreshService(id);
-      } catch (error) {
-        svc.status = "unavailable";
-        svc.summary = "Start failed.";
-        svc.lastError = error instanceof Error ? error.message : String(error);
-        svc.ownership = "none";
-        svc.pid = null;
+        },
+        { env: spawnEnv }
+      );
+      const pid = child.pid;
+      if (!pid) {
+        throw new Error("spawn returned no pid");
       }
-    });
+      // Wait briefly so process creation time is queryable.
+      await sleep(200);
+      const info = getProcessInfo(pid);
+      const startedAt = (info?.createdAtUtc ?? new Date()).toISOString();
+      const metadata: ProcessMetadata = {
+        schemaVersion: PROCESS_METADATA_VERSION,
+        role: svc.spec.role,
+        pid,
+        repositoryRoot: this.config.repositoryRoot,
+        stateDirectory: this.config.stateDirectory,
+        commandMarker: svc.spec.startCommand.commandMarker,
+        processStartedAtUtc: startedAt,
+        createdAtUtc: new Date().toISOString(),
+        ownershipToken: this.config.ownershipToken,
+        instanceId: this.config.instanceId
+      };
+      writeProcessMetadata(svc.spec.metadataFile, metadata);
+      svc.child = child;
+      svc.pid = pid;
+      svc.startedAt = startedAt;
+      svc.ownership = "owned";
+
+      child.on("exit", () => {
+        if (svc.pid === pid) {
+          svc.child = null;
+          // refresh will mark unavailable/stale
+        }
+      });
+
+      const ready = await this.waitReady(svc, svc.spec.startTimeoutMs);
+      if (!ready) {
+        svc.status = "unavailable";
+        svc.summary = "Started but readiness timed out.";
+        svc.lastError = "readiness timeout";
+        // Leave process owned so user can stop/restart; do not kill external-like failures automatically.
+        return;
+      }
+      await this.refreshService(id);
+    } catch (error) {
+      svc.status = "unavailable";
+      svc.summary = "Start failed.";
+      svc.lastError = error instanceof Error ? error.message : String(error);
+      svc.ownership = "none";
+      svc.pid = null;
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -467,9 +625,6 @@ export class DesktopSupervisor {
 
   private buildSpecs(): ManagedServiceSpec[] {
     const state = this.config.stateDirectory;
-    const runtimeOrigin = parseUrlOrigin(this.config.runtimeUrl);
-    const mem0Origin = parseUrlOrigin(this.config.mem0Url);
-    const ttsW = parseUrlOrigin(this.config.ttsWrapperUrl);
     const ttsU = parseUrlOrigin(this.config.ttsUpstreamUrl);
     const ollama = parseUrlOrigin(this.config.ollamaUrl);
     const db = this.config.databaseUrl ? tryParseDb(this.config.databaseUrl) : null;
@@ -560,6 +715,45 @@ export class DesktopSupervisor {
         logFile: path.join(state, "tts-upstream.log")
       }
     ];
+  }
+
+  /** Replace service specs in place; keep live ownership/pid state. Does not spawn/kill. */
+  private rebuildSpecsInPlace(): void {
+    for (const next of this.buildSpecs()) {
+      const existing = this.services.get(next.id);
+      if (existing) {
+        existing.spec = next;
+      } else {
+        this.services.set(next.id, {
+          spec: next,
+          status: "stopped",
+          ownership: "none",
+          summary: "Not checked yet",
+          detail: null,
+          lastError: null,
+          pid: null,
+          startedAt: null,
+          child: null,
+          autoRecovered: false,
+          op: null
+        });
+      }
+    }
+  }
+
+  private async withConfigLock(work: () => Promise<void>): Promise<void> {
+    const previous = this.configOp ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.configOp = previous.catch(() => undefined).then(() => gate);
+    await previous.catch(() => undefined);
+    try {
+      await work();
+    } finally {
+      release();
+    }
   }
 
   private require(id: ServiceId): InternalService {

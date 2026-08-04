@@ -10,7 +10,7 @@ import {
   createMemoryBackend
 } from "../packages/memory/src/index.ts";
 
-const baseUrl = process.env.MEM0_BASE_URL ?? "http://127.0.0.1:6130";
+const baseUrl = process.env.MEM0_BASE_URL ?? "http://127.0.0.1:6131";
 // Unique user per run avoids leftover facts polluting forget/recall assertions.
 const user =
   process.env.MEMORY_SUBJECT_USER_ID ??
