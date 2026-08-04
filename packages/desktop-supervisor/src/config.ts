@@ -2,7 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { envFlag, envString, loadYuviEnvFiles } from "./env.js";
-import { canonicalPath, defaultStateDirectory, parseUrlOrigin } from "./paths.js";
+import {
+  canonicalPath,
+  defaultStateDirectory,
+  isWindowsStylePath,
+  parseUrlOrigin
+} from "./paths.js";
+import { readMem0Manifest, resolveMem0ManifestExecutable } from "./mem0-manifest.js";
 import { readRuntimeManifest, resolveManifestFile } from "./runtime-manifest.js";
 import type {
   StartCommandSpec,
@@ -24,6 +30,7 @@ export type LoadPackagedSupervisorConfigInput = {
   resourceRoot: string;
   dataRoot: string;
   runtimeManifestPath?: string | undefined;
+  mem0ManifestPath?: string | undefined;
   stateDirectory?: string | undefined;
   instanceId?: string | undefined;
   ownershipToken?: string | undefined;
@@ -92,8 +99,13 @@ export function loadPackagedSupervisorConfig(
     input.runtimeManifestPath ??
       path.join(resourceRoot, "runtime", "runtime-manifest.json")
   );
+  const mem0ManifestPath = canonicalPath(
+    input.mem0ManifestPath?.trim() || path.join(resourceRoot, "mem0", "mem0-manifest.json")
+  );
   // Validate early so bootstrap fails with a clear packaging error.
   readRuntimeManifest(runtimeManifestPath);
+  const mem0Manifest = readMem0Manifest(mem0ManifestPath);
+  resolveMem0ManifestExecutable(mem0ManifestPath, mem0Manifest);
 
   const instanceId = input.instanceId ?? randomUUID();
   const ownershipToken = input.ownershipToken ?? randomUUID();
@@ -119,7 +131,8 @@ export function loadPackagedSupervisorConfig(
     mode: "packaged",
     resourceRoot,
     dataRoot,
-    runtimeManifestPath
+    runtimeManifestPath,
+    mem0ManifestPath
   };
   const derived = deriveConfigFromEnv(layout, env);
 
@@ -183,14 +196,17 @@ export function deriveConfigFromEnv(
 
   const ownershipRoot =
     layout.mode === "development" ? layout.repositoryRoot : layout.resourceRoot;
+  const managedMem0 =
+    layout.mode === "packaged" &&
+    memoryBackend === "mem0" &&
+    envFlag(env, "YUVI_AUTOSTART_MEM0", false);
 
   return {
     memoryBackend,
     autostartRuntime: envFlag(env, "YUVI_AUTOSTART_RUNTIME", true),
-    // Packaged P2 does not ship Mem0 sidecar — never autostart managed mem0.
     autostartMem0:
       layout.mode === "packaged"
-        ? false
+        ? managedMem0
         : envFlag(env, "YUVI_AUTOSTART_MEM0", memoryBackend === "mem0"),
     autostartTts: envFlag(env, "YUVI_AUTOSTART_TTS", false),
     runtimeUrl,
@@ -201,7 +217,11 @@ export function deriveConfigFromEnv(
     databaseUrl,
     runtimeStart: resolveRuntimeStartForLayout(layout, env, runtimePort),
     mem0Start:
-      layout.mode === "packaged" ? null : resolveMem0Start(ownershipRoot, env, mem0Url),
+      layout.mode === "packaged"
+        ? managedMem0
+          ? resolvePackagedMem0Start(layout, env, mem0Url)
+          : null
+        : resolveMem0Start(ownershipRoot, env, mem0Url),
     ttsWrapperStart:
       layout.mode === "packaged"
         ? null
@@ -318,6 +338,109 @@ export function resolvePackagedRuntimeStart(
     // Specific marker — not bare "node.exe".
     commandMarker: "yuvi-runtime-server.mjs"
   };
+}
+
+export function resolvePackagedMem0Start(
+  layout: Extract<SupervisorLayout, { mode: "packaged" }>,
+  env: Record<string, string>,
+  mem0Url: string
+): StartCommandSpec {
+  const manifest = readMem0Manifest(layout.mem0ManifestPath);
+  const executable = resolveMem0ManifestExecutable(layout.mem0ManifestPath, manifest);
+  const port = resolveManagedMem0Port(mem0Url);
+  const resourceDir = canonicalPath(path.dirname(layout.mem0ManifestPath));
+  const dataDir = resolvePackagedMem0DataDir(layout, env);
+  const logDir = resolvePackagedMem0LogDir(layout, env);
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+
+  const commandEnv: Record<string, string> = {
+    YUVI_MEM0_PACKAGED: "1",
+    YUVI_MEM0_RESOURCE_DIR: resourceDir,
+    YUVI_MEM0_DATA_DIR: dataDir,
+    YUVI_MEM0_LOG_DIR: logDir,
+    MEM0_DIR: dataDir,
+    MEM0_TELEMETRY: "false",
+    MEM0_SIDECAR_HOST: "127.0.0.1",
+    MEM0_SIDECAR_PORT: String(port)
+  };
+  const optionalKeys = [
+    "MEM0_OLLAMA_BASE_URL",
+    "MEM0_LLM_PROVIDER",
+    "MEM0_LLM_MODEL",
+    "MEM0_LLM_API_KEY",
+    "MEM0_LLM_BASE_URL",
+    "MEM0_LLM_TEMPERATURE",
+    "MEM0_LLM_TIMEOUT_MS",
+    "MEM0_REQUEST_TIMEOUT_MS",
+    "MEM0_LOG_CONTENT",
+    "MEM0_HEALTH_EMBED_CACHE_TTL_S"
+  ];
+  for (const key of optionalKeys) {
+    const value = env[key]?.trim();
+    if (value) commandEnv[key] = value;
+  }
+  const pgConnection = env["MEM0_PG_CONNECTION_STRING"]?.trim() || env["DATABASE_URL"]?.trim();
+  if (pgConnection) commandEnv["MEM0_PG_CONNECTION_STRING"] = pgConnection;
+
+  return {
+    file: executable,
+    args: [],
+    cwd: dataDir,
+    env: commandEnv,
+    commandMarker: executable
+  };
+}
+
+function resolveManagedMem0Port(mem0Url: string): number {
+  let parsed: URL;
+  try {
+    parsed = new URL(mem0Url);
+  } catch {
+    throw new Error("MEM0_BASE_URL must be a valid loopback HTTP URL.");
+  }
+  if (parsed.protocol !== "http:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("MEM0_BASE_URL must be a loopback HTTP URL without credentials.");
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+    throw new Error("Managed MEM0_BASE_URL must target loopback.");
+  }
+  if (parsed.pathname !== "" && parsed.pathname !== "/") {
+    throw new Error("MEM0_BASE_URL must not include a path.");
+  }
+  const port = parsed.port ? Number(parsed.port) : 80;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("MEM0_BASE_URL port must be between 1 and 65535.");
+  }
+  return port;
+}
+
+function resolvePackagedMem0DataDir(
+  layout: Extract<SupervisorLayout, { mode: "packaged" }>,
+  env: Record<string, string>
+): string {
+  const explicit = env["YUVI_MEM0_DATA_DIR"]?.trim();
+  return explicit
+    ? resolveAbsolutePackagedPath(explicit, "YUVI_MEM0_DATA_DIR")
+    : canonicalPath(path.join(path.dirname(layout.dataRoot), "Mem0", "data"));
+}
+
+function resolvePackagedMem0LogDir(
+  layout: Extract<SupervisorLayout, { mode: "packaged" }>,
+  env: Record<string, string>
+): string {
+  const explicit = env["YUVI_MEM0_LOG_DIR"]?.trim();
+  return explicit
+    ? resolveAbsolutePackagedPath(explicit, "YUVI_MEM0_LOG_DIR")
+    : canonicalPath(path.join(path.dirname(layout.dataRoot), "Mem0", "logs"));
+}
+
+function resolveAbsolutePackagedPath(value: string, key: string): string {
+  if (!path.isAbsolute(value) && !isWindowsStylePath(value)) {
+    throw new Error(`${key} must be an absolute path.`);
+  }
+  return canonicalPath(value);
 }
 
 /**

@@ -90,6 +90,75 @@ function baseConfig(overrides: Partial<SupervisorConfig> = {}): SupervisorConfig
 }
 
 describe("DesktopSupervisor classification", () => {
+  it("treats packaged Mem0 without a start command as external detect-only", async () => {
+    const resourceRoot = makeTempRepositoryRoot();
+    const config = baseConfig({
+      layout: {
+        mode: "packaged",
+        resourceRoot,
+        dataRoot: path.join(resourceRoot, "data"),
+        runtimeManifestPath: path.join(resourceRoot, "runtime", "runtime-manifest.json"),
+        mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
+      },
+      repositoryRoot: resourceRoot,
+      mem0Start: null,
+      autostartMem0: false
+    });
+    vi.spyOn(health, "probeHttpHealth").mockImplementation(async (url) => {
+      if (url.includes("6131")) {
+        return {
+          ok: true,
+          statusCode: 200,
+          protocolOk: true,
+          message: "healthy external mem0",
+          latencyMs: 1
+        };
+      }
+      return { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
+    });
+    vi.spyOn(health, "probeTcp").mockResolvedValue({
+      ok: false,
+      statusCode: null,
+      protocolOk: false,
+      message: "closed",
+      latencyMs: 1
+    });
+    const supervisor = new DesktopSupervisor(config);
+    await supervisor.refreshAll();
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(mem0?.managed).toBe(false);
+    expect(mem0?.ownership).toBe("external");
+    expect(mem0?.canStop).toBe(false);
+  });
+
+  it("marks packaged Mem0 as managed only when a manifest command is present", () => {
+    const resourceRoot = makeTempRepositoryRoot();
+    const mem0Start: StartCommandSpec = {
+      file: path.join(resourceRoot, "mem0", "yuvi-mem0.exe"),
+      args: [],
+      cwd: path.join(resourceRoot, "data"),
+      env: { YUVI_MEM0_PACKAGED: "1" },
+      commandMarker: path.join(resourceRoot, "mem0", "yuvi-mem0.exe")
+    };
+    const supervisor = new DesktopSupervisor(
+      baseConfig({
+        layout: {
+          mode: "packaged",
+          resourceRoot,
+          dataRoot: path.join(resourceRoot, "data"),
+          runtimeManifestPath: path.join(resourceRoot, "runtime", "runtime-manifest.json"),
+          mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
+        },
+        repositoryRoot: resourceRoot,
+        mem0Start,
+        autostartMem0: true
+      })
+    );
+    expect(supervisor.snapshot().services.find((service) => service.id === "mem0")?.managed).toBe(
+      true
+    );
+  });
+
   it("marks healthy runtime without metadata as external", async () => {
     vi.spyOn(health, "probeHttpHealth").mockImplementation(async (url) => {
       if (url.includes("6121")) {

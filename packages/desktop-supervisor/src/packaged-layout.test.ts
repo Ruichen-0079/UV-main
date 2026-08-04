@@ -22,6 +22,7 @@ function makePackagedResourceTree(): {
   resourceRoot: string;
   dataRoot: string;
   manifestPath: string;
+  mem0ManifestPath: string;
   nodeExe: string;
   entry: string;
 } {
@@ -45,7 +46,24 @@ function makePackagedResourceTree(): {
       runtimeEntry: "yuvi-runtime-server.mjs"
     })
   );
-  return { resourceRoot, dataRoot, manifestPath, nodeExe, entry };
+  const mem0Dir = path.join(resourceRoot, "mem0");
+  fs.mkdirSync(path.join(mem0Dir, "_internal"), { recursive: true });
+  fs.writeFileSync(path.join(mem0Dir, "yuvi-mem0.exe"), "MZ-placeholder");
+  const mem0ManifestPath = path.join(mem0Dir, "mem0-manifest.json");
+  fs.writeFileSync(
+    mem0ManifestPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      protocolVersion: 1,
+      platform: "win32",
+      arch: "x64",
+      executable: "yuvi-mem0.exe",
+      healthPath: "/health",
+      defaultHost: "127.0.0.1",
+      defaultPort: 6131
+    })
+  );
+  return { resourceRoot, dataRoot, manifestPath, mem0ManifestPath, nodeExe, entry };
 }
 
 describe("packaged supervisor layout", () => {
@@ -65,7 +83,8 @@ describe("packaged supervisor layout", () => {
     const cfg = loadPackagedSupervisorConfig({
       resourceRoot: tree.resourceRoot,
       dataRoot: tree.dataRoot,
-      runtimeManifestPath: tree.manifestPath
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: tree.mem0ManifestPath
     });
     expect(cfg.layout.mode).toBe("packaged");
     expect(cfg.runtimeStart).not.toBeNull();
@@ -86,7 +105,8 @@ describe("packaged supervisor layout", () => {
       mode: "packaged" as const,
       resourceRoot: tree.resourceRoot,
       dataRoot: tree.dataRoot,
-      runtimeManifestPath: tree.manifestPath
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: tree.mem0ManifestPath
     };
 
     // Explicit wins even when bundled exists.
@@ -152,7 +172,8 @@ describe("packaged supervisor layout", () => {
       const cfg = loadPackagedSupervisorConfig({
         resourceRoot: tree.resourceRoot,
         dataRoot: tree.dataRoot,
-        runtimeManifestPath: tree.manifestPath
+        runtimeManifestPath: tree.manifestPath,
+        mem0ManifestPath: tree.mem0ManifestPath
       });
       expect(cfg.env["DEEPSEEK_API_KEY"]).toBeUndefined();
     } finally {
@@ -186,7 +207,8 @@ describe("packaged supervisor layout", () => {
         mode: "packaged",
         resourceRoot,
         dataRoot,
-        runtimeManifestPath: manifestPath
+        runtimeManifestPath: manifestPath,
+        mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
       },
       { SERVER_PORT: "6121" },
       "6121"
@@ -201,7 +223,8 @@ describe("packaged supervisor layout", () => {
       mode: "packaged" as const,
       resourceRoot: tree.resourceRoot,
       dataRoot: tree.dataRoot,
-      runtimeManifestPath: tree.manifestPath
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: tree.mem0ManifestPath
     };
     const first = deriveConfigFromEnv(layout, {
       SERVER_PORT: "6121",
@@ -215,4 +238,154 @@ describe("packaged supervisor layout", () => {
     expect(second.runtimeStart?.commandMarker).toBe("yuvi-runtime-server.mjs");
     expect(second.runtimeStart?.env["SERVER_PORT"]).toBe("6121");
   });
+
+  it("stores the default and explicit Mem0 manifest paths", () => {
+    const tree = makePackagedResourceTree();
+    const cfg = loadPackagedSupervisorConfig({
+      resourceRoot: tree.resourceRoot,
+      dataRoot: tree.dataRoot,
+      runtimeManifestPath: tree.manifestPath,
+      env: { YUVI_AUTOSTART_MEM0: "false" }
+    });
+    expect(cfg.layout.mode).toBe("packaged");
+    if (cfg.layout.mode !== "packaged") throw new Error("expected packaged layout");
+    expect(cfg.layout.mem0ManifestPath).toBe(path.join(tree.resourceRoot, "mem0", "mem0-manifest.json"));
+
+    const alternateDir = path.join(tree.resourceRoot, "alternate-mem0");
+    fs.mkdirSync(alternateDir, { recursive: true });
+    const alternateManifest = path.join(alternateDir, "mem0-manifest.json");
+    fs.writeFileSync(path.join(alternateDir, "yuvi-mem0.exe"), "MZ");
+    fs.writeFileSync(alternateManifest, JSON.stringify({ ...validMem0Manifest(), defaultPort: 6142 }));
+    const explicit = loadPackagedSupervisorConfig({
+      resourceRoot: tree.resourceRoot,
+      dataRoot: tree.dataRoot,
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: alternateManifest,
+      env: { YUVI_AUTOSTART_MEM0: "false" }
+    });
+    expect(explicit.layout.mode === "packaged" && explicit.layout.mem0ManifestPath).toBe(
+      alternateManifest
+    );
+  });
+
+  it("validates the Mem0 manifest during packaged config bootstrap", () => {
+    const tree = makePackagedResourceTree();
+    fs.rmSync(tree.mem0ManifestPath);
+    expect(() =>
+      loadPackagedSupervisorConfig({
+        resourceRoot: tree.resourceRoot,
+        dataRoot: tree.dataRoot,
+        runtimeManifestPath: tree.manifestPath
+      })
+    ).toThrow(/mem0 manifest missing/i);
+  });
+
+  it("gates packaged managed Mem0 on backend and YUVI_AUTOSTART_MEM0", () => {
+    const tree = makePackagedResourceTree();
+    const layout = {
+      mode: "packaged" as const,
+      resourceRoot: tree.resourceRoot,
+      dataRoot: tree.dataRoot,
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: tree.mem0ManifestPath
+    };
+    const legacy = deriveConfigFromEnv(layout, {
+      MEMORY_BACKEND: "legacy",
+      YUVI_AUTOSTART_MEM0: "true"
+    });
+    expect(legacy.autostartMem0).toBe(false);
+    expect(legacy.mem0Start).toBeNull();
+
+    const disabled = deriveConfigFromEnv(layout, { YUVI_AUTOSTART_MEM0: "false" });
+    expect(disabled.autostartMem0).toBe(false);
+    expect(disabled.mem0Start).toBeNull();
+
+    const managed = deriveConfigFromEnv(layout, {
+      YUVI_AUTOSTART_MEM0: "true",
+      MEM0_BASE_URL: "http://127.0.0.1:6147"
+    });
+    expect(managed.autostartMem0).toBe(true);
+    expect(managed.mem0Start).not.toBeNull();
+  });
+
+  it("validates managed loopback URL and preserves external remote probing", () => {
+    const tree = makePackagedResourceTree();
+    const layout = {
+      mode: "packaged" as const,
+      resourceRoot: tree.resourceRoot,
+      dataRoot: tree.dataRoot,
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: tree.mem0ManifestPath
+    };
+    const external = deriveConfigFromEnv(layout, {
+      YUVI_AUTOSTART_MEM0: "false",
+      MEM0_BASE_URL: "https://memory.example.test:6131"
+    });
+    expect(external.mem0Start).toBeNull();
+    expect(() =>
+      deriveConfigFromEnv(layout, {
+        YUVI_AUTOSTART_MEM0: "true",
+        MEM0_BASE_URL: "http://memory.example.test:6131"
+      })
+    ).toThrow(/loopback/i);
+  });
+
+  it("builds packaged Mem0 paths, env, and command marker without secret args", () => {
+    const tree = makePackagedResourceTree();
+    const layout = {
+      mode: "packaged" as const,
+      resourceRoot: tree.resourceRoot,
+      dataRoot: tree.dataRoot,
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: tree.mem0ManifestPath
+    };
+    const secret = "P3_CONFIG_SECRET_DO_NOT_LOG";
+    const resourceEntriesBefore = fs.readdirSync(tree.resourceRoot).sort();
+    const start = deriveConfigFromEnv(layout, {
+      YUVI_AUTOSTART_MEM0: "true",
+      MEM0_BASE_URL: "http://127.0.0.1:6197",
+      YUVI_MEM0_DATA_DIR: path.join(tree.dataRoot, "data with spaces"),
+      YUVI_MEM0_LOG_DIR: path.join(tree.dataRoot, "logs with spaces"),
+      MEM0_PG_CONNECTION_STRING: "postgresql://yuvi:explicit@127.0.0.1:1/yuvi",
+      DATABASE_URL: "postgresql://yuvi:fallback@127.0.0.1:1/yuvi",
+      MEM0_OLLAMA_BASE_URL: "http://127.0.0.1:11434",
+      MEM0_LLM_PROVIDER: "deepseek",
+      MEM0_LLM_API_KEY: secret,
+      MEM0_REQUEST_TIMEOUT_MS: "1000"
+    }).mem0Start;
+    expect(start).not.toBeNull();
+    expect(start?.file).toBe(path.join(tree.resourceRoot, "mem0", "yuvi-mem0.exe"));
+    expect(start?.args).toEqual([]);
+    expect(start?.cwd).toBe(path.join(tree.dataRoot, "data with spaces"));
+    expect(start?.commandMarker).toBe(start?.file);
+    expect(start?.env).toMatchObject({
+      YUVI_MEM0_PACKAGED: "1",
+      YUVI_MEM0_RESOURCE_DIR: path.join(tree.resourceRoot, "mem0"),
+      YUVI_MEM0_DATA_DIR: path.join(tree.dataRoot, "data with spaces"),
+      YUVI_MEM0_LOG_DIR: path.join(tree.dataRoot, "logs with spaces"),
+      MEM0_DIR: path.join(tree.dataRoot, "data with spaces"),
+      MEM0_TELEMETRY: "false",
+      MEM0_SIDECAR_HOST: "127.0.0.1",
+      MEM0_SIDECAR_PORT: "6197",
+      MEM0_PG_CONNECTION_STRING: "postgresql://yuvi:explicit@127.0.0.1:1/yuvi",
+      MEM0_LLM_API_KEY: secret
+    });
+    expect(start?.env["DATABASE_URL"]).toBeUndefined();
+    expect(JSON.stringify(start?.args)).not.toContain(secret);
+    expect(start?.commandMarker).not.toContain(secret);
+    expect(fs.readdirSync(tree.resourceRoot).sort()).toEqual(resourceEntriesBefore);
+  });
 });
+
+function validMem0Manifest() {
+  return {
+    schemaVersion: 1,
+    protocolVersion: 1,
+    platform: "win32",
+    arch: "x64",
+    executable: "yuvi-mem0.exe",
+    healthPath: "/health",
+    defaultHost: "127.0.0.1",
+    defaultPort: 6131
+  };
+}

@@ -728,8 +728,12 @@ export class DesktopSupervisor {
         id: "mem0",
         role: "mem0",
         label: "Memory (Mem0)",
-        managed: this.config.memoryBackend === "mem0",
-        autostart: this.config.autostartMem0 && this.config.memoryBackend === "mem0",
+        // A Mem0 service without a resolved start command is external/detect-only.
+        managed: this.config.memoryBackend === "mem0" && Boolean(this.config.mem0Start),
+        autostart:
+          this.config.autostartMem0 &&
+          this.config.memoryBackend === "mem0" &&
+          Boolean(this.config.mem0Start),
         healthUrl: `${this.config.mem0Url.replace(/\/$/, "")}/health`,
         startTimeoutMs: 60_000,
         readinessIntervalMs: 800,

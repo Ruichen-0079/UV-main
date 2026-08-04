@@ -1,6 +1,7 @@
 export type {
   HealthProbeResult,
   ManagedServiceSpec,
+  Mem0Manifest,
   OwnershipResult,
   OwnershipStatus,
   ProcessInfo,
@@ -26,6 +27,7 @@ export {
   deriveConfigFromEnv,
   buildChildProcessEnv,
   resolvePackagedLive2DEnv,
+  resolvePackagedMem0Start,
   resolvePackagedRuntimeStart,
   resolveRuntimeStartForLayout
 } from "./config.js";
@@ -34,6 +36,11 @@ export {
   validateRuntimeManifest,
   resolveManifestFile
 } from "./runtime-manifest.js";
+export {
+  readMem0Manifest,
+  validateMem0Manifest,
+  resolveMem0ManifestExecutable
+} from "./mem0-manifest.js";
 export { loadYuviEnvFiles, envFlag, envString } from "./env.js";
 export {
   probeHttpHealth,

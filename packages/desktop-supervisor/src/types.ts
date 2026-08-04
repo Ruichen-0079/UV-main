@@ -125,7 +125,19 @@ export type SupervisorLayout =
       resourceRoot: string;
       dataRoot: string;
       runtimeManifestPath: string;
+      mem0ManifestPath: string;
     };
+
+export type Mem0Manifest = {
+  schemaVersion: 1;
+  protocolVersion: 1;
+  platform: "win32";
+  arch: "x64";
+  executable: string;
+  healthPath: "/health";
+  defaultHost: "127.0.0.1";
+  defaultPort: number;
+};
 
 export type RuntimeManifest = {
   schemaVersion: 1;
