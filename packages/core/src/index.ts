@@ -12,7 +12,11 @@ import type {
   MemoryRetrievalResult,
   RetrievedMemoryDebug
 } from "@companion/memory";
-import { detectCurrentAffect } from "@companion/memory";
+import {
+  detectCurrentAffect,
+  detectExplicitForgetRequest,
+  detectExplicitRememberRequest
+} from "@companion/memory";
 import type { PromptBuildInput, PromptBuildOutput } from "@companion/prompt-builder";
 import type {
   AgentReplyEvent,
@@ -106,6 +110,26 @@ export type RuntimeMemoryPort = {
     speakerId?: string;
   }): Promise<MemoryRetrievalResult>;
   scoreImportance(text: string): number;
+  /** When true, formal LTM is Mem0 — Legacy extract/write must not run. */
+  isMem0Backend?(): boolean;
+  getBackendKind?(): "legacy" | "mem0";
+  storeConversationTurn?(input: {
+    userMessage: string;
+    assistantMessage: string;
+    sessionId?: string | undefined;
+    personaId?: string | null | undefined;
+    subjectUserId?: string | null | undefined;
+    userMessageId?: string | null | undefined;
+    assistantMessageId?: string | null | undefined;
+    traceId?: string | null | undefined;
+    conversationId?: string | null | undefined;
+    language?: string | null | undefined;
+  }): Promise<{ ok: boolean; skippedReason?: string; memoryId?: string; operation?: string }>;
+  forgetExplicitMemory?(input: {
+    userMessage: string;
+    personaId?: string | null | undefined;
+    subjectUserId?: string | null | undefined;
+  }): Promise<{ deleted: number; notFound: boolean; memoryIds: string[]; query: string }>;
   extractCandidates?(input: {
     sessionId?: string | undefined;
     userMessage: string;
@@ -595,8 +619,13 @@ export class RuntimeOrchestrator {
     // direct-context, memory, and TTS side effects must not duplicate or retract it.
     await this.publishAssistantMessage(userEvent, reply);
     if (memoryOptions.writeMemory) {
-      const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
-      this.updateLatestPromptPreviewExtraction(extraction);
+      // Mem0: fire-and-forget so TTS/UI are never blocked by infer=true latency.
+      if (this.options.memory.isMem0Backend?.() && this.options.memory.storeConversationTurn) {
+        this.scheduleMem0TurnWrite(userEvent, reply);
+      } else {
+        const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
+        this.updateLatestPromptPreviewExtraction(extraction);
+      }
     } else {
       this.updateLatestPromptPreviewExtraction({
         ...this.getMemoryExtractorStatus(),
@@ -819,8 +848,15 @@ export class RuntimeOrchestrator {
       if (!options.signal?.aborted) {
         try {
           if (memoryOptions.writeMemory) {
-            const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
-            this.updateLatestPromptPreviewExtraction(extraction);
+            if (
+              this.options.memory.isMem0Backend?.() &&
+              this.options.memory.storeConversationTurn
+            ) {
+              this.scheduleMem0TurnWrite(userEvent, reply, assistantMessageId);
+            } else {
+              const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
+              this.updateLatestPromptPreviewExtraction(extraction);
+            }
           } else {
             this.updateLatestPromptPreviewExtraction({
               ...this.getMemoryExtractorStatus(),
@@ -996,10 +1032,62 @@ export class RuntimeOrchestrator {
       text: event.payload.content,
       sourceTraceId: event.traceId
     });
+    // Explicit forget runs before search so deleted facts are not re-injected.
+    let forgetNote: string | undefined;
+    if (
+      memoryOptions.writeMemory &&
+      this.options.memory.isMem0Backend?.() &&
+      this.options.memory.forgetExplicitMemory &&
+      detectExplicitForgetRequest(event.payload.content)
+    ) {
+      try {
+        const forget = await this.options.memory.forgetExplicitMemory({
+          userMessage: event.payload.content,
+          personaId: event.payload.personaId,
+          subjectUserId: event.payload.subjectUserId
+        });
+        forgetNote = forget.notFound
+          ? "The user asked to forget something, but no matching memory was found in this scope."
+          : `The user asked to forget something; deleted ${forget.deleted} related memor${forget.deleted === 1 ? "y" : "ies"} in the current scope only.`;
+      } catch (error) {
+        this.options.logger?.warn?.(
+          "mem0 forget failed",
+          this.errorLogContext(error, event.traceId)
+        );
+        forgetNote =
+          "The user asked to forget something, but memory deletion failed; continue without claiming success.";
+      }
+    }
     const memoryContext = memoryOptions.readMemory
       ? await this.retrieveMemories(event)
       : emptyMemoryContext();
     const directContext = this.buildDirectContext(event.payload.sessionId);
+    // Prompt only gets displayText content — never raw memoryId/score/metadata dumps.
+    const promptMemories = memoryContext.promptMemories.map((memory) => ({
+      content: memory.displayText,
+      displayText: memory.displayText,
+      importance: memory.importance,
+      type: memory.type,
+      subtype: memory.subtype,
+      scope: memory.scope,
+      scopeId: memory.scopeId,
+      memoryLayer: memory.memoryLayer,
+      status: memory.status,
+      ...(memory.validFrom !== undefined ? { validFrom: memory.validFrom } : {}),
+      ...(memory.eventTime !== undefined ? { eventTime: memory.eventTime } : {}),
+      ...(memory.validUntil !== undefined ? { validUntil: memory.validUntil } : {}),
+      ...(memory.expiresAt !== undefined ? { expiresAt: memory.expiresAt } : {}),
+      createdAt: memory.createdAt,
+      ...(memory.lastAccessedAt !== undefined ? { lastAccessedAt: memory.lastAccessedAt } : {})
+    }));
+    const situationParts = [
+      voiceOutput
+        ? "The user is interacting through voice."
+        : "The user is interacting through text."
+    ];
+    if (forgetNote) {
+      situationParts.push(forgetNote);
+    }
     const prompt = this.options.promptBuilder.buildPrompt({
       systemIdentity:
         "You are YUVI, a local-first AI companion runtime agent. Unless the user clearly asks for another language, reply in natural spoken English by default.",
@@ -1007,31 +1095,13 @@ export class RuntimeOrchestrator {
         "Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail. Do not default to Japanese or Chinese, do not auto-translate English into Japanese for voice, and do not produce bilingual replies. If the user mainly writes Chinese or Japanese, or explicitly requests Chinese or Japanese, reply in that language.",
       relationshipContext:
         "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
-      retrievedMemories: memoryContext.promptMemories.map((memory) => ({
-        content: memory.displayText,
-        displayText: memory.displayText,
-        importance: memory.importance,
-        type: memory.type,
-        subtype: memory.subtype,
-        scope: memory.scope,
-        scopeId: memory.scopeId,
-        memoryLayer: memory.memoryLayer,
-        status: memory.status,
-        ...(memory.validFrom !== undefined ? { validFrom: memory.validFrom } : {}),
-        ...(memory.eventTime !== undefined ? { eventTime: memory.eventTime } : {}),
-        ...(memory.validUntil !== undefined ? { validUntil: memory.validUntil } : {}),
-        ...(memory.expiresAt !== undefined ? { expiresAt: memory.expiresAt } : {}),
-        createdAt: memory.createdAt,
-        ...(memory.lastAccessedAt !== undefined ? { lastAccessedAt: memory.lastAccessedAt } : {})
-      })),
+      retrievedMemories: promptMemories,
       memoryEnabled: memoryOptions.readMemory,
       currentTime: currentTimeContext(),
       ...(currentAffect ? { currentAffect: formatCurrentAffectForPrompt(currentAffect) } : {}),
       directContext: directContext.content,
       directContextEnabled: directContext.enabled,
-      currentSituation: voiceOutput
-        ? "The user is interacting through voice."
-        : "The user is interacting through text.",
+      currentSituation: situationParts.join(" "),
       tools: [],
       userMessage: event.payload.content
     });
@@ -1192,6 +1262,80 @@ export class RuntimeOrchestrator {
     }
   }
 
+  private scheduleMem0TurnWrite(
+    sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
+    reply: AgentReplyEvent,
+    assistantMessageId?: string
+  ): void {
+    const store = this.options.memory.storeConversationTurn;
+    if (!store) {
+      return;
+    }
+    // Skip cancelled/empty assistant content — streaming failure must not write.
+    const assistantText = reply.payload.content?.trim() ?? "";
+    if (!assistantText) {
+      this.updateLatestPromptPreviewExtraction({
+        ...this.getMemoryExtractorStatus(),
+        used: false,
+        skippedReason: "Mem0 write skipped: empty or failed assistant turn."
+      });
+      return;
+    }
+    // Explicit forget is handled on the read path only; never schedule add.
+    if (detectExplicitForgetRequest(sourceEvent.payload.content)) {
+      this.updateLatestPromptPreviewExtraction({
+        ...this.getMemoryExtractorStatus(),
+        used: false,
+        skippedReason: "Mem0 write skipped: explicit_forget turn."
+      });
+      return;
+    }
+    const isRemember = detectExplicitRememberRequest(sourceEvent.payload.content);
+    this.updateLatestPromptPreviewExtraction({
+      ...this.getMemoryExtractorStatus(),
+      used: true,
+      candidateCount: 1,
+      storedMemoryCount: 0,
+      rejectedCount: 0,
+      rejectedReasons: [],
+      candidates: [],
+      skippedReason: isRemember
+        ? "Mem0 async write scheduled (explicit_remember infer=false)."
+        : "Mem0 async write scheduled (normal infer=true)."
+    });
+    void store({
+      userMessage: sourceEvent.payload.content,
+      assistantMessage: assistantText,
+      sessionId: sourceEvent.payload.sessionId,
+      personaId: sourceEvent.payload.personaId,
+      subjectUserId: sourceEvent.payload.subjectUserId,
+      userMessageId: sourceEvent.id,
+      assistantMessageId: assistantMessageId ?? reply.id,
+      traceId: sourceEvent.traceId,
+      conversationId: sourceEvent.payload.sessionId
+    })
+      .then((result) => {
+        this.updateLatestPromptPreviewExtraction({
+          ...this.getMemoryExtractorStatus(),
+          used: true,
+          candidateCount: 1,
+          storedMemoryCount: result.ok ? 1 : 0,
+          rejectedCount: result.ok ? 0 : 1,
+          rejectedReasons: result.ok ? [] : [result.skippedReason ?? "mem0-write-failed"],
+          candidates: [],
+          ...(result.ok
+            ? {}
+            : { skippedReason: result.skippedReason ?? "Mem0 turn write failed." })
+        });
+      })
+      .catch((error: unknown) => {
+        this.options.logger?.warn?.(
+          "mem0 async turn write failed",
+          this.errorLogContext(error, reply.traceId)
+        );
+      });
+  }
+
   async maybeStoreMemory(
     sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
     reply: AgentReplyEvent,
@@ -1202,6 +1346,45 @@ export class RuntimeOrchestrator {
   ): Promise<MemoryExtractionRuntimeDebug> {
     const initialExtractorStatus = this.getMemoryExtractorStatus();
     try {
+      // Mem0 path: never run Legacy extract/dedupe/embed/repository write.
+      if (this.options.memory.isMem0Backend?.()) {
+        if (this.options.memory.storeConversationTurn) {
+          const result = await this.options.memory.storeConversationTurn({
+            userMessage: sourceEvent.payload.content,
+            assistantMessage: reply.payload.content,
+            sessionId: sourceEvent.payload.sessionId,
+            personaId: sourceEvent.payload.personaId,
+            subjectUserId: sourceEvent.payload.subjectUserId,
+            userMessageId: sourceEvent.id,
+            assistantMessageId: reply.id,
+            traceId: sourceEvent.traceId,
+            conversationId: sourceEvent.payload.sessionId
+          });
+          return {
+            ...initialExtractorStatus,
+            used: true,
+            candidateCount: 1,
+            storedMemoryCount: result.ok ? 1 : 0,
+            rejectedCount: result.ok ? 0 : 1,
+            rejectedReasons: result.ok ? [] : [result.skippedReason ?? "mem0-write-failed"],
+            candidates: [],
+            ...(result.ok
+              ? {}
+              : { skippedReason: result.skippedReason ?? "Mem0 turn write failed." })
+          };
+        }
+        return {
+          ...initialExtractorStatus,
+          used: false,
+          candidateCount: 0,
+          storedMemoryCount: 0,
+          rejectedCount: 0,
+          rejectedReasons: [],
+          candidates: [],
+          skippedReason: "Mem0 backend has no storeConversationTurn handler."
+        };
+      }
+
       if (this.options.memory.extractCandidates) {
         const candidates = await this.options.memory.extractCandidates({
           sessionId: sourceEvent.payload.sessionId,

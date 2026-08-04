@@ -12,6 +12,7 @@ export type MemoryBackendFactoryOptions = {
   repository?: MemoryRepository;
   mem0BaseUrl?: string;
   mem0TimeoutMs?: number;
+  mem0WriteTimeoutMs?: number;
   mem0HealthTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 };
@@ -36,10 +37,14 @@ export function createMemoryBackend(options: MemoryBackendFactoryOptions = {}): 
     const mem0Options: {
       baseUrl: string;
       timeoutMs?: number;
+      writeTimeoutMs?: number;
       healthTimeoutMs?: number;
       fetchImpl?: typeof fetch;
     } = { baseUrl };
     if (options.mem0TimeoutMs !== undefined) mem0Options.timeoutMs = options.mem0TimeoutMs;
+    if (options.mem0WriteTimeoutMs !== undefined) {
+      mem0Options.writeTimeoutMs = options.mem0WriteTimeoutMs;
+    }
     if (options.mem0HealthTimeoutMs !== undefined) {
       mem0Options.healthTimeoutMs = options.mem0HealthTimeoutMs;
     }
@@ -48,6 +53,6 @@ export function createMemoryBackend(options: MemoryBackendFactoryOptions = {}): 
   }
   throw new MemoryBackendError(
     "CONFIG_INVALID",
-    `Unsupported MEMORY_BACKEND '${kind}'. Supported: legacy, mem0, shadow.`
+    `Unsupported MEMORY_BACKEND '${kind}'. Supported: legacy, mem0.`
   );
 }

@@ -1,4 +1,5 @@
 import { ConversationPersistenceError } from "@companion/core";
+import { parseRuntimeConfig } from "@companion/config";
 import { createEvent } from "@companion/protocol";
 import { ProviderError } from "@companion/providers";
 import type { FastifyInstance } from "fastify";
@@ -10,6 +11,9 @@ export const MessageRequestSchema = z
     sessionId: z.string().min(1).default("default"),
     content: z.string().min(1).optional(),
     text: z.string().min(1).optional(),
+    /** Explicit Mem0/user identity — preferred over env defaults. */
+    subjectUserId: z.string().min(1).optional(),
+    personaId: z.string().min(1).optional(),
     voiceOutput: z.boolean().optional(),
     options: z
       .object({
@@ -50,13 +54,21 @@ export async function registerMessageRoutes(
       input.data.voiceOutput ?? input.data.options?.voiceOutput ?? input.data.options?.tts
     );
     const memoryOptions = normalizeMessageMemoryOptions(input.data.options);
+    const identity = resolveMessageIdentity(input.data);
     const event = createEvent("user.message", {
       sessionId: input.data.sessionId,
-      content
+      content,
+      ...(identity.subjectUserId ? { subjectUserId: identity.subjectUserId } : {}),
+      ...(identity.personaId ? { personaId: identity.personaId } : {})
     });
 
     request.log.info(
-      { traceId: event.traceId, sessionId: input.data.sessionId },
+      {
+        traceId: event.traceId,
+        sessionId: input.data.sessionId,
+        hasSubjectUserId: Boolean(identity.subjectUserId),
+        hasPersonaId: Boolean(identity.personaId)
+      },
       "message request received"
     );
 
@@ -112,6 +124,24 @@ export function normalizeMessageMemoryOptions(
     legacyUseMemory,
     readMemory: options?.readMemory ?? defaultEnabled,
     writeMemory: options?.writeMemory ?? defaultEnabled
+  };
+}
+
+/**
+ * Resolve chat identity for Mem0 scopes.
+ * Request fields win; otherwise explicit MEMORY_SUBJECT_USER_ID / MEMORY_PERSONA_ID.
+ * Never invents default-user / default-persona.
+ */
+export function resolveMessageIdentity(input: {
+  subjectUserId?: string | undefined;
+  personaId?: string | undefined;
+}): { subjectUserId?: string; personaId?: string } {
+  const runtime = parseRuntimeConfig(process.env);
+  const subjectUserId = input.subjectUserId?.trim() || runtime.memory.subjectUserId?.trim();
+  const personaId = input.personaId?.trim() || runtime.memory.personaId?.trim();
+  return {
+    ...(subjectUserId ? { subjectUserId } : {}),
+    ...(personaId ? { personaId } : {})
   };
 }
 

@@ -105,18 +105,35 @@ See `services/memory-mem0/README.md`.
 ## 5. Runtime env (additive)
 
 ```env
-MEMORY_BACKEND=legacy
+MEMORY_BACKEND=mem0
 MEM0_BASE_URL=http://127.0.0.1:6130
-MEM0_RUNTIME_TIMEOUT_MS=500
+MEM0_RUNTIME_TIMEOUT_MS=600
 MEM0_RUNTIME_HEALTH_TIMEOUT_MS=1000
+# Explicit local single-user scope (required when request omits IDs)
+MEMORY_SUBJECT_USER_ID=local-user
+MEMORY_PERSONA_ID=lumi
 ```
 
-Chat paths **must not** set `MEMORY_BACKEND=mem0` until M2/M3.
+Set `MEMORY_BACKEND=legacy` to keep the previous repository path.
 
-## 6. M2 / M3 hooks (not implemented)
+## 6. Live chat integration (M2)
 
-- **M2**: MemoryService search path chooses backend; Prompt still formatted in TS.
-- **M3**: async write/outbox to Mem0; dual-write/shadow mode; never block chat on Mem0 failure.
+On `feat/mem0-live-integration` with `MEMORY_BACKEND=mem0`:
+
+- **Scope**: `yuvi:v1:user:{userId}:character:{characterId}` from request and/or
+  `MEMORY_SUBJECT_USER_ID` / `MEMORY_PERSONA_ID`. No silent `default-user` /
+  `default-persona`. Missing IDs → skip search/add/delete, log
+  `MEMORY_SCOPE_MISSING`, chat continues.
+- **Read**: before chat provider call, `Mem0Backend.search` (600ms timeout, topK 8 → prompt max 5, ~600 tokens) via existing Prompt Builder. Failures → empty memory, chat continues.
+- **Write routing** (exactly one path per completed turn):
+  - `normal` → async `add(infer=true)` once
+  - `explicit_remember` → async `add(infer=false)` fact only (never dual infer=true)
+  - `explicit_forget` → search+delete in current scope only; no add / no Legacy
+  - `cancelled_or_failed` → no write
+- **Forget**: content-overlap gate (vector score near-zero must not block exact hits).
+- **Legacy skip**: extractCandidates / processCandidate / repository LTM write / embedding path disabled for Mem0 mode.
+- **No shadow dual-write**, no migration, no outbox in v1.
+- Runtime boot does **not** require Sidecar healthy.
 
 ## 7. Memory LLM capability mode
 

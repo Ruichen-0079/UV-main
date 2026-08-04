@@ -49,12 +49,36 @@ export {
 } from "./candidate-dedupe.js";
 export {
   detectCorrectionRequest,
+  detectExplicitForgetRequest,
   detectExplicitRememberRequest,
   extractCorrectionEvidence,
   inferUserMemoryIntent,
+  stripExplicitForgetPrefix,
   stripExplicitRememberPrefix,
   type UserMemoryIntent
 } from "./intent.js";
+export {
+  buildChatMemoryScope,
+  buildMem0RetrievalResult,
+  classifyMem0Turn,
+  dedupeSearchResults,
+  emptyMem0RetrievalResult,
+  forgetMemoriesInScope,
+  MEM0_CHAT_PROMPT_MAX,
+  MEM0_CHAT_PROMPT_TOKEN_BUDGET,
+  MEM0_CHAT_SEARCH_TIMEOUT_MS,
+  MEM0_CHAT_SEARCH_TOP_K,
+  MEM0_CHAT_WRITE_TIMEOUT_MS,
+  MEMORY_SCOPE_MISSING,
+  resolveMem0ChatIdentity,
+  selectPromptMemories,
+  toPromptMemoryDebug,
+  type ForgetMemoriesResult,
+  type Mem0ChatIdentity,
+  type Mem0IdentityResolution,
+  type Mem0TurnKind
+} from "./mem0-chat.js";
+export type { MemoryServiceBackendConfig } from "./service.js";
 export {
   detectEpisodicCorrectionRelationships,
   hasCorrectionRelatedMemory,
