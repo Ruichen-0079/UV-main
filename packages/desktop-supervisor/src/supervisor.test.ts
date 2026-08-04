@@ -20,11 +20,34 @@ afterEach(() => {
   delete process.env["MEM0_BASE_URL"];
 });
 
+/**
+ * Platform-independent fake repo root so deriveConfigFromEnv / resolveRuntimeStart
+ * keep finding scripts/dev-server-runner.ps1 after applyRuntimeConfig (not a
+ * hardcoded Windows path that is missing on Ubuntu CI).
+ */
+function makeTempRepositoryRoot(): string {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-repo-"));
+  tempDirs.push(repositoryRoot);
+  const scriptsDir = path.join(repositoryRoot, "scripts");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(scriptsDir, "dev-server-runner.ps1"),
+    "# fixture placeholder for supervisor tests\n",
+    "utf8"
+  );
+  return repositoryRoot;
+}
+
 function baseConfig(overrides: Partial<SupervisorConfig> = {}): SupervisorConfig {
   const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-sup-"));
   tempDirs.push(stateDirectory);
+  const { repositoryRoot: overrideRoot, ...rest } = overrides;
+  const repositoryRoot =
+    typeof overrideRoot === "string" && overrideRoot.length > 0
+      ? overrideRoot
+      : makeTempRepositoryRoot();
   return {
-    repositoryRoot: "C:\\Dev\\UV-main",
+    repositoryRoot,
     stateDirectory,
     instanceId: "inst-1",
     ownershipToken: "tok-1",
@@ -49,6 +72,8 @@ function baseConfig(overrides: Partial<SupervisorConfig> = {}): SupervisorConfig
     ttsUpstreamUrl: "http://127.0.0.1:9880",
     ollamaUrl: "http://127.0.0.1:11434",
     databaseUrl: "postgres://yuvi:a@127.0.0.1:5432/yuvi",
+    // Default stub; applyRuntimeConfig re-derives via fixture scripts/ path.
+    // Pass runtimeStart: null when a test wants detect-only / no start command.
     runtimeStart: {
       file: "node",
       args: ["-e", "setInterval(()=>{}, 60000)"],
@@ -59,7 +84,7 @@ function baseConfig(overrides: Partial<SupervisorConfig> = {}): SupervisorConfig
     mem0Start: null,
     ttsWrapperStart: null,
     ttsUpstreamStart: null,
-    ...overrides
+    ...rest
   };
 }
 
@@ -221,6 +246,8 @@ describe("DesktopSupervisor runtime config push", () => {
     process.env["DEEPSEEK_CHAT_MODEL"] = "model-A";
     const supervisor = new DesktopSupervisor(baseConfig());
 
+    // Fixture repositoryRoot keeps startCommand resolvable before and after derive.
+    expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
     const envA = supervisor.resolveSpawnEnv("runtime");
     expect(envA?.["DEEPSEEK_CHAT_MODEL"]).toBe("model-A");
     expect(envA?.["DEEPSEEK_API_KEY"]).toBe("key-A");
@@ -241,6 +268,8 @@ describe("DesktopSupervisor runtime config push", () => {
     expect(JSON.stringify(result)).not.toContain("key-B");
     expect(JSON.stringify(result)).not.toContain("key-A");
 
+    // deriveConfigFromEnv re-ran resolveRuntimeStart against the temp repo fixture.
+    expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
     const envB = supervisor.resolveSpawnEnv("runtime");
     expect(envB?.["DEEPSEEK_CHAT_MODEL"]).toBe("model-B");
     expect(envB?.["DEEPSEEK_API_KEY"]).toBe("key-B");
@@ -260,12 +289,14 @@ describe("DesktopSupervisor runtime config push", () => {
         }
       })
     );
+    expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
     expect(supervisor.resolveSpawnEnv("runtime")?.["DEEPSEEK_API_KEY"]).toBe("fallback-A");
 
     await supervisor.applyRuntimeConfig({
       env: { DEEPSEEK_API_KEY: "user-secret-B", DEEPSEEK_CHAT_MODEL: "model-B" },
       unsetEnv: []
     });
+    expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
     expect(supervisor.resolveSpawnEnv("runtime")?.["DEEPSEEK_API_KEY"]).toBe("user-secret-B");
     expect(process.env["DEEPSEEK_API_KEY"]).toBe("user-secret-B");
 
@@ -275,6 +306,7 @@ describe("DesktopSupervisor runtime config push", () => {
     });
 
     // Must not keep dynamic B; restore base fallback A.
+    expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
     expect(supervisor.resolveSpawnEnv("runtime")?.["DEEPSEEK_API_KEY"]).toBe("fallback-A");
     expect(process.env["DEEPSEEK_API_KEY"]).toBe("fallback-A");
     // Live process.env pollution must not replace the resolved child map.
@@ -294,16 +326,19 @@ describe("DesktopSupervisor runtime config push", () => {
         }
       })
     );
+    expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
     await supervisor.applyRuntimeConfig({
       env: { DEEPSEEK_API_KEY: "user-secret-B" },
       unsetEnv: []
     });
+    expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
     expect(supervisor.resolveSpawnEnv("runtime")?.["DEEPSEEK_API_KEY"]).toBe("user-secret-B");
 
     await supervisor.applyRuntimeConfig({
       env: {},
       unsetEnv: ["DEEPSEEK_API_KEY"]
     });
+    expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
     expect(supervisor.resolveSpawnEnv("runtime")?.["DEEPSEEK_API_KEY"]).toBeUndefined();
     expect(process.env["DEEPSEEK_API_KEY"]).toBeUndefined();
   });
