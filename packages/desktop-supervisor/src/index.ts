@@ -5,6 +5,8 @@ export type {
   OwnershipStatus,
   ProcessInfo,
   ProcessMetadata,
+  RuntimeConfigUpdate,
+  RuntimeConfigUpdateResult,
   ServiceId,
   ServiceLifecycle,
   ServiceOwnership,
@@ -17,7 +19,9 @@ export type {
 export {
   loadSupervisorConfig,
   generateControlToken,
-  assertLoopbackHost
+  assertLoopbackHost,
+  deriveConfigFromEnv,
+  buildChildProcessEnv
 } from "./config.js";
 export { loadYuviEnvFiles, envFlag, envString } from "./env.js";
 export {

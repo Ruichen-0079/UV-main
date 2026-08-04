@@ -15,6 +15,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "2"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+keyring = "3"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"
 
 [profile.release]
 codegen-units = 1

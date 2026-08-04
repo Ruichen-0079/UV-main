@@ -140,6 +140,24 @@ export type SupervisorConfig = {
   ttsUpstreamStart: StartCommandSpec | null;
 };
 
+/**
+ * Runtime config push from Tauri ConfigService.
+ * Secrets may appear in `env` for managed services only; never echoed in responses/logs.
+ * `unsetEnv` keys must be removed from child process env (not merely left unoverwritten).
+ */
+export type RuntimeConfigUpdate = {
+  env?: Record<string, string> | undefined;
+  unsetEnv?: string[] | undefined;
+};
+
+/** Redacted ack for POST /v1/config — no secret values. */
+export type RuntimeConfigUpdateResult = {
+  ok: true;
+  appliedEnvKeys: string[];
+  unsetEnvKeys: string[];
+  updatedAt: string;
+};
+
 /** Public endpoint file shape (controlToken is present for Rust only; never sent to React). */
 export type ControlEndpointFile = {
   host: string;

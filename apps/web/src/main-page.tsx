@@ -17,6 +17,7 @@ import {
 } from "./voice-output.js";
 import { controlCompanionWindow, isTauriRuntime } from "./tauri-window.js";
 import { ServiceStatusPanel } from "./service-status-panel.js";
+import { UserSettingsPanel } from "./user-settings-panel.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
@@ -48,6 +49,7 @@ export function MainPage(): JSX.Element {
   const [companionReady, setCompanionReady] = useState(false);
   const [input, setInput] = useState("");
   const [companionActionError, setCompanionActionError] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   const mountedRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -327,7 +329,9 @@ export function MainPage(): JSX.Element {
   return (
     <div className="min-h-screen bg-ink-100">
       <ServiceStatusPanel />
-      <div className="mx-auto max-w-3xl space-y-4 p-6">
+      <div
+        className={`mx-auto space-y-4 p-6 ${showSettings ? "max-w-6xl" : "max-w-3xl"}`}
+      >
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold tracking-normal">YUVI Chat</h1>
@@ -340,6 +344,13 @@ export function MainPage(): JSX.Element {
             <Pill status={companionReady ? "companion connected" : "companion offline"} />
             {isTauriRuntime() && (
               <>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => setShowSettings((value) => !value)}
+                >
+                  {showSettings ? "关闭设置" : "设置"}
+                </button>
                 <button
                   type="button"
                   className="button-secondary"
@@ -365,6 +376,8 @@ export function MainPage(): JSX.Element {
             )}
           </div>
         </div>
+
+        {showSettings && <UserSettingsPanel />}
 
         <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
           <div className="h-[420px] overflow-auto rounded-md border border-ink-100 bg-ink-50 p-3">

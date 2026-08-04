@@ -1,6 +1,6 @@
 import http from "node:http";
 import type { DesktopSupervisor } from "./supervisor.js";
-import type { ServiceId } from "./types.js";
+import type { RuntimeConfigUpdate, ServiceId } from "./types.js";
 import { assertLoopbackHost } from "./config.js";
 
 const SERVICE_IDS = new Set<ServiceId>([
@@ -98,7 +98,18 @@ async function handle(
     }
 
     if (method === "GET" && url.pathname === "/v1/status") {
-      return sendJson(res, 200, supervisor.snapshot());
+      const snap = supervisor.snapshot();
+      // Belt-and-suspenders: never serialize secrets into status.
+      const text = JSON.stringify(snap);
+      if (text.includes("DEEPSEEK_API_KEY") || text.includes("DATABASE_URL=")) {
+        return sendJson(res, 200, {
+          instanceId: snap.instanceId,
+          shuttingDown: snap.shuttingDown,
+          services: snap.services,
+          updatedAt: snap.updatedAt
+        });
+      }
+      return sendJson(res, 200, snap);
     }
     if (method === "POST" && url.pathname === "/v1/refresh") {
       const snap = await supervisor.refreshAll();
@@ -107,6 +118,13 @@ async function handle(
     if (method === "POST" && url.pathname === "/v1/bootstrap") {
       const snap = await supervisor.bootstrap();
       return sendJson(res, 200, snap);
+    }
+    if (method === "POST" && url.pathname === "/v1/config") {
+      const raw = await readJsonBody(req);
+      const update = parseRuntimeConfigUpdate(raw);
+      const result = await supervisor.applyRuntimeConfig(update);
+      // Ack is redacted (key names only, no values).
+      return sendJson(res, 200, result);
     }
     if (method === "POST" && url.pathname === "/v1/shutdown") {
       await supervisor.shutdown();
@@ -136,13 +154,68 @@ async function handle(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Never echo tokens or env values.
-    const safe = message.includes("controlToken") || message.includes("token")
-      ? "supervisor_error"
-      : message;
-    sendJson(res, 500, {
-      error: "supervisor_error",
+    const safe =
+      message.includes("controlToken") ||
+      message.includes("token") ||
+      message.includes("DEEPSEEK") ||
+      message.includes("DATABASE_URL") ||
+      message.includes("sk-")
+        ? "supervisor_error"
+        : message.includes("shutting down")
+          ? message
+          : message;
+    const status = message.includes("shutting down") ? 409 : 500;
+    sendJson(res, status, {
+      error: status === 409 ? "shutting_down" : "supervisor_error",
       message: safe
     });
+  }
+}
+
+function parseRuntimeConfigUpdate(raw: unknown): RuntimeConfigUpdate {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("config body must be a JSON object");
+  }
+  const obj = raw as Record<string, unknown>;
+  const env: Record<string, string> = {};
+  if (obj["env"] != null) {
+    if (typeof obj["env"] !== "object" || Array.isArray(obj["env"])) {
+      throw new Error("env must be an object");
+    }
+    for (const [key, value] of Object.entries(obj["env"] as Record<string, unknown>)) {
+      if (typeof key !== "string" || !key.trim()) continue;
+      if (value == null) continue;
+      env[key] = String(value);
+    }
+  }
+  const unsetEnv: string[] = [];
+  if (obj["unsetEnv"] != null) {
+    if (!Array.isArray(obj["unsetEnv"])) {
+      throw new Error("unsetEnv must be an array");
+    }
+    for (const item of obj["unsetEnv"]) {
+      if (typeof item === "string" && item.trim()) unsetEnv.push(item.trim());
+    }
+  }
+  return { env, unsetEnv };
+}
+
+async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    // Guard against accidental huge payloads (config is small).
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    if (total > 256_000) {
+      throw new Error("config body too large");
+    }
+  }
+  const text = Buffer.concat(chunks).toString("utf8").trim();
+  if (!text) return {};
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("config body is not valid JSON");
   }
 }
 

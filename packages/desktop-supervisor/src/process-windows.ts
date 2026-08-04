@@ -71,15 +71,18 @@ export function isProcessAlive(processId: number): boolean {
 
 /**
  * Spawn a managed child with no console window flash on Windows.
+ * When `env` is provided it is used as-is (caller must merge + unset secrets).
+ * Otherwise falls back to process.env + command.env.
  */
 export function spawnManagedProcess(
   command: StartCommandSpec,
-  log: { out: string; err: string }
+  log: { out: string; err: string },
+  options?: { env?: NodeJS.ProcessEnv }
 ): ChildProcess {
   fs.mkdirSync(path.dirname(log.out), { recursive: true });
   const child = spawn(command.file, command.args, {
     cwd: command.cwd,
-    env: { ...process.env, ...command.env },
+    env: options?.env ?? { ...process.env, ...command.env },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
     detached: false

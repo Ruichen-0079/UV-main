@@ -38,19 +38,11 @@ export function loadSupervisorConfig(input: LoadSupervisorConfigInput): Supervis
     input.stateDirectory ?? path.join(defaultStateDirectory(), instanceId)
   );
 
-  const runtimeHost = envString(env, "SERVER_HOST", "127.0.0.1");
-  const runtimePort = envString(env, "SERVER_PORT", "6121");
-  const runtimeUrl = `http://${runtimeHost}:${runtimePort}`;
-  const mem0Url = envString(env, "MEM0_BASE_URL", "http://127.0.0.1:6130");
-  const ttsWrapperUrl = envString(env, "GPT_SOVITS_TTS_BASE_URL", "http://127.0.0.1:9881");
-  const ttsUpstreamUrl = envString(env, "GPT_SOVITS_TTS_UPSTREAM_URL", "http://127.0.0.1:9880");
-  const ollamaUrl = envString(env, "MEM0_OLLAMA_BASE_URL", envString(env, "OLLAMA_HOST", "http://127.0.0.1:11434"));
-  const databaseUrl = env["DATABASE_URL"]?.trim() || null;
-  const memoryBackend = envString(env, "MEMORY_BACKEND", "mem0") === "legacy" ? "legacy" : "mem0";
-
   const controlPort = input.controlPort ?? Number(envString(env, "YUVI_SUPERVISOR_PORT", "0"));
   const controlHost = input.controlHost ?? "127.0.0.1";
   assertLoopbackHost(controlHost);
+
+  const derived = deriveConfigFromEnv(repositoryRoot, env);
 
   return {
     repositoryRoot,
@@ -61,6 +53,49 @@ export function loadSupervisorConfig(input: LoadSupervisorConfigInput): Supervis
     controlHost,
     controlPort: Number.isFinite(controlPort) ? controlPort : 0,
     env,
+    ...derived
+  };
+}
+
+/**
+ * Recompute URLs, autostart flags, and start-command specs from an env map.
+ * Used at bootstrap and when Tauri pushes a runtime config update.
+ */
+export function deriveConfigFromEnv(
+  repositoryRoot: string,
+  env: Record<string, string>
+): Pick<
+  SupervisorConfig,
+  | "memoryBackend"
+  | "autostartRuntime"
+  | "autostartMem0"
+  | "autostartTts"
+  | "runtimeUrl"
+  | "mem0Url"
+  | "ttsWrapperUrl"
+  | "ttsUpstreamUrl"
+  | "ollamaUrl"
+  | "databaseUrl"
+  | "runtimeStart"
+  | "mem0Start"
+  | "ttsWrapperStart"
+  | "ttsUpstreamStart"
+> {
+  const runtimeHost = envString(env, "SERVER_HOST", "127.0.0.1");
+  const runtimePort = envString(env, "SERVER_PORT", "6121");
+  const runtimeUrl = `http://${runtimeHost}:${runtimePort}`;
+  const mem0Url = envString(env, "MEM0_BASE_URL", "http://127.0.0.1:6131");
+  const ttsWrapperUrl = envString(env, "GPT_SOVITS_TTS_BASE_URL", "http://127.0.0.1:9881");
+  const ttsUpstreamUrl = envString(env, "GPT_SOVITS_TTS_UPSTREAM_URL", "http://127.0.0.1:9880");
+  const ollamaUrl = envString(
+    env,
+    "MEM0_OLLAMA_BASE_URL",
+    envString(env, "OLLAMA_HOST", "http://127.0.0.1:11434")
+  );
+  const databaseUrl = env["DATABASE_URL"]?.trim() || null;
+  const memoryBackend = envString(env, "MEMORY_BACKEND", "mem0") === "legacy" ? "legacy" : "mem0";
+
+  return {
     memoryBackend,
     autostartRuntime: envFlag(env, "YUVI_AUTOSTART_RUNTIME", true),
     autostartMem0: envFlag(env, "YUVI_AUTOSTART_MEM0", memoryBackend === "mem0"),
@@ -73,12 +108,38 @@ export function loadSupervisorConfig(input: LoadSupervisorConfigInput): Supervis
     databaseUrl,
     runtimeStart: resolveRuntimeStart(repositoryRoot, env, runtimePort),
     mem0Start: resolveMem0Start(repositoryRoot, env, mem0Url),
-    ttsWrapperStart: resolveOptionalStartCommand(env, "YUVI_TTS_WRAPPER_START_COMMAND", repositoryRoot),
-    ttsUpstreamStart: resolveOptionalStartCommand(env, "YUVI_TTS_UPSTREAM_START_COMMAND", repositoryRoot)
+    ttsWrapperStart: resolveOptionalStartCommand(
+      env,
+      "YUVI_TTS_WRAPPER_START_COMMAND",
+      repositoryRoot
+    ),
+    ttsUpstreamStart: resolveOptionalStartCommand(
+      env,
+      "YUVI_TTS_UPSTREAM_START_COMMAND",
+      repositoryRoot
+    )
   };
 }
 
-function resolveRuntimeStart(
+/**
+ * Build the env object used for managed child spawn.
+ * Typical call: baseEnv + current config overrides, then commandEnv.
+ * `unsetKeys` (optional) delete after merge — prefer restoring base fallbacks
+ * in the Supervisor rather than permanently stripping shell env.
+ */
+export function buildChildProcessEnv(
+  processEnv: NodeJS.ProcessEnv,
+  commandEnv: Record<string, string>,
+  unsetKeys: Iterable<string> = []
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...processEnv, ...commandEnv };
+  for (const key of unsetKeys) {
+    delete env[key];
+  }
+  return env;
+}
+
+export function resolveRuntimeStart(
   repositoryRoot: string,
   env: Record<string, string>,
   runtimePort: string
@@ -111,7 +172,7 @@ function resolveRuntimeStart(
   };
 }
 
-function resolveMem0Start(
+export function resolveMem0Start(
   repositoryRoot: string,
   env: Record<string, string>,
   mem0Url: string
@@ -126,7 +187,7 @@ function resolveMem0Start(
   const venvPython = path.join(sidecarDir, ".venv", "Scripts", "python.exe");
   const python = fs.existsSync(venvPython) ? venvPython : "python";
   const parsed = parseUrlOrigin(mem0Url);
-  const port = parsed?.port ?? 6130;
+  const port = parsed?.port ?? 6131;
 
   return {
     file: python,
