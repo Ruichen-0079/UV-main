@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b tsconfig.json && vite build",
-    "check": "tsc -b tsconfig.json --pretty false",
+    "prepare:cubism-framework": "node ../../scripts/prepare-cubism-framework.mjs",
+    "build": "pnpm prepare:cubism-framework && tsc -b tsconfig.json && vite build",
+    "check": "pnpm prepare:cubism-framework && tsc -b tsconfig.json --pretty false",
     "test": "vitest run --passWithNoTests",
     "preview": "vite preview"
   },

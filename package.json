@@ -6,8 +6,10 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm --filter @companion/server dev",
-    "build": "tsc -b",
-    "check": "tsc -b --pretty false",
+    "prepare:cubism-framework": "node scripts/prepare-cubism-framework.mjs",
+    "postinstall": "node scripts/prepare-cubism-framework.mjs",
+    "build": "pnpm prepare:cubism-framework && tsc -b",
+    "check": "pnpm prepare:cubism-framework && tsc -b --pretty false",
     "test": "pnpm -r test",
     "smoke": "pnpm build && tsx scripts/smoke.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
