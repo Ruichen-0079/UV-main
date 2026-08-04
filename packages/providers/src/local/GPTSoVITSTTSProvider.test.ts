@@ -70,6 +70,33 @@ describe("GPTSoVITSTTSProvider", () => {
     fetchMock.mockRestore();
   });
 
+  it("uses the managed wrapper for non-Japanese text when no API-v2 reference is configured", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(new Uint8Array([6, 7]), {
+        status: 200,
+        headers: { "content-type": "audio/wav" }
+      })
+    );
+    const output = await new GPTSoVITSTTSProvider({
+      ...options,
+      referenceAudioPath: undefined,
+      referenceText: undefined
+    }).synthesizeSpeech({
+      text: "你好。",
+      metadata: { language: "zh" }
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://127.0.0.1:9881/tts");
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      language: "ja",
+      text: "你好。"
+    });
+    expect(output.providerMetadata).toMatchObject({
+      language: "zh",
+      transport: "wrapper-fallback"
+    });
+    fetchMock.mockRestore();
+  });
+
   it("maps an aborted request to CANCELLED without leaking the upstream error", async () => {
     const controller = new AbortController();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(

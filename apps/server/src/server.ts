@@ -15,6 +15,7 @@ import { registerEventRoutes } from "./routes/events.js";
 import { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
 import { registerWebSocketRoutes } from "./routes/websocket.js";
 import { registerLive2DCoreRoute, registerLive2DRoutes } from "./routes/live2d.js";
+import { desktopCorsHeaders } from "./cors.js";
 
 export async function buildServer(config: ServerConfig) {
   const app = Fastify({
@@ -54,16 +55,8 @@ export async function buildServer(config: ServerConfig) {
 
   // Tauri desktop webview (tauri.localhost) calls Runtime on 127.0.0.1 — needs CORS.
   app.addHook("onRequest", async (request, reply) => {
-    const origin = request.headers.origin;
-    if (typeof origin === "string" && isDesktopAllowedOrigin(origin)) {
-      reply.header("Access-Control-Allow-Origin", origin);
-      reply.header("Access-Control-Allow-Credentials", "true");
-      reply.header(
-        "Access-Control-Allow-Headers",
-        "Content-Type, Authorization, X-Yuvi-Control-Token"
-      );
-      reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-      reply.header("Vary", "Origin");
+    for (const [name, value] of Object.entries(desktopCorsHeaders(request.headers.origin))) {
+      reply.header(name, value);
     }
     if (request.method === "OPTIONS") {
       return reply.code(204).send();
@@ -123,22 +116,4 @@ function isMalformedQueryError(error: Error & { statusCode?: number }): boolean 
       message.includes("malformed") ||
       message.includes("invalid"))
   );
-}
-
-/** Origins that may call Runtime from the YUVI desktop shell or local tools. */
-function isDesktopAllowedOrigin(origin: string): boolean {
-  try {
-    const url = new URL(origin);
-    const host = url.hostname.toLowerCase();
-    if (host === "tauri.localhost" || host === "localhost" || host === "127.0.0.1" || host === "::1") {
-      return true;
-    }
-    // asset / custom protocols used by some Tauri versions
-    if (url.protocol === "tauri:" || url.protocol === "asset:") {
-      return true;
-    }
-  } catch {
-    return false;
-  }
-  return false;
 }

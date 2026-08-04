@@ -65,6 +65,7 @@ describe("versioned message SSE route", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/messages/stream",
+      headers: { origin: "http://tauri.localhost" },
       payload: { sessionId: "session-1", content: "hi" }
     });
 
@@ -73,6 +74,8 @@ describe("versioned message SSE route", () => {
     expect(response.headers["cache-control"]).toBe("no-cache, no-transform");
     expect(response.headers["connection"]).toBe("keep-alive");
     expect(response.headers["x-accel-buffering"]).toBe("no");
+    expect(response.headers["access-control-allow-origin"]).toBe("http://tauri.localhost");
+    expect(response.headers["access-control-allow-credentials"]).toBe("true");
     const frames = parseFrames(response.body);
     expect(frames.map((frame) => frame.event)).toEqual([
       "text-delta",

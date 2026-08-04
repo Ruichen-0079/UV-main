@@ -8,6 +8,7 @@ import {
   probeHttpHealth,
   probeTcp,
   runtimeHealthOk,
+  ttsUpstreamHealthOk,
   ttsWrapperHealthOk
 } from "./health.js";
 import {
@@ -785,13 +786,17 @@ export class DesktopSupervisor {
         label: "TTS upstream",
         managed: Boolean(this.config.ttsUpstreamStart),
         autostart: this.config.autostartTts && Boolean(this.config.ttsUpstreamStart),
-        healthUrl: ttsU ? `${ttsU.origin}/` : null,
+        // GPT-SoVITS api_v2 intentionally returns 404 at `/`; use its
+        // OpenAPI document to distinguish the expected FastAPI service from
+        // an unrelated process listening on the configured port.
+        healthUrl: ttsU ? `${ttsU.origin}/openapi.json` : null,
         tcp: ttsU ? { host: ttsU.host, port: ttsU.port } : { host: "127.0.0.1", port: 9880 },
         startTimeoutMs: 90_000,
         readinessIntervalMs: 1_000,
         startCommand: this.config.ttsUpstreamStart,
         metadataFile: path.join(state, "tts-upstream.pid.json"),
-        logFile: path.join(state, "tts-upstream.log")
+        logFile: path.join(state, "tts-upstream.log"),
+        validateHealthBody: ttsUpstreamHealthOk
       }
     ];
   }

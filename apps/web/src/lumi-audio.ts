@@ -85,6 +85,7 @@ export class AudioMouthEnvelope implements AudioEnvelopeHost {
   private readonly context: AudioContextLike | null;
   private analyser: ReturnType<AudioContextLike["createAnalyser"]> | null = null;
   private source: ReturnType<AudioContextLike["createMediaElementSource"]> | null = null;
+  private sourceConnected = false;
   private readonly sources = new WeakMap<HTMLAudioElement, ReturnType<AudioContextLike["createMediaElementSource"]>>();
   private attachedAudio: HTMLAudioElement | null = null;
   private samples = new Uint8Array(1024);
@@ -127,14 +128,21 @@ export class AudioMouthEnvelope implements AudioEnvelopeHost {
     try {
       this.attachedAudio = audio;
       this.debugAudioId = getSpeechAudioDebugId(audio);
-      this.source = this.sources.get(audio) ?? this.context.createMediaElementSource(audio);
-      this.sources.set(audio, this.source);
+      // Do not create a MediaElementSource until the audio context has
+      // actually resumed. Creating one immediately reroutes the element's
+      // native output through a suspended context; if resume is rejected,
+      // the HTMLAudioElement still reports a successful play but is silent.
+      // Keeping the element untouched until playback starts preserves the
+      // native output fallback.
+      this.source = null;
       this.analyser ??= this.context.createAnalyser();
       this.analyser.fftSize = 1024;
-      this.source.connect(this.analyser);
-      this.analyser.connect(this.context.destination);
       this.previousTime = null;
-      this.publishDebug({ attached: true, sourceBound: true });
+      // Do not connect the media element to a possibly suspended AudioContext
+      // before playback starts. A suspended analyser graph would otherwise
+      // reroute the audio into silence and make the user hear nothing.
+      this.sourceConnected = false;
+      this.publishDebug({ attached: true, sourceBound: false });
     } catch {
       this.stop();
     }
@@ -154,25 +162,53 @@ export class AudioMouthEnvelope implements AudioEnvelopeHost {
 
   /** Start sampling only after the corresponding HTMLAudioElement is playing. */
   startPlayback(audio: HTMLAudioElement): void {
-    if (this.disposed || !this.context || this.attachedAudio !== audio || !this.source || !this.analyser) {
+    if (this.disposed || !this.context || this.attachedAudio !== audio || !this.analyser) {
       return;
     }
     this.previousTime = null;
     this.resetDebugRange();
+    const connectSource = () => {
+      if (
+        this.disposed ||
+        this.attachedAudio !== audio ||
+        !this.analyser ||
+        this.sourceConnected
+      ) {
+        return;
+      }
+      try {
+        this.source =
+          this.sources.get(audio) ?? this.context!.createMediaElementSource(audio);
+        this.sources.set(audio, this.source);
+        this.source.connect(this.analyser);
+        this.analyser.connect(this.context!.destination);
+        this.sourceConnected = true;
+        this.publishDebug({ sourceBound: true });
+      } catch {
+        // Keep the native HTMLAudioElement path audible if Web Audio cannot
+        // be resumed/bound in the current WebView.
+        this.sourceConnected = false;
+        this.publishDebug({ sourceBound: false });
+      }
+    };
     const resumeResult = this.context.resume?.();
     if (resumeResult) {
       void resumeResult.then(
         () => {
-          if (!this.disposed && this.attachedAudio === audio) this.startLoop();
+          if (!this.disposed && this.attachedAudio === audio) {
+            connectSource();
+            this.startLoop();
+          }
           this.publishDebug({ resume: "resolved" });
         },
         () => {
           this.publishDebug({ resume: "rejected" });
-          // Audio playback must not be blocked when analysis cannot resume.
-          if (!this.disposed && this.attachedAudio === audio) this.startLoop();
+          // Audio playback must not be blocked when analysis cannot resume;
+          // leave the media element disconnected so native playback remains.
         }
       );
     } else {
+      connectSource();
       this.startLoop();
     }
   }
@@ -186,6 +222,7 @@ export class AudioMouthEnvelope implements AudioEnvelopeHost {
       // Browser audio nodes can already be disconnected during page teardown.
     }
     this.source = null;
+    this.sourceConnected = false;
     this.attachedAudio = null;
     this.debugAudioId = null;
     this.publishDebug({ attached: false, sourceBound: false });
@@ -274,7 +311,7 @@ export class AudioMouthEnvelope implements AudioEnvelopeHost {
       currentTime: audio?.currentTime ?? 0,
       volume: audio?.volume ?? 0,
       analyserBound: this.analyser !== null,
-      sourceBound: this.source !== null,
+      sourceBound: this.sourceConnected,
       rawRmsMin: Number.isFinite(this.debugRawMin) ? this.debugRawMin : 0,
       rawRmsMax: this.debugRawMax,
       mouthMin: Number.isFinite(this.debugMouthMin) ? this.debugMouthMin : 0,

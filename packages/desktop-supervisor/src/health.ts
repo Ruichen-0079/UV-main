@@ -119,6 +119,12 @@ export function ttsWrapperHealthOk(body: unknown): boolean {
   return true;
 }
 
+export function ttsUpstreamHealthOk(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const paths = (body as Record<string, unknown>)["paths"];
+  return Boolean(paths && typeof paths === "object" && "/tts" in paths);
+}
+
 export function ollamaTagsOk(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
   return Array.isArray((body as Record<string, unknown>)["models"]);

@@ -23,9 +23,12 @@ export function readVoiceOutputPreference(
   storage: VoiceOutputStorage | null = defaultVoiceOutputStorage()
 ): boolean {
   try {
-    return storage?.getItem(VOICE_OUTPUT_STORAGE_KEY) === "true";
+    const stored = storage?.getItem(VOICE_OUTPUT_STORAGE_KEY);
+    // Desktop companion speech is enabled by default. An explicit stored
+    // value still wins so users can turn it off without being re-enabled.
+    return stored === null || stored === undefined ? true : stored === "true";
   } catch {
-    return false;
+    return true;
   }
 }
 

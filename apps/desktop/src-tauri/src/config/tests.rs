@@ -180,6 +180,9 @@ fn managed_env_includes_secrets_external_runtime_skips_chat_key() {
   let public_json = serde_json::to_string(&public).unwrap();
   assert!(!public_json.contains("sk-secret"));
   assert!(!public_json.contains("postgres://"));
+  assert_eq!(public.get("DEFAULT_TTS_PROVIDER").map(String::as_str), Some("local"));
+  assert_eq!(public.get("TTS_PROVIDER_CHAIN").map(String::as_str), Some("local"));
+  assert_eq!(public.get("LOCAL_TTS_MODEL").map(String::as_str), Some("alice-v4"));
 }
 
 #[test]

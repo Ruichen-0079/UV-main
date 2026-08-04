@@ -26,8 +26,8 @@ function createStorage(
 }
 
 describe("TTS output preference", () => {
-  it("initializes to false when nothing was stored", () => {
-    expect(readVoiceOutputPreference(createStorage())).toBe(false);
+  it("initializes to true when nothing was stored", () => {
+    expect(readVoiceOutputPreference(createStorage())).toBe(true);
   });
 
   it("reads the persisted value on startup", () => {
@@ -67,7 +67,7 @@ describe("TTS output preference", () => {
   });
 
   it("never throws when storage is unavailable", () => {
-    expect(readVoiceOutputPreference(null)).toBe(false);
+    expect(readVoiceOutputPreference(null)).toBe(true);
     expect(() => writeVoiceOutputPreference(true, null)).not.toThrow();
   });
 });
