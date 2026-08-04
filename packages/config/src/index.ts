@@ -45,6 +45,13 @@ export type RuntimeConfig = {
     mem0BaseUrl?: string | undefined;
     mem0TimeoutMs?: number | undefined;
     mem0HealthTimeoutMs?: number | undefined;
+    /**
+     * Explicit local single-user identity for Mem0 scopes.
+     * Required when MEMORY_BACKEND=mem0 and the request omits subjectUserId/personaId.
+     * Never silently defaults to default-user / default-persona.
+     */
+    subjectUserId?: string | undefined;
+    personaId?: string | undefined;
   };
   providers: RuntimeProviderConfig;
   infrastructure: {
@@ -113,8 +120,11 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
       backend: parseMemoryBackend(env["MEMORY_BACKEND"]),
       databaseUrl: emptyToUndefined(env["DATABASE_URL"]),
       mem0BaseUrl: emptyToUndefined(env["MEM0_BASE_URL"]) ?? "http://127.0.0.1:6130",
-      mem0TimeoutMs: parsePositiveInteger(env["MEM0_RUNTIME_TIMEOUT_MS"], 500),
-      mem0HealthTimeoutMs: parsePositiveInteger(env["MEM0_RUNTIME_HEALTH_TIMEOUT_MS"], 1000)
+      /** Chat-path Mem0 search timeout (default 600ms). */
+      mem0TimeoutMs: parsePositiveInteger(env["MEM0_RUNTIME_TIMEOUT_MS"], 600),
+      mem0HealthTimeoutMs: parsePositiveInteger(env["MEM0_RUNTIME_HEALTH_TIMEOUT_MS"], 1000),
+      subjectUserId: emptyToUndefined(env["MEMORY_SUBJECT_USER_ID"]),
+      personaId: emptyToUndefined(env["MEMORY_PERSONA_ID"])
     },
     providers: {
       allowMocks,
@@ -424,14 +434,19 @@ function parseMemoryExtractor(value: string | undefined): MemoryExtractorDriver 
   return "llm";
 }
 
-/** Default remains legacy so Mem0 never silently takes over chat memory. */
+/**
+ * MEMORY_BACKEND=mem0 | legacy only.
+ * Default remains legacy unless env explicitly sets mem0 (dev .env.example uses mem0).
+ * Shadow dual-write is intentionally not supported.
+ */
 function parseMemoryBackend(value: string | undefined): MemoryBackendDriver {
   if (!value || value === "legacy") {
     return "legacy";
   }
-  if (value === "mem0" || value === "shadow") {
-    return value;
+  if (value === "mem0") {
+    return "mem0";
   }
+  // Unknown values (including retired "shadow") fall back to legacy.
   return "legacy";
 }
 

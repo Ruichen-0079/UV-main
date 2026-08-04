@@ -23,7 +23,10 @@ import {
 
 export type Mem0MemoryBackendOptions = {
   baseUrl: string;
+  /** Default request timeout (search/get/list). Chat search default is 600ms. */
   timeoutMs?: number;
+  /** Optional longer timeout for add/update/delete (infer=true writes). */
+  writeTimeoutMs?: number;
   healthTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 };
@@ -50,6 +53,7 @@ export class Mem0MemoryBackend implements MemoryBackend {
   readonly kind = "mem0" as const;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly writeTimeoutMs: number;
   private readonly healthTimeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
@@ -60,6 +64,7 @@ export class Mem0MemoryBackend implements MemoryBackend {
     }
     this.baseUrl = base.replace(/\/+$/, "");
     this.timeoutMs = Math.max(100, options.timeoutMs ?? 5000);
+    this.writeTimeoutMs = Math.max(this.timeoutMs, options.writeTimeoutMs ?? 180_000);
     this.healthTimeoutMs = Math.max(100, options.healthTimeoutMs ?? 1000);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
@@ -82,7 +87,7 @@ export class Mem0MemoryBackend implements MemoryBackend {
 
   async add(input: AddMemoryInput, signal?: AbortSignal): Promise<MemoryWriteResult> {
     assertScope(input.scope);
-    const opts: RequestOptions = {};
+    const opts: RequestOptions = { timeoutMs: this.writeTimeoutMs };
     if (signal) opts.signal = signal;
     const data = await this.request<MemoryWriteResult>(
       "POST",
@@ -169,7 +174,7 @@ export class Mem0MemoryBackend implements MemoryBackend {
     if (!input.content?.trim()) {
       throw new MemoryBackendError("VALIDATION_ERROR", "content is required for update.");
     }
-    const opts: RequestOptions = {};
+    const opts: RequestOptions = { timeoutMs: this.writeTimeoutMs };
     if (signal) opts.signal = signal;
     return this.request<MemoryRecord>(
       "PUT",
@@ -187,7 +192,7 @@ export class Mem0MemoryBackend implements MemoryBackend {
     if (!input.memoryId?.trim()) {
       throw new MemoryBackendError("VALIDATION_ERROR", "memoryId is required.");
     }
-    const opts: RequestOptions = {};
+    const opts: RequestOptions = { timeoutMs: this.writeTimeoutMs };
     if (signal) opts.signal = signal;
     if (input.scope) opts.query = { scope: input.scope };
     await this.request<unknown>(
