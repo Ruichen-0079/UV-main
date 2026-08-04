@@ -44,7 +44,14 @@ export {
   forceKillProcessTree,
   stopProcessTree
 } from "./process-windows.js";
-export { canonicalPath, defaultStateDirectory, parseUrlOrigin } from "./paths.js";
+export {
+  canonicalPath,
+  commandLineContainsPath,
+  defaultStateDirectory,
+  isWindowsStylePath,
+  parseUrlOrigin,
+  pathsEqual
+} from "./paths.js";
 export { DesktopSupervisor } from "./supervisor.js";
 export {
   startSupervisorHttpServer,

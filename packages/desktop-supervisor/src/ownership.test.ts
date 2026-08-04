@@ -7,6 +7,7 @@ import {
   testProcessOwnership,
   writeProcessMetadata
 } from "./ownership.js";
+import { canonicalPath, commandLineContainsPath, pathsEqual } from "./paths.js";
 import type { ProcessMetadata } from "./types.js";
 
 const tempDirs: string[] = [];
@@ -148,5 +149,77 @@ describe("process ownership", () => {
     });
     expect(result.owned).toBe(false);
     expect(result.message).toMatch(/marker/i);
+  });
+
+  it("accepts owned process when command line uses quoted Windows repo path", () => {
+    const dir = tempDir();
+    const file = path.join(dir, "runtime.pid.json");
+    const started = new Date();
+    writeProcessMetadata(
+      file,
+      meta({
+        pid: 2002,
+        role: "runtime",
+        processStartedAtUtc: started.toISOString(),
+        repositoryRoot: "C:\\Dev\\UV-main",
+        stateDirectory: dir
+      })
+    );
+    const result = testProcessOwnership({
+      metadataPath: file,
+      expectedRole: "runtime",
+      repositoryRoot: "C:\\Dev\\UV-main",
+      stateDirectory: dir,
+      ownershipToken: "token-a",
+      instanceId: "instance-a",
+      processInfo: {
+        processId: 2002,
+        parentProcessId: 1,
+        commandLine:
+          'powershell -File "C:\\Dev\\UV-main\\scripts\\dev-server-runner.ps1" -RepoRoot "C:\\Dev\\UV-main"',
+        createdAtUtc: started
+      }
+    });
+    expect(result.owned).toBe(true);
+    expect(canonicalPath("C:\\Dev\\UV-main")).toBe("C:\\Dev\\UV-main");
+    expect(pathsEqual("C:\\Dev\\UV-main", "c:/dev/uv-main")).toBe(true);
+    expect(
+      commandLineContainsPath(
+        'powershell -File "C:\\Dev\\UV-main\\scripts\\dev-server-runner.ps1"',
+        "C:\\Dev\\UV-main"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects when repo path is absent from command line (not marker-only)", () => {
+    const dir = tempDir();
+    const file = path.join(dir, "runtime.pid.json");
+    const started = new Date();
+    writeProcessMetadata(
+      file,
+      meta({
+        pid: 3003,
+        role: "runtime",
+        processStartedAtUtc: started.toISOString(),
+        stateDirectory: dir
+      })
+    );
+    const result = testProcessOwnership({
+      metadataPath: file,
+      expectedRole: "runtime",
+      repositoryRoot: "C:\\Dev\\UV-main",
+      stateDirectory: dir,
+      ownershipToken: "token-a",
+      instanceId: "instance-a",
+      processInfo: {
+        processId: 3003,
+        parentProcessId: 1,
+        // Marker present, but different repository path — must fail.
+        commandLine: "powershell -File C:\\Other\\Repo\\scripts\\dev-server-runner.ps1",
+        createdAtUtc: started
+      }
+    });
+    expect(result.owned).toBe(false);
+    expect(result.message).toMatch(/repository root not present/i);
   });
 });

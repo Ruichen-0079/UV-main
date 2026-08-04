@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { OwnershipResult, ProcessInfo, ProcessMetadata } from "./types.js";
-import { canonicalPath } from "./paths.js";
+import { commandLineContainsPath, pathsEqual } from "./paths.js";
 
 export const PROCESS_METADATA_VERSION = 1 as const;
 
@@ -69,7 +69,7 @@ export function testProcessOwnership(input: {
       metadata
     };
   }
-  if (canonicalPath(metadata.repositoryRoot) !== canonicalPath(input.repositoryRoot)) {
+  if (!pathsEqual(metadata.repositoryRoot, input.repositoryRoot)) {
     return {
       status: "mismatch",
       owned: false,
@@ -78,7 +78,7 @@ export function testProcessOwnership(input: {
       metadata
     };
   }
-  if (canonicalPath(metadata.stateDirectory) !== canonicalPath(input.stateDirectory)) {
+  if (!pathsEqual(metadata.stateDirectory, input.stateDirectory)) {
     return {
       status: "mismatch",
       owned: false,
@@ -127,19 +127,14 @@ export function testProcessOwnership(input: {
     };
   }
 
-  const expectedRepo = canonicalPath(input.repositoryRoot);
-  if (!input.processInfo.commandLine.toLowerCase().includes(expectedRepo.toLowerCase())) {
-    // On Windows command lines may use different slash style; try both.
-    const alt = expectedRepo.replaceAll("\\", "/");
-    if (!input.processInfo.commandLine.toLowerCase().includes(alt.toLowerCase())) {
-      return {
-        status: "mismatch",
-        owned: false,
-        processId,
-        message: "repository root not present in command line",
-        metadata
-      };
-    }
+  if (!commandLineContainsPath(input.processInfo.commandLine, input.repositoryRoot)) {
+    return {
+      status: "mismatch",
+      owned: false,
+      processId,
+      message: "repository root not present in command line",
+      metadata
+    };
   }
 
   if (input.processInfo.createdAtUtc && metadata.processStartedAtUtc) {
