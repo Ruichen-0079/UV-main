@@ -108,9 +108,10 @@ export class DesktopSupervisor {
   }
 
   /**
-   * Atomically apply env overrides from Tauri without restarting the Supervisor
-   * or any services. Subsequent start/restart use the new URLs and env.
-   * Does not spawn or kill processes (including external).
+   * Atomically apply env overrides from Tauri.
+   * Non-secret URL/model changes apply in place for the next start/restart.
+   * Secret keys (API keys, DATABASE_URL) force a managed Runtime reload so the
+   * already-running Node process picks them up — otherwise Providers stay unavailable.
    */
   async applyRuntimeConfig(update: RuntimeConfigUpdate): Promise<RuntimeConfigUpdateResult> {
     if (this.shuttingDown) {
@@ -119,6 +120,7 @@ export class DesktopSupervisor {
 
     const appliedEnvKeys: string[] = [];
     const unsetEnvKeys: string[] = [];
+    let secretsTouched = false;
 
     await this.withConfigLock(async () => {
       // Wait for in-flight service ops so restart never reads a half-applied map.
@@ -133,6 +135,7 @@ export class DesktopSupervisor {
         if (!key) continue;
         this.clearDynamicOverride(key);
         unsetEnvKeys.push(key);
+        if (SECRET_ENV_KEYS.has(key)) secretsTouched = true;
       }
 
       const incoming = update.env && typeof update.env === "object" ? update.env : {};
@@ -144,12 +147,14 @@ export class DesktopSupervisor {
           // Empty means unset, never store blank secrets.
           this.clearDynamicOverride(key);
           if (!unsetEnvKeys.includes(key)) unsetEnvKeys.push(key);
+          if (SECRET_ENV_KEYS.has(key)) secretsTouched = true;
           continue;
         }
         this.config.env[key] = value;
         process.env[key] = value;
         this.dynamicOverrideKeys.add(key);
         appliedEnvKeys.push(key);
+        if (SECRET_ENV_KEYS.has(key)) secretsTouched = true;
       }
 
       const derived = deriveConfigFromEnv(this.config.layout, this.config.env);
@@ -168,14 +173,49 @@ export class DesktopSupervisor {
       this.rebuildSpecsInPlace();
     });
 
+    const restartedServices: string[] = [];
+    if (secretsTouched && !this.shuttingDown) {
+      // Must run outside the config lock — restartService takes the same lock.
+      await this.reloadRuntimeAfterSecretChange(restartedServices);
+    }
+
     this.emit();
     return {
       ok: true,
       // Key names only — never values. Secret names may appear so clients know unset ran.
       appliedEnvKeys: appliedEnvKeys.filter((k) => !SECRET_ENV_KEYS.has(k)),
       unsetEnvKeys: [...new Set(unsetEnvKeys)],
+      restartedServices,
       updatedAt: new Date().toISOString()
     };
+  }
+
+  /**
+   * Reload managed Runtime so secret env is present in the child process.
+   * Never kills external (unowned) processes — surfaces a clear pending message instead.
+   */
+  private async reloadRuntimeAfterSecretChange(restartedServices: string[]): Promise<void> {
+    const runtime = this.services.get("runtime");
+    if (!runtime) return;
+
+    if (runtime.ownership === "external") {
+      // Health may be green but that process was not started with our secrets.
+      runtime.lastError =
+        "Secrets saved, but Runtime is external (another process owns :6121). Free the port or stop the other YUVI instance, then Start Runtime.";
+      runtime.summary = "Secrets pending — external Runtime";
+      runtime.detail =
+        "Managed Runtime must be owned by this Supervisor to inject DEEPSEEK_API_KEY / DATABASE_URL.";
+      return;
+    }
+
+    try {
+      await this.restartService("runtime");
+      restartedServices.push("runtime");
+    } catch (error) {
+      runtime.lastError =
+        error instanceof Error ? error.message : "Failed to reload Runtime after secret change.";
+      runtime.summary = "Secret reload failed";
+    }
   }
 
   /**
