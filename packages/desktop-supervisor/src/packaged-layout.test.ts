@@ -6,6 +6,7 @@ import {
   deriveConfigFromEnv,
   loadPackagedSupervisorConfig,
   loadSupervisorConfig,
+  resolvePackagedLive2DEnv,
   resolvePackagedRuntimeStart
 } from "./config.js";
 import { validateRuntimeManifest } from "./runtime-manifest.js";
@@ -77,6 +78,41 @@ describe("packaged supervisor layout", () => {
     expect(cfg.runtimeStart?.env["YUVI_PACKAGED"]).toBe("1");
     expect(cfg.autostartMem0).toBe(false);
     expect(cfg.mem0Start).toBeNull();
+  });
+
+  it("packaged Live2D env prefers explicit, then bundled resources, then LOCALAPPDATA/YUVI", () => {
+    const tree = makePackagedResourceTree();
+    const layout = {
+      mode: "packaged" as const,
+      resourceRoot: tree.resourceRoot,
+      dataRoot: tree.dataRoot,
+      runtimeManifestPath: tree.manifestPath
+    };
+
+    // Explicit wins even when bundled exists.
+    const bundledLive2d = path.join(tree.resourceRoot, "live2d");
+    fs.mkdirSync(bundledLive2d, { recursive: true });
+    const bundledCoreDir = path.join(tree.resourceRoot, "cubism-core");
+    fs.mkdirSync(bundledCoreDir, { recursive: true });
+    const bundledCore = path.join(bundledCoreDir, "live2dcubismcore.min.js");
+    fs.writeFileSync(bundledCore, "/*core*/");
+
+    const explicit = resolvePackagedLive2DEnv(layout, {
+      LIVE2D_ASSET_ROOT: "C:\\explicit\\models",
+      LIVE2D_CORE_PATH: "C:\\explicit\\core.js"
+    });
+    expect(explicit["LIVE2D_ASSET_ROOT"]).toBe("C:\\explicit\\models");
+    expect(explicit["LIVE2D_CORE_PATH"]).toBe("C:\\explicit\\core.js");
+
+    // Bundled when no explicit.
+    const bundled = resolvePackagedLive2DEnv(layout, {});
+    expect(bundled["LIVE2D_ASSET_ROOT"]).toBe(bundledLive2d);
+    expect(bundled["LIVE2D_CORE_PATH"]).toBe(bundledCore);
+
+    // runtimeStart merges Live2D env.
+    const start = resolvePackagedRuntimeStart(layout, {}, "6121");
+    expect(start?.env["LIVE2D_ASSET_ROOT"]).toBe(bundledLive2d);
+    expect(start?.env["LIVE2D_CORE_PATH"]).toBe(bundledCore);
   });
 
   it("rejects path traversal in runtime manifest fields", () => {

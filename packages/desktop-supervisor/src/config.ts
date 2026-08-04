@@ -225,6 +225,62 @@ export function resolveRuntimeStartForLayout(
 }
 
 /**
+ * Resolve Live2D model root + Cubism Core for packaged Runtime.
+ *
+ * Priority for each path:
+ * 1. Explicit env (process / seed / user settings push)
+ * 2. Bundled next to resource root (`live2d/`, `cubism-core/live2dcubismcore.min.js`)
+ * 3. Standard per-user layout under LOCALAPPDATA/YUVI (matches .env.local convention)
+ *
+ * Missing assets are omitted (Runtime returns 404 for /live2d/*) — never invent paths.
+ */
+export function resolvePackagedLive2DEnv(
+  layout: Extract<SupervisorLayout, { mode: "packaged" }>,
+  env: Record<string, string>
+): Record<string, string> {
+  const out: Record<string, string> = {};
+
+  const explicitAsset = env["LIVE2D_ASSET_ROOT"]?.trim();
+  const explicitCore = env["LIVE2D_CORE_PATH"]?.trim();
+
+  const bundledAsset = path.join(layout.resourceRoot, "live2d");
+  const bundledCore = path.join(
+    layout.resourceRoot,
+    "cubism-core",
+    "live2dcubismcore.min.js"
+  );
+
+  const localYuvi = defaultYuviLocalDataRoot();
+  const userAsset = path.join(localYuvi, "Live2DModels");
+  const userCore = path.join(localYuvi, "CubismCore", "live2dcubismcore.min.js");
+
+  if (explicitAsset) {
+    out["LIVE2D_ASSET_ROOT"] = explicitAsset;
+  } else if (fs.existsSync(bundledAsset)) {
+    out["LIVE2D_ASSET_ROOT"] = bundledAsset;
+  } else if (fs.existsSync(userAsset)) {
+    out["LIVE2D_ASSET_ROOT"] = userAsset;
+  }
+
+  if (explicitCore) {
+    out["LIVE2D_CORE_PATH"] = explicitCore;
+  } else if (fs.existsSync(bundledCore)) {
+    out["LIVE2D_CORE_PATH"] = bundledCore;
+  } else if (fs.existsSync(userCore)) {
+    out["LIVE2D_CORE_PATH"] = userCore;
+  }
+
+  return out;
+}
+
+function defaultYuviLocalDataRoot(): string {
+  const local = process.env["LOCALAPPDATA"]?.trim();
+  if (local) return path.join(local, "YUVI");
+  // Non-Windows / restricted clean-room fallback
+  return path.join(process.env["HOME"]?.trim() || process.cwd(), ".yuvi");
+}
+
+/**
  * Packaged Runtime: bundled node.exe + yuvi-runtime-server.mjs (never PATH node/pnpm/tsx).
  */
 export function resolvePackagedRuntimeStart(
@@ -245,6 +301,7 @@ export function resolvePackagedRuntimeStart(
   const dataDir = path.join(layout.dataRoot, "runtime-data");
   fs.mkdirSync(dataDir, { recursive: true });
   const host = envString(env, "SERVER_HOST", "127.0.0.1");
+  const live2dEnv = resolvePackagedLive2DEnv(layout, env);
   return {
     file: nodeExe,
     args: [entry],
@@ -255,7 +312,8 @@ export function resolvePackagedRuntimeStart(
       YUVI_RUNTIME_RESOURCE_DIR: layout.resourceRoot,
       YUVI_RUNTIME_DATA_DIR: dataDir,
       YUVI_RUNTIME_ENV_DIR: dataDir,
-      YUVI_PACKAGED: "1"
+      YUVI_PACKAGED: "1",
+      ...live2dEnv
     },
     // Specific marker — not bare "node.exe".
     commandMarker: "yuvi-runtime-server.mjs"

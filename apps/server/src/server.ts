@@ -52,6 +52,24 @@ export async function buildServer(config: ServerConfig) {
 
   await app.register(websocket);
 
+  // Tauri desktop webview (tauri.localhost) calls Runtime on 127.0.0.1 — needs CORS.
+  app.addHook("onRequest", async (request, reply) => {
+    const origin = request.headers.origin;
+    if (typeof origin === "string" && isDesktopAllowedOrigin(origin)) {
+      reply.header("Access-Control-Allow-Origin", origin);
+      reply.header("Access-Control-Allow-Credentials", "true");
+      reply.header(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization, X-Yuvi-Control-Token"
+      );
+      reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+      reply.header("Vary", "Origin");
+    }
+    if (request.method === "OPTIONS") {
+      return reply.code(204).send();
+    }
+  });
+
   if (config.runtimeMode === "development" && config.host === "0.0.0.0") {
     app.log.warn(
       "SERVER_HOST=0.0.0.0 exposes the development server on the local network. Use 127.0.0.1 unless you intentionally need LAN access."
@@ -105,4 +123,22 @@ function isMalformedQueryError(error: Error & { statusCode?: number }): boolean 
       message.includes("malformed") ||
       message.includes("invalid"))
   );
+}
+
+/** Origins that may call Runtime from the YUVI desktop shell or local tools. */
+function isDesktopAllowedOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    const host = url.hostname.toLowerCase();
+    if (host === "tauri.localhost" || host === "localhost" || host === "127.0.0.1" || host === "::1") {
+      return true;
+    }
+    // asset / custom protocols used by some Tauri versions
+    if (url.protocol === "tauri:" || url.protocol === "asset:") {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }

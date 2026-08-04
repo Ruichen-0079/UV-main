@@ -25,6 +25,7 @@ export {
   assertLoopbackHost,
   deriveConfigFromEnv,
   buildChildProcessEnv,
+  resolvePackagedLive2DEnv,
   resolvePackagedRuntimeStart,
   resolveRuntimeStartForLayout
 } from "./config.js";

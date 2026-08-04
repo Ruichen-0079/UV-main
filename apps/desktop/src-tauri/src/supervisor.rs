@@ -452,71 +452,146 @@ fn wait_for_active_endpoint(pointer_path: &Path, timeout: Duration) -> Result<En
   Err("desktop supervisor did not publish a control endpoint in time".to_string())
 }
 
+/// Loopback JSON over plain TCP — never shell out to PowerShell/curl.
+/// PowerShell was flashing console windows on every 5s status poll ("已退出进程").
 fn http_json(
   method: &str,
   url: &str,
   body: Option<&str>,
   token: Option<&str>,
 ) -> Result<Value, String> {
-  #[cfg(target_os = "windows")]
-  {
-    let token_header = token
-      .map(|t| format!("$h['X-Yuvi-Control-Token']='{t}'; "))
-      .unwrap_or_default();
-    // Escape single quotes for PowerShell single-quoted strings in URI only.
-    let safe_url = url.replace('\'', "''");
-    let script = if method == "GET" {
-      format!(
-        "$ProgressPreference='SilentlyContinue'; $h=@{{}}; {token_header}try {{ (Invoke-WebRequest -UseBasicParsing -Method GET -Uri '{safe_url}' -Headers $h -TimeoutSec 5).Content }} catch {{ exit 2 }}"
-      )
-    } else {
-      let body_arg = body.unwrap_or("").replace('\'', "''");
-      if body_arg.is_empty() {
-        format!(
-          "$ProgressPreference='SilentlyContinue'; $h=@{{}}; {token_header}try {{ (Invoke-WebRequest -UseBasicParsing -Method POST -Uri '{safe_url}' -Headers $h -TimeoutSec 60).Content }} catch {{ exit 2 }}"
-        )
-      } else {
-        format!(
-          "$ProgressPreference='SilentlyContinue'; $h=@{{'Content-Type'='application/json'}}; {token_header}try {{ (Invoke-WebRequest -UseBasicParsing -Method POST -Uri '{safe_url}' -Headers $h -Body '{body_arg}' -TimeoutSec 60).Content }} catch {{ exit 2 }}"
-        )
-      }
-    };
-    let output = Command::new("powershell.exe")
-      .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
-      .output()
-      .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-      return Err("supervisor request failed".to_string());
+  use std::io::{Read, Write};
+  use std::net::TcpStream;
+
+  let parsed = url::Url::parse(url).map_err(|e| format!("invalid supervisor url: {e}"))?;
+  if parsed.scheme() != "http" {
+    return Err("supervisor control plane must use http".into());
+  }
+  let host = parsed
+    .host_str()
+    .ok_or_else(|| "supervisor url missing host".to_string())?
+    .to_string();
+  let host_l = host.to_ascii_lowercase();
+  if host_l != "127.0.0.1" && host_l != "localhost" && host_l != "::1" {
+    return Err("supervisor HTTP must stay on loopback".into());
+  }
+  let port = parsed.port().unwrap_or(80);
+  let path = {
+    let p = parsed.path();
+    let path = if p.is_empty() { "/" } else { p };
+    match parsed.query() {
+      Some(q) => format!("{path}?{q}"),
+      None => path.to_string(),
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-      return Ok(Value::Object(serde_json::Map::new()));
-    }
-    serde_json::from_str(&text).map_err(|e| format!("invalid supervisor JSON: {e}"))
+  };
+
+  let is_get = method.eq_ignore_ascii_case("GET");
+  let timeout = if is_get {
+    Duration::from_secs(5)
+  } else {
+    Duration::from_secs(60)
+  };
+
+  // Prefer IPv4 loopback; `localhost` can resolve to ::1 first on some hosts.
+  let connect_host = if host_l == "localhost" || host_l == "::1" {
+    "127.0.0.1"
+  } else {
+    host.as_str()
+  };
+  let mut stream = TcpStream::connect((connect_host, port))
+    .map_err(|e| format!("supervisor connect failed: {e}"))?;
+  let _ = stream.set_read_timeout(Some(timeout));
+  let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+
+  let body_bytes = if is_get {
+    None
+  } else {
+    Some(body.unwrap_or(""))
+  };
+
+  let mut request = format!(
+    "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json\r\n"
+  );
+  if let Some(token) = token {
+    // Control tokens are hex; never log them.
+    request.push_str("X-Yuvi-Control-Token: ");
+    request.push_str(token);
+    request.push_str("\r\n");
+  }
+  if let Some(payload) = body_bytes {
+    request.push_str("Content-Type: application/json\r\n");
+    request.push_str(&format!("Content-Length: {}\r\n\r\n", payload.len()));
+    request.push_str(payload);
+  } else {
+    request.push_str("\r\n");
   }
 
-  #[cfg(not(target_os = "windows"))]
-  {
-    let mut command = Command::new("curl");
-    command.args(["-sS", "-X", method, url, "--max-time", "60"]);
-    if let Some(token) = token {
-      command.args(["-H", &format!("X-Yuvi-Control-Token: {token}")]);
-    }
-    if method != "GET" {
-      command.args([
-        "-H",
-        "content-type: application/json",
-        "-d",
-        body.unwrap_or("{}"),
-      ]);
-    }
-    let output = command.output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-      return Err("supervisor request failed".to_string());
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    serde_json::from_str(&text).map_err(|e| format!("invalid supervisor JSON: {e}"))
+  stream
+    .write_all(request.as_bytes())
+    .map_err(|e| format!("supervisor write failed: {e}"))?;
+
+  let mut raw = Vec::new();
+  stream
+    .read_to_end(&mut raw)
+    .map_err(|e| format!("supervisor read failed: {e}"))?;
+  let raw_str = String::from_utf8_lossy(&raw);
+  let (header_part, body_part) = raw_str
+    .split_once("\r\n\r\n")
+    .or_else(|| raw_str.split_once("\n\n"))
+    .ok_or_else(|| "invalid HTTP response from supervisor".to_string())?;
+
+  let status_line = header_part.lines().next().unwrap_or("");
+  let status_code: u16 = status_line
+    .split_whitespace()
+    .nth(1)
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(0);
+  if !(200..300).contains(&status_code) {
+    return Err(format!("supervisor request failed (HTTP {status_code})"));
   }
+
+  let response_body = if header_part
+    .to_ascii_lowercase()
+    .contains("transfer-encoding: chunked")
+  {
+    decode_chunked_body(body_part)?
+  } else {
+    body_part.to_string()
+  };
+
+  let text = response_body.trim();
+  if text.is_empty() {
+    return Ok(Value::Object(serde_json::Map::new()));
+  }
+  serde_json::from_str(text).map_err(|e| format!("invalid supervisor JSON: {e}"))
+}
+
+fn decode_chunked_body(input: &str) -> Result<String, String> {
+  let mut rest = input;
+  let mut out = String::new();
+  loop {
+    let (size_line, after) = rest
+      .split_once("\r\n")
+      .or_else(|| rest.split_once('\n'))
+      .ok_or_else(|| "invalid chunked encoding".to_string())?;
+    let size_str = size_line.split(';').next().unwrap_or("").trim();
+    let size = usize::from_str_radix(size_str, 16)
+      .map_err(|_| format!("invalid chunk size '{size_str}'"))?;
+    if size == 0 {
+      break;
+    }
+    if after.len() < size {
+      return Err("truncated chunked body".into());
+    }
+    out.push_str(&after[..size]);
+    rest = &after[size..];
+    if rest.starts_with("\r\n") {
+      rest = &rest[2..];
+    } else if rest.starts_with('\n') {
+      rest = &rest[1..];
+    }
+  }
+  Ok(out)
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -525,14 +600,8 @@ fn process_alive(pid: u32) -> bool {
   }
   #[cfg(target_os = "windows")]
   {
-    let output = Command::new("powershell.exe")
-      .args([
-        "-NoProfile",
-        "-Command",
-        &format!("if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"),
-      ])
-      .output();
-    matches!(output, Ok(o) if o.status.success())
+    // Native OpenProcess — no PowerShell console flash.
+    process_alive_windows(pid)
   }
   #[cfg(not(target_os = "windows"))]
   {
@@ -541,6 +610,28 @@ fn process_alive(pid: u32) -> bool {
       .status()
       .map(|s| s.success())
       .unwrap_or(false)
+  }
+}
+
+#[cfg(target_os = "windows")]
+fn process_alive_windows(pid: u32) -> bool {
+  #[link(name = "kernel32")]
+  extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> *mut std::ffi::c_void;
+    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    fn GetExitCodeProcess(handle: *mut std::ffi::c_void, exit_code: *mut u32) -> i32;
+  }
+  const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+  const STILL_ACTIVE: u32 = 259;
+  unsafe {
+    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if handle.is_null() {
+      return false;
+    }
+    let mut code: u32 = 0;
+    let ok = GetExitCodeProcess(handle, &mut code);
+    CloseHandle(handle);
+    ok != 0 && code == STILL_ACTIVE
   }
 }
 

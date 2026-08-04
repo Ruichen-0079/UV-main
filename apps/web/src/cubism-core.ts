@@ -15,6 +15,8 @@ export type CubismCoreLoader = {
   resetAfterFailure(): void;
 };
 
+import { resolveRuntimeAssetUrl } from "./desktop-runtime.js";
+
 const defaultSource = "/api/live2d-core/live2dcubismcore.min.js";
 
 export function createCubismCoreLoader(options: CubismCoreLoaderOptions = {}): CubismCoreLoader {
@@ -29,7 +31,7 @@ export function createCubismCoreLoader(options: CubismCoreLoaderOptions = {}): C
 
     const doc = options.document ?? (typeof document === "undefined" ? undefined : document);
     if (!doc) return Promise.reject(new Error("Live2D Core requires a browser document."));
-    const source = options.source ?? defaultSource;
+    const source = resolveRuntimeAssetUrl(options.source ?? defaultSource);
     const timeoutMs = options.timeoutMs ?? 10_000;
 
     inFlight = new Promise<CubismCoreGlobal>((resolve, reject) => {

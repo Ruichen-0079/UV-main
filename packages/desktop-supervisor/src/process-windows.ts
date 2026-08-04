@@ -39,9 +39,19 @@ $obj = [ordered]@{
 }
 $obj | ConvertTo-Json -Compress
 `;
+  // -WindowStyle Hidden + windowsHide: avoid console flash ("已退出进程") on Windows.
   const result = spawnSync(
     "powershell.exe",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-WindowStyle",
+      "Hidden",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      script
+    ],
     { encoding: "utf8", windowsHide: true, timeout: 8_000 }
   );
   if (result.status !== 0 || !result.stdout?.trim()) {
