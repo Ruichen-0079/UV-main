@@ -5,12 +5,14 @@ import {
   LlmMemoryExtractor,
   MemoryService,
   RuleBasedMemoryExtractor,
+  createMemoryBackend,
   createMemoryRepositoryFromEnv,
   createConversationRepositoryFromEnv,
   parseMemoryRepositoryEnv,
   type ConversationRepository,
   type MemoryRepository
 } from "@companion/memory";
+import { parseRuntimeConfig } from "@companion/config";
 import { PromptBuilder } from "@companion/prompt-builder";
 import {
   createProviderRegistryFromEnv,
@@ -73,7 +75,8 @@ export async function createAppContext(
 
   function createMemoryService(
     providers: ProviderRegistry,
-    extractorMode = config.memoryExtractor
+    extractorMode = config.memoryExtractor,
+    env: Record<string, string | undefined> = process.env
   ): MemoryService {
     const reasoningStatus = providers.getStatus().providers.reasoning;
     const memoryExtractor =
@@ -87,11 +90,53 @@ export async function createAppContext(
           })
         : ruleBasedExtractor;
 
-    return new MemoryService(memoryRepository, undefined, undefined, memoryExtractor, {
-      provider: providers.getEmbeddingProvider(),
-      enabled: true,
-      logger: runtimeLogger
-    });
+    const runtimeConfig = parseRuntimeConfig(env);
+    const backendKind = runtimeConfig.memory.backend === "mem0" ? "mem0" : "legacy";
+    // Runtime must not require Sidecar healthy at boot — Mem0 client is lazy HTTP.
+    const mem0Backend =
+      backendKind === "mem0"
+        ? createMemoryBackend({
+            kind: "mem0",
+            ...(runtimeConfig.memory.mem0BaseUrl
+              ? { mem0BaseUrl: runtimeConfig.memory.mem0BaseUrl }
+              : {}),
+            ...(runtimeConfig.memory.mem0TimeoutMs !== undefined
+              ? { mem0TimeoutMs: runtimeConfig.memory.mem0TimeoutMs }
+              : {}),
+            mem0WriteTimeoutMs: 180_000,
+            ...(runtimeConfig.memory.mem0HealthTimeoutMs !== undefined
+              ? { mem0HealthTimeoutMs: runtimeConfig.memory.mem0HealthTimeoutMs }
+              : {})
+          })
+        : undefined;
+
+    if (backendKind === "mem0") {
+      runtimeLogger.info("memory backend selected", {
+        backend: "mem0",
+        mem0BaseUrl: runtimeConfig.memory.mem0BaseUrl,
+        searchTimeoutMs: runtimeConfig.memory.mem0TimeoutMs
+      });
+    }
+
+    return new MemoryService(
+      memoryRepository,
+      undefined,
+      undefined,
+      memoryExtractor,
+      {
+        provider: providers.getEmbeddingProvider(),
+        // Mem0 owns embeddings for LTM; keep provider only for legacy path.
+        enabled: backendKind === "legacy",
+        logger: runtimeLogger
+      },
+      {
+        kind: backendKind,
+        mem0: mem0Backend,
+        searchTimeoutMs: runtimeConfig.memory.mem0TimeoutMs,
+        writeTimeoutMs: 180_000,
+        logger: runtimeLogger
+      }
+    );
   }
 
   function createRuntime(
@@ -137,7 +182,8 @@ export async function createAppContext(
       const nextProviders = createProviderRegistryFromEnv(env);
       const nextMemory = createMemoryService(
         nextProviders,
-        parseMemoryExtractorMode(env["MEMORY_EXTRACTOR"])
+        parseMemoryExtractorMode(env["MEMORY_EXTRACTOR"]),
+        env
       );
       context.providers = nextProviders;
       context.memory = nextMemory;

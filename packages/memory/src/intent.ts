@@ -43,6 +43,47 @@ export function stripExplicitRememberPrefix(text: string): string {
     .trim();
 }
 
+const explicitForgetPatterns: RegExp[] = [
+  /(?:^|[，,。！!？?\s])请?忘记/u,
+  /(?:^|[，,。！!？?\s])忘掉/u,
+  /帮我忘记/u,
+  /不要再记住/u,
+  /删掉.*记忆/u,
+  /删除.*记忆/u,
+  /\bplease\s+forget\b/iu,
+  /\bforget\s+that\b/iu,
+  /\bforget\b[,:]?\s+(?:that\s+)?/iu,
+  /\bdon'?t\s+remember\b/iu,
+  /\bdelete\s+(?:that\s+)?memory\b/iu
+];
+
+const explicitForgetFalsePositivePatterns: RegExp[] = [
+  /忘记带/u,
+  /忘了带/u,
+  /差点儿忘记/u,
+  /almost\s+forgot\b/iu
+];
+
+export function detectExplicitForgetRequest(userMessage: string): boolean {
+  const text = normalizeIntentInput(userMessage);
+  if (!text) {
+    return false;
+  }
+  if (explicitForgetFalsePositivePatterns.some((pattern) => pattern.test(text))) {
+    return false;
+  }
+  return explicitForgetPatterns.some((pattern) => pattern.test(text));
+}
+
+export function stripExplicitForgetPrefix(text: string): string {
+  return text
+    .replace(
+      /^(?:请忘记|忘记|忘掉|帮我忘记|不要再记住|please\s+forget|forget\s+that|forget|don't\s+remember|delete\s+(?:that\s+)?memory)\s*[:：,，-]?\s*/iu,
+      ""
+    )
+    .trim();
+}
+
 const correctionPatterns: RegExp[] = [
   /(?:^|[，,。！!？?\s])不对[，,：:]/u,
   /(?:^|[，,。！!？?\s])不对$/u,

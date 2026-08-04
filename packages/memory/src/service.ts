@@ -4,8 +4,28 @@ import { MemoryRetriever } from "./retriever.js";
 import { MemoryScorer } from "./scorer.js";
 import { buildCandidateFingerprint, deduplicateCandidateBatch } from "./candidate-dedupe.js";
 import { detectEpisodicCorrectionRelationships, hasCorrectionRelatedMemory } from "./correction.js";
-import { detectExplicitRememberRequest } from "./intent.js";
+import {
+  detectExplicitRememberRequest,
+  stripExplicitForgetPrefix,
+  stripExplicitRememberPrefix
+} from "./intent.js";
 import { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
+import type { MemoryBackend } from "./backend.js";
+import {
+  buildChatMemoryScope,
+  buildMem0RetrievalResult,
+  classifyMem0Turn,
+  emptyMem0RetrievalResult,
+  forgetMemoriesInScope,
+  MEM0_CHAT_SEARCH_TIMEOUT_MS,
+  MEM0_CHAT_SEARCH_TOP_K,
+  MEM0_CHAT_WRITE_TIMEOUT_MS,
+  MEMORY_SCOPE_MISSING,
+  resolveMem0ChatIdentity,
+  selectPromptMemories,
+  type ForgetMemoriesResult,
+  type Mem0TurnKind
+} from "./mem0-chat.js";
 import {
   canonicalEventKey,
   hasHistoricalEpisodicIntent,
@@ -58,25 +78,58 @@ export type MemoryEmbeddingConfig = {
   logger?: { warn?(message: string, context?: Record<string, unknown>): void } | undefined;
 };
 
+export type MemoryServiceBackendConfig = {
+  kind?: "legacy" | "mem0" | undefined;
+  mem0?: MemoryBackend | undefined;
+  searchTimeoutMs?: number | undefined;
+  writeTimeoutMs?: number | undefined;
+  logger?:
+    | {
+        warn?(message: string, context?: Record<string, unknown>): void;
+        info?(message: string, context?: Record<string, unknown>): void;
+      }
+    | undefined;
+};
+
 export class MemoryService {
   private readonly scorer: MemoryScorer;
   private readonly retriever: MemoryRetriever;
   private readonly embeddingProvider: MemoryEmbeddingProvider | undefined;
   private readonly embeddingEnabled: boolean;
   private readonly embeddingLogger: MemoryEmbeddingConfig["logger"];
+  private readonly backendKind: "legacy" | "mem0";
+  private readonly mem0Backend: MemoryBackend | undefined;
+  private readonly mem0SearchTimeoutMs: number;
+  private readonly mem0WriteTimeoutMs: number;
+  private readonly mem0Logger: MemoryServiceBackendConfig["logger"];
 
   constructor(
     private readonly repository: MemoryRepository,
     scorer = new MemoryScorer(),
     retriever?: MemoryRetriever,
     private readonly extractor: MemoryExtractor = new RuleBasedMemoryExtractor(),
-    embedding?: MemoryEmbeddingConfig
+    embedding?: MemoryEmbeddingConfig,
+    backend?: MemoryServiceBackendConfig
   ) {
     this.scorer = scorer;
     this.retriever = retriever ?? new MemoryRetriever(repository, scorer);
     this.embeddingProvider = embedding?.provider;
     this.embeddingEnabled = embedding?.enabled ?? Boolean(embedding?.provider);
     this.embeddingLogger = embedding?.logger;
+    this.backendKind = backend?.kind === "mem0" && backend.mem0 ? "mem0" : "legacy";
+    this.mem0Backend = backend?.kind === "mem0" ? backend.mem0 : undefined;
+    this.mem0SearchTimeoutMs = backend?.searchTimeoutMs ?? MEM0_CHAT_SEARCH_TIMEOUT_MS;
+    this.mem0WriteTimeoutMs = backend?.writeTimeoutMs ?? MEM0_CHAT_WRITE_TIMEOUT_MS;
+    this.mem0Logger = backend?.logger ?? embedding?.logger;
+  }
+
+  /** True when formal long-term memory is Mem0 (Legacy write/search path disabled). */
+  isMem0Backend(): boolean {
+    return this.backendKind === "mem0" && Boolean(this.mem0Backend);
+  }
+
+  getBackendKind(): "legacy" | "mem0" {
+    return this.isMem0Backend() ? "mem0" : "legacy";
   }
 
   async createMemory(input: CreateMemoryInput): Promise<Memory> {
@@ -160,6 +213,10 @@ export class MemoryService {
     sourceTraceId?: string | null;
     tags?: string[];
   }): Promise<Memory | null> {
+    if (this.isMem0Backend()) {
+      // Mem0 chat path uses storeConversationTurn / storeExplicitFact instead.
+      return null;
+    }
     const candidates = await this.extractCandidates({
       userMessage: input.userMessage,
       assistantMessage: input.assistantMessage,
@@ -178,6 +235,10 @@ export class MemoryService {
   }
 
   async extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
+    if (this.isMem0Backend()) {
+      // Do not run Legacy LLM/rule extraction when Mem0 owns long-term memory.
+      return [];
+    }
     const candidates = await this.extractor.extractCandidates(input);
     const withIdentity = candidates.map((candidate) =>
       this.applyExtractionIdentity(candidate, input)
@@ -281,6 +342,13 @@ export class MemoryService {
       storageReason?: string;
     } = {}
   ): Promise<MemoryCandidateStorageResult> {
+    if (this.isMem0Backend()) {
+      return {
+        decision: "rejected",
+        candidate,
+        rejectedReason: "mem0-backend-skips-legacy-storage"
+      };
+    }
     const pendingRejection = candidate.metadata?.["pendingRejection"];
     if (typeof pendingRejection === "string") {
       return {
@@ -389,6 +457,9 @@ export class MemoryService {
   async retrieveRelevantMemoriesWithMetadata(
     query: MemorySearchQuery
   ): Promise<MemoryRetrievalResult> {
+    if (this.isMem0Backend() && this.mem0Backend) {
+      return this.retrieveFromMem0(query);
+    }
     const result = await this.retrieveWithFallback(query);
     await Promise.all(
       result.selectedMemories.map((memory) => this.repository.updateMemoryAccess(memory.id))
@@ -397,14 +468,24 @@ export class MemoryService {
   }
 
   async consolidateMemory(_memoryId: string): Promise<void> {
+    // Mem0 owns consolidation via infer; Legacy path remains a no-op placeholder.
+    if (this.isMem0Backend()) {
+      return;
+    }
     // Placeholder: future consolidation should merge related memories into stable semantic summaries.
   }
 
   scoreImportance(content: string): number {
+    if (this.isMem0Backend()) {
+      return 0;
+    }
     return this.scorer.scoreImportance(content);
   }
 
   async remember(_sessionId: string, content: string): Promise<void> {
+    if (this.isMem0Backend()) {
+      return;
+    }
     await this.createMemory({
       type: "working",
       subtype: inferMemorySubtype(content),
@@ -415,6 +496,252 @@ export class MemoryService {
       metadata: { generatedBy: "runtime" },
       tags: []
     });
+  }
+
+  /**
+   * Formal chat write routing by turn kind.
+   * - normal → one add(infer=true)
+   * - explicit_remember → one add(infer=false) only (never dual infer=true)
+   * - explicit_forget / cancelled_or_failed → no add
+   */
+  async storeConversationTurn(input: {
+    userMessage: string;
+    assistantMessage: string;
+    sessionId?: string | undefined;
+    personaId?: string | null | undefined;
+    subjectUserId?: string | null | undefined;
+    userMessageId?: string | null | undefined;
+    assistantMessageId?: string | null | undefined;
+    traceId?: string | null | undefined;
+    conversationId?: string | null | undefined;
+    language?: string | null | undefined;
+    cancelledOrFailed?: boolean | undefined;
+    turnKind?: Mem0TurnKind | undefined;
+  }): Promise<{
+    ok: boolean;
+    skippedReason?: string;
+    code?: string;
+    turnKind?: Mem0TurnKind;
+    memoryId?: string;
+    operation?: string;
+    infer?: boolean;
+  }> {
+    if (!this.isMem0Backend() || !this.mem0Backend) {
+      return { ok: false, skippedReason: "not-mem0-backend" };
+    }
+    const userMessage = input.userMessage.trim();
+    const assistantMessage = input.assistantMessage.trim();
+    const turnKind =
+      input.turnKind ??
+      classifyMem0Turn({
+        userMessage,
+        assistantMessage,
+        cancelledOrFailed: input.cancelledOrFailed
+      });
+
+    if (turnKind === "cancelled_or_failed") {
+      return { ok: false, skippedReason: "cancelled-or-failed", turnKind };
+    }
+    if (turnKind === "explicit_forget") {
+      // Forget is handled on the read path only; never re-write deleted facts.
+      return { ok: false, skippedReason: "explicit-forget-skips-add", turnKind };
+    }
+    if (turnKind === "normal" && !assistantMessage) {
+      return { ok: false, skippedReason: "empty-assistant", turnKind };
+    }
+    if (turnKind === "explicit_remember" && !assistantMessage) {
+      // Require a completed assistant ack before persisting explicit facts.
+      return { ok: false, skippedReason: "explicit-remember-requires-assistant", turnKind };
+    }
+
+    const resolved = resolveMem0ChatIdentity({
+      subjectUserId: input.subjectUserId,
+      personaId: input.personaId
+    });
+    if (!resolved.ok) {
+      this.mem0Logger?.warn?.(MEMORY_SCOPE_MISSING, {
+        missing: resolved.missing,
+        turnKind
+      });
+      return {
+        ok: false,
+        skippedReason: MEMORY_SCOPE_MISSING,
+        code: MEMORY_SCOPE_MISSING,
+        turnKind
+      };
+    }
+    const { identity } = resolved;
+    const scope = buildChatMemoryScope(identity);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.mem0WriteTimeoutMs);
+    try {
+      if (turnKind === "explicit_remember") {
+        const fact = stripExplicitRememberPrefix(userMessage) || userMessage;
+        const result = await this.mem0Backend.add(
+          {
+            scope,
+            content: fact,
+            infer: false,
+            metadata: {
+              userId: identity.userId,
+              characterId: identity.characterId,
+              conversationId: input.conversationId ?? input.sessionId ?? null,
+              sourceMessageId: input.userMessageId ?? null,
+              sourceTraceId: input.traceId ?? null,
+              memoryType: "explicit",
+              explicit: true,
+              language: input.language ?? null,
+              schemaVersion: 1,
+              assistantMessageId: input.assistantMessageId ?? null
+            }
+          },
+          controller.signal
+        );
+        // Single write only — never follow with infer=true for the same turn.
+        return {
+          ok: true,
+          memoryId: result.memoryId,
+          operation: result.operation,
+          turnKind,
+          infer: false
+        };
+      }
+
+      // normal: exactly one infer=true add
+      const result = await this.mem0Backend.add(
+        {
+          scope,
+          messages: [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: assistantMessage }
+          ],
+          infer: true,
+          metadata: {
+            userId: identity.userId,
+            characterId: identity.characterId,
+            conversationId: input.conversationId ?? input.sessionId ?? null,
+            sourceMessageId: input.userMessageId ?? null,
+            sourceTraceId: input.traceId ?? null,
+            memoryType: "conversation",
+            explicit: false,
+            language: input.language ?? null,
+            schemaVersion: 1,
+            assistantMessageId: input.assistantMessageId ?? null
+          }
+        },
+        controller.signal
+      );
+      return {
+        ok: true,
+        memoryId: result.memoryId,
+        operation: result.operation,
+        turnKind: "normal",
+        infer: true
+      };
+    } catch (error) {
+      this.mem0Logger?.warn?.("mem0 conversation turn write failed", {
+        message: error instanceof Error ? error.message : String(error),
+        turnKind
+      });
+      return {
+        ok: false,
+        skippedReason: error instanceof Error ? error.message : "mem0-write-failed",
+        turnKind
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async forgetExplicitMemory(input: {
+    userMessage: string;
+    personaId?: string | null | undefined;
+    subjectUserId?: string | null | undefined;
+  }): Promise<ForgetMemoriesResult & { code?: string }> {
+    if (!this.isMem0Backend() || !this.mem0Backend) {
+      return { deleted: 0, notFound: true, memoryIds: [], query: input.userMessage };
+    }
+    const resolved = resolveMem0ChatIdentity({
+      subjectUserId: input.subjectUserId,
+      personaId: input.personaId
+    });
+    if (!resolved.ok) {
+      this.mem0Logger?.warn?.(MEMORY_SCOPE_MISSING, { missing: resolved.missing, op: "forget" });
+      return {
+        deleted: 0,
+        notFound: true,
+        memoryIds: [],
+        query: input.userMessage,
+        code: MEMORY_SCOPE_MISSING
+      };
+    }
+    const scope = buildChatMemoryScope(resolved.identity);
+    const query = stripExplicitForgetPrefix(input.userMessage) || input.userMessage;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.mem0WriteTimeoutMs);
+    try {
+      return await forgetMemoriesInScope(this.mem0Backend, {
+        scope,
+        query,
+        signal: controller.signal
+      });
+    } catch (error) {
+      this.mem0Logger?.warn?.("mem0 forget failed", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return { deleted: 0, notFound: true, memoryIds: [], query };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async retrieveFromMem0(query: MemorySearchQuery): Promise<MemoryRetrievalResult> {
+    if (!this.mem0Backend) {
+      return emptyMem0RetrievalResult(query.text ?? "");
+    }
+    const text = (query.text ?? "").trim();
+    if (!text) {
+      return emptyMem0RetrievalResult("");
+    }
+    const resolved = resolveMem0ChatIdentity({
+      subjectUserId: query.subjectUserId,
+      personaId: query.personaId
+    });
+    if (!resolved.ok) {
+      this.mem0Logger?.warn?.(MEMORY_SCOPE_MISSING, {
+        missing: resolved.missing,
+        op: "search"
+      });
+      const empty = emptyMem0RetrievalResult(text);
+      empty.fallbackUsed = true;
+      empty.fallbackReason = MEMORY_SCOPE_MISSING;
+      return empty;
+    }
+    const scope = buildChatMemoryScope(resolved.identity);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.mem0SearchTimeoutMs);
+    try {
+      const hits = await this.mem0Backend.search(
+        {
+          scope,
+          query: text,
+          limit: Math.min(query.limit ?? MEM0_CHAT_SEARCH_TOP_K, MEM0_CHAT_SEARCH_TOP_K)
+        },
+        controller.signal
+      );
+      const selected = selectPromptMemories(hits);
+      return buildMem0RetrievalResult(text, hits, selected);
+    } catch (error) {
+      this.mem0Logger?.warn?.("mem0 search failed; continuing without memories", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+      const empty = emptyMem0RetrievalResult(text);
+      empty.fallbackUsed = true;
+      empty.fallbackReason = error instanceof Error ? error.message : "mem0-search-failed";
+      return empty;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async retrieveForPrompt(query: MemoryQuery): Promise<string[]> {

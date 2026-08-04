@@ -6,6 +6,7 @@ import type { AppContext } from "../context.js";
 import {
   MessageRequestSchema,
   normalizeMessageMemoryOptions,
+  resolveMessageIdentity,
   sendMessageError
 } from "./message.js";
 import { SseConnectionClosedError, writeSseFrame } from "./sse.js";
@@ -32,9 +33,12 @@ export async function registerMessageStreamRoutes(
       input.data.voiceOutput ?? input.data.options?.voiceOutput ?? input.data.options?.tts
     );
     const memoryOptions = normalizeMessageMemoryOptions(input.data.options);
+    const identity = resolveMessageIdentity(input.data);
     const userEvent = createEvent("user.message", {
       sessionId: input.data.sessionId,
-      content
+      content,
+      ...(identity.subjectUserId ? { subjectUserId: identity.subjectUserId } : {}),
+      ...(identity.personaId ? { personaId: identity.personaId } : {})
     });
     const abortController = new AbortController();
     const runtimeStream = context.runtime.streamUserMessage(userEvent, {
