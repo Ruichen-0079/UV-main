@@ -75,7 +75,7 @@ describe("user settings reducer", () => {
     });
     expect(state.saving).toBe(false);
     expect(state.lastRestartServices).toEqual(["runtime", "memory"]);
-    expect(state.saveMessage).toMatch(/Restart recommended/);
+    expect(state.saveMessage).toMatch(/Services may reload: runtime, memory/);
     expect(state.form.deepseekApiKeyInput).toBe("");
   });
 
