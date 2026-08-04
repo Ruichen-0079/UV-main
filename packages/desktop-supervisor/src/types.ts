@@ -111,7 +111,37 @@ export type StartCommandSpec = {
   commandMarker: string;
 };
 
+/**
+ * Explicit layout: development uses repo tooling; packaged uses resource tree.
+ * Do not fake repositoryRoot to force packaged mode through dev logic.
+ */
+export type SupervisorLayout =
+  | {
+      mode: "development";
+      repositoryRoot: string;
+    }
+  | {
+      mode: "packaged";
+      resourceRoot: string;
+      dataRoot: string;
+      runtimeManifestPath: string;
+    };
+
+export type RuntimeManifest = {
+  schemaVersion: 1;
+  platform: string;
+  arch: string;
+  nodeVersion?: string;
+  nodeExecutable: string;
+  runtimeEntry: string;
+};
+
 export type SupervisorConfig = {
+  layout: SupervisorLayout;
+  /**
+   * Ownership / metadata root path.
+   * Development: repository root. Packaged: resource root.
+   */
   repositoryRoot: string;
   stateDirectory: string;
   instanceId: string;

@@ -7,22 +7,32 @@ export type {
   ProcessMetadata,
   RuntimeConfigUpdate,
   RuntimeConfigUpdateResult,
+  RuntimeManifest,
   ServiceId,
   ServiceLifecycle,
   ServiceOwnership,
   ServiceSnapshot,
   StartCommandSpec,
   SupervisorConfig,
+  SupervisorLayout,
   SupervisorSnapshot
 } from "./types.js";
 
 export {
   loadSupervisorConfig,
+  loadPackagedSupervisorConfig,
   generateControlToken,
   assertLoopbackHost,
   deriveConfigFromEnv,
-  buildChildProcessEnv
+  buildChildProcessEnv,
+  resolvePackagedRuntimeStart,
+  resolveRuntimeStartForLayout
 } from "./config.js";
+export {
+  readRuntimeManifest,
+  validateRuntimeManifest,
+  resolveManifestFile
+} from "./runtime-manifest.js";
 export { loadYuviEnvFiles, envFlag, envString } from "./env.js";
 export {
   probeHttpHealth,

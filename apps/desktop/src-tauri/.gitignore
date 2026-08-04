@@ -1,2 +1,10 @@
 /target
 gen/schemas
+# Generated packaged binaries (keep directory placeholders tracked).
+/generated/**/*.exe
+/generated/**/*.cjs
+/generated/**/*.mjs
+/generated/**/node.exe
+/generated/**/packaging-info.json
+/generated/**/runtime-manifest.json
+/generated/**/runtime-esbuild-metafile.json

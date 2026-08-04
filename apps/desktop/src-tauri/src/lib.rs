@@ -1,4 +1,5 @@
 mod config;
+mod packaging;
 mod supervisor;
 
 use std::sync::atomic::{AtomicBool, Ordering};

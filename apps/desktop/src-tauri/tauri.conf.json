@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm --filter @companion/web dev",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "pnpm --filter @companion/web build",
+    "beforeBuildCommand": "node ../../scripts/desktop-package/prepare.mjs && pnpm --dir ../.. --filter @companion/web build",
     "frontendDist": "../../web/dist"
   },
   "app": {
@@ -16,7 +16,8 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["nsis"],
+    "resources": ["generated/win32-x64/**/*"]
   }
 }

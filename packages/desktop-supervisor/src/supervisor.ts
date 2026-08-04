@@ -152,7 +152,7 @@ export class DesktopSupervisor {
         appliedEnvKeys.push(key);
       }
 
-      const derived = deriveConfigFromEnv(this.config.repositoryRoot, this.config.env);
+      const derived = deriveConfigFromEnv(this.config.layout, this.config.env);
       // Preserve TTS start commands when the update payload does not re-supply them
       // (Rust only sends user-settings keys, not YUVI_TTS_*_START_COMMAND).
       const keepTtsWrapper = this.config.ttsWrapperStart;

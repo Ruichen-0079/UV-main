@@ -47,6 +47,7 @@ function baseConfig(overrides: Partial<SupervisorConfig> = {}): SupervisorConfig
       ? overrideRoot
       : makeTempRepositoryRoot();
   return {
+    layout: { mode: "development", repositoryRoot },
     repositoryRoot,
     stateDirectory,
     instanceId: "inst-1",

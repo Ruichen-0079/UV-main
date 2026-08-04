@@ -90,53 +90,94 @@ pub fn bootstrap_supervisor(
   app: &AppHandle,
   env_overrides: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<(), String> {
-  let repo_root = discover_repo_root()?;
+  use crate::packaging::{
+    assert_no_secret_in_args, desktop_state_dir, discover_repo_root,
+    resolve_development_launch, resolve_launch_mode, resolve_packaged_launch,
+    SupervisorLaunchMode, SupervisorLaunchPlan,
+  };
+
   let root_state_dir = desktop_state_dir();
   fs::create_dir_all(&root_state_dir).map_err(|e| e.to_string())?;
-
-  // Active pointer is optional discovery only (no token). Each instance uses
-  // its own subdirectory for control-endpoint.json.
   let active_pointer = root_state_dir.join("active-instance.json");
 
-  let script = repo_root.join("scripts").join("yuvi-desktop-supervisor.mts");
-  if !script.exists() {
-    return Err(format!("missing supervisor script: {}", script.display()));
-  }
-
-  let mut command = if cfg!(target_os = "windows") {
-    let mut cmd = Command::new("cmd.exe");
-    cmd.args([
-      "/d",
-      "/c",
-      "pnpm",
-      "exec",
-      "tsx",
-      script.to_string_lossy().as_ref(),
-      "--repo-root",
-      repo_root.to_string_lossy().as_ref(),
-    ]);
-    cmd
-  } else if let Some(pnpm) = which_command("pnpm") {
-    let mut cmd = Command::new(pnpm);
-    cmd.args([
-      "exec",
-      "tsx",
-      script.to_string_lossy().as_ref(),
-      "--repo-root",
-    ])
-    .arg(&repo_root);
-    cmd
-  } else {
-    let node =
-      which_command("node").ok_or_else(|| "node/pnpm is required for desktop supervisor".to_string())?;
-    let mut cmd = Command::new(node);
-    cmd.arg("--import")
-      .arg("tsx")
-      .arg(&script)
-      .arg("--repo-root")
-      .arg(&repo_root);
-    cmd
+  let mode = resolve_launch_mode();
+  let plan = match mode {
+    SupervisorLaunchMode::Development => {
+      let repo_root = discover_repo_root()?;
+      SupervisorLaunchPlan::Development(resolve_development_launch(repo_root)?)
+    }
+    SupervisorLaunchMode::Packaged => {
+      let resource_root = resolve_packaged_resource_root(app)?;
+      let plan = resolve_packaged_launch(resource_root, root_state_dir.clone()).map_err(|e| {
+        // Never fall back to pnpm/tsx in packaged/release mode.
+        format!("packaging error: {e}")
+      })?;
+      SupervisorLaunchPlan::Packaged(plan)
+    }
   };
+
+  let (mut command, cwd, repo_root_for_state) = match &plan {
+    SupervisorLaunchPlan::Development(dev) => {
+      let command = if cfg!(target_os = "windows") {
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args([
+          "/d",
+          "/c",
+          "pnpm",
+          "exec",
+          "tsx",
+          dev.supervisor_script.to_string_lossy().as_ref(),
+          "--repo-root",
+          dev.repo_root.to_string_lossy().as_ref(),
+        ]);
+        cmd
+      } else if let Some(pnpm) = which_command("pnpm") {
+        let mut cmd = Command::new(pnpm);
+        cmd.args([
+          "exec",
+          "tsx",
+          dev.supervisor_script.to_string_lossy().as_ref(),
+          "--repo-root",
+        ])
+        .arg(&dev.repo_root);
+        cmd
+      } else {
+        let node = which_command("node")
+          .ok_or_else(|| "node/pnpm is required for desktop supervisor".to_string())?;
+        let mut cmd = Command::new(node);
+        cmd.arg("--import")
+          .arg("tsx")
+          .arg(&dev.supervisor_script)
+          .arg("--repo-root")
+          .arg(&dev.repo_root);
+        cmd
+      };
+      (command, dev.repo_root.clone(), Some(dev.repo_root.clone()))
+    }
+    SupervisorLaunchPlan::Packaged(pkg) => {
+      use crate::packaging::{select_packaged_supervisor_command, PackagedSupervisorCommand};
+      let selected = select_packaged_supervisor_command(pkg);
+      let command = match &selected {
+        PackagedSupervisorCommand::Exe { file, args } => {
+          assert_no_secret_in_args(args)?;
+          let mut cmd = Command::new(file);
+          cmd.args(args);
+          cmd
+        }
+        PackagedSupervisorCommand::NodeCjs { node, cjs, args } => {
+          assert_no_secret_in_args(args)?;
+          // Bundled node only — never PATH node.
+          let mut cmd = Command::new(node);
+          cmd.arg(cjs);
+          cmd.args(args);
+          cmd
+        }
+      };
+      // cwd is LocalAppData state root — never the install directory.
+      (command, pkg.state_root.clone(), None)
+    }
+  };
+
   // Inject non-secret public overrides only. Credential secrets are applied
   // after the control plane is up via POST /v1/config so they stay in the
   // dynamic override layer and can be cleared without poisoning baseEnv.
@@ -152,7 +193,7 @@ pub fn bootstrap_supervisor(
     }
   }
   command
-    .current_dir(&repo_root)
+    .current_dir(&cwd)
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null());
@@ -193,7 +234,7 @@ pub fn bootstrap_supervisor(
     guard.control_token = Some(endpoint.control_token.clone());
     guard.instance_id = Some(endpoint.instance_id.clone());
     guard.expected_pid = Some(endpoint.pid);
-    guard.repo_root = Some(repo_root);
+    guard.repo_root = repo_root_for_state;
     guard.state_dir = Some(instance_state_dir);
     guard.poll_stop = false;
     guard.shutting_down = false;
@@ -273,7 +314,9 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   }
 
   // Best-effort cleanup of active pointer (instance endpoint deleted by supervisor process).
-  let _ = fs::remove_file(desktop_state_dir().join("active-instance.json"));
+  let _ = fs::remove_file(
+    crate::packaging::desktop_state_dir().join("active-instance.json"),
+  );
 }
 
 fn start_status_poller(app: AppHandle) {
@@ -501,35 +544,40 @@ fn process_alive(pid: u32) -> bool {
   }
 }
 
-fn discover_repo_root() -> Result<PathBuf, String> {
-  let mut dir = std::env::current_dir().map_err(|e| e.to_string())?;
-  for _ in 0..8 {
-    if dir.join("pnpm-workspace.yaml").exists() && dir.join("apps").join("desktop").exists() {
-      return Ok(dir);
+fn resolve_packaged_resource_root(app: &AppHandle) -> Result<PathBuf, String> {
+  // Prefer Tauri resource_dir (release install layout).
+  if let Ok(resource_dir) = app.path().resource_dir() {
+    // Prefer generated/win32-x64 under resource_dir if present (dev staging),
+    // else resource_dir itself when it already contains runtime/supervisor.
+    let nested = resource_dir.join("generated").join("win32-x64");
+    if nested.join("runtime").join("runtime-manifest.json").is_file() {
+      return Ok(nested);
     }
-    if !dir.pop() {
-      break;
-    }
-  }
-  if let Ok(exe) = std::env::current_exe() {
-    let mut dir = exe;
-    for _ in 0..10 {
-      if dir.join("pnpm-workspace.yaml").exists() {
-        return Ok(dir);
-      }
-      if !dir.pop() {
-        break;
-      }
+    if resource_dir
+      .join("runtime")
+      .join("runtime-manifest.json")
+      .is_file()
+    {
+      return Ok(resource_dir);
     }
   }
-  Err("could not locate YUVI repository root for supervisor".to_string())
-}
-
-fn desktop_state_dir() -> PathBuf {
-  if let Ok(local) = std::env::var("LOCALAPPDATA") {
-    return PathBuf::from(local).join("YUVI").join("DesktopSupervisor");
+  // Dev-only convenience: resolve crate-local generated/ when force-packaged.
+  if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+    let generated = PathBuf::from(manifest_dir)
+      .join("generated")
+      .join("win32-x64");
+    if generated
+      .join("runtime")
+      .join("runtime-manifest.json")
+      .is_file()
+    {
+      return Ok(generated);
+    }
   }
-  std::env::temp_dir().join("YUVI-DesktopSupervisor")
+  Err(
+    "packaging error: Supervisor resource missing (expected runtime/ and supervisor/ under resource dir)"
+      .into(),
+  )
 }
 
 fn which_command(name: &str) -> Option<PathBuf> {
