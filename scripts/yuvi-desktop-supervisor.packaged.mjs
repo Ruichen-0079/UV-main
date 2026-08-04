@@ -34,8 +34,11 @@ async function main() {
   fs.mkdirSync(config.stateDirectory, { recursive: true });
   restrictToCurrentUser(config.stateDirectory);
 
-  const activePointer = path.join(defaultDesktopSupervisorRoot(), "active-instance.json");
+  const pointerRoot = defaultDesktopSupervisorRoot();
+  fs.mkdirSync(pointerRoot, { recursive: true });
+  const activePointer = path.join(pointerRoot, "active-instance.json");
   const endpointFile = path.join(config.stateDirectory, "control-endpoint.json");
+  fs.mkdirSync(path.dirname(endpointFile), { recursive: true });
   try {
     fs.unlinkSync(endpointFile);
   } catch {
