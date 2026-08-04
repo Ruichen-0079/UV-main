@@ -5,6 +5,7 @@ import path from "node:path";
 export type RuntimeEnvironment = "development" | "test" | "production";
 export type MemoryRepositoryDriver = "in-memory" | "postgres";
 export type MemoryExtractorDriver = "rule-based" | "llm";
+export type MemoryBackendDriver = "legacy" | "mem0" | "shadow";
 export type EventBusDriver = "in-memory" | "nats";
 
 export type ProviderCapability = "chat" | "reasoning" | "tts" | "stt" | "vision" | "embedding";
@@ -38,7 +39,12 @@ export type RuntimeConfig = {
   memory: {
     repository: MemoryRepositoryDriver;
     extractor: MemoryExtractorDriver;
+    /** Storage backend selector. Default remains legacy for chat path safety. */
+    backend: MemoryBackendDriver;
     databaseUrl?: string | undefined;
+    mem0BaseUrl?: string | undefined;
+    mem0TimeoutMs?: number | undefined;
+    mem0HealthTimeoutMs?: number | undefined;
   };
   providers: RuntimeProviderConfig;
   infrastructure: {
@@ -104,7 +110,11 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
     memory: {
       repository: parseMemoryRepository(env["MEMORY_REPOSITORY"]),
       extractor: parseMemoryExtractor(env["MEMORY_EXTRACTOR"]),
-      databaseUrl: emptyToUndefined(env["DATABASE_URL"])
+      backend: parseMemoryBackend(env["MEMORY_BACKEND"]),
+      databaseUrl: emptyToUndefined(env["DATABASE_URL"]),
+      mem0BaseUrl: emptyToUndefined(env["MEM0_BASE_URL"]) ?? "http://127.0.0.1:6130",
+      mem0TimeoutMs: parsePositiveInteger(env["MEM0_RUNTIME_TIMEOUT_MS"], 500),
+      mem0HealthTimeoutMs: parsePositiveInteger(env["MEM0_RUNTIME_HEALTH_TIMEOUT_MS"], 1000)
     },
     providers: {
       allowMocks,
@@ -412,6 +422,17 @@ function parseMemoryExtractor(value: string | undefined): MemoryExtractorDriver 
   }
 
   return "llm";
+}
+
+/** Default remains legacy so Mem0 never silently takes over chat memory. */
+function parseMemoryBackend(value: string | undefined): MemoryBackendDriver {
+  if (!value || value === "legacy") {
+    return "legacy";
+  }
+  if (value === "mem0" || value === "shadow") {
+    return value;
+  }
+  return "legacy";
 }
 
 function parseEventBus(value: string | undefined): EventBusDriver {

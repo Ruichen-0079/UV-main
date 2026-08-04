@@ -109,6 +109,39 @@ export {
 } from "./extractor.js";
 export { MemoryService } from "./service.js";
 export {
+  buildMemoryScope,
+  hashMemoryScope,
+  parseMemoryScope,
+  MemoryScopeError,
+  type MemoryScopeParts
+} from "./scope.js";
+export {
+  MemoryBackendError,
+  type AddMemoryInput,
+  type DeleteMemoryInput,
+  type GetMemoryInput,
+  type ListMemoryInput,
+  type ListMemoryResult,
+  type MemoryBackend,
+  type MemoryBackendHealth,
+  type MemoryBackendKind,
+  type MemoryHistoryEntry,
+  type MemoryHistoryInput,
+  type MemoryRecord,
+  type MemorySearchResult,
+  type MemoryWriteOperation,
+  type MemoryWriteResult,
+  type SearchMemoryInput,
+  type UpdateMemoryInput as BackendUpdateMemoryInput
+} from "./backend.js";
+export {
+  createMemoryBackend,
+  LegacyMemoryBackend,
+  Mem0MemoryBackend,
+  type Mem0MemoryBackendOptions,
+  type MemoryBackendFactoryOptions
+} from "./backends/index.js";
+export {
   InMemoryConversationRepository,
   PostgresConversationRepository,
   createConversationRepositoryFromEnv,
