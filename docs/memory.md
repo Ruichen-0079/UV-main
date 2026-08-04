@@ -194,7 +194,7 @@ Direct Context may preserve words like `刚才` or `今天` because it is short-
 
 Prompt assembly now combines short-term Direct Context with long-term RelevantMemory. They are separate on purpose:
 
-- `DirectContext` is bounded recent same-session context. It improves conversational continuity for recent turns, immediate confirmations, current task intent, and recent errors. It is not persisted by default.
+- `DirectContext` is bounded recent same-session context. It improves conversational continuity for recent turns, immediate confirmations, current task intent, and recent errors. It is not long-term memory; raw conversation persistence is handled separately by the Conversation Repository.
 - `RelevantMemory` is durable long-term memory retrieved from `MemoryService`, filtered by scope/status/time and ranked before prompt injection.
 
 Default Direct Context settings are `DIRECT_CONTEXT_ENABLED=true`, `DIRECT_CONTEXT_MAX_TURNS=6`, and `DIRECT_CONTEXT_MAX_CHARS=6000`. The runtime trims oldest turns first, does not use LLM summarization, and redacts secret-like values before prompt injection.

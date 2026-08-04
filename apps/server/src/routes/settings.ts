@@ -1,4 +1,5 @@
 import { writeFile } from "node:fs/promises";
+import type { MemoryExtractorStatus } from "@companion/memory";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
@@ -56,6 +57,24 @@ const editableKeys = [
   "LOCAL_EMBEDDING_MODEL",
   "LOCAL_EMBEDDING_DIMENSIONS",
   "LOCAL_TTS_MODEL",
+  "GPT_SOVITS_TTS_BASE_URL",
+  "GPT_SOVITS_TTS_UPSTREAM_URL",
+  "GPT_SOVITS_TTS_GPT_WEIGHTS",
+  "GPT_SOVITS_TTS_SOVITS_WEIGHTS",
+  "GPT_SOVITS_TTS_LANGUAGE",
+  "GPT_SOVITS_TTS_SPEAKER",
+  "GPT_SOVITS_TTS_STYLE",
+  "GPT_SOVITS_TTS_REFERENCE_RANK",
+  "GPT_SOVITS_TTS_REFERENCE_AUDIO",
+  "GPT_SOVITS_TTS_REFERENCE_TEXT",
+  "GPT_SOVITS_TTS_REFERENCE_LANGUAGE",
+  "GPT_SOVITS_TTS_TEXT_SPLIT_METHOD",
+  "GPT_SOVITS_TTS_TOP_K",
+  "GPT_SOVITS_TTS_TOP_P",
+  "GPT_SOVITS_TTS_TEMPERATURE",
+  "GPT_SOVITS_TTS_REPETITION_PENALTY",
+  "GPT_SOVITS_TTS_SAMPLE_STEPS",
+  "GPT_SOVITS_TTS_TIMEOUT_MS",
   "LOCAL_STT_MODEL",
   "LOCAL_VISION_MODEL",
   "EMBEDDING_PROVIDER",
@@ -112,6 +131,22 @@ const hotReloadableKeys = new Set([
   "LOCAL_EMBEDDING_MODEL",
   "LOCAL_EMBEDDING_DIMENSIONS",
   "LOCAL_TTS_MODEL",
+  "GPT_SOVITS_TTS_BASE_URL",
+  "GPT_SOVITS_TTS_UPSTREAM_URL",
+  "GPT_SOVITS_TTS_LANGUAGE",
+  "GPT_SOVITS_TTS_SPEAKER",
+  "GPT_SOVITS_TTS_STYLE",
+  "GPT_SOVITS_TTS_REFERENCE_RANK",
+  "GPT_SOVITS_TTS_REFERENCE_AUDIO",
+  "GPT_SOVITS_TTS_REFERENCE_TEXT",
+  "GPT_SOVITS_TTS_REFERENCE_LANGUAGE",
+  "GPT_SOVITS_TTS_TEXT_SPLIT_METHOD",
+  "GPT_SOVITS_TTS_TOP_K",
+  "GPT_SOVITS_TTS_TOP_P",
+  "GPT_SOVITS_TTS_TEMPERATURE",
+  "GPT_SOVITS_TTS_REPETITION_PENALTY",
+  "GPT_SOVITS_TTS_SAMPLE_STEPS",
+  "GPT_SOVITS_TTS_TIMEOUT_MS",
   "LOCAL_STT_MODEL",
   "LOCAL_VISION_MODEL",
   "EMBEDDING_PROVIDER",
@@ -299,8 +334,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       activeMemoryExtractor: context.memory.getExtractorStatus().mode,
       memoryExtractorActive: context.memory.getExtractorStatus().active,
       memoryExtractorDefault: "llm",
-      memoryExtractorFallbackUsed: Boolean(context.memory.getExtractorStatus().fallbackUsed),
-      memoryExtractorSkippedReason: context.memory.getExtractorStatus().skippedReason,
+      ...buildMemoryExtractorDiagnostics(context.memory.getExtractorStatus(), config.runtimeMode),
       maintenanceScheduler: context.memoryMaintenanceScheduler?.getStatus() ?? null,
       vectorIndex: config.memoryVectorIndex,
       reasoningProviderConfigured: Boolean(providerStatus.providers.reasoning.configured)
@@ -489,6 +523,34 @@ function serializeLocalEnv(values: Record<string, string>): string {
     lines.push(`${key}=${quoteEnvValue(values[key] ?? "")}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+function buildMemoryExtractorDiagnostics(
+  status: MemoryExtractorStatus,
+  runtimeMode: string
+): Record<string, unknown> {
+  const base = {
+    memoryExtractorFallbackUsed: Boolean(status.fallbackUsed),
+    memoryExtractorSkippedReason: status.skippedReason
+  };
+  if (runtimeMode !== "development") {
+    return base;
+  }
+  return {
+    ...base,
+    memoryExtractorFailureStage: status.failureStage ?? null,
+    memoryExtractorError: status.error ?? null,
+    memoryExtractorValidationIssues: status.validationIssues ?? null,
+    memoryExtractorRejectedReasons: status.rejectedReasons ?? null,
+    memoryExtractorRawPreview: status.rawPreview ?? null,
+    memoryExtractorCandidateCount: status.candidateCount ?? null,
+    memoryExtractorRejectedCount: status.rejectedCount ?? null,
+    memoryExtractorFinishReason: status.finishReason ?? null,
+    memoryExtractorSelectedOutputSource: status.selectedOutputSource ?? null,
+    memoryExtractorAnswerLength: status.answerLength ?? null,
+    memoryExtractorReasoningLength: status.reasoningLength ?? null,
+    memoryExtractorLastAttemptAt: status.lastAttemptAt ?? null
+  };
 }
 
 function maskSecret(value: string | undefined): string | undefined {

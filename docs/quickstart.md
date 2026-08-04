@@ -38,6 +38,8 @@ Development defaults to in-memory memory:
 
 ```env
 MEMORY_REPOSITORY=in-memory
+# Optional. If unset, conversation persistence uses MEMORY_REPOSITORY.
+CONVERSATION_REPOSITORY=in-memory
 MEMORY_EXTRACTOR=llm
 EVENT_BUS=in-memory
 DIRECT_CONTEXT_ENABLED=true
@@ -50,6 +52,8 @@ DIRECT_CONTEXT_MAX_CHARS=6000
 `MEMORY_EXTRACTOR=llm` is the default and uses DeepSeek Reasoning to propose memory candidates when configured. It consumes reasoning tokens only on turns where `writeMemory=true`, and candidates are still validated/scored by `MemoryService` before storage. If DeepSeek Reasoning is not configured, YUVI falls back safely to `rule-based`. Use `MEMORY_EXTRACTOR=rule-based` for deterministic no-token extraction.
 
 Direct Context is enabled by default. It injects bounded recent same-session turns into a separate `<DirectContext>` prompt section for conversational continuity. It is not long-term memory and is trimmed by `DIRECT_CONTEXT_MAX_TURNS` and `DIRECT_CONTEXT_MAX_CHARS`.
+
+Conversation persistence stores raw user and assistant messages separately from long-term memory. `CONVERSATION_REPOSITORY` accepts `in-memory`, `memory`, or `postgres`; when it is unset, `MEMORY_REPOSITORY` is used (`memory` and `in-memory` both normalize to the in-memory store). The in-memory store can restore context when a Runtime instance is rebuilt in the same process, but it cannot recover after a process restart. Use PostgreSQL for durable conversation recovery across restarts.
 
 Fill DeepSeek values when you want real provider calls:
 
@@ -141,6 +145,7 @@ The development default is in-memory memory. To switch to PostgreSQL memory, set
 
 ```env
 MEMORY_REPOSITORY=postgres
+CONVERSATION_REPOSITORY=postgres
 DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 
@@ -287,6 +292,12 @@ Invoke-RestMethod `
 ```
 
 With mocks enabled, the reply starts with `Mock reply:` when real provider keys are unavailable.
+
+For the versioned Runtime text stream, use `POST /v1/messages/stream` with the same JSON body
+(`sessionId`, `content` or `text`, and the existing memory options). Read the response with
+`fetch()` and consume the `text/event-stream` body one frame at a time. Browser `EventSource`
+cannot send a JSON body with `POST`, so it is not the client for this endpoint. The existing
+`POST /message` and `POST /v1/messages` endpoints remain non-streaming compatibility APIs.
 
 ## 8. Test Memory Endpoint
 

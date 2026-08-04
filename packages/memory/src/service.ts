@@ -2,10 +2,19 @@ import type { MemoryRepository } from "./repository.js";
 import { RuleBasedMemoryExtractor } from "./extractor.js";
 import { MemoryRetriever } from "./retriever.js";
 import { MemoryScorer } from "./scorer.js";
+import { buildCandidateFingerprint, deduplicateCandidateBatch } from "./candidate-dedupe.js";
+import { detectEpisodicCorrectionRelationships, hasCorrectionRelatedMemory } from "./correction.js";
+import { detectExplicitRememberRequest } from "./intent.js";
+import { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
 import {
+  canonicalEventKey,
   hasHistoricalEpisodicIntent,
   isDurableTemporalText,
-  normalizeTemporalCandidate
+  isOrdinaryDailyEvent,
+  normalizeTemporalCandidate,
+  resolveCanonicalTemporalBounds,
+  resolveTemporalDebug,
+  resolveTimezoneFromObservedAt
 } from "./temporal.js";
 import {
   detectMemoryRelationships,
@@ -170,48 +179,27 @@ export class MemoryService {
 
   async extractCandidates(input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
     const candidates = await this.extractor.extractCandidates(input);
-    return candidates.map((candidate) => ({
-      ...candidate,
-      ...(candidate.personaId !== undefined
-        ? {}
-        : input.personaId !== undefined
-          ? { personaId: input.personaId }
-          : {}),
-      ...(candidate.subjectUserId !== undefined
-        ? {}
-        : input.subjectUserId !== undefined
-          ? { subjectUserId: input.subjectUserId }
-          : {}),
-      ...(candidate.createdByUserId !== undefined
-        ? {}
-        : input.createdByUserId !== undefined
-          ? { createdByUserId: input.createdByUserId }
-          : {}),
-      ...(candidate.speakerId !== undefined
-        ? {}
-        : input.speakerId !== undefined
-          ? { speakerId: input.speakerId }
-          : {}),
-      ...(candidate.voiceProfileId !== undefined
-        ? {}
-        : input.voiceProfileId !== undefined
-          ? { voiceProfileId: input.voiceProfileId }
-          : {}),
-      ...(candidate.sessionId !== undefined
-        ? {}
-        : input.sessionId !== undefined
-          ? { sessionId: input.sessionId }
-          : {}),
-      metadata: {
-        ...(candidate.metadata ?? {}),
-        ...(input.personaId !== undefined ? { personaId: input.personaId } : {}),
-        ...(input.subjectUserId !== undefined ? { subjectUserId: input.subjectUserId } : {}),
-        ...(input.createdByUserId !== undefined ? { createdByUserId: input.createdByUserId } : {}),
-        ...(input.speakerId !== undefined ? { speakerId: input.speakerId } : {}),
-        ...(input.voiceProfileId !== undefined ? { voiceProfileId: input.voiceProfileId } : {}),
-        ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {})
-      }
-    }));
+    const withIdentity = candidates.map((candidate) =>
+      this.applyExtractionIdentity(candidate, input)
+    );
+    const enriched = withIdentity.map((candidate) =>
+      enrichCandidateProvenance(
+        {
+          ...candidate,
+          explicitRememberRequested:
+            candidate.explicitRememberRequested ??
+            (candidate.originRole === "assistant"
+              ? false
+              : detectExplicitRememberRequest(input.userMessage))
+        },
+        {
+          userMessage: input.userMessage,
+          assistantMessage: input.assistantMessage
+        }
+      )
+    );
+    const { kept, rejected } = deduplicateCandidateBatch(enriched);
+    return [...kept, ...rejected.map((entry) => entry.candidate)];
   }
 
   getExtractorStatus(): MemoryExtractorStatus {
@@ -263,8 +251,21 @@ export class MemoryService {
       tags: Array.from(new Set([...(normalized.tags ?? []), ...(options.tags ?? [])])),
       observedAt: normalized.observedAt ?? new Date(),
       eventTime: normalized.eventTime ?? null,
-      validFrom: normalized.validFrom ?? normalized.observedAt ?? new Date(),
-      validUntil: normalized.validUntil ?? null,
+      validFrom:
+        normalized.validFrom ??
+        resolveCanonicalTemporalBounds(
+          normalized,
+          resolveTimezoneFromObservedAt(normalized.observedAt)
+        )?.validFrom ??
+        normalized.observedAt ??
+        new Date(),
+      validUntil:
+        normalized.validUntil ??
+        resolveCanonicalTemporalBounds(
+          normalized,
+          resolveTimezoneFromObservedAt(normalized.observedAt)
+        )?.validUntil ??
+        null,
       expiresAt: normalized.expiresAt ?? null,
       supersedes: normalized.possibleSupersedes ?? [],
       contradicts: normalized.possibleContradictions ?? []
@@ -273,29 +274,84 @@ export class MemoryService {
 
   async processCandidateForStorage(
     candidate: MemoryCandidate,
-    options: { source?: string; tags?: string[] } = {}
+    options: {
+      source?: string;
+      tags?: string[];
+      skipAdmissionPolicy?: boolean;
+      storageReason?: string;
+    } = {}
   ): Promise<MemoryCandidateStorageResult> {
-    const normalized = this.normalizeCandidateForStorage(candidate);
-    const relationships = await this.detectCandidateRelationships(normalized);
-    const candidateWithRelationships = applyRelationshipSuggestions(normalized, relationships);
-    const decision = decideCandidateStorage(normalized);
-    if (decision.decision === "rejected") {
+    const pendingRejection = candidate.metadata?.["pendingRejection"];
+    if (typeof pendingRejection === "string") {
       return {
         decision: "rejected",
-        candidate: candidateWithRelationships,
-        rejectedReason: decision.reason
+        candidate,
+        rejectedReason: pendingRejection
       };
     }
 
+    const normalized = this.normalizeCandidateForStorage(candidate);
+    const relationships = await this.detectCandidateRelationships(normalized);
+    const correctionRelationships = await this.detectCorrectionRelationships(normalized);
+    const mergedRelationships = mergeRelationshipSuggestions(
+      relationships,
+      correctionRelationships
+    );
+    const candidateWithRelationships = applyRelationshipSuggestions(
+      normalized,
+      mergedRelationships
+    );
+
+    if (!options.skipAdmissionPolicy) {
+      const admission = decideCandidateStorage(normalized, mergedRelationships);
+      if (admission.decision === "rejected") {
+        return {
+          decision: "rejected",
+          candidate: candidateWithRelationships,
+          rejectedReason: admission.reason
+        };
+      }
+
+      const skipDuplicateCheck =
+        hasCorrectionRequest(normalized) &&
+        hasCorrectionRelatedMemory({
+          supersedes: mergedRelationships.supersedes,
+          contradicts: mergedRelationships.contradicts,
+          autoSupersedes: mergedRelationships.autoSupersedes,
+          correctionRelated: correctionRelationships.relatedMemoryIds
+        });
+      if (!skipDuplicateCheck) {
+        const repositoryDuplicate = await this.findRepositoryDuplicate(normalized);
+        if (repositoryDuplicate) {
+          return {
+            decision: "rejected",
+            candidate: {
+              ...candidateWithRelationships,
+              metadata: {
+                ...(candidateWithRelationships.metadata ?? {}),
+                duplicateOfMemoryId: repositoryDuplicate.id
+              }
+            },
+            rejectedReason: "duplicate-candidate"
+          };
+        }
+      }
+    }
+
+    const decision = {
+      decision: "stored" as const,
+      reason:
+        options.storageReason ?? decideCandidateStorage(normalized, mergedRelationships).reason
+    };
+
+    const supersedeIds = [
+      ...new Set([...mergedRelationships.autoSupersedes, ...correctionRelationships.supersedes])
+    ];
     const storageCandidate: MemoryCandidate = {
       ...candidateWithRelationships,
-      ...(relationships.autoSupersedes.length > 0
-        ? { possibleSupersedes: relationships.autoSupersedes }
-        : normalized.possibleSupersedes
-          ? { possibleSupersedes: normalized.possibleSupersedes }
-          : {}),
-      ...(relationships.contradicts.length > 0
-        ? { possibleContradictions: relationships.contradicts }
+      ...(supersedeIds.length > 0 ? { possibleSupersedes: supersedeIds } : {}),
+      ...(mergedRelationships.contradicts.length > 0
+        ? { possibleContradictions: mergedRelationships.contradicts }
         : normalized.possibleContradictions
           ? { possibleContradictions: normalized.possibleContradictions }
           : {})
@@ -305,12 +361,18 @@ export class MemoryService {
         ...storageCandidate,
         metadata: {
           ...(storageCandidate.metadata ?? {}),
-          storageReason: decision.reason
+          storageReason: decision.reason,
+          ...(hasCorrectionRequest(normalized)
+            ? {
+                correctionRequested: true,
+                correctedMemoryIds: correctionRelationships.relatedMemoryIds
+              }
+            : {})
         }
       },
       options
     );
-    await this.applyAutomaticSupersession(memory, relationships.autoSupersedes);
+    await this.applyAutomaticSupersession(memory, supersedeIds);
     return {
       decision: "stored",
       candidate: candidateWithRelationships,
@@ -482,25 +544,165 @@ export class MemoryService {
     return compact.length > 500 ? `${compact.slice(0, 497)}...` : compact;
   }
 
-  private normalizeCandidateForStorage(candidate: MemoryCandidate): MemoryCandidate {
-    const normalized = normalizeTemporalCandidate(candidate, {
-      timestamp: candidate.observedAt ?? new Date()
-    }).candidate;
-    const metadata = normalized.metadata ?? {};
+  private applyExtractionIdentity(
+    candidate: MemoryCandidate,
+    input: MemoryExtractionInput
+  ): MemoryCandidate {
     return {
+      ...candidate,
+      ...(candidate.personaId !== undefined
+        ? {}
+        : input.personaId !== undefined
+          ? { personaId: input.personaId }
+          : {}),
+      ...(candidate.subjectUserId !== undefined
+        ? {}
+        : input.subjectUserId !== undefined
+          ? { subjectUserId: input.subjectUserId }
+          : {}),
+      ...(candidate.createdByUserId !== undefined
+        ? {}
+        : input.createdByUserId !== undefined
+          ? { createdByUserId: input.createdByUserId }
+          : {}),
+      ...(candidate.speakerId !== undefined
+        ? {}
+        : input.speakerId !== undefined
+          ? { speakerId: input.speakerId }
+          : {}),
+      ...(candidate.voiceProfileId !== undefined
+        ? {}
+        : input.voiceProfileId !== undefined
+          ? { voiceProfileId: input.voiceProfileId }
+          : {}),
+      ...(candidate.sessionId !== undefined
+        ? {}
+        : input.sessionId !== undefined
+          ? { sessionId: input.sessionId }
+          : {}),
+      metadata: {
+        ...(candidate.metadata ?? {}),
+        ...(input.personaId !== undefined ? { personaId: input.personaId } : {}),
+        ...(input.subjectUserId !== undefined ? { subjectUserId: input.subjectUserId } : {}),
+        ...(input.createdByUserId !== undefined ? { createdByUserId: input.createdByUserId } : {}),
+        ...(input.speakerId !== undefined ? { speakerId: input.speakerId } : {}),
+        ...(input.voiceProfileId !== undefined ? { voiceProfileId: input.voiceProfileId } : {}),
+        ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+        extractionUserMessage: input.userMessage,
+        extractionAssistantMessage: input.assistantMessage ?? null
+      }
+    };
+  }
+
+  private async findRepositoryDuplicate(candidate: MemoryCandidate): Promise<Memory | null> {
+    const fingerprint = buildCandidateFingerprint(candidate);
+    const scope = candidate.scope ?? inferMemoryScope(candidate);
+    const scopeId = candidate.scopeId ?? inferMemoryScopeId(candidate);
+    const recent = await this.repository.listRecentMemories(80);
+    for (const memory of recent) {
+      if (memory.status !== "active") {
+        continue;
+      }
+      if (
+        (memory.subjectUserId ?? "default-user") !== (candidate.subjectUserId ?? "default-user")
+      ) {
+        continue;
+      }
+      if (memory.scope !== scope) {
+        continue;
+      }
+      if ((memory.scopeId ?? "") !== (scopeId ?? "")) {
+        continue;
+      }
+      const memoryFingerprint = buildCandidateFingerprint({
+        type: memory.type,
+        subtype: memory.subtype,
+        scope: memory.scope,
+        scopeId: memory.scopeId,
+        content: memory.content,
+        importance: memory.importance,
+        tags: memory.tags,
+        reason: typeof memory.metadata?.["reason"] === "string" ? memory.metadata["reason"] : "",
+        subjectUserId: memory.subjectUserId ?? null,
+        personaId: memory.personaId ?? null,
+        metadata: memory.metadata,
+        eventTime: memory.eventTime?.toISOString() ?? null,
+        validFrom: memory.validFrom.toISOString(),
+        validUntil: memory.validUntil?.toISOString() ?? null
+      });
+      if (memoryFingerprint === fingerprint) {
+        return memory;
+      }
+    }
+    return null;
+  }
+
+  private async detectCorrectionRelationships(
+    candidate: MemoryCandidate
+  ): Promise<ReturnType<typeof detectEpisodicCorrectionRelationships>> {
+    const scope = candidate.scope ?? inferMemoryScope(candidate);
+    const scopeId = candidate.scopeId ?? inferMemoryScopeId(candidate);
+    const recent = await this.repository.listRecentMemories(80);
+    const scoped = recent.filter(
+      (memory) =>
+        memory.scope === scope &&
+        (memory.scopeId ?? "") === (scopeId ?? "") &&
+        (memory.subjectUserId ?? "default-user") === (candidate.subjectUserId ?? "default-user")
+    );
+    return detectEpisodicCorrectionRelationships(candidate, scoped);
+  }
+
+  private normalizeCandidateForStorage(candidate: MemoryCandidate): MemoryCandidate {
+    const timezone = resolveTimezoneFromObservedAt(candidate.observedAt);
+    const normalized = normalizeTemporalCandidate(candidate, {
+      timestamp: candidate.observedAt ?? new Date(),
+      timezone
+    }).candidate;
+    const bounds = resolveCanonicalTemporalBounds(normalized, timezone);
+    const temporalDebug = resolveTemporalDebug({
       ...normalized,
-      personaId: normalized.personaId ?? metadataString(metadata, "personaId") ?? "default-persona",
+      ...(bounds
+        ? {
+            validFrom: bounds.validFrom,
+            validUntil: bounds.validUntil
+          }
+        : {})
+    });
+    const metadata = normalized.metadata ?? {};
+    const withBounds = {
+      ...normalized,
+      ...(bounds
+        ? {
+            validFrom: bounds.validFrom,
+            validUntil: bounds.validUntil
+          }
+        : {})
+    };
+    const fingerprint = buildCandidateFingerprint(withBounds);
+    const eventKey = canonicalEventKey(withBounds);
+    return {
+      ...withBounds,
+      personaId: withBounds.personaId ?? metadataString(metadata, "personaId") ?? "default-persona",
       subjectUserId:
-        normalized.subjectUserId ?? metadataString(metadata, "subjectUserId") ?? "default-user",
+        withBounds.subjectUserId ?? metadataString(metadata, "subjectUserId") ?? "default-user",
       createdByUserId:
-        normalized.createdByUserId ??
+        withBounds.createdByUserId ??
         metadataString(metadata, "createdByUserId") ??
-        normalized.subjectUserId ??
+        withBounds.subjectUserId ??
         "default-user",
-      speakerId: normalized.speakerId ?? metadataString(metadata, "speakerId") ?? null,
+      speakerId: withBounds.speakerId ?? metadataString(metadata, "speakerId") ?? null,
       voiceProfileId:
-        normalized.voiceProfileId ?? metadataString(metadata, "voiceProfileId") ?? null,
-      sessionId: normalized.sessionId ?? metadataString(metadata, "sessionId") ?? null
+        withBounds.voiceProfileId ?? metadataString(metadata, "voiceProfileId") ?? null,
+      sessionId: withBounds.sessionId ?? metadataString(metadata, "sessionId") ?? null,
+      metadata: {
+        ...metadata,
+        canonicalFingerprint: fingerprint,
+        ...(eventKey ? { canonicalEventKey: eventKey } : {}),
+        temporalStatus: temporalDebug.temporalStatus,
+        ...(temporalDebug.temporalSuggestion
+          ? { temporalSuggestion: temporalDebug.temporalSuggestion }
+          : {})
+      }
     };
   }
 
@@ -1636,41 +1838,109 @@ function isPromptRetrievableMemory(memory: Memory): boolean {
   );
 }
 
-function decideCandidateStorage(candidate: MemoryCandidate): {
+function mergeRelationshipSuggestions(
+  relationships: MemoryRelationshipSuggestion,
+  correction: ReturnType<typeof detectEpisodicCorrectionRelationships>
+): MemoryRelationshipSuggestion & { correctionRelated: string[] } {
+  const supersedes = new Set([...relationships.supersedes, ...correction.supersedes]);
+  const autoSupersedes = new Set([...relationships.autoSupersedes, ...correction.supersedes]);
+  const contradicts = new Set([...relationships.contradicts, ...correction.contradicts]);
+  return {
+    ...relationships,
+    supersedes: [...supersedes],
+    autoSupersedes: [...autoSupersedes],
+    contradicts: [...contradicts],
+    correctionRelated: correction.relatedMemoryIds
+  };
+}
+
+function hasCorrectionRequest(candidate: MemoryCandidate): boolean {
+  return Boolean(
+    candidate.correctionRequested || candidate.metadata?.["correctionRequested"] === true
+  );
+}
+
+function decideCandidateStorage(
+  candidate: MemoryCandidate,
+  relationships?: (MemoryRelationshipSuggestion & { correctionRelated?: string[] }) | null
+): {
   decision: "stored" | "rejected";
   reason: string;
 } {
   const text = `${candidate.content} ${candidate.summary ?? ""} ${(candidate.tags ?? []).join(" ")}`;
-  const explicitRemember =
-    candidate.reason === "explicit-remember" || candidate.metadata?.["explicitRemember"] === true;
+  if (!candidate.content.trim()) {
+    return { decision: "rejected", reason: "invalid-candidate" };
+  }
+
+  const extractionInput = {
+    userMessage:
+      typeof candidate.metadata?.["extractionUserMessage"] === "string"
+        ? candidate.metadata["extractionUserMessage"]
+        : "",
+    assistantMessage:
+      typeof candidate.metadata?.["extractionAssistantMessage"] === "string"
+        ? candidate.metadata["extractionAssistantMessage"]
+        : undefined
+  };
+  if (isAssistantOnlyRestatement(candidate, extractionInput)) {
+    return { decision: "rejected", reason: "assistant-only-restatement" };
+  }
 
   const temporalConfidence = temporalResolutionConfidence(candidate.metadata);
   if (temporalConfidence !== null && temporalConfidence < 0.7) {
-    return { decision: "rejected", reason: "low-confidence temporal resolution" };
+    return { decision: "rejected", reason: "low-confidence-temporal-resolution" };
+  }
+
+  const explicitRemember = hasExplicitRememberRequest(candidate);
+
+  if (explicitRemember) {
+    return { decision: "stored", reason: "explicit-user-memory-request" };
+  }
+
+  if (
+    hasCorrectionRequest(candidate) &&
+    hasCorrectionRelatedMemory(
+      relationships
+        ? {
+            supersedes: relationships.supersedes,
+            contradicts: relationships.contradicts,
+            autoSupersedes: relationships.autoSupersedes,
+            ...(relationships.correctionRelated
+              ? { correctionRelated: relationships.correctionRelated }
+              : {})
+          }
+        : null
+    )
+  ) {
+    return { decision: "stored", reason: "user-correction" };
   }
 
   if (
     candidate.type === "episodic" &&
     candidate.subtype === "event" &&
-    !isDurableTemporalText(text) &&
-    !explicitRemember
+    (isOrdinaryDailyEvent(text) || !isDurableTemporalText(text))
   ) {
-    return { decision: "rejected", reason: "ordinary one-off daily event" };
-  }
-
-  if (explicitRemember) {
-    return { decision: "stored", reason: "explicit remember" };
+    return { decision: "rejected", reason: "ordinary-one-off-daily-event" };
   }
 
   if (isDurableCandidate(candidate, text)) {
-    return { decision: "stored", reason: "durable memory signal" };
+    return { decision: "stored", reason: "durable-memory-signal" };
   }
 
   if (candidate.importance >= 0.65) {
-    return { decision: "stored", reason: "importance threshold" };
+    return { decision: "stored", reason: "importance-threshold" };
   }
 
-  return { decision: "rejected", reason: "below durable storage threshold" };
+  return { decision: "rejected", reason: "below-durable-storage-threshold" };
+}
+
+function hasExplicitRememberRequest(candidate: MemoryCandidate): boolean {
+  return Boolean(
+    candidate.explicitRememberRequested ||
+    candidate.metadata?.["explicitRememberRequested"] === true ||
+    candidate.reason === "explicit-remember" ||
+    candidate.metadata?.["explicitRemember"] === true
+  );
 }
 
 function applyRelationshipSuggestions(

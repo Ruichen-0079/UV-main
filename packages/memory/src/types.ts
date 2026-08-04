@@ -165,6 +165,8 @@ export type UpdateMemoryInput = {
   contradicts?: string[];
 };
 
+export type MemoryOriginRole = "user" | "assistant" | "mixed";
+
 export type MemoryCandidate = {
   type: MemoryType;
   subtype?: MemorySubtype | null;
@@ -178,6 +180,11 @@ export type MemoryCandidate = {
   metadata?: Record<string, unknown>;
   tags: string[];
   reason: string;
+  explicitRememberRequested?: boolean;
+  correctionRequested?: boolean;
+  userIntent?: "remember" | "correct" | "state" | "recall" | "other";
+  originRole?: MemoryOriginRole;
+  evidenceText?: string;
   sourceTraceId?: string | null;
   personaId?: string | null;
   subjectUserId?: string | null;
@@ -209,6 +216,17 @@ export type MemoryCandidateStorageResult = {
 export type MemoryExtractorMode = "rule-based" | "llm";
 export type MemoryExtractorActive = "rule-based" | "llm" | "fallback-rule-based" | "disabled";
 
+export type MemoryExtractorFailureStage =
+  | "empty-output"
+  | "truncated-output"
+  | "json-extraction"
+  | "json-parse"
+  | "root-schema"
+  | "candidate-schema"
+  | "provider-call";
+
+export type MemoryExtractorSelectedOutputSource = "answer" | "reasoning" | "none";
+
 export type MemoryExtractorStatus = {
   mode: MemoryExtractorMode;
   active: MemoryExtractorActive;
@@ -222,6 +240,12 @@ export type MemoryExtractorStatus = {
   rawPreview?: string;
   validationIssues?: string[];
   skippedReason?: string;
+  failureStage?: MemoryExtractorFailureStage;
+  selectedOutputSource?: MemoryExtractorSelectedOutputSource;
+  finishReason?: string;
+  answerLength?: number;
+  reasoningLength?: number;
+  lastAttemptAt?: string;
 };
 
 export type MemoryExtractionInput = {

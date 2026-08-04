@@ -1,0 +1,61 @@
+import { describe, expect, it } from "vitest";
+import {
+  compareSettingsForms,
+  isCurrentSettingsOperation,
+  reduceSettingsState,
+  shouldReplaceSettingsDraft,
+  settingsDraftDiffers,
+  settingsStateLabels
+} from "./settings-state.js";
+
+describe("settings apply state", () => {
+  it("models save, reload, refresh and applied in order", () => {
+    let state = reduceSettingsState("dirty", "save-start");
+    state = reduceSettingsState(state, "reload-start");
+    state = reduceSettingsState(state, "refresh-start");
+    state = reduceSettingsState(state, "apply-success");
+    expect(state).toBe("applied");
+    expect(settingsStateLabels[state]).toBe("已应用");
+  });
+
+  it("keeps failure and restart-required outcomes distinct", () => {
+    expect(reduceSettingsState("refreshing", "failure")).toBe("failed");
+    expect(reduceSettingsState("refreshing", "restart-required")).toBe("restart-required");
+    expect(settingsStateLabels.failed).toBe("应用失败");
+    expect(settingsStateLabels["restart-required"]).toBe("已保存，需要重启");
+  });
+
+  it("does not turn an applied configuration into a save failure when verification fails", () => {
+    const state = reduceSettingsState("applied", "provider-verify-failure");
+    expect(state).toBe("applied");
+  });
+
+  it("keeps a draft dirty when it differs from the last baseline", () => {
+    const baseline = { SERVER_PORT: "6121", DEEPSEEK_API_KEY: "" };
+    expect(settingsDraftDiffers({ ...baseline, SERVER_PORT: "7000" }, baseline)).toBe(true);
+    expect(settingsDraftDiffers(baseline, baseline)).toBe(false);
+    expect(settingsDraftDiffers({ ...baseline, DEEPSEEK_API_KEY: "new" }, baseline)).toBe(true);
+  });
+
+  it("does not replace a dirty draft when settings data refreshes", () => {
+    expect(shouldReplaceSettingsDraft(false, false)).toBe(true);
+    expect(shouldReplaceSettingsDraft(false, true)).toBe(false);
+    expect(shouldReplaceSettingsDraft(true, false)).toBe(false);
+  });
+
+  it("ignores masked secret values while comparing ordinary fields", () => {
+    const result = compareSettingsForms(
+      { SERVER_PORT: "6121", DEEPSEEK_API_KEY: "new-secret" },
+      { SERVER_PORT: "6122", DEEPSEEK_API_KEY: "" },
+      new Set(["DEEPSEEK_API_KEY"])
+    );
+    expect(result.mismatchedKeys).toEqual(["SERVER_PORT"]);
+    expect(result.ignoredSensitiveKeys).toEqual(["DEEPSEEK_API_KEY"]);
+  });
+
+  it("rejects stale responses and callbacks after unmount", () => {
+    expect(isCurrentSettingsOperation(true, 2, 1)).toBe(false);
+    expect(isCurrentSettingsOperation(false, 2, 2)).toBe(false);
+    expect(isCurrentSettingsOperation(true, 2, 2)).toBe(true);
+  });
+});

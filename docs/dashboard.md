@@ -22,6 +22,10 @@ The Dashboard is a local development UI for observing and steering the runtime. 
 
 The Settings page shows supervisor state, auto-migrate state, runtime env dir, memory repository, and whether the database URL is configured without showing the raw URL.
 
+## Chat
+
+The Chat page sends text with `fetch()` to `POST /v1/messages/stream` and consumes the SSE body incrementally. It keeps one assistant placeholder for all `text-delta` events, then finalizes it on the single `completed` event. The Stop action aborts the current request and preserves the partial reply as cancelled. Refreshing the page does not restore chat history yet because no session-history query endpoint exists. The Dashboard WebSocket remains an events/diagnostics channel and is not used to insert Chat replies.
+
 ## Provider Settings
 
 Provider settings are grouped by capability:

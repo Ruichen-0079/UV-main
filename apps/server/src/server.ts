@@ -7,12 +7,14 @@ import { registerHealthRoutes } from "./routes/health.js";
 import { memorySearchValidationError, registerMemoryRoutes } from "./routes/memory.js";
 import { registerMediaRoutes } from "./routes/media.js";
 import { registerMessageRoutes } from "./routes/message.js";
+import { registerMessageStreamRoutes } from "./routes/message-stream.js";
 import { registerProviderRoutes } from "./routes/providers.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
 import { registerWebSocketRoutes } from "./routes/websocket.js";
+import { registerLive2DCoreRoute, registerLive2DRoutes } from "./routes/live2d.js";
 
 export async function buildServer(config: ServerConfig) {
   const app = Fastify({
@@ -59,7 +61,7 @@ export async function buildServer(config: ServerConfig) {
     app.log.info("DASHBOARD_DEV_TOKEN is configured for sensitive development endpoints.");
   }
 
-  const context = createAppContext(app.log, config);
+  const context = await createAppContext(app.log, config);
   const maintenanceScheduler = new MemoryMaintenanceScheduler(context, config, app.log);
   context.memoryMaintenanceScheduler = maintenanceScheduler;
   maintenanceScheduler.start();
@@ -67,6 +69,7 @@ export async function buildServer(config: ServerConfig) {
   app.addHook("onClose", async () => {
     maintenanceScheduler.close();
     await context.memoryRepository.close?.();
+    await context.conversationRepository.close?.();
   });
 
   await registerHealthRoutes(app, context, config);
@@ -74,11 +77,14 @@ export async function buildServer(config: ServerConfig) {
   await registerSettingsRoutes(app, context, config);
   await registerSystemRoutes(app, config);
   await registerMessageRoutes(app, context);
+  await registerMessageStreamRoutes(app, context);
   await registerMediaRoutes(app, context);
   await registerMemoryRoutes(app, context, config);
   await registerEventRoutes(app, context);
   await registerDebugRoutes(app, context, config);
   await registerWebSocketRoutes(app, context);
+  await registerLive2DRoutes(app, config);
+  await registerLive2DCoreRoute(app, config);
 
   return app;
 }

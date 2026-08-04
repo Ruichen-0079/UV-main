@@ -10,6 +10,7 @@ apps/web/dist-types/
 *.log
 coverage/
 .turbo/
+terminals/
 
 # Environment files
 .env.*

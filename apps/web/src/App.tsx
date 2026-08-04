@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction
+} from "react";
 import {
   ApiError,
   apiClient,
@@ -22,10 +31,32 @@ import {
   type RuntimeEvent,
   type RuntimeSettingsReloadResponse,
   type RuntimeSettingsResponse,
-  type UpdateMemoryRequest
+  type UpdateMemoryRequest,
+  type MessageStreamEvent
 } from "./api/client.js";
 import { promptPreviewPlaceholder } from "./data/mock.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
+import { reduceChatMessages, shouldSubmitChatKey, type ChatMessage } from "./chat-state.js";
+import { ChatMessageContent } from "./markdown-message.js";
+import { SpeechSegmenter } from "./speech-segmenter.js";
+import {
+  createBrowserSpeechPlayer,
+  detectSpeechLanguage,
+  SpeechPlaybackQueue,
+  type SpeechQueueState,
+  type SpeechPlaybackEvent
+} from "./speech-queue.js";
+import { LumiCanvas } from "./lumi-canvas.js";
+import type { LumiControllerHandle, PresenceState } from "./lumi-live2d.js";
+import {
+  compareSettingsForms,
+  isCurrentSettingsOperation,
+  settingsDraftDiffers,
+  settingsFingerprint,
+  settingsStateLabels,
+  shouldReplaceSettingsDraft,
+  type SettingsApplyState
+} from "./settings-state.js";
 
 type PageId =
   | "overview"
@@ -38,17 +69,6 @@ type PageId =
   | "vision"
   | "settings";
 
-type ChatMessage = {
-  role: "user" | "assistant";
-  content: string;
-  traceId?: string;
-  useMemory?: boolean;
-  readMemory?: boolean;
-  writeMemory?: boolean;
-  voiceOutput?: boolean;
-  provider?: ProviderCallMetadata;
-};
-
 type WebSocketStatus =
   | "connecting"
   | "connected"
@@ -57,7 +77,32 @@ type WebSocketStatus =
   | "paused"
   | "error";
 type RequestStatus = "idle" | "sending" | "success" | "error";
+type VoicePlaybackStatus = SpeechQueueState;
+type ChatTimingMetrics = {
+  userSendAt: number;
+  firstTextDeltaAt?: number;
+  firstSegmentSubmittedAt?: number;
+  firstTtsCompletedAt?: number;
+  firstAudioStartedAt?: number;
+  presenceSpeakingAt?: number;
+  stopRequestedAt?: number;
+  audioPausedAt?: number;
+  mouthZeroAt?: number;
+  finalAudioEndedAt?: number;
+  assistantCompletedAt?: number;
+};
 type MemoryResultSource = "/memory/recent" | "/memory/search" | "local fallback";
+
+function recordChatTiming(
+  timingRef: MutableRefObject<ChatTimingMetrics | null>,
+  patch: Partial<ChatTimingMetrics>
+): void {
+  if (!timingRef.current) return;
+  Object.assign(timingRef.current, patch);
+  if (import.meta.env.DEV && typeof window !== "undefined") {
+    document.documentElement.dataset["yuviLumiTiming"] = JSON.stringify(timingRef.current);
+  }
+}
 
 const memoryTypes = ["working", "episodic", "semantic", "emotional", "procedural", "relationship"];
 
@@ -89,25 +134,26 @@ const memorySubtypes = [
 const memoryScopes = ["user", "project", "agent", "plugin", "session"];
 const memoryLayers = ["core", "recall", "archival", "working"];
 const memoryStatuses = ["active", "superseded", "archived", "forgotten", "expired"];
+let chatMessageSequence = 0;
 
 const pages: Array<{ id: PageId; label: string }> = [
-  { id: "overview", label: "Overview" },
-  { id: "chat", label: "Chat" },
-  { id: "memory", label: "Memory" },
-  { id: "providers", label: "Providers" },
-  { id: "events", label: "Events" },
-  { id: "prompt", label: "Prompt Preview" },
-  { id: "voice", label: "Voice" },
-  { id: "vision", label: "Vision" },
-  { id: "settings", label: "Settings" }
+  { id: "overview", label: "概览" },
+  { id: "chat", label: "对话" },
+  { id: "memory", label: "记忆" },
+  { id: "providers", label: "提供方" },
+  { id: "events", label: "事件" },
+  { id: "prompt", label: "提示词预览" },
+  { id: "voice", label: "语音" },
+  { id: "vision", label: "视觉" },
+  { id: "settings", label: "设置" }
 ];
 
 export function App(): JSX.Element {
   const [activePage, setActivePage] = useState<PageId>("overview");
-  const health = useAsyncData(() => apiClient.getHealth(), []);
-  const providerStatus = useAsyncData(() => apiClient.getProviderStatus(), []);
-  const memories = useAsyncData(() => apiClient.listRecentMemories(20), []);
-  const eventState = useAsyncData(() => apiClient.listRecentEvents(50), []);
+  const health = useAsyncData((signal) => apiClient.getHealth(signal), []);
+  const providerStatus = useAsyncData((signal) => apiClient.getProviderStatus(signal), []);
+  const memories = useAsyncData((signal) => apiClient.listRecentMemories(20, signal), []);
+  const eventState = useAsyncData((signal) => apiClient.listRecentEvents(50, signal), []);
   const [localEvents, setLocalEvents] = useState<RuntimeEvent[]>([]);
   const [liveEvents, setLiveEvents] = useState<RuntimeEvent[]>([]);
   const [eventsPaused, setEventsPaused] = useState(false);
@@ -127,7 +173,7 @@ export function App(): JSX.Element {
       <aside className="flex w-60 shrink-0 flex-col border-r border-ink-200 bg-white">
         <div className="border-b border-ink-200 px-4 py-4">
           <div className="text-sm font-semibold text-ink-500">YUVI Runtime</div>
-          <h1 className="mt-1 text-lg font-semibold text-ink-900">Developer Dashboard</h1>
+          <h1 className="mt-1 text-lg font-semibold text-ink-900">YUVI 开发控制台</h1>
         </div>
         <nav className="flex-1 space-y-1 p-3">
           {pages.map((page) => (
@@ -165,9 +211,7 @@ export function App(): JSX.Element {
               memories={memories.data?.memories ?? []}
             />
           )}
-          {activePage === "chat" && (
-            <ChatPage onEvent={(event) => setLocalEvents((current) => [event, ...current])} />
-          )}
+          {activePage === "chat" && <ChatPage />}
           {activePage === "memory" && <MemoryPage state={memories} health={health.data} />}
           {activePage === "providers" && <ProvidersPage state={providerStatus} />}
           {activePage === "events" && (
@@ -192,7 +236,7 @@ function TopStatusBar(props: {
   health: HealthResponse | null;
   loading: boolean;
   error: string | null;
-  onRefresh(): Promise<void>;
+  onRefresh(): Promise<unknown>;
 }): JSX.Element {
   const status = props.loading
     ? "loading"
@@ -238,11 +282,7 @@ function OverviewPage(props: {
           status={props.health.data?.server.status ?? "unknown"}
           detail={`Runtime mode: ${props.health.data?.runtimeMode ?? "unknown"}`}
         />
-        <StatusCard
-          title="WebSocket"
-          status={props.wsStatus}
-          detail="Dashboard runtime event stream"
-        />
+        <StatusCard title="WebSocket" status={props.wsStatus} detail="控制台运行时事件流" />
         <StatusCard
           title="Memory"
           status={memoryModeFromHealth(props.health.data)}
@@ -273,86 +313,340 @@ function OverviewPage(props: {
   );
 }
 
-function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
+function ChatPage(): JSX.Element {
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState("dashboard");
   const [readMemory, setReadMemory] = useState(true);
   const [writeMemory, setWriteMemory] = useState(true);
   const [promptPreview, setPromptPreview] = useState(true);
   const [voiceOutput, setVoiceOutput] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [presenceRequest, setPresenceRequest] = useState<PresenceState>("idle");
+  const [messages, dispatchMessages] = useReducer(reduceChatMessages, [] as ChatMessage[]);
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [lastTraceId, setLastTraceId] = useState<string | null>(null);
+  const [voicePlaybackStatus, setVoicePlaybackStatus] = useState<VoicePlaybackStatus>("idle");
+  const mountedRef = useRef(true);
+  const lumiRef = useRef<LumiControllerHandle>(null);
+  const timingRef = useRef<ChatTimingMetrics | null>(null);
+  const speechSessionRef = useRef<{
+    generation: string;
+    segmenter: SpeechSegmenter;
+    queue: SpeechPlaybackQueue;
+  } | null>(null);
+  const activeRequestRef = useRef<{
+    id: string;
+    assistantId: string;
+    controller: AbortController;
+    completedObserved: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      activeRequestRef.current?.controller.abort();
+      activeRequestRef.current = null;
+      speechSessionRef.current?.queue.cancel();
+      speechSessionRef.current = null;
+    };
+  }, []);
 
   const outgoingPayload = useMemo(
     () => ({
-      text: input.trim() || "<message text>",
+      text: input || "<message text>",
       options: {
         readMemory,
         writeMemory,
         promptPreview,
-        voiceOutput
+        voiceOutput: false,
+        browserVoiceOutput: voiceOutput
       }
     }),
     [input, promptPreview, readMemory, voiceOutput, writeMemory]
   );
 
   async function send(): Promise<void> {
-    if (!input.trim()) {
+    // Capture the draft once, clear the controlled textarea immediately, then
+    // use only the captured payload for the rest of the turn.
+    const submittedText = input.trim() ? input : null;
+    if (submittedText === null || activeRequestRef.current) {
       return;
     }
 
-    const content = input.trim();
+    speechSessionRef.current?.queue.cancel();
+    speechSessionRef.current = null;
+    const content = submittedText;
     setInput("");
-    setRequestStatus("sending");
     setError(null);
-    setMessages((current) => [
-      ...current,
-      {
+    const requestId = createChatMessageId("turn");
+    const assistantId = createChatMessageId("assistant");
+    const controller = new AbortController();
+    activeRequestRef.current = {
+      id: requestId,
+      assistantId,
+      controller,
+      completedObserved: false
+    };
+    timingRef.current = { userSendAt: performance.now() };
+    recordChatTiming(timingRef, {});
+    if (voiceOutput) {
+      // Resume the shared Web Audio context while this send is still a user gesture.
+      lumiRef.current?.resumeAudio();
+      const generation = requestId;
+      const segmenter = new SpeechSegmenter();
+      const queue = new SpeechPlaybackQueue(
+        (item, signal) =>
+          apiClient.synthesizeSpeech({
+            text: item.text,
+            language: item.language,
+            format: "wav",
+            sessionId,
+            signal
+          }),
+        createBrowserSpeechPlayer(),
+        {
+          onState: (state) => {
+            if (mountedRef.current && speechSessionRef.current?.generation === generation) {
+              setVoicePlaybackStatus(state);
+            }
+          },
+          onError: () => {
+            if (mountedRef.current && speechSessionRef.current?.generation === generation) {
+              setVoicePlaybackStatus("error");
+            }
+          },
+          onSynthesisCompleted: () => {
+            const timing = timingRef.current;
+            if (timing) recordChatTiming(timingRef, { firstTtsCompletedAt: timing.firstTtsCompletedAt ?? performance.now() });
+          },
+          onPlaybackEvent: (event: SpeechPlaybackEvent) => {
+            if (mountedRef.current && speechSessionRef.current?.generation === generation) {
+              lumiRef.current?.handlePlaybackEvent(event);
+              if (event.type === "playbackStarted") {
+                timingRef.current ??= { userSendAt: performance.now() };
+                const now = performance.now();
+                recordChatTiming(timingRef, {
+                  firstAudioStartedAt: timingRef.current.firstAudioStartedAt ?? now,
+                  presenceSpeakingAt: timingRef.current.presenceSpeakingAt ?? now
+                });
+              } else if (event.type === "playbackStopped") {
+                recordChatTiming(timingRef, {
+                  audioPausedAt: performance.now(),
+                  mouthZeroAt: performance.now()
+                });
+              } else if (event.type === "playbackEnded") {
+                recordChatTiming(timingRef, {
+                  finalAudioEndedAt: performance.now(),
+                  mouthZeroAt: performance.now()
+                });
+              }
+            }
+          }
+        }
+      );
+      speechSessionRef.current = { generation, segmenter, queue };
+    }
+    setPresenceRequest("thinking");
+    setRequestStatus("sending");
+    dispatchMessages({
+      type: "append-turn",
+      user: {
+        id: createChatMessageId("user"),
+        requestId,
         role: "user",
         content,
         useMemory: readMemory && writeMemory,
         readMemory,
         writeMemory,
-        voiceOutput
+        voiceOutput,
+        status: "completed"
+      },
+      assistant: {
+        id: assistantId,
+        requestId,
+        role: "assistant",
+        content: "",
+        status: "streaming"
       }
-    ]);
+    });
 
     try {
-      const response = await apiClient.sendMessage({
-        sessionId,
-        text: content,
-        options: {
-          readMemory,
-          writeMemory,
-          voiceOutput,
-          promptPreview
-        }
-      });
-      props.onEvent(response);
-      setLastTraceId(response.traceId);
-      const provider = response.provider ?? response.payload.provider;
-      setMessages((current) => [
-        ...current,
+      const response = await apiClient.streamMessage(
         {
-          role: "assistant",
-          content: response.reply || response.payload.content || "No assistant content returned.",
-          traceId: response.traceId,
-          ...(provider ? { provider } : {})
+          sessionId,
+          text: content,
+          options: {
+            readMemory,
+            writeMemory,
+            // Browser playback owns sentence-level TTS for this path. Avoid
+            // asking Runtime to synthesize the complete reply a second time.
+            voiceOutput: false,
+            promptPreview
+          }
+        },
+        {
+          signal: controller.signal,
+          onEvent: (event: MessageStreamEvent) => {
+            if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+              return;
+            }
+            if (event.type === "text-delta") {
+              if (timingRef.current && timingRef.current.firstTextDeltaAt === undefined) {
+                recordChatTiming(timingRef, { firstTextDeltaAt: performance.now() });
+              }
+              setLastTraceId(event.traceId);
+              dispatchMessages({
+                type: "append-delta",
+                assistantId,
+                text: event.text,
+                traceId: event.traceId
+              });
+              const speech = speechSessionRef.current;
+              if (speech?.generation === requestId) {
+                for (const text of speech.segmenter.push(event.text)) {
+                  if (timingRef.current && timingRef.current.firstSegmentSubmittedAt === undefined) {
+                    recordChatTiming(timingRef, { firstSegmentSubmittedAt: performance.now() });
+                  }
+                  speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+                }
+              }
+              return;
+            }
+            if (event.type === "error") {
+              dispatchMessages({ type: "fail", assistantId, error: event.message });
+              setError(event.message);
+              const speech = speechSessionRef.current;
+              if (speech?.generation === requestId) {
+                for (const text of speech.segmenter.flush("failed")) {
+                  speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+                }
+                speech.queue.finish();
+              }
+              return;
+            }
+            activeRequestRef.current.completedObserved = true;
+            setLastTraceId(event.traceId);
+            dispatchMessages({
+              type: "complete",
+              assistantId,
+              content: event.content,
+              traceId: event.traceId,
+              provider: event.provider
+            });
+            setRequestStatus("success");
+            setPresenceRequest("idle");
+            recordChatTiming(timingRef, { assistantCompletedAt: performance.now() });
+            const speech = speechSessionRef.current;
+            if (speech?.generation === requestId) {
+              for (const text of speech.segmenter.flush("completed")) {
+                speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+              }
+              speech.queue.finish();
+            }
+          }
         }
-      ]);
+      );
+
+      if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+        return;
+      }
+      dispatchMessages({
+        type: "complete",
+        assistantId,
+        content: response.content,
+        traceId: response.traceId,
+        provider: response.provider
+      });
+      setLastTraceId(response.traceId);
       setRequestStatus("success");
+      setPresenceRequest("idle");
+      recordChatTiming(timingRef, { assistantCompletedAt: performance.now() });
+      const speech = speechSessionRef.current;
+      if (speech?.generation === requestId) {
+        for (const text of speech.segmenter.flush("completed")) {
+          speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+        }
+        speech.queue.finish();
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Message request failed");
+      if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+        return;
+      }
+      if (controller.signal.aborted) {
+        const speech = speechSessionRef.current;
+        if (speech?.generation === requestId) {
+          speech.queue.cancel();
+          speech.segmenter.reset();
+        }
+        dispatchMessages({
+          type: "cancel",
+          assistantId,
+          error: "生成已取消，以上内容可能不完整。"
+        });
+        setRequestStatus("idle");
+        setPresenceRequest("idle");
+        return;
+      }
+      const message = friendlyChatError(caught);
+      const speech = speechSessionRef.current;
+      if (speech?.generation === requestId) {
+        for (const text of speech.segmenter.flush("failed")) {
+          speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+        }
+        speech.queue.finish();
+      }
+      dispatchMessages({ type: "fail", assistantId, error: message });
+      setError(message);
       setRequestStatus("error");
     } finally {
-      // Keep success/error visible after the request completes.
+      if (activeRequestRef.current?.id === requestId) {
+        activeRequestRef.current = null;
+      }
     }
   }
 
+  function stopGeneration(): void {
+    const active = activeRequestRef.current;
+    if (!active || active.completedObserved) {
+      return;
+    }
+    recordChatTiming(timingRef, { stopRequestedAt: performance.now() });
+    interruptLumi();
+    active.controller.abort();
+    if (speechSessionRef.current?.generation === active.id) {
+      speechSessionRef.current.queue.cancel();
+      speechSessionRef.current = null;
+    }
+    activeRequestRef.current = null;
+    if (!mountedRef.current) {
+      return;
+    }
+    dispatchMessages({
+      type: "cancel",
+      assistantId: active.assistantId,
+      error: "生成已取消，以上内容可能不完整。"
+    });
+    setRequestStatus("idle");
+  }
+
+  function stopSpeech(): void {
+    recordChatTiming(timingRef, { stopRequestedAt: performance.now() });
+    interruptLumi();
+    speechSessionRef.current?.queue.cancel();
+    speechSessionRef.current = null;
+    if (mountedRef.current) setVoicePlaybackStatus("stopped");
+  }
+
+  function interruptLumi(): void {
+    lumiRef.current?.setPresence("interrupted");
+    queueMicrotask(() => {
+      if (mountedRef.current) lumiRef.current?.setPresence("idle");
+    });
+  }
+
   return (
-    <PageShell title="Chat" subtitle="Send text turns through the runtime server.">
+    <PageShell title="Chat" subtitle="Send text turns through the persistent Runtime stream.">
       <div className="grid grid-cols-[1fr_280px] gap-4">
         <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
           <div className="h-[420px] overflow-auto rounded-md border border-ink-100 bg-ink-50 p-3">
@@ -360,15 +654,23 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
               <EmptyState title="No chat yet" message="Send a message to exercise the runtime." />
             ) : (
               <div className="space-y-3">
-                {messages.map((message, index) => (
+                {messages.map((message) => (
                   <div
-                    key={`${message.role}-${index}`}
+                    key={message.id}
                     className={`rounded-md border p-3 ${message.role === "user" ? "border-cyan-100 bg-white" : "border-ink-200 bg-white"}`}
                   >
-                    <div className="mb-1 text-xs font-semibold uppercase text-ink-500">
-                      {message.role}
+                    <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase text-ink-500">
+                      <span>{message.role}</span>
+                      {message.role === "assistant" && message.status && (
+                        <span aria-live="polite">{chatStatusLabel(message.status)}</span>
+                      )}
                     </div>
-                    <div className="text-sm leading-6">{message.content}</div>
+                    <ChatMessageContent role={message.role} content={message.content} />
+                    {message.error && (
+                      <div className="mt-2 text-xs text-red-700" role="alert">
+                        {message.error}
+                      </div>
+                    )}
                     {message.traceId && (
                       <div className="mt-2 font-mono text-xs text-ink-500">
                         traceId: {message.traceId}
@@ -403,64 +705,143 @@ function ChatPage(props: { onEvent(event: RuntimeEvent): void }): JSX.Element {
               placeholder="Type a runtime test message"
               value={input}
               onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (shouldSubmitChatKey(event)) {
+                  event.preventDefault();
+                  void send();
+                }
+              }}
+              aria-label="Chat message"
             />
-            <button
-              className="button-primary h-20 w-24"
-              disabled={requestStatus === "sending" || !input.trim()}
-              onClick={() => void send()}
-            >
-              {requestStatus === "sending" ? "Sending" : "Send"}
-            </button>
+            {requestStatus === "sending" && activeRequestRef.current ? (
+              <button
+                type="button"
+                className="button-secondary h-20 w-24"
+                onClick={stopGeneration}
+                aria-label="Stop generating"
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="button-primary h-20 w-24"
+                disabled={Boolean(activeRequestRef.current) || !input.trim()}
+                onClick={() => void send()}
+                aria-label="Send message"
+              >
+                Send
+              </button>
+            )}
+            {(voicePlaybackStatus === "synthesizing" || voicePlaybackStatus === "playing") && (
+              <button
+                type="button"
+                className="button-secondary h-20 w-24"
+                onClick={stopSpeech}
+                aria-label="Stop speech"
+              >
+                Stop speech
+              </button>
+            )}
           </div>
-        </Panel>
-        <Panel title="Turn Options">
-          <div className="space-y-4">
-            <Field label="Session ID">
-              <input
-                className="field"
-                value={sessionId}
-                onChange={(event) => setSessionId(event.target.value)}
-              />
-            </Field>
-            <Toggle
-              label="Read Memory"
-              checked={readMemory}
-              onChange={setReadMemory}
-              note="Controls retrieval and prompt injection."
-            />
-            <Toggle
-              label="Write Memory"
-              checked={writeMemory}
-              onChange={setWriteMemory}
-              note="Controls whether this turn can create runtime memory."
-            />
-            <Toggle
-              label="Prompt Preview"
-              checked={promptPreview}
-              onChange={setPromptPreview}
-              note="Requests promptPreview metadata in the /message response."
-            />
-            <Toggle
-              label="TTS output"
-              checked={voiceOutput}
-              onChange={setVoiceOutput}
-              note="Sent as voiceOutput to /message."
-            />
-            <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
-              <div className="label mb-2">Outgoing Payload</div>
-              <pre className="max-h-52 overflow-auto whitespace-pre-wrap text-xs leading-5 text-ink-700">
-                {JSON.stringify(outgoingPayload, null, 2)}
-              </pre>
+          {voiceOutput && voicePlaybackStatus !== "idle" && (
+            <div className="mt-2 text-xs text-ink-500" aria-live="polite">
+              {voicePlaybackStatus === "synthesizing" && "Preparing speech…"}
+              {voicePlaybackStatus === "playing" && "Speaking…"}
+              {voicePlaybackStatus === "stopped" && "Speech stopped; generated text is preserved."}
+              {voicePlaybackStatus === "error" && "Speech unavailable; text response is preserved."}
             </div>
-            <p className="text-xs leading-5 text-ink-500">
-              After sending, Prompt Preview shows the latest prompt sections and memory usage for
-              the returned trace.
-            </p>
-          </div>
+          )}
         </Panel>
+        <div className="space-y-4">
+          <Panel title="Lumi">
+            <LumiCanvas
+              ref={lumiRef}
+              requestedPresence={presenceRequest}
+              className="h-[420px] rounded-md bg-ink-900"
+            />
+          </Panel>
+          <Panel title="Turn Options">
+            <div className="space-y-4">
+              <Field label="Session ID">
+                <input
+                  className="field"
+                  value={sessionId}
+                  onChange={(event) => setSessionId(event.target.value)}
+                />
+              </Field>
+              <Toggle
+                label="Read Memory"
+                checked={readMemory}
+                onChange={setReadMemory}
+                note="Controls retrieval and prompt injection."
+              />
+              <Toggle
+                label="Write Memory"
+                checked={writeMemory}
+                onChange={setWriteMemory}
+                note="Controls whether this turn can create runtime memory."
+              />
+              <Toggle
+                label="Prompt Preview"
+                checked={promptPreview}
+                onChange={setPromptPreview}
+                note="The latest prompt preview remains available in the Prompt page."
+              />
+              <Toggle
+                label="TTS output"
+                checked={voiceOutput}
+                onChange={setVoiceOutput}
+                note="Synthesizes sentence segments locally while the text stream is arriving."
+              />
+              <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
+                <div className="label mb-2">Outgoing Payload</div>
+                <pre className="max-h-52 overflow-auto whitespace-pre-wrap text-xs leading-5 text-ink-700">
+                  {JSON.stringify(outgoingPayload, null, 2)}
+                </pre>
+              </div>
+              <p className="text-xs leading-5 text-ink-500">
+                Chat uses the persistent SSE endpoint. Refreshing the page does not restore chat
+                history yet because no session-history API is available.
+              </p>
+            </div>
+          </Panel>
+        </div>
       </div>
     </PageShell>
   );
+}
+
+function createChatMessageId(prefix: string): string {
+  chatMessageSequence += 1;
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return `${prefix}-${uuid ?? chatMessageSequence}`;
+}
+
+function chatStatusLabel(status: NonNullable<ChatMessage["status"]>): string {
+  switch (status) {
+    case "streaming":
+      return "生成中";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "cancelled":
+      return "已取消";
+  }
+}
+
+function friendlyChatError(error: unknown): string {
+  if (error instanceof ApiError) {
+    return error.message || "消息请求失败。";
+  }
+  if (error instanceof Error && error.name === "MessageStreamProtocolError") {
+    return "消息流协议错误，回复未完成。";
+  }
+  if (error instanceof Error && error.name === "MessageStreamError") {
+    return error.message || "消息流处理失败。";
+  }
+  return "网络连接中断，回复未完成。";
 }
 
 function MemoryPage(props: {
@@ -508,10 +889,19 @@ function MemoryPage(props: {
   const [maintenanceResult, setMaintenanceResult] = useState<MemoryMaintenanceSummary | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const candidates = useAsyncData(() => apiClient.listRecentMemoryCandidates(20), []);
-  const maintenanceHealth = useAsyncData(() => apiClient.getMemoryMaintenanceHealth(), []);
-  const maintenanceStatus = useAsyncData(() => apiClient.getMemoryMaintenanceStatus(), []);
-  const vectorIndexStatus = useAsyncData(() => apiClient.getMemoryVectorIndexStatus(), []);
+  const candidates = useAsyncData((signal) => apiClient.listRecentMemoryCandidates(20, signal), []);
+  const maintenanceHealth = useAsyncData(
+    (signal) => apiClient.getMemoryMaintenanceHealth(signal),
+    []
+  );
+  const maintenanceStatus = useAsyncData(
+    (signal) => apiClient.getMemoryMaintenanceStatus(signal),
+    []
+  );
+  const vectorIndexStatus = useAsyncData(
+    (signal) => apiClient.getMemoryVectorIndexStatus(signal),
+    []
+  );
   const memoryMode = memoryModeFromHealth(props.health);
 
   useEffect(() => {
@@ -1274,7 +1664,7 @@ function MemoryPage(props: {
         </Panel>
       </div>
       <div className="grid grid-cols-2 gap-4">
-        <Panel title="Recent Memory Candidates" badge="Debug">
+        <Panel title="最近候选记忆" badge="调试">
           <div className="mb-3 grid grid-cols-4 gap-2 text-xs text-ink-600">
             <div className="rounded-md bg-ink-50 p-2">
               <div className="label">Total</div>
@@ -1827,7 +2217,7 @@ function mergeEvents(...groups: RuntimeEvent[][]): RuntimeEvent[] {
 }
 
 function PromptPreviewPage(): JSX.Element {
-  const preview = useAsyncData(() => apiClient.getLatestPromptPreview(), []);
+  const preview = useAsyncData((signal) => apiClient.getLatestPromptPreview(signal), []);
   const promptPreview = preview.data?.promptPreview;
 
   return (
@@ -2051,7 +2441,7 @@ function PromptPreviewPage(): JSX.Element {
         </Panel>
       )}
       {promptPreview?.memoryCandidates && promptPreview.memoryCandidates.length > 0 && (
-        <Panel title="Memory Candidates from this turn" badge="Review">
+        <Panel title="本轮候选记忆" badge="审核">
           <MemoryCandidateList candidates={promptPreview.memoryCandidates} compact />
         </Panel>
       )}
@@ -2507,8 +2897,11 @@ function deepRestartErrorMessage(error: unknown): string {
 }
 
 function SettingsPage(): JSX.Element {
-  const settings = useAsyncData(() => apiClient.getRuntimeSettings(), []);
+  const settings = useAsyncData((signal) => apiClient.getRuntimeSettings(signal), []);
   const [form, setForm] = useState<SettingsForm>(() => emptySettingsForm());
+  const [loadedForm, setLoadedForm] = useState<SettingsForm | null>(null);
+  const [lastAppliedForm, setLastAppliedForm] = useState<SettingsForm | null>(null);
+  const [settingsState, setSettingsState] = useState<SettingsApplyState>("clean");
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{
     changedKeys: string[];
@@ -2527,49 +2920,241 @@ function SettingsPage(): JSX.Element {
   const [restartBusy, setRestartBusy] = useState(false);
   const [restartResult, setRestartResult] = useState<string | null>(null);
   const [restartError, setRestartError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const operationSeqRef = useRef(0);
+  const seededRef = useRef(false);
+  const draftTouchedBeforeLoadRef = useRef(false);
+  const formRef = useRef(form);
+  const clearedSecretsRef = useRef(clearedSecrets);
+  formRef.current = form;
+  clearedSecretsRef.current = clearedSecrets;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      operationSeqRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!seededRef.current && !settings.data) {
+      draftTouchedBeforeLoadRef.current =
+        settingsFingerprint(form, clearedSecrets) !==
+        settingsFingerprint(emptySettingsForm(), new Set());
+    }
+  }, [form, clearedSecrets, settings.data]);
 
   useEffect(() => {
     if (settings.data) {
-      setForm(settingsFormFromResponse(settings.data));
+      const next = settingsFormFromResponse(settings.data);
+      setLoadedForm((current) => current ?? next);
+      setLastAppliedForm((current) => current ?? next);
+      if (!seededRef.current) {
+        const replaceDraft = shouldReplaceSettingsDraft(
+          seededRef.current,
+          draftTouchedBeforeLoadRef.current
+        );
+        seededRef.current = true;
+        if (replaceDraft) setForm(next);
+        else setSettingsState("dirty");
+      }
     }
   }, [settings.data]);
 
-  async function save(): Promise<void> {
-    setSaving(true);
+  const draftDirty = settingsDraftDiffers(form, loadedForm, clearedSecrets);
+  const operationBusy = saving || applying;
+
+  useEffect(() => {
+    if (
+      draftDirty &&
+      !operationBusy &&
+      settingsState !== "failed" &&
+      settingsState !== "restart-required"
+    ) {
+      setSettingsState("dirty");
+    }
+  }, [draftDirty, operationBusy, settingsState]);
+
+  function beginOperation(): number {
+    const operation = ++operationSeqRef.current;
     setSaveError(null);
+    setApplyError(null);
     setSaveResult(null);
+    setApplyResult(null);
+    return operation;
+  }
+
+  function operationIsCurrent(operation: number): boolean {
+    return isCurrentSettingsOperation(mountedRef.current, operation, operationSeqRef.current);
+  }
+
+  function localValidation(snapshot: SettingsForm): string | null {
+    const port = Number(snapshot.SERVER_PORT);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return "SERVER_PORT 必须是 1 到 65535 之间的整数。";
+    }
+    if (!snapshot.MEMORY_REPOSITORY.trim()) return "MEMORY_REPOSITORY 不能为空。";
+    return null;
+  }
+
+  function updateBaselineAfterSave(snapshot: SettingsForm, refreshed: SettingsForm): void {
+    setLoadedForm((current) => {
+      const baseline = { ...(current ?? refreshed) };
+      for (const key of Object.keys(refreshed) as SettingsKey[]) {
+        baseline[key] = isSecretSettingsKey(key) ? snapshot[key] : refreshed[key];
+      }
+      return baseline;
+    });
+  }
+
+  async function saveAndApply(): Promise<void> {
+    if (operationBusy) return;
+    const snapshot = { ...form };
+    const snapshotClearedSecrets = new Set(clearedSecrets);
+    const validationError = localValidation(snapshot);
+    if (validationError) {
+      setSettingsState("failed");
+      setSaveError(validationError);
+      return;
+    }
+    const operation = beginOperation();
+    const fingerprint = settingsFingerprint(snapshot, snapshotClearedSecrets);
+    let stage: "save" | "reload" | "refresh" = "save";
+    setSaving(true);
+    setSettingsState("saving");
     try {
       const response = await apiClient.updateRuntimeSettings({
-        values: buildSettingsUpdate(form, clearedSecrets)
+        values: buildSettingsUpdate(snapshot, snapshotClearedSecrets)
       });
+      if (!operationIsCurrent(operation)) return;
       setSaveResult({
         changedKeys: response.changedKeys,
         restartRequired: response.restartRequired
       });
-      setForm(settingsFormFromResponse(response.settings));
-      setClearedSecrets(new Set());
-      await settings.refresh();
+      setSettingsState("reloading");
+      setApplying(true);
+      stage = "reload";
+      const reloadResponse = await apiClient.reloadRuntimeSettings();
+      if (!operationIsCurrent(operation)) return;
+      setApplyResult(reloadResponse);
+      setSettingsState("refreshing");
+      stage = "refresh";
+      const refreshedResponse = await settings.refresh();
+      if (!operationIsCurrent(operation)) return;
+      if (!refreshedResponse) {
+        setSettingsState("failed");
+        setApplyError("配置已保存，但重新读取生效值失败。");
+        return;
+      }
+      const refreshedForm = settingsFormFromResponse(refreshedResponse);
+      const comparison = compareSettingsForms(snapshot, refreshedForm, new Set(settingsSecretKeys));
+      updateBaselineAfterSave(snapshot, refreshedForm);
+      const currentFingerprint = settingsFingerprint(formRef.current, clearedSecretsRef.current);
+      const draftChangedDuringSave = currentFingerprint !== fingerprint;
+      if (!draftChangedDuringSave) {
+        setClearedSecrets(new Set());
+      }
+      if (reloadResponse.notHotReloaded.length > 0 || response.restartRequired) {
+        setSettingsState("restart-required");
+        setApplyError(
+          reloadResponse.notHotReloaded.length > 0
+            ? `配置已保存，需要重启后生效：${reloadResponse.notHotReloaded.join(", ")}`
+            : "配置已保存，需要重启后生效。"
+        );
+      } else if (comparison.mismatchedKeys.length > 0) {
+        setSettingsState("failed");
+        setApplyError(`配置已保存，但实际生效值不一致：${comparison.mismatchedKeys.join(", ")}`);
+      } else {
+        setLastAppliedForm(snapshot);
+        setSettingsState(draftChangedDuringSave ? "dirty" : "applied");
+      }
     } catch (caught) {
-      setSaveError(caught instanceof Error ? caught.message : "Settings update failed");
+      if (!operationIsCurrent(operation)) return;
+      setSettingsState("failed");
+      const message = caught instanceof Error ? caught.message : "保存或应用配置失败";
+      if (stage === "save") setSaveError(message);
+      else setApplyError(message);
     } finally {
-      setSaving(false);
+      if (operationIsCurrent(operation)) {
+        setSaving(false);
+        setApplying(false);
+      }
     }
   }
 
-  async function applyRuntimeConfig(): Promise<void> {
-    setApplying(true);
-    setApplyError(null);
-    setApplyResult(null);
+  async function saveOnly(): Promise<void> {
+    if (operationBusy) return;
+    const snapshot = { ...form };
+    const snapshotClearedSecrets = new Set(clearedSecrets);
+    const validationError = localValidation(snapshot);
+    if (validationError) {
+      setSettingsState("failed");
+      setSaveError(validationError);
+      return;
+    }
+    const operation = beginOperation();
+    setSaving(true);
+    setSettingsState("saving");
     try {
-      const response = await apiClient.reloadRuntimeSettings();
-      setApplyResult(response);
-      setForm(settingsFormFromResponse(response.settings));
-      setClearedSecrets(new Set());
-      await settings.refresh();
+      const response = await apiClient.updateRuntimeSettings({
+        values: buildSettingsUpdate(snapshot, snapshotClearedSecrets)
+      });
+      if (!operationIsCurrent(operation)) return;
+      const refreshed = await settings.refresh();
+      if (!operationIsCurrent(operation)) return;
+      if (!refreshed) {
+        setSettingsState("failed");
+        setApplyError("配置已保存，但重新读取配置失败。");
+        return;
+      }
+      updateBaselineAfterSave(snapshot, settingsFormFromResponse(refreshed));
+      setSaveResult({
+        changedKeys: response.changedKeys,
+        restartRequired: response.restartRequired
+      });
+      setSettingsState(response.restartRequired ? "restart-required" : "clean");
+      if (
+        settingsFingerprint(formRef.current, clearedSecretsRef.current) ===
+        settingsFingerprint(snapshot, snapshotClearedSecrets)
+      ) {
+        setClearedSecrets(new Set());
+      }
     } catch (caught) {
-      setApplyError(caught instanceof Error ? caught.message : "Runtime config reload failed");
+      if (!operationIsCurrent(operation)) return;
+      setSettingsState("failed");
+      setSaveError(caught instanceof Error ? caught.message : "保存配置失败");
     } finally {
-      setApplying(false);
+      if (operationIsCurrent(operation)) setSaving(false);
+    }
+  }
+
+  async function reloadCurrentConfig(): Promise<void> {
+    if (operationBusy) return;
+    if (draftDirty && !window.confirm("当前有未保存更改，重新载入会丢弃草稿。继续吗？")) return;
+    const operation = beginOperation();
+    setApplying(true);
+    setSettingsState("refreshing");
+    try {
+      const refreshed = await settings.refresh();
+      if (!operationIsCurrent(operation)) return;
+      if (!refreshed) {
+        setSettingsState("failed");
+        setApplyError("重新载入配置失败。");
+        return;
+      }
+      const next = settingsFormFromResponse(refreshed);
+      setForm(next);
+      setLoadedForm(next);
+      setLastAppliedForm(next);
+      setClearedSecrets(new Set());
+      setSettingsState("clean");
+    } catch (caught) {
+      if (!operationIsCurrent(operation)) return;
+      setSettingsState("failed");
+      setApplyError(caught instanceof Error ? caught.message : "重新载入配置失败");
+    } finally {
+      if (operationIsCurrent(operation)) setApplying(false);
     }
   }
 
@@ -2579,9 +3164,20 @@ function SettingsPage(): JSX.Element {
     setVerifying(capability);
     setVerification(null);
     try {
-      setVerification(await apiClient.verifyProvider(capability));
+      const result = await apiClient.verifyProvider(capability);
+      if (mountedRef.current) setVerification(result);
+    } catch (caught) {
+      if (mountedRef.current) {
+        setVerification({
+          ok: false,
+          provider: "unknown",
+          capability,
+          mock: false,
+          error: caught instanceof Error ? caught.message : "Provider 验证失败"
+        });
+      }
     } finally {
-      setVerifying(null);
+      if (mountedRef.current) setVerifying(null);
     }
   }
 
@@ -2598,11 +3194,11 @@ function SettingsPage(): JSX.Element {
     setRestartError(null);
     try {
       const response = await apiClient.deepRestartRuntime();
-      setRestartResult(response.message);
+      if (mountedRef.current) setRestartResult(response.message);
     } catch (caught) {
-      setRestartError(deepRestartErrorMessage(caught));
+      if (mountedRef.current) setRestartError(deepRestartErrorMessage(caught));
     } finally {
-      setRestartBusy(false);
+      if (mountedRef.current) setRestartBusy(false);
     }
   }
 
@@ -2657,8 +3253,45 @@ function SettingsPage(): JSX.Element {
       {settings.error && (
         <Notice tone="error" title="Settings load failed" message={settings.error} />
       )}
-      {saveError && <Notice tone="error" title="Save failed" message={saveError} />}
-      {applyError && <Notice tone="error" title="Apply failed" message={applyError} />}
+      {(draftDirty || settingsState === "dirty") && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels.dirty}
+          message="草稿尚未保存到 .env.local。"
+        />
+      )}
+      {settingsState === "saving" && (
+        <Notice tone="info" title={settingsStateLabels.saving} message="正在保存配置草稿。" />
+      )}
+      {settingsState === "reloading" && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels.reloading}
+          message="正在将配置应用到 Runtime。"
+        />
+      )}
+      {settingsState === "refreshing" && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels.refreshing}
+          message="正在重新读取配置以确认生效。"
+        />
+      )}
+      {settingsState === "applied" && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels.applied}
+          message="配置已保存并确认在 Runtime 中生效。"
+        />
+      )}
+      {saveError && <Notice tone="error" title="保存失败" message={saveError} />}
+      {applyError && (
+        <Notice
+          tone="error"
+          title={settingsState === "restart-required" ? "已保存，需要重启" : "应用失败"}
+          message={applyError}
+        />
+      )}
       {restartError && <Notice tone="error" title="Deep restart failed" message={restartError} />}
       {restartResult && (
         <Notice tone="info" title="Deep restart requested" message={restartResult} />
@@ -2666,29 +3299,29 @@ function SettingsPage(): JSX.Element {
       {saveResult && (
         <Notice
           tone="info"
-          title="Saved to .env.local"
-          message={`${saveResult.changedKeys.length || 0} field(s) changed. Click Apply Now to reload provider config without restarting. Memory/server setting changes may still require restart.`}
+          title="配置已保存"
+          message={`${saveResult.changedKeys.length || 0} 项发生变化。${saveResult.restartRequired ? "部分配置需要重启。" : ""}`}
         />
       )}
       {applyResult && (
         <Notice
           tone="info"
-          title="Applied to active runtime"
-          message={`${applyResult.message} ${applyResult.restartRequired ? `Restart required for: ${applyResult.notHotReloaded.join(", ")}` : "No restart required for the applied provider config."}`}
+          title="Runtime 应用结果"
+          message={`${applyResult.message}${applyResult.notHotReloaded.length ? `；需要重启：${applyResult.notHotReloaded.join(", ")}` : ""}`}
         />
       )}
       {savedDeepSeekButRuntimeMock && (
         <Notice
           tone="info"
-          title="Saved config is not active yet"
-          message="DeepSeek config is saved, but active runtime is still mock. Click Apply Now or restart the server."
+          title="已保存但尚未生效"
+          message="DeepSeek 配置已保存，但当前 Runtime 仍是 mock。请点击“保存并应用”或重启服务。"
         />
       )}
       {savedConfigDiffersFromActive && (
         <Notice
           tone="info"
-          title="Saved config differs from active runtime"
-          message="Dashboard writes to .env.local. Click Apply Now to reload hot-reloadable provider config, or restart for memory/server boundary changes."
+          title="保存配置与 Runtime 不一致"
+          message="配置已写入 .env.local。请点击“保存并应用”重新加载可热更新配置；记忆或服务边界变更需要重启。"
         />
       )}
       <div className="grid grid-cols-2 gap-4">
@@ -2831,6 +3464,62 @@ function SettingsPage(): JSX.Element {
                 message={settings.data.memory.memoryExtractorSkippedReason}
               />
             )}
+            {(settings.data?.memory.memoryExtractorFallbackUsed ||
+              (settings.data?.memory.memoryExtractorValidationIssues?.length ?? 0) > 0) && (
+              <div className="mt-3 rounded-md border border-ink-100 bg-ink-50 p-3">
+                <h4 className="text-sm font-semibold text-ink-800">Extractor diagnostics</h4>
+                <div className="mt-2 grid grid-cols-2 gap-3">
+                  {settings.data?.memory.memoryExtractorFailureStage && (
+                    <Definition
+                      label="Failure stage"
+                      value={settings.data.memory.memoryExtractorFailureStage}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorFinishReason && (
+                    <Definition
+                      label="Finish reason"
+                      value={settings.data.memory.memoryExtractorFinishReason}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorSelectedOutputSource && (
+                    <Definition
+                      label="Selected output"
+                      value={settings.data.memory.memoryExtractorSelectedOutputSource}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorAnswerLength !== undefined && (
+                    <Definition
+                      label="Answer length"
+                      value={String(settings.data.memory.memoryExtractorAnswerLength)}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorReasoningLength !== undefined && (
+                    <Definition
+                      label="Reasoning length"
+                      value={String(settings.data.memory.memoryExtractorReasoningLength)}
+                    />
+                  )}
+                  {settings.data?.memory.memoryExtractorLastAttemptAt && (
+                    <Definition
+                      label="Last attempt"
+                      value={settings.data.memory.memoryExtractorLastAttemptAt}
+                    />
+                  )}
+                </div>
+                {settings.data?.memory.memoryExtractorValidationIssues &&
+                  settings.data.memory.memoryExtractorValidationIssues.length > 0 && (
+                    <p className="mt-2 text-sm leading-6 text-ink-600">
+                      Validation issues:{" "}
+                      {settings.data.memory.memoryExtractorValidationIssues.join("; ")}
+                    </p>
+                  )}
+                {settings.data?.memory.memoryExtractorRawPreview && (
+                  <p className="mt-2 break-all text-sm leading-6 text-ink-600">
+                    Raw preview: {settings.data.memory.memoryExtractorRawPreview}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </Panel>
       </div>
@@ -2863,7 +3552,7 @@ function SettingsPage(): JSX.Element {
       <Panel title="Developer Tools / Deep Restart" badge="Development only">
         <div className="grid grid-cols-[1fr_1fr] gap-4">
           <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
-            <h3 className="mb-2 text-sm font-semibold text-ink-800">Apply Now</h3>
+            <h3 className="mb-2 text-sm font-semibold text-ink-800">保存并应用</h3>
             <ul className="space-y-1 text-sm leading-6 text-ink-600">
               <li>Reloads supported runtime config in-process.</li>
               <li>Does not restart the server.</li>
@@ -2972,7 +3661,7 @@ function SettingsPage(): JSX.Element {
         </div>
         <p className="mt-3 text-sm leading-6 text-ink-600">
           Provider chains are tried left to right. Mock is ignored unless PROVIDER_ALLOW_MOCKS=true.
-          Apply Now reloads supported runtime config; Deep Restart restarts the supervised runtime.
+          保存并应用会重新加载可热更新的 Runtime 配置；Deep Restart 会重启受监管的 Runtime。
         </p>
       </Panel>
       <div className="grid grid-cols-3 gap-4">
@@ -3134,13 +3823,37 @@ function SettingsPage(): JSX.Element {
       <div className="flex justify-end gap-3">
         <button
           className="button-secondary"
-          disabled={applying}
-          onClick={() => void applyRuntimeConfig()}
+          disabled={operationBusy}
+          onClick={() => void reloadCurrentConfig()}
         >
-          {applying ? "Applying" : "Apply Now / Reload Runtime Config"}
+          {applying ? "正在重新载入" : "重新载入当前配置"}
         </button>
-        <button className="button-primary" disabled={saving} onClick={() => void save()}>
-          {saving ? "Saving" : "Save to .env.local"}
+        <button
+          className="button-secondary"
+          disabled={operationBusy || !draftDirty}
+          onClick={() => {
+            if (loadedForm) {
+              setForm(loadedForm);
+              setClearedSecrets(new Set());
+              setSettingsState("clean");
+            }
+          }}
+        >
+          重置草稿
+        </button>
+        <button
+          className="button-secondary"
+          disabled={operationBusy}
+          onClick={() => void saveOnly()}
+        >
+          {saving ? "正在保存" : "仅保存"}
+        </button>
+        <button
+          className="button-primary"
+          disabled={operationBusy}
+          onClick={() => void saveAndApply()}
+        >
+          {saving ? "正在保存" : applying ? "正在应用" : "保存并应用"}
         </button>
       </div>
     </PageShell>
@@ -3195,6 +3908,15 @@ type SettingsKey =
   | "EMBEDDING_API_KEY"
   | "EMBEDDING_MODEL"
   | "EMBEDDING_DIMENSIONS";
+
+const settingsSecretKeys: SettingsKey[] = [
+  "DATABASE_URL",
+  "DEEPSEEK_API_KEY",
+  "NVIDIA_API_KEY",
+  "XAI_API_KEY",
+  "DASHSCOPE_API_KEY",
+  "EMBEDDING_API_KEY"
+];
 
 function emptySettingsForm(): SettingsForm {
   return {
@@ -3565,15 +4287,15 @@ function Notice(props: { tone: "info" | "error"; title: string; message: string 
 }
 
 function ProviderMetadataSummary(props: {
-  provider?: ProviderCallMetadata | undefined;
+  provider?: ProviderCallMetadata | string | undefined;
 }): JSX.Element {
   const provider = props.provider;
   if (!provider) {
-    return (
-      <div className="mt-2 text-xs text-ink-500">
-        provider: unknown · model: unknown · mode: unknown
-      </div>
-    );
+    return <></>;
+  }
+
+  if (typeof provider === "string") {
+    return <div className="mt-2 text-xs text-ink-500">provider: {provider}</div>;
   }
 
   return (
@@ -3585,9 +4307,11 @@ function ProviderMetadataSummary(props: {
       >
         {provider.mock ? "MOCK MODE" : `REAL PROVIDER / ${provider.name}`}
       </span>
-      <span>provider: {provider.name}</span>
-      <span>model: {provider.model ?? "unknown"}</span>
-      <span>latency: {formatLatency(provider.latencyMs)}</span>
+      {provider.name && <span>provider: {provider.name}</span>}
+      {provider.model && <span>model: {provider.model}</span>}
+      {provider.latencyMs !== undefined && (
+        <span>latency: {formatLatency(provider.latencyMs)}</span>
+      )}
       {provider.healthStatus && <span>health: {provider.healthStatus}</span>}
       {provider.tokenUsage && <span>tokens: {formatTokenUsage(provider.tokenUsage)}</span>}
       {provider.mock && (
@@ -4649,10 +5373,10 @@ function MemoryCandidateList(props: {
           <p className="whitespace-pre-wrap text-sm text-ink-700">
             {props.compact ? candidate.contentPreview : candidate.content}
           </p>
-          {!props.compact && temporalWarningForText(candidate.content) && (
+          {!props.compact && candidate.temporalStatus === "unresolved" && (
             <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
               Relative time detected. Consider resolving it to an absolute date before saving.
-              Suggested: {temporalWarningForText(candidate.content)}
+              {candidate.temporalSuggestion ? ` Suggested: ${candidate.temporalSuggestion}` : ""}
             </div>
           )}
           {candidate.summary && (
@@ -4660,8 +5384,19 @@ function MemoryCandidateList(props: {
           )}
           <div className="mt-2 text-xs text-ink-500">
             Reason: {candidate.reason}
+            {candidate.storageReason ? ` · Stored: ${candidate.storageReason}` : ""}
             {candidate.rejectedReason ? ` · Rejected: ${candidate.rejectedReason}` : ""}
           </div>
+          {!props.compact && (
+            <div className="mt-2 text-xs text-ink-500">
+              Origin: {candidate.originRole ?? "n/a"} · Explicit remember:{" "}
+              {String(candidate.explicitRememberRequested ?? false)} · Correction:{" "}
+              {String(candidate.correctionRequested ?? false)}
+              {candidate.canonicalFingerprint
+                ? ` · Fingerprint: ${candidate.canonicalFingerprint}`
+                : ""}
+            </div>
+          )}
           {!props.compact && (
             <div className="mt-2 text-xs text-ink-500">
               Tags: {candidate.tags.join(", ") || "none"}

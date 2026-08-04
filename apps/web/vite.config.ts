@@ -21,6 +21,10 @@ export default defineConfig({
         target: `http://${process.env["SERVER_HOST"] ?? "127.0.0.1"}:${process.env["SERVER_PORT"] ?? "6121"}`,
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, "")
+      },
+      "/live2d": {
+        target: `http://${process.env["SERVER_HOST"] ?? "127.0.0.1"}:${process.env["SERVER_PORT"] ?? "6121"}`,
+        changeOrigin: true
       }
     }
   },

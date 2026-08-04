@@ -1,3 +1,20 @@
+import {
+  MessageSseParser,
+  MessageStreamError,
+  MessageStreamProtocolError,
+  type CompletedMessage,
+  type MessageStreamEvent
+} from "./stream.js";
+
+export { MessageSseParser, MessageStreamError, MessageStreamProtocolError } from "./stream.js";
+export type {
+  CompletedMessage,
+  MessageStreamCompleted,
+  MessageStreamErrorEvent,
+  MessageStreamEvent,
+  MessageStreamTextDelta
+} from "./stream.js";
+
 export type ProviderHealth = {
   provider: string;
   name?: string;
@@ -254,6 +271,14 @@ export type MemoryCandidateReview = {
   reason: string;
   decision: "stored" | "rejected";
   rejectedReason?: string;
+  storageReason?: string;
+  explicitRememberRequested?: boolean;
+  correctionRequested?: boolean;
+  originRole?: "user" | "assistant" | "mixed";
+  canonicalFingerprint?: string;
+  canonicalEventKey?: string;
+  temporalStatus?: "not-needed" | "normalized" | "unresolved";
+  temporalSuggestion?: string;
   source?: string;
   sourceTraceId?: string | null;
   storedMemoryId?: string;
@@ -659,6 +684,18 @@ export type RuntimeSettingsResponse = {
     memoryExtractorDefault?: string;
     memoryExtractorFallbackUsed?: boolean;
     memoryExtractorSkippedReason?: string;
+    memoryExtractorFailureStage?: string;
+    memoryExtractorError?: string;
+    memoryExtractorValidationIssues?: string[];
+    memoryExtractorRejectedReasons?: string[];
+    memoryExtractorRawPreview?: string;
+    memoryExtractorCandidateCount?: number;
+    memoryExtractorRejectedCount?: number;
+    memoryExtractorFinishReason?: string;
+    memoryExtractorSelectedOutputSource?: string;
+    memoryExtractorAnswerLength?: number;
+    memoryExtractorReasoningLength?: number;
+    memoryExtractorLastAttemptAt?: string;
     reasoningProviderConfigured?: boolean;
     vectorIndex?: {
       enabled: boolean;
@@ -829,8 +866,8 @@ export const apiClient = {
     return dashboardDevToken.length > 0;
   },
 
-  getHealth(): Promise<HealthResponse> {
-    return request<HealthResponse>("/health");
+  getHealth(signal?: AbortSignal): Promise<HealthResponse> {
+    return request<HealthResponse>("/health", signalRequestInit(signal));
   },
 
   sendMessage(input: SendMessageRequest): Promise<MessageResponse> {
@@ -840,8 +877,95 @@ export const apiClient = {
     });
   },
 
-  listRecentMemories(limit = 20): Promise<{ memories: MemoryRecord[] }> {
-    return request<{ memories: MemoryRecord[] }>(`/memory/recent?limit=${limit}`);
+  async streamMessage(
+    input: SendMessageRequest,
+    options: {
+      signal?: AbortSignal;
+      onEvent?: (event: MessageStreamEvent) => void;
+    } = {}
+  ): Promise<CompletedMessage> {
+    const headers = new Headers({ "content-type": "application/json" });
+    if (dashboardDevToken && shouldAttachDashboardDevToken("/v1/messages/stream", "POST")) {
+      headers.set("authorization", `Bearer ${dashboardDevToken}`);
+    }
+
+    const requestInit: RequestInit = {
+      method: "POST",
+      headers,
+      body: JSON.stringify(input)
+    };
+    if (options.signal) {
+      requestInit.signal = options.signal;
+    }
+    const response = await fetch(`${apiBaseUrl}/v1/messages/stream`, requestInit);
+
+    if (!response.ok) {
+      throw new ApiError(await safeHttpStreamError(response), response.status);
+    }
+
+    if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+      throw new MessageStreamProtocolError("The streaming response was not SSE.");
+    }
+    if (!response.body) {
+      throw new MessageStreamProtocolError("The streaming response has no body.");
+    }
+
+    const parser = new MessageSseParser();
+    const reader = response.body.getReader();
+    let accumulatedText = "";
+    let completed: CompletedMessage | undefined;
+    let readerDone = false;
+
+    try {
+      while (true) {
+        const result = await reader.read();
+        if (result.done) {
+          readerDone = true;
+          break;
+        }
+        for (const event of parser.push(result.value)) {
+          if (event.type === "text-delta") {
+            if (completed) {
+              throw new MessageStreamProtocolError(
+                "The message stream continued after completion."
+              );
+            }
+            accumulatedText += event.text;
+            options.onEvent?.(event);
+            continue;
+          }
+          if (event.type === "error") {
+            options.onEvent?.(event);
+            throw new MessageStreamError(event);
+          }
+          if (event.content !== accumulatedText) {
+            throw new MessageStreamProtocolError(
+              "The completed message does not match its text deltas."
+            );
+          }
+          completed = event;
+          options.onEvent?.(event);
+        }
+      }
+
+      parser.finish();
+      if (!completed) {
+        throw new MessageStreamProtocolError("The message stream ended before completion.");
+      }
+      return completed;
+    } finally {
+      if (!readerDone) {
+        await reader.cancel().catch(() => undefined);
+      }
+      reader.releaseLock();
+    }
+  },
+
+  listRecentMemories(limit = 20, signal?: AbortSignal): Promise<{ memories: MemoryRecord[] }> {
+    return request<{ memories: MemoryRecord[] }>(
+      `/memory/recent?limit=${limit}`,
+      signalRequestInit(signal)
+    );
   },
 
   searchMemories(
@@ -1027,17 +1151,18 @@ export const apiClient = {
     });
   },
 
-  getMemoryMaintenanceHealth(): Promise<{
+  getMemoryMaintenanceHealth(signal?: AbortSignal): Promise<{
     ok: boolean;
     repository: string;
     health: MemoryHealthSummary;
   }> {
     return request<{ ok: boolean; repository: string; health: MemoryHealthSummary }>(
-      "/memory/maintenance/health"
+      "/memory/maintenance/health",
+      signalRequestInit(signal)
     );
   },
 
-  getMemoryMaintenanceStatus(): Promise<{
+  getMemoryMaintenanceStatus(signal?: AbortSignal): Promise<{
     ok: boolean;
     repository: string;
     scheduler: MemoryMaintenanceSchedulerStatus | null;
@@ -1046,16 +1171,17 @@ export const apiClient = {
       ok: boolean;
       repository: string;
       scheduler: MemoryMaintenanceSchedulerStatus | null;
-    }>("/memory/maintenance/status");
+    }>("/memory/maintenance/status", signalRequestInit(signal));
   },
 
-  getMemoryVectorIndexStatus(): Promise<{
+  getMemoryVectorIndexStatus(signal?: AbortSignal): Promise<{
     ok: boolean;
     repository: string;
     status: MemoryVectorIndexStatus;
   }> {
     return request<{ ok: boolean; repository: string; status: MemoryVectorIndexStatus }>(
-      "/memory/vector-index/status"
+      "/memory/vector-index/status",
+      signalRequestInit(signal)
     );
   },
 
@@ -1079,7 +1205,10 @@ export const apiClient = {
     });
   },
 
-  listRecentMemoryCandidates(limit = 20): Promise<{
+  listRecentMemoryCandidates(
+    limit = 20,
+    signal?: AbortSignal
+  ): Promise<{
     mock: boolean;
     volatile: boolean;
     message?: string;
@@ -1100,7 +1229,7 @@ export const apiClient = {
       candidateCount: number;
       fallbackUsed: boolean;
       candidates: MemoryCandidateReview[];
-    }>(`/memory/candidates/recent?limit=${limit}`);
+    }>(`/memory/candidates/recent?limit=${limit}`, signalRequestInit(signal));
   },
 
   acceptMemoryCandidate(
@@ -1138,8 +1267,8 @@ export const apiClient = {
     );
   },
 
-  getProviderStatus(): Promise<ProvidersStatusResponse> {
-    return request<ProvidersStatusResponse>("/providers/status");
+  getProviderStatus(signal?: AbortSignal): Promise<ProvidersStatusResponse> {
+    return request<ProvidersStatusResponse>("/providers/status", signalRequestInit(signal));
   },
 
   verifyProvider(
@@ -1205,11 +1334,18 @@ export const apiClient = {
     text: string;
     voice?: string;
     format?: "mp3" | "wav" | "opus" | "pcm" | "mulaw" | "alaw";
+    language?: string;
     sessionId?: string;
+    signal?: AbortSignal;
   }): Promise<TTSResponse> {
-    return request<TTSResponse>("/v1/tts", {
+    const { signal, ...payload } = input;
+    const init: RequestInit = {
       method: "POST",
-      body: JSON.stringify(input)
+      body: JSON.stringify(payload)
+    };
+    if (signal) init.signal = signal;
+    return request<TTSResponse>("/v1/tts", {
+      ...init
     });
   },
 
@@ -1229,16 +1365,22 @@ export const apiClient = {
     });
   },
 
-  listRecentEvents(limit = 50): Promise<{ mock: boolean; events: RuntimeEvent[] }> {
-    return request<{ mock: boolean; events: RuntimeEvent[] }>(`/events/recent?limit=${limit}`);
+  listRecentEvents(
+    limit = 50,
+    signal?: AbortSignal
+  ): Promise<{ mock: boolean; events: RuntimeEvent[] }> {
+    return request<{ mock: boolean; events: RuntimeEvent[] }>(
+      `/events/recent?limit=${limit}`,
+      signalRequestInit(signal)
+    );
   },
 
-  getLatestPromptPreview(): Promise<PromptPreviewResponse> {
-    return request<PromptPreviewResponse>("/debug/prompt/latest");
+  getLatestPromptPreview(signal?: AbortSignal): Promise<PromptPreviewResponse> {
+    return request<PromptPreviewResponse>("/debug/prompt/latest", signalRequestInit(signal));
   },
 
-  getRuntimeSettings(): Promise<RuntimeSettingsResponse> {
-    return request<RuntimeSettingsResponse>("/settings/runtime");
+  getRuntimeSettings(signal?: AbortSignal): Promise<RuntimeSettingsResponse> {
+    return request<RuntimeSettingsResponse>("/settings/runtime", signalRequestInit(signal));
   },
 
   updateRuntimeSettings(
@@ -1274,6 +1416,10 @@ export const apiClient = {
   }
 };
 
+function signalRequestInit(signal: AbortSignal | undefined): RequestInit | undefined {
+  return signal ? { signal } : undefined;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined && !headers.has("content-type")) {
@@ -1302,6 +1448,51 @@ function shouldAttachDashboardDevToken(path: string, method: string | undefined)
   }
   const normalized = method?.toUpperCase() ?? "GET";
   return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";
+}
+
+async function safeHttpStreamError(response: Response): Promise<string> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return response.status === 400 ? "请求内容无效。" : "消息流请求失败。";
+  }
+
+  if (isRecord(payload)) {
+    if (payload["error"] === "invalid_request") {
+      return "请求内容无效。";
+    }
+    if (typeof payload["code"] === "string") {
+      return safeClientErrorMessage(payload["code"]);
+    }
+    if (payload["error"] === "persistence_failed") {
+      return "消息保存失败，请稍后重试。";
+    }
+  }
+  return response.status === 400 ? "请求内容无效。" : "消息流请求失败。";
+}
+
+function safeClientErrorMessage(code: string): string {
+  switch (code) {
+    case "MISSING_API_KEY":
+    case "INVALID_API_KEY":
+    case "PERMISSION_DENIED":
+      return "Provider 认证失败。";
+    case "RATE_LIMITED":
+      return "Provider 请求过于频繁。";
+    case "TIMEOUT":
+      return "Provider 请求超时。";
+    case "CANCELLED":
+      return "生成已取消。";
+    case "PROVIDER_UNAVAILABLE":
+      return "Provider 当前不可用。";
+    default:
+      return "消息流请求失败。";
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function getWebSocketUrl(path: string): string {

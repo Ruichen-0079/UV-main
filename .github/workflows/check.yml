@@ -29,6 +29,11 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+        # postinstall builds apps/web/vendor/cubism-framework/dist from vendored TS
+        # (root .gitignore ignores dist/; Cubism Core is never committed).
+
+      - name: Ensure Cubism Framework dist
+        run: pnpm prepare:cubism-framework
 
       - name: Type check
         run: pnpm check

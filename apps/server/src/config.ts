@@ -29,6 +29,8 @@ export type ServerConfig = {
     restartMarkerPath?: string | undefined;
   };
   dashboardDevToken?: string | undefined;
+  live2dAssetRoot?: string | undefined;
+  live2dCorePath?: string | undefined;
 };
 
 export function loadServerConfig(
@@ -64,7 +66,9 @@ export function loadServerConfig(
       autoMigrate: env["YUVI_AUTO_MIGRATE"] !== "0",
       restartMarkerPath: emptyToUndefined(env["YUVI_RESTART_MARKER"])
     },
-    dashboardDevToken: emptyToUndefined(env["DASHBOARD_DEV_TOKEN"])
+    dashboardDevToken: emptyToUndefined(env["DASHBOARD_DEV_TOKEN"]),
+    live2dAssetRoot: emptyToUndefined(env["LIVE2D_ASSET_ROOT"]),
+    live2dCorePath: emptyToUndefined(env["LIVE2D_CORE_PATH"])
   };
 }
 

@@ -19,6 +19,12 @@
       sans-serif;
   }
 
+  html[data-yuvi-surface="companion"],
+  html[data-yuvi-surface="companion"] body,
+  html[data-yuvi-surface="companion"] #root {
+    background: transparent !important;
+  }
+
   button,
   input,
   select,

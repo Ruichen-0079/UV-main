@@ -1,0 +1,49 @@
+[project]
+name = "yuvi-mem0"
+version = "0.1.0"
+description = "YUVI Mem0 OSS sidecar for long-term memory"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "fastapi==0.115.12",
+  "uvicorn[standard]==0.34.2",
+  "pydantic==2.11.4",
+  "pydantic-settings==2.9.1",
+  "mem0ai==0.1.107",
+  "ollama==0.4.8",
+  "psycopg[binary]==3.2.9",
+  "psycopg2-binary==2.9.10",
+  "httpx==0.28.1",
+  "python-dotenv==1.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.5",
+  "pytest-asyncio==0.26.0",
+  "ruff==0.11.8",
+  "mypy==1.15.0",
+]
+
+[build-system]
+requires = ["setuptools==80.3.1"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

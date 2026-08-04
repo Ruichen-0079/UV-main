@@ -1,32 +1,84 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  AsyncRequestGeneration,
+  beginAsyncDataRefresh,
+  completeAsyncDataFailure,
+  completeAsyncDataSuccess,
+  isAbortError,
+  type AsyncDataSnapshot
+} from "./async-data-state.js";
 
 export type AsyncState<T> = {
   data: T | null;
   error: string | null;
   loading: boolean;
-  refresh(): Promise<void>;
+  refresh(): Promise<T | null>;
 };
 
-export function useAsyncData<T>(loader: () => Promise<T>, deps: unknown[] = []): AsyncState<T> {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+export type UseAsyncDataOptions = {
+  preserveDataOnRefresh?: boolean;
+};
+
+export function useAsyncData<T>(
+  loader: (signal: AbortSignal) => Promise<T>,
+  deps: unknown[] = [],
+  options: UseAsyncDataOptions = {}
+): AsyncState<T> {
+  const [state, setState] = useState<AsyncDataSnapshot<T>>({
+    data: null,
+    error: null,
+    loading: true
+  });
+  const loaderRef = useRef(loader);
+  const preserveDataRef = useRef(options.preserveDataOnRefresh ?? true);
+  const generationRef = useRef(new AsyncRequestGeneration());
+  const abortControllerRef = useRef<AbortController | null>(null);
+  loaderRef.current = loader;
+  preserveDataRef.current = options.preserveDataOnRefresh ?? true;
 
   const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+    if (!generationRef.current.isMounted()) return null;
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const requestGeneration = generationRef.current.next();
+    setState((current) => beginAsyncDataRefresh(current, preserveDataRef.current));
     try {
-      setData(await loader());
+      const next = await loaderRef.current(controller.signal);
+      if (generationRef.current.isCurrent(requestGeneration)) {
+        setState(completeAsyncDataSuccess(next));
+      }
+      return next;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Request failed");
+      if (
+        generationRef.current.isCurrent(requestGeneration) &&
+        !controller.signal.aborted &&
+        !isAbortError(caught)
+      ) {
+        setState((current) =>
+          completeAsyncDataFailure(
+            current,
+            caught instanceof Error ? caught.message : "Request failed"
+          )
+        );
+      }
+      return null;
     } finally {
-      setLoading(false);
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
     }
-  }, deps);
+  }, []);
 
   useEffect(() => {
+    generationRef.current.mount();
     void refresh();
-  }, [refresh]);
+    return () => {
+      generationRef.current.cleanup();
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+    };
+  }, [refresh, ...deps]);
 
-  return { data, error, loading, refresh };
+  return { ...state, refresh };
 }

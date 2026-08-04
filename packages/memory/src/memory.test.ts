@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseMemoryRepositoryEnv } from "./env.js";
 import {
   MissingDatabaseUrlError,
@@ -15,7 +15,19 @@ import { MemoryMaintenanceService } from "./maintenance.js";
 import { MemoryScorer } from "./scorer.js";
 import { createMemoryDisplayText, extractSearchKeywords, MemoryService } from "./service.js";
 import { LlmMemoryExtractor, RuleBasedMemoryExtractor } from "./extractor.js";
+import type { MemoryCandidate, MemoryExtractionInput, MemoryExtractor } from "./types.js";
 import { detectCurrentAffect } from "./affect.js";
+import { buildCandidateFingerprint } from "./candidate-dedupe.js";
+import { detectCorrectionRequest, detectExplicitRememberRequest } from "./intent.js";
+import {
+  canonicalEventDate,
+  hasUnresolvedRelativeTime,
+  normalizeContentForFingerprint,
+  normalizeTemporalCandidate,
+  resolveCanonicalTemporalBounds,
+  resolveTemporalDebug,
+  resolveTimezoneFromObservedAt
+} from "./temporal.js";
 
 describe("MemoryRepository", () => {
   it("creates and retrieves memory records", async () => {
@@ -1039,11 +1051,12 @@ describe("MemoryRepository", () => {
       memoryLayer: "recall"
     });
     expect(result.decision).toBe("rejected");
-    expect(result.rejectedReason).toBe("ordinary one-off daily event");
+    expect(result.rejectedReason).toBe("ordinary-one-off-daily-event");
     expect(result.candidate.content).toContain("2026-05-23");
     expect(result.candidate.content).not.toContain("今早");
     expect(result.candidate.importance).toBeLessThan(0.65);
     expect(result.candidate.eventTime).toBeTruthy();
+    expect(canonicalEventDate(result.candidate)).toBe("2026-05-23");
     expect(result.candidate.validFrom).toBeTruthy();
     expect(result.candidate.validUntil).toBeTruthy();
     expect(result.candidate.metadata).toMatchObject({
@@ -1082,9 +1095,531 @@ describe("MemoryRepository", () => {
     expect(result.memory?.content).not.toContain("今早");
     expect(result.memory?.importance).toBeLessThan(0.65);
     expect(result.memory?.eventTime?.toISOString()).toContain("2026-05-23");
-    expect(result.memory?.validFrom.toISOString()).toContain("2026-05-23");
-    expect(result.memory?.validUntil?.toISOString()).toContain("2026-05-23");
+    expect(
+      canonicalEventDate({
+        type: "episodic",
+        content: result.memory?.content ?? "",
+        importance: 0.4,
+        tags: [],
+        reason: "test",
+        ...(result.memory?.eventTime ? { eventTime: result.memory.eventTime.toISOString() } : {}),
+        validFrom: result.memory?.validFrom.toISOString() ?? null
+      })
+    ).toBe("2026-05-23");
     expect(result.memory?.expiresAt?.toISOString()).toContain("2026-05-30");
+    expect(result.storageReason).toBe("explicit-user-memory-request");
+  });
+
+  describe("explicit intent, provenance, temporal, and dedupe fixes", () => {
+    const observedAt = "2026-06-22T09:44:28+08:00";
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-06-22T12:00:00+08:00"));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("A stores explicit breakfast remember requests even when ordinary one-off", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const candidates = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+
+      expect(candidates[0]).toMatchObject({
+        explicitRememberRequested: true,
+        originRole: "user"
+      });
+      const result = await service.processCandidateForStorage(candidates[0]!, {
+        source: "runtime"
+      });
+      expect(result).toMatchObject({
+        decision: "stored",
+        storageReason: "explicit-user-memory-request"
+      });
+      expect(result.memory).toMatchObject({
+        type: "episodic",
+        memoryLayer: "recall"
+      });
+      expect(result.memory?.metadata?.["retentionReason"]).toBe(
+        "explicitly requested short-lived episodic event"
+      );
+    });
+
+    it("B rejects ordinary one-off breakfast statements without explicit remember intent", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const candidates = await service.extractCandidates({
+        userMessage: "我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      const result = await service.processCandidateForStorage(candidates[0]!, {
+        source: "runtime"
+      });
+      expect(result.decision).toBe("rejected");
+      expect(result.rejectedReason).toBe("ordinary-one-off-daily-event");
+    });
+
+    it("C keeps only the user-source candidate when assistant restates the same fact", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        createBreakfastScenarioExtractor()
+      );
+      const candidates = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        assistantMessage: "好的，我记住了，你今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      const decisions = await Promise.all(
+        candidates.map((candidate) =>
+          service.processCandidateForStorage(candidate, { source: "runtime" })
+        )
+      );
+      const stored = decisions.filter((decision) => decision.decision === "stored");
+      const rejected = decisions.filter((decision) => decision.decision === "rejected");
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.candidate.originRole ?? stored[0]?.candidate.metadata?.["originRole"]).toBe(
+        "user"
+      );
+      expect(
+        rejected.some(
+          (decision) =>
+            decision.rejectedReason === "assistant-only-restatement" ||
+            decision.rejectedReason === "duplicate-candidate"
+        )
+      ).toBe(true);
+    });
+
+    it("D does not create a second memory when assistant recalls a prior saved fact", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const first = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      await service.processCandidateForStorage(first[0]!, { source: "runtime" });
+
+      const second = await service.extractCandidates({
+        userMessage: "我刚才说了什么？",
+        assistantMessage: "你说今天早上没有吃早饭。",
+        timestamp: "2026-06-22T10:00:00+08:00"
+      });
+      const assistantOnly = second.find(
+        (candidate) =>
+          candidate.originRole === "assistant" || candidate.metadata?.["originRole"] === "assistant"
+      );
+      if (assistantOnly) {
+        const rejected = await service.processCandidateForStorage(assistantOnly, {
+          source: "runtime"
+        });
+        expect(rejected.decision).toBe("rejected");
+        expect(rejected.rejectedReason).toBe("assistant-only-restatement");
+      }
+      expect(
+        (await repository.listRecentMemories(10)).filter((memory) => memory.status === "active")
+      ).toHaveLength(1);
+    });
+
+    it("E allows user correction candidates without assistant-only rejection", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const correction: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        memoryLayer: "recall",
+        content: "用户今天早上其实吃了一个面包。",
+        importance: 0.55,
+        tags: ["meal", "event"],
+        reason: "user-correction",
+        originRole: "user",
+        metadata: {
+          extractionUserMessage: "不对，我其实吃了一个面包。",
+          extractionAssistantMessage: "明白了，你今天早上吃了一个面包。"
+        },
+        observedAt
+      };
+      const result = await service.processCandidateForStorage(correction, { source: "runtime" });
+      expect(result.rejectedReason).not.toBe("assistant-only-restatement");
+    });
+
+    it("F keeps temporal normalization idempotent", () => {
+      const base: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        content: "我今天早上没吃早饭。",
+        importance: 0.4,
+        tags: ["meal"],
+        reason: "ordinary-one-off-daily-event",
+        observedAt
+      };
+      const first = normalizeTemporalCandidate(base, {
+        timestamp: observedAt,
+        timezone: "Asia/Shanghai"
+      });
+      const second = normalizeTemporalCandidate(first.candidate, {
+        timestamp: observedAt,
+        timezone: "Asia/Shanghai"
+      });
+      expect(second.candidate.content).toBe(first.candidate.content);
+      expect(second.candidate.summary).toBe(first.candidate.summary);
+      expect(second.candidate.eventTime).toBe(first.candidate.eventTime);
+      expect(second.candidate.validFrom).toBe(first.candidate.validFrom);
+      expect(second.candidate.validUntil).toBe(first.candidate.validUntil);
+      expect(second.candidate.expiresAt).toBe(first.candidate.expiresAt);
+    });
+
+    it("G does not inject duplicate absolute dates into already dated content", () => {
+      const candidate: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        content: "用户在 2026-06-22 早上没吃早饭。",
+        importance: 0.4,
+        tags: ["meal"],
+        reason: "test",
+        observedAt
+      };
+      const normalized = normalizeTemporalCandidate(candidate, {
+        timestamp: observedAt,
+        timezone: "Asia/Shanghai"
+      }).candidate;
+      expect(normalized.content).not.toMatch(/2026-06-22.*2026-06-22/);
+      expect(normalized.content).not.toContain("在 2026-06-22 在");
+    });
+
+    it("H canonicalizes Chinese date expressions to a single absolute date", () => {
+      const candidate: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        content: "用户于2026年6月22日早上没吃早饭。",
+        importance: 0.4,
+        tags: ["meal"],
+        reason: "test",
+        observedAt
+      };
+      const normalized = normalizeTemporalCandidate(candidate, {
+        timestamp: observedAt,
+        timezone: "Asia/Shanghai"
+      }).candidate;
+      expect(normalized.content).toContain("2026-06-22");
+      expect(normalized.content).not.toMatch(/2026年6月22日/);
+      expect((normalized.content.match(/2026-06-22/g) ?? []).length).toBe(1);
+    });
+
+    it("normalizes near-identical breakfast phrasing to the same fingerprint content", () => {
+      const left = normalizeContentForFingerprint("用户在 2026-06-22 早上没吃早饭。");
+      const right = normalizeContentForFingerprint("用户于2026年6月22日上午未吃早餐。");
+      expect(left).toBe("用户2026-06-22早上没吃早饭");
+      expect(right).toBe(left);
+    });
+
+    it("I deduplicates near-identical breakfast candidates by fingerprint", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        createNearDuplicateExtractor()
+      );
+      const candidates = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        assistantMessage: "好的，我记住了。",
+        timestamp: observedAt
+      });
+      const fingerprints = candidates.map((candidate) => buildCandidateFingerprint(candidate));
+      expect(new Set(fingerprints).size).toBe(1);
+      const decisions = await Promise.all(
+        candidates.map((candidate) =>
+          service.processCandidateForStorage(candidate, { source: "runtime" })
+        )
+      );
+      expect(decisions.filter((decision) => decision.decision === "stored")).toHaveLength(1);
+      expect(
+        decisions.filter((decision) => decision.rejectedReason === "duplicate-candidate").length
+      ).toBeGreaterThan(0);
+    });
+
+    it("J allows manual accept to bypass ordinary one-off rejection", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const candidates = await service.extractCandidates({
+        userMessage: "我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      const auto = await service.processCandidateForStorage(candidates[0]!, { source: "runtime" });
+      expect(auto.decision).toBe("rejected");
+      const manual = await service.processCandidateForStorage(candidates[0]!, {
+        source: "dashboard",
+        skipAdmissionPolicy: true,
+        storageReason: "manual-accept"
+      });
+      expect(manual).toMatchObject({
+        decision: "stored",
+        storageReason: "manual-accept"
+      });
+    });
+
+    it("A stores user corrections over ordinary one-off daily event rejection", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const first = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      await service.processCandidateForStorage(first[0]!, { source: "runtime" });
+
+      const correction = await service.extractCandidates({
+        userMessage: "不对，我后来想起来了，今天早上其实吃了一个面包。",
+        timestamp: "2026-06-22T10:45:58+08:00"
+      });
+      expect(correction[0]).toMatchObject({
+        correctionRequested: true,
+        originRole: "user"
+      });
+      const result = await service.processCandidateForStorage(correction[0]!, {
+        source: "runtime"
+      });
+      expect(result).toMatchObject({
+        decision: "stored",
+        storageReason: "user-correction"
+      });
+    });
+
+    it("B auto-supersedes stale breakfast memory after user correction", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const first = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      const stored = await service.processCandidateForStorage(first[0]!, { source: "runtime" });
+      const oldId = stored.memory?.id;
+      expect(oldId).toBeTruthy();
+
+      const correction = await service.extractCandidates({
+        userMessage: "不对，我后来想起来了，今天早上其实吃了一个面包。",
+        timestamp: "2026-06-22T10:45:58+08:00"
+      });
+      const result = await service.processCandidateForStorage(correction[0]!, {
+        source: "runtime"
+      });
+      const old = await repository.getMemoryById(oldId!);
+      expect(result.memory?.status).toBe("active");
+      expect(result.memory?.supersedes).toContain(oldId);
+      expect(old).toMatchObject({
+        status: "superseded",
+        supersededBy: result.memory?.id
+      });
+    });
+
+    it("C does not treat unrelated 其实 statements as correction without prior memory", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      expect(detectCorrectionRequest("其实我今天下午喝了一杯水。")).toBe(true);
+      const candidates = await service.extractCandidates({
+        userMessage: "其实我今天下午喝了一杯水。",
+        timestamp: observedAt
+      });
+      const result = await service.processCandidateForStorage(candidates[0]!, {
+        source: "runtime"
+      });
+      expect(result.decision).toBe("rejected");
+      expect(result.storageReason).toBeUndefined();
+    });
+
+    it("D marks canonicalized breakfast content as resolved temporal status", () => {
+      const candidate: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        content: "在2026-06-22早上，用户没吃早饭。",
+        importance: 0.4,
+        tags: ["meal"],
+        reason: "test",
+        observedAt,
+        metadata: {
+          temporalNormalized: true,
+          canonicalEventDate: "2026-06-22"
+        }
+      };
+      expect(hasUnresolvedRelativeTime(candidate)).toBe(false);
+      expect(resolveTemporalDebug(candidate)).toMatchObject({
+        temporalStatus: "normalized"
+      });
+      expect(resolveTemporalDebug(candidate).temporalSuggestion).toBeUndefined();
+    });
+
+    it("E reports unresolved relative time only before canonical normalization", () => {
+      const unresolved: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        content: "用户今天早上没吃早饭。",
+        importance: 0.4,
+        tags: ["meal"],
+        reason: "test",
+        observedAt
+      };
+      expect(hasUnresolvedRelativeTime(unresolved)).toBe(true);
+      const normalized = normalizeTemporalCandidate(unresolved, {
+        timestamp: observedAt,
+        timezone: "Asia/Shanghai"
+      }).candidate;
+      expect(hasUnresolvedRelativeTime(normalized)).toBe(false);
+    });
+
+    it("G uses local day boundaries for validFrom and validUntil", () => {
+      const candidate: MemoryCandidate = {
+        type: "episodic",
+        subtype: "event",
+        content: "用户在 2026-06-22 早上没吃早饭。",
+        importance: 0.4,
+        tags: ["meal"],
+        reason: "test",
+        observedAt: "2026-06-22T10:45:58+08:00"
+      };
+      const normalized = normalizeTemporalCandidate(candidate, {
+        timestamp: "2026-06-22T10:45:58+08:00",
+        timezone: "Asia/Shanghai"
+      }).candidate;
+      const bounds = resolveCanonicalTemporalBounds(normalized, "Asia/Shanghai");
+      expect(bounds?.validFrom).toBe("2026-06-21T16:00:00.000Z");
+      expect(bounds?.validUntil).toBe("2026-06-22T16:00:00.000Z");
+      expect(normalized.observedAt).toBe("2026-06-22T10:45:58+08:00");
+    });
+
+    it("H recomputes temporal fields after edited canonical content", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(repository);
+      const original = await service.processCandidateForStorage(
+        {
+          type: "episodic",
+          subtype: "event",
+          content: "用户在 2026-06-22 早上没吃早饭。",
+          importance: 0.4,
+          tags: ["meal"],
+          reason: "test",
+          observedAt,
+          metadata: { temporalNormalized: true, canonicalEventDate: "2026-06-22" }
+        },
+        { source: "dashboard", skipAdmissionPolicy: true, storageReason: "manual-accept" }
+      );
+      const edited = await service.processCandidateForStorage(
+        {
+          ...original.candidate,
+          content: "用户在 2026-06-23 早上吃了一个面包。",
+          metadata: {
+            ...(original.candidate.metadata ?? {}),
+            temporalNormalized: false,
+            canonicalEventDate: undefined,
+            canonicalFingerprint: undefined,
+            canonicalEventKey: undefined
+          }
+        },
+        { source: "dashboard", skipAdmissionPolicy: true, storageReason: "manual-accept" }
+      );
+      expect(canonicalEventDate(edited.candidate)).toBe("2026-06-23");
+      expect(edited.candidate.metadata?.["canonicalEventDate"]).toBe("2026-06-23");
+    });
+
+    it("I retrieves corrected breakfast fact instead of superseded memory", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        new RuleBasedMemoryExtractor()
+      );
+      const first = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      await service.processCandidateForStorage(first[0]!, { source: "runtime" });
+      const correction = await service.extractCandidates({
+        userMessage: "不对，我后来想起来了，今天早上其实吃了一个面包。",
+        timestamp: "2026-06-22T10:45:58+08:00"
+      });
+      await service.processCandidateForStorage(correction[0]!, { source: "runtime" });
+
+      const result = await service.retrieveRelevantMemoriesWithMetadata({
+        text: "我今天早上到底吃饭了吗",
+        currentTime: "2026-06-22T12:00:00+08:00",
+        limit: 5
+      });
+      expect(result.memories.some((memory) => memory.displayText.includes("面包"))).toBe(true);
+      expect(
+        result.memories.every(
+          (memory) => !memory.displayText.includes("没吃早饭") || memory.status === "superseded"
+        )
+      ).toBe(true);
+    });
+
+    it("K keeps canonical event date stable across near-identical phrasing", async () => {
+      const repository = new InMemoryMemoryRepository();
+      const service = new MemoryService(
+        repository,
+        undefined,
+        undefined,
+        createNearDuplicateExtractor()
+      );
+      const candidates = await service.extractCandidates({
+        userMessage: "请记住，我今天早上没吃早饭。",
+        timestamp: observedAt
+      });
+      const normalized = candidates.map(
+        (candidate) =>
+          normalizeTemporalCandidate(candidate, {
+            timestamp: observedAt,
+            timezone: "Asia/Shanghai"
+          }).candidate
+      );
+      const dates = normalized.map((candidate) => canonicalEventDate(candidate));
+      expect(new Set(dates)).toEqual(new Set(["2026-06-22"]));
+    });
   });
 
   it("keeps stable mango cake preferences semantic core memories", async () => {
@@ -1166,7 +1701,7 @@ describe("MemoryRepository", () => {
     });
 
     expect(result.decision).toBe("rejected");
-    expect(result.rejectedReason).toBe("low-confidence temporal resolution");
+    expect(result.rejectedReason).toBe("low-confidence-temporal-resolution");
     expect(result.candidate.content).toContain("最近");
     expect(result.candidate.metadata).toMatchObject({
       temporalResolution: {
@@ -1655,12 +2190,16 @@ describe("MemoryRepository", () => {
     });
 
     const candidates = await extractor.extractCandidates({
-      userMessage: "What should be remembered?",
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main",
       sourceTraceId: "trace-invalid-candidates"
     });
 
-    expect(candidates).toEqual([]);
-    expect(extractor.getStatus().rejectedCount).toBe(3);
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "fallback-rule-based",
+      fallbackUsed: true,
+      failureStage: "candidate-schema"
+    });
     expect(extractor.getStatus().validationIssues?.join("\n")).not.toContain("sk-secret-value");
   });
 
@@ -1723,11 +2262,345 @@ describe("MemoryRepository", () => {
     expect(extractor.getStatus()).toMatchObject({
       active: "fallback-rule-based",
       fallbackUsed: true,
-      rejectedReasons: ["invalid-llm-output"],
+      failureStage: "json-extraction",
+      validationIssues: ["no-json-value"],
       skippedReason: "LLM extractor output was invalid; falling back to rule-based extraction."
     });
     expect(extractor.getStatus().rawPreview).toContain("apiKey=[redacted]");
     expect(extractor.getStatus().rawPreview).not.toContain("sk-secret-value");
+  });
+
+  it("uses reasoning when answer is empty but reasoning contains valid JSON", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            answer: "",
+            reasoning: JSON.stringify({
+              candidates: [
+                {
+                  type: "episodic",
+                  subtype: "event",
+                  content: "用户在2026-06-22早上没吃早饭。",
+                  summary: "用户未吃早饭。",
+                  importance: 0.4,
+                  confidence: 0.95,
+                  tags: ["meal"],
+                  reason: "Explicit request."
+                }
+              ]
+            })
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "请记住，我今天早上没吃早饭。"
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "llm",
+      fallbackUsed: false,
+      selectedOutputSource: "reasoning"
+    });
+  });
+
+  it("uses reasoning when answer is whitespace only", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            answer: "   ",
+            reasoning: JSON.stringify({
+              candidates: [
+                {
+                  type: "semantic",
+                  subtype: "fact",
+                  content: "用户偏好简洁的调试输出。",
+                  summary: "用户偏好简洁调试输出。",
+                  importance: 0.82,
+                  confidence: 0.8,
+                  tags: ["preference"],
+                  reason: "stable preference"
+                }
+              ]
+            })
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    await extractor.extractCandidates({ userMessage: "记住这个偏好" });
+    expect(extractor.getStatus().selectedOutputSource).toBe("reasoning");
+    expect(extractor.getStatus().fallbackUsed).toBe(false);
+  });
+
+  it("prefers answer over reasoning when answer is valid JSON", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            answer: JSON.stringify({
+              candidates: [
+                {
+                  type: "semantic",
+                  subtype: "provider-choice",
+                  content: "用户偏好 chat 使用 DeepSeek。",
+                  summary: "用户偏好 chat 使用 DeepSeek。",
+                  importance: 0.86,
+                  confidence: 0.91,
+                  tags: ["deepseek"],
+                  reason: "provider preference"
+                }
+              ]
+            }),
+            reasoning: "internal chain-of-thought should not be parsed"
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "以后 chat 用 DeepSeek"
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "llm",
+      selectedOutputSource: "answer",
+      fallbackUsed: false
+    });
+  });
+
+  it("falls back with empty-output when both answer and reasoning are empty", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return { answer: "", reasoning: "" };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    });
+
+    expect(extractor.getStatus()).toMatchObject({
+      fallbackUsed: true,
+      failureStage: "empty-output",
+      validationIssues: ["root:empty-output"]
+    });
+  });
+
+  it("falls back with truncated-output when finishReason is length", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            answer: '{"candidates":[{"type":"semantic","subtype":"fact","content":"truncated',
+            reasoning: "",
+            finishReason: "length" as const
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    });
+
+    expect(extractor.getStatus()).toMatchObject({
+      fallbackUsed: true,
+      failureStage: "truncated-output",
+      validationIssues: ["root:output-truncated"]
+    });
+  });
+
+  it("falls back on incomplete JSON with bounded rawPreview", async () => {
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          return {
+            reasoning: '{"candidates":[{"type":"semantic","content":"incomplete'
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    );
+
+    await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    });
+
+    const status = extractor.getStatus();
+    expect(status.fallbackUsed).toBe(true);
+    expect(status.failureStage).toBe("json-parse");
+    expect(status.validationIssues).toContain("incomplete-json");
+    expect(status.rawPreview?.length ?? 0).toBeLessThanOrEqual(500);
+  });
+
+  it("falls back on natural language without JSON", async () => {
+    const extractor = createLlmExtractor("I cannot extract any memories.");
+
+    await extractor.extractCandidates({ userMessage: "记住这个" });
+
+    expect(extractor.getStatus()).toMatchObject({
+      fallbackUsed: true,
+      validationIssues: ["no-json-value"]
+    });
+  });
+
+  it("ignores harmless extra LLM fields and keeps server provenance", async () => {
+    const extractor = createLlmExtractor({
+      candidates: [
+        {
+          type: "episodic",
+          subtype: "event",
+          content: "用户在2026-06-22早上没吃早饭。",
+          summary: "用户未吃早饭。",
+          importance: 0.4,
+          confidence: 0.95,
+          tags: ["meal"],
+          reason: "Explicit request.",
+          originRole: "user",
+          explicitRememberRequested: true
+        }
+      ]
+    });
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "请记住，我今天早上没吃早饭。"
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(extractor.getStatus().fallbackUsed).toBe(false);
+    expect(candidates[0]?.explicitRememberRequested).toBe(true);
+    expect(candidates[0]?.originRole).toBe("user");
+  });
+
+  it("returns valid candidates when one candidate is invalid without global fallback", async () => {
+    const extractor = createLlmExtractor({
+      candidates: [
+        {
+          type: "semantic",
+          subtype: "fact",
+          content: "用户偏好 Chat 使用 DeepSeek。",
+          summary: "用户偏好 DeepSeek。",
+          importance: 0.9,
+          confidence: 0.9,
+          tags: [],
+          reason: "valid candidate"
+        },
+        {
+          type: "unknown",
+          content: "bad candidate content here.",
+          summary: "bad",
+          importance: 0.9,
+          confidence: 0.9,
+          tags: [],
+          reason: "invalid type"
+        }
+      ]
+    });
+
+    const candidates = await extractor.extractCandidates({
+      userMessage: "以后 chat 用 DeepSeek"
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(extractor.getStatus()).toMatchObject({
+      active: "llm",
+      fallbackUsed: false,
+      rejectedCount: 1
+    });
+    expect(extractor.getStatus().validationIssues?.length).toBeGreaterThan(0);
+  });
+
+  it("rejects metadata secrets without leaking them in rawPreview", async () => {
+    const extractor = createLlmExtractor({
+      candidates: [
+        {
+          type: "semantic",
+          subtype: "fact",
+          content: "用户偏好 Chat 使用 DeepSeek。",
+          summary: "用户偏好 DeepSeek。",
+          importance: 0.9,
+          confidence: 0.9,
+          tags: [],
+          metadata: { apiKey: "secret" },
+          reason: "unsafe metadata"
+        }
+      ]
+    });
+
+    await extractor.extractCandidates({ userMessage: "记住这个" });
+
+    expect(extractor.getStatus().fallbackUsed).toBe(true);
+    expect(extractor.getStatus().failureStage).toBe("candidate-schema");
+    expect(extractor.getStatus().rawPreview).toContain("apiKey");
+    expect(extractor.getStatus().rawPreview).toContain("[redacted]");
+    expect(extractor.getStatus().rawPreview).not.toContain('"secret"');
+  });
+
+  it("clears previous extractor errors after a successful extraction", async () => {
+    let call = 0;
+    const extractor = new LlmMemoryExtractor(
+      {
+        async generateReasoning() {
+          call += 1;
+          if (call === 1) {
+            return { reasoning: "not json" };
+          }
+          return {
+            reasoning: JSON.stringify({
+              candidates: [
+                {
+                  type: "semantic",
+                  subtype: "provider-choice",
+                  content: "用户偏好 chat 使用 DeepSeek。",
+                  summary: "用户偏好 chat 使用 DeepSeek。",
+                  importance: 0.86,
+                  confidence: 0.91,
+                  tags: ["deepseek"],
+                  reason: "provider preference"
+                }
+              ]
+            })
+          };
+        }
+      },
+      new RuleBasedMemoryExtractor(),
+      { enabled: true, providerConfigured: true, providerName: "deepseek", includeRawPreview: true }
+    );
+
+    await extractor.extractCandidates({
+      userMessage: "记住：我的项目路径是 /home/administrator/uv-main/uv-main"
+    });
+    expect(extractor.getStatus().fallbackUsed).toBe(true);
+    expect(extractor.getStatus().rawPreview).toBeDefined();
+
+    await extractor.extractCandidates({ userMessage: "以后 chat 用 DeepSeek" });
+
+    expect(extractor.getStatus()).toMatchObject({
+      active: "llm",
+      fallbackUsed: false
+    });
+    expect(extractor.getStatus().failureStage).toBeUndefined();
+    expect(extractor.getStatus().error).toBeUndefined();
+    expect(extractor.getStatus().rawPreview).toBeUndefined();
   });
 
   it("falls back to rule-based extraction when the reasoning provider call fails", async () => {
@@ -1888,6 +2761,11 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("superseded_by");
     expect(combinedSql).toContain("memories_scope_scope_id_idx");
     expect(combinedSql).toContain("memories_memory_layer_idx");
+    expect(combinedSql).toContain("create table if not exists conversation_sessions");
+    expect(combinedSql).toContain("create table if not exists conversation_messages");
+    expect(combinedSql).toContain("sequence bigserial");
+    expect(combinedSql).not.toMatch(/max\s*\(\s*sequence\s*\)/i);
+    expect(combinedSql).toContain("conversation_messages_session_sequence_idx");
     expect(combinedSql).toContain("memories_status_idx");
     expect(combinedSql).toContain("memories_search_tsv_idx");
     expect(combinedSql).toContain("memories_scope_scope_id_status_idx");
@@ -1911,17 +2789,95 @@ describe("MemoryRepository", () => {
   });
 });
 
-function createLlmExtractor(output: string | Record<string, unknown>): LlmMemoryExtractor {
+function createBreakfastScenarioExtractor(): MemoryExtractor {
+  return {
+    async extractCandidates(input: MemoryExtractionInput) {
+      return [
+        {
+          type: "episodic",
+          subtype: "event",
+          memoryLayer: "recall",
+          content: "用户明确要求记住今天早上没吃早饭。",
+          importance: 0.4,
+          confidence: 0.9,
+          tags: ["meal", "event"],
+          reason: "explicit remember request",
+          explicitRememberRequested: true,
+          originRole: "user",
+          observedAt: input.timestamp ?? new Date().toISOString()
+        },
+        {
+          type: "episodic",
+          subtype: "event",
+          memoryLayer: "recall",
+          content: "用户今天早上没有吃早饭。",
+          importance: 0.4,
+          confidence: 0.85,
+          tags: ["meal", "event"],
+          reason:
+            "The assistant recalled a prior statement from the user about skipping breakfast that morning.",
+          originRole: "assistant",
+          observedAt: input.timestamp ?? new Date().toISOString()
+        }
+      ];
+    }
+  };
+}
+
+function createNearDuplicateExtractor(): MemoryExtractor {
+  return {
+    async extractCandidates(input: MemoryExtractionInput) {
+      const explicit = detectExplicitRememberRequest(input.userMessage);
+      return [
+        {
+          type: "episodic",
+          subtype: "event",
+          memoryLayer: "recall",
+          content: "用户在 2026-06-22 早上没吃早饭。",
+          importance: 0.4,
+          confidence: 0.9,
+          tags: ["meal", "event"],
+          reason: explicit ? "explicit remember request" : "daily event",
+          explicitRememberRequested: explicit,
+          originRole: "user",
+          observedAt: input.timestamp ?? new Date().toISOString()
+        },
+        {
+          type: "episodic",
+          subtype: "event",
+          memoryLayer: "recall",
+          content: "用户于2026年6月22日上午未吃早餐。",
+          importance: 0.4,
+          confidence: 0.82,
+          tags: ["meal", "event"],
+          reason: "assistant paraphrase",
+          originRole: "assistant",
+          observedAt: input.timestamp ?? new Date().toISOString()
+        }
+      ];
+    }
+  };
+}
+
+function createLlmExtractor(
+  output: string | Record<string, unknown>,
+  options?: {
+    answer?: string;
+    finishReason?: string;
+  }
+): LlmMemoryExtractor {
   return new LlmMemoryExtractor(
     {
       async generateReasoning() {
         return {
-          reasoning: typeof output === "string" ? output : JSON.stringify(output)
+          answer: options?.answer,
+          reasoning: typeof output === "string" ? output : JSON.stringify(output),
+          finishReason: options?.finishReason
         };
       }
     },
     new RuleBasedMemoryExtractor(),
-    { enabled: true, providerConfigured: true, providerName: "deepseek" }
+    { enabled: true, providerConfigured: true, providerName: "deepseek", includeRawPreview: true }
   );
 }
 

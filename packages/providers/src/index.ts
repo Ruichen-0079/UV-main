@@ -14,7 +14,14 @@ export type {
   ProviderErrorCode as ProviderErrorCodeType,
   ProviderErrorOptions
 } from "./types/errors.js";
-export type { ChatInput, ChatOutput, ChatProvider } from "./types/chat.js";
+export type {
+  ChatInput,
+  ChatOutput,
+  ChatProvider,
+  ChatStreamEvent,
+  ChatStreamOptions,
+  ChatStreamingMode
+} from "./types/chat.js";
 export type { ReasoningInput, ReasoningOutput, ReasoningProvider } from "./types/reasoning.js";
 export type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
 export type { STTInput, STTOutput, STTProvider } from "./types/stt.js";
@@ -26,8 +33,10 @@ export type {
 } from "./types/embedding.js";
 export {
   MockEmbeddingProvider,
+  FallbackChatProvider,
   ProviderRegistry,
   createMockChatProvider,
+  createMockStreamingChatProvider,
   createMockReasoningProvider,
   createMockSTTProvider,
   createMockTTSProvider,
@@ -37,8 +46,11 @@ export {
 } from "./registry.js";
 export type { ProviderRegistryConfig, ProviderStatusMap } from "./registry.js";
 export type { ProviderResolver } from "./registry.js";
+export { getChatStreamingMode } from "./registry.js";
+export type { MockStreamingChatProviderOptions } from "./registry.js";
 export { DeepSeekChatProvider } from "./deepseek/DeepSeekChatProvider.js";
 export { DeepSeekReasoningProvider } from "./deepseek/DeepSeekReasoningProvider.js";
 export { XAITTSProvider } from "./xai/XAITTSProvider.js";
 export { XAIVisionProvider } from "./xai/XAIVisionProvider.js";
 export { DashScopeSTTProvider } from "./alibaba/DashScopeSTTProvider.js";
+export { GPTSoVITSTTSProvider } from "./local/GPTSoVITSTTSProvider.js";

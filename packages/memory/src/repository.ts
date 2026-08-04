@@ -23,6 +23,10 @@ import { normalizePostgresConnectionString } from "./postgres-connection.js";
 
 export interface MemoryRepository {
   readonly kind: MemoryRepositoryKind;
+  getDatabaseClient?(): {
+    query(text: string, values?: unknown[]): Promise<{ rows: QueryResultRow[] }>;
+    end(): Promise<void>;
+  };
   healthCheck(): Promise<{ status: "healthy" | "unavailable"; message?: string }>;
   getRetrievalMode?():
     | "in-memory-keyword"
@@ -48,8 +52,10 @@ export interface MemoryRepository {
 export class PostgresMemoryRepository implements MemoryRepository {
   readonly kind = "postgres";
   private readonly pool: Pool;
+  private readonly ownsPool: boolean;
 
   constructor(connectionString: string | Pool) {
+    this.ownsPool = typeof connectionString === "string";
     this.pool =
       typeof connectionString === "string"
         ? new Pool({
@@ -73,6 +79,10 @@ export class PostgresMemoryRepository implements MemoryRepository {
 
   getRetrievalMode(): "postgres-hybrid-keyword" {
     return "postgres-hybrid-keyword";
+  }
+
+  getDatabaseClient(): Pool {
+    return this.pool;
   }
 
   async createMemory(input: CreateMemoryInput): Promise<Memory> {
@@ -697,7 +707,9 @@ export class PostgresMemoryRepository implements MemoryRepository {
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    if (this.ownsPool) {
+      await this.pool.end();
+    }
   }
 }
 

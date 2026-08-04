@@ -16,6 +16,8 @@ export function computeRetentionPolicy(input: {
 }): RetentionPolicy {
   const now = input.now ?? toDate(input.candidate.observedAt) ?? new Date();
   const explicitRemember =
+    input.candidate.explicitRememberRequested ||
+    input.candidate.metadata?.["explicitRememberRequested"] === true ||
     input.candidate.reason === "explicit-remember" ||
     input.candidate.metadata?.["explicitRemember"] === true;
   const source = input.source ?? "";
@@ -45,7 +47,9 @@ export function computeRetentionPolicy(input: {
   ) {
     return {
       retentionClass: "episodic-daily",
-      retentionReason: "explicitly stored ordinary episodic event expires after 7 days",
+      retentionReason: explicitRemember
+        ? "explicitly requested short-lived episodic event"
+        : "explicitly stored ordinary episodic event expires after 7 days",
       expiresAt: addDays(now, 7)
     };
   }

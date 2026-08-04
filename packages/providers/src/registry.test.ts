@@ -307,6 +307,28 @@ describe("ProviderRegistry", () => {
     expect(JSON.stringify(routes)).not.toContain("nvidia-secret");
   });
 
+  it("configures the local GPT-SoVITS adapter without requiring a generic model URL", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_TTS_PROVIDER: "local",
+      TTS_PROVIDER_CHAIN: "local",
+      LOCAL_TTS_MODEL: "alice-v4",
+      GPT_SOVITS_TTS_BASE_URL: "http://127.0.0.1:9881",
+      GPT_SOVITS_TTS_GPT_WEIGHTS: "D:/GPT.ckpt",
+      GPT_SOVITS_TTS_SOVITS_WEIGHTS: "D:/SoVITS.pth",
+      GPT_SOVITS_TTS_REFERENCE_AUDIO: "D:/reference.wav",
+      GPT_SOVITS_TTS_REFERENCE_TEXT: "reference"
+    });
+
+    expect(registry.getStatus().providers.tts).toMatchObject({
+      provider: "local",
+      configured: true,
+      baseUrl: "http://127.0.0.1:9881",
+      model: "alice-v4"
+    });
+  });
+
   it("uses mock STT/TTS/Vision runtime fallback only when explicitly enabled", async () => {
     const registry = createProviderRegistryFromEnv({
       NODE_ENV: "test",

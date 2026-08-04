@@ -1,18 +1,18 @@
 # Prompt Pipeline
 
-提示词构建是提供商中立的，并接收结构化输入：
+提示词构建是提供方中立的，并接收结构化输入；中文术语以[统一术语表](terminology.zh-CN.md)为准：
 
-- companion identity
-- current user event
-- reconstructed memories
-- task or modality context
-- runtime constraints
+- 伴侣名称与系统身份
+- 当前用户事件
+- 重构后的记忆
+- 任务或模态上下文
+- 运行时约束
 
-提示词构建器不应该接收原始聊天日志或提供商特定的响应对象。
+提示词构建器不应接收原始聊天日志或提供方特定的响应对象。
 
 ## Format
 
-提示词会被组装为结构化 section：
+提示词会被组装为结构化分段。分段名称的中文说明见术语表；它们不表示仓库已有固定人格设定：
 
 ```xml
 <SystemIdentity>
@@ -41,7 +41,7 @@ The current task is implementing the prompt builder package.
 </Tools>
 ```
 
-`<UserMessage>` 会作为单独的提供商中立 user message 保留。
+`<UserMessage>` 会作为单独的提供方中立用户消息保留。
 
 ## Example
 

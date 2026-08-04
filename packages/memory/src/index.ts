@@ -6,6 +6,7 @@ export type {
   Entity,
   Memory,
   MemoryCandidate,
+  MemoryOriginRole,
   MemoryCandidateStorageResult,
   CurrentAffect,
   CurrentAffectLabel,
@@ -14,6 +15,8 @@ export type {
   MemoryExtractorActive,
   MemoryExtractorMode,
   MemoryExtractorStatus,
+  MemoryExtractorFailureStage,
+  MemoryExtractorSelectedOutputSource,
   MemoryLayer,
   MemoryScope,
   MemoryMatchReason,
@@ -40,10 +43,37 @@ export {
   MemoryTypes
 } from "./types.js";
 export {
+  buildCandidateFingerprint,
+  deduplicateCandidateBatch,
+  type CandidateDedupeResult
+} from "./candidate-dedupe.js";
+export {
+  detectCorrectionRequest,
+  detectExplicitRememberRequest,
+  extractCorrectionEvidence,
+  inferUserMemoryIntent,
+  stripExplicitRememberPrefix,
+  type UserMemoryIntent
+} from "./intent.js";
+export {
+  detectEpisodicCorrectionRelationships,
+  hasCorrectionRelatedMemory,
+  type EpisodicCorrectionSuggestion
+} from "./correction.js";
+export { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
+export {
+  buildTemporalSuggestion,
+  canonicalEventKey,
   hasHistoricalEpisodicIntent,
   hasRelativeTemporalExpression,
+  hasUnresolvedRelativeTime,
   normalizeTemporalCandidate,
+  resolveCanonicalTemporalBounds,
+  resolveTemporalDebug,
+  resolveTimezoneFromObservedAt,
   temporalWarningForText,
+  type TemporalDebugInfo,
+  type TemporalDebugStatus,
   type TemporalNormalizationResult,
   type TemporalResolution
 } from "./temporal.js";
@@ -78,6 +108,53 @@ export {
   type MemoryExtractionReasoner
 } from "./extractor.js";
 export { MemoryService } from "./service.js";
+export {
+  buildMemoryScope,
+  hashMemoryScope,
+  parseMemoryScope,
+  MemoryScopeError,
+  type MemoryScopeParts
+} from "./scope.js";
+export {
+  MemoryBackendError,
+  type AddMemoryInput,
+  type DeleteMemoryInput,
+  type GetMemoryInput,
+  type ListMemoryInput,
+  type ListMemoryResult,
+  type MemoryBackend,
+  type MemoryBackendHealth,
+  type MemoryBackendKind,
+  type MemoryHistoryEntry,
+  type MemoryHistoryInput,
+  type MemoryRecord,
+  type MemorySearchResult,
+  type MemoryWriteOperation,
+  type MemoryWriteResult,
+  type SearchMemoryInput,
+  type UpdateMemoryInput as BackendUpdateMemoryInput
+} from "./backend.js";
+export {
+  createMemoryBackend,
+  LegacyMemoryBackend,
+  Mem0MemoryBackend,
+  type Mem0MemoryBackendOptions,
+  type MemoryBackendFactoryOptions
+} from "./backends/index.js";
+export {
+  InMemoryConversationRepository,
+  PostgresConversationRepository,
+  createConversationRepositoryFromEnv,
+  parseConversationRepositoryEnv,
+  type ConversationDatabaseClient,
+  type ConversationListOptions,
+  type ConversationMessage,
+  type ConversationMessageInput,
+  type ConversationMessageRole,
+  type ConversationMessageStatus,
+  type ConversationRepository,
+  type ConversationRepositoryKind
+} from "./conversation-repository.js";
 export {
   MissingDatabaseUrlError,
   parseDotEnv,

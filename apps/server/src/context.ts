@@ -6,7 +6,9 @@ import {
   MemoryService,
   RuleBasedMemoryExtractor,
   createMemoryRepositoryFromEnv,
+  createConversationRepositoryFromEnv,
   parseMemoryRepositoryEnv,
+  type ConversationRepository,
   type MemoryRepository
 } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
@@ -24,6 +26,7 @@ export type AppContext = {
   eventBus: InMemoryEventBus;
   dashboard: DashboardStateService;
   memoryRepository: MemoryRepository;
+  conversationRepository: ConversationRepository;
   memory: MemoryService;
   providers: ProviderRegistry;
   runtime: RuntimeOrchestrator;
@@ -39,7 +42,10 @@ export type RuntimeConfigReloadResult = {
   message: string;
 };
 
-export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig): AppContext {
+export async function createAppContext(
+  logger: FastifyBaseLogger,
+  config: ServerConfig
+): Promise<AppContext> {
   if (config.eventBus === "nats") {
     throw new Error("EVENT_BUS=nats is reserved for future NATS support and is not implemented.");
   }
@@ -49,11 +55,21 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
   eventBus.subscribe("*", (event) => {
     dashboard.recordEvent(event);
   });
+  const activeMemoryRepository = parseMemoryRepositoryEnv().kind;
   const memoryRepository = createMemoryRepositoryFromEnv();
+  let conversationRepository: ConversationRepository;
+  try {
+    conversationRepository = createConversationRepositoryFromEnv(
+      process.env,
+      memoryRepository.getDatabaseClient?.()
+    );
+  } catch (error) {
+    await memoryRepository.close?.();
+    throw error;
+  }
   const promptBuilder = new PromptBuilder();
   const ruleBasedExtractor = new RuleBasedMemoryExtractor();
   const runtimeLogger = createRuntimeLogger(logger);
-  const activeMemoryRepository = parseMemoryRepositoryEnv().kind;
 
   function createMemoryService(
     providers: ProviderRegistry,
@@ -65,7 +81,9 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
         ? new LlmMemoryExtractor(providers.getReasoningProvider(), ruleBasedExtractor, {
             enabled: true,
             providerConfigured: Boolean(reasoningStatus.configured && !reasoningStatus.mock),
-            providerName: reasoningStatus.provider
+            providerName: reasoningStatus.provider,
+            logger: runtimeLogger,
+            includeRawPreview: config.runtimeMode === "development"
           })
         : ruleBasedExtractor;
 
@@ -86,20 +104,31 @@ export function createAppContext(logger: FastifyBaseLogger, config: ServerConfig
       memory,
       promptBuilder,
       providers,
+      conversation: conversationRepository,
       memoryRepository: activeMemoryRepository,
       directContext,
       logger: runtimeLogger
     });
   }
 
-  const providers = createProviderRegistryFromEnv();
-  const memory = createMemoryService(providers);
-  const runtime = createRuntime(providers, memory);
+  let providers: ProviderRegistry;
+  let memory: MemoryService;
+  let runtime: RuntimeOrchestrator;
+  try {
+    providers = createProviderRegistryFromEnv();
+    memory = createMemoryService(providers);
+    runtime = createRuntime(providers, memory);
+  } catch (error) {
+    await conversationRepository.close?.();
+    await memoryRepository.close?.();
+    throw error;
+  }
 
   const context: AppContext = {
     eventBus,
     dashboard,
     memoryRepository,
+    conversationRepository,
     memory,
     providers,
     runtime,

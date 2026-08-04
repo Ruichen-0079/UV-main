@@ -41,7 +41,8 @@ const TTSRequestSchema = z.object({
   sessionId: z.string().min(1).default("default"),
   text: z.string().min(1),
   voice: z.string().min(1).optional(),
-  format: z.enum(["mp3", "wav", "opus", "pcm", "mulaw", "alaw"]).optional()
+  format: z.enum(["mp3", "wav", "opus", "pcm", "mulaw", "alaw"]).optional(),
+  language: z.string().min(1).optional()
 });
 
 const VisionRequestSchema = z.object({
@@ -147,12 +148,24 @@ export async function registerMediaRoutes(
     }
 
     const provider = context.providers.getTTSProvider();
+    const abortController = new AbortController();
+    const abortOnDisconnect = () => abortController.abort();
+    // IncomingMessage#close can fire when the request body has been fully
+    // consumed, which is a normal POST lifecycle rather than a client
+    // disconnect. Only abort on an explicitly aborted request or a socket
+    // that actually closes before the response is sent.
+    request.raw.once("aborted", abortOnDisconnect);
+    request.raw.socket?.once("close", abortOnDisconnect);
     try {
       const output = await provider.synthesizeSpeech({
         text: parsed.data.text,
         voice: parsed.data.voice,
         format: parsed.data.format,
-        metadata: { sessionId: parsed.data.sessionId }
+        signal: abortController.signal,
+        metadata: {
+          sessionId: parsed.data.sessionId,
+          ...(parsed.data.language ? { language: parsed.data.language } : {})
+        }
       });
       return reply.send({
         audioBase64: output.audioBase64 ?? Buffer.from(output.audio).toString("base64"),
@@ -162,6 +175,9 @@ export async function registerMediaRoutes(
       });
     } catch (error) {
       return sendProviderFailure(reply, "tts", error);
+    } finally {
+      request.raw.removeListener("aborted", abortOnDisconnect);
+      request.raw.socket?.removeListener("close", abortOnDisconnect);
     }
   });
 

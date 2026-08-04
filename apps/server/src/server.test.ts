@@ -56,6 +56,27 @@ describe("server", () => {
       expect(message.json().provider.latencyMs).toBeTypeOf("number");
       expect(message.json().provider.tokenUsage.totalTokens).toBeTypeOf("number");
 
+      const messageEvents = (await app.inject({ method: "GET", url: "/events/recent?limit=50" }))
+        .json()
+        .events.filter((event: { traceId?: string }) => event.traceId === message.json().traceId);
+      expect(
+        messageEvents.filter((event: { type: string }) => event.type === "user.message")
+      ).toHaveLength(1);
+      expect(
+        messageEvents.filter((event: { type: string }) => event.type === "agent.reply")
+      ).toHaveLength(1);
+      const assistantMessages = messageEvents.filter(
+        (event: { type: string }) => event.type === "assistant.message"
+      );
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0]).toMatchObject({
+        payload: {
+          sessionId: "test",
+          content: message.json().reply
+        }
+      });
+      expect(assistantMessages[0].payload.provider.name).toBe(message.json().provider.name);
+
       const prompt = await app.inject({ method: "GET", url: "/debug/prompt/latest" });
       expect(prompt.statusCode).toBe(200);
       expect(prompt.json().promptPreview.sections.length).toBeGreaterThan(0);
@@ -696,7 +717,7 @@ describe("server", () => {
         subtype: "event",
         memoryLayer: "recall",
         decision: "rejected",
-        rejectedReason: "ordinary one-off daily event"
+        rejectedReason: "ordinary-one-off-daily-event"
       });
       expect(candidates.json().candidates[0].content).not.toContain("今早");
       expect(candidates.body).not.toContain("test_deepseek_secret");
@@ -1951,6 +1972,34 @@ describe("server", () => {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("exposes memory extractor diagnostics only in development runtime settings", async () => {
+    const devApp = await buildTestServer({ RUNTIME_MODE: "development" });
+    try {
+      const devSettings = await devApp.inject({ method: "GET", url: "/settings/runtime" });
+      expect(devSettings.statusCode).toBe(200);
+      const devMemory = devSettings.json().memory;
+      expect(devMemory).toHaveProperty("memoryExtractorFailureStage");
+      expect(devMemory).toHaveProperty("memoryExtractorSelectedOutputSource");
+      expect(devMemory).toHaveProperty("memoryExtractorAnswerLength");
+      expect(devMemory).toHaveProperty("memoryExtractorReasoningLength");
+      expect(devMemory).toHaveProperty("memoryExtractorValidationIssues");
+      expect(devMemory).toHaveProperty("memoryExtractorRawPreview");
+    } finally {
+      await devApp.close();
+    }
+
+    const prodApp = await buildTestServer({ RUNTIME_MODE: "production" });
+    try {
+      const prodSettings = await prodApp.inject({ method: "GET", url: "/settings/runtime" });
+      expect(prodSettings.statusCode).toBe(200);
+      expect(prodSettings.json().memory).not.toHaveProperty("memoryExtractorRawPreview");
+      expect(prodSettings.json().memory).not.toHaveProperty("memoryExtractorFailureStage");
+      expect(prodSettings.json().memory).not.toHaveProperty("memoryExtractorValidationIssues");
+    } finally {
+      await prodApp.close();
+    }
+  });
 });
 
 function countOccurrences(text: string, needle: string): number {
@@ -1961,7 +2010,8 @@ type TestEnvOverrides = Record<string, string | undefined>;
 
 function createTestEnv(overrides: TestEnvOverrides = {}): NodeJS.ProcessEnv {
   const runtimeEnvDir =
-    overrides["YUVI_RUNTIME_ENV_DIR"] ?? mkdtempSync(path.join(testTmpDir, "yuvi-server-test-env-"));
+    overrides["YUVI_RUNTIME_ENV_DIR"] ??
+    mkdtempSync(path.join(testTmpDir, "yuvi-server-test-env-"));
   if (!overrides["YUVI_RUNTIME_ENV_DIR"]) {
     createdRuntimeEnvDirs.push(runtimeEnvDir);
   }
