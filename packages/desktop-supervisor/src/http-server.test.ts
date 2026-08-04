@@ -27,8 +27,10 @@ afterEach(async () => {
 function cfg(): SupervisorConfig {
   const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-http-"));
   tempDirs.push(stateDirectory);
+  const repositoryRoot = "C:\\Dev\\UV-main";
   return {
-    repositoryRoot: "C:\\Dev\\UV-main",
+    layout: { mode: "development", repositoryRoot },
+    repositoryRoot,
     stateDirectory,
     instanceId: "inst-http",
     ownershipToken: "own-tok",

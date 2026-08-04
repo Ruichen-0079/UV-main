@@ -245,6 +245,18 @@ export function createBrowserSpeechPlayer(): SpeechPlayer {
       const bytes = Uint8Array.from(atob(output.audioBase64), (char) => char.charCodeAt(0));
       const url = URL.createObjectURL(new Blob([bytes], { type: output.mimeType || "audio/wav" }));
       const audio = new Audio(url);
+      // Keep a real media element in the companion document. This makes the
+      // WebView2 output path deterministic and gives us an explicit cleanup
+      // point; the element stays hidden and never shows native controls.
+      audio.preload = "auto";
+      audio.autoplay = false;
+      audio.controls = false;
+      audio.volume = 1;
+      audio.setAttribute?.("aria-hidden", "true");
+      if (typeof document !== "undefined" && document.body) {
+        if (audio.style) audio.style.display = "none";
+        document.body.appendChild(audio);
+      }
       getSpeechAudioDebugId(audio);
       current = audio;
       let settled = false;
@@ -252,6 +264,9 @@ export function createBrowserSpeechPlayer(): SpeechPlayer {
         URL.revokeObjectURL(url);
         audio.onended = null;
         audio.onerror = null;
+        audio.removeAttribute?.("src");
+        audio.load?.();
+        audio.remove?.();
         signal.removeEventListener("abort", abort);
         if (current === audio) current = null;
       };

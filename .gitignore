@@ -11,6 +11,9 @@ apps/web/dist-types/
 coverage/
 .turbo/
 terminals/
+.cache/
+build/desktop/
+apps/desktop/src-tauri/generated/
 
 # Environment files
 .env.*

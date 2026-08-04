@@ -272,9 +272,18 @@ export function redactConfig<T>(value: T): T {
 }
 
 export function getRuntimeEnvDir(env: RuntimeConfigEnv = process.env, cwd = process.cwd()): string {
+  // Packaged Runtime: prefer dedicated data dir; never fall back to install resource root.
+  const dataDir = env["YUVI_RUNTIME_DATA_DIR"]?.trim();
+  if (dataDir) {
+    return path.resolve(dataDir);
+  }
   const configured = env["YUVI_RUNTIME_ENV_DIR"]?.trim();
   if (configured) {
     return path.resolve(configured);
+  }
+  // Packaged flag: do not walk for a workspace root (no source tree).
+  if (env["YUVI_PACKAGED"] === "1" || env["YUVI_PACKAGED"] === "true") {
+    return path.resolve(cwd);
   }
 
   return findWorkspaceRoot(cwd) ?? cwd;

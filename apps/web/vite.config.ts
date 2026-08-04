@@ -12,6 +12,8 @@ if (webHost === "0.0.0.0") {
 }
 
 export default defineConfig({
+  // Relative asset URLs work in both Vite dev and Tauri asset protocol.
+  base: "./",
   plugins: [react()],
   server: {
     host: webHost,

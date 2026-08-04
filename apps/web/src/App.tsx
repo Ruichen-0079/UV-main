@@ -2677,6 +2677,7 @@ function VoicePage(props: { providerStatus: ProvidersStatusResponse | null }): J
             <audio
               className="mt-3 w-full"
               controls
+              autoPlay
               src={`data:${ttsResult.mimeType};base64,${ttsResult.audioBase64}`}
             />
           ) : null}

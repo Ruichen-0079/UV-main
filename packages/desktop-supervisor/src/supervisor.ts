@@ -8,6 +8,7 @@ import {
   probeHttpHealth,
   probeTcp,
   runtimeHealthOk,
+  ttsUpstreamHealthOk,
   ttsWrapperHealthOk
 } from "./health.js";
 import {
@@ -21,6 +22,7 @@ import { parseUrlOrigin } from "./paths.js";
 import {
   forceKillProcessTree,
   getProcessInfo,
+  isProcessAlive,
   requestGracefulStop,
   spawnManagedProcess
 } from "./process-windows.js";
@@ -108,9 +110,10 @@ export class DesktopSupervisor {
   }
 
   /**
-   * Atomically apply env overrides from Tauri without restarting the Supervisor
-   * or any services. Subsequent start/restart use the new URLs and env.
-   * Does not spawn or kill processes (including external).
+   * Atomically apply env overrides from Tauri.
+   * Non-secret URL/model changes apply in place for the next start/restart.
+   * Secret keys that *actually change* schedule a background Runtime reload so
+   * Save returns quickly (blocking restart previously froze the Settings UI).
    */
   async applyRuntimeConfig(update: RuntimeConfigUpdate): Promise<RuntimeConfigUpdateResult> {
     if (this.shuttingDown) {
@@ -119,6 +122,7 @@ export class DesktopSupervisor {
 
     const appliedEnvKeys: string[] = [];
     const unsetEnvKeys: string[] = [];
+    let secretsChanged = false;
 
     await this.withConfigLock(async () => {
       // Wait for in-flight service ops so restart never reads a half-applied map.
@@ -131,8 +135,12 @@ export class DesktopSupervisor {
       for (const rawKey of unset) {
         const key = String(rawKey ?? "").trim();
         if (!key) continue;
+        const hadSecret =
+          SECRET_ENV_KEYS.has(key) &&
+          Boolean(this.config.env[key]?.trim() || this.dynamicOverrideKeys.has(key));
         this.clearDynamicOverride(key);
         unsetEnvKeys.push(key);
+        if (hadSecret) secretsChanged = true;
       }
 
       const incoming = update.env && typeof update.env === "object" ? update.env : {};
@@ -142,17 +150,26 @@ export class DesktopSupervisor {
         const value = rawValue == null ? "" : String(rawValue);
         if (value.trim() === "") {
           // Empty means unset, never store blank secrets.
+          const hadSecret =
+            SECRET_ENV_KEYS.has(key) &&
+            Boolean(this.config.env[key]?.trim() || this.dynamicOverrideKeys.has(key));
           this.clearDynamicOverride(key);
           if (!unsetEnvKeys.includes(key)) unsetEnvKeys.push(key);
+          if (hadSecret) secretsChanged = true;
           continue;
         }
+        const previous = this.config.env[key] ?? "";
         this.config.env[key] = value;
         process.env[key] = value;
         this.dynamicOverrideKeys.add(key);
         appliedEnvKeys.push(key);
+        // Only reload Runtime when the secret *value* changes (not every Save re-push).
+        if (SECRET_ENV_KEYS.has(key) && previous !== value) {
+          secretsChanged = true;
+        }
       }
 
-      const derived = deriveConfigFromEnv(this.config.repositoryRoot, this.config.env);
+      const derived = deriveConfigFromEnv(this.config.layout, this.config.env);
       // Preserve TTS start commands when the update payload does not re-supply them
       // (Rust only sends user-settings keys, not YUVI_TTS_*_START_COMMAND).
       const keepTtsWrapper = this.config.ttsWrapperStart;
@@ -168,14 +185,53 @@ export class DesktopSupervisor {
       this.rebuildSpecsInPlace();
     });
 
+    const restartedServices: string[] = [];
+    if (secretsChanged && !this.shuttingDown) {
+      // Do NOT await — HTTP /v1/config must return so Tauri Save does not freeze.
+      restartedServices.push("runtime");
+      void this.reloadRuntimeAfterSecretChange().catch(() => {
+        // Errors surface on the service snapshot; never reject the config ack.
+      });
+    }
+
     this.emit();
     return {
       ok: true,
       // Key names only — never values. Secret names may appear so clients know unset ran.
       appliedEnvKeys: appliedEnvKeys.filter((k) => !SECRET_ENV_KEYS.has(k)),
       unsetEnvKeys: [...new Set(unsetEnvKeys)],
+      restartedServices,
       updatedAt: new Date().toISOString()
     };
+  }
+
+  /**
+   * Reload managed Runtime so secret env is present in the child process.
+   * Never kills external (unowned) processes — surfaces a clear pending message instead.
+   */
+  private async reloadRuntimeAfterSecretChange(): Promise<void> {
+    const runtime = this.services.get("runtime");
+    if (!runtime || this.shuttingDown) return;
+
+    if (runtime.ownership === "external") {
+      // Health may be green but that process was not started with our secrets.
+      runtime.lastError =
+        "Secrets saved, but Runtime is external (another process owns :6121). Free the port or stop the other YUVI instance, then Start Runtime.";
+      runtime.summary = "Secrets pending — external Runtime";
+      runtime.detail =
+        "Managed Runtime must be owned by this Supervisor to inject DEEPSEEK_API_KEY / DATABASE_URL.";
+      this.emit();
+      return;
+    }
+
+    try {
+      await this.restartService("runtime");
+    } catch (error) {
+      runtime.lastError =
+        error instanceof Error ? error.message : "Failed to reload Runtime after secret change.";
+      runtime.summary = "Secret reload failed";
+      this.emit();
+    }
   }
 
   /**
@@ -450,12 +506,13 @@ export class DesktopSupervisor {
     }
     this.shuttingDown = true;
     this.stopBackgroundRefresh();
-    // Wait briefly for in-flight ops
+    // Wait briefly for in-flight ops (do not block exit forever).
     const ops = [...this.services.values()].map((s) => s.op).filter(Boolean);
-    await Promise.race([Promise.allSettled(ops), sleep(3_000)]);
+    await Promise.race([Promise.allSettled(ops), sleep(1_500)]);
 
     for (const svc of this.services.values()) {
-      if (svc.ownership === "owned" && svc.pid) {
+      // Always try to stop anything we tracked — Windows does not kill children with parent.
+      if (svc.pid || svc.child || svc.ownership === "owned") {
         await this.stopOwned(svc);
       }
     }
@@ -464,36 +521,59 @@ export class DesktopSupervisor {
   }
 
   private async stopOwned(svc: InternalService): Promise<void> {
-    const check = () =>
-      testProcessOwnership({
+    const trackedPid = svc.pid;
+    const child = svc.child;
+
+    // Kill our ChildProcess handle first (best signal we started it).
+    if (child && !child.killed) {
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+    }
+
+    const pidCandidates = new Set<number>();
+    if (trackedPid && trackedPid > 0) pidCandidates.add(trackedPid);
+    if (child?.pid && child.pid > 0) pidCandidates.add(child.pid);
+
+    const metaPid = this.readOwnedPid(svc);
+    if (metaPid && metaPid > 0) pidCandidates.add(metaPid);
+
+    for (const processId of pidCandidates) {
+      if (!isProcessAlive(processId)) continue;
+
+      const processInfo = getProcessInfo(processId);
+      const ownership = testProcessOwnership({
         metadataPath: svc.spec.metadataFile,
         expectedRole: svc.spec.role,
         repositoryRoot: this.config.repositoryRoot,
         stateDirectory: this.config.stateDirectory,
         ownershipToken: this.config.ownershipToken,
         instanceId: this.config.instanceId,
-        processInfo: svc.pid ? getProcessInfo(svc.pid) : null
+        processInfo
       });
 
-    let ownership = check();
-    if (ownership.owned && ownership.processId > 0) {
-      // 1) graceful request
-      requestGracefulStop(ownership.processId);
-      // 2) short wait
-      for (let i = 0; i < 15; i += 1) {
-        if (!getProcessInfo(ownership.processId)) break;
-        await sleep(200);
+      // Kill when owned OR when we still hold a child handle for this pid (we started it).
+      const weStarted = Boolean(child?.pid === processId || trackedPid === processId);
+      if (!ownership.owned && !weStarted) {
+        continue;
       }
-      // 3) re-check ownership before force kill
-      ownership = check();
-      if (ownership.owned && ownership.processId > 0 && getProcessInfo(ownership.processId)) {
-        forceKillProcessTree(ownership.processId);
-        for (let i = 0; i < 10; i += 1) {
-          if (!getProcessInfo(ownership.processId)) break;
-          await sleep(150);
+
+      requestGracefulStop(processId);
+      for (let i = 0; i < 8; i += 1) {
+        if (!isProcessAlive(processId)) break;
+        await sleep(100);
+      }
+      if (isProcessAlive(processId)) {
+        forceKillProcessTree(processId);
+        for (let i = 0; i < 8; i += 1) {
+          if (!isProcessAlive(processId)) break;
+          await sleep(80);
         }
       }
     }
+
     removeMetadataFile(svc.spec.metadataFile);
     svc.child = null;
     svc.pid = null;
@@ -706,13 +786,17 @@ export class DesktopSupervisor {
         label: "TTS upstream",
         managed: Boolean(this.config.ttsUpstreamStart),
         autostart: this.config.autostartTts && Boolean(this.config.ttsUpstreamStart),
-        healthUrl: ttsU ? `${ttsU.origin}/` : null,
+        // GPT-SoVITS api_v2 intentionally returns 404 at `/`; use its
+        // OpenAPI document to distinguish the expected FastAPI service from
+        // an unrelated process listening on the configured port.
+        healthUrl: ttsU ? `${ttsU.origin}/openapi.json` : null,
         tcp: ttsU ? { host: ttsU.host, port: ttsU.port } : { host: "127.0.0.1", port: 9880 },
         startTimeoutMs: 90_000,
         readinessIntervalMs: 1_000,
         startCommand: this.config.ttsUpstreamStart,
         metadataFile: path.join(state, "tts-upstream.pid.json"),
-        logFile: path.join(state, "tts-upstream.log")
+        logFile: path.join(state, "tts-upstream.log"),
+        validateHealthBody: ttsUpstreamHealthOk
       }
     ];
   }

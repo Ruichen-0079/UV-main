@@ -8,8 +8,9 @@ import {
 } from "./lumi-live2d.js";
 import type { LumiFraming } from "./lumi-cubism-model.js";
 import type { LumiFramingDiagnostics } from "./lumi-framing.js";
+import { resolveRuntimeAssetUrl } from "./desktop-runtime.js";
 
-const defaultModelUrl = "/api/live2d/Lumi/Lumi.model3.json";
+const DEFAULT_MODEL_PATH = "/api/live2d/Lumi/Lumi.model3.json";
 
 function isHeadBoundsOverlayEnabled(): boolean {
   if (!import.meta.env.DEV || typeof window === "undefined") return false;
@@ -68,7 +69,9 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
     const container = containerRef.current;
     if (!canvas || !container) return;
     let disposed = false;
-    const source = import.meta.env["VITE_LIVE2D_MODEL_URL"]?.trim() || defaultModelUrl;
+    const source =
+      import.meta.env["VITE_LIVE2D_MODEL_URL"]?.trim() ||
+      resolveRuntimeAssetUrl(DEFAULT_MODEL_PATH);
     const controller = new LumiController(
       () => new CubismLive2DAdapter(canvas),
       source,

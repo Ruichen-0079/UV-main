@@ -73,10 +73,13 @@ export function buildSaveMessage(input: {
 }): string {
   const prefix = input.kind === "secret" ? "Secret updated" : "Settings saved";
   if (input.saved && input.supervisorSync && !input.supervisorSync.applied) {
-    return `${prefix}, but running services were not refreshed. Restart YUVI to apply them.`;
+    return `${prefix}, but Supervisor was unavailable. Close other YUVI windows, reopen this app, then Save again so Runtime gets the key.`;
+  }
+  if (input.kind === "secret" && input.supervisorSync?.applied) {
+    return `${prefix}. Runtime is reloading with the new key — Providers should leave “unavailable” once healthy.`;
   }
   if (input.restartServices.length > 0) {
-    return `${prefix}. Restart recommended: ${input.restartServices.join(", ")}.`;
+    return `${prefix}. Services may reload: ${input.restartServices.join(", ")}.`;
   }
   return `${prefix}.`;
 }

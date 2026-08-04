@@ -15,6 +15,7 @@ import { registerEventRoutes } from "./routes/events.js";
 import { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
 import { registerWebSocketRoutes } from "./routes/websocket.js";
 import { registerLive2DCoreRoute, registerLive2DRoutes } from "./routes/live2d.js";
+import { desktopCorsHeaders } from "./cors.js";
 
 export async function buildServer(config: ServerConfig) {
   const app = Fastify({
@@ -51,6 +52,16 @@ export async function buildServer(config: ServerConfig) {
   });
 
   await app.register(websocket);
+
+  // Tauri desktop webview (tauri.localhost) calls Runtime on 127.0.0.1 — needs CORS.
+  app.addHook("onRequest", async (request, reply) => {
+    for (const [name, value] of Object.entries(desktopCorsHeaders(request.headers.origin))) {
+      reply.header(name, value);
+    }
+    if (request.method === "OPTIONS") {
+      return reply.code(204).send();
+    }
+  });
 
   if (config.runtimeMode === "development" && config.host === "0.0.0.0") {
     app.log.warn(

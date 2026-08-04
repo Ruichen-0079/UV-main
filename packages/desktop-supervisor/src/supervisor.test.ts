@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildChildProcessEnv } from "./config.js";
 import { DesktopSupervisor } from "./supervisor.js";
 import type { StartCommandSpec, SupervisorConfig } from "./types.js";
@@ -47,6 +47,7 @@ function baseConfig(overrides: Partial<SupervisorConfig> = {}): SupervisorConfig
       ? overrideRoot
       : makeTempRepositoryRoot();
   return {
+    layout: { mode: "development", repositoryRoot },
     repositoryRoot,
     stateDirectory,
     instanceId: "inst-1",
@@ -241,6 +242,15 @@ describe("DesktopSupervisor classification", () => {
 });
 
 describe("DesktopSupervisor runtime config push", () => {
+  beforeEach(() => {
+    // Secret changes schedule background Runtime reload — do not spawn children in unit tests.
+    vi.spyOn(DesktopSupervisor.prototype, "restartService").mockImplementation(async function (
+      this: DesktopSupervisor
+    ) {
+      return this.snapshot();
+    });
+  });
+
   it("starts with env A, applyRuntimeConfig B, resolveSpawnEnv uses B", async () => {
     process.env["DEEPSEEK_API_KEY"] = "key-A";
     process.env["DEEPSEEK_CHAT_MODEL"] = "model-A";
@@ -264,6 +274,7 @@ describe("DesktopSupervisor runtime config push", () => {
     });
     expect(result.ok).toBe(true);
     expect(result.appliedEnvKeys).toContain("DEEPSEEK_CHAT_MODEL");
+    expect(result.restartedServices).toContain("runtime");
     // Secret values never appear in ack.
     expect(JSON.stringify(result)).not.toContain("key-B");
     expect(JSON.stringify(result)).not.toContain("key-A");

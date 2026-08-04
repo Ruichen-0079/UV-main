@@ -10,6 +10,7 @@ import {
   sendMessageError
 } from "./message.js";
 import { SseConnectionClosedError, writeSseFrame } from "./sse.js";
+import { desktopCorsHeaders } from "../cors.js";
 
 const SSE_HEADERS = {
   "content-type": "text/event-stream; charset=utf-8",
@@ -104,7 +105,10 @@ export async function registerMessageStreamRoutes(
 
       reply.hijack();
       headersStarted = true;
-      reply.raw.writeHead(200, SSE_HEADERS);
+      reply.raw.writeHead(200, {
+        ...SSE_HEADERS,
+        ...desktopCorsHeaders(request.headers.origin)
+      });
 
       let completed = false;
       while (!next.done) {

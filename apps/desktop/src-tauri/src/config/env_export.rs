@@ -58,6 +58,13 @@ pub fn public_env_overrides(settings: &UserSettings) -> BTreeMap<String, String>
     settings.tts.upstream_url.clone(),
   );
 
+  // The packaged desktop ships with the local Alice GPT-SoVITS stack as its
+  // TTS deployment. Keep the provider chain explicit so an unset xAI key does
+  // not make /v1/tts fail before it reaches the healthy local wrapper.
+  env.insert("DEFAULT_TTS_PROVIDER".into(), "local".into());
+  env.insert("TTS_PROVIDER_CHAIN".into(), "local".into());
+  env.insert("LOCAL_TTS_MODEL".into(), "alice-v4".into());
+
   if settings.chat.provider == "deepseek" {
     env.insert("DEEPSEEK_CHAT_MODEL".into(), settings.chat.model.clone());
   }

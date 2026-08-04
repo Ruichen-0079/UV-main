@@ -211,6 +211,12 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(): JSX.Element 
               </button>
             ) : null}
           </div>
+          {!state.secrets.deepseekApiKey ? (
+            <p className="mt-2 text-xs text-ink-500">
+              Paste the key and click Save. Provider stays unavailable until this shows
+              Configured and Runtime is owned (not external).
+            </p>
+          ) : null}
         </section>
 
         <section className="settings-card">

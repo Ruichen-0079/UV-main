@@ -104,6 +104,28 @@ describe("OpenAI-compatible native chat streaming", () => {
     });
   });
 
+  it("joins multiple data lines in one SSE frame", async () => {
+    const body = [
+      "data: {\"choices\": [\n",
+      "data: {\"delta\": {\"content\": \"split\"}}]}\n\n",
+      frame({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+      frame("[DONE]")
+    ].join("");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => streamResponse([encoded(body)]))
+    );
+
+    const events = await collect(createProvider());
+    expect(events.filter((event) => event.type === "text-delta")).toEqual([
+      { type: "text-delta", text: "split" }
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      output: { message: { content: "split" } }
+    });
+  });
+
   it("uses the same native client for an OpenAI-compatible NVIDIA chat route", async () => {
     const body = `${frame({ model: "nvidia-model", choices: [{ delta: { content: "NVIDIA" } }] })}${frame({ choices: [{ delta: {}, finish_reason: "stop" }] })}${frame("[DONE]")}`;
     vi.stubGlobal(

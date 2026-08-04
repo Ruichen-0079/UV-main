@@ -429,14 +429,18 @@ function parseSseData(frame: string, provider: string, capability: ProviderCapab
   if (event !== undefined && event !== "message") {
     throw protocolError(provider, capability, "OpenAI-compatible SSE frame used an unknown event.");
   }
-  if (data.length !== 1) {
+  if (data.length === 0) {
     throw protocolError(
       provider,
       capability,
-      "OpenAI-compatible SSE frame must contain one data line."
+      "OpenAI-compatible SSE frame must contain a data line."
     );
   }
-  return data[0]!;
+  // SSE permits multiple data fields in one event. Per the event-stream
+  // specification, they are joined with a newline before dispatching the
+  // event payload. Some OpenAI-compatible gateways split large JSON payloads
+  // this way, so rejecting them as malformed breaks otherwise valid streams.
+  return data.join("\n");
 }
 
 function normalizeUsage(

@@ -26,12 +26,12 @@ describe("MainPage TTS output preference", () => {
     expect(readTtsToggleChecked(renderMainPage())).toBe(true);
   });
 
-  it("initializes the TTS checkbox off when nothing was stored", () => {
+  it("initializes the TTS checkbox on when nothing was stored", () => {
     (globalThis as { localStorage?: unknown }).localStorage = {
       getItem: () => null,
       setItem: () => {}
     };
-    expect(readTtsToggleChecked(renderMainPage())).toBe(false);
+    expect(readTtsToggleChecked(renderMainPage())).toBe(true);
   });
 
   it("renders without crashing when localStorage is unavailable", () => {

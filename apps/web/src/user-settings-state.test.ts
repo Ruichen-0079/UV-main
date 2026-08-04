@@ -75,7 +75,7 @@ describe("user settings reducer", () => {
     });
     expect(state.saving).toBe(false);
     expect(state.lastRestartServices).toEqual(["runtime", "memory"]);
-    expect(state.saveMessage).toMatch(/Restart recommended/);
+    expect(state.saveMessage).toMatch(/Services may reload: runtime, memory/);
     expect(state.form.deepseekApiKeyInput).toBe("");
   });
 
@@ -99,9 +99,7 @@ describe("user settings reducer", () => {
       clearSecrets: true
     });
     expect(result.saved).toBe(true);
-    expect(state.saveMessage).toBe(
-      "Settings saved, but running services were not refreshed. Restart YUVI to apply them."
-    );
+    expect(state.saveMessage).toMatch(/Supervisor was unavailable/);
     const text = JSON.stringify(result);
     expect(text).not.toContain("sk-");
     expect(text).not.toContain("postgres://");
@@ -126,7 +124,7 @@ describe("user settings reducer", () => {
     });
     expect(state.form.deepseekApiKeyInput).toBe("");
     expect(state.secrets.deepseekApiKey).toBe(true);
-    expect(state.saveMessage).toMatch(/Restart recommended/);
+    expect(state.saveMessage).toMatch(/reloading with the new key/i);
   });
 
   it("buildSaveMessage covers success and sync failure", () => {
@@ -134,16 +132,17 @@ describe("user settings reducer", () => {
       buildSaveMessage({
         saved: true,
         restartServices: ["runtime"],
-        supervisorSync: { applied: true, error: null }
+        supervisorSync: { applied: true, error: null },
+        kind: "secret"
       })
-    ).toMatch(/Restart recommended: runtime/);
+    ).toMatch(/reloading with the new key/i);
     expect(
       buildSaveMessage({
         saved: true,
         restartServices: ["runtime"],
         supervisorSync: { applied: false, error: "Supervisor unavailable" }
       })
-    ).toMatch(/were not refreshed/);
+    ).toMatch(/Supervisor was unavailable/);
   });
 
   it("surfaces save errors", () => {

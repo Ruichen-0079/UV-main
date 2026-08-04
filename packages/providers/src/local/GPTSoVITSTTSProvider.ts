@@ -98,12 +98,17 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
         : (this.options.defaultLanguage ?? "ja")
     );
     const start = performance.now();
-    const request = isJapanese(language)
+    const useWrapper = isJapanese(language) || !this.hasReferenceConfig();
+    const request = useWrapper
       ? {
           url: `${trimTrailingSlash(this.options.wrapperBaseUrl)}/tts`,
           body: {
             text: input.text,
-            language,
+            // Alice's managed wrapper currently accepts Japanese requests
+            // only. In packaged mode there is no user-supplied API-v2
+            // reference pair, so preserve playback by using the managed
+            // voice for every requested language instead of returning 503.
+            language: isJapanese(language) ? language : "ja",
             speaker: input.voice ?? this.options.speaker ?? "alice",
             style: this.options.style ?? "neutral",
             reference_rank: this.options.referenceRank ?? 0
@@ -137,9 +142,17 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
       providerMetadata: {
         language,
         speaker: input.voice ?? this.options.speaker ?? "alice",
-        transport: isJapanese(language) ? "wrapper" : "api_v2"
+        transport: isJapanese(language)
+          ? "wrapper"
+          : this.hasReferenceConfig()
+            ? "api_v2"
+            : "wrapper-fallback"
       }
     };
+  }
+
+  private hasReferenceConfig(): boolean {
+    return Boolean(this.options.referenceAudioPath && this.options.referenceText);
   }
 
   private buildUpstreamRequest(input: TTSInput, language: string): Record<string, unknown> {

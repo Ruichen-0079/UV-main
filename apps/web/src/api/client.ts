@@ -1,3 +1,4 @@
+import { resolveApiBaseUrl } from "../desktop-runtime.js";
 import {
   MessageSseParser,
   MessageStreamError,
@@ -843,7 +844,7 @@ export type MemoryVectorIndexStatus = {
   annAccelerationActive: boolean;
 };
 
-const apiBaseUrl = import.meta.env["VITE_API_BASE_URL"] ?? "/api";
+const apiBaseUrl = resolveApiBaseUrl();
 const explicitWebSocketBaseUrl = import.meta.env["VITE_WS_BASE_URL"] as string | undefined;
 let dashboardDevToken = "";
 
@@ -1504,6 +1505,11 @@ function getWebSocketUrl(path: string): string {
     return `${apiBaseUrl.replace(/^http/, "ws").replace(/\/$/, "")}${path}`;
   }
 
+  // Browser/dev behind Vite proxy: prefer same-host WS via Runtime port.
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.hostname}:6121${path}`;
+  const host =
+    window.location.hostname === "tauri.localhost" || window.location.hostname === "localhost"
+      ? "127.0.0.1"
+      : window.location.hostname || "127.0.0.1";
+  return `${protocol}//${host}:6121${path}`;
 }

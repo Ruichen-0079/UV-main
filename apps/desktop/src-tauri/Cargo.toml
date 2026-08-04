@@ -19,7 +19,7 @@ url = "2"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
-keyring = "3"
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
 [dev-dependencies]
 tempfile = "3"

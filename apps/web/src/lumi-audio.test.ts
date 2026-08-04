@@ -62,7 +62,7 @@ describe("AudioMouthEnvelope playback binding", () => {
     vi.unstubAllGlobals();
   });
 
-  it("binds the analyser before playback and samples the same audio element", async () => {
+  it("binds the analyser when playback starts and samples the same audio element", async () => {
     const callbacks = new Map<number, FrameRequestCallback>();
     let nextFrame = 1;
     vi.stubGlobal("window", {});
@@ -78,37 +78,48 @@ describe("AudioMouthEnvelope playback binding", () => {
     const audio = {} as HTMLAudioElement;
 
     envelope.attach(audio);
-    expect(context.createMediaElementSource).toHaveBeenCalledWith(audio);
-    expect(sources.get(audio)?.connect).toHaveBeenCalledWith(analysers[0]);
-    expect(analysers[0]!.connect).toHaveBeenCalledWith(context.destination);
+    expect(context.createMediaElementSource).not.toHaveBeenCalled();
+    expect(analysers[0]!.connect).not.toHaveBeenCalled();
     expect(callbacks.size).toBe(0);
 
     envelope.startPlayback?.(audio);
     await Promise.resolve();
     await Promise.resolve();
     expect(context.resume).toHaveBeenCalled();
+    expect(context.createMediaElementSource).toHaveBeenCalledWith(audio);
+    expect(sources.get(audio)?.connect).toHaveBeenCalledWith(analysers[0]);
+    expect(analysers[0]!.connect).toHaveBeenCalledWith(context.destination);
     expect(callbacks.size).toBe(1);
     const frame = callbacks.keys().next().value as number;
     callbacks.get(frame)?.(16);
     expect(target.mouthValues.at(-1)).toBeGreaterThan(0);
   });
 
-  it("does not recreate a source for the same Audio and disconnects old sources", () => {
+  it("does not recreate a source for the same Audio and disconnects old sources", async () => {
     vi.stubGlobal("window", {});
-    const { context, sources } = createAudioContext();
+    const { context, sources, analysers } = createAudioContext();
     const target = createTarget();
     const envelope = new AudioMouthEnvelope(target, undefined, () => context);
     const firstAudio = {} as HTMLAudioElement;
     const secondAudio = {} as HTMLAudioElement;
 
     envelope.attach(firstAudio);
+    envelope.startPlayback?.(firstAudio);
+    await Promise.resolve();
+    await Promise.resolve();
     envelope.detach();
     envelope.attach(firstAudio);
+    envelope.startPlayback?.(firstAudio);
+    await Promise.resolve();
+    await Promise.resolve();
     envelope.attach(secondAudio);
+    envelope.startPlayback?.(secondAudio);
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(context.createMediaElementSource).toHaveBeenCalledTimes(2);
     expect(sources.get(firstAudio)?.disconnect).toHaveBeenCalled();
-    expect(sources.get(secondAudio)?.connect).toHaveBeenCalled();
+    expect(sources.get(secondAudio)?.connect).toHaveBeenCalledWith(analysers[0]);
   });
 
   it("stops the RAF and resets the mouth when playback stops or is disposed", async () => {
