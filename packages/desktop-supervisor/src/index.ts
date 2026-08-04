@@ -1,0 +1,55 @@
+export type {
+  HealthProbeResult,
+  ManagedServiceSpec,
+  OwnershipResult,
+  OwnershipStatus,
+  ProcessInfo,
+  ProcessMetadata,
+  ServiceId,
+  ServiceLifecycle,
+  ServiceOwnership,
+  ServiceSnapshot,
+  StartCommandSpec,
+  SupervisorConfig,
+  SupervisorSnapshot
+} from "./types.js";
+
+export {
+  loadSupervisorConfig,
+  generateControlToken,
+  assertLoopbackHost
+} from "./config.js";
+export { loadYuviEnvFiles, envFlag, envString } from "./env.js";
+export {
+  probeHttpHealth,
+  probeTcp,
+  runtimeHealthOk,
+  mem0HealthOk,
+  ttsWrapperHealthOk,
+  ollamaTagsOk
+} from "./health.js";
+export {
+  PROCESS_METADATA_VERSION,
+  readProcessMetadata,
+  writeProcessMetadata,
+  removeMetadataFile,
+  testProcessOwnership,
+  shouldRemoveInvalidMetadata
+} from "./ownership.js";
+export {
+  getProcessInfo,
+  isProcessAlive,
+  spawnManagedProcess,
+  requestGracefulStop,
+  forceKillProcessTree,
+  stopProcessTree
+} from "./process-windows.js";
+export { canonicalPath, defaultStateDirectory, parseUrlOrigin } from "./paths.js";
+export { DesktopSupervisor } from "./supervisor.js";
+export {
+  startSupervisorHttpServer,
+  extractControlToken,
+  tokensMatch,
+  CONTROL_TOKEN_HEADER
+} from "./http-server.js";
+export type { ControlEndpointFile } from "./types.js";
