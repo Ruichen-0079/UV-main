@@ -36,8 +36,8 @@ function systemPathOnly() {
 }
 
 function cleanEnv(extra = {}) {
-  const env = { ...extra };
-  // Keep only non-dev essentials.
+  const env = {};
+  // Keep only non-dev essentials from the host process.
   for (const key of [
     "SystemRoot",
     "WINDIR",
@@ -60,6 +60,8 @@ function cleanEnv(extra = {}) {
   ]) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
+  // Explicit caller overrides win (e.g. isolated LOCALAPPDATA for clean-room).
+  Object.assign(env, extra);
   env.PATH = systemPathOnly();
   env.Path = env.PATH;
   // Explicitly strip Node/npm/pnpm pollution.

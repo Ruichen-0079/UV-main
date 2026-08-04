@@ -188,9 +188,13 @@ function restrictToCurrentUser(targetPath) {
 function defaultDesktopSupervisorRoot() {
   const local = process.env["LOCALAPPDATA"];
   if (local && local.trim()) {
-    return path.join(local, "YUVI", "DesktopSupervisor");
+    const root = path.join(local, "YUVI", "DesktopSupervisor");
+    fs.mkdirSync(root, { recursive: true });
+    return root;
   }
-  return path.join(process.cwd(), ".yuvi-desktop-supervisor");
+  const fallback = path.join(process.cwd(), ".yuvi-desktop-supervisor");
+  fs.mkdirSync(fallback, { recursive: true });
+  return fallback;
 }
 
 main().catch((error) => {
