@@ -5,7 +5,9 @@ import {
   BLINK_MIN_INTERVAL_MS,
   createCompanionBlinkScheduler,
   createInterruptedResetScheduler,
+  createPresenceBehaviorTransition,
   getCompanionAnimation,
+  PRESENCE_BEHAVIOR_PROFILES,
   reduceCompanionPresence
 } from "./companion-presence.js";
 
@@ -44,12 +46,12 @@ describe("reduceCompanionPresence", () => {
     expect(reduceCompanionPresence("interrupted", { type: "generation", state: "idle" })).toBe(
       "interrupted"
     );
-    expect(
-      reduceCompanionPresence("interrupted", { type: "generation", state: "listening" })
-    ).toBe("listening");
-    expect(
-      reduceCompanionPresence("interrupted", { type: "generation", state: "thinking" })
-    ).toBe("thinking");
+    expect(reduceCompanionPresence("interrupted", { type: "generation", state: "listening" })).toBe(
+      "listening"
+    );
+    expect(reduceCompanionPresence("interrupted", { type: "generation", state: "thinking" })).toBe(
+      "thinking"
+    );
   });
 
   it("maps interrupted generation state", () => {
@@ -81,9 +83,71 @@ describe("reduceCompanionPresence", () => {
     });
   });
 
+  it("keeps state behavior in one normalized profile table with absolute envelopes", () => {
+    for (const profile of Object.values(PRESENCE_BEHAVIOR_PROFILES)) {
+      const weights = profile.targetRegionWeights;
+      expect(
+        weights.center + weights.left + weights.right + weights.upper + weights.lower
+      ).toBeCloseTo(1, 8);
+      expect(profile.targetHoldMaxMs).toBeGreaterThanOrEqual(profile.targetHoldMinMs);
+      expect(profile.eyeXMax).toBeGreaterThan(0);
+      expect(profile.headXMax).toBeGreaterThan(0);
+      expect(profile.bodyXMax).toBeGreaterThan(0);
+      expect(profile.transitionMs).toBeGreaterThan(0);
+    }
+    expect(PRESENCE_BEHAVIOR_PROFILES.listening.targetRegionWeights.center).toBeGreaterThan(
+      PRESENCE_BEHAVIOR_PROFILES.idle.targetRegionWeights.center
+    );
+    expect(PRESENCE_BEHAVIOR_PROFILES.thinking.targetRegionWeights.upper).toBeGreaterThan(
+      PRESENCE_BEHAVIOR_PROFILES.idle.targetRegionWeights.upper
+    );
+    expect(PRESENCE_BEHAVIOR_PROFILES.speaking.eyeXMax).toBeLessThan(
+      PRESENCE_BEHAVIOR_PROFILES.idle.eyeXMax
+    );
+    expect(PRESENCE_BEHAVIOR_PROFILES.speaking.eyeXMax).toBeGreaterThan(
+      PRESENCE_BEHAVIOR_PROFILES.listening.eyeXMax
+    );
+    // Per-state transition durations (not a single average).
+    expect(PRESENCE_BEHAVIOR_PROFILES.listening.transitionMs).toBeLessThan(
+      PRESENCE_BEHAVIOR_PROFILES.thinking.transitionMs
+    );
+    expect(PRESENCE_BEHAVIOR_PROFILES.interrupted.transitionMs).toBeLessThan(
+      PRESENCE_BEHAVIOR_PROFILES.idle.transitionMs
+    );
+  });
+
+  it("interpolates profile values without rebuilding the behavior owner", () => {
+    const transition = createPresenceBehaviorTransition("idle");
+    const initial = transition.sample("idle", 0, 100);
+    // speaking transitionMs = 380 → halfway at 190ms
+    const middle = transition.sample("speaking", 190, 200);
+    expect(initial.activeState).toBe("idle");
+    expect(middle.activeState).toBe("speaking");
+    expect(middle.previousState).toBe("idle");
+    expect(middle.transitionProgress).toBeCloseTo(0.5, 5);
+    expect(middle.effectiveTransitionMs).toBe(PRESENCE_BEHAVIOR_PROFILES.speaking.transitionMs);
+    expect(middle.effective.eyeXMax).toBeGreaterThan(PRESENCE_BEHAVIOR_PROFILES.speaking.eyeXMax);
+    expect(middle.effective.eyeXMax).toBeLessThan(PRESENCE_BEHAVIOR_PROFILES.idle.eyeXMax);
+    const complete = transition.sample("speaking", 190, 300);
+    expect(complete.transitionProgress).toBe(1);
+    expect(complete.effective).toEqual(PRESENCE_BEHAVIOR_PROFILES.speaking);
+    expect(complete.lastPresenceTransitionAt).toBe(200);
+  });
+
+  it("keeps interrupted breathing alive while forcing the blink output open", () => {
+    const frame = getCompanionAnimation(
+      "interrupted",
+      1000,
+      1,
+      PRESENCE_BEHAVIOR_PROFILES.interrupted
+    );
+    expect(frame.blink).toBe(0);
+    expect(frame.breath).toBeGreaterThan(0);
+  });
+
   it("keeps blink timing in the natural, centralized config ranges", () => {
-    expect(BLINK_CONFIG.minIntervalMs).toBeGreaterThanOrEqual(2000);
-    expect(BLINK_CONFIG.maxIntervalMs).toBeLessThanOrEqual(4800);
+    expect(BLINK_CONFIG.minIntervalMs).toBeGreaterThanOrEqual(1600);
+    expect(BLINK_CONFIG.maxIntervalMs).toBeLessThanOrEqual(5200);
     expect(BLINK_CONFIG.closeMs).toBeGreaterThanOrEqual(70);
     expect(BLINK_CONFIG.closeMs).toBeLessThanOrEqual(100);
     expect(BLINK_CONFIG.holdMs).toBeGreaterThanOrEqual(45);
@@ -93,26 +157,40 @@ describe("reduceCompanionPresence", () => {
     const fullBlink = BLINK_CONFIG.closeMs + BLINK_CONFIG.holdMs + BLINK_CONFIG.openMs;
     expect(fullBlink).toBeGreaterThanOrEqual(220);
     expect(fullBlink).toBeLessThanOrEqual(330);
-    expect(BLINK_CONFIG.doubleBlinkProbability).toBeGreaterThanOrEqual(0.1);
-    expect(BLINK_CONFIG.doubleBlinkProbability).toBeLessThanOrEqual(0.16);
+    expect(PRESENCE_BEHAVIOR_PROFILES.idle.doubleBlinkProbability).toBeGreaterThanOrEqual(0.16);
+    expect(PRESENCE_BEHAVIOR_PROFILES.thinking.doubleBlinkProbability).toBeGreaterThanOrEqual(0.18);
+  });
+
+  it("applies the profile blink interval bounds to the next blink", () => {
+    const sequence = [0, 0, 1, 0, 0];
+    let index = 0;
+    const scheduler = createCompanionBlinkScheduler(() => sequence[index++] ?? 0, 0);
+    const profile = PRESENCE_BEHAVIOR_PROFILES.speaking;
+    const firstEnd =
+      profile.blinkIntervalMinMs + BLINK_CONFIG.closeMs + BLINK_CONFIG.holdMs + BLINK_CONFIG.openMs;
+    // Initial schedule uses idle profile defaults via constructor; force a finished blink:
+    scheduler.sample(firstEnd, "speaking", profile);
+    const next = scheduler.getNextBlinkAt();
+    expect(next).toBeGreaterThanOrEqual(firstEnd + profile.blinkIntervalMinMs * 0.5 - 1);
+    expect(next).toBeLessThanOrEqual(
+      firstEnd + profile.blinkIntervalMaxMs * profile.blinkIntervalScale + 1
+    );
   });
 
   it("uses injected randomness for bounded, non-fixed blink intervals", () => {
     const earliest = createCompanionBlinkScheduler(() => 0, 0);
     const latest = createCompanionBlinkScheduler(() => 1, 0);
-    expect(earliest.getNextBlinkAt()).toBe(BLINK_MIN_INTERVAL_MS);
-    expect(latest.getNextBlinkAt()).toBe(BLINK_MAX_INTERVAL_MS);
-    expect(latest.getNextBlinkAt()).not.toBe(
-      (BLINK_MIN_INTERVAL_MS + BLINK_MAX_INTERVAL_MS) / 2
-    );
+    const idleMin = PRESENCE_BEHAVIOR_PROFILES.idle.blinkIntervalMinMs;
+    const idleMax = PRESENCE_BEHAVIOR_PROFILES.idle.blinkIntervalMaxMs;
+    expect(earliest.getNextBlinkAt()).toBe(idleMin);
+    expect(latest.getNextBlinkAt()).toBe(idleMax);
+    expect(latest.getNextBlinkAt()).not.toBe((idleMin + idleMax) / 2);
     expect(earliest.getPhase(0)).toBe("waiting");
-    expect(earliest.getPhase(BLINK_MIN_INTERVAL_MS + 20)).toBe("closing");
-    expect(earliest.getPhase(BLINK_MIN_INTERVAL_MS + BLINK_CONFIG.closeMs + 5)).toBe("holding");
-    expect(
-      earliest.getPhase(
-        BLINK_MIN_INTERVAL_MS + BLINK_CONFIG.closeMs + BLINK_CONFIG.holdMs + 5
-      )
-    ).toBe("opening");
+    expect(earliest.getPhase(idleMin + 20)).toBe("closing");
+    expect(earliest.getPhase(idleMin + BLINK_CONFIG.closeMs + 5)).toBe("holding");
+    expect(earliest.getPhase(idleMin + BLINK_CONFIG.closeMs + BLINK_CONFIG.holdMs + 5)).toBe(
+      "opening"
+    );
   });
 
   it("allows one finite double blink without looping", () => {

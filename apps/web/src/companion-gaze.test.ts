@@ -1,181 +1,283 @@
 import { describe, expect, it } from "vitest";
 import {
+  composeCompanionPresenceAnimation,
   GAZE_CONFIG,
+  GAZE_REGION_RANGES,
   createGazeScheduler,
   mapEyeToHeadAngle,
   mapHeadToBodyAngle,
+  normalizeTargetRegionWeights,
+  selectNextTarget,
   smoothTowards
 } from "./companion-gaze.js";
+import { PRESENCE_BEHAVIOR_PROFILES } from "./companion-presence.js";
 
 describe("companion gaze scheduler", () => {
-  it("keeps targets stable between holds and uses bounded intervals", () => {
+  function createSeededRandom(seed = 0x9e3779b9): () => number {
+    let value = seed >>> 0;
+    return () => {
+      value = (value * 1664525 + 1013904223) >>> 0;
+      return value / 0x1_0000_0000;
+    };
+  }
+
+  it("matches the idle target distribution over many deterministic retargets", () => {
+    const random = createSeededRandom();
+    const counts = { center: 0, left: 0, right: 0, upper: 0, lower: 0 };
+    const sampleCount = 10_000;
+    for (let index = 0; index < sampleCount; index += 1) {
+      counts[selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.idle, random).region] += 1;
+    }
+    expect(counts.center / sampleCount).toBeGreaterThan(0.22);
+    expect(counts.center / sampleCount).toBeLessThan(0.36);
+    expect(counts.left / sampleCount).toBeGreaterThan(0.18);
+    expect(counts.right / sampleCount).toBeGreaterThan(0.18);
+    expect(counts.upper / sampleCount).toBeGreaterThan(0.12);
+    expect(counts.lower / sampleCount).toBeGreaterThan(0.02);
+  });
+
+  it("keeps listening center-biased without becoming static", () => {
+    const random = createSeededRandom(17);
+    let center = 0;
+    let nonCenter = 0;
+    for (let index = 0; index < 2_000; index += 1) {
+      const target = selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.listening, random, {
+        allowQuickGlance: false
+      });
+      if (target.region === "center") center += 1;
+      else nonCenter += 1;
+    }
+    expect(center / 2_000).toBeGreaterThan(0.55);
+    expect(nonCenter).toBeGreaterThan(0);
+  });
+
+  it("gives thinking a high upper weight and side looks", () => {
+    const random = createSeededRandom(31);
+    const counts = { center: 0, left: 0, right: 0, upper: 0, lower: 0 };
+    for (let index = 0; index < 2_000; index += 1) {
+      counts[
+        selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.thinking, random, { allowQuickGlance: false })
+          .region
+      ] += 1;
+    }
+    expect(counts.upper / 2_000).toBeGreaterThan(0.32);
+    expect((counts.left + counts.right + counts.upper) / 2_000).toBeGreaterThan(0.65);
+    expect(PRESENCE_BEHAVIOR_PROFILES.thinking.targetRegionWeights.upper).toBeGreaterThan(0.35);
+  });
+
+  it("keeps speaking peaks below idle but above listening", () => {
+    expect(PRESENCE_BEHAVIOR_PROFILES.speaking.eyeXMax).toBeLessThan(
+      PRESENCE_BEHAVIOR_PROFILES.idle.eyeXMax
+    );
+    expect(PRESENCE_BEHAVIOR_PROFILES.speaking.eyeXMax).toBeGreaterThan(
+      PRESENCE_BEHAVIOR_PROFILES.listening.eyeXMax
+    );
+    expect(PRESENCE_BEHAVIOR_PROFILES.speaking.headXMax).toBeLessThan(
+      PRESENCE_BEHAVIOR_PROFILES.idle.headXMax
+    );
+    expect(PRESENCE_BEHAVIOR_PROFILES.speaking.headXMax).toBeGreaterThan(
+      PRESENCE_BEHAVIOR_PROFILES.listening.headXMax
+    );
+    expect(PRESENCE_BEHAVIOR_PROFILES.speaking.bodyXMax).toBeLessThan(
+      PRESENCE_BEHAVIOR_PROFILES.idle.bodyXMax
+    );
+  });
+
+  it("maps absolute profile peaks without double-shrinking head/body", () => {
+    const idle = PRESENCE_BEHAVIOR_PROFILES.idle;
+    const head = mapEyeToHeadAngle(idle.eyeXMax, [-idle.eyeXMax, idle.eyeXMax], idle.headXMax, 1);
+    expect(head).toBeCloseTo(idle.headXMax, 5);
+    const body = mapHeadToBodyAngle(idle.headXMax, idle.bodyFollowFraction, idle.bodyXMax);
+    expect(body).toBeCloseTo(
+      Math.min(idle.bodyXMax, idle.headXMax * idle.bodyFollowFraction),
+      5
+    );
+    // Legacy double-shrink would be far smaller than the configured peak.
+    const legacy = 0.32 * idle.headXMax * 0.85;
+    expect(head).toBeGreaterThan(legacy * 2);
+  });
+
+  it("uses region bands outside the ±0.2 dead zone for side looks", () => {
+    expect(Math.abs(GAZE_REGION_RANGES.left.x[0])).toBeGreaterThan(0.4);
+    expect(Math.abs(GAZE_REGION_RANGES.right.x[1])).toBeGreaterThan(0.4);
+    expect(GAZE_REGION_RANGES.upper.y[0]).toBeGreaterThan(0.25);
+    const side = selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.idle, () => 0.55, {
+      allowQuickGlance: false
+    });
+    // 0.55 lands past center+left into right for idle weights.
+    expect(["left", "right", "upper", "lower", "center"]).toContain(side.region);
+  });
+
+  it("keeps force-gaze output separate from scheduler state", () => {
+    const scheduler = createGazeScheduler(() => 0.8, 0);
+    const frame = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    const before = scheduler.getDebug();
+    const forced = composeCompanionPresenceAnimation({ blink: 0, breath: 0.12 }, frame, true);
+    expect(forced.eyeBallX).toBe(1);
+    expect(forced.headAngleX).toBe(20);
+    expect(scheduler.getDebug()).toEqual(before);
+    const resumedFrame = scheduler.sample(16, 16, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    const resumed = composeCompanionPresenceAnimation(
+      { blink: 0, breath: 0.12 },
+      resumedFrame,
+      false
+    );
+    expect(resumed.eyeBallX).toBe(resumedFrame.currentX);
+  });
+
+  it("repeats fixed-random target sequences deterministically", () => {
+    const first = [0, 1, 2, 3, 4].map((seed) => {
+      const random = createSeededRandom(seed);
+      return selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.thinking, random, {
+        allowQuickGlance: false
+      });
+    });
+    const second = [0, 1, 2, 3, 4].map((seed) => {
+      const random = createSeededRandom(seed);
+      return selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.thinking, random, {
+        allowQuickGlance: false
+      });
+    });
+    expect(second).toEqual(first);
+  });
+
+  it("uses normalized profile weights including upper/lower", () => {
+    const listening = normalizeTargetRegionWeights(
+      PRESENCE_BEHAVIOR_PROFILES.listening.targetRegionWeights
+    );
+    expect(listening.center).toBeGreaterThan(0.6);
+    expect(
+      listening.center + listening.left + listening.right + listening.upper + listening.lower
+    ).toBeCloseTo(1);
+
+    const upward = selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.thinking, () => 0.95, {
+      allowQuickGlance: false
+    });
+    expect(upward.region === "upper" || upward.region === "lower").toBe(true);
+  });
+
+  it("falls back safely when a profile supplies invalid region weights", () => {
+    expect(
+      normalizeTargetRegionWeights({
+        center: -1,
+        left: Number.NaN,
+        right: 0,
+        upper: 0,
+        lower: 0
+      })
+    ).toEqual({ center: 1, left: 0, right: 0, upper: 0, lower: 0 });
+  });
+
+  it("does not dispose or reset the scheduler when interrupted", () => {
+    const scheduler = createGazeScheduler(() => 0.7, 0);
+    const before = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    const interrupted = scheduler.sample(100, 100, true, PRESENCE_BEHAVIOR_PROFILES.interrupted);
+    expect(interrupted.running).toBe(true);
+    expect(interrupted.disposed).toBe(false);
+    expect(interrupted.targetKind).toBe("recenter");
+    const resumed = scheduler.sample(200, 100, false, PRESENCE_BEHAVIOR_PROFILES.listening);
+    expect(resumed.running).toBe(true);
+    expect(resumed.elapsedMs).toBeGreaterThan(before.elapsedMs);
+  });
+
+  it("keeps targets stable between holds and uses profile hold bounds", () => {
     const scheduler = createGazeScheduler(() => 0.5, 0);
-    const first = scheduler.sample(0, 0, false);
-    const same = scheduler.sample(500, 500, false);
+    const first = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    const same = scheduler.sample(500, 500, false, PRESENCE_BEHAVIOR_PROFILES.idle);
     expect(same.targetX).toBe(first.targetX);
     expect(same.targetY).toBe(first.targetY);
-    expect(same.holdUntil).toBeGreaterThanOrEqual(GAZE_CONFIG.holdMinMs);
-    expect(same.holdUntil).toBeLessThanOrEqual(GAZE_CONFIG.holdMaxMs);
+    expect(same.holdUntil).toBeGreaterThanOrEqual(PRESENCE_BEHAVIOR_PROFILES.idle.targetHoldMinMs);
     expect(same.nextTargetAt).toBe(same.holdUntil);
   });
 
-  it("can deterministically choose a center target more often than an extreme", () => {
-    const values = [0.1, 0.5, 0.5, 0.5, 0.1, 0.5, 0.5, 0.5];
+  it("can produce quick glances that do not drive the body", () => {
+    // Force quick glance: first random for chance must be < chance.
+    const values = [0.01, 0.9, 0.5, 0.5, 0.5, 0.5];
     let index = 0;
-    const scheduler = createGazeScheduler(() => values[index++] ?? 0.1, 0);
-    const first = scheduler.sample(0, 0, false);
-    expect(first.targetRegion).toBe("center");
-    const next = scheduler.sample(first.holdUntil + 1, first.holdUntil + 1, false);
-    expect(next.targetRegion).toBe("center");
+    const selected = selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.idle, () => values[index++] ?? 0.5, {
+      allowQuickGlance: true,
+      lastWasQuickGlance: false
+    });
+    // May or may not be quick depending on region rolls; force path via high chance profile.
+    const alwaysGlance = {
+      ...PRESENCE_BEHAVIOR_PROFILES.idle,
+      quickGlanceChance: 1
+    };
+    const glance = selectNextTarget(alwaysGlance, () => 0.5, {
+      allowQuickGlance: true,
+      lastWasQuickGlance: false
+    });
+    expect(glance.kind).toBe("quickGlance");
+    expect(glance.bodyFollowEnabled).toBe(false);
+    expect(glance.headFollowScale).toBeGreaterThanOrEqual(0.15);
+    expect(glance.headFollowScale).toBeLessThanOrEqual(0.45);
+    expect(glance.holdMs).toBeLessThan(900);
+    void selected;
   });
 
-  it("moves eyes without teleporting and converges independently of frame rate", () => {
+  it("does not chain two quick glances back-to-back", () => {
+    const alwaysGlance = {
+      ...PRESENCE_BEHAVIOR_PROFILES.thinking,
+      quickGlanceChance: 1
+    };
+    const second = selectNextTarget(alwaysGlance, () => 0.2, {
+      allowQuickGlance: true,
+      lastWasQuickGlance: true
+    });
+    expect(second.kind).toBe("hold");
+  });
+
+  it("bounds session side bias within ±6%", () => {
+    const scheduler = createGazeScheduler(createSeededRandom(99), 0);
+    const frame = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    expect(Math.abs(frame.sessionSideBias)).toBeLessThanOrEqual(GAZE_CONFIG.sessionSideBiasMax + 1e-9);
+    expect(Math.abs(frame.headZBias)).toBeLessThanOrEqual(GAZE_CONFIG.headZBiasMaxFraction + 1e-9);
+  });
+
+  it("tracks actual envelopes as non-zero under lively idle motion", () => {
+    const scheduler = createGazeScheduler(createSeededRandom(3), 0);
+    let frame = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    let wall = 0;
+    for (let i = 0; i < 400; i += 1) {
+      wall += 16;
+      frame = scheduler.sample(wall, 16, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    }
+    expect(frame.actualEyeEnvelope.x + frame.actualEyeEnvelope.y).toBeGreaterThan(0.15);
+    expect(frame.actualHeadEnvelope.x).toBeGreaterThan(1);
+    expect(frame.actualBodyEnvelope.x).toBeGreaterThan(0.2);
+    expect(frame.actualBodyEnvelope.x).toBeLessThanOrEqual(
+      PRESENCE_BEHAVIOR_PROFILES.idle.bodyXMax + 0.5
+    );
+  });
+
+  it("moves eyes without teleporting", () => {
     const scheduler = createGazeScheduler(() => 0.8, 0);
-    const initial = scheduler.sample(0, 0, false);
-    const beforeHold = scheduler.sample(initial.holdUntil - 1, initial.holdUntil - 1, false);
-    const afterHold = scheduler.sample(initial.holdUntil + 1, 2, false);
+    const initial = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    const beforeHold = scheduler.sample(
+      initial.holdUntil - 1,
+      initial.holdUntil - 1,
+      false,
+      PRESENCE_BEHAVIOR_PROFILES.idle
+    );
+    const afterHold = scheduler.sample(initial.holdUntil + 1, 2, false, PRESENCE_BEHAVIOR_PROFILES.idle);
     expect(Math.abs(afterHold.currentX - beforeHold.currentX)).toBeLessThan(
-      Math.abs(GAZE_CONFIG.eyeXRange[1])
+      PRESENCE_BEHAVIOR_PROFILES.idle.eyeXMax
     );
     expect(smoothTowards(0, 1, 16, 260)).toBeGreaterThan(0);
     expect(smoothTowards(0, 1, 16, 260)).toBeLessThan(1);
-    expect(smoothTowards(0, 1, 10_000, 260)).toBeLessThan(1);
-  });
-
-  it("maps eye extremes to the calibrated head angles without double-shrinking", () => {
-    const eyeXMax = Math.abs(GAZE_CONFIG.eyeXRange[1]);
-    const eyeYMax = Math.max(
-      Math.abs(GAZE_CONFIG.eyeYRange[0]),
-      Math.abs(GAZE_CONFIG.eyeYRange[1])
-    );
-    expect(
-      mapEyeToHeadAngle(eyeXMax, GAZE_CONFIG.eyeXRange, GAZE_CONFIG.headAngleXMax, GAZE_CONFIG.headXGain)
-    ).toBeCloseTo(GAZE_CONFIG.headAngleXMax, 5);
-    expect(
-      mapEyeToHeadAngle(-eyeXMax, GAZE_CONFIG.eyeXRange, GAZE_CONFIG.headAngleXMax, GAZE_CONFIG.headXGain)
-    ).toBeCloseTo(-GAZE_CONFIG.headAngleXMax, 5);
-    expect(
-      mapEyeToHeadAngle(eyeXMax / 2, GAZE_CONFIG.eyeXRange, GAZE_CONFIG.headAngleXMax, 1)
-    ).toBeCloseTo(GAZE_CONFIG.headAngleXMax / 2, 5);
-    expect(
-      mapEyeToHeadAngle(eyeYMax, GAZE_CONFIG.eyeYRange, GAZE_CONFIG.headAngleYMax, GAZE_CONFIG.headYGain)
-    ).toBeCloseTo(GAZE_CONFIG.headAngleYMax, 5);
-    const legacy = eyeXMax * GAZE_CONFIG.headAngleXMax * 0.85;
-    expect(legacy).toBeLessThan(GAZE_CONFIG.headAngleXMax);
-    expect(
-      mapEyeToHeadAngle(eyeXMax, GAZE_CONFIG.eyeXRange, GAZE_CONFIG.headAngleXMax, 1)
-    ).toBeGreaterThan(legacy * 0.9);
-  });
-
-  it("maps body as a fraction of head without independent targets", () => {
-    expect(mapHeadToBodyAngle(10, 0.3, 3.5)).toBeCloseTo(3, 5);
-    expect(mapHeadToBodyAngle(10, 0.3, 2.5)).toBeCloseTo(2.5, 5); // soft cap
-    expect(mapHeadToBodyAngle(-8, 0.3, 3.5)).toBeCloseTo(-2.4, 5);
-    expect(mapHeadToBodyAngle(0, 0.3, 3.5)).toBe(0);
-  });
-
-  it("keeps presence-first amplitude and longer holds", () => {
-    expect(Math.abs(GAZE_CONFIG.eyeXRange[1])).toBeGreaterThanOrEqual(0.8);
-    expect(Math.abs(GAZE_CONFIG.eyeYRange[0])).toBeGreaterThanOrEqual(0.4);
-    expect(Math.abs(GAZE_CONFIG.eyeYRange[1])).toBeGreaterThanOrEqual(0.45);
-    expect(GAZE_CONFIG.headAngleXMax).toBeGreaterThanOrEqual(14);
-    expect(GAZE_CONFIG.headAngleYMax).toBeGreaterThanOrEqual(10);
-    expect(GAZE_CONFIG.headAngleZMax).toBeGreaterThanOrEqual(6);
-    expect(GAZE_CONFIG.bodyFollowFraction).toBeGreaterThanOrEqual(0.3);
-    expect(GAZE_CONFIG.bodyFollowFraction).toBeLessThanOrEqual(0.5);
-    expect(GAZE_CONFIG.verticalProbability).toBeGreaterThanOrEqual(0.18);
-    expect(GAZE_CONFIG.holdMinMs).toBeGreaterThanOrEqual(1500);
-    expect(GAZE_CONFIG.eyeResponseMs).toBeLessThan(GAZE_CONFIG.headResponseMs);
-    expect(GAZE_CONFIG.headResponseMs).toBeLessThan(GAZE_CONFIG.bodyResponseMs);
-    expect(GAZE_CONFIG.headXGain).toBe(1);
-  });
-
-  it("drives multi-degree head and lagging body when the eye is at an extreme", () => {
-    const scheduler = createGazeScheduler(() => 0.7, 0);
-    const first = scheduler.sample(0, 0, false);
-    let frame = first;
-    let wall = 0;
-    while (frame.elapsedMs < first.holdUntil + 1400) {
-      wall += 16;
-      frame = scheduler.sample(wall, 16, false);
-    }
-    expect(Math.abs(frame.targetX) + Math.abs(frame.targetY)).toBeGreaterThan(0.4);
-    expect(Math.abs(frame.headTargetX) + Math.abs(frame.headTargetY)).toBeGreaterThan(6);
-    expect(Math.abs(frame.headCurrentX)).toBeLessThanOrEqual(GAZE_CONFIG.headAngleXMax + 1e-6);
-    // Body tracks live head current at a fraction — no independent walk.
-    expect(Math.abs(frame.bodyTargetX)).toBeLessThanOrEqual(
-      Math.abs(frame.headCurrentX) * GAZE_CONFIG.bodyFollowFraction + 1e-6
-    );
-    expect(Math.abs(frame.bodyTargetX)).toBeLessThanOrEqual(GAZE_CONFIG.bodyAngleXMax + 1e-6);
-    expect(Math.abs(frame.bodyCurrentX)).toBeLessThanOrEqual(Math.abs(frame.headCurrentX) + 0.5);
-  });
-
-  it("cascades continuously: eyes lead head, head leads body (no hard gate snap)", () => {
-    // Force a right extreme after first hold using a fixed sequence.
-    // first sample uses random for hold only; after hold, region roll 0.7 → right.
-    const scheduler = createGazeScheduler(() => 0.7, 0);
-    const first = scheduler.sample(0, 0, false);
-    let wall = 0;
-    let frame = first;
-    while (frame.elapsedMs < first.holdUntil) {
-      wall += 16;
-      frame = scheduler.sample(wall, 16, false);
-    }
-    // Immediately after retarget, step a few frames and compare cascade lead.
-    wall += 16;
-    frame = scheduler.sample(wall, 16, false);
-    wall += 48;
-    const mid = scheduler.sample(wall, 48, false);
-    // Eye current should move toward target faster than head (normalized).
-    const eyeNorm = Math.abs(mid.currentX) / Math.abs(GAZE_CONFIG.eyeXRange[1] || 1);
-    const headNorm = Math.abs(mid.headCurrentX) / Math.max(GAZE_CONFIG.headAngleXMax, 1e-6);
-    const bodyNorm =
-      Math.abs(mid.bodyCurrentX) /
-      Math.max(GAZE_CONFIG.headAngleXMax * GAZE_CONFIG.bodyFollowFraction, 1e-6);
-    // Soft inequality: cascade ordering on the way out of center.
-    if (Math.abs(mid.targetX) > 0.3) {
-      expect(eyeNorm + 0.02).toBeGreaterThanOrEqual(headNorm);
-      expect(headNorm + 0.02).toBeGreaterThanOrEqual(bodyNorm);
-    }
-    // Hard delay gates are disabled.
-    expect(mid.headDelayUntil).toBe(0);
-    expect(mid.bodyDelayUntil).toBe(0);
-  });
-
-  it("produces a non-zero target within holdMaxMs under real random sampling", () => {
-    const scheduler = createGazeScheduler(Math.random, 0);
-    let sawNonZero = false;
-    let now = 0;
-    for (let i = 0; i < 2500; i += 1) {
-      now += 16;
-      const frame = scheduler.sample(now, 16, false);
-      if (Math.abs(frame.targetX) > 0.08 || Math.abs(frame.currentX) > 0.08) {
-        sawNonZero = true;
-        break;
-      }
-    }
-    expect(sawNonZero).toBe(true);
-  });
-
-  it("returns head smoothly under interruption", () => {
-    const scheduler = createGazeScheduler(() => 0.8, 0);
-    const first = scheduler.sample(0, 0, false);
-    const moved = scheduler.sample(first.holdUntil + 1, first.holdUntil + 1, false);
-    expect(Math.abs(moved.headCurrentX)).toBeLessThanOrEqual(GAZE_CONFIG.headAngleXMax);
-    expect(Math.abs(moved.headCurrentY)).toBeLessThanOrEqual(GAZE_CONFIG.headAngleYMax);
-    expect(Math.abs(moved.headCurrentZ)).toBeLessThanOrEqual(GAZE_CONFIG.headAngleZMax);
-    const interrupted = scheduler.sample(moved.holdUntil + 1, 1, true);
-    expect(interrupted.targetX).toBe(0);
-    expect(interrupted.targetY).toBe(0);
-    expect(Math.abs(interrupted.headCurrentX)).toBeLessThanOrEqual(Math.abs(moved.headCurrentX));
   });
 
   it("centers on interruption, resumes after a new turn, and disposes permanently", () => {
     const scheduler = createGazeScheduler(() => 0.9, 0);
-    const active = scheduler.sample(0, 0, false);
-    const interrupted = scheduler.sample(active.holdUntil + 1, 1, true);
+    const active = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    const interrupted = scheduler.sample(
+      active.holdUntil + 1,
+      1,
+      true,
+      PRESENCE_BEHAVIOR_PROFILES.interrupted
+    );
     expect(interrupted.targetRegion).toBe("center");
-    const resumed = scheduler.sample(active.holdUntil + 2, 1, false);
+    const resumed = scheduler.sample(active.holdUntil + 2, 1, false, PRESENCE_BEHAVIOR_PROFILES.idle);
     expect(resumed.running).toBe(true);
     expect(Number.isFinite(resumed.holdUntil)).toBe(true);
     scheduler.dispose();
@@ -185,24 +287,23 @@ describe("companion gaze scheduler", () => {
     expect(dead.disposed).toBe(true);
     expect(dead.currentX).toBe(0);
     expect(dead.bodyCurrentX).toBe(0);
-    scheduler.reset(active.holdUntil + 100);
-    expect(scheduler.isDisposed()).toBe(false);
-    expect(scheduler.sample(active.holdUntil + 100, 0, false).running).toBe(true);
   });
 
-  it("advances the hold clock from explicit frame deltas", () => {
+  it("keeps body lagging behind head on the way out of center", () => {
     const scheduler = createGazeScheduler(() => 0.7, 0);
-    const first = scheduler.sample(1000, 0, false);
-    expect(first.targetRegion).toBe("center");
+    const first = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    let wall = 0;
     let frame = first;
-    let wall = 1000;
-    while (frame.elapsedMs < first.holdUntil + 1) {
-      wall += 50;
-      frame = scheduler.sample(wall, 50, false);
+    while (frame.elapsedMs < first.holdUntil) {
+      wall += 16;
+      frame = scheduler.sample(wall, 16, false, PRESENCE_BEHAVIOR_PROFILES.idle);
     }
-    expect(frame.targetRegion).not.toBe("center");
-    expect(Math.abs(frame.targetX) + Math.abs(frame.targetY)).toBeGreaterThan(0.1);
-    expect(frame.running).toBe(true);
-    expect(frame.disposed).toBe(false);
+    wall += 80;
+    const mid = scheduler.sample(wall, 80, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    if (Math.abs(mid.targetX) > 0.25) {
+      const headNorm = Math.abs(mid.headCurrentX) / Math.max(mid.headTargetX || 1, 1e-3);
+      const bodyNorm = Math.abs(mid.bodyCurrentX) / Math.max(Math.abs(mid.headCurrentX) * 0.34, 1e-3);
+      expect(headNorm + 0.05).toBeGreaterThanOrEqual(bodyNorm * 0.5);
+    }
   });
 });

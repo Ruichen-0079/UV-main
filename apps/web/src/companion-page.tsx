@@ -3,12 +3,13 @@ import { apiClient } from "./api/client.js";
 import { CompanionBus, type CompanionBusMessage } from "./companion-bus.js";
 import {
   createCompanionBlinkScheduler,
+  createPresenceBehaviorTransition,
   createInterruptedResetScheduler,
   getCompanionAnimation,
   reduceCompanionPresence,
   type CompanionPresenceState
 } from "./companion-presence.js";
-import { createGazeScheduler } from "./companion-gaze.js";
+import { composeCompanionPresenceAnimation, createGazeScheduler } from "./companion-gaze.js";
 import { createCompanionSpeechBuffer } from "./companion-speech-buffer.js";
 import { createCompanionReadyAnnouncer } from "./companion-voice-sync.js";
 import { createSpeechSegmentDeduper } from "./speech-segment-dedup.js";
@@ -138,11 +139,17 @@ export function CompanionPage(): JSX.Element {
           onItemState: (id, state) => {
             const requestIdForItem = sessionRef.current?.requestId ?? "unknown";
             const sequence = id === undefined ? null : Number(id);
-            recordSpeechLedger(requestIdForItem, Number.isFinite(sequence) ? sequence : null, state);
+            recordSpeechLedger(
+              requestIdForItem,
+              Number.isFinite(sequence) ? sequence : null,
+              state
+            );
             if (import.meta.env.DEV && id !== undefined) {
-              const states = ((window as unknown as {
-                __yuviSpeechStates?: Record<string, string>;
-              }).__yuviSpeechStates ??= {});
+              const states = ((
+                window as unknown as {
+                  __yuviSpeechStates?: Record<string, string>;
+                }
+              ).__yuviSpeechStates ??= {});
               states[`${requestIdForItem}:${id}`] = state;
             }
           },
@@ -198,7 +205,11 @@ export function CompanionPage(): JSX.Element {
         text: message.text,
         language: message.language
       });
-      recordSpeechLedger(message.requestId, message.sequence, accepted ? "pre-ready-buffer" : "buffer-reject");
+      recordSpeechLedger(
+        message.requestId,
+        message.sequence,
+        accepted ? "pre-ready-buffer" : "buffer-reject"
+      );
     }
 
     function handleMessage(message: CompanionBusMessage): void {
@@ -299,6 +310,7 @@ export function CompanionPage(): JSX.Element {
     // instances and must never keep sampling a disposed ref.
     let blinkScheduler = createCompanionBlinkScheduler(Math.random, performance.now());
     let gazeScheduler = createGazeScheduler(Math.random, performance.now());
+    const behaviorTransition = createPresenceBehaviorTransition(presenceRef.current);
     blinkSchedulerRef.current = blinkScheduler;
     gazeSchedulerRef.current = gazeScheduler;
 
@@ -317,8 +329,7 @@ export function CompanionPage(): JSX.Element {
       }
       // Re-check visibility every frame. Do not permanently kill the loop on a
       // single "hidden" event — Tauri multi-window can miss the matching show.
-      const hidden =
-        typeof document !== "undefined" && document.visibilityState === "hidden";
+      const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
       if (hidden) {
         previousNow = now;
         frame = requestAnimationFrame(animate);
@@ -327,7 +338,12 @@ export function CompanionPage(): JSX.Element {
 
       const frameDelta = Math.max(0, now - previousNow);
       previousNow = now;
-      const currentPresence = presenceRef.current;
+      // Development-only acceptance hook: it replaces only the state input;
+      // the same profile transition, blink, gaze, and breath schedulers still
+      // run normally. Production builds never read this property.
+      const forcedPresence =
+        import.meta.env.DEV && typeof window !== "undefined" ? readForcedPresence(window) : null;
+      const currentPresence = forcedPresence ?? presenceRef.current;
       const interrupted = currentPresence === "interrupted";
 
       // Self-heal: if a disposed scheduler was ever left in place, replace it.
@@ -336,44 +352,22 @@ export function CompanionPage(): JSX.Element {
         gazeSchedulerRef.current = gazeScheduler;
       }
 
+      const behavior = behaviorTransition.sample(currentPresence, frameDelta, now);
+
       // Speaking continues to blink; only interrupted freezes eyes open.
-      const blink = interrupted ? 0 : blinkScheduler.sample(now, currentPresence);
-      const animation = getCompanionAnimation(currentPresence, now, blink);
+      const blink = interrupted
+        ? 0
+        : blinkScheduler.sample(now, currentPresence, behavior.effective);
+      const animation = getCompanionAnimation(currentPresence, now, blink, behavior.effective);
       // Explicit (now, dt, interrupted) so hold clocks advance from frameDelta
       // even if wall-clock origins differ between rAF and performance.now().
-      const gaze = gazeScheduler.sample(now, frameDelta, interrupted);
+      const gaze = gazeScheduler.sample(now, frameDelta, interrupted, behavior.effective);
 
-      // DEV force path only overrides the final output — the scheduler keeps
-      // ticking underneath so natural motion resumes when force is cleared.
       const forceGaze =
         import.meta.env.DEV &&
         typeof window !== "undefined" &&
         (window as typeof window & { __yuviForceGaze?: boolean }).__yuviForceGaze === true;
-      const presenceAnimation = forceGaze
-        ? {
-            blink: animation.blink,
-            breath: animation.breath,
-            eyeBallX: 1,
-            eyeBallY: 0.5,
-            headAngleX: 20,
-            headAngleY: 10,
-            headAngleZ: 8,
-            bodyAngleX: 6,
-            bodyAngleY: 3,
-            bodyAngleZ: 4
-          }
-        : {
-            blink: animation.blink,
-            breath: animation.breath,
-            eyeBallX: gaze.currentX,
-            eyeBallY: gaze.currentY,
-            headAngleX: gaze.headCurrentX,
-            headAngleY: gaze.headCurrentY,
-            headAngleZ: gaze.headCurrentZ,
-            bodyAngleX: gaze.bodyCurrentX,
-            bodyAngleY: gaze.bodyCurrentY,
-            bodyAngleZ: gaze.bodyCurrentZ
-          };
+      const presenceAnimation = composeCompanionPresenceAnimation(animation, gaze, forceGaze);
       lumiRef.current?.setPresenceAnimation(presenceAnimation);
 
       if (import.meta.env.DEV && typeof window !== "undefined") {
@@ -385,7 +379,35 @@ export function CompanionPage(): JSX.Element {
           running: true,
           presence: currentPresence,
           interrupted,
+          activeBehaviorProfile: behavior.activeState,
+          previousBehaviorProfile: behavior.previousState,
+          behaviorTransitionProgress: behavior.transitionProgress,
+          effectiveTransitionMs: behavior.effectiveTransitionMs,
+          effectiveEyeAmplitudeScale: behavior.effective.eyeAmplitudeScale,
+          effectiveHeadAmplitudeScale: behavior.effective.headAmplitudeScale,
+          effectiveBodyAmplitudeScale: behavior.effective.bodyAmplitudeScale,
+          effectiveEyeXMax: behavior.effective.eyeXMax,
+          effectiveHeadXMax: behavior.effective.headXMax,
+          effectiveBodyXMax: behavior.effective.bodyXMax,
+          effectiveBlinkIntervalScale: behavior.effective.blinkIntervalScale,
+          effectiveBreathSpeedScale: behavior.effective.breathSpeedScale,
+          effectiveTargetRegionWeights: behavior.effective.targetRegionWeights,
+          effectiveHoldRange: {
+            min: behavior.effective.targetHoldMinMs,
+            max: behavior.effective.targetHoldMaxMs
+          },
+          recenterBias: behavior.effective.recenterBias,
+          quickGlanceChance: behavior.effective.quickGlanceChance,
+          quickGlanceActive: gaze.quickGlanceActive,
+          currentTargetKind: gaze.targetKind,
+          currentTargetRegion: gaze.targetRegion,
+          sessionSideBias: gaze.sessionSideBias,
+          actualEyeEnvelope: gaze.actualEyeEnvelope,
+          actualHeadEnvelope: gaze.actualHeadEnvelope,
+          actualBodyEnvelope: gaze.actualBodyEnvelope,
+          lastPresenceTransitionAt: behavior.lastPresenceTransitionAt,
           forceGaze: forceGaze === true,
+          forcedPresence,
           schedulerDisposed: gazeScheduler.isDisposed(),
           schedulerPaused: false,
           hiddenDocument: hidden,
@@ -448,6 +470,11 @@ export function CompanionPage(): JSX.Element {
           appliedBodyAngleX: presenceAnimation.bodyAngleX,
           appliedBodyAngleY: presenceAnimation.bodyAngleY,
           appliedBodyAngleZ: presenceAnimation.bodyAngleZ,
+          // Lumi has no writable arm params / no arm idle motions in model3.
+          // Independent arm idle requires Cubism Editor (.cmo3) parameters or C motion library.
+          armControlCapability: "none",
+          armControlNote:
+            "No writable Arm/Shoulder/Wrist params; HandPhysics are outputs; no arm motion curves in model3. Chin-rest/play-game are expression Button toggles only.",
           activeRafCount: 1,
           now
         };
@@ -585,6 +612,20 @@ function presenceLabel(state: CompanionPresenceState): string {
       return "interrupted";
     case "idle":
       return "idle";
+  }
+}
+
+function readForcedPresence(windowObject: Window): CompanionPresenceState | null {
+  const value = (windowObject as Window & { __yuviForcePresence?: unknown }).__yuviForcePresence;
+  switch (value) {
+    case "idle":
+    case "listening":
+    case "thinking":
+    case "speaking":
+    case "interrupted":
+      return value;
+    default:
+      return null;
   }
 }
 
