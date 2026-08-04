@@ -1,4 +1,12 @@
-import { useEffect, useReducer, useRef, useState, type Dispatch } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+  type Dispatch
+} from "react";
 import {
   initialServiceStatusState,
   reduceServiceStatus,
@@ -18,23 +26,22 @@ import {
 /**
  * Compact service status strip for the Tauri main window.
  * Companion must not mount this component.
+ * Isolated reducer — status ticks must not re-render chat/settings.
  */
-export function ServiceStatusPanel(): JSX.Element | null {
+export const ServiceStatusPanel = memo(function ServiceStatusPanel(): JSX.Element | null {
   const [state, dispatch] = useReducer(reduceServiceStatus, initialServiceStatusState);
   const [expanded, setExpanded] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const startedRef = useRef(false);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
     if (!isTauriRuntime() && !isServiceSupervisorAvailable()) {
       return;
     }
-    // StrictMode-safe: only one subscription per mount cycle.
-    if (startedRef.current) return;
-    startedRef.current = true;
-
+    mountedRef.current = true;
     const unsubscribe = subscribeServiceStatus({
       onSnapshot(snapshot) {
+        if (!mountedRef.current) return;
         dispatch({
           type: "snapshot",
           instanceId: snapshot.instanceId,
@@ -44,9 +51,11 @@ export function ServiceStatusPanel(): JSX.Element | null {
         });
       },
       onConnected(instanceId) {
+        if (!mountedRef.current) return;
         dispatch({ type: "supervisor-connected", instanceId });
       },
       onDisconnected(error) {
+        if (!mountedRef.current) return;
         if (error) {
           dispatch({ type: "supervisor-disconnected", error });
         } else {
@@ -56,10 +65,20 @@ export function ServiceStatusPanel(): JSX.Element | null {
     });
 
     return () => {
-      startedRef.current = false;
+      mountedRef.current = false;
       unsubscribe();
     };
   }, []);
+
+  const onRefresh = useCallback(() => {
+    if (busyId) return;
+    void runAction(null, "refresh", dispatch, setBusyId);
+  }, [busyId]);
+
+  const onRetryRuntime = useCallback(() => {
+    if (busyId) return;
+    void runAction("runtime", "restart", dispatch, setBusyId);
+  }, [busyId]);
 
   if (!isTauriRuntime() && !isServiceSupervisorAvailable()) {
     return null;
@@ -67,13 +86,12 @@ export function ServiceStatusPanel(): JSX.Element | null {
 
   const primary = selectPrimaryServices(state.services);
   const chat = runtimeChatAvailability(state.services);
+  const refreshBusy = busyId === "all";
 
   return (
     <section className="border-b border-ink-200 bg-white px-4 py-2">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">
-          Services
-        </span>
+        <span className="text-xs font-semibold tracking-wide text-ink-500">Services</span>
         {primary.map((service) => (
           <ServiceChip key={service.id} service={service} />
         ))}
@@ -81,9 +99,10 @@ export function ServiceStatusPanel(): JSX.Element | null {
           <button
             type="button"
             className="button-secondary text-xs"
-            onClick={() => void runAction(null, "refresh", dispatch, setBusyId)}
+            disabled={refreshBusy}
+            onClick={onRefresh}
           >
-            Refresh
+            {refreshBusy ? "Refreshing…" : "Refresh"}
           </button>
           <button
             type="button"
@@ -98,19 +117,13 @@ export function ServiceStatusPanel(): JSX.Element | null {
       {!chat.available && (
         <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
           Chat unavailable: {chat.reason ?? "Runtime is not healthy."}{" "}
-          <button
-            type="button"
-            className="underline"
-            onClick={() => void runAction("runtime", "restart", dispatch, setBusyId)}
-          >
+          <button type="button" className="underline" disabled={Boolean(busyId)} onClick={onRetryRuntime}>
             Retry Runtime
           </button>
         </div>
       )}
 
-      {state.lastError && (
-        <div className="mt-2 text-xs text-rose-600">{state.lastError}</div>
-      )}
+      {state.lastError && <div className="mt-2 text-xs text-rose-600">{state.lastError}</div>}
 
       {expanded && (
         <div className="mt-3 grid gap-2 md:grid-cols-2">
@@ -119,18 +132,29 @@ export function ServiceStatusPanel(): JSX.Element | null {
               key={service.id}
               service={service}
               busy={busyId === service.id}
-              onRestart={() => void runAction(service.id, "restart", dispatch, setBusyId)}
-              onStop={() => void runAction(service.id, "stop", dispatch, setBusyId)}
-              onStart={() => void runAction(service.id, "start", dispatch, setBusyId)}
+              onRestart={() => {
+                if (busyId) return;
+                void runAction(service.id, "restart", dispatch, setBusyId);
+              }}
+              onStop={() => {
+                if (busyId) return;
+                void runAction(service.id, "stop", dispatch, setBusyId);
+              }}
+              onStart={() => {
+                if (busyId) return;
+                void runAction(service.id, "start", dispatch, setBusyId);
+              }}
             />
           ))}
         </div>
       )}
     </section>
   );
-}
+});
 
-function ServiceChip(props: { service: UiServiceSnapshot }): JSX.Element {
+const ServiceChip = memo(function ServiceChip(props: {
+  service: UiServiceSnapshot;
+}): JSX.Element {
   const tone = statusTone(props.service.status);
   return (
     <span
@@ -139,12 +163,14 @@ function ServiceChip(props: { service: UiServiceSnapshot }): JSX.Element {
     >
       <span className="font-medium">{shortLabel(props.service)}</span>
       <span className="opacity-70">{props.service.status}</span>
-      <span className="opacity-50">{props.service.ownership === "owned" ? "owned" : props.service.ownership}</span>
+      <span className="opacity-50">
+        {props.service.ownership === "owned" ? "owned" : props.service.ownership}
+      </span>
     </span>
   );
-}
+});
 
-function ServiceDetailCard(props: {
+const ServiceDetailCard = memo(function ServiceDetailCard(props: {
   service: UiServiceSnapshot;
   busy: boolean;
   onRestart(): void;
@@ -156,8 +182,8 @@ function ServiceDetailCard(props: {
     <div className="rounded-lg border border-ink-200 bg-ink-50/40 p-3 text-xs">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="font-semibold text-ink-800">{service.label}</div>
-          <div className="text-ink-600">{service.summary}</div>
+          <div className="font-semibold text-ink-900">{service.label}</div>
+          <div className="text-ink-500">{service.summary}</div>
         </div>
         <span className={`rounded px-1.5 py-0.5 ${statusTone(service.status)}`}>
           {service.status}
@@ -209,7 +235,7 @@ function ServiceDetailCard(props: {
       </div>
     </div>
   );
-}
+});
 
 function shortLabel(service: UiServiceSnapshot): string {
   switch (service.id) {

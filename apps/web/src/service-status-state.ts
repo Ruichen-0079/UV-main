@@ -69,6 +69,34 @@ export const initialServiceStatusState: ServiceStatusState = {
   lastError: null
 };
 
+/** Compare UI-relevant service fields; ignore checkedAt/updatedAt clock churn. */
+export function servicesUiEqual(
+  a: UiServiceSnapshot[],
+  b: UiServiceSnapshot[]
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i]!;
+    const right = b[i]!;
+    if (
+      left.id !== right.id ||
+      left.status !== right.status ||
+      left.ownership !== right.ownership ||
+      left.summary !== right.summary ||
+      left.detail !== right.detail ||
+      left.lastError !== right.lastError ||
+      left.url !== right.url ||
+      left.managed !== right.managed ||
+      left.canRestart !== right.canRestart ||
+      left.canStop !== right.canStop ||
+      left.label !== right.label
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function reduceServiceStatus(
   state: ServiceStatusState,
   action: ServiceStatusAction
@@ -77,6 +105,9 @@ export function reduceServiceStatus(
     case "reset":
       return { ...initialServiceStatusState };
     case "supervisor-connected":
+      if (state.connected && state.instanceId === action.instanceId && !state.lastError) {
+        return state;
+      }
       return {
         ...state,
         ready: true,
@@ -90,7 +121,17 @@ export function reduceServiceStatus(
         connected: false,
         lastError: action.error ?? state.lastError
       };
-    case "snapshot":
+    case "snapshot": {
+      if (
+        state.connected &&
+        state.instanceId === action.instanceId &&
+        state.shuttingDown === action.shuttingDown &&
+        state.lastError === null &&
+        servicesUiEqual(state.services, action.services)
+      ) {
+        // Same UI-visible snapshot — skip re-render (updatedAt alone is noise).
+        return state;
+      }
       return {
         ...state,
         ready: true,
@@ -101,7 +142,9 @@ export function reduceServiceStatus(
         updatedAt: action.updatedAt,
         lastError: null
       };
+    }
     case "local-error":
+      if (state.lastError === action.error) return state;
       return { ...state, lastError: action.error };
     default:
       return state;

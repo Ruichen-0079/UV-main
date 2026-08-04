@@ -63,7 +63,7 @@ TypeScript interface in `packages/memory/src/backend.ts`:
 Implementations:
 
 - `LegacyMemoryBackend` — wraps existing `MemoryRepository`
-- `Mem0MemoryBackend` — HTTP client to sidecar `:6130`
+- `Mem0MemoryBackend` — HTTP client to sidecar `:6131`
 - factory `createMemoryBackend({ kind })` — **default `legacy`**
 
 ## 3. Scope encoding
@@ -106,7 +106,7 @@ See `services/memory-mem0/README.md`.
 
 ```env
 MEMORY_BACKEND=mem0
-MEM0_BASE_URL=http://127.0.0.1:6130
+MEM0_BASE_URL=http://127.0.0.1:6131
 MEM0_RUNTIME_TIMEOUT_MS=600
 MEM0_RUNTIME_HEALTH_TIMEOUT_MS=1000
 # Explicit local single-user scope (required when request omits IDs)

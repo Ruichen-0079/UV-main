@@ -531,24 +531,25 @@ export function CompanionPage(): JSX.Element {
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-transparent text-white">
-      {isTauriRuntime() && (
-        <div
-          data-tauri-drag-region
-          className="absolute inset-x-0 top-0 z-0 h-6 cursor-grab touch-none select-none border-b border-white/5 bg-white/5"
-          aria-label="Drag window"
-          title="Drag window"
-        >
-          <div className="pointer-events-none absolute left-1/2 top-1/2 h-1 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/25" />
-        </div>
-      )}
       <LumiCanvas
         ref={lumiRef}
         requestedPresence={toLumiPresence(presence)}
         className="h-full w-full rounded-none"
         showFramingToggle={false}
       />
+      {/* Drag region above the canvas so WebView native drag is not stolen by WebGL. */}
+      {isTauriRuntime() && (
+        <div
+          data-tauri-drag-region
+          className="absolute inset-x-0 top-0 z-30 h-7 cursor-grab touch-none select-none border-b border-white/5 bg-white/5"
+          aria-label="Drag window"
+          title="Drag window"
+        >
+          <div className="pointer-events-none absolute left-1/2 top-1/2 h-1 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/25" />
+        </div>
+      )}
       <div
-        className="pointer-events-none absolute left-2 top-2 rounded bg-black/40 px-2 py-1 text-xs"
+        className="pointer-events-none absolute left-2 top-9 z-20 rounded bg-black/40 px-2 py-1 text-xs"
         aria-live="polite"
       >
         {presenceLabel(presence)} · {voiceStatusLabel(voiceStatus)} · voice{" "}

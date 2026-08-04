@@ -119,7 +119,7 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
       extractor: parseMemoryExtractor(env["MEMORY_EXTRACTOR"]),
       backend: parseMemoryBackend(env["MEMORY_BACKEND"]),
       databaseUrl: emptyToUndefined(env["DATABASE_URL"]),
-      mem0BaseUrl: emptyToUndefined(env["MEM0_BASE_URL"]) ?? "http://127.0.0.1:6130",
+      mem0BaseUrl: emptyToUndefined(env["MEM0_BASE_URL"]) ?? "http://127.0.0.1:6131",
       /** Chat-path Mem0 search timeout (default 600ms). */
       mem0TimeoutMs: parsePositiveInteger(env["MEM0_RUNTIME_TIMEOUT_MS"], 600),
       mem0HealthTimeoutMs: parsePositiveInteger(env["MEM0_RUNTIME_HEALTH_TIMEOUT_MS"], 1000),

@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     )
 
     mem0_sidecar_host: str = "127.0.0.1"
-    mem0_sidecar_port: int = 6130
+    mem0_sidecar_port: int = 6131
 
     mem0_embedder_provider: str = "ollama"
     mem0_embedder_model: str = FIXED_EMBEDDER_MODEL

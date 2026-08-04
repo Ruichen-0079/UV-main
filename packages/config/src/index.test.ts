@@ -32,7 +32,7 @@ describe("runtime config", () => {
     expect(config.memory.repository).toBe("postgres");
     expect(config.memory.extractor).toBe("llm");
     expect(config.memory.backend).toBe("legacy");
-    expect(config.memory.mem0BaseUrl).toBe("http://127.0.0.1:6130");
+    expect(config.memory.mem0BaseUrl).toBe("http://127.0.0.1:6131");
     expect(config.memory.databaseUrl).toBe("postgres://example");
     expect(config.infrastructure.eventBusDriver).toBe("in-memory");
   });

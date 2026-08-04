@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST = os.environ.get("MEM0_SIDECAR_HOST", "127.0.0.1")
-PORT = int(os.environ.get("MEM0_SIDECAR_PORT", "6130"))
+PORT = int(os.environ.get("MEM0_SIDECAR_PORT", "6131"))
 BASE = f"http://{HOST}:{PORT}"
 SCOPE = "yuvi:v1:user:perf-bench:character:alice"
 N = 10
