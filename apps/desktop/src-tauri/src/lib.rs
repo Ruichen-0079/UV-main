@@ -1,4 +1,10 @@
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+mod supervisor;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+
+use tauri::{Manager, RunEvent};
 
 /// Main chat window surface. Hash routing keeps the single static build
 /// working in both dev (Vite dev server) and packaged (frontendDist) mode.
@@ -8,11 +14,13 @@ const MAIN_WINDOW_URL: &str = "index.html#/main";
 /// the Web Audio analysis chain.
 const COMPANION_WINDOW_URL: &str = "index.html#/companion";
 
-fn build_companion_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
-    WebviewWindowBuilder::new(
+static EXIT_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn build_companion_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    tauri::WebviewWindowBuilder::new(
         app,
         "companion",
-        WebviewUrl::App(COMPANION_WINDOW_URL.into()),
+        tauri::WebviewUrl::App(COMPANION_WINDOW_URL.into()),
     )
     .title("YUVI Companion")
     .inner_size(480.0, 720.0)
@@ -24,7 +32,7 @@ fn build_companion_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .build()
 }
 
-fn ensure_companion_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+fn ensure_companion_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     if let Some(window) = app.get_webview_window("companion") {
         return Ok(window);
     }
@@ -32,14 +40,14 @@ fn ensure_companion_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 }
 
 #[tauri::command]
-fn show_companion(app: AppHandle) -> Result<(), String> {
+fn show_companion(app: tauri::AppHandle) -> Result<(), String> {
     let window = ensure_companion_window(&app).map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn hide_companion(app: AppHandle) -> Result<(), String> {
+fn hide_companion(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("companion") {
         window.hide().map_err(|error| error.to_string())?;
     }
@@ -47,7 +55,7 @@ fn hide_companion(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn toggle_companion(app: AppHandle) -> Result<(), String> {
+fn toggle_companion(app: tauri::AppHandle) -> Result<(), String> {
     let window = ensure_companion_window(&app).map_err(|error| error.to_string())?;
     let visible = window.is_visible().map_err(|error| error.to_string())?;
     if visible {
@@ -59,33 +67,83 @@ fn toggle_companion(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn reopen_companion(app: AppHandle) -> Result<(), String> {
+fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
     let window = ensure_companion_window(&app).map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())
 }
 
+fn begin_app_shutdown(app: &tauri::AppHandle) {
+    if EXIT_CLEANUP_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    supervisor::shutdown_supervisor(app);
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .manage(supervisor::SupervisorState::default())
         .setup(|app| {
-            let main_window =
-                WebviewWindowBuilder::new(app, "main", WebviewUrl::App(MAIN_WINDOW_URL.into()))
-                    .title("YUVI Chat")
-                    .inner_size(960.0, 760.0)
-                    .min_inner_size(640.0, 480.0)
-                    .build()?;
+            // Paint main window immediately — do not block on service startup.
+            let main_window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App(MAIN_WINDOW_URL.into()),
+            )
+            .title("YUVI Chat")
+            .inner_size(960.0, 760.0)
+            .min_inner_size(640.0, 480.0)
+            .build()?;
 
             build_companion_window(&app.handle())?;
-
             main_window.set_focus()?;
+
+            // Best-effort supervisor bootstrap for development orchestration.
+            // Failures are non-fatal so the UI still opens.
+            if let Err(error) = supervisor::bootstrap_supervisor(&app.handle()) {
+                eprintln!("[yuvi-desktop] supervisor bootstrap skipped: {error}");
+            }
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "companion" {
+                    // Closing companion must NOT shut down Runtime/Mem0/TTS.
+                    return;
+                }
+                if window.label() == "main" {
+                    // Prevent immediate destroy; clean owned processes first.
+                    api.prevent_close();
+                    let app = window.app_handle().clone();
+                    let win = window.clone();
+                    thread::spawn(move || {
+                        begin_app_shutdown(&app);
+                        // Bounded wait so UI does not hang forever.
+                        thread::sleep(Duration::from_millis(1200));
+                        let _ = win.destroy();
+                        app.exit(0);
+                    });
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             show_companion,
             hide_companion,
             toggle_companion,
-            reopen_companion
+            reopen_companion,
+            supervisor::get_service_status,
+            supervisor::refresh_services,
+            supervisor::service_action
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running YUVI desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while building YUVI desktop app")
+        .run(|app_handle, event| {
+            if let RunEvent::ExitRequested { .. } = event {
+                begin_app_shutdown(app_handle);
+            }
+            if let RunEvent::Exit = event {
+                begin_app_shutdown(app_handle);
+            }
+        });
 }

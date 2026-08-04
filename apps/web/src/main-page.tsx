@@ -16,6 +16,7 @@ import {
   writeVoiceOutputPreference
 } from "./voice-output.js";
 import { controlCompanionWindow, isTauriRuntime } from "./tauri-window.js";
+import { ServiceStatusPanel } from "./service-status-panel.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
@@ -324,8 +325,9 @@ export function MainPage(): JSX.Element {
   }
 
   return (
-    <div className="min-h-screen bg-ink-100 p-6">
-      <div className="mx-auto max-w-3xl space-y-4">
+    <div className="min-h-screen bg-ink-100">
+      <ServiceStatusPanel />
+      <div className="mx-auto max-w-3xl space-y-4 p-6">
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold tracking-normal">YUVI Chat</h1>

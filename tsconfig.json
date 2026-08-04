@@ -8,6 +8,7 @@
     { "path": "packages/config" },
     { "path": "packages/providers" },
     { "path": "packages/core" },
+    { "path": "packages/desktop-supervisor" },
     { "path": "apps/server" },
     { "path": "apps/web" }
   ]
