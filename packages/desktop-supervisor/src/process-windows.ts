@@ -8,20 +8,34 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ProcessInfo, StartCommandSpec } from "./types.js";
 
+/**
+ * Fast liveness check — never shells out to PowerShell (that blocked Save for seconds).
+ */
+export function isProcessAlive(processId: number): boolean {
+  if (!Number.isInteger(processId) || processId <= 0) return false;
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Full process info for ownership (command line). Prefer isProcessAlive for loops.
+ * On Windows uses a short-timeout PowerShell query only when needed.
+ */
 export function getProcessInfo(processId: number): ProcessInfo | null {
   if (!Number.isInteger(processId) || processId <= 0) return null;
+  if (!isProcessAlive(processId)) return null;
+
   if (process.platform !== "win32") {
-    try {
-      process.kill(processId, 0);
-      return {
-        processId,
-        parentProcessId: 0,
-        commandLine: `pid=${processId}`,
-        createdAtUtc: new Date()
-      };
-    } catch {
-      return null;
-    }
+    return {
+      processId,
+      parentProcessId: 0,
+      commandLine: `pid=${processId}`,
+      createdAtUtc: new Date()
+    };
   }
 
   const script = `
@@ -39,7 +53,6 @@ $obj = [ordered]@{
 }
 $obj | ConvertTo-Json -Compress
 `;
-  // -WindowStyle Hidden + windowsHide: avoid console flash ("已退出进程") on Windows.
   const result = spawnSync(
     "powershell.exe",
     [
@@ -52,10 +65,16 @@ $obj | ConvertTo-Json -Compress
       "-Command",
       script
     ],
-    { encoding: "utf8", windowsHide: true, timeout: 8_000 }
+    { encoding: "utf8", windowsHide: true, timeout: 2_500 }
   );
   if (result.status !== 0 || !result.stdout?.trim()) {
-    return null;
+    // Process is alive but command line unavailable — still return a stub so ownership can use pid.
+    return {
+      processId,
+      parentProcessId: 0,
+      commandLine: "",
+      createdAtUtc: null
+    };
   }
   try {
     const parsed = JSON.parse(result.stdout.trim()) as {
@@ -71,18 +90,22 @@ $obj | ConvertTo-Json -Compress
       createdAtUtc: parsed.createdAtUtc ? new Date(parsed.createdAtUtc) : null
     };
   } catch {
-    return null;
+    return {
+      processId,
+      parentProcessId: 0,
+      commandLine: "",
+      createdAtUtc: null
+    };
   }
-}
-
-export function isProcessAlive(processId: number): boolean {
-  return getProcessInfo(processId) !== null;
 }
 
 /**
  * Spawn a managed child with no console window flash on Windows.
  * When `env` is provided it is used as-is (caller must merge + unset secrets).
  * Otherwise falls back to process.env + command.env.
+ *
+ * Note: on Windows, children are NOT auto-killed when the supervisor exits unless
+ * we explicitly taskkill the tree during shutdown (see forceKillProcessTree).
  */
 export function spawnManagedProcess(
   command: StartCommandSpec,
@@ -102,6 +125,15 @@ export function spawnManagedProcess(
   const errStream = fs.createWriteStream(log.err, { flags: "a" });
   child.stdout?.pipe(outStream);
   child.stderr?.pipe(errStream);
+  // Prevent uncaughtException when the binary is missing (tests / misconfig).
+  child.on("error", () => {
+    try {
+      outStream.end();
+      errStream.end();
+    } catch {
+      // ignore
+    }
+  });
   child.on("exit", () => {
     outStream.end();
     errStream.end();
@@ -119,7 +151,7 @@ export function requestGracefulStop(processId: number): void {
     spawnSync("taskkill", ["/PID", String(processId), "/T"], {
       windowsHide: true,
       encoding: "utf8",
-      timeout: 10_000
+      timeout: 5_000
     });
     return;
   }
@@ -140,7 +172,7 @@ export function forceKillProcessTree(processId: number): void {
     spawnSync("taskkill", ["/PID", String(processId), "/T", "/F"], {
       windowsHide: true,
       encoding: "utf8",
-      timeout: 15_000
+      timeout: 8_000
     });
     return;
   }

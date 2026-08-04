@@ -288,10 +288,13 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let base = guard.base_url.clone();
   let token = guard.control_token.clone();
   let mut child = guard.child.take();
+  let state_dir = guard.state_dir.clone();
+  let expected_pid = guard.expected_pid;
   guard.base_url = None;
   // Keep token only for the shutdown request below.
   drop(guard);
 
+  // Ask Supervisor to stop owned Runtime/Mem0 (best-effort, short timeout path).
   if let (Some(base), Some(token)) = (base, token) {
     let _ = http_json(
       "POST",
@@ -300,23 +303,78 @@ pub fn shutdown_supervisor(app: &AppHandle) {
       Some(&token),
     );
   }
+
+  // Belt-and-suspenders: Windows does not kill Node Runtime when Supervisor exits.
+  // Kill runtime.pid.json from this instance if still alive.
+  if let Some(dir) = state_dir.as_ref() {
+    force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
+    force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
+  }
+
   if let Some(mut child) = child.take() {
+    let supervisor_pid = child.id();
     // Bounded wait for supervisor process to exit after graceful shutdown.
-    for _ in 0..20 {
+    for _ in 0..12 {
       match child.try_wait() {
         Ok(Some(_)) => break,
-        Ok(None) => thread::sleep(Duration::from_millis(150)),
+        Ok(None) => thread::sleep(Duration::from_millis(100)),
         Err(_) => break,
       }
     }
     let _ = child.kill();
     let _ = child.wait();
+    // Force entire process tree (supervisor + any remaining runtime/node children).
+    force_kill_process_tree(supervisor_pid);
+  } else if let Some(pid) = expected_pid {
+    force_kill_process_tree(pid);
   }
 
-  // Best-effort cleanup of active pointer (instance endpoint deleted by supervisor process).
-  let _ = fs::remove_file(
-    crate::packaging::desktop_state_dir().join("active-instance.json"),
-  );
+  // Best-effort cleanup of active pointer + instance lock.
+  let root = crate::packaging::desktop_state_dir();
+  let _ = fs::remove_file(root.join("active-instance.json"));
+  let _ = fs::remove_file(root.join("supervisor.instance.lock"));
+}
+
+/// Force-kill a process tree on Windows (taskkill /T /F). No-op elsewhere / pid 0.
+fn force_kill_process_tree(pid: u32) {
+  if pid == 0 {
+    return;
+  }
+  #[cfg(target_os = "windows")]
+  {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = Command::new("taskkill")
+      .args(["/PID", &pid.to_string(), "/T", "/F"])
+      .creation_flags(CREATE_NO_WINDOW)
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .status();
+  }
+  #[cfg(not(target_os = "windows"))]
+  {
+    let _ = Command::new("kill")
+      .args(["-TERM", &pid.to_string()])
+      .status();
+  }
+}
+
+/// Read `{ "pid": N }` metadata and force-kill that tree if present.
+fn force_kill_pid_from_metadata(path: &Path) {
+  let Ok(text) = fs::read_to_string(path) else {
+    return;
+  };
+  let Ok(value) = serde_json::from_str::<Value>(&text) else {
+    return;
+  };
+  let pid = value
+    .get("pid")
+    .and_then(|v| v.as_u64())
+    .or_else(|| value.get("processId").and_then(|v| v.as_u64()))
+    .unwrap_or(0) as u32;
+  if pid > 0 {
+    force_kill_process_tree(pid);
+  }
 }
 
 fn start_status_poller(app: AppHandle) {
