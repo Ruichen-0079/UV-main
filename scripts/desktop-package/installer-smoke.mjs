@@ -66,7 +66,7 @@ const STRIPPED_KEYS = [
   "npm_config_user_agent",
   "NODE_OPTIONS"
 ];
-const TOOL_NAMES = ["python", "python3", "py", "pip", "uv", "node", "pnpm", "tsx"];
+export const FORBIDDEN_PATH_TOOLS = ["python", "python3", "py", "pip", "uv", "node", "pnpm", "tsx"];
 
 function fail(message) {
   throw new Error(message);
@@ -162,19 +162,19 @@ export function chooseInstaller({ explicitPath, nsisDir = NSIS_DIR, buildStarted
   return { selected, candidates };
 }
 
-function windowsOnlyPath() {
-  if (process.platform !== "win32") return "/usr/bin:/bin";
-  const windir = process.env.WINDIR || process.env.SystemRoot || "C:\\Windows";
+export function restrictedWindowsPath(env = process.env) {
+  const windir = env.SystemRoot ?? env.WINDIR ?? "C:\\Windows";
+  const windowsPath = path.win32;
   return [
-    path.join(windir, "System32"),
-    windir,
-    path.join(windir, "System32", "Wbem"),
-    path.join(windir, "System32", "WindowsPowerShell", "v1.0")
-  ].join(path.delimiter);
+    windowsPath.join(windir, "System32"),
+    windowsPath.join(windir, "System32", "Wbem"),
+    windowsPath.join(windir, "System32", "WindowsPowerShell", "v1.0")
+  ].join(windowsPath.delimiter);
 }
 
-export function restrictedPath() {
-  return windowsOnlyPath();
+export function restrictedPath(env = process.env) {
+  if (process.platform !== "win32") return "/usr/bin:/bin";
+  return restrictedWindowsPath(env);
 }
 
 export function sanitizeChildEnv(overrides = {}) {
@@ -608,12 +608,15 @@ function assertNoNewNamedProcesses(before) {
   return after;
 }
 
-function assertToolsUnresolvable(env) {
-  if (process.platform !== "win32") return [];
+export function assertToolsUnresolvable(
+  env,
+  { execFile = execFileSync, platform = process.platform } = {}
+) {
+  if (platform !== "win32") return [];
   const unresolved = [];
-  for (const tool of TOOL_NAMES) {
+  for (const tool of FORBIDDEN_PATH_TOOLS) {
     try {
-      execFileSync("where.exe", [tool], {
+      execFile("where.exe", [tool], {
         env,
         encoding: "utf8",
         windowsHide: true,
@@ -623,10 +626,10 @@ function assertToolsUnresolvable(env) {
       unresolved.push(tool);
     }
   }
-  const expected = TOOL_NAMES.filter((tool) => unresolved.includes(tool));
-  if (expected.length !== TOOL_NAMES.length)
+  const expected = FORBIDDEN_PATH_TOOLS.filter((tool) => unresolved.includes(tool));
+  if (expected.length !== FORBIDDEN_PATH_TOOLS.length)
     fail(
-      `restricted PATH resolved: ${TOOL_NAMES.filter((tool) => !unresolved.includes(tool)).join(", ")}`
+      `restricted PATH resolved: ${FORBIDDEN_PATH_TOOLS.filter((tool) => !unresolved.includes(tool)).join(", ")}`
     );
   return unresolved;
 }

@@ -8,17 +8,20 @@ import {
   assertInstallPathSafe,
   assertNoSecrets,
   assertNoUnsafeCommandLine,
+  assertToolsUnresolvable,
   assertTempRoot,
   assertTauriAppSmokeAllowed,
   buildWmCloseScript,
   chooseInstaller,
   compareSnapshots,
+  FORBIDDEN_PATH_TOOLS,
   findInstalledApplicationExecutable,
   findInstallerCandidates,
   findUninstaller,
   isWithin,
   processBaseline,
   restrictedPath,
+  restrictedWindowsPath,
   sanitizeChildEnv,
   snapshotTree,
   validateInstalledResources,
@@ -150,7 +153,89 @@ test("packaging-info rejects missing Mem0 declaration", () => {
   );
 });
 
-test("restricted PATH contains only system locations", () => {
+const windowsEntries = (value) => value.split(path.win32.delimiter);
+
+test("forbidden PATH tools keep the Python launcher and developer tools", () => {
+  assert.deepEqual(FORBIDDEN_PATH_TOOLS, [
+    "python",
+    "python3",
+    "py",
+    "pip",
+    "uv",
+    "node",
+    "pnpm",
+    "tsx"
+  ]);
+  assert.equal(FORBIDDEN_PATH_TOOLS.includes("py"), true);
+});
+
+test("restricted Windows PATH contains only explicit SystemRoot children", () => {
+  const value = restrictedWindowsPath({ SystemRoot: "C:\\Windows", PATH: "C:\\tools" });
+  const entries = windowsEntries(value);
+  assert.deepEqual(entries, [
+    "C:\\Windows\\System32",
+    "C:\\Windows\\System32\\Wbem",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0"
+  ]);
+  assert.equal(entries.includes("C:\\Windows"), false);
+  for (const entry of entries) {
+    assert.equal(entry.toLowerCase().startsWith("c:\\windows\\"), true);
+    assert.equal(entry.toLowerCase().includes("node_modules"), false);
+    assert.equal(entry.toLowerCase().includes("python"), false);
+    assert.equal(entry.toLowerCase().includes("toolcache"), false);
+  }
+});
+
+test("restricted Windows PATH order is stable and does not inherit caller PATH", () => {
+  const env = {
+    SystemRoot: "D:\\Windows",
+    PATH: "D:\\tools;C:\\Program Files\\nodejs;C:\\Python"
+  };
+  assert.equal(restrictedWindowsPath(env), restrictedWindowsPath(env));
+  assert.deepEqual(windowsEntries(restrictedWindowsPath(env)), [
+    "D:\\Windows\\System32",
+    "D:\\Windows\\System32\\Wbem",
+    "D:\\Windows\\System32\\WindowsPowerShell\\v1.0"
+  ]);
+});
+
+test("restricted Windows PATH uses WINDIR and C:\\Windows fallbacks", () => {
+  assert.equal(
+    windowsEntries(restrictedWindowsPath({ WINDIR: "E:\\Win" }))[0],
+    "E:\\Win\\System32"
+  );
+  assert.equal(windowsEntries(restrictedWindowsPath({}))[0], "C:\\Windows\\System32");
+});
+
+test("System32 remains available for where.exe while py stays unavailable", () => {
+  const calls = [];
+  const env = { PATH: restrictedWindowsPath({ SystemRoot: "C:\\Windows" }) };
+  const lookup = (file, args, options) => {
+    calls.push({ file, tool: args[0], path: options.env.PATH });
+    if (args[0] === "py" && windowsEntries(options.env.PATH).includes("C:\\Windows"))
+      return "C:\\Windows\\py.exe";
+    throw new Error("not found");
+  };
+
+  assert.doesNotThrow(() => assertToolsUnresolvable(env, { execFile: lookup, platform: "win32" }));
+  assert.equal(calls.length, FORBIDDEN_PATH_TOOLS.length);
+  assert.equal(
+    calls.every((call) => call.file === "where.exe"),
+    true
+  );
+  assert.equal(
+    calls.every((call) => call.path.includes("C:\\Windows\\System32")),
+    true
+  );
+
+  const legacyPath = { PATH: ["C:\\Windows", env.PATH].join(path.win32.delimiter) };
+  assert.throws(
+    () => assertToolsUnresolvable(legacyPath, { execFile: lookup, platform: "win32" }),
+    /restricted PATH resolved: py/
+  );
+});
+
+test("restrictedPath keeps the non-Windows test fallback", () => {
   const value = restrictedPath().toLowerCase();
   assert.equal(value.includes("node_modules"), false);
   assert.equal(value.includes("pnpm"), false);
