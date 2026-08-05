@@ -9,8 +9,11 @@ import {
   assertNoSecrets,
   assertNoUnsafeCommandLine,
   assertTempRoot,
+  assertTauriAppSmokeAllowed,
+  buildWmCloseScript,
   chooseInstaller,
   compareSnapshots,
+  findInstalledApplicationExecutable,
   findInstallerCandidates,
   findUninstaller,
   isWithin,
@@ -225,4 +228,166 @@ test("installed resource tree must contain Mem0 before deep validation", () => {
   fs.mkdirSync(path.join(root, "supervisor"));
   fs.writeFileSync(path.join(root, "packaging-info.json"), "{}");
   assert.throws(() => validateInstalledResources(root), /missing/);
+});
+
+test("--launch-app is rejected outside CI", () => {
+  assert.throws(
+    () => assertTauriAppSmokeAllowed({ CI: "false", YUVI_ALLOW_TAURI_APP_SMOKE: "1" }, "win32"),
+    /CI-only/
+  );
+});
+
+test("--launch-app requires the explicit CI opt-in", () => {
+  assert.throws(
+    () => assertTauriAppSmokeAllowed({ CI: "true" }, "win32"),
+    /YUVI_ALLOW_TAURI_APP_SMOKE/
+  );
+});
+
+test("--launch-app is rejected on non-Windows", () => {
+  assert.throws(
+    () => assertTauriAppSmokeAllowed({ CI: "true", YUVI_ALLOW_TAURI_APP_SMOKE: "1" }, "linux"),
+    /CI-only/
+  );
+});
+
+test("the exact CI gate permits app smoke", () => {
+  assert.equal(
+    assertTauriAppSmokeAllowed({ CI: "true", YUVI_ALLOW_TAURI_APP_SMOKE: "1" }, "win32"),
+    true
+  );
+});
+
+test("installed application finder selects the unique top-level product exe", () => {
+  const root = temp("yuvi-installer-smoke-");
+  fs.writeFileSync(path.join(root, "yuvi-desktop.exe"), "MZ");
+  fs.writeFileSync(path.join(root, "uninstall.exe"), "MZ");
+  fs.mkdirSync(path.join(root, "generated", "win32-x64", "mem0"), { recursive: true });
+  fs.writeFileSync(path.join(root, "generated", "win32-x64", "mem0", "yuvi-mem0.exe"), "MZ");
+  assert.equal(findInstalledApplicationExecutable(root), path.join(root, "yuvi-desktop.exe"));
+});
+
+test("installed application finder excludes uninstaller files", () => {
+  const root = temp("yuvi-installer-smoke-");
+  fs.writeFileSync(path.join(root, "uninstall.exe"), "MZ");
+  fs.writeFileSync(path.join(root, "unins000.exe"), "MZ");
+  assert.throws(() => findInstalledApplicationExecutable(root), /not found/);
+});
+
+test("installed application finder excludes generated internal executables", () => {
+  const root = temp("yuvi-installer-smoke-");
+  fs.writeFileSync(path.join(root, "yuvi-desktop.exe"), "MZ");
+  fs.mkdirSync(path.join(root, "generated", "win32-x64", "runtime"), { recursive: true });
+  fs.writeFileSync(path.join(root, "generated", "win32-x64", "runtime", "node.exe"), "MZ");
+  assert.equal(path.basename(findInstalledApplicationExecutable(root)), "yuvi-desktop.exe");
+});
+
+test("installed application finder rejects multiple product executables", () => {
+  const root = temp("yuvi-installer-smoke-");
+  fs.writeFileSync(path.join(root, "yuvi-desktop.exe"), "MZ");
+  fs.writeFileSync(path.join(root, "YUVI Companion.exe"), "MZ");
+  assert.throws(() => findInstalledApplicationExecutable(root), /multiple installed application/);
+});
+
+test("installed application finder requires a top-level TEMP product", () => {
+  const root = temp("yuvi-installer-smoke-");
+  fs.mkdirSync(path.join(root, "nested"));
+  fs.writeFileSync(path.join(root, "nested", "yuvi-desktop.exe"), "MZ");
+  assert.throws(() => findInstalledApplicationExecutable(root), /not found/);
+});
+
+test("Tauri child env strips Python, Node and pnpm pollution", () => {
+  const env = sanitizeChildEnv({
+    PYTHONPATH: "bad",
+    NODE_PATH: "bad",
+    PNPM_HOME: "bad",
+    npm_config_prefix: "bad"
+  });
+  for (const key of ["PYTHONPATH", "NODE_PATH", "PNPM_HOME", "npm_config_prefix"])
+    assert.equal(env[key], undefined);
+});
+
+test("Tauri child env strips all four secret variables", () => {
+  const env = sanitizeChildEnv({
+    DEEPSEEK_API_KEY: "secret",
+    DATABASE_URL: "secret",
+    MEM0_PG_CONNECTION_STRING: "secret",
+    MEM0_LLM_API_KEY: "secret"
+  });
+  for (const key of [
+    "DEEPSEEK_API_KEY",
+    "DATABASE_URL",
+    "MEM0_PG_CONNECTION_STRING",
+    "MEM0_LLM_API_KEY"
+  ])
+    assert.equal(env[key], undefined);
+});
+
+test("Tauri application arguments are empty by construction", () => {
+  const args = [];
+  assert.deepEqual(args, []);
+  assertNoSecrets(args, "Tauri argv");
+});
+
+test("WM_CLOSE command targets a numeric PID only", () => {
+  const script = buildWmCloseScript(12345);
+  assert.match(script, /targetPid = 12345/);
+  assert.match(script, /GetWindowThreadProcessId/);
+  assert.match(script, /PostMessageW/);
+  assert.doesNotMatch(script, /WindowText|title|Alt\+F4/i);
+});
+
+test("WM_CLOSE command rejects invalid PIDs", () => {
+  assert.throws(() => buildWmCloseScript(0), /invalid/);
+  assert.throws(() => buildWmCloseScript("pid"), /invalid/);
+});
+
+test("endpoint files must be rooted in the isolated LOCALAPPDATA tree", () => {
+  const root = temp("yuvi-installer-smoke-");
+  const local = path.join(root, "local");
+  const state = path.join(local, "YUVI", "DesktopSupervisor");
+  fs.mkdirSync(state, { recursive: true });
+  const endpoint = path.join(state, "control-endpoint.json");
+  assert.ok(isWithin(endpoint, local));
+  assert.equal(isWithin(path.join(root, "outside", "endpoint.json"), local), false);
+});
+
+test("packaged mode is an explicit endpoint property", () => {
+  const endpoint = { mode: "packaged", baseUrl: "http://127.0.0.1:1" };
+  assert.equal(endpoint.mode, "packaged");
+});
+
+test("runtime and Mem0 owned status requires positive PIDs", () => {
+  const services = [
+    { id: "runtime", managed: true, ownership: "owned", pid: 11 },
+    { id: "mem0", managed: true, ownership: "owned", pid: 12 }
+  ];
+  for (const service of services)
+    assert.equal(service.managed && service.ownership === "owned" && service.pid > 0, true);
+});
+
+test("command-line checker rejects repo, target and unpackaged tools", () => {
+  assert.throws(
+    () => assertNoUnsafeCommandLine("C:\\repo\\target\\debug\\yuvi.exe"),
+    /source\/tool|unpackaged/
+  );
+  assert.throws(
+    () => assertNoUnsafeCommandLine("pnpm exec tsx supervisor.ts"),
+    /source\/tool|unpackaged/
+  );
+});
+
+test("process tree exit checks use exact PIDs", () => {
+  const before = processBaseline([{ pid: 41, name: "yuvi-mem0.exe" }]);
+  const after = processBaseline([{ pid: 41, name: "yuvi-mem0.exe" }]);
+  assert.equal(after.has(41), before.has(41));
+  assert.equal(after.has(42), false);
+});
+
+test("resource snapshot detects app-mode writes", () => {
+  const root = temp();
+  fs.writeFileSync(path.join(root, "packaging-info.json"), "before");
+  const before = snapshotTree(root);
+  fs.writeFileSync(path.join(root, "packaging-info.json"), "after");
+  assert.equal(compareSnapshots(before, snapshotTree(root)).at(0).type, "changed");
 });

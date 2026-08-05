@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -68,12 +71,165 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: pnpm smoke
 
-      - name: Desktop packaging prepare + clean-room smoke
-        if: matrix.os == 'windows-latest'
+  desktop-windows-package:
+    needs: validate
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert clean checkout
         shell: pwsh
         run: |
-          pnpm desktop:package:prepare
-          pnpm desktop:package:smoke
+          $ErrorActionPreference = "Stop"
+          if (Test-Path node_modules) { throw "node_modules must not exist before fresh install" }
+          if (Test-Path services/memory-mem0/.venv) { throw "Mem0 venv must not exist before fresh install" }
+          foreach ($path in @("build", "apps/desktop/src-tauri/generated", "apps/desktop/src-tauri/target")) {
+            if (Test-Path $path) { throw "build artifact exists before fresh install: $path" }
+          }
+          if ((git status --porcelain) -ne "") { throw "checkout is not clean" }
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify package toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pnpmVersion = (pnpm --version).Trim()
+          if ($pnpmVersion -ne "9.15.4") { throw "expected pnpm 9.15.4, found $pnpmVersion" }
+          pnpm exec esbuild --version
+
+      - name: Install Mem0 Python dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --disable-pip-version-check --no-input -r services/memory-mem0/requirements.txt
+          "YUVI_PYTHON311=$((Get-Command python).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $pythonVersion = (python --version 2>&1).ToString().Trim()
+          if ($pythonVersion -notmatch '^Python 3\.11\.') { throw "expected Python 3.11.x, found $pythonVersion" }
+          $pythonVersion
+          $pyinstallerVersion = ((python -m pip show pyinstaller | Select-String '^Version:').ToString() -split ':', 2)[1].Trim()
+          if ($pyinstallerVersion -ne "6.13.0") { throw "expected PyInstaller 6.13.0, found $pyinstallerVersion" }
+          $mem0Version = ((python -m pip show mem0ai | Select-String '^Version:').ToString() -split ':', 2)[1].Trim()
+          if ($mem0Version -ne "0.1.107") { throw "expected mem0ai 0.1.107, found $mem0Version" }
+          python -m pip show pyinstaller
+          python -m pip show mem0ai
+          python -m pip check
+
+      - name: Rust format gate
+        shell: pwsh
+        run: rustfmt --check apps/desktop/src-tauri/src/config/tests.rs
+
+      - name: Rust check and tests
+        working-directory: apps/desktop/src-tauri
+        run: |
+          cargo check
+          cargo test
+
+      - name: Credential Manager round-trip
+        working-directory: apps/desktop/src-tauri
+        shell: pwsh
         env:
-          # Allow Node zip cache between steps of the same job when present.
+          YUVI_RUN_WINDOWS_CREDENTIAL_TEST: "1"
+        run: cargo test platform_credential_manager_roundtrip_and_config_push -- --exact --nocapture --test-threads=1
+
+      - name: Packaging tests
+        run: |
+          pnpm desktop:installer:test
+          pnpm desktop:package:test
+
+      - name: Workspace gates
+        run: |
+          pnpm check
+          pnpm test
+          pnpm build
+
+      - name: Build NSIS installer
+        shell: pwsh
+        env:
           YUVI_NODE_CACHE: ${{ runner.temp }}/yuvi-node-cache
+        run: pnpm desktop:build:windows
+
+      - name: Direct installer smoke
+        shell: pwsh
+        env:
+          YUVI_NODE_CACHE: ${{ runner.temp }}/yuvi-node-cache
+        run: pnpm desktop:installer:smoke
+
+      - name: Tauri application smoke
+        shell: pwsh
+        env:
+          CI: "true"
+          YUVI_ALLOW_TAURI_APP_SMOKE: "1"
+        run: pnpm desktop:installer:smoke -- --launch-app
+
+      - name: Prepare installer artifact
+        id: installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $nsis = Join-Path $env:GITHUB_WORKSPACE "apps/desktop/src-tauri/target/release/bundle/nsis"
+          $candidates = @(Get-ChildItem $nsis -File -Filter "YUVI Companion_*_x64-setup.exe" | Sort-Object LastWriteTime -Descending)
+          if ($candidates.Count -ne 1) { throw "expected exactly one NSIS installer, found $($candidates.Count)" }
+          $installer = $candidates[0]
+          $artifact = Join-Path $env:RUNNER_TEMP "yuvi-windows-artifacts"
+          New-Item -ItemType Directory -Force $artifact | Out-Null
+          $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($installer.Name)" | Set-Content (Join-Path $artifact "installer-sha256.txt") -Encoding ascii
+          Copy-Item $installer.FullName (Join-Path $artifact $installer.Name)
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "apps/desktop/src-tauri/generated/win32-x64/packaging-info.json") (Join-Path $artifact "packaging-info.json")
+          "path=$($installer.FullName)" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "artifact=$artifact" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload Windows packaging artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yuvi-windows-nsis-${{ github.sha }}
+          path: ${{ steps.installer.outputs.artifact }}
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Final cleanliness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git diff --exit-code -- Cargo.lock pnpm-lock.yaml
+          if ((git status --porcelain --untracked-files=no) -ne "") { throw "tracked files changed during packaging job" }
+          $tempRoot = [IO.Path]::GetTempPath()
+          $residual = Get-CimInstance Win32_Process | Where-Object {
+            $_.CommandLine -and (
+              $_.CommandLine.Contains("yuvi-installer-smoke-") -or
+              $_.CommandLine.Contains("yuvi-desktop-supervisor") -or
+              $_.CommandLine.Contains("yuvi-runtime-server") -or
+              $_.CommandLine.Contains("yuvi-mem0.exe")
+            )
+          }
+          if ($residual) { throw "packaged smoke process remains: $($residual.ProcessId -join ',')" }

@@ -88,6 +88,7 @@ export function parseArgs(argv = process.argv.slice(2)) {
     keepTemp: false,
     build: false,
     cleanupStale: false,
+    launchApp: false,
     timeoutMs: 60_000
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -95,6 +96,7 @@ export function parseArgs(argv = process.argv.slice(2)) {
     if (arg === "--keep-temp") result.keepTemp = true;
     else if (arg === "--build") result.build = true;
     else if (arg === "--cleanup-stale") result.cleanupStale = true;
+    else if (arg === "--launch-app") result.launchApp = true;
     else if (arg === "--installer") {
       result.installer = argv[++i];
       if (!result.installer) fail("--installer requires an absolute path");
@@ -104,7 +106,7 @@ export function parseArgs(argv = process.argv.slice(2)) {
       result.timeoutMs = Math.round(seconds * 1000);
     } else if (arg === "--help" || arg === "-h") {
       console.info(
-        "Usage: node scripts/desktop-package/installer-smoke.mjs [--installer <path>] [--build] [--keep-temp] [--timeout <seconds>]"
+        "Usage: node scripts/desktop-package/installer-smoke.mjs [--installer <path>] [--build] [--keep-temp] [--cleanup-stale] [--launch-app] [--timeout <seconds>]"
       );
       return null;
     } else {
@@ -114,6 +116,13 @@ export function parseArgs(argv = process.argv.slice(2)) {
   if (result.installer && !path.isAbsolute(result.installer))
     fail("--installer must be an absolute path");
   return result;
+}
+
+export function assertTauriAppSmokeAllowed(env = process.env, platform = process.platform) {
+  if (platform !== "win32" || env.CI !== "true" || env.YUVI_ALLOW_TAURI_APP_SMOKE !== "1") {
+    fail("Tauri app smoke is CI-only and requires YUVI_ALLOW_TAURI_APP_SMOKE=1.");
+  }
+  return true;
 }
 
 export function findInstallerCandidates(nsisDir = NSIS_DIR, fsImpl = fs) {
@@ -219,6 +228,8 @@ export function assertNoUnsafeCommandLine(commandLine, { repoRoot = REPO_ROOT } 
   ];
   if (forbidden.some((needle) => lower.includes(needle)))
     fail("child command line contains source/tool path");
+  if (/(?:target[\\/]|pnpm|tsx)/i.test(text))
+    fail("child command line contains an unpackaged tool path");
   return true;
 }
 
@@ -377,6 +388,37 @@ export function findUninstaller(installDir) {
   if (candidates.length !== 1)
     fail(`expected one uninstaller in TEMP install, found ${candidates.length}`);
   if (!isWithin(candidates[0], installDir)) fail("uninstaller escaped install directory");
+  return candidates[0];
+}
+
+export function findInstalledApplicationExecutable(installRoot) {
+  const root = path.resolve(installRoot);
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory())
+    fail("installed application root is missing");
+  const excluded = new Set([
+    "uninstall.exe",
+    "uninstaller.exe",
+    "unins000.exe",
+    SUPERVISOR_EXE_NAME.toLowerCase(),
+    MEM0_EXE_NAME.toLowerCase(),
+    NODE_EXE_NAME.toLowerCase()
+  ]);
+  const candidates = fs
+    .readdirSync(root, { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        path.extname(entry.name).toLowerCase() === ".exe" &&
+        !/^unins?[^.]*\.exe$/i.test(entry.name) &&
+        !excluded.has(entry.name.toLowerCase())
+    )
+    .map((entry) => path.join(root, entry.name));
+  if (candidates.length === 0) fail("installed Tauri application executable was not found");
+  if (candidates.length > 1)
+    fail(
+      `multiple installed application executables: ${candidates.map((file) => path.basename(file)).join(", ")}`
+    );
+  if (!isWithin(candidates[0], root)) fail("installed application escaped TEMP install");
   return candidates[0];
 }
 
@@ -767,6 +809,203 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
   }
 }
 
+export function buildWmCloseScript(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) fail("WM_CLOSE target PID is invalid");
+  return `$targetPid = ${numericPid};
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class YuviWindowCloser {
+  private const uint WM_CLOSE = 0x0010;
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extra);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] private static extern bool PostMessageW(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+  public static void CloseForProcess(uint targetPid) {
+    EnumWindows((hWnd, extra) => {
+      uint windowPid;
+      GetWindowThreadProcessId(hWnd, out windowPid);
+      if (windowPid == targetPid) PostMessageW(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+      return true;
+    }, IntPtr.Zero);
+  }
+}
+'@
+[YuviWindowCloser]::CloseForProcess($targetPid)`;
+}
+
+async function waitForProcessExit(pid, timeoutMs) {
+  const started = Date.now();
+  while (pidAlive(pid) && Date.now() - started < timeoutMs) await wait(250);
+  return !pidAlive(pid);
+}
+
+async function sendWmClose(pid, layout, timeoutMs) {
+  const script = buildWmCloseScript(pid);
+  assertNoSecrets(script, "WM_CLOSE script");
+  const result = await runProcess(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    { cwd: layout.emptyCwd, env: sanitizeChildEnv(), stdio: ["ignore", "pipe", "pipe"] },
+    Math.min(timeoutMs, 10_000)
+  );
+  writeLog(layout.logs, "wm-close.log", `${result.stdout}\n${result.stderr}`);
+  if (result.code !== 0) fail(`WM_CLOSE command failed (${result.code})`);
+}
+
+async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
+  const appExecutable = findInstalledApplicationExecutable(installDir);
+  const tauriLocalAppData = path.join(layout.root, "tauri-local-app-data");
+  const tauriAppData = path.join(layout.root, "tauri-app-data");
+  const tauriHome = path.join(layout.root, "tauri-home");
+  const tauriTemp = path.join(layout.root, "tauri-temp");
+  for (const dir of [tauriLocalAppData, tauriAppData, tauriHome, tauriTemp])
+    fs.mkdirSync(dir, { recursive: true });
+  const env = sanitizeChildEnv({
+    LOCALAPPDATA: tauriLocalAppData,
+    APPDATA: tauriAppData,
+    USERPROFILE: tauriHome,
+    HOME: tauriHome,
+    TEMP: tauriTemp,
+    TMP: tauriTemp,
+    YUVI_AUTOSTART_RUNTIME: "true",
+    YUVI_AUTOSTART_MEM0: "true",
+    YUVI_AUTOSTART_TTS: "false"
+  });
+  assertNoSecrets(env, "Tauri app env");
+  const appArgs = [];
+  assertNoSecrets(appArgs, "Tauri app argv");
+  const child = spawn(appExecutable, appArgs, {
+    cwd: layout.emptyCwd,
+    env,
+    shell: false,
+    windowsHide: false,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const logExit = () => writeLog(layout.logs, "tauri-app.log", `${stdout}\n${stderr}`);
+  let endpoint = null;
+  let runtimePid = 0;
+  let mem0Pid = 0;
+  try {
+    endpoint = await waitForSupervisorEndpoint(
+      path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor"),
+      path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor"),
+      timeoutMs
+    );
+    if (!pidAlive(child.pid)) fail("Tauri application exited before bootstrap");
+    const pointer = readJson(
+      path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor", "active-instance.json")
+    );
+    if (pointer.mode !== "packaged") fail("Tauri bootstrap did not use packaged mode");
+    if (!pidAlive(Number(pointer.pid))) fail("packaged Supervisor endpoint PID is not alive");
+    if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(String(endpoint.baseUrl)))
+      fail("Tauri Supervisor endpoint is not loopback");
+    const health = await requestJson(`${endpoint.baseUrl}/health`);
+    if (health.status !== 200 || health.value?.ok !== true) fail("Tauri Supervisor health failed");
+    const status = await requestJson(`${endpoint.baseUrl}/v1/status`, {
+      token: endpoint.controlToken
+    });
+    if (status.status !== 200) fail("Tauri Supervisor status failed");
+    const services = status.value?.services ?? [];
+    const runtime = services.find((service) => service.id === "runtime");
+    const mem0 = services.find((service) => service.id === "mem0");
+    const tts = services.find((service) => service.id === "tts_wrapper");
+    if (!runtime || runtime.managed !== true || runtime.ownership !== "owned" || !(runtime.pid > 0))
+      fail("Tauri bootstrap did not own Runtime");
+    if (!mem0 || mem0.managed !== true || mem0.ownership !== "owned" || !(mem0.pid > 0))
+      fail("Tauri bootstrap did not own Mem0");
+    if (tts?.ownership === "owned" || tts?.pid) fail("Tauri smoke unexpectedly started TTS");
+    runtimePid = Number(runtime.pid);
+    mem0Pid = Number(mem0.pid);
+    const runtimeCommandLine = processCommandLine(runtimePid);
+    const mem0CommandLine = processCommandLine(mem0Pid);
+    const expectedRuntime = path
+      .join(resource.root, "runtime", NODE_EXE_NAME)
+      .toLowerCase()
+      .replaceAll("/", "\\");
+    const expectedMem0 = path
+      .join(resource.root, "mem0", MEM0_EXE_NAME)
+      .toLowerCase()
+      .replaceAll("/", "\\");
+    if (!runtimeCommandLine.toLowerCase().replaceAll("/", "\\").includes(expectedRuntime))
+      fail("Tauri Runtime command line is not the installed bundled Node");
+    if (!mem0CommandLine.toLowerCase().replaceAll("/", "\\").includes(expectedMem0))
+      fail("Tauri Mem0 command line is not the installed executable");
+    assertNoUnsafeCommandLine(runtimeCommandLine);
+    assertNoUnsafeCommandLine(mem0CommandLine);
+    const mem0Health = await requestJson(String(mem0.url));
+    if (mem0Health.status !== 200 || !mem0Health.value?.ok) fail("Tauri Mem0 health failed");
+    if (!["healthy", "degraded", "unhealthy"].includes(mem0Health.value?.data?.status))
+      fail("Tauri Mem0 health protocol is invalid");
+    const runtimeHealth = await requestJson(String(runtime.url));
+    if (runtimeHealth.status !== 200 || runtimeHealth.value?.ok !== true)
+      fail("Tauri Runtime health protocol is invalid");
+
+    await sendWmClose(child.pid, layout, timeoutMs);
+    if (!(await waitForProcessExit(child.pid, Math.min(timeoutMs, 20_000))))
+      fail("Tauri application did not exit after WM_CLOSE");
+    if (!(await waitForProcessExit(Number(pointer.pid), Math.min(timeoutMs, 20_000))))
+      fail("Supervisor did not exit after Tauri CloseRequested");
+    if (!(await waitForProcessExit(runtimePid, Math.min(timeoutMs, 20_000))))
+      fail("Runtime did not exit after Tauri CloseRequested");
+    if (!(await waitForProcessExit(mem0Pid, Math.min(timeoutMs, 20_000))))
+      fail("Mem0 did not exit after Tauri CloseRequested");
+    const pointerPath = path.join(
+      tauriLocalAppData,
+      "YUVI",
+      "DesktopSupervisor",
+      "active-instance.json"
+    );
+    if (fs.existsSync(pointerPath)) {
+      const active = readJson(pointerPath);
+      if (active.pid && pidAlive(Number(active.pid)))
+        fail("active Supervisor pointer remains alive");
+    }
+    logExit();
+    return {
+      appExecutable,
+      appPid: child.pid,
+      supervisorPid: Number(pointer.pid),
+      runtimePid,
+      mem0Pid,
+      runtimeCommandLine,
+      mem0CommandLine,
+      mode: pointer.mode,
+      mem0Health: mem0Health.value
+    };
+  } catch (error) {
+    if (endpoint?.baseUrl && endpoint.controlToken) {
+      try {
+        await requestJson(`${endpoint.baseUrl}/v1/shutdown`, {
+          method: "POST",
+          token: endpoint.controlToken,
+          body: null
+        });
+      } catch {
+        /* exact smoke instance cleanup only */
+      }
+    }
+    for (const pid of [child.pid, Number(endpoint?.pid), runtimePid, mem0Pid]) {
+      if (pid && pidAlive(pid)) {
+        try {
+          process.kill(pid);
+        } catch {
+          /* exact smoke PID fallback only */
+        }
+      }
+    }
+    logExit();
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}\n${stdout}\n${stderr}`
+    );
+  }
+}
+
 async function waitForInstallRemoval(installDir, timeoutMs) {
   const started = Date.now();
   while (Date.now() - started < Math.max(timeoutMs, 10_000)) {
@@ -821,6 +1060,7 @@ function treeMetadata(root) {
 
 export async function runInstallerSmoke(options = parseArgs()) {
   if (options === null) return null;
+  if (options.launchApp) assertTauriAppSmokeAllowed();
   if (options.cleanupStale) {
     const result = cleanupStaleRoots();
     console.info(
@@ -837,19 +1077,22 @@ export async function runInstallerSmoke(options = parseArgs()) {
   assertInstallerSwitches(selection.selected.path);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-installer-smoke-"));
   assertTempRoot(root);
-  const layout = Object.fromEntries(
-    [
-      "install",
-      "state",
-      "localAppData",
-      "appData",
-      "home",
-      "temp",
-      "emptyCwd",
-      "logs",
-      "snapshots"
-    ].map((name) => [name, path.join(root, name)])
-  );
+  const layout = {
+    root,
+    ...Object.fromEntries(
+      [
+        "install",
+        "state",
+        "localAppData",
+        "appData",
+        "home",
+        "temp",
+        "emptyCwd",
+        "logs",
+        "snapshots"
+      ].map((name) => [name, path.join(root, name)])
+    )
+  };
   for (const dir of Object.values(layout)) fs.mkdirSync(dir, { recursive: true });
   assertInstallPathSafe(layout.install, root);
   const baseline = captureProcessBaseline();
@@ -895,6 +1138,21 @@ export async function runInstallerSmoke(options = parseArgs()) {
     const changes = compareSnapshots(before, after);
     if (changes.length)
       fail(`installed resource tree changed: ${changes.map((change) => change.path).join(", ")}`);
+    let appSmoke = null;
+    if (options.launchApp) {
+      appSmoke = await runTauriAppSmoke({
+        installDir: layout.install,
+        resource,
+        layout,
+        timeoutMs: options.timeoutMs
+      });
+      const appAfter = snapshotTree(resourceRoot);
+      const appChanges = compareSnapshots(before, appAfter);
+      if (appChanges.length)
+        fail(
+          `installed resource tree changed during Tauri app smoke: ${appChanges.map((change) => change.path).join(", ")}`
+        );
+    }
     const uninstall = await runProcess(
       uninstaller,
       ["/S"],
@@ -936,6 +1194,7 @@ export async function runInstallerSmoke(options = parseArgs()) {
       existing,
       processBaseline: "preserved"
     };
+    if (appSmoke) summary.tauriApp = appSmoke;
     fs.writeFileSync(
       path.join(layout.snapshots, "summary.json"),
       `${JSON.stringify(summary, null, 2)}\n`,

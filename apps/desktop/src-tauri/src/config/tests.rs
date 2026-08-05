@@ -802,3 +802,136 @@ fn memory_llm_secret_never_enters_settings_or_result_json() {
     assert!(!settings_json.contains(MEMORY_LLM_TEST_SECRET));
     assert!(!settings_json.contains("apiKey"));
 }
+
+/// Opt-in Windows-only integration coverage for the production Credential
+/// Manager adapter and the ConfigService → Supervisor environment projection.
+/// The default test run is deliberately side-effect free.
+#[cfg(windows)]
+#[test]
+fn platform_credential_manager_roundtrip_and_config_push() {
+    if std::env::var("YUVI_RUN_WINDOWS_CREDENTIAL_TEST")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    const CHAT_SECRET: &str = "YUVI_CI_CHAT_SECRET_DO_NOT_LOG";
+    const DATABASE_SECRET: &str = "YUVI_CI_DATABASE_SECRET_DO_NOT_LOG";
+    const MEMORY_SECRET: &str = "YUVI_CI_MEMORY_SECRET_DO_NOT_LOG";
+    let store = Arc::new(super::secrets::PlatformSecretStore);
+    let keys = [
+        super::secrets::SECRET_DEEPSEEK_API_KEY,
+        super::secrets::SECRET_DATABASE_URL,
+        super::secrets::SECRET_MEMORY_LLM_API_KEY,
+    ];
+
+    let run = catch_unwind(AssertUnwindSafe(|| {
+        for key in keys {
+            store
+                .delete(key)
+                .expect("pre-test Credential Manager cleanup");
+        }
+        store
+            .set(super::secrets::SECRET_DEEPSEEK_API_KEY, CHAT_SECRET)
+            .expect("set chat test credential");
+        store
+            .set(super::secrets::SECRET_DATABASE_URL, DATABASE_SECRET)
+            .expect("set database test credential");
+        store
+            .set(super::secrets::SECRET_MEMORY_LLM_API_KEY, MEMORY_SECRET)
+            .expect("set memory test credential");
+
+        for key in keys {
+            assert!(store.is_configured(key).expect("credential status"));
+        }
+        assert!(
+            store
+                .get(super::secrets::SECRET_DEEPSEEK_API_KEY)
+                .expect("read chat test credential")
+                .as_deref()
+                == Some(CHAT_SECRET)
+        );
+        assert!(
+            store
+                .get(super::secrets::SECRET_DATABASE_URL)
+                .expect("read database test credential")
+                .as_deref()
+                == Some(DATABASE_SECRET)
+        );
+        assert!(
+            store
+                .get(super::secrets::SECRET_MEMORY_LLM_API_KEY)
+                .expect("read memory test credential")
+                .as_deref()
+                == Some(MEMORY_SECRET)
+        );
+
+        let dir = tempdir().expect("temp config directory");
+        let service = ConfigService::open(
+            dir.path().to_path_buf(),
+            store.clone() as Arc<dyn SecretStore>,
+        );
+        let mut patch = UserSettingsPatch::default();
+        patch.memory = Some(MemorySettingsPatch {
+            llm: Some(MemoryLlmSettingsPatch {
+                provider: Some(MemoryLlmProvider::Deepseek),
+                model: Some("ci-memory-model".into()),
+                base_url: Some("https://api.deepseek.com/v1".into()),
+            }),
+            ..Default::default()
+        });
+        let result = service
+            .update_settings(patch)
+            .expect("save active Memory LLM settings");
+        let view = service.get_view().expect("read settings view");
+        assert_eq!(view.settings.memory.backend, MemoryBackend::Mem0);
+        assert_eq!(view.settings.memory.mode, ServiceMode::Managed);
+        assert_eq!(
+            view.settings.memory.llm.provider,
+            MemoryLlmProvider::Deepseek
+        );
+        assert_eq!(view.settings.memory.llm.model, "ci-memory-model");
+        assert!(view.secrets.deepseek_api_key);
+        assert!(view.secrets.database_url);
+        assert!(view.secrets.memory_llm_api_key);
+
+        let push = service
+            .supervisor_config_push()
+            .expect("build Supervisor config push");
+        assert!(push.env.get("DEEPSEEK_API_KEY").map(String::as_str) == Some(CHAT_SECRET));
+        assert!(push.env.get("DATABASE_URL").map(String::as_str) == Some(DATABASE_SECRET));
+        assert!(push.env.get("MEM0_LLM_API_KEY").map(String::as_str) == Some(MEMORY_SECRET));
+
+        let view_json = serde_json::to_string(&view).expect("serialize settings view");
+        let result_json = serde_json::to_string(&result).expect("serialize update result");
+        assert!(!view_json.contains(CHAT_SECRET));
+        assert!(!view_json.contains(DATABASE_SECRET));
+        assert!(!view_json.contains(MEMORY_SECRET));
+        assert!(!result_json.contains(CHAT_SECRET));
+        assert!(!result_json.contains(DATABASE_SECRET));
+        assert!(!result_json.contains(MEMORY_SECRET));
+        let settings_json =
+            fs::read_to_string(service.settings_path()).expect("read settings JSON");
+        assert!(!settings_json.contains(CHAT_SECRET));
+        assert!(!settings_json.contains(DATABASE_SECRET));
+        assert!(!settings_json.contains(MEMORY_SECRET));
+    }));
+
+    let cleanup = keys.iter().try_for_each(|key| store.delete(key));
+    assert!(
+        cleanup.is_ok(),
+        "post-test Credential Manager cleanup failed"
+    );
+    for key in keys {
+        assert!(!store
+            .is_configured(key)
+            .expect("post-test credential status"));
+    }
+    if run.is_err() {
+        panic!("Credential Manager round-trip integration test failed");
+    }
+}
