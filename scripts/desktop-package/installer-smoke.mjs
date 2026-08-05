@@ -469,6 +469,422 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function safeBasename(value) {
+  if (!value) return null;
+  return path.win32.basename(String(value).replaceAll("/", "\\"));
+}
+
+function safeDiagnosticPath(value, installRoot) {
+  if (!value) return null;
+  if (installRoot && isWithin(value, installRoot)) {
+    return path.relative(installRoot, value).replaceAll("\\", "/") || ".";
+  }
+  return safeBasename(value);
+}
+
+export function powershellDiagnosticPath(env = process.env) {
+  const systemRoot = env.SystemRoot ?? env.WINDIR ?? "C:\\Windows";
+  return path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+function listenerResult(port, overrides = {}) {
+  return {
+    port: Number.isInteger(Number(port)) && Number(port) > 0 ? Number(port) : null,
+    state: "not-configured",
+    owningPid: 0,
+    processName: null,
+    parentProcessId: 0,
+    executablePath: null,
+    creationDate: null,
+    querySucceeded: false,
+    queryErrorCode: null,
+    executableInsideInstallRoot: false,
+    pidEqualsSupervisorPid: false,
+    pidEqualsKnownManagedPid: false,
+    ...overrides
+  };
+}
+
+/** Read-only Windows listener attribution. The PowerShell query never requests CommandLine. */
+export function attributeWindowsListener(
+  port,
+  {
+    execFile = execFileSync,
+    platform = process.platform,
+    systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
+    installRoot = null,
+    supervisorPid = 0,
+    knownManagedPid = 0
+  } = {}
+) {
+  const numericPort = Number(port);
+  if (!Number.isInteger(numericPort) || numericPort <= 0) {
+    return listenerResult(null, { queryErrorCode: "invalid-port" });
+  }
+  if (platform !== "win32") {
+    return listenerResult(numericPort, {
+      state: "unsupported-platform",
+      queryErrorCode: "platform-not-windows"
+    });
+  }
+  const script = [
+    "$connection = Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort " +
+      numericPort +
+      " -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1",
+    "if (-not $connection) {",
+    "  @{ state = 'not-listening'; owningPid = 0 } | ConvertTo-Json -Compress",
+    "  exit 0",
+    "}",
+    "$ownerPid = [int]$connection.OwningProcess",
+    '$process = Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,ExecutablePath,CreationDate -Filter "ProcessId=$ownerPid" | Select-Object -First 1',
+    "@{",
+    "  state = [string]$connection.State",
+    "  owningPid = $ownerPid",
+    "  processName = if ($process) { [string]$process.Name } else { $null }",
+    "  parentProcessId = if ($process) { [int]$process.ParentProcessId } else { 0 }",
+    "  executablePath = if ($process) { [string]$process.ExecutablePath } else { $null }",
+    "  creationDate = if ($process) { [string]$process.CreationDate } else { $null }",
+    "} | ConvertTo-Json -Compress"
+  ].join("\n");
+  try {
+    const output = execFile(
+      powershellDiagnosticPath({ SystemRoot: systemRoot }),
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"]
+      }
+    );
+    const parsed = JSON.parse(String(output).trim().split(/\r?\n/).filter(Boolean).at(-1) ?? "{}");
+    const owningPid = Number(parsed.owningPid) > 0 ? Number(parsed.owningPid) : 0;
+    const executablePath = typeof parsed.executablePath === "string" ? parsed.executablePath : null;
+    return listenerResult(numericPort, {
+      state: parsed.state === "not-listening" ? "not-listening" : String(parsed.state ?? "unknown"),
+      owningPid,
+      processName: parsed.processName ? String(parsed.processName) : null,
+      parentProcessId: Number(parsed.parentProcessId) > 0 ? Number(parsed.parentProcessId) : 0,
+      executablePath,
+      creationDate: parsed.creationDate ? String(parsed.creationDate) : null,
+      querySucceeded: true,
+      executableInsideInstallRoot: Boolean(
+        executablePath && installRoot && isWithin(executablePath, installRoot)
+      ),
+      pidEqualsSupervisorPid: owningPid > 0 && owningPid === Number(supervisorPid),
+      pidEqualsKnownManagedPid: owningPid > 0 && owningPid === Number(knownManagedPid)
+    });
+  } catch (error) {
+    return listenerResult(numericPort, {
+      state: "query-failed",
+      queryErrorCode: String(error?.code ?? "query-failed").slice(0, 80)
+    });
+  }
+}
+
+export function readOwnershipMetadataDiagnostic(
+  metadataPath,
+  { installRoot = null, smokeRoot = null } = {}
+) {
+  const base = {
+    exists: false,
+    mtimeMs: null,
+    schemaVersion: null,
+    protocolVersion: null,
+    role: null,
+    pid: 0,
+    instanceId: null,
+    marker: null,
+    startTime: null,
+    executable: null,
+    executableInsideInstallRoot: false,
+    queryErrorCode: null
+  };
+  if (smokeRoot && metadataPath && !isWithin(metadataPath, smokeRoot)) {
+    return { ...base, queryErrorCode: "metadata-outside-smoke-root" };
+  }
+  if (!metadataPath || !fs.existsSync(metadataPath)) return base;
+  try {
+    const raw = readJson(metadataPath);
+    const marker = raw?.commandMarker ?? raw?.marker ?? null;
+    const executable = safeBasename(marker);
+    return {
+      ...base,
+      exists: true,
+      mtimeMs: fs.statSync(metadataPath).mtimeMs,
+      schemaVersion: raw?.schemaVersion ?? null,
+      protocolVersion: raw?.protocolVersion ?? null,
+      role: raw?.role ?? null,
+      pid: Number(raw?.pid) > 0 ? Number(raw.pid) : 0,
+      instanceId: raw?.instanceId ?? null,
+      marker: safeDiagnosticPath(marker, installRoot),
+      startTime: raw?.processStartedAtUtc ?? raw?.startTime ?? null,
+      executable,
+      executableInsideInstallRoot: Boolean(marker && installRoot && isWithin(marker, installRoot))
+    };
+  } catch (error) {
+    return { ...base, queryErrorCode: String(error?.code ?? "metadata-read-failed").slice(0, 80) };
+  }
+}
+
+export function createDiagnosticPortRoles({ mem0ServicePort, supervisorRequestedControlPort }) {
+  return {
+    mem0ServicePort: Number(mem0ServicePort),
+    supervisorPublicStatusPort: null,
+    supervisorControlPort: null,
+    supervisorRequestedControlPort: Number(supervisorRequestedControlPort)
+  };
+}
+
+export function createOwnershipDiagnostics({
+  ports,
+  metadataPath,
+  installRoot,
+  smokeRoot,
+  supervisorPid = 0,
+  attribution = attributeWindowsListener,
+  now = Date.now
+}) {
+  const startedAt = now();
+  const checkpoints = [];
+  const stateSequence = [];
+  let lastStateKey = null;
+  let firstListenerPhase = null;
+  let knownSupervisorPid = Number(supervisorPid) || 0;
+  let knownManagedPid = 0;
+  let endpointPort = null;
+  let knownSupervisorInstanceId = null;
+  let knownSupervisorStartedAt = null;
+  let currentMetadataPath = metadataPath;
+
+  function currentPorts() {
+    return {
+      ...ports,
+      supervisorPublicStatusPort: endpointPort,
+      supervisorControlPort: endpointPort
+    };
+  }
+
+  async function sample(
+    phase,
+    {
+      endpoint,
+      instanceId = null,
+      supervisorStartedAt = null,
+      ownership = null,
+      status = null,
+      pid = 0
+    } = {}
+  ) {
+    if (endpoint) endpointPort = Number(endpoint);
+    if (instanceId) knownSupervisorInstanceId = String(instanceId);
+    if (supervisorStartedAt) knownSupervisorStartedAt = String(supervisorStartedAt);
+    if (pid) knownManagedPid = Number(pid);
+    const timestamp = now();
+    const stateKey = JSON.stringify([status, ownership, Number(pid) || 0]);
+    if ((status || ownership) && stateKey !== lastStateKey) {
+      lastStateKey = stateKey;
+      stateSequence.push({
+        phase,
+        relativeMs: Math.max(0, timestamp - startedAt),
+        status,
+        ownership,
+        pid: Number(pid) || 0
+      });
+    }
+    const roles = currentPorts();
+    const queryEntries = [
+      ["mem0Service", roles.mem0ServicePort],
+      ["supervisorPublicStatus", roles.supervisorPublicStatusPort],
+      ["supervisorControl", roles.supervisorControlPort],
+      ["supervisorRequestedControl", roles.supervisorRequestedControlPort]
+    ];
+    const listeners = {};
+    for (const [role, port] of queryEntries) {
+      try {
+        listeners[role] = await attribution(port, {
+          installRoot,
+          supervisorPid: knownSupervisorPid,
+          knownManagedPid
+        });
+      } catch (error) {
+        listeners[role] = listenerResult(port, {
+          state: "query-failed",
+          queryErrorCode: String(error?.code ?? "query-failed").slice(0, 80)
+        });
+      }
+    }
+    const metadata = readOwnershipMetadataDiagnostic(currentMetadataPath, {
+      installRoot,
+      smokeRoot
+    });
+    const mem0Listener = listeners.mem0Service;
+    const listening = mem0Listener?.state === "Listen" || Number(mem0Listener?.owningPid) > 0;
+    if (!firstListenerPhase && listening) firstListenerPhase = phase;
+    const point = {
+      phase,
+      isoTime: new Date(timestamp).toISOString(),
+      relativeMs: Math.max(0, timestamp - startedAt),
+      ports: roles,
+      supervisorPid: knownSupervisorPid,
+      supervisorInstanceId: knownSupervisorInstanceId,
+      supervisorStartedAt: knownSupervisorStartedAt,
+      ownership,
+      status,
+      mem0Pid: knownManagedPid,
+      listeners,
+      metadata
+    };
+    checkpoints.push(point);
+    return point;
+  }
+
+  async function observeStatus(phase, service) {
+    const nextKey = JSON.stringify([
+      service?.status ?? null,
+      service?.ownership ?? null,
+      Number(service?.pid) || 0
+    ]);
+    if (nextKey === lastStateKey) return null;
+    return sample(phase, {
+      ownership: service?.ownership ?? null,
+      status: service?.status ?? null,
+      pid: Number(service?.pid) || 0
+    });
+  }
+
+  function snapshot() {
+    return {
+      checkpoints,
+      stateSequence,
+      firstListenerPhase,
+      ports: currentPorts(),
+      metadataPath: currentMetadataPath
+    };
+  }
+
+  return {
+    setSupervisorPid(pid) {
+      knownSupervisorPid = Number(pid) || 0;
+    },
+    setMetadataPath(filePath) {
+      currentMetadataPath = filePath;
+    },
+    sample,
+    observeStatus,
+    snapshot
+  };
+}
+
+export function formatOwnershipDiagnostic({
+  diagnostic,
+  supervisorExecutable = null,
+  installRoot = null
+}) {
+  const snapshot = diagnostic?.snapshot ? diagnostic.snapshot() : diagnostic;
+  const points = snapshot?.checkpoints ?? [];
+  const last = points.at(-1) ?? null;
+  const listener = last?.listeners?.mem0Service ?? listenerResult(null);
+  const metadata = last?.metadata ?? readOwnershipMetadataDiagnostic(null);
+  const roles = snapshot?.ports ?? {};
+  const sequence =
+    (snapshot?.stateSequence ?? [])
+      .map(
+        (point) =>
+          `${point.relativeMs}ms ${point.status ?? "unknown"}/${point.ownership ?? "unknown"}`
+      )
+      .join(" -> ") || "none";
+  const safeSupervisor = safeDiagnosticPath(supervisorExecutable, installRoot);
+  const safeExecutable = safeDiagnosticPath(listener.executablePath, installRoot);
+  const parseDiagnosticTime = (value) => {
+    if (!value) return NaN;
+    const parsed = Date.parse(String(value));
+    if (Number.isFinite(parsed)) return parsed;
+    const match = String(value).match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+    return match
+      ? Date.UTC(
+          Number(match[1]),
+          Number(match[2]) - 1,
+          Number(match[3]),
+          Number(match[4]),
+          Number(match[5]),
+          Number(match[6])
+        )
+      : NaN;
+  };
+  const metadataStartMs = parseDiagnosticTime(metadata.startTime);
+  const listenerStartMs = parseDiagnosticTime(listener.creationDate);
+  const metadataStartMatches =
+    Number.isFinite(metadataStartMs) && Number.isFinite(listenerStartMs)
+      ? Math.abs(metadataStartMs - listenerStartMs) <= 2_500
+      : false;
+  const metadataExeMatches = Boolean(
+    metadata.executable &&
+    listener.processName &&
+    metadata.executable.toLowerCase() === listener.processName.toLowerCase()
+  );
+  const metadataInstanceMatches = Boolean(
+    metadata.instanceId &&
+    last?.supervisorInstanceId &&
+    metadata.instanceId === last.supervisorInstanceId
+  );
+  return [
+    "MEM0 OWNERSHIP DIAGNOSTIC",
+    "",
+    "port roles:",
+    `  mem0 service: ${roles.mem0ServicePort ?? "unknown"}`,
+    `  supervisor public/status: ${roles.supervisorPublicStatusPort ?? "unknown"}`,
+    `  supervisor control: ${roles.supervisorControlPort ?? "unknown"}`,
+    `  supervisor requested control: ${roles.supervisorRequestedControlPort ?? "unknown"}`,
+    "",
+    "supervisor:",
+    `  pid: ${last?.supervisorPid || "unknown"}`,
+    `  executable: ${safeSupervisor ?? "unknown"}`,
+    `  start time: ${last?.supervisorStartedAt ?? "unknown"}`,
+    "",
+    "mem0 listener:",
+    `  listening: ${listener.state === "Listen" ? "yes" : listener.state}`,
+    `  pid: ${listener.owningPid || "unknown"}`,
+    `  parent pid: ${listener.parentProcessId || "unknown"}`,
+    `  process name: ${listener.processName ?? "unknown"}`,
+    `  executable: ${safeExecutable ?? "unknown"}`,
+    `  creation date: ${listener.creationDate ?? "unknown"}`,
+    `  inside current install root: ${listener.executableInsideInstallRoot ? "yes" : "no"}`,
+    `  child of supervisor: ${listener.parentProcessId > 0 && listener.parentProcessId === Number(last?.supervisorPid) ? "yes" : "no"}`,
+    "",
+    "ownership:",
+    `  observed sequence: ${sequence}`,
+    `  metadata exists: ${metadata.exists ? "yes" : "no"}`,
+    `  metadata pid: ${metadata.pid || "unknown"}`,
+    `  metadata instance matches: ${metadataInstanceMatches ? "yes" : "unknown"}`,
+    `  metadata start time matches: ${metadataStartMatches ? "yes" : "unknown"}`,
+    `  metadata executable matches: ${metadataExeMatches ? "yes" : "unknown"}`,
+    "",
+    "classification evidence:",
+    `  known current-run process: ${listener.pidEqualsKnownManagedPid || listener.pidEqualsSupervisorPid ? "yes" : "no"}`,
+    `  unexplained external listener: ${listener.owningPid > 0 && !listener.pidEqualsKnownManagedPid && !listener.pidEqualsSupervisorPid ? "yes" : "unknown"}`
+  ].join("\n");
+}
+
+export function formatDiagnosticSummary({ diagnostic, installRoot = null }) {
+  const snapshot = diagnostic?.snapshot ? diagnostic.snapshot() : diagnostic;
+  const points = snapshot?.checkpoints ?? [];
+  const beforeSpawn = points.find((point) => point.phase === "T1-supervisor-spawn-before");
+  const listenerPoint = points.find((point) => Number(point.listeners?.mem0Service?.owningPid) > 0);
+  const metadataPoint = points.find((point) => point.metadata?.exists);
+  const finalState = [...(snapshot?.stateSequence ?? [])].at(-1);
+  const listener = listenerPoint?.listeners?.mem0Service ?? listenerResult(null);
+  const metadata = metadataPoint?.metadata ?? readOwnershipMetadataDiagnostic(null);
+  const roles = snapshot?.ports ?? {};
+  return [
+    `port roles: mem0 service=${roles.mem0ServicePort ?? "unknown"}, supervisor public/status=${roles.supervisorPublicStatusPort ?? "unknown"}, supervisor control=${roles.supervisorControlPort ?? "unknown"}, requested control=${roles.supervisorRequestedControlPort ?? "unknown"}`,
+    `T1 Mem0 listener=${beforeSpawn?.listeners?.mem0Service?.state ?? "unknown"}`,
+    `listener first=${snapshot?.firstListenerPhase ?? "none"}, pid=${listener.owningPid || "none"}, parent=${listener.parentProcessId || "none"}, exe=${safeDiagnosticPath(listener.executablePath, installRoot) ?? "none"}, childOfSupervisor=${listener.parentProcessId > 0 && listener.parentProcessId === Number(listenerPoint?.supervisorPid) ? "yes" : "no"}`,
+    `metadata first=${metadataPoint?.phase ?? "none"}, pid=${metadata.pid || "none"}, exe=${metadata.executable ?? "none"}`,
+    `ownership sequence=${(snapshot?.stateSequence ?? []).map((entry) => `${entry.relativeMs}ms ${entry.status ?? "unknown"}/${entry.ownership ?? "unknown"}`).join(" -> ") || "none"}`,
+    `final ownership=${finalState?.ownership ?? "unknown"}, shutdown=pids-exited, resource=unchanged, orphan=none, temp=clean`
+  ].join("\n");
+}
+
 export async function waitForSpecificPidsExit(
   entries,
   { pidProbe = pidAlive, sleep = wait, now = Date.now, timeoutMs = 10_000 } = {}
@@ -624,6 +1040,7 @@ async function waitForSupervisorEndpoint(pointerRoot, stateRoot, timeoutMs) {
         const active = readJson(pointer);
         if (active.endpointFile && isWithin(active.endpointFile, stateRoot)) {
           const endpoint = await waitForJsonFile(active.endpointFile, Math.min(timeoutMs, 5_000));
+          if (endpoint && active.stateDirectory) endpoint.stateDirectory = active.stateDirectory;
           return endpoint;
         }
       } catch {
@@ -730,10 +1147,44 @@ function locateResourceRoot(installDir) {
   fail("installed resource root with packaging-info.json was not found");
 }
 
-async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
+async function runPackagedSupervisor({
+  resource,
+  layout,
+  timeoutMs,
+  listenerAttribution = attributeWindowsListener,
+  diagnosticsNow = Date.now
+}) {
   const { mem0Port, supervisorPort } = await allocateDistinctPorts();
+  const ports = createDiagnosticPortRoles({
+    mem0ServicePort: mem0Port,
+    supervisorRequestedControlPort: supervisorPort
+  });
   const stateRoot = path.join(layout.state, "supervisor");
   const localAppData = layout.localAppData;
+  const mem0MetadataPath = path.join(stateRoot, "mem0.pid.json");
+  const diagnostics = createOwnershipDiagnostics({
+    ports,
+    metadataPath: mem0MetadataPath,
+    installRoot: layout.install,
+    smokeRoot: layout.root,
+    attribution: listenerAttribution,
+    now: diagnosticsNow
+  });
+  const safeSample = async (...args) => {
+    try {
+      return await diagnostics.sample(...args);
+    } catch {
+      return null;
+    }
+  };
+  const safeObserveStatus = async (...args) => {
+    try {
+      return await diagnostics.observeStatus(...args);
+    } catch {
+      return null;
+    }
+  };
+  await safeSample("T0-ports-allocated", { pid: 0 });
   const env = sanitizeChildEnv({
     LOCALAPPDATA: localAppData,
     APPDATA: layout.appData,
@@ -751,7 +1202,9 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
     MEM0_BASE_URL: `http://127.0.0.1:${mem0Port}`,
     PROVIDER_ALLOW_MOCKS: "true"
   });
-  console.info(`[installer-smoke] isolated ports: supervisor=${supervisorPort} mem0=${mem0Port}`);
+  console.info(
+    `[installer-smoke] port roles: mem0 service=${mem0Port}, supervisor requested control=${supervisorPort}, supervisor public/status=unknown, supervisor control=unknown`
+  );
   assertNoSecrets(env, "child env");
   assertToolsUnresolvable(env);
   const runtimeNode = path.join(resource.runtime, NODE_EXE_NAME);
@@ -773,6 +1226,7 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
   const useExe = fs.existsSync(supervisorExe);
   const command = useExe ? supervisorExe : runtimeNode;
   const commandArgs = useExe ? args : [supervisorCjs, ...args];
+  await safeSample("T1-supervisor-spawn-before", { pid: 0 });
   const child = spawn(command, commandArgs, {
     cwd: layout.emptyCwd,
     env,
@@ -780,6 +1234,8 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
+  diagnostics.setSupervisorPid(child.pid);
+  await safeSample("T2-supervisor-spawn-returned", { pid: 0 });
   let stdout = "";
   let stderr = "";
   let endpoint = null;
@@ -796,11 +1252,24 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
     const base = String(endpoint.baseUrl);
     if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(base)) fail("Supervisor endpoint is not loopback");
     const endpointPort = Number(new URL(base).port);
+    if (
+      typeof endpoint.stateDirectory === "string" &&
+      isWithin(endpoint.stateDirectory, stateRoot)
+    ) {
+      diagnostics.setMetadataPath(path.join(endpoint.stateDirectory, "mem0.pid.json"));
+    }
+    await safeSample("T3-supervisor-endpoint", {
+      endpoint: endpointPort,
+      instanceId: endpoint.instanceId,
+      supervisorStartedAt: endpoint.startedAt,
+      pid: 0
+    });
     if (endpointPort === mem0Port)
       fail(`Supervisor control port collides with Mem0 port (${mem0Port})`);
     const health = await requestJson(`${base}/health`);
     if (health.status !== 200 || health.value?.ok !== true)
       fail(`Supervisor health failed (${health.status})`);
+    await safeSample("T4-before-bootstrap", { endpoint: endpointPort, pid: 0 });
     const bootstrap = await requestJson(`${base}/v1/bootstrap`, {
       method: "POST",
       token: endpoint.controlToken,
@@ -808,11 +1277,33 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
     });
     if (bootstrap.status < 200 || bootstrap.status >= 300)
       fail(`Supervisor bootstrap failed (${bootstrap.status})`);
+    await safeSample("T5-after-bootstrap", { endpoint: endpointPort, pid: 0 });
     let mem0 = null;
+    let observedHealthy = false;
+    let observedExternal = false;
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
       const status = await requestJson(`${base}/v1/status`, { token: endpoint.controlToken });
       mem0 = status.value?.services?.find((service) => service.id === "mem0") ?? null;
+      await safeObserveStatus("status-change", mem0);
+      if (mem0?.status === "healthy" && !observedHealthy) {
+        observedHealthy = true;
+        await safeSample("T6-first-mem0-healthy", {
+          endpoint: endpointPort,
+          ownership: mem0.ownership,
+          status: mem0.status,
+          pid: Number(mem0.pid) || 0
+        });
+      }
+      if (mem0?.ownership === "external" && !observedExternal) {
+        observedExternal = true;
+        await safeSample("T7-first-mem0-external", {
+          endpoint: endpointPort,
+          ownership: mem0.ownership,
+          status: mem0.status,
+          pid: Number(mem0.pid) || 0
+        });
+      }
       if (
         mem0?.managed === true &&
         mem0.ownership === "owned" &&
@@ -822,8 +1313,15 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
         break;
       await wait(300);
     }
-    if (!mem0 || mem0.managed !== true || mem0.ownership !== "owned" || !(mem0.pid > 0))
+    if (!mem0 || mem0.managed !== true || mem0.ownership !== "owned" || !(mem0.pid > 0)) {
+      await safeSample("T8-before-ownership-error", {
+        endpoint: endpointPort,
+        ownership: mem0?.ownership ?? null,
+        status: mem0?.status ?? null,
+        pid: Number(mem0?.pid) || 0
+      });
       fail("Supervisor did not own a running Mem0");
+    }
     const mem0Health = await requestJson(`http://127.0.0.1:${mem0Port}/health`);
     if (mem0Health.status !== 200 || !mem0Health.value?.ok)
       fail(`Mem0 health failed (${mem0Health.status})`);
@@ -872,6 +1370,9 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
       });
     }
     logExit();
+    console.info(
+      `[installer-smoke] diagnostic summary:\n${formatDiagnosticSummary({ diagnostic: diagnostics, installRoot: layout.install })}`
+    );
     return {
       endpoint,
       mem0,
@@ -882,6 +1383,12 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
       status: mem0Health.value
     };
   } catch (error) {
+    await safeSample("T9-finally-start", {
+      endpoint: endpoint?.baseUrl ? Number(new URL(endpoint.baseUrl).port) : null,
+      ownership: error?.message?.includes("Supervisor did not own") ? "external" : null,
+      status: null,
+      pid: 0
+    });
     if (endpoint?.baseUrl && endpoint?.controlToken) {
       try {
         await requestJson(`${endpoint.baseUrl}/v1/shutdown`, {
@@ -912,9 +1419,20 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
       );
     }
     logExit();
-    throw new Error(
-      `${error instanceof Error ? error.message : String(error)}\n${stdout}\n${stderr}`
-    );
+    const message = error instanceof Error ? error.message : String(error);
+    let diagnosticBlock = "";
+    if (message.includes("Supervisor did not own")) {
+      try {
+        diagnosticBlock = `\n${formatOwnershipDiagnostic({
+          diagnostic: diagnostics,
+          supervisorExecutable: command,
+          installRoot: layout.install
+        })}`;
+      } catch {
+        diagnosticBlock = "\nMEM0 OWNERSHIP DIAGNOSTIC\n  diagnostic query failed";
+      }
+    }
+    throw new Error(`${message}${diagnosticBlock}\n${stdout}\n${stderr}`);
   }
 }
 

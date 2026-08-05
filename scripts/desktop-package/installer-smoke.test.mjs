@@ -12,10 +12,14 @@ import {
   assertTempRoot,
   assertTauriAppSmokeAllowed,
   allocateDistinctPorts,
+  attributeWindowsListener,
   buildWmCloseScript,
   chooseInstaller,
   compareSnapshots,
+  createDiagnosticPortRoles,
+  createOwnershipDiagnostics,
   FORBIDDEN_PATH_TOOLS,
+  formatOwnershipDiagnostic,
   findInstalledApplicationExecutable,
   findInstallerCandidates,
   findUninstaller,
@@ -24,6 +28,7 @@ import {
   removeTreeWithRetries,
   restrictedPath,
   restrictedWindowsPath,
+  readOwnershipMetadataDiagnostic,
   sanitizeChildEnv,
   snapshotTree,
   waitForSpecificPidsExit,
@@ -305,6 +310,175 @@ test("smoke fails closed when distinct ports cannot be allocated", async () => {
     allocateDistinctPorts({ free: async () => 6131, maxAttempts: 2 }),
     /unable to allocate distinct smoke ports/
   );
+});
+
+test("diagnostic port roles keep Mem0, requested control, and actual Supervisor endpoint explicit", () => {
+  const roles = createDiagnosticPortRoles({
+    mem0ServicePort: 6131,
+    supervisorRequestedControlPort: 6242
+  });
+  assert.deepEqual(roles, {
+    mem0ServicePort: 6131,
+    supervisorPublicStatusPort: null,
+    supervisorControlPort: null,
+    supervisorRequestedControlPort: 6242
+  });
+});
+
+test("Windows listener attribution uses an absolute PowerShell path and no CommandLine query", () => {
+  let invoked = null;
+  const attributed = attributeWindowsListener(6131, {
+    platform: "win32",
+    systemRoot: "C:\\Windows",
+    installRoot: "C:\\Temp\\install",
+    supervisorPid: 100,
+    knownManagedPid: 200,
+    execFile: (file, args) => {
+      invoked = { file, args };
+      return JSON.stringify({
+        state: "Listen",
+        owningPid: 200,
+        processName: "yuvi-mem0.exe",
+        parentProcessId: 100,
+        executablePath: "C:\\Temp\\install\\resources\\mem0\\yuvi-mem0.exe",
+        creationDate: "2026-08-05T10:00:00.000Z"
+      });
+    }
+  });
+  assert.equal(invoked.file, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.doesNotMatch(invoked.args.at(-1), /CommandLine/);
+  assert.equal(attributed.owningPid, 200);
+  assert.equal(attributed.parentProcessId, 100);
+  assert.equal(attributed.executableInsideInstallRoot, true);
+  assert.equal(attributed.pidEqualsSupervisorPid, false);
+  assert.equal(attributed.pidEqualsKnownManagedPid, true);
+});
+
+test("listener attribution fails closed without changing the query conclusion", () => {
+  const result = attributeWindowsListener(6131, {
+    platform: "win32",
+    execFile: () => {
+      throw Object.assign(new Error("query unavailable"), { code: "ENOEXEC" });
+    }
+  });
+  assert.equal(result.querySucceeded, false);
+  assert.equal(result.queryErrorCode, "ENOEXEC");
+  assert.equal(result.state, "query-failed");
+});
+
+test("diagnostics sample listener, metadata, and stable ownership state changes", async () => {
+  const root = temp("yuvi-installer-smoke-");
+  const installRoot = path.join(root, "install");
+  const metadataPath = path.join(root, "state", "mem0.pid.json");
+  fs.mkdirSync(path.dirname(metadataPath), { recursive: true });
+  fs.writeFileSync(
+    metadataPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      role: "mem0",
+      pid: 200,
+      commandMarker: `${installRoot}\\resources\\mem0\\yuvi-mem0.exe`,
+      processStartedAtUtc: "2026-08-05T10:00:00.000Z",
+      instanceId: "instance-a",
+      ownershipToken: "secret-canary"
+    })
+  );
+  let now = 1_000;
+  let listening = false;
+  const calls = [];
+  const attribution = async (port, options) => {
+    calls.push({ port, options });
+    if (port === 6131 && listening)
+      return {
+        port,
+        state: "Listen",
+        owningPid: 200,
+        processName: "yuvi-mem0.exe",
+        parentProcessId: 100,
+        executablePath: `${installRoot}\\resources\\mem0\\yuvi-mem0.exe`,
+        creationDate: "2026-08-05T10:00:00.000Z",
+        querySucceeded: true,
+        queryErrorCode: null,
+        executableInsideInstallRoot: true,
+        pidEqualsSupervisorPid: false,
+        pidEqualsKnownManagedPid: true
+      };
+    return {
+      port,
+      state: "not-listening",
+      owningPid: 0,
+      processName: null,
+      parentProcessId: 0,
+      executablePath: null,
+      creationDate: null,
+      querySucceeded: true,
+      queryErrorCode: null,
+      executableInsideInstallRoot: false,
+      pidEqualsSupervisorPid: false,
+      pidEqualsKnownManagedPid: false
+    };
+  };
+  const diagnostic = createOwnershipDiagnostics({
+    ports: createDiagnosticPortRoles({
+      mem0ServicePort: 6131,
+      supervisorRequestedControlPort: 6242
+    }),
+    metadataPath,
+    installRoot,
+    smokeRoot: root,
+    attribution,
+    now: () => now
+  });
+  diagnostic.setSupervisorPid(100);
+  await diagnostic.sample("T0", { status: "stopped", ownership: "none" });
+  now += 10;
+  listening = true;
+  await diagnostic.sample("T1", { status: "healthy", ownership: "owned", pid: 200 });
+  now += 10;
+  await diagnostic.sample("T2", { status: "healthy", ownership: "owned", pid: 200 });
+  const snapshot = diagnostic.snapshot();
+  assert.equal(snapshot.firstListenerPhase, "T1");
+  assert.deepEqual(
+    snapshot.stateSequence.map((entry) => entry.phase),
+    ["T0", "T1"]
+  );
+  assert.equal(snapshot.checkpoints.length, 3);
+  assert.equal(calls.length, 12);
+  assert.equal(snapshot.checkpoints[1].metadata.pid, 200);
+  const formatted = formatOwnershipDiagnostic({
+    diagnostic,
+    supervisorExecutable: `${installRoot}\\resources\\supervisor\\yuvi-desktop-supervisor.exe`,
+    installRoot
+  });
+  assert.match(formatted, /MEM0 OWNERSHIP DIAGNOSTIC/);
+  assert.doesNotMatch(formatted, /secret-canary/);
+});
+
+test("ownership metadata diagnostics use an allowlist and hide secret fields", () => {
+  const root = temp("yuvi-installer-smoke-");
+  const installRoot = path.join(root, "install");
+  const metadataPath = path.join(root, "state", "mem0.pid.json");
+  fs.mkdirSync(path.dirname(metadataPath), { recursive: true });
+  fs.writeFileSync(
+    metadataPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      protocolVersion: 1,
+      role: "mem0",
+      pid: 42,
+      instanceId: "instance-a",
+      commandMarker: `${installRoot}\\mem0\\yuvi-mem0.exe`,
+      processStartedAtUtc: "2026-08-05T10:00:00.000Z",
+      ownershipToken: "secret-canary",
+      DATABASE_URL: "postgres://secret"
+    })
+  );
+  const result = readOwnershipMetadataDiagnostic(metadataPath, { installRoot });
+  assert.equal(result.pid, 42);
+  assert.equal(result.executable, "yuvi-mem0.exe");
+  assert.equal(result.executableInsideInstallRoot, true);
+  assert.equal(JSON.stringify(result).includes("secret"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "ownershipToken"), false);
 });
 
 function transientError(code) {
