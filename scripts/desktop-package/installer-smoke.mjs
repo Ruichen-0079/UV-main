@@ -555,6 +555,15 @@ function freePort() {
   });
 }
 
+export async function allocateDistinctPorts({ free = freePort, maxAttempts = 4 } = {}) {
+  const mem0Port = await free();
+  for (let attempt = 0; attempt < Math.max(1, maxAttempts); attempt += 1) {
+    const supervisorPort = await free();
+    if (supervisorPort !== mem0Port) return { mem0Port, supervisorPort };
+  }
+  fail(`unable to allocate distinct smoke ports (Mem0 ${mem0Port})`);
+}
+
 function requestJson(url, { method = "GET", token, body } = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -722,7 +731,7 @@ function locateResourceRoot(installDir) {
 }
 
 async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
-  const port = await freePort();
+  const { mem0Port, supervisorPort } = await allocateDistinctPorts();
   const stateRoot = path.join(layout.state, "supervisor");
   const localAppData = layout.localAppData;
   const env = sanitizeChildEnv({
@@ -737,10 +746,12 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
     YUVI_AUTOSTART_RUNTIME: "false",
     YUVI_AUTOSTART_MEM0: "true",
     YUVI_AUTOSTART_TTS: "false",
+    YUVI_SUPERVISOR_PORT: String(supervisorPort),
     MEMORY_BACKEND: "mem0",
-    MEM0_BASE_URL: `http://127.0.0.1:${port}`,
+    MEM0_BASE_URL: `http://127.0.0.1:${mem0Port}`,
     PROVIDER_ALLOW_MOCKS: "true"
   });
+  console.info(`[installer-smoke] isolated ports: supervisor=${supervisorPort} mem0=${mem0Port}`);
   assertNoSecrets(env, "child env");
   assertToolsUnresolvable(env);
   const runtimeNode = path.join(resource.runtime, NODE_EXE_NAME);
@@ -784,6 +795,9 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
     );
     const base = String(endpoint.baseUrl);
     if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(base)) fail("Supervisor endpoint is not loopback");
+    const endpointPort = Number(new URL(base).port);
+    if (endpointPort === mem0Port)
+      fail(`Supervisor control port collides with Mem0 port (${mem0Port})`);
     const health = await requestJson(`${base}/health`);
     if (health.status !== 200 || health.value?.ok !== true)
       fail(`Supervisor health failed (${health.status})`);
@@ -810,7 +824,7 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
     }
     if (!mem0 || mem0.managed !== true || mem0.ownership !== "owned" || !(mem0.pid > 0))
       fail("Supervisor did not own a running Mem0");
-    const mem0Health = await requestJson(`http://127.0.0.1:${port}/health`);
+    const mem0Health = await requestJson(`http://127.0.0.1:${mem0Port}/health`);
     if (mem0Health.status !== 200 || !mem0Health.value?.ok)
       fail(`Mem0 health failed (${mem0Health.status})`);
     ownedMem0Pid = Number(mem0.pid);

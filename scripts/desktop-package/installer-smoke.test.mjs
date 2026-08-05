@@ -11,6 +11,7 @@ import {
   assertToolsUnresolvable,
   assertTempRoot,
   assertTauriAppSmokeAllowed,
+  allocateDistinctPorts,
   buildWmCloseScript,
   chooseInstaller,
   compareSnapshots,
@@ -291,6 +292,19 @@ test("cleanup guard accepts only the smoke root", () => {
   const root = temp("yuvi-installer-smoke-");
   assert.equal(assertCleanupTarget(root), root);
   assert.throws(() => assertCleanupTarget(os.tmpdir()), /unsafe/);
+});
+
+test("smoke allocates distinct Supervisor and Mem0 ports", async () => {
+  const supplied = [6131, 6131, 6242];
+  const ports = await allocateDistinctPorts({ free: async () => supplied.shift() });
+  assert.deepEqual(ports, { mem0Port: 6131, supervisorPort: 6242 });
+});
+
+test("smoke fails closed when distinct ports cannot be allocated", async () => {
+  await assert.rejects(
+    allocateDistinctPorts({ free: async () => 6131, maxAttempts: 2 }),
+    /unable to allocate distinct smoke ports/
+  );
 });
 
 function transientError(code) {
