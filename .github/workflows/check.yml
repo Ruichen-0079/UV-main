@@ -78,6 +78,12 @@ jobs:
       contents: read
 
     steps:
+      - name: Configure Git line endings
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -90,7 +96,27 @@ jobs:
           foreach ($path in @("build", "apps/desktop/src-tauri/generated", "apps/desktop/src-tauri/target")) {
             if (Test-Path $path) { throw "build artifact exists before fresh install: $path" }
           }
-          if ((git status --porcelain) -ne "") { throw "checkout is not clean" }
+          $statusLines = @(git status --porcelain=v1 --untracked-files=no)
+          if ($LASTEXITCODE -ne 0) {
+            throw "git status failed"
+          }
+
+          if ($statusLines.Count -gt 0) {
+            Write-Host "Tracked checkout changes:"
+            $statusLines | ForEach-Object { Write-Host $_ }
+
+            Write-Host "Changed paths:"
+            git diff --name-only
+
+            Write-Host "Diff stats:"
+            git diff --numstat
+
+            Write-Host "Git line-ending configuration:"
+            git config --show-origin --get core.autocrlf
+            git config --show-origin --get core.eol
+
+            throw "checkout contains tracked modifications"
+          }
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
