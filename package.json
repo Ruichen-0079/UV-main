@@ -28,6 +28,8 @@
     "desktop:package:prepare": "node scripts/desktop-package/prepare.mjs",
     "desktop:package:smoke": "node scripts/desktop-package/smoke.mjs",
     "desktop:package:test": "node --test scripts/desktop-package/build-mem0.test.mjs",
+    "desktop:installer:smoke": "node scripts/desktop-package/installer-smoke.mjs",
+    "desktop:installer:test": "node --test scripts/desktop-package/installer-smoke.test.mjs",
     "desktop:build:windows": "pnpm --filter @companion/desktop exec tauri build --bundles nsis"
   },
   "packageManager": "pnpm@9.15.4",
