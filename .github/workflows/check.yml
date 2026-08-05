@@ -170,6 +170,9 @@ jobs:
           python -m pip show mem0ai
           python -m pip check
 
+      - name: Prepare packaged desktop resources
+        run: pnpm desktop:package:prepare
+
       - name: Rust format gate
         shell: pwsh
         run: rustfmt --check apps/desktop/src-tauri/src/config/tests.rs
