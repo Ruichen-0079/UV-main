@@ -21,7 +21,8 @@ async function main() {
       ? loadPackagedSupervisorConfig({
           resourceRoot: required(args, "resource-root"),
           dataRoot: required(args, "state-root"),
-          runtimeManifestPath: args["runtime-manifest"],
+          runtimeManifestPath: required(args, "runtime-manifest"),
+          mem0ManifestPath: required(args, "mem0-manifest"),
           controlPort: args.port ? Number(args.port) : 0,
           controlHost: "127.0.0.1"
         })
@@ -263,11 +264,10 @@ function restrictToCurrentUser(targetPath) {
   try {
     const user = process.env["USERNAME"] ?? "";
     if (!user) return;
-    spawnSync(
-      "icacls",
-      [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`],
-      { stdio: "ignore", windowsHide: true }
-    );
+    spawnSync("icacls", [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`], {
+      stdio: "ignore",
+      windowsHide: true
+    });
   } catch {
     // ignore
   }

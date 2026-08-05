@@ -31,6 +31,18 @@ export const PACKAGE_TRIPLE = `${PACKAGE_PLATFORM}-${PACKAGE_ARCH}`;
 export const BUILD_ROOT = path.join(REPO_ROOT, "build", "desktop", PACKAGE_TRIPLE);
 export const SUPERVISOR_OUT_DIR = path.join(BUILD_ROOT, "supervisor");
 export const RUNTIME_OUT_DIR = path.join(BUILD_ROOT, "runtime");
+export const MEM0_OUT_DIR = path.join(BUILD_ROOT, "mem0");
+export const MEM0_EXE_NAME = "yuvi-mem0.exe";
+export const MEM0_MANIFEST_NAME = "mem0-manifest.json";
+export const MEM0_INTERNAL_DIR_NAME = "_internal";
+export const MEM0_BUILD_SCRIPT = path.join(
+  REPO_ROOT,
+  "services",
+  "memory-mem0",
+  "packaging",
+  "build.py"
+);
+export const MEM0_SERVICE_ROOT = path.join(REPO_ROOT, "services", "memory-mem0");
 export const CACHE_DIR = process.env["YUVI_NODE_CACHE"]?.trim()
   ? path.resolve(process.env["YUVI_NODE_CACHE"].trim())
   : path.join(REPO_ROOT, ".cache", "desktop-package");
