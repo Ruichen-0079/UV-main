@@ -371,7 +371,11 @@ export class DesktopSupervisor {
 
   async refreshAll(): Promise<SupervisorSnapshot> {
     for (const id of this.services.keys()) {
-      await this.refreshService(id);
+      const svc = this.services.get(id);
+      if (!svc) continue;
+      await this.queue(svc, async () => {
+        await this.refreshService(id);
+      });
     }
     // One controlled auto-recover for owned runtime crash only.
     const runtime = this.services.get("runtime");
@@ -499,10 +503,19 @@ export class DesktopSupervisor {
       if (!pid) {
         throw new Error("spawn returned no pid");
       }
+      svc.child = child;
+      svc.pid = pid;
       // Wait briefly so process creation time is queryable.
       await sleep(200);
       const info = getProcessInfo(pid);
       const startedAt = (info?.createdAtUtc ?? new Date()).toISOString();
+      svc.startedAt = startedAt;
+      child.on("exit", () => {
+        if (svc.pid === pid) {
+          svc.child = null;
+          // refresh will mark unavailable/stale
+        }
+      });
       const metadata: ProcessMetadata = {
         schemaVersion: PROCESS_METADATA_VERSION,
         role: svc.spec.role,
@@ -516,18 +529,8 @@ export class DesktopSupervisor {
         instanceId: this.config.instanceId
       };
       writeProcessMetadata(svc.spec.metadataFile, metadata);
-      svc.child = child;
-      svc.pid = pid;
-      svc.startedAt = startedAt;
       svc.ownership = "owned";
       svc.pendingExternal = false;
-
-      child.on("exit", () => {
-        if (svc.pid === pid) {
-          svc.child = null;
-          // refresh will mark unavailable/stale
-        }
-      });
 
       const ready = await this.waitReady(svc, svc.spec.startTimeoutMs);
       if (!ready) {
@@ -539,11 +542,17 @@ export class DesktopSupervisor {
       }
       await this.refreshService(id);
     } catch (error) {
+      try {
+        await this.stopOwned(svc);
+      } catch {
+        // Preserve the original managed-start failure.
+      }
       svc.status = "unavailable";
       svc.summary = "Start failed.";
       svc.lastError = error instanceof Error ? error.message : String(error);
       svc.ownership = "none";
       svc.pid = null;
+      throw error;
     }
   }
 

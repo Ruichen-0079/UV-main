@@ -7,6 +7,7 @@ import { buildChildProcessEnv, loadPackagedSupervisorConfig } from "./config.js"
 import { DesktopSupervisor } from "./supervisor.js";
 import type { StartCommandSpec, SupervisorConfig } from "./types.js";
 import * as health from "./health.js";
+import * as ownership from "./ownership.js";
 import * as processWindows from "./process-windows.js";
 
 const tempDirs: string[] = [];
@@ -821,6 +822,54 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
     expect(supervisor.snapshot().services.find((service) => service.id === "mem0")?.ownership).toBe(
       "owned"
     );
+  });
+
+  it("publishes managed Mem0 metadata before concurrent refresh can classify it", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+
+    await Promise.all([supervisor.bootstrap(), supervisor.refreshAll()]);
+
+    const config = supervisor.getConfig();
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const metadata = ownership.readProcessMetadata(metadataPath);
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+
+    expect(metadata).toMatchObject({
+      schemaVersion: 1,
+      role: "mem0",
+      pid: processMock.children[0]?.pid,
+      stateDirectory: config.stateDirectory,
+      instanceId: config.instanceId
+    });
+    expect(metadata?.commandMarker).toBe(processMock.spawn.mock.calls[0]?.[0].commandMarker);
+    expect(mem0?.status).toBe("healthy");
+    expect(mem0?.ownership).toBe("owned");
+    expect(
+      fs.readdirSync(config.stateDirectory).some((name) => name.includes(".mem0.pid.json."))
+    ).toBe(false);
+  });
+
+  it("cleans the exact child and preserves metadata errors", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const publishError = new Error("metadata publish failed");
+    vi.spyOn(ownership, "writeProcessMetadata").mockImplementation(() => {
+      throw publishError;
+    });
+    const supervisor = createSupervisor(packagedConfig());
+
+    await expect(supervisor.bootstrap()).rejects.toBe(publishError);
+
+    const config = supervisor.getConfig();
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(processMock.children[0]?.killed).toBe(true);
+    expect(mem0?.status).toBe("unavailable");
+    expect(mem0?.ownership).toBe("none");
+    expect(mem0?.lastError).toBe(publishError.message);
+    expect(fs.existsSync(path.join(config.stateDirectory, "mem0.pid.json"))).toBe(false);
+    expect(fs.readdirSync(config.stateDirectory).some((name) => name.endsWith(".tmp"))).toBe(false);
   });
 
   it("starts packaged Mem0 when external mode becomes managed", async () => {

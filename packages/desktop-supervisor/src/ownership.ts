@@ -6,8 +6,29 @@ import { commandLineContainsPath, pathsEqual } from "./paths.js";
 export const PROCESS_METADATA_VERSION = 1 as const;
 
 export function writeProcessMetadata(filePath: string, metadata: ProcessMetadata): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true });
+  const temporaryPath = path.join(
+    directory,
+    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+  );
+  let committed = false;
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(metadata, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600
+    });
+    fs.renameSync(temporaryPath, filePath);
+    committed = true;
+  } finally {
+    if (!committed) {
+      try {
+        fs.unlinkSync(temporaryPath);
+      } catch {
+        // Preserve the original write/rename failure.
+      }
+    }
+  }
 }
 
 export function readProcessMetadata(filePath: string): ProcessMetadata | null {
