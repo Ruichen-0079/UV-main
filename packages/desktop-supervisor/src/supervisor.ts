@@ -50,13 +50,69 @@ type InternalService = {
   startedAt: string | null;
   child: ChildProcess | null;
   autoRecovered: boolean;
+  pendingExternal: boolean;
   op: Promise<void> | null;
 };
 
 export type SupervisorListener = (snapshot: SupervisorSnapshot) => void;
 
 /** Secret keys that must never leak into status/config responses. */
-const SECRET_ENV_KEYS = new Set(["DEEPSEEK_API_KEY", "DATABASE_URL"]);
+const SECRET_ENV_KEYS = new Set([
+  "DEEPSEEK_API_KEY",
+  "DATABASE_URL",
+  "MEM0_PG_CONNECTION_STRING",
+  "MEM0_LLM_API_KEY"
+]);
+
+const RUNTIME_RELOAD_KEYS = new Set([
+  "DEEPSEEK_API_KEY",
+  "DATABASE_URL",
+  "MEMORY_BACKEND",
+  "MEM0_BASE_URL",
+  "MEMORY_SUBJECT_USER_ID",
+  "MEMORY_PERSONA_ID"
+]);
+
+const MEM0_CONFIG_KEYS = new Set([
+  "MEMORY_BACKEND",
+  "YUVI_AUTOSTART_MEM0",
+  "MEM0_BASE_URL",
+  "MEM0_OLLAMA_BASE_URL",
+  "DATABASE_URL",
+  "MEM0_PG_CONNECTION_STRING",
+  "MEM0_LLM_PROVIDER",
+  "MEM0_LLM_MODEL",
+  "MEM0_LLM_API_KEY",
+  "MEM0_LLM_BASE_URL",
+  "MEM0_LLM_TEMPERATURE",
+  "MEM0_LLM_TIMEOUT_MS",
+  "MEM0_REQUEST_TIMEOUT_MS",
+  "MEM0_LOG_CONTENT",
+  "MEM0_HEALTH_EMBED_CACHE_TTL_S",
+  "YUVI_MEM0_DATA_DIR",
+  "YUVI_MEM0_LOG_DIR"
+]);
+
+type Mem0ReconcileAction = "none" | "start" | "stop" | "restart" | "pending_external";
+
+type ServiceConfigState = {
+  spec: ManagedServiceSpec;
+  ownership: ServiceOwnership;
+  status: ServiceLifecycle;
+  effectiveEnv: NodeJS.ProcessEnv | null;
+};
+
+type SupervisorConfigState = {
+  env: Record<string, string>;
+  runtime: ServiceConfigState;
+  mem0: ServiceConfigState;
+};
+
+type ConfigReconcilePlan = {
+  generation: number;
+  runtimeChanged: boolean;
+  mem0Action: Mem0ReconcileAction;
+};
 
 export class DesktopSupervisor {
   private readonly services = new Map<ServiceId, InternalService>();
@@ -75,6 +131,9 @@ export class DesktopSupervisor {
   private readonly dynamicOverrideKeys = new Set<string>();
   /** Serializes config updates against service start/restart/stop. */
   private configOp: Promise<void> | null = null;
+  /** Tracks background config reconciliation so updates never overlap. */
+  private configReconcileOp: Promise<void> | null = null;
+  private configGeneration = 0;
 
   constructor(private config: SupervisorConfig) {
     // Base layer: shell/process + bootstrap config.env (e.g. .env files).
@@ -100,6 +159,7 @@ export class DesktopSupervisor {
         startedAt: null,
         child: null,
         autoRecovered: false,
+        pendingExternal: false,
         op: null
       });
     }
@@ -110,38 +170,47 @@ export class DesktopSupervisor {
   }
 
   /**
-   * Atomically apply env overrides from Tauri.
-   * Non-secret URL/model changes apply in place for the next start/restart.
-   * Secret keys that *actually change* schedule a background Runtime reload so
-   * Save returns quickly (blocking restart previously froze the Settings UI).
+   * Apply a redacted runtime-config update as one transaction. The HTTP caller
+   * only waits for validation and the in-memory commit; service reconciliation
+   * is tracked in the background so Save remains responsive.
    */
   async applyRuntimeConfig(update: RuntimeConfigUpdate): Promise<RuntimeConfigUpdateResult> {
     if (this.shuttingDown) {
       throw new Error("Supervisor is shutting down.");
     }
+    const previousReconcile = this.configReconcileOp;
+    if (previousReconcile) await previousReconcile.catch(() => undefined);
+    if (this.shuttingDown) {
+      throw new Error("Supervisor is shutting down.");
+    }
 
-    const appliedEnvKeys: string[] = [];
-    const unsetEnvKeys: string[] = [];
-    let secretsChanged = false;
+    const appliedEnvKeys = new Set<string>();
+    const unsetEnvKeys = new Set<string>();
+    let plan!: ConfigReconcilePlan;
 
     await this.withConfigLock(async () => {
-      // Wait for in-flight service ops so restart never reads a half-applied map.
+      const existingReconcile = this.configReconcileOp;
+      if (existingReconcile) await existingReconcile.catch(() => undefined);
+      // Wait for in-flight service operations so a new plan never races a
+      // previous spawn/stop/restart operation.
       const ops = [...this.services.values()].map((s) => s.op).filter(Boolean) as Promise<void>[];
-      if (ops.length > 0) {
-        await Promise.allSettled(ops);
-      }
+      if (ops.length > 0) await Promise.allSettled(ops);
+
+      const previousState = this.captureConfigState();
+      const candidateEnv: Record<string, string> = { ...this.config.env };
+      const candidateOverrides = new Set(this.dynamicOverrideKeys);
+
+      const applyUnset = (key: string): void => {
+        if (!key) return;
+        unsetEnvKeys.add(key);
+        candidateOverrides.delete(key);
+        const baseValue = this.baseEnv[key];
+        if (baseValue !== undefined) candidateEnv[key] = baseValue;
+        else delete candidateEnv[key];
+      };
 
       const unset = Array.isArray(update.unsetEnv) ? update.unsetEnv : [];
-      for (const rawKey of unset) {
-        const key = String(rawKey ?? "").trim();
-        if (!key) continue;
-        const hadSecret =
-          SECRET_ENV_KEYS.has(key) &&
-          Boolean(this.config.env[key]?.trim() || this.dynamicOverrideKeys.has(key));
-        this.clearDynamicOverride(key);
-        unsetEnvKeys.push(key);
-        if (hadSecret) secretsChanged = true;
-      }
+      for (const rawKey of unset) applyUnset(String(rawKey ?? "").trim());
 
       const incoming = update.env && typeof update.env === "object" ? update.env : {};
       for (const [rawKey, rawValue] of Object.entries(incoming)) {
@@ -149,115 +218,81 @@ export class DesktopSupervisor {
         if (!key) continue;
         const value = rawValue == null ? "" : String(rawValue);
         if (value.trim() === "") {
-          // Empty means unset, never store blank secrets.
-          const hadSecret =
-            SECRET_ENV_KEYS.has(key) &&
-            Boolean(this.config.env[key]?.trim() || this.dynamicOverrideKeys.has(key));
-          this.clearDynamicOverride(key);
-          if (!unsetEnvKeys.includes(key)) unsetEnvKeys.push(key);
-          if (hadSecret) secretsChanged = true;
+          applyUnset(key);
           continue;
         }
-        const previous = this.config.env[key] ?? "";
-        this.config.env[key] = value;
-        process.env[key] = value;
-        this.dynamicOverrideKeys.add(key);
-        appliedEnvKeys.push(key);
-        // Only reload Runtime when the secret *value* changes (not every Save re-push).
-        if (SECRET_ENV_KEYS.has(key) && previous !== value) {
-          secretsChanged = true;
-        }
+        candidateEnv[key] = value;
+        candidateOverrides.add(key);
+        appliedEnvKeys.add(key);
       }
 
-      const derived = deriveConfigFromEnv(this.config.layout, this.config.env);
-      // Preserve TTS start commands when the update payload does not re-supply them
-      // (Rust only sends user-settings keys, not YUVI_TTS_*_START_COMMAND).
-      const keepTtsWrapper = this.config.ttsWrapperStart;
-      const keepTtsUpstream = this.config.ttsUpstreamStart;
-      Object.assign(this.config, derived);
-      if (!derived.ttsWrapperStart && keepTtsWrapper) {
-        this.config.ttsWrapperStart = keepTtsWrapper;
-      }
-      if (!derived.ttsUpstreamStart && keepTtsUpstream) {
-        this.config.ttsUpstreamStart = keepTtsUpstream;
-      }
+      // Derive everything against the candidate. A malformed managed URL or
+      // manifest error therefore leaves the live config/specs untouched.
+      const derived = deriveConfigFromEnv(this.config.layout, candidateEnv);
+      const preserveMissingFlag = (key: string): boolean =>
+        candidateEnv[key] === undefined && !this.dynamicOverrideKeys.has(key);
+      const candidateDerived = {
+        ...derived,
+        // Hand-built SupervisorConfig instances may intentionally provide a
+        // false flag without an env key. Preserve that value until the key is
+        // explicitly supplied; removing a dynamic override still uses the
+        // derive default because it remains in dynamicOverrideKeys currently.
+        autostartRuntime: preserveMissingFlag("YUVI_AUTOSTART_RUNTIME")
+          ? this.config.autostartRuntime
+          : derived.autostartRuntime,
+        autostartMem0: preserveMissingFlag("YUVI_AUTOSTART_MEM0")
+          ? this.config.autostartMem0
+          : derived.autostartMem0,
+        autostartTts: preserveMissingFlag("YUVI_AUTOSTART_TTS")
+          ? this.config.autostartTts
+          : derived.autostartTts,
+        // Rust only sends user settings; preserve existing TTS commands when
+        // the update does not include their explicit start-command variables.
+        ttsWrapperStart: derived.ttsWrapperStart ?? this.config.ttsWrapperStart,
+        ttsUpstreamStart: derived.ttsUpstreamStart ?? this.config.ttsUpstreamStart
+      };
 
+      // Commit synchronously only after all candidate validation succeeds.
+      this.config.env = candidateEnv;
+      Object.assign(this.config, candidateDerived);
+      this.dynamicOverrideKeys.clear();
+      for (const key of candidateOverrides) this.dynamicOverrideKeys.add(key);
       this.rebuildSpecsInPlace();
-    });
+      this.configGeneration += 1;
 
-    const restartedServices: string[] = [];
-    if (secretsChanged && !this.shuttingDown) {
-      // Do NOT await — HTTP /v1/config must return so Tauri Save does not freeze.
-      restartedServices.push("runtime");
-      void this.reloadRuntimeAfterSecretChange().catch(() => {
-        // Errors surface on the service snapshot; never reject the config ack.
-      });
-    }
+      const nextState = this.captureConfigState();
+      plan = this.buildReconcilePlan(previousState, nextState);
+      plan.generation = this.configGeneration;
+      if (plan.runtimeChanged || plan.mem0Action !== "none") {
+        this.enqueueConfigReconcile(plan);
+      }
+    });
 
     this.emit();
     return {
       ok: true,
-      // Key names only — never values. Secret names may appear so clients know unset ran.
-      appliedEnvKeys: appliedEnvKeys.filter((k) => !SECRET_ENV_KEYS.has(k)),
-      unsetEnvKeys: [...new Set(unsetEnvKeys)],
-      restartedServices,
+      appliedEnvKeys: [...appliedEnvKeys].filter((key) => !SECRET_ENV_KEYS.has(key)),
+      unsetEnvKeys: [...unsetEnvKeys],
+      restartedServices: [
+        ...(plan.runtimeChanged ? (["runtime"] as const) : []),
+        ...(plan.mem0Action !== "none" ? (["mem0"] as const) : [])
+      ],
       updatedAt: new Date().toISOString()
     };
   }
 
-  /**
-   * Reload managed Runtime so secret env is present in the child process.
-   * Never kills external (unowned) processes — surfaces a clear pending message instead.
-   */
-  private async reloadRuntimeAfterSecretChange(): Promise<void> {
-    const runtime = this.services.get("runtime");
-    if (!runtime || this.shuttingDown) return;
-
-    if (runtime.ownership === "external") {
-      // Health may be green but that process was not started with our secrets.
-      runtime.lastError =
-        "Secrets saved, but Runtime is external (another process owns :6121). Free the port or stop the other YUVI instance, then Start Runtime.";
-      runtime.summary = "Secrets pending — external Runtime";
-      runtime.detail =
-        "Managed Runtime must be owned by this Supervisor to inject DEEPSEEK_API_KEY / DATABASE_URL.";
-      this.emit();
-      return;
-    }
-
-    try {
-      await this.restartService("runtime");
-    } catch (error) {
-      runtime.lastError =
-        error instanceof Error ? error.message : "Failed to reload Runtime after secret change.";
-      runtime.summary = "Secret reload failed";
-      this.emit();
-    }
-  }
-
-  /**
-   * Remove a dynamic user override and restore base-env fallback when present.
-   * Never leaves a stale dynamic secret in config.env / process.env / child env.
-   */
-  private clearDynamicOverride(key: string): void {
-    this.dynamicOverrideKeys.delete(key);
-    const baseValue = this.baseEnv[key];
-    if (baseValue !== undefined) {
-      this.config.env[key] = baseValue;
-      process.env[key] = baseValue;
-    } else {
-      delete this.config.env[key];
-      delete process.env[key];
-    }
-  }
-
   /** Effective env for managed child spawn: base + current config overrides + command.env. */
-  private effectiveChildEnv(commandEnv: Record<string, string>): NodeJS.ProcessEnv {
+  private effectiveChildEnv(
+    commandEnv: Record<string, string>,
+    serviceId?: ServiceId,
+    configEnv = this.config.env
+  ): NodeJS.ProcessEnv {
     // baseEnv first, then live config.env (includes dynamic overrides or restored base),
     // then per-command env. Do not read live process.env so shell pollution cannot leak.
     return buildChildProcessEnv(
-      { ...this.baseEnv, ...this.config.env },
+      { ...this.baseEnv, ...configEnv },
       commandEnv,
-      []
+      serviceId === "mem0" && this.config.layout.mode === "packaged" ? ["DATABASE_URL"] : []
     );
   }
 
@@ -265,7 +300,7 @@ export class DesktopSupervisor {
   resolveSpawnEnv(id: ServiceId): NodeJS.ProcessEnv | null {
     const svc = this.services.get(id);
     if (!svc?.spec.startCommand) return null;
-    return this.effectiveChildEnv(svc.spec.startCommand.env);
+    return this.effectiveChildEnv(svc.spec.startCommand.env, id);
   }
 
   /** Test/helper: current health URL for a service after config updates. */
@@ -350,6 +385,19 @@ export class DesktopSupervisor {
     ) {
       runtime.autoRecovered = true;
       await this.ensureService("runtime");
+    }
+    const mem0 = this.services.get("mem0");
+    if (
+      mem0 &&
+      !this.shuttingDown &&
+      mem0.spec.managed &&
+      mem0.spec.autostart &&
+      mem0.ownership === "none" &&
+      mem0.status === "stopped"
+    ) {
+      await this.queue(mem0, async () => {
+        await this.startManagedIfNeeded("mem0");
+      });
     }
     this.emit();
     return this.snapshot();
@@ -438,7 +486,7 @@ export class DesktopSupervisor {
     this.emit();
 
     try {
-      const spawnEnv = this.effectiveChildEnv(svc.spec.startCommand.env);
+      const spawnEnv = this.effectiveChildEnv(svc.spec.startCommand.env, id);
       const child = spawnManagedProcess(
         svc.spec.startCommand,
         {
@@ -472,6 +520,7 @@ export class DesktopSupervisor {
       svc.pid = pid;
       svc.startedAt = startedAt;
       svc.ownership = "owned";
+      svc.pendingExternal = false;
 
       child.on("exit", () => {
         if (svc.pid === pid) {
@@ -506,7 +555,11 @@ export class DesktopSupervisor {
     }
     this.shuttingDown = true;
     this.stopBackgroundRefresh();
-    // Wait briefly for in-flight ops (do not block exit forever).
+    // Wait briefly for the tracked config reconcile and service ops (do not
+    // block exit forever). New config updates are rejected once shutting down
+    // is set, while the final stop pass below still handles owned children.
+    const reconcile = this.configReconcileOp;
+    if (reconcile) await Promise.race([reconcile, sleep(1_500)]);
     const ops = [...this.services.values()].map((s) => s.op).filter(Boolean);
     await Promise.race([Promise.allSettled(ops), sleep(1_500)]);
 
@@ -603,9 +656,11 @@ export class DesktopSupervisor {
     if (ownership.owned) {
       svc.ownership = "owned";
       svc.pid = ownership.processId;
+      svc.pendingExternal = false;
     } else if (svc.ownership === "owned") {
       svc.ownership = "none";
       svc.pid = null;
+      svc.pendingExternal = false;
     }
 
     // Health / TCP
@@ -614,14 +669,19 @@ export class DesktopSupervisor {
       if (tcp.ok) {
         svc.status = "healthy";
         svc.ownership = svc.ownership === "owned" ? "owned" : "external";
-        svc.summary = "Reachable";
-        svc.detail = tcp.message;
+        if (svc.ownership !== "external" || !svc.pendingExternal) {
+          svc.summary = "Reachable";
+          svc.detail = tcp.message;
+        }
         svc.lastError = null;
       } else {
         svc.status = svc.ownership === "owned" ? "unavailable" : "stopped";
         svc.summary = "Not reachable";
         svc.detail = tcp.message;
-        if (svc.ownership !== "owned") svc.ownership = "none";
+        if (svc.ownership !== "owned") {
+          svc.ownership = "none";
+          svc.pendingExternal = false;
+        }
       }
       void now;
       return;
@@ -630,6 +690,7 @@ export class DesktopSupervisor {
     if (!svc.spec.healthUrl) {
       svc.status = "stopped";
       svc.summary = "No health endpoint";
+      svc.pendingExternal = false;
       return;
     }
 
@@ -639,8 +700,14 @@ export class DesktopSupervisor {
 
     if (health.ok) {
       svc.status = "healthy";
-      svc.summary = ownership.owned ? "Running (owned)" : "Running (external)";
-      svc.detail = `latency ${health.latencyMs}ms`;
+      svc.summary = ownership.owned
+        ? "Running (owned)"
+        : svc.pendingExternal
+          ? svc.summary
+          : "Running (external)";
+      svc.detail = svc.pendingExternal
+        ? svc.detail
+        : `latency ${health.latencyMs}ms`;
       svc.lastError = null;
       if (!ownership.owned) {
         svc.ownership = "external";
@@ -657,6 +724,7 @@ export class DesktopSupervisor {
       // Do not claim ownership / do not kill
       if (!ownership.owned) {
         svc.ownership = "none";
+        svc.pendingExternal = false;
       }
       return;
     }
@@ -670,6 +738,7 @@ export class DesktopSupervisor {
 
     svc.status = "stopped";
     svc.ownership = "none";
+    svc.pendingExternal = false;
     svc.summary = "Not running";
     svc.detail = health.message;
     svc.lastError = null;
@@ -823,10 +892,222 @@ export class DesktopSupervisor {
           startedAt: null,
           child: null,
           autoRecovered: false,
+          pendingExternal: false,
           op: null
         });
       }
     }
+  }
+
+  private captureConfigState(): SupervisorConfigState {
+    const capture = (id: ServiceId): ServiceConfigState => {
+      const svc = this.require(id);
+      return {
+        spec: svc.spec,
+        ownership: svc.ownership,
+        status: svc.status,
+        effectiveEnv: svc.spec.startCommand
+          ? this.effectiveChildEnv(svc.spec.startCommand.env, id)
+          : null
+      };
+    };
+    return {
+      env: { ...this.config.env },
+      runtime: capture("runtime"),
+      mem0: capture("mem0")
+    };
+  }
+
+  private buildReconcilePlan(
+    previous: SupervisorConfigState,
+    next: SupervisorConfigState
+  ): ConfigReconcilePlan {
+    return {
+      generation: this.configGeneration,
+      runtimeChanged: this.runtimeConfigChanged(previous, next),
+      mem0Action: this.mem0ReconcileAction(previous.mem0, next.mem0, previous, next)
+    };
+  }
+
+  private runtimeConfigChanged(
+    previous: SupervisorConfigState,
+    next: SupervisorConfigState
+  ): boolean {
+    for (const key of RUNTIME_RELOAD_KEYS) {
+      const previousValue = this.runtimeConfigValue(previous, key);
+      const nextValue = this.runtimeConfigValue(next, key);
+      if (previousValue !== nextValue) return true;
+    }
+    return false;
+  }
+
+  private runtimeConfigValue(state: SupervisorConfigState, key: string): string {
+    if (key === "MEMORY_BACKEND") {
+      const value = state.env[key]?.trim().toLowerCase();
+      return value === "legacy" ? "legacy" : "mem0";
+    }
+    if (key === "MEM0_BASE_URL") return state.mem0.spec.healthUrl ?? "";
+    return state.runtime.effectiveEnv?.[key] ?? state.env[key] ?? "";
+  }
+
+  private mem0ReconcileAction(
+    previous: ServiceConfigState,
+    next: ServiceConfigState,
+    previousConfig: SupervisorConfigState,
+    nextConfig: SupervisorConfigState
+  ): Mem0ReconcileAction {
+    const previousManaged = previous.spec.managed;
+    const nextManaged = next.spec.managed;
+    const previousOwned = previous.ownership === "owned";
+
+    if (!previousManaged && !nextManaged) return "none";
+    if (previousManaged && !nextManaged) return previousOwned ? "stop" : "none";
+
+    if (!previousManaged && nextManaged) {
+      return next.spec.autostart ? "start" : "none";
+    }
+
+    // In development, managed and autostart are separate. Turning autostart
+    // off must still stop an owned sidecar without changing dev resolution.
+    if (previous.spec.autostart && !next.spec.autostart) {
+      return previousOwned ? "stop" : "none";
+    }
+    if (!next.spec.autostart) return "none";
+
+    const effectiveChanged =
+      previous.spec.healthUrl !== next.spec.healthUrl ||
+      !startCommandEqual(previous.spec.startCommand, next.spec.startCommand) ||
+      this.mem0EffectiveConfigChanged(previous, next, previousConfig, nextConfig);
+    if (!effectiveChanged) return "none";
+    if (previous.ownership === "external" || next.ownership === "external") {
+      return "pending_external";
+    }
+    return previousOwned ? "restart" : "start";
+  }
+
+  private mem0EffectiveConfigChanged(
+    previous: ServiceConfigState,
+    next: ServiceConfigState,
+    previousConfig: SupervisorConfigState,
+    nextConfig: SupervisorConfigState
+  ): boolean {
+    for (const key of MEM0_CONFIG_KEYS) {
+      const previousValue = this.mem0ConfigValue(previous, previousConfig, key);
+      const nextValue = this.mem0ConfigValue(next, nextConfig, key);
+      if (previousValue !== nextValue) return true;
+    }
+    return false;
+  }
+
+  private mem0ConfigValue(
+    state: ServiceConfigState,
+    config: SupervisorConfigState,
+    key: string
+  ): string {
+    if (key === "MEMORY_BACKEND") {
+      const value = config.env[key]?.trim().toLowerCase();
+      return value === "legacy" ? "legacy" : "mem0";
+    }
+    if (key === "YUVI_AUTOSTART_MEM0") return state.spec.autostart ? "true" : "false";
+    if (key === "MEM0_BASE_URL") return state.spec.healthUrl ?? "";
+    if (key === "DATABASE_URL") return state.effectiveEnv?.[key] ?? "";
+    return state.effectiveEnv?.[key] ?? config.env[key] ?? "";
+  }
+
+  private enqueueConfigReconcile(plan: ConfigReconcilePlan): void {
+    const previous = this.configReconcileOp ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        // A subsequent update waits for this operation before committing, but
+        // keep the generation guard for callers that queue work concurrently.
+        if (plan.generation !== this.configGeneration || this.shuttingDown) return;
+        await this.reconcileConfig(plan);
+      });
+    this.configReconcileOp = next.catch(() => undefined);
+  }
+
+  private async reconcileConfig(plan: ConfigReconcilePlan): Promise<void> {
+    if (this.shuttingDown) return;
+    if (plan.runtimeChanged) await this.reconcileRuntimeConfig();
+    if (plan.mem0Action !== "none") await this.reconcileMem0Config(plan.mem0Action);
+  }
+
+  private async reconcileRuntimeConfig(): Promise<void> {
+    const svc = this.services.get("runtime");
+    if (!svc || this.shuttingDown) return;
+    await this.queue(svc, async () => {
+      try {
+        if (svc.ownership === "external") {
+          await this.refreshService("runtime");
+        }
+        if (svc.ownership === "external") {
+          this.markExternalPending(svc, "Runtime");
+          return;
+        }
+        if (svc.ownership === "owned") {
+          await this.stopOwned(svc);
+        }
+        if (svc.spec.autostart) {
+          await this.startManagedIfNeeded("runtime");
+        }
+      } catch {
+        svc.status = "unavailable";
+        svc.summary = "Runtime reconcile failed.";
+        svc.lastError = "Runtime reconcile failed.";
+        this.emit();
+      }
+    });
+  }
+
+  private async reconcileMem0Config(action: Mem0ReconcileAction): Promise<void> {
+    const svc = this.services.get("mem0");
+    if (!svc || this.shuttingDown) return;
+    await this.queue(svc, async () => {
+      try {
+        if (action === "stop") {
+          if (svc.ownership === "owned" || svc.pid || svc.child) await this.stopOwned(svc);
+          svc.pendingExternal = false;
+          svc.status = "stopped";
+          svc.summary = "Mem0 disabled — external detection only.";
+          svc.detail = null;
+          svc.lastError = null;
+          this.emit();
+          return;
+        }
+
+        if (action === "restart" && svc.ownership === "owned") {
+          svc.status = "restarting";
+          svc.summary = "Restarting…";
+          this.emit();
+          await this.stopOwned(svc);
+          await this.startManagedIfNeeded("mem0");
+          return;
+        }
+        await this.refreshService("mem0");
+        if (svc.status === "healthy" && svc.ownership === "external") {
+          this.markExternalPending(svc, "Mem0");
+          return;
+        }
+        await this.startManagedIfNeeded("mem0");
+        if (svc.status === "healthy" && svc.ownership === "external") {
+          this.markExternalPending(svc, "Mem0");
+        }
+      } catch {
+        svc.status = "unavailable";
+        svc.summary = "Mem0 reconcile failed.";
+        svc.lastError = "Mem0 reconcile failed.";
+        this.emit();
+      }
+    });
+  }
+
+  private markExternalPending(svc: InternalService, label: string): void {
+    svc.pendingExternal = true;
+    svc.summary = `Managed ${label} pending — external service owns the port`;
+    svc.detail = `The configured ${label} endpoint is healthy but is not owned by this Supervisor.`;
+    svc.lastError = null;
+    this.emit();
   }
 
   private async withConfigLock(work: () => Promise<void>): Promise<void> {
@@ -873,7 +1154,11 @@ export class DesktopSupervisor {
       pid: svc.ownership === "owned" ? svc.pid : null,
       startedAt: svc.ownership === "owned" ? svc.startedAt : null,
       managed: svc.spec.managed,
-      canRestart: svc.spec.managed && Boolean(svc.spec.startCommand) && !this.shuttingDown,
+      canRestart:
+        svc.spec.managed &&
+        Boolean(svc.spec.startCommand) &&
+        svc.ownership !== "external" &&
+        !this.shuttingDown,
       canStop: svc.ownership === "owned" && !this.shuttingDown,
       checkedAt: new Date().toISOString()
     };
@@ -902,6 +1187,31 @@ export class DesktopSupervisor {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function startCommandEqual(
+  previous: ManagedServiceSpec["startCommand"],
+  next: ManagedServiceSpec["startCommand"]
+): boolean {
+  if (!previous || !next) return previous === next;
+  if (
+    previous.file !== next.file ||
+    previous.cwd !== next.cwd ||
+    previous.commandMarker !== next.commandMarker ||
+    previous.args.length !== next.args.length
+  ) {
+    return false;
+  }
+  for (let index = 0; index < previous.args.length; index += 1) {
+    if (previous.args[index] !== next.args[index]) return false;
+  }
+  const previousKeys = Object.keys(previous.env);
+  const nextKeys = Object.keys(next.env);
+  if (previousKeys.length !== nextKeys.length) return false;
+  for (const key of previousKeys) {
+    if (previous.env[key] !== next.env[key]) return false;
+  }
+  return true;
 }
 
 function tryParseDb(databaseUrl: string): { host: string; port: number } | null {

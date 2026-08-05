@@ -197,7 +197,7 @@ export type RuntimeConfigUpdateResult = {
   ok: true;
   appliedEnvKeys: string[];
   unsetEnvKeys: string[];
-  /** Services reloaded after secret env changes (e.g. runtime). */
+  /** Services with a background config reconcile scheduled (runtime or mem0). */
   restartedServices?: string[];
   updatedAt: string;
 };
