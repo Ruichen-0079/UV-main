@@ -469,6 +469,80 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export async function waitForSpecificPidsExit(
+  entries,
+  { pidProbe = pidAlive, sleep = wait, now = Date.now, timeoutMs = 10_000 } = {}
+) {
+  const owned = entries.filter(
+    (entry) => Number.isInteger(Number(entry.pid)) && Number(entry.pid) > 0
+  );
+  const deadline = now() + Math.max(0, timeoutMs);
+  while (owned.some((entry) => pidProbe(Number(entry.pid)))) {
+    const remaining = deadline - now();
+    if (remaining <= 0) {
+      const live = owned
+        .filter((entry) => pidProbe(Number(entry.pid)))
+        .map((entry) => `${entry.role} PID ${Number(entry.pid)}`)
+        .join(", ");
+      fail(`owned process exit timeout before cleanup: ${live}`);
+    }
+    await sleep(Math.min(250, remaining));
+  }
+}
+
+export async function removeTreeWithRetries(
+  target,
+  {
+    smokeOwnedRoot,
+    remove = fs.rmSync,
+    sleep = wait,
+    now = Date.now,
+    maxAttempts = 8,
+    deadlineMs = 10_000,
+    retryableCodes = ["EPERM", "EBUSY", "ENOTEMPTY"],
+    phase = "temp-tree-cleanup",
+    onRetry = ({ code, attempt, targetName }) =>
+      console.warn(
+        `[installer-smoke] cleanup retry phase=${phase} code=${code} attempt=${attempt} target=${targetName}`
+      ),
+    systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows"
+  } = {}
+) {
+  if (typeof target !== "string" || target.trim().length === 0) fail("cleanup target is empty");
+  if (typeof smokeOwnedRoot !== "string" || smokeOwnedRoot.trim().length === 0)
+    fail("smoke-owned cleanup root is required");
+  const resolved = path.resolve(target);
+  const ownedRoot = path.resolve(smokeOwnedRoot);
+  assertTempRoot(ownedRoot);
+  if (!isWithin(resolved, ownedRoot)) fail("cleanup target is outside smoke root");
+  if (path.parse(resolved).root === resolved) fail("cleanup target cannot be a drive root");
+  const repoRoot = path.resolve(REPO_ROOT);
+  if (isWithin(resolved, repoRoot)) fail("cleanup target is inside repository");
+  const resolvedSystemRoot = path.resolve(systemRoot);
+  if (isWithin(resolved, resolvedSystemRoot)) fail("cleanup target is inside SystemRoot");
+
+  const retryCodes = new Set(
+    retryableCodes.filter((code) => ["EPERM", "EBUSY", "ENOTEMPTY"].includes(code))
+  );
+  const started = now();
+  for (let attempt = 1; attempt <= Math.max(1, maxAttempts); attempt += 1) {
+    try {
+      await remove(resolved, { recursive: true, force: true });
+      return resolved;
+    } catch (error) {
+      const code = error?.code;
+      if (code === "ENOENT") return resolved;
+      const remaining = deadlineMs - (now() - started);
+      if (!retryCodes.has(code) || attempt >= Math.max(1, maxAttempts) || remaining <= 0)
+        throw error;
+      const delayMs = Math.min(1_000, 100 * 2 ** (attempt - 1), remaining);
+      onRetry({ code, attempt, targetName: path.basename(resolved) });
+      await sleep(delayMs);
+    }
+  }
+  return resolved;
+}
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -764,16 +838,24 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
     if (shutdown.status < 200 || shutdown.status >= 300)
       fail(`Supervisor shutdown failed (${shutdown.status})`);
     const mem0Pid = ownedMem0Pid;
-    const waitStarted = Date.now();
-    while (Date.now() - waitStarted < timeoutMs && (pidAlive(child.pid) || pidAlive(mem0Pid)))
-      await wait(250);
-    if (pidAlive(mem0Pid)) fail(`owned Mem0 survived shutdown (${mem0Pid})`);
-    if (pidAlive(child.pid)) {
-      try {
-        child.kill();
-      } catch {
-        /* exact child fallback only */
+    await waitForSpecificPidsExit([{ role: "Mem0", pid: mem0Pid }], { timeoutMs });
+    try {
+      await waitForSpecificPidsExit([{ role: "Supervisor", pid: child.pid }], {
+        timeoutMs: Math.min(timeoutMs, 5_000)
+      });
+    } catch (supervisorExitError) {
+      if (pidAlive(child.pid)) {
+        try {
+          child.kill();
+        } catch {
+          /* exact spawned child only */
+        }
       }
+      await waitForSpecificPidsExit([{ role: "Supervisor", pid: child.pid }], {
+        timeoutMs: Math.min(timeoutMs, 5_000)
+      }).catch(() => {
+        throw supervisorExitError;
+      });
     }
     logExit();
     return {
@@ -797,13 +879,23 @@ async function runPackagedSupervisor({ resource, layout, timeoutMs }) {
         /* best-effort graceful shutdown of this exact smoke instance */
       }
     }
-    const stopStarted = Date.now();
-    while (ownedMem0Pid && pidAlive(ownedMem0Pid) && Date.now() - stopStarted < 5_000)
-      await wait(200);
     try {
       child.kill();
     } catch {
       /* exact spawned child only */
+    }
+    try {
+      await waitForSpecificPidsExit(
+        [
+          { role: "Supervisor", pid: child.pid },
+          { role: "Mem0", pid: ownedMem0Pid }
+        ],
+        { timeoutMs: Math.min(timeoutMs, 5_000) }
+      );
+    } catch (exitError) {
+      error = new Error(
+        `${error instanceof Error ? error.message : String(error)}\n${exitError.message}`
+      );
     }
     logExit();
     throw new Error(
@@ -1137,6 +1229,13 @@ export async function runInstallerSmoke(options = parseArgs()) {
     const resource = { root: resourceRoot, ...validateInstalledResources(resourceRoot) };
     const before = snapshotTree(resourceRoot);
     result = await runPackagedSupervisor({ resource, layout, timeoutMs: options.timeoutMs });
+    await waitForSpecificPidsExit(
+      [
+        { role: "Supervisor", pid: result.supervisorPid },
+        { role: "Mem0", pid: result.mem0Pid }
+      ],
+      { timeoutMs: options.timeoutMs }
+    );
     const after = snapshotTree(resourceRoot);
     const changes = compareSnapshots(before, after);
     if (changes.length)
@@ -1211,7 +1310,10 @@ export async function runInstallerSmoke(options = parseArgs()) {
     if (options.keepTemp) console.info(`[installer-smoke] kept TEMP root: ${root}`);
     else {
       assertCleanupTarget(root);
-      fs.rmSync(root, { recursive: true, force: true });
+      await removeTreeWithRetries(root, {
+        smokeOwnedRoot: root,
+        deadlineMs: Math.min(options.timeoutMs, 10_000)
+      });
     }
   }
 }

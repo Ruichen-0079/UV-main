@@ -20,10 +20,12 @@ import {
   findUninstaller,
   isWithin,
   processBaseline,
+  removeTreeWithRetries,
   restrictedPath,
   restrictedWindowsPath,
   sanitizeChildEnv,
   snapshotTree,
+  waitForSpecificPidsExit,
   validateInstalledResources,
   validatePackagingInfo
 } from "./installer-smoke.mjs";
@@ -289,6 +291,207 @@ test("cleanup guard accepts only the smoke root", () => {
   const root = temp("yuvi-installer-smoke-");
   assert.equal(assertCleanupTarget(root), root);
   assert.throws(() => assertCleanupTarget(os.tmpdir()), /unsafe/);
+});
+
+function transientError(code) {
+  return Object.assign(new Error(code), { code });
+}
+
+function cleanupFixture() {
+  const root = temp("yuvi-installer-smoke-");
+  return { root, target: path.join(root, "install") };
+}
+
+test("cleanup succeeds immediately without sleeping", async () => {
+  const { root, target } = cleanupFixture();
+  let attempts = 0;
+  let sleeps = 0;
+  await removeTreeWithRetries(target, {
+    smokeOwnedRoot: root,
+    remove: () => {
+      attempts += 1;
+    },
+    sleep: async () => {
+      sleeps += 1;
+    }
+  });
+  assert.equal(attempts, 1);
+  assert.equal(sleeps, 0);
+});
+
+for (const code of ["EPERM", "EBUSY", "ENOTEMPTY"]) {
+  test(`cleanup retries transient ${code} and then succeeds`, async () => {
+    const { root, target } = cleanupFixture();
+    let attempts = 0;
+    const sleeps = [];
+    await removeTreeWithRetries(target, {
+      smokeOwnedRoot: root,
+      remove: () => {
+        attempts += 1;
+        if (attempts === 1) throw transientError(code);
+      },
+      sleep: async (delay) => sleeps.push(delay)
+    });
+    assert.equal(attempts, 2);
+    assert.deepEqual(sleeps, [100]);
+  });
+}
+
+test("persistent EPERM fails with the original error after bounded retries", async () => {
+  const { root, target } = cleanupFixture();
+  const original = transientError("EPERM");
+  let attempts = 0;
+  const sleeps = [];
+  await assert.rejects(
+    removeTreeWithRetries(target, {
+      smokeOwnedRoot: root,
+      maxAttempts: 4,
+      remove: () => {
+        attempts += 1;
+        throw original;
+      },
+      sleep: async (delay) => sleeps.push(delay)
+    }),
+    (error) => error === original && error.code === "EPERM"
+  );
+  assert.equal(attempts, 4);
+  assert.equal(sleeps.length, 3);
+});
+
+test("non-retryable and no-code cleanup errors fail immediately", async () => {
+  for (const error of [transientError("EACCES"), new Error("unknown cleanup failure")]) {
+    const { root, target } = cleanupFixture();
+    let sleeps = 0;
+    await assert.rejects(
+      removeTreeWithRetries(target, {
+        smokeOwnedRoot: root,
+        remove: () => {
+          throw error;
+        },
+        sleep: async () => {
+          sleeps += 1;
+        }
+      }),
+      (actual) => actual === error
+    );
+    assert.equal(sleeps, 0);
+  }
+});
+
+test("cleanup retry delays are stable and capped", async () => {
+  const { root, target } = cleanupFixture();
+  let attempts = 0;
+  const sleeps = [];
+  await removeTreeWithRetries(target, {
+    smokeOwnedRoot: root,
+    maxAttempts: 7,
+    remove: () => {
+      attempts += 1;
+      if (attempts <= 6) throw transientError("EPERM");
+    },
+    sleep: async (delay) => sleeps.push(delay)
+  });
+  assert.deepEqual(sleeps, [100, 200, 400, 800, 1000, 1000]);
+});
+
+test("ENOENT is treated as an already-removed smoke tree", async () => {
+  const { root, target } = cleanupFixture();
+  let sleeps = 0;
+  await removeTreeWithRetries(target, {
+    smokeOwnedRoot: root,
+    remove: () => {
+      throw transientError("ENOENT");
+    },
+    sleep: async () => {
+      sleeps += 1;
+    }
+  });
+  assert.equal(sleeps, 0);
+});
+
+test("cleanup rejects empty, outside, repository and system paths", async () => {
+  const { root, target } = cleanupFixture();
+  await assert.rejects(
+    removeTreeWithRetries("", { smokeOwnedRoot: root, remove: () => {} }),
+    /empty/
+  );
+  await assert.rejects(
+    removeTreeWithRetries(temp(), { smokeOwnedRoot: root, remove: () => {} }),
+    /outside smoke root/
+  );
+  await assert.rejects(
+    removeTreeWithRetries(path.resolve("."), { smokeOwnedRoot: root, remove: () => {} }),
+    /outside smoke root/
+  );
+  await assert.rejects(
+    removeTreeWithRetries(target, { smokeOwnedRoot: root, systemRoot: root, remove: () => {} }),
+    /SystemRoot/
+  );
+});
+
+test("cleanup rejects a drive root even when removal is injected", async () => {
+  const root = temp("yuvi-installer-smoke-");
+  await assert.rejects(
+    removeTreeWithRetries(path.parse(root).root, { smokeOwnedRoot: root, remove: () => {} }),
+    /outside smoke root|drive root/
+  );
+});
+
+test("cleanup is invoked only after exact Supervisor and Mem0 PIDs exit", async () => {
+  const { root, target } = cleanupFixture();
+  const live = new Set([101, 202]);
+  const events = [];
+  await waitForSpecificPidsExit(
+    [
+      { role: "Supervisor", pid: 101 },
+      { role: "Mem0", pid: 202 }
+    ],
+    {
+      pidProbe: (pid) => live.has(pid),
+      sleep: async () => {
+        events.push("pids-exit");
+        live.clear();
+      }
+    }
+  );
+  await removeTreeWithRetries(target, {
+    smokeOwnedRoot: root,
+    remove: () => events.push("cleanup"),
+    sleep: async () => {}
+  });
+  assert.deepEqual(events, ["pids-exit", "cleanup"]);
+});
+
+test("PID exit timeout prevents cleanup and does not terminate external processes", async () => {
+  const { root, target } = cleanupFixture();
+  const probed = [];
+  let cleanupCalls = 0;
+  try {
+    await waitForSpecificPidsExit(
+      [
+        { role: "Supervisor", pid: 101 },
+        { role: "Mem0", pid: 202 }
+      ],
+      {
+        pidProbe: (pid) => {
+          probed.push(pid);
+          return true;
+        },
+        timeoutMs: 0,
+        sleep: async () => {}
+      }
+    );
+    await removeTreeWithRetries(target, {
+      smokeOwnedRoot: root,
+      remove: () => {
+        cleanupCalls += 1;
+      }
+    });
+  } catch (error) {
+    assert.match(String(error), /Supervisor PID 101.*Mem0 PID 202/);
+  }
+  assert.deepEqual([...new Set(probed)], [101, 202]);
+  assert.equal(cleanupCalls, 0);
 });
 
 test("uninstaller must be inside TEMP install", () => {
