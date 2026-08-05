@@ -10,10 +10,25 @@ import * as health from "./health.js";
 import * as processWindows from "./process-windows.js";
 
 const tempDirs: string[] = [];
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
+const supervisors = new Set<DesktopSupervisor>();
+let unexpectedSpawnCalls = 0;
+
+function createSupervisor(config: SupervisorConfig): DesktopSupervisor {
+  const supervisor = new DesktopSupervisor(config);
+  supervisors.add(supervisor);
+  return supervisor;
+}
+
+async function shutdownTrackedSupervisors(): Promise<void> {
+  const cleanupErrors: unknown[] = [];
+  const results = await Promise.allSettled(
+    [...supervisors].map((supervisor) => supervisor.shutdown())
+  );
+  for (const result of results) {
+    if (result.status === "rejected") cleanupErrors.push(result.reason);
   }
+  supervisors.clear();
+
   vi.restoreAllMocks();
   delete process.env["DEEPSEEK_API_KEY"];
   delete process.env["DATABASE_URL"];
@@ -21,6 +36,29 @@ afterEach(() => {
   delete process.env["MEM0_LLM_API_KEY"];
   delete process.env["DEEPSEEK_CHAT_MODEL"];
   delete process.env["MEM0_BASE_URL"];
+
+  for (const dir of tempDirs.splice(0)) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+
+  expect(cleanupErrors).toHaveLength(0);
+  expect(unexpectedSpawnCalls).toBe(0);
+}
+
+beforeEach(() => {
+  unexpectedSpawnCalls = 0;
+  vi.spyOn(processWindows, "spawnManagedProcess").mockImplementation(() => {
+    unexpectedSpawnCalls += 1;
+    throw new Error("unexpected managed process spawn in Supervisor unit test");
+  });
+});
+
+afterEach(async () => {
+  await shutdownTrackedSupervisors();
 });
 
 /**
@@ -193,7 +231,7 @@ describe("DesktopSupervisor classification", () => {
       message: "closed",
       latencyMs: 1
     });
-    const supervisor = new DesktopSupervisor(config);
+    const supervisor = createSupervisor(config);
     await supervisor.refreshAll();
     const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
     expect(mem0?.managed).toBe(false);
@@ -210,7 +248,7 @@ describe("DesktopSupervisor classification", () => {
       env: { YUVI_MEM0_PACKAGED: "1" },
       commandMarker: path.join(resourceRoot, "mem0", "yuvi-mem0.exe")
     };
-    const supervisor = new DesktopSupervisor(
+    const supervisor = createSupervisor(
       baseConfig({
         layout: {
           mode: "packaged",
@@ -256,13 +294,12 @@ describe("DesktopSupervisor classification", () => {
       latencyMs: 1
     });
 
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     const runtime = supervisor.snapshot().services.find((s) => s.id === "runtime");
     expect(runtime?.status).toBe("healthy");
     expect(runtime?.ownership).toBe("external");
     expect(runtime?.canStop).toBe(false);
-    vi.restoreAllMocks();
   });
 
   it("marks protocol mismatch as unavailable without taking ownership", async () => {
@@ -292,13 +329,12 @@ describe("DesktopSupervisor classification", () => {
       latencyMs: 1
     });
 
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     const runtime = supervisor.snapshot().services.find((s) => s.id === "runtime");
     expect(runtime?.status).toBe("unavailable");
     expect(runtime?.ownership).toBe("none");
     expect(runtime?.summary).toMatch(/unexpected/i);
-    vi.restoreAllMocks();
   });
 
   it("mem0 failure does not remove runtime from snapshot", async () => {
@@ -307,7 +343,13 @@ describe("DesktopSupervisor classification", () => {
         return { ok: true, statusCode: 200, protocolOk: true, message: "ok", latencyMs: 1 };
       }
       if (url.includes("6131")) {
-        return { ok: false, statusCode: null, protocolOk: false, message: "mem0 down", latencyMs: 1 };
+        return {
+          ok: false,
+          statusCode: null,
+          protocolOk: false,
+          message: "mem0 down",
+          latencyMs: 1
+        };
       }
       return { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
     });
@@ -319,12 +361,11 @@ describe("DesktopSupervisor classification", () => {
       latencyMs: 1
     });
 
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     const snap = supervisor.snapshot();
     expect(snap.services.find((s) => s.id === "runtime")?.status).toBe("healthy");
     expect(snap.services.find((s) => s.id === "mem0")?.status).toBe("stopped");
-    vi.restoreAllMocks();
   });
 
   it("marks protocol-mismatched HTTP as unavailable (not external/owned)", async () => {
@@ -347,7 +388,7 @@ describe("DesktopSupervisor classification", () => {
       message: "closed",
       latencyMs: 1
     });
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     const runtime = supervisor.snapshot().services.find((s) => s.id === "runtime");
     expect(runtime?.status).toBe("unavailable");
@@ -370,13 +411,12 @@ describe("DesktopSupervisor classification", () => {
       message: "tcp open",
       latencyMs: 1
     });
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     await supervisor.stopService("runtime");
     const runtime = supervisor.snapshot().services.find((s) => s.id === "runtime");
     expect(runtime?.lastError).toMatch(/external/i);
     expect(runtime?.status).toBe("healthy");
-    vi.restoreAllMocks();
   });
 });
 
@@ -393,7 +433,7 @@ describe("DesktopSupervisor runtime config push", () => {
   it("starts with env A, applyRuntimeConfig B, resolveSpawnEnv uses B", async () => {
     process.env["DEEPSEEK_API_KEY"] = "key-A";
     process.env["DEEPSEEK_CHAT_MODEL"] = "model-A";
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
 
     // Fixture repositoryRoot keeps startCommand resolvable before and after derive.
     expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
@@ -427,7 +467,7 @@ describe("DesktopSupervisor runtime config push", () => {
 
   it("base fallback A → override B → delete restores A (not stale B)", async () => {
     process.env["DEEPSEEK_API_KEY"] = "fallback-A";
-    const supervisor = new DesktopSupervisor(
+    const supervisor = createSupervisor(
       baseConfig({
         env: {
           DEEPSEEK_CHAT_MODEL: "model-A",
@@ -468,7 +508,7 @@ describe("DesktopSupervisor runtime config push", () => {
 
   it("delete secret with no base fallback leaves key absent (no stale B)", async () => {
     delete process.env["DEEPSEEK_API_KEY"];
-    const supervisor = new DesktopSupervisor(
+    const supervisor = createSupervisor(
       baseConfig({
         env: {
           DEEPSEEK_CHAT_MODEL: "model-A",
@@ -496,8 +536,8 @@ describe("DesktopSupervisor runtime config push", () => {
   });
 
   it("updates health probe URLs for mem0 / ollama / tts without spawn", async () => {
-    const spawnSpy = vi.spyOn(processWindows, "spawnManagedProcess");
-    const supervisor = new DesktopSupervisor(
+    const spawnSpy = vi.mocked(processWindows.spawnManagedProcess);
+    const supervisor = createSupervisor(
       baseConfig({
         runtimeStart: null,
         mem0Start: null,
@@ -541,7 +581,7 @@ describe("DesktopSupervisor runtime config push", () => {
   });
 
   it("rejects config update while shutting down", async () => {
-    const supervisor = new DesktopSupervisor(baseConfig({ runtimeStart: null }));
+    const supervisor = createSupervisor(baseConfig({ runtimeStart: null }));
     await supervisor.shutdown();
     await expect(
       supervisor.applyRuntimeConfig({ env: { DEEPSEEK_CHAT_MODEL: "x" }, unsetEnv: [] })
@@ -549,8 +589,8 @@ describe("DesktopSupervisor runtime config push", () => {
   });
 
   it("external services stay unspawned when config changes", async () => {
-    const spawnSpy = vi.spyOn(processWindows, "spawnManagedProcess");
-    const supervisor = new DesktopSupervisor(
+    const spawnSpy = vi.mocked(processWindows.spawnManagedProcess);
+    const supervisor = createSupervisor(
       baseConfig({
         runtimeStart: null,
         mem0Start: null,
@@ -575,7 +615,7 @@ describe("DesktopSupervisor runtime config push", () => {
 
   it("status snapshot never contains secret values", async () => {
     process.env["DEEPSEEK_API_KEY"] = "sk-super-secret-value";
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.applyRuntimeConfig({
       env: { DEEPSEEK_API_KEY: "sk-super-secret-value", DEEPSEEK_CHAT_MODEL: "m" },
       unsetEnv: []
@@ -624,7 +664,8 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
 
   function mockManagedSpawn(onSpawn?: () => void, onStop?: () => void) {
     const children: Array<EventEmitter & { pid: number; killed: boolean; kill: () => void }> = [];
-    const spawn = vi.spyOn(processWindows, "spawnManagedProcess").mockImplementation((command) => {
+    const spawn = vi.mocked(processWindows.spawnManagedProcess);
+    spawn.mockImplementation((command) => {
       onSpawn?.();
       const child = fakeChild(40_000 + children.length);
       children.push(child);
@@ -654,7 +695,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   }
 
   it("rejects invalid managed remote URL without changing config or specs", async () => {
-    const supervisor = new DesktopSupervisor(packagedConfig());
+    const supervisor = createSupervisor(packagedConfig());
     const beforeEnv = { ...supervisor.getConfig().env };
     const before = supervisor.snapshot();
     await expect(
@@ -673,7 +714,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   });
 
   it("keeps dynamic secrets out of process.env and injects them only into child env", async () => {
-    const supervisor = new DesktopSupervisor(packagedConfig());
+    const supervisor = createSupervisor(packagedConfig());
     delete process.env["MEM0_LLM_API_KEY"];
     const result = await supervisor.applyRuntimeConfig({
       env: { MEM0_LLM_API_KEY: "P3_MEM0_LLM_SECRET_NEVER_LOG" },
@@ -689,7 +730,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   });
 
   it("suppresses a no-op secret save", async () => {
-    const supervisor = new DesktopSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
     await supervisor.applyRuntimeConfig({
       env: { MEM0_LLM_API_KEY: "same-secret" },
       unsetEnv: []
@@ -704,7 +745,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   });
 
   it("does not restart Mem0 when DATABASE_URL changes under an explicit PG override", async () => {
-    const supervisor = new DesktopSupervisor(
+    const supervisor = createSupervisor(
       packagedConfig({
         MEM0_PG_CONNECTION_STRING: "explicit-pg-a",
         DATABASE_URL: "database-a"
@@ -715,14 +756,12 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
       unsetEnv: []
     });
     expect(result.restartedServices).toEqual(["runtime"]);
-    expect(supervisor.resolveSpawnEnv("mem0")?.["MEM0_PG_CONNECTION_STRING"]).toBe(
-      "explicit-pg-a"
-    );
+    expect(supervisor.resolveSpawnEnv("mem0")?.["MEM0_PG_CONNECTION_STRING"]).toBe("explicit-pg-a");
     await supervisor.shutdown();
   });
 
   it("does not reconcile Mem0 for unrelated TTS settings", async () => {
-    const supervisor = new DesktopSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
     const result = await supervisor.applyRuntimeConfig({
       env: { GPT_SOVITS_TTS_BASE_URL: "http://127.0.0.1:9899" },
       unsetEnv: []
@@ -732,7 +771,9 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   });
 
   it("maps DATABASE_URL to Mem0 PG env and removes it after unset", async () => {
-    const supervisor = new DesktopSupervisor(packagedConfig());
+    const healthMock = mockMem0Health(false);
+    mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
     const first = await supervisor.applyRuntimeConfig({
       env: { DATABASE_URL: "postgres://P3_MEM0_DB_SECRET_NEVER_LOG@127.0.0.1:5432/mem0" },
       unsetEnv: []
@@ -752,7 +793,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   it("stops an owned Mem0 when managed mode is disabled", async () => {
     const healthMock = mockMem0Health(false);
     const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
-    const supervisor = new DesktopSupervisor(packagedConfig());
+    const supervisor = createSupervisor(packagedConfig());
     await supervisor.bootstrap();
     await waitForReconcile(supervisor);
     expect(processMock.spawn).toHaveBeenCalledTimes(1);
@@ -767,15 +808,25 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
     expect(mem0?.ownership).toBe("none");
     expect(mem0?.status).toBe("stopped");
     expect(processMock.spawn).toHaveBeenCalledTimes(1);
-    await supervisor.shutdown();
+  });
+
+  it("tears down a reconciled packaged Mem0 through the tracked fixture lifecycle", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+    await supervisor.bootstrap();
+    await waitForReconcile(supervisor);
+
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(supervisor.snapshot().services.find((service) => service.id === "mem0")?.ownership).toBe(
+      "owned"
+    );
   });
 
   it("starts packaged Mem0 when external mode becomes managed", async () => {
     const healthMock = mockMem0Health(false);
     const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
-    const supervisor = new DesktopSupervisor(
-      packagedConfig({ YUVI_AUTOSTART_MEM0: "false" })
-    );
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
     const result = await supervisor.applyRuntimeConfig({
       env: { YUVI_AUTOSTART_MEM0: "true" },
       unsetEnv: []
@@ -791,7 +842,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   it("coordinates the mem0 backend transition from legacy to packaged Mem0", async () => {
     const healthMock = mockMem0Health(false);
     const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
-    const supervisor = new DesktopSupervisor(
+    const supervisor = createSupervisor(
       packagedConfig({ MEMORY_BACKEND: "legacy", YUVI_AUTOSTART_MEM0: "true" })
     );
     const result = await supervisor.applyRuntimeConfig({
@@ -808,9 +859,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   it("keeps a healthy external Mem0 pending instead of claiming or killing it", async () => {
     mockMem0Health(true);
     const processMock = mockManagedSpawn();
-    const supervisor = new DesktopSupervisor(
-      packagedConfig({ YUVI_AUTOSTART_MEM0: "false" })
-    );
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
     await supervisor.bootstrap();
     const result = await supervisor.applyRuntimeConfig({
       env: { YUVI_AUTOSTART_MEM0: "true" },
@@ -830,9 +879,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   it("recovers managed Mem0 after a pending external service disappears", async () => {
     const healthMock = mockMem0Health(true);
     const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
-    const supervisor = new DesktopSupervisor(
-      packagedConfig({ YUVI_AUTOSTART_MEM0: "false" })
-    );
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
     await supervisor.bootstrap();
     await supervisor.applyRuntimeConfig({
       env: { YUVI_AUTOSTART_MEM0: "true" },
@@ -852,7 +899,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   it("restarts an owned Mem0 once when its managed port changes", async () => {
     const healthMock = mockMem0Health(false);
     const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
-    const supervisor = new DesktopSupervisor(packagedConfig());
+    const supervisor = createSupervisor(packagedConfig());
     await supervisor.bootstrap();
     await waitForReconcile(supervisor);
     const result = await supervisor.applyRuntimeConfig({
@@ -870,7 +917,7 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
   it("serializes rapid config updates and does not run parallel reconcile", async () => {
     const healthMock = mockMem0Health(false);
     const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
-    const supervisor = new DesktopSupervisor(packagedConfig());
+    const supervisor = createSupervisor(packagedConfig());
     const first = supervisor.applyRuntimeConfig({
       env: { MEM0_LLM_MODEL: "model-a" },
       unsetEnv: []
@@ -903,8 +950,8 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
       message: "closed",
       latencyMs: 1
     });
-    const spawnSpy = vi.spyOn(processWindows, "spawnManagedProcess");
-    const supervisor = new DesktopSupervisor(baseConfig({ autostartRuntime: false }));
+    const spawnSpy = vi.mocked(processWindows.spawnManagedProcess);
+    const supervisor = createSupervisor(baseConfig({ autostartRuntime: false }));
     await supervisor.refreshAll();
     const result = await supervisor.applyRuntimeConfig({
       env: { DEEPSEEK_API_KEY: "P3_RUNTIME_SECRET_NEVER_LOG" },
