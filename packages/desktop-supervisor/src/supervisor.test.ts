@@ -663,7 +663,11 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
     return { setReady: () => (ready = true), setDown: () => (ready = false) };
   }
 
-  function mockManagedSpawn(onSpawn?: () => void, onStop?: () => void) {
+  function mockManagedSpawn(
+    onSpawn?: () => void,
+    onStop?: () => void,
+    onInspectionReady?: (command: StartCommandSpec) => void
+  ) {
     const children: Array<EventEmitter & { pid: number; killed: boolean; kill: () => void }> = [];
     const spawn = vi.mocked(processWindows.spawnManagedProcess);
     spawn.mockImplementation((command) => {
@@ -675,19 +679,28 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
         onStop?.();
         originalKill();
       };
-      vi.spyOn(processWindows, "getProcessInfo").mockImplementation((pid) => ({
+      vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+        status: "resolved",
         processId: pid,
-        parentProcessId: 1,
-        commandLine: `${command.commandMarker} ${command.cwd}`,
-        createdAtUtc: new Date()
+        info: {
+          processId: pid,
+          parentProcessId: 1,
+          commandLine: `${command.commandMarker} ${command.cwd}`,
+          createdAtUtc: new Date()
+        }
       }));
+      onInspectionReady?.(command);
       return child as never;
     });
-    vi.spyOn(processWindows, "getProcessInfo").mockImplementation((pid) => ({
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+      status: "resolved",
       processId: pid,
-      parentProcessId: 1,
-      commandLine: `external-process ${pid}`,
-      createdAtUtc: new Date()
+      info: {
+        processId: pid,
+        parentProcessId: 1,
+        commandLine: `external-process ${pid}`,
+        createdAtUtc: new Date()
+      }
     }));
     vi.spyOn(processWindows, "isProcessAlive").mockReturnValue(false);
     vi.spyOn(processWindows, "requestGracefulStop").mockImplementation(() => undefined);
@@ -849,6 +862,108 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
     expect(
       fs.readdirSync(config.stateDirectory).some((name) => name.includes(".mem0.pid.json."))
     ).toBe(false);
+  });
+
+  it("preserves a tracked Mem0 child across one identity query timeout", async () => {
+    const healthMock = mockMem0Health(false);
+    let inspectionCalls = 0;
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown, (command) => {
+      vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => {
+        inspectionCalls += 1;
+        if (inspectionCalls === 1) {
+          return {
+            status: "resolved",
+            processId: pid,
+            info: {
+              processId: pid,
+              parentProcessId: 1,
+              commandLine: `${command.commandMarker} ${command.cwd}`,
+              createdAtUtc: new Date()
+            }
+          };
+        }
+        return {
+          status: "unavailable",
+          processId: pid,
+          reason: "query-timeout"
+        };
+      });
+    });
+    const supervisor = createSupervisor(packagedConfig());
+
+    await supervisor.bootstrap();
+    await waitForReconcile(supervisor);
+
+    const config = supervisor.getConfig();
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const afterTimeout = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(inspectionCalls).toBeGreaterThanOrEqual(2);
+    expect(afterTimeout?.status).toBe("healthy");
+    expect(afterTimeout?.ownership).toBe("owned");
+    expect(fs.existsSync(metadataPath)).toBe(true);
+
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => {
+      const command = processMock.spawn.mock.calls[0]?.[0];
+      return {
+        status: "resolved",
+        processId: pid,
+        info: {
+          processId: pid,
+          parentProcessId: 1,
+          commandLine: `${command?.commandMarker ?? "yuvi-mem0.exe"} ${command?.cwd ?? ""}`,
+          createdAtUtc: new Date()
+        }
+      };
+    });
+    await supervisor.refreshAll();
+    const afterResolved = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(afterResolved?.status).toBe("healthy");
+    expect(afterResolved?.ownership).toBe("owned");
+    expect(fs.existsSync(metadataPath)).toBe(true);
+
+    await supervisor.shutdown();
+    expect(fs.existsSync(metadataPath)).toBe(false);
+  });
+
+  it("keeps metadata pending when a restarted Supervisor cannot inspect the process", async () => {
+    const config = packagedConfig();
+    const command = config.mem0Start;
+    if (!command) throw new Error("expected packaged Mem0 start command");
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const now = new Date().toISOString();
+    ownership.writeProcessMetadata(metadataPath, {
+      schemaVersion: 1,
+      role: "mem0",
+      pid: 5010,
+      repositoryRoot: config.repositoryRoot,
+      stateDirectory: config.stateDirectory,
+      commandMarker: command.commandMarker,
+      processStartedAtUtc: now,
+      createdAtUtc: now,
+      ownershipToken: config.ownershipToken,
+      instanceId: config.instanceId
+    });
+    vi.spyOn(processWindows, "inspectProcess").mockReturnValue({
+      status: "unavailable",
+      processId: 5010,
+      reason: "query-timeout"
+    });
+    vi.spyOn(health, "probeHttpHealth").mockResolvedValue({
+      ok: true,
+      statusCode: 200,
+      protocolOk: true,
+      message: "healthy",
+      latencyMs: 1
+    });
+    const supervisor = createSupervisor(config);
+
+    await supervisor.refreshAll();
+
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(mem0?.status).toBe("unavailable");
+    expect(mem0?.ownership).toBe("none");
+    expect(mem0?.summary).toMatch(/ownership verification unavailable/i);
+    expect(fs.existsSync(metadataPath)).toBe(true);
   });
 
   it("cleans the exact child and preserves metadata errors", async () => {

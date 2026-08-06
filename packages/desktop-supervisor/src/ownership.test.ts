@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   PROCESS_METADATA_VERSION,
+  readProcessMetadata,
+  removeProcessMetadataIfMatches,
   testProcessOwnership,
   writeProcessMetadata
 } from "./ownership.js";
@@ -82,7 +84,8 @@ describe("process ownership", () => {
       }
     });
     expect(result.owned).toBe(false);
-    expect(result.status).toBe("mismatch");
+    expect(result.status).toBe("foreign");
+    expect(result.cleanupAllowed).toBe(false);
     expect(result.message).toMatch(/token/i);
   });
 
@@ -327,5 +330,94 @@ describe("process ownership", () => {
     });
     expect(result.owned).toBe(false);
     expect(result.status).toBe("missing");
+  });
+
+  it("does not treat an unavailable identity query as marker mismatch", () => {
+    const dir = tempDir();
+    const file = path.join(dir, "mem0.pid.json");
+    const metadata = meta({
+      pid: 5004,
+      role: "mem0",
+      repositoryRoot: "C:\\Dev\\UV-main",
+      stateDirectory: dir
+    });
+    writeProcessMetadata(file, metadata);
+    const result = testProcessOwnership({
+      metadataPath: file,
+      expectedRole: "mem0",
+      repositoryRoot: "C:\\Dev\\UV-main",
+      stateDirectory: dir,
+      ownershipToken: "token-a",
+      instanceId: "instance-a",
+      processInspection: {
+        status: "unavailable",
+        processId: metadata.pid,
+        reason: "query-timeout"
+      }
+    });
+    expect(result.status).toBe("unavailable");
+    expect(result.processInspectionReason).toBe("query-timeout");
+    expect(result.cleanupAllowed).toBe(false);
+    expect(result.message).not.toMatch(/marker mismatch/i);
+  });
+
+  it("retains ownership for a tracked child while identity is unavailable", () => {
+    const dir = tempDir();
+    const file = path.join(dir, "mem0.pid.json");
+    const metadata = meta({ pid: 5005, role: "mem0", stateDirectory: dir });
+    writeProcessMetadata(file, metadata);
+    const result = testProcessOwnership({
+      metadataPath: file,
+      expectedRole: "mem0",
+      repositoryRoot: metadata.repositoryRoot,
+      stateDirectory: dir,
+      ownershipToken: metadata.ownershipToken,
+      instanceId: metadata.instanceId,
+      processInspection: {
+        status: "unavailable",
+        processId: metadata.pid,
+        reason: "query-timeout"
+      },
+      currentChild: { pid: metadata.pid, killed: false }
+    });
+    expect(result.status).toBe("unavailable");
+    expect(result.owned).toBe(true);
+    expect(result.currentChildMatch).toBe(true);
+    expect(result.cleanupAllowed).toBe(false);
+  });
+
+  it("allows cleanup only for a confirmed dead matching process", () => {
+    const dir = tempDir();
+    const file = path.join(dir, "mem0.pid.json");
+    const metadata = meta({ pid: 5006, role: "mem0", stateDirectory: dir });
+    writeProcessMetadata(file, metadata);
+    const result = testProcessOwnership({
+      metadataPath: file,
+      expectedRole: "mem0",
+      repositoryRoot: metadata.repositoryRoot,
+      stateDirectory: dir,
+      ownershipToken: metadata.ownershipToken,
+      instanceId: metadata.instanceId,
+      processInspection: {
+        status: "not-running",
+        processId: metadata.pid,
+        reason: "process-not-alive"
+      }
+    });
+    expect(result.status).toBe("not-running");
+    expect(result.cleanupAllowed).toBe(true);
+    expect(removeProcessMetadataIfMatches(file, result.metadata)).toBe(true);
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it("compare-and-delete refuses to remove a newer metadata generation", () => {
+    const dir = tempDir();
+    const file = path.join(dir, "mem0.pid.json");
+    const oldMetadata = meta({ pid: 5007, role: "mem0", stateDirectory: dir });
+    const newMetadata = meta({ pid: 5008, role: "mem0", stateDirectory: dir });
+    writeProcessMetadata(file, oldMetadata);
+    writeProcessMetadata(file, newMetadata);
+    expect(removeProcessMetadataIfMatches(file, oldMetadata)).toBe(false);
+    expect(readProcessMetadata(file)?.pid).toBe(newMetadata.pid);
   });
 });

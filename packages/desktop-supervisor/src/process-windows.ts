@@ -6,7 +6,11 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { ProcessInfo, StartCommandSpec } from "./types.js";
+import type {
+  ProcessInfo,
+  ProcessInspectionResult,
+  StartCommandSpec
+} from "./types.js";
 
 /**
  * Fast liveness check — never shells out to PowerShell (that blocked Save for seconds).
@@ -22,19 +26,27 @@ export function isProcessAlive(processId: number): boolean {
 }
 
 /**
- * Full process info for ownership (command line). Prefer isProcessAlive for loops.
- * On Windows uses a short-timeout PowerShell query only when needed.
+ * Full process inspection for ownership. The result deliberately distinguishes
+ * a dead process from a live process whose identity query was unavailable.
  */
-export function getProcessInfo(processId: number): ProcessInfo | null {
-  if (!Number.isInteger(processId) || processId <= 0) return null;
-  if (!isProcessAlive(processId)) return null;
+export function inspectProcess(processId: number): ProcessInspectionResult {
+  if (!Number.isInteger(processId) || processId <= 0) {
+    return { status: "not-running", processId, reason: "invalid-pid" };
+  }
+  if (!isProcessAlive(processId)) {
+    return { status: "not-running", processId, reason: "process-not-alive" };
+  }
 
   if (process.platform !== "win32") {
     return {
+      status: "resolved",
       processId,
-      parentProcessId: 0,
-      commandLine: `pid=${processId}`,
-      createdAtUtc: new Date()
+      info: {
+        processId,
+        parentProcessId: 0,
+        commandLine: `pid=${processId}`,
+        createdAtUtc: new Date()
+      }
     };
   }
 
@@ -67,14 +79,35 @@ $obj | ConvertTo-Json -Compress
     ],
     { encoding: "utf8", windowsHide: true, timeout: 2_500 }
   );
-  if (result.status !== 0 || !result.stdout?.trim()) {
-    // Process is alive but command line unavailable — still return a stub so ownership can use pid.
-    return {
-      processId,
-      parentProcessId: 0,
-      commandLine: "",
-      createdAtUtc: null
-    };
+  return classifyProcessQueryResult(processId, {
+    status: result.status,
+    stdout: result.stdout,
+    signal: result.signal,
+    error: result.error
+  });
+}
+
+type ProcessQueryResult = {
+  status: number | null;
+  stdout?: string | null | undefined;
+  signal?: NodeJS.Signals | null | undefined;
+  error?: NodeJS.ErrnoException | null | undefined;
+};
+
+/** Convert a PowerShell/CIM result into the explicit inspection state. */
+export function classifyProcessQueryResult(
+  processId: number,
+  result: ProcessQueryResult
+): ProcessInspectionResult {
+  const errorCode = result.error?.code ? String(result.error.code) : "";
+  if (errorCode === "ETIMEDOUT" || (result.signal === "SIGTERM" && result.status === null)) {
+    return { status: "unavailable", processId, reason: "query-timeout" };
+  }
+  if (result.status !== 0) {
+    return { status: "unavailable", processId, reason: "query-failed" };
+  }
+  if (!result.stdout?.trim()) {
+    return { status: "unavailable", processId, reason: "empty-output" };
   }
   try {
     const parsed = JSON.parse(result.stdout.trim()) as {
@@ -83,20 +116,37 @@ $obj | ConvertTo-Json -Compress
       commandLine: string;
       createdAtUtc: string | null;
     };
+    if (
+      !Number.isInteger(parsed.processId) ||
+      parsed.processId <= 0 ||
+      !Number.isInteger(parsed.parentProcessId) ||
+      typeof parsed.commandLine !== "string"
+    ) {
+      return { status: "unavailable", processId, reason: "parse-failed" };
+    }
     return {
+      status: "resolved",
       processId: parsed.processId,
-      parentProcessId: parsed.parentProcessId,
-      commandLine: parsed.commandLine ?? "",
-      createdAtUtc: parsed.createdAtUtc ? new Date(parsed.createdAtUtc) : null
+      info: {
+        processId: parsed.processId,
+        parentProcessId: parsed.parentProcessId,
+        commandLine: parsed.commandLine,
+        createdAtUtc: parsed.createdAtUtc ? new Date(parsed.createdAtUtc) : null
+      }
     };
   } catch {
-    return {
-      processId,
-      parentProcessId: 0,
-      commandLine: "",
-      createdAtUtc: null
-    };
+    return { status: "unavailable", processId, reason: "parse-failed" };
   }
+}
+
+/**
+ * Compatibility wrapper for callers that only need resolved process details.
+ * Ownership revalidation must use inspectProcess so unavailable is not confused
+ * with a dead process.
+ */
+export function getProcessInfo(processId: number): ProcessInfo | null {
+  const inspection = inspectProcess(processId);
+  return inspection.status === "resolved" ? inspection.info : null;
 }
 
 /**

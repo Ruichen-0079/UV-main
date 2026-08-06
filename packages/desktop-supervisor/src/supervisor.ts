@@ -15,15 +15,15 @@ import {
 import {
   PROCESS_METADATA_VERSION,
   readProcessMetadata,
-  removeMetadataFile,
+  removeProcessMetadataIfMatches,
   shouldRemoveInvalidMetadata,
   testProcessOwnership,
   writeProcessMetadata
 } from "./ownership.js";
-import { parseUrlOrigin } from "./paths.js";
+import { parseUrlOrigin, pathsEqual } from "./paths.js";
 import {
   forceKillProcessTree,
-  getProcessInfo,
+  inspectProcess,
   isProcessAlive,
   requestGracefulStop,
   spawnManagedProcess
@@ -515,10 +515,17 @@ export class DesktopSupervisor {
       this.lifecycleEvent("memory.spawn.returned", svc, { pid });
       // Wait briefly so process creation time is queryable.
       await sleep(200);
-      const info = getProcessInfo(pid);
-      const startedAt = (info?.createdAtUtc ?? new Date()).toISOString();
-      svc.startedAt = startedAt;
-      this.lifecycleEvent("memory.identity.resolved", svc, { pid, startTime: startedAt });
+      const inspection = inspectProcess(pid);
+      const startedAt =
+        (inspection.status === "resolved" ? inspection.info.createdAtUtc : null) ?? new Date();
+      const startedAtIso = startedAt.toISOString();
+      svc.startedAt = startedAtIso;
+      this.lifecycleEvent("memory.identity.resolved", svc, {
+        pid,
+        startTime: startedAtIso,
+        processInspectionStatus: inspection.status,
+        processInspectionReason: inspection.status === "resolved" ? null : inspection.reason
+      });
       child.on("exit", () => {
         if (svc.pid === pid) {
           svc.child = null;
@@ -532,7 +539,7 @@ export class DesktopSupervisor {
         repositoryRoot: this.config.repositoryRoot,
         stateDirectory: this.config.stateDirectory,
         commandMarker: svc.spec.startCommand.commandMarker,
-        processStartedAtUtc: startedAt,
+        processStartedAtUtc: startedAtIso,
         createdAtUtc: new Date().toISOString(),
         ownershipToken: this.config.ownershipToken,
         instanceId: this.config.instanceId
@@ -609,6 +616,16 @@ export class DesktopSupervisor {
   private async stopOwned(svc: InternalService): Promise<void> {
     const trackedPid = svc.pid;
     const child = svc.child;
+    const metadataSnapshot = readProcessMetadata(svc.spec.metadataFile);
+    const metadataBelongsToThisSupervisor = Boolean(
+      metadataSnapshot &&
+        metadataSnapshot.schemaVersion === PROCESS_METADATA_VERSION &&
+        metadataSnapshot.role === svc.spec.role &&
+        pathsEqual(metadataSnapshot.repositoryRoot, this.config.repositoryRoot) &&
+        pathsEqual(metadataSnapshot.stateDirectory, this.config.stateDirectory) &&
+        metadataSnapshot.ownershipToken === this.config.ownershipToken &&
+        metadataSnapshot.instanceId === this.config.instanceId
+    );
 
     // Kill our ChildProcess handle first (best signal we started it).
     if (child && !child.killed) {
@@ -629,7 +646,7 @@ export class DesktopSupervisor {
     for (const processId of pidCandidates) {
       if (!isProcessAlive(processId)) continue;
 
-      const processInfo = getProcessInfo(processId);
+      const processInspection = inspectProcess(processId);
       const ownership = testProcessOwnership({
         metadataPath: svc.spec.metadataFile,
         expectedRole: svc.spec.role,
@@ -637,11 +654,15 @@ export class DesktopSupervisor {
         stateDirectory: this.config.stateDirectory,
         ownershipToken: this.config.ownershipToken,
         instanceId: this.config.instanceId,
-        processInfo
+        processInspection,
+        currentChild: child
       });
 
       // Kill when owned OR when we still hold a child handle for this pid (we started it).
-      const weStarted = Boolean(child?.pid === processId || trackedPid === processId);
+      // A tracked numeric pid alone is not first-party evidence after a
+      // Supervisor restart. Only the live ChildProcess handle can bypass an
+      // unavailable identity query during shutdown.
+      const weStarted = Boolean(child?.pid === processId);
       if (!ownership.owned && !weStarted) {
         continue;
       }
@@ -660,8 +681,18 @@ export class DesktopSupervisor {
       }
     }
 
-    this.lifecycleEvent("memory.metadata.cleanup", svc);
-    removeMetadataFile(svc.spec.metadataFile);
+    const removed = metadataBelongsToThisSupervisor
+      ? removeProcessMetadataIfMatches(svc.spec.metadataFile, metadataSnapshot)
+      : false;
+    this.lifecycleEvent("memory.metadata.cleanup", svc, {
+      reason: removed
+        ? "explicit-owned-stop"
+        : metadataBelongsToThisSupervisor
+          ? "compare-delete-mismatch"
+          : "foreign-metadata",
+      removed,
+      metadataSnapshotMatch: removed
+    });
     svc.child = null;
     svc.pid = null;
     svc.startedAt = null;
@@ -675,7 +706,7 @@ export class DesktopSupervisor {
 
     // Ownership first
     const metaPid = this.readOwnedPid(svc);
-    const processInfo = metaPid ? getProcessInfo(metaPid) : null;
+    const processInspection = metaPid ? inspectProcess(metaPid) : null;
     const ownership = testProcessOwnership({
       metadataPath: svc.spec.metadataFile,
       expectedRole: svc.spec.role,
@@ -683,11 +714,19 @@ export class DesktopSupervisor {
       stateDirectory: this.config.stateDirectory,
       ownershipToken: this.config.ownershipToken,
       instanceId: this.config.instanceId,
-      processInfo
+      processInspection,
+      currentChild: svc.child
     });
+    let metadataCleanupMismatch = false;
     if (shouldRemoveInvalidMetadata(ownership)) {
-      this.lifecycleEvent("memory.metadata.cleanup", svc);
-      removeMetadataFile(svc.spec.metadataFile);
+      const removed = removeProcessMetadataIfMatches(svc.spec.metadataFile, ownership.metadata);
+      metadataCleanupMismatch = !removed;
+      this.lifecycleEvent("memory.metadata.cleanup", svc, {
+        reason: removed ? ownership.cleanupReason : "compare-delete-mismatch",
+        removed,
+        cleanupAllowed: ownership.cleanupAllowed,
+        metadataSnapshotMatch: ownership.metadataSnapshotMatch
+      });
     }
     if (ownership.owned) {
       svc.ownership = "owned";
@@ -697,6 +736,47 @@ export class DesktopSupervisor {
       svc.ownership = "none";
       svc.pid = null;
       svc.pendingExternal = false;
+    }
+
+    const ownershipDiagnostics = {
+      processInspectionStatus: ownership.processInspectionStatus,
+      processInspectionReason: ownership.processInspectionReason,
+      processAlive: ownership.processAlive,
+      processInfoComplete: ownership.processInfoComplete,
+      ownershipStatus: ownership.status,
+      cleanupAllowed: ownership.cleanupAllowed,
+      cleanupReason: ownership.cleanupReason,
+      currentChildMatch: ownership.currentChildMatch,
+      metadataSnapshotMatch: ownership.metadataSnapshotMatch
+    };
+
+    if (metadataCleanupMismatch) {
+      svc.status = "unavailable";
+      svc.ownership = "none";
+      svc.pid = null;
+      svc.summary = "Ownership metadata changed during verification.";
+      svc.detail = "Metadata compare-and-delete was refused.";
+      svc.lastError = null;
+      this.lifecycleEvent("memory.classification.result", svc, {
+        phase: "compare-delete-mismatch",
+        ...ownershipDiagnostics,
+        cleanupReason: "compare-delete-mismatch"
+      });
+      return;
+    }
+
+    if (ownership.status === "unavailable" && !ownership.owned) {
+      svc.status = "unavailable";
+      svc.ownership = "none";
+      svc.pid = null;
+      svc.summary = "Ownership verification unavailable.";
+      svc.detail = ownership.message;
+      svc.lastError = null;
+      this.lifecycleEvent("memory.classification.result", svc, {
+        phase: "ownership-unavailable",
+        ...ownershipDiagnostics
+      });
+      return;
     }
 
     // Health / TCP
@@ -720,7 +800,10 @@ export class DesktopSupervisor {
           svc.pendingExternal = false;
         }
       }
-      this.lifecycleEvent("memory.classification.result", svc, { phase: "tcp" });
+      this.lifecycleEvent("memory.classification.result", svc, {
+        phase: "tcp",
+        ...ownershipDiagnostics
+      });
       void now;
       return;
     }
@@ -729,7 +812,10 @@ export class DesktopSupervisor {
       svc.status = "stopped";
       svc.summary = "No health endpoint";
       svc.pendingExternal = false;
-      this.lifecycleEvent("memory.classification.result", svc, { phase: "no-health-endpoint" });
+      this.lifecycleEvent("memory.classification.result", svc, {
+        phase: "no-health-endpoint",
+        ...ownershipDiagnostics
+      });
       return;
     }
 
@@ -753,7 +839,10 @@ export class DesktopSupervisor {
         svc.ownership = "external";
         svc.pid = null;
       }
-      this.lifecycleEvent("memory.classification.result", svc, { phase: "healthy" });
+      this.lifecycleEvent("memory.classification.result", svc, {
+        phase: "healthy",
+        ...ownershipDiagnostics
+      });
       return;
     }
 
@@ -767,7 +856,10 @@ export class DesktopSupervisor {
         svc.ownership = "none";
         svc.pendingExternal = false;
       }
-      this.lifecycleEvent("memory.classification.result", svc, { phase: "protocol-mismatch" });
+      this.lifecycleEvent("memory.classification.result", svc, {
+        phase: "protocol-mismatch",
+        ...ownershipDiagnostics
+      });
       return;
     }
 
@@ -775,7 +867,10 @@ export class DesktopSupervisor {
       svc.status = "unavailable";
       svc.summary = "Owned process not healthy";
       svc.lastError = health.message;
-      this.lifecycleEvent("memory.classification.result", svc, { phase: "owned-unhealthy" });
+      this.lifecycleEvent("memory.classification.result", svc, {
+        phase: "owned-unhealthy",
+        ...ownershipDiagnostics
+      });
       return;
     }
 
@@ -785,7 +880,10 @@ export class DesktopSupervisor {
     svc.summary = "Not running";
     svc.detail = health.message;
     svc.lastError = null;
-    this.lifecycleEvent("memory.classification.result", svc, { phase: "stopped" });
+    this.lifecycleEvent("memory.classification.result", svc, {
+      phase: "stopped",
+      ...ownershipDiagnostics
+    });
   }
 
   private async waitReady(svc: InternalService, timeoutMs: number): Promise<boolean> {

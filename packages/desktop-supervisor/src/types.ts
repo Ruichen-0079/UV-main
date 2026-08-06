@@ -55,7 +55,40 @@ export type ProcessMetadata = {
   instanceId: string;
 };
 
-export type OwnershipStatus = "running" | "missing" | "stale" | "mismatch" | "invalid";
+export type ProcessInspectionReason =
+  | "invalid-pid"
+  | "process-not-alive"
+  | "query-timeout"
+  | "query-failed"
+  | "empty-output"
+  | "parse-failed";
+
+export type ProcessInspectionResult =
+  | {
+      status: "resolved";
+      processId: number;
+      info: ProcessInfo;
+    }
+  | {
+      status: "not-running";
+      processId: number;
+      reason: "invalid-pid" | "process-not-alive";
+    }
+  | {
+      status: "unavailable";
+      processId: number;
+      reason: "query-timeout" | "query-failed" | "empty-output" | "parse-failed";
+    };
+
+export type OwnershipStatus =
+  | "running"
+  | "missing"
+  | "not-running"
+  | "unavailable"
+  | "verification-pending"
+  | "mismatch"
+  | "foreign"
+  | "invalid";
 
 export type OwnershipResult = {
   status: OwnershipStatus;
@@ -63,6 +96,14 @@ export type OwnershipResult = {
   processId: number;
   message: string;
   metadata: ProcessMetadata | null;
+  cleanupAllowed: boolean;
+  cleanupReason: string;
+  processInspectionStatus: ProcessInspectionResult["status"] | "missing";
+  processInspectionReason: string | null;
+  processAlive: boolean;
+  processInfoComplete: boolean;
+  currentChildMatch: boolean;
+  metadataSnapshotMatch: boolean;
 };
 
 export type ProcessInfo = {
