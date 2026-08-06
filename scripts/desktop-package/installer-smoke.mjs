@@ -66,6 +66,7 @@ const STRIPPED_KEYS = [
   "npm_config_user_agent",
   "NODE_OPTIONS"
 ];
+const SUPERVISOR_BUILD_INFO_NAME = "supervisor-build-info.json";
 export const FORBIDDEN_PATH_TOOLS = ["python", "python3", "py", "pip", "uv", "node", "pnpm", "tsx"];
 
 function fail(message) {
@@ -338,10 +339,89 @@ export function validatePackagingInfo(info) {
     fail("packaging-info schema mismatch");
   if (info.hasMem0 !== true || info.mem0ProtocolVersion !== 1)
     fail("packaging-info does not declare packaged Mem0");
+  if (info.hasSupervisorExe !== true || info.supervisorMode !== "pkg-exe")
+    fail("packaging-info does not declare packaged Supervisor exe");
+  assertRelativeSafe(info.supervisorBuildInfo, "packaging-info.supervisorBuildInfo");
   for (const field of ["runtimeEntry", "nodeExecutable", "mem0Executable", "mem0Manifest"])
     assertRelativeSafe(info[field], `packaging-info.${field}`);
   assertNoSecrets(info, "packaging-info");
   return info;
+}
+
+export function validateSupervisorProvenance(info) {
+  if (!info || info.schemaVersion !== 1 || info.mode !== "pkg-exe")
+    fail("Supervisor provenance schema/mode mismatch");
+  if (typeof info.checkoutSha !== "string" || !/^[0-9a-f]{40}$/i.test(info.checkoutSha))
+    fail("Supervisor provenance checkoutSha is not a commit SHA");
+  for (const field of ["sourceFingerprint", "bundleSha256", "bundleInputSha256", "executableSha256", "stagedExecutableSha256", "stagedBundleSha256"]) {
+    if (typeof info[field] !== "string" || !/^[0-9a-f]{64}$/i.test(info[field]))
+      fail(`Supervisor provenance ${field} is not a SHA-256 value`);
+  }
+  if (typeof info.entry !== "string" || info.entry.includes("\\") || info.entry.includes("/"))
+    fail("Supervisor provenance entry is unsafe");
+  for (const field of ["bundleRelativePath", "executableRelativePath"])
+    assertRelativeSafe(info[field], `Supervisor provenance ${field}`);
+  if (info.pkgTarget !== "node20-win-x64" || info.platform !== "win32" || info.arch !== "x64")
+    fail("Supervisor provenance target mismatch");
+  assertNoSecrets(info, "Supervisor provenance");
+  return info;
+}
+
+export function parseEmbeddedSupervisorBuildInfo(stdout, stderr = "", code = 0) {
+  if (code !== 0) fail(`Supervisor --build-info-json exited with ${code}`);
+  const lines = String(stdout).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length !== 1) fail("Supervisor build-info output must contain exactly one JSON line");
+  let value;
+  try {
+    value = JSON.parse(lines[0]);
+  } catch {
+    fail("Supervisor build-info output is not valid JSON");
+  }
+  if (!value || value.schemaVersion !== 1 || value.mode !== "pkg-exe")
+    fail("embedded Supervisor build-info schema/mode mismatch");
+  if (typeof value.checkoutSha !== "string" || !/^[0-9a-f]{40}$/i.test(value.checkoutSha))
+    fail("embedded Supervisor checkout SHA is invalid");
+  if (typeof value.sourceFingerprint !== "string" || !/^[0-9a-f]{64}$/i.test(value.sourceFingerprint))
+    fail("embedded Supervisor source fingerprint is invalid");
+  if (typeof value.bundleSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(value.bundleSha256))
+    fail("embedded Supervisor bundle SHA is invalid");
+  if (typeof value.entry !== "string" || value.entry.includes("/") || value.entry.includes("\\"))
+    fail("embedded Supervisor entry is invalid");
+  assertNoSecrets(value, "embedded Supervisor build-info");
+  if (stderr && String(stderr).trim()) fail("Supervisor --build-info-json wrote stderr");
+  return value;
+}
+
+export function assertSupervisorProvenance({
+  resource,
+  provenance,
+  embedded,
+  installedExecutableSha256,
+  installedBundleSha256
+}) {
+  validateSupervisorProvenance(provenance);
+  if (!embedded || embedded.schemaVersion !== 1 || embedded.mode !== "pkg-exe")
+    fail("embedded Supervisor identity schema/mode mismatch");
+  if (installedExecutableSha256 !== provenance.executableSha256 ||
+      installedExecutableSha256 !== provenance.stagedExecutableSha256)
+    fail("installed Supervisor executable SHA-256 does not match provenance");
+  if (installedBundleSha256 !== provenance.bundleInputSha256 ||
+      installedBundleSha256 !== provenance.stagedBundleSha256)
+    fail("installed Supervisor bundle SHA-256 does not match provenance");
+  for (const field of ["schemaVersion", "mode", "checkoutSha", "sourceFingerprint", "bundleSha256", "entry"])
+    if (embedded[field] !== provenance[field]) fail(`embedded Supervisor identity mismatch: ${field}`);
+  if (!provenance.executableRelativePath.toLowerCase().startsWith("supervisor/"))
+    fail("Supervisor executable provenance escaped resource root");
+  return true;
+}
+
+export function findUniqueSupervisorExecutable(supervisorRoot) {
+  const matches = listFiles(supervisorRoot).filter(
+    (file) => path.basename(file).toLowerCase() === SUPERVISOR_EXE_NAME.toLowerCase()
+  );
+  if (matches.length !== 1)
+    fail(`expected exactly one packaged Supervisor exe, found ${matches.length}`);
+  return matches[0];
 }
 
 export function validateInstalledResources(resourceRoot) {
@@ -352,6 +432,9 @@ export function validateInstalledResources(resourceRoot) {
   for (const required of [runtime, supervisor, mem0, infoPath])
     if (!fs.existsSync(required)) fail(`installed resource missing: ${required}`);
   const info = validatePackagingInfo(readJson(infoPath));
+  const supervisorBuildInfoPath = path.join(resourceRoot, info.supervisorBuildInfo);
+  if (!fs.existsSync(supervisorBuildInfoPath)) fail("installed Supervisor provenance is missing");
+  const supervisorBuildInfo = validateSupervisorProvenance(readJson(supervisorBuildInfoPath));
   for (const required of [
     path.join(runtime, NODE_EXE_NAME),
     path.join(runtime, RUNTIME_ENTRY_NAME),
@@ -362,6 +445,9 @@ export function validateInstalledResources(resourceRoot) {
     path.join(mem0, MEM0_INTERNAL_DIR_NAME)
   ])
     if (!fs.existsSync(required)) fail(`installed resource missing: ${required}`);
+  const supervisorExe = findUniqueSupervisorExecutable(supervisor);
+  if (path.resolve(supervisorExe) !== path.resolve(path.join(resourceRoot, supervisorBuildInfo.executableRelativePath)))
+    fail("Supervisor executable path does not match provenance");
   const runtimeManifest = readJson(path.join(runtime, RUNTIME_MANIFEST_NAME));
   for (const field of ["nodeExecutable", "runtimeEntry"])
     assertRelativeSafe(runtimeManifest[field], `runtime-manifest.${field}`);
@@ -378,7 +464,16 @@ export function validateInstalledResources(resourceRoot) {
     if (/(?:^|\/)metadata(?:\.json|\.db)?$/i.test(rel) && !/\.dist-info\/METADATA$/i.test(rel))
       fail(`runtime resource contains forbidden metadata file: ${rel}`);
   }
-  return { info, runtime, supervisor, mem0, runtimeManifest, mem0Result };
+  return {
+    info,
+    runtime,
+    supervisor,
+    supervisorExe,
+    supervisorBuildInfo,
+    mem0,
+    runtimeManifest,
+    mem0Result
+  };
 }
 
 export function findUninstaller(installDir) {
@@ -1065,6 +1160,22 @@ function processCommandLine(pid) {
   }
 }
 
+export function processExecutablePath(
+  pid,
+  { execFile = execFileSync, platform = process.platform } = {}
+) {
+  if (!pid || platform !== "win32") return "";
+  try {
+    const script = `(Get-CimInstance Win32_Process -Filter \"ProcessId=${Number(pid)}\").ExecutablePath`;
+    return execFile(powershellDiagnosticPath(), ["-NoProfile", "-NonInteractive", "-Command", script], {
+      encoding: "utf8",
+      windowsHide: true
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+
 function pidAlive(pid) {
   if (!pid) return false;
   try {
@@ -1200,16 +1311,44 @@ async function runPackagedSupervisor({
     YUVI_SUPERVISOR_PORT: String(supervisorPort),
     MEMORY_BACKEND: "mem0",
     MEM0_BASE_URL: `http://127.0.0.1:${mem0Port}`,
-    PROVIDER_ALLOW_MOCKS: "true"
+    PROVIDER_ALLOW_MOCKS: "true",
+    YUVI_SUPERVISOR_DIAGNOSTICS: "1"
   });
   console.info(
     `[installer-smoke] port roles: mem0 service=${mem0Port}, supervisor requested control=${supervisorPort}, supervisor public/status=unknown, supervisor control=unknown`
   );
   assertNoSecrets(env, "child env");
   assertToolsUnresolvable(env);
-  const runtimeNode = path.join(resource.runtime, NODE_EXE_NAME);
-  const supervisorExe = path.join(resource.supervisor, SUPERVISOR_EXE_NAME);
-  const supervisorCjs = path.join(resource.supervisor, SUPERVISOR_BUNDLE_NAME);
+  const supervisorExe = resource.supervisorExe ?? findUniqueSupervisorExecutable(resource.supervisor);
+  const supervisorProvenance = resource.supervisorBuildInfo;
+  const installedExecutableSha256 = crypto.createHash("sha256").update(fs.readFileSync(supervisorExe)).digest("hex");
+  const installedBundlePath = path.join(resource.root, supervisorProvenance.bundleRelativePath);
+  const installedBundleSha256 = crypto.createHash("sha256").update(fs.readFileSync(installedBundlePath)).digest("hex");
+  const buildInfoRun = await runProcess(
+    supervisorExe,
+    ["--build-info-json"],
+    {
+      cwd: layout.emptyCwd,
+      env: sanitizeChildEnv({ YUVI_SUPERVISOR_DIAGNOSTICS: "1" }),
+      stdio: ["ignore", "pipe", "pipe"]
+    },
+    Math.min(timeoutMs, 10_000)
+  );
+  const embeddedBuildInfo = parseEmbeddedSupervisorBuildInfo(
+    buildInfoRun.stdout,
+    buildInfoRun.stderr,
+    buildInfoRun.code
+  );
+  assertSupervisorProvenance({
+    resource,
+    provenance: supervisorProvenance,
+    embedded: embeddedBuildInfo,
+    installedExecutableSha256,
+    installedBundleSha256
+  });
+  console.info(
+    `[installer-smoke] SUPERVISOR_PROVENANCE mode=${supervisorProvenance.mode} checkout_sha=${supervisorProvenance.checkoutSha} source_fingerprint=${supervisorProvenance.sourceFingerprint} bundle_sha256=${supervisorProvenance.bundleSha256} bundle_input_sha256=${supervisorProvenance.bundleInputSha256} build_exe_sha256=${supervisorProvenance.executableSha256} staged_exe_sha256=${supervisorProvenance.stagedExecutableSha256} installed_exe_sha256=${installedExecutableSha256} running_executable_path=pending`
+  );
   const args = [
     "--mode",
     "packaged",
@@ -1223,9 +1362,9 @@ async function runPackagedSupervisor({
     path.join(resource.mem0, MEM0_MANIFEST_NAME)
   ];
   assertNoSecrets(args, "Supervisor argv");
-  const useExe = fs.existsSync(supervisorExe);
-  const command = useExe ? supervisorExe : runtimeNode;
-  const commandArgs = useExe ? args : [supervisorCjs, ...args];
+  const useExe = true;
+  const command = supervisorExe;
+  const commandArgs = args;
   await safeSample("T1-supervisor-spawn-before", { pid: 0 });
   const child = spawn(command, commandArgs, {
     cwd: layout.emptyCwd,
@@ -1249,6 +1388,14 @@ async function runPackagedSupervisor({
       stateRoot,
       timeoutMs
     );
+    const runningExecutablePath = processExecutablePath(child.pid);
+    if (process.platform === "win32" && (!runningExecutablePath || normalized(runningExecutablePath) !== normalized(supervisorExe)))
+      fail("running Supervisor ExecutablePath does not match installed packaged exe");
+    if (runningExecutablePath) {
+      console.info(
+        `[installer-smoke] SUPERVISOR_PROVENANCE running_executable_path=${safeDiagnosticPath(runningExecutablePath, layout.install)}`
+      );
+    }
     const base = String(endpoint.baseUrl);
     if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(base)) fail("Supervisor endpoint is not loopback");
     const endpointPort = Number(new URL(base).port);
@@ -1380,6 +1527,11 @@ async function runPackagedSupervisor({
       commandLine,
       supervisorPid: child.pid,
       useExe,
+      supervisorExecutablePath: runningExecutablePath,
+      supervisorProvenance,
+      embeddedBuildInfo,
+      installedExecutableSha256,
+      installedBundleSha256,
       status: mem0Health.value
     };
   } catch (error) {

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { buildChildProcessEnv, deriveConfigFromEnv } from "./config.js";
 import {
@@ -13,6 +14,7 @@ import {
 } from "./health.js";
 import {
   PROCESS_METADATA_VERSION,
+  readProcessMetadata,
   removeMetadataFile,
   shouldRemoveInvalidMetadata,
   testProcessOwnership,
@@ -134,6 +136,9 @@ export class DesktopSupervisor {
   /** Tracks background config reconciliation so updates never overlap. */
   private configReconcileOp: Promise<void> | null = null;
   private configGeneration = 0;
+  private readonly lifecycleDiagnostics = process.env["YUVI_SUPERVISOR_DIAGNOSTICS"] === "1";
+  private readonly lifecycleStartedAt = process.hrtime.bigint();
+  private lifecycleSequence = 0;
 
   constructor(private config: SupervisorConfig) {
     // Base layer: shell/process + bootstrap config.env (e.g. .env files).
@@ -370,6 +375,8 @@ export class DesktopSupervisor {
   }
 
   async refreshAll(): Promise<SupervisorSnapshot> {
+    const mem0 = this.services.get("mem0");
+    if (mem0) this.lifecycleEvent("memory.refresh.queued", mem0);
     for (const id of this.services.keys()) {
       const svc = this.services.get(id);
       if (!svc) continue;
@@ -390,7 +397,6 @@ export class DesktopSupervisor {
       runtime.autoRecovered = true;
       await this.ensureService("runtime");
     }
-    const mem0 = this.services.get("mem0");
     if (
       mem0 &&
       !this.shuttingDown &&
@@ -466,6 +472,7 @@ export class DesktopSupervisor {
   private async startManagedIfNeeded(id: ServiceId): Promise<void> {
     if (this.shuttingDown) return;
     const svc = this.require(id);
+    this.lifecycleEvent("memory.start.enter", svc);
     await this.refreshService(id);
     if (svc.status === "healthy" || svc.status === "degraded") {
       return;
@@ -505,11 +512,13 @@ export class DesktopSupervisor {
       }
       svc.child = child;
       svc.pid = pid;
+      this.lifecycleEvent("memory.spawn.returned", svc, { pid });
       // Wait briefly so process creation time is queryable.
       await sleep(200);
       const info = getProcessInfo(pid);
       const startedAt = (info?.createdAtUtc ?? new Date()).toISOString();
       svc.startedAt = startedAt;
+      this.lifecycleEvent("memory.identity.resolved", svc, { pid, startTime: startedAt });
       child.on("exit", () => {
         if (svc.pid === pid) {
           svc.child = null;
@@ -528,10 +537,25 @@ export class DesktopSupervisor {
         ownershipToken: this.config.ownershipToken,
         instanceId: this.config.instanceId
       };
-      writeProcessMetadata(svc.spec.metadataFile, metadata);
+      this.lifecycleEvent("memory.metadata.write.begin", svc, { pid, startTime: startedAt });
+      writeProcessMetadata(svc.spec.metadataFile, metadata, {
+        onTempWritten: () => this.lifecycleEvent("memory.metadata.temp.written", svc),
+        onRenameCompleted: () => this.lifecycleEvent("memory.metadata.rename.completed", svc),
+        onCleanup: () => this.lifecycleEvent("memory.metadata.cleanup", svc)
+      });
+      const readback = readProcessMetadata(svc.spec.metadataFile);
+      this.lifecycleEvent("memory.metadata.readback.completed", svc, {
+        metadataExists: Boolean(readback),
+        pid: readback?.pid ?? 0
+      });
+      if (!readback || readback.pid !== pid || readback.instanceId !== this.config.instanceId) {
+        throw new Error("ownership metadata readback failed");
+      }
       svc.ownership = "owned";
       svc.pendingExternal = false;
+      this.lifecycleEvent("memory.owned.published", svc, { ownership: svc.ownership });
 
+      this.lifecycleEvent("memory.health.probe.begin", svc, { phase: "readiness" });
       const ready = await this.waitReady(svc, svc.spec.startTimeoutMs);
       if (!ready) {
         svc.status = "unavailable";
@@ -636,6 +660,7 @@ export class DesktopSupervisor {
       }
     }
 
+    this.lifecycleEvent("memory.metadata.cleanup", svc);
     removeMetadataFile(svc.spec.metadataFile);
     svc.child = null;
     svc.pid = null;
@@ -645,6 +670,7 @@ export class DesktopSupervisor {
 
   private async refreshService(id: ServiceId): Promise<void> {
     const svc = this.require(id);
+    this.lifecycleEvent("memory.refresh.enter", svc);
     const now = new Date().toISOString();
 
     // Ownership first
@@ -660,6 +686,7 @@ export class DesktopSupervisor {
       processInfo
     });
     if (shouldRemoveInvalidMetadata(ownership)) {
+      this.lifecycleEvent("memory.metadata.cleanup", svc);
       removeMetadataFile(svc.spec.metadataFile);
     }
     if (ownership.owned) {
@@ -674,6 +701,7 @@ export class DesktopSupervisor {
 
     // Health / TCP
     if (svc.spec.tcp && !svc.spec.healthUrl) {
+      this.lifecycleEvent("memory.health.probe.begin", svc, { phase: "tcp" });
       const tcp = await probeTcp(svc.spec.tcp.host, svc.spec.tcp.port);
       if (tcp.ok) {
         svc.status = "healthy";
@@ -692,6 +720,7 @@ export class DesktopSupervisor {
           svc.pendingExternal = false;
         }
       }
+      this.lifecycleEvent("memory.classification.result", svc, { phase: "tcp" });
       void now;
       return;
     }
@@ -700,9 +729,11 @@ export class DesktopSupervisor {
       svc.status = "stopped";
       svc.summary = "No health endpoint";
       svc.pendingExternal = false;
+      this.lifecycleEvent("memory.classification.result", svc, { phase: "no-health-endpoint" });
       return;
     }
 
+    this.lifecycleEvent("memory.health.probe.begin", svc, { phase: "http" });
     const health = await probeHttpHealth(svc.spec.healthUrl, {
       validateBody: svc.spec.validateHealthBody
     });
@@ -722,6 +753,7 @@ export class DesktopSupervisor {
         svc.ownership = "external";
         svc.pid = null;
       }
+      this.lifecycleEvent("memory.classification.result", svc, { phase: "healthy" });
       return;
     }
 
@@ -735,6 +767,7 @@ export class DesktopSupervisor {
         svc.ownership = "none";
         svc.pendingExternal = false;
       }
+      this.lifecycleEvent("memory.classification.result", svc, { phase: "protocol-mismatch" });
       return;
     }
 
@@ -742,6 +775,7 @@ export class DesktopSupervisor {
       svc.status = "unavailable";
       svc.summary = "Owned process not healthy";
       svc.lastError = health.message;
+      this.lifecycleEvent("memory.classification.result", svc, { phase: "owned-unhealthy" });
       return;
     }
 
@@ -751,6 +785,7 @@ export class DesktopSupervisor {
     svc.summary = "Not running";
     svc.detail = health.message;
     svc.lastError = null;
+    this.lifecycleEvent("memory.classification.result", svc, { phase: "stopped" });
   }
 
   private async waitReady(svc: InternalService, timeoutMs: number): Promise<boolean> {
@@ -1184,6 +1219,44 @@ export class DesktopSupervisor {
     }
   }
 
+  private lifecycleEvent(
+    event: string,
+    svc: InternalService,
+    extra: Record<string, unknown> = {}
+  ): void {
+    if (!this.lifecycleDiagnostics || svc.spec.id !== "mem0") return;
+    const metadataExists = fs.existsSync(svc.spec.metadataFile);
+    let metadataRootHash: string | null = null;
+    try {
+      metadataRootHash = createHash("sha256")
+        .update(path.resolve(this.config.stateDirectory))
+        .digest("hex")
+        .slice(0, 12);
+    } catch {
+      metadataRootHash = null;
+    }
+    const elapsedMs = Number(process.hrtime.bigint() - this.lifecycleStartedAt) / 1_000_000;
+    const payload = {
+      event,
+      sequence: ++this.lifecycleSequence,
+      elapsedMs: Math.round(elapsedMs),
+      role: svc.spec.role,
+      pid: svc.pid ?? 0,
+      instanceId: this.config.instanceId.slice(0, 12),
+      startTime: svc.startedAt,
+      metadataExists,
+      metadataRootHash,
+      ownership: svc.ownership,
+      health: svc.status,
+      ...extra
+    };
+    try {
+      console.log(`YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify(payload)}`);
+    } catch {
+      // Diagnostics must never affect service lifecycle.
+    }
+  }
+
   private appendExitLog(message: string): void {
     try {
       const logPath = path.join(this.config.stateDirectory, "supervisor-exit.log");
@@ -1211,6 +1284,7 @@ function startCommandEqual(
   ) {
     return false;
   }
+
   for (let index = 0; index < previous.args.length; index += 1) {
     if (previous.args[index] !== next.args[index]) return false;
   }

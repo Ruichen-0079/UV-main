@@ -5,7 +5,17 @@ import { commandLineContainsPath, pathsEqual } from "./paths.js";
 
 export const PROCESS_METADATA_VERSION = 1 as const;
 
-export function writeProcessMetadata(filePath: string, metadata: ProcessMetadata): void {
+export type ProcessMetadataWriteHooks = {
+  onTempWritten?: () => void;
+  onRenameCompleted?: () => void;
+  onCleanup?: () => void;
+};
+
+export function writeProcessMetadata(
+  filePath: string,
+  metadata: ProcessMetadata,
+  hooks: ProcessMetadataWriteHooks = {}
+): void {
   const directory = path.dirname(filePath);
   fs.mkdirSync(directory, { recursive: true });
   const temporaryPath = path.join(
@@ -18,7 +28,9 @@ export function writeProcessMetadata(filePath: string, metadata: ProcessMetadata
       encoding: "utf8",
       mode: 0o600
     });
+    hooks.onTempWritten?.();
     fs.renameSync(temporaryPath, filePath);
+    hooks.onRenameCompleted?.();
     committed = true;
   } finally {
     if (!committed) {
@@ -27,6 +39,7 @@ export function writeProcessMetadata(filePath: string, metadata: ProcessMetadata
       } catch {
         // Preserve the original write/rename failure.
       }
+      hooks.onCleanup?.();
     }
   }
 }

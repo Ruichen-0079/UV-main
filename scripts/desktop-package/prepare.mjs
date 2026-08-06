@@ -17,7 +17,7 @@ import {
   SUPERVISOR_OUT_DIR,
   TAURI_GENERATED
 } from "./constants.mjs";
-import { buildSupervisor } from "./build-supervisor.mjs";
+import { buildSupervisor, sha256File, SUPERVISOR_BUILD_INFO_NAME } from "./build-supervisor.mjs";
 import { buildPackagedMem0, validateMem0Artifact } from "./build-mem0.mjs";
 import { bundleRuntimeServer } from "./build-runtime.mjs";
 import { prepareBundledNode } from "./download-node.mjs";
@@ -38,6 +38,7 @@ export async function prepareDesktopPackage() {
 
   const supervisor = await buildSupervisor(SUPERVISOR_OUT_DIR);
   assertFile(supervisor.cjsPath, "supervisor cjs");
+  assertFile(supervisor.exePath, "supervisor exe");
 
   const mem0 = await buildPackagedMem0();
   validateMem0Artifact(MEM0_OUT_DIR);
@@ -69,9 +70,23 @@ export async function prepareDesktopPackage() {
     path.join(SUPERVISOR_OUT_DIR, SUPERVISOR_BUNDLE_NAME),
     path.join(stagedSupervisor, SUPERVISOR_BUNDLE_NAME)
   );
-  if (supervisor.exePath && fs.existsSync(supervisor.exePath)) {
-    copyFile(supervisor.exePath, path.join(stagedSupervisor, SUPERVISOR_EXE_NAME));
+  copyFile(supervisor.exePath, path.join(stagedSupervisor, SUPERVISOR_EXE_NAME));
+  const stagedSupervisorExe = path.join(stagedSupervisor, SUPERVISOR_EXE_NAME);
+  const stagedExecutableSha256 = sha256File(stagedSupervisorExe);
+  if (stagedExecutableSha256 !== supervisor.buildInfo.executableSha256) {
+    throw new Error("staged Supervisor executable SHA-256 does not match build output");
   }
+  const supervisorProvenance = {
+    ...supervisor.buildInfo,
+    stagedExecutableSha256,
+    stagedBundleSha256: sha256File(path.join(stagedSupervisor, SUPERVISOR_BUNDLE_NAME))
+  };
+  if (supervisorProvenance.stagedBundleSha256 !== supervisorProvenance.bundleInputSha256) {
+    throw new Error("staged Supervisor bundle SHA-256 does not match build input");
+  }
+  const buildInfoPath = path.join(SUPERVISOR_OUT_DIR, SUPERVISOR_BUILD_INFO_NAME);
+  writeJson(buildInfoPath, supervisorProvenance);
+  copyFile(buildInfoPath, path.join(stagedSupervisor, SUPERVISOR_BUILD_INFO_NAME));
   copyDir(MEM0_OUT_DIR, stagedMem0);
   const stagedMem0Artifact = validateMem0Artifact(stagedMem0);
 
@@ -80,7 +95,8 @@ export async function prepareDesktopPackage() {
     platform: "win32",
     arch: "x64",
     supervisorMode: supervisor.mode,
-    hasSupervisorExe: Boolean(supervisor.exePath && fs.existsSync(supervisor.exePath)),
+    hasSupervisorExe: true,
+    supervisorBuildInfo: `supervisor/${SUPERVISOR_BUILD_INFO_NAME}`,
     runtimeEntry: RUNTIME_ENTRY_NAME,
     nodeExecutable: NODE_EXE_NAME,
     hasMem0: true,

@@ -23,17 +23,21 @@ import {
   findInstalledApplicationExecutable,
   findInstallerCandidates,
   findUninstaller,
+  findUniqueSupervisorExecutable,
   isWithin,
   processBaseline,
+  parseEmbeddedSupervisorBuildInfo,
   removeTreeWithRetries,
   restrictedPath,
   restrictedWindowsPath,
   readOwnershipMetadataDiagnostic,
   sanitizeChildEnv,
   snapshotTree,
+  assertSupervisorProvenance,
   waitForSpecificPidsExit,
   validateInstalledResources,
-  validatePackagingInfo
+  validatePackagingInfo,
+  validateSupervisorProvenance
 } from "./installer-smoke.mjs";
 
 const temp = (prefix = "yuvi-installer-test-") => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -125,6 +129,9 @@ test("packaging-info fixed schema and relative fields validate", () => {
     schemaVersion: 1,
     platform: "win32",
     arch: "x64",
+    supervisorMode: "pkg-exe",
+    hasSupervisorExe: true,
+    supervisorBuildInfo: "supervisor/supervisor-build-info.json",
     hasMem0: true,
     mem0ProtocolVersion: 1,
     runtimeEntry: "runtime/yuvi-runtime-server.mjs",
@@ -142,6 +149,9 @@ test("packaging-info rejects absolute executable paths", () => {
         schemaVersion: 1,
         platform: "win32",
         arch: "x64",
+        supervisorMode: "pkg-exe",
+        hasSupervisorExe: true,
+        supervisorBuildInfo: "supervisor/supervisor-build-info.json",
         hasMem0: true,
         mem0ProtocolVersion: 1,
         runtimeEntry: "C:\\repo\\runtime.mjs",
@@ -151,6 +161,86 @@ test("packaging-info rejects absolute executable paths", () => {
       }),
     /absolute/
   );
+});
+
+const validSupervisorProvenance = () => ({
+  schemaVersion: 1,
+  mode: "pkg-exe",
+  checkoutSha: "a".repeat(40),
+  sourceFingerprint: "b".repeat(64),
+  bundleSha256: "c".repeat(64),
+  bundleInputSha256: "d".repeat(64),
+  executableSha256: "e".repeat(64),
+  stagedExecutableSha256: "e".repeat(64),
+  stagedBundleSha256: "d".repeat(64),
+  entry: "yuvi-desktop-supervisor.packaged.cjs",
+  bundleRelativePath: "supervisor/yuvi-desktop-supervisor.cjs",
+  executableRelativePath: "supervisor/yuvi-desktop-supervisor.exe",
+  pkgTarget: "node20-win-x64",
+  platform: "win32",
+  arch: "x64"
+});
+
+test("Supervisor provenance and embedded identity require matching immutable fields", () => {
+  const provenance = validSupervisorProvenance();
+  assert.equal(validateSupervisorProvenance(provenance), provenance);
+  const embedded = {
+    schemaVersion: 1,
+    mode: "pkg-exe",
+    checkoutSha: provenance.checkoutSha,
+    sourceFingerprint: provenance.sourceFingerprint,
+    bundleSha256: provenance.bundleSha256,
+    entry: provenance.entry
+  };
+  assert.equal(
+    assertSupervisorProvenance({
+      provenance,
+      embedded,
+      installedExecutableSha256: provenance.executableSha256,
+      installedBundleSha256: provenance.bundleInputSha256
+    }),
+    true
+  );
+  assert.throws(
+    () => assertSupervisorProvenance({
+      provenance,
+      embedded: { ...embedded, checkoutSha: "f".repeat(40) },
+      installedExecutableSha256: provenance.executableSha256,
+      installedBundleSha256: provenance.bundleInputSha256
+    }),
+    /identity mismatch/
+  );
+  assert.throws(
+    () => validateSupervisorProvenance({ ...provenance, executableRelativePath: "C:\\bad.exe" }),
+    /absolute/
+  );
+});
+
+test("Supervisor embedded build-info is exactly one JSON line", () => {
+  const provenance = validSupervisorProvenance();
+  const embedded = {
+    schemaVersion: 1,
+    mode: "pkg-exe",
+    checkoutSha: provenance.checkoutSha,
+    sourceFingerprint: provenance.sourceFingerprint,
+    bundleSha256: provenance.bundleSha256,
+    entry: provenance.entry
+  };
+  assert.deepEqual(parseEmbeddedSupervisorBuildInfo(`${JSON.stringify(embedded)}\n`, "", 0), embedded);
+  assert.throws(
+    () => parseEmbeddedSupervisorBuildInfo(`${JSON.stringify(embedded)}\n{}\n`, "", 0),
+    /exactly one/
+  );
+});
+
+test("Supervisor resource must contain exactly one executable", () => {
+  const root = temp();
+  const supervisor = path.join(root, "supervisor");
+  fs.mkdirSync(path.join(supervisor, "nested"), { recursive: true });
+  fs.writeFileSync(path.join(supervisor, "yuvi-desktop-supervisor.exe"), "one");
+  assert.equal(findUniqueSupervisorExecutable(supervisor), path.join(supervisor, "yuvi-desktop-supervisor.exe"));
+  fs.writeFileSync(path.join(supervisor, "nested", "yuvi-desktop-supervisor.exe"), "two");
+  assert.throws(() => findUniqueSupervisorExecutable(supervisor), /exactly one/);
 });
 
 test("packaging-info rejects missing Mem0 declaration", () => {

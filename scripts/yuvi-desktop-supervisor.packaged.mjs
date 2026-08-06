@@ -14,6 +14,14 @@ import {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (Object.prototype.hasOwnProperty.call(args, "build-info-json")) {
+    const buildInfo = globalThis.__YUVI_SUPERVISOR_BUILD_INFO__;
+    if (!buildInfo || buildInfo.schemaVersion !== 1 || buildInfo.mode !== "pkg-exe") {
+      throw new Error("embedded Supervisor build identity is unavailable");
+    }
+    process.stdout.write(`${JSON.stringify(buildInfo)}\n`);
+    return;
+  }
   const mode = (args.mode ?? "development").toLowerCase();
 
   const config =
