@@ -218,7 +218,7 @@ jobs:
         env:
           CI: "true"
           YUVI_ALLOW_TAURI_APP_SMOKE: "1"
-        run: pnpm desktop:installer:smoke -- --launch-app
+        run: pnpm desktop:installer:smoke --launch-app
 
       - name: Prepare installer artifact
         id: installer
