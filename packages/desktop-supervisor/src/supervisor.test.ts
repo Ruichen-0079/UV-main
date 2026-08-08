@@ -925,6 +925,118 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
     expect(fs.existsSync(metadataPath)).toBe(false);
   });
 
+  it("does not replace a live managed generation when identity is unavailable during a health failure", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+
+    await supervisor.ensureService("mem0");
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+
+    healthMock.setDown();
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+      status: "unavailable",
+      processId: pid,
+      reason: "query-timeout"
+    }));
+
+    await supervisor.ensureService("mem0");
+
+    const config = supervisor.getConfig();
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(mem0?.status).toBe("unavailable");
+    expect(mem0?.ownership).toBe("owned");
+    expect(fs.existsSync(metadataPath)).toBe(true);
+  });
+
+  it("does not spawn over a live child when unavailable metadata cannot match it", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+
+    await supervisor.ensureService("mem0");
+    const config = supervisor.getConfig();
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const metadata = ownership.readProcessMetadata(metadataPath);
+    if (!metadata) throw new Error("expected managed metadata");
+    ownership.writeProcessMetadata(metadataPath, { ...metadata, pid: metadata.pid + 1 });
+
+    healthMock.setDown();
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+      status: "unavailable",
+      processId: pid,
+      reason: "query-timeout"
+    }));
+
+    await supervisor.ensureService("mem0");
+
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(mem0?.status).toBe("unavailable");
+    expect(mem0?.ownership).toBe("none");
+    expect(fs.existsSync(metadataPath)).toBe(true);
+  });
+
+  it("ignores a stale exit callback from a previous managed generation", async () => {
+    const healthMock = mockMem0Health(false);
+    const children: Array<ReturnType<typeof fakeChild>> = [];
+    const spawn = vi.mocked(processWindows.spawnManagedProcess);
+    spawn.mockImplementation((command) => {
+      const child = fakeChild(41_000);
+      const originalKill = child.kill;
+      child.kill = () => {
+        // Deliberately defer the old generation's exit event until after the
+        // replacement has been published.
+        child.killed = true;
+        healthMock.setDown();
+        if (children.length > 1) originalKill();
+      };
+      children.push(child);
+      healthMock.setReady();
+      vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+        status: "resolved",
+        processId: pid,
+        info: {
+          processId: pid,
+          parentProcessId: 1,
+          commandLine: `${command.commandMarker} ${command.cwd}`,
+          createdAtUtc: new Date()
+        }
+      }));
+      return child as never;
+    });
+    vi.spyOn(processWindows, "inspectProcess").mockReturnValue({
+      status: "resolved",
+      processId: 41_000,
+      info: {
+        processId: 41_000,
+        parentProcessId: 1,
+        commandLine: "external-process 41000",
+        createdAtUtc: new Date()
+      }
+    });
+    vi.spyOn(processWindows, "isProcessAlive").mockReturnValue(false);
+    vi.spyOn(processWindows, "requestGracefulStop").mockImplementation(() => undefined);
+    vi.spyOn(processWindows, "forceKillProcessTree").mockImplementation(() => undefined);
+
+    const supervisor = createSupervisor(packagedConfig());
+    await supervisor.ensureService("mem0");
+    expect(spawn).toHaveBeenCalledTimes(1);
+
+    await supervisor.restartService("mem0");
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(supervisor.snapshot().services.find((service) => service.id === "mem0")?.ownership).toBe(
+      "owned"
+    );
+
+    children[0]?.emit("exit", 0, null);
+    const afterStaleExit = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(afterStaleExit?.ownership).toBe("owned");
+    expect(afterStaleExit?.pid).toBe(41_000);
+  });
+
   it("keeps metadata pending when a restarted Supervisor cannot inspect the process", async () => {
     const config = packagedConfig();
     const command = config.mem0Start;

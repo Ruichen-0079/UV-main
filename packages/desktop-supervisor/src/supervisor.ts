@@ -51,6 +51,8 @@ type InternalService = {
   pid: number | null;
   startedAt: string | null;
   child: ChildProcess | null;
+  /** Monotonically identifies the currently tracked managed-process generation. */
+  generation: number;
   autoRecovered: boolean;
   pendingExternal: boolean;
   op: Promise<void> | null;
@@ -163,6 +165,7 @@ export class DesktopSupervisor {
         pid: null,
         startedAt: null,
         child: null,
+        generation: 0,
         autoRecovered: false,
         pendingExternal: false,
         op: null
@@ -477,6 +480,12 @@ export class DesktopSupervisor {
     if (svc.status === "healthy" || svc.status === "degraded") {
       return;
     }
+    // An identity query timeout is not evidence that a live child died. Keep
+    // the current managed generation and wait for an explicit restart instead
+    // of spawning a second sidecar over the same port.
+    if (this.hasLiveManagedChild(svc)) {
+      return;
+    }
     if (!svc.spec.managed || !svc.spec.startCommand) {
       svc.status = "unavailable";
       svc.summary = svc.spec.managed
@@ -510,8 +519,18 @@ export class DesktopSupervisor {
       if (!pid) {
         throw new Error("spawn returned no pid");
       }
+      const generation = svc.generation + 1;
+      svc.generation = generation;
       svc.child = child;
       svc.pid = pid;
+      const clearTrackedChild = () => {
+        if (svc.generation !== generation || svc.child !== child || svc.pid !== pid) return;
+        svc.child = null;
+        svc.pid = null;
+        svc.startedAt = null;
+      };
+      child.once("exit", clearTrackedChild);
+      child.once("close", clearTrackedChild);
       this.lifecycleEvent("memory.spawn.returned", svc, { pid });
       // Wait briefly so process creation time is queryable.
       await sleep(200);
@@ -525,12 +544,6 @@ export class DesktopSupervisor {
         startTime: startedAtIso,
         processInspectionStatus: inspection.status,
         processInspectionReason: inspection.status === "resolved" ? null : inspection.reason
-      });
-      child.on("exit", () => {
-        if (svc.pid === pid) {
-          svc.child = null;
-          // refresh will mark unavailable/stale
-        }
       });
       const metadata: ProcessMetadata = {
         schemaVersion: PROCESS_METADATA_VERSION,
@@ -614,6 +627,9 @@ export class DesktopSupervisor {
   }
 
   private async stopOwned(svc: InternalService): Promise<void> {
+    // Invalidate callbacks from the generation being stopped before sending
+    // any signal. A delayed exit/close event must not clear a replacement.
+    svc.generation += 1;
     const trackedPid = svc.pid;
     const child = svc.child;
     const metadataSnapshot = readProcessMetadata(svc.spec.metadataFile);
@@ -733,6 +749,12 @@ export class DesktopSupervisor {
       svc.pid = ownership.processId;
       svc.pendingExternal = false;
     } else if (svc.ownership === "owned") {
+      if (
+        svc.child &&
+        ownership.status !== "unavailable"
+      ) {
+        this.invalidateTrackedChild(svc);
+      }
       svc.ownership = "none";
       svc.pid = null;
       svc.pendingExternal = false;
@@ -886,6 +908,24 @@ export class DesktopSupervisor {
     });
   }
 
+  private hasLiveManagedChild(svc: InternalService): boolean {
+    const child = svc.child;
+    return Boolean(
+      child &&
+        (svc.pid == null || svc.pid === child.pid) &&
+        !child.killed &&
+        child.exitCode == null &&
+        child.signalCode == null
+    );
+  }
+
+  private invalidateTrackedChild(svc: InternalService): void {
+    svc.generation += 1;
+    svc.child = null;
+    svc.pid = null;
+    svc.startedAt = null;
+  }
+
   private async waitReady(svc: InternalService, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -1033,6 +1073,7 @@ export class DesktopSupervisor {
           pid: null,
           startedAt: null,
           child: null,
+          generation: 0,
           autoRecovered: false,
           pendingExternal: false,
           op: null
@@ -1339,6 +1380,7 @@ export class DesktopSupervisor {
       sequence: ++this.lifecycleSequence,
       elapsedMs: Math.round(elapsedMs),
       role: svc.spec.role,
+      generation: svc.generation,
       pid: svc.pid ?? 0,
       instanceId: this.config.instanceId.slice(0, 12),
       startTime: svc.startedAt,
