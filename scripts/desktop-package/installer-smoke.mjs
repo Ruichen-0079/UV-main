@@ -997,6 +997,137 @@ export function formatDiagnosticSummary({ diagnostic, installRoot = null }) {
   ].join("\n");
 }
 
+function createTauriTimeline(now = Date.now) {
+  const startedAt = now();
+  const events = [];
+  return {
+    mark(phase, fields = {}) {
+      const timestamp = now();
+      events.push({
+        phase,
+        isoTime: new Date(timestamp).toISOString(),
+        relativeMs: Math.max(0, timestamp - startedAt),
+        ...fields
+      });
+    },
+    snapshot() {
+      return [...events];
+    }
+  };
+}
+
+function tauriRuntimePort(runtime) {
+  try {
+    const parsed = new URL(String(runtime?.url ?? ""));
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+    return Number.isInteger(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatTauriRuntimeOwnershipDiagnostic({
+  appPid,
+  appExecutable,
+  pointer,
+  endpoint,
+  runtime,
+  installRoot,
+  smokeRoot,
+  localAppData,
+  timeline
+}) {
+  const supervisorPid = Number(pointer?.pid) || 0;
+  const runtimePid = Number(runtime?.pid) || 0;
+  const expectedPort = tauriRuntimePort(runtime);
+  const listener = expectedPort
+    ? attributeWindowsListener(expectedPort, {
+        installRoot,
+        supervisorPid,
+        knownManagedPid: runtimePid
+      })
+    : listenerResult(null, { queryErrorCode: "runtime-url-unavailable" });
+  const metadataPath =
+    typeof endpoint?.stateDirectory === "string"
+      ? path.join(endpoint.stateDirectory, "runtime.pid.json")
+      : null;
+  const metadata = readOwnershipMetadataDiagnostic(metadataPath, {
+    installRoot,
+    smokeRoot
+  });
+  const runtimeCommandLine = runtimePid > 0 ? processCommandLine(runtimePid) : "";
+  const metadataExecutableMatch = Boolean(
+    metadata.marker &&
+      runtimeCommandLine &&
+      runtimeCommandLine.toLowerCase().includes(String(metadata.marker).toLowerCase())
+  );
+  const metadataInstanceMatch = Boolean(
+    metadata.instanceId && endpoint?.instanceId && metadata.instanceId === endpoint.instanceId
+  );
+  const timelineLines = (timeline ?? [])
+    .map(
+      (event) =>
+        `  ${event.phase}: ${event.isoTime} (+${event.relativeMs}ms)`
+    )
+    .join("\n");
+  const appPath = safeDiagnosticPath(appExecutable, installRoot) ?? "unknown";
+  const supervisorPort = endpoint?.baseUrl ? Number(new URL(endpoint.baseUrl).port) : null;
+  const supervisorListener = supervisorPort
+    ? attributeWindowsListener(supervisorPort, { installRoot, supervisorPid })
+    : listenerResult(null, { queryErrorCode: "supervisor-endpoint-unavailable" });
+  const runtimePath = listener.executablePath;
+  const runtimeChildOfTauri = listener.parentProcessId > 0 && listener.parentProcessId === Number(appPid);
+  const runtimeChildOfSupervisor =
+    listener.parentProcessId > 0 && listener.parentProcessId === supervisorPid;
+  const runtimeFirstListener = (timeline ?? []).find((event) => event.runtimeListening)?.phase ?? "none";
+  return [
+    "TAURI RUNTIME OWNERSHIP DIAGNOSTIC",
+    "",
+    "app:",
+    `  pid: ${Number(appPid) || "unknown"}`,
+    `  executable: ${appPath}`,
+    "",
+    "supervisor:",
+    `  pid: ${supervisorPid || "unknown"}`,
+    `  parent pid: ${supervisorListener.parentProcessId || "unknown"}`,
+    `  executable: ${safeDiagnosticPath(supervisorListener.executablePath, installRoot) ?? "unknown"}`,
+    `  active-instance exists: ${pointer ? "yes" : "no"}`,
+    `  endpoint: ${endpoint?.baseUrl ?? "unknown"}`,
+    "",
+    "runtime:",
+    `  expected port: ${expectedPort ?? "unknown"}`,
+    `  listening: ${listener.state === "Listen" ? "yes" : listener.state}`,
+    `  pid: ${listener.owningPid || runtimePid || "unknown"}`,
+    `  parent pid: ${listener.parentProcessId || "unknown"}`,
+    `  process name: ${listener.processName ?? "unknown"}`,
+    `  executable: ${safeDiagnosticPath(runtimePath, installRoot) ?? "unknown"}`,
+    `  executable inside install root: ${listener.executableInsideInstallRoot ? "yes" : "no"}`,
+    "",
+    "ownership:",
+    `  health: ${runtime?.status ?? "unknown"}`,
+    `  ownership: ${runtime?.ownership ?? "unknown"}`,
+    `  metadata exists: ${metadata.exists ? "yes" : "no"}`,
+    `  metadata pid: ${metadata.pid || "unknown"}`,
+    `  metadata instance match: ${metadataInstanceMatch ? "yes" : "no"}`,
+    `  metadata executable match: ${metadataExecutableMatch ? "yes" : "no"}`,
+    "",
+    "relationship:",
+    `  runtime child of Tauri: ${runtimeChildOfTauri ? "yes" : "no"}`,
+    `  runtime child of Supervisor: ${runtimeChildOfSupervisor ? "yes" : "no"}`,
+    `  runtime known to current Supervisor: ${runtimePid > 0 && runtimePid === Number(runtime?.pid) ? "yes" : "no"}`,
+    "",
+    "bootstrap:",
+    `  supervisor started before Runtime: ${supervisorPid > 0 && (!listener.creationDate || !runtime?.startedAt || Date.parse(listener.creationDate) >= Date.parse(runtime.startedAt)) ? "yes" : "unknown"}`,
+    `  managed Runtime intent observed: ${runtime?.managed === true ? "configured" : "not-observed"}`,
+    `  Runtime first listener phase: ${runtimeFirstListener}`,
+    "",
+    "timeline:",
+    timelineLines || "  none",
+    "",
+    `  isolated LocalAppData root: ${safeDiagnosticPath(localAppData, smokeRoot) ?? "unknown"}`
+  ].join("\n");
+}
+
 export async function waitForSpecificPidsExit(
   entries,
   { pidProbe = pidAlive, sleep = wait, now = Date.now, timeoutMs = 10_000 } = {}
@@ -1141,6 +1272,33 @@ async function waitForJsonFile(file, timeoutMs) {
     await wait(250);
   }
   fail(`timed out waiting for ${file}`);
+}
+
+export async function waitForTauriBootstrapReady(
+  file,
+  { timeoutMs, appPid, supervisorPid, instanceId } = {}
+) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (fs.existsSync(file)) {
+      try {
+        const marker = readJson(file);
+        if (
+          marker?.schemaVersion === 1 &&
+          Number(marker.tauriPid) === Number(appPid) &&
+          Number(marker.supervisorPid) === Number(supervisorPid) &&
+          String(marker.instanceId) === String(instanceId) &&
+          Number(marker.readyAtMs) > 0
+        ) {
+          return marker;
+        }
+      } catch {
+        /* marker may still be being written */
+      }
+    }
+    await wait(100);
+  }
+  fail("timed out waiting for Tauri bootstrap readiness barrier");
 }
 
 async function waitForSupervisorEndpoint(pointerRoot, stateRoot, timeoutMs, { checkExit } = {}) {
@@ -1669,6 +1827,8 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
   assertNoSecrets(env, "Tauri app env");
   const appArgs = [];
   assertNoSecrets(appArgs, "Tauri app argv");
+  const timeline = createTauriTimeline();
+  timeline.mark("T0-tauri-executable-spawn");
   const child = spawn(appExecutable, appArgs, {
     cwd: layout.emptyCwd,
     env,
@@ -1676,6 +1836,7 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     windowsHide: false,
     stdio: ["ignore", "pipe", "pipe"]
   });
+  timeline.mark("T1-tauri-spawn-returned", { appPid: child.pid });
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
@@ -1696,6 +1857,9 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     ].join("\n");
   };
   let endpoint = null;
+  let pointer = null;
+  let runtime = null;
+  let runtimeDiagnosticText = "";
   let runtimePid = 0;
   let mem0Pid = 0;
   try {
@@ -1706,25 +1870,84 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       { checkExit }
     );
     if (!pidAlive(child.pid)) fail("Tauri application exited before bootstrap");
-    const pointer = readJson(
+    pointer = readJson(
       path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor", "active-instance.json")
     );
+    timeline.mark("T2-active-instance-available", {
+      supervisorPid: Number(pointer.pid) || 0,
+      endpoint: endpoint.baseUrl
+    });
     if (pointer.mode !== "packaged") fail("Tauri bootstrap did not use packaged mode");
     if (!pidAlive(Number(pointer.pid))) fail("packaged Supervisor endpoint PID is not alive");
     if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(String(endpoint.baseUrl)))
       fail("Tauri Supervisor endpoint is not loopback");
+    const readinessMarker = await waitForTauriBootstrapReady(
+      path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor", "tauri-bootstrap-ready.json"),
+      {
+        timeoutMs,
+        appPid: child.pid,
+        supervisorPid: pointer.pid,
+        instanceId: endpoint.instanceId
+      }
+    );
+    timeline.mark("T3-bootstrap-ready-barrier", {
+      readyAtMs: Number(readinessMarker.readyAtMs)
+    });
     const health = await requestJson(`${endpoint.baseUrl}/health`);
     if (health.status !== 200 || health.value?.ok !== true) fail("Tauri Supervisor health failed");
+    timeline.mark("T4-supervisor-health-first", { supervisorHealth: "healthy" });
     const status = await requestJson(`${endpoint.baseUrl}/v1/status`, {
       token: endpoint.controlToken
     });
     if (status.status !== 200) fail("Tauri Supervisor status failed");
     const services = status.value?.services ?? [];
-    const runtime = services.find((service) => service.id === "runtime");
+    runtime = services.find((service) => service.id === "runtime");
     const mem0 = services.find((service) => service.id === "mem0");
     const tts = services.find((service) => service.id === "tts_wrapper");
-    if (!runtime || runtime.managed !== true || runtime.ownership !== "owned" || !(runtime.pid > 0))
+    timeline.mark("T5-status-first-observed", {
+      runtimeStatus: runtime?.status ?? null,
+      runtimeOwnership: runtime?.ownership ?? null,
+      runtimePid: Number(runtime?.pid) || 0,
+      runtimeManaged: runtime?.managed === true
+    });
+    const runtimePort = tauriRuntimePort(runtime);
+    const runtimeListener = runtimePort
+      ? attributeWindowsListener(runtimePort, {
+          installRoot: resource.root,
+          supervisorPid: Number(pointer.pid) || 0,
+          knownManagedPid: Number(runtime?.pid) || 0
+        })
+      : listenerResult(null, { queryErrorCode: "runtime-url-unavailable" });
+    timeline.mark("T6-runtime-listener-first", {
+      runtimeListening: runtimeListener.state === "Listen",
+      runtimePid: runtimeListener.owningPid || Number(runtime?.pid) || 0,
+      runtimeParentPid: runtimeListener.parentProcessId || 0
+    });
+    timeline.mark("T7-runtime-health-first", {
+      runtimeHealth: runtime?.status === "healthy" ? "healthy" : runtime?.status ?? "unknown"
+    });
+    timeline.mark("T8-runtime-ownership-first", {
+      runtimeOwnership: runtime?.ownership ?? "unknown"
+    });
+    timeline.mark("T9-bootstrap-readiness-assertion", {
+      runtimeStatus: runtime?.status ?? null,
+      runtimeOwnership: runtime?.ownership ?? null
+    });
+    runtimeDiagnosticText = formatTauriRuntimeOwnershipDiagnostic({
+      appPid: child.pid,
+      appExecutable,
+      pointer,
+      endpoint,
+      runtime,
+      installRoot: resource.root,
+      smokeRoot: layout.root,
+      localAppData: tauriLocalAppData,
+      timeline: timeline.snapshot()
+    });
+    console.info(runtimeDiagnosticText);
+    if (!runtime || runtime.managed !== true || runtime.ownership !== "owned" || !(runtime.pid > 0)) {
       fail("Tauri bootstrap did not own Runtime");
+    }
     if (!mem0 || mem0.managed !== true || mem0.ownership !== "owned" || !(mem0.pid > 0))
       fail("Tauri bootstrap did not own Mem0");
     if (tts?.ownership === "owned" || tts?.pid) fail("Tauri smoke unexpectedly started TTS");
@@ -1774,6 +1997,13 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       if (active.pid && pidAlive(Number(active.pid)))
         fail("active Supervisor pointer remains alive");
     }
+    const readinessPath = path.join(
+      tauriLocalAppData,
+      "YUVI",
+      "DesktopSupervisor",
+      "tauri-bootstrap-ready.json"
+    );
+    if (fs.existsSync(readinessPath)) fail("Tauri bootstrap readiness marker remains after shutdown");
     logExit();
     return {
       appExecutable,
@@ -1808,8 +2038,9 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       }
     }
     logExit();
+    const diagnostic = runtimeDiagnosticText ? `\n${runtimeDiagnosticText}` : "";
     throw new Error(
-      `${error instanceof Error ? error.message : String(error)}\n${stdout}\n${stderr}`
+      `${error instanceof Error ? error.message : String(error)}${diagnostic}\n${stdout}\n${stderr}`
     );
   }
 }

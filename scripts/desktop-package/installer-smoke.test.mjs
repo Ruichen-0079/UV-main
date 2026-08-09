@@ -36,6 +36,7 @@ import {
   snapshotTree,
   assertSupervisorProvenance,
   waitForSpecificPidsExit,
+  waitForTauriBootstrapReady,
   validateInstalledResources,
   validatePackagingInfo,
   validateSupervisorProvenance
@@ -913,6 +914,37 @@ test("Tauri child env strips all four secret variables", () => {
     "MEM0_LLM_API_KEY"
   ])
     assert.equal(env[key], undefined);
+});
+
+test("Tauri bootstrap readiness requires the current app and Supervisor instance", async () => {
+  const root = temp("yuvi-installer-smoke-");
+  const marker = path.join(root, "tauri-bootstrap-ready.json");
+  fs.writeFileSync(
+    marker,
+    JSON.stringify({
+      schemaVersion: 1,
+      tauriPid: 111,
+      supervisorPid: 222,
+      instanceId: "current-instance",
+      readyAtMs: Date.now()
+    })
+  );
+  const ready = await waitForTauriBootstrapReady(marker, {
+    timeoutMs: 100,
+    appPid: 111,
+    supervisorPid: 222,
+    instanceId: "current-instance"
+  });
+  assert.equal(ready.supervisorPid, 222);
+  await assert.rejects(
+    waitForTauriBootstrapReady(marker, {
+      timeoutMs: 100,
+      appPid: 999,
+      supervisorPid: 222,
+      instanceId: "current-instance"
+    }),
+    /readiness barrier/
+  );
 });
 
 test("Tauri application arguments are empty by construction", () => {
