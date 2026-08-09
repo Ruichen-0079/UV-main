@@ -77,21 +77,65 @@ function normalized(value) {
   return path.resolve(String(value)).replaceAll("/", "\\").toLowerCase();
 }
 
-function stripWindowsDevicePrefix(value) {
-  const text = String(value ?? "").trim().replace(/^['"]|['"]$/g, "");
-  return text.replace(/^\\\\\?\\/, "").replace(/^\\\\\.\\/, "");
+function stripWindowsOuterQuotes(value) {
+  const text = String(value ?? "").trim();
+  return text.length >= 2 &&
+      ((text.startsWith('"') && text.endsWith('"')) ||
+        (text.startsWith("'") && text.endsWith("'")))
+    ? text.slice(1, -1)
+    : text;
 }
 
-export function normalizeWindowsProcessPath(value) {
-  const text = stripWindowsDevicePrefix(value).replaceAll("/", "\\");
+function stripWindowsDevicePrefix(value) {
+  const text = stripWindowsOuterQuotes(value).replaceAll("/", "\\");
+  if (/^\\\\\?\\UNC\\/i.test(text)) return `\\\\${text.slice(8)}`;
+  if (/^\\\\\?\\/i.test(text)) return text.slice(4);
+  if (/^\\\\\.\\/i.test(text)) return text.slice(4);
+  return text;
+}
+
+function trimWindowsTrailingSeparators(value) {
+  const parsed = path.win32.parse(value);
+  if (value === parsed.root) return value;
+  return value.replace(/[\\]+$/, "");
+}
+
+/** Canonical Windows path used only for provenance comparison. */
+export function normalizeWindowsPathForComparison(value) {
+  if (typeof value !== "string") return "";
+  const text = stripWindowsDevicePrefix(value);
   if (!text) return "";
-  return path.win32.normalize(text).replace(/[\\]+$/, "").toLowerCase();
+  const normalizedPath = path.win32.normalize(text);
+  if (!normalizedPath || normalizedPath === ".") return "";
+  if (!path.win32.isAbsolute(normalizedPath)) return "";
+  return trimWindowsTrailingSeparators(normalizedPath).toLowerCase();
+}
+
+export function pathsEqualWindows(a, b) {
+  const left = normalizeWindowsPathForComparison(a);
+  const right = normalizeWindowsPathForComparison(b);
+  return Boolean(left && right && left === right);
+}
+
+/** Return whether candidate is root itself or a descendant of root. */
+export function isWindowsPathInside(root, candidate) {
+  const rootCanonical = normalizeWindowsPathForComparison(root);
+  const candidateCanonical = normalizeWindowsPathForComparison(candidate);
+  if (!rootCanonical || !candidateCanonical) return false;
+  const relative = path.win32.relative(rootCanonical, candidateCanonical);
+  if (!relative) return true;
+  if (path.win32.isAbsolute(relative)) return false;
+  return relative !== ".." && !relative.startsWith(`..${path.win32.sep}`);
+}
+
+// Keep the existing exported name for callers/tests while using the explicit
+// root/candidate contract internally.
+export function normalizeWindowsProcessPath(value) {
+  return normalizeWindowsPathForComparison(value);
 }
 
 export function windowsProcessPathInside(child, parent) {
-  const c = normalizeWindowsProcessPath(child);
-  const p = normalizeWindowsProcessPath(parent);
-  return Boolean(c && p && (c === p || c.startsWith(`${p}\\`)));
+  return isWindowsPathInside(parent, child);
 }
 
 export function isWithin(child, parent) {
@@ -606,11 +650,13 @@ function safeBasename(value) {
 function safeDiagnosticPath(value, installRoot) {
   if (!value) return null;
   const normalizedValue = stripWindowsDevicePrefix(value);
-  if (installRoot && windowsProcessPathInside(normalizedValue, installRoot)) {
+  const canonicalValue = normalizeWindowsPathForComparison(normalizedValue);
+  const canonicalRoot = normalizeWindowsPathForComparison(installRoot);
+  if (canonicalRoot && isWindowsPathInside(canonicalRoot, canonicalValue)) {
     return (
       path.win32.relative(
-        stripWindowsDevicePrefix(installRoot),
-        normalizedValue
+        canonicalRoot,
+        canonicalValue
       ).replaceAll("\\", "/") || "."
     );
   }
@@ -620,10 +666,12 @@ function safeDiagnosticPath(value, installRoot) {
 function provenanceDiagnosticPath(value, installRoot) {
   if (!value) return "unavailable";
   const normalizedValue = stripWindowsDevicePrefix(value);
-  if (installRoot && windowsProcessPathInside(normalizedValue, installRoot)) {
+  const canonicalValue = normalizeWindowsPathForComparison(normalizedValue);
+  const canonicalRoot = normalizeWindowsPathForComparison(installRoot);
+  if (canonicalRoot && isWindowsPathInside(canonicalRoot, canonicalValue)) {
     return (
       path.win32
-        .relative(stripWindowsDevicePrefix(installRoot), normalizedValue)
+        .relative(canonicalRoot, canonicalValue)
         .replaceAll("\\", "/") || "."
     );
   }
@@ -1459,12 +1507,17 @@ export function evaluateRuntimeProvenance({
   const entrypointAvailable = Boolean(String(actualEntrypoint ?? "").trim());
   const imageMatchesExpected =
     imageAvailable &&
-    normalizeWindowsProcessPath(imagePath) === normalizeWindowsProcessPath(expectedBundledNodePath);
-  const imageInsideInstallRoot = windowsProcessPathInside(imagePath, installRoot);
+    pathsEqualWindows(imagePath, expectedBundledNodePath);
+  const imageInsideInstallRoot = isWindowsPathInside(installRoot, imagePath);
   const entrypointMatchesExpected =
     entrypointAvailable &&
-    normalizeWindowsProcessPath(actualEntrypoint) === normalizeWindowsProcessPath(expectedEntrypointPath);
-  const entrypointInsideInstallRoot = windowsProcessPathInside(actualEntrypoint, installRoot);
+    pathsEqualWindows(actualEntrypoint, expectedEntrypointPath);
+  const entrypointInsideInstallRoot = isWindowsPathInside(installRoot, actualEntrypoint);
+  const normalizedImagePath = normalizeWindowsPathForComparison(imagePath);
+  const normalizedExpectedImagePath = normalizeWindowsPathForComparison(expectedBundledNodePath);
+  const normalizedEntrypointPath = normalizeWindowsPathForComparison(actualEntrypoint);
+  const normalizedExpectedEntrypointPath = normalizeWindowsPathForComparison(expectedEntrypointPath);
+  const normalizedInstallRoot = normalizeWindowsPathForComparison(installRoot);
   const failureReasons = [];
   if (!imageAvailable) failureReasons.push("authoritative image path unavailable");
   else if (!imageMatchesExpected) failureReasons.push("Runtime image does not match bundled Node");
@@ -1477,6 +1530,11 @@ export function evaluateRuntimeProvenance({
     entrypointPath: actualEntrypoint || null,
     expectedBundledNodePath: expectedBundledNodePath || null,
     expectedEntrypointPath: expectedEntrypointPath || null,
+    normalizedImagePath: normalizedImagePath || null,
+    normalizedExpectedImagePath: normalizedExpectedImagePath || null,
+    normalizedEntrypointPath: normalizedEntrypointPath || null,
+    normalizedExpectedEntrypointPath: normalizedExpectedEntrypointPath || null,
+    normalizedInstallRoot: normalizedInstallRoot || null,
     imageMatchesExpected: Boolean(imageMatchesExpected),
     imageInsideInstallRoot: Boolean(imageInsideInstallRoot),
     entrypointMatchesExpected: Boolean(entrypointMatchesExpected),
@@ -1501,18 +1559,40 @@ export function formatRuntimeProvenanceDiagnostic({
   metadataInstanceMatch = false,
   note = null
 } = {}) {
+  const rawPath = (value) => {
+    const text = String(value ?? "").trim();
+    return text || "unavailable";
+  };
+  const relativePath = (value) => {
+    const root = normalizeWindowsPathForComparison(installRoot);
+    const candidate = normalizeWindowsPathForComparison(value);
+    if (!root || !candidate) return "unavailable";
+    if (!isWindowsPathInside(root, candidate)) return "outside-install-root";
+    return path.win32.relative(root, candidate) || ".";
+  };
   return [
     `${stage ?? "RUNTIME"} RUNTIME PROVENANCE DIAGNOSTIC`,
     `  pid: ${provenance.pid || "unknown"}`,
     `  parentPid: ${runtimeParentPid || "unknown"}`,
     `  processName: ${provenance.processName ?? "unknown"}`,
+    `  actualInstallRoot: ${rawPath(installRoot)}`,
+    `  actualImagePath: ${rawPath(provenance.authoritativeImagePath)}`,
+    `  expectedImagePath: ${rawPath(provenance.expectedBundledNodePath)}`,
     `  authoritativeImagePath: ${provenanceDiagnosticPath(provenance.authoritativeImagePath, installRoot)}`,
     `  expectedBundledNodePath: ${provenanceDiagnosticPath(provenance.expectedBundledNodePath, installRoot)}`,
+    `  normalizedImagePath: ${rawPath(provenance.normalizedImagePath)}`,
+    `  normalizedExpectedImagePath: ${rawPath(provenance.normalizedExpectedImagePath)}`,
+    `  relativeImagePath: ${relativePath(provenance.authoritativeImagePath)}`,
     `  imageMatchesExpected: ${provenance.imageMatchesExpected ? "yes" : "no"}`,
     `  imageInsideInstallRoot: ${provenance.imageInsideInstallRoot ? "yes" : "no"}`,
     `  executableToken: ${provenance.executableToken ?? "unavailable"}`,
+    `  actualEntrypointPath: ${rawPath(provenance.entrypointPath)}`,
+    `  expectedEntrypointPath: ${rawPath(provenance.expectedEntrypointPath)}`,
     `  entrypointPath: ${provenanceDiagnosticPath(provenance.entrypointPath, installRoot)}`,
-    `  expectedEntrypointPath: ${provenanceDiagnosticPath(provenance.expectedEntrypointPath, installRoot)}`,
+    `  expectedEntrypointRelativePath: ${provenanceDiagnosticPath(provenance.expectedEntrypointPath, installRoot)}`,
+    `  normalizedEntrypointPath: ${rawPath(provenance.normalizedEntrypointPath)}`,
+    `  normalizedExpectedEntrypointPath: ${rawPath(provenance.normalizedExpectedEntrypointPath)}`,
+    `  relativeEntrypointPath: ${relativePath(provenance.entrypointPath)}`,
     `  entrypointMatchesExpected: ${provenance.entrypointMatchesExpected ? "yes" : "no"}`,
     `  entrypointInsideInstallRoot: ${provenance.entrypointInsideInstallRoot ? "yes" : "no"}`,
     `  supervisorPid: ${supervisorPid || "unknown"}`,

@@ -28,8 +28,11 @@ import {
   findUninstaller,
   findUniqueSupervisorExecutable,
   isWithin,
+  isWindowsPathInside,
+  normalizeWindowsPathForComparison,
   normalizeWindowsProcessPath,
   parseRuntimeCommandLine,
+  pathsEqualWindows,
   processBaseline,
   parseEmbeddedSupervisorBuildInfo,
   removeTreeWithRetries,
@@ -578,14 +581,61 @@ test("Runtime provenance diagnostic omits full command lines and secrets", () =>
   assert.doesNotMatch(text, /runtime\\node\.exe.*yuvi-runtime-server\.mjs/);
 });
 
-test("Windows process path comparison normalizes only supported prefixes and case", () => {
+test("Windows comparison canonicalizer handles drive extended paths, case, separators, and components", () => {
+  const normal = "C:\\Temp\\YUVI\\runtime\\node.exe";
+  const extended = "\\\\?\\C:\\Temp\\YUVI\\runtime\\node.exe";
+  assert.equal(pathsEqualWindows(extended, normal), true);
+  assert.equal(pathsEqualWindows(normal, extended), true);
   assert.equal(
-    normalizeWindowsProcessPath("\\\\?\\C:\\Temp\\Node.exe"),
-    "c:\\temp\\node.exe"
+    pathsEqualWindows(
+      "\\\\?\\c:/TEMP/YUVI/./runtime/child/../node.exe",
+      "C:\\temp\\yuvi\\runtime\\node.exe"
+    ),
+    true
   );
   assert.equal(
-    windowsProcessPathInside("\\\\?\\C:\\Temp\\install\\runtime\\node.exe", "C:\\Temp\\install"),
+    normalizeWindowsPathForComparison("C:\\"),
+    "c:\\"
+  );
+  assert.equal(pathsEqualWindows("C:\\Temp\\YUVI\\", "c:/temp/yuvi"), true);
+  assert.equal(normalizeWindowsPathForComparison("node.exe"), "");
+  assert.equal(normalizeWindowsProcessPath(extended), "c:\\temp\\yuvi\\runtime\\node.exe");
+  assert.equal(windowsProcessPathInside(extended, "C:\\Temp\\YUVI"), true);
+});
+
+test("Windows comparison canonicalizer preserves UNC semantics", () => {
+  const normal = "\\\\server\\share\\foo\\bar.exe";
+  const extended = "\\\\?\\UNC\\server\\share\\foo\\bar.exe";
+  assert.equal(pathsEqualWindows(extended, normal), true);
+  assert.equal(
+    normalizeWindowsPathForComparison("\\\\?\\UNC\\SERVER\\SHARE"),
+    "\\\\server\\share\\"
+  );
+  assert.equal(
+    pathsEqualWindows("\\\\server\\share\\", "\\\\?\\UNC\\server\\share"),
     true
+  );
+});
+
+test("Windows inside-root comparison uses relative path boundaries", () => {
+  const root = "C:\\Temp\\YUVI";
+  assert.equal(isWindowsPathInside(root, "C:\\Temp\\YUVI\\runtime\\node.exe"), true);
+  assert.equal(
+    isWindowsPathInside(root, "\\\\?\\C:\\Temp\\YUVI\\runtime\\node.exe"),
+    true
+  );
+  assert.equal(
+    isWindowsPathInside("\\\\?\\C:\\Temp\\YUVI", "C:\\Temp\\YUVI\\runtime\\node.exe"),
+    true
+  );
+  assert.equal(isWindowsPathInside(root, root), true);
+  assert.equal(isWindowsPathInside(root, "C:\\Temp\\YUVI-Evil\\node.exe"), false);
+  assert.equal(isWindowsPathInside(root, "C:\\Temp\\YUVI2\\node.exe"), false);
+  assert.equal(isWindowsPathInside(root, "C:\\Temp\\YUVI\\..\\outside\\node.exe"), false);
+  assert.equal(isWindowsPathInside(root, "D:\\Temp\\YUVI\\runtime\\node.exe"), false);
+  assert.equal(
+    isWindowsPathInside("\\\\server\\share", "\\\\?\\UNC\\server\\share2\\foo"),
+    false
   );
 });
 
