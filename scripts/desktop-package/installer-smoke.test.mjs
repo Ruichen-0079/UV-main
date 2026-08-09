@@ -21,11 +21,15 @@ import {
   createOwnershipDiagnostics,
   FORBIDDEN_PATH_TOOLS,
   formatOwnershipDiagnostic,
+  evaluateRuntimeProvenance,
+  formatRuntimeProvenanceDiagnostic,
   findInstalledApplicationExecutable,
   findInstallerCandidates,
   findUninstaller,
   findUniqueSupervisorExecutable,
   isWithin,
+  normalizeWindowsProcessPath,
+  parseRuntimeCommandLine,
   processBaseline,
   parseEmbeddedSupervisorBuildInfo,
   removeTreeWithRetries,
@@ -37,6 +41,7 @@ import {
   assertSupervisorProvenance,
   waitForSpecificPidsExit,
   waitForTauriBootstrapReady,
+  windowsProcessPathInside,
   validateInstalledResources,
   validatePackagingInfo,
   validateSupervisorProvenance
@@ -456,6 +461,132 @@ test("listener attribution fails closed without changing the query conclusion", 
   assert.equal(result.querySucceeded, false);
   assert.equal(result.queryErrorCode, "ENOEXEC");
   assert.equal(result.state, "query-failed");
+});
+
+test("Runtime provenance accepts bundled image with basename or absolute argv0", () => {
+  const root = "C:\\Temp\\install\\generated\\win32-x64";
+  const node = `${root}\\runtime\\node.exe`;
+  const entry = `${root}\\runtime\\yuvi-runtime-server.mjs`;
+  for (const commandLine of [
+    `node.exe "${entry}"`,
+    `"${node}" "${entry}"`
+  ]) {
+    const result = evaluateRuntimeProvenance({
+      imagePath: `\\\\?\\${node}`,
+      commandLine,
+      expectedBundledNodePath: node,
+      expectedEntrypointPath: entry,
+      installRoot: root
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.imageMatchesExpected, true);
+    assert.equal(result.entrypointMatchesExpected, true);
+  }
+});
+
+test("Runtime provenance rejects system or outside Node images", () => {
+  const root = "C:\\Temp\\install\\generated\\win32-x64";
+  const node = `${root}\\runtime\\node.exe`;
+  const entry = `${root}\\runtime\\yuvi-runtime-server.mjs`;
+  for (const imagePath of ["C:\\Program Files\\nodejs\\node.exe", "D:\\other\\node.exe"]) {
+    const result = evaluateRuntimeProvenance({
+      imagePath,
+      commandLine: `node.exe "${entry}"`,
+      expectedBundledNodePath: node,
+      expectedEntrypointPath: entry,
+      installRoot: root
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.imageMatchesExpected, false);
+  }
+});
+
+test("Runtime provenance fails closed when authoritative image is unavailable", () => {
+  const root = "C:\\Temp\\install\\generated\\win32-x64";
+  const entry = `${root}\\runtime\\yuvi-runtime-server.mjs`;
+  const result = evaluateRuntimeProvenance({
+    imagePath: "",
+    commandLine: `node.exe "${entry}"`,
+    expectedBundledNodePath: `${root}\\runtime\\node.exe`,
+    expectedEntrypointPath: entry,
+    installRoot: root
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.imageMatchesExpected, false);
+  assert.match(result.failureReasons.join(";"), /authoritative image path unavailable/);
+});
+
+test("Runtime provenance independently validates the installed entrypoint", () => {
+  const root = "C:\\Temp\\install\\generated\\win32-x64";
+  const node = `${root}\\runtime\\node.exe`;
+  const expected = `${root}\\runtime\\yuvi-runtime-server.mjs`;
+  for (const entry of [
+    "C:\\repo\\yuvi-runtime-server.mjs",
+    "C:\\Temp\\other\\yuvi-runtime-server.mjs"
+  ]) {
+    const result = evaluateRuntimeProvenance({
+      imagePath: node,
+      commandLine: `node.exe "${entry}"`,
+      expectedBundledNodePath: node,
+      expectedEntrypointPath: expected,
+      installRoot: root
+    });
+    assert.equal(result.imageMatchesExpected, true);
+    assert.equal(result.entrypointMatchesExpected, false);
+    assert.equal(result.ok, false);
+  }
+});
+
+test("Runtime provenance does not trust processName or basename alone", () => {
+  const root = "C:\\Temp\\install\\generated\\win32-x64";
+  const result = evaluateRuntimeProvenance({
+    imagePath: null,
+    commandLine: "node.exe yuvi-runtime-server.mjs",
+    expectedBundledNodePath: `${root}\\runtime\\node.exe`,
+    expectedEntrypointPath: `${root}\\runtime\\yuvi-runtime-server.mjs`,
+    installRoot: root
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.executableToken, "node.exe");
+});
+
+test("Runtime provenance diagnostic omits full command lines and secrets", () => {
+  const root = "C:\\Temp\\install\\generated\\win32-x64";
+  const text = formatRuntimeProvenanceDiagnostic({
+    stage: "TAURI",
+    installRoot: root,
+    supervisorPid: 22,
+    runtimeParentPid: 22,
+    ownership: "owned",
+    metadataPid: 33,
+    metadataInstanceMatch: true,
+    provenance: {
+      pid: 33,
+      processName: "node.exe",
+      authoritativeImagePath: `${root}\\runtime\\node.exe`,
+      expectedBundledNodePath: `${root}\\runtime\\node.exe`,
+      imageMatchesExpected: true,
+      imageInsideInstallRoot: true,
+      executableToken: "node.exe",
+      entrypointPath: `${root}\\runtime\\yuvi-runtime-server.mjs`,
+      expectedEntrypointPath: `${root}\\runtime\\yuvi-runtime-server.mjs`,
+      entrypointMatchesExpected: true,
+      entrypointInsideInstallRoot: true
+    }
+  });
+  assert.doesNotMatch(text, /DATABASE_URL|API_KEY|Authorization|fullCommandLine/i);
+  assert.doesNotMatch(text, /runtime\\node\.exe.*yuvi-runtime-server\.mjs/);
+});
+
+test("Windows process path comparison normalizes only supported prefixes and case", () => {
+  assert.equal(
+    normalizeWindowsProcessPath("\\\\?\\C:\\Temp\\Node.exe"),
+    "c:\\temp\\node.exe"
+  );
+  assert.equal(
+    windowsProcessPathInside("\\\\?\\C:\\Temp\\install\\runtime\\node.exe", "C:\\Temp\\install"),
+    true
+  );
 });
 
 test("diagnostics sample listener, metadata, and stable ownership state changes", async () => {

@@ -77,6 +77,23 @@ function normalized(value) {
   return path.resolve(String(value)).replaceAll("/", "\\").toLowerCase();
 }
 
+function stripWindowsDevicePrefix(value) {
+  const text = String(value ?? "").trim().replace(/^['"]|['"]$/g, "");
+  return text.replace(/^\\\\\?\\/, "").replace(/^\\\\\.\\/, "");
+}
+
+export function normalizeWindowsProcessPath(value) {
+  const text = stripWindowsDevicePrefix(value).replaceAll("/", "\\");
+  if (!text) return "";
+  return path.win32.normalize(text).replace(/[\\]+$/, "").toLowerCase();
+}
+
+export function windowsProcessPathInside(child, parent) {
+  const c = normalizeWindowsProcessPath(child);
+  const p = normalizeWindowsProcessPath(parent);
+  return Boolean(c && p && (c === p || c.startsWith(`${p}\\`)));
+}
+
 export function isWithin(child, parent) {
   const c = normalized(child);
   const p = normalized(parent);
@@ -588,10 +605,29 @@ function safeBasename(value) {
 
 function safeDiagnosticPath(value, installRoot) {
   if (!value) return null;
-  if (installRoot && isWithin(value, installRoot)) {
-    return path.relative(installRoot, value).replaceAll("\\", "/") || ".";
+  const normalizedValue = stripWindowsDevicePrefix(value);
+  if (installRoot && windowsProcessPathInside(normalizedValue, installRoot)) {
+    return (
+      path.win32.relative(
+        stripWindowsDevicePrefix(installRoot),
+        normalizedValue
+      ).replaceAll("\\", "/") || "."
+    );
   }
-  return safeBasename(value);
+  return safeBasename(normalizedValue);
+}
+
+function provenanceDiagnosticPath(value, installRoot) {
+  if (!value) return "unavailable";
+  const normalizedValue = stripWindowsDevicePrefix(value);
+  if (installRoot && windowsProcessPathInside(normalizedValue, installRoot)) {
+    return (
+      path.win32
+        .relative(stripWindowsDevicePrefix(installRoot), normalizedValue)
+        .replaceAll("\\", "/") || "."
+    );
+  }
+  return `outside-install-root:${normalizedValue.replaceAll("\\", "/")}`;
 }
 
 export function powershellDiagnosticPath(env = process.env) {
@@ -1035,7 +1071,9 @@ function formatTauriRuntimeOwnershipDiagnostic({
   installRoot,
   smokeRoot,
   localAppData,
-  timeline
+  timeline,
+  expectedBundledNodePath = path.join(installRoot, "runtime", NODE_EXE_NAME),
+  expectedEntrypointPath = path.join(installRoot, "runtime", RUNTIME_ENTRY_NAME)
 }) {
   const supervisorPid = Number(pointer?.pid) || 0;
   const runtimePid = Number(runtime?.pid) || 0;
@@ -1064,6 +1102,15 @@ function formatTauriRuntimeOwnershipDiagnostic({
   const metadataInstanceMatch = Boolean(
     metadata.instanceId && endpoint?.instanceId && metadata.instanceId === endpoint.instanceId
   );
+  const runtimeProvenance = evaluateRuntimeProvenance({
+    imagePath: listener.executablePath || processExecutablePath(runtimePid),
+    commandLine: runtimeCommandLine,
+    expectedBundledNodePath,
+    expectedEntrypointPath,
+    installRoot
+  });
+  runtimeProvenance.pid = runtimePid;
+  runtimeProvenance.processName = listener.processName;
   const timelineLines = (timeline ?? [])
     .map(
       (event) =>
@@ -1115,6 +1162,17 @@ function formatTauriRuntimeOwnershipDiagnostic({
     `  runtime child of Tauri: ${runtimeChildOfTauri ? "yes" : "no"}`,
     `  runtime child of Supervisor: ${runtimeChildOfSupervisor ? "yes" : "no"}`,
     `  runtime known to current Supervisor: ${runtimePid > 0 && runtimePid === Number(runtime?.pid) ? "yes" : "no"}`,
+    "",
+    formatRuntimeProvenanceDiagnostic({
+      stage: "TAURI",
+      provenance: runtimeProvenance,
+      installRoot,
+      supervisorPid,
+      runtimeParentPid: listener.parentProcessId,
+      ownership: runtime?.ownership ?? "unknown",
+      metadataPid: metadata.pid,
+      metadataInstanceMatch
+    }),
     "",
     "bootstrap:",
     `  supervisor started before Runtime: ${supervisorPid > 0 && (!listener.creationDate || !runtime?.startedAt || Date.parse(listener.creationDate) >= Date.parse(runtime.startedAt)) ? "yes" : "unknown"}`,
@@ -1353,6 +1411,119 @@ export function processExecutablePath(
   }
 }
 
+export function splitWindowsCommandLine(commandLine) {
+  const text = String(commandLine ?? "");
+  const tokens = [];
+  let token = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (/\s/.test(char) && !quoted) {
+      if (token) {
+        tokens.push(token);
+        token = "";
+      }
+      continue;
+    }
+    token += char;
+  }
+  if (token) tokens.push(token);
+  return tokens;
+}
+
+export function parseRuntimeCommandLine(commandLine) {
+  const tokens = splitWindowsCommandLine(commandLine);
+  const executableToken = tokens[0] ?? null;
+  const entrypointPath =
+    tokens.find(
+      (token) => path.win32.basename(stripWindowsDevicePrefix(token)).toLowerCase() === RUNTIME_ENTRY_NAME
+    ) ?? null;
+  return { executableToken, entrypointPath };
+}
+
+export function evaluateRuntimeProvenance({
+  imagePath,
+  commandLine,
+  entrypointPath,
+  expectedBundledNodePath,
+  expectedEntrypointPath,
+  installRoot
+} = {}) {
+  const parsed = parseRuntimeCommandLine(commandLine);
+  const actualEntrypoint = entrypointPath ?? parsed.entrypointPath;
+  const imageAvailable = Boolean(String(imagePath ?? "").trim());
+  const entrypointAvailable = Boolean(String(actualEntrypoint ?? "").trim());
+  const imageMatchesExpected =
+    imageAvailable &&
+    normalizeWindowsProcessPath(imagePath) === normalizeWindowsProcessPath(expectedBundledNodePath);
+  const imageInsideInstallRoot = windowsProcessPathInside(imagePath, installRoot);
+  const entrypointMatchesExpected =
+    entrypointAvailable &&
+    normalizeWindowsProcessPath(actualEntrypoint) === normalizeWindowsProcessPath(expectedEntrypointPath);
+  const entrypointInsideInstallRoot = windowsProcessPathInside(actualEntrypoint, installRoot);
+  const failureReasons = [];
+  if (!imageAvailable) failureReasons.push("authoritative image path unavailable");
+  else if (!imageMatchesExpected) failureReasons.push("Runtime image does not match bundled Node");
+  if (!entrypointAvailable) failureReasons.push("Runtime entrypoint unavailable");
+  else if (!entrypointMatchesExpected)
+    failureReasons.push("Runtime entrypoint does not match installed Runtime");
+  return {
+    authoritativeImagePath: imagePath || null,
+    executableToken: parsed.executableToken,
+    entrypointPath: actualEntrypoint || null,
+    expectedBundledNodePath: expectedBundledNodePath || null,
+    expectedEntrypointPath: expectedEntrypointPath || null,
+    imageMatchesExpected: Boolean(imageMatchesExpected),
+    imageInsideInstallRoot: Boolean(imageInsideInstallRoot),
+    entrypointMatchesExpected: Boolean(entrypointMatchesExpected),
+    entrypointInsideInstallRoot: Boolean(entrypointInsideInstallRoot),
+    failureReasons,
+    ok:
+      Boolean(imageMatchesExpected) &&
+      Boolean(imageInsideInstallRoot) &&
+      Boolean(entrypointMatchesExpected) &&
+      Boolean(entrypointInsideInstallRoot)
+  };
+}
+
+export function formatRuntimeProvenanceDiagnostic({
+  stage,
+  provenance = {},
+  installRoot,
+  supervisorPid = 0,
+  runtimeParentPid = 0,
+  ownership = "unknown",
+  metadataPid = 0,
+  metadataInstanceMatch = false,
+  note = null
+} = {}) {
+  return [
+    `${stage ?? "RUNTIME"} RUNTIME PROVENANCE DIAGNOSTIC`,
+    `  pid: ${provenance.pid || "unknown"}`,
+    `  parentPid: ${runtimeParentPid || "unknown"}`,
+    `  processName: ${provenance.processName ?? "unknown"}`,
+    `  authoritativeImagePath: ${provenanceDiagnosticPath(provenance.authoritativeImagePath, installRoot)}`,
+    `  expectedBundledNodePath: ${provenanceDiagnosticPath(provenance.expectedBundledNodePath, installRoot)}`,
+    `  imageMatchesExpected: ${provenance.imageMatchesExpected ? "yes" : "no"}`,
+    `  imageInsideInstallRoot: ${provenance.imageInsideInstallRoot ? "yes" : "no"}`,
+    `  executableToken: ${provenance.executableToken ?? "unavailable"}`,
+    `  entrypointPath: ${provenanceDiagnosticPath(provenance.entrypointPath, installRoot)}`,
+    `  expectedEntrypointPath: ${provenanceDiagnosticPath(provenance.expectedEntrypointPath, installRoot)}`,
+    `  entrypointMatchesExpected: ${provenance.entrypointMatchesExpected ? "yes" : "no"}`,
+    `  entrypointInsideInstallRoot: ${provenance.entrypointInsideInstallRoot ? "yes" : "no"}`,
+    `  supervisorPid: ${supervisorPid || "unknown"}`,
+    `  runtimeChildOfSupervisor: ${runtimeParentPid > 0 && runtimeParentPid === Number(supervisorPid) ? "yes" : "no"}`,
+    `  ownership: ${ownership}`,
+    `  metadataPid: ${metadataPid || "unknown"}`,
+    `  metadataInstanceMatch: ${metadataInstanceMatch ? "yes" : "no"}`,
+    ...(note ? [`  note: ${note}`] : [])
+  ].join("\n");
+}
+
 function pidAlive(pid) {
   if (!pid) return false;
   try {
@@ -1556,6 +1727,7 @@ async function runPackagedSupervisor({
   let stderr = "";
   let endpoint = null;
   let ownedMem0Pid = 0;
+  let runtimeState = null;
   child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
   child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
   const logExit = () => writeLog(layout.logs, "supervisor.log", `${stdout}\n${stderr}`);
@@ -1609,6 +1781,7 @@ async function runPackagedSupervisor({
     while (Date.now() - started < timeoutMs) {
       const status = await requestJson(`${base}/v1/status`, { token: endpoint.controlToken });
       mem0 = status.value?.services?.find((service) => service.id === "mem0") ?? null;
+      runtimeState = status.value?.services?.find((service) => service.id === "runtime") ?? null;
       await safeObserveStatus("status-change", mem0);
       if (mem0?.status === "healthy" && !observedHealthy) {
         observedHealthy = true;
@@ -1666,6 +1839,24 @@ async function runPackagedSupervisor({
     if (fs.existsSync(path.join(layout.home, ".mem0"))) fail("Mem0 wrote into HOME");
     const emptyEntries = fs.existsSync(layout.emptyCwd) ? fs.readdirSync(layout.emptyCwd) : [];
     if (emptyEntries.length) fail(`empty cwd was written: ${emptyEntries.join(", ")}`);
+    console.info(
+      formatRuntimeProvenanceDiagnostic({
+        stage: "DIRECT",
+        provenance: {
+          pid: Number(runtimeState?.pid) || 0,
+          processName: null,
+          expectedBundledNodePath: path.join(resource.root, "runtime", NODE_EXE_NAME),
+          expectedEntrypointPath: path.join(resource.root, "runtime", RUNTIME_ENTRY_NAME)
+        },
+        installRoot: resource.root,
+        supervisorPid: child.pid,
+        runtimeParentPid: 0,
+        ownership: runtimeState?.ownership ?? "not-started",
+        metadataPid: 0,
+        metadataInstanceMatch: false,
+        note: "Direct precheck sets YUVI_AUTOSTART_RUNTIME=false"
+      })
+    );
     const shutdown = await requestJson(`${base}/v1/shutdown`, {
       method: "POST",
       token: endpoint.controlToken,
@@ -1933,6 +2124,8 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       runtimeStatus: runtime?.status ?? null,
       runtimeOwnership: runtime?.ownership ?? null
     });
+    const expectedRuntime = path.join(resource.root, "runtime", NODE_EXE_NAME);
+    const expectedEntrypoint = path.join(resource.root, "runtime", RUNTIME_ENTRY_NAME);
     runtimeDiagnosticText = formatTauriRuntimeOwnershipDiagnostic({
       appPid: child.pid,
       appExecutable,
@@ -1942,7 +2135,9 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       installRoot: resource.root,
       smokeRoot: layout.root,
       localAppData: tauriLocalAppData,
-      timeline: timeline.snapshot()
+      timeline: timeline.snapshot(),
+      expectedBundledNodePath: expectedRuntime,
+      expectedEntrypointPath: expectedEntrypoint
     });
     console.info(runtimeDiagnosticText);
     if (!runtime || runtime.managed !== true || runtime.ownership !== "owned" || !(runtime.pid > 0)) {
@@ -1954,17 +2149,24 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     runtimePid = Number(runtime.pid);
     mem0Pid = Number(mem0.pid);
     const runtimeCommandLine = processCommandLine(runtimePid);
+    const runtimeImagePath =
+      processExecutablePath(runtimePid) || runtimeListener.executablePath || "";
+    const runtimeProvenance = evaluateRuntimeProvenance({
+      imagePath: runtimeImagePath,
+      commandLine: runtimeCommandLine,
+      expectedBundledNodePath: expectedRuntime,
+      expectedEntrypointPath: expectedEntrypoint,
+      installRoot: resource.root
+    });
+    runtimeProvenance.pid = runtimePid;
+    runtimeProvenance.processName = runtimeListener.processName;
     const mem0CommandLine = processCommandLine(mem0Pid);
-    const expectedRuntime = path
-      .join(resource.root, "runtime", NODE_EXE_NAME)
-      .toLowerCase()
-      .replaceAll("/", "\\");
     const expectedMem0 = path
       .join(resource.root, "mem0", MEM0_EXE_NAME)
       .toLowerCase()
       .replaceAll("/", "\\");
-    if (!runtimeCommandLine.toLowerCase().replaceAll("/", "\\").includes(expectedRuntime))
-      fail("Tauri Runtime command line is not the installed bundled Node");
+    if (!runtimeProvenance.ok)
+      fail(`Tauri Runtime bundled-Node provenance failed: ${runtimeProvenance.failureReasons.join("; ")}`);
     if (!mem0CommandLine.toLowerCase().replaceAll("/", "\\").includes(expectedMem0))
       fail("Tauri Mem0 command line is not the installed executable");
     assertNoUnsafeCommandLine(runtimeCommandLine);
