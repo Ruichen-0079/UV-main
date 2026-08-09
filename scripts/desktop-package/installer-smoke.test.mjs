@@ -16,6 +16,7 @@ import {
   buildWmCloseScript,
   chooseInstaller,
   compareSnapshots,
+  createTauriAppEnv,
   createDiagnosticPortRoles,
   createOwnershipDiagnostics,
   FORBIDDEN_PATH_TOOLS,
@@ -871,6 +872,31 @@ test("Tauri child env strips Python, Node and pnpm pollution", () => {
   });
   for (const key of ["PYTHONPATH", "NODE_PATH", "PNPM_HOME", "npm_config_prefix"])
     assert.equal(env[key], undefined);
+});
+
+test("Tauri app env preserves the real Windows profile while isolating mutable roots", () => {
+  const previous = process.env.USERPROFILE;
+  process.env.USERPROFILE = "C:\\Users\\runneradmin";
+  try {
+    const env = createTauriAppEnv({
+      localAppData: "C:\\Temp\\yuvi-local",
+      appData: "C:\\Temp\\yuvi-roaming",
+      home: "C:\\Temp\\yuvi-home",
+      temp: "C:\\Temp\\yuvi-temp"
+    });
+    assert.equal(env.USERPROFILE, "C:\\Users\\runneradmin");
+    assert.equal(env.LOCALAPPDATA, "C:\\Temp\\yuvi-local");
+    assert.equal(env.APPDATA, "C:\\Temp\\yuvi-roaming");
+    assert.equal(env.HOME, "C:\\Temp\\yuvi-home");
+    assert.equal(env.TEMP, "C:\\Temp\\yuvi-temp");
+    assert.equal(env.TMP, "C:\\Temp\\yuvi-temp");
+    assert.equal(env.PATH, restrictedPath());
+    assert.equal(env.PYTHONPATH, undefined);
+    assert.equal(env.NODE_PATH, undefined);
+  } finally {
+    if (previous === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previous;
+  }
 });
 
 test("Tauri child env strips all four secret variables", () => {

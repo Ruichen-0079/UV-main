@@ -206,6 +206,23 @@ export function sanitizeChildEnv(overrides = {}) {
   return env;
 }
 
+export function createTauriAppEnv({ localAppData, appData, home, temp } = {}) {
+  const userProfile = process.env.USERPROFILE;
+  if (process.platform === "win32" && !userProfile)
+    fail("Tauri app smoke requires the real Windows USERPROFILE");
+  return sanitizeChildEnv({
+    LOCALAPPDATA: localAppData,
+    APPDATA: appData,
+    ...(userProfile ? { USERPROFILE: userProfile } : {}),
+    HOME: home,
+    TEMP: temp,
+    TMP: temp,
+    YUVI_AUTOSTART_RUNTIME: "true",
+    YUVI_AUTOSTART_MEM0: "true",
+    YUVI_AUTOSTART_TTS: "false"
+  });
+}
+
 export function assertNoSecrets(value, label = "value") {
   const text = typeof value === "string" ? value : JSON.stringify(value);
   for (const key of SECRET_KEYS) {
@@ -1126,10 +1143,12 @@ async function waitForJsonFile(file, timeoutMs) {
   fail(`timed out waiting for ${file}`);
 }
 
-async function waitForSupervisorEndpoint(pointerRoot, stateRoot, timeoutMs) {
+async function waitForSupervisorEndpoint(pointerRoot, stateRoot, timeoutMs, { checkExit } = {}) {
   const pointer = path.join(pointerRoot, "active-instance.json");
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    const exitError = checkExit?.();
+    if (exitError) fail(exitError);
     if (fs.existsSync(pointer)) {
       try {
         const active = readJson(pointer);
@@ -1641,16 +1660,11 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
   const tauriTemp = path.join(layout.root, "tauri-temp");
   for (const dir of [tauriLocalAppData, tauriAppData, tauriHome, tauriTemp])
     fs.mkdirSync(dir, { recursive: true });
-  const env = sanitizeChildEnv({
-    LOCALAPPDATA: tauriLocalAppData,
-    APPDATA: tauriAppData,
-    USERPROFILE: tauriHome,
-    HOME: tauriHome,
-    TEMP: tauriTemp,
-    TMP: tauriTemp,
-    YUVI_AUTOSTART_RUNTIME: "true",
-    YUVI_AUTOSTART_MEM0: "true",
-    YUVI_AUTOSTART_TTS: "false"
+  const env = createTauriAppEnv({
+    localAppData: tauriLocalAppData,
+    appData: tauriAppData,
+    home: tauriHome,
+    temp: tauriTemp
   });
   assertNoSecrets(env, "Tauri app env");
   const appArgs = [];
@@ -1667,6 +1681,20 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
   child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
   child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
   const logExit = () => writeLog(layout.logs, "tauri-app.log", `${stdout}\n${stderr}`);
+  const outputTail = (value) => {
+    const text = String(value ?? "").trim();
+    return text.length > 4_000 ? text.slice(-4_000) : text;
+  };
+  const checkExit = () => {
+    if (child.exitCode === null && child.signalCode === null) return null;
+    const code = child.exitCode === null ? "none" : child.exitCode;
+    const signal = child.signalCode ?? "none";
+    return [
+      `Tauri application exited before bootstrap (code=${code}, signal=${signal})`,
+      `stdout tail:\n${outputTail(stdout) || "<empty>"}`,
+      `stderr tail:\n${outputTail(stderr) || "<empty>"}`
+    ].join("\n");
+  };
   let endpoint = null;
   let runtimePid = 0;
   let mem0Pid = 0;
@@ -1674,7 +1702,8 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     endpoint = await waitForSupervisorEndpoint(
       path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor"),
       path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor"),
-      timeoutMs
+      timeoutMs,
+      { checkExit }
     );
     if (!pidAlive(child.pid)) fail("Tauri application exited before bootstrap");
     const pointer = readJson(
