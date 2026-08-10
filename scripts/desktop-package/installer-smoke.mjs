@@ -1744,6 +1744,82 @@ export function requestJson(
   });
 }
 
+function isRecord(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+/**
+ * Validate the Runtime /health protocol without conflating provider readiness
+ * with the shape and core-health contract of the packaged Runtime.
+ */
+export function evaluateRuntimeHealthProtocol({ status, value } = {}) {
+  const failureReasons = [];
+  const body = isRecord(value) ? value : null;
+  const server = body && isRecord(body.server) ? body.server : null;
+  const database = body && isRecord(body.database) ? body.database : null;
+  const providers = body && isRecord(body.providers) ? body.providers : null;
+  const chat = providers && isRecord(providers.chat) ? providers.chat : null;
+  const serverStatus = server && typeof server.status === "string" ? server.status : null;
+  const databaseStatus = database && typeof database.status === "string" ? database.status : null;
+  const chatAvailable = chat && typeof chat.available === "boolean" ? chat.available : null;
+  const expectedOk = databaseStatus === "healthy" && chatAvailable === true;
+
+  if (status !== 200) failureReasons.push(`HTTP status is ${String(status)}`);
+  if (!body) failureReasons.push("body is not a JSON object");
+  if (body && body.service !== "ai-companion-runtime")
+    failureReasons.push("service identity is not ai-companion-runtime");
+  if (body && typeof body.ok !== "boolean") failureReasons.push("ok is not boolean");
+  if (!server) failureReasons.push("server object is missing");
+  else if (serverStatus !== "healthy") failureReasons.push("server.status is not healthy");
+  if (!database) failureReasons.push("database object is missing");
+  else if (databaseStatus !== "healthy") failureReasons.push("database.status is not healthy");
+  if (!providers) failureReasons.push("providers object is missing");
+  if (!chat) failureReasons.push("providers.chat object is missing");
+  else if (chatAvailable === null) failureReasons.push("providers.chat.available is not boolean");
+  if (body && typeof body.ok === "boolean" && body.ok !== expectedOk)
+    failureReasons.push(`ok does not match expected readiness (${String(expectedOk)})`);
+
+  return {
+    protocolValid: failureReasons.length === 0,
+    failureReasons,
+    status: Number.isInteger(status) ? status : null,
+    service: typeof body?.service === "string" ? body.service : null,
+    runtimeMode: typeof body?.runtimeMode === "string" ? body.runtimeMode : null,
+    serverStatus,
+    databaseStatus,
+    chatProvider:
+      typeof chat?.provider === "string"
+        ? chat.provider
+        : typeof chat?.name === "string"
+          ? chat.name
+          : null,
+    chatConfigured: typeof chat?.configured === "boolean" ? chat.configured : null,
+    chatAvailable,
+    healthOk: typeof body?.ok === "boolean" ? body.ok : null,
+    expectedOk
+  };
+}
+
+export function formatRuntimeHealthProtocolDiagnostic(result = {}) {
+  const safe = (value, fallback = "unknown") =>
+    value === null || value === undefined || value === "" ? fallback : String(value);
+  return [
+    "RUNTIME HEALTH PROTOCOL",
+    `  http status: ${safe(result.status)}`,
+    `  service: ${safe(result.service)}`,
+    `  runtime mode: ${safe(result.runtimeMode)}`,
+    `  server status: ${safe(result.serverStatus)}`,
+    `  database status: ${safe(result.databaseStatus)}`,
+    `  chat provider: ${safe(result.chatProvider)}`,
+    `  chat configured: ${result.chatConfigured === null ? "unknown" : result.chatConfigured ? "yes" : "no"}`,
+    `  chat available: ${result.chatAvailable === null ? "unknown" : result.chatAvailable ? "yes" : "no"}`,
+    `  health ok: ${result.healthOk === null ? "unknown" : result.healthOk ? "yes" : "no"}`,
+    `  expected ok: ${result.expectedOk ? "yes" : "no"}`,
+    `  protocol valid: ${result.protocolValid ? "yes" : "no"}`,
+    ...(result.failureReasons?.length ? [`  failure reasons: ${result.failureReasons.join("; ")}`] : [])
+  ].join("\n");
+}
+
 async function waitForJsonFile(file, timeoutMs) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -3040,8 +3116,12 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       label: "runtime.health",
       diagnostics: requestDiagnostics
     });
-    if (runtimeHealth.status !== 200 || runtimeHealth.value?.ok !== true)
-      fail("Tauri Runtime health protocol is invalid");
+    const runtimeHealthProtocol = evaluateRuntimeHealthProtocol(runtimeHealth);
+    console.info(formatRuntimeHealthProtocolDiagnostic(runtimeHealthProtocol));
+    if (!runtimeHealthProtocol.protocolValid)
+      fail(
+        `Tauri Runtime health protocol is invalid: ${runtimeHealthProtocol.failureReasons.join("; ")}`
+      );
 
     await sendWmClose(child.pid, layout, timeoutMs);
     if (!(await waitForProcessExit(child.pid, Math.min(timeoutMs, 20_000))))

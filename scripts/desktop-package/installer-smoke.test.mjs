@@ -27,8 +27,10 @@ import {
   FORBIDDEN_PATH_TOOLS,
   formatOwnershipDiagnostic,
   formatMem0ProvenanceDiagnostic,
+  formatRuntimeHealthProtocolDiagnostic,
   formatTauriFailureDiagnostic,
   evaluateMem0Provenance,
+  evaluateRuntimeHealthProtocol,
   evaluateRuntimeProvenance,
   formatRuntimeProvenanceDiagnostic,
   findInstalledApplicationExecutable,
@@ -131,6 +133,110 @@ function fakeHttpRequest({ responseBody = null, statusCode = 200, requestError =
     }
   };
 }
+
+function runtimeHealthBody({
+  ok = true,
+  service = "ai-companion-runtime",
+  runtimeMode = "development",
+  server = { status: "healthy" },
+  database = { status: "healthy" },
+  chat = {
+    provider: "deepseek",
+    name: "deepseek",
+    configured: true,
+    available: true,
+    status: "degraded"
+  }
+} = {}) {
+  return {
+    ok,
+    service,
+    runtimeMode,
+    server,
+    database,
+    providers: { chat }
+  };
+}
+
+test("Runtime health protocol accepts ready and clean-install degraded chat states", () => {
+  const ready = evaluateRuntimeHealthProtocol({
+    status: 200,
+    value: runtimeHealthBody()
+  });
+  assert.equal(ready.protocolValid, true);
+  assert.equal(ready.expectedOk, true);
+  assert.equal(ready.chatAvailable, true);
+
+  const cleanInstall = evaluateRuntimeHealthProtocol({
+    status: 200,
+    value: runtimeHealthBody({
+      ok: false,
+      chat: {
+        provider: "deepseek",
+        name: "deepseek",
+        configured: false,
+        available: false,
+        status: "unavailable"
+      }
+    })
+  });
+  assert.equal(cleanInstall.protocolValid, true);
+  assert.equal(cleanInstall.expectedOk, false);
+  assert.equal(cleanInstall.healthOk, false);
+  assert.equal(cleanInstall.chatAvailable, false);
+});
+
+test("Runtime health protocol rejects unhealthy, malformed, and inconsistent payloads", () => {
+  const cases = [
+    ["database unhealthy", { database: { status: "unhealthy" }, ok: false }],
+    ["database unavailable with chat available", { database: { status: "unavailable" }, ok: false }],
+    ["ok true while chat unavailable", { ok: true, chat: { available: false } }],
+    ["ok false while chat available", { ok: false }],
+    ["HTTP 500", { status: 500, value: runtimeHealthBody() }],
+    ["HTTP 404", { status: 404, value: runtimeHealthBody() }],
+    ["missing body", { status: 200, value: null }],
+    ["array body", { status: 200, value: [] }],
+    ["string body", { status: 200, value: "healthy" }],
+    ["missing ok", { status: 200, value: (() => { const body = runtimeHealthBody(); delete body.ok; return body; })() }],
+    ["non-boolean ok", { status: 200, value: runtimeHealthBody({ ok: "true" }) }],
+    ["wrong service", { status: 200, value: runtimeHealthBody({ service: "other-service" }) }],
+    ["missing server", { status: 200, value: runtimeHealthBody({ server: null }) }],
+    ["unhealthy server", { status: 200, value: runtimeHealthBody({ server: { status: "starting" } }) }],
+    ["missing database", { status: 200, value: runtimeHealthBody({ database: null, ok: false }) }],
+    ["missing database status", { status: 200, value: runtimeHealthBody({ database: {}, ok: false }) }],
+    ["missing providers chat", { status: 200, value: { ...runtimeHealthBody(), ok: false, providers: {} } }],
+    ["non-boolean chat available", { status: 200, value: runtimeHealthBody({ ok: false, chat: { available: "false" } }) }]
+  ];
+  for (const [label, input] of cases) {
+    assert.equal(evaluateRuntimeHealthProtocol(input).protocolValid, false, label);
+  }
+});
+
+test("Runtime health diagnostics expose only safe protocol fields", () => {
+  const result = evaluateRuntimeHealthProtocol({
+    status: 200,
+    value: runtimeHealthBody({
+      ok: false,
+      chat: { provider: "deepseek", configured: false, available: false, status: "unavailable" }
+    })
+  });
+  const text = formatRuntimeHealthProtocolDiagnostic(result);
+  assert.match(text, /RUNTIME HEALTH PROTOCOL/);
+  assert.match(text, /service: ai-companion-runtime/);
+  assert.match(text, /chat available: no/);
+  assert.match(text, /protocol valid: yes/);
+  assert.doesNotMatch(text, /DEEPSEEK_API_KEY|Authorization|DATABASE_URL|token|secret/i);
+});
+
+test("Tauri Runtime smoke uses the structured health protocol helper", () => {
+  const source = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "installer-smoke.mjs"),
+    "utf8"
+  );
+  assert.doesNotMatch(source, /runtimeHealth\.value\?\.ok\s*!==\s*true/);
+  assert.doesNotMatch(source, /if\s*\(runtimeHealth\.status\s*!==\s*200\s*\)/);
+  assert.ok((source.match(/evaluateRuntimeHealthProtocol\(/g) ?? []).length >= 2);
+});
 
 test("Tauri request diagnostics preserve ECONNRESET and never retry", async () => {
   const reset = Object.assign(new Error("read ECONNRESET"), {
