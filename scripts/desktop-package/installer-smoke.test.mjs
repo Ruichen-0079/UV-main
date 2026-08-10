@@ -17,10 +17,14 @@ import {
   chooseInstaller,
   compareSnapshots,
   createTauriAppEnv,
+  createRequestDiagnostics,
+  createTauriFailureSnapshot,
+  createTauriTimeline,
   createDiagnosticPortRoles,
   createOwnershipDiagnostics,
   FORBIDDEN_PATH_TOOLS,
   formatOwnershipDiagnostic,
+  formatTauriFailureDiagnostic,
   evaluateRuntimeProvenance,
   formatRuntimeProvenanceDiagnostic,
   findInstalledApplicationExecutable,
@@ -34,6 +38,7 @@ import {
   parseRuntimeCommandLine,
   pathsEqualWindows,
   processBaseline,
+  requestJson,
   parseEmbeddedSupervisorBuildInfo,
   removeTreeWithRetries,
   restrictedPath,
@@ -51,6 +56,174 @@ import {
 } from "./installer-smoke.mjs";
 
 const temp = (prefix = "yuvi-installer-test-") => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+
+function fakeHttpRequest({ responseBody = null, statusCode = 200, requestError = null } = {}) {
+  let responseCallback;
+  const listeners = new Map();
+  let calls = 0;
+  const request = {
+    once(event, handler) {
+      listeners.set(event, handler);
+      return this;
+    },
+    write() {
+      return true;
+    },
+    end() {
+      calls += 1;
+      queueMicrotask(() => {
+        listeners.get("socket")?.({ connecting: false });
+        if (requestError) {
+          listeners.get("error")?.(requestError);
+          return;
+        }
+        const responseListeners = new Map();
+        const response = {
+          statusCode,
+          setEncoding() {},
+          on(event, handler) {
+            responseListeners.set(event, handler);
+            return this;
+          },
+          once(event, handler) {
+            responseListeners.set(event, handler);
+            return this;
+          }
+        };
+        responseCallback(response);
+        if (responseBody !== null) responseListeners.get("data")?.(responseBody);
+        responseListeners.get("end")?.();
+      });
+      return this;
+    }
+  };
+  return {
+    factory(_options, callback) {
+      responseCallback = callback;
+      return request;
+    },
+    calls() {
+      return calls;
+    }
+  };
+}
+
+test("Tauri request diagnostics preserve ECONNRESET and never retry", async () => {
+  const reset = Object.assign(new Error("read ECONNRESET"), {
+    name: "Error",
+    code: "ECONNRESET",
+    errno: -4077,
+    syscall: "read"
+  });
+  const fake = fakeHttpRequest({ requestError: reset });
+  const diagnostics = createRequestDiagnostics({ now: () => 1_000 });
+  await assert.rejects(
+    requestJson("http://127.0.0.1:6121/v1/status?token=secret-value", {
+      method: "GET",
+      token: "secret-value",
+      label: "supervisor.status",
+      diagnostics,
+      requestFactory: fake.factory
+    }),
+    (error) => error === reset
+  );
+  assert.equal(fake.calls(), 1);
+  const formatted = diagnostics.format();
+  assert.match(formatted, /supervisor\.status GET 127\.0\.0\.1:6121\/v1\/status/);
+  assert.match(formatted, /errorCode=ECONNRESET/);
+  assert.match(formatted, /syscall=read/);
+  assert.doesNotMatch(formatted, /secret-value/);
+  assert.equal(diagnostics.lastFailure().phase, "connected");
+});
+
+test("Tauri request diagnostics keep successful request count and hide query secrets", async () => {
+  const fake = fakeHttpRequest({ responseBody: JSON.stringify({ ok: true }) });
+  const diagnostics = createRequestDiagnostics({ now: () => 2_000 });
+  const result = await requestJson(
+    "http://127.0.0.1:6121/health?api_key=query-secret",
+    { label: "supervisor.health", diagnostics, requestFactory: fake.factory }
+  );
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.value, { ok: true });
+  assert.equal(fake.calls(), 1);
+  const formatted = diagnostics.format({ includeSuccess: true });
+  assert.match(formatted, /supervisor\.health GET 127\.0\.0\.1:6121\/health/);
+  assert.doesNotMatch(formatted, /query-secret/);
+  assert.doesNotMatch(formatted, /api_key/);
+});
+
+test("Tauri failure timeline is bounded and retains deterministic order", () => {
+  let now = 10_000;
+  const timeline = createTauriTimeline(() => (now += 1), 3);
+  timeline.mark("E0");
+  timeline.mark("E1");
+  timeline.mark("E2");
+  timeline.mark("E3");
+  assert.deepEqual(timeline.snapshot().map((event) => event.phase), ["E0", "E1", "E2"]);
+  assert.equal(timeline.droppedCount(), 1);
+});
+
+test("Tauri failure snapshot is injectable and preserves ECONNRESET as primary", () => {
+  const listenerProbe = (port) => ({
+    state: "Listen",
+    owningPid: port + 1,
+    parentProcessId: 900,
+    processName: "node.exe",
+    executablePath: "C:\\smoke\\install\\runtime\\node.exe",
+    creationDate: "2026-08-10T00:00:00Z",
+    pidEqualsSupervisorPid: port === 6121,
+    pidEqualsKnownManagedPid: port !== 6121
+  });
+  const snapshot = createTauriFailureSnapshot({
+    appPid: 100,
+    supervisorPid: 900,
+    runtime: { pid: 901, url: "http://127.0.0.1:6122" },
+    mem0: { pid: 902, url: "http://127.0.0.1:6123" },
+    endpoint: { baseUrl: "http://127.0.0.1:6121" },
+    installRoot: "C:\\smoke\\install",
+    pidProbe: (pid) => pid !== 902,
+    listenerProbe,
+    now: () => Date.parse("2026-08-10T00:00:00Z")
+  });
+  assert.equal(snapshot.processes.app.status, "alive");
+  assert.equal(snapshot.processes.mem0.status, "exited");
+  assert.equal(snapshot.listeners.supervisor.owningPid, 6122);
+
+  const timeoutSnapshot = createTauriFailureSnapshot({
+    appPid: 100,
+    supervisorPid: 900,
+    endpoint: { baseUrl: "http://127.0.0.1:6121" },
+    installRoot: "C:\\smoke\\install",
+    pidProbe: () => true,
+    listenerProbe: () => {
+      const error = new Error("query timeout");
+      error.code = "ETIMEDOUT";
+      throw error;
+    },
+    now: () => Date.parse("2026-08-10T00:00:00Z")
+  });
+  const primary = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+  const text = formatTauriFailureDiagnostic({
+    primaryError: primary,
+    requestDiagnostics: { format: () => "  http-1 supervisor.status GET 127.0.0.1:6121/v1/status errorCode=ECONNRESET", lastFailure: () => ({ errorName: "Error", errorCode: "ECONNRESET" }) },
+    timeline: { snapshot: () => [{ phase: "E7-before-http-request", isoTime: "now", relativeMs: 1 }, { phase: "E8-http-error", isoTime: "now", relativeMs: 2 }] },
+    snapshot: timeoutSnapshot,
+    processQueries: [{
+      role: "runtime.command-line",
+      pid: 901,
+      startedAt: "2026-08-10T00:00:01.000Z",
+      endedAt: "2026-08-10T00:00:03.500Z",
+      elapsedMs: 2500,
+      outcome: "query-timeout",
+      errorCode: "ETIMEDOUT"
+    }]
+  });
+  assert.match(text, /primaryCode: ECONNRESET/);
+  assert.match(text, /snapshot: query-timeout/);
+  assert.match(text, /E7-before-http-request[\s\S]*E8-http-error/);
+  assert.match(text, /runtime\.command-line: pid=901[\s\S]*query-timeout/);
+  assert.doesNotMatch(text, /CommandLine|Authorization|token|api_key/i);
+});
 
 test("installer candidate discovery filters the expected x64 NSIS name", () => {
   const dir = temp();

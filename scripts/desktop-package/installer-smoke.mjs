@@ -1081,11 +1081,17 @@ export function formatDiagnosticSummary({ diagnostic, installRoot = null }) {
   ].join("\n");
 }
 
-function createTauriTimeline(now = Date.now) {
+export function createTauriTimeline(now = Date.now, maxEntries = 64) {
   const startedAt = now();
   const events = [];
+  const limit = Math.max(1, Number(maxEntries) || 64);
+  let dropped = 0;
   return {
     mark(phase, fields = {}) {
+      if (events.length >= limit) {
+        dropped += 1;
+        return;
+      }
       const timestamp = now();
       events.push({
         phase,
@@ -1096,8 +1102,184 @@ function createTauriTimeline(now = Date.now) {
     },
     snapshot() {
       return [...events];
+    },
+    droppedCount() {
+      return dropped;
     }
   };
+}
+
+function safePidSnapshot(pid, pidProbe) {
+  const numericPid = Number(pid) || 0;
+  if (numericPid <= 0) return { pid: 0, status: "unknown" };
+  try {
+    return { pid: numericPid, status: pidProbe(numericPid) ? "alive" : "exited" };
+  } catch (error) {
+    const code = String(error?.code ?? "query-failed").slice(0, 80);
+    return {
+      pid: numericPid,
+      status: "unknown",
+      queryErrorCode: code === "ETIMEDOUT" ? "query-timeout" : code
+    };
+  }
+}
+
+function safePortFromUrl(value) {
+  try {
+    const parsed = new URL(String(value ?? ""));
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+    return Number.isInteger(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeListenerSnapshot(
+  port,
+  {
+    installRoot,
+    supervisorPid,
+    knownManagedPid,
+    listenerProbe
+  }
+) {
+  const numericPort = Number(port);
+  if (!Number.isInteger(numericPort) || numericPort <= 0)
+    return { port: null, state: "not-configured" };
+  try {
+    const listener = listenerProbe(numericPort, {
+      installRoot,
+      supervisorPid,
+      knownManagedPid
+    });
+    return {
+      port: numericPort,
+      state: listener?.state ?? "unknown",
+      owningPid: Number(listener?.owningPid) || 0,
+      parentProcessId: Number(listener?.parentProcessId) || 0,
+      processName: listener?.processName ?? null,
+      executablePath: safeDiagnosticPath(listener?.executablePath, installRoot),
+      creationDate: listener?.creationDate ?? null,
+      queryErrorCode: listener?.queryErrorCode ?? null,
+      pidEqualsSupervisorPid: listener?.pidEqualsSupervisorPid === true,
+      pidEqualsKnownManagedPid: listener?.pidEqualsKnownManagedPid === true
+    };
+  } catch (error) {
+    const code = String(error?.code ?? "query-failed").slice(0, 80);
+    return {
+      port: numericPort,
+      state: "query-failed",
+      owningPid: 0,
+      parentProcessId: 0,
+      processName: null,
+      executablePath: null,
+      creationDate: null,
+      queryErrorCode: code === "ETIMEDOUT" ? "query-timeout" : code,
+      pidEqualsSupervisorPid: false,
+      pidEqualsKnownManagedPid: false
+    };
+  }
+}
+
+/** Read-only process/listener snapshot that never replaces the primary error. */
+export function createTauriFailureSnapshot({
+  appPid = 0,
+  supervisorPid = 0,
+  runtimePid = 0,
+  mem0Pid = 0,
+  endpoint = null,
+  runtime = null,
+  mem0 = null,
+  installRoot = null,
+  pidProbe = pidAlive,
+  listenerProbe = attributeWindowsListener,
+  now = Date.now
+} = {}) {
+  const supervisorPort = safePortFromUrl(endpoint?.baseUrl);
+  const runtimePort = safePortFromUrl(runtime?.url);
+  const mem0Port = safePortFromUrl(mem0?.url);
+  const snapshot = {
+    capturedAt: new Date(now()).toISOString(),
+    processes: {
+      app: safePidSnapshot(appPid, pidProbe),
+      supervisor: safePidSnapshot(supervisorPid, pidProbe),
+      runtime: safePidSnapshot(runtimePid || runtime?.pid, pidProbe),
+      mem0: safePidSnapshot(mem0Pid || mem0?.pid, pidProbe)
+    },
+    listeners: {},
+    snapshotStatus: "ok"
+  };
+  snapshot.listeners.supervisor = safeListenerSnapshot(supervisorPort, {
+    installRoot,
+    supervisorPid,
+    knownManagedPid: supervisorPid,
+    listenerProbe
+  });
+  snapshot.listeners.runtime = safeListenerSnapshot(runtimePort, {
+    installRoot,
+    supervisorPid,
+    knownManagedPid: runtimePid || runtime?.pid || 0,
+    listenerProbe
+  });
+  snapshot.listeners.mem0 = safeListenerSnapshot(mem0Port, {
+    installRoot,
+    supervisorPid,
+    knownManagedPid: mem0Pid || mem0?.pid || 0,
+    listenerProbe
+  });
+  if (
+    Object.values(snapshot.processes).some((entry) => entry.queryErrorCode === "query-timeout") ||
+    Object.values(snapshot.listeners).some((entry) => entry.queryErrorCode === "query-timeout")
+  ) {
+    snapshot.snapshotStatus = "query-timeout";
+  }
+  return snapshot;
+}
+
+export function formatTauriFailureDiagnostic({
+  primaryError,
+  requestDiagnostics,
+  timeline,
+  snapshot,
+  processQueries = []
+} = {}) {
+  const failure = requestDiagnostics?.lastFailure?.();
+  const primaryCode = failure?.errorCode ?? diagnosticErrorField(primaryError, "code") ?? "unknown";
+  const primaryName = failure?.errorName ?? String(primaryError?.name ?? "Error").slice(0, 80);
+  const requestLines = requestDiagnostics?.format?.() || "  none";
+  const timelineLines = timeline?.snapshot?.()
+    ?.map((event) => `  ${event.phase}: ${event.isoTime} (+${event.relativeMs}ms)`)
+    .join("\n") || "  none";
+  const processLines = Object.entries(snapshot?.processes ?? {})
+    .map(([role, state]) => `  ${role}: pid=${state.pid || "unknown"} status=${state.status}${state.queryErrorCode ? ` query=${state.queryErrorCode}` : ""}`)
+    .join("\n") || "  unavailable";
+  const listenerLines = Object.entries(snapshot?.listeners ?? {})
+    .map(([role, listener]) => `  ${role}: port=${listener.port ?? "unknown"} state=${listener.state} pid=${listener.owningPid || "unknown"} parent=${listener.parentProcessId || "unknown"} process=${listener.processName ?? "unknown"} executable=${listener.executablePath ?? "unknown"} query=${listener.queryErrorCode ?? "none"}`)
+    .join("\n") || "  unavailable";
+  const processQueryLines = processQueries
+    .map((query) => `  ${query.role}: pid=${query.pid || "unknown"} startedAt=${query.startedAt ?? "unknown"} endedAt=${query.endedAt ?? "unknown"} elapsedMs=${query.elapsedMs ?? "unknown"} outcome=${query.outcome} query=${query.errorCode ?? "none"}`)
+    .join("\n") || "  none";
+  return [
+    "TAURI SMOKE FAILURE DIAGNOSTIC",
+    `  primaryError: ${primaryName}`,
+    `  primaryCode: ${primaryCode}`,
+    `  snapshot: ${snapshot?.snapshotStatus ?? "unknown"}`,
+    "",
+    "requests:",
+    requestLines,
+    "",
+    "timeline:",
+    timelineLines,
+    "",
+    "processes:",
+    processLines,
+    "",
+    "listeners:",
+    listenerLines,
+    "",
+    "process-queries:",
+    processQueryLines
+  ].join("\n");
 }
 
 function tauriRuntimePort(runtime) {
@@ -1329,38 +1511,185 @@ export async function allocateDistinctPorts({ free = freePort, maxAttempts = 4 }
   fail(`unable to allocate distinct smoke ports (Mem0 ${mem0Port})`);
 }
 
-function requestJson(url, { method = "GET", token, body } = {}) {
+const DEFAULT_REQUEST_DIAGNOSTIC_LIMIT = 64;
+
+function diagnosticErrorField(error, field) {
+  const value = error?.[field];
+  if (value === undefined || value === null || value === "") return null;
+  return typeof value === "number" ? value : String(value).slice(0, 80);
+}
+
+/** Bounded, secret-free identity/outcome records for smoke HTTP requests. */
+export function createRequestDiagnostics({
+  now = Date.now,
+  maxEntries = DEFAULT_REQUEST_DIAGNOSTIC_LIMIT,
+  timeline = null
+} = {}) {
+  const limit = Math.max(1, Number(maxEntries) || DEFAULT_REQUEST_DIAGNOSTIC_LIMIT);
+  const entries = [];
+  let nextRequestId = 0;
+
+  const find = (requestId) => entries.find((entry) => entry.requestId === requestId);
+  const safeHost = (parsed) => String(parsed.hostname || "").slice(0, 255);
+  const safePort = (parsed) => Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+  const safePathname = (parsed) => String(parsed.pathname || "/").slice(0, 512);
+
+  return {
+    begin({ label, method, parsed }) {
+      const entry = {
+        requestId: `http-${++nextRequestId}`,
+        label: String(label || "http.request").slice(0, 80),
+        method: String(method || "GET").toUpperCase().slice(0, 16),
+        host: safeHost(parsed),
+        port: safePort(parsed),
+        pathname: safePathname(parsed),
+        startedAt: new Date(now()).toISOString(),
+        completedAt: null,
+        elapsedMs: null,
+        phase: "before-connect",
+        outcome: "pending",
+        status: null,
+        errorName: null,
+        errorCode: null,
+        errno: null,
+        syscall: null
+      };
+      if (entries.length >= limit) entries.shift();
+      entries.push(entry);
+      timeline?.mark("E7-before-http-request", {
+        requestId: entry.requestId,
+        label: entry.label,
+        method: entry.method,
+        host: entry.host,
+        port: entry.port,
+        pathname: entry.pathname
+      });
+      return entry.requestId;
+    },
+    updatePhase(requestId, phase) {
+      const entry = find(requestId);
+      if (entry) entry.phase = String(phase || "unknown").slice(0, 40);
+    },
+    complete(requestId, { phase, status, error } = {}) {
+      const entry = find(requestId);
+      if (!entry) return;
+      const completedAtMs = Number(now());
+      const elapsedMs = Math.max(0, completedAtMs - Date.parse(entry.startedAt));
+      entry.elapsedMs = Number.isFinite(elapsedMs) ? elapsedMs : null;
+      entry.completedAt = new Date(completedAtMs).toISOString();
+      entry.phase = String(phase || entry.phase || "unknown").slice(0, 40);
+      if (error) {
+        entry.outcome = "error";
+        entry.errorName = String(error?.name || "Error").slice(0, 80);
+        entry.errorCode = diagnosticErrorField(error, "code");
+        entry.errno = diagnosticErrorField(error, "errno");
+        entry.syscall = diagnosticErrorField(error, "syscall");
+        timeline?.mark("E8-http-error", {
+          requestId: entry.requestId,
+          label: entry.label,
+          phase: entry.phase,
+          errorName: entry.errorName,
+          errorCode: entry.errorCode
+        });
+      } else {
+        entry.outcome = "response";
+        entry.status = Number(status) || 0;
+      }
+    },
+    snapshot() {
+      return entries.map((entry) => ({ ...entry }));
+    },
+    lastFailure() {
+      return [...entries].reverse().find((entry) => entry.outcome === "error") ?? null;
+    },
+    format({ includeSuccess = false } = {}) {
+      return entries
+        .filter((entry) => includeSuccess || entry.outcome === "error")
+        .map((entry) => {
+          const outcome = entry.outcome === "error"
+            ? ` errorName=${entry.errorName ?? "unknown"} errorCode=${entry.errorCode ?? "unknown"} errno=${entry.errno ?? "unknown"} syscall=${entry.syscall ?? "unknown"}`
+            : ` status=${entry.status ?? "unknown"}`;
+          return `  ${entry.requestId} ${entry.label} ${entry.method} ${entry.host}:${entry.port}${entry.pathname} phase=${entry.phase} elapsedMs=${entry.elapsedMs ?? "unknown"} outcome=${entry.outcome}${outcome}`;
+        })
+        .join("\n");
+    }
+  };
+}
+
+export function requestJson(
+  url,
+  {
+    method = "GET",
+    token,
+    body,
+    label = "http.request",
+    diagnostics = null,
+    requestFactory = null
+  } = {}
+) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
-    const request = http.request(
-      {
-        hostname: parsed.hostname,
-        port: parsed.port,
-        path: `${parsed.pathname}${parsed.search}`,
-        method,
-        headers: {
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-          ...(body ? { "content-type": "application/json" } : {})
-        }
-      },
-      (response) => {
-        let text = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk) => (text += chunk));
-        response.on("end", () => {
-          let value = null;
-          try {
-            value = text ? JSON.parse(text) : null;
-          } catch {
-            /* diagnostics below */
+    const requestId = diagnostics?.begin({ label, method, parsed });
+    let phase = "before-connect";
+    let settled = false;
+    const finishError = (error) => {
+      if (settled) return;
+      settled = true;
+      diagnostics?.complete(requestId, { phase, error });
+      reject(error);
+    };
+    try {
+      const request = (requestFactory ?? http.request)(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port,
+          path: `${parsed.pathname}${parsed.search}`,
+          method,
+          headers: {
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
+            ...(body ? { "content-type": "application/json" } : {})
           }
-          resolve({ status: response.statusCode ?? 0, value, text });
+        },
+        (response) => {
+          if (settled) return;
+          phase = "response-headers-received";
+          diagnostics?.updatePhase(requestId, phase);
+          let text = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            phase = "reading-body";
+            diagnostics?.updatePhase(requestId, phase);
+            text += chunk;
+          });
+          response.once("error", finishError);
+          response.on("end", () => {
+            if (settled) return;
+            settled = true;
+            let value = null;
+            try {
+              value = text ? JSON.parse(text) : null;
+            } catch {
+              /* diagnostics below */
+            }
+            diagnostics?.complete(requestId, { phase, status: response.statusCode ?? 0 });
+            resolve({ status: response.statusCode ?? 0, value, text });
+          });
+        }
+      );
+      request.once("socket", (socket) => {
+        if (socket?.connecting === false) phase = "connected";
+        else socket?.once?.("connect", () => {
+          phase = "connected";
+          diagnostics?.updatePhase(requestId, phase);
         });
-      }
-    );
-    request.once("error", reject);
-    if (body) request.write(JSON.stringify(body));
-    request.end();
+        diagnostics?.updatePhase(requestId, phase);
+      });
+      request.once("error", finishError);
+      if (body) request.write(JSON.stringify(body));
+      request.end();
+    } catch (error) {
+      finishError(error);
+    }
   });
 }
 
@@ -1430,7 +1759,7 @@ async function waitForSupervisorEndpoint(pointerRoot, stateRoot, timeoutMs, { ch
   fail(`timed out waiting for ${pointer}`);
 }
 
-function processCommandLine(pid) {
+function processCommandLine(pid, { onError } = {}) {
   if (!pid || process.platform !== "win32") return "";
   try {
     const script = `(Get-CimInstance Win32_Process -Filter \"ProcessId=${Number(pid)}\").CommandLine`;
@@ -1438,14 +1767,15 @@ function processCommandLine(pid) {
       encoding: "utf8",
       windowsHide: true
     }).trim();
-  } catch {
+  } catch (error) {
+    onError?.(error);
     return "";
   }
 }
 
 export function processExecutablePath(
   pid,
-  { execFile = execFileSync, platform = process.platform } = {}
+  { execFile = execFileSync, platform = process.platform, onError } = {}
 ) {
   if (!pid || platform !== "win32") return "";
   try {
@@ -1454,7 +1784,8 @@ export function processExecutablePath(
       encoding: "utf8",
       windowsHide: true
     }).trim();
-  } catch {
+  } catch (error) {
+    onError?.(error);
     return "";
   }
 }
@@ -1709,6 +2040,7 @@ async function runPackagedSupervisor({
     attribution: listenerAttribution,
     now: diagnosticsNow
   });
+  const requestDiagnostics = createRequestDiagnostics();
   const safeSample = async (...args) => {
     try {
       return await diagnostics.sample(...args);
@@ -1842,14 +2174,19 @@ async function runPackagedSupervisor({
     });
     if (endpointPort === mem0Port)
       fail(`Supervisor control port collides with Mem0 port (${mem0Port})`);
-    const health = await requestJson(`${base}/health`);
+    const health = await requestJson(`${base}/health`, {
+      label: "supervisor.health",
+      diagnostics: requestDiagnostics
+    });
     if (health.status !== 200 || health.value?.ok !== true)
       fail(`Supervisor health failed (${health.status})`);
     await safeSample("T4-before-bootstrap", { endpoint: endpointPort, pid: 0 });
     const bootstrap = await requestJson(`${base}/v1/bootstrap`, {
       method: "POST",
       token: endpoint.controlToken,
-      body: null
+      body: null,
+      label: "supervisor.bootstrap",
+      diagnostics: requestDiagnostics
     });
     if (bootstrap.status < 200 || bootstrap.status >= 300)
       fail(`Supervisor bootstrap failed (${bootstrap.status})`);
@@ -1859,7 +2196,11 @@ async function runPackagedSupervisor({
     let observedExternal = false;
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      const status = await requestJson(`${base}/v1/status`, { token: endpoint.controlToken });
+      const status = await requestJson(`${base}/v1/status`, {
+        token: endpoint.controlToken,
+        label: "supervisor.status",
+        diagnostics: requestDiagnostics
+      });
       mem0 = status.value?.services?.find((service) => service.id === "mem0") ?? null;
       runtimeState = status.value?.services?.find((service) => service.id === "runtime") ?? null;
       await safeObserveStatus("status-change", mem0);
@@ -1899,7 +2240,10 @@ async function runPackagedSupervisor({
       });
       fail("Supervisor did not own a running Mem0");
     }
-    const mem0Health = await requestJson(`http://127.0.0.1:${mem0Port}/health`);
+    const mem0Health = await requestJson(`http://127.0.0.1:${mem0Port}/health`, {
+      label: "mem0.health",
+      diagnostics: requestDiagnostics
+    });
     if (mem0Health.status !== 200 || !mem0Health.value?.ok)
       fail(`Mem0 health failed (${mem0Health.status})`);
     ownedMem0Pid = Number(mem0.pid);
@@ -1994,7 +2338,9 @@ async function runPackagedSupervisor({
         await requestJson(`${endpoint.baseUrl}/v1/shutdown`, {
           method: "POST",
           token: endpoint.controlToken,
-          body: null
+          body: null,
+          label: "supervisor.shutdown",
+          diagnostics: requestDiagnostics
         });
       } catch {
         /* best-effort graceful shutdown of this exact smoke instance */
@@ -2032,7 +2378,10 @@ async function runPackagedSupervisor({
         diagnosticBlock = "\nMEM0 OWNERSHIP DIAGNOSTIC\n  diagnostic query failed";
       }
     }
-    throw new Error(`${message}${diagnosticBlock}\n${stdout}\n${stderr}`);
+    const requestDiagnostic = requestDiagnostics.format();
+    throw new Error(
+      `${message}${diagnosticBlock}${requestDiagnostic ? `\nDIRECT HTTP REQUEST DIAGNOSTIC\n${requestDiagnostic}` : ""}\n${stdout}\n${stderr}`
+    );
   }
 }
 
@@ -2099,6 +2448,7 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
   const appArgs = [];
   assertNoSecrets(appArgs, "Tauri app argv");
   const timeline = createTauriTimeline();
+  const requestDiagnostics = createRequestDiagnostics({ timeline });
   timeline.mark("T0-tauri-executable-spawn");
   const child = spawn(appExecutable, appArgs, {
     cwd: layout.emptyCwd,
@@ -2108,6 +2458,7 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     stdio: ["ignore", "pipe", "pipe"]
   });
   timeline.mark("T1-tauri-spawn-returned", { appPid: child.pid });
+  timeline.mark("E0-tauri-process-launched", { appPid: child.pid });
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
@@ -2133,6 +2484,7 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
   let runtimeDiagnosticText = "";
   let runtimePid = 0;
   let mem0Pid = 0;
+  const processQueries = [];
   try {
     endpoint = await waitForSupervisorEndpoint(
       path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor"),
@@ -2147,6 +2499,10 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     timeline.mark("T2-active-instance-available", {
       supervisorPid: Number(pointer.pid) || 0,
       endpoint: endpoint.baseUrl
+    });
+    timeline.mark("E1-supervisor-endpoint-discovered", {
+      supervisorPid: Number(pointer.pid) || 0,
+      endpointPort: safePortFromUrl(endpoint.baseUrl)
     });
     if (pointer.mode !== "packaged") fail("Tauri bootstrap did not use packaged mode");
     if (!pidAlive(Number(pointer.pid))) fail("packaged Supervisor endpoint PID is not alive");
@@ -2164,17 +2520,41 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     timeline.mark("T3-bootstrap-ready-barrier", {
       readyAtMs: Number(readinessMarker.readyAtMs)
     });
-    const health = await requestJson(`${endpoint.baseUrl}/health`);
+    const health = await requestJson(`${endpoint.baseUrl}/health`, {
+      label: "supervisor.health",
+      diagnostics: requestDiagnostics
+    });
     if (health.status !== 200 || health.value?.ok !== true) fail("Tauri Supervisor health failed");
     timeline.mark("T4-supervisor-health-first", { supervisorHealth: "healthy" });
+    timeline.mark("E2-supervisor-health-ready", { supervisorHealth: "healthy" });
     const status = await requestJson(`${endpoint.baseUrl}/v1/status`, {
-      token: endpoint.controlToken
+      token: endpoint.controlToken,
+      label: "supervisor.status",
+      diagnostics: requestDiagnostics
     });
     if (status.status !== 200) fail("Tauri Supervisor status failed");
     const services = status.value?.services ?? [];
     runtime = services.find((service) => service.id === "runtime");
     const mem0 = services.find((service) => service.id === "mem0");
     const tts = services.find((service) => service.id === "tts_wrapper");
+    const mem0MetadataPath = endpoint.stateDirectory
+      ? path.join(endpoint.stateDirectory, "mem0.pid.json")
+      : null;
+    const mem0Metadata = readOwnershipMetadataDiagnostic(mem0MetadataPath, {
+      installRoot: resource.root,
+      smokeRoot: layout.root
+    });
+    if (mem0Metadata.exists) {
+      timeline.mark("E3-mem0-metadata-first-observed", {
+        pid: mem0Metadata.pid || 0
+      });
+    }
+    if (mem0?.ownership === "owned") {
+      timeline.mark("E4-mem0-owned-first-observed", {
+        pid: Number(mem0.pid) || 0,
+        metadataExists: mem0Metadata.exists
+      });
+    }
     timeline.mark("T5-status-first-observed", {
       runtimeStatus: runtime?.status ?? null,
       runtimeOwnership: runtime?.ownership ?? null,
@@ -2228,9 +2608,49 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     if (tts?.ownership === "owned" || tts?.pid) fail("Tauri smoke unexpectedly started TTS");
     runtimePid = Number(runtime.pid);
     mem0Pid = Number(mem0.pid);
-    const runtimeCommandLine = processCommandLine(runtimePid);
-    const runtimeImagePath =
-      processExecutablePath(runtimePid) || runtimeListener.executablePath || "";
+    const runProcessQuery = (role, pid, query) => {
+      const startedAtMs = Date.now();
+      let errorCode = null;
+      let value = "";
+      try {
+        value = query((error) => {
+          errorCode = diagnosticErrorField(error, "code") ?? "query-failed";
+        });
+      } catch (error) {
+        errorCode = diagnosticErrorField(error, "code") ?? "query-failed";
+      }
+      const endedAtMs = Date.now();
+      processQueries.push({
+        role,
+        pid: Number(pid) || 0,
+        startedAt: new Date(startedAtMs).toISOString(),
+        endedAt: new Date(endedAtMs).toISOString(),
+        elapsedMs: Math.max(0, endedAtMs - startedAtMs),
+        outcome: errorCode ? "query-timeout" : value ? "resolved" : "unavailable",
+        errorCode
+      });
+      return value;
+    };
+    timeline.mark("E5-before-process-provenance-query", {
+      runtimePid,
+      mem0Pid
+    });
+    const runtimeCommandLine = runProcessQuery(
+      "runtime.command-line",
+      runtimePid,
+      (onError) => processCommandLine(runtimePid, { onError })
+    );
+    const queriedRuntimeImagePath = runProcessQuery(
+      "runtime.executable-path",
+      runtimePid,
+      (onError) => processExecutablePath(runtimePid, { onError })
+    );
+    const runtimeImagePath = queriedRuntimeImagePath || runtimeListener.executablePath || "";
+    timeline.mark("E6-process-query-completed", {
+      runtimeCommandLine: runtimeCommandLine ? "resolved" : "unavailable",
+      runtimeImagePath: runtimeImagePath ? "resolved" : "unavailable",
+      queryErrors: processQueries.filter((entry) => entry.errorCode).map((entry) => entry.errorCode)
+    });
     const runtimeProvenance = evaluateRuntimeProvenance({
       imagePath: runtimeImagePath,
       commandLine: runtimeCommandLine,
@@ -2240,7 +2660,11 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     });
     runtimeProvenance.pid = runtimePid;
     runtimeProvenance.processName = runtimeListener.processName;
-    const mem0CommandLine = processCommandLine(mem0Pid);
+    const mem0CommandLine = runProcessQuery(
+      "mem0.command-line",
+      mem0Pid,
+      (onError) => processCommandLine(mem0Pid, { onError })
+    );
     const expectedMem0 = path
       .join(resource.root, "mem0", MEM0_EXE_NAME)
       .toLowerCase()
@@ -2251,11 +2675,17 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       fail("Tauri Mem0 command line is not the installed executable");
     assertNoUnsafeCommandLine(runtimeCommandLine);
     assertNoUnsafeCommandLine(mem0CommandLine);
-    const mem0Health = await requestJson(String(mem0.url));
+    const mem0Health = await requestJson(String(mem0.url), {
+      label: "mem0.health",
+      diagnostics: requestDiagnostics
+    });
     if (mem0Health.status !== 200 || !mem0Health.value?.ok) fail("Tauri Mem0 health failed");
     if (!["healthy", "degraded", "unhealthy"].includes(mem0Health.value?.data?.status))
       fail("Tauri Mem0 health protocol is invalid");
-    const runtimeHealth = await requestJson(String(runtime.url));
+    const runtimeHealth = await requestJson(String(runtime.url), {
+      label: "runtime.health",
+      diagnostics: requestDiagnostics
+    });
     if (runtimeHealth.status !== 200 || runtimeHealth.value?.ok !== true)
       fail("Tauri Runtime health protocol is invalid");
 
@@ -2299,12 +2729,27 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       mem0Health: mem0Health.value
     };
   } catch (error) {
+    const failureSnapshot = createTauriFailureSnapshot({
+      appPid: child.pid,
+      supervisorPid: Number(pointer?.pid) || 0,
+      runtimePid,
+      mem0Pid,
+      endpoint,
+      runtime,
+      installRoot: resource.root
+    });
+    timeline.mark("E9-failure-snapshot", {
+      snapshotStatus: failureSnapshot.snapshotStatus
+    });
+    timeline.mark("E10-cleanup-begins");
     if (endpoint?.baseUrl && endpoint.controlToken) {
       try {
         await requestJson(`${endpoint.baseUrl}/v1/shutdown`, {
           method: "POST",
           token: endpoint.controlToken,
-          body: null
+          body: null,
+          label: "supervisor.shutdown",
+          diagnostics: requestDiagnostics
         });
       } catch {
         /* exact smoke instance cleanup only */
@@ -2321,8 +2766,15 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     }
     logExit();
     const diagnostic = runtimeDiagnosticText ? `\n${runtimeDiagnosticText}` : "";
+    const failureDiagnostic = formatTauriFailureDiagnostic({
+      primaryError: error,
+      requestDiagnostics,
+      timeline,
+      snapshot: failureSnapshot,
+      processQueries
+    });
     throw new Error(
-      `${error instanceof Error ? error.message : String(error)}${diagnostic}\n${stdout}\n${stderr}`
+      `${error instanceof Error ? error.message : String(error)}\n${failureDiagnostic}${diagnostic}\n${stdout}\n${stderr}`
     );
   }
 }
