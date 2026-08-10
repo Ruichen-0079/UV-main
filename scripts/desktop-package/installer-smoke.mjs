@@ -2011,6 +2011,148 @@ export function evaluateRuntimeProvenance({
   };
 }
 
+/**
+ * Validate the authoritative Mem0 process image against the installed resource.
+ * Command lines are intentionally not part of this identity contract.
+ */
+export function evaluateMem0Provenance({
+  imagePath,
+  expectedExecutablePath,
+  installRoot,
+  resolveExistingPath = resolveExistingWindowsPathForComparison
+} = {}) {
+  const resolvePath = (value) => {
+    try {
+      const result = resolveExistingPath(value);
+      if (typeof result === "string") {
+        const resolvedPath = normalizeWindowsPathForComparison(result);
+        return {
+          ok: Boolean(resolvedPath),
+          rawPath: typeof value === "string" ? stripWindowsDevicePrefix(value) : null,
+          lexicalPath: normalizeWindowsPathForComparison(value) || null,
+          resolvedPath: resolvedPath || null,
+          errorCode: resolvedPath ? null : "INVALID_RESOLVED_PATH"
+        };
+      }
+      if (!result || typeof result !== "object") {
+        return {
+          ok: false,
+          rawPath: typeof value === "string" ? stripWindowsDevicePrefix(value) : null,
+          lexicalPath: normalizeWindowsPathForComparison(value) || null,
+          resolvedPath: null,
+          errorCode: "RESOLVE_FAILED"
+        };
+      }
+      const resolvedPath = normalizeWindowsPathForComparison(result.resolvedPath);
+      return {
+        ok: result.ok === true && Boolean(resolvedPath),
+        rawPath: result.rawPath ?? (typeof value === "string" ? stripWindowsDevicePrefix(value) : null),
+        lexicalPath: result.lexicalPath ?? (normalizeWindowsPathForComparison(value) || null),
+        resolvedPath: resolvedPath || null,
+        errorCode: result.errorCode ?? (result.ok === true ? null : "RESOLVE_FAILED")
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        rawPath: typeof value === "string" ? stripWindowsDevicePrefix(value) : null,
+        lexicalPath: normalizeWindowsPathForComparison(value) || null,
+        resolvedPath: null,
+        errorCode: String(error?.code ?? "RESOLVE_FAILED").slice(0, 80)
+      };
+    }
+  };
+
+  const imageAvailable = Boolean(String(imagePath ?? "").trim());
+  const expectedAvailable = Boolean(String(expectedExecutablePath ?? "").trim());
+  const imageResolution = resolvePath(imagePath);
+  const expectedResolution = resolvePath(expectedExecutablePath);
+  const installRootResolution = resolvePath(installRoot);
+  const imageMatchesExpected =
+    imageAvailable &&
+    expectedAvailable &&
+    imageResolution.ok &&
+    expectedResolution.ok &&
+    imageResolution.resolvedPath === expectedResolution.resolvedPath;
+  const imageInsideInstallRoot =
+    imageResolution.ok &&
+    installRootResolution.ok &&
+    isWindowsPathInside(installRootResolution.resolvedPath, imageResolution.resolvedPath);
+  const failureReasons = [];
+  if (!imageAvailable) failureReasons.push("authoritative Mem0 image path unavailable");
+  else if (!imageMatchesExpected) failureReasons.push("Mem0 image does not match installed executable");
+  if (!expectedAvailable) failureReasons.push("installed Mem0 executable path unavailable");
+  if (!imageInsideInstallRoot) failureReasons.push("Mem0 image is outside the installed resource root");
+  const resolutionFailures = [
+    ["install root", installRootResolution, true],
+    ["authoritative Mem0 image", imageResolution, imageAvailable],
+    ["installed Mem0 executable", expectedResolution, expectedAvailable]
+  ];
+  for (const [label, resolution, required] of resolutionFailures) {
+    if (required && !resolution.ok)
+      failureReasons.push(`${label} filesystem resolution failed (${resolution.errorCode ?? "RESOLVE_FAILED"})`);
+  }
+  return {
+    rawImagePath: imagePath || null,
+    rawExpectedPath: expectedExecutablePath || null,
+    authoritativeImagePath: imagePath || null,
+    expectedExecutablePath: expectedExecutablePath || null,
+    normalizedImagePath: normalizeWindowsPathForComparison(imagePath) || null,
+    normalizedExpectedPath: normalizeWindowsPathForComparison(expectedExecutablePath) || null,
+    normalizedInstallRoot: normalizeWindowsPathForComparison(installRoot) || null,
+    resolvedImagePath: imageResolution.resolvedPath,
+    resolvedExpectedPath: expectedResolution.resolvedPath,
+    resolvedExpectedImagePath: expectedResolution.resolvedPath,
+    resolvedInstallRoot: installRootResolution.resolvedPath,
+    filesystemResolution: {
+      image: imageResolution,
+      expected: expectedResolution,
+      installRoot: installRootResolution
+    },
+    resolverStatus: {
+      image: imageResolution.errorCode ?? "ok",
+      expected: expectedResolution.errorCode ?? "ok",
+      installRoot: installRootResolution.errorCode ?? "ok"
+    },
+    imageMatchesExpected: Boolean(imageMatchesExpected),
+    imageInsideInstallRoot: Boolean(imageInsideInstallRoot),
+    failureReasons,
+    ok: Boolean(imageMatchesExpected) && Boolean(imageInsideInstallRoot)
+  };
+}
+
+export function formatMem0ProvenanceDiagnostic({
+  stage = "MEM0",
+  provenance = {},
+  installRoot,
+  pid = 0,
+  parentPid = 0,
+  supervisorPid = 0,
+  ownership = "unknown",
+  metadataInstanceMatch = false
+} = {}) {
+  const rawPath = (value) => {
+    const text = String(value ?? "").trim();
+    return text || "unavailable";
+  };
+  return [
+    `${stage} MEM0 PROVENANCE`,
+    `  actual image: ${rawPath(provenance.rawImagePath ?? provenance.authoritativeImagePath)}`,
+    `  expected image: ${rawPath(provenance.rawExpectedPath ?? provenance.expectedExecutablePath)}`,
+    `  filesystem resolved actual: ${provenanceDiagnosticPath(provenance.resolvedImagePath, provenance.resolvedInstallRoot ?? installRoot)}`,
+    `  filesystem resolved expected: ${provenanceDiagnosticPath(provenance.resolvedExpectedPath, provenance.resolvedInstallRoot ?? installRoot)}`,
+    `  filesystem resolved install root: ${rawPath(provenance.resolvedInstallRoot)}`,
+    `  image resolver: ${provenance.resolverStatus?.image ?? "unknown"}`,
+    `  expected resolver: ${provenance.resolverStatus?.expected ?? "unknown"}`,
+    `  image match: ${provenance.imageMatchesExpected ? "yes" : "no"}`,
+    `  image inside install root: ${provenance.imageInsideInstallRoot ? "yes" : "no"}`,
+    `  pid: ${Number(pid) || "unknown"}`,
+    `  parent pid: ${Number(parentPid) || "unknown"}`,
+    `  child of Supervisor: ${Number(parentPid) > 0 && Number(parentPid) === Number(supervisorPid) ? "yes" : "no"}`,
+    `  ownership: ${ownership}`,
+    `  metadata instance match: ${metadataInstanceMatch ? "yes" : "no"}`
+  ].join("\n");
+}
+
 export function formatRuntimeProvenanceDiagnostic({
   stage,
   provenance = {},
@@ -2388,16 +2530,50 @@ async function runPackagedSupervisor({
     if (mem0Health.status !== 200 || !mem0Health.value?.ok)
       fail(`Mem0 health failed (${mem0Health.status})`);
     ownedMem0Pid = Number(mem0.pid);
+    const mem0Listener = attributeWindowsListener(mem0Port, {
+      installRoot: resource.root,
+      supervisorPid: child.pid,
+      knownManagedPid: ownedMem0Pid
+    });
+    const mem0Metadata = endpoint.stateDirectory
+      ? readOwnershipMetadataDiagnostic(path.join(endpoint.stateDirectory, "mem0.pid.json"), {
+          installRoot: resource.root,
+          smokeRoot: layout.root
+        })
+      : readOwnershipMetadataDiagnostic(null);
+    const mem0MetadataInstanceMatch = Boolean(
+      mem0Metadata.instanceId && endpoint.instanceId && mem0Metadata.instanceId === endpoint.instanceId
+    );
+    if (!mem0MetadataInstanceMatch || Number(mem0Metadata.pid) !== ownedMem0Pid)
+      fail("Mem0 ownership metadata does not match the current instance");
+    const mem0ImagePath =
+      processExecutablePath(ownedMem0Pid) || mem0Listener.executablePath || "";
+    const expectedMem0 = path.join(resource.root, "mem0", MEM0_EXE_NAME);
+    const mem0Provenance = evaluateMem0Provenance({
+      imagePath: mem0ImagePath,
+      expectedExecutablePath: expectedMem0,
+      installRoot: resource.root
+    });
+    console.info(
+      formatMem0ProvenanceDiagnostic({
+        stage: "DIRECT",
+        provenance: mem0Provenance,
+        installRoot: resource.root,
+        pid: ownedMem0Pid,
+        parentPid: mem0Listener.parentProcessId,
+        supervisorPid: child.pid,
+        ownership: mem0.ownership,
+        metadataInstanceMatch: mem0MetadataInstanceMatch
+      })
+    );
+    if (mem0Listener.state === "Listen" &&
+      mem0Listener.parentProcessId > 0 &&
+      mem0Listener.parentProcessId !== Number(child.pid))
+      fail("Mem0 listener is not a child of the current Supervisor");
+    if (!mem0Provenance.ok)
+      fail(`Mem0 executable provenance failed: ${mem0Provenance.failureReasons.join("; ")}`);
     const commandLine = processCommandLine(mem0.pid);
-    if (commandLine) {
-      const expectedMem0 = path
-        .join(resource.root, "mem0", MEM0_EXE_NAME)
-        .toLowerCase()
-        .replaceAll("/", "\\");
-      if (!commandLine.toLowerCase().replaceAll("/", "\\").includes(expectedMem0))
-        fail("Mem0 command line is not the installed executable");
-      assertNoUnsafeCommandLine(commandLine);
-    }
+    if (commandLine) assertNoUnsafeCommandLine(commandLine);
     const dataRoot = path.join(localAppData, "YUVI", "Mem0");
     if (!isWithin(dataRoot, localAppData) || !fs.existsSync(dataRoot))
       fail("isolated Mem0 data path missing");
@@ -2465,6 +2641,7 @@ async function runPackagedSupervisor({
       embeddedBuildInfo,
       installedExecutableSha256,
       installedBundleSha256,
+      mem0Provenance,
       status: mem0Health.value
     };
   } catch (error) {
@@ -2801,19 +2978,55 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     });
     runtimeProvenance.pid = runtimePid;
     runtimeProvenance.processName = runtimeListener.processName;
+    const mem0Port = safePortFromUrl(mem0?.url);
+    const mem0Listener = mem0Port
+      ? attributeWindowsListener(mem0Port, {
+          installRoot: resource.root,
+          supervisorPid: Number(pointer.pid) || 0,
+          knownManagedPid: mem0Pid
+        })
+      : listenerResult(null, { queryErrorCode: "mem0-url-unavailable" });
+    const mem0ImagePath = runProcessQuery(
+      "mem0.executable-path",
+      mem0Pid,
+      (onError) => processExecutablePath(mem0Pid, { onError })
+    );
+    const expectedMem0 = path.join(resource.root, "mem0", MEM0_EXE_NAME);
+    const mem0Provenance = evaluateMem0Provenance({
+      imagePath: mem0ImagePath || mem0Listener.executablePath || "",
+      expectedExecutablePath: expectedMem0,
+      installRoot: resource.root
+    });
+    const mem0MetadataInstanceMatch = Boolean(
+      mem0Metadata.instanceId && endpoint.instanceId && mem0Metadata.instanceId === endpoint.instanceId
+    );
+    console.info(
+      formatMem0ProvenanceDiagnostic({
+        stage: "TAURI",
+        provenance: mem0Provenance,
+        installRoot: resource.root,
+        pid: mem0Pid,
+        parentPid: mem0Listener.parentProcessId,
+        supervisorPid: Number(pointer.pid) || 0,
+        ownership: mem0.ownership,
+        metadataInstanceMatch: mem0MetadataInstanceMatch
+      })
+    );
     const mem0CommandLine = runProcessQuery(
       "mem0.command-line",
       mem0Pid,
       (onError) => processCommandLine(mem0Pid, { onError })
     );
-    const expectedMem0 = path
-      .join(resource.root, "mem0", MEM0_EXE_NAME)
-      .toLowerCase()
-      .replaceAll("/", "\\");
     if (!runtimeProvenance.ok)
       fail(`Tauri Runtime bundled-Node provenance failed: ${runtimeProvenance.failureReasons.join("; ")}`);
-    if (!mem0CommandLine.toLowerCase().replaceAll("/", "\\").includes(expectedMem0))
-      fail("Tauri Mem0 command line is not the installed executable");
+    if (!mem0Provenance.ok)
+      fail(`Tauri Mem0 executable provenance failed: ${mem0Provenance.failureReasons.join("; ")}`);
+    if (mem0Listener.state === "Listen" &&
+      mem0Listener.parentProcessId > 0 &&
+      mem0Listener.parentProcessId !== Number(pointer.pid))
+      fail("Tauri Mem0 listener is not a child of the current Supervisor");
+    if (!mem0MetadataInstanceMatch || Number(mem0Metadata.pid) !== mem0Pid)
+      fail("Tauri Mem0 ownership metadata does not match the current instance");
     assertNoUnsafeCommandLine(runtimeCommandLine);
     assertNoUnsafeCommandLine(mem0CommandLine);
     const mem0Health = await requestJson(String(mem0.url), {
@@ -2866,6 +3079,7 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       mem0Pid,
       runtimeCommandLine,
       mem0CommandLine,
+      mem0Provenance,
       mode: pointer.mode,
       mem0Health: mem0Health.value
     };

@@ -4,6 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   assertCleanupTarget,
   assertInstallPathSafe,
@@ -25,7 +26,9 @@ import {
   createOwnershipDiagnostics,
   FORBIDDEN_PATH_TOOLS,
   formatOwnershipDiagnostic,
+  formatMem0ProvenanceDiagnostic,
   formatTauriFailureDiagnostic,
+  evaluateMem0Provenance,
   evaluateRuntimeProvenance,
   formatRuntimeProvenanceDiagnostic,
   findInstalledApplicationExecutable,
@@ -60,6 +63,13 @@ import {
 const temp = (prefix = "yuvi-installer-test-") => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 const syntheticExistingResolver = (value) =>
   resolveExistingWindowsPathForComparison(value, { realpathSyncNative: (input) => input });
+const mappedExistingResolver = (map) => (value) =>
+  resolveExistingWindowsPathForComparison(value, {
+    realpathSyncNative: (input) => {
+      if (map.has(input)) return map.get(input);
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }
+  });
 
 function fakeHttpRequest({ responseBody = null, statusCode = 200, requestError = null } = {}) {
   let responseCallback;
@@ -672,6 +682,170 @@ test("listener attribution fails closed without changing the query conclusion", 
   assert.equal(result.querySucceeded, false);
   assert.equal(result.queryErrorCode, "ENOEXEC");
   assert.equal(result.state, "query-failed");
+});
+
+test("Mem0 provenance accepts long actual and short expected filesystem aliases", () => {
+  const root = "C:\\Users\\runneradmin\\Temp\\install";
+  const shortRoot = "C:\\Users\\RUNNER~1\\Temp\\install";
+  const actual = `${root}\\mem0\\yuvi-mem0.exe`;
+  const expected = `${shortRoot}\\mem0\\yuvi-mem0.exe`;
+  const result = evaluateMem0Provenance({
+    imagePath: actual,
+    expectedExecutablePath: expected,
+    installRoot: shortRoot,
+    resolveExistingPath: mappedExistingResolver(new Map([
+      [root, root],
+      [shortRoot, root],
+      [actual, actual],
+      [expected, actual]
+    ]))
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.imageMatchesExpected, true);
+  assert.equal(result.imageInsideInstallRoot, true);
+});
+
+test("Mem0 provenance accepts short actual and long expected filesystem aliases", () => {
+  const root = "C:\\Users\\runneradmin\\Temp\\install";
+  const shortRoot = "C:\\Users\\RUNNER~1\\Temp\\install";
+  const actual = `${shortRoot}\\mem0\\yuvi-mem0.exe`;
+  const expected = `${root}\\mem0\\yuvi-mem0.exe`;
+  const result = evaluateMem0Provenance({
+    imagePath: actual,
+    expectedExecutablePath: expected,
+    installRoot: root,
+    resolveExistingPath: mappedExistingResolver(new Map([
+      [root, root],
+      [shortRoot, root],
+      [actual, expected],
+      [expected, expected]
+    ]))
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.resolvedImagePath, result.resolvedExpectedPath);
+});
+
+test("Mem0 provenance accepts extended actual and normal expected paths", () => {
+  const root = "C:\\Temp\\install";
+  const actual = `\\\\?\\${root}\\mem0\\yuvi-mem0.exe`;
+  const expected = `${root}\\mem0\\yuvi-mem0.exe`;
+  const result = evaluateMem0Provenance({
+    imagePath: actual,
+    expectedExecutablePath: expected,
+    installRoot: `\\\\?\\${root}`,
+    resolveExistingPath: syntheticExistingResolver
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.imageInsideInstallRoot, true);
+});
+
+test("Mem0 provenance rejects system and unrelated TEMP executables", () => {
+  const root = "C:\\Users\\runneradmin\\Temp\\install";
+  const expected = `${root}\\mem0\\yuvi-mem0.exe`;
+  for (const imagePath of [
+    "C:\\Program Files\\YUVI\\yuvi-mem0.exe",
+    "C:\\Users\\runneradmin\\Temp\\other-install\\mem0\\yuvi-mem0.exe",
+    "C:\\Dev\\UV-main\\build\\desktop\\win32-x64\\mem0\\yuvi-mem0.exe"
+  ]) {
+    const result = evaluateMem0Provenance({
+      imagePath,
+      expectedExecutablePath: expected,
+      installRoot: root,
+      resolveExistingPath: syntheticExistingResolver
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.imageMatchesExpected, false);
+    assert.equal(result.imageInsideInstallRoot, false);
+  }
+});
+
+test("Mem0 provenance fails closed for resolver errors and unavailable images", () => {
+  const root = "C:\\Users\\RUNNER~1\\Temp\\install";
+  const expected = `${root}\\mem0\\yuvi-mem0.exe`;
+  const actual = "C:\\Users\\runneradmin\\Temp\\install\\mem0\\yuvi-mem0.exe";
+  const actualError = evaluateMem0Provenance({
+    imagePath: actual,
+    expectedExecutablePath: expected,
+    installRoot: root,
+    resolveExistingPath: mappedExistingResolver(new Map([
+      [root, "C:\\Users\\runneradmin\\Temp\\install"],
+      [expected, actual]
+    ]))
+  });
+  assert.equal(actualError.ok, false);
+  assert.match(actualError.failureReasons.join(";"), /authoritative Mem0 image filesystem resolution failed/);
+  const expectedError = evaluateMem0Provenance({
+    imagePath: actual,
+    expectedExecutablePath: expected,
+    installRoot: root,
+    resolveExistingPath: mappedExistingResolver(new Map([
+      [root, root],
+      [actual, actual]
+    ]))
+  });
+  assert.equal(expectedError.ok, false);
+  assert.match(expectedError.failureReasons.join(";"), /installed Mem0 executable filesystem resolution failed/);
+  const unavailable = evaluateMem0Provenance({
+    imagePath: "",
+    expectedExecutablePath: expected,
+    installRoot: root,
+    resolveExistingPath: syntheticExistingResolver
+  });
+  assert.equal(unavailable.ok, false);
+  assert.match(unavailable.failureReasons.join(";"), /authoritative Mem0 image path unavailable/);
+});
+
+test("Mem0 provenance rejects an outside resolved root even when image paths match", () => {
+  const root = "C:\\Users\\runneradmin\\Temp\\install";
+  const outside = "C:\\Users\\runneradmin\\Temp\\other\\mem0\\yuvi-mem0.exe";
+  const result = evaluateMem0Provenance({
+    imagePath: outside,
+    expectedExecutablePath: outside,
+    installRoot: root,
+    resolveExistingPath: syntheticExistingResolver
+  });
+  assert.equal(result.imageMatchesExpected, true);
+  assert.equal(result.imageInsideInstallRoot, false);
+  assert.equal(result.ok, false);
+});
+
+test("Mem0 command line is not an executable identity gate", () => {
+  const root = "C:\\Temp\\install";
+  const image = `${root}\\mem0\\yuvi-mem0.exe`;
+  const result = evaluateMem0Provenance({
+    imagePath: image,
+    expectedExecutablePath: image,
+    installRoot: root,
+    resolveExistingPath: syntheticExistingResolver
+  });
+  assert.equal(result.ok, true);
+  assert.doesNotThrow(() => assertNoUnsafeCommandLine("unexpected-safe-argument"));
+  const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "installer-smoke.mjs"), "utf8");
+  assert.doesNotMatch(source, /commandLine\.toLowerCase\(\)[\s\S]{0,160}includes\(expectedMem0\)/);
+  assert.ok((source.match(/evaluateMem0Provenance\(/g) ?? []).length >= 2);
+});
+
+test("Mem0 provenance diagnostic omits command lines and secrets", () => {
+  const root = "C:\\Temp\\install";
+  const text = formatMem0ProvenanceDiagnostic({
+    stage: "TAURI",
+    installRoot: root,
+    pid: 42,
+    parentPid: 41,
+    supervisorPid: 41,
+    ownership: "owned",
+    metadataInstanceMatch: true,
+    provenance: evaluateMem0Provenance({
+      imagePath: `${root}\\mem0\\yuvi-mem0.exe`,
+      expectedExecutablePath: `${root}\\mem0\\yuvi-mem0.exe`,
+      installRoot: root,
+      resolveExistingPath: syntheticExistingResolver
+    })
+  });
+  assert.match(text, /MEM0 PROVENANCE/);
+  assert.match(text, /image match: yes/);
+  assert.match(text, /child of Supervisor: yes/);
+  assert.doesNotMatch(text, /CommandLine|Authorization|token|DATABASE_URL|api_key/i);
 });
 
 test("Runtime provenance accepts bundled image with basename or absolute argv0", () => {
