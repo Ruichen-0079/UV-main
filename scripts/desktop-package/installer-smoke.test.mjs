@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -44,6 +45,7 @@ import {
   restrictedPath,
   restrictedWindowsPath,
   readOwnershipMetadataDiagnostic,
+  resolveExistingWindowsPathForComparison,
   sanitizeChildEnv,
   snapshotTree,
   assertSupervisorProvenance,
@@ -56,11 +58,15 @@ import {
 } from "./installer-smoke.mjs";
 
 const temp = (prefix = "yuvi-installer-test-") => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+const syntheticExistingResolver = (value) =>
+  resolveExistingWindowsPathForComparison(value, { realpathSyncNative: (input) => input });
 
 function fakeHttpRequest({ responseBody = null, statusCode = 200, requestError = null } = {}) {
   let responseCallback;
   const listeners = new Map();
   let calls = 0;
+  let factoryCalls = 0;
+  const optionsSeen = [];
   const request = {
     once(event, handler) {
       listeners.set(event, handler);
@@ -98,12 +104,20 @@ function fakeHttpRequest({ responseBody = null, statusCode = 200, requestError =
     }
   };
   return {
-    factory(_options, callback) {
+    factory(options, callback) {
+      factoryCalls += 1;
+      optionsSeen.push(options);
       responseCallback = callback;
       return request;
     },
     calls() {
       return calls;
+    },
+    factoryCalls() {
+      return factoryCalls;
+    },
+    optionsSeen() {
+      return optionsSeen;
     }
   };
 }
@@ -134,6 +148,7 @@ test("Tauri request diagnostics preserve ECONNRESET and never retry", async () =
   assert.match(formatted, /syscall=read/);
   assert.doesNotMatch(formatted, /secret-value/);
   assert.equal(diagnostics.lastFailure().phase, "connected");
+  assert.equal(fake.optionsSeen()[0].agent, false);
 });
 
 test("Tauri request diagnostics keep successful request count and hide query secrets", async () => {
@@ -150,6 +165,26 @@ test("Tauri request diagnostics keep successful request count and hide query sec
   assert.match(formatted, /supervisor\.health GET 127\.0\.0\.1:6121\/health/);
   assert.doesNotMatch(formatted, /query-secret/);
   assert.doesNotMatch(formatted, /api_key/);
+  assert.equal(fake.optionsSeen()[0].agent, false);
+});
+
+test("requestJson isolates sequential requests and does not use globalAgent", async () => {
+  const fake = fakeHttpRequest({ responseBody: JSON.stringify({ ok: true }) });
+  const first = await requestJson("http://127.0.0.1:6121/health", {
+    label: "supervisor.health",
+    requestFactory: fake.factory
+  });
+  const second = await requestJson("http://127.0.0.1:6121/v1/status", {
+    label: "supervisor.status",
+    requestFactory: fake.factory
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(fake.factoryCalls(), 2);
+  assert.equal(fake.calls(), 2);
+  assert.deepEqual(fake.optionsSeen().map((options) => options.agent), [false, false]);
+  assert.notEqual(fake.optionsSeen()[0].agent, http.globalAgent);
 });
 
 test("Tauri failure timeline is bounded and retains deterministic order", () => {
@@ -652,7 +687,8 @@ test("Runtime provenance accepts bundled image with basename or absolute argv0",
       commandLine,
       expectedBundledNodePath: node,
       expectedEntrypointPath: entry,
-      installRoot: root
+      installRoot: root,
+      resolveExistingPath: syntheticExistingResolver
     });
     assert.equal(result.ok, true);
     assert.equal(result.imageMatchesExpected, true);
@@ -670,7 +706,8 @@ test("Runtime provenance rejects system or outside Node images", () => {
       commandLine: `node.exe "${entry}"`,
       expectedBundledNodePath: node,
       expectedEntrypointPath: entry,
-      installRoot: root
+      installRoot: root,
+      resolveExistingPath: syntheticExistingResolver
     });
     assert.equal(result.ok, false);
     assert.equal(result.imageMatchesExpected, false);
@@ -685,7 +722,8 @@ test("Runtime provenance fails closed when authoritative image is unavailable", 
     commandLine: `node.exe "${entry}"`,
     expectedBundledNodePath: `${root}\\runtime\\node.exe`,
     expectedEntrypointPath: entry,
-    installRoot: root
+    installRoot: root,
+    resolveExistingPath: syntheticExistingResolver
   });
   assert.equal(result.ok, false);
   assert.equal(result.imageMatchesExpected, false);
@@ -705,7 +743,8 @@ test("Runtime provenance independently validates the installed entrypoint", () =
       commandLine: `node.exe "${entry}"`,
       expectedBundledNodePath: node,
       expectedEntrypointPath: expected,
-      installRoot: root
+      installRoot: root,
+      resolveExistingPath: syntheticExistingResolver
     });
     assert.equal(result.imageMatchesExpected, true);
     assert.equal(result.entrypointMatchesExpected, false);
@@ -720,7 +759,8 @@ test("Runtime provenance does not trust processName or basename alone", () => {
     commandLine: "node.exe yuvi-runtime-server.mjs",
     expectedBundledNodePath: `${root}\\runtime\\node.exe`,
     expectedEntrypointPath: `${root}\\runtime\\yuvi-runtime-server.mjs`,
-    installRoot: root
+    installRoot: root,
+    resolveExistingPath: syntheticExistingResolver
   });
   assert.equal(result.ok, false);
   assert.equal(result.executableToken, "node.exe");
@@ -774,6 +814,166 @@ test("Windows comparison canonicalizer handles drive extended paths, case, separ
   assert.equal(normalizeWindowsPathForComparison("node.exe"), "");
   assert.equal(normalizeWindowsProcessPath(extended), "c:\\temp\\yuvi\\runtime\\node.exe");
   assert.equal(windowsProcessPathInside(extended, "C:\\Temp\\YUVI"), true);
+});
+
+test("lexical canonicalization never invents 8.3 short-name equivalence", () => {
+  const longPath = "C:\\Users\\runneradmin\\Temp\\install\\runtime\\node.exe";
+  const shortPath = "C:\\Users\\RUNNER~1\\Temp\\install\\runtime\\node.exe";
+  assert.notEqual(normalizeWindowsPathForComparison(longPath), normalizeWindowsPathForComparison(shortPath));
+  assert.equal(pathsEqualWindows(longPath, shortPath), false);
+});
+
+test("filesystem path resolver collapses injected short and long aliases", () => {
+  const longPath = "C:\\Users\\runneradmin\\Temp\\install\\runtime\\node.exe";
+  const shortPath = "C:\\Users\\RUNNER~1\\Temp\\install\\runtime\\node.exe";
+  const resolved = (input) => (input === shortPath ? longPath : input);
+  const shortResult = resolveExistingWindowsPathForComparison(shortPath, { realpathSyncNative: resolved });
+  const longResult = resolveExistingWindowsPathForComparison(longPath, { realpathSyncNative: resolved });
+  assert.equal(shortResult.ok, true);
+  assert.equal(longResult.ok, true);
+  assert.equal(shortResult.resolvedPath, longResult.resolvedPath);
+});
+
+test("Runtime provenance accepts short-vs-long filesystem identity for image and entrypoint", () => {
+  const root = "C:\\Users\\runneradmin\\Temp\\install\\generated\\win32-x64";
+  const shortRoot = "C:\\Users\\RUNNER~1\\Temp\\install\\generated\\win32-x64";
+  const longNode = `${root}\\runtime\\node.exe`;
+  const shortNode = `${shortRoot}\\runtime\\node.exe`;
+  const longEntry = `${root}\\runtime\\yuvi-runtime-server.mjs`;
+  const shortEntry = `${shortRoot}\\runtime\\yuvi-runtime-server.mjs`;
+  const resolveMap = new Map([
+    [shortRoot, root],
+    [root, root],
+    [shortNode, longNode],
+    [longNode, longNode],
+    [shortEntry, longEntry],
+    [longEntry, longEntry]
+  ]);
+  const result = evaluateRuntimeProvenance({
+    imagePath: shortNode,
+    commandLine: `node.exe "${shortEntry}"`,
+    expectedBundledNodePath: longNode,
+    expectedEntrypointPath: longEntry,
+    installRoot: root,
+    resolveExistingPath: (value) =>
+      resolveExistingWindowsPathForComparison(value, {
+        realpathSyncNative: (input) => resolveMap.get(input) ?? (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })()
+      })
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.imageMatchesExpected, true);
+  assert.equal(result.entrypointMatchesExpected, true);
+  assert.equal(result.imageInsideInstallRoot, true);
+  assert.equal(result.entrypointInsideInstallRoot, true);
+});
+
+test("filesystem-resolved provenance rejects a different real target and short sibling", () => {
+  const root = "C:\\Users\\runneradmin\\Temp\\install\\generated\\win32-x64";
+  const expectedNode = `${root}\\runtime\\node.exe`;
+  const expectedEntry = `${root}\\runtime\\yuvi-runtime-server.mjs`;
+  const shortSiblingNode = "C:\\Users\\RUNNER~2\\Temp\\install\\generated\\win32-x64\\runtime\\node.exe";
+  const resolveMap = new Map([
+    [root, root],
+    [expectedNode, expectedNode],
+    [expectedEntry, expectedEntry],
+    [shortSiblingNode, "C:\\Users\\other\\Temp\\runtime\\node.exe"]
+  ]);
+  const resolveExisting = (value) =>
+    resolveExistingWindowsPathForComparison(value, {
+      realpathSyncNative: (input) => resolveMap.get(input) ?? (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })()
+    });
+  const result = evaluateRuntimeProvenance({
+    imagePath: shortSiblingNode,
+    commandLine: `node.exe "${expectedEntry}"`,
+    expectedBundledNodePath: expectedNode,
+    expectedEntrypointPath: expectedEntry,
+    installRoot: root,
+    resolveExistingPath: resolveExisting
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.imageMatchesExpected, false);
+  assert.equal(result.imageInsideInstallRoot, false);
+  assert.match(result.failureReasons.join(";"), /Runtime image does not match/);
+});
+
+test("filesystem-resolved containment accepts an alias inside root and rejects an outside alias", () => {
+  const root = "C:\\Users\\runneradmin\\Temp\\install";
+  const shortRoot = "C:\\Users\\RUNNER~1\\Temp\\install";
+  const insideShort = `${shortRoot}\\runtime\\node.exe`;
+  const outsideShort = `${shortRoot}\\runtime\\junction\\node.exe`;
+  const insideLong = `${root}\\runtime\\node.exe`;
+  const entryLong = `${root}\\runtime\\yuvi-runtime-server.mjs`;
+  const outsideLong = "C:\\Users\\runneradmin\\Temp\\outside\\node.exe";
+  const resolveMap = new Map([
+    [root, root],
+    [shortRoot, root],
+    [insideShort, insideLong],
+    [insideLong, insideLong],
+    [entryLong, entryLong],
+    [outsideShort, outsideLong],
+    [outsideLong, outsideLong]
+  ]);
+  const resolveExisting = (value) =>
+    resolveExistingWindowsPathForComparison(value, {
+      realpathSyncNative: (input) => resolveMap.get(input) ?? (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })()
+    });
+  const inside = evaluateRuntimeProvenance({
+    imagePath: insideShort,
+    commandLine: `node.exe "${entryLong}"`,
+    expectedBundledNodePath: insideLong,
+    expectedEntrypointPath: entryLong,
+    installRoot: shortRoot,
+    resolveExistingPath: resolveExisting
+  });
+  const outside = evaluateRuntimeProvenance({
+    imagePath: outsideShort,
+    commandLine: `node.exe "${entryLong}"`,
+    expectedBundledNodePath: insideLong,
+    expectedEntrypointPath: entryLong,
+    installRoot: root,
+    resolveExistingPath: resolveExisting
+  });
+  assert.equal(inside.imageInsideInstallRoot, true);
+  assert.equal(inside.entrypointMatchesExpected, true);
+  assert.equal(outside.imageInsideInstallRoot, false);
+  assert.equal(outside.ok, false);
+});
+
+test("filesystem resolver errors fail closed without lexical fallback", () => {
+  const value = "C:\\Users\\RUNNER~1\\Temp\\missing\\runtime\\node.exe";
+  const result = evaluateRuntimeProvenance({
+    imagePath: value,
+    commandLine: `node.exe "${value}"`,
+    expectedBundledNodePath: value,
+    expectedEntrypointPath: value,
+    installRoot: "C:\\Users\\RUNNER~1\\Temp\\missing",
+    resolveExistingPath: () => ({
+      ok: false,
+      rawPath: value,
+      lexicalPath: normalizeWindowsPathForComparison(value),
+      resolvedPath: null,
+      errorCode: "ENOENT"
+    })
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.imageMatchesExpected, false);
+  assert.match(result.failureReasons.join(";"), /filesystem resolution failed/);
+});
+
+test("existing extended drive and UNC forms remain compatible with injected resolution", () => {
+  const root = "C:\\Temp\\YUVI\\install";
+  const node = `${root}\\runtime\\node.exe`;
+  const entry = `${root}\\runtime\\yuvi-runtime-server.mjs`;
+  const result = evaluateRuntimeProvenance({
+    imagePath: `\\\\?\\${node}`,
+    commandLine: `node.exe "\\\\?\\${entry}"`,
+    expectedBundledNodePath: node,
+    expectedEntrypointPath: entry,
+    installRoot: `\\\\?\\${root}`,
+    resolveExistingPath: syntheticExistingResolver
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.imageInsideInstallRoot, true);
 });
 
 test("Windows comparison canonicalizer preserves UNC semantics", () => {

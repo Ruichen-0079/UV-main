@@ -111,6 +111,56 @@ export function normalizeWindowsPathForComparison(value) {
   return trimWindowsTrailingSeparators(normalizedPath).toLowerCase();
 }
 
+/**
+ * Resolve an existing Windows path through the filesystem before comparing it.
+ * This deliberately remains separate from the lexical canonicalizer above:
+ * short-name aliases are filesystem metadata, not a string transformation.
+ */
+export function resolveExistingWindowsPathForComparison(
+  value,
+  { realpathSyncNative = fs.realpathSync.native } = {}
+) {
+  const rawPath = typeof value === "string" ? stripWindowsDevicePrefix(value) : "";
+  const lexicalPath = normalizeWindowsPathForComparison(value);
+  if (!lexicalPath) {
+    return {
+      ok: false,
+      rawPath: rawPath || null,
+      lexicalPath: null,
+      resolvedPath: null,
+      errorCode: "INVALID_PATH"
+    };
+  }
+  try {
+    const resolvedRawPath = realpathSyncNative(rawPath);
+    const resolvedPath = normalizeWindowsPathForComparison(resolvedRawPath);
+    if (!resolvedPath) {
+      return {
+        ok: false,
+        rawPath,
+        lexicalPath,
+        resolvedPath: null,
+        errorCode: "INVALID_RESOLVED_PATH"
+      };
+    }
+    return {
+      ok: true,
+      rawPath,
+      lexicalPath,
+      resolvedPath,
+      errorCode: null
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      rawPath,
+      lexicalPath,
+      resolvedPath: null,
+      errorCode: String(error?.code ?? "RESOLVE_FAILED").slice(0, 80)
+    };
+  }
+}
+
 export function pathsEqualWindows(a, b) {
   const left = normalizeWindowsPathForComparison(a);
   const right = normalizeWindowsPathForComparison(b);
@@ -1645,6 +1695,7 @@ export function requestJson(
           port: parsed.port,
           path: `${parsed.pathname}${parsed.search}`,
           method,
+          agent: false,
           headers: {
             ...(token ? { authorization: `Bearer ${token}` } : {}),
             ...(body ? { "content-type": "application/json" } : {})
@@ -1830,20 +1881,78 @@ export function evaluateRuntimeProvenance({
   entrypointPath,
   expectedBundledNodePath,
   expectedEntrypointPath,
-  installRoot
+  installRoot,
+  resolveExistingPath = resolveExistingWindowsPathForComparison
 } = {}) {
   const parsed = parseRuntimeCommandLine(commandLine);
   const actualEntrypoint = entrypointPath ?? parsed.entrypointPath;
   const imageAvailable = Boolean(String(imagePath ?? "").trim());
   const entrypointAvailable = Boolean(String(actualEntrypoint ?? "").trim());
+
+  const resolvePath = (value) => {
+    try {
+      const result = resolveExistingPath(value);
+      if (typeof result === "string") {
+        const resolvedPath = normalizeWindowsPathForComparison(result);
+        return {
+          ok: Boolean(resolvedPath),
+          rawPath: typeof value === "string" ? stripWindowsDevicePrefix(value) : null,
+          lexicalPath: normalizeWindowsPathForComparison(value) || null,
+          resolvedPath: resolvedPath || null,
+          errorCode: resolvedPath ? null : "INVALID_RESOLVED_PATH"
+        };
+      }
+      if (!result || typeof result !== "object") {
+        return {
+          ok: false,
+          rawPath: typeof value === "string" ? stripWindowsDevicePrefix(value) : null,
+          lexicalPath: normalizeWindowsPathForComparison(value) || null,
+          resolvedPath: null,
+          errorCode: "RESOLVE_FAILED"
+        };
+      }
+      const resolvedPath = normalizeWindowsPathForComparison(result.resolvedPath);
+      return {
+        ok: result.ok === true && Boolean(resolvedPath),
+        rawPath: result.rawPath ?? (typeof value === "string" ? stripWindowsDevicePrefix(value) : null),
+        lexicalPath: result.lexicalPath ?? (normalizeWindowsPathForComparison(value) || null),
+        resolvedPath: resolvedPath || null,
+        errorCode: result.errorCode ?? (result.ok === true ? null : "RESOLVE_FAILED")
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        rawPath: typeof value === "string" ? stripWindowsDevicePrefix(value) : null,
+        lexicalPath: normalizeWindowsPathForComparison(value) || null,
+        resolvedPath: null,
+        errorCode: String(error?.code ?? "RESOLVE_FAILED").slice(0, 80)
+      };
+    }
+  };
+
+  const imageResolution = resolvePath(imagePath);
+  const expectedImageResolution = resolvePath(expectedBundledNodePath);
+  const entrypointResolution = resolvePath(actualEntrypoint);
+  const expectedEntrypointResolution = resolvePath(expectedEntrypointPath);
+  const installRootResolution = resolvePath(installRoot);
   const imageMatchesExpected =
     imageAvailable &&
-    pathsEqualWindows(imagePath, expectedBundledNodePath);
-  const imageInsideInstallRoot = isWindowsPathInside(installRoot, imagePath);
+    imageResolution.ok &&
+    expectedImageResolution.ok &&
+    imageResolution.resolvedPath === expectedImageResolution.resolvedPath;
+  const imageInsideInstallRoot =
+    imageResolution.ok &&
+    installRootResolution.ok &&
+    isWindowsPathInside(installRootResolution.resolvedPath, imageResolution.resolvedPath);
   const entrypointMatchesExpected =
     entrypointAvailable &&
-    pathsEqualWindows(actualEntrypoint, expectedEntrypointPath);
-  const entrypointInsideInstallRoot = isWindowsPathInside(installRoot, actualEntrypoint);
+    entrypointResolution.ok &&
+    expectedEntrypointResolution.ok &&
+    entrypointResolution.resolvedPath === expectedEntrypointResolution.resolvedPath;
+  const entrypointInsideInstallRoot =
+    entrypointResolution.ok &&
+    installRootResolution.ok &&
+    isWindowsPathInside(installRootResolution.resolvedPath, entrypointResolution.resolvedPath);
   const normalizedImagePath = normalizeWindowsPathForComparison(imagePath);
   const normalizedExpectedImagePath = normalizeWindowsPathForComparison(expectedBundledNodePath);
   const normalizedEntrypointPath = normalizeWindowsPathForComparison(actualEntrypoint);
@@ -1855,6 +1964,17 @@ export function evaluateRuntimeProvenance({
   if (!entrypointAvailable) failureReasons.push("Runtime entrypoint unavailable");
   else if (!entrypointMatchesExpected)
     failureReasons.push("Runtime entrypoint does not match installed Runtime");
+  const resolutionFailures = [
+    ["install root", installRootResolution, true],
+    ["authoritative image", imageResolution, imageAvailable],
+    ["expected bundled Node", expectedImageResolution, Boolean(String(expectedBundledNodePath ?? "").trim())],
+    ["Runtime entrypoint", entrypointResolution, entrypointAvailable],
+    ["expected Runtime entrypoint", expectedEntrypointResolution, Boolean(String(expectedEntrypointPath ?? "").trim())]
+  ];
+  for (const [label, resolution, required] of resolutionFailures) {
+    if (required && !resolution.ok)
+      failureReasons.push(`${label} filesystem resolution failed (${resolution.errorCode ?? "RESOLVE_FAILED"})`);
+  }
   return {
     authoritativeImagePath: imagePath || null,
     executableToken: parsed.executableToken,
@@ -1866,6 +1986,18 @@ export function evaluateRuntimeProvenance({
     normalizedEntrypointPath: normalizedEntrypointPath || null,
     normalizedExpectedEntrypointPath: normalizedExpectedEntrypointPath || null,
     normalizedInstallRoot: normalizedInstallRoot || null,
+    resolvedImagePath: imageResolution.resolvedPath,
+    resolvedExpectedImagePath: expectedImageResolution.resolvedPath,
+    resolvedEntrypointPath: entrypointResolution.resolvedPath,
+    resolvedExpectedEntrypointPath: expectedEntrypointResolution.resolvedPath,
+    resolvedInstallRoot: installRootResolution.resolvedPath,
+    filesystemResolution: {
+      image: imageResolution,
+      expectedImage: expectedImageResolution,
+      entrypoint: entrypointResolution,
+      expectedEntrypoint: expectedEntrypointResolution,
+      installRoot: installRootResolution
+    },
     imageMatchesExpected: Boolean(imageMatchesExpected),
     imageInsideInstallRoot: Boolean(imageInsideInstallRoot),
     entrypointMatchesExpected: Boolean(entrypointMatchesExpected),
@@ -1913,6 +2045,11 @@ export function formatRuntimeProvenanceDiagnostic({
     `  expectedBundledNodePath: ${provenanceDiagnosticPath(provenance.expectedBundledNodePath, installRoot)}`,
     `  normalizedImagePath: ${rawPath(provenance.normalizedImagePath)}`,
     `  normalizedExpectedImagePath: ${rawPath(provenance.normalizedExpectedImagePath)}`,
+    `  resolvedImagePath: ${provenanceDiagnosticPath(provenance.resolvedImagePath, provenance.resolvedInstallRoot)}`,
+    `  resolvedExpectedImagePath: ${provenanceDiagnosticPath(provenance.resolvedExpectedImagePath, provenance.resolvedInstallRoot)}`,
+    `  resolvedInstallRoot: ${rawPath(provenance.resolvedInstallRoot)}`,
+    `  imageResolver: ${provenance.filesystemResolution?.image?.errorCode ?? "ok"}`,
+    `  expectedImageResolver: ${provenance.filesystemResolution?.expectedImage?.errorCode ?? "ok"}`,
     `  relativeImagePath: ${relativePath(provenance.authoritativeImagePath)}`,
     `  imageMatchesExpected: ${provenance.imageMatchesExpected ? "yes" : "no"}`,
     `  imageInsideInstallRoot: ${provenance.imageInsideInstallRoot ? "yes" : "no"}`,
@@ -1923,6 +2060,10 @@ export function formatRuntimeProvenanceDiagnostic({
     `  expectedEntrypointRelativePath: ${provenanceDiagnosticPath(provenance.expectedEntrypointPath, installRoot)}`,
     `  normalizedEntrypointPath: ${rawPath(provenance.normalizedEntrypointPath)}`,
     `  normalizedExpectedEntrypointPath: ${rawPath(provenance.normalizedExpectedEntrypointPath)}`,
+    `  resolvedEntrypointPath: ${provenanceDiagnosticPath(provenance.resolvedEntrypointPath, provenance.resolvedInstallRoot)}`,
+    `  resolvedExpectedEntrypointPath: ${provenanceDiagnosticPath(provenance.resolvedExpectedEntrypointPath, provenance.resolvedInstallRoot)}`,
+    `  entrypointResolver: ${provenance.filesystemResolution?.entrypoint?.errorCode ?? "ok"}`,
+    `  expectedEntrypointResolver: ${provenance.filesystemResolution?.expectedEntrypoint?.errorCode ?? "ok"}`,
     `  relativeEntrypointPath: ${relativePath(provenance.entrypointPath)}`,
     `  entrypointMatchesExpected: ${provenance.entrypointMatchesExpected ? "yes" : "no"}`,
     `  entrypointInsideInstallRoot: ${provenance.entrypointInsideInstallRoot ? "yes" : "no"}`,
