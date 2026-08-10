@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -42,6 +43,7 @@ import {
   normalizeWindowsPathForComparison,
   normalizeWindowsProcessPath,
   parseRuntimeCommandLine,
+  parseWmCloseOutput,
   pathsEqualWindows,
   processBaseline,
   requestJson,
@@ -54,6 +56,8 @@ import {
   sanitizeChildEnv,
   snapshotTree,
   assertSupervisorProvenance,
+  powershellDiagnosticPath,
+  runWmCloseHelper,
   waitForSpecificPidsExit,
   waitForTauriBootstrapReady,
   windowsProcessPathInside,
@@ -1792,12 +1796,227 @@ test("WM_CLOSE command targets a numeric PID only", () => {
   assert.match(script, /targetPid = 12345/);
   assert.match(script, /GetWindowThreadProcessId/);
   assert.match(script, /PostMessageW/);
+  assert.match(script, /Write-WmClosePhase "before_add_type"/);
+  assert.match(script, /Write-WmClosePhase "before_enum"/);
+  assert.match(script, /matched_windows=/);
+  assert.match(script, /posted_windows=/);
+  assert.match(script, /post_failures=/);
   assert.doesNotMatch(script, /WindowText|title|Alt\+F4/i);
 });
 
 test("WM_CLOSE command rejects invalid PIDs", () => {
   assert.throws(() => buildWmCloseScript(0), /invalid/);
   assert.throws(() => buildWmCloseScript("pid"), /invalid/);
+});
+
+const wmCloseOutput = ({ targetPid = 123, matched = 1, posted = 1, failures = 0 } = {}) =>
+  [
+    "WM_CLOSE_PHASE=start",
+    "WM_CLOSE_PHASE=before_add_type",
+    "WM_CLOSE_PHASE=after_add_type",
+    "WM_CLOSE_PHASE=before_enum",
+    "WM_CLOSE_PHASE=after_enum",
+    "WM_CLOSE_METRIC=add_type_ms=4",
+    "WM_CLOSE_METRIC=enum_ms=2",
+    "WM_CLOSE_METRIC=total_ms=8",
+    `target_pid=${targetPid}`,
+    `matched_windows=${matched}`,
+    `posted_windows=${posted}`,
+    `post_failures=${failures}`,
+    "elapsed_ms=8"
+  ].join("\n");
+
+function fakeWmCloseChild({ pid = 321, onKill = null } = {}) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  let killCalls = 0;
+  child.kill = () => {
+    killCalls += 1;
+    onKill?.(child);
+    return true;
+  };
+  return { child, getKillCalls: () => killCalls };
+}
+
+test("WM_CLOSE uses an absolute system PowerShell path", () => {
+  const executable = powershellDiagnosticPath({ SystemRoot: "C:\\Windows" });
+  assert.equal(executable, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+});
+
+test("WM_CLOSE helper accepts a successful structured result", async () => {
+  let observedExecutable = null;
+  const result = await runWmCloseHelper({
+    executable: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    args: [],
+    options: {},
+    timeoutMs: 100,
+    expectedPid: 123,
+    spawnImpl: (file) => {
+      observedExecutable = file;
+      const { child } = fakeWmCloseChild();
+      queueMicrotask(() => {
+        child.stdout.emit("data", wmCloseOutput());
+        child.emit("exit", 0, null);
+      });
+      return child;
+    }
+  });
+  assert.equal(observedExecutable, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.equal(result.matchedWindows, 1);
+  assert.equal(result.postedWindows, 1);
+  assert.equal(result.code, 0);
+});
+
+test("WM_CLOSE helper fails closed for matched=0 and posted=0", async () => {
+  for (const [matched, posted, message] of [
+    [0, 0, /target window was not found/],
+    [1, 0, /WM_CLOSE was not posted/]
+  ]) {
+    await assert.rejects(
+      runWmCloseHelper({
+        executable: "powershell.exe",
+        args: [],
+        options: {},
+        timeoutMs: 100,
+        spawnImpl: () => {
+          const { child } = fakeWmCloseChild();
+          queueMicrotask(() => {
+            child.stdout.emit("data", wmCloseOutput({ matched, posted }));
+            child.emit("exit", 0, null);
+          });
+          return child;
+        }
+      }),
+      message
+    );
+  }
+});
+
+test("WM_CLOSE helper rejects nonzero exit, spawn errors and malformed output", async () => {
+  await assert.rejects(
+    runWmCloseHelper({
+      executable: "powershell.exe",
+      args: [],
+      options: {},
+      timeoutMs: 100,
+      spawnImpl: () => {
+        const { child } = fakeWmCloseChild();
+        queueMicrotask(() => child.emit("exit", 2, null));
+        return child;
+      }
+    }),
+    /exited with code 2/
+  );
+  await assert.rejects(
+    runWmCloseHelper({
+      executable: "powershell.exe",
+      args: [],
+      options: {},
+      timeoutMs: 100,
+      spawnImpl: () => {
+        throw new Error("spawn failed safely");
+      }
+    }),
+    /spawn failed safely/
+  );
+  await assert.rejects(
+    runWmCloseHelper({
+      executable: "powershell.exe",
+      args: [],
+      options: {},
+      timeoutMs: 100,
+      spawnImpl: () => {
+        const { child } = fakeWmCloseChild();
+        queueMicrotask(() => {
+          child.stdout.emit("data", "WM_CLOSE_PHASE=start\ntarget_pid=123\n");
+          child.emit("exit", 0, null);
+        });
+        return child;
+      }
+    }),
+    /missing phase/
+  );
+});
+
+test("WM_CLOSE helper timeout requests one kill and reports phase and safe stderr", async () => {
+  const { child, getKillCalls } = fakeWmCloseChild();
+  await assert.rejects(
+    runWmCloseHelper({
+      executable: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      args: [],
+      options: {},
+      timeoutMs: 5,
+      killGraceMs: 5,
+      spawnImpl: () => {
+        queueMicrotask(() => {
+          child.stdout.emit("data", "WM_CLOSE_PHASE=start\nWM_CLOSE_PHASE=before_add_type\n");
+          child.stderr.emit("data", "safe diagnostic");
+        });
+        return child;
+      }
+    }),
+    (error) => {
+      assert.match(error.message, /did not exit after termination request/);
+      assert.match(error.message, /helper_pid=321/);
+      assert.match(error.message, /last_phase=before_add_type/);
+      assert.match(error.message, /kill_requested=yes/);
+      assert.match(error.message, /safe_stderr=safe diagnostic/);
+      assert.match(error.message, /exit_observed_after_kill=no/);
+      return true;
+    }
+  );
+  assert.equal(getKillCalls(), 1);
+});
+
+test("WM_CLOSE timeout observes a child exit after kill and never resolves later", async () => {
+  const { child, getKillCalls } = fakeWmCloseChild({
+    onKill: (target) => setTimeout(() => target.emit("exit", null, "SIGTERM"), 2)
+  });
+  await assert.rejects(
+    runWmCloseHelper({
+      executable: "powershell.exe",
+      args: [],
+      options: {},
+      timeoutMs: 5,
+      killGraceMs: 20,
+      spawnImpl: () => child
+    }),
+    (error) => {
+      assert.match(error.message, /WM_CLOSE helper timed out/);
+      assert.match(error.message, /exit_observed_after_kill=yes/);
+      assert.match(error.message, /exit_signal=SIGTERM/);
+      return true;
+    }
+  );
+  assert.equal(getKillCalls(), 1);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+});
+
+test("WM_CLOSE timeout and exit race settles exactly once", async () => {
+  const { child } = fakeWmCloseChild({
+    onKill: (target) => target.emit("exit", null, "SIGTERM")
+  });
+  const outcome = await Promise.allSettled([
+    runWmCloseHelper({
+      executable: "powershell.exe",
+      args: [],
+      options: {},
+      timeoutMs: 5,
+      killGraceMs: 20,
+      spawnImpl: () => child
+    })
+  ]);
+  assert.equal(outcome.length, 1);
+  assert.equal(outcome[0].status, "rejected");
+});
+
+test("WM_CLOSE output parser rejects secret-like output without retaining it", () => {
+  assert.throws(
+    () => parseWmCloseOutput(`${wmCloseOutput()}\nDEEPSEEK_API_KEY=do-not-echo`),
+    /secret-like material/
+  );
 });
 
 test("endpoint files must be rooted in the isolated LOCALAPPDATA tree", () => {

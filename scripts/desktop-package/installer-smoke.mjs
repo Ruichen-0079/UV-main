@@ -1744,6 +1744,292 @@ export function requestJson(
   });
 }
 
+function safeWmCloseOutput(value, label) {
+  const text = String(value ?? "");
+  try {
+    assertNoSecrets(text, label);
+  } catch {
+    return "<redacted secret-like output>";
+  }
+  return text.length > 8_000 ? text.slice(-8_000) : text;
+}
+
+function wmCloseExecutableDiagnostic(file) {
+  const text = String(file ?? "");
+  const basename = safeBasename(text) ?? "unknown";
+  const isSystemPowerShell =
+    /^powershell\.exe$/i.test(basename) &&
+    /(?:^|[\\/])System32[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/i.test(text);
+  return {
+    category: isSystemPowerShell ? "system-windows-powershell" : "wm-close-helper",
+    path: isSystemPowerShell ? text.replaceAll("\\", "/") : basename
+  };
+}
+
+function formatWmCloseFailure({
+  reason,
+  executable,
+  helperPid,
+  startedAt,
+  now,
+  lastPhase,
+  stdout,
+  stderr,
+  killRequested,
+  killResult,
+  exitObservedAfterKill,
+  exitCode,
+  exitSignal,
+  parseError
+}) {
+  const diagnostic = wmCloseExecutableDiagnostic(executable);
+  const elapsedMs = Math.max(0, Number(now()) - Number(startedAt));
+  return [
+    reason,
+    `helper_executable_category=${diagnostic.category}`,
+    `helper_executable_path=${diagnostic.path}`,
+    `helper_pid=${Number(helperPid) || 0}`,
+    `elapsed_ms=${elapsedMs}`,
+    `last_phase=${lastPhase || "unknown"}`,
+    `kill_requested=${killRequested ? "yes" : "no"}`,
+    `kill_result=${killResult ? "yes" : "no"}`,
+    `exit_observed_after_kill=${exitObservedAfterKill ? "yes" : "no"}`,
+    `exit_code=${exitCode === null || exitCode === undefined ? "none" : exitCode}`,
+    `exit_signal=${exitSignal || "none"}`,
+    parseError ? `parse_error=${parseError}` : null,
+    `safe_stdout=${safeWmCloseOutput(stdout, "WM_CLOSE stdout") || "<empty>"}`,
+    `safe_stderr=${safeWmCloseOutput(stderr, "WM_CLOSE stderr") || "<empty>"}`
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function parseWmCloseOutput(stdout, expectedPid = null) {
+  const text = String(stdout ?? "");
+  assertNoSecrets(text, "WM_CLOSE stdout");
+  const phases = [...text.matchAll(/(?:^|\r?\n)WM_CLOSE_PHASE=([a-z_]+)/g)].map(
+    (match) => match[1]
+  );
+  const requiredPhases = ["start", "before_add_type", "after_add_type", "before_enum", "after_enum"];
+  for (const phase of requiredPhases)
+    if (!phases.includes(phase)) fail(`WM_CLOSE output is missing phase ${phase}`);
+  const readInteger = (name) => {
+    const matches = [...text.matchAll(new RegExp(`(?:^|\\r?\\n)${name}=(-?\\d+)(?=\\r?$)`, "gm"))];
+    if (matches.length !== 1) fail(`WM_CLOSE output is missing or malformed ${name}`);
+    const value = Number(matches[0][1]);
+    if (!Number.isSafeInteger(value) || value < 0) fail(`WM_CLOSE output has invalid ${name}`);
+    return value;
+  };
+  const targetPid = readInteger("target_pid");
+  const matchedWindows = readInteger("matched_windows");
+  const postedWindows = readInteger("posted_windows");
+  const postFailures = readInteger("post_failures");
+  const elapsedMs = readInteger("elapsed_ms");
+  if (expectedPid !== null && targetPid !== Number(expectedPid))
+    fail(`WM_CLOSE output target PID mismatch (${targetPid})`);
+  if (matchedWindows === 0) fail("WM_CLOSE target window was not found");
+  if (postedWindows === 0) fail("WM_CLOSE was not posted");
+  const metrics = {};
+  for (const match of text.matchAll(/(?:^|\r?\n)WM_CLOSE_METRIC=([a-z_]+)=(\d+)(?=\r?$)/gm))
+    metrics[match[1]] = Number(match[2]);
+  return {
+    targetPid,
+    matchedWindows,
+    postedWindows,
+    postFailures,
+    elapsedMs,
+    phases,
+    metrics,
+    lastPhase: phases.at(-1) ?? "unknown"
+  };
+}
+
+export function runWmCloseHelper({
+  executable,
+  args,
+  options,
+  timeoutMs,
+  expectedPid = null,
+  spawnImpl = spawn,
+  killGraceMs = 1_000,
+  now = Date.now
+} = {}) {
+  if (!executable) fail("WM_CLOSE helper executable is required");
+  if (!Array.isArray(args)) fail("WM_CLOSE helper arguments are required");
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) fail("WM_CLOSE helper timeout is invalid");
+  const startedAt = Number(now());
+  const phaseTimings = {};
+  let child;
+  let stdout = "";
+  let stderr = "";
+  let lastPhase = "unknown";
+  let helperPid = 0;
+  let timedOut = false;
+  let killRequested = false;
+  let killResult = false;
+  let exitObserved = false;
+  let exitCode = null;
+  let exitSignal = null;
+  let settled = false;
+  let timer = null;
+  let graceTimer = null;
+  const rememberOutput = (stream, chunk) => {
+    const text = chunk.toString();
+    if (stream === "stdout") stdout += text;
+    else stderr += text;
+    for (const match of stdout.matchAll(/(?:^|\r?\n)WM_CLOSE_PHASE=([a-z_]+)/g)) {
+      lastPhase = match[1];
+      if (phaseTimings[lastPhase] === undefined)
+        phaseTimings[lastPhase] = Math.max(0, Number(now()) - startedAt);
+    }
+  };
+  return new Promise((resolve, reject) => {
+    const clearTimers = () => {
+      if (timer) clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      timer = null;
+      graceTimer = null;
+    };
+    const rejectOnce = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      reject(error);
+    };
+    const resolveOnce = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      resolve(value);
+    };
+    const timeoutFailure = (reason) =>
+      new Error(
+        formatWmCloseFailure({
+          reason,
+          executable,
+          helperPid,
+          startedAt,
+          now,
+          lastPhase,
+          stdout,
+          stderr,
+          killRequested,
+          killResult,
+          exitObservedAfterKill: exitObserved,
+          exitCode,
+          exitSignal
+        })
+      );
+    const onExit = (code, signal) => {
+      exitObserved = true;
+      exitCode = code;
+      exitSignal = signal;
+      if (timedOut) {
+        rejectOnce(timeoutFailure("WM_CLOSE helper timed out"));
+        return;
+      }
+      if (code !== 0) {
+        let parseError = null;
+        try {
+          parseWmCloseOutput(stdout, expectedPid);
+        } catch (error) {
+          parseError = error instanceof Error ? error.message : String(error);
+        }
+        rejectOnce(
+          new Error(
+            formatWmCloseFailure({
+              reason: `WM_CLOSE helper exited with code ${code ?? "none"}`,
+              executable,
+              helperPid,
+              startedAt,
+              now,
+              lastPhase,
+              stdout,
+              stderr,
+              killRequested: false,
+              killResult: false,
+              exitObservedAfterKill: false,
+              exitCode,
+              exitSignal,
+              parseError
+            })
+          )
+        );
+        return;
+      }
+      try {
+        assertNoSecrets(stderr, "WM_CLOSE stderr");
+        const parsed = parseWmCloseOutput(stdout, expectedPid);
+        resolveOnce({
+          child,
+          code,
+          signal,
+          stdout,
+          stderr,
+          helperPid,
+          executable: wmCloseExecutableDiagnostic(executable),
+          lastPhase: parsed.lastPhase,
+          phaseTimings,
+          ...parsed,
+          totalElapsedMs: Math.max(0, Number(now()) - startedAt)
+        });
+      } catch (error) {
+        rejectOnce(error);
+      }
+    };
+    const onError = (error) => {
+      if (timedOut) return;
+      rejectOnce(
+        new Error(
+          formatWmCloseFailure({
+            reason: `WM_CLOSE helper spawn failed: ${safeWmCloseOutput(error?.message, "WM_CLOSE spawn error")}`,
+            executable,
+            helperPid,
+            startedAt,
+            now,
+            lastPhase,
+            stdout,
+            stderr,
+            killRequested: false,
+            killResult: false,
+            exitObservedAfterKill: false,
+            exitCode,
+            exitSignal
+          })
+        )
+      );
+    };
+    try {
+      child = spawnImpl(executable, args, { ...options, shell: false, windowsHide: true });
+      helperPid = Number(child?.pid) || 0;
+      child.stdout?.on("data", (chunk) => rememberOutput("stdout", chunk));
+      child.stderr?.on("data", (chunk) => rememberOutput("stderr", chunk));
+      child.once("error", onError);
+      child.once("exit", onExit);
+    } catch (error) {
+      onError(error);
+      return;
+    }
+    timer = setTimeout(() => {
+      if (settled) return;
+      timedOut = true;
+      killRequested = true;
+      try {
+        killResult = child.kill() !== false;
+      } catch {
+        killResult = false;
+      }
+      graceTimer = setTimeout(() => {
+        if (settled) return;
+        if (exitObserved) return;
+        rejectOnce(
+          timeoutFailure("WM_CLOSE helper timed out and did not exit after termination request")
+        );
+      }, Math.max(1, Number(killGraceMs) || 1));
+    }, timeoutMs);
+  });
+}
+
 function isRecord(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -2783,26 +3069,70 @@ export function buildWmCloseScript(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) fail("WM_CLOSE target PID is invalid");
   return `$targetPid = ${numericPid};
+$totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+function Write-WmClosePhase([string]$phase) {
+  [Console]::Out.WriteLine("WM_CLOSE_PHASE=$phase")
+  [Console]::Out.Flush()
+}
+function Write-WmCloseMetric([string]$name, [long]$value) {
+  [Console]::Out.WriteLine("WM_CLOSE_METRIC=$name=$value")
+  [Console]::Out.Flush()
+}
+Write-WmClosePhase "start"
+Write-WmClosePhase "before_add_type"
+$addTypeStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class YuviWindowCloser {
-  private const uint WM_CLOSE = 0x0010;
+    private const uint WM_CLOSE = 0x0010;
   private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extra);
-  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-  [DllImport("user32.dll")] private static extern bool PostMessageW(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
-  public static void CloseForProcess(uint targetPid) {
-    EnumWindows((hWnd, extra) => {
-      uint windowPid;
-      GetWindowThreadProcessId(hWnd, out windowPid);
-      if (windowPid == targetPid) PostMessageW(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-      return true;
-    }, IntPtr.Zero);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extra);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+    [DllImport("user32.dll")] private static extern bool PostMessageW(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+    public sealed class CloseResult {
+      public int MatchedWindows { get; set; }
+      public int PostedWindows { get; set; }
+      public int PostFailures { get; set; }
+      public bool EnumWindowsSucceeded { get; set; }
+    }
+    public static CloseResult CloseForProcess(uint targetPid) {
+      var result = new CloseResult();
+      EnumWindowsProc callback = (hWnd, extra) => {
+        uint windowPid;
+        GetWindowThreadProcessId(hWnd, out windowPid);
+        if (windowPid == targetPid) {
+          result.MatchedWindows++;
+          if (PostMessageW(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero)) result.PostedWindows++;
+          else result.PostFailures++;
+        }
+        return true;
+      };
+      result.EnumWindowsSucceeded = EnumWindows(callback, IntPtr.Zero);
+      return result;
+    }
   }
-}
 '@
-[YuviWindowCloser]::CloseForProcess($targetPid)`;
+$addTypeStopwatch.Stop()
+Write-WmClosePhase "after_add_type"
+Write-WmCloseMetric "add_type_ms" $addTypeStopwatch.ElapsedMilliseconds
+Write-WmClosePhase "before_enum"
+$enumStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$closeResult = [YuviWindowCloser]::CloseForProcess([uint32]$targetPid)
+$enumStopwatch.Stop()
+Write-WmClosePhase "after_enum"
+$totalStopwatch.Stop()
+Write-WmCloseMetric "enum_ms" $enumStopwatch.ElapsedMilliseconds
+Write-WmCloseMetric "total_ms" $totalStopwatch.ElapsedMilliseconds
+[Console]::Out.WriteLine("target_pid=$targetPid")
+[Console]::Out.WriteLine("matched_windows=$($closeResult.MatchedWindows)")
+[Console]::Out.WriteLine("posted_windows=$($closeResult.PostedWindows)")
+[Console]::Out.WriteLine("post_failures=$($closeResult.PostFailures)")
+[Console]::Out.WriteLine("elapsed_ms=$($totalStopwatch.ElapsedMilliseconds)")
+[Console]::Out.Flush()
+if (-not $closeResult.EnumWindowsSucceeded) { throw "WM_CLOSE EnumWindows failed" }
+if ($closeResult.MatchedWindows -eq 0) { throw "WM_CLOSE target window was not found" }
+if ($closeResult.PostedWindows -eq 0) { throw "WM_CLOSE was not posted" }`;
 }
 
 async function waitForProcessExit(pid, timeoutMs) {
@@ -2814,14 +3144,43 @@ async function waitForProcessExit(pid, timeoutMs) {
 async function sendWmClose(pid, layout, timeoutMs) {
   const script = buildWmCloseScript(pid);
   assertNoSecrets(script, "WM_CLOSE script");
-  const result = await runProcess(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-    { cwd: layout.emptyCwd, env: sanitizeChildEnv(), stdio: ["ignore", "pipe", "pipe"] },
-    Math.min(timeoutMs, 10_000)
-  );
-  writeLog(layout.logs, "wm-close.log", `${result.stdout}\n${result.stderr}`);
-  if (result.code !== 0) fail(`WM_CLOSE command failed (${result.code})`);
+  const executable = powershellDiagnosticPath();
+  const args = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    script
+  ];
+  const options = {
+    cwd: layout.emptyCwd,
+    env: sanitizeChildEnv(),
+    stdio: ["ignore", "pipe", "pipe"]
+  };
+  let result;
+  try {
+    result = await runWmCloseHelper({
+      executable,
+      args,
+      options,
+      timeoutMs: Math.min(timeoutMs, 10_000),
+      expectedPid: pid
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    writeLog(layout.logs, "wm-close.log", message);
+    throw error;
+  }
+  const timing = result.phaseTimings.before_add_type ?? "unknown";
+  const metrics = result.metrics;
+  const diagnostic = [
+    `WM_CLOSE_HELPER executable_category=${result.executable.category} executable_path=${result.executable.path} helper_pid=${result.helperPid} exit_code=${result.code}`,
+    `WM_CLOSE_PHASE_TIMING spawn_to_before_add_type_ms=${timing} add_type_ms=${metrics.add_type_ms ?? "unknown"} enum_ms=${metrics.enum_ms ?? "unknown"} total_ms=${metrics.total_ms ?? result.totalElapsedMs}`,
+    `WM_CLOSE_RESULT target_pid=${result.targetPid} matched_windows=${result.matchedWindows} posted_windows=${result.postedWindows} post_failures=${result.postFailures} elapsed_ms=${result.elapsedMs}`
+  ].join("\n");
+  writeLog(layout.logs, "wm-close.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
+  console.info(`[installer-smoke] ${diagnostic.replaceAll("\n", " ")}`);
 }
 
 async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
