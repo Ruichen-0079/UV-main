@@ -9,6 +9,7 @@ import { buildMemoryScope } from "../scope.js";
 import {
   MEM0_MEMORY_SOURCE,
   Mem0MemoryProvider,
+  Mem0MemoryProviderError,
   buildWriteMetadata,
   canonicalMem0EventId,
   mapMem0RecordToMemoryEvent
@@ -46,6 +47,35 @@ function backend(overrides: Partial<MemoryBackend> = {}): MemoryBackend {
 }
 
 describe("Mem0MemoryProvider canonical mapping", () => {
+  it("accepts a mem0 backend", () => {
+    expect(() => new Mem0MemoryProvider(backend())).not.toThrow();
+  });
+
+  it.each(["legacy", "shadow"] as const)(
+    "rejects a %s backend before any storage operation",
+    (kind) => {
+      const search = vi.fn(async () => []);
+      const get = vi.fn(async () => null);
+      const add = vi.fn(async () => ({
+        memoryId: "should-not-write",
+        operation: "created" as const
+      }));
+      const invalidBackend = backend({ kind, search, get, add });
+
+      let thrown: unknown;
+      try {
+        new Mem0MemoryProvider(invalidBackend);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(Mem0MemoryProviderError);
+      expect(thrown).toMatchObject({ code: "MEMORY_BACKEND_KIND_INVALID" });
+      expect(search).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+      expect(add).not.toHaveBeenCalled();
+    }
+  );
+
   it("maps a backend record to a trimmed canonical event owned by mem0", () => {
     const event = mapMem0RecordToMemoryEvent(record(), scope);
     expect(event).toMatchObject({

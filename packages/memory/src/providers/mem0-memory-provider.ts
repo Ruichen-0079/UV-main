@@ -111,7 +111,14 @@ export function mapMem0RecordToMemoryEvent(
 }
 
 export class Mem0MemoryProvider implements MemoryProvider {
-  constructor(private readonly backend: MemoryBackend) {}
+  constructor(private readonly backend: MemoryBackend) {
+    if (backend.kind !== "mem0") {
+      throw new Mem0MemoryProviderError(
+        "MEMORY_BACKEND_KIND_INVALID",
+        `Mem0MemoryProvider requires a mem0 backend; received ${backend.kind}.`
+      );
+    }
+  }
 
   async retrieveRelevant(input: MemoryRetrievalInput): Promise<MemoryRetrievalOutcome> {
     const scope = resolveRetrievalScope(input);
