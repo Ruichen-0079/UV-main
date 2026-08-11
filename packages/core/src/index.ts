@@ -44,6 +44,15 @@ import {
   type VisionInput
 } from "@companion/providers";
 
+export {
+  MemoryContextBuilder,
+  type MemoryContext,
+  type MemoryContextDiagnostics,
+  type MemoryContextDropReason,
+  type MemoryContextInput,
+  type PromptMemoryCompatibility
+} from "./memory-context.js";
+
 export type RuntimeLogger = {
   info(message: string, context?: Record<string, unknown>): void;
   warn?(message: string, context?: Record<string, unknown>): void;
