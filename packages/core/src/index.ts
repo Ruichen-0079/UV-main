@@ -7,9 +7,12 @@ import type {
   MemoryCandidate,
   MemoryCandidateStorageResult,
   CurrentAffect,
+  MemoryEvent,
   MemoryExtractorStatus,
+  MemoryProvider,
   MemoryRetrievalMode,
   MemoryRetrievalResult,
+  MemoryRetrievalStatus,
   RetrievedMemoryDebug
 } from "@companion/memory";
 import {
@@ -43,6 +46,7 @@ import {
   type TokenUsage,
   type VisionInput
 } from "@companion/providers";
+import { MemoryContextBuilder, type PromptMemoryCompatibility } from "./memory-context.js";
 
 export {
   MemoryContextBuilder,
@@ -67,6 +71,7 @@ export type RuntimeOrchestratorOptions = {
   conversation?: ConversationRepository | undefined;
   memoryRepository?: string | undefined;
   directContext?: Partial<DirectContextConfig> | undefined;
+  memoryContextBuilder?: Pick<MemoryContextBuilder, "build"> | undefined;
   logger?: RuntimeLogger;
 };
 
@@ -109,6 +114,8 @@ export type RuntimeMemoryPort = {
     subjectUserId?: string;
     speakerId?: string;
   }): Promise<Memory[]>;
+  /** Optional semantic provider used by the Runtime read path during migration. */
+  getMemoryProvider?(): MemoryProvider | undefined;
   retrieveRelevantMemoriesWithMetadata?(input: {
     text: string;
     limit?: number;
@@ -239,6 +246,11 @@ export type RuntimePromptPreview = {
   memoryRepository: string;
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
+  memoryProviderStatus?: MemoryRetrievalStatus | undefined;
+  memoryProviderErrorCode?: string | null | undefined;
+  memoryFallbackUsed: boolean;
+  memoryFallbackReason?: string | undefined;
+  memoryFallbackSource?: "legacy" | undefined;
   retrievalMode: MemoryRetrievalMode;
   vectorEnabled: boolean;
   vectorUsed: boolean;
@@ -419,9 +431,11 @@ export class RuntimeOrchestrator {
   private readonly memoryCandidateHistory: RuntimeMemoryCandidateReview[] = [];
   private readonly sessionTurns = new Map<string, DirectContextTurn[]>();
   private readonly directContextConfig: DirectContextConfig;
+  private readonly memoryContextBuilder: Pick<MemoryContextBuilder, "build">;
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
     this.directContextConfig = normalizeDirectContextConfig(options.directContext);
+    this.memoryContextBuilder = options.memoryContextBuilder ?? new MemoryContextBuilder();
   }
 
   getLatestPromptPreview(): RuntimePromptPreview | null {
@@ -1072,23 +1086,29 @@ export class RuntimeOrchestrator {
       : emptyMemoryContext();
     const directContext = this.buildDirectContext(event.payload.sessionId);
     // Prompt only gets displayText content — never raw memoryId/score/metadata dumps.
-    const promptMemories = memoryContext.promptMemories.map((memory) => ({
-      content: memory.displayText,
-      displayText: memory.displayText,
-      importance: memory.importance,
-      type: memory.type,
-      subtype: memory.subtype,
-      scope: memory.scope,
-      scopeId: memory.scopeId,
-      memoryLayer: memory.memoryLayer,
-      status: memory.status,
-      ...(memory.validFrom !== undefined ? { validFrom: memory.validFrom } : {}),
-      ...(memory.eventTime !== undefined ? { eventTime: memory.eventTime } : {}),
-      ...(memory.validUntil !== undefined ? { validUntil: memory.validUntil } : {}),
-      ...(memory.expiresAt !== undefined ? { expiresAt: memory.expiresAt } : {}),
-      createdAt: memory.createdAt,
-      ...(memory.lastAccessedAt !== undefined ? { lastAccessedAt: memory.lastAccessedAt } : {})
-    }));
+    const promptMemories = memoryContext.promptMemories.map((memory) =>
+      isPromptMemoryCompatibility(memory)
+        ? memory
+        : {
+            content: memory.displayText,
+            displayText: memory.displayText,
+            importance: memory.importance,
+            type: memory.type,
+            subtype: memory.subtype,
+            scope: memory.scope,
+            scopeId: memory.scopeId,
+            memoryLayer: memory.memoryLayer,
+            status: memory.status,
+            ...(memory.validFrom !== undefined ? { validFrom: memory.validFrom } : {}),
+            ...(memory.eventTime !== undefined ? { eventTime: memory.eventTime } : {}),
+            ...(memory.validUntil !== undefined ? { validUntil: memory.validUntil } : {}),
+            ...(memory.expiresAt !== undefined ? { expiresAt: memory.expiresAt } : {}),
+            createdAt: memory.createdAt,
+            ...(memory.lastAccessedAt !== undefined
+              ? { lastAccessedAt: memory.lastAccessedAt }
+              : {})
+          }
+    );
     const situationParts = [
       voiceOutput
         ? "The user is interacting through voice."
@@ -1127,6 +1147,19 @@ export class RuntimeOrchestrator {
       memoryRepository: this.options.memoryRepository ?? "in-memory",
       retrievedMemoryCountRaw: memoryContext.retrievedMemoryCountRaw,
       retrievedMemoryCount: memoryContext.retrievedMemoryCount,
+      ...(memoryContext.memoryProviderStatus !== undefined
+        ? { memoryProviderStatus: memoryContext.memoryProviderStatus }
+        : {}),
+      ...(memoryContext.memoryProviderErrorCode !== undefined
+        ? { memoryProviderErrorCode: memoryContext.memoryProviderErrorCode }
+        : {}),
+      memoryFallbackUsed: memoryContext.memoryFallbackUsed,
+      ...(memoryContext.memoryFallbackReason !== undefined
+        ? { memoryFallbackReason: memoryContext.memoryFallbackReason }
+        : {}),
+      ...(memoryContext.memoryFallbackSource !== undefined
+        ? { memoryFallbackSource: memoryContext.memoryFallbackSource }
+        : {}),
       retrievalMode: memoryContext.retrievalMode,
       vectorEnabled: memoryContext.vectorEnabled,
       vectorUsed: memoryContext.vectorUsed,
@@ -1788,69 +1821,28 @@ export class RuntimeOrchestrator {
     event: UserMessageEvent | UserVoiceTranscriptEvent
   ): Promise<MemoryContext> {
     let memoryContext: MemoryContext;
+    const provider = this.options.memory.getMemoryProvider?.();
+    let providerOutcome: Awaited<ReturnType<MemoryProvider["retrieveRelevant"]>> | undefined;
     try {
-      if (this.options.memory.retrieveRelevantMemoriesWithMetadata) {
-        const result = await this.options.memory.retrieveRelevantMemoriesWithMetadata({
-          text: event.payload.content,
-          limit: 5,
-          sessionId: event.payload.sessionId,
-          projectId: "yuvi-runtime",
-          ...retrievalIdentityPayload(event.payload)
-        });
-        memoryContext = {
-          retrievedMemoryCountRaw: result.rawCount,
-          retrievedMemoryCount: result.count,
-          retrievalMode: result.retrievalMode,
-          vectorEnabled: result.vectorEnabled,
-          vectorUsed: result.vectorUsed,
-          embeddingProvider: result.embeddingProvider,
-          embeddingModel: result.embeddingModel,
-          embeddingDimensions: result.embeddingDimensions,
-          semanticEmbedding: result.semanticEmbedding,
-          embeddingNote: result.embeddingNote,
-          queryEmbeddingGenerated: result.queryEmbeddingGenerated,
-          vectorResultCount: result.vectorResultCount,
-          keywordResultCount: result.keywordResultCount,
-          hybridResultCount: result.hybridResultCount,
-          retrievalFallbackUsed: result.fallbackUsed,
-          retrievalFallbackReason: result.fallbackReason,
-          retrievalScope: result.retrievalScope,
-          includedScopes: result.includedScopes,
-          includeArchived: result.includeArchived,
-          includeSuperseded: result.includeSuperseded,
-          includeExpired: result.includeExpired,
-          currentTime: result.currentTime,
-          excludedByStatus: result.excludedByStatus,
-          excludedByTime: result.excludedByTime,
-          excludedByScope: result.excludedByScope,
-          retrievedMemories: result.rawMemories,
-          promptMemories: result.memories
-        };
+      if (provider) {
+        providerOutcome = await this.retrieveFromProvider(provider, event);
+        if (isUsableProviderOutcome(providerOutcome.status)) {
+          memoryContext = this.buildProviderMemoryContext(providerOutcome);
+        } else {
+          memoryContext = await this.retrieveLegacyMemories(event);
+          memoryContext = annotateProviderFallback(memoryContext, providerOutcome);
+        }
       } else {
-        const memories = await this.options.memory.retrieveRelevantMemories({
-          text: event.payload.content,
-          limit: 5,
-          sessionId: event.payload.sessionId,
-          projectId: "yuvi-runtime",
-          ...retrievalIdentityPayload(event.payload)
-        });
-        memoryContext = {
-          ...emptyMemoryContext(),
-          retrievedMemoryCountRaw: memories.length,
-          retrievedMemoryCount: memories.length,
-          retrievalMode: "keyword",
-          vectorEnabled: false,
-          vectorUsed: false,
-          queryEmbeddingGenerated: false,
-          vectorResultCount: 0,
-          keywordResultCount: memories.length,
-          hybridResultCount: memories.length,
-          retrievalFallbackUsed: false,
-          retrievedMemories: memories.map(memoryToDebug),
-          promptMemories: memories.map(memoryToDebug)
-        };
+        memoryContext = await this.retrieveLegacyMemories(event);
+        memoryContext.memoryFallbackUsed = true;
+        memoryContext.memoryFallbackReason = "provider-not-configured";
+        memoryContext.memoryFallbackSource = "legacy";
       }
     } catch (error) {
+      memoryContext = emptyMemoryContext();
+      if (providerOutcome && !isUsableProviderOutcome(providerOutcome.status)) {
+        memoryContext = annotateProviderFallback(memoryContext, providerOutcome);
+      }
       await this.publishRuntimeError(
         "Memory retrieval failed; continuing without retrieved memories.",
         error,
@@ -1863,7 +1855,7 @@ export class RuntimeOrchestrator {
         "memory retrieval failed",
         this.errorLogContext(error, event.traceId)
       );
-      return emptyMemoryContext();
+      return memoryContext;
     }
 
     await this.options.eventBus.publish(
@@ -1883,6 +1875,104 @@ export class RuntimeOrchestrator {
     );
 
     return memoryContext;
+  }
+
+  private async retrieveFromProvider(
+    provider: MemoryProvider,
+    event: UserMessageEvent | UserVoiceTranscriptEvent
+  ): Promise<Awaited<ReturnType<MemoryProvider["retrieveRelevant"]>>> {
+    try {
+      return await provider.retrieveRelevant({
+        text: event.payload.content,
+        limit: 5,
+        sessionId: event.payload.sessionId,
+        ...retrievalIdentityPayload(event.payload)
+      });
+    } catch {
+      return {
+        status: "error",
+        events: [],
+        source: "memory-provider",
+        limited: false,
+        errorCode: "MEMORY_PROVIDER_ERROR"
+      };
+    }
+  }
+
+  private buildProviderMemoryContext(
+    outcome: Awaited<ReturnType<MemoryProvider["retrieveRelevant"]>>
+  ): MemoryContext {
+    const built = this.memoryContextBuilder.build(outcome);
+    const context = emptyMemoryContext();
+    context.retrievedMemoryCountRaw = outcome.rawCount ?? outcome.events.length;
+    context.retrievedMemoryCount = built.diagnostics.selectedCount;
+    context.memoryProviderStatus = outcome.status;
+    context.memoryProviderErrorCode = outcome.errorCode ?? null;
+    context.promptMemories = built.promptMemories;
+    context.keywordResultCount = built.diagnostics.selectedCount;
+    context.hybridResultCount = built.diagnostics.selectedCount;
+    return context;
+  }
+
+  private async retrieveLegacyMemories(
+    event: UserMessageEvent | UserVoiceTranscriptEvent
+  ): Promise<MemoryContext> {
+    if (this.options.memory.retrieveRelevantMemoriesWithMetadata) {
+      const result = await this.options.memory.retrieveRelevantMemoriesWithMetadata({
+        text: event.payload.content,
+        limit: 5,
+        sessionId: event.payload.sessionId,
+        projectId: "yuvi-runtime",
+        ...retrievalIdentityPayload(event.payload)
+      });
+      return {
+        retrievedMemoryCountRaw: result.rawCount,
+        retrievedMemoryCount: result.count,
+        retrievalMode: result.retrievalMode,
+        vectorEnabled: result.vectorEnabled,
+        vectorUsed: result.vectorUsed,
+        embeddingProvider: result.embeddingProvider,
+        embeddingModel: result.embeddingModel,
+        embeddingDimensions: result.embeddingDimensions,
+        semanticEmbedding: result.semanticEmbedding,
+        embeddingNote: result.embeddingNote,
+        queryEmbeddingGenerated: result.queryEmbeddingGenerated,
+        vectorResultCount: result.vectorResultCount,
+        keywordResultCount: result.keywordResultCount,
+        hybridResultCount: result.hybridResultCount,
+        retrievalFallbackUsed: result.fallbackUsed,
+        retrievalFallbackReason: result.fallbackReason,
+        retrievalScope: result.retrievalScope,
+        includedScopes: result.includedScopes,
+        includeArchived: result.includeArchived,
+        includeSuperseded: result.includeSuperseded,
+        includeExpired: result.includeExpired,
+        currentTime: result.currentTime,
+        excludedByStatus: result.excludedByStatus,
+        excludedByTime: result.excludedByTime,
+        excludedByScope: result.excludedByScope,
+        retrievedMemories: result.rawMemories,
+        promptMemories: result.memories,
+        memoryFallbackUsed: false
+      };
+    }
+
+    const memories = await this.options.memory.retrieveRelevantMemories({
+      text: event.payload.content,
+      limit: 5,
+      sessionId: event.payload.sessionId,
+      projectId: "yuvi-runtime",
+      ...retrievalIdentityPayload(event.payload)
+    });
+    return {
+      ...emptyMemoryContext(),
+      retrievedMemoryCountRaw: memories.length,
+      retrievedMemoryCount: memories.length,
+      keywordResultCount: memories.length,
+      hybridResultCount: memories.length,
+      retrievedMemories: memories.map(memoryToDebug),
+      promptMemories: memories.map(memoryToDebug)
+    };
   }
 
   private async processCandidateForStorage(
@@ -2250,6 +2340,11 @@ type MemoryExtractionRuntimeDebug = MemoryExtractorStatus & {
 type MemoryContext = {
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
+  memoryProviderStatus?: MemoryRetrievalStatus | undefined;
+  memoryProviderErrorCode?: string | null | undefined;
+  memoryFallbackUsed: boolean;
+  memoryFallbackReason?: string | undefined;
+  memoryFallbackSource?: "legacy" | undefined;
   retrievalMode: MemoryRetrievalMode;
   vectorEnabled: boolean;
   vectorUsed: boolean;
@@ -2274,7 +2369,7 @@ type MemoryContext = {
   excludedByTime: number;
   excludedByScope: number;
   retrievedMemories: RetrievedMemoryDebug[];
-  promptMemories: RetrievedMemoryDebug[];
+  promptMemories: Array<RetrievedMemoryDebug | PromptMemoryCompatibility>;
 };
 
 type ResolvedMemoryOptions = {
@@ -2300,6 +2395,7 @@ function emptyMemoryContext(): MemoryContext {
   return {
     retrievedMemoryCountRaw: 0,
     retrievedMemoryCount: 0,
+    memoryFallbackUsed: false,
     retrievalMode: "keyword",
     vectorEnabled: false,
     vectorUsed: false,
@@ -2732,4 +2828,31 @@ function safeErrorMessage(error: unknown): string {
   }
 
   return "Unknown runtime error.";
+}
+
+function isPromptMemoryCompatibility(
+  memory: RetrievedMemoryDebug | PromptMemoryCompatibility
+): memory is PromptMemoryCompatibility {
+  return (
+    typeof (memory as Partial<PromptMemoryCompatibility>).provenanceId === "string" &&
+    typeof (memory as Partial<PromptMemoryCompatibility>).sourceRecordId === "string"
+  );
+}
+
+function isUsableProviderOutcome(status: MemoryRetrievalStatus): boolean {
+  return status === "ok" || status === "empty" || status === "partial";
+}
+
+function annotateProviderFallback(
+  context: MemoryContext,
+  outcome: Awaited<ReturnType<MemoryProvider["retrieveRelevant"]>>
+): MemoryContext {
+  return {
+    ...context,
+    memoryProviderStatus: outcome.status,
+    memoryProviderErrorCode: outcome.errorCode ?? null,
+    memoryFallbackUsed: true,
+    memoryFallbackReason: outcome.errorCode ?? `provider-status:${outcome.status}`,
+    memoryFallbackSource: "legacy"
+  };
 }

@@ -3,6 +3,7 @@ import { MemoryService } from "./service.js";
 import { InMemoryMemoryRepository } from "./repository.js";
 import type { MemoryBackend } from "./backend.js";
 import { detectExplicitForgetRequest, detectExplicitRememberRequest } from "./intent.js";
+import { Mem0MemoryProvider } from "./providers/mem0-memory-provider.js";
 
 function createMockBackend(overrides: Partial<MemoryBackend> = {}): MemoryBackend {
   return {
@@ -33,6 +34,20 @@ function createMockBackend(overrides: Partial<MemoryBackend> = {}): MemoryBacken
 }
 
 describe("MemoryService mem0 mode", () => {
+  it("exposes the semantic provider for Runtime read wiring", () => {
+    const backend = createMockBackend();
+    const service = new MemoryService(
+      new InMemoryMemoryRepository(),
+      undefined,
+      undefined,
+      undefined,
+      { enabled: false },
+      { kind: "mem0", mem0: backend }
+    );
+
+    expect(service.getMemoryProvider()).toBeInstanceOf(Mem0MemoryProvider);
+  });
+
   it("searches mem0 and maps prompt-safe memories", async () => {
     const backend = createMockBackend();
     const service = new MemoryService(

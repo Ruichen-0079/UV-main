@@ -11,6 +11,8 @@ import {
 } from "./intent.js";
 import { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
 import type { MemoryBackend } from "./backend.js";
+import type { MemoryProvider } from "./provider.js";
+import { Mem0MemoryProvider } from "./providers/mem0-memory-provider.js";
 import {
   buildChatMemoryScope,
   buildMem0RetrievalResult,
@@ -102,6 +104,7 @@ export class MemoryService {
   private readonly mem0SearchTimeoutMs: number;
   private readonly mem0WriteTimeoutMs: number;
   private readonly mem0Logger: MemoryServiceBackendConfig["logger"];
+  private readonly memoryProvider: MemoryProvider | undefined;
 
   constructor(
     private readonly repository: MemoryRepository,
@@ -121,6 +124,7 @@ export class MemoryService {
     this.mem0SearchTimeoutMs = backend?.searchTimeoutMs ?? MEM0_CHAT_SEARCH_TIMEOUT_MS;
     this.mem0WriteTimeoutMs = backend?.writeTimeoutMs ?? MEM0_CHAT_WRITE_TIMEOUT_MS;
     this.mem0Logger = backend?.logger ?? embedding?.logger;
+    this.memoryProvider = this.mem0Backend ? new Mem0MemoryProvider(this.mem0Backend) : undefined;
   }
 
   /** True when formal long-term memory is Mem0 (Legacy write/search path disabled). */
@@ -130,6 +134,11 @@ export class MemoryService {
 
   getBackendKind(): "legacy" | "mem0" {
     return this.isMem0Backend() ? "mem0" : "legacy";
+  }
+
+  /** Runtime-facing semantic retrieval provider; legacy mode remains facade-only. */
+  getMemoryProvider(): MemoryProvider | undefined {
+    return this.memoryProvider;
   }
 
   async createMemory(input: CreateMemoryInput): Promise<Memory> {
