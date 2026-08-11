@@ -8,6 +8,7 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from yuvi_mem0.noop_llm import YUVI_NOOP_MODEL, YUVI_NOOP_WIRE_PROVIDER
+from yuvi_mem0.runtime_paths import is_packaged_mode
 
 # YUVI-tuned Ollama Modelfile over the same qwen3-embedding:0.6b weights
 # with PARAMETER num_ctx 2048 (lower VRAM). Output dims remain 1024 and share
@@ -202,4 +203,8 @@ def parse_postgres_url(url: str) -> dict[str, str | int]:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    if is_packaged_mode():
+        # Packaged mode must never discover a .env from cwd, the install
+        # directory, or an accidentally inherited repository path.
+        return Settings(_env_file=None)  # type: ignore[call-arg]
     return Settings()

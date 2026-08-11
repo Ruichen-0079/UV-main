@@ -14,6 +14,14 @@ import {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (Object.prototype.hasOwnProperty.call(args, "build-info-json")) {
+    const buildInfo = globalThis.__YUVI_SUPERVISOR_BUILD_INFO__;
+    if (!buildInfo || buildInfo.schemaVersion !== 1 || buildInfo.mode !== "pkg-exe") {
+      throw new Error("embedded Supervisor build identity is unavailable");
+    }
+    process.stdout.write(`${JSON.stringify(buildInfo)}\n`);
+    return;
+  }
   const mode = (args.mode ?? "development").toLowerCase();
 
   const config =
@@ -21,7 +29,8 @@ async function main() {
       ? loadPackagedSupervisorConfig({
           resourceRoot: required(args, "resource-root"),
           dataRoot: required(args, "state-root"),
-          runtimeManifestPath: args["runtime-manifest"],
+          runtimeManifestPath: required(args, "runtime-manifest"),
+          mem0ManifestPath: required(args, "mem0-manifest"),
           controlPort: args.port ? Number(args.port) : 0,
           controlHost: "127.0.0.1"
         })
@@ -263,11 +272,10 @@ function restrictToCurrentUser(targetPath) {
   try {
     const user = process.env["USERNAME"] ?? "";
     if (!user) return;
-    spawnSync(
-      "icacls",
-      [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`],
-      { stdio: "ignore", windowsHide: true }
-    );
+    spawnSync("icacls", [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`], {
+      stdio: "ignore",
+      windowsHide: true
+    });
   } catch {
     // ignore
   }

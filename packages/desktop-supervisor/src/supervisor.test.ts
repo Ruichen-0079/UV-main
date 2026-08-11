@@ -1,23 +1,65 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildChildProcessEnv } from "./config.js";
+import { buildChildProcessEnv, loadPackagedSupervisorConfig } from "./config.js";
 import { DesktopSupervisor } from "./supervisor.js";
 import type { StartCommandSpec, SupervisorConfig } from "./types.js";
 import * as health from "./health.js";
+import * as ownership from "./ownership.js";
 import * as processWindows from "./process-windows.js";
 
 const tempDirs: string[] = [];
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
+const supervisors = new Set<DesktopSupervisor>();
+let unexpectedSpawnCalls = 0;
+
+function createSupervisor(config: SupervisorConfig): DesktopSupervisor {
+  const supervisor = new DesktopSupervisor(config);
+  supervisors.add(supervisor);
+  return supervisor;
+}
+
+async function shutdownTrackedSupervisors(): Promise<void> {
+  const cleanupErrors: unknown[] = [];
+  const results = await Promise.allSettled(
+    [...supervisors].map((supervisor) => supervisor.shutdown())
+  );
+  for (const result of results) {
+    if (result.status === "rejected") cleanupErrors.push(result.reason);
   }
+  supervisors.clear();
+
   vi.restoreAllMocks();
   delete process.env["DEEPSEEK_API_KEY"];
   delete process.env["DATABASE_URL"];
+  delete process.env["MEM0_PG_CONNECTION_STRING"];
+  delete process.env["MEM0_LLM_API_KEY"];
   delete process.env["DEEPSEEK_CHAT_MODEL"];
   delete process.env["MEM0_BASE_URL"];
+
+  for (const dir of tempDirs.splice(0)) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+
+  expect(cleanupErrors).toHaveLength(0);
+  expect(unexpectedSpawnCalls).toBe(0);
+}
+
+beforeEach(() => {
+  unexpectedSpawnCalls = 0;
+  vi.spyOn(processWindows, "spawnManagedProcess").mockImplementation(() => {
+    unexpectedSpawnCalls += 1;
+    throw new Error("unexpected managed process spawn in Supervisor unit test");
+  });
+});
+
+afterEach(async () => {
+  await shutdownTrackedSupervisors();
 });
 
 /**
@@ -89,7 +131,143 @@ function baseConfig(overrides: Partial<SupervisorConfig> = {}): SupervisorConfig
   };
 }
 
+function packagedConfig(env: Record<string, string> = {}): SupervisorConfig {
+  const resourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-packaged-res-"));
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-packaged-data-"));
+  tempDirs.push(resourceRoot, dataRoot);
+  const runtimeDir = path.join(resourceRoot, "runtime");
+  const mem0Dir = path.join(resourceRoot, "mem0");
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.mkdirSync(mem0Dir, { recursive: true });
+  fs.writeFileSync(path.join(runtimeDir, "node.exe"), "MZ");
+  fs.writeFileSync(path.join(runtimeDir, "yuvi-runtime-server.mjs"), "export {};\n");
+  fs.writeFileSync(
+    path.join(runtimeDir, "runtime-manifest.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      platform: "win32",
+      arch: "x64",
+      nodeExecutable: "node.exe",
+      runtimeEntry: "yuvi-runtime-server.mjs"
+    })
+  );
+  fs.writeFileSync(path.join(mem0Dir, "yuvi-mem0.exe"), "MZ");
+  fs.writeFileSync(
+    path.join(mem0Dir, "mem0-manifest.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      protocolVersion: 1,
+      platform: "win32",
+      arch: "x64",
+      executable: "yuvi-mem0.exe",
+      healthPath: "/health",
+      defaultHost: "127.0.0.1",
+      defaultPort: 6131
+    })
+  );
+  return loadPackagedSupervisorConfig({
+    resourceRoot,
+    dataRoot,
+    env: {
+      SERVER_HOST: "127.0.0.1",
+      SERVER_PORT: "6121",
+      MEM0_BASE_URL: "http://127.0.0.1:6131",
+      MEMORY_BACKEND: "mem0",
+      YUVI_AUTOSTART_RUNTIME: "false",
+      YUVI_AUTOSTART_MEM0: "true",
+      ...env
+    },
+    instanceId: "packaged-inst",
+    ownershipToken: "packaged-token",
+    controlToken: "b".repeat(64)
+  });
+}
+
+function fakeChild(pid: number): EventEmitter & { pid: number; killed: boolean; kill: () => void } {
+  const child = new EventEmitter() as EventEmitter & {
+    pid: number;
+    killed: boolean;
+    kill: () => void;
+  };
+  child.pid = pid;
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+    child.emit("exit", 0, null);
+  };
+  return child;
+}
+
 describe("DesktopSupervisor classification", () => {
+  it("treats packaged Mem0 without a start command as external detect-only", async () => {
+    const resourceRoot = makeTempRepositoryRoot();
+    const config = baseConfig({
+      layout: {
+        mode: "packaged",
+        resourceRoot,
+        dataRoot: path.join(resourceRoot, "data"),
+        runtimeManifestPath: path.join(resourceRoot, "runtime", "runtime-manifest.json"),
+        mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
+      },
+      repositoryRoot: resourceRoot,
+      mem0Start: null,
+      autostartMem0: false
+    });
+    vi.spyOn(health, "probeHttpHealth").mockImplementation(async (url) => {
+      if (url.includes("6131")) {
+        return {
+          ok: true,
+          statusCode: 200,
+          protocolOk: true,
+          message: "healthy external mem0",
+          latencyMs: 1
+        };
+      }
+      return { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
+    });
+    vi.spyOn(health, "probeTcp").mockResolvedValue({
+      ok: false,
+      statusCode: null,
+      protocolOk: false,
+      message: "closed",
+      latencyMs: 1
+    });
+    const supervisor = createSupervisor(config);
+    await supervisor.refreshAll();
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(mem0?.managed).toBe(false);
+    expect(mem0?.ownership).toBe("external");
+    expect(mem0?.canStop).toBe(false);
+  });
+
+  it("marks packaged Mem0 as managed only when a manifest command is present", () => {
+    const resourceRoot = makeTempRepositoryRoot();
+    const mem0Start: StartCommandSpec = {
+      file: path.join(resourceRoot, "mem0", "yuvi-mem0.exe"),
+      args: [],
+      cwd: path.join(resourceRoot, "data"),
+      env: { YUVI_MEM0_PACKAGED: "1" },
+      commandMarker: path.join(resourceRoot, "mem0", "yuvi-mem0.exe")
+    };
+    const supervisor = createSupervisor(
+      baseConfig({
+        layout: {
+          mode: "packaged",
+          resourceRoot,
+          dataRoot: path.join(resourceRoot, "data"),
+          runtimeManifestPath: path.join(resourceRoot, "runtime", "runtime-manifest.json"),
+          mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
+        },
+        repositoryRoot: resourceRoot,
+        mem0Start,
+        autostartMem0: true
+      })
+    );
+    expect(supervisor.snapshot().services.find((service) => service.id === "mem0")?.managed).toBe(
+      true
+    );
+  });
+
   it("marks healthy runtime without metadata as external", async () => {
     vi.spyOn(health, "probeHttpHealth").mockImplementation(async (url) => {
       if (url.includes("6121")) {
@@ -117,13 +295,12 @@ describe("DesktopSupervisor classification", () => {
       latencyMs: 1
     });
 
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     const runtime = supervisor.snapshot().services.find((s) => s.id === "runtime");
     expect(runtime?.status).toBe("healthy");
     expect(runtime?.ownership).toBe("external");
     expect(runtime?.canStop).toBe(false);
-    vi.restoreAllMocks();
   });
 
   it("marks protocol mismatch as unavailable without taking ownership", async () => {
@@ -153,13 +330,12 @@ describe("DesktopSupervisor classification", () => {
       latencyMs: 1
     });
 
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     const runtime = supervisor.snapshot().services.find((s) => s.id === "runtime");
     expect(runtime?.status).toBe("unavailable");
     expect(runtime?.ownership).toBe("none");
     expect(runtime?.summary).toMatch(/unexpected/i);
-    vi.restoreAllMocks();
   });
 
   it("mem0 failure does not remove runtime from snapshot", async () => {
@@ -168,7 +344,13 @@ describe("DesktopSupervisor classification", () => {
         return { ok: true, statusCode: 200, protocolOk: true, message: "ok", latencyMs: 1 };
       }
       if (url.includes("6131")) {
-        return { ok: false, statusCode: null, protocolOk: false, message: "mem0 down", latencyMs: 1 };
+        return {
+          ok: false,
+          statusCode: null,
+          protocolOk: false,
+          message: "mem0 down",
+          latencyMs: 1
+        };
       }
       return { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
     });
@@ -180,12 +362,11 @@ describe("DesktopSupervisor classification", () => {
       latencyMs: 1
     });
 
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     const snap = supervisor.snapshot();
     expect(snap.services.find((s) => s.id === "runtime")?.status).toBe("healthy");
     expect(snap.services.find((s) => s.id === "mem0")?.status).toBe("stopped");
-    vi.restoreAllMocks();
   });
 
   it("marks protocol-mismatched HTTP as unavailable (not external/owned)", async () => {
@@ -208,7 +389,7 @@ describe("DesktopSupervisor classification", () => {
       message: "closed",
       latencyMs: 1
     });
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     const runtime = supervisor.snapshot().services.find((s) => s.id === "runtime");
     expect(runtime?.status).toBe("unavailable");
@@ -231,13 +412,12 @@ describe("DesktopSupervisor classification", () => {
       message: "tcp open",
       latencyMs: 1
     });
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.refreshAll();
     await supervisor.stopService("runtime");
     const runtime = supervisor.snapshot().services.find((s) => s.id === "runtime");
     expect(runtime?.lastError).toMatch(/external/i);
     expect(runtime?.status).toBe("healthy");
-    vi.restoreAllMocks();
   });
 });
 
@@ -254,7 +434,7 @@ describe("DesktopSupervisor runtime config push", () => {
   it("starts with env A, applyRuntimeConfig B, resolveSpawnEnv uses B", async () => {
     process.env["DEEPSEEK_API_KEY"] = "key-A";
     process.env["DEEPSEEK_CHAT_MODEL"] = "model-A";
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
 
     // Fixture repositoryRoot keeps startCommand resolvable before and after derive.
     expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
@@ -288,7 +468,7 @@ describe("DesktopSupervisor runtime config push", () => {
 
   it("base fallback A → override B → delete restores A (not stale B)", async () => {
     process.env["DEEPSEEK_API_KEY"] = "fallback-A";
-    const supervisor = new DesktopSupervisor(
+    const supervisor = createSupervisor(
       baseConfig({
         env: {
           DEEPSEEK_CHAT_MODEL: "model-A",
@@ -309,7 +489,9 @@ describe("DesktopSupervisor runtime config push", () => {
     });
     expect(supervisor.resolveSpawnEnv("runtime")).not.toBeNull();
     expect(supervisor.resolveSpawnEnv("runtime")?.["DEEPSEEK_API_KEY"]).toBe("user-secret-B");
-    expect(process.env["DEEPSEEK_API_KEY"]).toBe("user-secret-B");
+    // Dynamic settings stay inside Supervisor state; process.env is never
+    // mutated by a config update.
+    expect(process.env["DEEPSEEK_API_KEY"]).toBe("fallback-A");
 
     await supervisor.applyRuntimeConfig({
       env: { DEEPSEEK_CHAT_MODEL: "model-B", SERVER_PORT: "6121" },
@@ -327,7 +509,7 @@ describe("DesktopSupervisor runtime config push", () => {
 
   it("delete secret with no base fallback leaves key absent (no stale B)", async () => {
     delete process.env["DEEPSEEK_API_KEY"];
-    const supervisor = new DesktopSupervisor(
+    const supervisor = createSupervisor(
       baseConfig({
         env: {
           DEEPSEEK_CHAT_MODEL: "model-A",
@@ -355,8 +537,8 @@ describe("DesktopSupervisor runtime config push", () => {
   });
 
   it("updates health probe URLs for mem0 / ollama / tts without spawn", async () => {
-    const spawnSpy = vi.spyOn(processWindows, "spawnManagedProcess");
-    const supervisor = new DesktopSupervisor(
+    const spawnSpy = vi.mocked(processWindows.spawnManagedProcess);
+    const supervisor = createSupervisor(
       baseConfig({
         runtimeStart: null,
         mem0Start: null,
@@ -400,7 +582,7 @@ describe("DesktopSupervisor runtime config push", () => {
   });
 
   it("rejects config update while shutting down", async () => {
-    const supervisor = new DesktopSupervisor(baseConfig({ runtimeStart: null }));
+    const supervisor = createSupervisor(baseConfig({ runtimeStart: null }));
     await supervisor.shutdown();
     await expect(
       supervisor.applyRuntimeConfig({ env: { DEEPSEEK_CHAT_MODEL: "x" }, unsetEnv: [] })
@@ -408,8 +590,8 @@ describe("DesktopSupervisor runtime config push", () => {
   });
 
   it("external services stay unspawned when config changes", async () => {
-    const spawnSpy = vi.spyOn(processWindows, "spawnManagedProcess");
-    const supervisor = new DesktopSupervisor(
+    const spawnSpy = vi.mocked(processWindows.spawnManagedProcess);
+    const supervisor = createSupervisor(
       baseConfig({
         runtimeStart: null,
         mem0Start: null,
@@ -434,7 +616,7 @@ describe("DesktopSupervisor runtime config push", () => {
 
   it("status snapshot never contains secret values", async () => {
     process.env["DEEPSEEK_API_KEY"] = "sk-super-secret-value";
-    const supervisor = new DesktopSupervisor(baseConfig());
+    const supervisor = createSupervisor(baseConfig());
     await supervisor.applyRuntimeConfig({
       env: { DEEPSEEK_API_KEY: "sk-super-secret-value", DEEPSEEK_CHAT_MODEL: "m" },
       unsetEnv: []
@@ -453,5 +635,611 @@ describe("DesktopSupervisor runtime config push", () => {
     expect(env["SERVER_PORT"]).toBe("2");
     expect(env["DEEPSEEK_API_KEY"]).toBeUndefined();
     expect(env["PATH"]).toBe("/bin");
+  });
+});
+
+describe("DesktopSupervisor packaged Mem0 reconcile", () => {
+  async function waitForReconcile(supervisor: DesktopSupervisor): Promise<void> {
+    await (supervisor as unknown as { configReconcileOp: Promise<void> | null }).configReconcileOp;
+  }
+
+  function mockMem0Health(healthy = false) {
+    let ready = healthy;
+    vi.spyOn(health, "probeHttpHealth").mockImplementation(async (url) => {
+      if (url.includes("6131") || url.includes("6132")) {
+        return ready
+          ? { ok: true, statusCode: 200, protocolOk: true, message: "healthy", latencyMs: 1 }
+          : { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
+      }
+      return { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
+    });
+    vi.spyOn(health, "probeTcp").mockResolvedValue({
+      ok: false,
+      statusCode: null,
+      protocolOk: false,
+      message: "closed",
+      latencyMs: 1
+    });
+    return { setReady: () => (ready = true), setDown: () => (ready = false) };
+  }
+
+  function mockManagedSpawn(
+    onSpawn?: () => void,
+    onStop?: () => void,
+    onInspectionReady?: (command: StartCommandSpec) => void
+  ) {
+    const children: Array<EventEmitter & { pid: number; killed: boolean; kill: () => void }> = [];
+    const spawn = vi.mocked(processWindows.spawnManagedProcess);
+    spawn.mockImplementation((command) => {
+      onSpawn?.();
+      const child = fakeChild(40_000 + children.length);
+      children.push(child);
+      const originalKill = child.kill;
+      child.kill = () => {
+        onStop?.();
+        originalKill();
+      };
+      vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+        status: "resolved",
+        processId: pid,
+        info: {
+          processId: pid,
+          parentProcessId: 1,
+          commandLine: `${command.commandMarker} ${command.cwd}`,
+          createdAtUtc: new Date()
+        }
+      }));
+      onInspectionReady?.(command);
+      return child as never;
+    });
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+      status: "resolved",
+      processId: pid,
+      info: {
+        processId: pid,
+        parentProcessId: 1,
+        commandLine: `external-process ${pid}`,
+        createdAtUtc: new Date()
+      }
+    }));
+    vi.spyOn(processWindows, "isProcessAlive").mockReturnValue(false);
+    vi.spyOn(processWindows, "requestGracefulStop").mockImplementation(() => undefined);
+    vi.spyOn(processWindows, "forceKillProcessTree").mockImplementation(() => undefined);
+    return { spawn, children };
+  }
+
+  it("rejects invalid managed remote URL without changing config or specs", async () => {
+    const supervisor = createSupervisor(packagedConfig());
+    const beforeEnv = { ...supervisor.getConfig().env };
+    const before = supervisor.snapshot();
+    await expect(
+      supervisor.applyRuntimeConfig({
+        env: { MEM0_BASE_URL: "https://remote.example.invalid:6131" },
+        unsetEnv: []
+      })
+    ).rejects.toThrow(/loopback|http/i);
+    expect(supervisor.getConfig().env).toEqual(beforeEnv);
+    const afterMem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    const beforeMem0 = before.services.find((service) => service.id === "mem0");
+    expect(afterMem0?.url).toBe(beforeMem0?.url);
+    expect(afterMem0?.managed).toBe(beforeMem0?.managed);
+    expect(afterMem0?.status).toBe(beforeMem0?.status);
+    expect(afterMem0?.ownership).toBe(beforeMem0?.ownership);
+  });
+
+  it("keeps dynamic secrets out of process.env and injects them only into child env", async () => {
+    const supervisor = createSupervisor(packagedConfig());
+    delete process.env["MEM0_LLM_API_KEY"];
+    const result = await supervisor.applyRuntimeConfig({
+      env: { MEM0_LLM_API_KEY: "P3_MEM0_LLM_SECRET_NEVER_LOG" },
+      unsetEnv: []
+    });
+    expect(process.env["MEM0_LLM_API_KEY"]).toBeUndefined();
+    expect(result.appliedEnvKeys).not.toContain("MEM0_LLM_API_KEY");
+    expect(JSON.stringify(result)).not.toContain("P3_MEM0_LLM_SECRET_NEVER_LOG");
+    expect(supervisor.resolveSpawnEnv("mem0")?.["MEM0_LLM_API_KEY"]).toBe(
+      "P3_MEM0_LLM_SECRET_NEVER_LOG"
+    );
+    await supervisor.shutdown();
+  });
+
+  it("suppresses a no-op secret save", async () => {
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
+    await supervisor.applyRuntimeConfig({
+      env: { MEM0_LLM_API_KEY: "same-secret" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    const result = await supervisor.applyRuntimeConfig({
+      env: { MEM0_LLM_API_KEY: "same-secret" },
+      unsetEnv: []
+    });
+    expect(result.restartedServices).toEqual([]);
+    await supervisor.shutdown();
+  });
+
+  it("does not restart Mem0 when DATABASE_URL changes under an explicit PG override", async () => {
+    const supervisor = createSupervisor(
+      packagedConfig({
+        MEM0_PG_CONNECTION_STRING: "explicit-pg-a",
+        DATABASE_URL: "database-a"
+      })
+    );
+    const result = await supervisor.applyRuntimeConfig({
+      env: { DATABASE_URL: "database-b" },
+      unsetEnv: []
+    });
+    expect(result.restartedServices).toEqual(["runtime"]);
+    expect(supervisor.resolveSpawnEnv("mem0")?.["MEM0_PG_CONNECTION_STRING"]).toBe("explicit-pg-a");
+    await supervisor.shutdown();
+  });
+
+  it("does not reconcile Mem0 for unrelated TTS settings", async () => {
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
+    const result = await supervisor.applyRuntimeConfig({
+      env: { GPT_SOVITS_TTS_BASE_URL: "http://127.0.0.1:9899" },
+      unsetEnv: []
+    });
+    expect(result.restartedServices).toEqual([]);
+    await supervisor.shutdown();
+  });
+
+  it("maps DATABASE_URL to Mem0 PG env and removes it after unset", async () => {
+    const healthMock = mockMem0Health(false);
+    mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+    const first = await supervisor.applyRuntimeConfig({
+      env: { DATABASE_URL: "postgres://P3_MEM0_DB_SECRET_NEVER_LOG@127.0.0.1:5432/mem0" },
+      unsetEnv: []
+    });
+    expect(first.restartedServices).toEqual(["runtime", "mem0"]);
+    const childEnv = supervisor.resolveSpawnEnv("mem0");
+    expect(childEnv?.["MEM0_PG_CONNECTION_STRING"]).toContain("P3_MEM0_DB_SECRET_NEVER_LOG");
+    expect(childEnv?.["DATABASE_URL"]).toBeUndefined();
+    const second = await supervisor.applyRuntimeConfig({ env: {}, unsetEnv: ["DATABASE_URL"] });
+    expect(second.restartedServices).toEqual(["runtime", "mem0"]);
+    expect(supervisor.resolveSpawnEnv("mem0")?.["DATABASE_URL"]).toBeUndefined();
+    expect(supervisor.resolveSpawnEnv("mem0")?.["MEM0_PG_CONNECTION_STRING"]).toBeUndefined();
+    expect(JSON.stringify(supervisor.snapshot())).not.toContain("P3_MEM0_DB_SECRET_NEVER_LOG");
+    await supervisor.shutdown();
+  });
+
+  it("stops an owned Mem0 when managed mode is disabled", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+    await supervisor.bootstrap();
+    await waitForReconcile(supervisor);
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    const result = await supervisor.applyRuntimeConfig({
+      env: { YUVI_AUTOSTART_MEM0: "false" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(result.restartedServices).toEqual(["mem0"]);
+    expect(mem0?.managed).toBe(false);
+    expect(mem0?.ownership).toBe("none");
+    expect(mem0?.status).toBe("stopped");
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("tears down a reconciled packaged Mem0 through the tracked fixture lifecycle", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+    await supervisor.bootstrap();
+    await waitForReconcile(supervisor);
+
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(supervisor.snapshot().services.find((service) => service.id === "mem0")?.ownership).toBe(
+      "owned"
+    );
+  });
+
+  it("publishes managed Mem0 metadata before concurrent refresh can classify it", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+
+    await Promise.all([supervisor.bootstrap(), supervisor.refreshAll()]);
+
+    const config = supervisor.getConfig();
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const metadata = ownership.readProcessMetadata(metadataPath);
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+
+    expect(metadata).toMatchObject({
+      schemaVersion: 1,
+      role: "mem0",
+      pid: processMock.children[0]?.pid,
+      stateDirectory: config.stateDirectory,
+      instanceId: config.instanceId
+    });
+    expect(metadata?.commandMarker).toBe(processMock.spawn.mock.calls[0]?.[0].commandMarker);
+    expect(mem0?.status).toBe("healthy");
+    expect(mem0?.ownership).toBe("owned");
+    expect(
+      fs.readdirSync(config.stateDirectory).some((name) => name.includes(".mem0.pid.json."))
+    ).toBe(false);
+  });
+
+  it("preserves a tracked Mem0 child across one identity query timeout", async () => {
+    const healthMock = mockMem0Health(false);
+    let inspectionCalls = 0;
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown, (command) => {
+      vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => {
+        inspectionCalls += 1;
+        if (inspectionCalls === 1) {
+          return {
+            status: "resolved",
+            processId: pid,
+            info: {
+              processId: pid,
+              parentProcessId: 1,
+              commandLine: `${command.commandMarker} ${command.cwd}`,
+              createdAtUtc: new Date()
+            }
+          };
+        }
+        return {
+          status: "unavailable",
+          processId: pid,
+          reason: "query-timeout"
+        };
+      });
+    });
+    const supervisor = createSupervisor(packagedConfig());
+
+    await supervisor.bootstrap();
+    await waitForReconcile(supervisor);
+
+    const config = supervisor.getConfig();
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const afterTimeout = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(inspectionCalls).toBeGreaterThanOrEqual(2);
+    expect(afterTimeout?.status).toBe("healthy");
+    expect(afterTimeout?.ownership).toBe("owned");
+    expect(fs.existsSync(metadataPath)).toBe(true);
+
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => {
+      const command = processMock.spawn.mock.calls[0]?.[0];
+      return {
+        status: "resolved",
+        processId: pid,
+        info: {
+          processId: pid,
+          parentProcessId: 1,
+          commandLine: `${command?.commandMarker ?? "yuvi-mem0.exe"} ${command?.cwd ?? ""}`,
+          createdAtUtc: new Date()
+        }
+      };
+    });
+    await supervisor.refreshAll();
+    const afterResolved = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(afterResolved?.status).toBe("healthy");
+    expect(afterResolved?.ownership).toBe("owned");
+    expect(fs.existsSync(metadataPath)).toBe(true);
+
+    await supervisor.shutdown();
+    expect(fs.existsSync(metadataPath)).toBe(false);
+  });
+
+  it("does not replace a live managed generation when identity is unavailable during a health failure", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+
+    await supervisor.ensureService("mem0");
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+
+    healthMock.setDown();
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+      status: "unavailable",
+      processId: pid,
+      reason: "query-timeout"
+    }));
+
+    await supervisor.ensureService("mem0");
+
+    const config = supervisor.getConfig();
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(mem0?.status).toBe("unavailable");
+    expect(mem0?.ownership).toBe("owned");
+    expect(fs.existsSync(metadataPath)).toBe(true);
+  });
+
+  it("does not spawn over a live child when unavailable metadata cannot match it", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+
+    await supervisor.ensureService("mem0");
+    const config = supervisor.getConfig();
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const metadata = ownership.readProcessMetadata(metadataPath);
+    if (!metadata) throw new Error("expected managed metadata");
+    ownership.writeProcessMetadata(metadataPath, { ...metadata, pid: metadata.pid + 1 });
+
+    healthMock.setDown();
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+      status: "unavailable",
+      processId: pid,
+      reason: "query-timeout"
+    }));
+
+    await supervisor.ensureService("mem0");
+
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(mem0?.status).toBe("unavailable");
+    expect(mem0?.ownership).toBe("none");
+    expect(fs.existsSync(metadataPath)).toBe(true);
+  });
+
+  it("ignores a stale exit callback from a previous managed generation", async () => {
+    const healthMock = mockMem0Health(false);
+    const children: Array<ReturnType<typeof fakeChild>> = [];
+    const spawn = vi.mocked(processWindows.spawnManagedProcess);
+    spawn.mockImplementation((command) => {
+      const child = fakeChild(41_000);
+      const originalKill = child.kill;
+      child.kill = () => {
+        // Deliberately defer the old generation's exit event until after the
+        // replacement has been published.
+        child.killed = true;
+        healthMock.setDown();
+        if (children.length > 1) originalKill();
+      };
+      children.push(child);
+      healthMock.setReady();
+      vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => ({
+        status: "resolved",
+        processId: pid,
+        info: {
+          processId: pid,
+          parentProcessId: 1,
+          commandLine: `${command.commandMarker} ${command.cwd}`,
+          createdAtUtc: new Date()
+        }
+      }));
+      return child as never;
+    });
+    vi.spyOn(processWindows, "inspectProcess").mockReturnValue({
+      status: "resolved",
+      processId: 41_000,
+      info: {
+        processId: 41_000,
+        parentProcessId: 1,
+        commandLine: "external-process 41000",
+        createdAtUtc: new Date()
+      }
+    });
+    vi.spyOn(processWindows, "isProcessAlive").mockReturnValue(false);
+    vi.spyOn(processWindows, "requestGracefulStop").mockImplementation(() => undefined);
+    vi.spyOn(processWindows, "forceKillProcessTree").mockImplementation(() => undefined);
+
+    const supervisor = createSupervisor(packagedConfig());
+    await supervisor.ensureService("mem0");
+    expect(spawn).toHaveBeenCalledTimes(1);
+
+    await supervisor.restartService("mem0");
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(supervisor.snapshot().services.find((service) => service.id === "mem0")?.ownership).toBe(
+      "owned"
+    );
+
+    children[0]?.emit("exit", 0, null);
+    const afterStaleExit = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(afterStaleExit?.ownership).toBe("owned");
+    expect(afterStaleExit?.pid).toBe(41_000);
+  });
+
+  it("keeps metadata pending when a restarted Supervisor cannot inspect the process", async () => {
+    const config = packagedConfig();
+    const command = config.mem0Start;
+    if (!command) throw new Error("expected packaged Mem0 start command");
+    const metadataPath = path.join(config.stateDirectory, "mem0.pid.json");
+    const now = new Date().toISOString();
+    ownership.writeProcessMetadata(metadataPath, {
+      schemaVersion: 1,
+      role: "mem0",
+      pid: 5010,
+      repositoryRoot: config.repositoryRoot,
+      stateDirectory: config.stateDirectory,
+      commandMarker: command.commandMarker,
+      processStartedAtUtc: now,
+      createdAtUtc: now,
+      ownershipToken: config.ownershipToken,
+      instanceId: config.instanceId
+    });
+    vi.spyOn(processWindows, "inspectProcess").mockReturnValue({
+      status: "unavailable",
+      processId: 5010,
+      reason: "query-timeout"
+    });
+    vi.spyOn(health, "probeHttpHealth").mockResolvedValue({
+      ok: true,
+      statusCode: 200,
+      protocolOk: true,
+      message: "healthy",
+      latencyMs: 1
+    });
+    const supervisor = createSupervisor(config);
+
+    await supervisor.refreshAll();
+
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(mem0?.status).toBe("unavailable");
+    expect(mem0?.ownership).toBe("none");
+    expect(mem0?.summary).toMatch(/ownership verification unavailable/i);
+    expect(fs.existsSync(metadataPath)).toBe(true);
+  });
+
+  it("cleans the exact child and preserves metadata errors", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const publishError = new Error("metadata publish failed");
+    vi.spyOn(ownership, "writeProcessMetadata").mockImplementation(() => {
+      throw publishError;
+    });
+    const supervisor = createSupervisor(packagedConfig());
+
+    await expect(supervisor.bootstrap()).rejects.toBe(publishError);
+
+    const config = supervisor.getConfig();
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(processMock.children[0]?.killed).toBe(true);
+    expect(mem0?.status).toBe("unavailable");
+    expect(mem0?.ownership).toBe("none");
+    expect(mem0?.lastError).toBe(publishError.message);
+    expect(fs.existsSync(path.join(config.stateDirectory, "mem0.pid.json"))).toBe(false);
+    expect(fs.readdirSync(config.stateDirectory).some((name) => name.endsWith(".tmp"))).toBe(false);
+  });
+
+  it("starts packaged Mem0 when external mode becomes managed", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
+    const result = await supervisor.applyRuntimeConfig({
+      env: { YUVI_AUTOSTART_MEM0: "true" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(result.restartedServices).toEqual(["mem0"]);
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(mem0?.ownership).toBe("owned");
+    await supervisor.shutdown();
+  });
+
+  it("coordinates the mem0 backend transition from legacy to packaged Mem0", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(
+      packagedConfig({ MEMORY_BACKEND: "legacy", YUVI_AUTOSTART_MEM0: "true" })
+    );
+    const result = await supervisor.applyRuntimeConfig({
+      env: { MEMORY_BACKEND: "mem0" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    expect(result.restartedServices).toEqual(["runtime", "mem0"]);
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(supervisor.getConfig().memoryBackend).toBe("mem0");
+    await supervisor.shutdown();
+  });
+
+  it("keeps a healthy external Mem0 pending instead of claiming or killing it", async () => {
+    mockMem0Health(true);
+    const processMock = mockManagedSpawn();
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
+    await supervisor.bootstrap();
+    const result = await supervisor.applyRuntimeConfig({
+      env: { YUVI_AUTOSTART_MEM0: "true" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(result.restartedServices).toEqual(["mem0"]);
+    expect(processMock.spawn).not.toHaveBeenCalled();
+    expect(mem0?.ownership).toBe("external");
+    expect(mem0?.canStop).toBe(false);
+    expect(mem0?.canRestart).toBe(false);
+    expect(mem0?.summary).toMatch(/pending.*external/i);
+    await supervisor.shutdown();
+  });
+
+  it("recovers managed Mem0 after a pending external service disappears", async () => {
+    const healthMock = mockMem0Health(true);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }));
+    await supervisor.bootstrap();
+    await supervisor.applyRuntimeConfig({
+      env: { YUVI_AUTOSTART_MEM0: "true" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    expect(processMock.spawn).not.toHaveBeenCalled();
+    healthMock.setDown();
+    await supervisor.refreshAll();
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(supervisor.snapshot().services.find((service) => service.id === "mem0")?.ownership).toBe(
+      "owned"
+    );
+    await supervisor.shutdown();
+  });
+
+  it("restarts an owned Mem0 once when its managed port changes", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+    await supervisor.bootstrap();
+    await waitForReconcile(supervisor);
+    const result = await supervisor.applyRuntimeConfig({
+      env: { MEM0_BASE_URL: "http://127.0.0.1:6132" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    expect(result.restartedServices).toEqual(["runtime", "mem0"]);
+    expect(processMock.spawn).toHaveBeenCalledTimes(2);
+    const lastCall = processMock.spawn.mock.calls.at(-1);
+    expect(lastCall?.[0].env["MEM0_SIDECAR_PORT"]).toBe("6132");
+    await supervisor.shutdown();
+  });
+
+  it("serializes rapid config updates and does not run parallel reconcile", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(packagedConfig());
+    const first = supervisor.applyRuntimeConfig({
+      env: { MEM0_LLM_MODEL: "model-a" },
+      unsetEnv: []
+    });
+    const second = supervisor.applyRuntimeConfig({
+      env: { MEM0_LLM_MODEL: "model-b" },
+      unsetEnv: []
+    });
+    const results = await Promise.all([first, second]);
+    await waitForReconcile(supervisor);
+    expect(results[0].restartedServices).toEqual(["mem0"]);
+    expect(results[1].restartedServices).toEqual(["mem0"]);
+    expect(supervisor.getConfig().env["MEM0_LLM_MODEL"]).toBe("model-b");
+    expect(processMock.spawn).toHaveBeenCalledTimes(2);
+    await supervisor.shutdown();
+  });
+
+  it("does not restart an external Runtime when a secret changes", async () => {
+    vi.spyOn(health, "probeHttpHealth").mockResolvedValue({
+      ok: true,
+      statusCode: 200,
+      protocolOk: true,
+      message: "healthy",
+      latencyMs: 1
+    });
+    vi.spyOn(health, "probeTcp").mockResolvedValue({
+      ok: false,
+      statusCode: null,
+      protocolOk: false,
+      message: "closed",
+      latencyMs: 1
+    });
+    const spawnSpy = vi.mocked(processWindows.spawnManagedProcess);
+    const supervisor = createSupervisor(baseConfig({ autostartRuntime: false }));
+    await supervisor.refreshAll();
+    const result = await supervisor.applyRuntimeConfig({
+      env: { DEEPSEEK_API_KEY: "P3_RUNTIME_SECRET_NEVER_LOG" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    const runtime = supervisor.snapshot().services.find((service) => service.id === "runtime");
+    expect(result.restartedServices).toEqual(["runtime"]);
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(runtime?.ownership).toBe("external");
+    expect(runtime?.summary).toMatch(/pending|external/i);
+    expect(JSON.stringify(supervisor.snapshot())).not.toContain("P3_RUNTIME_SECRET_NEVER_LOG");
+    await supervisor.shutdown();
   });
 });

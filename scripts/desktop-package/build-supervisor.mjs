@@ -1,12 +1,11 @@
 /**
  * Bundle desktop-supervisor + CLI into a single CommonJS file, then package
- * with @yao-pkg/pkg into a Windows x64 executable when available.
- *
- * Fallback (documented): keep supervisor.cjs next to bundled node.exe and run
- * via node.exe — still no system Node / pnpm / tsx.
+ * with @yao-pkg/pkg into a Windows x64 executable. A packaged build is never
+ * allowed to silently fall back to Node+CJS or reuse a stale executable.
  */
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -18,14 +17,67 @@ import {
 } from "./constants.mjs";
 import { assertFile, ensureDir } from "./paths.mjs";
 
-export async function bundleSupervisorCjs(outDir = SUPERVISOR_OUT_DIR) {
-  ensureDir(outDir);
-  const entry = path.join(REPO_ROOT, "scripts", "yuvi-desktop-supervisor.packaged.mjs");
-  assertFile(entry, "packaged supervisor entry");
-  const outfile = path.join(outDir, SUPERVISOR_BUNDLE_NAME);
+export const SUPERVISOR_BUILD_INFO_NAME = "supervisor-build-info.json";
+export const SUPERVISOR_SOURCE_FILES = [
+  "scripts/yuvi-desktop-supervisor.packaged.mjs",
+  "packages/desktop-supervisor/src/supervisor.ts",
+  "packages/desktop-supervisor/src/ownership.ts",
+  "packages/desktop-supervisor/src/config.ts",
+  "packages/desktop-supervisor/src/types.ts"
+];
+const BUNDLE_HASH_PLACEHOLDER = "0".repeat(64);
 
+export function sha256File(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+export function resolveCheckoutSha() {
+  const fromEnvironment = process.env.GITHUB_SHA?.trim();
+  if (fromEnvironment && /^[0-9a-f]{40}$/i.test(fromEnvironment)) return fromEnvironment.toLowerCase();
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    })
+      .trim()
+      .toLowerCase();
+  } catch (error) {
+    throw new Error(`unable to resolve checkout SHA: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+export function computeSupervisorSourceFingerprint() {
+  const hash = crypto.createHash("sha256");
+  for (const relativePath of SUPERVISOR_SOURCE_FILES) {
+    const absolutePath = path.join(REPO_ROOT, ...relativePath.split("/"));
+    assertFile(absolutePath, `Supervisor source ${relativePath}`);
+    hash.update(relativePath);
+    hash.update("\0");
+    hash.update(fs.readFileSync(absolutePath));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+export function canonicalBundleText(text) {
+  return String(text).replace(
+    /("bundleSha256"\s*:\s*")[0-9a-f]{64}("\s*[,}])/gi,
+    `$1${BUNDLE_HASH_PLACEHOLDER}$2`
+  );
+}
+
+function canonicalBundleSha256(filePath) {
+  return crypto.createHash("sha256").update(canonicalBundleText(fs.readFileSync(filePath, "utf8"))).digest("hex");
+}
+
+function embeddedBuildInfoBanner(identity) {
+  return `globalThis.__YUVI_SUPERVISOR_BUILD_INFO__ = Object.freeze(${JSON.stringify(identity)});`;
+}
+
+async function bundleSupervisorWithIdentity(outfile, identity) {
   await build({
-    entryPoints: [entry],
+    entryPoints: [path.join(REPO_ROOT, "scripts", "yuvi-desktop-supervisor.packaged.mjs")],
     bundle: true,
     platform: "node",
     format: "cjs",
@@ -34,9 +86,33 @@ export async function bundleSupervisorCjs(outDir = SUPERVISOR_OUT_DIR) {
     sourcemap: false,
     logLevel: "info",
     banner: {
-      js: "/* YUVI packaged Supervisor — do not edit */"
+      js: `/* YUVI packaged Supervisor — do not edit */\n${embeddedBuildInfoBanner(identity)}`
     }
   });
+  assertFile(outfile, "supervisor cjs bundle");
+}
+
+export async function bundleSupervisorCjs(outDir = SUPERVISOR_OUT_DIR) {
+  ensureDir(outDir);
+  const entry = path.join(REPO_ROOT, "scripts", "yuvi-desktop-supervisor.packaged.mjs");
+  assertFile(entry, "packaged supervisor entry");
+  const outfile = path.join(outDir, SUPERVISOR_BUNDLE_NAME);
+  const identity = {
+    schemaVersion: 1,
+    mode: "pkg-exe",
+    checkoutSha: resolveCheckoutSha(),
+    sourceFingerprint: computeSupervisorSourceFingerprint(),
+    bundleSha256: BUNDLE_HASH_PLACEHOLDER,
+    entry: "yuvi-desktop-supervisor.packaged.cjs"
+  };
+  fs.rmSync(outfile, { force: true });
+  await bundleSupervisorWithIdentity(outfile, identity);
+  identity.bundleSha256 = canonicalBundleSha256(outfile);
+  fs.rmSync(outfile, { force: true });
+  await bundleSupervisorWithIdentity(outfile, identity);
+  if (canonicalBundleSha256(outfile) !== identity.bundleSha256) {
+    throw new Error("Supervisor bundle canonical SHA changed after embedding build identity");
+  }
   assertFile(outfile, "supervisor cjs bundle");
   return outfile;
 }
@@ -44,6 +120,7 @@ export async function bundleSupervisorCjs(outDir = SUPERVISOR_OUT_DIR) {
 export function packageSupervisorExe(cjsPath, outDir = SUPERVISOR_OUT_DIR) {
   ensureDir(outDir);
   const exePath = path.join(outDir, SUPERVISOR_EXE_NAME);
+  fs.rmSync(exePath, { force: true });
   const pkgBin = path.join(REPO_ROOT, "node_modules", "@yao-pkg", "pkg", "lib-es5", "bin.js");
   const pkgCli = path.join(REPO_ROOT, "node_modules", ".bin", "pkg");
   const pkgCmd =
@@ -71,16 +148,11 @@ export function packageSupervisorExe(cjsPath, outDir = SUPERVISOR_OUT_DIR) {
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[desktop-package] pkg failed: ${message}`);
-    console.warn(
-      "[desktop-package] fallback: supervisor will run as node.exe + yuvi-desktop-supervisor.cjs"
-    );
-    return { exePath: null, cjsPath, mode: "node-cjs-fallback" };
+    throw new Error(`pkg failed while packaging Supervisor: ${message}`);
   }
 
   if (!fs.existsSync(exePath)) {
-    console.warn("[desktop-package] pkg produced no exe; using node+cjs fallback");
-    return { exePath: null, cjsPath, mode: "node-cjs-fallback" };
+    throw new Error("pkg produced no Supervisor exe");
   }
   return { exePath, cjsPath, mode: "pkg-exe" };
 }
@@ -88,7 +160,31 @@ export function packageSupervisorExe(cjsPath, outDir = SUPERVISOR_OUT_DIR) {
 export async function buildSupervisor(outDir = SUPERVISOR_OUT_DIR) {
   const cjsPath = await bundleSupervisorCjs(outDir);
   const packaged = packageSupervisorExe(cjsPath, outDir);
-  return packaged;
+  const bundleInfo = JSON.parse(
+    fs.readFileSync(cjsPath, "utf8").match(/__YUVI_SUPERVISOR_BUILD_INFO__ = Object\.freeze\((\{.*?\})\);/)?.[1] ?? "null"
+  );
+  if (!bundleInfo) throw new Error("embedded Supervisor build identity missing from CJS bundle");
+  const buildInfo = {
+    schemaVersion: 1,
+    mode: packaged.mode,
+    checkoutSha: bundleInfo.checkoutSha,
+    sourceFingerprint: bundleInfo.sourceFingerprint,
+    bundleSha256: bundleInfo.bundleSha256,
+    bundleInputSha256: sha256File(cjsPath),
+    entry: bundleInfo.entry,
+    bundleRelativePath: `supervisor/${SUPERVISOR_BUNDLE_NAME}`,
+    executableRelativePath: `supervisor/${SUPERVISOR_EXE_NAME}`,
+    executableSha256: sha256File(packaged.exePath),
+    pkgTarget: PKG_TARGET,
+    platform: "win32",
+    arch: "x64"
+  };
+  fs.writeFileSync(
+    path.join(outDir, SUPERVISOR_BUILD_INFO_NAME),
+    `${JSON.stringify(buildInfo, null, 2)}\n`,
+    "utf8"
+  );
+  return { ...packaged, buildInfo };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]).endsWith("build-supervisor.mjs");

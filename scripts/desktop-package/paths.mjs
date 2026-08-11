@@ -23,6 +23,21 @@ export function assertDir(dirPath, label) {
   }
 }
 
+export function assertSafeGeneratedTarget(target) {
+  const resolved = path.resolve(target);
+  const generatedRoot = path.resolve(REPO_ROOT, "apps", "desktop", "src-tauri", "generated");
+  if (
+    !resolved.startsWith(`${generatedRoot}${path.sep}`) ||
+    path.basename(resolved) !== "win32-x64"
+  ) {
+    throw new Error(`Refusing to clean unsafe generated target: ${resolved}`);
+  }
+  if (fs.existsSync(resolved) && fs.lstatSync(resolved).isSymbolicLink()) {
+    throw new Error(`Refusing to clean symlinked generated target: ${resolved}`);
+  }
+  return resolved;
+}
+
 export function writeJson(filePath, value) {
   ensureDir(path.dirname(filePath));
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");

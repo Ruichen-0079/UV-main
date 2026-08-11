@@ -240,30 +240,53 @@ pub fn bootstrap_supervisor(
     guard.shutting_down = false;
   }
 
-  // Apply full user config (incl. secrets + unsets) as dynamic overrides, then bootstrap.
+  // Apply full user config (incl. secrets + unsets) as dynamic overrides, then
+  // wait for the Supervisor's bootstrap/reconcile contract before returning.
+  // This is an explicit ACK barrier, not a timing delay or retry.
   let token = endpoint.control_token.clone();
   let base_url = endpoint.base_url.clone();
   let config_body = app
     .try_state::<crate::config::ConfigState>()
     .and_then(|cfg| cfg.service.supervisor_config_push().ok())
     .and_then(|payload| serde_json::to_string(&payload).ok());
-  thread::spawn(move || {
-    if let Some(body) = config_body {
-      // Never log body — may contain secrets.
-      let _ = http_json(
-        "POST",
-        &format!("{base_url}/v1/config"),
-        Some(&body),
-        Some(&token),
-      );
-    }
-    let _ = http_json(
+  if let Some(body) = config_body {
+    // Never log body — may contain secrets.
+    http_json(
       "POST",
-      &format!("{base_url}/v1/bootstrap"),
-      None,
+      &format!("{base_url}/v1/config"),
+      Some(&body),
       Some(&token),
-    );
+    )
+    .map_err(|error| format!("supervisor config barrier failed: {error}"))?;
+  }
+  http_json(
+    "POST",
+    &format!("{base_url}/v1/bootstrap"),
+    None,
+    Some(&token),
+  )
+  .map_err(|error| format!("supervisor bootstrap barrier failed: {error}"))?;
+
+  // Publish a non-secret readiness marker only after both ACKs above. The
+  // Tauri smoke uses this marker as the bootstrap barrier; the Supervisor's
+  // active-instance pointer intentionally remains available earlier so the
+  // control plane can be reached during startup.
+  let ready_marker = root_state_dir.join("tauri-bootstrap-ready.json");
+  let ready_payload = serde_json::json!({
+    "schemaVersion": 1,
+    "instanceId": endpoint.instance_id,
+    "supervisorPid": endpoint.pid,
+    "tauriPid": std::process::id(),
+    "readyAtMs": std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|duration| duration.as_millis())
+      .unwrap_or_default()
   });
+  fs::write(
+    &ready_marker,
+    serde_json::to_vec(&ready_payload).map_err(|error| error.to_string())?,
+  )
+  .map_err(|error| format!("tauri bootstrap readiness marker failed: {error}"))?;
 
   start_status_poller(app.clone());
   Ok(())
@@ -332,6 +355,7 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   // Best-effort cleanup of active pointer + instance lock.
   let root = crate::packaging::desktop_state_dir();
   let _ = fs::remove_file(root.join("active-instance.json"));
+  let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
   let _ = fs::remove_file(root.join("supervisor.instance.lock"));
 }
 

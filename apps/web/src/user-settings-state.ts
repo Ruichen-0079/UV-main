@@ -5,6 +5,9 @@
 
 export type ServiceMode = "managed" | "external";
 export type MemoryBackend = "mem0" | "legacy";
+export type MemoryLlmProvider = "none" | "deepseek" | "openai";
+
+export type UserSecretKey = "chat.deepseekApiKey" | "memory.databaseUrl" | "memory.llmApiKey";
 
 export type UserSettingsDto = {
   schemaVersion: number;
@@ -19,6 +22,11 @@ export type UserSettingsDto = {
     subjectUserId: string;
     personaId: string;
     ollamaUrl: string;
+    llm: {
+      provider: MemoryLlmProvider;
+      model: string;
+      baseUrl: string;
+    };
   };
   tts: {
     enabled: boolean;
@@ -32,6 +40,7 @@ export type UserSettingsDto = {
 export type SecretStatusDto = {
   deepseekApiKey: boolean;
   databaseUrl: boolean;
+  memoryLlmApiKey: boolean;
 };
 
 export type SettingsViewDto = {
@@ -64,6 +73,28 @@ export type SecretMutationResultDto = {
   supervisorSync: SupervisorSyncStatusDto;
 };
 
+/** Keep service restart hints deterministic for both mutations and settings saves. */
+export function mergeRestartServices(...serviceLists: readonly (readonly string[])[]): string[] {
+  const ordered = ["runtime", "memory", "tts"];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const service of ordered) {
+    if (serviceLists.some((services) => services.includes(service))) {
+      seen.add(service);
+      result.push(service);
+    }
+  }
+  for (const services of serviceLists) {
+    for (const service of services) {
+      if (!seen.has(service)) {
+        seen.add(service);
+        result.push(service);
+      }
+    }
+  }
+  return result;
+}
+
 /** User-facing save notice: persistence vs live supervisor refresh. */
 export function buildSaveMessage(input: {
   saved: boolean;
@@ -72,13 +103,14 @@ export function buildSaveMessage(input: {
   kind?: "settings" | "secret";
 }): string {
   const prefix = input.kind === "secret" ? "Secret updated" : "Settings saved";
-  if (input.saved && input.supervisorSync && !input.supervisorSync.applied) {
-    return `${prefix}, but Supervisor was unavailable. Close other YUVI windows, reopen this app, then Save again so Runtime gets the key.`;
-  }
-  if (input.kind === "secret" && input.supervisorSync?.applied) {
-    return `${prefix}. Runtime is reloading with the new key — Providers should leave “unavailable” once healthy.`;
+  if (input.supervisorSync && !input.supervisorSync.applied) {
+    const savedPrefix = input.kind === "secret" ? "Secret saved" : "Settings saved";
+    return `${savedPrefix}, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.`;
   }
   if (input.restartServices.length > 0) {
+    if (input.kind === "secret") {
+      return `${prefix}. Applying changes to: ${input.restartServices.join(", ")}.`;
+    }
     return `${prefix}. Services may reload: ${input.restartServices.join(", ")}.`;
   }
   return `${prefix}.`;
@@ -100,6 +132,10 @@ export type UserSettingsForm = {
   personaId: string;
   ollamaUrl: string;
   databaseUrlInput: string;
+  memoryLlmProvider: MemoryLlmProvider;
+  memoryLlmModel: string;
+  memoryLlmBaseUrl: string;
+  memoryLlmApiKeyInput: string;
   ttsEnabled: boolean;
   ttsMode: ServiceMode;
   ttsWrapperUrl: string;
@@ -122,7 +158,8 @@ export type UserSettingsUiState = {
 
 export const emptySecretStatus = (): SecretStatusDto => ({
   deepseekApiKey: false,
-  databaseUrl: false
+  databaseUrl: false,
+  memoryLlmApiKey: false
 });
 
 export const defaultUserSettingsForm = (): UserSettingsForm => ({
@@ -141,6 +178,10 @@ export const defaultUserSettingsForm = (): UserSettingsForm => ({
   personaId: "alice",
   ollamaUrl: "http://127.0.0.1:11434",
   databaseUrlInput: "",
+  memoryLlmProvider: "none",
+  memoryLlmModel: "",
+  memoryLlmBaseUrl: "",
+  memoryLlmApiKeyInput: "",
   ttsEnabled: true,
   ttsMode: "external",
   ttsWrapperUrl: "http://127.0.0.1:9881",
@@ -179,6 +220,10 @@ export function formFromView(view: SettingsViewDto): UserSettingsForm {
     personaId: s.memory.personaId,
     ollamaUrl: s.memory.ollamaUrl,
     databaseUrlInput: "",
+    memoryLlmProvider: s.memory.llm.provider,
+    memoryLlmModel: s.memory.llm.model,
+    memoryLlmBaseUrl: s.memory.llm.baseUrl,
+    memoryLlmApiKeyInput: "",
     ttsEnabled: s.tts.enabled,
     ttsMode: s.tts.mode,
     ttsWrapperUrl: s.tts.wrapperUrl,
@@ -203,7 +248,12 @@ export function patchFromForm(form: UserSettingsForm): Record<string, unknown> {
       baseUrl: form.memoryBaseUrl,
       subjectUserId: form.subjectUserId,
       personaId: form.personaId,
-      ollamaUrl: form.ollamaUrl
+      ollamaUrl: form.ollamaUrl,
+      llm: {
+        provider: form.memoryLlmProvider,
+        model: form.memoryLlmModel,
+        baseUrl: form.memoryLlmBaseUrl
+      }
     },
     tts: {
       enabled: form.ttsEnabled,
@@ -218,15 +268,59 @@ export function patchFromForm(form: UserSettingsForm): Record<string, unknown> {
 /** Ensure no secret field names/values leak into serialised DTO snapshots. */
 export function assertNoSecretMaterial(payload: unknown): void {
   const text = JSON.stringify(payload);
-  if (/"deepseekApiKey"\s*:\s*"[^"]+"/.test(text) && !text.includes('"deepseekApiKey":false') && !text.includes('"deepseekApiKey":true')) {
-    // only boolean flags allowed under secrets.deepseekApiKey
-  }
-  if (text.includes("sk-") && text.includes("apiKey")) {
+  if (text.includes("MEM0_LLM_API_KEY") || text.includes("P3_UI_MEMORY_LLM_SECRET_NEVER_EXPOSE")) {
     throw new Error("secret material must not appear in settings DTO");
   }
   if (/postgres(ql)?:\/\/[^:]+:[^@]+@/i.test(text)) {
     throw new Error("database password must not appear in settings DTO");
   }
+  const visit = (value: unknown, key?: string): void => {
+    if (typeof value === "string") {
+      if (
+        key?.endsWith("ApiKey") ||
+        key?.endsWith("ApiKeyInput") ||
+        key === "databaseUrl" ||
+        key === "databaseUrlInput"
+      ) {
+        if (value.length > 0) {
+          throw new Error("secret material must not appear in settings DTO");
+        }
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item));
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const [childKey, childValue] of Object.entries(value)) {
+        visit(childValue, childKey);
+      }
+    }
+  };
+  visit(payload);
+}
+
+export function validateUserSettingsForm(form: UserSettingsForm): string | null {
+  if (form.memoryLlmProvider === "none") {
+    return null;
+  }
+  if (!form.memoryLlmModel.trim()) {
+    return "Memory LLM model is required when a provider is selected.";
+  }
+  const baseUrl = form.memoryLlmBaseUrl.trim();
+  if (!baseUrl) {
+    return null;
+  }
+  try {
+    const parsed = new URL(baseUrl);
+    if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) {
+      return "Memory LLM base URL must use HTTP(S) without credentials.";
+    }
+  } catch {
+    return "Memory LLM base URL must be a valid HTTP(S) URL without credentials.";
+  }
+  return null;
 }
 
 export type UserSettingsAction =
@@ -239,6 +333,7 @@ export type UserSettingsAction =
   | { type: "save-error"; error: string }
   | {
       type: "secrets-updated";
+      key: UserSecretKey;
       secrets: SecretStatusDto;
       restartServices?: string[];
       supervisorSync?: SupervisorSyncStatusDto | null;
@@ -285,6 +380,11 @@ export function reduceUserSettings(
       if (action.clearSecrets) {
         form.deepseekApiKeyInput = "";
         form.databaseUrlInput = "";
+        form.memoryLlmApiKeyInput = "";
+      } else {
+        form.deepseekApiKeyInput = state.form.deepseekApiKeyInput;
+        form.databaseUrlInput = state.form.databaseUrlInput;
+        form.memoryLlmApiKeyInput = state.form.memoryLlmApiKeyInput;
       }
       const restart = action.result.restartServices;
       return {
@@ -306,21 +406,19 @@ export function reduceUserSettings(
       return { ...state, saving: false, error: action.error };
     case "secrets-updated": {
       const restart = action.restartServices ?? state.lastRestartServices;
+      const form = { ...state.form };
+      if (action.key === "chat.deepseekApiKey") form.deepseekApiKeyInput = "";
+      if (action.key === "memory.databaseUrl") form.databaseUrlInput = "";
+      if (action.key === "memory.llmApiKey") form.memoryLlmApiKeyInput = "";
       return {
         ...state,
         secrets: action.secrets,
-        form: {
-          ...state.form,
-          deepseekApiKeyInput: "",
-          databaseUrlInput: ""
-        },
+        form,
         lastRestartServices: restart,
         saveMessage: buildSaveMessage({
           saved: action.saved !== false,
           restartServices: restart,
-          ...(action.supervisorSync !== undefined
-            ? { supervisorSync: action.supervisorSync }
-            : {}),
+          ...(action.supervisorSync !== undefined ? { supervisorSync: action.supervisorSync } : {}),
           kind: "secret"
         })
       };

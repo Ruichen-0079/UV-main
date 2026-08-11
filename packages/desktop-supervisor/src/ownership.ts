@@ -1,13 +1,52 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { OwnershipResult, ProcessInfo, ProcessMetadata } from "./types.js";
+import type {
+  OwnershipResult,
+  ProcessInfo,
+  ProcessInspectionResult,
+  ProcessMetadata
+} from "./types.js";
 import { commandLineContainsPath, pathsEqual } from "./paths.js";
 
 export const PROCESS_METADATA_VERSION = 1 as const;
 
-export function writeProcessMetadata(filePath: string, metadata: ProcessMetadata): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+export type ProcessMetadataWriteHooks = {
+  onTempWritten?: () => void;
+  onRenameCompleted?: () => void;
+  onCleanup?: () => void;
+};
+
+export function writeProcessMetadata(
+  filePath: string,
+  metadata: ProcessMetadata,
+  hooks: ProcessMetadataWriteHooks = {}
+): void {
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true });
+  const temporaryPath = path.join(
+    directory,
+    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+  );
+  let committed = false;
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(metadata, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600
+    });
+    hooks.onTempWritten?.();
+    fs.renameSync(temporaryPath, filePath);
+    hooks.onRenameCompleted?.();
+    committed = true;
+  } finally {
+    if (!committed) {
+      try {
+        fs.unlinkSync(temporaryPath);
+      } catch {
+        // Preserve the original write/rename failure.
+      }
+      hooks.onCleanup?.();
+    }
+  }
 }
 
 export function readProcessMetadata(filePath: string): ProcessMetadata | null {
@@ -29,6 +68,102 @@ export function removeMetadataFile(filePath: string): void {
   }
 }
 
+const METADATA_IDENTITY_FIELDS: Array<keyof ProcessMetadata> = [
+  "schemaVersion",
+  "role",
+  "pid",
+  "processStartedAtUtc",
+  "ownershipToken",
+  "instanceId",
+  "repositoryRoot",
+  "stateDirectory",
+  "commandMarker"
+];
+
+function metadataMatches(left: ProcessMetadata, right: ProcessMetadata): boolean {
+  return METADATA_IDENTITY_FIELDS.every((field) => left[field] === right[field]);
+}
+
+/**
+ * Delete metadata only when the file still contains the exact snapshot that
+ * was inspected. This prevents an older refresh from deleting a new process'
+ * metadata generation.
+ */
+export function removeProcessMetadataIfMatches(
+  filePath: string,
+  expectedMetadata: ProcessMetadata | null
+): boolean {
+  if (!expectedMetadata) return false;
+  const current = readProcessMetadata(filePath);
+  if (!current || !metadataMatches(current, expectedMetadata)) return false;
+  try {
+    fs.unlinkSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type CurrentChildEvidence = {
+  pid?: number | null | undefined;
+  killed?: boolean | undefined;
+  exitCode?: number | null | undefined;
+  signalCode?: string | null | undefined;
+};
+
+function normalizeInspection(input: {
+  processInspection?: ProcessInspectionResult | null;
+  processInfo?: ProcessInfo | null;
+}, processId: number): ProcessInspectionResult {
+  if (input.processInspection) return input.processInspection;
+  if (input.processInfo) {
+    return { status: "resolved", processId, info: input.processInfo };
+  }
+  return { status: "not-running", processId, reason: "process-not-alive" };
+}
+
+function makeResult(input: {
+  status: OwnershipResult["status"];
+  owned: boolean;
+  processId: number;
+  message: string;
+  metadata: ProcessMetadata | null;
+  cleanupAllowed?: boolean;
+  cleanupReason?: string;
+  inspection: ProcessInspectionResult | "missing";
+  currentChildMatch?: boolean;
+  metadataSnapshotMatch?: boolean;
+}): OwnershipResult {
+  const inspectionStatus = input.inspection === "missing" ? "missing" : input.inspection.status;
+  const inspectionReason =
+    input.inspection === "missing"
+      ? null
+      : input.inspection.status === "resolved"
+        ? null
+        : input.inspection.reason;
+  const processAlive =
+    input.inspection !== "missing" && input.inspection.status !== "not-running";
+  const processInfoComplete =
+    input.inspection !== "missing" &&
+    input.inspection.status === "resolved" &&
+    input.inspection.info.commandLine.length > 0;
+  return {
+    status: input.status,
+    owned: input.owned,
+    processId: input.processId,
+    message: input.message,
+    metadata: input.metadata,
+    cleanupAllowed: input.cleanupAllowed ?? false,
+    cleanupReason: input.cleanupReason ?? "unsafe-to-clean",
+    processInspectionStatus: inspectionStatus,
+    processInspectionReason: inspectionReason,
+    processAlive,
+    processInfoComplete,
+    currentChildMatch: input.currentChildMatch ?? false,
+    metadataSnapshotMatch: input.metadataSnapshotMatch ?? false
+  };
+}
+
 /**
  * Validate ownership without trusting pid alone.
  * Mirrors scripts/lib/yuvi-process.ps1 rules + ownershipToken / instanceId.
@@ -40,128 +175,244 @@ export function testProcessOwnership(input: {
   stateDirectory: string;
   ownershipToken: string;
   instanceId: string;
-  processInfo: ProcessInfo | null;
+  processInfo?: ProcessInfo | null;
+  processInspection?: ProcessInspectionResult | null;
+  currentChild?: CurrentChildEvidence | null;
 }): OwnershipResult {
   if (!fs.existsSync(input.metadataPath)) {
-    return { status: "missing", owned: false, processId: 0, message: "metadata missing", metadata: null };
+    return makeResult({
+      status: "missing",
+      owned: false,
+      processId: 0,
+      message: "metadata missing",
+      metadata: null,
+      inspection: "missing",
+      cleanupReason: "metadata-missing"
+    });
   }
 
   const metadata = readProcessMetadata(input.metadataPath);
   if (!metadata) {
-    return { status: "invalid", owned: false, processId: 0, message: "metadata is not valid JSON", metadata: null };
+    return makeResult({
+      status: "invalid",
+      owned: false,
+      processId: 0,
+      message: "metadata is not valid JSON",
+      metadata: null,
+      inspection: "missing",
+      cleanupReason: "metadata-invalid"
+    });
   }
 
   if (metadata.schemaVersion !== PROCESS_METADATA_VERSION) {
-    return {
+    return makeResult({
       status: "mismatch",
       owned: false,
       processId: metadata.pid ?? 0,
       message: "schema version mismatch",
-      metadata
-    };
+      metadata,
+      inspection: "missing",
+      metadataSnapshotMatch: true,
+      cleanupReason: "foreign-or-unsafe-metadata"
+    });
   }
   if (metadata.role !== input.expectedRole) {
-    return {
+    return makeResult({
       status: "mismatch",
       owned: false,
       processId: metadata.pid ?? 0,
       message: "role mismatch",
-      metadata
-    };
+      metadata,
+      inspection: "missing",
+      metadataSnapshotMatch: true,
+      cleanupReason: "foreign-or-unsafe-metadata"
+    });
   }
   if (!pathsEqual(metadata.repositoryRoot, input.repositoryRoot)) {
-    return {
+    return makeResult({
       status: "mismatch",
       owned: false,
       processId: metadata.pid ?? 0,
       message: "repository root mismatch",
-      metadata
-    };
+      metadata,
+      inspection: "missing",
+      metadataSnapshotMatch: true,
+      cleanupReason: "foreign-or-unsafe-metadata"
+    });
   }
   if (!pathsEqual(metadata.stateDirectory, input.stateDirectory)) {
-    return {
+    return makeResult({
       status: "mismatch",
       owned: false,
       processId: metadata.pid ?? 0,
       message: "state directory mismatch",
-      metadata
-    };
+      metadata,
+      inspection: "missing",
+      metadataSnapshotMatch: true,
+      cleanupReason: "foreign-or-unsafe-metadata"
+    });
   }
   if (
     !metadata.ownershipToken ||
     metadata.ownershipToken !== input.ownershipToken ||
     metadata.instanceId !== input.instanceId
   ) {
-    return {
-      status: "mismatch",
+    return makeResult({
+      status: "foreign",
       owned: false,
       processId: metadata.pid ?? 0,
       message: "ownership token / instance mismatch",
-      metadata
-    };
+      metadata,
+      inspection: "missing",
+      metadataSnapshotMatch: true,
+      cleanupReason: "foreign-instance"
+    });
   }
 
   const processId = Number(metadata.pid);
   if (!Number.isInteger(processId) || processId <= 0) {
-    return { status: "invalid", owned: false, processId: 0, message: "pid invalid", metadata };
+    return makeResult({
+      status: "invalid",
+      owned: false,
+      processId: 0,
+      message: "pid invalid",
+      metadata,
+      inspection: "missing",
+      metadataSnapshotMatch: true,
+      cleanupReason: "metadata-invalid"
+    });
   }
 
-  if (!input.processInfo) {
-    return {
-      status: "stale",
+  const inspection = normalizeInspection(input, processId);
+  const currentChildMatch = Boolean(
+    input.currentChild &&
+      input.currentChild.pid === processId &&
+      !input.currentChild.killed &&
+      input.currentChild.exitCode == null &&
+      input.currentChild.signalCode == null
+  );
+
+  if (inspection.status === "not-running") {
+    return makeResult({
+      status: "not-running",
       owned: false,
       processId,
       message: "process is not running",
-      metadata
-    };
+      metadata,
+      inspection,
+      metadataSnapshotMatch: true,
+      cleanupAllowed: true,
+      cleanupReason: "process-confirmed-not-running",
+      currentChildMatch
+    });
+  }
+
+  if (inspection.status === "unavailable") {
+    return makeResult({
+      status: "unavailable",
+      owned: currentChildMatch,
+      processId,
+      message: currentChildMatch
+        ? "process identity temporarily unavailable; tracked child retained"
+        : "process identity temporarily unavailable",
+      metadata,
+      inspection,
+      metadataSnapshotMatch: true,
+      cleanupReason: "identity-unavailable",
+      currentChildMatch
+    });
+  }
+
+  const processInfo = inspection.info;
+  if (processInfo.processId !== processId) {
+    return makeResult({
+      status: "mismatch",
+      owned: false,
+      processId,
+      message: "process id mismatch",
+      metadata,
+      inspection,
+      metadataSnapshotMatch: true,
+      cleanupReason: "identity-mismatch",
+      currentChildMatch
+    });
   }
 
   const marker = metadata.commandMarker ?? "";
-  if (!marker || !input.processInfo.commandLine.includes(marker)) {
-    return {
+  if (!processInfo.commandLine) {
+    return makeResult({
+      status: "unavailable",
+      owned: currentChildMatch,
+      processId,
+      message: "process identity temporarily unavailable",
+      metadata,
+      inspection,
+      metadataSnapshotMatch: true,
+      cleanupReason: "identity-unavailable",
+      currentChildMatch
+    });
+  }
+  if (!marker || !processInfo.commandLine.includes(marker)) {
+    return makeResult({
       status: "mismatch",
       owned: false,
       processId,
       message: "command marker mismatch",
-      metadata
-    };
+      metadata,
+      inspection,
+      metadataSnapshotMatch: true,
+      cleanupReason: "marker-mismatch",
+      currentChildMatch
+    });
   }
 
-  if (!commandLineContainsPath(input.processInfo.commandLine, input.repositoryRoot)) {
-    return {
+  if (!commandLineContainsPath(processInfo.commandLine, input.repositoryRoot)) {
+    return makeResult({
       status: "mismatch",
       owned: false,
       processId,
       message: "repository root not present in command line",
-      metadata
-    };
+      metadata,
+      inspection,
+      metadataSnapshotMatch: true,
+      cleanupReason: "repository-marker-mismatch",
+      currentChildMatch
+    });
   }
 
-  if (input.processInfo.createdAtUtc && metadata.processStartedAtUtc) {
+  if (processInfo.createdAtUtc && metadata.processStartedAtUtc) {
     const metaStart = Date.parse(metadata.processStartedAtUtc);
-    const procStart = input.processInfo.createdAtUtc.getTime();
+    const procStart = processInfo.createdAtUtc.getTime();
     if (Number.isFinite(metaStart) && Number.isFinite(procStart)) {
       if (Math.abs(procStart - metaStart) > 2_500) {
-        return {
+        return makeResult({
           status: "mismatch",
           owned: false,
           processId,
           message: "start time mismatch",
-          metadata
-        };
+          metadata,
+          inspection,
+          metadataSnapshotMatch: true,
+          cleanupReason: "start-time-mismatch",
+          currentChildMatch
+        });
       }
     }
   }
 
-  return {
+  return makeResult({
     status: "running",
     owned: true,
     processId,
     message: "owned process is running",
-    metadata
-  };
+    metadata,
+    inspection,
+    metadataSnapshotMatch: true,
+    cleanupReason: "owned-running",
+    currentChildMatch
+  });
 }
 
 export function shouldRemoveInvalidMetadata(result: OwnershipResult): boolean {
-  return !result.owned && result.status !== "missing";
+  return result.cleanupAllowed;
 }

@@ -3,12 +3,17 @@
  * Copies supervisor/ + runtime/ outside the repo and runs with a sanitized PATH/env.
  */
 import { spawn, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import {
   NODE_EXE_NAME,
+  MEM0_EXE_NAME,
+  MEM0_MANIFEST_NAME,
+  MEM0_OUT_DIR,
   REPO_ROOT,
   RUNTIME_ENTRY_NAME,
   RUNTIME_MANIFEST_NAME,
@@ -20,6 +25,7 @@ import {
 } from "./constants.mjs";
 import { assertFile, readJson } from "./paths.mjs";
 import { collectDisallowedExternals } from "./build-runtime.mjs";
+import { validateMem0Artifact } from "./build-mem0.mjs";
 
 function fail(message) {
   throw new Error(message);
@@ -28,9 +34,12 @@ function fail(message) {
 function systemPathOnly() {
   if (process.platform === "win32") {
     const windir = process.env["WINDIR"] ?? "C:\\Windows";
-    return [path.join(windir, "System32"), windir, path.join(windir, "System32", "Wbem")].join(
-      path.delimiter
-    );
+    return [
+      path.join(windir, "System32"),
+      windir,
+      path.join(windir, "System32", "Wbem"),
+      path.join(windir, "System32", "WindowsPowerShell", "v1.0")
+    ].join(path.delimiter);
   }
   return "/usr/bin:/bin";
 }
@@ -77,7 +86,17 @@ function cleanEnv(extra = {}) {
     "npm_package_name",
     "BUN_INSTALL",
     "NVM_DIR",
-    "FNM_DIR"
+    "FNM_DIR",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "PYTHONSTARTUP",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "PIP_CONFIG_FILE",
+    "UV_PYTHON",
+    "UV_PROJECT_ENVIRONMENT"
   ]) {
     delete env[key];
   }
@@ -93,6 +112,8 @@ function copyDir(src, dest) {
       copyDir(from, to);
     } else if (ent.isFile()) {
       fs.copyFileSync(from, to);
+    } else {
+      fail(`unsupported resource entry (symlink or special file): ${from}`);
     }
   }
 }
@@ -123,11 +144,17 @@ export async function smokeDesktopPackage() {
   const sourceSupervisor = fs.existsSync(path.join(TAURI_GENERATED, "supervisor"))
     ? path.join(TAURI_GENERATED, "supervisor")
     : SUPERVISOR_OUT_DIR;
+  const generatedMem0 = path.join(TAURI_GENERATED, "mem0");
+  const sourceMem0 = fs.existsSync(generatedMem0) ? generatedMem0 : MEM0_OUT_DIR;
 
   assertFile(path.join(sourceRuntime, NODE_EXE_NAME), "source node.exe");
   assertFile(path.join(sourceRuntime, RUNTIME_ENTRY_NAME), "source runtime entry");
   assertFile(path.join(sourceRuntime, RUNTIME_MANIFEST_NAME), "source runtime manifest");
   assertFile(path.join(sourceSupervisor, SUPERVISOR_BUNDLE_NAME), "source supervisor cjs");
+  const mem0Artifact = validateMem0Artifact(sourceMem0, { repoRoot: REPO_ROOT });
+  console.info(
+    `[desktop-package] Mem0 artifact validated: ${mem0Artifact.files} files, ${mem0Artifact.bytes} bytes`
+  );
 
   // Metafile audit (from prepare output next to runtime entry).
   const metafilePath = path.join(sourceRuntime, "runtime-esbuild-metafile.json");
@@ -161,6 +188,7 @@ export async function smokeDesktopPackage() {
   const cleanRoom = path.join(smokeRoot, "resources");
   const runtimeDir = path.join(cleanRoom, "runtime");
   const supervisorDir = path.join(cleanRoom, "supervisor");
+  const mem0Dir = path.join(cleanRoom, "mem0");
   const dataRoot = path.join(smokeRoot, "state");
   const emptyCwd = path.join(smokeRoot, "empty-cwd");
   fs.mkdirSync(emptyCwd, { recursive: true });
@@ -168,9 +196,11 @@ export async function smokeDesktopPackage() {
 
   copyDir(sourceRuntime, runtimeDir);
   copyDir(sourceSupervisor, supervisorDir);
+  copyDir(sourceMem0, mem0Dir);
+  validateMem0Artifact(mem0Dir);
 
   // Snapshot resource files before run (must not write into install-like resource tree).
-  const beforeFiles = new Set(listFiles(cleanRoom).map((f) => path.relative(cleanRoom, f)));
+  const beforeFiles = snapshotResources(cleanRoom);
 
   const nodeExe = path.join(runtimeDir, NODE_EXE_NAME);
   const entry = path.join(runtimeDir, RUNTIME_ENTRY_NAME);
@@ -246,13 +276,31 @@ export async function smokeDesktopPackage() {
     "--state-root",
     dataRoot,
     "--runtime-manifest",
-    path.join(runtimeDir, RUNTIME_MANIFEST_NAME)
+    path.join(runtimeDir, RUNTIME_MANIFEST_NAME),
+    "--mem0-manifest",
+    path.join(mem0Dir, MEM0_MANIFEST_NAME)
   ];
   for (const a of args) {
-    if (/sk-|deepseek_api_key|database_url/i.test(a)) {
+    if (
+      /sk-|deepseek_api_key|database_url|mem0_pg_connection_string|mem0_llm_api_key|authorization|bearer/i.test(
+        a
+      )
+    ) {
       fail("secret-like argv");
     }
   }
+
+  await runManagedMem0Smoke({
+    nodeExe,
+    cjsPath,
+    exePath,
+    useExe,
+    cleanRoom,
+    mem0Dir,
+    runtimeDir,
+    emptyCwd,
+    fakeLocalAppData
+  });
 
   const sup = useExe
     ? spawn(exePath, args, {
@@ -287,8 +335,7 @@ export async function smokeDesktopPackage() {
       for (const file of endpoints) {
         try {
           const data = JSON.parse(fs.readFileSync(file, "utf8"));
-          const baseUrl =
-            data.baseUrl ?? (data.port ? `http://127.0.0.1:${data.port}` : null);
+          const baseUrl = data.baseUrl ?? (data.port ? `http://127.0.0.1:${data.port}` : null);
           if (baseUrl && (await getOk(`${baseUrl}/health`))) {
             supervised = true;
             endpointBase = baseUrl;
@@ -357,11 +404,20 @@ export async function smokeDesktopPackage() {
   }
 
   // Resource tree must be unchanged (no logs/pid written into install-like dir).
-  const afterFiles = new Set(listFiles(cleanRoom).map((f) => path.relative(cleanRoom, f)));
-  for (const f of afterFiles) {
-    if (!beforeFiles.has(f)) {
-      fail(`resource tree gained file during smoke: ${f}`);
+  const afterFiles = snapshotResources(cleanRoom);
+  for (const [relative, before] of beforeFiles) {
+    const after = afterFiles.get(relative);
+    if (!after) fail(`resource tree lost file during smoke: ${relative}`);
+    if (
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.hash !== after.hash
+    ) {
+      fail(`resource tree changed during smoke: ${relative}`);
     }
+  }
+  for (const relative of afterFiles.keys()) {
+    if (!beforeFiles.has(relative)) fail(`resource tree gained file during smoke: ${relative}`);
   }
 
   // Cleanup
@@ -372,7 +428,206 @@ export async function smokeDesktopPackage() {
   }
 
   console.info("[desktop-package] clean-room smoke passed");
-  console.info(`[desktop-package] used supervisor mode: ${useExe ? "pkg-exe" : "node-cjs-fallback"}`);
+  console.info(
+    `[desktop-package] used supervisor mode: ${useExe ? "pkg-exe" : "node-cjs-fallback"}`
+  );
+}
+
+function snapshotResources(root) {
+  const map = new Map();
+  for (const file of listFiles(root)) {
+    const stat = fs.statSync(file);
+    const hash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    map.set(path.relative(root, file), { size: stat.size, mtimeMs: stat.mtimeMs, hash });
+  }
+  return map;
+}
+
+async function runManagedMem0Smoke({
+  nodeExe,
+  cjsPath,
+  exePath,
+  useExe,
+  cleanRoom,
+  mem0Dir,
+  runtimeDir,
+  emptyCwd,
+  fakeLocalAppData
+}) {
+  const port = await findFreePort();
+  const managedStateRoot = path.join(fakeLocalAppData, "YUVI", "DesktopSupervisor");
+  fs.mkdirSync(managedStateRoot, { recursive: true });
+  const env = cleanEnv({
+    LOCALAPPDATA: fakeLocalAppData,
+    SERVER_HOST: "127.0.0.1",
+    SERVER_PORT: String(21000 + Math.floor(Math.random() * 500)),
+    YUVI_AUTOSTART_RUNTIME: "false",
+    YUVI_AUTOSTART_MEM0: "true",
+    YUVI_AUTOSTART_TTS: "false",
+    MEMORY_BACKEND: "mem0",
+    MEM0_BASE_URL: `http://127.0.0.1:${port}`,
+    PROVIDER_ALLOW_MOCKS: "true"
+  });
+  for (const key of ["DATABASE_URL", "MEM0_PG_CONNECTION_STRING", "MEM0_LLM_API_KEY"])
+    delete env[key];
+  const args = [
+    "--mode",
+    "packaged",
+    "--resource-root",
+    cleanRoom,
+    "--state-root",
+    managedStateRoot,
+    "--runtime-manifest",
+    path.join(runtimeDir, RUNTIME_MANIFEST_NAME),
+    "--mem0-manifest",
+    path.join(mem0Dir, MEM0_MANIFEST_NAME)
+  ];
+  const child = useExe
+    ? spawn(exePath, args, {
+        cwd: emptyCwd,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true
+      })
+    : spawn(nodeExe, [cjsPath, ...args], {
+        cwd: emptyCwd,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true
+      });
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (c) => {
+    stdout += c.toString();
+  });
+  child.stderr?.on("data", (c) => {
+    stderr += c.toString();
+  });
+  try {
+    const endpoint = await waitForSupervisorEndpoint(managedStateRoot, fakeLocalAppData, 35_000);
+    const token = endpoint.controlToken;
+    const base = endpoint.baseUrl;
+    const health = await getJson(`${base}/health`);
+    if (!health || health.ok !== true) fail("managed Mem0 supervisor health failed");
+    const mem0 = await waitForManagedMem0(base, token, 35_000);
+    const mem0Health = await getJson(`http://127.0.0.1:${port}/health`);
+    if (
+      !mem0Health ||
+      mem0Health.ok !== true ||
+      !["unhealthy", "degraded"].includes(mem0Health.data?.status)
+    )
+      fail("managed Mem0 /health did not report unhealthy/degraded");
+    if (process.platform === "win32" && mem0.pid) {
+      const commandLine = getProcessCommandLine(mem0.pid);
+      if (
+        !commandLine
+          .toLowerCase()
+          .includes(
+            path.join("resources", "mem0", MEM0_EXE_NAME).toLowerCase().replaceAll("/", "\\")
+          )
+      )
+        fail("Mem0 child command line is not clean-room packaged executable");
+      if (/python(?:\.exe)?|py\.exe|services[\\/]memory-mem0/i.test(commandLine))
+        fail("Mem0 child command line resolved Python/source paths");
+    }
+    const dataDir = path.join(fakeLocalAppData, "YUVI", "Mem0", "data");
+    const logDir = path.join(fakeLocalAppData, "YUVI", "Mem0", "logs");
+    if (!fs.existsSync(dataDir) || !fs.existsSync(logDir))
+      fail("isolated Mem0 data/log paths missing");
+    await postJson(`${base}/v1/shutdown`, token, null);
+    await sleep(1_000);
+    if (isPidAlive(mem0.pid)) fail("managed Mem0 survived supervisor shutdown");
+    console.info(`[desktop-package] managed Mem0 owned pid=${mem0.pid} status=${mem0.status}`);
+  } catch (error) {
+    fail(
+      `managed Mem0 smoke failed: ${error instanceof Error ? error.message : String(error)}\nstdout=${stdout}\nstderr=${stderr}`
+    );
+  } finally {
+    try {
+      child.kill();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => (error ? reject(error) : resolve(port)));
+    });
+  });
+}
+
+function waitForManagedMem0(base, token, timeoutMs) {
+  const started = Date.now();
+  let lastMem0 = null;
+  const samples = [];
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      const status = await getJson(`${base}/v1/status`, token);
+      const mem0 = status?.services?.find((service) => service.id === "mem0");
+      lastMem0 = mem0 ?? null;
+      if (mem0)
+        samples.push({
+          status: mem0.status,
+          ownership: mem0.ownership,
+          pid: mem0.pid,
+          managed: mem0.managed,
+          url: mem0.url,
+          detail: mem0.detail
+        });
+      if (
+        mem0 &&
+        ["degraded", "unavailable", "healthy"].includes(mem0.status) &&
+        mem0.ownership === "owned" &&
+        mem0.pid > 0
+      )
+        return resolve(mem0);
+      if (Date.now() - started > timeoutMs) {
+        return reject(
+          new Error(
+            `managed Mem0 was not owned and running: ${JSON.stringify(lastMem0)} samples=${JSON.stringify(samples.slice(-8))}`
+          )
+        );
+      }
+      setTimeout(tick, 300);
+    };
+    void tick();
+  });
+}
+
+function waitForSupervisorEndpoint(dataRoot, localAppData, timeoutMs) {
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      for (const file of findEndpointFiles(dataRoot, localAppData)) {
+        try {
+          const data = JSON.parse(fs.readFileSync(file, "utf8"));
+          if (data.baseUrl && data.controlToken) return resolve(data);
+        } catch {
+          /* continue */
+        }
+      }
+      if (Date.now() - started > timeoutMs) return reject(new Error("supervisor endpoint timeout"));
+      setTimeout(tick, 300);
+    };
+    tick();
+  });
+}
+
+function isPidAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function findEndpointFiles(...roots) {

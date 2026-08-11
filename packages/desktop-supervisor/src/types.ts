@@ -55,7 +55,40 @@ export type ProcessMetadata = {
   instanceId: string;
 };
 
-export type OwnershipStatus = "running" | "missing" | "stale" | "mismatch" | "invalid";
+export type ProcessInspectionReason =
+  | "invalid-pid"
+  | "process-not-alive"
+  | "query-timeout"
+  | "query-failed"
+  | "empty-output"
+  | "parse-failed";
+
+export type ProcessInspectionResult =
+  | {
+      status: "resolved";
+      processId: number;
+      info: ProcessInfo;
+    }
+  | {
+      status: "not-running";
+      processId: number;
+      reason: "invalid-pid" | "process-not-alive";
+    }
+  | {
+      status: "unavailable";
+      processId: number;
+      reason: "query-timeout" | "query-failed" | "empty-output" | "parse-failed";
+    };
+
+export type OwnershipStatus =
+  | "running"
+  | "missing"
+  | "not-running"
+  | "unavailable"
+  | "verification-pending"
+  | "mismatch"
+  | "foreign"
+  | "invalid";
 
 export type OwnershipResult = {
   status: OwnershipStatus;
@@ -63,6 +96,14 @@ export type OwnershipResult = {
   processId: number;
   message: string;
   metadata: ProcessMetadata | null;
+  cleanupAllowed: boolean;
+  cleanupReason: string;
+  processInspectionStatus: ProcessInspectionResult["status"] | "missing";
+  processInspectionReason: string | null;
+  processAlive: boolean;
+  processInfoComplete: boolean;
+  currentChildMatch: boolean;
+  metadataSnapshotMatch: boolean;
 };
 
 export type ProcessInfo = {
@@ -125,7 +166,19 @@ export type SupervisorLayout =
       resourceRoot: string;
       dataRoot: string;
       runtimeManifestPath: string;
+      mem0ManifestPath: string;
     };
+
+export type Mem0Manifest = {
+  schemaVersion: 1;
+  protocolVersion: 1;
+  platform: "win32";
+  arch: "x64";
+  executable: string;
+  healthPath: "/health";
+  defaultHost: "127.0.0.1";
+  defaultPort: number;
+};
 
 export type RuntimeManifest = {
   schemaVersion: 1;
@@ -185,7 +238,7 @@ export type RuntimeConfigUpdateResult = {
   ok: true;
   appliedEnvKeys: string[];
   unsetEnvKeys: string[];
-  /** Services reloaded after secret env changes (e.g. runtime). */
+  /** Services with a background config reconcile scheduled (runtime or mem0). */
   restartedServices?: string[];
   updatedAt: string;
 };

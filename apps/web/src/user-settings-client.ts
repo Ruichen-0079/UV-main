@@ -8,7 +8,8 @@ import type {
   SecretMutationResultDto,
   SecretStatusDto,
   SettingsViewDto,
-  UpdateSettingsResultDto
+  UpdateSettingsResultDto,
+  UserSecretKey
 } from "./user-settings-state.js";
 
 /** Commands that mutate settings or secrets on the Rust side. */
@@ -37,7 +38,7 @@ export async function saveUserSettings(
 }
 
 export async function setUserSecret(
-  key: string,
+  key: UserSecretKey,
   value: string
 ): Promise<SecretMutationResultDto> {
   if (!isTauriRuntime()) {
@@ -47,7 +48,7 @@ export async function setUserSecret(
   return invoke<SecretMutationResultDto>("set_user_secret", { key, value });
 }
 
-export async function deleteUserSecret(key: string): Promise<SecretMutationResultDto> {
+export async function deleteUserSecret(key: UserSecretKey): Promise<SecretMutationResultDto> {
   if (!isTauriRuntime()) {
     throw new Error("User settings require the Tauri desktop shell.");
   }
