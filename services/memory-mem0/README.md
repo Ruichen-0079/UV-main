@@ -2,7 +2,10 @@
 
 Python FastAPI sidecar that wraps **Mem0 OSS** for YUVI long-term memory.
 
-Runtime never embeds Mem0 Node SDK. Chat paths remain on **Legacy Memory** until M2/M3.
+Runtime never embeds a Mem0 Node SDK. Chat paths use the vendor-neutral
+`MemoryProvider` contract; `Mem0MemoryProvider` adapts the sidecar and the
+Legacy provider remains an explicit fallback. Prompt compatibility is handled
+by Core's `MemoryContextBuilder`.
 
 ## Python baseline
 
@@ -31,14 +34,14 @@ pip install -e ".[dev]"
 
 ```text
 YUVI Runtime :6121
-  └─ MemoryService
-      └─ MemoryBackend
-          ├─ LegacyMemoryBackend  (default)
-          └─ Mem0MemoryBackend    (HTTP adapter)
-                └─ this sidecar :6131
-                    ├─ Mem0 OSS (Python)
-                    ├─ Ollama embedder :11434  yuvi-embedding:0.6b (1024-d, num_ctx=2048)
-                    └─ PostgreSQL + pgvector collection yuvi_mem0_qwen3_1024_v1
+  └─ MemoryProvider
+      ├─ Legacy provider (fallback)
+      └─ Mem0MemoryProvider
+          └─ Mem0MemoryBackend (HTTP adapter)
+              └─ this sidecar :6131
+                  ├─ Mem0 OSS (Python)
+                  ├─ Ollama embedder :11434  yuvi-embedding:0.6b (1024-d, num_ctx=2048)
+                  └─ PostgreSQL + pgvector collection yuvi_mem0_qwen3_1024_v1
 ```
 
 Sidecar process lifecycle uses FastAPI **lifespan** (not deprecated `on_event`):
@@ -76,7 +79,7 @@ Sidecar process lifecycle uses FastAPI **lifespan** (not deprecated `on_event`):
 | Collection | `yuvi_mem0_qwen3_1024_v1` (reused; same space) |
 | Index | HNSW on, DiskANN **off** |
 | Graph Memory | disabled |
-| Default Runtime backend | **legacy** |
+| Default Runtime backend | **legacy** (Mem0 is opt-in) |
 | Python | **3.11** |
 
 ### mem0ai 0.1.107 field notes
@@ -115,7 +118,7 @@ LLM provider:
 - **No** forged / placeholder API keys
 - **No** outbound LLM network calls
 - Sidecar still starts; embedder + vector store initialize
-- `infer=false` add/search/CRUD works
+- `infer=false` semantic writes, search, and CRUD work
 - `infer=true` returns stable error `MEMORY_LLM_NOT_CONFIGURED` (`retryable=false`)
 - `/health`: `status=degraded`, `components.memoryLlm=not_configured`,
   `capabilities.infer=false`
@@ -173,7 +176,8 @@ Pinned direct versions (see pyproject for authoritative list):
 3. Base weights: `ollama pull qwen3-embedding:0.6b`
 4. YUVI model (create once from a Modelfile with `FROM qwen3-embedding:0.6b` and
    `PARAMETER num_ctx 2048`), then verify: `ollama list` shows `yuvi-embedding:0.6b`
-5. Optional Memory LLM (OpenAI-compatible or DeepSeek) for `infer=true`
+5. Optional Memory LLM (OpenAI-compatible or DeepSeek) for explicit sidecar
+   `infer=true` operations; normal YUVI conversation writes use `infer=false`
 
 ## Setup
 

@@ -300,17 +300,22 @@ docker compose -f infra/docker-compose.yml exec postgres \
 
 如果 `MEMORY_REPOSITORY=postgres` 但没有 `DATABASE_URL`，服务器会拒绝启动并提示需要 `DATABASE_URL`。如果忘记运行 migration，memory table 或 pgvector extension 相关操作会失败。
 
-## 4.1 YUVI Memory Core and future external backends
+## 4.1 YUVI Memory Core and external backends
 
-YUVI 拥有自己的 MemoryService 和 MemoryBackend / MemoryRepository 边界。当前 Phase 1 目标是保证记忆读写开关、来源追踪、类型/子类型、检索排序和 prompt 注入的正确性。
+YUVI 保留 `MemoryBackend` 的 storage contract，并通过 vendor-neutral 的
+`MemoryProvider` 暴露 Runtime 语义。Mem0 由 `Mem0MemoryProvider` 适配，
+Legacy provider 作为显式 fallback；Core 的 `MemoryContextBuilder` 将
+canonical `MemoryEvent` 转成现有 PromptBuilder 可消费的对象。
 
-未来可以把外部系统作为 adapter 接入，而不是让它们成为 core dependency：
+读取路径是 `Mem0 → MemoryBackend → Mem0MemoryProvider →
+MemoryRetrievalOutcome → MemoryEvent[] → MemoryContextBuilder → PromptBuilder`；
+写入路径是 `Conversation → MemoryIngestionPolicy → MemoryWriteEventInput →
+MemoryProvider.writeEvent() → Mem0MemoryProvider → MemoryBackend → Mem0`。
+Mem0 SDK、sidecar DTO 和未来的 Graphiti/Letta 实现都不能成为 Core dependency。
 
-- Mem0 可以作为 `Mem0MemoryBackend` 接入，用于实验外部长期记忆服务。
-- Graphiti 可以作为 `GraphitiMemoryBackend` 的参考方向，用于研究 temporal graph memory。
-- Letta 只作为 architecture reference，不作为 YUVI Runtime core dependency。
-
-当前不要把 raw chat logs 直接塞进 prompt。记忆必须经过检索、排序、压缩和重构后再进入 `RelevantMemory`。
+不要把 raw chat logs 直接塞进 prompt。记忆必须经过检索、状态判断和
+`MemoryContextBuilder` 的 prompt-compatible projection 后再进入
+`RelevantMemory`。
 
 ## 5. Start Server
 
