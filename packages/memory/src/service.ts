@@ -705,6 +705,16 @@ export class MemoryService {
         },
         controller.signal
       );
+      if (hits.some((item) => item.scope !== scope)) {
+        this.mem0Logger?.warn?.("mem0 search returned a record outside the requested scope", {
+          code: "MEMORY_SCOPE_MISMATCH",
+          operation: "search",
+          expectedScopePresent: true
+        });
+        const empty = emptyMem0RetrievalResult(text);
+        empty.fallbackReason = "MEMORY_SCOPE_MISMATCH";
+        return empty;
+      }
       const selected = selectPromptMemories(hits);
       return buildMem0RetrievalResult(text, hits, selected);
     } catch (error) {

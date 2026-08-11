@@ -1407,9 +1407,7 @@ export class RuntimeOrchestrator {
           rejectedCount: result.ok ? 0 : 1,
           rejectedReasons: result.ok ? [] : [result.skippedReason ?? "mem0-write-failed"],
           candidates: [],
-          ...(result.ok
-            ? {}
-            : { skippedReason: result.skippedReason ?? "Mem0 turn write failed." })
+          ...(result.ok ? {} : { skippedReason: result.skippedReason ?? "Mem0 turn write failed." })
         });
       })
       .catch((error: unknown) => {
@@ -1871,10 +1869,14 @@ export class RuntimeOrchestrator {
         providerOutcome = await this.retrieveFromProvider(provider, event);
         if (isUsableProviderOutcome(providerOutcome.status)) {
           memoryContext = this.buildProviderMemoryContext(providerOutcome, options);
-        } else {
+        } else if (providerOutcome.status === "unavailable") {
           memoryContext = await this.retrieveLegacyMemories(event);
           memoryContext = dedupeLegacyMemoryContext(memoryContext, options);
           memoryContext = annotateProviderFallback(memoryContext, providerOutcome);
+        } else {
+          // Semantic/provider validation errors are fail-closed: a raw legacy
+          // compatibility lookup must never bypass the Provider boundary.
+          memoryContext = this.buildProviderMemoryContext(providerOutcome, options);
         }
       } else {
         memoryContext = await this.retrieveLegacyMemories(event);
@@ -1979,7 +1981,8 @@ export class RuntimeOrchestrator {
     context.memoryProviderSource = outcome.source;
     context.memoryProviderErrorCode = outcome.errorCode ?? null;
     context.memoryRetrievalLimited = outcome.limited;
-    context.memoryRetrievalEventIds = built.diagnostics.eventIds ?? built.events.map((event) => event.id);
+    context.memoryRetrievalEventIds =
+      built.diagnostics.eventIds ?? built.events.map((event) => event.id);
     context.memoryRetrievalDroppedCount = built.diagnostics.droppedCount;
     context.memoryRetrievalDropped = built.diagnostics.dropped ?? [];
     context.memoryMetadataPresent = built.diagnostics.metadataPresent ?? false;
@@ -2033,7 +2036,8 @@ export class RuntimeOrchestrator {
         excludedByScope: result.excludedByScope,
         retrievedMemories: result.rawMemories,
         promptMemories: result.memories,
-        memoryFallbackUsed: false
+        memoryFallbackUsed: false,
+        ...(result.fallbackReason ? { memoryFallbackReason: result.fallbackReason } : {})
       });
     }
 
@@ -3006,7 +3010,8 @@ function annotateProviderFallback(
     memoryRetrievalLimited: outcome.limited,
     memoryFallbackProducedResults: context.retrievedMemoryCountRaw > 0,
     memoryFallbackUsed: true,
-    memoryFallbackReason: outcome.errorCode ?? `provider-status:${outcome.status}`,
+    memoryFallbackReason:
+      context.memoryFallbackReason ?? outcome.errorCode ?? `provider-status:${outcome.status}`,
     memoryFallbackSource: "legacy"
   };
 }

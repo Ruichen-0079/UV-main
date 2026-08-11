@@ -4,6 +4,7 @@ import { InMemoryMemoryRepository } from "./repository.js";
 import type { MemoryBackend } from "./backend.js";
 import { detectExplicitForgetRequest, detectExplicitRememberRequest } from "./intent.js";
 import { Mem0MemoryProvider } from "./providers/mem0-memory-provider.js";
+import { buildMemoryScope } from "./scope.js";
 
 function createMockBackend(overrides: Partial<MemoryBackend> = {}): MemoryBackend {
   return {
@@ -14,7 +15,7 @@ function createMockBackend(overrides: Partial<MemoryBackend> = {}): MemoryBacken
       {
         id: "m1",
         content: "User prefers short replies",
-        scope: "s",
+        scope: buildMemoryScope("user-a", "alice"),
         metadata: { secret: "nope" },
         score: 0.91
       }
@@ -88,6 +89,44 @@ describe("MemoryService mem0 mode", () => {
     });
     expect(backend.search).not.toHaveBeenCalled();
     expect(result.fallbackReason).toBe("MEMORY_SCOPE_MISSING");
+  });
+
+  it("fails closed when legacy compatibility retrieval receives a foreign-scope record", async () => {
+    const requestedScope = buildMemoryScope("user-a", "alice");
+    const backend = createMockBackend({
+      search: vi.fn(async () => [
+        {
+          id: "foreign",
+          content: "foreign scope memory",
+          scope: buildMemoryScope("user-b", "alice"),
+          metadata: {},
+          score: 0.9
+        }
+      ])
+    });
+    const service = new MemoryService(
+      new InMemoryMemoryRepository(),
+      undefined,
+      undefined,
+      undefined,
+      { enabled: false },
+      { kind: "mem0", mem0: backend }
+    );
+
+    const result = await service.retrieveRelevantMemoriesWithMetadata({
+      text: "recall",
+      subjectUserId: "user-a",
+      personaId: "alice"
+    });
+
+    expect(backend.search).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: requestedScope }),
+      expect.any(AbortSignal)
+    );
+    expect(result.rawCount).toBe(0);
+    expect(result.count).toBe(0);
+    expect(result.memories).toEqual([]);
+    expect(result.fallbackReason).toBe("MEMORY_SCOPE_MISMATCH");
   });
 
   it("does not run legacy extraction or processCandidate storage in mem0 mode", async () => {

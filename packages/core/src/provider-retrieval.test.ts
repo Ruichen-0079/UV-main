@@ -1,6 +1,10 @@
 import { InMemoryEventBus } from "@companion/event-bus";
 import {
   type MemoryEvent,
+  buildMemoryScope,
+  InMemoryMemoryRepository,
+  MemoryService,
+  type MemoryBackend,
   type MemoryProvider,
   type MemoryRetrievalOutcome,
   type MemoryRetrievalResult,
@@ -149,6 +153,17 @@ function createRuntime(memory: RuntimeMemoryPort, builder?: Pick<MemoryContextBu
   return { runtime, buildPrompt };
 }
 
+function createMem0Service(backend: MemoryBackend): MemoryService {
+  return new MemoryService(
+    new InMemoryMemoryRepository(),
+    undefined,
+    undefined,
+    undefined,
+    { enabled: false },
+    { kind: "mem0", mem0: backend }
+  );
+}
+
 describe("Runtime provider retrieval wiring", () => {
   it("uses MemoryProvider and MemoryContextBuilder without legacy mapping on success", async () => {
     const provider = createProvider(outcome("ok", [event()]));
@@ -242,9 +257,7 @@ describe("Runtime provider retrieval wiring", () => {
       memoryFinalStatus: "ok",
       memoryRetrievalEventIds: ["mem0:test"],
       memoryRetrievalDroppedCount: 1,
-      memoryRetrievalDropped: [
-        { id: "mem0:test", reason: "current_turn_echo", source: "mem0" }
-      ]
+      memoryRetrievalDropped: [{ id: "mem0:test", reason: "current_turn_echo", source: "mem0" }]
     });
   });
 
@@ -291,10 +304,10 @@ describe("Runtime provider retrieval wiring", () => {
     });
   });
 
-  it("treats provider errors as errors, not empty, before fallback", async () => {
+  it("fails closed on provider errors without legacy fallback", async () => {
     const provider = createProvider(outcome("error", [], "MEMORY_PROVIDER_ERROR"));
     const legacy = vi.fn(async () => legacyResult("legacy after provider error"));
-    const { runtime } = createRuntime(createMemory(provider, legacy));
+    const { runtime, buildPrompt } = createRuntime(createMemory(provider, legacy));
 
     await runtime.handleUserMessage(
       { sessionId: "session-error", content: "Provider error" },
@@ -303,12 +316,109 @@ describe("Runtime provider retrieval wiring", () => {
 
     expect(runtime.getLatestPromptPreview()).toMatchObject({
       memoryProviderStatus: "error",
-      memoryFinalStatus: "ok",
-      memoryFallbackProducedResults: true,
-      memoryFallbackUsed: true,
-      memoryFallbackSource: "legacy"
+      memoryProviderErrorCode: "MEMORY_PROVIDER_ERROR",
+      memoryFinalStatus: "error",
+      memoryFallbackUsed: false
     });
-    expect(legacy).toHaveBeenCalledOnce();
+    expect(buildPrompt.mock.calls[0]?.[0].retrievedMemories).toEqual([]);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it("does not let a real Service → Core scope mismatch enter legacy fallback", async () => {
+    const requestedScope = buildMemoryScope("user-a", "alice");
+    const foreignScope = buildMemoryScope("user-b", "alice");
+    const search = vi.fn(async () => [
+      {
+        id: "foreign",
+        content: "foreign scope memory",
+        scope: foreignScope,
+        metadata: {},
+        score: 0.9
+      }
+    ]);
+    const backend: MemoryBackend = {
+      kind: "mem0",
+      health: vi.fn(),
+      add: vi.fn(),
+      search,
+      get: vi.fn(),
+      list: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      history: vi.fn()
+    } as MemoryBackend;
+    const { runtime, buildPrompt } = createRuntime(createMem0Service(backend));
+
+    await runtime.handleUserMessage(
+      { sessionId: "scope-a", content: "recall", subjectUserId: "user-a", personaId: "alice" },
+      { readMemory: true, writeMemory: false }
+    );
+
+    expect(search).toHaveBeenCalledOnce();
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: requestedScope }),
+      undefined
+    );
+    expect(buildPrompt.mock.calls[0]?.[0].retrievedMemories).toEqual([]);
+    expect(runtime.getLatestPromptPreview()).toMatchObject({
+      memoryProviderStatus: "error",
+      memoryProviderErrorCode: "MEMORY_SCOPE_MISMATCH",
+      memoryFallbackUsed: false,
+      memoryFinalStatus: "error"
+    });
+  });
+
+  it("keeps unavailable fallback but fails closed if its legacy Mem0 result crosses scope", async () => {
+    const foreignScope = buildMemoryScope("user-b", "alice");
+    const backend: MemoryBackend = {
+      kind: "mem0",
+      health: vi.fn(),
+      add: vi.fn(),
+      search: vi.fn(async () => [
+        {
+          id: "foreign",
+          content: "foreign scope memory",
+          scope: foreignScope,
+          metadata: {},
+          score: 0.9
+        }
+      ]),
+      get: vi.fn(),
+      list: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      history: vi.fn()
+    } as MemoryBackend;
+    const service = createMem0Service(backend);
+    const unavailable = createProvider(outcome("unavailable", [], "OPERATION_TIMEOUT"));
+    const memory: RuntimeMemoryPort = {
+      getMemoryProvider: () => unavailable,
+      retrieveRelevantMemories: service.retrieveRelevantMemories.bind(service),
+      retrieveRelevantMemoriesWithMetadata:
+        service.retrieveRelevantMemoriesWithMetadata.bind(service),
+      scoreImportance: service.scoreImportance.bind(service),
+      rememberInteraction: service.rememberInteraction.bind(service)
+    };
+    const { runtime, buildPrompt } = createRuntime(memory);
+
+    await runtime.handleUserMessage(
+      {
+        sessionId: "scope-unavailable",
+        content: "recall",
+        subjectUserId: "user-a",
+        personaId: "alice"
+      },
+      { readMemory: true, writeMemory: false }
+    );
+
+    expect(backend.search).toHaveBeenCalledOnce();
+    expect(buildPrompt.mock.calls[0]?.[0].retrievedMemories).toEqual([]);
+    expect(runtime.getLatestPromptPreview()).toMatchObject({
+      memoryProviderStatus: "unavailable",
+      memoryProviderErrorCode: "OPERATION_TIMEOUT",
+      memoryFallbackUsed: true,
+      memoryFallbackReason: "MEMORY_SCOPE_MISMATCH"
+    });
   });
 
   it("keeps provider unavailable diagnostics when legacy fallback also fails", async () => {
