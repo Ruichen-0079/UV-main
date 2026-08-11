@@ -176,6 +176,11 @@ describe("Runtime provider retrieval wiring", () => {
     ]);
     expect(runtime.getLatestPromptPreview()).toMatchObject({
       memoryProviderStatus: "ok",
+      memoryFinalStatus: "ok",
+      memoryProviderSource: "mem0",
+      memoryRetrievalLimited: false,
+      memoryRetrievalEventIds: ["mem0:test"],
+      memoryRetrievalDroppedCount: 0,
       memoryFallbackUsed: false
     });
   });
@@ -196,6 +201,7 @@ describe("Runtime provider retrieval wiring", () => {
     expect(buildPrompt.mock.calls[0]?.[0].retrievedMemories).toEqual([]);
     expect(runtime.getLatestPromptPreview()).toMatchObject({
       memoryProviderStatus: "empty",
+      memoryFinalStatus: "empty",
       memoryFallbackUsed: false
     });
   });
@@ -221,6 +227,27 @@ describe("Runtime provider retrieval wiring", () => {
     });
   });
 
+  it("drops a current-turn echo from the prompt while retaining its event id", async () => {
+    const provider = createProvider(outcome("ok", [event("用户喜欢蓝色")]));
+    const legacy = vi.fn(async () => legacyResult("legacy should not be read"));
+    const { runtime, buildPrompt } = createRuntime(createMemory(provider, legacy));
+
+    await runtime.handleUserMessage(
+      { sessionId: "session-echo", content: "我喜欢蓝色" },
+      { readMemory: true, writeMemory: false }
+    );
+
+    expect(buildPrompt.mock.calls[0]?.[0].retrievedMemories).toEqual([]);
+    expect(runtime.getLatestPromptPreview()).toMatchObject({
+      memoryFinalStatus: "ok",
+      memoryRetrievalEventIds: ["mem0:test"],
+      memoryRetrievalDroppedCount: 1,
+      memoryRetrievalDropped: [
+        { id: "mem0:test", reason: "current_turn_echo", source: "mem0" }
+      ]
+    });
+  });
+
   it("marks the legacy path explicitly when no semantic provider is configured", async () => {
     const legacy = vi.fn(async () => legacyResult("legacy-only memory"));
     const { runtime } = createRuntime(createMemory(undefined, legacy));
@@ -232,6 +259,8 @@ describe("Runtime provider retrieval wiring", () => {
 
     expect(runtime.getLatestPromptPreview()).toMatchObject({
       memoryFallbackUsed: true,
+      memoryFinalStatus: "ok",
+      memoryFallbackProducedResults: true,
       memoryFallbackSource: "legacy",
       memoryFallbackReason: "provider-not-configured"
     });
@@ -253,6 +282,8 @@ describe("Runtime provider retrieval wiring", () => {
     ]);
     expect(runtime.getLatestPromptPreview()).toMatchObject({
       memoryProviderStatus: "unavailable",
+      memoryFinalStatus: "ok",
+      memoryFallbackProducedResults: true,
       memoryProviderErrorCode: "OPERATION_TIMEOUT",
       memoryFallbackUsed: true,
       memoryFallbackSource: "legacy",
@@ -272,6 +303,8 @@ describe("Runtime provider retrieval wiring", () => {
 
     expect(runtime.getLatestPromptPreview()).toMatchObject({
       memoryProviderStatus: "error",
+      memoryFinalStatus: "ok",
+      memoryFallbackProducedResults: true,
       memoryFallbackUsed: true,
       memoryFallbackSource: "legacy"
     });
