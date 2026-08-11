@@ -1760,8 +1760,13 @@ function wmCloseExecutableDiagnostic(file) {
   const isSystemPowerShell =
     /^powershell\.exe$/i.test(basename) &&
     /(?:^|[\\/])System32[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/i.test(text);
+  const isPythonHarness = /^python(?:\.exe)?$/i.test(basename);
   return {
-    category: isSystemPowerShell ? "system-windows-powershell" : "wm-close-helper",
+    category: isSystemPowerShell
+      ? "system-windows-powershell"
+      : isPythonHarness
+        ? "python-harness"
+        : "wm-close-helper",
     path: isSystemPowerShell ? text.replaceAll("\\", "/") : basename
   };
 }
@@ -1804,15 +1809,139 @@ function formatWmCloseFailure({
     .join("\n");
 }
 
+export const TAURI_MAIN_WINDOW_TITLE = "YUVI Chat";
+
+export const WM_CLOSE_PYTHON_SOURCE = String.raw`
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+WM_CLOSE = 0x0010
+started = time.monotonic()
+target_pid = int(sys.argv[1])
+expected_title = sys.argv[2]
+pid_top_level_windows = 0
+exact_title_matches = []
+validated_pid = 0
+title_exact = 0
+identity_valid = 0
+target_hwnd = 0
+post_result = 0
+
+def emit_phase(name):
+    print(f"WM_CLOSE_PHASE={name}", flush=True)
+
+def emit_result(error=None):
+    print(f"target_pid={target_pid}", flush=True)
+    print(f"pid_top_level_windows={pid_top_level_windows}", flush=True)
+    print(f"exact_title_matches={len(exact_title_matches)}", flush=True)
+    print(f"target_hwnd={target_hwnd}", flush=True)
+    print(f"validated_pid={validated_pid}", flush=True)
+    print(f"title_exact={title_exact}", flush=True)
+    print(f"identity_valid={identity_valid}", flush=True)
+    print(f"post_result={post_result}", flush=True)
+    if error is not None:
+        print(f"win32_error={error}", flush=True)
+    print(f"elapsed_ms={max(0, int((time.monotonic() - started) * 1000))}", flush=True)
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
+user32.EnumWindows.restype = wintypes.BOOL
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+user32.GetWindowTextLengthW.restype = ctypes.c_int
+user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetWindowTextW.restype = ctypes.c_int
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostMessageW.restype = wintypes.BOOL
+
+def read_title(hwnd):
+    length = user32.GetWindowTextLengthW(hwnd)
+    buffer = ctypes.create_unicode_buffer(max(1, length + 1))
+    user32.GetWindowTextW(hwnd, buffer, len(buffer))
+    return buffer.value
+
+def enum_window(hwnd, _lparam):
+    global pid_top_level_windows
+    pid_value = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_value))
+    if int(pid_value.value) != target_pid:
+        return True
+    pid_top_level_windows += 1
+    if read_title(hwnd) == expected_title:
+        exact_title_matches.append(int(hwnd))
+    return True
+
+emit_phase("start")
+emit_phase("before_enum")
+if not user32.EnumWindows(EnumWindowsProc(enum_window), 0):
+    emit_phase("after_enum")
+    emit_result(ctypes.get_last_error())
+    raise SystemExit(1)
+emit_phase("after_enum")
+if len(exact_title_matches) != 1:
+    emit_result()
+    raise SystemExit(1)
+target_hwnd = exact_title_matches[0]
+emit_phase("before_revalidate")
+pid_value = wintypes.DWORD(0)
+user32.GetWindowThreadProcessId(target_hwnd, ctypes.byref(pid_value))
+validated_pid = int(pid_value.value)
+title_exact = int(read_title(target_hwnd) == expected_title)
+identity_valid = int(bool(user32.IsWindow(target_hwnd)) and validated_pid == target_pid and title_exact == 1)
+emit_phase("after_revalidate")
+if identity_valid != 1:
+    emit_result()
+    raise SystemExit(1)
+emit_phase("before_post")
+post_result = int(bool(user32.PostMessageW(target_hwnd, WM_CLOSE, 0, 0)))
+post_error = ctypes.get_last_error() if post_result == 0 else None
+emit_phase("after_post")
+emit_result(post_error)
+raise SystemExit(0 if post_result == 1 else 1)
+`;
+
+export function resolveWmClosePythonExecutable(
+  env = process.env,
+  fsImpl = fs,
+  platform = process.platform
+) {
+  const executable = String(env?.YUVI_PYTHON311 ?? "").trim();
+  if (!executable) fail("Tauri WM_CLOSE harness requires YUVI_PYTHON311");
+  const absolute = platform === "win32" ? path.win32.isAbsolute(executable) : path.isAbsolute(executable);
+  if (!absolute) fail("Tauri WM_CLOSE harness requires an absolute YUVI_PYTHON311 path");
+  let stat;
+  try {
+    stat = fsImpl.statSync(executable);
+  } catch {
+    fail("Tauri WM_CLOSE harness requires an existing YUVI_PYTHON311 file");
+  }
+  if (!stat?.isFile?.()) fail("Tauri WM_CLOSE harness requires an existing YUVI_PYTHON311 file");
+  return executable;
+}
+
 export function parseWmCloseOutput(stdout, expectedPid = null) {
   const text = String(stdout ?? "");
   assertNoSecrets(text, "WM_CLOSE stdout");
-  const phases = [...text.matchAll(/(?:^|\r?\n)WM_CLOSE_PHASE=([a-z_]+)/g)].map(
+  const phases = [...text.matchAll(/(?:^|\r?\n)WM_CLOSE_PHASE=([a-z_]+)(?=\r?$)/gm)].map(
     (match) => match[1]
   );
-  const requiredPhases = ["start", "before_add_type", "after_add_type", "before_enum", "after_enum"];
-  for (const phase of requiredPhases)
-    if (!phases.includes(phase)) fail(`WM_CLOSE output is missing phase ${phase}`);
+  const requiredPhases = [
+    "start",
+    "before_enum",
+    "after_enum",
+    "before_revalidate",
+    "after_revalidate",
+    "before_post",
+    "after_post"
+  ];
+  if (phases.length !== requiredPhases.length || phases.some((phase, index) => phase !== requiredPhases[index]))
+    fail("WM_CLOSE output has invalid phase sequence");
   const readInteger = (name) => {
     const matches = [...text.matchAll(new RegExp(`(?:^|\\r?\\n)${name}=(-?\\d+)(?=\\r?$)`, "gm"))];
     if (matches.length !== 1) fail(`WM_CLOSE output is missing or malformed ${name}`);
@@ -1821,25 +1950,35 @@ export function parseWmCloseOutput(stdout, expectedPid = null) {
     return value;
   };
   const targetPid = readInteger("target_pid");
-  const matchedWindows = readInteger("matched_windows");
-  const postedWindows = readInteger("posted_windows");
-  const postFailures = readInteger("post_failures");
+  const pidTopLevelWindows = readInteger("pid_top_level_windows");
+  const exactTitleMatches = readInteger("exact_title_matches");
+  const targetHwnd = readInteger("target_hwnd");
+  const validatedPid = readInteger("validated_pid");
+  const titleExact = readInteger("title_exact");
+  const identityValid = readInteger("identity_valid");
+  const postResult = readInteger("post_result");
   const elapsedMs = readInteger("elapsed_ms");
   if (expectedPid !== null && targetPid !== Number(expectedPid))
     fail(`WM_CLOSE output target PID mismatch (${targetPid})`);
-  if (matchedWindows === 0) fail("WM_CLOSE target window was not found");
-  if (postedWindows === 0) fail("WM_CLOSE was not posted");
-  const metrics = {};
-  for (const match of text.matchAll(/(?:^|\r?\n)WM_CLOSE_METRIC=([a-z_]+)=(\d+)(?=\r?$)/gm))
-    metrics[match[1]] = Number(match[2]);
+  if (pidTopLevelWindows < 1) fail("WM_CLOSE found no target top-level windows");
+  if (exactTitleMatches !== 1) fail("WM_CLOSE requires exactly one exact title match");
+  if (targetHwnd <= 0) fail("WM_CLOSE output has invalid target_hwnd");
+  if (expectedPid !== null && validatedPid !== Number(expectedPid))
+    fail(`WM_CLOSE validated PID mismatch (${validatedPid})`);
+  if (titleExact !== 1) fail("WM_CLOSE target title was not exact");
+  if (identityValid !== 1) fail("WM_CLOSE target identity was not validated");
+  if (postResult !== 1) fail("WM_CLOSE PostMessageW was not accepted");
   return {
     targetPid,
-    matchedWindows,
-    postedWindows,
-    postFailures,
+    pidTopLevelWindows,
+    exactTitleMatches,
+    targetHwnd,
+    validatedPid,
+    titleExact: titleExact === 1,
+    identityValid: identityValid === 1,
+    postResult: postResult === 1,
     elapsedMs,
     phases,
-    metrics,
     lastPhase: phases.at(-1) ?? "unknown"
   };
 }
@@ -3068,71 +3207,20 @@ async function runPackagedSupervisor({
 export function buildWmCloseScript(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) fail("WM_CLOSE target PID is invalid");
-  return `$targetPid = ${numericPid};
-$totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-function Write-WmClosePhase([string]$phase) {
-  [Console]::Out.WriteLine("WM_CLOSE_PHASE=$phase")
-  [Console]::Out.Flush()
+  return WM_CLOSE_PYTHON_SOURCE;
 }
-function Write-WmCloseMetric([string]$name, [long]$value) {
-  [Console]::Out.WriteLine("WM_CLOSE_METRIC=$name=$value")
-  [Console]::Out.Flush()
-}
-Write-WmClosePhase "start"
-Write-WmClosePhase "before_add_type"
-$addTypeStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class YuviWindowCloser {
-    private const uint WM_CLOSE = 0x0010;
-  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extra);
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-    [DllImport("user32.dll")] private static extern bool PostMessageW(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
-    public sealed class CloseResult {
-      public int MatchedWindows { get; set; }
-      public int PostedWindows { get; set; }
-      public int PostFailures { get; set; }
-      public bool EnumWindowsSucceeded { get; set; }
-    }
-    public static CloseResult CloseForProcess(uint targetPid) {
-      var result = new CloseResult();
-      EnumWindowsProc callback = (hWnd, extra) => {
-        uint windowPid;
-        GetWindowThreadProcessId(hWnd, out windowPid);
-        if (windowPid == targetPid) {
-          result.MatchedWindows++;
-          if (PostMessageW(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero)) result.PostedWindows++;
-          else result.PostFailures++;
-        }
-        return true;
-      };
-      result.EnumWindowsSucceeded = EnumWindows(callback, IntPtr.Zero);
-      return result;
-    }
-  }
-'@
-$addTypeStopwatch.Stop()
-Write-WmClosePhase "after_add_type"
-Write-WmCloseMetric "add_type_ms" $addTypeStopwatch.ElapsedMilliseconds
-Write-WmClosePhase "before_enum"
-$enumStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-$closeResult = [YuviWindowCloser]::CloseForProcess([uint32]$targetPid)
-$enumStopwatch.Stop()
-Write-WmClosePhase "after_enum"
-$totalStopwatch.Stop()
-Write-WmCloseMetric "enum_ms" $enumStopwatch.ElapsedMilliseconds
-Write-WmCloseMetric "total_ms" $totalStopwatch.ElapsedMilliseconds
-[Console]::Out.WriteLine("target_pid=$targetPid")
-[Console]::Out.WriteLine("matched_windows=$($closeResult.MatchedWindows)")
-[Console]::Out.WriteLine("posted_windows=$($closeResult.PostedWindows)")
-[Console]::Out.WriteLine("post_failures=$($closeResult.PostFailures)")
-[Console]::Out.WriteLine("elapsed_ms=$($totalStopwatch.ElapsedMilliseconds)")
-[Console]::Out.Flush()
-if (-not $closeResult.EnumWindowsSucceeded) { throw "WM_CLOSE EnumWindows failed" }
-if ($closeResult.MatchedWindows -eq 0) { throw "WM_CLOSE target window was not found" }
-if ($closeResult.PostedWindows -eq 0) { throw "WM_CLOSE was not posted" }`;
+
+export function buildWmCloseArguments(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) fail("WM_CLOSE target PID is invalid");
+  return [
+    "-I",
+    "-S",
+    "-c",
+    WM_CLOSE_PYTHON_SOURCE,
+    String(numericPid),
+    TAURI_MAIN_WINDOW_TITLE
+  ];
 }
 
 async function waitForProcessExit(pid, timeoutMs) {
@@ -3143,16 +3231,10 @@ async function waitForProcessExit(pid, timeoutMs) {
 
 async function sendWmClose(pid, layout, timeoutMs) {
   const script = buildWmCloseScript(pid);
-  assertNoSecrets(script, "WM_CLOSE script");
-  const executable = powershellDiagnosticPath();
-  const args = [
-    "-NoProfile",
-    "-NonInteractive",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    script
-  ];
+  assertNoSecrets(script, "WM_CLOSE helper source");
+  const executable = resolveWmClosePythonExecutable();
+  const args = buildWmCloseArguments(pid);
+  assertNoSecrets(args, "WM_CLOSE helper argv");
   const options = {
     cwd: layout.emptyCwd,
     env: sanitizeChildEnv(),
@@ -3172,12 +3254,15 @@ async function sendWmClose(pid, layout, timeoutMs) {
     writeLog(layout.logs, "wm-close.log", message);
     throw error;
   }
-  const timing = result.phaseTimings.before_add_type ?? "unknown";
-  const metrics = result.metrics;
+  const timing = result.phaseTimings;
+  const phaseDelta = (before, after) =>
+    timing[before] !== undefined && timing[after] !== undefined
+      ? Math.max(0, timing[after] - timing[before])
+      : "unknown";
   const diagnostic = [
     `WM_CLOSE_HELPER executable_category=${result.executable.category} executable_path=${result.executable.path} helper_pid=${result.helperPid} exit_code=${result.code}`,
-    `WM_CLOSE_PHASE_TIMING spawn_to_before_add_type_ms=${timing} add_type_ms=${metrics.add_type_ms ?? "unknown"} enum_ms=${metrics.enum_ms ?? "unknown"} total_ms=${metrics.total_ms ?? result.totalElapsedMs}`,
-    `WM_CLOSE_RESULT target_pid=${result.targetPid} matched_windows=${result.matchedWindows} posted_windows=${result.postedWindows} post_failures=${result.postFailures} elapsed_ms=${result.elapsedMs}`
+    `WM_CLOSE_PHASE_TIMING spawn_to_before_enum_ms=${timing.before_enum ?? "unknown"} enum_ms=${phaseDelta("before_enum", "after_enum")} revalidate_ms=${phaseDelta("before_revalidate", "after_revalidate")} post_ms=${phaseDelta("before_post", "after_post")} total_ms=${result.totalElapsedMs}`,
+    `WM_CLOSE_RESULT target_pid=${result.targetPid} pid_top_level_windows=${result.pidTopLevelWindows} exact_title_matches=${result.exactTitleMatches} target_hwnd=${result.targetHwnd} validated_pid=${result.validatedPid} title_exact=${result.titleExact ? 1 : 0} identity_valid=${result.identityValid ? 1 : 0} post_result=${result.postResult ? 1 : 0} elapsed_ms=${result.elapsedMs}`
   ].join("\n");
   writeLog(layout.logs, "wm-close.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
   console.info(`[installer-smoke] ${diagnostic.replaceAll("\n", " ")}`);

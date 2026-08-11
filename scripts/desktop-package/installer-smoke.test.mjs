@@ -16,6 +16,7 @@ import {
   assertTauriAppSmokeAllowed,
   allocateDistinctPorts,
   attributeWindowsListener,
+  buildWmCloseArguments,
   buildWmCloseScript,
   chooseInstaller,
   compareSnapshots,
@@ -51,6 +52,7 @@ import {
   removeTreeWithRetries,
   restrictedPath,
   restrictedWindowsPath,
+  resolveWmClosePythonExecutable,
   readOwnershipMetadataDiagnostic,
   resolveExistingWindowsPathForComparison,
   sanitizeChildEnv,
@@ -58,6 +60,8 @@ import {
   assertSupervisorProvenance,
   powershellDiagnosticPath,
   runWmCloseHelper,
+  TAURI_MAIN_WINDOW_TITLE,
+  WM_CLOSE_PYTHON_SOURCE,
   waitForSpecificPidsExit,
   waitForTauriBootstrapReady,
   windowsProcessPathInside,
@@ -1791,40 +1795,96 @@ test("Tauri application arguments are empty by construction", () => {
   assertNoSecrets(args, "Tauri argv");
 });
 
-test("WM_CLOSE command targets a numeric PID only", () => {
+test("WM_CLOSE command uses Python ctypes exact-HWND targeting", () => {
   const script = buildWmCloseScript(12345);
-  assert.match(script, /targetPid = 12345/);
-  assert.match(script, /GetWindowThreadProcessId/);
-  assert.match(script, /PostMessageW/);
-  assert.match(script, /Write-WmClosePhase "before_add_type"/);
-  assert.match(script, /Write-WmClosePhase "before_enum"/);
-  assert.match(script, /matched_windows=/);
-  assert.match(script, /posted_windows=/);
-  assert.match(script, /post_failures=/);
-  assert.doesNotMatch(script, /WindowText|title|Alt\+F4/i);
+  assert.equal(script, WM_CLOSE_PYTHON_SOURCE);
+  assert.match(script, /ctypes\.WinDLL\("user32", use_last_error=True\)/);
+  for (const symbol of [
+    "EnumWindows",
+    "GetWindowThreadProcessId",
+    "GetWindowTextLengthW",
+    "GetWindowTextW",
+    "IsWindow",
+    "PostMessageW"
+  ]) assert.match(script, new RegExp(symbol));
+  assert.match(script, /expected_title/);
+  assert.match(script, /emit_phase\("before_revalidate"\)/);
+  assert.match(script, /emit_phase\("after_post"\)/);
+  assert.doesNotMatch(
+    script,
+    /CloseMainWindow|UIAutomation|WindowPattern|SetFocus|Add-Type|DllImport|CodeDom|SendKeys|AppActivate|taskkill|Stop-Process/i
+  );
 });
 
-test("WM_CLOSE command rejects invalid PIDs", () => {
+test("WM_CLOSE command rejects invalid PIDs and uses isolated Python arguments", () => {
   assert.throws(() => buildWmCloseScript(0), /invalid/);
   assert.throws(() => buildWmCloseScript("pid"), /invalid/);
+  assert.deepEqual(buildWmCloseArguments(12345).slice(0, 2), ["-I", "-S"]);
+  assert.equal(buildWmCloseArguments(12345).at(-1), TAURI_MAIN_WINDOW_TITLE);
 });
 
-const wmCloseOutput = ({ targetPid = 123, matched = 1, posted = 1, failures = 0 } = {}) =>
-  [
-    "WM_CLOSE_PHASE=start",
-    "WM_CLOSE_PHASE=before_add_type",
-    "WM_CLOSE_PHASE=after_add_type",
-    "WM_CLOSE_PHASE=before_enum",
-    "WM_CLOSE_PHASE=after_enum",
-    "WM_CLOSE_METRIC=add_type_ms=4",
-    "WM_CLOSE_METRIC=enum_ms=2",
-    "WM_CLOSE_METRIC=total_ms=8",
+test("WM_CLOSE harness requires an absolute existing YUVI_PYTHON311 file", () => {
+  const statFile = { statSync: () => ({ isFile: () => true }) };
+  assert.throws(
+    () => resolveWmClosePythonExecutable({}, statFile, "win32"),
+    /requires YUVI_PYTHON311/
+  );
+  assert.throws(
+    () => resolveWmClosePythonExecutable({ YUVI_PYTHON311: "python.exe" }, statFile, "win32"),
+    /absolute/
+  );
+  assert.throws(
+    () => resolveWmClosePythonExecutable(
+      { YUVI_PYTHON311: "C:\\missing\\python.exe" },
+      { statSync: () => { throw new Error("ENOENT"); } },
+      "win32"
+    ),
+    /existing/
+  );
+  assert.equal(
+    resolveWmClosePythonExecutable(
+      { YUVI_PYTHON311: "C:\\Python311\\python.exe" },
+      statFile,
+      "win32"
+    ),
+    "C:\\Python311\\python.exe"
+  );
+});
+
+const wmCloseOutput = ({
+  targetPid = 123,
+  pidTopLevelWindows = 2,
+  exactTitleMatches = 1,
+  targetHwnd = 123456,
+  validatedPid = targetPid,
+  titleExact = 1,
+  identityValid = 1,
+  postResult = 1,
+  elapsedMs = 8,
+  phases = null
+} = {}) => {
+  const phaseLines = [
+    "start",
+    "before_enum",
+    "after_enum",
+    "before_revalidate",
+    "after_revalidate",
+    "before_post",
+    "after_post"
+  ].map((phase) => `WM_CLOSE_PHASE=${phase}`);
+  return [
+    ...phaseLines.filter((line) => !phases || phases.includes(line.slice(15))),
     `target_pid=${targetPid}`,
-    `matched_windows=${matched}`,
-    `posted_windows=${posted}`,
-    `post_failures=${failures}`,
-    "elapsed_ms=8"
+    `pid_top_level_windows=${pidTopLevelWindows}`,
+    `exact_title_matches=${exactTitleMatches}`,
+    `target_hwnd=${targetHwnd}`,
+    `validated_pid=${validatedPid}`,
+    `title_exact=${titleExact}`,
+    `identity_valid=${identityValid}`,
+    `post_result=${postResult}`,
+    `elapsed_ms=${elapsedMs}`
   ].join("\n");
+};
 
 function fakeWmCloseChild({ pid = 321, onKill = null } = {}) {
   const child = new EventEmitter();
@@ -1840,7 +1900,7 @@ function fakeWmCloseChild({ pid = 321, onKill = null } = {}) {
   return { child, getKillCalls: () => killCalls };
 }
 
-test("WM_CLOSE uses an absolute system PowerShell path", () => {
+test("WM_CLOSE keeps the existing PowerShell diagnostic path available", () => {
   const executable = powershellDiagnosticPath({ SystemRoot: "C:\\Windows" });
   assert.equal(executable, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
 });
@@ -1864,15 +1924,21 @@ test("WM_CLOSE helper accepts a successful structured result", async () => {
     }
   });
   assert.equal(observedExecutable, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-  assert.equal(result.matchedWindows, 1);
-  assert.equal(result.postedWindows, 1);
+  assert.equal(result.pidTopLevelWindows, 2);
+  assert.equal(result.exactTitleMatches, 1);
+  assert.equal(result.targetHwnd, 123456);
+  assert.equal(result.identityValid, true);
+  assert.equal(result.postResult, true);
   assert.equal(result.code, 0);
 });
 
-test("WM_CLOSE helper fails closed for matched=0 and posted=0", async () => {
-  for (const [matched, posted, message] of [
-    [0, 0, /target window was not found/],
-    [1, 0, /WM_CLOSE was not posted/]
+test("WM_CLOSE helper fails closed for invalid discovery and identity", async () => {
+  for (const [output, message] of [
+    [wmCloseOutput({ pidTopLevelWindows: 0 }), /no target top-level windows/],
+    [wmCloseOutput({ exactTitleMatches: 0 }), /exactly one exact title match/],
+    [wmCloseOutput({ targetHwnd: 0 }), /invalid target_hwnd/],
+    [wmCloseOutput({ identityValid: 0 }), /identity was not validated/],
+    [wmCloseOutput({ postResult: 0 }), /PostMessageW was not accepted/]
   ]) {
     await assert.rejects(
       runWmCloseHelper({
@@ -1883,7 +1949,7 @@ test("WM_CLOSE helper fails closed for matched=0 and posted=0", async () => {
         spawnImpl: () => {
           const { child } = fakeWmCloseChild();
           queueMicrotask(() => {
-            child.stdout.emit("data", wmCloseOutput({ matched, posted }));
+            child.stdout.emit("data", output);
             child.emit("exit", 0, null);
           });
           return child;
@@ -1936,7 +2002,49 @@ test("WM_CLOSE helper rejects nonzero exit, spawn errors and malformed output", 
         return child;
       }
     }),
-    /missing phase/
+    /invalid phase sequence/
+  );
+});
+
+test("WM_CLOSE helper rejects missing fields and wrong target PID", async () => {
+  await assert.rejects(
+    runWmCloseHelper({
+      executable: "powershell.exe",
+      args: [],
+      options: {},
+      timeoutMs: 100,
+      expectedPid: 123,
+      spawnImpl: () => {
+        const { child } = fakeWmCloseChild();
+        queueMicrotask(() => {
+          child.stdout.emit(
+            "data",
+            wmCloseOutput().replace("post_result=1\n", "")
+          );
+          child.emit("exit", 0, null);
+        });
+        return child;
+      }
+    }),
+    /missing or malformed post_result/
+  );
+  await assert.rejects(
+    runWmCloseHelper({
+      executable: "powershell.exe",
+      args: [],
+      options: {},
+      timeoutMs: 100,
+      expectedPid: 999,
+      spawnImpl: () => {
+        const { child } = fakeWmCloseChild();
+        queueMicrotask(() => {
+          child.stdout.emit("data", wmCloseOutput());
+          child.emit("exit", 0, null);
+        });
+        return child;
+      }
+    }),
+    /target PID mismatch/
   );
 });
 
@@ -1951,7 +2059,7 @@ test("WM_CLOSE helper timeout requests one kill and reports phase and safe stder
       killGraceMs: 5,
       spawnImpl: () => {
         queueMicrotask(() => {
-          child.stdout.emit("data", "WM_CLOSE_PHASE=start\nWM_CLOSE_PHASE=before_add_type\n");
+          child.stdout.emit("data", "WM_CLOSE_PHASE=start\nWM_CLOSE_PHASE=before_enum\n");
           child.stderr.emit("data", "safe diagnostic");
         });
         return child;
@@ -1960,7 +2068,7 @@ test("WM_CLOSE helper timeout requests one kill and reports phase and safe stder
     (error) => {
       assert.match(error.message, /did not exit after termination request/);
       assert.match(error.message, /helper_pid=321/);
-      assert.match(error.message, /last_phase=before_add_type/);
+      assert.match(error.message, /last_phase=before_enum/);
       assert.match(error.message, /kill_requested=yes/);
       assert.match(error.message, /safe_stderr=safe diagnostic/);
       assert.match(error.message, /exit_observed_after_kill=no/);
