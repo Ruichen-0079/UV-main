@@ -251,7 +251,26 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           git diff --exit-code -- Cargo.lock pnpm-lock.yaml
-          if ((git status --porcelain --untracked-files=no) -ne "") { throw "tracked files changed during packaging job" }
+          $statusLines = @(git status --porcelain=v1 --untracked-files=no)
+          if ($LASTEXITCODE -ne 0) {
+            throw "git status failed during final cleanliness"
+          }
+
+          if ($statusLines.Count -gt 0) {
+            Write-Host "Tracked changes:"
+            $statusLines | ForEach-Object { Write-Host $_ }
+
+            Write-Host "Changed paths:"
+            git diff --name-only
+
+            Write-Host "Diff numstat:"
+            git diff --numstat
+
+            Write-Host "Diff stat:"
+            git diff --stat
+
+            throw "tracked files changed during packaging job"
+          }
           $tempRoot = [IO.Path]::GetTempPath()
           $residual = Get-CimInstance Win32_Process | Where-Object {
             $_.CommandLine -and (
