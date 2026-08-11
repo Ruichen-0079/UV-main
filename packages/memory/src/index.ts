@@ -33,6 +33,23 @@ export type {
   RetrievedMemoryDebug,
   Relation
 } from "./types.js";
+export type {
+  MemoryEvent,
+  MemoryEventAssertion,
+  MemoryEventAssertionSource,
+  MemoryEventId,
+  MemoryEventKind,
+  MemoryEventSource,
+  MemoryEventVerification,
+  MemoryGetEventInput,
+  MemoryProvider,
+  MemoryRetrievalInput,
+  MemoryRetrievalOutcome,
+  MemoryRetrievalStatus,
+  MemoryWriteEventInput,
+  MemoryWriteEventOutcome,
+  MemoryWriteEventStatus
+} from "./provider.js";
 export { detectCurrentAffect } from "./affect.js";
 export { computeRetentionPolicy, type RetentionPolicy } from "./retention.js";
 export {
