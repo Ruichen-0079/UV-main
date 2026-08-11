@@ -19,8 +19,10 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -32,6 +34,7 @@ PORT = int(os.environ.get("MEM0_SIDECAR_PORT", "6131"))
 BASE = f"http://{HOST}:{PORT}"
 SCOPE = "yuvi:v1:user:persist-test:character:alice"
 PYTHON = sys.executable
+_OUTPUT_TAIL_LIMIT = 200
 
 
 def port_open(host: str, port: int) -> bool:
@@ -60,6 +63,27 @@ def http_json(method: str, path: str, body: dict | None = None) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _drain_sidecar_output(proc: subprocess.Popen[bytes]) -> None:
+    stream = proc.stdout
+    if stream is None:
+        return
+    tail: deque[str] = getattr(proc, "_yuvi_output_tail")
+    lock: threading.Lock = getattr(proc, "_yuvi_output_lock")
+    for raw in iter(stream.readline, b""):
+        line = raw.decode("utf-8", errors="replace").rstrip()
+        with lock:
+            tail.append(line)
+
+
+def _sidecar_output_tail(proc: subprocess.Popen[bytes]) -> str:
+    tail: deque[str] | None = getattr(proc, "_yuvi_output_tail", None)
+    lock: threading.Lock | None = getattr(proc, "_yuvi_output_lock", None)
+    if tail is None or lock is None:
+        return ""
+    with lock:
+        return "\n".join(tail)
+
+
 def start_sidecar() -> subprocess.Popen[bytes]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
@@ -78,6 +102,16 @@ def start_sidecar() -> subprocess.Popen[bytes]:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+    setattr(proc, "_yuvi_output_tail", deque(maxlen=_OUTPUT_TAIL_LIMIT))
+    setattr(proc, "_yuvi_output_lock", threading.Lock())
+    drain_thread = threading.Thread(
+        target=_drain_sidecar_output,
+        args=(proc,),
+        name="yuvi-mem0-output-drain",
+        daemon=True,
+    )
+    setattr(proc, "_yuvi_output_drain_thread", drain_thread)
+    drain_thread.start()
     return proc
 
 
@@ -105,9 +139,8 @@ def main() -> int:
     pid_a = proc_a.pid
     print(f"[persistence] started process A pid={pid_a}")
     if not wait_port(True):
-        out = proc_a.stdout.read().decode("utf-8", errors="replace") if proc_a.stdout else ""
-        print("[persistence] ERROR: process A failed to bind", out[-2000:])
         stop_sidecar(proc_a)
+        print("[persistence] ERROR: process A failed to bind", _sidecar_output_tail(proc_a)[-2000:])
         return 3
 
     try:
@@ -152,9 +185,8 @@ def main() -> int:
     pid_b = proc_b.pid
     print(f"[persistence] started process B pid={pid_b}")
     if not wait_port(True):
-        out = proc_b.stdout.read().decode("utf-8", errors="replace") if proc_b.stdout else ""
-        print("[persistence] ERROR: process B failed to bind", out[-2000:])
         stop_sidecar(proc_b)
+        print("[persistence] ERROR: process B failed to bind", _sidecar_output_tail(proc_b)[-2000:])
         return 7
 
     try:
