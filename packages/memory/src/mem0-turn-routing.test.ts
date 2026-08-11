@@ -179,7 +179,7 @@ describe("Mem0 turn classification and write routing", () => {
     expect(calls.add).toHaveLength(0);
   });
 
-  it("normal turn calls add once with infer=true", async () => {
+  it("normal factual turn calls the semantic provider once", async () => {
     const { backend, calls } = createCountingBackend();
     const service = serviceWith(backend);
     const result = await service.storeConversationTurn({
@@ -190,9 +190,11 @@ describe("Mem0 turn classification and write routing", () => {
     });
     expect(result.ok).toBe(true);
     expect(result.turnKind).toBe("normal");
-    expect(result.infer).toBe(true);
+    expect(result.infer).toBe(false);
     expect(calls.add).toHaveLength(1);
-    expect(calls.add[0]?.infer).toBe(true);
+    expect(calls.add[0]?.infer).toBe(false);
+    expect(calls.add[0]?.messages).toBeUndefined();
+    expect(calls.add[0]?.content).toContain("咖啡");
   });
 
   it("cancelled_or_failed never writes", async () => {

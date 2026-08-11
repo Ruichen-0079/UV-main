@@ -1,0 +1,307 @@
+import type { MemoryEventKind, MemoryWriteEventInput } from "./provider.js";
+import type { MemoryCandidate } from "./types.js";
+import {
+  classifyMem0Turn,
+  type Mem0TurnKind
+} from "./mem0-chat.js";
+import { stripExplicitRememberPrefix } from "./intent.js";
+import { RuleBasedMemoryExtractor } from "./extractor.js";
+
+export type MemoryIngestionInput = {
+  userMessage: string;
+  assistantMessage?: string | null | undefined;
+  scope: string;
+  sessionId?: string | undefined;
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+  userMessageId?: string | null | undefined;
+  assistantMessageId?: string | null | undefined;
+  traceId?: string | null | undefined;
+  conversationId?: string | null | undefined;
+  language?: string | null | undefined;
+  observedAt?: string | undefined;
+  cancelledOrFailed?: boolean | undefined;
+  turnKind?: Mem0TurnKind | undefined;
+};
+
+export type MemoryIngestionResult = {
+  turnKind: Mem0TurnKind;
+  events: MemoryWriteEventInput[];
+  skippedReason?: string | undefined;
+};
+
+/**
+ * Deterministic boundary between a completed conversation turn and semantic
+ * memory evidence. Only user-grounded candidates become events; assistant
+ * prose is context and never a source of long-term memory.
+ */
+export class MemoryIngestionPolicy {
+  constructor(private readonly extractor = new RuleBasedMemoryExtractor()) {}
+
+  ingest(input: MemoryIngestionInput): Promise<MemoryIngestionResult> {
+    return this.build(input);
+  }
+
+  async build(input: MemoryIngestionInput): Promise<MemoryIngestionResult> {
+    const userMessage = normalize(input.userMessage);
+    const assistantMessage = normalize(input.assistantMessage ?? "");
+    const turnKind =
+      input.turnKind ??
+      classifyMem0Turn({
+        userMessage,
+        assistantMessage,
+        cancelledOrFailed: input.cancelledOrFailed
+      });
+
+    if (turnKind === "cancelled_or_failed") {
+      return { turnKind, events: [], skippedReason: "cancelled-or-failed" };
+    }
+    if (turnKind === "explicit_forget") {
+      return { turnKind, events: [], skippedReason: "explicit-forget-skips-add" };
+    }
+    if (turnKind === "normal" && !assistantMessage) {
+      return { turnKind, events: [], skippedReason: "empty-assistant" };
+    }
+    if (turnKind === "explicit_remember") {
+      if (!assistantMessage) {
+        return {
+          turnKind,
+          events: [],
+          skippedReason: "explicit-remember-requires-assistant"
+        };
+      }
+      const claim = stripExplicitRememberPrefix(userMessage) || userMessage;
+      return {
+        turnKind,
+        events: [
+          this.eventForClaim(claim, input, {
+            explicit: true,
+            sourceReason: "explicit-remember"
+          })
+        ]
+      };
+    }
+
+    // Relationship-duration statements are evidence of what the user claims,
+    // not authoritative relationship state.
+    if (isUserClaimStatement(userMessage)) {
+      return {
+        turnKind,
+        events: [
+          this.eventForClaim(userMessage, input, {
+            explicit: false,
+            sourceReason: "user-claim"
+          })
+        ]
+      };
+    }
+
+    const candidates = await this.extractor.extractCandidates({
+      userMessage,
+      assistantMessage,
+      sourceTraceId: input.traceId ?? null,
+      timestamp: input.observedAt,
+      personaId: input.personaId,
+      subjectUserId: input.subjectUserId,
+      sessionId: input.sessionId
+    });
+    const events = dedupeEvents(
+      candidates
+        .filter(isFactualCandidate)
+        .map((candidate) => this.eventForCandidate(candidate, input))
+    );
+    if (events.length === 0 && isSimpleFactualUserStatement(userMessage)) {
+      events.push(this.eventForFact(userMessage, input));
+    }
+    return {
+      turnKind,
+      events,
+      ...(events.length === 0 ? { skippedReason: "no-factual-memory" } : {})
+    };
+  }
+
+  private eventForClaim(
+    claim: string,
+    input: MemoryIngestionInput,
+    options: { explicit: boolean; sourceReason: string }
+  ): MemoryWriteEventInput {
+    const content = canonicalizeUserClaim(claim);
+    return {
+      kind: "user_claim",
+      content,
+      scope: input.scope,
+      ...(input.observedAt ? { observedAt: input.observedAt } : {}),
+      ...(input.userMessageId ? { sourceTurnIds: [input.userMessageId] } : {}),
+      ...(input.conversationId !== undefined
+        ? { conversationId: input.conversationId }
+        : input.sessionId !== undefined
+          ? { conversationId: input.sessionId }
+          : {}),
+      ...(input.subjectUserId || input.personaId
+        ? {
+            participants: [
+              ...(input.subjectUserId ? [input.subjectUserId] : []),
+              ...(input.personaId ? [input.personaId] : [])
+            ]
+          }
+        : {}),
+      assertion: { source: "user", verification: "unverified" },
+      metadata: buildEventMetadata(input, {
+        memoryType: "user_claim",
+        explicit: options.explicit,
+        ingestionReason: options.sourceReason
+      })
+    };
+  }
+
+  private eventForCandidate(
+    candidate: MemoryCandidate,
+    input: MemoryIngestionInput
+  ): MemoryWriteEventInput {
+    const kind: MemoryEventKind = candidate.type === "episodic" ? "episodic" : "fact";
+    const observedAt = toTimestamp(candidate.observedAt);
+    const occurredAt = toTimestamp(candidate.eventTime);
+    return {
+      kind,
+      content: normalize(candidate.content),
+      scope: input.scope,
+      ...(observedAt !== undefined ? { observedAt } : {}),
+      ...(occurredAt !== undefined ? { occurredAt } : {}),
+      ...(input.userMessageId ? { sourceTurnIds: [input.userMessageId] } : {}),
+      ...(input.conversationId !== undefined
+        ? { conversationId: input.conversationId }
+        : input.sessionId !== undefined
+          ? { conversationId: input.sessionId }
+          : {}),
+      ...(input.subjectUserId || input.personaId
+        ? {
+            participants: [
+              ...(input.subjectUserId ? [input.subjectUserId] : []),
+              ...(input.personaId ? [input.personaId] : [])
+            ]
+          }
+        : {}),
+      assertion: { source: "user", verification: "unverified" },
+      metadata: buildEventMetadata(input, {
+        memoryType: kind,
+        explicit: false,
+        ingestionReason: candidate.reason,
+        ...(candidate.subtype ? { memorySubtype: candidate.subtype } : {})
+      })
+    };
+  }
+
+  private eventForFact(text: string, input: MemoryIngestionInput): MemoryWriteEventInput {
+    return {
+      kind: "fact",
+      content: normalize(text),
+      scope: input.scope,
+      ...(input.observedAt ? { observedAt: input.observedAt } : {}),
+      ...(input.userMessageId ? { sourceTurnIds: [input.userMessageId] } : {}),
+      ...(input.conversationId !== undefined
+        ? { conversationId: input.conversationId }
+        : input.sessionId !== undefined
+          ? { conversationId: input.sessionId }
+          : {}),
+      ...(input.subjectUserId || input.personaId
+        ? {
+            participants: [
+              ...(input.subjectUserId ? [input.subjectUserId] : []),
+              ...(input.personaId ? [input.personaId] : [])
+            ]
+          }
+        : {}),
+      assertion: { source: "user", verification: "unverified" },
+      metadata: buildEventMetadata(input, {
+        memoryType: "fact",
+        explicit: false,
+        ingestionReason: "stable-user-fact"
+      })
+    };
+  }
+}
+
+function buildEventMetadata(
+  input: MemoryIngestionInput,
+  values: {
+    memoryType: string;
+    explicit: boolean;
+    ingestionReason: string;
+    memorySubtype?: string;
+  }
+): Record<string, unknown> {
+  return {
+    source: "yuvi",
+    sourceRole: "user",
+    userId: input.subjectUserId ?? null,
+    characterId: input.personaId ?? null,
+    conversationId: input.conversationId ?? input.sessionId ?? null,
+    sourceMessageId: input.userMessageId ?? null,
+    sourceTraceId: input.traceId ?? null,
+    assistantMessageId: input.assistantMessageId ?? null,
+    memoryType: values.memoryType,
+    explicit: values.explicit,
+    ingestionPolicy: "factual-v1",
+    ingestionReason: values.ingestionReason,
+    ...(values.memorySubtype ? { memorySubtype: values.memorySubtype } : {}),
+    language: input.language ?? null,
+    schemaVersion: 1
+  };
+}
+
+function isFactualCandidate(candidate: MemoryCandidate): boolean {
+  if (!candidate.content.trim()) return false;
+  if (candidate.originRole === "assistant" || candidate.originRole === "mixed") return false;
+  // These are interpretations/state claims, not factual evidence for Mem0.
+  return candidate.type !== "relationship" && candidate.type !== "emotional";
+}
+
+function isUserClaimStatement(text: string): boolean {
+  return /^(?:我们(?:认识|见过|一起|的关系)|we(?:'ve| have)?\s+(?:known|met|been together)|our relationship)/iu.test(
+    text
+  );
+}
+
+function isSimpleFactualUserStatement(text: string): boolean {
+  return /^(?:我|我的|i\b|i'm\b|i am\b|my\b).*(?:喜欢|不喜欢|通常|经常|总是|偏好|过敏|住在|来自|工作|prefer|usually|often|always|allerg|live\s+in|work\s+at)/iu.test(
+    text
+  );
+}
+
+export function canonicalizeUserClaim(value: string): string {
+  const text = normalize(value);
+  if (!text) return "";
+  if (/^我们/iu.test(text)) {
+    return `用户称双方${text.slice(2)}`;
+  }
+  if (/^我的/iu.test(text)) {
+    return `用户的${text.slice(2)}`;
+  }
+  if (/^我/iu.test(text)) {
+    return `用户${text.slice(1)}`;
+  }
+  if (/^(?:i|my)\b/iu.test(text)) {
+    return `User claims: ${text}`;
+  }
+  return `用户称：${text}`;
+}
+
+function normalize(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function toTimestamp(value: Date | string | null | undefined): string | undefined {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" && value.trim()) return value;
+  return undefined;
+}
+
+function dedupeEvents(events: MemoryWriteEventInput[]): MemoryWriteEventInput[] {
+  const seen = new Set<string>();
+  return events.filter((event) => {
+    const key = event.content.toLowerCase().replace(/\s+/g, " ").trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}

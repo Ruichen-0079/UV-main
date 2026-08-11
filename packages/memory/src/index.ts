@@ -101,6 +101,12 @@ export {
   hasCorrectionRelatedMemory,
   type EpisodicCorrectionSuggestion
 } from "./correction.js";
+export {
+  MemoryIngestionPolicy,
+  canonicalizeUserClaim,
+  type MemoryIngestionInput,
+  type MemoryIngestionResult
+} from "./ingestion.js";
 export { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
 export {
   buildTemporalSuggestion,

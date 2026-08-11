@@ -642,7 +642,7 @@ export class RuntimeOrchestrator {
     // direct-context, memory, and TTS side effects must not duplicate or retract it.
     await this.publishAssistantMessage(userEvent, reply);
     if (memoryOptions.writeMemory) {
-      // Mem0: fire-and-forget so TTS/UI are never blocked by infer=true latency.
+      // Mem0: fire-and-forget so TTS/UI are never blocked by semantic ingestion.
       if (this.options.memory.isMem0Backend?.() && this.options.memory.storeConversationTurn) {
         this.scheduleMem0TurnWrite(userEvent, reply);
       } else {
@@ -1342,8 +1342,8 @@ export class RuntimeOrchestrator {
       rejectedReasons: [],
       candidates: [],
       skippedReason: isRemember
-        ? "Mem0 async write scheduled (explicit_remember infer=false)."
-        : "Mem0 async write scheduled (normal infer=true)."
+        ? "Mem0 async factual write scheduled (explicit user claim)."
+        : "Mem0 async factual write scheduled."
     });
     void store({
       userMessage: sourceEvent.payload.content,

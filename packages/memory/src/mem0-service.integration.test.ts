@@ -117,7 +117,7 @@ describe("MemoryService mem0 mode", () => {
     expect(processed.rejectedReason).toContain("mem0");
   });
 
-  it("writes conversation turns with infer=true once", async () => {
+  it("writes factual conversation evidence through the semantic provider once", async () => {
     const backend = createMockBackend();
     const service = new MemoryService(
       new InMemoryMemoryRepository(),
@@ -138,8 +138,10 @@ describe("MemoryService mem0 mode", () => {
     expect(result.ok).toBe(true);
     expect(backend.add).toHaveBeenCalledOnce();
     const call = vi.mocked(backend.add).mock.calls[0]![0];
-    expect(call.infer).toBe(true);
-    expect(call.messages?.length).toBe(2);
+    expect(call.infer).toBe(false);
+    expect(call.messages).toBeUndefined();
+    expect(call.content).toContain("coffee");
+    expect(call.metadata?.["yuviEventKind"]).toBe("fact");
     expect(call.metadata?.userId).toBe("user-a");
     expect(call.metadata?.characterId).toBe("alice");
     expect(call.metadata?.schemaVersion).toBe(1);
@@ -167,7 +169,36 @@ describe("MemoryService mem0 mode", () => {
     expect(call.infer).toBe(false);
     expect(call.content).toContain("蓝色");
     expect(call.metadata?.explicit).toBe(true);
-    expect(call.metadata?.memoryType).toBe("explicit");
+    expect(call.metadata?.memoryType).toBe("user_claim");
+    expect(call.metadata?.["yuviAssertionSource"]).toBe("user");
+    expect(call.metadata?.["yuviVerification"]).toBe("unverified");
+  });
+
+  it("does not create a fake memory when the semantic provider fails", async () => {
+    const backend = createMockBackend({
+      add: vi.fn(async () => {
+        throw new Error("Mem0 unavailable");
+      })
+    });
+    const service = new MemoryService(
+      new InMemoryMemoryRepository(),
+      undefined,
+      undefined,
+      undefined,
+      { enabled: false },
+      { kind: "mem0", mem0: backend }
+    );
+
+    const result = await service.storeConversationTurn({
+      userMessage: "我喜欢蓝色",
+      assistantMessage: "好的",
+      subjectUserId: "u",
+      personaId: "p"
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.memoryId).toBeUndefined();
+    expect(backend.add).toHaveBeenCalledOnce();
   });
 
   it("forgets only within scope", async () => {
