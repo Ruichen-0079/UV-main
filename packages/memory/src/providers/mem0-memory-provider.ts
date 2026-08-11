@@ -1,0 +1,440 @@
+import {
+  MemoryBackendError,
+  type MemoryBackend,
+  type MemoryRecord,
+  type MemoryRecordMetadata
+} from "../backend.js";
+import { buildMemoryScope } from "../scope.js";
+import type {
+  MemoryEvent,
+  MemoryEventAssertion,
+  MemoryEventId,
+  MemoryEventKind,
+  MemoryEventSource,
+  MemoryGetEventInput,
+  MemoryProvider,
+  MemoryRetrievalInput,
+  MemoryRetrievalOutcome,
+  MemoryWriteEventInput,
+  MemoryWriteEventOutcome
+} from "../provider.js";
+
+export const MEM0_MEMORY_SOURCE: MemoryEventSource = "mem0";
+export const MEM0_EVENT_ID_PREFIX = "mem0:";
+
+const LEGAL_EVENT_KINDS: ReadonlySet<string> = new Set([
+  "episodic",
+  "fact",
+  "user_claim",
+  "interaction",
+  "correction",
+  "commitment_evidence"
+]);
+const LEGAL_ASSERTION_SOURCES: ReadonlySet<string> = new Set([
+  "user",
+  "assistant",
+  "mixed",
+  "system",
+  "unknown"
+]);
+const LEGAL_VERIFICATIONS: ReadonlySet<string> = new Set(["unverified", "verified", "unknown"]);
+const SENSITIVE_METADATA_KEY = /key|secret|password|authorization|token|connection/i;
+const MAX_METADATA_KEY_LENGTH = 128;
+const MAX_METADATA_STRING_LENGTH = 512;
+const MAX_METADATA_ARRAY_LENGTH = 32;
+
+export class Mem0MemoryProviderError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string, options?: { cause?: unknown }) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = "Mem0MemoryProviderError";
+    this.code = code;
+  }
+}
+
+/** Mem0 UUIDs are stable storage IDs, not rank- or scope-derived identities. */
+export function canonicalMem0EventId(sourceRecordId: string): MemoryEventId {
+  return `${MEM0_EVENT_ID_PREFIX}${sourceRecordId}`;
+}
+
+/**
+ * Convert one backend record to the vendor-neutral evidence contract.
+ * This is shared by retrieval, getEvent, and writeEvent so their identity and
+ * provenance semantics cannot drift.
+ */
+export function mapMem0RecordToMemoryEvent(
+  record: MemoryRecord,
+  expectedScope: string
+): MemoryEvent {
+  const scope = normalizeRequiredScope(expectedScope);
+  if (record.scope !== scope) {
+    throw new Mem0MemoryProviderError(
+      "MEMORY_SCOPE_MISMATCH",
+      "Mem0 returned a record outside the requested memory scope."
+    );
+  }
+
+  const sourceRecordId = typeof record.id === "string" ? record.id.trim() : "";
+  if (!sourceRecordId) {
+    throw new Mem0MemoryProviderError("MEMORY_RECORD_INVALID", "Mem0 record is missing an id.");
+  }
+  const metadata = sanitizeSemanticMetadata(record.metadata);
+  const memoryType = readString(metadata, "memoryType")?.toLowerCase();
+  const kind = resolveKind(metadata, memoryType);
+  const assertion = resolveAssertion(metadata, memoryType);
+  const sourceTurnIds = resolveSourceTurnIds(metadata);
+  const participants = resolveParticipants(metadata);
+  const event: MemoryEvent = {
+    id: canonicalMem0EventId(sourceRecordId),
+    kind,
+    content: typeof record.content === "string" ? record.content.trim() : "",
+    source: MEM0_MEMORY_SOURCE,
+    sourceRecordId,
+    scope,
+    metadata
+  };
+
+  const recordedAt = normalizeTimestamp(record.createdAt);
+  if (recordedAt !== undefined) event.recordedAt = recordedAt;
+  const observedAt = normalizeTimestamp(readString(metadata, "yuviObservedAt"));
+  if (observedAt !== undefined) event.observedAt = observedAt;
+  const occurredAt = normalizeTimestamp(readString(metadata, "yuviOccurredAt"));
+  if (occurredAt !== undefined) event.occurredAt = occurredAt;
+  if (sourceTurnIds.length > 0) event.sourceTurnIds = sourceTurnIds;
+
+  const conversationId = readString(metadata, "conversationId");
+  if (conversationId !== undefined) event.conversationId = conversationId;
+  if (participants.length > 0) event.participants = participants;
+  if (assertion !== undefined) event.assertion = assertion;
+  return event;
+}
+
+export class Mem0MemoryProvider implements MemoryProvider {
+  constructor(private readonly backend: MemoryBackend) {}
+
+  async retrieveRelevant(input: MemoryRetrievalInput): Promise<MemoryRetrievalOutcome> {
+    const scope = resolveRetrievalScope(input);
+    if (!scope) {
+      return retrievalError("MEMORY_SCOPE_MISSING");
+    }
+    const query = typeof input.text === "string" ? input.text.trim() : "";
+    if (!query) {
+      return {
+        status: "empty",
+        events: [],
+        source: MEM0_MEMORY_SOURCE,
+        limited: false,
+        rawCount: 0,
+        selectedCount: 0
+      };
+    }
+
+    const limit = normalizeLimit(input.limit);
+    try {
+      const records = await this.backend.search(
+        limit === undefined ? { scope, query } : { scope, query, limit },
+        input.signal
+      );
+      const events: MemoryEvent[] = [];
+      const seen = new Set<MemoryEventId>();
+      for (const record of records) {
+        const event = mapMem0RecordToMemoryEvent(record, scope);
+        if (seen.has(event.id)) continue;
+        seen.add(event.id);
+        events.push(event);
+      }
+      const limited = limit !== undefined && records.length >= limit;
+      return {
+        status: events.length === 0 ? "empty" : "ok",
+        events,
+        source: MEM0_MEMORY_SOURCE,
+        limited,
+        ...(limited ? { limitReason: "top-k-cap" } : {}),
+        rawCount: records.length,
+        selectedCount: events.length
+      };
+    } catch (error) {
+      return retrievalError(classifyRetrievalError(error));
+    }
+  }
+
+  async getEvent(input: MemoryGetEventInput): Promise<MemoryEvent | null> {
+    const scope = normalizeOptionalScope(input.scope);
+    if (!scope || !hasCanonicalMem0Prefix(input.id)) return null;
+    const sourceRecordId = input.id.slice(MEM0_EVENT_ID_PREFIX.length).trim();
+    if (!sourceRecordId) return null;
+
+    const record = await this.backend.get({ memoryId: sourceRecordId, scope }, input.signal);
+    if (!record) return null;
+    try {
+      return mapMem0RecordToMemoryEvent(record, scope);
+    } catch (error) {
+      if (error instanceof Mem0MemoryProviderError && error.code === "MEMORY_SCOPE_MISMATCH") {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async writeEvent(input: MemoryWriteEventInput): Promise<MemoryWriteEventOutcome> {
+    const scope = normalizeOptionalScope(input.scope);
+    if (!scope) return { status: "rejected", errorCode: "MEMORY_SCOPE_MISSING" };
+    const content = typeof input.content === "string" ? input.content.trim() : "";
+    if (!content) return { status: "rejected", errorCode: "MEMORY_CONTENT_MISSING" };
+
+    try {
+      const result = await this.backend.add(
+        {
+          scope,
+          content,
+          infer: false,
+          metadata: buildWriteMetadata(input)
+        },
+        input.signal
+      );
+      const memoryId = typeof result.memoryId === "string" ? result.memoryId.trim() : "";
+      if (!memoryId) return { status: "rejected", errorCode: "MEMORY_WRITE_ID_MISSING" };
+      const eventId = canonicalMem0EventId(memoryId);
+      if (result.operation === "deleted") {
+        return { status: "rejected", eventId, errorCode: "MEMORY_WRITE_UNEXPECTED_DELETE" };
+      }
+      if (
+        result.operation !== "created" &&
+        result.operation !== "updated" &&
+        result.operation !== "unchanged"
+      ) {
+        return { status: "rejected", eventId, errorCode: "MEMORY_WRITE_OPERATION_INVALID" };
+      }
+
+      let event: MemoryEvent | null = null;
+      if (result.record) {
+        try {
+          event = mapMem0RecordToMemoryEvent(result.record, scope);
+        } catch (error) {
+          return {
+            status: "rejected",
+            eventId,
+            errorCode: safeErrorCode(error, "MEMORY_RECORD_INVALID")
+          };
+        }
+      }
+      return {
+        status: result.operation === "unchanged" ? "unchanged" : "written",
+        eventId,
+        event
+      };
+    } catch (error) {
+      return {
+        status: "rejected",
+        errorCode: safeErrorCode(error, "MEMORY_WRITE_FAILED")
+      };
+    }
+  }
+}
+
+export function buildWriteMetadata(input: MemoryWriteEventInput): MemoryRecordMetadata {
+  const metadata = sanitizeSemanticMetadata(input.metadata);
+  metadata["yuviEventKind"] = input.kind;
+  if (input.assertion) {
+    metadata["yuviAssertionSource"] = input.assertion.source;
+    metadata["yuviVerification"] = input.assertion.verification;
+  }
+  const observedAt = normalizeTimestamp(input.observedAt);
+  if (observedAt !== undefined) metadata["yuviObservedAt"] = observedAt;
+  const occurredAt = normalizeTimestamp(input.occurredAt);
+  if (occurredAt !== undefined) metadata["yuviOccurredAt"] = occurredAt;
+  const sourceTurnIds = normalizeStringArray(input.sourceTurnIds);
+  if (sourceTurnIds.length > 0) metadata["yuviSourceTurnIds"] = sourceTurnIds;
+  const participants = normalizeStringArray(input.participants);
+  if (participants.length > 0) metadata["yuviParticipants"] = participants;
+  if (input.conversationId?.trim()) metadata.conversationId = input.conversationId.trim();
+  return metadata;
+}
+
+export function sanitizeSemanticMetadata(value: unknown): MemoryRecordMetadata {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: MemoryRecordMetadata = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      key.length === 0 ||
+      key.length > MAX_METADATA_KEY_LENGTH ||
+      SENSITIVE_METADATA_KEY.test(key)
+    ) {
+      continue;
+    }
+    const safe = sanitizeMetadataValue(entry);
+    if (safe !== undefined) out[key] = safe;
+  }
+  return out;
+}
+
+function sanitizeMetadataValue(
+  value: unknown
+): string | number | boolean | null | string[] | undefined {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string") {
+    return value.length <= MAX_METADATA_STRING_LENGTH
+      ? value
+      : `${value.slice(0, MAX_METADATA_STRING_LENGTH)}…`;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > MAX_METADATA_ARRAY_LENGTH) return undefined;
+    const values: string[] = [];
+    for (const item of value) {
+      if (typeof item !== "string" || item.length > MAX_METADATA_STRING_LENGTH) return undefined;
+      values.push(item);
+    }
+    return values;
+  }
+  return undefined;
+}
+
+function resolveRetrievalScope(input: MemoryRetrievalInput): string | null {
+  const direct = normalizeOptionalScope(input.scope);
+  if (direct) return direct;
+  if (input.subjectUserId?.trim() && input.personaId?.trim()) {
+    try {
+      return buildMemoryScope(input.subjectUserId, input.personaId);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function resolveKind(
+  metadata: MemoryRecordMetadata,
+  memoryType: string | undefined
+): MemoryEventKind {
+  const explicitKind = readString(metadata, "yuviEventKind");
+  if (explicitKind && LEGAL_EVENT_KINDS.has(explicitKind)) return explicitKind as MemoryEventKind;
+  if (memoryType === "explicit") return "user_claim";
+  return "fact";
+}
+
+function resolveAssertion(
+  metadata: MemoryRecordMetadata,
+  memoryType: string | undefined
+): MemoryEventAssertion | undefined {
+  const source = readString(metadata, "yuviAssertionSource");
+  const verification = readString(metadata, "yuviVerification");
+  if (
+    source &&
+    verification &&
+    LEGAL_ASSERTION_SOURCES.has(source) &&
+    LEGAL_VERIFICATIONS.has(verification)
+  ) {
+    return {
+      source: source as MemoryEventAssertion["source"],
+      verification: verification as MemoryEventAssertion["verification"]
+    };
+  }
+  if (memoryType === "explicit") return { source: "user", verification: "unverified" };
+  return undefined;
+}
+
+function resolveSourceTurnIds(metadata: MemoryRecordMetadata): string[] {
+  return dedupeStrings([
+    ...readStringArray(metadata, "sourceMessageId"),
+    ...readStringArray(metadata, "assistantMessageId"),
+    ...readStringArray(metadata, "yuviSourceTurnIds")
+  ]);
+}
+
+function resolveParticipants(metadata: MemoryRecordMetadata): string[] {
+  const namespaced = readStringArray(metadata, "yuviParticipants");
+  const identities = [readString(metadata, "userId"), readString(metadata, "characterId")];
+  return dedupeStrings([
+    ...namespaced,
+    ...identities.filter((value): value is string => value !== undefined)
+  ]);
+}
+
+function readString(metadata: Record<string, unknown>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readStringArray(metadata: Record<string, unknown>, key: string): string[] {
+  const value = metadata[key];
+  return Array.isArray(value)
+    ? normalizeStringArray(value)
+    : readString(metadata, key)
+      ? [readString(metadata, key)!]
+      : [];
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? dedupeStrings(value.filter((item): item is string => typeof item === "string"))
+    : [];
+}
+
+function dedupeStrings(values: string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function normalizeTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim() || !Number.isFinite(Date.parse(value)))
+    return undefined;
+  return value.trim();
+}
+
+function normalizeRequiredScope(scope: string): string {
+  const normalized = normalizeOptionalScope(scope);
+  if (!normalized) throw new Mem0MemoryProviderError("MEMORY_SCOPE_MISSING", "scope is required.");
+  return normalized;
+}
+
+function normalizeOptionalScope(scope: unknown): string | null {
+  return typeof scope === "string" && scope.trim() ? scope.trim() : null;
+}
+
+function normalizeLimit(limit: number | undefined): number | undefined {
+  return typeof limit === "number" && Number.isInteger(limit) && limit > 0 ? limit : undefined;
+}
+
+function hasCanonicalMem0Prefix(id: string): boolean {
+  return typeof id === "string" && id.startsWith(MEM0_EVENT_ID_PREFIX);
+}
+
+function retrievalError(errorCode: string): MemoryRetrievalOutcome {
+  return {
+    status:
+      errorCode === "OPERATION_TIMEOUT" || errorCode === "MEMORY_UNAVAILABLE"
+        ? "unavailable"
+        : "error",
+    events: [],
+    source: MEM0_MEMORY_SOURCE,
+    limited: false,
+    errorCode
+  };
+}
+
+function classifyRetrievalError(error: unknown): string {
+  if (error instanceof MemoryBackendError) {
+    if (error.code === "OPERATION_TIMEOUT") return "OPERATION_TIMEOUT";
+    if (error.code === "VALIDATION_ERROR") return error.code;
+    if (error.retryable) return "MEMORY_UNAVAILABLE";
+    return error.code || "MEMORY_BACKEND_ERROR";
+  }
+  if (error instanceof Mem0MemoryProviderError) return error.code;
+  return "MEMORY_PROVIDER_ERROR";
+}
+
+function safeErrorCode(error: unknown, fallback: string): string {
+  if (error instanceof MemoryBackendError || error instanceof Mem0MemoryProviderError) {
+    return error.code || fallback;
+  }
+  return fallback;
+}

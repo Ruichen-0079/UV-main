@@ -55,6 +55,8 @@ export type MemoryEvent = {
   sourceRecordId: string;
   scope?: string | null;
 
+  /** Time the source recorded this evidence, when the source supplied one. */
+  recordedAt?: string | null;
   observedAt?: string | null;
   occurredAt?: string | null;
 
@@ -82,7 +84,8 @@ export type MemoryRetrievalInput = {
 
 export type MemoryGetEventInput = {
   id: MemoryEventId;
-  scope?: string | null;
+  /** Required so a provider can enforce tenant/character isolation on reads. */
+  scope: string;
   signal?: AbortSignal;
 };
 
@@ -109,8 +112,7 @@ export type MemoryRetrievalOutcome = {
 export type MemoryWriteEventInput = {
   kind: MemoryEventKind;
   content: string;
-  source: MemoryEventSource;
-  scope?: string | null;
+  scope: string;
   observedAt?: string | null;
   occurredAt?: string | null;
   sourceTurnIds?: string[];
@@ -126,6 +128,8 @@ export type MemoryWriteEventStatus = "written" | "unchanged" | "rejected";
 
 export type MemoryWriteEventOutcome = {
   status: MemoryWriteEventStatus;
+  /** Stable provider identity is retained even when the backend omits a record. */
+  eventId?: MemoryEventId;
   event?: MemoryEvent | null;
   errorCode?: string | null;
 };

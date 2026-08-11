@@ -119,9 +119,7 @@ describe("Mem0MemoryBackend", () => {
   });
 
   it("does not invent scopes inside the adapter", async () => {
-    const fetchImpl = vi.fn(async () =>
-      Response.json({ ok: true, data: { items: [], total: 0 } })
-    );
+    const fetchImpl = vi.fn(async () => Response.json({ ok: true, data: { items: [], total: 0 } }));
     const backend = new Mem0MemoryBackend({
       baseUrl: "http://127.0.0.1:6130",
       fetchImpl: fetchImpl as unknown as typeof fetch
@@ -129,5 +127,41 @@ describe("Mem0MemoryBackend", () => {
     await expect(backend.list({ scope: "" })).rejects.toMatchObject({
       code: "VALIDATION_ERROR"
     });
+  });
+
+  it("preserves bounded string arrays while filtering secret-like metadata", async () => {
+    const scope = buildMemoryScope("user-a", "alice");
+    const fetchImpl = vi.fn(async () =>
+      Response.json({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: "memory-1",
+              content: "fact",
+              scope,
+              score: 0.5,
+              metadata: {
+                yuviSourceTurnIds: ["m-1", "a-1"],
+                yuviParticipants: ["user-a", "alice"],
+                apiKey: "must not escape",
+                nested: { unsafe: true }
+              }
+            }
+          ]
+        }
+      })
+    );
+    const backend = new Mem0MemoryBackend({
+      baseUrl: "http://127.0.0.1:6130",
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+    const result = await backend.search({ scope, query: "fact" });
+    expect(result[0]?.metadata).toMatchObject({
+      yuviSourceTurnIds: ["m-1", "a-1"],
+      yuviParticipants: ["user-a", "alice"]
+    });
+    expect(result[0]?.metadata).not.toHaveProperty("apiKey");
+    expect(result[0]?.metadata).not.toHaveProperty("nested");
   });
 });

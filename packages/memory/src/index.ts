@@ -183,6 +183,16 @@ export {
   type MemoryBackendFactoryOptions
 } from "./backends/index.js";
 export {
+  MEM0_EVENT_ID_PREFIX,
+  MEM0_MEMORY_SOURCE,
+  Mem0MemoryProvider,
+  Mem0MemoryProviderError,
+  buildWriteMetadata,
+  canonicalMem0EventId,
+  mapMem0RecordToMemoryEvent,
+  sanitizeSemanticMetadata
+} from "./providers/mem0-memory-provider.js";
+export {
   InMemoryConversationRepository,
   PostgresConversationRepository,
   createConversationRepositoryFromEnv,

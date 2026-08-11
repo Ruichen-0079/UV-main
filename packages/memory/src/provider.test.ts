@@ -39,6 +39,13 @@ describe("canonical memory contracts", () => {
     expect(Object.prototype.hasOwnProperty.call(value, "occurredAt")).toBe(false);
   });
 
+  it("keeps source recording time distinct from occurrence time", () => {
+    const value = event({ recordedAt: "2025-01-01T00:00:00.000Z" });
+    expect(value.recordedAt).toBe("2025-01-01T00:00:00.000Z");
+    expect(value.observedAt).toBeUndefined();
+    expect(value.occurredAt).toBeUndefined();
+  });
+
   it("represents a user claim as unverified evidence", () => {
     const value = event({
       kind: "user_claim",
@@ -58,18 +65,21 @@ describe("canonical memory contracts", () => {
     ["unavailable", []],
     ["error", []],
     ["partial", [event()]]
-  ] as const)("represents retrieval status %s without changing event identity", (status, events) => {
-    const outcome: MemoryRetrievalOutcome = {
-      status,
-      events: [...events],
-      source: "test-provider",
-      limited: false
-    };
+  ] as const)(
+    "represents retrieval status %s without changing event identity",
+    (status, events) => {
+      const outcome: MemoryRetrievalOutcome = {
+        status,
+        events: [...events],
+        source: "test-provider",
+        limited: false
+      };
 
-    expect(outcome.status).toBe(status);
-    expect(outcome.events).toEqual(events);
-    expect(outcome.source).toBe("test-provider");
-  });
+      expect(outcome.status).toBe(status);
+      expect(outcome.events).toEqual(events);
+      expect(outcome.source).toBe("test-provider");
+    }
+  );
 
   it("allows a successful limited result without reclassifying it as partial", () => {
     const outcome: MemoryRetrievalOutcome = {
@@ -91,7 +101,6 @@ describe("canonical memory contracts", () => {
     const write: MemoryWriteEventInput = {
       kind: "episodic",
       content: "A reminder request was accepted.",
-      source: "test-provider",
       scope: "scope-a",
       metadata: { schemaVersion: 1 }
     };
@@ -115,6 +124,16 @@ describe("canonical memory contracts", () => {
       status: "rejected",
       errorCode: "NOT_IMPLEMENTED"
     });
+  });
+
+  it("allows a provider to return a stable eventId without a hydrated event", () => {
+    const outcome = {
+      status: "written" as const,
+      eventId: "mem0:record-1",
+      event: null
+    };
+    expect(outcome.eventId).toBe("mem0:record-1");
+    expect(outcome.event).toBeNull();
   });
 
   it("does not require authoritative Runtime state fields", () => {
