@@ -2,6 +2,80 @@
 
 Memory is not raw chat log injection. The runtime stores structured memories, retrieves candidates, ranks them, compresses them, and reconstructs prompt-safe context.
 
+## Runtime-ready memory architecture (P3)
+
+The P3 migration keeps storage, semantic evidence, prompt compatibility, and
+authoritative runtime state as separate boundaries. `MemoryBackend` is the
+storage-level contract (`health`, `add`, `search`, `get`, `list`, `update`,
+`delete`, and `history`). `MemoryProvider` is the runtime-facing semantic
+contract: it retrieves `MemoryRetrievalOutcome`, returns canonical
+`MemoryEvent` evidence, and accepts `MemoryWriteEventInput` for semantic writes.
+The runtime does not import a Mem0 SDK or sidecar DTO.
+
+`MemoryEvent` is canonical, provenance-preserving evidence. Its stable opaque
+`id` is independent of rank and prompt position. The Mem0 adapter uses
+`mem0:<memoryId>` with `source=mem0` and the raw Mem0 UUID in
+`sourceRecordId`; scope is enforced on reads and is not encoded into the ID.
+Missing source timestamps remain unknown: `createdAt` maps to `recordedAt`,
+while `occurredAt` is supplied only by explicit event metadata. The provider
+never fills a missing timestamp with `now`.
+
+`MemoryContextBuilder` is the only compatibility bridge to the existing
+PromptBuilder. It retains canonical events for diagnostics and projects
+prompt-safe `{ content, displayText }` objects with an internal
+`provenanceId`. Current-turn and DirectContext echoes are removed
+deterministically with a reason, while their canonical events remain. Prompt
+wording, memory limits, token budgets, scope filtering, and DirectContext
+behavior remain owned by the existing prompt/retrieval code.
+
+### Read and write flows
+
+```text
+READ
+Mem0 → MemoryBackend → Mem0MemoryProvider
+     → MemoryRetrievalOutcome → MemoryEvent[]
+     → MemoryContextBuilder → PromptBuilder
+
+WRITE
+Conversation → MemoryIngestionPolicy → MemoryWriteEventInput
+            → MemoryProvider.writeEvent() → Mem0MemoryProvider
+            → MemoryBackend → Mem0
+```
+
+`MemoryIngestionPolicy` is the factual/user-claim write boundary. Normal
+conversation turns produce only user-grounded factual events, each dispatched
+through `writeEvent()` with `infer=false`; the assistant is context, not a
+default fact source. Explicit remember produces one unverified `user_claim`
+event and is not a verified truth. Assistant-only relationship or affect
+prose is rejected. There is no normal-turn user+assistant `infer=true` write,
+and no interpretation loop that writes assistant-derived state back to Mem0.
+
+Evidence is not authoritative `Relationship`, `Affect`, `Persona`, `Interest`,
+or `Commitment` state. A memory containing metadata such as `trust` or
+`closeness` does not create those states. A future path may compile selected
+evidence as `MemoryProvider → MemoryEvent[] → RuntimeStateEnvelope →
+GroundedClaimCompiler`; that state path is not implemented in P3.
+
+Retrieval status is epistemic and must be preserved: `ok`, `empty`,
+`unavailable`, `error`, or `partial`. `empty` means no relevant hit for this
+query, not confirmed database absence. `unavailable`/`error` are not amnesia.
+When a provider is unavailable or errors, legacy retrieval may supply prompt
+memories; diagnostics still preserve the provider status and mark the final
+prompt result separately. A successful fallback does not mean provider health
+was restored. The valid state is therefore `provider=unavailable`,
+`fallbackUsed=true`, `final=ok` when legacy retrieval produced a usable result.
+
+Forget remains a scoped search/delete operation. Dialogue-level “forget” does
+not imply a future administrator delete, repair, rollback, or audit operation.
+Observability is intentionally safe: status, counts, bounded query length,
+stable event IDs, drop reasons, source, and aggregate provenance flags may be
+reported; full memory text, raw query text, metadata, credentials, database
+URLs, authorization headers, tokens, API keys, and secrets must not be logged.
+
+The migration is storage-compatible: existing Mem0 records remain readable,
+there is no new event store, and no database or pgvector migration is required
+for the semantic contracts.
+
 ## Categories
 
 - `working`: short-lived task/session state, such as the current goal or active preference.

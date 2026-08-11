@@ -33,6 +33,23 @@ export type {
   RetrievedMemoryDebug,
   Relation
 } from "./types.js";
+export type {
+  MemoryEvent,
+  MemoryEventAssertion,
+  MemoryEventAssertionSource,
+  MemoryEventId,
+  MemoryEventKind,
+  MemoryEventSource,
+  MemoryEventVerification,
+  MemoryGetEventInput,
+  MemoryProvider,
+  MemoryRetrievalInput,
+  MemoryRetrievalOutcome,
+  MemoryRetrievalStatus,
+  MemoryWriteEventInput,
+  MemoryWriteEventOutcome,
+  MemoryWriteEventStatus
+} from "./provider.js";
 export { detectCurrentAffect } from "./affect.js";
 export { computeRetentionPolicy, type RetentionPolicy } from "./retention.js";
 export {
@@ -84,6 +101,12 @@ export {
   hasCorrectionRelatedMemory,
   type EpisodicCorrectionSuggestion
 } from "./correction.js";
+export {
+  MemoryIngestionPolicy,
+  canonicalizeUserClaim,
+  type MemoryIngestionInput,
+  type MemoryIngestionResult
+} from "./ingestion.js";
 export { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
 export {
   buildTemporalSuggestion,
@@ -165,6 +188,16 @@ export {
   type Mem0MemoryBackendOptions,
   type MemoryBackendFactoryOptions
 } from "./backends/index.js";
+export {
+  MEM0_EVENT_ID_PREFIX,
+  MEM0_MEMORY_SOURCE,
+  Mem0MemoryProvider,
+  Mem0MemoryProviderError,
+  buildWriteMetadata,
+  canonicalMem0EventId,
+  mapMem0RecordToMemoryEvent,
+  sanitizeSemanticMetadata
+} from "./providers/mem0-memory-provider.js";
 export {
   InMemoryConversationRepository,
   PostgresConversationRepository,

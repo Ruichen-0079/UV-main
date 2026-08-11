@@ -123,7 +123,9 @@ export class Mem0MemoryBackend implements MemoryBackend {
       opts
     );
     const items = Array.isArray(data?.items) ? data.items : [];
-    return items.map(normalizeSearchItem).filter((item): item is MemorySearchResult => item !== null);
+    return items
+      .map(normalizeSearchItem)
+      .filter((item): item is MemorySearchResult => item !== null);
   }
 
   async get(input: GetMemoryInput, signal?: AbortSignal): Promise<MemoryRecord | null> {
@@ -325,9 +327,11 @@ function sanitizeMetadata(value: unknown): MemorySearchResult["metadata"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
   }
+  const sensitiveKey = /key|secret|password|authorization|token|connection/i;
   const out: MemorySearchResult["metadata"] = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (typeof key !== "string" || key.length > 128) continue;
+    if (sensitiveKey.test(key)) continue;
     if (
       entry === null ||
       typeof entry === "string" ||
@@ -335,6 +339,12 @@ function sanitizeMetadata(value: unknown): MemorySearchResult["metadata"] {
       typeof entry === "boolean"
     ) {
       out[key] = entry;
+    } else if (
+      Array.isArray(entry) &&
+      entry.length <= 32 &&
+      entry.every((item): item is string => typeof item === "string" && item.length <= 512)
+    ) {
+      out[key] = [...entry];
     }
   }
   return out;

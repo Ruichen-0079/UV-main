@@ -20,8 +20,8 @@ export const MEM0_CHAT_PROMPT_CHAR_BUDGET = MEM0_CHAT_PROMPT_TOKEN_BUDGET * 4;
 export const MEM0_CHAT_SEARCH_TIMEOUT_MS = 600;
 /**
  * Background write timeout (ms).
- * Mem0 infer=true may take multiple Memory-LLM tool rounds (~2–3 min on DeepSeek).
- * Chat remains non-blocking; this only bounds the async write.
+ * Semantic ingestion writes are issued through MemoryProvider; this bounds the
+ * asynchronous provider write without blocking the chat response.
  */
 export const MEM0_CHAT_WRITE_TIMEOUT_MS = 180_000;
 /** Minimum score for explicit forget candidates (when score present). */
@@ -73,7 +73,7 @@ export type Mem0TurnKind =
 
 /**
  * Classify a chat turn for Mem0 write routing.
- * explicit_forget/remember take precedence over normal infer=true writes.
+ * explicit_forget/remember take precedence over normal factual ingestion.
  */
 export function classifyMem0Turn(input: {
   userMessage: string;
@@ -92,8 +92,8 @@ export function classifyMem0Turn(input: {
     return "explicit_forget";
   }
   if (detectExplicitRememberRequest(user)) {
-    // Explicit remember may still require an assistant ack, but write path is
-    // infer=false fact only (never dual infer=true).
+    // Explicit remember may still require an assistant ack, but the write path
+    // is one user-claim event only (never an assistant-inferred turn).
     return "explicit_remember";
   }
   if (!assistant) {
