@@ -8,8 +8,11 @@ import {
   createMemoryBackend,
   createMemoryRepositoryFromEnv,
   createConversationRepositoryFromEnv,
+  createFinalizedIngestionRepositoryFromEnv,
+  FinalizedIngestionService,
   parseMemoryRepositoryEnv,
   type ConversationRepository,
+  type FinalizedIngestionRepository,
   type MemoryRepository
 } from "@companion/memory";
 import { parseRuntimeConfig } from "@companion/config";
@@ -29,6 +32,8 @@ export type AppContext = {
   dashboard: DashboardStateService;
   memoryRepository: MemoryRepository;
   conversationRepository: ConversationRepository;
+  finalizedIngestionRepository: FinalizedIngestionRepository;
+  finalizedIngestion: FinalizedIngestionService;
   memory: MemoryService;
   providers: ProviderRegistry;
   runtime: RuntimeOrchestrator;
@@ -59,17 +64,24 @@ export async function createAppContext(
   });
   const activeMemoryRepository = parseMemoryRepositoryEnv().kind;
   const memoryRepository = createMemoryRepositoryFromEnv();
-  let conversationRepository: ConversationRepository;
+  let conversationRepository: ConversationRepository | undefined;
+  let finalizedIngestionRepository: FinalizedIngestionRepository | undefined;
   try {
     conversationRepository = createConversationRepositoryFromEnv(
       process.env,
       memoryRepository.getDatabaseClient?.()
     );
+    finalizedIngestionRepository = createFinalizedIngestionRepositoryFromEnv(
+      process.env,
+      memoryRepository.getDatabaseClient?.()
+    );
   } catch (error) {
+    await conversationRepository?.close?.();
     await memoryRepository.close?.();
     throw error;
   }
   const promptBuilder = new PromptBuilder();
+  const finalizedIngestion = new FinalizedIngestionService(finalizedIngestionRepository!);
   const ruleBasedExtractor = new RuleBasedMemoryExtractor();
   const runtimeLogger = createRuntimeLogger(logger);
 
@@ -150,6 +162,7 @@ export async function createAppContext(
       promptBuilder,
       providers,
       conversation: conversationRepository,
+      finalizedIngestion,
       memoryRepository: activeMemoryRepository,
       directContext,
       logger: runtimeLogger
@@ -165,6 +178,7 @@ export async function createAppContext(
     runtime = createRuntime(providers, memory);
   } catch (error) {
     await conversationRepository.close?.();
+    await finalizedIngestionRepository?.close?.();
     await memoryRepository.close?.();
     throw error;
   }
@@ -173,7 +187,9 @@ export async function createAppContext(
     eventBus,
     dashboard,
     memoryRepository,
-    conversationRepository,
+    conversationRepository: conversationRepository!,
+    finalizedIngestionRepository: finalizedIngestionRepository!,
+    finalizedIngestion,
     memory,
     providers,
     runtime,

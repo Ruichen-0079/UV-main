@@ -127,12 +127,22 @@ export type MemoryWriteEventInput = {
 
 export type MemoryWriteEventStatus = "written" | "unchanged" | "rejected";
 
+/**
+ * Durable classification for a rejected semantic write.
+ *
+ * `ambiguous` is intentionally conservative: a provider must not claim that
+ * a request is safe to retry unless it can prove that no external dispatch
+ * occurred.
+ */
+export type MemoryWriteFailureClass = "definitive_rejection" | "retryable_no_effect" | "ambiguous";
+
 export type MemoryWriteEventOutcome = {
   status: MemoryWriteEventStatus;
   /** Stable provider identity is retained even when the backend omits a record. */
   eventId?: MemoryEventId;
   event?: MemoryEvent | null;
   errorCode?: string | null;
+  failureClass?: MemoryWriteFailureClass | null;
 };
 
 /** Outcome of a completed runtime conversation turn crossing semantic memory. */

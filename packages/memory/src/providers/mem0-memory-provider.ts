@@ -15,6 +15,7 @@ import type {
   MemoryProvider,
   MemoryRetrievalInput,
   MemoryRetrievalOutcome,
+  MemoryWriteFailureClass,
   MemoryWriteEventInput,
   MemoryWriteEventOutcome
 } from "../provider.js";
@@ -186,9 +187,19 @@ export class Mem0MemoryProvider implements MemoryProvider {
 
   async writeEvent(input: MemoryWriteEventInput): Promise<MemoryWriteEventOutcome> {
     const scope = normalizeOptionalScope(input.scope);
-    if (!scope) return { status: "rejected", errorCode: "MEMORY_SCOPE_MISSING" };
+    if (!scope)
+      return {
+        status: "rejected",
+        errorCode: "MEMORY_SCOPE_MISSING",
+        failureClass: "definitive_rejection"
+      };
     const content = typeof input.content === "string" ? input.content.trim() : "";
-    if (!content) return { status: "rejected", errorCode: "MEMORY_CONTENT_MISSING" };
+    if (!content)
+      return {
+        status: "rejected",
+        errorCode: "MEMORY_CONTENT_MISSING",
+        failureClass: "definitive_rejection"
+      };
 
     try {
       const result = await this.backend.add(
@@ -201,17 +212,32 @@ export class Mem0MemoryProvider implements MemoryProvider {
         input.signal
       );
       const memoryId = typeof result.memoryId === "string" ? result.memoryId.trim() : "";
-      if (!memoryId) return { status: "rejected", errorCode: "MEMORY_WRITE_ID_MISSING" };
+      if (!memoryId)
+        return {
+          status: "rejected",
+          errorCode: "MEMORY_WRITE_ID_MISSING",
+          failureClass: "ambiguous"
+        };
       const eventId = canonicalMem0EventId(memoryId);
       if (result.operation === "deleted") {
-        return { status: "rejected", eventId, errorCode: "MEMORY_WRITE_UNEXPECTED_DELETE" };
+        return {
+          status: "rejected",
+          eventId,
+          errorCode: "MEMORY_WRITE_UNEXPECTED_DELETE",
+          failureClass: "definitive_rejection"
+        };
       }
       if (
         result.operation !== "created" &&
         result.operation !== "updated" &&
         result.operation !== "unchanged"
       ) {
-        return { status: "rejected", eventId, errorCode: "MEMORY_WRITE_OPERATION_INVALID" };
+        return {
+          status: "rejected",
+          eventId,
+          errorCode: "MEMORY_WRITE_OPERATION_INVALID",
+          failureClass: "definitive_rejection"
+        };
       }
 
       let event: MemoryEvent | null = null;
@@ -222,7 +248,8 @@ export class Mem0MemoryProvider implements MemoryProvider {
           return {
             status: "rejected",
             eventId,
-            errorCode: safeErrorCode(error, "MEMORY_RECORD_INVALID")
+            errorCode: safeErrorCode(error, "MEMORY_RECORD_INVALID"),
+            failureClass: "ambiguous"
           };
         }
       }
@@ -234,7 +261,8 @@ export class Mem0MemoryProvider implements MemoryProvider {
     } catch (error) {
       return {
         status: "rejected",
-        errorCode: safeErrorCode(error, "MEMORY_WRITE_FAILED")
+        errorCode: safeErrorCode(error, "MEMORY_WRITE_FAILED"),
+        failureClass: classifyWriteFailure(error)
       };
     }
   }
@@ -445,4 +473,17 @@ function safeErrorCode(error: unknown, fallback: string): string {
     return error.code || fallback;
   }
   return fallback;
+}
+
+function classifyWriteFailure(error: unknown): MemoryWriteFailureClass {
+  if (error instanceof Mem0MemoryProviderError) return "definitive_rejection";
+  if (error instanceof MemoryBackendError) {
+    if (error.code === "VALIDATION_ERROR") {
+      return "definitive_rejection";
+    }
+    // The backend request may already have reached the sidecar. Retryability
+    // alone is not proof that no external effect occurred.
+    return "ambiguous";
+  }
+  return "ambiguous";
 }

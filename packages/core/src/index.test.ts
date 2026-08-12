@@ -1,9 +1,12 @@
 import { InMemoryEventBus } from "@companion/event-bus";
 import {
   InMemoryConversationRepository,
+  FinalizedIngestionService,
+  InMemoryFinalizedIngestionRepository,
   type MemoryConversationTurnWriteResult,
   type Memory,
-  type MemoryCandidate
+  type MemoryCandidate,
+  type MemoryWriteEventInput
 } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
 import {
@@ -916,6 +919,160 @@ describe("RuntimeOrchestrator", () => {
       assistantMessage: reply.payload.content
     });
     expect(runtime.getLatestPromptPreview()).toMatchObject({ memoryWriteStatus: "complete" });
+  });
+
+  it("admits finalized memory through the ledger before publishing the assistant event", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    const providerWrites: MemoryWriteEventInput[] = [];
+    const memory = createMem0RecordingMemory(async () => completeMemoryWrite());
+    memory.getMemoryProvider = () => ({
+      async retrieveRelevant() {
+        return { status: "empty", events: [], source: "test", limited: false };
+      },
+      async getEvent() {
+        return null;
+      },
+      async writeEvent(input) {
+        providerWrites.push(input);
+        return { status: "written", eventId: "memory:ledger-test" };
+      }
+    });
+    const conversation = new InMemoryConversationRepository();
+    const ledger = new InMemoryFinalizedIngestionRepository();
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory,
+      conversation,
+      finalizedIngestion: new FinalizedIngestionService(ledger),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    const reply = await runtime.handleUserMessage({
+      sessionId: "ledger-runtime-session",
+      content: "I prefer concise replies.",
+      subjectUserId: "user-a",
+      personaId: "alice"
+    });
+    await runtime.drainMemoryWrites();
+
+    const sourceUserEventId = reply.parentId;
+    const assistant = await conversation.getMessageById(`assistant:${sourceUserEventId}`);
+    const turn = assistant?.finalizedTurnId
+      ? await ledger.getTurn(assistant.finalizedTurnId)
+      : null;
+    expect(assistant?.finalizedTurnId).toBeTruthy();
+    expect(turn?.status).toBe("complete");
+    expect(providerWrites).toHaveLength(1);
+    expect(
+      providerWrites[0]?.idempotencyKey?.startsWith(
+        `yuvi:finalized-turn:${assistant?.finalizedTurnId}:event:`
+      )
+    ).toBe(true);
+    expect(published.findIndex((event) => event.type === "assistant.message")).toBeGreaterThan(
+      published.findIndex((event) => event.type === "agent.reply")
+    );
+  });
+
+  it("keeps assistant success independent when ledger materialization fails", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    const ledger = new InMemoryFinalizedIngestionRepository();
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createMem0RecordingMemory(async () => completeMemoryWrite()),
+      conversation: new InMemoryConversationRepository(),
+      finalizedIngestion: new FinalizedIngestionService(ledger, {
+        async build() {
+          throw new Error("policy build failed");
+        }
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    await runtime.handleUserMessage({
+      sessionId: "materialization-failure-session",
+      content: "I prefer concise replies.",
+      subjectUserId: "user-a",
+      personaId: "alice"
+    });
+    await runtime.drainMemoryWrites();
+
+    expect(published.some((event) => event.type === "assistant.message")).toBe(true);
+    expect(published.some((event) => event.type === "runtime.error")).toBe(true);
+    expect(await ledger.listNonTerminalTurns()).toEqual([]);
+  });
+
+  it("submits every persisted child from a successful multi-event live turn", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const providerWrites: MemoryWriteEventInput[] = [];
+    const memory = createMem0RecordingMemory(async () => completeMemoryWrite());
+    memory.getMemoryProvider = () => ({
+      async retrieveRelevant() {
+        return { status: "empty", events: [], source: "test", limited: false };
+      },
+      async getEvent() {
+        return null;
+      },
+      async writeEvent(input) {
+        providerWrites.push(input);
+        return { status: "written", eventId: `memory:${providerWrites.length}` };
+      }
+    });
+    const ledger = new InMemoryFinalizedIngestionRepository();
+    const conversation = new InMemoryConversationRepository();
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory,
+      conversation,
+      finalizedIngestion: new FinalizedIngestionService(ledger, {
+        async build() {
+          return {
+            turnKind: "normal" as const,
+            events: [
+              {
+                kind: "fact" as const,
+                content: "The user prefers concise replies.",
+                scope: "user:user-a:persona:alice",
+                metadata: {}
+              },
+              {
+                kind: "fact" as const,
+                content: "The user prefers written examples.",
+                scope: "user:user-a:persona:alice",
+                metadata: {}
+              }
+            ]
+          };
+        }
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    const reply = await runtime.handleUserMessage({
+      sessionId: "multi-event-live-session",
+      content: "I prefer concise replies.",
+      subjectUserId: "user-a",
+      personaId: "alice"
+    });
+    await runtime.drainMemoryWrites();
+
+    const assistant = await conversation.getMessageById(`assistant:${reply.parentId}`);
+    expect(assistant?.role).toBe("assistant");
+    const turns = await ledger.listNonTerminalTurns();
+    expect(providerWrites).toHaveLength(2);
+    expect(new Set(providerWrites.map((input) => input.idempotencyKey)).size).toBe(2);
+    expect(turns).toEqual([]);
+    expect(reply.parentId).toBeTruthy();
   });
 
   it("deduplicates same finalized turn re-entry and drains delayed ingestion", async () => {

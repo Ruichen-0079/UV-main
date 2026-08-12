@@ -76,6 +76,47 @@ The migration is storage-compatible: existing Mem0 records remain readable,
 there is no new event store, and no database or pgvector migration is required
 for the semantic contracts.
 
+## Durable finalized-ingestion ledger
+
+When PostgreSQL-backed repository mode is enabled, completed text turns also
+cross a separate Yuvi operational ledger. The conversation repository remains
+authoritative for the finalized assistant text; the ledger records the
+admission decision, frozen policy output, durable child-event identities, and
+the outcome state of each semantic event. Mem0 remains a derived semantic
+store and is not treated as the ledger.
+
+The canonical ordering is:
+
+`assistant finalization → conversation persistence → ledger admission and event materialization → live semantic write`
+
+Each finalized turn receives an immutable `finalized_turn_id`. Each materialized
+child receives a content-derived stable event identity and a persisted backend
+key of the form
+`yuvi:finalized-turn:<finalized-turn-id>:event:<stable-event-id>`.
+These keys establish the future reconciliation identity; P4-2B does not claim
+that Mem0 enforces them. Ledger rows and child payloads are persisted before
+the live write starts. A process crash can therefore leave `pending`,
+`processing`, or `retryable_failed` work, while uncertain provider outcomes
+remain `reconcile_required` work for P4-2C.
+
+Semantic write failures retain a typed classification. Definitive validation
+or explicitly rejected backend responses become terminal failures; only a
+provider result that proves no external dispatch occurred may become ordinary
+retryable work; timeout, connection loss, malformed responses, and other
+uncertain outcomes become `reconcile_required`. Materialization/policy-build
+failures are recorded as one durable `terminal_failed` parent with
+`failure_stage=materialization` and no fabricated child events.
+
+Memory-disabled turns are durably recorded as `skipped`. Missing required
+persona/user scope is recorded as a terminal admission failure and is not
+classified as an intentional skip. Existing completed assistant rows receive
+identity-only migration backfill (`legacy:conversation:<message-id>`); their
+historical ingestion outcome remains unknown and is discoverable rather than
+being marked complete.
+
+Voice remains outside this durable-finalized-turn path:
+`VOICE_DURABLE_INGESTION: DEFERRED`.
+
 ## Categories
 
 - `working`: short-lived task/session state, such as the current goal or active preference.

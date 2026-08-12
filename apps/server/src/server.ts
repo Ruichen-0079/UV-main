@@ -80,6 +80,7 @@ export async function buildServer(config: ServerConfig) {
   app.addHook("onClose", async () => {
     maintenanceScheduler.close();
     await context.runtime.sealAndDrainMemoryWrites();
+    await context.finalizedIngestionRepository.close?.();
     await context.memoryRepository.close?.();
     await context.conversationRepository.close?.();
   });

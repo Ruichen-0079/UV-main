@@ -11,16 +11,51 @@ export type ConversationMessage = {
   sessionId: string;
   traceId: string;
   parentMessageId: string | null;
+  sourceUserEventId?: string | null;
   role: ConversationMessageRole;
   content: string;
   status: ConversationMessageStatus;
   createdAt: string;
   completedAt: string | null;
+  finalizedTurnId?: string | null;
+  personaId?: string | null;
+  subjectUserId?: string | null;
+  ingestionRequested?: boolean | null;
+  ingestionSkipReason?: string | null;
   metadata: Record<string, unknown>;
   sequence: number;
 };
 
-export type ConversationMessageInput = Omit<ConversationMessage, "sequence">;
+export type ConversationMessageInput = Omit<
+  ConversationMessage,
+  | "sequence"
+  | "sourceUserEventId"
+  | "finalizedTurnId"
+  | "personaId"
+  | "subjectUserId"
+  | "ingestionRequested"
+  | "ingestionSkipReason"
+> &
+  Partial<
+    Pick<
+      ConversationMessage,
+      | "sourceUserEventId"
+      | "finalizedTurnId"
+      | "personaId"
+      | "subjectUserId"
+      | "ingestionRequested"
+      | "ingestionSkipReason"
+    >
+  >;
+
+export type ConversationFinalizationFields = {
+  finalizedTurnId?: string | null | undefined;
+  sourceUserEventId?: string | null | undefined;
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+  ingestionRequested?: boolean | null | undefined;
+  ingestionSkipReason?: string | null | undefined;
+};
 
 export type ConversationListOptions = {
   limit?: number | undefined;
@@ -29,13 +64,16 @@ export type ConversationListOptions = {
 
 export interface ConversationRepository {
   readonly kind: ConversationRepositoryKind;
+  getDatabaseClient?(): ConversationDatabaseClient;
+  getMessageById?(messageId: string): Promise<ConversationMessage | null>;
   healthCheck(): Promise<{ status: "healthy" | "unavailable"; message?: string }>;
   ensureSession(sessionId: string): Promise<void>;
   appendMessage(message: ConversationMessageInput): Promise<ConversationMessage>;
   appendMessageContent(messageId: string, delta: string): Promise<ConversationMessage>;
   completeMessage(
     messageId: string,
-    metadata?: Record<string, unknown>
+    metadata?: Record<string, unknown>,
+    fields?: ConversationFinalizationFields
   ): Promise<ConversationMessage>;
   failMessage(
     messageId: string,
@@ -96,8 +134,9 @@ export class PostgresConversationRepository implements ConversationRepository {
     const result = await this.pool.query(
       `insert into conversation_messages (
         id, session_id, trace_id, parent_message_id, role, content, status,
-        created_at, completed_at, metadata
-      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        created_at, completed_at, metadata, source_user_event_id, finalized_turn_id,
+        persona_id, subject_user_id, ingestion_requested, ingestion_skip_reason
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       on conflict (id) do nothing
       returning *`,
       [
@@ -110,7 +149,13 @@ export class PostgresConversationRepository implements ConversationRepository {
         message.status,
         message.createdAt,
         message.completedAt,
-        message.metadata
+        message.metadata,
+        message.sourceUserEventId ?? null,
+        message.finalizedTurnId ?? null,
+        message.personaId ?? null,
+        message.subjectUserId ?? null,
+        message.ingestionRequested ?? null,
+        message.ingestionSkipReason ?? null
       ]
     );
 
@@ -153,16 +198,42 @@ export class PostgresConversationRepository implements ConversationRepository {
 
   async completeMessage(
     messageId: string,
-    metadata: Record<string, unknown> = {}
+    metadata: Record<string, unknown> = {},
+    fields: ConversationFinalizationFields = {}
   ): Promise<ConversationMessage> {
-    const result = await this.pool.query(
-      `update conversation_messages
-       set status = 'completed', completed_at = coalesce(completed_at, now()),
-           metadata = metadata || $2::jsonb
-       where id = $1 and status = 'streaming'
-       returning *`,
-      [messageId, JSON.stringify(metadata)]
-    );
+    const result =
+      Object.keys(fields).length === 0
+        ? await this.pool.query(
+            `update conversation_messages
+             set status = 'completed', completed_at = coalesce(completed_at, now()),
+                 metadata = metadata || $2::jsonb
+             where id = $1 and status = 'streaming'
+             returning *`,
+            [messageId, JSON.stringify(metadata)]
+          )
+        : await this.pool.query(
+            `update conversation_messages
+             set status = 'completed', completed_at = coalesce(completed_at, now()),
+                 metadata = metadata || $2::jsonb,
+                 finalized_turn_id = coalesce(finalized_turn_id, $3),
+                 source_user_event_id = coalesce(source_user_event_id, $4),
+                 persona_id = coalesce(persona_id, $5),
+                 subject_user_id = coalesce(subject_user_id, $6),
+                 ingestion_requested = coalesce(ingestion_requested, $7),
+                 ingestion_skip_reason = coalesce(ingestion_skip_reason, $8)
+             where id = $1 and status = 'streaming'
+             returning *`,
+            [
+              messageId,
+              JSON.stringify(metadata),
+              fields.finalizedTurnId ?? null,
+              fields.sourceUserEventId ?? null,
+              fields.personaId ?? null,
+              fields.subjectUserId ?? null,
+              fields.ingestionRequested ?? null,
+              fields.ingestionSkipReason ?? null
+            ]
+          );
     if (result.rows.length > 0) {
       return mapConversationMessageRow(result.rows[0]);
     }
@@ -246,6 +317,17 @@ export class PostgresConversationRepository implements ConversationRepository {
       await this.pool.end();
     }
   }
+
+  async getMessageById(messageId: string): Promise<ConversationMessage | null> {
+    const result = await this.pool.query("select * from conversation_messages where id = $1", [
+      messageId
+    ]);
+    return result.rows[0] ? mapConversationMessageRow(result.rows[0]) : null;
+  }
+
+  getDatabaseClient(): ConversationDatabaseClient {
+    return this.pool;
+  }
 }
 
 export class InMemoryConversationRepository implements ConversationRepository {
@@ -276,6 +358,12 @@ export class InMemoryConversationRepository implements ConversationRepository {
 
     const stored: ConversationMessage = {
       ...message,
+      sourceUserEventId: message.sourceUserEventId ?? null,
+      finalizedTurnId: message.finalizedTurnId ?? null,
+      personaId: message.personaId ?? null,
+      subjectUserId: message.subjectUserId ?? null,
+      ingestionRequested: message.ingestionRequested ?? null,
+      ingestionSkipReason: message.ingestionSkipReason ?? null,
       metadata: { ...message.metadata },
       sequence: messages.length + 1
     };
@@ -304,7 +392,8 @@ export class InMemoryConversationRepository implements ConversationRepository {
 
   async completeMessage(
     messageId: string,
-    metadata: Record<string, unknown> = {}
+    metadata: Record<string, unknown> = {},
+    fields: ConversationFinalizationFields = {}
   ): Promise<ConversationMessage> {
     const message = this.requireMessage(messageId, "complete");
     if (message.status === "completed") {
@@ -318,6 +407,12 @@ export class InMemoryConversationRepository implements ConversationRepository {
     message.status = "completed";
     message.completedAt = new Date().toISOString();
     message.metadata = { ...message.metadata, ...metadata };
+    message.finalizedTurnId ??= fields.finalizedTurnId ?? null;
+    message.sourceUserEventId ??= fields.sourceUserEventId ?? null;
+    message.personaId ??= fields.personaId ?? null;
+    message.subjectUserId ??= fields.subjectUserId ?? null;
+    message.ingestionRequested ??= fields.ingestionRequested ?? null;
+    message.ingestionSkipReason ??= fields.ingestionSkipReason ?? null;
     return cloneConversationMessage(message);
   }
 
@@ -370,6 +465,11 @@ export class InMemoryConversationRepository implements ConversationRepository {
     }
     return message;
   }
+
+  async getMessageById(messageId: string): Promise<ConversationMessage | null> {
+    const message = this.findMessage(messageId);
+    return message ? cloneConversationMessage(message) : null;
+  }
 }
 
 export function createConversationRepositoryFromEnv(
@@ -419,11 +519,20 @@ function mapConversationMessageRow(row: QueryResultRow | undefined): Conversatio
     sessionId: String(row["session_id"]),
     traceId: String(row["trace_id"]),
     parentMessageId: row["parent_message_id"] ?? null,
+    sourceUserEventId: row["source_user_event_id"] ?? null,
     role: row["role"] as ConversationMessageRole,
     content: String(row["content"]),
     status: row["status"] as ConversationMessageStatus,
     createdAt: toIsoString(row["created_at"]),
     completedAt: row["completed_at"] ? toIsoString(row["completed_at"]) : null,
+    finalizedTurnId: row["finalized_turn_id"] ?? null,
+    personaId: row["persona_id"] ?? null,
+    subjectUserId: row["subject_user_id"] ?? null,
+    ingestionRequested:
+      row["ingestion_requested"] === null || row["ingestion_requested"] === undefined
+        ? null
+        : Boolean(row["ingestion_requested"]),
+    ingestionSkipReason: row["ingestion_skip_reason"] ?? null,
     metadata: parseMetadata(row["metadata"]),
     sequence: Number(row["sequence"])
   };
