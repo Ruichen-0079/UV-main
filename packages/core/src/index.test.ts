@@ -1,6 +1,7 @@
 import { InMemoryEventBus } from "@companion/event-bus";
 import {
   InMemoryConversationRepository,
+  type MemoryConversationTurnWriteResult,
   type Memory,
   type MemoryCandidate
 } from "@companion/memory";
@@ -16,7 +17,7 @@ import {
   createMockSTTProvider,
   createMockVisionProvider
 } from "@companion/providers";
-import type { RuntimeEvent } from "@companion/protocol";
+import { createEvent, type RuntimeEvent } from "@companion/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
   RuntimeOrchestrator,
@@ -263,7 +264,9 @@ describe("RuntimeOrchestrator", () => {
         provider: "native"
       }
     ]);
-    expect((await conversation.listRecentMessages("post-processing-cancel-session")).at(-1)).toMatchObject({
+    expect(
+      (await conversation.listRecentMessages("post-processing-cancel-session")).at(-1)
+    ).toMatchObject({
       content: "done",
       status: "completed"
     });
@@ -312,7 +315,9 @@ describe("RuntimeOrchestrator", () => {
       )
     );
     expect(events.map((event) => event.type)).toEqual(["text-delta", "completed"]);
-    expect((await conversation.listRecentMessages("optional-failure-stream-session")).at(-1)).toMatchObject({
+    expect(
+      (await conversation.listRecentMessages("optional-failure-stream-session")).at(-1)
+    ).toMatchObject({
       content: "done",
       status: "completed"
     });
@@ -616,6 +621,7 @@ describe("RuntimeOrchestrator", () => {
     });
 
     const earlyConversation = new InMemoryConversationRepository();
+    const consumerReturnMemoryWrites: Array<Record<string, unknown>> = [];
     const trackedReturn = vi.fn(
       async (): Promise<IteratorResult<ChatStreamEvent>> => ({ done: true, value: undefined })
     );
@@ -639,7 +645,10 @@ describe("RuntimeOrchestrator", () => {
     };
     const earlyRuntime = new RuntimeOrchestrator({
       eventBus: new InMemoryEventBus({ development: false }),
-      memory: createRecordingMemory([]),
+      memory: createMem0RecordingMemory(async (input) => {
+        consumerReturnMemoryWrites.push(input);
+        return completeMemoryWrite();
+      }),
       conversation: earlyConversation,
       promptBuilder: new PromptBuilder(),
       providers: { ...createMockProviders(), getChatProvider: () => trackedProvider }
@@ -647,7 +656,7 @@ describe("RuntimeOrchestrator", () => {
     const earlyIterator = earlyRuntime
       .streamUserMessage(
         { sessionId: "return-session", content: "hello" },
-        { readMemory: false, writeMemory: false }
+        { readMemory: false, writeMemory: true }
       )
       [Symbol.asyncIterator]();
     await earlyIterator.next();
@@ -656,6 +665,7 @@ describe("RuntimeOrchestrator", () => {
     expect((await earlyConversation.listRecentMessages("return-session")).at(-1)).toMatchObject({
       status: "cancelled"
     });
+    expect(consumerReturnMemoryWrites).toHaveLength(0);
   });
 
   it("checks cancellation before saving the user message", async () => {
@@ -861,6 +871,467 @@ describe("RuntimeOrchestrator", () => {
       "agent.reply",
       "assistant.message"
     ]);
+  });
+
+  it("tracks one finalized non-stream Mem0 write with canonical IDs", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    const writes: Array<Record<string, unknown>> = [];
+    const memory = createMem0RecordingMemory(async (input) => {
+      writes.push(input);
+      return completeMemoryWrite(
+        typeof input["idempotencyKey"] === "string" ? input["idempotencyKey"] : undefined
+      );
+    });
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory,
+      conversation: new InMemoryConversationRepository(),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    const reply = await runtime.handleUserMessage({
+      sessionId: "non-stream-finalized",
+      content: "I prefer concise replies.",
+      subjectUserId: "user-a",
+      personaId: "alice"
+    });
+    await runtime.drainMemoryWrites();
+
+    const assistant = published.find((event) => event.type === "assistant.message");
+    expect(assistant?.id).toBe(
+      `assistant:${published.find((event) => event.type === "user.message")?.id}`
+    );
+    expect(published.find((event) => event.type === "agent.reply")?.id).toBe(
+      `reply:${published.find((event) => event.type === "user.message")?.id}`
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      assistantMessageId: assistant?.id,
+      idempotencyKey: `yuvi:finalized-turn:${assistant?.id}`,
+      assistantMessage: reply.payload.content
+    });
+    expect(runtime.getLatestPromptPreview()).toMatchObject({ memoryWriteStatus: "complete" });
+  });
+
+  it("deduplicates same finalized turn re-entry and drains delayed ingestion", async () => {
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls: Array<Record<string, unknown>> = [];
+    const eventBus = new InMemoryEventBus({ development: false });
+    const memory = createMem0RecordingMemory(async (input) => {
+      calls.push(input);
+      await delayed;
+      return completeMemoryWrite(
+        typeof input["idempotencyKey"] === "string" ? input["idempotencyKey"] : undefined
+      );
+    });
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory,
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const userEvent = createEvent("user.message", {
+      sessionId: "reentry-session",
+      content: "I prefer concise replies.",
+      subjectUserId: "user-a",
+      personaId: "alice"
+    });
+
+    const first = runtime.handleUserMessage(userEvent);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    const second = runtime.handleUserMessage(userEvent);
+    await Promise.all([first, second]);
+    expect(calls).toHaveLength(1);
+
+    let drained = false;
+    const drain = runtime.drainMemoryWrites().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+    release();
+    await drain;
+    expect(runtime.getLatestPromptPreview()).toMatchObject({ memoryWriteStatus: "complete" });
+  });
+
+  it("seals an in-flight runtime before reload and drains its late finalized write", async () => {
+    let releaseReply!: () => void;
+    const replyRelease = new Promise<void>((resolve) => {
+      releaseReply = resolve;
+    });
+    let replyPublished!: () => void;
+    const replyEntered = new Promise<void>((resolve) => {
+      replyPublished = resolve;
+    });
+    let releaseWrite!: () => void;
+    const writeRelease = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let writeStarted!: () => void;
+    const writeEntered = new Promise<void>((resolve) => {
+      writeStarted = resolve;
+    });
+    const writes: Array<Record<string, unknown>> = [];
+    const eventBus = new InMemoryEventBus({ development: false });
+    eventBus.subscribe("agent.reply", async () => {
+      replyPublished();
+      await replyRelease;
+    });
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createMem0RecordingMemory(async (input) => {
+        writes.push(input);
+        writeStarted();
+        await writeRelease;
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    const request = runtime.handleUserMessage({
+      sessionId: "reload-race-session",
+      content: "I prefer concise replies."
+    });
+    await replyEntered;
+    const reload = runtime.sealAndDrainMemoryWrites();
+    await Promise.resolve();
+    expect(runtime.getLifecycleState()).toBe("sealing");
+    expect(writes).toHaveLength(0);
+
+    let reloaded = false;
+    void reload.then(() => {
+      reloaded = true;
+    });
+    releaseReply();
+    await writeEntered;
+    expect(writes).toHaveLength(1);
+    expect(reloaded).toBe(false);
+    releaseWrite();
+    await expect(request).resolves.toMatchObject({ type: "agent.reply" });
+    await reload;
+    expect(reloaded).toBe(true);
+    expect(runtime.getLifecycleState()).toBe("disposed");
+    expect(writes).toHaveLength(1);
+    await expect(runtime.drainMemoryWrites()).resolves.toEqual([]);
+    await expect(
+      runtime.handleUserMessage({
+        sessionId: "replaced-runtime-session",
+        content: "This runtime has been replaced."
+      })
+    ).rejects.toThrow("disposed");
+  });
+
+  it("lifecycle-guards direct maybeStoreMemory calls while active", async () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async (input) => {
+        writes.push(input);
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const { sourceEvent, reply } = createDirectMemoryTurn("direct-active-session");
+
+    await expect(
+      runtime.maybeStoreMemory(sourceEvent, reply, { readMemory: false, writeMemory: true })
+    ).resolves.toMatchObject({ memoryWriteStatus: "complete" });
+    expect(writes).toHaveLength(1);
+    expect(runtime.getLifecycleState()).toBe("active");
+  });
+
+  it("waits for a direct maybeStoreMemory call that entered before sealing", async () => {
+    let releaseWrite!: () => void;
+    const writeRelease = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let writeStarted!: () => void;
+    const writeEntered = new Promise<void>((resolve) => {
+      writeStarted = resolve;
+    });
+    const writes: Array<Record<string, unknown>> = [];
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async (input) => {
+        writes.push(input);
+        writeStarted();
+        await writeRelease;
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const { sourceEvent, reply } = createDirectMemoryTurn("direct-seal-session");
+
+    const directWrite = runtime.maybeStoreMemory(sourceEvent, reply);
+    await writeEntered;
+    const seal = runtime.sealAndDrainMemoryWrites();
+    let sealed = false;
+    void seal.then(() => {
+      sealed = true;
+    });
+    await Promise.resolve();
+    expect(runtime.getLifecycleState()).toBe("sealing");
+    expect(sealed).toBe(false);
+    expect(writes).toHaveLength(1);
+
+    releaseWrite();
+    await expect(directWrite).resolves.toMatchObject({ memoryWriteStatus: "complete" });
+    await seal;
+    expect(sealed).toBe(true);
+    expect(runtime.getLifecycleState()).toBe("disposed");
+    expect(writes).toHaveLength(1);
+    await expect(runtime.drainMemoryWrites()).resolves.toEqual([]);
+  });
+
+  it("rejects direct maybeStoreMemory calls after sealing begins", async () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async (input) => {
+        writes.push(input);
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const { sourceEvent, reply } = createDirectMemoryTurn("direct-sealing-session");
+
+    const seal = runtime.sealAndDrainMemoryWrites();
+    await expect(runtime.maybeStoreMemory(sourceEvent, reply)).rejects.toThrow("sealing");
+    expect(writes).toHaveLength(0);
+    await seal;
+    expect(runtime.getLifecycleState()).toBe("disposed");
+  });
+
+  it("rejects direct maybeStoreMemory calls after disposal", async () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async (input) => {
+        writes.push(input);
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const { sourceEvent, reply } = createDirectMemoryTurn("direct-disposed-session");
+
+    await runtime.sealAndDrainMemoryWrites();
+    await expect(runtime.maybeStoreMemory(sourceEvent, reply)).rejects.toThrow("disposed");
+    expect(writes).toHaveLength(0);
+    await expect(runtime.drainMemoryWrites()).resolves.toEqual([]);
+  });
+
+  it("writes semantic memory once only after a successful stream finalizes", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async (input) => {
+        calls.push(input);
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () =>
+          createMockStreamingChatProvider("native", { chunks: ["first", "second"] })
+      }
+    });
+    const iterator = runtime
+      .streamUserMessage(
+        { sessionId: "stream-memory-session", content: "I prefer concise replies." },
+        { readMemory: false, writeMemory: true }
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: "text-delta", text: "first" }
+    });
+    expect(calls).toHaveLength(0);
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: "text-delta", text: "second" }
+    });
+    const completed = await iterator.next();
+    expect(completed.value).toMatchObject({ type: "completed", content: "firstsecond" });
+    expect(calls).toHaveLength(1);
+    await runtime.drainMemoryWrites();
+    expect(runtime.getLatestPromptPreview()).toMatchObject({ memoryWriteStatus: "complete" });
+  });
+
+  it("performs one finalized ingestion after provider fallback before output", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const failing = createMockStreamingChatProvider("primary", {
+      failBeforeFirst: new ProviderError({
+        provider: "primary",
+        capability: "chat",
+        code: ProviderErrorCode.ProviderUnavailable,
+        message: "primary unavailable"
+      })
+    });
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async (input) => {
+        calls.push(input);
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () =>
+          new FallbackChatProvider([
+            failing,
+            createMockStreamingChatProvider("backup", { chunks: ["ok"] })
+          ])
+      }
+    });
+
+    const events = await collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "fallback-memory-session", content: "I prefer concise replies." },
+        { readMemory: false, writeMemory: true }
+      )
+    );
+    await runtime.drainMemoryWrites();
+    expect(events.at(-1)).toMatchObject({ type: "completed", content: "ok" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not ingest partial or cancelled streams", async () => {
+    const partialCalls: Array<Record<string, unknown>> = [];
+    const partialRuntime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async (input) => {
+        partialCalls.push(input);
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () =>
+          createMockStreamingChatProvider("primary", {
+            chunks: ["partial", "ignored"],
+            failAfterChunks: 1,
+            failAfter: new ProviderError({
+              provider: "primary",
+              capability: "chat",
+              code: ProviderErrorCode.NetworkError,
+              message: "stream interrupted"
+            })
+          })
+      }
+    });
+    await expect(
+      collectRuntimeStream(
+        partialRuntime.streamUserMessage(
+          { sessionId: "partial-memory-session", content: "I prefer concise replies." },
+          { readMemory: false, writeMemory: true }
+        )
+      )
+    ).rejects.toMatchObject({ code: ProviderErrorCode.NetworkError });
+    expect(partialCalls).toHaveLength(0);
+
+    const cancellationCalls: Array<Record<string, unknown>> = [];
+    const controller = new AbortController();
+    const cancellationRuntime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async (input) => {
+        cancellationCalls.push(input);
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () =>
+          createMockStreamingChatProvider("native", { chunks: ["first", "second"], delayMs: 5 })
+      }
+    });
+    const iterator = cancellationRuntime
+      .streamUserMessage(
+        { sessionId: "cancelled-memory-session", content: "I prefer concise replies." },
+        { signal: controller.signal, readMemory: false, writeMemory: true }
+      )
+      [Symbol.asyncIterator]();
+    await iterator.next();
+    controller.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ code: ProviderErrorCode.Cancelled });
+    expect(cancellationCalls).toHaveLength(0);
+  });
+
+  it("ingests once when cancellation arrives after assistant finalization", async () => {
+    const controller = new AbortController();
+    const writes: Array<Record<string, unknown>> = [];
+    const eventBus = new InMemoryEventBus({ development: false });
+    eventBus.subscribe("assistant.message", () => {
+      controller.abort();
+    });
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createMem0RecordingMemory(async (input) => {
+        writes.push(input);
+        return completeMemoryWrite();
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => createMockStreamingChatProvider("native", { chunks: ["final"] })
+      }
+    });
+
+    const events = await collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "late-cancel-session", content: "I prefer concise replies." },
+        { signal: controller.signal, readMemory: false, writeMemory: true }
+      )
+    );
+    await runtime.drainMemoryWrites();
+
+    expect(events.at(-1)).toMatchObject({ type: "completed", content: "final" });
+    expect(writes).toHaveLength(1);
+  });
+
+  it("keeps assistant success distinct from a finalized memory failure", async () => {
+    const diagnostics: RuntimeEvent[] = [];
+    const eventBus = new InMemoryEventBus({ development: false });
+    eventBus.subscribe("runtime.error", (event) => {
+      diagnostics.push(event);
+    });
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createMem0RecordingMemory(async () => {
+        throw new Error("Mem0 unavailable");
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    const reply = await runtime.handleUserMessage({
+      sessionId: "memory-failure-session",
+      content: "I prefer concise replies.",
+      subjectUserId: "user-a",
+      personaId: "alice"
+    });
+    await runtime.drainMemoryWrites();
+
+    expect(reply.type).toBe("agent.reply");
+    expect(runtime.getLatestPromptPreview()).toMatchObject({ memoryWriteStatus: "failed" });
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.payload).toMatchObject({
+      category: "memory",
+      operation: "finalized_turn_ingestion"
+    });
   });
 
   it("publishes no reply events when every chat provider fails", async () => {
@@ -1334,6 +1805,62 @@ function createRecordingMemory(written: MemoryCandidate[]): RuntimeMemoryPort {
       return createMemory(candidate);
     },
     async rememberInteraction(): Promise<Memory | null> {
+      return null;
+    }
+  };
+}
+
+function completeMemoryWrite(idempotencyKey?: string): MemoryConversationTurnWriteResult {
+  return {
+    status: "complete",
+    ok: true,
+    attemptedCount: 1,
+    writtenCount: 1,
+    rejectedCount: 0,
+    deduplicatedCount: 0,
+    skippedCount: 0,
+    memoryId: "memory-id",
+    operation: "created",
+    idempotencyKey
+  };
+}
+
+function createDirectMemoryTurn(sessionId: string) {
+  const sourceEvent = createEvent("user.message", {
+    sessionId,
+    content: "I prefer concise replies."
+  });
+  const reply = createEvent(
+    "agent.reply",
+    {
+      sessionId,
+      content: "Understood."
+    },
+    {
+      traceId: sourceEvent.traceId,
+      parentId: sourceEvent.id
+    }
+  );
+  return { sourceEvent, reply };
+}
+
+function createMem0RecordingMemory(
+  store: (input: Record<string, unknown>) => Promise<MemoryConversationTurnWriteResult>
+): RuntimeMemoryPort {
+  return {
+    async retrieveRelevantMemories() {
+      return [];
+    },
+    scoreImportance() {
+      return 0;
+    },
+    isMem0Backend() {
+      return true;
+    },
+    async storeConversationTurn(input) {
+      return store(input as unknown as Record<string, unknown>);
+    },
+    async rememberInteraction() {
       return null;
     }
   };

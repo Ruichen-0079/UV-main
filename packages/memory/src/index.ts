@@ -48,7 +48,9 @@ export type {
   MemoryRetrievalStatus,
   MemoryWriteEventInput,
   MemoryWriteEventOutcome,
-  MemoryWriteEventStatus
+  MemoryWriteEventStatus,
+  MemoryConversationTurnWriteResult,
+  MemoryConversationTurnWriteStatus
 } from "./provider.js";
 export { detectCurrentAffect } from "./affect.js";
 export { computeRetentionPolicy, type RetentionPolicy } from "./retention.js";

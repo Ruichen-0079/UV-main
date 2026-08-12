@@ -34,7 +34,7 @@ export type AppContext = {
   runtime: RuntimeOrchestrator;
   activeMemoryRepository: string;
   memoryMaintenanceScheduler?: MemoryMaintenanceScheduler | undefined;
-  reloadRuntimeConfig(env: Record<string, string | undefined>): RuntimeConfigReloadResult;
+  reloadRuntimeConfig(env: Record<string, string | undefined>): Promise<RuntimeConfigReloadResult>;
 };
 
 export type RuntimeConfigReloadResult = {
@@ -178,7 +178,8 @@ export async function createAppContext(
     providers,
     runtime,
     activeMemoryRepository,
-    reloadRuntimeConfig(env) {
+    async reloadRuntimeConfig(env) {
+      await context.runtime.sealAndDrainMemoryWrites();
       const nextProviders = createProviderRegistryFromEnv(env);
       const nextMemory = createMemoryService(
         nextProviders,

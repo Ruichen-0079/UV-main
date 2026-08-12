@@ -1,9 +1,6 @@
 import type { MemoryEventKind, MemoryWriteEventInput } from "./provider.js";
 import type { MemoryCandidate } from "./types.js";
-import {
-  classifyMem0Turn,
-  type Mem0TurnKind
-} from "./mem0-chat.js";
+import { classifyMem0Turn, type Mem0TurnKind } from "./mem0-chat.js";
 import { stripExplicitRememberPrefix } from "./intent.js";
 import { RuleBasedMemoryExtractor } from "./extractor.js";
 
@@ -17,6 +14,7 @@ export type MemoryIngestionInput = {
   userMessageId?: string | null | undefined;
   assistantMessageId?: string | null | undefined;
   traceId?: string | null | undefined;
+  idempotencyKey?: string | null | undefined;
   conversationId?: string | null | undefined;
   language?: string | null | undefined;
   observedAt?: string | undefined;
@@ -150,7 +148,8 @@ export class MemoryIngestionPolicy {
         memoryType: "user_claim",
         explicit: options.explicit,
         ingestionReason: options.sourceReason
-      })
+      }),
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
     };
   }
 
@@ -187,7 +186,8 @@ export class MemoryIngestionPolicy {
         explicit: false,
         ingestionReason: candidate.reason,
         ...(candidate.subtype ? { memorySubtype: candidate.subtype } : {})
-      })
+      }),
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
     };
   }
 
@@ -216,7 +216,8 @@ export class MemoryIngestionPolicy {
         memoryType: "fact",
         explicit: false,
         ingestionReason: "stable-user-fact"
-      })
+      }),
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
     };
   }
 }
@@ -238,6 +239,7 @@ function buildEventMetadata(
     conversationId: input.conversationId ?? input.sessionId ?? null,
     sourceMessageId: input.userMessageId ?? null,
     sourceTraceId: input.traceId ?? null,
+    ...(input.idempotencyKey ? { yuviIngestionKey: input.idempotencyKey } : {}),
     assistantMessageId: input.assistantMessageId ?? null,
     memoryType: values.memoryType,
     explicit: values.explicit,

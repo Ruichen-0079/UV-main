@@ -17,7 +17,8 @@ describe("MemoryIngestionPolicy", () => {
     const result = await new MemoryIngestionPolicy().build({
       ...base,
       userMessage: "我喜欢蓝色。",
-      assistantMessage: "好的。"
+      assistantMessage: "好的.",
+      idempotencyKey: "turn-1"
     });
 
     expect(result.events).toHaveLength(1);
@@ -29,6 +30,7 @@ describe("MemoryIngestionPolicy", () => {
     expect(result.events[0]?.metadata).not.toHaveProperty("trust");
     expect(result.events[0]?.metadata).not.toHaveProperty("closeness");
     expect(result.events[0]?.metadata).not.toHaveProperty("relationship");
+    expect(result.events[0]?.metadata).toMatchObject({ yuviIngestionKey: "turn-1" });
   });
 
   it("blocks assistant interpretation and self-memory pollution", async () => {

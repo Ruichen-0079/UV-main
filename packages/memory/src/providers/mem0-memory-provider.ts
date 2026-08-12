@@ -256,6 +256,7 @@ export function buildWriteMetadata(input: MemoryWriteEventInput): MemoryRecordMe
   const participants = normalizeStringArray(input.participants);
   if (participants.length > 0) metadata["yuviParticipants"] = participants;
   if (input.conversationId?.trim()) metadata.conversationId = input.conversationId.trim();
+  if (input.idempotencyKey?.trim()) metadata["yuviIngestionKey"] = input.idempotencyKey.trim();
   return metadata;
 }
 
