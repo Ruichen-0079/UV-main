@@ -117,6 +117,7 @@ export type MemoryWriteEventInput = {
   occurredAt?: string | null;
   sourceTurnIds?: string[];
   conversationId?: string | null;
+  idempotencyKey?: string | null;
   participants?: string[];
   assertion?: MemoryEventAssertion;
   confidence?: number | null;
@@ -132,6 +133,34 @@ export type MemoryWriteEventOutcome = {
   eventId?: MemoryEventId;
   event?: MemoryEvent | null;
   errorCode?: string | null;
+};
+
+/** Outcome of a completed runtime conversation turn crossing semantic memory. */
+export type MemoryConversationTurnWriteStatus = "complete" | "partial" | "failed" | "skipped";
+
+/**
+ * `ok` is retained for compatibility, but is true only when every eligible
+ * event was written or deduplicated. Partial persistence is never success.
+ */
+export type MemoryConversationTurnWriteResult = {
+  status: MemoryConversationTurnWriteStatus;
+  ok: boolean;
+  attemptedCount: number;
+  writtenCount: number;
+  rejectedCount: number;
+  deduplicatedCount: number;
+  skippedCount: number;
+  skippedReason?: string | undefined;
+  errorCode?: string | undefined;
+  rejectedReasons?: string[] | undefined;
+  /** Compatibility alias for the total persisted (written or unchanged) count. */
+  storedCount?: number | undefined;
+  memoryId?: string | undefined;
+  operation?: string | undefined;
+  turnKind?: string | undefined;
+  infer?: boolean | undefined;
+  /** Runtime-lifetime idempotency identity, when supplied by the caller. */
+  idempotencyKey?: string | undefined;
 };
 
 /**

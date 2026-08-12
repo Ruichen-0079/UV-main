@@ -2,11 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MemoryService } from "./service.js";
 import { InMemoryMemoryRepository } from "./repository.js";
 import type { MemoryBackend } from "./backend.js";
-import {
-  MEMORY_SCOPE_MISSING,
-  classifyMem0Turn,
-  resolveMem0ChatIdentity
-} from "./mem0-chat.js";
+import { MEMORY_SCOPE_MISSING, classifyMem0Turn, resolveMem0ChatIdentity } from "./mem0-chat.js";
 
 function createCountingBackend() {
   const calls = {
@@ -165,6 +161,8 @@ describe("Mem0 turn classification and write routing", () => {
       personaId: "lumi"
     });
     expect(write.ok).toBe(false);
+    expect(write.status).toBe("skipped");
+    expect(write.skippedCount).toBe(1);
     expect(write.turnKind).toBe("explicit_forget");
     expect(calls.add).toHaveLength(0);
 
@@ -208,6 +206,8 @@ describe("Mem0 turn classification and write routing", () => {
       personaId: "lumi"
     });
     expect(result.ok).toBe(false);
+    expect(result.status).toBe("skipped");
+    expect(result.skippedCount).toBe(1);
     expect(result.turnKind).toBe("cancelled_or_failed");
     expect(calls.add).toHaveLength(0);
   });
@@ -222,6 +222,8 @@ describe("Mem0 turn classification and write routing", () => {
       // persona missing
     });
     expect(result.ok).toBe(false);
+    expect(result.status).toBe("skipped");
+    expect(result.skippedCount).toBe(1);
     expect(result.code).toBe(MEMORY_SCOPE_MISSING);
     expect(calls.add).toHaveLength(0);
   });

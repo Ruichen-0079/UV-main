@@ -11,7 +11,7 @@ import {
 } from "./intent.js";
 import { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
 import type { MemoryBackend } from "./backend.js";
-import type { MemoryProvider } from "./provider.js";
+import type { MemoryConversationTurnWriteResult, MemoryProvider } from "./provider.js";
 import { Mem0MemoryProvider } from "./providers/mem0-memory-provider.js";
 import { MemoryIngestionPolicy } from "./ingestion.js";
 import {
@@ -85,6 +85,7 @@ export type MemoryServiceBackendConfig = {
   mem0?: MemoryBackend | undefined;
   searchTimeoutMs?: number | undefined;
   writeTimeoutMs?: number | undefined;
+  ingestionPolicy?: Pick<MemoryIngestionPolicy, "build"> | undefined;
   logger?:
     | {
         warn?(message: string, context?: Record<string, unknown>): void;
@@ -105,7 +106,7 @@ export class MemoryService {
   private readonly mem0WriteTimeoutMs: number;
   private readonly mem0Logger: MemoryServiceBackendConfig["logger"];
   private readonly memoryProvider: MemoryProvider | undefined;
-  private readonly memoryIngestionPolicy: MemoryIngestionPolicy;
+  private readonly memoryIngestionPolicy: Pick<MemoryIngestionPolicy, "build">;
 
   constructor(
     private readonly repository: MemoryRepository,
@@ -126,7 +127,7 @@ export class MemoryService {
     this.mem0WriteTimeoutMs = backend?.writeTimeoutMs ?? MEM0_CHAT_WRITE_TIMEOUT_MS;
     this.mem0Logger = backend?.logger ?? embedding?.logger;
     this.memoryProvider = this.mem0Backend ? new Mem0MemoryProvider(this.mem0Backend) : undefined;
-    this.memoryIngestionPolicy = new MemoryIngestionPolicy();
+    this.memoryIngestionPolicy = backend?.ingestionPolicy ?? new MemoryIngestionPolicy();
   }
 
   /** True when formal long-term memory is Mem0 (Legacy write/search path disabled). */
@@ -522,29 +523,41 @@ export class MemoryService {
     userMessageId?: string | null | undefined;
     assistantMessageId?: string | null | undefined;
     traceId?: string | null | undefined;
+    idempotencyKey?: string | null | undefined;
     conversationId?: string | null | undefined;
     language?: string | null | undefined;
     cancelledOrFailed?: boolean | undefined;
     turnKind?: Mem0TurnKind | undefined;
-  }): Promise<{
-    ok: boolean;
-    skippedReason?: string;
-    code?: string;
-    turnKind?: Mem0TurnKind;
-    memoryId?: string;
-    operation?: string;
-    storedCount?: number;
-    infer?: boolean;
-  }> {
+  }): Promise<MemoryConversationTurnWriteResult & { code?: string }> {
     if (!this.isMem0Backend() || !this.memoryProvider) {
-      return { ok: false, skippedReason: "not-mem0-backend" };
+      return {
+        status: "failed",
+        ok: false,
+        attemptedCount: 0,
+        writtenCount: 0,
+        rejectedCount: 0,
+        deduplicatedCount: 0,
+        skippedCount: 0,
+        skippedReason: "not-mem0-backend",
+        errorCode: "MEMORY_BACKEND_UNAVAILABLE",
+        code: "MEMORY_BACKEND_UNAVAILABLE",
+        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
+      };
     }
     if (input.turnKind === "explicit_forget" || detectExplicitForgetRequest(input.userMessage)) {
       // Forget is handled on the read path only; never re-write deleted facts.
       return {
+        status: "skipped",
         ok: false,
+        attemptedCount: 0,
+        writtenCount: 0,
+        rejectedCount: 0,
+        deduplicatedCount: 0,
+        skippedCount: 1,
         skippedReason: "explicit-forget-skips-add",
-        turnKind: "explicit_forget"
+        turnKind: "explicit_forget",
+        infer: false,
+        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
       };
     }
 
@@ -558,10 +571,19 @@ export class MemoryService {
         turnKind: input.turnKind
       });
       return {
+        status: "skipped",
         ok: false,
+        attemptedCount: 0,
+        writtenCount: 0,
+        rejectedCount: 0,
+        deduplicatedCount: 0,
+        skippedCount: 1,
         skippedReason: MEMORY_SCOPE_MISSING,
         code: MEMORY_SCOPE_MISSING,
-        ...(input.turnKind ? { turnKind: input.turnKind } : {})
+        errorCode: MEMORY_SCOPE_MISSING,
+        infer: false,
+        ...(input.turnKind ? { turnKind: input.turnKind } : {}),
+        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
       };
     }
     const { identity } = resolved;
@@ -576,10 +598,17 @@ export class MemoryService {
       });
       if (ingestion.events.length === 0) {
         return {
+          status: "skipped",
           ok: false,
+          attemptedCount: 0,
+          writtenCount: 0,
+          rejectedCount: 0,
+          deduplicatedCount: 0,
+          skippedCount: 1,
           skippedReason: ingestion.skippedReason ?? "no-factual-memory",
           turnKind: ingestion.turnKind,
-          infer: false
+          infer: false,
+          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
         };
       }
 
@@ -587,32 +616,74 @@ export class MemoryService {
       let firstOperation: string | undefined;
       const rejectedReasons: string[] = [];
       let writtenCount = 0;
+      let deduplicatedCount = 0;
+      let rejectedCount = 0;
+      let attemptedCount = 0;
+      let skippedCount = 0;
       for (const event of ingestion.events) {
-        const result = await this.memoryProvider.writeEvent({
-          ...event,
-          signal: controller.signal
-        });
-        if (result.status === "written" || result.status === "unchanged") {
-          writtenCount += 1;
-          firstEventId ??= result.eventId;
-          firstOperation ??= result.status;
-        } else {
-          rejectedReasons.push(result.errorCode ?? "mem0-write-rejected");
+        attemptedCount += 1;
+        try {
+          const result = await this.memoryProvider.writeEvent({
+            ...event,
+            signal: controller.signal
+          });
+          if (result.status === "written") {
+            writtenCount += 1;
+            firstEventId ??= result.eventId;
+            firstOperation ??= result.status;
+          } else if (result.status === "unchanged") {
+            deduplicatedCount += 1;
+            firstEventId ??= result.eventId;
+            firstOperation ??= result.status;
+          } else {
+            rejectedCount += 1;
+            rejectedReasons.push(result.errorCode ?? "mem0-write-rejected");
+          }
+        } catch (error) {
+          rejectedCount += 1;
+          rejectedReasons.push(
+            error instanceof Error && error.message ? "MEMORY_WRITE_FAILED" : "mem0-write-failed"
+          );
+          this.mem0Logger?.warn?.("mem0 conversation event write failed", {
+            message: error instanceof Error ? error.message : String(error),
+            turnKind: ingestion.turnKind
+          });
+        }
+        if (controller.signal.aborted) {
+          skippedCount = ingestion.events.length - attemptedCount;
+          break;
         }
       }
+      const persistedCount = writtenCount + deduplicatedCount;
+      const status =
+        attemptedCount === 0
+          ? "failed"
+          : rejectedCount === 0 && skippedCount === 0
+            ? "complete"
+            : persistedCount > 0
+              ? "partial"
+              : "failed";
       return {
-        ok: writtenCount > 0,
-        ...(writtenCount > 0
+        status,
+        ok: status === "complete",
+        attemptedCount,
+        writtenCount,
+        rejectedCount,
+        deduplicatedCount,
+        skippedCount,
+        ...(persistedCount > 0
           ? {
               ...(firstEventId ? { memoryId: firstEventId } : {}),
               ...(firstOperation ? { operation: firstOperation } : {}),
-              storedCount: writtenCount
+              storedCount: persistedCount
             }
           : {
               skippedReason: rejectedReasons[0] ?? "mem0-write-rejected"
             }),
+        ...(rejectedReasons.length > 0 ? { rejectedReasons } : {}),
         turnKind: ingestion.turnKind,
-        infer: false
+        infer: false,
+        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
       };
     } catch (error) {
       this.mem0Logger?.warn?.("mem0 conversation turn write failed", {
@@ -620,9 +691,19 @@ export class MemoryService {
         turnKind: input.turnKind
       });
       return {
+        status: "failed",
         ok: false,
+        attemptedCount: 0,
+        writtenCount: 0,
+        rejectedCount: 1,
+        deduplicatedCount: 0,
+        skippedCount: 0,
         skippedReason: error instanceof Error ? error.message : "mem0-write-failed",
-        ...(input.turnKind ? { turnKind: input.turnKind } : {})
+        errorCode: "MEMORY_INGESTION_FAILED",
+        code: "MEMORY_INGESTION_FAILED",
+        infer: false,
+        ...(input.turnKind ? { turnKind: input.turnKind } : {}),
+        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
       };
     } finally {
       clearTimeout(timer);

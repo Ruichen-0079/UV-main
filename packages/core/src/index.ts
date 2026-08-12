@@ -13,7 +13,8 @@ import type {
   MemoryRetrievalMode,
   MemoryRetrievalResult,
   MemoryRetrievalStatus,
-  RetrievedMemoryDebug
+  RetrievedMemoryDebug,
+  MemoryConversationTurnWriteResult
 } from "@companion/memory";
 import {
   detectCurrentAffect,
@@ -151,7 +152,8 @@ export type RuntimeMemoryPort = {
     traceId?: string | null | undefined;
     conversationId?: string | null | undefined;
     language?: string | null | undefined;
-  }): Promise<{ ok: boolean; skippedReason?: string; memoryId?: string; operation?: string }>;
+    idempotencyKey?: string | null | undefined;
+  }): Promise<MemoryConversationTurnWriteResult>;
   forgetExplicitMemory?(input: {
     userMessage: string;
     personaId?: string | null | undefined;
@@ -330,7 +332,18 @@ export type RuntimePromptPreview = {
   validationIssues?: string[] | undefined;
   memoryCandidates: RuntimeMemoryCandidateReview[];
   memoryExtractionSkippedReason?: string | undefined;
+  memoryWriteStatus?: RuntimeMemoryWriteStatus | undefined;
+  memoryWriteAttemptedCount?: number | undefined;
+  memoryWriteWrittenCount?: number | undefined;
+  memoryWriteRejectedCount?: number | undefined;
+  memoryWriteDeduplicatedCount?: number | undefined;
+  memoryWriteSkippedCount?: number | undefined;
+  memoryWriteIdempotencyKey?: string | undefined;
 };
+
+export type RuntimeMemoryWriteStatus = "pending" | "complete" | "partial" | "failed" | "skipped";
+
+export type RuntimeLifecycleState = "active" | "sealing" | "disposed";
 
 export type RuntimeMemoryCandidateDecision = "stored" | "rejected";
 
@@ -453,6 +466,19 @@ export class RuntimeOrchestrator {
   private latestPromptPreview: RuntimePromptPreview | null = null;
   private readonly memoryCandidateHistory: RuntimeMemoryCandidateReview[] = [];
   private readonly sessionTurns = new Map<string, DirectContextTurn[]>();
+  private lifecycleState: RuntimeLifecycleState = "active";
+  private activeLifecycleOperations = 0;
+  private readonly lifecycleIdleWaiters = new Set<() => void>();
+  private lifecycleSealPromise: Promise<MemoryConversationTurnWriteResult[]> | undefined;
+  /**
+   * Runtime-lifetime dedupe for the same finalized event. This is deliberately
+   * not advertised as durable exactly-once delivery across process restarts.
+   */
+  private readonly finalizedMemoryWrites = new Map<
+    string,
+    Promise<MemoryConversationTurnWriteResult>
+  >();
+  private readonly pendingMemoryWrites = new Set<Promise<MemoryConversationTurnWriteResult>>();
   private readonly directContextConfig: DirectContextConfig;
   private readonly memoryContextBuilder: Pick<MemoryContextBuilder, "build">;
 
@@ -465,8 +491,69 @@ export class RuntimeOrchestrator {
     return this.latestPromptPreview;
   }
 
+  getLifecycleState(): RuntimeLifecycleState {
+    return this.lifecycleState;
+  }
+
   getRecentMemoryCandidates(limit = 20): RuntimeMemoryCandidateReview[] {
     return this.memoryCandidateHistory.slice(0, limit);
+  }
+
+  /** Drain finalized semantic writes before the owning process closes. */
+  async drainMemoryWrites(): Promise<MemoryConversationTurnWriteResult[]> {
+    const drained: MemoryConversationTurnWriteResult[] = [];
+    while (this.pendingMemoryWrites.size > 0) {
+      const pending = Array.from(this.pendingMemoryWrites);
+      drained.push(...(await Promise.all(pending)));
+    }
+    return drained;
+  }
+
+  /**
+   * Stop accepting new runtime operations, let already-started operations reach
+   * their finalized-write boundary, then drain all writes before replacement.
+   */
+  async sealAndDrainMemoryWrites(): Promise<MemoryConversationTurnWriteResult[]> {
+    if (this.lifecycleSealPromise) {
+      return this.lifecycleSealPromise;
+    }
+    if (this.lifecycleState === "disposed") {
+      return [];
+    }
+    this.lifecycleState = "sealing";
+    this.lifecycleSealPromise = (async () => {
+      await this.waitForLifecycleIdle();
+      const drained = await this.drainMemoryWrites();
+      this.lifecycleState = "disposed";
+      return drained;
+    })();
+    return this.lifecycleSealPromise;
+  }
+
+  private enterLifecycleOperation(): void {
+    if (this.lifecycleState !== "active") {
+      throw new Error(`Runtime is ${this.lifecycleState} and is not accepting new operations.`);
+    }
+    this.activeLifecycleOperations += 1;
+  }
+
+  private exitLifecycleOperation(): void {
+    this.activeLifecycleOperations = Math.max(0, this.activeLifecycleOperations - 1);
+    if (this.activeLifecycleOperations === 0) {
+      for (const resolve of this.lifecycleIdleWaiters) {
+        resolve();
+      }
+      this.lifecycleIdleWaiters.clear();
+    }
+  }
+
+  private waitForLifecycleIdle(): Promise<void> {
+    if (this.activeLifecycleOperations === 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.lifecycleIdleWaiters.add(resolve);
+    });
   }
 
   async acceptMemoryCandidate(
@@ -633,55 +720,62 @@ export class RuntimeOrchestrator {
     input: UserMessageEvent | HandleUserMessageInput,
     options: HandleUserMessageOptions = {}
   ): Promise<AgentReplyEvent> {
-    const userEvent = isRuntimeUserMessageEvent(input)
-      ? input
-      : createEvent(
-          "user.message",
-          {
-            sessionId: input.sessionId,
-            content: input.content,
-            ...identityPayload(input)
-          },
-          {
-            traceId: input.traceId,
-            parentId: input.parentId
-          }
-        );
+    this.enterLifecycleOperation();
+    try {
+      const userEvent = isRuntimeUserMessageEvent(input)
+        ? input
+        : createEvent(
+            "user.message",
+            {
+              sessionId: input.sessionId,
+              content: input.content,
+              ...identityPayload(input)
+            },
+            {
+              traceId: input.traceId,
+              parentId: input.parentId
+            }
+          );
 
-    await this.persistUserMessage(userEvent);
-    await this.options.eventBus.publish(userEvent);
-    await this.restoreDirectContext(userEvent.payload.sessionId);
-    const voiceOutput = isRuntimeUserMessageEvent(input)
-      ? Boolean(options.voiceOutput)
-      : Boolean(input.voiceOutput);
-    const memoryOptions = resolveMemoryOptions(options);
-    const reply = await this.generateReply(userEvent, {
-      voiceOutput,
-      readMemory: memoryOptions.readMemory,
-      writeMemory: memoryOptions.writeMemory,
-      publishAgentReply: false
-    });
-    // Persist the final text before publishing either reply event to transports. Later
-    // direct-context, memory, and TTS side effects must not duplicate or retract it.
-    await this.publishAssistantMessage(userEvent, reply);
-    if (memoryOptions.writeMemory) {
-      // Mem0: fire-and-forget so TTS/UI are never blocked by semantic ingestion.
-      if (this.options.memory.isMem0Backend?.() && this.options.memory.storeConversationTurn) {
-        this.scheduleMem0TurnWrite(userEvent, reply);
-      } else {
-        const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
-        this.updateLatestPromptPreviewExtraction(extraction);
-      }
-    } else {
-      this.updateLatestPromptPreviewExtraction({
-        ...this.getMemoryExtractorStatus(),
-        used: false,
-        skippedReason: "Memory write was disabled for this turn."
+      await this.persistUserMessage(userEvent);
+      await this.options.eventBus.publish(userEvent);
+      await this.restoreDirectContext(userEvent.payload.sessionId);
+      const voiceOutput = isRuntimeUserMessageEvent(input)
+        ? Boolean(options.voiceOutput)
+        : Boolean(input.voiceOutput);
+      const memoryOptions = resolveMemoryOptions(options);
+      const reply = await this.generateReply(userEvent, {
+        voiceOutput,
+        readMemory: memoryOptions.readMemory,
+        writeMemory: memoryOptions.writeMemory,
+        publishAgentReply: false
       });
-    }
-    await this.maybeSynthesizeSpeech(reply, voiceOutput);
+      // Persist the final text before publishing either reply event to transports. Later
+      // direct-context, memory, and TTS side effects must not duplicate or retract it.
+      const assistantMessageId = canonicalAssistantMessageId(userEvent);
+      await this.publishAssistantMessage(userEvent, reply, assistantMessageId);
+      if (memoryOptions.writeMemory) {
+        // Mem0 ingestion is tracked separately from assistant success and drained
+        // by the owning server before its repositories close.
+        if (this.options.memory.isMem0Backend?.() && this.options.memory.storeConversationTurn) {
+          void this.scheduleMem0TurnWrite(userEvent, reply, assistantMessageId);
+        } else {
+          const extraction = await this.maybeStoreMemoryInternal(userEvent, reply, memoryOptions);
+          this.updateLatestPromptPreviewExtraction(extraction);
+        }
+      } else {
+        this.updateLatestPromptPreviewExtraction({
+          ...this.getMemoryExtractorStatus(),
+          used: false,
+          skippedReason: "Memory write was disabled for this turn."
+        });
+      }
+      await this.maybeSynthesizeSpeech(reply, voiceOutput);
 
-    return reply;
+      return reply;
+    } finally {
+      this.exitLifecycleOperation();
+    }
   }
 
   async *streamUserMessage(
@@ -692,215 +786,222 @@ export class RuntimeOrchestrator {
       throw createRuntimeCancelledError();
     }
 
-    const userEvent = isRuntimeUserMessageEvent(input)
-      ? input
-      : createEvent(
-          "user.message",
-          {
-            sessionId: input.sessionId,
-            content: input.content,
-            ...identityPayload(input)
-          },
-          {
-            traceId: input.traceId,
-            parentId: input.parentId
-          }
-        );
-    const agentReplyId = crypto.randomUUID();
-    const assistantMessageId = crypto.randomUUID();
-    const voiceOutput = isRuntimeUserMessageEvent(input)
-      ? Boolean(options.voiceOutput)
-      : Boolean(input.voiceOutput ?? options.voiceOutput);
-
-    await this.persistUserMessage(userEvent);
-    await this.options.eventBus.publish(userEvent);
-    await this.restoreDirectContext(userEvent.payload.sessionId);
-    const { prompt, memoryOptions } = await this.prepareChatPrompt(userEvent, {
-      voiceOutput,
-      useMemory: options.useMemory,
-      readMemory: options.readMemory,
-      writeMemory: options.writeMemory
-    });
-
-    const chatProvider = this.options.providers.getChatProvider();
-    const chatStatus = this.getProviderStatus("chat");
-    const controller = new AbortController();
-    const onAbort = () => controller.abort();
-    if (options.signal?.aborted) {
-      controller.abort();
-    } else {
-      options.signal?.addEventListener("abort", onAbort, { once: true });
-    }
-
-    let providerIterator: AsyncIterator<ChatStreamEvent> | undefined;
-    let assistantCreated = false;
-    let accumulatedText = "";
-    let finalOutput: ChatOutput | undefined;
-    let sawCompleted = false;
-    let terminalStatus: "completed" | "failed" | "cancelled" | undefined;
-    let finalized = false;
-    let failure: unknown;
-    const startedAt = performance.now();
-
+    this.enterLifecycleOperation();
     try {
-      if (controller.signal.aborted) {
-        throw createRuntimeCancelledError(chatProvider.name);
-      }
-      const providerStream = chatProvider.streamReply
-        ? chatProvider.streamReply({ messages: prompt.messages }, { signal: controller.signal })
-        : compatibleRuntimeStream(chatProvider, { messages: prompt.messages }, controller.signal);
-      providerIterator = providerStream[Symbol.asyncIterator]();
+      const userEvent = isRuntimeUserMessageEvent(input)
+        ? input
+        : createEvent(
+            "user.message",
+            {
+              sessionId: input.sessionId,
+              content: input.content,
+              ...identityPayload(input)
+            },
+            {
+              traceId: input.traceId,
+              parentId: input.parentId
+            }
+          );
+      const agentReplyId = canonicalAgentReplyId(userEvent);
+      const assistantMessageId = canonicalAssistantMessageId(userEvent);
+      const voiceOutput = isRuntimeUserMessageEvent(input)
+        ? Boolean(options.voiceOutput)
+        : Boolean(input.voiceOutput ?? options.voiceOutput);
 
-      while (true) {
-        let next: IteratorResult<ChatStreamEvent>;
-        try {
-          next = await providerIterator.next();
-        } catch (error) {
-          throw normalizeRuntimeStreamError(error, chatProvider.name, controller.signal);
-        }
-        if (next.done) {
-          break;
-        }
-        const event = next.value;
+      await this.persistUserMessage(userEvent);
+      await this.options.eventBus.publish(userEvent);
+      await this.restoreDirectContext(userEvent.payload.sessionId);
+      const { prompt, memoryOptions } = await this.prepareChatPrompt(userEvent, {
+        voiceOutput,
+        useMemory: options.useMemory,
+        readMemory: options.readMemory,
+        writeMemory: options.writeMemory
+      });
+
+      const chatProvider = this.options.providers.getChatProvider();
+      const chatStatus = this.getProviderStatus("chat");
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      if (options.signal?.aborted) {
+        controller.abort();
+      } else {
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+      }
+
+      let providerIterator: AsyncIterator<ChatStreamEvent> | undefined;
+      let assistantCreated = false;
+      let accumulatedText = "";
+      let finalOutput: ChatOutput | undefined;
+      let sawCompleted = false;
+      let terminalStatus: "completed" | "failed" | "cancelled" | undefined;
+      let finalized = false;
+      let failure: unknown;
+      const startedAt = performance.now();
+
+      try {
         if (controller.signal.aborted) {
           throw createRuntimeCancelledError(chatProvider.name);
         }
-        if (sawCompleted) {
-          throw runtimeStreamProtocolError(
-            chatProvider.name,
-            "Provider emitted an event after completed."
-          );
-        }
+        const providerStream = chatProvider.streamReply
+          ? chatProvider.streamReply({ messages: prompt.messages }, { signal: controller.signal })
+          : compatibleRuntimeStream(chatProvider, { messages: prompt.messages }, controller.signal);
+        providerIterator = providerStream[Symbol.asyncIterator]();
 
-        if (event.type === "text-delta") {
-          if (!event.text) {
-            throw runtimeStreamProtocolError(
-              chatProvider.name,
-              "Provider emitted an empty text delta."
-            );
+        while (true) {
+          let next: IteratorResult<ChatStreamEvent>;
+          try {
+            next = await providerIterator.next();
+          } catch (error) {
+            throw normalizeRuntimeStreamError(error, chatProvider.name, controller.signal);
           }
-          if (!assistantCreated && this.options.conversation) {
-            await this.createStreamingAssistantMessage({
-              id: assistantMessageId,
-              sessionId: userEvent.payload.sessionId,
-              traceId: userEvent.traceId,
-              parentMessageId: agentReplyId,
-              content: event.text,
-              createdAt: new Date().toISOString()
-            });
-            assistantCreated = true;
-          } else if (assistantCreated) {
-            await this.appendStreamingAssistantContent(assistantMessageId, event.text);
+          if (next.done) {
+            break;
           }
-          accumulatedText += event.text;
-          yield {
-            type: "text-delta",
-            text: event.text,
-            messageId: assistantMessageId,
-            sessionId: userEvent.payload.sessionId,
-            traceId: userEvent.traceId
-          };
-          continue;
-        }
-
-        if (event.type === "completed") {
+          const event = next.value;
+          if (controller.signal.aborted) {
+            throw createRuntimeCancelledError(chatProvider.name);
+          }
           if (sawCompleted) {
             throw runtimeStreamProtocolError(
               chatProvider.name,
-              "Provider emitted multiple completed events."
+              "Provider emitted an event after completed."
             );
           }
-          if (event.output.message.content !== accumulatedText) {
-            throw runtimeStreamProtocolError(
-              chatProvider.name,
-              "Provider completed output did not match persisted text deltas."
-            );
+
+          if (event.type === "text-delta") {
+            if (!event.text) {
+              throw runtimeStreamProtocolError(
+                chatProvider.name,
+                "Provider emitted an empty text delta."
+              );
+            }
+            if (!assistantCreated && this.options.conversation) {
+              await this.createStreamingAssistantMessage({
+                id: assistantMessageId,
+                sessionId: userEvent.payload.sessionId,
+                traceId: userEvent.traceId,
+                parentMessageId: agentReplyId,
+                content: event.text,
+                createdAt: new Date().toISOString()
+              });
+              assistantCreated = true;
+            } else if (assistantCreated) {
+              await this.appendStreamingAssistantContent(assistantMessageId, event.text);
+            }
+            accumulatedText += event.text;
+            yield {
+              type: "text-delta",
+              text: event.text,
+              messageId: assistantMessageId,
+              sessionId: userEvent.payload.sessionId,
+              traceId: userEvent.traceId
+            };
+            continue;
           }
-          sawCompleted = true;
-          finalOutput = event.output;
-          continue;
+
+          if (event.type === "completed") {
+            if (sawCompleted) {
+              throw runtimeStreamProtocolError(
+                chatProvider.name,
+                "Provider emitted multiple completed events."
+              );
+            }
+            if (event.output.message.content !== accumulatedText) {
+              throw runtimeStreamProtocolError(
+                chatProvider.name,
+                "Provider completed output did not match persisted text deltas."
+              );
+            }
+            sawCompleted = true;
+            finalOutput = event.output;
+            continue;
+          }
+
+          throw runtimeStreamProtocolError(
+            chatProvider.name,
+            "Provider emitted an unknown stream event."
+          );
         }
 
-        throw runtimeStreamProtocolError(
+        if (!finalOutput || !sawCompleted) {
+          throw runtimeStreamProtocolError(
+            chatProvider.name,
+            "Provider stream ended without completion."
+          );
+        }
+
+        const providerMetadata = this.safeProviderCallMetadata(
+          "chat",
           chatProvider.name,
-          "Provider emitted an unknown stream event."
+          finalOutput,
+          chatStatus
         );
-      }
+        if (this.latestPromptPreview) {
+          this.latestPromptPreview = {
+            ...this.latestPromptPreview,
+            providerName: providerMetadata.name,
+            providerModel: providerMetadata.model,
+            providerMock: providerMetadata.mock,
+            providerLatencyMs: finalOutput.latencyMs ?? Math.round(performance.now() - startedAt),
+            providerHealthStatus: providerMetadata.healthStatus,
+            tokenUsage: providerMetadata.tokenUsage,
+            ...this.extractorPreviewFields({
+              ...this.getMemoryExtractorStatus(),
+              used: false
+            })
+          };
+        }
 
-      if (!finalOutput || !sawCompleted) {
-        throw runtimeStreamProtocolError(
-          chatProvider.name,
-          "Provider stream ended without completion."
+        if (this.options.conversation && !assistantCreated) {
+          await this.createStreamingAssistantMessage({
+            id: assistantMessageId,
+            sessionId: userEvent.payload.sessionId,
+            traceId: userEvent.traceId,
+            parentMessageId: agentReplyId,
+            content: accumulatedText,
+            createdAt: new Date().toISOString()
+          });
+          assistantCreated = true;
+        }
+        if (this.options.conversation) {
+          await this.completeStreamingAssistantMessage(assistantMessageId, {
+            provider: providerMetadata,
+            model: providerMetadata.model,
+            tokenUsage: providerMetadata.tokenUsage
+          });
+        }
+
+        const reply = this.createAgentReply(
+          userEvent,
+          finalOutput.message.content,
+          providerMetadata,
+          agentReplyId
         );
-      }
+        await this.options.eventBus.publish(reply);
+        this.recordDirectContextTurn(userEvent, reply);
+        const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
+        await this.options.eventBus.publish(assistantMessage);
 
-      const providerMetadata = this.safeProviderCallMetadata(
-        "chat",
-        chatProvider.name,
-        finalOutput,
-        chatStatus
-      );
-      if (this.latestPromptPreview) {
-        this.latestPromptPreview = {
-          ...this.latestPromptPreview,
-          providerName: providerMetadata.name,
-          providerModel: providerMetadata.model,
-          providerMock: providerMetadata.mock,
-          providerLatencyMs: finalOutput.latencyMs ?? Math.round(performance.now() - startedAt),
-          providerHealthStatus: providerMetadata.healthStatus,
-          tokenUsage: providerMetadata.tokenUsage,
-          ...this.extractorPreviewFields({
-            ...this.getMemoryExtractorStatus(),
-            used: false
-          })
-        };
-      }
-
-      if (this.options.conversation && !assistantCreated) {
-        await this.createStreamingAssistantMessage({
-          id: assistantMessageId,
-          sessionId: userEvent.payload.sessionId,
-          traceId: userEvent.traceId,
-          parentMessageId: agentReplyId,
-          content: accumulatedText,
-          createdAt: new Date().toISOString()
-        });
-        assistantCreated = true;
-      }
-      if (this.options.conversation) {
-        await this.completeStreamingAssistantMessage(assistantMessageId, {
-          provider: providerMetadata,
-          model: providerMetadata.model,
-          tokenUsage: providerMetadata.tokenUsage
-        });
-      }
-
-      const reply = this.createAgentReply(
-        userEvent,
-        finalOutput.message.content,
-        providerMetadata,
-        agentReplyId
-      );
-      await this.options.eventBus.publish(reply);
-      this.recordDirectContextTurn(userEvent, reply);
-      const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
-      await this.options.eventBus.publish(assistantMessage);
-
-      // Final persistence and user-visible events establish the completed reply.
-      // Optional post-processing must not move it back to failed/cancelled or
-      // prevent the Runtime completed event from being delivered.
-      finalized = true;
-      terminalStatus = "completed";
-      if (!options.signal?.aborted) {
+        // Final persistence and user-visible events establish the completed reply.
+        // Optional post-processing must not move it back to failed/cancelled or
+        // prevent the Runtime completed event from being delivered.
+        finalized = true;
+        terminalStatus = "completed";
         try {
           if (memoryOptions.writeMemory) {
             if (
               this.options.memory.isMem0Backend?.() &&
               this.options.memory.storeConversationTurn
             ) {
-              this.scheduleMem0TurnWrite(userEvent, reply, assistantMessageId);
+              // Finalization has succeeded; a later transport abort must not
+              // suppress this finalized semantic-memory lifecycle.
+              void this.scheduleMem0TurnWrite(userEvent, reply, assistantMessageId);
             } else {
-              const extraction = await this.maybeStoreMemory(userEvent, reply, memoryOptions);
+              const extraction = await this.maybeStoreMemoryInternal(
+                userEvent,
+                reply,
+                memoryOptions
+              );
               this.updateLatestPromptPreviewExtraction(extraction);
             }
           } else {
@@ -920,116 +1021,123 @@ export class RuntimeOrchestrator {
             this.errorLogContext(error, reply.traceId)
           );
         }
-      }
-      if (!options.signal?.aborted) {
-        try {
-          await this.maybeSynthesizeSpeech(reply, voiceOutput);
-        } catch (error) {
-          await this.publishRuntimeError("Optional TTS post-processing failed.", error, {
-            traceId: reply.traceId,
-            parentId: reply.id
-          });
-          this.options.logger?.warn?.(
-            "optional TTS post-processing failed",
-            this.errorLogContext(error, reply.traceId)
-          );
-        }
-      }
-      yield {
-        type: "completed",
-        messageId: assistantMessageId,
-        sessionId: userEvent.payload.sessionId,
-        traceId: userEvent.traceId,
-        content: finalOutput.message.content,
-        provider: providerMetadata.finalProvider ?? providerMetadata.name
-      };
-    } catch (error) {
-      failure = error;
-    } finally {
-      controller.abort();
-      try {
-        await providerIterator?.return?.();
-      } catch (closeError) {
-        this.options.logger?.warn?.(
-          "failed to close runtime provider stream",
-          this.errorLogContext(closeError, userEvent.traceId)
-        );
-      }
-
-      if (!finalized) {
-        const cancelled =
-          failure === undefined ||
-          (failure instanceof ProviderError && failure.code === ProviderErrorCode.Cancelled);
-        terminalStatus = cancelled ? "cancelled" : "failed";
-        if (assistantCreated) {
-          await this.failStreamingAssistantMessage(assistantMessageId, terminalStatus, {
-            error:
-              failure instanceof Error ? redactUnsafeText(safeErrorMessage(failure)) : undefined
-          });
-        }
-        if (failure === undefined && terminalStatus === "cancelled") {
-          failure = createRuntimeCancelledError(chatProvider.name);
-        }
-        if (failure !== undefined && !(failure instanceof ConversationPersistenceError)) {
-          if (failure instanceof ProviderError) {
-            await this.publishProviderError(failure, {
-              capability: "chat",
-              provider: chatProvider.name,
-              latencyMs: Math.round(performance.now() - startedAt),
-              traceId: userEvent.traceId,
-              parentId: userEvent.id
+        if (!options.signal?.aborted) {
+          try {
+            await this.maybeSynthesizeSpeech(reply, voiceOutput);
+          } catch (error) {
+            await this.publishRuntimeError("Optional TTS post-processing failed.", error, {
+              traceId: reply.traceId,
+              parentId: reply.id
             });
-          } else {
-            await this.publishRuntimeError("Runtime stream failed.", failure, {
-              traceId: userEvent.traceId,
-              parentId: userEvent.id,
-              category: "stream"
-            });
+            this.options.logger?.warn?.(
+              "optional TTS post-processing failed",
+              this.errorLogContext(error, reply.traceId)
+            );
           }
         }
-      }
-      options.signal?.removeEventListener("abort", onAbort);
-    }
+        yield {
+          type: "completed",
+          messageId: assistantMessageId,
+          sessionId: userEvent.payload.sessionId,
+          traceId: userEvent.traceId,
+          content: finalOutput.message.content,
+          provider: providerMetadata.finalProvider ?? providerMetadata.name
+        };
+      } catch (error) {
+        failure = error;
+      } finally {
+        controller.abort();
+        try {
+          await providerIterator?.return?.();
+        } catch (closeError) {
+          this.options.logger?.warn?.(
+            "failed to close runtime provider stream",
+            this.errorLogContext(closeError, userEvent.traceId)
+          );
+        }
 
-    if (failure !== undefined) {
-      throw failure;
+        if (!finalized) {
+          const cancelled =
+            failure === undefined ||
+            (failure instanceof ProviderError && failure.code === ProviderErrorCode.Cancelled);
+          terminalStatus = cancelled ? "cancelled" : "failed";
+          if (assistantCreated) {
+            await this.failStreamingAssistantMessage(assistantMessageId, terminalStatus, {
+              error:
+                failure instanceof Error ? redactUnsafeText(safeErrorMessage(failure)) : undefined
+            });
+          }
+          if (failure === undefined && terminalStatus === "cancelled") {
+            failure = createRuntimeCancelledError(chatProvider.name);
+          }
+          if (failure !== undefined && !(failure instanceof ConversationPersistenceError)) {
+            if (failure instanceof ProviderError) {
+              await this.publishProviderError(failure, {
+                capability: "chat",
+                provider: chatProvider.name,
+                latencyMs: Math.round(performance.now() - startedAt),
+                traceId: userEvent.traceId,
+                parentId: userEvent.id
+              });
+            } else {
+              await this.publishRuntimeError("Runtime stream failed.", failure, {
+                traceId: userEvent.traceId,
+                parentId: userEvent.id,
+                category: "stream"
+              });
+            }
+          }
+        }
+        options.signal?.removeEventListener("abort", onAbort);
+      }
+
+      if (failure !== undefined) {
+        throw failure;
+      }
+    } finally {
+      this.exitLifecycleOperation();
     }
   }
 
   async handleAudioInput(input: HandleAudioInputInput): Promise<AgentReplyEvent> {
-    const sttProvider = this.options.providers.getSTTProvider();
-    const transcript = await this.measureProvider(
-      "stt",
-      sttProvider.name,
-      () => sttProvider.transcribeAudio(input),
-      { traceId: input.traceId, parentId: input.parentId }
-    );
+    this.enterLifecycleOperation();
+    try {
+      const sttProvider = this.options.providers.getSTTProvider();
+      const transcript = await this.measureProvider(
+        "stt",
+        sttProvider.name,
+        () => sttProvider.transcribeAudio(input),
+        { traceId: input.traceId, parentId: input.parentId }
+      );
 
-    const transcriptEvent = createEvent(
-      "user.voice.transcript",
-      {
-        sessionId: input.sessionId,
-        content: transcript.text,
-        language: transcript.language,
-        confidence: transcript.confidence,
-        ...identityPayload(input)
-      },
-      {
-        traceId: input.traceId,
-        parentId: input.parentId
-      }
-    );
+      const transcriptEvent = createEvent(
+        "user.voice.transcript",
+        {
+          sessionId: input.sessionId,
+          content: transcript.text,
+          language: transcript.language,
+          confidence: transcript.confidence,
+          ...identityPayload(input)
+        },
+        {
+          traceId: input.traceId,
+          parentId: input.parentId
+        }
+      );
 
-    await this.options.eventBus.publish(transcriptEvent);
-    const reply = await this.generateReply(transcriptEvent, {
-      voiceOutput: Boolean(input.voiceOutput),
-      readMemory: true,
-      writeMemory: true
-    });
-    this.recordDirectContextTurn(transcriptEvent, reply);
-    await this.maybeStoreMemory(transcriptEvent, reply);
-    await this.maybeSynthesizeSpeech(reply, Boolean(input.voiceOutput));
-    return reply;
+      await this.options.eventBus.publish(transcriptEvent);
+      const reply = await this.generateReply(transcriptEvent, {
+        voiceOutput: Boolean(input.voiceOutput),
+        readMemory: true,
+        writeMemory: true
+      });
+      this.recordDirectContextTurn(transcriptEvent, reply);
+      await this.maybeStoreMemoryInternal(transcriptEvent, reply);
+      await this.maybeSynthesizeSpeech(reply, Boolean(input.voiceOutput));
+      return reply;
+    } finally {
+      this.exitLifecycleOperation();
+    }
   }
 
   async handleImageInput(input: HandleImageInputInput): Promise<PerceptionVisionEvent> {
@@ -1293,7 +1401,12 @@ export class RuntimeOrchestrator {
       };
     }
 
-    const reply = this.createAgentReply(event, output.message.content, providerMetadata);
+    const reply = this.createAgentReply(
+      event,
+      output.message.content,
+      providerMetadata,
+      canonicalAgentReplyId(event)
+    );
     if (options.publishAgentReply !== false) {
       await this.options.eventBus.publish(reply);
     }
@@ -1350,29 +1463,92 @@ export class RuntimeOrchestrator {
     sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
     reply: AgentReplyEvent,
     assistantMessageId?: string
-  ): void {
+  ): Promise<MemoryConversationTurnWriteResult> {
+    if (this.lifecycleState === "disposed") {
+      const result: MemoryConversationTurnWriteResult = {
+        status: "failed",
+        ok: false,
+        attemptedCount: 0,
+        writtenCount: 0,
+        rejectedCount: 1,
+        deduplicatedCount: 0,
+        skippedCount: 0,
+        errorCode: "RUNTIME_LIFECYCLE_DISPOSED",
+        skippedReason: "Finalized memory write attempted after runtime disposal."
+      };
+      this.options.logger?.error?.("finalized memory write attempted after runtime disposal", {
+        traceId: reply.traceId,
+        assistantMessageId: assistantMessageId ?? canonicalAssistantMessageId(sourceEvent)
+      });
+      return Promise.resolve(result);
+    }
     const store = this.options.memory.storeConversationTurn;
     if (!store) {
-      return;
+      return Promise.resolve({
+        status: "failed",
+        ok: false,
+        attemptedCount: 0,
+        writtenCount: 0,
+        rejectedCount: 0,
+        deduplicatedCount: 0,
+        skippedCount: 0,
+        skippedReason: "Mem0 backend has no storeConversationTurn handler.",
+        errorCode: "MEMORY_HANDLER_MISSING"
+      });
     }
+    const canonicalAssistantId = assistantMessageId ?? canonicalAssistantMessageId(sourceEvent);
+    const idempotencyKey = finalizedTurnIdempotencyKey(canonicalAssistantId);
+    const existing = this.finalizedMemoryWrites.get(idempotencyKey);
+    if (existing) {
+      return existing;
+    }
+
     // Skip cancelled/empty assistant content — streaming failure must not write.
     const assistantText = reply.payload.content?.trim() ?? "";
     if (!assistantText) {
+      const skipped = Promise.resolve<MemoryConversationTurnWriteResult>({
+        status: "skipped",
+        ok: false,
+        attemptedCount: 0,
+        writtenCount: 0,
+        rejectedCount: 0,
+        deduplicatedCount: 0,
+        skippedCount: 1,
+        skippedReason: "Mem0 write skipped: empty or failed assistant turn.",
+        idempotencyKey
+      });
+      this.finalizedMemoryWrites.set(idempotencyKey, skipped);
       this.updateLatestPromptPreviewExtraction({
         ...this.getMemoryExtractorStatus(),
         used: false,
-        skippedReason: "Mem0 write skipped: empty or failed assistant turn."
+        skippedReason: "Mem0 write skipped: empty or failed assistant turn.",
+        memoryWriteStatus: "skipped",
+        memoryWriteIdempotencyKey: idempotencyKey
       });
-      return;
+      return skipped;
     }
     // Explicit forget is handled on the read path only; never schedule add.
     if (detectExplicitForgetRequest(sourceEvent.payload.content)) {
+      const skipped = Promise.resolve<MemoryConversationTurnWriteResult>({
+        status: "skipped",
+        ok: false,
+        attemptedCount: 0,
+        writtenCount: 0,
+        rejectedCount: 0,
+        deduplicatedCount: 0,
+        skippedCount: 1,
+        skippedReason: "Mem0 write skipped: explicit_forget turn.",
+        idempotencyKey
+      });
+      this.finalizedMemoryWrites.set(idempotencyKey, skipped);
       this.updateLatestPromptPreviewExtraction({
         ...this.getMemoryExtractorStatus(),
         used: false,
-        skippedReason: "Mem0 write skipped: explicit_forget turn."
+        skippedReason: "Mem0 write skipped: explicit_forget turn.",
+        memoryWriteStatus: "skipped",
+        memoryWriteIdempotencyKey: idempotencyKey
       });
-      return;
+      return skipped;
     }
     const isRemember = detectExplicitRememberRequest(sourceEvent.payload.content);
     this.updateLatestPromptPreviewExtraction({
@@ -1383,42 +1559,130 @@ export class RuntimeOrchestrator {
       rejectedCount: 0,
       rejectedReasons: [],
       candidates: [],
+      memoryWriteStatus: "pending",
+      memoryWriteIdempotencyKey: idempotencyKey,
       skippedReason: isRemember
-        ? "Mem0 async factual write scheduled (explicit user claim)."
-        : "Mem0 async factual write scheduled."
+        ? "Mem0 finalized factual write pending (explicit user claim)."
+        : "Mem0 finalized factual write pending."
     });
-    void store({
-      userMessage: sourceEvent.payload.content,
-      assistantMessage: assistantText,
-      sessionId: sourceEvent.payload.sessionId,
-      personaId: sourceEvent.payload.personaId,
-      subjectUserId: sourceEvent.payload.subjectUserId,
-      userMessageId: sourceEvent.id,
-      assistantMessageId: assistantMessageId ?? reply.id,
-      traceId: sourceEvent.traceId,
-      conversationId: sourceEvent.payload.sessionId
-    })
-      .then((result) => {
+    let lifecyclePromise: Promise<MemoryConversationTurnWriteResult>;
+    lifecyclePromise = Promise.resolve()
+      .then(() =>
+        store({
+          userMessage: sourceEvent.payload.content,
+          assistantMessage: assistantText,
+          sessionId: sourceEvent.payload.sessionId,
+          personaId: sourceEvent.payload.personaId,
+          subjectUserId: sourceEvent.payload.subjectUserId,
+          userMessageId: sourceEvent.id,
+          assistantMessageId: canonicalAssistantId,
+          traceId: sourceEvent.traceId,
+          idempotencyKey,
+          conversationId: sourceEvent.payload.sessionId
+        })
+      )
+      .then(async (result) => {
+        this.updateLatestPromptPreviewExtraction({
+          ...this.getMemoryExtractorStatus(),
+          used: result.status !== "skipped",
+          candidateCount: result.attemptedCount,
+          storedMemoryCount: result.writtenCount + result.deduplicatedCount,
+          rejectedCount: result.rejectedCount,
+          rejectedReasons: result.rejectedReasons ?? [],
+          candidates: [],
+          memoryWriteStatus: result.status,
+          memoryWriteAttemptedCount: result.attemptedCount,
+          memoryWriteWrittenCount: result.writtenCount,
+          memoryWriteRejectedCount: result.rejectedCount,
+          memoryWriteDeduplicatedCount: result.deduplicatedCount,
+          memoryWriteSkippedCount: result.skippedCount,
+          memoryWriteIdempotencyKey: idempotencyKey,
+          ...(result.skippedReason ? { skippedReason: result.skippedReason } : {})
+        });
+        if (result.status === "partial" || result.status === "failed") {
+          const error = new Error(
+            result.skippedReason ?? `Finalized memory write ${result.status}.`
+          );
+          this.options.logger?.warn?.(
+            "finalized semantic memory write did not complete",
+            this.errorLogContext(error, reply.traceId)
+          );
+          await this.publishRuntimeError("Finalized semantic memory ingestion failed.", error, {
+            traceId: reply.traceId,
+            parentId: canonicalAssistantId,
+            category: "memory",
+            operation: "finalized_turn_ingestion"
+          });
+        }
+        return result;
+      })
+      .catch(async (error: unknown) => {
+        const result: MemoryConversationTurnWriteResult = {
+          status: "failed",
+          ok: false,
+          attemptedCount: 0,
+          writtenCount: 0,
+          rejectedCount: 1,
+          deduplicatedCount: 0,
+          skippedCount: 0,
+          skippedReason: safeErrorMessage(error),
+          errorCode: "MEMORY_INGESTION_FAILED",
+          idempotencyKey
+        };
         this.updateLatestPromptPreviewExtraction({
           ...this.getMemoryExtractorStatus(),
           used: true,
-          candidateCount: 1,
-          storedMemoryCount: result.ok ? 1 : 0,
-          rejectedCount: result.ok ? 0 : 1,
-          rejectedReasons: result.ok ? [] : [result.skippedReason ?? "mem0-write-failed"],
+          candidateCount: 0,
+          storedMemoryCount: 0,
+          rejectedCount: 1,
+          rejectedReasons: [result.errorCode ?? "MEMORY_INGESTION_FAILED"],
           candidates: [],
-          ...(result.ok ? {} : { skippedReason: result.skippedReason ?? "Mem0 turn write failed." })
+          memoryWriteStatus: "failed",
+          memoryWriteAttemptedCount: 0,
+          memoryWriteWrittenCount: 0,
+          memoryWriteRejectedCount: 1,
+          memoryWriteDeduplicatedCount: 0,
+          memoryWriteSkippedCount: 0,
+          memoryWriteIdempotencyKey: idempotencyKey,
+          ...(result.skippedReason ? { skippedReason: result.skippedReason } : {})
         });
-      })
-      .catch((error: unknown) => {
         this.options.logger?.warn?.(
-          "mem0 async turn write failed",
+          "finalized semantic memory write failed",
           this.errorLogContext(error, reply.traceId)
         );
+        await this.publishRuntimeError("Finalized semantic memory ingestion failed.", error, {
+          traceId: reply.traceId,
+          parentId: canonicalAssistantId,
+          category: "memory",
+          operation: "finalized_turn_ingestion"
+        });
+        return result;
+      })
+      .finally(() => {
+        this.pendingMemoryWrites.delete(lifecyclePromise);
       });
+    this.finalizedMemoryWrites.set(idempotencyKey, lifecyclePromise);
+    this.pendingMemoryWrites.add(lifecyclePromise);
+    return lifecyclePromise;
   }
 
   async maybeStoreMemory(
+    sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
+    reply: AgentReplyEvent,
+    memoryOptions: { readMemory: boolean; writeMemory: boolean } = {
+      readMemory: true,
+      writeMemory: true
+    }
+  ): Promise<MemoryExtractionRuntimeDebug> {
+    this.enterLifecycleOperation();
+    try {
+      return await this.maybeStoreMemoryInternal(sourceEvent, reply, memoryOptions);
+    } finally {
+      this.exitLifecycleOperation();
+    }
+  }
+
+  private async maybeStoreMemoryInternal(
     sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
     reply: AgentReplyEvent,
     memoryOptions: { readMemory: boolean; writeMemory: boolean } = {
@@ -1440,19 +1704,25 @@ export class RuntimeOrchestrator {
             userMessageId: sourceEvent.id,
             assistantMessageId: reply.id,
             traceId: sourceEvent.traceId,
+            idempotencyKey: finalizedTurnIdempotencyKey(reply.id),
             conversationId: sourceEvent.payload.sessionId
           });
           return {
             ...initialExtractorStatus,
-            used: true,
-            candidateCount: 1,
-            storedMemoryCount: result.ok ? 1 : 0,
-            rejectedCount: result.ok ? 0 : 1,
-            rejectedReasons: result.ok ? [] : [result.skippedReason ?? "mem0-write-failed"],
+            used: result.status !== "skipped",
+            candidateCount: result.attemptedCount,
+            storedMemoryCount: result.writtenCount + result.deduplicatedCount,
+            rejectedCount: result.rejectedCount,
+            rejectedReasons: result.rejectedReasons ?? [],
             candidates: [],
-            ...(result.ok
-              ? {}
-              : { skippedReason: result.skippedReason ?? "Mem0 turn write failed." })
+            memoryWriteStatus: result.status,
+            memoryWriteAttemptedCount: result.attemptedCount,
+            memoryWriteWrittenCount: result.writtenCount,
+            memoryWriteRejectedCount: result.rejectedCount,
+            memoryWriteDeduplicatedCount: result.deduplicatedCount,
+            memoryWriteSkippedCount: result.skippedCount,
+            ...(result.idempotencyKey ? { memoryWriteIdempotencyKey: result.idempotencyKey } : {}),
+            ...(result.skippedReason ? { skippedReason: result.skippedReason } : {})
           };
         }
         return {
@@ -1583,7 +1853,12 @@ export class RuntimeOrchestrator {
     content: string,
     provider?: SafeProviderCallMetadata | undefined
   ): Promise<AgentReplyEvent> {
-    const reply = this.createAgentReply(sourceEvent, content, provider);
+    const reply = this.createAgentReply(
+      sourceEvent,
+      content,
+      provider,
+      canonicalAgentReplyId(sourceEvent)
+    );
     await this.options.eventBus.publish(reply);
     return reply;
   }
@@ -1630,9 +1905,10 @@ export class RuntimeOrchestrator {
 
   private async publishAssistantMessage(
     sourceEvent: UserMessageEvent,
-    reply: AgentReplyEvent
+    reply: AgentReplyEvent,
+    assistantMessageId?: string
   ): Promise<AssistantMessageEvent> {
-    const assistantMessage = this.createAssistantMessageEvent(reply);
+    const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
 
     try {
       await this.options.conversation?.appendMessage(
@@ -2349,6 +2625,13 @@ export class RuntimeOrchestrator {
     | "validationIssues"
     | "memoryCandidates"
     | "memoryExtractionSkippedReason"
+    | "memoryWriteStatus"
+    | "memoryWriteAttemptedCount"
+    | "memoryWriteWrittenCount"
+    | "memoryWriteRejectedCount"
+    | "memoryWriteDeduplicatedCount"
+    | "memoryWriteSkippedCount"
+    | "memoryWriteIdempotencyKey"
   > {
     return {
       memoryExtractorMode: debug.mode,
@@ -2364,7 +2647,26 @@ export class RuntimeOrchestrator {
       ...(debug.error ? { llmExtractionError: debug.error } : {}),
       ...(debug.rawPreview ? { llmExtractionRawPreview: debug.rawPreview } : {}),
       ...(debug.validationIssues ? { validationIssues: debug.validationIssues } : {}),
-      ...(debug.skippedReason ? { memoryExtractionSkippedReason: debug.skippedReason } : {})
+      ...(debug.skippedReason ? { memoryExtractionSkippedReason: debug.skippedReason } : {}),
+      ...(debug.memoryWriteStatus ? { memoryWriteStatus: debug.memoryWriteStatus } : {}),
+      ...(debug.memoryWriteAttemptedCount !== undefined
+        ? { memoryWriteAttemptedCount: debug.memoryWriteAttemptedCount }
+        : {}),
+      ...(debug.memoryWriteWrittenCount !== undefined
+        ? { memoryWriteWrittenCount: debug.memoryWriteWrittenCount }
+        : {}),
+      ...(debug.memoryWriteRejectedCount !== undefined
+        ? { memoryWriteRejectedCount: debug.memoryWriteRejectedCount }
+        : {}),
+      ...(debug.memoryWriteDeduplicatedCount !== undefined
+        ? { memoryWriteDeduplicatedCount: debug.memoryWriteDeduplicatedCount }
+        : {}),
+      ...(debug.memoryWriteSkippedCount !== undefined
+        ? { memoryWriteSkippedCount: debug.memoryWriteSkippedCount }
+        : {}),
+      ...(debug.memoryWriteIdempotencyKey
+        ? { memoryWriteIdempotencyKey: debug.memoryWriteIdempotencyKey }
+        : {})
     };
   }
 
@@ -2419,6 +2721,13 @@ type MemoryExtractionRuntimeDebug = MemoryExtractorStatus & {
   storedMemoryCount?: number | undefined;
   skippedReason?: string | undefined;
   candidates?: RuntimeMemoryCandidateReview[] | undefined;
+  memoryWriteStatus?: RuntimeMemoryWriteStatus | undefined;
+  memoryWriteAttemptedCount?: number | undefined;
+  memoryWriteWrittenCount?: number | undefined;
+  memoryWriteRejectedCount?: number | undefined;
+  memoryWriteDeduplicatedCount?: number | undefined;
+  memoryWriteSkippedCount?: number | undefined;
+  memoryWriteIdempotencyKey?: string | undefined;
 };
 
 type MemoryContext = {
@@ -2912,6 +3221,22 @@ function isRuntimeUserMessageEvent(
   input: UserMessageEvent | HandleUserMessageInput
 ): input is UserMessageEvent {
   return "type" in input && input.type === "user.message";
+}
+
+/** Stable assistant identity for a finalized runtime turn. */
+function canonicalAssistantMessageId(
+  sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent
+): string {
+  return `assistant:${sourceEvent.id}`;
+}
+
+/** Stable compatibility reply identity for the same finalized runtime turn. */
+function canonicalAgentReplyId(sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent): string {
+  return `reply:${sourceEvent.id}`;
+}
+
+function finalizedTurnIdempotencyKey(assistantMessageId: string): string {
+  return `yuvi:finalized-turn:${assistantMessageId}`;
 }
 
 function isSafeProviderCallMetadata(value: unknown): value is SafeProviderCallMetadata {

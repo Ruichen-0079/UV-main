@@ -239,7 +239,7 @@ export async function registerSettingsRoutes(
     }
 
     const effectiveEnv = await readEffectiveRuntimeEnv(app);
-    const result = context.reloadRuntimeConfig(effectiveEnv);
+    const result = await context.reloadRuntimeConfig(effectiveEnv);
     const settings = await buildRuntimeSettings(context, config);
 
     return reply.send({

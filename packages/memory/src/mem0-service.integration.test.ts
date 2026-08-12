@@ -172,7 +172,8 @@ describe("MemoryService mem0 mode", () => {
       subjectUserId: "user-a",
       personaId: "alice",
       sessionId: "conv-1",
-      traceId: "t1"
+      traceId: "t1",
+      idempotencyKey: "turn-1"
     });
     expect(result.ok).toBe(true);
     expect(backend.add).toHaveBeenCalledOnce();
@@ -184,6 +185,57 @@ describe("MemoryService mem0 mode", () => {
     expect(call.metadata?.userId).toBe("user-a");
     expect(call.metadata?.characterId).toBe("alice");
     expect(call.metadata?.schemaVersion).toBe(1);
+    expect(call.metadata?.["yuviIngestionKey"]).toBe("turn-1");
+    expect(result.status).toBe("complete");
+    expect(result.attemptedCount).toBe(1);
+    expect(result.writtenCount).toBe(1);
+  });
+
+  it("reports partial persistence when one extracted event is rejected", async () => {
+    const backend = createMockBackend({
+      add: vi
+        .fn()
+        .mockResolvedValueOnce({ memoryId: "m1", operation: "created" as const })
+        .mockRejectedValueOnce(new Error("second event failed"))
+    });
+    const policy = {
+      build: vi.fn(async () => ({
+        turnKind: "normal" as const,
+        events: [
+          { kind: "fact" as const, content: "fact one", scope: buildMemoryScope("u", "p") },
+          { kind: "fact" as const, content: "fact two", scope: buildMemoryScope("u", "p") }
+        ]
+      }))
+    };
+    const service = new MemoryService(
+      new InMemoryMemoryRepository(),
+      undefined,
+      undefined,
+      undefined,
+      { enabled: false },
+      { kind: "mem0", mem0: backend, ingestionPolicy: policy }
+    );
+
+    const result = await service.storeConversationTurn({
+      userMessage: "I prefer concise replies.",
+      assistantMessage: "Noted.",
+      subjectUserId: "u",
+      personaId: "p",
+      idempotencyKey: "turn-1"
+    });
+
+    expect(result).toMatchObject({
+      status: "partial",
+      ok: false,
+      attemptedCount: 2,
+      writtenCount: 1,
+      rejectedCount: 1,
+      deduplicatedCount: 0,
+      skippedCount: 0,
+      idempotencyKey: "turn-1"
+    });
+    expect(result.rejectedReasons).toEqual(["MEMORY_WRITE_FAILED"]);
+    expect(backend.add).toHaveBeenCalledTimes(2);
   });
 
   it("writes explicit remember with infer=false", async () => {
