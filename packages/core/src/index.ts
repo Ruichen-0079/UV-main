@@ -14,7 +14,9 @@ import type {
   MemoryRetrievalResult,
   MemoryRetrievalStatus,
   RetrievedMemoryDebug,
-  MemoryConversationTurnWriteResult
+  MemoryConversationTurnWriteResult,
+  FinalizedIngestionAdmission,
+  FinalizedIngestionPort
 } from "@companion/memory";
 import {
   detectCurrentAffect,
@@ -81,6 +83,7 @@ export type RuntimeOrchestratorOptions = {
   promptBuilder: RuntimePromptBuilderPort;
   providers: ProviderResolver;
   conversation?: ConversationRepository | undefined;
+  finalizedIngestion?: FinalizedIngestionPort | undefined;
   memoryRepository?: string | undefined;
   directContext?: Partial<DirectContextConfig> | undefined;
   memoryContextBuilder?: Pick<MemoryContextBuilder, "build"> | undefined;
@@ -481,6 +484,11 @@ export class RuntimeOrchestrator {
   private readonly pendingMemoryWrites = new Set<Promise<MemoryConversationTurnWriteResult>>();
   private readonly directContextConfig: DirectContextConfig;
   private readonly memoryContextBuilder: Pick<MemoryContextBuilder, "build">;
+  private readonly finalizedTurnIds = new Map<string, Promise<string>>();
+  private readonly finalizedAdmissions = new Map<
+    string,
+    Promise<FinalizedIngestionAdmission | null>
+  >();
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
     this.directContextConfig = normalizeDirectContextConfig(options.directContext);
@@ -753,12 +761,24 @@ export class RuntimeOrchestrator {
       // Persist the final text before publishing either reply event to transports. Later
       // direct-context, memory, and TTS side effects must not duplicate or retract it.
       const assistantMessageId = canonicalAssistantMessageId(userEvent);
-      await this.publishAssistantMessage(userEvent, reply, assistantMessageId);
+      const finalizedTurnId = await this.resolveFinalizedTurnId(userEvent, assistantMessageId);
+      const ingestionDecision = this.durableIngestionDecision(memoryOptions.writeMemory);
+      await this.publishAssistantMessage(
+        userEvent,
+        reply,
+        assistantMessageId,
+        finalizedTurnId,
+        ingestionDecision.requested,
+        ingestionDecision.skipReason
+      );
       if (memoryOptions.writeMemory) {
         // Mem0 ingestion is tracked separately from assistant success and drained
         // by the owning server before its repositories close.
-        if (this.options.memory.isMem0Backend?.() && this.options.memory.storeConversationTurn) {
-          void this.scheduleMem0TurnWrite(userEvent, reply, assistantMessageId);
+        if (
+          this.options.memory.isMem0Backend?.() &&
+          (this.options.memory.storeConversationTurn || this.options.finalizedIngestion)
+        ) {
+          void this.scheduleMem0TurnWrite(userEvent, reply, assistantMessageId, finalizedTurnId);
         } else {
           const extraction = await this.maybeStoreMemoryInternal(userEvent, reply, memoryOptions);
           this.updateLatestPromptPreviewExtraction(extraction);
@@ -804,6 +824,7 @@ export class RuntimeOrchestrator {
           );
       const agentReplyId = canonicalAgentReplyId(userEvent);
       const assistantMessageId = canonicalAssistantMessageId(userEvent);
+      let finalizedTurnId = await this.resolveFinalizedTurnId(userEvent, assistantMessageId);
       const voiceOutput = isRuntimeUserMessageEvent(input)
         ? Boolean(options.voiceOutput)
         : Boolean(input.voiceOutput ?? options.voiceOutput);
@@ -817,6 +838,7 @@ export class RuntimeOrchestrator {
         readMemory: options.readMemory,
         writeMemory: options.writeMemory
       });
+      const ingestionDecision = this.durableIngestionDecision(memoryOptions.writeMemory);
 
       const chatProvider = this.options.providers.getChatProvider();
       const chatStatus = this.getProviderStatus("chat");
@@ -964,11 +986,27 @@ export class RuntimeOrchestrator {
           assistantCreated = true;
         }
         if (this.options.conversation) {
-          await this.completeStreamingAssistantMessage(assistantMessageId, {
-            provider: providerMetadata,
-            model: providerMetadata.model,
-            tokenUsage: providerMetadata.tokenUsage
-          });
+          await this.completeStreamingAssistantMessage(
+            assistantMessageId,
+            {
+              provider: providerMetadata,
+              model: providerMetadata.model,
+              tokenUsage: providerMetadata.tokenUsage
+            },
+            {
+              finalizedTurnId,
+              sourceUserEventId: userEvent.id,
+              personaId: userEvent.payload.personaId ?? null,
+              subjectUserId: userEvent.payload.subjectUserId ?? null,
+              ingestionRequested: ingestionDecision.requested === true,
+              ingestionSkipReason: ingestionDecision.skipReason
+            }
+          );
+          const persistedAssistant =
+            await this.options.conversation?.getMessageById?.(assistantMessageId);
+          if (persistedAssistant?.finalizedTurnId) {
+            finalizedTurnId = persistedAssistant.finalizedTurnId;
+          }
         }
 
         const reply = this.createAgentReply(
@@ -977,6 +1015,33 @@ export class RuntimeOrchestrator {
           providerMetadata,
           agentReplyId
         );
+        try {
+          await this.ensureFinalizedAdmission({
+            finalizedTurnId,
+            assistantMessageId,
+            sourceUserEventId: userEvent.id,
+            conversationId: userEvent.payload.sessionId,
+            traceId: userEvent.traceId,
+            personaId: userEvent.payload.personaId,
+            subjectUserId: userEvent.payload.subjectUserId,
+            finalizedAt: reply.timestamp,
+            ingestionRequested: ingestionDecision.requested === true,
+            userMessage: userEvent.payload.content,
+            assistantMessage: reply.payload.content,
+            sessionId: userEvent.payload.sessionId
+          });
+        } catch (error) {
+          await this.publishRuntimeError("Durable ingestion admission failed.", error, {
+            traceId: reply.traceId,
+            parentId: assistantMessageId,
+            category: "memory",
+            operation: "finalized_ingestion_admission"
+          });
+          this.options.logger?.warn?.(
+            "durable ingestion admission failed after assistant finalization",
+            this.errorLogContext(error, reply.traceId)
+          );
+        }
         await this.options.eventBus.publish(reply);
         this.recordDirectContextTurn(userEvent, reply);
         const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
@@ -991,11 +1056,16 @@ export class RuntimeOrchestrator {
           if (memoryOptions.writeMemory) {
             if (
               this.options.memory.isMem0Backend?.() &&
-              this.options.memory.storeConversationTurn
+              (this.options.memory.storeConversationTurn || this.options.finalizedIngestion)
             ) {
               // Finalization has succeeded; a later transport abort must not
               // suppress this finalized semantic-memory lifecycle.
-              void this.scheduleMem0TurnWrite(userEvent, reply, assistantMessageId);
+              void this.scheduleMem0TurnWrite(
+                userEvent,
+                reply,
+                assistantMessageId,
+                finalizedTurnId
+              );
             } else {
               const extraction = await this.maybeStoreMemoryInternal(
                 userEvent,
@@ -1459,10 +1529,11 @@ export class RuntimeOrchestrator {
     }
   }
 
-  private scheduleMem0TurnWrite(
+  private async scheduleMem0TurnWrite(
     sourceEvent: UserMessageEvent | UserVoiceTranscriptEvent,
     reply: AgentReplyEvent,
-    assistantMessageId?: string
+    assistantMessageId?: string,
+    finalizedTurnId?: string
   ): Promise<MemoryConversationTurnWriteResult> {
     if (this.lifecycleState === "disposed") {
       const result: MemoryConversationTurnWriteResult = {
@@ -1483,7 +1554,7 @@ export class RuntimeOrchestrator {
       return Promise.resolve(result);
     }
     const store = this.options.memory.storeConversationTurn;
-    if (!store) {
+    if (!store && !this.options.finalizedIngestion) {
       return Promise.resolve({
         status: "failed",
         ok: false,
@@ -1497,6 +1568,10 @@ export class RuntimeOrchestrator {
       });
     }
     const canonicalAssistantId = assistantMessageId ?? canonicalAssistantMessageId(sourceEvent);
+    const durableFinalizedTurnId =
+      finalizedTurnId ??
+      (await this.finalizedTurnIds.get(canonicalAssistantId)) ??
+      `legacy-finalized-turn:${canonicalAssistantId}`;
     const idempotencyKey = finalizedTurnIdempotencyKey(canonicalAssistantId);
     const existing = this.finalizedMemoryWrites.get(idempotencyKey);
     if (existing) {
@@ -1567,20 +1642,140 @@ export class RuntimeOrchestrator {
     });
     let lifecyclePromise: Promise<MemoryConversationTurnWriteResult>;
     lifecyclePromise = Promise.resolve()
-      .then(() =>
-        store({
-          userMessage: sourceEvent.payload.content,
-          assistantMessage: assistantText,
-          sessionId: sourceEvent.payload.sessionId,
+      .then(async (): Promise<MemoryConversationTurnWriteResult> => {
+        const admitted = await this.ensureFinalizedAdmission({
+          finalizedTurnId: durableFinalizedTurnId,
+          assistantMessageId: canonicalAssistantId,
+          sourceUserEventId: sourceEvent.id,
+          conversationId: sourceEvent.payload.sessionId,
+          traceId: sourceEvent.traceId,
           personaId: sourceEvent.payload.personaId,
           subjectUserId: sourceEvent.payload.subjectUserId,
-          userMessageId: sourceEvent.id,
-          assistantMessageId: canonicalAssistantId,
-          traceId: sourceEvent.traceId,
-          idempotencyKey,
-          conversationId: sourceEvent.payload.sessionId
-        })
-      )
+          finalizedAt: reply.timestamp,
+          ingestionRequested: true,
+          userMessage: sourceEvent.payload.content,
+          assistantMessage: assistantText,
+          sessionId: sourceEvent.payload.sessionId
+        });
+        if (!admitted || !this.options.finalizedIngestion) {
+          if (!store) {
+            throw new Error("Semantic memory store handler is unavailable.");
+          }
+          return store({
+            userMessage: sourceEvent.payload.content,
+            assistantMessage: assistantText,
+            sessionId: sourceEvent.payload.sessionId,
+            personaId: sourceEvent.payload.personaId,
+            subjectUserId: sourceEvent.payload.subjectUserId,
+            userMessageId: sourceEvent.id,
+            assistantMessageId: canonicalAssistantId,
+            traceId: sourceEvent.traceId,
+            idempotencyKey,
+            conversationId: sourceEvent.payload.sessionId
+          });
+        }
+        if (admitted.turn.status === "skipped") {
+          return {
+            status: "skipped",
+            ok: false,
+            attemptedCount: 0,
+            writtenCount: 0,
+            rejectedCount: 0,
+            deduplicatedCount: 0,
+            skippedCount: 1,
+            skippedReason: admitted.turn.ingestionSkipReason ?? "ledger-skipped",
+            idempotencyKey
+          };
+        }
+        if (admitted.turn.status === "terminal_failed") {
+          return {
+            status: "failed",
+            ok: false,
+            attemptedCount: 0,
+            writtenCount: 0,
+            rejectedCount: 1,
+            deduplicatedCount: 0,
+            skippedCount: 0,
+            skippedReason:
+              admitted.turn.lastErrorMessage ?? "Finalized ingestion admission failed.",
+            errorCode: admitted.turn.lastErrorCode ?? "FINALIZED_INGESTION_ADMISSION_FAILED",
+            idempotencyKey
+          };
+        }
+        let writtenCount = 0;
+        let deduplicatedCount = 0;
+        let rejectedCount = 0;
+        let unresolved = false;
+        for (const event of admitted.events.filter(
+          (candidate) =>
+            candidate.status === "pending" ||
+            candidate.status === "processing" ||
+            candidate.status === "retryable_failed"
+        )) {
+          const claimed = await this.options.finalizedIngestion.claimEvent({
+            finalizedTurnId: durableFinalizedTurnId,
+            eventId: event.eventId,
+            leaseOwner: `runtime:${crypto.randomUUID()}`,
+            leaseSeconds: 300,
+            expectedVersion: event.version
+          });
+          if (!claimed) {
+            unresolved = true;
+            continue;
+          }
+          try {
+            const outcome = await this.options.memory.getMemoryProvider?.()?.writeEvent({
+              ...event.eventPayload,
+              idempotencyKey: event.backendIdempotencyKey
+            });
+            if (!outcome) {
+              throw new Error("Semantic memory provider is unavailable.");
+            }
+            await this.options.finalizedIngestion.recordEventOutcome({
+              finalizedTurnId: durableFinalizedTurnId,
+              eventId: event.eventId,
+              outcome,
+              expectedVersion: claimed.version
+            });
+            if (outcome.status === "written") writtenCount += 1;
+            else if (outcome.status === "unchanged") deduplicatedCount += 1;
+            else rejectedCount += 1;
+          } catch (error) {
+            rejectedCount += 1;
+            await this.options.finalizedIngestion.recordEventOutcome({
+              finalizedTurnId: durableFinalizedTurnId,
+              eventId: event.eventId,
+              expectedVersion: claimed.version,
+              outcome: {
+                status: "ambiguous",
+                errorCode: "MEMORY_WRITE_AMBIGUOUS",
+                errorMessage: safeErrorMessage(error)
+              }
+            });
+          }
+        }
+        const status =
+          rejectedCount > 0
+            ? writtenCount + deduplicatedCount > 0
+              ? "partial"
+              : "failed"
+            : unresolved
+              ? "partial"
+              : "complete";
+        return {
+          status: status as MemoryConversationTurnWriteResult["status"],
+          ok: status === "complete",
+          attemptedCount: admitted.events.length,
+          writtenCount,
+          rejectedCount,
+          deduplicatedCount,
+          skippedCount: 0,
+          ...(rejectedCount > 0
+            ? { skippedReason: "Finalized semantic memory write failed." }
+            : {}),
+          idempotencyKey
+        };
+      })
       .then(async (result) => {
         this.updateLatestPromptPreviewExtraction({
           ...this.getMemoryExtractorStatus(),
@@ -1906,14 +2101,26 @@ export class RuntimeOrchestrator {
   private async publishAssistantMessage(
     sourceEvent: UserMessageEvent,
     reply: AgentReplyEvent,
-    assistantMessageId?: string
+    assistantMessageId?: string,
+    finalizedTurnId?: string,
+    ingestionRequested?: boolean | null,
+    ingestionSkipReason?: string | null
   ): Promise<AssistantMessageEvent> {
     const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
 
     try {
-      await this.options.conversation?.appendMessage(
-        conversationMessageFromEvent(assistantMessage, "assistant", "completed")
-      );
+      const persistedAssistant = await this.options.conversation?.appendMessage({
+        ...conversationMessageFromEvent(assistantMessage, "assistant", "completed"),
+        finalizedTurnId: finalizedTurnId ?? null,
+        sourceUserEventId: sourceEvent.id,
+        personaId: sourceEvent.payload.personaId ?? null,
+        subjectUserId: sourceEvent.payload.subjectUserId ?? null,
+        ingestionRequested: ingestionRequested ?? null,
+        ingestionSkipReason: ingestionSkipReason ?? null
+      });
+      if (persistedAssistant?.finalizedTurnId) {
+        finalizedTurnId = persistedAssistant.finalizedTurnId;
+      }
     } catch (error) {
       await this.publishPersistenceError(
         "assistant_message_save",
@@ -1931,11 +2138,92 @@ export class RuntimeOrchestrator {
       );
     }
 
+    if (finalizedTurnId && ingestionRequested !== null && ingestionRequested !== undefined) {
+      try {
+        await this.ensureFinalizedAdmission({
+          finalizedTurnId,
+          assistantMessageId: assistantMessage.id,
+          sourceUserEventId: sourceEvent.id,
+          conversationId: sourceEvent.payload.sessionId,
+          traceId: sourceEvent.traceId,
+          personaId: sourceEvent.payload.personaId,
+          subjectUserId: sourceEvent.payload.subjectUserId,
+          finalizedAt: assistantMessage.timestamp,
+          ingestionRequested,
+          userMessage: sourceEvent.payload.content,
+          assistantMessage: reply.payload.content,
+          sessionId: sourceEvent.payload.sessionId
+        });
+      } catch (error) {
+        await this.publishRuntimeError("Durable ingestion admission failed.", error, {
+          traceId: reply.traceId,
+          parentId: assistantMessage.id,
+          category: "memory",
+          operation: "finalized_ingestion_admission"
+        });
+        this.options.logger?.warn?.(
+          "durable ingestion admission failed after assistant finalization",
+          this.errorLogContext(error, reply.traceId)
+        );
+      }
+    }
+
     // Persist the final text before exposing the compatibility reply to transports.
     await this.options.eventBus.publish(reply);
     this.recordDirectContextTurn(sourceEvent, reply);
     await this.options.eventBus.publish(assistantMessage);
     return assistantMessage;
+  }
+
+  private async resolveFinalizedTurnId(
+    _sourceEvent: UserMessageEvent,
+    assistantMessageId: string
+  ): Promise<string> {
+    const existing = this.finalizedTurnIds.get(assistantMessageId);
+    if (existing) return existing;
+    const finalizedTurnId = (async () => {
+      const persisted = await this.options.conversation?.getMessageById?.(assistantMessageId);
+      return persisted?.finalizedTurnId ?? `finalized-turn:${crypto.randomUUID()}`;
+    })();
+    this.finalizedTurnIds.set(assistantMessageId, finalizedTurnId);
+    return finalizedTurnId;
+  }
+
+  private durableIngestionDecision(writeMemory: boolean): {
+    requested: boolean | null;
+    skipReason: string | null;
+  } {
+    if (!this.options.finalizedIngestion) {
+      return { requested: null, skipReason: null };
+    }
+    if (this.options.memory.isMem0Backend?.()) {
+      return writeMemory
+        ? { requested: true, skipReason: null }
+        : { requested: false, skipReason: "memory-disabled" };
+    }
+    return { requested: false, skipReason: "legacy-memory-compatibility" };
+  }
+
+  private admitFinalizedIngestion(
+    input: Parameters<FinalizedIngestionPort["admit"]>[0]
+  ): Promise<FinalizedIngestionAdmission | null> {
+    if (!this.options.finalizedIngestion) {
+      return Promise.resolve(null);
+    }
+    return this.options.finalizedIngestion.admit(input);
+  }
+
+  private ensureFinalizedAdmission(
+    input: Parameters<FinalizedIngestionPort["admit"]>[0]
+  ): Promise<FinalizedIngestionAdmission | null> {
+    if (!this.options.finalizedIngestion) {
+      return Promise.resolve(null);
+    }
+    const existing = this.finalizedAdmissions.get(input.finalizedTurnId);
+    if (existing) return existing;
+    const admission = this.admitFinalizedIngestion(input);
+    this.finalizedAdmissions.set(input.finalizedTurnId, admission);
+    return admission;
   }
 
   private async createStreamingAssistantMessage(input: {
@@ -2000,14 +2288,15 @@ export class RuntimeOrchestrator {
 
   private async completeStreamingAssistantMessage(
     messageId: string,
-    metadata: Record<string, unknown>
+    metadata: Record<string, unknown>,
+    fields?: Parameters<ConversationRepository["completeMessage"]>[2]
   ): Promise<void> {
     const conversation = this.options.conversation;
     if (!conversation) {
       return;
     }
     try {
-      await conversation.completeMessage(messageId, metadata);
+      await conversation.completeMessage(messageId, metadata, fields);
     } catch (error) {
       await this.publishPersistenceError(
         "assistant_stream_complete",

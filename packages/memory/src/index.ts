@@ -47,6 +47,7 @@ export type {
   MemoryRetrievalOutcome,
   MemoryRetrievalStatus,
   MemoryWriteEventInput,
+  MemoryWriteFailureClass,
   MemoryWriteEventOutcome,
   MemoryWriteEventStatus,
   MemoryConversationTurnWriteResult,
@@ -206,6 +207,7 @@ export {
   createConversationRepositoryFromEnv,
   parseConversationRepositoryEnv,
   type ConversationDatabaseClient,
+  type ConversationFinalizationFields,
   type ConversationListOptions,
   type ConversationMessage,
   type ConversationMessageInput,
@@ -214,6 +216,25 @@ export {
   type ConversationRepository,
   type ConversationRepositoryKind
 } from "./conversation-repository.js";
+export {
+  FINALIZED_INGESTION_POLICY_VERSION,
+  FinalizedIngestionService,
+  InMemoryFinalizedIngestionRepository,
+  PostgresFinalizedIngestionRepository,
+  createFinalizedIngestionRepositoryFromEnv,
+  type FinalizedIngestionAdmission,
+  type FinalizedIngestionAdmissionInput,
+  type FinalizedIngestionEvent,
+  type FinalizedIngestionEventOutcome,
+  type FinalizedIngestionEventPayload,
+  type FinalizedIngestionEventStatus,
+  type FinalizedIngestionPort,
+  type FinalizedIngestionRepository,
+  type FinalizedIngestionRepositoryKind,
+  type FinalizedIngestionTurn,
+  type FinalizedIngestionTurnStatus,
+  type MissingFinalizedConversationTurn
+} from "./finalized-ingestion-ledger.js";
 export {
   MissingDatabaseUrlError,
   parseDotEnv,

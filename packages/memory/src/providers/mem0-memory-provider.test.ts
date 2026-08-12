@@ -358,7 +358,8 @@ describe("Mem0MemoryProvider canonical mapping", () => {
       provider.writeEvent({ kind: "fact", content: "fact", scope: "" })
     ).resolves.toEqual({
       status: "rejected",
-      errorCode: "MEMORY_SCOPE_MISSING"
+      errorCode: "MEMORY_SCOPE_MISSING",
+      failureClass: "definitive_rejection"
     });
     expect(add).not.toHaveBeenCalled();
   });
@@ -425,6 +426,34 @@ describe("Mem0MemoryProvider canonical mapping", () => {
       status: "rejected",
       eventId: "mem0:gone",
       errorCode: "MEMORY_WRITE_UNEXPECTED_DELETE"
+    });
+  });
+
+  it("classifies definitive backend rejection separately from uncertain transport failure", async () => {
+    const validation = new Mem0MemoryProvider(
+      backend({
+        add: vi.fn(async () => {
+          throw new MemoryBackendError("VALIDATION_ERROR", "invalid request");
+        })
+      })
+    );
+    await expect(validation.writeEvent({ kind: "fact", content: "fact", scope })).resolves.toEqual({
+      status: "rejected",
+      errorCode: "VALIDATION_ERROR",
+      failureClass: "definitive_rejection"
+    });
+
+    const uncertain = new Mem0MemoryProvider(
+      backend({
+        add: vi.fn(async () => {
+          throw new MemoryBackendError("OPERATION_TIMEOUT", "timeout", { retryable: true });
+        })
+      })
+    );
+    await expect(uncertain.writeEvent({ kind: "fact", content: "fact", scope })).resolves.toEqual({
+      status: "rejected",
+      errorCode: "OPERATION_TIMEOUT",
+      failureClass: "ambiguous"
     });
   });
 });
