@@ -4,7 +4,9 @@ import {
   InMemoryFinalizedIngestionRepository
 } from "./finalized-ingestion-ledger.js";
 import { executeFinalizedIngestionEvent } from "./finalized-ingestion-executor.js";
+import type { MemoryBackend } from "./backend.js";
 import type { MemoryProvider } from "./provider.js";
+import { Mem0MemoryProvider } from "./providers/mem0-memory-provider.js";
 
 const base = {
   finalizedTurnId: "finalized-turn:executor",
@@ -62,6 +64,76 @@ describe("shared finalized ingestion executor", () => {
       idempotencyKey: admitted.events[0]!.backendIdempotencyKey,
       payloadDigest: admitted.events[0]!.eventPayload.payloadDigest
     });
+  });
+
+  it("keeps post-success mapping failure ambiguous and exactly reconcilable", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const admitted = await new FinalizedIngestionService(repository).admit(base);
+    const effects = new Map<string, string>();
+    const submitIdempotent = vi.fn(
+      async (input: { idempotencyKey: string; payloadDigest: string }) => {
+        effects.set(input.idempotencyKey, input.payloadDigest);
+        return {
+          memoryId: "stable-memory",
+          operation: "created" as const,
+          record: {
+            id: "stable-memory",
+            content: "Understood.",
+            scope: "unexpected-scope",
+            metadata: {}
+          }
+        };
+      }
+    );
+    const reconcileIdempotency = vi.fn(
+      async (input: { idempotencyKey: string; payloadDigest: string }) =>
+        effects.get(input.idempotencyKey) === input.payloadDigest
+          ? { status: "applied" as const, memoryId: "stable-memory", operation: "created" }
+          : { status: "not_applied" as const }
+    );
+    const backend = {
+      kind: "mem0" as const,
+      health: vi.fn(),
+      add: vi.fn(),
+      search: vi.fn(),
+      get: vi.fn(),
+      list: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      history: vi.fn(),
+      submitIdempotent,
+      reconcileIdempotency
+    } as unknown as MemoryBackend;
+    const memoryProvider = new Mem0MemoryProvider(backend);
+    const event = admitted.events[0]!;
+
+    const result = await executeFinalizedIngestionEvent({
+      repository,
+      provider: memoryProvider,
+      event,
+      leaseOwner: "worker-ambiguous",
+      leaseSeconds: 30
+    });
+    const turn = await repository.getTurn(admitted.turn.finalizedTurnId);
+    const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
+
+    expect(result.outcome).toMatchObject({
+      status: "rejected",
+      failureClass: "ambiguous"
+    });
+    expect(persisted).toMatchObject({
+      status: "reconcile_required",
+      resultKind: "ambiguous"
+    });
+    expect(turn?.status).toBe("reconcile_required");
+    expect(effects.get(event.backendIdempotencyKey)).toBe(event.eventPayload.payloadDigest);
+    await expect(
+      memoryProvider.reconcileEvent!({
+        idempotencyKey: event.backendIdempotencyKey,
+        payloadDigest: event.eventPayload.payloadDigest!
+      })
+    ).resolves.toMatchObject({ status: "applied", memoryId: "stable-memory" });
+    expect(submitIdempotent).toHaveBeenCalledOnce();
   });
 
   it("fails closed when materialization has no exact payload digest", async () => {

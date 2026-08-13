@@ -1083,6 +1083,121 @@ describe("RuntimeOrchestrator", () => {
     expect(reply.parentId).toBeTruthy();
   });
 
+  it("keeps a durable reconcile_required child out of complete status on re-entry", async () => {
+    const fixture = await createFinalizedStatusFixture("reconcile", 1);
+    await recordFinalizedEventOutcome(
+      fixture.service,
+      fixture.repository,
+      fixture.admitted.events[0]!,
+      {
+        status: "ambiguous",
+        errorCode: "MEMORY_WRITE_AMBIGUOUS"
+      }
+    );
+
+    const result = await runFinalizedStatusSchedule(fixture);
+    expect(result).toMatchObject({ status: "partial", ok: false });
+    expect(result.status).not.toBe("complete");
+    expect(result.ok).not.toBe(true);
+    expect((await fixture.repository.getTurn(fixture.turnId))?.status).toBe("reconcile_required");
+  });
+
+  it("keeps a durable processing child out of complete status on re-entry", async () => {
+    const fixture = await createFinalizedStatusFixture("processing", 1);
+    await fixture.repository.claimEvent({
+      finalizedTurnId: fixture.turnId,
+      eventId: fixture.admitted.events[0]!.eventId,
+      leaseOwner: "live-owner",
+      leaseSeconds: 300,
+      expectedVersion: fixture.admitted.events[0]!.version
+    });
+
+    const result = await runFinalizedStatusSchedule(fixture);
+    expect(result).toMatchObject({ status: "partial", ok: false });
+    expect(result.status).not.toBe("complete");
+    expect(result.ok).not.toBe(true);
+  });
+
+  it("keeps a partial parent with one reconcile child out of complete status", async () => {
+    const fixture = await createFinalizedStatusFixture("partial", 2);
+    await recordFinalizedEventOutcome(
+      fixture.service,
+      fixture.repository,
+      fixture.admitted.events[0]!,
+      {
+        status: "written",
+        eventId: "memory:complete-child"
+      }
+    );
+    await recordFinalizedEventOutcome(
+      fixture.service,
+      fixture.repository,
+      fixture.admitted.events[1]!,
+      {
+        status: "ambiguous",
+        errorCode: "MEMORY_WRITE_AMBIGUOUS"
+      }
+    );
+
+    const result = await runFinalizedStatusSchedule(fixture);
+    expect(result).toMatchObject({ status: "partial", ok: false });
+    expect(result.status).not.toBe("complete");
+    expect(result.ok).not.toBe(true);
+    expect((await fixture.repository.getTurn(fixture.turnId))?.status).toBe("reconcile_required");
+  });
+
+  it("keeps terminal_failed out of successful status", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const service = new FinalizedIngestionService(repository);
+    const turnId = "finalized-turn:terminal";
+    const admitted = await service.admit({
+      ...finalizedStatusAdmission(turnId),
+      personaId: null,
+      ingestionRequested: true
+    });
+    const fixture = { repository, service, admitted, turnId };
+
+    const result = await runFinalizedStatusSchedule(fixture);
+    expect(result).toMatchObject({ status: "failed", ok: false });
+    expect(result.status).not.toBe("complete");
+    expect(result.ok).not.toBe(true);
+  });
+
+  it("keeps a not-due retryable child out of complete status", async () => {
+    const fixture = await createFinalizedStatusFixture("retryable", 1);
+    await recordFinalizedEventOutcome(
+      fixture.service,
+      fixture.repository,
+      fixture.admitted.events[0]!,
+      {
+        status: "retryable_failed",
+        errorCode: "MEMORY_WRITE_RETRYABLE_FAILED",
+        nextAttemptAt: new Date(Date.now() + 60_000).toISOString()
+      }
+    );
+
+    const result = await runFinalizedStatusSchedule(fixture);
+    expect(result).toMatchObject({ status: "partial", ok: false });
+    expect(result.status).not.toBe("complete");
+    expect(result.ok).not.toBe(true);
+  });
+
+  it("keeps true durable complete status successful on re-entry", async () => {
+    const fixture = await createFinalizedStatusFixture("complete", 1);
+    await recordFinalizedEventOutcome(
+      fixture.service,
+      fixture.repository,
+      fixture.admitted.events[0]!,
+      {
+        status: "written",
+        eventId: "memory:complete"
+      }
+    );
+
+    const result = await runFinalizedStatusSchedule(fixture);
+    expect(result).toMatchObject({ status: "complete", ok: true });
+  });
+
   it("deduplicates same finalized turn re-entry and drains delayed ingestion", async () => {
     let release!: () => void;
     const delayed = new Promise<void>((resolve) => {
@@ -2009,6 +2124,8 @@ function createDirectMemoryTurn(sessionId: string) {
   return { sourceEvent, reply };
 }
 
+type DirectMemoryTurn = ReturnType<typeof createDirectMemoryTurn>;
+
 function createMem0RecordingMemory(
   store: (input: Record<string, unknown>) => Promise<MemoryConversationTurnWriteResult>
 ): RuntimeMemoryPort {
@@ -2029,6 +2146,114 @@ function createMem0RecordingMemory(
       return null;
     }
   };
+}
+
+function finalizedStatusAdmission(finalizedTurnId: string) {
+  return {
+    finalizedTurnId,
+    assistantMessageId: `assistant:${finalizedTurnId}`,
+    sourceUserEventId: `user:${finalizedTurnId}`,
+    conversationId: `conversation:${finalizedTurnId}`,
+    traceId: `trace:${finalizedTurnId}`,
+    personaId: "alice",
+    subjectUserId: "user-a",
+    finalizedAt: "2026-08-13T00:00:00.000Z",
+    ingestionRequested: true,
+    userMessage: "I prefer concise replies.",
+    assistantMessage: "Understood.",
+    sessionId: `session:${finalizedTurnId}`
+  };
+}
+
+async function createFinalizedStatusFixture(finalizedTurnId: string, eventCount: number) {
+  const repository = new InMemoryFinalizedIngestionRepository();
+  const service = new FinalizedIngestionService(repository, {
+    async build() {
+      return {
+        turnKind: "normal" as const,
+        events: Array.from({ length: eventCount }, (_, index) => ({
+          kind: "fact" as const,
+          content: `fact-${index + 1}`,
+          scope: "user:user-a:persona:alice",
+          metadata: {}
+        }))
+      };
+    }
+  });
+  const admitted = await service.admit(finalizedStatusAdmission(finalizedTurnId));
+  return { repository, service, admitted, turnId: finalizedTurnId };
+}
+
+async function recordFinalizedEventOutcome(
+  service: FinalizedIngestionService,
+  repository: InMemoryFinalizedIngestionRepository,
+  event: Awaited<ReturnType<FinalizedIngestionService["admit"]>>["events"][number],
+  outcome: Parameters<FinalizedIngestionService["recordEventOutcome"]>[0]["outcome"]
+): Promise<void> {
+  const claimed = await repository.claimEvent({
+    finalizedTurnId: event.finalizedTurnId,
+    eventId: event.eventId,
+    leaseOwner: "status-test-owner",
+    leaseSeconds: 300,
+    expectedVersion: event.version
+  });
+  if (!claimed) throw new Error(`Could not claim ${event.eventId} for status test.`);
+  const dispatching = await repository.markEventDispatchStarted({
+    finalizedTurnId: event.finalizedTurnId,
+    eventId: event.eventId,
+    leaseOwner: "status-test-owner",
+    expectedVersion: claimed.version
+  });
+  if (!dispatching) throw new Error(`Could not mark ${event.eventId} for status test.`);
+  await service.recordEventOutcome({
+    finalizedTurnId: event.finalizedTurnId,
+    eventId: event.eventId,
+    leaseOwner: "status-test-owner",
+    expectedVersion: dispatching.version,
+    outcome
+  });
+}
+
+async function runFinalizedStatusSchedule(fixture: {
+  repository: InMemoryFinalizedIngestionRepository;
+  service: FinalizedIngestionService;
+  admitted: Awaited<ReturnType<FinalizedIngestionService["admit"]>>;
+  turnId: string;
+}): Promise<MemoryConversationTurnWriteResult> {
+  const memory = createMem0RecordingMemory(async () => completeMemoryWrite());
+  memory.getMemoryProvider = () => ({
+    async retrieveRelevant() {
+      return { status: "empty", events: [], source: "test", limited: false };
+    },
+    async getEvent() {
+      return null;
+    },
+    async writeEvent() {
+      return { status: "written", eventId: "memory:status-test" };
+    },
+    async writeEventIdempotent() {
+      return { status: "written", eventId: "memory:status-test" };
+    }
+  });
+  const runtime = new RuntimeOrchestrator({
+    eventBus: new InMemoryEventBus({ development: false }),
+    memory,
+    finalizedIngestion: fixture.service,
+    promptBuilder: new PromptBuilder(),
+    providers: createMockProviders()
+  });
+  const { sourceEvent, reply } = createDirectMemoryTurn(`status-${fixture.turnId}`);
+  const schedule = (
+    runtime as unknown as {
+      scheduleMem0TurnWrite: (
+        sourceEvent: DirectMemoryTurn["sourceEvent"],
+        reply: DirectMemoryTurn["reply"],
+        assistantMessageId: string,
+        finalizedTurnId: string
+      ) => Promise<MemoryConversationTurnWriteResult>;
+    }
+  ).scheduleMem0TurnWrite.bind(runtime);
+  return schedule(sourceEvent, reply, fixture.admitted.turn.assistantMessageId, fixture.turnId);
 }
 
 function createMockProviders() {

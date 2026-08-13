@@ -199,6 +199,8 @@ export type FinalizedIngestionRepository = {
 
 export type FinalizedIngestionPort = {
   admit(input: FinalizedIngestionAdmissionInput): Promise<FinalizedIngestionAdmission>;
+  /** Read the authoritative durable parent state without dispatching work. */
+  getTurn?(finalizedTurnId: string): Promise<FinalizedIngestionTurn | null>;
   claimEvent(input: {
     finalizedTurnId: string;
     eventId: string;
@@ -1073,6 +1075,10 @@ export class FinalizedIngestionService implements FinalizedIngestionPort {
       "build"
     > = new MemoryIngestionPolicy()
   ) {}
+
+  getTurn(finalizedTurnId: string) {
+    return this.repository.getTurn(finalizedTurnId);
+  }
 
   async admit(input: FinalizedIngestionAdmissionInput): Promise<FinalizedIngestionAdmission> {
     const existing = await this.repository.getTurn(input.finalizedTurnId);

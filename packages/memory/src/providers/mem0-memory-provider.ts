@@ -294,16 +294,18 @@ export class Mem0MemoryProvider implements MemoryProvider {
         failureClass: "definitive_rejection"
       };
     }
+    const backend = this.backend;
+    if (!backend.submitIdempotent) {
+      return {
+        status: "rejected",
+        errorCode: "MEMORY_IDEMPOTENCY_UNSUPPORTED",
+        failureClass: "definitive_rejection"
+      };
+    }
+
+    let result: Awaited<ReturnType<NonNullable<MemoryBackend["submitIdempotent"]>>>;
     try {
-      const backend = this.backend;
-      if (!backend.submitIdempotent) {
-        return {
-          status: "rejected",
-          errorCode: "MEMORY_IDEMPOTENCY_UNSUPPORTED",
-          failureClass: "definitive_rejection"
-        };
-      }
-      const result = await backend.submitIdempotent(
+      result = await backend.submitIdempotent(
         {
           scope,
           content,
@@ -314,7 +316,25 @@ export class Mem0MemoryProvider implements MemoryProvider {
         },
         input.signal
       );
-      const memoryId = result.memoryId?.trim();
+    } catch (error) {
+      return {
+        status: "rejected",
+        errorCode: safeErrorCode(error, "MEMORY_IDEMPOTENT_WRITE_FAILED"),
+        failureClass: classifyWriteFailure(error)
+      };
+    }
+
+    // A successful keyed submit may already have committed the semantic effect.
+    // Any failure validating or mapping that success response is therefore
+    // ambiguous, regardless of the local mapping exception class.
+    let eventId: MemoryEventId | undefined;
+    try {
+      const response = result as unknown as {
+        memoryId?: unknown;
+        operation?: unknown;
+        record?: unknown;
+      } | null;
+      const memoryId = typeof response?.memoryId === "string" ? response.memoryId.trim() : "";
       if (!memoryId) {
         return {
           status: "rejected",
@@ -322,30 +342,34 @@ export class Mem0MemoryProvider implements MemoryProvider {
           failureClass: "ambiguous"
         };
       }
+      eventId = canonicalMem0EventId(memoryId);
       if (
-        result.operation !== "created" &&
-        result.operation !== "updated" &&
-        result.operation !== "unchanged"
+        response?.operation !== "created" &&
+        response?.operation !== "updated" &&
+        response?.operation !== "unchanged"
       ) {
         return {
           status: "rejected",
-          eventId: canonicalMem0EventId(memoryId),
+          eventId,
           errorCode: "MEMORY_WRITE_OPERATION_INVALID",
-          failureClass: "definitive_rejection"
+          failureClass: "ambiguous"
         };
       }
-      const eventId = canonicalMem0EventId(memoryId);
-      const event = result.record ? mapMem0RecordToMemoryEvent(result.record, scope) : null;
+      const event =
+        response.record === undefined || response.record === null
+          ? null
+          : mapMem0RecordToMemoryEvent(response.record as MemoryRecord, scope);
       return {
-        status: result.operation === "unchanged" ? "unchanged" : "written",
+        status: response.operation === "unchanged" ? "unchanged" : "written",
         eventId,
         event
       };
     } catch (error) {
       return {
         status: "rejected",
-        errorCode: safeErrorCode(error, "MEMORY_IDEMPOTENT_WRITE_FAILED"),
-        failureClass: classifyWriteFailure(error)
+        ...(eventId ? { eventId } : {}),
+        errorCode: safeErrorCode(error, "MEMORY_IDEMPOTENT_RESPONSE_INVALID"),
+        failureClass: "ambiguous"
       };
     }
   }

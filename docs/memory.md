@@ -93,11 +93,13 @@ Each finalized turn receives an immutable `finalized_turn_id`. Each materialized
 child receives a content-derived stable event identity and a persisted backend
 key of the form
 `yuvi:finalized-turn:<finalized-turn-id>:event:<stable-event-id>`.
-These keys establish the future reconciliation identity; P4-2B does not claim
-that Mem0 enforces them. Ledger rows and child payloads are persisted before
+The canonical finalized C1 path enforces these keys as backend idempotency
+identities. Ordinary compatibility Mem0 writes outside this keyed path are not
+governed by that contract. Ledger rows and child payloads are persisted before
 the live write starts. A process crash can therefore leave `pending`,
 `processing`, or `retryable_failed` work, while uncertain provider outcomes
-remain `reconcile_required` work for P4-2C.
+remain `reconcile_required` work. An end-to-end recovery coordinator is not yet
+present.
 
 Semantic write failures retain a typed classification. Definitive validation
 or explicitly rejected backend responses become terminal failures; only a
