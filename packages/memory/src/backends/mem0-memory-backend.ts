@@ -6,6 +6,7 @@
 import {
   MemoryBackendError,
   type AddMemoryInput,
+  type IdempotentMemoryWriteInput,
   type DeleteMemoryInput,
   type GetMemoryInput,
   type ListMemoryInput,
@@ -17,6 +18,7 @@ import {
   type MemoryRecord,
   type MemorySearchResult,
   type MemoryWriteResult,
+  type MemoryReconciliationResult,
   type SearchMemoryInput,
   type UpdateMemoryInput
 } from "../backend.js";
@@ -105,6 +107,65 @@ export class Mem0MemoryBackend implements MemoryBackend {
       throw new MemoryBackendError("INTERNAL_ERROR", "Sidecar add response missing memoryId.");
     }
     return data;
+  }
+
+  async submitIdempotent(
+    input: IdempotentMemoryWriteInput,
+    signal?: AbortSignal
+  ): Promise<MemoryWriteResult> {
+    assertScope(input.scope);
+    if (!input.idempotencyKey?.trim() || !input.payloadDigest?.trim()) {
+      throw new MemoryBackendError(
+        "VALIDATION_ERROR",
+        "idempotencyKey and payloadDigest are required."
+      );
+    }
+    const opts: RequestOptions = { timeoutMs: this.writeTimeoutMs };
+    if (signal) opts.signal = signal;
+    const data = await this.request<MemoryWriteResult>(
+      "POST",
+      "/v1/memories/idempotent",
+      {
+        scope: input.scope,
+        content: input.content,
+        messages: input.messages,
+        infer: false,
+        metadata: input.metadata ?? {},
+        idempotencyKey: input.idempotencyKey,
+        payloadDigest: input.payloadDigest
+      },
+      opts
+    );
+    if (!data?.memoryId) {
+      throw new MemoryBackendError(
+        "INTERNAL_ERROR",
+        "Sidecar idempotent response missing memoryId."
+      );
+    }
+    return data;
+  }
+
+  async reconcileIdempotency(
+    input: Pick<IdempotentMemoryWriteInput, "idempotencyKey" | "payloadDigest">,
+    signal?: AbortSignal
+  ): Promise<MemoryReconciliationResult> {
+    if (!input.idempotencyKey?.trim() || !input.payloadDigest?.trim()) {
+      throw new MemoryBackendError(
+        "VALIDATION_ERROR",
+        "idempotencyKey and payloadDigest are required."
+      );
+    }
+    const opts: RequestOptions = {};
+    if (signal) opts.signal = signal;
+    return this.request<MemoryReconciliationResult>(
+      "POST",
+      "/v1/memories/idempotent/reconcile",
+      {
+        idempotencyKey: input.idempotencyKey,
+        payloadDigest: input.payloadDigest
+      },
+      opts
+    );
   }
 
   async search(input: SearchMemoryInput, signal?: AbortSignal): Promise<MemorySearchResult[]> {

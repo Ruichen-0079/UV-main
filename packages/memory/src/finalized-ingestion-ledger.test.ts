@@ -128,14 +128,44 @@ describe("Finalized ingestion ledger foundation", () => {
       ingestionRequested: true
     });
 
+    const firstClaim = await repository.claimEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: admitted.events[0]!.eventId,
+      leaseOwner: "test-worker",
+      leaseSeconds: 30,
+      expectedVersion: admitted.events[0]!.version
+    });
+    const firstDispatch = await repository.markEventDispatchStarted({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: admitted.events[0]!.eventId,
+      leaseOwner: "test-worker",
+      expectedVersion: firstClaim!.version
+    });
     await service.recordEventOutcome({
       finalizedTurnId: admitted.turn.finalizedTurnId,
       eventId: admitted.events[0]!.eventId,
+      leaseOwner: "test-worker",
+      expectedVersion: firstDispatch!.version,
       outcome: { status: "written", eventId: "memory:one" }
+    });
+    const secondClaim = await repository.claimEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: admitted.events[1]!.eventId,
+      leaseOwner: "test-worker",
+      leaseSeconds: 30,
+      expectedVersion: admitted.events[1]!.version
+    });
+    const secondDispatch = await repository.markEventDispatchStarted({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: admitted.events[1]!.eventId,
+      leaseOwner: "test-worker",
+      expectedVersion: secondClaim!.version
     });
     await service.recordEventOutcome({
       finalizedTurnId: admitted.turn.finalizedTurnId,
       eventId: admitted.events[1]!.eventId,
+      leaseOwner: "test-worker",
+      expectedVersion: secondDispatch!.version,
       outcome: { status: "rejected", errorCode: "MEMORY_WRITE_REJECTED" }
     });
 
@@ -173,6 +203,135 @@ describe("Finalized ingestion ledger foundation", () => {
     expect(secondClaim).toBeNull();
   });
 
+  it("does not count a claim as delivery and reclaims a pre-dispatch expiry", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const service = new FinalizedIngestionService(repository);
+    const admitted = await service.admit({
+      ...base,
+      finalizedTurnId: "finalized-turn:reclaim-before-dispatch",
+      ingestionRequested: true
+    });
+    const event = admitted.events[0]!;
+    const claimed = await repository.claimEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "worker-a",
+      leaseSeconds: 1,
+      expectedVersion: event.version
+    });
+    expect(claimed?.attemptCount).toBe(0);
+    const reclaimed = await repository.reclaimExpiredEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      expectedVersion: claimed!.version,
+      now: new Date(Date.now() + 2_000).toISOString()
+    });
+    expect(reclaimed).toMatchObject({ status: "pending", attemptCount: 0 });
+  });
+
+  it("moves an expired dispatched child to reconciliation and fences the old owner", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const service = new FinalizedIngestionService(repository);
+    const admitted = await service.admit({
+      ...base,
+      finalizedTurnId: "finalized-turn:reclaim-after-dispatch",
+      ingestionRequested: true
+    });
+    const event = admitted.events[0]!;
+    const claimed = await repository.claimEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "worker-a",
+      leaseSeconds: 1,
+      expectedVersion: event.version
+    });
+    const dispatching = await repository.markEventDispatchStarted({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "worker-a",
+      expectedVersion: claimed!.version
+    });
+    const reclaimed = await repository.reclaimExpiredEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      expectedVersion: dispatching!.version,
+      now: new Date(Date.now() + 2_000).toISOString()
+    });
+    expect(reclaimed).toMatchObject({ status: "reconcile_required", resultKind: "ambiguous" });
+    await expect(
+      repository.recordEventOutcome({
+        finalizedTurnId: admitted.turn.finalizedTurnId,
+        eventId: event.eventId,
+        leaseOwner: "worker-a",
+        expectedVersion: dispatching!.version,
+        outcome: { status: "written", eventId: "memory:stale" }
+      })
+    ).rejects.toThrow(/changed before outcome recording/);
+  });
+
+  it("rejects stale or early outcome recording without owner and version", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const service = new FinalizedIngestionService(repository);
+    const admitted = await service.admit({
+      ...base,
+      finalizedTurnId: "finalized-turn:strict-outcome",
+      ingestionRequested: true
+    });
+    await expect(
+      repository.recordEventOutcome({
+        finalizedTurnId: admitted.turn.finalizedTurnId,
+        eventId: admitted.events[0]!.eventId,
+        leaseOwner: "worker-a",
+        expectedVersion: admitted.events[0]!.version,
+        outcome: { status: "written", eventId: "memory:early" }
+      })
+    ).rejects.toThrow(/changed before outcome recording/);
+  });
+
+  it("requires dispatch marker and attempt count for delivery outcomes", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const service = new FinalizedIngestionService(repository);
+    const admitted = await service.admit({
+      ...base,
+      finalizedTurnId: "finalized-turn:dispatch-marker-required",
+      ingestionRequested: true
+    });
+    const event = admitted.events[0]!;
+    const claimed = await repository.claimEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "worker-marker",
+      leaseSeconds: 30,
+      expectedVersion: event.version
+    });
+
+    await expect(
+      repository.recordEventOutcome({
+        finalizedTurnId: admitted.turn.finalizedTurnId,
+        eventId: event.eventId,
+        leaseOwner: "worker-marker",
+        expectedVersion: claimed!.version,
+        outcome: { status: "written", eventId: "memory:early" }
+      })
+    ).rejects.toThrow(/dispatch marker is missing/);
+
+    const dispatching = await repository.markEventDispatchStarted({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "worker-marker",
+      expectedVersion: claimed!.version
+    });
+    expect(dispatching).toMatchObject({ attemptCount: 1 });
+    const recorded = await repository.recordEventOutcome({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "worker-marker",
+      expectedVersion: dispatching!.version,
+      outcome: { status: "written", eventId: "memory:accepted" }
+    });
+    expect(recorded).toMatchObject({ status: "complete", attemptCount: 1 });
+  });
+
   it("retains retryable child failure as durable retryable work", async () => {
     const repository = new InMemoryFinalizedIngestionRepository();
     const service = new FinalizedIngestionService(repository);
@@ -189,11 +348,18 @@ describe("Finalized ingestion ledger foundation", () => {
       leaseSeconds: 30,
       expectedVersion: event.version
     });
+    const dispatching = await repository.markEventDispatchStarted({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "worker-retry",
+      expectedVersion: claimed!.version
+    });
 
     await service.recordEventOutcome({
       finalizedTurnId: admitted.turn.finalizedTurnId,
       eventId: event.eventId,
-      expectedVersion: claimed!.version,
+      leaseOwner: "worker-retry",
+      expectedVersion: dispatching!.version,
       outcome: {
         status: "retryable_failed",
         errorCode: "MEMORY_BACKEND_UNAVAILABLE",
@@ -257,11 +423,18 @@ describe("Finalized ingestion ledger foundation", () => {
       leaseSeconds: 30,
       expectedVersion: event.version
     });
+    const dispatching = await repository.markEventDispatchStarted({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "worker-ambiguous",
+      expectedVersion: claimed!.version
+    });
 
     await service.recordEventOutcome({
       finalizedTurnId: admitted.turn.finalizedTurnId,
       eventId: event.eventId,
-      expectedVersion: claimed!.version,
+      leaseOwner: "worker-ambiguous",
+      expectedVersion: dispatching!.version,
       outcome: {
         status: "rejected",
         errorCode: "OPERATION_TIMEOUT",
@@ -319,6 +492,7 @@ describe("Finalized ingestion ledger foundation", () => {
     await service.recordEventOutcome({
       finalizedTurnId: admitted.turn.finalizedTurnId,
       eventId: event.eventId,
+      leaseOwner: "worker-definitive",
       expectedVersion: claimed!.version,
       outcome: {
         status: "rejected",
@@ -371,9 +545,27 @@ describe("Finalized ingestion ledger foundation", () => {
           expectedVersion: reloadedEvents[0]!.version
         });
         expect(claimed?.status).toBe("processing");
+        await expect(
+          repositoryB.recordEventOutcome({
+            finalizedTurnId: `${prefix}one`,
+            eventId: reloadedEvents[0]!.eventId,
+            leaseOwner: "test-worker",
+            expectedVersion: claimed!.version,
+            outcome: { status: "written", eventId: "memory:early" }
+          })
+        ).rejects.toThrow(/not found or changed/);
+        const dispatching = await repositoryB.markEventDispatchStarted({
+          finalizedTurnId: `${prefix}one`,
+          eventId: reloadedEvents[0]!.eventId,
+          leaseOwner: "test-worker",
+          expectedVersion: claimed!.version
+        });
+        expect(dispatching?.dispatchStartedAt).toBeTruthy();
         await repositoryB.recordEventOutcome({
           finalizedTurnId: `${prefix}one`,
           eventId: reloadedEvents[0]!.eventId,
+          leaseOwner: "test-worker",
+          expectedVersion: dispatching!.version,
           outcome: { status: "written", eventId: "memory:postgres-test" }
         });
         const finalTurn = await repositoryB.getTurn(`${prefix}one`);
@@ -488,10 +680,17 @@ describe("Finalized ingestion ledger foundation", () => {
           leaseSeconds: 30,
           expectedVersion: event.version
         });
+        const dispatching = await repositoryA.markEventDispatchStarted({
+          finalizedTurnId: admitted.turn.finalizedTurnId,
+          eventId: event.eventId,
+          leaseOwner: "ambiguous-worker",
+          expectedVersion: claimed!.version
+        });
         await repositoryA.recordEventOutcome({
           finalizedTurnId: admitted.turn.finalizedTurnId,
           eventId: event.eventId,
-          expectedVersion: claimed!.version,
+          leaseOwner: "ambiguous-worker",
+          expectedVersion: dispatching!.version,
           outcome: {
             status: "rejected",
             errorCode: "OPERATION_TIMEOUT",
@@ -573,18 +772,34 @@ describe("Finalized ingestion ledger foundation", () => {
         ]);
         expect(firstClaim).not.toBeNull();
         expect(secondClaim).not.toBeNull();
+        const firstDispatch = await repository.markEventDispatchStarted({
+          finalizedTurnId: admitted.turn.finalizedTurnId,
+          eventId: first.eventId,
+          leaseOwner: "worker-a",
+          expectedVersion: firstClaim!.version
+        });
+        const secondDispatch = await repository.markEventDispatchStarted({
+          finalizedTurnId: admitted.turn.finalizedTurnId,
+          eventId: second.eventId,
+          leaseOwner: "worker-b",
+          expectedVersion: secondClaim!.version
+        });
+        expect(firstDispatch).not.toBeNull();
+        expect(secondDispatch).not.toBeNull();
 
         await Promise.all([
           repository.recordEventOutcome({
             finalizedTurnId: admitted.turn.finalizedTurnId,
             eventId: first.eventId,
-            expectedVersion: firstClaim!.version,
+            leaseOwner: "worker-a",
+            expectedVersion: firstDispatch!.version,
             outcome: { status: "written", eventId: "memory:first" }
           }),
           repository.recordEventOutcome({
             finalizedTurnId: admitted.turn.finalizedTurnId,
             eventId: second.eventId,
-            expectedVersion: secondClaim!.version,
+            leaseOwner: "worker-b",
+            expectedVersion: secondDispatch!.version,
             outcome: { status: "written", eventId: "memory:second" }
           })
         ]);

@@ -103,6 +103,7 @@ create table if not exists finalized_ingestion_events (
   )),
   attempt_count integer not null default 0,
   last_attempt_at timestamptz null,
+  dispatch_started_at timestamptz null,
   next_attempt_at timestamptz null,
   backend_memory_id text null,
   backend_operation text null,
@@ -121,3 +122,6 @@ create index if not exists finalized_ingestion_events_turn_status_idx
   on finalized_ingestion_events (finalized_turn_id, status, next_attempt_at);
 create index if not exists finalized_ingestion_events_retry_idx
   on finalized_ingestion_events (status, next_attempt_at, updated_at);
+
+alter table finalized_ingestion_events
+  add column if not exists dispatch_started_at timestamptz null;

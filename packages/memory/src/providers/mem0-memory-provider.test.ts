@@ -456,4 +456,104 @@ describe("Mem0MemoryProvider canonical mapping", () => {
       failureClass: "ambiguous"
     });
   });
+
+  it("uses keyed submit and preserves exact reconciliation outcomes", async () => {
+    const submitIdempotent = vi.fn(async () => ({
+      memoryId: "stable-memory",
+      operation: "created" as const
+    }));
+    const reconcileIdempotency = vi.fn(async () => ({
+      status: "applied" as const,
+      memoryId: "stable-memory",
+      operation: "created"
+    }));
+    const provider = new Mem0MemoryProvider(backend({ submitIdempotent, reconcileIdempotency }));
+    const input = {
+      kind: "fact" as const,
+      content: "fact",
+      scope,
+      idempotencyKey: "key-1",
+      payloadDigest: "digest-1"
+    };
+    await expect(provider.writeEventIdempotent!(input)).resolves.toMatchObject({
+      status: "written",
+      eventId: "mem0:stable-memory"
+    });
+    await expect(provider.reconcileEvent!(input)).resolves.toEqual({
+      status: "applied",
+      memoryId: "stable-memory",
+      operation: "created"
+    });
+    expect(submitIdempotent).toHaveBeenCalledWith(
+      expect.objectContaining({ idempotencyKey: "key-1", payloadDigest: "digest-1" }),
+      undefined
+    );
+  });
+
+  it.each([
+    ["missing record id", record({ id: "" })],
+    ["unexpected record scope", record({ scope: buildMemoryScope("other", "alice") })]
+  ] as const)(
+    "classifies a %s after successful keyed submit as ambiguous",
+    async (_label, malformedRecord) => {
+      const submitIdempotent = vi.fn(async () => ({
+        memoryId: "stable-memory",
+        operation: "created" as const,
+        record: malformedRecord
+      }));
+      const provider = new Mem0MemoryProvider(backend({ submitIdempotent }));
+
+      await expect(
+        provider.writeEventIdempotent!({
+          kind: "fact",
+          content: "fact",
+          scope,
+          idempotencyKey: "key-post-dispatch",
+          payloadDigest: "digest-post-dispatch"
+        })
+      ).resolves.toMatchObject({
+        status: "rejected",
+        eventId: "mem0:stable-memory",
+        failureClass: "ambiguous"
+      });
+    }
+  );
+
+  it("keeps an invalid successful operation ambiguous after keyed submit", async () => {
+    const provider = new Mem0MemoryProvider(
+      backend({
+        submitIdempotent: vi.fn(async () => ({
+          memoryId: "stable-memory",
+          operation: "deleted" as const
+        }))
+      })
+    );
+
+    await expect(
+      provider.writeEventIdempotent!({
+        kind: "fact",
+        content: "fact",
+        scope,
+        idempotencyKey: "key-invalid-operation",
+        payloadDigest: "digest-invalid-operation"
+      })
+    ).resolves.toMatchObject({
+      status: "rejected",
+      eventId: "mem0:stable-memory",
+      errorCode: "MEMORY_WRITE_OPERATION_INVALID",
+      failureClass: "ambiguous"
+    });
+  });
+
+  it.each(["not_applied", "in_flight", "payload_conflict", "unknown"] as const)(
+    "does not collapse exact reconciliation status %s",
+    async (status) => {
+      const provider = new Mem0MemoryProvider(
+        backend({ reconcileIdempotency: vi.fn(async () => ({ status })) })
+      );
+      await expect(
+        provider.reconcileEvent!({ idempotencyKey: "key-1", payloadDigest: "digest-1" })
+      ).resolves.toMatchObject({ status });
+    }
+  );
 });

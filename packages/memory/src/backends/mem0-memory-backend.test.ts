@@ -71,6 +71,41 @@ describe("Mem0MemoryBackend", () => {
     expect(result.operation).toBe("created");
   });
 
+  it("submits and reconciles keyed finalized writes through exact sidecar routes", async () => {
+    const scope = buildMemoryScope("user-a", "alice");
+    const fetchImpl = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (String(_url).endsWith("/reconcile")) {
+        expect(body).toEqual({ idempotencyKey: "key-1", payloadDigest: "digest-1" });
+        return Response.json({ ok: true, data: { status: "applied", memoryId: "mem-1" } });
+      }
+      expect(String(_url)).toContain("/idempotent");
+      expect(body).toMatchObject({
+        scope,
+        infer: false,
+        idempotencyKey: "key-1",
+        payloadDigest: "digest-1"
+      });
+      return Response.json({ ok: true, data: { memoryId: "mem-1", operation: "created" } });
+    });
+    const backend = new Mem0MemoryBackend({
+      baseUrl: "http://127.0.0.1:6130",
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+    await expect(
+      backend.submitIdempotent({
+        scope,
+        content: "fact",
+        infer: false,
+        idempotencyKey: "key-1",
+        payloadDigest: "digest-1"
+      })
+    ).resolves.toMatchObject({ memoryId: "mem-1" });
+    await expect(
+      backend.reconcileIdempotency({ idempotencyKey: "key-1", payloadDigest: "digest-1" })
+    ).resolves.toMatchObject({ status: "applied", memoryId: "mem-1" });
+  });
+
   it("maps 404 to MEMORY_NOT_FOUND and get returns null", async () => {
     const fetchImpl = vi.fn(async () =>
       Response.json(

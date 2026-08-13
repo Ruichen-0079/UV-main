@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
+import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -26,7 +32,9 @@ from yuvi_mem0.schemas import (
     HealthComponents,
     HealthData,
     HealthEmbedding,
+    IdempotentMemoryWriteRequest,
     MemoryHistoryEntry,
+    MemoryReconciliationResult,
     MemoryRecord,
     MemoryWriteResult,
     SearchMemoryRequest,
@@ -44,6 +52,7 @@ class Mem0Service:
         # Cached health probe results (no side-effectful re-init per request).
         self._embed_cache: tuple[float, str, str | None] | None = None
         self._vector_cache: tuple[float, str, str | None] | None = None
+        self._idempotency_lock = threading.RLock()
 
     def shutdown(self) -> None:
         """
@@ -135,6 +144,7 @@ class Mem0Service:
 
                 register_yuvi_noop_llm()
             self._memory = Memory.from_config(config)
+            self._ensure_idempotency_table()
             self._init_error = None
             logger.info(
                 "Mem0 initialized collection=%s dims=%s model=%s llm_configured=%s",
@@ -378,6 +388,312 @@ class Mem0Service:
 
         return self._normalize_write_result(result, scope=request.scope, metadata=metadata)
 
+    def submit_idempotent(self, request: IdempotentMemoryWriteRequest) -> MemoryWriteResult:
+        """Apply one finalized event under a durable, exact backend identity.
+
+        The durable reservation is committed before embedding. The pgvector
+        row and the transition from ``in_flight`` to ``applied`` are committed
+        together in a second PostgreSQL transaction. Mem0's ordinary ``add``
+        path is not used here because it generates a random UUID and commits
+        through a separate history SQLite database.
+        """
+        if request.infer:
+            raise SidecarError(
+                VALIDATION_ERROR,
+                "Idempotent finalized writes require infer=false.",
+                status_code=400,
+            )
+        memory = self.ensure_ready()
+        payload = self._request_payload(request)
+        metadata = request.metadata.model_dump(exclude_none=True)
+        metadata.update(
+            {
+                "user_id": request.scope,
+                "data": payload,
+                "hash": hashlib.md5(payload.encode()).hexdigest(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "yuviIngestionKey": request.idempotencyKey,
+                "yuviPayloadDigest": request.payloadDigest,
+            }
+        )
+        backend_id = str(uuid.uuid5(uuid.NAMESPACE_URL, request.idempotencyKey))
+        with self._idempotency_lock:
+            self._ensure_idempotency_table()
+            vector_store = getattr(memory, "vector_store", None)
+            connection = getattr(vector_store, "conn", None)
+            collection = getattr(vector_store, "collection_name", None)
+            if connection is None or not isinstance(collection, str):
+                raise SidecarError(
+                    INTERNAL_ERROR,
+                    "Idempotent backend storage is unavailable.",
+                    retryable=False,
+                    status_code=503,
+                )
+            table = _safe_identifier(collection)
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "select idempotency_key, payload_digest, state, backend_memory_id, "
+                        "backend_operation from yuvi_memory_idempotency "
+                        "where idempotency_key = %s for update",
+                        (request.idempotencyKey,),
+                    )
+                    existing = cursor.fetchone()
+                    if existing:
+                        if existing[1] != request.payloadDigest:
+                            connection.rollback()
+                            raise SidecarError(
+                                "MEMORY_IDEMPOTENCY_CONFLICT",
+                                "Idempotency key is already bound to a different payload.",
+                                status_code=409,
+                            )
+                        if existing[2] == "in_flight":
+                            connection.rollback()
+                            raise SidecarError(
+                                "MEMORY_IDEMPOTENCY_IN_FLIGHT",
+                                "Idempotent operation is still in flight.",
+                                retryable=True,
+                                status_code=409,
+                            )
+                        record = self._get_vector_record(
+                            cursor,
+                            table,
+                            str(existing[3]),
+                            request.scope,
+                            expected_key=request.idempotencyKey,
+                            expected_digest=request.payloadDigest,
+                        )
+                        if record is None:
+                            connection.rollback()
+                            raise SidecarError(
+                                "MEMORY_IDEMPOTENCY_EFFECT_MISSING",
+                                "Idempotency journal points to a missing backend effect.",
+                                status_code=503,
+                            )
+                        connection.rollback()
+                        return MemoryWriteResult(
+                            memoryId=str(existing[3]), operation="unchanged", record=record
+                        )
+
+                    cursor.execute(
+                        "insert into yuvi_memory_idempotency "
+                        "(idempotency_key, payload_digest, state, backend_memory_id, "
+                        "backend_operation) values (%s, %s, 'in_flight', %s, 'created') "
+                        "on conflict (idempotency_key) do nothing returning idempotency_key",
+                        (request.idempotencyKey, request.payloadDigest, backend_id),
+                    )
+                    inserted = cursor.fetchone()
+                    if not inserted:
+                        cursor.execute(
+                            "select payload_digest, state, backend_memory_id, backend_operation "
+                            "from yuvi_memory_idempotency where idempotency_key = %s for update",
+                            (request.idempotencyKey,),
+                        )
+                        reserved = cursor.fetchone()
+                        if reserved and reserved[1] == "applied":
+                            record = self._get_vector_record(
+                                cursor,
+                                table,
+                                str(reserved[2]),
+                                request.scope,
+                                expected_key=request.idempotencyKey,
+                                expected_digest=request.payloadDigest,
+                            )
+                            if record is not None:
+                                connection.rollback()
+                                return MemoryWriteResult(
+                                    memoryId=str(reserved[2]),
+                                    operation="unchanged",
+                                    record=record,
+                                )
+                            connection.rollback()
+                            raise SidecarError(
+                                "MEMORY_IDEMPOTENCY_EFFECT_MISSING",
+                                "Idempotency journal points to a missing backend effect.",
+                                status_code=503,
+                            )
+                        connection.rollback()
+                        raise SidecarError(
+                            "MEMORY_IDEMPOTENCY_IN_FLIGHT",
+                            "Idempotent operation is still in flight.",
+                            retryable=True,
+                            status_code=409,
+                        )
+                    connection.commit()
+
+                embedding = memory.embedding_model.embed(payload, "add")
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        f"insert into {table} (id, vector, payload) values (%s, %s, %s)",
+                        (backend_id, embedding, _json_value(metadata)),
+                    )
+                    cursor.execute(
+                        "update yuvi_memory_idempotency set state = 'applied', "
+                        "updated_at = now() where idempotency_key = %s and state = 'in_flight'",
+                        (request.idempotencyKey,),
+                    )
+                    if cursor.rowcount != 1:
+                        connection.rollback()
+                        raise SidecarError(
+                            "MEMORY_IDEMPOTENCY_IN_FLIGHT",
+                            "Idempotent operation is still in flight.",
+                            retryable=True,
+                            status_code=409,
+                        )
+                    connection.commit()
+                return MemoryWriteResult(
+                    memoryId=backend_id,
+                    operation="created",
+                    record=MemoryRecord(
+                        id=backend_id,
+                        content=payload,
+                        scope=request.scope,
+                        metadata=metadata,
+                        createdAt=metadata["created_at"],
+                    ),
+                )
+            except SidecarError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    connection.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise SidecarError(
+                    INTERNAL_ERROR,
+                    f"Idempotent memory write failed: {_safe_error_message(exc)}",
+                    retryable=True,
+                    status_code=503,
+                ) from exc
+
+    def reconcile_idempotency(
+        self, idempotency_key: str, payload_digest: str
+    ) -> MemoryReconciliationResult:
+        memory = self.ensure_ready()
+        with self._idempotency_lock:
+            self._ensure_idempotency_table()
+            vector_store = getattr(memory, "vector_store", None)
+            connection = getattr(vector_store, "conn", None)
+            collection = getattr(vector_store, "collection_name", None)
+            if connection is None or not isinstance(collection, str):
+                return MemoryReconciliationResult(status="unknown", errorCode="BACKEND_UNAVAILABLE")
+            table = _safe_identifier(collection)
+            backend_id = str(uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key))
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "select payload_digest, state, backend_memory_id, backend_operation "
+                        "from yuvi_memory_idempotency where idempotency_key = %s for update",
+                        (idempotency_key,),
+                    )
+                    journal = cursor.fetchone()
+                    if journal and journal[0] != payload_digest:
+                        connection.rollback()
+                        return MemoryReconciliationResult(status="payload_conflict")
+                    exact_id = str(journal[2]) if journal and journal[2] else backend_id
+                    vector = self._get_vector_payload(cursor, table, exact_id)
+                    if vector is None:
+                        connection.rollback()
+                        return MemoryReconciliationResult(
+                            status=(
+                                "in_flight"
+                                if journal and journal[1] == "in_flight"
+                                else "unknown" if journal else "not_applied"
+                            )
+                        )
+                    stored_key = vector.get("yuviIngestionKey")
+                    stored_digest = vector.get("yuviPayloadDigest")
+                    if stored_key != idempotency_key or stored_digest != payload_digest:
+                        connection.rollback()
+                        return MemoryReconciliationResult(status="payload_conflict")
+                    if journal and journal[1] == "in_flight":
+                        cursor.execute(
+                            "update yuvi_memory_idempotency set state = 'applied', "
+                            "updated_at = now() where idempotency_key = %s "
+                            "and payload_digest = %s and state = 'in_flight'",
+                            (idempotency_key, payload_digest),
+                        )
+                        if cursor.rowcount != 1:
+                            connection.rollback()
+                            return MemoryReconciliationResult(status="unknown")
+                        connection.commit()
+                    else:
+                        connection.rollback()
+                    return MemoryReconciliationResult(
+                        status="applied",
+                        memoryId=exact_id,
+                        operation=str(journal[3]) if journal and journal[3] else "created",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    connection.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                return MemoryReconciliationResult(
+                    status="unknown", errorCode=f"{type(exc).__name__}"
+                )
+
+    def _ensure_idempotency_table(self) -> None:
+        memory = self._memory
+        vector_store = getattr(memory, "vector_store", None) if memory is not None else None
+        connection = getattr(vector_store, "conn", None)
+        if connection is None:
+            return
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "create table if not exists yuvi_memory_idempotency ("
+                "idempotency_key text primary key, payload_digest text not null, "
+                "state text not null check (state in ('in_flight', 'applied')), "
+                "backend_memory_id uuid, backend_operation text, "
+                "created_at timestamptz not null default now(), "
+                "updated_at timestamptz not null default now())"
+            )
+        connection.commit()
+
+    @staticmethod
+    def _request_payload(request: IdempotentMemoryWriteRequest) -> str:
+        if request.messages:
+            return "\n".join(
+                message.content.strip() for message in request.messages if message.content.strip()
+            )
+        if request.content and request.content.strip():
+            return request.content.strip()
+        raise SidecarError(
+            VALIDATION_ERROR, "Either content or messages is required.", status_code=400
+        )
+
+    @staticmethod
+    def _get_vector_payload(cursor: Any, table: str, memory_id: str) -> dict[str, Any] | None:
+        cursor.execute(f"select payload from {table} where id = %s", (memory_id,))
+        row = cursor.fetchone()
+        return row[0] if row and isinstance(row[0], dict) else None
+
+    def _get_vector_record(
+        self,
+        cursor: Any,
+        table: str,
+        memory_id: str,
+        scope: str,
+        *,
+        expected_key: str | None = None,
+        expected_digest: str | None = None,
+    ) -> MemoryRecord | None:
+        payload = self._get_vector_payload(cursor, table, memory_id)
+        if payload is None or payload.get("user_id") != scope:
+            return None
+        if expected_key is not None and payload.get("yuviIngestionKey") != expected_key:
+            return None
+        if expected_digest is not None and payload.get("yuviPayloadDigest") != expected_digest:
+            return None
+        return MemoryRecord(
+            id=memory_id,
+            content=str(payload.get("data") or ""),
+            scope=scope,
+            metadata=payload,
+            createdAt=_as_optional_str(payload.get("created_at")),
+            updatedAt=_as_optional_str(payload.get("updated_at")),
+        )
+
     def search(self, request: SearchMemoryRequest) -> list[MemoryRecord]:
         memory = self.ensure_ready()
         try:
@@ -438,7 +754,10 @@ class Mem0Service:
             # Enforce scope isolation before update.
             self.get(memory_id, scope=request.scope)
         try:
-            if hasattr(memory, "update"):
+            yuvi_identity = self._read_yuvi_identity(memory, memory_id)
+            if yuvi_identity is not None:
+                self._update_yuvi_memory(memory, memory_id, request.content, yuvi_identity)
+            elif hasattr(memory, "update"):
                 memory.update(memory_id, data=request.content)
             else:
                 raise SidecarError(
@@ -460,6 +779,51 @@ class Mem0Service:
                 retryable=True,
             ) from exc
         return self.get(memory_id, scope=request.scope)
+
+    @staticmethod
+    def _read_yuvi_identity(memory: Any, memory_id: str) -> dict[str, str] | None:
+        """Read the immutable Yuvi identity directly from the canonical vector row."""
+        vector_store = getattr(memory, "vector_store", None)
+        getter = getattr(vector_store, "get", None)
+        if not callable(getter):
+            return None
+        existing = getter(vector_id=memory_id)
+        payload = getattr(existing, "payload", None)
+        if not isinstance(payload, dict):
+            return None
+        key = payload.get("yuviIngestionKey")
+        digest = payload.get("yuviPayloadDigest")
+        if key is None and digest is None:
+            return None
+        if not isinstance(key, str) or not key or not isinstance(digest, str) or not digest:
+            raise SidecarError(
+                INTERNAL_ERROR,
+                "Yuvi memory identity is incomplete and cannot be safely updated.",
+                retryable=False,
+                status_code=503,
+            )
+        return {"yuviIngestionKey": key, "yuviPayloadDigest": digest}
+
+    @staticmethod
+    def _update_yuvi_memory(
+        memory: Any, memory_id: str, content: str, identity: dict[str, str]
+    ) -> None:
+        """Run Mem0's normal update primitive with only immutable Yuvi identity added."""
+        update_memory = getattr(memory, "_update_memory", None)
+        embedding_model = getattr(memory, "embedding_model", None)
+        embed = getattr(embedding_model, "embed", None)
+        if not callable(update_memory) or not callable(embed):
+            raise SidecarError(
+                INTERNAL_ERROR,
+                "Mem0 update primitive is unavailable for Yuvi-identified memory.",
+                retryable=False,
+                status_code=503,
+            )
+        embeddings = embed(content, "update")
+        # Mem0's internal update preserves its normal data/hash/timestamp, vector,
+        # and history behavior. Only the two immutable Yuvi identity fields are
+        # supplied as metadata; caller metadata cannot replace them.
+        update_memory(memory_id, content, {content: embeddings}, metadata=identity)
 
     def delete(self, memory_id: str, scope: str | None = None) -> None:
         memory = self.ensure_ready()
@@ -661,3 +1025,15 @@ def _safe_error_message(exc: BaseException) -> str:
     if len(text) > 300:
         return text[:300] + "…"
     return text
+
+
+def _safe_identifier(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise SidecarError(
+            INTERNAL_ERROR, "Invalid backend collection identifier.", status_code=503
+        )
+    return value
+
+
+def _json_value(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
