@@ -118,6 +118,7 @@ export type MemoryWriteEventInput = {
   sourceTurnIds?: string[];
   conversationId?: string | null;
   idempotencyKey?: string | null;
+  payloadDigest?: string | null;
   participants?: string[];
   assertion?: MemoryEventAssertion;
   confidence?: number | null;
@@ -143,6 +144,20 @@ export type MemoryWriteEventOutcome = {
   event?: MemoryEvent | null;
   errorCode?: string | null;
   failureClass?: MemoryWriteFailureClass | null;
+};
+
+export type MemoryReconciliationStatus =
+  | "applied"
+  | "not_applied"
+  | "in_flight"
+  | "payload_conflict"
+  | "unknown";
+
+export type MemoryReconciliationResult = {
+  status: MemoryReconciliationStatus;
+  eventId?: MemoryEventId | undefined;
+  operation?: string | undefined;
+  errorCode?: string | null | undefined;
 };
 
 /** Outcome of a completed runtime conversation turn crossing semantic memory. */
@@ -183,4 +198,8 @@ export interface MemoryProvider {
   retrieveRelevant(input: MemoryRetrievalInput): Promise<MemoryRetrievalOutcome>;
   getEvent(input: MemoryGetEventInput): Promise<MemoryEvent | null>;
   writeEvent(input: MemoryWriteEventInput): Promise<MemoryWriteEventOutcome>;
+  writeEventIdempotent?(input: MemoryWriteEventInput): Promise<MemoryWriteEventOutcome>;
+  reconcileEvent?(
+    input: Pick<MemoryWriteEventInput, "idempotencyKey" | "payloadDigest">
+  ): Promise<MemoryReconciliationResult>;
 }

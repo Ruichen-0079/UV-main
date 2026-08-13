@@ -167,6 +167,42 @@ def test_infer_false_does_not_require_llm(monkeypatch: pytest.MonkeyPatch) -> No
     assert body["data"]["memoryId"] == "m1"
 
 
+def test_idempotent_routes_delegate_exact_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    import yuvi_mem0.app as app_module
+
+    class IdempotentService(FakeService):
+        def submit_idempotent(self, request):  # type: ignore[no-untyped-def]
+            return MemoryWriteResult(memoryId="stable-id", operation="created", record=None)
+
+        def reconcile_idempotency(self, key: str, digest: str):
+            from yuvi_mem0.schemas import MemoryReconciliationResult
+
+            assert key == "k"
+            assert digest == "d"
+            return MemoryReconciliationResult(status="applied", memoryId="stable-id")
+
+    monkeypatch.setattr(app_module, "get_service", lambda: IdempotentService())
+    with TestClient(app) as client:
+        submitted = client.post(
+            "/v1/memories/idempotent",
+            json={
+                "scope": "yuvi:v1:user:u:character:c",
+                "content": "fact",
+                "infer": False,
+                "idempotencyKey": "k",
+                "payloadDigest": "d",
+            },
+        )
+        reconciled = client.post(
+            "/v1/memories/idempotent/reconcile",
+            json={"idempotencyKey": "k", "payloadDigest": "d"},
+        )
+    assert submitted.status_code == 200
+    assert submitted.json()["data"]["memoryId"] == "stable-id"
+    assert reconciled.status_code == 200
+    assert reconciled.json()["data"]["status"] == "applied"
+
+
 def test_noop_llm_raises_without_network() -> None:
     from yuvi_mem0.noop_llm import YuviNoopLLM, register_yuvi_noop_llm
 

@@ -939,6 +939,10 @@ describe("RuntimeOrchestrator", () => {
       async writeEvent(input) {
         providerWrites.push(input);
         return { status: "written", eventId: "memory:ledger-test" };
+      },
+      async writeEventIdempotent(input) {
+        providerWrites.push(input);
+        return { status: "written", eventId: "memory:ledger-test" };
       }
     });
     const conversation = new InMemoryConversationRepository();
@@ -1023,6 +1027,10 @@ describe("RuntimeOrchestrator", () => {
         return null;
       },
       async writeEvent(input) {
+        providerWrites.push(input);
+        return { status: "written", eventId: `memory:${providerWrites.length}` };
+      },
+      async writeEventIdempotent(input) {
         providerWrites.push(input);
         return { status: "written", eventId: `memory:${providerWrites.length}` };
       }

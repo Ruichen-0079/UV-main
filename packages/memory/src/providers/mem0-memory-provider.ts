@@ -1,6 +1,7 @@
 import {
   MemoryBackendError,
   type MemoryBackend,
+  type MemoryReconciliationResult,
   type MemoryRecord,
   type MemoryRecordMetadata
 } from "../backend.js";
@@ -266,6 +267,111 @@ export class Mem0MemoryProvider implements MemoryProvider {
       };
     }
   }
+
+  async writeEventIdempotent(input: MemoryWriteEventInput): Promise<MemoryWriteEventOutcome> {
+    const scope = normalizeOptionalScope(input.scope);
+    const key = input.idempotencyKey?.trim();
+    const digest = input.payloadDigest?.trim();
+    if (!scope) {
+      return {
+        status: "rejected",
+        errorCode: "MEMORY_SCOPE_MISSING",
+        failureClass: "definitive_rejection"
+      };
+    }
+    if (!key || !digest) {
+      return {
+        status: "rejected",
+        errorCode: "MEMORY_IDEMPOTENCY_INPUT_MISSING",
+        failureClass: "definitive_rejection"
+      };
+    }
+    const content = typeof input.content === "string" ? input.content.trim() : "";
+    if (!content) {
+      return {
+        status: "rejected",
+        errorCode: "MEMORY_CONTENT_MISSING",
+        failureClass: "definitive_rejection"
+      };
+    }
+    try {
+      const backend = this.backend;
+      if (!backend.submitIdempotent) {
+        return {
+          status: "rejected",
+          errorCode: "MEMORY_IDEMPOTENCY_UNSUPPORTED",
+          failureClass: "definitive_rejection"
+        };
+      }
+      const result = await backend.submitIdempotent(
+        {
+          scope,
+          content,
+          infer: false,
+          metadata: buildWriteMetadata(input),
+          idempotencyKey: key,
+          payloadDigest: digest
+        },
+        input.signal
+      );
+      const memoryId = result.memoryId?.trim();
+      if (!memoryId) {
+        return {
+          status: "rejected",
+          errorCode: "MEMORY_WRITE_ID_MISSING",
+          failureClass: "ambiguous"
+        };
+      }
+      if (
+        result.operation !== "created" &&
+        result.operation !== "updated" &&
+        result.operation !== "unchanged"
+      ) {
+        return {
+          status: "rejected",
+          eventId: canonicalMem0EventId(memoryId),
+          errorCode: "MEMORY_WRITE_OPERATION_INVALID",
+          failureClass: "definitive_rejection"
+        };
+      }
+      const eventId = canonicalMem0EventId(memoryId);
+      const event = result.record ? mapMem0RecordToMemoryEvent(result.record, scope) : null;
+      return {
+        status: result.operation === "unchanged" ? "unchanged" : "written",
+        eventId,
+        event
+      };
+    } catch (error) {
+      return {
+        status: "rejected",
+        errorCode: safeErrorCode(error, "MEMORY_IDEMPOTENT_WRITE_FAILED"),
+        failureClass: classifyWriteFailure(error)
+      };
+    }
+  }
+
+  async reconcileEvent(
+    input: Pick<MemoryWriteEventInput, "idempotencyKey" | "payloadDigest">
+  ): Promise<MemoryReconciliationResult> {
+    const key = input.idempotencyKey?.trim();
+    const digest = input.payloadDigest?.trim();
+    if (!key || !digest)
+      return { status: "unknown", errorCode: "MEMORY_IDEMPOTENCY_INPUT_MISSING" };
+    if (!this.backend.reconcileIdempotency) {
+      return { status: "unknown", errorCode: "MEMORY_RECONCILIATION_UNSUPPORTED" };
+    }
+    try {
+      return await this.backend.reconcileIdempotency(
+        { idempotencyKey: key, payloadDigest: digest },
+        undefined
+      );
+    } catch (error) {
+      return {
+        status: "unknown",
+        errorCode: safeErrorCode(error, "MEMORY_RECONCILIATION_UNAVAILABLE")
+      };
+    }
+  }
 }
 
 export function buildWriteMetadata(input: MemoryWriteEventInput): MemoryRecordMetadata {
@@ -478,7 +584,11 @@ function safeErrorCode(error: unknown, fallback: string): string {
 function classifyWriteFailure(error: unknown): MemoryWriteFailureClass {
   if (error instanceof Mem0MemoryProviderError) return "definitive_rejection";
   if (error instanceof MemoryBackendError) {
-    if (error.code === "VALIDATION_ERROR") {
+    if (
+      error.code === "VALIDATION_ERROR" ||
+      error.code === "MEMORY_IDEMPOTENCY_CONFLICT" ||
+      error.code === "MEMORY_IDEMPOTENCY_PAYLOAD_CONFLICT"
+    ) {
       return "definitive_rejection";
     }
     // The backend request may already have reached the sidecar. Retryability

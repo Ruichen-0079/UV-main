@@ -95,6 +95,7 @@ export type FinalizedIngestionEvent = {
   resultKind: "written" | "unchanged" | "rejected" | "ambiguous" | "skipped" | null;
   attemptCount: number;
   lastAttemptAt: string | null;
+  dispatchStartedAt: string | null;
   nextAttemptAt: string | null;
   backendMemoryId: string | null;
   backendOperation: string | null;
@@ -163,13 +164,33 @@ export type FinalizedIngestionRepository = {
     eventId: string;
     leaseOwner: string;
     leaseSeconds: number;
-    expectedVersion?: number | undefined;
+    expectedVersion: number;
+  }): Promise<FinalizedIngestionEvent | null>;
+  markEventDispatchStarted(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
   }): Promise<FinalizedIngestionEvent | null>;
   recordEventOutcome(input: {
     finalizedTurnId: string;
     eventId: string;
+    leaseOwner: string;
     outcome: FinalizedIngestionEventOutcome;
-    expectedVersion?: number | undefined;
+    expectedVersion: number;
+  }): Promise<FinalizedIngestionEvent>;
+  reclaimExpiredEvent(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    expectedVersion: number;
+    now?: string | undefined;
+  }): Promise<FinalizedIngestionEvent | null>;
+  renewLease(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
+    leaseSeconds: number;
   }): Promise<FinalizedIngestionEvent>;
   listMissingAdmissions(limit?: number): Promise<MissingFinalizedConversationTurn[]>;
   listNonTerminalTurns(limit?: number): Promise<FinalizedIngestionTurn[]>;
@@ -183,13 +204,33 @@ export type FinalizedIngestionPort = {
     eventId: string;
     leaseOwner: string;
     leaseSeconds: number;
-    expectedVersion?: number | undefined;
+    expectedVersion: number;
+  }): Promise<FinalizedIngestionEvent | null>;
+  markEventDispatchStarted(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
   }): Promise<FinalizedIngestionEvent | null>;
   recordEventOutcome(input: {
     finalizedTurnId: string;
     eventId: string;
+    leaseOwner: string;
     outcome: FinalizedIngestionEventOutcome;
-    expectedVersion?: number | undefined;
+    expectedVersion: number;
+  }): Promise<FinalizedIngestionEvent>;
+  reclaimExpiredEvent(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    expectedVersion: number;
+    now?: string | undefined;
+  }): Promise<FinalizedIngestionEvent | null>;
+  renewLease(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
+    leaseSeconds: number;
   }): Promise<FinalizedIngestionEvent>;
 };
 
@@ -335,7 +376,7 @@ export class PostgresFinalizedIngestionRepository implements FinalizedIngestionR
     eventId: string;
     leaseOwner: string;
     leaseSeconds: number;
-    expectedVersion?: number | undefined;
+    expectedVersion: number;
   }): Promise<FinalizedIngestionEvent | null> {
     return this.transaction(async (tx) => {
       await this.lockTurn(input.finalizedTurnId, tx);
@@ -344,21 +385,52 @@ export class PostgresFinalizedIngestionRepository implements FinalizedIngestionR
          set status = 'processing',
              lease_owner = $3,
              lease_expires_at = now() + ($4::int * interval '1 second'),
-             last_attempt_at = now(),
+             dispatch_started_at = null,
              updated_at = now(),
              version = version + 1
          where finalized_turn_id = $1
            and event_id = $2
-           and status in ('pending', 'retryable_failed')
-           and ($5::int is null or version = $5)
+           and (status = 'pending' or (status = 'retryable_failed'
+             and (next_attempt_at is null or next_attempt_at <= now())))
+           and version = $5
          returning *`,
         [
           input.finalizedTurnId,
           input.eventId,
           input.leaseOwner,
           Math.max(1, Math.trunc(input.leaseSeconds)),
-          input.expectedVersion ?? null
+          input.expectedVersion
         ]
+      );
+      if (!result.rows[0]) return null;
+      await this.refreshAggregate(input.finalizedTurnId, tx);
+      return mapEventRow(result.rows[0]);
+    });
+  }
+
+  async markEventDispatchStarted(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
+  }): Promise<FinalizedIngestionEvent | null> {
+    return this.transaction(async (tx) => {
+      await this.lockTurn(input.finalizedTurnId, tx);
+      const result = await tx.query(
+        `update finalized_ingestion_events
+         set dispatch_started_at = now(),
+             attempt_count = attempt_count + 1,
+             last_attempt_at = now(),
+             updated_at = now(),
+             version = version + 1
+         where finalized_turn_id = $1 and event_id = $2
+           and status = 'processing'
+           and lease_owner = $3
+           and lease_expires_at > now()
+           and dispatch_started_at is null
+           and version = $4
+         returning *`,
+        [input.finalizedTurnId, input.eventId, input.leaseOwner, input.expectedVersion]
       );
       if (!result.rows[0]) return null;
       await tx.query(
@@ -378,8 +450,9 @@ export class PostgresFinalizedIngestionRepository implements FinalizedIngestionR
   async recordEventOutcome(input: {
     finalizedTurnId: string;
     eventId: string;
+    leaseOwner: string;
     outcome: FinalizedIngestionEventOutcome;
-    expectedVersion?: number | undefined;
+    expectedVersion: number;
   }): Promise<FinalizedIngestionEvent> {
     const mapped = mapOutcome(input.outcome);
     return this.transaction(async (tx) => {
@@ -394,12 +467,16 @@ export class PostgresFinalizedIngestionRepository implements FinalizedIngestionR
             error_code = $7,
             error_message = $8,
             next_attempt_at = $9,
+            dispatch_started_at = null,
             lease_owner = null,
             lease_expires_at = null,
             updated_at = now(),
             version = version + 1
          where finalized_turn_id = $1 and event_id = $2
-           and ($10::int is null or version = $10)
+           and status = 'processing'
+           and lease_owner = $10
+           and version = $11
+           and ($12::boolean = false or (dispatch_started_at is not null and attempt_count >= 1))
          returning *`,
         [
           input.finalizedTurnId,
@@ -411,7 +488,9 @@ export class PostgresFinalizedIngestionRepository implements FinalizedIngestionR
           mapped.errorCode,
           mapped.errorMessage,
           mapped.nextAttemptAt,
-          input.expectedVersion ?? null
+          input.leaseOwner,
+          input.expectedVersion,
+          outcomeRequiresDispatchMarker(input.outcome)
         ]
       );
       if (!result.rows[0]) {
@@ -425,6 +504,75 @@ export class PostgresFinalizedIngestionRepository implements FinalizedIngestionR
         [input.finalizedTurnId, input.eventId]
       );
       return mapEventRow(refreshed.rows[0] ?? result.rows[0]);
+    });
+  }
+
+  async reclaimExpiredEvent(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    expectedVersion: number;
+    now?: string | undefined;
+  }): Promise<FinalizedIngestionEvent | null> {
+    return this.transaction(async (tx) => {
+      await this.lockTurn(input.finalizedTurnId, tx);
+      const result = await tx.query(
+        `update finalized_ingestion_events
+         set status = case when dispatch_started_at is null then 'pending' else 'reconcile_required' end,
+             result_kind = case when dispatch_started_at is null then null else 'ambiguous' end,
+             error_code = case when dispatch_started_at is null then null else 'MEMORY_DISPATCH_EXPIRED' end,
+             error_message = case when dispatch_started_at is null then null else 'Lease expired after dispatch began.' end,
+             next_attempt_at = null,
+             lease_owner = null,
+             lease_expires_at = null,
+             dispatch_started_at = null,
+             updated_at = now(),
+             version = version + 1
+         where finalized_turn_id = $1 and event_id = $2
+           and status = 'processing'
+           and lease_expires_at <= coalesce($3::timestamptz, now())
+           and version = $4
+         returning *`,
+        [input.finalizedTurnId, input.eventId, input.now ?? null, input.expectedVersion]
+      );
+      if (!result.rows[0]) return null;
+      await this.refreshAggregate(input.finalizedTurnId, tx);
+      return mapEventRow(result.rows[0]);
+    });
+  }
+
+  async renewLease(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
+    leaseSeconds: number;
+  }): Promise<FinalizedIngestionEvent> {
+    return this.transaction(async (tx) => {
+      await this.lockTurn(input.finalizedTurnId, tx);
+      const result = await tx.query(
+        `update finalized_ingestion_events
+         set lease_expires_at = now() + ($5::int * interval '1 second'),
+             updated_at = now(),
+             version = version + 1
+         where finalized_turn_id = $1 and event_id = $2
+           and status = 'processing'
+           and lease_owner = $3
+           and lease_expires_at > now()
+           and version = $4
+         returning *`,
+        [
+          input.finalizedTurnId,
+          input.eventId,
+          input.leaseOwner,
+          input.expectedVersion,
+          Math.max(1, Math.trunc(input.leaseSeconds))
+        ]
+      );
+      if (!result.rows[0]) {
+        throw new Error(`Finalized ingestion event '${input.eventId}' lease could not be renewed.`);
+      }
+      await this.refreshAggregate(input.finalizedTurnId, tx);
+      return mapEventRow(result.rows[0]);
     });
   }
 
@@ -620,6 +768,7 @@ export class InMemoryFinalizedIngestionRepository implements FinalizedIngestionR
           resultKind: null,
           attemptCount: 0,
           lastAttemptAt: null,
+          dispatchStartedAt: null,
           nextAttemptAt: null,
           backendMemoryId: null,
           backendOperation: null,
@@ -654,14 +803,17 @@ export class InMemoryFinalizedIngestionRepository implements FinalizedIngestionR
     eventId: string;
     leaseOwner: string;
     leaseSeconds: number;
-    expectedVersion?: number | undefined;
+    expectedVersion: number;
   }): Promise<FinalizedIngestionEvent | null> {
     const event = this.events.get(input.eventId);
     if (
       !event ||
       event.finalizedTurnId !== input.finalizedTurnId ||
       !["pending", "retryable_failed"].includes(event.status) ||
-      (input.expectedVersion !== undefined && input.expectedVersion !== event.version)
+      (event.status === "retryable_failed" &&
+        event.nextAttemptAt !== null &&
+        new Date(event.nextAttemptAt).getTime() > Date.now()) ||
+      input.expectedVersion !== event.version
     ) {
       return null;
     }
@@ -671,15 +823,48 @@ export class InMemoryFinalizedIngestionRepository implements FinalizedIngestionR
     event.leaseExpiresAt = new Date(
       now.getTime() + Math.max(1, Math.trunc(input.leaseSeconds)) * 1000
     ).toISOString();
-    event.attemptCount += 1;
-    event.lastAttemptAt = now.toISOString();
+    event.dispatchStartedAt = null;
     event.updatedAt = now.toISOString();
     event.version += 1;
     const turn = this.turns.get(input.finalizedTurnId);
     if (turn) {
-      turn.attemptCount += 1;
-      turn.lastAttemptAt = now.toISOString();
       turn.updatedAt = now.toISOString();
+      turn.version += 1;
+    }
+    this.refreshAggregate(input.finalizedTurnId);
+    return cloneEvent(event);
+  }
+
+  async markEventDispatchStarted(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
+  }): Promise<FinalizedIngestionEvent | null> {
+    const event = this.events.get(input.eventId);
+    if (
+      !event ||
+      event.finalizedTurnId !== input.finalizedTurnId ||
+      event.status !== "processing" ||
+      event.leaseOwner !== input.leaseOwner ||
+      !event.leaseExpiresAt ||
+      new Date(event.leaseExpiresAt).getTime() <= Date.now() ||
+      event.dispatchStartedAt !== null ||
+      event.version !== input.expectedVersion
+    ) {
+      return null;
+    }
+    const now = new Date().toISOString();
+    event.dispatchStartedAt = now;
+    event.attemptCount += 1;
+    event.lastAttemptAt = now;
+    event.updatedAt = now;
+    event.version += 1;
+    const turn = this.turns.get(input.finalizedTurnId);
+    if (turn) {
+      turn.attemptCount += 1;
+      turn.lastAttemptAt = now;
+      turn.updatedAt = now;
       turn.version += 1;
     }
     this.refreshAggregate(input.finalizedTurnId);
@@ -689,16 +874,30 @@ export class InMemoryFinalizedIngestionRepository implements FinalizedIngestionR
   async recordEventOutcome(input: {
     finalizedTurnId: string;
     eventId: string;
+    leaseOwner: string;
     outcome: FinalizedIngestionEventOutcome;
-    expectedVersion?: number | undefined;
+    expectedVersion: number;
   }): Promise<FinalizedIngestionEvent> {
     const event = this.events.get(input.eventId);
     if (!event || event.finalizedTurnId !== input.finalizedTurnId) {
       throw new Error(`Finalized ingestion event '${input.eventId}' was not found.`);
     }
-    if (input.expectedVersion !== undefined && event.version !== input.expectedVersion) {
+    if (
+      event.status !== "processing" ||
+      event.leaseOwner !== input.leaseOwner ||
+      event.version !== input.expectedVersion
+    ) {
       throw new Error(
         `Finalized ingestion event '${input.eventId}' changed before outcome recording.`
+      );
+    }
+    if (
+      outcomeRequiresDispatchMarker(input.outcome) &&
+      (event.dispatchStartedAt === null || event.attemptCount < 1)
+    ) {
+      throw new Error(
+        `Finalized ingestion event '${input.eventId}' changed before outcome recording: ` +
+          "dispatch marker is missing."
       );
     }
     const mapped = mapOutcome(input.outcome);
@@ -707,6 +906,7 @@ export class InMemoryFinalizedIngestionRepository implements FinalizedIngestionR
       resultKind: mapped.resultKind,
       attemptCount: event.attemptCount,
       lastAttemptAt: new Date().toISOString(),
+      dispatchStartedAt: null,
       backendMemoryId: mapped.backendMemoryId,
       backendOperation: mapped.backendOperation,
       errorCode: mapped.errorCode,
@@ -717,6 +917,69 @@ export class InMemoryFinalizedIngestionRepository implements FinalizedIngestionR
       updatedAt: new Date().toISOString(),
       version: event.version + 1
     });
+    this.refreshAggregate(input.finalizedTurnId);
+    return cloneEvent(event);
+  }
+
+  async reclaimExpiredEvent(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    expectedVersion: number;
+    now?: string | undefined;
+  }): Promise<FinalizedIngestionEvent | null> {
+    const event = this.events.get(input.eventId);
+    const now = input.now ? new Date(input.now).getTime() : Date.now();
+    if (
+      !event ||
+      event.finalizedTurnId !== input.finalizedTurnId ||
+      event.status !== "processing" ||
+      !event.leaseExpiresAt ||
+      new Date(event.leaseExpiresAt).getTime() > now ||
+      event.version !== input.expectedVersion
+    ) {
+      return null;
+    }
+    const hadDispatch = event.dispatchStartedAt !== null;
+    Object.assign(event, {
+      status: hadDispatch ? "reconcile_required" : "pending",
+      resultKind: hadDispatch ? "ambiguous" : null,
+      errorCode: hadDispatch ? "MEMORY_DISPATCH_EXPIRED" : null,
+      errorMessage: hadDispatch ? "Lease expired after dispatch began." : null,
+      nextAttemptAt: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      dispatchStartedAt: null,
+      updatedAt: new Date().toISOString(),
+      version: event.version + 1
+    });
+    this.refreshAggregate(input.finalizedTurnId);
+    return cloneEvent(event);
+  }
+
+  async renewLease(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
+    leaseSeconds: number;
+  }): Promise<FinalizedIngestionEvent> {
+    const event = this.events.get(input.eventId);
+    if (
+      !event ||
+      event.finalizedTurnId !== input.finalizedTurnId ||
+      event.status !== "processing" ||
+      event.leaseOwner !== input.leaseOwner ||
+      !event.leaseExpiresAt ||
+      new Date(event.leaseExpiresAt).getTime() <= Date.now() ||
+      event.version !== input.expectedVersion
+    ) {
+      throw new Error(`Finalized ingestion event '${input.eventId}' lease could not be renewed.`);
+    }
+    event.leaseExpiresAt = new Date(
+      Date.now() + Math.max(1, Math.trunc(input.leaseSeconds)) * 1000
+    ).toISOString();
+    event.updatedAt = new Date().toISOString();
+    event.version += 1;
     this.refreshAggregate(input.finalizedTurnId);
     return cloneEvent(event);
   }
@@ -966,6 +1229,20 @@ export class FinalizedIngestionService implements FinalizedIngestionPort {
   claimEvent(input: Parameters<FinalizedIngestionRepository["claimEvent"]>[0]) {
     return this.repository.claimEvent(input);
   }
+
+  markEventDispatchStarted(
+    input: Parameters<FinalizedIngestionRepository["markEventDispatchStarted"]>[0]
+  ) {
+    return this.repository.markEventDispatchStarted(input);
+  }
+
+  reclaimExpiredEvent(input: Parameters<FinalizedIngestionRepository["reclaimExpiredEvent"]>[0]) {
+    return this.repository.reclaimExpiredEvent(input);
+  }
+
+  renewLease(input: Parameters<FinalizedIngestionRepository["renewLease"]>[0]) {
+    return this.repository.renewLease(input);
+  }
 }
 
 export function createFinalizedIngestionRepositoryFromEnv(
@@ -1012,6 +1289,7 @@ function materializeEvent(
     backendIdempotencyKey: `yuvi:finalized-turn:${finalizedTurnId}:event:${eventKey.slice("event:".length)}`,
     eventPayload: {
       ...payload,
+      payloadDigest: sha256(canonicalJson(payload)),
       idempotencyKey: `yuvi:finalized-turn:${finalizedTurnId}:event:${eventKey.slice("event:".length)}`
     }
   };
@@ -1155,6 +1433,20 @@ function mapOutcome(
   };
 }
 
+/**
+ * Delivery outcomes require the durable dispatch marker. Definitive rejection
+ * and skipped outcomes are non-dispatch terminal transitions and may be
+ * recorded immediately after claim.
+ */
+function outcomeRequiresDispatchMarker(
+  outcome: Parameters<FinalizedIngestionRepository["recordEventOutcome"]>[0]["outcome"]
+): boolean {
+  return (
+    outcome.status !== "skipped" &&
+    !(outcome.status === "rejected" && outcome.failureClass === "definitive_rejection")
+  );
+}
+
 function mapTurnRow(row: QueryResultRow): FinalizedIngestionTurn {
   return {
     finalizedTurnId: String(row["finalized_turn_id"]),
@@ -1208,6 +1500,7 @@ function mapEventRow(row: QueryResultRow): FinalizedIngestionEvent {
     resultKind: (row["result_kind"] as FinalizedIngestionEvent["resultKind"]) ?? null,
     attemptCount: Number(row["attempt_count"]),
     lastAttemptAt: nullableIsoString(row["last_attempt_at"]),
+    dispatchStartedAt: nullableIsoString(row["dispatch_started_at"]),
     nextAttemptAt: nullableIsoString(row["next_attempt_at"]),
     backendMemoryId: nullableString(row["backend_memory_id"]),
     backendOperation: nullableString(row["backend_operation"]),

@@ -21,8 +21,11 @@ from yuvi_mem0.schemas import (
     ApiMeta,
     ApiResponse,
     ErrorBody,
+    IdempotentMemoryReconcileRequest,
+    IdempotentMemoryWriteRequest,
     MemoryHistoryResponse,
     MemoryListResponse,
+    MemoryReconciliationResult,
     MemorySearchResponse,
     SearchMemoryRequest,
     UpdateMemoryRequest,
@@ -133,6 +136,26 @@ def add_memory(request: AddMemoryRequest) -> dict[str, Any]:
         infer=request.infer,
         result_count=1 if result.memoryId else 0,
     )
+    return _ok(result.model_dump(), duration)
+
+
+@app.post("/v1/memories/idempotent")
+def submit_idempotent_memory(request: IdempotentMemoryWriteRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    result = get_service().submit_idempotent(request)
+    duration = int((time.perf_counter() - started) * 1000)
+    log_event(logger, operation="submit_idempotent", duration_ms=duration, result_count=1)
+    return _ok(result.model_dump(), duration)
+
+
+@app.post("/v1/memories/idempotent/reconcile")
+def reconcile_idempotent_memory(request: IdempotentMemoryReconcileRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    result: MemoryReconciliationResult = get_service().reconcile_idempotency(
+        request.idempotencyKey, request.payloadDigest
+    )
+    duration = int((time.perf_counter() - started) * 1000)
+    log_event(logger, operation="reconcile_idempotent", duration_ms=duration)
     return _ok(result.model_dump(), duration)
 
 

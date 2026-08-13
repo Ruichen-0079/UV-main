@@ -236,6 +236,10 @@ export {
   type MissingFinalizedConversationTurn
 } from "./finalized-ingestion-ledger.js";
 export {
+  executeFinalizedIngestionEvent,
+  type FinalizedIngestionDeliveryResult
+} from "./finalized-ingestion-executor.js";
+export {
   MissingDatabaseUrlError,
   parseDotEnv,
   readSqlMigrations,

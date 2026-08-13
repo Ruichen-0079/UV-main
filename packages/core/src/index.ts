@@ -18,6 +18,7 @@ import type {
   FinalizedIngestionAdmission,
   FinalizedIngestionPort
 } from "@companion/memory";
+import { executeFinalizedIngestionEvent } from "@companion/memory";
 import {
   detectCurrentAffect,
   detectExplicitForgetRequest,
@@ -1706,53 +1707,27 @@ export class RuntimeOrchestrator {
         let deduplicatedCount = 0;
         let rejectedCount = 0;
         let unresolved = false;
+        const provider = this.options.memory.getMemoryProvider?.();
+        if (!provider || !this.options.finalizedIngestion) {
+          throw new Error("Shared finalized ingestion delivery dependencies are unavailable.");
+        }
         for (const event of admitted.events.filter(
-          (candidate) =>
-            candidate.status === "pending" ||
-            candidate.status === "processing" ||
-            candidate.status === "retryable_failed"
+          (candidate) => candidate.status === "pending" || candidate.status === "retryable_failed"
         )) {
-          const claimed = await this.options.finalizedIngestion.claimEvent({
-            finalizedTurnId: durableFinalizedTurnId,
-            eventId: event.eventId,
+          const delivery = await executeFinalizedIngestionEvent({
+            repository: this.options.finalizedIngestion,
+            provider,
+            event,
             leaseOwner: `runtime:${crypto.randomUUID()}`,
-            leaseSeconds: 300,
-            expectedVersion: event.version
+            leaseSeconds: 300
           });
-          if (!claimed) {
+          if (!delivery.claimed || !delivery.event) {
             unresolved = true;
             continue;
           }
-          try {
-            const outcome = await this.options.memory.getMemoryProvider?.()?.writeEvent({
-              ...event.eventPayload,
-              idempotencyKey: event.backendIdempotencyKey
-            });
-            if (!outcome) {
-              throw new Error("Semantic memory provider is unavailable.");
-            }
-            await this.options.finalizedIngestion.recordEventOutcome({
-              finalizedTurnId: durableFinalizedTurnId,
-              eventId: event.eventId,
-              outcome,
-              expectedVersion: claimed.version
-            });
-            if (outcome.status === "written") writtenCount += 1;
-            else if (outcome.status === "unchanged") deduplicatedCount += 1;
-            else rejectedCount += 1;
-          } catch (error) {
-            rejectedCount += 1;
-            await this.options.finalizedIngestion.recordEventOutcome({
-              finalizedTurnId: durableFinalizedTurnId,
-              eventId: event.eventId,
-              expectedVersion: claimed.version,
-              outcome: {
-                status: "ambiguous",
-                errorCode: "MEMORY_WRITE_AMBIGUOUS",
-                errorMessage: safeErrorMessage(error)
-              }
-            });
-          }
+          if (delivery.outcome?.status === "written") writtenCount += 1;
+          else if (delivery.outcome?.status === "unchanged") deduplicatedCount += 1;
+          else rejectedCount += 1;
         }
         const status =
           rejectedCount > 0

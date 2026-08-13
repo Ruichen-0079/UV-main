@@ -36,6 +36,16 @@ class AddMemoryRequest(BaseModel):
     metadata: MemoryMetadata = Field(default_factory=MemoryMetadata)
 
 
+class IdempotentMemoryWriteRequest(AddMemoryRequest):
+    idempotencyKey: str = Field(min_length=1)
+    payloadDigest: str = Field(min_length=1)
+
+
+class IdempotentMemoryReconcileRequest(BaseModel):
+    idempotencyKey: str = Field(min_length=1)
+    payloadDigest: str = Field(min_length=1)
+
+
 class SearchMemoryRequest(BaseModel):
     scope: str = Field(min_length=1)
     query: str = Field(min_length=1)
@@ -63,6 +73,13 @@ class MemoryWriteResult(BaseModel):
     memoryId: str
     operation: Literal["created", "updated", "deleted", "unchanged"]
     record: MemoryRecord | None = None
+
+
+class MemoryReconciliationResult(BaseModel):
+    status: Literal["applied", "not_applied", "in_flight", "payload_conflict", "unknown"]
+    memoryId: str | None = None
+    operation: str | None = None
+    errorCode: str | None = None
 
 
 class MemorySearchResponse(BaseModel):

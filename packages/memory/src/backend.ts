@@ -81,6 +81,25 @@ export type AddMemoryInput = {
   metadata?: MemoryRecordMetadata;
 };
 
+export type IdempotentMemoryWriteInput = AddMemoryInput & {
+  idempotencyKey: string;
+  payloadDigest: string;
+};
+
+export type MemoryReconciliationStatus =
+  | "applied"
+  | "not_applied"
+  | "in_flight"
+  | "payload_conflict"
+  | "unknown";
+
+export type MemoryReconciliationResult = {
+  status: MemoryReconciliationStatus;
+  memoryId?: string;
+  operation?: MemoryWriteOperation | string;
+  errorCode?: string | null;
+};
+
 export type SearchMemoryInput = {
   scope: string;
   query: string;
@@ -131,6 +150,14 @@ export interface MemoryBackend {
   update(input: UpdateMemoryInput, signal?: AbortSignal): Promise<MemoryRecord>;
   delete(input: DeleteMemoryInput, signal?: AbortSignal): Promise<void>;
   history(input: MemoryHistoryInput, signal?: AbortSignal): Promise<MemoryHistoryEntry[]>;
+  submitIdempotent?(
+    input: IdempotentMemoryWriteInput,
+    signal?: AbortSignal
+  ): Promise<MemoryWriteResult>;
+  reconcileIdempotency?(
+    input: Pick<IdempotentMemoryWriteInput, "idempotencyKey" | "payloadDigest">,
+    signal?: AbortSignal
+  ): Promise<MemoryReconciliationResult>;
 }
 
 export class MemoryBackendError extends Error {
