@@ -19,6 +19,7 @@
     "paths": {
       "@companion/core": ["packages/core/src/index.ts"],
       "@companion/event-bus": ["packages/event-bus/src/index.ts"],
+      "@companion/host-environment": ["packages/host-environment/src/index.ts"],
       "@companion/memory": ["packages/memory/src/index.ts"],
       "@companion/prompt-builder": ["packages/prompt-builder/src/index.ts"],
       "@companion/config": ["packages/config/src/index.ts"],

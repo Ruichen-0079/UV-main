@@ -6,6 +6,7 @@
     { "path": "packages/memory" },
     { "path": "packages/prompt-builder" },
     { "path": "packages/config" },
+    { "path": "packages/host-environment" },
     { "path": "packages/providers" },
     { "path": "packages/core" },
     { "path": "packages/desktop-supervisor" },
