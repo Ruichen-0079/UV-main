@@ -33,6 +33,7 @@ vi.mock("node:fs/promises", async () => {
 });
 
 const sandboxes: string[] = [];
+const itPosix = it.skipIf(process.platform === "win32");
 
 afterEach(async () => {
   vi.mocked(mockedChmod).mockClear();
@@ -56,7 +57,7 @@ async function createSandbox(): Promise<{ root: string; env: NodeJS.ProcessEnv }
 }
 
 describe("host environment safety", () => {
-  it("resolves persistent XDG paths and rejects ephemeral references", () => {
+  itPosix("resolves persistent XDG paths and rejects ephemeral references", () => {
     const paths = resolveYuviHostPaths({
       env: { HOME: "/home/yuvi" },
       ephemeralRoots: ["/tmp", "/var/tmp"]
@@ -77,8 +78,7 @@ describe("host environment safety", () => {
     );
   });
 
-  it("allows an ancestor symlink when its canonical location is persistent", async () => {
-    if (process.platform === "win32") return;
+  itPosix("allows an ancestor symlink when its canonical location is persistent", async () => {
     const { root, env } = await createSandbox();
     const realConfig = path.join(root, "real-config");
     const configLink = path.join(root, "config-link");
@@ -96,8 +96,7 @@ describe("host environment safety", () => {
     expect(installed.paths.posixShellFile).toBe(path.join(configLink, "yuvi", "shell", "yuvi.sh"));
   });
 
-  it("rejects an ancestor symlink whose canonical location is ephemeral", async () => {
-    if (process.platform === "win32") return;
+  itPosix("rejects an ancestor symlink whose canonical location is ephemeral", async () => {
     const { root, env } = await createSandbox();
     const configLink = path.join(root, "config-link");
     await symlink("/tmp", configLink, "dir");
@@ -112,8 +111,7 @@ describe("host environment safety", () => {
     ).rejects.toMatchObject({ code: "EPHEMERAL_PERSISTENT_TARGET" });
   });
 
-  it("rejects a binDir whose existing ancestor resolves to ephemeral storage", async () => {
-    if (process.platform === "win32") return;
+  itPosix("rejects a binDir whose existing ancestor resolves to ephemeral storage", async () => {
     const { root, env } = await createSandbox();
     const ephemeralBinRoot = await mkdtemp(path.join(tmpdir(), "yuvi-bin-ephemeral-"));
     sandboxes.push(ephemeralBinRoot);
@@ -132,8 +130,7 @@ describe("host environment safety", () => {
     ).toEqual([false, false, false, false]);
   });
 
-  it("allows a binDir whose existing ancestor resolves to persistent storage", async () => {
-    if (process.platform === "win32") return;
+  itPosix("allows a binDir whose existing ancestor resolves to persistent storage", async () => {
     const { root, env } = await createSandbox();
     const persistentBinRoot = path.join(root, "persistent-local");
     await mkdir(persistentBinRoot, { recursive: true });
@@ -149,8 +146,7 @@ describe("host environment safety", () => {
     expect(await pathExists(installed.paths.posixShellFile)).toBe(true);
   });
 
-  it("allows an ordinary persistent binDir and renders its PATH entry", async () => {
-    if (process.platform === "win32") return;
+  itPosix("allows an ordinary persistent binDir and renders its PATH entry", async () => {
     const { root, env } = await createSandbox();
 
     const installed = await installToolchainIntegration({
@@ -165,8 +161,7 @@ describe("host environment safety", () => {
     expect(await pathExists(installed.paths.posixShellFile)).toBe(true);
   });
 
-  it("rejects a final managed-file symlink before writing any integration file", async () => {
-    if (process.platform === "win32") return;
+  itPosix("rejects a final managed-file symlink before writing any integration file", async () => {
     const { root, env } = await createSandbox();
     const paths = resolveYuviHostPaths({ env, home: root, ephemeralRoots: [] });
     await mkdir(path.dirname(paths.toolchainEnv), { recursive: true });
@@ -292,7 +287,7 @@ describe("host environment safety", () => {
     expect(await readFile(target, "utf8")).toBe(previousContent);
   });
 
-  it("installs atomically, is idempotent, and never touches .profile", async () => {
+  itPosix("installs atomically, is idempotent, and never touches .profile", async () => {
     const { root, env } = await createSandbox();
     const profilePath = path.join(root, ".profile");
     await writeFile(profilePath, "# user content\n", "utf8");
@@ -336,7 +331,7 @@ describe("host environment safety", () => {
     expect(firstContents.join("\n").match(new RegExp(YUVI_SHELL_BEGIN, "g"))?.length).toBe(4);
   });
 
-  it("keeps POSIX and fish startup successful when environment files disappear", async () => {
+  itPosix("keeps POSIX and fish startup successful when environment files disappear", async () => {
     const { root, env } = await createSandbox();
     const installed = await installToolchainIntegration({
       env,
@@ -371,7 +366,7 @@ describe("host environment safety", () => {
     expect(fish.stderr).toBe("");
   });
 
-  it("fails before writing when an existing target is not Yuvi-owned", async () => {
+  itPosix("fails before writing when an existing target is not Yuvi-owned", async () => {
     const { root, env } = await createSandbox();
     const paths = resolveYuviHostPaths({ env, home: root, ephemeralRoots: [] });
     await mkdir(path.dirname(paths.fishDropIn), { recursive: true });
@@ -386,7 +381,7 @@ describe("host environment safety", () => {
     expect(await readFile(paths.fishDropIn, "utf8")).toBe("# user-owned fish config\n");
   });
 
-  it("removes only managed files and preserves user files", async () => {
+  itPosix("removes only managed files and preserves user files", async () => {
     const { root, env } = await createSandbox();
     const profilePath = path.join(root, ".profile");
     await writeFile(profilePath, "# keep this\n", "utf8");
