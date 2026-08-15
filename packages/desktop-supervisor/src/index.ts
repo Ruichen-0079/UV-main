@@ -70,10 +70,54 @@ export {
   canonicalPath,
   commandLineContainsPath,
   defaultStateDirectory,
+  defaultYuviLocalDataRoot,
   isWindowsStylePath,
   parseUrlOrigin,
   pathsEqual
 } from "./paths.js";
+export {
+  PRIVATE_POSTGRES_DATABASE,
+  PRIVATE_POSTGRES_HOST,
+  PRIVATE_POSTGRES_MAJOR,
+  PRIVATE_POSTGRES_PREFERRED_PORT,
+  PRIVATE_POSTGRES_USER,
+  createClusterMarker,
+  describeEscapedPgdata,
+  describeUnsafePostgresDataRoot,
+  layoutFromRoot,
+  readClusterMarker,
+  resolvePostgresLayout,
+  restrictPathToCurrentUser,
+  writeClusterMarker,
+  writeInitializationState
+} from "./postgres-layout.js";
+export {
+  resolvePostgresDistribution,
+  resolvePostgresHome,
+  inspectPostgresMajor,
+  parsePostgresVersionText
+} from "./postgres-distribution.js";
+export {
+  POSTGRES_PASSWORD_ENV,
+  POSTGRES_SECRET_KEY,
+  generatePostgresPassword,
+  redactSecretText
+} from "./postgres-secret.js";
+export { selectPrivatePostgresPort } from "./postgres-port.js";
+export {
+  inspectExistingCluster,
+  initializePrivateCluster,
+  writeLocalOnlyConfig,
+  buildPostgresStartCommand,
+  execAuthenticatedSql
+} from "./postgres-cluster.js";
+export {
+  evaluatePostgresOwnership,
+  parsePostgresArgv,
+  stopPrivatePostgresIfOwned
+} from "./postgres-ownership.js";
+export { preparePrivatePostgres, postgresDiagnostics } from "./postgres-lifecycle.js";
+export { resolvePostgresMode } from "./config.js";
 export { DesktopSupervisor } from "./supervisor.js";
 export {
   startSupervisorHttpServer,

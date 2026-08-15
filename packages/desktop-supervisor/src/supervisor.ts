@@ -3,6 +3,20 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { buildChildProcessEnv, deriveConfigFromEnv } from "./config.js";
+import { buildPostgresStartCommand, pingPostgres } from "./postgres-cluster.js";
+import {
+  adoptSurvivingPostgres,
+  postgresDiagnostics,
+  preparePrivatePostgres,
+  publishListenMetadata
+} from "./postgres-lifecycle.js";
+import { POSTGRES_PASSWORD_ENV, resolvePostgresPassword } from "./postgres-secret.js";
+import { selectPrivatePostgresPort } from "./postgres-port.js";
+import {
+  evaluatePostgresOwnership,
+  expectedClusterName,
+  stopPrivatePostgresIfOwned
+} from "./postgres-ownership.js";
 import {
   mem0HealthOk,
   ollamaTagsOk,
@@ -21,6 +35,12 @@ import {
   writeProcessMetadata
 } from "./ownership.js";
 import { parseUrlOrigin, pathsEqual } from "./paths.js";
+import {
+  PRIVATE_POSTGRES_HOST,
+  PRIVATE_POSTGRES_MAJOR,
+  readClusterMarker,
+  readListenMetadata
+} from "./postgres-layout.js";
 import {
   forceKillProcessTree,
   inspectProcess,
@@ -60,12 +80,22 @@ type InternalService = {
 
 export type SupervisorListener = (snapshot: SupervisorSnapshot) => void;
 
+export type SupervisorHooks = {
+  inspectProcess?: typeof inspectProcess;
+  invokePostgresStop?: (input: {
+    layout: NonNullable<SupervisorConfig["postgresLayout"]>;
+    distribution: NonNullable<SupervisorConfig["postgresDistribution"]>;
+  }) => boolean;
+};
+
 /** Secret keys that must never leak into status/config responses. */
 const SECRET_ENV_KEYS = new Set([
   "DEEPSEEK_API_KEY",
   "DATABASE_URL",
   "MEM0_PG_CONNECTION_STRING",
-  "MEM0_LLM_API_KEY"
+  "MEM0_LLM_API_KEY",
+  POSTGRES_PASSWORD_ENV,
+  "PGPASSWORD"
 ]);
 
 const RUNTIME_RELOAD_KEYS = new Set([
@@ -141,8 +171,13 @@ export class DesktopSupervisor {
   private readonly lifecycleDiagnostics = process.env["YUVI_SUPERVISOR_DIAGNOSTICS"] === "1";
   private readonly lifecycleStartedAt = process.hrtime.bigint();
   private lifecycleSequence = 0;
+  private readonly hooks: SupervisorHooks;
 
-  constructor(private config: SupervisorConfig) {
+  constructor(
+    private config: SupervisorConfig,
+    hooks: SupervisorHooks = {}
+  ) {
+    this.hooks = hooks;
     // Base layer: shell/process + bootstrap config.env (e.g. .env files).
     const base: Record<string, string> = {};
     for (const [key, value] of Object.entries(process.env)) {
@@ -257,7 +292,8 @@ export class DesktopSupervisor {
         // Rust only sends user settings; preserve existing TTS commands when
         // the update does not include their explicit start-command variables.
         ttsWrapperStart: derived.ttsWrapperStart ?? this.config.ttsWrapperStart,
-        ttsUpstreamStart: derived.ttsUpstreamStart ?? this.config.ttsUpstreamStart
+        ttsUpstreamStart: derived.ttsUpstreamStart ?? this.config.ttsUpstreamStart,
+        postgresStart: derived.postgresStart ?? this.config.postgresStart
       };
 
       // Commit synchronously only after all candidate validation succeeds.
@@ -323,11 +359,19 @@ export class DesktopSupervisor {
 
   snapshot(): SupervisorSnapshot {
     const services = [...this.services.values()].map((svc) => this.toSnapshot(svc));
+    const postgres = this.services.get("postgres");
     return {
       instanceId: this.config.instanceId,
       shuttingDown: this.shuttingDown,
       services,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      postgres: postgresDiagnostics({
+        mode: this.config.postgresMode ?? "external",
+        layout: this.config.postgresLayout ?? null,
+        distributionError: this.config.postgresDistributionError ?? null,
+        ownership: postgres?.ownership ?? "none",
+        status: postgres?.status ?? "stopped"
+      })
     };
   }
 
@@ -349,8 +393,11 @@ export class DesktopSupervisor {
 
   async bootstrap(): Promise<SupervisorSnapshot> {
     if (this.shuttingDown) return this.snapshot();
-    // Dependencies first (detect only)
-    await this.refreshService("postgres");
+    if ((this.config.postgresMode ?? "external") === "private") {
+      await this.prepareAndStartPrivatePostgres();
+    } else {
+      await this.refreshService("postgres");
+    }
     await this.refreshService("ollama");
 
     if (this.config.autostartRuntime) {
@@ -627,6 +674,23 @@ export class DesktopSupervisor {
   }
 
   private async stopOwned(svc: InternalService): Promise<void> {
+    if (
+      svc.spec.id === "postgres" &&
+      this.config.postgresLayout &&
+      this.config.postgresDistribution
+    ) {
+      const stopped = this.stopPrivatePostgresOwned();
+      if (!stopped.invoked) {
+        if (svc.ownership === "owned" || svc.pid || svc.child) {
+          svc.status = "unavailable";
+          svc.summary = "Ownership uncertain; refusing to stop PostgreSQL.";
+          svc.detail = stopped.reason;
+          svc.lastError = stopped.reason;
+        }
+        svc.generation += 1;
+        return;
+      }
+    }
     // Invalidate callbacks from the generation being stopped before sending
     // any signal. A delayed exit/close event must not clear a replacement.
     svc.generation += 1;
@@ -635,12 +699,12 @@ export class DesktopSupervisor {
     const metadataSnapshot = readProcessMetadata(svc.spec.metadataFile);
     const metadataBelongsToThisSupervisor = Boolean(
       metadataSnapshot &&
-        metadataSnapshot.schemaVersion === PROCESS_METADATA_VERSION &&
-        metadataSnapshot.role === svc.spec.role &&
-        pathsEqual(metadataSnapshot.repositoryRoot, this.config.repositoryRoot) &&
-        pathsEqual(metadataSnapshot.stateDirectory, this.config.stateDirectory) &&
-        metadataSnapshot.ownershipToken === this.config.ownershipToken &&
-        metadataSnapshot.instanceId === this.config.instanceId
+      metadataSnapshot.schemaVersion === PROCESS_METADATA_VERSION &&
+      metadataSnapshot.role === svc.spec.role &&
+      pathsEqual(metadataSnapshot.repositoryRoot, this.config.repositoryRoot) &&
+      pathsEqual(metadataSnapshot.stateDirectory, this.config.stateDirectory) &&
+      metadataSnapshot.ownershipToken === this.config.ownershipToken &&
+      metadataSnapshot.instanceId === this.config.instanceId
     );
 
     // Kill our ChildProcess handle first (best signal we started it).
@@ -749,10 +813,7 @@ export class DesktopSupervisor {
       svc.pid = ownership.processId;
       svc.pendingExternal = false;
     } else if (svc.ownership === "owned") {
-      if (
-        svc.child &&
-        ownership.status !== "unavailable"
-      ) {
+      if (svc.child && ownership.status !== "unavailable") {
         this.invalidateTrackedChild(svc);
       }
       svc.ownership = "none";
@@ -802,6 +863,32 @@ export class DesktopSupervisor {
     }
 
     // Health / TCP
+    if (svc.spec.id === "postgres" && (this.config.postgresMode ?? "external") === "private") {
+      const sqlOk = svc.spec.readinessCheck ? await svc.spec.readinessCheck() : false;
+      if (sqlOk && svc.ownership === "owned") {
+        svc.status = "healthy";
+        svc.summary = "Private PostgreSQL running (owned)";
+        svc.lastError = null;
+      } else if (sqlOk) {
+        svc.status = "unavailable";
+        svc.summary = "PostgreSQL answered but is not owned by this Supervisor.";
+        svc.ownership = "none";
+      } else if (svc.ownership === "owned") {
+        svc.status = "unavailable";
+        svc.summary = "Owned private PostgreSQL is not ready.";
+      } else {
+        svc.status = "stopped";
+        svc.ownership = "none";
+        svc.summary = "Private PostgreSQL is stopped.";
+      }
+      this.lifecycleEvent("memory.classification.result", svc, {
+        phase: "private-postgres",
+        ...ownershipDiagnostics
+      });
+      void now;
+      return;
+    }
+
     if (svc.spec.tcp && !svc.spec.healthUrl) {
       this.lifecycleEvent("memory.health.probe.begin", svc, { phase: "tcp" });
       const tcp = await probeTcp(svc.spec.tcp.host, svc.spec.tcp.port);
@@ -853,9 +940,7 @@ export class DesktopSupervisor {
         : svc.pendingExternal
           ? svc.summary
           : "Running (external)";
-      svc.detail = svc.pendingExternal
-        ? svc.detail
-        : `latency ${health.latencyMs}ms`;
+      svc.detail = svc.pendingExternal ? svc.detail : `latency ${health.latencyMs}ms`;
       svc.lastError = null;
       if (!ownership.owned) {
         svc.ownership = "external";
@@ -912,10 +997,10 @@ export class DesktopSupervisor {
     const child = svc.child;
     return Boolean(
       child &&
-        (svc.pid == null || svc.pid === child.pid) &&
-        !child.killed &&
-        child.exitCode == null &&
-        child.signalCode == null
+      (svc.pid == null || svc.pid === child.pid) &&
+      !child.killed &&
+      child.exitCode == null &&
+      child.signalCode == null
     );
   }
 
@@ -929,7 +1014,9 @@ export class DesktopSupervisor {
   private async waitReady(svc: InternalService, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (svc.spec.healthUrl) {
+      if (svc.spec.readinessCheck) {
+        if (await svc.spec.readinessCheck()) return true;
+      } else if (svc.spec.healthUrl) {
         const health = await probeHttpHealth(svc.spec.healthUrl, {
           validateBody: svc.spec.validateHealthBody,
           timeoutMs: 1_500
@@ -944,6 +1031,107 @@ export class DesktopSupervisor {
     return false;
   }
 
+  private async prepareAndStartPrivatePostgres(): Promise<void> {
+    const layout = this.config.postgresLayout;
+    const distribution = this.config.postgresDistribution;
+    const svc = this.services.get("postgres");
+    if (!layout || !distribution || !svc) {
+      if (svc) {
+        svc.status = "unavailable";
+        svc.summary =
+          this.config.postgresDistributionError ?? "Private PostgreSQL is not configured.";
+        svc.lastError = this.config.postgresDistributionError ?? "private postgres unavailable";
+        svc.ownership = "none";
+      }
+      return;
+    }
+
+    if (this.tryAdoptSurvivingPostgres(svc)) {
+      await this.refreshService("postgres");
+      const adopted = this.services.get("postgres");
+      const adoptedPort = this.config.postgresListenPort;
+      const clusterId = readClusterMarker(layout)?.clusterId;
+      if (
+        adopted?.ownership === "owned" &&
+        adopted.status === "healthy" &&
+        adoptedPort &&
+        clusterId
+      ) {
+        publishListenMetadata(layout, {
+          schemaVersion: 1,
+          host: PRIVATE_POSTGRES_HOST,
+          port: adoptedPort,
+          clusterId,
+          postgresMajor: PRIVATE_POSTGRES_MAJOR
+        });
+      }
+      return;
+    }
+
+    const prepared = await preparePrivatePostgres({
+      layout,
+      distribution,
+      env: this.config.env,
+      authority: this.config.postgresSecretAuthority ?? "development-file",
+      ownedPort: svc.ownership === "owned" ? svc.spec.tcp?.port : null,
+      skipPortPersistence: true
+    });
+    if (!prepared.ok) {
+      svc.status = "unavailable";
+      svc.summary = prepared.message;
+      svc.lastError = prepared.code;
+      svc.ownership = "none";
+      svc.spec.managed = false;
+      svc.spec.startCommand = null;
+      return;
+    }
+
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const listen =
+        attempt === 0
+          ? prepared.listen
+          : await selectPrivatePostgresPort({
+              layout,
+              clusterId: prepared.marker.clusterId,
+              persisted: null
+            });
+      this.config.postgresStart = buildPostgresStartCommand(
+        layout,
+        distribution,
+        listen.port,
+        prepared.marker.clusterId
+      );
+      this.config.postgresLayout = prepared.layout;
+      this.config.postgresListenPort = listen.port;
+      this.rebuildSpecsInPlace();
+      try {
+        await this.ensureService("postgres");
+      } catch {
+        // startManagedIfNeeded records lastError
+      }
+      const ready = this.services.get("postgres");
+      if (ready?.status === "healthy" && ready.ownership === "owned") {
+        const password = this.resolvePrivatePostgresPassword();
+        const sqlReady =
+          Boolean(password) &&
+          (await pingPostgres({
+            layout,
+            distribution,
+            port: listen.port,
+            password: password!,
+            clusterId: prepared.marker.clusterId
+          }));
+        if (sqlReady) {
+          publishListenMetadata(layout, listen);
+          return;
+        }
+      }
+      if (ready?.child || this.hasLiveManagedChild(ready!)) {
+        return;
+      }
+    }
+  }
+
   private readOwnedPid(svc: InternalService): number | null {
     try {
       if (!fs.existsSync(svc.spec.metadataFile)) return null;
@@ -952,6 +1140,134 @@ export class DesktopSupervisor {
     } catch {
       return null;
     }
+  }
+
+  private inspectManagedProcess(processId: number) {
+    return (this.hooks.inspectProcess ?? inspectProcess)(processId);
+  }
+
+  private resolvePrivatePostgresPassword(): string | null {
+    const layout = this.config.postgresLayout;
+    if (!layout) return null;
+    return resolvePostgresPassword(
+      layout,
+      this.config.env,
+      this.config.postgresSecretAuthority ?? "development-file"
+    );
+  }
+
+  private stopPrivatePostgresOwned() {
+    const layout = this.config.postgresLayout;
+    const distribution = this.config.postgresDistribution;
+    const svc = this.services.get("postgres");
+    if (!layout || !distribution || !svc) {
+      return { invoked: false, owned: false, reason: "postgres is not configured", pid: null };
+    }
+    const metadata = readProcessMetadata(svc.spec.metadataFile);
+    const pid = svc.pid ?? metadata?.pid ?? 0;
+    const inspection = pid
+      ? this.inspectManagedProcess(pid)
+      : { status: "not-running" as const, processId: 0, reason: "invalid-pid" as const };
+    return stopPrivatePostgresIfOwned({
+      layout,
+      distribution,
+      processInspection: inspection,
+      metadata,
+      invokeStop: this.hooks.invokePostgresStop
+    });
+  }
+
+  private tryAdoptSurvivingPostgres(svc: InternalService): boolean {
+    const layout = this.config.postgresLayout;
+    const distribution = this.config.postgresDistribution;
+    const marker = layout ? readClusterMarker(layout) : null;
+    if (!layout || !distribution || !marker) return false;
+    const metadata = readProcessMetadata(svc.spec.metadataFile);
+    if (!metadata?.pid) return false;
+    const inspection = this.inspectManagedProcess(metadata.pid);
+    const adopted = adoptSurvivingPostgres({
+      layout,
+      distribution,
+      processInspection: inspection,
+      metadata
+    });
+    if (!adopted.adopted) return false;
+    const password = this.resolvePrivatePostgresPassword();
+    const port = adopted.evidence.port ?? readListenMetadata(layout)?.port ?? null;
+    if (!password || !port) return false;
+    // Readiness is verified by the caller after listen is reconstructed.
+    const next: ProcessMetadata = {
+      schemaVersion: PROCESS_METADATA_VERSION,
+      role: "postgres",
+      pid: metadata.pid,
+      repositoryRoot: this.config.repositoryRoot,
+      stateDirectory: this.config.stateDirectory,
+      commandMarker: expectedClusterName(marker.clusterId),
+      processStartedAtUtc:
+        adopted.evidence.processStartedAtUtc ??
+        (inspection.status === "resolved"
+          ? (inspection.info.createdAtUtc?.toISOString() ?? metadata.processStartedAtUtc)
+          : metadata.processStartedAtUtc),
+      createdAtUtc: new Date().toISOString(),
+      ownershipToken: this.config.ownershipToken,
+      instanceId: this.config.instanceId
+    };
+    writeProcessMetadata(svc.spec.metadataFile, next);
+    svc.pid = metadata.pid;
+    svc.ownership = "owned";
+    svc.startedAt = next.processStartedAtUtc;
+    svc.status = "starting";
+    svc.summary = "Adopted surviving private PostgreSQL.";
+    this.config.postgresListenPort = port;
+    this.config.postgresStart = buildPostgresStartCommand(
+      layout,
+      distribution,
+      port,
+      marker.clusterId
+    );
+    this.rebuildSpecsInPlace();
+    return true;
+  }
+
+  private buildPostgresSpec(
+    state: string,
+    db: { host: string; port: number } | null
+  ): ManagedServiceSpec {
+    const privateMode = (this.config.postgresMode ?? "external") === "private";
+    const port = this.config.postgresListenPort ?? null;
+    const layout = this.config.postgresLayout;
+    const distribution = this.config.postgresDistribution;
+    return {
+      id: "postgres",
+      role: "postgres",
+      label: "PostgreSQL",
+      managed: privateMode && Boolean(this.config.postgresStart),
+      autostart: privateMode && Boolean(this.config.postgresStart),
+      healthUrl: null,
+      tcp: privateMode
+        ? { host: "127.0.0.1", port: port ?? 55432 }
+        : (db ?? { host: "127.0.0.1", port: 5432 }),
+      startTimeoutMs: privateMode ? 30_000 : 5_000,
+      readinessIntervalMs: privateMode ? 400 : 500,
+      startCommand: privateMode ? (this.config.postgresStart ?? null) : null,
+      metadataFile: layout?.metadataFile ?? path.join(state, "postgres.pid.json"),
+      logFile: layout?.logFile ?? path.join(state, "postgres.log"),
+      readinessCheck:
+        privateMode && layout && distribution && port
+          ? async () => {
+              const password = this.resolvePrivatePostgresPassword();
+              const clusterId = readClusterMarker(layout)?.clusterId;
+              if (!password || !clusterId) return false;
+              return await pingPostgres({
+                layout,
+                distribution,
+                port,
+                password,
+                clusterId
+              });
+            }
+          : undefined
+    };
   }
 
   private buildSpecs(): ManagedServiceSpec[] {
@@ -1007,20 +1323,7 @@ export class DesktopSupervisor {
         logFile: path.join(state, "ollama.log"),
         validateHealthBody: ollamaTagsOk
       },
-      {
-        id: "postgres",
-        role: "postgres",
-        label: "PostgreSQL",
-        managed: false,
-        autostart: false,
-        healthUrl: null,
-        tcp: db ?? { host: "127.0.0.1", port: 5432 },
-        startTimeoutMs: 5_000,
-        readinessIntervalMs: 500,
-        startCommand: null,
-        metadataFile: path.join(state, "postgres.pid.json"),
-        logFile: path.join(state, "postgres.log")
-      },
+      this.buildPostgresSpec(state, db),
       {
         id: "tts_wrapper",
         role: "tts_wrapper",

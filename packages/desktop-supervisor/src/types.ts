@@ -39,6 +39,23 @@ export type SupervisorSnapshot = {
   shuttingDown: boolean;
   services: ServiceSnapshot[];
   updatedAt: string;
+  postgres?: PostgresDiagnostics | undefined;
+};
+
+export type PostgresMode = "private" | "external";
+
+export type PostgresDiagnostics = {
+  mode: PostgresMode;
+  status: string;
+  host: string | null;
+  port: number | null;
+  postgresMajor: number | null;
+  clusterId: string | null;
+  dataDirectory: string | null;
+  dataDirectoryKind: "yuvi-local" | "none";
+  initializationState: "missing" | "initializing" | "ready" | "failed" | null;
+  ownership: ServiceOwnership;
+  distributionError: string | null;
 };
 
 export type ProcessMetadata = {
@@ -111,6 +128,7 @@ export type ProcessInfo = {
   parentProcessId: number;
   commandLine: string;
   createdAtUtc: Date | null;
+  executablePath?: string | null | undefined;
 };
 
 export type HealthProbeResult = {
@@ -141,6 +159,8 @@ export type ManagedServiceSpec = {
   logFile: string;
   /** Optional health body validator. */
   validateHealthBody?: ((body: unknown) => boolean) | undefined;
+  /** Optional SQL/process readiness probe. TCP listen alone is not sufficient. */
+  readinessCheck?: (() => Promise<boolean>) | undefined;
 };
 
 export type StartCommandSpec = {
@@ -221,6 +241,16 @@ export type SupervisorConfig = {
   mem0Start: StartCommandSpec | null;
   ttsWrapperStart: StartCommandSpec | null;
   ttsUpstreamStart: StartCommandSpec | null;
+  postgresMode?: PostgresMode | undefined;
+  postgresLayout?: import("./postgres-layout.js").PostgresLayout | null | undefined;
+  postgresDistribution?:
+    | import("./postgres-distribution.js").PostgresDistribution
+    | null
+    | undefined;
+  postgresStart?: StartCommandSpec | null | undefined;
+  postgresDistributionError?: string | null | undefined;
+  postgresListenPort?: number | null | undefined;
+  postgresSecretAuthority?: "credential-manager" | "development-file" | undefined;
 };
 
 /**

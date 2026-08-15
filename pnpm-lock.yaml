@@ -170,6 +170,10 @@ importers:
         version: 2.1.9(@types/node@22.19.18)
 
   packages/desktop-supervisor:
+    dependencies:
+      pg:
+        specifier: ^8.20.0
+        version: 8.20.0
     devDependencies:
       '@types/node':
         specifier: ^22.10.7

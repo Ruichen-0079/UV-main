@@ -5,12 +5,18 @@ import { envFlag, envString, loadYuviEnvFiles } from "./env.js";
 import {
   canonicalPath,
   defaultStateDirectory,
+  defaultYuviLocalDataRoot,
   isWindowsStylePath,
   parseUrlOrigin
 } from "./paths.js";
 import { readMem0Manifest, resolveMem0ManifestExecutable } from "./mem0-manifest.js";
 import { readRuntimeManifest, resolveManifestFile } from "./runtime-manifest.js";
+import { resolvePostgresDistribution } from "./postgres-distribution.js";
+import { resolvePostgresLayout } from "./postgres-layout.js";
+import type { PostgresLayout } from "./postgres-layout.js";
+import type { PostgresDistribution } from "./postgres-distribution.js";
 import type {
+  PostgresMode,
   StartCommandSpec,
   SupervisorConfig,
   SupervisorLayout
@@ -96,8 +102,7 @@ export function loadPackagedSupervisorConfig(
     throw new Error(`Supervisor resource root missing: ${resourceRoot}`);
   }
   const runtimeManifestPath = canonicalPath(
-    input.runtimeManifestPath ??
-      path.join(resourceRoot, "runtime", "runtime-manifest.json")
+    input.runtimeManifestPath ?? path.join(resourceRoot, "runtime", "runtime-manifest.json")
   );
   const mem0ManifestPath = canonicalPath(
     input.mem0ManifestPath?.trim() || path.join(resourceRoot, "mem0", "mem0-manifest.json")
@@ -174,6 +179,12 @@ export function deriveConfigFromEnv(
   | "mem0Start"
   | "ttsWrapperStart"
   | "ttsUpstreamStart"
+  | "postgresMode"
+  | "postgresLayout"
+  | "postgresDistribution"
+  | "postgresStart"
+  | "postgresDistributionError"
+  | "postgresSecretAuthority"
 > {
   const layout: SupervisorLayout =
     typeof layoutOrRepoRoot === "string"
@@ -194,12 +205,13 @@ export function deriveConfigFromEnv(
   const databaseUrl = env["DATABASE_URL"]?.trim() || null;
   const memoryBackend = envString(env, "MEMORY_BACKEND", "mem0") === "legacy" ? "legacy" : "mem0";
 
-  const ownershipRoot =
-    layout.mode === "development" ? layout.repositoryRoot : layout.resourceRoot;
+  const ownershipRoot = layout.mode === "development" ? layout.repositoryRoot : layout.resourceRoot;
   const managedMem0 =
     layout.mode === "packaged" &&
     memoryBackend === "mem0" &&
     envFlag(env, "YUVI_AUTOSTART_MEM0", false);
+
+  const postgres = resolvePostgresConfig(layout, env);
 
   return {
     memoryBackend,
@@ -229,7 +241,85 @@ export function deriveConfigFromEnv(
     ttsUpstreamStart:
       layout.mode === "packaged"
         ? null
-        : resolveOptionalStartCommand(env, "YUVI_TTS_UPSTREAM_START_COMMAND", ownershipRoot)
+        : resolveOptionalStartCommand(env, "YUVI_TTS_UPSTREAM_START_COMMAND", ownershipRoot),
+    ...postgres
+  };
+}
+
+export function resolvePostgresMode(
+  layout: SupervisorLayout,
+  env: Record<string, string>
+): PostgresMode {
+  const explicit = env["YUVI_POSTGRES_MODE"]?.trim().toLowerCase();
+  if (explicit === "external") return "external";
+  if (explicit === "private") return "private";
+  return layout.mode === "packaged" ? "private" : "external";
+}
+
+export function resolvePostgresConfig(
+  layout: SupervisorLayout,
+  env: Record<string, string>
+): {
+  postgresMode: PostgresMode;
+  postgresLayout: PostgresLayout | null;
+  postgresDistribution: PostgresDistribution | null;
+  postgresStart: StartCommandSpec | null;
+  postgresDistributionError: string | null;
+  postgresSecretAuthority: "credential-manager" | "development-file";
+} {
+  const postgresMode = resolvePostgresMode(layout, env);
+  const postgresSecretAuthority =
+    layout.mode === "packaged" ? "credential-manager" : "development-file";
+  if (postgresMode !== "private") {
+    return {
+      postgresMode,
+      postgresLayout: null,
+      postgresDistribution: null,
+      postgresStart: null,
+      postgresDistributionError: null,
+      postgresSecretAuthority
+    };
+  }
+
+  const bounds = {
+    resourceRoot: layout.mode === "packaged" ? layout.resourceRoot : undefined,
+    repositoryRoot: layout.mode === "development" ? layout.repositoryRoot : layout.resourceRoot,
+    packaged: layout.mode === "packaged"
+  };
+  let postgresLayout: PostgresLayout | null = null;
+  try {
+    postgresLayout = resolvePostgresLayout(env, bounds);
+  } catch (error) {
+    return {
+      postgresMode,
+      postgresLayout: null,
+      postgresDistribution: null,
+      postgresStart: null,
+      postgresDistributionError:
+        error instanceof Error ? error.message : "private PostgreSQL data root is invalid",
+      postgresSecretAuthority
+    };
+  }
+
+  const distribution = resolvePostgresDistribution(env, layout);
+  if (!distribution.ok) {
+    return {
+      postgresMode,
+      postgresLayout,
+      postgresDistribution: null,
+      postgresStart: null,
+      postgresDistributionError: distribution.error.message,
+      postgresSecretAuthority
+    };
+  }
+
+  return {
+    postgresMode,
+    postgresLayout,
+    postgresDistribution: distribution.distribution,
+    postgresStart: null,
+    postgresDistributionError: null,
+    postgresSecretAuthority
   };
 }
 
@@ -264,13 +354,9 @@ export function resolvePackagedLive2DEnv(
   const explicitCore = env["LIVE2D_CORE_PATH"]?.trim();
 
   const bundledAsset = path.join(layout.resourceRoot, "live2d");
-  const bundledCore = path.join(
-    layout.resourceRoot,
-    "cubism-core",
-    "live2dcubismcore.min.js"
-  );
+  const bundledCore = path.join(layout.resourceRoot, "cubism-core", "live2dcubismcore.min.js");
 
-  const localYuvi = defaultYuviLocalDataRoot();
+  const localYuvi = defaultYuviLocalDataRoot(process.env);
   const userAsset = path.join(localYuvi, "Live2DModels");
   const userCore = path.join(localYuvi, "CubismCore", "live2dcubismcore.min.js");
 
@@ -291,13 +377,6 @@ export function resolvePackagedLive2DEnv(
   }
 
   return out;
-}
-
-function defaultYuviLocalDataRoot(): string {
-  const local = process.env["LOCALAPPDATA"]?.trim();
-  if (local) return path.join(local, "YUVI");
-  // Non-Windows / restricted clean-room fallback
-  return path.join(process.env["HOME"]?.trim() || process.cwd(), ".yuvi");
 }
 
 /**
@@ -399,7 +478,13 @@ function resolveManagedMem0Port(mem0Url: string): number {
   } catch {
     throw new Error("MEM0_BASE_URL must be a valid loopback HTTP URL.");
   }
-  if (parsed.protocol !== "http:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+  if (
+    parsed.protocol !== "http:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash
+  ) {
     throw new Error("MEM0_BASE_URL must be a loopback HTTP URL without credentials.");
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();

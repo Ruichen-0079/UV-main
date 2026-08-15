@@ -97,6 +97,8 @@ describe("packaged supervisor layout", () => {
     expect(cfg.runtimeStart?.env["YUVI_PACKAGED"]).toBe("1");
     expect(cfg.autostartMem0).toBe(false);
     expect(cfg.mem0Start).toBeNull();
+    expect(cfg.postgresMode).toBe("private");
+    expect(cfg.postgresStart).toBeNull();
   });
 
   it("packaged Live2D env prefers explicit, then bundled resources, then LOCALAPPDATA/YUVI", () => {
@@ -249,13 +251,18 @@ describe("packaged supervisor layout", () => {
     });
     expect(cfg.layout.mode).toBe("packaged");
     if (cfg.layout.mode !== "packaged") throw new Error("expected packaged layout");
-    expect(cfg.layout.mem0ManifestPath).toBe(path.join(tree.resourceRoot, "mem0", "mem0-manifest.json"));
+    expect(cfg.layout.mem0ManifestPath).toBe(
+      path.join(tree.resourceRoot, "mem0", "mem0-manifest.json")
+    );
 
     const alternateDir = path.join(tree.resourceRoot, "alternate-mem0");
     fs.mkdirSync(alternateDir, { recursive: true });
     const alternateManifest = path.join(alternateDir, "mem0-manifest.json");
     fs.writeFileSync(path.join(alternateDir, "yuvi-mem0.exe"), "MZ");
-    fs.writeFileSync(alternateManifest, JSON.stringify({ ...validMem0Manifest(), defaultPort: 6142 }));
+    fs.writeFileSync(
+      alternateManifest,
+      JSON.stringify({ ...validMem0Manifest(), defaultPort: 6142 })
+    );
     const explicit = loadPackagedSupervisorConfig({
       resourceRoot: tree.resourceRoot,
       dataRoot: tree.dataRoot,

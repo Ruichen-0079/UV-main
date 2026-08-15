@@ -101,6 +101,13 @@ pub fn bootstrap_supervisor(
   let active_pointer = root_state_dir.join("active-instance.json");
 
   let mode = resolve_launch_mode();
+  if matches!(mode, SupervisorLaunchMode::Packaged) {
+    if let Some(cfg) = app.try_state::<crate::config::ConfigState>() {
+      cfg.service
+        .ensure_private_postgres_password()
+        .map_err(|error| format!("private PostgreSQL secret persist failed: {error}"))?;
+    }
+  }
   let plan = match mode {
     SupervisorLaunchMode::Development => {
       let repo_root = discover_repo_root()?;
@@ -293,7 +300,10 @@ pub fn bootstrap_supervisor(
 }
 
 fn is_secret_env_key(key: &str) -> bool {
-  matches!(key, "DEEPSEEK_API_KEY" | "DATABASE_URL")
+  matches!(
+    key,
+    "DEEPSEEK_API_KEY" | "DATABASE_URL" | "YUVI_POSTGRES_PASSWORD" | "PGPASSWORD"
+  )
 }
 
 /// Idempotent application-level shutdown. Only owned services are stopped by the supervisor.

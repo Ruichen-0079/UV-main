@@ -10,7 +10,7 @@ use super::schema::{
 };
 use super::secrets::{
     MemorySecretStore, SecretStore, SECRET_DATABASE_URL, SECRET_DEEPSEEK_API_KEY,
-    SECRET_MEMORY_LLM_API_KEY, WIN_CRED_MEMORY_LLM_API_KEY,
+    SECRET_MEMORY_LLM_API_KEY, SECRET_POSTGRES_LOCAL_PASSWORD, WIN_CRED_MEMORY_LLM_API_KEY,
 };
 use super::service::{atomic_write_json, replace_file, ConfigService};
 use super::validate::{apply_patch, validate_settings};
@@ -934,4 +934,49 @@ fn platform_credential_manager_roundtrip_and_config_push() {
     if run.is_err() {
         panic!("Credential Manager round-trip integration test failed");
     }
+}
+
+#[test]
+fn postgres_password_is_not_user_editable_and_not_in_settings_view() {
+    let (_dir, service, _) = service_with_memory();
+    assert!(service
+        .set_secret(SECRET_POSTGRES_LOCAL_PASSWORD, "should-fail")
+        .is_err());
+    let generated = service.ensure_private_postgres_password().unwrap();
+    assert!(!generated.is_empty());
+    let again = service.ensure_private_postgres_password().unwrap();
+    assert_eq!(generated, again);
+    let view = service.get_view().unwrap();
+    let json = serde_json::to_string(&view).unwrap();
+    assert!(!json.contains(&generated));
+    assert!(!json.contains("postgres.localPassword"));
+}
+
+#[test]
+fn postgres_password_unset_when_credential_missing() {
+    let secrets = MemorySecretStore::default();
+    secrets
+        .set(SECRET_POSTGRES_LOCAL_PASSWORD, "pg-secret")
+        .unwrap();
+    let settings = UserSettings::default();
+    let push = supervisor_config_push(&settings, &secrets).unwrap();
+    assert_eq!(
+        push.env.get("YUVI_POSTGRES_PASSWORD").map(String::as_str),
+        Some("pg-secret")
+    );
+    assert!(!push
+        .unset_env
+        .iter()
+        .any(|key| key == "YUVI_POSTGRES_PASSWORD"));
+
+    secrets.delete(SECRET_POSTGRES_LOCAL_PASSWORD).unwrap();
+    let push2 = supervisor_config_push(&settings, &secrets).unwrap();
+    assert!(push2.env.get("YUVI_POSTGRES_PASSWORD").is_none());
+    assert!(push2
+        .unset_env
+        .iter()
+        .any(|key| key == "YUVI_POSTGRES_PASSWORD"));
+    assert!(push2.unset_env.iter().any(|key| key == "PGPASSWORD"));
+    let json = serde_json::to_string(&push2).unwrap();
+    assert!(!json.contains("pg-secret"));
 }
