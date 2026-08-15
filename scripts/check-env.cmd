@@ -27,6 +27,6 @@ echo Windows 源路径参考：C:\Users\Administrator.DESKTOP-NPU6DHJ\Desktop\uv
 echo.
 echo 正在检查 Ubuntu 内的 Node.js、pnpm、Docker 和 docker compose...
 
-wsl -d Ubuntu bash -lc "set -euo pipefail; if [ -d ~/.nvm/versions/node ]; then node_bin=$(find ~/.nvm/versions/node -mindepth 3 -maxdepth 3 -type f -name node -printf '%%h\n' | sort -V | tail -n 1 || true); if [ -n ${node_bin:-} ]; then export PATH=$node_bin:$PATH; fi; fi; command -v node; node --version; command -v pnpm; pnpm --version; command -v docker; docker --version; docker compose version"
+wsl -d Ubuntu bash -c "set -euo pipefail; if [ -d ~/.nvm/versions/node ]; then node_bin=$(find ~/.nvm/versions/node -mindepth 3 -maxdepth 3 -type f -name node -printf '%%h\n' | sort -V | tail -n 1 || true); if [ -n ${node_bin:-} ]; then export PATH=$node_bin:$PATH; fi; fi; command -v node; node --version; command -v pnpm; pnpm --version; command -v docker; docker --version; docker compose version"
 
 exit /b %ERRORLEVEL%

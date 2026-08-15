@@ -133,7 +133,7 @@ server_command() {
     MEMORY_REPOSITORY="${MEMORY_REPOSITORY:-in-memory}" \
     SERVER_HOST="${SERVER_HOST:-127.0.0.1}" \
     SERVER_PORT="${SERVER_PORT:-6121}" \
-    bash -lc 'cd apps/server && exec ../../node_modules/.bin/tsx --conditions development src/index.ts'
+    bash -c 'cd apps/server && exec ../../node_modules/.bin/tsx --conditions development src/index.ts'
 }
 
 start_server() {
@@ -151,7 +151,7 @@ start_server() {
   echo "Provider fallback: PROVIDER_ALLOW_MOCKS=${PROVIDER_ALLOW_MOCKS:-false} (real-provider-first unless explicitly true)"
   run_auto_migrate_if_needed
   if [ "${YUVI_DEV_SUPERVISOR:-0}" = "1" ]; then
-    setsid bash -lc '
+    setsid bash -c '
       set -euo pipefail
       repo_root="$1"
       restart_marker="$2"
@@ -187,7 +187,7 @@ start_server() {
       done
     ' supervisor "$repo_root" "$restart_marker" >"$server_log" 2>&1 < /dev/null &
   else
-    setsid bash -lc "$(declare -f server_command); server_command" >"$server_log" 2>&1 < /dev/null &
+    setsid bash -c "$(declare -f server_command); server_command" >"$server_log" 2>&1 < /dev/null &
   fi
 
   echo "$!" > "$server_pid_file"
@@ -211,7 +211,7 @@ start_web() {
   fi
 
   echo "启动 Web UI: $web_url"
-  setsid bash -lc 'cd apps/web && exec pnpm dev' >"$web_log" 2>&1 < /dev/null &
+  setsid bash -c 'cd apps/web && exec pnpm dev' >"$web_log" 2>&1 < /dev/null &
 
   echo "$!" > "$web_pid_file"
   sleep 2

@@ -194,6 +194,18 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.18)
 
+  packages/host-environment:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.7
+        version: 22.19.18
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.18)
+
   packages/memory:
     dependencies:
       pg:

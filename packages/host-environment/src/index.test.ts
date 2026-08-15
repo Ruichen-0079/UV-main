@@ -1,0 +1,417 @@
+import { spawnSync } from "node:child_process";
+import {
+  chmod as mockedChmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  YUVI_SHELL_BEGIN,
+  YUVI_SHELL_END,
+  assertPersistentPath,
+  assertSafePersistentReference,
+  assertSafePersistentContent,
+  installToolchainIntegration,
+  isEphemeralPath,
+  pathExists,
+  removeToolchainIntegration,
+  renderFishShellIntegration,
+  renderPosixShellIntegration,
+  resolveYuviHostPaths,
+  writeManagedFile
+} from "./index.js";
+
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  return { ...actual, chmod: vi.fn(actual.chmod) };
+});
+
+const sandboxes: string[] = [];
+const itPosix = it.skipIf(process.platform === "win32");
+
+afterEach(async () => {
+  vi.mocked(mockedChmod).mockClear();
+  await Promise.all(sandboxes.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function createSandbox(): Promise<{ root: string; env: NodeJS.ProcessEnv }> {
+  const root = await mkdtemp(path.join(homedir(), ".yuvi-host-environment-"));
+  sandboxes.push(root);
+  return {
+    root,
+    env: {
+      HOME: root,
+      XDG_CONFIG_HOME: path.join(root, "config"),
+      XDG_STATE_HOME: path.join(root, "state"),
+      XDG_DATA_HOME: path.join(root, "data"),
+      XDG_CACHE_HOME: path.join(root, "cache"),
+      TMPDIR: path.join(root, "runtime-tmp")
+    }
+  };
+}
+
+describe("host environment safety", () => {
+  itPosix("resolves persistent XDG paths and rejects ephemeral references", () => {
+    const paths = resolveYuviHostPaths({
+      env: { HOME: "/home/yuvi" },
+      ephemeralRoots: ["/tmp", "/var/tmp"]
+    });
+
+    expect(paths.toolchainEnv).toBe("/home/yuvi/.config/yuvi/toolchain/env");
+    expect(paths.toolchainFishEnv).toBe("/home/yuvi/.config/yuvi/toolchain/env.fish");
+    expect(paths.fishDropIn).toBe("/home/yuvi/.config/fish/conf.d/yuvi.fish");
+    expect(paths.posixShellFile).not.toMatch(/\.profile|\.bashrc|\.zshrc/u);
+    expect(isEphemeralPath("/tmp/yuvi-toolchain/env", { ephemeralRoots: ["/tmp"] })).toBe(true);
+
+    expect(() =>
+      assertSafePersistentReference("/tmp/yuvi-toolchain/env", "/home/yuvi/.profile", {
+        ephemeralRoots: ["/tmp"]
+      })
+    ).toThrowError(
+      expect.objectContaining({ code: "REFUSE_PERSISTENT_REFERENCE_TO_EPHEMERAL_PATH" })
+    );
+  });
+
+  itPosix("allows an ancestor symlink when its canonical location is persistent", async () => {
+    const { root, env } = await createSandbox();
+    const realConfig = path.join(root, "real-config");
+    const configLink = path.join(root, "config-link");
+    await mkdir(realConfig, { recursive: true });
+    await symlink(realConfig, configLink, "dir");
+
+    const installed = await installToolchainIntegration({
+      env: { ...env, XDG_CONFIG_HOME: configLink },
+      home: root,
+      ephemeralRoots: [],
+      shells: ["posix"]
+    });
+
+    expect(await pathExists(path.join(realConfig, "yuvi", "shell", "yuvi.sh"))).toBe(true);
+    expect(installed.paths.posixShellFile).toBe(path.join(configLink, "yuvi", "shell", "yuvi.sh"));
+  });
+
+  itPosix("rejects an ancestor symlink whose canonical location is ephemeral", async () => {
+    const { root, env } = await createSandbox();
+    const configLink = path.join(root, "config-link");
+    await symlink("/tmp", configLink, "dir");
+
+    await expect(
+      installToolchainIntegration({
+        env: { ...env, XDG_CONFIG_HOME: configLink },
+        home: root,
+        ephemeralRoots: ["/tmp"],
+        shells: ["posix"]
+      })
+    ).rejects.toMatchObject({ code: "EPHEMERAL_PERSISTENT_TARGET" });
+  });
+
+  itPosix("rejects a binDir whose existing ancestor resolves to ephemeral storage", async () => {
+    const { root, env } = await createSandbox();
+    const ephemeralBinRoot = await mkdtemp(path.join(tmpdir(), "yuvi-bin-ephemeral-"));
+    sandboxes.push(ephemeralBinRoot);
+    await symlink(ephemeralBinRoot, path.join(root, ".local"), "dir");
+    const paths = resolveYuviHostPaths({ env, home: root, ephemeralRoots: [] });
+
+    await expect(
+      installToolchainIntegration({ env, home: root, ephemeralRoots: [], shells: ["posix"] })
+    ).rejects.toMatchObject({ code: "EPHEMERAL_PERSISTENT_TARGET" });
+    expect(
+      await Promise.all(
+        [paths.toolchainEnv, paths.toolchainFishEnv, paths.posixShellFile, paths.fishDropIn].map(
+          (target) => pathExists(target)
+        )
+      )
+    ).toEqual([false, false, false, false]);
+  });
+
+  itPosix("allows a binDir whose existing ancestor resolves to persistent storage", async () => {
+    const { root, env } = await createSandbox();
+    const persistentBinRoot = path.join(root, "persistent-local");
+    await mkdir(persistentBinRoot, { recursive: true });
+    await symlink(persistentBinRoot, path.join(root, ".local"), "dir");
+
+    const installed = await installToolchainIntegration({
+      env,
+      home: root,
+      ephemeralRoots: [],
+      shells: ["posix"]
+    });
+    expect(await readFile(installed.paths.toolchainEnv, "utf8")).toContain(installed.paths.binDir);
+    expect(await pathExists(installed.paths.posixShellFile)).toBe(true);
+  });
+
+  itPosix("allows an ordinary persistent binDir and renders its PATH entry", async () => {
+    const { root, env } = await createSandbox();
+
+    const installed = await installToolchainIntegration({
+      env,
+      home: root,
+      ephemeralRoots: [],
+      shells: ["posix"]
+    });
+    const content = await readFile(installed.paths.toolchainEnv, "utf8");
+
+    expect(content).toContain(installed.paths.binDir);
+    expect(await pathExists(installed.paths.posixShellFile)).toBe(true);
+  });
+
+  itPosix("rejects a final managed-file symlink before writing any integration file", async () => {
+    const { root, env } = await createSandbox();
+    const paths = resolveYuviHostPaths({ env, home: root, ephemeralRoots: [] });
+    await mkdir(path.dirname(paths.toolchainEnv), { recursive: true });
+    const persistentTarget = path.join(root, "persistent-env");
+    await writeFile(persistentTarget, "# existing target\n", "utf8");
+    await symlink(persistentTarget, paths.toolchainEnv);
+
+    await expect(
+      installToolchainIntegration({ env, home: root, ephemeralRoots: [], shells: ["posix"] })
+    ).rejects.toMatchObject({ code: "YUVI_INTEGRATION_CONFLICT" });
+    expect(await pathExists(paths.toolchainFishEnv)).toBe(false);
+  });
+
+  it("renders fail-open shell integration without persistent temp references", () => {
+    const posix = renderPosixShellIntegration("/home/yuvi/.config/yuvi/toolchain/env");
+    const fish = renderFishShellIntegration("/home/yuvi/.config/yuvi/toolchain/env.fish");
+
+    expect(posix).toContain("[ -r");
+    expect(posix).toContain("|| :");
+    expect(fish).toContain("test -r");
+    expect(fish).toContain("or true");
+    expect(posix).toContain(YUVI_SHELL_BEGIN);
+    expect(fish).toContain(YUVI_SHELL_END);
+    expect(posix).not.toMatch(/\/tmp\/|\/var\/tmp\/|\$TMPDIR/u);
+    expect(fish).not.toMatch(/\/tmp\/|\/var\/tmp\/|\$TMPDIR/u);
+  });
+
+  it("rejects ephemeral references at the persistent writer boundary", async () => {
+    const { root, env } = await createSandbox();
+    const target = path.join(root, ".profile");
+    const unsafeContentSamples = [
+      '. "/tmp/yuvi-toolchain/env"\n',
+      '. "/var/tmp/yuvi-toolchain/env"\n',
+      '. "$TMPDIR/yuvi-toolchain/env"\n',
+      'tmp_dir="$(mktemp -d)"\n'
+    ];
+
+    expect(() =>
+      assertPersistentPath("/tmp/yuvi-profile", { env, ephemeralRoots: [] })
+    ).toThrowError(expect.objectContaining({ code: "EPHEMERAL_PERSISTENT_TARGET" }));
+    for (const unsafeContent of unsafeContentSamples) {
+      expect(() =>
+        assertSafePersistentContent(target, unsafeContent, { env, ephemeralRoots: [] })
+      ).toThrowError(
+        expect.objectContaining({ code: "REFUSE_PERSISTENT_REFERENCE_TO_EPHEMERAL_PATH" })
+      );
+      await expect(
+        writeManagedFile(target, unsafeContent, { env, ephemeralRoots: [] })
+      ).rejects.toMatchObject({ code: "REFUSE_PERSISTENT_REFERENCE_TO_EPHEMERAL_PATH" });
+    }
+    expect(await pathExists(target)).toBe(false);
+  });
+
+  it("rejects root-only ephemeral paths and exact temporary variables without prefix false positives", async () => {
+    const { root, env } = await createSandbox();
+    const target = path.join(root, ".profile");
+    const unsafeReferences = [
+      "/tmp",
+      "/tmp/",
+      "/tmp/yuvi",
+      "/var/tmp",
+      "/var/tmp/",
+      "/var/tmp/yuvi",
+      "$TMP",
+      "${TMP}",
+      "$TMPDIR",
+      "${TMPDIR}",
+      "$TEMP",
+      "${TEMP}",
+      "$XDG_RUNTIME_DIR",
+      "${XDG_RUNTIME_DIR}",
+      "%TEMP%",
+      "%TMP%",
+      "$env:TEMP",
+      "$env:TMP",
+      "%LOCALAPPDATA%\\Temp\\yuvi",
+      "$env:LOCALAPPDATA\\Temp\\yuvi"
+    ];
+    const safeReferences = [
+      "/tmpfile",
+      "/tmp-old",
+      "/var/tmpdata",
+      "${TMP_NOT}",
+      "${TMPDIR_BACKUP}",
+      "${TEMPORARY}",
+      "${XDG_RUNTIME_DIRECTORY}",
+      "$TMP_EXTRA",
+      "$TEMPFILE",
+      "$env:TEMPORARY",
+      "%TEMP_BACKUP%",
+      "%LOCALAPPDATA%\\Yuvi",
+      '$env:LOCALAPPDATA + "\\Yuvi"'
+    ];
+
+    for (const reference of unsafeReferences) {
+      expect(() =>
+        assertSafePersistentContent(target, `YUVI_ENV=${reference}\n`, { env, ephemeralRoots: [] })
+      ).toThrowError(/ephemeral path/i);
+    }
+
+    for (const reference of safeReferences) {
+      expect(() =>
+        assertSafePersistentContent(target, `YUVI_ENV=${reference}\n`, { env, ephemeralRoots: [] })
+      ).not.toThrow();
+    }
+  });
+
+  it("leaves an existing managed target intact when temporary chmod fails", async () => {
+    const { root, env } = await createSandbox();
+    const target = path.join(root, "config", "yuvi", "shell", "yuvi.sh");
+    const previousContent = `${YUVI_SHELL_BEGIN}\n# previous\n${YUVI_SHELL_END}\n`;
+    const nextContent = `${YUVI_SHELL_BEGIN}\n# next\n${YUVI_SHELL_END}\n`;
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, previousContent, "utf8");
+
+    vi.mocked(mockedChmod).mockImplementationOnce(async () => {
+      throw new Error("injected chmod failure");
+    });
+
+    await expect(
+      writeManagedFile(target, nextContent, { env, ephemeralRoots: [] })
+    ).rejects.toThrow("injected chmod failure");
+    expect(await readFile(target, "utf8")).toBe(previousContent);
+  });
+
+  itPosix("installs atomically, is idempotent, and never touches .profile", async () => {
+    const { root, env } = await createSandbox();
+    const profilePath = path.join(root, ".profile");
+    await writeFile(profilePath, "# user content\n", "utf8");
+    const beforeProfile = await readFile(profilePath, "utf8");
+
+    const first = await installToolchainIntegration({
+      env,
+      home: root,
+      ephemeralRoots: [],
+      shells: ["fish", "posix"]
+    });
+    const firstContents = await Promise.all(
+      [
+        first.paths.toolchainEnv,
+        first.paths.toolchainFishEnv,
+        first.paths.fishDropIn,
+        first.paths.posixShellFile
+      ].map((file) => readFile(file, "utf8"))
+    );
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const repeat = await installToolchainIntegration({
+        env,
+        home: root,
+        ephemeralRoots: [],
+        shells: ["fish", "posix"]
+      });
+      expect(repeat.files.every((file) => !file.changed)).toBe(true);
+    }
+
+    const afterContents = await Promise.all(
+      [
+        first.paths.toolchainEnv,
+        first.paths.toolchainFishEnv,
+        first.paths.fishDropIn,
+        first.paths.posixShellFile
+      ].map((file) => readFile(file, "utf8"))
+    );
+    expect(afterContents).toEqual(firstContents);
+    expect(await readFile(profilePath, "utf8")).toBe(beforeProfile);
+    expect(firstContents.join("\n").match(new RegExp(YUVI_SHELL_BEGIN, "g"))?.length).toBe(4);
+  });
+
+  itPosix("keeps POSIX and fish startup successful when environment files disappear", async () => {
+    const { root, env } = await createSandbox();
+    const installed = await installToolchainIntegration({
+      env,
+      home: root,
+      ephemeralRoots: [],
+      shells: ["fish", "posix"]
+    });
+    await rm(installed.paths.toolchainEnv);
+    await rm(installed.paths.toolchainFishEnv);
+
+    const shellEnv = { ...process.env, ...env, PATH: process.env["PATH"] ?? "" };
+    for (const shell of ["sh", "bash"]) {
+      const posix = spawnSync(
+        shell,
+        ["-lc", `. ${JSON.stringify(installed.paths.posixShellFile)}`],
+        {
+          env: shellEnv,
+          encoding: "utf8"
+        }
+      );
+      if (posix.error?.message.includes("ENOENT")) continue;
+      expect(posix.status).toBe(0);
+      expect(posix.stderr).toBe("");
+    }
+
+    const fish = spawnSync("fish", ["-l", "-c", "exit 0"], {
+      env: shellEnv,
+      encoding: "utf8"
+    });
+    if (fish.error?.message.includes("ENOENT")) return;
+    expect(fish.status).toBe(0);
+    expect(fish.stderr).toBe("");
+  });
+
+  itPosix("fails before writing when an existing target is not Yuvi-owned", async () => {
+    const { root, env } = await createSandbox();
+    const paths = resolveYuviHostPaths({ env, home: root, ephemeralRoots: [] });
+    await mkdir(path.dirname(paths.fishDropIn), { recursive: true });
+    await writeFile(paths.fishDropIn, "# user-owned fish config\n", "utf8");
+
+    await expect(
+      installToolchainIntegration({ env, home: root, ephemeralRoots: [], shells: ["fish"] })
+    ).rejects.toMatchObject({
+      code: "YUVI_INTEGRATION_CONFLICT"
+    });
+    expect(await pathExists(paths.toolchainEnv)).toBe(false);
+    expect(await readFile(paths.fishDropIn, "utf8")).toBe("# user-owned fish config\n");
+  });
+
+  itPosix("removes only managed files and preserves user files", async () => {
+    const { root, env } = await createSandbox();
+    const profilePath = path.join(root, ".profile");
+    await writeFile(profilePath, "# keep this\n", "utf8");
+    const installed = await installToolchainIntegration({
+      env,
+      home: root,
+      ephemeralRoots: [],
+      shells: ["fish", "posix"]
+    });
+
+    await removeToolchainIntegration({
+      env,
+      home: root,
+      ephemeralRoots: [],
+      shells: ["fish", "posix"]
+    });
+
+    expect(await pathExists(installed.paths.toolchainEnv)).toBe(false);
+    expect(await pathExists(installed.paths.toolchainFishEnv)).toBe(false);
+    expect(await pathExists(installed.paths.fishDropIn)).toBe(false);
+    expect(await pathExists(installed.paths.posixShellFile)).toBe(false);
+    expect(await readFile(profilePath, "utf8")).toBe("# keep this\n");
+  });
+
+  it("does not install POSIX integration on Windows", async () => {
+    const { root, env } = await createSandbox();
+
+    await expect(
+      installToolchainIntegration({ env, home: root, platform: "win32", shells: ["posix"] })
+    ).rejects.toMatchObject({ code: "UNSUPPORTED_PLATFORM" });
+    expect(await pathExists(path.join(root, ".config"))).toBe(false);
+  });
+});
