@@ -51,6 +51,15 @@ const reply = await chat.generateReply(input);
 
 The registry decides whether that provider is DeepSeek, xAI, DashScope, a mock, or an unavailable placeholder.
 
+Provider status deliberately separates local readiness from remote
+observation. `readiness` is `ready` when the selected route has the required
+local configuration (or intentional mock mode), otherwise it is `not_ready`.
+`observed` is one of `unknown`, `available`, `degraded`, or `unavailable` and
+starts as `unknown` for real providers. The legacy `available` field remains a
+readiness compatibility projection; it does not mean that a remote provider
+was contacted successfully. `ProviderRegistry.getStatus()` and ordinary
+`GET /health` perform no provider network calls and do not consume quota.
+
 When a chain is used, calls try configured providers by priority. The response includes safe fallback metadata such as `fallbackUsed`, `attemptedProviders`, and `finalProvider`. Attempt records include provider name, status, safe error code, and latency, but never API keys, Authorization headers, `DATABASE_URL`, or raw secret values.
 
 Internally, provider construction is organized as provider-name factory maps per capability. Adding another chat, TTS, STT, vision, or embedding provider should add a new factory entry instead of branching through runtime code.
@@ -151,7 +160,7 @@ EMBEDDING_DIMENSIONS=1536
 
 `EMBEDDING_PROVIDER=mock` is deterministic and requires no network, but it reports `semanticEmbedding=false` because it validates the retrieval pipeline without real semantic similarity. Embedding status reports provider, model, dimensions, mock/configured/available state, semantic/non-semantic mode, and never returns API keys.
 
-`POST /providers/verify/embedding` is explicit and may consume provider usage. It calls the active embedding provider with a small test string and returns only safe metadata: provider, model, expected dimensions, actual dimensions, latency, mock/real mode, semanticEmbedding, and a redacted error if verification fails. If the provider returns a vector dimension that does not match `EMBEDDING_DIMENSIONS`, YUVI returns `ok=false` and does not expose the raw vector.
+`POST /providers/verify/embedding` is explicit and may consume provider usage. It calls the active embedding provider with a small test string and returns only safe metadata: provider, model, expected dimensions, actual dimensions, latency, mock/real mode, `verificationMode: "live"`, readiness, observed state, semanticEmbedding, and a redacted error if verification fails. If the provider returns a vector dimension that does not match `EMBEDDING_DIMENSIONS`, YUVI returns `ok=false` and does not expose the raw vector.
 
 If optional providers are missing and mocks are disabled, the registry returns an unavailable provider. `healthCheck()` reports `unavailable`, and actual calls throw normalized `ProviderError`s.
 
@@ -263,7 +272,7 @@ The Dashboard `Settings` page can write local development settings to `.env.loca
 - Provider verification buttons call `POST /providers/verify/chat`, `POST /providers/verify/reasoning`, `POST /providers/verify/embedding`, `POST /providers/verify/stt`, `POST /providers/verify/tts`, or `POST /providers/verify/vision` explicitly.
 - `POST /providers/verify-chain/:capability` returns safe configured route order and config-only attempted-provider metadata for the selected chain.
 - Save writes `.env.local`; **Apply Now** reloads hot-reloadable provider config; **Verify** is a separate explicit remote/provider call and may consume tokens.
-- `/health` and `/providers/status` do not consume provider tokens.
+- `/health` and `/providers/status` do not consume provider tokens. `/health` reports cached provider observation honestly: a ready provider with `observed: "unknown"` can keep the local health response `ok`, while a cached `observed: "unavailable"` makes required chat health fail. The compatibility `providers.chat` field remains the default route; `providers.chatCapability` summarizes whether any locally ready chat route keeps the capability operational.
 - Provider config changes can be applied with **Apply Now / Reload Runtime Config**. Memory repository, server host/port, and event bus changes remain restart-required.
 - If DeepSeek config is saved but chat still reports mock mode, click **Apply Now** or restart the dev server.
 - `GET /settings/runtime` reports safe config layering: base `.env`, local override `.env.local`, effective merged values, and active runtime values.
@@ -286,3 +295,19 @@ Planned provider extensions:
 - NATS-backed provider task events for long-running jobs
 
 These should preserve the same boundary: core uses interfaces, registry wires implementations.
+
+## Provider contract notes
+
+The runtime keeps provider, model, and capability separate. Capability
+contracts are typed in `@companion/providers`, selected by
+`ProviderResolver`, and implemented by vendor or local adapters.
+
+For reasoning, `ReasoningOutput.answer` is the authoritative final business
+result and must be non-empty on success. The `reasoning` field is retained as
+a legacy compatibility field, not as a public raw chain-of-thought channel;
+raw provider internal reasoning is discarded by normalization. Memory remains
+read-only and continues to prefer `answer`.
+
+Tool/function calling is currently unsupported. Existing `tool` message roles
+and `tool_call` finish reasons are reserved type affordances, not an
+implemented normalized tool protocol.

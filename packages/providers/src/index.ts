@@ -1,13 +1,18 @@
 export type {
   ProviderCapability,
+  ProviderCallOptions,
   ProviderDebug,
   ProviderHealth,
   ProviderHealthStatus,
+  ProviderObservedState,
   ProviderMetadata,
   ProviderAttempt,
+  ProviderRouteStatus,
+  ProviderReadinessState,
   TextMessage,
   TextMessageRole,
-  TokenUsage
+  TokenUsage,
+  ProviderVerificationMode
 } from "./types/common.js";
 export { ProviderError, ProviderErrorCode, isRetryableProviderError } from "./types/errors.js";
 export type {
@@ -22,6 +27,7 @@ export type {
   ChatStreamOptions,
   ChatStreamingMode
 } from "./types/chat.js";
+export { normalizeReasoningOutput } from "./types/reasoning.js";
 export type { ReasoningInput, ReasoningOutput, ReasoningProvider } from "./types/reasoning.js";
 export type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
 export type { STTInput, STTOutput, STTProvider } from "./types/stt.js";
@@ -44,7 +50,11 @@ export {
   createProviderRegistryConfigFromEnv,
   createProviderRegistryFromEnv
 } from "./registry.js";
-export type { ProviderRegistryConfig, ProviderStatusMap } from "./registry.js";
+export type {
+  LiveProviderVerification,
+  ProviderRegistryConfig,
+  ProviderStatusMap
+} from "./registry.js";
 export type { ProviderResolver } from "./registry.js";
 export { getChatStreamingMode } from "./registry.js";
 export type { MockStreamingChatProviderOptions } from "./registry.js";

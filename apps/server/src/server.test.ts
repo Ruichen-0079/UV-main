@@ -13,6 +13,7 @@ const createdRuntimeEnvDirs: string[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   process.exitCode = undefined;
   process.env = { ...originalEnv };
@@ -107,17 +108,24 @@ describe("server", () => {
         provider: "deepseek",
         capability: "chat",
         configured: false,
-        available: true,
-        mock: true,
+        readiness: "not_ready",
+        available: false,
+        mock: false,
         required: true
       });
       expect(providers.json().providers.reasoning).toMatchObject({
         provider: "deepseek",
         capability: "reasoning",
         configured: false,
-        available: true,
-        mock: true,
+        readiness: "not_ready",
+        available: false,
+        mock: false,
         required: false
+      });
+      expect(providers.json().routes.chat.at(-1)).toMatchObject({
+        provider: "mock",
+        readiness: "ready",
+        mock: true
       });
       expect(providers.json().providers.embedding).toMatchObject({
         provider: "mock",
@@ -701,7 +709,14 @@ describe("server", () => {
       const body = health.json();
       expect(body.ok).toBe(true);
       expect(body.database.status).toBe("healthy");
-      expect(body.providers.chat.available).toBe(true);
+      expect(body.providers.chat.available).toBe(false);
+      expect(body.providers.chatCapability).toMatchObject({
+        readiness: "ready",
+        observed: "unknown",
+        operational: true,
+        readyRouteCount: 1,
+        readyProviders: [expect.objectContaining({ provider: "mock" })]
+      });
       expect(body.memoryIngestion).toMatchObject({
         diagnosticsAvailability: "error",
         diagnosticsErrorCode: "MEMORY_INGESTION_DIAGNOSTICS_UNAVAILABLE",
@@ -1321,6 +1336,369 @@ describe("server", () => {
       expect(embedding.json().expectedDimensions).toBe(embedding.json().dimensions);
       expect(embedding.json().actualDimensions).toBe(embedding.json().dimensions);
       expect(embedding.body).not.toContain("test_deepseek_secret");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps config-only media verification from fabricating remote availability", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_TTS_PROVIDER: "xai",
+      TTS_PROVIDER_CHAIN: "xai",
+      XAI_API_KEY: "xai-secret",
+      XAI_TTS_MODEL: "xai-tts"
+    });
+
+    try {
+      const verify = await app.inject({ method: "POST", url: "/providers/verify/tts" });
+      expect(verify.statusCode).toBe(200);
+      expect(verify.json()).toMatchObject({
+        ok: true,
+        capability: "tts",
+        provider: "xai",
+        verificationMode: "config_only",
+        readiness: "ready",
+        observed: "unknown",
+        configOnly: true
+      });
+      expect(verify.json().lastVerifiedAt).toBeUndefined();
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const status = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(status.json().providers.tts).toMatchObject({
+        readiness: "ready",
+        observed: "unknown"
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps chain verification config-only and zero-cost", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek",
+      DEEPSEEK_API_KEY: "deepseek-secret",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    });
+
+    try {
+      const verify = await app.inject({
+        method: "POST",
+        url: "/providers/verify-chain/chat"
+      });
+      expect(verify.statusCode).toBe(200);
+      expect(verify.json()).toMatchObject({
+        ok: true,
+        capability: "chat",
+        configOnly: true,
+        verificationMode: "config_only",
+        routes: [
+          expect.objectContaining({
+            provider: "deepseek",
+            readiness: "ready",
+            observed: "unknown"
+          })
+        ]
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("records successful live chat verification and exposes the cached observation", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          model: "deepseek-chat",
+          choices: [{ finish_reason: "stop", message: { content: "OK" } }],
+          usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek",
+      DEEPSEEK_API_KEY: "deepseek-secret",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    });
+
+    try {
+      const verify = await app.inject({ method: "POST", url: "/providers/verify/chat" });
+      expect(verify.statusCode).toBe(200);
+      expect(verify.json()).toMatchObject({
+        ok: true,
+        provider: "deepseek",
+        capability: "chat",
+        verificationMode: "live",
+        readiness: "ready",
+        observed: "available",
+        lastVerifiedAt: expect.any(String)
+      });
+      expect(verify.json().latencyMs).toBeTypeOf("number");
+      expect(verify.body).not.toContain("deepseek-secret");
+
+      const status = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(status.json().providers.chat).toMatchObject({
+        readiness: "ready",
+        observed: "available",
+        status: "healthy",
+        lastVerifiedAt: expect.any(String)
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps chat health operational when live verification succeeds through a fallback", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("api.deepseek.com")) {
+        return new Response(JSON.stringify({ error: "primary unavailable" }), { status: 503 });
+      }
+
+      return new Response(
+        JSON.stringify({
+          model: "local-chat",
+          choices: [{ finish_reason: "stop", message: { content: "local verification" } }]
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek,local",
+      DEEPSEEK_API_KEY: "deepseek-secret",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat",
+      LOCAL_MODEL_BASEURL: "https://local.example/v1",
+      LOCAL_CHAT_MODEL: "local-chat"
+    });
+
+    try {
+      const verify = await app.inject({ method: "POST", url: "/providers/verify/chat" });
+      expect(verify.statusCode).toBe(200);
+      expect(verify.json()).toMatchObject({
+        ok: true,
+        provider: "local",
+        capability: "chat",
+        verificationMode: "live",
+        readiness: "ready",
+        observed: "available"
+      });
+
+      const status = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(status.json().routes.chat).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            provider: "deepseek",
+            readiness: "ready",
+            observed: "unavailable"
+          }),
+          expect.objectContaining({
+            provider: "local",
+            readiness: "ready",
+            observed: "available"
+          })
+        ])
+      );
+
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.json()).toMatchObject({
+        ok: true,
+        providers: {
+          chat: {
+            provider: "deepseek",
+            observed: "unavailable"
+          },
+          chatCapability: {
+            readiness: "ready",
+            observed: "available",
+            operational: true,
+            routeCount: 2,
+            readyRouteCount: 2,
+            readyProviders: expect.arrayContaining([
+              expect.objectContaining({ provider: "deepseek", observed: "unavailable" }),
+              expect.objectContaining({ provider: "local", observed: "available" })
+            ])
+          }
+        }
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("records failed live verification and makes cached chat unavailability visible to health", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "upstream secret should not escape" }), {
+        status: 503,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek",
+      DEEPSEEK_API_KEY: "deepseek-secret",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    });
+
+    try {
+      const verify = await app.inject({ method: "POST", url: "/providers/verify/chat" });
+      expect(verify.statusCode).toBe(502);
+      expect(verify.json()).toMatchObject({
+        ok: false,
+        capability: "chat",
+        verificationMode: "live",
+        readiness: "ready",
+        observed: "unavailable",
+        lastVerifiedAt: expect.any(String),
+        lastErrorCode: "PROVIDER_UNAVAILABLE"
+      });
+      expect(verify.body).not.toContain("deepseek-secret");
+      expect(verify.body).not.toContain("upstream secret");
+
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.statusCode).toBe(200);
+      expect(health.json()).toMatchObject({
+        ok: false,
+        providers: {
+          chat: {
+            readiness: "ready",
+            observed: "unavailable",
+            status: "unavailable"
+          },
+          chatCapability: {
+            readiness: "ready",
+            observed: "unavailable",
+            operational: false
+          }
+        }
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("fails chat health when every locally ready route is known unavailable", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: "all routes unavailable" }), { status: 503 })
+      );
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek,local",
+      DEEPSEEK_API_KEY: "deepseek-secret",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat",
+      LOCAL_MODEL_BASEURL: "https://local.example/v1",
+      LOCAL_CHAT_MODEL: "local-chat"
+    });
+
+    try {
+      const verify = await app.inject({ method: "POST", url: "/providers/verify/chat" });
+      expect(verify.statusCode).toBe(502);
+
+      const beforeHealth = fetchSpy.mock.calls.length;
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.json()).toMatchObject({
+        ok: false,
+        providers: {
+          chatCapability: {
+            readiness: "ready",
+            observed: "unavailable",
+            operational: false,
+            routeCount: 2,
+            readyRouteCount: 2
+          }
+        }
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(beforeHealth);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps ready but unverified chat health honest without remote calls", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek",
+      DEEPSEEK_API_KEY: "deepseek-secret",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    });
+
+    try {
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.statusCode).toBe(200);
+      expect(health.json()).toMatchObject({
+        ok: true,
+        providers: {
+          chat: {
+            readiness: "ready",
+            observed: "unknown",
+            available: true,
+            status: "degraded"
+          },
+          chatCapability: {
+            readiness: "ready",
+            observed: "unknown",
+            operational: true
+          }
+        }
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not make a disabled default mock provider healthy", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "mock"
+    });
+
+    try {
+      const status = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(status.json().providers.chat).toMatchObject({
+        provider: "mock",
+        mock: false,
+        readiness: "not_ready",
+        available: false
+      });
+      expect(status.json().routes.chat).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ provider: "mock", readiness: "ready" })])
+      );
+
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.json()).toMatchObject({
+        ok: false,
+        providers: {
+          chatCapability: {
+            readiness: "not_ready",
+            operational: false
+          }
+        }
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }
@@ -2021,6 +2399,12 @@ describe("server", () => {
       expect(initialProviders.statusCode).toBe(200);
       expect(initialProviders.json().providers.chat).toMatchObject({
         configured: false,
+        readiness: "not_ready",
+        mock: false
+      });
+      expect(initialProviders.json().routes.chat.at(-1)).toMatchObject({
+        provider: "mock",
+        readiness: "ready",
         mock: true
       });
 

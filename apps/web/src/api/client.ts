@@ -21,6 +21,8 @@ export type ProviderHealth = {
   name?: string;
   capability?: string;
   status: "healthy" | "degraded" | "unavailable";
+  readiness?: "ready" | "not_ready";
+  observed?: "unknown" | "available" | "degraded" | "unavailable";
   checkedAt?: string;
   message?: string;
   configured?: boolean;
@@ -39,6 +41,7 @@ export type ProviderHealth = {
   priority?: number;
   fallbackEligible?: boolean;
   lastVerifiedAt?: string;
+  lastErrorCode?: string;
   lastError?: string;
 };
 
@@ -53,6 +56,7 @@ export type HealthResponse = {
   };
   providers: {
     chat: ProviderHealth;
+    chatCapability: ProviderCapabilityHealth;
     optional: {
       reasoning?: ProviderHealth;
       tts: ProviderHealth;
@@ -61,6 +65,20 @@ export type HealthResponse = {
       embedding: ProviderHealth;
     };
   };
+};
+
+export type ProviderCapabilityHealth = {
+  readiness: "ready" | "not_ready";
+  observed: "unknown" | "available" | "degraded" | "unavailable";
+  operational: boolean;
+  routeCount: number;
+  readyRouteCount: number;
+  readyProviders: Array<{
+    provider: string;
+    priority: number;
+    observed: "unknown" | "available" | "degraded" | "unavailable";
+    status: "healthy" | "degraded" | "unavailable";
+  }>;
 };
 
 export type RuntimeEvent = {
@@ -357,6 +375,11 @@ export type ProviderVerificationResponse = {
   mock: boolean;
   configured?: boolean;
   configOnly?: boolean;
+  verificationMode?: "live" | "config_only";
+  readiness?: "ready" | "not_ready";
+  observed?: "unknown" | "available" | "degraded" | "unavailable";
+  lastVerifiedAt?: string;
+  lastErrorCode?: string;
   missingFields?: string[];
   latencyMs?: number;
   tokenUsage?: TokenUsage;
@@ -1285,6 +1308,7 @@ export const apiClient = {
       ok: boolean;
       capability: string;
       configOnly?: boolean;
+      verificationMode?: "live" | "config_only";
       routes: ProviderHealth[];
       attemptedProviders?: ProviderAttempt[];
       message?: string;

@@ -1,4 +1,9 @@
 import type { FastifyInstance } from "fastify";
+import type {
+  ProviderObservedState,
+  ProviderReadinessState,
+  ProviderRouteStatus
+} from "@companion/providers";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
 import {
@@ -17,8 +22,12 @@ export async function registerHealthRoutes(
     const database = await context.memoryRepository.healthCheck();
     const providerStatus = context.providers.getStatus();
     const chat = providerStatus.providers.chat;
+    const chatCapability = summarizeChatCapability(providerStatus.routes?.chat ?? []);
 
-    const ok = database.status === "healthy" && chat.available === true;
+    const ok =
+      database.status === "healthy" &&
+      chatCapability.readiness === "ready" &&
+      chatCapability.operational;
     const memoryIngestion = toMemoryIngestionHealthSnapshot(
       await readMemoryIngestionDiagnostics(context.memoryIngestionCoordinator)
     );
@@ -36,6 +45,7 @@ export async function registerHealthRoutes(
       memoryIngestion,
       providers: {
         chat,
+        chatCapability,
         optional: {
           reasoning: providerStatus.providers.reasoning,
           tts: providerStatus.providers.tts,
@@ -46,4 +56,46 @@ export async function registerHealthRoutes(
       }
     };
   });
+}
+
+type ChatCapabilityHealth = {
+  readiness: ProviderReadinessState;
+  observed: ProviderObservedState;
+  operational: boolean;
+  routeCount: number;
+  readyRouteCount: number;
+  readyProviders: Array<{
+    provider: string;
+    priority: number;
+    observed: ProviderObservedState;
+    status: ProviderRouteStatus["status"];
+  }>;
+};
+
+function summarizeChatCapability(routes: ProviderRouteStatus[]): ChatCapabilityHealth {
+  const readyRoutes = routes.filter((route) => route.readiness === "ready");
+  const operational = readyRoutes.some((route) => route.observed !== "unavailable");
+
+  let observed: ProviderObservedState = "unavailable";
+  if (readyRoutes.some((route) => route.observed === "available")) {
+    observed = "available";
+  } else if (readyRoutes.some((route) => route.observed === "unknown")) {
+    observed = "unknown";
+  } else if (readyRoutes.some((route) => route.observed === "degraded")) {
+    observed = "degraded";
+  }
+
+  return {
+    readiness: readyRoutes.length > 0 ? "ready" : "not_ready",
+    observed,
+    operational,
+    routeCount: routes.length,
+    readyRouteCount: readyRoutes.length,
+    readyProviders: readyRoutes.map((route) => ({
+      provider: route.provider,
+      priority: route.priority,
+      observed: route.observed ?? "unknown",
+      status: route.status
+    }))
+  };
 }
