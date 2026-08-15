@@ -505,6 +505,18 @@ export function reduceCompanionPresence(
   }
 }
 
+/**
+ * Generation interruption is a resource-cancelling operation, so callers must
+ * use the same lifecycle admission rule as the reducer before performing
+ * side-effects for it.
+ */
+export function canInterruptGeneration(
+  current: CompanionPresenceProjection,
+  epoch: string
+): boolean {
+  return isCurrentEpoch(current, epoch) && current.lifecycle === "active";
+}
+
 function reduceTurnStart(
   current: CompanionPresenceProjection,
   epoch: string
@@ -547,7 +559,7 @@ function reduceGeneration(
   if (!isCurrentEpoch(current, event.epoch)) return current;
 
   if (event.state === "interrupted") {
-    if (current.lifecycle !== "active") return current;
+    if (!canInterruptGeneration(current, event.epoch)) return current;
     return {
       ...current,
       lifecycle: "cancelled",

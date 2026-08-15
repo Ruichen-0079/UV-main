@@ -7,6 +7,7 @@ import {
   createPresenceBehaviorTransition,
   createInterruptedResetScheduler,
   createInitialCompanionPresence,
+  canInterruptGeneration,
   getCompanionPresentationState,
   getCompanionAnimation,
   reduceCompanionPresence,
@@ -52,6 +53,7 @@ export function CompanionPage(): JSX.Element {
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const voiceEnabledRef = useRef(true);
   const [framing, setFraming] = useState<LumiFraming>("half");
+  const presenceProjectionRef = useRef<CompanionPresenceProjection | null>(null);
   const activeEpochRef = useRef<string | null>(null);
   const speechStoppedEpochRef = useRef<string | null>(null);
   const epochGuardRef = useRef(createCompanionPresenceEpochGuard());
@@ -62,6 +64,16 @@ export function CompanionPage(): JSX.Element {
     null
   );
   presenceRef.current = getCompanionPresentationState(presence);
+  presenceProjectionRef.current = presence;
+
+  function updatePresence(
+    update: (current: CompanionPresenceProjection) => CompanionPresenceProjection
+  ): void {
+    const current = presenceProjectionRef.current ?? presence;
+    const next = update(current);
+    presenceProjectionRef.current = next;
+    setPresence(next);
+  }
 
   useEffect(() => {
     const bus = new CompanionBus("companion");
@@ -122,7 +134,7 @@ export function CompanionPage(): JSX.Element {
       previous?.queue.cancel();
       sessionRef.current = null;
       speechBuffer.setActiveTurn(requestId);
-      setPresence((current) =>
+      updatePresence((current) =>
         reduceCompanionPresence(current, { type: "turn-start", epoch: requestId })
       );
       if (!voiceEnabledRef.current) {
@@ -145,7 +157,7 @@ export function CompanionPage(): JSX.Element {
             const session = sessionRef.current;
             if (!session || session.queue !== queue) return;
             setVoiceStatus(state);
-            setPresence((current) =>
+            updatePresence((current) =>
               reduceCompanionPresence(current, {
                 type: "queue",
                 epoch: session.requestId,
@@ -175,7 +187,7 @@ export function CompanionPage(): JSX.Element {
             const session = sessionRef.current;
             if (!session || session.queue !== queue) return;
             setVoiceStatus("error");
-            setPresence((current) =>
+            updatePresence((current) =>
               reduceCompanionPresence(current, {
                 type: "queue",
                 epoch: session.requestId,
@@ -200,7 +212,7 @@ export function CompanionPage(): JSX.Element {
                       ? "error"
                       : null;
             if (playbackState !== null) {
-              setPresence((current) =>
+              updatePresence((current) =>
                 reduceCompanionPresence(current, {
                   type: "playback",
                   epoch: requestId,
@@ -268,7 +280,7 @@ export function CompanionPage(): JSX.Element {
     function handleMessage(message: CompanionBusMessage): void {
       switch (message.kind) {
         case "user-gesture":
-          setPresence((current) =>
+          updatePresence((current) =>
             reduceCompanionPresence(current, { type: "interaction", state: "listening" })
           );
           lumiRef.current?.resumeAudio();
@@ -288,7 +300,7 @@ export function CompanionPage(): JSX.Element {
             const epoch = activeEpochRef.current;
             if (epoch) {
               speechStoppedEpochRef.current = epoch;
-              setPresence((current) =>
+              updatePresence((current) =>
                 reduceCompanionPresence(current, { type: "speech-cancelled", epoch })
               );
             }
@@ -315,7 +327,7 @@ export function CompanionPage(): JSX.Element {
           if (activeEpochRef.current !== message.requestId) return;
           const session = sessionRef.current;
           speechStoppedEpochRef.current = message.requestId;
-          setPresence((current) =>
+          updatePresence((current) =>
             reduceCompanionPresence(current, {
               type: "speech-cancelled",
               epoch: message.requestId
@@ -331,7 +343,13 @@ export function CompanionPage(): JSX.Element {
         }
         case "generation-state":
           if (activeEpochRef.current !== message.requestId) return;
-          setPresence((current) =>
+          if (
+            message.state === "interrupted" &&
+            !canInterruptGeneration(presenceProjectionRef.current ?? presence, message.requestId)
+          ) {
+            return;
+          }
+          updatePresence((current) =>
             reduceCompanionPresence(current, {
               type: "generation",
               epoch: message.requestId,
@@ -371,7 +389,7 @@ export function CompanionPage(): JSX.Element {
     // Own the interrupted timer in this effect so React StrictMode remounts
     // get a live scheduler instead of a permanently disposed ref instance.
     const resetScheduler = createInterruptedResetScheduler(() => {
-      setPresence((current) =>
+      updatePresence((current) =>
         current.epoch
           ? reduceCompanionPresence(current, {
               type: "transition-expired",
