@@ -3,6 +3,7 @@ import {
   DeepSeekReasoningProvider,
   ProviderError,
   ProviderErrorCode,
+  createMockChatProvider,
   createProviderRegistryFromEnv
 } from "./index.js";
 
@@ -39,11 +40,18 @@ describe("ProviderRegistry", () => {
       provider: "deepseek",
       capability: "chat",
       configured: false,
-      available: true,
-      mock: true,
+      readiness: "not_ready",
+      available: false,
+      mock: false,
       required: true
     });
-    expect(JSON.stringify(status)).not.toContain("API_KEY");
+    expect(status.routes?.chat.at(-1)).toMatchObject({
+      provider: "mock",
+      readiness: "ready",
+      available: true,
+      mock: true
+    });
+    expect(JSON.stringify(status)).not.toContain("test_deepseek_secret");
   });
 
   it("uses real-provider-first behavior unless mock fallback is explicitly allowed", async () => {
@@ -137,6 +145,168 @@ describe("ProviderRegistry", () => {
     });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(JSON.stringify(status)).not.toContain("test-key");
+  });
+
+  it("keeps local readiness separate from unverified remote observation", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    });
+
+    const status = registry.getStatus().providers.chat;
+
+    expect(status).toMatchObject({
+      readiness: "ready",
+      observed: "unknown",
+      configured: true,
+      available: true,
+      status: "degraded"
+    });
+    expect(status.lastVerifiedAt).toBeUndefined();
+  });
+
+  it("does not make an unconfigured real route mock-ready when mocks are permitted", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "true",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek"
+    });
+
+    expect(registry.getStatus().providers.chat).toMatchObject({
+      provider: "deepseek",
+      configured: false,
+      readiness: "not_ready",
+      available: false,
+      mock: false,
+      status: "unavailable"
+    });
+    expect(registry.getStatus().routes?.chat).toMatchObject([
+      expect.objectContaining({
+        provider: "deepseek",
+        readiness: "not_ready",
+        mock: false
+      })
+    ]);
+  });
+
+  it("reports only an explicit mock route as mock-ready", async () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "true",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek,mock"
+    });
+
+    expect(registry.getStatus().routes?.chat).toMatchObject([
+      expect.objectContaining({
+        provider: "deepseek",
+        readiness: "not_ready",
+        available: false,
+        mock: false
+      }),
+      expect.objectContaining({
+        provider: "mock",
+        readiness: "ready",
+        available: true,
+        mock: true
+      })
+    ]);
+
+    await expect(
+      registry.getChatProvider().generateReply({
+        messages: [{ role: "user", content: "hello" }]
+      })
+    ).resolves.toMatchObject({ finalProvider: "mock" });
+  });
+
+  it("does not report a disabled default mock provider as ready", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "mock"
+    });
+    const status = registry.getStatus();
+
+    expect(status.providers.chat).toMatchObject({
+      provider: "mock",
+      configured: false,
+      mock: false,
+      readiness: "not_ready",
+      available: false
+    });
+    expect(status.routes?.chat).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ provider: "mock", readiness: "ready" })])
+    );
+  });
+
+  it("keeps getStatus zero-I/O and does not mutate cached observation", () => {
+    const fetchSpy = vi.fn();
+    const healthCheck = vi.fn(async () => {
+      throw new Error("healthCheck must not run during status inspection");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    });
+    registry.registerChatProvider({
+      ...createMockChatProvider("deepseek"),
+      healthCheck
+    });
+
+    const first = registry.getStatus();
+    const second = registry.getStatus();
+
+    expect(first.providers.chat.observed).toBe("unknown");
+    expect(second.providers.chat.observed).toBe("unknown");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(healthCheck).not.toHaveBeenCalled();
+  });
+
+  it("records live observations without persisting them across registry reload", () => {
+    const config = {
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    };
+    const registry = createProviderRegistryFromEnv(config);
+    registry.recordLiveVerification({
+      capability: "chat",
+      provider: "deepseek",
+      observed: "unavailable",
+      verifiedAt: "2026-08-15T12:00:00.000Z",
+      latencyMs: 42,
+      errorCode: ProviderErrorCode.ProviderUnavailable,
+      error: "Provider verification failed safely."
+    });
+
+    expect(registry.getStatus().providers.chat).toMatchObject({
+      readiness: "ready",
+      observed: "unavailable",
+      status: "unavailable",
+      lastVerifiedAt: "2026-08-15T12:00:00.000Z",
+      latencyMs: 42,
+      lastErrorCode: ProviderErrorCode.ProviderUnavailable,
+      lastError: "Provider verification failed safely."
+    });
+
+    const reloaded = createProviderRegistryFromEnv(config);
+    expect(reloaded.getStatus().providers.chat).toMatchObject({
+      readiness: "ready",
+      observed: "unknown",
+      status: "degraded"
+    });
+    expect(reloaded.getStatus().providers.chat.lastVerifiedAt).toBeUndefined();
   });
 
   it("normalizes provider errors", () => {

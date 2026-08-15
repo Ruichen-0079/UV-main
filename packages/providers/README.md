@@ -48,3 +48,19 @@ The current Runtime does not implement tool/function calling. `role: "tool"`
 and `finishReason: "tool_call"` remain reserved compatibility values only;
 they do not provide normalized tool definitions, calls, results, streaming
 argument deltas, or execution.
+
+Provider status has two independent axes. `readiness` is local configuration
+state (`ready` or `not_ready`) based on required local fields being present;
+it does not validate endpoint syntax or remote reachability. It is the only
+state used to decide whether a provider route can be constructed. `observed` is cached explicit verification
+state (`unknown`, `available`, `degraded`, or `unavailable`). A configured
+provider starts with `readiness: "ready"` and `observed: "unknown"`; config
+inspection never claims remote availability. The legacy `available` field is
+retained as a compatibility projection of local readiness, not remote health.
+
+`ProviderRegistry.getStatus()` is synchronous, local, and zero-I/O. It never
+calls a provider `healthCheck()` or a remote endpoint. Only explicit live
+verification updates the in-memory observation cache. Config-only verification
+for TTS, STT, Vision, and provider chains reports `verificationMode:
+"config_only"` and leaves `observed` unchanged. Ordinary `/health` is also
+zero-cost and exposes readiness and cached observation separately.

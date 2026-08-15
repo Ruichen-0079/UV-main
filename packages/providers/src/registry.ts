@@ -12,6 +12,8 @@ import type {
   ProviderAttempt,
   ProviderCapability,
   ProviderHealth,
+  ProviderObservedState,
+  ProviderReadinessState,
   ProviderRouteStatus
 } from "./types/common.js";
 import {
@@ -129,6 +131,20 @@ export type ProviderStatusMap = {
   routes?: Record<ProviderCapability, ProviderRouteStatus[]>;
 };
 
+export type LiveProviderVerification = {
+  capability: ProviderCapability;
+  provider: string;
+  observed: Exclude<ProviderObservedState, "unknown">;
+  verifiedAt?: string | undefined;
+  latencyMs?: number | undefined;
+  errorCode?: string | undefined;
+  error?: string | undefined;
+};
+
+type ProviderObservation = Omit<LiveProviderVerification, "capability" | "provider"> & {
+  verifiedAt: string;
+};
+
 export class ProviderRegistry implements ProviderResolver {
   private readonly chatProviders = new Map<string, ChatProvider>();
   private readonly reasoningProviders = new Map<string, ReasoningProvider>();
@@ -136,6 +152,7 @@ export class ProviderRegistry implements ProviderResolver {
   private readonly sttProviders = new Map<string, STTProvider>();
   private readonly visionProviders = new Map<string, VisionProvider>();
   private readonly embeddingProviders = new Map<string, EmbeddingProvider>();
+  private readonly observations = new Map<string, ProviderObservation>();
 
   constructor(private readonly config: ProviderRegistryConfig) {}
 
@@ -220,6 +237,22 @@ export class ProviderRegistry implements ProviderResolver {
     };
   }
 
+  /**
+   * Record an explicitly performed live observation. getStatus() never calls
+   * this method and never performs provider I/O; observations live only for
+   * this registry instance and therefore reset on configuration reload.
+   */
+  recordLiveVerification(input: LiveProviderVerification): void {
+    const verifiedAt = input.verifiedAt ?? new Date().toISOString();
+    this.observations.set(observationKey(input.capability, input.provider), {
+      observed: input.observed,
+      verifiedAt,
+      ...(input.latencyMs !== undefined ? { latencyMs: input.latencyMs } : {}),
+      ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+      ...(input.error ? { error: input.error } : {})
+    });
+  }
+
   private createRouteStatuses(capability: ProviderCapability): ProviderRouteStatus[] {
     return this.config.chains[capability].map((name, index) => {
       const status = this.createStatus(capability, name);
@@ -256,17 +289,23 @@ export class ProviderRegistry implements ProviderResolver {
 
   private createStatus(capability: ProviderCapability, name: string): ProviderHealth {
     const configured = this.isConfigured(capability, name);
-    const mock =
-      (capability === "embedding" && name === "mock") || (!configured && this.config.allowMocks);
+    // PROVIDER_ALLOW_MOCKS permits the explicit `mock` route; it does not
+    // turn an unconfigured real provider identity into a mock route.
+    const mock = this.config.allowMocks && name === "mock";
     const required = capability === "chat";
-    const available = configured || mock;
-    const status = available ? (mock ? "healthy" : "degraded") : "unavailable";
-    const missingFields = configured || mock ? [] : this.missingFieldsFor(capability, name);
+    const readiness: ProviderReadinessState = configured || mock ? "ready" : "not_ready";
+    const available = readiness === "ready";
+    const observation = this.observations.get(observationKey(capability, name));
+    const observed: ProviderObservedState = observation?.observed ?? "unknown";
+    const status = providerHealthStatus({ readiness, observed, mock });
+    const missingFields = readiness === "ready" ? [] : this.missingFieldsFor(capability, name);
 
     return {
       provider: name,
       name,
       capability,
+      readiness,
+      observed,
       configured,
       available,
       mock,
@@ -276,6 +315,14 @@ export class ProviderRegistry implements ProviderResolver {
       required,
       status,
       checkedAt: new Date().toISOString(),
+      ...(observation
+        ? {
+            lastVerifiedAt: observation.verifiedAt,
+            ...(observation.latencyMs !== undefined ? { latencyMs: observation.latencyMs } : {}),
+            ...(observation.errorCode ? { lastErrorCode: observation.errorCode } : {}),
+            ...(observation.error ? { lastError: observation.error } : {})
+          }
+        : {}),
       ...this.safeProviderMetadata(capability, name),
       ...(capability === "embedding" && name === "mock"
         ? {
@@ -286,7 +333,15 @@ export class ProviderRegistry implements ProviderResolver {
         : capability === "embedding"
           ? { semanticEmbedding: configured }
           : {}),
-      message: providerStatusMessage({ capability, name, configured, mock, required })
+      message: providerStatusMessage({
+        capability,
+        name,
+        configured,
+        mock,
+        required,
+        readiness,
+        observed
+      })
     };
   }
 
@@ -340,7 +395,7 @@ export class ProviderRegistry implements ProviderResolver {
 
     if (capability === "embedding") {
       if (name === "mock") {
-        return true;
+        return this.config.allowMocks;
       }
       return Boolean(this.config.embedding.apiKey && this.config.embedding.model);
     }
@@ -496,19 +551,62 @@ export class ProviderRegistry implements ProviderResolver {
   }
 }
 
+function observationKey(capability: ProviderCapability, provider: string): string {
+  return `${capability}:${provider}`;
+}
+
+function providerHealthStatus(input: {
+  readiness: ProviderReadinessState;
+  observed: ProviderObservedState;
+  mock: boolean;
+}): ProviderHealth["status"] {
+  if (input.readiness === "not_ready") {
+    return "unavailable";
+  }
+
+  // Mock providers are locally available without remote verification. Keep
+  // the observation axis honest (normally unknown) while retaining the
+  // existing healthy status projection for intentional offline mode.
+  if (input.mock) {
+    return "healthy";
+  }
+
+  if (input.observed === "available") {
+    return "healthy";
+  }
+  if (input.observed === "unavailable") {
+    return "unavailable";
+  }
+  return "degraded";
+}
+
 function providerStatusMessage(input: {
   capability: ProviderCapability;
   name: string;
   configured: boolean;
   mock: boolean;
   required: boolean;
+  readiness: ProviderReadinessState;
+  observed: ProviderObservedState;
 }): string {
-  if (input.configured) {
-    return `${input.name} ${input.capability} provider is configured; health is config-only and unverified.`;
+  if (input.mock) {
+    return `${input.name} ${input.capability} provider is locally ready in mock mode; remote availability is not verified.`;
   }
 
-  if (input.mock) {
-    return `${input.name} ${input.capability} provider is using mock fallback.`;
+  if (input.readiness === "ready" && input.observed === "available") {
+    return `${input.name} ${input.capability} provider was verified available.`;
+  }
+
+  if (input.readiness === "ready" && input.observed === "unavailable") {
+    return `${input.name} ${input.capability} provider was verified unavailable.`;
+  }
+
+  if (input.readiness === "ready" && input.observed === "degraded") {
+    return `${input.name} ${input.capability} provider was verified with degraded availability.`;
+  }
+
+  if (input.configured) {
+    return `${input.name} ${input.capability} provider is locally ready; remote availability is unverified.`;
   }
 
   return input.required
@@ -2300,6 +2398,7 @@ function normalizeFinishReason(
 function safeProviderErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message
+    .replace(/:\s*(?:\{|\[)[\s\S]*$/, "")
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [REDACTED]")
     .replace(/\bsk-[A-Za-z0-9._~+/=-]+/g, "sk-[REDACTED]")
     .replace(/(api[-_]?key|authorization|token|password|secret)=([^&\s]+)/gi, "$1=[REDACTED]")
