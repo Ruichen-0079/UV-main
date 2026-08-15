@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalPath } from "./paths.js";
 import {
   createClusterMarker,
   ensurePostgresDirectories,
@@ -78,10 +79,12 @@ function inspection(commandLine: string, started: Date): ProcessInspectionResult
 
 describe("strong private postgres ownership", () => {
   it("parses exact argv tokens and rejects substring PGDATA", () => {
+    const extra = "/tmp/yuvi/data-extra";
     const parsed = parsePostgresArgv(
-      `/opt/pg16/bin/postgres -D /tmp/yuvi/data-extra -c cluster_name=yuvi-pg-abc`
+      `/opt/pg16/bin/postgres -D ${extra} -c cluster_name=yuvi-pg-abc`
     );
-    expect(parsed.dataDirectory).toBe("/tmp/yuvi/data-extra");
+    expect(parsed.dataDirectory).toBe(canonicalPath(extra));
+    expect(parsed.dataDirectory).not.toBe(canonicalPath("/tmp/yuvi/data"));
     expect(parsed.clusterName).toBe("yuvi-pg-abc");
   });
 
