@@ -10,17 +10,22 @@ logout、reboot 或 display-manager session 之间继续存在的配置。
 
 - 配置：`${XDG_CONFIG_HOME:-$HOME/.config}/yuvi/`
 - 状态：`${XDG_STATE_HOME:-$HOME/.local/state}/yuvi/`
-- 数据/工具链：`${XDG_DATA_HOME:-$HOME/.local/share}/yuvi/`
+- 数据：`${XDG_DATA_HOME:-$HOME/.local/share}/yuvi/`
 - 缓存：`${XDG_CACHE_HOME:-$HOME/.cache}/yuvi/`
 - 用户可执行文件：`$HOME/.local/bin/`
 - 工具链环境：`${XDG_CONFIG_HOME:-$HOME/.config}/yuvi/toolchain/env` 和
   `env.fish`
 
+Windows 默认使用 `%APPDATA%\yuvi\` 配置、`%LOCALAPPDATA%\yuvi\` 状态/数据、
+`%LOCALAPPDATA%\Temp\yuvi\` 缓存和 `%LOCALAPPDATA%\yuvi\bin\` 用户工具目录；
+POSIX shell integration 不在 Windows 上安装。
+
 `/tmp`、`/var/tmp`、`TMPDIR`、`TMP`、`TEMP` 和 `XDG_RUNTIME_DIR` 只允许用于
 运行时状态或 installer transaction，不允许成为持久 shell integration 的来源或目标。
 `scripts/dev.sh` 使用 `${XDG_RUNTIME_DIR:-/tmp}/yuvi-runtime-dev` 仅保存 PID、日志和
-重启标记；它不会把该目录写入 shell 配置。开发子进程使用非 login `bash -c`，避免
-一次开发启动被用户 login profile 中的失效 source 阻断。
+重启标记；它不会把该目录写入 shell 配置。开发子进程使用非 login `bash -c`，从
+调用 shell 继承已经导出的 PATH 和环境变量，但不会加载 login profile，避免一次开发
+启动被用户 login profile 中的失效 source 阻断。
 
 ## Shell integration
 
@@ -35,8 +40,14 @@ logout、reboot 或 display-manager session 之间继续存在的配置。
 
 所有写入先检查路径安全，创建同目录临时文件，fsync 后 atomic rename；替换或
 删除既有 YUVI 文件前会留下带时间戳的 backup。安装事务在后续写入失败时回滚已完成
-的写入。重复安装不会产生重复 PATH 或 source block，cleanup 只删除 YUVI 自己的
-managed files。
+的写入。已有目录的 canonical 路径也会检查，指向 ephemeral root 的 ancestor symlink
+和 managed-file symlink 会被拒绝。重复安装不会产生重复 PATH 或 source block，cleanup
+只删除 YUVI 自己的 managed files。
+
+这些检查覆盖稳定存在的 ancestor symlink 和 final symlink；同一用户恶意并发替换路径时
+仍存在理论 TOCTOU 窗口。彻底消除这类 race 需要平台特定的 `openat`/`O_NOFOLLOW`
+文件句柄协议，超出这个 user-level writer 的范围；atomic rename 本身不会跟随目标文件
+symlink。
 
 ## 工具提供方式
 
@@ -44,6 +55,9 @@ managed files。
 项目 package manager、`node_modules/.bin`、Python venv、`uv run` 或稳定的
 `$HOME/.local/bin` wrapper。不要为了单次 Codex/Grok 或 CI session 创建临时工具链，
 再把临时 env 文件永久写进 login 配置。
+
+此 hotfix 不会自动改写历史上的 `.profile`、`.bashrc` 或 `.zshrc`；此前已经受影响的
+主机仍需单独、明确地清理旧引用。
 
 ## 验证
 

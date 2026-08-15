@@ -1,8 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod as mockedChmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   YUVI_SHELL_BEGIN,
   YUVI_SHELL_END,
@@ -19,9 +27,15 @@ import {
   writeManagedFile
 } from "./index.js";
 
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  return { ...actual, chmod: vi.fn(actual.chmod) };
+});
+
 const sandboxes: string[] = [];
 
 afterEach(async () => {
+  vi.mocked(mockedChmod).mockClear();
   await Promise.all(sandboxes.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -63,6 +77,56 @@ describe("host environment safety", () => {
     );
   });
 
+  it("allows an ancestor symlink when its canonical location is persistent", async () => {
+    if (process.platform === "win32") return;
+    const { root, env } = await createSandbox();
+    const realConfig = path.join(root, "real-config");
+    const configLink = path.join(root, "config-link");
+    await mkdir(realConfig, { recursive: true });
+    await symlink(realConfig, configLink, "dir");
+
+    const installed = await installToolchainIntegration({
+      env: { ...env, XDG_CONFIG_HOME: configLink },
+      home: root,
+      ephemeralRoots: [],
+      shells: ["posix"]
+    });
+
+    expect(await pathExists(path.join(realConfig, "yuvi", "shell", "yuvi.sh"))).toBe(true);
+    expect(installed.paths.posixShellFile).toBe(path.join(configLink, "yuvi", "shell", "yuvi.sh"));
+  });
+
+  it("rejects an ancestor symlink whose canonical location is ephemeral", async () => {
+    if (process.platform === "win32") return;
+    const { root, env } = await createSandbox();
+    const configLink = path.join(root, "config-link");
+    await symlink("/tmp", configLink, "dir");
+
+    await expect(
+      installToolchainIntegration({
+        env: { ...env, XDG_CONFIG_HOME: configLink },
+        home: root,
+        ephemeralRoots: ["/tmp"],
+        shells: ["posix"]
+      })
+    ).rejects.toMatchObject({ code: "EPHEMERAL_PERSISTENT_TARGET" });
+  });
+
+  it("rejects a final managed-file symlink before writing any integration file", async () => {
+    if (process.platform === "win32") return;
+    const { root, env } = await createSandbox();
+    const paths = resolveYuviHostPaths({ env, home: root, ephemeralRoots: [] });
+    await mkdir(path.dirname(paths.toolchainEnv), { recursive: true });
+    const persistentTarget = path.join(root, "persistent-env");
+    await writeFile(persistentTarget, "# existing target\n", "utf8");
+    await symlink(persistentTarget, paths.toolchainEnv);
+
+    await expect(
+      installToolchainIntegration({ env, home: root, ephemeralRoots: [], shells: ["posix"] })
+    ).rejects.toMatchObject({ code: "YUVI_INTEGRATION_CONFLICT" });
+    expect(await pathExists(paths.toolchainFishEnv)).toBe(false);
+  });
+
   it("renders fail-open shell integration without persistent temp references", () => {
     const posix = renderPosixShellIntegration("/home/yuvi/.config/yuvi/toolchain/env");
     const fish = renderFishShellIntegration("/home/yuvi/.config/yuvi/toolchain/env.fish");
@@ -101,6 +165,24 @@ describe("host environment safety", () => {
       ).rejects.toMatchObject({ code: "REFUSE_PERSISTENT_REFERENCE_TO_EPHEMERAL_PATH" });
     }
     expect(await pathExists(target)).toBe(false);
+  });
+
+  it("leaves an existing managed target intact when temporary chmod fails", async () => {
+    const { root, env } = await createSandbox();
+    const target = path.join(root, "config", "yuvi", "shell", "yuvi.sh");
+    const previousContent = `${YUVI_SHELL_BEGIN}\n# previous\n${YUVI_SHELL_END}\n`;
+    const nextContent = `${YUVI_SHELL_BEGIN}\n# next\n${YUVI_SHELL_END}\n`;
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, previousContent, "utf8");
+
+    vi.mocked(mockedChmod).mockImplementationOnce(async () => {
+      throw new Error("injected chmod failure");
+    });
+
+    await expect(
+      writeManagedFile(target, nextContent, { env, ephemeralRoots: [] })
+    ).rejects.toThrow("injected chmod failure");
+    expect(await readFile(target, "utf8")).toBe(previousContent);
   });
 
   it("installs atomically, is idempotent, and never touches .profile", async () => {

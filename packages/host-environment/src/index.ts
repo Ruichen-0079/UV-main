@@ -8,6 +8,7 @@ import {
   mkdir,
   open,
   readFile,
+  realpath,
   rename,
   unlink
 } from "node:fs/promises";
@@ -43,6 +44,8 @@ export type HostEnvironmentOptions = {
   /** Additional runtime/temp roots to reject in addition to platform defaults. */
   ephemeralRoots?: readonly string[];
 };
+
+type PathSafetyOptions = Pick<HostEnvironmentOptions, "env" | "ephemeralRoots" | "platform">;
 
 export type YuviHostPaths = {
   home: string;
@@ -130,10 +133,7 @@ function effectiveEphemeralRoots(
   return [...new Set([...defaultEphemeralRoots(env, platform), ...(additionalRoots ?? [])])];
 }
 
-export function isEphemeralPath(
-  value: string,
-  options: Pick<HostEnvironmentOptions, "env" | "ephemeralRoots" | "platform"> = {}
-): boolean {
+export function isEphemeralPath(value: string, options: PathSafetyOptions = {}): boolean {
   if (!value.trim()) return false;
   if (/\$\{?(?:TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR)\}?/.test(value)) return true;
   if (!path.isAbsolute(value)) return false;
@@ -144,10 +144,7 @@ export function isEphemeralPath(
   return roots.some((root) => isPathWithin(candidate, path.resolve(root)));
 }
 
-export function assertPersistentPath(
-  targetPath: string,
-  options: Pick<HostEnvironmentOptions, "env" | "ephemeralRoots" | "platform"> = {}
-): void {
+export function assertPersistentPath(targetPath: string, options: PathSafetyOptions = {}): void {
   if (!path.isAbsolute(targetPath)) {
     throw new HostEnvironmentSafetyError(
       "INVALID_ABSOLUTE_PATH",
@@ -166,7 +163,7 @@ export function assertPersistentPath(
 export function assertSafePersistentReference(
   sourcePath: string,
   targetPath: string,
-  options: Pick<HostEnvironmentOptions, "env" | "ephemeralRoots" | "platform"> = {}
+  options: PathSafetyOptions = {}
 ): void {
   assertPersistentPath(targetPath, options);
 
@@ -178,10 +175,7 @@ export function assertSafePersistentReference(
   }
 }
 
-function containsEphemeralReference(
-  content: string,
-  options: Pick<HostEnvironmentOptions, "env" | "ephemeralRoots" | "platform"> = {}
-): boolean {
+function containsEphemeralReference(content: string, options: PathSafetyOptions = {}): boolean {
   if (/\${?(?:TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR)}?/.test(content)) return true;
   if (/\/tmp\/|\/var\/tmp\//.test(content)) return true;
   if (/\bmktemp\b/.test(content)) return true;
@@ -199,7 +193,7 @@ function containsEphemeralReference(
 export function assertSafePersistentContent(
   targetPath: string,
   content: string,
-  options: Pick<HostEnvironmentOptions, "env" | "ephemeralRoots" | "platform"> = {}
+  options: PathSafetyOptions = {}
 ): void {
   assertPersistentPath(targetPath, options);
   if (containsEphemeralReference(content, options)) {
@@ -207,6 +201,126 @@ export function assertSafePersistentContent(
       "REFUSE_PERSISTENT_REFERENCE_TO_EPHEMERAL_PATH",
       `REFUSE_PERSISTENT_REFERENCE_TO_EPHEMERAL_PATH: ${targetPath} content contains an ephemeral path or runtime temporary reference`
     );
+  }
+}
+
+async function canonicalEphemeralRoots(options: PathSafetyOptions): Promise<string[]> {
+  const env = options.env ?? process.env;
+  const roots = effectiveEphemeralRoots(env, options.platform, options.ephemeralRoots);
+  const canonicalRoots = await Promise.all(
+    roots.map(async (root) => {
+      try {
+        return await realpath(path.resolve(root));
+      } catch (error) {
+        if (isNodeError(error, "ENOENT")) return undefined;
+        throw error;
+      }
+    })
+  );
+  return canonicalRoots.filter((root): root is string => root !== undefined);
+}
+
+async function assertSafeCanonicalPath(
+  candidatePath: string,
+  options: PathSafetyOptions
+): Promise<void> {
+  const candidate = path.resolve(candidatePath);
+  assertPersistentPath(candidate, options);
+  const roots = await canonicalEphemeralRoots(options);
+  if (roots.some((root) => isPathWithin(candidate, root))) {
+    throw new HostEnvironmentSafetyError(
+      "EPHEMERAL_PERSISTENT_TARGET",
+      `Refusing persistent path whose canonical location is under an ephemeral root: ${candidate}`
+    );
+  }
+}
+
+async function resolveExistingAncestor(targetPath: string): Promise<string> {
+  let candidate = path.resolve(targetPath);
+  for (;;) {
+    try {
+      const stats = await lstat(candidate);
+      if (stats.isSymbolicLink()) {
+        try {
+          return await realpath(candidate);
+        } catch (error) {
+          if (isNodeError(error, "ENOENT")) {
+            throw new HostEnvironmentSafetyError(
+              "YUVI_INTEGRATION_CONFLICT",
+              `Refusing to use a dangling symlink in persistent path: ${candidate}`
+            );
+          }
+          throw error;
+        }
+      }
+      return await realpath(candidate);
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+      const parent = path.dirname(candidate);
+      if (parent === candidate) throw error;
+      candidate = parent;
+    }
+  }
+}
+
+async function assertSafePersistentDestination(
+  targetPath: string,
+  options: PathSafetyOptions = {}
+): Promise<string> {
+  const normalizedTarget = path.resolve(targetPath);
+  assertPersistentPath(normalizedTarget, options);
+
+  try {
+    const stats = await lstat(normalizedTarget);
+    if (stats.isSymbolicLink()) {
+      throw new HostEnvironmentSafetyError(
+        "YUVI_INTEGRATION_CONFLICT",
+        `Refusing to replace symlink integration target: ${normalizedTarget}`
+      );
+    }
+  } catch (error) {
+    if (!isNodeError(error, "ENOENT")) throw error;
+  }
+
+  const canonicalParent = await resolveExistingAncestor(path.dirname(normalizedTarget));
+  await assertSafeCanonicalPath(canonicalParent, options);
+  return normalizedTarget;
+}
+
+async function ensureSafeDirectory(
+  directoryPath: string,
+  options: PathSafetyOptions = {}
+): Promise<void> {
+  const directory = path.resolve(directoryPath);
+  assertPersistentPath(directory, options);
+
+  const root = path.parse(directory).root;
+  let current = root;
+  const relative = path.relative(root, directory);
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    let stats;
+    try {
+      stats = await lstat(current);
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+      try {
+        await mkdir(current, { mode: 0o755 });
+      } catch (mkdirError) {
+        if (!isNodeError(mkdirError, "EEXIST")) throw mkdirError;
+      }
+      stats = await lstat(current);
+    }
+
+    if (!stats.isDirectory() && !stats.isSymbolicLink()) {
+      throw new HostEnvironmentSafetyError(
+        "YUVI_INTEGRATION_CONFLICT",
+        `Refusing to use non-directory persistent path component: ${current}`
+      );
+    }
+
+    const canonical = await resolveExistingAncestor(current);
+    await assertSafeCanonicalPath(canonical, options);
   }
 }
 
@@ -369,12 +483,18 @@ async function backupExisting(targetPath: string): Promise<string> {
   }
 }
 
-async function atomicWrite(targetPath: string, content: string): Promise<void> {
-  const directory = path.dirname(targetPath);
-  await mkdir(directory, { recursive: true, mode: 0o755 });
+async function atomicWrite(
+  targetPath: string,
+  content: string,
+  options: PathSafetyOptions = {}
+): Promise<void> {
+  const normalizedTarget = await assertSafePersistentDestination(targetPath, options);
+  const directory = path.dirname(normalizedTarget);
+  await ensureSafeDirectory(directory, options);
+  await assertSafePersistentDestination(normalizedTarget, options);
   const temporaryPath = path.join(
     directory,
-    `.${path.basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`
+    `.${path.basename(normalizedTarget)}.${process.pid}.${randomUUID()}.tmp`
   );
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
@@ -383,8 +503,8 @@ async function atomicWrite(targetPath: string, content: string): Promise<void> {
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await rename(temporaryPath, targetPath);
-    await chmod(targetPath, 0o644);
+    await chmod(temporaryPath, 0o644);
+    await rename(temporaryPath, normalizedTarget);
   } catch (error) {
     if (handle) await handle.close().catch(() => undefined);
     await unlink(temporaryPath).catch(() => undefined);
@@ -392,7 +512,10 @@ async function atomicWrite(targetPath: string, content: string): Promise<void> {
   }
 }
 
-async function restoreFile(result: ManagedFileResult): Promise<void> {
+async function restoreFile(
+  result: ManagedFileResult,
+  options: PathSafetyOptions = {}
+): Promise<void> {
   if (!result.changed) return;
   if (result.previousContent === undefined) {
     await unlink(result.path).catch((error: unknown) => {
@@ -400,7 +523,7 @@ async function restoreFile(result: ManagedFileResult): Promise<void> {
     });
     return;
   }
-  await atomicWrite(result.path, result.previousContent);
+  await atomicWrite(result.path, result.previousContent, options);
 }
 
 export async function writeManagedFile(
@@ -408,22 +531,24 @@ export async function writeManagedFile(
   content: string,
   options: Pick<HostEnvironmentOptions, "env" | "ephemeralRoots" | "platform"> = {}
 ): Promise<ManagedFileResult> {
-  assertSafePersistentContent(targetPath, content, options);
-  const previousContent = await readExisting(targetPath);
+  const normalizedTarget = await assertSafePersistentDestination(targetPath, options);
+  assertSafePersistentContent(normalizedTarget, content, options);
+  const previousContent = await readExisting(normalizedTarget);
   if (previousContent === content) {
-    return { path: targetPath, changed: false, created: false };
+    return { path: normalizedTarget, changed: false, created: false };
   }
   if (previousContent !== undefined && !isManagedContent(previousContent)) {
     throw new HostEnvironmentSafetyError(
       "YUVI_INTEGRATION_CONFLICT",
-      `Refusing to overwrite non-YUVI content at ${targetPath}`
+      `Refusing to overwrite non-YUVI content at ${normalizedTarget}`
     );
   }
 
-  const backupPath = previousContent === undefined ? undefined : await backupExisting(targetPath);
-  await atomicWrite(targetPath, content);
+  const backupPath =
+    previousContent === undefined ? undefined : await backupExisting(normalizedTarget);
+  await atomicWrite(normalizedTarget, content, options);
   return {
-    path: targetPath,
+    path: normalizedTarget,
     changed: true,
     created: previousContent === undefined,
     ...(previousContent !== undefined ? { previousContent } : {}),
@@ -435,21 +560,21 @@ export async function removeManagedFile(
   targetPath: string,
   options: Pick<HostEnvironmentOptions, "env" | "ephemeralRoots" | "platform"> = {}
 ): Promise<ManagedFileResult> {
-  assertPersistentPath(targetPath, options);
-  const previousContent = await readExisting(targetPath);
+  const normalizedTarget = await assertSafePersistentDestination(targetPath, options);
+  const previousContent = await readExisting(normalizedTarget);
   if (previousContent === undefined) {
-    return { path: targetPath, changed: false, created: false };
+    return { path: normalizedTarget, changed: false, created: false };
   }
   if (!isManagedContent(previousContent)) {
     throw new HostEnvironmentSafetyError(
       "YUVI_INTEGRATION_CONFLICT",
-      `Refusing to remove non-YUVI content at ${targetPath}`
+      `Refusing to remove non-YUVI content at ${normalizedTarget}`
     );
   }
-  const backupPath = await backupExisting(targetPath);
-  await unlink(targetPath);
+  const backupPath = await backupExisting(normalizedTarget);
+  await unlink(normalizedTarget);
   return {
-    path: targetPath,
+    path: normalizedTarget,
     changed: true,
     created: false,
     previousContent,
@@ -514,16 +639,15 @@ function integrationSpecs(paths: YuviHostPaths, shells: readonly ShellKind[]): I
 
 async function preflightSpecs(
   specs: readonly IntegrationSpec[],
-  paths: YuviHostPaths
+  safetyOptions: PathSafetyOptions
 ): Promise<void> {
   for (const spec of specs) {
-    assertPersistentPath(spec.targetPath, { ephemeralRoots: paths.ephemeralRoots });
+    await assertSafePersistentDestination(spec.targetPath, safetyOptions);
     if (spec.sourcePath) {
-      assertSafePersistentReference(spec.sourcePath, spec.targetPath, {
-        ephemeralRoots: paths.ephemeralRoots
-      });
+      await assertSafePersistentDestination(spec.sourcePath, safetyOptions);
+      assertSafePersistentReference(spec.sourcePath, spec.targetPath, safetyOptions);
     }
-    const existing = await readExisting(spec.targetPath);
+    const existing = await readExisting(path.resolve(spec.targetPath));
     if (existing !== undefined && !isManagedContent(existing)) {
       throw new HostEnvironmentSafetyError(
         "YUVI_INTEGRATION_CONFLICT",
@@ -541,20 +665,25 @@ export async function installToolchainIntegration(
   assertPathSet(paths);
   const shells = options.shells ?? ["fish", "posix"];
   const specs = integrationSpecs(paths, shells);
-  await preflightSpecs(specs, paths);
+  const safetyOptions: PathSafetyOptions = {
+    ...(options.env !== undefined ? { env: options.env } : {}),
+    ...(options.platform !== undefined ? { platform: options.platform } : {}),
+    ephemeralRoots: paths.ephemeralRoots
+  };
+  await preflightSpecs(specs, safetyOptions);
 
   const results: ManagedFileResult[] = [];
   try {
     for (const spec of specs) {
       results.push(
         await writeManagedFile(spec.targetPath, spec.content, {
-          ephemeralRoots: paths.ephemeralRoots
+          ...safetyOptions
         })
       );
     }
   } catch (error) {
     for (const result of [...results].reverse()) {
-      await restoreFile(result).catch(() => undefined);
+      await restoreFile(result, safetyOptions).catch(() => undefined);
     }
     throw error;
   }
@@ -570,20 +699,25 @@ export async function removeToolchainIntegration(
   assertPathSet(paths);
   const shells = options.shells ?? ["fish", "posix"];
   const specs = integrationSpecs(paths, shells);
-  await preflightSpecs(specs, paths);
+  const safetyOptions: PathSafetyOptions = {
+    ...(options.env !== undefined ? { env: options.env } : {}),
+    ...(options.platform !== undefined ? { platform: options.platform } : {}),
+    ephemeralRoots: paths.ephemeralRoots
+  };
+  await preflightSpecs(specs, safetyOptions);
 
   const results: ManagedFileResult[] = [];
   try {
     for (const spec of specs) {
       results.push(
         await removeManagedFile(spec.targetPath, {
-          ephemeralRoots: paths.ephemeralRoots
+          ...safetyOptions
         })
       );
     }
   } catch (error) {
     for (const result of [...results].reverse()) {
-      await restoreFile(result).catch(() => undefined);
+      await restoreFile(result, safetyOptions).catch(() => undefined);
     }
     throw error;
   }
