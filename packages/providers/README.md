@@ -37,6 +37,18 @@ existing `ProviderRegistry` / `ProviderResolver` boundary. A provider adapter
 must return the normalized business result for its capability rather than
 vendor transport fields.
 
+Chat streaming is selected by method: `generateReply()` is always a
+non-streaming operation and `streamReply()` is the authoritative normalized
+streaming operation. The legacy `ChatInput.stream` field is retained only for
+compatibility and must not turn `generateReply()` into a streamed transport
+request. Normalized streams contain non-empty `text-delta` events followed by
+exactly one `completed` event; the completed message content must equal the
+concatenated deltas. Provider-native transport frames, internal reasoning, and
+tool/function-call events are not exposed above the provider boundary.
+`FallbackChatProvider.streamingMode` is a diagnostic projection of the
+preferred route, not a chain-wide capability guarantee; stream execution
+evaluates each configured route as it is attempted.
+
 Reasoning has one authoritative business result: `ReasoningOutput.answer`.
 The legacy `ReasoningOutput.reasoning` field remains for structural
 compatibility, but is not a raw provider reasoning/internal-trace channel and

@@ -10,7 +10,8 @@ import {
   type ChatInput,
   type ChatOutput,
   type ChatProvider,
-  type ChatStreamEvent
+  type ChatStreamEvent,
+  type ProviderCallOptions
 } from "./index.js";
 import { describe, expect, it, vi } from "vitest";
 
@@ -113,6 +114,34 @@ describe("provider-neutral chat streaming", () => {
       streamingMode: "unsupported"
     };
     expect(getChatStreamingMode(unsupported)).toBe("unsupported");
+  });
+
+  it("forwards the exact ProviderCallOptions through the compatible adapter", async () => {
+    const controller = new AbortController();
+    const options = { signal: controller.signal };
+    let receivedOptions: ProviderCallOptions | undefined;
+    const legacy: ChatProvider = {
+      name: "legacy-options",
+      healthCheck: async () => ({
+        provider: "legacy-options",
+        status: "healthy",
+        checkedAt: new Date().toISOString()
+      }),
+      async generateReply(_input, received) {
+        receivedOptions = received;
+        return { message: { role: "assistant", content: "legacy reply" } };
+      }
+    };
+
+    const events = await collect(new FallbackChatProvider([legacy]).streamReply(input, options));
+
+    expect(receivedOptions).toBe(options);
+    expect(receivedOptions?.signal).toBe(controller.signal);
+    expect(events[0]).toEqual({ type: "text-delta", text: "legacy reply" });
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      output: { message: { role: "assistant", content: "legacy reply" } }
+    });
   });
 
   it("falls back before the first delta and exposes only the successful provider stream", async () => {

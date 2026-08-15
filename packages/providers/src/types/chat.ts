@@ -12,6 +12,11 @@ export type ChatInput = {
   maxTokens?: number | undefined;
   maxOutputTokens?: number | undefined;
   stopSequences?: string[] | undefined;
+  /**
+   * @deprecated Method selection controls streaming. `generateReply()` is
+   * always non-streaming and `streamReply()` is always streaming; this field
+   * is retained only for input compatibility.
+   */
   stream?: boolean | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
@@ -24,6 +29,7 @@ export type ChatOutput = ProviderMetadata & {
 
 export type ChatStreamingMode = "unsupported" | "native" | "compatible";
 
+/** Streaming call controls; `streamReply()` is the authoritative stream API. */
 export type ChatStreamOptions = ProviderCallOptions;
 
 export type ChatStreamEvent =

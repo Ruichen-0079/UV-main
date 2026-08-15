@@ -43,6 +43,7 @@ import {
   type ChatOutput,
   type ChatProvider,
   type ChatStreamEvent,
+  type ChatStreamOptions,
   type ProviderCapability,
   type ProviderHealth,
   type ProviderMetadata,
@@ -876,7 +877,13 @@ export class RuntimeOrchestrator {
         }
         const providerStream = chatProvider.streamReply
           ? chatProvider.streamReply({ messages: prompt.messages }, { signal: controller.signal })
-          : compatibleRuntimeStream(chatProvider, { messages: prompt.messages }, controller.signal);
+          : compatibleRuntimeStream(
+              chatProvider,
+              { messages: prompt.messages },
+              {
+                signal: controller.signal
+              }
+            );
         providerIterator = providerStream[Symbol.asyncIterator]();
 
         while (true) {
@@ -3134,21 +3141,21 @@ function emptyMemoryContext(): MemoryContext {
 async function* compatibleRuntimeStream(
   provider: ChatProvider,
   input: ChatInput,
-  signal: AbortSignal
+  options: ChatStreamOptions
 ): AsyncIterable<ChatStreamEvent> {
-  if (signal.aborted) {
+  if (options.signal?.aborted) {
     throw createRuntimeCancelledError(provider.name);
   }
   // A compatible provider may not be able to physically abort generateReply().
   // Runtime cancellation therefore only suppresses output, fallback, and completion.
-  const output = await provider.generateReply(input);
-  if (signal.aborted) {
+  const output = await provider.generateReply(input, options);
+  if (options.signal?.aborted) {
     throw createRuntimeCancelledError(provider.name);
   }
   if (output.message.content) {
     yield { type: "text-delta", text: output.message.content };
   }
-  if (signal.aborted) {
+  if (options.signal?.aborted) {
     throw createRuntimeCancelledError(provider.name);
   }
   yield { type: "completed", output };

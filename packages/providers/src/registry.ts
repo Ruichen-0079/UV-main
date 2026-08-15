@@ -1199,6 +1199,8 @@ function createProviderChain<TProvider>(
 
 export class FallbackChatProvider implements ChatProvider {
   readonly name: string;
+  // Diagnostic projection of the preferred route; the fallback chain still
+  // evaluates each provider's actual stream capability at execution time.
   readonly streamingMode: ChatStreamingMode;
 
   constructor(
@@ -1602,7 +1604,7 @@ async function* adaptNonStreamingProvider(
   // A legacy generateReply() may already own a network request that cannot be
   // physically aborted. Once its promise settles, the adapter only guarantees
   // that no further output, fallback, or completed event is produced.
-  const output = await provider.generateReply(input);
+  const output = await provider.generateReply(input, options);
   if (options.signal?.aborted) {
     throw createCancelledError(provider.name);
   }

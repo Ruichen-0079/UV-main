@@ -203,6 +203,42 @@ describe("RuntimeOrchestrator", () => {
     });
   });
 
+  it("forwards the runtime call options to a compatible provider", async () => {
+    let receivedOptions: { signal?: AbortSignal } | undefined;
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation: new InMemoryConversationRepository(),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          name: "legacy-options",
+          healthCheck: async () => ({
+            provider: "legacy-options",
+            status: "healthy" as const,
+            checkedAt: new Date().toISOString()
+          }),
+          async generateReply(_input: unknown, options?: { signal?: AbortSignal }) {
+            receivedOptions = options;
+            return { message: { role: "assistant" as const, content: "legacy reply" } };
+          }
+        })
+      }
+    });
+
+    const controller = new AbortController();
+    const events = await collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "compatible-options-session", content: "hello" },
+        { signal: controller.signal, readMemory: false, writeMemory: false }
+      )
+    );
+
+    expect(receivedOptions?.signal).toBeDefined();
+    expect(events.map((event) => event.type)).toEqual(["text-delta", "completed"]);
+  });
+
   it("finalizes persistence and final events before yielding completed", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const published: RuntimeEvent[] = [];
