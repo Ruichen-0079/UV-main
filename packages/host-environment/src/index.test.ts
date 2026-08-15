@@ -8,7 +8,7 @@ import {
   symlink,
   writeFile
 } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -110,6 +110,59 @@ describe("host environment safety", () => {
         shells: ["posix"]
       })
     ).rejects.toMatchObject({ code: "EPHEMERAL_PERSISTENT_TARGET" });
+  });
+
+  it("rejects a binDir whose existing ancestor resolves to ephemeral storage", async () => {
+    if (process.platform === "win32") return;
+    const { root, env } = await createSandbox();
+    const ephemeralBinRoot = await mkdtemp(path.join(tmpdir(), "yuvi-bin-ephemeral-"));
+    sandboxes.push(ephemeralBinRoot);
+    await symlink(ephemeralBinRoot, path.join(root, ".local"), "dir");
+    const paths = resolveYuviHostPaths({ env, home: root, ephemeralRoots: [] });
+
+    await expect(
+      installToolchainIntegration({ env, home: root, ephemeralRoots: [], shells: ["posix"] })
+    ).rejects.toMatchObject({ code: "EPHEMERAL_PERSISTENT_TARGET" });
+    expect(
+      await Promise.all(
+        [paths.toolchainEnv, paths.toolchainFishEnv, paths.posixShellFile, paths.fishDropIn].map(
+          (target) => pathExists(target)
+        )
+      )
+    ).toEqual([false, false, false, false]);
+  });
+
+  it("allows a binDir whose existing ancestor resolves to persistent storage", async () => {
+    if (process.platform === "win32") return;
+    const { root, env } = await createSandbox();
+    const persistentBinRoot = path.join(root, "persistent-local");
+    await mkdir(persistentBinRoot, { recursive: true });
+    await symlink(persistentBinRoot, path.join(root, ".local"), "dir");
+
+    const installed = await installToolchainIntegration({
+      env,
+      home: root,
+      ephemeralRoots: [],
+      shells: ["posix"]
+    });
+    expect(await readFile(installed.paths.toolchainEnv, "utf8")).toContain(installed.paths.binDir);
+    expect(await pathExists(installed.paths.posixShellFile)).toBe(true);
+  });
+
+  it("allows an ordinary persistent binDir and renders its PATH entry", async () => {
+    if (process.platform === "win32") return;
+    const { root, env } = await createSandbox();
+
+    const installed = await installToolchainIntegration({
+      env,
+      home: root,
+      ephemeralRoots: [],
+      shells: ["posix"]
+    });
+    const content = await readFile(installed.paths.toolchainEnv, "utf8");
+
+    expect(content).toContain(installed.paths.binDir);
+    expect(await pathExists(installed.paths.posixShellFile)).toBe(true);
   });
 
   it("rejects a final managed-file symlink before writing any integration file", async () => {

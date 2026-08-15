@@ -301,6 +301,17 @@ async function resolveExistingAncestor(targetPath: string): Promise<string> {
   }
 }
 
+async function assertSafePersistentResolvedPath(
+  candidatePath: string,
+  options: PathSafetyOptions = {}
+): Promise<string> {
+  const normalizedCandidate = path.resolve(candidatePath);
+  assertPersistentPath(normalizedCandidate, options);
+  const canonicalExistingAncestor = await resolveExistingAncestor(normalizedCandidate);
+  await assertSafeCanonicalPath(canonicalExistingAncestor, options);
+  return normalizedCandidate;
+}
+
 async function assertSafePersistentDestination(
   targetPath: string,
   options: PathSafetyOptions = {}
@@ -320,8 +331,7 @@ async function assertSafePersistentDestination(
     if (!isNodeError(error, "ENOENT")) throw error;
   }
 
-  const canonicalParent = await resolveExistingAncestor(path.dirname(normalizedTarget));
-  await assertSafeCanonicalPath(canonicalParent, options);
+  await assertSafePersistentResolvedPath(normalizedTarget, options);
   return normalizedTarget;
 }
 
@@ -357,8 +367,7 @@ async function ensureSafeDirectory(
       );
     }
 
-    const canonical = await resolveExistingAncestor(current);
-    await assertSafeCanonicalPath(canonical, options);
+    await assertSafePersistentResolvedPath(current, options);
   }
 }
 
@@ -629,7 +638,7 @@ function assertPlatform(paths: YuviHostPaths): void {
   }
 }
 
-function assertPathSet(paths: YuviHostPaths): void {
+async function assertPathSet(paths: YuviHostPaths, options: PathSafetyOptions): Promise<void> {
   for (const target of [
     paths.configHome,
     paths.stateHome,
@@ -646,7 +655,7 @@ function assertPathSet(paths: YuviHostPaths): void {
     paths.fishDropIn,
     paths.posixShellFile
   ]) {
-    assertPersistentPath(target, { ephemeralRoots: paths.ephemeralRoots });
+    await assertSafePersistentResolvedPath(target, options);
   }
 }
 
@@ -700,14 +709,14 @@ export async function installToolchainIntegration(
 ): Promise<ToolchainIntegrationResult> {
   const paths = resolveYuviHostPaths(options);
   assertPlatform(paths);
-  assertPathSet(paths);
   const shells = options.shells ?? ["fish", "posix"];
-  const specs = integrationSpecs(paths, shells);
   const safetyOptions: PathSafetyOptions = {
     ...(options.env !== undefined ? { env: options.env } : {}),
     ...(options.platform !== undefined ? { platform: options.platform } : {}),
     ephemeralRoots: paths.ephemeralRoots
   };
+  await assertPathSet(paths, safetyOptions);
+  const specs = integrationSpecs(paths, shells);
   await preflightSpecs(specs, safetyOptions);
 
   const results: ManagedFileResult[] = [];
@@ -734,14 +743,14 @@ export async function removeToolchainIntegration(
 ): Promise<ToolchainIntegrationResult> {
   const paths = resolveYuviHostPaths(options);
   assertPlatform(paths);
-  assertPathSet(paths);
   const shells = options.shells ?? ["fish", "posix"];
-  const specs = integrationSpecs(paths, shells);
   const safetyOptions: PathSafetyOptions = {
     ...(options.env !== undefined ? { env: options.env } : {}),
     ...(options.platform !== undefined ? { platform: options.platform } : {}),
     ephemeralRoots: paths.ephemeralRoots
   };
+  await assertPathSet(paths, safetyOptions);
+  const specs = integrationSpecs(paths, shells);
   await preflightSpecs(specs, safetyOptions);
 
   const results: ManagedFileResult[] = [];
