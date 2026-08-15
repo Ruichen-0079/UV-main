@@ -90,13 +90,19 @@ vi.mock("./speech-queue.js", () => {
       this.callbacks.onPlaybackEvent?.({
         type: "playbackStopped",
         audio: {},
-        sequence: 0
+        sequence: 0,
+        segment: { requestId: "turn-a", sequence: 0 }
       });
       this.callbacks.onState?.("stopped");
     }
 
-    emitPlayback(type: "playbackStarted" | "playbackEnded"): void {
-      this.callbacks.onPlaybackEvent?.({ type, audio: {}, sequence: 0 });
+    emitPlayback(type: "playbackStarted" | "playbackEnded", sequence = 0): void {
+      this.callbacks.onPlaybackEvent?.({
+        type,
+        audio: {},
+        sequence: 0,
+        segment: { requestId: "turn-a", sequence }
+      });
     }
   }
 
@@ -293,9 +299,13 @@ async function emitBus(bus: any, message: any): Promise<void> {
   });
 }
 
-async function emitPlayback(queue: any, type: "playbackStarted" | "playbackEnded"): Promise<void> {
+async function emitPlayback(
+  queue: any,
+  type: "playbackStarted" | "playbackEnded",
+  sequence = 0
+): Promise<void> {
   await act(async () => {
-    queue.emitPlayback(type);
+    queue.emitPlayback(type, sequence);
     await Promise.resolve();
   });
 }
@@ -357,6 +367,29 @@ describe("CompanionPage generation interruption admission", () => {
 
       expect(queue.cancelCalls).toBe(1);
       expect(readText(mounted.container)).toContain("interrupted");
+    } finally {
+      await act(async () => mounted.root.unmount());
+      mounted.restore();
+    }
+  });
+
+  it("ignores a stale same-turn segment terminal callback", async () => {
+    const mounted = await mountCompanionPage();
+    try {
+      const bus = mockState.buses.at(-1);
+      await emitBus(bus, { kind: "start-generation", requestId: "turn-a", sessionId: "session" });
+      const queue = mockState.queues.at(-1);
+      await emitBus(bus, { kind: "generation-state", requestId: "turn-a", state: "idle" });
+      await emitPlayback(queue, "playbackStarted", 0);
+      await emitPlayback(queue, "playbackEnded", 0);
+      await emitPlayback(queue, "playbackStarted", 1);
+      await emitPlayback(queue, "playbackEnded", 0);
+
+      expect(queue.cancelCalls).toBe(0);
+      expect(readText(mounted.container)).toContain("speaking");
+
+      await emitPlayback(queue, "playbackEnded", 1);
+      expect(readText(mounted.container)).toContain("idle");
     } finally {
       await act(async () => mounted.root.unmount());
       mounted.restore();

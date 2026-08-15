@@ -18,14 +18,21 @@ import { composeCompanionPresenceAnimation, createGazeScheduler } from "./compan
 import { createCompanionSpeechBuffer } from "./companion-speech-buffer.js";
 import { createCompanionReadyAnnouncer } from "./companion-voice-sync.js";
 import { createSpeechSegmentDeduper } from "./speech-segment-dedup.js";
+import {
+  correlateSpeechPlayback,
+  createSpeechPlaybackCorrelation,
+  type SpeechPlaybackCorrelationState
+} from "./speech-playback-correlation.js";
 import { LumiCanvas } from "./lumi-canvas.js";
 import type { LumiFraming } from "./lumi-cubism-model.js";
 import type { LumiControllerHandle, PresenceState } from "./lumi-live2d.js";
 import {
   createBrowserSpeechPlayer,
   SpeechPlaybackQueue,
-  type SpeechQueueState
+  type SpeechQueueState,
+  type SpeechPlaybackEvent
 } from "./speech-queue.js";
+import type { SpeechSegmentIdentity } from "./speech-identity.js";
 import {
   isTauriRuntime,
   preloadTauriWindowApi,
@@ -56,6 +63,9 @@ export function CompanionPage(): JSX.Element {
   const presenceProjectionRef = useRef<CompanionPresenceProjection | null>(null);
   const activeEpochRef = useRef<string | null>(null);
   const speechStoppedEpochRef = useRef<string | null>(null);
+  const playbackCorrelationRef = useRef<SpeechPlaybackCorrelationState>(
+    createSpeechPlaybackCorrelation()
+  );
   const epochGuardRef = useRef(createCompanionPresenceEpochGuard());
   const presenceRef = useRef<CompanionPresentationState>("idle");
   const blinkSchedulerRef = useRef<ReturnType<typeof createCompanionBlinkScheduler> | null>(null);
@@ -119,8 +129,25 @@ export function CompanionPage(): JSX.Element {
       });
       session.queue.enqueue(
         { text: segment.text, language: segment.language },
-        String(segment.sequence)
+        { requestId: session.requestId, sequence: segment.sequence }
       );
+    }
+
+    function acceptPlaybackEvent(event: SpeechPlaybackEvent): {
+      accepted: boolean;
+      segment: SpeechSegmentIdentity;
+    } {
+      const phase =
+        event.type === "audioElementAttached"
+          ? "attached"
+          : event.type === "playbackStarted"
+            ? "started"
+            : event.type === "audioElementDetached"
+              ? "detached"
+              : "terminal";
+      const result = correlateSpeechPlayback(playbackCorrelationRef.current, phase, event.segment);
+      playbackCorrelationRef.current = result.state;
+      return { accepted: result.accepted, segment: event.segment };
     }
 
     function startGeneration(requestId: string, sessionId: string): void {
@@ -133,6 +160,7 @@ export function CompanionPage(): JSX.Element {
       const previous = sessionRef.current;
       previous?.queue.cancel();
       sessionRef.current = null;
+      playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
       speechBuffer.setActiveTurn(requestId);
       updatePresence((current) =>
         reduceCompanionPresence(current, { type: "turn-start", epoch: requestId })
@@ -166,21 +194,15 @@ export function CompanionPage(): JSX.Element {
             );
             bus.post({ kind: "speech-status", requestId: session.requestId, state });
           },
-          onItemState: (id, state) => {
-            const requestIdForItem = sessionRef.current?.requestId ?? "unknown";
-            const sequence = id === undefined ? null : Number(id);
-            recordSpeechLedger(
-              requestIdForItem,
-              Number.isFinite(sequence) ? sequence : null,
-              state
-            );
-            if (import.meta.env.DEV && id !== undefined) {
+          onItemState: (segment, state) => {
+            recordSpeechLedger(segment.requestId, segment.sequence, state);
+            if (import.meta.env.DEV) {
               const states = ((
                 window as unknown as {
                   __yuviSpeechStates?: Record<string, string>;
                 }
               ).__yuviSpeechStates ??= {});
-              states[`${requestIdForItem}:${id}`] = state;
+              states[`${segment.requestId}:${segment.sequence}`] = state;
             }
           },
           onError: () => {
@@ -197,9 +219,15 @@ export function CompanionPage(): JSX.Element {
             bus.post({ kind: "speech-status", requestId: session.requestId, state: "error" });
           },
           onPlaybackEvent: (event) => {
-            if (sessionRef.current?.queue !== queue) return;
+            const session = sessionRef.current;
+            if (!session || session.queue !== queue || event.segment.requestId !== requestId)
+              return;
+            const accepted = acceptPlaybackEvent(event);
+            if (!accepted.accepted) return;
             if (event.type === "playbackStarted") {
-              recordSpeechLedger(requestId, event.sequence, "audio.play");
+              recordSpeechLedger(requestId, event.segment.sequence, "audio.play", {
+                queueSequence: event.sequence
+              });
             }
             const playbackState =
               event.type === "playbackStarted"
@@ -222,6 +250,7 @@ export function CompanionPage(): JSX.Element {
               bus.post({
                 kind: "playback-status",
                 requestId,
+                segmentSequence: event.segment.sequence,
                 state: playbackState
               });
             }
@@ -306,6 +335,7 @@ export function CompanionPage(): JSX.Element {
             }
             if (session) session.queue.cancel();
             sessionRef.current = null;
+            playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
             speechBuffer.clear();
           }
           return;
@@ -337,6 +367,7 @@ export function CompanionPage(): JSX.Element {
             session.queue.cancel();
           }
           sessionRef.current = null;
+          playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
           speechBuffer.clear();
           recordSpeechLedger(message.requestId, null, "stop-speech");
           return;
@@ -360,6 +391,7 @@ export function CompanionPage(): JSX.Element {
             speechStoppedEpochRef.current = message.requestId;
             sessionRef.current?.queue.cancel();
             sessionRef.current = null;
+            playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
             speechBuffer.clear();
           }
           return;
@@ -377,6 +409,7 @@ export function CompanionPage(): JSX.Element {
       announcerRef.current = null;
       sessionRef.current?.queue.cancel();
       sessionRef.current = null;
+      playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
       activeEpochRef.current = null;
       speechStoppedEpochRef.current = null;
       epochGuardRef.current.dispose();

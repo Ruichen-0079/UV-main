@@ -14,6 +14,13 @@ import {
   type CompanionBusMessage,
   type CompanionPlaybackState
 } from "./companion-bus.js";
+import {
+  correlateSpeechPlayback,
+  createSpeechPlaybackCorrelation,
+  retireActiveSpeechPlayback,
+  type SpeechPlaybackCorrelationState
+} from "./speech-playback-correlation.js";
+import type { SpeechSegmentIdentity } from "./speech-identity.js";
 import { EmptyState, Field, Notice, Panel, Pill, Toggle } from "./surface-ui.js";
 import { readVoiceOutputPreference, writeVoiceOutputPreference } from "./voice-output.js";
 import { controlCompanionWindow, isTauriRuntime } from "./tauri-window.js";
@@ -64,6 +71,9 @@ export function MainPage(): JSX.Element {
     ended: boolean;
   } | null>(null);
   const speechEpochRef = useRef<string | null>(null);
+  const playbackCorrelationRef = useRef<SpeechPlaybackCorrelationState>(
+    createSpeechPlaybackCorrelation()
+  );
   const activeRequestRef = useRef<{
     id: string;
     assistantId: string;
@@ -94,6 +104,17 @@ export function MainPage(): JSX.Element {
         }
       } else if (message.kind === "playback-status") {
         if (speechEpochRef.current !== message.requestId) return;
+        const segment: SpeechSegmentIdentity = {
+          requestId: message.requestId,
+          sequence: message.segmentSequence
+        };
+        const result = correlateMainPlaybackStatus(
+          playbackCorrelationRef.current,
+          message.state === "started" ? "started" : "terminal",
+          segment
+        );
+        playbackCorrelationRef.current = result.state;
+        if (!result.accepted) return;
         applyPlaybackStatus(message.state, setVoicePlaybackStatus, setActualPlaybackActive);
       }
     });
@@ -109,6 +130,7 @@ export function MainPage(): JSX.Element {
       activeRequestRef.current = null;
       speechSessionRef.current = null;
       speechEpochRef.current = null;
+      playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
     };
   }, []);
 
@@ -120,6 +142,7 @@ export function MainPage(): JSX.Element {
       setVoicePlaybackStatus("idle");
       setActualPlaybackActive(false);
       speechEpochRef.current = null;
+      playbackCorrelationRef.current = retireActiveSpeechPlayback(playbackCorrelationRef.current);
     }
     busRef.current?.post({ kind: "voice-enabled", enabled });
   }
@@ -143,6 +166,7 @@ export function MainPage(): JSX.Element {
       completedObserved: false
     };
     speechEpochRef.current = voiceOutputRef.current ? requestId : null;
+    playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
     setActualPlaybackActive(false);
     setRequestStatus("sending");
     const bus = busRef.current;
@@ -337,6 +361,7 @@ export function MainPage(): JSX.Element {
     busRef.current?.post({ kind: "stop-speech", requestId });
     setVoicePlaybackStatus("stopped");
     setActualPlaybackActive(false);
+    playbackCorrelationRef.current = retireActiveSpeechPlayback(playbackCorrelationRef.current);
   }
 
   async function controlCompanion(
@@ -552,6 +577,14 @@ export function resolveSpeechCommandEpoch(
   generationEpoch: string | null
 ): string | null {
   return speechEpoch ?? generationEpoch;
+}
+
+export function correlateMainPlaybackStatus(
+  current: SpeechPlaybackCorrelationState,
+  phase: "started" | "terminal",
+  segment: SpeechSegmentIdentity
+) {
+  return correlateSpeechPlayback(current, phase, segment);
 }
 
 export function voicePlaybackStatusLabel(

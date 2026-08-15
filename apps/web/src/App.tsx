@@ -46,6 +46,11 @@ import {
   type SpeechQueueState,
   type SpeechPlaybackEvent
 } from "./speech-queue.js";
+import {
+  correlateSpeechPlayback,
+  createSpeechPlaybackCorrelation,
+  type SpeechPlaybackCorrelationState
+} from "./speech-playback-correlation.js";
 import { LumiCanvas } from "./lumi-canvas.js";
 import type { LumiControllerHandle, PresenceState } from "./lumi-live2d.js";
 import {
@@ -326,6 +331,7 @@ function ChatPage(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [lastTraceId, setLastTraceId] = useState<string | null>(null);
   const [voicePlaybackStatus, setVoicePlaybackStatus] = useState<VoicePlaybackStatus>("idle");
+  const [actualPlaybackActive, setActualPlaybackActive] = useState(false);
   const mountedRef = useRef(true);
   const lumiRef = useRef<LumiControllerHandle>(null);
   const timingRef = useRef<ChatTimingMetrics | null>(null);
@@ -333,7 +339,11 @@ function ChatPage(): JSX.Element {
     generation: string;
     segmenter: SpeechSegmenter;
     queue: SpeechPlaybackQueue;
+    nextSegmentSequence: number;
   } | null>(null);
+  const playbackCorrelationRef = useRef<SpeechPlaybackCorrelationState>(
+    createSpeechPlaybackCorrelation()
+  );
   const activeRequestRef = useRef<{
     id: string;
     assistantId: string;
@@ -349,6 +359,7 @@ function ChatPage(): JSX.Element {
       activeRequestRef.current = null;
       speechSessionRef.current?.queue.cancel();
       speechSessionRef.current = null;
+      playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
     };
   }, []);
 
@@ -366,6 +377,17 @@ function ChatPage(): JSX.Element {
     [input, promptPreview, readMemory, voiceOutput, writeMemory]
   );
 
+  function enqueueDashboardSpeech(
+    speech: NonNullable<typeof speechSessionRef.current>,
+    text: string
+  ): void {
+    const segment = {
+      requestId: speech.generation,
+      sequence: speech.nextSegmentSequence++
+    };
+    speech.queue.enqueue({ text, language: detectSpeechLanguage(text) }, segment);
+  }
+
   async function send(): Promise<void> {
     // Capture the draft once, clear the controlled textarea immediately, then
     // use only the captured payload for the rest of the turn.
@@ -376,6 +398,8 @@ function ChatPage(): JSX.Element {
 
     speechSessionRef.current?.queue.cancel();
     speechSessionRef.current = null;
+    playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
+    setActualPlaybackActive(false);
     const content = submittedText;
     setInput("");
     setError(null);
@@ -422,8 +446,24 @@ function ChatPage(): JSX.Element {
           },
           onPlaybackEvent: (event: SpeechPlaybackEvent) => {
             if (mountedRef.current && speechSessionRef.current?.generation === generation) {
+              const phase =
+                event.type === "audioElementAttached"
+                  ? "attached"
+                  : event.type === "playbackStarted"
+                    ? "started"
+                    : event.type === "audioElementDetached"
+                      ? "detached"
+                      : "terminal";
+              const result = correlateSpeechPlayback(
+                playbackCorrelationRef.current,
+                phase,
+                event.segment
+              );
+              playbackCorrelationRef.current = result.state;
+              if (!result.accepted) return;
               lumiRef.current?.handlePlaybackEvent(event);
               if (event.type === "playbackStarted") {
+                setActualPlaybackActive(true);
                 timingRef.current ??= { userSendAt: performance.now() };
                 const now = performance.now();
                 recordChatTiming(timingRef, {
@@ -431,21 +471,30 @@ function ChatPage(): JSX.Element {
                   presenceSpeakingAt: timingRef.current.presenceSpeakingAt ?? now
                 });
               } else if (event.type === "playbackStopped") {
+                setActualPlaybackActive(false);
                 recordChatTiming(timingRef, {
                   audioPausedAt: performance.now(),
                   mouthZeroAt: performance.now()
                 });
               } else if (event.type === "playbackEnded") {
+                setActualPlaybackActive(false);
                 recordChatTiming(timingRef, {
                   finalAudioEndedAt: performance.now(),
                   mouthZeroAt: performance.now()
                 });
+              } else if (event.type === "playbackError") {
+                setActualPlaybackActive(false);
               }
             }
           }
         }
       );
-      speechSessionRef.current = { generation, segmenter, queue };
+      speechSessionRef.current = {
+        generation,
+        segmenter,
+        queue,
+        nextSegmentSequence: 0
+      };
     }
     setPresenceRequest("thinking");
     setRequestStatus("sending");
@@ -508,7 +557,7 @@ function ChatPage(): JSX.Element {
                   if (timingRef.current && timingRef.current.firstSegmentSubmittedAt === undefined) {
                     recordChatTiming(timingRef, { firstSegmentSubmittedAt: performance.now() });
                   }
-                  speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+                  enqueueDashboardSpeech(speech, text);
                 }
               }
               return;
@@ -519,7 +568,7 @@ function ChatPage(): JSX.Element {
               const speech = speechSessionRef.current;
               if (speech?.generation === requestId) {
                 for (const text of speech.segmenter.flush("failed")) {
-                  speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+                  enqueueDashboardSpeech(speech, text);
                 }
                 speech.queue.finish();
               }
@@ -540,7 +589,7 @@ function ChatPage(): JSX.Element {
             const speech = speechSessionRef.current;
             if (speech?.generation === requestId) {
               for (const text of speech.segmenter.flush("completed")) {
-                speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+                enqueueDashboardSpeech(speech, text);
               }
               speech.queue.finish();
             }
@@ -565,7 +614,7 @@ function ChatPage(): JSX.Element {
       const speech = speechSessionRef.current;
       if (speech?.generation === requestId) {
         for (const text of speech.segmenter.flush("completed")) {
-          speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+          enqueueDashboardSpeech(speech, text);
         }
         speech.queue.finish();
       }
@@ -592,7 +641,7 @@ function ChatPage(): JSX.Element {
       const speech = speechSessionRef.current;
       if (speech?.generation === requestId) {
         for (const text of speech.segmenter.flush("failed")) {
-          speech.queue.enqueue({ text, language: detectSpeechLanguage(text) });
+          enqueueDashboardSpeech(speech, text);
         }
         speech.queue.finish();
       }
@@ -746,10 +795,7 @@ function ChatPage(): JSX.Element {
           </div>
           {voiceOutput && voicePlaybackStatus !== "idle" && (
             <div className="mt-2 text-xs text-ink-500" aria-live="polite">
-              {voicePlaybackStatus === "synthesizing" && "Preparing speech…"}
-              {voicePlaybackStatus === "playing" && "Speaking…"}
-              {voicePlaybackStatus === "stopped" && "Speech stopped; generated text is preserved."}
-              {voicePlaybackStatus === "error" && "Speech unavailable; text response is preserved."}
+              {dashboardVoicePlaybackStatusLabel(voicePlaybackStatus, actualPlaybackActive)}
             </div>
           )}
         </Panel>
@@ -810,6 +856,25 @@ function ChatPage(): JSX.Element {
       </div>
     </PageShell>
   );
+}
+
+export function dashboardVoicePlaybackStatusLabel(
+  status: SpeechQueueState,
+  actualPlaybackActive: boolean
+): string {
+  if (actualPlaybackActive) return "Speaking…";
+  switch (status) {
+    case "synthesizing":
+      return "Preparing speech…";
+    case "playing":
+      return "Speech queued…";
+    case "stopped":
+      return "Speech stopped; generated text is preserved.";
+    case "error":
+      return "Speech unavailable; text response is preserved.";
+    default:
+      return "";
+  }
 }
 
 function createChatMessageId(prefix: string): string {

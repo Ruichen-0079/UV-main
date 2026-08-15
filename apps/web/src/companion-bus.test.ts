@@ -44,13 +44,30 @@ describe("CompanionBus", () => {
     const main = new CompanionBus("main");
     const companion = new CompanionBus("companion");
     try {
-      const received: string[] = [];
+      const received: Array<[string, number]> = [];
       main.subscribe((message) => {
-        if (message.kind === "playback-status") received.push(message.state);
+        if (message.kind === "playback-status") {
+          received.push([message.state, message.segmentSequence]);
+        }
       });
-      companion.post({ kind: "playback-status", requestId: "r1", state: "started" });
-      companion.post({ kind: "playback-status", requestId: "r1", state: "ended" });
-      await vi.waitFor(() => expect(received).toEqual(["started", "ended"]));
+      companion.post({
+        kind: "playback-status",
+        requestId: "r1",
+        segmentSequence: 0,
+        state: "started"
+      });
+      companion.post({
+        kind: "playback-status",
+        requestId: "r1",
+        segmentSequence: 0,
+        state: "ended"
+      });
+      await vi.waitFor(() =>
+        expect(received).toEqual([
+          ["started", 0],
+          ["ended", 0]
+        ])
+      );
     } finally {
       main.close();
       companion.close();
@@ -145,6 +162,9 @@ describe("CompanionBus", () => {
       })
     ).toBe(true);
     expect(
+      isCompanionBusMessage({ kind: "playback-status", requestId: "r1", state: "started" })
+    ).toBe(false);
+    expect(
       isCompanionBusMessage({
         kind: "speak",
         requestId: "r1",
@@ -157,10 +177,20 @@ describe("CompanionBus", () => {
       isCompanionBusMessage({ kind: "generation-state", requestId: "r1", state: "unknown" })
     ).toBe(false);
     expect(
-      isCompanionBusMessage({ kind: "playback-status", requestId: "r1", state: "started" })
+      isCompanionBusMessage({
+        kind: "playback-status",
+        requestId: "r1",
+        segmentSequence: 0,
+        state: "started"
+      })
     ).toBe(true);
     expect(
-      isCompanionBusMessage({ kind: "playback-status", requestId: "r1", state: "playing" })
+      isCompanionBusMessage({
+        kind: "playback-status",
+        requestId: "r1",
+        segmentSequence: 0,
+        state: "playing"
+      })
     ).toBe(false);
     expect(isCompanionBusMessage({ kind: "user-gesture", extra: true })).toBe(false);
   });
