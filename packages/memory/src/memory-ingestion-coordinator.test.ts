@@ -122,6 +122,8 @@ describe("MemoryIngestionCoordinator", () => {
     const provider = createProvider();
     const coordinator = coordinatorOf(repository, provider);
     await coordinator.notifyAdmitted(admitted);
+    expect(provider.writes).toHaveLength(0);
+    await coordinator.drain(1_000);
     const event = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
     expect(event.status).toBe("complete");
     expect(provider.writes).toHaveLength(1);
@@ -146,10 +148,11 @@ describe("MemoryIngestionCoordinator", () => {
       assistantMessageId: "assistant:wake"
     });
     const pending = await Promise.race([
-      coordinator.notifyAdmitted(admitted).then(() => "done"),
-      new Promise((resolve) => setTimeout(() => resolve("timeout"), 200))
+      coordinator.notifyAdmitted(admitted).then(() => "notified"),
+      new Promise((resolve) => setTimeout(() => resolve("timeout"), 50))
     ]);
-    expect(pending).toBe("done");
+    expect(pending).toBe("notified");
+    await coordinator.drain(1_000);
     expect(provider.writes).toHaveLength(1);
     await coordinator.shutdown();
   });
@@ -181,6 +184,7 @@ describe("MemoryIngestionCoordinator", () => {
       turn: (await repository.getTurn(admitted.turn.finalizedTurnId))!,
       events: await repository.listEvents(admitted.turn.finalizedTurnId)
     });
+    await coordinator.drain(1_000);
     expect(provider.writes).toHaveLength(0);
     expect((await repository.listEvents(admitted.turn.finalizedTurnId))[0]?.status).toBe(
       "retryable_failed"
@@ -220,6 +224,7 @@ describe("MemoryIngestionCoordinator", () => {
       turn: (await repository.getTurn(admitted.turn.finalizedTurnId))!,
       events: await repository.listEvents(admitted.turn.finalizedTurnId)
     });
+    await other.drain(1_000);
     const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
     expect(persisted).toMatchObject({
       status: "processing",
@@ -552,15 +557,14 @@ describe("MemoryIngestionCoordinator", () => {
         }
       }
     });
-    const running = coordinator.notifyAdmitted(admitted);
+    coordinator.start();
+    await coordinator.notifyAdmitted(admitted);
     await vi.waitFor(async () => {
       const event = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
       expect(event.status).toBe("processing");
     });
-    const shuttingDown = coordinator.shutdown({ graceMs: 20 });
-    await shuttingDown;
+    await coordinator.shutdown({ graceMs: 20 });
     releaseClaim();
-    await running;
     const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
     expect(["processing", "complete", "pending", "reconcile_required"]).toContain(persisted.status);
     expect(persisted.status).not.toBe("terminal_failed");
@@ -683,10 +687,12 @@ describe("MemoryIngestionCoordinator", () => {
       }))
     });
     const now = Date.parse("2026-08-12T00:00:00.000Z");
-    await coordinatorOf(repository, provider, {
+    const coordinator = coordinatorOf(repository, provider, {
       clock: () => new Date(now),
       retryPolicy: { initialDelayMs: 12_000, maxDelayMs: 12_000, multiplier: 1 }
-    }).notifyAdmitted(admitted);
+    });
+    await coordinator.notifyAdmitted(admitted);
+    await coordinator.drain(1_000);
     const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
     expect(persisted.status).toBe("retryable_failed");
     expect(persisted.nextAttemptAt).toBe(new Date(now + 12_000).toISOString());
@@ -747,9 +753,11 @@ describe("MemoryIngestionCoordinator", () => {
         `finalized-turn:fault:${testCase.name}`
       );
       const provider = createProvider();
-      await coordinatorOf(repository, provider, {
+      const coordinator = coordinatorOf(repository, provider, {
         ...(testCase.hook ? { hooks: testCase.hook } : {})
-      }).notifyAdmitted(admitted);
+      });
+      await coordinator.notifyAdmitted(admitted);
+      await coordinator.drain(1_000);
       const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
       expect(persisted.status, testCase.name).toBe(testCase.expected);
       expect(provider.writes, testCase.name).toHaveLength(testCase.writes);
@@ -790,7 +798,9 @@ describe("MemoryIngestionCoordinator", () => {
       }),
       { ownerId: "coord-2" }
     );
-    const firstRun = first.notifyAdmitted(admitted);
+    first.start();
+    second.start();
+    await first.notifyAdmitted(admitted);
     await vi.waitFor(async () => {
       expect((await repository.listEvents(admitted.turn.finalizedTurnId))[0]?.leaseOwner).toBe(
         "coord-1"
@@ -800,13 +810,192 @@ describe("MemoryIngestionCoordinator", () => {
       turn: (await repository.getTurn(admitted.turn.finalizedTurnId))!,
       events: await repository.listEvents(admitted.turn.finalizedTurnId)
     });
+    await second.drain(200);
     expect(secondWrites).toHaveLength(0);
     release();
-    await firstRun;
+    await first.drain(1_000);
     expect(firstWrites).toHaveLength(1);
     expect((await repository.listEvents(admitted.turn.finalizedTurnId))[0]?.status).toBe(
       "complete"
     );
+    await first.shutdown();
+    await second.shutdown();
+  });
+
+  it("does not execute a separate batch from notifyAdmitted", async () => {
+    const { repository, admitted } = await admitTurn(
+      new InMemoryFinalizedIngestionRepository(),
+      "finalized-turn:wake-only"
+    );
+    const provider = createProvider();
+    const coordinator = coordinatorOf(repository, provider);
+    await coordinator.notifyAdmitted(admitted);
+    expect(provider.writes).toHaveLength(0);
+    expect((await repository.listEvents(admitted.turn.finalizedTurnId))[0]?.status).toBe("pending");
+    await coordinator.drain(1_000);
+    expect(provider.writes).toHaveLength(1);
+  });
+
+  it("caps active work at configured concurrency under a wake storm", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    let peak = 0;
+    const provider = createProvider({
+      writeEventIdempotent: vi.fn(async (input) => {
+        provider.writes.push(input);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { status: "written" as const, eventId: `memory:${provider.writes.length}` };
+      })
+    });
+    const coordinator = coordinatorOf(repository, provider, { concurrency: 2, pollIntervalMs: 5 });
+    const original = coordinator.getActiveWorkerCount.bind(coordinator);
+    vi.spyOn(coordinator, "getActiveWorkerCount").mockImplementation(() => {
+      const current = original();
+      peak = Math.max(peak, current);
+      return current;
+    });
+    coordinator.start();
+    const admissions = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        new FinalizedIngestionService(repository).admit({
+          ...base,
+          finalizedTurnId: `finalized-turn:storm:${index}`,
+          assistantMessageId: `assistant:storm:${index}`
+        })
+      )
+    );
+    const monitor = setInterval(() => {
+      peak = Math.max(peak, coordinator.getActiveWorkerCount());
+    }, 1);
+    await Promise.all(admissions.map((admission) => coordinator.notifyAdmitted(admission)));
+    await coordinator.drain(3_000);
+    clearInterval(monitor);
+    peak = Math.max(peak, coordinator.getActiveWorkerCount());
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(coordinator.getConfiguredConcurrency()).toBe(2);
+    expect(provider.writes).toHaveLength(12);
+    await coordinator.shutdown();
+  });
+
+  it("recovers durable work when the wake is never consumed", async () => {
+    const { repository, admitted } = await admitTurn(
+      new InMemoryFinalizedIngestionRepository(),
+      "finalized-turn:lost-wake"
+    );
+    const provider = createProvider();
+    const crashed = coordinatorOf(repository, provider, { ownerId: "crashed" });
+    await crashed.notifyAdmitted(admitted);
+    await crashed.shutdown();
+    expect(provider.writes).toHaveLength(0);
+    const restarted = coordinatorOf(repository, createProvider(), { ownerId: "restart" });
+    restarted.start();
+    await restarted.drain(1_000);
+    expect((await repository.listEvents(admitted.turn.finalizedTurnId))[0]?.status).toBe(
+      "complete"
+    );
+    await restarted.shutdown();
+  });
+
+  it("does not dispatch when the delivery attempt budget is exhausted", async () => {
+    const { repository, admitted } = await admitTurn(
+      new InMemoryFinalizedIngestionRepository(),
+      "finalized-turn:budget-exhausted"
+    );
+    await forceOutcome(repository, admitted.events[0]!, {
+      status: "retryable_failed",
+      nextAttemptAt: new Date(Date.now() - 1_000).toISOString()
+    });
+    expect((await repository.listEvents(admitted.turn.finalizedTurnId))[0]?.attemptCount).toBe(1);
+    const provider = createProvider();
+    await coordinatorOf(repository, provider, { maxDeliveryAttempts: 1 }).drain(1_000);
+    const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
+    expect(persisted).toMatchObject({
+      status: "terminal_failed",
+      errorCode: "MEMORY_WRITE_RETRY_EXHAUSTED",
+      attemptCount: 1
+    });
+    expect(provider.writes).toHaveLength(0);
+  });
+
+  it("does not consume the delivery budget on a pre-dispatch claim fault", async () => {
+    const { repository, admitted } = await admitTurn(
+      new InMemoryFinalizedIngestionRepository(),
+      "finalized-turn:claim-not-attempt"
+    );
+    const provider = createProvider();
+    await coordinatorOf(repository, provider, {
+      hooks: {
+        afterClaim: async () => {
+          throw new Error("preflight");
+        }
+      }
+    }).drain(1_000);
+    const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
+    expect(persisted.status).toBe("processing");
+    expect(persisted.attemptCount).toBe(0);
+    expect(persisted.dispatchStartedAt).toBeNull();
+    expect(provider.writes).toHaveLength(0);
+  });
+
+  it("allows a not_applied child to dispatch once when budget remains", async () => {
+    const { repository, admitted } = await admitTurn(
+      new InMemoryFinalizedIngestionRepository(),
+      "finalized-turn:not-applied-budget"
+    );
+    await forceOutcome(repository, admitted.events[0]!, {
+      status: "ambiguous",
+      errorCode: "MEMORY_WRITE_AMBIGUOUS"
+    });
+    const provider = createProvider({
+      reconcileEvent: vi.fn(async () => ({ status: "not_applied" as const }))
+    });
+    await coordinatorOf(repository, provider, { maxDeliveryAttempts: 2 }).drain(1_000);
+    const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
+    expect(persisted.status).toBe("complete");
+    expect(provider.writes).toHaveLength(1);
+    expect(persisted.attemptCount).toBe(2);
+  });
+
+  it("terminalizes not_applied without dispatch when the delivery budget is exhausted", async () => {
+    const { repository, admitted } = await admitTurn(
+      new InMemoryFinalizedIngestionRepository(),
+      "finalized-turn:not-applied-exhausted"
+    );
+    await forceOutcome(repository, admitted.events[0]!, {
+      status: "ambiguous",
+      errorCode: "MEMORY_WRITE_AMBIGUOUS"
+    });
+    const provider = createProvider({
+      reconcileEvent: vi.fn(async () => ({ status: "not_applied" as const }))
+    });
+    await coordinatorOf(repository, provider, { maxDeliveryAttempts: 1 }).drain(1_000);
+    const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
+    expect(persisted).toMatchObject({
+      status: "terminal_failed",
+      errorCode: "MEMORY_WRITE_RETRY_EXHAUSTED"
+    });
+    expect(provider.writes).toHaveLength(0);
+    expect(persisted.attemptCount).toBe(1);
+  });
+
+  it("does not let the retry budget terminalize in_flight or unknown reconciliation", async () => {
+    for (const status of ["in_flight", "unknown"] as const) {
+      const { repository, admitted } = await admitTurn(
+        new InMemoryFinalizedIngestionRepository(),
+        `finalized-turn:budget-${status}`
+      );
+      await forceOutcome(repository, admitted.events[0]!, {
+        status: "ambiguous",
+        errorCode: "MEMORY_WRITE_AMBIGUOUS"
+      });
+      const provider = createProvider({
+        reconcileEvent: vi.fn(async () => ({ status }))
+      });
+      await coordinatorOf(repository, provider, { maxDeliveryAttempts: 1 }).drain(1_000);
+      expect((await repository.listEvents(admitted.turn.finalizedTurnId))[0]?.status).toBe(
+        "reconcile_required"
+      );
+      expect(provider.writes).toHaveLength(0);
+    }
   });
 });
 
@@ -1156,6 +1345,77 @@ describe("MemoryIngestionCoordinator PostgreSQL acceptance", () => {
         expect(writes).toHaveLength(0);
         expect(turn?.status).toBe("terminal_failed");
       });
+    }
+  );
+
+  it.skipIf(!process.env["DATABASE_URL"])(
+    "persists delivery attempt count and exhausts the budget after restart",
+    async () => {
+      const pool = new Pool({ connectionString: process.env["DATABASE_URL"] });
+      const prefix = "test:coordinator:budget-restart:";
+      await pool.query("delete from finalized_ingestion_turns where finalized_turn_id like $1", [
+        `${prefix}%`
+      ]);
+      try {
+        const repository = new PostgresFinalizedIngestionRepository(pool);
+        const admitted = await new FinalizedIngestionService(repository).admit({
+          ...base,
+          finalizedTurnId: `${prefix}turn`,
+          assistantMessageId: `${prefix}assistant`
+        });
+        const event = admitted.events[0]!;
+        const claimed = await repository.claimEvent({
+          finalizedTurnId: event.finalizedTurnId,
+          eventId: event.eventId,
+          leaseOwner: "seed",
+          leaseSeconds: 30,
+          expectedVersion: event.version
+        });
+        const dispatched = await repository.markEventDispatchStarted({
+          finalizedTurnId: event.finalizedTurnId,
+          eventId: event.eventId,
+          leaseOwner: "seed",
+          expectedVersion: claimed!.version
+        });
+        await repository.recordEventOutcome({
+          finalizedTurnId: event.finalizedTurnId,
+          eventId: event.eventId,
+          leaseOwner: "seed",
+          expectedVersion: dispatched!.version,
+          outcome: {
+            status: "retryable_failed",
+            nextAttemptAt: new Date(Date.now() - 1_000).toISOString()
+          }
+        });
+        const writes: string[] = [];
+        const coordinator = new MemoryIngestionCoordinator({
+          repository: new PostgresFinalizedIngestionRepository(pool),
+          provider: createProvider({
+            writeEventIdempotent: async (input) => {
+              writes.push(String(input.content));
+              return { status: "written", eventId: "memory:budget" };
+            }
+          }),
+          ownerId: "pg-budget",
+          maxDeliveryAttempts: 1,
+          pollIntervalMs: 60_000
+        });
+        coordinator.start();
+        await coordinator.drain(3_000);
+        const persisted = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
+        expect(persisted).toMatchObject({
+          status: "terminal_failed",
+          errorCode: "MEMORY_WRITE_RETRY_EXHAUSTED",
+          attemptCount: 1
+        });
+        expect(writes).toHaveLength(0);
+        await coordinator.shutdown();
+      } finally {
+        await pool.query("delete from finalized_ingestion_turns where finalized_turn_id like $1", [
+          `${prefix}%`
+        ]);
+        await pool.end();
+      }
     }
   );
 });

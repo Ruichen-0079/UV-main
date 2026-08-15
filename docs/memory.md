@@ -97,14 +97,30 @@ The canonical finalized C1 path enforces these keys as backend idempotency
 identities. Ordinary compatibility Mem0 writes outside this keyed path are not
 governed by that contract. Ledger rows and child payloads are persisted before
 delivery starts. `MemoryIngestionCoordinator` owns automatic execution of that
-durable child work. It discovers pending, due retryable, expired-lease, and
+durable child work. `notifyAdmitted()` is a wake signal only; one serialized
+scheduler loop discovers pending, due retryable, expired-lease, and
 `reconcile_required` events, then calls the shared C1 executor or exact
-reconciliation primitive. Request completion does not wait for backend
+reconciliation primitive. Per-process concurrency is capped by
+`MEMORY_INGESTION_CONCURRENCY` across wake, poll, startup, retry, reclaim,
+and reconcile work. Cross-process correctness still depends on PostgreSQL
+claims and backend idempotency. Request completion does not wait for backend
 delivery. A process crash can therefore leave `pending`, `processing`, or
 `retryable_failed` work, while uncertain provider outcomes remain
 `reconcile_required` work. Coordinator startup is asynchronous and must not
 block application readiness. Historical assistant rows with
-`ingestion_requested = NULL` stay outside automatic recovery.
+`ingestion_requested = NULL` stay outside automatic recovery. Automatic
+missing-admission remains restricted to completed assistant rows with
+`ingestion_requested = true`, a finalized identity, and recoverable
+user/persona scope. A future `missingAdmissionAfter` / policy-epoch cutover
+is deferred while factual-v1/schema-1 is unchanged.
+
+Ordinary backend delivery is gated by `MEMORY_INGESTION_MAX_DELIVERY_ATTEMPTS`
+(default 8). The budget counts durable dispatch markers only, not claims or
+reconciliation probes. Exhaustion may terminalize a child only when the
+durable state proves no unresolved external effect, including exact
+`not_applied` after a previous ambiguous dispatch. `reconcile_required`,
+`in_flight`, and `unknown` are never converted to terminal failure by the
+retry budget.
 
 Coordinator work statistics are observability, not availability.
 `GET /health` continues to derive overall `ok` from existing core service

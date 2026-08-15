@@ -5,6 +5,11 @@ import type {
 } from "./finalized-ingestion-ledger.js";
 import type { MemoryProvider } from "./provider.js";
 
+/** Conservative default for actual durable backend dispatches, not claims or reconcile probes. */
+export const DEFAULT_MEMORY_INGESTION_MAX_DELIVERY_ATTEMPTS = 8;
+
+export const MEMORY_WRITE_RETRY_EXHAUSTED = "MEMORY_WRITE_RETRY_EXHAUSTED";
+
 export type FinalizedIngestionDeliveryResult = {
   claimed: boolean;
   dispatched: boolean;
@@ -21,7 +26,12 @@ export async function executeFinalizedIngestionEvent(input: {
   event: FinalizedIngestionEvent;
   leaseOwner: string;
   leaseSeconds: number;
+  maxDeliveryAttempts?: number;
 }): Promise<FinalizedIngestionDeliveryResult> {
+  const maxDeliveryAttempts = Math.max(
+    1,
+    Math.trunc(input.maxDeliveryAttempts ?? DEFAULT_MEMORY_INGESTION_MAX_DELIVERY_ATTEMPTS)
+  );
   const claimed = await input.repository.claimEvent({
     finalizedTurnId: input.event.finalizedTurnId,
     eventId: input.event.eventId,
@@ -31,6 +41,24 @@ export async function executeFinalizedIngestionEvent(input: {
   });
   if (!claimed) {
     return { claimed: false, dispatched: false, event: null, outcome: null };
+  }
+
+  // Budget is previous durable dispatches only. Claim/preflight is not an attempt.
+  // Ordinary C1 claims are pending/retryable_failed with no unresolved dispatch marker.
+  if (claimed.attemptCount >= maxDeliveryAttempts) {
+    const outcome: FinalizedIngestionEventOutcome = {
+      status: "rejected",
+      errorCode: MEMORY_WRITE_RETRY_EXHAUSTED,
+      failureClass: "definitive_rejection"
+    };
+    const recorded = await input.repository.recordEventOutcome({
+      finalizedTurnId: claimed.finalizedTurnId,
+      eventId: claimed.eventId,
+      leaseOwner: input.leaseOwner,
+      expectedVersion: claimed.version,
+      outcome
+    });
+    return { claimed: true, dispatched: false, event: recorded, outcome };
   }
 
   if (!input.provider.writeEventIdempotent) {

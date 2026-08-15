@@ -21,6 +21,7 @@ export type MemoryIngestionHealthSnapshot = {
   staleLeaseCount: number | null;
   historicalUnknownCount: number | null;
   activeWorkerCount: number | null;
+  configuredConcurrency: number | null;
   lastScanAt: string | null;
   lastSuccessfulExecutionAt: string | null;
   lastError: string | null;
@@ -53,6 +54,7 @@ export async function readMemoryIngestionDiagnostics(
       partialParentCount: null,
       staleLeaseCount: null,
       historicalUnknownCount: null,
+      configuredConcurrency: null,
       diagnosticsAvailability: status === undefined ? "unavailable" : "error",
       diagnosticsErrorCode: MEMORY_INGESTION_DIAGNOSTICS_UNAVAILABLE,
       diagnosticsError: sanitizeDiagnosticsError(error),
@@ -85,6 +87,7 @@ export function toMemoryIngestionHealthSnapshot(
     staleLeaseCount: diagnostics.staleLeaseCount,
     historicalUnknownCount: diagnostics.historicalUnknownCount,
     activeWorkerCount: diagnostics.activeWorkerCount,
+    configuredConcurrency: diagnostics.configuredConcurrency,
     lastScanAt: diagnostics.lastScanAt,
     lastSuccessfulExecutionAt: diagnostics.lastSuccessfulExecutionAt,
     lastError: diagnostics.lastError

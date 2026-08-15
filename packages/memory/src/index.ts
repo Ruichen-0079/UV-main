@@ -237,7 +237,9 @@ export {
   type MissingFinalizedConversationTurn
 } from "./finalized-ingestion-ledger.js";
 export {
+  DEFAULT_MEMORY_INGESTION_MAX_DELIVERY_ATTEMPTS,
   executeFinalizedIngestionEvent,
+  MEMORY_WRITE_RETRY_EXHAUSTED,
   type FinalizedIngestionDeliveryResult
 } from "./finalized-ingestion-executor.js";
 export {

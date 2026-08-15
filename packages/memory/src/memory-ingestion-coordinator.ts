@@ -1,4 +1,7 @@
-import { executeFinalizedIngestionEvent } from "./finalized-ingestion-executor.js";
+import {
+  DEFAULT_MEMORY_INGESTION_MAX_DELIVERY_ATTEMPTS,
+  executeFinalizedIngestionEvent
+} from "./finalized-ingestion-executor.js";
 import type {
   FinalizedIngestionAdmission,
   FinalizedIngestionAdmissionInput,
@@ -28,6 +31,11 @@ export const DEFAULT_MEMORY_INGESTION_RETRY_POLICY: MemoryIngestionRetryPolicy =
   maxDelayMs: 300_000,
   multiplier: 2
 };
+
+export {
+  DEFAULT_MEMORY_INGESTION_MAX_DELIVERY_ATTEMPTS,
+  MEMORY_WRITE_RETRY_EXHAUSTED
+} from "./finalized-ingestion-executor.js";
 
 export type MemoryIngestionFaultHooks = {
   afterClaim?: (event: FinalizedIngestionEvent) => Promise<void> | void;
@@ -73,6 +81,7 @@ export type MemoryIngestionCoordinatorDiagnostics = {
   diagnosticsErrorCode: string | null;
   diagnosticsError: string | null;
   activeWorkerCount: number | null;
+  configuredConcurrency: number | null;
   lastScanAt: string | null;
   lastSuccessfulExecutionAt: string | null;
   lastError: string | null;
@@ -124,6 +133,7 @@ export type MemoryIngestionCoordinatorOptions = {
   pollIntervalMs?: number;
   leaseSeconds?: number;
   concurrency?: number;
+  maxDeliveryAttempts?: number;
   ownerId?: string;
   scanLimit?: number;
   missingAdmissionEnabled?: boolean;
@@ -184,6 +194,7 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
   private readonly pollIntervalMs: number;
   private readonly leaseSeconds: number;
   private readonly concurrency: number;
+  private readonly maxDeliveryAttempts: number;
   private readonly ownerId: string;
   private readonly scanLimit: number;
   private readonly missingAdmissionEnabled: boolean;
@@ -197,6 +208,8 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
   private status: MemoryIngestionCoordinatorStatus = "idle";
   private acceptingWork = false;
   private loop: Promise<void> | undefined;
+  private scanLock: Promise<void> = Promise.resolve();
+  private scanRequested = false;
   private activeWorkerCount = 0;
   private lastScanAt: string | null = null;
   private lastSuccessfulExecutionAt: string | null = null;
@@ -216,6 +229,10 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
     this.pollIntervalMs = Math.max(1, Math.trunc(options.pollIntervalMs ?? 15_000));
     this.leaseSeconds = Math.max(1, Math.trunc(options.leaseSeconds ?? 300));
     this.concurrency = Math.max(1, Math.trunc(options.concurrency ?? 4));
+    this.maxDeliveryAttempts = Math.max(
+      1,
+      Math.trunc(options.maxDeliveryAttempts ?? DEFAULT_MEMORY_INGESTION_MAX_DELIVERY_ATTEMPTS)
+    );
     this.ownerId = options.ownerId ?? `yuvi-coordinator:${crypto.randomUUID()}`;
     this.scanLimit = Math.max(1, Math.trunc(options.scanLimit ?? 50));
     this.missingAdmissionEnabled = options.missingAdmissionEnabled ?? Boolean(options.admit);
@@ -254,6 +271,7 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
     }
     this.acceptingWork = true;
     this.status = "running";
+    this.scanRequested = true;
     this.loop = this.runLoop().finally(() => {
       this.loop = undefined;
       if (this.status !== "stopped") {
@@ -263,27 +281,33 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
   }
 
   wake(): void {
+    this.scanRequested = true;
     for (const resolve of this.wakeWaiters) {
       resolve();
     }
     this.wakeWaiters.clear();
   }
 
-  async notifyAdmitted(admission: FinalizedIngestionAdmission): Promise<void> {
+  /**
+   * Wake the single scheduler. Does not execute a separate delivery batch.
+   * Durable admission remains the correctness boundary if this signal is lost.
+   */
+  async notifyAdmitted(_admission: FinalizedIngestionAdmission): Promise<void> {
     this.wake();
-    if (!this.acceptingWork && this.status !== "idle") {
-      return;
-    }
-    const actionable = admission.events.filter(
-      (event) => !TERMINAL_EVENT_STATUSES.has(event.status)
-    );
-    await this.processEvents(actionable);
+  }
+
+  getConfiguredConcurrency(): number {
+    return this.concurrency;
+  }
+
+  getActiveWorkerCount(): number {
+    return this.activeWorkerCount;
   }
 
   async drain(timeoutMs = 10_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      await this.scan();
+      await this.runScheduledScan();
       await this.waitForInFlight();
       const due = await this.listDueWork(1);
       if (this.activeWorkerCount === 0 && due.length === 0 && this.inFlight.size === 0) {
@@ -324,6 +348,7 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
       diagnosticsErrorCode: stats ? null : MEMORY_INGESTION_DIAGNOSTICS_UNAVAILABLE,
       diagnosticsError,
       activeWorkerCount: this.activeWorkerCount,
+      configuredConcurrency: this.concurrency,
       lastScanAt: this.lastScanAt,
       lastSuccessfulExecutionAt: this.lastSuccessfulExecutionAt,
       lastError: this.lastError,
@@ -335,14 +360,39 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
   private async runLoop(): Promise<void> {
     while (this.acceptingWork && !this.signal?.aborted) {
       try {
-        await this.scan();
+        await this.runScheduledScan();
       } catch (error) {
         this.recordError(error, "memory ingestion coordinator scan failed");
       }
       if (!this.acceptingWork || this.signal?.aborted) {
         break;
       }
+      if (this.scanRequested) {
+        continue;
+      }
       await this.waitForWakeOrPoll();
+    }
+  }
+
+  /**
+   * Serialize all scans for this instance so wake, poll, drain, and startup
+   * share one scheduler budget. Wakes that arrive mid-scan coalesce into one
+   * follow-up pass.
+   */
+  private async runScheduledScan(): Promise<void> {
+    const previous = this.scanLock;
+    let release!: () => void;
+    this.scanLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      do {
+        this.scanRequested = false;
+        await this.scan();
+      } while (this.scanRequested && this.canSchedule());
+    } finally {
+      release();
     }
   }
 
@@ -360,7 +410,7 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
       return;
     }
     let next = 0;
-    const workerCount = Math.min(this.concurrency, events.length);
+    const workerCount = Math.min(this.availableSlots(), events.length);
     const workers = Array.from({ length: workerCount }, async () => {
       while (this.canClaim()) {
         const index = next;
@@ -456,7 +506,8 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
       provider: this.executionProvider(),
       event,
       leaseOwner: this.ownerId,
-      leaseSeconds: this.leaseSeconds
+      leaseSeconds: this.leaseSeconds,
+      maxDeliveryAttempts: this.maxDeliveryAttempts
     });
     if (result.claimed && result.event) {
       this.lastSuccessfulExecutionAt = this.clock().toISOString();
@@ -706,11 +757,19 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
   }
 
   private canClaim(): boolean {
+    return this.canSchedule();
+  }
+
+  private canSchedule(): boolean {
     return this.acceptingWork || this.status === "idle";
   }
 
+  private availableSlots(): number {
+    return Math.max(0, this.concurrency - this.activeWorkerCount);
+  }
+
   private async waitForWakeOrPoll(): Promise<void> {
-    if (!this.acceptingWork || this.signal?.aborted) {
+    if (!this.acceptingWork || this.signal?.aborted || this.scanRequested) {
       return;
     }
     await new Promise<void>((resolve) => {
