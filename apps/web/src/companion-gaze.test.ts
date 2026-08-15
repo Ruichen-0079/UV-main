@@ -56,8 +56,9 @@ describe("companion gaze scheduler", () => {
     const counts = { center: 0, left: 0, right: 0, upper: 0, lower: 0 };
     for (let index = 0; index < 2_000; index += 1) {
       counts[
-        selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.thinking, random, { allowQuickGlance: false })
-          .region
+        selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.thinking, random, {
+          allowQuickGlance: false
+        }).region
       ] += 1;
     }
     expect(counts.upper / 2_000).toBeGreaterThan(0.32);
@@ -88,10 +89,7 @@ describe("companion gaze scheduler", () => {
     const head = mapEyeToHeadAngle(idle.eyeXMax, [-idle.eyeXMax, idle.eyeXMax], idle.headXMax, 1);
     expect(head).toBeCloseTo(idle.headXMax, 5);
     const body = mapHeadToBodyAngle(idle.headXMax, idle.bodyFollowFraction, idle.bodyXMax);
-    expect(body).toBeCloseTo(
-      Math.min(idle.bodyXMax, idle.headXMax * idle.bodyFollowFraction),
-      5
-    );
+    expect(body).toBeCloseTo(Math.min(idle.bodyXMax, idle.headXMax * idle.bodyFollowFraction), 5);
     // Legacy double-shrink would be far smaller than the configured peak.
     const legacy = 0.32 * idle.headXMax * 0.85;
     expect(head).toBeGreaterThan(legacy * 2);
@@ -194,10 +192,14 @@ describe("companion gaze scheduler", () => {
     // Force quick glance: first random for chance must be < chance.
     const values = [0.01, 0.9, 0.5, 0.5, 0.5, 0.5];
     let index = 0;
-    const selected = selectNextTarget(PRESENCE_BEHAVIOR_PROFILES.idle, () => values[index++] ?? 0.5, {
-      allowQuickGlance: true,
-      lastWasQuickGlance: false
-    });
+    const selected = selectNextTarget(
+      PRESENCE_BEHAVIOR_PROFILES.idle,
+      () => values[index++] ?? 0.5,
+      {
+        allowQuickGlance: true,
+        lastWasQuickGlance: false
+      }
+    );
     // May or may not be quick depending on region rolls; force path via high chance profile.
     const alwaysGlance = {
       ...PRESENCE_BEHAVIOR_PROFILES.idle,
@@ -230,7 +232,9 @@ describe("companion gaze scheduler", () => {
   it("bounds session side bias within ±6%", () => {
     const scheduler = createGazeScheduler(createSeededRandom(99), 0);
     const frame = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
-    expect(Math.abs(frame.sessionSideBias)).toBeLessThanOrEqual(GAZE_CONFIG.sessionSideBiasMax + 1e-9);
+    expect(Math.abs(frame.sessionSideBias)).toBeLessThanOrEqual(
+      GAZE_CONFIG.sessionSideBiasMax + 1e-9
+    );
     expect(Math.abs(frame.headZBias)).toBeLessThanOrEqual(GAZE_CONFIG.headZBiasMaxFraction + 1e-9);
   });
 
@@ -259,7 +263,12 @@ describe("companion gaze scheduler", () => {
       false,
       PRESENCE_BEHAVIOR_PROFILES.idle
     );
-    const afterHold = scheduler.sample(initial.holdUntil + 1, 2, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    const afterHold = scheduler.sample(
+      initial.holdUntil + 1,
+      2,
+      false,
+      PRESENCE_BEHAVIOR_PROFILES.idle
+    );
     expect(Math.abs(afterHold.currentX - beforeHold.currentX)).toBeLessThan(
       PRESENCE_BEHAVIOR_PROFILES.idle.eyeXMax
     );
@@ -277,7 +286,12 @@ describe("companion gaze scheduler", () => {
       PRESENCE_BEHAVIOR_PROFILES.interrupted
     );
     expect(interrupted.targetRegion).toBe("center");
-    const resumed = scheduler.sample(active.holdUntil + 2, 1, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    const resumed = scheduler.sample(
+      active.holdUntil + 2,
+      1,
+      false,
+      PRESENCE_BEHAVIOR_PROFILES.idle
+    );
     expect(resumed.running).toBe(true);
     expect(Number.isFinite(resumed.holdUntil)).toBe(true);
     scheduler.dispose();
@@ -302,8 +316,23 @@ describe("companion gaze scheduler", () => {
     const mid = scheduler.sample(wall, 80, false, PRESENCE_BEHAVIOR_PROFILES.idle);
     if (Math.abs(mid.targetX) > 0.25) {
       const headNorm = Math.abs(mid.headCurrentX) / Math.max(mid.headTargetX || 1, 1e-3);
-      const bodyNorm = Math.abs(mid.bodyCurrentX) / Math.max(Math.abs(mid.headCurrentX) * 0.34, 1e-3);
+      const bodyNorm =
+        Math.abs(mid.bodyCurrentX) / Math.max(Math.abs(mid.headCurrentX) * 0.34, 1e-3);
       expect(headNorm + 0.05).toBeGreaterThanOrEqual(bodyNorm * 0.5);
     }
+  });
+
+  it("lets a supplied execution target override idle gaze and resume idle sampling when cleared", () => {
+    const scheduler = createGazeScheduler(() => 0.5, 0);
+    scheduler.setSuppliedTarget({ x: 0.7, y: 0.25, strength: 1 });
+    const supplied = scheduler.sample(0, 0, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    expect(supplied.targetX).toBeCloseTo(0.7);
+    expect(supplied.targetY).toBeCloseTo(0.25);
+    expect(supplied.holdUntil).toBe(Number.POSITIVE_INFINITY);
+
+    scheduler.setSuppliedTarget(null);
+    const resumed = scheduler.sample(16, 16, false, PRESENCE_BEHAVIOR_PROFILES.idle);
+    expect(Number.isFinite(resumed.holdUntil)).toBe(true);
+    expect(resumed.targetKind).not.toBe("recenter");
   });
 });

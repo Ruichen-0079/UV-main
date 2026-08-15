@@ -55,12 +55,15 @@ vi.mock("./lumi-canvas.js", async () => {
       resumeAudio: () => undefined,
       setFraming: () => undefined,
       setPresence: () => undefined,
+      setPresentationProjection: () => undefined,
+      setGazeTarget: () => undefined,
       setPresenceAnimation: () => undefined,
       load: async () => undefined,
       runMouthCalibration: async () => undefined,
       resize: () => undefined,
       dispose: () => undefined,
       getPresence: () => props.requestedPresence,
+      getModelLifecycle: () => "ready",
       getFramingDiagnostics: () => null,
       getDebugInfo: () => ({ instanceId: 0, generation: 0 })
     }));

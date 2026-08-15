@@ -2,19 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { apiClient } from "./api/client.js";
 import { CompanionBus, type CompanionBusMessage } from "./companion-bus.js";
 import {
-  createCompanionBlinkScheduler,
   createCompanionPresenceEpochGuard,
-  createPresenceBehaviorTransition,
   createInterruptedResetScheduler,
   createInitialCompanionPresence,
   canInterruptGeneration,
   getCompanionPresentationState,
-  getCompanionAnimation,
   reduceCompanionPresence,
-  type CompanionPresenceProjection,
-  type CompanionPresentationState
+  type CompanionPresenceProjection
 } from "./companion-presence.js";
-import { composeCompanionPresenceAnimation, createGazeScheduler } from "./companion-gaze.js";
 import { createCompanionSpeechBuffer } from "./companion-speech-buffer.js";
 import { createCompanionReadyAnnouncer } from "./companion-voice-sync.js";
 import { createSpeechSegmentDeduper } from "./speech-segment-dedup.js";
@@ -25,7 +20,7 @@ import {
 } from "./speech-playback-correlation.js";
 import { LumiCanvas } from "./lumi-canvas.js";
 import type { LumiFraming } from "./lumi-cubism-model.js";
-import type { LumiControllerHandle, PresenceState } from "./lumi-live2d.js";
+import type { LumiControllerHandle } from "./lumi-live2d.js";
 import {
   createBrowserSpeechPlayer,
   SpeechPlaybackQueue,
@@ -67,13 +62,9 @@ export function CompanionPage(): JSX.Element {
     createSpeechPlaybackCorrelation()
   );
   const epochGuardRef = useRef(createCompanionPresenceEpochGuard());
-  const presenceRef = useRef<CompanionPresentationState>("idle");
-  const blinkSchedulerRef = useRef<ReturnType<typeof createCompanionBlinkScheduler> | null>(null);
-  const gazeSchedulerRef = useRef<ReturnType<typeof createGazeScheduler> | null>(null);
   const interruptedResetRef = useRef<ReturnType<typeof createInterruptedResetScheduler> | null>(
     null
   );
-  presenceRef.current = getCompanionPresentationState(presence);
   presenceProjectionRef.current = presence;
 
   function updatePresence(
@@ -82,6 +73,9 @@ export function CompanionPage(): JSX.Element {
     const current = presenceProjectionRef.current ?? presence;
     const next = update(current);
     presenceProjectionRef.current = next;
+    // The controller receives the normalized input synchronously. React state
+    // remains the render/configuration surface and is not the animation clock.
+    lumiRef.current?.setPresentationProjection(next);
     setPresence(next);
   }
 
@@ -448,236 +442,11 @@ export function CompanionPage(): JSX.Element {
     }
   }, [presence.transition, presence.epoch]);
 
-  useEffect(() => {
-    // Schedulers MUST be created inside this effect. StrictMode mount → cleanup
-    // → remount disposes the first pair; remount must allocate brand-new
-    // instances and must never keep sampling a disposed ref.
-    let blinkScheduler = createCompanionBlinkScheduler(Math.random, performance.now());
-    let gazeScheduler = createGazeScheduler(Math.random, performance.now());
-    const behaviorTransition = createPresenceBehaviorTransition(presenceRef.current);
-    blinkSchedulerRef.current = blinkScheduler;
-    gazeSchedulerRef.current = gazeScheduler;
-
-    let frame = 0;
-    let alive = true;
-    let previousNow = performance.now();
-    // Generation token: any in-flight rAF from a previous StrictMode mount
-    // must no-op even if cancelAnimationFrame races.
-    const effectGeneration = Symbol("presence-raf");
-    let activeGeneration: symbol | null = effectGeneration;
-
-    const animate = (now: number) => {
-      if (!alive || activeGeneration !== effectGeneration) {
-        frame = 0;
-        return;
-      }
-      // Re-check visibility every frame. Do not permanently kill the loop on a
-      // single "hidden" event — Tauri multi-window can miss the matching show.
-      const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
-      if (hidden) {
-        previousNow = now;
-        frame = requestAnimationFrame(animate);
-        return;
-      }
-
-      const frameDelta = Math.max(0, now - previousNow);
-      previousNow = now;
-      // Development-only acceptance hook: it replaces only the state input;
-      // the same profile transition, blink, gaze, and breath schedulers still
-      // run normally. Production builds never read this property.
-      const forcedPresence =
-        import.meta.env.DEV && typeof window !== "undefined" ? readForcedPresence(window) : null;
-      const currentPresence = forcedPresence ?? presenceRef.current;
-      const interrupted = currentPresence === "interrupted";
-
-      // Self-heal: if a disposed scheduler was ever left in place, replace it.
-      if (gazeScheduler.isDisposed()) {
-        gazeScheduler = createGazeScheduler(Math.random, now);
-        gazeSchedulerRef.current = gazeScheduler;
-      }
-
-      const behavior = behaviorTransition.sample(currentPresence, frameDelta, now);
-
-      // Speaking continues to blink; only interrupted freezes eyes open.
-      const blink = interrupted
-        ? 0
-        : blinkScheduler.sample(now, currentPresence, behavior.effective);
-      const animation = getCompanionAnimation(currentPresence, now, blink, behavior.effective);
-      // Explicit (now, dt, interrupted) so hold clocks advance from frameDelta
-      // even if wall-clock origins differ between rAF and performance.now().
-      const gaze = gazeScheduler.sample(now, frameDelta, interrupted, behavior.effective);
-
-      const forceGaze =
-        import.meta.env.DEV &&
-        typeof window !== "undefined" &&
-        (window as typeof window & { __yuviForceGaze?: boolean }).__yuviForceGaze === true;
-      const presenceAnimation = composeCompanionPresenceAnimation(animation, gaze, forceGaze);
-      lumiRef.current?.setPresenceAnimation(presenceAnimation);
-
-      if (import.meta.env.DEV && typeof window !== "undefined") {
-        const debugWindow = window as typeof window & {
-          __yuviPresenceDiagnostics?: Record<string, unknown>;
-        };
-        const controller = lumiRef.current?.getDebugInfo();
-        debugWindow.__yuviPresenceDiagnostics = {
-          running: true,
-          presence: currentPresence,
-          interrupted,
-          activeBehaviorProfile: behavior.activeState,
-          previousBehaviorProfile: behavior.previousState,
-          behaviorTransitionProgress: behavior.transitionProgress,
-          effectiveTransitionMs: behavior.effectiveTransitionMs,
-          effectiveEyeAmplitudeScale: behavior.effective.eyeAmplitudeScale,
-          effectiveHeadAmplitudeScale: behavior.effective.headAmplitudeScale,
-          effectiveBodyAmplitudeScale: behavior.effective.bodyAmplitudeScale,
-          effectiveEyeXMax: behavior.effective.eyeXMax,
-          effectiveHeadXMax: behavior.effective.headXMax,
-          effectiveBodyXMax: behavior.effective.bodyXMax,
-          effectiveBlinkIntervalScale: behavior.effective.blinkIntervalScale,
-          effectiveBreathSpeedScale: behavior.effective.breathSpeedScale,
-          effectiveTargetRegionWeights: behavior.effective.targetRegionWeights,
-          effectiveHoldRange: {
-            min: behavior.effective.targetHoldMinMs,
-            max: behavior.effective.targetHoldMaxMs
-          },
-          recenterBias: behavior.effective.recenterBias,
-          quickGlanceChance: behavior.effective.quickGlanceChance,
-          quickGlanceActive: gaze.quickGlanceActive,
-          currentTargetKind: gaze.targetKind,
-          currentTargetRegion: gaze.targetRegion,
-          sessionSideBias: gaze.sessionSideBias,
-          actualEyeEnvelope: gaze.actualEyeEnvelope,
-          actualHeadEnvelope: gaze.actualHeadEnvelope,
-          actualBodyEnvelope: gaze.actualBodyEnvelope,
-          lastPresenceTransitionAt: behavior.lastPresenceTransitionAt,
-          forceGaze: forceGaze === true,
-          forcedPresence,
-          schedulerDisposed: gazeScheduler.isDisposed(),
-          schedulerPaused: false,
-          hiddenDocument: hidden,
-          frameNow: now,
-          frameDelta,
-          nextBlinkAt: blinkScheduler.getNextBlinkAt(),
-          blinkPhase: blinkScheduler.getPhase(now),
-          eyeOpen: 1 - animation.blink,
-          eyeLeft: 1 - animation.blink,
-          eyeRight: 1 - animation.blink,
-          blinkValue: animation.blink,
-          breathValue: animation.breath,
-          pendingEyeLeft: controller?.pendingEyeLeft ?? null,
-          pendingEyeRight: controller?.pendingEyeRight ?? null,
-          pendingBreath: controller?.pendingBreath ?? null,
-          pendingEyeBallX: controller?.pendingEyeBallX ?? null,
-          pendingEyeBallY: controller?.pendingEyeBallY ?? null,
-          pendingAngleX: controller?.pendingHeadAngleX ?? null,
-          pendingAngleY: controller?.pendingHeadAngleY ?? null,
-          pendingAngleZ: controller?.pendingHeadAngleZ ?? null,
-          preUpdateEyeBallX: controller?.preUpdateEyeBallX ?? null,
-          preUpdateEyeBallY: controller?.preUpdateEyeBallY ?? null,
-          preUpdateAngleX: controller?.preUpdateAngleX ?? null,
-          preUpdateAngleY: controller?.preUpdateAngleY ?? null,
-          preUpdateAngleZ: controller?.preUpdateAngleZ ?? null,
-          preUpdateEyeBallPhysicsX: controller?.preUpdateEyeBallPhysicsX ?? null,
-          preUpdateEyeBallPhysicsY: controller?.preUpdateEyeBallPhysicsY ?? null,
-          ownedParameterIds: controller?.ownedParameterIds ?? null,
-          controllerInstanceId: controller?.instanceId ?? null,
-          controllerGeneration: controller?.generation ?? null,
-          gazeSchedulerRunning: gaze.running,
-          gazeElapsedMs: gaze.elapsedMs,
-          gazeTargetX: gaze.targetX,
-          gazeTargetY: gaze.targetY,
-          gazeCurrentX: gaze.currentX,
-          gazeCurrentY: gaze.currentY,
-          gazeTargetRegion: gaze.targetRegion,
-          holdUntil: gaze.holdUntil,
-          nextTargetAt: gaze.nextTargetAt,
-          headCurrentX: gaze.headCurrentX,
-          headCurrentY: gaze.headCurrentY,
-          headCurrentZ: gaze.headCurrentZ,
-          headTargetX: gaze.headTargetX,
-          headTargetY: gaze.headTargetY,
-          headTargetZ: gaze.headTargetZ,
-          bodyCurrentX: gaze.bodyCurrentX,
-          bodyCurrentY: gaze.bodyCurrentY,
-          bodyCurrentZ: gaze.bodyCurrentZ,
-          bodyTargetX: gaze.bodyTargetX,
-          bodyTargetY: gaze.bodyTargetY,
-          bodyTargetZ: gaze.bodyTargetZ,
-          pendingBodyAngleX: controller?.pendingBodyAngleX ?? null,
-          pendingBodyAngleY: controller?.pendingBodyAngleY ?? null,
-          pendingBodyAngleZ: controller?.pendingBodyAngleZ ?? null,
-          appliedEyeBallX: presenceAnimation.eyeBallX,
-          appliedEyeBallY: presenceAnimation.eyeBallY,
-          appliedHeadAngleX: presenceAnimation.headAngleX,
-          appliedHeadAngleY: presenceAnimation.headAngleY,
-          appliedHeadAngleZ: presenceAnimation.headAngleZ,
-          appliedBodyAngleX: presenceAnimation.bodyAngleX,
-          appliedBodyAngleY: presenceAnimation.bodyAngleY,
-          appliedBodyAngleZ: presenceAnimation.bodyAngleZ,
-          // Lumi has no writable arm params / no arm idle motions in model3.
-          // Independent arm idle requires Cubism Editor (.cmo3) parameters or C motion library.
-          armControlCapability: "none",
-          armControlNote:
-            "No writable Arm/Shoulder/Wrist params; HandPhysics are outputs; no arm motion curves in model3. Chin-rest/play-game are expression Button toggles only.",
-          activeRafCount: 1,
-          now
-        };
-      }
-      frame = requestAnimationFrame(animate);
-    };
-
-    frame = requestAnimationFrame(animate);
-    return () => {
-      alive = false;
-      activeGeneration = null;
-      cancelAnimationFrame(frame);
-      frame = 0;
-      blinkScheduler.dispose();
-      gazeScheduler.dispose();
-      if (blinkSchedulerRef.current === blinkScheduler) {
-        blinkSchedulerRef.current = null;
-      }
-      if (gazeSchedulerRef.current === gazeScheduler) {
-        gazeSchedulerRef.current = null;
-      }
-      lumiRef.current?.setPresenceAnimation({
-        blink: 0,
-        breath: 0,
-        eyeBallX: 0,
-        eyeBallY: 0,
-        headAngleX: 0,
-        headAngleY: 0,
-        headAngleZ: 0,
-        bodyAngleX: 0,
-        bodyAngleY: 0,
-        bodyAngleZ: 0
-      });
-      if (import.meta.env.DEV && typeof window !== "undefined") {
-        const debugWindow = window as typeof window & {
-          __yuviPresenceDiagnostics?: Record<string, unknown>;
-        };
-        if (debugWindow.__yuviPresenceDiagnostics) {
-          debugWindow.__yuviPresenceDiagnostics = {
-            ...debugWindow.__yuviPresenceDiagnostics,
-            running: false,
-            gazeSchedulerRunning: false,
-            schedulerDisposed: true,
-            activeRafCount: 0,
-            presence: "idle",
-            blinkPhase: "waiting",
-            eyeOpen: 1,
-            blinkValue: 0
-          };
-        }
-      }
-    };
-  }, []);
-
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-transparent text-white">
       <LumiCanvas
         ref={lumiRef}
-        requestedPresence={toLumiPresence(getCompanionPresentationState(presence))}
+        requestedProjection={presence}
         className="h-full w-full rounded-none"
         showFramingToggle={false}
       />
@@ -759,24 +528,6 @@ function presenceLabel(projection: CompanionPresenceProjection): string {
     case "idle":
       return "idle";
   }
-}
-
-function readForcedPresence(windowObject: Window): CompanionPresentationState | null {
-  const value = (windowObject as Window & { __yuviForcePresence?: unknown }).__yuviForcePresence;
-  switch (value) {
-    case "idle":
-    case "listening":
-    case "thinking":
-    case "speaking":
-    case "interrupted":
-      return value;
-    default:
-      return null;
-  }
-}
-
-function toLumiPresence(state: CompanionPresentationState): PresenceState {
-  return state === "listening" ? "idle" : state;
 }
 
 function voiceStatusLabel(state: SpeechQueueState): string {

@@ -2,15 +2,77 @@ import { describe, expect, it, vi } from "vitest";
 import { gatedEnvelope, rmsFromTimeDomain, smoothMouthEnvelope } from "./lumi-audio.js";
 import {
   LUMI_PRESENCE_PARAMETER_MAP,
+  LumiPresentationController,
   LumiController,
   lumiMapping,
   reducePresence
 } from "./lumi-live2d.js";
+import { createInitialCompanionPresence } from "./companion-presence.js";
 
 const playbackSegment = { requestId: "turn-a", sequence: 0 };
 const nextPlaybackSegment = { requestId: "turn-a", sequence: 1 };
 
 describe("Lumi presence and audio envelope", () => {
+  it("owns one lifecycle-safe presentation clock independent of React rerenders", () => {
+    const callbacks: Array<(now: number) => void> = [];
+    const applied: Array<{ blink?: number; breath?: number; eyeBallX?: number }> = [];
+    const controller = new LumiPresentationController((animation) => applied.push(animation), {
+      random: () => 0,
+      now: () => 0,
+      requestFrame: (callback) => {
+        callbacks.push(callback);
+        return callbacks.length;
+      },
+      cancelFrame: () => undefined,
+      isHidden: () => false
+    });
+    const initial = createInitialCompanionPresence();
+    controller.setProjection({
+      ...initial,
+      epoch: "turn-a",
+      lifecycle: "active",
+      activity: "thinking"
+    });
+    controller.start();
+    controller.start();
+    expect(callbacks).toHaveLength(1);
+
+    const firstFrame = callbacks.shift();
+    firstFrame?.(16);
+    expect(applied).toHaveLength(1);
+    expect(controller.getDebug().running).toBe(true);
+    expect(controller.getDebug().state).toBe("thinking");
+
+    const staleFrame = callbacks.shift();
+    controller.dispose();
+    staleFrame?.(32);
+    expect(applied).toHaveLength(1);
+    expect(controller.getDebug().running).toBe(false);
+  });
+
+  it("bounds the first frame after a hidden interval without stopping the controller", () => {
+    const callbacks: Array<(now: number) => void> = [];
+    let hidden = false;
+    const controller = new LumiPresentationController(() => undefined, {
+      random: () => 0,
+      requestFrame: (callback) => {
+        callbacks.push(callback);
+        return callbacks.length;
+      },
+      cancelFrame: () => undefined,
+      isHidden: () => hidden
+    });
+    controller.start();
+    callbacks.shift()?.(100);
+    hidden = true;
+    callbacks.shift()?.(200);
+    hidden = false;
+    callbacks.shift()?.(100_000);
+    expect(controller.getDebug().running).toBe(true);
+    expect(controller.getDebug().frameDeltaMs).toBeLessThanOrEqual(100);
+    controller.dispose();
+  });
+
   it("keeps the presence lifecycle tied to real playback", () => {
     expect(reducePresence("idle", { type: "user-sent" })).toBe("thinking");
     expect(reducePresence("thinking", { type: "playback-started" })).toBe("speaking");
@@ -110,7 +172,12 @@ describe("Lumi presence and audio envelope", () => {
       dispose: vi.fn()
     };
     const envelope = { attach: vi.fn(), detach: vi.fn(), stop: vi.fn(), dispose: vi.fn() };
-    const controller = new LumiController(() => adapter, "model3.json", undefined, () => envelope);
+    const controller = new LumiController(
+      () => adapter,
+      "model3.json",
+      undefined,
+      () => envelope
+    );
     await controller.load();
     const audio = {} as HTMLAudioElement;
     controller.handlePlaybackEvent({
@@ -380,7 +447,9 @@ describe("Lumi presence and audio envelope", () => {
       await vi.advanceTimersByTimeAsync(2800);
       await calibration;
       expect(adapter.setMouthOpen).toHaveBeenLastCalledWith(0);
-      expect(adapter.setMouthOpen.mock.calls.slice(-4).map(([value]) => value)).toEqual([0, 1, 2.1, 0]);
+      expect(adapter.setMouthOpen.mock.calls.slice(-4).map(([value]) => value)).toEqual([
+        0, 1, 2.1, 0
+      ]);
       expect(adapter.resetMouth).toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -403,7 +472,39 @@ describe("Lumi presence and audio envelope", () => {
     };
     const controller = new LumiController(() => adapter, "model3.json");
     await controller.load();
-    expect(controller.getPresence()).toBe("unavailable");
+    expect(controller.getModelLifecycle()).toBe("failed");
+    expect(controller.getPresence()).toBe("idle");
     expect(adapter.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences stale model loads when a reload replaces the adapter", async () => {
+    let resolveFirst!: () => void;
+    const firstLoad = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const makeAdapter = (load: () => Promise<void>) => ({
+      load: vi.fn(load),
+      setMouthOpen: vi.fn(),
+      setMouthForm: vi.fn(),
+      setParameter: vi.fn(),
+      setBreath: vi.fn(),
+      setFraming: vi.fn(),
+      resetMouth: vi.fn(),
+      resize: vi.fn(),
+      dispose: vi.fn()
+    });
+    const first = makeAdapter(() => firstLoad);
+    const second = makeAdapter(async () => undefined);
+    let next = 0;
+    const controller = new LumiController(() => (next++ === 0 ? first : second), "model3.json");
+    const firstRequest = controller.load();
+    const secondRequest = controller.load();
+    resolveFirst();
+    await Promise.all([firstRequest, secondRequest]);
+
+    expect(first.dispose).toHaveBeenCalled();
+    expect(second.dispose).not.toHaveBeenCalled();
+    expect(controller.getPresence()).toBe("idle");
+    controller.dispose();
   });
 });
