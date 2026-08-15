@@ -1,5 +1,16 @@
 export type ProviderCapability = "chat" | "reasoning" | "tts" | "stt" | "vision" | "embedding";
 
+/**
+ * Call-level controls shared by every provider capability.
+ *
+ * A caller-owned signal is the canonical cancellation channel. Provider
+ * adapters are responsible for propagating it to their underlying transport;
+ * capability-specific input fields must not become a second control plane.
+ */
+export type ProviderCallOptions = {
+  signal?: AbortSignal | undefined;
+};
+
 export type ProviderHealthStatus = "healthy" | "degraded" | "unavailable";
 
 export type ProviderHealth = {
@@ -60,9 +71,19 @@ export type ProviderDebug = {
 };
 
 export type ProviderMetadata = {
+  /** Capability that produced this output when the output is carried alone. */
+  capability?: ProviderCapability | undefined;
+  /** Concrete provider identity that produced this output. */
+  provider?: string | undefined;
   model?: string | undefined;
+  requestId?: string | undefined;
+  providerRequestId?: string | undefined;
   latencyMs?: number | undefined;
+  firstByteLatencyMs?: number | undefined;
+  firstTokenLatencyMs?: number | undefined;
   tokenUsage?: TokenUsage | undefined;
+  audioInputDurationMs?: number | undefined;
+  audioOutputDurationMs?: number | undefined;
   providerMetadata?: Record<string, unknown> | undefined;
   fallbackUsed?: boolean | undefined;
   attemptedProviders?: ProviderAttempt[] | undefined;

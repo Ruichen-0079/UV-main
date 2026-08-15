@@ -1,4 +1,4 @@
-import type { ProviderHealth, ProviderMetadata } from "./common.js";
+import type { ProviderCallOptions, ProviderHealth, ProviderMetadata } from "./common.js";
 
 export type STTInput = {
   audio?: Uint8Array | undefined;
@@ -28,5 +28,5 @@ export type STTOutput = ProviderMetadata & {
 export interface STTProvider {
   readonly name: string;
   healthCheck(): Promise<ProviderHealth>;
-  transcribeAudio(input: STTInput): Promise<STTOutput>;
+  transcribeAudio(input: STTInput, options?: ProviderCallOptions): Promise<STTOutput>;
 }

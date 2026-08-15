@@ -1,4 +1,4 @@
-import type { ProviderHealth, ProviderMetadata } from "./common.js";
+import type { ProviderCallOptions, ProviderHealth, ProviderMetadata } from "./common.js";
 
 export type EmbeddingOutput = ProviderMetadata & {
   vector: number[];
@@ -14,6 +14,6 @@ export interface EmbeddingProvider {
   readonly model?: string | undefined;
   readonly mock?: boolean | undefined;
   healthCheck(): Promise<ProviderHealth>;
-  embedText(text: string): Promise<number[]>;
-  embedBatch(texts: string[]): Promise<number[][]>;
+  embedText(text: string, options?: ProviderCallOptions): Promise<number[]>;
+  embedBatch(texts: string[], options?: ProviderCallOptions): Promise<number[][]>;
 }

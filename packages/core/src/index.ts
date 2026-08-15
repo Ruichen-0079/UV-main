@@ -2421,7 +2421,7 @@ export class RuntimeOrchestrator {
       })
     );
 
-    return output.reasoning;
+    return output.answer;
   }
 
   private async retrieveMemories(

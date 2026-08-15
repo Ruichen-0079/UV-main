@@ -1,4 +1,9 @@
-import type { ProviderHealth, ProviderMetadata, TextMessage } from "./common.js";
+import type {
+  ProviderCallOptions,
+  ProviderHealth,
+  ProviderMetadata,
+  TextMessage
+} from "./common.js";
 
 export type ChatInput = {
   messages: TextMessage[];
@@ -13,14 +18,13 @@ export type ChatInput = {
 
 export type ChatOutput = ProviderMetadata & {
   message: TextMessage;
+  /** Reserved compatibility value; Runtime tool/function calling is unsupported. */
   finishReason?: "stop" | "length" | "tool_call" | "content_filter" | "unknown" | undefined;
 };
 
 export type ChatStreamingMode = "unsupported" | "native" | "compatible";
 
-export type ChatStreamOptions = {
-  signal?: AbortSignal | undefined;
-};
+export type ChatStreamOptions = ProviderCallOptions;
 
 export type ChatStreamEvent =
   | {
@@ -36,7 +40,7 @@ export interface ChatProvider {
   readonly name: string;
   readonly streamingMode?: ChatStreamingMode | undefined;
   healthCheck(): Promise<ProviderHealth>;
-  generateReply(input: ChatInput): Promise<ChatOutput>;
+  generateReply(input: ChatInput, options?: ProviderCallOptions): Promise<ChatOutput>;
   streamReply?(
     input: ChatInput,
     options?: ChatStreamOptions | undefined

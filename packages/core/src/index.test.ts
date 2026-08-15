@@ -41,6 +41,40 @@ async function collectRuntimeStream(
 }
 
 describe("RuntimeOrchestrator", () => {
+  it("uses the normalized reasoning answer instead of provider internal reasoning", async () => {
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getReasoningProvider: () => ({
+          name: "reasoning-test",
+          async healthCheck() {
+            return {
+              provider: "reasoning-test",
+              status: "healthy" as const,
+              checkedAt: new Date().toISOString()
+            };
+          },
+          async generateReasoning() {
+            return {
+              reasoning: "private provider internal trace",
+              answer: "safe final answer"
+            };
+          }
+        })
+      }
+    });
+
+    await expect(
+      runtime.maybeGenerateReasoning({
+        messages: [{ role: "user", content: "What is the answer?" }],
+        purpose: "planning"
+      })
+    ).resolves.toBe("safe final answer");
+  });
+
   it("persists each delta before yielding it and finalizes one reply lifecycle", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const conversation = new InMemoryConversationRepository();
