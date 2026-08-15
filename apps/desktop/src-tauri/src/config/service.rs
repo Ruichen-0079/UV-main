@@ -8,6 +8,7 @@ use super::schema::{
 };
 use super::secrets::{
     SecretStore, SECRET_DATABASE_URL, SECRET_DEEPSEEK_API_KEY, SECRET_MEMORY_LLM_API_KEY,
+    SECRET_POSTGRES_LOCAL_PASSWORD,
 };
 use super::validate::{apply_patch, validate_settings};
 use std::collections::BTreeMap;
@@ -105,17 +106,31 @@ impl ConfigService {
     }
 
     pub fn set_secret(&self, key: &str, value: &str) -> Result<SecretStatus, String> {
-        validate_secret_key(key)?;
+        validate_user_secret_key(key)?;
         self.secrets.set(key, value)?;
         self.revision.fetch_add(1, Ordering::SeqCst);
         self.secret_status()
     }
 
     pub fn delete_secret(&self, key: &str) -> Result<SecretStatus, String> {
-        validate_secret_key(key)?;
+        validate_user_secret_key(key)?;
         self.secrets.delete(key)?;
         self.revision.fetch_add(1, Ordering::SeqCst);
         self.secret_status()
+    }
+
+    /// Internal bootstrap only. Not exposed as a user-editable settings secret.
+    pub fn ensure_private_postgres_password(&self) -> Result<String, String> {
+        if let Some(existing) = self.secrets.get(SECRET_POSTGRES_LOCAL_PASSWORD)? {
+            if !existing.trim().is_empty() {
+                return Ok(existing);
+            }
+        }
+        let generated = super::secrets::generate_postgres_password()?;
+        self.secrets
+            .set(SECRET_POSTGRES_LOCAL_PASSWORD, &generated)?;
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        Ok(generated)
     }
 
     pub fn secret_status(&self) -> Result<SecretStatus, String> {
@@ -160,9 +175,13 @@ impl ConfigService {
     }
 }
 
-fn validate_secret_key(key: &str) -> Result<(), String> {
+fn validate_user_secret_key(key: &str) -> Result<(), String> {
     match key {
         SECRET_DEEPSEEK_API_KEY | SECRET_DATABASE_URL | SECRET_MEMORY_LLM_API_KEY => Ok(()),
+        SECRET_POSTGRES_LOCAL_PASSWORD => Err(
+            "postgres.localPassword is an internal infrastructure secret and is not user-editable"
+                .into(),
+        ),
         other => Err(format!("unsupported secret key: {other}")),
     }
 }

@@ -175,6 +175,7 @@ function packagedConfig(env: Record<string, string> = {}): SupervisorConfig {
       MEMORY_BACKEND: "mem0",
       YUVI_AUTOSTART_RUNTIME: "false",
       YUVI_AUTOSTART_MEM0: "true",
+      YUVI_POSTGRES_MODE: "external",
       ...env
     },
     instanceId: "packaged-inst",

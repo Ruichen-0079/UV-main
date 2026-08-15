@@ -106,6 +106,27 @@ function stripQuotes(input: string): string {
   return input.replace(/"/g, "").replace(/'/g, "");
 }
 
+export function defaultYuviLocalDataRoot(
+  env: Record<string, string | undefined> = process.env
+): string {
+  const explicit = env["YUVI_DATA_ROOT"]?.trim();
+  if (explicit) {
+    if (!path.isAbsolute(explicit) && !isWindowsStylePath(explicit)) {
+      throw new Error("YUVI_DATA_ROOT must be an absolute path.");
+    }
+    return canonicalPath(explicit);
+  }
+  const local = env["LOCALAPPDATA"]?.trim();
+  if (local) {
+    return canonicalPath(path.join(local, "YUVI"));
+  }
+  const home = env["HOME"]?.trim() || env["USERPROFILE"]?.trim();
+  if (home) {
+    return canonicalPath(path.join(home, ".yuvi"));
+  }
+  return canonicalPath(path.join(process.cwd(), ".yuvi"));
+}
+
 export function defaultStateDirectory(): string {
   const local = process.env["LOCALAPPDATA"];
   if (local && local.trim()) {
@@ -117,12 +138,7 @@ export function defaultStateDirectory(): string {
 export function parseUrlOrigin(url: string): { host: string; port: number; origin: string } | null {
   try {
     const parsed = new URL(url);
-    const port =
-      parsed.port !== ""
-        ? Number(parsed.port)
-        : parsed.protocol === "https:"
-          ? 443
-          : 80;
+    const port = parsed.port !== "" ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
     if (!Number.isFinite(port)) return null;
     return {
       host: parsed.hostname || "127.0.0.1",

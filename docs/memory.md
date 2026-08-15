@@ -158,7 +158,18 @@ Voice remains outside this durable-finalized-turn path:
 
 ## Storage
 
-Development defaults to `MEMORY_REPOSITORY=in-memory`, which is useful for quick iteration but resets when the server restarts. Durable development memory uses PostgreSQL with pgvector after `MEMORY_REPOSITORY=postgres`, `DATABASE_URL`, and migrations are configured. Migrations live in:
+Development defaults to `MEMORY_REPOSITORY=in-memory`, which is useful for quick iteration but resets when the server restarts. Durable development memory uses PostgreSQL with pgvector after `MEMORY_REPOSITORY=postgres`, `DATABASE_URL`, and migrations are configured.
+
+Packaged YUVI owns a private PostgreSQL 16 cluster under the user-writable
+`%LOCALAPPDATA%\\YUVI\\Postgres` data root (P4-2D1). Supervisor is the lifecycle
+owner. The packaged password lives in Windows Credential Manager
+(`YUVI/postgres/local`); it is not a user-editable setting and is not stored
+as a long-lived `local.secret`. Runtime repository selection and Yuvi schema
+migrations are not switched in D1; those land in P4-2D2/D3. External
+`DATABASE_URL` remains an advanced override and is never started or stopped by
+the private-cluster owner.
+
+Migrations live in:
 
 ```text
 packages/memory/migrations/

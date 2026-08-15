@@ -4,6 +4,7 @@
 use super::schema::{MemoryBackend, MemoryLlmProvider, ServiceMode, UserSettings};
 use super::secrets::{
     SecretStore, SECRET_DATABASE_URL, SECRET_DEEPSEEK_API_KEY, SECRET_MEMORY_LLM_API_KEY,
+    SECRET_POSTGRES_LOCAL_PASSWORD,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -128,6 +129,13 @@ pub fn secret_env_overrides(
         }
     }
 
+    // Internal private-cluster password. Never a user setting and never a DATABASE_URL.
+    if let Some(password) = secrets.get(SECRET_POSTGRES_LOCAL_PASSWORD)? {
+        if !password.trim().is_empty() {
+            env.insert("YUVI_POSTGRES_PASSWORD".into(), password);
+        }
+    }
+
     Ok(env)
 }
 
@@ -161,6 +169,14 @@ pub fn unset_env_for_supervisor(
         && secrets.is_configured(SECRET_DATABASE_URL).unwrap_or(false);
     if !inject_db {
         unset.push("DATABASE_URL".into());
+    }
+
+    let inject_postgres = secrets
+        .is_configured(SECRET_POSTGRES_LOCAL_PASSWORD)
+        .unwrap_or(false);
+    if !inject_postgres {
+        push_unique(&mut unset, "YUVI_POSTGRES_PASSWORD");
+        push_unique(&mut unset, "PGPASSWORD");
     }
 
     let memory_llm_active = memory_llm_active(settings);

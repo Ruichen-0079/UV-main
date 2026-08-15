@@ -6,11 +6,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type {
-  ProcessInfo,
-  ProcessInspectionResult,
-  StartCommandSpec
-} from "./types.js";
+import type { ProcessInfo, ProcessInspectionResult, StartCommandSpec } from "./types.js";
 
 /**
  * Fast liveness check — never shells out to PowerShell (that blocked Save for seconds).
@@ -38,16 +34,7 @@ export function inspectProcess(processId: number): ProcessInspectionResult {
   }
 
   if (process.platform !== "win32") {
-    return {
-      status: "resolved",
-      processId,
-      info: {
-        processId,
-        parentProcessId: 0,
-        commandLine: `pid=${processId}`,
-        createdAtUtc: new Date()
-      }
-    };
+    return inspectPosixProcess(processId);
   }
 
   const script = `
@@ -62,6 +49,7 @@ $obj = [ordered]@{
   parentProcessId = [int]$p.ParentProcessId
   commandLine = [string]$p.CommandLine
   createdAtUtc = $created
+  executablePath = [string]$p.ExecutablePath
 }
 $obj | ConvertTo-Json -Compress
 `;
@@ -85,6 +73,56 @@ $obj | ConvertTo-Json -Compress
     signal: result.signal,
     error: result.error
   });
+}
+
+function inspectPosixProcess(processId: number): ProcessInspectionResult {
+  try {
+    const cmdline = fs.readFileSync(`/proc/${processId}/cmdline`, "utf8");
+    const commandLine = cmdline.replaceAll("\0", " ").trim();
+    let parentProcessId = 0;
+    let createdAtUtc: Date | null = null;
+    try {
+      const stat = fs.readFileSync(`/proc/${processId}/stat`, "utf8");
+      const close = stat.lastIndexOf(")");
+      const rest = close >= 0 ? stat.slice(close + 2).split(" ") : [];
+      parentProcessId = Number(rest[1] ?? 0) || 0;
+      const startTicks = Number(rest[19] ?? 0);
+      if (Number.isFinite(startTicks) && startTicks > 0) {
+        const uptime = fs.readFileSync("/proc/uptime", "utf8");
+        const uptimeSec = Number(uptime.split(" ")[0] ?? 0);
+        const hertz = 100;
+        const elapsedSec = uptimeSec - startTicks / hertz;
+        createdAtUtc = new Date(Date.now() - Math.max(0, elapsedSec) * 1000);
+      }
+    } catch {
+      // Command line is the required identity; start time is best-effort.
+    }
+    if (!commandLine) {
+      return { status: "unavailable", processId, reason: "empty-output" };
+    }
+    let executablePath: string | null = null;
+    try {
+      executablePath = fs.realpathSync.native(`/proc/${processId}/exe`);
+    } catch {
+      executablePath = null;
+    }
+    return {
+      status: "resolved",
+      processId,
+      info: {
+        processId,
+        parentProcessId,
+        commandLine,
+        createdAtUtc,
+        executablePath
+      }
+    };
+  } catch {
+    if (!isProcessAlive(processId)) {
+      return { status: "not-running", processId, reason: "process-not-alive" };
+    }
+    return { status: "unavailable", processId, reason: "query-failed" };
+  }
 }
 
 type ProcessQueryResult = {
@@ -115,6 +153,7 @@ export function classifyProcessQueryResult(
       parentProcessId: number;
       commandLine: string;
       createdAtUtc: string | null;
+      executablePath?: string | null;
     };
     if (
       !Number.isInteger(parsed.processId) ||
@@ -131,7 +170,8 @@ export function classifyProcessQueryResult(
         processId: parsed.processId,
         parentProcessId: parsed.parentProcessId,
         commandLine: parsed.commandLine,
-        createdAtUtc: parsed.createdAtUtc ? new Date(parsed.createdAtUtc) : null
+        createdAtUtc: parsed.createdAtUtc ? new Date(parsed.createdAtUtc) : null,
+        executablePath: parsed.executablePath ? String(parsed.executablePath) : null
       }
     };
   } catch {
