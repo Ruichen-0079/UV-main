@@ -8,6 +8,7 @@ import type {
 } from "./types/chat.js";
 import type { EmbeddingProvider } from "./types/embedding.js";
 import type {
+  ProviderCallOptions,
   ProviderAttempt,
   ProviderCapability,
   ProviderHealth,
@@ -1117,8 +1118,10 @@ export class FallbackChatProvider implements ChatProvider {
     );
   }
 
-  async generateReply(input: ChatInput): Promise<ChatOutput> {
-    return runProviderChain(this.providers, "chat", (provider) => provider.generateReply(input));
+  async generateReply(input: ChatInput, options?: ProviderCallOptions): Promise<ChatOutput> {
+    return runProviderChain(this.providers, "chat", (provider) =>
+      provider.generateReply(input, options)
+    );
   }
 
   async *streamReply(
@@ -1129,7 +1132,7 @@ export class FallbackChatProvider implements ChatProvider {
   }
 }
 
-class FallbackReasoningProvider implements ReasoningProvider {
+export class FallbackReasoningProvider implements ReasoningProvider {
   readonly name: string;
 
   constructor(
@@ -1146,14 +1149,17 @@ class FallbackReasoningProvider implements ReasoningProvider {
     );
   }
 
-  async generateReasoning(input: ReasoningInput): Promise<ReasoningOutput> {
+  async generateReasoning(
+    input: ReasoningInput,
+    options?: ProviderCallOptions
+  ): Promise<ReasoningOutput> {
     return runProviderChain(this.providers, "reasoning", (provider) =>
-      provider.generateReasoning(input)
+      provider.generateReasoning(input, options)
     );
   }
 }
 
-class FallbackTTSProvider implements TTSProvider {
+export class FallbackTTSProvider implements TTSProvider {
   readonly name: string;
 
   constructor(
@@ -1170,12 +1176,14 @@ class FallbackTTSProvider implements TTSProvider {
     );
   }
 
-  async synthesizeSpeech(input: TTSInput): Promise<TTSOutput> {
-    return runProviderChain(this.providers, "tts", (provider) => provider.synthesizeSpeech(input));
+  async synthesizeSpeech(input: TTSInput, options?: ProviderCallOptions): Promise<TTSOutput> {
+    return runProviderChain(this.providers, "tts", (provider) =>
+      provider.synthesizeSpeech(input, options)
+    );
   }
 }
 
-class FallbackSTTProvider implements STTProvider {
+export class FallbackSTTProvider implements STTProvider {
   readonly name: string;
 
   constructor(
@@ -1192,12 +1200,14 @@ class FallbackSTTProvider implements STTProvider {
     );
   }
 
-  async transcribeAudio(input: STTInput): Promise<STTOutput> {
-    return runProviderChain(this.providers, "stt", (provider) => provider.transcribeAudio(input));
+  async transcribeAudio(input: STTInput, options?: ProviderCallOptions): Promise<STTOutput> {
+    return runProviderChain(this.providers, "stt", (provider) =>
+      provider.transcribeAudio(input, options)
+    );
   }
 }
 
-class FallbackVisionProvider implements VisionProvider {
+export class FallbackVisionProvider implements VisionProvider {
   readonly name: string;
 
   constructor(
@@ -1214,12 +1224,14 @@ class FallbackVisionProvider implements VisionProvider {
     );
   }
 
-  async analyzeImage(input: VisionInput): Promise<VisionOutput> {
-    return runProviderChain(this.providers, "vision", (provider) => provider.analyzeImage(input));
+  async analyzeImage(input: VisionInput, options?: ProviderCallOptions): Promise<VisionOutput> {
+    return runProviderChain(this.providers, "vision", (provider) =>
+      provider.analyzeImage(input, options)
+    );
   }
 }
 
-class FallbackEmbeddingProvider implements EmbeddingProvider {
+export class FallbackEmbeddingProvider implements EmbeddingProvider {
   readonly name: string;
   readonly dimensions: number;
   readonly model: string | undefined;
@@ -1243,17 +1255,17 @@ class FallbackEmbeddingProvider implements EmbeddingProvider {
     );
   }
 
-  async embedText(text: string): Promise<number[]> {
+  async embedText(text: string, options?: ProviderCallOptions): Promise<number[]> {
     const output = await runProviderChain(this.providers, "embedding", async (provider) => ({
-      vector: await provider.embedText(text),
+      vector: await provider.embedText(text, options),
       model: provider.model
     }));
     return output.vector;
   }
 
-  async embedBatch(texts: string[]): Promise<number[][]> {
+  async embedBatch(texts: string[], options?: ProviderCallOptions): Promise<number[][]> {
     const output = await runProviderChain(this.providers, "embedding", async (provider) => ({
-      vectors: await provider.embedBatch(texts),
+      vectors: await provider.embedBatch(texts, options),
       model: provider.model
     }));
     return output.vectors;
