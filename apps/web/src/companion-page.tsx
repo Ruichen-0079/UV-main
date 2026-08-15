@@ -3,6 +3,7 @@ import { apiClient } from "./api/client.js";
 import { CompanionBus, type CompanionBusMessage } from "./companion-bus.js";
 import {
   createCompanionBlinkScheduler,
+  createCompanionPresenceEpochGuard,
   createPresenceBehaviorTransition,
   createInterruptedResetScheduler,
   createInitialCompanionPresence,
@@ -53,6 +54,7 @@ export function CompanionPage(): JSX.Element {
   const [framing, setFraming] = useState<LumiFraming>("half");
   const activeEpochRef = useRef<string | null>(null);
   const speechStoppedEpochRef = useRef<string | null>(null);
+  const epochGuardRef = useRef(createCompanionPresenceEpochGuard());
   const presenceRef = useRef<CompanionPresentationState>("idle");
   const blinkSchedulerRef = useRef<ReturnType<typeof createCompanionBlinkScheduler> | null>(null);
   const gazeSchedulerRef = useRef<ReturnType<typeof createGazeScheduler> | null>(null);
@@ -110,7 +112,7 @@ export function CompanionPage(): JSX.Element {
     }
 
     function startGeneration(requestId: string, sessionId: string): void {
-      if (activeEpochRef.current === requestId) return;
+      if (!epochGuardRef.current.accept(requestId)) return;
       // A new turn replaces the previous speech session: old audio stops,
       // stale presence is reset and synthesis restarts from a fresh queue.
       recordSpeechLedger(requestId, null, "turn-start");
@@ -205,6 +207,11 @@ export function CompanionPage(): JSX.Element {
                   state: playbackState
                 })
               );
+              bus.post({
+                kind: "playback-status",
+                requestId,
+                state: playbackState
+              });
             }
             lumiRef.current?.handlePlaybackEvent(event);
           }
@@ -339,6 +346,7 @@ export function CompanionPage(): JSX.Element {
           }
           return;
         case "companion-ready":
+        case "playback-status":
         case "speech-status":
           return;
       }
@@ -353,6 +361,7 @@ export function CompanionPage(): JSX.Element {
       sessionRef.current = null;
       activeEpochRef.current = null;
       speechStoppedEpochRef.current = null;
+      epochGuardRef.current.dispose();
       speechBuffer.clear();
       bus.close();
     };

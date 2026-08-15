@@ -16,6 +16,7 @@ import type { SpeechQueueState } from "./speech-queue.js";
 export type CompanionBusRole = "main" | "companion";
 
 export type CompanionGenerationState = "listening" | "thinking" | "idle" | "interrupted";
+export type CompanionPlaybackState = "started" | "ended" | "stopped" | "error";
 
 export type CompanionBusMessage =
   | { kind: "user-gesture" }
@@ -26,6 +27,7 @@ export type CompanionBusMessage =
   | { kind: "stop-speech"; requestId: string }
   | { kind: "generation-state"; requestId: string; state: CompanionGenerationState }
   | { kind: "companion-ready" }
+  | { kind: "playback-status"; requestId: string; state: CompanionPlaybackState }
   | { kind: "speech-status"; requestId: string; state: SpeechQueueState };
 
 type WireMessage = { from: CompanionBusRole; message: CompanionBusMessage };
@@ -41,6 +43,7 @@ const knownKinds = new Set<string>([
   "stop-speech",
   "generation-state",
   "companion-ready",
+  "playback-status",
   "speech-status"
 ]);
 
@@ -105,6 +108,8 @@ export function isCompanionBusMessage(value: unknown): value is CompanionBusMess
       return isNonEmptyString(message["requestId"]);
     case "generation-state":
       return isNonEmptyString(message["requestId"]) && isGenerationState(message["state"]);
+    case "playback-status":
+      return isNonEmptyString(message["requestId"]) && isPlaybackState(message["state"]);
     case "speech-status":
       return isNonEmptyString(message["requestId"]) && isSpeechQueueState(message["state"]);
   }
@@ -123,6 +128,10 @@ function isGenerationState(value: unknown): value is CompanionGenerationState {
   return (
     value === "listening" || value === "thinking" || value === "idle" || value === "interrupted"
   );
+}
+
+function isPlaybackState(value: unknown): value is CompanionPlaybackState {
+  return value === "started" || value === "ended" || value === "stopped" || value === "error";
 }
 
 function isSpeechQueueState(value: unknown): value is SpeechQueueState {

@@ -3,6 +3,7 @@ import {
   BLINK_CONFIG,
   BLINK_MAX_INTERVAL_MS,
   BLINK_MIN_INTERVAL_MS,
+  createCompanionPresenceEpochGuard,
   createInitialCompanionPresence,
   createCompanionBlinkScheduler,
   createInterruptedResetScheduler,
@@ -151,6 +152,42 @@ describe("normalized companion presence", () => {
     expect(presence).toEqual(current);
   });
 
+  it("retires old turn starts before they can replace the current epoch", () => {
+    const guard = createCompanionPresenceEpochGuard();
+    let presence = createInitialCompanionPresence();
+
+    if (guard.accept("turn-a")) {
+      presence = reduceCompanionPresence(presence, { type: "turn-start", epoch: "turn-a" });
+    }
+    if (guard.accept("turn-b")) {
+      presence = reduceCompanionPresence(presence, { type: "turn-start", epoch: "turn-b" });
+    }
+    const current = presence;
+
+    expect(guard.accept("turn-a")).toBe(false);
+    expect(presence).toEqual(current);
+    expect(
+      reduceCompanionPresence(presence, {
+        type: "playback",
+        epoch: "turn-a",
+        state: "started"
+      })
+    ).toEqual(current);
+
+    guard.dispose();
+  });
+
+  it("keeps all retired epochs rejected across later turns", () => {
+    const guard = createCompanionPresenceEpochGuard();
+    expect(guard.accept("turn-a")).toBe(true);
+    expect(guard.accept("turn-b")).toBe(true);
+    expect(guard.accept("turn-c")).toBe(true);
+    expect(guard.accept("turn-a")).toBe(false);
+    expect(guard.accept("turn-b")).toBe(false);
+    expect(guard.accept("turn-c")).toBe(false);
+    guard.dispose();
+  });
+
   it("does not revive a cancelled epoch or accept duplicate terminal events", () => {
     let presence = reduceCompanionPresence(createInitialCompanionPresence(), {
       type: "turn-start",
@@ -214,6 +251,53 @@ describe("normalized companion presence", () => {
     });
     presence = reduceCompanionPresence(presence, { type: "turn-start", epoch: "turn-2" });
     expect(presence).toMatchObject({ epoch: "turn-2", lifecycle: "active", activity: "thinking" });
+  });
+
+  it("does not restore interruption after generation completion", () => {
+    let presence = reduceCompanionPresence(createInitialCompanionPresence(), {
+      type: "turn-start",
+      epoch: "turn-1"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "generation",
+      epoch: "turn-1",
+      state: "idle"
+    });
+    const completed = presence;
+
+    expect(
+      reduceCompanionPresence(presence, {
+        type: "generation",
+        epoch: "turn-1",
+        state: "interrupted"
+      })
+    ).toEqual(completed);
+  });
+
+  it("cleans invalidated playback without restoring interruption", () => {
+    let presence = reduceCompanionPresence(createInitialCompanionPresence(), {
+      type: "turn-start",
+      epoch: "turn-1"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "playback",
+      epoch: "turn-1",
+      state: "started"
+    });
+    presence = reduceCompanionPresence(presence, { type: "disconnect", state: "offline" });
+    presence = reduceCompanionPresence(presence, {
+      type: "playback",
+      epoch: "turn-1",
+      state: "stopped"
+    });
+
+    expect(presence).toMatchObject({
+      lifecycle: "invalidated",
+      activity: "idle",
+      connectivity: "offline",
+      speech: "cancelled",
+      transition: "none"
+    });
   });
 
   it("accepts explicit listening input without inventing an epoch", () => {

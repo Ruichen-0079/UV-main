@@ -9,7 +9,11 @@ import {
 import { ChatMessageContent } from "./markdown-message.js";
 import { detectSpeechLanguage, type SpeechQueueState } from "./speech-queue.js";
 import { SpeechSegmenter } from "./speech-segmenter.js";
-import { CompanionBus, type CompanionBusMessage } from "./companion-bus.js";
+import {
+  CompanionBus,
+  type CompanionBusMessage,
+  type CompanionPlaybackState
+} from "./companion-bus.js";
 import { EmptyState, Field, Notice, Panel, Pill, Toggle } from "./surface-ui.js";
 import { readVoiceOutputPreference, writeVoiceOutputPreference } from "./voice-output.js";
 import { controlCompanionWindow, isTauriRuntime } from "./tauri-window.js";
@@ -43,6 +47,7 @@ export function MainPage(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [lastTraceId, setLastTraceId] = useState<string | null>(null);
   const [voicePlaybackStatus, setVoicePlaybackStatus] = useState<VoicePlaybackStatus>("idle");
+  const [actualPlaybackActive, setActualPlaybackActive] = useState(false);
   const [companionReady, setCompanionReady] = useState(false);
   const [input, setInput] = useState("");
   const [companionActionError, setCompanionActionError] = useState<string | null>(null);
@@ -58,6 +63,7 @@ export function MainPage(): JSX.Element {
     sequence: number;
     ended: boolean;
   } | null>(null);
+  const speechEpochRef = useRef<string | null>(null);
   const activeRequestRef = useRef<{
     id: string;
     assistantId: string;
@@ -81,7 +87,14 @@ export function MainPage(): JSX.Element {
         // voice-enabled preference so TTS state converges without a reload.
         bus.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
       } else if (message.kind === "speech-status") {
+        if (speechEpochRef.current !== message.requestId) return;
         setVoicePlaybackStatus(message.state);
+        if (message.state === "idle" || message.state === "stopped") {
+          speechEpochRef.current = null;
+        }
+      } else if (message.kind === "playback-status") {
+        if (speechEpochRef.current !== message.requestId) return;
+        applyPlaybackStatus(message.state, setVoicePlaybackStatus, setActualPlaybackActive);
       }
     });
     // Announce the persisted preference so a companion that is already open
@@ -95,6 +108,7 @@ export function MainPage(): JSX.Element {
       activeRequestRef.current?.controller.abort();
       activeRequestRef.current = null;
       speechSessionRef.current = null;
+      speechEpochRef.current = null;
     };
   }, []);
 
@@ -102,7 +116,11 @@ export function MainPage(): JSX.Element {
     setVoiceOutput(enabled);
     writeVoiceOutputPreference(enabled);
     voiceOutputRef.current = enabled;
-    if (!enabled) setVoicePlaybackStatus("idle");
+    if (!enabled) {
+      setVoicePlaybackStatus("idle");
+      setActualPlaybackActive(false);
+      speechEpochRef.current = null;
+    }
     busRef.current?.post({ kind: "voice-enabled", enabled });
   }
 
@@ -124,6 +142,8 @@ export function MainPage(): JSX.Element {
       controller,
       completedObserved: false
     };
+    speechEpochRef.current = voiceOutputRef.current ? requestId : null;
+    setActualPlaybackActive(false);
     setRequestStatus("sending");
     const bus = busRef.current;
     bus?.post({ kind: "user-gesture" });
@@ -309,9 +329,14 @@ export function MainPage(): JSX.Element {
   }
 
   function stopSpeech(): void {
-    const requestId = activeRequestRef.current?.id ?? "unknown";
+    const requestId = resolveSpeechCommandEpoch(
+      speechEpochRef.current,
+      activeRequestRef.current?.id ?? null
+    );
+    if (requestId === null) return;
     busRef.current?.post({ kind: "stop-speech", requestId });
     setVoicePlaybackStatus("stopped");
+    setActualPlaybackActive(false);
   }
 
   async function controlCompanion(
@@ -454,7 +479,9 @@ export function MainPage(): JSX.Element {
                 Send
               </button>
             )}
-            {(voicePlaybackStatus === "synthesizing" || voicePlaybackStatus === "playing") && (
+            {(actualPlaybackActive ||
+              voicePlaybackStatus === "synthesizing" ||
+              voicePlaybackStatus === "playing") && (
               <button
                 type="button"
                 className="button-secondary h-20 w-24"
@@ -467,7 +494,7 @@ export function MainPage(): JSX.Element {
           </div>
           {voiceOutput && voicePlaybackStatus !== "idle" && (
             <div className="mt-2 text-xs text-ink-500" aria-live="polite">
-              {voicePlaybackStatusLabel(voicePlaybackStatus)}
+              {voicePlaybackStatusLabel(voicePlaybackStatus, actualPlaybackActive)}
             </div>
           )}
         </Panel>
@@ -520,12 +547,23 @@ function chatStatusLabel(status: NonNullable<ChatMessage["status"]>): string {
   }
 }
 
-function voicePlaybackStatusLabel(status: VoicePlaybackStatus): string {
+export function resolveSpeechCommandEpoch(
+  speechEpoch: string | null,
+  generationEpoch: string | null
+): string | null {
+  return speechEpoch ?? generationEpoch;
+}
+
+export function voicePlaybackStatusLabel(
+  status: VoicePlaybackStatus,
+  actualPlaybackActive = false
+): string {
+  if (actualPlaybackActive) return "Speaking…";
   switch (status) {
     case "synthesizing":
       return "Preparing speech…";
     case "playing":
-      return "Speaking…";
+      return actualPlaybackActive ? "Speaking…" : "Speech queued…";
     case "stopped":
       return "Speech stopped; generated text is preserved.";
     case "error":
@@ -533,6 +571,20 @@ function voicePlaybackStatusLabel(status: VoicePlaybackStatus): string {
     default:
       return "";
   }
+}
+
+function applyPlaybackStatus(
+  state: CompanionPlaybackState,
+  setStatus: (status: VoicePlaybackStatus) => void,
+  setActive: (active: boolean) => void
+): void {
+  if (state === "started") {
+    setStatus("playing");
+    setActive(true);
+    return;
+  }
+  setActive(false);
+  if (state === "error") setStatus("error");
 }
 
 function friendlyChatError(error: unknown): string {

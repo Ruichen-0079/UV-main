@@ -58,6 +58,37 @@ export function createInitialCompanionPresence(
   };
 }
 
+/**
+ * Session-local guard for turn-start inputs. Request ids are opaque, so the
+ * current id alone cannot distinguish a new turn from a delayed old start.
+ * The owning surface keeps retired ids here without putting history into the
+ * public Presence projection.
+ */
+export type CompanionPresenceEpochGuard = {
+  accept(epoch: string): boolean;
+  dispose(): void;
+};
+
+export function createCompanionPresenceEpochGuard(): CompanionPresenceEpochGuard {
+  let currentEpoch: string | null = null;
+  const retiredEpochs = new Set<string>();
+
+  return {
+    accept(epoch) {
+      if (!isValidEpoch(epoch) || epoch === currentEpoch || retiredEpochs.has(epoch)) {
+        return false;
+      }
+      if (currentEpoch !== null) retiredEpochs.add(currentEpoch);
+      currentEpoch = epoch;
+      return true;
+    },
+    dispose() {
+      currentEpoch = null;
+      retiredEpochs.clear();
+    }
+  };
+}
+
 export type PresenceTargetRegionWeights = {
   center: number;
   left: number;
@@ -516,6 +547,7 @@ function reduceGeneration(
   if (!isCurrentEpoch(current, event.epoch)) return current;
 
   if (event.state === "interrupted") {
+    if (current.lifecycle !== "active") return current;
     return {
       ...current,
       lifecycle: "cancelled",
@@ -557,7 +589,11 @@ function reduceQueue(
       // Queue scheduling is not actual browser playback.
       return { ...current, speech: "queued" };
     case "stopped":
-      return { ...current, speech: "cancelled", transition: "interrupted" };
+      return {
+        ...current,
+        speech: "cancelled",
+        transition: current.lifecycle === "invalidated" ? current.transition : "interrupted"
+      };
     case "error":
       return { ...current, speech: "error" };
     case "idle":
@@ -592,7 +628,11 @@ function reducePlayback(
     case "ended":
       return { ...current, speech: "completed" };
     case "stopped":
-      return { ...current, speech: "cancelled", transition: "interrupted" };
+      return {
+        ...current,
+        speech: "cancelled",
+        transition: current.lifecycle === "invalidated" ? current.transition : "interrupted"
+      };
     case "error":
       return { ...current, speech: "error" };
   }
@@ -603,7 +643,11 @@ function reduceSpeechCancelled(
   epoch: string
 ): CompanionPresenceProjection {
   if (!isCurrentEpoch(current, epoch)) return current;
-  return { ...current, speech: "cancelled", transition: "interrupted" };
+  return {
+    ...current,
+    speech: "cancelled",
+    transition: current.lifecycle === "invalidated" ? current.transition : "interrupted"
+  };
 }
 
 function reduceDisconnect(

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MainPage } from "./main-page.js";
+import { MainPage, resolveSpeechCommandEpoch, voicePlaybackStatusLabel } from "./main-page.js";
 import { VOICE_OUTPUT_STORAGE_KEY } from "./voice-output.js";
 
 function renderMainPage(): string {
@@ -36,5 +36,18 @@ describe("MainPage TTS output preference", () => {
 
   it("renders without crashing when localStorage is unavailable", () => {
     expect(() => renderMainPage()).not.toThrow();
+  });
+});
+
+describe("MainPage speech lifecycle correlation", () => {
+  it("retains the speech epoch after generation ownership ends", () => {
+    expect(resolveSpeechCommandEpoch("turn-a", null)).toBe("turn-a");
+    expect(resolveSpeechCommandEpoch(null, "turn-a")).toBe("turn-a");
+    expect(resolveSpeechCommandEpoch(null, null)).toBeNull();
+  });
+
+  it("does not label queue scheduling as actual speaking", () => {
+    expect(voicePlaybackStatusLabel("playing", false)).toBe("Speech queued…");
+    expect(voicePlaybackStatusLabel("playing", true)).toBe("Speaking…");
   });
 });

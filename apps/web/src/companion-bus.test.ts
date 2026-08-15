@@ -40,6 +40,23 @@ describe("CompanionBus", () => {
     }
   });
 
+  it("relays correlated browser playback status messages", async () => {
+    const main = new CompanionBus("main");
+    const companion = new CompanionBus("companion");
+    try {
+      const received: string[] = [];
+      main.subscribe((message) => {
+        if (message.kind === "playback-status") received.push(message.state);
+      });
+      companion.post({ kind: "playback-status", requestId: "r1", state: "started" });
+      companion.post({ kind: "playback-status", requestId: "r1", state: "ended" });
+      await vi.waitFor(() => expect(received).toEqual(["started", "ended"]));
+    } finally {
+      main.close();
+      companion.close();
+    }
+  });
+
   it("relays voice-enabled preference from main to companion", async () => {
     const main = new CompanionBus("main");
     const companion = new CompanionBus("companion");
@@ -138,6 +155,12 @@ describe("CompanionBus", () => {
     ).toBe(false);
     expect(
       isCompanionBusMessage({ kind: "generation-state", requestId: "r1", state: "unknown" })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({ kind: "playback-status", requestId: "r1", state: "started" })
+    ).toBe(true);
+    expect(
+      isCompanionBusMessage({ kind: "playback-status", requestId: "r1", state: "playing" })
     ).toBe(false);
     expect(isCompanionBusMessage({ kind: "user-gesture", extra: true })).toBe(false);
   });
