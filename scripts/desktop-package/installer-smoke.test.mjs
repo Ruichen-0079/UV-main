@@ -56,7 +56,17 @@ import {
   readOwnershipMetadataDiagnostic,
   resolveExistingWindowsPathForComparison,
   sanitizeChildEnv,
+  applyInstallerSmokePostgresFixture,
+  applyInstallerSmokePostgresPassword,
+  assertMem0FollowsMemorySearch,
+  generateInstallerSmokePostgresPassword,
+  INSTALLER_SMOKE_POSTGRES_HOME_ENV,
+  memorySearchStatusFromStatus,
+  readInstallerSmokePostgresHome,
+  redactInstallerSmokeSecretText,
+  schemaReadyFromStatus,
   snapshotTree,
+  validateInstallerSmokePostgresHome,
   assertSupervisorProvenance,
   powershellDiagnosticPath,
   runWmCloseHelper,
@@ -69,6 +79,15 @@ import {
   validatePackagingInfo,
   validateSupervisorProvenance
 } from "./installer-smoke.mjs";
+import {
+  POSTGRES16_FIXTURE_MAJOR,
+  POSTGRES16_FIXTURE_SHA256,
+  POSTGRES16_FIXTURE_URL,
+  POSTGRES16_FIXTURE_VERSION,
+  assertSha256,
+  parsePostgresMajor,
+  validatePostgres16Distribution
+} from "./provision-postgres16-fixture.mjs";
 
 const temp = (prefix = "yuvi-installer-test-") => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 const syntheticExistingResolver = (value) =>
@@ -197,7 +216,10 @@ test("Runtime health protocol accepts ready and clean-install degraded chat stat
 test("Runtime health protocol rejects unhealthy, malformed, and inconsistent payloads", () => {
   const cases = [
     ["database unhealthy", { database: { status: "unhealthy" }, ok: false }],
-    ["database unavailable with chat available", { database: { status: "unavailable" }, ok: false }],
+    [
+      "database unavailable with chat available",
+      { database: { status: "unavailable" }, ok: false }
+    ],
     ["ok true while chat unavailable", { ok: true, chat: { available: false } }],
     ["ok false while chat available", { ok: false }],
     ["HTTP 500", { status: 500, value: runtimeHealthBody() }],
@@ -205,15 +227,37 @@ test("Runtime health protocol rejects unhealthy, malformed, and inconsistent pay
     ["missing body", { status: 200, value: null }],
     ["array body", { status: 200, value: [] }],
     ["string body", { status: 200, value: "healthy" }],
-    ["missing ok", { status: 200, value: (() => { const body = runtimeHealthBody(); delete body.ok; return body; })() }],
+    [
+      "missing ok",
+      {
+        status: 200,
+        value: (() => {
+          const body = runtimeHealthBody();
+          delete body.ok;
+          return body;
+        })()
+      }
+    ],
     ["non-boolean ok", { status: 200, value: runtimeHealthBody({ ok: "true" }) }],
     ["wrong service", { status: 200, value: runtimeHealthBody({ service: "other-service" }) }],
     ["missing server", { status: 200, value: runtimeHealthBody({ server: null }) }],
-    ["unhealthy server", { status: 200, value: runtimeHealthBody({ server: { status: "starting" } }) }],
+    [
+      "unhealthy server",
+      { status: 200, value: runtimeHealthBody({ server: { status: "starting" } }) }
+    ],
     ["missing database", { status: 200, value: runtimeHealthBody({ database: null, ok: false }) }],
-    ["missing database status", { status: 200, value: runtimeHealthBody({ database: {}, ok: false }) }],
-    ["missing providers chat", { status: 200, value: { ...runtimeHealthBody(), ok: false, providers: {} } }],
-    ["non-boolean chat available", { status: 200, value: runtimeHealthBody({ ok: false, chat: { available: "false" } }) }]
+    [
+      "missing database status",
+      { status: 200, value: runtimeHealthBody({ database: {}, ok: false }) }
+    ],
+    [
+      "missing providers chat",
+      { status: 200, value: { ...runtimeHealthBody(), ok: false, providers: {} } }
+    ],
+    [
+      "non-boolean chat available",
+      { status: 200, value: runtimeHealthBody({ ok: false, chat: { available: "false" } }) }
+    ]
   ];
   for (const [label, input] of cases) {
     assert.equal(evaluateRuntimeHealthProtocol(input).protocolValid, false, label);
@@ -278,10 +322,11 @@ test("Tauri request diagnostics preserve ECONNRESET and never retry", async () =
 test("Tauri request diagnostics keep successful request count and hide query secrets", async () => {
   const fake = fakeHttpRequest({ responseBody: JSON.stringify({ ok: true }) });
   const diagnostics = createRequestDiagnostics({ now: () => 2_000 });
-  const result = await requestJson(
-    "http://127.0.0.1:6121/health?api_key=query-secret",
-    { label: "supervisor.health", diagnostics, requestFactory: fake.factory }
-  );
+  const result = await requestJson("http://127.0.0.1:6121/health?api_key=query-secret", {
+    label: "supervisor.health",
+    diagnostics,
+    requestFactory: fake.factory
+  });
   assert.equal(result.status, 200);
   assert.deepEqual(result.value, { ok: true });
   assert.equal(fake.calls(), 1);
@@ -307,7 +352,10 @@ test("requestJson isolates sequential requests and does not use globalAgent", as
   assert.equal(second.status, 200);
   assert.equal(fake.factoryCalls(), 2);
   assert.equal(fake.calls(), 2);
-  assert.deepEqual(fake.optionsSeen().map((options) => options.agent), [false, false]);
+  assert.deepEqual(
+    fake.optionsSeen().map((options) => options.agent),
+    [false, false]
+  );
   assert.notEqual(fake.optionsSeen()[0].agent, http.globalAgent);
 });
 
@@ -318,7 +366,10 @@ test("Tauri failure timeline is bounded and retains deterministic order", () => 
   timeline.mark("E1");
   timeline.mark("E2");
   timeline.mark("E3");
-  assert.deepEqual(timeline.snapshot().map((event) => event.phase), ["E0", "E1", "E2"]);
+  assert.deepEqual(
+    timeline.snapshot().map((event) => event.phase),
+    ["E0", "E1", "E2"]
+  );
   assert.equal(timeline.droppedCount(), 1);
 });
 
@@ -364,18 +415,28 @@ test("Tauri failure snapshot is injectable and preserves ECONNRESET as primary",
   const primary = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
   const text = formatTauriFailureDiagnostic({
     primaryError: primary,
-    requestDiagnostics: { format: () => "  http-1 supervisor.status GET 127.0.0.1:6121/v1/status errorCode=ECONNRESET", lastFailure: () => ({ errorName: "Error", errorCode: "ECONNRESET" }) },
-    timeline: { snapshot: () => [{ phase: "E7-before-http-request", isoTime: "now", relativeMs: 1 }, { phase: "E8-http-error", isoTime: "now", relativeMs: 2 }] },
+    requestDiagnostics: {
+      format: () => "  http-1 supervisor.status GET 127.0.0.1:6121/v1/status errorCode=ECONNRESET",
+      lastFailure: () => ({ errorName: "Error", errorCode: "ECONNRESET" })
+    },
+    timeline: {
+      snapshot: () => [
+        { phase: "E7-before-http-request", isoTime: "now", relativeMs: 1 },
+        { phase: "E8-http-error", isoTime: "now", relativeMs: 2 }
+      ]
+    },
     snapshot: timeoutSnapshot,
-    processQueries: [{
-      role: "runtime.command-line",
-      pid: 901,
-      startedAt: "2026-08-10T00:00:01.000Z",
-      endedAt: "2026-08-10T00:00:03.500Z",
-      elapsedMs: 2500,
-      outcome: "query-timeout",
-      errorCode: "ETIMEDOUT"
-    }]
+    processQueries: [
+      {
+        role: "runtime.command-line",
+        pid: 901,
+        startedAt: "2026-08-10T00:00:01.000Z",
+        endedAt: "2026-08-10T00:00:03.500Z",
+        elapsedMs: 2500,
+        outcome: "query-timeout",
+        errorCode: "ETIMEDOUT"
+      }
+    ]
   });
   assert.match(text, /primaryCode: ECONNRESET/);
   assert.match(text, /snapshot: query-timeout/);
@@ -544,12 +605,13 @@ test("Supervisor provenance and embedded identity require matching immutable fie
     true
   );
   assert.throws(
-    () => assertSupervisorProvenance({
-      provenance,
-      embedded: { ...embedded, checkoutSha: "f".repeat(40) },
-      installedExecutableSha256: provenance.executableSha256,
-      installedBundleSha256: provenance.bundleInputSha256
-    }),
+    () =>
+      assertSupervisorProvenance({
+        provenance,
+        embedded: { ...embedded, checkoutSha: "f".repeat(40) },
+        installedExecutableSha256: provenance.executableSha256,
+        installedBundleSha256: provenance.bundleInputSha256
+      }),
     /identity mismatch/
   );
   assert.throws(
@@ -568,7 +630,10 @@ test("Supervisor embedded build-info is exactly one JSON line", () => {
     bundleSha256: provenance.bundleSha256,
     entry: provenance.entry
   };
-  assert.deepEqual(parseEmbeddedSupervisorBuildInfo(`${JSON.stringify(embedded)}\n`, "", 0), embedded);
+  assert.deepEqual(
+    parseEmbeddedSupervisorBuildInfo(`${JSON.stringify(embedded)}\n`, "", 0),
+    embedded
+  );
   assert.throws(
     () => parseEmbeddedSupervisorBuildInfo(`${JSON.stringify(embedded)}\n{}\n`, "", 0),
     /exactly one/
@@ -580,7 +645,10 @@ test("Supervisor resource must contain exactly one executable", () => {
   const supervisor = path.join(root, "supervisor");
   fs.mkdirSync(path.join(supervisor, "nested"), { recursive: true });
   fs.writeFileSync(path.join(supervisor, "yuvi-desktop-supervisor.exe"), "one");
-  assert.equal(findUniqueSupervisorExecutable(supervisor), path.join(supervisor, "yuvi-desktop-supervisor.exe"));
+  assert.equal(
+    findUniqueSupervisorExecutable(supervisor),
+    path.join(supervisor, "yuvi-desktop-supervisor.exe")
+  );
   fs.writeFileSync(path.join(supervisor, "nested", "yuvi-desktop-supervisor.exe"), "two");
   assert.throws(() => findUniqueSupervisorExecutable(supervisor), /exactly one/);
 });
@@ -807,12 +875,14 @@ test("Mem0 provenance accepts long actual and short expected filesystem aliases"
     imagePath: actual,
     expectedExecutablePath: expected,
     installRoot: shortRoot,
-    resolveExistingPath: mappedExistingResolver(new Map([
-      [root, root],
-      [shortRoot, root],
-      [actual, actual],
-      [expected, actual]
-    ]))
+    resolveExistingPath: mappedExistingResolver(
+      new Map([
+        [root, root],
+        [shortRoot, root],
+        [actual, actual],
+        [expected, actual]
+      ])
+    )
   });
   assert.equal(result.ok, true);
   assert.equal(result.imageMatchesExpected, true);
@@ -828,12 +898,14 @@ test("Mem0 provenance accepts short actual and long expected filesystem aliases"
     imagePath: actual,
     expectedExecutablePath: expected,
     installRoot: root,
-    resolveExistingPath: mappedExistingResolver(new Map([
-      [root, root],
-      [shortRoot, root],
-      [actual, expected],
-      [expected, expected]
-    ]))
+    resolveExistingPath: mappedExistingResolver(
+      new Map([
+        [root, root],
+        [shortRoot, root],
+        [actual, expected],
+        [expected, expected]
+      ])
+    )
   });
   assert.equal(result.ok, true);
   assert.equal(result.resolvedImagePath, result.resolvedExpectedPath);
@@ -881,24 +953,34 @@ test("Mem0 provenance fails closed for resolver errors and unavailable images", 
     imagePath: actual,
     expectedExecutablePath: expected,
     installRoot: root,
-    resolveExistingPath: mappedExistingResolver(new Map([
-      [root, "C:\\Users\\runneradmin\\Temp\\install"],
-      [expected, actual]
-    ]))
+    resolveExistingPath: mappedExistingResolver(
+      new Map([
+        [root, "C:\\Users\\runneradmin\\Temp\\install"],
+        [expected, actual]
+      ])
+    )
   });
   assert.equal(actualError.ok, false);
-  assert.match(actualError.failureReasons.join(";"), /authoritative Mem0 image filesystem resolution failed/);
+  assert.match(
+    actualError.failureReasons.join(";"),
+    /authoritative Mem0 image filesystem resolution failed/
+  );
   const expectedError = evaluateMem0Provenance({
     imagePath: actual,
     expectedExecutablePath: expected,
     installRoot: root,
-    resolveExistingPath: mappedExistingResolver(new Map([
-      [root, root],
-      [actual, actual]
-    ]))
+    resolveExistingPath: mappedExistingResolver(
+      new Map([
+        [root, root],
+        [actual, actual]
+      ])
+    )
   });
   assert.equal(expectedError.ok, false);
-  assert.match(expectedError.failureReasons.join(";"), /installed Mem0 executable filesystem resolution failed/);
+  assert.match(
+    expectedError.failureReasons.join(";"),
+    /installed Mem0 executable filesystem resolution failed/
+  );
   const unavailable = evaluateMem0Provenance({
     imagePath: "",
     expectedExecutablePath: expected,
@@ -934,7 +1016,10 @@ test("Mem0 command line is not an executable identity gate", () => {
   });
   assert.equal(result.ok, true);
   assert.doesNotThrow(() => assertNoUnsafeCommandLine("unexpected-safe-argument"));
-  const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "installer-smoke.mjs"), "utf8");
+  const source = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "installer-smoke.mjs"),
+    "utf8"
+  );
   assert.doesNotMatch(source, /commandLine\.toLowerCase\(\)[\s\S]{0,160}includes\(expectedMem0\)/);
   assert.ok((source.match(/evaluateMem0Provenance\(/g) ?? []).length >= 2);
 });
@@ -966,10 +1051,7 @@ test("Runtime provenance accepts bundled image with basename or absolute argv0",
   const root = "C:\\Temp\\install\\generated\\win32-x64";
   const node = `${root}\\runtime\\node.exe`;
   const entry = `${root}\\runtime\\yuvi-runtime-server.mjs`;
-  for (const commandLine of [
-    `node.exe "${entry}"`,
-    `"${node}" "${entry}"`
-  ]) {
+  for (const commandLine of [`node.exe "${entry}"`, `"${node}" "${entry}"`]) {
     const result = evaluateRuntimeProvenance({
       imagePath: `\\\\?\\${node}`,
       commandLine,
@@ -1094,10 +1176,7 @@ test("Windows comparison canonicalizer handles drive extended paths, case, separ
     ),
     true
   );
-  assert.equal(
-    normalizeWindowsPathForComparison("C:\\"),
-    "c:\\"
-  );
+  assert.equal(normalizeWindowsPathForComparison("C:\\"), "c:\\");
   assert.equal(pathsEqualWindows("C:\\Temp\\YUVI\\", "c:/temp/yuvi"), true);
   assert.equal(normalizeWindowsPathForComparison("node.exe"), "");
   assert.equal(normalizeWindowsProcessPath(extended), "c:\\temp\\yuvi\\runtime\\node.exe");
@@ -1107,7 +1186,10 @@ test("Windows comparison canonicalizer handles drive extended paths, case, separ
 test("lexical canonicalization never invents 8.3 short-name equivalence", () => {
   const longPath = "C:\\Users\\runneradmin\\Temp\\install\\runtime\\node.exe";
   const shortPath = "C:\\Users\\RUNNER~1\\Temp\\install\\runtime\\node.exe";
-  assert.notEqual(normalizeWindowsPathForComparison(longPath), normalizeWindowsPathForComparison(shortPath));
+  assert.notEqual(
+    normalizeWindowsPathForComparison(longPath),
+    normalizeWindowsPathForComparison(shortPath)
+  );
   assert.equal(pathsEqualWindows(longPath, shortPath), false);
 });
 
@@ -1115,8 +1197,12 @@ test("filesystem path resolver collapses injected short and long aliases", () =>
   const longPath = "C:\\Users\\runneradmin\\Temp\\install\\runtime\\node.exe";
   const shortPath = "C:\\Users\\RUNNER~1\\Temp\\install\\runtime\\node.exe";
   const resolved = (input) => (input === shortPath ? longPath : input);
-  const shortResult = resolveExistingWindowsPathForComparison(shortPath, { realpathSyncNative: resolved });
-  const longResult = resolveExistingWindowsPathForComparison(longPath, { realpathSyncNative: resolved });
+  const shortResult = resolveExistingWindowsPathForComparison(shortPath, {
+    realpathSyncNative: resolved
+  });
+  const longResult = resolveExistingWindowsPathForComparison(longPath, {
+    realpathSyncNative: resolved
+  });
   assert.equal(shortResult.ok, true);
   assert.equal(longResult.ok, true);
   assert.equal(shortResult.resolvedPath, longResult.resolvedPath);
@@ -1145,7 +1231,11 @@ test("Runtime provenance accepts short-vs-long filesystem identity for image and
     installRoot: root,
     resolveExistingPath: (value) =>
       resolveExistingWindowsPathForComparison(value, {
-        realpathSyncNative: (input) => resolveMap.get(input) ?? (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })()
+        realpathSyncNative: (input) =>
+          resolveMap.get(input) ??
+          (() => {
+            throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          })()
       })
   });
   assert.equal(result.ok, true);
@@ -1159,7 +1249,8 @@ test("filesystem-resolved provenance rejects a different real target and short s
   const root = "C:\\Users\\runneradmin\\Temp\\install\\generated\\win32-x64";
   const expectedNode = `${root}\\runtime\\node.exe`;
   const expectedEntry = `${root}\\runtime\\yuvi-runtime-server.mjs`;
-  const shortSiblingNode = "C:\\Users\\RUNNER~2\\Temp\\install\\generated\\win32-x64\\runtime\\node.exe";
+  const shortSiblingNode =
+    "C:\\Users\\RUNNER~2\\Temp\\install\\generated\\win32-x64\\runtime\\node.exe";
   const resolveMap = new Map([
     [root, root],
     [expectedNode, expectedNode],
@@ -1168,7 +1259,11 @@ test("filesystem-resolved provenance rejects a different real target and short s
   ]);
   const resolveExisting = (value) =>
     resolveExistingWindowsPathForComparison(value, {
-      realpathSyncNative: (input) => resolveMap.get(input) ?? (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })()
+      realpathSyncNative: (input) =>
+        resolveMap.get(input) ??
+        (() => {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        })()
     });
   const result = evaluateRuntimeProvenance({
     imagePath: shortSiblingNode,
@@ -1203,7 +1298,11 @@ test("filesystem-resolved containment accepts an alias inside root and rejects a
   ]);
   const resolveExisting = (value) =>
     resolveExistingWindowsPathForComparison(value, {
-      realpathSyncNative: (input) => resolveMap.get(input) ?? (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })()
+      realpathSyncNative: (input) =>
+        resolveMap.get(input) ??
+        (() => {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        })()
     });
   const inside = evaluateRuntimeProvenance({
     imagePath: insideShort,
@@ -1272,19 +1371,13 @@ test("Windows comparison canonicalizer preserves UNC semantics", () => {
     normalizeWindowsPathForComparison("\\\\?\\UNC\\SERVER\\SHARE"),
     "\\\\server\\share\\"
   );
-  assert.equal(
-    pathsEqualWindows("\\\\server\\share\\", "\\\\?\\UNC\\server\\share"),
-    true
-  );
+  assert.equal(pathsEqualWindows("\\\\server\\share\\", "\\\\?\\UNC\\server\\share"), true);
 });
 
 test("Windows inside-root comparison uses relative path boundaries", () => {
   const root = "C:\\Temp\\YUVI";
   assert.equal(isWindowsPathInside(root, "C:\\Temp\\YUVI\\runtime\\node.exe"), true);
-  assert.equal(
-    isWindowsPathInside(root, "\\\\?\\C:\\Temp\\YUVI\\runtime\\node.exe"),
-    true
-  );
+  assert.equal(isWindowsPathInside(root, "\\\\?\\C:\\Temp\\YUVI\\runtime\\node.exe"), true);
   assert.equal(
     isWindowsPathInside("\\\\?\\C:\\Temp\\YUVI", "C:\\Temp\\YUVI\\runtime\\node.exe"),
     true
@@ -1294,10 +1387,7 @@ test("Windows inside-root comparison uses relative path boundaries", () => {
   assert.equal(isWindowsPathInside(root, "C:\\Temp\\YUVI2\\node.exe"), false);
   assert.equal(isWindowsPathInside(root, "C:\\Temp\\YUVI\\..\\outside\\node.exe"), false);
   assert.equal(isWindowsPathInside(root, "D:\\Temp\\YUVI\\runtime\\node.exe"), false);
-  assert.equal(
-    isWindowsPathInside("\\\\server\\share", "\\\\?\\UNC\\server\\share2\\foo"),
-    false
-  );
+  assert.equal(isWindowsPathInside("\\\\server\\share", "\\\\?\\UNC\\server\\share2\\foo"), false);
 });
 
 test("diagnostics sample listener, metadata, and stable ownership state changes", async () => {
@@ -1806,7 +1896,8 @@ test("WM_CLOSE command uses Python ctypes exact-HWND targeting", () => {
     "GetWindowTextW",
     "IsWindow",
     "PostMessageW"
-  ]) assert.match(script, new RegExp(symbol));
+  ])
+    assert.match(script, new RegExp(symbol));
   assert.match(script, /expected_title/);
   assert.match(script, /emit_phase\("before_revalidate"\)/);
   assert.match(script, /emit_phase\("after_post"\)/);
@@ -1834,11 +1925,16 @@ test("WM_CLOSE harness requires an absolute existing YUVI_PYTHON311 file", () =>
     /absolute/
   );
   assert.throws(
-    () => resolveWmClosePythonExecutable(
-      { YUVI_PYTHON311: "C:\\missing\\python.exe" },
-      { statSync: () => { throw new Error("ENOENT"); } },
-      "win32"
-    ),
+    () =>
+      resolveWmClosePythonExecutable(
+        { YUVI_PYTHON311: "C:\\missing\\python.exe" },
+        {
+          statSync: () => {
+            throw new Error("ENOENT");
+          }
+        },
+        "win32"
+      ),
     /existing/
   );
   assert.equal(
@@ -1923,7 +2019,10 @@ test("WM_CLOSE helper accepts a successful structured result", async () => {
       return child;
     }
   });
-  assert.equal(observedExecutable, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.equal(
+    observedExecutable,
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  );
   assert.equal(result.pidTopLevelWindows, 2);
   assert.equal(result.exactTitleMatches, 1);
   assert.equal(result.targetHwnd, 123456);
@@ -2017,10 +2116,7 @@ test("WM_CLOSE helper rejects missing fields and wrong target PID", async () => 
       spawnImpl: () => {
         const { child } = fakeWmCloseChild();
         queueMicrotask(() => {
-          child.stdout.emit(
-            "data",
-            wmCloseOutput().replace("post_result=1\n", "")
-          );
+          child.stdout.emit("data", wmCloseOutput().replace("post_result=1\n", ""));
           child.emit("exit", 0, null);
         });
         return child;
@@ -2175,4 +2271,196 @@ test("resource snapshot detects app-mode writes", () => {
   const before = snapshotTree(root);
   fs.writeFileSync(path.join(root, "packaging-info.json"), "after");
   assert.equal(compareSnapshots(before, snapshotTree(root)).at(0).type, "changed");
+});
+
+test("sanitizeChildEnv strips parent PostgreSQL and memory overrides", () => {
+  const previous = {
+    YUVI_POSTGRES_HOME: process.env.YUVI_POSTGRES_HOME,
+    YUVI_POSTGRES_MODE: process.env.YUVI_POSTGRES_MODE,
+    YUVI_POSTGRES_DATA_ROOT: process.env.YUVI_POSTGRES_DATA_ROOT,
+    YUVI_POSTGRES_PASSWORD: process.env.YUVI_POSTGRES_PASSWORD,
+    DATABASE_URL: process.env.DATABASE_URL,
+    MEMORY_REPOSITORY: process.env.MEMORY_REPOSITORY
+  };
+  Object.assign(process.env, {
+    YUVI_POSTGRES_HOME: "/tmp/host-pg",
+    YUVI_POSTGRES_MODE: "external",
+    YUVI_POSTGRES_DATA_ROOT: "/tmp/host-pgdata",
+    YUVI_POSTGRES_PASSWORD: "host-secret",
+    DATABASE_URL: "postgres://host",
+    MEMORY_REPOSITORY: "postgres"
+  });
+  try {
+    const env = sanitizeChildEnv();
+    for (const key of [
+      "YUVI_POSTGRES_HOME",
+      "YUVI_POSTGRES_MODE",
+      "YUVI_POSTGRES_DATA_ROOT",
+      "YUVI_POSTGRES_PASSWORD",
+      "DATABASE_URL",
+      "MEMORY_REPOSITORY"
+    ])
+      assert.equal(env[key], undefined);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("dedicated installer-smoke fixture input is the only mapped PostgreSQL home", () => {
+  const previousFixture = process.env[INSTALLER_SMOKE_POSTGRES_HOME_ENV];
+  const previousHome = process.env.YUVI_POSTGRES_HOME;
+  const home = temp("yuvi-pg-fixture-");
+  fs.mkdirSync(path.join(home, "bin"), { recursive: true });
+  process.env[INSTALLER_SMOKE_POSTGRES_HOME_ENV] = home;
+  process.env.YUVI_POSTGRES_HOME = "/tmp/parent-pg";
+  try {
+    const env = sanitizeChildEnv();
+    assert.equal(env.YUVI_POSTGRES_HOME, undefined);
+    const mapped = applyInstallerSmokePostgresFixture(env, process.env, {
+      validate: () => ({ home, major: POSTGRES16_FIXTURE_MAJOR })
+    });
+    assert.equal(mapped, path.resolve(home));
+    assert.equal(env.YUVI_POSTGRES_HOME, path.resolve(home));
+    assert.equal(readInstallerSmokePostgresHome(process.env), home);
+    assert.notEqual(env.YUVI_POSTGRES_HOME, "/tmp/parent-pg");
+  } finally {
+    if (previousFixture === undefined) delete process.env[INSTALLER_SMOKE_POSTGRES_HOME_ENV];
+    else process.env[INSTALLER_SMOKE_POSTGRES_HOME_ENV] = previousFixture;
+    if (previousHome === undefined) delete process.env.YUVI_POSTGRES_HOME;
+    else process.env.YUVI_POSTGRES_HOME = previousHome;
+  }
+});
+
+test("dedicated PostgreSQL fixture path is rejected when missing, relative, or absent", () => {
+  assert.throws(() => validateInstallerSmokePostgresHome(""), /required/);
+  assert.throws(() => validateInstallerSmokePostgresHome("relative/pg"), /absolute/);
+  assert.throws(
+    () => validateInstallerSmokePostgresHome(path.join(os.tmpdir(), "yuvi-missing-pg-home")),
+    /does not exist/
+  );
+});
+
+test("PostgreSQL fixture major other than 16 is rejected", () => {
+  const home = temp("yuvi-pg-wrong-");
+  fs.mkdirSync(path.join(home, "bin"), { recursive: true });
+  for (const name of ["postgres", "pg_ctl", "initdb"]) {
+    fs.writeFileSync(path.join(home, "bin", name), "stub");
+  }
+  assert.throws(
+    () =>
+      validateInstallerSmokePostgresHome(home, {
+        validate: () => {
+          throw new Error("PostgreSQL 16 fixture requires major 16 (postgres is 17)");
+        }
+      }),
+    /major 16/
+  );
+  assert.throws(
+    () =>
+      validatePostgres16Distribution(home, {
+        inspect: () => ({ major: 17, versionText: "postgres (PostgreSQL) 17.4" })
+      }),
+    /major 16/
+  );
+  assert.equal(parsePostgresMajor("postgres (PostgreSQL) 16.10"), 16);
+});
+
+test("ephemeral installer-smoke password is generated, injected after sanitization, and not logged", () => {
+  const env = sanitizeChildEnv();
+  assert.equal(env.YUVI_POSTGRES_PASSWORD, undefined);
+  const password = generateInstallerSmokePostgresPassword(() => Buffer.alloc(32, 7));
+  applyInstallerSmokePostgresPassword(env, password);
+  assert.equal(env.YUVI_POSTGRES_PASSWORD, password);
+  const diagnostic = redactInstallerSmokeSecretText(
+    `YUVI_POSTGRES_PASSWORD=${password} home=/tmp/pg`,
+    [password]
+  );
+  assert.doesNotMatch(diagnostic, new RegExp(password.replaceAll("-", "\\-")));
+  assert.match(diagnostic, /\[redacted\]/);
+  assert.throws(() => applyInstallerSmokePostgresPassword(env, "short"), /too short/);
+});
+
+test("schemaReady is the primary D2 PostgreSQL smoke success criterion", () => {
+  assert.equal(schemaReadyFromStatus({ postgres: { migration: { schemaReady: true } } }), true);
+  assert.equal(schemaReadyFromStatus({ postgres: { migration: { schemaReady: false } } }), false);
+  assert.equal(schemaReadyFromStatus({}), false);
+  assert.equal(
+    memorySearchStatusFromStatus({
+      postgres: { migration: { memorySearchStatus: "unavailable" } }
+    }),
+    "unavailable"
+  );
+});
+
+test("memory-search unavailability gates Mem0", () => {
+  assert.equal(
+    assertMem0FollowsMemorySearch({
+      mem0: { ownership: "none", pid: 0 },
+      memorySearchStatus: "unavailable",
+      autostartMem0: true
+    }),
+    "gated"
+  );
+  assert.throws(
+    () =>
+      assertMem0FollowsMemorySearch({
+        mem0: { ownership: "owned", pid: 44 },
+        memorySearchStatus: "unavailable",
+        autostartMem0: true
+      }),
+    /memory-search is not ready/
+  );
+  assert.equal(
+    assertMem0FollowsMemorySearch({
+      mem0: { ownership: "owned", pid: 45 },
+      memorySearchStatus: "ready",
+      autostartMem0: true
+    }),
+    "started"
+  );
+});
+
+test("ExecutablePath provenance comparison remains the installed-exe lexical check", () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("./installer-smoke.mjs", import.meta.url)),
+    "utf8"
+  );
+  assert.match(
+    source,
+    /!runningExecutablePath \|\| normalized\(runningExecutablePath\) !== normalized\(supervisorExe\)/
+  );
+  assert.match(source, /running Supervisor ExecutablePath does not match installed packaged exe/);
+});
+
+test("restricted PATH isolation remains intact after fixture mapping", () => {
+  const home = temp("yuvi-pg-path-");
+  const env = sanitizeChildEnv({ NODE_PATH: "bad", PYTHONPATH: "bad" });
+  applyInstallerSmokePostgresFixture(
+    env,
+    { [INSTALLER_SMOKE_POSTGRES_HOME_ENV]: home },
+    {
+      validate: () => ({ home, major: 16 })
+    }
+  );
+  assert.equal(env.PATH, restrictedPath());
+  assert.equal(env.NODE_PATH, undefined);
+  assert.equal(env.PYTHONPATH, undefined);
+});
+
+test("PostgreSQL 16 fixture pin is the independently published 16.10 zip", () => {
+  assert.equal(POSTGRES16_FIXTURE_VERSION, "16.10-1");
+  assert.equal(POSTGRES16_FIXTURE_MAJOR, 16);
+  assert.match(POSTGRES16_FIXTURE_URL, /postgresql-16\.10-1-windows-x64-binaries\.zip$/);
+  assert.equal(
+    POSTGRES16_FIXTURE_SHA256,
+    "ebb3b6af4fa69dea9951b66855bc4d42dc04e56ccb9aa7024ce3c58bd89d6b0c"
+  );
+  assert.equal(
+    assertSha256("ebb3b6af4fa69dea9951b66855bc4d42dc04e56ccb9aa7024ce3c58bd89d6b0c"),
+    POSTGRES16_FIXTURE_SHA256
+  );
+  assert.throws(() => assertSha256("0".repeat(64)), /SHA-256 mismatch/);
 });

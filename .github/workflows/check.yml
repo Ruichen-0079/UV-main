@@ -134,6 +134,8 @@ jobs:
         with:
           python-version: "3.11"
           architecture: x64
+          cache: pip
+          cache-dependency-path: services/memory-mem0/requirements.txt
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -141,6 +143,15 @@ jobs:
           toolchain: stable
           target: x86_64-pc-windows-msvc
           components: rustfmt
+
+      # Cache cargo registry + dependency artifacts for apps/desktop/src-tauri.
+      # Key includes rustc, Cargo.lock/Cargo.toml, and compiler env. Workspace
+      # crates and the NSIS installer are not restored from cache.
+      - name: Cache Rust / Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          shared-key: desktop-windows-tauri
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -195,22 +206,27 @@ jobs:
           pnpm desktop:installer:test
           pnpm desktop:package:test
 
-      - name: Workspace gates
-        run: |
-          pnpm check
-          pnpm test
-          pnpm build
-
       - name: Build NSIS installer
         shell: pwsh
         env:
           YUVI_NODE_CACHE: ${{ runner.temp }}/yuvi-node-cache
         run: pnpm desktop:build:windows
 
+      - name: Provision PostgreSQL 16 smoke fixture
+        id: pg16
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $home = (node scripts/desktop-package/provision-postgres16-fixture.mjs | Select-Object -Last 1).Trim()
+          if (-not $home) { throw "PostgreSQL 16 fixture home was not printed" }
+          if (-not (Test-Path (Join-Path $home "bin\postgres.exe"))) { throw "PostgreSQL 16 fixture is missing bin\postgres.exe" }
+          "home=$home" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Direct installer smoke
         shell: pwsh
         env:
           YUVI_NODE_CACHE: ${{ runner.temp }}/yuvi-node-cache
+          YUVI_INSTALLER_SMOKE_POSTGRES_HOME: ${{ steps.pg16.outputs.home }}
         run: pnpm desktop:installer:smoke
 
       - name: Tauri application smoke
@@ -218,6 +234,7 @@ jobs:
         env:
           CI: "true"
           YUVI_ALLOW_TAURI_APP_SMOKE: "1"
+          YUVI_INSTALLER_SMOKE_POSTGRES_HOME: ${{ steps.pg16.outputs.home }}
         run: pnpm desktop:installer:smoke --launch-app
 
       - name: Prepare installer artifact

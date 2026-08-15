@@ -27,6 +27,10 @@ import {
 } from "./constants.mjs";
 import { assertRelativeSafe, readJson } from "./paths.mjs";
 import { validateMem0Artifact } from "./build-mem0.mjs";
+import {
+  POSTGRES16_FIXTURE_MAJOR,
+  validatePostgres16Distribution
+} from "./provision-postgres16-fixture.mjs";
 
 const NSIS_DIR = path.join(
   REPO_ROOT,
@@ -80,8 +84,7 @@ function normalized(value) {
 function stripWindowsOuterQuotes(value) {
   const text = String(value ?? "").trim();
   return text.length >= 2 &&
-      ((text.startsWith('"') && text.endsWith('"')) ||
-        (text.startsWith("'") && text.endsWith("'")))
+    ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'")))
     ? text.slice(1, -1)
     : text;
 }
@@ -334,6 +337,159 @@ export function createTauriAppEnv({ localAppData, appData, home, temp } = {}) {
   });
 }
 
+export const INSTALLER_SMOKE_POSTGRES_HOME_ENV = "YUVI_INSTALLER_SMOKE_POSTGRES_HOME";
+export const WINDOWS_POSTGRES_CREDENTIAL_TARGET = "YUVI/postgres/local.YUVI";
+export const WINDOWS_POSTGRES_CREDENTIAL_USER = "YUVI/postgres/local";
+
+export function generateInstallerSmokePostgresPassword(randomBytes = crypto.randomBytes) {
+  return randomBytes(32).toString("base64url");
+}
+
+export function readInstallerSmokePostgresHome(sourceEnv = process.env) {
+  const raw = sourceEnv[INSTALLER_SMOKE_POSTGRES_HOME_ENV];
+  return typeof raw === "string" && raw.trim() ? raw.trim() : "";
+}
+
+export function validateInstallerSmokePostgresHome(
+  home,
+  { platform = process.platform, validate = validatePostgres16Distribution } = {}
+) {
+  if (!home) fail(`${INSTALLER_SMOKE_POSTGRES_HOME_ENV} is required for packaged installer smoke`);
+  if (!path.isAbsolute(home) && !/^[A-Za-z]:[\\/]/.test(home))
+    fail(`${INSTALLER_SMOKE_POSTGRES_HOME_ENV} must be an absolute path`);
+  if (!fs.existsSync(home)) fail(`${INSTALLER_SMOKE_POSTGRES_HOME_ENV} does not exist`);
+  const validated = validate(home, { platform });
+  if (validated.major !== POSTGRES16_FIXTURE_MAJOR)
+    fail(`${INSTALLER_SMOKE_POSTGRES_HOME_ENV} is not PostgreSQL ${POSTGRES16_FIXTURE_MAJOR}`);
+  return validated.home;
+}
+
+export function applyInstallerSmokePostgresFixture(env, sourceEnv = process.env, options = {}) {
+  const requested = readInstallerSmokePostgresHome(sourceEnv);
+  const home = validateInstallerSmokePostgresHome(requested, options);
+  env.YUVI_POSTGRES_HOME = home;
+  return home;
+}
+
+export function applyInstallerSmokePostgresPassword(env, password) {
+  const secret = String(password ?? "");
+  if (secret.length < 32) fail("installer-smoke PostgreSQL password is too short");
+  env.YUVI_POSTGRES_PASSWORD = secret;
+  return true;
+}
+
+export function schemaReadyFromStatus(status) {
+  return status?.postgres?.migration?.schemaReady === true;
+}
+
+export function memorySearchStatusFromStatus(status) {
+  const value = status?.postgres?.migration?.memorySearchStatus;
+  return typeof value === "string" ? value : null;
+}
+
+export function assertMem0FollowsMemorySearch({ mem0, memorySearchStatus, autostartMem0 = true }) {
+  const ready = memorySearchStatus === "ready";
+  const owned = mem0?.ownership === "owned" && Number(mem0?.pid) > 0;
+  if (ready && autostartMem0) {
+    if (!owned) fail("Mem0 did not start after memory-search became ready");
+    return "started";
+  }
+  if (owned) fail("Mem0 started while memory-search is not ready");
+  return "gated";
+}
+
+export function redactInstallerSmokeSecretText(text, secrets = []) {
+  let out = String(text ?? "");
+  for (const secret of secrets) {
+    if (!secret) continue;
+    out = out.split(secret).join("[redacted]");
+  }
+  return out;
+}
+
+export function buildWindowsPostgresCredentialHelperScript() {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "Add-Type -TypeDefinition @'",
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "public class YuviCred {",
+    "  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]",
+    "  public struct CREDENTIAL {",
+    "    public int Flags; public int Type; public string TargetName; public string Comment;",
+    "    public long LastWritten; public int CredentialBlobSize; public IntPtr CredentialBlob;",
+    "    public int Persist; public int AttributeCount; public IntPtr Attributes;",
+    "    public string TargetAlias; public string UserName;",
+    "  }",
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+    "  public static extern bool CredWrite(ref CREDENTIAL userCredential, uint flags);",
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+    "  public static extern bool CredDelete(string target, int type, int flags);",
+    "}",
+    "'@",
+    "$target = $env:YUVI_INSTALLER_SMOKE_CRED_TARGET",
+    "$user = $env:YUVI_INSTALLER_SMOKE_CRED_USER",
+    "$action = $env:YUVI_INSTALLER_SMOKE_CRED_ACTION",
+    "if ([string]::IsNullOrWhiteSpace($target) -or [string]::IsNullOrWhiteSpace($action)) { throw 'credential helper target/action missing' }",
+    "if ($action -eq 'delete') {",
+    "  [void][YuviCred]::CredDelete($target, 1, 0)",
+    "  exit 0",
+    "}",
+    "if ($action -ne 'write') { throw 'credential helper action is invalid' }",
+    "$password = $env:YUVI_INSTALLER_SMOKE_CRED_SECRET",
+    "if ([string]::IsNullOrWhiteSpace($password)) { throw 'credential helper secret missing' }",
+    "$bytes = [System.Text.Encoding]::Unicode.GetBytes($password)",
+    "$ptr = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)",
+    "try {",
+    "  [System.Runtime.InteropServices.Marshal]::Copy($bytes, 0, $ptr, $bytes.Length)",
+    "  $cred = New-Object YuviCred+CREDENTIAL",
+    "  $cred.Type = 1",
+    "  $cred.TargetName = $target",
+    "  $cred.UserName = $user",
+    "  $cred.CredentialBlobSize = $bytes.Length",
+    "  $cred.CredentialBlob = $ptr",
+    "  $cred.Persist = 2",
+    "  $cred.Comment = 'yuvi-installer-smoke-fixture'",
+    "  if (-not [YuviCred]::CredWrite([ref]$cred, 0)) { throw 'CredWrite failed' }",
+    "} finally {",
+    "  [System.Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)",
+    "}",
+    "exit 0"
+  ].join("\n");
+}
+
+export function applyInstallerSmokeWindowsPostgresCredential(
+  password,
+  {
+    action = "write",
+    execFile = execFileSync,
+    platform = process.platform,
+    systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows"
+  } = {}
+) {
+  if (platform !== "win32") return false;
+  const secret = String(password ?? "");
+  if (action === "write" && secret.length < 32)
+    fail("installer-smoke PostgreSQL password is too short");
+  const helperEnv = sanitizeChildEnv({
+    YUVI_INSTALLER_SMOKE_CRED_TARGET: WINDOWS_POSTGRES_CREDENTIAL_TARGET,
+    YUVI_INSTALLER_SMOKE_CRED_USER: WINDOWS_POSTGRES_CREDENTIAL_USER,
+    YUVI_INSTALLER_SMOKE_CRED_ACTION: action,
+    ...(action === "write" ? { YUVI_INSTALLER_SMOKE_CRED_SECRET: secret } : {})
+  });
+  execFile(
+    powershellDiagnosticPath({ SystemRoot: systemRoot }),
+    ["-NoProfile", "-NonInteractive", "-Command", buildWindowsPostgresCredentialHelperScript()],
+    {
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: helperEnv
+    }
+  );
+  return true;
+}
+
 export function assertNoSecrets(value, label = "value") {
   const text = typeof value === "string" ? value : JSON.stringify(value);
   for (const key of SECRET_KEYS) {
@@ -481,7 +637,14 @@ export function validateSupervisorProvenance(info) {
     fail("Supervisor provenance schema/mode mismatch");
   if (typeof info.checkoutSha !== "string" || !/^[0-9a-f]{40}$/i.test(info.checkoutSha))
     fail("Supervisor provenance checkoutSha is not a commit SHA");
-  for (const field of ["sourceFingerprint", "bundleSha256", "bundleInputSha256", "executableSha256", "stagedExecutableSha256", "stagedBundleSha256"]) {
+  for (const field of [
+    "sourceFingerprint",
+    "bundleSha256",
+    "bundleInputSha256",
+    "executableSha256",
+    "stagedExecutableSha256",
+    "stagedBundleSha256"
+  ]) {
     if (typeof info[field] !== "string" || !/^[0-9a-f]{64}$/i.test(info[field]))
       fail(`Supervisor provenance ${field} is not a SHA-256 value`);
   }
@@ -497,7 +660,10 @@ export function validateSupervisorProvenance(info) {
 
 export function parseEmbeddedSupervisorBuildInfo(stdout, stderr = "", code = 0) {
   if (code !== 0) fail(`Supervisor --build-info-json exited with ${code}`);
-  const lines = String(stdout).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = String(stdout)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
   if (lines.length !== 1) fail("Supervisor build-info output must contain exactly one JSON line");
   let value;
   try {
@@ -509,7 +675,10 @@ export function parseEmbeddedSupervisorBuildInfo(stdout, stderr = "", code = 0) 
     fail("embedded Supervisor build-info schema/mode mismatch");
   if (typeof value.checkoutSha !== "string" || !/^[0-9a-f]{40}$/i.test(value.checkoutSha))
     fail("embedded Supervisor checkout SHA is invalid");
-  if (typeof value.sourceFingerprint !== "string" || !/^[0-9a-f]{64}$/i.test(value.sourceFingerprint))
+  if (
+    typeof value.sourceFingerprint !== "string" ||
+    !/^[0-9a-f]{64}$/i.test(value.sourceFingerprint)
+  )
     fail("embedded Supervisor source fingerprint is invalid");
   if (typeof value.bundleSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(value.bundleSha256))
     fail("embedded Supervisor bundle SHA is invalid");
@@ -530,14 +699,26 @@ export function assertSupervisorProvenance({
   validateSupervisorProvenance(provenance);
   if (!embedded || embedded.schemaVersion !== 1 || embedded.mode !== "pkg-exe")
     fail("embedded Supervisor identity schema/mode mismatch");
-  if (installedExecutableSha256 !== provenance.executableSha256 ||
-      installedExecutableSha256 !== provenance.stagedExecutableSha256)
+  if (
+    installedExecutableSha256 !== provenance.executableSha256 ||
+    installedExecutableSha256 !== provenance.stagedExecutableSha256
+  )
     fail("installed Supervisor executable SHA-256 does not match provenance");
-  if (installedBundleSha256 !== provenance.bundleInputSha256 ||
-      installedBundleSha256 !== provenance.stagedBundleSha256)
+  if (
+    installedBundleSha256 !== provenance.bundleInputSha256 ||
+    installedBundleSha256 !== provenance.stagedBundleSha256
+  )
     fail("installed Supervisor bundle SHA-256 does not match provenance");
-  for (const field of ["schemaVersion", "mode", "checkoutSha", "sourceFingerprint", "bundleSha256", "entry"])
-    if (embedded[field] !== provenance[field]) fail(`embedded Supervisor identity mismatch: ${field}`);
+  for (const field of [
+    "schemaVersion",
+    "mode",
+    "checkoutSha",
+    "sourceFingerprint",
+    "bundleSha256",
+    "entry"
+  ])
+    if (embedded[field] !== provenance[field])
+      fail(`embedded Supervisor identity mismatch: ${field}`);
   if (!provenance.executableRelativePath.toLowerCase().startsWith("supervisor/"))
     fail("Supervisor executable provenance escaped resource root");
   return true;
@@ -574,7 +755,10 @@ export function validateInstalledResources(resourceRoot) {
   ])
     if (!fs.existsSync(required)) fail(`installed resource missing: ${required}`);
   const supervisorExe = findUniqueSupervisorExecutable(supervisor);
-  if (path.resolve(supervisorExe) !== path.resolve(path.join(resourceRoot, supervisorBuildInfo.executableRelativePath)))
+  if (
+    path.resolve(supervisorExe) !==
+    path.resolve(path.join(resourceRoot, supervisorBuildInfo.executableRelativePath))
+  )
     fail("Supervisor executable path does not match provenance");
   const runtimeManifest = readJson(path.join(runtime, RUNTIME_MANIFEST_NAME));
   for (const field of ["nodeExecutable", "runtimeEntry"])
@@ -703,12 +887,7 @@ function safeDiagnosticPath(value, installRoot) {
   const canonicalValue = normalizeWindowsPathForComparison(normalizedValue);
   const canonicalRoot = normalizeWindowsPathForComparison(installRoot);
   if (canonicalRoot && isWindowsPathInside(canonicalRoot, canonicalValue)) {
-    return (
-      path.win32.relative(
-        canonicalRoot,
-        canonicalValue
-      ).replaceAll("\\", "/") || "."
-    );
+    return path.win32.relative(canonicalRoot, canonicalValue).replaceAll("\\", "/") || ".";
   }
   return safeBasename(normalizedValue);
 }
@@ -719,11 +898,7 @@ function provenanceDiagnosticPath(value, installRoot) {
   const canonicalValue = normalizeWindowsPathForComparison(normalizedValue);
   const canonicalRoot = normalizeWindowsPathForComparison(installRoot);
   if (canonicalRoot && isWindowsPathInside(canonicalRoot, canonicalValue)) {
-    return (
-      path.win32
-        .relative(canonicalRoot, canonicalValue)
-        .replaceAll("\\", "/") || "."
-    );
+    return path.win32.relative(canonicalRoot, canonicalValue).replaceAll("\\", "/") || ".";
   }
   return `outside-install-root:${normalizedValue.replaceAll("\\", "/")}`;
 }
@@ -1065,13 +1240,13 @@ export function formatOwnershipDiagnostic({
       : false;
   const metadataExeMatches = Boolean(
     metadata.executable &&
-    listener.processName &&
-    metadata.executable.toLowerCase() === listener.processName.toLowerCase()
+      listener.processName &&
+      metadata.executable.toLowerCase() === listener.processName.toLowerCase()
   );
   const metadataInstanceMatches = Boolean(
     metadata.instanceId &&
-    last?.supervisorInstanceId &&
-    metadata.instanceId === last.supervisorInstanceId
+      last?.supervisorInstanceId &&
+      metadata.instanceId === last.supervisorInstanceId
   );
   return [
     "MEM0 OWNERSHIP DIAGNOSTIC",
@@ -1186,12 +1361,7 @@ function safePortFromUrl(value) {
 
 function safeListenerSnapshot(
   port,
-  {
-    installRoot,
-    supervisorPid,
-    knownManagedPid,
-    listenerProbe
-  }
+  { installRoot, supervisorPid, knownManagedPid, listenerProbe }
 ) {
   const numericPort = Number(port);
   if (!Number.isInteger(numericPort) || numericPort <= 0)
@@ -1297,18 +1467,32 @@ export function formatTauriFailureDiagnostic({
   const primaryCode = failure?.errorCode ?? diagnosticErrorField(primaryError, "code") ?? "unknown";
   const primaryName = failure?.errorName ?? String(primaryError?.name ?? "Error").slice(0, 80);
   const requestLines = requestDiagnostics?.format?.() || "  none";
-  const timelineLines = timeline?.snapshot?.()
-    ?.map((event) => `  ${event.phase}: ${event.isoTime} (+${event.relativeMs}ms)`)
-    .join("\n") || "  none";
-  const processLines = Object.entries(snapshot?.processes ?? {})
-    .map(([role, state]) => `  ${role}: pid=${state.pid || "unknown"} status=${state.status}${state.queryErrorCode ? ` query=${state.queryErrorCode}` : ""}`)
-    .join("\n") || "  unavailable";
-  const listenerLines = Object.entries(snapshot?.listeners ?? {})
-    .map(([role, listener]) => `  ${role}: port=${listener.port ?? "unknown"} state=${listener.state} pid=${listener.owningPid || "unknown"} parent=${listener.parentProcessId || "unknown"} process=${listener.processName ?? "unknown"} executable=${listener.executablePath ?? "unknown"} query=${listener.queryErrorCode ?? "none"}`)
-    .join("\n") || "  unavailable";
-  const processQueryLines = processQueries
-    .map((query) => `  ${query.role}: pid=${query.pid || "unknown"} startedAt=${query.startedAt ?? "unknown"} endedAt=${query.endedAt ?? "unknown"} elapsedMs=${query.elapsedMs ?? "unknown"} outcome=${query.outcome} query=${query.errorCode ?? "none"}`)
-    .join("\n") || "  none";
+  const timelineLines =
+    timeline
+      ?.snapshot?.()
+      ?.map((event) => `  ${event.phase}: ${event.isoTime} (+${event.relativeMs}ms)`)
+      .join("\n") || "  none";
+  const processLines =
+    Object.entries(snapshot?.processes ?? {})
+      .map(
+        ([role, state]) =>
+          `  ${role}: pid=${state.pid || "unknown"} status=${state.status}${state.queryErrorCode ? ` query=${state.queryErrorCode}` : ""}`
+      )
+      .join("\n") || "  unavailable";
+  const listenerLines =
+    Object.entries(snapshot?.listeners ?? {})
+      .map(
+        ([role, listener]) =>
+          `  ${role}: port=${listener.port ?? "unknown"} state=${listener.state} pid=${listener.owningPid || "unknown"} parent=${listener.parentProcessId || "unknown"} process=${listener.processName ?? "unknown"} executable=${listener.executablePath ?? "unknown"} query=${listener.queryErrorCode ?? "none"}`
+      )
+      .join("\n") || "  unavailable";
+  const processQueryLines =
+    processQueries
+      .map(
+        (query) =>
+          `  ${query.role}: pid=${query.pid || "unknown"} startedAt=${query.startedAt ?? "unknown"} endedAt=${query.endedAt ?? "unknown"} elapsedMs=${query.elapsedMs ?? "unknown"} outcome=${query.outcome} query=${query.errorCode ?? "none"}`
+      )
+      .join("\n") || "  none";
   return [
     "TAURI SMOKE FAILURE DIAGNOSTIC",
     `  primaryError: ${primaryName}`,
@@ -1392,10 +1576,7 @@ function formatTauriRuntimeOwnershipDiagnostic({
   runtimeProvenance.pid = runtimePid;
   runtimeProvenance.processName = listener.processName;
   const timelineLines = (timeline ?? [])
-    .map(
-      (event) =>
-        `  ${event.phase}: ${event.isoTime} (+${event.relativeMs}ms)`
-    )
+    .map((event) => `  ${event.phase}: ${event.isoTime} (+${event.relativeMs}ms)`)
     .join("\n");
   const appPath = safeDiagnosticPath(appExecutable, installRoot) ?? "unknown";
   const supervisorPort = endpoint?.baseUrl ? Number(new URL(endpoint.baseUrl).port) : null;
@@ -1403,10 +1584,12 @@ function formatTauriRuntimeOwnershipDiagnostic({
     ? attributeWindowsListener(supervisorPort, { installRoot, supervisorPid })
     : listenerResult(null, { queryErrorCode: "supervisor-endpoint-unavailable" });
   const runtimePath = listener.executablePath;
-  const runtimeChildOfTauri = listener.parentProcessId > 0 && listener.parentProcessId === Number(appPid);
+  const runtimeChildOfTauri =
+    listener.parentProcessId > 0 && listener.parentProcessId === Number(appPid);
   const runtimeChildOfSupervisor =
     listener.parentProcessId > 0 && listener.parentProcessId === supervisorPid;
-  const runtimeFirstListener = (timeline ?? []).find((event) => event.runtimeListening)?.phase ?? "none";
+  const runtimeFirstListener =
+    (timeline ?? []).find((event) => event.runtimeListening)?.phase ?? "none";
   return [
     "TAURI RUNTIME OWNERSHIP DIAGNOSTIC",
     "",
@@ -1589,7 +1772,9 @@ export function createRequestDiagnostics({
       const entry = {
         requestId: `http-${++nextRequestId}`,
         label: String(label || "http.request").slice(0, 80),
-        method: String(method || "GET").toUpperCase().slice(0, 16),
+        method: String(method || "GET")
+          .toUpperCase()
+          .slice(0, 16),
         host: safeHost(parsed),
         port: safePort(parsed),
         pathname: safePathname(parsed),
@@ -1656,9 +1841,10 @@ export function createRequestDiagnostics({
       return entries
         .filter((entry) => includeSuccess || entry.outcome === "error")
         .map((entry) => {
-          const outcome = entry.outcome === "error"
-            ? ` errorName=${entry.errorName ?? "unknown"} errorCode=${entry.errorCode ?? "unknown"} errno=${entry.errno ?? "unknown"} syscall=${entry.syscall ?? "unknown"}`
-            : ` status=${entry.status ?? "unknown"}`;
+          const outcome =
+            entry.outcome === "error"
+              ? ` errorName=${entry.errorName ?? "unknown"} errorCode=${entry.errorCode ?? "unknown"} errno=${entry.errno ?? "unknown"} syscall=${entry.syscall ?? "unknown"}`
+              : ` status=${entry.status ?? "unknown"}`;
           return `  ${entry.requestId} ${entry.label} ${entry.method} ${entry.host}:${entry.port}${entry.pathname} phase=${entry.phase} elapsedMs=${entry.elapsedMs ?? "unknown"} outcome=${entry.outcome}${outcome}`;
         })
         .join("\n");
@@ -1729,10 +1915,11 @@ export function requestJson(
       );
       request.once("socket", (socket) => {
         if (socket?.connecting === false) phase = "connected";
-        else socket?.once?.("connect", () => {
-          phase = "connected";
-          diagnostics?.updatePhase(requestId, phase);
-        });
+        else
+          socket?.once?.("connect", () => {
+            phase = "connected";
+            diagnostics?.updatePhase(requestId, phase);
+          });
         diagnostics?.updatePhase(requestId, phase);
       });
       request.once("error", finishError);
@@ -1913,7 +2100,8 @@ export function resolveWmClosePythonExecutable(
 ) {
   const executable = String(env?.YUVI_PYTHON311 ?? "").trim();
   if (!executable) fail("Tauri WM_CLOSE harness requires YUVI_PYTHON311");
-  const absolute = platform === "win32" ? path.win32.isAbsolute(executable) : path.isAbsolute(executable);
+  const absolute =
+    platform === "win32" ? path.win32.isAbsolute(executable) : path.isAbsolute(executable);
   if (!absolute) fail("Tauri WM_CLOSE harness requires an absolute YUVI_PYTHON311 path");
   let stat;
   try {
@@ -1940,7 +2128,10 @@ export function parseWmCloseOutput(stdout, expectedPid = null) {
     "before_post",
     "after_post"
   ];
-  if (phases.length !== requiredPhases.length || phases.some((phase, index) => phase !== requiredPhases[index]))
+  if (
+    phases.length !== requiredPhases.length ||
+    phases.some((phase, index) => phase !== requiredPhases[index])
+  )
     fail("WM_CLOSE output has invalid phase sequence");
   const readInteger = (name) => {
     const matches = [...text.matchAll(new RegExp(`(?:^|\\r?\\n)${name}=(-?\\d+)(?=\\r?$)`, "gm"))];
@@ -2158,13 +2349,16 @@ export function runWmCloseHelper({
       } catch {
         killResult = false;
       }
-      graceTimer = setTimeout(() => {
-        if (settled) return;
-        if (exitObserved) return;
-        rejectOnce(
-          timeoutFailure("WM_CLOSE helper timed out and did not exit after termination request")
-        );
-      }, Math.max(1, Number(killGraceMs) || 1));
+      graceTimer = setTimeout(
+        () => {
+          if (settled) return;
+          if (exitObserved) return;
+          rejectOnce(
+            timeoutFailure("WM_CLOSE helper timed out and did not exit after termination request")
+          );
+        },
+        Math.max(1, Number(killGraceMs) || 1)
+      );
     }, timeoutMs);
   });
 }
@@ -2241,7 +2435,9 @@ export function formatRuntimeHealthProtocolDiagnostic(result = {}) {
     `  health ok: ${result.healthOk === null ? "unknown" : result.healthOk ? "yes" : "no"}`,
     `  expected ok: ${result.expectedOk ? "yes" : "no"}`,
     `  protocol valid: ${result.protocolValid ? "yes" : "no"}`,
-    ...(result.failureReasons?.length ? [`  failure reasons: ${result.failureReasons.join("; ")}`] : [])
+    ...(result.failureReasons?.length
+      ? [`  failure reasons: ${result.failureReasons.join("; ")}`]
+      : [])
   ].join("\n");
 }
 
@@ -2332,10 +2528,14 @@ export function processExecutablePath(
   if (!pid || platform !== "win32") return "";
   try {
     const script = `(Get-CimInstance Win32_Process -Filter \"ProcessId=${Number(pid)}\").ExecutablePath`;
-    return execFile(powershellDiagnosticPath(), ["-NoProfile", "-NonInteractive", "-Command", script], {
-      encoding: "utf8",
-      windowsHide: true
-    }).trim();
+    return execFile(
+      powershellDiagnosticPath(),
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      {
+        encoding: "utf8",
+        windowsHide: true
+      }
+    ).trim();
   } catch (error) {
     onError?.(error);
     return "";
@@ -2371,7 +2571,8 @@ export function parseRuntimeCommandLine(commandLine) {
   const executableToken = tokens[0] ?? null;
   const entrypointPath =
     tokens.find(
-      (token) => path.win32.basename(stripWindowsDevicePrefix(token)).toLowerCase() === RUNTIME_ENTRY_NAME
+      (token) =>
+        path.win32.basename(stripWindowsDevicePrefix(token)).toLowerCase() === RUNTIME_ENTRY_NAME
     ) ?? null;
   return { executableToken, entrypointPath };
 }
@@ -2415,7 +2616,8 @@ export function evaluateRuntimeProvenance({
       const resolvedPath = normalizeWindowsPathForComparison(result.resolvedPath);
       return {
         ok: result.ok === true && Boolean(resolvedPath),
-        rawPath: result.rawPath ?? (typeof value === "string" ? stripWindowsDevicePrefix(value) : null),
+        rawPath:
+          result.rawPath ?? (typeof value === "string" ? stripWindowsDevicePrefix(value) : null),
         lexicalPath: result.lexicalPath ?? (normalizeWindowsPathForComparison(value) || null),
         resolvedPath: resolvedPath || null,
         errorCode: result.errorCode ?? (result.ok === true ? null : "RESOLVE_FAILED")
@@ -2457,7 +2659,8 @@ export function evaluateRuntimeProvenance({
   const normalizedImagePath = normalizeWindowsPathForComparison(imagePath);
   const normalizedExpectedImagePath = normalizeWindowsPathForComparison(expectedBundledNodePath);
   const normalizedEntrypointPath = normalizeWindowsPathForComparison(actualEntrypoint);
-  const normalizedExpectedEntrypointPath = normalizeWindowsPathForComparison(expectedEntrypointPath);
+  const normalizedExpectedEntrypointPath =
+    normalizeWindowsPathForComparison(expectedEntrypointPath);
   const normalizedInstallRoot = normalizeWindowsPathForComparison(installRoot);
   const failureReasons = [];
   if (!imageAvailable) failureReasons.push("authoritative image path unavailable");
@@ -2468,13 +2671,23 @@ export function evaluateRuntimeProvenance({
   const resolutionFailures = [
     ["install root", installRootResolution, true],
     ["authoritative image", imageResolution, imageAvailable],
-    ["expected bundled Node", expectedImageResolution, Boolean(String(expectedBundledNodePath ?? "").trim())],
+    [
+      "expected bundled Node",
+      expectedImageResolution,
+      Boolean(String(expectedBundledNodePath ?? "").trim())
+    ],
     ["Runtime entrypoint", entrypointResolution, entrypointAvailable],
-    ["expected Runtime entrypoint", expectedEntrypointResolution, Boolean(String(expectedEntrypointPath ?? "").trim())]
+    [
+      "expected Runtime entrypoint",
+      expectedEntrypointResolution,
+      Boolean(String(expectedEntrypointPath ?? "").trim())
+    ]
   ];
   for (const [label, resolution, required] of resolutionFailures) {
     if (required && !resolution.ok)
-      failureReasons.push(`${label} filesystem resolution failed (${resolution.errorCode ?? "RESOLVE_FAILED"})`);
+      failureReasons.push(
+        `${label} filesystem resolution failed (${resolution.errorCode ?? "RESOLVE_FAILED"})`
+      );
   }
   return {
     authoritativeImagePath: imagePath || null,
@@ -2547,7 +2760,8 @@ export function evaluateMem0Provenance({
       const resolvedPath = normalizeWindowsPathForComparison(result.resolvedPath);
       return {
         ok: result.ok === true && Boolean(resolvedPath),
-        rawPath: result.rawPath ?? (typeof value === "string" ? stripWindowsDevicePrefix(value) : null),
+        rawPath:
+          result.rawPath ?? (typeof value === "string" ? stripWindowsDevicePrefix(value) : null),
         lexicalPath: result.lexicalPath ?? (normalizeWindowsPathForComparison(value) || null),
         resolvedPath: resolvedPath || null,
         errorCode: result.errorCode ?? (result.ok === true ? null : "RESOLVE_FAILED")
@@ -2580,9 +2794,11 @@ export function evaluateMem0Provenance({
     isWindowsPathInside(installRootResolution.resolvedPath, imageResolution.resolvedPath);
   const failureReasons = [];
   if (!imageAvailable) failureReasons.push("authoritative Mem0 image path unavailable");
-  else if (!imageMatchesExpected) failureReasons.push("Mem0 image does not match installed executable");
+  else if (!imageMatchesExpected)
+    failureReasons.push("Mem0 image does not match installed executable");
   if (!expectedAvailable) failureReasons.push("installed Mem0 executable path unavailable");
-  if (!imageInsideInstallRoot) failureReasons.push("Mem0 image is outside the installed resource root");
+  if (!imageInsideInstallRoot)
+    failureReasons.push("Mem0 image is outside the installed resource root");
   const resolutionFailures = [
     ["install root", installRootResolution, true],
     ["authoritative Mem0 image", imageResolution, imageAvailable],
@@ -2590,7 +2806,9 @@ export function evaluateMem0Provenance({
   ];
   for (const [label, resolution, required] of resolutionFailures) {
     if (required && !resolution.ok)
-      failureReasons.push(`${label} filesystem resolution failed (${resolution.errorCode ?? "RESOLVE_FAILED"})`);
+      failureReasons.push(
+        `${label} filesystem resolution failed (${resolution.errorCode ?? "RESOLVE_FAILED"})`
+      );
   }
   return {
     rawImagePath: imagePath || null,
@@ -2862,12 +3080,25 @@ async function runPackagedSupervisor({
     `[installer-smoke] port roles: mem0 service=${mem0Port}, supervisor requested control=${supervisorPort}, supervisor public/status=unknown, supervisor control=unknown`
   );
   assertNoSecrets(env, "child env");
+  const fixtureHome = applyInstallerSmokePostgresFixture(env);
+  const postgresPassword = generateInstallerSmokePostgresPassword();
+  applyInstallerSmokePostgresPassword(env, postgresPassword);
   assertToolsUnresolvable(env);
-  const supervisorExe = resource.supervisorExe ?? findUniqueSupervisorExecutable(resource.supervisor);
+  console.info(
+    `[installer-smoke] postgres fixture mapped home=${path.basename(fixtureHome)} major=${POSTGRES16_FIXTURE_MAJOR}`
+  );
+  const supervisorExe =
+    resource.supervisorExe ?? findUniqueSupervisorExecutable(resource.supervisor);
   const supervisorProvenance = resource.supervisorBuildInfo;
-  const installedExecutableSha256 = crypto.createHash("sha256").update(fs.readFileSync(supervisorExe)).digest("hex");
+  const installedExecutableSha256 = crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(supervisorExe))
+    .digest("hex");
   const installedBundlePath = path.join(resource.root, supervisorProvenance.bundleRelativePath);
-  const installedBundleSha256 = crypto.createHash("sha256").update(fs.readFileSync(installedBundlePath)).digest("hex");
+  const installedBundleSha256 = crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(installedBundlePath))
+    .digest("hex");
   const buildInfoRun = await runProcess(
     supervisorExe,
     ["--build-info-json"],
@@ -2934,7 +3165,10 @@ async function runPackagedSupervisor({
       timeoutMs
     );
     const runningExecutablePath = processExecutablePath(child.pid);
-    if (process.platform === "win32" && (!runningExecutablePath || normalized(runningExecutablePath) !== normalized(supervisorExe)))
+    if (
+      process.platform === "win32" &&
+      (!runningExecutablePath || normalized(runningExecutablePath) !== normalized(supervisorExe))
+    )
       fail("running Supervisor ExecutablePath does not match installed packaged exe");
     if (runningExecutablePath) {
       console.info(
@@ -2976,8 +3210,7 @@ async function runPackagedSupervisor({
       fail(`Supervisor bootstrap failed (${bootstrap.status})`);
     await safeSample("T5-after-bootstrap", { endpoint: endpointPort, pid: 0 });
     let mem0 = null;
-    let observedHealthy = false;
-    let observedExternal = false;
+    let statusValue = null;
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
       const status = await requestJson(`${base}/v1/status`, {
@@ -2985,99 +3218,87 @@ async function runPackagedSupervisor({
         label: "supervisor.status",
         diagnostics: requestDiagnostics
       });
-      mem0 = status.value?.services?.find((service) => service.id === "mem0") ?? null;
-      runtimeState = status.value?.services?.find((service) => service.id === "runtime") ?? null;
+      statusValue = status.value ?? null;
+      mem0 = statusValue?.services?.find((service) => service.id === "mem0") ?? null;
+      runtimeState = statusValue?.services?.find((service) => service.id === "runtime") ?? null;
       await safeObserveStatus("status-change", mem0);
-      if (mem0?.status === "healthy" && !observedHealthy) {
-        observedHealthy = true;
-        await safeSample("T6-first-mem0-healthy", {
-          endpoint: endpointPort,
-          ownership: mem0.ownership,
-          status: mem0.status,
-          pid: Number(mem0.pid) || 0
-        });
-      }
-      if (mem0?.ownership === "external" && !observedExternal) {
-        observedExternal = true;
-        await safeSample("T7-first-mem0-external", {
-          endpoint: endpointPort,
-          ownership: mem0.ownership,
-          status: mem0.status,
-          pid: Number(mem0.pid) || 0
-        });
-      }
-      if (
-        mem0?.managed === true &&
-        mem0.ownership === "owned" &&
-        Number(mem0.pid) > 0 &&
-        ["healthy", "degraded", "unhealthy"].includes(mem0.status)
-      )
-        break;
+      if (schemaReadyFromStatus(statusValue)) break;
       await wait(300);
     }
-    if (!mem0 || mem0.managed !== true || mem0.ownership !== "owned" || !(mem0.pid > 0)) {
-      await safeSample("T8-before-ownership-error", {
-        endpoint: endpointPort,
-        ownership: mem0?.ownership ?? null,
-        status: mem0?.status ?? null,
-        pid: Number(mem0?.pid) || 0
-      });
-      fail("Supervisor did not own a running Mem0");
-    }
-    const mem0Health = await requestJson(`http://127.0.0.1:${mem0Port}/health`, {
-      label: "mem0.health",
-      diagnostics: requestDiagnostics
-    });
-    if (mem0Health.status !== 200 || !mem0Health.value?.ok)
-      fail(`Mem0 health failed (${mem0Health.status})`);
-    ownedMem0Pid = Number(mem0.pid);
-    const mem0Listener = attributeWindowsListener(mem0Port, {
-      installRoot: resource.root,
-      supervisorPid: child.pid,
-      knownManagedPid: ownedMem0Pid
-    });
-    const mem0Metadata = endpoint.stateDirectory
-      ? readOwnershipMetadataDiagnostic(path.join(endpoint.stateDirectory, "mem0.pid.json"), {
-          installRoot: resource.root,
-          smokeRoot: layout.root
-        })
-      : readOwnershipMetadataDiagnostic(null);
-    const mem0MetadataInstanceMatch = Boolean(
-      mem0Metadata.instanceId && endpoint.instanceId && mem0Metadata.instanceId === endpoint.instanceId
-    );
-    if (!mem0MetadataInstanceMatch || Number(mem0Metadata.pid) !== ownedMem0Pid)
-      fail("Mem0 ownership metadata does not match the current instance");
-    const mem0ImagePath =
-      processExecutablePath(ownedMem0Pid) || mem0Listener.executablePath || "";
-    const expectedMem0 = path.join(resource.root, "mem0", MEM0_EXE_NAME);
-    const mem0Provenance = evaluateMem0Provenance({
-      imagePath: mem0ImagePath,
-      expectedExecutablePath: expectedMem0,
-      installRoot: resource.root
+    if (!schemaReadyFromStatus(statusValue))
+      fail("Supervisor bootstrap did not reach schemaReady=true");
+    const memorySearchStatus = memorySearchStatusFromStatus(statusValue);
+    const mem0Gate = assertMem0FollowsMemorySearch({
+      mem0,
+      memorySearchStatus,
+      autostartMem0: true
     });
     console.info(
-      formatMem0ProvenanceDiagnostic({
-        stage: "DIRECT",
-        provenance: mem0Provenance,
-        installRoot: resource.root,
-        pid: ownedMem0Pid,
-        parentPid: mem0Listener.parentProcessId,
-        supervisorPid: child.pid,
-        ownership: mem0.ownership,
-        metadataInstanceMatch: mem0MetadataInstanceMatch
-      })
+      `[installer-smoke] D2 readiness schemaReady=true memorySearch=${memorySearchStatus ?? "null"} mem0=${mem0Gate}`
     );
-    if (mem0Listener.state === "Listen" &&
-      mem0Listener.parentProcessId > 0 &&
-      mem0Listener.parentProcessId !== Number(child.pid))
-      fail("Mem0 listener is not a child of the current Supervisor");
-    if (!mem0Provenance.ok)
-      fail(`Mem0 executable provenance failed: ${mem0Provenance.failureReasons.join("; ")}`);
-    const commandLine = processCommandLine(mem0.pid);
-    if (commandLine) assertNoUnsafeCommandLine(commandLine);
-    const dataRoot = path.join(localAppData, "YUVI", "Mem0");
-    if (!isWithin(dataRoot, localAppData) || !fs.existsSync(dataRoot))
-      fail("isolated Mem0 data path missing");
+    let mem0Health = { value: null };
+    let mem0Provenance = null;
+    let commandLine = "";
+    if (mem0Gate === "started") {
+      mem0Health = await requestJson(`http://127.0.0.1:${mem0Port}/health`, {
+        label: "mem0.health",
+        diagnostics: requestDiagnostics
+      });
+      if (mem0Health.status !== 200 || !mem0Health.value?.ok)
+        fail(`Mem0 health failed (${mem0Health.status})`);
+      ownedMem0Pid = Number(mem0.pid);
+      const mem0Listener = attributeWindowsListener(mem0Port, {
+        installRoot: resource.root,
+        supervisorPid: child.pid,
+        knownManagedPid: ownedMem0Pid
+      });
+      const mem0Metadata = endpoint.stateDirectory
+        ? readOwnershipMetadataDiagnostic(path.join(endpoint.stateDirectory, "mem0.pid.json"), {
+            installRoot: resource.root,
+            smokeRoot: layout.root
+          })
+        : readOwnershipMetadataDiagnostic(null);
+      const mem0MetadataInstanceMatch = Boolean(
+        mem0Metadata.instanceId &&
+          endpoint.instanceId &&
+          mem0Metadata.instanceId === endpoint.instanceId
+      );
+      if (!mem0MetadataInstanceMatch || Number(mem0Metadata.pid) !== ownedMem0Pid)
+        fail("Mem0 ownership metadata does not match the current instance");
+      const mem0ImagePath =
+        processExecutablePath(ownedMem0Pid) || mem0Listener.executablePath || "";
+      const expectedMem0 = path.join(resource.root, "mem0", MEM0_EXE_NAME);
+      mem0Provenance = evaluateMem0Provenance({
+        imagePath: mem0ImagePath,
+        expectedExecutablePath: expectedMem0,
+        installRoot: resource.root
+      });
+      console.info(
+        formatMem0ProvenanceDiagnostic({
+          stage: "DIRECT",
+          provenance: mem0Provenance,
+          installRoot: resource.root,
+          pid: ownedMem0Pid,
+          parentPid: mem0Listener.parentProcessId,
+          supervisorPid: child.pid,
+          ownership: mem0.ownership,
+          metadataInstanceMatch: mem0MetadataInstanceMatch
+        })
+      );
+      if (
+        mem0Listener.state === "Listen" &&
+        mem0Listener.parentProcessId > 0 &&
+        mem0Listener.parentProcessId !== Number(child.pid)
+      )
+        fail("Mem0 listener is not a child of the current Supervisor");
+      if (!mem0Provenance.ok)
+        fail(`Mem0 executable provenance failed: ${mem0Provenance.failureReasons.join("; ")}`);
+      commandLine = processCommandLine(mem0.pid);
+      if (commandLine) assertNoUnsafeCommandLine(commandLine);
+      const dataRoot = path.join(localAppData, "YUVI", "Mem0");
+      if (!isWithin(dataRoot, localAppData) || !fs.existsSync(dataRoot))
+        fail("isolated Mem0 data path missing");
+    }
     if (fs.existsSync(path.join(layout.home, ".mem0"))) fail("Mem0 wrote into HOME");
     const emptyEntries = fs.existsSync(layout.emptyCwd) ? fs.readdirSync(layout.emptyCwd) : [];
     if (emptyEntries.length) fail(`empty cwd was written: ${emptyEntries.join(", ")}`);
@@ -3213,14 +3434,7 @@ export function buildWmCloseScript(pid) {
 export function buildWmCloseArguments(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) fail("WM_CLOSE target PID is invalid");
-  return [
-    "-I",
-    "-S",
-    "-c",
-    WM_CLOSE_PYTHON_SOURCE,
-    String(numericPid),
-    TAURI_MAIN_WINDOW_TITLE
-  ];
+  return ["-I", "-S", "-c", WM_CLOSE_PYTHON_SOURCE, String(numericPid), TAURI_MAIN_WINDOW_TITLE];
 }
 
 async function waitForProcessExit(pid, timeoutMs) {
@@ -3283,38 +3497,32 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     temp: tauriTemp
   });
   assertNoSecrets(env, "Tauri app env");
+  const fixtureHome = applyInstallerSmokePostgresFixture(env);
+  const postgresPassword = generateInstallerSmokePostgresPassword();
+  applyInstallerSmokePostgresPassword(env, postgresPassword);
+  let seededWindowsCredential = false;
+  if (process.platform === "win32") {
+    applyInstallerSmokeWindowsPostgresCredential(postgresPassword, { action: "write" });
+    seededWindowsCredential = true;
+    console.info(
+      "[installer-smoke] Tauri smoke seeded fixture Credential Manager target; this does not prove production secret/bootstrap ordering"
+    );
+  }
+  console.info(
+    `[installer-smoke] Tauri postgres fixture mapped home=${path.basename(fixtureHome)} major=${POSTGRES16_FIXTURE_MAJOR}`
+  );
   const appArgs = [];
   assertNoSecrets(appArgs, "Tauri app argv");
   const timeline = createTauriTimeline();
   const requestDiagnostics = createRequestDiagnostics({ timeline });
   timeline.mark("T0-tauri-executable-spawn");
-  const child = spawn(appExecutable, appArgs, {
-    cwd: layout.emptyCwd,
-    env,
-    shell: false,
-    windowsHide: false,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  timeline.mark("T1-tauri-spawn-returned", { appPid: child.pid });
-  timeline.mark("E0-tauri-process-launched", { appPid: child.pid });
+  let child;
   let stdout = "";
   let stderr = "";
-  child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
-  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
   const logExit = () => writeLog(layout.logs, "tauri-app.log", `${stdout}\n${stderr}`);
   const outputTail = (value) => {
     const text = String(value ?? "").trim();
     return text.length > 4_000 ? text.slice(-4_000) : text;
-  };
-  const checkExit = () => {
-    if (child.exitCode === null && child.signalCode === null) return null;
-    const code = child.exitCode === null ? "none" : child.exitCode;
-    const signal = child.signalCode ?? "none";
-    return [
-      `Tauri application exited before bootstrap (code=${code}, signal=${signal})`,
-      `stdout tail:\n${outputTail(stdout) || "<empty>"}`,
-      `stderr tail:\n${outputTail(stderr) || "<empty>"}`
-    ].join("\n");
   };
   let endpoint = null;
   let pointer = null;
@@ -3324,6 +3532,27 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
   let mem0Pid = 0;
   const processQueries = [];
   try {
+    child = spawn(appExecutable, appArgs, {
+      cwd: layout.emptyCwd,
+      env,
+      shell: false,
+      windowsHide: false,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    timeline.mark("T1-tauri-spawn-returned", { appPid: child.pid });
+    timeline.mark("E0-tauri-process-launched", { appPid: child.pid });
+    child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
+    child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+    const checkExit = () => {
+      if (child.exitCode === null && child.signalCode === null) return null;
+      const code = child.exitCode === null ? "none" : child.exitCode;
+      const signal = child.signalCode ?? "none";
+      return [
+        `Tauri application exited before bootstrap (code=${code}, signal=${signal})`,
+        `stdout tail:\n${outputTail(stdout) || "<empty>"}`,
+        `stderr tail:\n${outputTail(stderr) || "<empty>"}`
+      ].join("\n");
+    };
     endpoint = await waitForSupervisorEndpoint(
       path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor"),
       path.join(tauriLocalAppData, "YUVI", "DesktopSupervisor"),
@@ -3365,15 +3594,36 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     if (health.status !== 200 || health.value?.ok !== true) fail("Tauri Supervisor health failed");
     timeline.mark("T4-supervisor-health-first", { supervisorHealth: "healthy" });
     timeline.mark("E2-supervisor-health-ready", { supervisorHealth: "healthy" });
-    const status = await requestJson(`${endpoint.baseUrl}/v1/status`, {
+    let status = await requestJson(`${endpoint.baseUrl}/v1/status`, {
       token: endpoint.controlToken,
       label: "supervisor.status",
       diagnostics: requestDiagnostics
     });
     if (status.status !== 200) fail("Tauri Supervisor status failed");
+    const statusWaitStarted = Date.now();
+    while (!schemaReadyFromStatus(status.value) && Date.now() - statusWaitStarted < timeoutMs) {
+      await wait(300);
+      status = await requestJson(`${endpoint.baseUrl}/v1/status`, {
+        token: endpoint.controlToken,
+        label: "supervisor.status",
+        diagnostics: requestDiagnostics
+      });
+      if (status.status !== 200) fail("Tauri Supervisor status failed");
+    }
+    if (!schemaReadyFromStatus(status.value))
+      fail("Tauri bootstrap did not reach schemaReady=true");
     const services = status.value?.services ?? [];
     runtime = services.find((service) => service.id === "runtime");
     const mem0 = services.find((service) => service.id === "mem0");
+    const memorySearchStatus = memorySearchStatusFromStatus(status.value);
+    const mem0Gate = assertMem0FollowsMemorySearch({
+      mem0,
+      memorySearchStatus,
+      autostartMem0: true
+    });
+    console.info(
+      `[installer-smoke] Tauri D2 readiness schemaReady=true memorySearch=${memorySearchStatus ?? "null"} mem0=${mem0Gate}`
+    );
     const tts = services.find((service) => service.id === "tts_wrapper");
     const mem0MetadataPath = endpoint.stateDirectory
       ? path.join(endpoint.stateDirectory, "mem0.pid.json")
@@ -3413,7 +3663,7 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       runtimeParentPid: runtimeListener.parentProcessId || 0
     });
     timeline.mark("T7-runtime-health-first", {
-      runtimeHealth: runtime?.status === "healthy" ? "healthy" : runtime?.status ?? "unknown"
+      runtimeHealth: runtime?.status === "healthy" ? "healthy" : (runtime?.status ?? "unknown")
     });
     timeline.mark("T8-runtime-ownership-first", {
       runtimeOwnership: runtime?.ownership ?? "unknown"
@@ -3438,14 +3688,17 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       expectedEntrypointPath: expectedEntrypoint
     });
     console.info(runtimeDiagnosticText);
-    if (!runtime || runtime.managed !== true || runtime.ownership !== "owned" || !(runtime.pid > 0)) {
+    if (
+      !runtime ||
+      runtime.managed !== true ||
+      runtime.ownership !== "owned" ||
+      !(runtime.pid > 0)
+    ) {
       fail("Tauri bootstrap did not own Runtime");
     }
-    if (!mem0 || mem0.managed !== true || mem0.ownership !== "owned" || !(mem0.pid > 0))
-      fail("Tauri bootstrap did not own Mem0");
     if (tts?.ownership === "owned" || tts?.pid) fail("Tauri smoke unexpectedly started TTS");
     runtimePid = Number(runtime.pid);
-    mem0Pid = Number(mem0.pid);
+    mem0Pid = mem0Gate === "started" ? Number(mem0.pid) : 0;
     const runProcessQuery = (role, pid, query) => {
       const startedAtMs = Date.now();
       let errorCode = null;
@@ -3473,10 +3726,8 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       runtimePid,
       mem0Pid
     });
-    const runtimeCommandLine = runProcessQuery(
-      "runtime.command-line",
-      runtimePid,
-      (onError) => processCommandLine(runtimePid, { onError })
+    const runtimeCommandLine = runProcessQuery("runtime.command-line", runtimePid, (onError) =>
+      processCommandLine(runtimePid, { onError })
     );
     const queriedRuntimeImagePath = runProcessQuery(
       "runtime.executable-path",
@@ -3498,64 +3749,73 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     });
     runtimeProvenance.pid = runtimePid;
     runtimeProvenance.processName = runtimeListener.processName;
-    const mem0Port = safePortFromUrl(mem0?.url);
-    const mem0Listener = mem0Port
-      ? attributeWindowsListener(mem0Port, {
+    let mem0Provenance = null;
+    let mem0CommandLine = "";
+    let mem0Health = { value: null };
+    if (mem0Pid > 0) {
+      const mem0Port = safePortFromUrl(mem0?.url);
+      const mem0Listener = mem0Port
+        ? attributeWindowsListener(mem0Port, {
+            installRoot: resource.root,
+            supervisorPid: Number(pointer.pid) || 0,
+            knownManagedPid: mem0Pid
+          })
+        : listenerResult(null, { queryErrorCode: "mem0-url-unavailable" });
+      const mem0ImagePath = runProcessQuery("mem0.executable-path", mem0Pid, (onError) =>
+        processExecutablePath(mem0Pid, { onError })
+      );
+      const expectedMem0 = path.join(resource.root, "mem0", MEM0_EXE_NAME);
+      mem0Provenance = evaluateMem0Provenance({
+        imagePath: mem0ImagePath || mem0Listener.executablePath || "",
+        expectedExecutablePath: expectedMem0,
+        installRoot: resource.root
+      });
+      const mem0MetadataInstanceMatch = Boolean(
+        mem0Metadata.instanceId &&
+          endpoint.instanceId &&
+          mem0Metadata.instanceId === endpoint.instanceId
+      );
+      console.info(
+        formatMem0ProvenanceDiagnostic({
+          stage: "TAURI",
+          provenance: mem0Provenance,
           installRoot: resource.root,
+          pid: mem0Pid,
+          parentPid: mem0Listener.parentProcessId,
           supervisorPid: Number(pointer.pid) || 0,
-          knownManagedPid: mem0Pid
+          ownership: mem0.ownership,
+          metadataInstanceMatch: mem0MetadataInstanceMatch
         })
-      : listenerResult(null, { queryErrorCode: "mem0-url-unavailable" });
-    const mem0ImagePath = runProcessQuery(
-      "mem0.executable-path",
-      mem0Pid,
-      (onError) => processExecutablePath(mem0Pid, { onError })
-    );
-    const expectedMem0 = path.join(resource.root, "mem0", MEM0_EXE_NAME);
-    const mem0Provenance = evaluateMem0Provenance({
-      imagePath: mem0ImagePath || mem0Listener.executablePath || "",
-      expectedExecutablePath: expectedMem0,
-      installRoot: resource.root
-    });
-    const mem0MetadataInstanceMatch = Boolean(
-      mem0Metadata.instanceId && endpoint.instanceId && mem0Metadata.instanceId === endpoint.instanceId
-    );
-    console.info(
-      formatMem0ProvenanceDiagnostic({
-        stage: "TAURI",
-        provenance: mem0Provenance,
-        installRoot: resource.root,
-        pid: mem0Pid,
-        parentPid: mem0Listener.parentProcessId,
-        supervisorPid: Number(pointer.pid) || 0,
-        ownership: mem0.ownership,
-        metadataInstanceMatch: mem0MetadataInstanceMatch
-      })
-    );
-    const mem0CommandLine = runProcessQuery(
-      "mem0.command-line",
-      mem0Pid,
-      (onError) => processCommandLine(mem0Pid, { onError })
-    );
+      );
+      mem0CommandLine = runProcessQuery("mem0.command-line", mem0Pid, (onError) =>
+        processCommandLine(mem0Pid, { onError })
+      );
+      if (!mem0Provenance.ok)
+        fail(
+          `Tauri Mem0 executable provenance failed: ${mem0Provenance.failureReasons.join("; ")}`
+        );
+      if (
+        mem0Listener.state === "Listen" &&
+        mem0Listener.parentProcessId > 0 &&
+        mem0Listener.parentProcessId !== Number(pointer.pid)
+      )
+        fail("Tauri Mem0 listener is not a child of the current Supervisor");
+      if (!mem0MetadataInstanceMatch || Number(mem0Metadata.pid) !== mem0Pid)
+        fail("Tauri Mem0 ownership metadata does not match the current instance");
+      assertNoUnsafeCommandLine(mem0CommandLine);
+      mem0Health = await requestJson(String(mem0.url), {
+        label: "mem0.health",
+        diagnostics: requestDiagnostics
+      });
+      if (mem0Health.status !== 200 || !mem0Health.value?.ok) fail("Tauri Mem0 health failed");
+      if (!["healthy", "degraded", "unhealthy"].includes(mem0Health.value?.data?.status))
+        fail("Tauri Mem0 health protocol is invalid");
+    }
     if (!runtimeProvenance.ok)
-      fail(`Tauri Runtime bundled-Node provenance failed: ${runtimeProvenance.failureReasons.join("; ")}`);
-    if (!mem0Provenance.ok)
-      fail(`Tauri Mem0 executable provenance failed: ${mem0Provenance.failureReasons.join("; ")}`);
-    if (mem0Listener.state === "Listen" &&
-      mem0Listener.parentProcessId > 0 &&
-      mem0Listener.parentProcessId !== Number(pointer.pid))
-      fail("Tauri Mem0 listener is not a child of the current Supervisor");
-    if (!mem0MetadataInstanceMatch || Number(mem0Metadata.pid) !== mem0Pid)
-      fail("Tauri Mem0 ownership metadata does not match the current instance");
+      fail(
+        `Tauri Runtime bundled-Node provenance failed: ${runtimeProvenance.failureReasons.join("; ")}`
+      );
     assertNoUnsafeCommandLine(runtimeCommandLine);
-    assertNoUnsafeCommandLine(mem0CommandLine);
-    const mem0Health = await requestJson(String(mem0.url), {
-      label: "mem0.health",
-      diagnostics: requestDiagnostics
-    });
-    if (mem0Health.status !== 200 || !mem0Health.value?.ok) fail("Tauri Mem0 health failed");
-    if (!["healthy", "degraded", "unhealthy"].includes(mem0Health.value?.data?.status))
-      fail("Tauri Mem0 health protocol is invalid");
     const runtimeHealth = await requestJson(String(runtime.url), {
       label: "runtime.health",
       diagnostics: requestDiagnostics
@@ -3574,7 +3834,7 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       fail("Supervisor did not exit after Tauri CloseRequested");
     if (!(await waitForProcessExit(runtimePid, Math.min(timeoutMs, 20_000))))
       fail("Runtime did not exit after Tauri CloseRequested");
-    if (!(await waitForProcessExit(mem0Pid, Math.min(timeoutMs, 20_000))))
+    if (mem0Pid > 0 && !(await waitForProcessExit(mem0Pid, Math.min(timeoutMs, 20_000))))
       fail("Mem0 did not exit after Tauri CloseRequested");
     const pointerPath = path.join(
       tauriLocalAppData,
@@ -3593,7 +3853,8 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       "DesktopSupervisor",
       "tauri-bootstrap-ready.json"
     );
-    if (fs.existsSync(readinessPath)) fail("Tauri bootstrap readiness marker remains after shutdown");
+    if (fs.existsSync(readinessPath))
+      fail("Tauri bootstrap readiness marker remains after shutdown");
     logExit();
     return {
       appExecutable,
@@ -3609,7 +3870,7 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     };
   } catch (error) {
     const failureSnapshot = createTauriFailureSnapshot({
-      appPid: child.pid,
+      appPid: child?.pid,
       supervisorPid: Number(pointer?.pid) || 0,
       runtimePid,
       mem0Pid,
@@ -3634,7 +3895,7 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
         /* exact smoke instance cleanup only */
       }
     }
-    for (const pid of [child.pid, Number(endpoint?.pid), runtimePid, mem0Pid]) {
+    for (const pid of [child?.pid, Number(endpoint?.pid), runtimePid, mem0Pid]) {
       if (pid && pidAlive(pid)) {
         try {
           process.kill(pid);
@@ -3655,6 +3916,14 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n${failureDiagnostic}${diagnostic}\n${stdout}\n${stderr}`
     );
+  } finally {
+    if (seededWindowsCredential) {
+      try {
+        applyInstallerSmokeWindowsPostgresCredential("", { action: "delete" });
+      } catch {
+        /* best-effort fixture credential cleanup */
+      }
+    }
   }
 }
 
@@ -3860,7 +4129,7 @@ export async function runInstallerSmoke(options = parseArgs()) {
       "utf8"
     );
     console.info(
-      `[installer-smoke] passed: Mem0 pid=${result.mem0Pid}, files=${summary.mem0Files}, bytes=${summary.mem0Bytes}`
+      `[installer-smoke] passed: schemaReady=true mem0Pid=${result.mem0Pid || 0}, files=${summary.mem0Files}, bytes=${summary.mem0Bytes}`
     );
     return summary;
   } finally {
