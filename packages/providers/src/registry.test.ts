@@ -223,6 +223,26 @@ describe("ProviderRegistry", () => {
     ).resolves.toMatchObject({ finalProvider: "mock" });
   });
 
+  it("does not report a disabled default mock provider as ready", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "mock"
+    });
+    const status = registry.getStatus();
+
+    expect(status.providers.chat).toMatchObject({
+      provider: "mock",
+      configured: false,
+      mock: false,
+      readiness: "not_ready",
+      available: false
+    });
+    expect(status.routes?.chat).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ provider: "mock", readiness: "ready" })])
+    );
+  });
+
   it("keeps getStatus zero-I/O and does not mutate cached observation", () => {
     const fetchSpy = vi.fn();
     const healthCheck = vi.fn(async () => {

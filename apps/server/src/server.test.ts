@@ -1668,6 +1668,42 @@ describe("server", () => {
     }
   });
 
+  it("does not make a disabled default mock provider healthy", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "mock"
+    });
+
+    try {
+      const status = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(status.json().providers.chat).toMatchObject({
+        provider: "mock",
+        mock: false,
+        readiness: "not_ready",
+        available: false
+      });
+      expect(status.json().routes.chat).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ provider: "mock", readiness: "ready" })])
+      );
+
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.json()).toMatchObject({
+        ok: false,
+        providers: {
+          chatCapability: {
+            readiness: "not_ready",
+            operational: false
+          }
+        }
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("verify embedding reports dimension mismatches safely", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(

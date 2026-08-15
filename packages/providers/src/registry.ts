@@ -291,7 +291,7 @@ export class ProviderRegistry implements ProviderResolver {
     const configured = this.isConfigured(capability, name);
     // PROVIDER_ALLOW_MOCKS permits the explicit `mock` route; it does not
     // turn an unconfigured real provider identity into a mock route.
-    const mock = name === "mock";
+    const mock = this.config.allowMocks && name === "mock";
     const required = capability === "chat";
     const readiness: ProviderReadinessState = configured || mock ? "ready" : "not_ready";
     const available = readiness === "ready";
@@ -395,7 +395,7 @@ export class ProviderRegistry implements ProviderResolver {
 
     if (capability === "embedding") {
       if (name === "mock") {
-        return true;
+        return this.config.allowMocks;
       }
       return Boolean(this.config.embedding.apiKey && this.config.embedding.model);
     }
