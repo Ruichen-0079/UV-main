@@ -677,6 +677,137 @@ describe("MemoryIngestionCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it("coalesces concurrent drain callers into one scheduling domain", async () => {
+    const { repository } = await admitTurn();
+    const provider = createProvider();
+    let activeListCalls = 0;
+    let peakListCalls = 0;
+    let listCalls = 0;
+    const listDueWork = repository.listDueWork.bind(repository);
+    vi.spyOn(repository, "listDueWork").mockImplementation(async (input) => {
+      activeListCalls += 1;
+      peakListCalls = Math.max(peakListCalls, activeListCalls);
+      listCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      try {
+        return await listDueWork(input);
+      } finally {
+        activeListCalls -= 1;
+      }
+    });
+    const coordinator = coordinatorOf(repository, provider);
+
+    await Promise.all([coordinator.drain(1_000), coordinator.drain(1_000)]);
+
+    expect(provider.writes).toHaveLength(1);
+    expect(peakListCalls).toBe(1);
+    expect(listCalls).toBe(2);
+  });
+
+  it("consumes work admitted while a drain is actively delivering", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const service = new FinalizedIngestionService(repository);
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let holdFirst = true;
+    const provider = createProvider({
+      writeEventIdempotent: vi.fn(async (input) => {
+        provider.writes.push(input);
+        if (holdFirst) {
+          holdFirst = false;
+          await firstHeld;
+        }
+        return { status: "written" as const, eventId: `memory:${provider.writes.length}` };
+      })
+    });
+    const coordinator = coordinatorOf(repository, provider);
+    const first = await service.admit({
+      ...base,
+      finalizedTurnId: "finalized-turn:drain-wake-first",
+      assistantMessageId: "assistant:drain-wake-first"
+    });
+    const draining = coordinator.drain(2_000);
+    await vi.waitFor(() => expect(provider.writes).toHaveLength(1));
+
+    const second = await service.admit({
+      ...base,
+      finalizedTurnId: "finalized-turn:drain-wake-second",
+      assistantMessageId: "assistant:drain-wake-second"
+    });
+    await coordinator.notifyAdmitted(second);
+    releaseFirst();
+    await draining;
+
+    expect(provider.writes).toHaveLength(2);
+    expect(
+      (await repository.listEvents(first.turn.finalizedTurnId))[0]?.status
+    ).toBe("complete");
+    expect(
+      (await repository.listEvents(second.turn.finalizedTurnId))[0]?.status
+    ).toBe("complete");
+  });
+
+  it("releases the coordinator slot after a provider failure", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const admitted = await new FinalizedIngestionService(repository, {
+      async build() {
+        return {
+          turnKind: "normal" as const,
+          events: [
+            {
+              kind: "fact" as const,
+              content: "boom",
+              scope: "user:user-a:persona:alice",
+              metadata: {}
+            },
+            {
+              kind: "fact" as const,
+              content: "after-boom",
+              scope: "user:user-a:persona:alice",
+              metadata: {}
+            }
+          ]
+        };
+      }
+    }).admit({ ...base, finalizedTurnId: "finalized-turn:slot-release" });
+    const provider = createProvider({
+      writeEventIdempotent: vi.fn(async (input) => {
+        if (input.content === "boom") {
+          throw new Error("provider failure");
+        }
+        provider.writes.push(input);
+        return { status: "written" as const, eventId: "memory:after-boom" };
+      })
+    });
+    const coordinator = coordinatorOf(repository, provider, { concurrency: 1 });
+
+    await coordinator.drain(1_000);
+
+    const events = await repository.listEvents(admitted.turn.finalizedTurnId);
+    const byContent = Object.fromEntries(
+      events.map((event) => [String(event.eventPayload.content), event])
+    );
+    expect(byContent["boom"]?.status).toBe("reconcile_required");
+    expect(byContent["after-boom"]?.status).toBe("complete");
+    expect((await coordinator.getDiagnostics()).activeWorkerCount).toBe(0);
+    expect(provider.writes).toHaveLength(1);
+  });
+
+  it("makes repeated shutdown safe and ignores wakes after stop", async () => {
+    const { repository, admitted } = await admitTurn();
+    const provider = createProvider();
+    const coordinator = coordinatorOf(repository, provider);
+    coordinator.start();
+    await coordinator.shutdown({ graceMs: 0 });
+    await coordinator.shutdown({ graceMs: 0 });
+    await coordinator.notifyAdmitted(admitted);
+
+    expect(coordinator.getStatus()).toBe("stopped");
+    expect(provider.writes).toHaveLength(0);
+  });
+
   it("applies the configured retry policy instead of burying delay constants", async () => {
     const { repository, admitted } = await admitTurn();
     const provider = createProvider({

@@ -208,6 +208,7 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
   private status: MemoryIngestionCoordinatorStatus = "idle";
   private acceptingWork = false;
   private loop: Promise<void> | undefined;
+  private drainPromise: Promise<void> | undefined;
   private scanLock: Promise<void> = Promise.resolve();
   private scanRequested = false;
   private activeWorkerCount = 0;
@@ -305,10 +306,33 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
   }
 
   async drain(timeoutMs = 10_000): Promise<void> {
+    const running = this.drainPromise;
+    if (running) {
+      await running;
+      return;
+    }
+    const drain = this.runDrain(timeoutMs);
+    this.drainPromise = drain;
+    try {
+      await drain;
+    } finally {
+      if (this.drainPromise === drain) {
+        this.drainPromise = undefined;
+      }
+    }
+  }
+
+  private async runDrain(timeoutMs: number): Promise<void> {
+    if (this.isStoppingOrStopped()) {
+      return;
+    }
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       await this.runScheduledScan();
       await this.waitForInFlight();
+      if (this.isStoppingOrStopped()) {
+        return;
+      }
       const due = await this.listDueWork(1);
       if (this.activeWorkerCount === 0 && due.length === 0 && this.inFlight.size === 0) {
         return;
@@ -758,6 +782,10 @@ export class MemoryIngestionCoordinator implements MemoryIngestionCoordinatorPor
 
   private canClaim(): boolean {
     return this.canSchedule();
+  }
+
+  private isStoppingOrStopped(): boolean {
+    return this.status === "stopping" || this.status === "stopped";
   }
 
   private canSchedule(): boolean {
