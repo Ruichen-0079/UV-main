@@ -11,7 +11,7 @@
     "build": "pnpm prepare:cubism-framework && tsc -b",
     "check": "pnpm prepare:cubism-framework && pnpm check:host-environment && tsc -b --pretty false",
     "check:host-environment": "node scripts/check-host-environment-safety.mjs",
-    "test": "pnpm -r test",
+    "test": "pnpm -r test && node --test scripts/check-host-environment-safety.node.mjs",
     "smoke": "pnpm build && tsx scripts/smoke.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",

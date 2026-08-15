@@ -16,8 +16,9 @@ logout、reboot 或 display-manager session 之间继续存在的配置。
 - 工具链环境：`${XDG_CONFIG_HOME:-$HOME/.config}/yuvi/toolchain/env` 和
   `env.fish`
 
-Windows 默认使用 `%APPDATA%\yuvi\` 配置、`%LOCALAPPDATA%\yuvi\` 状态/数据、
-`%LOCALAPPDATA%\Temp\yuvi\` 缓存和 `%LOCALAPPDATA%\yuvi\bin\` 用户工具目录；
+Windows 默认使用 `%APPDATA%\yuvi\` 配置、`%LOCALAPPDATA%\yuvi\` 状态/数据/缓存、
+以及 `%LOCALAPPDATA%\yuvi\bin\` 用户工具目录。持久化的 YUVI 配置、数据和工具链
+不依赖 `%LOCALAPPDATA%\Temp`；临时运行时状态仍可在适当场景使用临时或运行时目录；
 POSIX shell integration 不在 Windows 上安装。
 
 `/tmp`、`/var/tmp`、`TMPDIR`、`TMP`、`TEMP` 和 `XDG_RUNTIME_DIR` 只允许用于

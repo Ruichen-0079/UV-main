@@ -133,9 +133,54 @@ function effectiveEphemeralRoots(
   return [...new Set([...defaultEphemeralRoots(env, platform), ...(additionalRoots ?? [])])];
 }
 
+const POSIX_EPHEMERAL_VARIABLE_PATTERN =
+  /(?:\$(?:TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR)(?![A-Za-z0-9_])|\$\{(?:TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR)(?:\}|[^A-Za-z0-9_}][^}]*\}))/u;
+const WINDOWS_EPHEMERAL_VARIABLE_PATTERN =
+  /(?:%(?:TEMP|TMP)%|\$env:(?:TEMP|TMP)(?![A-Za-z0-9_]))/iu;
+const EPHEMERAL_LOCAL_APP_DATA_PATTERN =
+  /(?:%LOCALAPPDATA%|\$env:LOCALAPPDATA|\$\{env:LOCALAPPDATA\})[\\/]temp(?:[\\/]|$|["'`\s;])/iu;
+const POSIX_EPHEMERAL_PATH_PATTERN =
+  /(?:^|[\s"'`=:(])\/(?:var\/|private\/)?tmp(?=$|[\/\s"'`:=;,#&|)\]])/u;
+const WINDOWS_EPHEMERAL_PATH_PATTERN =
+  /(?:^|[\s"'`=:(])\\(?:var\\)?tmp(?=$|[\\\/\s"'`:=;,#&|)\]])/iu;
+const PATH_REFERENCE_BOUNDARY_PATTERN = /[\s"'`=:(;,#&|)\]]/u;
+
+function hasEphemeralReference(value: string): boolean {
+  return (
+    POSIX_EPHEMERAL_VARIABLE_PATTERN.test(value) ||
+    WINDOWS_EPHEMERAL_VARIABLE_PATTERN.test(value) ||
+    EPHEMERAL_LOCAL_APP_DATA_PATTERN.test(value) ||
+    POSIX_EPHEMERAL_PATH_PATTERN.test(value) ||
+    WINDOWS_EPHEMERAL_PATH_PATTERN.test(value)
+  );
+}
+
+function containsPathReference(content: string, root: string): boolean {
+  let offset = content.indexOf(root);
+
+  while (offset >= 0) {
+    const before = content[offset - 1];
+    const after = content[offset + root.length];
+    const beforeIsBoundary = before === undefined || PATH_REFERENCE_BOUNDARY_PATTERN.test(before);
+    const afterIsBoundary =
+      after === undefined ||
+      after === "/" ||
+      after === "\\" ||
+      PATH_REFERENCE_BOUNDARY_PATTERN.test(after);
+
+    if (beforeIsBoundary && afterIsBoundary) {
+      return true;
+    }
+
+    offset = content.indexOf(root, offset + 1);
+  }
+
+  return false;
+}
+
 export function isEphemeralPath(value: string, options: PathSafetyOptions = {}): boolean {
   if (!value.trim()) return false;
-  if (/\$\{?(?:TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR)\}?/.test(value)) return true;
+  if (hasEphemeralReference(value)) return true;
   if (!path.isAbsolute(value)) return false;
 
   const env = options.env ?? process.env;
@@ -176,18 +221,11 @@ export function assertSafePersistentReference(
 }
 
 function containsEphemeralReference(content: string, options: PathSafetyOptions = {}): boolean {
-  if (/\${?(?:TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR)}?/.test(content)) return true;
-  if (/\/tmp\/|\/var\/tmp\//.test(content)) return true;
-  if (/\bmktemp\b/.test(content)) return true;
+  if (hasEphemeralReference(content) || /\bmktemp\b/.test(content)) return true;
 
   const env = options.env ?? process.env;
   const roots = effectiveEphemeralRoots(env, options.platform, options.ephemeralRoots);
-  return roots.some((root) => {
-    const normalizedRoot = path.resolve(root);
-    return (
-      content.includes(`${normalizedRoot}${path.sep}`) || content.includes(`${normalizedRoot}/`)
-    );
-  });
+  return roots.some((root) => containsPathReference(content, path.resolve(root)));
 }
 
 export function assertSafePersistentContent(

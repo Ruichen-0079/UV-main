@@ -55,12 +55,14 @@ const persistentTargets = [
   "conf.d",
   "environment.d"
 ];
-const ephemeralVariablePattern =
-  /(?:\$(?:TMP|TMPDIR|TEMP|XDG_RUNTIME_DIR)\b|\$\{(?:TMP|TMPDIR|TEMP|XDG_RUNTIME_DIR)(?:[^}]*)\}|%(?:TEMP|TMP)%|\$env:(?:TEMP|TMP)\b)/iu;
+const posixEphemeralVariablePattern =
+  /(?:\$(?:TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR)(?![A-Za-z0-9_])|\$\{(?:TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR)(?:\}|[^A-Za-z0-9_}][^}]*\}))/u;
+const windowsEphemeralVariablePattern = /(?:%(?:TEMP|TMP)%|\$env:(?:TEMP|TMP)(?![A-Za-z0-9_]))/iu;
 const ephemeralLocalAppDataPattern =
   /(?:%LOCALAPPDATA%|\$env:LOCALAPPDATA|\$\{env:LOCALAPPDATA\})[\\/]temp(?:[\\/]|$|["'`\s;])/iu;
-const ephemeralPathPattern =
-  /(?:^|[\s"'`=:(])(?:\/(?:var\/|private\/)?tmp\/|\\(?:var\\)?tmp[\\/])/iu;
+const posixEphemeralPathPattern =
+  /(?:^|[\s"'`=:(])\/(?:var\/|private\/)?tmp(?=$|[\/\s"'`:=;,#&|)\]])/u;
+const windowsEphemeralPathPattern = /(?:^|[\s"'`=:(])\\(?:var\\)?tmp(?=$|[\\\/\s"'`:=;,#&|)\]])/iu;
 const mktempPattern = /\bmktemp\b/u;
 const shellSourcePattern = /(?:\bsource\b|(?:^|[\s;&])\.)\s+/u;
 
@@ -108,9 +110,11 @@ async function readTextCandidate(filePath) {
 
 function hasEphemeralReference(line) {
   return (
-    ephemeralVariablePattern.test(line) ||
+    posixEphemeralVariablePattern.test(line) ||
+    windowsEphemeralVariablePattern.test(line) ||
     ephemeralLocalAppDataPattern.test(line) ||
-    ephemeralPathPattern.test(line) ||
+    posixEphemeralPathPattern.test(line) ||
+    windowsEphemeralPathPattern.test(line) ||
     mktempPattern.test(line)
   );
 }

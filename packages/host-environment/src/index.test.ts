@@ -167,6 +167,60 @@ describe("host environment safety", () => {
     expect(await pathExists(target)).toBe(false);
   });
 
+  it("rejects root-only ephemeral paths and exact temporary variables without prefix false positives", async () => {
+    const { root, env } = await createSandbox();
+    const target = path.join(root, ".profile");
+    const unsafeReferences = [
+      "/tmp",
+      "/tmp/",
+      "/tmp/yuvi",
+      "/var/tmp",
+      "/var/tmp/",
+      "/var/tmp/yuvi",
+      "$TMP",
+      "${TMP}",
+      "$TMPDIR",
+      "${TMPDIR}",
+      "$TEMP",
+      "${TEMP}",
+      "$XDG_RUNTIME_DIR",
+      "${XDG_RUNTIME_DIR}",
+      "%TEMP%",
+      "%TMP%",
+      "$env:TEMP",
+      "$env:TMP",
+      "%LOCALAPPDATA%\\Temp\\yuvi",
+      "$env:LOCALAPPDATA\\Temp\\yuvi"
+    ];
+    const safeReferences = [
+      "/tmpfile",
+      "/tmp-old",
+      "/var/tmpdata",
+      "${TMP_NOT}",
+      "${TMPDIR_BACKUP}",
+      "${TEMPORARY}",
+      "${XDG_RUNTIME_DIRECTORY}",
+      "$TMP_EXTRA",
+      "$TEMPFILE",
+      "$env:TEMPORARY",
+      "%TEMP_BACKUP%",
+      "%LOCALAPPDATA%\\Yuvi",
+      '$env:LOCALAPPDATA + "\\Yuvi"'
+    ];
+
+    for (const reference of unsafeReferences) {
+      expect(() =>
+        assertSafePersistentContent(target, `YUVI_ENV=${reference}\n`, { env, ephemeralRoots: [] })
+      ).toThrowError(/ephemeral path/i);
+    }
+
+    for (const reference of safeReferences) {
+      expect(() =>
+        assertSafePersistentContent(target, `YUVI_ENV=${reference}\n`, { env, ephemeralRoots: [] })
+      ).not.toThrow();
+    }
+  });
+
   it("leaves an existing managed target intact when temporary chmod fails", async () => {
     const { root, env } = await createSandbox();
     const target = path.join(root, "config", "yuvi", "shell", "yuvi.sh");

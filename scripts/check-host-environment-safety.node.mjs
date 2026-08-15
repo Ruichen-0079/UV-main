@@ -46,9 +46,11 @@ test("detects POSIX, CMD, and PowerShell ephemeral-variable forms", async () => 
       "D=${TEMP}",
       "E=$XDG_RUNTIME_DIR",
       "F=${XDG_RUNTIME_DIR}",
-      "G=$env:LOCALAPPDATA",
+      'G=$env:LOCALAPPDATA + "\\Yuvi"',
       "H=$env:LOCALAPPDATA\\Temp\\yuvi",
-      "I=${env:LOCALAPPDATA}\\Temp\\yuvi"
+      "I=${env:LOCALAPPDATA}\\Temp\\yuvi",
+      "J=%LOCALAPPDATA%\\Yuvi",
+      "K=%LOCALAPPDATA%\\Temp\\yuvi"
     ].join("\n"),
     "utf8"
   );
@@ -61,11 +63,105 @@ test("detects POSIX, CMD, and PowerShell ephemeral-variable forms", async () => 
 
   const violations = await scanHostEnvironmentSafety(root);
 
-  assert.equal(violations.length, 9);
+  assert.equal(violations.length, 10);
   assert(violations.every((violation) => violation.includes("persistent startup file")));
   assert(violations.some((violation) => violation.startsWith(".zshenv:8:")));
   assert(violations.some((violation) => violation.startsWith(".zshenv:9:")));
+  assert(violations.some((violation) => violation.startsWith(".zshenv:11:")));
   assert(!violations.some((violation) => violation.startsWith(".zshenv:7:")));
+  assert(!violations.some((violation) => violation.startsWith(".zshenv:10:")));
+});
+
+test("detects root-only POSIX temporary paths without prefix false positives", async () => {
+  const root = await createSandbox();
+  const file = path.join(root, ".profile");
+  const unsafeReferences = ["/tmp", "/tmp/", "/tmp/yuvi", "/var/tmp", "/var/tmp/", "/var/tmp/yuvi"];
+  const safeReferences = ["/tmpfile", "/tmp-old", "/var/tmpdata"];
+
+  await writeFile(
+    file,
+    [
+      ...unsafeReferences.map((reference) => `YUVI_ENV=${reference}`),
+      ...safeReferences.map((reference) => `YUVI_ENV=${reference}`)
+    ].join("\n"),
+    "utf8"
+  );
+
+  const violations = await scanHostEnvironmentSafety(root);
+  assert.equal(violations.length, unsafeReferences.length);
+  for (let index = 0; index < unsafeReferences.length; index += 1) {
+    assert.equal(
+      violations.some((entry) => entry.startsWith(`.profile:${index + 1}:`)),
+      true
+    );
+  }
+  for (
+    let index = unsafeReferences.length;
+    index < unsafeReferences.length + safeReferences.length;
+    index += 1
+  ) {
+    assert.equal(
+      violations.some((entry) => entry.startsWith(`.profile:${index + 1}:`)),
+      false
+    );
+  }
+});
+
+test("detects exact temporary variables without prefix false positives", async () => {
+  const root = await createSandbox();
+  const file = path.join(root, ".zshenv");
+  const unsafeReferences = [
+    "$TMP",
+    "${TMP}",
+    "$TMPDIR",
+    "${TMPDIR}",
+    "$TEMP",
+    "${TEMP}",
+    "$XDG_RUNTIME_DIR",
+    "${XDG_RUNTIME_DIR}",
+    "%TEMP%",
+    "%TMP%",
+    "$env:TEMP",
+    "$env:TMP"
+  ];
+  const safeReferences = [
+    "${TMP_NOT}",
+    "${TMPDIR_BACKUP}",
+    "${TEMPORARY}",
+    "${XDG_RUNTIME_DIRECTORY}",
+    "$TMP_EXTRA",
+    "$TEMPFILE",
+    "$env:TEMPORARY",
+    "%TEMP_BACKUP%"
+  ];
+
+  await writeFile(
+    file,
+    [
+      ...unsafeReferences.map((reference) => `YUVI_ENV=${reference}`),
+      ...safeReferences.map((reference) => `YUVI_ENV=${reference}`)
+    ].join("\n"),
+    "utf8"
+  );
+
+  const violations = await scanHostEnvironmentSafety(root);
+  assert.equal(violations.length, unsafeReferences.length);
+  for (let index = 0; index < unsafeReferences.length; index += 1) {
+    assert.equal(
+      violations.some((entry) => entry.startsWith(`.zshenv:${index + 1}:`)),
+      true
+    );
+  }
+  for (
+    let index = unsafeReferences.length;
+    index < unsafeReferences.length + safeReferences.length;
+    index += 1
+  ) {
+    assert.equal(
+      violations.some((entry) => entry.startsWith(`.zshenv:${index + 1}:`)),
+      false
+    );
+  }
 });
 
 test("allows documentation and intentional regression fixtures", async () => {
