@@ -29,3 +29,22 @@ The MVP includes a `local-echo` chat provider so the server is runnable without 
 - `src/types/vision.ts`: vision provider contract.
 - `src/types/embedding.ts`: embedding provider contract.
 - `src/types/errors.ts`: normalized provider errors.
+
+## Provider contracts
+
+Provider contracts are capability-specific and are resolved through the
+existing `ProviderRegistry` / `ProviderResolver` boundary. A provider adapter
+must return the normalized business result for its capability rather than
+vendor transport fields.
+
+Reasoning has one authoritative business result: `ReasoningOutput.answer`.
+The legacy `ReasoningOutput.reasoning` field remains for structural
+compatibility, but is not a raw provider reasoning/internal-trace channel and
+normalized adapters leave it empty. Raw vendor reasoning content is discarded
+at the provider boundary. `packages/memory/src/extractor.ts` remains
+answer-first and is not changed.
+
+The current Runtime does not implement tool/function calling. `role: "tool"`
+and `finishReason: "tool_call"` remain reserved compatibility values only;
+they do not provide normalized tool definitions, calls, results, streaming
+argument deltas, or execution.

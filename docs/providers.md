@@ -286,3 +286,19 @@ Planned provider extensions:
 - NATS-backed provider task events for long-running jobs
 
 These should preserve the same boundary: core uses interfaces, registry wires implementations.
+
+## Provider contract notes
+
+The runtime keeps provider, model, and capability separate. Capability
+contracts are typed in `@companion/providers`, selected by
+`ProviderResolver`, and implemented by vendor or local adapters.
+
+For reasoning, `ReasoningOutput.answer` is the authoritative final business
+result and must be non-empty on success. The `reasoning` field is retained as
+a legacy compatibility field, not as a public raw chain-of-thought channel;
+raw provider internal reasoning is discarded by normalization. Memory remains
+read-only and continues to prefer `answer`.
+
+Tool/function calling is currently unsupported. Existing `tool` message roles
+and `tool_call` finish reasons are reserved type affordances, not an
+implemented normalized tool protocol.

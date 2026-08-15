@@ -13,7 +13,12 @@ import type {
   ProviderHealth,
   ProviderRouteStatus
 } from "./types/common.js";
-import type { ReasoningInput, ReasoningOutput, ReasoningProvider } from "./types/reasoning.js";
+import {
+  normalizeReasoningOutput,
+  type ReasoningInput,
+  type ReasoningOutput,
+  type ReasoningProvider
+} from "./types/reasoning.js";
 import type { STTInput, STTOutput, STTProvider } from "./types/stt.js";
 import type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
 import type { VisionInput, VisionOutput, VisionProvider } from "./types/vision.js";
@@ -1241,8 +1246,7 @@ class FallbackEmbeddingProvider implements EmbeddingProvider {
   async embedText(text: string): Promise<number[]> {
     const output = await runProviderChain(this.providers, "embedding", async (provider) => ({
       vector: await provider.embedText(text),
-      model: provider.model,
-      latencyMs: 0
+      model: provider.model
     }));
     return output.vector;
   }
@@ -1250,8 +1254,7 @@ class FallbackEmbeddingProvider implements EmbeddingProvider {
   async embedBatch(texts: string[]): Promise<number[][]> {
     const output = await runProviderChain(this.providers, "embedding", async (provider) => ({
       vectors: await provider.embedBatch(texts),
-      model: provider.model,
-      latencyMs: 0
+      model: provider.model
     }));
     return output.vectors;
   }
@@ -1747,15 +1750,15 @@ class OpenAICompatibleReasoningProvider implements ReasoningProvider {
       temperature: input.temperature,
       maxTokens: input.maxTokens ?? input.maxOutputTokens
     });
-    return {
-      reasoning: completion.reasoningContent ?? completion.content,
-      answer: completion.reasoningContent ? completion.content : undefined,
+    return normalizeReasoningOutput(this.name, {
+      // OpenAI-compatible reasoning_content is provider-internal trace and
+      // is intentionally discarded at the normalized boundary.
+      answer: completion.content,
       finishReason: completion.finishReason,
       model: completion.model,
       latencyMs: completion.latencyMs,
-      tokenUsage: completion.tokenUsage,
-      debug: completion.rawResponse ? { rawResponse: completion.rawResponse } : undefined
-    };
+      tokenUsage: completion.tokenUsage
+    });
   }
 }
 
@@ -2044,12 +2047,12 @@ export function createMockReasoningProvider(name = "mock-reasoning"): ReasoningP
     },
     async generateReasoning(input: ReasoningInput) {
       const joined = input.messages.map((message) => message.content).join("\n");
-      return {
-        reasoning: "Mock reasoning path.",
-        answer: joined.slice(0, 256),
+      return normalizeReasoningOutput(name, {
+        reasoning: "",
+        answer: joined.slice(0, 256) || "Mock reasoning result.",
         latencyMs: 0,
         tokenUsage: { inputTokens: estimateTokenCount(joined), outputTokens: 4 }
-      };
+      });
     }
   };
 }

@@ -1,5 +1,10 @@
 import type { ProviderHealth } from "../types/common.js";
-import type { ReasoningInput, ReasoningOutput, ReasoningProvider } from "../types/reasoning.js";
+import {
+  normalizeReasoningOutput,
+  type ReasoningInput,
+  type ReasoningOutput,
+  type ReasoningProvider
+} from "../types/reasoning.js";
 import {
   createDeepSeekChatCompletion,
   healthCheckDeepSeek,
@@ -24,14 +29,14 @@ export class DeepSeekReasoningProvider implements ReasoningProvider {
       stream: input.stream ?? false
     });
 
-    return {
-      reasoning: completion.reasoningContent ?? completion.content,
-      answer: completion.reasoningContent ? completion.content : undefined,
+    return normalizeReasoningOutput(this.name, {
+      // DeepSeek's reasoning_content is provider-internal trace and is
+      // intentionally not copied into the normalized compatibility field.
+      answer: completion.content,
       finishReason: completion.finishReason,
       model: completion.model,
       latencyMs: completion.latencyMs,
-      tokenUsage: completion.tokenUsage,
-      debug: completion.rawResponse ? { rawResponse: completion.rawResponse } : undefined
-    };
+      tokenUsage: completion.tokenUsage
+    });
   }
 }

@@ -1,5 +1,6 @@
 export type {
   ProviderCapability,
+  ProviderCallOptions,
   ProviderDebug,
   ProviderHealth,
   ProviderHealthStatus,
@@ -22,6 +23,7 @@ export type {
   ChatStreamOptions,
   ChatStreamingMode
 } from "./types/chat.js";
+export { normalizeReasoningOutput } from "./types/reasoning.js";
 export type { ReasoningInput, ReasoningOutput, ReasoningProvider } from "./types/reasoning.js";
 export type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
 export type { STTInput, STTOutput, STTProvider } from "./types/stt.js";

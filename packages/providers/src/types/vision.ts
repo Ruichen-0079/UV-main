@@ -1,4 +1,9 @@
-import type { ProviderHealth, ProviderMetadata, TextMessage } from "./common.js";
+import type {
+  ProviderCallOptions,
+  ProviderHealth,
+  ProviderMetadata,
+  TextMessage
+} from "./common.js";
 
 export type VisionInput = {
   image?: Uint8Array | undefined;
@@ -23,5 +28,5 @@ export type VisionOutput = ProviderMetadata & {
 export interface VisionProvider {
   readonly name: string;
   healthCheck(): Promise<ProviderHealth>;
-  analyzeImage(input: VisionInput): Promise<VisionOutput>;
+  analyzeImage(input: VisionInput, options?: ProviderCallOptions): Promise<VisionOutput>;
 }
