@@ -120,6 +120,18 @@ export { preparePrivatePostgres, postgresDiagnostics } from "./postgres-lifecycl
 export { resolvePostgresMode } from "./config.js";
 export { DesktopSupervisor } from "./supervisor.js";
 export {
+  buildPrivateDatabaseUrl,
+  migrateSupervisorPostgres,
+  migrateSupervisorTarget,
+  migrationSettingsFromEnv,
+  resolveSupervisorMigrationTarget
+} from "./postgres-migrate.js";
+export type {
+  SupervisorMigrateInput,
+  SupervisorMigrateResult,
+  SupervisorMigrationTarget
+} from "./postgres-migrate.js";
+export {
   startSupervisorHttpServer,
   extractControlToken,
   tokensMatch,

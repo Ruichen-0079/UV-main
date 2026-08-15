@@ -4,8 +4,9 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildChildProcessEnv, loadPackagedSupervisorConfig } from "./config.js";
-import { DesktopSupervisor } from "./supervisor.js";
+import { DesktopSupervisor, type SupervisorHooks } from "./supervisor.js";
 import type { StartCommandSpec, SupervisorConfig } from "./types.js";
+import { emptyDiagnostics } from "@companion/memory";
 import * as health from "./health.js";
 import * as ownership from "./ownership.js";
 import * as processWindows from "./process-windows.js";
@@ -14,8 +15,21 @@ const tempDirs: string[] = [];
 const supervisors = new Set<DesktopSupervisor>();
 let unexpectedSpawnCalls = 0;
 
-function createSupervisor(config: SupervisorConfig): DesktopSupervisor {
-  const supervisor = new DesktopSupervisor(config);
+function createSupervisor(
+  config: SupervisorConfig,
+  hooks: SupervisorHooks = {}
+): DesktopSupervisor {
+  const supervisor = new DesktopSupervisor(config, {
+    migratePostgres: async () => ({
+      ok: true,
+      schemaReady: true,
+      diagnostics: {
+        ...emptyDiagnostics(),
+        schemaReady: true
+      }
+    }),
+    ...hooks
+  });
   supervisors.add(supervisor);
   return supervisor;
 }
@@ -1242,5 +1256,97 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
     expect(runtime?.summary).toMatch(/pending|external/i);
     expect(JSON.stringify(supervisor.snapshot())).not.toContain("P3_RUNTIME_SECRET_NEVER_LOG");
     await supervisor.shutdown();
+  });
+
+  it("skips schema bootstrap when external mode has no DATABASE_URL", async () => {
+    const migratePostgres = vi.fn();
+    const supervisor = createSupervisor(packagedConfig({ YUVI_AUTOSTART_MEM0: "false" }), {
+      migratePostgres
+    });
+    await supervisor.bootstrap();
+    expect(migratePostgres).not.toHaveBeenCalled();
+  });
+
+  it("runs schema bootstrap before starting database-dependent services", async () => {
+    const order: string[] = [];
+    const healthMock = mockMem0Health(false);
+    mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(
+      packagedConfig({ DATABASE_URL: "postgres://yuvi:x@127.0.0.1:5432/yuvi" }),
+      {
+        migratePostgres: async () => {
+          order.push("migrate");
+          const diagnostics = emptyDiagnostics();
+          diagnostics.schemaReady = true;
+          diagnostics.memorySearch.status = "ready";
+          diagnostics.memorySearchReady = true;
+          return {
+            ok: true,
+            schemaReady: true,
+            diagnostics
+          };
+        }
+      }
+    );
+    const originalEnsure = supervisor.ensureService.bind(supervisor);
+    vi.spyOn(supervisor, "ensureService").mockImplementation(async (id) => {
+      order.push(`ensure:${id}`);
+      return originalEnsure(id);
+    });
+    await supervisor.bootstrap();
+    expect(order[0]).toBe("migrate");
+    expect(order).toContain("ensure:mem0");
+    expect(JSON.stringify(supervisor.snapshot())).not.toContain("postgres://");
+  });
+
+  it("fails closed and does not start Mem0 when schema bootstrap fails", async () => {
+    const { MigrationError } = await import("@companion/memory");
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const supervisor = createSupervisor(
+      packagedConfig({ DATABASE_URL: "postgres://yuvi:x@127.0.0.1:5432/yuvi" }),
+      {
+        migratePostgres: async () => {
+          throw new MigrationError(
+            "FOREIGN_DATABASE",
+            "The target database is not an empty or Yuvi-owned schema."
+          );
+        }
+      }
+    );
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "FOREIGN_DATABASE" });
+    expect(processMock.spawn).not.toHaveBeenCalled();
+    expect(supervisor.snapshot().postgres?.migration?.lastErrorCode).toBe("FOREIGN_DATABASE");
+    expect(JSON.stringify(supervisor.snapshot())).not.toContain("postgres://yuvi");
+  });
+
+  it("starts Runtime after core ready but does not start Mem0 when memory-search failed", async () => {
+    const healthMock = mockMem0Health(false);
+    const processMock = mockManagedSpawn(healthMock.setReady, healthMock.setDown);
+    const diagnostics = emptyDiagnostics();
+    diagnostics.schemaReady = true;
+    diagnostics.memorySearch.status = "failed";
+    diagnostics.memorySearch.errorCode = "MIGRATION_FAILED";
+    diagnostics.memorySearch.failedMigration = "001_init_memory.sql";
+    const supervisor = createSupervisor(
+      packagedConfig({
+        DATABASE_URL: "postgres://yuvi:x@127.0.0.1:5432/yuvi",
+        YUVI_AUTOSTART_MEM0: "true"
+      }),
+      {
+        migratePostgres: async () => ({
+          ok: true,
+          schemaReady: true,
+          diagnostics
+        })
+      }
+    );
+    await supervisor.bootstrap();
+    expect(supervisor.snapshot().postgres?.migration?.schemaReady).toBe(true);
+    expect(supervisor.snapshot().postgres?.migration?.memorySearchStatus).toBe("failed");
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(mem0?.ownership).not.toBe("owned");
+    expect(processMock.spawn).not.toHaveBeenCalled();
+    expect(JSON.stringify(supervisor.snapshot())).not.toContain("postgres://yuvi");
   });
 });

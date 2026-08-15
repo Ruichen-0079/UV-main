@@ -50,6 +50,7 @@ import {
 } from "./process-windows.js";
 import type {
   ManagedServiceSpec,
+  PostgresMigrationDiagnostics,
   ProcessMetadata,
   RuntimeConfigUpdate,
   RuntimeConfigUpdateResult,
@@ -60,6 +61,12 @@ import type {
   SupervisorConfig,
   SupervisorSnapshot
 } from "./types.js";
+import {
+  migrateSupervisorTarget,
+  migrationSettingsFromEnv,
+  resolveSupervisorMigrationTarget
+} from "./postgres-migrate.js";
+import { MigrationError, type MigrationDiagnostics } from "@companion/memory";
 
 type InternalService = {
   spec: ManagedServiceSpec;
@@ -86,6 +93,7 @@ export type SupervisorHooks = {
     layout: NonNullable<SupervisorConfig["postgresLayout"]>;
     distribution: NonNullable<SupervisorConfig["postgresDistribution"]>;
   }) => boolean;
+  migratePostgres?: typeof migrateSupervisorTarget;
 };
 
 /** Secret keys that must never leak into status/config responses. */
@@ -172,6 +180,7 @@ export class DesktopSupervisor {
   private readonly lifecycleStartedAt = process.hrtime.bigint();
   private lifecycleSequence = 0;
   private readonly hooks: SupervisorHooks;
+  private migrationDiagnostics: PostgresMigrationDiagnostics | undefined;
 
   constructor(
     private config: SupervisorConfig,
@@ -365,13 +374,16 @@ export class DesktopSupervisor {
       shuttingDown: this.shuttingDown,
       services,
       updatedAt: new Date().toISOString(),
-      postgres: postgresDiagnostics({
-        mode: this.config.postgresMode ?? "external",
-        layout: this.config.postgresLayout ?? null,
-        distributionError: this.config.postgresDistributionError ?? null,
-        ownership: postgres?.ownership ?? "none",
-        status: postgres?.status ?? "stopped"
-      })
+      postgres: {
+        ...postgresDiagnostics({
+          mode: this.config.postgresMode ?? "external",
+          layout: this.config.postgresLayout ?? null,
+          distributionError: this.config.postgresDistributionError ?? null,
+          ownership: postgres?.ownership ?? "none",
+          status: postgres?.status ?? "stopped"
+        }),
+        migration: this.migrationDiagnostics
+      }
     };
   }
 
@@ -398,6 +410,7 @@ export class DesktopSupervisor {
     } else {
       await this.refreshService("postgres");
     }
+    await this.runSchemaBootstrap();
     await this.refreshService("ollama");
 
     if (this.config.autostartRuntime) {
@@ -406,10 +419,27 @@ export class DesktopSupervisor {
       await this.refreshService("runtime");
     }
 
-    if (this.config.memoryBackend === "mem0" && this.config.autostartMem0) {
+    if (
+      this.config.memoryBackend === "mem0" &&
+      this.config.autostartMem0 &&
+      this.memorySearchAllowsMem0()
+    ) {
       await this.ensureService("mem0");
     } else {
       await this.refreshService("mem0");
+      const mem0 = this.services.get("mem0");
+      if (
+        mem0 &&
+        this.config.autostartMem0 &&
+        !this.memorySearchAllowsMem0() &&
+        mem0.ownership !== "owned"
+      ) {
+        mem0.summary = "Memory-search schema is not ready.";
+        mem0.lastError =
+          this.migrationDiagnostics?.memorySearchErrorCode ??
+          this.migrationDiagnostics?.memorySearchStatus ??
+          "unavailable";
+      }
     }
 
     if (this.config.autostartTts) {
@@ -1029,6 +1059,83 @@ export class DesktopSupervisor {
       await sleep(svc.spec.readinessIntervalMs);
     }
     return false;
+  }
+
+  private memorySearchAllowsMem0(): boolean {
+    const status = this.migrationDiagnostics?.memorySearchStatus;
+    if (status == null) return true;
+    return status === "ready";
+  }
+
+  private toMigrationDiagnostics(diagnostics: MigrationDiagnostics): PostgresMigrationDiagnostics {
+    return {
+      schemaReady: diagnostics.schemaReady,
+      memorySearchReady: diagnostics.memorySearchReady,
+      memorySearchStatus: diagnostics.memorySearch.status,
+      memorySearchErrorCode: diagnostics.memorySearch.errorCode,
+      memorySearchFailedMigration: diagnostics.memorySearch.failedMigration,
+      vectorAvailable: diagnostics.vectorAvailable,
+      applied: diagnostics.applied,
+      pending: diagnostics.pending,
+      currentMigration: diagnostics.currentMigration,
+      lastErrorCode: diagnostics.lastErrorCode,
+      lockWaitMs: diagnostics.lockWaitMs
+    };
+  }
+
+  private async runSchemaBootstrap(): Promise<void> {
+    const mode = this.config.postgresMode ?? "external";
+    const password = this.resolvePrivatePostgresPassword();
+    const target = resolveSupervisorMigrationTarget(this.config, password);
+    if (!target) {
+      if (mode === "private") {
+        throw new MigrationError(
+          "DATABASE_UNAVAILABLE",
+          "The private PostgreSQL target is not reachable."
+        );
+      }
+      return;
+    }
+    if (mode === "private") {
+      const postgres = this.services.get("postgres");
+      if (postgres?.status !== "healthy" || postgres.ownership !== "owned") {
+        throw new MigrationError(
+          "DATABASE_UNAVAILABLE",
+          "The private PostgreSQL target is not reachable."
+        );
+      }
+    }
+    const migrate = this.hooks.migratePostgres ?? migrateSupervisorTarget;
+    try {
+      const result = await migrate(target, {
+        settings: migrationSettingsFromEnv(this.config.env)
+      });
+      this.migrationDiagnostics = this.toMigrationDiagnostics(result.diagnostics);
+      if (!result.ok || !result.schemaReady) {
+        throw new MigrationError(
+          result.diagnostics.lastErrorCode ?? "SCHEMA_POSTCONDITION_FAILED",
+          "Yuvi schema bootstrap did not reach schema_ready."
+        );
+      }
+    } catch (error) {
+      if (error instanceof MigrationError) {
+        this.migrationDiagnostics = {
+          schemaReady: false,
+          memorySearchReady: false,
+          memorySearchStatus: this.migrationDiagnostics?.memorySearchStatus ?? null,
+          memorySearchErrorCode: this.migrationDiagnostics?.memorySearchErrorCode ?? null,
+          memorySearchFailedMigration:
+            this.migrationDiagnostics?.memorySearchFailedMigration ?? null,
+          vectorAvailable: this.migrationDiagnostics?.vectorAvailable ?? false,
+          applied: this.migrationDiagnostics?.applied ?? [],
+          pending: this.migrationDiagnostics?.pending ?? [],
+          currentMigration: this.migrationDiagnostics?.currentMigration ?? null,
+          lastErrorCode: error.code,
+          lockWaitMs: this.migrationDiagnostics?.lockWaitMs ?? 0
+        };
+      }
+      throw error;
+    }
   }
 
   private async prepareAndStartPrivatePostgres(): Promise<void> {

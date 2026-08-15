@@ -171,6 +171,9 @@ importers:
 
   packages/desktop-supervisor:
     dependencies:
+      '@companion/memory':
+        specifier: workspace:*
+        version: link:../memory
       pg:
         specifier: ^8.20.0
         version: 8.20.0

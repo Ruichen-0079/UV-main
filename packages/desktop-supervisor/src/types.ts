@@ -44,6 +44,20 @@ export type SupervisorSnapshot = {
 
 export type PostgresMode = "private" | "external";
 
+export type PostgresMigrationDiagnostics = {
+  schemaReady: boolean;
+  memorySearchReady: boolean;
+  memorySearchStatus: "ready" | "unavailable" | "failed" | null;
+  memorySearchErrorCode: string | null;
+  memorySearchFailedMigration: string | null;
+  vectorAvailable: boolean;
+  applied: string[];
+  pending: string[];
+  currentMigration: string | null;
+  lastErrorCode: string | null;
+  lockWaitMs: number;
+};
+
 export type PostgresDiagnostics = {
   mode: PostgresMode;
   status: string;
@@ -56,6 +70,7 @@ export type PostgresDiagnostics = {
   initializationState: "missing" | "initializing" | "ready" | "failed" | null;
   ownership: ServiceOwnership;
   distributionError: string | null;
+  migration?: PostgresMigrationDiagnostics | undefined;
 };
 
 export type ProcessMetadata = {

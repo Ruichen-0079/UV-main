@@ -164,8 +164,16 @@ Packaged YUVI owns a private PostgreSQL 16 cluster under the user-writable
 `%LOCALAPPDATA%\\YUVI\\Postgres` data root (P4-2D1). Supervisor is the lifecycle
 owner. The packaged password lives in Windows Credential Manager
 (`YUVI/postgres/local`); it is not a user-editable setting and is not stored
-as a long-lived `local.secret`. Runtime repository selection and Yuvi schema
-migrations are not switched in D1; those land in P4-2D2/D3. External
+as a long-lived `local.secret`. P4-2D2 owns Yuvi schema bootstrap: Supervisor
+and `pnpm db:migrate` share one crash-safe runner (session advisory lock,
+read-only classification, set-based history, per-file transactions). Foreign
+and partial databases are refused with zero schema mutation. Core conversation
+migrations (`006`–`009`) run first and are required for `schema_ready`. Optional
+memory-search migrations (`001`–`005`) run after core when vector is eligible;
+a memory-search failure does not undo core readiness. `pnpm db:migrate` exits 0
+when core is ready and memory-search is ready or unavailable, and exits non-zero
+if memory-search fails after core. Runtime
+repository selection and packaged default durability remain D3. External
 `DATABASE_URL` remains an advanced override and is never started or stopped by
 the private-cluster owner.
 
