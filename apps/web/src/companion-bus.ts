@@ -27,7 +27,12 @@ export type CompanionBusMessage =
   | { kind: "stop-speech"; requestId: string }
   | { kind: "generation-state"; requestId: string; state: CompanionGenerationState }
   | { kind: "companion-ready" }
-  | { kind: "playback-status"; requestId: string; state: CompanionPlaybackState }
+  | {
+      kind: "playback-status";
+      requestId: string;
+      segmentSequence: number;
+      state: CompanionPlaybackState;
+    }
   | { kind: "speech-status"; requestId: string; state: SpeechQueueState };
 
 type WireMessage = { from: CompanionBusRole; message: CompanionBusMessage };
@@ -109,7 +114,11 @@ export function isCompanionBusMessage(value: unknown): value is CompanionBusMess
     case "generation-state":
       return isNonEmptyString(message["requestId"]) && isGenerationState(message["state"]);
     case "playback-status":
-      return isNonEmptyString(message["requestId"]) && isPlaybackState(message["state"]);
+      return (
+        isNonEmptyString(message["requestId"]) &&
+        isNonNegativeInteger(message["segmentSequence"]) &&
+        isPlaybackState(message["state"])
+      );
     case "speech-status":
       return isNonEmptyString(message["requestId"]) && isSpeechQueueState(message["state"]);
   }

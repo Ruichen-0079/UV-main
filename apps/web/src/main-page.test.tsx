@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MainPage, resolveSpeechCommandEpoch, voicePlaybackStatusLabel } from "./main-page.js";
+import {
+  correlateMainPlaybackStatus,
+  MainPage,
+  resolveSpeechCommandEpoch,
+  voicePlaybackStatusLabel
+} from "./main-page.js";
+import { createSpeechPlaybackCorrelation } from "./speech-playback-correlation.js";
 import { VOICE_OUTPUT_STORAGE_KEY } from "./voice-output.js";
 
 function renderMainPage(): string {
@@ -49,5 +55,18 @@ describe("MainPage speech lifecycle correlation", () => {
   it("does not label queue scheduling as actual speaking", () => {
     expect(voicePlaybackStatusLabel("playing", false)).toBe("Speech queued…");
     expect(voicePlaybackStatusLabel("playing", true)).toBe("Speaking…");
+  });
+
+  it("keeps a newer segment speaking after an old terminal status", () => {
+    let state = createSpeechPlaybackCorrelation();
+    const first = { requestId: "turn-a", sequence: 0 };
+    const second = { requestId: "turn-a", sequence: 1 };
+
+    state = correlateMainPlaybackStatus(state, "started", first).state;
+    state = correlateMainPlaybackStatus(state, "started", second).state;
+    const stale = correlateMainPlaybackStatus(state, "terminal", first);
+
+    expect(stale.accepted).toBe(false);
+    expect(stale.state.active).toEqual(second);
   });
 });

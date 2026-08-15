@@ -5,6 +5,11 @@ import {
 } from "./lumi-audio.js";
 import type { SpeechPlaybackEvent } from "./speech-queue.js";
 import {
+  correlateSpeechPlayback,
+  createSpeechPlaybackCorrelation,
+  type SpeechPlaybackCorrelationState
+} from "./speech-playback-correlation.js";
+import {
   loadLumiCubismModel,
   type LumiParameterInfo,
   type LumiCubismModel,
@@ -253,6 +258,7 @@ export class LumiController {
   private state: PresenceState = "unavailable";
   private requestedPresence: PresenceState = "idle";
   private generation = 0;
+  private playbackCorrelation: SpeechPlaybackCorrelationState = createSpeechPlaybackCorrelation();
 
   constructor(
     private readonly createAdapter: () => Live2DAdapter,
@@ -265,6 +271,7 @@ export class LumiController {
 
   async load(): Promise<void> {
     const generation = ++this.generation;
+    this.playbackCorrelation = createSpeechPlaybackCorrelation();
     const adapter = this.createAdapter();
     this.adapter = adapter;
     try {
@@ -346,13 +353,25 @@ export class LumiController {
   }
 
   handlePlaybackEvent(event: SpeechPlaybackEvent): void {
+    const phase =
+      event.type === "audioElementAttached"
+        ? "attached"
+        : event.type === "playbackStarted"
+          ? "started"
+          : event.type === "audioElementDetached"
+            ? "detached"
+            : "terminal";
+    const result = correlateSpeechPlayback(this.playbackCorrelation, phase, event.segment);
+    this.playbackCorrelation = result.state;
+    if (!result.accepted) return;
+
     if (event.type === "audioElementAttached") {
       this.envelope?.attach(event.audio);
     } else if (event.type === "playbackStarted") {
       this.envelope?.startPlayback?.(event.audio);
       this.setPresence("speaking");
     } else if (event.type === "playbackEnded") {
-      this.envelope?.detach();
+      this.envelope?.stop();
       this.requestedPresence = "idle";
       this.applyPresence("idle");
     } else if (event.type === "playbackStopped" || event.type === "playbackError") {
@@ -395,6 +414,7 @@ export class LumiController {
 
   dispose(): void {
     this.generation += 1;
+    this.playbackCorrelation = createSpeechPlaybackCorrelation();
     this.setPresenceAnimation({
       blink: 0,
       breath: 0,

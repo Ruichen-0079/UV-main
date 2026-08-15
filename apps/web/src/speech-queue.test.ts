@@ -5,6 +5,10 @@ import {
   type SpeechQueueItem
 } from "./speech-queue.js";
 
+const segment = (sequence: number, requestId = "turn-a") => ({ requestId, sequence });
+const segmentKey = (value: { requestId: string; sequence: number }) =>
+  `${value.requestId}:${value.sequence}`;
+
 describe("SpeechPlaybackQueue", () => {
   it("synthesizes and plays queued segments in order", async () => {
     const events: string[] = [];
@@ -17,8 +21,8 @@ describe("SpeechPlaybackQueue", () => {
       events.push(`play:${events.filter((value) => value.startsWith("synth:")).length}`);
     });
     const queue = new SpeechPlaybackQueue(synthesize, play);
-    queue.enqueue({ text: "one", language: "en" });
-    queue.enqueue({ text: "two", language: "en" });
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
+    queue.enqueue({ text: "two", language: "en" }, segment(1));
     queue.finish();
     await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(2));
     expect(events).toEqual(["synth:one", "play:1", "synth:two", "play:2"]);
@@ -41,8 +45,8 @@ describe("SpeechPlaybackQueue", () => {
     });
     const queue = new SpeechPlaybackQueue(synthesize, play);
 
-    queue.enqueue({ text: "one", language: "en" });
-    queue.enqueue({ text: "two", language: "en" });
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
+    queue.enqueue({ text: "two", language: "en" }, segment(1));
     await vi.waitFor(() => expect(synthesize).toHaveBeenCalledTimes(2));
     expect(play).toHaveBeenCalledTimes(1);
     expect(events).toEqual(["synth:one", "play:one", "synth:two"]);
@@ -63,7 +67,7 @@ describe("SpeechPlaybackQueue", () => {
         onSynthesisCompleted: (item) => events.push(`ready:${item.sequence}:${item.item.text}`)
       }
     );
-    queue.enqueue({ text: "one", language: "en" });
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
     queue.finish();
     await vi.waitFor(() => expect(events).toEqual(["ready:0:one", "play:one"]));
   });
@@ -75,8 +79,8 @@ describe("SpeechPlaybackQueue", () => {
     );
     const play = vi.fn(async () => undefined);
     const queue = new SpeechPlaybackQueue(synthesize, play);
-    queue.enqueue({ text: "one", language: "en" });
-    queue.enqueue({ text: "two", language: "en" });
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
+    queue.enqueue({ text: "two", language: "en" }, segment(1));
     await vi.waitFor(() => expect(synthesize).toHaveBeenCalledTimes(1));
     queue.cancel();
     release?.();
@@ -98,7 +102,7 @@ describe("SpeechPlaybackQueue", () => {
         onState: (state) => states.push(state)
       }
     );
-    queue.enqueue({ text: "one", language: "en" });
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
     queue.finish();
     await vi.waitFor(() => expect(errors).toHaveLength(1));
     expect(states).toContain("error");
@@ -110,16 +114,28 @@ describe("SpeechPlaybackQueue", () => {
     const queue = new SpeechPlaybackQueue(
       async (item) => ({ audioBase64: item.text, mimeType: "audio/wav" }) as never,
       async () => undefined,
-      { onItemState: (id, state) => states.push([id, state]) }
+      { onItemState: (item, state) => states.push([segmentKey(item), state]) }
     );
-    queue.enqueue({ text: "one", language: "en" }, "0");
-    queue.enqueue({ text: "two", language: "en" }, "1");
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
+    queue.enqueue({ text: "two", language: "en" }, segment(1));
     queue.finish();
-    await vi.waitFor(() => expect(states).toContainEqual(["1", "completed"]));
+    await vi.waitFor(() => expect(states).toContainEqual(["turn-a:1", "completed"]));
     const stateFor = (id: string) =>
       states.filter(([itemId]) => itemId === id).map(([, state]) => state);
-    expect(stateFor("0")).toEqual(["queued", "synthesizing", "ready", "playing", "completed"]);
-    expect(stateFor("1")).toEqual(["queued", "synthesizing", "ready", "playing", "completed"]);
+    expect(stateFor("turn-a:0")).toEqual([
+      "queued",
+      "synthesizing",
+      "ready",
+      "playing",
+      "completed"
+    ]);
+    expect(stateFor("turn-a:1")).toEqual([
+      "queued",
+      "synthesizing",
+      "ready",
+      "playing",
+      "completed"
+    ]);
   });
 
   it("skips a failed synthesis and continues with remaining segments", async () => {
@@ -133,18 +149,18 @@ describe("SpeechPlaybackQueue", () => {
       async () => undefined,
       {
         onError: (error) => errors.push(error),
-        onItemState: (id, state) => states.push([id, state])
+        onItemState: (item, state) => states.push([segmentKey(item), state])
       }
     );
-    queue.enqueue({ text: "bad", language: "en" }, "0");
-    queue.enqueue({ text: "good", language: "en" }, "1");
+    queue.enqueue({ text: "bad", language: "en" }, segment(0));
+    queue.enqueue({ text: "good", language: "en" }, segment(1));
     queue.finish();
-    await vi.waitFor(() => expect(states).toContainEqual(["1", "completed"]));
+    await vi.waitFor(() => expect(states).toContainEqual(["turn-a:1", "completed"]));
     expect(errors).toHaveLength(1);
     const stateFor = (id: string) =>
       states.filter(([itemId]) => itemId === id).map(([, state]) => state);
-    expect(stateFor("0").at(-1)).toBe("failed");
-    expect(stateFor("1").at(-1)).toBe("completed");
+    expect(stateFor("turn-a:0").at(-1)).toBe("failed");
+    expect(stateFor("turn-a:1").at(-1)).toBe("completed");
   });
 
   it("marks first play failure as failed and continues later sequences", async () => {
@@ -156,16 +172,18 @@ describe("SpeechPlaybackQueue", () => {
         if (output.audioBase64 === "one") throw new DOMException("NotAllowedError");
       },
       {
-        onItemState: (id, state) => states.push([id, state]),
+        onItemState: (item, state) => states.push([segmentKey(item), state]),
         onError: (error) => errors.push(error)
       }
     );
-    queue.enqueue({ text: "one", language: "en" }, "0");
-    queue.enqueue({ text: "two", language: "en" }, "1");
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
+    queue.enqueue({ text: "two", language: "en" }, segment(1));
     queue.finish();
-    await vi.waitFor(() => expect(states).toContainEqual(["1", "completed"]));
-    expect(states.filter(([id, state]) => id === "0" && state === "failed")).toHaveLength(1);
-    expect(states.filter(([id, state]) => id === "0" && state === "completed")).toHaveLength(0);
+    await vi.waitFor(() => expect(states).toContainEqual(["turn-a:1", "completed"]));
+    expect(states.filter(([id, state]) => id === "turn-a:0" && state === "failed")).toHaveLength(1);
+    expect(states.filter(([id, state]) => id === "turn-a:0" && state === "completed")).toHaveLength(
+      0
+    );
     expect(errors).toHaveLength(1);
   });
 
@@ -182,8 +200,8 @@ describe("SpeechPlaybackQueue", () => {
       }
     );
     // Synthesis is serial in the queue, so order is natural; assert completion order.
-    queue.enqueue({ text: "zero", language: "en" }, "0");
-    queue.enqueue({ text: "one", language: "en" }, "1");
+    queue.enqueue({ text: "zero", language: "en" }, segment(0));
+    queue.enqueue({ text: "one", language: "en" }, segment(1));
     queue.finish();
     await vi.waitFor(() => expect(played).toEqual(["zero", "one"]));
   });
@@ -197,10 +215,10 @@ describe("SpeechPlaybackQueue", () => {
           release = () => resolve(undefined as never);
         }),
       async () => undefined,
-      { onItemState: (id, state) => states.push([id, state]) }
+      { onItemState: (item, state) => states.push([segmentKey(item), state]) }
     );
-    queue.enqueue({ text: "one", language: "en" }, "0");
-    queue.enqueue({ text: "two", language: "en" }, "1");
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
+    queue.enqueue({ text: "two", language: "en" }, segment(1));
     await vi.waitFor(() => expect(release).toBeDefined());
     queue.cancel();
     release?.();
@@ -216,23 +234,23 @@ describe("SpeechPlaybackQueue", () => {
     const first = new SpeechPlaybackQueue(
       async (item) => ({ audioBase64: item.text, mimeType: "audio/wav" }) as never,
       async () => undefined,
-      { onItemState: (id, state) => firstStates.push([id, state]) }
+      { onItemState: (item, state) => firstStates.push([segmentKey(item), state]) }
     );
-    first.enqueue({ text: "one", language: "en" }, "0");
+    first.enqueue({ text: "one", language: "en" }, segment(0, "first"));
     first.finish();
-    await vi.waitFor(() => expect(firstStates).toContainEqual(["0", "completed"]));
+    await vi.waitFor(() => expect(firstStates).toContainEqual(["first:0", "completed"]));
 
     const secondStates: Array<[string | undefined, string]> = [];
     const second = new SpeechPlaybackQueue(
       async (item) => ({ audioBase64: item.text, mimeType: "audio/wav" }) as never,
       async () => undefined,
-      { onItemState: (id, state) => secondStates.push([id, state]) }
+      { onItemState: (item, state) => secondStates.push([segmentKey(item), state]) }
     );
-    second.enqueue({ text: "two", language: "en" }, "0");
+    second.enqueue({ text: "two", language: "en" }, segment(0, "second"));
     second.finish();
-    await vi.waitFor(() => expect(secondStates).toContainEqual(["0", "completed"]));
-    expect(secondStates.filter(([id]) => id === "0").length).toBeGreaterThan(0);
-    expect(firstStates.filter(([id]) => id === "0").length).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(secondStates).toContainEqual(["second:0", "completed"]));
+    expect(secondStates.filter(([id]) => id === "second:0").length).toBeGreaterThan(0);
+    expect(firstStates.filter(([id]) => id === "first:0").length).toBeGreaterThan(0);
   });
 
   it("exposes playback lifecycle only after the player starts", async () => {
@@ -247,11 +265,38 @@ describe("SpeechPlaybackQueue", () => {
       },
       { onPlaybackEvent: (event) => events.push(event.type) }
     );
-    queue.enqueue({ text: "one", language: "en" });
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
     queue.finish();
     await vi.waitFor(() =>
       expect(events).toEqual(["audioElementAttached", "playbackStarted", "playbackEnded"])
     );
+  });
+
+  it("keeps queue ordering separate from stable product segment identity", async () => {
+    const playback: Array<{ sequence: number; requestId: string; segmentSequence: number }> = [];
+    const queue = new SpeechPlaybackQueue(
+      async () => ({ audioBase64: "", mimeType: "audio/wav" }) as never,
+      async (_output, _signal, lifecycle) => {
+        lifecycle?.emit({ type: "playbackStarted", audio: {} as HTMLAudioElement });
+        lifecycle?.emit({ type: "playbackEnded", audio: {} as HTMLAudioElement });
+      },
+      {
+        onPlaybackEvent: (event) =>
+          playback.push({
+            sequence: event.sequence,
+            requestId: event.segment.requestId,
+            segmentSequence: event.segment.sequence
+          })
+      }
+    );
+    queue.enqueue({ text: "one", language: "en" }, segment(42));
+    queue.finish();
+
+    await vi.waitFor(() => expect(playback).toHaveLength(2));
+    expect(playback).toEqual([
+      { sequence: 0, requestId: "turn-a", segmentSequence: 42 },
+      { sequence: 0, requestId: "turn-a", segmentSequence: 42 }
+    ]);
   });
 
   it("does not emit playbackStarted after a cancelled play promise settles", async () => {
@@ -277,12 +322,48 @@ describe("SpeechPlaybackQueue", () => {
     const playback = player(
       { audioBase64: "", mimeType: "audio/wav" } as never,
       controller.signal,
-      { sequence: 0, emit: (event) => events.push(event.type) }
+      { sequence: 0, segment: segment(0), emit: (event) => events.push(event.type) }
     );
     controller.abort();
     resolvePlay?.();
     await expect(playback).rejects.toMatchObject({ name: "AbortError" });
     expect(events).toEqual(["audioElementAttached", "playbackStopped", "audioElementDetached"]);
     expect(audio.pause).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports browser play rejection as playbackError without starting speech", async () => {
+    const audio = {
+      play: vi.fn(() => Promise.reject(new Error("autoplay blocked"))),
+      pause: vi.fn(),
+      onended: null,
+      onerror: null
+    } as unknown as HTMLAudioElement;
+    vi.stubGlobal(
+      "Audio",
+      vi.fn(() => audio)
+    );
+    vi.stubGlobal(
+      "atob",
+      vi.fn(() => "")
+    );
+    vi.stubGlobal("URL", {
+      createObjectURL: vi.fn(() => "blob:test"),
+      revokeObjectURL: vi.fn()
+    });
+    try {
+      const events: string[] = [];
+      const player = createBrowserSpeechPlayer();
+      await expect(
+        player({ audioBase64: "", mimeType: "audio/wav" } as never, new AbortController().signal, {
+          sequence: 0,
+          segment: segment(0),
+          emit: (event) => events.push(event.type)
+        })
+      ).rejects.toThrow("autoplay blocked");
+      expect(events).toEqual(["audioElementAttached", "playbackError", "audioElementDetached"]);
+      expect(events).not.toContain("playbackStarted");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

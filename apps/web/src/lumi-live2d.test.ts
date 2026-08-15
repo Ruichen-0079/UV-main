@@ -7,6 +7,9 @@ import {
   reducePresence
 } from "./lumi-live2d.js";
 
+const playbackSegment = { requestId: "turn-a", sequence: 0 };
+const nextPlaybackSegment = { requestId: "turn-a", sequence: 1 };
+
 describe("Lumi presence and audio envelope", () => {
   it("keeps the presence lifecycle tied to real playback", () => {
     expect(reducePresence("idle", { type: "user-sent" })).toBe("thinking");
@@ -67,13 +70,28 @@ describe("Lumi presence and audio envelope", () => {
     );
     await controller.load();
     const audio = {} as HTMLAudioElement;
-    controller.handlePlaybackEvent({ type: "audioElementAttached", sequence: 0, audio });
+    controller.handlePlaybackEvent({
+      type: "audioElementAttached",
+      sequence: 0,
+      segment: playbackSegment,
+      audio
+    });
     expect(controller.getPresence()).toBe("idle");
-    controller.handlePlaybackEvent({ type: "playbackStarted", sequence: 0, audio });
+    controller.handlePlaybackEvent({
+      type: "playbackStarted",
+      sequence: 0,
+      segment: playbackSegment,
+      audio
+    });
     expect(controller.getPresence()).toBe("speaking");
     expect(envelope.attach).toHaveBeenCalledWith(audio);
     expect(envelope.startPlayback).toHaveBeenCalledWith(audio);
-    controller.handlePlaybackEvent({ type: "playbackStopped", sequence: 0, audio });
+    controller.handlePlaybackEvent({
+      type: "playbackStopped",
+      sequence: 0,
+      segment: playbackSegment,
+      audio
+    });
     expect(envelope.stop).toHaveBeenCalled();
     expect(controller.getPresence()).toBe("idle");
     expect(states).toContain("interrupted");
@@ -95,13 +113,101 @@ describe("Lumi presence and audio envelope", () => {
     const controller = new LumiController(() => adapter, "model3.json", undefined, () => envelope);
     await controller.load();
     const audio = {} as HTMLAudioElement;
-    controller.handlePlaybackEvent({ type: "playbackStarted", sequence: 0, audio });
+    controller.handlePlaybackEvent({
+      type: "playbackStarted",
+      sequence: 0,
+      segment: playbackSegment,
+      audio
+    });
     adapter.resetMouth.mockClear();
     controller.setPresence("idle");
     expect(controller.getPresence()).toBe("speaking");
     expect(adapter.resetMouth).not.toHaveBeenCalled();
-    controller.handlePlaybackEvent({ type: "playbackEnded", sequence: 0, audio });
+    controller.handlePlaybackEvent({
+      type: "playbackEnded",
+      sequence: 0,
+      segment: playbackSegment,
+      audio
+    });
     expect(controller.getPresence()).toBe("idle");
+    controller.handlePlaybackEvent({
+      type: "audioElementDetached",
+      sequence: 0,
+      segment: playbackSegment,
+      audio
+    });
+    expect(envelope.detach).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let an old segment detach a newer active analyser", async () => {
+    const adapter = {
+      load: vi.fn(async () => undefined),
+      setMouthOpen: vi.fn(),
+      setMouthForm: vi.fn(),
+      setParameter: vi.fn(),
+      setBreath: vi.fn(),
+      setFraming: vi.fn(),
+      resetMouth: vi.fn(),
+      resize: vi.fn(),
+      dispose: vi.fn()
+    };
+    const envelope = {
+      attach: vi.fn(),
+      startPlayback: vi.fn(),
+      detach: vi.fn(),
+      stop: vi.fn(),
+      dispose: vi.fn()
+    };
+    const controller = new LumiController(
+      () => adapter,
+      "model3.json",
+      undefined,
+      () => envelope
+    );
+    await controller.load();
+    const firstAudio = {} as HTMLAudioElement;
+    const secondAudio = {} as HTMLAudioElement;
+
+    controller.handlePlaybackEvent({
+      type: "audioElementAttached",
+      sequence: 0,
+      segment: playbackSegment,
+      audio: firstAudio
+    });
+    controller.handlePlaybackEvent({
+      type: "playbackStarted",
+      sequence: 0,
+      segment: playbackSegment,
+      audio: firstAudio
+    });
+    controller.handlePlaybackEvent({
+      type: "playbackEnded",
+      sequence: 0,
+      segment: playbackSegment,
+      audio: firstAudio
+    });
+    const detachCountAfterFirst = envelope.detach.mock.calls.length;
+    controller.handlePlaybackEvent({
+      type: "audioElementAttached",
+      sequence: 1,
+      segment: nextPlaybackSegment,
+      audio: secondAudio
+    });
+    controller.handlePlaybackEvent({
+      type: "playbackStarted",
+      sequence: 1,
+      segment: nextPlaybackSegment,
+      audio: secondAudio
+    });
+    controller.handlePlaybackEvent({
+      type: "audioElementDetached",
+      sequence: 0,
+      segment: playbackSegment,
+      audio: firstAudio
+    });
+
+    expect(envelope.detach).toHaveBeenCalledTimes(detachCountAfterFirst);
+    expect(controller.getPresence()).toBe("speaking");
   });
 
   it("keeps speaking mouth ownership with RMS while presence animates eyes and breath", async () => {
