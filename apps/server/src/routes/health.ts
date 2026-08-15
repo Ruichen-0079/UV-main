@@ -18,7 +18,10 @@ export async function registerHealthRoutes(
     const providerStatus = context.providers.getStatus();
     const chat = providerStatus.providers.chat;
 
-    const ok = database.status === "healthy" && chat.available === true;
+    const ok =
+      database.status === "healthy" &&
+      chat.readiness === "ready" &&
+      chat.observed !== "unavailable";
     const memoryIngestion = toMemoryIngestionHealthSnapshot(
       await readMemoryIngestionDiagnostics(context.memoryIngestionCoordinator)
     );

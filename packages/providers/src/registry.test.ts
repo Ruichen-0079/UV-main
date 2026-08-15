@@ -3,6 +3,7 @@ import {
   DeepSeekReasoningProvider,
   ProviderError,
   ProviderErrorCode,
+  createMockChatProvider,
   createProviderRegistryFromEnv
 } from "./index.js";
 
@@ -137,6 +138,93 @@ describe("ProviderRegistry", () => {
     });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(JSON.stringify(status)).not.toContain("test-key");
+  });
+
+  it("keeps local readiness separate from unverified remote observation", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    });
+
+    const status = registry.getStatus().providers.chat;
+
+    expect(status).toMatchObject({
+      readiness: "ready",
+      observed: "unknown",
+      configured: true,
+      available: true,
+      status: "degraded"
+    });
+    expect(status.lastVerifiedAt).toBeUndefined();
+  });
+
+  it("keeps getStatus zero-I/O and does not mutate cached observation", () => {
+    const fetchSpy = vi.fn();
+    const healthCheck = vi.fn(async () => {
+      throw new Error("healthCheck must not run during status inspection");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    });
+    registry.registerChatProvider({
+      ...createMockChatProvider("deepseek"),
+      healthCheck
+    });
+
+    const first = registry.getStatus();
+    const second = registry.getStatus();
+
+    expect(first.providers.chat.observed).toBe("unknown");
+    expect(second.providers.chat.observed).toBe("unknown");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(healthCheck).not.toHaveBeenCalled();
+  });
+
+  it("records live observations without persisting them across registry reload", () => {
+    const config = {
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat"
+    };
+    const registry = createProviderRegistryFromEnv(config);
+    registry.recordLiveVerification({
+      capability: "chat",
+      provider: "deepseek",
+      observed: "unavailable",
+      verifiedAt: "2026-08-15T12:00:00.000Z",
+      latencyMs: 42,
+      errorCode: ProviderErrorCode.ProviderUnavailable,
+      error: "Provider verification failed safely."
+    });
+
+    expect(registry.getStatus().providers.chat).toMatchObject({
+      readiness: "ready",
+      observed: "unavailable",
+      status: "unavailable",
+      lastVerifiedAt: "2026-08-15T12:00:00.000Z",
+      latencyMs: 42,
+      lastErrorCode: ProviderErrorCode.ProviderUnavailable,
+      lastError: "Provider verification failed safely."
+    });
+
+    const reloaded = createProviderRegistryFromEnv(config);
+    expect(reloaded.getStatus().providers.chat).toMatchObject({
+      readiness: "ready",
+      observed: "unknown",
+      status: "degraded"
+    });
+    expect(reloaded.getStatus().providers.chat.lastVerifiedAt).toBeUndefined();
   });
 
   it("normalizes provider errors", () => {

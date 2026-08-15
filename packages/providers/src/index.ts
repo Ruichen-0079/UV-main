@@ -4,11 +4,14 @@ export type {
   ProviderDebug,
   ProviderHealth,
   ProviderHealthStatus,
+  ProviderObservedState,
   ProviderMetadata,
   ProviderAttempt,
+  ProviderReadinessState,
   TextMessage,
   TextMessageRole,
-  TokenUsage
+  TokenUsage,
+  ProviderVerificationMode
 } from "./types/common.js";
 export { ProviderError, ProviderErrorCode, isRetryableProviderError } from "./types/errors.js";
 export type {
@@ -46,7 +49,11 @@ export {
   createProviderRegistryConfigFromEnv,
   createProviderRegistryFromEnv
 } from "./registry.js";
-export type { ProviderRegistryConfig, ProviderStatusMap } from "./registry.js";
+export type {
+  LiveProviderVerification,
+  ProviderRegistryConfig,
+  ProviderStatusMap
+} from "./registry.js";
 export type { ProviderResolver } from "./registry.js";
 export { getChatStreamingMode } from "./registry.js";
 export type { MockStreamingChatProviderOptions } from "./registry.js";

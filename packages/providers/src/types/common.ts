@@ -1,5 +1,14 @@
 export type ProviderCapability = "chat" | "reasoning" | "tts" | "stt" | "vision" | "embedding";
 
+/** Local configuration state. This axis never implies remote reachability. */
+export type ProviderReadinessState = "ready" | "not_ready";
+
+/** The most recent explicitly observed provider state. */
+export type ProviderObservedState = "unknown" | "available" | "degraded" | "unavailable";
+
+/** How an explicit provider verification request was performed. */
+export type ProviderVerificationMode = "live" | "config_only";
+
 /**
  * Call-level controls shared by every provider capability.
  *
@@ -18,6 +27,10 @@ export type ProviderHealth = {
   provider: string;
   name?: string | undefined;
   capability?: ProviderCapability | undefined;
+  /** Canonical local configuration/readiness axis. */
+  readiness?: ProviderReadinessState | undefined;
+  /** Canonical cached observation axis; unknown means not live-verified. */
+  observed?: ProviderObservedState | undefined;
   configured?: boolean | undefined;
   available?: boolean | undefined;
   mock?: boolean | undefined;
@@ -37,6 +50,7 @@ export type ProviderHealth = {
   priority?: number | undefined;
   fallbackEligible?: boolean | undefined;
   lastVerifiedAt?: string | undefined;
+  lastErrorCode?: string | undefined;
   lastError?: string | undefined;
 };
 
