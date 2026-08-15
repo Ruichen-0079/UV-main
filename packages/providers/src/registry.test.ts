@@ -40,11 +40,18 @@ describe("ProviderRegistry", () => {
       provider: "deepseek",
       capability: "chat",
       configured: false,
-      available: true,
-      mock: true,
+      readiness: "not_ready",
+      available: false,
+      mock: false,
       required: true
     });
-    expect(JSON.stringify(status)).not.toContain("API_KEY");
+    expect(status.routes?.chat.at(-1)).toMatchObject({
+      provider: "mock",
+      readiness: "ready",
+      available: true,
+      mock: true
+    });
+    expect(JSON.stringify(status)).not.toContain("test_deepseek_secret");
   });
 
   it("uses real-provider-first behavior unless mock fallback is explicitly allowed", async () => {
@@ -159,6 +166,61 @@ describe("ProviderRegistry", () => {
       status: "degraded"
     });
     expect(status.lastVerifiedAt).toBeUndefined();
+  });
+
+  it("does not make an unconfigured real route mock-ready when mocks are permitted", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "true",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek"
+    });
+
+    expect(registry.getStatus().providers.chat).toMatchObject({
+      provider: "deepseek",
+      configured: false,
+      readiness: "not_ready",
+      available: false,
+      mock: false,
+      status: "unavailable"
+    });
+    expect(registry.getStatus().routes?.chat).toMatchObject([
+      expect.objectContaining({
+        provider: "deepseek",
+        readiness: "not_ready",
+        mock: false
+      })
+    ]);
+  });
+
+  it("reports only an explicit mock route as mock-ready", async () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "true",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      CHAT_PROVIDER_CHAIN: "deepseek,mock"
+    });
+
+    expect(registry.getStatus().routes?.chat).toMatchObject([
+      expect.objectContaining({
+        provider: "deepseek",
+        readiness: "not_ready",
+        available: false,
+        mock: false
+      }),
+      expect.objectContaining({
+        provider: "mock",
+        readiness: "ready",
+        available: true,
+        mock: true
+      })
+    ]);
+
+    await expect(
+      registry.getChatProvider().generateReply({
+        messages: [{ role: "user", content: "hello" }]
+      })
+    ).resolves.toMatchObject({ finalProvider: "mock" });
   });
 
   it("keeps getStatus zero-I/O and does not mutate cached observation", () => {

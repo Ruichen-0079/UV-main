@@ -289,8 +289,9 @@ export class ProviderRegistry implements ProviderResolver {
 
   private createStatus(capability: ProviderCapability, name: string): ProviderHealth {
     const configured = this.isConfigured(capability, name);
-    const mock =
-      (capability === "embedding" && name === "mock") || (!configured && this.config.allowMocks);
+    // PROVIDER_ALLOW_MOCKS permits the explicit `mock` route; it does not
+    // turn an unconfigured real provider identity into a mock route.
+    const mock = name === "mock";
     const required = capability === "chat";
     const readiness: ProviderReadinessState = configured || mock ? "ready" : "not_ready";
     const available = readiness === "ready";

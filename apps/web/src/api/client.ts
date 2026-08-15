@@ -56,6 +56,7 @@ export type HealthResponse = {
   };
   providers: {
     chat: ProviderHealth;
+    chatCapability: ProviderCapabilityHealth;
     optional: {
       reasoning?: ProviderHealth;
       tts: ProviderHealth;
@@ -64,6 +65,20 @@ export type HealthResponse = {
       embedding: ProviderHealth;
     };
   };
+};
+
+export type ProviderCapabilityHealth = {
+  readiness: "ready" | "not_ready";
+  observed: "unknown" | "available" | "degraded" | "unavailable";
+  operational: boolean;
+  routeCount: number;
+  readyRouteCount: number;
+  readyProviders: Array<{
+    provider: string;
+    priority: number;
+    observed: "unknown" | "available" | "degraded" | "unavailable";
+    status: "healthy" | "degraded" | "unavailable";
+  }>;
 };
 
 export type RuntimeEvent = {

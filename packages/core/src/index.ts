@@ -2867,15 +2867,22 @@ export class RuntimeOrchestrator {
     output: ProviderMetadata,
     status: ProviderHealth | undefined
   ): SafeProviderCallMetadata {
-    const mock = Boolean(status?.mock);
+    const finalProvider = output.finalProvider ?? providerName;
+    const finalStatus =
+      finalProvider === providerName
+        ? status
+        : (this.options.providers
+            .getStatus?.()
+            .routes?.[capability]?.find((route) => route.provider === finalProvider) ?? status);
+    const mock = Boolean(finalStatus?.mock);
     return {
-      name: mock ? "mock" : providerName,
+      name: mock ? "mock" : finalProvider,
       capability,
-      model: output.model ?? status?.model,
+      model: output.model ?? finalStatus?.model,
       mock,
       latencyMs: output.latencyMs,
       tokenUsage: output.tokenUsage,
-      healthStatus: status?.status,
+      healthStatus: finalStatus?.status,
       ...(output.fallbackUsed !== undefined ? { fallbackUsed: output.fallbackUsed } : {}),
       ...(output.attemptedProviders ? { attemptedProviders: output.attemptedProviders } : {}),
       ...(output.finalProvider ? { finalProvider: output.finalProvider } : {})

@@ -50,8 +50,9 @@ they do not provide normalized tool definitions, calls, results, streaming
 argument deltas, or execution.
 
 Provider status has two independent axes. `readiness` is local configuration
-state (`ready` or `not_ready`) and is the only state used to decide whether a
-provider route can be constructed. `observed` is cached explicit verification
+state (`ready` or `not_ready`) based on required local fields being present;
+it does not validate endpoint syntax or remote reachability. It is the only
+state used to decide whether a provider route can be constructed. `observed` is cached explicit verification
 state (`unknown`, `available`, `degraded`, or `unavailable`). A configured
 provider starts with `readiness: "ready"` and `observed: "unknown"`; config
 inspection never claims remote availability. The legacy `available` field is
