@@ -104,10 +104,56 @@ describe("OpenAI-compatible native chat streaming", () => {
     });
   });
 
+  it("keeps generateReply non-streaming when the legacy input flag is true", async () => {
+    const fetchMock = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            model: "deepseek-chat",
+            choices: [{ message: { content: "reply" }, finish_reason: "stop" }]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const output = await createProvider().generateReply({
+      messages: [{ role: "user", content: "hello" }],
+      stream: true
+    });
+
+    expect(output.message.content).toBe("reply");
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(JSON.parse(String(request?.body))).toMatchObject({ stream: false });
+  });
+
+  it("does not expose provider reasoning_content as normalized stream output", async () => {
+    const body = [
+      frame({ choices: [{ delta: { reasoning_content: "private trace", content: "visible" } }] }),
+      frame({ choices: [{ delta: { reasoning_content: "more private trace" } }] }),
+      frame({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+      frame("[DONE]")
+    ].join("");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => streamResponse([encoded(body)]))
+    );
+
+    const events = await collect(createProvider());
+    expect(events.filter((event) => event.type === "text-delta")).toEqual([
+      { type: "text-delta", text: "visible" }
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      output: { message: { content: "visible" } }
+    });
+    expect(JSON.stringify(events)).not.toContain("private trace");
+  });
+
   it("joins multiple data lines in one SSE frame", async () => {
     const body = [
-      "data: {\"choices\": [\n",
-      "data: {\"delta\": {\"content\": \"split\"}}]}\n\n",
+      'data: {"choices": [\n',
+      'data: {"delta": {"content": "split"}}]}\n\n',
       frame({ choices: [{ delta: {}, finish_reason: "stop" }] }),
       frame("[DONE]")
     ].join("");

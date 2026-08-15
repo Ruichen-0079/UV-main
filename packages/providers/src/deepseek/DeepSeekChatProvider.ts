@@ -24,7 +24,9 @@ export class DeepSeekChatProvider implements ChatProvider {
       temperature: input.temperature,
       maxTokens: input.maxTokens ?? input.maxOutputTokens,
       stopSequences: input.stopSequences,
-      stream: input.stream ?? false
+      // Method selection is authoritative: generateReply is never a streamed
+      // transport request, even when the legacy input field is set.
+      stream: false
     });
 
     return {
