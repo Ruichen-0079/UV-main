@@ -16,6 +16,17 @@ export type ServerConfig = {
     intervalMinutes: number;
     limit: number;
   };
+  memoryIngestion: {
+    enabled: boolean;
+    pollIntervalMs: number;
+    concurrency: number;
+    leaseSeconds: number;
+    scanLimit: number;
+    retryInitialDelayMs: number;
+    retryMaxDelayMs: number;
+    retryMultiplier: number;
+    missingAdmissionEnabled: boolean;
+  };
   memoryVectorIndex: {
     enabled: boolean;
     type: "hnsw" | "ivfflat" | "none";
@@ -53,6 +64,20 @@ export function loadServerConfig(
       runOnStartup: parseBoolean(env["MEMORY_MAINTENANCE_RUN_ON_STARTUP"], false),
       intervalMinutes: parsePositiveInteger(env["MEMORY_MAINTENANCE_INTERVAL_MINUTES"], 0),
       limit: parseStrictPositiveInteger(env["MEMORY_MAINTENANCE_LIMIT"], 500)
+    },
+    memoryIngestion: {
+      enabled: parseBoolean(env["MEMORY_INGESTION_COORDINATOR_ENABLED"], true),
+      pollIntervalMs: parseStrictPositiveInteger(env["MEMORY_INGESTION_POLL_INTERVAL_MS"], 15_000),
+      concurrency: parseStrictPositiveInteger(env["MEMORY_INGESTION_CONCURRENCY"], 4),
+      leaseSeconds: parseStrictPositiveInteger(env["MEMORY_INGESTION_LEASE_SECONDS"], 300),
+      scanLimit: parseStrictPositiveInteger(env["MEMORY_INGESTION_SCAN_LIMIT"], 50),
+      retryInitialDelayMs: parseStrictPositiveInteger(
+        env["MEMORY_INGESTION_RETRY_INITIAL_MS"],
+        5_000
+      ),
+      retryMaxDelayMs: parseStrictPositiveInteger(env["MEMORY_INGESTION_RETRY_MAX_MS"], 300_000),
+      retryMultiplier: parseStrictPositiveInteger(env["MEMORY_INGESTION_RETRY_MULTIPLIER"], 2),
+      missingAdmissionEnabled: parseBoolean(env["MEMORY_INGESTION_MISSING_ADMISSION_ENABLED"], true)
     },
     memoryVectorIndex: {
       enabled: parseBoolean(env["MEMORY_VECTOR_INDEX_ENABLED"], true),

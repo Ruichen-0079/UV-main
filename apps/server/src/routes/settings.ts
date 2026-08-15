@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
 import { getRuntimeEnvPath, quoteEnvValue, readRuntimeEnvFiles } from "../env.js";
+import { readMemoryIngestionDiagnostics } from "../memory-ingestion-diagnostics.js";
 import { requireDashboardDevToken } from "./security.js";
 
 const editableKeys = [
@@ -336,6 +337,9 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       memoryExtractorDefault: "llm",
       ...buildMemoryExtractorDiagnostics(context.memory.getExtractorStatus(), config.runtimeMode),
       maintenanceScheduler: context.memoryMaintenanceScheduler?.getStatus() ?? null,
+      ingestionCoordinator: await readMemoryIngestionDiagnostics(
+        context.memoryIngestionCoordinator
+      ),
       vectorIndex: config.memoryVectorIndex,
       reasoningProviderConfigured: Boolean(providerStatus.providers.reasoning.configured)
     },

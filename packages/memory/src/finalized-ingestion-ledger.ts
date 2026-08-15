@@ -11,7 +11,11 @@ import {
 } from "./mem0-chat.js";
 import { detectExplicitForgetRequest } from "./intent.js";
 import { normalizePostgresConnectionString } from "./postgres-connection.js";
-import type { MemoryWriteEventInput, MemoryWriteEventOutcome } from "./provider.js";
+import type {
+  MemoryReconciliationResult,
+  MemoryWriteEventInput,
+  MemoryWriteEventOutcome
+} from "./provider.js";
 
 export const FINALIZED_INGESTION_POLICY_VERSION = "factual-v1/schema-1";
 
@@ -193,8 +197,45 @@ export type FinalizedIngestionRepository = {
     leaseSeconds: number;
   }): Promise<FinalizedIngestionEvent>;
   listMissingAdmissions(limit?: number): Promise<MissingFinalizedConversationTurn[]>;
+  listHistoricalUnknownAdmissions?(limit?: number): Promise<MissingFinalizedConversationTurn[]>;
   listNonTerminalTurns(limit?: number): Promise<FinalizedIngestionTurn[]>;
+  listDueWork(input?: {
+    limit?: number;
+    now?: string | undefined;
+  }): Promise<FinalizedIngestionEvent[]>;
+  getWorkStats(input?: { now?: string | undefined }): Promise<FinalizedIngestionWorkStats>;
+  claimReconcileEvent(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    leaseSeconds: number;
+    expectedVersion: number;
+    now?: string | undefined;
+  }): Promise<FinalizedIngestionEvent | null>;
+  recordReconcileOutcome(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
+    result: MemoryReconciliationResult;
+    nextAttemptAt?: string | null;
+  }): Promise<FinalizedIngestionEvent>;
   close?(): Promise<void>;
+};
+
+export type FinalizedIngestionWorkStats = {
+  pendingCount: number;
+  processingCount: number;
+  retryableFailedCount: number;
+  dueRetryCount: number;
+  reconcileRequiredCount: number;
+  completeCount: number;
+  unchangedCount: number;
+  skippedCount: number;
+  terminalFailedCount: number;
+  partialParentCount: number;
+  staleLeaseCount: number;
+  historicalUnknownCount: number;
 };
 
 export type FinalizedIngestionPort = {
@@ -620,6 +661,218 @@ export class PostgresFinalizedIngestionRepository implements FinalizedIngestionR
     return result.rows.map(mapTurnRow);
   }
 
+  async listDueWork(
+    input: { limit?: number; now?: string | undefined } = {}
+  ): Promise<FinalizedIngestionEvent[]> {
+    const result = await this.client.query(
+      `select * from finalized_ingestion_events
+       where (
+         status = 'pending'
+         or (
+           status = 'retryable_failed'
+           and (next_attempt_at is null or next_attempt_at <= coalesce($2::timestamptz, now()))
+         )
+         or (
+           status = 'processing'
+           and lease_expires_at is not null
+           and lease_expires_at <= coalesce($2::timestamptz, now())
+         )
+         or (
+           status = 'reconcile_required'
+           and (lease_owner is null or lease_expires_at is null
+             or lease_expires_at <= coalesce($2::timestamptz, now()))
+           and (next_attempt_at is null or next_attempt_at <= coalesce($2::timestamptz, now()))
+         )
+       )
+       order by
+         case status
+           when 'pending' then 0
+           when 'retryable_failed' then 1
+           when 'processing' then 2
+           when 'reconcile_required' then 3
+           else 4
+         end,
+         coalesce(next_attempt_at, created_at) asc,
+         event_id asc
+       limit $1`,
+      [clampLimit(input.limit ?? 100), input.now ?? null]
+    );
+    return result.rows.map(mapEventRow);
+  }
+
+  async getWorkStats(
+    input: { now?: string | undefined } = {}
+  ): Promise<FinalizedIngestionWorkStats> {
+    const events = await this.client.query(
+      `select
+         count(*) filter (where status = 'pending')::int as pending_count,
+         count(*) filter (where status = 'processing')::int as processing_count,
+         count(*) filter (where status = 'retryable_failed')::int as retryable_failed_count,
+         count(*) filter (
+           where status = 'retryable_failed'
+             and (next_attempt_at is null or next_attempt_at <= coalesce($1::timestamptz, now()))
+         )::int as due_retry_count,
+         count(*) filter (where status = 'reconcile_required')::int as reconcile_required_count,
+         count(*) filter (where status = 'complete')::int as complete_count,
+         count(*) filter (where status = 'unchanged')::int as unchanged_count,
+         count(*) filter (where status = 'skipped')::int as skipped_count,
+         count(*) filter (where status = 'terminal_failed')::int as terminal_failed_count,
+         count(*) filter (
+           where status = 'processing'
+             and lease_expires_at is not null
+             and lease_expires_at <= coalesce($1::timestamptz, now())
+         )::int as stale_lease_count
+       from finalized_ingestion_events`,
+      [input.now ?? null]
+    );
+    const turns = await this.client.query(
+      `select count(*) filter (where status = 'partial')::int as partial_parent_count
+       from finalized_ingestion_turns`
+    );
+    const historical = await this.client.query(
+      `select count(*)::int as historical_unknown_count
+       from conversation_messages
+       where role = 'assistant'
+         and status = 'completed'
+         and ingestion_requested is null`
+    );
+    const row = events.rows[0] ?? {};
+    return {
+      pendingCount: Number(row["pending_count"] ?? 0),
+      processingCount: Number(row["processing_count"] ?? 0),
+      retryableFailedCount: Number(row["retryable_failed_count"] ?? 0),
+      dueRetryCount: Number(row["due_retry_count"] ?? 0),
+      reconcileRequiredCount: Number(row["reconcile_required_count"] ?? 0),
+      completeCount: Number(row["complete_count"] ?? 0),
+      unchangedCount: Number(row["unchanged_count"] ?? 0),
+      skippedCount: Number(row["skipped_count"] ?? 0),
+      terminalFailedCount: Number(row["terminal_failed_count"] ?? 0),
+      partialParentCount: Number(turns.rows[0]?.["partial_parent_count"] ?? 0),
+      staleLeaseCount: Number(row["stale_lease_count"] ?? 0),
+      historicalUnknownCount: Number(historical.rows[0]?.["historical_unknown_count"] ?? 0)
+    };
+  }
+
+  async listHistoricalUnknownAdmissions(limit = 100): Promise<MissingFinalizedConversationTurn[]> {
+    const result = await this.client.query(
+      `select
+         cm.id as assistant_message_id,
+         cm.finalized_turn_id,
+         cm.source_user_event_id,
+         cm.session_id as conversation_id,
+         cm.trace_id,
+         cm.persona_id,
+         cm.subject_user_id,
+         cm.content,
+         cm.status,
+         coalesce(cm.completed_at, cm.created_at) as finalized_at,
+         cm.ingestion_requested
+       from conversation_messages cm
+       where cm.role = 'assistant'
+         and cm.status = 'completed'
+         and cm.ingestion_requested is null
+       order by coalesce(cm.completed_at, cm.created_at) asc
+       limit $1`,
+      [clampLimit(limit)]
+    );
+    return result.rows.map(mapMissingRow);
+  }
+
+  async claimReconcileEvent(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    leaseSeconds: number;
+    expectedVersion: number;
+    now?: string | undefined;
+  }): Promise<FinalizedIngestionEvent | null> {
+    return this.transaction(async (tx) => {
+      await this.lockTurn(input.finalizedTurnId, tx);
+      const result = await tx.query(
+        `update finalized_ingestion_events
+         set lease_owner = $3,
+             lease_expires_at = coalesce($6::timestamptz, now())
+               + ($4::int * interval '1 second'),
+             updated_at = now(),
+             version = version + 1
+         where finalized_turn_id = $1
+           and event_id = $2
+           and status = 'reconcile_required'
+           and version = $5
+           and (
+             lease_owner is null
+             or lease_expires_at is null
+             or lease_expires_at <= coalesce($6::timestamptz, now())
+             or lease_owner = $3
+           )
+         returning *`,
+        [
+          input.finalizedTurnId,
+          input.eventId,
+          input.leaseOwner,
+          Math.max(1, Math.trunc(input.leaseSeconds)),
+          input.expectedVersion,
+          input.now ?? null
+        ]
+      );
+      return result.rows[0] ? mapEventRow(result.rows[0]) : null;
+    });
+  }
+
+  async recordReconcileOutcome(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
+    result: MemoryReconciliationResult;
+    nextAttemptAt?: string | null;
+  }): Promise<FinalizedIngestionEvent> {
+    const mapped = mapReconcileResult(input.result);
+    return this.transaction(async (tx) => {
+      await this.lockTurn(input.finalizedTurnId, tx);
+      const result = await tx.query(
+        `update finalized_ingestion_events
+         set status = $3,
+             result_kind = $4,
+             backend_memory_id = $5,
+             backend_operation = $6,
+             error_code = $7,
+             error_message = $8,
+             next_attempt_at = $11,
+             dispatch_started_at = case when $3 = 'pending' then null else dispatch_started_at end,
+             lease_owner = null,
+             lease_expires_at = null,
+             updated_at = now(),
+             version = version + 1
+         where finalized_turn_id = $1 and event_id = $2
+           and status = 'reconcile_required'
+           and lease_owner = $9
+           and version = $10
+         returning *`,
+        [
+          input.finalizedTurnId,
+          input.eventId,
+          mapped.status,
+          mapped.resultKind,
+          mapped.backendMemoryId,
+          mapped.backendOperation,
+          mapped.errorCode,
+          mapped.errorMessage,
+          input.leaseOwner,
+          input.expectedVersion,
+          mapped.status === "reconcile_required" ? (input.nextAttemptAt ?? null) : null
+        ]
+      );
+      if (!result.rows[0]) {
+        throw new Error(
+          `Finalized ingestion event '${input.eventId}' was not found or changed for turn '${input.finalizedTurnId}'.`
+        );
+      }
+      await this.refreshAggregate(input.finalizedTurnId, tx);
+      return mapEventRow(result.rows[0]);
+    });
+  }
+
   async close(): Promise<void> {
     if (this.ownsClient) {
       await this.client.end();
@@ -1001,6 +1254,142 @@ export class InMemoryFinalizedIngestionRepository implements FinalizedIngestionR
       .map(cloneTurn);
   }
 
+  async listDueWork(
+    input: { limit?: number; now?: string | undefined } = {}
+  ): Promise<FinalizedIngestionEvent[]> {
+    const now = input.now ? new Date(input.now).getTime() : Date.now();
+    const rank = (status: FinalizedIngestionEventStatus): number => {
+      if (status === "pending") return 0;
+      if (status === "retryable_failed") return 1;
+      if (status === "processing") return 2;
+      if (status === "reconcile_required") return 3;
+      return 4;
+    };
+    return Array.from(this.events.values())
+      .filter((event) => isDueWork(event, now))
+      .sort((left, right) => {
+        const statusDelta = rank(left.status) - rank(right.status);
+        if (statusDelta !== 0) return statusDelta;
+        const leftDue = left.nextAttemptAt ?? left.createdAt;
+        const rightDue = right.nextAttemptAt ?? right.createdAt;
+        return leftDue.localeCompare(rightDue) || left.eventId.localeCompare(right.eventId);
+      })
+      .slice(0, clampLimit(input.limit ?? 100))
+      .map(cloneEvent);
+  }
+
+  async getWorkStats(
+    input: { now?: string | undefined } = {}
+  ): Promise<FinalizedIngestionWorkStats> {
+    const now = input.now ? new Date(input.now).getTime() : Date.now();
+    const events = Array.from(this.events.values());
+    return {
+      pendingCount: events.filter((event) => event.status === "pending").length,
+      processingCount: events.filter((event) => event.status === "processing").length,
+      retryableFailedCount: events.filter((event) => event.status === "retryable_failed").length,
+      dueRetryCount: events.filter(
+        (event) =>
+          event.status === "retryable_failed" &&
+          (event.nextAttemptAt === null || new Date(event.nextAttemptAt).getTime() <= now)
+      ).length,
+      reconcileRequiredCount: events.filter((event) => event.status === "reconcile_required")
+        .length,
+      completeCount: events.filter((event) => event.status === "complete").length,
+      unchangedCount: events.filter((event) => event.status === "unchanged").length,
+      skippedCount: events.filter((event) => event.status === "skipped").length,
+      terminalFailedCount: events.filter((event) => event.status === "terminal_failed").length,
+      partialParentCount: Array.from(this.turns.values()).filter(
+        (turn) => turn.status === "partial"
+      ).length,
+      staleLeaseCount: events.filter(
+        (event) =>
+          event.status === "processing" &&
+          event.leaseExpiresAt !== null &&
+          new Date(event.leaseExpiresAt).getTime() <= now
+      ).length,
+      historicalUnknownCount: 0
+    };
+  }
+
+  async listHistoricalUnknownAdmissions(): Promise<MissingFinalizedConversationTurn[]> {
+    return [];
+  }
+
+  async claimReconcileEvent(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    leaseSeconds: number;
+    expectedVersion: number;
+    now?: string | undefined;
+  }): Promise<FinalizedIngestionEvent | null> {
+    const event = this.events.get(input.eventId);
+    const now = input.now ? new Date(input.now).getTime() : Date.now();
+    if (
+      !event ||
+      event.finalizedTurnId !== input.finalizedTurnId ||
+      event.status !== "reconcile_required" ||
+      event.version !== input.expectedVersion
+    ) {
+      return null;
+    }
+    if (
+      event.leaseOwner &&
+      event.leaseExpiresAt &&
+      new Date(event.leaseExpiresAt).getTime() > now &&
+      event.leaseOwner !== input.leaseOwner
+    ) {
+      return null;
+    }
+    event.leaseOwner = input.leaseOwner;
+    event.leaseExpiresAt = new Date(
+      now + Math.max(1, Math.trunc(input.leaseSeconds)) * 1000
+    ).toISOString();
+    event.updatedAt = new Date(now).toISOString();
+    event.version += 1;
+    return cloneEvent(event);
+  }
+
+  async recordReconcileOutcome(input: {
+    finalizedTurnId: string;
+    eventId: string;
+    leaseOwner: string;
+    expectedVersion: number;
+    result: MemoryReconciliationResult;
+    nextAttemptAt?: string | null;
+  }): Promise<FinalizedIngestionEvent> {
+    const event = this.events.get(input.eventId);
+    if (!event || event.finalizedTurnId !== input.finalizedTurnId) {
+      throw new Error(`Finalized ingestion event '${input.eventId}' was not found.`);
+    }
+    if (
+      event.status !== "reconcile_required" ||
+      event.leaseOwner !== input.leaseOwner ||
+      event.version !== input.expectedVersion
+    ) {
+      throw new Error(
+        `Finalized ingestion event '${input.eventId}' changed before reconcile outcome recording.`
+      );
+    }
+    const mapped = mapReconcileResult(input.result);
+    Object.assign(event, {
+      status: mapped.status,
+      resultKind: mapped.resultKind,
+      backendMemoryId: mapped.backendMemoryId,
+      backendOperation: mapped.backendOperation,
+      errorCode: mapped.errorCode,
+      errorMessage: mapped.errorMessage,
+      nextAttemptAt: mapped.status === "reconcile_required" ? (input.nextAttemptAt ?? null) : null,
+      dispatchStartedAt: mapped.status === "pending" ? null : event.dispatchStartedAt,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      updatedAt: new Date().toISOString(),
+      version: event.version + 1
+    });
+    this.refreshAggregate(input.finalizedTurnId);
+    return cloneEvent(event);
+  }
+
   private listEventsSync(finalizedTurnId: string): FinalizedIngestionEvent[] {
     return Array.from(this.events.values())
       .filter((event) => event.finalizedTurnId === finalizedTurnId)
@@ -1249,6 +1638,36 @@ export class FinalizedIngestionService implements FinalizedIngestionPort {
   renewLease(input: Parameters<FinalizedIngestionRepository["renewLease"]>[0]) {
     return this.repository.renewLease(input);
   }
+
+  listEvents(finalizedTurnId: string) {
+    return this.repository.listEvents(finalizedTurnId);
+  }
+
+  listDueWork(input?: { limit?: number; now?: string | undefined }) {
+    return this.repository.listDueWork(input);
+  }
+
+  getWorkStats(input?: { now?: string | undefined }) {
+    return this.repository.getWorkStats(input);
+  }
+
+  listMissingAdmissions(limit?: number) {
+    return this.repository.listMissingAdmissions(limit);
+  }
+
+  listHistoricalUnknownAdmissions(limit?: number) {
+    return this.repository.listHistoricalUnknownAdmissions?.(limit) ?? Promise.resolve([]);
+  }
+
+  claimReconcileEvent(input: Parameters<FinalizedIngestionRepository["claimReconcileEvent"]>[0]) {
+    return this.repository.claimReconcileEvent(input);
+  }
+
+  recordReconcileOutcome(
+    input: Parameters<FinalizedIngestionRepository["recordReconcileOutcome"]>[0]
+  ) {
+    return this.repository.recordReconcileOutcome(input);
+  }
 }
 
 export function createFinalizedIngestionRepositoryFromEnv(
@@ -1338,6 +1757,87 @@ function canonicalJson(value: unknown): string {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function isDueWork(event: FinalizedIngestionEvent, nowMs: number): boolean {
+  if (event.status === "pending") return true;
+  if (event.status === "retryable_failed") {
+    return event.nextAttemptAt === null || new Date(event.nextAttemptAt).getTime() <= nowMs;
+  }
+  if (event.status === "processing") {
+    return event.leaseExpiresAt !== null && new Date(event.leaseExpiresAt).getTime() <= nowMs;
+  }
+  if (event.status === "reconcile_required") {
+    const leaseExpired =
+      !event.leaseOwner ||
+      !event.leaseExpiresAt ||
+      new Date(event.leaseExpiresAt).getTime() <= nowMs;
+    const probeDue =
+      event.nextAttemptAt === null || new Date(event.nextAttemptAt).getTime() <= nowMs;
+    return leaseExpired && probeDue;
+  }
+  return false;
+}
+
+function mapReconcileResult(result: MemoryReconciliationResult): {
+  status: FinalizedIngestionEventStatus;
+  resultKind: FinalizedIngestionEvent["resultKind"];
+  backendMemoryId: string | null;
+  backendOperation: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+} {
+  if (result.status === "applied") {
+    const unchanged = isUnchangedReconcileOperation(result.operation);
+    return {
+      status: unchanged ? "unchanged" : "complete",
+      resultKind: unchanged ? "unchanged" : "written",
+      backendMemoryId: result.eventId ?? null,
+      backendOperation: result.operation ?? "applied",
+      errorCode: null,
+      errorMessage: null
+    };
+  }
+  if (result.status === "not_applied") {
+    return {
+      status: "pending",
+      resultKind: null,
+      backendMemoryId: null,
+      backendOperation: result.operation ?? null,
+      errorCode: null,
+      errorMessage: null
+    };
+  }
+  if (result.status === "payload_conflict") {
+    return {
+      status: "terminal_failed",
+      resultKind: "rejected",
+      backendMemoryId: null,
+      backendOperation: result.operation ?? null,
+      errorCode: result.errorCode ?? "MEMORY_RECONCILE_PAYLOAD_CONFLICT",
+      errorMessage: "Exact reconciliation reported a payload conflict."
+    };
+  }
+  return {
+    status: "reconcile_required",
+    resultKind: "ambiguous",
+    backendMemoryId: null,
+    backendOperation: result.operation ?? null,
+    errorCode:
+      result.errorCode ??
+      (result.status === "in_flight"
+        ? "MEMORY_RECONCILE_IN_FLIGHT"
+        : "MEMORY_RECONCILE_UNRESOLVED"),
+    errorMessage:
+      result.status === "in_flight"
+        ? "Exact reconciliation is still in flight."
+        : "Exact reconciliation remains unresolved."
+  };
+}
+
+function isUnchangedReconcileOperation(operation: string | undefined): boolean {
+  if (!operation) return false;
+  return /^(none|unchanged|dedup)/i.test(operation.trim());
 }
 
 function mapOutcome(

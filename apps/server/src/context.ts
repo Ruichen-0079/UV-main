@@ -10,9 +10,11 @@ import {
   createConversationRepositoryFromEnv,
   createFinalizedIngestionRepositoryFromEnv,
   FinalizedIngestionService,
+  MemoryIngestionCoordinator,
   parseMemoryRepositoryEnv,
   type ConversationRepository,
   type FinalizedIngestionRepository,
+  type MemoryProvider,
   type MemoryRepository
 } from "@companion/memory";
 import { parseRuntimeConfig } from "@companion/config";
@@ -34,6 +36,7 @@ export type AppContext = {
   conversationRepository: ConversationRepository;
   finalizedIngestionRepository: FinalizedIngestionRepository;
   finalizedIngestion: FinalizedIngestionService;
+  memoryIngestionCoordinator: MemoryIngestionCoordinator;
   memory: MemoryService;
   providers: ProviderRegistry;
   runtime: RuntimeOrchestrator;
@@ -163,6 +166,7 @@ export async function createAppContext(
       providers,
       conversation: conversationRepository,
       finalizedIngestion,
+      memoryIngestionCoordinator: coordinator,
       memoryRepository: activeMemoryRepository,
       directContext,
       logger: runtimeLogger
@@ -171,10 +175,28 @@ export async function createAppContext(
 
   let providers: ProviderRegistry;
   let memory: MemoryService;
+  let coordinator: MemoryIngestionCoordinator;
   let runtime: RuntimeOrchestrator;
   try {
     providers = createProviderRegistryFromEnv();
     memory = createMemoryService(providers);
+    coordinator = new MemoryIngestionCoordinator({
+      repository: finalizedIngestionRepository!,
+      provider: memory.getMemoryProvider() ?? unavailableMemoryProvider(),
+      admit: (input) => finalizedIngestion.admit(input),
+      conversation: conversationRepository,
+      logger: runtimeLogger,
+      pollIntervalMs: config.memoryIngestion.pollIntervalMs,
+      concurrency: config.memoryIngestion.concurrency,
+      leaseSeconds: config.memoryIngestion.leaseSeconds,
+      scanLimit: config.memoryIngestion.scanLimit,
+      missingAdmissionEnabled: config.memoryIngestion.missingAdmissionEnabled,
+      retryPolicy: {
+        initialDelayMs: config.memoryIngestion.retryInitialDelayMs,
+        maxDelayMs: config.memoryIngestion.retryMaxDelayMs,
+        multiplier: config.memoryIngestion.retryMultiplier
+      }
+    });
     runtime = createRuntime(providers, memory);
   } catch (error) {
     await conversationRepository.close?.();
@@ -190,6 +212,7 @@ export async function createAppContext(
     conversationRepository: conversationRepository!,
     finalizedIngestionRepository: finalizedIngestionRepository!,
     finalizedIngestion,
+    memoryIngestionCoordinator: coordinator,
     memory,
     providers,
     runtime,
@@ -201,6 +224,9 @@ export async function createAppContext(
         nextProviders,
         parseMemoryExtractorMode(env["MEMORY_EXTRACTOR"]),
         env
+      );
+      context.memoryIngestionCoordinator.replaceProvider(
+        nextMemory.getMemoryProvider() ?? unavailableMemoryProvider()
       );
       context.providers = nextProviders;
       context.memory = nextMemory;
@@ -309,6 +335,24 @@ function parseStrictPositiveInteger(value: string | undefined, fallback: number)
 
 function parseMemoryExtractorMode(value: string | undefined): "rule-based" | "llm" {
   return value === "rule-based" ? "rule-based" : "llm";
+}
+
+function unavailableMemoryProvider(): MemoryProvider {
+  return {
+    async retrieveRelevant() {
+      return { status: "unavailable", events: [], source: "none", limited: false };
+    },
+    async getEvent() {
+      return null;
+    },
+    async writeEvent() {
+      return {
+        status: "rejected",
+        errorCode: "MEMORY_PROVIDER_UNAVAILABLE",
+        failureClass: "definitive_rejection"
+      };
+    }
+  };
 }
 
 function createRuntimeLogger(logger: FastifyBaseLogger): RuntimeLogger {

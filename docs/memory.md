@@ -87,7 +87,7 @@ store and is not treated as the ledger.
 
 The canonical ordering is:
 
-`assistant finalization → conversation persistence → ledger admission and event materialization → live semantic write`
+`assistant finalization → conversation persistence → ledger admission and event materialization → coordinator wake → shared C1 delivery executor`
 
 Each finalized turn receives an immutable `finalized_turn_id`. Each materialized
 child receives a content-derived stable event identity and a persisted backend
@@ -96,10 +96,23 @@ key of the form
 The canonical finalized C1 path enforces these keys as backend idempotency
 identities. Ordinary compatibility Mem0 writes outside this keyed path are not
 governed by that contract. Ledger rows and child payloads are persisted before
-the live write starts. A process crash can therefore leave `pending`,
-`processing`, or `retryable_failed` work, while uncertain provider outcomes
-remain `reconcile_required` work. An end-to-end recovery coordinator is not yet
-present.
+delivery starts. `MemoryIngestionCoordinator` owns automatic execution of that
+durable child work. It discovers pending, due retryable, expired-lease, and
+`reconcile_required` events, then calls the shared C1 executor or exact
+reconciliation primitive. Request completion does not wait for backend
+delivery. A process crash can therefore leave `pending`, `processing`, or
+`retryable_failed` work, while uncertain provider outcomes remain
+`reconcile_required` work. Coordinator startup is asynchronous and must not
+block application readiness. Historical assistant rows with
+`ingestion_requested = NULL` stay outside automatic recovery.
+
+Coordinator work statistics are observability, not availability.
+`GET /health` continues to derive overall `ok` from existing core service
+conditions such as database and chat-provider health. A diagnostics query
+failure, a stopped coordinator, or a pending/reconcile backlog does not make
+the server unavailable. When durable counts cannot be read they stay `null`
+instead of being reported as zero. Runtime settings use the same fail-open
+rule for `memory.ingestionCoordinator`.
 
 Semantic write failures retain a typed classification. Definitive validation
 or explicitly rejected backend responses become terminal failures; only a

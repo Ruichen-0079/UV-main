@@ -16,10 +16,11 @@ import type {
   RetrievedMemoryDebug,
   MemoryConversationTurnWriteResult,
   FinalizedIngestionAdmission,
-  FinalizedIngestionPort
+  FinalizedIngestionPort,
+  MemoryIngestionCoordinatorPort
 } from "@companion/memory";
-import { executeFinalizedIngestionEvent } from "@companion/memory";
 import {
+  MemoryIngestionCoordinator,
   detectCurrentAffect,
   detectExplicitForgetRequest,
   detectExplicitRememberRequest
@@ -85,6 +86,7 @@ export type RuntimeOrchestratorOptions = {
   providers: ProviderResolver;
   conversation?: ConversationRepository | undefined;
   finalizedIngestion?: FinalizedIngestionPort | undefined;
+  memoryIngestionCoordinator?: MemoryIngestionCoordinatorPort | undefined;
   memoryRepository?: string | undefined;
   directContext?: Partial<DirectContextConfig> | undefined;
   memoryContextBuilder?: Pick<MemoryContextBuilder, "build"> | undefined;
@@ -490,6 +492,7 @@ export class RuntimeOrchestrator {
     string,
     Promise<FinalizedIngestionAdmission | null>
   >();
+  private inlineIngestionCoordinator: MemoryIngestionCoordinator | undefined;
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
     this.directContextConfig = normalizeDirectContextConfig(options.directContext);
@@ -1703,48 +1706,24 @@ export class RuntimeOrchestrator {
             idempotencyKey
           };
         }
-        let writtenCount = 0;
-        let deduplicatedCount = 0;
-        let rejectedCount = 0;
-        const provider = this.options.memory.getMemoryProvider?.();
-        if (!provider || !this.options.finalizedIngestion) {
-          throw new Error("Shared finalized ingestion delivery dependencies are unavailable.");
-        }
-        const events = [...admitted.events];
-        for (const event of events.filter(
-          (candidate) => candidate.status === "pending" || candidate.status === "retryable_failed"
-        )) {
-          const delivery = await executeFinalizedIngestionEvent({
-            repository: this.options.finalizedIngestion,
-            provider,
-            event,
-            leaseOwner: `runtime:${crypto.randomUUID()}`,
-            leaseSeconds: 300
-          });
-          if (!delivery.claimed || !delivery.event) {
-            continue;
-          }
-          const eventIndex = events.findIndex((candidate) => candidate.eventId === event.eventId);
-          if (eventIndex >= 0) events[eventIndex] = delivery.event;
-          if (delivery.outcome?.status === "written") writtenCount += 1;
-          else if (delivery.outcome?.status === "unchanged") deduplicatedCount += 1;
-          else rejectedCount += 1;
+        const coordinator = this.resolveIngestionCoordinator();
+        if (coordinator) {
+          await coordinator.notifyAdmitted(admitted);
+        } else {
+          this.options.logger?.warn?.(
+            "memory ingestion coordinator unavailable; durable admission remains pending",
+            {
+              traceId: sourceEvent.traceId,
+              finalizedTurnId: durableFinalizedTurnId
+            }
+          );
         }
 
-        // The durable parent is authoritative. If an older/compatible port
-        // cannot reread it, only explicit completion of every child processed
-        // by this invocation is sufficient evidence for a pending/retryable
-        // admission; "nothing was dispatchable" is never completion evidence.
+        // The durable parent is authoritative. Request success does not depend
+        // on coordinator delivery; this result only reports the ledger snapshot
+        // after the live handoff/wake.
         const durableTurn = await this.options.finalizedIngestion.getTurn?.(durableFinalizedTurnId);
-        const allEventsComplete =
-          events.length > 0 &&
-          events.every((event) => event.status === "complete" || event.status === "unchanged");
-        const durableStatus =
-          durableTurn?.status ??
-          (allEventsComplete &&
-          (admitted.turn.status === "pending" || admitted.turn.status === "retryable_failed")
-            ? "complete"
-            : admitted.turn.status);
+        const durableStatus = durableTurn?.status ?? admitted.turn.status;
         const status =
           durableStatus === "complete"
             ? "complete"
@@ -1755,18 +1734,15 @@ export class RuntimeOrchestrator {
                 : "partial";
         const unresolved = status !== "complete";
         const statusMessage =
-          durableTurn?.lastErrorMessage ??
-          (rejectedCount > 0
-            ? "Finalized semantic memory write failed."
-            : `Finalized ingestion remains ${durableStatus}.`);
+          durableTurn?.lastErrorMessage ?? `Finalized ingestion remains ${durableStatus}.`;
         return {
           status,
           ok: status === "complete",
-          attemptedCount: admitted.events.length,
-          writtenCount,
-          rejectedCount,
-          deduplicatedCount,
-          skippedCount: 0,
+          attemptedCount: durableTurn?.eligibleEventCount ?? admitted.events.length,
+          writtenCount: durableTurn?.completeEventCount ?? 0,
+          rejectedCount: durableTurn?.failedEventCount ?? 0,
+          deduplicatedCount: durableTurn?.unchangedEventCount ?? 0,
+          skippedCount: durableTurn?.skippedEventCount ?? 0,
           ...(unresolved ? { skippedReason: statusMessage } : {}),
           ...(durableTurn?.lastErrorCode ? { errorCode: durableTurn.lastErrorCode } : {}),
           idempotencyKey
@@ -2207,6 +2183,29 @@ export class RuntimeOrchestrator {
       return Promise.resolve(null);
     }
     return this.options.finalizedIngestion.admit(input);
+  }
+
+  private resolveIngestionCoordinator(): MemoryIngestionCoordinatorPort | undefined {
+    if (this.options.memoryIngestionCoordinator) {
+      return this.options.memoryIngestionCoordinator;
+    }
+    if (this.inlineIngestionCoordinator) {
+      return this.inlineIngestionCoordinator;
+    }
+    const provider = this.options.memory.getMemoryProvider?.();
+    const repository = this.options.finalizedIngestion;
+    if (!provider || !repository) {
+      return undefined;
+    }
+    this.inlineIngestionCoordinator = new MemoryIngestionCoordinator({
+      repository,
+      provider,
+      ownerId: `runtime-live:${crypto.randomUUID()}`,
+      pollIntervalMs: 60_000,
+      concurrency: 4,
+      ...(this.options.logger ? { logger: this.options.logger } : {})
+    });
+    return this.inlineIngestionCoordinator;
   }
 
   private ensureFinalizedAdmission(

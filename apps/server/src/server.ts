@@ -76,9 +76,13 @@ export async function buildServer(config: ServerConfig) {
   const maintenanceScheduler = new MemoryMaintenanceScheduler(context, config, app.log);
   context.memoryMaintenanceScheduler = maintenanceScheduler;
   maintenanceScheduler.start();
+  if (config.memoryIngestion.enabled) {
+    context.memoryIngestionCoordinator.start();
+  }
 
   app.addHook("onClose", async () => {
     maintenanceScheduler.close();
+    await context.memoryIngestionCoordinator.shutdown({ graceMs: 2_000 });
     await context.runtime.sealAndDrainMemoryWrites();
     await context.finalizedIngestionRepository.close?.();
     await context.memoryRepository.close?.();
