@@ -3,11 +3,16 @@ import { apiClient } from "./api/client.js";
 import { CompanionBus, type CompanionBusMessage } from "./companion-bus.js";
 import {
   createCompanionBlinkScheduler,
+  createCompanionPresenceEpochGuard,
   createPresenceBehaviorTransition,
   createInterruptedResetScheduler,
+  createInitialCompanionPresence,
+  canInterruptGeneration,
+  getCompanionPresentationState,
   getCompanionAnimation,
   reduceCompanionPresence,
-  type CompanionPresenceState
+  type CompanionPresenceProjection,
+  type CompanionPresentationState
 } from "./companion-presence.js";
 import { composeCompanionPresenceAnimation, createGazeScheduler } from "./companion-gaze.js";
 import { createCompanionSpeechBuffer } from "./companion-speech-buffer.js";
@@ -41,18 +46,34 @@ export function CompanionPage(): JSX.Element {
   } | null>(null);
   const speechBufferRef = useRef(createCompanionSpeechBuffer());
   const announcerRef = useRef<ReturnType<typeof createCompanionReadyAnnouncer> | null>(null);
-  const [presence, setPresence] = useState<CompanionPresenceState>("idle");
+  const [presence, setPresence] = useState<CompanionPresenceProjection>(() =>
+    createInitialCompanionPresence()
+  );
   const [voiceStatus, setVoiceStatus] = useState<SpeechQueueState>("idle");
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const voiceEnabledRef = useRef(true);
   const [framing, setFraming] = useState<LumiFraming>("half");
-  const presenceRef = useRef<CompanionPresenceState>(presence);
+  const presenceProjectionRef = useRef<CompanionPresenceProjection | null>(null);
+  const activeEpochRef = useRef<string | null>(null);
+  const speechStoppedEpochRef = useRef<string | null>(null);
+  const epochGuardRef = useRef(createCompanionPresenceEpochGuard());
+  const presenceRef = useRef<CompanionPresentationState>("idle");
   const blinkSchedulerRef = useRef<ReturnType<typeof createCompanionBlinkScheduler> | null>(null);
   const gazeSchedulerRef = useRef<ReturnType<typeof createGazeScheduler> | null>(null);
   const interruptedResetRef = useRef<ReturnType<typeof createInterruptedResetScheduler> | null>(
     null
   );
-  presenceRef.current = presence;
+  presenceRef.current = getCompanionPresentationState(presence);
+  presenceProjectionRef.current = presence;
+
+  function updatePresence(
+    update: (current: CompanionPresenceProjection) => CompanionPresenceProjection
+  ): void {
+    const current = presenceProjectionRef.current ?? presence;
+    const next = update(current);
+    presenceProjectionRef.current = next;
+    setPresence(next);
+  }
 
   useEffect(() => {
     const bus = new CompanionBus("companion");
@@ -103,15 +124,18 @@ export function CompanionPage(): JSX.Element {
     }
 
     function startGeneration(requestId: string, sessionId: string): void {
+      if (!epochGuardRef.current.accept(requestId)) return;
       // A new turn replaces the previous speech session: old audio stops,
       // stale presence is reset and synthesis restarts from a fresh queue.
       recordSpeechLedger(requestId, null, "turn-start");
+      activeEpochRef.current = requestId;
+      speechStoppedEpochRef.current = null;
       const previous = sessionRef.current;
       previous?.queue.cancel();
       sessionRef.current = null;
       speechBuffer.setActiveTurn(requestId);
-      setPresence((current) =>
-        reduceCompanionPresence(current, { type: "generation", state: "thinking" })
+      updatePresence((current) =>
+        reduceCompanionPresence(current, { type: "turn-start", epoch: requestId })
       );
       if (!voiceEnabledRef.current) {
         setVoiceStatus("idle");
@@ -133,7 +157,13 @@ export function CompanionPage(): JSX.Element {
             const session = sessionRef.current;
             if (!session || session.queue !== queue) return;
             setVoiceStatus(state);
-            setPresence((current) => reduceCompanionPresence(current, { type: "queue", state }));
+            updatePresence((current) =>
+              reduceCompanionPresence(current, {
+                type: "queue",
+                epoch: session.requestId,
+                state
+              })
+            );
             bus.post({ kind: "speech-status", requestId: session.requestId, state });
           },
           onItemState: (id, state) => {
@@ -157,8 +187,12 @@ export function CompanionPage(): JSX.Element {
             const session = sessionRef.current;
             if (!session || session.queue !== queue) return;
             setVoiceStatus("error");
-            setPresence((current) =>
-              reduceCompanionPresence(current, { type: "queue", state: "error" })
+            updatePresence((current) =>
+              reduceCompanionPresence(current, {
+                type: "queue",
+                epoch: session.requestId,
+                state: "error"
+              })
             );
             bus.post({ kind: "speech-status", requestId: session.requestId, state: "error" });
           },
@@ -166,6 +200,30 @@ export function CompanionPage(): JSX.Element {
             if (sessionRef.current?.queue !== queue) return;
             if (event.type === "playbackStarted") {
               recordSpeechLedger(requestId, event.sequence, "audio.play");
+            }
+            const playbackState =
+              event.type === "playbackStarted"
+                ? "started"
+                : event.type === "playbackEnded"
+                  ? "ended"
+                  : event.type === "playbackStopped"
+                    ? "stopped"
+                    : event.type === "playbackError"
+                      ? "error"
+                      : null;
+            if (playbackState !== null) {
+              updatePresence((current) =>
+                reduceCompanionPresence(current, {
+                  type: "playback",
+                  epoch: requestId,
+                  state: playbackState
+                })
+              );
+              bus.post({
+                kind: "playback-status",
+                requestId,
+                state: playbackState
+              });
             }
             lumiRef.current?.handlePlaybackEvent(event);
           }
@@ -184,6 +242,13 @@ export function CompanionPage(): JSX.Element {
     }
 
     function handleSpeak(message: Extract<CompanionBusMessage, { kind: "speak" }>): void {
+      if (
+        activeEpochRef.current !== message.requestId ||
+        speechStoppedEpochRef.current === message.requestId
+      ) {
+        recordSpeechLedger(message.requestId, message.sequence, "stale-speak-drop");
+        return;
+      }
       if (!voiceEnabledRef.current) {
         recordSpeechLedger(message.requestId, message.sequence, "voice-disabled-drop");
         return;
@@ -215,8 +280,8 @@ export function CompanionPage(): JSX.Element {
     function handleMessage(message: CompanionBusMessage): void {
       switch (message.kind) {
         case "user-gesture":
-          setPresence((current) =>
-            reduceCompanionPresence(current, { type: "generation", state: "listening" })
+          updatePresence((current) =>
+            reduceCompanionPresence(current, { type: "interaction", state: "listening" })
           );
           lumiRef.current?.resumeAudio();
           return;
@@ -232,7 +297,15 @@ export function CompanionPage(): JSX.Element {
           recordSpeechLedger("sync", null, "voice-enabled", { enabled: message.enabled });
           if (!message.enabled) {
             const session = sessionRef.current;
+            const epoch = activeEpochRef.current;
+            if (epoch) {
+              speechStoppedEpochRef.current = epoch;
+              updatePresence((current) =>
+                reduceCompanionPresence(current, { type: "speech-cancelled", epoch })
+              );
+            }
             if (session) session.queue.cancel();
+            sessionRef.current = null;
             speechBuffer.clear();
           }
           return;
@@ -241,29 +314,57 @@ export function CompanionPage(): JSX.Element {
           return;
         case "speech-end": {
           const session = sessionRef.current;
-          if (session && session.requestId === message.requestId) {
+          if (
+            session &&
+            session.requestId === message.requestId &&
+            speechStoppedEpochRef.current !== message.requestId
+          ) {
             session.queue.finish();
           }
           return;
         }
         case "stop-speech": {
+          if (activeEpochRef.current !== message.requestId) return;
           const session = sessionRef.current;
-          setPresence((current) =>
-            reduceCompanionPresence(current, { type: "queue", state: "stopped" })
+          speechStoppedEpochRef.current = message.requestId;
+          updatePresence((current) =>
+            reduceCompanionPresence(current, {
+              type: "speech-cancelled",
+              epoch: message.requestId
+            })
           );
           if (session && session.requestId === message.requestId) {
             session.queue.cancel();
           }
+          sessionRef.current = null;
           speechBuffer.clear();
           recordSpeechLedger(message.requestId, null, "stop-speech");
           return;
         }
         case "generation-state":
-          setPresence((current) =>
-            reduceCompanionPresence(current, { type: "generation", state: message.state })
+          if (activeEpochRef.current !== message.requestId) return;
+          if (
+            message.state === "interrupted" &&
+            !canInterruptGeneration(presenceProjectionRef.current ?? presence, message.requestId)
+          ) {
+            return;
+          }
+          updatePresence((current) =>
+            reduceCompanionPresence(current, {
+              type: "generation",
+              epoch: message.requestId,
+              state: message.state
+            })
           );
+          if (message.state === "interrupted") {
+            speechStoppedEpochRef.current = message.requestId;
+            sessionRef.current?.queue.cancel();
+            sessionRef.current = null;
+            speechBuffer.clear();
+          }
           return;
         case "companion-ready":
+        case "playback-status":
         case "speech-status":
           return;
       }
@@ -276,6 +377,9 @@ export function CompanionPage(): JSX.Element {
       announcerRef.current = null;
       sessionRef.current?.queue.cancel();
       sessionRef.current = null;
+      activeEpochRef.current = null;
+      speechStoppedEpochRef.current = null;
+      epochGuardRef.current.dispose();
       speechBuffer.clear();
       bus.close();
     };
@@ -285,7 +389,14 @@ export function CompanionPage(): JSX.Element {
     // Own the interrupted timer in this effect so React StrictMode remounts
     // get a live scheduler instead of a permanently disposed ref instance.
     const resetScheduler = createInterruptedResetScheduler(() => {
-      setPresence((current) => (current === "interrupted" ? "idle" : current));
+      updatePresence((current) =>
+        current.epoch
+          ? reduceCompanionPresence(current, {
+              type: "transition-expired",
+              epoch: current.epoch
+            })
+          : current
+      );
     });
     interruptedResetRef.current = resetScheduler;
     return () => {
@@ -297,12 +408,12 @@ export function CompanionPage(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    if (presence === "interrupted") {
+    if (presence.transition === "interrupted" && presence.epoch) {
       interruptedResetRef.current?.schedule();
     } else {
       interruptedResetRef.current?.invalidate();
     }
-  }, [presence]);
+  }, [presence.transition, presence.epoch]);
 
   useEffect(() => {
     // Schedulers MUST be created inside this effect. StrictMode mount → cleanup
@@ -533,7 +644,7 @@ export function CompanionPage(): JSX.Element {
     <div className="relative h-screen w-screen overflow-hidden bg-transparent text-white">
       <LumiCanvas
         ref={lumiRef}
-        requestedPresence={toLumiPresence(presence)}
+        requestedPresence={toLumiPresence(getCompanionPresentationState(presence))}
         className="h-full w-full rounded-none"
         showFramingToggle={false}
       />
@@ -601,7 +712,8 @@ export function CompanionPage(): JSX.Element {
   );
 }
 
-function presenceLabel(state: CompanionPresenceState): string {
+function presenceLabel(projection: CompanionPresenceProjection): string {
+  const state = getCompanionPresentationState(projection);
   switch (state) {
     case "thinking":
       return "thinking";
@@ -616,7 +728,7 @@ function presenceLabel(state: CompanionPresenceState): string {
   }
 }
 
-function readForcedPresence(windowObject: Window): CompanionPresenceState | null {
+function readForcedPresence(windowObject: Window): CompanionPresentationState | null {
   const value = (windowObject as Window & { __yuviForcePresence?: unknown }).__yuviForcePresence;
   switch (value) {
     case "idle":
@@ -630,7 +742,7 @@ function readForcedPresence(windowObject: Window): CompanionPresenceState | null
   }
 }
 
-function toLumiPresence(state: CompanionPresenceState): PresenceState {
+function toLumiPresence(state: CompanionPresentationState): PresenceState {
   return state === "listening" ? "idle" : state;
 }
 
