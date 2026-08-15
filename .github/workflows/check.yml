@@ -201,10 +201,11 @@ jobs:
           YUVI_RUN_WINDOWS_CREDENTIAL_TEST: "1"
         run: cargo test platform_credential_manager_roundtrip_and_config_push -- --exact --nocapture --test-threads=1
 
-      - name: Packaging tests
-        run: |
-          pnpm desktop:installer:test
-          pnpm desktop:package:test
+      - name: Installer smoke tests
+        run: pnpm desktop:installer:test
+
+      - name: Desktop package tests
+        run: pnpm desktop:package:test
 
       - name: Build NSIS installer
         shell: pwsh
@@ -217,10 +218,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $home = (node scripts/desktop-package/provision-postgres16-fixture.mjs | Select-Object -Last 1).Trim()
-          if (-not $home) { throw "PostgreSQL 16 fixture home was not printed" }
-          if (-not (Test-Path (Join-Path $home "bin\postgres.exe"))) { throw "PostgreSQL 16 fixture is missing bin\postgres.exe" }
-          "home=$home" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $pgHome = (node scripts/desktop-package/provision-postgres16-fixture.mjs | Select-Object -Last 1).Trim()
+          if (-not $pgHome) { throw "PostgreSQL 16 fixture home was not printed" }
+          if (-not (Test-Path (Join-Path $pgHome "bin\postgres.exe"))) { throw "PostgreSQL 16 fixture is missing bin\postgres.exe" }
+          "home=$pgHome" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Direct installer smoke
         shell: pwsh

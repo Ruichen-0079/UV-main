@@ -2346,8 +2346,9 @@ test("dedicated PostgreSQL fixture path is rejected when missing, relative, or a
 test("PostgreSQL fixture major other than 16 is rejected", () => {
   const home = temp("yuvi-pg-wrong-");
   fs.mkdirSync(path.join(home, "bin"), { recursive: true });
+  const suffix = process.platform === "win32" ? ".exe" : "";
   for (const name of ["postgres", "pg_ctl", "initdb"]) {
-    fs.writeFileSync(path.join(home, "bin", name), "stub");
+    fs.writeFileSync(path.join(home, "bin", `${name}${suffix}`), "stub");
   }
   assert.throws(
     () =>
@@ -2358,14 +2359,52 @@ test("PostgreSQL fixture major other than 16 is rejected", () => {
       }),
     /major 16/
   );
+  let inspectedHost = 0;
   assert.throws(
     () =>
       validatePostgres16Distribution(home, {
-        inspect: () => ({ major: 17, versionText: "postgres (PostgreSQL) 17.4" })
+        inspect: () => {
+          inspectedHost += 1;
+          return { major: 17, versionText: "postgres (PostgreSQL) 17.4" };
+        }
       }),
     /major 16/
   );
+  assert.ok(inspectedHost > 0);
   assert.equal(parsePostgresMajor("postgres (PostgreSQL) 16.10"), 16);
+
+  const winHome = temp("yuvi-pg-wrong-win-");
+  fs.mkdirSync(path.join(winHome, "bin"), { recursive: true });
+  for (const name of ["postgres", "pg_ctl", "initdb"]) {
+    fs.writeFileSync(path.join(winHome, "bin", `${name}.exe`), "stub");
+  }
+  let inspectedWin32 = 0;
+  assert.throws(
+    () =>
+      validatePostgres16Distribution(winHome, {
+        platform: "win32",
+        inspect: () => {
+          inspectedWin32 += 1;
+          return { major: 17, versionText: "postgres (PostgreSQL) 17.4" };
+        }
+      }),
+    /major 16/
+  );
+  assert.ok(inspectedWin32 > 0);
+
+  const extensionless = temp("yuvi-pg-win-extensionless-");
+  fs.mkdirSync(path.join(extensionless, "bin"), { recursive: true });
+  for (const name of ["postgres", "pg_ctl", "initdb"]) {
+    fs.writeFileSync(path.join(extensionless, "bin", name), "stub");
+  }
+  assert.throws(
+    () =>
+      validatePostgres16Distribution(extensionless, {
+        platform: "win32",
+        inspect: () => ({ major: 17, versionText: "postgres (PostgreSQL) 17.4" })
+      }),
+    /missing postgres\.exe/
+  );
 });
 
 test("ephemeral installer-smoke password is generated, injected after sanitization, and not logged", () => {
