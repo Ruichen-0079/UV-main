@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CompanionBus } from "./companion-bus.js";
+import { CompanionBus, isCompanionBusMessage } from "./companion-bus.js";
 
 describe("CompanionBus", () => {
   it("relays main -> companion messages across bus instances", async () => {
@@ -112,5 +112,33 @@ describe("CompanionBus", () => {
       main.close();
       companion.close();
     }
+  });
+
+  it("validates correlated message payloads before delivery", () => {
+    expect(
+      isCompanionBusMessage({ kind: "start-generation", requestId: "r1", sessionId: "default" })
+    ).toBe(true);
+    expect(
+      isCompanionBusMessage({
+        kind: "speak",
+        requestId: "r1",
+        sequence: 0,
+        text: "x",
+        language: "en"
+      })
+    ).toBe(true);
+    expect(
+      isCompanionBusMessage({
+        kind: "speak",
+        requestId: "r1",
+        sequence: -1,
+        text: "x",
+        language: "en"
+      })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({ kind: "generation-state", requestId: "r1", state: "unknown" })
+    ).toBe(false);
+    expect(isCompanionBusMessage({ kind: "user-gesture", extra: true })).toBe(false);
   });
 });

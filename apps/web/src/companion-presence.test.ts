@@ -3,70 +3,227 @@ import {
   BLINK_CONFIG,
   BLINK_MAX_INTERVAL_MS,
   BLINK_MIN_INTERVAL_MS,
+  createInitialCompanionPresence,
   createCompanionBlinkScheduler,
   createInterruptedResetScheduler,
   createPresenceBehaviorTransition,
+  getCompanionPresentationState,
   getCompanionAnimation,
   PRESENCE_BEHAVIOR_PROFILES,
-  reduceCompanionPresence
+  reduceCompanionPresence,
+  type CompanionPresenceEvent
 } from "./companion-presence.js";
 
-describe("reduceCompanionPresence", () => {
+describe("normalized companion presence", () => {
   afterEach(() => vi.useRealTimers());
-  it("follows generation state and queue state transitions", () => {
-    let presence = reduceCompanionPresence("idle", { type: "generation", state: "thinking" });
-    expect(presence).toBe("thinking");
+  it("keeps activity, queue stages, and actual playback orthogonal", () => {
+    let presence = createInitialCompanionPresence();
+    presence = reduceCompanionPresence(presence, { type: "turn-start", epoch: "turn-1" });
+    expect(presence).toMatchObject({
+      epoch: "turn-1",
+      lifecycle: "active",
+      activity: "thinking",
+      speech: "inactive"
+    });
 
-    presence = reduceCompanionPresence(presence, { type: "queue", state: "synthesizing" });
-    expect(presence).toBe("thinking");
+    presence = reduceCompanionPresence(presence, {
+      type: "queue",
+      epoch: "turn-1",
+      state: "synthesizing"
+    });
+    expect(presence.speech).toBe("preparing");
+    expect(getCompanionPresentationState(presence)).toBe("thinking");
 
-    presence = reduceCompanionPresence(presence, { type: "queue", state: "playing" });
-    expect(presence).toBe("speaking");
+    presence = reduceCompanionPresence(presence, {
+      type: "queue",
+      epoch: "turn-1",
+      state: "playing"
+    });
+    expect(presence.speech).toBe("queued");
+    expect(getCompanionPresentationState(presence)).toBe("thinking");
 
-    presence = reduceCompanionPresence(presence, { type: "generation", state: "idle" });
-    expect(presence).toBe("speaking");
+    presence = reduceCompanionPresence(presence, {
+      type: "playback",
+      epoch: "turn-1",
+      state: "started"
+    });
+    expect(presence.speech).toBe("active");
+    expect(getCompanionPresentationState(presence)).toBe("speaking");
 
-    presence = reduceCompanionPresence(presence, { type: "queue", state: "idle" });
-    expect(presence).toBe("idle");
+    presence = reduceCompanionPresence(presence, {
+      type: "generation",
+      epoch: "turn-1",
+      state: "idle"
+    });
+    expect(presence).toMatchObject({
+      lifecycle: "generation-complete",
+      activity: "idle",
+      speech: "active"
+    });
+    expect(getCompanionPresentationState(presence)).toBe("speaking");
+
+    presence = reduceCompanionPresence(presence, {
+      type: "playback",
+      epoch: "turn-1",
+      state: "ended"
+    });
+    expect(presence.speech).toBe("completed");
+    expect(getCompanionPresentationState(presence)).toBe("idle");
   });
 
-  it("maps stopped and error queue states", () => {
-    expect(reduceCompanionPresence("thinking", { type: "queue", state: "stopped" })).toBe(
-      "interrupted"
-    );
-    expect(reduceCompanionPresence("interrupted", { type: "queue", state: "error" })).toBe(
-      "interrupted"
-    );
+  it("keeps queue stop/error separate from activity", () => {
+    let presence = reduceCompanionPresence(createInitialCompanionPresence(), {
+      type: "turn-start",
+      epoch: "turn-1"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "queue",
+      epoch: "turn-1",
+      state: "stopped"
+    });
+    expect(presence).toMatchObject({
+      activity: "thinking",
+      speech: "cancelled",
+      transition: "interrupted"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "transition-expired",
+      epoch: "turn-1"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "queue",
+      epoch: "turn-1",
+      state: "error"
+    });
+    expect(presence.speech).toBe("error");
+    presence = reduceCompanionPresence(presence, {
+      type: "queue",
+      epoch: "turn-1",
+      state: "idle"
+    });
+    expect(presence.speech).toBe("error");
+    expect(presence.activity).toBe("thinking");
   });
 
-  it("keeps interrupted transient until its timer, while a new turn can override it", () => {
-    expect(reduceCompanionPresence("interrupted", { type: "queue", state: "idle" })).toBe(
-      "interrupted"
-    );
-    expect(reduceCompanionPresence("interrupted", { type: "generation", state: "idle" })).toBe(
-      "interrupted"
-    );
-    expect(reduceCompanionPresence("interrupted", { type: "generation", state: "listening" })).toBe(
-      "listening"
-    );
-    expect(reduceCompanionPresence("interrupted", { type: "generation", state: "thinking" })).toBe(
-      "thinking"
-    );
+  it("keeps speech cancellation transient without cancelling generation", () => {
+    let presence = reduceCompanionPresence(createInitialCompanionPresence(), {
+      type: "turn-start",
+      epoch: "turn-1"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "speech-cancelled",
+      epoch: "turn-1"
+    });
+    expect(presence).toMatchObject({
+      lifecycle: "active",
+      activity: "thinking",
+      speech: "cancelled",
+      transition: "interrupted"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "transition-expired",
+      epoch: "turn-1"
+    });
+    expect(presence.transition).toBe("none");
   });
 
-  it("maps interrupted generation state", () => {
-    expect(reduceCompanionPresence("thinking", { type: "generation", state: "interrupted" })).toBe(
-      "interrupted"
-    );
+  it("rejects stale events after a newer turn starts", () => {
+    let presence = reduceCompanionPresence(createInitialCompanionPresence(), {
+      type: "turn-start",
+      epoch: "old"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "turn-start",
+      epoch: "new"
+    });
+    const current = presence;
+
+    const staleEvents: CompanionPresenceEvent[] = [
+      { type: "generation", epoch: "old", state: "thinking" as const },
+      { type: "generation", epoch: "old", state: "idle" as const },
+      { type: "queue", epoch: "old", state: "playing" as const },
+      { type: "playback", epoch: "old", state: "started" as const }
+    ];
+    for (const event of staleEvents) {
+      presence = reduceCompanionPresence(presence, event);
+    }
+
+    expect(presence).toEqual(current);
   });
 
-  it("tracks listening before thinking", () => {
-    expect(reduceCompanionPresence("idle", { type: "generation", state: "listening" })).toBe(
-      "listening"
-    );
-    expect(reduceCompanionPresence("listening", { type: "generation", state: "thinking" })).toBe(
-      "thinking"
-    );
+  it("does not revive a cancelled epoch or accept duplicate terminal events", () => {
+    let presence = reduceCompanionPresence(createInitialCompanionPresence(), {
+      type: "turn-start",
+      epoch: "turn-1"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "playback",
+      epoch: "turn-1",
+      state: "started"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "generation",
+      epoch: "turn-1",
+      state: "interrupted"
+    });
+    expect(getCompanionPresentationState(presence)).toBe("speaking");
+    presence = reduceCompanionPresence(presence, {
+      type: "playback",
+      epoch: "turn-1",
+      state: "stopped"
+    });
+    const cancelled = presence;
+
+    presence = reduceCompanionPresence(presence, {
+      type: "generation",
+      epoch: "turn-1",
+      state: "thinking"
+    });
+    expect(presence).toEqual(cancelled);
+    expect(
+      reduceCompanionPresence(presence, {
+        type: "playback",
+        epoch: "turn-1",
+        state: "stopped"
+      })
+    ).toEqual(cancelled);
+  });
+
+  it("invalidates activity on disconnect without making Live2D capability offline", () => {
+    let presence = reduceCompanionPresence(createInitialCompanionPresence(), {
+      type: "turn-start",
+      epoch: "turn-1"
+    });
+    presence = reduceCompanionPresence(presence, {
+      type: "capability",
+      capability: "live2d",
+      state: "available"
+    });
+    presence = reduceCompanionPresence(presence, { type: "disconnect", state: "offline" });
+    expect(presence).toMatchObject({
+      lifecycle: "invalidated",
+      activity: "idle",
+      connectivity: "offline",
+      capabilities: { live2d: "available" }
+    });
+    presence = reduceCompanionPresence(presence, { type: "connectivity", state: "online" });
+    expect(presence).toMatchObject({
+      lifecycle: "invalidated",
+      activity: "idle",
+      connectivity: "online"
+    });
+    presence = reduceCompanionPresence(presence, { type: "turn-start", epoch: "turn-2" });
+    expect(presence).toMatchObject({ epoch: "turn-2", lifecycle: "active", activity: "thinking" });
+  });
+
+  it("accepts explicit listening input without inventing an epoch", () => {
+    let presence = reduceCompanionPresence(createInitialCompanionPresence(), {
+      type: "interaction",
+      state: "listening"
+    });
+    expect(presence).toMatchObject({ epoch: null, lifecycle: "none", activity: "listening" });
+    presence = reduceCompanionPresence(presence, { type: "interaction", state: "idle" });
+    expect(presence.activity).toBe("idle");
   });
 
   it("produces breathing and eye frames while idle and speaking", () => {

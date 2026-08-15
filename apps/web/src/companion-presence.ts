@@ -1,7 +1,62 @@
 import type { SpeechQueueState } from "./speech-queue.js";
 import type { CompanionGenerationState } from "./companion-bus.js";
 
-export type CompanionPresenceState = "idle" | "listening" | "thinking" | "speaking" | "interrupted";
+/**
+ * Visual behavior state derived from the normalized projection below.
+ *
+ * This is intentionally not the product Presence contract.  It is retained
+ * as the small input vocabulary used by the existing blink/gaze mechanics.
+ */
+export type CompanionPresentationState =
+  "idle" | "listening" | "thinking" | "speaking" | "interrupted";
+
+/** @deprecated Use CompanionPresentationState for animation-only consumers. */
+export type CompanionPresenceState = CompanionPresentationState;
+
+export type CompanionPresenceActivity = "idle" | "listening" | "thinking";
+export type CompanionPresenceConnectivity = "unknown" | "online" | "reconnecting" | "offline";
+export type CompanionPresenceCapabilityState = "unknown" | "available" | "unavailable";
+export type CompanionPresenceSpeech =
+  "inactive" | "queued" | "preparing" | "ready" | "active" | "completed" | "cancelled" | "error";
+export type CompanionPresenceTransition = "none" | "interrupted";
+export type CompanionPresenceLifecycle =
+  "none" | "active" | "generation-complete" | "cancelled" | "invalidated";
+
+export type CompanionPresenceCapabilities = {
+  tts: CompanionPresenceCapabilityState;
+  audio: CompanionPresenceCapabilityState;
+  live2d: CompanionPresenceCapabilityState;
+};
+
+export type CompanionPresenceProjection = {
+  /** The current request id; request ids are the current web-side turn epoch. */
+  epoch: string | null;
+  /** Generation/speech terminality is tracked independently from speech playback. */
+  lifecycle: CompanionPresenceLifecycle;
+  activity: CompanionPresenceActivity;
+  connectivity: CompanionPresenceConnectivity;
+  speech: CompanionPresenceSpeech;
+  capabilities: CompanionPresenceCapabilities;
+  transition: CompanionPresenceTransition;
+};
+
+export function createInitialCompanionPresence(
+  connectivity: CompanionPresenceConnectivity = "unknown"
+): CompanionPresenceProjection {
+  return {
+    epoch: null,
+    lifecycle: "none",
+    activity: "idle",
+    connectivity,
+    speech: "inactive",
+    capabilities: {
+      tts: "unknown",
+      audio: "unknown",
+      live2d: "unknown"
+    },
+    transition: "none"
+  };
+}
 
 export type PresenceTargetRegionWeights = {
   center: number;
@@ -358,60 +413,249 @@ export function getPresenceBehaviorProfile(state: CompanionPresenceState): Prese
 }
 
 export type CompanionPresenceEvent =
-  | { type: "generation"; state: CompanionGenerationState }
-  | { type: "queue"; state: SpeechQueueState };
+  | { type: "turn-start"; epoch: string }
+  | { type: "interaction"; state: "listening" | "idle"; epoch?: string }
+  | { type: "generation"; epoch: string; state: CompanionGenerationState }
+  | { type: "queue"; epoch: string; state: SpeechQueueState }
+  | {
+      type: "playback";
+      epoch: string;
+      state: "started" | "ended" | "stopped" | "error";
+    }
+  | { type: "speech-cancelled"; epoch: string }
+  | { type: "connectivity"; state: CompanionPresenceConnectivity }
+  | { type: "disconnect"; state: "reconnecting" | "offline" }
+  | {
+      type: "capability";
+      capability: keyof CompanionPresenceCapabilities;
+      state: CompanionPresenceCapabilityState;
+    }
+  | { type: "transition-expired"; epoch: string };
 
 /**
- * Drives the companion window's Lumi presence from two sources:
- * - main window generation state (thinking / idle / interrupted)
- * - the local speech queue state (synthesizing / playing / stopped / idle)
- * Speaking always wins until the queue actually returns to idle. Interrupted
- * is held until its tokenized reset timer so stop callbacks cannot collapse it
- * synchronously; a new generation state still overrides it immediately.
+ * The single UI-facing Presence projection owner for the companion path.
+ *
+ * Request ids are the current web-side turn epochs. Generation terminality is
+ * intentionally separate from speech playback: a completed response may
+ * still have queued or active audio. Queue `playing` means that playback was
+ * scheduled, not that media has actually started; only playbackStarted maps to
+ * visible speech.
  */
 export function reduceCompanionPresence(
-  current: CompanionPresenceState,
+  current: CompanionPresenceProjection,
   event: CompanionPresenceEvent
-): CompanionPresenceState {
+): CompanionPresenceProjection {
   switch (event.type) {
+    case "turn-start":
+      return reduceTurnStart(current, event.epoch);
+    case "interaction":
+      return reduceInteraction(current, event);
     case "generation":
-      return reduceGeneration(current, event.state);
+      return reduceGeneration(current, event);
     case "queue":
-      return reduceQueue(current, event.state);
+      return reduceQueue(current, event);
+    case "playback":
+      return reducePlayback(current, event);
+    case "speech-cancelled":
+      return reduceSpeechCancelled(current, event.epoch);
+    case "connectivity":
+      return { ...current, connectivity: event.state };
+    case "disconnect":
+      return reduceDisconnect(current, event.state);
+    case "capability":
+      return {
+        ...current,
+        capabilities: { ...current.capabilities, [event.capability]: event.state }
+      };
+    case "transition-expired":
+      return current.epoch === event.epoch && current.transition === "interrupted"
+        ? { ...current, transition: "none" }
+        : current;
   }
+}
+
+function reduceTurnStart(
+  current: CompanionPresenceProjection,
+  epoch: string
+): CompanionPresenceProjection {
+  if (!isValidEpoch(epoch) || current.epoch === epoch) return current;
+  return {
+    ...current,
+    epoch,
+    lifecycle: "active",
+    activity: "thinking",
+    speech: "inactive",
+    transition: "none"
+  };
+}
+
+function reduceInteraction(
+  current: CompanionPresenceProjection,
+  event: Extract<CompanionPresenceEvent, { type: "interaction" }>
+): CompanionPresenceProjection {
+  if (event.epoch && !isCurrentEpoch(current, event.epoch)) return current;
+  if (!event.epoch && current.epoch && isInvalidated(current)) return current;
+  if (event.state === "listening") {
+    return {
+      ...current,
+      activity: "listening",
+      transition: "none"
+    };
+  }
+  return {
+    ...current,
+    activity: "idle",
+    transition: "none"
+  };
 }
 
 function reduceGeneration(
-  current: CompanionPresenceState,
-  state: CompanionGenerationState
-): CompanionPresenceState {
-  switch (state) {
-    case "listening":
-      return "listening";
-    case "thinking":
-      return "thinking";
-    case "interrupted":
-      return "interrupted";
-    case "idle":
-      return current === "speaking" || current === "interrupted" ? current : "idle";
+  current: CompanionPresenceProjection,
+  event: Extract<CompanionPresenceEvent, { type: "generation" }>
+): CompanionPresenceProjection {
+  if (!isCurrentEpoch(current, event.epoch)) return current;
+
+  if (event.state === "interrupted") {
+    return {
+      ...current,
+      lifecycle: "cancelled",
+      activity: "idle",
+      speech: current.speech === "active" ? current.speech : "cancelled",
+      transition: "interrupted"
+    };
   }
+
+  if (event.state === "idle") {
+    if (current.lifecycle !== "active") return current;
+    return {
+      ...current,
+      lifecycle: "generation-complete",
+      activity: "idle",
+      transition: "none"
+    };
+  }
+
+  if (current.lifecycle !== "active") return current;
+  return {
+    ...current,
+    activity: event.state,
+    transition: "none"
+  };
 }
 
 function reduceQueue(
-  current: CompanionPresenceState,
-  state: SpeechQueueState
-): CompanionPresenceState {
-  switch (state) {
+  current: CompanionPresenceProjection,
+  event: Extract<CompanionPresenceEvent, { type: "queue" }>
+): CompanionPresenceProjection {
+  if (!isCurrentEpoch(current, event.epoch)) return current;
+  if (isInvalidated(current) && !isQueueTerminal(event.state)) return current;
+
+  switch (event.state) {
     case "synthesizing":
-      return "thinking";
+      return { ...current, speech: "preparing" };
     case "playing":
-      return "speaking";
+      // Queue scheduling is not actual browser playback.
+      return { ...current, speech: "queued" };
     case "stopped":
-      return "interrupted";
-    case "idle":
+      return { ...current, speech: "cancelled", transition: "interrupted" };
     case "error":
-      return current === "interrupted" ? "interrupted" : "idle";
+      return { ...current, speech: "error" };
+    case "idle":
+      if (
+        current.speech === "active" ||
+        current.speech === "completed" ||
+        current.speech === "cancelled" ||
+        current.speech === "error"
+      ) {
+        return current;
+      }
+      if (current.lifecycle === "cancelled" || current.lifecycle === "invalidated") {
+        return current;
+      }
+      return {
+        ...current,
+        speech: current.lifecycle === "generation-complete" ? "completed" : "inactive"
+      };
   }
+}
+
+function reducePlayback(
+  current: CompanionPresenceProjection,
+  event: Extract<CompanionPresenceEvent, { type: "playback" }>
+): CompanionPresenceProjection {
+  if (!isCurrentEpoch(current, event.epoch)) return current;
+
+  switch (event.state) {
+    case "started":
+      if (isInvalidated(current)) return current;
+      return { ...current, speech: "active", transition: "none" };
+    case "ended":
+      return { ...current, speech: "completed" };
+    case "stopped":
+      return { ...current, speech: "cancelled", transition: "interrupted" };
+    case "error":
+      return { ...current, speech: "error" };
+  }
+}
+
+function reduceSpeechCancelled(
+  current: CompanionPresenceProjection,
+  epoch: string
+): CompanionPresenceProjection {
+  if (!isCurrentEpoch(current, epoch)) return current;
+  return { ...current, speech: "cancelled", transition: "interrupted" };
+}
+
+function reduceDisconnect(
+  current: CompanionPresenceProjection,
+  state: "reconnecting" | "offline"
+): CompanionPresenceProjection {
+  if (!current.epoch) {
+    return { ...current, connectivity: state, activity: "idle", transition: "none" };
+  }
+  return {
+    ...current,
+    lifecycle: "invalidated",
+    activity: "idle",
+    connectivity: state,
+    transition: "none"
+  };
+}
+
+function isCurrentEpoch(current: CompanionPresenceProjection, epoch: string): boolean {
+  return isValidEpoch(epoch) && current.epoch === epoch;
+}
+
+function isValidEpoch(epoch: string): boolean {
+  return epoch.trim().length > 0;
+}
+
+function isInvalidated(current: CompanionPresenceProjection): boolean {
+  return current.lifecycle === "cancelled" || current.lifecycle === "invalidated";
+}
+
+function isQueueTerminal(state: SpeechQueueState): boolean {
+  return state === "idle" || state === "stopped" || state === "error";
+}
+
+/**
+ * Converts the orthogonal projection into the existing animation vocabulary.
+ * This is a derived presentation input, not another product Presence owner.
+ */
+export function getCompanionPresentationState(
+  projection: CompanionPresenceProjection
+): CompanionPresentationState {
+  if (projection.speech === "active") return "speaking";
+  if (projection.transition === "interrupted") return "interrupted";
+  if (
+    projection.activity === "thinking" ||
+    projection.speech === "queued" ||
+    projection.speech === "preparing" ||
+    projection.speech === "ready"
+  ) {
+    return "thinking";
+  }
+  return projection.activity;
 }
 
 export type CompanionAnimationFrame = {
@@ -709,7 +953,10 @@ function interpolateProfile(
     quickGlanceChance: mix(from.quickGlanceChance, target.quickGlanceChance),
     quickGlanceHoldMinMs: mix(from.quickGlanceHoldMinMs, target.quickGlanceHoldMinMs),
     quickGlanceHoldMaxMs: mix(from.quickGlanceHoldMaxMs, target.quickGlanceHoldMaxMs),
-    quickGlanceAmplitudeScale: mix(from.quickGlanceAmplitudeScale, target.quickGlanceAmplitudeScale),
+    quickGlanceAmplitudeScale: mix(
+      from.quickGlanceAmplitudeScale,
+      target.quickGlanceAmplitudeScale
+    ),
     quickGlanceHeadFollow: mix(from.quickGlanceHeadFollow, target.quickGlanceHeadFollow),
     eyeAmplitudeScale: mix(from.eyeAmplitudeScale, target.eyeAmplitudeScale),
     headAmplitudeScale: mix(from.headAmplitudeScale, target.headAmplitudeScale),

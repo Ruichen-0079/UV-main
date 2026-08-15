@@ -11,10 +11,7 @@ import { detectSpeechLanguage, type SpeechQueueState } from "./speech-queue.js";
 import { SpeechSegmenter } from "./speech-segmenter.js";
 import { CompanionBus, type CompanionBusMessage } from "./companion-bus.js";
 import { EmptyState, Field, Notice, Panel, Pill, Toggle } from "./surface-ui.js";
-import {
-  readVoiceOutputPreference,
-  writeVoiceOutputPreference
-} from "./voice-output.js";
+import { readVoiceOutputPreference, writeVoiceOutputPreference } from "./voice-output.js";
 import { controlCompanionWindow, isTauriRuntime } from "./tauri-window.js";
 import { ServiceStatusPanel } from "./service-status-panel.js";
 import { UserSettingsPanel } from "./user-settings-panel.js";
@@ -246,11 +243,14 @@ export function MainPage(): JSX.Element {
       setError(message);
       setRequestStatus("error");
     } finally {
-      if (activeRequestRef.current?.id === requestId) {
+      const isCurrentRequest = activeRequestRef.current?.id === requestId;
+      if (isCurrentRequest) {
         activeRequestRef.current = null;
+        bus?.post({ kind: "generation-state", requestId, state: "idle" });
       }
-      bus?.post({ kind: "generation-state", requestId, state: "idle" });
-      speechSessionRef.current = null;
+      if (speechSessionRef.current?.generation === requestId) {
+        speechSessionRef.current = null;
+      }
     }
   }
 
@@ -311,7 +311,6 @@ export function MainPage(): JSX.Element {
   function stopSpeech(): void {
     const requestId = activeRequestRef.current?.id ?? "unknown";
     busRef.current?.post({ kind: "stop-speech", requestId });
-    busRef.current?.post({ kind: "generation-state", requestId, state: "interrupted" });
     setVoicePlaybackStatus("stopped");
   }
 
@@ -329,9 +328,7 @@ export function MainPage(): JSX.Element {
   return (
     <div className="min-h-screen bg-ink-100">
       <ServiceStatusPanel />
-      <div
-        className={`mx-auto space-y-4 p-6 ${showSettings ? "max-w-6xl" : "max-w-3xl"}`}
-      >
+      <div className={`mx-auto space-y-4 p-6 ${showSettings ? "max-w-6xl" : "max-w-3xl"}`}>
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold tracking-normal">YUVI Chat</h1>

@@ -83,7 +83,56 @@ export class CompanionBus {
 export function isCompanionBusMessage(value: unknown): value is CompanionBusMessage {
   if (typeof value !== "object" || value === null) return false;
   const kind = (value as { kind?: unknown }).kind;
-  return typeof kind === "string" && knownKinds.has(kind);
+  if (typeof kind !== "string" || !knownKinds.has(kind)) return false;
+  const message = value as Record<string, unknown>;
+  switch (kind) {
+    case "user-gesture":
+    case "companion-ready":
+      return Object.keys(message).every((key) => key === "kind");
+    case "voice-enabled":
+      return typeof message["enabled"] === "boolean";
+    case "start-generation":
+      return isNonEmptyString(message["requestId"]) && isNonEmptyString(message["sessionId"]);
+    case "speak":
+      return (
+        isNonEmptyString(message["requestId"]) &&
+        isNonNegativeInteger(message["sequence"]) &&
+        typeof message["text"] === "string" &&
+        typeof message["language"] === "string"
+      );
+    case "speech-end":
+    case "stop-speech":
+      return isNonEmptyString(message["requestId"]);
+    case "generation-state":
+      return isNonEmptyString(message["requestId"]) && isGenerationState(message["state"]);
+    case "speech-status":
+      return isNonEmptyString(message["requestId"]) && isSpeechQueueState(message["state"]);
+  }
+  return false;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isGenerationState(value: unknown): value is CompanionGenerationState {
+  return (
+    value === "listening" || value === "thinking" || value === "idle" || value === "interrupted"
+  );
+}
+
+function isSpeechQueueState(value: unknown): value is SpeechQueueState {
+  return (
+    value === "idle" ||
+    value === "synthesizing" ||
+    value === "playing" ||
+    value === "stopped" ||
+    value === "error"
+  );
 }
 
 function isWireMessage(value: unknown): value is WireMessage {
