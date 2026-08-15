@@ -745,6 +745,7 @@ describe("server", () => {
         diagnosticsErrorCode: null,
         diagnosticsError: null,
         activeWorkerCount: 1,
+        configuredConcurrency: 4,
         lastScanAt: "2026-08-15T00:00:00.000Z",
         lastSuccessfulExecutionAt: null,
         lastError: null,
@@ -1774,7 +1775,8 @@ describe("server", () => {
     expect(loadServerConfig({}).memoryIngestion).toMatchObject({
       enabled: true,
       pollIntervalMs: 15_000,
-      concurrency: 4
+      concurrency: 4,
+      maxDeliveryAttempts: 8
     });
     expect(loadServerConfig({}).memoryExtractor).toBe("llm");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe("rule-based");

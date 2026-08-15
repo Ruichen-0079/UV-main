@@ -25,6 +25,7 @@ export type ServerConfig = {
     retryInitialDelayMs: number;
     retryMaxDelayMs: number;
     retryMultiplier: number;
+    maxDeliveryAttempts: number;
     missingAdmissionEnabled: boolean;
   };
   memoryVectorIndex: {
@@ -77,6 +78,10 @@ export function loadServerConfig(
       ),
       retryMaxDelayMs: parseStrictPositiveInteger(env["MEMORY_INGESTION_RETRY_MAX_MS"], 300_000),
       retryMultiplier: parseStrictPositiveInteger(env["MEMORY_INGESTION_RETRY_MULTIPLIER"], 2),
+      maxDeliveryAttempts: parseStrictPositiveInteger(
+        env["MEMORY_INGESTION_MAX_DELIVERY_ATTEMPTS"],
+        8
+      ),
       missingAdmissionEnabled: parseBoolean(env["MEMORY_INGESTION_MISSING_ADMISSION_ENABLED"], true)
     },
     memoryVectorIndex: {

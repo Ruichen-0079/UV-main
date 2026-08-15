@@ -518,6 +518,9 @@ export class RuntimeOrchestrator {
       const pending = Array.from(this.pendingMemoryWrites);
       drained.push(...(await Promise.all(pending)));
     }
+    if (this.inlineIngestionCoordinator) {
+      await this.inlineIngestionCoordinator.drain(10_000);
+    }
     return drained;
   }
 
@@ -536,6 +539,9 @@ export class RuntimeOrchestrator {
     this.lifecycleSealPromise = (async () => {
       await this.waitForLifecycleIdle();
       const drained = await this.drainMemoryWrites();
+      if (this.inlineIngestionCoordinator) {
+        await this.inlineIngestionCoordinator.shutdown({ graceMs: 2_000 });
+      }
       this.lifecycleState = "disposed";
       return drained;
     })();
@@ -2205,6 +2211,7 @@ export class RuntimeOrchestrator {
       concurrency: 4,
       ...(this.options.logger ? { logger: this.options.logger } : {})
     });
+    this.inlineIngestionCoordinator.start();
     return this.inlineIngestionCoordinator;
   }
 

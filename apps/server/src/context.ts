@@ -190,6 +190,7 @@ export async function createAppContext(
       concurrency: config.memoryIngestion.concurrency,
       leaseSeconds: config.memoryIngestion.leaseSeconds,
       scanLimit: config.memoryIngestion.scanLimit,
+      maxDeliveryAttempts: config.memoryIngestion.maxDeliveryAttempts,
       missingAdmissionEnabled: config.memoryIngestion.missingAdmissionEnabled,
       retryPolicy: {
         initialDelayMs: config.memoryIngestion.retryInitialDelayMs,

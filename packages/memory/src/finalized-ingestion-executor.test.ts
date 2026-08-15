@@ -187,4 +187,42 @@ describe("shared finalized ingestion executor", () => {
       errorCode: "MEMORY_IDEMPOTENCY_UNSUPPORTED"
     });
   });
+
+  it("refuses another dispatch when the durable delivery budget is already consumed", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const admitted = await new FinalizedIngestionService(repository).admit({
+      ...base,
+      finalizedTurnId: "finalized-turn:budget"
+    });
+    const first = await executeFinalizedIngestionEvent({
+      repository,
+      provider: provider({
+        writeEventIdempotent: vi.fn(async () => ({
+          status: "rejected" as const,
+          failureClass: "retryable_no_effect" as const,
+          errorCode: "MEMORY_BACKEND_UNAVAILABLE"
+        }))
+      }),
+      event: admitted.events[0]!,
+      leaseOwner: "worker-a",
+      leaseSeconds: 30,
+      maxDeliveryAttempts: 1
+    });
+    expect(first.dispatched).toBe(true);
+    expect(first.event?.attemptCount).toBe(1);
+    const retry = await executeFinalizedIngestionEvent({
+      repository,
+      provider: provider(),
+      event: (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!,
+      leaseOwner: "worker-b",
+      leaseSeconds: 30,
+      maxDeliveryAttempts: 1
+    });
+    expect(retry.dispatched).toBe(false);
+    expect(retry.event).toMatchObject({
+      status: "terminal_failed",
+      errorCode: "MEMORY_WRITE_RETRY_EXHAUSTED",
+      attemptCount: 1
+    });
+  });
 });
