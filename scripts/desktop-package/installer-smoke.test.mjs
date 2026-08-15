@@ -59,11 +59,21 @@ import {
   applyInstallerSmokePostgresFixture,
   applyInstallerSmokePostgresPassword,
   assertMem0FollowsMemorySearch,
+  cleanupExactOwnedSmokeProcesses,
+  collectExactOwnedSmokePids,
+  createOwnedSmokeProcessState,
+  formatCleanupSecondaryDiagnostic,
   generateInstallerSmokePostgresPassword,
   INSTALLER_SMOKE_POSTGRES_HOME_ENV,
   memorySearchStatusFromStatus,
+  ownedPostgresPidFromStatus,
+  preservePrimarySmokeError,
   readInstallerSmokePostgresHome,
   redactInstallerSmokeSecretText,
+  rememberOwnedSmokeProcess,
+  requestExactSupervisorShutdown,
+  runCleanupPreservingPrimaryError,
+  runInstallerSmokeFinalCleanup,
   schemaReadyFromStatus,
   snapshotTree,
   validateInstallerSmokePostgresHome,
@@ -2502,4 +2512,281 @@ test("PostgreSQL 16 fixture pin is the independently published 16.10 zip", () =>
     POSTGRES16_FIXTURE_SHA256
   );
   assert.throws(() => assertSha256("0".repeat(64)), /SHA-256 mismatch/);
+});
+
+test("primary assertion failure is retained when cleanup succeeds", async () => {
+  const primary = new Error("Supervisor bootstrap did not reach schemaReady=true");
+  let cleaned = false;
+  await assert.rejects(
+    runCleanupPreservingPrimaryError(primary, async () => {
+      cleaned = true;
+    }),
+    (error) => error === primary && error.message === primary.message && !error.cleanupSecondary
+  );
+  assert.equal(cleaned, true);
+});
+
+test("primary assertion failure is retained when cleanup also EPERM fails", async () => {
+  const primary = new Error(
+    "running Supervisor ExecutablePath does not match installed packaged exe"
+  );
+  const cleanup = Object.assign(
+    new Error("EPERM: operation not permitted, scandir PGDATA/base/1"),
+    {
+      code: "EPERM"
+    }
+  );
+  const originalStack = primary.stack;
+  await assert.rejects(
+    runCleanupPreservingPrimaryError(primary, async () => {
+      throw cleanup;
+    }),
+    (error) =>
+      error === primary &&
+      error.message === primary.message &&
+      error.stack === originalStack &&
+      error.cleanupSecondary?.cleanupPhase === "temp-tree-remove" &&
+      error.cleanupSecondary?.code === "EPERM" &&
+      /scandir/.test(error.cleanupSecondary.message)
+  );
+});
+
+test("cleanup failure becomes the failure when the main smoke succeeds", async () => {
+  const cleanup = Object.assign(new Error("EPERM: operation not permitted, rmdir smoke-root"), {
+    code: "EPERM"
+  });
+  await assert.rejects(
+    runCleanupPreservingPrimaryError(null, async () => {
+      throw cleanup;
+    }),
+    (error) => error === cleanup && error.code === "EPERM"
+  );
+});
+
+test("TEMP root removal cannot begin before required exact owned PID exit waits", async () => {
+  const { root, target } = cleanupFixture();
+  const live = new Set([101, 303]);
+  const events = [];
+  await runInstallerSmokeFinalCleanup({
+    keepTemp: false,
+    root,
+    ownedProcessState: { supervisorPid: 101, postgresPid: 303 },
+    waitForPids: async (entries, options) => {
+      events.push(`wait:${entries.map((entry) => `${entry.role}:${entry.pid}`).join(",")}`);
+      await waitForSpecificPidsExit(entries, {
+        ...options,
+        pidProbe: (pid) => live.has(pid),
+        sleep: async () => {
+          events.push("pids-exit");
+          live.clear();
+        }
+      });
+    },
+    removeTree: async (...args) => {
+      events.push("remove");
+      return removeTreeWithRetries(...args);
+    }
+  });
+  assert.deepEqual(events, ["wait:Supervisor:101,PostgreSQL:303", "pids-exit", "remove"]);
+  assert.equal(live.size, 0);
+});
+
+test("graceful shutdown uses the exact Supervisor endpoint and control token", async () => {
+  const calls = [];
+  const result = await requestExactSupervisorShutdown({
+    baseUrl: "http://127.0.0.1:18765",
+    controlToken: "smoke-control-token",
+    request: async (url, options) => {
+      calls.push({
+        url,
+        method: options.method,
+        token: options.token,
+        label: options.label,
+        hasAuthorizationHeader: false
+      });
+      return { status: 200, value: { ok: true } };
+    }
+  });
+  assert.deepEqual(result, { attempted: true, status: 200 });
+  assert.deepEqual(calls, [
+    {
+      url: "http://127.0.0.1:18765/v1/shutdown",
+      method: "POST",
+      token: "smoke-control-token",
+      label: "supervisor.shutdown",
+      hasAuthorizationHeader: false
+    }
+  ]);
+  const skipped = await requestExactSupervisorShutdown({
+    baseUrl: "",
+    controlToken: "smoke-control-token",
+    request: async () => {
+      throw new Error("shutdown must not run without an exact endpoint");
+    }
+  });
+  assert.deepEqual(skipped, { attempted: false, reason: "endpoint-unknown" });
+});
+
+test("failure path before success-path shutdown still attempts exact Supervisor cleanup", async () => {
+  const events = [];
+  const primary = new Error("Supervisor bootstrap did not reach schemaReady=true");
+  await assert.rejects(
+    runCleanupPreservingPrimaryError(primary, async () => {
+      await cleanupExactOwnedSmokeProcesses({
+        endpoint: { baseUrl: "http://127.0.0.1:19191", controlToken: "exact-token" },
+        supervisorPid: 77,
+        postgresPid: 88,
+        requestShutdown: async ({ baseUrl, controlToken }) => {
+          events.push(`shutdown:${baseUrl}:${controlToken}`);
+          return { attempted: true, status: 200 };
+        },
+        waitForPids: async (entries) => {
+          events.push(`wait:${entries.map((entry) => entry.role).join(",")}`);
+        }
+      });
+    }),
+    (error) => error === primary
+  );
+  assert.deepEqual(events, [
+    "shutdown:http://127.0.0.1:19191:exact-token",
+    "wait:Supervisor,PostgreSQL"
+  ]);
+});
+
+test("owned smoke cleanup does not terminate arbitrary PostgreSQL processes", async () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("./installer-smoke.mjs", import.meta.url)),
+    "utf8"
+  );
+  const start = source.indexOf("export async function cleanupExactOwnedSmokeProcesses");
+  const end = source.indexOf("export async function runInstallerSmokeFinalCleanup");
+  const helper = source.slice(start, end);
+  assert.match(helper, /endpointKnown/);
+  assert.doesNotMatch(helper, /taskkill|Stop-Process|postgres\.exe|pg_ctl|wmic|process\.kill/);
+  assert.equal(ownedPostgresPidFromStatus({ postgres: { ownership: "owned" } }), 0);
+  assert.equal(
+    ownedPostgresPidFromStatus({
+      services: [{ id: "postgres", ownership: "owned", pid: 4242 }]
+    }),
+    4242
+  );
+  assert.equal(
+    ownedPostgresPidFromStatus({
+      services: [{ id: "postgres", ownership: "none", pid: 4242 }]
+    }),
+    0
+  );
+  assert.deepEqual(collectExactOwnedSmokePids({ supervisorPid: 1, postgresPid: 2 }), [
+    { role: "Supervisor", pid: 1 },
+    { role: "PostgreSQL", pid: 2 }
+  ]);
+});
+
+test("owned smoke cleanup does not introduce unfenced pg_ctl", () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("./installer-smoke.mjs", import.meta.url)),
+    "utf8"
+  );
+  const start = source.indexOf("export function createOwnedSmokeProcessState");
+  const end = source.indexOf("function freePort()");
+  const helpers = source.slice(start, end);
+  assert.doesNotMatch(helpers, /taskkill|Stop-Process|postgres\.exe|pg_ctl/);
+  assert.doesNotMatch(source, /invokePostgresStop|defaultInvokePgCtlStop|distribution\.pgCtl/);
+  assert.match(helpers, /stopPrivatePostgresIfOwned/);
+  assert.match(source, /schemaReadyFromStatus\(statusValue\)/);
+  assert.match(source, /assertMem0FollowsMemorySearch/);
+});
+
+test("keepTemp preserves the smoke root and does not stop unrelated processes", async () => {
+  const { root } = cleanupFixture();
+  const events = [];
+  const result = await runInstallerSmokeFinalCleanup({
+    keepTemp: true,
+    root,
+    ownedProcessState: { supervisorPid: 11, mem0Pid: 22, postgresPid: 33 },
+    waitForPids: async () => {
+      events.push("wait");
+    },
+    removeTree: async () => {
+      events.push("remove");
+    },
+    logKeepTemp: (message) => events.push(message)
+  });
+  assert.deepEqual(result, { removed: false, waited: false });
+  assert.deepEqual(events, [`[installer-smoke] kept TEMP root: ${root}`]);
+  assert.equal(fs.existsSync(root), true);
+});
+
+test("cleanup secondary diagnostics redact secrets", () => {
+  const diagnostic = formatCleanupSecondaryDiagnostic(
+    Object.assign(
+      new Error(
+        "EPERM scandir DATABASE_URL=postgres://user:hunter2@127.0.0.1/yuvi YUVI_POSTGRES_PASSWORD=super-secret MEM0_PG_CONNECTION_STRING=postgres://mem0 Bearer smoke-control-token"
+      ),
+      { code: "EPERM" }
+    )
+  );
+  assert.equal(diagnostic.cleanupPhase, "temp-tree-remove");
+  assert.equal(diagnostic.code, "EPERM");
+  assert.doesNotMatch(
+    diagnostic.message,
+    /hunter2|super-secret|smoke-control-token|postgres:\/\/user/
+  );
+  assert.match(diagnostic.message, /\[redacted\]/);
+  const primary = new Error("schemaReady failed");
+  const preserved = preservePrimarySmokeError(
+    primary,
+    Object.assign(new Error("YUVI_POSTGRES_PASSWORD=super-secret"), { code: "EPERM" })
+  );
+  assert.equal(preserved, primary);
+  assert.doesNotMatch(JSON.stringify(preserved.cleanupSecondary), /super-secret/);
+});
+
+test("owned PostgreSQL PID is remembered only from exact Supervisor status", () => {
+  const state = createOwnedSmokeProcessState();
+  rememberOwnedSmokeProcess(state, {
+    supervisorPid: 9,
+    endpoint: { baseUrl: "http://127.0.0.1:1", controlToken: "tok" },
+    postgresPid: ownedPostgresPidFromStatus({
+      services: [{ id: "postgres", ownership: "owned", pid: 55 }]
+    })
+  });
+  assert.equal(state.supervisorPid, 9);
+  assert.equal(state.postgresPid, 55);
+  rememberOwnedSmokeProcess(state, {
+    postgresPid: ownedPostgresPidFromStatus({
+      services: [{ id: "postgres", ownership: "none", pid: 99 }]
+    })
+  });
+  assert.equal(state.postgresPid, 55);
+});
+
+test("PID exit timeout in final cleanup prevents TEMP removal", async () => {
+  const { root } = cleanupFixture();
+  let removed = false;
+  const probed = [];
+  await assert.rejects(
+    runInstallerSmokeFinalCleanup({
+      keepTemp: false,
+      root,
+      ownedProcessState: { supervisorPid: 101, postgresPid: 303 },
+      timeoutMs: 0,
+      waitForPids: async (entries, options) => {
+        await waitForSpecificPidsExit(entries, {
+          ...options,
+          pidProbe: (pid) => {
+            probed.push(pid);
+            return true;
+          },
+          sleep: async () => {}
+        });
+      },
+      removeTree: async () => {
+        removed = true;
+      }
+    }),
+    /PostgreSQL PID 303/
+  );
+  assert.deepEqual([...new Set(probed)], [101, 303]);
+  assert.equal(removed, false);
 });

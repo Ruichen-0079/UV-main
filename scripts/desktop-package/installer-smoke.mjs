@@ -1240,13 +1240,13 @@ export function formatOwnershipDiagnostic({
       : false;
   const metadataExeMatches = Boolean(
     metadata.executable &&
-      listener.processName &&
-      metadata.executable.toLowerCase() === listener.processName.toLowerCase()
+    listener.processName &&
+    metadata.executable.toLowerCase() === listener.processName.toLowerCase()
   );
   const metadataInstanceMatches = Boolean(
     metadata.instanceId &&
-      last?.supervisorInstanceId &&
-      metadata.instanceId === last.supervisorInstanceId
+    last?.supervisorInstanceId &&
+    metadata.instanceId === last.supervisorInstanceId
   );
   return [
     "MEM0 OWNERSHIP DIAGNOSTIC",
@@ -1560,8 +1560,8 @@ function formatTauriRuntimeOwnershipDiagnostic({
   const runtimeCommandLine = runtimePid > 0 ? processCommandLine(runtimePid) : "";
   const metadataExecutableMatch = Boolean(
     metadata.marker &&
-      runtimeCommandLine &&
-      runtimeCommandLine.toLowerCase().includes(String(metadata.marker).toLowerCase())
+    runtimeCommandLine &&
+    runtimeCommandLine.toLowerCase().includes(String(metadata.marker).toLowerCase())
   );
   const metadataInstanceMatch = Boolean(
     metadata.instanceId && endpoint?.instanceId && metadata.instanceId === endpoint.instanceId
@@ -1721,6 +1721,228 @@ export async function removeTreeWithRetries(
     }
   }
   return resolved;
+}
+
+export function createOwnedSmokeProcessState() {
+  return {
+    supervisorPid: 0,
+    mem0Pid: 0,
+    postgresPid: 0,
+    endpoint: null
+  };
+}
+
+export function rememberOwnedSmokeProcess(state, patch = {}) {
+  if (!state) return state;
+  if (Number(patch.supervisorPid) > 0) state.supervisorPid = Number(patch.supervisorPid);
+  if (Number(patch.mem0Pid) > 0) state.mem0Pid = Number(patch.mem0Pid);
+  if (Number(patch.postgresPid) > 0) state.postgresPid = Number(patch.postgresPid);
+  if (patch.endpoint) state.endpoint = patch.endpoint;
+  return state;
+}
+
+/** Exact owned PostgreSQL PID from Supervisor status. Never inferred by process name. */
+export function ownedPostgresPidFromStatus(status) {
+  const services = Array.isArray(status?.services) ? status.services : [];
+  const postgres = services.find((service) => service?.id === "postgres");
+  if (postgres?.ownership !== "owned") return 0;
+  const pid = Number(postgres.pid);
+  return Number.isInteger(pid) && pid > 0 ? pid : 0;
+}
+
+export function collectExactOwnedSmokePids({
+  supervisorPid = 0,
+  mem0Pid = 0,
+  postgresPid = 0
+} = {}) {
+  return [
+    { role: "Supervisor", pid: supervisorPid },
+    { role: "Mem0", pid: mem0Pid },
+    { role: "PostgreSQL", pid: postgresPid }
+  ].filter((entry) => Number.isInteger(Number(entry.pid)) && Number(entry.pid) > 0);
+}
+
+function redactCleanupDiagnosticText(text) {
+  let out = redactInstallerSmokeSecretText(text);
+  out = out.replace(/Bearer\s+\S+/gi, "Bearer [redacted]");
+  out = out.replace(
+    /\b(YUVI_POSTGRES_PASSWORD|DATABASE_URL|MEM0_PG_CONNECTION_STRING|YUVI_INSTALLER_SMOKE_CRED_SECRET)\b\s*[=:]\s*\S+/gi,
+    "$1=[redacted]"
+  );
+  out = out.replace(/postgres(?:ql)?:\/\/\S+/gi, "postgres://[redacted]");
+  return out.slice(0, 240);
+}
+
+export function formatCleanupSecondaryDiagnostic(error, { phase = null } = {}) {
+  const code = error?.code ? String(error.code).slice(0, 32) : null;
+  const rawMessage = error instanceof Error ? error.message : String(error ?? "cleanup failed");
+  const message = redactCleanupDiagnosticText(rawMessage);
+  const inferred =
+    phase ||
+    (code && ["EPERM", "EBUSY", "ENOTEMPTY"].includes(code)
+      ? "temp-tree-remove"
+      : /PostgreSQL PID/i.test(rawMessage)
+        ? "postgres-exit-wait"
+        : /exit timeout/i.test(rawMessage)
+          ? "owned-pid-exit-wait"
+          : /shutdown/i.test(rawMessage)
+            ? "supervisor-shutdown"
+            : "cleanup");
+  return {
+    cleanupPhase: String(inferred).slice(0, 40),
+    code,
+    message
+  };
+}
+
+export function preservePrimarySmokeError(primaryError, cleanupError) {
+  if (!cleanupError) return primaryError;
+  const secondary = formatCleanupSecondaryDiagnostic(cleanupError);
+  if (!primaryError) {
+    if (cleanupError instanceof Error) cleanupError.cleanupSecondary = secondary;
+    return cleanupError;
+  }
+  if (primaryError instanceof Error) {
+    primaryError.cleanupSecondary = secondary;
+    return primaryError;
+  }
+  const wrapped = new Error(String(primaryError));
+  wrapped.cleanupSecondary = secondary;
+  return wrapped;
+}
+
+export async function runCleanupPreservingPrimaryError(primaryError, cleanup) {
+  try {
+    await cleanup();
+  } catch (cleanupError) {
+    throw preservePrimarySmokeError(primaryError, cleanupError);
+  }
+  if (primaryError) throw primaryError;
+}
+
+export async function requestExactSupervisorShutdown({
+  baseUrl,
+  controlToken,
+  request = requestJson,
+  label = "supervisor.shutdown",
+  diagnostics = null
+} = {}) {
+  const base = String(baseUrl ?? "");
+  if (!base || !controlToken) return { attempted: false, reason: "endpoint-unknown" };
+  const shutdown = await request(`${base}/v1/shutdown`, {
+    method: "POST",
+    token: controlToken,
+    body: null,
+    label,
+    diagnostics
+  });
+  if (shutdown.status < 200 || shutdown.status >= 300)
+    fail(`Supervisor shutdown failed (${shutdown.status})`);
+  return { attempted: true, status: shutdown.status };
+}
+
+/**
+ * Exact-ownership process cleanup. TEMP-root removal is authorized only after:
+ * 1. POST /v1/shutdown was requested for the exact smoke endpoint when known.
+ *    The Supervisor HTTP handler awaits shutdown(), which stops owned private
+ *    PostgreSQL via D1 stopPrivatePostgresIfOwned before returning 200.
+ * 2. Every previously observed exact owned PID has exited. Unknown PIDs are
+ *    not inferred from process names, ports, or cluster-stop binaries.
+ */
+export async function cleanupExactOwnedSmokeProcesses({
+  endpoint = null,
+  supervisorPid = 0,
+  mem0Pid = 0,
+  postgresPid = 0,
+  timeoutMs = 10_000,
+  requestShutdown = requestExactSupervisorShutdown,
+  waitForPids = waitForSpecificPidsExit,
+  stopExactSupervisorChild = null,
+  supervisorStillAlive = null,
+  request,
+  diagnostics,
+  pidProbe,
+  sleep,
+  now
+} = {}) {
+  const endpointKnown = Boolean(endpoint?.baseUrl && endpoint?.controlToken);
+  let shutdownError = null;
+  if (endpointKnown) {
+    try {
+      await requestShutdown({
+        baseUrl: endpoint.baseUrl,
+        controlToken: endpoint.controlToken,
+        request,
+        diagnostics,
+        label: "supervisor.shutdown"
+      });
+    } catch (error) {
+      shutdownError = error;
+    }
+  } else if (typeof stopExactSupervisorChild === "function") {
+    try {
+      stopExactSupervisorChild();
+    } catch {
+      /* exact spawned Supervisor child only */
+    }
+  }
+
+  const pids = collectExactOwnedSmokePids({ supervisorPid, mem0Pid, postgresPid });
+  try {
+    if (pids.length) await waitForPids(pids, { timeoutMs, pidProbe, sleep, now });
+  } catch (exitError) {
+    if (
+      endpointKnown &&
+      typeof stopExactSupervisorChild === "function" &&
+      Number(supervisorPid) > 0 &&
+      (typeof supervisorStillAlive !== "function" || supervisorStillAlive(supervisorPid))
+    ) {
+      try {
+        stopExactSupervisorChild();
+      } catch {
+        /* exact spawned Supervisor child only */
+      }
+      await waitForPids([{ role: "Supervisor", pid: supervisorPid }], {
+        timeoutMs,
+        pidProbe,
+        sleep,
+        now
+      }).catch(() => {
+        /* retain the original owned-PID timeout */
+      });
+    }
+    throw shutdownError ?? exitError;
+  }
+  if (shutdownError) throw shutdownError;
+}
+
+export async function runInstallerSmokeFinalCleanup({
+  keepTemp = false,
+  root,
+  ownedProcessState = {},
+  timeoutMs = 10_000,
+  waitForPids = waitForSpecificPidsExit,
+  removeTree = removeTreeWithRetries,
+  logKeepTemp = (message) => console.info(message),
+  pidProbe,
+  sleep,
+  now
+} = {}) {
+  if (keepTemp) {
+    logKeepTemp(`[installer-smoke] kept TEMP root: ${root}`);
+    return { removed: false, waited: false };
+  }
+  const pids = collectExactOwnedSmokePids(ownedProcessState);
+  if (pids.length) await waitForPids(pids, { timeoutMs, pidProbe, sleep, now });
+  assertCleanupTarget(root);
+  await removeTree(root, {
+    smokeOwnedRoot: root,
+    deadlineMs: timeoutMs,
+    phase: "temp-tree-remove",
+    sleep,
+    now
+  });
+  return { removed: true, waited: pids.length > 0 };
 }
 
 function freePort() {
@@ -3024,7 +3246,8 @@ async function runPackagedSupervisor({
   layout,
   timeoutMs,
   listenerAttribution = attributeWindowsListener,
-  diagnosticsNow = Date.now
+  diagnosticsNow = Date.now,
+  ownedProcessState = null
 }) {
   const { mem0Port, supervisorPort } = await allocateDistinctPorts();
   const ports = createDiagnosticPortRoles({
@@ -3149,11 +3372,13 @@ async function runPackagedSupervisor({
     stdio: ["ignore", "pipe", "pipe"]
   });
   diagnostics.setSupervisorPid(child.pid);
+  rememberOwnedSmokeProcess(ownedProcessState, { supervisorPid: child.pid });
   await safeSample("T2-supervisor-spawn-returned", { pid: 0 });
   let stdout = "";
   let stderr = "";
   let endpoint = null;
   let ownedMem0Pid = 0;
+  let ownedPostgresPid = 0;
   let runtimeState = null;
   child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
   child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
@@ -3164,6 +3389,7 @@ async function runPackagedSupervisor({
       stateRoot,
       timeoutMs
     );
+    rememberOwnedSmokeProcess(ownedProcessState, { endpoint });
     const runningExecutablePath = processExecutablePath(child.pid);
     if (
       process.platform === "win32" &&
@@ -3221,6 +3447,11 @@ async function runPackagedSupervisor({
       statusValue = status.value ?? null;
       mem0 = statusValue?.services?.find((service) => service.id === "mem0") ?? null;
       runtimeState = statusValue?.services?.find((service) => service.id === "runtime") ?? null;
+      ownedPostgresPid = ownedPostgresPidFromStatus(statusValue) || ownedPostgresPid;
+      rememberOwnedSmokeProcess(ownedProcessState, {
+        mem0Pid: Number(mem0?.pid) || 0,
+        postgresPid: ownedPostgresPid
+      });
       await safeObserveStatus("status-change", mem0);
       if (schemaReadyFromStatus(statusValue)) break;
       await wait(300);
@@ -3247,6 +3478,7 @@ async function runPackagedSupervisor({
       if (mem0Health.status !== 200 || !mem0Health.value?.ok)
         fail(`Mem0 health failed (${mem0Health.status})`);
       ownedMem0Pid = Number(mem0.pid);
+      rememberOwnedSmokeProcess(ownedProcessState, { mem0Pid: ownedMem0Pid });
       const mem0Listener = attributeWindowsListener(mem0Port, {
         installRoot: resource.root,
         supervisorPid: child.pid,
@@ -3260,8 +3492,8 @@ async function runPackagedSupervisor({
         : readOwnershipMetadataDiagnostic(null);
       const mem0MetadataInstanceMatch = Boolean(
         mem0Metadata.instanceId &&
-          endpoint.instanceId &&
-          mem0Metadata.instanceId === endpoint.instanceId
+        endpoint.instanceId &&
+        mem0Metadata.instanceId === endpoint.instanceId
       );
       if (!mem0MetadataInstanceMatch || Number(mem0Metadata.pid) !== ownedMem0Pid)
         fail("Mem0 ownership metadata does not match the current instance");
@@ -3320,15 +3552,19 @@ async function runPackagedSupervisor({
         note: "Direct precheck sets YUVI_AUTOSTART_RUNTIME=false"
       })
     );
-    const shutdown = await requestJson(`${base}/v1/shutdown`, {
-      method: "POST",
-      token: endpoint.controlToken,
-      body: null
+    await requestExactSupervisorShutdown({
+      baseUrl: base,
+      controlToken: endpoint.controlToken
     });
-    if (shutdown.status < 200 || shutdown.status >= 300)
-      fail(`Supervisor shutdown failed (${shutdown.status})`);
     const mem0Pid = ownedMem0Pid;
-    await waitForSpecificPidsExit([{ role: "Mem0", pid: mem0Pid }], { timeoutMs });
+    await waitForSpecificPidsExit(
+      collectExactOwnedSmokePids({
+        supervisorPid: 0,
+        mem0Pid,
+        postgresPid: ownedPostgresPid
+      }),
+      { timeoutMs }
+    );
     try {
       await waitForSpecificPidsExit([{ role: "Supervisor", pid: child.pid }], {
         timeoutMs: Math.min(timeoutMs, 5_000)
@@ -3355,6 +3591,7 @@ async function runPackagedSupervisor({
       endpoint,
       mem0,
       mem0Pid,
+      postgresPid: ownedPostgresPid,
       commandLine,
       supervisorPid: child.pid,
       useExe,
@@ -3373,37 +3610,23 @@ async function runPackagedSupervisor({
       status: null,
       pid: 0
     });
-    if (endpoint?.baseUrl && endpoint?.controlToken) {
-      try {
-        await requestJson(`${endpoint.baseUrl}/v1/shutdown`, {
-          method: "POST",
-          token: endpoint.controlToken,
-          body: null,
-          label: "supervisor.shutdown",
-          diagnostics: requestDiagnostics
-        });
-      } catch {
-        /* best-effort graceful shutdown of this exact smoke instance */
-      }
-    }
+    let cleanupError = null;
     try {
-      child.kill();
-    } catch {
-      /* exact spawned child only */
+      await cleanupExactOwnedSmokeProcesses({
+        endpoint,
+        supervisorPid: child.pid,
+        mem0Pid: ownedMem0Pid,
+        postgresPid: ownedPostgresPid,
+        timeoutMs: Math.min(timeoutMs, 5_000),
+        request: requestJson,
+        diagnostics: requestDiagnostics,
+        stopExactSupervisorChild: () => child.kill(),
+        supervisorStillAlive: (pid) => pidAlive(pid)
+      });
+    } catch (err) {
+      cleanupError = err;
     }
-    try {
-      await waitForSpecificPidsExit(
-        [
-          { role: "Supervisor", pid: child.pid },
-          { role: "Mem0", pid: ownedMem0Pid }
-        ],
-        { timeoutMs: Math.min(timeoutMs, 5_000) }
-      );
-    } catch (exitError) {
-      error = new Error(
-        `${error instanceof Error ? error.message : String(error)}\n${exitError.message}`
-      );
-    }
+    error = preservePrimarySmokeError(error, cleanupError);
     logExit();
     const message = error instanceof Error ? error.message : String(error);
     let diagnosticBlock = "";
@@ -3419,9 +3642,11 @@ async function runPackagedSupervisor({
       }
     }
     const requestDiagnostic = requestDiagnostics.format();
-    throw new Error(
+    const wrapped = new Error(
       `${message}${diagnosticBlock}${requestDiagnostic ? `\nDIRECT HTTP REQUEST DIAGNOSTIC\n${requestDiagnostic}` : ""}\n${stdout}\n${stderr}`
     );
+    if (error?.cleanupSecondary) wrapped.cleanupSecondary = error.cleanupSecondary;
+    throw wrapped;
   }
 }
 
@@ -3772,8 +3997,8 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
       });
       const mem0MetadataInstanceMatch = Boolean(
         mem0Metadata.instanceId &&
-          endpoint.instanceId &&
-          mem0Metadata.instanceId === endpoint.instanceId
+        endpoint.instanceId &&
+        mem0Metadata.instanceId === endpoint.instanceId
       );
       console.info(
         formatMem0ProvenanceDiagnostic({
@@ -4036,7 +4261,10 @@ export async function runInstallerSmoke(options = parseArgs()) {
   };
   const logBase = `installer=${selection.selected.name}\nsize=${selection.selected.size}\nmtime=${selection.selected.mtimeMs}\n`;
   writeLog(layout.logs, "installer-selection.log", logBase);
+  const ownedProcessState = createOwnedSmokeProcessState();
+  let primaryError = null;
   let result;
+  let summary = null;
   try {
     const install = await runProcess(
       selection.selected.path,
@@ -4054,12 +4282,18 @@ export async function runInstallerSmoke(options = parseArgs()) {
     const resourceRoot = locateResourceRoot(layout.install);
     const resource = { root: resourceRoot, ...validateInstalledResources(resourceRoot) };
     const before = snapshotTree(resourceRoot);
-    result = await runPackagedSupervisor({ resource, layout, timeoutMs: options.timeoutMs });
+    result = await runPackagedSupervisor({
+      resource,
+      layout,
+      timeoutMs: options.timeoutMs,
+      ownedProcessState
+    });
     await waitForSpecificPidsExit(
-      [
-        { role: "Supervisor", pid: result.supervisorPid },
-        { role: "Mem0", pid: result.mem0Pid }
-      ],
+      collectExactOwnedSmokePids({
+        supervisorPid: result.supervisorPid,
+        mem0Pid: result.mem0Pid,
+        postgresPid: result.postgresPid
+      }),
       { timeoutMs: options.timeoutMs }
     );
     const after = snapshotTree(resourceRoot);
@@ -4108,7 +4342,7 @@ export async function runInstallerSmoke(options = parseArgs()) {
       }) !== JSON.stringify(afterExisting)
     )
       fail("an existing install, user state, or repository artifact changed");
-    const summary = {
+    summary = {
       installer: selection.selected,
       resourceRoot,
       installRoot: root,
@@ -4131,17 +4365,18 @@ export async function runInstallerSmoke(options = parseArgs()) {
     console.info(
       `[installer-smoke] passed: schemaReady=true mem0Pid=${result.mem0Pid || 0}, files=${summary.mem0Files}, bytes=${summary.mem0Bytes}`
     );
-    return summary;
-  } finally {
-    if (options.keepTemp) console.info(`[installer-smoke] kept TEMP root: ${root}`);
-    else {
-      assertCleanupTarget(root);
-      await removeTreeWithRetries(root, {
-        smokeOwnedRoot: root,
-        deadlineMs: Math.min(options.timeoutMs, 10_000)
-      });
-    }
+  } catch (error) {
+    primaryError = error;
   }
+  await runCleanupPreservingPrimaryError(primaryError, async () => {
+    await runInstallerSmokeFinalCleanup({
+      keepTemp: options.keepTemp,
+      root,
+      ownedProcessState,
+      timeoutMs: Math.min(options.timeoutMs, 10_000)
+    });
+  });
+  return summary;
 }
 
 if (
@@ -4152,6 +4387,12 @@ if (
     console.error(
       `[installer-smoke] failed: ${error instanceof Error ? error.message : String(error)}`
     );
+    if (error?.cleanupSecondary) {
+      const secondary = error.cleanupSecondary;
+      console.error(
+        `[installer-smoke] cleanup-secondary: cleanupPhase=${secondary.cleanupPhase} code=${secondary.code ?? "none"} message=${secondary.message}`
+      );
+    }
     process.exitCode = 1;
   });
 }
