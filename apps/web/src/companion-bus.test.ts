@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CompanionBus } from "./companion-bus.js";
+import { CompanionBus, isCompanionBusMessage } from "./companion-bus.js";
 
 describe("CompanionBus", () => {
   it("relays main -> companion messages across bus instances", async () => {
@@ -34,6 +34,23 @@ describe("CompanionBus", () => {
       companion.post({ kind: "speech-status", requestId: "r1", state: "playing" });
       companion.post({ kind: "speech-status", requestId: "r1", state: "idle" });
       await vi.waitFor(() => expect(received).toEqual(["playing", "idle"]));
+    } finally {
+      main.close();
+      companion.close();
+    }
+  });
+
+  it("relays correlated browser playback status messages", async () => {
+    const main = new CompanionBus("main");
+    const companion = new CompanionBus("companion");
+    try {
+      const received: string[] = [];
+      main.subscribe((message) => {
+        if (message.kind === "playback-status") received.push(message.state);
+      });
+      companion.post({ kind: "playback-status", requestId: "r1", state: "started" });
+      companion.post({ kind: "playback-status", requestId: "r1", state: "ended" });
+      await vi.waitFor(() => expect(received).toEqual(["started", "ended"]));
     } finally {
       main.close();
       companion.close();
@@ -112,5 +129,39 @@ describe("CompanionBus", () => {
       main.close();
       companion.close();
     }
+  });
+
+  it("validates correlated message payloads before delivery", () => {
+    expect(
+      isCompanionBusMessage({ kind: "start-generation", requestId: "r1", sessionId: "default" })
+    ).toBe(true);
+    expect(
+      isCompanionBusMessage({
+        kind: "speak",
+        requestId: "r1",
+        sequence: 0,
+        text: "x",
+        language: "en"
+      })
+    ).toBe(true);
+    expect(
+      isCompanionBusMessage({
+        kind: "speak",
+        requestId: "r1",
+        sequence: -1,
+        text: "x",
+        language: "en"
+      })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({ kind: "generation-state", requestId: "r1", state: "unknown" })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({ kind: "playback-status", requestId: "r1", state: "started" })
+    ).toBe(true);
+    expect(
+      isCompanionBusMessage({ kind: "playback-status", requestId: "r1", state: "playing" })
+    ).toBe(false);
+    expect(isCompanionBusMessage({ kind: "user-gesture", extra: true })).toBe(false);
   });
 });

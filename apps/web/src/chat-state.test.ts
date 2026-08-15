@@ -116,6 +116,24 @@ describe("chat message state", () => {
     ).toEqual(messages);
   });
 
+  it("rejects late text deltas after cancellation", () => {
+    const current = turn();
+    let messages = reduceChatMessages([], { type: "append-turn", ...current });
+    messages = reduceChatMessages(messages, {
+      type: "cancel",
+      assistantId: current.assistant.id,
+      error: "生成已取消"
+    });
+    expect(
+      reduceChatMessages(messages, {
+        type: "append-delta",
+        assistantId: current.assistant.id,
+        text: "迟到的内容",
+        traceId: "late-trace"
+      })
+    ).toEqual(messages);
+  });
+
   it("does not let an old request update the current assistant", () => {
     const oldTurn = turn("old");
     const newTurn = turn("new");
