@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryMaintenanceService } from "@companion/memory";
+import { MemoryIngestionCoordinator, MemoryMaintenanceService } from "@companion/memory";
 import { loadServerConfig } from "./config.js";
 import { buildServer } from "./server.js";
 import { mkdtempSync } from "node:fs";
@@ -29,6 +29,16 @@ describe("server", () => {
       const health = await app.inject({ method: "GET", url: "/health" });
       expect(health.statusCode).toBe(200);
       expect(health.json().ok).toBe(true);
+      expect(health.json().memoryIngestion).toMatchObject({
+        status: "running",
+        diagnosticsAvailability: "ok",
+        diagnosticsErrorCode: null,
+        diagnosticsError: null,
+        pendingCount: 0,
+        processingCount: 0,
+        reconcileRequiredCount: 0,
+        activeWorkerCount: 0
+      });
       expect(health.body).not.toContain("test_deepseek_secret");
 
       const message = await app.inject({
@@ -675,6 +685,127 @@ describe("server", () => {
       );
       expect(dashboardMessage.kind).toBe("dashboard.connected");
       expect(dashboardMessage.traceId).toBeTypeOf("string");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps /health available when memory-ingestion diagnostics throw", async () => {
+    const app = await buildTestServer();
+    try {
+      vi.spyOn(MemoryIngestionCoordinator.prototype, "getDiagnostics").mockRejectedValue(
+        new Error("DATABASE_URL=postgres://secret stats query failed")
+      );
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.statusCode).toBe(200);
+      const body = health.json();
+      expect(body.ok).toBe(true);
+      expect(body.database.status).toBe("healthy");
+      expect(body.providers.chat.available).toBe(true);
+      expect(body.memoryIngestion).toMatchObject({
+        diagnosticsAvailability: "error",
+        diagnosticsErrorCode: "MEMORY_INGESTION_DIAGNOSTICS_UNAVAILABLE",
+        pendingCount: null,
+        processingCount: null,
+        retryableFailedCount: null,
+        dueRetryCount: null,
+        reconcileRequiredCount: null,
+        terminalFailedCount: null,
+        staleLeaseCount: null,
+        historicalUnknownCount: null,
+        activeWorkerCount: null
+      });
+      expect(body.memoryIngestion.diagnosticsError).toContain("stats query failed");
+      expect(health.body).not.toContain("postgres://secret");
+      expect(body.memoryIngestion.pendingCount).not.toBe(0);
+      expect(body.memoryIngestion.processingCount).not.toBe(0);
+      expect(body.memoryIngestion.reconcileRequiredCount).not.toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not mark the server unavailable merely because an ingestion backlog exists", async () => {
+    const app = await buildTestServer();
+    try {
+      vi.spyOn(MemoryIngestionCoordinator.prototype, "getDiagnostics").mockResolvedValue({
+        pendingCount: 4,
+        processingCount: 1,
+        retryableFailedCount: 0,
+        dueRetryCount: 0,
+        reconcileRequiredCount: 2,
+        completeCount: 0,
+        unchangedCount: 0,
+        skippedCount: 0,
+        terminalFailedCount: 0,
+        partialParentCount: 1,
+        staleLeaseCount: 0,
+        historicalUnknownCount: 0,
+        diagnosticsAvailability: "ok",
+        diagnosticsErrorCode: null,
+        diagnosticsError: null,
+        activeWorkerCount: 1,
+        lastScanAt: "2026-08-15T00:00:00.000Z",
+        lastSuccessfulExecutionAt: null,
+        lastError: null,
+        status: "running",
+        ownerId: "test-coordinator"
+      });
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.statusCode).toBe(200);
+      expect(health.json().ok).toBe(true);
+      expect(health.json().memoryIngestion).toMatchObject({
+        diagnosticsAvailability: "ok",
+        pendingCount: 4,
+        reconcileRequiredCount: 2,
+        partialCount: 1,
+        status: "running"
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("reports a stopped coordinator without failing /health", async () => {
+    const app = await buildTestServer({ MEMORY_INGESTION_COORDINATOR_ENABLED: "false" });
+    try {
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.statusCode).toBe(200);
+      expect(health.json().ok).toBe(true);
+      expect(health.json().memoryIngestion).toMatchObject({
+        status: "idle",
+        diagnosticsAvailability: "ok",
+        pendingCount: 0,
+        activeWorkerCount: 0
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps unrelated runtime settings when ingestion diagnostics throw", async () => {
+    const app = await buildTestServer();
+    try {
+      vi.spyOn(MemoryIngestionCoordinator.prototype, "getDiagnostics").mockRejectedValue(
+        new Error("work stats unavailable")
+      );
+      const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
+      expect(settings.statusCode).toBe(200);
+      expect(settings.json().memory).toMatchObject({
+        memoryExtractor: "llm",
+        memoryExtractorDefault: "llm",
+        ingestionCoordinator: {
+          diagnosticsAvailability: "error",
+          diagnosticsErrorCode: "MEMORY_INGESTION_DIAGNOSTICS_UNAVAILABLE",
+          pendingCount: null,
+          processingCount: null,
+          reconcileRequiredCount: null
+        }
+      });
+      expect(settings.json().memory.ingestionCoordinator.diagnosticsError).toContain(
+        "work stats unavailable"
+      );
+      expect(settings.json().providers.deepseek).toBeTruthy();
     } finally {
       await app.close();
     }
@@ -1640,6 +1771,11 @@ describe("server", () => {
   });
 
   it("parses optional memory extractor mode", () => {
+    expect(loadServerConfig({}).memoryIngestion).toMatchObject({
+      enabled: true,
+      pollIntervalMs: 15_000,
+      concurrency: 4
+    });
     expect(loadServerConfig({}).memoryExtractor).toBe("llm");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe("rule-based");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractor).toBe("llm");

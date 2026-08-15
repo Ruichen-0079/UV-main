@@ -233,12 +233,27 @@ export {
   type FinalizedIngestionRepositoryKind,
   type FinalizedIngestionTurn,
   type FinalizedIngestionTurnStatus,
+  type FinalizedIngestionWorkStats,
   type MissingFinalizedConversationTurn
 } from "./finalized-ingestion-ledger.js";
 export {
   executeFinalizedIngestionEvent,
   type FinalizedIngestionDeliveryResult
 } from "./finalized-ingestion-executor.js";
+export {
+  DEFAULT_MEMORY_INGESTION_RETRY_POLICY,
+  MEMORY_INGESTION_DIAGNOSTICS_UNAVAILABLE,
+  MemoryIngestionCoordinator,
+  type MemoryIngestionCoordinatorDiagnostics,
+  type MemoryIngestionCoordinatorLogger,
+  type MemoryIngestionCoordinatorOptions,
+  type MemoryIngestionCoordinatorPort,
+  type MemoryIngestionCoordinatorRepository,
+  type MemoryIngestionCoordinatorStatus,
+  type MemoryIngestionDiagnosticsAvailability,
+  type MemoryIngestionFaultHooks,
+  type MemoryIngestionRetryPolicy
+} from "./memory-ingestion-coordinator.js";
 export {
   MissingDatabaseUrlError,
   parseDotEnv,

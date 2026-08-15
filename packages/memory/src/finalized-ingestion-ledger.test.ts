@@ -823,3 +823,142 @@ describe("Finalized ingestion ledger foundation", () => {
     }
   );
 });
+
+describe("Finalized ingestion child work discovery", () => {
+  it("selects pending, due retryable, expired processing, and unleased reconcile children", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const service = new FinalizedIngestionService(repository, {
+      async build() {
+        return {
+          turnKind: "normal" as const,
+          events: ["pending", "due", "later", "leased", "expired", "reconcile", "done"].map(
+            (label) => ({
+              kind: "fact" as const,
+              content: `fact ${label}`,
+              scope: "user:user-a:persona:alice",
+              metadata: {}
+            })
+          )
+        };
+      }
+    });
+    const admitted = await service.admit({
+      ...base,
+      finalizedTurnId: "finalized-turn:discovery",
+      ingestionRequested: true
+    });
+    const byLabel = Object.fromEntries(
+      admitted.events.map((event) => [String(event.eventPayload.content).slice(5), event])
+    );
+    await recordOutcome(repository, byLabel["due"]!, {
+      status: "retryable_failed",
+      nextAttemptAt: "2026-08-12T00:00:00.000Z"
+    });
+    await recordOutcome(repository, byLabel["later"]!, {
+      status: "retryable_failed",
+      nextAttemptAt: "2099-01-01T00:00:00.000Z"
+    });
+    await repository.claimEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: byLabel["leased"]!.eventId,
+      leaseOwner: "owner-live",
+      leaseSeconds: 300,
+      expectedVersion: byLabel["leased"]!.version
+    });
+    const expiredClaim = await repository.claimEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: byLabel["expired"]!.eventId,
+      leaseOwner: "owner-stale",
+      leaseSeconds: 1,
+      expectedVersion: byLabel["expired"]!.version
+    });
+    expect(expiredClaim).not.toBeNull();
+    await recordOutcome(repository, byLabel["reconcile"]!, {
+      status: "ambiguous",
+      errorCode: "MEMORY_WRITE_AMBIGUOUS"
+    });
+    await recordOutcome(repository, byLabel["done"]!, {
+      status: "written",
+      eventId: "memory:done"
+    });
+
+    const due = await repository.listDueWork({
+      now: new Date(Date.now() + 5_000).toISOString(),
+      limit: 20
+    });
+    const dueIds = new Set(due.map((event) => event.eventId));
+    expect(dueIds.has(byLabel["pending"]!.eventId)).toBe(true);
+    expect(dueIds.has(byLabel["due"]!.eventId)).toBe(true);
+    expect(dueIds.has(byLabel["later"]!.eventId)).toBe(false);
+    expect(dueIds.has(byLabel["leased"]!.eventId)).toBe(false);
+    expect(dueIds.has(byLabel["expired"]!.eventId)).toBe(true);
+    expect(dueIds.has(byLabel["reconcile"]!.eventId)).toBe(true);
+    expect(dueIds.has(byLabel["done"]!.eventId)).toBe(false);
+  });
+
+  it("records exact reconcile outcomes without incrementing delivery attempts", async () => {
+    const repository = new InMemoryFinalizedIngestionRepository();
+    const admitted = await new FinalizedIngestionService(repository).admit({
+      ...base,
+      finalizedTurnId: "finalized-turn:reconcile-record",
+      ingestionRequested: true
+    });
+    const event = admitted.events[0]!;
+    await recordOutcome(repository, event, {
+      status: "ambiguous",
+      errorCode: "MEMORY_WRITE_AMBIGUOUS"
+    });
+    const ambiguous = (await repository.listEvents(admitted.turn.finalizedTurnId))[0]!;
+    expect(ambiguous.attemptCount).toBe(1);
+    const claimed = await repository.claimReconcileEvent({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "reconciler-a",
+      leaseSeconds: 30,
+      expectedVersion: ambiguous.version
+    });
+    expect(claimed?.attemptCount).toBe(1);
+    const recorded = await repository.recordReconcileOutcome({
+      finalizedTurnId: admitted.turn.finalizedTurnId,
+      eventId: event.eventId,
+      leaseOwner: "reconciler-a",
+      expectedVersion: claimed!.version,
+      result: { status: "applied", eventId: "memory:applied", operation: "created" }
+    });
+    expect(recorded).toMatchObject({
+      status: "complete",
+      resultKind: "written",
+      attemptCount: 1,
+      leaseOwner: null
+    });
+  });
+});
+
+async function recordOutcome(
+  repository: InMemoryFinalizedIngestionRepository,
+  event: { finalizedTurnId: string; eventId: string; version: number },
+  outcome: Parameters<InMemoryFinalizedIngestionRepository["recordEventOutcome"]>[0]["outcome"]
+): Promise<void> {
+  const claimed = await repository.claimEvent({
+    finalizedTurnId: event.finalizedTurnId,
+    eventId: event.eventId,
+    leaseOwner: "fixture",
+    leaseSeconds: 30,
+    expectedVersion: event.version
+  });
+  if (!claimed) throw new Error(`Could not claim ${event.eventId}.`);
+  const dispatching = await repository.markEventDispatchStarted({
+    finalizedTurnId: event.finalizedTurnId,
+    eventId: event.eventId,
+    leaseOwner: "fixture",
+    expectedVersion: claimed.version
+  });
+  if (!dispatching) throw new Error(`Could not mark ${event.eventId}.`);
+  await repository.recordEventOutcome({
+    finalizedTurnId: event.finalizedTurnId,
+    eventId: event.eventId,
+    leaseOwner: "fixture",
+    expectedVersion: dispatching.version,
+    outcome
+  });
+}

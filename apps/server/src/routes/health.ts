@@ -1,6 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
+import {
+  readMemoryIngestionDiagnostics,
+  toMemoryIngestionHealthSnapshot
+} from "../memory-ingestion-diagnostics.js";
 
 const startedAt = Date.now();
 
@@ -15,6 +19,9 @@ export async function registerHealthRoutes(
     const chat = providerStatus.providers.chat;
 
     const ok = database.status === "healthy" && chat.available === true;
+    const memoryIngestion = toMemoryIngestionHealthSnapshot(
+      await readMemoryIngestionDiagnostics(context.memoryIngestionCoordinator)
+    );
 
     return {
       ok,
@@ -26,6 +33,7 @@ export async function registerHealthRoutes(
       },
       server: { status: "healthy" },
       database,
+      memoryIngestion,
       providers: {
         chat,
         optional: {
