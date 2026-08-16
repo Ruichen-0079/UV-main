@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,8 +37,13 @@ type SpawnSyncOverride = (
   stderr: string;
 };
 
+type SpawnSyncOverrideRegistration = {
+  command: string;
+  run: SpawnSyncOverride;
+};
+
 const childProcessState = vi.hoisted(() => ({
-  override: null as SpawnSyncOverride | null
+  override: null as SpawnSyncOverrideRegistration | null
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -45,8 +51,9 @@ vi.mock("node:child_process", async (importOriginal) => {
   return {
     ...actual,
     spawnSync: ((command: string, args?: readonly string[], options?: Record<string, unknown>) => {
-      if (childProcessState.override) {
-        return childProcessState.override(command, args, options);
+      const override = childProcessState.override;
+      if (override && command === override.command) {
+        return override.run(command, args, options);
       }
       return actual.spawnSync(command, args as string[] | undefined, options);
     }) as typeof actual.spawnSync
@@ -213,6 +220,44 @@ describe("initdb failure evidence", () => {
     expect(call.options?.["windowsHide"]).toBe(true);
   }
 
+  function syntheticInitdbCommand(): string {
+    return path.join(os.tmpdir(), "yuvi-test-initdb", `initdb-${randomUUID()}`);
+  }
+
+  function registerExactInitdbOverride(
+    initdb: string,
+    result: {
+      error?: Error | undefined;
+      status: number | null;
+      signal: NodeJS.Signals | string | null;
+      stdout: string;
+      stderr: string;
+    }
+  ) {
+    const invocations: Array<{
+      command: string;
+      args: readonly string[];
+      options: Record<string, unknown> | undefined;
+    }> = [];
+    childProcessState.override = {
+      command: initdb,
+      run(command, args = [], options) {
+        expect(command).toBe(initdb);
+        expect(command).not.toBe("icacls");
+        invocations.push({ command, args, options });
+        return result;
+      }
+    };
+    return {
+      invocations,
+      expectInterceptedOnce() {
+        expect(invocations).toHaveLength(1);
+        expect(invocations[0]?.command).toBe(initdb);
+        expect(invocations.some((call) => call.command === "icacls")).toBe(false);
+      }
+    };
+  }
+
   it("classifies spawn failure, nonzero exit, signal, timeout, and success separately", () => {
     expect(
       classifyInitdbSpawnResult({
@@ -263,27 +308,17 @@ describe("initdb failure evidence", () => {
   });
 
   it("persists the stderr fatal sentinel after a Windows-like initdb banner", () => {
-    const initdb = path.join(os.tmpdir(), "yuvi-initdb-fixture", "initdb");
-    let observed:
-      | {
-          command: string;
-          args: readonly string[];
-          options: Record<string, unknown> | undefined;
-        }
-      | undefined;
-    childProcessState.override = (command, args = [], options) => {
-      observed = { command, args, options };
-      return {
-        error: undefined,
-        status: 1,
-        signal: null,
-        stdout: windowsBanner,
-        stderr: "FATAL_TEST_SENTINEL\n"
-      };
-    };
+    const initdb = syntheticInitdbCommand();
+    const override = registerExactInitdbOverride(initdb, {
+      error: undefined,
+      status: 1,
+      signal: null,
+      stdout: windowsBanner,
+      stderr: "FATAL_TEST_SENTINEL\n"
+    });
     const { layout, result, password } = runInitialize(initdb);
-    expect(observed).toBeDefined();
-    if (observed) assertInitdbSpawnCall(observed, { initdb, dataDir: layout.data, password });
+    override.expectInterceptedOnce();
+    assertInitdbSpawnCall(override.invocations[0]!, { initdb, dataDir: layout.data, password });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("POSTGRES_INIT_FAILED");
     const state = readInitializationState(layout);
@@ -292,6 +327,7 @@ describe("initdb failure evidence", () => {
     expect(state?.exitStatus).toBe(1);
     expect(state?.reason).toContain("FATAL_TEST_SENTINEL");
     expect(state?.reason).not.toContain("owned by user");
+    expect(state?.reason).not.toMatch(/RestrictedAclError|icacls/);
     expect(state?.stderrTail).toContain("FATAL_TEST_SENTINEL");
     const serialized = fs.readFileSync(layout.initializationStateFile, "utf8");
     expect(serialized).toContain("FATAL_TEST_SENTINEL");
@@ -299,6 +335,7 @@ describe("initdb failure evidence", () => {
   });
 
   it("preserves a missing-executable spawn as SPAWN_FAILED with a safe code", () => {
+    childProcessState.override = null;
     const { layout, result } = runInitialize(
       path.join(os.tmpdir(), "yuvi-missing-initdb", "initdb-does-not-exist")
     );
@@ -313,16 +350,16 @@ describe("initdb failure evidence", () => {
   });
 
   it("preserves a signalled initdb separately from a nonzero exit", () => {
-    childProcessState.override = () => ({
+    const initdb = syntheticInitdbCommand();
+    const override = registerExactInitdbOverride(initdb, {
       error: undefined,
       status: null,
       signal: "SIGTERM",
       stdout: "",
       stderr: ""
     });
-    const { layout, result } = runInitialize(
-      path.join(os.tmpdir(), "yuvi-initdb-fixture", "initdb")
-    );
+    const { layout, result } = runInitialize(initdb);
+    override.expectInterceptedOnce();
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("POSTGRES_INIT_FAILED");
     const state = readInitializationState(layout);
@@ -330,19 +367,20 @@ describe("initdb failure evidence", () => {
     expect(state?.errorCode).toBe("SIGNALLED");
     expect(state?.signal).toBe("SIGTERM");
     expect(state?.exitStatus).toBeNull();
+    expect(state?.reason).not.toMatch(/RestrictedAclError|icacls/);
   });
 
   it("leaves success initialization-state free of failure evidence", () => {
-    childProcessState.override = () => ({
+    const initdb = syntheticInitdbCommand();
+    const override = registerExactInitdbOverride(initdb, {
       error: undefined,
       status: 0,
       signal: null,
       stdout: "",
       stderr: ""
     });
-    const { layout, result } = runInitialize(
-      path.join(os.tmpdir(), "yuvi-initdb-fixture", "initdb")
-    );
+    const { layout, result } = runInitialize(initdb);
+    override.expectInterceptedOnce();
     expect(result.ok).toBe(true);
     const state = readInitializationState(layout);
     expect(state?.state).toBe("ready");
@@ -357,6 +395,7 @@ describe("initdb failure evidence", () => {
     expect(serialized).not.toContain("stdoutTail");
     expect(serialized).not.toContain("stderrTail");
     expect(serialized).not.toContain("EXIT_NONZERO");
+    expect(serialized).not.toMatch(/RestrictedAclError|icacls/);
   });
 
   it("keeps a failure sentinel from large stdout/stderr and bounds persisted tails", () => {
@@ -382,7 +421,8 @@ describe("initdb failure evidence", () => {
         logs.push(args.map((value) => String(value)).join(" "));
       });
     const spies = [spy("log"), spy("info"), spy("warn"), spy("error")];
-    childProcessState.override = () => ({
+    const initdb = syntheticInitdbCommand();
+    const override = registerExactInitdbOverride(initdb, {
       error: undefined,
       status: 1,
       signal: null,
@@ -397,12 +437,13 @@ describe("initdb failure evidence", () => {
       ].join("\n")
     });
     try {
-      const { layout, result } = runInitialize(
-        path.join(os.tmpdir(), "yuvi-initdb-fixture", "initdb"),
-        generatePostgresPassword()
-      );
+      const { layout, result } = runInitialize(initdb, generatePostgresPassword());
+      override.expectInterceptedOnce();
       expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("POSTGRES_INIT_FAILED");
       const state = readInitializationState(layout);
+      expect(state?.errorCode).toBe("EXIT_NONZERO");
+      expect(state?.reason).not.toMatch(/RestrictedAclError|icacls/);
       const serialized = fs.readFileSync(layout.initializationStateFile, "utf8");
       for (const haystack of [
         state?.reason ?? "",
