@@ -1,12 +1,16 @@
 import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
-import type { ProviderHealth, TextMessage, TokenUsage } from "../types/common.js";
+import type { ProviderCallOptions, ProviderHealth, TextMessage, TokenUsage } from "../types/common.js";
 import { ProviderError, ProviderErrorCode } from "../types/errors.js";
+import { createTransportAbort } from "../transport-abort.js";
 import type { VisionInput, VisionOutput, VisionProvider } from "../types/vision.js";
 import {
+  createXAIStatusError,
+  createXAITransportAbortError,
   ensureXAIConfig,
   healthCheckXAI,
   parseJsonResponse,
+  throwIfXAITransportAborted,
   xaiFetch,
   type XAIProviderOptions
 } from "./common.js";
@@ -34,33 +38,71 @@ export class XAIVisionProvider implements VisionProvider {
     return healthCheckXAI(this.name, "vision", this.options);
   }
 
-  async analyzeImage(input: VisionInput): Promise<VisionOutput> {
-    ensureXAIConfig(this.name, "vision", this.options);
-
-    const start = performance.now();
-    const imageUrl = await resolveImageUrl(input);
-    const response = await xaiFetch(this.name, "vision", this.options, "/chat/completions", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        model: this.options.model,
-        messages: buildVisionMessages(input, imageUrl)
-      })
+  async analyzeImage(input: VisionInput, options?: ProviderCallOptions): Promise<VisionOutput> {
+    const transport = createTransportAbort({
+      signal: options?.signal,
+      timeoutMs: this.options.timeoutMs ?? 30000
     });
+    let transportStarted = false;
 
-    const rawResponse = await parseJsonResponse(this.name, "vision", response);
-    const normalized = normalizeVisionResponse(rawResponse);
+    try {
+      throwIfXAITransportAborted(this.name, "vision", transport);
+      ensureXAIConfig(this.name, "vision", this.options);
 
-    return {
-      text: normalized.text,
-      sceneSummary: normalized.text,
-      latencyMs: Math.round(performance.now() - start),
-      model: normalized.model,
-      tokenUsage: normalized.tokenUsage,
-      debug: this.options.includeRawResponse ? { rawResponse } : undefined
-    };
+      const start = performance.now();
+      const imageUrl = await resolveImageUrl(input);
+      throwIfXAITransportAborted(this.name, "vision", transport);
+      if (!transport.markStarted()) {
+        throwIfXAITransportAborted(this.name, "vision", transport);
+        throw new Error("xAI vision transport could not start.");
+      }
+      transportStarted = true;
+      const response = await xaiFetch(this.options, "/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          model: this.options.model,
+          messages: buildVisionMessages(input, imageUrl)
+        })
+      }, transport.signal);
+      if (!response.ok) {
+        throw await createXAIStatusError(this.name, "vision", response);
+      }
+
+      const rawResponse = await parseJsonResponse(this.name, "vision", response);
+      throwIfXAITransportAborted(this.name, "vision", transport);
+      const normalized = normalizeVisionResponse(rawResponse);
+
+      return {
+        text: normalized.text,
+        sceneSummary: normalized.text,
+        latencyMs: Math.round(performance.now() - start),
+        model: normalized.model,
+        tokenUsage: normalized.tokenUsage,
+        debug: this.options.includeRawResponse ? { rawResponse } : undefined
+      };
+    } catch (error) {
+      if (transport.source !== null) {
+        throw createXAITransportAbortError(this.name, "vision", transport);
+      }
+      if (error instanceof ProviderError) {
+        throw error;
+      }
+      if (!transportStarted) {
+        throw error;
+      }
+      throw new ProviderError({
+        provider: this.name,
+        capability: "vision",
+        code: ProviderErrorCode.NetworkError,
+        message: "xAI vision network request failed.",
+        cause: error
+      });
+    } finally {
+      transport.cleanup();
+    }
   }
 }
 
