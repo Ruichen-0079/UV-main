@@ -5,6 +5,21 @@ import {
 } from "./lumi-audio.js";
 import type { SpeechPlaybackEvent } from "./speech-queue.js";
 import {
+  composeCompanionPresenceAnimation,
+  createGazeScheduler,
+  type GazeScheduler,
+  type SuppliedGazeTarget
+} from "./companion-gaze.js";
+import {
+  createCompanionBlinkScheduler,
+  createInitialCompanionPresence,
+  createPresenceBehaviorTransition,
+  getCompanionAnimation,
+  getCompanionPresentationState,
+  type CompanionPresenceProjection,
+  type CompanionPresentationState
+} from "./companion-presence.js";
+import {
   correlateSpeechPlayback,
   createSpeechPlaybackCorrelation,
   type SpeechPlaybackCorrelationState
@@ -50,6 +65,7 @@ export type LumiPresenceAnimation = {
 };
 
 export type PresenceState = "idle" | "thinking" | "speaking" | "interrupted" | "unavailable";
+export type LumiModelLifecycle = "loading" | "ready" | "failed" | "disposed";
 
 export type PresenceEvent =
   | { type: "user-sent" }
@@ -90,6 +106,199 @@ export interface Live2DAdapter extends MouthParameterTarget {
   getFramingDiagnostics?(): import("./lumi-framing.js").LumiFramingDiagnostics | null;
   resize(width: number, height: number): void;
   dispose(): void;
+}
+
+export type LumiPresentationClockOptions = {
+  random?: () => number;
+  now?: () => number;
+  requestFrame?: (callback: (now: number) => void) => number;
+  cancelFrame?: (frame: number) => void;
+  isHidden?: () => boolean;
+};
+
+export type LumiPresentationDebug = {
+  running: boolean;
+  generation: number;
+  state: CompanionPresentationState;
+  frameDeltaMs: number;
+  transitionProgress: number;
+  gaze: ReturnType<GazeScheduler["getDebug"]>;
+  blinkPhase: ReturnType<ReturnType<typeof createCompanionBlinkScheduler>["getPhase"]>;
+};
+
+/**
+ * Lifecycle-owned continuous presentation mechanics. It consumes normalized
+ * Presence and execution-level gaze input, then emits parameter intent to the
+ * Lumi model adapter. It never owns product Presence or writes Cubism Core.
+ */
+export class LumiPresentationController {
+  private readonly random: () => number;
+  private readonly now: () => number;
+  private readonly requestFrame: ((callback: (now: number) => void) => number) | null;
+  private readonly cancelFrame: ((frame: number) => void) | null;
+  private readonly isHidden: () => boolean;
+  private projection: CompanionPresenceProjection = createInitialCompanionPresence();
+  private normalizedInputActive = false;
+  private compatibilityState: CompanionPresentationState = "idle";
+  private suppliedGazeTarget: SuppliedGazeTarget | null = null;
+  private blinkScheduler: ReturnType<typeof createCompanionBlinkScheduler> | null = null;
+  private gazeScheduler: GazeScheduler | null = null;
+  private behaviorTransition = createPresenceBehaviorTransition("idle");
+  private frame: number | null = null;
+  private previousNow: number | null = null;
+  private frameDeltaMs = 0;
+  private generation = 0;
+  private disposed = false;
+  private running = false;
+  private debug: LumiPresentationDebug = {
+    running: false,
+    generation: 0,
+    state: "idle",
+    frameDeltaMs: 0,
+    transitionProgress: 1,
+    gaze: createGazeScheduler(() => 0, 0).getDebug(),
+    blinkPhase: "waiting"
+  };
+
+  constructor(
+    private readonly apply: (animation: LumiPresenceAnimation) => void,
+    options: LumiPresentationClockOptions = {}
+  ) {
+    this.random = options.random ?? Math.random;
+    this.now = options.now ?? (() => (typeof performance === "undefined" ? 0 : performance.now()));
+    this.requestFrame =
+      options.requestFrame ??
+      (typeof requestAnimationFrame === "function"
+        ? (callback) => requestAnimationFrame(callback)
+        : null);
+    this.cancelFrame =
+      options.cancelFrame ??
+      (typeof cancelAnimationFrame === "function" ? (frame) => cancelAnimationFrame(frame) : null);
+    this.isHidden =
+      options.isHidden ??
+      (() => typeof document !== "undefined" && document.visibilityState === "hidden");
+    // The initial scheduler is diagnostics-only until start() creates the
+    // lifecycle-owned pair. It avoids a nullable debug shape before mount.
+    this.disposeSchedulers();
+  }
+
+  setProjection(projection: CompanionPresenceProjection): void {
+    if (this.disposed) return;
+    this.normalizedInputActive = true;
+    this.projection = projection;
+  }
+
+  setCompatibilityState(state: CompanionPresentationState): void {
+    if (this.disposed) return;
+    this.compatibilityState = state;
+  }
+
+  setGazeTarget(target: SuppliedGazeTarget | null): void {
+    if (this.disposed) return;
+    this.suppliedGazeTarget = target;
+    this.gazeScheduler?.setSuppliedTarget(target);
+  }
+
+  start(): void {
+    if (this.disposed || this.running || this.requestFrame === null) return;
+    this.running = true;
+    this.previousNow = null;
+    this.generation += 1;
+    const generation = this.generation;
+    this.blinkScheduler = createCompanionBlinkScheduler(this.random, this.now());
+    this.gazeScheduler = createGazeScheduler(this.random, this.now());
+    this.gazeScheduler.setSuppliedTarget(this.suppliedGazeTarget);
+    this.behaviorTransition = createPresenceBehaviorTransition(this.currentState());
+
+    const animate = (now: number) => {
+      if (this.disposed || !this.running || generation !== this.generation) return;
+      if (this.isHidden()) {
+        this.previousNow = now;
+        this.schedule(animate);
+        return;
+      }
+      const previous = this.previousNow;
+      const delta = previous === null ? 0 : Math.max(0, now - previous);
+      this.previousNow = now;
+      this.frameDeltaMs = Math.min(100, delta);
+
+      const state = this.currentState();
+      const behavior = this.behaviorTransition.sample(state, this.frameDeltaMs, now);
+      const interrupted = state === "interrupted";
+      const blink = interrupted
+        ? 0
+        : (this.blinkScheduler?.sample(now, state, behavior.effective) ?? 0);
+      const animation = getCompanionAnimation(state, now, blink, behavior.effective);
+      const gaze = this.gazeScheduler?.sample(
+        now,
+        this.frameDeltaMs,
+        interrupted,
+        behavior.effective
+      );
+      if (gaze) {
+        const forceGaze =
+          import.meta.env.DEV &&
+          typeof window !== "undefined" &&
+          (window as typeof window & { __yuviForceGaze?: boolean }).__yuviForceGaze === true;
+        this.apply(composeCompanionPresenceAnimation(animation, gaze, forceGaze));
+      }
+      this.debug = {
+        running: true,
+        generation,
+        state,
+        frameDeltaMs: this.frameDeltaMs,
+        transitionProgress: behavior.transitionProgress,
+        gaze: gaze ?? this.gazeScheduler!.getDebug(),
+        blinkPhase: this.blinkScheduler?.getPhase(now) ?? "waiting"
+      };
+      this.schedule(animate);
+    };
+    this.schedule(animate);
+  }
+
+  stop(): void {
+    if (!this.running && this.frame === null) return;
+    this.running = false;
+    this.generation += 1;
+    if (this.frame !== null) this.cancelFrame?.(this.frame);
+    this.frame = null;
+    this.previousNow = null;
+    this.disposeSchedulers();
+    this.debug = { ...this.debug, running: false, frameDeltaMs: 0 };
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.stop();
+    this.disposed = true;
+    this.normalizedInputActive = false;
+    this.projection = createInitialCompanionPresence();
+    this.suppliedGazeTarget = null;
+  }
+
+  getDebug(): LumiPresentationDebug {
+    return this.debug;
+  }
+
+  private currentState(): CompanionPresentationState {
+    const forced = readForcedPresentationState();
+    if (forced !== null) return forced;
+    return this.normalizedInputActive
+      ? getCompanionPresentationState(this.projection)
+      : this.compatibilityState;
+  }
+
+  private schedule(callback: (now: number) => void): void {
+    if (!this.running || this.requestFrame === null) return;
+    this.frame = this.requestFrame(callback);
+  }
+
+  private disposeSchedulers(): void {
+    this.blinkScheduler?.dispose();
+    this.gazeScheduler?.dispose();
+    this.blinkScheduler = null;
+    this.gazeScheduler = null;
+  }
 }
 
 /** Official Cubism Framework/WebGL adapter for the Cubism 3 Lumi model. */
@@ -198,7 +407,15 @@ export class CubismLive2DAdapter implements Live2DAdapter {
   private startRenderLoop(): void {
     const render = (now: number) => {
       if (this.disposed || !this.model) return;
-      const delta = this.previousFrameAt === null ? 1 / 60 : (now - this.previousFrameAt) / 1000;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        this.previousFrameAt = now;
+        this.frame = requestAnimationFrame(render);
+        return;
+      }
+      const delta =
+        this.previousFrameAt === null
+          ? 1 / 60
+          : Math.min(0.1, Math.max(0, (now - this.previousFrameAt) / 1000));
       this.previousFrameAt = now;
       this.model.render(delta);
       this.frame = requestAnimationFrame(render);
@@ -212,6 +429,8 @@ export type LumiControllerHandle = {
   runMouthCalibration(): Promise<void>;
   setFraming(framing: LumiFraming): void;
   setPresence(state: PresenceState): void;
+  setPresentationProjection(projection: CompanionPresenceProjection): void;
+  setGazeTarget(target: SuppliedGazeTarget | null): void;
   setPresenceAnimation(animation: LumiPresenceAnimation): void;
   setPresenceAnimation(blink: number, breath: number): void;
   resumeAudio(): void;
@@ -219,6 +438,7 @@ export type LumiControllerHandle = {
   resize(width: number, height: number): void;
   dispose(): void;
   getPresence(): PresenceState;
+  getModelLifecycle(): LumiModelLifecycle;
   getFramingDiagnostics(): import("./lumi-framing.js").LumiFramingDiagnostics | null;
   getDebugInfo(): {
     instanceId: number;
@@ -246,6 +466,11 @@ export type LumiControllerHandle = {
     preUpdateEyeBallPhysicsX?: number;
     preUpdateEyeBallPhysicsY?: number;
     ownedParameterIds?: string[];
+    presentationClockRunning?: boolean;
+    presentationGeneration?: number;
+    activePresentationState?: CompanionPresentationState;
+    presentationTransitionProgress?: number;
+    presentationFrameDeltaMs?: number;
   };
 };
 
@@ -255,10 +480,14 @@ export class LumiController {
   private readonly instanceId = nextLumiControllerInstanceId++;
   private adapter: Live2DAdapter | null = null;
   private envelope: AudioEnvelopeHost | null = null;
-  private state: PresenceState = "unavailable";
+  private state: PresenceState = "idle";
+  private modelLifecycle: LumiModelLifecycle = "loading";
   private requestedPresence: PresenceState = "idle";
   private generation = 0;
   private playbackCorrelation: SpeechPlaybackCorrelationState = createSpeechPlaybackCorrelation();
+  private presentationProjection: CompanionPresenceProjection | null = null;
+  private readonly presentationController: LumiPresentationController;
+  private disposed = false;
 
   constructor(
     private readonly createAdapter: () => Live2DAdapter,
@@ -266,11 +495,23 @@ export class LumiController {
     private readonly onState?: (state: PresenceState) => void,
     private readonly createEnvelope: (target: MouthParameterTarget) => AudioEnvelopeHost = (
       target
-    ) => new AudioMouthEnvelope(target)
-  ) {}
+    ) => new AudioMouthEnvelope(target),
+    private readonly onModelLifecycle?: (state: LumiModelLifecycle) => void
+  ) {
+    this.presentationController = new LumiPresentationController((animation) => {
+      this.applyPresenceAnimation(animation);
+    });
+  }
 
   async load(): Promise<void> {
+    if (this.disposed) return;
+    this.setModelLifecycle("loading");
     const generation = ++this.generation;
+    this.presentationController.stop();
+    this.envelope?.dispose();
+    this.envelope = null;
+    this.adapter?.dispose();
+    this.adapter = null;
     this.playbackCorrelation = createSpeechPlaybackCorrelation();
     const adapter = this.createAdapter();
     this.adapter = adapter;
@@ -281,10 +522,15 @@ export class LumiController {
         return;
       }
       this.envelope = this.createEnvelope(adapter);
-      adapter.setBreath(0.16);
       adapter.resetMouth();
-      this.transition({ type: "model-ready" });
+      this.setModelLifecycle("ready");
+      if (this.presentationProjection !== null) {
+        this.setState(
+          toLumiPresenceState(getCompanionPresentationState(this.presentationProjection))
+        );
+      }
       this.setPresence(this.requestedPresence);
+      this.presentationController.start();
     } catch (error) {
       if (generation !== this.generation) {
         adapter.dispose();
@@ -297,12 +543,17 @@ export class LumiController {
       this.adapter = null;
       this.envelope?.dispose();
       this.envelope = null;
-      this.transition({ type: "model-failed" });
+      this.setModelLifecycle("failed");
     }
   }
 
   setPresence(state: PresenceState): void {
     this.requestedPresence = state;
+    if (this.presentationProjection !== null) {
+      if (state === "unavailable") this.applyPresence(state);
+      return;
+    }
+    this.presentationController.setCompatibilityState(toCompanionPresentationState(state));
     // A text response can finish while its first audio segment is still
     // playing. That external idle request must not silence the RMS-driven
     // mouth; playbackEnded remains the authoritative transition to idle.
@@ -316,13 +567,30 @@ export class LumiController {
     animationOrBlink: LumiPresenceAnimation | number,
     positionalBreath?: number
   ): void {
-    if (!this.adapter) return;
-    const animation: LumiPresenceAnimation =
+    this.applyPresenceAnimation(
       typeof animationOrBlink === "number"
         ? positionalBreath === undefined
           ? { blink: animationOrBlink }
           : { blink: animationOrBlink, breath: positionalBreath }
-        : animationOrBlink;
+        : animationOrBlink
+    );
+  }
+
+  setPresentationProjection(projection: CompanionPresenceProjection): void {
+    if (this.disposed) return;
+    this.presentationProjection = projection;
+    this.presentationController.setProjection(projection);
+    if (this.state !== "unavailable") {
+      this.setState(toLumiPresenceState(getCompanionPresentationState(projection)));
+    }
+  }
+
+  setGazeTarget(target: SuppliedGazeTarget | null): void {
+    this.presentationController.setGazeTarget(target);
+  }
+
+  private applyPresenceAnimation(animation: LumiPresenceAnimation): void {
+    if (!this.adapter || this.disposed) return;
     // Presence owns only eyes and breath. ParamMouthOpenY remains exclusively
     // driven by the active AudioMouthEnvelope while playback is speaking.
     if (animation.blink !== undefined) {
@@ -343,12 +611,11 @@ export class LumiController {
 
   private applyPresence(state: PresenceState): void {
     if (state === "unavailable") {
-      this.transition({ type: "model-failed" });
+      this.setModelLifecycle("failed");
       return;
     }
     if (!this.adapter) return;
     this.setState(state);
-    this.adapter.setBreath(state === "idle" || state === "thinking" ? 0.16 : 0);
     if (state !== "speaking") this.adapter.resetMouth();
   }
 
@@ -369,16 +636,20 @@ export class LumiController {
       this.envelope?.attach(event.audio);
     } else if (event.type === "playbackStarted") {
       this.envelope?.startPlayback?.(event.audio);
-      this.setPresence("speaking");
+      if (this.presentationProjection === null) this.setPresence("speaking");
     } else if (event.type === "playbackEnded") {
       this.envelope?.stop();
-      this.requestedPresence = "idle";
-      this.applyPresence("idle");
+      if (this.presentationProjection === null) {
+        this.requestedPresence = "idle";
+        this.applyPresence("idle");
+      }
     } else if (event.type === "playbackStopped" || event.type === "playbackError") {
       this.envelope?.stop();
-      this.transition({ type: "interrupted" });
-      this.requestedPresence = "idle";
-      this.applyPresence("idle");
+      if (this.presentationProjection === null) {
+        this.transition({ type: "interrupted" });
+        this.requestedPresence = "idle";
+        this.applyPresence("idle");
+      }
     } else if (event.type === "audioElementDetached") {
       this.envelope?.detach();
     }
@@ -413,9 +684,12 @@ export class LumiController {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.generation += 1;
+    this.presentationController.dispose();
     this.playbackCorrelation = createSpeechPlaybackCorrelation();
-    this.setPresenceAnimation({
+    this.applyPresenceAnimation({
       blink: 0,
       breath: 0,
       eyeBallX: 0,
@@ -432,10 +706,16 @@ export class LumiController {
     this.envelope = null;
     this.adapter?.dispose();
     this.adapter = null;
+    this.presentationProjection = null;
+    this.setModelLifecycle("disposed");
   }
 
   getPresence(): PresenceState {
     return this.state;
+  }
+
+  getModelLifecycle(): LumiModelLifecycle {
+    return this.modelLifecycle;
   }
 
   getDebugInfo(): {
@@ -464,6 +744,11 @@ export class LumiController {
     preUpdateEyeBallPhysicsX?: number;
     preUpdateEyeBallPhysicsY?: number;
     ownedParameterIds?: string[];
+    presentationClockRunning?: boolean;
+    presentationGeneration?: number;
+    activePresentationState?: CompanionPresentationState;
+    presentationTransitionProgress?: number;
+    presentationFrameDeltaMs?: number;
   } {
     const info: {
       instanceId: number;
@@ -491,6 +776,11 @@ export class LumiController {
       preUpdateEyeBallPhysicsX?: number;
       preUpdateEyeBallPhysicsY?: number;
       ownedParameterIds?: string[];
+      presentationClockRunning?: boolean;
+      presentationGeneration?: number;
+      activePresentationState?: CompanionPresentationState;
+      presentationTransitionProgress?: number;
+      presentationFrameDeltaMs?: number;
     } = {
       instanceId: this.instanceId,
       generation: this.generation
@@ -505,12 +795,24 @@ export class LumiController {
     if (mouth !== undefined) info.pendingMouth = mouth;
     const eyeBallX = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.eyeBallX.id);
     const eyeBallY = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.eyeBallY.id);
-    const headAngleX = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.headAngleX.id);
-    const headAngleY = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.headAngleY.id);
-    const headAngleZ = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.headAngleZ.id);
-    const bodyAngleX = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.bodyAngleX.id);
-    const bodyAngleY = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.bodyAngleY.id);
-    const bodyAngleZ = this.adapter?.getPendingParameter?.(LUMI_PRESENCE_PARAMETER_MAP.bodyAngleZ.id);
+    const headAngleX = this.adapter?.getPendingParameter?.(
+      LUMI_PRESENCE_PARAMETER_MAP.headAngleX.id
+    );
+    const headAngleY = this.adapter?.getPendingParameter?.(
+      LUMI_PRESENCE_PARAMETER_MAP.headAngleY.id
+    );
+    const headAngleZ = this.adapter?.getPendingParameter?.(
+      LUMI_PRESENCE_PARAMETER_MAP.headAngleZ.id
+    );
+    const bodyAngleX = this.adapter?.getPendingParameter?.(
+      LUMI_PRESENCE_PARAMETER_MAP.bodyAngleX.id
+    );
+    const bodyAngleY = this.adapter?.getPendingParameter?.(
+      LUMI_PRESENCE_PARAMETER_MAP.bodyAngleY.id
+    );
+    const bodyAngleZ = this.adapter?.getPendingParameter?.(
+      LUMI_PRESENCE_PARAMETER_MAP.bodyAngleZ.id
+    );
     if (eyeBallX !== undefined) info.pendingEyeBallX = eyeBallX;
     if (eyeBallY !== undefined) info.pendingEyeBallY = eyeBallY;
     if (headAngleX !== undefined) info.pendingHeadAngleX = headAngleX;
@@ -520,14 +822,19 @@ export class LumiController {
     if (bodyAngleY !== undefined) info.pendingBodyAngleY = bodyAngleY;
     if (bodyAngleZ !== undefined) info.pendingBodyAngleZ = bodyAngleZ;
     const preUpdate = this.adapter?.getLastPreUpdateParameters?.() ?? {};
-    if (preUpdate["ParamEyeBallX"] !== undefined) info.preUpdateEyeBallX = preUpdate["ParamEyeBallX"];
-    if (preUpdate["ParamEyeBallY"] !== undefined) info.preUpdateEyeBallY = preUpdate["ParamEyeBallY"];
+    if (preUpdate["ParamEyeBallX"] !== undefined)
+      info.preUpdateEyeBallX = preUpdate["ParamEyeBallX"];
+    if (preUpdate["ParamEyeBallY"] !== undefined)
+      info.preUpdateEyeBallY = preUpdate["ParamEyeBallY"];
     if (preUpdate["ParamAngleX"] !== undefined) info.preUpdateAngleX = preUpdate["ParamAngleX"];
     if (preUpdate["ParamAngleY"] !== undefined) info.preUpdateAngleY = preUpdate["ParamAngleY"];
     if (preUpdate["ParamAngleZ"] !== undefined) info.preUpdateAngleZ = preUpdate["ParamAngleZ"];
-    if (preUpdate["ParamBodyAngleX"] !== undefined) info.preUpdateBodyAngleX = preUpdate["ParamBodyAngleX"];
-    if (preUpdate["ParamBodyAngleY"] !== undefined) info.preUpdateBodyAngleY = preUpdate["ParamBodyAngleY"];
-    if (preUpdate["ParamBodyAngleZ"] !== undefined) info.preUpdateBodyAngleZ = preUpdate["ParamBodyAngleZ"];
+    if (preUpdate["ParamBodyAngleX"] !== undefined)
+      info.preUpdateBodyAngleX = preUpdate["ParamBodyAngleX"];
+    if (preUpdate["ParamBodyAngleY"] !== undefined)
+      info.preUpdateBodyAngleY = preUpdate["ParamBodyAngleY"];
+    if (preUpdate["ParamBodyAngleZ"] !== undefined)
+      info.preUpdateBodyAngleZ = preUpdate["ParamBodyAngleZ"];
     if (preUpdate["ParamEyeBallPhysicsX"] !== undefined) {
       info.preUpdateEyeBallPhysicsX = preUpdate["ParamEyeBallPhysicsX"];
     }
@@ -536,6 +843,12 @@ export class LumiController {
     }
     const owned = this.adapter?.getOwnedParameterIds?.();
     if (owned) info.ownedParameterIds = [...owned];
+    const presentation = this.presentationController.getDebug();
+    info.presentationClockRunning = presentation.running;
+    info.presentationGeneration = presentation.generation;
+    info.activePresentationState = presentation.state;
+    info.presentationTransitionProgress = presentation.transitionProgress;
+    info.presentationFrameDeltaMs = presentation.frameDeltaMs;
     return info;
   }
 
@@ -564,10 +877,38 @@ export class LumiController {
     this.state = state;
     this.onState?.(state);
   }
+
+  private setModelLifecycle(state: LumiModelLifecycle): void {
+    this.modelLifecycle = state;
+    this.onModelLifecycle?.(state);
+  }
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+}
+
+function toCompanionPresentationState(state: PresenceState): CompanionPresentationState {
+  return state === "unavailable" ? "idle" : state;
+}
+
+function toLumiPresenceState(state: CompanionPresentationState): PresenceState {
+  return state === "listening" ? "idle" : state;
+}
+
+function readForcedPresentationState(): CompanionPresentationState | null {
+  if (!import.meta.env.DEV || typeof window === "undefined") return null;
+  const value = (window as Window & { __yuviForcePresence?: unknown }).__yuviForcePresence;
+  switch (value) {
+    case "idle":
+    case "listening":
+    case "thinking":
+    case "speaking":
+    case "interrupted":
+      return value;
+    default:
+      return null;
+  }
 }
 
 function pause(milliseconds: number): Promise<void> {

@@ -2,15 +2,193 @@ import { describe, expect, it, vi } from "vitest";
 import { gatedEnvelope, rmsFromTimeDomain, smoothMouthEnvelope } from "./lumi-audio.js";
 import {
   LUMI_PRESENCE_PARAMETER_MAP,
+  LumiPresentationController,
   LumiController,
   lumiMapping,
   reducePresence
 } from "./lumi-live2d.js";
+import { createInitialCompanionPresence } from "./companion-presence.js";
 
 const playbackSegment = { requestId: "turn-a", sequence: 0 };
 const nextPlaybackSegment = { requestId: "turn-a", sequence: 1 };
 
+function createPresentationHarness() {
+  const callbacks: Array<(now: number) => void> = [];
+  const controller = new LumiPresentationController(() => undefined, {
+    random: () => 0,
+    now: () => 0,
+    requestFrame: (callback) => {
+      callbacks.push(callback);
+      return callbacks.length;
+    },
+    cancelFrame: () => undefined,
+    isHidden: () => false
+  });
+  return { callbacks, controller };
+}
+
+function listeningProjection(epoch: string | null = null) {
+  return {
+    ...createInitialCompanionPresence(),
+    epoch,
+    activity: "listening" as const
+  };
+}
+
 describe("Lumi presence and audio envelope", () => {
+  it("uses normalized listening input when its epoch is null", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setCompatibilityState("thinking");
+    controller.setProjection(listeningProjection());
+    controller.start();
+
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("listening");
+    controller.dispose();
+  });
+
+  it("keeps normalized input authoritative over later legacy updates", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setProjection(listeningProjection());
+    controller.setCompatibilityState("thinking");
+    controller.start();
+
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("listening");
+    controller.dispose();
+  });
+
+  it("switches from legacy compatibility to normalized epoch-less input", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setCompatibilityState("thinking");
+    controller.start();
+    callbacks.shift()?.(16);
+    expect(controller.getDebug().state).toBe("thinking");
+
+    controller.setProjection(listeningProjection());
+    callbacks.shift()?.(32);
+
+    expect(controller.getDebug().state).toBe("listening");
+    controller.dispose();
+  });
+
+  it("keeps normalized epochful input behavior unchanged", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setProjection({
+      ...createInitialCompanionPresence(),
+      epoch: "turn-a",
+      lifecycle: "active",
+      activity: "thinking"
+    });
+    controller.start();
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("thinking");
+    controller.dispose();
+  });
+
+  it("treats other epoch-less normalized activity as normalized input", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setCompatibilityState("thinking");
+    controller.setProjection({
+      ...createInitialCompanionPresence(),
+      activity: "idle"
+    });
+    controller.start();
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("idle");
+    controller.dispose();
+  });
+
+  it("retains legacy compatibility when normalized input was never installed", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setCompatibilityState("thinking");
+    controller.start();
+    callbacks.shift()?.(16);
+    expect(controller.getDebug().state).toBe("thinking");
+
+    controller.setCompatibilityState("idle");
+    callbacks.shift()?.(32);
+
+    expect(controller.getDebug().state).toBe("idle");
+    controller.dispose();
+  });
+
+  it("combines epoch-less normalized listening with supplied gaze", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setProjection(listeningProjection());
+    controller.setGazeTarget({ x: 0.6, y: 0.2, strength: 1 });
+    controller.start();
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("listening");
+    expect(controller.getDebug().gaze.targetX).toBeGreaterThan(0);
+    controller.dispose();
+  });
+
+  it("owns one lifecycle-safe presentation clock independent of React rerenders", () => {
+    const callbacks: Array<(now: number) => void> = [];
+    const applied: Array<{ blink?: number; breath?: number; eyeBallX?: number }> = [];
+    const controller = new LumiPresentationController((animation) => applied.push(animation), {
+      random: () => 0,
+      now: () => 0,
+      requestFrame: (callback) => {
+        callbacks.push(callback);
+        return callbacks.length;
+      },
+      cancelFrame: () => undefined,
+      isHidden: () => false
+    });
+    const initial = createInitialCompanionPresence();
+    controller.setProjection({
+      ...initial,
+      epoch: "turn-a",
+      lifecycle: "active",
+      activity: "thinking"
+    });
+    controller.start();
+    controller.start();
+    expect(callbacks).toHaveLength(1);
+
+    const firstFrame = callbacks.shift();
+    firstFrame?.(16);
+    expect(applied).toHaveLength(1);
+    expect(controller.getDebug().running).toBe(true);
+    expect(controller.getDebug().state).toBe("thinking");
+
+    const staleFrame = callbacks.shift();
+    controller.dispose();
+    staleFrame?.(32);
+    expect(applied).toHaveLength(1);
+    expect(controller.getDebug().running).toBe(false);
+  });
+
+  it("bounds the first frame after a hidden interval without stopping the controller", () => {
+    const callbacks: Array<(now: number) => void> = [];
+    let hidden = false;
+    const controller = new LumiPresentationController(() => undefined, {
+      random: () => 0,
+      requestFrame: (callback) => {
+        callbacks.push(callback);
+        return callbacks.length;
+      },
+      cancelFrame: () => undefined,
+      isHidden: () => hidden
+    });
+    controller.start();
+    callbacks.shift()?.(100);
+    hidden = true;
+    callbacks.shift()?.(200);
+    hidden = false;
+    callbacks.shift()?.(100_000);
+    expect(controller.getDebug().running).toBe(true);
+    expect(controller.getDebug().frameDeltaMs).toBeLessThanOrEqual(100);
+    controller.dispose();
+  });
+
   it("keeps the presence lifecycle tied to real playback", () => {
     expect(reducePresence("idle", { type: "user-sent" })).toBe("thinking");
     expect(reducePresence("thinking", { type: "playback-started" })).toBe("speaking");
@@ -110,7 +288,12 @@ describe("Lumi presence and audio envelope", () => {
       dispose: vi.fn()
     };
     const envelope = { attach: vi.fn(), detach: vi.fn(), stop: vi.fn(), dispose: vi.fn() };
-    const controller = new LumiController(() => adapter, "model3.json", undefined, () => envelope);
+    const controller = new LumiController(
+      () => adapter,
+      "model3.json",
+      undefined,
+      () => envelope
+    );
     await controller.load();
     const audio = {} as HTMLAudioElement;
     controller.handlePlaybackEvent({
@@ -380,7 +563,9 @@ describe("Lumi presence and audio envelope", () => {
       await vi.advanceTimersByTimeAsync(2800);
       await calibration;
       expect(adapter.setMouthOpen).toHaveBeenLastCalledWith(0);
-      expect(adapter.setMouthOpen.mock.calls.slice(-4).map(([value]) => value)).toEqual([0, 1, 2.1, 0]);
+      expect(adapter.setMouthOpen.mock.calls.slice(-4).map(([value]) => value)).toEqual([
+        0, 1, 2.1, 0
+      ]);
       expect(adapter.resetMouth).toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -403,7 +588,78 @@ describe("Lumi presence and audio envelope", () => {
     };
     const controller = new LumiController(() => adapter, "model3.json");
     await controller.load();
-    expect(controller.getPresence()).toBe("unavailable");
+    expect(controller.getModelLifecycle()).toBe("failed");
+    expect(controller.getPresence()).toBe("idle");
     expect(adapter.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences stale model loads when a reload replaces the adapter", async () => {
+    let resolveFirst!: () => void;
+    const firstLoad = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const makeAdapter = (load: () => Promise<void>) => ({
+      load: vi.fn(load),
+      setMouthOpen: vi.fn(),
+      setMouthForm: vi.fn(),
+      setParameter: vi.fn(),
+      setBreath: vi.fn(),
+      setFraming: vi.fn(),
+      resetMouth: vi.fn(),
+      resize: vi.fn(),
+      dispose: vi.fn()
+    });
+    const first = makeAdapter(() => firstLoad);
+    const second = makeAdapter(async () => undefined);
+    let next = 0;
+    const controller = new LumiController(() => (next++ === 0 ? first : second), "model3.json");
+    const firstRequest = controller.load();
+    const secondRequest = controller.load();
+    resolveFirst();
+    await Promise.all([firstRequest, secondRequest]);
+
+    expect(first.dispose).toHaveBeenCalled();
+    expect(second.dispose).not.toHaveBeenCalled();
+    expect(controller.getPresence()).toBe("idle");
+    controller.dispose();
+  });
+
+  it("preserves normalized epoch-less input across model reload", async () => {
+    const callbacks: Array<(now: number) => void> = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callbacks.push((now) => callback(now));
+      return callbacks.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => undefined);
+    try {
+      const makeAdapter = () => ({
+        load: vi.fn(async () => undefined),
+        setMouthOpen: vi.fn(),
+        setMouthForm: vi.fn(),
+        setParameter: vi.fn(),
+        setBreath: vi.fn(),
+        setFraming: vi.fn(),
+        resetMouth: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn()
+      });
+      const adapters = [makeAdapter(), makeAdapter()];
+      let next = 0;
+      const controller = new LumiController(() => adapters[next++]!, "model3.json");
+      controller.setPresentationProjection(listeningProjection());
+
+      await controller.load();
+      callbacks.pop()?.(16);
+      expect(controller.getDebugInfo().activePresentationState).toBe("listening");
+
+      callbacks.length = 0;
+      await controller.load();
+      callbacks.pop()?.(32);
+      expect(controller.getDebugInfo().activePresentationState).toBe("listening");
+
+      controller.dispose();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

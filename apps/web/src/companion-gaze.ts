@@ -61,6 +61,13 @@ export const GAZE_CONFIG = {
 export type GazeTargetRegion = "center" | "left" | "right" | "upper" | "lower";
 export type GazeTargetKind = "hold" | "quickGlance" | "recenter";
 
+/** Execution-level input; target selection remains outside P5 presentation mechanics. */
+export type SuppliedGazeTarget = {
+  x: number;
+  y: number;
+  strength?: number;
+};
+
 export type GazeFrame = {
   running: boolean;
   disposed: boolean;
@@ -150,6 +157,7 @@ export type GazeScheduler = {
     profile?: PresenceBehaviorProfile
   ): GazeFrame;
   reset(nowMilliseconds?: number): void;
+  setSuppliedTarget(target: SuppliedGazeTarget | null): void;
   dispose(): void;
   isDisposed(): boolean;
   getDebug(): GazeFrame;
@@ -251,11 +259,7 @@ export function selectNextTarget(
   }
 
   // Avoid repeating the same extreme region twice in a row.
-  if (
-    region !== "center" &&
-    region === options.lastExtremeRegion &&
-    !wantQuick
-  ) {
+  if (region !== "center" && region === options.lastExtremeRegion && !wantQuick) {
     region = "center";
   }
 
@@ -266,7 +270,8 @@ export function selectNextTarget(
   let y = lerp(band.y[0], band.y[1], yRoll);
 
   // Soft session asymmetry (±6%) on horizontal targets.
-  x *= 1 + sessionSideBias * (region === "left" || region === "right" || region === "upper" ? 1 : 0.4);
+  x *=
+    1 + sessionSideBias * (region === "left" || region === "right" || region === "upper" ? 1 : 0.4);
 
   const eyeXMax = Math.max(0.05, profile.eyeXMax);
   const eyeYMin = Math.min(0, profile.eyeYMin);
@@ -278,7 +283,10 @@ export function selectNextTarget(
     const glanceScale = Math.max(0.4, profile.quickGlanceAmplitudeScale);
     x = clamp(x * glanceScale, -eyeXMax, eyeXMax);
     y = clamp(y * glanceScale, eyeYMin, eyeYMax);
-    const holdMin = Math.max(120, Math.min(profile.quickGlanceHoldMinMs, profile.quickGlanceHoldMaxMs));
+    const holdMin = Math.max(
+      120,
+      Math.min(profile.quickGlanceHoldMinMs, profile.quickGlanceHoldMaxMs)
+    );
     const holdMax = Math.max(holdMin, profile.quickGlanceHoldMaxMs);
     return {
       region,
@@ -352,13 +360,13 @@ export function createGazeScheduler(
   let bodyTargetY = 0;
   let bodyTargetZ = 0;
   let previousInterrupted = false;
+  let suppliedTarget: SuppliedGazeTarget | null = null;
   let lastExtremeRegion: GazeTargetRegion | null = null;
   let lastWasQuickGlance = false;
   let lastFrameDeltaMs = 0;
   // Deterministic per-scheduler bias from the injected RNG (fixed random tests stay stable).
   const sessionSideBias = (clamp01(random()) - 0.5) * 2 * GAZE_CONFIG.sessionSideBiasMax;
-  const headZBias =
-    (clamp01(random()) - 0.5) * 2 * GAZE_CONFIG.headZBiasMaxFraction;
+  const headZBias = (clamp01(random()) - 0.5) * 2 * GAZE_CONFIG.headZBiasMaxFraction;
   let peakEyeX = 0;
   let peakEyeY = 0;
   let peakHeadX = 0;
@@ -457,6 +465,15 @@ export function createGazeScheduler(
       bodyFollowEnabled = true;
       holdUntil = elapsedMs + Math.max(200, profile.targetHoldMaxMs);
       previousInterrupted = true;
+    } else if (suppliedTarget !== null) {
+      const strength = clamp01(suppliedTarget.strength ?? 1);
+      targetX = clamp(suppliedTarget.x * strength, -profile.eyeXMax, profile.eyeXMax);
+      targetY = clamp(suppliedTarget.y * strength, profile.eyeYMin, profile.eyeYMax);
+      targetRegion = suppliedTargetRegion(targetX, targetY);
+      targetKind = "hold";
+      headFollowScale = 1;
+      bodyFollowEnabled = true;
+      holdUntil = Number.POSITIVE_INFINITY;
     } else {
       if (previousInterrupted) {
         previousInterrupted = false;
@@ -609,6 +626,7 @@ export function createGazeScheduler(
       bodyTargetY = 0;
       bodyTargetZ = 0;
       previousInterrupted = false;
+      suppliedTarget = null;
       lastExtremeRegion = null;
       lastWasQuickGlance = false;
       lastFrameDeltaMs = 0;
@@ -621,8 +639,24 @@ export function createGazeScheduler(
       peakBodyY = 0;
       peakBodyZ = 0;
     },
+    setSuppliedTarget(target) {
+      if (target === null) {
+        suppliedTarget = null;
+        holdUntil = elapsedMs;
+        return;
+      }
+      suppliedTarget = {
+        x: Number.isFinite(target.x) ? target.x : 0,
+        y: Number.isFinite(target.y) ? target.y : 0
+      };
+      if (target.strength !== undefined) {
+        suppliedTarget.strength = Number.isFinite(target.strength) ? target.strength : 1;
+      }
+      holdUntil = Number.POSITIVE_INFINITY;
+    },
     dispose() {
       disposed = true;
+      suppliedTarget = null;
       holdUntil = Number.POSITIVE_INFINITY;
       targetX = 0;
       targetY = 0;
@@ -659,6 +693,13 @@ function sampleHold(
   const min = Math.max(0, Math.min(profile.targetHoldMinMs, profile.targetHoldMaxMs));
   const max = Math.max(min, profile.targetHoldMaxMs);
   return lerp(min, max, (a + b) / 2);
+}
+
+function suppliedTargetRegion(x: number, y: number): GazeTargetRegion {
+  if (Math.abs(x) >= Math.abs(y) && Math.abs(x) > 0.28) return x < 0 ? "left" : "right";
+  if (y > 0.2) return "upper";
+  if (y < -0.12) return "lower";
+  return "center";
 }
 
 function sanitizeNow(value: number): number {

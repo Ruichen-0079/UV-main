@@ -6,7 +6,8 @@ import { CompanionPage } from "./companion-page.js";
 
 const mockState = vi.hoisted(() => ({
   buses: [] as any[],
-  queues: [] as any[]
+  queues: [] as any[],
+  projections: [] as any[]
 }));
 
 vi.mock("./companion-bus.js", () => {
@@ -49,23 +50,30 @@ vi.mock("./companion-voice-sync.js", () => ({
 
 vi.mock("./lumi-canvas.js", async () => {
   const react = await import("react");
-  const LumiCanvas = react.forwardRef((props: { requestedPresence: string }, ref) => {
-    react.useImperativeHandle(ref, () => ({
-      handlePlaybackEvent: () => undefined,
-      resumeAudio: () => undefined,
-      setFraming: () => undefined,
-      setPresence: () => undefined,
-      setPresenceAnimation: () => undefined,
-      load: async () => undefined,
-      runMouthCalibration: async () => undefined,
-      resize: () => undefined,
-      dispose: () => undefined,
-      getPresence: () => props.requestedPresence,
-      getFramingDiagnostics: () => null,
-      getDebugInfo: () => ({ instanceId: 0, generation: 0 })
-    }));
-    return react.createElement("div", { "aria-label": "Lumi avatar" }, "Lumi avatar");
-  });
+  const LumiCanvas = react.forwardRef(
+    (props: { requestedPresence?: string; requestedProjection?: any }, ref) => {
+      react.useImperativeHandle(ref, () => ({
+        handlePlaybackEvent: () => undefined,
+        resumeAudio: () => undefined,
+        setFraming: () => undefined,
+        setPresence: () => undefined,
+        setPresentationProjection: (projection: any) => {
+          mockState.projections.push(projection);
+        },
+        setGazeTarget: () => undefined,
+        setPresenceAnimation: () => undefined,
+        load: async () => undefined,
+        runMouthCalibration: async () => undefined,
+        resize: () => undefined,
+        dispose: () => undefined,
+        getPresence: () => props.requestedPresence ?? "idle",
+        getModelLifecycle: () => "ready",
+        getFramingDiagnostics: () => null,
+        getDebugInfo: () => ({ instanceId: 0, generation: 0 })
+      }));
+      return react.createElement("div", { "aria-label": "Lumi avatar" }, "Lumi avatar");
+    }
+  );
   return { LumiCanvas };
 });
 
@@ -313,6 +321,7 @@ async function emitPlayback(
 afterEach(() => {
   mockState.buses.length = 0;
   mockState.queues.length = 0;
+  mockState.projections.length = 0;
   delete (globalThis as { window?: unknown }).window;
 });
 
@@ -334,6 +343,20 @@ describe("CompanionPage Tauri chrome", () => {
 });
 
 describe("CompanionPage generation interruption admission", () => {
+  it("forwards epoch-less normalized listening through the mounted Lumi path", async () => {
+    const mounted = await mountCompanionPage();
+    try {
+      const bus = mockState.buses.at(-1);
+      await emitBus(bus, { kind: "user-gesture" });
+
+      const projection = mockState.projections.at(-1);
+      expect(projection).toMatchObject({ epoch: null, activity: "listening" });
+    } finally {
+      await act(async () => mounted.root.unmount());
+      mounted.restore();
+    }
+  });
+
   it("ignores a terminal interruption without cancelling post-generation speech", async () => {
     const mounted = await mountCompanionPage();
     try {
