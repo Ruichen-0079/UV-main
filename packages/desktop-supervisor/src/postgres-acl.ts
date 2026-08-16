@@ -5,6 +5,8 @@
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 
+export type RestrictedPathKind = "directory" | "file";
+
 export type WindowsAccountIdentity = {
   identity: string;
   source: "username" | "userdomain-username";
@@ -18,7 +20,11 @@ export type WindowsAclApplyResult = {
 
 export type WindowsAclAdapter = {
   resolveAccount(): WindowsAccountIdentity | null;
-  applyRestrictedAcl(targetPath: string, identity: string): WindowsAclApplyResult;
+  applyRestrictedAcl(
+    targetPath: string,
+    identity: string,
+    kind: RestrictedPathKind
+  ): WindowsAclApplyResult;
 };
 
 export class RestrictedAclError extends Error {
@@ -41,8 +47,13 @@ export function resolveWindowsAccountIdentity(
   return { identity: user, source: "username" };
 }
 
-export function aclGrantArguments(targetPath: string, identity: string): string[] {
-  return [targetPath, "/inheritance:r", "/grant:r", `${identity}:(F)`];
+export function aclGrantArguments(
+  targetPath: string,
+  identity: string,
+  kind: RestrictedPathKind
+): string[] {
+  const grant = kind === "directory" ? `${identity}:(OI)(CI)(F)` : `${identity}:(F)`;
+  return [targetPath, "/inheritance:r", "/grant:r", grant];
 }
 
 export function createDefaultWindowsAclAdapter(
@@ -52,8 +63,8 @@ export function createDefaultWindowsAclAdapter(
     resolveAccount() {
       return resolveWindowsAccountIdentity(env);
     },
-    applyRestrictedAcl(targetPath: string, identity: string) {
-      const args = aclGrantArguments(targetPath, identity);
+    applyRestrictedAcl(targetPath: string, identity: string, kind: RestrictedPathKind) {
+      const args = aclGrantArguments(targetPath, identity, kind);
       try {
         const result = spawnSync("icacls", args, {
           windowsHide: true,
@@ -90,13 +101,16 @@ export function createDefaultWindowsAclAdapter(
 
 export function applyRestrictedPermissions(
   targetPath: string,
-  options: { adapter?: WindowsAclAdapter; platform?: NodeJS.Platform } = {}
+  options: {
+    adapter?: WindowsAclAdapter;
+    platform?: NodeJS.Platform;
+    kind: RestrictedPathKind;
+  }
 ): void {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32") {
     try {
-      const stat = fs.statSync(targetPath);
-      fs.chmodSync(targetPath, stat.isDirectory() ? 0o700 : 0o600);
+      fs.chmodSync(targetPath, options.kind === "directory" ? 0o700 : 0o600);
     } catch (error) {
       throw new RestrictedAclError(
         `Failed to restrict POSIX mode on ${targetPath}: ${
@@ -113,7 +127,7 @@ export function applyRestrictedPermissions(
       "Cannot restrict private PostgreSQL ACL: no Windows account identity (USERNAME/USERDOMAIN)."
     );
   }
-  const applied = adapter.applyRestrictedAcl(targetPath, account.identity);
+  const applied = adapter.applyRestrictedAcl(targetPath, account.identity, options.kind);
   if (!applied.ok) {
     throw new RestrictedAclError(
       `Failed to restrict private PostgreSQL ACL on ${targetPath}: ${applied.detail}`
@@ -124,7 +138,7 @@ export function applyRestrictedPermissions(
 export function writeRestrictedFile(filePath: string, contents: string): void {
   const directory = require("node:path").dirname(filePath);
   fs.mkdirSync(directory, { recursive: true });
-  applyRestrictedPermissions(directory);
+  applyRestrictedPermissions(directory, { kind: "directory" });
   fs.writeFileSync(filePath, contents, { encoding: "utf8", mode: 0o600 });
-  applyRestrictedPermissions(filePath);
+  applyRestrictedPermissions(filePath, { kind: "file" });
 }

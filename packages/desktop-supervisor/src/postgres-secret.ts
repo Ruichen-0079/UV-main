@@ -38,9 +38,9 @@ export function persistDevelopmentPasswordFile(
   } = {}
 ): void {
   fs.mkdirSync(layout.runtime, { recursive: true });
-  applyRestrictedPermissions(layout.runtime, options);
+  applyRestrictedPermissions(layout.runtime, { ...options, kind: "directory" });
   fs.writeFileSync(layout.passwordFile, `${password}\n`, { encoding: "utf8", mode: 0o600 });
-  applyRestrictedPermissions(layout.passwordFile, options);
+  applyRestrictedPermissions(layout.passwordFile, { ...options, kind: "file" });
 }
 
 /** @deprecated Packaged production must not persist filesystem secrets. */

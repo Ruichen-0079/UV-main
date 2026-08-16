@@ -150,7 +150,7 @@ export function initializePrivateCluster(input: {
   const pwFile = path.join(input.layout.runtime, `initdb-pw.${process.pid}.tmp`);
   try {
     fs.writeFileSync(pwFile, `${input.password}\n`, { encoding: "utf8", mode: 0o600 });
-    restrictPathToCurrentUser(pwFile);
+    restrictPathToCurrentUser(pwFile, { kind: "file" });
     const args = [
       "-D",
       input.layout.data,
@@ -214,7 +214,7 @@ export function writeLocalOnlyConfig(layout: PostgresLayout, port: number): void
     ].join("\n"),
     "utf8"
   );
-  restrictPathToCurrentUser(include);
+  restrictPathToCurrentUser(include, { kind: "file" });
 
   const existing = fs.existsSync(conf) ? fs.readFileSync(conf, "utf8") : "";
   if (!existing.includes("postgresql.yuvi.conf")) {
@@ -232,7 +232,7 @@ export function writeLocalOnlyConfig(layout: PostgresLayout, port: number): void
     ].join("\n"),
     "utf8"
   );
-  restrictPathToCurrentUser(hba);
+  restrictPathToCurrentUser(hba, { kind: "file" });
 }
 
 export function buildPostgresStartCommand(

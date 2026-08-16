@@ -78,11 +78,29 @@ describe("private postgres layout", () => {
     if (!inspected.ok) expect(inspected.code).toBe("POSTGRES_FOREIGN_PGDATA");
   });
 
-  it("builds Windows ACL arguments without Everyone write", () => {
-    const args = aclGrantArguments("C:\\YUVI\\Postgres", "alice");
-    expect(args).toContain("/inheritance:r");
-    expect(args.join(" ")).toContain("alice:(F)");
-    expect(args.join(" ").toLowerCase()).not.toContain("everyone");
+  it("builds inheritable directory ACL arguments without Everyone write", () => {
+    const args = aclGrantArguments("C:\\YUVI\\Postgres", "alice", "directory");
+    expect(args).toEqual(["C:\\YUVI\\Postgres", "/inheritance:r", "/grant:r", "alice:(OI)(CI)(F)"]);
+    const joined = args.join(" ");
+    expect(joined).not.toMatch(/(?:^|\s)\/T(?:\s|$)/);
+    expect(joined.toLowerCase()).not.toContain("everyone");
+    expect(joined).not.toContain("BUILTIN\\Users");
+    expect(joined).not.toMatch(/Authenticated Users/i);
+  });
+
+  it("builds this-object file ACL arguments without inherit flags", () => {
+    const args = aclGrantArguments("C:\\YUVI\\Postgres\\runtime\\initdb-pw.tmp", "alice", "file");
+    expect(args).toEqual([
+      "C:\\YUVI\\Postgres\\runtime\\initdb-pw.tmp",
+      "/inheritance:r",
+      "/grant:r",
+      "alice:(F)"
+    ]);
+    const joined = args.join(" ");
+    expect(joined).not.toContain("(OI)");
+    expect(joined).not.toContain("(CI)");
+    expect(joined).not.toMatch(/(?:^|\s)\/T(?:\s|$)/);
+    expect(joined.toLowerCase()).not.toContain("everyone");
   });
 
   it("refuses a PGDATA symlink that escapes the cluster root", () => {

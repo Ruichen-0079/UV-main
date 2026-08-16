@@ -16,6 +16,7 @@ import {
 import {
   aclGrantArguments as aclGrantArgumentsImpl,
   applyRestrictedPermissions,
+  type RestrictedPathKind,
   type WindowsAclAdapter
 } from "./postgres-acl.js";
 
@@ -248,15 +249,20 @@ export function assertPgdataContained(layout: PostgresLayout): void {
 
 export function ensurePostgresDirectories(
   layout: PostgresLayout,
-  options: { adapter?: WindowsAclAdapter } = {}
+  options: { adapter?: WindowsAclAdapter; platform?: NodeJS.Platform } = {}
 ): void {
   assertPgdataContained(layout);
+  const directoryAcl = {
+    kind: "directory" as const,
+    ...(options.adapter ? { adapter: options.adapter } : {}),
+    ...(options.platform ? { platform: options.platform } : {})
+  };
   fs.mkdirSync(layout.root, { recursive: true });
-  applyRestrictedPermissions(layout.root, options.adapter ? { adapter: options.adapter } : {});
+  applyRestrictedPermissions(layout.root, directoryAcl);
   fs.mkdirSync(layout.data, { recursive: true });
-  applyRestrictedPermissions(layout.data, options.adapter ? { adapter: options.adapter } : {});
+  applyRestrictedPermissions(layout.data, directoryAcl);
   fs.mkdirSync(layout.runtime, { recursive: true });
-  applyRestrictedPermissions(layout.runtime, options.adapter ? { adapter: options.adapter } : {});
+  applyRestrictedPermissions(layout.runtime, directoryAcl);
   assertPgdataContained(layout);
 }
 
@@ -266,7 +272,7 @@ export function readClusterMarker(layout: PostgresLayout): YuviClusterMarker | n
 
 export function writeClusterMarker(layout: PostgresLayout, marker: YuviClusterMarker): void {
   writeJsonFile(layout.markerFile, marker);
-  restrictPathToCurrentUser(layout.markerFile);
+  restrictPathToCurrentUser(layout.markerFile, { kind: "file" });
 }
 
 export function createClusterMarker(layout: PostgresLayout): YuviClusterMarker {
@@ -286,7 +292,7 @@ export function readListenMetadata(layout: PostgresLayout): PostgresListenMetada
 
 export function writeListenMetadata(layout: PostgresLayout, listen: PostgresListenMetadata): void {
   writeJsonFile(layout.listenFile, listen);
-  restrictPathToCurrentUser(layout.listenFile);
+  restrictPathToCurrentUser(layout.listenFile, { kind: "file" });
 }
 
 export function readInitializationState(
@@ -316,7 +322,7 @@ export function writeInitializationState(
     if (evidence.stderrTail) record.stderrTail = evidence.stderrTail;
   }
   writeJsonFile(layout.initializationStateFile, record);
-  restrictPathToCurrentUser(layout.initializationStateFile);
+  restrictPathToCurrentUser(layout.initializationStateFile, { kind: "file" });
 }
 
 export function readPgVersion(layout: PostgresLayout): number | null {
@@ -339,13 +345,21 @@ export function pgdataLooksInitialized(layout: PostgresLayout): boolean {
 
 export function restrictPathToCurrentUser(
   targetPath: string,
-  options: { adapter?: WindowsAclAdapter } = {}
+  options: {
+    adapter?: WindowsAclAdapter;
+    platform?: NodeJS.Platform;
+    kind: RestrictedPathKind;
+  }
 ): void {
   applyRestrictedPermissions(targetPath, options);
 }
 
-export function aclGrantArguments(targetPath: string, user: string): string[] {
-  return aclGrantArgumentsImpl(targetPath, user);
+export function aclGrantArguments(
+  targetPath: string,
+  user: string,
+  kind: RestrictedPathKind
+): string[] {
+  return aclGrantArgumentsImpl(targetPath, user, kind);
 }
 
 function requireAbsolutePath(value: string, key: string): string {
@@ -422,11 +436,11 @@ function readJsonFile<T>(filePath: string, parse: (value: unknown) => T | null):
 
 function writeJsonFile(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  applyRestrictedPermissions(path.dirname(filePath));
+  applyRestrictedPermissions(path.dirname(filePath), { kind: "directory" });
   const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   fs.renameSync(tmp, filePath);
-  applyRestrictedPermissions(filePath);
+  applyRestrictedPermissions(filePath, { kind: "file" });
 }
 
 function parseClusterMarker(value: unknown): YuviClusterMarker | null {
