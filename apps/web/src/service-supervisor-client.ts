@@ -7,6 +7,7 @@
 import { isTauriRuntime } from "./tauri-window.js";
 import {
   initialServiceStatusState,
+  isValidSnapshotTimestamp,
   normalizeUiServiceSnapshots,
   reduceServiceStatus,
   type ServiceStatusState,
@@ -39,28 +40,43 @@ export function isServiceSupervisorAvailable(): boolean {
 }
 
 /** Fallback poll when events are quiet. Prefer event-driven updates. */
-const STATUS_FALLBACK_POLL_MS = 5_000;
+export const STATUS_FALLBACK_POLL_MS = 5_000;
 
-export function subscribeServiceStatus(handlers: StatusHandlers): () => void {
+export type ServiceStatusSubscriptionOptions = {
+  getStatus?: () => Promise<SupervisorSnapshotDto | null>;
+};
+
+export function subscribeServiceStatus(
+  handlers: StatusHandlers,
+  options: ServiceStatusSubscriptionOptions = {}
+): () => void {
   let cancelled = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let unlisten: (() => void) | null = null;
+  let connectionGeneration = 0;
   /** Skip redundant fallback poll briefly after a live event. */
   let lastEventAt = 0;
+  const readStatus = options.getStatus ?? getServiceStatus;
+
+  const disconnect = (error?: string): void => {
+    connectionGeneration += 1;
+    handlers.onDisconnected(error);
+  };
 
   const tick = async (source: "poll" | "event" | "boot") => {
     if (cancelled) return;
     if (source === "poll" && Date.now() - lastEventAt < STATUS_FALLBACK_POLL_MS - 250) {
       return;
     }
+    const requestGeneration = connectionGeneration;
     try {
-      const snapshot = await getServiceStatus();
-      if (cancelled || !snapshot) return;
+      const snapshot = await readStatus();
+      if (cancelled || requestGeneration !== connectionGeneration || !snapshot) return;
       handlers.onConnected(snapshot.instanceId);
       handlers.onSnapshot(snapshot);
     } catch (error) {
-      if (cancelled) return;
-      handlers.onDisconnected(error instanceof Error ? error.message : String(error));
+      if (cancelled || requestGeneration !== connectionGeneration) return;
+      disconnect(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -151,7 +167,8 @@ export async function invokeServiceAction(
 
 /** Shared reducer-backed subscription for surfaces that need projection inputs. */
 export function subscribeServiceStatusState(
-  onState: (state: ServiceStatusState) => void
+  onState: (state: ServiceStatusState) => void,
+  options: ServiceStatusSubscriptionOptions = {}
 ): () => void {
   let state = initialServiceStatusState;
   const apply = (action: ServiceStatusAction): void => {
@@ -160,21 +177,24 @@ export function subscribeServiceStatusState(
     state = next;
     onState(state);
   };
-  return subscribeServiceStatus({
-    onConnected: (instanceId) => apply({ type: "supervisor-connected", instanceId }),
-    onSnapshot: (snapshot) =>
-      apply({
-        type: "snapshot",
-        instanceId: snapshot.instanceId,
-        shuttingDown: snapshot.shuttingDown,
-        services: snapshot.services,
-        updatedAt: snapshot.updatedAt
-      }),
-    onDisconnected: (error) =>
-      apply(
-        error ? { type: "supervisor-disconnected", error } : { type: "supervisor-disconnected" }
-      )
-  });
+  return subscribeServiceStatus(
+    {
+      onConnected: (instanceId) => apply({ type: "supervisor-connected", instanceId }),
+      onSnapshot: (snapshot) =>
+        apply({
+          type: "snapshot",
+          instanceId: snapshot.instanceId,
+          shuttingDown: snapshot.shuttingDown,
+          services: snapshot.services,
+          updatedAt: snapshot.updatedAt
+        }),
+      onDisconnected: (error) =>
+        apply(
+          error ? { type: "supervisor-disconnected", error } : { type: "supervisor-disconnected" }
+        )
+    },
+    options
+  );
 }
 
 export function parseSupervisorSnapshot(value: unknown): SupervisorSnapshotDto | null {
@@ -189,7 +209,7 @@ export function parseSupervisorSnapshot(value: unknown): SupervisorSnapshotDto |
     instanceId.trim().length === 0 ||
     typeof shuttingDown !== "boolean" ||
     typeof updatedAt !== "string" ||
-    updatedAt.trim().length === 0 ||
+    !isValidSnapshotTimestamp(updatedAt) ||
     services === null
   ) {
     return null;

@@ -27,7 +27,13 @@ export type CapabilityProjection = {
 
 export type EffectiveVoiceOutput = {
   requestTts: boolean;
-  reason: "persistent-disabled" | "settings-pending" | "voice-disabled" | "tts-unavailable" | null;
+  reason:
+    | "persistent-disabled"
+    | "settings-pending"
+    | "voice-disabled"
+    | "tts-unavailable"
+    | "tts-unknown"
+    | null;
 };
 
 export function deriveRuntimeConnectivity(
@@ -134,6 +140,7 @@ export function deriveEffectiveVoiceOutput(input: {
   persistentTtsEnabled: boolean | null;
   perTurnVoiceOutput: boolean;
   ttsCapability: CompanionPresenceCapabilityState;
+  ttsConfiguration: CompanionTtsConfiguration | null;
 }): EffectiveVoiceOutput {
   if (input.persistentTtsEnabled === false) {
     return { requestTts: false, reason: "persistent-disabled" };
@@ -144,11 +151,14 @@ export function deriveEffectiveVoiceOutput(input: {
   if (!input.perTurnVoiceOutput) {
     return { requestTts: false, reason: "voice-disabled" };
   }
-  // Unknown is intentionally not treated as unavailable. In external mode,
-  // supervisor absence does not prove that the configured TTS endpoint is
-  // down; an actual synthesis failure remains item-level P5-B truth.
+  // External mode may optimistically request while supervisor health is
+  // unknown; supervisor absence does not prove that its configured endpoint
+  // is down. Managed mode waits for authoritative service evidence below.
   if (input.ttsCapability === "unavailable") {
     return { requestTts: false, reason: "tts-unavailable" };
+  }
+  if (input.ttsCapability === "unknown" && input.ttsConfiguration?.mode === "managed") {
+    return { requestTts: false, reason: "tts-unknown" };
   }
   return { requestTts: true, reason: null };
 }

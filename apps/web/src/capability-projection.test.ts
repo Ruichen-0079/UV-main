@@ -14,6 +14,7 @@ import {
 } from "./companion-presence.js";
 import {
   initialServiceStatusState,
+  reduceServiceStatus,
   type ServiceStatusState,
   type UiServiceSnapshot
 } from "./service-status-state.js";
@@ -212,37 +213,126 @@ describe("P5-D capability projection", () => {
       deriveEffectiveVoiceOutput({
         persistentTtsEnabled: false,
         perTurnVoiceOutput: true,
-        ttsCapability: "available"
+        ttsCapability: "available",
+        ttsConfiguration: { enabled: false, mode: "managed" }
       }).requestTts
     ).toBe(false);
     expect(
       deriveEffectiveVoiceOutput({
         persistentTtsEnabled: true,
         perTurnVoiceOutput: false,
-        ttsCapability: "available"
+        ttsCapability: "available",
+        ttsConfiguration: { enabled: true, mode: "external" }
       }).requestTts
     ).toBe(false);
     expect(
       deriveEffectiveVoiceOutput({
         persistentTtsEnabled: true,
         perTurnVoiceOutput: true,
-        ttsCapability: "available"
+        ttsCapability: "available",
+        ttsConfiguration: { enabled: true, mode: "external" }
       }).requestTts
     ).toBe(true);
     expect(
       deriveEffectiveVoiceOutput({
         persistentTtsEnabled: true,
         perTurnVoiceOutput: true,
-        ttsCapability: "unavailable"
+        ttsCapability: "unavailable",
+        ttsConfiguration: { enabled: true, mode: "external" }
       }).requestTts
     ).toBe(false);
     expect(
       deriveEffectiveVoiceOutput({
         persistentTtsEnabled: true,
         perTurnVoiceOutput: true,
-        ttsCapability: "unknown"
+        ttsCapability: "unknown",
+        ttsConfiguration: { enabled: true, mode: "external" }
       }).requestTts
     ).toBe(true);
+    expect(
+      deriveEffectiveVoiceOutput({
+        persistentTtsEnabled: true,
+        perTurnVoiceOutput: true,
+        ttsCapability: "unknown",
+        ttsConfiguration: { enabled: true, mode: "managed" }
+      })
+    ).toEqual({ requestTts: false, reason: "tts-unknown" });
+    expect(
+      deriveEffectiveVoiceOutput({
+        persistentTtsEnabled: true,
+        perTurnVoiceOutput: true,
+        ttsCapability: "available",
+        ttsConfiguration: { enabled: true, mode: "managed" }
+      }).requestTts
+    ).toBe(true);
+    expect(
+      deriveEffectiveVoiceOutput({
+        persistentTtsEnabled: true,
+        perTurnVoiceOutput: true,
+        ttsCapability: "unavailable",
+        ttsConfiguration: { enabled: true, mode: "external" }
+      }).requestTts
+    ).toBe(false);
+    expect(
+      deriveEffectiveVoiceOutput({
+        persistentTtsEnabled: null,
+        perTurnVoiceOutput: true,
+        ttsCapability: "available",
+        ttsConfiguration: { enabled: true, mode: "managed" }
+      }).requestTts
+    ).toBe(false);
+  });
+
+  it("rejects a stale stopped snapshot before it can invalidate an active epoch", () => {
+    const healthy = [service("runtime", "healthy")];
+    let serviceState = reduceServiceStatus(initialServiceStatusState, {
+      type: "snapshot",
+      instanceId: "instance-a",
+      shuttingDown: false,
+      updatedAt: "2026-01-01T00:00:01.000Z",
+      services: healthy
+    });
+    serviceState = reduceServiceStatus(serviceState, {
+      type: "snapshot",
+      instanceId: "instance-a",
+      shuttingDown: false,
+      updatedAt: "2026-01-01T00:00:03.000Z",
+      services: [service("runtime", "healthy")]
+    });
+    serviceState = reduceServiceStatus(serviceState, {
+      type: "snapshot",
+      instanceId: "instance-a",
+      shuttingDown: false,
+      updatedAt: "2026-01-01T00:00:02.000Z",
+      services: [service("runtime", "stopped")]
+    });
+
+    expect(serviceState.updatedAt).toBe("2026-01-01T00:00:03.000Z");
+    expect(serviceState.services[0]?.status).toBe("healthy");
+
+    let current = reduceCompanionPresence(createInitialCompanionPresence(), {
+      type: "turn-start",
+      epoch: "turn-a"
+    });
+    current = reduceCompanionPresence(current, {
+      type: "playback",
+      epoch: "turn-a",
+      state: "started"
+    });
+    current = apply(
+      current,
+      deriveCapabilityProjection({
+        serviceStatus: serviceState,
+        persistentTtsEnabled: true,
+        ttsConfiguration: { enabled: true, mode: "external" },
+        audio: "available",
+        live2dLifecycle: "ready"
+      })
+    );
+    expect(current.connectivity).toBe("online");
+    expect(current.lifecycle).toBe("active");
+    expect(current.epoch).toBe("turn-a");
+    expect(current.speech).toBe("active");
   });
 
   it("preserves the active epoch on capability updates and invalidates only offline", () => {

@@ -41,6 +41,7 @@ export type ServiceStatusState = {
   connected: boolean;
   shuttingDown: boolean;
   instanceId: string | null;
+  retiredInstanceIds: string[];
   services: UiServiceSnapshot[];
   updatedAt: string | null;
   lastError: string | null;
@@ -84,10 +85,15 @@ export const initialServiceStatusState: ServiceStatusState = {
   connected: false,
   shuttingDown: false,
   instanceId: null,
+  retiredInstanceIds: [],
   services: [],
   updatedAt: null,
   lastError: null
 };
+
+export function isValidSnapshotTimestamp(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && Number.isFinite(Date.parse(value));
+}
 
 /** Validate supervisor service records before they can reach UI projection code. */
 export function normalizeUiServiceSnapshot(value: unknown): UiServiceSnapshot | null {
@@ -163,27 +169,15 @@ export function reduceServiceStatus(
     case "reset":
       return { ...initialServiceStatusState };
     case "supervisor-connected":
+      if (state.retiredInstanceIds.includes(action.instanceId)) return state;
       if (state.connected && state.instanceId === action.instanceId && !state.lastError) {
         return state;
       }
       if (state.instanceId !== null && state.connected && state.instanceId !== action.instanceId) {
-        // A snapshot carrying a replacement instance establishes the new
-        // connection. The snapshot itself is admitted below only when its
-        // timestamp is newer than the current instance, so a late poll from
-        // the retired instance cannot roll the reducer backwards.
-        return state;
+        return adoptSupervisorInstance(state, action.instanceId);
       }
       if (state.instanceId !== null && state.instanceId !== action.instanceId) {
-        return {
-          ...state,
-          ready: true,
-          connected: true,
-          instanceId: action.instanceId,
-          services: [],
-          shuttingDown: false,
-          updatedAt: null,
-          lastError: null
-        };
+        return adoptSupervisorInstance(state, action.instanceId);
       }
       return {
         ...state,
@@ -199,40 +193,21 @@ export function reduceServiceStatus(
         lastError: action.error ?? state.lastError
       };
     case "snapshot": {
+      if (!isValidSnapshotTimestamp(action.updatedAt)) return state;
+      if (state.retiredInstanceIds.includes(action.instanceId)) return state;
       // A late response from a previous supervisor instance must not replace
       // the current instance. A snapshot after transport loss also requires
       // a fresh supervisor-connected edge first.
       if (state.instanceId !== null && !state.connected) {
         return state;
       }
-      if (
-        state.instanceId !== null &&
-        state.instanceId !== action.instanceId &&
-        !isNewerSnapshot(state.updatedAt, action.updatedAt)
-      ) {
-        return state;
+      if (state.instanceId !== null && state.instanceId !== action.instanceId) {
+        // Instance identity establishes a new authority generation. Its
+        // first valid snapshot is not ordered against the retired instance's
+        // wall clock; ordering resumes within the adopted instance below.
+        return applySnapshot(adoptSupervisorInstance(state, action.instanceId), action);
       }
-      if (isOlderSnapshot(state.updatedAt, action.updatedAt)) return state;
-      if (
-        state.connected &&
-        state.instanceId === action.instanceId &&
-        state.shuttingDown === action.shuttingDown &&
-        state.lastError === null &&
-        servicesUiEqual(state.services, action.services)
-      ) {
-        // Same UI-visible snapshot — skip re-render (updatedAt alone is noise).
-        return state;
-      }
-      return {
-        ...state,
-        ready: true,
-        connected: true,
-        instanceId: action.instanceId,
-        shuttingDown: action.shuttingDown,
-        services: action.services,
-        updatedAt: action.updatedAt,
-        lastError: null
-      };
+      return applySnapshot(state, action);
     }
     case "local-error":
       if (state.lastError === action.error) return state;
@@ -242,20 +217,60 @@ export function reduceServiceStatus(
   }
 }
 
+function adoptSupervisorInstance(
+  state: ServiceStatusState,
+  instanceId: string
+): ServiceStatusState {
+  const retiredInstanceIds = state.instanceId
+    ? Array.from(new Set([...state.retiredInstanceIds, state.instanceId]))
+    : state.retiredInstanceIds;
+  return {
+    ...state,
+    ready: true,
+    connected: true,
+    instanceId,
+    retiredInstanceIds,
+    services: [],
+    shuttingDown: false,
+    updatedAt: null,
+    lastError: null
+  };
+}
+
+function applySnapshot(
+  state: ServiceStatusState,
+  action: Extract<ServiceStatusAction, { type: "snapshot" }>
+): ServiceStatusState {
+  if (isOlderSnapshot(state.updatedAt, action.updatedAt)) return state;
+  if (
+    state.connected &&
+    state.instanceId === action.instanceId &&
+    state.shuttingDown === action.shuttingDown &&
+    state.lastError === null &&
+    servicesUiEqual(state.services, action.services)
+  ) {
+    // Keep UI references stable while advancing authoritative recency.
+    if (state.updatedAt === action.updatedAt) return state;
+    return { ...state, updatedAt: action.updatedAt };
+  }
+  return {
+    ...state,
+    ready: true,
+    connected: true,
+    instanceId: action.instanceId,
+    shuttingDown: action.shuttingDown,
+    services: action.services,
+    updatedAt: action.updatedAt,
+    lastError: null
+  };
+}
+
 function isOlderSnapshot(current: string | null, incoming: string): boolean {
   if (!current) return false;
   const currentTime = Date.parse(current);
   const incomingTime = Date.parse(incoming);
   if (!Number.isFinite(currentTime) || !Number.isFinite(incomingTime)) return false;
   return incomingTime <= currentTime;
-}
-
-function isNewerSnapshot(current: string | null, incoming: string): boolean {
-  if (!current) return true;
-  const currentTime = Date.parse(current);
-  const incomingTime = Date.parse(incoming);
-  if (!Number.isFinite(currentTime) || !Number.isFinite(incomingTime)) return false;
-  return incomingTime > currentTime;
 }
 
 function isOneOf<T extends string>(value: unknown, values: readonly T[]): value is T {

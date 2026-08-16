@@ -112,9 +112,10 @@ export function MainPage(): JSX.Element {
       deriveEffectiveVoiceOutput({
         persistentTtsEnabled: ttsConfig?.enabled ?? null,
         perTurnVoiceOutput: voiceOutput,
-        ttsCapability: capabilityProjection.capabilities.tts
+        ttsCapability: capabilityProjection.capabilities.tts,
+        ttsConfiguration: ttsConfig
       }),
-    [capabilityProjection.capabilities.tts, ttsConfig?.enabled, voiceOutput]
+    [capabilityProjection.capabilities.tts, ttsConfig?.enabled, ttsConfig?.mode, voiceOutput]
   );
   const effectiveVoiceOutputRef = useRef(effectiveVoiceOutput);
   ttsConfigRef.current = ttsConfig;
