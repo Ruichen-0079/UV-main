@@ -24,8 +24,38 @@ import {
 import { generatePostgresPassword, redactSecretText } from "./postgres-secret.js";
 import type { PostgresDistribution } from "./postgres-distribution.js";
 
+type SpawnSyncOverride = (
+  command: string,
+  args?: readonly string[],
+  options?: Record<string, unknown>
+) => {
+  error?: Error | undefined;
+  status: number | null;
+  signal: NodeJS.Signals | string | null;
+  stdout: string;
+  stderr: string;
+};
+
+const childProcessState = vi.hoisted(() => ({
+  override: null as SpawnSyncOverride | null
+}));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    spawnSync: ((command: string, args?: readonly string[], options?: Record<string, unknown>) => {
+      if (childProcessState.override) {
+        return childProcessState.override(command, args, options);
+      }
+      return actual.spawnSync(command, args as string[] | undefined, options);
+    }) as typeof actual.spawnSync
+  };
+});
+
 const tempDirs: string[] = [];
 afterEach(() => {
+  childProcessState.override = null;
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -142,15 +172,6 @@ describe("initdb failure evidence", () => {
     };
   }
 
-  function writeFakeInitdb(source: string): string {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-fake-initdb-"));
-    tempDirs.push(dir);
-    const file = path.join(dir, "initdb");
-    fs.writeFileSync(file, source, { encoding: "utf8", mode: 0o755 });
-    fs.chmodSync(file, 0o755);
-    return file;
-  }
-
   function runInitialize(initdb: string, password = generatePostgresPassword()) {
     const layout = emptyLayout();
     const result = initializePrivateCluster({
@@ -160,6 +181,36 @@ describe("initdb failure evidence", () => {
       port: 55432
     });
     return { layout, result, password };
+  }
+
+  function assertInitdbSpawnCall(
+    call: {
+      command: string;
+      args: readonly string[];
+      options: Record<string, unknown> | undefined;
+    },
+    input: { initdb: string; dataDir: string; password: string }
+  ) {
+    expect(call.command).toBe(input.initdb);
+    expect(call.args).toEqual(
+      expect.arrayContaining([
+        "-D",
+        input.dataDir,
+        "--encoding=UTF8",
+        "--locale=C",
+        "--username=yuvi",
+        "--auth-host=scram-sha-256",
+        "--auth-local=scram-sha-256"
+      ])
+    );
+    const pwfile = call.args.find((value) => String(value).startsWith("--pwfile="));
+    expect(pwfile).toEqual(expect.stringMatching(/^--pwfile=/));
+    expect(String(pwfile)).not.toContain(input.password);
+    expect(call.command).not.toContain(input.password);
+    expect(call.args.join("\0")).not.toContain(input.password);
+    expect(call.options?.["encoding"]).toBe("utf8");
+    expect(call.options?.["timeout"]).toBe(60_000);
+    expect(call.options?.["windowsHide"]).toBe(true);
   }
 
   it("classifies spawn failure, nonzero exit, signal, timeout, and success separately", () => {
@@ -212,12 +263,27 @@ describe("initdb failure evidence", () => {
   });
 
   it("persists the stderr fatal sentinel after a Windows-like initdb banner", () => {
-    const initdb = writeFakeInitdb(`#!/usr/bin/env node
-process.stdout.write(${JSON.stringify(windowsBanner)});
-process.stderr.write("FATAL_TEST_SENTINEL\\n");
-process.exit(1);
-`);
-    const { layout, result } = runInitialize(initdb);
+    const initdb = path.join(os.tmpdir(), "yuvi-initdb-fixture", "initdb");
+    let observed:
+      | {
+          command: string;
+          args: readonly string[];
+          options: Record<string, unknown> | undefined;
+        }
+      | undefined;
+    childProcessState.override = (command, args = [], options) => {
+      observed = { command, args, options };
+      return {
+        error: undefined,
+        status: 1,
+        signal: null,
+        stdout: windowsBanner,
+        stderr: "FATAL_TEST_SENTINEL\n"
+      };
+    };
+    const { layout, result, password } = runInitialize(initdb);
+    expect(observed).toBeDefined();
+    if (observed) assertInitdbSpawnCall(observed, { initdb, dataDir: layout.data, password });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("POSTGRES_INIT_FAILED");
     const state = readInitializationState(layout);
@@ -247,11 +313,16 @@ process.exit(1);
   });
 
   it("preserves a signalled initdb separately from a nonzero exit", () => {
-    const initdb = writeFakeInitdb(`#!/usr/bin/env node
-process.kill(process.pid, "SIGTERM");
-setTimeout(() => process.exit(1), 5000);
-`);
-    const { layout, result } = runInitialize(initdb);
+    childProcessState.override = () => ({
+      error: undefined,
+      status: null,
+      signal: "SIGTERM",
+      stdout: "",
+      stderr: ""
+    });
+    const { layout, result } = runInitialize(
+      path.join(os.tmpdir(), "yuvi-initdb-fixture", "initdb")
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("POSTGRES_INIT_FAILED");
     const state = readInitializationState(layout);
@@ -262,10 +333,16 @@ setTimeout(() => process.exit(1), 5000);
   });
 
   it("leaves success initialization-state free of failure evidence", () => {
-    const initdb = writeFakeInitdb(`#!/usr/bin/env node
-process.exit(0);
-`);
-    const { layout, result } = runInitialize(initdb);
+    childProcessState.override = () => ({
+      error: undefined,
+      status: 0,
+      signal: null,
+      stdout: "",
+      stderr: ""
+    });
+    const { layout, result } = runInitialize(
+      path.join(os.tmpdir(), "yuvi-initdb-fixture", "initdb")
+    );
     expect(result.ok).toBe(true);
     const state = readInitializationState(layout);
     expect(state?.state).toBe("ready");
@@ -305,20 +382,25 @@ process.exit(0);
         logs.push(args.map((value) => String(value)).join(" "));
       });
     const spies = [spy("log"), spy("info"), spy("warn"), spy("error")];
-    const initdb = writeFakeInitdb(`#!/usr/bin/env node
-process.stdout.write(${JSON.stringify(windowsBanner)});
-process.stderr.write([
-  "YUVI_POSTGRES_PASSWORD=SUPERSECRET",
-  "postgres://yuvi:SUPERSECRET@127.0.0.1/yuvi",
-  "password=SUPERSECRET",
-  "PGPASSWORD=SUPERSECRET",
-  "Bearer SUPERSECRET",
-  "FATAL_TEST_SENTINEL"
-].join("\\n"));
-process.exit(1);
-`);
+    childProcessState.override = () => ({
+      error: undefined,
+      status: 1,
+      signal: null,
+      stdout: windowsBanner,
+      stderr: [
+        "YUVI_POSTGRES_PASSWORD=SUPERSECRET",
+        "postgres://yuvi:SUPERSECRET@127.0.0.1/yuvi",
+        "password=SUPERSECRET",
+        "PGPASSWORD=SUPERSECRET",
+        "Bearer SUPERSECRET",
+        "FATAL_TEST_SENTINEL"
+      ].join("\n")
+    });
     try {
-      const { layout, result } = runInitialize(initdb, generatePostgresPassword());
+      const { layout, result } = runInitialize(
+        path.join(os.tmpdir(), "yuvi-initdb-fixture", "initdb"),
+        generatePostgresPassword()
+      );
       expect(result.ok).toBe(false);
       const state = readInitializationState(layout);
       const serialized = fs.readFileSync(layout.initializationStateFile, "utf8");
