@@ -1,5 +1,10 @@
-import type { ProviderHealth } from "../types/common.js";
-import { ProviderError, ProviderErrorCode } from "../types/errors.js";
+import type { ProviderCallOptions, ProviderHealth } from "../types/common.js";
+import {
+  ProviderError,
+  ProviderErrorCode,
+  mapHttpStatusToProviderErrorCode
+} from "../types/errors.js";
+import { createTransportAbort, type TransportAbort } from "../transport-abort.js";
 import type { TTSInput, TTSOutput, TTSProvider } from "../types/tts.js";
 
 export type GPTSoVITSTTSProviderOptions = {
@@ -37,15 +42,19 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
 
   async healthCheck(): Promise<ProviderHealth> {
     const startedAt = performance.now();
+    const transport = createTransportAbort({ timeoutMs: this.options.timeoutMs ?? 10_000 });
+
     try {
       const response = await fetch(`${trimTrailingSlash(this.options.wrapperBaseUrl)}/health`, {
         method: "GET",
-        signal: AbortSignal.timeout(this.options.timeoutMs ?? 10_000)
+        signal: transport.signal
       });
+      throwIfGPTSoVITSTransportAborted(transport);
       if (!response.ok) {
         throw new Error(`local GPT-SoVITS health returned ${response.status}`);
       }
       const body = (await response.json()) as { model_loaded?: unknown };
+      throwIfGPTSoVITSTransportAborted(transport);
       if (body.model_loaded !== true) {
         throw new Error("local GPT-SoVITS model is not loaded");
       }
@@ -78,77 +87,114 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
         latencyMs: Math.round(performance.now() - startedAt),
         message: error instanceof Error ? error.message : "Local GPT-SoVITS health check failed."
       };
+    } finally {
+      transport.cleanup();
     }
   }
 
-  async synthesizeSpeech(input: TTSInput): Promise<TTSOutput> {
-    if (!input.text.trim()) {
-      throw new ProviderError({
-        provider: this.name,
-        capability: "tts",
-        code: ProviderErrorCode.UnsupportedInput,
-        message: "TTS text must not be empty.",
-        retryable: false
-      });
-    }
+  async synthesizeSpeech(input: TTSInput, options?: ProviderCallOptions): Promise<TTSOutput> {
+    const callerSignal = options?.signal ?? input.signal;
+    const transport = createTransportAbort({
+      signal: callerSignal,
+      timeoutMs: this.options.timeoutMs ?? 60_000
+    });
+    let transportStarted = false;
 
-    const language = normalizeLanguage(
-      typeof input.metadata?.["language"] === "string"
-        ? input.metadata["language"]
-        : (this.options.defaultLanguage ?? "ja")
-    );
-    const start = performance.now();
-    const useWrapper = isJapanese(language) || !this.hasReferenceConfig();
-    const request = useWrapper
-      ? {
-          url: `${trimTrailingSlash(this.options.wrapperBaseUrl)}/tts`,
-          body: {
-            text: input.text,
-            // Alice's managed wrapper currently accepts Japanese requests
-            // only. In packaged mode there is no user-supplied API-v2
-            // reference pair, so preserve playback by using the managed
-            // voice for every requested language instead of returning 503.
-            language: isJapanese(language) ? language : "ja",
-            speaker: input.voice ?? this.options.speaker ?? "alice",
-            style: this.options.style ?? "neutral",
-            reference_rank: this.options.referenceRank ?? 0
-          }
-        }
-      : {
-          url: `${trimTrailingSlash(this.options.upstreamBaseUrl)}/tts`,
-          body: this.buildUpstreamRequest(input, language)
-        };
-
-    const response = await this.fetchAudio(request.url, request.body, input.signal);
-    const audio = response.audio;
-    if (audio.byteLength === 0) {
-      throw new ProviderError({
-        provider: this.name,
-        capability: "tts",
-        code: ProviderErrorCode.MalformedResponse,
-        message: "Local GPT-SoVITS returned empty audio.",
-        retryable: false
-      });
-    }
-
-    return {
-      audio,
-      audioBuffer: audio,
-      audioBase64: Buffer.from(audio).toString("base64"),
-      mimeType: response.mimeType,
-      latencyMs: Math.round(performance.now() - start),
-      model: this.options.model,
-      finalProvider: this.name,
-      providerMetadata: {
-        language,
-        speaker: input.voice ?? this.options.speaker ?? "alice",
-        transport: isJapanese(language)
-          ? "wrapper"
-          : this.hasReferenceConfig()
-            ? "api_v2"
-            : "wrapper-fallback"
+    try {
+      throwIfGPTSoVITSTransportAborted(transport);
+      if (!input.text.trim()) {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "tts",
+          code: ProviderErrorCode.UnsupportedInput,
+          message: "TTS text must not be empty.",
+          retryable: false
+        });
       }
-    };
+
+      const language = normalizeLanguage(
+        typeof input.metadata?.["language"] === "string"
+          ? input.metadata["language"]
+          : (this.options.defaultLanguage ?? "ja")
+      );
+      const start = performance.now();
+      const useWrapper = isJapanese(language) || !this.hasReferenceConfig();
+      const request = useWrapper
+        ? {
+            url: `${trimTrailingSlash(this.options.wrapperBaseUrl)}/tts`,
+            body: {
+              text: input.text,
+              // Alice's managed wrapper currently accepts Japanese requests
+              // only. In packaged mode there is no user-supplied API-v2
+              // reference pair, so preserve playback by using the managed
+              // voice for every requested language instead of returning 503.
+              language: isJapanese(language) ? language : "ja",
+              speaker: input.voice ?? this.options.speaker ?? "alice",
+              style: this.options.style ?? "neutral",
+              reference_rank: this.options.referenceRank ?? 0
+            }
+          }
+        : {
+            url: `${trimTrailingSlash(this.options.upstreamBaseUrl)}/tts`,
+            body: this.buildUpstreamRequest(input, language)
+          };
+
+      if (!transport.markStarted()) {
+        throwIfGPTSoVITSTransportAborted(transport);
+        throw new Error("Local GPT-SoVITS transport could not start.");
+      }
+      transportStarted = true;
+      const response = await this.fetchAudio(request.url, request.body, transport);
+      throwIfGPTSoVITSTransportAborted(transport);
+      const audio = response.audio;
+      if (audio.byteLength === 0) {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "tts",
+          code: ProviderErrorCode.MalformedResponse,
+          message: "Local GPT-SoVITS returned empty audio.",
+          retryable: false
+        });
+      }
+
+      return {
+        audio,
+        audioBuffer: audio,
+        audioBase64: Buffer.from(audio).toString("base64"),
+        mimeType: response.mimeType,
+        latencyMs: Math.round(performance.now() - start),
+        model: this.options.model,
+        finalProvider: this.name,
+        providerMetadata: {
+          language,
+          speaker: input.voice ?? this.options.speaker ?? "alice",
+          transport: isJapanese(language)
+            ? "wrapper"
+            : this.hasReferenceConfig()
+              ? "api_v2"
+              : "wrapper-fallback"
+        }
+      };
+    } catch (error) {
+      if (transport.source !== null) {
+        throw createGPTSoVITSTransportAbortError(transport);
+      }
+      if (error instanceof ProviderError) {
+        throw error;
+      }
+      if (!transportStarted) {
+        throw error;
+      }
+      throw new ProviderError({
+        provider: this.name,
+        capability: "tts",
+        code: ProviderErrorCode.NetworkError,
+        message: "Local GPT-SoVITS synthesis request failed.",
+        cause: error
+      });
+    } finally {
+      transport.cleanup();
+    }
   }
 
   private hasReferenceConfig(): boolean {
@@ -189,69 +235,32 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
   private async fetchAudio(
     url: string,
     body: Record<string, unknown>,
-    signal?: AbortSignal
+    transport: TransportAbort
   ): Promise<{ audio: Uint8Array; mimeType: string }> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 60_000);
-    const abort = () => controller.abort();
-    if (signal?.aborted) controller.abort();
-    signal?.addEventListener("abort", abort, { once: true });
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal: controller.signal
-      });
-      if (!response.ok) {
-        const bodyText = await response.text().catch(() => "");
-        throw new ProviderError({
-          provider: this.name,
-          capability: "tts",
-          code: mapStatus(response.status),
-          statusCode: response.status,
-          message: bodyText
-            ? `Local GPT-SoVITS request failed with ${response.status}: ${redact(bodyText).slice(0, 200)}`
-            : `Local GPT-SoVITS request failed with ${response.status}.`,
-          retryable: response.status === 429 || response.status >= 500
-        });
-      }
-      return {
-        audio: new Uint8Array(await response.arrayBuffer()),
-        mimeType: response.headers.get("content-type")?.split(";", 1)[0] ?? "audio/wav"
-      };
-    } catch (error) {
-      if (error instanceof ProviderError) throw error;
-      if (signal?.aborted) {
-        throw new ProviderError({
-          provider: this.name,
-          capability: "tts",
-          code: ProviderErrorCode.Cancelled,
-          message: "Local GPT-SoVITS synthesis was cancelled.",
-          retryable: false,
-          cause: error
-        });
-      }
-      if (error instanceof DOMException && error.name === "AbortError") {
-        throw new ProviderError({
-          provider: this.name,
-          capability: "tts",
-          code: ProviderErrorCode.Timeout,
-          message: "Local GPT-SoVITS synthesis timed out.",
-          cause: error
-        });
-      }
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: transport.signal
+    });
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "");
       throw new ProviderError({
         provider: this.name,
         capability: "tts",
-        code: ProviderErrorCode.NetworkError,
-        message: "Local GPT-SoVITS synthesis request failed.",
-        cause: error
+        code: mapHttpStatusToProviderErrorCode(response.status),
+        statusCode: response.status,
+        message: bodyText
+          ? `Local GPT-SoVITS request failed with ${response.status}: ${redact(bodyText).slice(0, 200)}`
+          : `Local GPT-SoVITS request failed with ${response.status}.`
       });
-    } finally {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", abort);
     }
+    const audio = new Uint8Array(await response.arrayBuffer());
+    throwIfGPTSoVITSTransportAborted(transport);
+    return {
+      audio,
+      mimeType: response.headers.get("content-type")?.split(";", 1)[0] ?? "audio/wav"
+    };
   }
 }
 
@@ -266,11 +275,32 @@ function isJapanese(language: string): boolean {
   return language === "ja";
 }
 
-function mapStatus(status: number): ProviderErrorCode {
-  if (status === 400) return ProviderErrorCode.UnsupportedInput;
-  if (status === 429) return ProviderErrorCode.RateLimited;
-  if (status >= 500) return ProviderErrorCode.ProviderUnavailable;
-  return ProviderErrorCode.ProviderUnavailable;
+function throwIfGPTSoVITSTransportAborted(transport: TransportAbort): void {
+  if (transport.source !== null) {
+    throw createGPTSoVITSTransportAbortError(transport);
+  }
+}
+
+function createGPTSoVITSTransportAbortError(transport: TransportAbort): ProviderError {
+  if (transport.source === "caller") {
+    return new ProviderError({
+      provider: "local",
+      capability: "tts",
+      code: ProviderErrorCode.Cancelled,
+      message: "Local GPT-SoVITS synthesis was cancelled.",
+      retryable: false,
+      fallbackEligible: false,
+      effectState: transport.effectState ?? "unknown"
+    });
+  }
+
+  return new ProviderError({
+    provider: "local",
+    capability: "tts",
+    code: ProviderErrorCode.Timeout,
+    message: "Local GPT-SoVITS synthesis timed out.",
+    effectState: transport.effectState ?? "unknown"
+  });
 }
 
 function redact(value: string): string {
