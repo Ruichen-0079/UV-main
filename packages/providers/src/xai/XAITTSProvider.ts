@@ -33,6 +33,7 @@ export class XAITTSProvider implements TTSProvider {
 
     try {
       throwIfXAITransportAborted(this.name, "tts", transport);
+      validateTTSInput(input);
       ensureXAIConfig(this.name, "tts", this.options);
 
       const start = performance.now();
@@ -59,7 +60,19 @@ export class XAITTSProvider implements TTSProvider {
 
       const audioBuffer = new Uint8Array(await response.arrayBuffer());
       throwIfXAITransportAborted(this.name, "tts", transport);
-      const mimeType = response.headers.get("content-type") ?? mimeTypeFromFormat(input.format);
+      if (audioBuffer.byteLength === 0) {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "tts",
+          code: ProviderErrorCode.MalformedResponse,
+          message: "xAI returned empty audio.",
+          retryable: false
+        });
+      }
+      const mimeType = normalizeAudioMimeType(
+        response.headers.get("content-type"),
+        mimeTypeFromFormat(input.format)
+      );
 
       return {
         audio: audioBuffer,
@@ -91,6 +104,23 @@ export class XAITTSProvider implements TTSProvider {
       transport.cleanup();
     }
   }
+}
+
+function validateTTSInput(input: TTSInput): void {
+  if (input.text.trim().length === 0) {
+    throw new ProviderError({
+      provider: "xai",
+      capability: "tts",
+      code: ProviderErrorCode.UnsupportedInput,
+      message: "TTS text must not be empty.",
+      retryable: false
+    });
+  }
+}
+
+function normalizeAudioMimeType(contentType: string | null, fallback: string): string {
+  const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  return mediaType || fallback;
 }
 
 function mimeTypeFromFormat(format: TTSInput["format"]): string {

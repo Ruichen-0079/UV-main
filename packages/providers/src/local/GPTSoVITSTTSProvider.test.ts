@@ -28,6 +28,35 @@ describe("GPTSoVITSTTSProvider", () => {
     fetchMock.mockRestore();
   });
 
+  it("preserves wrapper WAV compatibility and normalizes MIME parameters", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { "content-type": "Audio/WAV; codecs=1" }
+      })
+    );
+
+    const output = await new GPTSoVITSTTSProvider(options).synthesizeSpeech({
+      text: "はい。",
+      format: "wav"
+    });
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(requestBody).toMatchObject({ text: "はい。", language: "ja" });
+    expect(requestBody).not.toHaveProperty("format");
+    expect(output).toMatchObject({
+      mimeType: "audio/wav",
+      audio: new Uint8Array([1, 2, 3]),
+      audioBuffer: new Uint8Array([1, 2, 3]),
+      audioBase64: "AQID"
+    });
+    expect(new Uint8Array(Buffer.from(output.audioBase64 ?? "", "base64"))).toEqual(output.audio);
+    fetchMock.mockRestore();
+  });
+
   it("uses api_v2 with the Japanese reference for English text", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(new Uint8Array([4, 5]), {
@@ -49,6 +78,84 @@ describe("GPTSoVITSTTSProvider", () => {
     });
     // English must never be forced through the Japanese-only wrapper.
     expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("9881");
+    fetchMock.mockRestore();
+  });
+
+  it("maps API-v2 PCM and speed to the upstream full-buffer request", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(new Uint8Array([4, 5]), {
+        status: 200,
+        headers: { "content-type": "Audio/RAW; charset=binary" }
+      })
+    );
+
+    const output = await new GPTSoVITSTTSProvider(options).synthesizeSpeech({
+      text: "Hello.",
+      format: "pcm",
+      speed: 0.9,
+      metadata: { language: "en" }
+    });
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(requestBody).toMatchObject({
+      media_type: "raw",
+      streaming_mode: false,
+      speed_factor: 0.9
+    });
+    expect(output.mimeType).toBe("audio/raw");
+    expect(output.audioBase64).toBe("BAU=");
+    fetchMock.mockRestore();
+  });
+
+  it.each(["mp3", "opus", "mulaw", "alaw"] as const)(
+    "rejects unsupported API-v2 format %s instead of substituting WAV",
+    async (format) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch");
+
+      await expect(
+        new GPTSoVITSTTSProvider(options).synthesizeSpeech({
+          text: "Hello.",
+          format,
+          metadata: { language: "en" }
+        })
+      ).rejects.toMatchObject({
+        code: ProviderErrorCode.UnsupportedInput,
+        retryable: false,
+        effectState: "not_started"
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      fetchMock.mockRestore();
+    }
+  );
+
+  it("rejects unsupported wrapper formats instead of substituting WAV", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    await expect(
+      new GPTSoVITSTTSProvider(options).synthesizeSpeech({ text: "はい。", format: "mp3" })
+    ).rejects.toMatchObject({
+      code: ProviderErrorCode.UnsupportedInput,
+      retryable: false,
+      effectState: "not_started"
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
+  it("rejects wrapper speed because the managed wrapper has no speed field", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    await expect(
+      new GPTSoVITSTTSProvider(options).synthesizeSpeech({ text: "はい。", speed: 1.1 })
+    ).rejects.toMatchObject({
+      code: ProviderErrorCode.UnsupportedInput,
+      retryable: false,
+      effectState: "not_started"
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
     fetchMock.mockRestore();
   });
 
