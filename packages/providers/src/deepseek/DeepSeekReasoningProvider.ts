@@ -1,4 +1,4 @@
-import type { ProviderHealth } from "../types/common.js";
+import type { ProviderCallOptions, ProviderHealth } from "../types/common.js";
 import {
   normalizeReasoningOutput,
   type ReasoningInput,
@@ -20,7 +20,10 @@ export class DeepSeekReasoningProvider implements ReasoningProvider {
     return healthCheckDeepSeek(this.name, "reasoning", this.options);
   }
 
-  async generateReasoning(input: ReasoningInput): Promise<ReasoningOutput> {
+  async generateReasoning(
+    input: ReasoningInput,
+    options?: ProviderCallOptions
+  ): Promise<ReasoningOutput> {
     const completion = await createDeepSeekChatCompletion(this.name, "reasoning", this.options, {
       messages: input.messages,
       model: input.model,
@@ -29,7 +32,7 @@ export class DeepSeekReasoningProvider implements ReasoningProvider {
       // generateReasoning is non-streaming. The deprecated input.stream flag
       // must not create a second transport control plane.
       stream: false
-    });
+    }, options);
 
     return normalizeReasoningOutput(this.name, {
       // DeepSeek's reasoning_content is provider-internal trace and is

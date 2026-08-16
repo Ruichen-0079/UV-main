@@ -1,15 +1,21 @@
 import type {
   ProviderCapability,
+  ProviderCallOptions,
   ProviderHealth,
   TextMessage,
   TokenUsage
 } from "../types/common.js";
 import type { ChatInput, ChatStreamEvent, ChatStreamOptions } from "../types/chat.js";
-import { ProviderError, ProviderErrorCode } from "../types/errors.js";
+import {
+  ProviderError,
+  ProviderErrorCode,
+  mapHttpStatusToProviderErrorCode
+} from "../types/errors.js";
 import {
   streamOpenAICompatibleChatCompletion,
   type OpenAICompatibleStreamOptions
 } from "../openai-compatible-stream.js";
+import { createTransportAbort, type TransportAbort } from "../transport-abort.js";
 
 export type DeepSeekProviderOptions = {
   apiKey: string | undefined;
@@ -116,41 +122,77 @@ export async function createDeepSeekChatCompletion(
   provider: string,
   capability: ProviderCapability,
   options: DeepSeekProviderOptions,
-  request: DeepSeekChatRequest
+  request: DeepSeekChatRequest,
+  callOptions?: ProviderCallOptions
 ): Promise<DeepSeekChatCompletion & { latencyMs: number }> {
-  ensureDeepSeekConfig(provider, capability, options);
+  const transport = createTransportAbort({
+    signal: callOptions?.signal,
+    timeoutMs: options.timeoutMs ?? 30000
+  });
 
-  const model = request.model ?? options.model;
-  if (!model) {
+  try {
+    throwIfTransportAborted(provider, capability, transport);
+    ensureDeepSeekConfig(provider, capability, options);
+
+    const model = request.model ?? options.model;
+    if (!model) {
+      throw new ProviderError({
+        provider,
+        capability,
+        code: ProviderErrorCode.ModelNotFound,
+        message: `${provider} ${capability} model is not configured.`,
+        retryable: false
+      });
+    }
+
+    const start = performance.now();
+    if (!transport.markStarted()) {
+      throwIfTransportAborted(provider, capability, transport);
+      throw new Error("DeepSeek transport could not start.");
+    }
+
+    const response = await deepSeekFetch(options, "/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({
+        model,
+        messages: request.messages,
+        temperature: request.temperature,
+        max_tokens: request.maxTokens,
+        stop: request.stopSequences,
+        stream: request.stream ?? false
+      })
+    }, transport.signal);
+    if (!response.ok) {
+      throw await createStatusError(provider, capability, response);
+    }
+
+    const rawResponse = await parseJsonResponse(provider, capability, response);
+    throwIfTransportAborted(provider, capability, transport);
+    const completion = normalizeDeepSeekChatCompletion(provider, capability, rawResponse);
+
+    return {
+      ...completion,
+      rawResponse: options.includeRawResponse ? rawResponse : undefined,
+      latencyMs: Math.round(performance.now() - start)
+    };
+  } catch (error) {
+    const source = transport.source;
+    if (source !== null) {
+      throw createTransportAbortError(provider, capability, transport);
+    }
+    if (error instanceof ProviderError) {
+      throw error;
+    }
     throw new ProviderError({
       provider,
       capability,
-      code: ProviderErrorCode.ModelNotFound,
-      message: `${provider} ${capability} model is not configured.`,
-      retryable: false
+      code: ProviderErrorCode.NetworkError,
+      message: "DeepSeek network request failed.",
+      cause: error
     });
+  } finally {
+    transport.cleanup();
   }
-
-  const start = performance.now();
-  const response = await deepSeekFetch(provider, capability, options, "/chat/completions", {
-    method: "POST",
-    body: JSON.stringify({
-      model,
-      messages: request.messages,
-      temperature: request.temperature,
-      max_tokens: request.maxTokens,
-      stop: request.stopSequences,
-      stream: request.stream ?? false
-    })
-  });
-  const rawResponse = await parseJsonResponse(provider, capability, response);
-  const completion = normalizeDeepSeekChatCompletion(provider, capability, rawResponse);
-
-  return {
-    ...completion,
-    rawResponse: options.includeRawResponse ? rawResponse : undefined,
-    latencyMs: Math.round(performance.now() - start)
-  };
 }
 
 export function streamDeepSeekChatCompletion(
@@ -205,56 +247,20 @@ function ensureDeepSeekConfig(
 }
 
 async function deepSeekFetch(
-  provider: string,
-  capability: ProviderCapability,
   options: DeepSeekProviderOptions,
   path: string,
-  init: RequestInit
+  init: RequestInit,
+  signal: AbortSignal
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30000);
-
-  try {
-    const response = await fetch(`${trimTrailingSlash(options.baseUrl)}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${options.apiKey}`,
-        ...init.headers
-      },
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      throw await createStatusError(provider, capability, response);
-    }
-
-    return response;
-  } catch (error) {
-    if (error instanceof ProviderError) {
-      throw error;
-    }
-
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new ProviderError({
-        provider,
-        capability,
-        code: ProviderErrorCode.Timeout,
-        message: "DeepSeek request timed out.",
-        cause: error
-      });
-    }
-
-    throw new ProviderError({
-      provider,
-      capability,
-      code: ProviderErrorCode.NetworkError,
-      message: "DeepSeek network request failed.",
-      cause: error
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
+  return fetch(`${trimTrailingSlash(options.baseUrl)}${path}`, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${options.apiKey}`,
+      ...init.headers
+    },
+    signal
+  });
 }
 
 async function createStatusError(
@@ -262,7 +268,7 @@ async function createStatusError(
   capability: ProviderCapability,
   response: Response
 ): Promise<ProviderError> {
-  const code = mapStatusToProviderErrorCode(response.status);
+  const code = mapHttpStatusToProviderErrorCode(response.status);
   const safeBody = await readSafeErrorBody(response);
 
   return new ProviderError({
@@ -272,30 +278,44 @@ async function createStatusError(
     statusCode: response.status,
     message: safeBody
       ? `DeepSeek request failed with ${response.status}: ${safeBody}`
-      : `DeepSeek request failed with ${response.status}.`,
-    retryable:
-      code === ProviderErrorCode.RateLimited || code === ProviderErrorCode.ProviderUnavailable
+      : `DeepSeek request failed with ${response.status}.`
   });
 }
 
-function mapStatusToProviderErrorCode(status: number): ProviderErrorCode {
-  if (status === 401) {
-    return ProviderErrorCode.InvalidApiKey;
+function throwIfTransportAborted(
+  provider: string,
+  capability: ProviderCapability,
+  transport: TransportAbort
+): void {
+  if (transport.source !== null) {
+    throw createTransportAbortError(provider, capability, transport);
+  }
+}
+
+function createTransportAbortError(
+  provider: string,
+  capability: ProviderCapability,
+  transport: TransportAbort
+): ProviderError {
+  if (transport.source === "caller") {
+    return new ProviderError({
+      provider,
+      capability,
+      code: ProviderErrorCode.Cancelled,
+      message: `${provider} ${capability} was cancelled.`,
+      retryable: false,
+      fallbackEligible: false,
+      effectState: transport.effectState ?? "unknown"
+    });
   }
 
-  if (status === 403) {
-    return ProviderErrorCode.PermissionDenied;
-  }
-
-  if (status === 404) {
-    return ProviderErrorCode.ModelNotFound;
-  }
-
-  if (status === 429) {
-    return ProviderErrorCode.RateLimited;
-  }
-
-  return ProviderErrorCode.ProviderUnavailable;
+  return new ProviderError({
+    provider,
+    capability,
+    code: ProviderErrorCode.Timeout,
+    message: "DeepSeek request timed out.",
+    effectState: transport.effectState ?? "unknown"
+  });
 }
 
 async function parseJsonResponse(

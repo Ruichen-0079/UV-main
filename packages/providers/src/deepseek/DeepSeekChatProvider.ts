@@ -1,5 +1,5 @@
 import type { ChatInput, ChatOutput, ChatProvider } from "../types/chat.js";
-import type { ProviderHealth } from "../types/common.js";
+import type { ProviderCallOptions, ProviderHealth } from "../types/common.js";
 import {
   createDeepSeekChatCompletion,
   healthCheckDeepSeek,
@@ -17,7 +17,7 @@ export class DeepSeekChatProvider implements ChatProvider {
     return healthCheckDeepSeek(this.name, "chat", this.options);
   }
 
-  async generateReply(input: ChatInput): Promise<ChatOutput> {
+  async generateReply(input: ChatInput, options?: ProviderCallOptions): Promise<ChatOutput> {
     const completion = await createDeepSeekChatCompletion(this.name, "chat", this.options, {
       messages: input.messages,
       model: input.model,
@@ -27,7 +27,7 @@ export class DeepSeekChatProvider implements ChatProvider {
       // Method selection is authoritative: generateReply is never a streamed
       // transport request, even when the legacy input field is set.
       stream: false
-    });
+    }, options);
 
     return {
       message: {
