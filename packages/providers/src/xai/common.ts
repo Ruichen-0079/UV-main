@@ -1,5 +1,10 @@
 import type { ProviderCapability, ProviderHealth } from "../types/common.js";
-import { ProviderError, ProviderErrorCode } from "../types/errors.js";
+import {
+  ProviderError,
+  ProviderErrorCode,
+  mapHttpStatusToProviderErrorCode
+} from "../types/errors.js";
+import { createTransportAbort, type TransportAbort } from "../transport-abort.js";
 
 export type XAIProviderOptions = {
   apiKey: string | undefined;
@@ -15,10 +20,19 @@ export async function healthCheckXAI(
   options: XAIProviderOptions
 ): Promise<ProviderHealth> {
   const start = performance.now();
+  const transport = createTransportAbort({ timeoutMs: options.timeoutMs ?? 30000 });
 
   try {
     ensureXAIConfig(provider, capability, options);
-    await xaiFetch(provider, capability, options, "/models", { method: "GET" });
+    if (!transport.markStarted()) {
+      throwIfXAITransportAborted(provider, capability, transport);
+      throw new Error("xAI health-check transport could not start.");
+    }
+    const response = await xaiFetch(options, "/models", { method: "GET" }, transport.signal);
+    throwIfXAITransportAborted(provider, capability, transport);
+    if (!response.ok) {
+      throw await createXAIStatusError(provider, capability, response);
+    }
 
     return {
       provider,
@@ -34,6 +48,8 @@ export async function healthCheckXAI(
       latencyMs: Math.round(performance.now() - start),
       message: error instanceof Error ? error.message : "xAI health check failed."
     };
+  } finally {
+    transport.cleanup();
   }
 }
 
@@ -64,55 +80,19 @@ export function ensureXAIConfig(
 }
 
 export async function xaiFetch(
-  provider: string,
-  capability: ProviderCapability,
   options: XAIProviderOptions,
   path: string,
-  init: RequestInit
+  init: RequestInit,
+  signal: AbortSignal
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30000);
-
-  try {
-    const response = await fetch(`${trimTrailingSlash(options.baseUrl)}${path}`, {
-      ...init,
-      headers: {
-        authorization: `Bearer ${options.apiKey}`,
-        ...init.headers
-      },
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      throw await createStatusError(provider, capability, response);
-    }
-
-    return response;
-  } catch (error) {
-    if (error instanceof ProviderError) {
-      throw error;
-    }
-
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new ProviderError({
-        provider,
-        capability,
-        code: ProviderErrorCode.Timeout,
-        message: "xAI request timed out.",
-        cause: error
-      });
-    }
-
-    throw new ProviderError({
-      provider,
-      capability,
-      code: ProviderErrorCode.NetworkError,
-      message: "xAI network request failed.",
-      cause: error
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
+  return fetch(`${trimTrailingSlash(options.baseUrl)}${path}`, {
+    ...init,
+    headers: {
+      authorization: `Bearer ${options.apiKey}`,
+      ...init.headers
+    },
+    signal
+  });
 }
 
 export async function parseJsonResponse(
@@ -134,12 +114,12 @@ export async function parseJsonResponse(
   }
 }
 
-async function createStatusError(
+export async function createXAIStatusError(
   provider: string,
   capability: ProviderCapability,
   response: Response
 ): Promise<ProviderError> {
-  const code = mapStatusToProviderErrorCode(response.status);
+  const code = mapHttpStatusToProviderErrorCode(response.status);
   const safeBody = await readSafeErrorBody(response);
 
   return new ProviderError({
@@ -149,34 +129,44 @@ async function createStatusError(
     statusCode: response.status,
     message: safeBody
       ? `xAI request failed with ${response.status}: ${safeBody}`
-      : `xAI request failed with ${response.status}.`,
-    retryable:
-      code === ProviderErrorCode.RateLimited || code === ProviderErrorCode.ProviderUnavailable
+      : `xAI request failed with ${response.status}.`
   });
 }
 
-function mapStatusToProviderErrorCode(status: number): ProviderErrorCode {
-  if (status === 401) {
-    return ProviderErrorCode.InvalidApiKey;
+export function throwIfXAITransportAborted(
+  provider: string,
+  capability: ProviderCapability,
+  transport: TransportAbort
+): void {
+  if (transport.source !== null) {
+    throw createXAITransportAbortError(provider, capability, transport);
+  }
+}
+
+export function createXAITransportAbortError(
+  provider: string,
+  capability: ProviderCapability,
+  transport: TransportAbort
+): ProviderError {
+  if (transport.source === "caller") {
+    return new ProviderError({
+      provider,
+      capability,
+      code: ProviderErrorCode.Cancelled,
+      message: `${provider} ${capability} was cancelled.`,
+      retryable: false,
+      fallbackEligible: false,
+      effectState: transport.effectState ?? "unknown"
+    });
   }
 
-  if (status === 403) {
-    return ProviderErrorCode.PermissionDenied;
-  }
-
-  if (status === 404) {
-    return ProviderErrorCode.ModelNotFound;
-  }
-
-  if (status === 429) {
-    return ProviderErrorCode.RateLimited;
-  }
-
-  if (status === 400) {
-    return ProviderErrorCode.UnsupportedInput;
-  }
-
-  return ProviderErrorCode.ProviderUnavailable;
+  return new ProviderError({
+    provider,
+    capability,
+    code: ProviderErrorCode.Timeout,
+    message: "xAI request timed out.",
+    effectState: transport.effectState ?? "unknown"
+  });
 }
 
 async function readSafeErrorBody(response: Response): Promise<string | undefined> {

@@ -30,6 +30,7 @@ import {
   ProviderErrorCode,
   canFallbackProviderError,
   cloneProviderError,
+  mapHttpStatusToProviderErrorCode,
   normalizeProviderError,
   type ProviderEffectState
 } from "./types/errors.js";
@@ -40,6 +41,7 @@ import { XAIVisionProvider } from "./xai/XAIVisionProvider.js";
 import { DashScopeSTTProvider } from "./alibaba/DashScopeSTTProvider.js";
 import { streamOpenAICompatibleChatCompletion } from "./openai-compatible-stream.js";
 import { GPTSoVITSTTSProvider } from "./local/GPTSoVITSTTSProvider.js";
+import { createTransportAbort, type TransportAbort } from "./transport-abort.js";
 
 export type ProviderRegistryConfig = {
   environment: "development" | "test" | "production";
@@ -1936,13 +1938,13 @@ class OpenAICompatibleChatProvider implements ChatProvider {
     };
   }
 
-  async generateReply(input: ChatInput): Promise<ChatOutput> {
+  async generateReply(input: ChatInput, options?: ProviderCallOptions): Promise<ChatOutput> {
     const completion = await createOpenAICompatibleChatCompletion(this.options, "chat", {
       messages: input.messages,
       temperature: input.temperature,
       maxTokens: input.maxTokens ?? input.maxOutputTokens,
       stopSequences: input.stopSequences
-    });
+    }, options);
     return {
       message: { role: "assistant", content: completion.content },
       finishReason: completion.finishReason,
@@ -1982,12 +1984,15 @@ class OpenAICompatibleReasoningProvider implements ReasoningProvider {
     };
   }
 
-  async generateReasoning(input: ReasoningInput): Promise<ReasoningOutput> {
+  async generateReasoning(
+    input: ReasoningInput,
+    options?: ProviderCallOptions
+  ): Promise<ReasoningOutput> {
     const completion = await createOpenAICompatibleChatCompletion(this.options, "reasoning", {
       messages: input.messages,
       temperature: input.temperature,
       maxTokens: input.maxTokens ?? input.maxOutputTokens
-    });
+    }, options);
     return normalizeReasoningOutput(this.name, {
       // OpenAI-compatible reasoning_content is provider-internal trace and
       // is intentionally discarded at the normalized boundary.
@@ -2049,22 +2054,33 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
     };
   }
 
-  override async embedText(text: string): Promise<number[]> {
-    const [vector] = await this.embedBatch([text]);
+  override async embedText(text: string, options?: ProviderCallOptions): Promise<number[]> {
+    const [vector] = await this.embedBatch([text], options);
     return vector ?? [];
   }
 
-  override async embedBatch(texts: string[]): Promise<number[][]> {
-    if (!this.apiKey) {
-      throw unavailableError(this.name, "embedding", "EMBEDDING_API_KEY is required.");
-    }
-    if (!this.model) {
-      throw unavailableError(this.name, "embedding", "EMBEDDING_MODEL is required.");
-    }
+  override async embedBatch(
+    texts: string[],
+    options?: ProviderCallOptions
+  ): Promise<number[][]> {
+    const transport = createTransportAbort({
+      signal: options?.signal,
+      timeoutMs: this.timeoutMs
+    });
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
+      throwIfOpenAICompatibleTransportAborted(this.name, "embedding", transport);
+      if (!this.apiKey) {
+        throw unavailableError(this.name, "embedding", "EMBEDDING_API_KEY is required.");
+      }
+      if (!this.model) {
+        throw unavailableError(this.name, "embedding", "EMBEDDING_MODEL is required.");
+      }
+
+      if (!transport.markStarted()) {
+        throwIfOpenAICompatibleTransportAborted(this.name, "embedding", transport);
+        throw new Error("OpenAI-compatible embedding transport could not start.");
+      }
       const response = await fetch(`${trimTrailingSlash(this.baseUrl)}/embeddings`, {
         method: "POST",
         headers: {
@@ -2076,24 +2092,15 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
           input: texts,
           dimensions: this.dimensions
         }),
-        signal: controller.signal
+        signal: transport.signal
       });
       if (!response.ok) {
-        throw new ProviderError({
-          provider: this.name,
-          capability: "embedding",
-          code:
-            response.status === 401
-              ? ProviderErrorCode.InvalidApiKey
-              : ProviderErrorCode.ProviderUnavailable,
-          statusCode: response.status,
-          message: `Embedding request failed with ${response.status}.`,
-          retryable: response.status >= 500 || response.status === 429
-        });
+        throw await createOpenAICompatibleStatusError(this.name, "embedding", response);
       }
-      const raw = (await response.json()) as {
+      const raw = (await parseOpenAICompatibleJsonResponse(this.name, "embedding", response)) as {
         data?: Array<{ embedding?: unknown; index?: number }>;
       };
+      throwIfOpenAICompatibleTransportAborted(this.name, "embedding", transport);
       const vectors = raw.data
         ?.slice()
         .sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
@@ -2113,17 +2120,11 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
       }
       return vectors;
     } catch (error) {
+      if (transport.source !== null) {
+        throw createOpenAICompatibleTransportAbortError(this.name, "embedding", transport);
+      }
       if (error instanceof ProviderError) {
         throw error;
-      }
-      if (error instanceof DOMException && error.name === "AbortError") {
-        throw new ProviderError({
-          provider: this.name,
-          capability: "embedding",
-          code: ProviderErrorCode.Timeout,
-          message: "Embedding request timed out.",
-          cause: error
-        });
       }
       throw new ProviderError({
         provider: this.name,
@@ -2133,7 +2134,7 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
         cause: error
       });
     } finally {
-      clearTimeout(timeout);
+      transport.cleanup();
     }
   }
 }
@@ -2432,81 +2433,176 @@ async function createOpenAICompatibleChatCompletion(
     temperature?: number | undefined;
     maxTokens?: number | undefined;
     stopSequences?: string[] | undefined;
-  }
+  },
+  callOptions?: ProviderCallOptions
 ): Promise<OpenAICompatibleChatCompletion> {
-  const startedAt = performance.now();
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (options.apiKey) {
-    headers["authorization"] = `Bearer ${options.apiKey}`;
-  }
-  const response = await fetch(`${trimTrailingSlash(options.baseUrl)}/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: options.model,
-      messages: request.messages,
-      temperature: request.temperature,
-      max_tokens: request.maxTokens,
-      stop: request.stopSequences,
-      stream: false
-    })
-  });
+  const transport = createTransportAbort({ signal: callOptions?.signal, timeoutMs: 30000 });
 
-  if (!response.ok) {
+  try {
+    throwIfOpenAICompatibleTransportAborted(options.provider, capability, transport);
+    const startedAt = performance.now();
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (options.apiKey) {
+      headers["authorization"] = `Bearer ${options.apiKey}`;
+    }
+    if (!transport.markStarted()) {
+      throwIfOpenAICompatibleTransportAborted(options.provider, capability, transport);
+      throw new Error("OpenAI-compatible transport could not start.");
+    }
+    const response = await fetch(`${trimTrailingSlash(options.baseUrl)}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: options.model,
+        messages: request.messages,
+        temperature: request.temperature,
+        max_tokens: request.maxTokens,
+        stop: request.stopSequences,
+        stream: false
+      }),
+      signal: transport.signal
+    });
+
+    if (!response.ok) {
+      throw await createOpenAICompatibleStatusError(options.provider, capability, response);
+    }
+
+    const raw = (await parseOpenAICompatibleJsonResponse(
+      options.provider,
+      capability,
+      response
+    )) as {
+      model?: string;
+      choices?: Array<{
+        finish_reason?: string | null;
+        message?: { content?: string | null; reasoning_content?: string | null };
+      }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
+    throwIfOpenAICompatibleTransportAborted(options.provider, capability, transport);
+    const choice = raw.choices?.[0];
+    const content = choice?.message?.content;
+    if (typeof content !== "string") {
+      throw new ProviderError({
+        provider: options.provider,
+        capability,
+        code: ProviderErrorCode.MalformedResponse,
+        message: `${options.provider} ${capability} response did not include assistant content.`,
+        retryable: false
+      });
+    }
+
+    return {
+      content,
+      reasoningContent: choice?.message?.reasoning_content ?? undefined,
+      finishReason: normalizeFinishReason(choice?.finish_reason),
+      model: raw.model ?? options.model,
+      latencyMs: Math.round(performance.now() - startedAt),
+      tokenUsage: raw.usage
+        ? {
+            ...(raw.usage.prompt_tokens !== undefined
+              ? { inputTokens: raw.usage.prompt_tokens }
+              : {}),
+            ...(raw.usage.completion_tokens !== undefined
+              ? { outputTokens: raw.usage.completion_tokens }
+              : {}),
+            ...(raw.usage.total_tokens !== undefined ? { totalTokens: raw.usage.total_tokens } : {})
+          }
+        : undefined,
+      rawResponse: options.includeRawResponse ? raw : undefined
+    };
+  } catch (error) {
+    if (transport.source !== null) {
+      throw createOpenAICompatibleTransportAbortError(options.provider, capability, transport);
+    }
+    if (error instanceof ProviderError) {
+      throw error;
+    }
     throw new ProviderError({
       provider: options.provider,
       capability,
-      code:
-        response.status === 401
-          ? ProviderErrorCode.InvalidApiKey
-          : response.status === 429
-            ? ProviderErrorCode.RateLimited
-            : ProviderErrorCode.ProviderUnavailable,
-      statusCode: response.status,
-      message: `${options.provider} ${capability} request failed with ${response.status}.`,
-      retryable: response.status >= 500 || response.status === 429
+      code: ProviderErrorCode.NetworkError,
+      message: `${options.provider} ${capability} network request failed.`,
+      cause: error
     });
+  } finally {
+    transport.cleanup();
+  }
+}
+
+async function createOpenAICompatibleStatusError(
+  provider: string,
+  capability: ProviderCapability,
+  response: Response
+): Promise<ProviderError> {
+  try {
+    await response.text();
+  } catch {
+    // The outer transport winner check determines cancellation precedence.
   }
 
-  const raw = (await response.json()) as {
-    model?: string;
-    choices?: Array<{
-      finish_reason?: string | null;
-      message?: { content?: string | null; reasoning_content?: string | null };
-    }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-  };
-  const choice = raw.choices?.[0];
-  const content = choice?.message?.content;
-  if (typeof content !== "string") {
+  return new ProviderError({
+    provider,
+    capability,
+    code: mapHttpStatusToProviderErrorCode(response.status),
+    statusCode: response.status,
+    message: `${provider} ${capability} request failed with ${response.status}.`
+  });
+}
+
+async function parseOpenAICompatibleJsonResponse(
+  provider: string,
+  capability: ProviderCapability,
+  response: Response
+): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch (error) {
     throw new ProviderError({
-      provider: options.provider,
+      provider,
       capability,
       code: ProviderErrorCode.MalformedResponse,
-      message: `${options.provider} ${capability} response did not include assistant content.`,
-      retryable: false
+      message: `${provider} ${capability} returned a non-JSON response.`,
+      retryable: false,
+      cause: error
+    });
+  }
+}
+
+function throwIfOpenAICompatibleTransportAborted(
+  provider: string,
+  capability: ProviderCapability,
+  transport: TransportAbort
+): void {
+  if (transport.source !== null) {
+    throw createOpenAICompatibleTransportAbortError(provider, capability, transport);
+  }
+}
+
+function createOpenAICompatibleTransportAbortError(
+  provider: string,
+  capability: ProviderCapability,
+  transport: TransportAbort
+): ProviderError {
+  if (transport.source === "caller") {
+    return new ProviderError({
+      provider,
+      capability,
+      code: ProviderErrorCode.Cancelled,
+      message: `${provider} ${capability} was cancelled.`,
+      retryable: false,
+      fallbackEligible: false,
+      effectState: transport.effectState ?? "unknown"
     });
   }
 
-  return {
-    content,
-    reasoningContent: choice?.message?.reasoning_content ?? undefined,
-    finishReason: normalizeFinishReason(choice?.finish_reason),
-    model: raw.model ?? options.model,
-    latencyMs: Math.round(performance.now() - startedAt),
-    tokenUsage: raw.usage
-      ? {
-          ...(raw.usage.prompt_tokens !== undefined
-            ? { inputTokens: raw.usage.prompt_tokens }
-            : {}),
-          ...(raw.usage.completion_tokens !== undefined
-            ? { outputTokens: raw.usage.completion_tokens }
-            : {}),
-          ...(raw.usage.total_tokens !== undefined ? { totalTokens: raw.usage.total_tokens } : {})
-        }
-      : undefined,
-    rawResponse: options.includeRawResponse ? raw : undefined
-  };
+  return new ProviderError({
+    provider,
+    capability,
+    code: ProviderErrorCode.Timeout,
+    message: `${provider} ${capability} request timed out.`,
+    effectState: transport.effectState ?? "unknown"
+  });
 }
 
 function normalizeFinishReason(
