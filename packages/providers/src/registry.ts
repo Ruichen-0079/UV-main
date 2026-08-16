@@ -1422,6 +1422,7 @@ async function runProviderChain<
 ): Promise<TOutput> {
   const attempts: ProviderAttempt[] = [];
   let lastError: ProviderError | undefined;
+  const initialProvider = providers[0]?.name;
 
   for (const [index, provider] of providers.entries()) {
     if (options?.signal?.aborted) {
@@ -1437,6 +1438,12 @@ async function runProviderChain<
     const startedAt = performance.now();
     try {
       const output = await operation(provider);
+      if (options?.signal?.aborted) {
+        throw createCancelledError(provider.name, undefined, {
+          capability,
+          effectState: "unknown"
+        });
+      }
       const latencyMs = Math.round(performance.now() - startedAt);
       attempts.push({
         provider: provider.name,
@@ -1446,8 +1453,7 @@ async function runProviderChain<
         enabled: true,
         priority: index + 1
       });
-      const firstAttemptedProvider = attempts[0]?.provider;
-      const fallbackUsed = didUseProviderFallback(provider.name, firstAttemptedProvider);
+      const fallbackUsed = didUseProviderFallback(provider.name, initialProvider);
       return {
         ...output,
         fallbackUsed,
@@ -1515,6 +1521,7 @@ async function* runProviderStreamChain(
 ): AsyncIterable<ChatStreamEvent> {
   const attempts: ProviderAttempt[] = [];
   let lastError: ProviderError | undefined;
+  const initialProvider = providers[0]?.name;
 
   for (const [index, provider] of providers.entries()) {
     if (options.signal?.aborted) {
@@ -1580,8 +1587,7 @@ async function* runProviderStreamChain(
         priority: index + 1
       };
       attempts.push(providerAttempt);
-      const firstAttemptedProvider = attempts[0]?.provider;
-      const fallbackUsed = didUseProviderFallback(provider.name, firstAttemptedProvider);
+      const fallbackUsed = didUseProviderFallback(provider.name, initialProvider);
       const output: ChatOutput = {
         ...completion,
         fallbackUsed,
@@ -1737,9 +1743,9 @@ function attachAttemptedProviders(
 
 function didUseProviderFallback(
   successfulProvider: string,
-  firstAttemptedProvider: string | undefined
+  initialProvider: string | undefined
 ): boolean {
-  return Boolean(firstAttemptedProvider && successfulProvider !== firstAttemptedProvider);
+  return Boolean(initialProvider && successfulProvider !== initialProvider);
 }
 
 function failedProviderAttempt(

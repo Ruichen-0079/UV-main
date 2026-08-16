@@ -243,6 +243,28 @@ describe("non-stream provider chain policy", () => {
     ]);
   });
 
+  it("anchors fallbackUsed to the first chain identity, not error attribution", async () => {
+    const output = await new FallbackChatProvider([
+      chatLeaf("primary-route", async () => {
+        throw new ProviderError({
+          provider: "backup",
+          capability: "chat",
+          code: ProviderErrorCode.InvalidApiKey,
+          message: "misattributed"
+        });
+      }),
+      chatLeaf("backup", async () => ok("backup"))
+    ]).generateReply(input);
+
+    expect(output.fallbackUsed).toBe(true);
+    expect(output.finalProvider).toBe("backup");
+    expect(output.attemptedProviders?.[0]).toMatchObject({
+      provider: "backup",
+      status: "failed",
+      errorCode: ProviderErrorCode.InvalidApiKey
+    });
+  });
+
   it("does not mark fallbackUsed when the first attempted provider succeeds", async () => {
     const output = await new FallbackChatProvider([
       chatLeaf("primary", async () => ok("ok")),
@@ -266,6 +288,41 @@ describe("non-stream provider chain policy", () => {
       provider: "primary",
       fallbackEligible: false
     });
+    expect(backup).not.toHaveBeenCalled();
+  });
+
+  it("suppresses a late successful result after the caller aborts in flight", async () => {
+    const controller = new AbortController();
+    let releasePrimary!: (value: ChatOutput) => void;
+    let markStarted!: () => void;
+    const primaryStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const primaryWork = new Promise<ChatOutput>((resolve) => {
+      releasePrimary = resolve;
+    });
+    const primary = vi.fn(async () => {
+      markStarted();
+      return primaryWork;
+    });
+    const backup = vi.fn(async () => ok("backup"));
+    const pending = new FallbackChatProvider([
+      chatLeaf("primary", primary),
+      chatLeaf("backup", backup)
+    ]).generateReply(input, { signal: controller.signal });
+
+    await primaryStarted;
+    controller.abort();
+    releasePrimary(ok("too late"));
+
+    await expect(pending).rejects.toMatchObject({
+      code: ProviderErrorCode.Cancelled,
+      retryable: false,
+      fallbackEligible: false,
+      effectState: "unknown",
+      provider: "primary"
+    });
+    expect(primary).toHaveBeenCalledTimes(1);
     expect(backup).not.toHaveBeenCalled();
   });
 
@@ -494,6 +551,37 @@ describe("non-stream provider chain policy", () => {
 });
 
 describe("stream provider chain policy", () => {
+  it("anchors stream fallbackUsed to the first chain identity, not error attribution", async () => {
+    const events = await collect(
+      new FallbackChatProvider([
+        createMockStreamingChatProvider("primary-route", {
+          failBeforeFirst: new ProviderError({
+            provider: "backup",
+            capability: "chat",
+            code: ProviderErrorCode.InvalidApiKey,
+            message: "misattributed"
+          })
+        }),
+        createMockStreamingChatProvider("backup", { chunks: ["ok"] })
+      ]).streamReply(input)
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      output: expect.objectContaining({
+        finalProvider: "backup",
+        fallbackUsed: true,
+        attemptedProviders: [
+          expect.objectContaining({
+            provider: "backup",
+            status: "failed",
+            errorCode: ProviderErrorCode.InvalidApiKey
+          }),
+          expect.objectContaining({ provider: "backup", status: "success" })
+        ]
+      })
+    });
+  });
+
   it("still falls back on pre-first InvalidApiKey", async () => {
     const events = await collect(
       new FallbackChatProvider([
