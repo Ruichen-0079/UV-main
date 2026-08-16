@@ -61,12 +61,28 @@ export type PostgresListenMetadata = {
   postgresMajor: typeof PRIVATE_POSTGRES_MAJOR;
 };
 
+export type PostgresInitializationFailureKind =
+  | "SPAWN_FAILED"
+  | "EXIT_NONZERO"
+  | "SIGNALLED"
+  | "TIMEOUT"
+  | "INIT_THREW";
+
+export type PostgresInitializationFailureEvidence = {
+  errorCode?: PostgresInitializationFailureKind | undefined;
+  exitStatus?: number | null | undefined;
+  signal?: string | null | undefined;
+  spawnErrorCode?: string | null | undefined;
+  stdoutTail?: string | undefined;
+  stderrTail?: string | undefined;
+};
+
 export type PostgresInitializationState = {
   schemaVersion: 1;
   state: PostgresInitializationStateName;
   updatedAt: string;
   reason?: string | undefined;
-};
+} & PostgresInitializationFailureEvidence;
 
 export type PostgresLayoutBounds = {
   resourceRoot?: string | undefined;
@@ -282,7 +298,8 @@ export function readInitializationState(
 export function writeInitializationState(
   layout: PostgresLayout,
   state: PostgresInitializationStateName,
-  reason?: string
+  reason?: string,
+  evidence?: PostgresInitializationFailureEvidence
 ): void {
   const record: PostgresInitializationState = {
     schemaVersion: INITIALIZATION_STATE_SCHEMA_VERSION,
@@ -290,6 +307,14 @@ export function writeInitializationState(
     updatedAt: new Date().toISOString(),
     ...(reason ? { reason } : {})
   };
+  if (state === "failed" && evidence) {
+    if (evidence.errorCode) record.errorCode = evidence.errorCode;
+    if (evidence.exitStatus !== undefined) record.exitStatus = evidence.exitStatus;
+    if (evidence.signal !== undefined) record.signal = evidence.signal;
+    if (evidence.spawnErrorCode !== undefined) record.spawnErrorCode = evidence.spawnErrorCode;
+    if (evidence.stdoutTail) record.stdoutTail = evidence.stdoutTail;
+    if (evidence.stderrTail) record.stderrTail = evidence.stderrTail;
+  }
   writeJsonFile(layout.initializationStateFile, record);
   restrictPathToCurrentUser(layout.initializationStateFile);
 }
@@ -454,6 +479,45 @@ function parseInitializationState(value: unknown): PostgresInitializationState |
     schemaVersion: INITIALIZATION_STATE_SCHEMA_VERSION,
     state,
     updatedAt: record["updatedAt"],
-    ...(typeof record["reason"] === "string" ? { reason: record["reason"] } : {})
+    ...(typeof record["reason"] === "string" ? { reason: record["reason"] } : {}),
+    ...optionalFailureKind(record["errorCode"]),
+    ...optionalIntOrNullField("exitStatus", record["exitStatus"]),
+    ...optionalStringOrNullField("signal", record["signal"]),
+    ...optionalStringOrNullField("spawnErrorCode", record["spawnErrorCode"]),
+    ...(typeof record["stdoutTail"] === "string" ? { stdoutTail: record["stdoutTail"] } : {}),
+    ...(typeof record["stderrTail"] === "string" ? { stderrTail: record["stderrTail"] } : {})
   };
+}
+
+function optionalFailureKind(
+  value: unknown
+): { errorCode: PostgresInitializationFailureKind } | Record<string, never> {
+  if (
+    value === "SPAWN_FAILED" ||
+    value === "EXIT_NONZERO" ||
+    value === "SIGNALLED" ||
+    value === "TIMEOUT" ||
+    value === "INIT_THREW"
+  ) {
+    return { errorCode: value };
+  }
+  return {};
+}
+
+function optionalIntOrNullField(
+  key: "exitStatus",
+  value: unknown
+): { exitStatus: number | null } | Record<string, never> {
+  if (value === null) return { [key]: null };
+  if (typeof value === "number" && Number.isInteger(value)) return { [key]: value };
+  return {};
+}
+
+function optionalStringOrNullField(
+  key: "signal" | "spawnErrorCode",
+  value: unknown
+): { [K in typeof key]?: string | null } {
+  if (value === null) return { [key]: null };
+  if (typeof value === "string") return { [key]: value.slice(0, 64) };
+  return {};
 }

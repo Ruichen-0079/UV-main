@@ -10,6 +10,7 @@ import {
   ensurePostgresDirectories,
   layoutFromRoot,
   readClusterMarker,
+  readInitializationState,
   resolvePostgresLayout,
   writeClusterMarker,
   writeInitializationState
@@ -106,5 +107,40 @@ describe("private postgres layout", () => {
     const inspected = inspectExistingCluster(layout);
     expect(inspected.ok).toBe(false);
     if (!inspected.ok) expect(inspected.code).toBe("POSTGRES_INIT_IN_PROGRESS");
+  });
+
+  it("persists failed initdb evidence additively and ignores it on ready", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-init-ev-"));
+    tempDirs.push(root);
+    const layout = layoutFromRoot(root);
+    ensurePostgresDirectories(layout);
+    writeInitializationState(layout, "failed", "EXIT_NONZERO: FATAL_TEST_SENTINEL", {
+      errorCode: "EXIT_NONZERO",
+      exitStatus: 1,
+      signal: null,
+      spawnErrorCode: null,
+      stdoutTail: 'owned by user "runneradmin"',
+      stderrTail: "FATAL_TEST_SENTINEL"
+    });
+    const failed = readInitializationState(layout);
+    expect(failed?.state).toBe("failed");
+    expect(failed?.reason).toBe("EXIT_NONZERO: FATAL_TEST_SENTINEL");
+    expect(failed?.errorCode).toBe("EXIT_NONZERO");
+    expect(failed?.exitStatus).toBe(1);
+    expect(failed?.stderrTail).toBe("FATAL_TEST_SENTINEL");
+    writeInitializationState(layout, "ready", undefined, {
+      errorCode: "EXIT_NONZERO",
+      stdoutTail: "BANNER",
+      stderrTail: "FATAL_TEST_SENTINEL"
+    });
+    const ready = readInitializationState(layout);
+    expect(ready?.state).toBe("ready");
+    expect(ready?.reason).toBeUndefined();
+    expect(ready?.errorCode).toBeUndefined();
+    expect(ready?.stdoutTail).toBeUndefined();
+    expect(ready?.stderrTail).toBeUndefined();
+    const serialized = fs.readFileSync(layout.initializationStateFile, "utf8");
+    expect(serialized).not.toContain("stdoutTail");
+    expect(serialized).not.toContain("FATAL_TEST_SENTINEL");
   });
 });

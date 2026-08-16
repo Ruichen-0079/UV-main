@@ -23,9 +23,16 @@ import {
   restrictPathToCurrentUser,
   writeClusterMarker,
   writeInitializationState,
+  type PostgresInitializationFailureEvidence,
+  type PostgresInitializationFailureKind,
   type PostgresLayout,
   type YuviClusterMarker
 } from "./postgres-layout.js";
+import { redactSecretText } from "./postgres-secret.js";
+
+export const INITDB_REASON_MAX_CHARS = 180;
+export const INITDB_STDOUT_TAIL_MAX_CHARS = 2048;
+export const INITDB_STDERR_TAIL_MAX_CHARS = 4096;
 
 export type ClusterPrepareResult =
   | {
@@ -160,8 +167,8 @@ export function initializePrivateCluster(input: {
       windowsHide: true
     });
     if (result.status !== 0) {
-      const detail = sanitizeInitOutput(`${result.stdout ?? ""}${result.stderr ?? ""}`);
-      writeInitializationState(input.layout, "failed", detail || "initdb failed");
+      const evidence = buildInitdbFailureEvidence(result, { secrets: [input.password] });
+      writeInitializationState(input.layout, "failed", evidence.reason, evidence);
       return {
         ok: false,
         code: "POSTGRES_INIT_FAILED",
@@ -173,11 +180,8 @@ export function initializePrivateCluster(input: {
     writeInitializationState(input.layout, "ready");
     return { ok: true, marker, initialized: true };
   } catch (error) {
-    writeInitializationState(
-      input.layout,
-      "failed",
-      error instanceof Error ? error.message : "initialization threw"
-    );
+    const thrown = buildInitdbThrownEvidence(error, { secrets: [input.password] });
+    writeInitializationState(input.layout, "failed", thrown.reason, thrown);
     return {
       ok: false,
       code: "POSTGRES_INIT_FAILED",
@@ -399,8 +403,156 @@ export function stopPostgresFast(input: {
   return result.status === 0;
 }
 
-function sanitizeInitOutput(text: string): string {
-  return text.replace(/\s+/g, " ").trim().slice(0, 180);
+export type InitdbSpawnClassification =
+  | { kind: "SUCCESS" }
+  | { kind: "SPAWN_FAILED"; spawnErrorCode: string | null }
+  | { kind: "TIMEOUT"; spawnErrorCode: "ETIMEDOUT"; signal: string | null }
+  | { kind: "SIGNALLED"; signal: string }
+  | { kind: "EXIT_NONZERO"; exitStatus: number | null };
+
+type InitdbSpawnSnapshot = {
+  error?: Error | undefined;
+  status: number | null;
+  signal: NodeJS.Signals | string | null;
+  stdout?: string | Buffer | null | undefined;
+  stderr?: string | Buffer | null | undefined;
+};
+
+export function classifyInitdbSpawnResult(result: InitdbSpawnSnapshot): InitdbSpawnClassification {
+  const spawnErrorCode = safeSpawnErrorCode(result.error);
+  if (spawnErrorCode === "ETIMEDOUT") {
+    return {
+      kind: "TIMEOUT",
+      spawnErrorCode: "ETIMEDOUT",
+      signal: typeof result.signal === "string" ? result.signal : null
+    };
+  }
+  if (result.error) {
+    return { kind: "SPAWN_FAILED", spawnErrorCode };
+  }
+  if (typeof result.signal === "string" && result.signal) {
+    return { kind: "SIGNALLED", signal: result.signal };
+  }
+  if (result.status === 0) return { kind: "SUCCESS" };
+  return {
+    kind: "EXIT_NONZERO",
+    exitStatus: typeof result.status === "number" ? result.status : null
+  };
+}
+
+export function buildInitdbFailureEvidence(
+  result: InitdbSpawnSnapshot,
+  options: { secrets?: string[] } = {}
+): PostgresInitializationFailureEvidence & { reason: string } {
+  const secrets = options.secrets ?? [];
+  const classified = classifyInitdbSpawnResult(result);
+  const stdoutTail = boundInitdbTail(
+    redactInitdbDiagnosticText(stringSpawnOutput(result.stdout), secrets),
+    INITDB_STDOUT_TAIL_MAX_CHARS
+  );
+  const stderrTail = boundInitdbTail(
+    redactInitdbDiagnosticText(stringSpawnOutput(result.stderr), secrets),
+    INITDB_STDERR_TAIL_MAX_CHARS
+  );
+  const errorCode: PostgresInitializationFailureKind =
+    classified.kind === "SUCCESS" ? "EXIT_NONZERO" : classified.kind;
+  const exitStatus = classified.kind === "EXIT_NONZERO" ? classified.exitStatus : null;
+  const signal =
+    classified.kind === "SIGNALLED" || classified.kind === "TIMEOUT" ? classified.signal : null;
+  const spawnErrorCode =
+    classified.kind === "SPAWN_FAILED" || classified.kind === "TIMEOUT"
+      ? classified.spawnErrorCode
+      : null;
+  const reason = buildInitdbFailureReason({
+    errorCode,
+    stdoutTail,
+    stderrTail,
+    exitStatus,
+    signal,
+    spawnErrorCode
+  });
+  return {
+    reason,
+    errorCode,
+    exitStatus,
+    signal,
+    spawnErrorCode,
+    ...(stdoutTail ? { stdoutTail } : {}),
+    ...(stderrTail ? { stderrTail } : {})
+  };
+}
+
+function buildInitdbThrownEvidence(
+  error: unknown,
+  options: { secrets?: string[] } = {}
+): PostgresInitializationFailureEvidence & { reason: string } {
+  const secrets = options.secrets ?? [];
+  const message = error instanceof Error ? error.message : "initialization threw";
+  const reason = buildInitdbFailureReason({
+    errorCode: "INIT_THREW",
+    stdoutTail: "",
+    stderrTail: redactInitdbDiagnosticText(message, secrets),
+    exitStatus: null,
+    signal: null,
+    spawnErrorCode: safeSpawnErrorCode(error)
+  });
+  return {
+    reason,
+    errorCode: "INIT_THREW",
+    exitStatus: null,
+    signal: null,
+    spawnErrorCode: safeSpawnErrorCode(error)
+  };
+}
+
+function buildInitdbFailureReason(input: {
+  errorCode: PostgresInitializationFailureKind;
+  stdoutTail: string;
+  stderrTail: string;
+  exitStatus: number | null;
+  signal: string | null;
+  spawnErrorCode: string | null;
+}): string {
+  const prefix = `${input.errorCode}: `;
+  const preferred = input.stderrTail.trim() ? input.stderrTail : input.stdoutTail;
+  const detail =
+    collapseInitdbText(preferred) ||
+    (input.spawnErrorCode ? input.spawnErrorCode : "") ||
+    (input.signal ? input.signal : "") ||
+    (input.exitStatus !== null ? `status=${input.exitStatus}` : "") ||
+    "initdb failed";
+  const body = boundInitdbTail(detail, Math.max(1, INITDB_REASON_MAX_CHARS - prefix.length));
+  return `${prefix}${body}`.slice(0, INITDB_REASON_MAX_CHARS);
+}
+
+function redactInitdbDiagnosticText(text: string, secrets: string[]): string {
+  return redactSecretText(text, secrets)
+    .replace(/\bpassword\s*=\s*\S+/giu, "password=[REDACTED]")
+    .replace(/\bBearer\s+\S+/giu, "Bearer [REDACTED]");
+}
+
+function boundInitdbTail(text: string, maxChars: number): string {
+  const normalized = text.replace(/\r\n/g, "\n");
+  if (normalized.length <= maxChars) return normalized;
+  return normalized.slice(-maxChars);
+}
+
+function collapseInitdbText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function stringSpawnOutput(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Buffer.isBuffer(value)) return value.toString("utf8");
+  return "";
+}
+
+function safeSpawnErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code !== "string") return null;
+  const trimmed = code.slice(0, 32);
+  return /^[A-Za-z0-9_]+$/.test(trimmed) ? trimmed : null;
 }
 
 export function assertPgdataInsideLayout(layout: PostgresLayout): boolean {

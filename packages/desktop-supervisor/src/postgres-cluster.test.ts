@@ -1,20 +1,28 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createClusterMarker,
   ensurePostgresDirectories,
   layoutFromRoot,
+  readInitializationState,
   writeClusterMarker,
   writeInitializationState
 } from "./postgres-layout.js";
 import {
+  INITDB_REASON_MAX_CHARS,
+  INITDB_STDERR_TAIL_MAX_CHARS,
+  INITDB_STDOUT_TAIL_MAX_CHARS,
+  buildInitdbFailureEvidence,
   buildPostgresStartCommand,
+  classifyInitdbSpawnResult,
+  initializePrivateCluster,
   inspectExistingCluster,
   writeLocalOnlyConfig
 } from "./postgres-cluster.js";
 import { generatePostgresPassword, redactSecretText } from "./postgres-secret.js";
+import type { PostgresDistribution } from "./postgres-distribution.js";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -98,5 +106,239 @@ describe("private postgres cluster safety", () => {
     expect(command.args.join(" ")).not.toContain("postgres://");
     expect(command.env["PGPASSWORD"]).toBeUndefined();
     expect(command.commandMarker).toBe("yuvi-pg-abc-cluster");
+  });
+});
+
+describe("initdb failure evidence", () => {
+  const windowsBanner = [
+    'The files belonging to this database system will be owned by user "runneradmin".',
+    "",
+    "This user must also own the server process.",
+    "",
+    'The database cluster will be initialized with locale "C".',
+    'The default text search configuration will be set to "english".',
+    ""
+  ].join("\n");
+
+  function emptyLayout() {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-initdb-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    return layout;
+  }
+
+  function fakeDistribution(initdb: string): PostgresDistribution {
+    const binDir = path.dirname(initdb);
+    return {
+      home: binDir,
+      binDir,
+      postgres: path.join(binDir, "postgres"),
+      pgCtl: path.join(binDir, "pg_ctl"),
+      initdb,
+      createdb: null,
+      psql: path.join(binDir, "psql"),
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+  }
+
+  function writeFakeInitdb(source: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-fake-initdb-"));
+    tempDirs.push(dir);
+    const file = path.join(dir, "initdb");
+    fs.writeFileSync(file, source, { encoding: "utf8", mode: 0o755 });
+    fs.chmodSync(file, 0o755);
+    return file;
+  }
+
+  function runInitialize(initdb: string, password = generatePostgresPassword()) {
+    const layout = emptyLayout();
+    const result = initializePrivateCluster({
+      layout,
+      distribution: fakeDistribution(initdb),
+      password,
+      port: 55432
+    });
+    return { layout, result, password };
+  }
+
+  it("classifies spawn failure, nonzero exit, signal, timeout, and success separately", () => {
+    expect(
+      classifyInitdbSpawnResult({
+        error: Object.assign(new Error("spawn initdb ENOENT"), { code: "ENOENT" }),
+        status: null,
+        signal: null
+      })
+    ).toEqual({ kind: "SPAWN_FAILED", spawnErrorCode: "ENOENT" });
+    expect(
+      classifyInitdbSpawnResult({
+        error: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }),
+        status: null,
+        signal: "SIGTERM"
+      })
+    ).toEqual({ kind: "TIMEOUT", spawnErrorCode: "ETIMEDOUT", signal: "SIGTERM" });
+    expect(
+      classifyInitdbSpawnResult({ error: undefined, status: null, signal: "SIGTERM" })
+    ).toEqual({
+      kind: "SIGNALLED",
+      signal: "SIGTERM"
+    });
+    expect(classifyInitdbSpawnResult({ error: undefined, status: 1, signal: null })).toEqual({
+      kind: "EXIT_NONZERO",
+      exitStatus: 1
+    });
+    expect(classifyInitdbSpawnResult({ error: undefined, status: 0, signal: null })).toEqual({
+      kind: "SUCCESS"
+    });
+  });
+
+  it("keeps a Windows initdb banner from crowding out a later stderr fatal line", () => {
+    const evidence = buildInitdbFailureEvidence(
+      {
+        error: undefined,
+        status: 1,
+        signal: null,
+        stdout: windowsBanner,
+        stderr: "FATAL_TEST_SENTINEL\n"
+      },
+      { secrets: [] }
+    );
+    expect(evidence.errorCode).toBe("EXIT_NONZERO");
+    expect(evidence.exitStatus).toBe(1);
+    expect(evidence.reason).toContain("FATAL_TEST_SENTINEL");
+    expect(evidence.reason).not.toContain("owned by user");
+    expect(evidence.stderrTail).toContain("FATAL_TEST_SENTINEL");
+    expect(evidence.stdoutTail).toContain("owned by user");
+  });
+
+  it("persists the stderr fatal sentinel after a Windows-like initdb banner", () => {
+    const initdb = writeFakeInitdb(`#!/usr/bin/env node
+process.stdout.write(${JSON.stringify(windowsBanner)});
+process.stderr.write("FATAL_TEST_SENTINEL\\n");
+process.exit(1);
+`);
+    const { layout, result } = runInitialize(initdb);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("POSTGRES_INIT_FAILED");
+    const state = readInitializationState(layout);
+    expect(state?.state).toBe("failed");
+    expect(state?.errorCode).toBe("EXIT_NONZERO");
+    expect(state?.exitStatus).toBe(1);
+    expect(state?.reason).toContain("FATAL_TEST_SENTINEL");
+    expect(state?.reason).not.toContain("owned by user");
+    expect(state?.stderrTail).toContain("FATAL_TEST_SENTINEL");
+    const serialized = fs.readFileSync(layout.initializationStateFile, "utf8");
+    expect(serialized).toContain("FATAL_TEST_SENTINEL");
+    expect(serialized.indexOf("FATAL_TEST_SENTINEL")).toBeGreaterThan(-1);
+  });
+
+  it("preserves a missing-executable spawn as SPAWN_FAILED with a safe code", () => {
+    const { layout, result } = runInitialize(
+      path.join(os.tmpdir(), "yuvi-missing-initdb", "initdb-does-not-exist")
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("POSTGRES_INIT_FAILED");
+    const state = readInitializationState(layout);
+    expect(state?.state).toBe("failed");
+    expect(state?.errorCode).toBe("SPAWN_FAILED");
+    expect(state?.spawnErrorCode).toBe("ENOENT");
+    expect(state?.exitStatus).toBeNull();
+    expect(state?.reason).toContain("SPAWN_FAILED");
+  });
+
+  it("preserves a signalled initdb separately from a nonzero exit", () => {
+    const initdb = writeFakeInitdb(`#!/usr/bin/env node
+process.kill(process.pid, "SIGTERM");
+setTimeout(() => process.exit(1), 5000);
+`);
+    const { layout, result } = runInitialize(initdb);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("POSTGRES_INIT_FAILED");
+    const state = readInitializationState(layout);
+    expect(state?.state).toBe("failed");
+    expect(state?.errorCode).toBe("SIGNALLED");
+    expect(state?.signal).toBe("SIGTERM");
+    expect(state?.exitStatus).toBeNull();
+  });
+
+  it("leaves success initialization-state free of failure evidence", () => {
+    const initdb = writeFakeInitdb(`#!/usr/bin/env node
+process.exit(0);
+`);
+    const { layout, result } = runInitialize(initdb);
+    expect(result.ok).toBe(true);
+    const state = readInitializationState(layout);
+    expect(state?.state).toBe("ready");
+    expect(state?.reason).toBeUndefined();
+    expect(state?.errorCode).toBeUndefined();
+    expect(state?.stdoutTail).toBeUndefined();
+    expect(state?.stderrTail).toBeUndefined();
+    expect(state?.exitStatus).toBeUndefined();
+    expect(state?.signal).toBeUndefined();
+    expect(state?.spawnErrorCode).toBeUndefined();
+    const serialized = fs.readFileSync(layout.initializationStateFile, "utf8");
+    expect(serialized).not.toContain("stdoutTail");
+    expect(serialized).not.toContain("stderrTail");
+    expect(serialized).not.toContain("EXIT_NONZERO");
+  });
+
+  it("keeps a failure sentinel from large stdout/stderr and bounds persisted tails", () => {
+    const stdout = `${windowsBanner}${"BANNER_NOISE".repeat(4000)}`;
+    const stderr = `${"E".repeat(8000)}\nFATAL_TEST_SENTINEL\n`;
+    const evidence = buildInitdbFailureEvidence(
+      { error: undefined, status: 13, signal: null, stdout, stderr },
+      { secrets: [] }
+    );
+    expect(evidence.exitStatus).toBe(13);
+    expect(evidence.stdoutTail?.length ?? 0).toBeLessThanOrEqual(INITDB_STDOUT_TAIL_MAX_CHARS);
+    expect(evidence.stderrTail?.length ?? 0).toBeLessThanOrEqual(INITDB_STDERR_TAIL_MAX_CHARS);
+    expect(evidence.reason.length).toBeLessThanOrEqual(INITDB_REASON_MAX_CHARS);
+    expect(evidence.stderrTail).toContain("FATAL_TEST_SENTINEL");
+    expect(evidence.reason).toContain("FATAL_TEST_SENTINEL");
+    expect(JSON.stringify(evidence).length).toBeLessThan(12_000);
+  });
+
+  it("redacts secrets from initdb failure diagnostics and persisted state", () => {
+    const logs: string[] = [];
+    const spy = (method: "log" | "info" | "warn" | "error") =>
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        logs.push(args.map((value) => String(value)).join(" "));
+      });
+    const spies = [spy("log"), spy("info"), spy("warn"), spy("error")];
+    const initdb = writeFakeInitdb(`#!/usr/bin/env node
+process.stdout.write(${JSON.stringify(windowsBanner)});
+process.stderr.write([
+  "YUVI_POSTGRES_PASSWORD=SUPERSECRET",
+  "postgres://yuvi:SUPERSECRET@127.0.0.1/yuvi",
+  "password=SUPERSECRET",
+  "PGPASSWORD=SUPERSECRET",
+  "Bearer SUPERSECRET",
+  "FATAL_TEST_SENTINEL"
+].join("\\n"));
+process.exit(1);
+`);
+    try {
+      const { layout, result } = runInitialize(initdb, generatePostgresPassword());
+      expect(result.ok).toBe(false);
+      const state = readInitializationState(layout);
+      const serialized = fs.readFileSync(layout.initializationStateFile, "utf8");
+      for (const haystack of [
+        state?.reason ?? "",
+        state?.stdoutTail ?? "",
+        state?.stderrTail ?? "",
+        serialized,
+        logs.join("\n")
+      ]) {
+        expect(haystack).not.toContain("SUPERSECRET");
+      }
+      expect(state?.reason).toContain("FATAL_TEST_SENTINEL");
+      expect(state?.stderrTail).toContain("FATAL_TEST_SENTINEL");
+      expect(state?.stderrTail).toMatch(/YUVI_POSTGRES_PASSWORD=\[REDACTED\]/i);
+      expect(state?.stderrTail).toMatch(/password=\[REDACTED\]/i);
+      expect(state?.stderrTail).toMatch(/Bearer \[REDACTED\]/i);
+      expect(state?.stderrTail).toMatch(/postgres:\/\/\[REDACTED\]/i);
+    } finally {
+      for (const current of spies) current.mockRestore();
+    }
   });
 });
