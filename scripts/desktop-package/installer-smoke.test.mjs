@@ -2922,3 +2922,176 @@ test("D1 diagnostic collector does not introduce PostgreSQL process termination"
     /taskkill|Stop-Process|pg_ctl|process\.kill|child\.kill|postgres\.exe/
   );
 });
+
+function writeContainedInitializationState(root, record) {
+  const localAppData = path.join(root, "localAppData");
+  const runtime = path.join(localAppData, "YUVI", "Postgres", "runtime");
+  fs.mkdirSync(runtime, { recursive: true });
+  fs.writeFileSync(path.join(runtime, "initialization-state.json"), JSON.stringify(record));
+  return localAppData;
+}
+
+test("D1 diagnostic formatter keeps the real Windows initdb failure tail", () => {
+  const { root } = cleanupFixture();
+  const longPath =
+    "C:/Users/RUNNER~1/AppData/Local/Temp/yuvi-installer-smoke-HC2kOJ/localAppData/YUVI/Postgres/data/" +
+    "nested/".repeat(12) +
+    "pgdata";
+  const reason = `EXIT_NONZERO: ${longPath} initdb: error: FATAL_REASON_SENTINEL`;
+  assert.ok(reason.length > 80);
+  const stdoutTail = `${"The files belonging to this database system will be owned by user runneradmin.\n".repeat(8)}owned by user`;
+  const stderrTail = `${"creating directory\n".repeat(80)}${longPath}\ninitdb: error: FATAL_STDERR_SENTINEL`;
+  assert.ok(stderrTail.length > 1500);
+  const localAppData = writeContainedInitializationState(root, {
+    schemaVersion: 1,
+    state: "failed",
+    updatedAt: "2026-08-16T03:28:19.168Z",
+    reason,
+    errorCode: "EXIT_NONZERO",
+    exitStatus: 1,
+    signal: null,
+    spawnErrorCode: null,
+    stdoutTail,
+    stderrTail
+  });
+  const diagnostic = collectInstallerSmokePostgresDiagnostics({
+    smokeRoot: root,
+    localAppData,
+    secrets: []
+  });
+  const serialized = formatInstallerSmokePostgresDiagnostic(diagnostic);
+  assert.equal(diagnostic.initializationState.state, "failed");
+  assert.equal(diagnostic.initializationState.errorCode, "EXIT_NONZERO");
+  assert.equal(diagnostic.initializationState.exitStatus, 1);
+  assert.equal(diagnostic.initializationState.signal, null);
+  assert.equal(diagnostic.initializationState.spawnErrorCode, null);
+  assert.match(serialized, /EXIT_NONZERO/);
+  assert.match(serialized, /"exitStatus":1/);
+  assert.match(serialized, /FATAL_REASON_SENTINEL/);
+  assert.match(serialized, /FATAL_STDERR_SENTINEL/);
+  assert.doesNotMatch(serialized, /schemaVersion/);
+});
+
+test("D1 diagnostic formatter keeps the stderr fatal end under max-size evidence", () => {
+  const { root } = cleanupFixture();
+  const reason = `EXIT_NONZERO: ${"P".repeat(200)} FATAL_REASON_SENTINEL`;
+  const stdoutTail = `${"BANNER".repeat(400)} STDOUT_END_SENTINEL`;
+  const stderrTail = `${"E".repeat(5000)}initdb: error: FATAL_STDERR_SENTINEL`;
+  const localAppData = writeContainedInitializationState(root, {
+    state: "failed",
+    updatedAt: "2026-08-16T03:28:19.168Z",
+    reason,
+    errorCode: "EXIT_NONZERO",
+    exitStatus: 1,
+    signal: null,
+    spawnErrorCode: null,
+    stdoutTail,
+    stderrTail,
+    extraNoise: "do-not-print"
+  });
+  const pg = path.join(localAppData, "YUVI", "Postgres");
+  fs.writeFileSync(
+    path.join(pg, "marker.json"),
+    JSON.stringify({ product: "yuvi", clusterId: "c1", postgresMajor: 16 })
+  );
+  fs.writeFileSync(
+    path.join(pg, "runtime", "listen.json"),
+    JSON.stringify({ host: "127.0.0.1", port: 55432, clusterId: "c1", postgresMajor: 16 })
+  );
+  fs.writeFileSync(
+    path.join(pg, "runtime", "postgres.pid.json"),
+    JSON.stringify({ pid: 9, role: "postgres", processStartedAtUtc: "2026-08-16T00:00:00.000Z" })
+  );
+  const diagnostic = collectInstallerSmokePostgresDiagnostics({
+    smokeRoot: root,
+    localAppData
+  });
+  const serialized = formatInstallerSmokePostgresDiagnostic(diagnostic);
+  assert.ok(serialized.length <= 8192);
+  assert.ok(diagnostic.initializationState.reason.length <= 180);
+  assert.ok(diagnostic.initializationState.stdoutTail.length <= 2048);
+  assert.ok(diagnostic.initializationState.stderrTail.length <= 4096);
+  assert.match(serialized, /FATAL_REASON_SENTINEL/);
+  assert.match(serialized, /FATAL_STDERR_SENTINEL/);
+  assert.match(diagnostic.initializationState.stderrTail, /FATAL_STDERR_SENTINEL$/);
+  assert.doesNotMatch(serialized, /do-not-print/);
+});
+
+test("D1 diagnostic collector and formatter redact secrets in initdb evidence", () => {
+  const { root } = cleanupFixture();
+  const secret = "ACTUAL_TEST_SECRET";
+  const reason = [
+    `EXIT_NONZERO: ${secret} YUVI_POSTGRES_PASSWORD=${secret}`,
+    `initdb: error: FATAL_REASON_SENTINEL`
+  ].join(" ");
+  const stdoutTail = `owned by user password=${secret} STDOUT_OK`;
+  const stderrTail = [
+    `PGPASSWORD=${secret}`,
+    `DATABASE_URL=postgres://yuvi:${secret}@127.0.0.1/yuvi`,
+    `postgres://yuvi:${secret}@127.0.0.1/yuvi`,
+    `postgresql://yuvi:${secret}@127.0.0.1/yuvi`,
+    `Bearer ${secret}`,
+    `Authorization: Bearer ${secret}`,
+    "initdb: error: FATAL_STDERR_SENTINEL"
+  ].join("\n");
+  const localAppData = writeContainedInitializationState(root, {
+    state: "failed",
+    updatedAt: "2026-08-16T03:28:19.168Z",
+    reason,
+    errorCode: "EXIT_NONZERO",
+    exitStatus: 1,
+    signal: null,
+    spawnErrorCode: null,
+    stdoutTail,
+    stderrTail
+  });
+  const diagnostic = collectInstallerSmokePostgresDiagnostics({
+    smokeRoot: root,
+    localAppData,
+    secrets: [secret]
+  });
+  const serialized = formatInstallerSmokePostgresDiagnostic(diagnostic);
+  assert.doesNotMatch(serialized, /ACTUAL_TEST_SECRET/);
+  assert.match(serialized, /FATAL_REASON_SENTINEL/);
+  assert.match(serialized, /FATAL_STDERR_SENTINEL/);
+  assert.match(serialized, /EXIT_NONZERO/);
+  assert.match(serialized, /"exitStatus":1/);
+  assert.match(serialized, /\[redacted\]/);
+  assert.equal(diagnostic.initializationState.errorCode, "EXIT_NONZERO");
+  assert.equal(diagnostic.initializationState.exitStatus, 1);
+});
+
+test("D1 diagnostic collector preserves old and absent initialization-state shapes", () => {
+  const { root } = cleanupFixture();
+  const localAppData = path.join(root, "localAppData");
+  fs.mkdirSync(path.join(localAppData, "YUVI", "Postgres", "runtime"), { recursive: true });
+  const missing = collectInstallerSmokePostgresDiagnostics({ smokeRoot: root, localAppData });
+  assert.deepEqual(missing.initializationState, { present: false });
+  assert.equal(Object.hasOwn(missing.initializationState, "errorCode"), false);
+  assert.equal(Object.hasOwn(missing.initializationState, "stderrTail"), false);
+
+  fs.writeFileSync(
+    path.join(localAppData, "YUVI", "Postgres", "runtime", "initialization-state.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      state: "failed",
+      updatedAt: "2026-08-16T00:00:00.000Z",
+      reason: "initdb failed"
+    })
+  );
+  const legacy = collectInstallerSmokePostgresDiagnostics({ smokeRoot: root, localAppData });
+  assert.deepEqual(legacy.initializationState, {
+    state: "failed",
+    reason: "initdb failed",
+    updatedAt: "2026-08-16T00:00:00.000Z"
+  });
+  assert.equal(Object.hasOwn(legacy.initializationState, "errorCode"), false);
+  assert.equal(Object.hasOwn(legacy.initializationState, "stderrTail"), false);
+
+  fs.writeFileSync(
+    path.join(localAppData, "YUVI", "Postgres", "runtime", "initialization-state.json"),
+    "{"
+  );
+  const malformed = collectInstallerSmokePostgresDiagnostics({ smokeRoot: root, localAppData });
+  assert.deepEqual(malformed.initializationState, { malformed: true });
+});

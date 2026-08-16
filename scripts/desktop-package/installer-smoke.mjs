@@ -1773,6 +1773,43 @@ function redactCleanupDiagnosticText(text) {
   return out.slice(0, 240);
 }
 
+/** Initialization-state evidence only. Cleanup diagnostics keep the 240-char helper. */
+const INSTALLER_SMOKE_INIT_STATE_BOUNDS = {
+  state: { maxChars: 32, retain: "head" },
+  updatedAt: { maxChars: 64, retain: "head" },
+  reason: { maxChars: 180, retain: "tail" },
+  errorCode: { maxChars: 32, retain: "head" },
+  signal: { maxChars: 32, retain: "tail" },
+  spawnErrorCode: { maxChars: 32, retain: "head" },
+  stdoutTail: { maxChars: 2048, retain: "tail" },
+  stderrTail: { maxChars: 4096, retain: "tail" }
+};
+
+const INSTALLER_SMOKE_D1_DIAGNOSTIC_MAX_CHARS = 8192;
+
+function redactInstallerSmokeDiagnosticPatterns(text) {
+  return String(text ?? "")
+    .replace(/Authorization:\s*Bearer\s+\S+/gi, "Authorization: Bearer [redacted]")
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(
+      /\b(YUVI_POSTGRES_PASSWORD|PGPASSWORD|DATABASE_URL|MEM0_PG_CONNECTION_STRING|YUVI_INSTALLER_SMOKE_CRED_SECRET)\b\s*[=:]\s*\S+/gi,
+      "$1=[redacted]"
+    )
+    .replace(/\bpassword\s*=\s*\S+/gi, "password=[redacted]")
+    .replace(/postgres(?:ql)?:\/\/\S+/gi, "postgres://[redacted]");
+}
+
+export function redactInstallerSmokeDiagnosticText(
+  text,
+  secrets = [],
+  { maxChars, retain = "head" } = {}
+) {
+  let out = redactInstallerSmokeDiagnosticPatterns(redactInstallerSmokeSecretText(text, secrets));
+  const limit = Number.isInteger(maxChars) && maxChars > 0 ? maxChars : out.length;
+  if (out.length <= limit) return out;
+  return retain === "tail" ? out.slice(-limit) : out.slice(0, limit);
+}
+
 export function formatCleanupSecondaryDiagnostic(error, { phase = null } = {}) {
   const code = error?.code ? String(error.code).slice(0, 32) : null;
   const rawMessage = error instanceof Error ? error.message : String(error ?? "cleanup failed");
@@ -1963,6 +2000,52 @@ function parseAllowlistedJson(text, allow) {
   }
 }
 
+function parseInitializationStateDiagnostic(text, secrets = []) {
+  try {
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    return pickInitializationStateDiagnostic(value, secrets);
+  } catch {
+    return { malformed: true };
+  }
+}
+
+function pickInitializationStateDiagnostic(value, secrets = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.present === false) return { present: false };
+  if (value.malformed === true) return { malformed: true };
+  const out = {};
+  const order = [
+    "state",
+    "errorCode",
+    "exitStatus",
+    "signal",
+    "spawnErrorCode",
+    "reason",
+    "stderrTail",
+    "stdoutTail",
+    "updatedAt"
+  ];
+  for (const key of order) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const field = value[key];
+    if (key === "exitStatus") {
+      if (field === null) out.exitStatus = null;
+      else if (typeof field === "number" && Number.isInteger(field)) out.exitStatus = field;
+      continue;
+    }
+    if ((key === "signal" || key === "spawnErrorCode") && field === null) {
+      out[key] = null;
+      continue;
+    }
+    if (typeof field !== "string") continue;
+    const spec = INSTALLER_SMOKE_INIT_STATE_BOUNDS[key];
+    if (!spec) continue;
+    out[key] = redactInstallerSmokeDiagnosticText(field, secrets, spec);
+  }
+  return out;
+}
+
 function boundedRedactedLogTail(text, secrets = []) {
   const redacted = redactCleanupDiagnosticText(redactInstallerSmokeSecretText(text, secrets));
   const lines = redacted.split(/\r?\n/).filter((line) => line.trim());
@@ -2003,7 +2086,7 @@ export function collectInstallerSmokePostgresDiagnostics({
   const diagnostic = {
     postgresRootRelative: "localAppData/YUVI/Postgres",
     initializationState: initState.ok
-      ? parseAllowlistedJson(initState.text, ["state", "updatedAt", "reason"])
+      ? parseInitializationStateDiagnostic(initState.text, secrets)
       : { present: false },
     marker: marker.ok
       ? parseAllowlistedJson(marker.text, ["product", "clusterId", "postgresMajor"])
@@ -2039,7 +2122,29 @@ export function formatInstallerSmokePostgresDiagnostic(diagnostic) {
   if (diagnostic.diagnosticUnavailable) {
     return `diagnosticUnavailable=${String(diagnostic.diagnosticUnavailable).slice(0, 40)}`;
   }
-  return JSON.stringify(diagnostic).slice(0, 1_500);
+  const initializationState = pickInitializationStateDiagnostic(diagnostic.initializationState);
+  const essential = {
+    initializationState
+  };
+  const extras = [
+    ["postgresRootRelative", diagnostic.postgresRootRelative],
+    ["marker", diagnostic.marker],
+    ["listen", diagnostic.listen],
+    ["pidMetadata", diagnostic.pidMetadata],
+    ["pgVersion", diagnostic.pgVersion],
+    ["listenConfig", diagnostic.listenConfig],
+    ["postgresLogPresent", diagnostic.postgresLogPresent],
+    ["postgresLogBytes", diagnostic.postgresLogBytes],
+    ["postgresLogTail", diagnostic.postgresLogTail]
+  ];
+  const payload = { ...essential };
+  for (const [key, value] of extras) {
+    if (value === undefined) continue;
+    const candidate = { ...payload, [key]: value };
+    if (JSON.stringify(candidate).length > INSTALLER_SMOKE_D1_DIAGNOSTIC_MAX_CHARS) continue;
+    payload[key] = value;
+  }
+  return JSON.stringify(payload);
 }
 
 export async function runInstallerSmokeFinalCleanup({
