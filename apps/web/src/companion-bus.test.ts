@@ -91,6 +91,23 @@ describe("CompanionBus", () => {
     }
   });
 
+  it("relays persistent TTS configuration separately from voice preference", async () => {
+    const main = new CompanionBus("main");
+    const companion = new CompanionBus("companion");
+    try {
+      const received: Array<{ enabled: boolean; mode: "managed" | "external" } | null> = [];
+      companion.subscribe((message) => {
+        if (message.kind === "tts-config") received.push(message.config);
+      });
+      main.post({ kind: "tts-config", config: { enabled: false, mode: "managed" } });
+      main.post({ kind: "tts-config", config: null });
+      await vi.waitFor(() => expect(received).toEqual([{ enabled: false, mode: "managed" }, null]));
+    } finally {
+      main.close();
+      companion.close();
+    }
+  });
+
   it("ignores unknown wire payloads and self-originated messages", async () => {
     const main = new CompanionBus("main");
     const companion = new CompanionBus("companion");
@@ -193,5 +210,12 @@ describe("CompanionBus", () => {
       })
     ).toBe(false);
     expect(isCompanionBusMessage({ kind: "user-gesture", extra: true })).toBe(false);
+    expect(
+      isCompanionBusMessage({
+        kind: "tts-config",
+        config: { enabled: true, mode: "external" }
+      })
+    ).toBe(true);
+    expect(isCompanionBusMessage({ kind: "tts-config", config: { enabled: true } })).toBe(false);
   });
 });

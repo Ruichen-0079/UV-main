@@ -25,6 +25,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
     requestedPresence?: PresenceState;
     requestedProjection?: CompanionPresenceProjection;
     className?: string;
+    onModelLifecycle?: (state: LumiModelLifecycle) => void;
     /** The companion window draws its own framing toggle outside the resize corner. */
     showFramingToggle?: boolean;
   },
@@ -35,6 +36,8 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   const controllerRef = useRef<LumiController | null>(null);
   const [state, setState] = useState<PresenceState>("idle");
   const [modelLifecycle, setModelLifecycle] = useState<LumiModelLifecycle>("loading");
+  const onModelLifecycleRef = useRef(props.onModelLifecycle);
+  onModelLifecycleRef.current = props.onModelLifecycle;
   // Default portrait (half). Full-body only after an explicit user toggle.
   const [framing, setFraming] = useState<LumiFraming>("half");
   const [overlay, setOverlay] = useState<LumiFramingDiagnostics | null>(null);
@@ -91,7 +94,10 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       },
       undefined,
       (next) => {
-        if (!disposed) setModelLifecycle(next);
+        if (!disposed) {
+          setModelLifecycle(next);
+          onModelLifecycleRef.current?.(next);
+        }
       }
     );
     controllerRef.current = controller;

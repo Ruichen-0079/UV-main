@@ -37,6 +37,8 @@ export type UserSettingsDto = {
   companion: { alwaysOnTop: boolean };
 };
 
+export type TtsSettingsProjection = Pick<UserSettingsDto["tts"], "enabled" | "mode">;
+
 export type SecretStatusDto = {
   deepseekApiKey: boolean;
   databaseUrl: boolean;
@@ -348,6 +350,7 @@ export function reduceUserSettings(
     case "load-start":
       return { ...state, loading: true, error: null };
     case "load-success":
+      if (action.view.revision < state.revision) return state;
       return {
         ...state,
         loading: false,
@@ -370,6 +373,9 @@ export function reduceUserSettings(
     case "save-start":
       return { ...state, saving: true, error: null, saveMessage: null };
     case "save-success": {
+      if (action.result.revision < state.revision) {
+        return { ...state, saving: false };
+      }
       const form = formFromView({
         settings: action.result.settings,
         secrets: action.result.secrets,

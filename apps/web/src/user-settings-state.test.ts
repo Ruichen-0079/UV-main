@@ -443,6 +443,57 @@ describe("user settings reducer", () => {
     ).toThrow();
   });
 
+  it("does not let an older load overwrite newer persisted settings", () => {
+    let state = reduceUserSettings(initialUserSettingsUiState(), {
+      type: "load-success",
+      view: {
+        ...sampleView(),
+        revision: 4,
+        settings: {
+          ...sampleView().settings,
+          tts: { ...sampleView().settings.tts, enabled: false }
+        }
+      }
+    });
+    const stale = reduceUserSettings(state, {
+      type: "load-success",
+      view: {
+        ...sampleView(),
+        revision: 3,
+        settings: { ...sampleView().settings, tts: { ...sampleView().settings.tts, enabled: true } }
+      }
+    });
+    expect(stale).toBe(state);
+    expect(stale.form.ttsEnabled).toBe(false);
+  });
+
+  it("does not let an older save result replace newer settings", () => {
+    let state = reduceUserSettings(initialUserSettingsUiState(), {
+      type: "load-success",
+      view: { ...sampleView(), revision: 4 }
+    });
+    state = reduceUserSettings(state, { type: "save-start" });
+    const stale = reduceUserSettings(state, {
+      type: "save-success",
+      clearSecrets: true,
+      result: {
+        saved: true,
+        restartServices: [],
+        restartApplication: false,
+        revision: 3,
+        settings: {
+          ...sampleView().settings,
+          tts: { ...sampleView().settings.tts, enabled: false }
+        },
+        secrets: emptySecretStatus(),
+        supervisorSync: { applied: true, error: null }
+      }
+    });
+    expect(stale.revision).toBe(4);
+    expect(stale.form.ttsEnabled).toBe(true);
+    expect(stale.saving).toBe(false);
+  });
+
   it("exposes only the supported secret mutation keys to TypeScript callers", () => {
     const acceptsSecretKey = (key: Parameters<typeof setUserSecret>[0]): string => key;
     expect(acceptsSecretKey("memory.llmApiKey")).toBe("memory.llmApiKey");

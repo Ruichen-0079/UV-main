@@ -5,11 +5,20 @@
  */
 
 import { isTauriRuntime } from "./tauri-window.js";
+import {
+  initialServiceStatusState,
+  isValidSnapshotTimestamp,
+  normalizeUiServiceSnapshots,
+  reduceServiceStatus,
+  type ServiceStatusState,
+  type ServiceStatusAction
+} from "./service-status-state.js";
+import type { UiServiceSnapshot } from "./service-status-state.js";
 
 export type SupervisorSnapshotDto = {
   instanceId: string;
   shuttingDown: boolean;
-  services: Array<Record<string, unknown>>;
+  services: UiServiceSnapshot[];
   updatedAt: string;
 };
 
@@ -31,28 +40,43 @@ export function isServiceSupervisorAvailable(): boolean {
 }
 
 /** Fallback poll when events are quiet. Prefer event-driven updates. */
-const STATUS_FALLBACK_POLL_MS = 5_000;
+export const STATUS_FALLBACK_POLL_MS = 5_000;
 
-export function subscribeServiceStatus(handlers: StatusHandlers): () => void {
+export type ServiceStatusSubscriptionOptions = {
+  getStatus?: () => Promise<SupervisorSnapshotDto | null>;
+};
+
+export function subscribeServiceStatus(
+  handlers: StatusHandlers,
+  options: ServiceStatusSubscriptionOptions = {}
+): () => void {
   let cancelled = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let unlisten: (() => void) | null = null;
+  let connectionGeneration = 0;
   /** Skip redundant fallback poll briefly after a live event. */
   let lastEventAt = 0;
+  const readStatus = options.getStatus ?? getServiceStatus;
+
+  const disconnect = (error?: string): void => {
+    connectionGeneration += 1;
+    handlers.onDisconnected(error);
+  };
 
   const tick = async (source: "poll" | "event" | "boot") => {
     if (cancelled) return;
     if (source === "poll" && Date.now() - lastEventAt < STATUS_FALLBACK_POLL_MS - 250) {
       return;
     }
+    const requestGeneration = connectionGeneration;
     try {
-      const snapshot = await getServiceStatus();
-      if (cancelled || !snapshot) return;
+      const snapshot = await readStatus();
+      if (cancelled || requestGeneration !== connectionGeneration || !snapshot) return;
       handlers.onConnected(snapshot.instanceId);
       handlers.onSnapshot(snapshot);
     } catch (error) {
-      if (cancelled) return;
-      handlers.onDisconnected(error instanceof Error ? error.message : String(error));
+      if (cancelled || requestGeneration !== connectionGeneration) return;
+      disconnect(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -67,12 +91,19 @@ export function subscribeServiceStatus(handlers: StatusHandlers): () => void {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         if (cancelled) return;
-        unlisten = await listen<SupervisorSnapshotDto>("service.status.changed", (event) => {
+        const remove = await listen<unknown>("service.status.changed", (event) => {
           if (cancelled) return;
+          const snapshot = parseSupervisorSnapshot(event.payload);
+          if (!snapshot) return;
           lastEventAt = Date.now();
-          handlers.onConnected(event.payload.instanceId);
-          handlers.onSnapshot(event.payload);
+          handlers.onConnected(snapshot.instanceId);
+          handlers.onSnapshot(snapshot);
         });
+        if (cancelled) {
+          remove();
+        } else {
+          unlisten = remove;
+        }
       } catch {
         // fall back to interval only
       }
@@ -95,12 +126,12 @@ export function subscribeServiceStatus(handlers: StatusHandlers): () => void {
 export async function getServiceStatus(): Promise<SupervisorSnapshotDto | null> {
   if (isTauriRuntime()) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<SupervisorSnapshotDto>("get_service_status");
+    return parseSupervisorSnapshot(await invoke<unknown>("get_service_status"));
   }
   if (debugSupervisorUrl) {
     const response = await fetch(`${debugSupervisorUrl.replace(/\/$/, "")}/v1/status`);
     if (!response.ok) throw new Error(`supervisor HTTP ${response.status}`);
-    return (await response.json()) as SupervisorSnapshotDto;
+    return parseSupervisorSnapshot(await response.json());
   }
   return null;
 }
@@ -112,24 +143,76 @@ export async function invokeServiceAction(
   if (isTauriRuntime()) {
     const { invoke } = await import("@tauri-apps/api/core");
     if (action === "refresh") {
-      return invoke<SupervisorSnapshotDto>("refresh_services");
+      return parseSupervisorSnapshot(await invoke<unknown>("refresh_services"));
     }
     if (!serviceId) {
-      return invoke<SupervisorSnapshotDto>("refresh_services");
+      return parseSupervisorSnapshot(await invoke<unknown>("refresh_services"));
     }
-    return invoke<SupervisorSnapshotDto>("service_action", { action, serviceId });
+    return parseSupervisorSnapshot(await invoke<unknown>("service_action", { action, serviceId }));
   }
   if (debugSupervisorUrl) {
     const base = debugSupervisorUrl.replace(/\/$/, "");
     if (action === "refresh") {
       const response = await fetch(`${base}/v1/refresh`, { method: "POST" });
-      return (await response.json()) as SupervisorSnapshotDto;
+      return parseSupervisorSnapshot(await response.json());
     }
     if (!serviceId) return getServiceStatus();
     const response = await fetch(`${base}/v1/services/${serviceId}/${action}`, {
       method: "POST"
     });
-    return (await response.json()) as SupervisorSnapshotDto;
+    return parseSupervisorSnapshot(await response.json());
   }
   return null;
+}
+
+/** Shared reducer-backed subscription for surfaces that need projection inputs. */
+export function subscribeServiceStatusState(
+  onState: (state: ServiceStatusState) => void,
+  options: ServiceStatusSubscriptionOptions = {}
+): () => void {
+  let state = initialServiceStatusState;
+  const apply = (action: ServiceStatusAction): void => {
+    const next = reduceServiceStatus(state, action);
+    if (next === state) return;
+    state = next;
+    onState(state);
+  };
+  return subscribeServiceStatus(
+    {
+      onConnected: (instanceId) => apply({ type: "supervisor-connected", instanceId }),
+      onSnapshot: (snapshot) =>
+        apply({
+          type: "snapshot",
+          instanceId: snapshot.instanceId,
+          shuttingDown: snapshot.shuttingDown,
+          services: snapshot.services,
+          updatedAt: snapshot.updatedAt
+        }),
+      onDisconnected: (error) =>
+        apply(
+          error ? { type: "supervisor-disconnected", error } : { type: "supervisor-disconnected" }
+        )
+    },
+    options
+  );
+}
+
+export function parseSupervisorSnapshot(value: unknown): SupervisorSnapshotDto | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const instanceId = record["instanceId"];
+  const shuttingDown = record["shuttingDown"];
+  const updatedAt = record["updatedAt"];
+  const services = normalizeUiServiceSnapshots(record["services"]);
+  if (
+    typeof instanceId !== "string" ||
+    instanceId.trim().length === 0 ||
+    typeof shuttingDown !== "boolean" ||
+    typeof updatedAt !== "string" ||
+    !isValidSnapshotTimestamp(updatedAt) ||
+    services === null
+  ) {
+    return null;
+  }
+  return { instanceId, shuttingDown, services, updatedAt };
 }
