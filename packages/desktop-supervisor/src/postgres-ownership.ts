@@ -33,6 +33,51 @@ export type PostgresOwnershipEvidence = {
   processStartedAtUtc: string | null;
 };
 
+export type PostgresOwnershipDiagnosticReason =
+  | "NONE"
+  | "MARKER_INVALID"
+  | "MARKER_MAJOR_MISMATCH"
+  | "PG_VERSION_MISMATCH"
+  | "MARKER_DATA_DIRECTORY_MISMATCH"
+  | "PROCESS_UNRESOLVED"
+  | "PID_MISMATCH"
+  | "EXECUTABLE_MISMATCH"
+  | "PGDATA_ARGUMENT_MISMATCH"
+  | "CLUSTER_NAME_MISMATCH"
+  | "LAUNCH_TIME_MISMATCH"
+  | "PREVIOUS_METADATA_MISMATCH"
+  | "OTHER_BOUNDED";
+
+/** Map internal ownership prose to a bounded, secret-free diagnostic enum. */
+export function postgresOwnershipDiagnosticReason(
+  reason: string
+): PostgresOwnershipDiagnosticReason {
+  if (reason === "YUVI cluster marker is missing") return "MARKER_INVALID";
+  if (reason === "cluster marker major is not 16") return "MARKER_MAJOR_MISMATCH";
+  if (reason === "PG_VERSION is not 16") return "PG_VERSION_MISMATCH";
+  if (reason === "cluster marker PGDATA does not match layout") {
+    return "MARKER_DATA_DIRECTORY_MISMATCH";
+  }
+  if (reason.startsWith("process is not inspectable")) return "PROCESS_UNRESOLVED";
+  if (reason === "inspected process is not the nominated postmaster PID") return "PID_MISMATCH";
+  if (reason === "executable is not the selected PostgreSQL 16 postgres binary") {
+    return "EXECUTABLE_MISMATCH";
+  }
+  if (reason === "exact -D PGDATA token does not match canonical PGDATA") {
+    return "PGDATA_ARGUMENT_MISMATCH";
+  }
+  if (reason === "cluster_name does not match yuvi-pg-<clusterId>") {
+    return "CLUSTER_NAME_MISMATCH";
+  }
+  if (reason === "process start time is not plausible for this launch") {
+    return "LAUNCH_TIME_MISMATCH";
+  }
+  if (reason === "previous ownership metadata is not valid first-party evidence") {
+    return "PREVIOUS_METADATA_MISMATCH";
+  }
+  return "OTHER_BOUNDED";
+}
+
 export type EvaluatePostgresOwnershipInput = {
   layout: PostgresLayout;
   distribution: PostgresDistribution;

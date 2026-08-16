@@ -2066,10 +2066,208 @@ function yuviConfAllowlist(text) {
  * Secret-safe, smoke-contained D1 artifact snapshot. Diagnostic only — never
  * used as PostgreSQL ownership or termination authority.
  */
+function createEmptyPostgresAttemptDiagnostic(postgresAttempt = 0) {
+  return {
+    postgresAttempt,
+    postgresLaunchOutcome: "NOT_RUN",
+    postgresLaunchExitCode: null,
+    postgresLaunchSignal: null,
+    postmasterPidPresent: null,
+    postmasterPid: null,
+    postmasterPidSource: null,
+    processInspectionStatus: "NOT_RUN",
+    processInspectionPid: null,
+    ownershipStatus: "NOT_RUN",
+    ownershipReason: null,
+    metadataRecorded: "NOT_RUN",
+    metadataReadback: "NOT_RUN",
+    metadataCleanup: "NOT_RUN",
+    serverReady: "NOT_RUN",
+    databaseCreateStatus: "NOT_RUN",
+    databaseCreateSqlState: null,
+    yuviReady: "NOT_RUN",
+    fencedStopStatus: "NOT_RUN",
+    postgresServiceLastErrorCode: null
+  };
+}
+
+function isBoundedEnum(value, allowed) {
+  return typeof value === "string" && allowed.includes(value) ? value : null;
+}
+
+function boundedPid(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function boundedExitCode(value) {
+  return Number.isSafeInteger(value) && Math.abs(value) <= 2_147_483_647 ? value : null;
+}
+
+function boundedSignal(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 32 ? value : null;
+}
+
+function boundedSqlState(value) {
+  return typeof value === "string" && /^[0-9A-Z]{5}$/.test(value) ? value : null;
+}
+
+function boundedServiceErrorCode(value) {
+  return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(value) ? value : null;
+}
+
+const POSTGRES_DIAGNOSTIC_ROLE = "postgres";
+const POSTGRES_DIAGNOSTIC_EVENT_PREFIX = "postgres.private.";
+const POSTGRES_DIAGNOSTIC_EVENT_NAMES = new Set([
+  "launch",
+  "postmaster",
+  "inspect",
+  "ownership",
+  "metadata",
+  "server_ready",
+  "database_create",
+  "yuvi_ready",
+  "fenced_stop",
+  "service"
+]);
+
+function isPostgresDiagnosticEvent(event) {
+  if (!event || typeof event !== "object" || typeof event.event !== "string") return false;
+  if (event.role !== POSTGRES_DIAGNOSTIC_ROLE) return false;
+  if (!event.event.startsWith(POSTGRES_DIAGNOSTIC_EVENT_PREFIX)) return false;
+  return POSTGRES_DIAGNOSTIC_EVENT_NAMES.has(
+    event.event.slice(POSTGRES_DIAGNOSTIC_EVENT_PREFIX.length)
+  );
+}
+
+/** Parse only the safe allowlist emitted by postgres.private.* lifecycle events. */
+export function parsePostgresLifecycleDiagnostics(output = "") {
+  let diagnostic = createEmptyPostgresAttemptDiagnostic();
+  const prefix = "YUVI_SUPERVISOR_LIFECYCLE ";
+  for (const line of String(output ?? "").split(/\r?\n/)) {
+    const start = line.indexOf(prefix);
+    if (start < 0) continue;
+    let event;
+    try {
+      event = JSON.parse(line.slice(start + prefix.length));
+    } catch {
+      continue;
+    }
+    if (!isPostgresDiagnosticEvent(event)) continue;
+    const name = event.event.slice(POSTGRES_DIAGNOSTIC_EVENT_PREFIX.length);
+    if (name === "launch") {
+      const status = isBoundedEnum(event.status, [
+        "SUCCESS",
+        "EXIT_NONZERO",
+        "TIMEOUT",
+        "SIGNALLED",
+        "PRE_SPAWN_ERROR",
+        "POST_SPAWN_ERROR"
+      ]);
+      if (!status) continue;
+      diagnostic = createEmptyPostgresAttemptDiagnostic(
+        Math.min(diagnostic.postgresAttempt + 1, 2_147_483_647)
+      );
+      diagnostic.postgresLaunchOutcome = status;
+      diagnostic.postgresLaunchExitCode = boundedExitCode(event.exitCode);
+      diagnostic.postgresLaunchSignal = boundedSignal(event.signal);
+      continue;
+    }
+    if (name === "postmaster") {
+      const status = isBoundedEnum(event.status, ["PRESENT", "MISSING"]);
+      if (status) diagnostic.postmasterPidPresent = status === "PRESENT";
+      diagnostic.postmasterPid = boundedPid(event.postmasterPid);
+      diagnostic.postmasterPidSource = isBoundedEnum(event.source, ["immediate", "delayed-settle"]);
+      continue;
+    }
+    if (name === "inspect") {
+      const status = isBoundedEnum(event.status, [
+        "RESOLVED",
+        "NOT_RUNNING",
+        "QUERY_TIMEOUT",
+        "QUERY_FAILED",
+        "EMPTY_OUTPUT",
+        "PARSE_FAILED"
+      ]);
+      if (status) diagnostic.processInspectionStatus = status;
+      diagnostic.processInspectionPid = boundedPid(event.processId);
+      continue;
+    }
+    if (name === "ownership") {
+      const status = isBoundedEnum(event.status, ["NOT_RUN", "ACCEPTED", "REJECTED", "UNCERTAIN"]);
+      const reason = isBoundedEnum(event.reason, [
+        "NONE",
+        "MARKER_INVALID",
+        "MARKER_MAJOR_MISMATCH",
+        "PG_VERSION_MISMATCH",
+        "MARKER_DATA_DIRECTORY_MISMATCH",
+        "PROCESS_UNRESOLVED",
+        "PID_MISMATCH",
+        "EXECUTABLE_MISMATCH",
+        "PGDATA_ARGUMENT_MISMATCH",
+        "CLUSTER_NAME_MISMATCH",
+        "LAUNCH_TIME_MISMATCH",
+        "PREVIOUS_METADATA_MISMATCH",
+        "OTHER_BOUNDED"
+      ]);
+      if (status) diagnostic.ownershipStatus = status;
+      if (reason) diagnostic.ownershipReason = reason;
+      continue;
+    }
+    if (name === "metadata") {
+      const phase = String(event.phase ?? "");
+      const status = String(event.status ?? "");
+      if (phase === "METADATA_WRITE" && ["SUCCESS", "FAILED"].includes(status)) {
+        diagnostic.metadataRecorded = status;
+      } else if (phase === "METADATA_READBACK" && ["SUCCESS", "FAILED"].includes(status)) {
+        diagnostic.metadataReadback = status;
+      } else if (
+        phase === "METADATA_CLEANUP" &&
+        ["NOT_RUN", "REMOVED", "RETAINED", "FAILED"].includes(status)
+      ) {
+        diagnostic.metadataCleanup = status;
+      }
+      continue;
+    }
+    if (name === "server_ready") {
+      const status = isBoundedEnum(event.status, ["NOT_RUN", "READY", "FAILED"]);
+      if (status) diagnostic.serverReady = status;
+      continue;
+    }
+    if (name === "database_create") {
+      const status = isBoundedEnum(event.status, [
+        "NOT_RUN",
+        "CREATED",
+        "ALREADY_EXISTS",
+        "FAILED"
+      ]);
+      if (status) diagnostic.databaseCreateStatus = status;
+      diagnostic.databaseCreateSqlState = boundedSqlState(event.sqlState);
+      continue;
+    }
+    if (name === "yuvi_ready") {
+      const status = isBoundedEnum(event.status, ["NOT_RUN", "READY", "FAILED"]);
+      if (status) diagnostic.yuviReady = status;
+      continue;
+    }
+    if (name === "fenced_stop") {
+      const status = isBoundedEnum(event.status, ["NOT_RUN", "INVOKED", "PROVEN", "FAILED"]);
+      if (status) diagnostic.fencedStopStatus = status;
+      continue;
+    }
+    if (name === "service") {
+      if (event.phase === "SERVICE_LAST_ERROR") {
+        diagnostic.postgresServiceLastErrorCode = boundedServiceErrorCode(event.lastErrorCode);
+      }
+    }
+  }
+  return diagnostic;
+}
+
 export function collectInstallerSmokePostgresDiagnostics({
   smokeRoot,
   localAppData,
   secrets = [],
+  supervisorOutput = "",
   readFile = fs.readFileSync,
   exists = fs.existsSync
 } = {}) {
@@ -2100,7 +2298,8 @@ export function collectInstallerSmokePostgresDiagnostics({
     pgVersion: pgVersion.ok
       ? redactCleanupDiagnosticText(pgVersion.text).trim().slice(0, 16)
       : null,
-    listenConfig: yuviConf.ok ? yuviConfAllowlist(yuviConf.text) : null
+    listenConfig: yuviConf.ok ? yuviConfAllowlist(yuviConf.text) : null,
+    ...parsePostgresLifecycleDiagnostics(supervisorOutput)
   };
   const logPresent = Boolean(logFile.ok || logErr.ok);
   diagnostic.postgresLogPresent = logPresent;
@@ -2135,7 +2334,27 @@ export function formatInstallerSmokePostgresDiagnostic(diagnostic) {
     ["listenConfig", diagnostic.listenConfig],
     ["postgresLogPresent", diagnostic.postgresLogPresent],
     ["postgresLogBytes", diagnostic.postgresLogBytes],
-    ["postgresLogTail", diagnostic.postgresLogTail]
+    ["postgresLogTail", diagnostic.postgresLogTail],
+    ["postgresAttempt", diagnostic.postgresAttempt],
+    ["postgresLaunchOutcome", diagnostic.postgresLaunchOutcome],
+    ["postgresLaunchExitCode", diagnostic.postgresLaunchExitCode],
+    ["postgresLaunchSignal", diagnostic.postgresLaunchSignal],
+    ["postmasterPidPresent", diagnostic.postmasterPidPresent],
+    ["postmasterPid", diagnostic.postmasterPid],
+    ["postmasterPidSource", diagnostic.postmasterPidSource],
+    ["processInspectionStatus", diagnostic.processInspectionStatus],
+    ["processInspectionPid", diagnostic.processInspectionPid],
+    ["ownershipStatus", diagnostic.ownershipStatus],
+    ["ownershipReason", diagnostic.ownershipReason],
+    ["metadataRecorded", diagnostic.metadataRecorded],
+    ["metadataReadback", diagnostic.metadataReadback],
+    ["metadataCleanup", diagnostic.metadataCleanup],
+    ["serverReady", diagnostic.serverReady],
+    ["databaseCreateStatus", diagnostic.databaseCreateStatus],
+    ["databaseCreateSqlState", diagnostic.databaseCreateSqlState],
+    ["yuviReady", diagnostic.yuviReady],
+    ["fencedStopStatus", diagnostic.fencedStopStatus],
+    ["postgresServiceLastErrorCode", diagnostic.postgresServiceLastErrorCode]
   ];
   const payload = { ...essential };
   for (const [key, value] of extras) {
@@ -3863,7 +4082,8 @@ async function runPackagedSupervisor({
         error.d1Diagnostic = collectInstallerSmokePostgresDiagnostics({
           smokeRoot: layout.root,
           localAppData: layout.localAppData,
-          secrets: [postgresPassword]
+          secrets: [postgresPassword],
+          supervisorOutput: `${stdout}\n${stderr}`
         });
       }
     } catch (diagError) {

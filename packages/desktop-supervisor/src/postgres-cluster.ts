@@ -32,7 +32,9 @@ import { redactSecretText } from "./postgres-secret.js";
 import {
   evaluatePostgresOwnership,
   expectedClusterName,
+  postgresOwnershipDiagnosticReason,
   readPostmasterPid,
+  type PostgresOwnershipDiagnosticReason,
   type PostgresOwnershipEvidence
 } from "./postgres-ownership.js";
 import type { ProcessInspectionResult } from "./types.js";
@@ -375,6 +377,61 @@ export type WindowsPgCtlSpawnAsync = (
 /** @deprecated Use WindowsPgCtlSpawnAsync. Kept as an alias for hook typing. */
 export type WindowsPgCtlSpawn = WindowsPgCtlSpawnAsync;
 
+export type PostgresLaunchDiagnostic =
+  | {
+      phase: "PG_CTL_LAUNCH";
+      status: WindowsPgCtlOutcomeKind;
+      exitCode: number | null;
+      signal: string | null;
+    }
+  | {
+      phase: "POSTMASTER_PID";
+      status: "PRESENT" | "MISSING";
+      postmasterPid: number | null;
+      source: "immediate" | "delayed-settle";
+    }
+  | {
+      phase: "PROCESS_INSPECTION";
+      status:
+        | "RESOLVED"
+        | "NOT_RUNNING"
+        | "QUERY_TIMEOUT"
+        | "QUERY_FAILED"
+        | "EMPTY_OUTPUT"
+        | "PARSE_FAILED";
+      processId: number;
+    }
+  | {
+      phase: "OWNERSHIP";
+      status: "NOT_RUN" | "ACCEPTED" | "REJECTED" | "UNCERTAIN";
+      reason: PostgresOwnershipDiagnosticReason;
+      postmasterPid: number | null;
+    };
+
+export type PostgresLaunchDiagnosticSink = (diagnostic: PostgresLaunchDiagnostic) => void;
+
+function reportPostgresLaunchDiagnostic(
+  sink: PostgresLaunchDiagnosticSink | undefined,
+  diagnostic: PostgresLaunchDiagnostic
+): void {
+  try {
+    sink?.(diagnostic);
+  } catch {
+    // Diagnostic failures must never affect PostgreSQL lifecycle behavior.
+  }
+}
+
+function processInspectionDiagnosticStatus(
+  inspection: ProcessInspectionResult
+): Extract<PostgresLaunchDiagnostic, { phase: "PROCESS_INSPECTION" }>["status"] {
+  if (inspection.status === "resolved") return "RESOLVED";
+  if (inspection.status === "not-running") return "NOT_RUNNING";
+  if (inspection.reason === "query-timeout") return "QUERY_TIMEOUT";
+  if (inspection.reason === "query-failed") return "QUERY_FAILED";
+  if (inspection.reason === "empty-output") return "EMPTY_OUTPUT";
+  return "PARSE_FAILED";
+}
+
 export function boundPgCtlOutput(text: string, maxChars = PG_CTL_OUTPUT_MAX_CHARS): string {
   if (text.length <= maxChars) return text;
   return text.slice(-maxChars);
@@ -575,14 +632,33 @@ export function reconcileWindowsPrivatePostgresLaunch(input: {
   inspectProcess: (processId: number) => ProcessInspectionResult;
   launchStartedAt: Date;
   readPid?: (dataDirectory: string) => number | null;
+  diagnosticSink?: PostgresLaunchDiagnosticSink;
+  diagnosticSource?: "immediate" | "delayed-settle";
 }): WindowsLaunchReconciliation {
   const readPid = input.readPid ?? readPostmasterPid;
   const pid = readPid(input.layout.data);
+  reportPostgresLaunchDiagnostic(input.diagnosticSink, {
+    phase: "POSTMASTER_PID",
+    status: pid == null ? "MISSING" : "PRESENT",
+    postmasterPid: pid,
+    source: input.diagnosticSource ?? "immediate"
+  });
   if (pid == null) {
     return { disposition: "missing" };
   }
   const inspection = input.inspectProcess(pid);
+  reportPostgresLaunchDiagnostic(input.diagnosticSink, {
+    phase: "PROCESS_INSPECTION",
+    status: processInspectionDiagnosticStatus(inspection),
+    processId: pid
+  });
   if (inspection.status === "not-running") {
+    reportPostgresLaunchDiagnostic(input.diagnosticSink, {
+      phase: "OWNERSHIP",
+      status: "NOT_RUN",
+      reason: "NONE",
+      postmasterPid: pid
+    });
     return { disposition: "quiescent" };
   }
   const evidence = evaluatePostgresOwnership({
@@ -594,6 +670,16 @@ export function reconcileWindowsPrivatePostgresLaunch(input: {
     expectedPid: pid,
     launchStartedAt: input.launchStartedAt,
     launchMaxAfterMs: PG_CTL_START_WAIT_SECONDS * 1000
+  });
+  reportPostgresLaunchDiagnostic(input.diagnosticSink, {
+    phase: "OWNERSHIP",
+    status: evidence.owned
+      ? "ACCEPTED"
+      : inspection.status === "resolved"
+        ? "REJECTED"
+        : "UNCERTAIN",
+    reason: evidence.owned ? "NONE" : postgresOwnershipDiagnosticReason(evidence.reason),
+    postmasterPid: pid
   });
   if (evidence.owned && evidence.pid === pid) {
     return {
@@ -683,14 +769,23 @@ export async function launchWindowsPrivatePostgres(input: {
   sleepImpl?: (ms: number) => Promise<void>;
   nowMs?: () => number;
   readPid?: (dataDirectory: string) => number | null;
+  diagnosticSink?: PostgresLaunchDiagnosticSink;
 }): Promise<WindowsPrivatePostgresLaunchResult> {
   const launchStartedAt = (input.now ?? (() => new Date()))();
   const launcher = await invokeWindowsPgCtlStart(input);
+  reportPostgresLaunchDiagnostic(input.diagnosticSink, {
+    phase: "PG_CTL_LAUNCH",
+    status: launcher.kind,
+    exitCode: launcher.status,
+    signal: launcher.signal
+  });
   const reconcileInput = {
     layout: input.layout,
     distribution: input.distribution,
     inspectProcess: input.inspectProcess,
     launchStartedAt,
+    ...(input.diagnosticSink ? { diagnosticSink: input.diagnosticSink } : {}),
+    diagnosticSource: "immediate" as const,
     ...(input.readPid ? { readPid: input.readPid } : {})
   };
   let reconciled = reconcileWindowsPrivatePostgresLaunch(reconcileInput);
@@ -703,7 +798,10 @@ export async function launchWindowsPrivatePostgres(input: {
       ...(input.nowMs ? { now: input.nowMs } : {}),
       ...(input.readPid ? { readPid: input.readPid } : {})
     });
-    reconciled = reconcileWindowsPrivatePostgresLaunch(reconcileInput);
+    reconciled = reconcileWindowsPrivatePostgresLaunch({
+      ...reconcileInput,
+      diagnosticSource: "delayed-settle"
+    });
   }
   if (reconciled.disposition === "owned") {
     if (launcher.ok) {

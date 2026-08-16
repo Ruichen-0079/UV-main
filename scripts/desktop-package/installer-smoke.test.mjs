@@ -64,6 +64,7 @@ import {
   collectInstallerSmokePostgresDiagnostics,
   createOwnedSmokeProcessState,
   formatInstallerSmokePostgresDiagnostic,
+  parsePostgresLifecycleDiagnostics,
   resolveContainedInstallerSmokePostgresRoot,
   formatCleanupSecondaryDiagnostic,
   generateInstallerSmokePostgresPassword,
@@ -2875,6 +2876,288 @@ test("D1 diagnostic collector surfaces allowlisted fields and redacts secrets", 
     Object.prototype.hasOwnProperty.call(diagnostic.pidMetadata, "ownershipToken"),
     false
   );
+});
+
+test("D1 lifecycle diagnostics preserve first phase and cleanup evidence without secrets", () => {
+  const secret = "YUVI_TEST_SECRET_DO_NOT_PRINT";
+  const line = (event, fields = {}) =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({
+      event,
+      role: "postgres",
+      status: "untrusted-status",
+      commandLine: secret,
+      argv: [secret],
+      password: secret,
+      ...fields
+    })}`;
+  const output = [
+    line("postgres.private.launch", {
+      status: "SUCCESS",
+      exitCode: 0,
+      signal: null,
+      rawOutput: secret
+    }),
+    line("postgres.private.postmaster", {
+      status: "PRESENT",
+      postmasterPid: 9116,
+      source: "immediate"
+    }),
+    line("postgres.private.inspect", {
+      status: "RESOLVED",
+      processId: 9116,
+      argv: secret
+    }),
+    line("postgres.private.ownership", {
+      status: "ACCEPTED",
+      reason: "NONE",
+      postmasterPid: 9116
+    }),
+    line("postgres.private.metadata", { phase: "METADATA_WRITE", status: "SUCCESS" }),
+    line("postgres.private.metadata", { phase: "METADATA_READBACK", status: "SUCCESS" }),
+    line("postgres.private.server_ready", { status: "READY" }),
+    line("postgres.private.database_create", {
+      status: "ALREADY_EXISTS",
+      sqlState: "42P04",
+      query: secret
+    }),
+    line("postgres.private.yuvi_ready", { status: "FAILED" }),
+    line("postgres.private.fenced_stop", { status: "PROVEN" }),
+    line("postgres.private.metadata", { phase: "METADATA_CLEANUP", status: "REMOVED" }),
+    line("postgres.private.service", {
+      phase: "SERVICE_LAST_ERROR",
+      lastErrorCode: "YUVI_DATABASE_NOT_READY"
+    })
+  ].join("\n");
+  const diagnostic = parsePostgresLifecycleDiagnostics(output);
+  assert.equal(diagnostic.postgresLaunchOutcome, "SUCCESS");
+  assert.equal(diagnostic.postmasterPidPresent, true);
+  assert.equal(diagnostic.postmasterPid, 9116);
+  assert.equal(diagnostic.processInspectionStatus, "RESOLVED");
+  assert.equal(diagnostic.ownershipStatus, "ACCEPTED");
+  assert.equal(diagnostic.metadataRecorded, "SUCCESS");
+  assert.equal(diagnostic.metadataReadback, "SUCCESS");
+  assert.equal(diagnostic.metadataCleanup, "REMOVED");
+  assert.equal(diagnostic.serverReady, "READY");
+  assert.equal(diagnostic.databaseCreateStatus, "ALREADY_EXISTS");
+  assert.equal(diagnostic.databaseCreateSqlState, "42P04");
+  assert.equal(diagnostic.yuviReady, "FAILED");
+  assert.equal(diagnostic.fencedStopStatus, "PROVEN");
+  assert.equal(diagnostic.postgresServiceLastErrorCode, "YUVI_DATABASE_NOT_READY");
+  const formatted = formatInstallerSmokePostgresDiagnostic(diagnostic);
+  assert.doesNotMatch(formatted, new RegExp(secret));
+  assert.doesNotMatch(formatted, /commandLine|argv|rawOutput|password/);
+
+  const phases = [
+    ["OWNERSHIP", "REJECTED", "EXECUTABLE_MISMATCH", "POSTGRES_START_IDENTITY_UNCERTAIN"],
+    ["SERVER_READY", "FAILED", null, "POSTGRES_SERVER_NOT_READY"],
+    ["DATABASE_CREATE", "FAILED", "42501", "YUVI_DATABASE_CREATE_FAILED"],
+    ["YUVI_READY", "FAILED", null, "YUVI_DATABASE_NOT_READY"]
+  ];
+  for (const [phase, status, sqlState, lastErrorCode] of phases) {
+    const phaseOutput = [
+      line("postgres.private.metadata", { phase: "METADATA_WRITE", status: "SUCCESS" }),
+      line("postgres.private.metadata", { phase: "METADATA_CLEANUP", status: "REMOVED" }),
+      phase === "OWNERSHIP"
+        ? line("postgres.private.ownership", { status, reason: "EXECUTABLE_MISMATCH" })
+        : line(
+            `postgres.private.${phase === "DATABASE_CREATE" ? "database_create" : phase === "SERVER_READY" ? "server_ready" : "yuvi_ready"}`,
+            {
+              status,
+              sqlState
+            }
+          ),
+      line("postgres.private.service", { phase: "SERVICE_LAST_ERROR", lastErrorCode })
+    ].join("\n");
+    const phaseDiagnostic = parsePostgresLifecycleDiagnostics(phaseOutput);
+    if (phase === "OWNERSHIP") assert.equal(phaseDiagnostic.ownershipStatus, "REJECTED");
+    if (phase === "SERVER_READY") assert.equal(phaseDiagnostic.serverReady, "FAILED");
+    if (phase === "DATABASE_CREATE") {
+      assert.equal(phaseDiagnostic.databaseCreateStatus, "FAILED");
+      assert.equal(phaseDiagnostic.databaseCreateSqlState, "42501");
+    }
+    if (phase === "YUVI_READY") assert.equal(phaseDiagnostic.yuviReady, "FAILED");
+    assert.equal(phaseDiagnostic.postgresServiceLastErrorCode, lastErrorCode);
+  }
+});
+
+test("D1 lifecycle diagnostics reset all phase fields at a new launch attempt", () => {
+  const line = (event, fields = {}) =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({ event, role: "postgres", ...fields })}`;
+  const output = [
+    line("postgres.private.launch", { status: "SUCCESS", exitCode: 0, signal: null }),
+    line("postgres.private.postmaster", {
+      status: "PRESENT",
+      postmasterPid: 4101,
+      source: "immediate"
+    }),
+    line("postgres.private.inspect", { status: "RESOLVED", processId: 4101 }),
+    line("postgres.private.ownership", { status: "ACCEPTED", reason: "NONE" }),
+    line("postgres.private.metadata", { phase: "METADATA_WRITE", status: "SUCCESS" }),
+    line("postgres.private.metadata", { phase: "METADATA_READBACK", status: "SUCCESS" }),
+    line("postgres.private.server_ready", { status: "READY" }),
+    line("postgres.private.database_create", { status: "ALREADY_EXISTS", sqlState: "42P04" }),
+    line("postgres.private.yuvi_ready", { status: "FAILED" }),
+    line("postgres.private.fenced_stop", { status: "PROVEN" }),
+    line("postgres.private.metadata", { phase: "METADATA_CLEANUP", status: "REMOVED" }),
+    line("postgres.private.service", {
+      phase: "SERVICE_LAST_ERROR",
+      lastErrorCode: "YUVI_DATABASE_NOT_READY"
+    }),
+    line("postgres.private.launch", {
+      status: "PRE_SPAWN_ERROR",
+      exitCode: null,
+      signal: null
+    }),
+    line("postgres.private.postmaster", {
+      status: "MISSING",
+      postmasterPid: null,
+      source: "immediate"
+    })
+  ].join("\n");
+
+  const diagnostic = parsePostgresLifecycleDiagnostics(output);
+  assert.equal(diagnostic.postgresAttempt, 2);
+  assert.equal(diagnostic.postgresLaunchOutcome, "PRE_SPAWN_ERROR");
+  assert.equal(diagnostic.postgresLaunchExitCode, null);
+  assert.equal(diagnostic.postgresLaunchSignal, null);
+  assert.equal(diagnostic.postmasterPidPresent, false);
+  assert.equal(diagnostic.postmasterPid, null);
+  assert.equal(diagnostic.processInspectionStatus, "NOT_RUN");
+  assert.equal(diagnostic.processInspectionPid, null);
+  assert.equal(diagnostic.ownershipStatus, "NOT_RUN");
+  assert.equal(diagnostic.ownershipReason, null);
+  assert.equal(diagnostic.metadataRecorded, "NOT_RUN");
+  assert.equal(diagnostic.metadataReadback, "NOT_RUN");
+  assert.equal(diagnostic.metadataCleanup, "NOT_RUN");
+  assert.equal(diagnostic.serverReady, "NOT_RUN");
+  assert.equal(diagnostic.databaseCreateStatus, "NOT_RUN");
+  assert.equal(diagnostic.databaseCreateSqlState, null);
+  assert.equal(diagnostic.yuviReady, "NOT_RUN");
+  assert.equal(diagnostic.fencedStopStatus, "NOT_RUN");
+  assert.equal(diagnostic.postgresServiceLastErrorCode, null);
+  assert.equal(JSON.parse(formatInstallerSmokePostgresDiagnostic(diagnostic)).postgresAttempt, 2);
+});
+
+test("D1 lifecycle diagnostics keep launcher fields and phases within the latest attempt", () => {
+  const line = (event, fields = {}) =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({ event, role: "postgres", ...fields })}`;
+  const output = [
+    line("postgres.private.launch", { status: "EXIT_NONZERO", exitCode: 1, signal: "SIGTERM" }),
+    line("postgres.private.postmaster", { status: "PRESENT", postmasterPid: 4201 }),
+    line("postgres.private.inspect", { status: "RESOLVED", processId: 4201 }),
+    line("postgres.private.ownership", { status: "ACCEPTED", reason: "NONE" }),
+    line("postgres.private.metadata", { phase: "METADATA_WRITE", status: "SUCCESS" }),
+    line("postgres.private.fenced_stop", { status: "PROVEN" }),
+    line("postgres.private.launch", { status: "SUCCESS", exitCode: null, signal: null }),
+    line("postgres.private.postmaster", { status: "PRESENT", postmasterPid: 4202 }),
+    line("postgres.private.inspect", { status: "RESOLVED", processId: 4202 }),
+    line("postgres.private.ownership", { status: "ACCEPTED", reason: "NONE" }),
+    line("postgres.private.server_ready", { status: "FAILED" })
+  ].join("\n");
+
+  const diagnostic = parsePostgresLifecycleDiagnostics(output);
+  assert.equal(diagnostic.postgresAttempt, 2);
+  assert.equal(diagnostic.postgresLaunchOutcome, "SUCCESS");
+  assert.equal(diagnostic.postgresLaunchExitCode, null);
+  assert.equal(diagnostic.postgresLaunchSignal, null);
+  assert.equal(diagnostic.postmasterPid, 4202);
+  assert.equal(diagnostic.ownershipStatus, "ACCEPTED");
+  assert.equal(diagnostic.metadataRecorded, "NOT_RUN");
+  assert.equal(diagnostic.serverReady, "FAILED");
+});
+
+test("D1 lifecycle diagnostics clear a stale launch signal on SUCCESS", () => {
+  const line = (status, fields = {}) =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({
+      event: "postgres.private.launch",
+      role: "postgres",
+      status,
+      ...fields
+    })}`;
+  const diagnostic = parsePostgresLifecycleDiagnostics(
+    [
+      line("SIGNALLED", { signal: "SIGTERM", exitCode: null }),
+      line("SUCCESS", { signal: null, exitCode: null })
+    ].join("\n")
+  );
+  assert.equal(diagnostic.postgresAttempt, 2);
+  assert.equal(diagnostic.postgresLaunchOutcome, "SUCCESS");
+  assert.equal(diagnostic.postgresLaunchSignal, null);
+  assert.equal(diagnostic.postgresLaunchExitCode, null);
+});
+
+test("D1 lifecycle diagnostics keep terminal phase updates within one attempt", () => {
+  const line = (event, fields = {}) =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({ event, role: "postgres", ...fields })}`;
+  const diagnostic = parsePostgresLifecycleDiagnostics(
+    [
+      line("postgres.private.launch", { status: "SUCCESS", exitCode: 0, signal: null }),
+      line("postgres.private.server_ready", { status: "READY" }),
+      line("postgres.private.fenced_stop", { status: "INVOKED" }),
+      line("postgres.private.fenced_stop", { status: "PROVEN" })
+    ].join("\n")
+  );
+  assert.equal(diagnostic.postgresAttempt, 1);
+  assert.equal(diagnostic.serverReady, "READY");
+  assert.equal(diagnostic.fencedStopStatus, "PROVEN");
+});
+
+test("D1 lifecycle diagnostics enforce canonical PostgreSQL producer identity", () => {
+  const line = (event, fields = {}) =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({ event, role: "postgres", ...fields })}`;
+  const populatedOutput = [
+    line("postgres.private.launch", { status: "SUCCESS", exitCode: 0, signal: null }),
+    line("postgres.private.postmaster", {
+      status: "PRESENT",
+      postmasterPid: 5151,
+      source: "immediate"
+    }),
+    line("postgres.private.inspect", { status: "RESOLVED", processId: 5151 }),
+    line("postgres.private.ownership", { status: "ACCEPTED", reason: "NONE" }),
+    line("postgres.private.metadata", { phase: "METADATA_WRITE", status: "SUCCESS" }),
+    line("postgres.private.metadata", { phase: "METADATA_READBACK", status: "SUCCESS" }),
+    line("postgres.private.server_ready", { status: "FAILED" }),
+    line("postgres.private.service", {
+      phase: "SERVICE_LAST_ERROR",
+      lastErrorCode: "POSTGRES_SERVER_NOT_READY"
+    })
+  ].join("\n");
+  const before = parsePostgresLifecycleDiagnostics(populatedOutput);
+  assert.equal(before.postgresAttempt, 1);
+  assert.equal(before.postgresLaunchOutcome, "SUCCESS");
+
+  const contradictoryEvents = [
+    { event: "postgres.private.launch", role: "mem0", status: "SUCCESS" },
+    { event: "postgres.private.launch", role: "runtime", status: "SUCCESS" },
+    { event: "postgres.private.launch", role: null, status: "SUCCESS" },
+    { event: "postgres.private.launch", role: "", status: "SUCCESS" },
+    { event: "postgres.private.launch", role: 7, status: "SUCCESS" },
+    { event: "postgres.private.launch", role: {}, status: "SUCCESS" },
+    { event: "memory.spawn.returned", role: "postgres", status: "SUCCESS" },
+    { event: "postgres.private.unknown", role: "postgres", status: "SUCCESS" },
+    { event: "postgres.private.launch", role: "postgres", status: "INVALID" }
+  ];
+  for (const event of contradictoryEvents) {
+    const after = parsePostgresLifecycleDiagnostics(
+      `${populatedOutput}\nYUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify(event)}`
+    );
+    assert.deepEqual(after, before);
+    assert.doesNotMatch(formatInstallerSmokePostgresDiagnostic(after), /mem0|runtime/);
+  }
+
+  const validSecondAttempt = parsePostgresLifecycleDiagnostics(
+    `${populatedOutput}\n${line("postgres.private.launch", {
+      status: "PRE_SPAWN_ERROR",
+      exitCode: null,
+      signal: null
+    })}`
+  );
+  assert.equal(validSecondAttempt.postgresAttempt, 2);
+  assert.equal(validSecondAttempt.postgresLaunchOutcome, "PRE_SPAWN_ERROR");
+  assert.equal(validSecondAttempt.ownershipStatus, "NOT_RUN");
+  assert.equal(validSecondAttempt.metadataRecorded, "NOT_RUN");
+  assert.equal(validSecondAttempt.serverReady, "NOT_RUN");
+  assert.equal(validSecondAttempt.postgresServiceLastErrorCode, null);
 });
 
 test("D1 diagnostic collector tolerates missing and malformed files", () => {

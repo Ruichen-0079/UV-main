@@ -38,6 +38,7 @@ import {
 } from "./postgres-cluster.js";
 import { generatePostgresPassword, redactSecretText } from "./postgres-secret.js";
 import type { PostgresDistribution } from "./postgres-distribution.js";
+import type { ProcessInspectionResult } from "./types.js";
 
 type SpawnSyncOverride = (
   command: string,
@@ -297,6 +298,166 @@ describe("private postgres cluster safety", () => {
     if (missingAfterDelete.outcome === "uncertain") {
       expect(missingAfterDelete.code).toBe("POSTGRES_POSTMASTER_IDENTITY_UNPROVEN");
     }
+  });
+
+  it("emits bounded launch, PID, inspection, and ownership diagnostics", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-diag-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    const marker = createClusterMarker(layout);
+    writeClusterMarker(layout, marker);
+    fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+    const distribution: import("./postgres-distribution.js").PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const started = new Date();
+    const ownedInspection = (
+      processId: number
+    ): Extract<ProcessInspectionResult, { status: "resolved" }> => ({
+      status: "resolved",
+      processId,
+      info: {
+        processId,
+        parentProcessId: 1,
+        commandLine: `${distribution.postgres} -D ${layout.data} -p 55432 -c cluster_name=yuvi-pg-${marker.clusterId}`,
+        createdAtUtc: started,
+        executablePath: distribution.postgres
+      }
+    });
+    const diagnostics: Array<import("./postgres-cluster.js").PostgresLaunchDiagnostic> = [];
+
+    fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+    const success = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: async () => ({
+        ok: true,
+        kind: "SUCCESS",
+        status: 0,
+        signal: null,
+        stdout: "",
+        stderr: ""
+      }),
+      now: () => started,
+      inspectProcess: ownedInspection,
+      diagnosticSink: (diagnostic) => diagnostics.push(diagnostic)
+    });
+    expect(success.outcome).toBe("started");
+    expect(diagnostics).toEqual([
+      { phase: "PG_CTL_LAUNCH", status: "SUCCESS", exitCode: 0, signal: null },
+      {
+        phase: "POSTMASTER_PID",
+        status: "PRESENT",
+        postmasterPid: 4242,
+        source: "immediate"
+      },
+      { phase: "PROCESS_INSPECTION", status: "RESOLVED", processId: 4242 },
+      { phase: "OWNERSHIP", status: "ACCEPTED", reason: "NONE", postmasterPid: 4242 }
+    ]);
+
+    const inspectionFailure: Array<import("./postgres-cluster.js").PostgresLaunchDiagnostic> = [];
+    const uncertain = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: async () => ({
+        ok: true,
+        kind: "SUCCESS",
+        status: 0,
+        signal: null,
+        stdout: "",
+        stderr: ""
+      }),
+      now: () => started,
+      inspectProcess: (processId) => ({
+        status: "unavailable",
+        processId,
+        reason: "query-timeout"
+      }),
+      diagnosticSink: (diagnostic) => inspectionFailure.push(diagnostic)
+    });
+    expect(uncertain.outcome).toBe("uncertain");
+    expect(inspectionFailure).toContainEqual({
+      phase: "PROCESS_INSPECTION",
+      status: "QUERY_TIMEOUT",
+      processId: 4242
+    });
+    expect(inspectionFailure).toContainEqual({
+      phase: "OWNERSHIP",
+      status: "UNCERTAIN",
+      reason: "PROCESS_UNRESOLVED",
+      postmasterPid: 4242
+    });
+
+    const ownershipRejection: Array<import("./postgres-cluster.js").PostgresLaunchDiagnostic> = [];
+    const rejected = reconcileWindowsPrivatePostgresLaunch({
+      layout,
+      distribution,
+      launchStartedAt: started,
+      inspectProcess: (processId) => ({
+        status: "resolved",
+        processId,
+        info: {
+          ...ownedInspection(processId).info,
+          executablePath: "/other/postgres"
+        }
+      }),
+      diagnosticSink: (diagnostic) => ownershipRejection.push(diagnostic)
+    });
+    expect(rejected.disposition).toBe("uncertain");
+    expect(ownershipRejection).toContainEqual({
+      phase: "OWNERSHIP",
+      status: "REJECTED",
+      reason: "EXECUTABLE_MISMATCH",
+      postmasterPid: 4242
+    });
+
+    fs.rmSync(path.join(layout.data, "postmaster.pid"), { force: true });
+    const ambiguous: Array<import("./postgres-cluster.js").PostgresLaunchDiagnostic> = [];
+    const ambiguousLaunch = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      settleTimeoutMs: 0,
+      spawnImpl: async () => ({
+        ok: false,
+        kind: "POST_SPAWN_ERROR",
+        status: null,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        detail: "launcher failed after spawn"
+      }),
+      inspectProcess: () => {
+        throw new Error("missing PID must not be inspected");
+      },
+      diagnosticSink: (diagnostic) => ambiguous.push(diagnostic)
+    });
+    expect(ambiguousLaunch.outcome).toBe("uncertain");
+    expect(ambiguous).toContainEqual({
+      phase: "PG_CTL_LAUNCH",
+      status: "POST_SPAWN_ERROR",
+      exitCode: null,
+      signal: null
+    });
+    expect(ambiguous.at(-1)).toEqual({
+      phase: "POSTMASTER_PID",
+      status: "MISSING",
+      postmasterPid: null,
+      source: "delayed-settle"
+    });
   });
 
   it("classifies async pg_ctl outcomes without blocking the event loop", async () => {

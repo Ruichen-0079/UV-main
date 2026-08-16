@@ -21,12 +21,46 @@ import type { ProcessInspectionResult, SupervisorConfig } from "./types.js";
 
 const tempDirs: string[] = [];
 const supervisors: DesktopSupervisor[] = [];
+let lifecycleDiagnosticsWasEnabled = false;
+let previousLifecycleDiagnostics: string | undefined;
+
+function enableLifecycleDiagnostics(): void {
+  if (!lifecycleDiagnosticsWasEnabled) {
+    previousLifecycleDiagnostics = process.env["YUVI_SUPERVISOR_DIAGNOSTICS"];
+    lifecycleDiagnosticsWasEnabled = true;
+  }
+  process.env["YUVI_SUPERVISOR_DIAGNOSTICS"] = "1";
+}
+
+function capturedLifecycleEvents(spy: {
+  mock: { calls: unknown[][] };
+}): Array<Record<string, unknown>> {
+  const prefix = "YUVI_SUPERVISOR_LIFECYCLE ";
+  return spy.mock.calls.flatMap(([message]) => {
+    if (typeof message !== "string" || !message.startsWith(prefix)) return [];
+    try {
+      const event = JSON.parse(message.slice(prefix.length));
+      return event && typeof event === "object" ? [event as Record<string, unknown>] : [];
+    } catch {
+      return [];
+    }
+  });
+}
 
 afterEach(async () => {
   for (const supervisor of supervisors.splice(0)) {
     await supervisor.shutdown().catch(() => undefined);
   }
   vi.restoreAllMocks();
+  if (lifecycleDiagnosticsWasEnabled) {
+    if (previousLifecycleDiagnostics === undefined) {
+      delete process.env["YUVI_SUPERVISOR_DIAGNOSTICS"];
+    } else {
+      process.env["YUVI_SUPERVISOR_DIAGNOSTICS"] = previousLifecycleDiagnostics;
+    }
+    previousLifecycleDiagnostics = undefined;
+    lifecycleDiagnosticsWasEnabled = false;
+  }
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -136,6 +170,8 @@ function createSupervisor(config: SupervisorConfig, hooks: SupervisorHooks): Des
 
 describe("private postgres Windows start state machine", () => {
   it("does not publish healthy or invoke D2 when only the postgres database is ready", async () => {
+    enableLifecycleDiagnostics();
+    const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const { config, layout, marker, dist } = privateConfig();
     const migratePostgres = vi.fn();
     const started = new Date();
@@ -174,9 +210,40 @@ describe("private postgres Windows start state machine", () => {
     expect(postgres?.ownership).not.toBe("owned");
     expect(migratePostgres).not.toHaveBeenCalled();
     expect(readListenMetadata(layout)).toBeNull();
+    const events = capturedLifecycleEvents(lifecycleLog);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.server_ready",
+        phase: "SERVER_READY",
+        status: "READY"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.database_create",
+        phase: "DATABASE_CREATE",
+        status: "CREATED"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.yuvi_ready",
+        phase: "YUVI_READY",
+        status: "FAILED"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.fenced_stop",
+        phase: "FENCED_STOP",
+        status: "PROVEN"
+      })
+    );
   });
 
   it("does not publish healthy when CREATE DATABASE fails", async () => {
+    enableLifecycleDiagnostics();
+    const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const { config, layout, marker, dist } = privateConfig();
     const migratePostgres = vi.fn();
     const started = new Date();
@@ -212,9 +279,34 @@ describe("private postgres Windows start state machine", () => {
     expect(postgres?.lastError).toBe("YUVI_DATABASE_CREATE_FAILED");
     expect(migratePostgres).not.toHaveBeenCalled();
     expect(readListenMetadata(layout)).toBeNull();
+    const events = capturedLifecycleEvents(lifecycleLog);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.server_ready",
+        phase: "SERVER_READY",
+        status: "READY"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.database_create",
+        phase: "DATABASE_CREATE",
+        status: "FAILED",
+        sqlState: "42501"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.fenced_stop",
+        phase: "FENCED_STOP",
+        status: "PROVEN"
+      })
+    );
   });
 
   it("publishes healthy+owned only after yuvi-ready", async () => {
+    enableLifecycleDiagnostics();
+    const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const { config, layout, marker, dist } = privateConfig();
     const migratePostgres = vi.fn(async () => ({
       ok: true,
@@ -250,6 +342,74 @@ describe("private postgres Windows start state machine", () => {
     expect(listen?.clusterId).toBe(marker.clusterId);
     expect(listen?.port).toBe(supervisor.snapshot().postgres?.port ?? null);
     expect(listen?.port).toBeGreaterThan(0);
+    const events = capturedLifecycleEvents(lifecycleLog);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.launch",
+        phase: "PG_CTL_LAUNCH",
+        status: "SUCCESS"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.postmaster",
+        phase: "POSTMASTER_PID",
+        status: "PRESENT",
+        postmasterPid: 4242
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.inspect",
+        phase: "PROCESS_INSPECTION",
+        status: "RESOLVED",
+        processId: 4242
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.ownership",
+        phase: "OWNERSHIP",
+        status: "ACCEPTED",
+        reason: "NONE"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.metadata",
+        phase: "METADATA_WRITE",
+        status: "SUCCESS"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.metadata",
+        phase: "METADATA_READBACK",
+        status: "SUCCESS"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.server_ready",
+        phase: "SERVER_READY",
+        status: "READY"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.database_create",
+        phase: "DATABASE_CREATE",
+        status: "ALREADY_EXISTS",
+        sqlState: "42P04"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.yuvi_ready",
+        phase: "YUVI_READY",
+        status: "READY"
+      })
+    );
   });
 
   it("does not let background refresh promote server-ready-only to healthy", async () => {

@@ -8,7 +8,8 @@ import {
   ensureYuviDatabase,
   launchWindowsPrivatePostgres,
   pingPostgres,
-  pingPostgresServer
+  pingPostgresServer,
+  type PostgresLaunchDiagnostic
 } from "./postgres-cluster.js";
 import {
   adoptSurvivingPostgres,
@@ -94,6 +95,14 @@ type InternalService = {
   pendingExternal: boolean;
   op: Promise<void> | null;
 };
+
+function safeSqlState(value: string | null | undefined): string | null {
+  return typeof value === "string" && /^[0-9A-Z]{5}$/.test(value) ? value : null;
+}
+
+function safePostgresServiceErrorCode(value: string | null | undefined): string | null {
+  return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(value) ? value : null;
+}
 
 export type SupervisorListener = (snapshot: SupervisorSnapshot) => void;
 
@@ -772,6 +781,7 @@ export class DesktopSupervisor {
       this.config.postgresDistribution
     ) {
       const stopped = this.stopPrivatePostgresOwned();
+      this.emitFencedStopDiagnostic(svc, stopped);
       if (!stopped.invoked) {
         if (svc.ownership === "owned" || svc.pid || svc.child) {
           svc.status = "unavailable";
@@ -856,6 +866,12 @@ export class DesktopSupervisor {
     const removed = metadataBelongsToThisSupervisor
       ? removeProcessMetadataIfMatches(svc.spec.metadataFile, metadataSnapshot)
       : false;
+    if (svc.spec.id === "postgres") {
+      this.emitPostgresPhaseDiagnostic(svc, "metadata", {
+        phase: "METADATA_CLEANUP",
+        status: removed ? "REMOVED" : metadataBelongsToThisSupervisor ? "FAILED" : "RETAINED"
+      });
+    }
     this.lifecycleEvent("memory.metadata.cleanup", svc, {
       reason: removed
         ? "explicit-owned-stop"
@@ -893,6 +909,12 @@ export class DesktopSupervisor {
     if (shouldRemoveInvalidMetadata(ownership)) {
       const removed = removeProcessMetadataIfMatches(svc.spec.metadataFile, ownership.metadata);
       metadataCleanupMismatch = !removed;
+      if (svc.spec.id === "postgres") {
+        this.emitPostgresPhaseDiagnostic(svc, "metadata", {
+          phase: "METADATA_CLEANUP",
+          status: removed ? "REMOVED" : "FAILED"
+        });
+      }
       this.lifecycleEvent("memory.metadata.cleanup", svc, {
         reason: removed ? ownership.cleanupReason : "compare-delete-mismatch",
         removed,
@@ -1151,6 +1173,14 @@ export class DesktopSupervisor {
     const target = resolveSupervisorMigrationTarget(this.config, password);
     if (!target) {
       if (mode === "private") {
+        const postgres = this.services.get("postgres");
+        if (postgres) {
+          this.emitPostgresPhaseDiagnostic(postgres, "service", {
+            phase: "SERVICE_LAST_ERROR",
+            status: "FAILED",
+            lastErrorCode: safePostgresServiceErrorCode(postgres.lastError)
+          });
+        }
         throw new MigrationError(
           "DATABASE_UNAVAILABLE",
           "The private PostgreSQL target is not reachable."
@@ -1161,6 +1191,13 @@ export class DesktopSupervisor {
     if (mode === "private") {
       const postgres = this.services.get("postgres");
       if (postgres?.status !== "healthy" || postgres.ownership !== "owned") {
+        if (postgres) {
+          this.emitPostgresPhaseDiagnostic(postgres, "service", {
+            phase: "SERVICE_LAST_ERROR",
+            status: "FAILED",
+            lastErrorCode: safePostgresServiceErrorCode(postgres.lastError)
+          });
+        }
         throw new MigrationError(
           "DATABASE_UNAVAILABLE",
           "The private PostgreSQL target is not reachable."
@@ -1217,15 +1254,45 @@ export class DesktopSupervisor {
     const clusterId = layout ? readClusterMarker(layout)?.clusterId : null;
     const password = this.resolvePrivatePostgresPassword();
     if (!layout || !distribution || !port || !clusterId || !password) {
+      const svc = this.services.get("postgres");
+      if (svc) {
+        this.emitPostgresPhaseDiagnostic(svc, "server_ready", {
+          phase: "SERVER_READY",
+          status: "NOT_RUN"
+        });
+        this.emitPostgresPhaseDiagnostic(svc, "database_create", {
+          phase: "DATABASE_CREATE",
+          status: "NOT_RUN",
+          sqlState: null
+        });
+        this.emitPostgresPhaseDiagnostic(svc, "yuvi_ready", {
+          phase: "YUVI_READY",
+          status: "NOT_RUN"
+        });
+      }
       return { ok: false, code: "POSTGRES_NOT_CONFIGURED" };
     }
     const serverReady = await this.waitPrivatePostgresServerReady();
+    const svc = this.services.get("postgres");
+    if (svc) {
+      this.emitPostgresPhaseDiagnostic(svc, "server_ready", {
+        phase: "SERVER_READY",
+        status: serverReady ? "READY" : "FAILED"
+      });
+    }
     if (!serverReady) return { ok: false, code: "POSTGRES_SERVER_NOT_READY" };
     const created = await ensureYuviDatabase({
       distribution,
       port,
       password
     });
+    if (svc) {
+      this.emitPostgresPhaseDiagnostic(svc, "database_create", {
+        phase: "DATABASE_CREATE",
+        status: created.ok ? (created.alreadyExists ? "ALREADY_EXISTS" : "CREATED") : "FAILED",
+        sqlState: safeSqlState(created.sqlState)
+      });
+    }
     if (!created.ok) return { ok: false, code: "YUVI_DATABASE_CREATE_FAILED" };
     const yuviReady = await pingPostgres({
       layout,
@@ -1234,6 +1301,12 @@ export class DesktopSupervisor {
       password,
       clusterId
     });
+    if (svc) {
+      this.emitPostgresPhaseDiagnostic(svc, "yuvi_ready", {
+        phase: "YUVI_READY",
+        status: yuviReady ? "READY" : "FAILED"
+      });
+    }
     return yuviReady ? { ok: true } : { ok: false, code: "YUVI_DATABASE_NOT_READY" };
   }
 
@@ -1314,7 +1387,9 @@ export class DesktopSupervisor {
       ...(this.hooks.postmasterSettleIntervalMs != null
         ? { settleIntervalMs: this.hooks.postmasterSettleIntervalMs }
         : {}),
-      ...(this.hooks.sleep ? { sleepImpl: this.hooks.sleep } : {})
+      ...(this.hooks.sleep ? { sleepImpl: this.hooks.sleep } : {}),
+      diagnosticSink: (diagnostic: PostgresLaunchDiagnostic) =>
+        this.emitPostgresLaunchDiagnostic(svc, diagnostic)
     });
     if (launched.outcome === "uncertain") {
       this.markPostgresIdentityUncertain(
@@ -1337,7 +1412,9 @@ export class DesktopSupervisor {
     });
     if (!recorded) {
       const stopped = this.stopPrivatePostgresOwned();
-      if (!this.privatePostgresStopProven(stopped, launched.pid)) {
+      const stopProven = this.privatePostgresStopProven(stopped, launched.pid);
+      this.emitFencedStopDiagnostic(svc, stopped, stopProven);
+      if (!stopProven) {
         this.markPostgresIdentityUncertain(
           svc,
           "Ownership metadata readback failed and the postmaster could not be fenced-stopped.",
@@ -1356,7 +1433,9 @@ export class DesktopSupervisor {
 
     if (launched.outcome === "owned-after-failure") {
       const stopped = this.stopPrivatePostgresOwned();
-      if (!this.privatePostgresStopProven(stopped, launched.pid)) {
+      const stopProven = this.privatePostgresStopProven(stopped, launched.pid);
+      this.emitFencedStopDiagnostic(svc, stopped, stopProven);
+      if (!stopProven) {
         this.markPostgresIdentityUncertain(
           svc,
           "pg_ctl failed after starting a strongly owned postmaster that could not be fenced-stopped.",
@@ -1376,7 +1455,9 @@ export class DesktopSupervisor {
     const applicationReady = await this.completePrivatePostgresApplicationReady();
     if (!applicationReady.ok) {
       const stopped = this.stopPrivatePostgresOwned();
-      if (!this.privatePostgresStopProven(stopped, launched.pid)) {
+      const stopProven = this.privatePostgresStopProven(stopped, launched.pid);
+      this.emitFencedStopDiagnostic(svc, stopped, stopProven);
+      if (!stopProven) {
         svc.status = "unavailable";
         svc.ownership = "owned";
         svc.pid = launched.pid;
@@ -1525,6 +1606,61 @@ export class DesktopSupervisor {
     return (this.hooks.inspectProcess ?? inspectProcess)(processId);
   }
 
+  private emitPostgresLaunchDiagnostic(
+    svc: InternalService,
+    diagnostic: PostgresLaunchDiagnostic
+  ): void {
+    const eventByPhase: Record<PostgresLaunchDiagnostic["phase"], string> = {
+      PG_CTL_LAUNCH: "launch",
+      POSTMASTER_PID: "postmaster",
+      PROCESS_INSPECTION: "inspect",
+      OWNERSHIP: "ownership"
+    };
+    try {
+      this.lifecycleEvent(`postgres.private.${eventByPhase[diagnostic.phase]}`, svc, diagnostic);
+    } catch {
+      // Diagnostic failures must never affect PostgreSQL lifecycle behavior.
+    }
+  }
+
+  private emitPostgresPhaseDiagnostic(
+    svc: InternalService,
+    event:
+      | "metadata"
+      | "server_ready"
+      | "database_create"
+      | "yuvi_ready"
+      | "fenced_stop"
+      | "service",
+    extra: Record<string, unknown>
+  ): void {
+    try {
+      this.lifecycleEvent(`postgres.private.${event}`, svc, extra);
+    } catch {
+      // Diagnostic failures must never affect PostgreSQL lifecycle behavior.
+    }
+  }
+
+  private emitFencedStopDiagnostic(
+    svc: InternalService,
+    stopped: { invoked: boolean; owned: boolean; reason: string; pid: number | null },
+    proven?: boolean
+  ): void {
+    const status =
+      proven === true
+        ? "PROVEN"
+        : proven === false || (stopped.owned && !stopped.invoked)
+          ? "FAILED"
+          : stopped.invoked
+            ? "INVOKED"
+            : "NOT_RUN";
+    this.emitPostgresPhaseDiagnostic(svc, "fenced_stop", {
+      phase: "FENCED_STOP",
+      status,
+      pid: Number.isInteger(stopped.pid) && (stopped.pid ?? 0) > 0 ? stopped.pid : null
+    });
+  }
+
   private resolvePrivatePostgresPassword(): string | null {
     const layout = this.config.postgresLayout;
     if (!layout) return null;
@@ -1580,11 +1716,28 @@ export class DesktopSupervisor {
       ownershipToken: this.config.ownershipToken,
       instanceId: this.config.instanceId
     };
-    writeProcessMetadata(svc.spec.metadataFile, metadata);
+    try {
+      writeProcessMetadata(svc.spec.metadataFile, metadata);
+      this.emitPostgresPhaseDiagnostic(svc, "metadata", {
+        phase: "METADATA_WRITE",
+        status: "SUCCESS"
+      });
+    } catch (error) {
+      this.emitPostgresPhaseDiagnostic(svc, "metadata", {
+        phase: "METADATA_WRITE",
+        status: "FAILED"
+      });
+      throw error;
+    }
     const readback = readProcessMetadata(svc.spec.metadataFile);
-    return Boolean(
+    const readbackOk = Boolean(
       readback && readback.pid === launched.pid && readback.instanceId === this.config.instanceId
     );
+    this.emitPostgresPhaseDiagnostic(svc, "metadata", {
+      phase: "METADATA_READBACK",
+      status: readbackOk ? "SUCCESS" : "FAILED"
+    });
+    return readbackOk;
   }
 
   private markPostgresIdentityUncertain(
@@ -2160,7 +2313,8 @@ export class DesktopSupervisor {
     svc: InternalService,
     extra: Record<string, unknown> = {}
   ): void {
-    if (!this.lifecycleDiagnostics || svc.spec.id !== "mem0") return;
+    if (!this.lifecycleDiagnostics || (svc.spec.id !== "mem0" && svc.spec.id !== "postgres"))
+      return;
     const metadataExists = fs.existsSync(svc.spec.metadataFile);
     let metadataRootHash: string | null = null;
     try {
