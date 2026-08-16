@@ -3,11 +3,13 @@ import {
   LumiController,
   CubismLive2DAdapter,
   type LumiControllerHandle,
+  type LumiModelLifecycle,
   type LumiPresenceAnimation,
   type PresenceState
 } from "./lumi-live2d.js";
 import type { LumiFraming } from "./lumi-cubism-model.js";
 import type { LumiFramingDiagnostics } from "./lumi-framing.js";
+import type { CompanionPresenceProjection } from "./companion-presence.js";
 import { resolveRuntimeAssetUrl } from "./desktop-runtime.js";
 
 const DEFAULT_MODEL_PATH = "/api/live2d/Lumi/Lumi.model3.json";
@@ -20,7 +22,8 @@ function isHeadBoundsOverlayEnabled(): boolean {
 
 export const LumiCanvas = forwardRef(function LumiCanvas(
   props: {
-    requestedPresence: PresenceState;
+    requestedPresence?: PresenceState;
+    requestedProjection?: CompanionPresenceProjection;
     className?: string;
     /** The companion window draws its own framing toggle outside the resize corner. */
     showFramingToggle?: boolean;
@@ -30,7 +33,8 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<LumiController | null>(null);
-  const [state, setState] = useState<PresenceState>("unavailable");
+  const [state, setState] = useState<PresenceState>("idle");
+  const [modelLifecycle, setModelLifecycle] = useState<LumiModelLifecycle>("loading");
   // Default portrait (half). Full-body only after an explicit user toggle.
   const [framing, setFraming] = useState<LumiFraming>("half");
   const [overlay, setOverlay] = useState<LumiFramingDiagnostics | null>(null);
@@ -43,7 +47,13 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       runMouthCalibration: () => controllerRef.current?.runMouthCalibration() ?? Promise.resolve(),
       setFraming: (next) => controllerRef.current?.setFraming(next),
       setPresence: (next) => controllerRef.current?.setPresence(next),
-      setPresenceAnimation: ((animationOrBlink: LumiPresenceAnimation | number, breath?: number) => {
+      setPresentationProjection: (projection) =>
+        controllerRef.current?.setPresentationProjection(projection),
+      setGazeTarget: (target) => controllerRef.current?.setGazeTarget(target),
+      setPresenceAnimation: ((
+        animationOrBlink: LumiPresenceAnimation | number,
+        breath?: number
+      ) => {
         if (typeof animationOrBlink === "number") {
           controllerRef.current?.setPresenceAnimation(animationOrBlink, breath ?? 0);
         } else {
@@ -54,7 +64,8 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       handlePlaybackEvent: (event) => controllerRef.current?.handlePlaybackEvent(event),
       resize: (width, height) => controllerRef.current?.resize(width, height),
       dispose: () => controllerRef.current?.dispose(),
-      getPresence: () => controllerRef.current?.getPresence() ?? "unavailable",
+      getPresence: () => controllerRef.current?.getPresence() ?? "idle",
+      getModelLifecycle: () => controllerRef.current?.getModelLifecycle() ?? "loading",
       getFramingDiagnostics: () => controllerRef.current?.getFramingDiagnostics() ?? null,
       getDebugInfo: () =>
         controllerRef.current?.getDebugInfo() ?? {
@@ -77,6 +88,10 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       source,
       (next) => {
         if (!disposed) setState(next);
+      },
+      undefined,
+      (next) => {
+        if (!disposed) setModelLifecycle(next);
       }
     );
     controllerRef.current = controller;
@@ -113,8 +128,12 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   }, []);
 
   useEffect(() => {
-    controllerRef.current?.setPresence(props.requestedPresence);
-  }, [props.requestedPresence]);
+    if (props.requestedProjection) {
+      controllerRef.current?.setPresentationProjection(props.requestedProjection);
+    } else if (props.requestedPresence) {
+      controllerRef.current?.setPresence(props.requestedPresence);
+    }
+  }, [props.requestedPresence, props.requestedProjection]);
 
   useEffect(() => {
     controllerRef.current?.setFraming(framing);
@@ -126,6 +145,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       className={props.className ?? "relative min-h-[280px] overflow-hidden rounded-md bg-ink-900"}
       aria-label="Lumi avatar"
       data-presence={state}
+      data-model-lifecycle={modelLifecycle}
       data-framing={framing}
     >
       {/*
@@ -146,14 +166,8 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
             style={{
               left: overlay.safeViewportPx.left,
               top: overlay.safeViewportPx.top,
-              width: Math.max(
-                0,
-                overlay.safeViewportPx.right - overlay.safeViewportPx.left
-              ),
-              height: Math.max(
-                0,
-                overlay.safeViewportPx.bottom - overlay.safeViewportPx.top
-              )
+              width: Math.max(0, overlay.safeViewportPx.right - overlay.safeViewportPx.left),
+              height: Math.max(0, overlay.safeViewportPx.bottom - overlay.safeViewportPx.top)
             }}
           />
           {/* Projected head bounds */}
@@ -162,14 +176,8 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
             style={{
               left: overlay.headProjectionPx.left,
               top: overlay.headProjectionPx.top,
-              width: Math.max(
-                0,
-                overlay.headProjectionPx.right - overlay.headProjectionPx.left
-              ),
-              height: Math.max(
-                0,
-                overlay.headProjectionPx.bottom - overlay.headProjectionPx.top
-              )
+              width: Math.max(0, overlay.headProjectionPx.right - overlay.headProjectionPx.left),
+              height: Math.max(0, overlay.headProjectionPx.bottom - overlay.headProjectionPx.top)
             }}
           />
           <div className="absolute left-2 top-8 max-w-[90%] rounded bg-black/60 px-2 py-1 text-[10px] leading-snug text-white">
