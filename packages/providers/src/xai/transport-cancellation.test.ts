@@ -106,6 +106,83 @@ describe("xAI transport cancellation", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each(["", " \t\n "])("rejects %j TTS text before fetch", async (text) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createTTSProvider().synthesizeSpeech({ text })).rejects.toMatchObject({
+      code: ProviderErrorCode.UnsupportedInput,
+      retryable: false,
+      effectState: "not_started"
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves valid TTS request fields and normalizes the complete audio output", async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "Audio/MPEG; charset=binary" }
+        });
+      })
+    );
+
+    const output = await createTTSProvider().synthesizeSpeech({
+      text: "  hello  ",
+      voice: "ara",
+      format: "mp3",
+      speed: 1.25
+    });
+
+    expect(requestBody).toMatchObject({
+      model: "xai-tts",
+      text: "  hello  ",
+      voice_id: "ara",
+      format: "mp3",
+      speed: 1.25
+    });
+    expect(output).toMatchObject({
+      audio: new Uint8Array([1, 2, 3]),
+      audioBuffer: new Uint8Array([1, 2, 3]),
+      audioBase64: "AQID",
+      mimeType: "audio/mpeg"
+    });
+    expect(new Uint8Array(Buffer.from(output.audioBase64 ?? "", "base64"))).toEqual(output.audio);
+  });
+
+  it("falls back to the requested audio MIME when xAI omits content type", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Uint8Array([1]), { status: 200 }))
+    );
+
+    await expect(
+      createTTSProvider().synthesizeSpeech({ text: "hello", format: "wav" })
+    ).resolves.toMatchObject({ mimeType: "audio/wav" });
+  });
+
+  it("rejects a successful xAI response with an empty audio body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(new Uint8Array(), {
+          status: 200,
+          headers: { "content-type": "audio/mpeg" }
+        })
+      )
+    );
+
+    await expect(createTTSProvider().synthesizeSpeech(ttsInput)).rejects.toMatchObject({
+      code: ProviderErrorCode.MalformedResponse,
+      retryable: false,
+      effectState: "unknown"
+    });
+  });
+
   it("returns Cancelled when the TTS caller aborts while fetch is pending", async () => {
     vi.useFakeTimers();
     const caller = new AbortController();

@@ -445,8 +445,28 @@ describe("GPT-SoVITS transport cancellation", () => {
     });
   });
 
+  it.each(["", " \t\n "])("rejects %j text before network start", async (text) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new GPTSoVITSTTSProvider(options).synthesizeSpeech({ text })).rejects.toMatchObject({
+      code: ProviderErrorCode.UnsupportedInput,
+      retryable: false,
+      effectState: "not_started"
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("preserves normal wrapper output semantics", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => audioResponse(new Uint8Array([4, 5]))));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(new Uint8Array([4, 5]), {
+          status: 200,
+          headers: { "content-type": "Audio/WAV; codecs=1" }
+        })
+      )
+    );
 
     await expect(new GPTSoVITSTTSProvider(options).synthesizeSpeech(input)).resolves.toMatchObject({
       audio: new Uint8Array([4, 5]),
@@ -455,18 +475,6 @@ describe("GPT-SoVITS transport cancellation", () => {
       finalProvider: "local",
       providerMetadata: { language: "ja", transport: "wrapper" }
     });
-  });
-
-  it("preserves empty-text local validation before network start", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(new GPTSoVITSTTSProvider(options).synthesizeSpeech({ text: "   " })).rejects.toMatchObject({
-      code: ProviderErrorCode.UnsupportedInput,
-      retryable: false,
-      effectState: "not_started"
-    });
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("reports a healthy local model from the /health probe", async () => {

@@ -119,6 +119,21 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
       );
       const start = performance.now();
       const useWrapper = isJapanese(language) || !this.hasReferenceConfig();
+      const transportKind = useWrapper
+        ? isJapanese(language)
+          ? "wrapper"
+          : "wrapper-fallback"
+        : "api_v2";
+      validateFormat(input.format, transportKind);
+      if (useWrapper && input.speed !== undefined) {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "tts",
+          code: ProviderErrorCode.UnsupportedInput,
+          message: "The managed GPT-SoVITS wrapper does not support TTS speed.",
+          retryable: false
+        });
+      }
       const request = useWrapper
         ? {
             url: `${trimTrailingSlash(this.options.wrapperBaseUrl)}/tts`,
@@ -144,7 +159,12 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
         throw new Error("Local GPT-SoVITS transport could not start.");
       }
       transportStarted = true;
-      const response = await this.fetchAudio(request.url, request.body, transport);
+      const response = await this.fetchAudio(
+        request.url,
+        request.body,
+        transport,
+        input.format ?? "wav"
+      );
       throwIfGPTSoVITSTransportAborted(transport);
       const audio = response.audio;
       if (audio.byteLength === 0) {
@@ -168,11 +188,7 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
         providerMetadata: {
           language,
           speaker: input.voice ?? this.options.speaker ?? "alice",
-          transport: isJapanese(language)
-            ? "wrapper"
-            : this.hasReferenceConfig()
-              ? "api_v2"
-              : "wrapper-fallback"
+          transport: transportKind
         }
       };
     } catch (error) {
@@ -221,7 +237,7 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
       prompt_lang: this.options.referenceLanguage ?? "ja",
       text_split_method: this.options.textSplitMethod ?? "cut0",
       batch_size: 1,
-      media_type: "wav",
+      media_type: input.format === "pcm" ? "raw" : "wav",
       streaming_mode: false,
       top_k: this.options.topK ?? 15,
       top_p: this.options.topP ?? 1,
@@ -235,7 +251,8 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
   private async fetchAudio(
     url: string,
     body: Record<string, unknown>,
-    transport: TransportAbort
+    transport: TransportAbort,
+    format: TTSInput["format"]
   ): Promise<{ audio: Uint8Array; mimeType: string }> {
     const response = await fetch(url, {
       method: "POST",
@@ -259,9 +276,44 @@ export class GPTSoVITSTTSProvider implements TTSProvider {
     throwIfGPTSoVITSTransportAborted(transport);
     return {
       audio,
-      mimeType: response.headers.get("content-type")?.split(";", 1)[0] ?? "audio/wav"
+      mimeType: normalizeAudioMimeType(
+        response.headers.get("content-type"),
+        mimeTypeFromFormat(format)
+      )
     };
   }
+}
+
+type GPTSoVITSTransportKind = "wrapper" | "wrapper-fallback" | "api_v2";
+
+function validateFormat(
+  format: TTSInput["format"],
+  transport: GPTSoVITSTransportKind
+): void {
+  if (format === undefined || format === "wav") {
+    return;
+  }
+
+  if (transport === "api_v2" && format === "pcm") {
+    return;
+  }
+
+  throw new ProviderError({
+    provider: "local",
+    capability: "tts",
+    code: ProviderErrorCode.UnsupportedInput,
+    message: `GPT-SoVITS ${transport} does not support the requested ${format} TTS format.`,
+    retryable: false
+  });
+}
+
+function normalizeAudioMimeType(contentType: string | null, fallback: string): string {
+  const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  return mediaType || fallback;
+}
+
+function mimeTypeFromFormat(format: TTSInput["format"]): string {
+  return format === "pcm" ? "audio/raw" : "audio/wav";
 }
 
 function normalizeLanguage(value: string): string {
