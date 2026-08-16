@@ -19,6 +19,10 @@ import {
   reduceCompanionPresence,
   type CompanionPresenceProjection
 } from "./companion-presence.js";
+import {
+  createBehaviorPolicyController,
+  type BehaviorPolicyController
+} from "./behavior-policy-controller.js";
 import { createCompanionSpeechBuffer } from "./companion-speech-buffer.js";
 import { createCompanionReadyAnnouncer } from "./companion-voice-sync.js";
 import { createSpeechSegmentDeduper } from "./speech-segment-dedup.js";
@@ -86,6 +90,8 @@ export function CompanionPage(): JSX.Element {
   const interruptedResetRef = useRef<ReturnType<typeof createInterruptedResetScheduler> | null>(
     null
   );
+  const behaviorControllerRef = useRef<BehaviorPolicyController | null>(null);
+  const behaviorSessionIdRef = useRef("companion-page-session");
   presenceProjectionRef.current = presence;
   ttsConfigRef.current = ttsConfig;
 
@@ -108,11 +114,32 @@ export function CompanionPage(): JSX.Element {
     const next = update(current);
     if (next === current) return;
     presenceProjectionRef.current = next;
-    // The controller receives the normalized input synchronously. React state
-    // remains the render/configuration surface and is not the animation clock.
+    // Feed the same normalized transition synchronously. React state remains
+    // the render/configuration surface and is not the animation clock.
+    behaviorControllerRef.current?.updatePresence(next);
     lumiRef.current?.setPresentationProjection(next);
     setPresence(next);
   }
+
+  useEffect(() => {
+    const controller = createBehaviorPolicyController({
+      sessionId: behaviorSessionIdRef.current,
+      controllerId: "companion-page",
+      now: () => performance.now(),
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number),
+      setGazeTarget: (target) => lumiRef.current?.setGazeTarget(target)
+    });
+    behaviorControllerRef.current = controller;
+    controller.updatePresence(presenceProjectionRef.current ?? presence);
+
+    return () => {
+      controller.dispose();
+      if (behaviorControllerRef.current === controller) {
+        behaviorControllerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!isTauriRuntime() && !isServiceSupervisorAvailable()) return;
