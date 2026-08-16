@@ -61,7 +61,10 @@ import {
   assertMem0FollowsMemorySearch,
   cleanupExactOwnedSmokeProcesses,
   collectExactOwnedSmokePids,
+  collectInstallerSmokePostgresDiagnostics,
   createOwnedSmokeProcessState,
+  formatInstallerSmokePostgresDiagnostic,
+  resolveContainedInstallerSmokePostgresRoot,
   formatCleanupSecondaryDiagnostic,
   generateInstallerSmokePostgresPassword,
   INSTALLER_SMOKE_POSTGRES_HOME_ENV,
@@ -2789,4 +2792,133 @@ test("PID exit timeout in final cleanup prevents TEMP removal", async () => {
   );
   assert.deepEqual([...new Set(probed)], [101, 303]);
   assert.equal(removed, false);
+});
+
+test("D1 diagnostic collector accepts only the smoke-contained PostgreSQL root", () => {
+  const { root } = cleanupFixture();
+  const localAppData = path.join(root, "localAppData");
+  fs.mkdirSync(path.join(localAppData, "YUVI", "Postgres"), { recursive: true });
+  assert.equal(
+    resolveContainedInstallerSmokePostgresRoot(root, localAppData),
+    path.resolve(localAppData, "YUVI", "Postgres")
+  );
+  assert.throws(
+    () =>
+      resolveContainedInstallerSmokePostgresRoot(root, path.join(os.tmpdir(), "outside-appdata")),
+    /outside smoke root/
+  );
+});
+
+test("D1 diagnostic collector surfaces allowlisted fields and redacts secrets", () => {
+  const { root } = cleanupFixture();
+  const localAppData = path.join(root, "localAppData");
+  const pg = path.join(localAppData, "YUVI", "Postgres");
+  fs.mkdirSync(path.join(pg, "runtime"), { recursive: true });
+  fs.mkdirSync(path.join(pg, "data"), { recursive: true });
+  fs.writeFileSync(
+    path.join(pg, "runtime", "initialization-state.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      state: "failed",
+      updatedAt: "2026-08-16T00:00:00.000Z",
+      reason: "initdb failed",
+      DATABASE_URL: "postgres://yuvi:super-secret@127.0.0.1/yuvi"
+    })
+  );
+  fs.writeFileSync(
+    path.join(pg, "marker.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      product: "yuvi",
+      clusterId: "cluster-a",
+      postgresMajor: 16,
+      ownershipToken: "secret-token"
+    })
+  );
+  fs.writeFileSync(
+    path.join(pg, "runtime", "listen.json"),
+    JSON.stringify({ host: "127.0.0.1", port: 55432, clusterId: "cluster-a", postgresMajor: 16 })
+  );
+  fs.writeFileSync(
+    path.join(pg, "runtime", "postgres.pid.json"),
+    JSON.stringify({
+      pid: 4242,
+      role: "postgres",
+      processStartedAtUtc: "2026-08-16T00:00:00.000Z",
+      ownershipToken: "do-not-print"
+    })
+  );
+  fs.writeFileSync(path.join(pg, "data", "PG_VERSION"), "16\n");
+  fs.writeFileSync(
+    path.join(pg, "data", "postgresql.yuvi.conf"),
+    "listen_addresses = '127.0.0.1'\nport = 55432\n"
+  );
+  fs.writeFileSync(
+    path.join(pg, "runtime", "postgres.log"),
+    'FATAL:  password authentication failed for user "yuvi" DATABASE_URL=postgres://yuvi:super-secret@127.0.0.1/yuvi\n'
+  );
+  const diagnostic = collectInstallerSmokePostgresDiagnostics({
+    smokeRoot: root,
+    localAppData,
+    secrets: ["super-secret"]
+  });
+  assert.equal(diagnostic.initializationState.state, "failed");
+  assert.equal(diagnostic.marker.postgresMajor, 16);
+  assert.equal(diagnostic.listen.port, 55432);
+  assert.equal(diagnostic.pidMetadata.pid, 4242);
+  assert.equal(diagnostic.pgVersion, "16");
+  assert.equal(diagnostic.listenConfig.port, "55432");
+  assert.equal(diagnostic.postgresLogPresent, true);
+  const serialized = formatInstallerSmokePostgresDiagnostic(diagnostic);
+  assert.doesNotMatch(serialized, /super-secret|do-not-print|secret-token|postgres:\/\/yuvi/);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(diagnostic.pidMetadata, "ownershipToken"),
+    false
+  );
+});
+
+test("D1 diagnostic collector tolerates missing and malformed files", () => {
+  const { root } = cleanupFixture();
+  const localAppData = path.join(root, "localAppData");
+  fs.mkdirSync(path.join(localAppData, "YUVI", "Postgres", "runtime"), { recursive: true });
+  fs.writeFileSync(path.join(localAppData, "YUVI", "Postgres", "runtime", "listen.json"), "{");
+  const diagnostic = collectInstallerSmokePostgresDiagnostics({ smokeRoot: root, localAppData });
+  assert.deepEqual(diagnostic.initializationState, { present: false });
+  assert.equal(diagnostic.listen.malformed, true);
+  assert.equal(diagnostic.postgresLogPresent, false);
+});
+
+test("D1 diagnostic collection failure cannot replace the primary smoke error", async () => {
+  const primary = new Error(
+    "running Supervisor ExecutablePath does not match installed packaged exe"
+  );
+  const originalStack = primary.stack;
+  await assert.rejects(
+    runCleanupPreservingPrimaryError(primary, async () => {
+      collectInstallerSmokePostgresDiagnostics({
+        smokeRoot: "/tmp/not-a-smoke-root",
+        localAppData: "/tmp/not-a-smoke-root"
+      });
+    }),
+    (error) =>
+      error === primary &&
+      error.message === primary.message &&
+      error.stack === originalStack &&
+      Boolean(error.cleanupSecondary?.message)
+  );
+});
+
+test("D1 diagnostic collector does not introduce PostgreSQL process termination", () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("./installer-smoke.mjs", import.meta.url)),
+    "utf8"
+  );
+  const start = source.indexOf("export function resolveContainedInstallerSmokePostgresRoot");
+  const end = source.indexOf("export async function runInstallerSmokeFinalCleanup");
+  const helper = source.slice(start, end);
+  assert.match(helper, /Diagnostic only/);
+  assert.doesNotMatch(
+    helper,
+    /taskkill|Stop-Process|pg_ctl|process\.kill|child\.kill|postgres\.exe/
+  );
 });

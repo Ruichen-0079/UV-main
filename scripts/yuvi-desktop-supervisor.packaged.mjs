@@ -11,6 +11,7 @@ import {
   loadPackagedSupervisorConfig,
   startSupervisorHttpServer
 } from "../packages/desktop-supervisor/src/index.ts";
+import { startAutomaticSupervisorBootstrap } from "./supervisor-auto-bootstrap.mjs";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -105,19 +106,7 @@ async function main() {
   );
 
   supervisor.startBackgroundRefresh(5_000);
-  void supervisor.bootstrap().then((snap) => {
-    console.log(
-      JSON.stringify({
-        ok: true,
-        event: "supervisor.bootstrap",
-        services: snap.services.map((s) => ({
-          id: s.id,
-          status: s.status,
-          ownership: s.ownership
-        }))
-      })
-    );
-  });
+  void startAutomaticSupervisorBootstrap(supervisor);
 
   let shuttingDown = false;
   async function gracefulShutdown(reason) {

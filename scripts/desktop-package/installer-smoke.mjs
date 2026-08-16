@@ -1916,6 +1916,132 @@ export async function cleanupExactOwnedSmokeProcesses({
   if (shutdownError) throw shutdownError;
 }
 
+export function resolveContainedInstallerSmokePostgresRoot(smokeRoot, localAppData) {
+  if (typeof smokeRoot !== "string" || !smokeRoot.trim()) fail("smoke root is required");
+  if (typeof localAppData !== "string" || !localAppData.trim())
+    fail("localAppData is required for PostgreSQL diagnostics");
+  const ownedRoot = assertTempRoot(smokeRoot);
+  const resolvedAppData = path.resolve(localAppData);
+  if (!isWithin(resolvedAppData, ownedRoot)) fail("localAppData is outside smoke root");
+  const postgresRoot = path.resolve(resolvedAppData, "YUVI", "Postgres");
+  if (!isWithin(postgresRoot, ownedRoot) || !isWithin(postgresRoot, resolvedAppData))
+    fail("PostgreSQL diagnostic root escaped the smoke tree");
+  return postgresRoot;
+}
+
+function readContainedSmokeFile(
+  root,
+  relativeParts,
+  { readFile = fs.readFileSync, exists = fs.existsSync } = {}
+) {
+  const target = path.resolve(root, ...relativeParts);
+  if (!isWithin(target, root)) return { ok: false, reason: "path-escaped" };
+  if (!exists(target)) return { ok: false, reason: "missing" };
+  try {
+    return { ok: true, text: readFile(target, "utf8") };
+  } catch (error) {
+    return { ok: false, reason: String(error?.code ?? "read-failed").slice(0, 32) };
+  }
+}
+
+function parseAllowlistedJson(text, allow) {
+  try {
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const out = {};
+    for (const key of allow) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      const field = value[key];
+      if (field == null) out[key] = field;
+      else if (typeof field === "number" || typeof field === "boolean") out[key] = field;
+      else if (typeof field === "string")
+        out[key] = redactCleanupDiagnosticText(field).slice(0, 80);
+    }
+    return out;
+  } catch {
+    return { malformed: true };
+  }
+}
+
+function boundedRedactedLogTail(text, secrets = []) {
+  const redacted = redactCleanupDiagnosticText(redactInstallerSmokeSecretText(text, secrets));
+  const lines = redacted.split(/\r?\n/).filter((line) => line.trim());
+  return lines.slice(-20).join("\n").slice(-2_000);
+}
+
+function yuviConfAllowlist(text) {
+  const out = {};
+  for (const line of String(text).split(/\r?\n/)) {
+    const match = line.match(/^\s*(listen_addresses|port)\s*=\s*'?([^'\s#]+)'?/i);
+    if (!match) continue;
+    out[match[1].toLowerCase()] = String(match[2]).slice(0, 40);
+  }
+  return out;
+}
+
+/**
+ * Secret-safe, smoke-contained D1 artifact snapshot. Diagnostic only — never
+ * used as PostgreSQL ownership or termination authority.
+ */
+export function collectInstallerSmokePostgresDiagnostics({
+  smokeRoot,
+  localAppData,
+  secrets = [],
+  readFile = fs.readFileSync,
+  exists = fs.existsSync
+} = {}) {
+  const root = resolveContainedInstallerSmokePostgresRoot(smokeRoot, localAppData);
+  const read = (parts) => readContainedSmokeFile(root, parts, { readFile, exists });
+  const marker = read(["marker.json"]);
+  const initState = read(["runtime", "initialization-state.json"]);
+  const listen = read(["runtime", "listen.json"]);
+  const pidMeta = read(["runtime", "postgres.pid.json"]);
+  const pgVersion = read(["data", "PG_VERSION"]);
+  const yuviConf = read(["data", "postgresql.yuvi.conf"]);
+  const logFile = read(["runtime", "postgres.log"]);
+  const logErr = read(["runtime", "postgres.log.err"]);
+  const diagnostic = {
+    postgresRootRelative: "localAppData/YUVI/Postgres",
+    initializationState: initState.ok
+      ? parseAllowlistedJson(initState.text, ["state", "updatedAt", "reason"])
+      : { present: false },
+    marker: marker.ok
+      ? parseAllowlistedJson(marker.text, ["product", "clusterId", "postgresMajor"])
+      : { present: false },
+    listen: listen.ok
+      ? parseAllowlistedJson(listen.text, ["host", "port", "clusterId", "postgresMajor"])
+      : { present: false },
+    pidMetadata: pidMeta.ok
+      ? parseAllowlistedJson(pidMeta.text, ["pid", "role", "processStartedAtUtc"])
+      : { present: false },
+    pgVersion: pgVersion.ok
+      ? redactCleanupDiagnosticText(pgVersion.text).trim().slice(0, 16)
+      : null,
+    listenConfig: yuviConf.ok ? yuviConfAllowlist(yuviConf.text) : null
+  };
+  const logPresent = Boolean(logFile.ok || logErr.ok);
+  diagnostic.postgresLogPresent = logPresent;
+  diagnostic.postgresLogBytes =
+    (logFile.ok ? Buffer.byteLength(logFile.text) : 0) +
+    (logErr.ok ? Buffer.byteLength(logErr.text) : 0);
+  if (logPresent) {
+    const tail = boundedRedactedLogTail(
+      `${logFile.ok ? logFile.text : ""}\n${logErr.ok ? logErr.text : ""}`,
+      secrets
+    );
+    if (tail) diagnostic.postgresLogTail = tail;
+  }
+  return diagnostic;
+}
+
+export function formatInstallerSmokePostgresDiagnostic(diagnostic) {
+  if (!diagnostic) return "diagnosticUnavailable=missing";
+  if (diagnostic.diagnosticUnavailable) {
+    return `diagnosticUnavailable=${String(diagnostic.diagnosticUnavailable).slice(0, 40)}`;
+  }
+  return JSON.stringify(diagnostic).slice(0, 1_500);
+}
+
 export async function runInstallerSmokeFinalCleanup({
   keepTemp = false,
   root,
@@ -3627,6 +3753,21 @@ async function runPackagedSupervisor({
       cleanupError = err;
     }
     error = preservePrimarySmokeError(error, cleanupError);
+    try {
+      if (error && typeof error === "object") {
+        error.d1Diagnostic = collectInstallerSmokePostgresDiagnostics({
+          smokeRoot: layout.root,
+          localAppData: layout.localAppData,
+          secrets: [postgresPassword]
+        });
+      }
+    } catch (diagError) {
+      if (error && typeof error === "object") {
+        error.d1Diagnostic = {
+          diagnosticUnavailable: String(diagError?.code ?? "collect-failed").slice(0, 40)
+        };
+      }
+    }
     logExit();
     const message = error instanceof Error ? error.message : String(error);
     let diagnosticBlock = "";
@@ -3646,6 +3787,7 @@ async function runPackagedSupervisor({
       `${message}${diagnosticBlock}${requestDiagnostic ? `\nDIRECT HTTP REQUEST DIAGNOSTIC\n${requestDiagnostic}` : ""}\n${stdout}\n${stderr}`
     );
     if (error?.cleanupSecondary) wrapped.cleanupSecondary = error.cleanupSecondary;
+    if (error?.d1Diagnostic) wrapped.d1Diagnostic = error.d1Diagnostic;
     throw wrapped;
   }
 }
@@ -4391,6 +4533,11 @@ if (
       const secondary = error.cleanupSecondary;
       console.error(
         `[installer-smoke] cleanup-secondary: cleanupPhase=${secondary.cleanupPhase} code=${secondary.code ?? "none"} message=${secondary.message}`
+      );
+    }
+    if (error?.d1Diagnostic) {
+      console.error(
+        `[installer-smoke] d1-diagnostic: ${formatInstallerSmokePostgresDiagnostic(error.d1Diagnostic)}`
       );
     }
     process.exitCode = 1;

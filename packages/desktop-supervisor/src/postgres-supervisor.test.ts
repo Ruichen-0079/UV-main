@@ -113,6 +113,27 @@ describe("supervisor postgres mode", () => {
     expect(text).not.toContain("postgres://yuvi");
   });
 
+  it("keeps packaged and development entrypoints on the contained bootstrap helper", () => {
+    const packaged = fs.readFileSync(
+      path.resolve(__dirname, "../../../scripts/yuvi-desktop-supervisor.packaged.mjs"),
+      "utf8"
+    );
+    const development = fs.readFileSync(
+      path.resolve(__dirname, "../../../scripts/yuvi-desktop-supervisor.mts"),
+      "utf8"
+    );
+    for (const source of [packaged, development]) {
+      expect(source).toContain("startAutomaticSupervisorBootstrap(supervisor)");
+      expect(source).not.toMatch(/void supervisor\.bootstrap\(\)\.then\(/);
+    }
+    const helper = fs.readFileSync(
+      path.resolve(__dirname, "../../../scripts/supervisor-auto-bootstrap.mjs"),
+      "utf8"
+    );
+    expect(helper).not.toMatch(/process\.exit|process\.exitCode/);
+    expect(helper).toContain("never rethrow");
+  });
+
   it("keeps the packaged Supervisor instance lock as the process-level mutex", () => {
     const script = fs.readFileSync(
       path.resolve(__dirname, "../../../scripts/yuvi-desktop-supervisor.packaged.mjs"),

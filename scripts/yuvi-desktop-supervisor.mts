@@ -15,11 +15,11 @@ import {
   startSupervisorHttpServer,
   type ControlEndpointFile
 } from "../packages/desktop-supervisor/src/index.ts";
+import { startAutomaticSupervisorBootstrap } from "./supervisor-auto-bootstrap.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 const repoRoot =
-  args["repo-root"] ??
-  path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  args["repo-root"] ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const config = loadSupervisorConfig({
   repositoryRoot: repoRoot,
@@ -90,19 +90,7 @@ console.log(
 );
 
 supervisor.startBackgroundRefresh(3_000);
-void supervisor.bootstrap().then((snap) => {
-  console.log(
-    JSON.stringify({
-      ok: true,
-      event: "supervisor.bootstrap",
-      services: snap.services.map((s) => ({
-        id: s.id,
-        status: s.status,
-        ownership: s.ownership
-      }))
-    })
-  );
-});
+void startAutomaticSupervisorBootstrap(supervisor);
 
 let shuttingDown = false;
 async function gracefulShutdown(reason: string): Promise<void> {
@@ -130,7 +118,10 @@ process.on("SIGTERM", () => {
 });
 
 function writeEndpointSecure(filePath: string, data: ControlEndpointFile): void {
-  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600
+  });
   restrictToCurrentUser(filePath);
 }
 
@@ -147,11 +138,10 @@ function restrictToCurrentUser(targetPath: string): void {
     const user = process.env["USERNAME"] ?? "";
     if (!user) return;
     // Current user full control; remove inheritance for tighter local ACL.
-    spawnSync(
-      "icacls",
-      [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`],
-      { windowsHide: true, timeout: 5_000 }
-    );
+    spawnSync("icacls", [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`], {
+      windowsHide: true,
+      timeout: 5_000
+    });
   } catch {
     // Best-effort only.
   }
