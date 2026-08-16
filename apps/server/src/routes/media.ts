@@ -1,6 +1,13 @@
-import { ProviderError, type ProviderAttempt, type ProviderCapability } from "@companion/providers";
-import type { ProviderMetadata } from "@companion/providers";
-import type { FastifyInstance } from "fastify";
+import {
+  ProviderError,
+  type ProviderAttempt,
+  type ProviderCapability,
+  type ProviderMetadata,
+  type STTInput,
+  type STTOutput,
+  type STTProvider
+} from "@companion/providers";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 
@@ -100,6 +107,50 @@ function isValidPublicBase64Audio(value: string): boolean {
   return normalizedInput === normalizedCanonical;
 }
 
+type RequestDisconnectBoundary = {
+  signal: AbortSignal;
+  cleanup(): void;
+};
+
+function createRequestDisconnectBoundary(request: FastifyRequest): RequestDisconnectBoundary {
+  const controller = new AbortController();
+  const socket = request.raw.socket;
+  const abortOnDisconnect = () => controller.abort();
+
+  request.raw.once("aborted", abortOnDisconnect);
+  socket?.once("close", abortOnDisconnect);
+
+  if (request.raw.aborted || socket?.destroyed) {
+    abortOnDisconnect();
+  }
+
+  let cleaned = false;
+  return {
+    signal: controller.signal,
+    cleanup() {
+      if (cleaned) {
+        return;
+      }
+      cleaned = true;
+      request.raw.removeListener("aborted", abortOnDisconnect);
+      socket?.removeListener("close", abortOnDisconnect);
+    }
+  };
+}
+
+async function transcribeAudioWithDisconnectBoundary(
+  request: FastifyRequest,
+  provider: STTProvider,
+  input: STTInput
+): Promise<STTOutput> {
+  const boundary = createRequestDisconnectBoundary(request);
+  try {
+    return await provider.transcribeAudio(input, { signal: boundary.signal });
+  } finally {
+    boundary.cleanup();
+  }
+}
+
 export async function registerMediaRoutes(
   app: FastifyInstance,
   context: AppContext
@@ -117,7 +168,7 @@ export async function registerMediaRoutes(
 
     const provider = context.providers.getSTTProvider();
     try {
-      const output = await provider.transcribeAudio({
+      const output = await transcribeAudioWithDisconnectBoundary(request, provider, {
         audioBase64: parsed.data.audioBase64,
         mimeType: parsed.data.mimeType,
         language: parsed.data.language,
@@ -152,7 +203,7 @@ export async function registerMediaRoutes(
 
     const sttProvider = context.providers.getSTTProvider();
     try {
-      const transcription = await sttProvider.transcribeAudio({
+      const transcription = await transcribeAudioWithDisconnectBoundary(request, sttProvider, {
         audioBase64: parsed.data.audioBase64,
         mimeType: parsed.data.mimeType,
         language: parsed.data.language,
