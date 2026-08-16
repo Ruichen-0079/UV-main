@@ -51,6 +51,13 @@ type OpenAICompatibleASRResponse = {
   };
 };
 
+type DashScopeAudioSourceKind = "url" | "base64" | "buffer" | "localFilePath";
+
+type ResolvedAudioInput = {
+  audio: string;
+  sourceKind: DashScopeAudioSourceKind;
+};
+
 export class DashScopeSTTProvider implements STTProvider {
   readonly name = "dashscope";
 
@@ -90,7 +97,7 @@ export class DashScopeSTTProvider implements STTProvider {
       ensureDashScopeConfig(this.options);
 
       const start = performance.now();
-      const audio = await resolveAudioInput(
+      const resolvedAudio = await resolveAudioInput(
         input,
         this.options.maxInlineAudioBytes ?? 10 * 1024 * 1024
       );
@@ -116,7 +123,7 @@ export class DashScopeSTTProvider implements STTProvider {
                   role: "user",
                   content: [
                     {
-                      audio
+                      audio: resolvedAudio.audio
                     }
                   ]
                 }
@@ -150,7 +157,7 @@ export class DashScopeSTTProvider implements STTProvider {
         tokenUsage: normalized.tokenUsage,
         providerMetadata: {
           usage: normalized.usage,
-          sourceKind: classifyAudioInput(input)
+          sourceKind: resolvedAudio.sourceKind
         },
         debug: this.options.includeRawResponse ? { rawResponse } : undefined
       };
@@ -199,20 +206,29 @@ function ensureDashScopeConfig(options: DashScopeSTTProviderOptions): void {
   }
 }
 
-async function resolveAudioInput(input: STTInput, maxInlineAudioBytes: number): Promise<string> {
+async function resolveAudioInput(
+  input: STTInput,
+  maxInlineAudioBytes: number
+): Promise<ResolvedAudioInput> {
   if (input.audioUrl) {
-    return input.audioUrl;
+    return { audio: input.audioUrl, sourceKind: "url" };
   }
 
-  if (input.audioBase64) {
+  if (input.audioBase64 !== undefined) {
     validateInlineAudioSize(input.audioBase64, maxInlineAudioBytes);
-    return toDataUrl(input.audioBase64, input.mimeType);
+    return {
+      audio: toDataUrl(input.audioBase64, input.mimeType),
+      sourceKind: "base64"
+    };
   }
 
   const buffer = input.audioBuffer ?? input.audio;
-  if (buffer) {
+  if (buffer !== undefined) {
     validateBufferSize(buffer.byteLength, maxInlineAudioBytes);
-    return toDataUrl(Buffer.from(buffer).toString("base64"), input.mimeType);
+    return {
+      audio: toDataUrl(Buffer.from(buffer).toString("base64"), input.mimeType),
+      sourceKind: "buffer"
+    };
   }
 
   if (input.localFilePath) {
@@ -228,10 +244,13 @@ async function resolveAudioInput(input: STTInput, maxInlineAudioBytes: number): 
 
     const file = await readFile(input.localFilePath);
     validateBufferSize(file.byteLength, maxInlineAudioBytes);
-    return toDataUrl(
-      file.toString("base64"),
-      input.mimeType ?? mimeTypeFromPath(input.localFilePath)
-    );
+    return {
+      audio: toDataUrl(
+        file.toString("base64"),
+        input.mimeType ?? mimeTypeFromPath(input.localFilePath)
+      ),
+      sourceKind: "localFilePath"
+    };
   }
 
   throw new ProviderError({
@@ -330,6 +349,7 @@ function normalizeDashScopeResponse(rawResponse: unknown): {
       (item) => typeof item.text === "string"
     )?.text;
     if (typeof text === "string") {
+      assertMeaningfulTranscript(text);
       return {
         text,
         usage: rawResponse.usage
@@ -340,6 +360,7 @@ function normalizeDashScopeResponse(rawResponse: unknown): {
   if (isOpenAICompatibleASRResponse(rawResponse)) {
     const message = rawResponse.choices?.[0]?.message;
     if (typeof message?.content === "string") {
+      assertMeaningfulTranscript(message.content);
       const audioInfo = message.annotations?.find((annotation) => annotation.type === "audio_info");
       return {
         text: message.content,
@@ -358,6 +379,21 @@ function normalizeDashScopeResponse(rawResponse: unknown): {
     message: "DashScope STT response did not include normalized transcription text.",
     retryable: false,
     cause: rawResponse
+  });
+}
+
+function assertMeaningfulTranscript(text: string): void {
+  if (text.trim().length > 0) {
+    return;
+  }
+
+  throw new ProviderError({
+    provider: "dashscope",
+    capability: "stt",
+    code: ProviderErrorCode.MalformedResponse,
+    message: "DashScope STT response contained an empty transcription.",
+    retryable: false,
+    effectState: "unknown"
   });
 }
 
@@ -386,13 +422,31 @@ function normalizeUsage(usage: OpenAICompatibleASRResponse["usage"]): TokenUsage
 }
 
 function validateInlineAudioSize(base64OrDataUrl: string, maxInlineAudioBytes: number): void {
-  const base64 = base64OrDataUrl.includes(",")
-    ? (base64OrDataUrl.split(",").at(-1) ?? "")
-    : base64OrDataUrl;
-  validateBufferSize(Math.ceil(base64.length * 0.75), maxInlineAudioBytes);
+  const base64 = extractInlineBase64(base64OrDataUrl);
+  if (!isValidBase64(base64)) {
+    throw new ProviderError({
+      provider: "dashscope",
+      capability: "stt",
+      code: ProviderErrorCode.UnsupportedInput,
+      message: "audioBase64 must contain valid non-empty base64 audio data.",
+      retryable: false
+    });
+  }
+
+  validateBufferSize(Buffer.from(base64, "base64").byteLength, maxInlineAudioBytes);
 }
 
 function validateBufferSize(byteLength: number, maxInlineAudioBytes: number): void {
+  if (byteLength === 0) {
+    throw new ProviderError({
+      provider: "dashscope",
+      capability: "stt",
+      code: ProviderErrorCode.UnsupportedInput,
+      message: "Audio input must not be empty.",
+      retryable: false
+    });
+  }
+
   if (byteLength > maxInlineAudioBytes) {
     throw new ProviderError({
       provider: "dashscope",
@@ -402,6 +456,39 @@ function validateBufferSize(byteLength: number, maxInlineAudioBytes: number): vo
       retryable: false
     });
   }
+}
+
+function extractInlineBase64(value: string): string {
+  if (!value.startsWith("data:")) {
+    return value;
+  }
+
+  const comma = value.indexOf(",");
+  if (comma < 0 || !/^data:[^,]*;base64$/i.test(value.slice(0, comma))) {
+    return "";
+  }
+
+  return value.slice(comma + 1);
+}
+
+function isValidBase64(value: string): boolean {
+  if (value.length === 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 === 1) {
+    return false;
+  }
+
+  const paddingIndex = value.indexOf("=");
+  if (paddingIndex >= 0 && value.length % 4 !== 0) {
+    return false;
+  }
+
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.byteLength === 0) {
+    return false;
+  }
+
+  const normalizedInput = value.replace(/=+$/, "");
+  const normalizedCanonical = decoded.toString("base64").replace(/=+$/, "");
+  return normalizedInput === normalizedCanonical;
 }
 
 async function readSafeErrorBody(response: Response): Promise<string | undefined> {
@@ -444,22 +531,6 @@ function mimeTypeFromPath(filePath: string): string {
   }
 
   return "audio/mpeg";
-}
-
-function classifyAudioInput(input: STTInput): string {
-  if (input.audioUrl) {
-    return "url";
-  }
-
-  if (input.localFilePath) {
-    return "localFilePath";
-  }
-
-  if (input.audioBase64) {
-    return "base64";
-  }
-
-  return "buffer";
 }
 
 function trimTrailingSlash(value: string): string {

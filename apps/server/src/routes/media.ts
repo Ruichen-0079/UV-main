@@ -53,6 +53,53 @@ const VisionRequestSchema = z.object({
   prompt: z.string().optional()
 });
 
+function validatePublicSTTInput(input: {
+  audioBase64?: string | undefined;
+  mockText?: string | undefined;
+}): string | undefined {
+  if (input.audioBase64 !== undefined) {
+    if (!isValidPublicBase64Audio(input.audioBase64)) {
+      return "audioBase64 must contain valid non-empty base64 audio data.";
+    }
+    return undefined;
+  }
+
+  if (input.mockText?.trim()) {
+    return undefined;
+  }
+
+  return "Provide valid audioBase64 or non-empty mockText.";
+}
+
+function isValidPublicBase64Audio(value: string): boolean {
+  const payload = value.startsWith("data:")
+    ? (() => {
+        const comma = value.indexOf(",");
+        return comma >= 0 && /^data:[^,]*;base64$/i.test(value.slice(0, comma))
+          ? value.slice(comma + 1)
+          : "";
+      })()
+    : value;
+
+  if (payload.length === 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(payload) || payload.length % 4 === 1) {
+    return false;
+  }
+
+  const paddingIndex = payload.indexOf("=");
+  if (paddingIndex >= 0 && payload.length % 4 !== 0) {
+    return false;
+  }
+
+  const decoded = Buffer.from(payload, "base64");
+  if (decoded.byteLength === 0) {
+    return false;
+  }
+
+  const normalizedInput = payload.replace(/=+$/, "");
+  const normalizedCanonical = decoded.toString("base64").replace(/=+$/, "");
+  return normalizedInput === normalizedCanonical;
+}
+
 export async function registerMediaRoutes(
   app: FastifyInstance,
   context: AppContext
@@ -61,6 +108,11 @@ export async function registerMediaRoutes(
     const parsed = TranscriptionRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+
+    const inputError = validatePublicSTTInput(parsed.data);
+    if (inputError) {
+      return reply.status(400).send({ error: "invalid_request", message: inputError });
     }
 
     const provider = context.providers.getSTTProvider();
@@ -91,6 +143,11 @@ export async function registerMediaRoutes(
     const parsed = VoiceMessageRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+
+    const inputError = validatePublicSTTInput(parsed.data);
+    if (inputError) {
+      return reply.status(400).send({ error: "invalid_request", message: inputError });
     }
 
     const sttProvider = context.providers.getSTTProvider();
