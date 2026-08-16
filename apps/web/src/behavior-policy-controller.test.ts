@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   createBehaviorPolicyController,
-  LIFECYCLE_PULSE_TTL_MS
+  LIFECYCLE_PULSE_TTL_MS,
+  type BehaviorPolicyControllerOptions
 } from "./behavior-policy-controller.js";
 import {
   createInitialCompanionPresence,
@@ -15,12 +16,13 @@ type FakeTimer = {
   cancelled: boolean;
 };
 
-function createHarness(sessionId = "test-session") {
+function createHarness(sessionId?: unknown) {
   let now = 0;
   const timers: FakeTimer[] = [];
   const writes: Array<SuppliedGazeTarget | null> = [];
-  const controller = createBehaviorPolicyController({
-    sessionId,
+  const resolvedSessionId = arguments.length === 0 ? "test-session" : sessionId;
+  const options: BehaviorPolicyControllerOptions = {
+    sessionId: resolvedSessionId as string,
     controllerId: "test-controller",
     now: () => now,
     setTimer(callback, delayMs) {
@@ -34,7 +36,8 @@ function createHarness(sessionId = "test-session") {
     setGazeTarget(target) {
       writes.push(target);
     }
-  });
+  };
+  const controller = createBehaviorPolicyController(options);
 
   function setNow(value: number): void {
     now = value;
@@ -51,7 +54,7 @@ function createHarness(sessionId = "test-session") {
     return timer;
   }
 
-  return { controller, timers, writes, setNow, fire, latestTimer };
+  return { controller, options, timers, writes, setNow, fire, latestTimer };
 }
 
 function presence(
@@ -275,6 +278,84 @@ describe("BehaviorPolicyController", () => {
     harness.controller.updatePresence(presence({ epoch: "turn-a" }));
     harness.controller.updatePresence(presence({ epoch: "turn-a", activity: "listening" }));
     expect(harness.controller.getState().active.kind).toBe("none");
+  });
+
+  it.each([null, undefined, 123, true, {}, [], "", "   "])(
+    "fails closed without throwing for invalid runtime session identity %j",
+    (sessionId) => {
+      const harness = createHarness(sessionId);
+      expect(() => {
+        harness.controller.updatePresence(presence({ epoch: "turn-a" }));
+        harness.controller.updatePresence(presence({ epoch: "turn-a", activity: "listening" }));
+      }).not.toThrow();
+      expect(harness.controller.getState().active.kind).toBe("none");
+      expect(harness.timers).toHaveLength(0);
+      expect(harness.writes).toEqual([]);
+    }
+  );
+
+  it("fails closed for undefined session identity with a null epoch", () => {
+    const harness = createHarness(undefined);
+    expect(() => {
+      harness.controller.updatePresence(presence({ epoch: null }));
+      harness.controller.updatePresence(presence({ epoch: null, activity: "listening" }));
+    }).not.toThrow();
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.timers).toHaveLength(0);
+    expect(harness.writes).toEqual([]);
+  });
+
+  it("keeps turn-scoped lifecycle pulses available when session identity is invalid", () => {
+    const harness = createHarness(null);
+    harness.controller.updatePresence(presence({ epoch: "turn-a" }));
+    harness.controller.updatePresence(presence({ epoch: "turn-a", activity: "thinking" }));
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "gaze",
+      scope: "turn",
+      reason: "thinking"
+    });
+  });
+
+  it("does not let invalid listening clear a valid turn-scoped winner", () => {
+    const harness = createHarness(null);
+    harness.controller.updatePresence(presence({ epoch: "turn-a" }));
+    harness.controller.updatePresence(presence({ epoch: "turn-a", activity: "thinking" }));
+    const timerCount = harness.timers.length;
+
+    harness.controller.updatePresence(presence({ epoch: "turn-a", activity: "listening" }));
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "gaze",
+      scope: "turn",
+      reason: "thinking"
+    });
+    expect(harness.timers).toHaveLength(timerCount);
+  });
+
+  it("normalizes a valid trimmed session identity once", () => {
+    const harness = createHarness("  session-a  ");
+    harness.controller.updatePresence(presence({ epoch: "turn-a" }));
+    harness.controller.updatePresence(presence({ epoch: "turn-a", activity: "listening" }));
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      scope: "session",
+      sessionId: "session-a"
+    });
+  });
+
+  it("does not read a mutated options session identity after construction", () => {
+    const harness = createHarness("session-a");
+    harness.controller.updatePresence(presence({ epoch: "turn-a" }));
+    const mutableOptions = harness.options as unknown as { sessionId: string };
+    mutableOptions.sessionId = null as unknown as string;
+
+    expect(() =>
+      harness.controller.updatePresence(presence({ epoch: "turn-a", activity: "listening" }))
+    ).not.toThrow();
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      scope: "session",
+      sessionId: "session-a"
+    });
   });
 
   it("keeps an early timer firing active and reschedules the same exact pulse", () => {

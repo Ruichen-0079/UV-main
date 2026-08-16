@@ -86,6 +86,12 @@ function isValidMonotonicNow(value: number): boolean {
   return Number.isFinite(value) && value >= 0;
 }
 
+function normalizeSessionId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function isThinkingLifecycleIntent(intent: BehaviorIntent): boolean {
   return (
     intent.kind === "gaze" &&
@@ -122,7 +128,7 @@ function semanticGazeForIntent(intent: BehaviorIntent): {
 function createLifecycleIntent(
   spec: LifecycleIntentSpec,
   presence: CompanionPresenceProjection,
-  sessionId: string,
+  sessionId: string | null,
   controllerId: string,
   generation: number,
   sequence: number,
@@ -136,7 +142,7 @@ function createLifecycleIntent(
 
   const scope =
     spec.reason === "listening-entry"
-      ? sessionId.trim().length > 0
+      ? sessionId !== null
         ? { scope: "session" as const, sessionId }
         : null
       : presence.epoch !== null && presence.epoch.trim().length > 0
@@ -172,6 +178,7 @@ export function createBehaviorPolicyController(
     typeof options.controllerId === "string" && options.controllerId.length > 0
       ? options.controllerId
       : "behavior-controller";
+  const sessionId = normalizeSessionId(options.sessionId);
 
   function readNow(): number {
     try {
@@ -182,7 +189,7 @@ export function createBehaviorPolicyController(
   }
 
   function context(presence: CompanionPresenceProjection, nowMs: number): BehaviorPolicyContext {
-    return { presence, sessionId: options.sessionId, nowMs };
+    return { presence, sessionId, nowMs };
   }
 
   function clearActiveTimer(): void {
@@ -315,7 +322,7 @@ export function createBehaviorPolicyController(
     const intent = createLifecycleIntent(
       spec,
       presence,
-      options.sessionId,
+      sessionId,
       controllerId,
       generation,
       sequence++,
