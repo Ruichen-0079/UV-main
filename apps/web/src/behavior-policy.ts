@@ -95,6 +95,7 @@ type BehaviorIntentMetadata = {
   readonly intentId: string;
   readonly source: BehaviorIntentSource;
   readonly reason: BehaviorIntentReason;
+  /** Diagnostic copy of the centrally derived priority; admission validates it. */
   readonly priority: NonNoneBehaviorPriority;
   readonly createdAtMs: number;
   readonly expiresAtMs: number;
@@ -128,9 +129,15 @@ export type BehaviorNoneIntent = {
 
 export type BehaviorIntent = BehaviorNoneIntent | BehaviorSemanticIntent;
 
+export type BehaviorIntentRef = {
+  readonly intentId: string;
+  readonly createdAtMs: number;
+};
+
 export type BehaviorPolicyContext = {
   readonly presence: CompanionPresenceProjection;
   readonly sessionId: string | null;
+  /** The only authoritative monotonic time for a reduction. */
   readonly nowMs: number;
 };
 
@@ -144,19 +151,23 @@ export type BehaviorPolicyEvent =
       readonly intent: BehaviorSemanticIntent;
     }
   | {
-      readonly type: "release";
-      /** Omit to release unconditionally; provide it to make release identity-safe. */
-      readonly intentId?: string;
+      /** Identity-bound release for an expiry/timer callback. */
+      readonly type: "release-intent";
+      readonly intentRef: BehaviorIntentRef;
     }
   | {
+      /** Identity-bound cancellation of one exact active intent instance. */
       readonly type: "cancel-intent";
-      readonly intentId: string;
+      readonly intentRef: BehaviorIntentRef;
     }
   | {
+      /** Identity-bound clock notification; context.nowMs supplies the time. */
       readonly type: "clock-tick";
-      readonly nowMs: number;
-      /** A timer-originated tick may target the intent that scheduled it. */
-      readonly intentId?: string;
+      readonly intentRef: BehaviorIntentRef;
+    }
+  | {
+      /** Explicit whole-arbiter reset. RESET IS NOT FOR TIMER EXPIRY. */
+      readonly type: "reset";
     };
 
 export const NONE_BEHAVIOR_INTENT: BehaviorNoneIntent = { kind: "none" };
@@ -165,9 +176,34 @@ export function createInitialBehaviorPolicyState(): BehaviorPolicyState {
   return { active: NONE_BEHAVIOR_INTENT };
 }
 
+export function getBehaviorIntentRef(intent: BehaviorSemanticIntent): BehaviorIntentRef {
+  return { intentId: intent.intentId, createdAtMs: intent.createdAtMs };
+}
+
+/**
+ * Derive priority from the semantic policy category, never from caller priority.
+ * The priority field on an intent is admitted only when it matches this result.
+ */
+export function deriveBehaviorPriority(
+  intent: BehaviorSemanticIntent
+): NonNoneBehaviorPriority | null {
+  switch (intent.kind) {
+    case "reaction":
+      return isReactionCategory(intent.source, intent.reason) ? "P2" : null;
+    case "proactive":
+      return isProactiveCategory(intent.source, intent.reason) ? "P3" : null;
+    case "attention":
+    case "gaze":
+      if (isUserInteractionCategory(intent.source, intent.reason)) return "P0";
+      if (isActiveTaskCategory(intent.source, intent.reason)) return "P1";
+      if (isAmbientCategory(intent.source, intent.reason)) return "P3";
+      return null;
+  }
+}
+
 export function getBehaviorPriority(intent: BehaviorIntent): BehaviorPriority {
   if (intent.kind === "none") return "P4";
-  return intent.priority;
+  return deriveBehaviorPriority(intent) ?? "P4";
 }
 
 /** Explicit rank: a smaller P-number has greater authority. */
@@ -180,28 +216,28 @@ export function reduceBehaviorPolicy(
   event: BehaviorPolicyEvent,
   context: BehaviorPolicyContext
 ): BehaviorPolicyState {
-  const eventNowMs =
-    event.type === "clock-tick" && isNonNegativeFiniteNumber(event.nowMs)
-      ? event.nowMs
-      : context.nowMs;
-  const effectiveContext: BehaviorPolicyContext = {
-    presence: context.presence,
-    sessionId: context.sessionId,
-    nowMs: eventNowMs
-  };
-
-  if (!isValidPolicyContext(effectiveContext)) {
+  if (isRecord(event) && event["type"] === "reset") {
     return createInitialBehaviorPolicyState();
   }
 
-  const targetedTick = event.type === "clock-tick" && event.intentId !== undefined;
-  let current = reconcileActive(state, effectiveContext, !targetedTick);
+  if (!isValidPolicyContext(context)) {
+    return createInitialBehaviorPolicyState();
+  }
 
-  switch (event.type) {
+  // Reconcile before interpreting every event so stale state cannot block a
+  // current candidate, and malformed events cannot keep invalid state alive.
+  const current = reconcileActive(state, context);
+  if (!isRecord(event)) return current;
+
+  switch (event["type"]) {
     case "submit-intent": {
-      const admitted = admitIntent(event.intent, effectiveContext);
+      const admitted = admitIntent(event["intent"], context);
       if (admitted === null) return current;
       if (current.active.kind === "none") return { active: admitted };
+
+      // The pair is the exact immutable instance identity. It cannot be
+      // silently reused for a different active semantic intent.
+      if (sameIntentRef(current.active, getBehaviorIntentRef(admitted))) return current;
 
       const priorityComparison = compareBehaviorPriority(
         getBehaviorPriority(admitted),
@@ -213,29 +249,24 @@ export function reduceBehaviorPolicy(
       }
       return current;
     }
-    case "release":
-      return canRelease(current.active, event.intentId)
-        ? createInitialBehaviorPolicyState()
-        : current;
+    case "release-intent":
     case "cancel-intent":
-      return canRelease(current.active, event.intentId)
+      return targetsActive(current.active, event["intentRef"])
         ? createInitialBehaviorPolicyState()
         : current;
     case "clock-tick":
-      if (event.intentId === undefined) return reconcileActive(current, effectiveContext, true);
-      if (
-        current.active.kind !== "none" &&
-        current.active.intentId === event.intentId &&
-        event.nowMs >= current.active.expiresAtMs
-      ) {
-        return createInitialBehaviorPolicyState();
-      }
+      // Expiry has already been reconciled against the one authoritative clock
+      // above. A tick is only an identity-safe notification, never a second clock.
+      if (!isValidBehaviorIntentRef(event["intentRef"])) return current;
+      if (!targetsActive(current.active, event["intentRef"])) return current;
+      return current;
+    default:
       return current;
   }
 }
 
 function admitIntent(
-  intent: BehaviorSemanticIntent,
+  intent: unknown,
   context: BehaviorPolicyContext
 ): BehaviorSemanticIntent | null {
   if (!isValidBehaviorSemanticIntent(intent)) return null;
@@ -251,8 +282,7 @@ function admitIntent(
 
 function reconcileActive(
   state: BehaviorPolicyState,
-  context: BehaviorPolicyContext,
-  expireByTime: boolean
+  context: BehaviorPolicyContext
 ): BehaviorPolicyState {
   if (!isValidBehaviorPolicyState(state)) return createInitialBehaviorPolicyState();
   if (state.active.kind === "none") return state;
@@ -262,16 +292,22 @@ function reconcileActive(
   if (isVisualIntent(state.active) && context.presence.capabilities.live2d !== "available") {
     return createInitialBehaviorPolicyState();
   }
-  if (expireByTime && context.nowMs >= state.active.expiresAtMs) {
+  if (context.nowMs >= state.active.expiresAtMs) {
     return createInitialBehaviorPolicyState();
   }
   return state;
 }
 
-function canRelease(active: BehaviorIntent, intentId: string | undefined): boolean {
-  if (active.kind === "none") return true;
-  if (intentId === undefined) return true;
-  return isNonEmptyString(intentId) && active.intentId === intentId;
+function targetsActive(active: BehaviorIntent, intentRef: unknown): boolean {
+  return (
+    active.kind !== "none" &&
+    isValidBehaviorIntentRef(intentRef) &&
+    sameIntentRef(active, intentRef)
+  );
+}
+
+function sameIntentRef(intent: BehaviorSemanticIntent, intentRef: BehaviorIntentRef): boolean {
+  return intent.intentId === intentRef.intentId && intent.createdAtMs === intentRef.createdAtMs;
 }
 
 function isCurrentCorrelation(
@@ -285,25 +321,37 @@ function isCurrentCorrelation(
       return context.sessionId !== null && intent.sessionId === context.sessionId;
     case "resource":
     case "decision":
+      // P6-A validates these correlations structurally. Authoritative resource
+      // generations and decision fencing belong to later phases.
       return true;
   }
 }
 
 function isVisualIntent(intent: BehaviorSemanticIntent): boolean {
-  return intent.kind === "attention" || intent.kind === "gaze" || intent.kind === "reaction";
-}
-
-function isValidPolicyContext(context: BehaviorPolicyContext): boolean {
   return (
-    isNonNegativeFiniteNumber(context.nowMs) &&
-    (context.sessionId === null || isNonEmptyString(context.sessionId)) &&
-    isValidLive2dCapability(context.presence.capabilities.live2d)
+    intent.kind === "attention" ||
+    intent.kind === "gaze" ||
+    intent.kind === "reaction" ||
+    (intent.kind === "proactive" && intent.payload.action === "silent-attention")
   );
 }
 
-function isValidBehaviorPolicyState(state: BehaviorPolicyState): boolean {
-  if (state.active.kind === "none") return true;
-  return isValidBehaviorSemanticIntent(state.active);
+function isValidPolicyContext(value: unknown): value is BehaviorPolicyContext {
+  if (!isRecord(value) || !isRecord(value["presence"])) return false;
+  const presence = value["presence"];
+  const capabilities = presence["capabilities"];
+  return (
+    isNonNegativeFiniteNumber(value["nowMs"]) &&
+    (value["sessionId"] === null || isNonEmptyString(value["sessionId"])) &&
+    isRecord(capabilities) &&
+    isValidLive2dCapability(capabilities["live2d"])
+  );
+}
+
+function isValidBehaviorPolicyState(value: unknown): value is BehaviorPolicyState {
+  if (!isRecord(value) || !isRecord(value["active"])) return false;
+  const active = value["active"];
+  return active["kind"] === "none" || isValidBehaviorSemanticIntent(active);
 }
 
 function isValidBehaviorSemanticIntent(value: unknown): value is BehaviorSemanticIntent {
@@ -316,29 +364,44 @@ function isValidBehaviorSemanticIntent(value: unknown): value is BehaviorSemanti
     !isNonNegativeFiniteNumber(value["createdAtMs"]) ||
     !isNonNegativeFiniteNumber(value["expiresAtMs"]) ||
     value["expiresAtMs"] <= value["createdAtMs"] ||
-    !isValidScopeFields(value)
+    !isValidScopeFields(value) ||
+    !isRecord(value["payload"])
   ) {
     return false;
   }
 
-  if (!isRecord(value["payload"])) return false;
   const payload = value["payload"];
+  let validPayload = false;
   switch (value["kind"]) {
     case "attention":
     case "gaze":
-      return isSemanticGazeTarget(payload["target"]) && isSemanticStrength(payload["strength"]);
+      validPayload =
+        isSemanticGazeTarget(payload["target"]) && isSemanticStrength(payload["strength"]);
+      break;
     case "reaction":
-      return (
-        isBehaviorReactionType(payload["reaction"]) && isSemanticStrength(payload["intensity"])
-      );
+      validPayload =
+        isBehaviorReactionType(payload["reaction"]) && isSemanticStrength(payload["intensity"]);
+      break;
     case "proactive":
-      return (
+      validPayload =
         isBehaviorProactiveAction(payload["action"]) &&
-        isMatchingProactiveModality(payload["action"], payload["modality"])
-      );
+        isMatchingProactiveModality(payload["action"], payload["modality"]);
+      break;
     default:
       return false;
   }
+
+  if (!validPayload) return false;
+  const expectedPriority = deriveBehaviorPriority(value as BehaviorSemanticIntent);
+  return expectedPriority !== null && value["priority"] === expectedPriority;
+}
+
+function isValidBehaviorIntentRef(value: unknown): value is BehaviorIntentRef {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value["intentId"]) &&
+    isNonNegativeFiniteNumber(value["createdAtMs"])
+  );
 }
 
 function isValidScopeFields(value: Record<string, unknown>): boolean {
@@ -374,6 +437,41 @@ function isMatchingProactiveModality(
       return modality === "none";
   }
   return false;
+}
+
+function isUserInteractionCategory(
+  source: BehaviorIntentSource,
+  reason: BehaviorIntentReason
+): boolean {
+  return (
+    source === "user-interaction" &&
+    (reason === "user-gesture" || reason === "listening-entry" || reason === "turn-start")
+  );
+}
+
+function isActiveTaskCategory(source: BehaviorIntentSource, reason: BehaviorIntentReason): boolean {
+  return source === "lifecycle" && (reason === "thinking" || reason === "speech-active");
+}
+
+function isAmbientCategory(source: BehaviorIntentSource, reason: BehaviorIntentReason): boolean {
+  return (
+    source === "idle-policy" && (reason === "silent-attention" || reason === "proactive-candidate")
+  );
+}
+
+function isReactionCategory(source: BehaviorIntentSource, reason: BehaviorIntentReason): boolean {
+  return (
+    (source === "user-interaction" && reason === "interrupt-acknowledgement") ||
+    (source === "lifecycle" && reason === "lifecycle-reaction") ||
+    (source === "capability" && reason === "capability-gate") ||
+    (source === "external" && reason === "external-command")
+  );
+}
+
+function isProactiveCategory(source: BehaviorIntentSource, reason: BehaviorIntentReason): boolean {
+  return (
+    source === "idle-policy" && (reason === "silent-attention" || reason === "proactive-candidate")
+  );
 }
 
 function priorityRank(priority: BehaviorPriority): number {

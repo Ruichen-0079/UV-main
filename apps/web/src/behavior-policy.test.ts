@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   compareBehaviorPriority,
   createInitialBehaviorPolicyState,
+  getBehaviorIntentRef,
   getBehaviorPriority,
   reduceBehaviorPolicy,
   type BehaviorPolicyContext,
@@ -37,11 +38,24 @@ type IntentOverrides = {
   payload?: BehaviorSemanticIntent["payload"];
 };
 
+function defaultSemanticCategory(
+  kind: BehaviorSemanticIntent["kind"],
+  priority: BehaviorSemanticIntent["priority"]
+): Pick<IntentOverrides, "source" | "reason"> {
+  if (kind === "reaction") return { source: "lifecycle", reason: "lifecycle-reaction" };
+  if (kind === "proactive") return { source: "idle-policy", reason: "proactive-candidate" };
+  if (priority === "P0") return { source: "user-interaction", reason: "user-gesture" };
+  if (priority === "P1") return { source: "lifecycle", reason: "thinking" };
+  if (priority === "P3") return { source: "idle-policy", reason: "silent-attention" };
+  return { source: "external", reason: "external-command" };
+}
+
 function intent(overrides: IntentOverrides): BehaviorSemanticIntent {
+  const defaults = defaultSemanticCategory(overrides.kind, overrides.priority);
   const common = {
     intentId: overrides.intentId ?? "intent-a",
-    source: overrides.source ?? "user-interaction",
-    reason: overrides.reason ?? "user-gesture",
+    source: overrides.source ?? defaults.source,
+    reason: overrides.reason ?? defaults.reason,
     priority: overrides.priority,
     createdAtMs: overrides.createdAtMs ?? 100,
     expiresAtMs: overrides.expiresAtMs ?? 500,
@@ -109,29 +123,77 @@ describe("P6-A semantic behavior policy", () => {
     expect(compareBehaviorPriority("P3", "P0")).toBeGreaterThan(0);
   });
 
-  it("applies every priority boundary through the single reducer", () => {
-    const precedence: Array<readonly ["P0" | "P1" | "P2" | "P3", "P1" | "P2" | "P3"]> = [
-      ["P0", "P1"],
-      ["P1", "P2"],
-      ["P2", "P3"]
+  it("owns priority by semantic category and rejects forged promotions", () => {
+    const forgedProactive = intent({
+      intentId: "forged-proactive-p0",
+      kind: "proactive",
+      priority: "P0",
+      scope: "turn"
+    });
+    const forgedReaction = intent({
+      intentId: "forged-reaction-p0",
+      kind: "reaction",
+      priority: "P0",
+      scope: "turn",
+      source: "user-interaction",
+      reason: "user-gesture",
+      payload: { reaction: "avert-think", intensity: 1 }
+    });
+    expect(submit(createInitialBehaviorPolicyState(), forgedProactive).active).toEqual({
+      kind: "none"
+    });
+    expect(submit(createInitialBehaviorPolicyState(), forgedReaction).active).toEqual({
+      kind: "none"
+    });
+
+    const valid = [
+      intent({ intentId: "p0", kind: "gaze", priority: "P0", scope: "turn" }),
+      intent({ intentId: "p1", kind: "gaze", priority: "P1", scope: "turn" }),
+      intent({ intentId: "p2", kind: "reaction", priority: "P2", scope: "turn" }),
+      intent({ intentId: "p3", kind: "proactive", priority: "P3", scope: "turn" })
     ];
-    for (const [higher, lower] of precedence) {
-      const low = intent({
-        intentId: `low-${lower}`,
-        kind: "gaze",
-        priority: lower,
-        scope: "turn"
-      });
-      const high = intent({
-        intentId: `high-${higher}`,
-        kind: "gaze",
-        priority: higher,
-        scope: "turn",
-        createdAtMs: 110
-      });
+    for (const candidate of valid) {
+      expect(submit(createInitialBehaviorPolicyState(), candidate).active).toEqual(candidate);
+    }
+  });
+
+  it("applies every priority boundary through the single reducer", () => {
+    const cases: Array<readonly [BehaviorSemanticIntent, BehaviorSemanticIntent]> = [
+      [
+        intent({ intentId: "low-p1", kind: "gaze", priority: "P1", scope: "turn" }),
+        intent({
+          intentId: "high-p0",
+          kind: "gaze",
+          priority: "P0",
+          scope: "turn",
+          createdAtMs: 90
+        })
+      ],
+      [
+        intent({ intentId: "low-p2", kind: "reaction", priority: "P2", scope: "turn" }),
+        intent({
+          intentId: "high-p1",
+          kind: "gaze",
+          priority: "P1",
+          scope: "turn",
+          createdAtMs: 90
+        })
+      ],
+      [
+        intent({ intentId: "low-p3", kind: "proactive", priority: "P3", scope: "turn" }),
+        intent({
+          intentId: "high-p2",
+          kind: "reaction",
+          priority: "P2",
+          scope: "turn",
+          createdAtMs: 90
+        })
+      ]
+    ];
+    for (const [low, high] of cases) {
       let state = submit(createInitialBehaviorPolicyState(), low);
-      state = submit(state, high, context({ nowMs: 110 }));
-      expect(activeId(state)).toBe(`high-${higher}`);
+      state = submit(state, high);
+      expect(activeId(state)).toBe(high.intentId);
     }
 
     const ambient = intent({
@@ -158,7 +220,7 @@ describe("P6-A semantic behavior policy", () => {
       expect(activeId(state)).toBe(candidate.intentId);
       state = reduceBehaviorPolicy(
         state,
-        { type: "release", intentId: candidate.intentId },
+        { type: "release-intent", intentRef: getBehaviorIntentRef(candidate) },
         baseContext
       );
     }
@@ -183,6 +245,21 @@ describe("P6-A semantic behavior policy", () => {
     expect(submit(createInitialBehaviorPolicyState(), mismatchedSession).active).toEqual({
       kind: "none"
     });
+
+    const activeSession = intent({
+      intentId: "active-session",
+      kind: "gaze",
+      priority: "P0",
+      scope: "session"
+    });
+    const activeState = submit(createInitialBehaviorPolicyState(), activeSession);
+    expect(
+      reduceBehaviorPolicy(
+        activeState,
+        { type: "clock-tick", intentRef: getBehaviorIntentRef(activeSession) },
+        context({ sessionId: "session-b", nowMs: 120 })
+      ).active
+    ).toEqual({ kind: "none" });
   });
 
   it("requires finite, non-negative TTL values with expiry after creation", () => {
@@ -192,7 +269,9 @@ describe("P6-A semantic behavior policy", () => {
     for (const timing of [
       { createdAtMs: Number.NaN, expiresAtMs: 500 },
       { createdAtMs: Number.POSITIVE_INFINITY, expiresAtMs: 500 },
+      { createdAtMs: Number.NEGATIVE_INFINITY, expiresAtMs: 500 },
       { createdAtMs: -1, expiresAtMs: 500 },
+      { createdAtMs: 500, expiresAtMs: Number.POSITIVE_INFINITY },
       { createdAtMs: 500, expiresAtMs: 500 },
       { createdAtMs: 500, expiresAtMs: 400 }
     ]) {
@@ -219,14 +298,14 @@ describe("P6-A semantic behavior policy", () => {
       kind: "gaze",
       priority: "P0",
       scope: "turn",
-      createdAtMs: 110
+      createdAtMs: 90
     });
     let state = submit(createInitialBehaviorPolicyState(), ambient);
-    state = submit(state, user, context({ nowMs: 110 }));
+    state = submit(state, user);
     expect(activeId(state)).toBe("user");
     state = reduceBehaviorPolicy(
       state,
-      { type: "clock-tick", nowMs: 500 },
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(user) },
       context({ nowMs: 500 })
     );
     expect(state.active).toEqual({ kind: "none" });
@@ -246,7 +325,7 @@ describe("P6-A semantic behavior policy", () => {
     expect(activeId(state)).toBe("task");
     state = reduceBehaviorPolicy(
       state,
-      { type: "clock-tick", nowMs: 500 },
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(task) },
       context({ nowMs: 500 })
     );
     expect(state.active).toEqual({ kind: "none" });
@@ -256,6 +335,13 @@ describe("P6-A semantic behavior policy", () => {
     const first = intent({ intentId: "first", kind: "reaction", priority: "P2", scope: "turn" });
     const newer = intent({
       intentId: "newer",
+      kind: "reaction",
+      priority: "P2",
+      scope: "turn",
+      createdAtMs: 120
+    });
+    const equalTime = intent({
+      intentId: "equal-time",
       kind: "reaction",
       priority: "P2",
       scope: "turn",
@@ -272,8 +358,40 @@ describe("P6-A semantic behavior policy", () => {
     let state = submit(createInitialBehaviorPolicyState(), first);
     state = submit(state, newer, context({ nowMs: 120 }));
     expect(activeId(state)).toBe("newer");
+    state = submit(state, equalTime, context({ nowMs: 120 }));
+    expect(activeId(state)).toBe("newer");
     state = submit(state, stale, context({ nowMs: 130 }));
     expect(activeId(state)).toBe("newer");
+  });
+
+  it("clears stale active turns before accepting a current lower-priority turn", () => {
+    const oldTurn = intent({
+      intentId: "old-turn",
+      kind: "gaze",
+      priority: "P0",
+      scope: "turn",
+      epoch: "turn-a"
+    });
+    const currentTurn = intent({
+      intentId: "current-turn",
+      kind: "proactive",
+      priority: "P3",
+      scope: "turn",
+      epoch: "turn-b"
+    });
+    let state = submit(
+      createInitialBehaviorPolicyState(),
+      oldTurn,
+      context({ presence: { ...baseContext.presence, epoch: "turn-a" } })
+    );
+    state = submit(state, currentTurn);
+    expect(activeId(state)).toBe("current-turn");
+    state = submit(
+      state,
+      oldTurn,
+      context({ presence: { ...baseContext.presence, epoch: "turn-b" } })
+    );
+    expect(activeId(state)).toBe("current-turn");
   });
 
   it("clears active turn intent when Presence epoch changes and rejects late old events", () => {
@@ -281,7 +399,7 @@ describe("P6-A semantic behavior policy", () => {
     let state = submit(createInitialBehaviorPolicyState(), oldTurn);
     state = reduceBehaviorPolicy(
       state,
-      { type: "clock-tick", nowMs: 120 },
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(oldTurn) },
       context({
         nowMs: 120,
         presence: { ...baseContext.presence, epoch: "turn-c" }
@@ -307,19 +425,19 @@ describe("P6-A semantic behavior policy", () => {
     let state = submit(createInitialBehaviorPolicyState(), candidate);
     state = reduceBehaviorPolicy(
       state,
-      { type: "clock-tick", nowMs: 199 },
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(candidate) },
       context({ nowMs: 199 })
     );
     expect(activeId(state)).toBe("short");
     state = reduceBehaviorPolicy(
       state,
-      { type: "clock-tick", nowMs: 200 },
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(candidate) },
       context({ nowMs: 200 })
     );
     expect(state.active).toEqual({ kind: "none" });
     state = reduceBehaviorPolicy(
       state,
-      { type: "clock-tick", nowMs: 300 },
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(candidate) },
       context({ nowMs: 300 })
     );
     expect(state.active).toEqual({ kind: "none" });
@@ -345,10 +463,88 @@ describe("P6-A semantic behavior policy", () => {
     state = submit(state, newIntent, context({ nowMs: 120 }));
     state = reduceBehaviorPolicy(
       state,
-      { type: "clock-tick", intentId: "old", nowMs: 150 },
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(oldIntent) },
       context({ nowMs: 150 })
     );
     expect(activeId(state)).toBe("new");
+  });
+
+  it("protects a replacement when intentId is reused", () => {
+    const first = intent({
+      intentId: "same",
+      kind: "proactive",
+      priority: "P3",
+      scope: "turn",
+      expiresAtMs: 200
+    });
+    const second = intent({
+      intentId: "same",
+      kind: "gaze",
+      priority: "P0",
+      scope: "turn",
+      createdAtMs: 150,
+      expiresAtMs: 300
+    });
+    let state = submit(createInitialBehaviorPolicyState(), first);
+    state = submit(state, second, context({ nowMs: 150 }));
+    expect(activeId(state)).toBe("same");
+
+    for (const event of [
+      { type: "cancel-intent", intentRef: getBehaviorIntentRef(first) },
+      { type: "release-intent", intentRef: getBehaviorIntentRef(first) },
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(first) }
+    ] as const) {
+      state = reduceBehaviorPolicy(state, event, context({ nowMs: 200 }));
+      expect(state.active.kind === "none" ? null : state.active.createdAtMs).toBe(150);
+    }
+
+    state = reduceBehaviorPolicy(
+      state,
+      { type: "cancel-intent", intentRef: getBehaviorIntentRef(second) },
+      context({ nowMs: 200 })
+    );
+    expect(state.active).toEqual({ kind: "none" });
+  });
+
+  it("rejects reuse of an exact intent reference for different semantics", () => {
+    const first = intent({
+      intentId: "same-pair",
+      kind: "proactive",
+      priority: "P3",
+      scope: "turn",
+      createdAtMs: 100
+    });
+    const collision = intent({
+      intentId: "same-pair",
+      kind: "gaze",
+      priority: "P0",
+      scope: "turn",
+      createdAtMs: 100
+    });
+    let state = submit(createInitialBehaviorPolicyState(), first);
+    state = submit(state, collision);
+    expect(state.active).toEqual(first);
+  });
+
+  it("supports exact cancellation and an explicit reset separately", () => {
+    const first = intent({ intentId: "first", kind: "gaze", priority: "P0", scope: "turn" });
+    const second = intent({
+      intentId: "second",
+      kind: "gaze",
+      priority: "P0",
+      scope: "turn",
+      createdAtMs: 110
+    });
+    let state = submit(createInitialBehaviorPolicyState(), first);
+    state = submit(state, second, context({ nowMs: 110 }));
+    state = reduceBehaviorPolicy(
+      state,
+      { type: "cancel-intent", intentRef: getBehaviorIntentRef(first) },
+      context({ nowMs: 110 })
+    );
+    expect(activeId(state)).toBe("second");
+    state = reduceBehaviorPolicy(state, { type: "reset" }, context({ nowMs: 110 }));
+    expect(state.active).toEqual({ kind: "none" });
   });
 
   it("fails closed for visual intent when Live2D is unavailable or unknown", () => {
@@ -368,63 +564,127 @@ describe("P6-A semantic behavior policy", () => {
     }
   });
 
+  it("treats proactive silent-attention as visual but request actions as nonvisual", () => {
+    const silent = intent({
+      intentId: "silent",
+      kind: "proactive",
+      priority: "P3",
+      scope: "decision",
+      payload: { action: "silent-attention", modality: "silent" }
+    });
+    for (const live2d of ["unknown", "unavailable"] as const) {
+      expect(
+        submit(
+          createInitialBehaviorPolicyState(),
+          silent,
+          context({
+            presence: {
+              ...baseContext.presence,
+              capabilities: { ...baseContext.presence.capabilities, live2d }
+            }
+          })
+        ).active
+      ).toEqual({ kind: "none" });
+    }
+    expect(submit(createInitialBehaviorPolicyState(), silent).active).toEqual(silent);
+
+    for (const [action, modality] of [
+      ["request-turn-text", "text"],
+      ["request-turn-speech", "speech"]
+    ] as const) {
+      const request = intent({
+        intentId: action,
+        kind: "proactive",
+        priority: "P3",
+        scope: "decision",
+        payload: { action, modality }
+      });
+      expect(
+        submit(
+          createInitialBehaviorPolicyState(),
+          request,
+          context({
+            presence: {
+              ...baseContext.presence,
+              capabilities: { ...baseContext.presence.capabilities, live2d: "unavailable" }
+            }
+          })
+        ).active
+      ).toEqual(request);
+    }
+  });
+
+  it("releases visual state on capability downgrade without clearing nonvisual structure", () => {
+    const silent = intent({
+      intentId: "silent",
+      kind: "proactive",
+      priority: "P3",
+      scope: "decision",
+      payload: { action: "silent-attention", modality: "silent" }
+    });
+    const silentState = submit(createInitialBehaviorPolicyState(), silent);
+    expect(
+      reduceBehaviorPolicy(
+        silentState,
+        { type: "clock-tick", intentRef: getBehaviorIntentRef(silent) },
+        context({
+          nowMs: 120,
+          presence: {
+            ...baseContext.presence,
+            capabilities: { ...baseContext.presence.capabilities, live2d: "unavailable" }
+          }
+        })
+      ).active
+    ).toEqual({ kind: "none" });
+
+    const request = intent({
+      intentId: "request",
+      kind: "proactive",
+      priority: "P3",
+      scope: "decision",
+      payload: { action: "request-turn-text", modality: "text" }
+    });
+    const requestState = submit(createInitialBehaviorPolicyState(), request);
+    expect(
+      reduceBehaviorPolicy(
+        requestState,
+        { type: "clock-tick", intentRef: getBehaviorIntentRef(request) },
+        context({
+          nowMs: 120,
+          presence: {
+            ...baseContext.presence,
+            capabilities: { ...baseContext.presence.capabilities, live2d: "unavailable" }
+          }
+        })
+      ).active
+    ).toEqual(request);
+  });
+
   it("admits otherwise-valid visual intent only when Live2D is available", () => {
     const visual = intent({ intentId: "visual", kind: "attention", priority: "P1", scope: "turn" });
     expect(submit(createInitialBehaviorPolicyState(), visual).active).toEqual(visual);
   });
 
-  it("releases an already-active visual intent after a Live2D capability downgrade", () => {
-    const visual = intent({ intentId: "visual", kind: "gaze", priority: "P1", scope: "turn" });
-    const active = submit(createInitialBehaviorPolicyState(), visual);
-    const downgraded = reduceBehaviorPolicy(
-      active,
-      { type: "clock-tick", nowMs: 120 },
-      context({
-        nowMs: 120,
-        presence: {
-          ...baseContext.presence,
-          capabilities: { ...baseContext.presence.capabilities, live2d: "unavailable" }
-        }
-      })
-    );
-    expect(downgraded.active).toEqual({ kind: "none" });
-  });
-
-  it("keeps proactive structure distinct from visual capability gating", () => {
-    const proactive = intent({
-      intentId: "proactive",
-      kind: "proactive",
-      priority: "P3",
-      scope: "decision"
-    });
-    const next = submit(
-      createInitialBehaviorPolicyState(),
-      proactive,
-      context({
-        presence: {
-          ...baseContext.presence,
-          capabilities: { ...baseContext.presence.capabilities, live2d: "unknown" }
-        }
-      })
-    );
-    expect(next.active).toEqual(proactive);
-  });
-
   it("releases P0 through P3 explicitly regardless of priority", () => {
-    for (const priority of ["P0", "P1", "P2", "P3"] as const) {
-      const active = intent({ intentId: priority, kind: "gaze", priority, scope: "turn" });
+    const activeIntents = [
+      intent({ intentId: "p0", kind: "gaze", priority: "P0", scope: "turn" }),
+      intent({ intentId: "p1", kind: "gaze", priority: "P1", scope: "turn" }),
+      intent({ intentId: "p2", kind: "reaction", priority: "P2", scope: "turn" }),
+      intent({ intentId: "p3", kind: "proactive", priority: "P3", scope: "turn" })
+    ];
+    for (const active of activeIntents) {
       const state = submit(createInitialBehaviorPolicyState(), active);
       const released = reduceBehaviorPolicy(
         state,
-        { type: "release", intentId: priority },
+        { type: "release-intent", intentRef: getBehaviorIntentRef(active) },
         baseContext
       );
       expect(released.active).toEqual({ kind: "none" });
     }
   });
 
-  it("keeps a newer active intent when an old release or cancellation arrives", () => {
-    const first = intent({ intentId: "first", kind: "gaze", priority: "P2", scope: "turn" });
+  it("keeps a newer active intent when old identity-bound events arrive", () => {
+    const first = intent({ intentId: "first", kind: "reaction", priority: "P2", scope: "turn" });
     const second = intent({
       intentId: "second",
       kind: "gaze",
@@ -436,20 +696,73 @@ describe("P6-A semantic behavior policy", () => {
     state = submit(state, second, context({ nowMs: 120 }));
     state = reduceBehaviorPolicy(
       state,
-      { type: "release", intentId: "first" },
+      { type: "release-intent", intentRef: getBehaviorIntentRef(first) },
       context({ nowMs: 120 })
     );
     expect(activeId(state)).toBe("second");
     state = reduceBehaviorPolicy(
       state,
-      { type: "cancel-intent", intentId: "first" },
+      { type: "cancel-intent", intentRef: getBehaviorIntentRef(first) },
       context({ nowMs: 120 })
     );
     expect(activeId(state)).toBe("second");
   });
 
-  it("fails closed on malformed identity, invalid semantic payload, and invalid context time", () => {
-    const malformed = intent({ intentId: "", kind: "gaze", priority: "P0", scope: "turn" });
+  it("uses context.nowMs as the only time authority and rejects future candidates", () => {
+    const candidate = intent({
+      intentId: "timed",
+      kind: "gaze",
+      priority: "P0",
+      scope: "turn",
+      expiresAtMs: 200
+    });
+    let state = submit(createInitialBehaviorPolicyState(), candidate);
+    const contradictoryEvent = {
+      type: "clock-tick",
+      intentRef: getBehaviorIntentRef(candidate),
+      nowMs: 100
+    } as never;
+    state = reduceBehaviorPolicy(state, contradictoryEvent, context({ nowMs: 199 }));
+    expect(activeId(state)).toBe("timed");
+    state = reduceBehaviorPolicy(state, contradictoryEvent, context({ nowMs: 200 }));
+    expect(state.active).toEqual({ kind: "none" });
+
+    const future = intent({
+      intentId: "future",
+      kind: "gaze",
+      priority: "P0",
+      scope: "turn",
+      createdAtMs: 200,
+      expiresAtMs: 300
+    });
+    expect(
+      submit(createInitialBehaviorPolicyState(), future, context({ nowMs: 100 })).active
+    ).toEqual({ kind: "none" });
+  });
+
+  it("fails closed for invalid authoritative context time", () => {
+    const active = intent({ intentId: "active", kind: "gaze", priority: "P0", scope: "turn" });
+    const state = submit(createInitialBehaviorPolicyState(), active);
+    for (const nowMs of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1]) {
+      expect(
+        reduceBehaviorPolicy(
+          state,
+          { type: "clock-tick", intentRef: getBehaviorIntentRef(active) },
+          context({ nowMs })
+        ).active
+      ).toEqual({ kind: "none" });
+    }
+  });
+
+  it("fails safely for malformed and unknown events without turning them into reset", () => {
+    const active = intent({ intentId: "active", kind: "gaze", priority: "P0", scope: "turn" });
+    const state = submit(createInitialBehaviorPolicyState(), active);
+    const malformedIdentity = intent({
+      intentId: "",
+      kind: "gaze",
+      priority: "P0",
+      scope: "turn"
+    });
     const invalidPayload = intent({
       intentId: "invalid-payload",
       kind: "gaze",
@@ -457,17 +770,50 @@ describe("P6-A semantic behavior policy", () => {
       scope: "turn",
       payload: { target: "raw-x-y", strength: 1 } as never
     });
-    expect(submit(createInitialBehaviorPolicyState(), malformed).active).toEqual({ kind: "none" });
+    expect(submit(createInitialBehaviorPolicyState(), malformedIdentity).active).toEqual({
+      kind: "none"
+    });
     expect(submit(createInitialBehaviorPolicyState(), invalidPayload).active).toEqual({
       kind: "none"
     });
-    expect(
-      submit(
-        createInitialBehaviorPolicyState(),
-        intent({ intentId: "bad-context", kind: "gaze", priority: "P0", scope: "turn" }),
-        context({ nowMs: Number.NaN })
-      ).active
-    ).toEqual({ kind: "none" });
+    const malformedEvents = [
+      { type: "cancel-intent" },
+      { type: "release-intent" },
+      { type: "clock-tick" },
+      { type: "submit-intent", intent: null },
+      { type: "unknown" },
+      null
+    ] as never[];
+    for (const event of malformedEvents) {
+      const next = reduceBehaviorPolicy(state, event, baseContext);
+      expect(next).toEqual(state);
+      expect(next).not.toBeUndefined();
+    }
+
+    const expired = reduceBehaviorPolicy(
+      submit(createInitialBehaviorPolicyState(), active),
+      { type: "unknown" } as never,
+      context({ nowMs: 500 })
+    );
+    expect(expired.active).toEqual({ kind: "none" });
+  });
+
+  it("does not allow an invalid high-priority candidate to erase valid state", () => {
+    const ambient = intent({
+      intentId: "ambient",
+      kind: "proactive",
+      priority: "P3",
+      scope: "turn"
+    });
+    const forged = intent({
+      intentId: "forged",
+      kind: "proactive",
+      priority: "P0",
+      scope: "turn",
+      createdAtMs: 90
+    });
+    const state = submit(createInitialBehaviorPolicyState(), ambient);
+    expect(submit(state, forged).active).toEqual(ambient);
   });
 
   it("is source-reviewable as a pure semantic module", async () => {
@@ -479,15 +825,26 @@ describe("P6-A semantic behavior policy", () => {
       "React",
       "window",
       "document",
+      "Date.now",
+      "performance.now",
+      "Math.random",
       "setTimeout",
       "setInterval",
       "requestAnimationFrame",
+      "BroadcastChannel",
       "Audio",
       "CompanionBus",
-      "provider",
-      "Cubism"
+      "fetch",
+      "Cubism",
+      "DeepSeek",
+      "xAI",
+      "DashScope",
+      "Mem0",
+      "provider"
     ]) {
-      expect(source.toLowerCase()).not.toMatch(new RegExp(`\\b${forbidden.toLowerCase()}\\b`));
+      const escaped = forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = forbidden === "React" ? `\\b${escaped}\\b` : escaped;
+      expect(source).not.toMatch(new RegExp(pattern, "i"));
     }
   });
 });
