@@ -200,5 +200,125 @@ describe("strong private postgres ownership", () => {
     });
     expect(allowed.invoked).toBe(true);
     expect(invoked).toBe(true);
+
+    invoked = false;
+    const stopFailed = stopPrivatePostgresIfOwned({
+      layout,
+      distribution: dist,
+      metadata,
+      processInspection: inspection(
+        `${dist.postgres} -D ${layout.data} -c cluster_name=yuvi-pg-${marker.clusterId}`,
+        started
+      ),
+      invokeStop: () => {
+        invoked = true;
+        return false;
+      }
+    });
+    expect(invoked).toBe(true);
+    expect(stopFailed.invoked).toBe(false);
+    expect(stopFailed.owned).toBe(true);
+  });
+
+  it("accepts first-start evidence without prior metadata and rejects a stale process", () => {
+    const { layout, marker, dist, started } = fixture();
+    const launchStartedAt = started;
+    const accepted = evaluatePostgresOwnership({
+      layout,
+      distribution: dist,
+      metadata: null,
+      requirePreviousMetadata: false,
+      expectedPid: 4242,
+      launchStartedAt,
+      processInspection: inspection(
+        `${dist.postgres} -D ${layout.data} -p 55432 -c cluster_name=yuvi-pg-${marker.clusterId}`,
+        started
+      )
+    });
+    expect(accepted.owned).toBe(true);
+    expect(accepted.pid).toBe(4242);
+
+    const stale = evaluatePostgresOwnership({
+      layout,
+      distribution: dist,
+      metadata: null,
+      requirePreviousMetadata: false,
+      expectedPid: 4242,
+      launchStartedAt,
+      processInspection: inspection(
+        `${dist.postgres} -D ${layout.data} -p 55432 -c cluster_name=yuvi-pg-${marker.clusterId}`,
+        new Date("2025-01-01T00:00:00.000Z")
+      )
+    });
+    expect(stale.owned).toBe(false);
+    expect(stale.reason).toMatch(/start time/i);
+  });
+
+  it("rejects first-start when postmaster.pid and inspection disagree or the executable is wrong", () => {
+    const { layout, marker, dist, started } = fixture();
+    const wrongPid = evaluatePostgresOwnership({
+      layout,
+      distribution: dist,
+      metadata: null,
+      requirePreviousMetadata: false,
+      expectedPid: 99999,
+      launchStartedAt: started,
+      processInspection: inspection(
+        `${dist.postgres} -D ${layout.data} -c cluster_name=yuvi-pg-${marker.clusterId}`,
+        started
+      )
+    });
+    expect(wrongPid.owned).toBe(false);
+
+    const unavailable = evaluatePostgresOwnership({
+      layout,
+      distribution: dist,
+      metadata: null,
+      requirePreviousMetadata: false,
+      expectedPid: 4242,
+      processInspection: {
+        status: "unavailable",
+        processId: 4242,
+        reason: "query-timeout"
+      }
+    });
+    expect(unavailable.owned).toBe(false);
+
+    const wrongExe = evaluatePostgresOwnership({
+      layout,
+      distribution: dist,
+      metadata: null,
+      requirePreviousMetadata: false,
+      expectedPid: 4242,
+      launchStartedAt: started,
+      processInspection: {
+        status: "resolved",
+        processId: 4242,
+        info: {
+          processId: 4242,
+          parentProcessId: 1,
+          commandLine: `/usr/bin/postgres -D ${layout.data} -c cluster_name=yuvi-pg-${marker.clusterId}`,
+          createdAtUtc: started,
+          executablePath: "/usr/bin/postgres"
+        }
+      }
+    });
+    expect(wrongExe.owned).toBe(false);
+  });
+
+  it("still requires previous metadata for adopt/restart", () => {
+    const { layout, marker, dist, started } = fixture();
+    const rejected = evaluatePostgresOwnership({
+      layout,
+      distribution: dist,
+      metadata: null,
+      requirePreviousMetadata: true,
+      processInspection: inspection(
+        `${dist.postgres} -D ${layout.data} -c cluster_name=yuvi-pg-${marker.clusterId}`,
+        started
+      )
+    });
+    expect(rejected.owned).toBe(false);
+    expect(rejected.reason).toMatch(/previous ownership metadata/i);
   });
 });

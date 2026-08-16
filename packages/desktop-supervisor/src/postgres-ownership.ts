@@ -39,6 +39,9 @@ export type EvaluatePostgresOwnershipInput = {
   processInspection: ProcessInspectionResult;
   metadata?: ProcessMetadata | null | undefined;
   requirePreviousMetadata?: boolean;
+  expectedPid?: number;
+  launchStartedAt?: Date | string | null;
+  launchMaxAfterMs?: number;
 };
 
 export function tokenizeCommandLine(commandLine: string): string[] {
@@ -129,6 +132,24 @@ export function creationTimesMatch(
   return Math.abs(a - b) <= toleranceMs;
 }
 
+export function processStartedDuringLaunch(
+  processStartedAt: Date | string | null | undefined,
+  launchStartedAt: Date | string,
+  maxAfterMs: number,
+  toleranceMs = CREATION_TIME_TOLERANCE_MS
+): boolean {
+  if (!processStartedAt) return false;
+  const started =
+    typeof processStartedAt === "string"
+      ? Date.parse(processStartedAt)
+      : processStartedAt.getTime();
+  const launched =
+    typeof launchStartedAt === "string" ? Date.parse(launchStartedAt) : launchStartedAt.getTime();
+  if (!Number.isFinite(started) || !Number.isFinite(launched)) return false;
+  if (!Number.isFinite(maxAfterMs) || maxAfterMs < 0) return false;
+  return started >= launched - toleranceMs && started <= launched + maxAfterMs + toleranceMs;
+}
+
 export function executablesMatch(actual: string | null | undefined, expected: string): boolean {
   if (!actual) return false;
   return pathsEqual(canonicalPath(actual), canonicalPath(expected));
@@ -200,6 +221,9 @@ export function evaluatePostgresOwnership(
     return fail(`process is not inspectable (${input.processInspection.status})`);
   }
   const info = input.processInspection.info;
+  if (input.expectedPid != null && info.processId !== input.expectedPid) {
+    return fail("inspected process is not the nominated postmaster PID");
+  }
   const argv = parsePostgresArgv(info.commandLine);
   const expectedName = expectedClusterName(marker.clusterId);
   const expectedExe = input.distribution.postgres;
@@ -213,6 +237,20 @@ export function evaluatePostgresOwnership(
   }
   if (argv.clusterName !== expectedName) {
     return fail("cluster_name does not match yuvi-pg-<clusterId>");
+  }
+
+  if (input.launchStartedAt) {
+    const maxAfterMs = input.launchMaxAfterMs ?? 30_000;
+    if (
+      !processStartedDuringLaunch(
+        info.createdAtUtc,
+        input.launchStartedAt,
+        maxAfterMs,
+        CREATION_TIME_TOLERANCE_MS
+      )
+    ) {
+      return fail("process start time is not plausible for this launch");
+    }
   }
 
   const requireMetadata = input.requirePreviousMetadata !== false;
@@ -304,11 +342,11 @@ export function stopPrivatePostgresIfOwned(
     };
   }
   const invoke = input.invokeStop ?? defaultInvokePgCtlStop;
-  invoke({ layout: input.layout, distribution: input.distribution });
+  const stopped = invoke({ layout: input.layout, distribution: input.distribution });
   return {
-    invoked: true,
+    invoked: stopped,
     owned: true,
-    reason: evidence.reason,
+    reason: stopped ? evidence.reason : "fenced PostgreSQL stop did not succeed",
     pid: evidence.pid
   };
 }

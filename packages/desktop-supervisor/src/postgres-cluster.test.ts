@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,12 +16,25 @@ import {
   INITDB_REASON_MAX_CHARS,
   INITDB_STDERR_TAIL_MAX_CHARS,
   INITDB_STDOUT_TAIL_MAX_CHARS,
+  PG_CTL_START_WAIT_SECONDS,
+  assertPrivatePostgresPort,
+  assertYuviClusterId,
   buildInitdbFailureEvidence,
   buildPostgresStartCommand,
+  buildWindowsPgCtlStartArguments,
   classifyInitdbSpawnResult,
+  classifyWindowsPgCtlChildExit,
+  ensureYuviDatabase,
   initializePrivateCluster,
   inspectExistingCluster,
-  writeLocalOnlyConfig
+  invokeWindowsPgCtlStart,
+  launchWindowsPrivatePostgres,
+  launcherProcessWasNeverCreated,
+  reconcileWindowsPrivatePostgresLaunch,
+  runWindowsPgCtlChild,
+  waitForPostmasterCandidate,
+  writeLocalOnlyConfig,
+  type WindowsPgCtlChildHandle
 } from "./postgres-cluster.js";
 import { generatePostgresPassword, redactSecretText } from "./postgres-secret.js";
 import type { PostgresDistribution } from "./postgres-distribution.js";
@@ -143,6 +157,750 @@ describe("private postgres cluster safety", () => {
     expect(command.args.join(" ")).not.toContain("postgres://");
     expect(command.env["PGPASSWORD"]).toBeUndefined();
     expect(command.commandMarker).toBe("yuvi-pg-abc-cluster");
+  });
+
+  it("builds a fenced Windows pg_ctl start command without PATH or secrets", () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-")));
+    tempDirs.push(layout.root);
+    const clusterId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const args = buildWindowsPgCtlStartArguments({
+      layout,
+      port: 55432,
+      clusterId
+    });
+    expect(args).toEqual([
+      "start",
+      "-w",
+      "-t",
+      String(PG_CTL_START_WAIT_SECONDS),
+      "-D",
+      layout.data,
+      "-l",
+      layout.logFile,
+      "-o",
+      "-p 55432 -c cluster_name=yuvi-pg-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    ]);
+    const joined = args.join(" ");
+    expect(joined).not.toMatch(/(?:^|\s)pg_ctl(?:\s|$)/);
+    expect(joined).not.toContain("PGPASSWORD");
+    expect(joined).not.toContain("password");
+    expect(args[5]).toBe(layout.data);
+    expect(layout.logFile.startsWith(layout.root)).toBe(true);
+  });
+
+  it("rejects unsafe cluster ids and ports before interpolating -o", () => {
+    expect(() => assertPrivatePostgresPort(0)).toThrow(/TCP port/);
+    expect(() => assertPrivatePostgresPort(65536)).toThrow(/TCP port/);
+    expect(() => assertYuviClusterId('id"quoted')).toThrow(/cluster id/);
+    expect(() => assertYuviClusterId("id with space")).toThrow(/cluster id/);
+    expect(() => assertYuviClusterId("id&more")).toThrow(/cluster id/);
+    expect(() => assertYuviClusterId("id|more")).toThrow(/cluster id/);
+    expect(() => assertYuviClusterId("id\nmore")).toThrow(/cluster id/);
+    expect(assertYuviClusterId("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")).toBe(
+      "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    );
+  });
+
+  it("invokes distribution.pgCtl with shell disabled and never publishes the launcher pid", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-run-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    const marker = createClusterMarker(layout);
+    writeClusterMarker(layout, marker);
+    fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+    const distribution: import("./postgres-distribution.js").PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const captured: {
+      command: string;
+      args: readonly string[];
+      options?: { shell?: boolean; windowsHide?: boolean };
+    } = { command: "", args: [] };
+    const fakePgCtl: import("./postgres-cluster.js").WindowsPgCtlSpawnAsync = async (
+      command,
+      args,
+      options
+    ) => {
+      captured.command = command;
+      captured.args = args;
+      captured.options = options;
+      return { ok: true, kind: "SUCCESS", status: 0, signal: null, stdout: "", stderr: "" };
+    };
+    const started = await invokeWindowsPgCtlStart({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: fakePgCtl
+    });
+    expect(started.ok).toBe(true);
+    expect(captured.command).toBe(distribution.pgCtl);
+    expect(captured.command).not.toBe("pg_ctl");
+    expect(captured.options?.shell).toBe(false);
+    expect(captured.options?.windowsHide).toBe(true);
+    expect(captured.args).toContain("-w");
+    expect(captured.args).toContain("-D");
+    fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+    const launched = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: fakePgCtl,
+      inspectProcess: (processId) => ({
+        status: "resolved",
+        processId,
+        info: {
+          processId,
+          parentProcessId: 1,
+          commandLine: `${distribution.postgres} -D ${layout.data} -p 55432 -c cluster_name=yuvi-pg-${marker.clusterId}`,
+          createdAtUtc: new Date(),
+          executablePath: distribution.postgres
+        }
+      })
+    });
+    expect(launched.outcome).toBe("started");
+    if (launched.outcome === "started") {
+      expect(launched.pid).toBe(4242);
+    }
+
+    fs.rmSync(path.join(layout.data, "postmaster.pid"), { force: true });
+    const missingAfterDelete = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: fakePgCtl,
+      settleTimeoutMs: 15,
+      settleIntervalMs: 5,
+      sleepImpl: async () => undefined,
+      nowMs: (() => {
+        let t = 0;
+        return () => {
+          t += 15;
+          return t;
+        };
+      })(),
+      inspectProcess: () => {
+        throw new Error("must not inspect when postmaster.pid is absent");
+      }
+    });
+    expect(missingAfterDelete.outcome).toBe("uncertain");
+    if (missingAfterDelete.outcome === "uncertain") {
+      expect(missingAfterDelete.code).toBe("POSTGRES_POSTMASTER_IDENTITY_UNPROVEN");
+    }
+  });
+
+  it("classifies async pg_ctl outcomes without blocking the event loop", async () => {
+    expect(classifyWindowsPgCtlChildExit({ status: 0, signal: null }).kind).toBe("SUCCESS");
+    expect(classifyWindowsPgCtlChildExit({ status: 1, signal: null, stderr: "failed" }).kind).toBe(
+      "EXIT_NONZERO"
+    );
+    expect(classifyWindowsPgCtlChildExit({ status: null, signal: null, timedOut: true }).kind).toBe(
+      "TIMEOUT"
+    );
+    expect(
+      classifyWindowsPgCtlChildExit({
+        status: null,
+        signal: null,
+        error: new Error("ENOENT")
+      }).kind
+    ).toBe("PRE_SPAWN_ERROR");
+    expect(
+      classifyWindowsPgCtlChildExit({
+        status: null,
+        signal: null,
+        error: new Error("kill failed"),
+        spawned: true
+      }).kind
+    ).toBe("POST_SPAWN_ERROR");
+    expect(classifyWindowsPgCtlChildExit({ status: null, signal: "SIGTERM" }).kind).toBe(
+      "SIGNALLED"
+    );
+
+    let ticks = 0;
+    const ticker = setInterval(() => {
+      ticks += 1;
+    }, 8);
+    const result = await runWindowsPgCtlChild(
+      process.execPath,
+      ["-e", "setTimeout(() => {}, 5000)"],
+      {
+        windowsHide: true,
+        shell: false,
+        timeoutMs: 40
+      }
+    );
+    clearInterval(ticker);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.kind).toBe("TIMEOUT");
+    expect(ticks).toBeGreaterThan(0);
+
+    const nonzero = await runWindowsPgCtlChild(process.execPath, ["-e", "process.exit(3)"], {
+      windowsHide: true,
+      shell: false,
+      timeoutMs: 5_000
+    });
+    expect(nonzero.ok).toBe(false);
+    if (!nonzero.ok) expect(nonzero.kind).toBe("EXIT_NONZERO");
+
+    const success = await runWindowsPgCtlChild(process.execPath, ["-e", "process.exit(0)"], {
+      windowsHide: true,
+      shell: false,
+      timeoutMs: 5_000
+    });
+    expect(success.ok).toBe(true);
+
+    const missing = await runWindowsPgCtlChild(path.join(os.tmpdir(), "yuvi-missing-pg-ctl"), [], {
+      windowsHide: true,
+      shell: false,
+      timeoutMs: 1_000
+    });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.kind).toBe("PRE_SPAWN_ERROR");
+    expect(launcherProcessWasNeverCreated(missing)).toBe(true);
+  });
+
+  it("reconciles failed and successful pg_ctl launches against postmaster.pid", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-rec-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    const marker = createClusterMarker(layout);
+    writeClusterMarker(layout, marker);
+    fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+    const distribution: import("./postgres-distribution.js").PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const started = new Date();
+    const inspectOwned = (processId: number) => ({
+      status: "resolved" as const,
+      processId,
+      info: {
+        processId,
+        parentProcessId: 1,
+        commandLine: `${distribution.postgres} -D ${layout.data} -p 55432 -c cluster_name=yuvi-pg-${marker.clusterId}`,
+        createdAtUtc: started,
+        executablePath: distribution.postgres
+      }
+    });
+    const failLauncher: import("./postgres-cluster.js").WindowsPgCtlSpawnAsync = async () => ({
+      ok: false,
+      kind: "EXIT_NONZERO",
+      status: 1,
+      signal: null,
+      stdout: "",
+      stderr: "pg_ctl failed",
+      detail: "pg_ctl failed"
+    });
+
+    const noPid = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: failLauncher,
+      settleTimeoutMs: 15,
+      settleIntervalMs: 5,
+      sleepImpl: async () => undefined,
+      nowMs: (() => {
+        let t = 0;
+        return () => {
+          t += 15;
+          return t;
+        };
+      })(),
+      inspectProcess: () => {
+        throw new Error("must not inspect when postmaster.pid is absent");
+      }
+    });
+    expect(noPid.outcome).toBe("uncertain");
+    if (noPid.outcome === "uncertain") {
+      expect(noPid.code).toBe("POSTGRES_START_IDENTITY_UNCERTAIN");
+    }
+    expect(
+      reconcileWindowsPrivatePostgresLaunch({
+        layout,
+        distribution,
+        inspectProcess: () => {
+          throw new Error("absent");
+        },
+        launchStartedAt: started
+      }).disposition
+    ).toBe("missing");
+
+    fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+    const ownedAfterFail = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: failLauncher,
+      now: () => started,
+      inspectProcess: inspectOwned
+    });
+    expect(ownedAfterFail.outcome).toBe("owned-after-failure");
+    if (ownedAfterFail.outcome === "owned-after-failure") {
+      expect(ownedAfterFail.pid).toBe(4242);
+    }
+
+    const uncertain = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: failLauncher,
+      now: () => started,
+      inspectProcess: () => ({
+        status: "unavailable",
+        processId: 4242,
+        reason: "query-timeout"
+      })
+    });
+    expect(uncertain.outcome).toBe("uncertain");
+
+    const successUnproven = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: async () => ({
+        ok: true,
+        kind: "SUCCESS",
+        status: 0,
+        signal: null,
+        stdout: "",
+        stderr: ""
+      }),
+      now: () => started,
+      inspectProcess: () => ({
+        status: "resolved",
+        processId: 4242,
+        info: {
+          processId: 4242,
+          parentProcessId: 1,
+          commandLine: `/usr/bin/postgres -D ${layout.data} -c cluster_name=yuvi-pg-${marker.clusterId}`,
+          createdAtUtc: started,
+          executablePath: "/usr/bin/postgres"
+        }
+      })
+    });
+    expect(successUnproven.outcome).toBe("uncertain");
+  });
+
+  it("settles a delayed postmaster.pid after an ambiguous launcher failure", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-delay-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    const marker = createClusterMarker(layout);
+    writeClusterMarker(layout, marker);
+    fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+    const distribution: import("./postgres-distribution.js").PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const started = new Date();
+    let reads = 0;
+    let clock = 0;
+    const delayed = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      now: () => started,
+      settleTimeoutMs: 20,
+      settleIntervalMs: 5,
+      sleepImpl: async () => {
+        clock += 5;
+      },
+      nowMs: () => clock,
+      readPid: () => {
+        reads += 1;
+        return reads < 3 ? null : 4242;
+      },
+      spawnImpl: async () => ({
+        ok: false,
+        kind: "TIMEOUT",
+        status: null,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        detail: "timed out"
+      }),
+      inspectProcess: (processId) => ({
+        status: "resolved",
+        processId,
+        info: {
+          processId,
+          parentProcessId: 1,
+          commandLine: `${distribution.postgres} -D ${layout.data} -p 55432 -c cluster_name=yuvi-pg-${marker.clusterId}`,
+          createdAtUtc: started,
+          executablePath: distribution.postgres
+        }
+      })
+    });
+    expect(reads).toBeGreaterThan(1);
+    expect(delayed.outcome).toBe("owned-after-failure");
+    if (delayed.outcome === "owned-after-failure") expect(delayed.pid).toBe(4242);
+
+    const unprovenDelayed = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      now: () => started,
+      settleTimeoutMs: 20,
+      settleIntervalMs: 5,
+      sleepImpl: async () => {
+        clock += 5;
+      },
+      nowMs: () => clock,
+      readPid: (() => {
+        let n = 0;
+        return () => {
+          n += 1;
+          return n < 2 ? null : 4242;
+        };
+      })(),
+      spawnImpl: async () => ({
+        ok: false,
+        kind: "EXIT_NONZERO",
+        status: 1,
+        signal: null,
+        stdout: "",
+        stderr: "failed",
+        detail: "failed"
+      }),
+      inspectProcess: () => ({
+        status: "unavailable",
+        processId: 4242,
+        reason: "query-timeout"
+      })
+    });
+    expect(unprovenDelayed.outcome).toBe("uncertain");
+  });
+
+  it("halts when an ambiguous launcher leaves no postmaster.pid after the settle window", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-miss-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    const marker = createClusterMarker(layout);
+    writeClusterMarker(layout, marker);
+    fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+    const distribution: import("./postgres-distribution.js").PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const kinds = ["TIMEOUT", "EXIT_NONZERO", "SIGNALLED"] as const;
+    for (const kind of kinds) {
+      const launched = await launchWindowsPrivatePostgres({
+        layout,
+        distribution,
+        port: 55432,
+        clusterId: marker.clusterId,
+        settleTimeoutMs: 15,
+        settleIntervalMs: 5,
+        sleepImpl: async () => undefined,
+        nowMs: (() => {
+          let t = 0;
+          return () => {
+            t += 15;
+            return t;
+          };
+        })(),
+        spawnImpl: async () =>
+          kind === "EXIT_NONZERO"
+            ? {
+                ok: false,
+                kind,
+                status: 1,
+                signal: null,
+                stdout: "",
+                stderr: "failed",
+                detail: "failed"
+              }
+            : {
+                ok: false,
+                kind,
+                status: null,
+                signal: kind === "SIGNALLED" ? "SIGTERM" : null,
+                stdout: "",
+                stderr: "",
+                detail: kind.toLowerCase()
+              },
+        inspectProcess: () => {
+          throw new Error(`${kind} must not inspect a missing PID`);
+        }
+      });
+      expect(launched.outcome, kind).toBe("uncertain");
+      if (launched.outcome === "uncertain") {
+        expect(launched.code).toBe("POSTGRES_START_IDENTITY_UNCERTAIN");
+      }
+    }
+
+    const successMissing = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      settleTimeoutMs: 15,
+      settleIntervalMs: 5,
+      sleepImpl: async () => undefined,
+      nowMs: (() => {
+        let t = 0;
+        return () => {
+          t += 15;
+          return t;
+        };
+      })(),
+      spawnImpl: async () => ({
+        ok: true,
+        kind: "SUCCESS",
+        status: 0,
+        signal: null,
+        stdout: "",
+        stderr: ""
+      }),
+      inspectProcess: () => {
+        throw new Error("success-missing must not inspect");
+      }
+    });
+    expect(successMissing.outcome).toBe("uncertain");
+    if (successMissing.outcome === "uncertain") {
+      expect(successMissing.code).toBe("POSTGRES_POSTMASTER_IDENTITY_UNPROVEN");
+    }
+
+    const spawnError = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      spawnImpl: async () => ({
+        ok: false,
+        kind: "PRE_SPAWN_ERROR",
+        status: null,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        detail: "ENOENT"
+      }),
+      inspectProcess: () => {
+        throw new Error("spawn error must not inspect when no candidate exists");
+      }
+    });
+    expect(spawnError.outcome).toBe("quiescent-failure");
+    expect(launcherProcessWasNeverCreated(spawnError.launcher)).toBe(true);
+    expect(
+      await waitForPostmasterCandidate({ dataDirectory: layout.data, timeoutMs: 0 })
+    ).toBeNull();
+  });
+
+  it("classifies ChildProcess error before spawn as pre-spawn and spawn-then-error as post-spawn", async () => {
+    function fakeChild(sequence: Array<"spawn" | "error">, error = new Error("boom")) {
+      const emitter = new EventEmitter() as EventEmitter & WindowsPgCtlChildHandle;
+      emitter.stdout = null;
+      emitter.stderr = null;
+      emitter.kill = () => undefined;
+      queueMicrotask(() => {
+        for (const event of sequence) {
+          if (event === "spawn") emitter.emit("spawn");
+          else emitter.emit("error", error);
+        }
+      });
+      return emitter;
+    }
+
+    const preSpawn = await runWindowsPgCtlChild("pg_ctl", ["start"], {
+      windowsHide: true,
+      shell: false,
+      timeoutMs: 1_000,
+      createChild: () => fakeChild(["error"])
+    });
+    expect(preSpawn.ok).toBe(false);
+    if (!preSpawn.ok) expect(preSpawn.kind).toBe("PRE_SPAWN_ERROR");
+    expect(launcherProcessWasNeverCreated(preSpawn)).toBe(true);
+
+    const postSpawn = await runWindowsPgCtlChild("pg_ctl", ["start"], {
+      windowsHide: true,
+      shell: false,
+      timeoutMs: 1_000,
+      createChild: () => fakeChild(["spawn", "error"])
+    });
+    expect(postSpawn.ok).toBe(false);
+    if (!postSpawn.ok) expect(postSpawn.kind).toBe("POST_SPAWN_ERROR");
+    expect(launcherProcessWasNeverCreated(postSpawn)).toBe(false);
+
+    const syncThrow = await runWindowsPgCtlChild("pg_ctl", ["start"], {
+      windowsHide: true,
+      shell: false,
+      timeoutMs: 1_000,
+      createChild: () => {
+        throw new Error("create failed");
+      }
+    });
+    expect(syncThrow.ok).toBe(false);
+    if (!syncThrow.ok) expect(syncThrow.kind).toBe("PRE_SPAWN_ERROR");
+    expect(launcherProcessWasNeverCreated(syncThrow)).toBe(true);
+
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-post-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    const marker = createClusterMarker(layout);
+    writeClusterMarker(layout, marker);
+    fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+    const distribution: import("./postgres-distribution.js").PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const started = new Date();
+    const missingAfterPostSpawn = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      now: () => started,
+      settleTimeoutMs: 15,
+      settleIntervalMs: 5,
+      sleepImpl: async () => undefined,
+      nowMs: (() => {
+        let t = 0;
+        return () => {
+          t += 15;
+          return t;
+        };
+      })(),
+      spawnImpl: async () => postSpawn,
+      inspectProcess: () => {
+        throw new Error("post-spawn missing PID must not inspect");
+      }
+    });
+    expect(missingAfterPostSpawn.outcome).toBe("uncertain");
+    if (missingAfterPostSpawn.outcome === "uncertain") {
+      expect(missingAfterPostSpawn.code).toBe("POSTGRES_START_IDENTITY_UNCERTAIN");
+    }
+    expect(launcherProcessWasNeverCreated(missingAfterPostSpawn.launcher)).toBe(false);
+
+    let reads = 0;
+    let clock = 0;
+    const delayedOwned = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      now: () => started,
+      settleTimeoutMs: 20,
+      settleIntervalMs: 5,
+      sleepImpl: async () => {
+        clock += 5;
+      },
+      nowMs: () => clock,
+      readPid: () => {
+        reads += 1;
+        return reads < 3 ? null : 4242;
+      },
+      spawnImpl: async () => postSpawn,
+      inspectProcess: (processId) => ({
+        status: "resolved",
+        processId,
+        info: {
+          processId,
+          parentProcessId: 1,
+          commandLine: `${distribution.postgres} -D ${layout.data} -p 55432 -c cluster_name=yuvi-pg-${marker.clusterId}`,
+          createdAtUtc: started,
+          executablePath: distribution.postgres
+        }
+      })
+    });
+    expect(delayedOwned.outcome).toBe("owned-after-failure");
+    expect(launcherProcessWasNeverCreated(delayedOwned.launcher)).toBe(false);
+  });
+
+  it("treats SQLSTATE 42P04 as idempotent yuvi database creation", async () => {
+    const distribution: import("./postgres-distribution.js").PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const created = await ensureYuviDatabase({
+      distribution,
+      port: 55432,
+      password: "secret",
+      execute: async () => ({ ok: true, output: "", sqlState: null })
+    });
+    expect(created).toEqual({
+      ok: true,
+      created: true,
+      alreadyExists: false,
+      sqlState: null
+    });
+    const existing = await ensureYuviDatabase({
+      distribution,
+      port: 55432,
+      password: "secret",
+      execute: async () => ({ ok: false, output: "duplicate_database", sqlState: "42P04" })
+    });
+    expect(existing.ok).toBe(true);
+    if (existing.ok) {
+      expect(existing.alreadyExists).toBe(true);
+      expect(existing.sqlState).toBe("42P04");
+    }
+    const failed = await ensureYuviDatabase({
+      distribution,
+      port: 55432,
+      password: "secret",
+      execute: async () => ({ ok: false, output: "insufficient_privilege", sqlState: "42501" })
+    });
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.sqlState).toBe("42501");
+    const auth = await ensureYuviDatabase({
+      distribution,
+      port: 55432,
+      password: "secret",
+      execute: async () => ({ ok: false, output: "password authentication failed", sqlState: null })
+    });
+    expect(auth.ok).toBe(false);
   });
 });
 

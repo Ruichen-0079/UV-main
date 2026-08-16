@@ -5,7 +5,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { canonicalPath, pathsEqual } from "./paths.js";
 import type { PostgresDistribution } from "./postgres-distribution.js";
 import {
@@ -29,10 +29,24 @@ import {
   type YuviClusterMarker
 } from "./postgres-layout.js";
 import { redactSecretText } from "./postgres-secret.js";
+import {
+  evaluatePostgresOwnership,
+  expectedClusterName,
+  readPostmasterPid,
+  type PostgresOwnershipEvidence
+} from "./postgres-ownership.js";
+import type { ProcessInspectionResult } from "./types.js";
 
 export const INITDB_REASON_MAX_CHARS = 180;
 export const INITDB_STDOUT_TAIL_MAX_CHARS = 2048;
 export const INITDB_STDERR_TAIL_MAX_CHARS = 4096;
+export const PG_CTL_START_WAIT_SECONDS = 30;
+export const PG_CTL_LAUNCH_TIMEOUT_MS = (PG_CTL_START_WAIT_SECONDS + 10) * 1000;
+export const PG_CTL_OUTPUT_MAX_CHARS = 2048;
+export const POSTMASTER_SETTLE_WINDOW_MS = 1_500;
+export const POSTMASTER_SETTLE_INTERVAL_MS = 50;
+export const DUPLICATE_DATABASE_SQLSTATE = "42P04";
+export const STANDARD_POSTGRES_DATABASE = "postgres";
 
 export type ClusterPrepareResult =
   | {
@@ -266,6 +280,505 @@ export function buildPostgresStartCommand(
   };
 }
 
+export function assertPrivatePostgresPort(port: number): number {
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error("Private PostgreSQL port is not a valid TCP port.");
+  }
+  return port;
+}
+
+export function assertYuviClusterId(clusterId: string): string {
+  const trimmed = clusterId.trim();
+  if (!/^[0-9a-fA-F-]{8,64}$/.test(trimmed)) {
+    throw new Error("Private PostgreSQL cluster id is not a safe internal marker.");
+  }
+  return trimmed;
+}
+
+export function buildWindowsPgCtlStartArguments(input: {
+  layout: PostgresLayout;
+  port: number;
+  clusterId: string;
+}): string[] {
+  const port = assertPrivatePostgresPort(input.port);
+  const clusterId = assertYuviClusterId(input.clusterId);
+  return [
+    "start",
+    "-w",
+    "-t",
+    String(PG_CTL_START_WAIT_SECONDS),
+    "-D",
+    input.layout.data,
+    "-l",
+    input.layout.logFile,
+    "-o",
+    `-p ${port} -c cluster_name=${expectedClusterName(clusterId)}`
+  ];
+}
+
+export type WindowsPgCtlOutcomeKind =
+  | "SUCCESS"
+  | "EXIT_NONZERO"
+  | "TIMEOUT"
+  | "PRE_SPAWN_ERROR"
+  | "POST_SPAWN_ERROR"
+  | "SIGNALLED";
+
+export type WindowsPgCtlChildHandle = {
+  stdout?: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown } | null;
+  stderr?: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown } | null;
+  on(event: "error", listener: (error: Error) => void): unknown;
+  on(
+    event: "exit",
+    listener: (status: number | null, signal: NodeJS.Signals | string | null) => unknown
+  ): unknown;
+  once(event: "spawn", listener: () => void): unknown;
+  kill(): void;
+};
+
+export type WindowsPgCtlSpawnOptions = {
+  windowsHide: boolean;
+  shell: boolean;
+  timeoutMs: number;
+  createChild?: (
+    command: string,
+    args: readonly string[],
+    options: { windowsHide: boolean; shell: boolean; stdio: ["ignore", "pipe", "pipe"] }
+  ) => WindowsPgCtlChildHandle;
+};
+
+export type WindowsPgCtlStartResult =
+  | {
+      ok: true;
+      kind: "SUCCESS";
+      status: 0;
+      signal: null;
+      stdout: string;
+      stderr: string;
+    }
+  | {
+      ok: false;
+      kind: Exclude<WindowsPgCtlOutcomeKind, "SUCCESS">;
+      status: number | null;
+      signal: string | null;
+      stdout: string;
+      stderr: string;
+      detail: string;
+    };
+
+export type WindowsPgCtlSpawnAsync = (
+  command: string,
+  args: readonly string[],
+  options: WindowsPgCtlSpawnOptions
+) => Promise<WindowsPgCtlStartResult>;
+
+/** @deprecated Use WindowsPgCtlSpawnAsync. Kept as an alias for hook typing. */
+export type WindowsPgCtlSpawn = WindowsPgCtlSpawnAsync;
+
+export function boundPgCtlOutput(text: string, maxChars = PG_CTL_OUTPUT_MAX_CHARS): string {
+  if (text.length <= maxChars) return text;
+  return text.slice(-maxChars);
+}
+
+export function classifyWindowsPgCtlChildExit(input: {
+  status: number | null;
+  signal: NodeJS.Signals | string | null;
+  error?: Error | undefined;
+  timedOut?: boolean | undefined;
+  spawned?: boolean | undefined;
+  stdout?: string | undefined;
+  stderr?: string | undefined;
+}): WindowsPgCtlStartResult {
+  const stdout = boundPgCtlOutput(input.stdout ?? "");
+  const stderr = boundPgCtlOutput(input.stderr ?? "");
+  const output = `${stdout}${stderr}`.trim();
+  if (input.timedOut) {
+    return {
+      ok: false,
+      kind: "TIMEOUT",
+      status: input.status,
+      signal: typeof input.signal === "string" ? input.signal : null,
+      stdout,
+      stderr,
+      detail: output || "pg_ctl start timed out"
+    };
+  }
+  if (input.error) {
+    return {
+      ok: false,
+      kind: input.spawned ? "POST_SPAWN_ERROR" : "PRE_SPAWN_ERROR",
+      status: input.status,
+      signal: typeof input.signal === "string" ? input.signal : null,
+      stdout,
+      stderr,
+      detail: output || input.error.message || "pg_ctl spawn failed"
+    };
+  }
+  if (typeof input.signal === "string" && input.signal) {
+    return {
+      ok: false,
+      kind: "SIGNALLED",
+      status: input.status,
+      signal: input.signal,
+      stdout,
+      stderr,
+      detail: output || input.signal
+    };
+  }
+  if (input.status === 0) {
+    return { ok: true, kind: "SUCCESS", status: 0, signal: null, stdout, stderr };
+  }
+  return {
+    ok: false,
+    kind: "EXIT_NONZERO",
+    status: input.status,
+    signal: null,
+    stdout,
+    stderr,
+    detail: output || `pg_ctl exited ${input.status}`
+  };
+}
+
+export function runWindowsPgCtlChild(
+  command: string,
+  args: readonly string[],
+  options: WindowsPgCtlSpawnOptions
+): Promise<WindowsPgCtlStartResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    let stdout = "";
+    let stderr = "";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (result: WindowsPgCtlStartResult) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(result);
+    };
+    let spawned = false;
+    const createChild =
+      options.createChild ??
+      ((file, childArgs, childOptions) =>
+        spawn(file, [...childArgs], childOptions) as WindowsPgCtlChildHandle);
+    let child: WindowsPgCtlChildHandle;
+    try {
+      child = createChild(command, args, {
+        windowsHide: options.windowsHide,
+        shell: options.shell,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+    } catch (error) {
+      finish(
+        classifyWindowsPgCtlChildExit({
+          status: null,
+          signal: null,
+          error: error instanceof Error ? error : new Error(String(error)),
+          spawned: false
+        })
+      );
+      return;
+    }
+    child.once("spawn", () => {
+      spawned = true;
+    });
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      stdout = boundPgCtlOutput(`${stdout}${String(chunk)}`);
+    });
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderr = boundPgCtlOutput(`${stderr}${String(chunk)}`);
+    });
+    child.on("error", (error) => {
+      finish(
+        classifyWindowsPgCtlChildExit({
+          status: null,
+          signal: null,
+          error,
+          timedOut,
+          spawned,
+          stdout,
+          stderr
+        })
+      );
+    });
+    child.on("exit", (status, signal) => {
+      finish(
+        classifyWindowsPgCtlChildExit({
+          status,
+          signal,
+          timedOut,
+          spawned,
+          stdout,
+          stderr
+        })
+      );
+    });
+    timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill();
+      } catch {
+        // The launcher only is signalled; the postmaster is not our child.
+      }
+      finish(
+        classifyWindowsPgCtlChildExit({
+          status: null,
+          signal: null,
+          timedOut: true,
+          stdout,
+          stderr
+        })
+      );
+    }, options.timeoutMs);
+  });
+}
+
+export async function invokeWindowsPgCtlStart(input: {
+  layout: PostgresLayout;
+  distribution: PostgresDistribution;
+  port: number;
+  clusterId: string;
+  spawnImpl?: WindowsPgCtlSpawnAsync;
+}): Promise<WindowsPgCtlStartResult> {
+  const args = buildWindowsPgCtlStartArguments(input);
+  const run = input.spawnImpl ?? runWindowsPgCtlChild;
+  return run(input.distribution.pgCtl, args, {
+    windowsHide: true,
+    shell: false,
+    timeoutMs: PG_CTL_LAUNCH_TIMEOUT_MS
+  });
+}
+
+export type WindowsLaunchReconciliation =
+  | {
+      disposition: "owned";
+      pid: number;
+      processStartedAtUtc: string;
+      evidence: PostgresOwnershipEvidence;
+    }
+  | {
+      disposition: "quiescent";
+    }
+  | {
+      disposition: "missing";
+    }
+  | {
+      disposition: "uncertain";
+      code: "POSTGRES_START_IDENTITY_UNCERTAIN";
+      message: string;
+      nominatedPid: number | null;
+    };
+
+export function reconcileWindowsPrivatePostgresLaunch(input: {
+  layout: PostgresLayout;
+  distribution: PostgresDistribution;
+  inspectProcess: (processId: number) => ProcessInspectionResult;
+  launchStartedAt: Date;
+  readPid?: (dataDirectory: string) => number | null;
+}): WindowsLaunchReconciliation {
+  const readPid = input.readPid ?? readPostmasterPid;
+  const pid = readPid(input.layout.data);
+  if (pid == null) {
+    return { disposition: "missing" };
+  }
+  const inspection = input.inspectProcess(pid);
+  if (inspection.status === "not-running") {
+    return { disposition: "quiescent" };
+  }
+  const evidence = evaluatePostgresOwnership({
+    layout: input.layout,
+    distribution: input.distribution,
+    processInspection: inspection,
+    metadata: null,
+    requirePreviousMetadata: false,
+    expectedPid: pid,
+    launchStartedAt: input.launchStartedAt,
+    launchMaxAfterMs: PG_CTL_START_WAIT_SECONDS * 1000
+  });
+  if (evidence.owned && evidence.pid === pid) {
+    return {
+      disposition: "owned",
+      pid,
+      processStartedAtUtc: evidence.processStartedAtUtc ?? input.launchStartedAt.toISOString(),
+      evidence
+    };
+  }
+  return {
+    disposition: "uncertain",
+    code: "POSTGRES_START_IDENTITY_UNCERTAIN",
+    message:
+      evidence.reason || "A postmaster candidate exists but its identity could not be proven.",
+    nominatedPid: pid
+  };
+}
+
+export async function waitForPostmasterCandidate(input: {
+  dataDirectory: string;
+  timeoutMs?: number;
+  intervalMs?: number;
+  sleepImpl?: (ms: number) => Promise<void>;
+  now?: () => number;
+  readPid?: (dataDirectory: string) => number | null;
+}): Promise<number | null> {
+  const timeoutMs = input.timeoutMs ?? POSTMASTER_SETTLE_WINDOW_MS;
+  const intervalMs = input.intervalMs ?? POSTMASTER_SETTLE_INTERVAL_MS;
+  const sleepImpl =
+    input.sleepImpl ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const now = input.now ?? Date.now;
+  const readPid = input.readPid ?? readPostmasterPid;
+  const deadline = now() + timeoutMs;
+  while (true) {
+    const pid = readPid(input.dataDirectory);
+    if (pid != null) return pid;
+    if (now() >= deadline) return null;
+    await sleepImpl(intervalMs);
+  }
+}
+
+export function launcherProcessWasNeverCreated(launcher: WindowsPgCtlStartResult): boolean {
+  return !launcher.ok && launcher.kind === "PRE_SPAWN_ERROR";
+}
+
+export type WindowsPrivatePostgresLaunchResult =
+  | {
+      outcome: "started";
+      pid: number;
+      processStartedAtUtc: string;
+      evidence: PostgresOwnershipEvidence;
+      launcher: WindowsPgCtlStartResult;
+    }
+  | {
+      outcome: "owned-after-failure";
+      pid: number;
+      processStartedAtUtc: string;
+      evidence: PostgresOwnershipEvidence;
+      launcher: WindowsPgCtlStartResult;
+    }
+  | {
+      outcome: "quiescent-failure";
+      code: string;
+      message: string;
+      detail?: string;
+      launcher: WindowsPgCtlStartResult;
+    }
+  | {
+      outcome: "uncertain";
+      code: "POSTGRES_START_IDENTITY_UNCERTAIN" | "POSTGRES_POSTMASTER_IDENTITY_UNPROVEN";
+      message: string;
+      nominatedPid: number | null;
+      detail?: string;
+      launcher: WindowsPgCtlStartResult;
+    };
+
+export async function launchWindowsPrivatePostgres(input: {
+  layout: PostgresLayout;
+  distribution: PostgresDistribution;
+  port: number;
+  clusterId: string;
+  inspectProcess: (processId: number) => ProcessInspectionResult;
+  spawnImpl?: WindowsPgCtlSpawnAsync;
+  now?: () => Date;
+  settleTimeoutMs?: number;
+  settleIntervalMs?: number;
+  sleepImpl?: (ms: number) => Promise<void>;
+  nowMs?: () => number;
+  readPid?: (dataDirectory: string) => number | null;
+}): Promise<WindowsPrivatePostgresLaunchResult> {
+  const launchStartedAt = (input.now ?? (() => new Date()))();
+  const launcher = await invokeWindowsPgCtlStart(input);
+  const reconcileInput = {
+    layout: input.layout,
+    distribution: input.distribution,
+    inspectProcess: input.inspectProcess,
+    launchStartedAt,
+    ...(input.readPid ? { readPid: input.readPid } : {})
+  };
+  let reconciled = reconcileWindowsPrivatePostgresLaunch(reconcileInput);
+  if (reconciled.disposition === "missing" && !launcherProcessWasNeverCreated(launcher)) {
+    await waitForPostmasterCandidate({
+      dataDirectory: input.layout.data,
+      timeoutMs: input.settleTimeoutMs ?? POSTMASTER_SETTLE_WINDOW_MS,
+      intervalMs: input.settleIntervalMs ?? POSTMASTER_SETTLE_INTERVAL_MS,
+      ...(input.sleepImpl ? { sleepImpl: input.sleepImpl } : {}),
+      ...(input.nowMs ? { now: input.nowMs } : {}),
+      ...(input.readPid ? { readPid: input.readPid } : {})
+    });
+    reconciled = reconcileWindowsPrivatePostgresLaunch(reconcileInput);
+  }
+  if (reconciled.disposition === "owned") {
+    if (launcher.ok) {
+      return {
+        outcome: "started",
+        pid: reconciled.pid,
+        processStartedAtUtc: reconciled.processStartedAtUtc,
+        evidence: reconciled.evidence,
+        launcher
+      };
+    }
+    return {
+      outcome: "owned-after-failure",
+      pid: reconciled.pid,
+      processStartedAtUtc: reconciled.processStartedAtUtc,
+      evidence: reconciled.evidence,
+      launcher
+    };
+  }
+  if (reconciled.disposition === "uncertain") {
+    return {
+      outcome: "uncertain",
+      code: reconciled.code,
+      message: reconciled.message,
+      nominatedPid: reconciled.nominatedPid,
+      ...(launcher.ok ? {} : { detail: launcher.detail }),
+      launcher
+    };
+  }
+  if (reconciled.disposition === "quiescent") {
+    if (launcher.ok) {
+      return {
+        outcome: "uncertain",
+        code: "POSTGRES_POSTMASTER_IDENTITY_UNPROVEN",
+        message: "pg_ctl reported success but the nominated postmaster is not live.",
+        nominatedPid: null,
+        launcher
+      };
+    }
+    return {
+      outcome: "quiescent-failure",
+      code: "POSTGRES_PG_CTL_START_FAILED",
+      message: "pg_ctl could not start the private PostgreSQL server.",
+      ...(launcher.ok ? {} : { detail: launcher.detail }),
+      launcher
+    };
+  }
+  if (launcherProcessWasNeverCreated(launcher) && !launcher.ok) {
+    return {
+      outcome: "quiescent-failure",
+      code: "POSTGRES_PG_CTL_START_FAILED",
+      message: "pg_ctl could not start the private PostgreSQL server.",
+      detail: launcher.detail,
+      launcher
+    };
+  }
+  if (launcher.ok) {
+    return {
+      outcome: "uncertain",
+      code: "POSTGRES_POSTMASTER_IDENTITY_UNPROVEN",
+      message: "pg_ctl reported success but no postmaster identity could be proven.",
+      nominatedPid: null,
+      launcher
+    };
+  }
+  return {
+    outcome: "uncertain",
+    code: "POSTGRES_START_IDENTITY_UNCERTAIN",
+    message: "pg_ctl failed and no postmaster identity could be proven.",
+    nominatedPid: null,
+    ...(launcher.ok ? {} : { detail: launcher.detail }),
+    launcher
+  };
+}
+
 export function createYuviDatabase(input: {
   layout: PostgresLayout;
   distribution: PostgresDistribution;
@@ -318,13 +831,25 @@ async function createSqlClient(input: {
   });
 }
 
+export type AuthenticatedSqlResult = {
+  ok: boolean;
+  output: string;
+  sqlState: string | null;
+};
+
+function sqlStateFromError(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : null;
+}
+
 export async function execAuthenticatedSql(input: {
   distribution: PostgresDistribution;
   port: number;
   password: string;
   database?: string;
   sql: string;
-}): Promise<{ ok: boolean; output: string }> {
+}): Promise<AuthenticatedSqlResult> {
   void input.distribution;
   const client = await createSqlClient({
     port: input.port,
@@ -341,12 +866,53 @@ export async function execAuthenticatedSql(input: {
           .join("|")
       )
       .join("\n");
-    return { ok: true, output };
+    return { ok: true, output, sqlState: null };
   } catch (error) {
-    return { ok: false, output: error instanceof Error ? error.message : String(error) };
+    return {
+      ok: false,
+      output: error instanceof Error ? error.message : String(error),
+      sqlState: sqlStateFromError(error)
+    };
   } finally {
     await client.end().catch(() => undefined);
   }
+}
+
+function pingMatchesCluster(output: string, clusterId: string): boolean {
+  const line = output.trim().split(/\r?\n/)[0] ?? "";
+  const [versionRaw, clusterName] = line.split("|").map((part) => part.trim());
+  const version = Number.parseInt(versionRaw ?? "", 10);
+  const major = Number.isInteger(version) ? Math.floor(version / 10000) : NaN;
+  return major === PRIVATE_POSTGRES_MAJOR && clusterName === expectedClusterName(clusterId);
+}
+
+export async function pingPostgresDatabase(input: {
+  layout: PostgresLayout;
+  distribution: PostgresDistribution;
+  port: number;
+  password: string;
+  clusterId: string;
+  database: string;
+}): Promise<boolean> {
+  void input.layout;
+  const probed = await execAuthenticatedSql({
+    distribution: input.distribution,
+    port: input.port,
+    password: input.password,
+    database: input.database,
+    sql: "SELECT current_setting('server_version_num') AS version, current_setting('cluster_name') AS cluster"
+  });
+  return probed.ok && pingMatchesCluster(probed.output, input.clusterId);
+}
+
+export async function pingPostgresServer(input: {
+  layout: PostgresLayout;
+  distribution: PostgresDistribution;
+  port: number;
+  password: string;
+  clusterId: string;
+}): Promise<boolean> {
+  return pingPostgresDatabase({ ...input, database: STANDARD_POSTGRES_DATABASE });
 }
 
 export async function pingPostgres(input: {
@@ -356,19 +922,38 @@ export async function pingPostgres(input: {
   password: string;
   clusterId: string;
 }): Promise<boolean> {
-  const probed = await execAuthenticatedSql({
+  return pingPostgresDatabase({ ...input, database: PRIVATE_POSTGRES_DATABASE });
+}
+
+export type EnsureYuviDatabaseResult =
+  | { ok: true; created: boolean; alreadyExists: boolean; sqlState: string | null }
+  | { ok: false; message: string; sqlState: string | null };
+
+export async function ensureYuviDatabase(input: {
+  distribution: PostgresDistribution;
+  port: number;
+  password: string;
+  execute?: typeof execAuthenticatedSql;
+}): Promise<EnsureYuviDatabaseResult> {
+  const execute = input.execute ?? execAuthenticatedSql;
+  const result = await execute({
     distribution: input.distribution,
     port: input.port,
     password: input.password,
-    database: PRIVATE_POSTGRES_DATABASE,
-    sql: "SELECT current_setting('server_version_num') AS version, current_setting('cluster_name') AS cluster"
+    database: STANDARD_POSTGRES_DATABASE,
+    sql: `CREATE DATABASE ${PRIVATE_POSTGRES_DATABASE}`
   });
-  if (!probed.ok) return false;
-  const line = probed.output.trim().split(/\r?\n/)[0] ?? "";
-  const [versionRaw, clusterName] = line.split("|").map((part) => part.trim());
-  const version = Number.parseInt(versionRaw ?? "", 10);
-  const major = Number.isInteger(version) ? Math.floor(version / 10000) : NaN;
-  return major === PRIVATE_POSTGRES_MAJOR && clusterName === `yuvi-pg-${input.clusterId}`;
+  if (result.ok) {
+    return { ok: true, created: true, alreadyExists: false, sqlState: result.sqlState };
+  }
+  if (result.sqlState === DUPLICATE_DATABASE_SQLSTATE) {
+    return { ok: true, created: false, alreadyExists: true, sqlState: result.sqlState };
+  }
+  return {
+    ok: false,
+    message: result.output || "CREATE DATABASE yuvi failed",
+    sqlState: result.sqlState
+  };
 }
 
 export function runSingleUserSql(input: {

@@ -3,18 +3,28 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { buildChildProcessEnv, deriveConfigFromEnv } from "./config.js";
-import { buildPostgresStartCommand, pingPostgres } from "./postgres-cluster.js";
+import {
+  buildPostgresStartCommand,
+  ensureYuviDatabase,
+  launchWindowsPrivatePostgres,
+  pingPostgres,
+  pingPostgresServer
+} from "./postgres-cluster.js";
 import {
   adoptSurvivingPostgres,
   postgresDiagnostics,
   preparePrivatePostgres,
   publishListenMetadata
 } from "./postgres-lifecycle.js";
-import { POSTGRES_PASSWORD_ENV, resolvePostgresPassword } from "./postgres-secret.js";
+import {
+  POSTGRES_PASSWORD_ENV,
+  redactSecretText,
+  resolvePostgresPassword
+} from "./postgres-secret.js";
 import { selectPrivatePostgresPort } from "./postgres-port.js";
 import {
-  evaluatePostgresOwnership,
   expectedClusterName,
+  readPostmasterPid,
   stopPrivatePostgresIfOwned
 } from "./postgres-ownership.js";
 import {
@@ -94,6 +104,11 @@ export type SupervisorHooks = {
     distribution: NonNullable<SupervisorConfig["postgresDistribution"]>;
   }) => boolean;
   migratePostgres?: typeof migrateSupervisorTarget;
+  platform?: NodeJS.Platform;
+  spawnWindowsPgCtl?: import("./postgres-cluster.js").WindowsPgCtlSpawnAsync;
+  postmasterSettleTimeoutMs?: number;
+  postmasterSettleIntervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
 };
 
 /** Secret keys that must never leak into status/config responses. */
@@ -508,6 +523,28 @@ export class DesktopSupervisor {
         svc.status = "restarting";
         svc.summary = "Restarting…";
         this.emit();
+        if (id === "postgres" && (this.config.postgresMode ?? "external") === "private") {
+          const mayExist =
+            svc.ownership === "owned" ||
+            Boolean(svc.pid) ||
+            Boolean(svc.child) ||
+            this.privatePostgresHasLiveCandidate() ||
+            this.privatePostgresIdentityUnresolved(svc);
+          if (mayExist) {
+            await this.stopOwned(svc);
+            if (!this.privatePostgresQuiescentForRelaunch(svc)) {
+              svc.status = "unavailable";
+              svc.summary = "Ownership uncertain; refusing to restart PostgreSQL.";
+              svc.lastError = svc.lastError ?? "POSTGRES_FENCED_STOP_FAILED";
+              if (!this.privatePostgresIdentityUnresolved(svc)) {
+                svc.lastError = "POSTGRES_FENCED_STOP_FAILED";
+              }
+              return;
+            }
+          }
+          await this.startManagedIfNeeded(id);
+          return;
+        }
         if (svc.ownership === "owned" && svc.pid) {
           await this.stopOwned(svc);
         }
@@ -549,8 +586,19 @@ export class DesktopSupervisor {
    * Probe then spawn if needed. Must run inside a service queue (and config lock
    * when racing with applyRuntimeConfig). Does not re-enter queue.
    */
+  private usesDedicatedWindowsPostgresStart(): boolean {
+    return (
+      (this.hooks.platform ?? process.platform) === "win32" &&
+      (this.config.postgresMode ?? "external") === "private"
+    );
+  }
+
   private async startManagedIfNeeded(id: ServiceId): Promise<void> {
     if (this.shuttingDown) return;
+    if (id === "postgres" && this.usesDedicatedWindowsPostgresStart()) {
+      await this.startWindowsPrivatePostgresIfNeeded();
+      return;
+    }
     const svc = this.require(id);
     this.lifecycleEvent("memory.start.enter", svc);
     await this.refreshService(id);
@@ -653,13 +701,23 @@ export class DesktopSupervisor {
       this.lifecycleEvent("memory.owned.published", svc, { ownership: svc.ownership });
 
       this.lifecycleEvent("memory.health.probe.begin", svc, { phase: "readiness" });
-      const ready = await this.waitReady(svc, svc.spec.startTimeoutMs);
-      if (!ready) {
-        svc.status = "unavailable";
-        svc.summary = "Started but readiness timed out.";
-        svc.lastError = "readiness timeout";
-        // Leave process owned so user can stop/restart; do not kill external-like failures automatically.
-        return;
+      if (id === "postgres") {
+        const applicationReady = await this.completePrivatePostgresApplicationReady();
+        if (!applicationReady.ok) {
+          svc.status = "unavailable";
+          svc.summary = "Private PostgreSQL started but the yuvi database is not ready.";
+          svc.lastError = applicationReady.code;
+          return;
+        }
+      } else {
+        const ready = await this.waitReady(svc, svc.spec.startTimeoutMs);
+        if (!ready) {
+          svc.status = "unavailable";
+          svc.summary = "Started but readiness timed out.";
+          svc.lastError = "readiness timeout";
+          // Leave process owned so user can stop/restart; do not kill external-like failures automatically.
+          return;
+        }
       }
       await this.refreshService(id);
     } catch (error) {
@@ -671,6 +729,10 @@ export class DesktopSupervisor {
       svc.status = "unavailable";
       svc.summary = "Start failed.";
       svc.lastError = error instanceof Error ? error.message : String(error);
+      if (id === "postgres" && !this.privatePostgresQuiescentForRelaunch(svc)) {
+        svc.lastError = "POSTGRES_FENCED_STOP_FAILED";
+        throw error;
+      }
       svc.ownership = "none";
       svc.pid = null;
       throw error;
@@ -1138,6 +1200,204 @@ export class DesktopSupervisor {
     }
   }
 
+  private async completePrivatePostgresApplicationReady(): Promise<
+    | { ok: true }
+    | {
+        ok: false;
+        code:
+          | "POSTGRES_NOT_CONFIGURED"
+          | "POSTGRES_SERVER_NOT_READY"
+          | "YUVI_DATABASE_CREATE_FAILED"
+          | "YUVI_DATABASE_NOT_READY";
+      }
+  > {
+    const layout = this.config.postgresLayout;
+    const distribution = this.config.postgresDistribution;
+    const port = this.config.postgresListenPort;
+    const clusterId = layout ? readClusterMarker(layout)?.clusterId : null;
+    const password = this.resolvePrivatePostgresPassword();
+    if (!layout || !distribution || !port || !clusterId || !password) {
+      return { ok: false, code: "POSTGRES_NOT_CONFIGURED" };
+    }
+    const serverReady = await this.waitPrivatePostgresServerReady();
+    if (!serverReady) return { ok: false, code: "POSTGRES_SERVER_NOT_READY" };
+    const created = await ensureYuviDatabase({
+      distribution,
+      port,
+      password
+    });
+    if (!created.ok) return { ok: false, code: "YUVI_DATABASE_CREATE_FAILED" };
+    const yuviReady = await pingPostgres({
+      layout,
+      distribution,
+      port,
+      password,
+      clusterId
+    });
+    return yuviReady ? { ok: true } : { ok: false, code: "YUVI_DATABASE_NOT_READY" };
+  }
+
+  private async waitPrivatePostgresServerReady(): Promise<boolean> {
+    const layout = this.config.postgresLayout;
+    const distribution = this.config.postgresDistribution;
+    const port = this.config.postgresListenPort;
+    const clusterId = layout ? readClusterMarker(layout)?.clusterId : null;
+    const password = this.resolvePrivatePostgresPassword();
+    if (!layout || !distribution || !port || !clusterId || !password) return false;
+    const svc = this.services.get("postgres");
+    const timeoutMs = svc?.spec.startTimeoutMs ?? 30_000;
+    const intervalMs = svc?.spec.readinessIntervalMs ?? 400;
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const ready = await pingPostgresServer({
+        layout,
+        distribution,
+        port,
+        password,
+        clusterId
+      });
+      if (ready) return true;
+      if (Date.now() >= deadline) return false;
+      await sleep(intervalMs);
+    }
+  }
+
+  private async startWindowsPrivatePostgresIfNeeded(): Promise<void> {
+    const svc = this.require("postgres");
+    await this.refreshService("postgres");
+    if (svc.status === "healthy" || svc.status === "degraded") {
+      return;
+    }
+    const layout = this.config.postgresLayout;
+    const distribution = this.config.postgresDistribution;
+    const clusterId = layout ? readClusterMarker(layout)?.clusterId : null;
+    const port = this.config.postgresListenPort;
+    if (!layout || !distribution || !clusterId || !port) {
+      svc.status = "unavailable";
+      svc.summary = "Private PostgreSQL is not configured.";
+      svc.lastError = "POSTGRES_NOT_CONFIGURED";
+      svc.ownership = "none";
+      return;
+    }
+    if (svc.ownership === "owned" && svc.pid) {
+      const alreadyReady = await this.completePrivatePostgresApplicationReady();
+      if (alreadyReady.ok) {
+        svc.status = "healthy";
+        svc.ownership = "owned";
+        svc.summary = "Private PostgreSQL is ready.";
+        svc.child = null;
+        return;
+      }
+      svc.status = "unavailable";
+      svc.summary = "Private PostgreSQL started but the yuvi database is not ready.";
+      svc.lastError = alreadyReady.code;
+      return;
+    }
+    if (svc.pid && isProcessAlive(svc.pid)) {
+      this.markPostgresIdentityUncertain(
+        svc,
+        "A live PostgreSQL process is tracked but is not strongly owned."
+      );
+      return;
+    }
+
+    const launched = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port,
+      clusterId,
+      inspectProcess: (processId) => this.inspectManagedProcess(processId),
+      ...(this.hooks.spawnWindowsPgCtl ? { spawnImpl: this.hooks.spawnWindowsPgCtl } : {}),
+      ...(this.hooks.postmasterSettleTimeoutMs != null
+        ? { settleTimeoutMs: this.hooks.postmasterSettleTimeoutMs }
+        : {}),
+      ...(this.hooks.postmasterSettleIntervalMs != null
+        ? { settleIntervalMs: this.hooks.postmasterSettleIntervalMs }
+        : {}),
+      ...(this.hooks.sleep ? { sleepImpl: this.hooks.sleep } : {})
+    });
+    if (launched.outcome === "uncertain") {
+      this.markPostgresIdentityUncertain(
+        svc,
+        launched.message,
+        launched.nominatedPid,
+        launched.code
+      );
+      return;
+    }
+    if (launched.outcome === "quiescent-failure") {
+      this.markPostgresLaunchFailed(svc, launched.code, launched.message, launched.detail);
+      return;
+    }
+
+    const recorded = this.recordPrivatePostgresIdentity(svc, {
+      pid: launched.pid,
+      processStartedAtUtc: launched.processStartedAtUtc,
+      clusterId
+    });
+    if (!recorded) {
+      const stopped = this.stopPrivatePostgresOwned();
+      if (!this.privatePostgresStopProven(stopped, launched.pid)) {
+        this.markPostgresIdentityUncertain(
+          svc,
+          "Ownership metadata readback failed and the postmaster could not be fenced-stopped.",
+          launched.pid
+        );
+        svc.lastError = "POSTGRES_FENCED_STOP_FAILED";
+        return;
+      }
+      this.markPostgresLaunchFailed(
+        svc,
+        "POSTGRES_METADATA_READBACK_FAILED",
+        "Ownership metadata readback failed."
+      );
+      return;
+    }
+
+    if (launched.outcome === "owned-after-failure") {
+      const stopped = this.stopPrivatePostgresOwned();
+      if (!this.privatePostgresStopProven(stopped, launched.pid)) {
+        this.markPostgresIdentityUncertain(
+          svc,
+          "pg_ctl failed after starting a strongly owned postmaster that could not be fenced-stopped.",
+          launched.pid
+        );
+        svc.lastError = "POSTGRES_FENCED_STOP_FAILED";
+        return;
+      }
+      this.markPostgresLaunchFailed(
+        svc,
+        "POSTGRES_PG_CTL_START_FAILED",
+        "pg_ctl failed after starting a postmaster; the owned server was fenced-stopped."
+      );
+      return;
+    }
+
+    const applicationReady = await this.completePrivatePostgresApplicationReady();
+    if (!applicationReady.ok) {
+      const stopped = this.stopPrivatePostgresOwned();
+      if (!this.privatePostgresStopProven(stopped, launched.pid)) {
+        svc.status = "unavailable";
+        svc.ownership = "owned";
+        svc.pid = launched.pid;
+        svc.child = null;
+        svc.summary = "Private PostgreSQL started but the yuvi database is not ready.";
+        svc.lastError = "POSTGRES_FENCED_STOP_FAILED";
+        return;
+      }
+      this.markPostgresLaunchFailed(
+        svc,
+        applicationReady.code,
+        "Private PostgreSQL started but the yuvi database is not ready."
+      );
+      return;
+    }
+    svc.status = "healthy";
+    svc.ownership = "owned";
+    svc.summary = "Private PostgreSQL is ready.";
+    svc.child = null;
+  }
+
   private async prepareAndStartPrivatePostgres(): Promise<void> {
     const layout = this.config.postgresLayout;
     const distribution = this.config.postgresDistribution;
@@ -1154,6 +1414,13 @@ export class DesktopSupervisor {
     }
 
     if (this.tryAdoptSurvivingPostgres(svc)) {
+      const applicationReady = await this.completePrivatePostgresApplicationReady();
+      if (!applicationReady.ok) {
+        svc.status = "unavailable";
+        svc.summary = "Adopted private PostgreSQL is not yuvi-ready.";
+        svc.lastError = applicationReady.code;
+        return;
+      }
       await this.refreshService("postgres");
       const adopted = this.services.get("postgres");
       const adoptedPort = this.config.postgresListenPort;
@@ -1194,6 +1461,9 @@ export class DesktopSupervisor {
     }
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
+      if (attempt > 0 && this.shouldHaltPrivatePostgresPortRetry(svc)) {
+        return;
+      }
       const listen =
         attempt === 0
           ? prepared.listen
@@ -1232,8 +1502,10 @@ export class DesktopSupervisor {
           publishListenMetadata(layout, listen);
           return;
         }
+        ready.status = "unavailable";
+        ready.lastError = "YUVI_DATABASE_NOT_READY";
       }
-      if (ready?.child || this.hasLiveManagedChild(ready!)) {
+      if (this.shouldHaltPrivatePostgresPortRetry(ready ?? svc)) {
         return;
       }
     }
@@ -1282,6 +1554,121 @@ export class DesktopSupervisor {
       metadata,
       invokeStop: this.hooks.invokePostgresStop
     });
+  }
+
+  private recordPrivatePostgresIdentity(
+    svc: InternalService,
+    launched: { pid: number; processStartedAtUtc: string; clusterId: string }
+  ): boolean {
+    const generation = svc.generation + 1;
+    svc.generation = generation;
+    svc.child = null;
+    svc.pid = launched.pid;
+    svc.startedAt = launched.processStartedAtUtc;
+    svc.status = "starting";
+    svc.summary = "Starting private PostgreSQL…";
+    svc.lastError = null;
+    const metadata: ProcessMetadata = {
+      schemaVersion: PROCESS_METADATA_VERSION,
+      role: svc.spec.role,
+      pid: launched.pid,
+      repositoryRoot: this.config.repositoryRoot,
+      stateDirectory: this.config.stateDirectory,
+      commandMarker: expectedClusterName(launched.clusterId),
+      processStartedAtUtc: launched.processStartedAtUtc,
+      createdAtUtc: new Date().toISOString(),
+      ownershipToken: this.config.ownershipToken,
+      instanceId: this.config.instanceId
+    };
+    writeProcessMetadata(svc.spec.metadataFile, metadata);
+    const readback = readProcessMetadata(svc.spec.metadataFile);
+    return Boolean(
+      readback && readback.pid === launched.pid && readback.instanceId === this.config.instanceId
+    );
+  }
+
+  private markPostgresIdentityUncertain(
+    svc: InternalService,
+    message: string,
+    nominatedPid?: number | null,
+    code:
+      | "POSTGRES_START_IDENTITY_UNCERTAIN"
+      | "POSTGRES_POSTMASTER_IDENTITY_UNPROVEN" = "POSTGRES_START_IDENTITY_UNCERTAIN"
+  ): void {
+    svc.status = "unavailable";
+    svc.summary = message;
+    svc.lastError = code;
+    svc.detail = message;
+    if (nominatedPid && nominatedPid > 0) {
+      svc.pid = nominatedPid;
+    }
+    svc.child = null;
+  }
+
+  private markPostgresLaunchFailed(
+    svc: InternalService,
+    code: string,
+    message: string,
+    detail?: string
+  ): void {
+    const password = this.resolvePrivatePostgresPassword();
+    svc.status = "unavailable";
+    svc.summary = message;
+    svc.lastError = code;
+    svc.detail = detail ? redactSecretText(detail, password ? [password] : []) : null;
+    svc.ownership = "none";
+    svc.pid = null;
+    svc.child = null;
+    svc.startedAt = null;
+  }
+
+  private privatePostgresIdentityUnresolved(svc: InternalService): boolean {
+    const haltCodes = new Set([
+      "POSTGRES_START_IDENTITY_UNCERTAIN",
+      "POSTGRES_POSTMASTER_IDENTITY_UNPROVEN",
+      "POSTGRES_POSTMASTER_PID_MISSING",
+      "POSTGRES_FENCED_STOP_FAILED"
+    ]);
+    return Boolean(svc.lastError && haltCodes.has(svc.lastError));
+  }
+
+  private shouldHaltPrivatePostgresPortRetry(svc: InternalService): boolean {
+    if (this.privatePostgresIdentityUnresolved(svc)) return true;
+    if (svc.ownership === "owned") return true;
+    if (svc.pid && isProcessAlive(svc.pid)) return true;
+    if (svc.child || this.hasLiveManagedChild(svc)) return true;
+    if (this.privatePostgresHasLiveCandidate()) return true;
+    return false;
+  }
+
+  private privatePostgresHasLiveCandidate(): boolean {
+    const layout = this.config.postgresLayout;
+    if (!layout) return false;
+    const pid = readPostmasterPid(layout.data);
+    if (pid == null) return false;
+    const inspection = this.inspectManagedProcess(pid);
+    return inspection.status !== "not-running";
+  }
+
+  private privatePostgresQuiescentForRelaunch(svc: InternalService): boolean {
+    if (this.privatePostgresIdentityUnresolved(svc)) return false;
+    if (svc.ownership === "owned") return false;
+    if (svc.child || this.hasLiveManagedChild(svc)) return false;
+    if (svc.pid && isProcessAlive(svc.pid)) return false;
+    return !this.privatePostgresHasLiveCandidate();
+  }
+
+  private privatePostgresStopProven(
+    stopped: { invoked: boolean; owned: boolean; pid: number | null },
+    expectedPid: number
+  ): boolean {
+    if (!stopped.invoked) return false;
+    if (isProcessAlive(expectedPid)) return false;
+    const leftover = this.config.postgresLayout
+      ? readPostmasterPid(this.config.postgresLayout.data)
+      : null;
+    if (leftover != null && leftover === expectedPid && isProcessAlive(leftover)) return false;
+    return !this.privatePostgresHasLiveCandidate();
   }
 
   private tryAdoptSurvivingPostgres(svc: InternalService): boolean {

@@ -9,7 +9,6 @@ import {
   type PostgresSecretAuthority
 } from "./postgres-secret.js";
 import {
-  createYuviDatabaseSingleUser,
   initializePrivateCluster,
   inspectExistingCluster,
   writeLocalOnlyConfig
@@ -121,10 +120,6 @@ export async function preparePrivatePostgres(input: {
         layout: input.layout
       };
     }
-    createYuviDatabaseSingleUser({
-      layout: input.layout,
-      distribution: input.distribution
-    });
     return {
       ok: true,
       layout: input.layout,
