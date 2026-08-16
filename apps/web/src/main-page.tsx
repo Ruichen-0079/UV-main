@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ApiError, apiClient, type MessageStreamEvent } from "./api/client.js";
 import {
   beginControlledDraftSubmit,
@@ -12,8 +12,10 @@ import { SpeechSegmenter } from "./speech-segmenter.js";
 import {
   CompanionBus,
   type CompanionBusMessage,
-  type CompanionPlaybackState
+  type CompanionPlaybackState,
+  type CompanionTtsConfiguration
 } from "./companion-bus.js";
+import { deriveCapabilityProjection, deriveEffectiveVoiceOutput } from "./capability-projection.js";
 import {
   correlateSpeechPlayback,
   createSpeechPlaybackCorrelation,
@@ -26,6 +28,13 @@ import { readVoiceOutputPreference, writeVoiceOutputPreference } from "./voice-o
 import { controlCompanionWindow, isTauriRuntime } from "./tauri-window.js";
 import { ServiceStatusPanel } from "./service-status-panel.js";
 import { UserSettingsPanel } from "./user-settings-panel.js";
+import { fetchUserSettings } from "./user-settings-client.js";
+import { initialServiceStatusState, type ServiceStatusState } from "./service-status-state.js";
+import {
+  isServiceSupervisorAvailable,
+  subscribeServiceStatusState
+} from "./service-supervisor-client.js";
+import type { TtsSettingsProjection } from "./user-settings-state.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
@@ -49,6 +58,10 @@ export function MainPage(): JSX.Element {
   const [writeMemory, setWriteMemory] = useState(true);
   const [promptPreview, setPromptPreview] = useState(true);
   const [voiceOutput, setVoiceOutput] = useState<boolean>(readVoiceOutputPreference);
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatusState>(initialServiceStatusState);
+  const [ttsConfig, setTtsConfig] = useState<CompanionTtsConfiguration | null>(() =>
+    isTauriRuntime() ? null : { enabled: true, mode: "external" }
+  );
   const [messages, dispatchMessages] = useReducer(reduceChatMessages, [] as ChatMessage[]);
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -64,6 +77,8 @@ export function MainPage(): JSX.Element {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const busRef = useRef<CompanionBus | null>(null);
   const voiceOutputRef = useRef(voiceOutput);
+  const ttsConfigRef = useRef(ttsConfig);
+  const ttsConfigRevisionRef = useRef(-1);
   const speechSessionRef = useRef<{
     generation: string;
     segmenter: SpeechSegmenter;
@@ -81,9 +96,73 @@ export function MainPage(): JSX.Element {
     completedObserved: boolean;
   } | null>(null);
 
+  const capabilityProjection = useMemo(
+    () =>
+      deriveCapabilityProjection({
+        serviceStatus,
+        persistentTtsEnabled: ttsConfig?.enabled ?? null,
+        ttsConfiguration: ttsConfig,
+        audio: "unknown",
+        live2dLifecycle: "loading"
+      }),
+    [serviceStatus, ttsConfig]
+  );
+  const effectiveVoiceOutput = useMemo(
+    () =>
+      deriveEffectiveVoiceOutput({
+        persistentTtsEnabled: ttsConfig?.enabled ?? null,
+        perTurnVoiceOutput: voiceOutput,
+        ttsCapability: capabilityProjection.capabilities.tts,
+        ttsConfiguration: ttsConfig
+      }),
+    [capabilityProjection.capabilities.tts, ttsConfig?.enabled, ttsConfig?.mode, voiceOutput]
+  );
+  const effectiveVoiceOutputRef = useRef(effectiveVoiceOutput);
+  ttsConfigRef.current = ttsConfig;
+  effectiveVoiceOutputRef.current = effectiveVoiceOutput;
+
   useEffect(() => {
     voiceOutputRef.current = voiceOutput;
   }, [voiceOutput]);
+
+  useEffect(() => {
+    if (!isTauriRuntime() && !isServiceSupervisorAvailable()) return;
+    return subscribeServiceStatusState(setServiceStatus);
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    void fetchUserSettings()
+      .then((view) => {
+        if (cancelled || view.revision < ttsConfigRevisionRef.current) return;
+        const settings: CompanionTtsConfiguration = {
+          enabled: view.settings.tts.enabled,
+          mode: view.settings.tts.mode
+        };
+        ttsConfigRevisionRef.current = view.revision;
+        ttsConfigRef.current = settings;
+        setTtsConfig(settings);
+      })
+      .catch(() => {
+        // Keep the capability unknown when persisted settings cannot be read.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onTtsSettings = useCallback((settings: TtsSettingsProjection, revision: number): void => {
+    if (revision < ttsConfigRevisionRef.current) return;
+    ttsConfigRevisionRef.current = revision;
+    const config: CompanionTtsConfiguration = {
+      enabled: settings.enabled,
+      mode: settings.mode
+    };
+    ttsConfigRef.current = config;
+    setTtsConfig(config);
+    busRef.current?.post({ kind: "tts-config", config });
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -96,6 +175,7 @@ export function MainPage(): JSX.Element {
         // A companion window may have been recreated; re-sync the current
         // voice-enabled preference so TTS state converges without a reload.
         bus.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
+        bus.post({ kind: "tts-config", config: ttsConfigRef.current });
       } else if (message.kind === "speech-status") {
         if (speechEpochRef.current !== message.requestId) return;
         setVoicePlaybackStatus(message.state);
@@ -121,6 +201,7 @@ export function MainPage(): JSX.Element {
     // Announce the persisted preference so a companion that is already open
     // (or opens later) starts with the same voice-enabled state.
     bus.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
+    bus.post({ kind: "tts-config", config: ttsConfigRef.current });
     return () => {
       mountedRef.current = false;
       unsubscribe();
@@ -133,6 +214,10 @@ export function MainPage(): JSX.Element {
       playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
     };
   }, []);
+
+  useEffect(() => {
+    busRef.current?.post({ kind: "tts-config", config: ttsConfig });
+  }, [ttsConfig]);
 
   function updateVoiceOutput(enabled: boolean): void {
     setVoiceOutput(enabled);
@@ -165,7 +250,8 @@ export function MainPage(): JSX.Element {
       controller,
       completedObserved: false
     };
-    speechEpochRef.current = voiceOutputRef.current ? requestId : null;
+    const shouldRequestTts = effectiveVoiceOutputRef.current.requestTts;
+    speechEpochRef.current = shouldRequestTts ? requestId : null;
     playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
     setActualPlaybackActive(false);
     setRequestStatus("sending");
@@ -174,7 +260,7 @@ export function MainPage(): JSX.Element {
     bus?.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
     bus?.post({ kind: "start-generation", requestId, sessionId });
     const segmenter = new SpeechSegmenter();
-    if (voiceOutputRef.current) {
+    if (shouldRequestTts) {
       speechSessionRef.current = { generation: requestId, segmenter, sequence: 0, ended: false };
     }
     dispatchMessages({
@@ -301,7 +387,14 @@ export function MainPage(): JSX.Element {
   function forwardSpeechSegments(requestId: string, text: string): void {
     const speech = speechSessionRef.current;
     const bus = busRef.current;
-    if (!speech || speech.generation !== requestId || !bus) return;
+    if (
+      !speech ||
+      speech.generation !== requestId ||
+      !bus ||
+      !effectiveVoiceOutputRef.current.requestTts
+    ) {
+      return;
+    }
     for (const segment of speech.segmenter.push(text)) {
       bus.post({
         kind: "speak",
@@ -319,6 +412,12 @@ export function MainPage(): JSX.Element {
     if (!speech || speech.generation !== requestId || !bus) return;
     if (speech.ended) return;
     speech.ended = true;
+    if (!effectiveVoiceOutputRef.current.requestTts) {
+      // Let already-queued/playing local audio finish, but do not flush new
+      // text into synthesis after settings or service health disables TTS.
+      bus.post({ kind: "speech-end", requestId });
+      return;
+    }
     for (const segment of speech.segmenter.flush(reason)) {
       bus.post({
         kind: "speak",
@@ -424,7 +523,7 @@ export function MainPage(): JSX.Element {
           </div>
         </div>
 
-        {showSettings && <UserSettingsPanel />}
+        {showSettings && <UserSettingsPanel onTtsSettings={onTtsSettings} />}
 
         <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
           <div className="h-[420px] overflow-auto rounded-md border border-ink-100 bg-ink-50 p-3">

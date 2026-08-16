@@ -199,6 +199,7 @@ describe("LumiCanvas normalized projection input", () => {
     const dom = installFakeDom();
     let root!: Root;
     const ref = createRef<LumiControllerHandle>();
+    const lifecycles: string[] = [];
     const projection = {
       ...createInitialCompanionPresence(),
       activity: "listening" as const
@@ -212,6 +213,7 @@ describe("LumiCanvas normalized projection input", () => {
             ref,
             requestedPresence: "thinking",
             requestedProjection: projection,
+            onModelLifecycle: (state) => lifecycles.push(state),
             showFramingToggle: false
           })
         );
@@ -226,6 +228,7 @@ describe("LumiCanvas normalized projection input", () => {
       });
 
       expect(ref.current?.getDebugInfo().activePresentationState).toBe("listening");
+      expect(lifecycles).toContain("ready");
     } finally {
       await act(async () => root?.unmount());
       dom.restore();
