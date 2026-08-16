@@ -79,3 +79,38 @@ verification updates the in-memory observation cache. Config-only verification
 for TTS, STT, Vision, and provider chains reports `verificationMode:
 "config_only"` and leaves `observed` unchanged. Ordinary `/health` is also
 zero-cost and exposes readiness and cached observation separately.
+
+## STT contract (P7-5)
+
+STT is currently a batch capability. The stable provider contract is:
+
+```ts
+STTProvider.transcribeAudio(
+  input: STTInput,
+  options?: ProviderCallOptions
+): Promise<STTOutput>
+```
+
+Provider-level input supports `audioUrl`, `audioBase64`, `audioBuffer`, the
+compatibility alias `audio`, and `localFilePath`. DashScope resolves multiple
+supplied sources in this order: `audioUrl`, `audioBase64`, `audioBuffer`,
+`audio`, then `localFilePath`. `audio` and `audioBuffer` remain compatibility
+aliases; P7-5 does not add provider-level mutual-exclusion validation.
+
+`providerMetadata.sourceKind` describes the source actually selected by that
+resolution. Selection and source classification are one operation.
+
+DashScope-specific input checks remain adapter boundaries: inline audio has an
+adapter-owned size limit, zero-byte audio is rejected, relative local paths
+are rejected, and MIME inference for local files remains adapter behavior.
+There is no new global or vendor MIME allowlist.
+
+Successful STT output requires meaningful non-empty transcript text. The
+normalized adapter output may include language, confidence, and usage when
+available. `segments` and timestamp fields remain optional capability space;
+the current adapter does not fabricate them.
+
+`ProviderCallOptions.signal` is the canonical caller-owned cancellation
+channel. Future streaming STT must be additive through a separate interface
+and capability; `transcribeAudio()` is not a streaming operation. P7-5 adds
+no streaming DTOs, WebSocket transport, or streaming protocol contract.
