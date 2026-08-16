@@ -1,7 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute } from "node:path";
-import type { ProviderHealth, TokenUsage } from "../types/common.js";
-import { ProviderError, ProviderErrorCode } from "../types/errors.js";
+import type { ProviderCallOptions, ProviderHealth, TokenUsage } from "../types/common.js";
+import {
+  ProviderError,
+  ProviderErrorCode,
+  mapHttpStatusToProviderErrorCode
+} from "../types/errors.js";
+import { createTransportAbort, type TransportAbort } from "../transport-abort.js";
 import type { STTInput, STTOutput, STTProvider } from "../types/stt.js";
 
 export type DashScopeSTTProviderOptions = {
@@ -73,63 +78,102 @@ export class DashScopeSTTProvider implements STTProvider {
     }
   }
 
-  async transcribeAudio(input: STTInput): Promise<STTOutput> {
-    ensureDashScopeConfig(this.options);
+  async transcribeAudio(input: STTInput, options?: ProviderCallOptions): Promise<STTOutput> {
+    const transport = createTransportAbort({
+      signal: options?.signal,
+      timeoutMs: this.options.timeoutMs ?? 60000
+    });
+    let transportStarted = false;
 
-    const start = performance.now();
-    const audio = await resolveAudioInput(
-      input,
-      this.options.maxInlineAudioBytes ?? 10 * 1024 * 1024
-    );
-    const response = await dashScopeFetch(
-      this.options,
-      "/services/aigc/multimodal-generation/generation",
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          model: this.options.model,
-          input: {
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    audio
-                  }
-                ]
-              }
-            ]
-          },
-          parameters: {
-            asr_options: {
-              language: input.language,
-              enable_itn: input.metadata?.["enableItn"] ?? false
-            }
-          }
-        })
+    try {
+      throwIfDashScopeTransportAborted(transport);
+      ensureDashScopeConfig(this.options);
+
+      const start = performance.now();
+      const audio = await resolveAudioInput(
+        input,
+        this.options.maxInlineAudioBytes ?? 10 * 1024 * 1024
+      );
+      throwIfDashScopeTransportAborted(transport);
+      if (!transport.markStarted()) {
+        throwIfDashScopeTransportAborted(transport);
+        throw new Error("DashScope STT transport could not start.");
       }
-    );
+      transportStarted = true;
+      const response = await dashScopeFetch(
+        this.options,
+        "/services/aigc/multimodal-generation/generation",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            model: this.options.model,
+            input: {
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    {
+                      audio
+                    }
+                  ]
+                }
+              ]
+            },
+            parameters: {
+              asr_options: {
+                language: input.language,
+                enable_itn: input.metadata?.["enableItn"] ?? false
+              }
+            }
+          })
+        },
+        transport.signal
+      );
+      if (!response.ok) {
+        throw await createStatusError(response);
+      }
 
-    const rawResponse = await parseJsonResponse(response);
-    const normalized = normalizeDashScopeResponse(rawResponse);
+      const rawResponse = await parseJsonResponse(response);
+      throwIfDashScopeTransportAborted(transport);
+      const normalized = normalizeDashScopeResponse(rawResponse);
 
-    return {
-      text: normalized.text,
-      language: normalized.language ?? input.language,
-      confidence: normalized.confidence,
-      segments: normalized.segments,
-      latencyMs: Math.round(performance.now() - start),
-      model: this.options.model,
-      tokenUsage: normalized.tokenUsage,
-      providerMetadata: {
-        usage: normalized.usage,
-        sourceKind: classifyAudioInput(input)
-      },
-      debug: this.options.includeRawResponse ? { rawResponse } : undefined
-    };
+      return {
+        text: normalized.text,
+        language: normalized.language ?? input.language,
+        confidence: normalized.confidence,
+        segments: normalized.segments,
+        latencyMs: Math.round(performance.now() - start),
+        model: this.options.model,
+        tokenUsage: normalized.tokenUsage,
+        providerMetadata: {
+          usage: normalized.usage,
+          sourceKind: classifyAudioInput(input)
+        },
+        debug: this.options.includeRawResponse ? { rawResponse } : undefined
+      };
+    } catch (error) {
+      if (transport.source !== null) {
+        throw createDashScopeTransportAbortError(transport);
+      }
+      if (error instanceof ProviderError) {
+        throw error;
+      }
+      if (!transportStarted) {
+        throw error;
+      }
+      throw new ProviderError({
+        provider: "dashscope",
+        capability: "stt",
+        code: ProviderErrorCode.NetworkError,
+        message: "DashScope STT network request failed.",
+        cause: error
+      });
+    } finally {
+      transport.cleanup();
+    }
   }
 }
 
@@ -202,55 +246,21 @@ async function resolveAudioInput(input: STTInput, maxInlineAudioBytes: number): 
 async function dashScopeFetch(
   options: DashScopeSTTProviderOptions,
   path: string,
-  init: RequestInit
+  init: RequestInit,
+  signal: AbortSignal
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60000);
-
-  try {
-    const response = await fetch(`${trimTrailingSlash(options.baseUrl)}${path}`, {
-      ...init,
-      headers: {
-        authorization: `Bearer ${options.apiKey}`,
-        ...init.headers
-      },
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      throw await createStatusError(response);
-    }
-
-    return response;
-  } catch (error) {
-    if (error instanceof ProviderError) {
-      throw error;
-    }
-
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new ProviderError({
-        provider: "dashscope",
-        capability: "stt",
-        code: ProviderErrorCode.Timeout,
-        message: "DashScope STT request timed out.",
-        cause: error
-      });
-    }
-
-    throw new ProviderError({
-      provider: "dashscope",
-      capability: "stt",
-      code: ProviderErrorCode.NetworkError,
-      message: "DashScope STT network request failed.",
-      cause: error
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
+  return fetch(`${trimTrailingSlash(options.baseUrl)}${path}`, {
+    ...init,
+    headers: {
+      authorization: `Bearer ${options.apiKey}`,
+      ...init.headers
+    },
+    signal
+  });
 }
 
 async function createStatusError(response: Response): Promise<ProviderError> {
-  const code = mapStatusToProviderErrorCode(response.status);
+  const code = mapHttpStatusToProviderErrorCode(response.status);
   const safeBody = await readSafeErrorBody(response);
 
   return new ProviderError({
@@ -260,34 +270,36 @@ async function createStatusError(response: Response): Promise<ProviderError> {
     statusCode: response.status,
     message: safeBody
       ? `DashScope STT request failed with ${response.status}: ${safeBody}`
-      : `DashScope STT request failed with ${response.status}.`,
-    retryable:
-      code === ProviderErrorCode.RateLimited || code === ProviderErrorCode.ProviderUnavailable
+      : `DashScope STT request failed with ${response.status}.`
   });
 }
 
-function mapStatusToProviderErrorCode(status: number): ProviderErrorCode {
-  if (status === 401) {
-    return ProviderErrorCode.InvalidApiKey;
+function throwIfDashScopeTransportAborted(transport: TransportAbort): void {
+  if (transport.source !== null) {
+    throw createDashScopeTransportAbortError(transport);
+  }
+}
+
+function createDashScopeTransportAbortError(transport: TransportAbort): ProviderError {
+  if (transport.source === "caller") {
+    return new ProviderError({
+      provider: "dashscope",
+      capability: "stt",
+      code: ProviderErrorCode.Cancelled,
+      message: "DashScope STT was cancelled.",
+      retryable: false,
+      fallbackEligible: false,
+      effectState: transport.effectState ?? "unknown"
+    });
   }
 
-  if (status === 403) {
-    return ProviderErrorCode.PermissionDenied;
-  }
-
-  if (status === 404) {
-    return ProviderErrorCode.ModelNotFound;
-  }
-
-  if (status === 413 || status === 400 || status === 415) {
-    return ProviderErrorCode.UnsupportedInput;
-  }
-
-  if (status === 429) {
-    return ProviderErrorCode.RateLimited;
-  }
-
-  return ProviderErrorCode.ProviderUnavailable;
+  return new ProviderError({
+    provider: "dashscope",
+    capability: "stt",
+    code: ProviderErrorCode.Timeout,
+    message: "DashScope STT request timed out.",
+    effectState: transport.effectState ?? "unknown"
+  });
 }
 
 async function parseJsonResponse(response: Response): Promise<unknown> {
