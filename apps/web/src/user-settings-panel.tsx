@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useReducer } from "react";
+import { memo, useCallback, useEffect, useReducer, useRef } from "react";
 import { Field, Notice, Panel, Pill } from "./surface-ui.js";
 import { isTauriRuntime } from "./tauri-window.js";
 import {
@@ -14,6 +14,7 @@ import {
   reduceUserSettings,
   validateUserSettingsForm,
   type SupervisorSyncStatusDto,
+  type TtsSettingsProjection,
   type UserSecretKey,
   type UserSettingsForm
 } from "./user-settings-state.js";
@@ -23,8 +24,12 @@ import {
  * Companion must not mount this component.
  * Local reducer only — keystrokes never invoke Rust until Save.
  */
-export const UserSettingsPanel = memo(function UserSettingsPanel(): JSX.Element | null {
+export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
+  onTtsSettings?: (settings: TtsSettingsProjection, revision: number) => void;
+}): JSX.Element | null {
   const [state, dispatch] = useReducer(reduceUserSettings, undefined, initialUserSettingsUiState);
+  const revisionRef = useRef(state.revision);
+  revisionRef.current = state.revision;
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -32,7 +37,12 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(): JSX.Element 
     dispatch({ type: "load-start" });
     void fetchUserSettings()
       .then((view) => {
-        if (!cancelled) dispatch({ type: "load-success", view });
+        if (!cancelled) {
+          dispatch({ type: "load-success", view });
+          if (view.revision >= revisionRef.current) {
+            props.onTtsSettings?.(view.settings.tts, view.revision);
+          }
+        }
       })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -45,7 +55,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(): JSX.Element 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [props.onTtsSettings]);
 
   const setField = useCallback(
     <K extends keyof UserSettingsForm>(key: K, value: UserSettingsForm[K]): void => {
@@ -56,6 +66,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(): JSX.Element 
 
   const onSave = useCallback(async (): Promise<void> => {
     const form = state.form;
+    const startingRevision = state.revision;
     const validationError = validateUserSettingsForm(form);
     if (validationError) {
       dispatch({ type: "save-error", error: validationError });
@@ -99,13 +110,16 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(): JSX.Element 
         : result.supervisorSync;
       const merged = { ...result, restartServices, supervisorSync };
       dispatch({ type: "save-success", result: merged, clearSecrets: true });
+      if (result.revision >= startingRevision) {
+        props.onTtsSettings?.(result.settings.tts, result.revision);
+      }
     } catch (error) {
       dispatch({
         type: "save-error",
         error: error instanceof Error ? error.message : String(error)
       });
     }
-  }, [state.form]);
+  }, [props.onTtsSettings, state.form]);
 
   const clearSecret = useCallback(async (key: UserSecretKey): Promise<void> => {
     try {

@@ -1,6 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiClient } from "./api/client.js";
-import { CompanionBus, type CompanionBusMessage } from "./companion-bus.js";
+import {
+  CompanionBus,
+  type CompanionBusMessage,
+  type CompanionTtsConfiguration
+} from "./companion-bus.js";
+import {
+  applyCapabilityProjection,
+  deriveCapabilityProjection,
+  detectBrowserAudioCapability
+} from "./capability-projection.js";
 import {
   createCompanionPresenceEpochGuard,
   createInterruptedResetScheduler,
@@ -20,7 +29,12 @@ import {
 } from "./speech-playback-correlation.js";
 import { LumiCanvas } from "./lumi-canvas.js";
 import type { LumiFraming } from "./lumi-cubism-model.js";
-import type { LumiControllerHandle } from "./lumi-live2d.js";
+import type { LumiControllerHandle, LumiModelLifecycle } from "./lumi-live2d.js";
+import { initialServiceStatusState, type ServiceStatusState } from "./service-status-state.js";
+import {
+  isServiceSupervisorAvailable,
+  subscribeServiceStatusState
+} from "./service-supervisor-client.js";
 import {
   createBrowserSpeechPlayer,
   SpeechPlaybackQueue,
@@ -54,6 +68,13 @@ export function CompanionPage(): JSX.Element {
   const [voiceStatus, setVoiceStatus] = useState<SpeechQueueState>("idle");
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const voiceEnabledRef = useRef(true);
+  const [ttsConfig, setTtsConfig] = useState<CompanionTtsConfiguration | null>(() =>
+    isTauriRuntime() ? null : { enabled: true, mode: "external" }
+  );
+  const ttsConfigRef = useRef(ttsConfig);
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatusState>(initialServiceStatusState);
+  const [modelLifecycle, setModelLifecycle] = useState<LumiModelLifecycle>("loading");
+  const audioCapability = useMemo(() => detectBrowserAudioCapability(), []);
   const [framing, setFraming] = useState<LumiFraming>("half");
   const presenceProjectionRef = useRef<CompanionPresenceProjection | null>(null);
   const activeEpochRef = useRef<string | null>(null);
@@ -66,18 +87,45 @@ export function CompanionPage(): JSX.Element {
     null
   );
   presenceProjectionRef.current = presence;
+  ttsConfigRef.current = ttsConfig;
+
+  const capabilityProjection = useMemo(
+    () =>
+      deriveCapabilityProjection({
+        serviceStatus,
+        persistentTtsEnabled: ttsConfig?.enabled ?? null,
+        ttsConfiguration: ttsConfig,
+        audio: audioCapability,
+        live2dLifecycle: modelLifecycle
+      }),
+    [audioCapability, modelLifecycle, serviceStatus, ttsConfig]
+  );
 
   function updatePresence(
     update: (current: CompanionPresenceProjection) => CompanionPresenceProjection
   ): void {
     const current = presenceProjectionRef.current ?? presence;
     const next = update(current);
+    if (next === current) return;
     presenceProjectionRef.current = next;
     // The controller receives the normalized input synchronously. React state
     // remains the render/configuration surface and is not the animation clock.
     lumiRef.current?.setPresentationProjection(next);
     setPresence(next);
   }
+
+  useEffect(() => {
+    if (!isTauriRuntime() && !isServiceSupervisorAvailable()) return;
+    return subscribeServiceStatusState(setServiceStatus);
+  }, []);
+
+  useEffect(() => {
+    updatePresence((current) =>
+      applyCapabilityProjection(current, capabilityProjection, (value, event) =>
+        reduceCompanionPresence(value, event)
+      )
+    );
+  }, [capabilityProjection]);
 
   useEffect(() => {
     const bus = new CompanionBus("companion");
@@ -160,6 +208,11 @@ export function CompanionPage(): JSX.Element {
         reduceCompanionPresence(current, { type: "turn-start", epoch: requestId })
       );
       if (!voiceEnabledRef.current) {
+        setVoiceStatus("idle");
+        speechBuffer.clear();
+        return;
+      }
+      if (ttsConfigRef.current?.enabled !== true) {
         setVoiceStatus("idle");
         speechBuffer.clear();
         return;
@@ -276,6 +329,10 @@ export function CompanionPage(): JSX.Element {
         recordSpeechLedger(message.requestId, message.sequence, "voice-disabled-drop");
         return;
       }
+      if (ttsConfigRef.current?.enabled !== true) {
+        recordSpeechLedger(message.requestId, message.sequence, "tts-disabled-drop");
+        return;
+      }
       recordSpeechLedger(message.requestId, message.sequence, "companion-receive", {
         text: message.text,
         language: message.language
@@ -332,6 +389,13 @@ export function CompanionPage(): JSX.Element {
             playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
             speechBuffer.clear();
           }
+          return;
+        case "tts-config":
+          // This is configuration intent from MainPage, not service health.
+          // A disabled persistent setting suppresses future synthesis but does
+          // not cancel already-playing local audio.
+          ttsConfigRef.current = message.config;
+          setTtsConfig(message.config);
           return;
         case "speak":
           handleSpeak(message);
@@ -447,6 +511,7 @@ export function CompanionPage(): JSX.Element {
       <LumiCanvas
         ref={lumiRef}
         requestedProjection={presence}
+        onModelLifecycle={setModelLifecycle}
         className="h-full w-full rounded-none"
         showFramingToggle={false}
       />

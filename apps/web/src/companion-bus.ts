@@ -17,11 +17,16 @@ export type CompanionBusRole = "main" | "companion";
 
 export type CompanionGenerationState = "listening" | "thinking" | "idle" | "interrupted";
 export type CompanionPlaybackState = "started" | "ended" | "stopped" | "error";
+export type CompanionTtsConfiguration = {
+  enabled: boolean;
+  mode: "managed" | "external";
+};
 
 export type CompanionBusMessage =
   | { kind: "user-gesture" }
   | { kind: "start-generation"; requestId: string; sessionId: string }
   | { kind: "voice-enabled"; enabled: boolean }
+  | { kind: "tts-config"; config: CompanionTtsConfiguration | null }
   | { kind: "speak"; requestId: string; sequence: number; text: string; language: string }
   | { kind: "speech-end"; requestId: string }
   | { kind: "stop-speech"; requestId: string }
@@ -43,6 +48,7 @@ const knownKinds = new Set<string>([
   "user-gesture",
   "start-generation",
   "voice-enabled",
+  "tts-config",
   "speak",
   "speech-end",
   "stop-speech",
@@ -99,6 +105,16 @@ export function isCompanionBusMessage(value: unknown): value is CompanionBusMess
       return Object.keys(message).every((key) => key === "kind");
     case "voice-enabled":
       return typeof message["enabled"] === "boolean";
+    case "tts-config": {
+      const config = message["config"];
+      if (config === null) return true;
+      if (typeof config !== "object" || config === null) return false;
+      const candidate = config as Record<string, unknown>;
+      return (
+        typeof candidate["enabled"] === "boolean" &&
+        (candidate["mode"] === "managed" || candidate["mode"] === "external")
+      );
+    }
     case "start-generation":
       return isNonEmptyString(message["requestId"]) && isNonEmptyString(message["sessionId"]);
     case "speak":
