@@ -311,6 +311,37 @@ describe("provider-neutral chat streaming", () => {
     expect(tracked.returnSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("does not fall back after visible output even when the error is fallback-eligible", async () => {
+    const backup = vi.fn(async function* (): AsyncIterable<ChatStreamEvent> {
+      yield { type: "text-delta", text: "backup" };
+    });
+    await expect(
+      collect(
+        new FallbackChatProvider([
+          createMockStreamingChatProvider("primary", {
+            chunks: ["seen", " later"],
+            failAfterChunks: 1,
+            failAfter: providerError("primary", ProviderErrorCode.InvalidApiKey)
+          }),
+          {
+            name: "backup",
+            healthCheck: async () => ({
+              provider: "backup",
+              status: "healthy",
+              checkedAt: new Date().toISOString()
+            }),
+            generateReply: async () => ({ message: { role: "assistant", content: "backup" } }),
+            streamReply: backup
+          }
+        ]).streamReply(input)
+      )
+    ).rejects.toMatchObject({
+      code: ProviderErrorCode.InvalidApiKey,
+      effectState: "committed"
+    });
+    expect(backup).not.toHaveBeenCalled();
+  });
+
   it("preserves the existing chain policy for non-retryable pre-first errors", async () => {
     const primary = createMockStreamingChatProvider("primary", {
       failBeforeFirst: providerError("primary", ProviderErrorCode.InvalidApiKey)

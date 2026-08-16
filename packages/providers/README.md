@@ -28,7 +28,10 @@ The MVP includes a `local-echo` chat provider so the server is runnable without 
 - `src/types/stt.ts`: speech-to-text provider contract.
 - `src/types/vision.ts`: vision provider contract.
 - `src/types/embedding.ts`: embedding provider contract.
-- `src/types/errors.ts`: normalized provider errors.
+- `src/types/errors.ts`: normalized provider errors and call-error policy
+  (`retryable`, `fallbackEligible`, `effectState`). Replay safety is derived
+  from `effectState !== "committed"`. `ProviderRouteStatus.fallbackEligible`
+  remains a route/readiness projection and is a different concept.
 
 ## Provider contracts
 

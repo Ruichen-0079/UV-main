@@ -48,6 +48,11 @@ export type ProviderHealth = {
   message?: string;
   enabled?: boolean | undefined;
   priority?: number | undefined;
+  /**
+   * Route/readiness projection: whether this configured identity is locally
+   * ready to occupy a fallback-chain slot. This is not call-error permission;
+   * see `ProviderError.fallbackEligible`.
+   */
   fallbackEligible?: boolean | undefined;
   lastVerifiedAt?: string | undefined;
   lastErrorCode?: string | undefined;
@@ -59,6 +64,12 @@ export type ProviderRouteStatus = ProviderHealth & {
   provider: string;
   enabled: boolean;
   priority: number;
+  /**
+   * Local readiness of this configured route inside the fallback chain.
+   * A true value means the route can be constructed from local config (or
+   * intentional mock mode). It does not mean a thrown call error permits
+   * switching providers; that permission lives on `ProviderError.fallbackEligible`.
+   */
   fallbackEligible: boolean;
 };
 

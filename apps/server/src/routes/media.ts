@@ -256,7 +256,7 @@ function sendProviderFailure(
     provider: providerError?.provider,
     code: providerError?.code ?? "PROVIDER_UNAVAILABLE",
     message: safeProviderError(error),
-    fallbackUsed: true,
+    fallbackUsed: false,
     attemptedProviders: sanitizeAttempts(extractAttempts(error)),
     setup:
       "Configure a real provider for this capability, or set PROVIDER_ALLOW_MOCKS=true for explicit offline/mock development."
@@ -264,6 +264,9 @@ function sendProviderFailure(
 }
 
 function extractAttempts(error: unknown): ProviderAttempt[] {
+  if (error instanceof ProviderError && error.attemptedProviders) {
+    return error.attemptedProviders;
+  }
   const value = (error as { attemptedProviders?: unknown })?.attemptedProviders;
   return Array.isArray(value) ? (value as ProviderAttempt[]) : [];
 }

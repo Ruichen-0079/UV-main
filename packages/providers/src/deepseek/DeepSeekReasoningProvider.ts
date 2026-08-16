@@ -26,7 +26,9 @@ export class DeepSeekReasoningProvider implements ReasoningProvider {
       model: input.model,
       temperature: input.temperature,
       maxTokens: input.maxTokens ?? input.maxOutputTokens,
-      stream: input.stream ?? false
+      // generateReasoning is non-streaming. The deprecated input.stream flag
+      // must not create a second transport control plane.
+      stream: false
     });
 
     return normalizeReasoningOutput(this.name, {

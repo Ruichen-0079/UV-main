@@ -25,7 +25,14 @@ import {
 import type { STTInput, STTOutput, STTProvider } from "./types/stt.js";
 import type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
 import type { VisionInput, VisionOutput, VisionProvider } from "./types/vision.js";
-import { ProviderError, ProviderErrorCode } from "./types/errors.js";
+import {
+  ProviderError,
+  ProviderErrorCode,
+  canFallbackProviderError,
+  cloneProviderError,
+  normalizeProviderError,
+  type ProviderEffectState
+} from "./types/errors.js";
 import { DeepSeekChatProvider } from "./deepseek/DeepSeekChatProvider.js";
 import { DeepSeekReasoningProvider } from "./deepseek/DeepSeekReasoningProvider.js";
 import { XAITTSProvider } from "./xai/XAITTSProvider.js";
@@ -1219,8 +1226,11 @@ export class FallbackChatProvider implements ChatProvider {
   }
 
   async generateReply(input: ChatInput, options?: ProviderCallOptions): Promise<ChatOutput> {
-    return runProviderChain(this.providers, "chat", (provider) =>
-      provider.generateReply(input, options)
+    return runProviderChain(
+      this.providers,
+      "chat",
+      (provider) => provider.generateReply(input, options),
+      options
     );
   }
 
@@ -1253,8 +1263,11 @@ export class FallbackReasoningProvider implements ReasoningProvider {
     input: ReasoningInput,
     options?: ProviderCallOptions
   ): Promise<ReasoningOutput> {
-    return runProviderChain(this.providers, "reasoning", (provider) =>
-      provider.generateReasoning(input, options)
+    return runProviderChain(
+      this.providers,
+      "reasoning",
+      (provider) => provider.generateReasoning(input, options),
+      options
     );
   }
 }
@@ -1277,8 +1290,11 @@ export class FallbackTTSProvider implements TTSProvider {
   }
 
   async synthesizeSpeech(input: TTSInput, options?: ProviderCallOptions): Promise<TTSOutput> {
-    return runProviderChain(this.providers, "tts", (provider) =>
-      provider.synthesizeSpeech(input, options)
+    return runProviderChain(
+      this.providers,
+      "tts",
+      (provider) => provider.synthesizeSpeech(input, options),
+      options
     );
   }
 }
@@ -1301,8 +1317,11 @@ export class FallbackSTTProvider implements STTProvider {
   }
 
   async transcribeAudio(input: STTInput, options?: ProviderCallOptions): Promise<STTOutput> {
-    return runProviderChain(this.providers, "stt", (provider) =>
-      provider.transcribeAudio(input, options)
+    return runProviderChain(
+      this.providers,
+      "stt",
+      (provider) => provider.transcribeAudio(input, options),
+      options
     );
   }
 }
@@ -1325,8 +1344,11 @@ export class FallbackVisionProvider implements VisionProvider {
   }
 
   async analyzeImage(input: VisionInput, options?: ProviderCallOptions): Promise<VisionOutput> {
-    return runProviderChain(this.providers, "vision", (provider) =>
-      provider.analyzeImage(input, options)
+    return runProviderChain(
+      this.providers,
+      "vision",
+      (provider) => provider.analyzeImage(input, options),
+      options
     );
   }
 }
@@ -1356,18 +1378,28 @@ export class FallbackEmbeddingProvider implements EmbeddingProvider {
   }
 
   async embedText(text: string, options?: ProviderCallOptions): Promise<number[]> {
-    const output = await runProviderChain(this.providers, "embedding", async (provider) => ({
-      vector: await provider.embedText(text, options),
-      model: provider.model
-    }));
+    const output = await runProviderChain(
+      this.providers,
+      "embedding",
+      async (provider) => ({
+        vector: await provider.embedText(text, options),
+        model: provider.model
+      }),
+      options
+    );
     return output.vector;
   }
 
   async embedBatch(texts: string[], options?: ProviderCallOptions): Promise<number[][]> {
-    const output = await runProviderChain(this.providers, "embedding", async (provider) => ({
-      vectors: await provider.embedBatch(texts, options),
-      model: provider.model
-    }));
+    const output = await runProviderChain(
+      this.providers,
+      "embedding",
+      async (provider) => ({
+        vectors: await provider.embedBatch(texts, options),
+        model: provider.model
+      }),
+      options
+    );
     return output.vectors;
   }
 }
@@ -1385,15 +1417,33 @@ async function runProviderChain<
 >(
   providers: TProvider[],
   capability: ProviderCapability,
-  operation: (provider: TProvider) => Promise<TOutput>
+  operation: (provider: TProvider) => Promise<TOutput>,
+  options?: ProviderCallOptions
 ): Promise<TOutput> {
   const attempts: ProviderAttempt[] = [];
-  let lastError: unknown;
+  let lastError: ProviderError | undefined;
+  const initialProvider = providers[0]?.name;
 
   for (const [index, provider] of providers.entries()) {
+    if (options?.signal?.aborted) {
+      throw attachAttemptedProviders(
+        createCancelledError(provider.name, undefined, {
+          capability,
+          effectState: "not_started"
+        }),
+        attempts
+      );
+    }
+
     const startedAt = performance.now();
     try {
       const output = await operation(provider);
+      if (options?.signal?.aborted) {
+        throw createCancelledError(provider.name, undefined, {
+          capability,
+          effectState: "unknown"
+        });
+      }
       const latencyMs = Math.round(performance.now() - startedAt);
       attempts.push({
         provider: provider.name,
@@ -1403,50 +1453,61 @@ async function runProviderChain<
         enabled: true,
         priority: index + 1
       });
+      const fallbackUsed = didUseProviderFallback(provider.name, initialProvider);
       return {
         ...output,
-        fallbackUsed: attempts.length > 1,
+        fallbackUsed,
         attemptedProviders: attempts,
         finalProvider: provider.name,
         providerMetadata: {
           ...(output.providerMetadata ?? {}),
-          fallbackUsed: attempts.length > 1,
+          fallbackUsed,
           attemptedProviders: attempts,
           finalProvider: provider.name
         }
       };
     } catch (error) {
-      lastError = error;
-      const providerError = error instanceof ProviderError ? error : null;
-      attempts.push({
-        provider: providerError?.provider ?? provider.name,
-        status:
-          providerError?.code === ProviderErrorCode.ProviderUnavailable &&
-          providerError.statusCode === undefined
-            ? "unavailable"
-            : "failed",
-        errorCode: providerError?.code ?? "PROVIDER_UNAVAILABLE",
-        error: safeProviderErrorMessage(error),
-        latencyMs: Math.round(performance.now() - startedAt),
-        enabled: true,
-        priority: index + 1
+      const providerError = normalizeProviderError(error, {
+        provider: provider.name,
+        capability,
+        signal: options?.signal
       });
+      lastError = providerError;
+      attempts.push(failedProviderAttempt(providerError, provider.name, index, startedAt, error));
+
+      if (options?.signal?.aborted) {
+        throw attachAttemptedProviders(
+          normalizeProviderError(providerError, {
+            provider: provider.name,
+            capability,
+            signal: options.signal,
+            effectState: providerError.effectState
+          }),
+          attempts
+        );
+      }
+      const anotherProviderExists = index < providers.length - 1;
+      if (
+        !canFallbackProviderError(providerError, {
+          signal: options?.signal,
+          anotherProviderExists
+        })
+      ) {
+        if (
+          !anotherProviderExists &&
+          canFallbackProviderError(providerError, {
+            signal: options?.signal,
+            anotherProviderExists: true
+          })
+        ) {
+          throw createExhaustedChainError(capability, attempts, providerError, provider.name);
+        }
+        throw attachAttemptedProviders(providerError, attempts);
+      }
     }
   }
 
-  const message = `All ${capability} providers failed: ${attempts
-    .map((attempt) => `${attempt.provider}:${attempt.errorCode ?? attempt.status}`)
-    .join(", ")}`;
-  const providerError = new ProviderError({
-    provider: providers[0]?.name ?? "provider-chain",
-    capability,
-    code:
-      lastError instanceof ProviderError ? lastError.code : ProviderErrorCode.ProviderUnavailable,
-    message,
-    retryable: false
-  });
-  Object.assign(providerError, { attemptedProviders: attempts });
-  throw providerError;
+  throw createExhaustedChainError(capability, attempts, lastError, providers[0]?.name);
 }
 
 export function getChatStreamingMode(provider: ChatProvider): ChatStreamingMode {
@@ -1460,10 +1521,14 @@ async function* runProviderStreamChain(
 ): AsyncIterable<ChatStreamEvent> {
   const attempts: ProviderAttempt[] = [];
   let lastError: ProviderError | undefined;
+  const initialProvider = providers[0]?.name;
 
   for (const [index, provider] of providers.entries()) {
     if (options.signal?.aborted) {
-      throw attachAttemptedProviders(createCancelledError(provider.name), attempts);
+      throw attachAttemptedProviders(
+        createCancelledError(provider.name, undefined, { effectState: "not_started" }),
+        attempts
+      );
     }
 
     const startedAt = performance.now();
@@ -1476,7 +1541,9 @@ async function* runProviderStreamChain(
 
       for await (const event of stream) {
         if (options.signal?.aborted) {
-          throw createCancelledError(provider.name);
+          throw createCancelledError(provider.name, undefined, {
+            effectState: emittedText || completion ? "committed" : "unknown"
+          });
         }
         if (completion) {
           throw streamProtocolError(provider.name, "Stream emitted an event after completed.");
@@ -1520,64 +1587,56 @@ async function* runProviderStreamChain(
         priority: index + 1
       };
       attempts.push(providerAttempt);
+      const fallbackUsed = didUseProviderFallback(provider.name, initialProvider);
       const output: ChatOutput = {
         ...completion,
-        fallbackUsed: attempts.length > 1,
+        fallbackUsed,
         attemptedProviders: attempts,
         finalProvider: provider.name,
         providerMetadata: {
           ...(completion.providerMetadata ?? {}),
-          fallbackUsed: attempts.length > 1,
+          fallbackUsed,
           attemptedProviders: attempts,
           finalProvider: provider.name
         }
       };
 
       if (options.signal?.aborted) {
-        throw createCancelledError(provider.name);
+        throw createCancelledError(provider.name, undefined, { effectState: "committed" });
       }
       yield { type: "completed", output };
       return;
     } catch (error) {
-      const providerError = normalizeStreamError(error, provider.name, options.signal);
+      let providerError = normalizeStreamError(error, provider.name, options.signal);
+      if (emittedText || completion) {
+        providerError = cloneProviderError(providerError, { effectState: "committed" });
+      }
       lastError = providerError;
-      attempts.push({
-        provider: providerError.provider,
-        status:
-          providerError.code === ProviderErrorCode.ProviderUnavailable &&
-          providerError.statusCode === undefined
-            ? "unavailable"
-            : "failed",
-        errorCode: providerError.code,
-        error: safeProviderErrorMessage(providerError),
-        latencyMs: Math.round(performance.now() - startedAt),
-        enabled: true,
-        priority: index + 1
-      });
-      attachAttemptedProviders(providerError, attempts);
+      attempts.push(
+        failedProviderAttempt(providerError, provider.name, index, startedAt, providerError)
+      );
+      const attached = attachAttemptedProviders(providerError, attempts);
+      const anotherProviderExists = index < providers.length - 1;
+      const fallbackContext = {
+        signal: options.signal,
+        anotherProviderExists,
+        visibleOutput: emittedText,
+        completed: Boolean(completion)
+      };
 
-      if (
-        providerError.code === ProviderErrorCode.Cancelled ||
-        options.signal?.aborted ||
-        emittedText ||
-        completion
-      ) {
-        throw providerError;
+      if (!canFallbackProviderError(providerError, fallbackContext)) {
+        if (
+          !anotherProviderExists &&
+          canFallbackProviderError(providerError, { ...fallbackContext, anotherProviderExists: true })
+        ) {
+          throw createExhaustedChainError("chat", attempts, providerError, provider.name);
+        }
+        throw attached;
       }
     }
   }
 
-  const chainError = new ProviderError({
-    provider: providers[0]?.name ?? "provider-chain",
-    capability: "chat",
-    code: lastError?.code ?? ProviderErrorCode.ProviderUnavailable,
-    message: `All chat providers failed: ${attempts
-      .map((attempt) => `${attempt.provider}:${attempt.errorCode ?? attempt.status}`)
-      .join(", ")}`,
-    retryable: false
-  });
-  attachAttemptedProviders(chainError, attempts);
-  throw chainError;
+  throw createExhaustedChainError("chat", attempts, lastError, providers[0]?.name);
 }
 
 function streamProvider(
@@ -1637,22 +1696,27 @@ function normalizeStreamError(
       cause: error
     });
   }
-  return new ProviderError({
-    provider,
-    capability: "chat",
-    code: ProviderErrorCode.NetworkError,
-    message: "Chat stream failed.",
-    cause: error
-  });
+  return normalizeProviderError(error, { provider, capability: "chat" });
 }
 
-function createCancelledError(provider: string, cause?: unknown): ProviderError {
+function createCancelledError(
+  provider: string,
+  cause?: unknown,
+  options?: {
+    capability?: ProviderCapability;
+    effectState?: ProviderEffectState;
+  }
+): ProviderError {
+  const capability = options?.capability ?? "chat";
   return new ProviderError({
     provider,
-    capability: "chat",
+    capability,
     code: ProviderErrorCode.Cancelled,
-    message: "Chat stream was cancelled.",
+    message:
+      capability === "chat" ? "Chat stream was cancelled." : `${provider} ${capability} was cancelled.`,
     retryable: false,
+    fallbackEligible: false,
+    effectState: options?.effectState ?? "unknown",
     cause
   });
 }
@@ -1671,8 +1735,70 @@ function attachAttemptedProviders(
   error: ProviderError,
   attempts: ProviderAttempt[]
 ): ProviderError {
-  Object.assign(error, { attemptedProviders: attempts });
-  return error;
+  if (error.attemptedProviders === attempts) {
+    return error;
+  }
+  return cloneProviderError(error, { attemptedProviders: attempts });
+}
+
+function didUseProviderFallback(
+  successfulProvider: string,
+  initialProvider: string | undefined
+): boolean {
+  return Boolean(initialProvider && successfulProvider !== initialProvider);
+}
+
+function failedProviderAttempt(
+  providerError: ProviderError,
+  fallbackProvider: string,
+  index: number,
+  startedAt: number,
+  source: unknown
+): ProviderAttempt {
+  return {
+    provider: providerError.provider || fallbackProvider,
+    status:
+      providerError.code === ProviderErrorCode.ProviderUnavailable &&
+      providerError.statusCode === undefined
+        ? "unavailable"
+        : "failed",
+    errorCode: providerError.code,
+    error:
+      source instanceof ProviderError
+        ? safeProviderErrorMessage(providerError)
+        : providerError.message,
+    latencyMs: Math.round(performance.now() - startedAt),
+    enabled: true,
+    priority: index + 1
+  };
+}
+
+function createExhaustedChainError(
+  capability: ProviderCapability,
+  attempts: ProviderAttempt[],
+  lastError: ProviderError | undefined,
+  fallbackProvider: string | undefined
+): ProviderError {
+  const message = `All ${capability} providers failed: ${attempts
+    .map((attempt) => `${attempt.provider}:${attempt.errorCode ?? attempt.status}`)
+    .join(", ")}`;
+  if (lastError) {
+    return cloneProviderError(lastError, {
+      message,
+      cause: lastError,
+      attemptedProviders: attempts
+    });
+  }
+  return new ProviderError({
+    provider: fallbackProvider ?? "provider-chain",
+    capability,
+    code: ProviderErrorCode.ProviderUnavailable,
+    message,
+    retryable: false,
+    fallbackEligible: true,
+    effectState: "not_started",
+    attemptedProviders: attempts
+  });
 }
 
 class UnimplementedChatProvider implements ChatProvider {

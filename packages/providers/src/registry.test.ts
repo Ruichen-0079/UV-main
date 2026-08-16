@@ -83,8 +83,11 @@ describe("ProviderRegistry", () => {
       registry.getChatProvider().generateReply({ messages: [{ role: "user", content: "hello" }] })
     ).rejects.toMatchObject({
       code: "PROVIDER_UNAVAILABLE",
-      provider: "deepseek",
-      capability: "chat"
+      provider: "local",
+      capability: "chat",
+      retryable: false,
+      fallbackEligible: true,
+      effectState: "not_started"
     });
   });
 
