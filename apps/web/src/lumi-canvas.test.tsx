@@ -211,7 +211,6 @@ describe("LumiCanvas normalized projection input", () => {
         root.render(
           createElement(LumiCanvas, {
             ref,
-            requestedPresence: "thinking",
             requestedProjection: projection,
             onModelLifecycle: (state) => lifecycles.push(state),
             showFramingToggle: false
