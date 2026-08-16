@@ -12,7 +12,123 @@ import { createInitialCompanionPresence } from "./companion-presence.js";
 const playbackSegment = { requestId: "turn-a", sequence: 0 };
 const nextPlaybackSegment = { requestId: "turn-a", sequence: 1 };
 
+function createPresentationHarness() {
+  const callbacks: Array<(now: number) => void> = [];
+  const controller = new LumiPresentationController(() => undefined, {
+    random: () => 0,
+    now: () => 0,
+    requestFrame: (callback) => {
+      callbacks.push(callback);
+      return callbacks.length;
+    },
+    cancelFrame: () => undefined,
+    isHidden: () => false
+  });
+  return { callbacks, controller };
+}
+
+function listeningProjection(epoch: string | null = null) {
+  return {
+    ...createInitialCompanionPresence(),
+    epoch,
+    activity: "listening" as const
+  };
+}
+
 describe("Lumi presence and audio envelope", () => {
+  it("uses normalized listening input when its epoch is null", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setCompatibilityState("thinking");
+    controller.setProjection(listeningProjection());
+    controller.start();
+
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("listening");
+    controller.dispose();
+  });
+
+  it("keeps normalized input authoritative over later legacy updates", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setProjection(listeningProjection());
+    controller.setCompatibilityState("thinking");
+    controller.start();
+
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("listening");
+    controller.dispose();
+  });
+
+  it("switches from legacy compatibility to normalized epoch-less input", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setCompatibilityState("thinking");
+    controller.start();
+    callbacks.shift()?.(16);
+    expect(controller.getDebug().state).toBe("thinking");
+
+    controller.setProjection(listeningProjection());
+    callbacks.shift()?.(32);
+
+    expect(controller.getDebug().state).toBe("listening");
+    controller.dispose();
+  });
+
+  it("keeps normalized epochful input behavior unchanged", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setProjection({
+      ...createInitialCompanionPresence(),
+      epoch: "turn-a",
+      lifecycle: "active",
+      activity: "thinking"
+    });
+    controller.start();
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("thinking");
+    controller.dispose();
+  });
+
+  it("treats other epoch-less normalized activity as normalized input", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setCompatibilityState("thinking");
+    controller.setProjection({
+      ...createInitialCompanionPresence(),
+      activity: "idle"
+    });
+    controller.start();
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("idle");
+    controller.dispose();
+  });
+
+  it("retains legacy compatibility when normalized input was never installed", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setCompatibilityState("thinking");
+    controller.start();
+    callbacks.shift()?.(16);
+    expect(controller.getDebug().state).toBe("thinking");
+
+    controller.setCompatibilityState("idle");
+    callbacks.shift()?.(32);
+
+    expect(controller.getDebug().state).toBe("idle");
+    controller.dispose();
+  });
+
+  it("combines epoch-less normalized listening with supplied gaze", () => {
+    const { callbacks, controller } = createPresentationHarness();
+    controller.setProjection(listeningProjection());
+    controller.setGazeTarget({ x: 0.6, y: 0.2, strength: 1 });
+    controller.start();
+    callbacks.shift()?.(16);
+
+    expect(controller.getDebug().state).toBe("listening");
+    expect(controller.getDebug().gaze.targetX).toBeGreaterThan(0);
+    controller.dispose();
+  });
+
   it("owns one lifecycle-safe presentation clock independent of React rerenders", () => {
     const callbacks: Array<(now: number) => void> = [];
     const applied: Array<{ blink?: number; breath?: number; eyeBallX?: number }> = [];
@@ -506,5 +622,44 @@ describe("Lumi presence and audio envelope", () => {
     expect(second.dispose).not.toHaveBeenCalled();
     expect(controller.getPresence()).toBe("idle");
     controller.dispose();
+  });
+
+  it("preserves normalized epoch-less input across model reload", async () => {
+    const callbacks: Array<(now: number) => void> = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callbacks.push((now) => callback(now));
+      return callbacks.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => undefined);
+    try {
+      const makeAdapter = () => ({
+        load: vi.fn(async () => undefined),
+        setMouthOpen: vi.fn(),
+        setMouthForm: vi.fn(),
+        setParameter: vi.fn(),
+        setBreath: vi.fn(),
+        setFraming: vi.fn(),
+        resetMouth: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn()
+      });
+      const adapters = [makeAdapter(), makeAdapter()];
+      let next = 0;
+      const controller = new LumiController(() => adapters[next++]!, "model3.json");
+      controller.setPresentationProjection(listeningProjection());
+
+      await controller.load();
+      callbacks.pop()?.(16);
+      expect(controller.getDebugInfo().activePresentationState).toBe("listening");
+
+      callbacks.length = 0;
+      await controller.load();
+      callbacks.pop()?.(32);
+      expect(controller.getDebugInfo().activePresentationState).toBe("listening");
+
+      controller.dispose();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

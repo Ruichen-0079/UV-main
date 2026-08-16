@@ -138,6 +138,7 @@ export class LumiPresentationController {
   private readonly cancelFrame: ((frame: number) => void) | null;
   private readonly isHidden: () => boolean;
   private projection: CompanionPresenceProjection = createInitialCompanionPresence();
+  private normalizedInputActive = false;
   private compatibilityState: CompanionPresentationState = "idle";
   private suppliedGazeTarget: SuppliedGazeTarget | null = null;
   private blinkScheduler: ReturnType<typeof createCompanionBlinkScheduler> | null = null;
@@ -183,6 +184,7 @@ export class LumiPresentationController {
 
   setProjection(projection: CompanionPresenceProjection): void {
     if (this.disposed) return;
+    this.normalizedInputActive = true;
     this.projection = projection;
   }
 
@@ -269,6 +271,7 @@ export class LumiPresentationController {
     if (this.disposed) return;
     this.stop();
     this.disposed = true;
+    this.normalizedInputActive = false;
     this.projection = createInitialCompanionPresence();
     this.suppliedGazeTarget = null;
   }
@@ -280,9 +283,9 @@ export class LumiPresentationController {
   private currentState(): CompanionPresentationState {
     const forced = readForcedPresentationState();
     if (forced !== null) return forced;
-    return this.projection.epoch === null
-      ? this.compatibilityState
-      : getCompanionPresentationState(this.projection);
+    return this.normalizedInputActive
+      ? getCompanionPresentationState(this.projection)
+      : this.compatibilityState;
   }
 
   private schedule(callback: (now: number) => void): void {
