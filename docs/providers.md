@@ -192,6 +192,57 @@ NVIDIA vision is a fallback interface in v1. Configure model IDs explicitly; sui
 
 Local media providers are interface boundaries in v1. A local OpenAI-compatible server may be configured and reported in status, but STT/TTS/Vision runtime adapters can still return a clear unavailable error until a compatible adapter is implemented. Mock media providers remain deterministic test/offline tools only.
 
+## Batch STT contract (P7-5)
+
+STT remains batch-only. The provider contract is
+`transcribeAudio(input, options?) -> Promise<STTOutput>`, with
+`ProviderCallOptions.signal` as the caller-owned cancellation channel. A
+future streaming STT capability must use a separate additive interface; this
+contract does not add streaming types, WebSockets, or streaming DTOs.
+Any future design would separately define partial/final ordering, sequence
+identity, cancellation, input format, finalization, timestamp/confidence
+semantics, and connection lifecycle; those are not current TypeScript
+contract requirements.
+
+Provider adapters accept `audioUrl`, `audioBase64`, `audioBuffer`, `audio`, and
+`localFilePath`. DashScope precedence is fixed as `audioUrl`, `audioBase64`,
+`audioBuffer`, `audio`, then `localFilePath`; `audio` and `audioBuffer` are
+compatibility aliases. Provider-level sources are not mutually exclusive, and
+`providerMetadata.sourceKind` identifies the source actually selected.
+Filesystem/path support is an internal provider capability only.
+
+The public media routes intentionally expose a narrower DTO: `audioBase64`,
+`mimeType`, `language`, identity metadata, and explicit non-empty `mockText`
+development compatibility. They do not expose `audioUrl`, `localFilePath`, or
+arbitrary raw bytes. A request must provide valid non-empty base64 audio or
+non-empty `mockText`; malformed audio is rejected even when `mockText` is
+present. Canonical padded and unpadded base64 are accepted, including valid
+base64 data URLs, while non-canonical pad-bit encodings are rejected.
+
+DashScope owns its inline-audio size limit and rejects zero-byte audio and
+relative local paths. Local-file MIME inference remains adapter behavior; no
+global or vendor MIME allowlist was introduced. These are adapter boundaries,
+not universal STT limits.
+
+Successful transcription requires meaningful non-empty text. Language,
+confidence, and normalized usage may be returned when available. The current
+adapter does not fabricate segments or timestamps; those fields remain
+optional capability space.
+
+For public STT routes, client disconnect is represented by request `aborted`
+or socket `close`. Normal request-body completion (`IncomingMessage` raw
+`close`) is not a disconnect signal. STT listeners are removed when the call
+settles. For `/v1/voice/message`, STT disconnect ownership ends before the
+normal Runtime/chat call begins, and the STT signal is not propagated into
+`handleUserMessage()`. This is not general chat interruption.
+
+P7-5 does not change `ProviderError` policy, `retryable`, `fallbackEligible`,
+`effectState`, fallback ordering, or same-provider retries. It introduces no
+billable STT health I/O; DashScope ordinary health remains
+readiness/configuration oriented under the existing health model. The existing
+`stt.completed` protocol entry, if used elsewhere, is not an implemented
+streaming STT contract.
+
 ## Swapping Providers
 
 To add or replace a provider:
@@ -299,7 +350,8 @@ There is intentionally no automatic “sync `.env.local` into `.env`” behavior
 Planned provider extensions:
 
 - streaming TTS over WebSocket or chunked audio events
-- streaming STT for live microphone input
+- future additive streaming STT for live microphone input through a separate
+  interface and capability
 - vision screen sharing and frame sampling
 - local embedding models for fully local memory search
 - NATS-backed provider task events for long-running jobs
