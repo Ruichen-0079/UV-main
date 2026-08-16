@@ -128,6 +128,18 @@ export function deriveDashboardTtsPolicy(
   return deriveEffectiveVoiceOutput(input);
 }
 
+export function flushDashboardSpeechTail(
+  tail: readonly string[],
+  requestTts: boolean,
+  enqueue: (text: string) => void,
+  finish: () => void
+): void {
+  if (requestTts) {
+    for (const text of tail) enqueue(text);
+  }
+  finish();
+}
+
 function recordChatTiming(
   timingRef: MutableRefObject<ChatTimingMetrics | null>,
   patch: Partial<ChatTimingMetrics>
@@ -813,10 +825,12 @@ function ChatPage(): JSX.Element {
       const message = friendlyChatError(caught);
       const speech = speechSessionRef.current;
       if (speech?.generation === requestId) {
-        for (const text of speech.segmenter.flush("failed")) {
-          enqueueDashboardSpeech(speech, text);
-        }
-        speech.queue.finish();
+        flushDashboardSpeechTail(
+          speech.segmenter.flush("failed"),
+          effectiveVoiceOutputRef.current.requestTts,
+          (text) => enqueueDashboardSpeech(speech, text),
+          () => speech.queue.finish()
+        );
       }
       dispatchMessages({ type: "fail", assistantId, error: message });
       setError(message);

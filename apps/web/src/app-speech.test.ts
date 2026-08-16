@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { dashboardVoicePlaybackStatusLabel, deriveDashboardTtsPolicy } from "./App.js";
+import {
+  dashboardVoicePlaybackStatusLabel,
+  deriveDashboardTtsPolicy,
+  flushDashboardSpeechTail
+} from "./App.js";
 import {
   createInitialCompanionPresence,
   getCompanionPresentationState,
@@ -96,5 +100,118 @@ describe("dashboard effective TTS policy", () => {
   it("keeps persistent and per-turn disablement authoritative", () => {
     expect(policy("managed", false, "available").requestTts).toBe(false);
     expect(policy("external", true, "available", false).requestTts).toBe(false);
+  });
+});
+
+describe("dashboard failed-tail speech admission", () => {
+  it("does not admit a failed tail when the current policy forbids TTS", () => {
+    const enqueued: string[] = [];
+    let finished = 0;
+    const policy = deriveDashboardTtsPolicy({
+      persistentTtsEnabled: true,
+      perTurnVoiceOutput: true,
+      ttsCapability: "unknown",
+      ttsConfiguration: { enabled: true, mode: "managed" }
+    });
+
+    flushDashboardSpeechTail(
+      ["tail"],
+      policy.requestTts,
+      (text) => enqueued.push(text),
+      () => {
+        finished += 1;
+      }
+    );
+
+    expect(enqueued).toEqual([]);
+    expect(finished).toBe(1);
+  });
+
+  it("blocks failed-tail admission after persistent TTS is disabled", () => {
+    const enqueued: string[] = [];
+    let finished = 0;
+    const policy = deriveDashboardTtsPolicy({
+      persistentTtsEnabled: false,
+      perTurnVoiceOutput: true,
+      ttsCapability: "available",
+      ttsConfiguration: { enabled: false, mode: "managed" }
+    });
+
+    flushDashboardSpeechTail(
+      ["tail"],
+      policy.requestTts,
+      (text) => enqueued.push(text),
+      () => {
+        finished += 1;
+      }
+    );
+
+    expect(policy.requestTts).toBe(false);
+    expect(enqueued).toEqual([]);
+    expect(finished).toBe(1);
+  });
+
+  it("blocks failed-tail admission after the per-turn voice preference is disabled", () => {
+    const enqueued: string[] = [];
+    let finished = 0;
+    const policy = deriveDashboardTtsPolicy({
+      persistentTtsEnabled: true,
+      perTurnVoiceOutput: false,
+      ttsCapability: "available",
+      ttsConfiguration: { enabled: true, mode: "managed" }
+    });
+
+    flushDashboardSpeechTail(
+      ["tail"],
+      policy.requestTts,
+      (text) => enqueued.push(text),
+      () => {
+        finished += 1;
+      }
+    );
+
+    expect(policy.requestTts).toBe(false);
+    expect(enqueued).toEqual([]);
+    expect(finished).toBe(1);
+  });
+
+  it("keeps failed-tail admission when the current policy allows TTS", () => {
+    const enqueued: string[] = [];
+    let finished = 0;
+    const policy = deriveDashboardTtsPolicy({
+      persistentTtsEnabled: true,
+      perTurnVoiceOutput: true,
+      ttsCapability: "unknown",
+      ttsConfiguration: { enabled: true, mode: "external" }
+    });
+
+    flushDashboardSpeechTail(
+      ["tail-1", "tail-2"],
+      policy.requestTts,
+      (text) => enqueued.push(text),
+      () => {
+        finished += 1;
+      }
+    );
+
+    expect(enqueued).toEqual(["tail-1", "tail-2"]);
+    expect(finished).toBe(1);
+  });
+
+  it("finishes an empty tail without admitting or cancelling speech", () => {
+    const enqueued: string[] = [];
+    let finished = 0;
+
+    flushDashboardSpeechTail(
+      [],
+      false,
+      (text) => enqueued.push(text),
+      () => {
+        finished += 1;
+      }
+    );
+
+    expect(enqueued).toEqual([]);
+    expect(finished).toBe(1);
   });
 });
