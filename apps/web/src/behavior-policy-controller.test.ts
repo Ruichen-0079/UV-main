@@ -15,12 +15,12 @@ type FakeTimer = {
   cancelled: boolean;
 };
 
-function createHarness() {
+function createHarness(sessionId = "test-session") {
   let now = 0;
   const timers: FakeTimer[] = [];
   const writes: Array<SuppliedGazeTarget | null> = [];
   const controller = createBehaviorPolicyController({
-    sessionId: "test-session",
+    sessionId,
     controllerId: "test-controller",
     now: () => now,
     setTimer(callback, delayMs) {
@@ -177,6 +177,39 @@ describe("BehaviorPolicyController", () => {
     expect(harness.controller.getState().active.kind).toBe("none");
   });
 
+  it("retires obsolete thinking before equal-clock speaking succession", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.setNow(100);
+    harness.controller.updatePresence(presence({ activity: "thinking" }));
+    const thinkingTimer = harness.latestTimer();
+
+    harness.controller.updatePresence(presence({ activity: "thinking", speech: "active" }));
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "gaze",
+      reason: "speech-active",
+      payload: { target: "user" }
+    });
+    expect(targetWrites(harness).at(-1)).toMatchObject({ x: 0, y: 0.08 });
+
+    harness.fire(thinkingTimer, 200);
+    expect(harness.controller.getState().active).toMatchObject({ reason: "speech-active" });
+    expect(targetWrites(harness).at(-1)).toMatchObject({ x: 0, y: 0.08 });
+  });
+
+  it("keeps P0 listening and P2 interruption priority behavior unchanged", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ activity: "listening" }));
+    harness.controller.updatePresence(
+      presence({ activity: "thinking", speech: "active", transition: "interrupted" })
+    );
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      reason: "listening-entry"
+    });
+  });
+
   it("reconciles a stale turn before a current lower-priority turn can be admitted", () => {
     const harness = createHarness();
     harness.controller.updatePresence(presence());
@@ -186,6 +219,62 @@ describe("BehaviorPolicyController", () => {
     expect(harness.controller.getState().active.kind).toBe("none");
     harness.controller.updatePresence(presence({ epoch: "turn-b", activity: "listening" }));
     expect(harness.controller.getState().active.kind).toBe("attention");
+  });
+
+  it("uses session scope for listening even when a previous epoch is present", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence({ epoch: "turn-a" }));
+    harness.controller.updatePresence(presence({ epoch: "turn-a", activity: "listening" }));
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      scope: "session",
+      sessionId: "test-session"
+    });
+
+    harness.setNow(10);
+    harness.controller.updatePresence(presence({ epoch: "turn-b", activity: "thinking" }));
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      scope: "session",
+      sessionId: "test-session"
+    });
+  });
+
+  it("uses the same session scope for epoch-null listening", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence({ epoch: null }));
+    harness.controller.updatePresence(presence({ epoch: null, activity: "listening" }));
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      scope: "session",
+      sessionId: "test-session"
+    });
+  });
+
+  it("does not create turn lifecycle pulses without an authoritative epoch", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence({ epoch: null }));
+    harness.controller.updatePresence(presence({ epoch: null, activity: "thinking" }));
+    harness.controller.updatePresence(
+      presence({ epoch: null, activity: "idle", speech: "active" })
+    );
+    harness.controller.updatePresence(
+      presence({
+        epoch: null,
+        activity: "idle",
+        speech: "inactive",
+        lifecycle: "active",
+        transition: "interrupted"
+      })
+    );
+    expect(harness.controller.getState().active.kind).toBe("none");
+  });
+
+  it("fails closed when session scope has no valid session identity", () => {
+    const harness = createHarness(" ");
+    harness.controller.updatePresence(presence({ epoch: "turn-a" }));
+    harness.controller.updatePresence(presence({ epoch: "turn-a", activity: "listening" }));
+    expect(harness.controller.getState().active.kind).toBe("none");
   });
 
   it("keeps an early timer firing active and reschedules the same exact pulse", () => {
@@ -201,6 +290,42 @@ describe("BehaviorPolicyController", () => {
     harness.fire(lateTimer, LIFECYCLE_PULSE_TTL_MS.thinking);
     expect(harness.controller.getState().active.kind).toBe("none");
     expect(harness.writes.at(-1)).toBeNull();
+  });
+
+  it("fences duplicate early callbacks and permits one legitimate reschedule", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ activity: "thinking" }));
+    const firstTimer = harness.latestTimer();
+
+    harness.fire(firstTimer, 100);
+    expect(harness.timers).toHaveLength(2);
+
+    harness.fire(firstTimer, 100);
+    expect(harness.timers).toHaveLength(2);
+    expect(harness.controller.getState().active.kind).toBe("gaze");
+
+    const secondTimer = harness.latestTimer();
+    harness.fire(secondTimer, 200);
+    expect(harness.timers).toHaveLength(3);
+    expect(harness.controller.getState().active.kind).toBe("gaze");
+  });
+
+  it("does not reschedule a timer after Live2D capability downgrade", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ activity: "thinking" }));
+    const timer = harness.latestTimer();
+    harness.controller.updatePresence(
+      presence({
+        activity: "thinking",
+        capabilities: { tts: "unknown", audio: "unknown", live2d: "unavailable" }
+      })
+    );
+    const timerCount = harness.timers.length;
+    harness.fire(timer, 100);
+    expect(harness.timers).toHaveLength(timerCount);
+    expect(harness.controller.getState().active.kind).toBe("none");
   });
 
   it("releases visual policy on Live2D downgrade without replaying on recovery", () => {

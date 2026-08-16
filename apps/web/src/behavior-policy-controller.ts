@@ -68,6 +68,7 @@ type LifecycleIntentSpec =
     };
 
 type ActiveTimer = {
+  readonly token: number;
   readonly generation: number;
   readonly intentRef: BehaviorIntentRef;
   readonly handle: BehaviorPolicyTimerHandle;
@@ -83,6 +84,15 @@ function activeRef(state: BehaviorPolicyState): BehaviorIntentRef | null {
 
 function isValidMonotonicNow(value: number): boolean {
   return Number.isFinite(value) && value >= 0;
+}
+
+function isThinkingLifecycleIntent(intent: BehaviorIntent): boolean {
+  return (
+    intent.kind === "gaze" &&
+    intent.source === "lifecycle" &&
+    intent.reason === "thinking" &&
+    intent.payload.target === "down-thoughtful"
+  );
 }
 
 function semanticGazeForIntent(intent: BehaviorIntent): {
@@ -125,9 +135,14 @@ function createLifecycleIntent(
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) return null;
 
   const scope =
-    presence.epoch !== null && presence.epoch.length > 0
-      ? { scope: "turn" as const, epoch: presence.epoch }
-      : { scope: "session" as const, sessionId };
+    spec.reason === "listening-entry"
+      ? sessionId.trim().length > 0
+        ? { scope: "session" as const, sessionId }
+        : null
+      : presence.epoch !== null && presence.epoch.trim().length > 0
+        ? { scope: "turn" as const, epoch: presence.epoch }
+        : null;
+  if (scope === null) return null;
 
   return {
     intentId: `${controllerId}:${generation}:${sequence}:${spec.reason}`,
@@ -150,6 +165,7 @@ export function createBehaviorPolicyController(
   let timer: ActiveTimer | null = null;
   let generation = 0;
   let sequence = 0;
+  let timerToken = 0;
   let disposed = false;
   let lastExecutionKey: string | null = null;
   const controllerId =
@@ -170,6 +186,7 @@ export function createBehaviorPolicyController(
   }
 
   function clearActiveTimer(): void {
+    timerToken += 1;
     if (timer === null) return;
     const current = timer;
     timer = null;
@@ -246,16 +263,18 @@ export function createBehaviorPolicyController(
     const delayMs = Math.max(0, intent.expiresAtMs - nowMs);
     const intentRef = Object.freeze(getBehaviorIntentRef(intent));
     const timerGeneration = generation;
+    const currentTimerToken = ++timerToken;
     try {
       const handle = options.setTimer(() => {
         if (disposed || timerGeneration !== generation) return;
         if (
-          timer !== null &&
-          timer.generation === timerGeneration &&
-          sameIntentRef(timer.intentRef, intentRef)
-        ) {
-          timer = null;
-        }
+          timer === null ||
+          timer.token !== currentTimerToken ||
+          timer.generation !== timerGeneration ||
+          !sameIntentRef(timer.intentRef, intentRef)
+        )
+          return;
+        timer = null;
 
         const callbackNow = readNow();
         const currentPresence = previousPresence;
@@ -281,7 +300,7 @@ export function createBehaviorPolicyController(
           scheduleActiveTimer(active, callbackNow);
         }
       }, delayMs);
-      timer = { generation: timerGeneration, intentRef, handle };
+      timer = { token: currentTimerToken, generation: timerGeneration, intentRef, handle };
     } catch {
       failSafe();
     }
@@ -304,8 +323,45 @@ export function createBehaviorPolicyController(
       ttlMs
     );
     if (intent === null) return;
+
+    const current = state.active;
+    const shouldRetireThinking =
+      spec.reason === "speech-active" && isThinkingLifecycleIntent(current);
+    if (
+      shouldRetireThinking &&
+      current.kind !== "none" &&
+      isAdmittedCandidate(intent, presence, nowMs)
+    ) {
+      const currentRef = getBehaviorIntentRef(current);
+      const retiredState = reduceSafely(
+        { type: "release-intent", intentRef: currentRef },
+        context(presence, nowMs)
+      );
+      applyState(retiredState, nowMs);
+    }
+
     const nextState = reduceSafely({ type: "submit-intent", intent }, context(presence, nowMs));
     applyState(nextState, nowMs);
+  }
+
+  function isAdmittedCandidate(
+    intent: BehaviorSemanticIntent,
+    presence: CompanionPresenceProjection,
+    nowMs: number
+  ): boolean {
+    try {
+      const candidateState = reduceBehaviorPolicy(
+        createInitialBehaviorPolicyState(),
+        { type: "submit-intent", intent },
+        context(presence, nowMs)
+      );
+      return (
+        candidateState.active.kind !== "none" &&
+        sameIntentRef(getBehaviorIntentRef(candidateState.active), getBehaviorIntentRef(intent))
+      );
+    } catch {
+      return false;
+    }
   }
 
   function reconcile(presence: CompanionPresenceProjection, nowMs: number): void {
