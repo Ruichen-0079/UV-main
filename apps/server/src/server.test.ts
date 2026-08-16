@@ -1028,9 +1028,11 @@ describe("server", () => {
       expect(message.statusCode).toBe(503);
       expect(message.json()).toMatchObject({
         error: "provider_unavailable",
-        provider: "deepseek",
+        provider: "local",
         capability: "chat"
       });
+      expect(message.json()).not.toHaveProperty("fallbackEligible");
+      expect(message.json()).not.toHaveProperty("effectState");
       expect(message.json().setup).toContain("PROVIDER_ALLOW_MOCKS=true");
       expect(message.body).not.toContain("API_KEY");
     } finally {
@@ -1059,6 +1061,7 @@ describe("server", () => {
         error: "provider_unavailable",
         capability: "stt"
       });
+      expect(response.json().fallbackUsed).toBe(false);
       expect(response.json().attemptedProviders).toEqual(
         expect.arrayContaining([
           expect.objectContaining({

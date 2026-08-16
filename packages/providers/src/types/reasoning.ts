@@ -13,6 +13,11 @@ export type ReasoningInput = {
   temperature?: number | undefined;
   maxTokens?: number | undefined;
   maxOutputTokens?: number | undefined;
+  /**
+   * @deprecated `generateReasoning()` is always non-streaming. This field is
+   * retained only for input compatibility and must not change the transport
+   * mode.
+   */
   stream?: boolean | undefined;
   metadata?: Record<string, unknown> | undefined;
 };

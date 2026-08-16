@@ -130,7 +130,15 @@ YUVI 默认采用 real-provider-first。`EMBEDDING_PROVIDER=openai-compatible` �
 - `UNSUPPORTED_INPUT`
 - `PROVIDER_UNAVAILABLE`
 
-运行时代码不应该检查 vendor-specific error body。
+`ProviderError` 有三条独立策略轴：
+
+- `retryable`：同一提供方稍后可能成功。P7-4B 不会自动同提供方重试。
+- `fallbackEligible`：该错误本身允许切换提供方身份。
+- `effectState`：`not_started` / `unknown` / `committed`。是否可重放由 `effectState !== "committed"` 派生，不是可独立赋值的布尔值。
+
+`ProviderRouteStatus.fallbackEligible` 仍是 P7-2 的路由就绪投影，不是调用错误的切换许可。`Cancelled` 永不重试、永不 fallback。本地 `UNSUPPORTED_INPUT` 会停止链路；带 HTTP 状态的厂商输入拒绝可以 fallback。Chat 在首个可见 delta 之前可以 fallback（包括 `INVALID_API_KEY`），可见输出之后不能 fallback。
+
+运行时代码不应该检查 vendor-specific error body。内部策略字段不会进入公开 SSE/JSON。
 
 ## Security Rules
 

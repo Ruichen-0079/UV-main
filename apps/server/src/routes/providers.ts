@@ -474,6 +474,9 @@ function verificationStatusFields(status: ProviderHealth): {
 }
 
 function attemptedProvidersFrom(error: unknown): ProviderAttempt[] {
+  if (error instanceof ProviderError && error.attemptedProviders) {
+    return error.attemptedProviders;
+  }
   const attempts = (error as { attemptedProviders?: unknown } | null)?.attemptedProviders;
   return Array.isArray(attempts) ? (attempts as ProviderAttempt[]) : [];
 }

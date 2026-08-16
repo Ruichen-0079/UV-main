@@ -14,10 +14,24 @@ export type {
   TokenUsage,
   ProviderVerificationMode
 } from "./types/common.js";
-export { ProviderError, ProviderErrorCode, isRetryableProviderError } from "./types/errors.js";
+export {
+  ProviderError,
+  ProviderErrorCode,
+  canFallbackProviderError,
+  cloneProviderError,
+  isProviderReplaySafe,
+  isRetryableProviderError,
+  isSafeToReplay,
+  mapHttpStatusToProviderErrorCode,
+  normalizeProviderError,
+  resolveProviderErrorPolicy
+} from "./types/errors.js";
 export type {
+  ProviderEffectState,
   ProviderErrorCode as ProviderErrorCodeType,
-  ProviderErrorOptions
+  ProviderErrorOptions,
+  ProviderErrorPolicy,
+  ProviderFallbackContext
 } from "./types/errors.js";
 export type {
   ChatInput,

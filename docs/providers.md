@@ -60,7 +60,9 @@ readiness compatibility projection; it does not mean that a remote provider
 was contacted successfully. `ProviderRegistry.getStatus()` and ordinary
 `GET /health` perform no provider network calls and do not consume quota.
 
-When a chain is used, calls try configured providers by priority. The response includes safe fallback metadata such as `fallbackUsed`, `attemptedProviders`, and `finalProvider`. Attempt records include provider name, status, safe error code, and latency, but never API keys, Authorization headers, `DATABASE_URL`, or raw secret values.
+When a chain is used, calls try configured providers by priority. The response includes safe fallback metadata such as `fallbackUsed`, `attemptedProviders`, and `finalProvider`. `fallbackUsed` is true only when the successful provider identity differs from the first attempted provider identity. A total failure is not a successful fallback. Attempt records include provider name, status, safe error code, and latency, but never API keys, Authorization headers, `DATABASE_URL`, or raw secret values.
+
+`ProviderRouteStatus.fallbackEligible` is a P7-2 route/readiness projection: the configured identity is locally ready to occupy a chain slot. It is not call-error permission and is not consulted by `runProviderChain`. `ProviderError.fallbackEligible` is the separate error-level permission to switch provider identity after a failed call.
 
 Internally, provider construction is organized as provider-name factory maps per capability. Adding another chat, TTS, STT, vision, or embedding provider should add a new factory entry instead of branching through runtime code.
 
@@ -217,7 +219,15 @@ Provider implementations should throw `ProviderError` with one of these codes:
 - `UNSUPPORTED_INPUT`
 - `PROVIDER_UNAVAILABLE`
 
-Runtime code should not inspect vendor-specific error bodies.
+Each `ProviderError` carries three independent policy axes:
+
+- `retryable` — the same provider may plausibly succeed later. P7-4B never auto-retries.
+- `fallbackEligible` — the error itself permits switching provider identity.
+- `effectState` — `not_started`, `unknown`, or `committed`. Replay safety is derived as `effectState !== "committed"` and is not a separately mutable field.
+
+`Cancelled` never retries and never falls back. Local `UNSUPPORTED_INPUT` (no HTTP status) stops the chain; a vendor HTTP input rejection may fall back. Chat streaming still allows pre-first-visible fallback, including `INVALID_API_KEY`, and never falls back after a visible text-delta. A visible Chat delta is a `committed` business effect even though the stream event named `completed` has not been emitted yet.
+
+Runtime code should not inspect vendor-specific error bodies. Internal policy fields (`fallbackEligible`, `effectState`, derived replay safety) are not part of public SSE/JSON payloads.
 
 ## Security Rules
 

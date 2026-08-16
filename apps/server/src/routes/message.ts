@@ -167,7 +167,7 @@ export function sendMessageError(
       provider: error.provider,
       capability: error.capability,
       message: error.message,
-      attemptedProviders: (error as { attemptedProviders?: unknown }).attemptedProviders,
+      attemptedProviders: error.attemptedProviders,
       setup:
         "Configure the selected provider in .env.local and use Settings > Apply Now, or set PROVIDER_ALLOW_MOCKS=true for explicit offline/mock development.",
       traceId
