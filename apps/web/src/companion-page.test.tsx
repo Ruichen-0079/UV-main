@@ -50,30 +50,27 @@ vi.mock("./companion-voice-sync.js", () => ({
 
 vi.mock("./lumi-canvas.js", async () => {
   const react = await import("react");
-  const LumiCanvas = react.forwardRef(
-    (props: { requestedPresence?: string; requestedProjection?: any }, ref) => {
-      react.useImperativeHandle(ref, () => ({
-        handlePlaybackEvent: () => undefined,
-        resumeAudio: () => undefined,
-        setFraming: () => undefined,
-        setPresence: () => undefined,
-        setPresentationProjection: (projection: any) => {
-          mockState.projections.push(projection);
-        },
-        setGazeTarget: () => undefined,
-        setPresenceAnimation: () => undefined,
-        load: async () => undefined,
-        runMouthCalibration: async () => undefined,
-        resize: () => undefined,
-        dispose: () => undefined,
-        getPresence: () => props.requestedPresence ?? "idle",
-        getModelLifecycle: () => "ready",
-        getFramingDiagnostics: () => null,
-        getDebugInfo: () => ({ instanceId: 0, generation: 0 })
-      }));
-      return react.createElement("div", { "aria-label": "Lumi avatar" }, "Lumi avatar");
-    }
-  );
+  const LumiCanvas = react.forwardRef((_props: { requestedProjection: any }, ref) => {
+    react.useImperativeHandle(ref, () => ({
+      handlePlaybackEvent: () => undefined,
+      resumeAudio: () => undefined,
+      setFraming: () => undefined,
+      setPresentationProjection: (projection: any) => {
+        mockState.projections.push(projection);
+      },
+      setGazeTarget: () => undefined,
+      setPresenceAnimation: () => undefined,
+      load: async () => undefined,
+      runMouthCalibration: async () => undefined,
+      resize: () => undefined,
+      dispose: () => undefined,
+      getPresentationState: () => "idle",
+      getModelLifecycle: () => "ready",
+      getFramingDiagnostics: () => null,
+      getDebugInfo: () => ({ instanceId: 0, generation: 0 })
+    }));
+    return react.createElement("div", { "aria-label": "Lumi avatar" }, "Lumi avatar");
+  });
   return { LumiCanvas };
 });
 

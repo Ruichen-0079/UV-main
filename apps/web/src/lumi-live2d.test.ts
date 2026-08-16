@@ -4,8 +4,7 @@ import {
   LUMI_PRESENCE_PARAMETER_MAP,
   LumiPresentationController,
   LumiController,
-  lumiMapping,
-  reducePresence
+  lumiMapping
 } from "./lumi-live2d.js";
 import { createInitialCompanionPresence } from "./companion-presence.js";
 
@@ -38,37 +37,10 @@ function listeningProjection(epoch: string | null = null) {
 describe("Lumi presence and audio envelope", () => {
   it("uses normalized listening input when its epoch is null", () => {
     const { callbacks, controller } = createPresentationHarness();
-    controller.setCompatibilityState("thinking");
     controller.setProjection(listeningProjection());
     controller.start();
 
     callbacks.shift()?.(16);
-
-    expect(controller.getDebug().state).toBe("listening");
-    controller.dispose();
-  });
-
-  it("keeps normalized input authoritative over later legacy updates", () => {
-    const { callbacks, controller } = createPresentationHarness();
-    controller.setProjection(listeningProjection());
-    controller.setCompatibilityState("thinking");
-    controller.start();
-
-    callbacks.shift()?.(16);
-
-    expect(controller.getDebug().state).toBe("listening");
-    controller.dispose();
-  });
-
-  it("switches from legacy compatibility to normalized epoch-less input", () => {
-    const { callbacks, controller } = createPresentationHarness();
-    controller.setCompatibilityState("thinking");
-    controller.start();
-    callbacks.shift()?.(16);
-    expect(controller.getDebug().state).toBe("thinking");
-
-    controller.setProjection(listeningProjection());
-    callbacks.shift()?.(32);
 
     expect(controller.getDebug().state).toBe("listening");
     controller.dispose();
@@ -91,27 +63,12 @@ describe("Lumi presence and audio envelope", () => {
 
   it("treats other epoch-less normalized activity as normalized input", () => {
     const { callbacks, controller } = createPresentationHarness();
-    controller.setCompatibilityState("thinking");
     controller.setProjection({
       ...createInitialCompanionPresence(),
       activity: "idle"
     });
     controller.start();
     callbacks.shift()?.(16);
-
-    expect(controller.getDebug().state).toBe("idle");
-    controller.dispose();
-  });
-
-  it("retains legacy compatibility when normalized input was never installed", () => {
-    const { callbacks, controller } = createPresentationHarness();
-    controller.setCompatibilityState("thinking");
-    controller.start();
-    callbacks.shift()?.(16);
-    expect(controller.getDebug().state).toBe("thinking");
-
-    controller.setCompatibilityState("idle");
-    callbacks.shift()?.(32);
 
     expect(controller.getDebug().state).toBe("idle");
     controller.dispose();
@@ -189,14 +146,6 @@ describe("Lumi presence and audio envelope", () => {
     controller.dispose();
   });
 
-  it("keeps the presence lifecycle tied to real playback", () => {
-    expect(reducePresence("idle", { type: "user-sent" })).toBe("thinking");
-    expect(reducePresence("thinking", { type: "playback-started" })).toBe("speaking");
-    expect(reducePresence("speaking", { type: "playback-ended" })).toBe("idle");
-    expect(reducePresence("speaking", { type: "interrupted" })).toBe("interrupted");
-    expect(reducePresence("unavailable", { type: "user-sent" })).toBe("unavailable");
-  });
-
   it("gates noise and clamps mouth values to Lumi's parameter range", () => {
     const config = { noiseGate: 0.02, gain: 10, attack: 0.04, release: 0.12, maxValue: 2.1 };
     expect(rmsFromTimeDomain(new Uint8Array([128, 128, 128]))).toBe(0);
@@ -254,14 +203,14 @@ describe("Lumi presence and audio envelope", () => {
       segment: playbackSegment,
       audio
     });
-    expect(controller.getPresence()).toBe("idle");
+    expect(controller.getPresentationState()).toBe("idle");
     controller.handlePlaybackEvent({
       type: "playbackStarted",
       sequence: 0,
       segment: playbackSegment,
       audio
     });
-    expect(controller.getPresence()).toBe("speaking");
+    expect(controller.getPresentationState()).toBe("idle");
     expect(envelope.attach).toHaveBeenCalledWith(audio);
     expect(envelope.startPlayback).toHaveBeenCalledWith(audio);
     controller.handlePlaybackEvent({
@@ -271,8 +220,8 @@ describe("Lumi presence and audio envelope", () => {
       audio
     });
     expect(envelope.stop).toHaveBeenCalled();
-    expect(controller.getPresence()).toBe("idle");
-    expect(states).toContain("interrupted");
+    expect(controller.getPresentationState()).toBe("idle");
+    expect(states).toContain("idle");
   });
 
   it("does not let text completion override an active audio mouth", async () => {
@@ -303,8 +252,7 @@ describe("Lumi presence and audio envelope", () => {
       audio
     });
     adapter.resetMouth.mockClear();
-    controller.setPresence("idle");
-    expect(controller.getPresence()).toBe("speaking");
+    expect(controller.getPresentationState()).toBe("idle");
     expect(adapter.resetMouth).not.toHaveBeenCalled();
     controller.handlePlaybackEvent({
       type: "playbackEnded",
@@ -312,7 +260,7 @@ describe("Lumi presence and audio envelope", () => {
       segment: playbackSegment,
       audio
     });
-    expect(controller.getPresence()).toBe("idle");
+    expect(controller.getPresentationState()).toBe("idle");
     controller.handlePlaybackEvent({
       type: "audioElementDetached",
       sequence: 0,
@@ -390,7 +338,7 @@ describe("Lumi presence and audio envelope", () => {
     });
 
     expect(envelope.detach).toHaveBeenCalledTimes(detachCountAfterFirst);
-    expect(controller.getPresence()).toBe("speaking");
+    expect(controller.getPresentationState()).toBe("idle");
   });
 
   it("keeps speaking mouth ownership with RMS while presence animates eyes and breath", async () => {
@@ -411,7 +359,6 @@ describe("Lumi presence and audio envelope", () => {
     adapter.setMouthOpen.mockClear();
     adapter.setBreath.mockClear();
 
-    controller.setPresence("speaking");
     controller.setPresenceAnimation(0.7, 0.2);
 
     expect(adapter.setParameter.mock.calls[0]?.[0]).toBe(lumiMapping.eyeLeft);
@@ -589,7 +536,7 @@ describe("Lumi presence and audio envelope", () => {
     const controller = new LumiController(() => adapter, "model3.json");
     await controller.load();
     expect(controller.getModelLifecycle()).toBe("failed");
-    expect(controller.getPresence()).toBe("idle");
+    expect(controller.getPresentationState()).toBe("idle");
     expect(adapter.dispose).toHaveBeenCalledTimes(1);
   });
 
@@ -620,7 +567,7 @@ describe("Lumi presence and audio envelope", () => {
 
     expect(first.dispose).toHaveBeenCalled();
     expect(second.dispose).not.toHaveBeenCalled();
-    expect(controller.getPresence()).toBe("idle");
+    expect(controller.getPresentationState()).toBe("idle");
     controller.dispose();
   });
 

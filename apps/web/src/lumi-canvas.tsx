@@ -4,12 +4,14 @@ import {
   CubismLive2DAdapter,
   type LumiControllerHandle,
   type LumiModelLifecycle,
-  type LumiPresenceAnimation,
-  type PresenceState
+  type LumiPresenceAnimation
 } from "./lumi-live2d.js";
 import type { LumiFraming } from "./lumi-cubism-model.js";
 import type { LumiFramingDiagnostics } from "./lumi-framing.js";
-import type { CompanionPresenceProjection } from "./companion-presence.js";
+import type {
+  CompanionPresenceProjection,
+  CompanionPresentationState
+} from "./companion-presence.js";
 import { resolveRuntimeAssetUrl } from "./desktop-runtime.js";
 
 const DEFAULT_MODEL_PATH = "/api/live2d/Lumi/Lumi.model3.json";
@@ -22,8 +24,7 @@ function isHeadBoundsOverlayEnabled(): boolean {
 
 export const LumiCanvas = forwardRef(function LumiCanvas(
   props: {
-    requestedPresence?: PresenceState;
-    requestedProjection?: CompanionPresenceProjection;
+    requestedProjection: CompanionPresenceProjection;
     className?: string;
     onModelLifecycle?: (state: LumiModelLifecycle) => void;
     /** The companion window draws its own framing toggle outside the resize corner. */
@@ -34,7 +35,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<LumiController | null>(null);
-  const [state, setState] = useState<PresenceState>("idle");
+  const [state, setState] = useState<CompanionPresentationState>("idle");
   const [modelLifecycle, setModelLifecycle] = useState<LumiModelLifecycle>("loading");
   const onModelLifecycleRef = useRef(props.onModelLifecycle);
   onModelLifecycleRef.current = props.onModelLifecycle;
@@ -49,7 +50,6 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       load: () => controllerRef.current?.load() ?? Promise.resolve(),
       runMouthCalibration: () => controllerRef.current?.runMouthCalibration() ?? Promise.resolve(),
       setFraming: (next) => controllerRef.current?.setFraming(next),
-      setPresence: (next) => controllerRef.current?.setPresence(next),
       setPresentationProjection: (projection) =>
         controllerRef.current?.setPresentationProjection(projection),
       setGazeTarget: (target) => controllerRef.current?.setGazeTarget(target),
@@ -67,7 +67,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       handlePlaybackEvent: (event) => controllerRef.current?.handlePlaybackEvent(event),
       resize: (width, height) => controllerRef.current?.resize(width, height),
       dispose: () => controllerRef.current?.dispose(),
-      getPresence: () => controllerRef.current?.getPresence() ?? "idle",
+      getPresentationState: () => controllerRef.current?.getPresentationState() ?? "idle",
       getModelLifecycle: () => controllerRef.current?.getModelLifecycle() ?? "loading",
       getFramingDiagnostics: () => controllerRef.current?.getFramingDiagnostics() ?? null,
       getDebugInfo: () =>
@@ -134,12 +134,8 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   }, []);
 
   useEffect(() => {
-    if (props.requestedProjection) {
-      controllerRef.current?.setPresentationProjection(props.requestedProjection);
-    } else if (props.requestedPresence) {
-      controllerRef.current?.setPresence(props.requestedPresence);
-    }
-  }, [props.requestedPresence, props.requestedProjection]);
+    controllerRef.current?.setPresentationProjection(props.requestedProjection);
+  }, [props.requestedProjection]);
 
   useEffect(() => {
     controllerRef.current?.setFraming(framing);
@@ -229,16 +225,16 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   );
 });
 
-function presenceLabel(state: PresenceState): string {
+function presenceLabel(state: CompanionPresentationState): string {
   switch (state) {
+    case "listening":
+      return "正在聆听";
     case "thinking":
       return "正在思考";
     case "speaking":
       return "正在说话";
     case "interrupted":
       return "已中断";
-    case "unavailable":
-      return "形象暂不可用";
     case "idle":
       return "待机";
   }

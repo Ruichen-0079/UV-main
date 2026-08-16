@@ -64,33 +64,7 @@ export type LumiPresenceAnimation = {
   bodyAngleZ?: number;
 };
 
-export type PresenceState = "idle" | "thinking" | "speaking" | "interrupted" | "unavailable";
 export type LumiModelLifecycle = "loading" | "ready" | "failed" | "disposed";
-
-export type PresenceEvent =
-  | { type: "user-sent" }
-  | { type: "playback-started" }
-  | { type: "playback-ended" }
-  | { type: "interrupted" }
-  | { type: "model-ready" }
-  | { type: "model-failed" };
-
-export function reducePresence(state: PresenceState, event: PresenceEvent): PresenceState {
-  switch (event.type) {
-    case "model-failed":
-      return "unavailable";
-    case "model-ready":
-      return "idle";
-    case "user-sent":
-      return state === "unavailable" ? state : "thinking";
-    case "playback-started":
-      return state === "unavailable" ? state : "speaking";
-    case "playback-ended":
-      return state === "unavailable" ? state : "idle";
-    case "interrupted":
-      return state === "unavailable" ? state : "interrupted";
-  }
-}
 
 export interface Live2DAdapter extends MouthParameterTarget {
   load(source: string): Promise<void>;
@@ -138,8 +112,6 @@ export class LumiPresentationController {
   private readonly cancelFrame: ((frame: number) => void) | null;
   private readonly isHidden: () => boolean;
   private projection: CompanionPresenceProjection = createInitialCompanionPresence();
-  private normalizedInputActive = false;
-  private compatibilityState: CompanionPresentationState = "idle";
   private suppliedGazeTarget: SuppliedGazeTarget | null = null;
   private blinkScheduler: ReturnType<typeof createCompanionBlinkScheduler> | null = null;
   private gazeScheduler: GazeScheduler | null = null;
@@ -184,13 +156,7 @@ export class LumiPresentationController {
 
   setProjection(projection: CompanionPresenceProjection): void {
     if (this.disposed) return;
-    this.normalizedInputActive = true;
     this.projection = projection;
-  }
-
-  setCompatibilityState(state: CompanionPresentationState): void {
-    if (this.disposed) return;
-    this.compatibilityState = state;
   }
 
   setGazeTarget(target: SuppliedGazeTarget | null): void {
@@ -271,7 +237,6 @@ export class LumiPresentationController {
     if (this.disposed) return;
     this.stop();
     this.disposed = true;
-    this.normalizedInputActive = false;
     this.projection = createInitialCompanionPresence();
     this.suppliedGazeTarget = null;
   }
@@ -283,9 +248,7 @@ export class LumiPresentationController {
   private currentState(): CompanionPresentationState {
     const forced = readForcedPresentationState();
     if (forced !== null) return forced;
-    return this.normalizedInputActive
-      ? getCompanionPresentationState(this.projection)
-      : this.compatibilityState;
+    return getCompanionPresentationState(this.projection);
   }
 
   private schedule(callback: (now: number) => void): void {
@@ -428,7 +391,6 @@ export type LumiControllerHandle = {
   load(): Promise<void>;
   runMouthCalibration(): Promise<void>;
   setFraming(framing: LumiFraming): void;
-  setPresence(state: PresenceState): void;
   setPresentationProjection(projection: CompanionPresenceProjection): void;
   setGazeTarget(target: SuppliedGazeTarget | null): void;
   setPresenceAnimation(animation: LumiPresenceAnimation): void;
@@ -437,7 +399,7 @@ export type LumiControllerHandle = {
   handlePlaybackEvent(event: SpeechPlaybackEvent): void;
   resize(width: number, height: number): void;
   dispose(): void;
-  getPresence(): PresenceState;
+  getPresentationState(): CompanionPresentationState;
   getModelLifecycle(): LumiModelLifecycle;
   getFramingDiagnostics(): import("./lumi-framing.js").LumiFramingDiagnostics | null;
   getDebugInfo(): {
@@ -480,19 +442,18 @@ export class LumiController {
   private readonly instanceId = nextLumiControllerInstanceId++;
   private adapter: Live2DAdapter | null = null;
   private envelope: AudioEnvelopeHost | null = null;
-  private state: PresenceState = "idle";
+  private presentationState: CompanionPresentationState = "idle";
   private modelLifecycle: LumiModelLifecycle = "loading";
-  private requestedPresence: PresenceState = "idle";
   private generation = 0;
   private playbackCorrelation: SpeechPlaybackCorrelationState = createSpeechPlaybackCorrelation();
-  private presentationProjection: CompanionPresenceProjection | null = null;
+  private presentationProjection: CompanionPresenceProjection = createInitialCompanionPresence();
   private readonly presentationController: LumiPresentationController;
   private disposed = false;
 
   constructor(
     private readonly createAdapter: () => Live2DAdapter,
     private readonly source: string,
-    private readonly onState?: (state: PresenceState) => void,
+    private readonly onState?: (state: CompanionPresentationState) => void,
     private readonly createEnvelope: (target: MouthParameterTarget) => AudioEnvelopeHost = (
       target
     ) => new AudioMouthEnvelope(target),
@@ -524,12 +485,7 @@ export class LumiController {
       this.envelope = this.createEnvelope(adapter);
       adapter.resetMouth();
       this.setModelLifecycle("ready");
-      if (this.presentationProjection !== null) {
-        this.setState(
-          toLumiPresenceState(getCompanionPresentationState(this.presentationProjection))
-        );
-      }
-      this.setPresence(this.requestedPresence);
+      this.setPresentationState(getCompanionPresentationState(this.presentationProjection));
       this.presentationController.start();
     } catch (error) {
       if (generation !== this.generation) {
@@ -545,20 +501,6 @@ export class LumiController {
       this.envelope = null;
       this.setModelLifecycle("failed");
     }
-  }
-
-  setPresence(state: PresenceState): void {
-    this.requestedPresence = state;
-    if (this.presentationProjection !== null) {
-      if (state === "unavailable") this.applyPresence(state);
-      return;
-    }
-    this.presentationController.setCompatibilityState(toCompanionPresentationState(state));
-    // A text response can finish while its first audio segment is still
-    // playing. That external idle request must not silence the RMS-driven
-    // mouth; playbackEnded remains the authoritative transition to idle.
-    if (state === "idle" && this.state === "speaking") return;
-    this.applyPresence(state);
   }
 
   setPresenceAnimation(animation: LumiPresenceAnimation): void;
@@ -580,9 +522,7 @@ export class LumiController {
     if (this.disposed) return;
     this.presentationProjection = projection;
     this.presentationController.setProjection(projection);
-    if (this.state !== "unavailable") {
-      this.setState(toLumiPresenceState(getCompanionPresentationState(projection)));
-    }
+    this.setPresentationState(getCompanionPresentationState(projection));
   }
 
   setGazeTarget(target: SuppliedGazeTarget | null): void {
@@ -609,16 +549,6 @@ export class LumiController {
     this.setOwnedParameter("bodyAngleZ", animation.bodyAngleZ);
   }
 
-  private applyPresence(state: PresenceState): void {
-    if (state === "unavailable") {
-      this.setModelLifecycle("failed");
-      return;
-    }
-    if (!this.adapter) return;
-    this.setState(state);
-    if (state !== "speaking") this.adapter.resetMouth();
-  }
-
   handlePlaybackEvent(event: SpeechPlaybackEvent): void {
     const phase =
       event.type === "audioElementAttached"
@@ -636,20 +566,10 @@ export class LumiController {
       this.envelope?.attach(event.audio);
     } else if (event.type === "playbackStarted") {
       this.envelope?.startPlayback?.(event.audio);
-      if (this.presentationProjection === null) this.setPresence("speaking");
     } else if (event.type === "playbackEnded") {
       this.envelope?.stop();
-      if (this.presentationProjection === null) {
-        this.requestedPresence = "idle";
-        this.applyPresence("idle");
-      }
     } else if (event.type === "playbackStopped" || event.type === "playbackError") {
       this.envelope?.stop();
-      if (this.presentationProjection === null) {
-        this.transition({ type: "interrupted" });
-        this.requestedPresence = "idle";
-        this.applyPresence("idle");
-      }
     } else if (event.type === "audioElementDetached") {
       this.envelope?.detach();
     }
@@ -662,7 +582,7 @@ export class LumiController {
   async runMouthCalibration(): Promise<void> {
     const adapter = this.adapter;
     const generation = this.generation;
-    if (!adapter || this.state === "speaking") return;
+    if (!adapter || this.presentationState === "speaking") return;
     for (const value of [0, 1, 2.1, 0]) {
       if (generation !== this.generation || adapter !== this.adapter) return;
       adapter.setMouthOpen(value);
@@ -706,12 +626,12 @@ export class LumiController {
     this.envelope = null;
     this.adapter?.dispose();
     this.adapter = null;
-    this.presentationProjection = null;
+    this.presentationProjection = createInitialCompanionPresence();
     this.setModelLifecycle("disposed");
   }
 
-  getPresence(): PresenceState {
-    return this.state;
+  getPresentationState(): CompanionPresentationState {
+    return this.presentationState;
   }
 
   getModelLifecycle(): LumiModelLifecycle {
@@ -869,12 +789,8 @@ export class LumiController {
     );
   }
 
-  private transition(event: PresenceEvent): void {
-    this.setState(reducePresence(this.state, event));
-  }
-
-  private setState(state: PresenceState): void {
-    this.state = state;
+  private setPresentationState(state: CompanionPresentationState): void {
+    this.presentationState = state;
     this.onState?.(state);
   }
 
@@ -886,14 +802,6 @@ export class LumiController {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
-}
-
-function toCompanionPresentationState(state: PresenceState): CompanionPresentationState {
-  return state === "unavailable" ? "idle" : state;
-}
-
-function toLumiPresenceState(state: CompanionPresentationState): PresenceState {
-  return state === "listening" ? "idle" : state;
 }
 
 function readForcedPresentationState(): CompanionPresentationState | null {

@@ -40,6 +40,12 @@ import { reduceChatMessages, shouldSubmitChatKey, type ChatMessage } from "./cha
 import { ChatMessageContent } from "./markdown-message.js";
 import { SpeechSegmenter } from "./speech-segmenter.js";
 import {
+  applyCapabilityProjection,
+  deriveCapabilityProjection,
+  deriveEffectiveVoiceOutput,
+  detectBrowserAudioCapability
+} from "./capability-projection.js";
+import {
   createBrowserSpeechPlayer,
   detectSpeechLanguage,
   SpeechPlaybackQueue,
@@ -52,7 +58,24 @@ import {
   type SpeechPlaybackCorrelationState
 } from "./speech-playback-correlation.js";
 import { LumiCanvas } from "./lumi-canvas.js";
-import type { LumiControllerHandle, PresenceState } from "./lumi-live2d.js";
+import type { LumiControllerHandle, LumiModelLifecycle } from "./lumi-live2d.js";
+import {
+  canInterruptGeneration,
+  createCompanionPresenceEpochGuard,
+  createInitialCompanionPresence,
+  createInterruptedResetScheduler,
+  reduceCompanionPresence,
+  type CompanionPresenceEvent,
+  type CompanionPresenceProjection
+} from "./companion-presence.js";
+import type { CompanionTtsConfiguration } from "./companion-bus.js";
+import {
+  isServiceSupervisorAvailable,
+  subscribeServiceStatusState
+} from "./service-supervisor-client.js";
+import { initialServiceStatusState, type ServiceStatusState } from "./service-status-state.js";
+import { fetchUserSettings } from "./user-settings-client.js";
+import { isTauriRuntime } from "./tauri-window.js";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
@@ -97,6 +120,13 @@ type ChatTimingMetrics = {
   assistantCompletedAt?: number;
 };
 type MemoryResultSource = "/memory/recent" | "/memory/search" | "local fallback";
+
+/** Dashboard chat uses the frozen P5-D selector without adding another policy. */
+export function deriveDashboardTtsPolicy(
+  input: Parameters<typeof deriveEffectiveVoiceOutput>[0]
+): ReturnType<typeof deriveEffectiveVoiceOutput> {
+  return deriveEffectiveVoiceOutput(input);
+}
 
 function recordChatTiming(
   timingRef: MutableRefObject<ChatTimingMetrics | null>,
@@ -325,7 +355,14 @@ function ChatPage(): JSX.Element {
   const [writeMemory, setWriteMemory] = useState(true);
   const [promptPreview, setPromptPreview] = useState(true);
   const [voiceOutput, setVoiceOutput] = useState(false);
-  const [presenceRequest, setPresenceRequest] = useState<PresenceState>("idle");
+  const [presence, setPresenceProjection] = useState<CompanionPresenceProjection>(() =>
+    createInitialCompanionPresence()
+  );
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatusState>(initialServiceStatusState);
+  const [ttsConfig, setTtsConfig] = useState<CompanionTtsConfiguration | null>(() =>
+    isTauriRuntime() ? null : { enabled: true, mode: "external" }
+  );
+  const [modelLifecycle, setModelLifecycle] = useState<LumiModelLifecycle>("loading");
   const [messages, dispatchMessages] = useReducer(reduceChatMessages, [] as ChatMessage[]);
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -334,6 +371,15 @@ function ChatPage(): JSX.Element {
   const [actualPlaybackActive, setActualPlaybackActive] = useState(false);
   const mountedRef = useRef(true);
   const lumiRef = useRef<LumiControllerHandle>(null);
+  const presenceProjectionRef = useRef(presence);
+  const epochGuardRef = useRef(createCompanionPresenceEpochGuard());
+  const interruptedResetRef = useRef<ReturnType<typeof createInterruptedResetScheduler> | null>(
+    null
+  );
+  const effectiveVoiceOutputRef = useRef<ReturnType<typeof deriveEffectiveVoiceOutput>>({
+    requestTts: false,
+    reason: "settings-pending"
+  });
   const timingRef = useRef<ChatTimingMetrics | null>(null);
   const speechSessionRef = useRef<{
     generation: string;
@@ -350,6 +396,98 @@ function ChatPage(): JSX.Element {
     controller: AbortController;
     completedObserved: boolean;
   } | null>(null);
+
+  presenceProjectionRef.current = presence;
+
+  const capabilityProjection = useMemo(
+    () =>
+      deriveCapabilityProjection({
+        serviceStatus,
+        persistentTtsEnabled: ttsConfig?.enabled ?? null,
+        ttsConfiguration: ttsConfig,
+        audio: detectBrowserAudioCapability(),
+        live2dLifecycle: modelLifecycle
+      }),
+    [modelLifecycle, serviceStatus, ttsConfig]
+  );
+  const effectiveVoiceOutput = useMemo(
+    () =>
+      deriveDashboardTtsPolicy({
+        persistentTtsEnabled: ttsConfig?.enabled ?? null,
+        perTurnVoiceOutput: voiceOutput,
+        ttsCapability: capabilityProjection.capabilities.tts,
+        ttsConfiguration: ttsConfig
+      }),
+    [capabilityProjection.capabilities.tts, ttsConfig?.enabled, ttsConfig?.mode, voiceOutput]
+  );
+  effectiveVoiceOutputRef.current = effectiveVoiceOutput;
+
+  function updatePresence(
+    update: (current: CompanionPresenceProjection) => CompanionPresenceProjection
+  ): void {
+    const current = presenceProjectionRef.current;
+    const next = update(current);
+    if (next === current) return;
+    presenceProjectionRef.current = next;
+    // Forward synchronously; React state is only the dashboard render surface.
+    lumiRef.current?.setPresentationProjection(next);
+    setPresenceProjection(next);
+  }
+
+  function applyPresenceEvent(event: CompanionPresenceEvent): void {
+    updatePresence((current) => reduceCompanionPresence(current, event));
+  }
+
+  useEffect(() => {
+    if (!isTauriRuntime() && !isServiceSupervisorAvailable()) return;
+    return subscribeServiceStatusState(setServiceStatus);
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    void fetchUserSettings()
+      .then((view) => {
+        if (!cancelled) {
+          setTtsConfig({ enabled: view.settings.tts.enabled, mode: view.settings.tts.mode });
+        }
+      })
+      .catch(() => {
+        // Keep persisted TTS configuration unknown when the authority cannot be read.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    updatePresence((current) =>
+      applyCapabilityProjection(current, capabilityProjection, (value, event) =>
+        reduceCompanionPresence(value, event)
+      )
+    );
+  }, [capabilityProjection]);
+
+  useEffect(() => {
+    const resetScheduler = createInterruptedResetScheduler(() => {
+      const epoch = presenceProjectionRef.current.epoch;
+      if (epoch) applyPresenceEvent({ type: "transition-expired", epoch });
+    });
+    interruptedResetRef.current = resetScheduler;
+    return () => {
+      resetScheduler.dispose();
+      if (interruptedResetRef.current === resetScheduler) interruptedResetRef.current = null;
+      epochGuardRef.current.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (presence.transition === "interrupted" && presence.epoch) {
+      interruptedResetRef.current?.schedule();
+    } else {
+      interruptedResetRef.current?.invalidate();
+    }
+  }, [presence.transition, presence.epoch]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -371,10 +509,12 @@ function ChatPage(): JSX.Element {
         writeMemory,
         promptPreview,
         voiceOutput: false,
-        browserVoiceOutput: voiceOutput
+        browserVoiceOutput: voiceOutput,
+        effectiveTtsRequest: effectiveVoiceOutput.requestTts,
+        effectiveTtsReason: effectiveVoiceOutput.reason
       }
     }),
-    [input, promptPreview, readMemory, voiceOutput, writeMemory]
+    [effectiveVoiceOutput, input, promptPreview, readMemory, voiceOutput, writeMemory]
   );
 
   function enqueueDashboardSpeech(
@@ -406,6 +546,7 @@ function ChatPage(): JSX.Element {
     const requestId = createChatMessageId("turn");
     const assistantId = createChatMessageId("assistant");
     const controller = new AbortController();
+    if (!epochGuardRef.current.accept(requestId)) return;
     activeRequestRef.current = {
       id: requestId,
       assistantId,
@@ -414,7 +555,9 @@ function ChatPage(): JSX.Element {
     };
     timingRef.current = { userSendAt: performance.now() };
     recordChatTiming(timingRef, {});
-    if (voiceOutput) {
+    const shouldRequestTts = effectiveVoiceOutputRef.current.requestTts;
+    applyPresenceEvent({ type: "turn-start", epoch: requestId });
+    if (shouldRequestTts) {
       // Resume the shared Web Audio context while this send is still a user gesture.
       lumiRef.current?.resumeAudio();
       const generation = requestId;
@@ -433,16 +576,24 @@ function ChatPage(): JSX.Element {
           onState: (state) => {
             if (mountedRef.current && speechSessionRef.current?.generation === generation) {
               setVoicePlaybackStatus(state);
+              applyPresenceEvent({ type: "queue", epoch: generation, state });
+              if (state === "idle" || state === "stopped" || state === "error") {
+                speechSessionRef.current = null;
+              }
             }
           },
           onError: () => {
             if (mountedRef.current && speechSessionRef.current?.generation === generation) {
               setVoicePlaybackStatus("error");
+              applyPresenceEvent({ type: "queue", epoch: generation, state: "error" });
             }
           },
           onSynthesisCompleted: () => {
             const timing = timingRef.current;
-            if (timing) recordChatTiming(timingRef, { firstTtsCompletedAt: timing.firstTtsCompletedAt ?? performance.now() });
+            if (timing)
+              recordChatTiming(timingRef, {
+                firstTtsCompletedAt: timing.firstTtsCompletedAt ?? performance.now()
+              });
           },
           onPlaybackEvent: (event: SpeechPlaybackEvent) => {
             if (mountedRef.current && speechSessionRef.current?.generation === generation) {
@@ -461,6 +612,23 @@ function ChatPage(): JSX.Element {
               );
               playbackCorrelationRef.current = result.state;
               if (!result.accepted) return;
+              const playbackState =
+                event.type === "playbackStarted"
+                  ? "started"
+                  : event.type === "playbackEnded"
+                    ? "ended"
+                    : event.type === "playbackStopped"
+                      ? "stopped"
+                      : event.type === "playbackError"
+                        ? "error"
+                        : null;
+              if (playbackState !== null) {
+                applyPresenceEvent({
+                  type: "playback",
+                  epoch: generation,
+                  state: playbackState
+                });
+              }
               lumiRef.current?.handlePlaybackEvent(event);
               if (event.type === "playbackStarted") {
                 setActualPlaybackActive(true);
@@ -496,7 +664,6 @@ function ChatPage(): JSX.Element {
         nextSegmentSequence: 0
       };
     }
-    setPresenceRequest("thinking");
     setRequestStatus("sending");
     dispatchMessages({
       type: "append-turn",
@@ -552,9 +719,12 @@ function ChatPage(): JSX.Element {
                 traceId: event.traceId
               });
               const speech = speechSessionRef.current;
-              if (speech?.generation === requestId) {
+              if (speech?.generation === requestId && effectiveVoiceOutputRef.current.requestTts) {
                 for (const text of speech.segmenter.push(event.text)) {
-                  if (timingRef.current && timingRef.current.firstSegmentSubmittedAt === undefined) {
+                  if (
+                    timingRef.current &&
+                    timingRef.current.firstSegmentSubmittedAt === undefined
+                  ) {
                     recordChatTiming(timingRef, { firstSegmentSubmittedAt: performance.now() });
                   }
                   enqueueDashboardSpeech(speech, text);
@@ -565,10 +735,12 @@ function ChatPage(): JSX.Element {
             if (event.type === "error") {
               dispatchMessages({ type: "fail", assistantId, error: event.message });
               setError(event.message);
+              applyPresenceEvent({ type: "generation", epoch: requestId, state: "idle" });
               const speech = speechSessionRef.current;
               if (speech?.generation === requestId) {
                 for (const text of speech.segmenter.flush("failed")) {
-                  enqueueDashboardSpeech(speech, text);
+                  if (effectiveVoiceOutputRef.current.requestTts)
+                    enqueueDashboardSpeech(speech, text);
                 }
                 speech.queue.finish();
               }
@@ -584,12 +756,13 @@ function ChatPage(): JSX.Element {
               provider: event.provider
             });
             setRequestStatus("success");
-            setPresenceRequest("idle");
+            applyPresenceEvent({ type: "generation", epoch: requestId, state: "idle" });
             recordChatTiming(timingRef, { assistantCompletedAt: performance.now() });
             const speech = speechSessionRef.current;
             if (speech?.generation === requestId) {
               for (const text of speech.segmenter.flush("completed")) {
-                enqueueDashboardSpeech(speech, text);
+                if (effectiveVoiceOutputRef.current.requestTts)
+                  enqueueDashboardSpeech(speech, text);
               }
               speech.queue.finish();
             }
@@ -609,12 +782,12 @@ function ChatPage(): JSX.Element {
       });
       setLastTraceId(response.traceId);
       setRequestStatus("success");
-      setPresenceRequest("idle");
+      applyPresenceEvent({ type: "generation", epoch: requestId, state: "idle" });
       recordChatTiming(timingRef, { assistantCompletedAt: performance.now() });
       const speech = speechSessionRef.current;
       if (speech?.generation === requestId) {
         for (const text of speech.segmenter.flush("completed")) {
-          enqueueDashboardSpeech(speech, text);
+          if (effectiveVoiceOutputRef.current.requestTts) enqueueDashboardSpeech(speech, text);
         }
         speech.queue.finish();
       }
@@ -634,7 +807,7 @@ function ChatPage(): JSX.Element {
           error: "生成已取消，以上内容可能不完整。"
         });
         setRequestStatus("idle");
-        setPresenceRequest("idle");
+        applyPresenceEvent({ type: "generation", epoch: requestId, state: "interrupted" });
         return;
       }
       const message = friendlyChatError(caught);
@@ -648,6 +821,7 @@ function ChatPage(): JSX.Element {
       dispatchMessages({ type: "fail", assistantId, error: message });
       setError(message);
       setRequestStatus("error");
+      applyPresenceEvent({ type: "generation", epoch: requestId, state: "idle" });
     } finally {
       if (activeRequestRef.current?.id === requestId) {
         activeRequestRef.current = null;
@@ -661,7 +835,9 @@ function ChatPage(): JSX.Element {
       return;
     }
     recordChatTiming(timingRef, { stopRequestedAt: performance.now() });
-    interruptLumi();
+    if (canInterruptGeneration(presenceProjectionRef.current, active.id)) {
+      applyPresenceEvent({ type: "generation", epoch: active.id, state: "interrupted" });
+    }
     active.controller.abort();
     if (speechSessionRef.current?.generation === active.id) {
       speechSessionRef.current.queue.cancel();
@@ -681,17 +857,11 @@ function ChatPage(): JSX.Element {
 
   function stopSpeech(): void {
     recordChatTiming(timingRef, { stopRequestedAt: performance.now() });
-    interruptLumi();
+    const epoch = speechSessionRef.current?.generation ?? presenceProjectionRef.current.epoch;
+    if (epoch) applyPresenceEvent({ type: "speech-cancelled", epoch });
     speechSessionRef.current?.queue.cancel();
     speechSessionRef.current = null;
     if (mountedRef.current) setVoicePlaybackStatus("stopped");
-  }
-
-  function interruptLumi(): void {
-    lumiRef.current?.setPresence("interrupted");
-    queueMicrotask(() => {
-      if (mountedRef.current) lumiRef.current?.setPresence("idle");
-    });
   }
 
   return (
@@ -803,7 +973,8 @@ function ChatPage(): JSX.Element {
           <Panel title="Lumi">
             <LumiCanvas
               ref={lumiRef}
-              requestedPresence={presenceRequest}
+              requestedProjection={presence}
+              onModelLifecycle={setModelLifecycle}
               className="h-[420px] rounded-md bg-ink-900"
             />
           </Panel>
