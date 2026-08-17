@@ -5,6 +5,11 @@ import {
   type BehaviorPolicyControllerOptions
 } from "./behavior-policy-controller.js";
 import {
+  SILENT_ATTENTION_COOLDOWN_MS,
+  SILENT_ATTENTION_IDLE_DELAY_MS,
+  SILENT_ATTENTION_TTL_MS
+} from "./proactive-eligibility.js";
+import {
   createInitialCompanionPresence,
   type CompanionPresenceProjection
 } from "./companion-presence.js";
@@ -467,5 +472,241 @@ describe("BehaviorPolicyController", () => {
     now = LIFECYCLE_PULSE_TTL_MS.thinking;
     expect(() => callbacks[0]?.()).not.toThrow();
     expect(controller.getState().active.kind).toBe("none");
+  });
+
+  it("schedules one silent-attention pulse and returns to natural gaze", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    expect(harness.timers).toHaveLength(1);
+    expect(harness.latestTimer().dueAt).toBe(SILENT_ATTENTION_IDLE_DELAY_MS);
+
+    const proactiveTimer = harness.latestTimer();
+    harness.fire(proactiveTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "proactive",
+      source: "idle-policy",
+      reason: "silent-attention",
+      priority: "P3",
+      scope: "session",
+      sessionId: "test-session",
+      payload: { action: "silent-attention", modality: "silent" }
+    });
+    expect(targetWrites(harness)).toHaveLength(1);
+    expect(targetWrites(harness)[0]).toMatchObject({ x: 0, y: 0.08, strength: 0.5 });
+
+    const activeTimer = harness.latestTimer();
+    expect(activeTimer.dueAt).toBe(SILENT_ATTENTION_IDLE_DELAY_MS + SILENT_ATTENTION_TTL_MS);
+    harness.fire(activeTimer, activeTimer.dueAt);
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes.at(-1)).toBeNull();
+
+    harness.setNow(100_000);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    expect(harness.timers).toHaveLength(2);
+  });
+
+  it("fails closed until visibility is explicitly supplied", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    expect(harness.timers).toHaveLength(0);
+
+    harness.controller.updateVisibility(true);
+    expect(harness.timers).toHaveLength(1);
+    expect(harness.latestTimer().dueAt).toBe(SILENT_ATTENTION_IDLE_DELAY_MS);
+  });
+
+  it("allows one legitimate early proactive reschedule and fences duplicates", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const firstTimer = harness.latestTimer();
+
+    harness.fire(firstTimer, SILENT_ATTENTION_IDLE_DELAY_MS - 1);
+    expect(harness.timers).toHaveLength(2);
+    const secondTimer = harness.latestTimer();
+    expect(secondTimer).not.toBe(firstTimer);
+
+    harness.fire(firstTimer, SILENT_ATTENTION_IDLE_DELAY_MS - 1);
+    expect(harness.timers).toHaveLength(2);
+    expect(harness.controller.getState().active.kind).toBe("none");
+
+    harness.fire(secondTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+    expect(harness.timers).toHaveLength(3);
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "proactive",
+      reason: "silent-attention"
+    });
+  });
+
+  it("cancels a pending proactive timer for last-second interaction", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const proactiveTimer = harness.latestTimer();
+
+    harness.setNow(SILENT_ATTENTION_IDLE_DELAY_MS - 1);
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "listening" }));
+    harness.fire(proactiveTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      reason: "listening-entry"
+    });
+    expect(harness.timers).toHaveLength(2);
+  });
+
+  it("cancels active silent attention when the window becomes hidden", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    harness.fire(harness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+    const activeTimer = harness.latestTimer();
+    expect(harness.controller.getState().active.kind).toBe("proactive");
+
+    harness.controller.updateVisibility(false);
+    harness.fire(activeTimer, SILENT_ATTENTION_IDLE_DELAY_MS + SILENT_ATTENTION_TTL_MS);
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes.at(-1)).toBeNull();
+  });
+
+  it("cancels active silent attention when lifecycle or speech becomes busy", () => {
+    const lifecycleHarness = createHarness();
+    lifecycleHarness.controller.updateVisibility(true);
+    lifecycleHarness.controller.updatePresence(presence({ connectivity: "online" }));
+    lifecycleHarness.fire(lifecycleHarness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+    lifecycleHarness.controller.updatePresence(
+      presence({ connectivity: "online", lifecycle: "active" })
+    );
+    expect(lifecycleHarness.controller.getState().active.kind).toBe("none");
+
+    const speechHarness = createHarness();
+    speechHarness.controller.updateVisibility(true);
+    speechHarness.controller.updatePresence(presence({ connectivity: "online" }));
+    speechHarness.fire(speechHarness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+    speechHarness.controller.updatePresence(presence({ connectivity: "online", speech: "queued" }));
+    expect(speechHarness.controller.getState().active.kind).toBe("none");
+  });
+
+  it("cancels a stale proactive callback after Live2D or connectivity loss", () => {
+    for (const capabilityChange of [
+      { tts: "unknown", audio: "unknown", live2d: "unavailable" },
+      { tts: "unknown", audio: "unknown", live2d: "available" }
+    ] as const) {
+      const harness = createHarness();
+      harness.controller.updateVisibility(true);
+      harness.controller.updatePresence(presence({ connectivity: "online" }));
+      const proactiveTimer = harness.latestTimer();
+      harness.controller.updatePresence(
+        presence({
+          connectivity: capabilityChange.live2d === "available" ? "reconnecting" : "online",
+          capabilities: capabilityChange
+        })
+      );
+      harness.fire(proactiveTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+      expect(harness.controller.getState().active.kind).toBe("none");
+    }
+  });
+
+  it("does not reset silent-attention timing for TTS or audio changes", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const proactiveTimer = harness.latestTimer();
+
+    harness.setNow(100);
+    harness.controller.updatePresence(
+      presence({
+        connectivity: "online",
+        capabilities: { tts: "unavailable", audio: "unavailable", live2d: "available" }
+      })
+    );
+    expect(proactiveTimer.cancelled).toBe(false);
+    expect(harness.latestTimer()).toBe(proactiveTimer);
+  });
+
+  it("starts the idle delay before a temporary lifecycle pulse finishes", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+
+    harness.setNow(100);
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "thinking" }));
+    harness.setNow(100);
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "idle" }));
+    expect(harness.controller.getState().active).toMatchObject({ reason: "thinking" });
+
+    const thinkingTimer = harness.latestTimer();
+    harness.fire(thinkingTimer, 100 + LIFECYCLE_PULSE_TTL_MS.thinking);
+    expect(harness.latestTimer().dueAt).toBe(100 + SILENT_ATTENTION_IDLE_DELAY_MS);
+  });
+
+  it("enforces cooldown across a new idle episode", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    harness.fire(harness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+    harness.fire(harness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS + SILENT_ATTENTION_TTL_MS);
+
+    harness.setNow(14_000);
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "listening" }));
+    harness.setNow(15_000);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+
+    expect(harness.latestTimer().dueAt).toBe(
+      SILENT_ATTENTION_IDLE_DELAY_MS + SILENT_ATTENTION_COOLDOWN_MS
+    );
+    harness.fire(harness.latestTimer(), 42_000);
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "proactive",
+      reason: "silent-attention"
+    });
+  });
+
+  it("does not reschedule a stale proactive callback after disposal", () => {
+    const first = createHarness();
+    first.controller.updateVisibility(true);
+    first.controller.updatePresence(presence({ connectivity: "online" }));
+    const staleTimer = first.latestTimer();
+    first.controller.dispose();
+    const writesAfterDispose = first.writes.length;
+
+    first.fire(staleTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+    expect(first.writes).toHaveLength(writesAfterDispose);
+    expect(first.controller.getState().active.kind).toBe("none");
+  });
+
+  it("suppresses ambient attention while speech is queued without changing lifecycle policy", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const proactiveTimer = harness.latestTimer();
+
+    harness.setNow(100);
+    harness.controller.updatePresence(presence({ connectivity: "online", speech: "queued" }));
+    harness.fire(proactiveTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+    expect(harness.controller.getState().active.kind).toBe("none");
+  });
+
+  it("does not let silent attention bypass P0, P1, or P2 priority", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    harness.fire(harness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "listening" }));
+    harness.controller.updatePresence(
+      presence({
+        connectivity: "online",
+        activity: "thinking",
+        speech: "active",
+        transition: "interrupted"
+      })
+    );
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      reason: "listening-entry",
+      priority: "P0"
+    });
   });
 });

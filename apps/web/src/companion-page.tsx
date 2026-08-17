@@ -131,9 +131,24 @@ export function CompanionPage(): JSX.Element {
       setGazeTarget: (target) => lumiRef.current?.setGazeTarget(target)
     });
     behaviorControllerRef.current = controller;
+    const syncVisibility = (): void => {
+      controller.updateVisibility(
+        typeof document !== "undefined" && document.visibilityState === "visible"
+      );
+    };
+    const handleVisibilityChange = (): void => {
+      syncVisibility();
+    };
+    syncVisibility();
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    }
     controller.updatePresence(presenceProjectionRef.current ?? presence);
 
     return () => {
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
       controller.dispose();
       if (behaviorControllerRef.current === controller) {
         behaviorControllerRef.current = null;
