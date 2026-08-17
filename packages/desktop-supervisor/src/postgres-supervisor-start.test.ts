@@ -17,6 +17,7 @@ import {
 import { expectedClusterName } from "./postgres-ownership.js";
 import { PROCESS_METADATA_VERSION, writeProcessMetadata } from "./ownership.js";
 import * as processWindows from "./process-windows.js";
+import type { ProcessInspectionOptions } from "./process-windows.js";
 import type { PostgresDistribution } from "./postgres-distribution.js";
 import type { ProcessInspectionResult, SupervisorConfig } from "./types.js";
 
@@ -362,6 +363,9 @@ describe("private postgres Windows start state machine", () => {
       diagnostics: { ...emptyDiagnostics(), schemaReady: true }
     }));
     const started = new Date();
+    const inspectProcess = vi.fn((processId: number, _options?: ProcessInspectionOptions) =>
+      ownedInspection(dist, layout, marker.clusterId, started, processId)
+    );
     vi.spyOn(cluster, "pingPostgresServer").mockResolvedValue(true);
     vi.spyOn(cluster, "pingPostgres").mockResolvedValue(true);
     vi.spyOn(cluster, "ensureYuviDatabase").mockResolvedValue({
@@ -373,8 +377,7 @@ describe("private postgres Windows start state machine", () => {
     const supervisor = createSupervisor(config, {
       platform: "win32",
       migratePostgres,
-      inspectProcess: (processId) =>
-        ownedInspection(dist, layout, marker.clusterId, started, processId),
+      inspectProcess,
       spawnWindowsPgCtl: async () => {
         fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
         return {
@@ -393,6 +396,9 @@ describe("private postgres Windows start state machine", () => {
     expect(postgres?.ownership).toBe("owned");
     expect(postgres?.pid).toBe(4242);
     expect(migratePostgres).toHaveBeenCalledTimes(1);
+    expect(inspectProcess).toHaveBeenCalledWith(4242, {
+      windowsQueryTimeoutMs: cluster.POSTGRES_LAUNCH_PROCESS_QUERY_TIMEOUT_MS
+    });
     const listen = readListenMetadata(layout);
     expect(listen?.clusterId).toBe(marker.clusterId);
     expect(listen?.port).toBe(supervisor.snapshot().postgres?.port ?? null);

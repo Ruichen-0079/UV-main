@@ -253,6 +253,7 @@ describe("private postgres cluster safety", () => {
       args: readonly string[];
       options?: { shell?: boolean; windowsHide?: boolean };
     } = { command: "", args: [] };
+    let inspectionCalls = 0;
     const fakePgCtl: import("./postgres-cluster.js").WindowsPgCtlSpawnAsync = async (
       command,
       args,
@@ -284,19 +285,23 @@ describe("private postgres cluster safety", () => {
       port: 55432,
       clusterId: marker.clusterId,
       spawnImpl: fakePgCtl,
-      inspectProcess: (processId) => ({
-        status: "resolved",
-        processId,
-        info: {
+      inspectProcess: (processId) => {
+        inspectionCalls += 1;
+        return {
+          status: "resolved",
           processId,
-          parentProcessId: 1,
-          commandLine: `${distribution.postgres} -D ${layout.data} -p 55432 -c cluster_name=yuvi-pg-${marker.clusterId}`,
-          createdAtUtc: new Date(),
-          executablePath: distribution.postgres
-        }
-      })
+          info: {
+            processId,
+            parentProcessId: 1,
+            commandLine: `${distribution.postgres} -D ${layout.data} -p 55432 -c cluster_name=yuvi-pg-${marker.clusterId}`,
+            createdAtUtc: new Date(),
+            executablePath: distribution.postgres
+          }
+        };
+      }
     });
     expect(launched.outcome).toBe("started");
+    expect(inspectionCalls).toBe(1);
     if (launched.outcome === "started") {
       expect(launched.pid).toBe(4242);
     }

@@ -8,6 +8,19 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ProcessInfo, ProcessInspectionResult, StartCommandSpec } from "./types.js";
 
+export const DEFAULT_WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 2_500;
+export const MAX_WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 10_000;
+
+export type ProcessInspectionOptions = {
+  windowsQueryTimeoutMs?: number;
+};
+
+function normalizeWindowsProcessQueryTimeout(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_WINDOWS_PROCESS_QUERY_TIMEOUT_MS;
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_WINDOWS_PROCESS_QUERY_TIMEOUT_MS;
+  return Math.min(Math.max(1, Math.floor(value)), MAX_WINDOWS_PROCESS_QUERY_TIMEOUT_MS);
+}
+
 /**
  * Fast liveness check — never shells out to PowerShell (that blocked Save for seconds).
  */
@@ -25,7 +38,10 @@ export function isProcessAlive(processId: number): boolean {
  * Full process inspection for ownership. The result deliberately distinguishes
  * a dead process from a live process whose identity query was unavailable.
  */
-export function inspectProcess(processId: number): ProcessInspectionResult {
+export function inspectProcess(
+  processId: number,
+  options?: ProcessInspectionOptions
+): ProcessInspectionResult {
   if (!Number.isInteger(processId) || processId <= 0) {
     return { status: "not-running", processId, reason: "invalid-pid" };
   }
@@ -65,7 +81,11 @@ $obj | ConvertTo-Json -Compress
       "-Command",
       script
     ],
-    { encoding: "utf8", windowsHide: true, timeout: 2_500 }
+    {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: normalizeWindowsProcessQueryTimeout(options?.windowsQueryTimeoutMs)
+    }
   );
   return classifyProcessQueryResult(processId, {
     status: result.status,

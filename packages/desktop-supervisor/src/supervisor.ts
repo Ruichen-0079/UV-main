@@ -9,6 +9,7 @@ import {
   launchWindowsPrivatePostgres,
   pingPostgres,
   pingPostgresServer,
+  POSTGRES_LAUNCH_PROCESS_QUERY_TIMEOUT_MS,
   type PostgresLaunchDiagnostic
 } from "./postgres-cluster.js";
 import {
@@ -57,7 +58,8 @@ import {
   inspectProcess,
   isProcessAlive,
   requestGracefulStop,
-  spawnManagedProcess
+  spawnManagedProcess,
+  type ProcessInspectionOptions
 } from "./process-windows.js";
 import type {
   ManagedServiceSpec,
@@ -1384,7 +1386,10 @@ export class DesktopSupervisor {
       distribution,
       port,
       clusterId,
-      inspectProcess: (processId) => this.inspectManagedProcess(processId),
+      inspectProcess: (processId) =>
+        this.inspectManagedProcess(processId, {
+          windowsQueryTimeoutMs: POSTGRES_LAUNCH_PROCESS_QUERY_TIMEOUT_MS
+        }),
       ...(this.hooks.spawnWindowsPgCtl ? { spawnImpl: this.hooks.spawnWindowsPgCtl } : {}),
       ...(this.hooks.postmasterSettleTimeoutMs != null
         ? { settleTimeoutMs: this.hooks.postmasterSettleTimeoutMs }
@@ -1608,8 +1613,8 @@ export class DesktopSupervisor {
     }
   }
 
-  private inspectManagedProcess(processId: number) {
-    return (this.hooks.inspectProcess ?? inspectProcess)(processId);
+  private inspectManagedProcess(processId: number, options?: ProcessInspectionOptions) {
+    return (this.hooks.inspectProcess ?? inspectProcess)(processId, options);
   }
 
   private emitPostgresLaunchDiagnostic(

@@ -47,6 +47,8 @@ export const PG_CTL_LAUNCH_TIMEOUT_MS = (PG_CTL_START_WAIT_SECONDS + 10) * 1000;
 export const PG_CTL_OUTPUT_MAX_CHARS = 2048;
 /** Small, secret-safe tails surfaced through the lifecycle diagnostic only. */
 export const PG_CTL_DIAGNOSTIC_OUTPUT_MAX_CHARS = 512;
+/** Startup-only identity budget for the private PostgreSQL launch path. */
+export const POSTGRES_LAUNCH_PROCESS_QUERY_TIMEOUT_MS = 10_000;
 export const POSTMASTER_SETTLE_WINDOW_MS = 1_500;
 export const POSTMASTER_SETTLE_INTERVAL_MS = 50;
 export const DUPLICATE_DATABASE_SQLSTATE = "42P04";
