@@ -6,6 +6,8 @@ import {
   ConfigValidationError,
   getLegacyServerLocalEnvWarning,
   parseRuntimeConfig,
+  parseEnvText,
+  quoteEnvValue,
   redactConfig,
   redactSecret,
   readRuntimeEnvFiles,
@@ -13,6 +15,21 @@ import {
 } from "./index.js";
 
 describe("runtime config", () => {
+  it("round-trips dashboard environment values through quote and parse", () => {
+    const values = [
+      "",
+      'spaces and # equals=quotes"',
+      "backslash\\unicode-你好",
+      "https://example.com/v1",
+      "C:\\models\\voice.bin",
+      "sk-api-key-like-value"
+    ];
+
+    for (const value of values) {
+      expect(parseEnvText(`VALUE=${quoteEnvValue(value)}\n`)["VALUE"]).toBe(value);
+    }
+  });
+
   it("parses environment values without reading process state", () => {
     const config = parseRuntimeConfig({
       NODE_ENV: "production",

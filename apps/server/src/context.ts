@@ -26,6 +26,14 @@ import {
 } from "@companion/providers";
 import type { FastifyBaseLogger } from "fastify";
 import type { ServerConfig } from "./config.js";
+import { readRuntimeEnvFiles } from "./env.js";
+import {
+  editableKeys,
+  getPendingRestartKeys,
+  getRuntimeSettingApplyMode,
+  snapshotRestartSettings,
+  type EditableRuntimeSetting
+} from "./runtime-settings.js";
 import { DashboardStateService } from "./services/dashboard.js";
 import type { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
 
@@ -41,6 +49,7 @@ export type AppContext = {
   providers: ProviderRegistry;
   runtime: RuntimeOrchestrator;
   activeMemoryRepository: string;
+  activeRuntimeEnv: Record<string, string | undefined>;
   memoryMaintenanceScheduler?: MemoryMaintenanceScheduler | undefined;
   reloadRuntimeConfig(env: Record<string, string | undefined>): Promise<RuntimeConfigReloadResult>;
 };
@@ -49,6 +58,8 @@ export type RuntimeConfigReloadResult = {
   providers: ProviderStatusMap;
   restartRequired: boolean;
   notHotReloaded: string[];
+  appliedKeys: string[];
+  pendingRestartKeys: string[];
   message: string;
 };
 
@@ -60,12 +71,36 @@ export async function createAppContext(
     throw new Error("EVENT_BUS=nats is reserved for future NATS support and is not implemented.");
   }
 
+  const bootEnv = (await readRuntimeEnvFiles()).env;
   const eventBus = new InMemoryEventBus();
   const dashboard = new DashboardStateService();
   eventBus.subscribe("*", (event) => {
     dashboard.recordEvent(event);
   });
   const activeMemoryRepository = parseMemoryRepositoryEnv().kind;
+  const activeRuntimeEnv = {
+    ...bootEnv,
+    ...snapshotRestartSettings(bootEnv),
+    MEMORY_REPOSITORY: activeMemoryRepository,
+    MEMORY_MAINTENANCE_ENABLED: String(config.memoryMaintenance.enabled),
+    MEMORY_MAINTENANCE_RUN_ON_STARTUP: String(config.memoryMaintenance.runOnStartup),
+    MEMORY_MAINTENANCE_INTERVAL_MINUTES: String(config.memoryMaintenance.intervalMinutes),
+    MEMORY_MAINTENANCE_LIMIT: String(config.memoryMaintenance.limit),
+    MEMORY_VECTOR_INDEX_ENABLED: String(config.memoryVectorIndex.enabled),
+    MEMORY_VECTOR_INDEX_TYPE: config.memoryVectorIndex.type,
+    MEMORY_VECTOR_DISTANCE: config.memoryVectorIndex.distance,
+    ...(config.memoryVectorIndex.ivfflatProbes === undefined
+      ? {}
+      : { MEMORY_VECTOR_IVFFLAT_PROBES: String(config.memoryVectorIndex.ivfflatProbes) }),
+    ...(config.memoryVectorIndex.hnswEfSearch === undefined
+      ? {}
+      : { MEMORY_VECTOR_HNSW_EF_SEARCH: String(config.memoryVectorIndex.hnswEfSearch) }),
+    YUVI_AUTO_MIGRATE: String(config.devSupervisor.autoMigrate),
+    YUVI_DEV_SUPERVISOR: String(config.devSupervisor.active),
+    EVENT_BUS: config.eventBus,
+    SERVER_HOST: config.host,
+    SERVER_PORT: String(config.port)
+  };
   const memoryRepository = createMemoryRepositoryFromEnv();
   let conversationRepository: ConversationRepository | undefined;
   let finalizedIngestionRepository: FinalizedIngestionRepository | undefined;
@@ -218,20 +253,15 @@ export async function createAppContext(
     providers,
     runtime,
     activeMemoryRepository,
+    activeRuntimeEnv,
     async reloadRuntimeConfig(env) {
-      await context.runtime.sealAndDrainMemoryWrites();
       const nextProviders = createProviderRegistryFromEnv(env);
       const nextMemory = createMemoryService(
         nextProviders,
         parseMemoryExtractorMode(env["MEMORY_EXTRACTOR"]),
         env
       );
-      context.memoryIngestionCoordinator.replaceProvider(
-        nextMemory.getMemoryProvider() ?? unavailableMemoryProvider()
-      );
-      context.providers = nextProviders;
-      context.memory = nextMemory;
-      context.runtime = createRuntime(nextProviders, nextMemory, {
+      const nextRuntime = createRuntime(nextProviders, nextMemory, {
         enabled: parseBoolean(env["DIRECT_CONTEXT_ENABLED"], config.directContext.enabled),
         maxTurns: parsePositiveInteger(
           env["DIRECT_CONTEXT_MAX_TURNS"],
@@ -243,16 +273,40 @@ export async function createAppContext(
         )
       });
 
-      const notHotReloaded = collectNotHotReloadedSettings(env, config, activeMemoryRepository);
+      // Stage all replacements before sealing or mutating the current
+      // Runtime. Construction failures therefore leave the live context
+      // unchanged.
+      await context.runtime.sealAndDrainMemoryWrites();
+      context.memoryIngestionCoordinator.replaceProvider(
+        nextMemory.getMemoryProvider() ?? unavailableMemoryProvider()
+      );
+      context.providers = nextProviders;
+      context.memory = nextMemory;
+      context.runtime = nextRuntime;
+
+      const previousActiveRuntimeEnv = { ...context.activeRuntimeEnv };
+      const appliedKeys: string[] = [];
+      for (const key of editableKeys) {
+        if (getRuntimeSettingApplyMode(key) === "hot_reload") {
+          if (!sameRuntimeSettingValue(key, previousActiveRuntimeEnv[key], env[key])) {
+            appliedKeys.push(key);
+          }
+          context.activeRuntimeEnv[key] = env[key];
+        }
+      }
+
+      const notHotReloaded = getPendingRestartKeys(env, context.activeRuntimeEnv);
       const restartRequired = notHotReloaded.length > 0;
 
       return {
         providers: nextProviders.getStatus(),
         restartRequired,
         notHotReloaded,
+        appliedKeys,
+        pendingRestartKeys: notHotReloaded,
         message: restartRequired
-          ? "Runtime provider config reloaded. Some settings require server restart."
-          : "Runtime provider config reloaded."
+          ? "Hot-reloadable settings applied. Some saved settings still require a server restart."
+          : "Hot-reloadable settings applied."
       };
     }
   };
@@ -260,55 +314,28 @@ export async function createAppContext(
   return context;
 }
 
-function collectNotHotReloadedSettings(
-  env: Record<string, string | undefined>,
-  config: ServerConfig,
-  activeMemoryRepository: string
-): string[] {
-  const notHotReloaded: string[] = [];
-  if (parseMemoryRepositoryEnv(env).kind !== activeMemoryRepository) {
-    notHotReloaded.push("MEMORY_REPOSITORY");
+function sameRuntimeSettingValue(
+  key: EditableRuntimeSetting,
+  previous: string | undefined,
+  next: string | undefined
+): boolean {
+  if (key === "MEMORY_REPOSITORY") {
+    return normalizeMemoryRepository(previous) === normalizeMemoryRepository(next);
   }
-  if ((env["SERVER_HOST"] ?? config.host) !== config.host) {
-    notHotReloaded.push("SERVER_HOST");
+  if (key === "EVENT_BUS") {
+    return normalizeEventBus(previous) === normalizeEventBus(next);
   }
-  if (Number.parseInt(env["SERVER_PORT"] ?? String(config.port), 10) !== config.port) {
-    notHotReloaded.push("SERVER_PORT");
-  }
-  if ((env["EVENT_BUS"] ?? config.eventBus) !== config.eventBus) {
-    notHotReloaded.push("EVENT_BUS");
-  }
-  if (parseBoolean(env["MEMORY_MAINTENANCE_ENABLED"], false) !== config.memoryMaintenance.enabled) {
-    notHotReloaded.push("MEMORY_MAINTENANCE_ENABLED");
-  }
-  if (
-    parseBoolean(env["MEMORY_MAINTENANCE_RUN_ON_STARTUP"], false) !==
-    config.memoryMaintenance.runOnStartup
-  ) {
-    notHotReloaded.push("MEMORY_MAINTENANCE_RUN_ON_STARTUP");
-  }
-  if (
-    parsePositiveInteger(env["MEMORY_MAINTENANCE_INTERVAL_MINUTES"], 0) !==
-    config.memoryMaintenance.intervalMinutes
-  ) {
-    notHotReloaded.push("MEMORY_MAINTENANCE_INTERVAL_MINUTES");
-  }
-  if (
-    parseStrictPositiveInteger(env["MEMORY_MAINTENANCE_LIMIT"], 500) !==
-    config.memoryMaintenance.limit
-  ) {
-    notHotReloaded.push("MEMORY_MAINTENANCE_LIMIT");
-  }
-  if (parseBoolean(env["MEMORY_VECTOR_INDEX_ENABLED"], true) !== config.memoryVectorIndex.enabled) {
-    notHotReloaded.push("MEMORY_VECTOR_INDEX_ENABLED");
-  }
-  if ((env["MEMORY_VECTOR_INDEX_TYPE"] ?? "hnsw") !== config.memoryVectorIndex.type) {
-    notHotReloaded.push("MEMORY_VECTOR_INDEX_TYPE");
-  }
-  if ((env["MEMORY_VECTOR_DISTANCE"] ?? "cosine") !== config.memoryVectorIndex.distance) {
-    notHotReloaded.push("MEMORY_VECTOR_DISTANCE");
-  }
-  return notHotReloaded;
+  return (previous ?? "").trim() === (next ?? "").trim();
+}
+
+function normalizeMemoryRepository(value: string | undefined): string {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "memory" ? "in-memory" : (normalized ?? "");
+}
+
+function normalizeEventBus(value: string | undefined): string {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "memory" ? "in-memory" : (normalized ?? "");
 }
 
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {

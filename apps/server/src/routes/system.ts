@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import type { FastifyInstance } from "fastify";
 import type { ServerConfig } from "../config.js";
 import { getRuntimeEnvDir } from "../env.js";
-import { requireDashboardDevToken } from "./security.js";
+import { isLocalAddress, requireDashboardDevToken } from "./security.js";
 
 export async function registerSystemRoutes(
   app: FastifyInstance,
@@ -66,14 +66,4 @@ export async function registerSystemRoutes(
       runtimeEnvDir: getRuntimeEnvDir()
     });
   });
-}
-
-function isLocalAddress(value: string | undefined): boolean {
-  return (
-    !value ||
-    value === "127.0.0.1" ||
-    value === "::1" ||
-    value === "::ffff:127.0.0.1" ||
-    value === "localhost"
-  );
 }

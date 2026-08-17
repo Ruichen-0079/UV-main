@@ -26,3 +26,28 @@ export function requireDashboardDevToken(
   });
   return false;
 }
+
+export function requireLocalDashboardAccess(
+  config: ServerConfig,
+  request: FastifyRequest,
+  reply: FastifyReply
+): boolean {
+  if (!isLocalAddress(request.ip)) {
+    reply.status(403).send({
+      error: "forbidden",
+      message: "This dashboard operation can only be requested from localhost."
+    });
+    return false;
+  }
+
+  return requireDashboardDevToken(config, request, reply);
+}
+
+export function isLocalAddress(value: string | undefined): boolean {
+  return (
+    value === "127.0.0.1" ||
+    value === "::1" ||
+    value === "::ffff:127.0.0.1" ||
+    value === "localhost"
+  );
+}

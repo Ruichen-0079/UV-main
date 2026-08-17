@@ -10,7 +10,7 @@ import {
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
 import { redactValue } from "../services/dashboard.js";
-import { requireDashboardDevToken } from "./security.js";
+import { requireLocalDashboardAccess } from "./security.js";
 
 const ProviderCapabilitySchema = {
   chat: true,
@@ -38,7 +38,7 @@ export async function registerProviderRoutes(
   });
 
   app.post("/providers/verify/chat", async (request, reply) => {
-    if (!requireDashboardDevToken(config, request, reply)) {
+    if (!requireLocalDashboardAccess(config, request, reply)) {
       return reply;
     }
 
@@ -101,7 +101,7 @@ export async function registerProviderRoutes(
   });
 
   app.post("/providers/verify/reasoning", async (request, reply) => {
-    if (!requireDashboardDevToken(config, request, reply)) {
+    if (!requireLocalDashboardAccess(config, request, reply)) {
       return reply;
     }
 
@@ -164,7 +164,7 @@ export async function registerProviderRoutes(
   });
 
   app.post("/providers/verify/embedding", async (request, reply) => {
-    if (!requireDashboardDevToken(config, request, reply)) {
+    if (!requireLocalDashboardAccess(config, request, reply)) {
       return reply;
     }
 
@@ -259,7 +259,7 @@ export async function registerProviderRoutes(
   });
 
   app.post("/providers/verify-chain/:capability", async (request, reply) => {
-    if (!requireDashboardDevToken(config, request, reply)) {
+    if (!requireLocalDashboardAccess(config, request, reply)) {
       return reply;
     }
     const capability = (request.params as { capability?: string }).capability;
@@ -302,7 +302,7 @@ function verifyConfigOnlyCapability(
   context: AppContext,
   config: ServerConfig
 ): unknown {
-  if (!requireDashboardDevToken(config, request, reply)) {
+  if (!requireLocalDashboardAccess(config, request, reply)) {
     return reply;
   }
 

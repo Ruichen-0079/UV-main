@@ -3,7 +3,7 @@ import { MemoryIngestionCoordinator, MemoryMaintenanceService } from "@companion
 import { loadServerConfig } from "./config.js";
 import { buildServer } from "./server.js";
 import { mkdtempSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -1768,6 +1768,12 @@ describe("server", () => {
       expect(blockedSettings.statusCode).toBe(401);
       expect(blockedSettings.body).not.toContain("dev-token");
 
+      const blockedSettingsRead = await app.inject({
+        method: "GET",
+        url: "/settings/runtime"
+      });
+      expect(blockedSettingsRead.statusCode).toBe(401);
+
       const blockedVerify = await app.inject({
         method: "POST",
         url: "/providers/verify/chat"
@@ -1797,6 +1803,15 @@ describe("server", () => {
       });
       expect(allowedVerify.body).not.toContain("dev-token");
 
+      const allowedSettingsRead = await app.inject({
+        method: "GET",
+        url: "/settings/runtime",
+        headers: {
+          "X-YUVI-Dev-Token": "dev-token"
+        }
+      });
+      expect(allowedSettingsRead.statusCode).toBe(200);
+
       const allowedMaintenance = await app.inject({
         method: "POST",
         url: "/memory/maintenance/run",
@@ -1821,6 +1836,38 @@ describe("server", () => {
       });
       expect(allowedMaintenance.body).not.toContain("dev-token");
     } finally {
+      await app.close();
+    }
+  });
+
+  it("requires localhost for settings and explicit provider verification even without a token", async () => {
+    const app = await buildTestServer();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    try {
+      const settings = await app.inject({
+        method: "GET",
+        url: "/settings/runtime",
+        remoteAddress: "10.0.0.8"
+      });
+      expect(settings.statusCode).toBe(403);
+
+      const verify = await app.inject({
+        method: "POST",
+        url: "/providers/verify/chat",
+        remoteAddress: "10.0.0.8"
+      });
+      expect(verify.statusCode).toBe(403);
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const health = await app.inject({
+        method: "GET",
+        url: "/health",
+        remoteAddress: "10.0.0.8"
+      });
+      expect(health.statusCode).toBe(200);
+    } finally {
+      fetchSpy.mockRestore();
       await app.close();
     }
   });
@@ -2205,6 +2252,18 @@ describe("server", () => {
       expect(settings.json().providers.deepseek.apiKeyPreview.length).toBe(16);
       expect(settings.json().providers.xai.apiKeyConfigured).toBe(false);
       expect(settings.json().providers.xai.apiKeyPreview).toBeUndefined();
+      expect(settings.json().activeRuntimeConfig.providers).toEqual(
+        expect.objectContaining({
+          chat: expect.any(Object),
+          reasoning: expect.any(Object),
+          embedding: expect.any(Object),
+          tts: expect.any(Object),
+          stt: expect.any(Object),
+          vision: expect.any(Object)
+        })
+      );
+      expect(settings.json().providers.xai.implementedCapabilities).toEqual(["tts", "vision"]);
+      expect(settings.json().providers.dashscope.implementedCapabilities).toEqual(["stt"]);
       expect(settings.json().memory).toMatchObject({
         memoryExtractor: "llm",
         activeMemoryExtractor: "llm",
@@ -2236,7 +2295,8 @@ describe("server", () => {
         }
       });
       expect(invalidExtractor.statusCode).toBe(400);
-      expect(invalidExtractor.json().error).toBe("invalid_memory_extractor");
+      expect(invalidExtractor.json().error).toBe("invalid_settings");
+      expect(invalidExtractor.json().fieldErrors.MEMORY_EXTRACTOR).toEqual(expect.any(String));
 
       const update = await app.inject({
         method: "POST",
@@ -2244,6 +2304,7 @@ describe("server", () => {
         payload: {
           values: {
             MEMORY_REPOSITORY: "postgres",
+            DATABASE_URL: "postgres://settings-test",
             MEMORY_EXTRACTOR: "rule-based",
             DEEPSEEK_API_KEY: "new_deepseek_secret",
             DEEPSEEK_CHAT_MODEL: "deepseek-chat"
@@ -2288,6 +2349,9 @@ describe("server", () => {
       const localEnv = await readFile(path.join(tempDir, ".env.local"), "utf8");
       expect(localEnv.match(/^DEEPSEEK_API_KEY=/gmu)).toHaveLength(1);
       expect(localEnv).toContain("DEEPSEEK_API_KEY=new_deepseek_secret");
+      if (process.platform !== "win32") {
+        expect((await stat(path.join(tempDir, ".env.local"))).mode & 0o777).toBe(0o600);
+      }
 
       const updateExisting = await app.inject({
         method: "POST",
@@ -2303,6 +2367,62 @@ describe("server", () => {
       expect(updatedLocalEnv.match(/^DEEPSEEK_API_KEY=/gmu)).toHaveLength(1);
       expect(updatedLocalEnv).toContain("DEEPSEEK_API_KEY=second_secret_value");
       expect(updateExisting.body).not.toContain("second_secret_value");
+
+      const [concurrentModel, concurrentVoice] = await Promise.all([
+        app.inject({
+          method: "POST",
+          url: "/settings/runtime",
+          payload: { values: { DEEPSEEK_CHAT_MODEL: "concurrent-model" } }
+        }),
+        app.inject({
+          method: "POST",
+          url: "/settings/runtime",
+          payload: { values: { XAI_TTS_VOICE: "concurrent-voice" } }
+        })
+      ]);
+      expect(concurrentModel.statusCode).toBe(200);
+      expect(concurrentVoice.statusCode).toBe(200);
+      const concurrentLocalEnv = await readFile(path.join(tempDir, ".env.local"), "utf8");
+      expect(concurrentLocalEnv).toContain("DEEPSEEK_CHAT_MODEL=concurrent-model");
+      expect(concurrentLocalEnv).toContain("XAI_TTS_VOICE=concurrent-voice");
+
+      const beforeInvalidUpdate = concurrentLocalEnv;
+      const invalidPort = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: { values: { SERVER_PORT: "6121abc" } }
+      });
+      expect(invalidPort.statusCode).toBe(400);
+      expect(invalidPort.json()).toMatchObject({
+        error: "invalid_settings",
+        fieldErrors: { SERVER_PORT: expect.any(String) }
+      });
+      expect(await readFile(path.join(tempDir, ".env.local"), "utf8")).toBe(beforeInvalidUpdate);
+
+      const conflictingUpdate = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: {
+          values: { DEEPSEEK_CHAT_MODEL: "ignored" },
+          removeOverrides: ["DEEPSEEK_CHAT_MODEL"]
+        }
+      });
+      expect(conflictingUpdate.statusCode).toBe(400);
+
+      const removedSecret = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: { removeOverrides: ["DEEPSEEK_API_KEY"] }
+      });
+      expect(removedSecret.statusCode).toBe(200);
+      expect(await readFile(path.join(tempDir, ".env.local"), "utf8")).not.toMatch(
+        /^DEEPSEEK_API_KEY=/mu
+      );
+      expect(removedSecret.json().settings.settings.DEEPSEEK_API_KEY).toMatchObject({
+        localOverrideConfigured: false,
+        effectiveConfigured: false,
+        source: "process.env/default"
+      });
 
       await app.close();
     } finally {
@@ -2362,6 +2482,72 @@ describe("server", () => {
       expect(await readFile(path.join(tempDir, ".env"), "utf8")).toBe(
         "DEEPSEEK_CHAT_MODEL=from-env\n"
       );
+
+      await app.close();
+    } finally {
+      process.chdir(previousCwd);
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes local overrides so effective settings inherit from .env", async () => {
+    const previousCwd = process.cwd();
+    const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-inherit-"));
+    const env = createTestEnv({
+      YUVI_RUNTIME_ENV_DIR: tempDir,
+      SERVER_PORT: "6121"
+    });
+
+    try {
+      process.chdir(tempDir);
+      await writeFile(
+        path.join(tempDir, ".env"),
+        "SERVER_PORT=6121\nPROVIDER_ALLOW_MOCKS=true\n",
+        "utf8"
+      );
+      await writeFile(
+        path.join(tempDir, ".env.local"),
+        "SERVER_PORT=6121\nMANUALLY_ADDED_SETTING=preserve-me\n",
+        "utf8"
+      );
+      process.env = { ...env };
+      const app = await buildServer(loadServerConfig(env));
+
+      const before = await app.inject({ method: "GET", url: "/settings/runtime" });
+      expect(before.statusCode).toBe(200);
+      expect(before.json().settings.SERVER_PORT).toMatchObject({
+        base: "6121",
+        localOverride: "6121",
+        effective: "6121",
+        source: ".env.local"
+      });
+
+      const changed = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: { values: { SERVER_PORT: "6122" } }
+      });
+      expect(changed.statusCode).toBe(200);
+      expect(changed.json().pendingRestartKeys).toContain("SERVER_PORT");
+
+      const removed = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: { removeOverrides: ["SERVER_PORT"] }
+      });
+      expect(removed.statusCode).toBe(200);
+      expect(await readFile(path.join(tempDir, ".env.local"), "utf8")).not.toMatch(
+        /^SERVER_PORT=/mu
+      );
+      expect(await readFile(path.join(tempDir, ".env.local"), "utf8")).toContain(
+        "MANUALLY_ADDED_SETTING=preserve-me"
+      );
+      expect(removed.json().settings.settings.SERVER_PORT).toMatchObject({
+        base: "6121",
+        localOverride: "",
+        effective: "6121",
+        source: ".env"
+      });
 
       await app.close();
     } finally {
@@ -2480,7 +2666,8 @@ describe("server", () => {
         url: "/settings/runtime",
         payload: {
           values: {
-            MEMORY_REPOSITORY: "postgres"
+            MEMORY_REPOSITORY: "postgres",
+            DATABASE_URL: "postgres://reload-settings-test"
           }
         }
       });
