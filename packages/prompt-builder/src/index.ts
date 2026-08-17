@@ -8,6 +8,7 @@ export type PromptSectionName =
   | "RelevantMemory"
   | "CurrentSituation"
   | "Tools"
+  | "ProactiveInstruction"
   | "UserMessage";
 
 export type PromptSection = {
@@ -43,7 +44,7 @@ export type ToolContext = {
   available?: boolean;
 };
 
-export type PromptBuildInput = {
+type PromptBuildSharedInput = {
   systemIdentity: string;
   characterStyle?: string;
   relationshipContext?: string;
@@ -59,9 +60,20 @@ export type PromptBuildInput = {
   directContextEnabled?: boolean;
   currentSituation?: string;
   tools?: ToolContext[];
-  userMessage: string;
   maxCharacters?: number;
 };
+
+export type PromptBuildInput =
+  | (PromptBuildSharedInput & {
+      turnOrigin?: "user-turn";
+      userMessage: string;
+      proactiveInstruction?: never;
+    })
+  | (PromptBuildSharedInput & {
+      turnOrigin: "assistant-initiated";
+      proactiveInstruction: string;
+      userMessage?: never;
+    });
 
 export type ProviderNeutralChatMessage = {
   role: "system" | "user";
@@ -108,15 +120,19 @@ export class PromptBuilder {
           role: "system",
           content: systemPrompt
         },
-        {
-          role: "user",
-          content: formatSection({
-            name: "UserMessage",
-            content: input.userMessage,
-            priority: 100,
-            stable: false
-          })
-        }
+        ...(input.turnOrigin === "assistant-initiated"
+          ? []
+          : [
+              {
+                role: "user" as const,
+                content: formatSection({
+                  name: "UserMessage",
+                  content: input.userMessage,
+                  priority: 100,
+                  stable: false
+                })
+              }
+            ])
       ],
       prompt,
       characterCount: prompt.length,
@@ -195,18 +211,32 @@ export class PromptBuilder {
         priority: 60,
         stable: false
       },
+      ...(input.turnOrigin === "assistant-initiated"
+        ? [
+            {
+              name: "ProactiveInstruction" as const,
+              content: input.proactiveInstruction,
+              priority: 100,
+              stable: false
+            }
+          ]
+        : []),
       {
         name: "Tools",
         content: formatTools(input.tools ?? []),
         priority: 50,
         stable: false
       },
-      {
-        name: "UserMessage",
-        content: input.userMessage,
-        priority: 100,
-        stable: false
-      }
+      ...(input.turnOrigin === "assistant-initiated"
+        ? []
+        : [
+            {
+              name: "UserMessage" as const,
+              content: input.userMessage,
+              priority: 100,
+              stable: false
+            }
+          ])
     ];
   }
 

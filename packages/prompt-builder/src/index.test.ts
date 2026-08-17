@@ -39,6 +39,25 @@ describe("PromptBuilder", () => {
     expect(output.sections.some((section) => section.name === "CurrentTime")).toBe(true);
   });
 
+  it("builds assistant-initiated prompts without a synthetic user message", () => {
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "You are Companion.",
+      turnOrigin: "assistant-initiated",
+      proactiveInstruction: "Generate one natural assistant-initiated message.",
+      directContext: "- Previous assistant-initiated message: Assistant: Earlier context.",
+      retrievedMemories: [],
+      currentSituation: "The assistant is initiating a message.",
+      tools: []
+    });
+
+    expect(output.messages).toHaveLength(1);
+    expect(output.messages[0]?.role).toBe("system");
+    expect(output.sections.map((section) => section.name)).toContain("ProactiveInstruction");
+    expect(output.sections.map((section) => section.name)).not.toContain("UserMessage");
+    expect(output.prompt).toContain("Generate one natural assistant-initiated message.");
+    expect(output.prompt).not.toContain("<UserMessage>");
+  });
+
   it("keeps DirectContext separate from RelevantMemory", () => {
     const output = new PromptBuilder().buildPrompt({
       systemIdentity: "You are Companion.",
