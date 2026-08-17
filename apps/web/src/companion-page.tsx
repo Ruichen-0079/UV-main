@@ -139,10 +139,10 @@ export function CompanionPage(): JSX.Element {
     const handleVisibilityChange = (): void => {
       syncVisibility();
     };
-    syncVisibility();
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", handleVisibilityChange);
     }
+    syncVisibility();
     controller.updatePresence(presenceProjectionRef.current ?? presence);
 
     return () => {

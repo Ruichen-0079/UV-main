@@ -44,6 +44,8 @@ export const LIFECYCLE_PULSE_TTL_MS = {
   interrupted: 650
 } as const;
 
+export const ACTIVE_TIMER_CLOCK_RETRY_DELAY_MS = 50;
+
 type LifecycleIntentSpec =
   | {
       readonly kind: "attention";
@@ -351,6 +353,20 @@ export function createBehaviorPolicyController(
     }
   }
 
+  function handleInvalidClockEnvironment(presence: CompanionPresenceProjection): void {
+    // An invalid sample cannot authorize a policy reduction. Keep the current
+    // semantic winner and only invalidate proactive scheduling until time is
+    // readable again.
+    clearProactiveTimer();
+    const result = evaluateSilentAttentionEligibility(proactiveInput(presence, Number.NaN));
+    if (result.baseEligible) return;
+
+    resetProactiveEpisode();
+    if (isSilentAttentionIntent(state.active)) {
+      scheduleActiveTimerRetry(state.active);
+    }
+  }
+
   function createSilentAttentionIntent(nowMs: number): BehaviorSemanticIntent | null {
     if (
       sessionId === null ||
@@ -477,13 +493,10 @@ export function createBehaviorPolicyController(
     }
   }
 
-  function scheduleActiveTimer(intent: BehaviorSemanticIntent, nowMs: number): void {
-    if (!isValidMonotonicNow(nowMs)) {
-      failSafe();
-      return;
-    }
+  function scheduleActiveTimerWithDelay(intent: BehaviorSemanticIntent, delayMs: number): void {
+    if (disposed || !Number.isFinite(delayMs) || delayMs < 0) return;
 
-    const delayMs = Math.max(0, intent.expiresAtMs - nowMs);
+    if (timer !== null) clearActiveTimer();
     const intentRef = Object.freeze(getBehaviorIntentRef(intent));
     const timerGeneration = generation;
     const currentTimerToken = ++timerToken;
@@ -503,6 +516,17 @@ export function createBehaviorPolicyController(
         const currentPresence = previousPresence;
         if (currentPresence === null) {
           failSafe();
+          return;
+        }
+        if (!isValidMonotonicNow(callbackNow)) {
+          // Clock failure delays expiry processing; it does not mean the
+          // exact active intent was semantically released.
+          if (
+            state.active.kind !== "none" &&
+            sameIntentRef(getBehaviorIntentRef(state.active), intentRef)
+          ) {
+            scheduleActiveTimerRetry(state.active);
+          }
           return;
         }
         const nextState = reduceSafely(
@@ -528,6 +552,15 @@ export function createBehaviorPolicyController(
     } catch {
       failSafe();
     }
+  }
+
+  function scheduleActiveTimer(intent: BehaviorSemanticIntent, nowMs: number): void {
+    if (!isValidMonotonicNow(nowMs)) return;
+    scheduleActiveTimerWithDelay(intent, Math.max(0, intent.expiresAtMs - nowMs));
+  }
+
+  function scheduleActiveTimerRetry(intent: BehaviorSemanticIntent): void {
+    scheduleActiveTimerWithDelay(intent, ACTIVE_TIMER_CLOCK_RETRY_DELAY_MS);
   }
 
   function submit(
@@ -604,6 +637,10 @@ export function createBehaviorPolicyController(
     const previous = previousPresence;
     previousPresence = next;
     const nowMs = readNow();
+    if (!isValidMonotonicNow(nowMs)) {
+      handleInvalidClockEnvironment(next);
+      return;
+    }
     reconcile(next, nowMs);
     synchronizeProactiveEnvironment(next, nowMs);
     if (previous === null) {
@@ -680,6 +717,10 @@ export function createBehaviorPolicyController(
     const currentPresence = previousPresence;
     if (currentPresence === null) return;
     const nowMs = readNow();
+    if (!isValidMonotonicNow(nowMs)) {
+      handleInvalidClockEnvironment(currentPresence);
+      return;
+    }
     synchronizeProactiveEnvironment(currentPresence, nowMs);
     reevaluateProactive(currentPresence, nowMs);
   }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACTIVE_TIMER_CLOCK_RETRY_DELAY_MS,
   createBehaviorPolicyController,
   LIFECYCLE_PULSE_TTL_MS,
   type BehaviorPolicyControllerOptions
@@ -23,13 +24,17 @@ type FakeTimer = {
 
 function createHarness(sessionId?: unknown) {
   let now = 0;
+  let clockThrows = false;
   const timers: FakeTimer[] = [];
   const writes: Array<SuppliedGazeTarget | null> = [];
   const resolvedSessionId = arguments.length === 0 ? "test-session" : sessionId;
   const options: BehaviorPolicyControllerOptions = {
     sessionId: resolvedSessionId as string,
     controllerId: "test-controller",
-    now: () => now,
+    now: () => {
+      if (clockThrows) throw new Error("clock unavailable");
+      return now;
+    },
     setTimer(callback, delayMs) {
       const timer = { callback, dueAt: now + delayMs, cancelled: false };
       timers.push(timer);
@@ -46,6 +51,11 @@ function createHarness(sessionId?: unknown) {
 
   function setNow(value: number): void {
     now = value;
+    clockThrows = false;
+  }
+
+  function failClock(): void {
+    clockThrows = true;
   }
 
   function fire(timer: FakeTimer, at = timer.dueAt): void {
@@ -59,7 +69,7 @@ function createHarness(sessionId?: unknown) {
     return timer;
   }
 
-  return { controller, options, timers, writes, setNow, fire, latestTimer };
+  return { controller, options, timers, writes, setNow, failClock, fire, latestTimer };
 }
 
 function presence(
@@ -472,6 +482,160 @@ describe("BehaviorPolicyController", () => {
     now = LIFECYCLE_PULSE_TTL_MS.thinking;
     expect(() => callbacks[0]?.()).not.toThrow();
     expect(controller.getState().active.kind).toBe("none");
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    "preserves a P1 winner when updatePresence receives invalid clock %s",
+    (invalidNow) => {
+      const harness = createHarness();
+      harness.controller.updatePresence(presence());
+      harness.controller.updatePresence(presence({ activity: "thinking" }));
+      const activeTimer = harness.latestTimer();
+      const writesBefore = harness.writes.length;
+
+      harness.setNow(invalidNow);
+      expect(() =>
+        harness.controller.updatePresence(presence({ activity: "thinking" }))
+      ).not.toThrow();
+
+      expect(harness.controller.getState().active).toMatchObject({
+        kind: "gaze",
+        reason: "thinking"
+      });
+      expect(harness.writes).toHaveLength(writesBefore);
+      expect(activeTimer.cancelled).toBe(false);
+    }
+  );
+
+  it("preserves a P2 winner when updatePresence throws while reading the clock", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ transition: "interrupted" }));
+    const writesBefore = harness.writes.length;
+
+    harness.failClock();
+    expect(() =>
+      harness.controller.updatePresence(presence({ transition: "interrupted" }))
+    ).not.toThrow();
+
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "reaction",
+      reason: "interrupt-acknowledgement"
+    });
+    expect(harness.writes).toHaveLength(writesBefore);
+  });
+
+  it.each([
+    ["P0", { activity: "listening" }, "attention"],
+    ["P1", { activity: "thinking" }, "gaze"],
+    ["P2", { transition: "interrupted" }, "reaction"]
+  ] as const)(
+    "preserves an active %s winner during invalid-clock visibility reevaluation",
+    (_label, next, kind) => {
+      const harness = createHarness();
+      harness.controller.updatePresence(presence());
+      harness.controller.updatePresence(presence(next));
+      const writesBefore = harness.writes.length;
+
+      harness.failClock();
+      expect(() => harness.controller.updateVisibility(true)).not.toThrow();
+
+      expect(harness.controller.getState().active.kind).toBe(kind);
+      expect(harness.writes).toHaveLength(writesBefore);
+    }
+  );
+
+  it("retries an active timer after an invalid clock sample and expires after recovery", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ activity: "thinking" }));
+    const firstTimer = harness.latestTimer();
+
+    harness.failClock();
+    firstTimer.callback();
+    expect(harness.controller.getState().active).toMatchObject({ reason: "thinking" });
+    const retryTimer = harness.latestTimer();
+    expect(retryTimer).not.toBe(firstTimer);
+    expect(retryTimer.dueAt).toBe(ACTIVE_TIMER_CLOCK_RETRY_DELAY_MS);
+
+    harness.setNow(LIFECYCLE_PULSE_TTL_MS.thinking);
+    retryTimer.callback();
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes.at(-1)).toBeNull();
+  });
+
+  it("keeps one bounded active-timer retry across repeated invalid clock samples", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ activity: "thinking" }));
+    const firstTimer = harness.latestTimer();
+
+    harness.failClock();
+    firstTimer.callback();
+    const secondTimer = harness.latestTimer();
+    secondTimer.callback();
+    const thirdTimer = harness.latestTimer();
+    firstTimer.callback();
+
+    expect(harness.timers).toHaveLength(3);
+    expect(thirdTimer).not.toBe(secondTimer);
+    expect(harness.controller.getState().active).toMatchObject({ reason: "thinking" });
+  });
+
+  it("does not create proactive behavior when its due callback reads an invalid clock", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const proactiveTimer = harness.latestTimer();
+
+    harness.failClock();
+    proactiveTimer.callback();
+
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes).toEqual([]);
+    expect(harness.timers).toHaveLength(1);
+  });
+
+  it("preserves silent attention through a bad-clock hide and cancels it after recovery", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    harness.fire(harness.latestTimer(), 12_000);
+    expect(harness.controller.getState().active.kind).toBe("proactive");
+
+    harness.failClock();
+    harness.controller.updateVisibility(false);
+    expect(harness.controller.getState().active.kind).toBe("proactive");
+
+    const retryTimer = harness.latestTimer();
+    harness.setNow(12_010);
+    retryTimer.callback();
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes.at(-1)).toBeNull();
+  });
+
+  it("delays capability reconciliation until a valid clock sample returns", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ activity: "thinking" }));
+
+    harness.failClock();
+    harness.controller.updatePresence(
+      presence({
+        activity: "thinking",
+        capabilities: { tts: "unknown", audio: "unknown", live2d: "unavailable" }
+      })
+    );
+    expect(harness.controller.getState().active.kind).toBe("gaze");
+
+    harness.setNow(1);
+    harness.controller.updatePresence(
+      presence({
+        activity: "thinking",
+        capabilities: { tts: "unknown", audio: "unknown", live2d: "unavailable" }
+      })
+    );
+    expect(harness.controller.getState().active.kind).toBe("none");
   });
 
   it("schedules one silent-attention pulse and returns to natural gaze", () => {

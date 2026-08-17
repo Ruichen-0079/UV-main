@@ -7,7 +7,24 @@ import { CompanionPage } from "./companion-page.js";
 const mockState = vi.hoisted(() => ({
   buses: [] as any[],
   queues: [] as any[],
-  projections: [] as any[]
+  projections: [] as any[],
+  controllers: [] as any[]
+}));
+
+vi.mock("./behavior-policy-controller.js", () => ({
+  createBehaviorPolicyController: (options: any) => {
+    const visibilityCalls: boolean[] = [];
+    const controller = {
+      visibilityCalls,
+      updatePresence: () => undefined,
+      updateVisibility: (visible: boolean) => visibilityCalls.push(visible),
+      getState: () => ({ active: { kind: "none" } }),
+      getPreviousPresence: () => null,
+      dispose: () => undefined
+    };
+    mockState.controllers.push({ controller, options });
+    return controller;
+  }
 }));
 
 vi.mock("./companion-bus.js", () => {
@@ -149,6 +166,7 @@ type FakeNode = {
 
 type FakeDocument = {
   nodeType: 9;
+  visibilityState: "visible" | "hidden";
   body: FakeNode;
   documentElement: FakeNode;
   activeElement: FakeNode;
@@ -157,11 +175,25 @@ type FakeDocument = {
   createElementNS(namespace: string, tag: string): FakeNode;
   createTextNode(text: string): FakeNode;
   createComment(text: string): FakeNode;
-  addEventListener(): void;
-  removeEventListener(): void;
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
 };
 
-function installFakeDom(): { container: FakeNode; restore(): void } {
+function installFakeDom(
+  options: {
+    initialVisibility?: "visible" | "hidden";
+    onVisibilityListenerInstall?: () => void;
+  } = {}
+): {
+  container: FakeNode;
+  document: FakeDocument;
+  visibilityListeners: Set<() => void>;
+  visibilityListenerHistory: Array<() => void>;
+  visibilityAdds: number;
+  visibilityRemoves: number;
+  setVisibility(value: "visible" | "hidden"): void;
+  restore(): void;
+} {
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
   const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
@@ -224,8 +256,14 @@ function installFakeDom(): { container: FakeNode; restore(): void } {
     removeEventListener() {},
     document: undefined as unknown as FakeDocument
   };
+  const visibilityListeners = new Set<() => void>();
+  const visibilityListenerHistory: Array<() => void> = [];
+  let visibilityAdds = 0;
+  let visibilityRemoves = 0;
+  let onVisibilityListenerInstall = options.onVisibilityListenerInstall;
   const documentObject = {
     nodeType: 9,
+    visibilityState: options.initialVisibility ?? "visible",
     body: undefined as unknown as FakeNode,
     documentElement: undefined as unknown as FakeNode,
     activeElement: undefined as unknown as FakeNode,
@@ -234,8 +272,20 @@ function installFakeDom(): { container: FakeNode; restore(): void } {
     createElementNS: (_namespace: string, tag: string) => makeNode(tag),
     createTextNode: (text: string) => makeNode("#text", 3, text),
     createComment: (text: string) => makeNode("#comment", 8, text),
-    addEventListener() {},
-    removeEventListener() {}
+    addEventListener(type: string, listener: () => void) {
+      if (type !== "visibilitychange") return;
+      visibilityAdds += 1;
+      visibilityListeners.add(listener);
+      visibilityListenerHistory.push(listener);
+      const hook = onVisibilityListenerInstall;
+      onVisibilityListenerInstall = undefined;
+      hook?.();
+    },
+    removeEventListener(type: string, listener: () => void) {
+      if (type !== "visibilitychange") return;
+      visibilityRemoves += 1;
+      visibilityListeners.delete(listener);
+    }
   } satisfies FakeDocument;
   documentObject.body = makeNode("body");
   documentObject.documentElement = makeNode("html");
@@ -258,6 +308,19 @@ function installFakeDom(): { container: FakeNode; restore(): void } {
 
   return {
     container,
+    document: documentObject,
+    visibilityListeners,
+    visibilityListenerHistory,
+    get visibilityAdds() {
+      return visibilityAdds;
+    },
+    get visibilityRemoves() {
+      return visibilityRemoves;
+    },
+    setVisibility(value) {
+      documentObject.visibilityState = value;
+      for (const listener of [...visibilityListeners]) listener();
+    },
     restore() {
       const globalObject = globalThis as Record<string, unknown>;
       if (previousDocument === undefined) delete globalObject["document"];
@@ -282,19 +345,39 @@ function readText(node: FakeNode): string {
   return node.childNodes.map(readText).join("");
 }
 
-async function mountCompanionPage(): Promise<{
+async function mountCompanionPage(domOptions?: Parameters<typeof installFakeDom>[0]): Promise<{
   root: Root;
   container: FakeNode;
   restore(): void;
+  document: FakeDocument;
+  visibilityListeners: Set<() => void>;
+  visibilityListenerHistory: Array<() => void>;
+  visibilityAdds: number;
+  visibilityRemoves: number;
+  setVisibility(value: "visible" | "hidden"): void;
 }> {
-  const dom = installFakeDom();
+  const dom = installFakeDom(domOptions);
   let root!: Root;
   await act(async () => {
     root = createRoot(dom.container as unknown as Element);
     root.render(createElement(CompanionPage));
     await Promise.resolve();
   });
-  return { root, ...dom };
+  return {
+    root,
+    container: dom.container,
+    document: dom.document,
+    visibilityListeners: dom.visibilityListeners,
+    visibilityListenerHistory: dom.visibilityListenerHistory,
+    get visibilityAdds() {
+      return dom.visibilityAdds;
+    },
+    get visibilityRemoves() {
+      return dom.visibilityRemoves;
+    },
+    setVisibility: dom.setVisibility,
+    restore: dom.restore
+  };
 }
 
 async function emitBus(bus: any, message: any): Promise<void> {
@@ -319,6 +402,7 @@ afterEach(() => {
   mockState.buses.length = 0;
   mockState.queues.length = 0;
   mockState.projections.length = 0;
+  mockState.controllers.length = 0;
   delete (globalThis as { window?: unknown }).window;
 });
 
@@ -336,6 +420,56 @@ describe("CompanionPage Tauri chrome", () => {
     const markup = renderToStaticMarkup(<CompanionPage />);
     expect(markup).toContain("data-tauri-drag-region");
     expect(markup).toContain('aria-label="Resize window"');
+  });
+});
+
+describe("CompanionPage visibility installation", () => {
+  it("installs the listener before the initial visibility synchronization", async () => {
+    const mounted = await mountCompanionPage({
+      initialVisibility: "visible",
+      onVisibilityListenerInstall: () => {
+        (globalThis.document as unknown as FakeDocument).visibilityState = "hidden";
+      }
+    });
+    try {
+      const controller = mockState.controllers[0]?.controller;
+      expect(controller.visibilityCalls).toEqual([false]);
+      expect(mounted.visibilityAdds).toBe(1);
+      expect(mounted.visibilityListeners.size).toBe(1);
+    } finally {
+      await act(async () => mounted.root.unmount());
+      expect(mounted.visibilityRemoves).toBe(1);
+      expect(mounted.visibilityListeners.size).toBe(0);
+      mounted.restore();
+    }
+  });
+
+  it("keeps one live listener across remount and fences the stale listener", async () => {
+    const first = await mountCompanionPage();
+    const staleListener = first.visibilityListenerHistory[0];
+    const firstController = mockState.controllers[0]?.controller;
+    await act(async () => first.root.unmount());
+    expect(first.visibilityRemoves).toBe(1);
+    expect(first.visibilityListeners.size).toBe(0);
+    first.restore();
+
+    const second = await mountCompanionPage();
+    try {
+      const secondController = mockState.controllers[1]?.controller;
+      expect(second.visibilityAdds).toBe(1);
+      expect(second.visibilityListeners.size).toBe(1);
+      const secondCallsBeforeStaleListener = secondController.visibilityCalls.length;
+
+      staleListener?.();
+
+      expect(firstController.visibilityCalls).toHaveLength(2);
+      expect(secondController.visibilityCalls).toHaveLength(secondCallsBeforeStaleListener);
+    } finally {
+      await act(async () => second.root.unmount());
+      expect(second.visibilityRemoves).toBe(1);
+      expect(second.visibilityListeners.size).toBe(0);
+      second.restore();
+    }
   });
 });
 
