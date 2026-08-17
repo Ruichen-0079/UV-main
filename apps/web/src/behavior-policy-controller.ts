@@ -12,6 +12,11 @@ import {
 import type { CompanionPresenceProjection } from "./companion-presence.js";
 import { adaptSemanticGaze } from "./semantic-gaze-adapter.js";
 import type { SuppliedGazeTarget } from "./companion-gaze.js";
+import {
+  evaluateSilentAttentionEligibility,
+  SILENT_ATTENTION_ENABLED,
+  SILENT_ATTENTION_TTL_MS
+} from "./proactive-eligibility.js";
 
 export type BehaviorPolicyTimerHandle = unknown;
 
@@ -26,6 +31,7 @@ export type BehaviorPolicyControllerOptions = {
 
 export type BehaviorPolicyController = {
   updatePresence(next: CompanionPresenceProjection): void;
+  updateVisibility(visible: boolean): void;
   getState(): BehaviorPolicyState;
   getPreviousPresence(): CompanionPresenceProjection | null;
   dispose(): void;
@@ -37,6 +43,8 @@ export const LIFECYCLE_PULSE_TTL_MS = {
   speaking: 1000,
   interrupted: 650
 } as const;
+
+export const ACTIVE_TIMER_CLOCK_RETRY_DELAY_MS = 50;
 
 type LifecycleIntentSpec =
   | {
@@ -71,6 +79,13 @@ type ActiveTimer = {
   readonly token: number;
   readonly generation: number;
   readonly intentRef: BehaviorIntentRef;
+  readonly handle: BehaviorPolicyTimerHandle;
+};
+
+type ProactiveTimer = {
+  readonly token: number;
+  readonly generation: number;
+  readonly dueAtMs: number;
   readonly handle: BehaviorPolicyTimerHandle;
 };
 
@@ -121,8 +136,14 @@ function semanticGazeForIntent(intent: BehaviorIntent): {
           return null;
       }
     case "proactive":
-      return null;
+      return intent.payload.action === "silent-attention" ? { target: "user", strength: 1 } : null;
   }
+}
+
+function isSilentAttentionIntent(
+  intent: BehaviorIntent
+): intent is Extract<BehaviorSemanticIntent, { readonly kind: "proactive" }> {
+  return intent.kind === "proactive" && intent.payload.action === "silent-attention";
 }
 
 function createLifecycleIntent(
@@ -172,6 +193,13 @@ export function createBehaviorPolicyController(
   let generation = 0;
   let sequence = 0;
   let timerToken = 0;
+  let proactiveTimer: ProactiveTimer | null = null;
+  let proactiveTimerToken = 0;
+  let visible = false;
+  let idleSinceMs: number | null = null;
+  let lastSilentAttentionAtMs: number | null = null;
+  let consumedThisIdleEpisode = false;
+  let attemptedThisIdleEpisode = false;
   let disposed = false;
   let lastExecutionKey: string | null = null;
   const controllerId =
@@ -203,6 +231,26 @@ export function createBehaviorPolicyController(
       // Timer cancellation is an optimization; identity fencing remains the
       // correctness boundary when an already-queued callback still runs.
     }
+  }
+
+  function clearProactiveTimer(): void {
+    proactiveTimerToken += 1;
+    if (proactiveTimer === null) return;
+    const current = proactiveTimer;
+    proactiveTimer = null;
+    try {
+      options.clearTimer(current.handle);
+    } catch {
+      // Timer cancellation is an optimization; the schedule token remains
+      // the correctness boundary for an already-queued callback.
+    }
+  }
+
+  function resetProactiveEpisode(): void {
+    idleSinceMs = null;
+    consumedThisIdleEpisode = false;
+    attemptedThisIdleEpisode = false;
+    clearProactiveTimer();
   }
 
   function executionKey(target: SuppliedGazeTarget | null): string | null {
@@ -245,6 +293,7 @@ export function createBehaviorPolicyController(
 
   function failSafe(): void {
     clearActiveTimer();
+    resetProactiveEpisode();
     state = createInitialBehaviorPolicyState();
     applyExecution(null, true);
   }
@@ -261,13 +310,193 @@ export function createBehaviorPolicyController(
     }
   }
 
-  function scheduleActiveTimer(intent: BehaviorSemanticIntent, nowMs: number): void {
-    if (!isValidMonotonicNow(nowMs)) {
-      failSafe();
+  function proactiveInput(
+    presence: CompanionPresenceProjection,
+    nowMs: number
+  ): Parameters<typeof evaluateSilentAttentionEligibility>[0] {
+    return {
+      presence,
+      visible,
+      sessionId,
+      policyState: state,
+      nowMs,
+      idleSinceMs,
+      lastSilentAttentionAtMs,
+      consumedThisIdleEpisode,
+      attemptedThisIdleEpisode,
+      enabled: SILENT_ATTENTION_ENABLED
+    };
+  }
+
+  function cancelActiveSilentAttention(presence: CompanionPresenceProjection, nowMs: number): void {
+    if (!isSilentAttentionIntent(state.active)) return;
+    const intentRef = getBehaviorIntentRef(state.active);
+    const nextState = reduceSafely({ type: "cancel-intent", intentRef }, context(presence, nowMs));
+    applyState(nextState, nowMs);
+  }
+
+  function synchronizeProactiveEnvironment(
+    presence: CompanionPresenceProjection,
+    nowMs: number
+  ): void {
+    const result = evaluateSilentAttentionEligibility(proactiveInput(presence, nowMs));
+    if (!result.baseEligible) {
+      cancelActiveSilentAttention(presence, nowMs);
+      resetProactiveEpisode();
       return;
     }
 
-    const delayMs = Math.max(0, intent.expiresAtMs - nowMs);
+    if (idleSinceMs === null && isValidMonotonicNow(nowMs)) {
+      idleSinceMs = nowMs;
+      consumedThisIdleEpisode = false;
+      attemptedThisIdleEpisode = false;
+    }
+  }
+
+  function handleInvalidClockEnvironment(presence: CompanionPresenceProjection): void {
+    // An invalid sample cannot authorize a policy reduction. Keep the current
+    // semantic winner and only invalidate proactive scheduling until time is
+    // readable again.
+    clearProactiveTimer();
+    const result = evaluateSilentAttentionEligibility(proactiveInput(presence, Number.NaN));
+    if (result.baseEligible) return;
+
+    resetProactiveEpisode();
+    if (isSilentAttentionIntent(state.active)) {
+      scheduleActiveTimerRetry(state.active);
+    }
+  }
+
+  function createSilentAttentionIntent(nowMs: number): BehaviorSemanticIntent | null {
+    if (
+      sessionId === null ||
+      !isValidMonotonicNow(nowMs) ||
+      !Number.isFinite(SILENT_ATTENTION_TTL_MS) ||
+      SILENT_ATTENTION_TTL_MS <= 0
+    ) {
+      return null;
+    }
+
+    const expiresAtMs = nowMs + SILENT_ATTENTION_TTL_MS;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) return null;
+
+    return {
+      intentId: `${controllerId}:${generation}:${sequence++}:silent-attention`,
+      source: "idle-policy",
+      reason: "silent-attention",
+      priority: "P3",
+      createdAtMs: nowMs,
+      expiresAtMs,
+      scope: "session",
+      sessionId,
+      kind: "proactive",
+      payload: { action: "silent-attention", modality: "silent" }
+    };
+  }
+
+  function scheduleProactiveTimer(dueAtMs: number, nowMs: number): void {
+    if (disposed || !isValidMonotonicNow(nowMs) || !Number.isFinite(dueAtMs) || dueAtMs < nowMs) {
+      return;
+    }
+
+    if (proactiveTimer !== null) clearProactiveTimer();
+    const timerGeneration = generation;
+    const currentToken = ++proactiveTimerToken;
+    const delayMs = Math.max(0, dueAtMs - nowMs);
+    try {
+      const handle = options.setTimer(() => {
+        if (disposed || timerGeneration !== generation) return;
+        if (
+          proactiveTimer === null ||
+          proactiveTimer.token !== currentToken ||
+          proactiveTimer.generation !== timerGeneration ||
+          proactiveTimer.dueAtMs !== dueAtMs
+        ) {
+          return;
+        }
+
+        // Consume the concrete schedule before any path that may schedule a
+        // replacement. A duplicate invocation of this closure is stale.
+        proactiveTimer = null;
+        const callbackNow = readNow();
+        const currentPresence = previousPresence;
+        if (currentPresence === null || !isValidMonotonicNow(callbackNow)) return;
+
+        synchronizeProactiveEnvironment(currentPresence, callbackNow);
+        const currentEvaluation = evaluateSilentAttentionEligibility(
+          proactiveInput(currentPresence, callbackNow)
+        );
+        if (!currentEvaluation.baseEligible) return;
+
+        if (callbackNow < dueAtMs) {
+          scheduleProactiveTimer(dueAtMs, callbackNow);
+          return;
+        }
+
+        if (!currentEvaluation.eligible) {
+          if (currentEvaluation.nextCheckAtMs !== null) {
+            scheduleProactiveTimer(currentEvaluation.nextCheckAtMs, callbackNow);
+          }
+          return;
+        }
+
+        const intent = createSilentAttentionIntent(callbackNow);
+        if (intent === null) return;
+
+        const nextState = reduceSafely(
+          { type: "submit-intent", intent },
+          context(currentPresence, callbackNow)
+        );
+        const admitted =
+          isSilentAttentionIntent(nextState.active) &&
+          sameIntentRef(getBehaviorIntentRef(nextState.active), getBehaviorIntentRef(intent));
+        applyState(nextState, callbackNow);
+        attemptedThisIdleEpisode = true;
+        if (admitted) {
+          consumedThisIdleEpisode = true;
+          lastSilentAttentionAtMs = callbackNow;
+        }
+      }, delayMs);
+      proactiveTimer = {
+        token: currentToken,
+        generation: timerGeneration,
+        dueAtMs,
+        handle
+      };
+    } catch {
+      proactiveTimer = null;
+    }
+  }
+
+  function reevaluateProactive(presence: CompanionPresenceProjection, nowMs: number): void {
+    if (disposed || !isValidMonotonicNow(nowMs)) {
+      if (!isValidMonotonicNow(nowMs)) clearProactiveTimer();
+      return;
+    }
+
+    if (idleSinceMs === null) {
+      synchronizeProactiveEnvironment(presence, nowMs);
+    }
+
+    const result = evaluateSilentAttentionEligibility(proactiveInput(presence, nowMs));
+    if (!result.baseEligible) return;
+
+    if (result.eligible) {
+      if (proactiveTimer === null) scheduleProactiveTimer(nowMs, nowMs);
+      return;
+    }
+
+    if (proactiveTimer !== null && result.nextCheckAtMs === null) {
+      clearProactiveTimer();
+    } else if (proactiveTimer === null && result.nextCheckAtMs !== null) {
+      scheduleProactiveTimer(result.nextCheckAtMs, nowMs);
+    }
+  }
+
+  function scheduleActiveTimerWithDelay(intent: BehaviorSemanticIntent, delayMs: number): void {
+    if (disposed || !Number.isFinite(delayMs) || delayMs < 0) return;
+
+    if (timer !== null) clearActiveTimer();
     const intentRef = Object.freeze(getBehaviorIntentRef(intent));
     const timerGeneration = generation;
     const currentTimerToken = ++timerToken;
@@ -289,6 +518,17 @@ export function createBehaviorPolicyController(
           failSafe();
           return;
         }
+        if (!isValidMonotonicNow(callbackNow)) {
+          // Clock failure delays expiry processing; it does not mean the
+          // exact active intent was semantically released.
+          if (
+            state.active.kind !== "none" &&
+            sameIntentRef(getBehaviorIntentRef(state.active), intentRef)
+          ) {
+            scheduleActiveTimerRetry(state.active);
+          }
+          return;
+        }
         const nextState = reduceSafely(
           { type: "clock-tick", intentRef },
           context(currentPresence, callbackNow)
@@ -306,11 +546,21 @@ export function createBehaviorPolicyController(
           // remaining monotonic lifetime rather than clearing execution.
           scheduleActiveTimer(active, callbackNow);
         }
+        reevaluateProactive(currentPresence, callbackNow);
       }, delayMs);
       timer = { token: currentTimerToken, generation: timerGeneration, intentRef, handle };
     } catch {
       failSafe();
     }
+  }
+
+  function scheduleActiveTimer(intent: BehaviorSemanticIntent, nowMs: number): void {
+    if (!isValidMonotonicNow(nowMs)) return;
+    scheduleActiveTimerWithDelay(intent, Math.max(0, intent.expiresAtMs - nowMs));
+  }
+
+  function scheduleActiveTimerRetry(intent: BehaviorSemanticIntent): void {
+    scheduleActiveTimerWithDelay(intent, ACTIVE_TIMER_CLOCK_RETRY_DELAY_MS);
   }
 
   function submit(
@@ -387,8 +637,16 @@ export function createBehaviorPolicyController(
     const previous = previousPresence;
     previousPresence = next;
     const nowMs = readNow();
+    if (!isValidMonotonicNow(nowMs)) {
+      handleInvalidClockEnvironment(next);
+      return;
+    }
     reconcile(next, nowMs);
-    if (previous === null) return;
+    synchronizeProactiveEnvironment(next, nowMs);
+    if (previous === null) {
+      reevaluateProactive(next, nowMs);
+      return;
+    }
 
     if (previous.activity !== "listening" && next.activity === "listening") {
       submit(
@@ -449,6 +707,22 @@ export function createBehaviorPolicyController(
         LIFECYCLE_PULSE_TTL_MS.interrupted
       );
     }
+
+    reevaluateProactive(next, nowMs);
+  }
+
+  function updateVisibility(nextVisible: boolean): void {
+    if (disposed || visible === nextVisible) return;
+    visible = nextVisible;
+    const currentPresence = previousPresence;
+    if (currentPresence === null) return;
+    const nowMs = readNow();
+    if (!isValidMonotonicNow(nowMs)) {
+      handleInvalidClockEnvironment(currentPresence);
+      return;
+    }
+    synchronizeProactiveEnvironment(currentPresence, nowMs);
+    reevaluateProactive(currentPresence, nowMs);
   }
 
   function dispose(): void {
@@ -456,6 +730,8 @@ export function createBehaviorPolicyController(
     disposed = true;
     generation += 1;
     clearActiveTimer();
+    resetProactiveEpisode();
+    visible = false;
     state = createInitialBehaviorPolicyState();
     previousPresence = null;
     applyExecution(null, true);
@@ -463,6 +739,7 @@ export function createBehaviorPolicyController(
 
   return {
     updatePresence,
+    updateVisibility,
     getState: () => state,
     getPreviousPresence: () => previousPresence,
     dispose

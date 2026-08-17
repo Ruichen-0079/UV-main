@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACTIVE_TIMER_CLOCK_RETRY_DELAY_MS,
   createBehaviorPolicyController,
   LIFECYCLE_PULSE_TTL_MS,
   type BehaviorPolicyControllerOptions
 } from "./behavior-policy-controller.js";
+import {
+  SILENT_ATTENTION_COOLDOWN_MS,
+  SILENT_ATTENTION_IDLE_DELAY_MS,
+  SILENT_ATTENTION_TTL_MS
+} from "./proactive-eligibility.js";
 import {
   createInitialCompanionPresence,
   type CompanionPresenceProjection
@@ -18,13 +24,17 @@ type FakeTimer = {
 
 function createHarness(sessionId?: unknown) {
   let now = 0;
+  let clockThrows = false;
   const timers: FakeTimer[] = [];
   const writes: Array<SuppliedGazeTarget | null> = [];
   const resolvedSessionId = arguments.length === 0 ? "test-session" : sessionId;
   const options: BehaviorPolicyControllerOptions = {
     sessionId: resolvedSessionId as string,
     controllerId: "test-controller",
-    now: () => now,
+    now: () => {
+      if (clockThrows) throw new Error("clock unavailable");
+      return now;
+    },
     setTimer(callback, delayMs) {
       const timer = { callback, dueAt: now + delayMs, cancelled: false };
       timers.push(timer);
@@ -41,6 +51,11 @@ function createHarness(sessionId?: unknown) {
 
   function setNow(value: number): void {
     now = value;
+    clockThrows = false;
+  }
+
+  function failClock(): void {
+    clockThrows = true;
   }
 
   function fire(timer: FakeTimer, at = timer.dueAt): void {
@@ -54,7 +69,7 @@ function createHarness(sessionId?: unknown) {
     return timer;
   }
 
-  return { controller, options, timers, writes, setNow, fire, latestTimer };
+  return { controller, options, timers, writes, setNow, failClock, fire, latestTimer };
 }
 
 function presence(
@@ -467,5 +482,395 @@ describe("BehaviorPolicyController", () => {
     now = LIFECYCLE_PULSE_TTL_MS.thinking;
     expect(() => callbacks[0]?.()).not.toThrow();
     expect(controller.getState().active.kind).toBe("none");
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    "preserves a P1 winner when updatePresence receives invalid clock %s",
+    (invalidNow) => {
+      const harness = createHarness();
+      harness.controller.updatePresence(presence());
+      harness.controller.updatePresence(presence({ activity: "thinking" }));
+      const activeTimer = harness.latestTimer();
+      const writesBefore = harness.writes.length;
+
+      harness.setNow(invalidNow);
+      expect(() =>
+        harness.controller.updatePresence(presence({ activity: "thinking" }))
+      ).not.toThrow();
+
+      expect(harness.controller.getState().active).toMatchObject({
+        kind: "gaze",
+        reason: "thinking"
+      });
+      expect(harness.writes).toHaveLength(writesBefore);
+      expect(activeTimer.cancelled).toBe(false);
+    }
+  );
+
+  it("preserves a P2 winner when updatePresence throws while reading the clock", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ transition: "interrupted" }));
+    const writesBefore = harness.writes.length;
+
+    harness.failClock();
+    expect(() =>
+      harness.controller.updatePresence(presence({ transition: "interrupted" }))
+    ).not.toThrow();
+
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "reaction",
+      reason: "interrupt-acknowledgement"
+    });
+    expect(harness.writes).toHaveLength(writesBefore);
+  });
+
+  it.each([
+    ["P0", { activity: "listening" }, "attention"],
+    ["P1", { activity: "thinking" }, "gaze"],
+    ["P2", { transition: "interrupted" }, "reaction"]
+  ] as const)(
+    "preserves an active %s winner during invalid-clock visibility reevaluation",
+    (_label, next, kind) => {
+      const harness = createHarness();
+      harness.controller.updatePresence(presence());
+      harness.controller.updatePresence(presence(next));
+      const writesBefore = harness.writes.length;
+
+      harness.failClock();
+      expect(() => harness.controller.updateVisibility(true)).not.toThrow();
+
+      expect(harness.controller.getState().active.kind).toBe(kind);
+      expect(harness.writes).toHaveLength(writesBefore);
+    }
+  );
+
+  it("retries an active timer after an invalid clock sample and expires after recovery", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ activity: "thinking" }));
+    const firstTimer = harness.latestTimer();
+
+    harness.failClock();
+    firstTimer.callback();
+    expect(harness.controller.getState().active).toMatchObject({ reason: "thinking" });
+    const retryTimer = harness.latestTimer();
+    expect(retryTimer).not.toBe(firstTimer);
+    expect(retryTimer.dueAt).toBe(ACTIVE_TIMER_CLOCK_RETRY_DELAY_MS);
+
+    harness.setNow(LIFECYCLE_PULSE_TTL_MS.thinking);
+    retryTimer.callback();
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes.at(-1)).toBeNull();
+  });
+
+  it("keeps one bounded active-timer retry across repeated invalid clock samples", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ activity: "thinking" }));
+    const firstTimer = harness.latestTimer();
+
+    harness.failClock();
+    firstTimer.callback();
+    const secondTimer = harness.latestTimer();
+    secondTimer.callback();
+    const thirdTimer = harness.latestTimer();
+    firstTimer.callback();
+
+    expect(harness.timers).toHaveLength(3);
+    expect(thirdTimer).not.toBe(secondTimer);
+    expect(harness.controller.getState().active).toMatchObject({ reason: "thinking" });
+  });
+
+  it("does not create proactive behavior when its due callback reads an invalid clock", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const proactiveTimer = harness.latestTimer();
+
+    harness.failClock();
+    proactiveTimer.callback();
+
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes).toEqual([]);
+    expect(harness.timers).toHaveLength(1);
+  });
+
+  it("preserves silent attention through a bad-clock hide and cancels it after recovery", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    harness.fire(harness.latestTimer(), 12_000);
+    expect(harness.controller.getState().active.kind).toBe("proactive");
+
+    harness.failClock();
+    harness.controller.updateVisibility(false);
+    expect(harness.controller.getState().active.kind).toBe("proactive");
+
+    const retryTimer = harness.latestTimer();
+    harness.setNow(12_010);
+    retryTimer.callback();
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes.at(-1)).toBeNull();
+  });
+
+  it("delays capability reconciliation until a valid clock sample returns", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence());
+    harness.controller.updatePresence(presence({ activity: "thinking" }));
+
+    harness.failClock();
+    harness.controller.updatePresence(
+      presence({
+        activity: "thinking",
+        capabilities: { tts: "unknown", audio: "unknown", live2d: "unavailable" }
+      })
+    );
+    expect(harness.controller.getState().active.kind).toBe("gaze");
+
+    harness.setNow(1);
+    harness.controller.updatePresence(
+      presence({
+        activity: "thinking",
+        capabilities: { tts: "unknown", audio: "unknown", live2d: "unavailable" }
+      })
+    );
+    expect(harness.controller.getState().active.kind).toBe("none");
+  });
+
+  it("schedules one silent-attention pulse and returns to natural gaze", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    expect(harness.timers).toHaveLength(1);
+    expect(harness.latestTimer().dueAt).toBe(SILENT_ATTENTION_IDLE_DELAY_MS);
+
+    const proactiveTimer = harness.latestTimer();
+    harness.fire(proactiveTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "proactive",
+      source: "idle-policy",
+      reason: "silent-attention",
+      priority: "P3",
+      scope: "session",
+      sessionId: "test-session",
+      payload: { action: "silent-attention", modality: "silent" }
+    });
+    expect(targetWrites(harness)).toHaveLength(1);
+    expect(targetWrites(harness)[0]).toMatchObject({ x: 0, y: 0.08, strength: 0.5 });
+
+    const activeTimer = harness.latestTimer();
+    expect(activeTimer.dueAt).toBe(SILENT_ATTENTION_IDLE_DELAY_MS + SILENT_ATTENTION_TTL_MS);
+    harness.fire(activeTimer, activeTimer.dueAt);
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes.at(-1)).toBeNull();
+
+    harness.setNow(100_000);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    expect(harness.timers).toHaveLength(2);
+  });
+
+  it("fails closed until visibility is explicitly supplied", () => {
+    const harness = createHarness();
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    expect(harness.timers).toHaveLength(0);
+
+    harness.controller.updateVisibility(true);
+    expect(harness.timers).toHaveLength(1);
+    expect(harness.latestTimer().dueAt).toBe(SILENT_ATTENTION_IDLE_DELAY_MS);
+  });
+
+  it("allows one legitimate early proactive reschedule and fences duplicates", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const firstTimer = harness.latestTimer();
+
+    harness.fire(firstTimer, SILENT_ATTENTION_IDLE_DELAY_MS - 1);
+    expect(harness.timers).toHaveLength(2);
+    const secondTimer = harness.latestTimer();
+    expect(secondTimer).not.toBe(firstTimer);
+
+    harness.fire(firstTimer, SILENT_ATTENTION_IDLE_DELAY_MS - 1);
+    expect(harness.timers).toHaveLength(2);
+    expect(harness.controller.getState().active.kind).toBe("none");
+
+    harness.fire(secondTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+    expect(harness.timers).toHaveLength(3);
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "proactive",
+      reason: "silent-attention"
+    });
+  });
+
+  it("cancels a pending proactive timer for last-second interaction", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const proactiveTimer = harness.latestTimer();
+
+    harness.setNow(SILENT_ATTENTION_IDLE_DELAY_MS - 1);
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "listening" }));
+    harness.fire(proactiveTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      reason: "listening-entry"
+    });
+    expect(harness.timers).toHaveLength(2);
+  });
+
+  it("cancels active silent attention when the window becomes hidden", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    harness.fire(harness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+    const activeTimer = harness.latestTimer();
+    expect(harness.controller.getState().active.kind).toBe("proactive");
+
+    harness.controller.updateVisibility(false);
+    harness.fire(activeTimer, SILENT_ATTENTION_IDLE_DELAY_MS + SILENT_ATTENTION_TTL_MS);
+    expect(harness.controller.getState().active.kind).toBe("none");
+    expect(harness.writes.at(-1)).toBeNull();
+  });
+
+  it("cancels active silent attention when lifecycle or speech becomes busy", () => {
+    const lifecycleHarness = createHarness();
+    lifecycleHarness.controller.updateVisibility(true);
+    lifecycleHarness.controller.updatePresence(presence({ connectivity: "online" }));
+    lifecycleHarness.fire(lifecycleHarness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+    lifecycleHarness.controller.updatePresence(
+      presence({ connectivity: "online", lifecycle: "active" })
+    );
+    expect(lifecycleHarness.controller.getState().active.kind).toBe("none");
+
+    const speechHarness = createHarness();
+    speechHarness.controller.updateVisibility(true);
+    speechHarness.controller.updatePresence(presence({ connectivity: "online" }));
+    speechHarness.fire(speechHarness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+    speechHarness.controller.updatePresence(presence({ connectivity: "online", speech: "queued" }));
+    expect(speechHarness.controller.getState().active.kind).toBe("none");
+  });
+
+  it("cancels a stale proactive callback after Live2D or connectivity loss", () => {
+    for (const capabilityChange of [
+      { tts: "unknown", audio: "unknown", live2d: "unavailable" },
+      { tts: "unknown", audio: "unknown", live2d: "available" }
+    ] as const) {
+      const harness = createHarness();
+      harness.controller.updateVisibility(true);
+      harness.controller.updatePresence(presence({ connectivity: "online" }));
+      const proactiveTimer = harness.latestTimer();
+      harness.controller.updatePresence(
+        presence({
+          connectivity: capabilityChange.live2d === "available" ? "reconnecting" : "online",
+          capabilities: capabilityChange
+        })
+      );
+      harness.fire(proactiveTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+      expect(harness.controller.getState().active.kind).toBe("none");
+    }
+  });
+
+  it("does not reset silent-attention timing for TTS or audio changes", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const proactiveTimer = harness.latestTimer();
+
+    harness.setNow(100);
+    harness.controller.updatePresence(
+      presence({
+        connectivity: "online",
+        capabilities: { tts: "unavailable", audio: "unavailable", live2d: "available" }
+      })
+    );
+    expect(proactiveTimer.cancelled).toBe(false);
+    expect(harness.latestTimer()).toBe(proactiveTimer);
+  });
+
+  it("starts the idle delay before a temporary lifecycle pulse finishes", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+
+    harness.setNow(100);
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "thinking" }));
+    harness.setNow(100);
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "idle" }));
+    expect(harness.controller.getState().active).toMatchObject({ reason: "thinking" });
+
+    const thinkingTimer = harness.latestTimer();
+    harness.fire(thinkingTimer, 100 + LIFECYCLE_PULSE_TTL_MS.thinking);
+    expect(harness.latestTimer().dueAt).toBe(100 + SILENT_ATTENTION_IDLE_DELAY_MS);
+  });
+
+  it("enforces cooldown across a new idle episode", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    harness.fire(harness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+    harness.fire(harness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS + SILENT_ATTENTION_TTL_MS);
+
+    harness.setNow(14_000);
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "listening" }));
+    harness.setNow(15_000);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+
+    expect(harness.latestTimer().dueAt).toBe(
+      SILENT_ATTENTION_IDLE_DELAY_MS + SILENT_ATTENTION_COOLDOWN_MS
+    );
+    harness.fire(harness.latestTimer(), 42_000);
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "proactive",
+      reason: "silent-attention"
+    });
+  });
+
+  it("does not reschedule a stale proactive callback after disposal", () => {
+    const first = createHarness();
+    first.controller.updateVisibility(true);
+    first.controller.updatePresence(presence({ connectivity: "online" }));
+    const staleTimer = first.latestTimer();
+    first.controller.dispose();
+    const writesAfterDispose = first.writes.length;
+
+    first.fire(staleTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+    expect(first.writes).toHaveLength(writesAfterDispose);
+    expect(first.controller.getState().active.kind).toBe("none");
+  });
+
+  it("suppresses ambient attention while speech is queued without changing lifecycle policy", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    const proactiveTimer = harness.latestTimer();
+
+    harness.setNow(100);
+    harness.controller.updatePresence(presence({ connectivity: "online", speech: "queued" }));
+    harness.fire(proactiveTimer, SILENT_ATTENTION_IDLE_DELAY_MS);
+    expect(harness.controller.getState().active.kind).toBe("none");
+  });
+
+  it("does not let silent attention bypass P0, P1, or P2 priority", () => {
+    const harness = createHarness();
+    harness.controller.updateVisibility(true);
+    harness.controller.updatePresence(presence({ connectivity: "online" }));
+    harness.fire(harness.latestTimer(), SILENT_ATTENTION_IDLE_DELAY_MS);
+
+    harness.controller.updatePresence(presence({ connectivity: "online", activity: "listening" }));
+    harness.controller.updatePresence(
+      presence({
+        connectivity: "online",
+        activity: "thinking",
+        speech: "active",
+        transition: "interrupted"
+      })
+    );
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "attention",
+      reason: "listening-entry",
+      priority: "P0"
+    });
   });
 });
