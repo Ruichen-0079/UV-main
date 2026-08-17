@@ -274,9 +274,7 @@ function admitIntent(
     return null;
   }
   if (!isCurrentCorrelation(intent, context)) return null;
-  if (isVisualIntent(intent) && context.presence.capabilities.live2d !== "available") {
-    return null;
-  }
+  if (!isIntentAllowedByCapabilityPolicy(intent, context.presence)) return null;
   return intent;
 }
 
@@ -289,7 +287,7 @@ function reconcileActive(
   if (!isCurrentCorrelation(state.active, context)) {
     return createInitialBehaviorPolicyState();
   }
-  if (isVisualIntent(state.active) && context.presence.capabilities.live2d !== "available") {
+  if (!isIntentAllowedByCapabilityPolicy(state.active, context.presence)) {
     return createInitialBehaviorPolicyState();
   }
   if (context.nowMs >= state.active.expiresAtMs) {
@@ -334,6 +332,36 @@ function isVisualIntent(intent: BehaviorSemanticIntent): boolean {
     intent.kind === "reaction" ||
     (intent.kind === "proactive" && intent.payload.action === "silent-attention")
   );
+}
+
+/**
+ * Central P6-C admission/reconciliation gate for normalized Presence truth.
+ * Capability loss drops affected semantic behavior; it never suspends it for
+ * replay after recovery.
+ */
+export function isIntentAllowedByCapabilityPolicy(
+  intent: BehaviorSemanticIntent,
+  presence: CompanionPresenceProjection
+): boolean {
+  const capabilities = presence.capabilities;
+
+  if (isVisualIntent(intent) && capabilities.live2d !== "available") return false;
+
+  // P3 is the reducer's ambient/proactive semantic category. Active task and
+  // user-interaction intents remain eligible while connectivity changes.
+  if (getBehaviorPriority(intent) === "P3" && presence.connectivity !== "online") {
+    return false;
+  }
+
+  if (
+    intent.kind === "proactive" &&
+    intent.payload.action === "request-turn-speech" &&
+    (capabilities.tts !== "available" || capabilities.audio !== "available")
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 function isValidPolicyContext(value: unknown): value is BehaviorPolicyContext {
