@@ -316,7 +316,7 @@ export function buildWindowsPgCtlStartArguments(input: {
     "-l",
     input.layout.logFile,
     "-o",
-    `-p ${port} -c cluster_name=${expectedClusterName(clusterId)}`
+    `-p ${port} -c cluster_name=${expectedClusterName(clusterId)} -c unix_socket_directories=`
   ];
 }
 

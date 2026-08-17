@@ -155,6 +155,7 @@ describe("private postgres cluster safety", () => {
       "abc-cluster"
     );
     expect(command.args).toContain("127.0.0.1");
+    expect(command.args).toContain(`unix_socket_directories=${layout.runtime}`);
     expect(command.args.join(" ")).not.toContain("postgres://");
     expect(command.env["PGPASSWORD"]).toBeUndefined();
     expect(command.commandMarker).toBe("yuvi-pg-abc-cluster");
@@ -179,14 +180,41 @@ describe("private postgres cluster safety", () => {
       "-l",
       layout.logFile,
       "-o",
-      "-p 55432 -c cluster_name=yuvi-pg-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+      "-p 55432 -c cluster_name=yuvi-pg-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee -c unix_socket_directories="
     ]);
+    const serverOptions = args[args.indexOf("-o") + 1];
+    expect(serverOptions).toBe(
+      "-p 55432 -c cluster_name=yuvi-pg-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee -c unix_socket_directories="
+    );
+    expect(serverOptions).not.toContain('unix_socket_directories=""');
+    expect(serverOptions).not.toContain("unix_socket_directories=''");
+    expect(serverOptions).not.toContain("-k");
     const joined = args.join(" ");
     expect(joined).not.toMatch(/(?:^|\s)pg_ctl(?:\s|$)/);
     expect(joined).not.toContain("PGPASSWORD");
     expect(joined).not.toContain("password");
     expect(args[5]).toBe(layout.data);
     expect(layout.logFile.startsWith(layout.root)).toBe(true);
+  });
+
+  it("overrides a stale long socket directory on an already initialized Windows cluster", () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-stale-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    const staleSocketDir = path.join(layout.root, "a".repeat(180));
+    const config = `unix_socket_directories = '${staleSocketDir.replaceAll("\\", "/")}'\n`;
+    fs.writeFileSync(path.join(layout.data, "postgresql.conf"), config, "utf8");
+
+    const args = buildWindowsPgCtlStartArguments({
+      layout,
+      port: 55432,
+      clusterId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    });
+
+    expect(fs.readFileSync(path.join(layout.data, "postgresql.conf"), "utf8")).toBe(config);
+    expect(args[args.indexOf("-o") + 1]).toBe(
+      "-p 55432 -c cluster_name=yuvi-pg-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee -c unix_socket_directories="
+    );
   });
 
   it("rejects unsafe cluster ids and ports before interpolating -o", () => {
