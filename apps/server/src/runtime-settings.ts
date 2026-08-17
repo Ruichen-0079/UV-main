@@ -154,6 +154,8 @@ const providerChainRules: Record<string, Set<string>> = {
   VISION_PROVIDER_CHAIN: new Set(["xai", "nvidia", "local", "mock"])
 };
 
+const embeddingProviderNames = new Set(["openai-compatible", "nvidia", "local", "mock"]);
+
 const urlKeys = new Set<EditableRuntimeSetting>([
   "DEEPSEEK_API_BASEURL",
   "XAI_API_BASEURL",
@@ -185,6 +187,14 @@ export function validateRuntimeSettings(
   const extractor = value("MEMORY_EXTRACTOR")?.trim();
   if (extractor && !["llm", "rule-based"].includes(extractor)) {
     add("MEMORY_EXTRACTOR", "Supported values are llm and rule-based.");
+  }
+
+  const embeddingProvider = value("EMBEDDING_PROVIDER");
+  if (embeddingProvider !== undefined && !embeddingProviderNames.has(embeddingProvider.trim())) {
+    add(
+      "EMBEDDING_PROVIDER",
+      `Supported providers: ${Array.from(embeddingProviderNames).join(", ")}.`
+    );
   }
 
   const eventBus = value("EVENT_BUS")?.trim().toLowerCase();

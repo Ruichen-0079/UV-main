@@ -142,6 +142,7 @@ export async function registerSettingsRoutes(
         });
       }
       const result = await context.reloadRuntimeConfig(effectiveEnv);
+      applyRuntimeEnv(buildAppliedProcessEnv(effectiveEnv, context));
       const settings = await buildRuntimeSettings(context, config);
 
       return reply.send({
@@ -338,6 +339,23 @@ async function readEffectiveRuntimeEnv(
   return runtimeEnvFiles.env;
 }
 
+function buildAppliedProcessEnv(
+  effectiveEnv: Record<string, string | undefined>,
+  context: AppContext
+): Record<string, string | undefined> {
+  const processEnv = { ...effectiveEnv };
+  for (const key of editableKeys) {
+    if (getRuntimeSettingApplyMode(key) !== "restart_required") continue;
+    const activeValue = context.activeRuntimeEnv[key];
+    if (activeValue === undefined) {
+      delete processEnv[key];
+    } else {
+      processEnv[key] = activeValue;
+    }
+  }
+  return processEnv;
+}
+
 function buildSafeConfig(env: Record<string, string | undefined>): Record<string, unknown> {
   const safeConfig: Record<string, unknown> = {};
   for (const key of editableKeys) {
@@ -431,11 +449,6 @@ async function writeLocalRuntimeSettings(
   const uniqueChangedKeys = Array.from(new Set(changedKeys));
   if (uniqueChangedKeys.length > 0) {
     await atomicWriteLocalEnv(envPath, serializeLocalEnv(candidate));
-    const processEnv = { ...candidateEnv };
-    for (const key of localStateKeys) {
-      if (!(key in candidateEnv)) processEnv[key] = undefined;
-    }
-    applyRuntimeEnv(processEnv);
   }
 
   return uniqueChangedKeys;

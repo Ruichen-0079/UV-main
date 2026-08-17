@@ -2399,6 +2399,19 @@ describe("server", () => {
       });
       expect(await readFile(path.join(tempDir, ".env.local"), "utf8")).toBe(beforeInvalidUpdate);
 
+      const invalidEmbeddingProvider = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: { values: { EMBEDDING_PROVIDER: "unsupported-provider" } }
+      });
+      expect(invalidEmbeddingProvider.statusCode).toBe(400);
+      expect(invalidEmbeddingProvider.json()).toMatchObject({
+        error: "invalid_settings",
+        fieldErrors: { EMBEDDING_PROVIDER: expect.any(String) }
+      });
+      expect(await readFile(path.join(tempDir, ".env.local"), "utf8")).toBe(beforeInvalidUpdate);
+      expect(process.env["EMBEDDING_PROVIDER"]).toBe("mock");
+
       const conflictingUpdate = await app.inject({
         method: "POST",
         url: "/settings/runtime",
@@ -2420,7 +2433,7 @@ describe("server", () => {
       );
       expect(removedSecret.json().settings.settings.DEEPSEEK_API_KEY).toMatchObject({
         localOverrideConfigured: false,
-        effectiveConfigured: false,
+        effectiveConfigured: true,
         source: "process.env/default"
       });
 
@@ -2559,7 +2572,11 @@ describe("server", () => {
   it("reloads saved provider config into the active runtime without leaking secrets", async () => {
     const previousCwd = process.cwd();
     const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-reload-"));
-    const env = createTestEnv({ YUVI_RUNTIME_ENV_DIR: tempDir });
+    const env = createTestEnv({
+      YUVI_RUNTIME_ENV_DIR: tempDir,
+      DEEPSEEK_CHAT_MODEL: "old-active",
+      SERVER_PORT: "6121"
+    });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -2612,6 +2629,15 @@ describe("server", () => {
       });
       expect(update.statusCode).toBe(200);
       expect(update.body).not.toContain("reload_deepseek_secret");
+      expect(process.env["DEEPSEEK_CHAT_MODEL"]).toBe("old-active");
+      const desiredBeforeReload = await app.inject({
+        method: "GET",
+        url: "/settings/runtime"
+      });
+      expect(desiredBeforeReload.json().effectiveConfig.DEEPSEEK_CHAT_MODEL).toBe("deepseek-chat");
+      expect(desiredBeforeReload.json().activeRuntimeConfig.providers.chat.model).toBe(
+        "old-active"
+      );
 
       const reload = await app.inject({ method: "POST", url: "/settings/runtime/reload" });
       expect(reload.statusCode).toBe(200);
@@ -2621,6 +2647,7 @@ describe("server", () => {
         restartRequired: false
       });
       expect(reload.json().settings.memory.activeMemoryExtractor).toBe("rule-based");
+      expect(process.env["DEEPSEEK_CHAT_MODEL"]).toBe("deepseek-chat");
       expect(reload.json().active.providers.chat).toMatchObject({
         provider: "deepseek",
         configured: true,
@@ -2661,6 +2688,17 @@ describe("server", () => {
       });
       expect(message.body).not.toContain("reload_deepseek_secret");
 
+      const portUpdate = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: { values: { SERVER_PORT: "6122" } }
+      });
+      expect(portUpdate.statusCode).toBe(200);
+      expect(portUpdate.json().pendingRestartKeys).toContain("SERVER_PORT");
+      expect(portUpdate.json().settings.runtime.serverPort).toBe(6122);
+      expect(portUpdate.json().settings.runtime.activeServerPort).toBe(6121);
+      expect(process.env["SERVER_PORT"]).toBe("6121");
+
       const memoryUpdate = await app.inject({
         method: "POST",
         url: "/settings/runtime",
@@ -2676,7 +2714,9 @@ describe("server", () => {
       expect(memoryReload.statusCode).toBe(200);
       expect(memoryReload.json().restartRequired).toBe(true);
       expect(memoryReload.json().notHotReloaded).toContain("MEMORY_REPOSITORY");
+      expect(memoryReload.json().notHotReloaded).toContain("SERVER_PORT");
       expect(memoryReload.json().active.memoryRepository).toBe("in-memory");
+      expect(process.env["SERVER_PORT"]).toBe("6121");
 
       await app.close();
     } finally {

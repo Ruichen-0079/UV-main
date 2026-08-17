@@ -1478,6 +1478,9 @@ function shouldAttachDashboardDevToken(path: string, method: string | undefined)
     return true;
   }
   const normalized = method?.toUpperCase() ?? "GET";
+  if (normalized === "GET" && path === "/settings/runtime") {
+    return true;
+  }
   return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";
 }
 
