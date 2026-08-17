@@ -354,7 +354,14 @@ describe("private postgres cluster safety", () => {
     });
     expect(success.outcome).toBe("started");
     expect(diagnostics).toEqual([
-      { phase: "PG_CTL_LAUNCH", status: "SUCCESS", exitCode: 0, signal: null },
+      {
+        phase: "PG_CTL_LAUNCH",
+        status: "SUCCESS",
+        exitCode: 0,
+        signal: null,
+        pgCtlStdoutTail: "",
+        pgCtlStderrTail: ""
+      },
       {
         phase: "POSTMASTER_PID",
         status: "PRESENT",
@@ -432,7 +439,7 @@ describe("private postgres cluster safety", () => {
       clusterId: marker.clusterId,
       settleTimeoutMs: 0,
       spawnImpl: async () => ({
-        ok: false,
+        ok: false as const,
         kind: "POST_SPAWN_ERROR",
         status: null,
         signal: null,
@@ -450,7 +457,9 @@ describe("private postgres cluster safety", () => {
       phase: "PG_CTL_LAUNCH",
       status: "POST_SPAWN_ERROR",
       exitCode: null,
-      signal: null
+      signal: null,
+      pgCtlStdoutTail: "",
+      pgCtlStderrTail: ""
     });
     expect(ambiguous.at(-1)).toEqual({
       phase: "POSTMASTER_PID",
@@ -458,6 +467,115 @@ describe("private postgres cluster safety", () => {
       postmasterPid: null,
       source: "delayed-settle"
     });
+  });
+
+  it("surfaces bounded redacted pg_ctl output without changing launch classification", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-output-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    const marker = createClusterMarker(layout);
+    writeClusterMarker(layout, marker);
+    fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+    const distribution: import("./postgres-distribution.js").PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const secret = "YUVI_TEST_SECRET_DO_NOT_PRINT";
+    const stdout = `HEAD_ONLY_SENTINEL ${"x".repeat(800)} STDOUT_TAIL_SENTINEL`;
+    const stderr = [
+      `PGPASSWORD=${secret}`,
+      `DATABASE_URL=postgres://yuvi:${secret}@127.0.0.1/yuvi`,
+      `${"e".repeat(800)} STDERR_TAIL_SENTINEL`
+    ].join("\n");
+    const diagnostics: Array<import("./postgres-cluster.js").PostgresLaunchDiagnostic> = [];
+    const launched = await launchWindowsPrivatePostgres({
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      diagnosticSecrets: [secret],
+      spawnImpl: async () => ({
+        ok: false,
+        kind: "EXIT_NONZERO",
+        status: 1,
+        signal: null,
+        stdout,
+        stderr,
+        detail: "pg_ctl failed"
+      }),
+      settleTimeoutMs: 0,
+      sleepImpl: async () => undefined,
+      inspectProcess: () => {
+        throw new Error("missing PID must not be inspected");
+      },
+      diagnosticSink: (diagnostic) => diagnostics.push(diagnostic)
+    });
+    expect(launched.outcome).toBe("uncertain");
+    const launch = diagnostics[0];
+    expect(launch?.phase).toBe("PG_CTL_LAUNCH");
+    if (launch?.phase !== "PG_CTL_LAUNCH") return;
+    expect(launch.status).toBe("EXIT_NONZERO");
+    expect(launch.pgCtlStdoutTail.length).toBeLessThanOrEqual(512);
+    expect(launch.pgCtlStderrTail.length).toBeLessThanOrEqual(512);
+    expect(launch.pgCtlStdoutTail).not.toContain("HEAD_ONLY_SENTINEL");
+    expect(launch.pgCtlStdoutTail).toContain("STDOUT_TAIL_SENTINEL");
+    expect(launch.pgCtlStderrTail).not.toContain(secret);
+    expect(launch.pgCtlStderrTail).toContain("STDERR_TAIL_SENTINEL");
+  });
+
+  it("contains diagnostic sink failures without changing the launch result", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-ctl-sink-")));
+    tempDirs.push(layout.root);
+    ensurePostgresDirectories(layout);
+    const marker = createClusterMarker(layout);
+    writeClusterMarker(layout, marker);
+    fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+    const distribution: import("./postgres-distribution.js").PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const launchInput = {
+      layout,
+      distribution,
+      port: 55432,
+      clusterId: marker.clusterId,
+      settleTimeoutMs: 0,
+      spawnImpl: async () => ({
+        ok: false as const,
+        kind: "EXIT_NONZERO" as const,
+        status: 1,
+        signal: null,
+        stdout: "PG_CTL_STDOUT",
+        stderr: "PG_CTL_STDERR",
+        detail: "pg_ctl failed"
+      }),
+      inspectProcess: () => {
+        throw new Error("missing PID must not be inspected");
+      }
+    };
+    const control = await launchWindowsPrivatePostgres(launchInput);
+    const contained = await launchWindowsPrivatePostgres({
+      ...launchInput,
+      diagnosticSink: () => {
+        throw new Error("diagnostic sink failure");
+      }
+    });
+    expect(contained.outcome).toBe(control.outcome);
+    expect(contained).toEqual(control);
   });
 
   it("classifies async pg_ctl outcomes without blocking the event loop", async () => {

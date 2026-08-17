@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { emptyDiagnostics } from "@companion/memory";
 import { DesktopSupervisor, type SupervisorHooks } from "./supervisor.js";
 import * as cluster from "./postgres-cluster.js";
+import * as postgresSecret from "./postgres-secret.js";
 import {
   createClusterMarker,
   ensurePostgresDirectories,
@@ -169,6 +170,46 @@ function createSupervisor(config: SupervisorConfig, hooks: SupervisorHooks): Des
 }
 
 describe("private postgres Windows start state machine", () => {
+  it("does not resolve a password for diagnostics before pg_ctl launch", async () => {
+    const { config } = privateConfig();
+    const originalResolve = postgresSecret.resolvePostgresPassword;
+    const resolverStacks: string[] = [];
+    const resolver = vi
+      .spyOn(postgresSecret, "resolvePostgresPassword")
+      .mockImplementation((layout, env, authority) => {
+        resolverStacks.push(new Error().stack ?? "");
+        return originalResolve(layout, env, authority);
+      });
+    const supervisor = createSupervisor(config, {
+      platform: "win32",
+      spawnWindowsPgCtl: async () => {
+        return {
+          ok: false,
+          kind: "PRE_SPAWN_ERROR",
+          status: null,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          detail: "spawn blocked for test"
+        };
+      }
+    });
+
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE" });
+    const directStartCalls = resolverStacks.filter((stack) => {
+      const frames = stack.split("\n").slice(1);
+      const resolverFrameIndex = frames.findIndex((frame) =>
+        frame.includes("DesktopSupervisor.resolvePrivatePostgresPassword")
+      );
+      return frames[resolverFrameIndex + 1]?.includes(
+        "DesktopSupervisor.startWindowsPrivatePostgresIfNeeded"
+      );
+    });
+    expect(directStartCalls).toHaveLength(0);
+    expect(resolver.mock.calls.length).toBeGreaterThan(0);
+    expect(config.env["YUVI_POSTGRES_PASSWORD"]).toBe("unit-test-password");
+  });
+
   it("does not publish healthy or invoke D2 when only the postgres database is ready", async () => {
     enableLifecycleDiagnostics();
     const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -196,7 +237,14 @@ describe("private postgres Windows start state machine", () => {
           : { status: "not-running", processId, reason: "process-not-alive" },
       spawnWindowsPgCtl: async () => {
         fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
-        return { ok: true, kind: "SUCCESS", status: 0, signal: null, stdout: "", stderr: "" };
+        return {
+          ok: true,
+          kind: "SUCCESS",
+          status: 0,
+          signal: null,
+          stdout: "PG_CTL_STDOUT_TEST_MARKER",
+          stderr: "PG_CTL_STDERR_TEST_MARKER"
+        };
       },
       invokePostgresStop: () => {
         alive = false;
@@ -329,7 +377,14 @@ describe("private postgres Windows start state machine", () => {
         ownedInspection(dist, layout, marker.clusterId, started, processId),
       spawnWindowsPgCtl: async () => {
         fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
-        return { ok: true, kind: "SUCCESS", status: 0, signal: null, stdout: "", stderr: "" };
+        return {
+          ok: true,
+          kind: "SUCCESS",
+          status: 0,
+          signal: null,
+          stdout: "PG_CTL_STDOUT_TEST_MARKER",
+          stderr: "PG_CTL_STDERR_TEST_MARKER"
+        };
       }
     });
     await supervisor.bootstrap();
@@ -347,7 +402,9 @@ describe("private postgres Windows start state machine", () => {
       expect.objectContaining({
         event: "postgres.private.launch",
         phase: "PG_CTL_LAUNCH",
-        status: "SUCCESS"
+        status: "SUCCESS",
+        pgCtlStdoutTail: "PG_CTL_STDOUT_TEST_MARKER",
+        pgCtlStderrTail: "PG_CTL_STDERR_TEST_MARKER"
       })
     );
     expect(events).toContainEqual(

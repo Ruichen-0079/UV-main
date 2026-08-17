@@ -1374,6 +1374,11 @@ export class DesktopSupervisor {
       return;
     }
 
+    const diagnosticSecrets = [
+      this.config.env[POSTGRES_PASSWORD_ENV],
+      this.baseEnv[POSTGRES_PASSWORD_ENV]
+    ].filter((value): value is string => typeof value === "string" && value.length > 0);
+
     const launched = await launchWindowsPrivatePostgres({
       layout,
       distribution,
@@ -1388,6 +1393,7 @@ export class DesktopSupervisor {
         ? { settleIntervalMs: this.hooks.postmasterSettleIntervalMs }
         : {}),
       ...(this.hooks.sleep ? { sleepImpl: this.hooks.sleep } : {}),
+      ...(diagnosticSecrets.length ? { diagnosticSecrets } : {}),
       diagnosticSink: (diagnostic: PostgresLaunchDiagnostic) =>
         this.emitPostgresLaunchDiagnostic(svc, diagnostic)
     });

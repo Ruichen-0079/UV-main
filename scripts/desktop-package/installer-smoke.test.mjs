@@ -3102,11 +3102,123 @@ test("D1 lifecycle diagnostics keep terminal phase updates within one attempt", 
   assert.equal(diagnostic.fencedStopStatus, "PROVEN");
 });
 
+test("D1 PostgreSQL log diagnostics retain the real redacted tail", () => {
+  const { root } = cleanupFixture();
+  const localAppData = path.join(root, "localAppData");
+  const runtime = path.join(localAppData, "YUVI", "Postgres", "runtime");
+  fs.mkdirSync(runtime, { recursive: true });
+  const secret = "POSTGRES_LOG_TEST_SECRET";
+  const lines = ["HEAD_ONLY_SENTINEL"];
+  for (let index = 0; index < 24; index += 1) {
+    lines.push(`noise-${index}-${"x".repeat(120)}`);
+  }
+  lines.push(`FATAL: TAIL_FAILURE_SENTINEL password=${secret}`);
+  const log = lines.join("\n");
+  assert.ok(log.length > 240);
+  fs.writeFileSync(path.join(runtime, "postgres.log"), log);
+
+  const diagnostic = collectInstallerSmokePostgresDiagnostics({
+    smokeRoot: root,
+    localAppData,
+    secrets: [secret]
+  });
+  const formatted = formatInstallerSmokePostgresDiagnostic(diagnostic);
+  assert.ok(diagnostic.postgresLogTail.length <= 2_000);
+  assert.ok(diagnostic.postgresLogTail.split(/\r?\n/).length <= 20);
+  assert.doesNotMatch(diagnostic.postgresLogTail, /HEAD_ONLY_SENTINEL/);
+  assert.match(diagnostic.postgresLogTail, /TAIL_FAILURE_SENTINEL/);
+  assert.doesNotMatch(diagnostic.postgresLogTail, /POSTGRES_LOG_TEST_SECRET/);
+  assert.match(formatted, /TAIL_FAILURE_SENTINEL/);
+  assert.doesNotMatch(formatted, /POSTGRES_LOG_TEST_SECRET/);
+});
+
+test("D1 PG_CTL diagnostic tails are bounded, redacted, and formatter-visible", () => {
+  const secret = "PG_CTL_TEST_SECRET";
+  const line = (fields) =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({
+      event: "postgres.private.launch",
+      role: "postgres",
+      status: "EXIT_NONZERO",
+      exitCode: 1,
+      signal: null,
+      ...fields
+    })}`;
+  const stdout = `HEAD_ONLY_SENTINEL ${"o".repeat(800)} STDOUT_TAIL_SENTINEL`;
+  const stderr = [
+    `PGPASSWORD=${secret}`,
+    `DATABASE_URL=postgres://yuvi:${secret}@127.0.0.1/yuvi`,
+    `commandLine=${secret} raw-argv`,
+    `${"e".repeat(800)} STDERR_TAIL_SENTINEL`
+  ].join("\n");
+  const diagnostic = parsePostgresLifecycleDiagnostics(
+    line({ pgCtlStdoutTail: stdout, pgCtlStderrTail: stderr }),
+    [secret]
+  );
+  const formatted = formatInstallerSmokePostgresDiagnostic(diagnostic);
+  assert.equal(diagnostic.postgresLaunchOutcome, "EXIT_NONZERO");
+  assert.ok(diagnostic.pgCtlStdoutTail.length <= 512);
+  assert.ok(diagnostic.pgCtlStderrTail.length <= 512);
+  assert.doesNotMatch(diagnostic.pgCtlStdoutTail, /HEAD_ONLY_SENTINEL/);
+  assert.match(diagnostic.pgCtlStdoutTail, /STDOUT_TAIL_SENTINEL/);
+  assert.doesNotMatch(diagnostic.pgCtlStderrTail, /PG_CTL_TEST_SECRET/);
+  assert.match(diagnostic.pgCtlStderrTail, /STDERR_TAIL_SENTINEL/);
+  assert.doesNotMatch(formatted, /PG_CTL_TEST_SECRET|commandLine|argv|DATABASE_URL=/);
+});
+
+test("D1 PG_CTL diagnostic output is correlated to and reset with each attempt", () => {
+  const line = (status, fields = {}) =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({
+      event: "postgres.private.launch",
+      role: "postgres",
+      status,
+      exitCode: 1,
+      signal: null,
+      ...fields
+    })}`;
+  const twoAttempts = parsePostgresLifecycleDiagnostics(
+    [
+      line("EXIT_NONZERO", {
+        pgCtlStdoutTail: "ATTEMPT_ONE_STDOUT",
+        pgCtlStderrTail: "ATTEMPT_ONE_FAILURE"
+      }),
+      line("EXIT_NONZERO", {
+        pgCtlStdoutTail: "ATTEMPT_TWO_STDOUT",
+        pgCtlStderrTail: "ATTEMPT_TWO_FAILURE"
+      })
+    ].join("\n")
+  );
+  const formatted = formatInstallerSmokePostgresDiagnostic(twoAttempts);
+  assert.equal(twoAttempts.postgresAttempt, 2);
+  assert.equal(twoAttempts.pgCtlStdoutTail, "ATTEMPT_TWO_STDOUT");
+  assert.equal(twoAttempts.pgCtlStderrTail, "ATTEMPT_TWO_FAILURE");
+  assert.doesNotMatch(formatted, /ATTEMPT_ONE_FAILURE|ATTEMPT_ONE_STDOUT/);
+
+  const emptySecondAttempt = parsePostgresLifecycleDiagnostics(
+    [
+      line("EXIT_NONZERO", { pgCtlStderrTail: "ATTEMPT_ONE_FAILURE" }),
+      line("EXIT_NONZERO", { pgCtlStdoutTail: "", pgCtlStderrTail: "" })
+    ].join("\n")
+  );
+  assert.equal(emptySecondAttempt.postgresAttempt, 2);
+  assert.equal(emptySecondAttempt.pgCtlStdoutTail, "");
+  assert.equal(emptySecondAttempt.pgCtlStderrTail, "");
+  assert.doesNotMatch(
+    formatInstallerSmokePostgresDiagnostic(emptySecondAttempt),
+    /ATTEMPT_ONE_FAILURE/
+  );
+});
+
 test("D1 lifecycle diagnostics enforce canonical PostgreSQL producer identity", () => {
   const line = (event, fields = {}) =>
     `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({ event, role: "postgres", ...fields })}`;
   const populatedOutput = [
-    line("postgres.private.launch", { status: "SUCCESS", exitCode: 0, signal: null }),
+    line("postgres.private.launch", {
+      status: "SUCCESS",
+      exitCode: 0,
+      signal: null,
+      pgCtlStdoutTail: "REAL_POSTGRES_STDOUT",
+      pgCtlStderrTail: "REAL_POSTGRES_STDERR"
+    }),
     line("postgres.private.postmaster", {
       status: "PRESENT",
       postmasterPid: 5151,
@@ -3125,10 +3237,24 @@ test("D1 lifecycle diagnostics enforce canonical PostgreSQL producer identity", 
   const before = parsePostgresLifecycleDiagnostics(populatedOutput);
   assert.equal(before.postgresAttempt, 1);
   assert.equal(before.postgresLaunchOutcome, "SUCCESS");
+  assert.equal(before.pgCtlStdoutTail, "REAL_POSTGRES_STDOUT");
+  assert.equal(before.pgCtlStderrTail, "REAL_POSTGRES_STDERR");
 
   const contradictoryEvents = [
-    { event: "postgres.private.launch", role: "mem0", status: "SUCCESS" },
-    { event: "postgres.private.launch", role: "runtime", status: "SUCCESS" },
+    {
+      event: "postgres.private.launch",
+      role: "mem0",
+      status: "EXIT_NONZERO",
+      pgCtlStdoutTail: "FAKE_MEM0_STDOUT",
+      pgCtlStderrTail: "FAKE_MEM0_STDERR"
+    },
+    {
+      event: "postgres.private.launch",
+      role: "runtime",
+      status: "EXIT_NONZERO",
+      pgCtlStdoutTail: "FAKE_RUNTIME_STDOUT",
+      pgCtlStderrTail: "FAKE_RUNTIME_STDERR"
+    },
     { event: "postgres.private.launch", role: null, status: "SUCCESS" },
     { event: "postgres.private.launch", role: "", status: "SUCCESS" },
     { event: "postgres.private.launch", role: 7, status: "SUCCESS" },
@@ -3298,6 +3424,59 @@ test("D1 diagnostic formatter keeps the stderr fatal end under max-size evidence
   assert.match(serialized, /FATAL_STDERR_SENTINEL/);
   assert.match(diagnostic.initializationState.stderrTail, /FATAL_STDERR_SENTINEL$/);
   assert.doesNotMatch(serialized, /do-not-print/);
+});
+
+test("D1 diagnostic formatter prioritizes the complete causal state within its bound", () => {
+  const causal = {
+    postgresAttempt: 7,
+    postgresLaunchOutcome: "EXIT_NONZERO",
+    postgresLaunchExitCode: 1,
+    postgresLaunchSignal: "SIGTERM",
+    postmasterPidPresent: true,
+    postmasterPid: 9116,
+    postmasterPidSource: "delayed-settle",
+    processInspectionStatus: "RESOLVED",
+    processInspectionPid: 9116,
+    ownershipStatus: "ACCEPTED",
+    ownershipReason: "NONE",
+    metadataRecorded: "SUCCESS",
+    metadataReadback: "SUCCESS",
+    metadataCleanup: "REMOVED",
+    serverReady: "READY",
+    databaseCreateStatus: "ALREADY_EXISTS",
+    databaseCreateSqlState: "42P04",
+    yuviReady: "READY",
+    fencedStopStatus: "PROVEN",
+    postgresServiceLastErrorCode: "POSTGRES_TEST_LAST_ERROR"
+  };
+  const diagnostic = {
+    initializationState: {
+      state: "failed",
+      errorCode: "EXIT_NONZERO",
+      exitStatus: 1,
+      reason: "R".repeat(180),
+      stdoutTail: "S".repeat(2048),
+      stderrTail: "E".repeat(4096)
+    },
+    postgresRootRelative: "localAppData/YUVI/Postgres",
+    marker: { product: "yuvi", clusterId: "c1", postgresMajor: 16 },
+    listen: { host: "127.0.0.1", port: 55432, clusterId: "c1", postgresMajor: 16 },
+    pidMetadata: { pid: 9116, role: "postgres", processStartedAtUtc: "2026-08-17T00:00:00.000Z" },
+    pgVersion: "16",
+    listenConfig: { listen_addresses: "127.0.0.1", port: "55432" },
+    postgresLogPresent: true,
+    postgresLogBytes: 99999,
+    postgresLogTail: "L".repeat(2000),
+    pgCtlStdoutTail: "O".repeat(512),
+    pgCtlStderrTail: "T".repeat(512),
+    ...causal
+  };
+  const serialized = formatInstallerSmokePostgresDiagnostic(diagnostic);
+  const payload = JSON.parse(serialized);
+  assert.ok(serialized.length <= 8192);
+  for (const [key, value] of Object.entries(causal)) {
+    assert.deepEqual(payload[key], value, `causal field ${key} changed or was dropped`);
+  }
 });
 
 test("D1 diagnostic collector and formatter redact secrets in initdb evidence", () => {

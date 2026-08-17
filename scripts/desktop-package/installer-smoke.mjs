@@ -2047,7 +2047,7 @@ function pickInitializationStateDiagnostic(value, secrets = []) {
 }
 
 function boundedRedactedLogTail(text, secrets = []) {
-  const redacted = redactCleanupDiagnosticText(redactInstallerSmokeSecretText(text, secrets));
+  const redacted = redactInstallerSmokeDiagnosticText(text, secrets);
   const lines = redacted.split(/\r?\n/).filter((line) => line.trim());
   return lines.slice(-20).join("\n").slice(-2_000);
 }
@@ -2072,6 +2072,8 @@ function createEmptyPostgresAttemptDiagnostic(postgresAttempt = 0) {
     postgresLaunchOutcome: "NOT_RUN",
     postgresLaunchExitCode: null,
     postgresLaunchSignal: null,
+    pgCtlStdoutTail: "",
+    pgCtlStderrTail: "",
     postmasterPidPresent: null,
     postmasterPid: null,
     postmasterPidSource: null,
@@ -2115,6 +2117,85 @@ function boundedServiceErrorCode(value) {
   return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(value) ? value : null;
 }
 
+const POSTGRES_LIFECYCLE_OUTPUT_MAX_CHARS = 512;
+
+function boundedRedactedPostgresLifecycleOutput(text, secrets) {
+  try {
+    const redacted = redactInstallerSmokeDiagnosticText(text, secrets).replace(
+      /\b(argv|args|commandLine|command|env|environment)\s*[=:][^\r\n]*/giu,
+      "[redacted execution data]"
+    );
+    return redacted.length <= POSTGRES_LIFECYCLE_OUTPUT_MAX_CHARS
+      ? redacted
+      : redacted.slice(-POSTGRES_LIFECYCLE_OUTPUT_MAX_CHARS);
+  } catch {
+    return "";
+  }
+}
+
+const POSTGRES_CAUSAL_DIAGNOSTIC_FIELDS = [
+  "postgresAttempt",
+  "postgresLaunchOutcome",
+  "postgresLaunchExitCode",
+  "postgresLaunchSignal",
+  "postmasterPidPresent",
+  "postmasterPid",
+  "postmasterPidSource",
+  "processInspectionStatus",
+  "processInspectionPid",
+  "ownershipStatus",
+  "ownershipReason",
+  "metadataRecorded",
+  "metadataReadback",
+  "metadataCleanup",
+  "serverReady",
+  "databaseCreateStatus",
+  "databaseCreateSqlState",
+  "yuviReady",
+  "fencedStopStatus",
+  "postgresServiceLastErrorCode"
+];
+
+const POSTGRES_INITIALIZATION_SUMMARY_FIELDS = [
+  "present",
+  "malformed",
+  "state",
+  "errorCode",
+  "exitStatus",
+  "signal",
+  "spawnErrorCode",
+  "reason",
+  "updatedAt"
+];
+
+function compactInitializationStateDiagnostic(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const summary = {};
+  for (const key of POSTGRES_INITIALIZATION_SUMMARY_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) summary[key] = value[key];
+  }
+  return summary;
+}
+
+function boundedCausalDiagnosticValue(value) {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") return value.slice(0, 160);
+  return null;
+}
+
+function appendBoundedDiagnosticField(payload, key, value) {
+  if (value === undefined) return;
+  try {
+    const candidate = { ...payload, [key]: value };
+    if (JSON.stringify(candidate).length <= INSTALLER_SMOKE_D1_DIAGNOSTIC_MAX_CHARS) {
+      payload[key] = value;
+    }
+  } catch {
+    // Optional diagnostic evidence is never allowed to break formatting.
+  }
+}
+
 const POSTGRES_DIAGNOSTIC_ROLE = "postgres";
 const POSTGRES_DIAGNOSTIC_EVENT_PREFIX = "postgres.private.";
 const POSTGRES_DIAGNOSTIC_EVENT_NAMES = new Set([
@@ -2140,7 +2221,7 @@ function isPostgresDiagnosticEvent(event) {
 }
 
 /** Parse only the safe allowlist emitted by postgres.private.* lifecycle events. */
-export function parsePostgresLifecycleDiagnostics(output = "") {
+export function parsePostgresLifecycleDiagnostics(output = "", secrets = []) {
   let diagnostic = createEmptyPostgresAttemptDiagnostic();
   const prefix = "YUVI_SUPERVISOR_LIFECYCLE ";
   for (const line of String(output ?? "").split(/\r?\n/)) {
@@ -2170,6 +2251,14 @@ export function parsePostgresLifecycleDiagnostics(output = "") {
       diagnostic.postgresLaunchOutcome = status;
       diagnostic.postgresLaunchExitCode = boundedExitCode(event.exitCode);
       diagnostic.postgresLaunchSignal = boundedSignal(event.signal);
+      diagnostic.pgCtlStdoutTail =
+        typeof event.pgCtlStdoutTail === "string"
+          ? boundedRedactedPostgresLifecycleOutput(event.pgCtlStdoutTail, secrets)
+          : "";
+      diagnostic.pgCtlStderrTail =
+        typeof event.pgCtlStderrTail === "string"
+          ? boundedRedactedPostgresLifecycleOutput(event.pgCtlStderrTail, secrets)
+          : "";
       continue;
     }
     if (name === "postmaster") {
@@ -2299,7 +2388,7 @@ export function collectInstallerSmokePostgresDiagnostics({
       ? redactCleanupDiagnosticText(pgVersion.text).trim().slice(0, 16)
       : null,
     listenConfig: yuviConf.ok ? yuviConfAllowlist(yuviConf.text) : null,
-    ...parsePostgresLifecycleDiagnostics(supervisorOutput)
+    ...parsePostgresLifecycleDiagnostics(supervisorOutput, secrets)
   };
   const logPresent = Boolean(logFile.ok || logErr.ok);
   diagnostic.postgresLogPresent = logPresent;
@@ -2322,10 +2411,21 @@ export function formatInstallerSmokePostgresDiagnostic(diagnostic) {
     return `diagnosticUnavailable=${String(diagnostic.diagnosticUnavailable).slice(0, 40)}`;
   }
   const initializationState = pickInitializationStateDiagnostic(diagnostic.initializationState);
-  const essential = {
-    initializationState
+  const payload = {
+    initializationState: compactInitializationStateDiagnostic(initializationState)
   };
-  const extras = [
+
+  // Causal state is mandatory. Bulky evidence is opportunistic and can never evict it.
+  for (const key of POSTGRES_CAUSAL_DIAGNOSTIC_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(diagnostic, key)) {
+      appendBoundedDiagnosticField(payload, key, boundedCausalDiagnosticValue(diagnostic[key]));
+    }
+  }
+
+  const evidence = [
+    ["pgCtlStderrTail", diagnostic.pgCtlStderrTail],
+    ["pgCtlStdoutTail", diagnostic.pgCtlStdoutTail],
+    ["postgresLogTail", diagnostic.postgresLogTail],
     ["postgresRootRelative", diagnostic.postgresRootRelative],
     ["marker", diagnostic.marker],
     ["listen", diagnostic.listen],
@@ -2333,35 +2433,14 @@ export function formatInstallerSmokePostgresDiagnostic(diagnostic) {
     ["pgVersion", diagnostic.pgVersion],
     ["listenConfig", diagnostic.listenConfig],
     ["postgresLogPresent", diagnostic.postgresLogPresent],
-    ["postgresLogBytes", diagnostic.postgresLogBytes],
-    ["postgresLogTail", diagnostic.postgresLogTail],
-    ["postgresAttempt", diagnostic.postgresAttempt],
-    ["postgresLaunchOutcome", diagnostic.postgresLaunchOutcome],
-    ["postgresLaunchExitCode", diagnostic.postgresLaunchExitCode],
-    ["postgresLaunchSignal", diagnostic.postgresLaunchSignal],
-    ["postmasterPidPresent", diagnostic.postmasterPidPresent],
-    ["postmasterPid", diagnostic.postmasterPid],
-    ["postmasterPidSource", diagnostic.postmasterPidSource],
-    ["processInspectionStatus", diagnostic.processInspectionStatus],
-    ["processInspectionPid", diagnostic.processInspectionPid],
-    ["ownershipStatus", diagnostic.ownershipStatus],
-    ["ownershipReason", diagnostic.ownershipReason],
-    ["metadataRecorded", diagnostic.metadataRecorded],
-    ["metadataReadback", diagnostic.metadataReadback],
-    ["metadataCleanup", diagnostic.metadataCleanup],
-    ["serverReady", diagnostic.serverReady],
-    ["databaseCreateStatus", diagnostic.databaseCreateStatus],
-    ["databaseCreateSqlState", diagnostic.databaseCreateSqlState],
-    ["yuviReady", diagnostic.yuviReady],
-    ["fencedStopStatus", diagnostic.fencedStopStatus],
-    ["postgresServiceLastErrorCode", diagnostic.postgresServiceLastErrorCode]
+    ["postgresLogBytes", diagnostic.postgresLogBytes]
   ];
-  const payload = { ...essential };
-  for (const [key, value] of extras) {
-    if (value === undefined) continue;
-    const candidate = { ...payload, [key]: value };
-    if (JSON.stringify(candidate).length > INSTALLER_SMOKE_D1_DIAGNOSTIC_MAX_CHARS) continue;
-    payload[key] = value;
+  for (const [key, value] of evidence) appendBoundedDiagnosticField(payload, key, value);
+
+  // Preserve verbose initdb evidence only when the causal snapshot and higher-value
+  // PostgreSQL evidence still fit inside the fixed diagnostic budget.
+  if (JSON.stringify(initializationState) !== JSON.stringify(payload.initializationState)) {
+    appendBoundedDiagnosticField(payload, "initializationState", initializationState);
   }
   return JSON.stringify(payload);
 }

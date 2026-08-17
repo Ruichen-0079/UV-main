@@ -45,6 +45,8 @@ export const INITDB_STDERR_TAIL_MAX_CHARS = 4096;
 export const PG_CTL_START_WAIT_SECONDS = 30;
 export const PG_CTL_LAUNCH_TIMEOUT_MS = (PG_CTL_START_WAIT_SECONDS + 10) * 1000;
 export const PG_CTL_OUTPUT_MAX_CHARS = 2048;
+/** Small, secret-safe tails surfaced through the lifecycle diagnostic only. */
+export const PG_CTL_DIAGNOSTIC_OUTPUT_MAX_CHARS = 512;
 export const POSTMASTER_SETTLE_WINDOW_MS = 1_500;
 export const POSTMASTER_SETTLE_INTERVAL_MS = 50;
 export const DUPLICATE_DATABASE_SQLSTATE = "42P04";
@@ -383,6 +385,8 @@ export type PostgresLaunchDiagnostic =
       status: WindowsPgCtlOutcomeKind;
       exitCode: number | null;
       signal: string | null;
+      pgCtlStdoutTail: string;
+      pgCtlStderrTail: string;
     }
   | {
       phase: "POSTMASTER_PID";
@@ -435,6 +439,33 @@ function processInspectionDiagnosticStatus(
 export function boundPgCtlOutput(text: string, maxChars = PG_CTL_OUTPUT_MAX_CHARS): string {
   if (text.length <= maxChars) return text;
   return text.slice(-maxChars);
+}
+
+function redactPgCtlDiagnosticText(text: string, secrets: readonly string[]): string {
+  return redactSecretText(text, [...secrets])
+    .replace(/Authorization:\s*Bearer\s+\S+/giu, "Authorization: Bearer [REDACTED]")
+    .replace(/\bBearer\s+\S+/giu, "Bearer [REDACTED]")
+    .replace(
+      /\b(password|DATABASE_URL|PGPASSWORD|YUVI_POSTGRES_PASSWORD)\s*[=:]\s*\S+/giu,
+      "$1=[REDACTED]"
+    )
+    .replace(/\bconnectionString\s*[=:]\s*\S+/giu, "connectionString=[REDACTED]")
+    .replace(
+      /\b(argv|args|commandLine|command|env|environment)\s*[=:][^\r\n]*/giu,
+      "[REDACTED_EXECUTION_DATA]"
+    );
+}
+
+function boundPgCtlDiagnosticOutput(text: string, secrets: readonly string[]): string {
+  try {
+    return boundPgCtlOutput(
+      redactPgCtlDiagnosticText(text, secrets),
+      PG_CTL_DIAGNOSTIC_OUTPUT_MAX_CHARS
+    );
+  } catch {
+    // Diagnostic redaction must never affect PostgreSQL lifecycle behavior.
+    return "";
+  }
 }
 
 export function classifyWindowsPgCtlChildExit(input: {
@@ -769,15 +800,19 @@ export async function launchWindowsPrivatePostgres(input: {
   sleepImpl?: (ms: number) => Promise<void>;
   nowMs?: () => number;
   readPid?: (dataDirectory: string) => number | null;
+  diagnosticSecrets?: readonly string[];
   diagnosticSink?: PostgresLaunchDiagnosticSink;
 }): Promise<WindowsPrivatePostgresLaunchResult> {
   const launchStartedAt = (input.now ?? (() => new Date()))();
   const launcher = await invokeWindowsPgCtlStart(input);
+  const diagnosticSecrets = input.diagnosticSecrets ?? [];
   reportPostgresLaunchDiagnostic(input.diagnosticSink, {
     phase: "PG_CTL_LAUNCH",
     status: launcher.kind,
     exitCode: launcher.status,
-    signal: launcher.signal
+    signal: launcher.signal,
+    pgCtlStdoutTail: boundPgCtlDiagnosticOutput(launcher.stdout, diagnosticSecrets),
+    pgCtlStderrTail: boundPgCtlDiagnosticOutput(launcher.stderr, diagnosticSecrets)
   });
   const reconcileInput = {
     layout: input.layout,
