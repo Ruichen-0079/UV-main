@@ -85,6 +85,11 @@ import {
   shouldReplaceSettingsDraft,
   type SettingsApplyState
 } from "./settings-state.js";
+import {
+  normalizeVisionImageMimeType,
+  toVisionFileInput,
+  type VisionImageMimeType
+} from "./vision-input.js";
 
 type PageId =
   | "overview"
@@ -2942,6 +2947,7 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
   const [subjectUserId, setSubjectUserId] = useState("");
   const [speakerId, setSpeakerId] = useState("");
   const [imageBase64, setImageBase64] = useState("");
+  const [imageMimeType, setImageMimeType] = useState<VisionImageMimeType>("image/png");
   const [imageUrl, setImageUrl] = useState("");
   const [prompt, setPrompt] = useState("Describe the image safely and concisely.");
   const [result, setResult] = useState<unknown>(null);
@@ -2955,7 +2961,7 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
       setResult(
         await apiClient.analyzeVision({
           sessionId,
-          mimeType: "image/png",
+          mimeType: imageMimeType,
           prompt,
           ...(subjectUserId.trim() ? { subjectUserId: subjectUserId.trim() } : {}),
           ...(subjectUserId.trim() ? { createdByUserId: subjectUserId.trim() } : {}),
@@ -3012,9 +3018,15 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
             <input
               className="field"
               type="file"
-              accept="image/*"
+              accept="image/png,image/jpeg"
               onChange={(event) =>
-                void loadFileAsBase64(event.currentTarget.files?.[0], setImageBase64)
+                void loadFileAsBase64(
+                  event.currentTarget.files?.[0],
+                  setImageBase64,
+                  setImageMimeType
+                ).catch((caught) => {
+                  setError(caught instanceof Error ? caught.message : "Image file read failed");
+                })
               }
             />
           </Field>
@@ -3031,6 +3043,19 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
               value={imageBase64}
               onChange={(event) => setImageBase64(event.target.value)}
             />
+          </Field>
+          <Field label="image MIME">
+            <select
+              className="field"
+              value={imageMimeType}
+              onChange={(event) => {
+                const normalized = normalizeVisionImageMimeType(event.target.value);
+                if (normalized) setImageMimeType(normalized);
+              }}
+            >
+              <option value="image/png">image/png (PNG)</option>
+              <option value="image/jpeg">image/jpeg (JPEG)</option>
+            </select>
           </Field>
           <Field label="prompt">
             <textarea
@@ -3101,7 +3126,8 @@ function ResultBlock(props: { title: string; value: unknown }): JSX.Element {
 
 async function loadFileAsBase64(
   file: File | undefined,
-  setValue: (value: string) => void
+  setValue: (value: string) => void,
+  setMimeType?: (value: VisionImageMimeType) => void
 ): Promise<void> {
   if (!file) return;
   const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -3110,6 +3136,12 @@ async function loadFileAsBase64(
     reader.onerror = () => reject(new Error("File read failed"));
     reader.readAsDataURL(file);
   });
+  if (setMimeType) {
+    const imageInput = toVisionFileInput(dataUrl, file.type);
+    setMimeType(imageInput.mimeType);
+    setValue(imageInput.imageBase64);
+    return;
+  }
   setValue(dataUrl.split(",", 2)[1] ?? "");
 }
 

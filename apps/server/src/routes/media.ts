@@ -56,10 +56,17 @@ const TTSRequestSchema = z.object({
 const VisionRequestSchema = z.object({
   ...IdentitySchema,
   imageBase64: z.string().optional(),
-  imageUrl: z.string().url().optional(),
+  imageUrl: z.string().optional(),
   mimeType: z.string().optional(),
   prompt: z.string().optional()
 });
+
+const PUBLIC_VISION_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const PUBLIC_VISION_MIME_TYPES = new Map([
+  ["image/jpeg", "image/jpeg"],
+  ["image/jpg", "image/jpeg"],
+  ["image/png", "image/png"]
+]);
 
 function validatePublicSTTInput(input: {
   audioBase64?: string | undefined;
@@ -106,6 +113,93 @@ function isValidPublicBase64Audio(value: string): boolean {
   const normalizedInput = payload.replace(/=+$/, "");
   const normalizedCanonical = decoded.toString("base64").replace(/=+$/, "");
   return normalizedInput === normalizedCanonical;
+}
+
+function validatePublicVisionInput(input: {
+  imageBase64?: string | undefined;
+  imageUrl?: string | undefined;
+  mimeType?: string | undefined;
+}): string | undefined {
+  if (input.imageUrl) {
+    let parsed: URL;
+    try {
+      parsed = new URL(input.imageUrl);
+    } catch {
+      return "imageUrl must be a valid HTTP or HTTPS URL.";
+    }
+
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "imageUrl must use the http or https scheme.";
+    }
+    return undefined;
+  }
+
+  if (input.imageBase64) {
+    if (/^data:/i.test(input.imageBase64)) {
+      return validatePublicVisionDataUrl(input.imageBase64);
+    }
+
+    if (!normalizePublicVisionMimeType(input.mimeType)) {
+      return "Raw imageBase64 requires image/png or image/jpeg mimeType.";
+    }
+    return validatePublicVisionBase64(input.imageBase64);
+  }
+
+  return "Provide a usable imageUrl or imageBase64 source.";
+}
+
+function validatePublicVisionDataUrl(value: string): string | undefined {
+  const match = /^data:([^;,\s]+);base64,([A-Za-z0-9+/]*={0,2})$/i.exec(value);
+  if (!match) {
+    return "imageBase64 data URLs must use a supported image MIME type and base64 encoding.";
+  }
+
+  const rawMimeType = match[1];
+  const payload = match[2];
+  if (!rawMimeType || !payload || !normalizePublicVisionMimeType(rawMimeType)) {
+    return "imageBase64 data URLs must contain a non-empty PNG or JPEG payload.";
+  }
+  return validatePublicVisionBase64(payload);
+}
+
+function validatePublicVisionBase64(value: string): string | undefined {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length === 0 || value.length % 4 === 1) {
+    return "imageBase64 must contain valid non-empty base64 data.";
+  }
+
+  const paddingIndex = value.indexOf("=");
+  if (paddingIndex >= 0 && value.length % 4 !== 0) {
+    return "imageBase64 has invalid base64 padding.";
+  }
+
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const estimatedBytes = Math.floor((value.length * 3) / 4) - padding;
+  if (estimatedBytes > PUBLIC_VISION_MAX_IMAGE_BYTES) {
+    return "Inline images must not exceed 20 MiB.";
+  }
+
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.byteLength === 0) {
+    return "imageBase64 must decode to non-empty image bytes.";
+  }
+  if (decoded.byteLength > PUBLIC_VISION_MAX_IMAGE_BYTES) {
+    return "Inline images must not exceed 20 MiB.";
+  }
+
+  const normalizedInput = value.replace(/=+$/, "");
+  const normalizedCanonical = decoded.toString("base64").replace(/=+$/, "");
+  if (normalizedInput !== normalizedCanonical) {
+    return "imageBase64 is not canonically encoded.";
+  }
+  return undefined;
+}
+
+function normalizePublicVisionMimeType(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const mediaType = value.split(";", 1)[0]?.trim().toLowerCase();
+  return mediaType ? PUBLIC_VISION_MIME_TYPES.get(mediaType) : undefined;
 }
 
 type RequestDisconnectBoundary = {
@@ -312,15 +406,36 @@ export async function registerMediaRoutes(
       return reply.status(400).send({ error: "invalid_request", details: parsed.error.flatten() });
     }
 
-    const provider = context.providers.getVisionProvider();
+    const inputError = validatePublicVisionInput(parsed.data);
+    if (inputError) {
+      return reply.status(400).send({ error: "invalid_request", message: inputError });
+    }
+
+    const boundary = createRequestDisconnectBoundary(request);
     try {
-      const output = await provider.analyzeImage({
-        imageBase64: parsed.data.imageBase64,
-        imageUrl: parsed.data.imageUrl,
-        mimeType: parsed.data.mimeType,
-        prompt: parsed.data.prompt,
-        metadata: identityMetadata(parsed.data)
-      });
+      const provider = context.providers.getVisionProvider();
+      if (boundary.signal.aborted) {
+        throw createCancelledVisionProviderError(provider.name, "not_started");
+      }
+
+      const output = await provider.analyzeImage(
+        {
+          imageBase64: parsed.data.imageBase64,
+          imageUrl: parsed.data.imageUrl,
+          mimeType: normalizePublicVisionMimeType(parsed.data.mimeType) ?? parsed.data.mimeType,
+          prompt: parsed.data.prompt,
+          metadata: identityMetadata(parsed.data)
+        },
+        { signal: boundary.signal }
+      );
+
+      if (boundary.signal.aborted) {
+        throw createCancelledVisionProviderError(provider.name, "unknown");
+      }
+      if (isResponseUnavailable(request, reply)) {
+        return;
+      }
+
       return reply.send({
         analysis: output.text,
         labels: output.labels,
@@ -330,7 +445,12 @@ export async function registerMediaRoutes(
         ...standardProviderMetadata("vision", output)
       });
     } catch (error) {
+      if (isResponseUnavailable(request, reply)) {
+        return;
+      }
       return sendProviderFailure(reply, "vision", error);
+    } finally {
+      boundary.cleanup();
     }
   });
 }
@@ -397,6 +517,21 @@ function createCancelledProviderError(
     capability: "tts",
     code: ProviderErrorCode.Cancelled,
     message: "TTS operation cancelled.",
+    retryable: false,
+    fallbackEligible: false,
+    effectState
+  });
+}
+
+function createCancelledVisionProviderError(
+  provider: string,
+  effectState: "not_started" | "unknown"
+): ProviderError {
+  return new ProviderError({
+    provider,
+    capability: "vision",
+    code: ProviderErrorCode.Cancelled,
+    message: "Vision operation cancelled.",
     retryable: false,
     fallbackEligible: false,
     effectState

@@ -279,6 +279,76 @@ GPT-SoVITS does not transcode unsupported formats. Wrapper speed is not
 supported; API-v2 maps the existing speed option to its upstream
 `speed_factor` field. Both adapters return one complete audio result.
 
+## Vision contract (P7-7)
+
+Vision is currently one-shot analysis. The provider contract is:
+
+```ts
+VisionProvider.analyzeImage(
+  input: VisionInput,
+  options?: ProviderCallOptions
+): Promise<VisionOutput>
+```
+
+There is no public Vision streaming contract. Future video, camera, or
+streaming analysis must be additive and must not silently replace this
+complete-result operation.
+
+Provider-level source resolution is deterministic and does not require
+mutual exclusion:
+
+```text
+imageUrl -> imageBase64 -> imageBuffer -> image -> localFilePath
+```
+
+Only the first usable selected source is normalized; lower-precedence values
+are ignored. The xAI adapter accepts `image/png` and `image/jpeg`; the
+compatibility alias `image/jpg` is normalized to JPEG. Unsupported inline and
+local formats are rejected without transcoding. `localFilePath` is a trusted
+internal provider capability and is not exposed by the public route.
+
+The public `POST /v1/vision/analyze` surface is intentionally narrower:
+
+```text
+imageUrl -> imageBase64
+```
+
+Both may be supplied and `imageUrl` wins. Public URLs must use `http` or
+`https`; Yuvi forwards the reference to the selected external provider and
+does not download it or pre-check its remote byte size. Raw `imageBase64`
+requires non-empty valid base64 plus `image/png` or `image/jpeg` MIME
+metadata. Supported image data URLs may also be supplied through
+`imageBase64`. Malformed public image input is rejected as HTTP 400 before
+provider work.
+
+The xAI adapter enforces a 20 MiB limit on decoded/raw inline bytes and local
+files. The public JSON route is additionally constrained by the server's
+HTTP body limit, so the provider limit does not guarantee that a 20 MiB image
+can be transported in one JSON request.
+
+`ProviderCallOptions.signal` is the canonical cancellation channel. For the
+public route, request `aborted` and client-socket `close` flow through the
+route boundary, fallback chain, and Vision provider transport. Normal request
+body completion is not treated as disconnect. Disconnect listeners are
+removed after every outcome, and a late provider result cannot produce a
+successful HTTP write after the response owner is gone.
+
+`VisionOutput.text` is the required meaningful analysis result. `labels`,
+`objects`, `confidence`, `sceneSummary`, and provider/model metadata are
+optional. The current xAI adapter sets `sceneSummary` to the same text as a
+compatibility projection; it does not claim an independently generated scene
+summary. Token usage and raw provider response are internal/optional, and raw
+debug data is not exposed by the public route.
+
+The current public data flow is transient:
+
+```text
+image/base64/URL -> provider request -> normalized analysis -> HTTP response
+```
+
+Vision image bytes are not persisted to conversation or memory by this
+contract.
+
 ## Swapping Providers
 
 To add or replace a provider:

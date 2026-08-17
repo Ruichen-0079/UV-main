@@ -1383,10 +1383,16 @@ export const apiClient = {
     speakerId?: string;
     subjectUserId?: string;
     createdByUserId?: string;
+    signal?: AbortSignal;
   }): Promise<VisionAnalyzeResponse> {
-    return request<VisionAnalyzeResponse>("/v1/vision/analyze", {
+    const { signal, ...payload } = input;
+    const init: RequestInit = {
       method: "POST",
-      body: JSON.stringify(input)
+      body: JSON.stringify(payload)
+    };
+    if (signal) init.signal = signal;
+    return request<VisionAnalyzeResponse>("/v1/vision/analyze", {
+      ...init
     });
   },
 

@@ -153,3 +153,54 @@ GPT-SoVITS adapter support is explicit and does not include transcoding:
 
 Wrapper speed is unsupported. API-v2 maps the existing speed option to
 `speed_factor`. xAI supports its configured format set.
+
+## Vision contract (P7-7)
+
+Vision is a one-shot/full-result capability:
+
+```ts
+VisionProvider.analyzeImage(
+  input: VisionInput,
+  options?: ProviderCallOptions
+): Promise<VisionOutput>
+```
+
+No public Vision streaming contract exists. Future streaming, video, or
+camera analysis must be additive.
+
+Provider source precedence is deterministic and does not require mutual
+exclusion:
+
+```text
+imageUrl -> imageBase64 -> imageBuffer -> image -> localFilePath
+```
+
+Only the selected source is validated; lower-precedence values are ignored.
+The xAI adapter accepts `image/png` and `image/jpeg`, with `image/jpg`
+normalized to JPEG. It rejects unsupported inline/local formats and does no
+transcoding. `localFilePath` is trusted-internal capability only.
+
+The public route exposes only `imageUrl -> imageBase64`; both may be present
+and the URL wins. Public URLs are limited to HTTP/HTTPS and are forwarded to
+the external provider without Yuvi downloading them. Raw base64 requires
+supported MIME metadata and valid non-empty base64. Supported image data URLs
+may also be passed through `imageBase64`. Invalid public image input returns
+HTTP 400 before provider work.
+
+Inline and local adapter inputs are limited to 20 MiB of raw/decoded image
+bytes. The public JSON request is also subject to the server HTTP body limit,
+and remote URL size is enforced by the upstream provider rather than by a
+Yuvi download.
+
+`ProviderCallOptions.signal` is the canonical cancellation channel. The
+public route maps request/socket disconnect to that signal through the
+fallback chain and concrete provider, does not treat normal request-body
+completion as disconnect, cleans listeners, and suppresses late HTTP success.
+
+`VisionOutput.text` must contain meaningful analysis. Labels, objects,
+confidence, scene summary, model/provider metadata, and token usage are
+optional; the current xAI adapter uses `sceneSummary = text` only as a
+compatibility projection and does not fabricate the other semantic fields.
+Raw provider debug data remains internal/opt-in and is not returned by the
+public route. The current public flow is transient and does not persist image
+bytes to conversation or memory.
