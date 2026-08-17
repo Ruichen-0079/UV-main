@@ -232,6 +232,10 @@ export type HandleUserMessageOptions = {
   writeMemory?: boolean | undefined;
 };
 
+export type MaybeSynthesizeSpeechOptions = {
+  signal?: AbortSignal | undefined;
+};
+
 export type RuntimeReplyStreamEvent =
   | {
       type: "text-delta";
@@ -1110,7 +1114,9 @@ export class RuntimeOrchestrator {
         }
         if (!options.signal?.aborted) {
           try {
-            await this.maybeSynthesizeSpeech(reply, voiceOutput);
+            await this.maybeSynthesizeSpeech(reply, voiceOutput, {
+              signal: options.signal
+            });
           } catch (error) {
             await this.publishRuntimeError("Optional TTS post-processing failed.", error, {
               traceId: reply.traceId,
@@ -1502,9 +1508,10 @@ export class RuntimeOrchestrator {
 
   async maybeSynthesizeSpeech(
     reply: AgentReplyEvent,
-    voiceOutput: boolean
+    voiceOutput: boolean,
+    options: MaybeSynthesizeSpeechOptions = {}
   ): Promise<AvatarSpeakEvent | null> {
-    if (!voiceOutput) {
+    if (!voiceOutput || options.signal?.aborted) {
       return null;
     }
 
@@ -1514,11 +1521,18 @@ export class RuntimeOrchestrator {
         "tts",
         ttsProvider.name,
         () =>
-          ttsProvider.synthesizeSpeech({
-            text: reply.payload.content
-          }),
+          ttsProvider.synthesizeSpeech(
+            {
+              text: reply.payload.content
+            },
+            { signal: options.signal }
+          ),
         { traceId: reply.traceId, parentId: reply.id }
       );
+
+      if (options.signal?.aborted) {
+        return null;
+      }
 
       const event = createEvent(
         "avatar.speak",
@@ -1535,9 +1549,19 @@ export class RuntimeOrchestrator {
         }
       );
 
+      if (options.signal?.aborted) {
+        return null;
+      }
+
       await this.options.eventBus.publish(event);
       return event;
     } catch (error) {
+      if (
+        options.signal?.aborted ||
+        (error instanceof ProviderError && error.code === ProviderErrorCode.Cancelled)
+      ) {
+        return null;
+      }
       this.options.logger?.warn?.(
         "optional tts synthesis failed",
         this.errorLogContext(error, reply.traceId)

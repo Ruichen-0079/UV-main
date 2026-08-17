@@ -114,3 +114,42 @@ the current adapter does not fabricate them.
 channel. Future streaming STT must be additive through a separate interface
 and capability; `transcribeAudio()` is not a streaming operation. P7-5 adds
 no streaming DTOs, WebSocket transport, or streaming protocol contract.
+
+## TTS contract (P7-6)
+
+TTS is currently full-buffer synthesis:
+
+```text
+one request -> one provider synthesis -> complete buffered audio -> one TTSOutput
+```
+
+The stable provider contract is:
+
+```ts
+TTSProvider.synthesizeSpeech(
+  input: TTSInput,
+  options?: ProviderCallOptions
+): Promise<TTSOutput>
+```
+
+`ProviderCallOptions.signal` is the canonical cancellation channel. The
+deprecated `TTSInput.signal` is compatibility-only and must not be used by new
+callers. `TTSOutput.audio` and `TTSOutput.mimeType` are required; optional
+`audioBuffer` and `audioBase64` representations must contain the same bytes.
+Duration, sample rate, and channel metadata are not promised unless supplied.
+No public streaming TTS contract exists. Future streaming must be additive and
+must not silently replace `Promise<TTSOutput>`.
+
+GPT-SoVITS adapter support is explicit and does not include transcoding:
+
+| Yuvi format | wrapper     | wrapper-fallback | API-v2                       |
+| ----------- | ----------- | ---------------- | ---------------------------- |
+| mp3         | unsupported | unsupported      | unsupported                  |
+| wav         | supported   | supported        | supported                    |
+| opus        | unsupported | unsupported      | unsupported                  |
+| pcm         | unsupported | unsupported      | supported via upstream `raw` |
+| mulaw       | unsupported | unsupported      | unsupported                  |
+| alaw        | unsupported | unsupported      | unsupported                  |
+
+Wrapper speed is unsupported. API-v2 maps the existing speed option to
+`speed_factor`. xAI supports its configured format set.

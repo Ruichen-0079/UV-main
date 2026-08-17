@@ -18,7 +18,8 @@ import {
   createMockStreamingChatProvider,
   createMockReasoningProvider,
   createMockSTTProvider,
-  createMockVisionProvider
+  createMockVisionProvider,
+  type TTSOutput
 } from "@companion/providers";
 import { createEvent, type RuntimeEvent } from "@companion/protocol";
 import { describe, expect, it, vi } from "vitest";
@@ -38,6 +39,39 @@ async function collectRuntimeStream(
     onEvent?.(event);
   }
   return events;
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason?: unknown): void;
+} {
+  let resolvePromise: ((value: T) => void) | undefined;
+  let rejectPromise: ((reason?: unknown) => void) | undefined;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return {
+    promise,
+    resolve(value: T): void {
+      resolvePromise?.(value);
+    },
+    reject(reason?: unknown): void {
+      rejectPromise?.(reason);
+    }
+  };
+}
+
+function runtimeSpeechOutput(): TTSOutput {
+  return {
+    audio: new Uint8Array([1, 2, 3]),
+    audioBase64: "AQID",
+    mimeType: "audio/wav",
+    durationMs: 42,
+    model: "runtime-test-tts",
+    finalProvider: "runtime-test-tts"
+  };
 }
 
 describe("RuntimeOrchestrator", () => {
@@ -343,6 +377,242 @@ describe("RuntimeOrchestrator", () => {
       content: "done",
       status: "completed"
     });
+  });
+
+  it("forwards the caller signal to TTS and publishes one complete audio event", async () => {
+    const controller = new AbortController();
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    let receivedSignal: AbortSignal | undefined;
+    const synthesizeSpeech = vi.fn(async (_input: unknown, options?: { signal?: AbortSignal }) => {
+      receivedSignal = options?.signal;
+      return runtimeSpeechOutput();
+    });
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory([]),
+      conversation: new InMemoryConversationRepository(),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => createMockStreamingChatProvider("native", { chunks: ["done"] }),
+        getTTSProvider: () => ({
+          name: "runtime-test-tts",
+          healthCheck: async () => ({
+            provider: "runtime-test-tts",
+            status: "healthy" as const,
+            checkedAt: new Date().toISOString()
+          }),
+          synthesizeSpeech
+        })
+      }
+    });
+
+    const events = await collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "tts-success-session", content: "hello" },
+        { signal: controller.signal, voiceOutput: true, readMemory: false, writeMemory: false }
+      )
+    );
+
+    expect(receivedSignal).toBe(controller.signal);
+    expect(synthesizeSpeech).toHaveBeenCalledOnce();
+    expect(events.at(-1)).toMatchObject({ type: "completed", content: "done" });
+    expect(published.filter((event) => event.type === "avatar.speak")).toHaveLength(1);
+    expect(published.find((event) => event.type === "avatar.speak")).toMatchObject({
+      payload: { audioBase64: "AQID", mimeType: "audio/wav", durationMs: 42 }
+    });
+  });
+
+  it("skips TTS after the finalized reply is cancelled before synthesis starts", async () => {
+    const controller = new AbortController();
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+      if (event.type === "assistant.message") {
+        controller.abort();
+      }
+    });
+    const synthesizeSpeech = vi.fn(async () => runtimeSpeechOutput());
+    const conversation = new InMemoryConversationRepository();
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => createMockStreamingChatProvider("native", { chunks: ["done"] }),
+        getTTSProvider: () => ({
+          name: "runtime-test-tts",
+          healthCheck: async () => ({
+            provider: "runtime-test-tts",
+            status: "healthy" as const,
+            checkedAt: new Date().toISOString()
+          }),
+          synthesizeSpeech
+        })
+      }
+    });
+
+    const events = await collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "tts-pre-cancel-session", content: "hello" },
+        { signal: controller.signal, voiceOutput: true, readMemory: false, writeMemory: false }
+      )
+    );
+
+    expect(synthesizeSpeech).not.toHaveBeenCalled();
+    expect(published.filter((event) => event.type === "avatar.speak")).toHaveLength(0);
+    expect(events.at(-1)).toMatchObject({ type: "completed", content: "done" });
+    expect((await conversation.listRecentMessages("tts-pre-cancel-session")).at(-1)).toMatchObject({
+      content: "done",
+      status: "completed"
+    });
+  });
+
+  it("propagates in-flight TTS cancellation without failing the finalized reply", async () => {
+    const controller = new AbortController();
+    const ttsStarted = deferred<void>();
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    let receivedSignal: AbortSignal | undefined;
+    const synthesizeSpeech = vi.fn(
+      async (_input: unknown, options?: { signal?: AbortSignal }): Promise<TTSOutput> => {
+        receivedSignal = options?.signal;
+        ttsStarted.resolve();
+        if (!receivedSignal) {
+          throw new Error("TTS did not receive the caller signal.");
+        }
+        return new Promise<TTSOutput>((_resolve, reject) => {
+          receivedSignal?.addEventListener(
+            "abort",
+            () =>
+              reject(
+                new ProviderError({
+                  provider: "runtime-test-tts",
+                  capability: "tts",
+                  code: ProviderErrorCode.Cancelled,
+                  message: "TTS cancelled",
+                  retryable: false,
+                  fallbackEligible: false,
+                  effectState: "unknown"
+                })
+              ),
+            { once: true }
+          );
+        });
+      }
+    );
+    const conversation = new InMemoryConversationRepository();
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => createMockStreamingChatProvider("native", { chunks: ["done"] }),
+        getTTSProvider: () => ({
+          name: "runtime-test-tts",
+          healthCheck: async () => ({
+            provider: "runtime-test-tts",
+            status: "healthy" as const,
+            checkedAt: new Date().toISOString()
+          }),
+          synthesizeSpeech
+        })
+      }
+    });
+
+    const collecting = collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "tts-in-flight-cancel-session", content: "hello" },
+        { signal: controller.signal, voiceOutput: true, readMemory: false, writeMemory: false }
+      )
+    );
+    await ttsStarted.promise;
+    controller.abort();
+
+    const events = await collecting;
+    expect(receivedSignal).toBe(controller.signal);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "completed", content: "done" });
+    expect(published.filter((event) => event.type === "avatar.speak")).toHaveLength(0);
+    expect(
+      (await conversation.listRecentMessages("tts-in-flight-cancel-session")).at(-1)
+    ).toMatchObject({
+      content: "done",
+      status: "completed"
+    });
+  });
+
+  it("discards a late TTS result when the provider ignores cancellation", async () => {
+    const controller = new AbortController();
+    const ttsStarted = deferred<void>();
+    const finishTTS = deferred<TTSOutput>();
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    let receivedSignal: AbortSignal | undefined;
+    const synthesizeSpeech = vi.fn(
+      async (_input: unknown, options?: { signal?: AbortSignal }): Promise<TTSOutput> => {
+        receivedSignal = options?.signal;
+        ttsStarted.resolve();
+        return finishTTS.promise;
+      }
+    );
+    const conversation = new InMemoryConversationRepository();
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => createMockStreamingChatProvider("native", { chunks: ["done"] }),
+        getTTSProvider: () => ({
+          name: "runtime-test-tts",
+          healthCheck: async () => ({
+            provider: "runtime-test-tts",
+            status: "healthy" as const,
+            checkedAt: new Date().toISOString()
+          }),
+          synthesizeSpeech
+        })
+      }
+    });
+
+    const collecting = collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "tts-late-result-session", content: "hello" },
+        { signal: controller.signal, voiceOutput: true, readMemory: false, writeMemory: false }
+      )
+    );
+    await ttsStarted.promise;
+    controller.abort();
+    finishTTS.resolve(runtimeSpeechOutput());
+
+    const events = await collecting;
+    expect(receivedSignal).toBe(controller.signal);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "completed", content: "done" });
+    expect(published.filter((event) => event.type === "avatar.speak")).toHaveLength(0);
+    expect((await conversation.listRecentMessages("tts-late-result-session")).at(-1)).toMatchObject(
+      {
+        content: "done",
+        status: "completed"
+      }
+    );
   });
 
   it("keeps streaming completed when optional memory and TTS post-processing fail", async () => {
