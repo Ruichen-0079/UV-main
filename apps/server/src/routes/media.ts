@@ -1,5 +1,6 @@
 import {
   ProviderError,
+  ProviderErrorCode,
   type ProviderAttempt,
   type ProviderCapability,
   type ProviderMetadata,
@@ -115,7 +116,14 @@ type RequestDisconnectBoundary = {
 function createRequestDisconnectBoundary(request: FastifyRequest): RequestDisconnectBoundary {
   const controller = new AbortController();
   const socket = request.raw.socket;
-  const abortOnDisconnect = () => controller.abort();
+  let aborted = false;
+  const abortOnDisconnect = () => {
+    if (aborted) {
+      return;
+    }
+    aborted = true;
+    controller.abort();
+  };
 
   request.raw.once("aborted", abortOnDisconnect);
   socket?.once("close", abortOnDisconnect);
@@ -256,25 +264,32 @@ export async function registerMediaRoutes(
     }
 
     const provider = context.providers.getTTSProvider();
-    const abortController = new AbortController();
-    const abortOnDisconnect = () => abortController.abort();
-    // IncomingMessage#close can fire when the request body has been fully
-    // consumed, which is a normal POST lifecycle rather than a client
-    // disconnect. Only abort on an explicitly aborted request or a socket
-    // that actually closes before the response is sent.
-    request.raw.once("aborted", abortOnDisconnect);
-    request.raw.socket?.once("close", abortOnDisconnect);
+    const boundary = createRequestDisconnectBoundary(request);
     try {
-      const output = await provider.synthesizeSpeech({
-        text: parsed.data.text,
-        voice: parsed.data.voice,
-        format: parsed.data.format,
-        signal: abortController.signal,
-        metadata: {
-          sessionId: parsed.data.sessionId,
-          ...(parsed.data.language ? { language: parsed.data.language } : {})
-        }
-      });
+      if (boundary.signal.aborted) {
+        throw createCancelledProviderError(provider.name, "not_started");
+      }
+
+      const output = await provider.synthesizeSpeech(
+        {
+          text: parsed.data.text,
+          voice: parsed.data.voice,
+          format: parsed.data.format,
+          metadata: {
+            sessionId: parsed.data.sessionId,
+            ...(parsed.data.language ? { language: parsed.data.language } : {})
+          }
+        },
+        { signal: boundary.signal }
+      );
+
+      if (boundary.signal.aborted) {
+        throw createCancelledProviderError(provider.name, "unknown");
+      }
+      if (isResponseUnavailable(request, reply)) {
+        return;
+      }
+
       return reply.send({
         audioBase64: output.audioBase64 ?? Buffer.from(output.audio).toString("base64"),
         mimeType: output.mimeType,
@@ -282,10 +297,12 @@ export async function registerMediaRoutes(
         ...standardProviderMetadata("tts", output)
       });
     } catch (error) {
+      if (isResponseUnavailable(request, reply)) {
+        return;
+      }
       return sendProviderFailure(reply, "tts", error);
     } finally {
-      request.raw.removeListener("aborted", abortOnDisconnect);
-      request.raw.socket?.removeListener("close", abortOnDisconnect);
+      boundary.cleanup();
     }
   });
 
@@ -369,6 +386,28 @@ function sendProviderFailure(
     setup:
       "Configure a real provider for this capability, or set PROVIDER_ALLOW_MOCKS=true for explicit offline/mock development."
   });
+}
+
+function createCancelledProviderError(
+  provider: string,
+  effectState: "not_started" | "unknown"
+): ProviderError {
+  return new ProviderError({
+    provider,
+    capability: "tts",
+    code: ProviderErrorCode.Cancelled,
+    message: "TTS operation cancelled.",
+    retryable: false,
+    fallbackEligible: false,
+    effectState
+  });
+}
+
+function isResponseUnavailable(
+  request: FastifyRequest,
+  reply: { raw: { destroyed?: boolean; writableEnded?: boolean } }
+): boolean {
+  return Boolean(reply.raw.destroyed || reply.raw.writableEnded || request.raw.socket?.destroyed);
 }
 
 function extractAttempts(error: unknown): ProviderAttempt[] {

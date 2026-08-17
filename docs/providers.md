@@ -243,6 +243,42 @@ readiness/configuration oriented under the existing health model. The existing
 `stt.completed` protocol entry, if used elsewhere, is not an implemented
 streaming STT contract.
 
+## Full-buffer TTS contract (P7-6)
+
+Yuvi TTS is currently full-buffer synthesis:
+
+```text
+one request -> one provider synthesis -> complete buffered audio -> one TTSOutput
+```
+
+The public provider method remains
+`synthesizeSpeech(input, options?) -> Promise<TTSOutput>`. There is no public
+streaming TTS contract; any future streaming capability must be additive and
+must not replace this promise-based result.
+
+`ProviderCallOptions.signal` is the canonical cancellation channel. The
+deprecated `TTSInput.signal` remains compatibility-only for existing provider
+behavior and must not be used by new callers. Required normalized output fields
+are `audio: Uint8Array` and `mimeType`; `audioBuffer` and `audioBase64` may be
+provided as compatibility representations of the same bytes. Duration, sample
+rate, and channel metadata are optional and are not fabricated.
+
+Provider-specific capabilities remain truthful. xAI supports its configured
+format set. GPT-SoVITS currently supports:
+
+| Yuvi format | wrapper     | wrapper-fallback | API-v2                       |
+| ----------- | ----------- | ---------------- | ---------------------------- |
+| mp3         | unsupported | unsupported      | unsupported                  |
+| wav         | supported   | supported        | supported                    |
+| opus        | unsupported | unsupported      | unsupported                  |
+| pcm         | unsupported | unsupported      | supported via upstream `raw` |
+| mulaw       | unsupported | unsupported      | unsupported                  |
+| alaw        | unsupported | unsupported      | unsupported                  |
+
+GPT-SoVITS does not transcode unsupported formats. Wrapper speed is not
+supported; API-v2 maps the existing speed option to its upstream
+`speed_factor` field. Both adapters return one complete audio result.
+
 ## Swapping Providers
 
 To add or replace a provider:

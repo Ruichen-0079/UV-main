@@ -178,13 +178,15 @@ describe("versioned message SSE route", () => {
     await app.close();
   });
 
-  it("propagates a real client disconnect to Runtime and closes the iterator", async () => {
+  it("propagates a real client disconnect to Runtime and cancels a pending TTS side effect", async () => {
     let pending: ((result: IteratorResult<RuntimeReplyStreamEvent>) => void) | undefined;
     let resolveReturnObserved!: () => void;
     const returnObserved = new Promise<void>((resolve) => {
       resolveReturnObserved = resolve;
     });
     let returnCalled = false;
+    let ttsSignal: AbortSignal | undefined;
+    let ttsObservedCancellation = false;
     const runtime = runtimeFor((_input, options) => {
       let first = true;
       const iterator: AsyncIterator<RuntimeReplyStreamEvent> &
@@ -207,7 +209,11 @@ describe("versioned message SSE route", () => {
             pending = resolve;
             options?.signal?.addEventListener(
               "abort",
-              () => resolve({ done: true, value: undefined }),
+              () => {
+                ttsSignal = options.signal;
+                ttsObservedCancellation = true;
+                resolve({ done: true, value: undefined });
+              },
               { once: true }
             );
           });
@@ -241,6 +247,8 @@ describe("versioned message SSE route", () => {
     controller.abort();
     await returnObserved;
     expect(returnCalled).toBe(true);
+    expect(ttsSignal).toBeInstanceOf(AbortSignal);
+    expect(ttsObservedCancellation).toBe(true);
     await app.close();
   });
 });

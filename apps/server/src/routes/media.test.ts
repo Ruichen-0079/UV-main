@@ -5,7 +5,9 @@ import {
   ProviderErrorCode,
   type ProviderCallOptions,
   type STTInput,
-  type STTOutput
+  type STTOutput,
+  type TTSInput,
+  type TTSOutput
 } from "@companion/providers";
 import type { IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
@@ -18,6 +20,8 @@ type TestSTTTranscriber = (
   input: STTInput,
   options?: ProviderCallOptions
 ) => Promise<STTOutput>;
+
+type TestTTSSynthesizer = (input: TTSInput, options?: ProviderCallOptions) => Promise<TTSOutput>;
 
 type RequestCapture = {
   raw: IncomingMessage | undefined;
@@ -59,12 +63,36 @@ function recognizedOutput(): STTOutput {
   };
 }
 
+function speechOutput(): TTSOutput {
+  return {
+    audio: new Uint8Array([1, 2, 3]),
+    audioBase64: "AQID",
+    mimeType: "audio/wav",
+    durationMs: 42,
+    model: "test-tts",
+    finalProvider: "test-tts",
+    providerMetadata: { sourceKind: "test" }
+  };
+}
+
 function cancelledProviderError(effectState: "not_started" | "unknown"): ProviderError {
   return new ProviderError({
     provider: "test-stt",
     capability: "stt",
     code: ProviderErrorCode.Cancelled,
     message: "STT operation cancelled.",
+    retryable: false,
+    fallbackEligible: false,
+    effectState
+  });
+}
+
+function cancelledTTSError(effectState: "not_started" | "unknown"): ProviderError {
+  return new ProviderError({
+    provider: "test-tts",
+    capability: "tts",
+    code: ProviderErrorCode.Cancelled,
+    message: "TTS operation cancelled.",
     retryable: false,
     fallbackEligible: false,
     effectState
@@ -140,6 +168,39 @@ async function createLifecycleApp(
   });
   await registerMediaRoutes(app, context);
   return { app, transcribeAudio, handleUserMessage, request };
+}
+
+async function createTTSLifecycleApp(
+  synthesizeSpeech: TestTTSSynthesizer,
+  configureRequest?: (raw: IncomingMessage, socket: Socket | undefined) => void
+): Promise<{
+  app: ReturnType<typeof Fastify>;
+  synthesizeSpeech: TestTTSSynthesizer;
+  request: RequestCapture;
+}> {
+  const context = {
+    providers: { getTTSProvider: () => ({ name: "test-tts", synthesizeSpeech }) },
+    runtime: {
+      handleUserMessage: vi.fn(),
+      getLatestPromptPreview: vi.fn(() => undefined)
+    }
+  } as unknown as AppContext;
+  const request: RequestCapture = {
+    raw: undefined,
+    socket: undefined,
+    rawAbortedListenersBefore: undefined,
+    socketCloseListenersBefore: undefined
+  };
+  const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (incomingRequest) => {
+    request.raw = incomingRequest.raw;
+    request.socket = incomingRequest.raw.socket ?? undefined;
+    request.rawAbortedListenersBefore = request.raw.listenerCount("aborted");
+    request.socketCloseListenersBefore = request.socket?.listenerCount("close");
+    configureRequest?.(request.raw, request.socket);
+  });
+  await registerMediaRoutes(app, context);
+  return { app, synthesizeSpeech, request };
 }
 
 function emitDisconnect(request: RequestCapture, event: "aborted" | "socket-close"): void {
@@ -508,6 +569,212 @@ describe("public batch STT disconnect cancellation", () => {
       });
       const response = await responsePromise;
       expect(response.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("public TTS disconnect cancellation", () => {
+  it("passes the canonical signal without putting it on TTSInput", async () => {
+    let receivedInput: TTSInput | undefined;
+    let receivedOptions: ProviderCallOptions | undefined;
+    const synthesizeSpeech = vi.fn<TestTTSSynthesizer>(async (input, options) => {
+      receivedInput = input;
+      receivedOptions = options;
+      return speechOutput();
+    });
+    const { app } = await createTTSLifecycleApp(synthesizeSpeech);
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/tts",
+        payload: { sessionId: "tts-session", text: "hello", voice: "ara", format: "wav" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(receivedInput).toMatchObject({
+        text: "hello",
+        voice: "ara",
+        format: "wav",
+        metadata: { sessionId: "tts-session" }
+      });
+      expect(receivedInput).not.toHaveProperty("signal");
+      expect(receivedOptions?.signal).toBeInstanceOf(AbortSignal);
+      expect(receivedOptions?.signal?.aborted).toBe(false);
+      expect(response.json()).toMatchObject({
+        audioBase64: "AQID",
+        mimeType: "audio/wav",
+        durationMs: 42,
+        finalProvider: "test-tts",
+        provider: "test-tts",
+        model: "test-tts"
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not start TTS when the request is already aborted", async () => {
+    const synthesizeSpeech = vi.fn<TestTTSSynthesizer>(async () => speechOutput());
+    const { app, request } = await createTTSLifecycleApp(synthesizeSpeech, (raw) => {
+      raw.aborted = true;
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/tts",
+        payload: { text: "hello" }
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(synthesizeSpeech).not.toHaveBeenCalled();
+      expectDisconnectListenersCleaned(request);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not start TTS when the request socket is already destroyed", async () => {
+    const synthesizeSpeech = vi.fn<TestTTSSynthesizer>(async () => speechOutput());
+    const { app, request } = await createTTSLifecycleApp(synthesizeSpeech, (_raw, socket) => {
+      if (socket) {
+        Object.defineProperty(socket, "destroyed", { configurable: true, value: true });
+      }
+    });
+
+    try {
+      const responsePromise = app.inject({
+        method: "POST",
+        url: "/v1/tts",
+        payload: { text: "hello" }
+      });
+      void responsePromise.catch(() => undefined);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(synthesizeSpeech).not.toHaveBeenCalled();
+      expectDisconnectListenersCleaned(request);
+    } finally {
+      await app.close();
+    }
+  });
+
+  for (const event of ["aborted", "socket-close"] as const) {
+    it(`aborts pending TTS on ${event} and cleans up listeners`, async () => {
+      const started = deferred<void>();
+      let signal: AbortSignal | undefined;
+      const synthesizeSpeech = vi.fn<TestTTSSynthesizer>(async (_input, options) => {
+        signal = options?.signal;
+        started.resolve();
+        if (!signal) {
+          throw new Error("TTS route did not provide a canonical signal.");
+        }
+        return new Promise<TTSOutput>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(cancelledTTSError("unknown")), {
+            once: true
+          });
+        });
+      });
+      const { app, request } = await createTTSLifecycleApp(synthesizeSpeech);
+
+      try {
+        const responsePromise = app.inject({
+          method: "POST",
+          url: "/v1/tts",
+          payload: { text: "hello" }
+        });
+        await started.promise;
+        emitDisconnect(request, event);
+
+        expect(signal?.aborted).toBe(true);
+        const response = await responsePromise;
+        expect(response.statusCode).toBe(503);
+        expect(response.body).not.toContain("audioBase64");
+        expectDisconnectListenersCleaned(request);
+      } finally {
+        await app.close();
+      }
+    });
+  }
+
+  it("does not treat normal request-body close as cancellation", async () => {
+    const started = deferred<void>();
+    const finish = deferred<TTSOutput>();
+    let signal: AbortSignal | undefined;
+    const synthesizeSpeech = vi.fn<TestTTSSynthesizer>(async (_input, options) => {
+      signal = options?.signal;
+      started.resolve();
+      return finish.promise;
+    });
+    const { app, request } = await createTTSLifecycleApp(synthesizeSpeech);
+
+    try {
+      const responsePromise = app.inject({
+        method: "POST",
+        url: "/v1/tts",
+        payload: { text: "hello" }
+      });
+      await started.promise;
+      request.raw?.emit("close");
+      expect(signal?.aborted).toBe(false);
+      finish.resolve(speechOutput());
+
+      const response = await responsePromise;
+      expect(response.statusCode).toBe(200);
+      expectDisconnectListenersCleaned(request);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects a late provider result after request disconnect without serializing success", async () => {
+    const started = deferred<void>();
+    const finish = deferred<TTSOutput>();
+    let signal: AbortSignal | undefined;
+    const synthesizeSpeech = vi.fn<TestTTSSynthesizer>(async (_input, options) => {
+      signal = options?.signal;
+      started.resolve();
+      return finish.promise;
+    });
+    const { app, request } = await createTTSLifecycleApp(synthesizeSpeech);
+
+    try {
+      const responsePromise = app.inject({
+        method: "POST",
+        url: "/v1/tts",
+        payload: { text: "hello" }
+      });
+      await started.promise;
+      request.raw?.emit("aborted");
+      expect(signal?.aborted).toBe(true);
+      finish.resolve(speechOutput());
+
+      const response = await responsePromise;
+      expect(response.statusCode).toBe(503);
+      expect(response.body).not.toContain("audioBase64");
+      expectDisconnectListenersCleaned(request);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("cleans TTS disconnect listeners after provider failure", async () => {
+    const synthesizeSpeech = vi.fn<TestTTSSynthesizer>(async () => {
+      throw new Error("synthetic TTS failure");
+    });
+    const { app, request } = await createTTSLifecycleApp(synthesizeSpeech);
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/tts",
+        payload: { text: "hello" }
+      });
+
+      expect(response.statusCode).toBe(503);
+      expectDisconnectListenersCleaned(request);
     } finally {
       await app.close();
     }
