@@ -1,11 +1,14 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProviderErrorCode } from "../types/errors.js";
 import { XAITTSProvider } from "./XAITTSProvider.js";
 import { XAIVisionProvider } from "./XAIVisionProvider.js";
 import { healthCheckXAI } from "./common.js";
 
-vi.mock("node:fs/promises", () => ({ readFile: vi.fn() }));
+vi.mock("node:fs/promises", () => ({
+  readFile: vi.fn(),
+  stat: vi.fn(async () => ({ size: 3 }))
+}));
 
 const ttsInput = { text: "hello" };
 const visionInput = {
@@ -14,6 +17,7 @@ const visionInput = {
   prompt: "describe"
 };
 const readFileMock = readFile as unknown as ReturnType<typeof vi.fn>;
+const statMock = stat as unknown as ReturnType<typeof vi.fn>;
 
 function createTTSProvider(timeoutMs = 100): XAITTSProvider {
   return new XAITTSProvider({
@@ -53,6 +57,8 @@ describe("xAI transport cancellation", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     readFileMock.mockReset();
+    statMock.mockReset();
+    statMock.mockResolvedValue({ size: 3 });
   });
 
   it("returns unavailable when a timeout wins before an abort-ignoring health fetch resolves", async () => {
