@@ -896,7 +896,11 @@ export class RuntimeOrchestrator {
 
       await this.persistUserMessage(userEvent);
       await this.options.eventBus.publish(userEvent);
-      await this.restoreDirectContext(userEvent.payload.sessionId);
+      await this.restoreDirectContext(
+        userEvent.payload.sessionId,
+        userEvent.id,
+        userEvent.payload.content.length
+      );
       const voiceOutput = isRuntimeUserMessageEvent(input)
         ? Boolean(options.voiceOutput)
         : Boolean(input.voiceOutput);
@@ -980,7 +984,11 @@ export class RuntimeOrchestrator {
 
       await this.persistUserMessage(userEvent);
       await this.options.eventBus.publish(userEvent);
-      await this.restoreDirectContext(userEvent.payload.sessionId);
+      await this.restoreDirectContext(
+        userEvent.payload.sessionId,
+        userEvent.id,
+        userEvent.payload.content.length
+      );
       const { prompt, memoryOptions } = await this.prepareChatPrompt(userEvent, {
         voiceOutput,
         useMemory: options.useMemory,
@@ -1349,9 +1357,10 @@ export class RuntimeOrchestrator {
       this.claimAssistantTurn(input);
       claimed = true;
 
+      const effectInstanceId = crypto.randomUUID();
       const traceId = crypto.randomUUID();
-      const assistantMessageId = `assistant:assistant-initiated:${input.idempotencyKey}`;
-      const replyId = `reply:assistant-initiated:${input.idempotencyKey}`;
+      const assistantMessageId = `assistant:assistant-initiated:${effectInstanceId}`;
+      const replyId = `reply:assistant-initiated:${effectInstanceId}`;
       if (this.options.conversation) {
         try {
           await this.options.conversation.ensureSession(input.sessionId);
@@ -3017,7 +3026,11 @@ export class RuntimeOrchestrator {
     }
   }
 
-  private async restoreDirectContext(sessionId: string): Promise<void> {
+  private async restoreDirectContext(
+    sessionId: string,
+    excludedMessageId?: string,
+    excludedMessageContentLength = 0
+  ): Promise<void> {
     const conversation = this.options.conversation;
     if (!conversation || !this.directContextConfig.enabled || this.sessionTurns.has(sessionId)) {
       return;
@@ -3027,9 +3040,11 @@ export class RuntimeOrchestrator {
       const maxStoredTurns = Math.max(this.directContextConfig.maxTurns * 3, 12);
       const messages = await conversation.listRecentMessages(sessionId, {
         limit: maxStoredTurns * 2,
-        maxCharacters: this.directContextConfig.maxChars * 2
+        maxCharacters:
+          this.directContextConfig.maxChars * 2 +
+          (excludedMessageId ? excludedMessageContentLength : 0)
       });
-      const entries = buildDirectContextEntries(messages).slice(-maxStoredTurns);
+      const entries = buildDirectContextEntries(messages, excludedMessageId).slice(-maxStoredTurns);
       this.sessionTurns.set(sessionId, entries);
     } catch (error) {
       await this.publishPersistenceError(
@@ -4071,85 +4086,143 @@ function conversationMessageFromEvent(
   };
 }
 
-function buildDirectContextEntries(messages: ConversationMessage[]): DirectContextEntry[] {
-  const entries: DirectContextEntry[] = [];
-  let pendingUser: ConversationMessage | undefined;
+function buildDirectContextEntries(
+  messages: ConversationMessage[],
+  excludedMessageId?: string
+): DirectContextEntry[] {
+  // Exclude by the persisted event/message identity before pairing or applying
+  // the bounded direct-context entry budget. Content is never an identity key.
+  const ordered = messages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => message.id !== excludedMessageId);
+  const allCompletedUsers = ordered.filter(
+    ({ message }) => message.role === "user" && message.status === "completed"
+  );
+  const discardedUserIds = new Set<string>();
+  for (const assistant of ordered) {
+    if (assistant.message.role !== "assistant" || assistant.message.status === "completed") {
+      continue;
+    }
+    const precedingUser = [...allCompletedUsers]
+      .reverse()
+      .find((user) => user.index < assistant.index);
+    if (precedingUser) {
+      discardedUserIds.add(precedingUser.message.id);
+    }
+  }
+  const completedUsers = allCompletedUsers.filter(
+    ({ message }) => !discardedUserIds.has(message.id)
+  );
+  const userByEventId = new Map(
+    completedUsers.map((candidate) => [candidate.message.id, candidate])
+  );
+  const pairedUserIds = new Set<string>();
+  const pairedAssistantIndexes = new Set<number>();
+  const candidates: Array<{ entry: DirectContextEntry; order: number }> = [];
 
-  for (const message of messages) {
-    if (message.role === "assistant" && message.status !== "completed") {
-      // A failed/cancelled assistant belongs to the preceding user attempt;
-      // retain the existing behavior of excluding that incomplete pair.
-      pendingUser = undefined;
-      continue;
-    }
-    if (message.status !== "completed") {
-      continue;
-    }
-    if (message.role === "user") {
-      if (pendingUser) {
-        entries.push({
-          kind: "user-only",
-          traceId: pendingUser.traceId,
-          timestamp: pendingUser.completedAt ?? pendingUser.createdAt,
-          userMessage: redactUnsafeText(pendingUser.content)
-        });
+  const addPair = (
+    user: { message: ConversationMessage; index: number },
+    assistant: { message: ConversationMessage; index: number }
+  ): void => {
+    pairedUserIds.add(user.message.id);
+    pairedAssistantIndexes.add(assistant.index);
+    candidates.push({
+      // A linked assistant belongs to the chronological user turn it answers;
+      // this keeps interleaved source-linked history stable even when reply
+      // persistence order differs from user-message order.
+      order: user.index,
+      entry: {
+        kind: "turn",
+        traceId: user.message.traceId,
+        timestamp: assistant.message.completedAt ?? assistant.message.createdAt,
+        userMessage: redactUnsafeText(user.message.content),
+        assistantReply: redactUnsafeText(assistant.message.content)
       }
-      pendingUser = message;
+    });
+  };
+
+  const completedAssistants = ordered.filter(
+    ({ message }) => message.role === "assistant" && message.status === "completed"
+  );
+
+  // Persisted source links are authoritative and use the user event ID, which
+  // is also the canonical persisted user conversation message ID.
+  for (const assistant of completedAssistants) {
+    const sourceUserEventId = assistant.message.sourceUserEventId?.trim();
+    if (!sourceUserEventId) {
+      continue;
+    }
+    const user = userByEventId.get(sourceUserEventId);
+    if (user && !pairedUserIds.has(user.message.id)) {
+      addPair(user, assistant);
+    }
+  }
+
+  for (const assistant of completedAssistants) {
+    if (pairedAssistantIndexes.has(assistant.index)) {
       continue;
     }
 
-    const metadata = message.metadata;
+    const metadata = assistant.message.metadata;
     const assistantInitiated =
       metadata && typeof metadata === "object" && metadata["origin"] === "assistant-initiated";
-    if (assistantInitiated) {
-      if (pendingUser) {
-        entries.push({
-          kind: "user-only",
-          traceId: pendingUser.traceId,
-          timestamp: pendingUser.completedAt ?? pendingUser.createdAt,
-          userMessage: redactUnsafeText(pendingUser.content)
-        });
-        pendingUser = undefined;
+    const sourceUserEventId = assistant.message.sourceUserEventId?.trim();
+    if (
+      assistantInitiated ||
+      (excludedMessageId !== undefined && sourceUserEventId === excludedMessageId) ||
+      (sourceUserEventId !== undefined && discardedUserIds.has(sourceUserEventId))
+    ) {
+      candidates.push({
+        order: assistant.index,
+        entry: {
+          kind: "assistant-only",
+          traceId: assistant.message.traceId,
+          timestamp: assistant.message.completedAt ?? assistant.message.createdAt,
+          assistantMessage: redactUnsafeText(assistant.message.content)
+        }
+      });
+      continue;
+    }
+
+    // Legacy assistants without a usable source link retain the previous
+    // nearest-preceding-user adjacency fallback. Already source-linked users
+    // cannot be stolen by this fallback.
+    const fallbackUser = [...completedUsers]
+      .reverse()
+      .find((user) => user.index < assistant.index && !pairedUserIds.has(user.message.id));
+    if (fallbackUser) {
+      addPair(fallbackUser, assistant);
+      continue;
+    }
+
+    candidates.push({
+      order: assistant.index,
+      entry: {
+        kind: "assistant-only",
+        traceId: assistant.message.traceId,
+        timestamp: assistant.message.completedAt ?? assistant.message.createdAt,
+        assistantMessage: redactUnsafeText(assistant.message.content)
       }
-      entries.push({
-        kind: "assistant-only",
-        traceId: message.traceId,
-        timestamp: message.completedAt ?? message.createdAt,
-        assistantMessage: redactUnsafeText(message.content)
-      });
-      continue;
-    }
-
-    if (!pendingUser) {
-      entries.push({
-        kind: "assistant-only",
-        traceId: message.traceId,
-        timestamp: message.completedAt ?? message.createdAt,
-        assistantMessage: redactUnsafeText(message.content)
-      });
-      continue;
-    }
-
-    entries.push({
-      kind: "turn",
-      traceId: pendingUser.traceId,
-      timestamp: message.completedAt ?? message.createdAt,
-      userMessage: redactUnsafeText(pendingUser.content),
-      assistantReply: redactUnsafeText(message.content)
-    });
-    pendingUser = undefined;
-  }
-
-  if (pendingUser) {
-    entries.push({
-      kind: "user-only",
-      traceId: pendingUser.traceId,
-      timestamp: pendingUser.completedAt ?? pendingUser.createdAt,
-      userMessage: redactUnsafeText(pendingUser.content)
     });
   }
 
-  return entries;
+  for (const user of completedUsers) {
+    if (pairedUserIds.has(user.message.id)) {
+      continue;
+    }
+    candidates.push({
+      order: user.index,
+      entry: {
+        kind: "user-only",
+        traceId: user.message.traceId,
+        timestamp: user.message.completedAt ?? user.message.createdAt,
+        userMessage: redactUnsafeText(user.message.content)
+      }
+    });
+  }
+
+  candidates.sort((left, right) => left.order - right.order);
+  return candidates.map(({ entry }) => entry);
 }
 
 function formatDirectContextEntry(entry: DirectContextEntry): string {

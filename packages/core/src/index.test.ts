@@ -65,6 +65,36 @@ function deferred<T>(): {
   };
 }
 
+async function appendCompletedConversationMessage(
+  conversation: InMemoryConversationRepository,
+  input: {
+    id: string;
+    sessionId: string;
+    traceId: string;
+    role: "user" | "assistant";
+    content: string;
+    sourceUserEventId?: string | null;
+    metadata?: Record<string, unknown>;
+    timestampMs?: number;
+  }
+): Promise<void> {
+  const timestamp = new Date(input.timestampMs ?? 0).toISOString();
+  await conversation.ensureSession(input.sessionId);
+  await conversation.appendMessage({
+    id: input.id,
+    sessionId: input.sessionId,
+    traceId: input.traceId,
+    parentMessageId: null,
+    sourceUserEventId: input.sourceUserEventId ?? null,
+    role: input.role,
+    content: input.content,
+    status: "completed",
+    createdAt: timestamp,
+    completedAt: timestamp,
+    metadata: input.metadata ?? {}
+  });
+}
+
 function runtimeSpeechOutput(): TTSOutput {
   return {
     audio: new Uint8Array([1, 2, 3]),
@@ -2572,6 +2602,548 @@ describe("RuntimeOrchestrator", () => {
     expect(queries[0]).toContain("actual prior conversation");
     expect(queries[0]).not.toContain("assistant-initiated");
     expect(queries[0]).not.toBe("");
+  });
+
+  it("excludes the current persisted user by identity before building direct context", async () => {
+    const conversation = new InMemoryConversationRepository();
+    let providerInput: ChatInput | undefined;
+    const provider = createMockStreamingChatProvider("current-user", { chunks: ["reply"] });
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          ...provider,
+          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+            providerInput = input;
+            yield* provider.streamReply!(input, options);
+          }
+        })
+      }
+    });
+
+    await collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "current-user-session", content: "hello" },
+        { readMemory: false, writeMemory: false }
+      )
+    );
+
+    const systemMessage = providerInput?.messages.find((message) => message.role === "system");
+    const currentMessage = providerInput?.messages.find((message) => message.role === "user");
+    expect(systemMessage?.content).not.toContain("hello");
+    expect(currentMessage?.content.match(/hello/g)).toHaveLength(1);
+  });
+
+  it("keeps historical proactive context while excluding a restored current user", async () => {
+    const conversation = new InMemoryConversationRepository();
+    let firstProviderCall = 0;
+    const first = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => {
+          firstProviderCall += 1;
+          return createMockStreamingChatProvider("history-user", {
+            chunks: [firstProviderCall === 1 ? "first assistant" : "proactive assistant"]
+          });
+        }
+      }
+    });
+
+    await collectRuntimeStream(
+      first.streamUserMessage(
+        { sessionId: "history-composition-session", content: "first user" },
+        { readMemory: false, writeMemory: false }
+      )
+    );
+    await collectRuntimeStream(
+      first.streamAssistantInitiatedTurn({
+        sessionId: "history-composition-session",
+        idempotencyKey: "history-proactive",
+        readMemory: false
+      })
+    );
+
+    let restoredInput: ChatInput | undefined;
+    const secondProvider = createMockStreamingChatProvider("current-user", {
+      chunks: ["second assistant"]
+    });
+    const second = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          ...secondProvider,
+          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+            restoredInput = input;
+            yield* secondProvider.streamReply!(input, options);
+          }
+        })
+      }
+    });
+
+    await collectRuntimeStream(
+      second.streamUserMessage(
+        { sessionId: "history-composition-session", content: "second user" },
+        { readMemory: false, writeMemory: false }
+      )
+    );
+
+    const systemMessage = restoredInput?.messages.find((message) => message.role === "system");
+    const currentMessage = restoredInput?.messages.find((message) => message.role === "user");
+    expect(systemMessage?.content).toContain("first user");
+    expect(systemMessage?.content).toContain("first assistant");
+    expect(systemMessage?.content).toContain("proactive assistant");
+    expect(systemMessage?.content).not.toContain("second user");
+    expect(currentMessage?.content.match(/second user/g)).toHaveLength(1);
+  });
+
+  it("preserves identical historical text and excludes only the current identity", async () => {
+    const conversation = new InMemoryConversationRepository();
+    await appendCompletedConversationMessage(conversation, {
+      id: "user:historical-hello",
+      sessionId: "identical-text-session",
+      traceId: "trace:historical-hello",
+      role: "user",
+      content: "hello"
+    });
+    let providerInput: ChatInput | undefined;
+    const provider = createMockStreamingChatProvider("identical-text", { chunks: ["reply"] });
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          ...provider,
+          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+            providerInput = input;
+            yield* provider.streamReply!(input, options);
+          }
+        })
+      }
+    });
+
+    await collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "identical-text-session", content: "hello" },
+        { readMemory: false, writeMemory: false }
+      )
+    );
+
+    const systemMessage = providerInput?.messages.find((message) => message.role === "system");
+    const currentMessage = providerInput?.messages.find((message) => message.role === "user");
+    expect(systemMessage?.content.match(/hello/g)).toHaveLength(1);
+    expect(currentMessage?.content.match(/hello/g)).toHaveLength(1);
+  });
+
+  it("excludes the current row before the direct-context entry budget", async () => {
+    const conversation = new InMemoryConversationRepository();
+    for (let index = 1; index <= 12; index += 1) {
+      await appendCompletedConversationMessage(conversation, {
+        id: `user:budget-${index}`,
+        sessionId: "budget-session",
+        traceId: `trace:budget-${index}`,
+        role: "user",
+        content: `historical-${index}`,
+        timestampMs: index
+      });
+    }
+    let providerInput: ChatInput | undefined;
+    const provider = createMockStreamingChatProvider("budget", { chunks: ["reply"] });
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      directContext: { enabled: true, maxTurns: 4, maxChars: 5000 },
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          ...provider,
+          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+            providerInput = input;
+            yield* provider.streamReply!(input, options);
+          }
+        })
+      }
+    });
+
+    await collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "budget-session", content: "current-budget" },
+        { readMemory: false, writeMemory: false }
+      )
+    );
+
+    const systemMessage = providerInput?.messages.find((message) => message.role === "system");
+    expect(systemMessage?.content).toContain("historical-9");
+    expect(systemMessage?.content).toContain("historical-12");
+    expect(systemMessage?.content).not.toContain("current-budget");
+  });
+
+  it("pairs persisted assistants by source user identity before adjacency fallback", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const sessionId = "source-link-session";
+    await appendCompletedConversationMessage(conversation, {
+      id: "user:source-1",
+      sessionId,
+      traceId: "trace:source-1",
+      role: "user",
+      content: "source-user-1",
+      timestampMs: 1
+    });
+    await appendCompletedConversationMessage(conversation, {
+      id: "user:source-2",
+      sessionId,
+      traceId: "trace:source-2",
+      role: "user",
+      content: "source-user-2",
+      timestampMs: 2
+    });
+    await appendCompletedConversationMessage(conversation, {
+      id: "assistant:source-1",
+      sessionId,
+      traceId: "trace:assistant-1",
+      role: "assistant",
+      content: "source-answer-1",
+      sourceUserEventId: "user:source-1",
+      timestampMs: 3
+    });
+    await appendCompletedConversationMessage(conversation, {
+      id: "assistant:proactive-source",
+      sessionId,
+      traceId: "trace:proactive-source",
+      role: "assistant",
+      content: "proactive-history",
+      metadata: { origin: "assistant-initiated" },
+      timestampMs: 4
+    });
+    await appendCompletedConversationMessage(conversation, {
+      id: "assistant:source-2",
+      sessionId,
+      traceId: "trace:assistant-2",
+      role: "assistant",
+      content: "source-answer-2",
+      sourceUserEventId: "user:source-2",
+      timestampMs: 5
+    });
+    await appendCompletedConversationMessage(conversation, {
+      id: "user:source-3",
+      sessionId,
+      traceId: "trace:source-3",
+      role: "user",
+      content: "incomplete-historical-user",
+      timestampMs: 6
+    });
+
+    let providerInput: ChatInput | undefined;
+    const provider = createMockStreamingChatProvider("source-link", { chunks: ["reply"] });
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          ...provider,
+          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+            providerInput = input;
+            yield* provider.streamReply!(input, options);
+          }
+        })
+      }
+    });
+
+    await collectRuntimeStream(
+      runtime.streamAssistantInitiatedTurn({
+        sessionId,
+        idempotencyKey: "source-link-probe",
+        readMemory: false
+      })
+    );
+
+    const systemContent = providerInput?.messages.find(
+      (message) => message.role === "system"
+    )?.content;
+    expect(systemContent).toContain("User: source-user-1\n  Assistant: source-answer-1");
+    expect(systemContent).toContain("User: source-user-2\n  Assistant: source-answer-2");
+    expect(systemContent).toContain("Assistant: proactive-history");
+    expect(systemContent).toContain("User: incomplete-historical-user");
+    expect(systemContent!.indexOf("User: source-user-1")).toBeLessThan(
+      systemContent!.indexOf("User: source-user-2")
+    );
+    expect(systemContent!.indexOf("User: source-user-2")).toBeLessThan(
+      systemContent!.indexOf("Assistant: proactive-history")
+    );
+    expect(systemContent!.indexOf("Assistant: proactive-history")).toBeLessThan(
+      systemContent!.indexOf("User: incomplete-historical-user")
+    );
+  });
+
+  it("uses deterministic adjacency fallback only for missing or invalid source links", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const sessionId = "fallback-source-session";
+    await appendCompletedConversationMessage(conversation, {
+      id: "user:fallback-1",
+      sessionId,
+      traceId: "trace:fallback-1",
+      role: "user",
+      content: "fallback-user-1",
+      timestampMs: 1
+    });
+    await appendCompletedConversationMessage(conversation, {
+      id: "user:fallback-2",
+      sessionId,
+      traceId: "trace:fallback-2",
+      role: "user",
+      content: "fallback-user-2",
+      timestampMs: 2
+    });
+    await appendCompletedConversationMessage(conversation, {
+      id: "assistant:fallback-1",
+      sessionId,
+      traceId: "trace:fallback-1",
+      role: "assistant",
+      content: "fallback-answer-1",
+      timestampMs: 3
+    });
+    await appendCompletedConversationMessage(conversation, {
+      id: "assistant:fallback-2",
+      sessionId,
+      traceId: "trace:fallback-2",
+      role: "assistant",
+      content: "fallback-answer-2",
+      sourceUserEventId: "user:does-not-exist",
+      timestampMs: 4
+    });
+
+    let providerInput: ChatInput | undefined;
+    const provider = createMockStreamingChatProvider("fallback-source", { chunks: ["reply"] });
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          ...provider,
+          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+            providerInput = input;
+            yield* provider.streamReply!(input, options);
+          }
+        })
+      }
+    });
+
+    await collectRuntimeStream(
+      runtime.streamAssistantInitiatedTurn({
+        sessionId,
+        idempotencyKey: "fallback-source-probe",
+        readMemory: false
+      })
+    );
+
+    const systemContent = providerInput?.messages.find(
+      (message) => message.role === "system"
+    )?.content;
+    expect(systemContent).toContain("User: fallback-user-2\n  Assistant: fallback-answer-1");
+    expect(systemContent).toContain("User: fallback-user-1\n  Assistant: fallback-answer-2");
+  });
+
+  it("allocates fresh assistant and reply identities when a retained key is reused", async () => {
+    vi.useFakeTimers();
+    try {
+      const conversation = new InMemoryConversationRepository();
+      const published: RuntimeEvent[] = [];
+      const eventBus = new InMemoryEventBus({ development: false });
+      eventBus.subscribe("*", (event) => {
+        published.push(event);
+      });
+      let output = "first-output";
+      let providerCalls = 0;
+      const runtime = new RuntimeOrchestrator({
+        eventBus,
+        memory: createRecordingMemory([]),
+        conversation,
+        promptBuilder: new PromptBuilder(),
+        providers: {
+          ...createMockProviders(),
+          getChatProvider: () => {
+            const provider = createMockStreamingChatProvider("effect-id", { chunks: [output] });
+            return {
+              ...provider,
+              async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+                providerCalls += 1;
+                yield* provider.streamReply!(input, options);
+              }
+            };
+          }
+        }
+      });
+      const input = {
+        sessionId: "effect-id-session",
+        idempotencyKey: "reusable-key",
+        readMemory: false
+      } as const;
+
+      await collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input));
+      await expect(
+        collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input))
+      ).rejects.toMatchObject({
+        name: "AssistantTurnConflictError"
+      });
+      const firstMessages = await conversation.listRecentMessages(input.sessionId);
+      const firstAssistant = firstMessages.find((message) => message.role === "assistant")!;
+      const firstReply = published.find((event) => event.type === "agent.reply")!;
+
+      output = "second-output";
+      vi.advanceTimersByTime(15 * 60 * 1000 + 1);
+      await collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input));
+
+      const messages = await conversation.listRecentMessages(input.sessionId);
+      const assistants = messages.filter((message) => message.role === "assistant");
+      const replies = published.filter((event) => event.type === "agent.reply");
+      expect(providerCalls).toBe(2);
+      expect(assistants).toHaveLength(2);
+      expect(new Set(assistants.map((message) => message.id)).size).toBe(2);
+      expect(new Set(replies.map((event) => event.id)).size).toBe(2);
+      expect(assistants.map((message) => message.content)).toEqual([
+        "first-output",
+        "second-output"
+      ]);
+      expect(
+        assistants.every((message) => message.metadata["idempotencyKey"] === input.idempotencyKey)
+      ).toBe(true);
+      expect(firstAssistant.id).not.toBe(assistants[1]?.id);
+      expect(firstReply.id).not.toBe(replies[1]?.id);
+      expect(firstAssistant.id).not.toBe(input.idempotencyKey);
+      expect(firstReply.id).not.toBe(input.idempotencyKey);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("atomically admits one fresh effect when a key becomes reusable", async () => {
+    vi.useFakeTimers();
+    try {
+      let providerCalls = 0;
+      const provider = createMockStreamingChatProvider("race-id", { chunks: ["race-output"] });
+      const runtime = new RuntimeOrchestrator({
+        eventBus: new InMemoryEventBus({ development: false }),
+        memory: createRecordingMemory([]),
+        promptBuilder: new PromptBuilder(),
+        providers: {
+          ...createMockProviders(),
+          getChatProvider: () => ({
+            ...provider,
+            async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+              providerCalls += 1;
+              yield* provider.streamReply!(input, options);
+            }
+          })
+        }
+      });
+      const input = {
+        sessionId: "race-id-session",
+        idempotencyKey: "race-reusable-key",
+        readMemory: false
+      } as const;
+
+      await collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input));
+      vi.advanceTimersByTime(15 * 60 * 1000 + 1);
+      const results = await Promise.allSettled([
+        collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input)),
+        collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input))
+      ]);
+
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      expect(providerCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("allocates fresh persistence identities after terminal-cap eviction", async () => {
+    vi.useFakeTimers();
+    try {
+      const conversation = new InMemoryConversationRepository();
+      let output = "cap-first";
+      let providerCalls = 0;
+      const runtime = new RuntimeOrchestrator({
+        eventBus: new InMemoryEventBus({ development: false }),
+        memory: createRecordingMemory([]),
+        conversation,
+        promptBuilder: new PromptBuilder(),
+        providers: {
+          ...createMockProviders(),
+          getChatProvider: () => {
+            const provider = createMockStreamingChatProvider("cap-id", { chunks: [output] });
+            return {
+              ...provider,
+              async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+                providerCalls += 1;
+                yield* provider.streamReply!(input, options);
+              }
+            };
+          }
+        }
+      });
+      const reusable = {
+        sessionId: "cap-id-session",
+        idempotencyKey: "cap-reusable-key",
+        readMemory: false
+      } as const;
+
+      await collectRuntimeStream(runtime.streamAssistantInitiatedTurn(reusable));
+      const firstAssistant = (
+        await conversation.listRecentMessages(reusable.sessionId, { limit: 400 })
+      ).find((message) => message.role === "assistant")!;
+
+      for (let index = 0; index < 256; index += 1) {
+        vi.advanceTimersByTime(1);
+        await collectRuntimeStream(
+          runtime.streamAssistantInitiatedTurn({
+            sessionId: reusable.sessionId,
+            idempotencyKey: `cap-filler-${index}`,
+            readMemory: false
+          })
+        );
+      }
+
+      output = "cap-second";
+      await collectRuntimeStream(runtime.streamAssistantInitiatedTurn(reusable));
+      const assistants = (
+        await conversation.listRecentMessages(reusable.sessionId, { limit: 400 })
+      ).filter((message) => message.role === "assistant");
+      const secondAssistant = assistants.find(
+        (message) => message.metadata["idempotencyKey"] === reusable.idempotencyKey
+      );
+
+      expect(providerCalls).toBe(258);
+      expect(firstAssistant.content).toBe("cap-first");
+      expect(secondAssistant).toMatchObject({ content: "cap-second" });
+      expect(firstAssistant.id).not.toBe(secondAssistant?.id);
+      expect(firstAssistant.metadata["idempotencyKey"]).toBe(reusable.idempotencyKey);
+      expect(secondAssistant?.metadata["idempotencyKey"]).toBe(reusable.idempotencyKey);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retains terminal idempotency claims for fifteen minutes and bounds the terminal cache", async () => {
