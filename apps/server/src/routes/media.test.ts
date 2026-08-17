@@ -7,7 +7,9 @@ import {
   type STTInput,
   type STTOutput,
   type TTSInput,
-  type TTSOutput
+  type TTSOutput,
+  type VisionInput,
+  type VisionOutput
 } from "@companion/providers";
 import type { IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
@@ -16,12 +18,14 @@ import { registerMediaRoutes } from "./media.js";
 
 const routeCases = ["/v1/audio/transcriptions", "/v1/voice/message"] as const;
 
-type TestSTTTranscriber = (
-  input: STTInput,
-  options?: ProviderCallOptions
-) => Promise<STTOutput>;
+type TestSTTTranscriber = (input: STTInput, options?: ProviderCallOptions) => Promise<STTOutput>;
 
 type TestTTSSynthesizer = (input: TTSInput, options?: ProviderCallOptions) => Promise<TTSOutput>;
+
+type TestVisionAnalyzer = (
+  input: VisionInput,
+  options?: ProviderCallOptions
+) => Promise<VisionOutput>;
 
 type RequestCapture = {
   raw: IncomingMessage | undefined;
@@ -71,6 +75,16 @@ function speechOutput(): TTSOutput {
     durationMs: 42,
     model: "test-tts",
     finalProvider: "test-tts",
+    providerMetadata: { sourceKind: "test" }
+  };
+}
+
+function visionOutput(): VisionOutput {
+  return {
+    text: "a bright scene",
+    sceneSummary: "a bright scene",
+    model: "test-vision",
+    finalProvider: "test-vision",
     providerMetadata: { sourceKind: "test" }
   };
 }
@@ -201,6 +215,39 @@ async function createTTSLifecycleApp(
   });
   await registerMediaRoutes(app, context);
   return { app, synthesizeSpeech, request };
+}
+
+async function createVisionLifecycleApp(
+  analyzeImage: TestVisionAnalyzer,
+  configureRequest?: (raw: IncomingMessage, socket: Socket | undefined) => void
+): Promise<{
+  app: ReturnType<typeof Fastify>;
+  analyzeImage: TestVisionAnalyzer;
+  request: RequestCapture;
+}> {
+  const context = {
+    providers: { getVisionProvider: () => ({ name: "test-vision", analyzeImage }) },
+    runtime: {
+      handleUserMessage: vi.fn(),
+      getLatestPromptPreview: vi.fn(() => undefined)
+    }
+  } as unknown as AppContext;
+  const request: RequestCapture = {
+    raw: undefined,
+    socket: undefined,
+    rawAbortedListenersBefore: undefined,
+    socketCloseListenersBefore: undefined
+  };
+  const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (incomingRequest) => {
+    request.raw = incomingRequest.raw;
+    request.socket = incomingRequest.raw.socket ?? undefined;
+    request.rawAbortedListenersBefore = request.raw.listenerCount("aborted");
+    request.socketCloseListenersBefore = request.socket?.listenerCount("close");
+    configureRequest?.(request.raw, request.socket);
+  });
+  await registerMediaRoutes(app, context);
+  return { app, analyzeImage, request };
 }
 
 function emitDisconnect(request: RequestCapture, event: "aborted" | "socket-close"): void {
@@ -387,11 +434,9 @@ describe("public batch STT disconnect cancellation", () => {
             throw cancelledProviderError("not_started");
           }
           return new Promise<STTOutput>((_resolve, reject) => {
-            signal?.addEventListener(
-              "abort",
-              () => reject(cancelledProviderError("unknown")),
-              { once: true }
-            );
+            signal?.addEventListener("abort", () => reject(cancelledProviderError("unknown")), {
+              once: true
+            });
           });
         });
         const { app, handleUserMessage, request } = await createLifecycleApp(
@@ -569,6 +614,338 @@ describe("public batch STT disconnect cancellation", () => {
       });
       const response = await responsePromise;
       expect(response.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("public Vision input validation", () => {
+  for (const testCase of [
+    { payload: {}, label: "missing image" },
+    { payload: { prompt: "describe" }, label: "prompt without image" },
+    { payload: { imageBase64: "" }, label: "empty base64" },
+    {
+      payload: { imageBase64: "not-base64", mimeType: "image/png" },
+      label: "malformed base64"
+    },
+    { payload: { imageBase64: "AQID" }, label: "raw base64 without MIME" },
+    { payload: { imageBase64: "AQID", mimeType: "image/webp" }, label: "unsupported MIME" },
+    {
+      payload: { imageBase64: "data:text/plain;base64,AQID" },
+      label: "non-image data URL"
+    },
+    {
+      payload: { imageBase64: "data:image/png,AQID" },
+      label: "non-base64 data URL"
+    },
+    {
+      payload: { imageBase64: "data:image/png;base64," },
+      label: "empty data URL"
+    },
+    { payload: { imageUrl: "ftp://example.com/image.png" }, label: "unsupported URL scheme" },
+    { payload: { imageUrl: "not-a-url" }, label: "invalid URL syntax" },
+    {
+      payload: { imageUrl: "data:image/png;base64,AQID" },
+      label: "data URL through imageUrl"
+    }
+  ]) {
+    it(`rejects ${testCase.label} before provider invocation`, async () => {
+      const analyzeImage = vi.fn<TestVisionAnalyzer>(async () => visionOutput());
+      const { app } = await createVisionLifecycleApp(analyzeImage);
+
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: "/v1/vision/analyze",
+          payload: testCase.payload
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toMatchObject({ error: "invalid_request" });
+        expect(analyzeImage).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    });
+  }
+
+  it("preserves URL precedence without validating an ignored malformed base64 source", async () => {
+    const analyzeImage = vi.fn<TestVisionAnalyzer>(async () => visionOutput());
+    const { app } = await createVisionLifecycleApp(analyzeImage);
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/vision/analyze",
+        payload: {
+          imageUrl: "https://example.com/image.png",
+          imageBase64: "not-base64"
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(analyzeImage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          imageUrl: "https://example.com/image.png",
+          imageBase64: "not-base64"
+        }),
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each(["http://example.com/image.png", "https://example.com/image.png"])(
+    "accepts a public %s image URL",
+    async (imageUrl) => {
+      const analyzeImage = vi.fn<TestVisionAnalyzer>(async () => visionOutput());
+      const { app } = await createVisionLifecycleApp(analyzeImage);
+
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: "/v1/vision/analyze",
+          payload: { imageUrl }
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(analyzeImage).toHaveBeenCalledWith(
+          expect.objectContaining({ imageUrl }),
+          expect.anything()
+        );
+      } finally {
+        await app.close();
+      }
+    }
+  );
+
+  it("falls back from an empty URL to a valid base64 source", async () => {
+    const analyzeImage = vi.fn<TestVisionAnalyzer>(async () => visionOutput());
+    const { app } = await createVisionLifecycleApp(analyzeImage);
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/vision/analyze",
+        payload: {
+          imageUrl: "",
+          imageBase64: "AQID",
+          mimeType: "image/png"
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(analyzeImage).toHaveBeenCalledWith(
+        expect.objectContaining({ imageUrl: "", imageBase64: "AQID" }),
+        expect.anything()
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("accepts raw base64, canonicalizes the JPG alias, and preserves prompt metadata", async () => {
+    let receivedInput: VisionInput | undefined;
+    let receivedOptions: ProviderCallOptions | undefined;
+    const analyzeImage = vi.fn<TestVisionAnalyzer>(async (input, options) => {
+      receivedInput = input;
+      receivedOptions = options;
+      return visionOutput();
+    });
+    const { app } = await createVisionLifecycleApp(analyzeImage);
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/vision/analyze",
+        payload: {
+          sessionId: "vision-session",
+          imageBase64: "AQID",
+          mimeType: "IMAGE/JPG; charset=binary",
+          prompt: "  preserve prompt  "
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(receivedInput).toMatchObject({
+        imageBase64: "AQID",
+        mimeType: "image/jpeg",
+        prompt: "  preserve prompt  ",
+        metadata: { sessionId: "vision-session" }
+      });
+      expect(receivedInput).not.toHaveProperty("signal");
+      expect(receivedOptions?.signal).toBeInstanceOf(AbortSignal);
+      expect(receivedOptions?.signal?.aborted).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("accepts supported data URLs and lets their embedded MIME govern the source", async () => {
+    let receivedInput: VisionInput | undefined;
+    const analyzeImage = vi.fn<TestVisionAnalyzer>(async (input) => {
+      receivedInput = input;
+      return visionOutput();
+    });
+    const { app } = await createVisionLifecycleApp(analyzeImage);
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/vision/analyze",
+        payload: {
+          imageBase64: "data:image/png;base64,AQID",
+          mimeType: "image/jpeg"
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(receivedInput).toMatchObject({
+        imageBase64: "data:image/png;base64,AQID",
+        mimeType: "image/jpeg"
+      });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("public Vision disconnect cancellation", () => {
+  it("does not start Vision when the request is already aborted", async () => {
+    const analyzeImage = vi.fn<TestVisionAnalyzer>(async () => visionOutput());
+    const { app, request } = await createVisionLifecycleApp(analyzeImage, (raw) => {
+      raw.aborted = true;
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/vision/analyze",
+        payload: { imageBase64: "AQID", mimeType: "image/png" }
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({
+        capability: "vision",
+        code: ProviderErrorCode.Cancelled,
+        fallbackUsed: false
+      });
+      expect(analyzeImage).not.toHaveBeenCalled();
+      expectDisconnectListenersCleaned(request);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not start Vision when the request socket is already destroyed", async () => {
+    const analyzeImage = vi.fn<TestVisionAnalyzer>(async () => visionOutput());
+    const { app, request } = await createVisionLifecycleApp(analyzeImage, (_raw, socket) => {
+      if (socket) {
+        Object.defineProperty(socket, "destroyed", { configurable: true, value: true });
+      }
+    });
+
+    try {
+      const responsePromise = app.inject({
+        method: "POST",
+        url: "/v1/vision/analyze",
+        payload: { imageBase64: "AQID", mimeType: "image/png" }
+      });
+      void responsePromise.catch(() => undefined);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(analyzeImage).not.toHaveBeenCalled();
+      expectDisconnectListenersCleaned(request);
+    } finally {
+      await app.close();
+    }
+  });
+
+  for (const event of ["aborted", "socket-close"] as const) {
+    it(`passes ${event} cancellation to Vision and rejects a late result`, async () => {
+      const started = deferred<void>();
+      const finish = deferred<VisionOutput>();
+      let signal: AbortSignal | undefined;
+      const analyzeImage = vi.fn<TestVisionAnalyzer>(async (_input, options) => {
+        signal = options?.signal;
+        started.resolve();
+        if (!signal) {
+          throw new Error("Vision route did not provide a canonical signal.");
+        }
+        return finish.promise;
+      });
+      const { app, request } = await createVisionLifecycleApp(analyzeImage);
+
+      try {
+        const responsePromise = app.inject({
+          method: "POST",
+          url: "/v1/vision/analyze",
+          payload: { imageBase64: "AQID", mimeType: "image/png" }
+        });
+        await started.promise;
+        emitDisconnect(request, event);
+
+        expect(signal?.aborted).toBe(true);
+        finish.resolve(visionOutput());
+
+        const response = await responsePromise;
+        expect(response.statusCode).toBe(503);
+        expect(response.body).not.toContain("a bright scene");
+        expectDisconnectListenersCleaned(request);
+      } finally {
+        await app.close();
+      }
+    });
+  }
+
+  it("does not treat normal request-body close as cancellation", async () => {
+    const started = deferred<void>();
+    const finish = deferred<VisionOutput>();
+    let signal: AbortSignal | undefined;
+    const analyzeImage = vi.fn<TestVisionAnalyzer>(async (_input, options) => {
+      signal = options?.signal;
+      started.resolve();
+      return finish.promise;
+    });
+    const { app, request } = await createVisionLifecycleApp(analyzeImage);
+
+    try {
+      const responsePromise = app.inject({
+        method: "POST",
+        url: "/v1/vision/analyze",
+        payload: { imageBase64: "AQID", mimeType: "image/png" }
+      });
+      await started.promise;
+      request.raw?.emit("close");
+      expect(signal?.aborted).toBe(false);
+      finish.resolve(visionOutput());
+
+      const response = await responsePromise;
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ analysis: "a bright scene" });
+      expectDisconnectListenersCleaned(request);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("cleans Vision disconnect listeners after provider failure", async () => {
+    const analyzeImage = vi.fn<TestVisionAnalyzer>(async () => {
+      throw new Error("synthetic Vision failure");
+    });
+    const { app, request } = await createVisionLifecycleApp(analyzeImage);
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/vision/analyze",
+        payload: { imageBase64: "AQID", mimeType: "image/png" }
+      });
+
+      expect(response.statusCode).toBe(503);
+      expectDisconnectListenersCleaned(request);
     } finally {
       await app.close();
     }

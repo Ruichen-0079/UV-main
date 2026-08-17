@@ -230,7 +230,8 @@ describe("server", () => {
         url: "/v1/vision/analyze",
         payload: {
           sessionId: "vision",
-          imageBase64: "",
+          imageBase64: "AQID",
+          mimeType: "image/png",
           prompt: "Describe"
         }
       });
