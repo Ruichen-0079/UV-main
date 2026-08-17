@@ -25,13 +25,18 @@ import {
   detectExplicitForgetRequest,
   detectExplicitRememberRequest
 } from "@companion/memory";
-import type { PromptBuildInput, PromptBuildOutput } from "@companion/prompt-builder";
+import type {
+  PromptBuildInput,
+  PromptBuildOutput,
+  RetrievedMemoryForPrompt
+} from "@companion/prompt-builder";
 import type {
   AgentReplyEvent,
   AssistantMessageEvent,
   AvatarSpeakEvent,
   PerceptionVisionEvent,
   RuntimeEvent,
+  TurnOrigin,
   UserMessageEvent,
   UserVoiceTranscriptEvent
 } from "@companion/protocol";
@@ -60,6 +65,11 @@ import {
   type MemoryContextDrop,
   type PromptMemoryCompatibility
 } from "./memory-context.js";
+
+const assistantTurnClaimRetentionMs = 15 * 60 * 1000;
+const assistantTurnClaimMaxTerminal = 256;
+const proactiveInstruction =
+  "Generate one natural assistant-initiated conversational message using the available conversation context and permitted memory.";
 
 export {
   MemoryContextBuilder,
@@ -114,6 +124,19 @@ export class ConversationPersistenceError extends Error {
     super(message);
     this.name = "ConversationPersistenceError";
     this.operation = operation;
+  }
+}
+
+export class AssistantTurnConflictError extends Error {
+  readonly idempotencyKey: string;
+
+  constructor(
+    idempotencyKey: string,
+    message = "Assistant turn idempotency key is already claimed."
+  ) {
+    super(message);
+    this.name = "AssistantTurnConflictError";
+    this.idempotencyKey = idempotencyKey;
   }
 }
 
@@ -232,6 +255,19 @@ export type HandleUserMessageOptions = {
   writeMemory?: boolean | undefined;
 };
 
+export type AssistantInitiatedTurnInput = {
+  sessionId: string;
+  idempotencyKey: string;
+  readMemory: boolean;
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+};
+
+export type AssistantInitiatedTurnOptions = {
+  signal?: AbortSignal | undefined;
+  promptPreview?: boolean | undefined;
+};
+
 export type MaybeSynthesizeSpeechOptions = {
   signal?: AbortSignal | undefined;
 };
@@ -260,7 +296,9 @@ export type StreamUserMessageOptions = HandleUserMessageOptions & {
 export type RuntimePromptPreview = {
   traceId: string;
   timestamp: string;
-  userMessage: string;
+  turnOrigin: TurnOrigin;
+  userMessage?: string | undefined;
+  proactiveInstruction?: string | undefined;
   legacyUseMemory: boolean | undefined;
   useMemory: boolean;
   readMemory: boolean;
@@ -434,11 +472,55 @@ export type SafeProviderCallMetadata = {
   finalProvider?: string | undefined;
 };
 
-type DirectContextTurn = {
+type DirectContextEntry =
+  | {
+      kind: "turn";
+      traceId: string;
+      timestamp: string;
+      userMessage: string;
+      assistantReply: string;
+    }
+  | {
+      kind: "assistant-only";
+      traceId: string;
+      timestamp: string;
+      assistantMessage: string;
+    }
+  | {
+      kind: "user-only";
+      traceId: string;
+      timestamp: string;
+      userMessage: string;
+    };
+
+type AssistantTurnClaim = {
+  sessionId: string;
+  status: "running" | "terminal";
+  claimedAtMs: number;
+  terminalAtMs?: number | undefined;
+};
+
+type MemoryRetrievalRequest = {
+  sessionId: string;
+  queryText: string;
   traceId: string;
-  timestamp: string;
-  userMessage: string;
-  assistantReply: string;
+  parentId?: string | undefined;
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+};
+
+type PromptPreviewInput = {
+  traceId: string;
+  turnOrigin: TurnOrigin;
+  userMessage?: string | undefined;
+  proactiveInstruction?: string | undefined;
+  legacyUseMemory: boolean | undefined;
+  readMemory: boolean;
+  writeMemory: boolean;
+  memoryContext: MemoryContext;
+  currentAffect?: CurrentAffect | undefined;
+  directContext: DirectContextBuildResult;
+  prompt: PromptBuildOutput;
 };
 
 type DirectContextBuildResult = {
@@ -476,7 +558,8 @@ export type HandleImageInputInput = VisionInput & {
 export class RuntimeOrchestrator {
   private latestPromptPreview: RuntimePromptPreview | null = null;
   private readonly memoryCandidateHistory: RuntimeMemoryCandidateReview[] = [];
-  private readonly sessionTurns = new Map<string, DirectContextTurn[]>();
+  private readonly sessionTurns = new Map<string, DirectContextEntry[]>();
+  private readonly assistantTurnClaims = new Map<string, AssistantTurnClaim>();
   private lifecycleState: RuntimeLifecycleState = "active";
   private activeLifecycleOperations = 0;
   private readonly lifecycleIdleWaiters = new Set<() => void>();
@@ -514,6 +597,57 @@ export class RuntimeOrchestrator {
 
   getRecentMemoryCandidates(limit = 20): RuntimeMemoryCandidateReview[] {
     return this.memoryCandidateHistory.slice(0, limit);
+  }
+
+  private claimAssistantTurn(input: AssistantInitiatedTurnInput): void {
+    const now = Date.now();
+    for (const [key, claim] of this.assistantTurnClaims) {
+      if (
+        claim.status === "terminal" &&
+        claim.terminalAtMs !== undefined &&
+        now - claim.terminalAtMs >= assistantTurnClaimRetentionMs
+      ) {
+        this.assistantTurnClaims.delete(key);
+      }
+    }
+
+    const existing = this.assistantTurnClaims.get(input.idempotencyKey);
+    if (existing) {
+      throw new AssistantTurnConflictError(input.idempotencyKey);
+    }
+
+    const terminalClaims = Array.from(this.assistantTurnClaims.entries()).filter(
+      ([, claim]) => claim.status === "terminal"
+    );
+    if (terminalClaims.length >= assistantTurnClaimMaxTerminal) {
+      terminalClaims.sort(
+        ([, left], [, right]) => (left.terminalAtMs ?? 0) - (right.terminalAtMs ?? 0)
+      );
+      for (const [key] of terminalClaims.slice(
+        0,
+        terminalClaims.length - assistantTurnClaimMaxTerminal + 1
+      )) {
+        this.assistantTurnClaims.delete(key);
+      }
+    }
+
+    this.assistantTurnClaims.set(input.idempotencyKey, {
+      sessionId: input.sessionId,
+      status: "running",
+      claimedAtMs: now
+    });
+  }
+
+  private completeAssistantTurnClaim(idempotencyKey: string): void {
+    const claim = this.assistantTurnClaims.get(idempotencyKey);
+    if (!claim || claim.status === "terminal") {
+      return;
+    }
+    this.assistantTurnClaims.set(idempotencyKey, {
+      ...claim,
+      status: "terminal",
+      terminalAtMs: Date.now()
+    });
   }
 
   /** Drain finalized semantic writes before the owning process closes. */
@@ -1192,6 +1326,324 @@ export class RuntimeOrchestrator {
     }
   }
 
+  async *streamAssistantInitiatedTurn(
+    input: AssistantInitiatedTurnInput,
+    options: AssistantInitiatedTurnOptions = {}
+  ): AsyncIterable<RuntimeReplyStreamEvent> {
+    if (options.signal?.aborted) {
+      throw createRuntimeCancelledError();
+    }
+    if (!input.sessionId.trim()) {
+      throw new Error("Assistant-initiated turn sessionId must not be empty.");
+    }
+    if (!input.idempotencyKey.trim()) {
+      throw new Error("Assistant-initiated turn idempotencyKey must not be empty.");
+    }
+    if (typeof input.readMemory !== "boolean") {
+      throw new Error("Assistant-initiated turn readMemory must be boolean.");
+    }
+
+    this.enterLifecycleOperation();
+    let claimed = false;
+    try {
+      this.claimAssistantTurn(input);
+      claimed = true;
+
+      const traceId = crypto.randomUUID();
+      const assistantMessageId = `assistant:assistant-initiated:${input.idempotencyKey}`;
+      const replyId = `reply:assistant-initiated:${input.idempotencyKey}`;
+      if (this.options.conversation) {
+        try {
+          await this.options.conversation.ensureSession(input.sessionId);
+        } catch (error) {
+          await this.publishPersistenceError(
+            "session_create",
+            "Session persistence failed.",
+            error,
+            {
+              traceId,
+              parentId: undefined
+            }
+          );
+          throw new ConversationPersistenceError(
+            "session_create",
+            "The session could not be saved."
+          );
+        }
+      }
+      await this.restoreDirectContext(input.sessionId);
+      const { prompt } = await this.prepareAssistantInitiatedPrompt(input, traceId);
+      const chatProvider = this.options.providers.getChatProvider();
+      const chatStatus = this.getProviderStatus("chat");
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      if (options.signal?.aborted) {
+        controller.abort();
+      } else {
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+      }
+
+      let providerIterator: AsyncIterator<ChatStreamEvent> | undefined;
+      let assistantCreated = false;
+      let accumulatedText = "";
+      let finalOutput: ChatOutput | undefined;
+      let sawCompleted = false;
+      let finalized = false;
+      let failure: unknown;
+      const startedAt = performance.now();
+
+      try {
+        if (controller.signal.aborted) {
+          throw createRuntimeCancelledError(chatProvider.name);
+        }
+
+        const providerInput: ChatInput = {
+          messages: prompt.messages,
+          metadata: { turnOrigin: "assistant-initiated" }
+        };
+        const providerStream = chatProvider.streamReply
+          ? chatProvider.streamReply(providerInput, { signal: controller.signal })
+          : compatibleRuntimeStream(chatProvider, providerInput, {
+              signal: controller.signal
+            });
+        providerIterator = providerStream[Symbol.asyncIterator]();
+
+        while (true) {
+          let next: IteratorResult<ChatStreamEvent>;
+          try {
+            next = await providerIterator.next();
+          } catch (error) {
+            throw normalizeRuntimeStreamError(error, chatProvider.name, controller.signal);
+          }
+          if (next.done) {
+            break;
+          }
+
+          const event = next.value;
+          if (controller.signal.aborted) {
+            throw createRuntimeCancelledError(chatProvider.name);
+          }
+          if (sawCompleted) {
+            throw runtimeStreamProtocolError(
+              chatProvider.name,
+              "Provider emitted an event after completed."
+            );
+          }
+
+          if (event.type === "text-delta") {
+            if (!event.text) {
+              throw runtimeStreamProtocolError(
+                chatProvider.name,
+                "Provider emitted an empty text delta."
+              );
+            }
+            if (!assistantCreated && this.options.conversation) {
+              await this.createStreamingAssistantMessage({
+                id: assistantMessageId,
+                sessionId: input.sessionId,
+                traceId,
+                parentMessageId: null,
+                content: event.text,
+                createdAt: new Date().toISOString(),
+                metadata: {
+                  origin: "assistant-initiated",
+                  idempotencyKey: input.idempotencyKey,
+                  modality: "text"
+                }
+              });
+              assistantCreated = true;
+            } else if (assistantCreated) {
+              await this.appendStreamingAssistantContent(assistantMessageId, event.text);
+            }
+            accumulatedText += event.text;
+            yield {
+              type: "text-delta",
+              text: event.text,
+              messageId: assistantMessageId,
+              sessionId: input.sessionId,
+              traceId
+            };
+            continue;
+          }
+
+          if (event.type === "completed") {
+            if (sawCompleted) {
+              throw runtimeStreamProtocolError(
+                chatProvider.name,
+                "Provider emitted multiple completed events."
+              );
+            }
+            if (!accumulatedText || event.output.message.content !== accumulatedText) {
+              throw runtimeStreamProtocolError(
+                chatProvider.name,
+                "Provider completed output did not match meaningful text deltas."
+              );
+            }
+            sawCompleted = true;
+            finalOutput = event.output;
+            continue;
+          }
+
+          throw runtimeStreamProtocolError(
+            chatProvider.name,
+            "Provider emitted an unknown stream event."
+          );
+        }
+
+        if (!finalOutput || !sawCompleted || !accumulatedText) {
+          throw runtimeStreamProtocolError(
+            chatProvider.name,
+            "Provider stream ended without meaningful completion."
+          );
+        }
+
+        const providerMetadata = this.safeProviderCallMetadata(
+          "chat",
+          chatProvider.name,
+          finalOutput,
+          chatStatus
+        );
+        if (this.latestPromptPreview) {
+          this.latestPromptPreview = {
+            ...this.latestPromptPreview,
+            providerName: providerMetadata.name,
+            providerModel: providerMetadata.model,
+            providerMock: providerMetadata.mock,
+            providerLatencyMs: finalOutput.latencyMs ?? Math.round(performance.now() - startedAt),
+            providerHealthStatus: providerMetadata.healthStatus,
+            tokenUsage: providerMetadata.tokenUsage,
+            ...this.extractorPreviewFields({
+              ...this.getMemoryExtractorStatus(),
+              used: false,
+              skippedReason: "Memory write was disabled for this turn."
+            })
+          };
+        }
+
+        if (this.options.conversation && !assistantCreated) {
+          await this.createStreamingAssistantMessage({
+            id: assistantMessageId,
+            sessionId: input.sessionId,
+            traceId,
+            parentMessageId: null,
+            content: accumulatedText,
+            createdAt: new Date().toISOString(),
+            metadata: {
+              origin: "assistant-initiated",
+              idempotencyKey: input.idempotencyKey,
+              modality: "text"
+            }
+          });
+          assistantCreated = true;
+        }
+        if (this.options.conversation) {
+          await this.completeStreamingAssistantMessage(
+            assistantMessageId,
+            {
+              provider: providerMetadata,
+              model: providerMetadata.model,
+              tokenUsage: providerMetadata.tokenUsage,
+              origin: "assistant-initiated",
+              idempotencyKey: input.idempotencyKey,
+              modality: "text"
+            },
+            {
+              sourceUserEventId: null,
+              finalizedTurnId: null,
+              ingestionRequested: false,
+              ingestionSkipReason: "assistant-initiated-memory-write-disabled"
+            }
+          );
+        }
+
+        const reply = this.createAssistantInitiatedReply(
+          input.sessionId,
+          traceId,
+          input.idempotencyKey,
+          finalOutput.message.content,
+          providerMetadata,
+          replyId
+        );
+        await this.options.eventBus.publish(reply);
+        this.recordDirectContextAssistant(input.sessionId, reply);
+        const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
+        await this.options.eventBus.publish(assistantMessage);
+        finalized = true;
+
+        yield {
+          type: "completed",
+          messageId: assistantMessageId,
+          sessionId: input.sessionId,
+          traceId,
+          content: finalOutput.message.content,
+          provider: providerMetadata.finalProvider ?? providerMetadata.name
+        };
+      } catch (error) {
+        failure = error;
+      } finally {
+        controller.abort();
+        try {
+          await providerIterator?.return?.();
+        } catch (closeError) {
+          this.options.logger?.warn?.(
+            "failed to close assistant-initiated provider stream",
+            this.errorLogContext(closeError, traceId)
+          );
+        }
+
+        if (!finalized) {
+          const cancelled =
+            failure === undefined ||
+            (failure instanceof ProviderError && failure.code === ProviderErrorCode.Cancelled);
+          const terminalStatus = cancelled ? "cancelled" : "failed";
+          if (assistantCreated) {
+            await this.failStreamingAssistantMessage(assistantMessageId, terminalStatus, {
+              origin: "assistant-initiated",
+              idempotencyKey: input.idempotencyKey,
+              ...(failure instanceof Error
+                ? { error: redactUnsafeText(safeErrorMessage(failure)) }
+                : {})
+            });
+          }
+          if (failure === undefined && cancelled) {
+            failure = createRuntimeCancelledError(chatProvider.name);
+          }
+          if (failure !== undefined && !(failure instanceof ConversationPersistenceError)) {
+            if (failure instanceof ProviderError) {
+              await this.publishProviderError(failure, {
+                capability: "chat",
+                provider: chatProvider.name,
+                latencyMs: Math.round(performance.now() - startedAt),
+                traceId,
+                parentId: replyId
+              });
+            } else {
+              await this.publishRuntimeError(
+                "Assistant-initiated runtime stream failed.",
+                failure,
+                {
+                  traceId,
+                  parentId: replyId,
+                  category: "stream"
+                }
+              );
+            }
+          }
+        }
+        options.signal?.removeEventListener("abort", onAbort);
+      }
+
+      if (failure !== undefined) {
+        throw failure;
+      }
+    } finally {
+      if (claimed) {
+        this.completeAssistantTurnClaim(input.idempotencyKey);
+      }
+      this.exitLifecycleOperation();
+    }
+  }
+
   async handleAudioInput(input: HandleAudioInputInput): Promise<AgentReplyEvent> {
     this.enterLifecycleOperation();
     try {
@@ -1312,30 +1764,7 @@ export class RuntimeOrchestrator {
           directContextText: directContext.content
         })
       : emptyMemoryContext();
-    // Prompt only gets displayText content — never raw memoryId/score/metadata dumps.
-    const promptMemories = memoryContext.promptMemories.map((memory) =>
-      isPromptMemoryCompatibility(memory)
-        ? memory
-        : {
-            content: memory.displayText,
-            displayText: memory.displayText,
-            importance: memory.importance,
-            type: memory.type,
-            subtype: memory.subtype,
-            scope: memory.scope,
-            scopeId: memory.scopeId,
-            memoryLayer: memory.memoryLayer,
-            status: memory.status,
-            ...(memory.validFrom !== undefined ? { validFrom: memory.validFrom } : {}),
-            ...(memory.eventTime !== undefined ? { eventTime: memory.eventTime } : {}),
-            ...(memory.validUntil !== undefined ? { validUntil: memory.validUntil } : {}),
-            ...(memory.expiresAt !== undefined ? { expiresAt: memory.expiresAt } : {}),
-            createdAt: memory.createdAt,
-            ...(memory.lastAccessedAt !== undefined
-              ? { lastAccessedAt: memory.lastAccessedAt }
-              : {})
-          }
-    );
+    const promptMemories = promptMemoriesForBuilder(memoryContext);
     const situationParts = [
       voiceOutput
         ? "The user is interacting through voice."
@@ -1364,6 +1793,7 @@ export class RuntimeOrchestrator {
     this.latestPromptPreview = {
       traceId: event.traceId,
       timestamp: new Date().toISOString(),
+      turnOrigin: "user-turn",
       userMessage: event.payload.content,
       legacyUseMemory: memoryOptions.legacyUseMemory,
       useMemory: memoryOptions.readMemory && memoryOptions.writeMemory,
@@ -1447,6 +1877,152 @@ export class RuntimeOrchestrator {
     };
 
     return { prompt, memoryOptions };
+  }
+
+  private async prepareAssistantInitiatedPrompt(
+    input: AssistantInitiatedTurnInput,
+    traceId: string
+  ): Promise<{ prompt: PromptBuildOutput }> {
+    const directContext = this.buildDirectContext(input.sessionId);
+    const queryText = directContext.content.trim();
+    const memoryContext =
+      input.readMemory && queryText
+        ? await this.retrieveMemoriesForQuery(
+            {
+              sessionId: input.sessionId,
+              queryText,
+              traceId,
+              personaId: input.personaId,
+              subjectUserId: input.subjectUserId
+            },
+            {
+              currentTurnText: queryText,
+              directContextText: directContext.content
+            }
+          )
+        : emptyMemoryContext();
+    const prompt = this.options.promptBuilder.buildPrompt({
+      systemIdentity:
+        "You are YUVI, a local-first AI companion runtime agent. Unless the user clearly asks for another language, reply in natural spoken English by default.",
+      characterStyle:
+        "Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail. Do not default to Japanese or Chinese, do not auto-translate English into Japanese for voice, and do not produce bilingual replies. If the user mainly writes Chinese or Japanese, or explicitly requests Chinese or Japanese, reply in that language.",
+      relationshipContext:
+        "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
+      retrievedMemories: promptMemoriesForBuilder(memoryContext),
+      memoryEnabled: input.readMemory,
+      currentTime: currentTimeContext(),
+      directContext: directContext.content,
+      directContextEnabled: directContext.enabled,
+      currentSituation:
+        "The assistant is initiating a proactive message in the existing conversation.",
+      tools: [],
+      turnOrigin: "assistant-initiated",
+      proactiveInstruction
+    });
+    this.latestPromptPreview = this.buildPromptPreview({
+      traceId,
+      turnOrigin: "assistant-initiated",
+      proactiveInstruction,
+      legacyUseMemory: undefined,
+      readMemory: input.readMemory,
+      writeMemory: false,
+      memoryContext,
+      directContext,
+      prompt
+    });
+    return { prompt };
+  }
+
+  private buildPromptPreview(input: PromptPreviewInput): RuntimePromptPreview {
+    const { memoryContext, directContext, prompt } = input;
+    return {
+      traceId: input.traceId,
+      timestamp: new Date().toISOString(),
+      turnOrigin: input.turnOrigin,
+      ...(input.userMessage !== undefined ? { userMessage: input.userMessage } : {}),
+      ...(input.proactiveInstruction !== undefined
+        ? { proactiveInstruction: input.proactiveInstruction }
+        : {}),
+      legacyUseMemory: input.legacyUseMemory,
+      useMemory: input.readMemory && input.writeMemory,
+      readMemory: input.readMemory,
+      writeMemory: input.writeMemory,
+      memoryReadEnabled: input.readMemory,
+      memoryWriteEnabled: input.writeMemory,
+      memoryRepository: this.options.memoryRepository ?? "in-memory",
+      retrievedMemoryCountRaw: memoryContext.retrievedMemoryCountRaw,
+      retrievedMemoryCount: memoryContext.retrievedMemoryCount,
+      ...(memoryContext.memoryProviderStatus !== undefined
+        ? { memoryProviderStatus: memoryContext.memoryProviderStatus }
+        : {}),
+      ...(memoryContext.memoryFinalStatus !== undefined
+        ? { memoryFinalStatus: memoryContext.memoryFinalStatus }
+        : {}),
+      ...(memoryContext.memoryProviderSource !== undefined
+        ? { memoryProviderSource: memoryContext.memoryProviderSource }
+        : {}),
+      ...(memoryContext.memoryProviderErrorCode !== undefined
+        ? { memoryProviderErrorCode: memoryContext.memoryProviderErrorCode }
+        : {}),
+      memoryRetrievalLimited: memoryContext.memoryRetrievalLimited,
+      memoryQueryLength: memoryContext.memoryQueryLength,
+      memoryRetrievalEventIds: memoryContext.memoryRetrievalEventIds,
+      memoryRetrievalDroppedCount: memoryContext.memoryRetrievalDroppedCount,
+      memoryRetrievalDropped: memoryContext.memoryRetrievalDropped,
+      memoryMetadataPresent: memoryContext.memoryMetadataPresent,
+      memorySourceTurnLinkCount: memoryContext.memorySourceTurnLinkCount,
+      memoryConversationLinked: memoryContext.memoryConversationLinked,
+      memoryParticipantsCount: memoryContext.memoryParticipantsCount,
+      memoryFallbackProducedResults: memoryContext.memoryFallbackProducedResults,
+      memoryFallbackUsed: memoryContext.memoryFallbackUsed,
+      ...(memoryContext.memoryFallbackReason !== undefined
+        ? { memoryFallbackReason: memoryContext.memoryFallbackReason }
+        : {}),
+      ...(memoryContext.memoryFallbackSource !== undefined
+        ? { memoryFallbackSource: memoryContext.memoryFallbackSource }
+        : {}),
+      retrievalMode: memoryContext.retrievalMode,
+      vectorEnabled: memoryContext.vectorEnabled,
+      vectorUsed: memoryContext.vectorUsed,
+      embeddingProvider: memoryContext.embeddingProvider,
+      embeddingModel: memoryContext.embeddingModel,
+      embeddingDimensions: memoryContext.embeddingDimensions,
+      semanticEmbedding: memoryContext.semanticEmbedding,
+      embeddingNote: memoryContext.embeddingNote,
+      queryEmbeddingGenerated: memoryContext.queryEmbeddingGenerated,
+      vectorResultCount: memoryContext.vectorResultCount,
+      keywordResultCount: memoryContext.keywordResultCount,
+      hybridResultCount: memoryContext.hybridResultCount,
+      retrievalFallbackUsed: memoryContext.retrievalFallbackUsed,
+      retrievalFallbackReason: memoryContext.retrievalFallbackReason,
+      retrievalScope: memoryContext.retrievalScope,
+      includedScopes: memoryContext.includedScopes,
+      includeArchived: memoryContext.includeArchived,
+      includeSuperseded: memoryContext.includeSuperseded,
+      includeExpired: memoryContext.includeExpired,
+      currentTime: memoryContext.currentTime,
+      ...(input.currentAffect ? { currentAffect: input.currentAffect } : {}),
+      directContextEnabled: directContext.enabled,
+      directContextTurnCount: directContext.turnCount,
+      directContextCharCount: directContext.charCount,
+      directContextTruncated: directContext.truncated,
+      directContextSource: directContext.source,
+      excludedByStatus: memoryContext.excludedByStatus,
+      excludedByTime: memoryContext.excludedByTime,
+      excludedByScope: memoryContext.excludedByScope,
+      retrievedMemories: memoryContext.retrievedMemories,
+      sections: prompt.sections,
+      finalMessages: prompt.messages,
+      finalPrompt: prompt.prompt,
+      characterCount: prompt.characterCount,
+      estimatedTokens: prompt.estimatedTokens,
+      truncated: prompt.truncated,
+      ...this.extractorPreviewFields(
+        this.getMemoryExtractorStatus(
+          input.writeMemory ? undefined : "Memory write was disabled for this turn."
+        )
+      )
+    };
   }
 
   async generateReply(
@@ -2088,6 +2664,34 @@ export class RuntimeOrchestrator {
     return id ? { ...event, id } : event;
   }
 
+  private createAssistantInitiatedReply(
+    sessionId: string,
+    traceId: string,
+    idempotencyKey: string,
+    content: string,
+    provider: SafeProviderCallMetadata,
+    id: string
+  ): AgentReplyEvent {
+    const event = createEvent(
+      "agent.reply",
+      {
+        sessionId,
+        content,
+        turnOrigin: "assistant-initiated" as const,
+        provider
+      },
+      { traceId }
+    );
+    return {
+      ...event,
+      id,
+      payload: {
+        ...event.payload,
+        idempotencyKey
+      }
+    };
+  }
+
   private createAssistantMessageEvent(
     reply: AgentReplyEvent,
     id?: string | undefined
@@ -2097,6 +2701,8 @@ export class RuntimeOrchestrator {
       {
         sessionId: reply.payload.sessionId,
         content: reply.payload.content,
+        ...(reply.payload.turnOrigin ? { turnOrigin: reply.payload.turnOrigin } : {}),
+        ...(reply.payload.idempotencyKey ? { idempotencyKey: reply.payload.idempotencyKey } : {}),
         ...(reply.payload.provider ? { provider: reply.payload.provider } : {})
       },
       {
@@ -2263,9 +2869,10 @@ export class RuntimeOrchestrator {
     id: string;
     sessionId: string;
     traceId: string;
-    parentMessageId: string;
+    parentMessageId: string | null;
     content: string;
     createdAt: string;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     const conversation = this.options.conversation;
     if (!conversation) {
@@ -2282,14 +2889,14 @@ export class RuntimeOrchestrator {
         status: "streaming",
         createdAt: input.createdAt,
         completedAt: null,
-        metadata: {}
+        metadata: input.metadata ?? {}
       });
     } catch (error) {
       await this.publishPersistenceError(
         "assistant_stream_create",
         "Streaming assistant message creation failed.",
         error,
-        { traceId: input.traceId, parentId: input.parentMessageId }
+        { traceId: input.traceId, parentId: input.parentMessageId ?? undefined }
       );
       throw new ConversationPersistenceError(
         "assistant_stream_create",
@@ -2422,8 +3029,8 @@ export class RuntimeOrchestrator {
         limit: maxStoredTurns * 2,
         maxCharacters: this.directContextConfig.maxChars * 2
       });
-      const turns = buildDirectContextTurns(messages).slice(-maxStoredTurns);
-      this.sessionTurns.set(sessionId, turns);
+      const entries = buildDirectContextEntries(messages).slice(-maxStoredTurns);
+      this.sessionTurns.set(sessionId, entries);
     } catch (error) {
       await this.publishPersistenceError(
         "context_restore",
@@ -2459,16 +3066,33 @@ export class RuntimeOrchestrator {
     event: UserMessageEvent | UserVoiceTranscriptEvent,
     options: MemoryContextBuildOptions = {}
   ): Promise<MemoryContext> {
+    return this.retrieveMemoriesForQuery(
+      {
+        sessionId: event.payload.sessionId,
+        queryText: event.payload.content,
+        traceId: event.traceId,
+        parentId: event.id,
+        personaId: event.payload.personaId,
+        subjectUserId: event.payload.subjectUserId
+      },
+      options
+    );
+  }
+
+  private async retrieveMemoriesForQuery(
+    request: MemoryRetrievalRequest,
+    options: MemoryContextBuildOptions = {}
+  ): Promise<MemoryContext> {
     let memoryContext: MemoryContext;
     const provider = this.options.memory.getMemoryProvider?.();
     let providerOutcome: Awaited<ReturnType<MemoryProvider["retrieveRelevant"]>> | undefined;
     try {
       if (provider) {
-        providerOutcome = await this.retrieveFromProvider(provider, event);
+        providerOutcome = await this.retrieveFromProvider(provider, request);
         if (isUsableProviderOutcome(providerOutcome.status)) {
           memoryContext = this.buildProviderMemoryContext(providerOutcome, options);
         } else if (providerOutcome.status === "unavailable") {
-          memoryContext = await this.retrieveLegacyMemories(event);
+          memoryContext = await this.retrieveLegacyMemories(request);
           memoryContext = dedupeLegacyMemoryContext(memoryContext, options);
           memoryContext = annotateProviderFallback(memoryContext, providerOutcome);
         } else {
@@ -2477,7 +3101,7 @@ export class RuntimeOrchestrator {
           memoryContext = this.buildProviderMemoryContext(providerOutcome, options);
         }
       } else {
-        memoryContext = await this.retrieveLegacyMemories(event);
+        memoryContext = await this.retrieveLegacyMemories(request);
         memoryContext = dedupeLegacyMemoryContext(memoryContext, options);
         memoryContext.memoryFallbackUsed = true;
         memoryContext.memoryFallbackProducedResults = memoryContext.retrievedMemoryCountRaw > 0;
@@ -2493,25 +3117,25 @@ export class RuntimeOrchestrator {
         "Memory retrieval failed; continuing without retrieved memories.",
         error,
         {
-          traceId: event.traceId,
-          parentId: event.id
+          traceId: request.traceId,
+          parentId: request.parentId
         }
       );
       this.options.logger?.warn?.(
         "memory retrieval failed",
-        this.errorLogContext(error, event.traceId)
+        this.errorLogContext(error, request.traceId)
       );
-      memoryContext.memoryQueryLength = event.payload.content.length;
+      memoryContext.memoryQueryLength = request.queryText.length;
       return memoryContext;
     }
 
-    memoryContext.memoryQueryLength = event.payload.content.length;
+    memoryContext.memoryQueryLength = request.queryText.length;
 
     await this.options.eventBus.publish(
       createEvent(
         "memory.retrieved",
         {
-          sessionId: event.payload.sessionId,
+          sessionId: request.sessionId,
           count: memoryContext.retrievedMemoryCount,
           rawCount: memoryContext.retrievedMemoryCountRaw,
           retrievalMode: memoryContext.retrievalMode,
@@ -2535,8 +3159,8 @@ export class RuntimeOrchestrator {
           dropped: memoryContext.memoryRetrievalDropped.map(({ id, reason }) => ({ id, reason }))
         },
         {
-          traceId: event.traceId,
-          parentId: event.id
+          traceId: request.traceId,
+          parentId: request.parentId
         }
       )
     );
@@ -2546,14 +3170,14 @@ export class RuntimeOrchestrator {
 
   private async retrieveFromProvider(
     provider: MemoryProvider,
-    event: UserMessageEvent | UserVoiceTranscriptEvent
+    request: MemoryRetrievalRequest
   ): Promise<Awaited<ReturnType<MemoryProvider["retrieveRelevant"]>>> {
     try {
       return await provider.retrieveRelevant({
-        text: event.payload.content,
+        text: request.queryText,
         limit: 5,
-        sessionId: event.payload.sessionId,
-        ...retrievalIdentityPayload(event.payload)
+        sessionId: request.sessionId,
+        ...retrievalIdentityPayload(request)
       });
     } catch {
       return {
@@ -2594,16 +3218,14 @@ export class RuntimeOrchestrator {
     return context;
   }
 
-  private async retrieveLegacyMemories(
-    event: UserMessageEvent | UserVoiceTranscriptEvent
-  ): Promise<MemoryContext> {
+  private async retrieveLegacyMemories(request: MemoryRetrievalRequest): Promise<MemoryContext> {
     if (this.options.memory.retrieveRelevantMemoriesWithMetadata) {
       const result = await this.options.memory.retrieveRelevantMemoriesWithMetadata({
-        text: event.payload.content,
+        text: request.queryText,
         limit: 5,
-        sessionId: event.payload.sessionId,
+        sessionId: request.sessionId,
         projectId: "yuvi-runtime",
-        ...retrievalIdentityPayload(event.payload)
+        ...retrievalIdentityPayload(request)
       });
       return finalizeLegacyMemoryContext({
         ...emptyMemoryContext(),
@@ -2640,11 +3262,11 @@ export class RuntimeOrchestrator {
     }
 
     const memories = await this.options.memory.retrieveRelevantMemories({
-      text: event.payload.content,
+      text: request.queryText,
       limit: 5,
-      sessionId: event.payload.sessionId,
+      sessionId: request.sessionId,
       projectId: "yuvi-runtime",
-      ...retrievalIdentityPayload(event.payload)
+      ...retrievalIdentityPayload(request)
     });
     return finalizeLegacyMemoryContext({
       ...emptyMemoryContext(),
@@ -2699,22 +3321,22 @@ export class RuntimeOrchestrator {
       };
     }
 
-    const turns = this.sessionTurns.get(sessionId) ?? [];
+    const entries = this.sessionTurns.get(sessionId) ?? [];
     if (this.directContextConfig.maxTurns === 0) {
       return {
         enabled: true,
         content: "",
         turnCount: 0,
         charCount: 0,
-        truncated: turns.length > 0,
+        truncated: entries.length > 0,
         source: "session-turns"
       };
     }
 
-    const selected = turns.slice(-this.directContextConfig.maxTurns);
-    const lines = selected.map(formatDirectContextTurn);
+    const selected = entries.slice(-this.directContextConfig.maxTurns);
+    const lines = selected.map(formatDirectContextEntry);
     let content = lines.join("\n");
-    let truncated = selected.length < turns.length;
+    let truncated = selected.length < entries.length;
 
     while (content.length > this.directContextConfig.maxChars && lines.length > 0) {
       lines.shift();
@@ -2753,6 +3375,7 @@ export class RuntimeOrchestrator {
     }
 
     turns.push({
+      kind: "turn",
       traceId: userEvent.traceId,
       timestamp: new Date().toISOString(),
       userMessage: redactUnsafeText(userEvent.payload.content),
@@ -2761,6 +3384,27 @@ export class RuntimeOrchestrator {
 
     const maxStoredTurns = Math.max(this.directContextConfig.maxTurns * 3, 12);
     this.sessionTurns.set(sessionId, turns.slice(-maxStoredTurns));
+  }
+
+  private recordDirectContextAssistant(sessionId: string, reply: AgentReplyEvent): void {
+    if (!this.directContextConfig.enabled) {
+      return;
+    }
+
+    const entries = this.sessionTurns.get(sessionId) ?? [];
+    if (this.directContextConfig.maxTurns === 0) {
+      this.sessionTurns.set(sessionId, []);
+      return;
+    }
+
+    entries.push({
+      kind: "assistant-only",
+      traceId: reply.traceId,
+      timestamp: reply.timestamp,
+      assistantMessage: redactUnsafeText(reply.payload.content)
+    });
+    const maxStoredTurns = Math.max(this.directContextConfig.maxTurns * 3, 12);
+    this.sessionTurns.set(sessionId, entries.slice(-maxStoredTurns));
   }
 
   private async measureProvider<TOutput>(
@@ -3427,23 +4071,67 @@ function conversationMessageFromEvent(
   };
 }
 
-function buildDirectContextTurns(messages: ConversationMessage[]): DirectContextTurn[] {
-  const turns: DirectContextTurn[] = [];
+function buildDirectContextEntries(messages: ConversationMessage[]): DirectContextEntry[] {
+  const entries: DirectContextEntry[] = [];
   let pendingUser: ConversationMessage | undefined;
 
   for (const message of messages) {
+    if (message.role === "assistant" && message.status !== "completed") {
+      // A failed/cancelled assistant belongs to the preceding user attempt;
+      // retain the existing behavior of excluding that incomplete pair.
+      pendingUser = undefined;
+      continue;
+    }
     if (message.status !== "completed") {
       continue;
     }
     if (message.role === "user") {
+      if (pendingUser) {
+        entries.push({
+          kind: "user-only",
+          traceId: pendingUser.traceId,
+          timestamp: pendingUser.completedAt ?? pendingUser.createdAt,
+          userMessage: redactUnsafeText(pendingUser.content)
+        });
+      }
       pendingUser = message;
       continue;
     }
-    if (!pendingUser) {
+
+    const metadata = message.metadata;
+    const assistantInitiated =
+      metadata && typeof metadata === "object" && metadata["origin"] === "assistant-initiated";
+    if (assistantInitiated) {
+      if (pendingUser) {
+        entries.push({
+          kind: "user-only",
+          traceId: pendingUser.traceId,
+          timestamp: pendingUser.completedAt ?? pendingUser.createdAt,
+          userMessage: redactUnsafeText(pendingUser.content)
+        });
+        pendingUser = undefined;
+      }
+      entries.push({
+        kind: "assistant-only",
+        traceId: message.traceId,
+        timestamp: message.completedAt ?? message.createdAt,
+        assistantMessage: redactUnsafeText(message.content)
+      });
       continue;
     }
 
-    turns.push({
+    if (!pendingUser) {
+      entries.push({
+        kind: "assistant-only",
+        traceId: message.traceId,
+        timestamp: message.completedAt ?? message.createdAt,
+        assistantMessage: redactUnsafeText(message.content)
+      });
+      continue;
+    }
+
+    entries.push({
+      kind: "turn",
       traceId: pendingUser.traceId,
       timestamp: message.completedAt ?? message.createdAt,
       userMessage: redactUnsafeText(pendingUser.content),
@@ -3452,14 +4140,35 @@ function buildDirectContextTurns(messages: ConversationMessage[]): DirectContext
     pendingUser = undefined;
   }
 
-  return turns;
+  if (pendingUser) {
+    entries.push({
+      kind: "user-only",
+      traceId: pendingUser.traceId,
+      timestamp: pendingUser.completedAt ?? pendingUser.createdAt,
+      userMessage: redactUnsafeText(pendingUser.content)
+    });
+  }
+
+  return entries;
 }
 
-function formatDirectContextTurn(turn: DirectContextTurn): string {
+function formatDirectContextEntry(entry: DirectContextEntry): string {
+  if (entry.kind === "turn") {
+    return [
+      `- Previous turn (${entry.timestamp}, trace ${entry.traceId.slice(0, 8)}):`,
+      `  User: ${truncateDirectContextLine(entry.userMessage)}`,
+      `  Assistant: ${truncateDirectContextLine(entry.assistantReply)}`
+    ].join("\n");
+  }
+  if (entry.kind === "assistant-only") {
+    return [
+      `- Previous assistant-initiated message (${entry.timestamp}, trace ${entry.traceId.slice(0, 8)}):`,
+      `  Assistant: ${truncateDirectContextLine(entry.assistantMessage)}`
+    ].join("\n");
+  }
   return [
-    `- Previous turn (${turn.timestamp}, trace ${turn.traceId.slice(0, 8)}):`,
-    `  User: ${truncateDirectContextLine(turn.userMessage)}`,
-    `  Assistant: ${truncateDirectContextLine(turn.assistantReply)}`
+    `- Previous incomplete user message (${entry.timestamp}, trace ${entry.traceId.slice(0, 8)}):`,
+    `  User: ${truncateDirectContextLine(entry.userMessage)}`
   ].join("\n");
 }
 
@@ -3602,6 +4311,32 @@ function isPromptMemoryCompatibility(
     typeof (memory as Partial<PromptMemoryCompatibility>).provenanceId === "string" &&
     typeof (memory as Partial<PromptMemoryCompatibility>).sourceRecordId === "string"
   );
+}
+
+function promptMemoriesForBuilder(memoryContext: MemoryContext): RetrievedMemoryForPrompt[] {
+  // Prompt only gets displayText content — never raw memoryId/score/metadata dumps.
+  return memoryContext.promptMemories.map((memory): RetrievedMemoryForPrompt => {
+    if (isPromptMemoryCompatibility(memory)) {
+      return memory;
+    }
+    return {
+      content: memory.displayText,
+      displayText: memory.displayText,
+      importance: memory.importance,
+      type: memory.type,
+      subtype: memory.subtype,
+      scope: memory.scope,
+      scopeId: memory.scopeId,
+      memoryLayer: memory.memoryLayer,
+      status: memory.status,
+      ...(memory.validFrom !== undefined ? { validFrom: memory.validFrom } : {}),
+      ...(memory.eventTime !== undefined ? { eventTime: memory.eventTime } : {}),
+      ...(memory.validUntil !== undefined ? { validUntil: memory.validUntil } : {}),
+      ...(memory.expiresAt !== undefined ? { expiresAt: memory.expiresAt } : {}),
+      createdAt: memory.createdAt,
+      ...(memory.lastAccessedAt !== undefined ? { lastAccessedAt: memory.lastAccessedAt } : {})
+    };
+  });
 }
 
 function isUsableProviderOutcome(status: MemoryRetrievalStatus): boolean {

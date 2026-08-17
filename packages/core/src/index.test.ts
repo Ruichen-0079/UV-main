@@ -19,6 +19,8 @@ import {
   createMockReasoningProvider,
   createMockSTTProvider,
   createMockVisionProvider,
+  type ChatInput,
+  type ChatStreamOptions,
   type TTSOutput
 } from "@companion/providers";
 import { createEvent, type RuntimeEvent } from "@companion/protocol";
@@ -2364,6 +2366,260 @@ describe("RuntimeOrchestrator", () => {
     expect(thirdDirectContext?.content).not.toContain("First context turn");
     expect(thirdDirectContext?.content).toContain("Second context turn");
     expect(thirdPreview?.directContextTruncated).toBe(true);
+  });
+
+  it("streams an assistant-only turn without a user event, user row, or memory write", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    const conversation = new InMemoryConversationRepository();
+    const providerInputs: ChatInput[] = [];
+    const baseProvider = createMockStreamingChatProvider("assistant-only", { chunks: ["hello"] });
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          ...baseProvider,
+          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+            providerInputs.push(input);
+            yield* baseProvider.streamReply!(input, options);
+          }
+        })
+      }
+    });
+
+    const events = await collectRuntimeStream(
+      runtime.streamAssistantInitiatedTurn({
+        sessionId: "assistant-only-session",
+        idempotencyKey: "decision-1",
+        readMemory: false
+      })
+    );
+
+    expect(events.map((event) => event.type)).toEqual(["text-delta", "completed"]);
+    expect(published.filter((event) => event.type === "user.message")).toHaveLength(0);
+    expect(published.find((event) => event.type === "agent.reply")).toMatchObject({
+      payload: { turnOrigin: "assistant-initiated", idempotencyKey: "decision-1" }
+    });
+    expect(await conversation.listRecentMessages("assistant-only-session")).toMatchObject([
+      {
+        role: "assistant",
+        content: "hello",
+        parentMessageId: null,
+        sourceUserEventId: null,
+        finalizedTurnId: null,
+        metadata: {
+          origin: "assistant-initiated",
+          idempotencyKey: "decision-1",
+          modality: "text"
+        }
+      }
+    ]);
+    expect(providerInputs[0]?.messages.map((message) => message.role)).toEqual(["system"]);
+    expect(providerInputs[0]?.messages[0]?.content).toContain("ProactiveInstruction");
+    expect(providerInputs[0]?.messages[0]?.content).not.toContain("<UserMessage>");
+    expect(runtime.getLatestPromptPreview()).toMatchObject({
+      turnOrigin: "assistant-initiated",
+      proactiveInstruction: expect.any(String),
+      writeMemory: false
+    });
+    expect(runtime.getLatestPromptPreview()).not.toHaveProperty("userMessage");
+
+    await expect(
+      collectRuntimeStream(
+        runtime.streamAssistantInitiatedTurn({
+          sessionId: "assistant-only-session",
+          idempotencyKey: "decision-1",
+          readMemory: false
+        })
+      )
+    ).rejects.toMatchObject({ name: "AssistantTurnConflictError" });
+  });
+
+  it("restores assistant-only history without inventing a user message", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const first = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => createMockStreamingChatProvider("first", { chunks: ["earlier"] })
+      }
+    });
+    await collectRuntimeStream(
+      first.streamAssistantInitiatedTurn({
+        sessionId: "restored-assistant-session",
+        idempotencyKey: "decision-history-1",
+        readMemory: false
+      })
+    );
+
+    let restoredInput: ChatInput | undefined;
+    const secondBase = createMockStreamingChatProvider("second", { chunks: ["later"] });
+    const second = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          ...secondBase,
+          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+            restoredInput = input;
+            yield* secondBase.streamReply!(input, options);
+          }
+        })
+      }
+    });
+    await collectRuntimeStream(
+      second.streamAssistantInitiatedTurn({
+        sessionId: "restored-assistant-session",
+        idempotencyKey: "decision-history-2",
+        readMemory: false
+      })
+    );
+
+    expect(restoredInput?.messages.map((message) => message.role)).toEqual(["system"]);
+    expect(restoredInput?.messages[0]?.content).toContain("earlier");
+    expect(restoredInput?.messages[0]?.content).not.toContain("<UserMessage>");
+  });
+
+  it("rejects a duplicate idempotency key while the first provider effect is running", async () => {
+    const providerStarted = deferred<void>();
+    const releaseProvider = deferred<void>();
+    const baseProvider = createMockStreamingChatProvider("blocked", { chunks: ["done"] });
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => ({
+          ...baseProvider,
+          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+            providerStarted.resolve();
+            await releaseProvider.promise;
+            yield* baseProvider.streamReply!(input, options);
+          }
+        })
+      }
+    });
+
+    const first = collectRuntimeStream(
+      runtime.streamAssistantInitiatedTurn({
+        sessionId: "running-session",
+        idempotencyKey: "running-decision",
+        readMemory: false
+      })
+    );
+    await providerStarted.promise;
+    await expect(
+      collectRuntimeStream(
+        runtime.streamAssistantInitiatedTurn({
+          sessionId: "running-session",
+          idempotencyKey: "running-decision",
+          readMemory: false
+        })
+      )
+    ).rejects.toMatchObject({ name: "AssistantTurnConflictError" });
+    releaseProvider.resolve();
+    await expect(first).resolves.toHaveLength(2);
+  });
+
+  it("uses only actual direct context for proactive memory reads", async () => {
+    const memory = createRecordingMemory([]);
+    const baseRetrieve = memory.retrieveRelevantMemoriesWithMetadata!;
+    const queries: string[] = [];
+    memory.retrieveRelevantMemoriesWithMetadata = async (input) => {
+      queries.push(input.text);
+      return { ...(await baseRetrieve(input)), query: input.text };
+    };
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory,
+      conversation: new InMemoryConversationRepository(),
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => createMockStreamingChatProvider("memory", { chunks: ["reply"] })
+      }
+    });
+
+    await collectRuntimeStream(
+      runtime.streamUserMessage(
+        { sessionId: "memory-context-session", content: "actual prior conversation" },
+        { readMemory: false, writeMemory: false }
+      )
+    );
+    await collectRuntimeStream(
+      runtime.streamAssistantInitiatedTurn({
+        sessionId: "memory-context-session",
+        idempotencyKey: "memory-context-decision",
+        readMemory: true
+      })
+    );
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("actual prior conversation");
+    expect(queries[0]).not.toContain("assistant-initiated");
+    expect(queries[0]).not.toBe("");
+  });
+
+  it("retains terminal idempotency claims for fifteen minutes and bounds the terminal cache", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = new RuntimeOrchestrator({
+        eventBus: new InMemoryEventBus({ development: false }),
+        memory: createRecordingMemory([]),
+        promptBuilder: new PromptBuilder(),
+        providers: createMockProviders()
+      });
+      const input = {
+        sessionId: "retention-session",
+        idempotencyKey: "retained-decision",
+        readMemory: false
+      } as const;
+
+      await collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input));
+      await expect(
+        collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input))
+      ).rejects.toMatchObject({ name: "AssistantTurnConflictError" });
+
+      vi.advanceTimersByTime(15 * 60 * 1000 + 1);
+      await expect(
+        collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input))
+      ).resolves.toHaveLength(2);
+
+      for (let index = 0; index < 257; index += 1) {
+        await collectRuntimeStream(
+          runtime.streamAssistantInitiatedTurn({
+            sessionId: "retention-session",
+            idempotencyKey: `bounded-${index}`,
+            readMemory: false
+          })
+        );
+      }
+      await expect(
+        collectRuntimeStream(
+          runtime.streamAssistantInitiatedTurn({
+            sessionId: "retention-session",
+            idempotencyKey: "bounded-0",
+            readMemory: false
+          })
+        )
+      ).resolves.toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

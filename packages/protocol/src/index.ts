@@ -15,6 +15,10 @@ export const EventTypeSchema = z.enum([
   "runtime.error"
 ]);
 
+export const TurnOriginSchema = z.enum(["user-turn", "assistant-initiated"]);
+
+export type TurnOrigin = z.infer<typeof TurnOriginSchema>;
+
 export type EventType = z.infer<typeof EventTypeSchema>;
 
 export const RuntimeEventSchema = z.object({
@@ -75,6 +79,8 @@ export type UserVoiceTranscriptEvent = RuntimeEvent<
 export const AssistantMessagePayloadSchema = z.object({
   sessionId: z.string().min(1),
   content: z.string(),
+  turnOrigin: TurnOriginSchema.optional(),
+  idempotencyKey: z.string().min(1).optional(),
   provider: z
     .object({
       name: z.string(),
