@@ -4,6 +4,7 @@ import {
   createInitialBehaviorPolicyState,
   getBehaviorIntentRef,
   getBehaviorPriority,
+  isIntentAllowedByCapabilityPolicy,
   reduceBehaviorPolicy,
   type BehaviorPolicyContext,
   type BehaviorPolicyState,
@@ -15,6 +16,7 @@ const baseContext: BehaviorPolicyContext = {
   presence: {
     ...createInitialCompanionPresence(),
     epoch: "turn-b",
+    connectivity: "online",
     capabilities: { tts: "unknown", audio: "unknown", live2d: "available" }
   },
   sessionId: "session-a",
@@ -104,6 +106,45 @@ function submit(
   policyContext: BehaviorPolicyContext = baseContext
 ): BehaviorPolicyState {
   return reduceBehaviorPolicy(state, { type: "submit-intent", intent: candidate }, policyContext);
+}
+
+type PresenceOverrides = {
+  connectivity?: BehaviorPolicyContext["presence"]["connectivity"];
+  epoch?: BehaviorPolicyContext["presence"]["epoch"];
+  capabilities?: Partial<BehaviorPolicyContext["presence"]["capabilities"]>;
+};
+
+function presenceWith(overrides: PresenceOverrides = {}): BehaviorPolicyContext["presence"] {
+  return {
+    ...baseContext.presence,
+    connectivity: overrides.connectivity ?? baseContext.presence.connectivity,
+    epoch: overrides.epoch === undefined ? baseContext.presence.epoch : overrides.epoch,
+    capabilities: {
+      ...baseContext.presence.capabilities,
+      ...(overrides.capabilities ?? {})
+    }
+  };
+}
+
+function proactiveIntent(
+  action: "silent-attention" | "request-turn-text" | "request-turn-speech",
+  intentId: string = action
+): BehaviorSemanticIntent {
+  return intent({
+    intentId,
+    kind: "proactive",
+    priority: "P3",
+    scope: "decision",
+    payload: {
+      action,
+      modality:
+        action === "silent-attention"
+          ? "silent"
+          : action === "request-turn-text"
+            ? "text"
+            : "speech"
+    }
+  });
 }
 
 describe("P6-A semantic behavior policy", () => {
@@ -606,7 +647,12 @@ describe("P6-A semantic behavior policy", () => {
           context({
             presence: {
               ...baseContext.presence,
-              capabilities: { ...baseContext.presence.capabilities, live2d: "unavailable" }
+              capabilities: {
+                ...baseContext.presence.capabilities,
+                tts: "available",
+                audio: "available",
+                live2d: "unavailable"
+              }
             }
           })
         ).active
@@ -832,7 +878,8 @@ describe("P6-A semantic behavior policy", () => {
       "setInterval",
       "requestAnimationFrame",
       "BroadcastChannel",
-      "Audio",
+      "AudioContext",
+      "HTMLAudioElement",
       "CompanionBus",
       "fetch",
       "Cubism",
@@ -846,5 +893,417 @@ describe("P6-A semantic behavior policy", () => {
       const pattern = forbidden === "React" ? `\\b${escaped}\\b` : escaped;
       expect(source).not.toMatch(new RegExp(pattern, "i"));
     }
+  });
+});
+
+describe("P6-C capability gates", () => {
+  it("uses one gate for every visual semantic modality", () => {
+    const visualIntents = [
+      intent({ intentId: "attention", kind: "attention", priority: "P1", scope: "turn" }),
+      intent({ intentId: "gaze", kind: "gaze", priority: "P1", scope: "turn" }),
+      intent({ intentId: "reaction", kind: "reaction", priority: "P2", scope: "turn" }),
+      proactiveIntent("silent-attention")
+    ];
+
+    for (const candidate of visualIntents) {
+      expect(
+        isIntentAllowedByCapabilityPolicy(
+          candidate,
+          presenceWith({
+            capabilities: { live2d: "available" }
+          })
+        )
+      ).toBe(true);
+      expect(submit(createInitialBehaviorPolicyState(), candidate).active).toEqual(candidate);
+
+      for (const live2d of ["unknown", "unavailable"] as const) {
+        const unavailablePresence = presenceWith({ capabilities: { live2d } });
+        expect(isIntentAllowedByCapabilityPolicy(candidate, unavailablePresence)).toBe(false);
+        expect(
+          submit(
+            createInitialBehaviorPolicyState(),
+            candidate,
+            context({ presence: unavailablePresence })
+          ).active
+        ).toEqual({ kind: "none" });
+      }
+    }
+  });
+
+  it("requires online connectivity for ambient and proactive P3 intents", () => {
+    const candidates = [
+      intent({
+        intentId: "connectivity-ambient-gaze",
+        kind: "gaze",
+        priority: "P3",
+        scope: "decision",
+        source: "idle-policy",
+        reason: "silent-attention"
+      }),
+      proactiveIntent("silent-attention", "connectivity-silent"),
+      proactiveIntent("request-turn-text", "connectivity-text"),
+      proactiveIntent("request-turn-speech", "connectivity-speech")
+    ];
+
+    for (const connectivity of ["unknown", "reconnecting", "offline"] as const) {
+      for (const candidate of candidates) {
+        const next = submit(
+          createInitialBehaviorPolicyState(),
+          candidate,
+          context({
+            presence: presenceWith({
+              connectivity,
+              capabilities: { tts: "available", audio: "available", live2d: "available" }
+            })
+          })
+        );
+        expect(next.active).toEqual({ kind: "none" });
+      }
+    }
+
+    for (const candidate of candidates) {
+      expect(
+        submit(
+          createInitialBehaviorPolicyState(),
+          candidate,
+          context({
+            presence: presenceWith({
+              connectivity: "online",
+              capabilities: { tts: "available", audio: "available", live2d: "available" }
+            })
+          })
+        ).active
+      ).toEqual(candidate);
+    }
+  });
+
+  it("requires both TTS and audio for proactive speech, independently of Live2D", () => {
+    for (const tts of ["unknown", "available", "unavailable"] as const) {
+      for (const audio of ["unknown", "available", "unavailable"] as const) {
+        const candidate = proactiveIntent("request-turn-speech", `speech-${tts}-${audio}`);
+        const next = submit(
+          createInitialBehaviorPolicyState(),
+          candidate,
+          context({
+            presence: presenceWith({
+              connectivity: "online",
+              capabilities: { tts, audio, live2d: "unavailable" }
+            })
+          })
+        );
+        expect(next.active).toEqual(
+          tts === "available" && audio === "available" ? candidate : { kind: "none" }
+        );
+      }
+    }
+  });
+
+  it("keeps proactive text independent of TTS, audio, and Live2D", () => {
+    for (const live2d of ["unknown", "unavailable"] as const) {
+      const candidate = proactiveIntent("request-turn-text", `text-${live2d}`);
+      expect(
+        submit(
+          createInitialBehaviorPolicyState(),
+          candidate,
+          context({
+            presence: presenceWith({
+              connectivity: "online",
+              capabilities: { tts: "unavailable", audio: "unknown", live2d }
+            })
+          })
+        ).active
+      ).toEqual(candidate);
+    }
+
+    const candidate = proactiveIntent("request-turn-text", "text-offline");
+    expect(
+      submit(
+        createInitialBehaviorPolicyState(),
+        candidate,
+        context({ presence: presenceWith({ connectivity: "offline" }) })
+      ).active
+    ).toEqual({ kind: "none" });
+  });
+
+  it("requires online and Live2D for silent attention, but not TTS or audio", () => {
+    for (const connectivity of ["unknown", "online", "reconnecting", "offline"] as const) {
+      for (const live2d of ["unknown", "available", "unavailable"] as const) {
+        const candidate = proactiveIntent("silent-attention", `silent-${connectivity}-${live2d}`);
+        const next = submit(
+          createInitialBehaviorPolicyState(),
+          candidate,
+          context({
+            presence: presenceWith({
+              connectivity,
+              capabilities: { tts: "unavailable", audio: "unavailable", live2d }
+            })
+          })
+        );
+        expect(next.active).toEqual(
+          connectivity === "online" && live2d === "available" ? candidate : { kind: "none" }
+        );
+      }
+    }
+  });
+
+  it("does not apply the ambient connectivity gate to active task or interaction intents", () => {
+    const candidates = [
+      intent({
+        intentId: "offline-listening",
+        kind: "attention",
+        priority: "P0",
+        scope: "session"
+      }),
+      intent({
+        intentId: "offline-thinking",
+        kind: "gaze",
+        priority: "P1",
+        scope: "turn",
+        reason: "thinking"
+      }),
+      intent({
+        intentId: "offline-speaking",
+        kind: "gaze",
+        priority: "P1",
+        scope: "turn",
+        reason: "speech-active",
+        payload: { target: "user", strength: 1 }
+      }),
+      intent({
+        intentId: "offline-reaction",
+        kind: "reaction",
+        priority: "P2",
+        scope: "turn"
+      })
+    ];
+
+    for (const connectivity of ["reconnecting", "offline"] as const) {
+      for (const candidate of candidates) {
+        expect(
+          submit(
+            createInitialBehaviorPolicyState(),
+            candidate,
+            context({ presence: presenceWith({ connectivity }) })
+          ).active
+        ).toEqual(candidate);
+      }
+    }
+  });
+
+  it("does not clear actual speech-active lifecycle behavior for TTS or audio loss", () => {
+    const speaking = intent({
+      intentId: "actual-speaking",
+      kind: "gaze",
+      priority: "P1",
+      scope: "turn",
+      reason: "speech-active",
+      payload: { target: "user", strength: 1 }
+    });
+    expect(
+      submit(
+        createInitialBehaviorPolicyState(),
+        speaking,
+        context({
+          presence: presenceWith({
+            connectivity: "offline",
+            capabilities: { tts: "unavailable", audio: "unavailable", live2d: "available" }
+          })
+        })
+      ).active
+    ).toEqual(speaking);
+  });
+
+  it("reconciles affected active behavior and never replays it after recovery", () => {
+    const silent = proactiveIntent("silent-attention", "active-silent");
+    let state = submit(
+      createInitialBehaviorPolicyState(),
+      silent,
+      context({
+        presence: presenceWith({
+          connectivity: "online",
+          capabilities: { live2d: "available" }
+        })
+      })
+    );
+    state = reduceBehaviorPolicy(
+      state,
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(silent) },
+      context({ presence: presenceWith({ connectivity: "reconnecting" }), nowMs: 120 })
+    );
+    expect(state.active).toEqual({ kind: "none" });
+    state = reduceBehaviorPolicy(
+      state,
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(silent) },
+      context({ presence: presenceWith({ connectivity: "online" }), nowMs: 140 })
+    );
+    expect(state.active).toEqual({ kind: "none" });
+
+    const speech = proactiveIntent("request-turn-speech", "active-speech");
+    state = submit(
+      createInitialBehaviorPolicyState(),
+      speech,
+      context({
+        presence: presenceWith({
+          capabilities: { tts: "available", audio: "available" }
+        })
+      })
+    );
+    state = reduceBehaviorPolicy(
+      state,
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(speech) },
+      context({
+        nowMs: 120,
+        presence: presenceWith({ capabilities: { tts: "unavailable" } })
+      })
+    );
+    expect(state.active).toEqual({ kind: "none" });
+    state = reduceBehaviorPolicy(
+      state,
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(speech) },
+      context({
+        nowMs: 140,
+        presence: presenceWith({ capabilities: { tts: "available", audio: "available" } })
+      })
+    );
+    expect(state.active).toEqual({ kind: "none" });
+
+    const text = proactiveIntent("request-turn-text", "active-text");
+    state = submit(
+      createInitialBehaviorPolicyState(),
+      text,
+      context({
+        presence: presenceWith({
+          capabilities: { tts: "available", audio: "available", live2d: "available" }
+        })
+      })
+    );
+    state = reduceBehaviorPolicy(
+      state,
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(text) },
+      context({
+        nowMs: 160,
+        presence: presenceWith({
+          capabilities: { tts: "unavailable", audio: "unavailable", live2d: "unavailable" }
+        })
+      })
+    );
+    expect(state.active).toEqual(text);
+
+    const visual = proactiveIntent("silent-attention", "active-visual-downgrade");
+    state = submit(
+      createInitialBehaviorPolicyState(),
+      visual,
+      context({ presence: presenceWith({ capabilities: { live2d: "available" } }) })
+    );
+    state = reduceBehaviorPolicy(
+      state,
+      { type: "clock-tick", intentRef: getBehaviorIntentRef(visual) },
+      context({
+        nowMs: 180,
+        presence: presenceWith({ capabilities: { live2d: "unavailable" } })
+      })
+    );
+    expect(state.active).toEqual({ kind: "none" });
+  });
+
+  it("reconciles capability loss before admitting a new candidate", () => {
+    const speech = proactiveIntent("request-turn-speech", "stale-speech");
+    let state = submit(
+      createInitialBehaviorPolicyState(),
+      speech,
+      context({
+        presence: presenceWith({
+          capabilities: { tts: "available", audio: "available" }
+        })
+      })
+    );
+    const reaction = intent({
+      intentId: "replacement-reaction",
+      kind: "reaction",
+      priority: "P2",
+      scope: "turn"
+    });
+    state = submit(
+      state,
+      reaction,
+      context({ presence: presenceWith({ capabilities: { tts: "unavailable" } }), nowMs: 120 })
+    );
+    expect(state.active).toEqual(reaction);
+  });
+
+  it("preserves a valid current nonvisual winner when a visual candidate is capability-invalid", () => {
+    const text = proactiveIntent("request-turn-text", "current-text");
+    const constrainedPresence = presenceWith({
+      capabilities: { tts: "unavailable", audio: "unavailable", live2d: "unavailable" }
+    });
+    let state = submit(
+      createInitialBehaviorPolicyState(),
+      text,
+      context({ presence: constrainedPresence })
+    );
+    const visual = intent({
+      intentId: "invalid-visual-p0",
+      kind: "gaze",
+      priority: "P0",
+      scope: "session",
+      createdAtMs: 120
+    });
+    state = submit(state, visual, context({ presence: constrainedPresence, nowMs: 120 }));
+    expect(state.active).toEqual(text);
+  });
+
+  it("keeps a P0 listener over P1 thinking and P1 speech over P2 interruption", () => {
+    const listening = intent({
+      intentId: "priority-listening",
+      kind: "attention",
+      priority: "P0",
+      scope: "session"
+    });
+    const thinking = intent({
+      intentId: "priority-thinking",
+      kind: "gaze",
+      priority: "P1",
+      scope: "turn",
+      createdAtMs: 120
+    });
+    let state = submit(createInitialBehaviorPolicyState(), listening);
+    state = submit(state, thinking, context({ nowMs: 120 }));
+    expect(state.active).toEqual(listening);
+
+    const speaking = intent({
+      intentId: "priority-speaking",
+      kind: "gaze",
+      priority: "P1",
+      scope: "turn",
+      reason: "speech-active",
+      createdAtMs: 130,
+      payload: { target: "user", strength: 1 }
+    });
+    state = submit(createInitialBehaviorPolicyState(), speaking, context({ nowMs: 130 }));
+    const interrupt = intent({
+      intentId: "priority-interrupt",
+      kind: "reaction",
+      priority: "P2",
+      scope: "turn",
+      createdAtMs: 140
+    });
+    state = submit(state, interrupt, context({ nowMs: 140 }));
+    expect(state.active).toEqual(speaking);
+  });
+
+  it("rejects a capability-invalid lifecycle candidate against the same Presence snapshot", () => {
+    const thinking = intent({
+      intentId: "unavailable-thinking",
+      kind: "gaze",
+      priority: "P1",
+      scope: "turn"
+    });
+    expect(
+      submit(
+        createInitialBehaviorPolicyState(),
+        thinking,
+        context({ presence: presenceWith({ capabilities: { live2d: "unavailable" } }) })
+      ).active
+    ).toEqual({ kind: "none" });
   });
 });
