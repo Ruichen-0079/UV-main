@@ -30,6 +30,10 @@ import {
   invokeWindowsPgCtlStart,
   launchWindowsPrivatePostgres,
   launcherProcessWasNeverCreated,
+  POSTGRES_IDENTITY_DB_PROBE_SQL,
+  POSTGRES_IDENTITY_DB_PROBE_TIMEOUT_MS,
+  isPostgresIdentityStartTimePlausible,
+  probePrivatePostgresIdentity,
   reconcileWindowsPrivatePostgresLaunch,
   runWindowsPgCtlChild,
   waitForPostmasterCandidate,
@@ -37,6 +41,7 @@ import {
   type WindowsPgCtlChildHandle
 } from "./postgres-cluster.js";
 import { generatePostgresPassword, redactSecretText } from "./postgres-secret.js";
+import { CREATION_TIME_TOLERANCE_MS, expectedClusterName } from "./postgres-ownership.js";
 import type { PostgresDistribution } from "./postgres-distribution.js";
 import type { ProcessInspectionResult } from "./types.js";
 
@@ -84,6 +89,206 @@ afterEach(() => {
 });
 
 describe("private postgres cluster safety", () => {
+  it("runs the read-only authenticated identity probe with bounded postgres-client settings", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-identity-db-")));
+    tempDirs.push(layout.root);
+    const marker = createClusterMarker(layout);
+    const distribution: PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const launchStartedAt = new Date();
+    const postmasterStartTime = new Date(launchStartedAt.getTime() + 100).toISOString();
+    let captured: Record<string, unknown> | null = null;
+    const result = await probePrivatePostgresIdentity({
+      layout,
+      distribution,
+      port: 55432,
+      password: "identity-test-password",
+      clusterId: marker.clusterId,
+      launchStartedAt,
+      execute: async (input) => {
+        captured = input as unknown as Record<string, unknown>;
+        return {
+          ok: true,
+          output: "",
+          sqlState: null,
+          rows: [
+            {
+              data_directory: layout.data,
+              cluster_name: expectedClusterName(marker.clusterId),
+              port: "55432",
+              server_version_num: "160010",
+              postmaster_start_time: postmasterStartTime
+            }
+          ]
+        };
+      }
+    });
+
+    expect(result.status).toBe("RESOLVED");
+    expect(result.dataDirectoryMatchesExpected).toBe(true);
+    expect(result.clusterNameMatchesExpected).toBe(true);
+    expect(result.portMatchesExpected).toBe(true);
+    expect(result.majorMatches).toBe(true);
+    expect(result.startTimePlausible).toBe(true);
+    expect(captured?.["database"]).toBe("postgres");
+    expect(captured?.["queryTimeoutMs"]).toBe(POSTGRES_IDENTITY_DB_PROBE_TIMEOUT_MS);
+    expect(captured?.["includeRows"]).toBe(true);
+    expect(captured?.["sql"]).toBe(POSTGRES_IDENTITY_DB_PROBE_SQL);
+    expect(String(captured?.["sql"])).not.toMatch(/CREATE|INSERT|UPDATE|DELETE|ALTER|DROP/i);
+  });
+
+  it("surfaces identity probe mismatches and fails closed on query timeout", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-identity-fail-")));
+    tempDirs.push(layout.root);
+    const marker = createClusterMarker(layout);
+    const distribution: PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const launchStartedAt = new Date();
+    const mismatch = await probePrivatePostgresIdentity({
+      layout,
+      distribution,
+      port: 55432,
+      password: "identity-test-password",
+      clusterId: marker.clusterId,
+      launchStartedAt,
+      execute: async () => ({
+        ok: true,
+        output: "",
+        sqlState: null,
+        rows: [
+          {
+            data_directory: "/foreign/data",
+            cluster_name: "foreign-cluster",
+            port: "5432",
+            server_version_num: "150000",
+            postmaster_start_time: "2020-01-01T00:00:00.000Z"
+          }
+        ]
+      })
+    });
+    expect(mismatch.status).toBe("RESOLVED");
+    expect(mismatch.dataDirectoryMatchesExpected).toBe(false);
+    expect(mismatch.clusterNameMatchesExpected).toBe(false);
+    expect(mismatch.portMatchesExpected).toBe(false);
+    expect(mismatch.majorMatches).toBe(false);
+    expect(mismatch.startTimePlausible).toBe(false);
+
+    const timeout = await probePrivatePostgresIdentity({
+      layout,
+      distribution,
+      port: 55432,
+      password: "identity-test-password",
+      clusterId: marker.clusterId,
+      launchStartedAt,
+      execute: async () => ({
+        ok: false,
+        output: "not surfaced",
+        sqlState: "57014",
+        errorCode: "57014"
+      })
+    });
+    expect(timeout.status).toBe("TIMEOUT");
+    expect(timeout.dataDirectory).toBeNull();
+    expect(timeout.clusterName).toBeNull();
+  });
+
+  it("uses the ownership-grade launch window for OS and DB identity timestamps", () => {
+    const launchStartedAt = new Date("2026-08-17T00:00:00.000Z");
+    const lowerBoundary = launchStartedAt.getTime() - CREATION_TIME_TOLERANCE_MS;
+    const upperBoundary =
+      launchStartedAt.getTime() + PG_CTL_START_WAIT_SECONDS * 1_000 + CREATION_TIME_TOLERANCE_MS;
+    const timestamps = [
+      [lowerBoundary - 1, false],
+      [lowerBoundary, true],
+      [launchStartedAt.getTime(), true],
+      [upperBoundary, true],
+      [upperBoundary + 1, false]
+    ] as const;
+
+    for (const [timestamp, expected] of timestamps) {
+      const value = new Date(timestamp).toISOString();
+      expect(isPostgresIdentityStartTimePlausible(value, launchStartedAt)).toBe(expected);
+    }
+
+    const delayedClock = vi.spyOn(Date, "now").mockReturnValue(upperBoundary + 60_000);
+    expect(
+      isPostgresIdentityStartTimePlausible(new Date(upperBoundary).toISOString(), launchStartedAt)
+    ).toBe(true);
+    expect(
+      isPostgresIdentityStartTimePlausible(
+        new Date(upperBoundary + 1).toISOString(),
+        launchStartedAt
+      )
+    ).toBe(false);
+    delayedClock.mockRestore();
+  });
+
+  it("applies the fixed launch window to the authenticated postmaster timestamp", async () => {
+    const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-identity-time-")));
+    tempDirs.push(layout.root);
+    const marker = createClusterMarker(layout);
+    const distribution: PostgresDistribution = {
+      home: "/opt/pg16",
+      binDir: "/opt/pg16/bin",
+      postgres: "/opt/pg16/bin/postgres",
+      pgCtl: "/opt/pg16/bin/pg_ctl",
+      initdb: "/opt/pg16/bin/initdb",
+      createdb: null,
+      psql: "/opt/pg16/bin/psql",
+      major: 16,
+      versionText: "postgres (PostgreSQL) 16.10"
+    };
+    const launchStartedAt = new Date("2026-08-17T00:00:00.000Z");
+    const upperBoundary =
+      launchStartedAt.getTime() + PG_CTL_START_WAIT_SECONDS * 1_000 + CREATION_TIME_TOLERANCE_MS;
+    const execute = async (postmasterStartTime: string) =>
+      probePrivatePostgresIdentity({
+        layout,
+        distribution,
+        port: 55432,
+        password: "identity-test-password",
+        clusterId: marker.clusterId,
+        launchStartedAt,
+        execute: async () => ({
+          ok: true,
+          output: "",
+          sqlState: null,
+          rows: [
+            {
+              data_directory: layout.data,
+              cluster_name: expectedClusterName(marker.clusterId),
+              port: "55432",
+              server_version_num: "160010",
+              postmaster_start_time: postmasterStartTime
+            }
+          ]
+        })
+      });
+
+    const atUpperBoundary = await execute(new Date(upperBoundary).toISOString());
+    const afterUpperBoundary = await execute(new Date(upperBoundary + 1).toISOString());
+    expect(atUpperBoundary.startTimePlausible).toBe(true);
+    expect(afterUpperBoundary.startTimePlausible).toBe(false);
+  });
+
   it("refuses init over non-empty PGDATA without a YUVI marker", () => {
     const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-foreign-")));
     tempDirs.push(layout.root);

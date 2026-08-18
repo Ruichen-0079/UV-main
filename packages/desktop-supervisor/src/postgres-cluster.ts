@@ -30,6 +30,7 @@ import {
 } from "./postgres-layout.js";
 import { redactSecretText } from "./postgres-secret.js";
 import {
+  CREATION_TIME_TOLERANCE_MS,
   evaluatePostgresOwnership,
   expectedClusterName,
   postgresOwnershipDiagnosticReason,
@@ -952,6 +953,7 @@ async function createSqlClient(input: {
   port: number;
   password: string;
   database: string;
+  queryTimeoutMs?: number;
 }): Promise<SqlClient> {
   const mod = (await import("pg")) as {
     Client: new (config: Record<string, unknown>) => SqlClient;
@@ -962,7 +964,8 @@ async function createSqlClient(input: {
     user: PRIVATE_POSTGRES_USER,
     password: input.password,
     database: input.database,
-    connectionTimeoutMillis: 4_000
+    connectionTimeoutMillis: 4_000,
+    ...(input.queryTimeoutMs != null ? { query_timeout: input.queryTimeoutMs } : {})
   });
 }
 
@@ -970,7 +973,19 @@ export type AuthenticatedSqlResult = {
   ok: boolean;
   output: string;
   sqlState: string | null;
+  errorCode?: string | null;
+  rows?: Array<Record<string, unknown>>;
 };
+
+export type AuthenticatedSqlExecutor = (input: {
+  distribution: PostgresDistribution;
+  port: number;
+  password: string;
+  database?: string;
+  sql: string;
+  queryTimeoutMs?: number;
+  includeRows?: boolean;
+}) => Promise<AuthenticatedSqlResult>;
 
 function sqlStateFromError(error: unknown): string | null {
   if (!error || typeof error !== "object") return null;
@@ -984,12 +999,15 @@ export async function execAuthenticatedSql(input: {
   password: string;
   database?: string;
   sql: string;
+  queryTimeoutMs?: number;
+  includeRows?: boolean;
 }): Promise<AuthenticatedSqlResult> {
   void input.distribution;
   const client = await createSqlClient({
     port: input.port,
     password: input.password,
-    database: input.database ?? PRIVATE_POSTGRES_DATABASE
+    database: input.database ?? PRIVATE_POSTGRES_DATABASE,
+    ...(input.queryTimeoutMs != null ? { queryTimeoutMs: input.queryTimeoutMs } : {})
   });
   try {
     await client.connect();
@@ -1001,15 +1019,187 @@ export async function execAuthenticatedSql(input: {
           .join("|")
       )
       .join("\n");
-    return { ok: true, output, sqlState: null };
+    return {
+      ok: true,
+      output,
+      sqlState: null,
+      ...(input.includeRows ? { rows: result.rows } : {})
+    };
   } catch (error) {
+    const errorCode =
+      error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : null;
     return {
       ok: false,
       output: error instanceof Error ? error.message : String(error),
-      sqlState: sqlStateFromError(error)
+      sqlState: sqlStateFromError(error),
+      ...(input.includeRows
+        ? { errorCode: typeof errorCode === "string" ? errorCode.slice(0, 32) : null }
+        : {})
     };
   } finally {
     await client.end().catch(() => undefined);
+  }
+}
+
+export const POSTGRES_IDENTITY_DB_PROBE_TIMEOUT_MS = 4_000;
+export const POSTGRES_IDENTITY_DB_PROBE_SQL =
+  "SELECT current_setting('data_directory') AS data_directory, " +
+  "current_setting('cluster_name') AS cluster_name, " +
+  "current_setting('port') AS port, " +
+  "current_setting('server_version_num') AS server_version_num, " +
+  "pg_postmaster_start_time() AS postmaster_start_time";
+
+export type PostgresIdentityDbProbeResult = {
+  status: "RESOLVED" | "PASSWORD_UNAVAILABLE" | "TIMEOUT" | "QUERY_FAILED" | "PARSE_FAILED";
+  durationMs: number;
+  sqlState: string | null;
+  dataDirectory: string | null;
+  clusterName: string | null;
+  port: number | null;
+  serverVersionNum: number | null;
+  postmasterStartTime: string | null;
+  dataDirectoryMatchesExpected: boolean | null;
+  clusterNameMatchesExpected: boolean | null;
+  portMatchesExpected: boolean | null;
+  majorMatches: boolean | null;
+  startTimePlausible: boolean | null;
+};
+
+function boundedIdentityProbeDuration(value: number): number {
+  return Number.isFinite(value) ? Math.min(Math.max(Math.round(value), 0), 60_000) : 0;
+}
+
+function boundedIdentityProbeText(value: unknown, maxChars: number): string | null {
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value.toISOString().slice(0, maxChars) : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) return String(value).slice(0, maxChars);
+  if (typeof value !== "string" || value.length === 0) return null;
+  return value.slice(0, maxChars);
+}
+
+/**
+ * Diagnostic-only copy of the authoritative PostgreSQL launch-time window.
+ * It intentionally has no dependency on the time at which diagnostics run.
+ */
+export function isPostgresIdentityStartTimePlausible(
+  value: string,
+  launchStartedAt: Date
+): boolean {
+  const time = Date.parse(value);
+  const launch = launchStartedAt.getTime();
+  const lower = launch - CREATION_TIME_TOLERANCE_MS;
+  const upper = launch + PG_CTL_START_WAIT_SECONDS * 1_000 + CREATION_TIME_TOLERANCE_MS;
+  return Number.isFinite(time) && time >= lower && time <= upper;
+}
+
+function identityProbeFailure(
+  status: PostgresIdentityDbProbeResult["status"],
+  durationMs: number,
+  sqlState: string | null = null
+): PostgresIdentityDbProbeResult {
+  return {
+    status,
+    durationMs: boundedIdentityProbeDuration(durationMs),
+    sqlState,
+    dataDirectory: null,
+    clusterName: null,
+    port: null,
+    serverVersionNum: null,
+    postmasterStartTime: null,
+    dataDirectoryMatchesExpected: null,
+    clusterNameMatchesExpected: null,
+    portMatchesExpected: null,
+    majorMatches: null,
+    startTimePlausible: null
+  };
+}
+
+/**
+ * Diagnostic-only authenticated identity probe. It is deliberately separate
+ * from readiness and CREATE DATABASE and cannot establish ownership.
+ */
+export async function probePrivatePostgresIdentity(input: {
+  layout: PostgresLayout;
+  distribution: PostgresDistribution;
+  port: number;
+  password: string;
+  clusterId: string;
+  launchStartedAt: Date;
+  execute?: AuthenticatedSqlExecutor;
+}): Promise<PostgresIdentityDbProbeResult> {
+  const started = Date.now();
+  if (!input.password) return identityProbeFailure("PASSWORD_UNAVAILABLE", 0);
+  try {
+    const execute = input.execute ?? execAuthenticatedSql;
+    const result = await execute({
+      distribution: input.distribution,
+      port: input.port,
+      password: input.password,
+      database: STANDARD_POSTGRES_DATABASE,
+      sql: POSTGRES_IDENTITY_DB_PROBE_SQL,
+      queryTimeoutMs: POSTGRES_IDENTITY_DB_PROBE_TIMEOUT_MS,
+      includeRows: true
+    });
+    const durationMs = boundedIdentityProbeDuration(Date.now() - started);
+    if (!result.ok) {
+      return identityProbeFailure(
+        result.sqlState === "57014" || result.errorCode === "ETIMEDOUT"
+          ? "TIMEOUT"
+          : "QUERY_FAILED",
+        durationMs,
+        result.sqlState
+      );
+    }
+    const row = result.rows?.[0];
+    if (!row || typeof row !== "object") {
+      return identityProbeFailure("PARSE_FAILED", durationMs, result.sqlState);
+    }
+    const dataDirectory = boundedIdentityProbeText(row["data_directory"], 1_024);
+    const clusterName = boundedIdentityProbeText(row["cluster_name"], 128);
+    const rawPort = boundedIdentityProbeText(row["port"], 16);
+    const rawVersion = boundedIdentityProbeText(row["server_version_num"], 16);
+    const postmasterStartTime = boundedIdentityProbeText(row["postmaster_start_time"], 64);
+    const port = rawPort && /^\d{1,5}$/.test(rawPort) ? Number(rawPort) : null;
+    const serverVersionNum =
+      rawVersion && /^\d{1,10}$/.test(rawVersion) ? Number(rawVersion) : null;
+    if (
+      !dataDirectory ||
+      !clusterName ||
+      port == null ||
+      !Number.isInteger(port) ||
+      port <= 0 ||
+      port > 65_535 ||
+      serverVersionNum == null ||
+      !Number.isSafeInteger(serverVersionNum) ||
+      !postmasterStartTime ||
+      !Number.isFinite(Date.parse(postmasterStartTime))
+    ) {
+      return identityProbeFailure("PARSE_FAILED", durationMs, result.sqlState);
+    }
+    const major = Math.floor(serverVersionNum / 10_000);
+    return {
+      status: "RESOLVED",
+      durationMs,
+      sqlState: null,
+      dataDirectory,
+      clusterName,
+      port,
+      serverVersionNum,
+      postmasterStartTime: new Date(postmasterStartTime).toISOString(),
+      dataDirectoryMatchesExpected: pathsEqual(dataDirectory, input.layout.data),
+      clusterNameMatchesExpected: clusterName === expectedClusterName(input.clusterId),
+      portMatchesExpected: port === input.port,
+      majorMatches: major === PRIVATE_POSTGRES_MAJOR,
+      startTimePlausible: isPostgresIdentityStartTimePlausible(
+        postmasterStartTime,
+        input.launchStartedAt
+      )
+    };
+  } catch {
+    return identityProbeFailure("QUERY_FAILED", Date.now() - started);
   }
 }
 

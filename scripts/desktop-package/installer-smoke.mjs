@@ -2089,7 +2089,28 @@ function createEmptyPostgresAttemptDiagnostic(postgresAttempt = 0) {
     databaseCreateSqlState: null,
     yuviReady: "NOT_RUN",
     fencedStopStatus: "NOT_RUN",
-    postgresServiceLastErrorCode: null
+    postgresServiceLastErrorCode: null,
+    postgresIdentityOsStatus: "NOT_RUN",
+    postgresIdentityOsDurationMs: null,
+    postgresIdentityOsProcessId: null,
+    postgresIdentityOsPidMatches: null,
+    postgresIdentityOsExecutablePath: null,
+    postgresIdentityOsStartedAtUtc: null,
+    postgresIdentityOsExecutableMatches: null,
+    postgresIdentityOsStartTimePlausible: null,
+    postgresIdentityDbStatus: "NOT_RUN",
+    postgresIdentityDbDurationMs: null,
+    postgresIdentityDbSqlState: null,
+    postgresIdentityDbDataDirectory: null,
+    postgresIdentityDbClusterName: null,
+    postgresIdentityDbPort: null,
+    postgresIdentityDbServerVersionNum: null,
+    postgresIdentityDbPostmasterStartTime: null,
+    postgresIdentityDbDataDirectoryMatches: null,
+    postgresIdentityDbClusterNameMatches: null,
+    postgresIdentityDbPortMatches: null,
+    postgresIdentityDbMajorMatches: null,
+    postgresIdentityDbStartTimePlausible: null
   };
 }
 
@@ -2208,7 +2229,9 @@ const POSTGRES_DIAGNOSTIC_EVENT_NAMES = new Set([
   "database_create",
   "yuvi_ready",
   "fenced_stop",
-  "service"
+  "service",
+  "identity_os",
+  "identity_db"
 ]);
 
 function isPostgresDiagnosticEvent(event) {
@@ -2347,6 +2370,86 @@ export function parsePostgresLifecycleDiagnostics(output = "", secrets = []) {
       if (event.phase === "SERVICE_LAST_ERROR") {
         diagnostic.postgresServiceLastErrorCode = boundedServiceErrorCode(event.lastErrorCode);
       }
+      continue;
+    }
+    if (name === "identity_os") {
+      diagnostic.postgresIdentityOsStatus = isBoundedEnum(event.status, [
+        "RESOLVED",
+        "NOT_RUNNING",
+        "TIMEOUT",
+        "EXIT_NONZERO",
+        "EMPTY_OUTPUT",
+        "PARSE_FAILED",
+        "ERROR"
+      ]);
+      diagnostic.postgresIdentityOsDurationMs =
+        Number.isSafeInteger(event.durationMs) &&
+        event.durationMs >= 0 &&
+        event.durationMs <= 60_000
+          ? event.durationMs
+          : null;
+      diagnostic.postgresIdentityOsProcessId = boundedPid(event.processId);
+      diagnostic.postgresIdentityOsPidMatches =
+        typeof event.processIdMatches === "boolean" ? event.processIdMatches : null;
+      diagnostic.postgresIdentityOsExecutablePath =
+        typeof event.executablePath === "string"
+          ? boundedRedactedPostgresLifecycleOutput(event.executablePath, secrets)
+          : null;
+      diagnostic.postgresIdentityOsStartedAtUtc =
+        typeof event.startedAtUtc === "string"
+          ? boundedRedactedPostgresLifecycleOutput(event.startedAtUtc, secrets).slice(0, 64)
+          : null;
+      diagnostic.postgresIdentityOsExecutableMatches =
+        typeof event.executableMatches === "boolean" ? event.executableMatches : null;
+      diagnostic.postgresIdentityOsStartTimePlausible =
+        typeof event.startTimePlausible === "boolean" ? event.startTimePlausible : null;
+      continue;
+    }
+    if (name === "identity_db") {
+      diagnostic.postgresIdentityDbStatus = isBoundedEnum(event.status, [
+        "RESOLVED",
+        "PASSWORD_UNAVAILABLE",
+        "TIMEOUT",
+        "QUERY_FAILED",
+        "PARSE_FAILED"
+      ]);
+      diagnostic.postgresIdentityDbDurationMs =
+        Number.isSafeInteger(event.durationMs) &&
+        event.durationMs >= 0 &&
+        event.durationMs <= 60_000
+          ? event.durationMs
+          : null;
+      diagnostic.postgresIdentityDbSqlState = boundedSqlState(event.sqlState);
+      diagnostic.postgresIdentityDbDataDirectory =
+        typeof event.dataDirectory === "string"
+          ? boundedRedactedPostgresLifecycleOutput(event.dataDirectory, secrets)
+          : null;
+      diagnostic.postgresIdentityDbClusterName =
+        typeof event.clusterName === "string"
+          ? boundedRedactedPostgresLifecycleOutput(event.clusterName, secrets).slice(0, 128)
+          : null;
+      diagnostic.postgresIdentityDbPort =
+        Number.isSafeInteger(event.port) && event.port > 0 && event.port <= 65_535
+          ? event.port
+          : null;
+      diagnostic.postgresIdentityDbServerVersionNum =
+        Number.isSafeInteger(event.serverVersionNum) && event.serverVersionNum > 0
+          ? event.serverVersionNum
+          : null;
+      diagnostic.postgresIdentityDbPostmasterStartTime =
+        typeof event.postmasterStartTime === "string"
+          ? boundedRedactedPostgresLifecycleOutput(event.postmasterStartTime, secrets).slice(0, 64)
+          : null;
+      diagnostic.postgresIdentityDbDataDirectoryMatches =
+        typeof event.dataDirectoryMatches === "boolean" ? event.dataDirectoryMatches : null;
+      diagnostic.postgresIdentityDbClusterNameMatches =
+        typeof event.clusterNameMatches === "boolean" ? event.clusterNameMatches : null;
+      diagnostic.postgresIdentityDbPortMatches =
+        typeof event.portMatches === "boolean" ? event.portMatches : null;
+      diagnostic.postgresIdentityDbMajorMatches =
+        typeof event.majorMatches === "boolean" ? event.majorMatches : null;
+      diagnostic.postgresIdentityDbStartTimePlausible =
+        typeof event.startTimePlausible === "boolean" ? event.startTimePlausible : null;
     }
   }
   return diagnostic;
@@ -2425,6 +2528,27 @@ export function formatInstallerSmokePostgresDiagnostic(diagnostic) {
   const evidence = [
     ["pgCtlStderrTail", diagnostic.pgCtlStderrTail],
     ["pgCtlStdoutTail", diagnostic.pgCtlStdoutTail],
+    ["postgresIdentityOsStatus", diagnostic.postgresIdentityOsStatus],
+    ["postgresIdentityOsDurationMs", diagnostic.postgresIdentityOsDurationMs],
+    ["postgresIdentityOsProcessId", diagnostic.postgresIdentityOsProcessId],
+    ["postgresIdentityOsPidMatches", diagnostic.postgresIdentityOsPidMatches],
+    ["postgresIdentityOsExecutablePath", diagnostic.postgresIdentityOsExecutablePath],
+    ["postgresIdentityOsStartedAtUtc", diagnostic.postgresIdentityOsStartedAtUtc],
+    ["postgresIdentityOsExecutableMatches", diagnostic.postgresIdentityOsExecutableMatches],
+    ["postgresIdentityOsStartTimePlausible", diagnostic.postgresIdentityOsStartTimePlausible],
+    ["postgresIdentityDbStatus", diagnostic.postgresIdentityDbStatus],
+    ["postgresIdentityDbDurationMs", diagnostic.postgresIdentityDbDurationMs],
+    ["postgresIdentityDbSqlState", diagnostic.postgresIdentityDbSqlState],
+    ["postgresIdentityDbDataDirectory", diagnostic.postgresIdentityDbDataDirectory],
+    ["postgresIdentityDbClusterName", diagnostic.postgresIdentityDbClusterName],
+    ["postgresIdentityDbPort", diagnostic.postgresIdentityDbPort],
+    ["postgresIdentityDbServerVersionNum", diagnostic.postgresIdentityDbServerVersionNum],
+    ["postgresIdentityDbPostmasterStartTime", diagnostic.postgresIdentityDbPostmasterStartTime],
+    ["postgresIdentityDbDataDirectoryMatches", diagnostic.postgresIdentityDbDataDirectoryMatches],
+    ["postgresIdentityDbClusterNameMatches", diagnostic.postgresIdentityDbClusterNameMatches],
+    ["postgresIdentityDbPortMatches", diagnostic.postgresIdentityDbPortMatches],
+    ["postgresIdentityDbMajorMatches", diagnostic.postgresIdentityDbMajorMatches],
+    ["postgresIdentityDbStartTimePlausible", diagnostic.postgresIdentityDbStartTimePlausible],
     ["postgresLogTail", diagnostic.postgresLogTail],
     ["postgresRootRelative", diagnostic.postgresRootRelative],
     ["marker", diagnostic.marker],
@@ -2435,7 +2559,10 @@ export function formatInstallerSmokePostgresDiagnostic(diagnostic) {
     ["postgresLogPresent", diagnostic.postgresLogPresent],
     ["postgresLogBytes", diagnostic.postgresLogBytes]
   ];
-  for (const [key, value] of evidence) appendBoundedDiagnosticField(payload, key, value);
+  for (const [key, value] of evidence) {
+    if (value === null || value === undefined || value === "NOT_RUN") continue;
+    appendBoundedDiagnosticField(payload, key, value);
+  }
 
   // Preserve verbose initdb evidence only when the causal snapshot and higher-value
   // PostgreSQL evidence still fit inside the fixed diagnostic budget.

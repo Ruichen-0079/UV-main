@@ -9,7 +9,10 @@ import {
   launchWindowsPrivatePostgres,
   pingPostgres,
   pingPostgresServer,
+  probePrivatePostgresIdentity,
   POSTGRES_LAUNCH_PROCESS_QUERY_TIMEOUT_MS,
+  isPostgresIdentityStartTimePlausible,
+  type PostgresIdentityDbProbeResult,
   type PostgresLaunchDiagnostic
 } from "./postgres-cluster.js";
 import {
@@ -56,9 +59,11 @@ import {
 import {
   forceKillProcessTree,
   inspectProcess,
+  inspectWindowsProcessWithoutCim,
   isProcessAlive,
   requestGracefulStop,
   spawnManagedProcess,
+  type NonCimProcessProbeResult,
   type ProcessInspectionOptions
 } from "./process-windows.js";
 import type {
@@ -117,6 +122,8 @@ export type SupervisorHooks = {
   migratePostgres?: typeof migrateSupervisorTarget;
   platform?: NodeJS.Platform;
   spawnWindowsPgCtl?: import("./postgres-cluster.js").WindowsPgCtlSpawnAsync;
+  identityProcessProbe?: typeof inspectWindowsProcessWithoutCim;
+  identityDatabaseProbe?: typeof probePrivatePostgresIdentity;
   postmasterSettleTimeoutMs?: number;
   postmasterSettleIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -1381,6 +1388,7 @@ export class DesktopSupervisor {
       this.baseEnv[POSTGRES_PASSWORD_ENV]
     ].filter((value): value is string => typeof value === "string" && value.length > 0);
 
+    const launchStartedAt = new Date();
     const launched = await launchWindowsPrivatePostgres({
       layout,
       distribution,
@@ -1403,6 +1411,25 @@ export class DesktopSupervisor {
         this.emitPostgresLaunchDiagnostic(svc, diagnostic)
     });
     if (launched.outcome === "uncertain") {
+      if (
+        this.usesDedicatedWindowsPostgresStart() &&
+        launched.launcher.ok &&
+        Number.isInteger(launched.nominatedPid) &&
+        (launched.nominatedPid ?? 0) > 0
+      ) {
+        const nominatedPid = launched.nominatedPid;
+        if (nominatedPid != null) {
+          await this.runPostgresIdentityDiagnosticExperiment({
+            svc,
+            layout,
+            distribution,
+            port,
+            clusterId,
+            processId: nominatedPid,
+            launchStartedAt
+          });
+        }
+      }
       this.markPostgresIdentityUncertain(
         svc,
         launched.message,
@@ -1488,6 +1515,134 @@ export class DesktopSupervisor {
     svc.ownership = "owned";
     svc.summary = "Private PostgreSQL is ready.";
     svc.child = null;
+  }
+
+  private async runPostgresIdentityDiagnosticExperiment(input: {
+    svc: InternalService;
+    layout: NonNullable<SupervisorConfig["postgresLayout"]>;
+    distribution: NonNullable<SupervisorConfig["postgresDistribution"]>;
+    port: number;
+    clusterId: string;
+    processId: number;
+    launchStartedAt: Date;
+  }): Promise<void> {
+    let osProbe: NonCimProcessProbeResult;
+    try {
+      osProbe = (this.hooks.identityProcessProbe ?? inspectWindowsProcessWithoutCim)(
+        input.processId
+      );
+    } catch {
+      osProbe = {
+        status: "ERROR",
+        processId: input.processId,
+        processIdMatches: null,
+        durationMs: 0,
+        executablePath: null,
+        startedAtUtc: null
+      };
+    }
+    const executableMatches =
+      osProbe.status === "RESOLVED" && osProbe.executablePath
+        ? pathsEqual(osProbe.executablePath, input.distribution.postgres)
+        : null;
+    const startTimePlausible =
+      osProbe.status === "RESOLVED" && osProbe.startedAtUtc
+        ? isPostgresIdentityStartTimePlausible(osProbe.startedAtUtc, input.launchStartedAt)
+        : null;
+    this.emitPostgresIdentityExperimentDiagnostic(input.svc, "os", {
+      status: osProbe.status,
+      durationMs: osProbe.durationMs,
+      processId: osProbe.processId,
+      processIdMatches: osProbe.processIdMatches,
+      executablePath: osProbe.executablePath,
+      startedAtUtc: osProbe.startedAtUtc,
+      executableMatches,
+      startTimePlausible
+    });
+
+    let password: string | null = null;
+    try {
+      password = this.resolvePrivatePostgresPassword();
+    } catch {
+      this.emitPostgresIdentityExperimentDiagnostic(input.svc, "db", {
+        status: "PASSWORD_UNAVAILABLE",
+        durationMs: 0,
+        sqlState: null,
+        dataDirectory: null,
+        clusterName: null,
+        port: null,
+        serverVersionNum: null,
+        postmasterStartTime: null,
+        dataDirectoryMatches: null,
+        clusterNameMatches: null,
+        portMatches: null,
+        majorMatches: null,
+        startTimePlausible: null
+      });
+      return;
+    }
+    if (!password) {
+      this.emitPostgresIdentityExperimentDiagnostic(input.svc, "db", {
+        status: "PASSWORD_UNAVAILABLE",
+        durationMs: 0,
+        sqlState: null,
+        dataDirectory: null,
+        clusterName: null,
+        port: null,
+        serverVersionNum: null,
+        postmasterStartTime: null,
+        dataDirectoryMatches: null,
+        clusterNameMatches: null,
+        portMatches: null,
+        majorMatches: null,
+        startTimePlausible: null
+      });
+      return;
+    }
+
+    let dbProbe: PostgresIdentityDbProbeResult;
+    try {
+      dbProbe = await (this.hooks.identityDatabaseProbe ?? probePrivatePostgresIdentity)({
+        layout: input.layout,
+        distribution: input.distribution,
+        port: input.port,
+        password,
+        clusterId: input.clusterId,
+        launchStartedAt: input.launchStartedAt
+      });
+    } catch {
+      this.emitPostgresIdentityExperimentDiagnostic(input.svc, "db", {
+        status: "QUERY_FAILED",
+        durationMs: 0,
+        sqlState: null,
+        dataDirectory: null,
+        clusterName: null,
+        port: null,
+        serverVersionNum: null,
+        postmasterStartTime: null,
+        dataDirectoryMatches: null,
+        clusterNameMatches: null,
+        portMatches: null,
+        majorMatches: null,
+        startTimePlausible: null
+      });
+      return;
+    }
+    this.emitPostgresIdentityExperimentDiagnostic(input.svc, "db", {
+      status: dbProbe.status,
+      durationMs: dbProbe.durationMs,
+      sqlState: dbProbe.sqlState,
+      dataDirectory: dbProbe.dataDirectory,
+      clusterName: dbProbe.clusterName,
+      port: dbProbe.port,
+      serverVersionNum: dbProbe.serverVersionNum,
+      postmasterStartTime: dbProbe.postmasterStartTime,
+      dataDirectoryMatches: dbProbe.dataDirectoryMatchesExpected,
+      clusterNameMatches: dbProbe.clusterNameMatchesExpected,
+      portMatches: dbProbe.portMatchesExpected,
+      majorMatches: dbProbe.majorMatches,
+      startTimePlausible: dbProbe.startTimePlausible
+    });
   }
 
   private async prepareAndStartPrivatePostgres(): Promise<void> {
@@ -1650,6 +1805,80 @@ export class DesktopSupervisor {
     } catch {
       // Diagnostic failures must never affect PostgreSQL lifecycle behavior.
     }
+  }
+
+  private emitPostgresIdentityExperimentDiagnostic(
+    svc: InternalService,
+    kind: "os" | "db",
+    extra: Record<string, unknown>
+  ): void {
+    let safeExtra: Record<string, unknown> = {};
+    try {
+      safeExtra = this.sanitizePostgresIdentityExperimentDiagnostic(extra);
+    } catch {
+      // Never allow producer-side diagnostic handling to affect startup.
+    }
+    try {
+      this.lifecycleEvent(`postgres.private.identity_${kind}`, svc, safeExtra);
+    } catch {
+      // Diagnostic experiment failures must never affect PostgreSQL lifecycle behavior.
+    }
+  }
+
+  private sanitizePostgresIdentityExperimentDiagnostic(
+    extra: Record<string, unknown>
+  ): Record<string, unknown> {
+    let secrets: string[];
+    try {
+      secrets = [
+        this.config.env[POSTGRES_PASSWORD_ENV],
+        this.baseEnv[POSTGRES_PASSWORD_ENV]
+      ].filter((value): value is string => typeof value === "string" && value.length > 0);
+    } catch {
+      // Never fall back to raw diagnostic strings if secret collection fails.
+      return Object.fromEntries(
+        Object.entries(extra).filter(([, value]) => typeof value !== "string")
+      );
+    }
+
+    const limits: Record<string, number> = {
+      executablePath: 1_024,
+      startedAtUtc: 64,
+      dataDirectory: 1_024,
+      clusterName: 128,
+      postmasterStartTime: 64,
+      sqlState: 32,
+      status: 64,
+      reason: 256
+    };
+    const sanitize = (value: string, maxChars: number): string | null => {
+      try {
+        const redacted = redactSecretText(value, secrets)
+          .replace(
+            /\b(?:password|DATABASE_URL|PGPASSWORD|YUVI_POSTGRES_PASSWORD)\s*[=:]\s*\S+/giu,
+            "[REDACTED_SECRET]"
+          )
+          .replace(/\bBearer\s+\S+/giu, "Bearer [REDACTED]")
+          .replace(
+            /\b(?:commandLine|argv|args|command|env|environment)\s*[=:][^\r\n]*/giu,
+            "[REDACTED_EXECUTION_DATA]"
+          );
+        return redacted.slice(0, maxChars);
+      } catch {
+        return null;
+      }
+    };
+
+    const safe: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(extra)) {
+      if (typeof value === "string") {
+        const sanitized = sanitize(value, limits[key] ?? 512);
+        if (sanitized !== null) safe[key] = sanitized;
+      } else if (value === null || typeof value === "number" || typeof value === "boolean") {
+        safe[key] = value;
+      }
+    }
+    return safe;
   }
 
   private emitFencedStopDiagnostic(

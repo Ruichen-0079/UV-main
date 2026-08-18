@@ -10,9 +10,29 @@ import type { ProcessInfo, ProcessInspectionResult, StartCommandSpec } from "./t
 
 export const DEFAULT_WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 2_500;
 export const MAX_WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 10_000;
+/** Diagnostic-only bound for the non-CIM PostgreSQL identity experiment. */
+export const NON_CIM_PROCESS_PROBE_TIMEOUT_MS = 4_000;
 
 export type ProcessInspectionOptions = {
   windowsQueryTimeoutMs?: number;
+};
+
+export type NonCimProcessProbeStatus =
+  | "RESOLVED"
+  | "NOT_RUNNING"
+  | "TIMEOUT"
+  | "EXIT_NONZERO"
+  | "EMPTY_OUTPUT"
+  | "PARSE_FAILED"
+  | "ERROR";
+
+export type NonCimProcessProbeResult = {
+  status: NonCimProcessProbeStatus;
+  processId: number;
+  processIdMatches: boolean | null;
+  durationMs: number;
+  executablePath: string | null;
+  startedAtUtc: string | null;
 };
 
 function normalizeWindowsProcessQueryTimeout(value: number | undefined): number {
@@ -93,6 +113,187 @@ $obj | ConvertTo-Json -Compress
     signal: result.signal,
     error: result.error
   });
+}
+
+type NonCimProcessQueryResult = {
+  status: number | null;
+  stdout?: string | null | undefined;
+  signal?: NodeJS.Signals | string | null | undefined;
+  error?: NodeJS.ErrnoException | null | undefined;
+};
+
+function boundedProbeDurationMs(value: number): number {
+  return Number.isFinite(value) ? Math.min(Math.max(Math.round(value), 0), 60_000) : 0;
+}
+
+function classifyNonCimProcessProbeResult(
+  processId: number,
+  durationMs: number,
+  result: NonCimProcessQueryResult
+): NonCimProcessProbeResult {
+  const duration = boundedProbeDurationMs(durationMs);
+  const errorCode = result.error?.code ? String(result.error.code) : "";
+  if (errorCode === "ETIMEDOUT" || (result.signal === "SIGTERM" && result.status === null)) {
+    return {
+      status: "TIMEOUT",
+      processId,
+      processIdMatches: null,
+      durationMs: duration,
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+  if (result.status !== 0) {
+    return {
+      status: "EXIT_NONZERO",
+      processId,
+      processIdMatches: null,
+      durationMs: duration,
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+  if (!result.stdout?.trim()) {
+    return {
+      status: "EMPTY_OUTPUT",
+      processId,
+      processIdMatches: null,
+      durationMs: duration,
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+  try {
+    const parsed = JSON.parse(result.stdout.trim()) as {
+      processId?: unknown;
+      executablePath?: unknown;
+      startedAtUtc?: unknown;
+    };
+    const parsedProcessId = parsed.processId;
+    const executablePath = parsed.executablePath;
+    const startedAtUtc = parsed.startedAtUtc;
+    if (
+      typeof parsedProcessId !== "number" ||
+      !Number.isInteger(parsedProcessId) ||
+      parsedProcessId <= 0 ||
+      typeof executablePath !== "string" ||
+      executablePath.length === 0 ||
+      executablePath.length > 1_024 ||
+      typeof startedAtUtc !== "string" ||
+      startedAtUtc.length === 0 ||
+      startedAtUtc.length > 128 ||
+      !Number.isFinite(Date.parse(startedAtUtc))
+    ) {
+      return {
+        status: "PARSE_FAILED",
+        processId,
+        processIdMatches: null,
+        durationMs: duration,
+        executablePath: null,
+        startedAtUtc: null
+      };
+    }
+    return {
+      status: "RESOLVED",
+      processId,
+      processIdMatches: parsedProcessId === processId,
+      durationMs: duration,
+      executablePath,
+      startedAtUtc: new Date(startedAtUtc).toISOString()
+    };
+  } catch {
+    return {
+      status: "PARSE_FAILED",
+      processId,
+      processIdMatches: null,
+      durationMs: duration,
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+}
+
+/**
+ * Diagnostic-only Windows identity experiment. This deliberately does not
+ * use CIM/WMI and never participates in ownership or lifecycle decisions.
+ */
+export function inspectWindowsProcessWithoutCim(processId: number): NonCimProcessProbeResult {
+  const started = Date.now();
+  if (!Number.isInteger(processId) || processId <= 0) {
+    return {
+      status: "NOT_RUNNING",
+      processId,
+      processIdMatches: null,
+      durationMs: 0,
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+  if (!isProcessAlive(processId)) {
+    return {
+      status: "NOT_RUNNING",
+      processId,
+      processIdMatches: null,
+      durationMs: boundedProbeDurationMs(Date.now() - started),
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+  if (process.platform !== "win32") {
+    return {
+      status: "ERROR",
+      processId,
+      processIdMatches: null,
+      durationMs: boundedProbeDurationMs(Date.now() - started),
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+
+  const script = `
+try {
+  $p = [System.Diagnostics.Process]::GetProcessById(${processId})
+  $obj = [ordered]@{
+    processId = [int]$p.Id
+    executablePath = [string]$p.MainModule.FileName
+    startedAtUtc = $p.StartTime.ToUniversalTime().ToString('o')
+  }
+  $obj | ConvertTo-Json -Compress
+} catch {
+  exit 5
+}
+`;
+  let result: NonCimProcessQueryResult;
+  try {
+    result = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script
+      ],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: NON_CIM_PROCESS_PROBE_TIMEOUT_MS
+      }
+    );
+  } catch {
+    return {
+      status: "ERROR",
+      processId,
+      processIdMatches: null,
+      durationMs: boundedProbeDurationMs(Date.now() - started),
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+  return classifyNonCimProcessProbeResult(processId, Date.now() - started, result);
 }
 
 function inspectPosixProcess(processId: number): ProcessInspectionResult {

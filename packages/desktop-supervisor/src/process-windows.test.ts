@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { classifyProcessQueryResult, isProcessAlive } from "./process-windows.js";
+import {
+  classifyProcessQueryResult,
+  inspectWindowsProcessWithoutCim,
+  isProcessAlive,
+  NON_CIM_PROCESS_PROBE_TIMEOUT_MS
+} from "./process-windows.js";
 
 type SpawnSyncCapture = {
   command: string;
@@ -55,12 +60,74 @@ function resolvedWindowsProcessOutput(processId: number): string {
   });
 }
 
+function resolvedNonCimProcessOutput(processId: number): string {
+  return JSON.stringify({
+    processId,
+    executablePath: "C:\\YUVI\\Postgres\\bin\\postgres.exe",
+    startedAtUtc: "2026-08-06T00:00:00.000Z"
+  });
+}
+
 afterEach(() => {
   processQueryState.calls = [];
   processQueryState.result = null;
 });
 
 describe("Windows process inspection result classification", () => {
+  it("runs the bounded non-CIM .NET identity experiment without command-line data", async () => {
+    processQueryState.result = {
+      status: 0,
+      signal: null,
+      stdout: resolvedNonCimProcessOutput(process.pid),
+      stderr: ""
+    };
+
+    const result = withWindowsPlatform(() => inspectWindowsProcessWithoutCim(process.pid));
+
+    expect(result).toMatchObject({
+      status: "RESOLVED",
+      processId: process.pid,
+      processIdMatches: true,
+      executablePath: "C:\\YUVI\\Postgres\\bin\\postgres.exe",
+      startedAtUtc: "2026-08-06T00:00:00.000Z"
+    });
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
+    expect(processQueryState.calls).toHaveLength(1);
+    expect(processQueryState.calls[0]?.options?.["timeout"]).toBe(NON_CIM_PROCESS_PROBE_TIMEOUT_MS);
+    const script = String(processQueryState.calls[0]?.args.at(-1));
+    expect(script).toContain("[System.Diagnostics.Process]::GetProcessById");
+    expect(script).not.toContain("Get-CimInstance");
+    expect(script).not.toContain("Win32_Process");
+    expect(script).not.toContain("CommandLine");
+  });
+
+  it("classifies non-CIM timeout, process failure, empty output, and malformed output safely", async () => {
+    const cases = [
+      [
+        {
+          status: null,
+          signal: "SIGTERM" as const,
+          stdout: "",
+          stderr: "",
+          error: Object.assign(new Error(), { code: "ETIMEDOUT" })
+        },
+        "TIMEOUT"
+      ],
+      [{ status: 5, signal: null, stdout: "", stderr: "" }, "EXIT_NONZERO"],
+      [{ status: 0, signal: null, stdout: "", stderr: "" }, "EMPTY_OUTPUT"],
+      [{ status: 0, signal: null, stdout: "not-json", stderr: "" }, "PARSE_FAILED"]
+    ] as const;
+    for (const [result, status] of cases) {
+      processQueryState.result = result;
+      expect(withWindowsPlatform(() => inspectWindowsProcessWithoutCim(process.pid))).toMatchObject(
+        {
+          status,
+          processId: process.pid
+        }
+      );
+    }
+  });
+
   it("uses the bounded 2500 ms default for generic Windows inspection", async () => {
     const { inspectProcess } = await import("./process-windows.js");
     processQueryState.result = {

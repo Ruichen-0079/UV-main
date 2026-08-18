@@ -3286,6 +3286,78 @@ test("D1 lifecycle diagnostics enforce canonical PostgreSQL producer identity", 
   assert.equal(validSecondAttempt.postgresServiceLastErrorCode, null);
 });
 
+test("D1 identity experiment diagnostics are attempt-scoped, bounded, and role-gated", () => {
+  const secret = "IDENTITY_EXPERIMENT_SECRET";
+  const line = (event, fields = {}, role = "postgres") =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({ event, role, ...fields })}`;
+  const output = [
+    line("postgres.private.launch", { status: "SUCCESS", exitCode: 0, signal: null }),
+    line("postgres.private.identity_os", {
+      status: "RESOLVED",
+      durationMs: 19,
+      processId: 5151,
+      executablePath: `C:/YUVI/bin/postgres.exe ${secret}`,
+      startedAtUtc: "2026-08-17T09:36:21.600Z",
+      executableMatches: true,
+      startTimePlausible: true
+    }),
+    line("postgres.private.identity_db", {
+      status: "RESOLVED",
+      durationMs: 31,
+      sqlState: null,
+      dataDirectory: `C:/YUVI/Postgres/data/${secret}`,
+      clusterName: `postgres://yuvi:${secret}@127.0.0.1/yuvi`,
+      port: 55432,
+      serverVersionNum: 160010,
+      postmasterStartTime: "2026-08-17T09:36:21.600Z",
+      dataDirectoryMatches: true,
+      clusterNameMatches: true,
+      portMatches: true,
+      majorMatches: true,
+      startTimePlausible: true
+    }),
+    line("postgres.private.launch", { status: "PRE_SPAWN_ERROR", exitCode: null, signal: null }),
+    line("postgres.private.identity_os", {
+      status: "RESOLVED",
+      durationMs: 20,
+      processId: 6161,
+      executablePath: "C:/YUVI/bin/postgres.exe",
+      startedAtUtc: "2026-08-17T09:37:21.600Z",
+      executableMatches: true,
+      startTimePlausible: true
+    }),
+    line(
+      "postgres.private.identity_db",
+      {
+        status: "QUERY_FAILED",
+        durationMs: 4_000,
+        sqlState: "57014",
+        dataDirectory: null,
+        clusterName: null,
+        port: null,
+        serverVersionNum: null,
+        postmasterStartTime: null
+      },
+      "mem0"
+    )
+  ].join("\n");
+  const diagnostic = parsePostgresLifecycleDiagnostics(output, [secret]);
+  assert.equal(diagnostic.postgresAttempt, 2);
+  assert.equal(diagnostic.postgresLaunchOutcome, "PRE_SPAWN_ERROR");
+  assert.equal(diagnostic.postgresIdentityOsStatus, "RESOLVED");
+  assert.equal(diagnostic.postgresIdentityOsProcessId, 6161);
+  assert.equal(diagnostic.postgresIdentityOsExecutableMatches, true);
+  assert.equal(diagnostic.postgresIdentityDbStatus, "NOT_RUN");
+  assert.equal(diagnostic.postgresIdentityDbDurationMs, null);
+  const formatted = formatInstallerSmokePostgresDiagnostic(diagnostic);
+  assert.match(formatted, /postgresIdentityOsStatus/);
+  assert.match(formatted, /postgresIdentityOsProcessId/);
+  assert.doesNotMatch(formatted, new RegExp(secret));
+  assert.doesNotMatch(formatted, /postgres:\/\/yuvi:/);
+  assert.doesNotMatch(formatted, /mem0/);
+  assert.ok(formatted.length <= 8192);
+});
+
 test("D1 diagnostic collector tolerates missing and malformed files", () => {
   const { root } = cleanupFixture();
   const localAppData = path.join(root, "localAppData");

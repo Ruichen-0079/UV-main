@@ -171,6 +171,125 @@ function createSupervisor(config: SupervisorConfig, hooks: SupervisorHooks): Des
 }
 
 describe("private postgres Windows start state machine", () => {
+  it("runs supplemental identity probes only after uncertain launch and never establishes ownership", async () => {
+    enableLifecycleDiagnostics();
+    const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { config, layout, marker, dist } = privateConfig();
+    const order: string[] = [];
+    const originalResolve = postgresSecret.resolvePostgresPassword;
+    const resolver = vi
+      .spyOn(postgresSecret, "resolvePostgresPassword")
+      .mockImplementation((layout, env, authority) => {
+        const stack = new Error().stack ?? "";
+        order.push(
+          stack.includes("runPostgresIdentityDiagnosticExperiment")
+            ? "experiment-resolve-password"
+            : "other-resolve-password"
+        );
+        return originalResolve(layout, env, authority);
+      });
+    const identityProcessProbe = vi.fn(() => {
+      order.push("os-probe");
+      return {
+        status: "RESOLVED" as const,
+        processId: 4242,
+        processIdMatches: true,
+        durationMs: 17,
+        executablePath: dist.postgres,
+        startedAtUtc: new Date().toISOString()
+      };
+    });
+    const identityDatabaseProbe = vi.fn(async () => {
+      order.push("db-probe");
+      return {
+        status: "RESOLVED" as const,
+        durationMs: 23,
+        sqlState: null,
+        dataDirectory: layout.data,
+        clusterName: expectedClusterName(marker.clusterId),
+        port: 55432,
+        serverVersionNum: 160010,
+        postmasterStartTime: new Date().toISOString(),
+        dataDirectoryMatchesExpected: true,
+        clusterNameMatchesExpected: true,
+        portMatchesExpected: true,
+        majorMatches: true,
+        startTimePlausible: true
+      };
+    });
+    const supervisor = createSupervisor(config, {
+      platform: "win32",
+      identityProcessProbe,
+      identityDatabaseProbe,
+      inspectProcess: (processId) => ({
+        status: "unavailable",
+        processId,
+        reason: "query-timeout"
+      }),
+      spawnWindowsPgCtl: async () => {
+        order.push("pgctl-launch");
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        return {
+          ok: true,
+          kind: "SUCCESS" as const,
+          status: 0 as const,
+          signal: null,
+          stdout: "",
+          stderr: ""
+        };
+      }
+    });
+
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE" });
+    expect(identityProcessProbe).toHaveBeenCalledTimes(1);
+    expect(identityDatabaseProbe).toHaveBeenCalledTimes(1);
+    expect(order.indexOf("pgctl-launch")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("os-probe")).toBeGreaterThan(order.indexOf("pgctl-launch"));
+    expect(order.indexOf("experiment-resolve-password")).toBeGreaterThan(order.indexOf("os-probe"));
+    expect(order.indexOf("db-probe")).toBeGreaterThan(order.indexOf("experiment-resolve-password"));
+    expect(resolver).toHaveBeenCalled();
+    const postgres = supervisor.snapshot().services.find((service) => service.id === "postgres");
+    expect(postgres?.ownership).not.toBe("owned");
+    expect(postgres?.lastError).toBe("POSTGRES_START_IDENTITY_UNCERTAIN");
+    expect(fs.existsSync(config.postgresLayout!.metadataFile)).toBe(false);
+    const events = capturedLifecycleEvents(lifecycleLog);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.inspect",
+        status: "QUERY_TIMEOUT"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.ownership",
+        status: "UNCERTAIN"
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.identity_os",
+        status: "RESOLVED",
+        executableMatches: true,
+        startTimePlausible: true
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.identity_db",
+        status: "RESOLVED",
+        dataDirectoryMatches: true,
+        clusterNameMatches: true,
+        portMatches: true,
+        majorMatches: true,
+        startTimePlausible: true
+      })
+    );
+    expect(events.some((event) => event["event"] === "postgres.private.server_ready")).toBe(false);
+    expect(events.some((event) => event["event"] === "postgres.private.database_create")).toBe(
+      false
+    );
+  });
+
   it("does not resolve a password for diagnostics before pg_ctl launch", async () => {
     const { config } = privateConfig();
     const originalResolve = postgresSecret.resolvePostgresPassword;
@@ -181,8 +300,12 @@ describe("private postgres Windows start state machine", () => {
         resolverStacks.push(new Error().stack ?? "");
         return originalResolve(layout, env, authority);
       });
+    const identityProcessProbe = vi.fn();
+    const identityDatabaseProbe = vi.fn();
     const supervisor = createSupervisor(config, {
       platform: "win32",
+      identityProcessProbe,
+      identityDatabaseProbe,
       spawnWindowsPgCtl: async () => {
         return {
           ok: false,
@@ -209,6 +332,224 @@ describe("private postgres Windows start state machine", () => {
     expect(directStartCalls).toHaveLength(0);
     expect(resolver.mock.calls.length).toBeGreaterThan(0);
     expect(config.env["YUVI_POSTGRES_PASSWORD"]).toBe("unit-test-password");
+    expect(identityProcessProbe).not.toHaveBeenCalled();
+    expect(identityDatabaseProbe).not.toHaveBeenCalled();
+  });
+
+  it("contains failures from both identity experiment probes and preserves uncertain service state", async () => {
+    const { config, layout } = privateConfig();
+    const identityProcessProbe = vi.fn(() => {
+      throw new Error("non-CIM probe failed");
+    });
+    const identityDatabaseProbe = vi.fn(async () => {
+      throw new Error("identity SQL probe failed");
+    });
+    const supervisor = createSupervisor(config, {
+      platform: "win32",
+      identityProcessProbe,
+      identityDatabaseProbe,
+      inspectProcess: (processId) => ({
+        status: "unavailable",
+        processId,
+        reason: "query-timeout"
+      }),
+      spawnWindowsPgCtl: async () => {
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        return {
+          ok: true,
+          kind: "SUCCESS" as const,
+          status: 0 as const,
+          signal: null,
+          stdout: "",
+          stderr: ""
+        };
+      }
+    });
+
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE" });
+    expect(identityProcessProbe).toHaveBeenCalledTimes(1);
+    expect(identityDatabaseProbe).toHaveBeenCalledTimes(1);
+    const postgres = supervisor.snapshot().services.find((service) => service.id === "postgres");
+    expect(postgres?.ownership).not.toBe("owned");
+    expect(postgres?.lastError).toBe("POSTGRES_START_IDENTITY_UNCERTAIN");
+    expect(fs.existsSync(config.postgresLayout!.metadataFile)).toBe(false);
+  });
+
+  it("contains a post-launch diagnostic password lookup failure", async () => {
+    enableLifecycleDiagnostics();
+    const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { config, layout } = privateConfig();
+    const originalResolve = postgresSecret.resolvePostgresPassword;
+    vi.spyOn(postgresSecret, "resolvePostgresPassword").mockImplementation(
+      (layout, env, authority) => {
+        if ((new Error().stack ?? "").includes("runPostgresIdentityDiagnosticExperiment")) {
+          throw new Error("password provider unavailable");
+        }
+        return originalResolve(layout, env, authority);
+      }
+    );
+    const identityDatabaseProbe = vi.fn();
+    const supervisor = createSupervisor(config, {
+      platform: "win32",
+      identityProcessProbe: () => ({
+        status: "RESOLVED",
+        processId: 4242,
+        processIdMatches: true,
+        durationMs: 2,
+        executablePath: "C:/YUVI/postgres.exe",
+        startedAtUtc: new Date().toISOString()
+      }),
+      identityDatabaseProbe,
+      inspectProcess: (processId) => ({
+        status: "unavailable",
+        processId,
+        reason: "query-timeout"
+      }),
+      spawnWindowsPgCtl: async () => {
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        return {
+          ok: true,
+          kind: "SUCCESS" as const,
+          status: 0 as const,
+          signal: null,
+          stdout: "",
+          stderr: ""
+        };
+      }
+    });
+
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE" });
+    expect(identityDatabaseProbe).not.toHaveBeenCalled();
+    expect(
+      supervisor.snapshot().services.find((service) => service.id === "postgres")?.lastError
+    ).toBe("POSTGRES_START_IDENTITY_UNCERTAIN");
+    expect(capturedLifecycleEvents(lifecycleLog)).toContainEqual(
+      expect.objectContaining({
+        event: "postgres.private.identity_db",
+        status: "PASSWORD_UNAVAILABLE"
+      })
+    );
+  });
+
+  it("redacts identity experiment strings before lifecycle emission", async () => {
+    enableLifecycleDiagnostics();
+    const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { config, layout } = privateConfig();
+    const secret = "IDENTITY_PROBE_SECRET";
+    const supervisor = createSupervisor(config, {
+      platform: "win32",
+      identityProcessProbe: () => ({
+        status: "RESOLVED",
+        processId: 4242,
+        processIdMatches: true,
+        durationMs: 2,
+        executablePath: `commandLine=${secret} args=${secret} env=${secret} environment=${secret}`,
+        startedAtUtc: `Authorization: Bearer ${secret}`
+      }),
+      identityDatabaseProbe: async () => ({
+        status: "RESOLVED",
+        durationMs: 3,
+        sqlState: `password=${secret} Bearer ${secret}`,
+        dataDirectory: `DATABASE_URL=postgres://user:${secret}@host/db postgresql://user:${secret}@host/db`,
+        clusterName: `PGPASSWORD=${secret}`,
+        port: 55432,
+        serverVersionNum: 160010,
+        postmasterStartTime: `YUVI_POSTGRES_PASSWORD=${secret}`,
+        dataDirectoryMatchesExpected: false,
+        clusterNameMatchesExpected: false,
+        portMatchesExpected: true,
+        majorMatches: true,
+        startTimePlausible: false
+      }),
+      inspectProcess: (processId) => ({
+        status: "unavailable",
+        processId,
+        reason: "query-timeout"
+      }),
+      spawnWindowsPgCtl: async () => {
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        return {
+          ok: true,
+          kind: "SUCCESS" as const,
+          status: 0 as const,
+          signal: null,
+          stdout: "",
+          stderr: ""
+        };
+      }
+    });
+
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE" });
+    const serialized = JSON.stringify(capturedLifecycleEvents(lifecycleLog));
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("postgresql://user:");
+    expect(serialized).not.toContain("commandLine=");
+    expect(serialized).not.toContain("args=");
+    expect(serialized).not.toContain("env=");
+    expect(serialized).not.toContain("environment=");
+    expect(serialized).not.toContain("PGPASSWORD=");
+    expect(serialized).not.toContain("YUVI_POSTGRES_PASSWORD=");
+    expect(serialized).toContain("postgres.private.identity_os");
+    expect(serialized).toContain("postgres.private.identity_db");
+  });
+
+  it("fails safe when producer identity redaction throws", async () => {
+    enableLifecycleDiagnostics();
+    const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { config, layout } = privateConfig();
+    vi.spyOn(postgresSecret, "redactSecretText").mockImplementation(() => {
+      throw new Error("redaction unavailable");
+    });
+    const supervisor = createSupervisor(config, {
+      platform: "win32",
+      identityProcessProbe: () => ({
+        status: "RESOLVED",
+        processId: 4242,
+        processIdMatches: true,
+        durationMs: 2,
+        executablePath: "C:/private/IDENTITY_SECRET/postgres.exe",
+        startedAtUtc: new Date().toISOString()
+      }),
+      identityDatabaseProbe: async () => ({
+        status: "RESOLVED",
+        durationMs: 3,
+        sqlState: null,
+        dataDirectory: layout.data,
+        clusterName: "yuvi-pg-test",
+        port: 55432,
+        serverVersionNum: 160010,
+        postmasterStartTime: new Date().toISOString(),
+        dataDirectoryMatchesExpected: true,
+        clusterNameMatchesExpected: true,
+        portMatchesExpected: true,
+        majorMatches: true,
+        startTimePlausible: true
+      }),
+      inspectProcess: (processId) => ({
+        status: "unavailable",
+        processId,
+        reason: "query-timeout"
+      }),
+      spawnWindowsPgCtl: async () => {
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        return {
+          ok: true,
+          kind: "SUCCESS" as const,
+          status: 0 as const,
+          signal: null,
+          stdout: "",
+          stderr: ""
+        };
+      }
+    });
+
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE" });
+    const serialized = JSON.stringify(capturedLifecycleEvents(lifecycleLog));
+    expect(serialized).not.toContain("IDENTITY_SECRET");
+    expect(
+      supervisor.snapshot().services.find((service) => service.id === "postgres")?.lastError
+    ).toBe("POSTGRES_START_IDENTITY_UNCERTAIN");
+    expect(fs.existsSync(config.postgresLayout!.metadataFile)).toBe(false);
   });
 
   it("does not publish healthy or invoke D2 when only the postgres database is ready", async () => {
@@ -366,6 +707,8 @@ describe("private postgres Windows start state machine", () => {
     const inspectProcess = vi.fn((processId: number, _options?: ProcessInspectionOptions) =>
       ownedInspection(dist, layout, marker.clusterId, started, processId)
     );
+    const identityProcessProbe = vi.fn();
+    const identityDatabaseProbe = vi.fn();
     vi.spyOn(cluster, "pingPostgresServer").mockResolvedValue(true);
     vi.spyOn(cluster, "pingPostgres").mockResolvedValue(true);
     vi.spyOn(cluster, "ensureYuviDatabase").mockResolvedValue({
@@ -378,6 +721,8 @@ describe("private postgres Windows start state machine", () => {
       platform: "win32",
       migratePostgres,
       inspectProcess,
+      identityProcessProbe,
+      identityDatabaseProbe,
       spawnWindowsPgCtl: async () => {
         fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
         return {
@@ -396,6 +741,8 @@ describe("private postgres Windows start state machine", () => {
     expect(postgres?.ownership).toBe("owned");
     expect(postgres?.pid).toBe(4242);
     expect(migratePostgres).toHaveBeenCalledTimes(1);
+    expect(identityProcessProbe).not.toHaveBeenCalled();
+    expect(identityDatabaseProbe).not.toHaveBeenCalled();
     expect(inspectProcess).toHaveBeenCalledWith(4242, {
       windowsQueryTimeoutMs: cluster.POSTGRES_LAUNCH_PROCESS_QUERY_TIMEOUT_MS
     });
