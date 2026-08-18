@@ -110,10 +110,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
         : result.supervisorSync;
       const merged = { ...result, restartServices, supervisorSync };
       dispatch({ type: "save-success", result: merged, clearSecrets: true });
-      const ttsChanged =
-        form.ttsEnabled !== result.settings.tts.enabled ||
-        form.ttsMode !== result.settings.tts.mode;
-      if (result.revision >= startingRevision && ttsChanged) {
+      if (result.revision >= startingRevision) {
         props.onTtsSettings?.(result.settings.tts, result.revision);
       }
     } catch (error) {
