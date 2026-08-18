@@ -1381,6 +1381,48 @@ describe("server", () => {
     }
   });
 
+  it("keeps config-only TTS, STT, and Vision verification zero-I/O and non-live", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const app = await buildTestServer({
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_TTS_PROVIDER: "xai",
+      TTS_PROVIDER_CHAIN: "xai",
+      XAI_API_KEY: "xai-secret",
+      XAI_TTS_MODEL: "xai-tts",
+      DEFAULT_STT_PROVIDER: "dashscope",
+      STT_PROVIDER_CHAIN: "dashscope",
+      DASHSCOPE_API_KEY: "dashscope-secret",
+      DASHSCOPE_STT_MODEL: "dashscope-stt",
+      DEFAULT_VISION_PROVIDER: "xai",
+      VISION_PROVIDER_CHAIN: "xai",
+      XAI_VISION_MODEL: "xai-vision"
+    });
+
+    try {
+      for (const capability of ["tts", "stt", "vision"] as const) {
+        const verify = await app.inject({
+          method: "POST",
+          url: `/providers/verify/${capability}`
+        });
+        expect(verify.statusCode).toBe(200);
+        expect(verify.json()).toMatchObject({
+          ok: true,
+          capability,
+          configOnly: true,
+          verificationMode: "config_only",
+          readiness: "ready",
+          observed: "unknown"
+        });
+        expect(verify.json().lastVerifiedAt).toBeUndefined();
+        expect(verify.json().message).toContain("no provider call was made");
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("keeps chain verification config-only and zero-cost", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
@@ -1403,14 +1445,24 @@ describe("server", () => {
         capability: "chat",
         configOnly: true,
         verificationMode: "config_only",
+        readyRouteCount: 1,
         routes: [
           expect.objectContaining({
             provider: "deepseek",
             readiness: "ready",
             observed: "unknown"
           })
+        ],
+        attemptedProviders: [
+          expect.objectContaining({
+            provider: "deepseek",
+            status: "skipped"
+          })
         ]
       });
+      expect(verify.json().attemptedProviders).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ status: "success" })])
+      );
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       await app.close();

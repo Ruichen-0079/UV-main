@@ -10,14 +10,19 @@ Responsibilities:
 - Keep vendor clients behind stable abstractions.
 - Keep provider-specific response shapes out of runtime core.
 
-Planned providers:
+Provider families currently supported by the registry:
 
 - DeepSeek chat and reasoning.
 - xAI TTS and vision.
 - Alibaba Cloud DashScope STT.
+- OpenAI-compatible chat, reasoning, vision, and embedding routes for
+  compatible or local gateways.
+- GPT-SoVITS TTS for local development.
 - Embedding providers for memory retrieval.
 
-The MVP includes a `local-echo` chat provider so the server is runnable without API keys.
+Explicit mock providers are available for tests and offline development when
+`PROVIDER_ALLOW_MOCKS=true`; real provider routes are never silently relabeled
+as mocks.
 
 ## Type Layout
 
@@ -67,18 +72,25 @@ argument deltas, or execution.
 Provider status has two independent axes. `readiness` is local configuration
 state (`ready` or `not_ready`) based on required local fields being present;
 it does not validate endpoint syntax or remote reachability. It is the only
-state used to decide whether a provider route can be constructed. `observed` is cached explicit verification
-state (`unknown`, `available`, `degraded`, or `unavailable`). A configured
-provider starts with `readiness: "ready"` and `observed: "unknown"`; config
-inspection never claims remote availability. The legacy `available` field is
-retained as a compatibility projection of local readiness, not remote health.
+state used to decide whether a provider route can be constructed. `observed` is
+cached explicit live-verification state (`unknown`, `available`, `degraded`, or
+`unavailable`). A configured provider starts with `readiness: "ready"` and
+`observed: "unknown"`; config inspection never claims remote availability. The
+legacy `available` field is retained as a compatibility projection of local
+readiness, not remote health.
 
 `ProviderRegistry.getStatus()` is synchronous, local, and zero-I/O. It never
 calls a provider `healthCheck()` or a remote endpoint. Only explicit live
-verification updates the in-memory observation cache. Config-only verification
-for TTS, STT, Vision, and provider chains reports `verificationMode:
-"config_only"` and leaves `observed` unchanged. Ordinary `/health` is also
-zero-cost and exposes readiness and cached observation separately.
+verification updates the in-memory observation cache. The cache belongs to one
+`ProviderRegistry` instance; runtime settings reload replaces that instance,
+so observations reset and are not persisted or copied across reloads. Config-
+only verification for TTS, STT, Vision, and provider chains reports
+`verificationMode: "config_only"`, leaves `observed` unchanged, and marks
+uninvoked chain routes as `skipped` rather than `success`. Live chat, reasoning,
+and embedding verification are the explicit provider-I/O paths and may incur
+provider usage or billing. Ordinary `/health` is also zero-provider-I/O and
+exposes readiness and cached observation separately; service operability from
+local readiness is not proof of remote reachability.
 
 ## STT contract (P7-5)
 

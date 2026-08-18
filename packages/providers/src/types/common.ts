@@ -1,12 +1,20 @@
 export type ProviderCapability = "chat" | "reasoning" | "tts" | "stt" | "vision" | "embedding";
 
-/** Local configuration state. This axis never implies remote reachability. */
+/** Local configuration state. This zero-I/O axis never implies remote reachability. */
 export type ProviderReadinessState = "ready" | "not_ready";
 
-/** The most recent explicitly observed provider state. */
+/**
+ * The most recent explicitly observed provider state. This is a registry-local
+ * cache populated only by explicit live verification and reset when that
+ * registry instance is replaced or reloaded.
+ */
 export type ProviderObservedState = "unknown" | "available" | "degraded" | "unavailable";
 
-/** How an explicit provider verification request was performed. */
+/**
+ * How an explicit provider verification request was performed. Config-only
+ * inspection performs no provider I/O; live verification may perform remote
+ * (and potentially billable) provider I/O.
+ */
 export type ProviderVerificationMode = "live" | "config_only";
 
 /**
@@ -32,6 +40,7 @@ export type ProviderHealth = {
   /** Canonical cached observation axis; unknown means not live-verified. */
   observed?: ProviderObservedState | undefined;
   configured?: boolean | undefined;
+  /** Compatibility projection of local readiness; never remote availability. */
   available?: boolean | undefined;
   mock?: boolean | undefined;
   mode?: "real" | "mock" | "unavailable" | undefined;
@@ -76,6 +85,10 @@ export type ProviderRouteStatus = ProviderHealth & {
 export type ProviderAttempt = {
   provider: string;
   model?: string | undefined;
+  /**
+   * `success`/`failed`/`unavailable` describe a call outcome. `skipped` means
+   * that this route was not called, including config-only route inspection.
+   */
   status: "success" | "failed" | "skipped" | "unavailable";
   errorCode?: string | undefined;
   error?: string | undefined;

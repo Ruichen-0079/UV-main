@@ -272,24 +272,23 @@ export async function registerProviderRoutes(
     const routes =
       context.providers.getStatus().routes?.[capability as keyof typeof ProviderCapabilitySchema] ??
       [];
+    const readyRouteCount = routes.filter((route) => route.readiness === "ready").length;
     return reply.send(
       redactValue({
-        ok: true,
+        // `ok` is the result of local route inspection only. No route is
+        // called by this endpoint, so it must not be represented as a live
+        // provider success.
+        ok: readyRouteCount > 0,
         capability,
         configOnly: true,
         verificationMode: "config_only" as const,
+        readyRouteCount,
         routes,
-        attemptedProviders: routes.map((route) => ({
-          provider: route.provider,
-          model: route.model,
-          status: route.readiness === "ready" ? "success" : "unavailable",
-          configured: route.configured,
-          enabled: route.enabled,
-          priority: route.priority,
-          errorCode: route.readiness === "ready" ? undefined : "PROVIDER_UNAVAILABLE"
-        })),
+        // Preserve the response shape used by the dashboard, but make the
+        // no-I/O contract explicit: these are route checks, not call results.
+        attemptedProviders: routes.map(configOnlyRouteAttempt),
         message:
-          "Chain verification is explicit. This v1 endpoint returns safe configured route order; use individual Verify buttons for live provider calls."
+          "Chain inspection is config-only. No provider route was called; skipped statuses are not live attempts. Use live chat, reasoning, or embedding verification when remote reachability must be checked."
       })
     );
   });
@@ -307,9 +306,15 @@ function verifyConfigOnlyCapability(
   }
 
   const status = context.providers.getStatus().providers[capability];
+  const readinessMessage =
+    status.readiness === "ready"
+      ? "configuration is locally ready"
+      : "configuration is not locally ready";
   return reply.send(
     redactValue({
-      ok: Boolean(status.available),
+      // `ok` reports local configuration readiness only. This endpoint never
+      // calls the provider and therefore cannot report live success.
+      ok: status.readiness === "ready",
       provider: status.provider,
       capability,
       model: status.model,
@@ -318,15 +323,26 @@ function verifyConfigOnlyCapability(
       missingFields: status.missingFields ?? [],
       configOnly: true,
       verificationMode: "config_only" as const,
-      ...verificationStatusFields(status),
       message:
         capability === "stt"
-          ? "STT verification is config-only in v1; upload audio to /v1/audio/transcriptions to test runtime transcription."
+          ? `STT ${readinessMessage}; no provider call was made. Upload audio to /v1/audio/transcriptions for runtime transcription.`
           : capability === "vision"
-            ? "Vision verification is config-only in v1; use /v1/vision/analyze with an explicit image to test runtime analysis."
-            : "TTS verification is config-only in v1; use /v1/tts with explicit text to test runtime synthesis."
+            ? `Vision ${readinessMessage}; no provider call was made. Use /v1/vision/analyze with an explicit image for runtime analysis.`
+            : `TTS ${readinessMessage}; no provider call was made. Use /v1/tts with explicit text for runtime synthesis.`,
+      ...verificationStatusFields(status)
     })
   );
+}
+
+function configOnlyRouteAttempt(route: ProviderHealth): ProviderAttempt {
+  return {
+    provider: route.provider,
+    ...(route.model ? { model: route.model } : {}),
+    status: "skipped",
+    ...(route.configured !== undefined ? { configured: route.configured } : {}),
+    ...(route.enabled !== undefined ? { enabled: route.enabled } : {}),
+    ...(route.priority !== undefined ? { priority: route.priority } : {})
+  };
 }
 
 type ProviderMetadataLike = {

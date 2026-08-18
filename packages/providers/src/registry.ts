@@ -161,7 +161,12 @@ export class ProviderRegistry implements ProviderResolver {
   private readonly sttProviders = new Map<string, STTProvider>();
   private readonly visionProviders = new Map<string, VisionProvider>();
   private readonly embeddingProviders = new Map<string, EmbeddingProvider>();
-  private readonly observations = new Map<string, ProviderObservation>();
+  /**
+   * Live observations belong to this registry instance only. Runtime config
+   * reload replaces the registry, which intentionally starts with an empty
+   * cache; observations are never persisted or copied between registries.
+   */
+  private readonly observationCache = new Map<string, ProviderObservation>();
 
   constructor(private readonly config: ProviderRegistryConfig) {}
 
@@ -248,12 +253,13 @@ export class ProviderRegistry implements ProviderResolver {
 
   /**
    * Record an explicitly performed live observation. getStatus() never calls
-   * this method and never performs provider I/O; observations live only for
-   * this registry instance and therefore reset on configuration reload.
+   * this method and never performs provider I/O. The observation is retained
+   * only by this registry instance and therefore resets on configuration
+   * reload when the runtime replaces the registry.
    */
   recordLiveVerification(input: LiveProviderVerification): void {
     const verifiedAt = input.verifiedAt ?? new Date().toISOString();
-    this.observations.set(observationKey(input.capability, input.provider), {
+    this.observationCache.set(observationKey(input.capability, input.provider), {
       observed: input.observed,
       verifiedAt,
       ...(input.latencyMs !== undefined ? { latencyMs: input.latencyMs } : {}),
@@ -304,7 +310,7 @@ export class ProviderRegistry implements ProviderResolver {
     const required = capability === "chat";
     const readiness: ProviderReadinessState = configured || mock ? "ready" : "not_ready";
     const available = readiness === "ready";
-    const observation = this.observations.get(observationKey(capability, name));
+    const observation = this.observationCache.get(observationKey(capability, name));
     const observed: ProviderObservedState = observation?.observed ?? "unknown";
     const status = providerHealthStatus({ readiness, observed, mock });
     const missingFields = readiness === "ready" ? [] : this.missingFieldsFor(capability, name);
