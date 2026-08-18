@@ -150,6 +150,40 @@ describe("ProviderRegistry", () => {
     expect(JSON.stringify(status)).not.toContain("test-key");
   });
 
+  it("projects all six capabilities with independent local readiness and cached observation", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "deepseek",
+      DEFAULT_REASONING_PROVIDER: "deepseek",
+      DEFAULT_TTS_PROVIDER: "xai",
+      DEFAULT_STT_PROVIDER: "dashscope",
+      DEFAULT_VISION_PROVIDER: "xai",
+      DEFAULT_EMBEDDING_PROVIDER: "openai-compatible",
+      DEEPSEEK_API_KEY: "deepseek-key",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat",
+      DEEPSEEK_REASONING_MODEL: "deepseek-reasoner",
+      XAI_API_KEY: "xai-key",
+      XAI_TTS_MODEL: "xai-tts",
+      XAI_VISION_MODEL: "xai-vision",
+      DASHSCOPE_API_KEY: "dashscope-key",
+      DASHSCOPE_STT_MODEL: "dashscope-stt",
+      EMBEDDING_API_KEY: "embedding-key",
+      EMBEDDING_API_BASEURL: "https://embedding.example/v1",
+      EMBEDDING_MODEL: "embedding-model"
+    });
+
+    const providers = registry.getStatus().providers;
+    for (const capability of ["chat", "reasoning", "embedding", "tts", "stt", "vision"] as const) {
+      expect(providers[capability]).toMatchObject({
+        readiness: "ready",
+        observed: "unknown",
+        available: true
+      });
+      expect(providers[capability].lastVerifiedAt).toBeUndefined();
+    }
+  });
+
   it("keeps local readiness separate from unverified remote observation", () => {
     const registry = createProviderRegistryFromEnv({
       NODE_ENV: "production",
@@ -274,7 +308,7 @@ describe("ProviderRegistry", () => {
     expect(healthCheck).not.toHaveBeenCalled();
   });
 
-  it("records live observations without persisting them across registry reload", () => {
+  it("keeps live observations in one registry and resets them on registry reload", () => {
     const config = {
       NODE_ENV: "production",
       PROVIDER_ALLOW_MOCKS: "false",
@@ -310,6 +344,15 @@ describe("ProviderRegistry", () => {
       status: "degraded"
     });
     expect(reloaded.getStatus().providers.chat.lastVerifiedAt).toBeUndefined();
+
+    registry.recordLiveVerification({
+      capability: "chat",
+      provider: "deepseek",
+      observed: "available",
+      verifiedAt: "2026-08-15T12:01:00.000Z"
+    });
+    expect(registry.getStatus().providers.chat.observed).toBe("available");
+    expect(reloaded.getStatus().providers.chat.observed).toBe("unknown");
   });
 
   it("normalizes provider errors", () => {

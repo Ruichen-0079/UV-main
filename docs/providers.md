@@ -54,11 +54,18 @@ The registry decides whether that provider is DeepSeek, xAI, DashScope, a mock, 
 Provider status deliberately separates local readiness from remote
 observation. `readiness` is `ready` when the selected route has the required
 local configuration (or intentional mock mode), otherwise it is `not_ready`.
-`observed` is one of `unknown`, `available`, `degraded`, or `unavailable` and
-starts as `unknown` for real providers. The legacy `available` field remains a
+This is a zero-I/O configuration axis and does not validate endpoint syntax or
+remote reachability. `observed` is one of `unknown`, `available`, `degraded`, or
+`unavailable`; it starts as `unknown` for real providers and is populated only
+by explicit live verification. The legacy `available` field remains a
 readiness compatibility projection; it does not mean that a remote provider
-was contacted successfully. `ProviderRegistry.getStatus()` and ordinary
-`GET /health` perform no provider network calls and do not consume quota.
+was contacted successfully. `ProviderRegistry.getStatus()` and provider
+inspection in `GET /health` perform no provider network calls and do not
+consume provider quota.
+
+The observation cache is scoped to one `ProviderRegistry` instance. A runtime
+settings reload replaces the registry, so cached observations reset to
+`unknown`; observations are not persisted or copied into the new registry.
 
 When a chain is used, calls try configured providers by priority. The response includes safe fallback metadata such as `fallbackUsed`, `attemptedProviders`, and `finalProvider`. `fallbackUsed` is true only when the successful provider identity differs from the first attempted provider identity. A total failure is not a successful fallback. Attempt records include provider name, status, safe error code, and latency, but never API keys, Authorization headers, `DATABASE_URL`, or raw secret values.
 
@@ -162,9 +169,19 @@ EMBEDDING_DIMENSIONS=1536
 
 `EMBEDDING_PROVIDER=mock` is deterministic and requires no network, but it reports `semanticEmbedding=false` because it validates the retrieval pipeline without real semantic similarity. Embedding status reports provider, model, dimensions, mock/configured/available state, semantic/non-semantic mode, and never returns API keys.
 
-`POST /providers/verify/embedding` is explicit and may consume provider usage. It calls the active embedding provider with a small test string and returns only safe metadata: provider, model, expected dimensions, actual dimensions, latency, mock/real mode, `verificationMode: "live"`, readiness, observed state, semanticEmbedding, and a redacted error if verification fails. If the provider returns a vector dimension that does not match `EMBEDDING_DIMENSIONS`, YUVI returns `ok=false` and does not expose the raw vector.
+`POST /providers/verify/embedding` is explicit live verification and may
+perform billable provider I/O. It calls the active embedding provider with a
+small test string and returns only safe metadata: provider, model, expected
+dimensions, actual dimensions, latency, mock/real mode,
+`verificationMode: "live"`, readiness, observed state, semanticEmbedding, and
+a redacted error if verification fails. If the provider returns a vector
+dimension that does not match `EMBEDDING_DIMENSIONS`, YUVI returns `ok=false`
+and does not expose the raw vector.
 
-If optional providers are missing and mocks are disabled, the registry returns an unavailable provider. `healthCheck()` reports `unavailable`, and actual calls throw normalized `ProviderError`s.
+If optional providers are missing and mocks are disabled, the registry reports
+the route as locally `not_ready`/`unavailable`; actual calls throw normalized
+`ProviderError`s. Status and health inspection do not turn that configuration
+result into a remote probe.
 
 ## Media Runtime Routes
 
@@ -436,10 +453,10 @@ The Dashboard `Settings` page can write local development settings to `.env.loca
 - `scripts/dev.sh` loads `.env` first and `.env.local` second, so `.env.local` overrides base local values after restart.
 - `POST /settings/runtime` only accepts an allowlist of development provider and memory keys.
 - `POST /settings/runtime/reload` reloads `.env` and `.env.local`, rebuilds the active provider registry, and applies provider config without restarting the HTTP server.
-- Provider verification buttons call `POST /providers/verify/chat`, `POST /providers/verify/reasoning`, `POST /providers/verify/embedding`, `POST /providers/verify/stt`, `POST /providers/verify/tts`, or `POST /providers/verify/vision` explicitly.
-- `POST /providers/verify-chain/:capability` returns safe configured route order and config-only attempted-provider metadata for the selected chain.
-- Save writes `.env.local`; **Apply Now** reloads hot-reloadable provider config; **Verify** is a separate explicit remote/provider call and may consume tokens.
-- `/health` and `/providers/status` do not consume provider tokens. `/health` reports cached provider observation honestly: a ready provider with `observed: "unknown"` can keep the local health response `ok`, while a cached `observed: "unavailable"` makes required chat health fail. The compatibility `providers.chat` field remains the default route; `providers.chatCapability` summarizes whether any locally ready chat route keeps the capability operational.
+- `POST /providers/verify/chat`, `POST /providers/verify/reasoning`, and `POST /providers/verify/embedding` are explicit live verification requests and may perform provider I/O. `POST /providers/verify/stt`, `POST /providers/verify/tts`, and `POST /providers/verify/vision` are config-only in v1 and do not contact a provider.
+- `POST /providers/verify-chain/:capability` returns safe configured route order and config-only route metadata. It never calls a route; uninvoked entries use `status: "skipped"`, not `success`, and do not update observations.
+- Save writes `.env.local`; **Apply Now** reloads hot-reloadable provider config. Config-only inspection and live verification are separate modes; only live verification may consume provider usage or incur billing.
+- `/health` and `/providers/status` do not perform provider calls or consume provider tokens. `/health` reports cached provider observation honestly: a ready provider with `observed: "unknown"` can keep the local health response `ok`, while a cached `observed: "unavailable"` makes required chat health fail. The compatibility `providers.chat` field remains the default route; `providers.chatCapability` summarizes whether any locally ready chat route keeps the capability operational. That operational flag is a local readiness policy, not proof of remote reachability.
 - Provider config changes can be applied with **Apply Now / Reload Runtime Config**. Memory repository, server host/port, and event bus changes remain restart-required.
 - If DeepSeek config is saved but chat still reports mock mode, click **Apply Now** or restart the dev server.
 - `GET /settings/runtime` reports safe config layering: base `.env`, local override `.env.local`, effective merged values, and active runtime values.

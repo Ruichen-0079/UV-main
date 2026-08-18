@@ -38,6 +38,17 @@ const reply = await chat.generateReply(input);
 
 注册表决定这个提供方是 DeepSeek、xAI、DashScope、模拟提供方，还是不可用占位实现。
 
+Provider 状态有两条相互独立的轴：`readiness` 表示本地配置是否足以构造路由，
+不代表远程可达；`observed` 表示最近一次明确 live verification 的缓存结果，初始值
+通常为 `unknown`。`/providers/status` 和 `/health` 的提供方检查不执行远程 provider
+I/O。缓存只属于当前 `ProviderRegistry` 实例；运行时配置 reload 替换注册表后，观察值
+会重置为 `unknown`，不会持久化或复制。
+
+TTS、STT、Vision 的 `/providers/verify/*` 在 v1 只做 config-only 检查，不调用 provider，
+也不会更新 `observed`。`/providers/verify-chain/:capability` 同样只检查路由配置；未调用
+的路由在 `attemptedProviders` 中标记为 `skipped`，不会伪装成 live `success`。Chat、Reasoning
+和 Embedding 的显式 live verification 可能产生 provider I/O 和费用。
+
 内部实现中，提供方构造按能力组织为 provider-name factory map。要添加另一个对话、语音合成、语音转写、视觉理解或向量嵌入提供方，应添加新的 factory entry，而不是在运行时代码里分支。
 
 当前注册表入口：
@@ -101,7 +112,9 @@ EMBEDDING_DIMENSIONS=1536
 
 YUVI 默认采用 real-provider-first。`EMBEDDING_PROVIDER=openai-compatible` 会在配置 `EMBEDDING_API_BASEURL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL` 和 `EMBEDDING_DIMENSIONS` 后调用 OpenAI-style `/embeddings` endpoint。`EMBEDDING_PROVIDER=mock` 只用于测试、CI 或显式离线模式，并会报告 `semanticEmbedding=false`，表示它只能验证检索管线，不能提供真实语义相似度。Embedding status 只返回 provider、model、dimensions、mock/configured/available 状态，绝不返回 API key。
 
-如果缺少可选提供方配置并且禁用了模拟实现，注册表会返回不可用提供方。`healthCheck()` 会报告 `unavailable`，实际调用会抛出标准化的 `ProviderError`。
+如果缺少可选提供方配置并且禁用了模拟实现，注册表会将路由报告为本地
+`not_ready`/`unavailable`；实际调用会抛出标准化的 `ProviderError`。状态和健康检查
+不会把这个配置结果升级为远程探测。
 
 ## Swapping Providers
 

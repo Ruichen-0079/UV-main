@@ -24,6 +24,10 @@ export async function registerHealthRoutes(
     const chat = providerStatus.providers.chat;
     const chatCapability = summarizeChatCapability(providerStatus.routes?.chat ?? []);
 
+    // Health uses locally ready chat routes as the service-operability gate.
+    // A ready route can keep the service operational while observed remains
+    // unknown; that is not evidence of remote reachability. Provider status
+    // inspection itself remains zero-provider-I/O.
     const ok =
       database.status === "healthy" &&
       chatCapability.readiness === "ready" &&
@@ -74,6 +78,9 @@ type ChatCapabilityHealth = {
 
 function summarizeChatCapability(routes: ProviderRouteStatus[]): ChatCapabilityHealth {
   const readyRoutes = routes.filter((route) => route.readiness === "ready");
+  // `operational` means that at least one locally constructible route is not
+  // known unavailable. It deliberately does not turn readiness into a live
+  // provider health check.
   const operational = readyRoutes.some((route) => route.observed !== "unavailable");
 
   let observed: ProviderObservedState = "unavailable";
