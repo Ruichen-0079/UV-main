@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2,
+  "name": "Yuvi AgentBus Browser Bridge",
+  "version": "1.0.0",
+  "description": "Transports exact AgentBus Product/Final GPT jobs to bound ChatGPT conversations without activating tabs.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "https://chatgpt.com/*",
+    "http://127.0.0.1:6738/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "yuvi-agentbus-bridge@local"
+    }
+  }
+}
