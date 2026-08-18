@@ -1830,10 +1830,25 @@ export class DesktopSupervisor {
   ): Record<string, unknown> {
     let secrets: string[];
     try {
-      secrets = [
+      const secretCandidates = [
         this.config.env[POSTGRES_PASSWORD_ENV],
         this.baseEnv[POSTGRES_PASSWORD_ENV]
-      ].filter((value): value is string => typeof value === "string" && value.length > 0);
+      ];
+      const layout = this.config.postgresLayout;
+      if (layout) {
+        try {
+          // A development secret file is authoritative input to the probe.
+          secretCandidates.push(fs.readFileSync(layout.passwordFile, "utf8").trim());
+        } catch (error) {
+          // An absent file is expected for credential-manager mode. Any other
+          // read failure omits all string fields below rather than risking an
+          // unredacted probe value.
+          if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+        }
+      }
+      secrets = secretCandidates.filter(
+        (value): value is string => typeof value === "string" && value.length > 0
+      );
     } catch {
       // Never fall back to raw diagnostic strings if secret collection fails.
       return Object.fromEntries(

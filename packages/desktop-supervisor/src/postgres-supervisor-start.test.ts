@@ -493,6 +493,66 @@ describe("private postgres Windows start state machine", () => {
     expect(serialized).toContain("postgres.private.identity_db");
   });
 
+  it("redacts a development-file postgres password before lifecycle emission", async () => {
+    enableLifecycleDiagnostics();
+    const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { config, layout } = privateConfig();
+    const secret = "DEVELOPMENT_FILE_IDENTITY_SECRET";
+    delete config.env["YUVI_POSTGRES_PASSWORD"];
+    fs.writeFileSync(layout.passwordFile, `${secret}\n`, "utf8");
+    const supervisor = createSupervisor(config, {
+      platform: "win32",
+      identityProcessProbe: () => ({
+        status: "RESOLVED",
+        processId: 4242,
+        processIdMatches: true,
+        durationMs: 2,
+        executablePath: `C:/private/${secret}/postgres.exe`,
+        startedAtUtc: new Date().toISOString()
+      }),
+      identityDatabaseProbe: async () => ({
+        status: "RESOLVED",
+        durationMs: 3,
+        sqlState: `password=${secret}`,
+        dataDirectory: `postgresql://user:${secret}@host/db`,
+        clusterName: `PGPASSWORD=${secret}`,
+        port: 55432,
+        serverVersionNum: 160010,
+        postmasterStartTime: `YUVI_POSTGRES_PASSWORD=${secret}`,
+        dataDirectoryMatchesExpected: false,
+        clusterNameMatchesExpected: false,
+        portMatchesExpected: true,
+        majorMatches: true,
+        startTimePlausible: false
+      }),
+      inspectProcess: (processId) => ({
+        status: "unavailable",
+        processId,
+        reason: "query-timeout"
+      }),
+      spawnWindowsPgCtl: async () => {
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        return {
+          ok: true,
+          kind: "SUCCESS" as const,
+          status: 0 as const,
+          signal: null,
+          stdout: "",
+          stderr: ""
+        };
+      }
+    });
+
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE" });
+    const serialized = JSON.stringify(capturedLifecycleEvents(lifecycleLog));
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("postgresql://user:");
+    expect(serialized).not.toContain("PGPASSWORD=");
+    expect(serialized).not.toContain("YUVI_POSTGRES_PASSWORD=");
+    expect(serialized).toContain("postgres.private.identity_os");
+    expect(serialized).toContain("postgres.private.identity_db");
+  });
+
   it("fails safe when producer identity redaction throws", async () => {
     enableLifecycleDiagnostics();
     const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
