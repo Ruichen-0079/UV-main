@@ -14,6 +14,8 @@ pub struct UserSettings {
     pub memory: MemorySettings,
     pub tts: TtsSettings,
     pub companion: CompanionSettings,
+    #[serde(default)]
+    pub proactive: ProactiveSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +86,12 @@ pub struct CompanionSettings {
     pub always_on_top: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProactiveSettings {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ServiceMode {
@@ -141,6 +149,7 @@ impl Default for UserSettings {
             companion: CompanionSettings {
                 always_on_top: true,
             },
+            proactive: ProactiveSettings::default(),
         }
     }
 }
@@ -155,6 +164,7 @@ pub struct UserSettingsPatch {
     pub memory: Option<MemorySettingsPatch>,
     pub tts: Option<TtsSettingsPatch>,
     pub companion: Option<CompanionSettingsPatch>,
+    pub proactive: Option<ProactiveSettingsPatch>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -212,6 +222,12 @@ pub struct TtsSettingsPatch {
 #[serde(rename_all = "camelCase")]
 pub struct CompanionSettingsPatch {
     pub always_on_top: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProactiveSettingsPatch {
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]

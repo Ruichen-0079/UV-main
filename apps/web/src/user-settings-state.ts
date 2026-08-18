@@ -35,6 +35,7 @@ export type UserSettingsDto = {
     upstreamUrl: string;
   };
   companion: { alwaysOnTop: boolean };
+  proactive: { enabled: boolean };
 };
 
 export type TtsSettingsProjection = Pick<UserSettingsDto["tts"], "enabled" | "mode">;
@@ -143,6 +144,7 @@ export type UserSettingsForm = {
   ttsWrapperUrl: string;
   ttsUpstreamUrl: string;
   companionAlwaysOnTop: boolean;
+  proactiveEnabled: boolean;
 };
 
 export type UserSettingsUiState = {
@@ -188,7 +190,8 @@ export const defaultUserSettingsForm = (): UserSettingsForm => ({
   ttsMode: "external",
   ttsWrapperUrl: "http://127.0.0.1:9881",
   ttsUpstreamUrl: "http://127.0.0.1:9880",
-  companionAlwaysOnTop: true
+  companionAlwaysOnTop: true,
+  proactiveEnabled: false
 });
 
 export const initialUserSettingsUiState = (): UserSettingsUiState => ({
@@ -230,7 +233,8 @@ export function formFromView(view: SettingsViewDto): UserSettingsForm {
     ttsMode: s.tts.mode,
     ttsWrapperUrl: s.tts.wrapperUrl,
     ttsUpstreamUrl: s.tts.upstreamUrl,
-    companionAlwaysOnTop: s.companion.alwaysOnTop
+    companionAlwaysOnTop: s.companion.alwaysOnTop,
+    proactiveEnabled: s.proactive.enabled
   };
 }
 
@@ -263,7 +267,8 @@ export function patchFromForm(form: UserSettingsForm): Record<string, unknown> {
       wrapperUrl: form.ttsWrapperUrl,
       upstreamUrl: form.ttsUpstreamUrl
     },
-    companion: { alwaysOnTop: form.companionAlwaysOnTop }
+    companion: { alwaysOnTop: form.companionAlwaysOnTop },
+    proactive: { enabled: form.proactiveEnabled }
   };
 }
 

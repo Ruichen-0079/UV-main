@@ -37,7 +37,8 @@ const sampleView = (): SettingsViewDto => ({
       wrapperUrl: "http://127.0.0.1:9881",
       upstreamUrl: "http://127.0.0.1:9880"
     },
-    companion: { alwaysOnTop: true }
+    companion: { alwaysOnTop: true },
+    proactive: { enabled: false }
   },
   secrets: { deepseekApiKey: false, databaseUrl: false, memoryLlmApiKey: false },
   revision: 1,
@@ -51,6 +52,7 @@ describe("user settings reducer", () => {
     state = reduceUserSettings(state, { type: "load-success", view: sampleView() });
     expect(state.loading).toBe(false);
     expect(state.form.chatModel).toBe("deepseek-chat");
+    expect(state.form.proactiveEnabled).toBe(false);
     expect(state.form.deepseekApiKeyInput).toBe("");
     expect(state.secrets.deepseekApiKey).toBe(false);
     assertNoSecretMaterial(state);
@@ -183,6 +185,20 @@ describe("user settings reducer", () => {
     const form = formFromView(sampleView());
     expect(form.memoryBaseUrl).toBe("http://127.0.0.1:6131");
     expect(form.companionAlwaysOnTop).toBe(true);
+  });
+
+  it("maps proactive consent exactly and defaults it off", () => {
+    expect(defaultUserSettingsForm().proactiveEnabled).toBe(false);
+
+    const view = sampleView();
+    view.settings.proactive.enabled = true;
+    const form = formFromView(view);
+    expect(form.proactiveEnabled).toBe(true);
+
+    form.proactiveEnabled = false;
+    expect(patchFromForm(form)).toMatchObject({ proactive: { enabled: false } });
+    form.proactiveEnabled = true;
+    expect(patchFromForm(form)).toMatchObject({ proactive: { enabled: true } });
   });
 
   it("field edits only update form local state (no secret leak)", () => {

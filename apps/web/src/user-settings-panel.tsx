@@ -481,6 +481,22 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
             />
           </Field>
         </section>
+
+        <section className="settings-card">
+          <h3>Proactive messages</h3>
+          <label className="setting-checkbox">
+            <input
+              type="checkbox"
+              checked={form.proactiveEnabled}
+              onChange={(e) => setField("proactiveEnabled", e.target.checked)}
+            />
+            Allow proactive messages
+          </label>
+          <p className="mt-2 text-xs text-ink-500">
+            Allow YUVI to start text conversations on its own when eligible. Off by default. Voice
+            remains disabled.
+          </p>
+        </section>
       </div>
     </Panel>
   );

@@ -110,6 +110,11 @@ pub fn apply_patch(base: &UserSettings, patch: &UserSettingsPatch) -> Result<Use
             next.companion.always_on_top = always_on_top;
         }
     }
+    if let Some(proactive) = &patch.proactive {
+        if let Some(enabled) = proactive.enabled {
+            next.proactive.enabled = enabled;
+        }
+    }
     next.schema_version = SCHEMA_VERSION;
     validate_settings(&next)?;
     Ok(next)
