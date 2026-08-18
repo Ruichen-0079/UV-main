@@ -2503,6 +2503,70 @@ describe("server", () => {
     }
   });
 
+  it("redacts URL userinfo across runtime settings and provider status responses", async () => {
+    const previousCwd = process.cwd();
+    const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-url-redaction-"));
+    const configuredUrl = "https://synthetic_user:synthetic_password@example.test/v1";
+    const sanitizedUrl = "https://example.test/v1";
+    const env = createTestEnv({
+      YUVI_RUNTIME_ENV_DIR: tempDir,
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEEPSEEK_API_KEY: "synthetic_deepseek_api_key",
+      DEEPSEEK_CHAT_MODEL: "deepseek-chat",
+      DEEPSEEK_REASONING_MODEL: "deepseek-reasoner"
+    });
+    let app: Awaited<ReturnType<typeof buildServer>> | undefined;
+
+    try {
+      process.chdir(tempDir);
+      process.env = { ...env };
+      app = await buildServer(loadServerConfig(env));
+
+      const update = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: { values: { DEEPSEEK_API_BASEURL: configuredUrl } }
+      });
+      expect(update.statusCode).toBe(200);
+      expect(update.body).not.toContain(configuredUrl);
+      expect(update.body).not.toContain("synthetic_user");
+      expect(update.body).not.toContain("synthetic_password");
+      expect(update.json().settings.providers.deepseek.baseUrl).toBe(sanitizedUrl);
+      expect(update.json().settings.effectiveConfig.DEEPSEEK_API_BASEURL).toBe(sanitizedUrl);
+
+      const reload = await app.inject({ method: "POST", url: "/settings/runtime/reload" });
+      expect(reload.statusCode).toBe(200);
+      expect(reload.body).not.toContain(configuredUrl);
+      expect(reload.body).not.toContain("synthetic_user");
+      expect(reload.body).not.toContain("synthetic_password");
+      expect(reload.json().active.providers.chat.baseUrl).toBe(sanitizedUrl);
+
+      const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
+      expect(settings.statusCode).toBe(200);
+      expect(settings.body).not.toContain(configuredUrl);
+      expect(settings.body).not.toContain("synthetic_user");
+      expect(settings.body).not.toContain("synthetic_password");
+      expect(settings.json().providers.deepseek.baseUrl).toBe(sanitizedUrl);
+      expect(settings.json().activeRuntimeConfig.providers.chat.baseUrl).toBe(sanitizedUrl);
+
+      const providers = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(providers.statusCode).toBe(200);
+      expect(providers.body).not.toContain(configuredUrl);
+      expect(providers.body).not.toContain("synthetic_user");
+      expect(providers.body).not.toContain("synthetic_password");
+      expect(providers.json().providers.chat.baseUrl).toBe(sanitizedUrl);
+      expect(
+        providers
+          .json()
+          .routes.chat.find((route: { provider: string }) => route.provider === "deepseek").baseUrl
+      ).toBe(sanitizedUrl);
+    } finally {
+      await app?.close();
+      process.chdir(previousCwd);
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("removes local overrides so effective settings inherit from .env", async () => {
     const previousCwd = process.cwd();
     const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-settings-inherit-"));

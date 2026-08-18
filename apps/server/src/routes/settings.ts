@@ -152,7 +152,12 @@ export async function registerSettingsRoutes(
         restartRequired: result.restartRequired,
         pendingRestartKeys: result.pendingRestartKeys,
         active: {
-          providers: result.providers.providers,
+          providers: Object.fromEntries(
+            Object.entries(result.providers.providers).map(([capability, status]) => [
+              capability,
+              sanitizeProviderStatus(status)
+            ])
+          ),
           memoryRepository: context.activeMemoryRepository
         },
         notHotReloaded: result.notHotReloaded,
