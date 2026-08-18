@@ -7,6 +7,7 @@ import {
 } from "./vision-input.js";
 
 afterEach(() => {
+  apiClient.setDashboardDevToken("");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -64,5 +65,52 @@ describe("Vision web input contract", () => {
       mimeType: "image/jpeg",
       prompt: "describe"
     });
+  });
+
+  it("attaches the dashboard token only to the protected settings GET", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    apiClient.setDashboardDevToken("dashboard-secret");
+
+    await apiClient.getRuntimeSettings();
+    await apiClient.getHealth();
+    await apiClient.getProviderStatus();
+    await apiClient.listRecentMemoryCandidates();
+
+    const calls = fetchMock.mock.calls as unknown as Array<
+      [RequestInfo | URL, RequestInit | undefined]
+    >;
+    expect(new Headers(calls[0]?.[1]?.headers).get("authorization")).toBe(
+      "Bearer dashboard-secret"
+    );
+    expect(new Headers(calls[1]?.[1]?.headers).get("authorization")).toBeNull();
+    expect(new Headers(calls[2]?.[1]?.headers).get("authorization")).toBeNull();
+    expect(new Headers(calls[3]?.[1]?.headers).get("authorization")).toBe(
+      "Bearer dashboard-secret"
+    );
+  });
+
+  it("does not attach a dashboard token when none is configured", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await apiClient.getRuntimeSettings();
+
+    const calls = fetchMock.mock.calls as unknown as Array<
+      [RequestInfo | URL, RequestInit | undefined]
+    >;
+    expect(new Headers(calls[0]?.[1]?.headers).get("authorization")).toBeNull();
   });
 });

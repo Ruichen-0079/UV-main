@@ -1,173 +1,65 @@
-import { writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
 import type { MemoryExtractorStatus } from "@companion/memory";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 import type { AppContext } from "../context.js";
-import { getRuntimeEnvPath, quoteEnvValue, readRuntimeEnvFiles } from "../env.js";
+import {
+  applyRuntimeEnv,
+  getRuntimeEnvDir,
+  getRuntimeEnvPath,
+  quoteEnvValue,
+  readRuntimeEnvFiles
+} from "../env.js";
 import { readMemoryIngestionDiagnostics } from "../memory-ingestion-diagnostics.js";
-import { requireDashboardDevToken } from "./security.js";
+import {
+  editableKeys,
+  getPendingRestartKeys,
+  getRuntimeSettingApplyMode,
+  sanitizeSettingValue,
+  secretKeys,
+  validateRuntimeSettings,
+  type EditableRuntimeSetting
+} from "../runtime-settings.js";
+import { requireLocalDashboardAccess } from "./security.js";
 
-const editableKeys = [
-  "MEMORY_REPOSITORY",
-  "DATABASE_URL",
-  "MEMORY_EXTRACTOR",
-  "MEMORY_MAINTENANCE_ENABLED",
-  "MEMORY_MAINTENANCE_RUN_ON_STARTUP",
-  "MEMORY_MAINTENANCE_INTERVAL_MINUTES",
-  "MEMORY_MAINTENANCE_LIMIT",
-  "MEMORY_VECTOR_INDEX_ENABLED",
-  "MEMORY_VECTOR_INDEX_TYPE",
-  "MEMORY_VECTOR_DISTANCE",
-  "MEMORY_VECTOR_IVFFLAT_PROBES",
-  "MEMORY_VECTOR_HNSW_EF_SEARCH",
-  "YUVI_AUTO_MIGRATE",
-  "YUVI_DEV_SUPERVISOR",
-  "EVENT_BUS",
-  "PROVIDER_ALLOW_MOCKS",
-  "CHAT_PROVIDER_CHAIN",
-  "REASONING_PROVIDER_CHAIN",
-  "EMBEDDING_PROVIDER_CHAIN",
-  "TTS_PROVIDER_CHAIN",
-  "STT_PROVIDER_CHAIN",
-  "VISION_PROVIDER_CHAIN",
-  "SERVER_HOST",
-  "SERVER_PORT",
-  "DEEPSEEK_API_BASEURL",
-  "DEEPSEEK_API_KEY",
-  "DEEPSEEK_CHAT_MODEL",
-  "DEEPSEEK_REASONING_MODEL",
-  "XAI_API_BASEURL",
-  "XAI_API_KEY",
-  "XAI_TTS_MODEL",
-  "XAI_TTS_VOICE",
-  "XAI_VISION_MODEL",
-  "DASHSCOPE_API_BASEURL",
-  "DASHSCOPE_API_KEY",
-  "DASHSCOPE_STT_MODEL",
-  "NVIDIA_API_BASEURL",
-  "NVIDIA_API_KEY",
-  "NVIDIA_CHAT_MODEL",
-  "NVIDIA_REASONING_MODEL",
-  "NVIDIA_EMBEDDING_MODEL",
-  "NVIDIA_EMBEDDING_DIMENSIONS",
-  "NVIDIA_VISION_MODEL",
-  "LOCAL_MODEL_BASEURL",
-  "LOCAL_CHAT_MODEL",
-  "LOCAL_REASONING_MODEL",
-  "LOCAL_EMBEDDING_MODEL",
-  "LOCAL_EMBEDDING_DIMENSIONS",
-  "LOCAL_TTS_MODEL",
-  "GPT_SOVITS_TTS_BASE_URL",
-  "GPT_SOVITS_TTS_UPSTREAM_URL",
-  "GPT_SOVITS_TTS_GPT_WEIGHTS",
-  "GPT_SOVITS_TTS_SOVITS_WEIGHTS",
-  "GPT_SOVITS_TTS_LANGUAGE",
-  "GPT_SOVITS_TTS_SPEAKER",
-  "GPT_SOVITS_TTS_STYLE",
-  "GPT_SOVITS_TTS_REFERENCE_RANK",
-  "GPT_SOVITS_TTS_REFERENCE_AUDIO",
-  "GPT_SOVITS_TTS_REFERENCE_TEXT",
-  "GPT_SOVITS_TTS_REFERENCE_LANGUAGE",
-  "GPT_SOVITS_TTS_TEXT_SPLIT_METHOD",
-  "GPT_SOVITS_TTS_TOP_K",
-  "GPT_SOVITS_TTS_TOP_P",
-  "GPT_SOVITS_TTS_TEMPERATURE",
-  "GPT_SOVITS_TTS_REPETITION_PENALTY",
-  "GPT_SOVITS_TTS_SAMPLE_STEPS",
-  "GPT_SOVITS_TTS_TIMEOUT_MS",
-  "LOCAL_STT_MODEL",
-  "LOCAL_VISION_MODEL",
-  "EMBEDDING_PROVIDER",
-  "EMBEDDING_API_BASEURL",
-  "EMBEDDING_API_KEY",
-  "EMBEDDING_MODEL",
-  "EMBEDDING_DIMENSIONS"
-] as const;
+const RuntimeSettingsUpdateSchema = z
+  .object({
+    values: z.record(z.string(), z.string().nullable()).optional().default({}),
+    removeOverrides: z.array(z.string()).optional().default([])
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const conflicts = Object.keys(value.values).filter((key) =>
+      value.removeOverrides.includes(key)
+    );
+    if (conflicts.length > 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["removeOverrides"],
+        message: `Keys cannot be both set and removed: ${conflicts.join(", ")}.`
+      });
+    }
+  });
 
-const RuntimeSettingsUpdateSchema = z.object({
-  values: z.record(z.string(), z.string().nullable())
-});
-
-const secretKeys = new Set([
-  "DATABASE_URL",
-  "DEEPSEEK_API_KEY",
-  "XAI_API_KEY",
-  "DASHSCOPE_API_KEY",
-  "NVIDIA_API_KEY",
-  "EMBEDDING_API_KEY"
-]);
-
-const hotReloadableKeys = new Set([
-  "DEEPSEEK_API_BASEURL",
-  "DEEPSEEK_API_KEY",
-  "DEEPSEEK_CHAT_MODEL",
-  "DEEPSEEK_REASONING_MODEL",
-  "MEMORY_EXTRACTOR",
-  "PROVIDER_ALLOW_MOCKS",
-  "CHAT_PROVIDER_CHAIN",
-  "REASONING_PROVIDER_CHAIN",
-  "EMBEDDING_PROVIDER_CHAIN",
-  "TTS_PROVIDER_CHAIN",
-  "STT_PROVIDER_CHAIN",
-  "VISION_PROVIDER_CHAIN",
-  "XAI_API_BASEURL",
-  "XAI_API_KEY",
-  "XAI_TTS_MODEL",
-  "XAI_TTS_VOICE",
-  "XAI_VISION_MODEL",
-  "DASHSCOPE_API_BASEURL",
-  "DASHSCOPE_API_KEY",
-  "DASHSCOPE_STT_MODEL",
-  "NVIDIA_API_BASEURL",
-  "NVIDIA_API_KEY",
-  "NVIDIA_CHAT_MODEL",
-  "NVIDIA_REASONING_MODEL",
-  "NVIDIA_EMBEDDING_MODEL",
-  "NVIDIA_EMBEDDING_DIMENSIONS",
-  "NVIDIA_VISION_MODEL",
-  "LOCAL_MODEL_BASEURL",
-  "LOCAL_CHAT_MODEL",
-  "LOCAL_REASONING_MODEL",
-  "LOCAL_EMBEDDING_MODEL",
-  "LOCAL_EMBEDDING_DIMENSIONS",
-  "LOCAL_TTS_MODEL",
-  "GPT_SOVITS_TTS_BASE_URL",
-  "GPT_SOVITS_TTS_UPSTREAM_URL",
-  "GPT_SOVITS_TTS_LANGUAGE",
-  "GPT_SOVITS_TTS_SPEAKER",
-  "GPT_SOVITS_TTS_STYLE",
-  "GPT_SOVITS_TTS_REFERENCE_RANK",
-  "GPT_SOVITS_TTS_REFERENCE_AUDIO",
-  "GPT_SOVITS_TTS_REFERENCE_TEXT",
-  "GPT_SOVITS_TTS_REFERENCE_LANGUAGE",
-  "GPT_SOVITS_TTS_TEXT_SPLIT_METHOD",
-  "GPT_SOVITS_TTS_TOP_K",
-  "GPT_SOVITS_TTS_TOP_P",
-  "GPT_SOVITS_TTS_TEMPERATURE",
-  "GPT_SOVITS_TTS_REPETITION_PENALTY",
-  "GPT_SOVITS_TTS_SAMPLE_STEPS",
-  "GPT_SOVITS_TTS_TIMEOUT_MS",
-  "LOCAL_STT_MODEL",
-  "LOCAL_VISION_MODEL",
-  "EMBEDDING_PROVIDER",
-  "EMBEDDING_API_BASEURL",
-  "EMBEDDING_API_KEY",
-  "EMBEDDING_MODEL",
-  "EMBEDDING_DIMENSIONS"
-]);
+let settingsOperationQueue: Promise<void> = Promise.resolve();
 
 export async function registerSettingsRoutes(
   app: FastifyInstance,
   context: AppContext,
   config: ServerConfig
 ): Promise<void> {
-  app.get("/settings/runtime", async () => {
+  app.get("/settings/runtime", async (request, reply) => {
+    if (!requireLocalDashboardAccess(config, request, reply)) {
+      return reply;
+    }
     return buildRuntimeSettings(context, config);
   });
 
   app.post("/settings/runtime", async (request, reply) => {
-    if (!requireDashboardDevToken(config, request, reply)) {
+    if (!requireLocalDashboardAccess(config, request, reply)) {
       return reply;
     }
 
@@ -175,13 +67,6 @@ export async function registerSettingsRoutes(
       return reply.status(404).send({
         error: "not_found",
         message: "Runtime settings updates are only available in development mode."
-      });
-    }
-
-    if (!isLocalRequest(request)) {
-      return reply.status(403).send({
-        error: "forbidden",
-        message: "Runtime settings can only be updated from localhost."
       });
     }
 
@@ -193,35 +78,50 @@ export async function registerSettingsRoutes(
       });
     }
 
-    const unsafeKeys = Object.keys(parsed.data.values).filter(
-      (key) => !editableKeys.includes(key as (typeof editableKeys)[number])
+    const unsafeKeys = [...Object.keys(parsed.data.values), ...parsed.data.removeOverrides].filter(
+      (key) => !editableKeys.includes(key as EditableRuntimeSetting)
     );
     if (unsafeKeys.length > 0) {
       return reply.status(400).send({
         error: "unsafe_keys",
         message: "Only allowlisted local development settings can be updated.",
-        unsafeKeys
-      });
-    }
-    const invalidMemoryExtractor = validateMemoryExtractorUpdate(parsed.data.values);
-    if (invalidMemoryExtractor) {
-      return reply.status(400).send({
-        error: "invalid_memory_extractor",
-        message: invalidMemoryExtractor
+        unsafeKeys: Array.from(new Set(unsafeKeys))
       });
     }
 
-    const changedKeys = await writeLocalRuntimeSettings(parsed.data.values);
-    return reply.send({
-      ok: true,
-      restartRequired: changedKeys.some((key) => !hotReloadableKeys.has(key)),
-      changedKeys,
-      settings: await buildRuntimeSettings(context, config)
+    return withSettingsOperationLock(async () => {
+      let changedKeys: string[];
+      try {
+        changedKeys = await writeLocalRuntimeSettings(
+          parsed.data.values,
+          parsed.data.removeOverrides
+        );
+      } catch (error) {
+        if (error instanceof InvalidRuntimeSettingsError) {
+          return reply.status(400).send({
+            error: "invalid_settings",
+            fieldErrors: error.fieldErrors
+          });
+        }
+        throw error;
+      }
+      const runtimeEnvFiles = await readRuntimeEnvFiles();
+      const pendingRestartKeys = getPendingRestartKeys(
+        runtimeEnvFiles.env,
+        context.activeRuntimeEnv
+      );
+      return reply.send({
+        ok: true,
+        restartRequired: pendingRestartKeys.length > 0,
+        pendingRestartKeys,
+        changedKeys,
+        settings: await buildRuntimeSettings(context, config)
+      });
     });
   });
 
   app.post("/settings/runtime/reload", async (request, reply) => {
-    if (!requireDashboardDevToken(config, request, reply)) {
+    if (!requireLocalDashboardAccess(config, request, reply)) {
       return reply;
     }
 
@@ -232,30 +132,54 @@ export async function registerSettingsRoutes(
       });
     }
 
-    if (!isLocalRequest(request)) {
-      return reply.status(403).send({
-        error: "forbidden",
-        message: "Runtime settings can only be reloaded from localhost."
+    return withSettingsOperationLock(async () => {
+      const effectiveEnv = await readEffectiveRuntimeEnv(app);
+      const validation = validateRuntimeSettings(effectiveEnv);
+      if (Object.keys(validation.fieldErrors).length > 0) {
+        return reply.status(400).send({
+          error: "invalid_settings",
+          fieldErrors: validation.fieldErrors
+        });
+      }
+      const result = await context.reloadRuntimeConfig(effectiveEnv);
+      applyRuntimeEnv(buildAppliedProcessEnv(effectiveEnv, context));
+      const settings = await buildRuntimeSettings(context, config);
+
+      return reply.send({
+        ok: true,
+        applied: true,
+        appliedKeys: result.appliedKeys,
+        restartRequired: result.restartRequired,
+        pendingRestartKeys: result.pendingRestartKeys,
+        active: {
+          providers: Object.fromEntries(
+            Object.entries(result.providers.providers).map(([capability, status]) => [
+              capability,
+              sanitizeProviderStatus(status)
+            ])
+          ),
+          memoryRepository: context.activeMemoryRepository
+        },
+        notHotReloaded: result.notHotReloaded,
+        message: result.message,
+        settings
       });
-    }
-
-    const effectiveEnv = await readEffectiveRuntimeEnv(app);
-    const result = await context.reloadRuntimeConfig(effectiveEnv);
-    const settings = await buildRuntimeSettings(context, config);
-
-    return reply.send({
-      ok: true,
-      applied: true,
-      restartRequired: result.restartRequired,
-      active: {
-        providers: result.providers.providers,
-        memoryRepository: context.activeMemoryRepository
-      },
-      notHotReloaded: result.notHotReloaded,
-      message: result.message,
-      settings
     });
   });
+}
+
+async function withSettingsOperationLock<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = settingsOperationQueue;
+  let release!: () => void;
+  settingsOperationQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
 }
 
 async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
@@ -268,11 +192,8 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
   const providerStatus = context.providers.getStatus();
   const memoryRepository = env["MEMORY_REPOSITORY"] ?? "in-memory";
   const memoryExtractor = normalizeMemoryExtractor(env["MEMORY_EXTRACTOR"]);
-  const pendingRestart = hasRestartRequiredLocalOverrides(
-    localEnv,
-    config,
-    context.activeMemoryRepository
-  );
+  const pendingRestartKeys = getPendingRestartKeys(env, context.activeRuntimeEnv);
+  const pendingRestart = pendingRestartKeys.length > 0;
 
   return {
     configFiles: {
@@ -298,9 +219,12 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       memoryExtractor: context.memory.getExtractorStatus().mode,
       memoryExtractorActive: context.memory.getExtractorStatus().active,
       providers: {
-        chat: providerStatus.providers.chat,
-        reasoning: providerStatus.providers.reasoning,
-        embedding: providerStatus.providers.embedding
+        chat: sanitizeProviderStatus(providerStatus.providers.chat),
+        reasoning: sanitizeProviderStatus(providerStatus.providers.reasoning),
+        embedding: sanitizeProviderStatus(providerStatus.providers.embedding),
+        tts: sanitizeProviderStatus(providerStatus.providers.tts),
+        stt: sanitizeProviderStatus(providerStatus.providers.stt),
+        vision: sanitizeProviderStatus(providerStatus.providers.vision)
       }
     },
     settings: buildLayeredSettings(baseEnv, localEnv, env),
@@ -319,9 +243,10 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
         restartSupported: Boolean(
           config.devSupervisor.active && config.devSupervisor.restartMarkerPath
         ),
-        runtimeEnvDir: process.env["YUVI_RUNTIME_ENV_DIR"] ?? process.cwd()
+        runtimeEnvDir: getRuntimeEnvDir()
       },
-      pendingRestart
+      pendingRestart,
+      pendingRestartKeys
     },
     memory: {
       memoryRepository,
@@ -345,58 +270,57 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
     },
     providers: {
       deepseek: {
-        baseUrl: env["DEEPSEEK_API_BASEURL"] ?? "https://api.deepseek.com",
+        baseUrl: sanitizeSettingValue(
+          "DEEPSEEK_API_BASEURL",
+          env["DEEPSEEK_API_BASEURL"] ?? "https://api.deepseek.com"
+        ),
         apiKeyConfigured: Boolean(env["DEEPSEEK_API_KEY"]),
         apiKeyPreview: maskSecret(env["DEEPSEEK_API_KEY"]),
         chatModel: env["DEEPSEEK_CHAT_MODEL"] ?? "",
         reasoningModel: env["DEEPSEEK_REASONING_MODEL"] ?? "",
         status: {
-          chat: providerStatus.providers.chat,
-          reasoning: providerStatus.providers.reasoning
+          chat: sanitizeProviderStatus(providerStatus.providers.chat),
+          reasoning: sanitizeProviderStatus(providerStatus.providers.reasoning)
         }
       },
       xai: {
-        baseUrl: env["XAI_API_BASEURL"] ?? "https://api.x.ai/v1",
+        baseUrl: sanitizeSettingValue(
+          "XAI_API_BASEURL",
+          env["XAI_API_BASEURL"] ?? "https://api.x.ai/v1"
+        ),
         apiKeyConfigured: Boolean(env["XAI_API_KEY"]),
         apiKeyPreview: maskSecret(env["XAI_API_KEY"]),
         ttsModel: env["XAI_TTS_MODEL"] ?? "",
         ttsVoice: env["XAI_TTS_VOICE"] ?? "",
         visionModel: env["XAI_VISION_MODEL"] ?? "",
         optional: true,
-        implemented: false
+        implementedCapabilities: ["tts", "vision"]
       },
       dashscope: {
-        baseUrl: env["DASHSCOPE_API_BASEURL"] ?? "",
+        baseUrl: sanitizeSettingValue("DASHSCOPE_API_BASEURL", env["DASHSCOPE_API_BASEURL"] ?? ""),
         apiKeyConfigured: Boolean(env["DASHSCOPE_API_KEY"]),
         apiKeyPreview: maskSecret(env["DASHSCOPE_API_KEY"]),
         sttModel: env["DASHSCOPE_STT_MODEL"] ?? "",
         optional: true,
-        implemented: false
+        implementedCapabilities: ["stt"]
       },
       embedding: {
         provider: env["EMBEDDING_PROVIDER"] ?? "openai-compatible",
-        baseUrl: env["EMBEDDING_API_BASEURL"] ?? "",
+        baseUrl: sanitizeSettingValue("EMBEDDING_API_BASEURL", env["EMBEDDING_API_BASEURL"] ?? ""),
         apiKeyConfigured: Boolean(env["EMBEDDING_API_KEY"]),
         apiKeyPreview: maskSecret(env["EMBEDDING_API_KEY"]),
         model: env["EMBEDDING_MODEL"] ?? "",
         dimensions: env["EMBEDDING_DIMENSIONS"] ?? "",
-        status: providerStatus.providers.embedding
+        status: sanitizeProviderStatus(providerStatus.providers.embedding)
       }
     },
     restartRequired: pendingRestart,
-    editableKeys
+    pendingRestartKeys,
+    editableKeys,
+    applyModes: Object.fromEntries(
+      editableKeys.map((key) => [key, getRuntimeSettingApplyMode(key)])
+    )
   };
-}
-
-function validateMemoryExtractorUpdate(values: Record<string, string | null>): string | null {
-  if (!("MEMORY_EXTRACTOR" in values)) {
-    return null;
-  }
-  const value = values["MEMORY_EXTRACTOR"] || "llm";
-  if (value === "llm" || value === "rule-based") {
-    return null;
-  }
-  return "MEMORY_EXTRACTOR must be one of: llm, rule-based.";
 }
 
 function normalizeMemoryExtractor(value: string | undefined): "rule-based" | "llm" {
@@ -405,37 +329,6 @@ function normalizeMemoryExtractor(value: string | undefined): "rule-based" | "ll
 
 function parseBooleanString(value: string | undefined): boolean {
   return value === "1" || value === "true" || value === "TRUE";
-}
-
-function hasRestartRequiredLocalOverrides(
-  localEnv: Record<string, string>,
-  config: ServerConfig,
-  activeMemoryRepository: string
-): boolean {
-  if (
-    localEnv["MEMORY_REPOSITORY"] &&
-    (localEnv["MEMORY_REPOSITORY"] ?? "in-memory") !== activeMemoryRepository
-  ) {
-    return true;
-  }
-  if (localEnv["SERVER_HOST"] && localEnv["SERVER_HOST"] !== config.host) {
-    return true;
-  }
-  if (localEnv["SERVER_PORT"] && Number.parseInt(localEnv["SERVER_PORT"], 10) !== config.port) {
-    return true;
-  }
-  if (
-    localEnv["MEMORY_MAINTENANCE_ENABLED"] ||
-    localEnv["MEMORY_MAINTENANCE_RUN_ON_STARTUP"] ||
-    localEnv["MEMORY_MAINTENANCE_INTERVAL_MINUTES"] ||
-    localEnv["MEMORY_MAINTENANCE_LIMIT"] ||
-    localEnv["MEMORY_VECTOR_INDEX_ENABLED"] ||
-    localEnv["MEMORY_VECTOR_INDEX_TYPE"] ||
-    localEnv["MEMORY_VECTOR_DISTANCE"]
-  ) {
-    return true;
-  }
-  return Boolean(localEnv["EVENT_BUS"] && localEnv["EVENT_BUS"] !== config.eventBus);
 }
 
 async function readEffectiveRuntimeEnv(
@@ -451,6 +344,23 @@ async function readEffectiveRuntimeEnv(
   return runtimeEnvFiles.env;
 }
 
+function buildAppliedProcessEnv(
+  effectiveEnv: Record<string, string | undefined>,
+  context: AppContext
+): Record<string, string | undefined> {
+  const processEnv = { ...effectiveEnv };
+  for (const key of editableKeys) {
+    if (getRuntimeSettingApplyMode(key) !== "restart_required") continue;
+    const activeValue = context.activeRuntimeEnv[key];
+    if (activeValue === undefined) {
+      delete processEnv[key];
+    } else {
+      processEnv[key] = activeValue;
+    }
+  }
+  return processEnv;
+}
+
 function buildSafeConfig(env: Record<string, string | undefined>): Record<string, unknown> {
   const safeConfig: Record<string, unknown> = {};
   for (const key of editableKeys) {
@@ -462,9 +372,18 @@ function buildSafeConfig(env: Record<string, string | undefined>): Record<string
       };
       continue;
     }
-    safeConfig[key] = value ?? "";
+    safeConfig[key] = sanitizeSettingValue(key, value) ?? "";
   }
   return safeConfig;
+}
+
+function sanitizeProviderStatus<T extends { baseUrl?: string | undefined }>(status: T): T {
+  return {
+    ...status,
+    ...(status.baseUrl !== undefined
+      ? { baseUrl: sanitizeSettingValue("XAI_API_BASEURL", status.baseUrl) }
+      : {})
+  };
 }
 
 function buildLayeredSettings(
@@ -487,9 +406,9 @@ function buildLayeredSettings(
     }
 
     layeredSettings[key] = {
-      base: baseEnv[key] ?? "",
-      localOverride: localEnv[key] ?? "",
-      effective: effectiveEnv[key] ?? "",
+      base: sanitizeSettingValue(key, baseEnv[key]) ?? "",
+      localOverride: sanitizeSettingValue(key, localEnv[key]) ?? "",
+      effective: sanitizeSettingValue(key, effectiveEnv[key]) ?? "",
       source
     };
   }
@@ -497,25 +416,75 @@ function buildLayeredSettings(
 }
 
 async function writeLocalRuntimeSettings(
-  updates: Record<string, string | null>
+  updates: Record<string, string | null>,
+  removeOverrides: string[]
 ): Promise<string[]> {
   const envPath = getRuntimeEnvPath(".env.local");
-  const existing = (await readRuntimeEnvFiles()).local.values;
+  const runtimeEnvFiles = await readRuntimeEnvFiles();
+  const existing = runtimeEnvFiles.local.values;
+  const candidate = { ...existing };
   const changedKeys: string[] = [];
 
   for (const [key, value] of Object.entries(updates)) {
     const normalized = value ?? "";
-    if ((existing[key] ?? "") !== normalized) {
-      existing[key] = normalized;
+    if (!(key in candidate) || candidate[key] !== normalized) changedKeys.push(key);
+    candidate[key] = normalized;
+  }
+
+  for (const key of removeOverrides) {
+    if (key in candidate) {
+      delete candidate[key];
       changedKeys.push(key);
     }
   }
 
-  if (changedKeys.length > 0) {
-    await writeFile(envPath, serializeLocalEnv(existing), "utf8");
+  const ambientEnv = { ...process.env };
+  const localStateKeys = new Set([
+    ...Object.keys(existing),
+    ...Object.keys(candidate),
+    ...removeOverrides
+  ]);
+  for (const key of localStateKeys) delete ambientEnv[key];
+  const candidateEnv = { ...runtimeEnvFiles.base.values, ...ambientEnv, ...candidate };
+  const validation = validateRuntimeSettings(candidateEnv);
+  if (Object.keys(validation.fieldErrors).length > 0) {
+    throw new InvalidRuntimeSettingsError(validation.fieldErrors);
   }
 
-  return changedKeys;
+  const uniqueChangedKeys = Array.from(new Set(changedKeys));
+  if (uniqueChangedKeys.length > 0) {
+    await atomicWriteLocalEnv(envPath, serializeLocalEnv(candidate));
+  }
+
+  return uniqueChangedKeys;
+}
+
+class InvalidRuntimeSettingsError extends Error {
+  constructor(readonly fieldErrors: Record<string, string>) {
+    super("Runtime settings are invalid.");
+    this.name = "InvalidRuntimeSettingsError";
+  }
+}
+
+async function atomicWriteLocalEnv(envPath: string, content: string): Promise<void> {
+  const directory = dirname(envPath);
+  await mkdir(directory, { recursive: true });
+  const temporaryPath = `${envPath}.${process.pid}.${randomUUID()}.tmp`;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+
+  try {
+    handle = await open(temporaryPath, "wx", 0o600);
+    await handle.writeFile(content, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, envPath);
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 function serializeLocalEnv(values: Record<string, string>): string {
@@ -563,8 +532,4 @@ function maskSecret(value: string | undefined): string | undefined {
   }
   const suffix = value.length >= 4 ? value.slice(-4) : "";
   return suffix ? `••••••••••••${suffix}` : "••••••••••••";
-}
-
-function isLocalRequest(request: FastifyRequest): boolean {
-  return ["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"].includes(request.ip);
 }

@@ -1,4 +1,5 @@
 import type { RuntimeEvent } from "@companion/protocol";
+import { sanitizeUrlUserinfo } from "../runtime-settings.js";
 
 export class DashboardStateService {
   private readonly events: RuntimeEvent[] = [];
@@ -23,7 +24,14 @@ export function redactValue(value: unknown): unknown {
   if (value && typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, nested] of Object.entries(value)) {
-      result[key] = isSensitiveKey(key) ? "[redacted]" : redactValue(nested);
+      if (isSensitiveKey(key)) {
+        result[key] = "[redacted]";
+        continue;
+      }
+      result[key] =
+        isUrlKey(key) && typeof nested === "string"
+          ? sanitizeUrlUserinfo(nested)
+          : redactValue(nested);
     }
     return result;
   }
@@ -48,4 +56,9 @@ function isSensitiveKey(key: string): boolean {
     normalized.includes("secret") ||
     normalized.includes("password")
   );
+}
+
+function isUrlKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return normalized === "url" || normalized.endsWith("url") || normalized.includes("baseurl");
 }
