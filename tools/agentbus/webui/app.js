@@ -37,6 +37,12 @@ const ROLE_LABELS_ZH = {
 };
 
 const ACTION_LABELS_ZH = {
+  PRODUCT_GPT: "产品 GPT（自动）",
+  FINAL_GPT: "最终 GPT（自动）",
+  MERGE: "自动合并",
+  NEXT: "继续下一单元",
+  WAIT: "自动等待",
+  DONE: "完成",
   SPEC: "等待规格",
   IMPL: "等待实现",
   AUDIT: "等待审计",
@@ -691,15 +697,31 @@ function renderMain(stream, events) {
 }
 
 function renderBindings(stream, catalog) {
+  const overview = state.overview || {};
+  const settings = overview.settings || {};
+  const bridge = overview.browser_bridge || {};
+  const globalProduct = settings.product_gpt || {};
+  const globalFinal = settings.final_gpt || {};
+  const globalBlock = `<div class="bind">
+    <h3>Browser Bridge · ${escapeHtml(bridge.status || "OFFLINE")}</h3>
+    <div class="muted mono">${escapeHtml(bridge.extension_dir || "tools/agentbus/browser_extension")}</div>
+    <div class="muted">Product GPT 全局默认：${escapeHtml(globalProduct.url || "未配置")}</div>
+    <div class="muted">Final GPT 全局 URL：${escapeHtml(globalFinal.url || "未配置")}</div>
+    <div class="row">
+      <button class="btn small" id="global-product-gpt">设置 Product GPT 默认</button>
+      <button class="btn small primary" id="global-final-gpt">设置 Final GPT</button>
+    </div>
+  </div>`;
   if (!stream) {
-    $("bindings").innerHTML = `<div class="empty">请选择一个任务。</div>`;
+    $("bindings").innerHTML = globalBlock + `<div class="empty">请选择一个任务。</div>`;
+    wireGlobalBindings(globalProduct, globalFinal);
     return;
   }
   const gpt = stream.browser_gpt || {};
   const mergeGpt = stream.merge_gpt || {};
   const impl = stream.impl || {};
   const audit = stream.audit || {};
-  $("bindings").innerHTML = `
+  $("bindings").innerHTML = `${globalBlock}
     <div class="bind">
       <h3>${t("gpt.product_title")}</h3>
       ${gpt.bound ? `<div><strong>${escapeHtml(gpt.display_name || t("gpt.planning"))}</strong></div>
@@ -735,7 +757,39 @@ function renderBindings(stream, catalog) {
     ${roleCard("impl", impl, stream, catalog)}
     ${roleCard("audit", audit, stream, catalog)}
   `;
+  wireGlobalBindings(globalProduct, globalFinal);
   $("bindings").querySelectorAll("[data-b]").forEach((b) => b.onclick = () => bindAct(b.dataset.b, stream, catalog));
+}
+
+function wireGlobalBindings(product, finalGpt) {
+  const productButton = $("global-product-gpt");
+  const finalButton = $("global-final-gpt");
+  if (productButton) productButton.onclick = () => globalBindingModal("PRODUCT_GPT", product || {});
+  if (finalButton) finalButton.onclick = () => globalBindingModal("FINAL_GPT", finalGpt || {});
+}
+
+function globalBindingModal(role, binding) {
+  const title = role === "FINAL_GPT" ? "全局 Final GPT" : "全局 Product GPT 默认";
+  showModal(`
+    <h2>${title}</h2>
+    <p class="muted">非密钥配置；GitHub PR comment 仍是唯一持久 GPT authority。</p>
+    <label>显示名称</label><input id="global-gpt-name" value="${escapeHtml(binding.display_name || "")}">
+    <label>ChatGPT conversation URL</label><input id="global-gpt-url" value="${escapeHtml(binding.url || "")}" placeholder="https://chatgpt.com/c/…">
+    <label>备注</label><input id="global-gpt-note" value="${escapeHtml(binding.note || "")}">
+    <div class="row"><button class="btn primary" id="global-gpt-save">保存</button><button class="btn" id="global-gpt-cancel">取消</button></div>`);
+  $("global-gpt-cancel").onclick = hideModal;
+  $("global-gpt-save").onclick = async () => {
+    try {
+      await post("/api/settings/gpt", {
+        role,
+        display_name: $("global-gpt-name").value,
+        url: $("global-gpt-url").value,
+        note: $("global-gpt-note").value,
+      });
+      hideModal();
+      await refresh();
+    } catch (err) { toastError(err); }
+  };
 }
 
 function publicationBlock(stream) {
@@ -916,14 +970,9 @@ async function auditModal(stream) {
 }
 
 function applyHandoffs(overview) {
-  state.openedGens = state.openedGens || {};
-  for (const item of overview.handoffs || []) {
-    const gen = item.generation || item.stream_id;
-    if (item.open_once && item.url && !state.openedGens[gen]) {
-      state.openedGens[gen] = true;
-      window.open(item.url, "_blank");
-    }
-  }
+  // Browser jobs are transported by the Firefox extension in inactive tabs.
+  // The WebUI never opens an automatic handoff and therefore cannot steal focus.
+  void overview;
 }
 
 async function refresh() {

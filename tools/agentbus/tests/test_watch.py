@@ -8,12 +8,32 @@ import time
 from agentbus.actions import request_audit_current, resolve_audit_target, set_role_model
 from agentbus.github import sync_with_lease
 from agentbus.machine import IMPLEMENTING, READY_FOR_AUDIT, READY_FOR_GPT, WAITING_FOR_SPEC
-from agentbus.runner import already_done, audit_work_key, impl_work_key, mark_done, role_should_work, run_role
+from agentbus.runner import (
+    already_done,
+    audit_work_key,
+    impl_work_key,
+    mark_done,
+    role_should_work,
+    run_role,
+    waiting_banner,
+)
 from agentbus.tests.harness import AgentbusTest
 from agentbus.views import needs_you, stream_view
 
 
 class WatchTests(AgentbusTest):
+    def test_impl_waiting_banner_implementing(self) -> None:
+        state = {"stream_id": "p4_2d2", "phase": IMPLEMENTING, "github": {}}
+        banner = waiting_banner(state, "impl", github={})
+        self.assertIn("IMPLEMENTING", banner)
+        self.assertIn("WAITING", banner)
+
+    def test_impl_waiting_banner_ready_for_gpt(self) -> None:
+        state = {"stream_id": "p4_2d2", "phase": READY_FOR_GPT, "github": {}}
+        banner = waiting_banner(state, "impl", github={})
+        self.assertIn("READY_FOR_GPT", banner)
+        self.assertIn("Waiting for Browser GPT review", banner)
+
     def test_needs_you_skips_ready_for_audit_and_repair(self) -> None:
         self.create_stream("s1")
         store = self.store("s1")

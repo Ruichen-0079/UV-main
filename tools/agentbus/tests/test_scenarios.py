@@ -132,7 +132,9 @@ class ScenarioTests(AgentbusTest):
         os.environ["FAKE_CODEX_STREAM"] = "s1"
         result = self.agentctl("run", "s1", "impl", "--once")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.store("s1").load()["phase"], RECOVERY_REQUIRED)
+        state = self.store("s1").load()
+        self.assertEqual(state["phase"], IMPLEMENTING)
+        self.assertEqual((state.get("wait") or {}).get("kind"), "RUNNER_TEMPORARY")
 
     def test_audit_crash(self) -> None:
         head = self.git("rev-parse", "HEAD")
@@ -144,7 +146,9 @@ class ScenarioTests(AgentbusTest):
         os.environ["FAKE_CODEX_CRASH"] = "1"
         result = self.agentctl("run", "s1", "audit", "--once")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.store("s1").load()["phase"], RECOVERY_REQUIRED)
+        state = self.store("s1").load()
+        self.assertEqual(state["phase"], "AUDITING")
+        self.assertEqual((state.get("wait") or {}).get("kind"), "RUNNER_TEMPORARY")
 
     def test_audit_changes_required_and_max_cycles(self) -> None:
         head = self.git("rev-parse", "HEAD")

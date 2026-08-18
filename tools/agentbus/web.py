@@ -120,6 +120,32 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                 return self._static(path.lstrip("/"))
             if path == "/api/health":
                 return self._send(*_json_bytes(self._health()))
+            if path == "/api/browser/jobs":
+                self._maybe_tick()
+                from agentbus.browser import list_browser_jobs
+                from agentbus.settings import browser_bridge_status, note_browser_poll
+
+                note_browser_poll(self.ctx.repo)
+                return self._send(
+                    *_json_bytes(
+                        {
+                            "jobs": list_browser_jobs(self.ctx.repo),
+                            "bridge": browser_bridge_status(self.ctx.repo),
+                            "authority": "GitHub PR comments and PR state",
+                        }
+                    )
+                )
+            if path == "/api/settings":
+                from agentbus.settings import browser_bridge_status, load_settings
+
+                return self._send(
+                    *_json_bytes(
+                        {
+                            "settings": load_settings(self.ctx.repo),
+                            "browser_bridge": browser_bridge_status(self.ctx.repo),
+                        }
+                    )
+                )
             if path == "/api/overview":
                 self._maybe_tick()
                 qs = parse_qs(parsed.query)
@@ -151,6 +177,17 @@ class AgentBusHandler(BaseHTTPRequestHandler):
         path = posixpath.normpath(parsed.path)
         try:
             payload = self._read_json()
+            if path == "/api/settings/gpt":
+                from agentbus.settings import set_global_binding
+
+                settings = set_global_binding(
+                    self.ctx.repo,
+                    str(payload.get("role") or ""),
+                    display_name=payload.get("display_name"),
+                    url=payload.get("url"),
+                    note=payload.get("note"),
+                )
+                return self._send(*_json_bytes({"ok": True, "settings": settings}))
             if path == "/api/campaign/tick" or path == "/api/sync":
                 from agentbus.autopilot import campaign_tick
 
@@ -203,12 +240,15 @@ class AgentBusHandler(BaseHTTPRequestHandler):
             return
 
     def _health(self) -> dict[str, Any]:
+        from agentbus.settings import browser_bridge_status
+
         return {
             "ok": True,
             "service": "yuvi-agentbus",
             "host": DEFAULT_HOST,
             "repo_id": self.ctx.repo.repo_id,
             "repo_root": self.ctx.repo.repo_root,
+            "browser_bridge": browser_bridge_status(self.ctx.repo),
         }
 
     def _store(self, stream_id: str) -> StreamStore:
@@ -243,12 +283,30 @@ class AgentBusHandler(BaseHTTPRequestHandler):
             text = merge_prompt_text(state, campaign)
             return self._send(*_json_bytes({"ok": True, "text": text, "head": unit_head(state)}))
         if parts[3] == "logs":
+            from agentbus.display import sanitize_display_text
+
             kind = (qs.get("kind") or ["impl"])[0]
             if kind not in {"impl", "audit", "events"}:
                 raise AgentbusError("kind must be impl, audit, or events")
             lines = int((qs.get("lines") or ["200"])[0])
             path_log = store.events_path if kind == "events" else store.log_path(kind)
-            return self._send(*_json_bytes({"kind": kind, "path": path_log, "text": tail_text(path_log, min(lines, 2000))}))
+            state = store.load()
+            return self._send(
+                *_json_bytes(
+                    {
+                        "kind": kind,
+                        "path": os.path.basename(path_log),
+                        "text": sanitize_display_text(
+                            tail_text(path_log, min(lines, 2000)),
+                            roots=tuple(
+                                str(item)
+                                for item in (state.get("audit_worktree"), state.get("impl_worktree"))
+                                if item
+                            ),
+                        ),
+                    }
+                )
+            )
         raise AgentbusError("unknown stream resource")
 
     def _create(self, payload: dict[str, Any]) -> None:
@@ -442,7 +500,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
             campaign = load_campaign(self.ctx.repo, infer_campaign_id(state))
             write_merge_prompt(store, state, campaign)
             store.save(state)
-            binding = merge_gpt_binding(state, campaign)
+            binding = merge_gpt_binding(state, campaign, self.ctx.repo)
             return self._send(
                 *_json_bytes(
                     {
@@ -479,7 +537,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
 
     def _step(self, store: StreamStore, stream_id: str) -> None:
         state = arm_step(store)
-        actor = next_actor(state.get("phase") or "", control=state.get("control") or "running")
+        actor = next_actor(state, control=state.get("control") or "running")
         if actor in {"IMPL", "AUDIT"}:
             role = actor.lower()
             workdir = state.get("impl_worktree") if role == "impl" else (state.get("audit_worktree") or state.get("impl_worktree"))

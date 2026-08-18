@@ -34,6 +34,7 @@ FIELD_ORDER = {
     "GPT_SPEC": (
         "STATUS",
         "STREAM",
+        "JOB_ID",
         "GOAL",
         "TARGET",
         "BASE_HEAD",
@@ -49,6 +50,7 @@ FIELD_ORDER = {
     "GPT_CONTINUATION": (
         "STATUS",
         "CAMPAIGN",
+        "JOB_ID",
         "AFTER_STREAM",
         "TRIGGER",
         "NEXT_STREAM",
@@ -64,6 +66,7 @@ FIELD_ORDER = {
     "GPT_REVIEW": (
         "STATUS",
         "STREAM",
+        "JOB_ID",
         "REVIEWED_HEAD",
         "FINDINGS",
         "ACCEPTANCE",
@@ -73,6 +76,7 @@ FIELD_ORDER = {
         "STATUS",
         "STREAM",
         "PR",
+        "JOB_ID",
         "REVIEWED_HEAD",
         "REVIEWED_BASE",
         "SUMMARY",
@@ -113,6 +117,9 @@ FIELD_ORDER = {
         "STREAM",
         "REVIEWED_HEAD",
         "FINAL_HEAD",
+        "AUTHORIZED_BY",
+        "MODE",
+        "SOURCE_COMMENT_ID",
         "DECISION",
         "NEXT_ACTION",
     ),
@@ -352,10 +359,7 @@ def required_fields(kind: str) -> tuple[str, ...]:
             "REVIEWED_HEAD",
             "REVIEWED_BASE",
             "SUMMARY",
-            "EVIDENCE",
             "FINDINGS",
-            "RECOMMENDATION",
-            "NEXT_ACTION",
         )
     if kind == "CODEX_REPORT":
         return ("STATUS", "STREAM", "IMPLEMENTED_HEAD")
@@ -382,13 +386,20 @@ def validate_envelope(
             errors.append(f"missing {key}")
     if envelope.kind == "GPT_MERGE_REVIEW":
         status = envelope.status
-        if status not in {"PASS", "HOLD", "HUMAN_DECISION"}:
-            errors.append("GPT_MERGE_REVIEW STATUS must be PASS, HOLD, or HUMAN_DECISION")
+        preferred = {"PASS", "REPAIR", "WAIT", "HUMAN"}
+        legacy = {"HOLD", "HUMAN_DECISION"}
+        if status not in preferred | legacy:
+            errors.append(
+                "GPT_MERGE_REVIEW STATUS must be PASS, REPAIR, WAIT, HUMAN "
+                "(legacy HOLD/HUMAN_DECISION accepted)"
+            )
         if not (envelope.fields.get("REVIEWED_HEAD") or "").strip():
             errors.append("missing REVIEWED_HEAD")
         recommendation = (envelope.fields.get("RECOMMENDATION") or "").strip().upper()
         next_action = (envelope.fields.get("NEXT_ACTION") or "").strip().upper()
-        if status == "PASS":
+        # Compatibility: validate the redundant old combination only when an
+        # old producer actually emits those fields. New jobs omit both.
+        if status == "PASS" and (recommendation or next_action):
             if recommendation != "MERGE":
                 errors.append("GPT_MERGE_REVIEW PASS requires RECOMMENDATION: MERGE")
             if next_action != "HUMAN_MERGE":

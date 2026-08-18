@@ -103,6 +103,22 @@ if args[:2] == ["pr", "merge"]:
     if os.environ.get("FAKE_GH_ALLOW_MERGE") != "1":
         print("auto-merge is forbidden in tests", file=sys.stderr)
         sys.exit(2)
+    count_path = os.environ.get("FAKE_GH_MERGE_COUNT", "")
+    if count_path:
+        try:
+            count = int(open(count_path).read() or "0")
+        except Exception:
+            count = 0
+        open(count_path, "w").write(str(count + 1))
+    comments_path = os.environ.get("FAKE_GH_COMMENTS", "")
+    if os.environ.get("FAKE_GH_REQUIRE_FINAL_GATE") == "1":
+        try:
+            bodies = [item.get("body") or "" for item in json.loads(open(comments_path).read() or "[]")]
+        except Exception:
+            bodies = []
+        if not any("[FINAL_GATE]" in body for body in bodies):
+            print("FINAL_GATE missing before merge", file=sys.stderr)
+            sys.exit(3)
     fail = os.environ.get("FAKE_GH_MERGE_FAIL", "")
     if fail == "timeout":
         print("network timeout", file=sys.stderr)
@@ -119,6 +135,9 @@ if args[:2] == ["pr", "merge"]:
         rec["state"] = "MERGED"
         rec["mergeCommit"] = {"oid": rec.get("headRefOid") or ("m" * 40)}
         open(state_path, "w").write(json.dumps(rec))
+    if fail == "timeout_after_merge":
+        print("network timeout after merge", file=sys.stderr)
+        sys.exit(1)
     print("MERGED")
     sys.exit(0)
 if mode == "missing":
@@ -219,6 +238,19 @@ for i, a in enumerate(args):
 if os.environ.get("FAKE_CODEX_CRASH") == "1":
     print("codex exploded", file=sys.stderr)
     sys.exit(99)
+slot = "secondary" if os.environ.get("CODEX_HOME", "").endswith(".codex-secondary") else "primary"
+invocations = os.environ.get("FAKE_CODEX_INVOCATIONS", "")
+if invocations:
+    with open(invocations, "a") as handle:
+        handle.write(slot + " " + os.environ.get("CODEX_HOME", "") + "\n")
+capacity_slot = os.environ.get("FAKE_CODEX_CAPACITY_SLOT", "")
+if capacity_slot in {slot, "both"}:
+    dirty_file = os.environ.get("FAKE_CODEX_CAPACITY_DIRTY_FILE", "")
+    if dirty_file:
+        with open(os.path.join(cwd, dirty_file), "a") as handle:
+            handle.write("partial-from-" + slot + "\n")
+    print("You have hit your Codex usage limit; retry after 15 minutes", file=sys.stderr)
+    sys.exit(91)
 kind = os.environ.get("FAKE_CODEX_KIND", "CODEX_REPORT")
 status = os.environ.get("FAKE_CODEX_STATUS", "READY_FOR_AUDIT")
 head = os.popen(f"git -C {cwd} rev-parse HEAD").read().strip()
@@ -244,7 +276,9 @@ NEXT_ACTION: AUDIT
 """
     extra = os.environ.get("FAKE_CODEX_COMMIT")
     if extra:
-        open(os.path.join(cwd, extra), "w").write("changed\n")
+        mode = "a" if os.path.exists(os.path.join(cwd, extra)) else "w"
+        with open(os.path.join(cwd, extra), mode) as handle:
+            handle.write("continued-by-" + slot + "\n")
         # Codex must not commit. AgentBus publishes on the host.
         body = f"""[{kind}]
 
@@ -284,6 +318,9 @@ else:
 print("fake-codex running")
 if out:
     open(out, "w").write(body)
+if os.environ.get("FAKE_CODEX_EXIT_CAPACITY_AFTER_MESSAGE") == "1":
+    print("You have hit your Codex usage limit; retry after 15 minutes", file=sys.stderr)
+    sys.exit(91)
 sys.exit(0)
 '''
         for name, body in (("gh", gh), ("codex", codex)):

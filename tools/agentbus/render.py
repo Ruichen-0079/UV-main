@@ -12,7 +12,7 @@ from agentbus.util import short_sha
 
 def _display_text(value: Any) -> str:
     """Normalize display-only audit paths without touching durable state."""
-    from agentbus.mergegate import sanitize_display_text
+    from agentbus.display import sanitize_display_text
 
     return sanitize_display_text(str(value or ""))
 
@@ -25,7 +25,7 @@ def status_row(state: dict[str, Any], *, current_head: str | None = None) -> dic
     impl = (state.get("status") or {}).get("impl") or "-"
     audit = (state.get("status") or {}).get("audit") or "-"
     gpt = (state.get("status") or {}).get("gpt") or "-"
-    nxt = (state.get("status") or {}).get("next_action") or next_actor(state.get("phase") or "", control=control)
+    nxt = (state.get("status") or {}).get("next_action") or next_actor(state, control=control)
     pr = state.get("pr")
     return {
         "STREAM": state.get("stream_id") or "-",
@@ -85,7 +85,7 @@ def render_plan(state: dict[str, Any], *, env: dict[str, str] | None = None) -> 
         f"AUDIT:               {status.get('audit')}",
         f"REPAIR CYCLES:       {state.get('repair_cycles')}/{state.get('max_repair_cycles')}",
         f"BLOCKING ISSUE:      {_display_text(status.get('blocker')) or '-'}",
-        f"NEXT ACTION:         {_display_text(describe_next(phase, control=control, blocker=status.get('blocker')))}",
+        f"NEXT ACTION:         {_display_text(describe_next(state, control=control, blocker=status.get('blocker')))}",
         f"SPEC_BASE_HEAD:      {(state.get('heads') or {}).get('spec_base') or '-'}",
         f"IMPLEMENTED_HEAD:    {(state.get('heads') or {}).get('implemented') or '-'}",
         f"AUDITED_HEAD:        {(state.get('heads') or {}).get('audited') or '-'}",
@@ -93,7 +93,7 @@ def render_plan(state: dict[str, Any], *, env: dict[str, str] | None = None) -> 
         f"GITHUB:              {_github_line(github)}",
         f"IMPL DIRTY:          {impl_snap.get('dirty')}",
         f"WHY:                 {_why(state)}",
-        f"WHO:                 {next_actor(phase, control=control)}",
+        f"WHO:                 {next_actor(state, control=control)}",
         f"HUMAN INTERVENTION:  {_intervention(state)}",
     ]
     return "\n".join(lines)
@@ -117,7 +117,7 @@ def _why(state: dict[str, Any]) -> str:
     control = state.get("control")
     if control == "paused":
         return "operator paused the stream; current atomic stage may finish"
-    return describe_next(phase or "", control=control or "running")
+    return describe_next(state, control=control or "running")
 
 
 def _intervention(state: dict[str, Any]) -> str:
@@ -146,9 +146,9 @@ def render_inbox_item(state: dict[str, Any]) -> str:
     if status.get("blocker"):
         lines.append(f"REASON: {_display_text(status['blocker'])}")
     lines.append(
-        f"NEXT: {_display_text(describe_next(state.get('phase') or '', control=control, blocker=status.get('blocker')))}"
+        f"NEXT: {_display_text(describe_next(state, control=control, blocker=status.get('blocker')))}"
     )
-    return "\n".join(lines)
+    return _display_text("\n".join(lines))
 
 
 def render_brief(state: dict[str, Any]) -> str:
@@ -238,7 +238,7 @@ def render_banner(state: dict[str, Any], role: str, *, env: dict[str, str] | Non
         f"ACTION   {(state.get('status') or {}).get('next_action') or '-'}",
         f"RESULT   {(state.get('status') or {}).get(role) or '-'}",
     ]
-    return "\n".join(lines)
+    return _display_text("\n".join(lines))
 
 
 def render_config(state: dict[str, Any], env: dict[str, str] | None = None) -> str:

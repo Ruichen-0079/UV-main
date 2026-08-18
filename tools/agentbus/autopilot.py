@@ -1,8 +1,4 @@
-"""Campaign autopilot. Piggybacks on WebUI / role watchers. No hidden daemon.
-
-A bound ChatGPT URL may be opened once per GPT gate generation.
-No DOM automation, no cookies, no message injection.
-"""
+"""One-step campaign autopilot piggybacking on WebUI / role watcher ticks."""
 
 from __future__ import annotations
 
@@ -44,11 +40,20 @@ def _tick_lock(ctx: RepoContext) -> StreamLock:
 
 
 def gpt_gate_generation(state: dict[str, Any], campaign: dict[str, Any] | None = None) -> str:
-    phase = state.get("phase") or ""
-    if phase == machine.MERGED and (campaign or {}).get("status") == STATUS_WAITING_FOR_PLAN:
-        return f"WAITING_FOR_PLAN|{(campaign or {}).get('campaign_id')}"
-    implemented = ((state.get("heads") or {}).get("implemented") or "")[:40]
-    return f"{phase}|{implemented}|{review_policy_of(state)}"
+    """Compatibility name for the canonical Browser job generation."""
+    from agentbus.decision import derive_next_action, review_generation
+
+    live = (state.get("github") or {}).get("pr")
+    decision = derive_next_action(state, campaign, live if isinstance(live, dict) else None)
+    if not decision.task:
+        return ""
+    return review_generation(
+        state,
+        campaign,
+        live if isinstance(live, dict) else None,
+        role=decision.action,
+        task=decision.task,
+    )
 
 
 def maybe_gpt_handoff(
@@ -59,39 +64,42 @@ def maybe_gpt_handoff(
     env: dict[str, str] | None = None,
     surface: str = "cli",
 ) -> dict[str, Any] | None:
-    att = classify_attention(state, campaign=campaign)
-    camp_att = campaign_attention(campaign)
-    if not (att.get("browser_gpt_required") or camp_att.get("browser_gpt_required")):
+    del env, surface
+    from agentbus.browser import job_for_state
+
+    job = job_for_state(store.ctx, state, campaign=campaign)
+    if job is None:
         return None
-    url = ((state.get("browser_gpt") or {}).get("url") or "").strip()
-    generation = gpt_gate_generation(state, campaign)
+    generation = job.generation
     gate = state.setdefault("gpt_gate", {})
-    if gate.get("generation") == generation and gate.get("notified"):
+    if gate.get("job_id") == job.job_id:
         return {
             "generation": generation,
-            "url": url or None,
+            "job_id": job.job_id,
+            "role": job.role,
+            "task": job.task,
+            "url": job.conversation_url,
             "open_once": False,
             "already": True,
         }
     gate["generation"] = generation
+    gate["job_id"] = job.job_id
+    gate["role"] = job.role
+    gate["task"] = job.task
     gate["notified"] = True
     gate["notified_at"] = utc_now()
-    gate["url"] = url or None
-    stream_id = state.get("stream_id") or store.stream_id
-    _notify_gpt(stream_id, state.get("phase") or "", campaign)
-    opened = False
-    if url and surface != "webui" and (env or os.environ).get("YUVI_AGENTBUS_OPEN_URL") != "0":
-        opened = _open_url(url, env)
-        if opened:
-            gate["opened_at"] = utc_now()
+    gate["url"] = job.conversation_url
     store.append_event(
-        "gpt-gate",
-        {"generation": generation, "url": bool(url), "opened": opened, "surface": surface},
+        "browser-job",
+        {"generation": generation, "job_id": job.job_id, "role": job.role, "task": job.task},
     )
     return {
         "generation": generation,
-        "url": url or None,
-        "open_once": bool(url) and not gate.get("opened_at"),
+        "job_id": job.job_id,
+        "role": job.role,
+        "task": job.task,
+        "url": job.conversation_url,
+        "open_once": False,
         "already": False,
     }
 
@@ -108,16 +116,6 @@ def _notify_gpt(stream_id: str, phase: str, campaign: dict[str, Any] | None) -> 
     notify_custom(stream_id, "needs GPT", body)
 
 
-def _open_url(url: str, env: dict[str, str] | None) -> bool:
-    from agentbus.util import run_cmd, which
-
-    opener = which("xdg-open") or which("kde-open")
-    if not opener:
-        return False
-    result = run_cmd([opener, url], env=env, timeout=8)
-    return result.returncode == 0
-
-
 def migrate_roles(state: dict[str, Any], env: dict[str, str] | None = None) -> None:
     for role in ("impl", "audit"):
         cfg = (state.get("roles") or {}).get(role)
@@ -126,7 +124,9 @@ def migrate_roles(state: dict[str, Any], env: dict[str, str] | None = None) -> N
 
 
 def reconcile_durable(store: StreamStore, state: dict[str, Any], *, repo: str) -> list[str]:
-    """Push a stream to the phase its durable envelopes already justify."""
+    """Project compatibility phases from the one canonical durable decision."""
+    from agentbus.decision import AUDIT, FINAL_GPT, IMPL, PRODUCT_GPT, derive_next_action
+
     notes: list[str] = []
     migrate_roles(state)
     apply_known_obsolete(state)
@@ -135,133 +135,51 @@ def reconcile_durable(store: StreamStore, state: dict[str, Any], *, repo: str) -
         refresh_next(state)
         return ["obsolete candidate; not resumed"]
 
-    envelopes = state.get("envelopes") or {}
     phase = state.get("phase") or ""
-    heads = state.setdefault("heads", {})
-    implemented = heads.get("implemented")
-    audited = heads.get("audited")
-    current = heads.get("current")
-
     if phase == machine.RECOVERY_REQUIRED:
         blocker = str((state.get("status") or {}).get("blocker") or "")
         prior = state.get("prior_phase")
         dirty = bool(repo and is_dirty(repo))
-        if dirty:
-            notes.append("recovery remains human: dirty worktree")
-        elif "no valid envelope" in blocker or "untrusted" in blocker.lower():
-            notes.append("recovery remains human: missing/untrusted authority")
-        elif prior and "process died" in blocker:
+        if not dirty and prior and "process died" in blocker and "untrusted" not in blocker.lower():
             set_phase(state, prior, reason="stale runner recovered")
             state["status"]["blocker"] = None
             notes.append(f"cleared stale crash recovery → {prior}")
-            phase = state["phase"]
 
-    spec = envelopes.get("GPT_SPEC") if isinstance(envelopes.get("GPT_SPEC"), dict) else None
-    if phase == machine.WAITING_FOR_SPEC and spec and (spec.get("status") or "").upper() in {
-        "ACTIONABLE",
-        "APPROVED",
-    }:
-        raw = spec.get("raw") or ""
-        if raw:
-            try:
-                apply_envelope(
-                    store,
-                    state,
-                    Envelope(
-                        kind="GPT_SPEC",
-                        fields=spec.get("fields") or {},
-                        raw=raw,
-                        source="reconcile",
-                    ),
-                    repo=repo,
-                    current_head=current,
-                    allow_stale=False,
-                )
-                notes.append("reapplied durable GPT_SPEC")
-                phase = state["phase"]
-            except Exception as exc:  # noqa: BLE001
-                notes.append(f"spec reapply skipped: {exc}")
-
-    review = envelopes.get("GPT_REVIEW") if isinstance(envelopes.get("GPT_REVIEW"), dict) else None
-    review_wants_repair = bool(
-        review
-        and (review.get("status") or "").upper() in {"CHANGES_REQUIRED", "REJECT", "REJECTED"}
-        and review.get("head")
-        and implemented
-        and review.get("head") == implemented
+    campaign = load_campaign(store.ctx, infer_campaign_id(state))
+    live = (state.get("github") or {}).get("pr")
+    decision = derive_next_action(
+        state,
+        campaign,
+        live if isinstance(live, dict) else None,
     )
-    audit_rec = envelopes.get("CODEX_AUDIT") if isinstance(envelopes.get("CODEX_AUDIT"), dict) else None
-    audit_wants_repair = bool(
-        audit_rec
-        and (audit_rec.get("status") or "").upper() in {"CHANGES_REQUIRED", "FAIL", "FAILED"}
-        and audit_rec.get("head")
-        and implemented
-        and audit_rec.get("head") == implemented
-        and int(state.get("repair_cycles") or 0) > 0
-    )
-    review_wants_repair = review_wants_repair or audit_wants_repair
 
-    report = envelopes.get("CODEX_REPORT") if isinstance(envelopes.get("CODEX_REPORT"), dict) else None
-    if (
-        not review_wants_repair
-        and phase in {machine.IMPLEMENTING, machine.VALIDATING}
-        and report
-        and (report.get("status") or "").upper() in {"READY_FOR_AUDIT", "PASS", "PASSED"}
-        and implemented
-        and current
-        and implemented == current
-        and ((state.get("publication") or {}).get("commit") == implemented)
-    ):
-        if phase == machine.IMPLEMENTING:
-            set_phase(state, machine.VALIDATING, reason="durable CODEX_REPORT")
-        set_phase(state, machine.READY_FOR_AUDIT, reason="durable CODEX_REPORT")
-        notes.append("advanced to READY_FOR_AUDIT from durable report")
-        phase = state["phase"]
+    # Compatibility phases remain useful diagnostics. They follow, rather
+    # than decide, the canonical action.
+    phase = state.get("phase") or ""
+    if decision.action == IMPL and phase != machine.IMPLEMENTING and machine.can_transition(phase, machine.IMPLEMENTING):
+        set_phase(state, machine.IMPLEMENTING, reason=f"canonical decision: {decision.reason}")
+        notes.append("compatibility phase projected to IMPLEMENTING")
+    elif decision.action == AUDIT:
+        if phase == machine.IMPLEMENTING and machine.can_transition(phase, machine.VALIDATING):
+            set_phase(state, machine.VALIDATING, reason="canonical durable report")
+            phase = state.get("phase") or ""
+        if phase == machine.VALIDATING and machine.can_transition(phase, machine.READY_FOR_AUDIT):
+            set_phase(state, machine.READY_FOR_AUDIT, reason="canonical audit action")
+            notes.append("compatibility phase projected to READY_FOR_AUDIT")
+    elif decision.action == PRODUCT_GPT and decision.task == "PRODUCT_REVIEW":
+        if phase in {machine.READY_FOR_AUDIT, machine.AUDITING} and machine.can_transition(phase, machine.READY_FOR_GPT):
+            set_phase(state, machine.READY_FOR_GPT, reason="canonical product review action")
+            notes.append("compatibility phase projected to READY_FOR_GPT")
+    elif decision.action == FINAL_GPT and phase != machine.FINAL_GATE:
+        if review_policy_of(state) == AUDIT_SUFFICIENT:
+            delegated = evaluate_delegation(state)
+            if delegated.ok:
+                record_delegated_review(store, state, delegated)
+        if machine.can_transition(phase, machine.FINAL_GATE):
+            set_phase(state, machine.FINAL_GATE, reason="canonical final review action")
+            notes.append("compatibility phase projected to FINAL_GATE")
 
-    audit = envelopes.get("CODEX_AUDIT") if isinstance(envelopes.get("CODEX_AUDIT"), dict) else None
-    if (
-        not review_wants_repair
-        and phase in {machine.READY_FOR_AUDIT, machine.AUDITING}
-        and audit
-        and (audit.get("status") or "").upper() in {"PASS", "PASSED", "OK"}
-        and audited
-        and implemented
-        and audited == implemented
-    ):
-        decision = evaluate_delegation(state, audit.get("fields") if isinstance(audit.get("fields"), dict) else None)
-        if phase == machine.READY_FOR_AUDIT:
-            set_phase(state, machine.AUDITING, reason="durable AUDIT result")
-        if decision.ok:
-            record_delegated_review(store, state, decision)
-            set_phase(state, machine.FINAL_GATE, reason="AUDIT_SUFFICIENT reconcile")
-            notes.append("AUDIT_SUFFICIENT delegated during reconcile")
-        else:
-            set_phase(state, machine.READY_FOR_GPT, reason="durable AUDIT PASS")
-            notes.append("advanced to READY_FOR_GPT from durable audit")
-        phase = state["phase"]
-
-    if phase == machine.READY_FOR_GPT and review_policy_of(state) == AUDIT_SUFFICIENT:
-        decision = evaluate_delegation(state)
-        if decision.ok:
-            record_delegated_review(store, state, decision)
-            set_phase(state, machine.FINAL_GATE, reason="AUDIT_SUFFICIENT autopilot")
-            notes.append("delegated review auto-advanced")
-
-    review = envelopes.get("GPT_REVIEW") if isinstance(envelopes.get("GPT_REVIEW"), dict) else None
-    if (
-        phase in {machine.READY_FOR_GPT, machine.GPT_REVIEW}
-        and review
-        and (review.get("status") or "").upper() in {"ACCEPT", "ACCEPTED", "APPROVE", "APPROVED"}
-        and review.get("head")
-        and implemented
-        and review.get("head") == implemented
-    ):
-        if phase == machine.READY_FOR_GPT:
-            set_phase(state, machine.GPT_REVIEW, reason="durable GPT_REVIEW")
-        set_phase(state, machine.FINAL_GATE, reason="durable GPT ACCEPT")
-        notes.append("advanced to FINAL_GATE from durable GPT_REVIEW")
-        phase = state["phase"]
-
+    state.setdefault("status", {})["decision"] = decision.as_dict()
     refresh_authority(state)
     refresh_next(state)
     return notes
@@ -331,6 +249,15 @@ def tick_stream(
                     notes.append(f"durable CODEX_REPORT comment {durable.get('comment_id')}")
                 elif durable.get("reason"):
                     notes.append(f"durable report: {durable.get('reason')}")
+        if state.get("pr") and ((state.get("envelopes") or {}).get("CODEX_AUDIT")):
+            from agentbus.publish import audit_is_durable, ensure_durable_audit
+
+            if not audit_is_durable(state):
+                durable = ensure_durable_audit(ctx, store, state, env=env)
+                if durable.get("comment_id"):
+                    notes.append(f"durable CODEX_AUDIT comment {durable.get('comment_id')}")
+                elif durable.get("reason"):
+                    notes.append(f"durable audit: {durable.get('reason')}")
         campaign = load_campaign(ctx, cid)
         if campaign is not None:
             from agentbus.campaign import persist_campaign_projection, save_campaign
@@ -340,21 +267,35 @@ def tick_stream(
         if (campaign or {}).get("automation_mode") == AUTOPILOT or EXPLICIT_STREAM_CAMPAIGNS.get(
             state.get("stream_id") or ""
         ) or (state.get("phase") == machine.MERGED):
-            if state.get("phase") == machine.MERGED:
+            from agentbus.decision import NEXT, derive_next_action
+
+            live = (state.get("github") or {}).get("pr")
+            raw_decision = derive_next_action(
+                state,
+                campaign,
+                live if isinstance(live, dict) else None,
+            )
+            if raw_decision.action == NEXT:
                 maybe_materialize_successor(store, state)
                 campaign = load_campaign(ctx, cid)
         handoff = None
-        merge_handoff = None
         if not is_obsolete(state):
             handoff = maybe_gpt_handoff(store, state, campaign=campaign, env=env, surface=surface)
-            from agentbus.mergegate import maybe_merge_gpt_handoff
+        from agentbus.decision import decision_for_stream
 
-            merge_handoff = maybe_merge_gpt_handoff(
-                store, state, campaign=campaign, env=env, surface=surface
-            )
+        live = (state.get("github") or {}).get("pr")
+        decision = decision_for_stream(
+            ctx,
+            state,
+            campaign,
+            live if isinstance(live, dict) else None,
+            env=env,
+        )
+        state.setdefault("status", {})["next_action"] = decision.action
+        state["status"]["decision"] = decision.as_dict()
         refresh_authority(state)
         store.save(state)
-        att = classify_attention(state, campaign=campaign)
+        att = classify_attention(state, campaign=campaign, decision=decision)
         return {
             "stream_id": state.get("stream_id"),
             "phase": state.get("phase"),
@@ -362,6 +303,8 @@ def tick_stream(
             "notes": notes,
             "attention": att,
             "handoff": handoff,
+            "decision": decision.as_dict(),
+            "dispatch_merge": decision.action == "MERGE",
             "obsolete": is_obsolete(state),
             "latest_authority": (state.get("status") or {}).get("latest_authority"),
         }
@@ -369,7 +312,14 @@ def tick_stream(
     if locked:
         return work()
     with store.lock():
-        return work()
+        result = work()
+    if result.pop("dispatch_merge", False):
+        from agentbus.mergegate import autonomous_merge
+
+        merged = autonomous_merge(ctx, store, env=env)
+        result["merge"] = merged
+        result["phase"] = store.load().get("phase")
+    return result
 
 
 def campaign_tick(

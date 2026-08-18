@@ -4,30 +4,31 @@ import os
 import signal
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any, TextIO
 
 from agentbus.apply import apply_envelope, refresh_next, set_phase
 from agentbus.config import build_codex_argv, effective_role_label
 from agentbus.fencing import fence_spec
 from agentbus.gitutil import head_sha, is_dirty
-from agentbus.github import publish_body, sync_interval, sync_with_lease
+from agentbus.github import sync_interval, sync_with_lease
 from agentbus.inbox import process_inbox
 from agentbus.machine import (
     AUDITING,
     IMPLEMENTING,
     READY_FOR_AUDIT,
+    READY_FOR_GPT,
     RECOVERY_REQUIRED,
     RE_REVIEW_REQUIRED,
     VALIDATING,
     WAITING_FOR_SPEC,
-    next_actor,
 )
 from agentbus.paths import AgentbusError, RepoContext
-from agentbus.protocol import extract_first_envelope, render_envelope
+from agentbus.protocol import extract_first_envelope
 from agentbus.recover import recover_stream, role_process_healthy
 from agentbus.render import render_banner
 from agentbus.store import StreamStore
-from agentbus.util import append_text, pid_start_token, utc_now
+from agentbus.util import append_text, atomic_write_text, pid_start_token, utc_now
 from agentbus.worktree import ensure_audit_worktree
 
 
@@ -105,9 +106,17 @@ def role_should_work(state: dict[str, Any], role: str) -> bool:
         return False
     if state.get("control") == "step" and not state.get("step_armed"):
         return False
-    actor = next_actor(state["phase"], control=state.get("control") or "running")
+    from agentbus.decision import AUDIT, IMPL, derive_next_action
+
+    campaign = state.get("campaign") if isinstance(state.get("campaign"), dict) else None
+    live = (state.get("github") or {}).get("pr")
+    actor = derive_next_action(
+        state,
+        campaign,
+        live if isinstance(live, dict) else None,
+    ).action
     if role == "impl":
-        return actor == "IMPL" or state["phase"] in {IMPLEMENTING, VALIDATING}
+        return actor == IMPL
     if role == "audit":
         from agentbus.publish import report_is_durable
 
@@ -118,7 +127,7 @@ def role_should_work(state: dict[str, Any], role: str) -> bool:
         request = state.get("audit_request") or {}
         if request.get("status") == "pending":
             return True
-        return actor == "AUDIT" or state["phase"] in {READY_FOR_AUDIT, AUDITING}
+        return actor == AUDIT
     return False
 
 
@@ -170,6 +179,8 @@ def register_runner(store: StreamStore, role: str) -> None:
 
 
 def waiting_banner(state: dict[str, Any], role: str, *, github: dict[str, Any] | None) -> str:
+    from agentbus.display import sanitize_display_text
+
     phase = state.get("phase")
     if role == "impl":
         if phase in {READY_FOR_AUDIT, AUDITING}:
@@ -194,12 +205,17 @@ def waiting_banner(state: dict[str, Any], role: str, *, github: dict[str, Any] |
         gh_line = f"GitHub: DEGRADED\nLast successful sync: {gh.get('last_sync_at') or '-'}\nError: {gh.get('last_error') or 'unavailable'}"
     else:
         gh_line = f"GitHub: connected\nLast sync: {gh.get('last_sync_at') or 'never'}"
-    return (
+    return sanitize_display_text(
         f"\n{str(state.get('stream_id') or '').upper()} | {role.upper()}\n"
         f"STATE\n{title}\n\n"
         f"Current stream phase:\n{phase}\n\n"
         f"{why}\n\n"
-        f"{gh_line}\n"
+        f"{gh_line}\n",
+        roots=tuple(
+            str(item)
+            for item in (state.get("audit_worktree"), state.get("impl_worktree"))
+            if item
+        ),
     )
 
 
@@ -229,6 +245,19 @@ Publish a [CODEX_AUDIT] envelope as your final message.
 If AUDITED_HEAD would not match IMPLEMENTED_HEAD, stop and emit [BLOCKER].
 """
         required = "[CODEX_AUDIT]"
+    takeover = ""
+    interruption = state.get("codex_interruption") or {}
+    if (
+        role == "impl"
+        and interruption.get("kind") == "INTERRUPTED_CAPACITY"
+        and interruption.get("work_key") == impl_work_key(state)
+    ):
+        takeover = """
+Previous IMPL invocation stopped because Codex capacity was exhausted.
+The existing worktree may contain partial uncommitted work.
+Inspect and continue it. Do not restart blindly. Do not discard correct existing changes.
+This is the same implementation generation; publish one complete CODEX_REPORT only when finished.
+"""
     return f"""Yuvi agent-bus role assignment.
 
 STREAM: {state.get("stream_id")}
@@ -241,6 +270,7 @@ IMPLEMENTED_HEAD: {(state.get("heads") or {}).get("implemented") or "-"}
 PROTOCOL FILE: {protocol_path}
 
 {duties}
+{takeover}
 
 Read AGENTS.md and {protocol_path} if present.
 
@@ -272,7 +302,10 @@ def invoke_codex(
     env: dict[str, str] | None = None,
     out: TextIO,
 ) -> int:
+    from agentbus.codexpool import acquire_slot, pool_status, release_slot
+
     role_cfg = (state.get("roles") or {}).get(role) or {}
+    capacity_takeover = False
     if role == "audit":
         request = state.get("audit_request") or {}
         implemented = request.get("target") if request.get("status") == "pending" else None
@@ -294,7 +327,14 @@ def invoke_codex(
             )
         if not os.path.isdir(workdir):
             raise AgentbusError(f"impl worktree missing: {workdir}")
-        if is_dirty(workdir):
+        interruption = state.get("codex_interruption") or {}
+        capacity_takeover = bool(
+            is_dirty(workdir)
+            and interruption.get("kind") == "INTERRUPTED_CAPACITY"
+            and interruption.get("role") == "impl"
+            and interruption.get("work_key") == impl_work_key(state)
+        )
+        if is_dirty(workdir) and not capacity_takeover:
             raise AgentbusError(
                 "impl worktree is dirty; refusing to start Codex. "
                 "Publish existing changes with `agentctl publish STREAM --recover`."
@@ -315,9 +355,49 @@ def invoke_codex(
             set_phase(state, IMPLEMENTING, reason="impl runner start")
         runtime = store.load_runtime()
         runtime.setdefault(role, {})
-        runtime[role]["baseline_head"] = current or head_sha(workdir)
-        runtime[role]["clean_at_start"] = not is_dirty(workdir)
+        previous = runtime.get(role) or {}
+        if capacity_takeover:
+            runtime[role]["baseline_head"] = previous.get("baseline_head") or current or head_sha(workdir)
+            runtime[role]["clean_at_start"] = previous.get("clean_at_start", False)
+        else:
+            runtime[role]["baseline_head"] = current or head_sha(workdir)
+            runtime[role]["clean_at_start"] = not is_dirty(workdir)
+        runtime[role]["capacity_takeover"] = capacity_takeover
         store.save_runtime(runtime)
+
+    acquired = acquire_slot(
+        ctx,
+        stream=state.get("stream_id") or store.stream_id,
+        role=role,
+        profile=role_cfg.get("profile"),
+        env=env,
+    )
+    if not acquired.get("ok"):
+        status = pool_status(ctx, env)
+        deadlines = [
+            str(slot.get("next_probe_at"))
+            for slot in (status.get("slots") or {}).values()
+            if slot.get("next_probe_at")
+        ]
+        until = min(deadlines) if deadlines else (
+            datetime.now(timezone.utc) + timedelta(seconds=30)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        state["wait"] = {
+            "kind": "CODEX_CAPACITY" if any(
+                slot == "COOLDOWN" for slot in (acquired.get("statuses") or {}).values()
+            ) else "CODEX_BUSY",
+            "reason": acquired.get("reason"),
+            "until": until,
+            "set_at": utc_now(),
+        }
+        refresh_next(state)
+        store.save(state)
+        out.write(f"CodexPool WAIT: {acquired.get('reason')}\n")
+        return 75
+    slot_name = str(acquired["slot"])
+    invocation_env = acquired["env"]
+    if (state.get("wait") or {}).get("kind") in {"CODEX_CAPACITY", "CODEX_BUSY", "RUNNER_TEMPORARY"}:
+        state.pop("wait", None)
 
     protocol_path = os.path.join(ctx.repo_root, ".ai", "HANDOFF_PROTOCOL.md")
     if not os.path.isfile(protocol_path):
@@ -327,17 +407,19 @@ def invoke_codex(
             protocol_path = here
     prompt = build_prompt(state, role, protocol_path)
     last_message = store.artifact_path(f"{role}.last-message.md")
+    atomic_write_text(last_message, "")
     argv = build_codex_argv(
         role_cfg=role_cfg,
         workdir=workdir,
         prompt=prompt,
         last_message_path=last_message,
+        env=invocation_env,
     )
-    argv[0] = _codex_bin(env)
+    argv[0] = _codex_bin(invocation_env)
     log_path = store.log_path(role)
     append_text(
         log_path,
-        f"\n===== {utc_now()} start {role} model={effective_role_label(role_cfg, env)} cwd={workdir} =====\n"
+        f"\n===== {utc_now()} start {role} slot={slot_name} model={effective_role_label(role_cfg, invocation_env)} cwd={workdir} =====\n"
         f"cmd: {' '.join(argv[:12])} ...\n",
     )
     store.append_event(
@@ -350,22 +432,27 @@ def invoke_codex(
             "effort": role_cfg.get("effort"),
             "profile": role_cfg.get("profile"),
             "sandbox": role_cfg.get("sandbox"),
+            "codex_slot": slot_name,
         },
     )
-    out.write(f"\nInvoking Codex ({role}) with {effective_role_label(role_cfg, env)}\n")
+    out.write(f"\nInvoking Codex ({role}) on {slot_name} with {effective_role_label(role_cfg, invocation_env)}\n")
     out.write(f"workdir: {workdir}\n")
     out.flush()
     runtime = store.load_runtime()
     previous_slot = dict(runtime.get(role) or {})
-    proc = subprocess.Popen(
-        argv,
-        cwd=workdir,
-        env=env or os.environ.copy(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=workdir,
+            env=invocation_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except Exception:
+        release_slot(ctx, slot_name, env=env)
+        raise
     runtime[role] = {
         "pid": proc.pid,
         "start_token": pid_start_token(proc.pid),
@@ -375,11 +462,15 @@ def invoke_codex(
         "last_exit": None,
         "baseline_head": previous_slot.get("baseline_head"),
         "clean_at_start": previous_slot.get("clean_at_start"),
+        "capacity_takeover": previous_slot.get("capacity_takeover", False),
+        "codex_slot": slot_name,
     }
     store.save_runtime(runtime)
     store.save(state)
     assert proc.stdout is not None
+    output_lines: list[str] = []
     for line in proc.stdout:
+        output_lines.append(line)
         out.write(line)
         append_text(log_path, line.rstrip("\n"))
     code = proc.wait()
@@ -404,14 +495,119 @@ def invoke_codex(
         with open(last_message, encoding="utf-8") as handle:
             text = handle.read()
     kinds = ("CODEX_REPORT", "BLOCKER") if role == "impl" else ("CODEX_AUDIT", "BLOCKER")
-    envelope = extract_first_envelope(text, kinds)
+    combined_output = "".join(output_lines)
+    envelope = extract_first_envelope(text, kinds) or extract_first_envelope(combined_output, kinds)
+    from agentbus.codexpool import (
+        CAPACITY_WAIT,
+        RETRYABLE_TRANSIENT,
+        classify_invocation,
+        mark_capacity,
+        mark_failure,
+    )
+
+    classification = classify_invocation(code, combined_output + "\n" + text)
+    if classification == CAPACITY_WAIT:
+        mark_capacity(ctx, slot_name, combined_output + "\n" + text, env=env)
+    elif envelope is not None:
+        release_slot(ctx, slot_name, success=True, env=env)
+    elif classification == RETRYABLE_TRANSIENT:
+        release_slot(ctx, slot_name, env=env)
+    # FAILED/no-artifact keeps the reservation until mark_failure atomically
+    # converts this exact slot to COOLDOWN below. Releasing first would let a
+    # concurrent runner acquire it in the gap.
     if envelope is None:
-        state["status"][role] = "CRASHED" if code != 0 else "FAIL"
-        state["status"]["blocker"] = f"{role} produced no valid envelope (exit {code})"
-        set_phase(state, RECOVERY_REQUIRED, reason="missing role envelope")
+        if classification == CAPACITY_WAIT:
+            status = pool_status(ctx, env)
+            dirty = bool(role == "impl" and is_dirty(workdir))
+            state["status"][role] = "INTERRUPTED_CAPACITY"
+            state["codex_interruption"] = {
+                "kind": "INTERRUPTED_CAPACITY",
+                "role": role,
+                "slot": slot_name,
+                "work_key": impl_work_key(state) if role == "impl" else audit_work_key(state),
+                "dirty": dirty,
+                "head": head_sha(workdir),
+                "at": utc_now(),
+            }
+            if not status.get("available"):
+                deadlines = [
+                    str(slot.get("next_probe_at"))
+                    for slot in (status.get("slots") or {}).values()
+                    if slot.get("next_probe_at")
+                ]
+                state["wait"] = {
+                    "kind": "CODEX_CAPACITY",
+                    "reason": "both Codex accounts are cooling down",
+                    "until": min(deadlines) if deadlines else None,
+                    "set_at": utc_now(),
+                }
+            refresh_next(state)
+            store.save(state)
+            out.write(
+                f"Codex {slot_name} capacity exhausted; preserved "
+                f"{'dirty' if dirty else 'clean'} worktree for same-generation failover.\n"
+            )
+            return 75
+        if classification == RETRYABLE_TRANSIENT:
+            state["status"][role] = "WAITING"
+            state["wait"] = {
+                "kind": "RUNNER_TEMPORARY",
+                "reason": f"{role} invocation hit a transient transport error",
+                "until": (datetime.now(timezone.utc) + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "set_at": utc_now(),
+            }
+            refresh_next(state)
+            store.save(state)
+            out.write("Codex invocation hit a transient error; waiting before retry.\n")
+            return 75
+        dirty = bool(role == "impl" and is_dirty(workdir))
+        failure = mark_failure(ctx, slot_name, combined_output + "\n" + text, env=env)
+        if dirty:
+            state["status"][role] = "CRASHED"
+            state["status"]["blocker"] = (
+                f"{role} produced no valid envelope and left a dirty worktree (exit {code}); "
+                "non-capacity account takeover is intentionally disabled"
+            )
+            set_phase(state, RECOVERY_REQUIRED, reason="ambiguous dirty role failure")
+            store.save(state)
+            out.write(state["status"]["blocker"] + "\n")
+            return code or 1
+        status = pool_status(ctx, env)
+        state["status"][role] = "INTERRUPTED_FAILED"
+        state["codex_interruption"] = {
+            "kind": "INTERRUPTED_FAILED",
+            "role": role,
+            "slot": slot_name,
+            "work_key": impl_work_key(state) if role == "impl" else audit_work_key(state),
+            "dirty": False,
+            "head": head_sha(workdir),
+            "at": utc_now(),
+        }
+        if status.get("available"):
+            refresh_next(state)
+            store.save(state)
+            out.write(f"Codex {slot_name} failed without an artifact; retrying the same clean generation on the other slot.\n")
+            return 75
+        slots = list((status.get("slots") or {}).values())
+        permanently_unusable = bool(slots) and all(int(item.get("failure_count") or 0) >= 3 for item in slots)
+        if permanently_unusable:
+            state["status"][role] = "CRASHED"
+            state["status"]["blocker"] = "both Codex accounts repeatedly failed for a non-capacity reason"
+            set_phase(state, RECOVERY_REQUIRED, reason="Codex pool permanently unusable")
+            store.save(state)
+            out.write(state["status"]["blocker"] + "\n")
+            return code or 1
+        deadlines = [str(item.get("next_probe_at")) for item in slots if item.get("next_probe_at")]
+        state["wait"] = {
+            "kind": "RUNNER_TEMPORARY",
+            "reason": "both Codex accounts failed without artifacts; waiting for a bounded reprobe",
+            "until": min(deadlines) if deadlines else failure.get("next_probe_at"),
+            "set_at": utc_now(),
+        }
+        refresh_next(state)
         store.save(state)
-        out.write(state["status"]["blocker"] + "\n")
-        return code or 1
+        out.write("Both Codex slots are cooling down after non-capacity failures; waiting before reprobe.\n")
+        return 75
 
     current = head_sha(workdir)
     if role == "impl" and envelope.kind == "CODEX_REPORT":
@@ -436,6 +632,7 @@ def invoke_codex(
             baseline_head=baseline,
             expected_paths=claimed or None,
             clean_at_start=(runtime.get("impl") or {}).get("clean_at_start"),
+            capacity_takeover=bool((runtime.get("impl") or {}).get("capacity_takeover")),
             push=True,
             out_write=out.write,
         )
@@ -469,17 +666,27 @@ def invoke_codex(
             out.write(f"CODEX_REPORT durable publish: {durable.get('reason')}\n")
         else:
             out.write(f"CODEX_REPORT published to PR #{state.get('pr')} comment {durable.get('comment_id')}\n")
-    elif envelope.kind == "CODEX_AUDIT" and state.get("pr"):
-        body = render_envelope(envelope)
-        if not publish_body(state, body, repo_root=ctx.repo_root, env=env):
-            out.write("warning: could not publish envelope to GitHub; local artifact kept\n")
+    elif envelope.kind == "CODEX_AUDIT":
+        from agentbus.publish import ensure_durable_audit
+
+        durable = ensure_durable_audit(ctx, store, state, env=env)
+        if not durable.get("ok"):
+            out.write(f"CODEX_AUDIT durable publish: {durable.get('reason')}\n")
+        elif state.get("pr"):
+            out.write(f"CODEX_AUDIT published to PR #{state.get('pr')} comment {durable.get('comment_id')}\n")
+        refresh_next(state)
     maybe_validate(store, state)
+    state.pop("codex_interruption", None)
+    if (state.get("wait") or {}).get("kind") in {"CODEX_CAPACITY", "CODEX_BUSY", "RUNNER_TEMPORARY"}:
+        state.pop("wait", None)
     if state.get("control") == "step":
         state["step_armed"] = False
     store.save(state)
     out.write(f"\nRecorded {envelope.kind} STATUS={envelope.status}\n")
     out.write(f"STATE now {state['phase']} NEXT {state['status'].get('next_action')}\n")
-    return 0 if code == 0 else code
+    # A complete, validated role envelope is useful even when the CLI's final
+    # exit reports capacity exhaustion. The exhausted slot remains cooling.
+    return 0
 
 
 def poll_seconds(env: dict[str, str] | None = None) -> float:
@@ -509,6 +716,7 @@ def run_role(
     register_runner(store, role)
     last_github = 0.0
     interval = sync_interval(env)
+    once_failovers = 0
     while True:
         try:
             with store.lock():
@@ -616,6 +824,16 @@ def run_role(
                     runtime = store.load_runtime()
                     maybe_notify_transition(runtime, store.stream_id, store.load().get("phase") or "")
                     store.save_runtime(runtime)
+                    if once and code == 75 and once_failovers < 1:
+                        latest = store.load()
+                        interruption = latest.get("codex_interruption") or {}
+                        if interruption.get("kind") in {"INTERRUPTED_CAPACITY", "INTERRUPTED_FAILED"}:
+                            from agentbus.codexpool import pool_status
+
+                            if pool_status(ctx, env).get("available"):
+                                once_failovers += 1
+                                out.write("Trying the remaining CodexPool slot for the same generation.\n")
+                                continue
                     if once or state.get("control") == "step":
                         return code
                     continue

@@ -12,6 +12,8 @@ from agentbus.machine import IMPLEMENTING, READY_FOR_AUDIT
 from agentbus.protocol import Envelope, parse_one
 from agentbus.publish import (
     apply_published_report,
+    audit_is_durable,
+    ensure_durable_audit,
     ensure_durable_report,
     parse_claimed_paths,
     report_is_durable,
@@ -183,10 +185,55 @@ NEXT_ACTION: AUDIT
         self.assertTrue(report_is_durable(state))
         second = ensure_durable_report(self.ctx, store, state)
         self.assertTrue(second.get("already"))
-        data = json.loads(open(comments, encoding="utf-8").read())
+        with open(comments, encoding="utf-8") as handle:
+            data = json.load(handle)
         reports = [item for item in data if "[CODEX_REPORT]" in (item.get("body") or "")]
         self.assertEqual(len(reports), 1)
         self.assertTrue(role_should_work(store.load(), "audit"))
+
+    def test_durable_audit_is_exact_once(self) -> None:
+        self.create_stream("audit-pub", "--pr", "42")
+        store = self.store("audit-pub")
+        state = store.load()
+        head = self.git("rev-parse", "HEAD")
+        comments = os.path.join(self.root, "audit-comments.json")
+        with open(comments, "w", encoding="utf-8") as handle:
+            json.dump([], handle)
+        os.environ["FAKE_GH_COMMENTS"] = comments
+        raw = (
+            "[CODEX_AUDIT]\n\nSTATUS: PASS\n\nSTREAM: audit-pub\n\n"
+            f"AUDITED_HEAD: {head}\n\nFINDINGS: none\n\nNEXT_ACTION: READY_FOR_GPT\n"
+        )
+        state["heads"].update({"current": head, "implemented": head, "audited": head})
+        state["envelopes"]["CODEX_AUDIT"] = {
+            "kind": "CODEX_AUDIT",
+            "status": "PASS",
+            "head": head,
+            "raw": raw,
+            "source": "local",
+            "fields": {"STATUS": "PASS", "STREAM": "audit-pub", "AUDITED_HEAD": head},
+        }
+        self.assertFalse(audit_is_durable(state))
+        first = ensure_durable_audit(self.ctx, store, state)
+        self.assertTrue(first.get("ok"), first)
+        second = ensure_durable_audit(self.ctx, store, state)
+        self.assertTrue(second.get("already"), second)
+        self.assertTrue(audit_is_durable(state))
+        with open(comments, encoding="utf-8") as handle:
+            rows = json.load(handle)
+        self.assertEqual(sum("[CODEX_AUDIT]" in (row.get("body") or "") for row in rows), 1)
+
+    def test_old_publication_comment_id_cannot_authorize_new_artifact(self) -> None:
+        state = {"pr": 42, "publication": {"audit_comment_id": "old", "audit_comment_digest": "old"}}
+        state["envelopes"] = {
+            "CODEX_AUDIT": {
+                "status": "PASS",
+                "raw": "[CODEX_AUDIT]",
+                "digest": "new",
+                "source": "local",
+            }
+        }
+        self.assertFalse(audit_is_durable(state))
 
     def test_pr_after_impl_retains_normalized_scope(self) -> None:
         self.create_stream("late-pr", "--create-worktree")

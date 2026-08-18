@@ -13,38 +13,16 @@ from agentbus.util import utc_now
 
 
 def refresh_next(state: dict[str, Any]) -> dict[str, Any]:
-    phase = state["phase"]
-    control = state.get("control") or "running"
+    from agentbus.decision import derive_next_action
+
     status = state.setdefault("status", {})
-    if control == "paused":
-        status["next_action"] = "RESUME"
-    elif phase == machine.WAITING_FOR_SPEC:
-        status["next_action"] = "SPEC"
+    campaign = state.get("campaign") if isinstance(state.get("campaign"), dict) else None
+    live = (state.get("github") or {}).get("pr")
+    decision = derive_next_action(state, campaign, live if isinstance(live, dict) else None)
+    status["next_action"] = decision.action
+    status["decision"] = decision.as_dict()
+    if decision.action in {"PRODUCT_GPT", "FINAL_GPT"}:
         status["gpt"] = "WAITING"
-    elif phase in {machine.IMPLEMENTING, machine.VALIDATING}:
-        status["next_action"] = "IMPL"
-    elif phase in {machine.READY_FOR_AUDIT, machine.AUDITING}:
-        status["next_action"] = "AUDIT"
-    elif phase in {machine.READY_FOR_GPT, machine.GPT_REVIEW, machine.RE_REVIEW_REQUIRED}:
-        status["next_action"] = "GPT"
-        status["gpt"] = "WAITING" if phase != machine.GPT_REVIEW else "REVIEWING"
-    elif phase == machine.FINAL_GATE:
-        status["next_action"] = "HUMAN"
-        status["gpt"] = "READY"
-    elif phase == machine.MERGE_PENDING:
-        status["next_action"] = "AGENTBUS"
-    elif phase == machine.MERGE_RETRYABLE_FAILED:
-        status["next_action"] = "HUMAN"
-    elif phase == machine.BLOCKED_FOR_REVIEW:
-        status["next_action"] = "GPT"
-    elif phase in {machine.BLOCKED, machine.RECOVERY_REQUIRED, machine.PAUSED}:
-        status["next_action"] = "HUMAN"
-    elif phase in {machine.MATERIALIZING, machine.WORKTREE_READY, machine.BOOTSTRAP_PR_READY}:
-        status["next_action"] = "AGENTBUS"
-    elif phase == machine.MERGED:
-        status["next_action"] = "-"
-    else:
-        status["next_action"] = machine.next_actor(phase, control=control)
     refresh_authority(state)
     return state
 
@@ -133,6 +111,45 @@ def apply_envelope(
                 raise AgentbusError(
                     f"envelope stream {envelope.stream} does not match {state['stream_id']}"
                 )
+    if envelope.kind in {"GPT_SPEC", "GPT_REVIEW", "GPT_CONTINUATION"} and envelope.get("JOB_ID"):
+        from agentbus.campaign import infer_campaign_id, load_campaign
+        from agentbus.decision import (
+            PLAN_CONTINUATION,
+            PLAN_SPEC,
+            PRODUCT_GPT,
+            PRODUCT_REVIEW,
+            browser_job_id,
+        )
+
+        task = {
+            "GPT_SPEC": PLAN_SPEC,
+            "GPT_REVIEW": PRODUCT_REVIEW,
+            "GPT_CONTINUATION": PLAN_CONTINUATION,
+        }[envelope.kind]
+        campaign = load_campaign(store.ctx, infer_campaign_id(state, envelope))
+        live = (state.get("github") or {}).get("pr")
+        expected_job = browser_job_id(
+            state,
+            campaign,
+            live if isinstance(live, dict) else None,
+            role=PRODUCT_GPT,
+            task=task,
+        )
+        if envelope.get("JOB_ID").strip() != expected_job:
+            state.setdefault("stale_product_jobs", []).append(
+                {
+                    "kind": envelope.kind,
+                    "job_id": envelope.get("JOB_ID"),
+                    "expected_job_id": expected_job,
+                    "source_id": envelope.source_id,
+                    "ts": utc_now(),
+                }
+            )
+            store.append_event(
+                "stale-product-job-ignored",
+                {"kind": envelope.kind, "job_id": envelope.get("JOB_ID"), "source": envelope.source},
+            )
+            return refresh_next(state)
     if envelope.kind == "GPT_CONTINUATION":
         from agentbus.campaign import apply_continuation
 
@@ -165,6 +182,51 @@ def apply_envelope(
             store.append_event(
                 "stale-merge-review-ignored",
                 {"head": reviewed, "status": envelope.status, "source": envelope.source},
+            )
+            return refresh_next(state)
+        expected_pr = str(state.get("pr") or "")
+        reviewed_pr = str(envelope.fields.get("PR") or "").strip().lstrip("#")
+        live = (state.get("github") or {}).get("pr") or {}
+        current_base = str(live.get("baseRefOid") or "").strip()
+        reviewed_base = str(envelope.fields.get("REVIEWED_BASE") or "").strip()
+        stale_reason = None
+        if expected_pr and reviewed_pr != expected_pr:
+            stale_reason = "PR mismatch"
+        elif current_base and not sha_equal(reviewed_base, current_base):
+            stale_reason = "base mismatch"
+        job_id = str(envelope.fields.get("JOB_ID") or "").strip()
+        if not stale_reason and job_id:
+            from agentbus.campaign import infer_campaign_id, load_campaign
+            from agentbus.decision import FINAL_GPT, FINAL_REVIEW, browser_job_id
+
+            campaign = load_campaign(store.ctx, infer_campaign_id(state))
+            expected_job = browser_job_id(
+                state,
+                campaign,
+                live,
+                role=FINAL_GPT,
+                task=FINAL_REVIEW,
+            )
+            if job_id != expected_job:
+                stale_reason = "review generation mismatch"
+        if stale_reason:
+            state.setdefault("stale_merge_reviews", []).append(
+                {
+                    "head": reviewed,
+                    "status": envelope.status,
+                    "source_id": envelope.source_id,
+                    "reason": stale_reason,
+                    "ts": utc_now(),
+                }
+            )
+            store.append_event(
+                "stale-merge-review-ignored",
+                {
+                    "head": reviewed,
+                    "status": envelope.status,
+                    "source": envelope.source,
+                    "reason": stale_reason,
+                },
             )
             return refresh_next(state)
         if envelope.source != "github" or not str(envelope.source_id or "").strip():
@@ -518,13 +580,12 @@ def mark_pr_merged(
         else:
             state["prior_phase"] = state["phase"]
             state["phase"] = machine.MERGED
-    state["status"]["next_action"] = "-"
     if merge_sha:
         state.setdefault("heads", {})["merged"] = merge_sha
     elif not (state.get("heads") or {}).get("merged"):
         state.setdefault("heads", {})["merged"] = (state.get("heads") or {}).get("current")
     txn = state.get("merge_txn")
-    if isinstance(txn, dict) and txn.get("human_authorized"):
+    if isinstance(txn, dict) and (txn.get("human_authorized") or txn.get("autonomous_authorized")):
         # GitHub's merged state is authoritative after a crash anywhere in
         # the local transaction.  Preserve the exact commit when available.
         txn["status"] = "merged"
@@ -540,7 +601,7 @@ def mark_pr_merged(
         # successor work begins.
         store.save(state)
         after_unit_merged(store, state, merge_sha=state.get("heads", {}).get("merged"))
-    return state
+    return refresh_next(state)
 
 
 def touch_seen_comment(state: dict[str, Any], comment_id: str) -> None:

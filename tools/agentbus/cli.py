@@ -268,7 +268,7 @@ def cmd_step(ns: argparse.Namespace) -> int:
     role = "impl" if actor == "IMPL" else "audit" if actor == "AUDIT" else None
     if role:
         return run_role(ctx, store, role, once=True)
-    print(f"No Codex step to run. Phase={state['phase']} next={describe_next(state['phase'], control=state.get('control') or 'running')}")
+    print(f"No Codex step to run. Phase={state['phase']} next={describe_next(state, control=state.get('control') or 'running')}")
     return 0
 
 
@@ -656,6 +656,41 @@ def cmd_bind_gpt(ns: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_settings(ns: argparse.Namespace) -> int:
+    import json
+
+    from agentbus.settings import (
+        browser_bridge_status,
+        load_settings,
+        migrate_gpt_bindings,
+        set_global_binding,
+    )
+
+    ctx = _ctx(ns)
+    notes: list[str] = []
+    if ns.migrate_bindings:
+        migrated = migrate_gpt_bindings(ctx)
+        notes.extend(migrated.get("notes") or [])
+    if ns.product_url is not None or ns.product_name is not None:
+        set_global_binding(
+            ctx,
+            "PRODUCT_GPT",
+            display_name=ns.product_name,
+            url=ns.product_url,
+        )
+    if ns.final_url is not None or ns.final_name is not None:
+        set_global_binding(
+            ctx,
+            "FINAL_GPT",
+            display_name=ns.final_name,
+            url=ns.final_url,
+        )
+    for note in notes:
+        print(note)
+    print(json.dumps({"settings": load_settings(ctx), "browser_bridge": browser_bridge_status(ctx)}, indent=2))
+    return 0
+
+
 def cmd_unbind_gpt(ns: argparse.Namespace) -> int:
     ctx = _ctx(ns)
     store = _store(ctx, ns.stream)
@@ -934,6 +969,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("unbind-gpt", help="clear Browser GPT binding without touching workflow state")
     p.add_argument("stream")
     p.set_defaults(func=cmd_unbind_gpt)
+
+    p = sub.add_parser("settings", help="show/migrate repository GPT and Browser Bridge settings")
+    p.add_argument("--migrate-bindings", action="store_true")
+    p.add_argument("--product-url")
+    p.add_argument("--product-name")
+    p.add_argument("--final-url")
+    p.add_argument("--final-name")
+    p.set_defaults(func=cmd_settings)
 
     p = sub.add_parser("workspace", help="open IMPL + AUDIT Konsoles (and print GPT URL)")
     p.add_argument("stream")

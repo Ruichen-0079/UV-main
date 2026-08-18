@@ -1,8 +1,8 @@
-"""Campaign = long-running goal. Work unit = one PR / implementation generation.
+"""Campaign lineage and continuation ownership.
 
-A bound ChatGPT conversation URL is a convenience pointer, not an invokable API.
-Zero-touch continuation requires a durable [GPT_CONTINUATION] published in advance.
-No browser automation. Future planner_provider = browser | api | codex is reserved.
+Campaign JSON preserves compatibility fields, but visible lifecycle is derived
+from the current work unit and durable continuation queue. It is not a second
+workflow engine.
 """
 
 from __future__ import annotations
@@ -99,12 +99,14 @@ def empty_campaign(campaign_id: str) -> dict[str, Any]:
         "units": [],
         "queue": [],
         "max_queued": DEFAULT_MAX_QUEUED,
+        "current_stream": None,
         "active_stream": None,
         "reason": None,
         "human_required": False,
         "automation_mode": None,
         "merge_review_mode": DEFAULT_MERGE_REVIEW_MODE,
         "merge_gpt_provider": DEFAULT_MERGE_GPT_PROVIDER,
+        "product_gpt": {"display_name": None, "url": None, "note": None, "bound_at": None},
         "merge_gpt": {"display_name": None, "url": None, "note": None, "bound_at": None},
         "created_at": now,
         "updated_at": now,
@@ -113,10 +115,23 @@ def empty_campaign(campaign_id: str) -> dict[str, Any]:
 
 def apply_campaign_defaults(campaign: dict[str, Any]) -> dict[str, Any]:
     """Legacy campaign JSON must gain Merge GPT fields without rewriting authority."""
+    if campaign.get("status") == STATUS_COMPLETE and not campaign.get("completion"):
+        # Preserve an old explicit completion without continuing to treat the
+        # compatibility status snapshot as lifecycle authority.
+        campaign["completion"] = STATUS_COMPLETE
     campaign.setdefault("merge_review_mode", DEFAULT_MERGE_REVIEW_MODE)
     if campaign.get("merge_review_mode") not in {MERGE_REVIEW_ALWAYS, MERGE_REVIEW_RISK, MERGE_REVIEW_OFF}:
         campaign["merge_review_mode"] = DEFAULT_MERGE_REVIEW_MODE
     campaign.setdefault("merge_gpt_provider", DEFAULT_MERGE_GPT_PROVIDER)
+    campaign.setdefault("current_stream", campaign.get("active_stream"))
+    product = campaign.get("product_gpt")
+    if not isinstance(product, dict):
+        campaign["product_gpt"] = {"display_name": None, "url": None, "note": None, "bound_at": None}
+    else:
+        product.setdefault("display_name", None)
+        product.setdefault("url", None)
+        product.setdefault("note", None)
+        product.setdefault("bound_at", None)
     binding = campaign.get("merge_gpt")
     if not isinstance(binding, dict):
         campaign["merge_gpt"] = {"display_name": None, "url": None, "note": None, "bound_at": None}
@@ -156,7 +171,7 @@ def list_campaigns(ctx: RepoContext) -> list[dict[str, Any]]:
             continue
         data = read_json(os.path.join(root, name), default=None)
         if isinstance(data, dict) and data.get("campaign_id"):
-            found.append(data)
+            found.append(apply_campaign_defaults(data))
     return found
 
 
@@ -205,6 +220,7 @@ def bind_explicit_campaign(
                 "merge_sha": (state.get("heads") or {}).get("merged"),
             }
         )
+    campaign["current_stream"] = sid
     persist_campaign_projection(ctx, campaign)
     save_campaign(ctx, campaign)
     return campaign
@@ -262,7 +278,7 @@ def _candidate_stream_ids(campaign: dict[str, Any]) -> list[str]:
         seen.add(sid)
         found.append(sid)
 
-    add(campaign.get("active_stream"))
+    add(campaign.get("current_stream") or campaign.get("active_stream"))
     for unit in campaign.get("units") or []:
         add(unit.get("stream_id"))
     for item in campaign.get("queue") or []:
@@ -330,8 +346,17 @@ def select_current_unit(units: list[dict[str, Any]], campaign: dict[str, Any]) -
         and not unit_completed(row.get("phase") or row.get("status"))
     ]
     if not live:
+        wanted = campaign.get("current_stream") or campaign.get("active_stream")
+        for row in units:
+            if not row.get("archived") and row.get("stream_id") == wanted:
+                return row
+        by_id = {row.get("stream_id"): row for row in units if row.get("stream_id")}
+        for recorded in reversed(campaign.get("units") or []):
+            row = by_id.get(recorded.get("stream_id"))
+            if row and not row.get("archived"):
+                return row
         return None
-    wanted = campaign.get("active_stream")
+    wanted = campaign.get("current_stream") or campaign.get("active_stream")
     for row in live:
         if row.get("stream_id") == wanted:
             return row
@@ -345,35 +370,24 @@ def project_campaign(ctx: RepoContext | None, campaign: dict[str, Any]) -> dict[
     units = discover_campaign_units(ctx, campaign)
     current = select_current_unit(units, campaign)
     pending = pending_items(campaign)
-    if campaign.get("status") == STATUS_HUMAN_REQUIRED:
-        return {
-            "status": STATUS_HUMAN_REQUIRED,
-            "reason": campaign.get("reason"),
-            "active_stream": (current or {}).get("stream_id") if current else campaign.get("active_stream"),
-            "current_unit": (current or {}).get("stream_id") if current else None,
-            "current_phase": (current or {}).get("phase") if current else None,
-            "current_pr": (current or {}).get("pr") if current else None,
-            "wait_reason": None,
-            "queue_empty": not pending,
-            "unit_completed": current is None,
-        }
     if current is not None:
         phase = current.get("phase") or current.get("status") or ""
-        return {
-            "status": STATUS_ACTIVE,
-            "reason": None,
-            "active_stream": current.get("stream_id"),
-            "current_unit": current.get("stream_id"),
-            "current_phase": phase,
-            "current_pr": current.get("pr"),
-            "wait_reason": None,
-            "queue_empty": not pending,
-            "unit_completed": False,
-        }
+        if not unit_completed(phase):
+            return {
+                "status": STATUS_ACTIVE,
+                "reason": None,
+                "active_stream": current.get("stream_id"),
+                "current_unit": current.get("stream_id"),
+                "current_phase": phase,
+                "current_pr": current.get("pr"),
+                "wait_reason": None,
+                "queue_empty": not pending,
+                "unit_completed": False,
+            }
     if pending:
         nxt = pending[0].get("next_stream")
         return {
-            "status": STATUS_CONTINUING if campaign.get("status") == STATUS_CONTINUING else STATUS_ACTIVE,
+            "status": STATUS_ACTIVE,
             "reason": f"queued successor {nxt}",
             "active_stream": nxt,
             "current_unit": nxt,
@@ -383,13 +397,40 @@ def project_campaign(ctx: RepoContext | None, campaign: dict[str, Any]) -> dict[
             "queue_empty": False,
             "unit_completed": False,
         }
+    if campaign.get("completion") == STATUS_COMPLETE:
+        return {
+            "status": STATUS_COMPLETE,
+            "reason": campaign.get("reason") or "campaign explicitly complete",
+            "active_stream": None,
+            "current_unit": None,
+            "current_phase": "MERGED",
+            "current_pr": None,
+            "wait_reason": None,
+            "queue_empty": True,
+            "unit_completed": True,
+        }
+    if campaign.get("continuation_error") or any(
+        isinstance(item, dict) and item.get("status") == ITEM_CONFLICT
+        for item in campaign.get("queue") or []
+    ):
+        return {
+            "status": STATUS_HUMAN_REQUIRED,
+            "reason": campaign.get("continuation_error") or campaign.get("reason") or "conflicting continuation",
+            "active_stream": None,
+            "current_unit": (current or {}).get("stream_id"),
+            "current_phase": "MERGED",
+            "current_pr": (current or {}).get("pr"),
+            "wait_reason": None,
+            "queue_empty": True,
+            "unit_completed": True,
+        }
     return {
         "status": STATUS_WAITING_FOR_PLAN,
         "reason": "unit completed; continuation queue empty",
         "active_stream": None,
-        "current_unit": None,
+        "current_unit": (current or {}).get("stream_id"),
         "current_phase": "MERGED",
-        "current_pr": None,
+        "current_pr": (current or {}).get("pr"),
         "wait_reason": WAIT_WAITING_FOR_PLAN,
         "queue_empty": True,
         "unit_completed": True,
@@ -398,22 +439,17 @@ def project_campaign(ctx: RepoContext | None, campaign: dict[str, Any]) -> dict[
 
 def persist_campaign_projection(ctx: RepoContext, campaign: dict[str, Any]) -> dict[str, Any]:
     projected = project_campaign(ctx, campaign)
-    if campaign.get("status") == STATUS_HUMAN_REQUIRED and projected["status"] == STATUS_HUMAN_REQUIRED:
-        campaign["wait_reason"] = projected.get("wait_reason")
-        return projected
-    campaign["status"] = projected["status"]
-    campaign["reason"] = projected["reason"]
+    # Only persist campaign-owned lineage. Legacy status/reason fields remain
+    # readable compatibility data, never lifecycle authority.
+    campaign["current_stream"] = projected["current_unit"]
     campaign["active_stream"] = projected["active_stream"]
+    # Existing fields remain a compatibility snapshot only. project_campaign
+    # never reads them to determine a live unit's lifecycle.
+    campaign["status"] = projected["status"]
+    campaign["reason"] = projected.get("reason")
     campaign["human_required"] = projected["status"] == STATUS_HUMAN_REQUIRED
     campaign["wait_reason"] = projected.get("wait_reason")
-    if projected.get("current_unit") and not projected.get("unit_completed"):
-        from agentbus.mergegate import wait_reason_for_state
-
-        store = StreamStore(ctx, projected["current_unit"])
-        if store.exists():
-            # Persist the control-plane wait reason; this is a projection of
-            # the unit and never mutates the product stream itself.
-            campaign["wait_reason"] = wait_reason_for_state(store.load(), campaign)
+    campaign["projection_version"] = 2
     return projected
 
 
@@ -668,10 +704,23 @@ def maybe_materialize_successor(store: StreamStore, state: dict[str, Any]) -> di
     with campaign_lock(ctx):
         campaign = ensure_campaign(ctx, campaign_id)
         _record_unit(campaign, state)
+        from agentbus.decision import NEXT, derive_next_action
+
+        decision = derive_next_action(state, campaign)
+        if decision.action != NEXT:
+            persist_campaign_projection(ctx, campaign)
+            save_campaign(ctx, campaign)
+            state["campaign"] = {
+                "campaign_id": campaign_id,
+                "status": campaign["status"],
+                "next_stream": None,
+                "reason": decision.reason,
+            }
+            return None
         item = matching_continuation(campaign, state["stream_id"], state)
         if item is None:
             persist_campaign_projection(ctx, campaign)
-            existing = campaign.get("active_stream") or _existing_successor(ctx, campaign, state)
+            existing = campaign.get("current_stream") or campaign.get("active_stream") or _existing_successor(ctx, campaign, state)
             save_campaign(ctx, campaign)
             state["campaign"] = {
                 "campaign_id": campaign_id,
@@ -688,6 +737,7 @@ def maybe_materialize_successor(store: StreamStore, state: dict[str, Any]) -> di
         campaign["status"] = STATUS_CONTINUING
         campaign["human_required"] = False
         campaign["reason"] = f"creating {item['next_stream']}"
+        campaign["current_stream"] = item["next_stream"]
         campaign["active_stream"] = item["next_stream"]
         save_campaign(ctx, campaign)
     result = start_next_unit(ctx, store, state, item)
@@ -698,6 +748,7 @@ def maybe_materialize_successor(store: StreamStore, state: dict[str, Any]) -> di
             campaign["status"] = STATUS_ACTIVE
             campaign["human_required"] = False
             campaign["reason"] = f"next unit {result.get('stream_id')} started"
+            campaign["current_stream"] = result.get("stream_id")
             campaign["active_stream"] = result.get("stream_id")
         else:
             campaign["status"] = STATUS_HUMAN_REQUIRED
@@ -799,6 +850,8 @@ def _record_unit(campaign: dict[str, Any], state: dict[str, Any]) -> None:
     }
     if unit_completed(phase):
         rec["completed_at"] = utc_now()
+    if not campaign.get("current_stream"):
+        campaign["current_stream"] = sid
     for unit in campaign.setdefault("units", []):
         if unit.get("stream_id") == sid:
             unit.update(rec)
@@ -1005,6 +1058,7 @@ def campaign_view(campaign: dict[str, Any] | None, ctx: RepoContext | None = Non
     view_campaign = dict(campaign)
     view_campaign["status"] = projected["status"]
     view_campaign["reason"] = projected.get("reason") or campaign.get("reason")
+    view_campaign["current_stream"] = projected.get("current_unit")
     view_campaign["active_stream"] = projected.get("active_stream")
     att = campaign_attention(view_campaign)
     if current_state is not None:
@@ -1012,8 +1066,18 @@ def campaign_view(campaign: dict[str, Any] | None, ctx: RepoContext | None = Non
         # Otherwise P6/P7 incorrectly look like AgentBus work while they are
         # explicitly waiting for independent Browser GPT review.
         from agentbus.attention import classify_attention
+        from agentbus.decision import decision_for_stream
 
-        att = classify_attention(current_state, campaign=campaign)
+        live = (current_state.get("github") or {}).get("pr")
+        decision = decision_for_stream(
+            ctx,
+            current_state,
+            campaign,
+            live if isinstance(live, dict) else None,
+        )
+        if decision.wait_reason:
+            wait_reason = decision.wait_reason
+        att = classify_attention(current_state, campaign=campaign, decision=decision)
     pending = pending_items(campaign)
     next_stream = pending[0].get("next_stream") if pending else None
     if projected.get("unit_completed"):
@@ -1025,6 +1089,7 @@ def campaign_view(campaign: dict[str, Any] | None, ctx: RepoContext | None = Non
         "status": projected["status"],
         "reason": projected.get("reason") if projected.get("unit_completed") else (projected.get("reason") or campaign.get("reason")),
         "wait_reason": wait_reason,
+        "current_stream": projected.get("current_unit"),
         "active_stream": projected.get("active_stream"),
         "current_unit": projected.get("current_unit"),
         "current_phase": projected.get("current_phase"),
@@ -1039,6 +1104,7 @@ def campaign_view(campaign: dict[str, Any] | None, ctx: RepoContext | None = Non
         "merge_review_mode": campaign.get("merge_review_mode") or DEFAULT_MERGE_REVIEW_MODE,
         "merge_gpt_provider": campaign.get("merge_gpt_provider") or DEFAULT_MERGE_GPT_PROVIDER,
         "merge_gpt": campaign.get("merge_gpt") or {},
+        "product_gpt": campaign.get("product_gpt") or {},
         "attention": att["kind"],
         "attention_owner": att["attention_owner"],
         "browser_gpt_required": att["browser_gpt_required"],

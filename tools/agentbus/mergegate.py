@@ -1,13 +1,12 @@
-"""Independent Merge GPT gate and explicit human pass-and-merge transaction.
+"""Final GPT compatibility views and the exact-once merge transaction.
 
-Product GPT review and Merge GPT review are separate authorities.
-Opening a browser URL never completes a review.
-No merge mutation without an explicit human authorization for the exact HEAD.
+Final GPT is independent authority, while the normal merge executor is
+autonomous and still revalidates every deterministic fence.  The legacy human
+entry points remain recovery controls only.
 """
 
 from __future__ import annotations
 
-import os
 import re
 import secrets
 from typing import Any
@@ -28,10 +27,10 @@ from agentbus.campaign import (
     infer_campaign_id,
     load_campaign,
     save_campaign,
-    unit_completed,
 )
 from agentbus.machine import (
     AUDITING,
+    BLOCKED_FOR_REVIEW,
     FINAL_GATE,
     IMPLEMENTING,
     MERGE_PENDING,
@@ -56,14 +55,9 @@ SUGGEST_HUMAN = "需要人工判断"
 SUGGEST_GATE_PASSED = "最终审阅已通过，等待合并完成"
 SUGGEST_MERGED = "已合并"
 
-VALID_MERGE_STATUSES = {"PASS", "HOLD", "HUMAN_DECISION"}
-
-AUDIT_WORKTREE_PATH = re.compile(
-    r"(?:[A-Za-z]:)?(?:/[^ \n\]|]+)+/audit-worktree/((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+)"
-)
-HOME_STATE_PATH = re.compile(
-    r"(?:/home/[^ \n\]|]+/\.local/state/yuvi-agent-bus/|/tmp/[^ \n\]|]+/)[^\s\]|]+"
-)
+VALID_MERGE_STATUSES = {"PASS", "REPAIR", "WAIT", "HUMAN", "HOLD", "HUMAN_DECISION"}
+MODE_HUMAN = "HUMAN"
+MODE_AUTONOMOUS = "AUTONOMOUS"
 
 
 def empty_merge_gpt() -> dict[str, Any]:
@@ -99,9 +93,9 @@ def merge_review_required(campaign: dict[str, Any] | None, state: dict[str, Any]
 
 
 def unit_head(state: dict[str, Any]) -> str | None:
-    heads = state.get("heads") or {}
-    pub = state.get("publication") or {}
-    return heads.get("implemented") or pub.get("commit") or heads.get("current")
+    from agentbus.decision import unit_head as canonical
+
+    return canonical(state)
 
 
 def sha_equal(left: str | None, right: str | None) -> bool:
@@ -113,54 +107,34 @@ def sha_equal(left: str | None, right: str | None) -> bool:
 
 
 def sanitize_display_text(text: str | None) -> str:
-    """Display-only: hide AgentBus audit-worktree absolute prefixes."""
-    if not text:
-        return ""
-    value = AUDIT_WORKTREE_PATH.sub(r"\1", str(text))
-    return value
+    """Compatibility wrapper around the one shared display sanitizer."""
+    from agentbus.display import sanitize_display_text as shared
+
+    return shared(text)
 
 
-def merge_gpt_binding(state: dict[str, Any], campaign: dict[str, Any] | None) -> dict[str, Any]:
-    stream = state.get("merge_gpt") if isinstance(state.get("merge_gpt"), dict) else {}
-    if stream.get("url") or stream.get("display_name"):
-        return stream
-    camp = (campaign or {}).get("merge_gpt") if isinstance((campaign or {}).get("merge_gpt"), dict) else {}
-    return camp or empty_merge_gpt()
+def merge_gpt_binding(
+    state: dict[str, Any],
+    campaign: dict[str, Any] | None,
+    ctx: RepoContext | None = None,
+) -> dict[str, Any]:
+    """Compatibility name for the normal stream override → global resolver."""
+    del campaign
+    from agentbus.settings import load_settings, resolve_final_gpt_binding
+
+    settings = load_settings(ctx) if ctx is not None else None
+    return resolve_final_gpt_binding(state, settings)
 
 
 def product_review_authority(state: dict[str, Any]) -> dict[str, Any]:
-    policy = review_policy_of(state)
-    review = ((state.get("envelopes") or {}).get("GPT_REVIEW") or {})
-    head = unit_head(state)
-    if policy == AUDIT_SUFFICIENT and state.get("review_authority") == DELEGATED_AUTHORITY:
-        return {
-            "ok": True,
-            "kind": "DELEGATED",
-            "label": "AUDIT_SUFFICIENT / delegated_by_gpt_spec",
-            "detail": "GPT pre-authorized independent audit as review authority",
-            "head": ((state.get("heads") or {}).get("audited") or head),
-            "source_id": None,
-        }
-    status = (review.get("status") or "").upper()
-    rec_head = review.get("head")
-    if status in {"ACCEPT", "ACCEPTED", "APPROVE", "APPROVED"} and sha_equal(rec_head, head):
-        return {
-            "ok": True,
-            "kind": "GPT_REVIEW",
-            "label": f"GPT_REVIEW {status}",
-            "detail": "Product GPT exact-head ACCEPT",
-            "head": rec_head,
-            "source_id": review.get("source_id"),
-        }
-    return {
-        "ok": False,
-        "kind": review.get("kind") or "GPT_REVIEW",
-        "label": f"GPT_REVIEW {status or 'missing'}",
-        "detail": "product review not valid for current HEAD",
-        "head": rec_head,
-        "source_id": review.get("source_id"),
-        "status": status or None,
-    }
+    from agentbus.decision import product_review_authority as canonical
+
+    result = canonical(state)
+    result.setdefault(
+        "detail",
+        "product review authority is exact" if result.get("ok") else "product review not valid for current HEAD",
+    )
+    return result
 
 
 def current_merge_review(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -206,130 +180,64 @@ def merge_review_status(state: dict[str, Any]) -> str | None:
 
 
 def audit_pass_exact(state: dict[str, Any]) -> bool:
-    rec = ((state.get("envelopes") or {}).get("CODEX_AUDIT") or {})
-    if (rec.get("status") or "").upper() not in {"PASS", "PASSED", "OK"}:
-        return False
-    return sha_equal(rec.get("head") or (rec.get("fields") or {}).get("AUDITED_HEAD"), unit_head(state))
+    from agentbus.decision import audit_pass_exact as canonical
+
+    return canonical(state)
 
 
 def report_valid_exact(state: dict[str, Any]) -> bool:
-    rec = ((state.get("envelopes") or {}).get("CODEX_REPORT") or {})
-    if not isinstance(rec, dict) or not rec:
-        return False
-    status = (rec.get("status") or "").upper()
-    if status not in {"READY_FOR_AUDIT", "PASS", "PASSED", "OK"}:
-        return False
-    fields = rec.get("fields") or {}
-    return sha_equal(rec.get("head") or fields.get("IMPLEMENTED_HEAD"), unit_head(state))
+    from agentbus.decision import report_valid_exact as canonical
+
+    return canonical(state)
 
 
 def publication_pending(state: dict[str, Any]) -> bool:
-    from agentbus.publish import report_is_durable
+    from agentbus.decision import publication_pending as canonical
 
-    if not state.get("pr"):
-        return False
-    rec = ((state.get("envelopes") or {}).get("CODEX_REPORT") or {})
-    if not rec:
-        return False
-    return not report_is_durable(state)
+    return canonical(state)
 
 
 def ci_projection(view: dict[str, Any] | None) -> dict[str, Any]:
-    if not view:
-        return {"status": "NOT_AVAILABLE", "summary": "PR view unavailable"}
-    checks = view.get("statusCheckRollup")
-    if not checks:
-        return {"status": "NOT_AVAILABLE", "summary": "no GitHub checks"}
-    states = []
-    for item in checks:
-        if isinstance(item, dict):
-            states.append((item.get("state") or item.get("conclusion") or "").upper())
-    if any(item in {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "FAIL"} for item in states):
-        return {"status": "FAIL", "summary": "one or more checks failed"}
-    if any(item in {"PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED"} for item in states):
-        return {"status": "PENDING", "summary": "checks still running"}
-    if any(item in {"SUCCESS", "PASS", "NEUTRAL", "SKIPPED"} for item in states):
-        return {"status": "PASS", "summary": "reported checks succeeded"}
-    return {"status": "NOT_RUN", "summary": "checks present but inconclusive"}
+    from agentbus.decision import ci_snapshot
+
+    result = ci_snapshot(view)
+    return {**result, "summary": result["status"].lower().replace("_", " ")}
 
 
 def wait_reason_for_state(state: dict[str, Any], campaign: dict[str, Any] | None = None) -> str:
-    phase = state.get("phase") or ""
-    if unit_completed(phase):
-        return WAIT_WAITING_FOR_PLAN
-    if phase in {MERGE_PENDING, MERGE_RETRYABLE_FAILED}:
-        return WAIT_MERGE_PENDING
-    if phase in {IMPLEMENTING, VALIDATING}:
-        return WAIT_IMPLEMENTING
-    if phase in {READY_FOR_AUDIT, AUDITING}:
-        return WAIT_AUDITING
-    if phase == READY_FOR_GPT:
-        return WAIT_WAITING_FOR_GPT
-    if phase == FINAL_GATE:
-        txn = state.get("merge_txn") or {}
-        if _final_gate_is_durable(state) and (txn.get("status") or "") in {
-            "final_gate_published",
-            "merging",
-            "pending",
-            "retryable_failed",
-        }:
-            return WAIT_MERGE_PENDING
-        if merge_review_required(campaign, state) and merge_review_status(state) != "PASS":
-            return WAIT_WAITING_FOR_MERGE_GPT
-        return WAIT_WAITING_FOR_HUMAN_MERGE
-    if phase == "GPT_REVIEW":
-        return WAIT_WAITING_FOR_GPT
-    return phase or WAIT_IMPLEMENTING
+    from agentbus.decision import AUDIT, FINAL_GPT, IMPL, NEXT, PRODUCT_GPT, derive_next_action
+
+    live = (state.get("github") or {}).get("pr")
+    decision = derive_next_action(state, campaign, live if isinstance(live, dict) else None)
+    if decision.wait_reason:
+        return decision.wait_reason
+    return {
+        IMPL: WAIT_IMPLEMENTING,
+        AUDIT: WAIT_AUDITING,
+        PRODUCT_GPT: WAIT_WAITING_FOR_GPT,
+        FINAL_GPT: WAIT_WAITING_FOR_MERGE_GPT,
+        NEXT: WAIT_WAITING_FOR_PLAN,
+    }.get(decision.action, decision.action)
 
 
 def gpt_suggestion(state: dict[str, Any], campaign: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Deterministic projection. AgentBus does not invent advice."""
-    phase = state.get("phase") or ""
-    product = product_review_authority(state)
-    merge_status = merge_review_status(state)
-    audit_status = (((state.get("envelopes") or {}).get("CODEX_AUDIT") or {}).get("status") or "").upper()
-    gpt_status = (((state.get("envelopes") or {}).get("GPT_REVIEW") or {}).get("status") or "").upper()
+    """Compatibility projection of the canonical workflow decision."""
+    from agentbus.decision import DONE, FINAL_GPT, HUMAN, IMPL, MERGE, PRODUCT_GPT, WAIT, derive_next_action
 
-    if unit_completed(phase) or (state.get("heads") or {}).get("merged"):
-        text = SUGGEST_MERGED
-        predicate = "PR/unit MERGED"
-    elif audit_status == "CHANGES_REQUIRED" or gpt_status == "CHANGES_REQUIRED":
-        text = SUGGEST_HOLD
-        predicate = "current CHANGES_REQUIRED"
-    elif phase == READY_FOR_GPT and not product["ok"]:
-        text = SUGGEST_WAIT_PRODUCT
-        predicate = "product review missing for current HEAD"
-    elif phase in {IMPLEMENTING, VALIDATING, READY_FOR_AUDIT, AUDITING} and not product["ok"]:
-        text = SUGGEST_HOLD
-        predicate = f"unit is {phase}; not merge-ready"
-    elif phase in {FINAL_GATE, MERGE_PENDING, MERGE_RETRYABLE_FAILED} and not product["ok"]:
-        text = SUGGEST_WAIT_PRODUCT
-        predicate = "product review missing for current HEAD"
-    elif phase in {FINAL_GATE, MERGE_PENDING, MERGE_RETRYABLE_FAILED}:
-        txn = state.get("merge_txn") or {}
-        if (_final_gate_is_durable(state) and
-                txn.get("status") in {"final_gate_published", "pending", "retryable_failed", "merging"} and
-                sha_equal(txn.get("authorized_head"), unit_head(state))):
-            text = SUGGEST_GATE_PASSED
-            predicate = "exact-head FINAL_GATE PASS exists; merge not complete"
-        elif merge_review_required(campaign, state) and merge_status is None:
-            text = SUGGEST_WAIT_MERGE
-            predicate = "product authority valid; Merge GPT missing for current HEAD"
-        elif merge_status == "HOLD":
-            text = SUGGEST_HOLD
-            predicate = "GPT_MERGE_REVIEW HOLD"
-        elif merge_status == "HUMAN_DECISION":
-            text = SUGGEST_HUMAN
-            predicate = "GPT_MERGE_REVIEW HUMAN_DECISION"
-        elif merge_status == "PASS" or not merge_review_required(campaign, state):
-            text = SUGGEST_MERGE
-            predicate = "exact-head GPT_MERGE_REVIEW PASS" if merge_status == "PASS" else "merge_review_mode=off"
-        else:
-            text = SUGGEST_WAIT_MERGE
-            predicate = f"Merge GPT {merge_status}"
-    else:
-        text = SUGGEST_WAIT_PRODUCT
-        predicate = "product review not complete"
+    product = product_review_authority(state)
+    live = (state.get("github") or {}).get("pr")
+    decision = derive_next_action(state, campaign, live if isinstance(live, dict) else None)
+    text = {
+        DONE: SUGGEST_MERGED,
+        MERGE: SUGGEST_MERGE,
+        HUMAN: SUGGEST_HUMAN,
+        PRODUCT_GPT: SUGGEST_WAIT_PRODUCT,
+        FINAL_GPT: SUGGEST_WAIT_MERGE,
+        IMPL: SUGGEST_HOLD,
+        WAIT: SUGGEST_HOLD,
+    }.get(decision.action, SUGGEST_HOLD)
+    predicate = decision.reason
+    merge_status = merge_review_status(state)
 
     rec = merge_review_for_head(state, unit_head(state))
     return {
@@ -349,62 +257,13 @@ def gpt_suggestion(state: dict[str, Any], campaign: dict[str, Any] | None = None
 
 
 def merge_enablement(state: dict[str, Any], campaign: dict[str, Any] | None = None, *, live: dict[str, Any] | None = None) -> dict[str, Any]:
-    reasons: list[str] = []
-    phase = state.get("phase") or ""
-    head = unit_head(state)
-    if phase not in {FINAL_GATE, MERGE_PENDING, MERGE_RETRYABLE_FAILED}:
-        reasons.append(f"unit is {phase or 'unknown'}, not FINAL_GATE")
-    if not state.get("pr"):
-        reasons.append("no PR")
-    current = (state.get("heads") or {}).get("current")
-    if current and head and not sha_equal(current, head):
-        reasons.append("unexplained external drift from IMPLEMENTED_HEAD")
-    if (state.get("status") or {}).get("blocker"):
-        reasons.append("blocker present")
-    if publication_pending(state):
-        reasons.append("PUBLICATION_PENDING")
-    if not report_valid_exact(state):
-        reasons.append("CODEX_REPORT is not valid for exact HEAD")
-    if not audit_pass_exact(state):
-        reasons.append("CODEX_AUDIT is not PASS on exact HEAD")
-    product = product_review_authority(state)
-    if not product["ok"]:
-        reasons.append("product review authority not valid")
-    if merge_review_required(campaign, state):
-        status = merge_review_status(state)
-        if status != "PASS":
-            reasons.append(f"Merge GPT is {status or 'pending'}, not PASS")
-    if not head:
-        reasons.append("IMPLEMENTED_HEAD missing")
-    if live:
-        if (live.get("state") or "").upper() == "MERGED":
-            reasons.append("PR already MERGED")
-        elif (live.get("state") or "").upper() not in {"OPEN", ""}:
-            reasons.append(f"PR state is {live.get('state')}")
-        live_head = live.get("headRefOid")
-        if live_head and head and not sha_equal(live_head, head):
-            reasons.append("PR HEAD != expected implemented HEAD")
-        rec = merge_review_for_head(state, head)
-        reviewed_base = ((rec or {}).get("fields") or {}).get("REVIEWED_BASE")
-        live_base = live.get("baseRefOid")
-        if reviewed_base and live_base and not sha_equal(reviewed_base, live_base):
-            reasons.append("Merge GPT REVIEWED_BASE is stale")
-        mergeable = (live.get("mergeable") or "").upper()
-        merge_state = (live.get("mergeStateStatus") or "").upper()
-        if mergeable and mergeable != "MERGEABLE":
-            reasons.append("PR is not mergeable")
-        if merge_state and merge_state != "CLEAN":
-            reasons.append("PR is not mergeable")
-        ci = ci_projection(live)
-        if ci["status"] in {"FAIL", "PENDING"}:
-            reasons.append(f"CI is {ci['status'].lower()}")
+    from agentbus.decision import deterministic_merge_fences
+
+    gate = deterministic_merge_fences(state, campaign, live)
     return {
-        "enabled": not reasons,
-        "reasons": reasons,
-        "expected_head": head,
-        "pr": state.get("pr"),
-        "product": product,
-        "merge_review": merge_review_status(state),
+        **gate,
+        "enabled": gate["ok"],
+        "merge_review": gate.get("final_review"),
         "suggestion": gpt_suggestion(state, campaign),
     }
 
@@ -415,7 +274,7 @@ def merge_prompt_text(state: dict[str, Any], campaign: dict[str, Any] | None = N
     stream = state.get("stream_id") or "-"
     product = product_review_authority(state)
     return (
-        "继续作为 Yuvi 独立 Merge Gate GPT。\n\n"
+        "继续作为 Yuvi FINAL_GPT（手动恢复提示）。\n\n"
         "不要重新实现。\n"
         "不要修代码。\n"
         "不要重复 Product GPT 的规划。\n\n"
@@ -443,15 +302,11 @@ def merge_prompt_text(state: dict[str, Any], campaign: dict[str, Any] | None = N
         f"REVIEWED_HEAD: {head}\n"
         "REVIEWED_BASE: <exact baseRefOid from current PR>\n"
         "SUMMARY: independent merge-readiness conclusion\n"
-        "EVIDENCE:\n"
-        "- PR/diff, CODEX_REPORT, CODEX_AUDIT, product authority, CI, scope, and base checked\n"
         "FINDINGS:\n"
         "- none, or concrete merge blocker\n"
-        "RECOMMENDATION: MERGE\n"
-        "NEXT_ACTION: HUMAN_MERGE\n"
         "[/GPT_MERGE_REVIEW]\n\n"
-        "如果存在 blocker：STATUS: HOLD\n"
-        "如果是风险取舍而非明确 blocker：STATUS: HUMAN_DECISION\n\n"
+        "STATUS 只能是 PASS / REPAIR / WAIT / HUMAN。\n"
+        "REPAIR 是批准范围内可修复的具体问题；WAIT 是外部证据需要变化且不要改代码；HUMAN 只用于真实决策。\n\n"
         "不要 merge。\n"
         "不要发布 FINAL_GATE。\n"
         "不要修改代码。\n"
@@ -485,35 +340,42 @@ def maybe_merge_gpt_handoff(
     env: dict[str, str] | None = None,
     surface: str = "cli",
 ) -> dict[str, Any] | None:
-    if (state.get("phase") or "") != FINAL_GATE:
+    """Legacy caller adapter to the one generic Browser GPT job interface."""
+    del env, surface
+    from agentbus.browser import job_for_state
+    from agentbus.decision import FINAL_GPT
+
+    job = job_for_state(store.ctx, state, campaign=campaign)
+    if job is None or job.role != FINAL_GPT:
         return None
-    if not merge_review_required(campaign, state):
-        return None
-    if merge_review_status(state) == "PASS":
-        return None
-    binding = merge_gpt_binding(state, campaign)
-    url = (binding.get("url") or "").strip()
-    generation = merge_attention_generation(state)
+    generation = job.generation
     gate = state.setdefault("merge_gpt_gate", {})
-    write_merge_prompt(store, state, campaign)
-    if gate.get("generation") == generation and gate.get("notified"):
-        return {"generation": generation, "url": url or None, "open_once": False, "already": True, "role": "MERGE_GPT"}
+    if gate.get("job_id") == job.job_id:
+        return {
+            "generation": generation,
+            "job_id": job.job_id,
+            "url": job.conversation_url,
+            "open_once": False,
+            "already": True,
+            "role": FINAL_GPT,
+        }
     gate["generation"] = generation
+    gate["job_id"] = job.job_id
     gate["notified"] = True
     gate["notified_at"] = utc_now()
-    gate["url"] = url or None
-    from agentbus.notify import notify_custom
-
-    notify_custom(state.get("stream_id") or store.stream_id, "needs Merge GPT", "Independent merge-readiness review is required.")
-    opened = False
-    if url and surface != "webui" and (env or os.environ).get("YUVI_AGENTBUS_OPEN_URL") != "0":
-        from agentbus.autopilot import _open_url
-
-        opened = _open_url(url, env)
-        if opened:
-            gate["opened_at"] = utc_now()
-    store.append_event("merge-gpt-gate", {"generation": generation, "url": bool(url), "opened": opened, "surface": surface})
-    return {"generation": generation, "url": url or None, "open_once": bool(url) and not gate.get("opened_at"), "already": False, "role": "MERGE_GPT"}
+    gate["url"] = job.conversation_url
+    store.append_event(
+        "browser-job",
+        {"generation": generation, "job_id": job.job_id, "role": FINAL_GPT, "task": job.task},
+    )
+    return {
+        "generation": generation,
+        "job_id": job.job_id,
+        "url": job.conversation_url,
+        "open_once": False,
+        "already": False,
+        "role": FINAL_GPT,
+    }
 
 
 def bind_merge_gpt(
@@ -550,7 +412,8 @@ def bind_merge_gpt(
 
 
 def apply_merge_review(state: dict[str, Any], envelope: Envelope) -> dict[str, Any]:
-    from agentbus.apply import refresh_next
+    from agentbus.apply import refresh_next, set_phase
+    from agentbus.decision import normalize_final_status
 
     status = envelope.status
     reviewed = (envelope.fields.get("REVIEWED_HEAD") or "").strip()
@@ -565,6 +428,8 @@ def apply_merge_review(state: dict[str, Any], envelope: Envelope) -> dict[str, A
     )
     if len(history) > 40:
         del history[:-40]
+    if envelope.source != "github" or not str(envelope.source_id or "").strip():
+        return refresh_next(state)
     if status not in VALID_MERGE_STATUSES:
         return refresh_next(state)
     head = unit_head(state)
@@ -576,6 +441,35 @@ def apply_merge_review(state: dict[str, Any], envelope: Envelope) -> dict[str, A
     pr_field = (envelope.fields.get("PR") or "").strip()
     if pr_field and state.get("pr") and str(state.get("pr")) != pr_field.lstrip("#"):
         return refresh_next(state)
+    normalized = normalize_final_status(envelope.as_record())
+    if normalized == "REPAIR":
+        token = envelope.source_id or envelope.digest
+        repair = state.setdefault("final_repair", {})
+        if repair.get("consumed_review") != token:
+            cycles = int(state.get("repair_cycles") or 0)
+            maximum = int(state.get("max_repair_cycles") or 2)
+            if cycles >= maximum:
+                if state.get("phase") != BLOCKED_FOR_REVIEW:
+                    set_phase(state, BLOCKED_FOR_REVIEW, reason="Final GPT repair budget exhausted")
+                state.setdefault("status", {})["impl"] = "PAUSED"
+                repair["exhausted_review"] = token
+                repair["exhausted_at"] = utc_now()
+                return refresh_next(state)
+            state["repair_cycles"] = cycles + 1
+            repair["consumed_review"] = token
+            repair["consumed_head"] = reviewed or head
+            repair["job_id"] = envelope.fields.get("JOB_ID") or None
+            repair["consumed_at"] = utc_now()
+        state.setdefault("status", {})["gpt"] = "REPAIR"
+        state["status"]["impl"] = "WAITING"
+        if state.get("phase") != IMPLEMENTING:
+            set_phase(state, IMPLEMENTING, reason="GPT_MERGE_REVIEW REPAIR")
+    elif normalized == "WAIT":
+        state.setdefault("status", {})["gpt"] = "WAIT"
+    elif normalized == "HUMAN":
+        state.setdefault("status", {})["gpt"] = "HUMAN"
+    elif normalized == "PASS":
+        state.setdefault("status", {})["gpt"] = "PASS"
     return refresh_next(state)
 
 
@@ -606,12 +500,20 @@ def revalidate_merge(
     *,
     env: dict[str, str] | None = None,
     live: dict[str, Any] | None = None,
+    authorization_mode: str = MODE_HUMAN,
 ) -> dict[str, Any]:
     try:
         live = live if live is not None else fetch_live_pr(ctx, state, env)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "code": "FINAL_GATE_STALE", "reason": f"could not fetch PR: {exc}", "retryable": True}
-    gate = merge_enablement(state, campaign, live=live)
+    from agentbus.decision import deterministic_merge_fences
+
+    gate = deterministic_merge_fences(
+        state,
+        campaign,
+        live,
+        require_current_job=str(authorization_mode).upper() == MODE_AUTONOMOUS,
+    )
     if (live.get("state") or "").upper() == "MERGED":
         return {"ok": True, "already_merged": True, "live": live, "gate": gate}
     if not gate["enabled"]:
@@ -639,7 +541,11 @@ def _final_gate_is_durable(state: dict[str, Any]) -> bool:
 
 
 def _existing_final_gate(
-    comments: list[dict[str, Any]], state: dict[str, Any], head: str
+    comments: list[dict[str, Any]],
+    state: dict[str, Any],
+    head: str,
+    *,
+    mode: str | None = None,
 ) -> tuple[dict[str, Any], Envelope] | None:
     from agentbus.protocol import parse_comment_envelope, validate_envelope
 
@@ -657,11 +563,64 @@ def _existing_final_gate(
             continue
         if fields.get("REVIEWED_HEAD") and not sha_equal(fields.get("REVIEWED_HEAD"), head):
             continue
+        if mode == MODE_AUTONOMOUS:
+            review = merge_review_for_head(state, head) or {}
+            if (fields.get("AUTHORIZED_BY") or "").upper() != "GPT_MERGE_REVIEW":
+                continue
+            if (fields.get("MODE") or "").upper() != MODE_AUTONOMOUS:
+                continue
+            if str(fields.get("SOURCE_COMMENT_ID") or "") != str(review.get("source_id") or ""):
+                continue
         return comment, envelope
     return None
 
 
-def _final_gate_envelope(state: dict[str, Any], campaign: dict[str, Any] | None, head: str) -> Envelope:
+def _final_review_is_still_remote(
+    comments: list[dict[str, Any]],
+    state: dict[str, Any],
+    campaign: dict[str, Any] | None,
+    live: dict[str, Any],
+) -> bool:
+    """Re-read the exact Final GPT source comment before autonomous merge."""
+    from agentbus.decision import final_review_for_current
+    from agentbus.protocol import parse_comment_envelope, validate_envelope
+
+    review = final_review_for_current(state, campaign, live)
+    if not review or review.get("normalized_status") != "PASS":
+        return False
+    source_id = str(review.get("source_id") or "")
+    for comment in comments:
+        if str(comment.get("id") or "") != source_id:
+            continue
+        envelope = parse_comment_envelope(str(comment.get("body") or ""))
+        if envelope is None or envelope.kind != "GPT_MERGE_REVIEW":
+            return False
+        envelope.source = "github"
+        envelope.source_id = source_id
+        if validate_envelope(
+            envelope,
+            expected_stream=state.get("stream_id") or "",
+            aliases=state.get("aliases") or [],
+        ):
+            return False
+        fields = envelope.fields
+        return bool(
+            envelope.status == "PASS"
+            and sha_equal(fields.get("REVIEWED_HEAD"), unit_head(state))
+            and str(fields.get("PR") or "").lstrip("#") == str(state.get("pr") or "")
+            and sha_equal(fields.get("REVIEWED_BASE"), live.get("baseRefOid"))
+            and str(fields.get("JOB_ID") or "") == str(((review.get("fields") or {}).get("JOB_ID") or ""))
+        )
+    return False
+
+
+def _final_gate_envelope(
+    state: dict[str, Any],
+    campaign: dict[str, Any] | None,
+    head: str,
+    *,
+    mode: str,
+) -> Envelope:
     merge_rec = merge_review_for_head(state, head) or {}
     audit = ((state.get("envelopes") or {}).get("CODEX_AUDIT") or {})
     product = product_review_authority(state)
@@ -670,6 +629,9 @@ def _final_gate_envelope(state: dict[str, Any], campaign: dict[str, Any] | None,
         "STREAM": state["stream_id"],
         "REVIEWED_HEAD": head,
         "FINAL_HEAD": head,
+        "AUTHORIZED_BY": "GPT_MERGE_REVIEW" if mode == MODE_AUTONOMOUS else "HUMAN",
+        "MODE": mode,
+        "SOURCE_COMMENT_ID": str(merge_rec.get("source_id") or ""),
         "DECISION": "PASS",
         "NEXT_ACTION": "MERGE",
         "BASIS": (
@@ -678,7 +640,8 @@ def _final_gate_envelope(state: dict[str, Any], campaign: dict[str, Any] | None,
             f"- AUDIT: {audit.get('source_id') or 'n/a'}"
         ),
     }
-    return Envelope(kind="FINAL_GATE", fields=fields, source="agentbus-human-merge")
+    source = "agentbus-autonomous" if mode == MODE_AUTONOMOUS else "agentbus-human-merge"
+    return Envelope(kind="FINAL_GATE", fields=fields, source=source)
 
 
 def pass_and_merge(
@@ -690,10 +653,16 @@ def pass_and_merge(
     expected_pr: int | None = None,
     env: dict[str, str] | None = None,
     retry_only: bool = False,
+    authorization_mode: str = MODE_HUMAN,
 ) -> dict[str, Any]:
-    """Explicit human merge authorization. Never auto-called from Merge GPT ingest."""
+    """Run the existing exact-once merge transaction under truthful authority."""
     from agentbus.apply import apply_envelope, mark_pr_merged, set_phase
     from agentbus.github import list_issue_comments, merge_pr, post_pr_comment
+
+    mode = str(authorization_mode or MODE_HUMAN).upper()
+    if mode not in {MODE_HUMAN, MODE_AUTONOMOUS}:
+        raise AgentbusError(f"unsupported merge authorization mode {authorization_mode}")
+    authorization_key = "autonomous_authorized" if mode == MODE_AUTONOMOUS else "human_authorized"
 
     with store.lock():
         state = store.load()
@@ -722,14 +691,17 @@ def pass_and_merge(
             return {"ok": False, "code": "FINAL_GATE_STALE", "reason": "当前版本或审阅状态已变化，请重新审阅。"}
         if txn.get("status") in {"revalidating", "merging", "final_gate_publishing"}:
             return {"ok": False, "code": "MERGE_IN_PROGRESS", "reason": "a merge transaction is already running"}
-        if retry_only and not txn.get("human_authorized"):
-            return {"ok": False, "code": "NOT_AUTHORIZED", "reason": "retry requires a prior human 通过并合并"}
+        if retry_only and not txn.get(authorization_key):
+            return {"ok": False, "code": "NOT_AUTHORIZED", "reason": f"retry requires prior {mode} authorization"}
         operation_id = secrets.token_hex(8)
         txn["operation_id"] = operation_id
         txn["authorized_at"] = txn.get("authorized_at") or utc_now()
         txn["authorized_head"] = head
         txn["pr"] = state.get("pr")
-        txn["human_authorized"] = True
+        txn[authorization_key] = True
+        txn["authorization_mode"] = mode
+        if mode == MODE_AUTONOMOUS:
+            txn["human_authorized"] = False
         txn["status"] = "revalidating"
         txn["updated_at"] = utc_now()
         store.save(state)
@@ -742,13 +714,13 @@ def pass_and_merge(
                 # The click did not authorize a changed PR/head.  Keep a
                 # diagnostic trail but do not claim FINAL_GATE PASS.
                 txn["status"] = "stale"
-                txn["human_authorized"] = False
+                txn[authorization_key] = False
                 txn["stale_reason"] = result.get("reason")
                 txn["updated_at"] = utc_now()
                 store.save(current)
         return result
 
-    check = revalidate_merge(ctx, store.load(), campaign, env=env)
+    check = revalidate_merge(ctx, store.load(), campaign, env=env, authorization_mode=mode)
     if check.get("already_merged"):
         return _reconcile_external_merge(ctx, store, check["live"])
     if not check.get("ok"):
@@ -769,7 +741,20 @@ def pass_and_merge(
                 "retryable": True,
             }
         )
-    existing = _existing_final_gate(comments, state, head or "")
+    if mode == MODE_AUTONOMOUS and not _final_review_is_still_remote(
+        comments,
+        state,
+        campaign,
+        check.get("live") or {},
+    ):
+        return stale(
+            {
+                "ok": False,
+                "code": "FINAL_REVIEW_UNVERIFIED",
+                "reason": "durable GPT_MERGE_REVIEW source comment is not present and exact on GitHub",
+            }
+        )
+    existing = _existing_final_gate(comments, state, head or "", mode=mode)
     if existing:
         verified_comment, verified_envelope = existing
         comment_id = str(verified_comment.get("id") or "")
@@ -785,7 +770,7 @@ def pass_and_merge(
         # Re-read every predicate immediately before the irreversible post.
         # Rendered UI state and the first validation are only a snapshot.
         campaign = load_campaign(ctx, infer_campaign_id(store.load()))
-        check = revalidate_merge(ctx, store.load(), campaign, env=env)
+        check = revalidate_merge(ctx, store.load(), campaign, env=env, authorization_mode=mode)
         if check.get("already_merged"):
             return _reconcile_external_merge(ctx, store, check["live"])
         if not check.get("ok"):
@@ -802,7 +787,7 @@ def pass_and_merge(
             txn["status"] = "final_gate_publishing"
             txn["final_gate_post_started_at"] = utc_now()
             txn["updated_at"] = utc_now()
-            env_obj = _final_gate_envelope(state, campaign, head or "")
+            env_obj = _final_gate_envelope(state, campaign, head or "", mode=mode)
             body = render_envelope(env_obj)
             store.save(state)
         try:
@@ -832,7 +817,7 @@ def pass_and_merge(
                 "reason": f"could not verify FINAL_GATE: {exc}",
                 "retryable": False,
             }
-        existing = _existing_final_gate(comments, store.load(), head or "")
+        existing = _existing_final_gate(comments, store.load(), head or "", mode=mode)
         if not existing:
             return {
                 "ok": False,
@@ -855,7 +840,7 @@ def pass_and_merge(
         txn["status"] = "final_gate_published"
         txn["updated_at"] = utc_now()
         if state.get("phase") == FINAL_GATE:
-            set_phase(state, MERGE_PENDING, reason="human authorized merge")
+            set_phase(state, MERGE_PENDING, reason=f"{mode.lower()} authorized merge")
         store.save(state)
 
     try:
@@ -950,6 +935,50 @@ def retry_merge(
         expected_pr=expected_pr,
         env=env,
         retry_only=True,
+        authorization_mode=MODE_HUMAN,
+    )
+
+
+def autonomous_merge(
+    ctx: RepoContext,
+    store: StreamStore,
+    *,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Merge an exact Final GPT PASS through the existing transaction path."""
+    from agentbus.settings import autonomous_merge_ready
+
+    if not autonomous_merge_ready(ctx, env):
+        return {
+            "ok": False,
+            "code": "AUTONOMY_NOT_ACTIVE",
+            "reason": "global Final GPT / Browser Bridge activation is not ready",
+            "retryable": True,
+        }
+    state = store.load()
+    txn = state.get("merge_txn") or {}
+    retry_only = bool(
+        txn.get("autonomous_authorized")
+        and sha_equal(txn.get("authorized_head"), unit_head(state))
+        and state.get("phase") in {FINAL_GATE, MERGE_PENDING, MERGE_RETRYABLE_FAILED}
+    )
+    if retry_only:
+        # A previous process may have died after sending the merge request.
+        # Always fetch GitHub truth before issuing any retry.
+        recovered = recover_authorized_merge(ctx, store, env=env)
+        if recovered and (recovered.get("merged") or not recovered.get("ok")):
+            return recovered
+        state = store.load()
+        txn = state.get("merge_txn") or {}
+    return pass_and_merge(
+        ctx,
+        store,
+        expected_stream=state.get("stream_id") or store.stream_id,
+        expected_head=txn.get("authorized_head") if retry_only else unit_head(state),
+        expected_pr=state.get("pr"),
+        env=env,
+        retry_only=retry_only,
+        authorization_mode=MODE_AUTONOMOUS,
     )
 
 
@@ -959,7 +988,7 @@ def recover_authorized_merge(
     *,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    """Recover an interrupted human-authorized transaction from GitHub truth.
+    """Recover an interrupted authorized transaction from GitHub truth.
 
     This routine never requests a merge.  It only adopts an existing merge or
     a verified FINAL_GATE comment, and leaves an ambiguous post as a stop.
@@ -968,7 +997,9 @@ def recover_authorized_merge(
 
     state = store.load()
     txn = state.get("merge_txn") or {}
-    if not txn.get("human_authorized"):
+    mode = str(txn.get("authorization_mode") or (MODE_AUTONOMOUS if txn.get("autonomous_authorized") else MODE_HUMAN)).upper()
+    authorization_key = "autonomous_authorized" if mode == MODE_AUTONOMOUS else "human_authorized"
+    if not txn.get(authorization_key):
         return None
     authorized_head = txn.get("authorized_head")
     if not sha_equal(authorized_head, unit_head(state)):
@@ -987,14 +1018,14 @@ def recover_authorized_merge(
         return {
             "ok": False,
             "code": "FINAL_GATE_STALE",
-            "reason": "PR state or HEAD changed after human authorization",
+            "reason": "PR state or HEAD changed after merge authorization",
         }
     repo = state.get("impl_worktree") or ctx.repo_root
     try:
         comments = list_issue_comments(repo, ctx.origin, int(state["pr"]), env=env)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "code": "MERGE_PENDING", "reason": f"could not read PR comments: {exc}", "retryable": True}
-    existing = _existing_final_gate(comments, state, authorized_head)
+    existing = _existing_final_gate(comments, state, authorized_head, mode=mode)
     if not existing:
         return {
             "ok": False,
@@ -1030,7 +1061,7 @@ def maybe_retry_authorized_merge(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     txn = state.get("merge_txn") or {}
-    if not txn.get("human_authorized"):
+    if not (txn.get("human_authorized") or txn.get("autonomous_authorized")):
         return None
     if (state.get("phase") or "") not in {MERGE_PENDING}:
         return None
@@ -1038,6 +1069,8 @@ def maybe_retry_authorized_merge(
         return None
     if not sha_equal(txn.get("authorized_head"), unit_head(state)):
         return None
+    if txn.get("autonomous_authorized"):
+        return autonomous_merge(ctx, store, env=env)
     return retry_merge(
         ctx,
         store,
@@ -1086,7 +1119,13 @@ def _reconcile_external_merge(
     }
 
 
-def merge_review_card(state: dict[str, Any], campaign: dict[str, Any] | None = None, *, live: dict[str, Any] | None = None) -> dict[str, Any]:
+def merge_review_card(
+    state: dict[str, Any],
+    campaign: dict[str, Any] | None = None,
+    *,
+    live: dict[str, Any] | None = None,
+    ctx: RepoContext | None = None,
+) -> dict[str, Any]:
     product = product_review_authority(state)
     suggestion = gpt_suggestion(state, campaign)
     gate = merge_enablement(state, campaign, live=live)
@@ -1129,6 +1168,6 @@ def merge_review_card(state: dict[str, Any], campaign: dict[str, Any] | None = N
         ],
         "sources": suggestion["sources"],
         "prompt": (state.get("merge_prompt") or {}),
-        "binding": merge_gpt_binding(state, campaign),
+        "binding": merge_gpt_binding(state, campaign, ctx),
         "wait_reason": wait_reason_for_state(state, campaign),
     }

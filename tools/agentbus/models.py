@@ -91,6 +91,15 @@ def empty_state(stream_id: str) -> dict[str, Any]:
             "note": None,
             "bound_at": None,
         },
+        "final_gpt": {
+            "display_name": None,
+            "url": None,
+            "note": None,
+            "bound_at": None,
+        },
+        "wait": None,
+        "codex_interruption": None,
+        "final_repair": {},
         "merge_txn": {},
         "merge_review_history": [],
         "merge_gpt_gate": {},
@@ -122,6 +131,10 @@ def migrate_state(state: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("review_authority", None)
     state.setdefault("delegated_reviews", [])
     state.setdefault("merge_gpt", {"display_name": None, "url": None, "note": None, "bound_at": None})
+    state.setdefault("final_gpt", {"display_name": None, "url": None, "note": None, "bound_at": None})
+    state.setdefault("wait", None)
+    state.setdefault("codex_interruption", None)
+    state.setdefault("final_repair", {})
     state.setdefault("merge_txn", {})
     state.setdefault("merge_review_history", [])
     state.setdefault("merge_gpt_gate", {})

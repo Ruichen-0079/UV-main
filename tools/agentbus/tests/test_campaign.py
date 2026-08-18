@@ -105,6 +105,10 @@ class CampaignTests(AgentbusTest):
         campaign = load_campaign(self.ctx, "p7")
         self.assertIsNotNone(campaign)
         self.assertEqual(campaign["status"], "WAITING_FOR_PLAN")
+        self.assertEqual(campaign["current_stream"], "p7-8b-canary")
+        from agentbus.campaign import campaign_view
+
+        self.assertEqual(campaign_view(campaign, self.ctx)["current_unit"], "p7-8b-canary")
         self.assertEqual(campaign.get("queue") or [], [])
         self.assertFalse(campaign.get("human_required"))
 
@@ -209,8 +213,15 @@ class CampaignTests(AgentbusTest):
             current_head=sha,
         )
         campaign = load_campaign(self.ctx, "cf")
-        self.assertEqual(campaign["status"], "HUMAN_REQUIRED")
-        self.assertTrue(campaign["human_required"])
+        from agentbus.campaign import campaign_view
+        from agentbus.decision import HUMAN, derive_next_action
+
+        # The live successor remains visibly ACTIVE; the conflicting durable
+        # plan is a canonical HUMAN decision, not a competing campaign phase.
+        view = campaign_view(campaign, self.ctx)
+        self.assertEqual(view["status"], "ACTIVE")
+        successor = self.store("cf-b").load()
+        self.assertEqual(derive_next_action(successor, campaign).action, HUMAN)
         self.assertFalse(StreamStore(self.ctx, "cf-other").exists())
 
     def test_bounded_queue(self) -> None:

@@ -210,6 +210,7 @@ def publish_implementation(
     push: bool = True,
     out_write: Any = None,
     clean_at_start: bool | None = None,
+    capacity_takeover: bool = False,
 ) -> dict[str, Any]:
     def say(msg: str) -> None:
         if out_write:
@@ -218,7 +219,7 @@ def publish_implementation(
     worktree = state.get("impl_worktree")
     if not worktree:
         raise AgentbusError("no impl worktree")
-    if clean_at_start is False:
+    if clean_at_start is False and not capacity_takeover:
         reason = "worktree was dirty when the Codex invocation began"
         _update_publication(state, status="failed", reason=reason, baseline_head=baseline_head)
         return {"ok": False, "reason": reason}
@@ -537,9 +538,21 @@ def report_is_durable(state: dict[str, Any]) -> bool:
     if rec.get("source") == "github" and rec.get("source_id"):
         return True
     pub = state.get("publication") or {}
-    if pub.get("report_comment_id"):
+    if pub.get("report_comment_id") and pub.get("report_comment_digest") == rec.get("digest"):
         return True
     # Local inbox is the durable store only when there is no GitHub PR.
+    return not bool(state.get("pr"))
+
+
+def audit_is_durable(state: dict[str, Any]) -> bool:
+    rec = (state.get("envelopes") or {}).get("CODEX_AUDIT") or {}
+    if not isinstance(rec, dict) or not (rec.get("raw") or rec.get("status")):
+        return False
+    if rec.get("source") == "github" and rec.get("source_id"):
+        return True
+    pub = state.get("publication") or {}
+    if pub.get("audit_comment_id") and pub.get("audit_comment_digest") == rec.get("digest"):
+        return True
     return not bool(state.get("pr"))
 
 
@@ -586,7 +599,7 @@ def ensure_durable_report(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Exact-once CODEX_REPORT publication to the current PR. Never invents results."""
-    from agentbus.github import list_issue_comments, parse_owner_repo, post_pr_comment
+    from agentbus.github import list_issue_comments, post_pr_comment
 
     rec = (state.get("envelopes") or {}).get("CODEX_REPORT")
     if not isinstance(rec, dict) or not rec.get("raw"):
@@ -605,7 +618,9 @@ def ensure_durable_report(
     if existing and existing.get("id"):
         rec["source"] = "github"
         rec["source_id"] = str(existing["id"])
-        state.setdefault("publication", {})["report_comment_id"] = str(existing["id"])
+        publication = state.setdefault("publication", {})
+        publication["report_comment_id"] = str(existing["id"])
+        publication["report_comment_digest"] = rec.get("digest")
         return {"ok": True, "already": True, "comment_id": str(existing["id"])}
     body = _report_body_for_github(state)
     if not body:
@@ -626,8 +641,107 @@ def ensure_durable_report(
             return {"ok": False, "reason": "CODEX_REPORT post not visible on PR", "retryable": True}
     rec["source"] = "github"
     rec["source_id"] = comment_id
-    state.setdefault("publication", {})["report_comment_id"] = comment_id
+    publication = state.setdefault("publication", {})
+    publication["report_comment_id"] = comment_id
+    publication["report_comment_digest"] = rec.get("digest")
     store.append_event("durable-report", {"pr": pr, "comment_id": comment_id, "head": rec.get("head")})
+    return {"ok": True, "comment_id": comment_id}
+
+
+def _audit_body_for_github(state: dict[str, Any]) -> str | None:
+    rec = (state.get("envelopes") or {}).get("CODEX_AUDIT") or {}
+    if not isinstance(rec, dict):
+        return None
+    raw = str(rec.get("raw") or "")
+    fields = rec.get("fields") if isinstance(rec.get("fields"), dict) else {}
+    if not raw.strip() or (fields.get("AUDITED_HEAD") and "AUDITED_HEAD:" not in raw):
+        return None
+    return raw if raw.endswith("\n") else raw + "\n"
+
+
+def _matching_audit_comment(comments: list[dict[str, Any]], state: dict[str, Any]) -> dict[str, Any] | None:
+    audit = (state.get("envelopes") or {}).get("CODEX_AUDIT") or {}
+    expected = (_audit_body_for_github(state) or "").strip()
+    audited = ((audit.get("fields") or {}).get("AUDITED_HEAD") or audit.get("head") or "")
+    stream = state.get("stream_id") or ""
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if "[CODEX_AUDIT]" not in body:
+            continue
+        if expected and body.strip() == expected:
+            return comment
+        if audited and audited not in body:
+            continue
+        if stream and f"STREAM: {stream}" not in body and f"STREAM:{stream}" not in body:
+            continue
+        # An older audit on the same SHA may have a different conclusion.
+        # Only adopt it when the normalized status also matches.
+        status = str(audit.get("status") or "").upper()
+        if status and f"STATUS: {status}" not in body.upper():
+            continue
+        return comment
+    return None
+
+
+def ensure_durable_audit(
+    ctx: RepoContext,
+    store: StreamStore,
+    state: dict[str, Any],
+    *,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Publish an exact CODEX_AUDIT once and adopt the verified PR comment."""
+    from agentbus.github import list_issue_comments, post_pr_comment
+
+    rec = (state.get("envelopes") or {}).get("CODEX_AUDIT")
+    if not isinstance(rec, dict) or not rec.get("raw"):
+        return {"ok": False, "reason": "no local CODEX_AUDIT artifact"}
+    if audit_is_durable(state):
+        return {
+            "ok": True,
+            "already": True,
+            "comment_id": rec.get("source_id") or (state.get("publication") or {}).get("audit_comment_id"),
+        }
+    pr = state.get("pr")
+    if not pr:
+        return {"ok": False, "reason": "no PR for durable audit", "retryable": True}
+    repo = state.get("impl_worktree") or ctx.repo_root
+    try:
+        comments = list_issue_comments(repo, ctx.origin, int(pr), env=env)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:300], "retryable": True}
+    existing = _matching_audit_comment(comments, state)
+    if existing and existing.get("id"):
+        comment_id = str(existing["id"])
+        rec["source"] = "github"
+        rec["source_id"] = comment_id
+        publication = state.setdefault("publication", {})
+        publication["audit_comment_id"] = comment_id
+        publication["audit_comment_digest"] = rec.get("digest")
+        return {"ok": True, "already": True, "comment_id": comment_id}
+    body = _audit_body_for_github(state)
+    if not body:
+        return {"ok": False, "reason": "local CODEX_AUDIT is empty"}
+    try:
+        posted = post_pr_comment(repo, int(pr), body, env=env)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:300], "retryable": True}
+    comment_id = str((posted or {}).get("id") or "")
+    if not comment_id:
+        try:
+            comments = list_issue_comments(repo, ctx.origin, int(pr), env=env)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"posted but could not verify: {exc}"[:300], "retryable": True}
+        match = _matching_audit_comment(comments, state)
+        comment_id = str((match or {}).get("id") or "")
+        if not comment_id:
+            return {"ok": False, "reason": "CODEX_AUDIT post not visible on PR", "retryable": True}
+    rec["source"] = "github"
+    rec["source_id"] = comment_id
+    publication = state.setdefault("publication", {})
+    publication["audit_comment_id"] = comment_id
+    publication["audit_comment_digest"] = rec.get("digest")
+    store.append_event("durable-audit", {"pr": pr, "comment_id": comment_id, "head": rec.get("head")})
     return {"ok": True, "comment_id": comment_id}
 
 

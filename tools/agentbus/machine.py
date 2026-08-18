@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Any, Iterable
 
 
 WAITING_FOR_SPEC = "WAITING_FOR_SPEC"
@@ -165,6 +165,7 @@ LEGAL_TRANSITIONS: dict[str, set[str]] = {
         MERGE_PENDING,
         MERGE_RETRYABLE_FAILED,
         IMPLEMENTING,
+        BLOCKED_FOR_REVIEW,
         PAUSED,
         BLOCKED,
         GPT_REVIEW,
@@ -282,7 +283,14 @@ def transition(src: str, dest: str, *, reason: str = "") -> str:
     return dest
 
 
-def next_actor(phase: str, *, control: str = "running") -> str:
+def next_actor(phase: str | dict[str, Any], *, control: str = "running") -> str:
+    if isinstance(phase, dict):
+        from agentbus.decision import derive_next_action
+
+        state = phase
+        live = (state.get("github") or {}).get("pr")
+        campaign = state.get("campaign") if isinstance(state.get("campaign"), dict) else None
+        return derive_next_action(state, campaign, live if isinstance(live, dict) else None).action
     if control == "paused":
         return "HUMAN"
     mapping = {
@@ -309,7 +317,9 @@ def next_actor(phase: str, *, control: str = "running") -> str:
     return mapping.get(phase, "HUMAN")
 
 
-def needs_human(phase: str, *, control: str = "running") -> bool:
+def needs_human(phase: str | dict[str, Any], *, control: str = "running") -> bool:
+    if isinstance(phase, dict):
+        return next_actor(phase, control=control) == "HUMAN"
     if control == "paused":
         return False
     return phase in HUMAN_GATES
@@ -325,7 +335,14 @@ def display_state(phase: str, *, control: str = "running") -> str:
     return phase
 
 
-def describe_next(phase: str, *, control: str = "running", blocker: str | None = None) -> str:
+def describe_next(phase: str | dict[str, Any], *, control: str = "running", blocker: str | None = None) -> str:
+    if isinstance(phase, dict):
+        from agentbus.decision import derive_next_action
+
+        state = phase
+        live = (state.get("github") or {}).get("pr")
+        campaign = state.get("campaign") if isinstance(state.get("campaign"), dict) else None
+        return derive_next_action(state, campaign, live if isinstance(live, dict) else None).reason
     if control == "paused":
         return "paused; resume to continue"
     if blocker:

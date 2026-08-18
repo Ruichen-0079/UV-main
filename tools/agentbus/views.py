@@ -19,14 +19,14 @@ from agentbus.config import (
     effective_role_label,
     inherited_label,
 )
+from agentbus.decision import decision_for_stream
+from agentbus.display import sanitize_display_text, sanitize_display_value
 from agentbus.konsolebind import slot_alive
 from agentbus.gitutil import head_sha, worktree_snapshot
 from agentbus.github import pr_web_url
 from agentbus.machine import (
     MERGED,
-    describe_next,
     display_state,
-    next_actor,
 )
 from agentbus.reviewpolicy import review_policy_of
 from agentbus.models import envelope_summary
@@ -80,20 +80,6 @@ def rail_status(phase: str, control: str) -> dict[str, str]:
     return out
 
 
-def _browser(state: dict[str, Any]) -> dict[str, Any]:
-    raw = state.get("browser_gpt") or {}
-    bound = bool(raw.get("url") or raw.get("display_name"))
-    return {
-        "display_name": raw.get("display_name"),
-        "url": raw.get("url"),
-        "note": raw.get("note"),
-        "bound_at": raw.get("bound_at"),
-        "bound": bound,
-        "convenience_only": True,
-        "authority": "PR / durable AgentBus state — never this binding",
-    }
-
-
 def _terminal_state(state: dict[str, Any], runtime: dict[str, Any], role: str) -> str:
     if state.get("phase") == "RECOVERY_REQUIRED" and (state.get("status") or {}).get(role) == "CRASHED":
         return "RECOVERY_REQUIRED"
@@ -106,7 +92,14 @@ def _terminal_state(state: dict[str, Any], runtime: dict[str, Any], role: str) -
     return "CLOSED"
 
 
-def _role_view(state: dict[str, Any], runtime: dict[str, Any], role: str, env: dict[str, str] | None) -> dict[str, Any]:
+def _role_view(
+    state: dict[str, Any],
+    runtime: dict[str, Any],
+    role: str,
+    env: dict[str, str] | None,
+    *,
+    roots: tuple[str, ...] = (),
+) -> dict[str, Any]:
     cfg = (state.get("roles") or {}).get(role) or {}
     slot = runtime.get(role) or {}
     konsole = ((runtime.get("konsole") or {}).get(role)) or {}
@@ -128,7 +121,10 @@ def _role_view(state: dict[str, Any], runtime: dict[str, Any], role: str, env: d
         "pid": slot.get("pid") if healthy else None,
         "process": "RUNNING" if healthy else ("CRASHED" if slot.get("last_exit") not in (None, 0) else "IDLE"),
         "last_exit": slot.get("last_exit"),
-        "worktree": state.get(f"{role}_worktree") or (state.get("impl_worktree") if role == "impl" else None),
+        "worktree": sanitize_display_text(
+            state.get(f"{role}_worktree") or (state.get("impl_worktree") if role == "impl" else None),
+            roots=roots,
+        ),
         "konsole_pid": konsole.get("pid"),
         "konsole_title": konsole.get("title") or f"{str(state.get('stream_id') or '').upper()} | {role.upper()}",
         "konsole_present": slot_alive(konsole),
@@ -155,6 +151,8 @@ def stream_view(
             state = store.load()
             runtime = store.load_runtime()
     impl = state.get("impl_worktree")
+    audit_root = state.get("audit_worktree")
+    display_roots = tuple(str(item) for item in (audit_root, impl, ctx.repo_root) if item)
     current = head_sha(impl) if impl else (state.get("heads") or {}).get("current")
     control = state.get("control") or "running"
     phase = state.get("phase") or ""
@@ -166,14 +164,11 @@ def stream_view(
     if campaign_id:
         loaded = load_campaign(ctx, campaign_id)
         campaign = campaign_view(loaded, ctx)
-    classified = classify_attention(state, runtime, campaign=loaded)
-    kind = classified["kind"]
     from agentbus.mergegate import (
         fetch_live_pr,
         gpt_suggestion,
         merge_gpt_binding,
         merge_review_card,
-        sanitize_display_text,
     )
 
     suggestion = gpt_suggestion(state, loaded)
@@ -186,8 +181,17 @@ def stream_view(
             live_pr = fetch_live_pr(ctx, state, env)
         except Exception:  # noqa: BLE001
             live_pr = None
-    merge_card = merge_review_card(state, loaded, live=live_pr)
-    blocker = sanitize_display_text((state.get("status") or {}).get("blocker"))
+    merge_card = merge_review_card(state, loaded, live=live_pr, ctx=ctx)
+    blocker = sanitize_display_text((state.get("status") or {}).get("blocker"), roots=display_roots)
+    decision_live = live_pr or ((state.get("github") or {}).get("pr") if isinstance((state.get("github") or {}).get("pr"), dict) else None)
+    decision = decision_for_stream(ctx, state, loaded, decision_live, runtime, env=env)
+    classified = classify_attention(state, runtime, campaign=loaded, decision=decision)
+    kind = classified["kind"]
+    from agentbus.settings import load_settings, resolve_final_gpt_binding, resolve_product_gpt_binding
+
+    settings = load_settings(ctx)
+    product_binding = resolve_product_gpt_binding(state, loaded, settings)
+    final_binding = resolve_final_gpt_binding(state, settings)
     return {
         "stream_id": state.get("stream_id"),
         "goal": state.get("goal") or "",
@@ -200,26 +204,29 @@ def stream_view(
         "visible_phase": display_state(phase, control=control),
         "control": control,
         "attention": kind,
+        "attention_category": classified.get("category"),
         "attention_owner": classified["attention_owner"],
         "human_required": classified["human_required"],
         "browser_gpt_required": classified["browser_gpt_required"],
         "needs_you": classified["human_required"],
         "review_policy": review_policy_of(state),
         "review_authority": state.get("review_authority"),
-        "campaign": campaign,
+        "campaign": sanitize_display_value(campaign, roots=display_roots),
         "campaign_id": state.get("campaign_id") or (campaign or {}).get("campaign_id"),
         "planner_provider": state.get("planner_provider") or "browser",
         "repair_cycles": state.get("repair_cycles") or 0,
         "max_repair_cycles": state.get("max_repair_cycles") or 2,
         "latest_authority": current_generation_authority(state),
-        "next_action": (state.get("status") or {}).get("next_action"),
-        "next_detail": describe_next(phase, control=control, blocker=blocker or None),
+        "next_action": decision.action,
+        "next_detail": sanitize_display_text(blocker or decision.reason, roots=display_roots),
         "blocker": blocker or None,
-        "who": next_actor(phase, control=control),
-        "impl": _role_view(state, runtime, "impl", env),
-        "audit": _role_view(state, runtime, "audit", env),
-        "browser_gpt": _browser(state),
-        "merge_gpt": merge_gpt_binding(state, loaded),
+        "who": decision.action,
+        "impl": _role_view(state, runtime, "impl", env, roots=display_roots),
+        "audit": _role_view(state, runtime, "audit", env, roots=display_roots),
+        "browser_gpt": product_binding,
+        "product_gpt": product_binding,
+        "merge_gpt": final_binding,
+        "final_gpt": final_binding,
         "gpt_suggestion": suggestion,
         "merge_review": merge_card,
         "heads": state.get("heads") or {},
@@ -227,23 +234,23 @@ def stream_view(
             kind: {
                 "status": rec.get("status"),
                 "head": rec.get("head"),
-                "summary": sanitize_display_text(envelope_summary(rec)),
-                "raw": sanitize_display_text(rec.get("raw") or ""),
+                "summary": sanitize_display_text(envelope_summary(rec), roots=display_roots),
+                "raw": sanitize_display_text(rec.get("raw") or "", roots=display_roots),
             }
             for kind, rec in envelopes.items()
             if isinstance(rec, dict)
         },
-        "github": state.get("github") or {},
+        "github": sanitize_display_value(state.get("github") or {}, roots=display_roots),
         "rail": rail_status(phase, control),
-        "impl_worktree": impl,
-        "audit_worktree": state.get("audit_worktree"),
+        "impl_worktree": sanitize_display_text(impl, roots=display_roots),
+        "audit_worktree": sanitize_display_text(audit_root, roots=display_roots),
         "impl_dirty": impl_snap.get("dirty"),
         "updated_at": state.get("updated_at"),
-        "audit_request": state.get("audit_request"),
+        "audit_request": sanitize_display_value(state.get("audit_request"), roots=display_roots),
         "github_connected": not bool((state.get("github") or {}).get("unavailable")),
-        "publication": state.get("publication") or {},
+        "publication": sanitize_display_value(state.get("publication") or {}, roots=display_roots),
         "aliases": state.get("aliases") or [],
-        "rejected_comments": state.get("rejected_comments") or [],
+        "rejected_comments": sanitize_display_value(state.get("rejected_comments") or [], roots=display_roots),
         "obsolete": is_obsolete(state),
         "superseded_by": state.get("superseded_by"),
         "stream_class": state.get("stream_class"),
@@ -291,11 +298,15 @@ def overview(ctx: RepoContext, env: dict[str, str] | None = None, *, include_arc
         "archived": len(archived),
         "total": len(streams),
     }
+    categories = {"RUNNING": 0, "AUTO_WAIT": 0, "NEEDS_YOU": 0, "COMPLETE": 0}
     visible = [item for item in streams if not item.get("obsolete")]
     for item in visible:
         kind = item.get("attention") or "waiting"
         if kind in counts:
             counts[kind] += 1
+        category = item.get("attention_category") or "AUTO_WAIT"
+        if category in categories:
+            categories[category] += 1
     campaigns = [campaign_view(item, ctx) for item in list_campaigns(ctx)]
     campaigns = [item for item in campaigns if item]
     counted_gpt = {item.get("campaign_id") for item in visible if item.get("browser_gpt_required")}
@@ -309,21 +320,26 @@ def overview(ctx: RepoContext, env: dict[str, str] | None = None, *, include_arc
         gate = item.get("gpt_gate") or {}
         camp = item.get("campaign") or {}
         needs_gpt = item.get("browser_gpt_required") or camp.get("browser_gpt_required")
-        if needs_gpt and (item.get("browser_gpt") or {}).get("url"):
+        binding = item.get("final_gpt") if item.get("next_action") == "FINAL_GPT" else item.get("product_gpt")
+        if needs_gpt and (binding or {}).get("url"):
             handoffs.append(
                 {
                     "stream_id": item.get("stream_id"),
-                    "url": (item.get("browser_gpt") or {}).get("url"),
+                    "url": (binding or {}).get("url"),
                     "generation": gate.get("generation"),
                     "open_once": bool(gate.get("notified") and not gate.get("opened_at")),
                 }
             )
+    from agentbus.codexpool import pool_status
+    from agentbus.settings import browser_bridge_status, load_settings
+
     return {
         "repo_id": ctx.repo_id,
         "repo_root": ctx.repo_root,
         "origin": ctx.origin,
         "inherit": inherited_label(env),
         "counts": counts,
+        "attention_categories": categories,
         "streams": streams,
         "archived": archived if include_archived else [],
         "archived_count": len(archived),
@@ -331,6 +347,9 @@ def overview(ctx: RepoContext, env: dict[str, str] | None = None, *, include_arc
         "needs_you": [item for item in visible if item.get("human_required")],
         "needs_gpt": [item for item in visible if item.get("browser_gpt_required")],
         "handoffs": handoffs,
+        "settings": load_settings(ctx),
+        "browser_bridge": browser_bridge_status(ctx),
+        "codex_pool": pool_status(ctx, env),
     }
 
 
@@ -349,14 +368,14 @@ def event_rows(store: StreamStore, limit: int = 80) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         kind = rec.get("kind") or "event"
-        detail = _event_detail(rec)
+        detail = sanitize_display_text(_event_detail(rec))
         rows.append(
             {
                 "ts": rec.get("ts"),
                 "kind": kind,
                 "label": _event_label(kind, rec),
                 "detail": detail,
-                "raw": rec,
+                "raw": sanitize_display_value(rec),
             }
         )
     return list(reversed(rows))

@@ -122,7 +122,8 @@ class AutopilotTests(AgentbusTest):
             for name in files:
                 if not name.endswith(".py"):
                     continue
-                text = open(os.path.join(dirpath, name), encoding="utf-8").read()
+                with open(os.path.join(dirpath, name), encoding="utf-8") as handle:
+                    text = handle.read()
                 self.assertNotIn("playwright", text.lower())
                 self.assertNotIn("puppeteer", text.lower())
                 self.assertNotIn("selenium", text.lower())
@@ -170,7 +171,9 @@ class AutopilotTests(AgentbusTest):
         store.save(state)
         handoff = maybe_gpt_handoff(store, store.load(), campaign=campaign, surface="cli")
         self.assertTrue(handoff)
-        self.assertIn("WAITING_FOR_PLAN", handoff["generation"])
+        self.assertEqual(handoff["role"], "PRODUCT_GPT")
+        self.assertEqual(handoff["task"], "PLAN_CONTINUATION")
+        self.assertIn("plan_continuation", handoff["job_id"])
 
     def test_final_merge_remains_human(self) -> None:
         self.create_stream("s1")

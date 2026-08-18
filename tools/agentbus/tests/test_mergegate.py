@@ -69,6 +69,15 @@ class MergeGateTests(AgentbusTest):
         state["heads"]["implemented"] = head
         state["heads"]["current"] = head
         state["heads"]["audited"] = head
+        state.setdefault("github", {})["pr"] = {
+            "number": pr,
+            "headRefOid": head,
+            "baseRefOid": "b" * 40,
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [],
+        }
         state["envelopes"]["CODEX_AUDIT"] = {
             "kind": "CODEX_AUDIT",
             "status": "PASS",
@@ -130,34 +139,36 @@ class MergeGateTests(AgentbusTest):
         self.assertTrue(view["unit_completed"])
 
     def test_p6_p7_live_fixture_projection(self) -> None:
-        self.create_stream("p6-e2a", "--pr", "44")
-        st = self.store("p6-e2a").load()
+        p6_store, _ = self._gate_stream("p6-e2a", pr=44, policy="AUDIT_SUFFICIENT")
+        st = p6_store.load()
         st["campaign_id"] = "p6"
         st["phase"] = FINAL_GATE
-        self.store("p6-e2a").save(st)
+        p6_store.save(st)
         from agentbus.campaign import bind_explicit_campaign
 
         bind_explicit_campaign(self.ctx, st, "p6")
         p6 = campaign_view(load_campaign(self.ctx, "p6"), self.ctx)
         self.assertEqual(p6["status"], "ACTIVE")
-        self.assertEqual(p6["wait_reason"], "WAITING_FOR_MERGE_GPT")
-        self.assertEqual(p6["attention_owner"], "BROWSER_GPT")
+        self.assertEqual(p6["wait_reason"], "WAIT_BROWSER_CONFIG")
+        self.assertEqual(p6["attention_owner"], "AGENTBUS")
         from agentbus.campaign import persist_campaign_projection, save_campaign
 
         campaign6 = load_campaign(self.ctx, "p6")
         persist_campaign_projection(self.ctx, campaign6)
         save_campaign(self.ctx, campaign6)
-        self.assertEqual(load_campaign(self.ctx, "p6")["wait_reason"], "WAITING_FOR_MERGE_GPT")
-        self.create_stream("p7-8c", "--pr", "43")
-        st7 = self.store("p7-8c").load()
+        # Saved campaign lifecycle fields are compatibility snapshots only;
+        # the live unit decision owns the Browser configuration wait.
+        self.assertIsNone(load_campaign(self.ctx, "p6")["wait_reason"])
+        p7_store, _ = self._gate_stream("p7-8c", pr=43, policy="GPT_REQUIRED")
+        st7 = p7_store.load()
         st7["campaign_id"] = "p7"
         st7["phase"] = READY_FOR_GPT
-        self.store("p7-8c").save(st7)
+        p7_store.save(st7)
         bind_explicit_campaign(self.ctx, st7, "p7")
         p7 = campaign_view(load_campaign(self.ctx, "p7"), self.ctx)
         self.assertEqual(p7["status"], "ACTIVE")
-        self.assertEqual(p7["wait_reason"], "WAITING_FOR_GPT")
-        self.assertEqual(p7["attention_owner"], "BROWSER_GPT")
+        self.assertEqual(p7["wait_reason"], "WAIT_BROWSER_CONFIG")
+        self.assertEqual(p7["attention_owner"], "AGENTBUS")
 
     def test_audit_worktree_path_display(self) -> None:
         raw = (
@@ -250,7 +261,12 @@ class MergeGateTests(AgentbusTest):
         store.save(state)
         view = stream_view(self.ctx, store)
         self.assertEqual(view["browser_gpt"]["url"], "https://chatgpt.com/c/product")
-        self.assertEqual(view["merge_gpt"]["url"], "https://chatgpt.com/c/merge")
+        from agentbus.settings import set_global_binding
+
+        set_global_binding(self.ctx, "FINAL_GPT", url="https://chatgpt.com/c/final")
+        view = stream_view(self.ctx, store)
+        self.assertEqual(view["merge_gpt"]["url"], "https://chatgpt.com/c/final")
+        self.assertNotEqual(view["merge_gpt"]["url"], "https://chatgpt.com/c/merge")
 
     def test_merge_card_requires_live_pr_snapshot(self) -> None:
         store, head = self._gate_stream("live-card", pr=46)
@@ -260,7 +276,7 @@ class MergeGateTests(AgentbusTest):
         os.environ["FAKE_GH_PR_STATE"] = prstate
         card = stream_view(self.ctx, store)["merge_review"]
         self.assertFalse(card["enabled"])
-        self.assertIn("PR HEAD != expected implemented HEAD", card["disabled_reasons"])
+        self.assertIn("PR HEAD != IMPLEMENTED_HEAD", card["disabled_reasons"])
 
     def test_suggestions(self) -> None:
         store, head = self._gate_stream()
@@ -279,7 +295,9 @@ class MergeGateTests(AgentbusTest):
         store, head = self._gate_stream("sg-c")
         self.assertEqual(gpt_suggestion(store.load(), None)["text"], SUGGEST_WAIT_MERGE)
         self._apply(store, _merge_review("sg-c", head, "PASS"), head)
-        self.assertEqual(gpt_suggestion(store.load(), None)["text"], SUGGEST_MERGE)
+        # Legacy PASS without a Browser generation remains compatible
+        # evidence, but cannot enter the new autonomous happy path.
+        self.assertEqual(gpt_suggestion(store.load(), None)["text"], SUGGEST_HOLD)
         self._apply(store, _merge_review("sg-c", head, "HOLD"), head)
         self.assertEqual(gpt_suggestion(store.load(), None)["text"], SUGGEST_HOLD)
         self._apply(store, _merge_review("sg-c", head, "HUMAN_DECISION"), head)
@@ -288,13 +306,16 @@ class MergeGateTests(AgentbusTest):
     def test_prompt_artifact_is_merge_role(self) -> None:
         store, head = self._gate_stream()
         text = merge_prompt_text(store.load(), None)
-        self.assertIn("独立 Merge Gate GPT", text)
+        self.assertIn("FINAL_GPT", text)
         self.assertIn(head, text)
         self.assertIn("不要 merge", text)
         self.assertNotIn("/home/", text)
         self.assertNotIn("Authorization", text)
-        for field in ("REVIEWED_BASE:", "EVIDENCE:", "FINDINGS:", "RECOMMENDATION:", "NEXT_ACTION:"):
+        for field in ("REVIEWED_BASE:", "FINDINGS:"):
             self.assertIn(field, text)
+        self.assertIn("PASS / REPAIR / WAIT / HUMAN", text)
+        self.assertNotIn("RECOMMENDATION:", text)
+        self.assertNotIn("NEXT_ACTION:", text)
 
     def test_local_merge_review_is_not_durable_authority(self) -> None:
         store, head = self._gate_stream("local-merge")

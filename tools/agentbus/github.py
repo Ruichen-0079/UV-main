@@ -205,7 +205,7 @@ def merge_pr(
     method: str = "merge",
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Merge using a merge commit. Never squash/rebase. Never called without human authorization."""
+    """Merge using a merge commit after AgentBus exact-head authorization."""
     if method != "merge":
         raise AgentbusError(f"unsupported merge method {method}")
     args = ["pr", "merge", str(int(number)), "--merge"]
@@ -342,6 +342,11 @@ def apply_fetched_comments(
     if view.get("_view_error"):
         notes.append(f"PR view degraded: {view['_view_error']}")
     mark_github_ok(state)
+    # Cache the last read-only PR projection so every decision surface sees
+    # the same HEAD/base/CI generation between GitHub polls. This cache never
+    # replaces GitHub as authority and is refreshed by the normal sync lease.
+    if not view.get("_view_error"):
+        state.setdefault("github", {})["pr"] = dict(view)
     if view.get("headRefName") and not state.get("branch"):
         state["branch"] = view["headRefName"]
     if view.get("title") and not state.get("goal"):

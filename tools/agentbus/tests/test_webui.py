@@ -76,6 +76,33 @@ if log:
         self.assertEqual(code, 200)
         self.assertIn("Yuvi AgentBus", html)
 
+    def test_browser_jobs_are_get_only_and_global_settings_are_nonsecret(self) -> None:
+        self.create_stream("browser-api")
+        code, configured = self.http(
+            "/api/settings/gpt",
+            {"role": "PRODUCT_GPT", "url": "https://chatgpt.com/c/product-global"},
+        )
+        self.assertEqual(code, 200, configured)
+        self.assertEqual(configured["settings"]["product_gpt"]["url"], "https://chatgpt.com/c/product-global")
+
+        code, first = self.http("/api/browser/jobs")
+        self.assertEqual(code, 200, first)
+        self.assertEqual(first["authority"], "GitHub PR comments and PR state")
+        self.assertEqual(first["bridge"]["status"], "ONLINE")
+        jobs = [item for item in first["jobs"] if item["stream"] == "browser-api"]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual((jobs[0]["role"], jobs[0]["task"]), ("PRODUCT_GPT", "PLAN_SPEC"))
+        job_id = jobs[0]["job_id"]
+
+        code, second = self.http("/api/browser/jobs")
+        self.assertEqual(code, 200, second)
+        self.assertIn(job_id, {item["job_id"] for item in second["jobs"]})
+        self.assertNotIn("GPT_SPEC", self.store("browser-api").load()["envelopes"])
+
+        code, _ = self.http("/api/browser/jobs", {}, method="POST")
+        self.assertIn(code, {400, 404})
+        self.assertNotIn("GPT_SPEC", self.store("browser-api").load()["envelopes"])
+
     def test_ui_is_simplified_chinese_without_changing_api(self) -> None:
         code, html = self.http("/")
         self.assertEqual(code, 200)
@@ -131,9 +158,10 @@ if log:
         self.assertEqual(code, 200)
         self.assertEqual(overview["counts"]["total"], 1)
         self.assertEqual(len(overview["needs_you"]), 0)
-        self.assertEqual(len(overview["needs_gpt"]), 1)
-        self.assertEqual(overview["needs_gpt"][0]["stream_id"], "p7-9a")
-        self.assertEqual(overview["needs_gpt"][0]["attention"], "needs_gpt")
+        self.assertEqual(len(overview["needs_gpt"]), 0)
+        created_view = next(item for item in overview["streams"] if item["stream_id"] == "p7-9a")
+        self.assertEqual(created_view["attention_category"], "AUTO_WAIT")
+        self.assertEqual(created_view["next_action"], "WAIT")
 
     def test_pause_resume_and_models_isolated(self) -> None:
         self.http("/api/streams", {"stream": "a1", "goal": "A", "create_worktree": True})
