@@ -187,6 +187,129 @@ class SolTargetDecisionTests(AgentbusTest):
         )
         self.assertEqual(derive_next_action(state, live=live).action, IMPL)
 
+    def test_scope_insufficient_blocked_report_requests_same_unit_replan(self) -> None:
+        state, live, head = self.ready_state("scope-replan")
+        state["envelopes"]["GPT_SPEC"] = {
+            "kind": "GPT_SPEC",
+            "status": "ACTIONABLE",
+            "head": "b" * 40,
+            "source": "github",
+            "source_id": "100",
+            "fields": {"STATUS": "ACTIONABLE", "BASE_HEAD": "b" * 40},
+        }
+        state["envelopes"]["CODEX_AUDIT"].update(
+            status="CHANGES_REQUIRED",
+            fields={
+                "STATUS": "CHANGES_REQUIRED",
+                "STREAM": state["stream_id"],
+                "AUDITED_HEAD": head,
+                "FINDINGS": "- exact-head finding",
+            },
+        )
+        state["envelopes"]["CODEX_REPORT"].update(
+            fields={
+                "STATUS": "READY_FOR_AUDIT",
+                "STREAM": state["stream_id"],
+                "IMPLEMENTED_HEAD": head,
+                "BASE_HEAD": "b" * 40,
+                "VERDICT": "BLOCKED",
+                "BLOCKER": "approved scope is insufficient for the required primitive",
+            }
+        )
+        self.assertEqual(derive_next_action(state, live=live).action, PRODUCT_GPT)
+        decision = derive_next_action(state, live=live)
+        self.assertEqual(decision.task, PLAN_SPEC)
+        self.assertTrue(decision.evidence["scope_blocked"])
+
+    def test_ordinary_audit_changes_required_stays_impl(self) -> None:
+        state, live, head = self.ready_state("ordinary-audit-repair")
+        state["envelopes"]["CODEX_AUDIT"].update(
+            status="CHANGES_REQUIRED",
+            fields={
+                "STATUS": "CHANGES_REQUIRED",
+                "STREAM": state["stream_id"],
+                "AUDITED_HEAD": head,
+                "FINDINGS": "- implementable in-scope finding",
+            },
+        )
+        self.assertEqual(derive_next_action(state, live=live).action, IMPL)
+
+    def test_blocked_report_does_not_override_capacity_wait(self) -> None:
+        state, live, head = self.ready_state("blocked-capacity")
+        state["envelopes"]["GPT_SPEC"] = {
+            "kind": "GPT_SPEC",
+            "status": "ACTIONABLE",
+            "head": "b" * 40,
+            "source": "github",
+            "source_id": "100",
+            "fields": {"STATUS": "ACTIONABLE", "BASE_HEAD": "b" * 40},
+        }
+        state["envelopes"]["CODEX_REPORT"]["fields"].update(
+            {"BASE_HEAD": "b" * 40, "VERDICT": "BLOCKED", "BLOCKER": "scope is insufficient"}
+        )
+        state["wait"] = {"kind": "CODEX_CAPACITY", "reason": "quota exhausted"}
+        self.assertEqual(derive_next_action(state, live=live).action, WAIT)
+
+    def test_stale_blocked_report_does_not_replan_new_spec(self) -> None:
+        state, live, head = self.ready_state("stale-blocked")
+        state["envelopes"]["GPT_SPEC"] = {
+            "kind": "GPT_SPEC",
+            "status": "ACTIONABLE",
+            "head": "b" * 40,
+            "source": "github",
+            "source_id": "100",
+            "fields": {"STATUS": "ACTIONABLE", "BASE_HEAD": "b" * 40},
+        }
+        state["envelopes"]["CODEX_REPORT"]["fields"].update(
+            {"BASE_HEAD": "b" * 40, "VERDICT": "BLOCKED", "BLOCKER": "scope is insufficient"}
+        )
+        state["envelopes"]["GPT_SPEC"]["head"] = "c" * 40
+        state["envelopes"]["GPT_SPEC"]["fields"]["BASE_HEAD"] = "c" * 40
+        self.assertNotEqual(derive_next_action(state, live=live).action, PRODUCT_GPT)
+
+        state, live, head = self.ready_state("stale-blocked-generation")
+        state["envelopes"]["GPT_SPEC"] = {
+            "kind": "GPT_SPEC",
+            "status": "ACTIONABLE",
+            "head": "b" * 40,
+            "source": "github",
+            "source_id": "200",
+            "fields": {"STATUS": "ACTIONABLE", "BASE_HEAD": "b" * 40},
+        }
+        state["envelopes"]["CODEX_REPORT"]["source_id"] = "100"
+        state["envelopes"]["CODEX_REPORT"]["fields"].update(
+            {"BASE_HEAD": "b" * 40, "VERDICT": "BLOCKED", "BLOCKER": "scope is insufficient"}
+        )
+        self.assertNotEqual(derive_next_action(state, live=live).action, PRODUCT_GPT)
+
+    def test_replan_browser_job_is_stable_and_self_identifies_revision(self) -> None:
+        state, live, head = self.ready_state("replan-job")
+        state["envelopes"]["GPT_SPEC"] = {
+            "kind": "GPT_SPEC",
+            "status": "ACTIONABLE",
+            "head": "b" * 40,
+            "source": "github",
+            "source_id": "100",
+            "fields": {"STATUS": "ACTIONABLE", "BASE_HEAD": "b" * 40},
+        }
+        state["envelopes"]["CODEX_AUDIT"].update(status="CHANGES_REQUIRED")
+        state["envelopes"]["CODEX_AUDIT"]["fields"].update(
+            {"STATUS": "CHANGES_REQUIRED", "AUDITED_HEAD": head}
+        )
+        state["envelopes"]["CODEX_REPORT"]["fields"].update(
+            {"BASE_HEAD": "b" * 40, "VERDICT": "BLOCKED", "BLOCKER": "scope is insufficient"}
+        )
+        state["browser_gpt"] = {"url": "https://chatgpt.com/c/replan-job"}
+        from agentbus.browser import job_for_state
+
+        first = job_for_state(self.ctx, state)
+        second = job_for_state(self.ctx, state)
+        self.assertIsNotNone(first)
+        self.assertEqual(first.job_id, second.job_id)
+        self.assertIn("revision of the current blocked GPT_SPEC", first.prompt)
+        self.assertIn("same stream and PR", first.prompt)
+        self.assertIn("separate Mem0 fail-closed HIGH", first.prompt)
+
     def test_final_statuses_and_legacy_normalization(self) -> None:
         expected = {"PASS": MERGE, "REPAIR": IMPL, "WAIT": WAIT, "HUMAN": HUMAN}
         for status, action in expected.items():

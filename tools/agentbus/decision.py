@@ -128,6 +128,59 @@ def _repair_record(state: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
     return None, {}
 
 
+def _scope_insufficient_implementation(state: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """Recognize a durable, exact-head blocked implementation generation.
+
+    This deliberately uses the structured CODEX_REPORT verdict/blocker fields
+    rather than guessing from prose.  Matching the report's BASE_HEAD to the
+    current GPT_SPEC also prevents an old blocked attempt from replanning a
+    newer specification on the same product HEAD.
+    """
+    report = _record(state, "CODEX_REPORT")
+    head = unit_head(state)
+    if not report or not head or not durable_github_record(state, "CODEX_REPORT"):
+        return False, {}
+    if not sha_equal(_record_head(report, "IMPLEMENTED_HEAD"), head):
+        return False, {}
+    fields = report.get("fields") if isinstance(report.get("fields"), dict) else {}
+    verdict = str(fields.get("VERDICT") or report.get("status") or "").strip().upper()
+    blocker = str(fields.get("BLOCKER") or "").strip()
+    if verdict != "BLOCKED" or not blocker:
+        return False, {}
+
+    # A capacity/transport interruption is WAIT even if an older blocked
+    # report remains in the durable record.
+    interruption = state.get("codex_interruption") or {}
+    if interruption.get("kind") in {"INTERRUPTED_CAPACITY", "INTERRUPTED_FAILED"}:
+        return False, {}
+    wait = state.get("wait")
+    if isinstance(wait, dict) and wait.get("kind") in {
+        "CODEX_CAPACITY",
+        "CODEX_BUSY",
+        "RUNNER_TEMPORARY",
+        "GITHUB_TRANSIENT",
+        "BROWSER_CAPACITY",
+        "BROWSER_OFFLINE",
+    }:
+        return False, {}
+
+    spec = _record(state, "GPT_SPEC")
+    spec_base = _record_head(spec, "BASE_HEAD")
+    report_base = str(fields.get("BASE_HEAD") or "").strip()
+    if not spec_base or not report_base or not sha_equal(report_base, spec_base):
+        return False, {}
+    report_source = str(report.get("source_id") or "").strip()
+    spec_source = str(spec.get("source_id") or "").strip()
+    if report_source.isdigit() and spec_source.isdigit() and int(report_source) < int(spec_source):
+        return False, {}
+    return True, {
+        "scope_blocked": True,
+        "blocked_source": report.get("source_id") or report.get("digest"),
+        "blocked_head": head,
+        "blocked_spec_base": spec_base,
+    }
+
+
 def product_review_authority(state: dict[str, Any]) -> dict[str, Any]:
     from agentbus.reviewpolicy import AUDIT_SUFFICIENT, evaluate_delegation, review_policy_of
 
@@ -230,6 +283,7 @@ def review_generation_evidence(
     report = _record(state, "CODEX_REPORT")
     audit = _record(state, "CODEX_AUDIT")
     product = _record(state, "GPT_REVIEW")
+    spec = _record(state, "GPT_SPEC")
     scope = state.get("scope") or ((_record(state, "GPT_SPEC").get("fields") or {}).get("SCOPE"))
     continuation = _record(state, "GPT_CONTINUATION")
     return {
@@ -247,6 +301,7 @@ def review_generation_evidence(
         "report": [report.get("digest"), report.get("source_id"), report.get("status"), report.get("head")],
         "audit": [audit.get("digest"), audit.get("source_id"), audit.get("status"), audit.get("head")],
         "product": [product.get("digest"), product.get("source_id"), product.get("status"), product.get("head")],
+        "spec": [spec.get("digest"), spec.get("source_id"), spec.get("status"), spec.get("head")],
         "review_authority": state.get("review_authority"),
         "ci": ci_snapshot(pr),
         "blocker": (state.get("status") or {}).get("blocker"),
@@ -536,6 +591,18 @@ def derive_next_action(
         wait = _active_wait(state)
         if wait:
             return _decision(WAIT, str(wait.get("reason") or wait.get("kind")), wait_reason=str(wait.get("kind")), transient=True)
+        scope_blocked, evidence = _scope_insufficient_implementation(state)
+        if scope_blocked:
+            return _externalize(
+                _decision(
+                    PRODUCT_GPT,
+                    "implementation proved the approved spec/scope is insufficient",
+                    task=PLAN_SPEC,
+                    **evidence,
+                ),
+                state,
+                external,
+            )
         return _decision(HUMAN, str((state.get("status") or {}).get("blocker") or "recovery requires a decision"))
 
     if phase == "MERGED" or (state.get("heads") or {}).get("merged"):
@@ -602,6 +669,19 @@ def derive_next_action(
         and sha_equal(txn.get("authorized_head"), head)
     ):
         return _externalize(_decision(MERGE, "recover or retry the already-fenced merge transaction"), state, external)
+
+    scope_blocked, evidence = _scope_insufficient_implementation(state)
+    if scope_blocked:
+        return _externalize(
+            _decision(
+                PRODUCT_GPT,
+                "implementation proved the approved spec/scope is insufficient",
+                task=PLAN_SPEC,
+                **evidence,
+            ),
+            state,
+            external,
+        )
 
     repair_kind, repair = _repair_record(state)
     if repair_kind:

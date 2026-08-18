@@ -90,7 +90,20 @@ def _common(job: dict[str, Any]) -> str:
 def _product_prompt(job: dict[str, Any], state: dict[str, Any]) -> str:
     task = job["task"]
     if task == PLAN_SPEC:
+        replan = bool(job.get("replan_scope"))
+        replan_protocol = ""
+        if replan:
+            replan_protocol = (
+                "This is a revision of the current blocked GPT_SPEC for the same stream and PR, "
+                "not a new campaign, unit, stream, or PR. Re-read the durable current GPT_REVIEW, "
+                "CODEX_REPORT VERDICT=BLOCKED, CODEX_AUDIT, exact HEAD, and current GitHub comments. "
+                "Issue a replacement bounded GPT_SPEC for the existing HEAD lineage and define the "
+                "smallest honest scope expansion needed to complete the approved goal. Do not mix the "
+                "separate Mem0 fail-closed HIGH finding into this repair; keep it as a separate focused "
+                "generation before FINAL_GATE.\n\n"
+            )
         protocol = (
+            replan_protocol +
             "Produce the smallest actionable product specification using the existing durable protocol:\n"
             "[GPT_SPEC]\n"
             "STATUS: ACTIONABLE\n"
@@ -217,6 +230,7 @@ def job_for_state(
         "pr": state.get("pr"),
         "expected_head": unit_head(state) or (state.get("heads") or {}).get("current") or "UNKNOWN",
         "expected_base": live.get("baseRefOid") or "UNKNOWN",
+        "replan_scope": bool(decision.evidence.get("scope_blocked")),
     }
     prompt = _product_prompt(values, state) if decision.action == PRODUCT_GPT else _final_prompt(values, state)
     return BrowserGPTJob(

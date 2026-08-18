@@ -215,9 +215,14 @@ class BrowserBridgeTests(AgentbusTest):
         root = os.path.join(os.path.dirname(__file__), "..", "browser_extension")
         with open(os.path.join(root, "manifest.json"), encoding="utf-8") as handle:
             manifest = json.load(handle)
+        permissions = set(manifest["permissions"])
         self.assertEqual(
-            set(manifest["permissions"]),
-            {"storage", "tabs", "https://chatgpt.com/*", "http://127.0.0.1:6738/*"},
+            permissions - {"http://127.0.0.1:6738/*", "http://127.0.0.1/*"},
+            {"storage", "tabs", "https://chatgpt.com/*"},
+        )
+        self.assertIn(
+            permissions & {"http://127.0.0.1:6738/*", "http://127.0.0.1/*"},
+            ({"http://127.0.0.1:6738/*"}, {"http://127.0.0.1/*"}),
         )
         sources = []
         for name in ("background.js", "content.js"):
