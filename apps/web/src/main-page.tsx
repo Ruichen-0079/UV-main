@@ -28,12 +28,17 @@ import { readVoiceOutputPreference, writeVoiceOutputPreference } from "./voice-o
 import { controlCompanionWindow, isTauriRuntime } from "./tauri-window.js";
 import { ServiceStatusPanel } from "./service-status-panel.js";
 import { UserSettingsPanel } from "./user-settings-panel.js";
-import { fetchUserSettings } from "./user-settings-client.js";
+import { fetchUserSettings, subscribeUserSettingsChanged } from "./user-settings-client.js";
 import { initialServiceStatusState, type ServiceStatusState } from "./service-status-state.js";
 import {
   isServiceSupervisorAvailable,
   subscribeServiceStatusState
 } from "./service-supervisor-client.js";
+import {
+  createInitialProactiveConsentState,
+  reduceProactiveConsent,
+  type ProactiveConsentAction
+} from "./proactive-consent.js";
 import type { TtsSettingsProjection } from "./user-settings-state.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
@@ -62,6 +67,11 @@ export function MainPage(): JSX.Element {
   const [ttsConfig, setTtsConfig] = useState<CompanionTtsConfiguration | null>(() =>
     isTauriRuntime() ? null : { enabled: true, mode: "external" }
   );
+  const [proactiveConsent, dispatchProactiveConsent] = useReducer(
+    reduceProactiveConsent,
+    undefined,
+    createInitialProactiveConsentState
+  );
   const [messages, dispatchMessages] = useReducer(reduceChatMessages, [] as ChatMessage[]);
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -79,6 +89,7 @@ export function MainPage(): JSX.Element {
   const voiceOutputRef = useRef(voiceOutput);
   const ttsConfigRef = useRef(ttsConfig);
   const ttsConfigRevisionRef = useRef(-1);
+  const proactiveConsentRef = useRef(proactiveConsent);
   const speechSessionRef = useRef<{
     generation: string;
     segmenter: SpeechSegmenter;
@@ -130,27 +141,89 @@ export function MainPage(): JSX.Element {
     return subscribeServiceStatusState(setServiceStatus);
   }, []);
 
+  const applyProactiveConsent = useCallback((action: ProactiveConsentAction): boolean => {
+    const current = proactiveConsentRef.current;
+    const next = reduceProactiveConsent(current, action);
+    if (next === current) return false;
+    proactiveConsentRef.current = next;
+    dispatchProactiveConsent(action);
+    return true;
+  }, []);
+
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let cancelled = false;
+    const initialRequestRevision = proactiveConsentRef.current.revisionFloor;
+
+    const applySettingsView = (
+      view: Awaited<ReturnType<typeof fetchUserSettings>>,
+      requestRevision: number
+    ): void => {
+      if (cancelled) return;
+      if (view.loadError !== null) {
+        applyProactiveConsent({
+          type: "settings-read-failed",
+          requestRevision: Math.max(requestRevision, view.revision)
+        });
+      } else {
+        applyProactiveConsent({
+          type: "settings-view",
+          revision: view.revision,
+          enabled: view.settings.proactive.enabled
+        });
+      }
+    };
+
+    const refetchProactiveConsent = (requestRevision: number): void => {
+      void fetchUserSettings()
+        .then((view) => applySettingsView(view, requestRevision))
+        .catch(() => {
+          if (!cancelled) {
+            applyProactiveConsent({ type: "settings-read-failed", requestRevision });
+          }
+        });
+    };
+
     void fetchUserSettings()
       .then((view) => {
-        if (cancelled || view.revision < ttsConfigRevisionRef.current) return;
-        const settings: CompanionTtsConfiguration = {
-          enabled: view.settings.tts.enabled,
-          mode: view.settings.tts.mode
-        };
-        ttsConfigRevisionRef.current = view.revision;
-        ttsConfigRef.current = settings;
-        setTtsConfig(settings);
+        if (cancelled) return;
+        // Preserve the existing TTS initial-load projection and its revision fence.
+        if (view.revision >= ttsConfigRevisionRef.current) {
+          const settings: CompanionTtsConfiguration = {
+            enabled: view.settings.tts.enabled,
+            mode: view.settings.tts.mode
+          };
+          ttsConfigRevisionRef.current = view.revision;
+          ttsConfigRef.current = settings;
+          setTtsConfig(settings);
+        }
+        applySettingsView(view, initialRequestRevision);
       })
       .catch(() => {
-        // Keep the capability unknown when persisted settings cannot be read.
+        if (!cancelled) {
+          // Keep the existing TTS capability unknown and keep proactive consent denied.
+          applyProactiveConsent({
+            type: "settings-read-failed",
+            requestRevision: initialRequestRevision
+          });
+        }
       });
+
+    const unsubscribe = subscribeUserSettingsChanged((event) => {
+      if (cancelled) return;
+      const invalidated = applyProactiveConsent({
+        type: "settings-changed",
+        revision: event.revision,
+        changedSections: event.changedSections
+      });
+      if (invalidated) refetchProactiveConsent(event.revision);
+    });
+
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, []);
+  }, [applyProactiveConsent]);
 
   const onTtsSettings = useCallback((settings: TtsSettingsProjection, revision: number): void => {
     if (revision < ttsConfigRevisionRef.current) return;
