@@ -5,8 +5,8 @@ use super::env_export::{
 use super::impact::{compute_restart_services, restart_application_needed};
 use super::schema::{redact_supervisor_error, SecretMutationResult, SupervisorSyncStatus};
 use super::schema::{
-    MemoryBackend, MemoryLlmProvider, MemoryLlmSettingsPatch, MemorySettingsPatch, ServiceMode,
-    UserSettings, UserSettingsPatch, SCHEMA_VERSION,
+    MemoryBackend, MemoryLlmProvider, MemoryLlmSettingsPatch, MemorySettingsPatch,
+    ProactiveSettingsPatch, ServiceMode, UserSettings, UserSettingsPatch, SCHEMA_VERSION,
 };
 use super::secrets::{
     MemorySecretStore, SecretStore, SECRET_DATABASE_URL, SECRET_DEEPSEEK_API_KEY,
@@ -42,6 +42,7 @@ fn defaults_when_no_file() {
     let view = service.get_view().unwrap();
     assert_eq!(view.settings.schema_version, SCHEMA_VERSION);
     assert_eq!(view.settings.chat.provider, "deepseek");
+    assert!(!view.settings.proactive.enabled);
     assert!(!view.secrets.deepseek_api_key);
     assert!(view.load_error.is_none());
 }
@@ -221,6 +222,82 @@ fn partial_patch_merges_defaults() {
     assert_eq!(next.app.language, "zh");
     assert_eq!(next.chat.provider, "deepseek");
     assert_eq!(next.memory.backend, MemoryBackend::Mem0);
+}
+
+#[test]
+fn proactive_defaults_false_and_roundtrips_true_and_false() {
+    let dir = tempdir().unwrap();
+    let secrets = Arc::new(MemorySecretStore::default());
+    let service = ConfigService::open(dir.path().to_path_buf(), secrets.clone());
+    let defaults = service.current_settings().unwrap();
+    assert!(!defaults.proactive.enabled);
+    assert_eq!(
+        serde_json::to_value(&defaults).unwrap()["proactive"]["enabled"],
+        false
+    );
+
+    let mut enable = UserSettingsPatch::default();
+    enable.proactive = Some(ProactiveSettingsPatch {
+        enabled: Some(true),
+    });
+    service.update_settings(enable).unwrap();
+    let reloaded = ConfigService::open(dir.path().to_path_buf(), secrets.clone());
+    assert!(reloaded.current_settings().unwrap().proactive.enabled);
+
+    let mut disable = UserSettingsPatch::default();
+    disable.proactive = Some(ProactiveSettingsPatch {
+        enabled: Some(false),
+    });
+    reloaded.update_settings(disable).unwrap();
+    let reloaded_again = ConfigService::open(dir.path().to_path_buf(), secrets);
+    assert!(!reloaded_again.current_settings().unwrap().proactive.enabled);
+}
+
+#[test]
+fn proactive_patch_preserves_omitted_value_and_rejects_unknown_nested_fields() {
+    let mut base = UserSettings::default();
+    base.proactive.enabled = true;
+
+    let omitted = apply_patch(&base, &UserSettingsPatch::default()).unwrap();
+    assert!(omitted.proactive.enabled);
+
+    let mut empty_section = UserSettingsPatch::default();
+    empty_section.proactive = Some(ProactiveSettingsPatch::default());
+    let empty_section_result = apply_patch(&base, &empty_section).unwrap();
+    assert!(empty_section_result.proactive.enabled);
+
+    let unknown = serde_json::from_str::<UserSettingsPatch>(
+        r#"{"proactive":{"enabled":false,"unexpected":true}}"#,
+    );
+    assert!(unknown.is_err());
+}
+
+#[test]
+fn proactive_only_change_reports_no_restart_or_supervisor_env() {
+    let (_dir, service, _) = service_with_memory();
+    let before = service.current_settings().unwrap();
+    let mut patch = UserSettingsPatch::default();
+    patch.proactive = Some(ProactiveSettingsPatch {
+        enabled: Some(true),
+    });
+    let result = service.update_settings(patch).unwrap();
+
+    assert!(result.restart_services.is_empty());
+    assert!(!result.restart_application);
+    let event = service.changed_event(&before, &result.settings, result.restart_services.clone());
+    assert_eq!(event.changed_sections, vec!["proactive"]);
+    assert!(event.restart_services.is_empty());
+
+    let env = service.supervisor_env().unwrap();
+    assert!(env
+        .keys()
+        .all(|key| !key.to_ascii_lowercase().contains("proactive")));
+    let push = service.supervisor_config_push().unwrap();
+    assert!(push
+        .env
+        .keys()
+        .chain(push.unset_env.iter())
+        .all(|key| !key.to_ascii_lowercase().contains("proactive")));
 }
 
 #[test]
@@ -441,7 +518,8 @@ fn old_settings_without_memory_llm_load_and_save_without_quarantine() {
         },
         "companion": {"alwaysOnTop": true}
     });
-    fs::write(&path, serde_json::to_string_pretty(&old).unwrap()).unwrap();
+    let original = serde_json::to_string_pretty(&old).unwrap();
+    fs::write(&path, &original).unwrap();
 
     let service = ConfigService::open(
         dir.path().to_path_buf(),
@@ -450,6 +528,8 @@ fn old_settings_without_memory_llm_load_and_save_without_quarantine() {
     let view = service.get_view().unwrap();
     assert!(view.load_error.is_none());
     assert_eq!(view.settings.memory.llm.provider, MemoryLlmProvider::None);
+    assert!(!view.settings.proactive.enabled);
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
     assert!(fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|entry| entry.ok())
@@ -466,6 +546,7 @@ fn old_settings_without_memory_llm_load_and_save_without_quarantine() {
     let saved = fs::read_to_string(path).unwrap();
     let saved_json: serde_json::Value = serde_json::from_str(&saved).unwrap();
     assert_eq!(saved_json["memory"]["llm"]["provider"], "none");
+    assert_eq!(saved_json["proactive"]["enabled"], false);
     assert_eq!(saved_json["memory"]["subjectUserId"], "legacy-user");
     assert_eq!(saved_json["memory"]["personaId"], "legacy-persona");
     assert!(!saved.contains("apiKey"));

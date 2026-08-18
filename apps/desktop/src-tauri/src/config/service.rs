@@ -346,5 +346,8 @@ fn changed_sections(before: &UserSettings, after: &UserSettings) -> Vec<String> 
     if before.companion != after.companion {
         sections.push("companion".into());
     }
+    if before.proactive != after.proactive {
+        sections.push("proactive".into());
+    }
     sections
 }

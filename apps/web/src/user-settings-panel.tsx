@@ -110,7 +110,10 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
         : result.supervisorSync;
       const merged = { ...result, restartServices, supervisorSync };
       dispatch({ type: "save-success", result: merged, clearSecrets: true });
-      if (result.revision >= startingRevision) {
+      const ttsChanged =
+        form.ttsEnabled !== result.settings.tts.enabled ||
+        form.ttsMode !== result.settings.tts.mode;
+      if (result.revision >= startingRevision && ttsChanged) {
         props.onTtsSettings?.(result.settings.tts, result.revision);
       }
     } catch (error) {
@@ -480,6 +483,22 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               onChange={(e) => setField("language", e.target.value)}
             />
           </Field>
+        </section>
+
+        <section className="settings-card">
+          <h3>Proactive messages</h3>
+          <label className="setting-checkbox">
+            <input
+              type="checkbox"
+              checked={form.proactiveEnabled}
+              onChange={(e) => setField("proactiveEnabled", e.target.checked)}
+            />
+            Allow proactive messages
+          </label>
+          <p className="mt-2 text-xs text-ink-500">
+            Allow YUVI to start text conversations on its own when eligible. Off by default. Voice
+            remains disabled.
+          </p>
         </section>
       </div>
     </Panel>
