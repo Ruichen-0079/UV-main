@@ -91,6 +91,7 @@ import { isTauriRuntime } from "./tauri-window.js";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
+  normalizeRuntimeSettingForComparison,
   resolveSettingsOperationState,
   settingsDraftDiffers,
   settingsFingerprint,
@@ -3466,9 +3467,19 @@ function SettingsPage(): JSX.Element {
       const activeRuntimeMismatch =
         refreshedResponse.runtime.serverHost !== refreshedResponse.activeRuntimeConfig.serverHost ||
         refreshedResponse.runtime.serverPort !== refreshedResponse.activeRuntimeConfig.serverPort ||
-        refreshedResponse.runtime.eventBus !== refreshedResponse.activeRuntimeConfig.eventBus ||
-        refreshedResponse.memory.memoryRepository !==
-          refreshedResponse.activeRuntimeConfig.memoryRepository ||
+        normalizeRuntimeSettingForComparison("EVENT_BUS", refreshedResponse.runtime.eventBus) !==
+          normalizeRuntimeSettingForComparison(
+            "EVENT_BUS",
+            refreshedResponse.activeRuntimeConfig.eventBus
+          ) ||
+        normalizeRuntimeSettingForComparison(
+          "MEMORY_REPOSITORY",
+          refreshedResponse.memory.memoryRepository
+        ) !==
+          normalizeRuntimeSettingForComparison(
+            "MEMORY_REPOSITORY",
+            refreshedResponse.activeRuntimeConfig.memoryRepository
+          ) ||
         (refreshedResponse.memory.memoryExtractor !== undefined &&
           refreshedResponse.activeRuntimeConfig.memoryExtractor !== undefined &&
           refreshedResponse.memory.memoryExtractor !==
@@ -3674,9 +3685,19 @@ function SettingsPage(): JSX.Element {
       settings.data &&
         (settings.data.runtime.serverHost !== settings.data.activeRuntimeConfig.serverHost ||
           settings.data.runtime.serverPort !== settings.data.activeRuntimeConfig.serverPort ||
-          settings.data.runtime.eventBus !== settings.data.activeRuntimeConfig.eventBus ||
-          settings.data.memory.memoryRepository !==
-            settings.data.activeRuntimeConfig.memoryRepository ||
+          normalizeRuntimeSettingForComparison("EVENT_BUS", settings.data.runtime.eventBus) !==
+            normalizeRuntimeSettingForComparison(
+              "EVENT_BUS",
+              settings.data.activeRuntimeConfig.eventBus
+            ) ||
+          normalizeRuntimeSettingForComparison(
+            "MEMORY_REPOSITORY",
+            settings.data.memory.memoryRepository
+          ) !==
+            normalizeRuntimeSettingForComparison(
+              "MEMORY_REPOSITORY",
+              settings.data.activeRuntimeConfig.memoryRepository
+            ) ||
           (settings.data.memory.memoryExtractor !== undefined &&
             settings.data.activeRuntimeConfig.memoryExtractor !== undefined &&
             settings.data.memory.memoryExtractor !==

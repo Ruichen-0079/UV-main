@@ -11,6 +11,8 @@ export type SettingsApplyState =
 
 export type SettingsOperationMode = "save-only" | "save-and-apply";
 
+export type RuntimeAliasSettingKey = "EVENT_BUS" | "MEMORY_REPOSITORY";
+
 export type SettingsOperationOutcome = {
   saveSucceeded: boolean;
   refreshSucceeded: boolean;
@@ -44,6 +46,26 @@ export const settingsStateLabels: Record<SettingsApplyState, string> = {
   failed: "应用失败",
   "restart-required": "已保存，需要重启"
 };
+
+/**
+ * Compare the saved/effective and active Runtime representations using the
+ * same aliases accepted by the existing settings authority. The authority
+ * reports the active value canonically as `in-memory`, while either editable
+ * setting may still contain the valid `memory` alias (or its default empty
+ * representation).
+ */
+export function normalizeRuntimeSettingForComparison(
+  key: RuntimeAliasSettingKey,
+  value: string | undefined
+): string {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  switch (key) {
+    case "EVENT_BUS":
+    case "MEMORY_REPOSITORY":
+      return !normalized || normalized === "memory" ? "in-memory" : normalized;
+  }
+  return normalized;
+}
 
 export function reduceSettingsState(
   state: SettingsApplyState,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
+  normalizeRuntimeSettingForComparison,
   reduceSettingsState,
   resolveSettingsOperationState,
   shouldReplaceSettingsDraft,
@@ -134,6 +135,19 @@ describe("settings apply state", () => {
     );
     expect(result.mismatchedKeys).toEqual(["SERVER_PORT"]);
     expect(result.ignoredSensitiveKeys).toEqual(["DEEPSEEK_API_KEY"]);
+  });
+
+  it("normalizes valid runtime aliases before comparing saved and active values", () => {
+    expect(normalizeRuntimeSettingForComparison("EVENT_BUS", "memory")).toBe("in-memory");
+    expect(normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", "memory")).toBe(
+      "in-memory"
+    );
+    expect(normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", "in-memory")).toBe(
+      "in-memory"
+    );
+    expect(
+      normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", undefined)
+    ).toBe("in-memory");
   });
 
   it("rejects stale responses and callbacks after unmount", () => {
