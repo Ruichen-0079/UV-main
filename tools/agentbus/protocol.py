@@ -157,6 +157,15 @@ class Envelope:
     source: str = "local"
     source_id: str = ""
     created_at: str = field(default_factory=utc_now)
+    # GitHub authority metadata is deliberately additive.  ``source_id``
+    # remains the legacy raw identifier used by existing artifacts, while the
+    # namespaced key prevents issue-comment and review-submission IDs from
+    # being confused with one another.
+    surface: str = ""
+    source_key: str = ""
+    updated_at: str = ""
+    author: str = ""
+    url: str = ""
 
     @property
     def status(self) -> str:
@@ -201,6 +210,11 @@ class Envelope:
             "raw": self.raw,
             "source": self.source,
             "source_id": self.source_id,
+            "surface": self.surface,
+            "source_key": self.source_key,
+            "updated_at": self.updated_at,
+            "author": self.author,
+            "url": self.url,
             "created_at": self.created_at,
             "digest": self.digest,
         }

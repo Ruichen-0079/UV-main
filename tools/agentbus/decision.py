@@ -253,9 +253,52 @@ def _scope_insufficient_implementation(state: dict[str, Any]) -> tuple[bool, dic
     report_base = str(fields.get("BASE_HEAD") or "").strip()
     if not spec_base or not report_base or not sha_equal(report_base, spec_base):
         return False, {}
+    def source_namespace(record: dict[str, Any]) -> str:
+        surface = str(record.get("surface") or "").strip()
+        if surface in {"issue_comment", "review_submission"}:
+            return surface
+        key = str(record.get("source_key") or "").strip()
+        if ":" in key and key.split(":", 1)[0] in {"issue_comment", "review_submission"}:
+            return key.split(":", 1)[0]
+        # Before namespaced metadata existed, GitHub source IDs in this
+        # record family came only from issue comments.  Preserve that narrow
+        # legacy interpretation; a review submission always carries its own
+        # explicit namespace and therefore cannot be compared numerically.
+        if record.get("source") == "github" and str(record.get("source_id") or "").strip():
+            return "issue_comment"
+        return ""
+
     report_source = str(report.get("source_id") or "").strip()
     spec_source = str(spec.get("source_id") or "").strip()
-    if report_source.isdigit() and spec_source.isdigit() and int(report_source) < int(spec_source):
+    report_namespace = source_namespace(report)
+    spec_namespace = source_namespace(spec)
+    report_created = str(report.get("created_at") or "").strip()
+    spec_created = str(spec.get("created_at") or "").strip()
+    if report_created and spec_created:
+        def source_timestamp(value: str) -> float:
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.timestamp()
+            except ValueError:
+                return float("-inf")
+
+        report_key = str(report.get("source_key") or "").strip() or f"{report_namespace}:{report_source}"
+        spec_key = str(spec.get("source_key") or "").strip() or f"{spec_namespace}:{spec_source}"
+        if (source_timestamp(report_created), report_created, report_key) < (
+            source_timestamp(spec_created),
+            spec_created,
+            spec_key,
+        ):
+            return False, {}
+    if (
+        report_namespace
+        and report_namespace == spec_namespace
+        and report_source.isdigit()
+        and spec_source.isdigit()
+        and int(report_source) < int(spec_source)
+    ):
         return False, {}
     return True, {
         "scope_blocked": True,

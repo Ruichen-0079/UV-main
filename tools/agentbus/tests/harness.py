@@ -239,6 +239,16 @@ if args[:1] == ["api"] and any("/branches/" in str(a) for a in args):
     sha = os.environ.get("FAKE_GH_LIVE_BASE_SHA") or rec.get("liveBaseRefOid") or rec.get("baseRefOid") or ("b" * 40)
     print(json.dumps({"name": "main", "commit": {"sha": sha}}))
     sys.exit(0)
+if args[:1] == ["api"] and any("/reviews" in str(a) for a in args):
+    if mode == "down":
+        print("api down", file=sys.stderr)
+        sys.exit(1)
+    path = os.environ.get("FAKE_GH_REVIEWS", "")
+    if path and os.path.isfile(path):
+        sys.stdout.write(open(path).read())
+    else:
+        print("[]")
+    sys.exit(0)
 if args[:1] == ["api"] and any("comments" in str(a) for a in args):
     if mode == "down":
         print("api down", file=sys.stderr)

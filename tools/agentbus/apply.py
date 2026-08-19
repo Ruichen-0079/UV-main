@@ -111,6 +111,27 @@ def apply_envelope(
                 raise AgentbusError(
                     f"envelope stream {envelope.stream} does not match {state['stream_id']}"
                 )
+    # Top-level review submissions are durable browser jobs.  A continuation
+    # review without its exact generation token is historical evidence only;
+    # legacy local/issue-comment fixtures may still omit JOB_ID for backward
+    # compatibility and are handled by the existing path below.
+    if envelope.kind == "GPT_CONTINUATION" and envelope.surface == "review_submission" and not envelope.get("JOB_ID"):
+        state.setdefault("stale_product_jobs", []).append(
+            {
+                "kind": envelope.kind,
+                "job_id": "",
+                "expected_job_id": "",
+                "source_id": envelope.source_id,
+                "source_key": envelope.source_key,
+                "reason": "review submission continuation is missing JOB_ID",
+                "ts": utc_now(),
+            }
+        )
+        store.append_event(
+            "stale-product-job-ignored",
+            {"kind": envelope.kind, "job_id": "", "source": envelope.source, "source_key": envelope.source_key},
+        )
+        return refresh_next(state)
     if envelope.kind in {"GPT_SPEC", "GPT_REVIEW", "GPT_CONTINUATION"} and envelope.get("JOB_ID"):
         from agentbus.campaign import infer_campaign_id, load_campaign
         from agentbus.decision import (
@@ -142,6 +163,7 @@ def apply_envelope(
                     "job_id": envelope.get("JOB_ID"),
                     "expected_job_id": expected_job,
                     "source_id": envelope.source_id,
+                    "source_key": envelope.source_key,
                     "ts": utc_now(),
                 }
             )
@@ -622,6 +644,12 @@ def ingest_text(
     source: str,
     source_id: str = "",
     allow_stale: bool = False,
+    surface: str = "",
+    source_key: str = "",
+    created_at: str = "",
+    updated_at: str = "",
+    author: str = "",
+    url: str = "",
 ) -> list[Envelope]:
     from agentbus.protocol import parse_envelopes
 
@@ -629,7 +657,14 @@ def ingest_text(
     for envelope in parse_envelopes(text):
         envelope.source = source
         envelope.source_id = source_id
-        envelope.created_at = envelope.created_at or utc_now()
+        envelope.surface = surface
+        envelope.source_key = source_key
+        envelope.updated_at = updated_at
+        envelope.author = author
+        envelope.url = url
+        # Parsed envelopes have a local default timestamp.  A durable GitHub
+        # source timestamp is authoritative when one was supplied.
+        envelope.created_at = created_at or envelope.created_at or utc_now()
         apply_envelope(
             store,
             state,

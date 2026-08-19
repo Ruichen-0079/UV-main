@@ -482,7 +482,13 @@ def _item_from_envelope(envelope: Envelope, *, source_stream: str) -> dict[str, 
         "digest": envelope.digest,
         "source_stream": source_stream,
         "source_comment_id": envelope.source_id or None,
-        "created_at": utc_now(),
+        "source_surface": envelope.surface or None,
+        "source_key": envelope.source_key or None,
+        "source_created_at": envelope.created_at or None,
+        "source_updated_at": envelope.updated_at or None,
+        "source_author": envelope.author or None,
+        "source_url": envelope.url or None,
+        "created_at": envelope.created_at or utc_now(),
         "consumed_stream": None,
         "reconciliation": None,
     }
@@ -505,6 +511,46 @@ def apply_continuation(store: StreamStore, state: dict[str, Any], envelope: Enve
 
     ctx = store.ctx
     campaign_id = infer_campaign_id(state, envelope)
+    named_raw = (envelope.get("CAMPAIGN") or "").strip()
+    bound_raw = (state.get("campaign_id") or "").strip()
+    named_campaign = normalize_stream_id(named_raw) if named_raw else ""
+    bound_campaign = normalize_stream_id(bound_raw) if bound_raw else ""
+    if named_campaign and bound_campaign and named_campaign != bound_campaign:
+        raise AgentbusError(
+            f"continuation campaign mismatch: envelope={named_campaign} state={bound_campaign}"
+        )
+    if (envelope.get("TRIGGER") or "").strip().upper() != TRIGGER_MERGED:
+        raise AgentbusError("GPT_CONTINUATION ACTIONABLE trigger must be MERGED")
+    after_stream = normalize_stream_id(envelope.get("AFTER_STREAM") or "")
+    next_stream = normalize_stream_id(envelope.get("NEXT_STREAM") or "")
+    if not after_stream:
+        raise AgentbusError("GPT_CONTINUATION ACTIONABLE requires AFTER_STREAM")
+    if not next_stream or next_stream == after_stream:
+        raise AgentbusError("GPT_CONTINUATION ACTIONABLE requires a unique NEXT_STREAM")
+    # A continuation is executable only after its predecessor is durably
+    # MERGED.  This check is independent of which PR surface carried it and
+    # prevents historical review backfills from reviving old units.
+    predecessor = state if after_stream in _after_stream_ids(state, state.get("stream_id") or "") else None
+    if predecessor is None:
+        predecessor_store = StreamStore(ctx, after_stream)
+        if predecessor_store.exists():
+            predecessor = predecessor_store.load()
+    # Existing issue-comment continuations may be observed before the merge;
+    # they remain queued and are materialized only by the later MERGED edge.
+    # A top-level review submission is the new durable Product GPT surface and
+    # must prove its predecessor is already merged before it can be accepted.
+    if envelope.surface == "review_submission" and (
+        not predecessor
+        or predecessor.get("phase") != "MERGED"
+        or not (predecessor.get("heads") or {}).get("merged")
+    ):
+        raise AgentbusError(f"continuation predecessor {after_stream} is not durably MERGED")
+    predecessor_raw = ((predecessor or {}).get("campaign_id") or "").strip()
+    predecessor_campaign = normalize_stream_id(predecessor_raw) if predecessor_raw else ""
+    if predecessor_campaign and predecessor_campaign != campaign_id:
+        raise AgentbusError(
+            f"continuation predecessor campaign mismatch: {predecessor_campaign} != {campaign_id}"
+        )
     state["campaign_id"] = campaign_id
     item = _item_from_envelope(envelope, source_stream=state["stream_id"])
     with campaign_lock(ctx):
@@ -762,6 +808,7 @@ def maybe_materialize_successor(store: StreamStore, state: dict[str, Any]) -> di
     if result.get("ok"):
         state["continuation"] = {
             "continuation_comment_id": item.get("source_comment_id"),
+            "continuation_source_key": item.get("source_key"),
             "status": "consumed",
             "created_stream": result.get("stream_id"),
             "resolved_base": result.get("base"),

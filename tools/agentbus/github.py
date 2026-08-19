@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -15,8 +16,140 @@ from agentbus.util import run_cmd, utc_now
 
 DEFAULT_SYNC_INTERVAL = 20.0
 
+ISSUE_COMMENT = "issue_comment"
+REVIEW_SUBMISSION = "review_submission"
+GITHUB_DURABLE_SURFACES = {ISSUE_COMMENT, REVIEW_SUBMISSION}
 
-def _continuation_already_consumed(state: dict[str, Any], envelope: Any, comment_id: str, ctx: Any) -> bool:
+
+def _source_id(source: dict[str, Any]) -> str:
+    return str(source.get("source_id") or "").strip()
+
+
+def source_key_for(source: dict[str, Any] | Any) -> str:
+    """Return a namespace-qualified GitHub source key.
+
+    Existing state may only contain ``source_id``.  The compatibility fallback
+    is intentionally issue-comment-only; a review submission must carry its
+    explicit namespace so two GitHub ID spaces can never collide.
+    """
+    if not isinstance(source, dict):
+        return ""
+    key = str(source.get("source_key") or "").strip()
+    if key:
+        return key
+    surface = str(source.get("surface") or "").strip()
+    raw = _source_id(source)
+    if surface in GITHUB_DURABLE_SURFACES and raw:
+        return f"{surface}:{raw}"
+    return ""
+
+
+def source_namespace(record: dict[str, Any] | None) -> str:
+    """Return the proven source namespace, or ``""`` when it is unknown."""
+    if not isinstance(record, dict):
+        return ""
+    surface = str(record.get("surface") or "").strip()
+    if surface in GITHUB_DURABLE_SURFACES:
+        return surface
+    key = str(record.get("source_key") or "").strip()
+    if ":" in key:
+        candidate = key.split(":", 1)[0]
+        if candidate in GITHUB_DURABLE_SURFACES:
+            return candidate
+    return ""
+
+
+def source_order_key(source: dict[str, Any] | None) -> tuple[float, str, str]:
+    """Order durable records without comparing IDs across GitHub namespaces."""
+    source = source if isinstance(source, dict) else {}
+    raw_time = str(source.get("created_at") or "").strip()
+    timestamp = float("-inf")
+    if raw_time:
+        try:
+            parsed = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            timestamp = parsed.timestamp()
+        except ValueError:
+            # Keep malformed timestamps deterministic without falling back to
+            # a numeric source ID.
+            timestamp = float("-inf")
+    key = source_key_for(source)
+    return timestamp, raw_time, key
+
+
+def normalize_github_source(item: dict[str, Any], *, surface: str) -> dict[str, Any]:
+    """Normalize one explicitly allowed top-level GitHub durable source."""
+    if surface not in GITHUB_DURABLE_SURFACES:
+        raise AgentbusError(f"unsupported GitHub durable surface: {surface}")
+    raw_id = str(item.get("id") or "").strip()
+    if not raw_id:
+        return {}
+    user = item.get("user") if isinstance(item.get("user"), dict) else {}
+    if surface == ISSUE_COMMENT:
+        created = item.get("created_at") or item.get("createdAt") or ""
+        updated = item.get("updated_at") or item.get("updatedAt") or ""
+    else:
+        # Pull-review submissions use submitted_at as their creation time.
+        created = item.get("submitted_at") or item.get("created_at") or item.get("createdAt") or ""
+        updated = item.get("updated_at") or item.get("updatedAt") or ""
+    return {
+        "surface": surface,
+        "source_id": raw_id,
+        "source_key": f"{surface}:{raw_id}",
+        "created_at": str(created or "").strip(),
+        "updated_at": str(updated or "").strip(),
+        "body": str(item.get("body") or ""),
+        "author": str(user.get("login") or item.get("author") or "").strip(),
+        "url": str(item.get("html_url") or item.get("url") or "").strip(),
+    }
+
+
+def normalize_github_sources(
+    issue_comments: list[dict[str, Any]] | None = None,
+    review_submissions: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    for item in issue_comments or []:
+        explicit_surface = item.get("surface") if isinstance(item, dict) else None
+        if explicit_surface and explicit_surface not in GITHUB_DURABLE_SURFACES:
+            continue
+        if explicit_surface == REVIEW_SUBMISSION:
+            source = dict(item)
+        elif isinstance(item, dict) and item.get("source_key") and item.get("surface") == ISSUE_COMMENT:
+            source = dict(item)
+        elif isinstance(item, dict):
+            source = normalize_github_source(item, surface=ISSUE_COMMENT)
+        else:
+            source = {}
+        if source:
+            sources.append(source)
+    for item in review_submissions or []:
+        explicit_surface = item.get("surface") if isinstance(item, dict) else None
+        if explicit_surface and explicit_surface != REVIEW_SUBMISSION:
+            continue
+        if isinstance(item, dict) and item.get("source_key") and item.get("surface") == REVIEW_SUBMISSION:
+            source = dict(item)
+        elif isinstance(item, dict):
+            source = normalize_github_source(item, surface=REVIEW_SUBMISSION)
+        else:
+            source = {}
+        if source:
+            sources.append(source)
+    # GitHub's IDs are independent namespaces.  Time plus namespaced key is
+    # the only ordering used when records arrive from both surfaces.
+    sources.sort(key=source_order_key)
+    return sources
+
+
+def _continuation_already_consumed(
+    state: dict[str, Any],
+    envelope: Any,
+    source_id: str,
+    ctx: Any,
+    *,
+    source_key: str = "",
+) -> bool:
     from agentbus.campaign import infer_campaign_id, load_campaign
     from agentbus.store import StreamStore
 
@@ -32,12 +165,21 @@ def _continuation_already_consumed(state: dict[str, Any], envelope: Any, comment
     for item in (campaign or {}).get("queue") or []:
         if item.get("status") != "consumed":
             continue
-        if str(item.get("source_comment_id") or "") == str(comment_id):
+        item_key = str(item.get("source_key") or "").strip()
+        if source_key and item_key and item_key == source_key:
+            return True
+        # Legacy rows have no namespace metadata.  Only use the raw-ID
+        # fallback for those rows, never to equate two explicitly namespaced
+        # GitHub surfaces.
+        if not item_key and str(item.get("source_comment_id") or "") == str(source_id):
             return True
         if next_id and item.get("next_stream") == next_id:
             return True
     rec = (state.get("envelopes") or {}).get("GPT_CONTINUATION") or {}
-    if rec.get("source_id") == str(comment_id) and rec.get("consumed_stream"):
+    rec_key = str(rec.get("source_key") or "").strip()
+    if source_key and rec_key and rec_key == source_key and rec.get("consumed_stream"):
+        return True
+    if not rec_key and rec.get("source_id") == str(source_id) and rec.get("consumed_stream"):
         return True
     return False
 
@@ -202,6 +344,35 @@ def list_issue_comments(
     return data
 
 
+def list_review_submissions(
+    cwd: str,
+    origin: str,
+    number: int,
+    env: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch only top-level PR review submissions.
+
+    Inline review comments and replies live on different GitHub endpoints and
+    are deliberately not included in this durable authority surface.
+    """
+    parsed = parse_owner_repo(origin)
+    if not parsed:
+        raise AgentbusError("origin is not a GitHub repository; cannot sync PR reviews")
+    owner, repo = parsed
+    code, out, err = run_gh(
+        ["api", f"repos/{owner}/{repo}/pulls/{number}/reviews", "--paginate"],
+        cwd=cwd,
+        env=env,
+        timeout=45,
+    )
+    if code != 0:
+        raise AgentbusError(err.strip() or "gh api reviews failed")
+    data = json.loads(out or "[]")
+    if isinstance(data, dict):
+        data = [data]
+    return data
+
+
 def create_draft_pr(
     cwd: str,
     *,
@@ -310,15 +481,65 @@ def fetch_pr_payload(
     env: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     comments = list_issue_comments(repo_root, origin, number, env=env)
+    reviews = list_review_submissions(repo_root, origin, number, env=env)
     try:
         view = pr_view(repo_root, number, env=env)
     except (AgentbusError, json.JSONDecodeError, OSError) as exc:
         view = {"number": number, "_view_error": str(exc)[:400]}
-    return comments, view
+    return normalize_github_sources(comments, reviews), view
 
 
 def rejected_ids(state: dict[str, Any]) -> set[str]:
     return {str(item) for item in (state.get("rejected_comment_ids") or [])}
+
+
+def rejected_source_keys(state: dict[str, Any]) -> set[str]:
+    return {str(item) for item in (state.get("rejected_github_source_keys") or [])}
+
+
+def _legacy_source_id(source: dict[str, Any]) -> str:
+    return _source_id(source)
+
+
+def _source_control_id(source: dict[str, Any]) -> str:
+    """Identifier used by retry/rejected bookkeeping.
+
+    Keep old issue-comment IDs stable for compatibility; reviews use their
+    namespaced key so a review ID can never collide with an issue comment ID.
+    """
+    if source.get("surface") == ISSUE_COMMENT:
+        return _legacy_source_id(source)
+    return source_key_for(source)
+
+
+def _source_seen(state: dict[str, Any], source: dict[str, Any]) -> bool:
+    key = source_key_for(source)
+    if key in {str(item) for item in (state.get("seen_github_source_keys") or [])}:
+        return True
+    return source.get("surface") == ISSUE_COMMENT and _legacy_source_id(source) in {
+        str(item) for item in (state.get("seen_comment_ids") or [])
+    }
+
+
+def _source_rejected(state: dict[str, Any], source: dict[str, Any]) -> bool:
+    key = source_key_for(source)
+    if key in rejected_source_keys(state):
+        return True
+    return source.get("surface") == ISSUE_COMMENT and _legacy_source_id(source) in rejected_ids(state)
+
+
+def _touch_seen_source(state: dict[str, Any], source: dict[str, Any]) -> None:
+    key = source_key_for(source)
+    if key:
+        seen = state.setdefault("seen_github_source_keys", [])
+        if key not in seen:
+            seen.append(key)
+            if len(seen) > 800:
+                del seen[:-800]
+    if source.get("surface") == ISSUE_COMMENT:
+        from agentbus.apply import touch_seen_comment
+
+        touch_seen_comment(state, _legacy_source_id(source))
 
 
 def record_rejected_comment(
@@ -332,11 +553,15 @@ def record_rejected_comment(
     expected_stream: str | None,
     retryable: bool = False,
     pr: int | str | None = None,
+    surface: str = ISSUE_COMMENT,
+    source_key: str = "",
 ) -> None:
     rejected = state.setdefault("rejected_comments", [])
     ids = state.setdefault("rejected_comment_ids", [])
     record = {
         "comment_id": comment_id,
+        "surface": surface,
+        "source_key": source_key,
         "reason": reason,
         "envelope": envelope_kind,
         "source_stream": source_stream,
@@ -349,12 +574,18 @@ def record_rejected_comment(
     rejected.append(record)
     if len(rejected) > 200:
         del rejected[:-200]
-    if comment_id not in ids:
+    if surface == ISSUE_COMMENT and comment_id not in ids:
         ids.append(comment_id)
+    if source_key:
+        source_keys = state.setdefault("rejected_github_source_keys", [])
+        if source_key not in source_keys:
+            source_keys.append(source_key)
     store.append_event(
         "github_envelope_rejected",
         {
             "comment_id": comment_id,
+            "surface": surface,
+            "source_key": source_key,
             "reason": reason,
             "source_stream": source_stream,
             "expected_stream": expected_stream,
@@ -368,9 +599,16 @@ def unreject_comment(state: dict[str, Any], comment_id: str | None = None) -> li
     if comment_id:
         wanted = {str(comment_id)}
     else:
-        wanted = set(rejected_ids(state))
+        wanted = set(rejected_ids(state)) | set(rejected_source_keys(state))
     state["rejected_comment_ids"] = [
         item for item in (state.get("rejected_comment_ids") or []) if str(item) not in wanted
+    ]
+    def matches_key(value: Any) -> bool:
+        text = str(value)
+        return text in wanted or any(text == f"{ISSUE_COMMENT}:{raw}" for raw in wanted)
+
+    state["rejected_github_source_keys"] = [
+        item for item in (state.get("rejected_github_source_keys") or []) if not matches_key(item)
     ]
     remaining = []
     cleared: list[str] = []
@@ -386,21 +624,23 @@ def unreject_comment(state: dict[str, Any], comment_id: str | None = None) -> li
     state["rejected_comments"] = remaining
     seen = state.get("seen_comment_ids") or []
     state["seen_comment_ids"] = [item for item in seen if str(item) not in wanted]
+    source_seen = state.get("seen_github_source_keys") or []
+    state["seen_github_source_keys"] = [item for item in source_seen if not matches_key(item)]
     return cleared
 
 
-def apply_fetched_comments(
+def apply_fetched_sources(
     store: StreamStore,
     state: dict[str, Any],
     *,
-    comments: list[dict[str, Any]],
+    sources: list[dict[str, Any]],
     view: dict[str, Any],
     repo_root: str,
     current_head: str | None,
     ctx: Any = None,
     reprocess_ids: set[str] | None = None,
 ) -> list[str]:
-    from agentbus.apply import ingest_text, mark_pr_merged, touch_seen_comment
+    from agentbus.apply import ingest_text, mark_pr_merged
     from agentbus.protocol import parse_comment_envelope
     from agentbus.streamid import claimed_ids, classify_envelope_stream, ensure_stream_aliases
 
@@ -421,8 +661,6 @@ def apply_fetched_comments(
         state["branch"] = view["headRefName"]
     if view.get("title") and not state.get("goal"):
         state["goal"] = view["title"]
-    seen = set(state.get("seen_comment_ids") or [])
-    rejected = rejected_ids(state)
     reprocess = {str(item) for item in (reprocess_ids or set())}
     others = claimed_ids(ctx, except_stream=state.get("stream_id")) if ctx is not None else set()
     stale_merge_ids = {
@@ -466,41 +704,43 @@ def apply_fetched_comments(
             state.setdefault("heads", {})["merged"] = merge_sha
         if state.get("phase") != "MERGED":
             mark_pr_merged(state, store, merge_sha=merge_sha)
-    for comment in comments:
-        cid = str(comment.get("id") or "")
-        body = comment.get("body") or ""
-        if not cid:
+    for source in normalize_github_sources(sources):
+        cid = _legacy_source_id(source)
+        control_id = _source_control_id(source)
+        source_key = source_key_for(source)
+        label = "comment" if source.get("surface") == ISSUE_COMMENT else "review"
+        body = source.get("body") or ""
+        if not control_id:
             continue
-        if cid in reprocess:
-            unreject_comment(state, cid)
-            rejected.discard(cid)
-            seen.discard(cid)
-        if cid in seen or cid in rejected:
+        if control_id in reprocess or cid in reprocess or source_key in reprocess:
+            unreject_comment(state, control_id)
+        if _source_seen(state, source) or _source_rejected(state, source):
             preview = parse_comment_envelope(body)
             if (
                 preview
                 and preview.kind == "GPT_CONTINUATION"
-                and not _continuation_already_consumed(state, preview, cid, ctx)
+                and not _continuation_already_consumed(
+                    state, preview, cid, ctx, source_key=source_key
+                )
             ):
-                seen.discard(cid)
-                rejected.discard(cid)
-                unreject_comment(state, cid)
-            elif preview and preview.kind == "GPT_MERGE_REVIEW" and cid in stale_merge_ids and stale_merge_review_is_current(preview):
+                unreject_comment(state, control_id)
+            elif preview and preview.kind == "GPT_MERGE_REVIEW" and (
+                cid in stale_merge_ids or source_key in stale_merge_ids
+            ) and stale_merge_review_is_current(preview):
                 # A review can be observed before the PR/base projection has
                 # converged.  Revisit only an exact current head/PR/base/job;
                 # wrong-generation history remains ignored.
-                seen.discard(cid)
-                rejected.discard(cid)
+                unreject_comment(state, control_id)
             else:
                 continue
         if "[" not in body:
-            touch_seen_comment(state, cid)
+            _touch_seen_source(state, source)
             continue
         try:
             first = parse_comment_envelope(body)
             envelopes = [first] if first else []
             if not envelopes:
-                touch_seen_comment(state, cid)
+                _touch_seen_source(state, source)
                 continue
             own: list[Any] = []
             ignored = 0
@@ -521,36 +761,74 @@ def apply_fetched_comments(
                     record_rejected_comment(
                         store,
                         state,
-                        comment_id=cid,
+                        comment_id=control_id,
                         reason="missing STREAM",
                         envelope_kind=envelope.kind,
                         source_stream=None,
                         expected_stream=state.get("stream_id"),
                         retryable=False,
                         pr=state.get("pr"),
+                        surface=source.get("surface") or ISSUE_COMMENT,
+                        source_key=source_key,
                     )
-                    notes.append(f"rejected comment {cid}: missing STREAM")
+                    notes.append(f"rejected {label} {cid}: missing STREAM")
                     own = []
                     break
                 record_rejected_comment(
                     store,
                     state,
-                    comment_id=cid,
+                    comment_id=control_id,
                     reason=f"stream mismatch: envelope={envelope.stream} expected={state.get('stream_id')}",
                     envelope_kind=envelope.kind,
                     source_stream=envelope.stream,
                     expected_stream=state.get("stream_id"),
                     retryable=False,
                     pr=state.get("pr"),
+                    surface=source.get("surface") or ISSUE_COMMENT,
+                    source_key=source_key,
                 )
-                notes.append(f"rejected comment {cid}: unknown stream {envelope.stream}")
+                notes.append(f"rejected {label} {cid}: unknown stream {envelope.stream}")
                 own = []
                 break
             else:
                 if not own:
-                    touch_seen_comment(state, cid)
+                    _touch_seen_source(state, source)
                     if ignored:
-                        notes.append(f"ignored foreign envelope in comment {cid}")
+                        notes.append(f"ignored foreign envelope in {label} {cid}")
+                    continue
+                # Both allowed surfaces can carry the same exact durable
+                # envelope.  Keep source history but apply the workflow effect
+                # once; the later (created_at, source_key) record becomes the
+                # canonical metadata record below.
+                identity = f"{own[0].kind}:{own[0].get('JOB_ID') or own[0].digest}"
+                history = state.setdefault("github_envelope_sources", {})
+                if identity in history:
+                    _touch_seen_source(state, source)
+                    history[identity].append(
+                        {
+                            "surface": source.get("surface"),
+                            "source_id": cid,
+                            "source_key": source_key,
+                            "created_at": source.get("created_at") or "",
+                        }
+                    )
+                    if len(history[identity]) > 20:
+                        del history[identity][:-20]
+                    rec = (state.get("envelopes") or {}).get(own[0].kind)
+                    if isinstance(rec, dict) and source_order_key(source) >= source_order_key(rec):
+                        rec.update(
+                            {
+                                "source": "github",
+                                "source_id": cid,
+                                "surface": source.get("surface") or "",
+                                "source_key": source_key,
+                                "created_at": source.get("created_at") or rec.get("created_at"),
+                                "updated_at": source.get("updated_at") or "",
+                                "author": source.get("author") or "",
+                                "url": source.get("url") or "",
+                            }
+                        )
+                    notes.append(f"duplicate {own[0].kind} from {label} {cid} ignored idempotently")
                     continue
                 text = "\n\n".join(item.raw or "" for item in own)
                 applied = ingest_text(
@@ -561,29 +839,78 @@ def apply_fetched_comments(
                     current_head=current_head,
                     source="github",
                     source_id=cid,
+                    surface=source.get("surface") or ISSUE_COMMENT,
+                    source_key=source_key,
+                    created_at=source.get("created_at") or "",
+                    updated_at=source.get("updated_at") or "",
+                    author=source.get("author") or "",
+                    url=source.get("url") or "",
                 )
-                touch_seen_comment(state, cid)
+                _touch_seen_source(state, source)
+                current_record = (state.get("envelopes") or {}).get(own[0].kind)
+                accepted = isinstance(current_record, dict) and (
+                    str(current_record.get("source_key") or "") == source_key
+                    or (
+                        not current_record.get("source_key")
+                        and str(current_record.get("source_id") or "") == cid
+                    )
+                )
+                if accepted:
+                    history[identity] = [
+                        {
+                            "surface": source.get("surface"),
+                            "source_id": cid,
+                            "source_key": source_key,
+                            "created_at": source.get("created_at") or "",
+                        }
+                    ]
                 if applied:
                     notes.append(
-                        "ingested " + ", ".join(item.kind for item in applied) + f" from comment {cid}"
+                        "ingested " + ", ".join(item.kind for item in applied) + f" from {label} {cid}"
                     )
         except Exception as exc:  # noqa: BLE001 — one comment must not abort sync
             record_rejected_comment(
                 store,
                 state,
-                comment_id=cid,
+                comment_id=control_id,
                 reason=str(exc)[:400],
                 envelope_kind=None,
                 source_stream=None,
                 expected_stream=state.get("stream_id"),
                 retryable=False,
                 pr=state.get("pr"),
+                surface=source.get("surface") or ISSUE_COMMENT,
+                source_key=source_key,
             )
-            notes.append(f"rejected comment {cid}: {exc}")
+            notes.append(f"rejected {label} {cid}: {exc}")
     if merged_now:
         mark_pr_merged(state, store, merge_sha=merge_sha or (state.get("heads") or {}).get("merged"))
         notes.append("PR is merged")
     return notes
+
+
+def apply_fetched_comments(
+    store: StreamStore,
+    state: dict[str, Any],
+    *,
+    comments: list[dict[str, Any]],
+    view: dict[str, Any],
+    repo_root: str,
+    current_head: str | None,
+    ctx: Any = None,
+    reprocess_ids: set[str] | None = None,
+) -> list[str]:
+    """Compatibility wrapper for callers that only provide issue comments."""
+    return apply_fetched_sources(
+        store,
+        state,
+        sources=normalize_github_sources(comments, []),
+        view=view,
+        repo_root=repo_root,
+        current_head=current_head,
+        ctx=ctx,
+        reprocess_ids=reprocess_ids,
+    )
 
 
 def sync_stream(
@@ -614,10 +941,10 @@ def sync_stream(
         notes.append(f"GitHub unavailable: {exc}")
         return notes
     notes.extend(
-        apply_fetched_comments(
+        apply_fetched_sources(
             store,
             state,
-            comments=comments,
+            sources=comments,
             view=view,
             repo_root=repo_root,
             current_head=current_head,
@@ -683,10 +1010,10 @@ def sync_with_lease(
         except (AgentbusError, json.JSONDecodeError, OSError) as exc:
             mark_github_error(state, str(exc)[:400])
             return [f"GitHub unavailable: {exc}"]
-        notes = apply_fetched_comments(
+        notes = apply_fetched_sources(
             store,
             state,
-            comments=comments,
+            sources=comments,
             view=view,
             repo_root=repo_root,
             current_head=current_head,
