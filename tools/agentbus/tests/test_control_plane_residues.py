@@ -8,14 +8,21 @@ from agentbus.browser import job_for_state
 from agentbus.decision import (
     FINAL_GPT,
     FINAL_REVIEW,
+    IMPL,
+    PLAN_SPEC,
+    PRODUCT_GPT,
     active_blocker,
     browser_job_id,
     deterministic_merge_fences,
+    derive_next_action,
     final_review_for_current,
     review_generation,
+    scope_failure_route,
 )
+from agentbus.github import pr_view
 from agentbus.models import empty_state
 from agentbus.protocol import Envelope, render_envelope
+from agentbus.runner import build_prompt
 from agentbus.tests.harness import AgentbusTest
 from agentbus.views import stream_view
 
@@ -226,3 +233,134 @@ class ControlPlaneResidueTests(AgentbusTest):
         gate = deterministic_merge_fences(state, live=live)
         self.assertIn("blocker present", gate["reasons"])
         self.assertEqual(state["publication"]["history"], before_history)
+
+    def test_pr_view_uses_current_base_branch_tip_and_preserves_history(self) -> None:
+        state, live, head, old_base = self._ready_fixture("base-s1")
+        new_base = "c" * 40
+        os.environ["FAKE_GH_LIVE_BASE_SHA"] = new_base
+
+        current = pr_view(self.repo, 46, env=dict(os.environ))
+
+        self.assertEqual(current["baseRefName"], "main")
+        self.assertEqual(current["baseRefOid"], new_base)
+        self.assertEqual(current["liveBaseRefOid"], new_base)
+        self.assertEqual(current["graphqlBaseRefOid"], old_base)
+        self.assertEqual(current["historicalBaseRefOid"], old_base)
+        self.assertEqual(state["transport"]["base_sha"], old_base)
+        self.assertEqual(live["baseRefOid"], old_base)
+
+    def test_old_final_pass_is_stale_when_live_base_advances(self) -> None:
+        state, live, head, old_base = self._ready_fixture("base-s2")
+        state["final_gpt"] = {"url": "https://chatgpt.com/c/final"}
+        state["envelopes"]["GPT_MERGE_REVIEW"] = self._record(
+            "GPT_MERGE_REVIEW",
+            state["stream_id"],
+            head,
+            "5330000010",
+            "PASS",
+            {
+                "PR": "46",
+                "JOB_ID": browser_job_id(state, None, live, role=FINAL_GPT, task=FINAL_REVIEW),
+                "REVIEWED_HEAD": head,
+                "REVIEWED_BASE": old_base,
+            },
+        )
+        new_base = "d" * 40
+        advanced = dict(live)
+        advanced["baseRefOid"] = new_base
+        advanced["liveBaseRefOid"] = new_base
+
+        self.assertNotEqual(
+            review_generation(state, None, live, role=FINAL_GPT, task=FINAL_REVIEW),
+            review_generation(state, None, advanced, role=FINAL_GPT, task=FINAL_REVIEW),
+        )
+        self.assertIsNone(final_review_for_current(state, None, advanced))
+        gate = deterministic_merge_fences(state, live=advanced)
+        self.assertFalse(gate["ok"])
+        self.assertIn("GPT_MERGE_REVIEW is not durable PASS for current evidence", gate["reasons"])
+
+    def test_scope_failure_routes_only_spec_insufficient_helper_to_product_gpt(self) -> None:
+        self.create_stream("scope-replan", "--worktree", self.repo)
+        store = self.store("scope-replan")
+        state = store.load()
+        head = self.git("rev-parse", "HEAD")
+        helper = "apps/web/src/proactive-turn-effect.ts"
+        importer = "apps/web/src/main-page.tsx"
+        os.makedirs(os.path.dirname(os.path.join(self.repo, importer)), exist_ok=True)
+        self._write_text(
+            os.path.join(self.repo, importer),
+            'import { runEffect } from "./proactive-turn-effect.js";\n',
+        )
+        state.update(
+            {
+                "phase": "IMPLEMENTING",
+                "impl_worktree": self.repo,
+                "heads": {**state["heads"], "current": head, "last_seen": head},
+                "scope": {
+                    "raw": "Add one narrowly scoped pure/helper module under `apps/web/src/` only if needed.",
+                    "explicit_paths": [importer],
+                    "allowed_patterns": [],
+                },
+                "envelopes": {
+                    "GPT_SPEC": {
+                        "kind": "GPT_SPEC",
+                        "fields": {
+                            "STATUS": "ACTIONABLE",
+                            "STREAM": "scope-replan",
+                            "SCOPE": "Add one narrowly scoped pure/helper module under `apps/web/src/` only if needed.",
+                        },
+                        "raw": "Add one narrowly scoped pure/helper module under `apps/web/src/` only if needed.",
+                        "status": "ACTIONABLE",
+                    }
+                },
+                "publication": {
+                    "status": "failed",
+                    "reason": "scope fence rejected files\nunexpected:\n- " + helper + "\nauthorized_exact:\n- " + importer,
+                    "commit": None,
+                },
+            }
+        )
+        state["status"]["blocker"] = state["publication"]["reason"]
+
+        route = scope_failure_route(state)
+        decision = derive_next_action(state)
+
+        self.assertEqual(route["scope_failure_kind"], "SPEC_INSUFFICIENT")
+        self.assertEqual(decision.action, PRODUCT_GPT)
+        self.assertEqual(decision.task, PLAN_SPEC)
+        self.assertEqual(state["repair_cycles"], 0)
+        self.assertIsNone(state["publication"]["commit"])
+
+    def test_scope_failure_without_helper_evidence_remains_impl_retry(self) -> None:
+        self.create_stream("scope-retry", "--worktree", self.repo)
+        store = self.store("scope-retry")
+        state = store.load()
+        head = self.git("rev-parse", "HEAD")
+        state.update(
+            {
+                "phase": "IMPLEMENTING",
+                "impl_worktree": self.repo,
+                "heads": {**state["heads"], "current": head, "last_seen": head},
+                "scope": {"raw": "Change only the approved file.", "explicit_paths": ["apps/web/src/main-page.tsx"]},
+                "envelopes": {
+                    "GPT_SPEC": {
+                        "kind": "GPT_SPEC",
+                        "fields": {"STATUS": "ACTIONABLE", "STREAM": "scope-retry", "SCOPE": "Change only the approved file."},
+                        "raw": "Change only the approved file.",
+                        "status": "ACTIONABLE",
+                    }
+                },
+                "publication": {
+                    "status": "failed",
+                    "reason": "scope fence rejected files\nunexpected:\n- apps/web/src/unrelated.ts\nauthorized_exact:\n- apps/web/src/main-page.tsx",
+                    "commit": None,
+                },
+            }
+        )
+        state["status"]["blocker"] = state["publication"]["reason"]
+
+        self.assertEqual(scope_failure_route(state)["scope_failure_kind"], "CODER_SCOPE_VIOLATION")
+        self.assertEqual(derive_next_action(state).action, IMPL)
+        prompt = build_prompt(state, "impl", "/tmp/HANDOFF_PROTOCOL.md")
+        self.assertIn("apps/web/src/unrelated.ts", prompt)
+        self.assertIn("This is an IMPL retry", prompt)

@@ -363,6 +363,20 @@ FINAL_GPT REPAIR DUTIES:
 - Implement the concrete Final GPT findings before emitting READY_FOR_AUDIT.
 - If the repair cannot be completed honestly inside approved scope, emit BLOCKED rather than READY_FOR_AUDIT.
 """
+    scope_context = ""
+    if role == "impl":
+        from agentbus.decision import scope_failure_route
+
+        scope_failure = scope_failure_route(state)
+        if scope_failure and scope_failure.get("scope_failure_kind") == "CODER_SCOPE_VIOLATION":
+            unexpected = ", ".join(str(item) for item in (scope_failure.get("unexpected_paths") or []))
+            approved = ", ".join(str(item) for item in (scope_failure.get("approved_paths") or [])) or "the materialized scope"
+            scope_context = f"""
+Previous publication attempt was rejected by the AgentBus scope fence.
+Rejected paths: {unexpected or '(recorded scope violation)'}
+Approved paths: {approved}
+This is an IMPL retry, not permission to expand scope. Do not modify the rejected paths or any other unapproved file. Continue the same generation only within the approved scope; if the approved scope cannot satisfy the authority, emit BLOCKED rather than pretending the result is publishable.
+"""
     takeover = ""
     interruption = state.get("codex_interruption") or {}
     if (
@@ -390,6 +404,7 @@ PROTOCOL FILE: {protocol_path}
 {duties}
 {takeover}
 {repair_context}
+{scope_context}
 
 Read AGENTS.md and {protocol_path} if present.
 

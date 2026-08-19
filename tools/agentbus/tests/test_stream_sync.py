@@ -5,6 +5,7 @@ import os
 
 from agentbus.github import apply_fetched_comments, unreject_comment
 from agentbus.apply import apply_envelope
+from agentbus.decision import FINAL_GPT, FINAL_REVIEW, browser_job_id, final_review_for_current
 from agentbus.machine import FINAL_GATE, IMPLEMENTING, READY_FOR_AUDIT, READY_FOR_GPT, WAITING_FOR_SPEC
 from agentbus.protocol import parse_one
 from agentbus.streamid import claimed_ids, classify_envelope_stream, ensure_stream_aliases, separator_twin
@@ -198,6 +199,73 @@ NEXT_ACTION: IMPL
         )
         self.assertEqual(state["phase"], phase)
         self.assertEqual(state["seen_comment_ids"].count("9"), 1)
+
+    def test_stale_merge_review_is_revisited_after_projection_converges(self) -> None:
+        self.create_stream("s1", "--pr", "20")
+        store = self.store("s1")
+        state = store.load()
+        head = self.git("rev-parse", "HEAD")
+        base = "b" * 40
+        state["phase"] = FINAL_GATE
+        state["heads"]["current"] = head
+        state["heads"]["implemented"] = head
+        old_live = {
+            "number": 20,
+            "headRefName": "agentbus/s1",
+            "headRefOid": head,
+            "baseRefName": "main",
+            "baseRefOid": base,
+            "state": "OPEN",
+            "isDraft": True,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+        }
+        ready_live = dict(old_live)
+        ready_live["isDraft"] = False
+        old_job = browser_job_id(state, None, old_live, role=FINAL_GPT, task=FINAL_REVIEW)
+        new_job = browser_job_id(state, None, ready_live, role=FINAL_GPT, task=FINAL_REVIEW)
+        wait = (
+            "[GPT_MERGE_REVIEW]\n\nSTATUS: WAIT\n\nSTREAM: s1\n\nPR: 20\n\n"
+            f"JOB_ID: {old_job}\n\nREVIEWED_HEAD: {head}\n\nREVIEWED_BASE: {base}\n\nSUMMARY: draft\n\nFINDINGS: wait\n"
+        )
+        passed = (
+            "[GPT_MERGE_REVIEW]\n\nSTATUS: PASS\n\nSTREAM: s1\n\nPR: 20\n\n"
+            f"JOB_ID: {new_job}\n\nREVIEWED_HEAD: {head}\n\nREVIEWED_BASE: {base}\n\nSUMMARY: ready\n\nFINDINGS: none\n"
+        )
+
+        apply_fetched_comments(
+            store,
+            state,
+            comments=[{"id": "wait", "body": wait}],
+            view=old_live,
+            repo_root=self.repo,
+            current_head=head,
+            ctx=self.ctx,
+        )
+        apply_fetched_comments(
+            store,
+            state,
+            comments=[{"id": "pass", "body": passed}],
+            view=old_live,
+            repo_root=self.repo,
+            current_head=head,
+            ctx=self.ctx,
+        )
+        self.assertIn("pass", state["seen_comment_ids"])
+        self.assertTrue(state.get("stale_merge_reviews"))
+
+        apply_fetched_comments(
+            store,
+            state,
+            comments=[{"id": "pass", "body": passed}],
+            view=ready_live,
+            repo_root=self.repo,
+            current_head=head,
+            ctx=self.ctx,
+        )
+
+        self.assertEqual(state["envelopes"]["GPT_MERGE_REVIEW"]["source_id"], "pass")
+        self.assertEqual(final_review_for_current(state, None, ready_live)["normalized_status"], "PASS")
 
     def test_last_sync_advances_with_rejects(self) -> None:
         self.create_stream("s1", "--pr", "20")

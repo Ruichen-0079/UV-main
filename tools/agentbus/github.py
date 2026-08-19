@@ -4,10 +4,11 @@ import json
 import os
 import re
 from typing import Any, Callable
+from urllib.parse import quote
 
 import fcntl
 
-from agentbus.paths import AgentbusError
+from agentbus.paths import AgentbusError, origin_url
 from agentbus.store import StreamStore
 from agentbus.util import run_cmd, utc_now
 
@@ -90,6 +91,49 @@ def pr_web_url(origin: str, number: int | str | None) -> str | None:
     return f"https://github.com/{owner}/{repo}/pull/{int(number)}"
 
 
+def resolve_live_base_head(
+    cwd: str,
+    base_ref_name: str,
+    *,
+    origin: str | None = None,
+    env: dict[str, str] | None = None,
+) -> str:
+    """Resolve the current remote tip of a PR base branch.
+
+    GitHub's PR ``baseRefOid``/REST ``base.sha`` fields are historical PR
+    snapshots.  Merge and review fencing need the branch tip now, so resolve
+    the named ref through the branches API and keep the historical PR values
+    available to callers as lineage diagnostics.
+    """
+
+    parsed = parse_owner_repo(origin or origin_url(cwd))
+    if not parsed:
+        raise AgentbusError("origin is not a GitHub repository; cannot resolve live PR base")
+    owner, repo = parsed
+    ref = str(base_ref_name or "").strip()
+    if not ref:
+        raise AgentbusError("PR base ref name is missing; cannot resolve live base")
+    code, out, err = run_gh(
+        [
+            "api",
+            f"repos/{owner}/{repo}/branches/{quote(ref, safe='')}",
+        ],
+        cwd=cwd,
+        env=env,
+        timeout=30,
+    )
+    if code != 0:
+        raise AgentbusError(err.strip() or out.strip() or f"could not resolve remote base branch {ref}")
+    try:
+        payload = json.loads(out or "{}")
+    except json.JSONDecodeError as exc:
+        raise AgentbusError(f"remote base branch {ref} returned invalid JSON") from exc
+    sha = str(((payload.get("commit") or {}).get("sha")) or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+        raise AgentbusError(f"remote base branch {ref} returned no exact commit SHA")
+    return sha
+
+
 def pr_view(cwd: str, number: int, env: dict[str, str] | None = None) -> dict[str, Any]:
     code, out, err = run_gh(
         [
@@ -97,7 +141,7 @@ def pr_view(cwd: str, number: int, env: dict[str, str] | None = None) -> dict[st
             "view",
             str(number),
             "--json",
-            "number,title,headRefName,headRefOid,baseRefOid,state,isDraft,url,statusCheckRollup,mergeCommit,mergeable,mergeStateStatus",
+            "number,title,headRefName,headRefOid,baseRefName,baseRefOid,state,isDraft,url,statusCheckRollup,mergeCommit,mergeable,mergeStateStatus",
         ],
         cwd=cwd,
         env=env,
@@ -105,7 +149,20 @@ def pr_view(cwd: str, number: int, env: dict[str, str] | None = None) -> dict[st
     )
     if code != 0:
         raise AgentbusError(err.strip() or out.strip() or f"gh pr view {number} failed")
-    return json.loads(out)
+    payload = json.loads(out)
+    if not isinstance(payload, dict):
+        raise AgentbusError(f"gh pr view {number} returned an invalid object")
+    historical = str(payload.get("baseRefOid") or "").strip()
+    base_ref = str(payload.get("baseRefName") or "").strip()
+    live = resolve_live_base_head(cwd, base_ref, origin=(env or {}).get("YUVI_AGENTBUS_ORIGIN"), env=env)
+    payload["graphqlBaseRefOid"] = historical or None
+    payload["historicalBaseRefOid"] = historical or None
+    payload["liveBaseRefOid"] = live
+    # Existing decision/review/merge callers consume baseRefOid.  Normalize
+    # that one field to the current branch tip while preserving the PR
+    # snapshot above for diagnostics and lineage.
+    payload["baseRefOid"] = live
+    return payload
 
 
 def mark_pr_ready(cwd: str, number: int, env: dict[str, str] | None = None) -> dict[str, Any]:
@@ -368,6 +425,35 @@ def apply_fetched_comments(
     rejected = rejected_ids(state)
     reprocess = {str(item) for item in (reprocess_ids or set())}
     others = claimed_ids(ctx, except_stream=state.get("stream_id")) if ctx is not None else set()
+    stale_merge_ids = {
+        str(item.get("source_id"))
+        for item in (state.get("stale_merge_reviews") or [])
+        if isinstance(item, dict) and str(item.get("source_id") or "").strip()
+    }
+
+    def stale_merge_review_is_current(envelope: Any) -> bool:
+        fields = envelope.fields if isinstance(getattr(envelope, "fields", None), dict) else {}
+        expected_head = str(current_head or "").strip()
+        reviewed_head = str(fields.get("REVIEWED_HEAD") or envelope.head or "").strip()
+        if expected_head and reviewed_head != expected_head:
+            return False
+        reviewed_pr = str(fields.get("PR") or "").strip().lstrip("#")
+        if state.get("pr") and reviewed_pr != str(state.get("pr")):
+            return False
+        current_base = str(view.get("baseRefOid") or "").strip()
+        reviewed_base = str(fields.get("REVIEWED_BASE") or "").strip()
+        if current_base and reviewed_base != current_base:
+            return False
+        job_id = str(fields.get("JOB_ID") or "").strip()
+        if not job_id:
+            return True
+        from agentbus.campaign import infer_campaign_id, load_campaign
+        from agentbus.decision import FINAL_GPT, FINAL_REVIEW, browser_job_id
+
+        campaign = load_campaign(ctx, infer_campaign_id(state)) if ctx is not None else None
+        expected_job = browser_job_id(state, campaign, view, role=FINAL_GPT, task=FINAL_REVIEW)
+        return job_id == expected_job
+
     merged_now = view.get("state") == "MERGED"
     merge_sha = None
     if merged_now:
@@ -399,6 +485,12 @@ def apply_fetched_comments(
                 seen.discard(cid)
                 rejected.discard(cid)
                 unreject_comment(state, cid)
+            elif preview and preview.kind == "GPT_MERGE_REVIEW" and cid in stale_merge_ids and stale_merge_review_is_current(preview):
+                # A review can be observed before the PR/base projection has
+                # converged.  Revisit only an exact current head/PR/base/job;
+                # wrong-generation history remains ignored.
+                seen.discard(cid)
+                rejected.discard(cid)
             else:
                 continue
         if "[" not in body:

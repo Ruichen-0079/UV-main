@@ -214,6 +214,7 @@ if args[:2] == ["pr", "view"]:
         "title": rec.get("title") or "Test PR",
         "headRefName": rec.get("headRefName") or "codex/test-branch",
         "headRefOid": rec.get("headRefOid") or os.environ.get("FAKE_GH_HEAD") or ("0" * 40),
+        "baseRefName": rec.get("baseRefName") or "main",
         "baseRefOid": rec.get("baseRefOid") or ("b" * 40),
         "state": rec.get("state") or "OPEN",
         "isDraft": rec.get("isDraft"),
@@ -223,6 +224,20 @@ if args[:2] == ["pr", "view"]:
         "mergeStateStatus": rec.get("mergeStateStatus") or "CLEAN",
         "mergeCommit": rec.get("mergeCommit"),
     }))
+    sys.exit(0)
+if args[:1] == ["api"] and any("/branches/" in str(a) for a in args):
+    if mode in {"down", "unauth"}:
+        print("api down", file=sys.stderr)
+        sys.exit(1)
+    state_path = os.environ.get("FAKE_GH_PR_STATE", "")
+    rec = {}
+    if state_path and os.path.isfile(state_path):
+        try:
+            rec = json.loads(open(state_path).read() or "{}")
+        except Exception:
+            rec = {}
+    sha = os.environ.get("FAKE_GH_LIVE_BASE_SHA") or rec.get("liveBaseRefOid") or rec.get("baseRefOid") or ("b" * 40)
+    print(json.dumps({"name": "main", "commit": {"sha": sha}}))
     sys.exit(0)
 if args[:1] == ["api"] and any("comments" in str(a) for a in args):
     if mode == "down":

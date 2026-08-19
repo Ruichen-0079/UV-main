@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from agentbus.autopilot import campaign_tick, ensure_executor_surface
-from agentbus.decision import AUDIT, FINAL_GPT, HUMAN, IMPL, MERGE, PRODUCT_GPT, WAIT, WorkflowDecision
+from agentbus.decision import AUDIT, FINAL_GPT, HUMAN, IMPL, MERGE, NEXT, PRODUCT_GPT, WAIT, WorkflowDecision
 from agentbus.konsolebind import AGENTBUS_EXECUTOR_GENERATION, role_title
 from agentbus.runner import impl_work_key
 from agentbus.tests.harness import AgentbusTest
@@ -157,6 +157,54 @@ class ExecutorSurfaceTests(AgentbusTest):
             self.assertTrue(result["ok"])
             self.assertFalse(result["managed"])
             popen.assert_not_called()
+
+    def test_non_role_action_cleans_owned_surfaces_and_is_idempotent(self) -> None:
+        store = self._impl_stream("cleanup")
+        token = pid_start_token(os.getpid()) or "current"
+        runtime = store.load_runtime()
+        for role in ("impl", "audit"):
+            runtime["konsole"][role] = self._owned_slot(
+                "cleanup",
+                role,
+                runner_pid=os.getpid(),
+                runner_token=token,
+                generation=AGENTBUS_EXECUTOR_GENERATION,
+            )
+        store.save_runtime(runtime)
+
+        with patch("agentbus.konsolebind.os.kill") as kill:
+            first = ensure_executor_surface(self.ctx, store, store.load(), self._decision(NEXT))
+            second = ensure_executor_surface(self.ctx, store, store.load(), self._decision(NEXT))
+
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(first["status"], "cleaned")
+        self.assertTrue(second["ok"], second)
+        self.assertFalse(second["managed"])
+        self.assertEqual(sum(call.args[1] == 15 for call in kill.call_args_list), 4)
+        self.assertIsNone(store.load_runtime()["konsole"]["impl"]["runner_pid"])
+        self.assertIsNone(store.load_runtime()["konsole"]["audit"]["runner_pid"])
+
+    def test_cleanup_never_kills_active_codex_invocation(self) -> None:
+        store = self._impl_stream("active-cleanup")
+        token = pid_start_token(os.getpid()) or "current"
+        runtime = store.load_runtime()
+        runtime["impl"] = {"pid": os.getpid(), "start_token": token}
+        runtime["konsole"]["impl"] = self._owned_slot(
+            "active-cleanup",
+            "impl",
+            runner_pid=os.getpid(),
+            runner_token=token,
+            generation=AGENTBUS_EXECUTOR_GENERATION,
+        )
+        store.save_runtime(runtime)
+
+        with patch("agentbus.konsolebind.os.kill") as kill:
+            result = ensure_executor_surface(self.ctx, store, store.load(), self._decision(FINAL_GPT))
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "active")
+        self.assertFalse(any(call.args[1] == 15 for call in kill.call_args_list))
+        self.assertEqual(store.load_runtime()["konsole"]["impl"]["runner_pid"], os.getpid())
 
     def test_missing_impl_worktree_never_falls_back_to_repo_root(self) -> None:
         store = self._impl_stream()

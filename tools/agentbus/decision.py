@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -262,6 +263,84 @@ def _scope_insufficient_implementation(state: dict[str, Any]) -> tuple[bool, dic
         "blocked_head": head,
         "blocked_spec_base": spec_base,
     }
+
+
+def scope_failure_route(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Classify a failed scope fence without weakening the path fence.
+
+    A failed publication may mean either that the frozen spec omitted a
+    helper it explicitly permits semantically, or that Codex touched an
+    unrelated path.  The first case can return to Product GPT for the same
+    stream; the second remains an IMPL retry.  The helper case requires both
+    explicit spec language and an import from an approved file, so a filename
+    alone can never trigger replanning.
+    """
+
+    publication = state.get("publication") if isinstance(state.get("publication"), dict) else {}
+    status = state.get("status") if isinstance(state.get("status"), dict) else {}
+    reason = str(publication.get("reason") or status.get("blocker") or "").strip()
+    if "scope fence rejected files" not in reason.lower():
+        return None
+    match = re.search(
+        r"unexpected:\s*(.*?)(?:\nauthorized_exact:|\nauthorized_patterns:|\Z)",
+        reason,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    unexpected = []
+    if match:
+        for line in match.group(1).splitlines():
+            path = line.strip().lstrip("-* ").strip().strip("`")
+            if path:
+                unexpected.append(path)
+    if not unexpected:
+        return None
+
+    spec = _record(state, "GPT_SPEC")
+    spec_fields = spec.get("fields") if isinstance(spec.get("fields"), dict) else {}
+    raw_spec = str(spec_fields.get("SCOPE") or spec.get("raw") or "")
+    helper_allowed = bool(
+        re.search(
+            r"(?:pure/)?helper\s+module\s+under\s+[`\"']?apps/web/src/.*?only\s+if\s+needed",
+            raw_spec,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+    scope = state.get("scope") if isinstance(state.get("scope"), dict) else {}
+    approved = [str(item).lstrip("./") for item in (scope.get("explicit_paths") or [])]
+    worktree = str(state.get("impl_worktree") or "")
+
+    def imported_by_approved_file(path: str) -> bool:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        token = re.compile(
+            rf"(?:from\s+|import\s*(?:\([^)]*\))?\s*)[\"']\.\/{re.escape(stem)}(?:\.[A-Za-z0-9_-]+)?[\"']",
+            flags=re.IGNORECASE,
+        )
+        for approved_path in approved:
+            if not worktree:
+                continue
+            candidate = os.path.join(worktree, approved_path)
+            try:
+                with open(candidate, encoding="utf-8") as handle:
+                    if token.search(handle.read()):
+                        return True
+            except OSError:
+                continue
+        return False
+
+    helper_needed = bool(
+        helper_allowed
+        and all(path.startswith("apps/web/src/") for path in unexpected)
+        and approved
+        and all(imported_by_approved_file(path) for path in unexpected)
+    )
+    evidence = {
+        "scope_blocked": bool(helper_needed),
+        "scope_failure_kind": "SPEC_INSUFFICIENT" if helper_needed else "CODER_SCOPE_VIOLATION",
+        "scope_failure_reason": reason,
+        "unexpected_paths": unexpected,
+        "approved_paths": approved,
+    }
+    return evidence
 
 
 def product_review_authority(state: dict[str, Any]) -> dict[str, Any]:
@@ -677,6 +756,18 @@ def derive_next_action(
         wait = _active_wait(state)
         if wait:
             return _decision(WAIT, str(wait.get("reason") or wait.get("kind")), wait_reason=str(wait.get("kind")), transient=True)
+        scope_failure = scope_failure_route(state)
+        if scope_failure and scope_failure.get("scope_failure_kind") == "SPEC_INSUFFICIENT":
+            return _externalize(
+                _decision(
+                    PRODUCT_GPT,
+                    "implementation proved the materialized scope is insufficient for an explicitly permitted helper",
+                    task=PLAN_SPEC,
+                    **scope_failure,
+                ),
+                state,
+                external,
+            )
         scope_blocked, evidence = _scope_insufficient_implementation(state)
         if scope_blocked:
             return _externalize(
@@ -712,6 +803,18 @@ def derive_next_action(
         )
 
     current_live = _live_pr(state, live)
+    scope_failure = scope_failure_route(state)
+    if scope_failure and scope_failure.get("scope_failure_kind") == "SPEC_INSUFFICIENT":
+        return _externalize(
+            _decision(
+                PRODUCT_GPT,
+                "implementation proved the materialized scope is insufficient for an explicitly permitted helper",
+                task=PLAN_SPEC,
+                **scope_failure,
+            ),
+            state,
+            external,
+        )
     final = final_review_for_current(state, campaign, current_live)
     final_status = (final or {}).get("normalized_status")
     if final_status == "REPAIR":

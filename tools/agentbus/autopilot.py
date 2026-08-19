@@ -380,6 +380,71 @@ def _audit_executor_worktree(
     return os.path.abspath(worktree), None, notes
 
 
+def _cleanup_unneeded_executor_surfaces(
+    store: StreamStore,
+    state: dict[str, Any],
+    *,
+    action: str | None,
+) -> dict[str, Any]:
+    """Stop only owned role surfaces after the canonical action leaves IMPL/AUDIT."""
+
+    from agentbus.konsolebind import (
+        agentbus_konsole_owned,
+        agentbus_runner_owned,
+        close_role_konsole,
+    )
+    from agentbus.recover import role_process_healthy
+
+    stream_id = str(state.get("stream_id") or store.stream_id)
+    runtime = store.load_runtime()
+    candidates: list[str] = []
+    notes: list[str] = []
+    for role in ("impl", "audit"):
+        slot = ((runtime.get("konsole") or {}).get(role)) or {}
+        if not (
+            agentbus_konsole_owned(slot, stream_id, role)
+            or agentbus_runner_owned(slot, stream_id, role)
+        ):
+            continue
+        candidates.append(role)
+        if role_process_healthy(runtime.get(role) or {}):
+            notes.append(f"left {role.upper()} surface in place while Codex invocation is active")
+            continue
+        result = close_role_konsole(
+            store,
+            stream_id,
+            role,
+            reason=f"canonical action {action or '-'} no longer requires executor",
+        )
+        if result.get("ok"):
+            notes.extend(result.get("notes") or [])
+            notes.append(f"cleaned owned {role.upper()} executor")
+        else:
+            notes.append(f"could not clean owned {role.upper()} executor: {result.get('reason')}")
+
+    if not candidates:
+        return {
+            "ok": True,
+            "managed": False,
+            "status": "not-required",
+            "reason": f"canonical action {action or '-'} does not require a Codex executor",
+            "notes": notes,
+        }
+    if any("active" in note.lower() for note in notes) and not any("cleaned owned" in note for note in notes):
+        status = "active"
+    elif any("could not clean" in note for note in notes):
+        status = "cleanup-pending"
+    else:
+        status = "cleaned"
+    return {
+        "ok": True,
+        "managed": True,
+        "status": status,
+        "reason": f"canonical action {action or '-'} does not require a Codex executor",
+        "notes": notes,
+    }
+
+
 def ensure_executor_surface(
     ctx: RepoContext,
     store: StreamStore,
@@ -398,12 +463,7 @@ def ensure_executor_surface(
 
     action = _executor_action(decision)
     if action not in {IMPL, AUDIT}:
-        return {
-            "ok": True,
-            "managed": False,
-            "status": "not-required",
-            "reason": f"canonical action {action or '-'} does not require a Codex executor",
-        }
+        return _cleanup_unneeded_executor_surfaces(store, state, action=action)
 
     role = "impl" if action == IMPL else "audit"
     if role == "impl":
@@ -511,16 +571,9 @@ def ensure_pr_reviewable(
     branch = str(state.get("branch") or "").strip()
     if branch and str(live.get("headRefName") or "").strip() != branch:
         return refused("PR branch is not the expected AgentBus branch")
-    spec = (state.get("envelopes") or {}).get("GPT_SPEC") or {}
-    spec_fields = spec.get("fields") if isinstance(spec.get("fields"), dict) else {}
-    expected_base = str(
-        (state.get("transport") or {}).get("base_sha")
-        or spec_fields.get("BASE_HEAD")
-        or (heads.get("spec_base") or "")
-    ).strip()
     base = str(live.get("baseRefOid") or "").strip()
-    if not expected_base or base != expected_base:
-        return refused("PR base is not the expected durable base")
+    if not str(live.get("baseRefName") or "").strip() or not base:
+        return refused("current PR base ref/tip is unavailable")
     ci = ci_snapshot(live)
     if ci.get("status") in {"FAIL", "PENDING"}:
         return refused(f"required CI evidence is {str(ci.get('status')).lower()}")
