@@ -72,9 +72,9 @@ export function subscribeUserSettingsChanged(
 function parseSettingsChangedEvent(payload: unknown): SettingsChangedEventDto | null {
   if (!payload || typeof payload !== "object") return null;
   const value = payload as Record<string, unknown>;
-  const revision = value.revision;
-  const changedSections = value.changedSections;
-  const restartServices = value.restartServices;
+  const revision = value["revision"];
+  const changedSections = value["changedSections"];
+  const restartServices = value["restartServices"];
   if (
     typeof revision !== "number" ||
     !Number.isFinite(revision) ||
