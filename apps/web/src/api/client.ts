@@ -19,11 +19,11 @@ export type {
 export type ProviderHealth = {
   provider: string;
   name?: string;
-  capability?: string;
+  capability?: ProviderCapability;
   status: "healthy" | "degraded" | "unavailable";
-  readiness?: "ready" | "not_ready";
-  observed?: "unknown" | "available" | "degraded" | "unavailable";
-  checkedAt?: string;
+  readiness?: ProviderReadinessState;
+  observed?: ProviderObservedState;
+  checkedAt: string;
   message?: string;
   configured?: boolean;
   available?: boolean;
@@ -37,12 +37,27 @@ export type ProviderHealth = {
   dimensions?: number;
   semanticEmbedding?: boolean;
   embeddingNote?: string;
+  latencyMs?: number;
   enabled?: boolean;
   priority?: number;
   fallbackEligible?: boolean;
   lastVerifiedAt?: string;
   lastErrorCode?: string;
   lastError?: string;
+};
+
+export type ProviderCapability = "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision";
+
+export type ProviderReadinessState = "ready" | "not_ready";
+export type ProviderObservedState = "unknown" | "available" | "degraded" | "unavailable";
+export type ProviderVerificationMode = "live" | "config_only";
+
+export type ProviderRouteHealth = ProviderHealth & {
+  capability: ProviderCapability;
+  provider: string;
+  enabled: boolean;
+  priority: number;
+  fallbackEligible: boolean;
 };
 
 export type HealthResponse = {
@@ -363,19 +378,19 @@ export type ProvidersStatusResponse = {
     embedding: ProviderHealth;
   };
   routes?: {
-    chat: ProviderHealth[];
-    reasoning: ProviderHealth[];
-    tts: ProviderHealth[];
-    stt: ProviderHealth[];
-    vision: ProviderHealth[];
-    embedding: ProviderHealth[];
+    chat: ProviderRouteHealth[];
+    reasoning: ProviderRouteHealth[];
+    tts: ProviderRouteHealth[];
+    stt: ProviderRouteHealth[];
+    vision: ProviderRouteHealth[];
+    embedding: ProviderRouteHealth[];
   };
 };
 
 export type ProviderVerificationResponse = {
   ok: boolean;
   provider: string;
-  capability: "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision";
+  capability: ProviderCapability;
   model?: string;
   dimensions?: number;
   expectedDimensions?: number;
@@ -384,16 +399,31 @@ export type ProviderVerificationResponse = {
   semanticEmbedding?: boolean;
   mock: boolean;
   configured?: boolean;
-  configOnly?: boolean;
-  verificationMode?: "live" | "config_only";
-  readiness?: "ready" | "not_ready";
-  observed?: "unknown" | "available" | "degraded" | "unavailable";
+  configOnly?: true;
+  verificationMode: ProviderVerificationMode;
+  readiness?: ProviderReadinessState;
+  observed?: ProviderObservedState;
   lastVerifiedAt?: string;
   lastErrorCode?: string;
+  lastError?: string;
   missingFields?: string[];
   latencyMs?: number;
   tokenUsage?: TokenUsage;
+  errorCode?: string;
   error?: string;
+  message?: string;
+};
+
+/** Response from a no-I/O provider-chain readiness inspection. */
+export type ProviderChainInspectionResponse = {
+  ok: boolean;
+  capability: ProviderCapability;
+  configOnly: true;
+  verificationMode: "config_only";
+  readyRouteCount: number;
+  routes: ProviderRouteHealth[];
+  attemptedProviders: ProviderAttempt[];
+  message: string;
 };
 
 export type CapabilityRuntimeMetadata = {
@@ -684,7 +714,10 @@ export type RuntimeSettingsResponse = {
     providers: {
       chat: ProviderHealth;
       reasoning: ProviderHealth;
-      embedding?: ProviderHealth;
+      embedding: ProviderHealth;
+      tts: ProviderHealth;
+      stt: ProviderHealth;
+      vision: ProviderHealth;
     };
   };
   settings: Record<string, LayeredSetting>;
@@ -759,7 +792,7 @@ export type RuntimeSettingsResponse = {
       ttsVoice: string;
       visionModel: string;
       optional: boolean;
-      implemented: boolean;
+      implementedCapabilities: Array<"tts" | "vision">;
     };
     dashscope: {
       baseUrl: string;
@@ -767,7 +800,7 @@ export type RuntimeSettingsResponse = {
       apiKeyPreview?: string;
       sttModel: string;
       optional: boolean;
-      implemented: boolean;
+      implementedCapabilities: Array<"stt">;
     };
     embedding: {
       provider: string;
@@ -1244,24 +1277,16 @@ export const apiClient = {
     return request<ProvidersStatusResponse>("/providers/status", signalRequestInit(signal));
   },
 
-  verifyProvider(
-    capability: "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision"
-  ): Promise<ProviderVerificationResponse> {
+  verifyProvider(capability: ProviderCapability): Promise<ProviderVerificationResponse> {
     return request<ProviderVerificationResponse>(`/providers/verify/${capability}`, {
       method: "POST"
     });
   },
 
-  verifyProviderChain(capability: "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision") {
-    return request<{
-      ok: boolean;
-      capability: string;
-      configOnly?: boolean;
-      verificationMode?: "live" | "config_only";
-      routes: ProviderHealth[];
-      attemptedProviders?: ProviderAttempt[];
-      message?: string;
-    }>(`/providers/verify-chain/${capability}`, { method: "POST" });
+  verifyProviderChain(capability: ProviderCapability): Promise<ProviderChainInspectionResponse> {
+    return request<ProviderChainInspectionResponse>(`/providers/verify-chain/${capability}`, {
+      method: "POST"
+    });
   },
 
   transcribeAudio(input: {

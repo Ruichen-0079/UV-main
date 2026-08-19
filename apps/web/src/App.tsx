@@ -23,7 +23,10 @@ import {
   type MemoryRecord,
   type MemoryVectorIndexStatus,
   type ProviderCallMetadata,
+  type ProviderCapability,
+  type ProviderChainInspectionResponse,
   type ProviderHealth,
+  type ProviderRouteHealth,
   type ProviderVerificationResponse,
   type PromptPreviewResponse,
   type ProvidersStatusResponse,
@@ -34,6 +37,15 @@ import {
   type UpdateMemoryRequest,
   type MessageStreamEvent
 } from "./api/client.js";
+import {
+  cachedObservationDetail,
+  providerAttemptLabel,
+  providerObservationLabel,
+  providerReadinessLabel,
+  verificationModeExplanation,
+  verificationModeLabel,
+  verificationOutcomeLabel
+} from "./provider-diagnostics.js";
 import { promptPreviewPlaceholder } from "./data/mock.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
 import { reduceChatMessages, shouldSubmitChatKey, type ChatMessage } from "./chat-state.js";
@@ -342,8 +354,10 @@ function OverviewPage(props: {
         />
         <StatusCard
           title="Providers"
-          status={providerSummaryStatus(props.health.data)}
-          detail={`Chat: ${props.health.data?.providers.chat.provider ?? "unknown"}`}
+          status={`chat ${props.health.data?.providers.chat.readiness ?? "unknown"}`}
+          detail={`Cached chat observation: ${providerObservationLabel(
+            props.health.data?.providers.chat.observed
+          )}`}
         />
       </div>
       <div className="grid grid-cols-[1.1fr_0.9fr] gap-4">
@@ -2070,46 +2084,47 @@ function MemoryPage(props: {
 function ProvidersPage(props: {
   state: ReturnType<typeof useAsyncData<ProvidersStatusResponse>>;
 }): JSX.Element {
-  const [verifying, setVerifying] = useState<
-    "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision" | null
-  >(null);
+  const [verifying, setVerifying] = useState<ProviderCapability | null>(null);
   const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
   const [verificationError, setVerificationError] = useState<string | null>(null);
-  const rows = [
+  const [inspectingChain, setInspectingChain] = useState<ProviderCapability | null>(null);
+  const [chainInspection, setChainInspection] = useState<ProviderChainInspectionResponse | null>(
+    null
+  );
+  const [chainInspectionError, setChainInspectionError] = useState<string | null>(null);
+  const rows: Array<{
+    label: string;
+    capability: ProviderCapability;
+    health: ProviderHealth | undefined;
+  }> = [
     {
       label: "DeepSeek Chat",
       capability: "chat",
-      requirement: "Required",
       health: props.state.data?.providers.chat
     },
     {
       label: "DeepSeek Reasoning",
       capability: "reasoning",
-      requirement: "Required",
       health: props.state.data?.providers.reasoning
     },
     {
       label: "xAI TTS",
       capability: "tts",
-      requirement: "Optional",
       health: props.state.data?.providers.tts
     },
     {
       label: "xAI Vision",
       capability: "vision",
-      requirement: "Optional",
       health: props.state.data?.providers.vision
     },
     {
       label: "Alibaba DashScope STT",
       capability: "stt",
-      requirement: "Optional",
       health: props.state.data?.providers.stt
     },
     {
       label: "Embedding provider",
       capability: "embedding",
-      requirement: "Required for vector memory later",
       health: props.state.data?.providers.embedding
     }
   ];
@@ -2123,14 +2138,32 @@ function ProvidersPage(props: {
     } catch (caught) {
       setVerificationError(caught instanceof Error ? caught.message : "Provider verify failed");
     } finally {
+      // A failed live verification is retained as cached observation metadata
+      // by the server. Refresh the zero-I/O status projection so it is visible.
+      await props.state.refresh();
       setVerifying(null);
+    }
+  }
+
+  async function inspectChain(capability: ProviderCapability): Promise<void> {
+    setInspectingChain(capability);
+    setChainInspection(null);
+    setChainInspectionError(null);
+    try {
+      setChainInspection(await apiClient.verifyProviderChain(capability));
+    } catch (caught) {
+      setChainInspectionError(
+        caught instanceof Error ? caught.message : "Provider chain inspection failed"
+      );
+    } finally {
+      setInspectingChain(null);
     }
   }
 
   return (
     <PageShell
       title="Providers"
-      subtitle="Provider health without exposing keys or raw secret configuration."
+      subtitle="Local readiness and cached observations without exposing keys or raw secret configuration."
     >
       {props.state.loading && (
         <Notice tone="info" title="Loading" message="Fetching provider status." />
@@ -2140,29 +2173,29 @@ function ProvidersPage(props: {
       )}
       <div className="grid grid-cols-3 gap-4">
         <StatusCard
-          title="Chat"
-          status={props.state.data?.providers.chat.status ?? "unknown"}
-          detail={providerConfigurationHint(props.state.data?.providers.chat)}
+          title="Chat diagnostics"
+          status={props.state.data?.providers.chat.readiness ?? "unknown"}
+          detail={cachedObservationDetail(props.state.data?.providers.chat ?? {})}
         />
         <StatusCard
-          title="Reasoning"
-          status={props.state.data?.providers.reasoning.status ?? "unknown"}
-          detail={providerConfigurationHint(props.state.data?.providers.reasoning)}
+          title="Reasoning diagnostics"
+          status={props.state.data?.providers.reasoning.readiness ?? "unknown"}
+          detail={cachedObservationDetail(props.state.data?.providers.reasoning ?? {})}
         />
         <StatusCard
-          title="Optional Media"
-          status={optionalProviderSummary(props.state.data)}
-          detail="TTS, STT, and Vision use provider-chain runtime routes."
+          title="Optional media diagnostics"
+          status={optionalProviderReadinessSummary(props.state.data)}
+          detail={optionalProviderObservationSummary(props.state.data)}
         />
       </div>
       <Notice
         tone="info"
-        title="Status meanings"
-        message="YUVI is real-provider-first by default. configured=false + mock=false means the provider is unavailable until configured. configured=false + mock=true only appears when PROVIDER_ALLOW_MOCKS=true. configured=true + mock=false + degraded means config is present, but remote health is intentionally unverified."
+        title="Diagnostics meanings"
+        message="Local readiness only reports whether YUVI can construct a configured route; it never proves remote reachability. Cached observation is recorded only after an explicit live verification. Legacy available and generic health status are not remote-reachability evidence."
       />
       {props.state.data?.routes && <ProviderPriorityPanel routes={props.state.data.routes} />}
       <Panel
-        title="Manual Verification"
+        title="Live verification (explicit provider I/O)"
         actions={
           <div className="flex gap-2">
             <button
@@ -2170,33 +2203,65 @@ function ProvidersPage(props: {
               disabled={verifying !== null}
               onClick={() => void verify("chat")}
             >
-              {verifying === "chat" ? "Verifying Chat" : "Verify Chat"}
+              {verifying === "chat" ? "Live verifying Chat" : "Live verify Chat"}
             </button>
             <button
               className="button-secondary"
               disabled={verifying !== null}
               onClick={() => void verify("reasoning")}
             >
-              {verifying === "reasoning" ? "Verifying Reasoning" : "Verify Reasoning"}
+              {verifying === "reasoning" ? "Live verifying Reasoning" : "Live verify Reasoning"}
             </button>
             <button
               className="button-secondary"
               disabled={verifying !== null}
               onClick={() => void verify("embedding")}
             >
-              {verifying === "embedding" ? "Verifying Embedding" : "Verify Embedding"}
+              {verifying === "embedding" ? "Live verifying Embedding" : "Live verify Embedding"}
             </button>
           </div>
         }
       >
         <p className="mb-3 text-sm leading-6 text-ink-600">
-          Verification is explicit and may call the selected provider. Results show only safe
-          metadata; API keys and Authorization headers are never displayed.
+          Chat, reasoning, and embedding verification explicitly call the selected provider and may
+          be billable. Results show only safe metadata; API keys and Authorization headers are never
+          displayed.
         </p>
         {verificationError && (
           <Notice tone="error" title="Verification failed" message={verificationError} />
         )}
         {verification && <ProviderVerificationResult result={verification} />}
+      </Panel>
+      <Panel
+        title="Provider-chain inspection"
+        badge="Config-only / no provider I/O"
+        actions={
+          <div className="flex flex-wrap gap-2">
+            {(["chat", "reasoning", "embedding", "tts", "stt", "vision"] as const).map(
+              (capability) => (
+                <button
+                  key={capability}
+                  className="button-secondary"
+                  disabled={inspectingChain !== null}
+                  onClick={() => void inspectChain(capability)}
+                >
+                  {inspectingChain === capability
+                    ? `Inspecting ${capability}`
+                    : `Inspect ${capability} chain`}
+                </button>
+              )
+            )}
+          </div>
+        }
+      >
+        <p className="mb-3 text-sm leading-6 text-ink-600">
+          Chain inspection only evaluates local route configuration and readiness. It makes no
+          provider call: ready routes and skipped attempts are not live provider successes.
+        </p>
+        {chainInspectionError && (
+          <Notice tone="error" title="Chain inspection failed" message={chainInspectionError} />
+        )}
+        {chainInspection && <ProviderChainInspectionResult result={chainInspection} />}
       </Panel>
       <Panel title="Provider Status">
         <div className="overflow-auto rounded-md border border-ink-100">
@@ -2206,7 +2271,9 @@ function ProvidersPage(props: {
                 <th className="table-cell">Capability</th>
                 <th className="table-cell">Requirement</th>
                 <th className="table-cell">Provider</th>
-                <th className="table-cell">Status</th>
+                <th className="table-cell">Local readiness</th>
+                <th className="table-cell">Cached observation</th>
+                <th className="table-cell">Last live observation</th>
                 <th className="table-cell">Configured</th>
                 <th className="table-cell">Mode</th>
                 <th className="table-cell">Base URL</th>
@@ -2218,10 +2285,34 @@ function ProvidersPage(props: {
               {rows.map((row) => (
                 <tr key={row.label}>
                   <td className="table-cell font-medium">{row.label}</td>
-                  <td className="table-cell text-ink-500">{row.requirement}</td>
+                  <td className="table-cell text-ink-500">
+                    {providerRequirementLabel(row.capability, row.health)}
+                  </td>
                   <td className="table-cell">{row.health?.provider ?? "unknown"}</td>
                   <td className="table-cell">
-                    <Pill status={row.health?.status ?? "unknown"} />
+                    <Pill status={row.health?.readiness ?? "unknown"} />
+                    <div className="mt-1 text-xs text-ink-500">Local configuration only</div>
+                  </td>
+                  <td className="table-cell">
+                    <Pill status={row.health?.observed ?? "unknown"} />
+                    <div className="mt-1 text-xs text-ink-500">
+                      {providerObservationLabel(row.health?.observed)}
+                    </div>
+                  </td>
+                  <td className="table-cell text-ink-500">
+                    {row.health?.lastVerifiedAt ? (
+                      <>
+                        <div>{formatDate(row.health.lastVerifiedAt)}</div>
+                        {row.health.lastErrorCode && (
+                          <div className="mt-1 text-rose-700">
+                            {row.health.lastErrorCode}
+                            {row.health.lastError ? `: ${row.health.lastError}` : ""}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      "No live verification recorded"
+                    )}
                   </td>
                   <td className="table-cell text-ink-500">
                     {row.health?.configured ? "configured" : "missing config"}
@@ -2269,12 +2360,17 @@ function ProviderPriorityPanel(props: {
                   <span>
                     <span className="font-medium text-ink-800">{route.provider}</span>
                     <span className="ml-2 text-ink-500">{route.model ?? "no model"}</span>
+                    <div className="mt-1 text-ink-500">
+                      Local readiness: {providerReadinessLabel(route.readiness)}
+                    </div>
+                    <div className="mt-1 text-ink-500">
+                      Cached observation: {providerObservationLabel(route.observed)}
+                    </div>
                     {route.missingFields?.length ? (
                       <div className="text-rose-700">Missing: {route.missingFields.join(", ")}</div>
                     ) : null}
                   </span>
                   <span className="flex items-center gap-1">
-                    <Pill status={route.status ?? "unknown"} />
                     <span className="text-ink-500">{route.mock ? "mock" : "real"}</span>
                   </span>
                 </li>
@@ -2284,10 +2380,42 @@ function ProviderPriorityPanel(props: {
         ))}
       </div>
       <p className="mt-3 text-xs leading-5 text-ink-500">
-        Priority is configured through *_PROVIDER_CHAIN values. Apply Now reloads supported runtime
+        Priority is configured through *_PROVIDER_CHAIN values. Route readiness is local only;
+        observation is cached only after live verification. Apply Now reloads supported runtime
         config; Deep Restart restarts the supervised local runtime and reloads env files.
       </p>
     </Panel>
+  );
+}
+
+function ProviderChainInspectionResult(props: {
+  result: ProviderChainInspectionResponse;
+}): JSX.Element {
+  const result = props.result;
+  return (
+    <div className="rounded-md border border-ink-100 bg-ink-50 p-3 text-sm">
+      <div className="grid grid-cols-4 gap-3">
+        <Definition label="Inspection mode" value="Config-only / no provider I/O" />
+        <Definition label="Capability" value={result.capability} />
+        <Definition label="Local ready routes" value={String(result.readyRouteCount)} />
+        <Definition
+          label="Result"
+          value={result.ok ? "Local route readiness found" : "No locally ready route"}
+        />
+      </div>
+      <p className="mb-3 text-xs leading-5 text-ink-600">
+        {result.message ||
+          "No provider route was called. This inspection does not prove remote reachability."}
+      </p>
+      <div className="label mb-2">Route inspection attempts</div>
+      <ul className="space-y-1 text-xs text-ink-600">
+        {result.attemptedProviders.map((attempt) => (
+          <li key={`${attempt.provider}-${attempt.priority ?? "default"}`}>
+            <span className="font-medium">{attempt.provider}</span>: {providerAttemptLabel(attempt)}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -2442,11 +2570,11 @@ function isDashboardConnectedMessage(
 function isRuntimeEvent(value: unknown): value is RuntimeEvent {
   return Boolean(
     value &&
-    typeof value === "object" &&
-    "id" in value &&
-    "type" in value &&
-    "traceId" in value &&
-    "payload" in value
+      typeof value === "object" &&
+      "id" in value &&
+      "type" in value &&
+      "traceId" in value &&
+      "payload" in value
   );
 }
 
@@ -3076,7 +3204,7 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
   );
 }
 
-function ProviderChainBlock(props: { title: string; routes: ProviderHealth[] }): JSX.Element {
+function ProviderChainBlock(props: { title: string; routes: ProviderRouteHealth[] }): JSX.Element {
   const routes = props.routes;
   return (
     <Panel title={props.title} badge="Fallback order">
@@ -3097,9 +3225,12 @@ function ProviderChainBlock(props: { title: string; routes: ProviderHealth[] }):
                   <div className="text-rose-700">Missing: {route.missingFields.join(", ")}</div>
                 ) : null}
               </span>
-              <span className="flex items-center gap-2">
-                <Pill status={route.status ?? "unknown"} />
-                <span className="text-ink-500">{route.mock ? "mock" : "real"}</span>
+              <span className="text-right text-ink-500">
+                <div>Local readiness: {providerReadinessLabel(route.readiness)}</div>
+                <div className="mt-1">
+                  Cached observation: {providerObservationLabel(route.observed)}
+                </div>
+                <div className="mt-1">{route.mock ? "mock" : "real"}</div>
               </span>
             </li>
           ))}
@@ -3148,9 +3279,9 @@ async function loadFileAsBase64(
 function isTTSResult(value: unknown): value is { audioBase64: string; mimeType: string } {
   return Boolean(
     value &&
-    typeof value === "object" &&
-    typeof (value as { audioBase64?: unknown }).audioBase64 === "string" &&
-    typeof (value as { mimeType?: unknown }).mimeType === "string"
+      typeof value === "object" &&
+      typeof (value as { audioBase64?: unknown }).audioBase64 === "string" &&
+      typeof (value as { mimeType?: unknown }).mimeType === "string"
   );
 }
 
@@ -3194,9 +3325,7 @@ function SettingsPage(): JSX.Element {
   const [applying, setApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<RuntimeSettingsReloadResponse | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
-  const [verifying, setVerifying] = useState<
-    "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision" | null
-  >(null);
+  const [verifying, setVerifying] = useState<ProviderCapability | null>(null);
   const [verification, setVerification] = useState<ProviderVerificationResponse | null>(null);
   const [clearedSecrets, setClearedSecrets] = useState<Set<SettingsKey>>(() => new Set());
   const [dashboardDevToken, setDashboardDevTokenState] = useState("");
@@ -3441,11 +3570,10 @@ function SettingsPage(): JSX.Element {
     }
   }
 
-  async function verify(
-    capability: "chat" | "reasoning" | "embedding" | "tts" | "stt" | "vision"
-  ): Promise<void> {
+  async function verify(capability: ProviderCapability): Promise<void> {
     setVerifying(capability);
     setVerification(null);
+    const configOnly = capability === "tts" || capability === "stt" || capability === "vision";
     try {
       const result = await apiClient.verifyProvider(capability);
       if (mountedRef.current) setVerification(result);
@@ -3456,10 +3584,15 @@ function SettingsPage(): JSX.Element {
           provider: "unknown",
           capability,
           mock: false,
+          ...(configOnly ? { configOnly: true as const } : {}),
+          verificationMode: configOnly ? "config_only" : "live",
           error: caught instanceof Error ? caught.message : "Provider 验证失败"
         });
       }
     } finally {
+      // Status reads are local/cache-only and let the settings summaries show
+      // any observation recorded by an explicit live verification.
+      void settings.refresh();
       if (mountedRef.current) setVerifying(null);
     }
   }
@@ -3493,11 +3626,11 @@ function SettingsPage(): JSX.Element {
     savedDeepSeekButRuntimeMock ||
     Boolean(
       settings.data &&
-      (settings.data.memory.memoryRepository !== settings.data.memory.activeMemoryRepository ||
-        settings.data.memory.memoryExtractor !== settings.data.memory.activeMemoryExtractor ||
-        settings.data.runtime.serverHost !== settings.data.runtime.activeServerHost ||
-        settings.data.runtime.serverPort !== settings.data.runtime.activeServerPort ||
-        settings.data.runtime.eventBus !== settings.data.runtime.activeEventBus)
+        (settings.data.memory.memoryRepository !== settings.data.memory.activeMemoryRepository ||
+          settings.data.memory.memoryExtractor !== settings.data.memory.activeMemoryExtractor ||
+          settings.data.runtime.serverHost !== settings.data.runtime.activeServerHost ||
+          settings.data.runtime.serverPort !== settings.data.runtime.activeServerPort ||
+          settings.data.runtime.eventBus !== settings.data.runtime.activeEventBus)
     );
   const configLayerKeys = [
     "SERVER_HOST",
@@ -3947,6 +4080,11 @@ function SettingsPage(): JSX.Element {
           保存并应用会重新加载可热更新的 Runtime 配置；Deep Restart 会重启受监管的 Runtime。
         </p>
       </Panel>
+      <Notice
+        tone="info"
+        title="Provider diagnostics"
+        message="Local readiness is a configuration check, not proof that a provider is reachable. Cached observation comes only from an explicit live check. Chat, reasoning, and embedding controls below perform provider I/O and may be billable; TTS, STT, and Vision controls are config-only and make no provider call."
+      />
       <div className="grid grid-cols-3 gap-4">
         <Panel
           title="DeepSeek"
@@ -3957,14 +4095,14 @@ function SettingsPage(): JSX.Element {
                 disabled={verifying !== null}
                 onClick={() => void verify("chat")}
               >
-                Verify Chat
+                {verifying === "chat" ? "Live verifying Chat" : "Live verify Chat"}
               </button>
               <button
                 className="button-secondary"
                 disabled={verifying !== null}
                 onClick={() => void verify("reasoning")}
               >
-                Verify Reasoning
+                {verifying === "reasoning" ? "Live verifying Reasoning" : "Live verify Reasoning"}
               </button>
             </div>
           }
@@ -3980,9 +4118,16 @@ function SettingsPage(): JSX.Element {
           />
           <SettingsInput form={form} name="DEEPSEEK_CHAT_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="DEEPSEEK_REASONING_MODEL" setForm={setForm} />
-          {verification && <ProviderVerificationResult result={verification} />}
+          <ProviderDiagnosticsSummary
+            label="Chat"
+            health={settings.data?.activeRuntimeConfig.providers.chat}
+          />
+          <ProviderDiagnosticsSummary
+            label="Reasoning"
+            health={settings.data?.activeRuntimeConfig.providers.reasoning}
+          />
         </Panel>
-        <Panel title="xAI" badge="Optional / placeholder">
+        <Panel title="xAI" badge="Optional · TTS and Vision implemented">
           <SettingsInput form={form} name="XAI_API_BASEURL" setForm={setForm} />
           <SecretInput
             label="XAI_API_KEY"
@@ -3995,6 +4140,14 @@ function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="XAI_TTS_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="XAI_TTS_VOICE" setForm={setForm} />
           <SettingsInput form={form} name="XAI_VISION_MODEL" setForm={setForm} />
+          <ProviderDiagnosticsSummary
+            label="TTS (optional)"
+            health={settings.data?.activeRuntimeConfig.providers.tts}
+          />
+          <ProviderDiagnosticsSummary
+            label="Vision (optional)"
+            health={settings.data?.activeRuntimeConfig.providers.vision}
+          />
         </Panel>
         <Panel title="NVIDIA API" badge="OpenAI-compatible v1">
           <SettingsInput form={form} name="NVIDIA_API_BASEURL" setForm={setForm} />
@@ -4024,7 +4177,7 @@ function SettingsPage(): JSX.Element {
         </Panel>
         <Panel
           title="DashScope / Embedding"
-          badge="Optional / placeholder"
+          badge="DashScope STT optional · implemented"
           actions={
             <div className="flex flex-wrap gap-2">
               <button
@@ -4032,28 +4185,28 @@ function SettingsPage(): JSX.Element {
                 disabled={verifying !== null}
                 onClick={() => void verify("embedding")}
               >
-                {verifying === "embedding" ? "Verifying Embedding" : "Verify Embedding"}
+                {verifying === "embedding" ? "Live verifying Embedding" : "Live verify Embedding"}
               </button>
               <button
                 className="button-secondary"
                 disabled={verifying !== null}
                 onClick={() => void verify("stt")}
               >
-                {verifying === "stt" ? "Verifying STT" : "Verify STT"}
+                {verifying === "stt" ? "Inspecting STT config" : "Inspect STT config"}
               </button>
               <button
                 className="button-secondary"
                 disabled={verifying !== null}
                 onClick={() => void verify("tts")}
               >
-                {verifying === "tts" ? "Verifying TTS" : "Verify TTS"}
+                {verifying === "tts" ? "Inspecting TTS config" : "Inspect TTS config"}
               </button>
               <button
                 className="button-secondary"
                 disabled={verifying !== null}
                 onClick={() => void verify("vision")}
               >
-                {verifying === "vision" ? "Verifying Vision" : "Verify Vision"}
+                {verifying === "vision" ? "Inspecting Vision config" : "Inspect Vision config"}
               </button>
             </div>
           }
@@ -4068,9 +4221,16 @@ function SettingsPage(): JSX.Element {
             onClear={() => clearSecret(setForm, setClearedSecrets, "DASHSCOPE_API_KEY")}
           />
           <SettingsInput form={form} name="DASHSCOPE_STT_MODEL" setForm={setForm} />
+          <ProviderDiagnosticsSummary
+            label="STT (optional)"
+            health={settings.data?.activeRuntimeConfig.providers.stt}
+          />
           <SettingsInput form={form} name="EMBEDDING_PROVIDER" setForm={setForm} />
           <div className="rounded-md border border-ink-100 bg-ink-50 p-2 text-xs text-ink-600">
-            Status: {settings.data?.providers.embedding.status?.status ?? "unknown"} · mode:{" "}
+            Local readiness:{" "}
+            {providerReadinessLabel(settings.data?.providers.embedding.status?.readiness)} · Cached
+            observation:{" "}
+            {providerObservationLabel(settings.data?.providers.embedding.status?.observed)} · mode:{" "}
             {settings.data?.providers.embedding.status?.mode ?? "unknown"} · mock:{" "}
             {String(settings.data?.providers.embedding.status?.mock ?? false)} · dimensions:{" "}
             {settings.data?.providers.embedding.status?.dimensions ??
@@ -4103,6 +4263,7 @@ function SettingsPage(): JSX.Element {
           />
         </Panel>
       </div>
+      {verification && <ProviderVerificationResult result={verification} />}
       <div className="flex justify-end gap-3">
         <button
           className="button-secondary"
@@ -4530,9 +4691,7 @@ function StatusCard(props: {
         <div className="text-lg font-semibold">{props.status}</div>
       </div>
       <div className="mt-2 text-sm text-ink-500">{props.detail}</div>
-      {props.mock && (
-        <div className="mt-3 text-xs font-medium text-amber-700">Mock / placeholder</div>
-      )}
+      {props.mock && <div className="mt-3 text-xs font-medium text-amber-700">Mock mode</div>}
     </div>
   );
 }
@@ -4627,12 +4786,21 @@ function ProviderVerificationResult(props: { result: ProviderVerificationRespons
   const result = props.result;
   return (
     <div className="grid grid-cols-6 gap-3 rounded-md border border-ink-100 bg-ink-50 p-3 text-sm">
-      <Definition label="Status" value={result.ok ? "ok" : "failed"} />
+      <div className="col-span-6 rounded-md border border-ink-200 bg-white px-3 py-2 text-xs text-ink-700">
+        <div className="font-semibold">{verificationModeLabel(result)}</div>
+        <div className="mt-1 text-ink-600">{verificationModeExplanation(result)}</div>
+      </div>
+      <Definition label="Result" value={verificationOutcomeLabel(result)} />
       <Definition label="Capability" value={result.capability} />
       <Definition label="Provider" value={result.provider} />
       <Definition label="Mode" value={result.mock ? "mock" : "real"} />
       <Definition label="Model" value={result.model ?? "unknown"} />
       <Definition label="Latency" value={formatLatency(result.latencyMs)} />
+      <Definition label="Local readiness" value={providerReadinessLabel(result.readiness)} />
+      <Definition label="Cached observation" value={providerObservationLabel(result.observed)} />
+      <div className="col-span-4">
+        <Definition label="Cached observation metadata" value={cachedObservationDetail(result)} />
+      </div>
       {result.capability === "embedding" && (
         <>
           <Definition
@@ -4670,11 +4838,34 @@ function ProviderVerificationResult(props: { result: ProviderVerificationRespons
           <Definition label="Token Usage" value={formatTokenUsage(result.tokenUsage)} />
         </div>
       )}
+      {result.message && (
+        <div className="col-span-6 text-ink-600">
+          <span className="font-semibold">Inspection note:</span> {result.message}
+        </div>
+      )}
+      {result.errorCode && (
+        <div className="col-span-6 text-rose-700">
+          <span className="font-semibold">Error code:</span> {result.errorCode}
+        </div>
+      )}
       {result.error && (
         <div className="col-span-6 text-rose-700">
           <span className="font-semibold">Error:</span> {result.error}
         </div>
       )}
+    </div>
+  );
+}
+
+function ProviderDiagnosticsSummary(props: {
+  label: string;
+  health: ProviderHealth | undefined;
+}): JSX.Element {
+  return (
+    <div className="mt-3 rounded-md border border-ink-100 bg-ink-50 p-2 text-xs text-ink-600">
+      <div className="font-semibold text-ink-800">{props.label}</div>
+      <div className="mt-1">Local readiness: {providerReadinessLabel(props.health?.readiness)}</div>
+      <div className="mt-1">Cached observation: {cachedObservationDetail(props.health ?? {})}</div>
     </div>
   );
 }
@@ -4801,37 +4992,40 @@ function memoryModeDetail(mode: string): string {
   return "Mode is inferred from /health and may need a server response update.";
 }
 
-function providerSummaryStatus(health: HealthResponse | null): string {
-  if (!health) {
-    return "unknown";
-  }
-  return health.providers.chat.status === "healthy" ? "healthy" : "degraded";
-}
-
-function optionalProviderSummary(status: ProvidersStatusResponse | null): string {
+function optionalProviderReadinessSummary(status: ProvidersStatusResponse | null): string {
   if (!status) {
     return "unknown";
   }
   const optional = [status.providers.tts, status.providers.stt, status.providers.vision];
-  return optional.every((provider) => provider.status === "healthy") ? "healthy" : "optional";
+  const ready = optional.filter((provider) => provider.readiness === "ready").length;
+  return `${ready}/${optional.length} locally ready`;
 }
 
-function providerConfigurationHint(
-  health: ProvidersStatusResponse["providers"]["chat"] | undefined
+function optionalProviderObservationSummary(status: ProvidersStatusResponse | null): string {
+  if (!status) {
+    return "No provider diagnostics loaded";
+  }
+  return [
+    `TTS: ${providerObservationLabel(status.providers.tts.observed)}`,
+    `STT: ${providerObservationLabel(status.providers.stt.observed)}`,
+    `Vision: ${providerObservationLabel(status.providers.vision.observed)}`
+  ].join(" · ");
+}
+
+function providerRequirementLabel(
+  capability: ProviderCapability,
+  health: ProviderHealth | undefined
 ): string {
   if (!health) {
-    return "Not configured";
-  }
-  if (health.mock) {
-    return "Mock fallback";
-  }
-  if (health.configured) {
-    return health.available ? "Configured, unverified" : "Configured, unavailable";
+    return "Loading";
   }
   if (health.required) {
-    return "Missing config or unavailable";
+    return "Required";
   }
-  return "Optional, not configured";
+  if (capability === "embedding") {
+    return "Optional until vector memory is enabled";
+  }
+  return "Optional";
 }
 
 function embeddingSettingsHint(
@@ -4847,7 +5041,7 @@ function embeddingSettingsHint(
       </div>
     );
   }
-  if (health.mode === "unavailable" || health.status === "unavailable") {
+  if (health.readiness === "not_ready") {
     return (
       <div className="mt-1 text-rose-700">
         OpenAI-compatible embedding provider is selected but not configured or unavailable. Fill
@@ -4859,8 +5053,8 @@ function embeddingSettingsHint(
   if (health.configured && health.semanticEmbedding) {
     return (
       <div className="mt-1 text-emerald-700">
-        Real embedding provider configured. Run Verify Embedding if available, then run pnpm
-        memory:embed:backfill for existing memories.
+        Real embedding provider is locally configured. Run Live verify Embedding to record remote
+        reachability, then run pnpm memory:embed:backfill for existing memories.
       </div>
     );
   }
