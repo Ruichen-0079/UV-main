@@ -16,6 +16,7 @@ from agentbus.codexpool import (
     release_slot,
 )
 from agentbus.machine import IMPLEMENTING
+from agentbus.protocol import Envelope, render_envelope
 from agentbus.runner import build_prompt
 from agentbus.tests.harness import AgentbusTest
 
@@ -37,6 +38,129 @@ class CodexPoolTests(AgentbusTest):
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(text)
         return path
+
+    def _install_final_review(
+        self,
+        state: dict,
+        head: str,
+        *,
+        status: str = "REPAIR",
+        source_id: str = "5331069366",
+        reviewed_head: str | None = None,
+    ) -> None:
+        base = "b" * 40
+        state["pr"] = 44
+        state["heads"]["current"] = head
+        state["heads"]["implemented"] = head
+        state["publication"]["commit"] = head
+        state["github"]["pr"] = {
+            "number": 44,
+            "headRefOid": head,
+            "baseRefOid": base,
+            "state": "OPEN",
+        }
+        reviewed = reviewed_head or head
+        envelope = Envelope(
+            kind="GPT_MERGE_REVIEW",
+            fields={
+                "STATUS": status,
+                "STREAM": state["stream_id"],
+                "PR": "44",
+                "REVIEWED_HEAD": reviewed,
+                "REVIEWED_BASE": base,
+                "FINDINGS": "value.revision\nvalue.changedSections\nvalue.restartServices",
+            },
+            source="github",
+            source_id=source_id,
+        )
+        envelope.raw = render_envelope(envelope)
+        state["envelopes"]["GPT_MERGE_REVIEW"] = envelope.as_record()
+
+    def test_current_final_repair_and_findings_are_in_impl_prompt(self) -> None:
+        store, head = self.prepared_impl("prompt-repair")
+        state = store.load()
+        self._install_final_review(state, head)
+        prompt = build_prompt(state, "impl", os.path.join(self.repo, ".ai", "HANDOFF_PROTOCOL.md"))
+        self.assertIn("Latest FINAL_GPT repair authority:", prompt)
+        self.assertIn("5331069366", prompt)
+        self.assertIn("value.revision", prompt)
+        self.assertIn("value.changedSections", prompt)
+        self.assertIn("value.restartServices", prompt)
+        self.assertIn("does not authorize scope expansion", prompt)
+        self.assertIn("emit BLOCKED rather than READY_FOR_AUDIT", prompt)
+
+    def test_stale_or_non_repair_final_review_is_not_impl_authority(self) -> None:
+        store, head = self.prepared_impl("prompt-fences")
+        for status in ("PASS", "WAIT", "HUMAN"):
+            state = store.load()
+            self._install_final_review(state, head, status=status, source_id=f"{status}-1")
+            prompt = build_prompt(state, "impl", os.path.join(self.repo, ".ai", "HANDOFF_PROTOCOL.md"))
+            self.assertNotIn("Latest FINAL_GPT repair authority:", prompt, status)
+        state = store.load()
+        self._install_final_review(state, head, reviewed_head="c" * 40, source_id="stale-1")
+        prompt = build_prompt(state, "impl", os.path.join(self.repo, ".ai", "HANDOFF_PROTOCOL.md"))
+        self.assertNotIn("Latest FINAL_GPT repair authority:", prompt)
+
+    def test_historical_noop_marker_is_requeued_without_consuming_repair_cycle(self) -> None:
+        store, head = self.prepared_impl("repair-requeue")
+        state = store.load()
+        self._install_final_review(state, head)
+        state["final_repair"] = {"consumed_review": "5331069366"}
+        state["repair_cycles"] = 1
+        state["publication"].update({"status": "pushed", "commit": head, "pushed": True})
+        report = Envelope(
+            kind="CODEX_REPORT",
+            fields={
+                "STATUS": "READY_FOR_AUDIT",
+                "STREAM": state["stream_id"],
+                "IMPLEMENTED_HEAD": head,
+            },
+            source="github",
+            source_id="old-report",
+        )
+        report.raw = render_envelope(report)
+        state["envelopes"]["CODEX_REPORT"] = report.as_record()
+        from agentbus.runner import impl_work_key, requeue_noop_repair_generation
+
+        key = impl_work_key(state)
+        runtime = store.load_runtime()
+        runtime.setdefault("last_done_key", {})["impl"] = key
+        store.save_runtime(runtime)
+        store.save(state)
+        before = state["repair_cycles"]
+        self.assertTrue(requeue_noop_repair_generation(store, store.load()))
+        self.assertFalse((store.load_runtime().get("last_done_key") or {}).get("impl"))
+        self.assertEqual(store.load()["repair_cycles"], before)
+
+    def test_noop_repair_retries_other_slot_without_done_or_audit(self) -> None:
+        store, head = self.prepared_impl("repair-noop")
+        state = store.load()
+        self._install_final_review(state, head)
+        state["final_repair"] = {"consumed_review": "5331069366"}
+        state["phase"] = IMPLEMENTING
+        state["repair_cycles"] = 1
+        state["publication"].update({"status": "pushed", "commit": head, "pushed": True})
+        store.save(state)
+        invocations = os.path.join(self.root, "repair-noop-invocations.txt")
+        os.environ.update(
+            {
+                "FAKE_GH_HEAD": head,
+                "FAKE_CODEX_STREAM": "repair-noop",
+                "FAKE_CODEX_KIND": "CODEX_REPORT",
+                "FAKE_CODEX_STATUS": "READY_FOR_AUDIT",
+                "FAKE_CODEX_INVOCATIONS": invocations,
+            }
+        )
+        result = self.agentctl("run", "repair-noop", "impl", "--once")
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        with open(invocations, encoding="utf-8") as handle:
+            self.assertEqual([line.split()[0] for line in handle], ["primary", "secondary"])
+        final = store.load()
+        self.assertEqual(final["repair_cycles"], 1)
+        self.assertEqual(final["phase"], IMPLEMENTING)
+        self.assertNotIn("impl", store.load_runtime().get("last_done_key") or {})
+        self.assertTrue((final.get("codex_interruption") or {}).get("no_op_repair"))
+        self.assertFalse(any(item["argv"][-1] == "audit" for item in self.executor_launches))
 
     def test_primary_then_secondary_then_wait(self) -> None:
         primary = acquire_slot(self.ctx, stream="a", role="impl")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
@@ -8,7 +9,10 @@ from agentbus.gitutil import head_sha, is_dirty
 from agentbus.machine import BLOCKED_FOR_REVIEW, IMPLEMENTING, READY_FOR_AUDIT, RE_REVIEW_REQUIRED
 from agentbus.protocol import Envelope
 from agentbus.publish import (
+    _matching_report_comment,
+    _report_body_for_github,
     consume_product_repair,
+    ensure_durable_report,
     publish_implementation,
     reset_infra_repair_budget,
     validate_publication,
@@ -49,6 +53,104 @@ class PublishTests(AgentbusTest):
         self.assertEqual(head_sha(linked), result["commit"])
         shown = subprocess.check_output(["git", "-C", linked, "show", result["commit"], "--stat"], text=True)
         self.assertIn("feature.txt", shown)
+
+    def test_required_repair_noop_does_not_reuse_old_publication(self) -> None:
+        _, linked = self._linked()
+        self.create_stream("s1", "--worktree", linked)
+        store = self.store("s1")
+        state = store.load()
+        baseline = head_sha(linked)
+        state["publication"]["commit"] = baseline
+        before = dict(state["publication"])
+        result = publish_implementation(
+            store,
+            state,
+            self.ctx,
+            baseline_head=baseline,
+            required_repair_head=baseline,
+            push=False,
+        )
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["no_op_repair"])
+        self.assertEqual(result["commit"], baseline)
+        self.assertEqual(state["publication"], before)
+
+    def test_required_repair_advances_and_retry_of_new_commit_is_idempotent(self) -> None:
+        _, linked = self._linked()
+        self.create_stream("s1", "--worktree", linked, "--branch", "s1-impl")
+        store = self.store("s1")
+        state = store.load()
+        state["branch"] = "s1-impl"
+        baseline = head_sha(linked)
+        atomic_write_text(os.path.join(linked, "repair.txt"), "bracket access\n")
+        first = publish_implementation(
+            store,
+            state,
+            self.ctx,
+            baseline_head=baseline,
+            required_repair_head=baseline,
+            push=True,
+        )
+        self.assertTrue(first["ok"], first)
+        self.assertNotEqual(first["commit"], baseline)
+        second = publish_implementation(
+            store,
+            state,
+            self.ctx,
+            baseline_head=first["commit"],
+            required_repair_head=baseline,
+            push=True,
+        )
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["commit"], first["commit"])
+
+    def test_codex_report_matching_requires_exact_current_body(self) -> None:
+        self.create_stream("report-match", "--pr", "44")
+        store = self.store("report-match")
+        state = store.load()
+        head = "a" * 40
+        state["heads"]["implemented"] = head
+        state["publication"]["commit"] = head
+        raw = (
+            "[CODEX_REPORT]\n\nSTATUS: READY_FOR_AUDIT\n\n"
+            "STREAM: report-match\n\nIMPLEMENTED_HEAD: " + head + "\n\n"
+            "CHANGED_FILES: - user-settings-client.ts\n"
+        )
+        state["envelopes"]["CODEX_REPORT"] = {
+            "kind": "CODEX_REPORT",
+            "status": "READY_FOR_AUDIT",
+            "head": head,
+            "digest": "current-digest",
+            "raw": raw,
+            "fields": {
+                "STATUS": "READY_FOR_AUDIT",
+                "STREAM": "report-match",
+                "IMPLEMENTED_HEAD": head,
+            },
+        }
+        expected = _report_body_for_github(state).strip()
+        old = {
+            "id": 5327117770,
+            "body": expected.replace("user-settings-client.ts", "old-report.ts"),
+        }
+        self.assertIsNone(_matching_report_comment([old], state))
+        current = {"id": 5330000000, "body": expected}
+        self.assertEqual(_matching_report_comment([old, current], state), current)
+
+        comments_path = os.path.join(self.root, "report-comments.json")
+        with open(comments_path, "w", encoding="utf-8") as handle:
+            json.dump([old], handle)
+        os.environ["FAKE_GH_COMMENTS"] = comments_path
+        first = ensure_durable_report(self.ctx, store, state)
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(first["comment_id"], "555001")
+        with open(comments_path, encoding="utf-8") as handle:
+            comments = json.load(handle)
+        self.assertEqual({str(item["id"]) for item in comments}, {"5327117770", "555001"})
+        second = ensure_durable_report(self.ctx, store, state)
+        self.assertTrue(second["ok"], second)
+        self.assertTrue(second["already"])
+        self.assertEqual(second["comment_id"], "555001")
 
     def test_ready_for_audit_refused_if_uncommitted(self) -> None:
         _, linked = self._linked()

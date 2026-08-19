@@ -211,6 +211,7 @@ def publish_implementation(
     out_write: Any = None,
     clean_at_start: bool | None = None,
     capacity_takeover: bool = False,
+    required_repair_head: str | None = None,
 ) -> dict[str, Any]:
     def say(msg: str) -> None:
         if out_write:
@@ -226,6 +227,22 @@ def publish_implementation(
     pub = state.setdefault("publication", empty_publication())
     pending_commit = pub.get("commit")
     current = head_sha(worktree)
+
+    if (
+        required_repair_head
+        and baseline_head == required_repair_head
+        and current == required_repair_head
+        and not is_dirty(worktree)
+    ):
+        reason = "Final GPT REPAIR requires a concrete change, but READY_FOR_AUDIT did not advance HEAD"
+        say(f"rejecting no-op repair at {current[:12]}")
+        return {
+            "ok": False,
+            "no_op_repair": True,
+            "reason": reason,
+            "commit": current,
+            "files": [],
+        }
 
     if pending_commit and current == pending_commit and not is_dirty(worktree):
         say(f"commit {pending_commit[:12]} already exists; skipping duplicate commit")
@@ -577,17 +594,13 @@ def _report_body_for_github(state: dict[str, Any]) -> str | None:
 
 
 def _matching_report_comment(comments: list[dict[str, Any]], state: dict[str, Any]) -> dict[str, Any] | None:
-    implemented = (state.get("heads") or {}).get("implemented") or ""
-    stream = state.get("stream_id") or ""
+    expected = (_report_body_for_github(state) or "").strip()
+    if not expected:
+        return None
     for comment in comments:
-        body = comment.get("body") or ""
-        if "[CODEX_REPORT]" not in body:
-            continue
-        if implemented and implemented not in body:
-            continue
-        if stream and f"STREAM: {stream}" not in body and f"STREAM:{stream}" not in body:
-            continue
-        return comment
+        body = str(comment.get("body") or "").strip()
+        if body == expected:
+            return comment
     return None
 
 
@@ -604,10 +617,14 @@ def ensure_durable_report(
     rec = (state.get("envelopes") or {}).get("CODEX_REPORT")
     if not isinstance(rec, dict) or not rec.get("raw"):
         return {"ok": False, "reason": "no local CODEX_REPORT artifact"}
-    if report_is_durable(state):
-        return {"ok": True, "already": True, "comment_id": rec.get("source_id") or (state.get("publication") or {}).get("report_comment_id")}
     pr = state.get("pr")
     if not pr:
+        if report_is_durable(state):
+            return {
+                "ok": True,
+                "already": True,
+                "comment_id": rec.get("source_id") or (state.get("publication") or {}).get("report_comment_id"),
+            }
         return {"ok": False, "reason": "no PR for durable report", "retryable": True}
     repo = state.get("impl_worktree") or ctx.repo_root
     try:
@@ -626,19 +643,17 @@ def ensure_durable_report(
     if not body:
         return {"ok": False, "reason": "local CODEX_REPORT is empty"}
     try:
-        posted = post_pr_comment(repo, int(pr), body, env=env)
+        post_pr_comment(repo, int(pr), body, env=env)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": str(exc)[:300], "retryable": True}
-    comment_id = str((posted or {}).get("id") or "")
+    try:
+        comments = list_issue_comments(repo, ctx.origin, int(pr), env=env)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"posted but could not verify: {exc}"[:300], "retryable": True}
+    match = _matching_report_comment(comments, state)
+    comment_id = str((match or {}).get("id") or "")
     if not comment_id:
-        try:
-            comments = list_issue_comments(repo, ctx.origin, int(pr), env=env)
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "reason": f"posted but could not verify: {exc}"[:300], "retryable": True}
-        match = _matching_report_comment(comments, state)
-        comment_id = str((match or {}).get("id") or "")
-        if not comment_id:
-            return {"ok": False, "reason": "CODEX_REPORT post not visible on PR", "retryable": True}
+        return {"ok": False, "reason": "CODEX_REPORT post not visible on PR", "retryable": True}
     rec["source"] = "github"
     rec["source_id"] = comment_id
     publication = state.setdefault("publication", {})

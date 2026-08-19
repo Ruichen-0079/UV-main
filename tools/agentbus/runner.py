@@ -145,6 +145,84 @@ def impl_work_key(state: dict[str, Any]) -> str:
     )
 
 
+def final_repair_authority(state: dict[str, Any], campaign: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Return the exact-current Final GPT repair authority, if any."""
+
+    from agentbus.decision import final_review_for_current
+
+    github = state.get("github") if isinstance(state.get("github"), dict) else {}
+    live = github.get("pr") if isinstance(github.get("pr"), dict) else {}
+    review = final_review_for_current(state, campaign or {}, live)
+    if review and review.get("normalized_status") == "REPAIR":
+        return review
+    return None
+
+
+def repair_authority_head(review: dict[str, Any] | None) -> str | None:
+    if not review:
+        return None
+    fields = review.get("fields") if isinstance(review.get("fields"), dict) else {}
+    head = review.get("head") or fields.get("REVIEWED_HEAD")
+    return str(head).strip() if head else None
+
+
+def requeue_noop_repair_generation(
+    store: StreamStore,
+    state: dict[str, Any],
+    campaign: dict[str, Any] | None = None,
+) -> bool:
+    """Forget only a historical completion marker for a repair no-op.
+
+    Older AgentBus versions could mark a READY_FOR_AUDIT/no-change result as
+    done while the durable Final GPT authority still required a change at the
+    same head.  This narrowly recovers that marker without changing workflow
+    authority or consuming another repair cycle.
+    """
+
+    if campaign is None:
+        from agentbus.campaign import infer_campaign_id, load_campaign
+
+        campaign = load_campaign(store.ctx, infer_campaign_id(state))
+    runtime = store.load_runtime()
+    key = impl_work_key(state)
+    if runtime.get("last_done_key", {}).get("impl") != key:
+        return False
+
+    review = final_repair_authority(state, campaign)
+    repair_head = repair_authority_head(review)
+    if not review or not repair_head:
+        return False
+
+    final_repair = state.get("final_repair") if isinstance(state.get("final_repair"), dict) else {}
+    if final_repair.get("consumed_review") != review.get("source_id"):
+        return False
+
+    heads = state.get("heads") if isinstance(state.get("heads"), dict) else {}
+    publication = state.get("publication") if isinstance(state.get("publication"), dict) else {}
+    report = (state.get("envelopes") or {}).get("CODEX_REPORT")
+    report_fields = (
+        report.get("fields")
+        if isinstance(report, dict) and isinstance(report.get("fields"), dict)
+        else {}
+    )
+    current_head = heads.get("current") or heads.get("implemented") or publication.get("commit")
+    report_head = report_fields.get("IMPLEMENTED_HEAD")
+    if not (
+        current_head == repair_head
+        and publication.get("commit") == repair_head
+        and report_head == repair_head
+    ):
+        return False
+
+    runtime.setdefault("last_done_key", {}).pop("impl", None)
+    store.save_runtime(runtime)
+    store.append_event(
+        "repair-noop-requeued",
+        {"work_key": key, "repair_head": repair_head, "review_source_id": review.get("source_id")},
+    )
+    return True
+
+
 def audit_work_key(state: dict[str, Any]) -> str:
     request = state.get("audit_request") or {}
     if request.get("status") == "pending":
@@ -239,7 +317,12 @@ def waiting_banner(state: dict[str, Any], role: str, *, github: dict[str, Any] |
     )
 
 
-def build_prompt(state: dict[str, Any], role: str, protocol_path: str) -> str:
+def build_prompt(
+    state: dict[str, Any],
+    role: str,
+    protocol_path: str,
+    campaign: dict[str, Any] | None = None,
+) -> str:
     envelopes = state.get("envelopes") or {}
     spec = (envelopes.get("GPT_SPEC") or {}).get("raw") or "(none)"
     review = (envelopes.get("GPT_REVIEW") or {}).get("raw") or "(none)"
@@ -265,6 +348,21 @@ Publish a [CODEX_AUDIT] envelope as your final message.
 If AUDITED_HEAD would not match IMPLEMENTED_HEAD, stop and emit [BLOCKER].
 """
         required = "[CODEX_AUDIT]"
+    final_repair = final_repair_authority(state, campaign) if role == "impl" else None
+    repair_context = ""
+    if final_repair:
+        repair_context = f"""
+Latest FINAL_GPT repair authority:
+Source comment: {final_repair.get("source_id") or "(unknown)"}
+{final_repair.get("raw") or "(none)"}
+
+FINAL_GPT REPAIR DUTIES:
+- GPT_MERGE_REVIEW REPAIR is implementation authority only for the concrete repair findings already inside approved scope.
+- It does not authorize scope expansion.
+- It does not supersede unrelated GPT_SPEC constraints.
+- Implement the concrete Final GPT findings before emitting READY_FOR_AUDIT.
+- If the repair cannot be completed honestly inside approved scope, emit BLOCKED rather than READY_FOR_AUDIT.
+"""
     takeover = ""
     interruption = state.get("codex_interruption") or {}
     if (
@@ -291,6 +389,7 @@ PROTOCOL FILE: {protocol_path}
 
 {duties}
 {takeover}
+{repair_context}
 
 Read AGENTS.md and {protocol_path} if present.
 
@@ -311,6 +410,57 @@ Latest CODEX_AUDIT:
 
 Your final message MUST contain a {required} envelope using the protocol fields.
 """
+
+
+def reject_noop_repair(
+    ctx: RepoContext,
+    store: StreamStore,
+    state: dict[str, Any],
+    *,
+    slot_name: str,
+    workdir: str,
+    work_key: str,
+    output: str,
+    env: dict[str, str] | None,
+    out: TextIO,
+) -> int:
+    """Reject READY_FOR_AUDIT when a required repair did not advance HEAD."""
+
+    from agentbus.codexpool import mark_failure, pool_status
+
+    reason = "Final GPT REPAIR produced READY_FOR_AUDIT without advancing the reviewed HEAD"
+    failure = mark_failure(ctx, slot_name, output, env=env)
+    status = pool_status(ctx, env)
+    state["status"]["impl"] = "INTERRUPTED_FAILED"
+    state["codex_interruption"] = {
+        "kind": "INTERRUPTED_FAILED",
+        "role": "impl",
+        "slot": slot_name,
+        "work_key": work_key,
+        "dirty": False,
+        "head": head_sha(workdir),
+        "no_op_repair": True,
+        "reason": reason,
+        "at": utc_now(),
+    }
+    if status.get("available"):
+        refresh_next(state)
+        store.save(state)
+        out.write(f"Git publication: rejected no-op repair ({reason}); retrying same generation.\n")
+        return 75
+
+    slots = list((status.get("slots") or {}).values())
+    deadlines = [str(item.get("next_probe_at")) for item in slots if item.get("next_probe_at")]
+    state["wait"] = {
+        "kind": "RUNNER_TEMPORARY",
+        "reason": "both Codex slots produced no-change Final GPT repairs; waiting before reprobe",
+        "until": min(deadlines) if deadlines else failure.get("next_probe_at"),
+        "set_at": utc_now(),
+    }
+    refresh_next(state)
+    store.save(state)
+    out.write("Both Codex slots produced no-change repairs; waiting before bounded reprobe.\n")
+    return 75
 
 
 def invoke_codex(
@@ -419,13 +569,17 @@ def invoke_codex(
     if (state.get("wait") or {}).get("kind") in {"CODEX_CAPACITY", "CODEX_BUSY", "RUNNER_TEMPORARY"}:
         state.pop("wait", None)
 
+    from agentbus.campaign import infer_campaign_id, load_campaign
+
+    campaign = load_campaign(ctx, infer_campaign_id(state))
+    final_repair = final_repair_authority(state, campaign) if role == "impl" else None
     protocol_path = os.path.join(ctx.repo_root, ".ai", "HANDOFF_PROTOCOL.md")
     if not os.path.isfile(protocol_path):
         # Runner may execute from another worktree of the same repo.
         here = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".ai", "HANDOFF_PROTOCOL.md"))
         if os.path.isfile(here):
             protocol_path = here
-    prompt = build_prompt(state, role, protocol_path)
+    prompt = build_prompt(state, role, protocol_path, campaign=campaign)
     last_message = store.artifact_path(f"{role}.last-message.md")
     atomic_write_text(last_message, "")
     argv = build_codex_argv(
@@ -655,7 +809,20 @@ def invoke_codex(
             capacity_takeover=bool((runtime.get("impl") or {}).get("capacity_takeover")),
             push=True,
             out_write=out.write,
+            required_repair_head=repair_authority_head(final_repair),
         )
+        if published.get("no_op_repair"):
+            return reject_noop_repair(
+                ctx,
+                store,
+                state,
+                slot_name=slot_name,
+                workdir=workdir,
+                work_key=impl_work_key(state),
+                output=combined_output + "\n" + text,
+                env=env,
+                out=out,
+            )
         if not published.get("ok"):
             mark_publication_failed(
                 state,
@@ -806,6 +973,14 @@ def run_role(
             out.flush()
 
             runtime = store.load_runtime()
+            if role == "impl":
+                latest = store.load()
+                if requeue_noop_repair_generation(store, latest):
+                    state = latest
+                    runtime = store.load_runtime()
+                    out.write(
+                        "Re-queued the current Final GPT REPAIR generation after a historical no-op.\n"
+                    )
             key = impl_work_key(state) if role == "impl" else audit_work_key(state)
             if role_should_work(state, role) and not already_done(runtime, role, key):
                 request = state.get("audit_request") or {}

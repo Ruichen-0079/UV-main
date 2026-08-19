@@ -33,6 +33,12 @@ class AgentbusTest(unittest.TestCase):
         os.environ["XDG_STATE_HOME"] = os.path.join(self.root, "xdg-state")
         os.environ["YUVI_AGENTBUS_STATE"] = self.state
         os.environ["YUVI_AGENTBUS_GH"] = os.path.join(self.bin, "gh")
+        # The fake GitHub transport must preserve posted comments so the
+        # production exact-body re-fetch path is exercised without touching
+        # the real network.
+        self.fake_comments = os.path.join(self.root, "fake-gh-comments.json")
+        atomic_write_text(self.fake_comments, "[]")
+        os.environ["FAKE_GH_COMMENTS"] = self.fake_comments
         os.environ["YUVI_AGENTBUS_CODEX"] = os.path.join(self.bin, "codex")
         os.environ["YUVI_AGENTBUS_REPO"] = self.repo
         os.environ["YUVI_AGENTBUS_PUSH"] = "0"
