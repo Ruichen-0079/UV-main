@@ -331,6 +331,15 @@ def _apply_spec(
         state["goal"] = envelope.get("GOAL")
     if envelope.status not in {"ACTIONABLE", "APPROVED"}:
         state["status"]["gpt"] = envelope.status or "DRAFT"
+        pending = state.get("repair_replan") if isinstance(state.get("repair_replan"), dict) else {}
+        if pending.get("pending"):
+            from agentbus.repair import PRODUCT_GPT_REPLAN_FAILED, note_replan_failure
+
+            note_replan_failure(
+                state,
+                authority=envelope.source_id or envelope.digest,
+                reason=PRODUCT_GPT_REPLAN_FAILED,
+            )
         return refresh_next(state)
     fence = fence_spec(repo, base, current_head)
     if not fence.ok and not allow_stale:

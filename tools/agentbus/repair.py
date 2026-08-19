@@ -16,6 +16,7 @@ from agentbus.util import sha256_text, utc_now
 DEFAULT_MAX_REPAIR_REPLANS = 1
 REPAIR_EPOCH_EXHAUSTED_REPLAN = "REPAIR_EPOCH_EXHAUSTED_REPLAN"
 REPAIR_REPLAN_LIMIT_EXHAUSTED = "REPAIR_REPLAN_LIMIT_EXHAUSTED"
+PRODUCT_GPT_REPLAN_FAILED = "PRODUCT_GPT_REPLAN_FAILED"
 
 
 def _record(state: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -282,6 +283,32 @@ def note_repair_exhausted(state: dict[str, Any], *, authority: str, head: str | 
             "head": head,
             "epoch_id": spec_epoch_id(state),
             "cycle": int(state.get("repair_cycles") or 0),
+            "ts": utc_now(),
+        }
+    )
+
+
+def note_replan_failure(state: dict[str, Any], *, authority: str, reason: str) -> None:
+    """Stop a bounded replan when Product GPT did not issue an actionable spec."""
+
+    ensure_repair_state(state)
+    pending = state.get("repair_replan") if isinstance(state.get("repair_replan"), dict) else {}
+    if not pending.get("pending"):
+        return
+    pending.update(
+        {
+            "failed": True,
+            "failed_authority": authority,
+            "failed_reason": reason,
+            "failed_at": utc_now(),
+        }
+    )
+    state.setdefault("repair_history", []).append(
+        {
+            "kind": "PRODUCT_GPT_REPLAN_FAILED",
+            "authority": authority,
+            "epoch_id": spec_epoch_id(state),
+            "reason": reason,
             "ts": utc_now(),
         }
     )

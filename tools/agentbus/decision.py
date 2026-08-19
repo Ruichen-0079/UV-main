@@ -13,6 +13,7 @@ from agentbus.util import sha256_text
 from agentbus.repair import (
     REPAIR_EPOCH_EXHAUSTED_REPLAN,
     REPAIR_REPLAN_LIMIT_EXHAUSTED,
+    PRODUCT_GPT_REPLAN_FAILED,
     max_repair_replans,
     repair_epoch_exhausted,
     repair_replan_count,
@@ -1055,6 +1056,14 @@ def derive_next_action(
             wait_reason="CI_REVALIDATION",
             transient=True,
             current_base_ci=current_ci_wait,
+        )
+    replan = state.get("repair_replan") if isinstance(state.get("repair_replan"), dict) else {}
+    if replan.get("failed"):
+        return _decision(
+            HUMAN,
+            PRODUCT_GPT_REPLAN_FAILED,
+            failed_replan_authority=replan.get("failed_authority"),
+            failed_replan_reason=replan.get("failed_reason"),
         )
     final = final_review_for_current(state, campaign, current_live)
     final_status = (final or {}).get("normalized_status")

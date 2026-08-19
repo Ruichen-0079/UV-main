@@ -569,6 +569,35 @@ class SolTargetDecisionTests(AgentbusTest):
             decision = derive_next_action(state, live=live)
             self.assertEqual(decision.action, HUMAN)
 
+    def test_non_actionable_product_replan_escalates_without_a_planning_loop(self) -> None:
+        self.create_stream("repair-bad-replan", "--pr", "44")
+        store = self.store("repair-bad-replan")
+        state, live, head = self.ready_state("repair-bad-replan")
+        apply_envelope(
+            store,
+            state,
+            self.spec_envelope(state, source_id="spec-before-bad-replan"),
+            repo=self.repo,
+            current_head=head,
+            allow_stale=True,
+        )
+        state["spec_epoch_pending_implementation"] = False
+        state["repair_cycles"] = state["max_repair_cycles"]
+        apply_envelope(
+            store,
+            state,
+            self.final_envelope(state, live, "REPAIR", source_id="final-bad-replan"),
+            repo=self.repo,
+            current_head=head,
+        )
+        bad_spec = self.spec_envelope(state, source_id="spec-non-actionable")
+        bad_spec.fields["STATUS"] = "DRAFT"
+        bad_spec.raw = render_envelope(bad_spec)
+        apply_envelope(store, state, bad_spec, repo=self.repo, current_head=head, allow_stale=True)
+        decision = derive_next_action(state, live=live)
+        self.assertEqual(decision.action, HUMAN)
+        self.assertEqual(decision.reason, "PRODUCT_GPT_REPLAN_FAILED")
+
     def _autonomous_fixture(self, stream: str, pr: int) -> tuple:
         self.create_stream(stream, "--pr", str(pr))
         store = self.store(stream)
