@@ -134,10 +134,12 @@ def role_should_work(state: dict[str, Any], role: str) -> bool:
 def impl_work_key(state: dict[str, Any]) -> str:
     spec = (state.get("envelopes") or {}).get("GPT_SPEC") or {}
     review = (state.get("envelopes") or {}).get("GPT_REVIEW") or {}
+    final_review = (state.get("envelopes") or {}).get("GPT_MERGE_REVIEW") or {}
     return "|".join(
         [
             str(spec.get("digest") or spec.get("head") or ""),
             str(review.get("digest") or review.get("status") or ""),
+            str(final_review.get("digest") or final_review.get("source_id") or final_review.get("status") or ""),
             str(state.get("repair_cycles") or 0),
         ]
     )
@@ -170,12 +172,30 @@ def mark_done(store: StreamStore, role: str, key: str) -> None:
 
 
 def register_runner(store: StreamStore, role: str) -> None:
-    runtime = store.load_runtime()
-    slot = runtime.setdefault("konsole", {}).setdefault(role, {})
-    slot["runner_pid"] = os.getpid()
-    slot["runner_token"] = pid_start_token(os.getpid())
-    slot["title"] = slot.get("title")
-    store.save_runtime(runtime)
+    from agentbus.konsolebind import AGENTBUS_EXECUTOR_GENERATION
+
+    # Registration is the hand-off point from the Konsole process to the
+    # watch runner.  Serialize it with executor reconciliation so a runner
+    # that is being replaced cannot overwrite a newer slot.
+    with store.lock():
+        runtime = store.load_runtime()
+        slot = runtime.setdefault("konsole", {}).setdefault(role, {})
+        launch_token = os.environ.get("YUVI_AGENTBUS_EXECUTOR_TOKEN")
+        recorded_launch_token = slot.get("runner_launch_token")
+        if recorded_launch_token and launch_token and recorded_launch_token != launch_token:
+            return
+        slot["runner_pid"] = os.getpid()
+        slot["runner_token"] = pid_start_token(os.getpid())
+        slot["runner_start_token"] = slot["runner_token"]
+        slot["runner_generation"] = AGENTBUS_EXECUTOR_GENERATION
+        slot["executor_generation"] = AGENTBUS_EXECUTOR_GENERATION
+        slot["runner_stream_id"] = store.stream_id
+        slot["runner_role"] = role
+        slot["runner_pending"] = False
+        slot["runner_pending_since"] = None
+        slot["owner"] = slot.get("owner") or "agentbus"
+        slot["managed_by"] = slot.get("managed_by") or "agentbus"
+        store.save_runtime(runtime)
 
 
 def waiting_banner(state: dict[str, Any], role: str, *, github: dict[str, Any] | None) -> str:

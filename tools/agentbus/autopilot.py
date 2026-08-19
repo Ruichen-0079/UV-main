@@ -185,6 +185,250 @@ def reconcile_durable(store: StreamStore, state: dict[str, Any], *, repo: str) -
     return notes
 
 
+def _executor_action(decision: Any) -> str | None:
+    if isinstance(decision, str):
+        return decision
+    if isinstance(decision, dict):
+        return str(decision.get("action") or "") or None
+    return str(getattr(decision, "action", "") or "") or None
+
+
+def _executor_condition(
+    role: str,
+    condition: str,
+    reason: str,
+    *,
+    worktree: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "managed": True,
+        "role": role,
+        "status": "wait" if condition == "WAIT" else "human",
+        "condition": condition,
+        "reason": reason,
+        "worktree": worktree,
+    }
+
+
+def _impl_executor_worktree(
+    ctx: RepoContext,
+    store: StreamStore,
+    state: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None, list[str]]:
+    """Resolve IMPL's explicit worktree without ever falling back to repo root."""
+
+    notes: list[str] = []
+    candidate = state.get("impl_worktree")
+    if candidate:
+        candidate = os.path.abspath(str(candidate))
+        if os.path.isdir(candidate):
+            return candidate, None, notes
+        created = bool((state.get("created_worktrees") or {}).get("impl"))
+        if not created:
+            return None, _executor_condition(
+                "impl",
+                "HUMAN",
+                f"implementation worktree is missing: {candidate}; refusing to use {ctx.repo_root}",
+                worktree=candidate,
+            ), notes
+        try:
+            from agentbus.worktree import bind_or_create_impl
+
+            notes.extend(
+                bind_or_create_impl(
+                    store,
+                    state,
+                    repo_root=ctx.repo_root,
+                    requested=candidate,
+                    create=True,
+                    start_point=(state.get("heads") or {}).get("current")
+                    or (state.get("heads") or {}).get("implemented"),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — surface a precise recovery condition
+            return None, _executor_condition(
+                "impl",
+                "WAIT",
+                f"AgentBus could not reconstruct managed implementation worktree {candidate}: {exc}",
+                worktree=candidate,
+            ), notes
+        resolved = state.get("impl_worktree")
+        if resolved and os.path.isdir(str(resolved)):
+            return os.path.abspath(str(resolved)), None, notes
+        return None, _executor_condition(
+            "impl",
+            "WAIT",
+            f"managed implementation worktree was not materialized at {candidate}",
+            worktree=candidate,
+        ), notes
+
+    # A durable branch may still have a safe, already-materialized worktree.
+    # Do not bind the primary checkout when looking for it.
+    branch = state.get("branch")
+    if branch:
+        from agentbus.gitutil import find_worktree_for_branch
+
+        found = find_worktree_for_branch(ctx.repo_root, str(branch))
+        raw_found_path = (found or {}).get("path")
+        found_path = os.path.abspath(str(raw_found_path)) if raw_found_path else ""
+        if found_path and found_path != os.path.abspath(ctx.repo_root) and os.path.isdir(found_path):
+            state["impl_worktree"] = found_path
+            state.setdefault("created_worktrees", {})["impl"] = False
+            notes.append(f"bound existing implementation worktree for {branch}: {found_path}")
+            return found_path, None, notes
+
+    created = bool((state.get("created_worktrees") or {}).get("impl"))
+    if created:
+        prior_path = state.get("impl_worktree")
+        prior_created = bool((state.get("created_worktrees") or {}).get("impl"))
+        try:
+            from agentbus.worktree import bind_or_create_impl
+
+            notes.extend(
+                bind_or_create_impl(
+                    store,
+                    state,
+                    repo_root=ctx.repo_root,
+                    requested=None,
+                    create=True,
+                    start_point=(state.get("heads") or {}).get("current")
+                    or (state.get("heads") or {}).get("implemented"),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — surface a precise recovery condition
+            state["impl_worktree"] = prior_path
+            state.setdefault("created_worktrees", {})["impl"] = prior_created
+            return None, _executor_condition(
+                "impl",
+                "WAIT",
+                f"AgentBus could not rematerialize the managed implementation worktree: {exc}",
+            ), notes
+        resolved = state.get("impl_worktree")
+        if resolved and os.path.isdir(str(resolved)):
+            resolved_abs = os.path.abspath(str(resolved))
+            if resolved_abs != os.path.abspath(ctx.repo_root):
+                return resolved_abs, None, notes
+        state["impl_worktree"] = prior_path
+        state.setdefault("created_worktrees", {})["impl"] = prior_created
+        return None, _executor_condition(
+            "impl",
+            "WAIT",
+            "managed implementation worktree recovery did not produce a safe non-root checkout",
+        ), notes
+
+    return None, _executor_condition(
+        "impl",
+        "HUMAN",
+        "stream has no usable implementation worktree; bind or create one explicitly; refusing to use the current repo root",
+    ), notes
+
+
+def _audit_executor_worktree(
+    ctx: RepoContext,
+    store: StreamStore,
+    state: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None, list[str]]:
+    notes: list[str] = []
+    request = state.get("audit_request") or {}
+    implemented = request.get("target") if request.get("status") == "pending" else None
+    implemented = implemented or (state.get("heads") or {}).get("implemented")
+    if not implemented:
+        return None, _executor_condition(
+            "audit",
+            "HUMAN",
+            "cannot activate AUDIT without an exact IMPLEMENTED_HEAD",
+        ), notes
+    try:
+        from agentbus.worktree import ensure_audit_worktree
+
+        worktree = ensure_audit_worktree(
+            store,
+            state,
+            repo_root=ctx.repo_root,
+            implemented_head=str(implemented),
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a precise recovery condition
+        return None, _executor_condition(
+            "audit",
+            "WAIT",
+            f"AgentBus could not ensure the audit worktree at the implemented HEAD: {exc}",
+            worktree=state.get("audit_worktree"),
+        ), notes
+    if not worktree or not os.path.isdir(worktree):
+        return None, _executor_condition(
+            "audit",
+            "WAIT",
+            f"audit worktree was not materialized: {worktree or '(none)' }",
+            worktree=worktree,
+        ), notes
+    return os.path.abspath(worktree), None, notes
+
+
+def ensure_executor_surface(
+    ctx: RepoContext,
+    store: StreamStore,
+    state: dict[str, Any],
+    decision: Any,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Reconcile the local executor surface for the already-derived action.
+
+    This is intentionally operational: it does not derive, replace, or
+    reinterpret workflow authority.  Closing a stale role surface changes only
+    runtime ownership facts, never the durable stream phase or control state.
+    """
+
+    from agentbus.decision import AUDIT, IMPL
+
+    action = _executor_action(decision)
+    if action not in {IMPL, AUDIT}:
+        return {
+            "ok": True,
+            "managed": False,
+            "status": "not-required",
+            "reason": f"canonical action {action or '-'} does not require a Codex executor",
+        }
+
+    role = "impl" if action == IMPL else "audit"
+    if role == "impl":
+        worktree, failure, notes = _impl_executor_worktree(ctx, store, state)
+    else:
+        worktree, failure, notes = _audit_executor_worktree(ctx, store, state)
+    if failure:
+        failure["notes"] = notes
+        return failure
+
+    try:
+        from agentbus.konsolebind import ensure_role_konsole
+
+        result = ensure_role_konsole(
+            store,
+            str(state.get("stream_id") or store.stream_id),
+            role,
+            str(worktree),
+            env=env,
+        )
+    except Exception as exc:  # noqa: BLE001 — a missing desktop surface must not stop the workflow tick
+        result = {
+            "ok": False,
+            "managed": True,
+            "role": role,
+            "status": "wait",
+            "condition": "WAIT",
+            "reason": f"could not reconcile {role.upper()} executor surface: {exc}",
+        }
+    result.setdefault("managed", True)
+    result.setdefault("role", role)
+    result.setdefault("worktree", worktree)
+    result.setdefault("notes", notes)
+    if result.get("status") in {"launched", "reused", "starting"}:
+        result["notes"] = notes + [
+            f"{role.upper()} executor {result['status']} without changing durable workflow authority"
+        ]
+    return result
+
+
 def tick_stream(
     ctx: RepoContext,
     store: StreamStore,
@@ -294,6 +538,12 @@ def tick_stream(
         state.setdefault("status", {})["next_action"] = decision.action
         state["status"]["decision"] = decision.as_dict()
         refresh_authority(state)
+        executor = ensure_executor_surface(ctx, store, state, decision, env=env)
+        for note in executor.get("notes") or []:
+            notes.append(f"executor: {note}")
+        if not executor.get("ok"):
+            condition = executor.get("condition") or "WAIT"
+            notes.append(f"executor {condition}: {executor.get('reason')}")
         store.save(state)
         att = classify_attention(state, campaign=campaign, decision=decision)
         return {
@@ -304,6 +554,7 @@ def tick_stream(
             "attention": att,
             "handoff": handoff,
             "decision": decision.as_dict(),
+            "executor": executor,
             "dispatch_merge": decision.action == "MERGE",
             "obsolete": is_obsolete(state),
             "latest_authority": (state.get("status") or {}).get("latest_authority"),

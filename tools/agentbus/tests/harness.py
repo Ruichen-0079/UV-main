@@ -5,7 +5,9 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from typing import Sequence
+from unittest.mock import patch
 
 from agentbus.cli import main
 from agentbus.paths import discover_repo
@@ -38,14 +40,33 @@ class AgentbusTest(unittest.TestCase):
         os.environ["YUVI_AGENTBUS_OPEN_URL"] = "0"
         os.environ["YUVI_AGENTBUS_NOTIFY"] = "0"
         os.environ["YUVI_AGENTBUS_WAKE_IMPL"] = "0"
+        # Automatic executor reconciliation is exercised by AgentBus ticks;
+        # keep the suite's desktop surface a short-lived fake instead of
+        # opening real user Konsoles.
+        os.environ["YUVI_AGENTBUS_KONSOLE"] = "/bin/true"
         os.environ["PATH"] = self.bin + os.pathsep + self.env_backup.get("PATH", "")
         os.environ.pop("CODEX_HOME", None)
         self.ctx = discover_repo(self.repo)
+        self.executor_launches: list[dict[str, object]] = []
+        self._executor_launcher_patch = patch(
+            "agentbus.konsolebind._launch_executor_process",
+            side_effect=self._fake_executor_process,
+        )
+        self._executor_launcher_patch.start()
 
     def tearDown(self) -> None:
+        if hasattr(self, "_executor_launcher_patch"):
+            self._executor_launcher_patch.stop()
         os.environ.clear()
         os.environ.update(self.env_backup)
         self.td.cleanup()
+
+    def _fake_executor_process(self, argv: list[str], *, env: dict[str, str]) -> SimpleNamespace:
+        self.executor_launches.append({"argv": list(argv), "env": dict(env)})
+        # The current test process is a deterministic live owner for pending
+        # runtime facts. No child process, Konsole, DBus session, or watch loop
+        # is created by the test harness.
+        return SimpleNamespace(pid=os.getpid())
 
     def _init_repo(self) -> None:
         os.makedirs(self.repo)
@@ -323,7 +344,12 @@ if os.environ.get("FAKE_CODEX_EXIT_CAPACITY_AFTER_MESSAGE") == "1":
     sys.exit(91)
 sys.exit(0)
 '''
-        for name, body in (("gh", gh), ("codex", codex)):
+        konsole = r'''#!/usr/bin/env python3
+# The AgentBus test harness must not open a real desktop window.
+import sys
+sys.exit(0)
+'''
+        for name, body in (("gh", gh), ("codex", codex), ("konsole", konsole)):
             path = os.path.join(self.bin, name)
             atomic_write_text(path, body)
             os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
