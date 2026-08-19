@@ -8,6 +8,7 @@ from agentbus.campaign import (
     backfill_archived_units,
     campaign_view,
     load_campaign,
+    project_campaign,
 )
 from agentbus.decision import PLAN_CONTINUATION, PRODUCT_GPT, WAIT, browser_job_id, derive_next_action
 from agentbus.machine import FINAL_GATE, MERGED
@@ -142,6 +143,28 @@ NEXT_ACTION: DONE
         self.assertEqual(view.get("status"), "WAITING_FOR_PLAN")
         self.assertFalse(view.get("archived"))
         self.assertFalse(view.get("hidden_from_attention"))
+
+    def test_archived_nonterminal_unit_blocks_campaign_completion(self) -> None:
+        terminal = self._merged("terminal-u", "unsafe-complete-c")
+        self.create_stream("bad-archived-u", "--pr", "54")
+        bad = self.store("bad-archived-u")
+        bad_state = bad.load()
+        bad_state["campaign_id"] = "unsafe-complete-c"
+        bad_state["phase"] = "IMPLEMENTING"
+        bad_state["archived"] = True
+        bad_state["hidden_from_attention"] = True
+        bad.save(bad_state)
+        campaign = load_campaign(self.ctx, "unsafe-complete-c")
+        campaign["completion"] = "COMPLETE"
+        campaign["completion_authority"] = {
+            "source": "github",
+            "source_id": "complete-unsafe",
+            "job_id": "plan-job",
+            "campaign": "unsafe-complete-c",
+            "after_stream": "terminal-u",
+            "trigger": "MERGED",
+        }
+        self.assertNotEqual(project_campaign(self.ctx, campaign).get("status"), "COMPLETE")
 
     def test_explicit_complete_authority_archives_campaign(self) -> None:
         store = self._merged("complete-u", "complete-c")

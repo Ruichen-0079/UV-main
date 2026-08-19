@@ -449,11 +449,7 @@ def _campaign_completion_fences(
     last_completed = _last_completed_unit(units)
     if not last_completed or str(authority.get("after_stream") or "").strip().lower() != str(last_completed.get("stream_id") or "").strip().lower():
         return False, "completion authority predecessor is not the latest completed unit"
-    if any(
-        not _unit_row_completed(row)
-        and not row.get("archived")
-        for row in units
-    ):
+    if any(not _unit_row_completed(row) for row in units):
         return False, "campaign still has an active nonterminal unit"
     if not any(_unit_row_completed(row) for row in units):
         return False, "latest campaign unit is not durably merged"
