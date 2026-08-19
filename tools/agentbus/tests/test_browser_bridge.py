@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 
 from agentbus.browser import BrowserGPTJob, job_for_state
 from agentbus.campaign import bind_explicit_campaign, empty_campaign, load_campaign, save_campaign
@@ -241,6 +243,11 @@ class BrowserBridgeTests(AgentbusTest):
             self.assertNotIn(forbidden, js)
         self.assertIn("active: false", js)
         self.assertIn("WAITING_FOR_GITHUB", js)
+        self.assertIn("SUBMITTED_CONFIRMED", js)
+        self.assertIn("SUBMIT_NOT_CONFIRMED", js)
+        self.assertIn("ALREADY_SUBMITTED_VISIBLE", js)
+        self.assertIn("WAITING_FOR_GITHUB_WATCHDOG_MS", js)
+        self.assertIn("AGENTBUS_CHECK_JOB", js)
         self.assertIn("fetch(JOBS_URL", js)
         self.assertIn('const JOBS_URL = "http://127.0.0.1:6738/api/browser/jobs"', js)
         self.assertIn("AUTH_REQUIRED", js)
@@ -251,6 +258,20 @@ class BrowserBridgeTests(AgentbusTest):
         from agentbus.browser_extension.package import validate_extension_sources
 
         self.assertEqual(validate_extension_sources(root)["browser_specific_settings"]["gecko"]["id"], "yuvi-agentbus-bridge@local")
+
+    def test_extension_runtime_liveness_harness(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not available")
+        root = os.path.join(os.path.dirname(__file__), "..", "browser_extension")
+        result = subprocess.run(
+            [node, os.path.join(root, "test_runtime.cjs")],
+            cwd=os.path.dirname(root),
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("browser extension runtime tests: ok", result.stdout)
 
     def test_display_sanitizer_preserves_urls(self) -> None:
         from agentbus.display import sanitize_display_text
