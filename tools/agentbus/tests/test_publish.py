@@ -54,6 +54,24 @@ class PublishTests(AgentbusTest):
         shown = subprocess.check_output(["git", "-C", linked, "show", result["commit"], "--stat"], text=True)
         self.assertIn("feature.txt", shown)
 
+    def test_publish_commit_persists_ownership_before_report_processing(self) -> None:
+        _, linked = self._linked()
+        self.create_stream("s1", "--worktree", linked)
+        store = self.store("s1")
+        state = store.load()
+        baseline = head_sha(linked)
+        atomic_write_text(os.path.join(linked, "ownership.txt"), "persisted\n")
+        result = publish_implementation(store, state, self.ctx, baseline_head=baseline, push=False)
+        self.assertTrue(result["ok"], result)
+        persisted = store.load()
+        self.assertEqual(persisted["publication"]["commit"], result["commit"])
+        self.assertEqual(persisted["heads"]["implemented"], result["commit"])
+        with open(store.events_path, encoding="utf-8") as handle:
+            events = [json.loads(line) for line in handle if line.strip()]
+        self.assertTrue(
+            any(item.get("kind") == "publish-commit" and item.get("commit") == result["commit"] for item in events)
+        )
+
     def test_required_repair_noop_does_not_reuse_old_publication(self) -> None:
         _, linked = self._linked()
         self.create_stream("s1", "--worktree", linked)

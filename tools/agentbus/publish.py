@@ -212,7 +212,28 @@ def publish_implementation(
     clean_at_start: bool | None = None,
     capacity_takeover: bool = False,
     required_repair_head: str | None = None,
+    lock_held: bool = False,
 ) -> dict[str, Any]:
+    if not lock_held:
+        # Codex runs outside the stream lock. Keep the commit event and the
+        # recovered publication metadata in one exclusive state interval so a
+        # concurrent campaign tick cannot save an older state over them.
+        with store.lock():
+            return publish_implementation(
+                store,
+                state,
+                ctx,
+                baseline_head=baseline_head,
+                expected_paths=expected_paths,
+                allow_empty=allow_empty,
+                push=push,
+                out_write=out_write,
+                clean_at_start=clean_at_start,
+                capacity_takeover=capacity_takeover,
+                required_repair_head=required_repair_head,
+                lock_held=True,
+            )
+
     def say(msg: str) -> None:
         if out_write:
             out_write(msg + "\n")
@@ -251,6 +272,7 @@ def publish_implementation(
             pushed = _push_and_verify(worktree, state, ctx, pending_commit, say)
             result.update(pushed)
             if not pushed.get("ok"):
+                store.save(state)
                 return pushed
         _update_publication(
             state,
@@ -258,6 +280,7 @@ def publish_implementation(
             commit=pending_commit,
             baseline_head=baseline_head or pub.get("baseline_head"),
         )
+        store.save(state)
         return result
 
     gate = validate_publication(
@@ -305,7 +328,9 @@ def publish_implementation(
             pushed = _push_and_verify(worktree, state, ctx, current, say)
             result.update(pushed)
             if not pushed.get("ok"):
+                store.save(state)
                 return result
+        store.save(state)
         return result
 
     paths: list[str] = gate["paths"]
@@ -358,13 +383,19 @@ def publish_implementation(
             "message": message,
         },
     )
+    # Persist ownership immediately after the append-only event. The caller
+    # may still publish the exact CODEX_REPORT afterward, but a concurrent
+    # tick can no longer erase the implementation generation.
+    store.save(state)
     say(f"commit {new_head}")
     result = {"ok": True, "commit": new_head, "files": paths, "parent": parent, "reused": False}
     if push and _should_push(state):
         pushed = _push_and_verify(worktree, state, ctx, new_head, say)
         result.update(pushed)
         if not pushed.get("ok"):
+            store.save(state)
             return result
+        store.save(state)
     return result
 
 

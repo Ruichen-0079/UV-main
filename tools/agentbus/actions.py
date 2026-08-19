@@ -348,6 +348,7 @@ def publish_existing_implementation(
             baseline_head=baseline,
             expected_paths=expected_paths,
             push=True,
+            lock_held=True,
         )
         if not result.get("ok"):
             store.save(state)

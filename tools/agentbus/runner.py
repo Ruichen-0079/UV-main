@@ -942,6 +942,7 @@ def run_role(
                             or (state.get("heads") or {}).get("current"),
                             push=True,
                             out_write=out.write,
+                            lock_held=True,
                         )
                         if published.get("ok"):
                             apply_published_report(

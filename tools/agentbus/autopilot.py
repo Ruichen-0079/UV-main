@@ -123,7 +123,13 @@ def migrate_roles(state: dict[str, Any], env: dict[str, str] | None = None) -> N
             migrate_role_config(cfg, env)
 
 
-def reconcile_durable(store: StreamStore, state: dict[str, Any], *, repo: str) -> list[str]:
+def reconcile_durable(
+    store: StreamStore,
+    state: dict[str, Any],
+    *,
+    repo: str,
+    env: dict[str, str] | None = None,
+) -> list[str]:
     """Project compatibility phases from the one canonical durable decision."""
     from agentbus.decision import AUDIT, FINAL_GPT, IMPL, PRODUCT_GPT, derive_next_action
 
@@ -144,6 +150,15 @@ def reconcile_durable(store: StreamStore, state: dict[str, Any], *, repo: str) -
             set_phase(state, prior, reason="stale runner recovered")
             state["status"]["blocker"] = None
             notes.append(f"cleared stale crash recovery → {prior}")
+
+    from agentbus.generation import recover_lost_publication
+
+    recovered = recover_lost_publication(store, state, worktree=repo, env=env)
+    if recovered.get("ok"):
+        notes.append(
+            f"recovered AgentBus publication {str(recovered.get('commit') or '')[:12]} "
+            f"from exact durable CODEX_REPORT {recovered.get('report_comment_id')}"
+        )
 
     campaign = load_campaign(store.ctx, infer_campaign_id(state))
     live = (state.get("github") or {}).get("pr")
@@ -456,7 +471,7 @@ def tick_stream(
             force_sync=rescan,
         )
         impl = state.get("impl_worktree") or ctx.repo_root
-        notes.extend(reconcile_durable(store, state, repo=impl))
+        notes.extend(reconcile_durable(store, state, repo=impl, env=env))
         pub = state.get("publication") or {}
         need_transport = state.get("phase") in {machine.WORKTREE_READY, machine.MATERIALIZING} or (
             (state.get("transport") or {}).get("status") in {"push_failed", "pr_failed"}
