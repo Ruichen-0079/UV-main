@@ -111,6 +111,15 @@ class ScopeTests(AgentbusTest):
         self.assertFalse(check["ok"])
         self.assertEqual(check.get("error"), "SCOPE_MATERIALIZATION_ERROR")
 
+    def test_numbered_path_scope_preserves_every_declared_path(self) -> None:
+        scope = materialize_path_scope(
+            raw_scope="",
+            path_scope_field="Maximum ten paths:\n1. `one.ts`\n2. `two.ts`\n3. `three.ts`",
+            source="spec",
+        )
+
+        self.assertEqual(scope["explicit_paths"], ["one.ts", "two.ts", "three.ts"])
+
     def test_scope_refreshes_when_latest_durable_spec_changes_scope(self) -> None:
         self.create_stream("scope-refresh")
         store = self.store("scope-refresh")

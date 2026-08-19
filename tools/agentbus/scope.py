@@ -84,6 +84,7 @@ def parse_path_scope_field(raw: str | None) -> dict[str, list[str]]:
             section = "patterns"
             continue
         token = item.lstrip("-*").strip().strip("`")
+        token = re.sub(r"^\d+[.)]\s*", "", token).strip().strip("`")
         if not token:
             continue
         if section == "patterns" or any(ch in token for ch in "*?[]"):
@@ -186,10 +187,24 @@ def attach_scope(state: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]
 
 
 def scope_of(state: dict[str, Any]) -> dict[str, Any] | None:
-    spec = ((state.get("envelopes") or {}).get("GPT_SPEC") or {}).get("fields") or {}
+    spec_record = ((state.get("envelopes") or {}).get("GPT_SPEC") or {})
+    spec = spec_record.get("fields") or {}
     if not isinstance(spec, dict):
         existing = state.get("scope")
         return existing if isinstance(existing, dict) else None
+    raw_scope = spec.get("SCOPE")
+    raw_path_scope = spec.get("PATH_SCOPE")
+    raw_envelope = spec_record.get("raw")
+    if raw_envelope:
+        try:
+            from agentbus.protocol import parse_one
+
+            parsed = parse_one(str(raw_envelope))
+            if parsed.kind == "GPT_SPEC":
+                raw_scope = parsed.fields.get("SCOPE", raw_scope)
+                raw_path_scope = parsed.fields.get("PATH_SCOPE", raw_path_scope)
+        except (ValueError, TypeError):
+            pass
     source = spec.get("SOURCE_CONTINUATION_COMMENT_ID") or spec.get("CONTINUATION_OF")
     if source and str(source).isdigit():
         source = f"continuation:{source}"
@@ -200,8 +215,8 @@ def scope_of(state: dict[str, Any]) -> dict[str, Any] | None:
     else:
         source = "spec"
     scope = materialize_path_scope(
-        raw_scope=spec.get("SCOPE"),
-        path_scope_field=spec.get("PATH_SCOPE"),
+        raw_scope=raw_scope,
+        path_scope_field=raw_path_scope,
         source=source,
     )
     existing = state.get("scope")
