@@ -464,6 +464,16 @@ def _live_pr(state: dict[str, Any], live: dict[str, Any] | None) -> dict[str, An
     return cached if isinstance(cached, dict) else {}
 
 
+def _remote_merge_state(state: dict[str, Any], live: dict[str, Any] | None) -> str | None:
+    """Return the cached/explicit GitHub PR state, if one is available."""
+    if state.get("merge_confirmed_at"):
+        return "MERGED"
+    projection = live if isinstance(live, dict) and live else _live_pr(state, None)
+    if not isinstance(projection, dict) or "state" not in projection:
+        return None
+    return str(projection.get("state") or "").upper() or None
+
+
 def ci_snapshot(live: dict[str, Any] | None) -> dict[str, Any]:
     checks = (live or {}).get("statusCheckRollup") or []
     rows: list[dict[str, str]] = []
@@ -874,6 +884,17 @@ def derive_next_action(
     control = str(state.get("control") or "running")
     head = unit_head(state)
 
+    remote_merge_state = _remote_merge_state(state, live)
+    if (state.get("archived") or state.get("hidden_from_attention")) and (
+        remote_merge_state not in {None, "MERGED"}
+        or (state.get("pr") is not None and remote_merge_state is None)
+    ):
+        return _decision(
+            WAIT,
+            "local completion/archive projection is ahead of GitHub MERGED confirmation",
+            wait_reason="MERGE_PENDING",
+            transient=True,
+        )
     if state.get("archived") or state.get("hidden_from_attention"):
         # Archive/tombstone rows remain durable continuation anchors.  They do
         # not resume ordinary work, but a newly discovered exact continuation
@@ -881,6 +902,31 @@ def derive_next_action(
         if (state.get("heads") or {}).get("merged") and _has_actionable_continuation(state, campaign):
             return _externalize(
                 _decision(NEXT, "archived merged unit has an actionable durable continuation"),
+                state,
+                external,
+            )
+        projected = None
+        if campaign:
+            try:
+                from agentbus.campaign import project_campaign
+
+                projected = project_campaign(None, campaign)
+            except Exception:  # noqa: BLE001 - malformed legacy projection fails closed
+                projected = None
+        if (
+            (state.get("heads") or {}).get("merged")
+            and projected
+            and projected.get("status") == "WAITING_FOR_PLAN"
+            and (
+                projected.get("last_completed_unit") == state.get("stream_id")
+                or (
+                    not projected.get("active_stream")
+                    and projected.get("current_unit") == state.get("stream_id")
+                )
+            )
+        ):
+            return _externalize(
+                _decision(PRODUCT_GPT, "merged historical anchor needs an explicit continuation/completion plan", task=PLAN_CONTINUATION),
                 state,
                 external,
             )
@@ -928,6 +974,15 @@ def derive_next_action(
         return _decision(HUMAN, str((state.get("status") or {}).get("blocker") or "recovery requires a decision"))
 
     if phase == "MERGED" or (state.get("heads") or {}).get("merged"):
+        if remote_merge_state not in {None, "MERGED"} or (
+            state.get("pr") is not None and remote_merge_state is None
+        ):
+            return _decision(
+                WAIT,
+                "local merged phase is not confirmed by current GitHub PR state",
+                wait_reason="MERGE_PENDING",
+                transient=True,
+            )
         if _has_actionable_continuation(state, campaign):
             return _externalize(_decision(NEXT, "durable continuation or successor is actionable"), state, external)
         if str((campaign or {}).get("completion") or "").upper() == "COMPLETE":

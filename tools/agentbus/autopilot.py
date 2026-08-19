@@ -838,6 +838,20 @@ def campaign_tick(
         }
     try:
         existing = set(list_stream_ids_safe(ctx))
+        if not stream_id:
+            # Lifecycle migration is deliberately narrow: mark already
+            # merged units historical, but never reopen/replay their
+            # workflow or manufacture a successor.
+            from agentbus.campaign import backfill_archived_units, list_campaigns
+
+            for campaign in list_campaigns(ctx):
+                try:
+                    backfill_archived_units(ctx, str(campaign.get("campaign_id") or ""))
+                except Exception:
+                    # A malformed legacy campaign must not prevent ordinary
+                    # stream reconciliation; its next explicit tick can
+                    # retry the idempotent migration.
+                    continue
         if stream_id:
             pending = [stream_id]
         else:

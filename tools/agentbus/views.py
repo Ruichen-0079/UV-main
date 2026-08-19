@@ -337,8 +337,10 @@ def overview(
         category = item.get("attention_category") or "AUTO_WAIT"
         if category in categories:
             categories[category] += 1
-    campaigns = [campaign_view(item, ctx) for item in list_campaigns(ctx)]
-    campaigns = [item for item in campaigns if item]
+    all_campaign_views = [campaign_view(item, ctx) for item in list_campaigns(ctx)]
+    all_campaign_views = [item for item in all_campaign_views if item]
+    archived_campaigns = [item for item in all_campaign_views if item.get("archived")]
+    campaigns = all_campaign_views if include_archived else [item for item in all_campaign_views if not item.get("archived")]
     counted_gpt = {item.get("campaign_id") for item in visible if item.get("browser_gpt_required")}
     for camp in campaigns:
         if camp.get("status") == "WAITING_FOR_PLAN" and camp.get("campaign_id") not in counted_gpt:
@@ -374,6 +376,7 @@ def overview(
         "archived": archived if include_archived else [],
         "archived_count": len(archived),
         "campaigns": campaigns,
+        "archived_campaigns": archived_campaigns if include_archived else [],
         "needs_you": [item for item in visible if item.get("human_required")],
         "needs_gpt": [item for item in visible if item.get("browser_gpt_required")],
         "handoffs": handoffs,

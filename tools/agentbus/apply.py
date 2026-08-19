@@ -613,6 +613,11 @@ def mark_pr_merged(
         txn["status"] = "merged"
         txn["merge_commit"] = state.get("heads", {}).get("merged")
         txn["merged_at"] = utc_now()
+    # This function is called only at the durable merge edge (or by explicit
+    # compatibility callers that already assert that edge).  Keep a local
+    # fencing marker so a stale cached OPEN projection from an earlier poll
+    # cannot undo that exact completion event.
+    state["merge_confirmed_at"] = state.get("merge_confirmed_at") or utc_now()
     if store is not None:
         from agentbus.campaign import after_unit_merged
 

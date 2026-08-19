@@ -141,15 +141,17 @@ def _product_prompt(job: dict[str, Any], state: dict[str, Any]) -> str:
     elif task == PLAN_CONTINUATION:
         campaign = job["campaign"]
         protocol = (
-            "The current unit is merged and the campaign needs one bounded successor plan.\n"
-            "Publish exactly one preferred durable envelope on the current PR:\n"
+            "Re-read the existing campaign goal, durable unit history, and current GitHub PR authority.\n"
+            "The predecessor is durably MERGED. Decide whether meaningful approved campaign work remains.\n"
+            "Continue only when a bounded successor is justified; do not invent filler units merely to avoid COMPLETE.\n"
+            "Publish exactly one preferred durable envelope on the current PR, choosing ACTIONABLE or COMPLETE:\n"
             "[GPT_CONTINUATION]\n"
-            "STATUS: ACTIONABLE\n"
+            "STATUS: ACTIONABLE | COMPLETE\n"
             f"CAMPAIGN: {campaign}\n"
             f"JOB_ID: {job['job_id']}\n"
             f"AFTER_STREAM: {job['stream']}\n"
             "TRIGGER: MERGED\n"
-            "NEXT_STREAM: <new unique stream id>\n"
+            "For ACTIONABLE: NEXT_STREAM: <new unique stream id>\n"
             "TARGET: <target>\n"
             "BASE_ANCHOR: PREVIOUS_MERGE\n"
             "SCOPE: <bounded scope>\n"
@@ -158,6 +160,8 @@ def _product_prompt(job: dict[str, Any], state: dict[str, Any]) -> str:
             "REVIEW_POLICY: GPT_REQUIRED | AUDIT_SUFFICIENT\n"
             "PATH_SCOPE: <bounded paths/globs>\n"
             "NEXT_ACTION: CREATE_AND_IMPLEMENT\n"
+            "For COMPLETE: SUMMARY: <why the campaign objective is complete>\n"
+            "NEXT_ACTION: DONE\n"
             "[/GPT_CONTINUATION]\n"
         )
     else:  # pragma: no cover - callers only build canonical tasks
@@ -203,8 +207,11 @@ def job_for_state(
 ) -> BrowserGPTJob | None:
     campaign = campaign if campaign is not None else load_campaign(ctx, infer_campaign_id(state))
     if state.get("phase") == "MERGED" and campaign:
-        current = project_campaign(ctx, campaign).get("current_unit")
-        if current and current != state.get("stream_id"):
+        projected = project_campaign(ctx, campaign)
+        active = projected.get("active_stream")
+        if active and active != state.get("stream_id"):
+            return None
+        if projected.get("status") in {"COMPLETE", "HUMAN_REQUIRED"}:
             return None
     live = _live(state)
     decision = derive_next_action(state, campaign, live)
@@ -264,8 +271,6 @@ def list_browser_jobs(ctx: RepoContext) -> list[dict[str, Any]]:
     for store in iter_stores(ctx):
         try:
             state = store.load()
-            if state.get("archived") or state.get("hidden_from_attention"):
-                continue
             job = job_for_state(ctx, state)
             if job is not None:
                 jobs.append(job)

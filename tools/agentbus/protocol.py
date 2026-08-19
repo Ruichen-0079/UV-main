@@ -54,6 +54,7 @@ FIELD_ORDER = {
         "AFTER_STREAM",
         "TRIGGER",
         "NEXT_STREAM",
+        "SUMMARY",
         "TARGET",
         "BASE_ANCHOR",
         "SCOPE",
@@ -362,7 +363,10 @@ def required_fields(kind: str) -> tuple[str, ...]:
     if kind == "GPT_SPEC":
         return ("STATUS", "STREAM", "BASE_HEAD", "SCOPE", "ACCEPTANCE_CRITERIA")
     if kind == "GPT_CONTINUATION":
-        return ("STATUS", "CAMPAIGN", "AFTER_STREAM", "NEXT_STREAM", "TRIGGER")
+        # NEXT_STREAM is required only for an ACTIONABLE successor.  A
+        # campaign may also explicitly terminate through the same durable
+        # continuation envelope, without inventing a second workflow kind.
+        return ("STATUS", "CAMPAIGN", "AFTER_STREAM", "TRIGGER")
     if kind == "GPT_REVIEW":
         return ("STATUS", "STREAM", "REVIEWED_HEAD")
     if kind == "GPT_MERGE_REVIEW":
@@ -423,6 +427,17 @@ def validate_envelope(
     if envelope.kind == "FINAL_GATE":
         if not (envelope.fields.get("REVIEWED_HEAD") or envelope.fields.get("FINAL_HEAD") or "").strip():
             errors.append("missing REVIEWED_HEAD or FINAL_HEAD")
+    if envelope.kind == "GPT_CONTINUATION":
+        status = envelope.status
+        if status == "ACTIONABLE" and not (envelope.fields.get("NEXT_STREAM") or "").strip():
+            errors.append("missing NEXT_STREAM")
+        if status == "COMPLETE":
+            if not (envelope.fields.get("JOB_ID") or "").strip():
+                errors.append("GPT_CONTINUATION COMPLETE requires JOB_ID")
+            if not (envelope.fields.get("SUMMARY") or "").strip():
+                errors.append("GPT_CONTINUATION COMPLETE requires SUMMARY")
+            if (envelope.fields.get("NEXT_ACTION") or "").strip().upper() != "DONE":
+                errors.append("GPT_CONTINUATION COMPLETE requires NEXT_ACTION: DONE")
     if envelope.kind == "GPT_CONTINUATION" and envelope.status == "ACTIONABLE":
         for key in ("TARGET", "SCOPE", "ACCEPTANCE_CRITERIA"):
             if not (envelope.fields.get(key) or "").strip():

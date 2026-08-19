@@ -377,7 +377,7 @@ def publish_existing_implementation(
 def stream_archivable(state: dict[str, Any], runtime: dict[str, Any] | None = None) -> dict[str, Any]:
     """MERGED campaign units and obsolete candidates may be archived."""
     if state.get("archived"):
-        return {"ok": False, "reason": "already archived"}
+        return {"ok": True, "reason": "already archived"}
     if is_obsolete(state):
         return {"ok": True, "reason": "obsolete"}
     if (state.get("phase") or "") == MERGED:
@@ -474,6 +474,11 @@ def archive_campaign_unit(store: StreamStore, state: dict[str, Any]) -> dict[str
         origin = origin_url(store.ctx.repo_root)
     except Exception:  # noqa: BLE001
         origin = ""
+    merged_at = (
+        state.get("completed_at")
+        or ((state.get("github") or {}).get("pr") or {}).get("mergedAt")
+        or state.get("updated_at")
+    )
     state["archived"] = True
     state["hidden_from_attention"] = True
     state["archive"] = {
@@ -486,7 +491,7 @@ def archive_campaign_unit(store: StreamStore, state: dict[str, Any]) -> dict[str
         "final_product_head": (state.get("heads") or {}).get("implemented"),
         "implemented_head": (state.get("heads") or {}).get("implemented"),
         "merge_commit": (state.get("heads") or {}).get("merged"),
-        "merged_at": state.get("updated_at"),
+        "merged_at": merged_at,
         "continuation_comment_ids": sorted(set(comment_ids)),
         "consumed_continuation_ids": sorted(set(consumed)),
         "successor_stream": campaign.get("next_stream") or (state.get("continuation") or {}).get("created_stream"),
@@ -505,6 +510,8 @@ def archive_stream(ctx: RepoContext, store: StreamStore) -> dict[str, Any]:
         allowed = stream_archivable(state, store.load_runtime())
         if not allowed["ok"]:
             raise AgentbusError(allowed["reason"])
+        if state.get("archived"):
+            return {"ok": True, "stream_id": store.stream_id, "archived": True, "reason": "already archived", "notes": []}
         archive_campaign_unit(store, state)
         store.save(state)
     return {"ok": True, "stream_id": store.stream_id, "archived": True, "reason": "archived", "notes": ["archived; campaign/PR/continuation anchor preserved"]}

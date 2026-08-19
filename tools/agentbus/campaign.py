@@ -101,6 +101,10 @@ def empty_campaign(campaign_id: str) -> dict[str, Any]:
         "max_queued": DEFAULT_MAX_QUEUED,
         "current_stream": None,
         "active_stream": None,
+        "archived": False,
+        "hidden_from_attention": False,
+        "completion": None,
+        "completion_authority": None,
         "reason": None,
         "human_required": False,
         "automation_mode": None,
@@ -115,10 +119,12 @@ def empty_campaign(campaign_id: str) -> dict[str, Any]:
 
 def apply_campaign_defaults(campaign: dict[str, Any]) -> dict[str, Any]:
     """Legacy campaign JSON must gain Merge GPT fields without rewriting authority."""
-    if campaign.get("status") == STATUS_COMPLETE and not campaign.get("completion"):
-        # Preserve an old explicit completion without continuing to treat the
-        # compatibility status snapshot as lifecycle authority.
-        campaign["completion"] = STATUS_COMPLETE
+    # A compatibility status snapshot is not completion authority.  Only the
+    # durable Product GPT completion record below may terminate a campaign.
+    campaign.setdefault("archived", False)
+    campaign.setdefault("hidden_from_attention", False)
+    campaign.setdefault("completion", None)
+    campaign.setdefault("completion_authority", None)
     campaign.setdefault("merge_review_mode", DEFAULT_MERGE_REVIEW_MODE)
     if campaign.get("merge_review_mode") not in {MERGE_REVIEW_ALWAYS, MERGE_REVIEW_RISK, MERGE_REVIEW_OFF}:
         campaign["merge_review_mode"] = DEFAULT_MERGE_REVIEW_MODE
@@ -241,6 +247,16 @@ def is_obsolete(state: dict[str, Any]) -> bool:
     return sid in EXPLICIT_OBSOLETE
 
 
+def _explicit_obsolete_state(state: dict[str, Any]) -> bool:
+    """Distinguish a tombstoned merged unit from an obsolete unit."""
+    sid = (state.get("stream_id") or "").lower()
+    return bool(
+        state.get("stream_class") == "OBSOLETE_CANDIDATE"
+        or state.get("superseded_by")
+        or sid in EXPLICIT_OBSOLETE
+    )
+
+
 def apply_known_obsolete(state: dict[str, Any]) -> bool:
     rec = EXPLICIT_OBSOLETE.get((state.get("stream_id") or "").lower())
     if not rec:
@@ -265,6 +281,13 @@ def pending_items(campaign: dict[str, Any]) -> list[dict[str, Any]]:
 def unit_completed(phase: str | None) -> bool:
     """A work unit is completed only after the PR is MERGED."""
     return (phase or "") == "MERGED"
+
+
+def _unit_row_completed(row: dict[str, Any]) -> bool:
+    """Include the existing explicit obsolete terminal semantics."""
+    return unit_completed(row.get("phase") or row.get("status")) or bool(
+        row.get("obsolete") or row.get("stream_class") == "OBSOLETE_CANDIDATE"
+    )
 
 
 def _candidate_stream_ids(campaign: dict[str, Any]) -> list[str]:
@@ -309,7 +332,11 @@ def discover_campaign_units(ctx: RepoContext | None, campaign: dict[str, Any]) -
                 rec["phase"] = state.get("phase")
                 rec["pr"] = state.get("pr")
                 rec["archived"] = bool(state.get("archived"))
+                rec["hidden_from_attention"] = bool(state.get("hidden_from_attention"))
+                rec["stream_class"] = state.get("stream_class")
+                rec["obsolete"] = _explicit_obsolete_state(state)
                 rec["updated_at"] = state.get("updated_at")
+                rec["completed_at"] = state.get("completed_at")
                 rec["merge_sha"] = (state.get("heads") or {}).get("merged")
         rec.setdefault("phase", rec.get("status"))
         rows[sid] = rec
@@ -331,7 +358,11 @@ def discover_campaign_units(ctx: RepoContext | None, campaign: dict[str, Any]) -
                 "phase": state.get("phase"),
                 "pr": state.get("pr"),
                 "archived": bool(state.get("archived")),
+                "hidden_from_attention": bool(state.get("hidden_from_attention")),
+                "stream_class": state.get("stream_class"),
+                "obsolete": _explicit_obsolete_state(state),
                 "updated_at": state.get("updated_at"),
+                "completed_at": state.get("completed_at"),
                 "merge_sha": (state.get("heads") or {}).get("merged"),
             }
     return list(rows.values())
@@ -343,7 +374,7 @@ def select_current_unit(units: list[dict[str, Any]], campaign: dict[str, Any]) -
         for row in units
         if not row.get("archived")
         and (row.get("phase") or row.get("status"))
-        and not unit_completed(row.get("phase") or row.get("status"))
+        and not _unit_row_completed(row)
     ]
     if not live:
         wanted = campaign.get("current_stream") or campaign.get("active_stream")
@@ -364,15 +395,145 @@ def select_current_unit(units: list[dict[str, Any]], campaign: dict[str, Any]) -
     return live[0]
 
 
+def _last_completed_unit(units: list[dict[str, Any]]) -> dict[str, Any] | None:
+    completed = [
+        row
+        for row in units
+        if _unit_row_completed(row)
+    ]
+    if not completed:
+        return None
+    completed.sort(
+        key=lambda row: (
+            str(row.get("completed_at") or row.get("updated_at") or ""),
+            str(row.get("stream_id") or ""),
+        ),
+        reverse=True,
+    )
+    return completed[0]
+
+
+def _has_explicit_completion_authority(campaign: dict[str, Any]) -> bool:
+    if str(campaign.get("completion") or "").upper() != STATUS_COMPLETE:
+        return False
+    authority = campaign.get("completion_authority")
+    if not isinstance(authority, dict):
+        return False
+    return bool(
+        authority.get("source") == "github"
+        and str(authority.get("source_id") or "").strip()
+        and str(authority.get("job_id") or "").strip()
+        and str(authority.get("campaign") or "").strip()
+        and str(authority.get("after_stream") or "").strip()
+    )
+
+
+def _campaign_completion_fences(
+    ctx: RepoContext | None,
+    campaign: dict[str, Any],
+    units: list[dict[str, Any]] | None = None,
+) -> tuple[bool, str]:
+    """Check terminal campaign fences without deriving a new workflow phase."""
+    if not _has_explicit_completion_authority(campaign):
+        return False, "explicit Product GPT completion authority is missing"
+    if pending_items(campaign):
+        return False, "actionable continuation remains queued"
+    units = units if units is not None else discover_campaign_units(ctx, campaign)
+    if not units:
+        return False, "campaign has no terminal unit"
+    authority = campaign.get("completion_authority") or {}
+    if str(authority.get("campaign") or "").strip().lower() != str(campaign.get("campaign_id") or "").strip().lower():
+        return False, "completion authority campaign is stale"
+    if str(authority.get("trigger") or "").upper() != TRIGGER_MERGED:
+        return False, "completion authority trigger is not MERGED"
+    last_completed = _last_completed_unit(units)
+    if not last_completed or str(authority.get("after_stream") or "").strip().lower() != str(last_completed.get("stream_id") or "").strip().lower():
+        return False, "completion authority predecessor is not the latest completed unit"
+    if any(
+        not _unit_row_completed(row)
+        and not row.get("archived")
+        for row in units
+    ):
+        return False, "campaign still has an active nonterminal unit"
+    if not any(_unit_row_completed(row) for row in units):
+        return False, "latest campaign unit is not durably merged"
+    if ctx is not None:
+        from agentbus.recover import role_process_healthy
+        from agentbus.store import StreamStore
+
+        for row in units:
+            sid = row.get("stream_id")
+            if not sid:
+                continue
+            store = StreamStore(ctx, sid)
+            if not store.exists():
+                continue
+            state = store.load()
+            runtime = store.load_runtime()
+            if role_process_healthy(runtime.get("impl") or {}) or role_process_healthy(runtime.get("audit") or {}):
+                return False, f"active executor remains for {sid}"
+            publication = state.get("publication") or {}
+            if str(publication.get("status") or "").lower() in {
+                "pending",
+                "publishing",
+                "in_progress",
+                "recovering",
+                "push_failed",
+                "pr_failed",
+            }:
+                return False, f"publication recovery remains for {sid}"
+            txn = state.get("merge_txn") or {}
+            if str(txn.get("status") or "").lower() in {
+                "started",
+                "requested",
+                "in_progress",
+                "retrying",
+            }:
+                return False, f"merge is still in progress for {sid}"
+            status = state.get("status") if isinstance(state.get("status"), dict) else {}
+            if status.get("blocker"):
+                return False, f"unresolved blocker remains for {sid}"
+        try:
+            from agentbus.codexpool import BUSY, pool_status
+
+            unit_ids = {str(row.get("stream_id")) for row in units if row.get("stream_id")}
+            pool = pool_status(ctx)
+            for slot in (pool.get("slots") or {}).values():
+                if slot.get("status") == BUSY and str(slot.get("active_stream") or "") in unit_ids:
+                    return False, f"active Codex ownership remains for {slot.get('active_stream')}"
+        except Exception:
+            # Operational pool state is a completion fence.  If it cannot be
+            # read safely, leave the campaign recoverable for the next tick.
+            return False, "Codex ownership could not be verified"
+    return True, "completion fences passed"
+
+
+def _archive_campaign_if_safe(ctx: RepoContext | None, campaign: dict[str, Any], units: list[dict[str, Any]] | None = None) -> bool:
+    ok, _reason = _campaign_completion_fences(ctx, campaign, units)
+    if not ok:
+        return False
+    campaign["status"] = STATUS_COMPLETE
+    campaign["completion"] = STATUS_COMPLETE
+    campaign["archived"] = True
+    campaign["hidden_from_attention"] = True
+    campaign["active_stream"] = None
+    campaign["current_stream"] = None
+    campaign["human_required"] = False
+    campaign["reason"] = campaign.get("reason") or "campaign explicitly complete"
+    campaign["completed_at"] = campaign.get("completed_at") or utc_now()
+    return True
+
+
 def project_campaign(ctx: RepoContext | None, campaign: dict[str, Any]) -> dict[str, Any]:
     """Truthful campaign lifecycle. Never treats a non-MERGED unit as completed."""
     apply_campaign_defaults(campaign)
     units = discover_campaign_units(ctx, campaign)
     current = select_current_unit(units, campaign)
+    last_completed = _last_completed_unit(units)
     pending = pending_items(campaign)
     if current is not None:
         phase = current.get("phase") or current.get("status") or ""
-        if not unit_completed(phase):
+        if not _unit_row_completed(current):
             return {
                 "status": STATUS_ACTIVE,
                 "reason": None,
@@ -383,6 +544,8 @@ def project_campaign(ctx: RepoContext | None, campaign: dict[str, Any]) -> dict[
                 "wait_reason": None,
                 "queue_empty": not pending,
                 "unit_completed": False,
+                "last_completed_unit": (last_completed or {}).get("stream_id"),
+                "last_completed": last_completed,
             }
     if pending:
         nxt = pending[0].get("next_stream")
@@ -396,18 +559,47 @@ def project_campaign(ctx: RepoContext | None, campaign: dict[str, Any]) -> dict[
             "wait_reason": None,
             "queue_empty": False,
             "unit_completed": False,
+            "last_completed_unit": (last_completed or {}).get("stream_id"),
+            "last_completed": last_completed,
         }
-    if campaign.get("completion") == STATUS_COMPLETE:
+    if _has_explicit_completion_authority(campaign):
+        complete, completion_reason = _campaign_completion_fences(ctx, campaign, units)
+        if complete:
+            return {
+                "status": STATUS_COMPLETE,
+                "reason": campaign.get("reason") or "campaign explicitly complete",
+                "active_stream": None,
+                "current_unit": None,
+                "current_phase": "MERGED",
+                "current_pr": None,
+                "wait_reason": None,
+                "queue_empty": True,
+                "unit_completed": True,
+                "last_completed_unit": (last_completed or {}).get("stream_id"),
+                "last_completed": last_completed,
+            }
+        # Explicit completion is durable intent, but it cannot skip a
+        # publication/executor/merge fence.  Keep the campaign active and
+        # recoverable until the next normal reconcile.
+        completion_reason = f"completion authority awaiting fence: {completion_reason}"
+    else:
+        completion_reason = None
+    if completion_reason is not None:
         return {
-            "status": STATUS_COMPLETE,
-            "reason": campaign.get("reason") or "campaign explicitly complete",
+            "status": STATUS_WAITING_FOR_PLAN,
+            "reason": completion_reason,
             "active_stream": None,
-            "current_unit": None,
+            # ``current_unit`` remains a compatibility anchor.  Consumers
+            # needing the active execution unit use ``active_stream``; the
+            # completed anchor is exposed separately below.
+            "current_unit": (current or last_completed or {}).get("stream_id"),
             "current_phase": "MERGED",
-            "current_pr": None,
-            "wait_reason": None,
+            "current_pr": (current or last_completed or {}).get("pr"),
+            "wait_reason": WAIT_WAITING_FOR_PLAN,
             "queue_empty": True,
             "unit_completed": True,
+            "last_completed_unit": (last_completed or {}).get("stream_id"),
+            "last_completed": last_completed,
         }
     if campaign.get("continuation_error") or any(
         isinstance(item, dict) and item.get("status") == ITEM_CONFLICT
@@ -423,17 +615,23 @@ def project_campaign(ctx: RepoContext | None, campaign: dict[str, Any]) -> dict[
             "wait_reason": None,
             "queue_empty": True,
             "unit_completed": True,
+            "last_completed_unit": (last_completed or {}).get("stream_id"),
+            "last_completed": last_completed,
         }
     return {
         "status": STATUS_WAITING_FOR_PLAN,
         "reason": "unit completed; continuation queue empty",
         "active_stream": None,
-        "current_unit": (current or {}).get("stream_id"),
+        # Preserve the old current_stream anchor for compatibility while
+        # making the active/null distinction explicit.
+        "current_unit": (current or last_completed or {}).get("stream_id"),
         "current_phase": "MERGED",
-        "current_pr": (current or {}).get("pr"),
+        "current_pr": (current or last_completed or {}).get("pr"),
         "wait_reason": WAIT_WAITING_FOR_PLAN,
         "queue_empty": True,
         "unit_completed": True,
+        "last_completed_unit": (last_completed or {}).get("stream_id"),
+        "last_completed": last_completed,
     }
 
 
@@ -449,6 +647,15 @@ def persist_campaign_projection(ctx: RepoContext, campaign: dict[str, Any]) -> d
     campaign["reason"] = projected.get("reason")
     campaign["human_required"] = projected["status"] == STATUS_HUMAN_REQUIRED
     campaign["wait_reason"] = projected.get("wait_reason")
+    campaign["last_completed_unit"] = projected.get("last_completed_unit")
+    campaign["last_completed"] = projected.get("last_completed")
+    if projected["status"] == STATUS_COMPLETE:
+        campaign["archived"] = True
+        campaign["hidden_from_attention"] = True
+    else:
+        # WAITING_FOR_PLAN is active campaign state, never an archive.
+        campaign["archived"] = False
+        campaign["hidden_from_attention"] = False
     campaign["projection_version"] = 2
     return projected
 
@@ -494,6 +701,25 @@ def _item_from_envelope(envelope: Envelope, *, source_stream: str) -> dict[str, 
     }
 
 
+def _durably_merged(state: dict[str, Any]) -> bool:
+    """Return true only when the local projection is compatible with GitHub MERGED."""
+    if (state.get("phase") or "") != "MERGED" or not (state.get("heads") or {}).get("merged"):
+        return False
+    cached = (state.get("github") or {}).get("pr")
+    if isinstance(cached, dict) and "state" in cached:
+        return str(cached.get("state") or "").upper() == "MERGED" or bool(state.get("merge_confirmed_at"))
+    # A PR-backed unit must have an explicit GitHub MERGED observation (or the
+    # marker written at that observation).  A local MERGED phase alone is not
+    # enough to start continuation planning.
+    if state.get("pr") is not None:
+        return bool(state.get("merge_confirmed_at"))
+    # Legacy/local fixtures may not carry a cached PR projection.  The
+    # durable GitHub sync path always fills it before invoking continuation
+    # reconciliation; this fallback preserves those explicit test/repair
+    # fixtures without inventing a new phase.
+    return True
+
+
 def apply_continuation(store: StreamStore, state: dict[str, Any], envelope: Envelope) -> dict[str, Any]:
     """Record a durable continuation. Does not mutate a merged PR."""
     from agentbus.apply import refresh_next
@@ -504,12 +730,93 @@ def apply_continuation(store: StreamStore, state: dict[str, Any], envelope: Enve
     errors = validate_envelope(envelope)
     if errors:
         raise AgentbusError("invalid envelope: " + "; ".join(errors))
+    ctx = store.ctx
+    if envelope.status == "COMPLETE":
+        if envelope.source != "github" or not str(envelope.source_id or "").strip():
+            raise AgentbusError("GPT_CONTINUATION COMPLETE requires a durable GitHub source")
+        if envelope.surface not in {"issue_comment", "review_submission"}:
+            raise AgentbusError("GPT_CONTINUATION COMPLETE surface is not an allowed GitHub authority")
+        campaign_id = infer_campaign_id(state, envelope)
+        after_stream = normalize_stream_id(envelope.get("AFTER_STREAM") or "")
+        bound_campaign = normalize_stream_id(str(state.get("campaign_id") or "")) if state.get("campaign_id") else ""
+        if bound_campaign and bound_campaign != campaign_id:
+            raise AgentbusError(
+                f"completion campaign mismatch: envelope={campaign_id} state={bound_campaign}"
+            )
+        if (envelope.get("TRIGGER") or "").strip().upper() != TRIGGER_MERGED:
+            raise AgentbusError("GPT_CONTINUATION COMPLETE trigger must be MERGED")
+        if after_stream not in _after_stream_ids(state, state.get("stream_id") or ""):
+            raise AgentbusError("completion predecessor does not match the current stream")
+        if not _durably_merged(state):
+            raise AgentbusError("completion predecessor is not durably MERGED")
+        from agentbus.decision import PLAN_CONTINUATION, PRODUCT_GPT, browser_job_id
+
+        campaign = load_campaign(ctx, campaign_id) or ensure_campaign(ctx, campaign_id)
+        live = (state.get("github") or {}).get("pr")
+        projected = project_campaign(ctx, campaign)
+        existing_authority = campaign.get("completion_authority")
+        same_authority = isinstance(existing_authority, dict) and (
+            str(existing_authority.get("source_key") or "") == str(envelope.source_key or "")
+            and str(existing_authority.get("job_id") or "") == str(envelope.get("JOB_ID") or "")
+        )
+        if projected.get("status") == STATUS_COMPLETE and not same_authority:
+            raise AgentbusError("campaign already has a different durable completion authority")
+        if not same_authority and projected.get("status") not in {STATUS_WAITING_FOR_PLAN, STATUS_COMPLETE}:
+            raise AgentbusError("completion authority is stale because the campaign has an active unit")
+        if not same_authority and projected.get("active_stream") not in {None, after_stream}:
+            raise AgentbusError("completion authority predecessor is no longer the active planning anchor")
+        expected_job = browser_job_id(
+            state,
+            campaign,
+            live if isinstance(live, dict) else None,
+            role=PRODUCT_GPT,
+            task=PLAN_CONTINUATION,
+        )
+        if (envelope.get("JOB_ID") or "").strip() != expected_job:
+            raise AgentbusError("completion authority is stale for the current planning generation")
+        rec = envelope.as_record()
+        rec["campaign_id"] = campaign_id
+        rec["completion_authority"] = True
+        state.setdefault("envelopes", {})["GPT_CONTINUATION"] = rec
+        state["campaign_id"] = campaign_id
+        authority = {
+            "source": "github",
+            "source_id": envelope.source_id,
+            "source_key": envelope.source_key,
+            "surface": envelope.surface,
+            "created_at": envelope.created_at,
+            "updated_at": envelope.updated_at,
+            "url": envelope.url,
+            "job_id": envelope.get("JOB_ID"),
+            "campaign": campaign_id,
+            "after_stream": after_stream,
+            "trigger": TRIGGER_MERGED,
+            "summary": envelope.get("SUMMARY"),
+        }
+        with campaign_lock(ctx):
+            campaign = ensure_campaign(ctx, campaign_id)
+            _record_unit(campaign, state)
+            campaign["completion"] = STATUS_COMPLETE
+            campaign["completion_authority"] = authority
+            campaign["reason"] = envelope.get("SUMMARY") or "campaign explicitly complete"
+            _archive_campaign_if_safe(ctx, campaign)
+            persist_campaign_projection(ctx, campaign)
+            save_campaign(ctx, campaign)
+        if not state.get("archived"):
+            archive_merged_unit(store, state)
+        state["campaign"] = {
+            "campaign_id": campaign_id,
+            "status": campaign.get("status"),
+            "next_stream": None,
+            "reason": campaign.get("reason"),
+        }
+        store.save(state)
+        return refresh_next(state)
     if envelope.status != "ACTIONABLE":
         rec = envelope.as_record()
         state.setdefault("envelopes", {})["GPT_CONTINUATION"] = rec
         return refresh_next(state)
 
-    ctx = store.ctx
     campaign_id = infer_campaign_id(state, envelope)
     named_raw = (envelope.get("CAMPAIGN") or "").strip()
     bound_raw = (state.get("campaign_id") or "").strip()
@@ -540,9 +847,7 @@ def apply_continuation(store: StreamStore, state: dict[str, Any], envelope: Enve
     # A top-level review submission is the new durable Product GPT surface and
     # must prove its predecessor is already merged before it can be accepted.
     if envelope.surface == "review_submission" and (
-        not predecessor
-        or predecessor.get("phase") != "MERGED"
-        or not (predecessor.get("heads") or {}).get("merged")
+        not predecessor or not _durably_merged(predecessor)
     ):
         raise AgentbusError(f"continuation predecessor {after_stream} is not durably MERGED")
     predecessor_raw = ((predecessor or {}).get("campaign_id") or "").strip()
@@ -742,7 +1047,7 @@ def resolve_base_anchor(
 
 def maybe_materialize_successor(store: StreamStore, state: dict[str, Any]) -> dict[str, Any] | None:
     """Edge-order independent: ACTIONABLE continuation + MERGED predecessor → create next once."""
-    if (state.get("phase") or "") != "MERGED":
+    if not _durably_merged(state):
         return None
     ctx = store.ctx
     campaign_id = infer_campaign_id(state)
@@ -873,6 +1178,8 @@ def after_unit_merged(
     create_next: bool = True,
 ) -> dict[str, Any]:
     """Mark the work unit complete and maybe start the next unit. Never auto-merges."""
+    if not _durably_merged(state):
+        return load_campaign(store.ctx, infer_campaign_id(state)) or {}
     if merge_sha:
         state.setdefault("heads", {})["merged"] = merge_sha
     elif not (state.get("heads") or {}).get("merged"):
@@ -881,9 +1188,97 @@ def after_unit_merged(
         campaign = ensure_campaign(store.ctx, infer_campaign_id(state))
         _record_unit(campaign, state)
         save_campaign(store.ctx, campaign)
+        archive_merged_unit(store, state)
+        with campaign_lock(store.ctx):
+            campaign = ensure_campaign(store.ctx, infer_campaign_id(state))
+            _record_unit(campaign, state)
+            persist_campaign_projection(store.ctx, campaign)
+            save_campaign(store.ctx, campaign)
         return campaign
     result = maybe_materialize_successor(store, state)
+    # GitHub's durable MERGED edge is the unit-completion boundary.  The
+    # predecessor remains a historical continuation anchor, but it no longer
+    # owns active attention or an executor even when planning is still needed.
+    archive_merged_unit(store, state)
+    with campaign_lock(store.ctx):
+        campaign = ensure_campaign(store.ctx, infer_campaign_id(state))
+        _record_unit(campaign, state)
+        persist_campaign_projection(store.ctx, campaign)
+        save_campaign(store.ctx, campaign)
     return load_campaign(store.ctx, infer_campaign_id(state)) or result or {}
+
+
+def archive_merged_unit(store: StreamStore, state: dict[str, Any]) -> bool:
+    """Archive a durably merged unit while preserving all authority/history."""
+    if state.get("archived") or not _durably_merged(state):
+        return False
+    from agentbus.actions import archive_campaign_unit
+
+    previous_archive = state.get("archive") if isinstance(state.get("archive"), dict) else {}
+    state["completed_at"] = (
+        previous_archive.get("merged_at")
+        or ((state.get("github") or {}).get("pr") or {}).get("mergedAt")
+        or state.get("completed_at")
+        or utc_now()
+    )
+    archive_campaign_unit(store, state)
+    # A direct GitHub reconcile may call this before the normal executor
+    # projection runs.  Reuse the existing fenced cleanup; it never closes a
+    # healthy/unowned process and never touches a successor stream.
+    try:
+        from agentbus.autopilot import _cleanup_unneeded_executor_surfaces
+
+        _cleanup_unneeded_executor_surfaces(store, state, action="DONE")
+    except Exception:  # noqa: BLE001 - cleanup is best-effort and fenced
+        pass
+    store.save(state)
+    return True
+
+
+def backfill_archived_units(ctx: RepoContext, campaign_id: str) -> list[str]:
+    """Idempotently hide historical merged units without replaying workflow."""
+    from agentbus.store import iter_stores
+
+    archived: list[str] = []
+    touched: list[str] = []
+    with campaign_lock(ctx):
+        for store in iter_stores(ctx):
+            if not store.exists():
+                continue
+            stream_lock = store.lock()
+            if not stream_lock.try_acquire():
+                # A live runner owns this stream; leave it untouched for its
+                # next normal reconcile rather than contending with product
+                # work or turning migration into a blocker.
+                continue
+            try:
+                state = store.load()
+                if state.get("campaign_id") != campaign_id:
+                    continue
+                if state.get("archived"):
+                    touched.append(str(state.get("stream_id") or store.stream_id))
+                    archive = state.get("archive") if isinstance(state.get("archive"), dict) else {}
+                    merged_at = archive.get("merged_at")
+                    if merged_at and state.get("completed_at") != merged_at:
+                        state["completed_at"] = merged_at
+                        store.save(state)
+                    continue
+                if not _durably_merged(state):
+                    continue
+                if archive_merged_unit(store, state):
+                    stream_id = str(state.get("stream_id") or store.stream_id)
+                    archived.append(stream_id)
+                    touched.append(stream_id)
+            finally:
+                stream_lock.release()
+        campaign = ensure_campaign(ctx, campaign_id)
+        for sid in touched:
+            store = StreamStore(ctx, sid)
+            if store.exists():
+                _record_unit(campaign, store.load())
+        persist_campaign_projection(ctx, campaign)
+        save_campaign(ctx, campaign)
+    return archived
 
 
 def _record_unit(campaign: dict[str, Any], state: dict[str, Any]) -> None:
@@ -894,9 +1289,11 @@ def _record_unit(campaign: dict[str, Any], state: dict[str, Any]) -> None:
         "status": phase,
         "pr": state.get("pr"),
         "merge_sha": (state.get("heads") or {}).get("merged"),
+        "archived": bool(state.get("archived")),
+        "obsolete": _explicit_obsolete_state(state),
     }
     if unit_completed(phase):
-        rec["completed_at"] = utc_now()
+        rec["completed_at"] = state.get("completed_at") or utc_now()
     if not campaign.get("current_stream"):
         campaign["current_stream"] = sid
     for unit in campaign.setdefault("units", []):
@@ -1107,6 +1504,14 @@ def campaign_view(campaign: dict[str, Any] | None, ctx: RepoContext | None = Non
     view_campaign["reason"] = projected.get("reason") or campaign.get("reason")
     view_campaign["current_stream"] = projected.get("current_unit")
     view_campaign["active_stream"] = projected.get("active_stream")
+    view_campaign["last_completed_unit"] = projected.get("last_completed_unit")
+    view_campaign["last_completed"] = projected.get("last_completed")
+    # Archive is a projection of explicit campaign completion, never a stale
+    # saved boolean.  In particular WAITING_FOR_PLAN remains visible/active
+    # even when its last completed unit is archived.
+    projected_archived = projected["status"] == STATUS_COMPLETE
+    view_campaign["archived"] = projected_archived
+    view_campaign["hidden_from_attention"] = projected_archived
     att = campaign_attention(view_campaign)
     if current_state is not None:
         # A campaign with a live unit inherits that unit's next authority.
@@ -1139,6 +1544,9 @@ def campaign_view(campaign: dict[str, Any] | None, ctx: RepoContext | None = Non
         "current_stream": projected.get("current_unit"),
         "active_stream": projected.get("active_stream"),
         "current_unit": projected.get("current_unit"),
+        "active_unit": projected.get("active_stream"),
+        "last_completed_unit": projected.get("last_completed_unit"),
+        "last_completed": projected.get("last_completed"),
         "current_phase": projected.get("current_phase"),
         "unit_completed": bool(projected.get("unit_completed")),
         "units": campaign.get("units") or [],
@@ -1156,4 +1564,7 @@ def campaign_view(campaign: dict[str, Any] | None, ctx: RepoContext | None = Non
         "attention_owner": att["attention_owner"],
         "browser_gpt_required": att["browser_gpt_required"],
         "next_stream": next_label,
+        "archived": projected_archived,
+        "hidden_from_attention": projected_archived,
+        "completion_authority": campaign.get("completion_authority"),
     }
