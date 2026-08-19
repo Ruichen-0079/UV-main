@@ -2092,7 +2092,11 @@ function ProvidersPage(props: {
     null
   );
   const [chainInspectionError, setChainInspectionError] = useState<string | null>(null);
-  const rows = [
+  const rows: Array<{
+    label: string;
+    capability: ProviderCapability;
+    health: ProviderHealth | undefined;
+  }> = [
     {
       label: "DeepSeek Chat",
       capability: "chat",
