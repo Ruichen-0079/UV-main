@@ -6,7 +6,8 @@ import {
   resolveSettingsOperationState,
   shouldReplaceSettingsDraft,
   settingsDraftDiffers,
-  settingsStateLabels
+  settingsStateLabels,
+  synchronizeSettingsDraftState
 } from "./settings-state.js";
 
 describe("settings apply state", () => {
@@ -106,6 +107,17 @@ describe("settings apply state", () => {
     expect(settingsDraftDiffers({ ...baseline, SERVER_PORT: "7000" }, baseline)).toBe(true);
     expect(settingsDraftDiffers(baseline, baseline)).toBe(false);
     expect(settingsDraftDiffers({ ...baseline, DEEPSEEK_API_KEY: "new" }, baseline)).toBe(true);
+  });
+
+  it("clears only the transient dirty state when a draft is restored", () => {
+    expect(synchronizeSettingsDraftState("dirty", false, false)).toBe("clean");
+    expect(synchronizeSettingsDraftState("saved-not-applied", false, false)).toBe(
+      "saved-not-applied"
+    );
+    expect(synchronizeSettingsDraftState("restart-required", false, false)).toBe(
+      "restart-required"
+    );
+    expect(synchronizeSettingsDraftState("dirty", false, true)).toBe("dirty");
   });
 
   it("does not replace a dirty draft when settings data refreshes", () => {

@@ -95,6 +95,24 @@ export function resolveSettingsOperationState(
   return outcome.draftChangedDuringOperation ? "dirty" : "applied";
 }
 
+/**
+ * Keep the presentation state aligned with the current draft once no
+ * settings operation is in flight. Reverting an edit must clear only the
+ * transient dirty marker; saved/effective and restart-required outcomes are
+ * still represented by their own states.
+ */
+export function synchronizeSettingsDraftState(
+  state: SettingsApplyState,
+  draftDirty: boolean,
+  operationBusy: boolean
+): SettingsApplyState {
+  if (operationBusy) return state;
+  if (draftDirty) {
+    return state === "failed" || state === "restart-required" ? state : "dirty";
+  }
+  return state === "dirty" ? "clean" : state;
+}
+
 export function settingsFingerprint<T extends Record<string, string>>(
   form: T,
   clearedSecrets: Iterable<string> = []

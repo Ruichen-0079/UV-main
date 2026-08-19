@@ -96,6 +96,7 @@ import {
   settingsFingerprint,
   settingsStateLabels,
   shouldReplaceSettingsDraft,
+  synchronizeSettingsDraftState,
   type SettingsApplyState,
   type SettingsOperationMode
 } from "./settings-state.js";
@@ -3379,14 +3380,8 @@ function SettingsPage(): JSX.Element {
   const operationBusy = saving || applying;
 
   useEffect(() => {
-    if (
-      draftDirty &&
-      !operationBusy &&
-      settingsState !== "failed" &&
-      settingsState !== "restart-required"
-    ) {
-      setSettingsState("dirty");
-    }
+    const nextState = synchronizeSettingsDraftState(settingsState, draftDirty, operationBusy);
+    if (nextState !== settingsState) setSettingsState(nextState);
   }, [draftDirty, operationBusy, settingsState]);
 
   function beginOperation(): number {
@@ -3768,7 +3763,7 @@ function SettingsPage(): JSX.Element {
           />
         )}
       </Panel>
-      {(draftDirty || settingsState === "dirty") && (
+      {draftDirty && (
         <Notice
           tone="info"
           title={settingsStateLabels.dirty}
