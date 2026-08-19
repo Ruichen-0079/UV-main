@@ -23,7 +23,26 @@ function findSendButton() {
   return button.disabled || button.getAttribute("aria-disabled") === "true" ? null : button;
 }
 
+function detectAuthRequired() {
+  const path = (location.pathname || "").toLowerCase();
+  if (path.includes("/auth/login") || path === "/login" || path.startsWith("/login/")) {
+    return { code: "AUTH_REQUIRED", auth_required: true };
+  }
+  if (findComposer()) return null;
+  const loginControl = document.querySelector(
+    'input[type="email"], input[name="username"], input[name="email"], [data-testid="login-button"]'
+  );
+  if (!loginControl) return null;
+  const text = `${document.title || ""} ${(document.body && document.body.innerText || "").slice(0, 1200)}`.toLowerCase();
+  const loginWords = ["log in", "login", "sign in", "continue with google", "登录", "登入"];
+  return loginWords.some((needle) => text.includes(needle))
+    ? { code: "AUTH_REQUIRED", auth_required: true }
+    : null;
+}
+
 function detectTemporaryError() {
+  const auth = detectAuthRequired();
+  if (auth) return auth;
   const errorNodes = [...new Set([
     document.querySelector('[role="alert"]'),
     document.querySelector('[data-testid="error-message"]'),

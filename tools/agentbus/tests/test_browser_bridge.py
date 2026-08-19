@@ -217,13 +217,10 @@ class BrowserBridgeTests(AgentbusTest):
             manifest = json.load(handle)
         permissions = set(manifest["permissions"])
         self.assertEqual(
-            permissions - {"http://127.0.0.1:6738/*", "http://127.0.0.1/*"},
-            {"storage", "tabs", "https://chatgpt.com/*"},
+            permissions,
+            {"storage", "tabs", "https://chatgpt.com/*", "http://127.0.0.1/*"},
         )
-        self.assertIn(
-            permissions & {"http://127.0.0.1:6738/*", "http://127.0.0.1/*"},
-            ({"http://127.0.0.1:6738/*"}, {"http://127.0.0.1/*"}),
-        )
+        self.assertNotIn("http://127.0.0.1:6738/*", permissions)
         sources = []
         for name in ("background.js", "content.js"):
             with open(os.path.join(root, name), encoding="utf-8") as handle:
@@ -245,7 +242,15 @@ class BrowserBridgeTests(AgentbusTest):
         self.assertIn("active: false", js)
         self.assertIn("WAITING_FOR_GITHUB", js)
         self.assertIn("fetch(JOBS_URL", js)
+        self.assertIn('const JOBS_URL = "http://127.0.0.1:6738/api/browser/jobs"', js)
+        self.assertIn("AUTH_REQUIRED", js)
+        for unsafe in ("0.0.0.0", "http://*/*", "https://*/*", "http://localhost:"):
+            self.assertNotIn(unsafe, js)
         self.assertNotIn('method: "POST"', js)
+
+        from agentbus.browser_extension.package import validate_extension_sources
+
+        self.assertEqual(validate_extension_sources(root)["browser_specific_settings"]["gecko"]["id"], "yuvi-agentbus-bridge@local")
 
     def test_display_sanitizer_preserves_urls(self) -> None:
         from agentbus.display import sanitize_display_text

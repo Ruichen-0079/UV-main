@@ -72,6 +72,15 @@ function scheduleComposerRetry(record) {
   record.attempts = (record.attempts || 0) + 1;
 }
 
+function scheduleAuthRetry(record) {
+  // Keep the durable server job queued while login is unavailable. The
+  // bounded retry is local extension state, so recovery never duplicates a
+  // submission of the same job.
+  record.state = "AUTH_REQUIRED";
+  record.nextAttemptAt = now() + jitter(LONG_BACKOFF_MS[0]);
+  record.attempts = (record.attempts || 0) + 1;
+}
+
 async function submit(job, scheduler) {
   const record = scheduler.jobs[job.job_id];
   record.state = "SUBMITTING";
@@ -99,7 +108,9 @@ async function submit(job, scheduler) {
     }
     const code = response && response.code || "COMPOSER_NOT_READY";
     record.lastError = code;
-    if (code === "COMPOSER_NOT_READY" || code === "COMPOSER_NOT_FOUND") {
+    if (code === "AUTH_REQUIRED") {
+      scheduleAuthRetry(record);
+    } else if (code === "COMPOSER_NOT_READY" || code === "COMPOSER_NOT_FOUND") {
       scheduleComposerRetry(record);
     } else {
       scheduleBackoff(record, code === "BROWSER_CAPACITY");
@@ -146,7 +157,9 @@ async function tick() {
     if (now() - scheduler.lastSubmitAt < MIN_SUBMIT_INTERVAL_MS) return;
     const candidate = actionable.find((job) => {
       const record = scheduler.jobs[job.job_id];
-      return record.state === "QUEUED" || (record.state === "BACKOFF" && now() >= (record.nextAttemptAt || 0));
+      return record.state === "QUEUED"
+        || ((record.state === "BACKOFF" || record.state === "AUTH_REQUIRED")
+          && now() >= (record.nextAttemptAt || 0));
     });
     if (candidate) await submit(candidate, scheduler);
   } catch (_) {

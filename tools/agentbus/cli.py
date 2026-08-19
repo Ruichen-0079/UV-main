@@ -691,6 +691,75 @@ def cmd_settings(ns: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_browser(ns: argparse.Namespace) -> int:
+    import json
+
+    from agentbus.browser_extension.package import (
+        browser_artifact_status,
+        default_artifact_dir,
+        firefox_policy_path,
+        install_persistent_extension,
+        package_extension,
+        sign_extension,
+    )
+    from agentbus.settings import browser_bridge_status
+
+    ctx = _ctx(ns)
+    artifact_dir = default_artifact_dir(ctx.repo_state)
+    action = ns.browser_action
+    if action == "package":
+        result = package_extension(
+            artifact_dir=artifact_dir,
+            output=ns.output,
+            version=ns.version,
+            bump=bool(ns.bump),
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if action == "sign":
+        result = sign_extension(
+            artifact_dir=artifact_dir,
+            version=ns.version,
+            bump=bool(ns.bump),
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if action == "install":
+        xpi = ns.xpi
+        if not xpi:
+            candidates = sorted(artifact_dir.glob("yuvi-agentbus-bridge-*-signed.xpi"), key=lambda path: path.stat().st_mtime)
+            if not candidates:
+                raise AgentbusError(
+                    "no Mozilla-signed Browser Bridge XPI is available; run browser sign first",
+                    code="SIGNING_SETUP_REQUIRED",
+                )
+            xpi = str(candidates[-1])
+        result = install_persistent_extension(
+            xpi,
+            policy_path=ns.policy,
+            dry_run=bool(ns.dry_run),
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if action == "status":
+        print(
+            json.dumps(
+                {
+                    "browser_bridge": browser_bridge_status(ctx),
+                    "artifacts": browser_artifact_status(artifact_dir),
+                    "policy_path": str(firefox_policy_path(ns.policy)),
+                    "extension_id": "yuvi-agentbus-bridge@local",
+                    "temporary_addon": False,
+                    "profile_mutation": False,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    raise AgentbusError(f"unknown browser action {action}")
+
+
 def cmd_unbind_gpt(ns: argparse.Namespace) -> int:
     ctx = _ctx(ns)
     store = _store(ctx, ns.stream)
@@ -977,6 +1046,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--final-url")
     p.add_argument("--final-name")
     p.set_defaults(func=cmd_settings)
+
+    p = sub.add_parser("browser", help="package, sign, install, or inspect the Firefox Browser Bridge")
+    browser_sub = p.add_subparsers(dest="browser_action", required=True)
+
+    package_parser = browser_sub.add_parser("package", help="build a deterministic unsigned XPI")
+    package_parser.add_argument("--output")
+    package_parser.add_argument("--version")
+    package_parser.add_argument("--bump", action="store_true", help="advance the patch version after a source change")
+    package_parser.set_defaults(func=cmd_browser)
+
+    sign_parser = browser_sub.add_parser("sign", help="submit the bridge to Mozilla unlisted signing")
+    sign_parser.add_argument("--version")
+    sign_parser.add_argument("--bump", action="store_true")
+    sign_parser.set_defaults(func=cmd_browser)
+
+    install_parser = browser_sub.add_parser("install", help="install a signed XPI through Firefox policy")
+    install_parser.add_argument("--xpi")
+    install_parser.add_argument("--policy")
+    install_parser.add_argument("--dry-run", action="store_true")
+    install_parser.set_defaults(func=cmd_browser)
+
+    status_parser = browser_sub.add_parser("status", help="show bridge artifacts, policy, and liveness")
+    status_parser.add_argument("--policy")
+    status_parser.set_defaults(func=cmd_browser)
 
     p = sub.add_parser("workspace", help="open IMPL + AUDIT Konsoles (and print GPT URL)")
     p.add_argument("stream")

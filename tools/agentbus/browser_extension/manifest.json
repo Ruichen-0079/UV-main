@@ -7,7 +7,7 @@
     "storage",
     "tabs",
     "https://chatgpt.com/*",
-    "http://127.0.0.1:6738/*"
+    "http://127.0.0.1/*"
   ],
   "background": {
     "scripts": ["background.js"]
