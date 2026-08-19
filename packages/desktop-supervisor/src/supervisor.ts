@@ -525,6 +525,7 @@ export class DesktopSupervisor {
       !this.shuttingDown &&
       mem0.spec.managed &&
       mem0.spec.autostart &&
+      this.memorySearchAllowsMem0() &&
       mem0.ownership === "none" &&
       mem0.status === "stopped"
     ) {
@@ -646,6 +647,10 @@ export class DesktopSupervisor {
     this.lifecycleEvent("memory.start.enter", svc);
     await this.refreshService(id);
     if (svc.status === "healthy" || svc.status === "degraded") {
+      return;
+    }
+    if (id === "mem0" && !this.memorySearchAllowsMem0()) {
+      this.markMem0BlockedByMemorySearch(svc);
       return;
     }
     // An identity query timeout is not evidence that a live child died. Keep
@@ -1180,9 +1185,21 @@ export class DesktopSupervisor {
   }
 
   private memorySearchAllowsMem0(): boolean {
-    const status = this.migrationDiagnostics?.memorySearchStatus;
-    if (status == null) return true;
-    return status === "ready";
+    if (this.privatePostgresBootstrapTransition) return false;
+    const diagnostics = this.migrationDiagnostics;
+    if (!diagnostics) return true;
+    return diagnostics.schemaReady && diagnostics.memorySearchStatus === "ready";
+  }
+
+  private markMem0BlockedByMemorySearch(svc: InternalService): void {
+    if (svc.ownership === "owned") return;
+    svc.status = "unavailable";
+    svc.ownership = "none";
+    svc.summary = "Memory-search schema is not ready.";
+    svc.lastError =
+      this.migrationDiagnostics?.memorySearchErrorCode ??
+      this.migrationDiagnostics?.memorySearchStatus ??
+      "unavailable";
   }
 
   private toMigrationDiagnostics(diagnostics: MigrationDiagnostics): PostgresMigrationDiagnostics {
@@ -1215,10 +1232,12 @@ export class DesktopSupervisor {
             lastErrorCode: safePostgresServiceErrorCode(postgres.lastError)
           });
         }
-        throw new MigrationError(
+        const error = new MigrationError(
           "DATABASE_UNAVAILABLE",
           "The private PostgreSQL target is not reachable."
         );
+        this.recordSchemaBootstrapFailure(error);
+        throw error;
       }
       return;
     }
@@ -1232,16 +1251,21 @@ export class DesktopSupervisor {
             lastErrorCode: safePostgresServiceErrorCode(postgres.lastError)
           });
         }
-        throw new MigrationError(
+        const error = new MigrationError(
           "DATABASE_UNAVAILABLE",
           "The private PostgreSQL target is not reachable."
         );
+        this.recordSchemaBootstrapFailure(error);
+        throw error;
       }
     }
     const migrate = this.hooks.migratePostgres ?? migrateSupervisorTarget;
     try {
       const result = await migrate(target, {
-        settings: migrationSettingsFromEnv(this.config.env)
+        settings: migrationSettingsFromEnv(this.config.env),
+        ...(this.config.layout.mode === "packaged"
+          ? { migrationsDir: this.packagedMigrationsDirectory() }
+          : {})
       });
       this.migrationDiagnostics = this.toMigrationDiagnostics(result.diagnostics);
       if (!result.ok || !result.schemaReady) {
@@ -1251,24 +1275,66 @@ export class DesktopSupervisor {
         );
       }
     } catch (error) {
-      if (error instanceof MigrationError) {
-        this.migrationDiagnostics = {
-          schemaReady: false,
-          memorySearchReady: false,
-          memorySearchStatus: this.migrationDiagnostics?.memorySearchStatus ?? null,
-          memorySearchErrorCode: this.migrationDiagnostics?.memorySearchErrorCode ?? null,
-          memorySearchFailedMigration:
-            this.migrationDiagnostics?.memorySearchFailedMigration ?? null,
-          vectorAvailable: this.migrationDiagnostics?.vectorAvailable ?? false,
-          applied: this.migrationDiagnostics?.applied ?? [],
-          pending: this.migrationDiagnostics?.pending ?? [],
-          currentMigration: this.migrationDiagnostics?.currentMigration ?? null,
-          lastErrorCode: error.code,
-          lockWaitMs: this.migrationDiagnostics?.lockWaitMs ?? 0
-        };
-      }
+      this.recordSchemaBootstrapFailure(error);
       throw error;
     }
+  }
+
+  private recordSchemaBootstrapFailure(error: unknown): void {
+    const errorCode =
+      error instanceof MigrationError
+        ? error.code
+        : error && typeof error === "object" && "code" in error && typeof error.code === "string"
+          ? error.code
+          : "SCHEMA_BOOTSTRAP_FAILED";
+    this.migrationDiagnostics = {
+      schemaReady: false,
+      memorySearchReady: false,
+      memorySearchStatus: null,
+      memorySearchErrorCode: null,
+      memorySearchFailedMigration: null,
+      vectorAvailable: this.migrationDiagnostics?.vectorAvailable ?? false,
+      applied: this.migrationDiagnostics?.applied ?? [],
+      pending: this.migrationDiagnostics?.pending ?? [],
+      currentMigration: this.migrationDiagnostics?.currentMigration ?? null,
+      lastErrorCode: errorCode,
+      lockWaitMs: this.migrationDiagnostics?.lockWaitMs ?? 0
+    };
+  }
+
+  private packagedMigrationsDirectory(): string {
+    if (typeof __dirname === "string") {
+      const migrationFiles = [
+        path.join(__dirname, "../../../../packages/memory/migrations/001_init_memory.sql"),
+        path.join(__dirname, "../../../../packages/memory/migrations/002_postgres_search_v2.sql"),
+        path.join(
+          __dirname,
+          "../../../../packages/memory/migrations/003_embedding_pgvector_v1.sql"
+        ),
+        path.join(__dirname, "../../../../packages/memory/migrations/004_ann_vector_index_v1.sql"),
+        path.join(
+          __dirname,
+          "../../../../packages/memory/migrations/005_identity_retention_v1.sql"
+        ),
+        path.join(__dirname, "../../../../packages/memory/migrations/006_conversation_v1.sql"),
+        path.join(
+          __dirname,
+          "../../../../packages/memory/migrations/007_conversation_streaming.sql"
+        ),
+        path.join(
+          __dirname,
+          "../../../../packages/memory/migrations/008_finalized_ingestion_ledger_v1.sql"
+        ),
+        path.join(
+          __dirname,
+          "../../../../packages/memory/migrations/009_finalized_ingestion_work_discovery_v1.sql"
+        )
+      ];
+      if (migrationFiles.every((file) => fs.existsSync(file))) {
+        return path.dirname(migrationFiles[0]!);
+      }
+    }
+    return path.join(this.config.repositoryRoot, "packages", "memory", "migrations");
   }
 
   private async completePrivatePostgresApplicationReady(): Promise<

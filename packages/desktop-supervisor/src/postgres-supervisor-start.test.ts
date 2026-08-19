@@ -27,6 +27,9 @@ const supervisors: DesktopSupervisor[] = [];
 let lifecycleDiagnosticsWasEnabled = false;
 let previousLifecycleDiagnostics: string | undefined;
 let nextSyntheticPid = 1_000_000_000;
+type SupervisorMigrateOptions = NonNullable<
+  Parameters<NonNullable<SupervisorHooks["migratePostgres"]>>[1]
+>;
 
 function unavailableTestPid(): number {
   for (let attempts = 0; attempts < 1_000; attempts += 1) {
@@ -92,7 +95,7 @@ function distribution(): PostgresDistribution {
   };
 }
 
-function privateConfig(): {
+function privateConfig(options: { packaged?: boolean } = {}): {
   config: SupervisorConfig;
   layout: ReturnType<typeof layoutFromRoot>;
   marker: ReturnType<typeof createClusterMarker>;
@@ -110,12 +113,21 @@ function privateConfig(): {
   writeInitializationState(layout, "ready");
   const dist = distribution();
   const start = cluster.buildPostgresStartCommand(layout, dist, 55432, marker.clusterId);
+  const supervisorLayout = options.packaged
+    ? {
+        mode: "packaged" as const,
+        resourceRoot: root,
+        dataRoot: stateDirectory,
+        runtimeManifestPath: path.join(root, "runtime", "runtime-manifest.json"),
+        mem0ManifestPath: path.join(root, "mem0", "mem0-manifest.json")
+      }
+    : { mode: "development" as const, repositoryRoot: root };
   return {
     layout,
     marker,
     dist,
     config: {
-      layout: { mode: "development", repositoryRoot: root },
+      layout: supervisorLayout,
       repositoryRoot: root,
       stateDirectory,
       instanceId: "pg-inst",
@@ -958,6 +970,45 @@ describe("private postgres Windows start state machine", () => {
     );
   });
 
+  it("passes an explicit migration directory for packaged schema bootstrap", async () => {
+    const { config, layout, marker, dist } = privateConfig({ packaged: true });
+    const started = new Date();
+    config.repositoryRoot = path.resolve(".");
+    const migratePostgres = vi.fn(
+      async (_target: unknown, _options: SupervisorMigrateOptions = {}) => ({
+        ok: true,
+        schemaReady: true,
+        diagnostics: { ...emptyDiagnostics(), schemaReady: true }
+      })
+    );
+    vi.spyOn(cluster, "pingPostgresServer").mockResolvedValue(true);
+    vi.spyOn(cluster, "pingPostgres").mockResolvedValue(true);
+    vi.spyOn(cluster, "ensureYuviDatabase").mockResolvedValue({
+      ok: true,
+      created: false,
+      alreadyExists: true,
+      sqlState: "42P04"
+    });
+    const supervisor = createSupervisor(config, {
+      platform: "win32",
+      migratePostgres,
+      inspectProcess: (processId) =>
+        ownedInspection(dist, layout, marker.clusterId, started, processId),
+      spawnWindowsPgCtl: async () => {
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        return { ok: true, kind: "SUCCESS", status: 0, signal: null, stdout: "", stderr: "" };
+      }
+    });
+
+    await supervisor.bootstrap();
+
+    const options = migratePostgres.mock.calls[0]?.[1];
+    expect(options?.migrationsDir).toBe(
+      path.join(config.repositoryRoot, "packages", "memory", "migrations")
+    );
+    expect(fs.existsSync(options?.migrationsDir ?? "")).toBe(true);
+  });
+
   it("fences generic postgres refresh during private bootstrap and refreshes other services", async () => {
     const { config, layout, marker, dist } = privateConfig();
     const started = new Date();
@@ -1129,6 +1180,66 @@ describe("private postgres Windows start state machine", () => {
     const postgres = supervisor.snapshot().services.find((service) => service.id === "postgres");
     expect(postgres?.status).toBe("unavailable");
     expect(postgres?.ownership).toBe("none");
+  });
+
+  it("fails closed for Mem0 after a schema bootstrap path error", async () => {
+    const { config, layout, marker, dist } = privateConfig();
+    const started = new Date();
+    config.autostartMem0 = true;
+    config.mem0Start = {
+      file: process.execPath,
+      args: ["-e", ""],
+      cwd: config.repositoryRoot,
+      env: {},
+      commandMarker: "mem0-test"
+    };
+    const processSpawn = vi.spyOn(processWindows, "spawnManagedProcess").mockImplementation(() => {
+      throw new Error("Mem0 must not spawn before memory-search readiness");
+    });
+    vi.spyOn(health, "probeHttpHealth").mockResolvedValue({
+      ok: false,
+      statusCode: null,
+      protocolOk: false,
+      message: "down",
+      latencyMs: 1
+    });
+    vi.spyOn(cluster, "pingPostgresServer").mockResolvedValue(true);
+    vi.spyOn(cluster, "pingPostgres").mockResolvedValue(true);
+    vi.spyOn(cluster, "ensureYuviDatabase").mockResolvedValue({
+      ok: true,
+      created: false,
+      alreadyExists: true,
+      sqlState: "42P04"
+    });
+    const supervisor = createSupervisor(config, {
+      platform: "win32",
+      migratePostgres: vi.fn(async () => {
+        throw Object.assign(
+          new TypeError('The "path" argument must be of type string or an instance of URL.'),
+          { code: "ERR_INVALID_ARG_TYPE" }
+        );
+      }),
+      inspectProcess: (processId) =>
+        ownedInspection(dist, layout, marker.clusterId, started, processId),
+      spawnWindowsPgCtl: async () => {
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        return { ok: true, kind: "SUCCESS", status: 0, signal: null, stdout: "", stderr: "" };
+      }
+    });
+
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "ERR_INVALID_ARG_TYPE" });
+    await supervisor.refreshAll();
+    await supervisor.ensureService("mem0");
+
+    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+    expect(processSpawn).not.toHaveBeenCalled();
+    expect(mem0?.ownership).not.toBe("owned");
+    expect(mem0?.summary).toMatch(/memory-search schema is not ready/i);
+    expect(supervisor.snapshot().postgres?.migration).toMatchObject({
+      schemaReady: false,
+      memorySearchStatus: null,
+      lastErrorCode: "ERR_INVALID_ARG_TYPE"
+    });
   });
 
   it("halts retry when a live postmaster candidate cannot be identified", async () => {
