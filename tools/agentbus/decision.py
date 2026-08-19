@@ -295,6 +295,22 @@ def scope_failure_route(state: dict[str, Any]) -> dict[str, Any] | None:
     if not unexpected:
         return None
 
+    # A long-lived runner can retain a pre-refresh materialized scope while a
+    # newer durable GPT_SPEC has already authorized the reported paths.  Do
+    # not discard a valid implementation in that projection race; the normal
+    # publication retry will re-check the current scope under the stream lock.
+    from agentbus.scope import path_allowed
+
+    current_scope = state.get("scope") if isinstance(state.get("scope"), dict) else None
+    if current_scope and all(path_allowed(path, current_scope) for path in unexpected):
+        return {
+            "scope_blocked": False,
+            "scope_failure_kind": "STALE_SCOPE_PROJECTION",
+            "scope_failure_reason": reason,
+            "unexpected_paths": unexpected,
+            "approved_paths": list(current_scope.get("explicit_paths") or []),
+        }
+
     spec = _record(state, "GPT_SPEC")
     spec_fields = spec.get("fields") if isinstance(spec.get("fields"), dict) else {}
     raw_spec = str(spec_fields.get("SCOPE") or spec.get("raw") or "")

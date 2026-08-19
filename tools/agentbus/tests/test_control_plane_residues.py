@@ -364,3 +364,28 @@ class ControlPlaneResidueTests(AgentbusTest):
         prompt = build_prompt(state, "impl", "/tmp/HANDOFF_PROTOCOL.md")
         self.assertIn("apps/web/src/unrelated.ts", prompt)
         self.assertIn("This is an IMPL retry", prompt)
+
+    def test_scope_failure_allowed_by_newer_scope_is_not_discardable(self) -> None:
+        self.create_stream("scope-refresh-retry", "--worktree", self.repo)
+        store = self.store("scope-refresh-retry")
+        state = store.load()
+        state["phase"] = "IMPLEMENTING"
+        state["scope"] = {
+            "raw": "allow `apps/web/src/new-helper.ts`",
+            "explicit_paths": ["apps/web/src/new-helper.ts"],
+            "allowed_patterns": [],
+            "source": "continuation:new",
+        }
+        state["envelopes"]["GPT_SPEC"] = {
+            "kind": "GPT_SPEC",
+            "status": "ACTIONABLE",
+            "fields": {"STATUS": "ACTIONABLE", "SCOPE": "allow `apps/web/src/new-helper.ts`"},
+        }
+        state["publication"] = {
+            "status": "failed",
+            "reason": "scope fence rejected files\nunexpected:\n- apps/web/src/new-helper.ts",
+        }
+
+        route = scope_failure_route(state)
+
+        self.assertEqual(route["scope_failure_kind"], "STALE_SCOPE_PROJECTION")
