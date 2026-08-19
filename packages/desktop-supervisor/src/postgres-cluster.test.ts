@@ -47,6 +47,7 @@ import type { PostgresDistribution } from "./postgres-distribution.js";
 import type { PostgresIdentityDbProbeResult } from "./postgres-cluster.js";
 import type { WindowsNativeProcessIdentityResult } from "./process-windows.js";
 import type { ProcessInspectionResult } from "./types.js";
+import { canonicalPath } from "./paths.js";
 
 type SpawnSyncOverride = (
   command: string,
@@ -310,7 +311,7 @@ describe("private postgres cluster safety", () => {
     expect(accepted.evidence).toMatchObject({
       owned: true,
       pid: 4242,
-      executable: fixture.distribution.postgres,
+      executable: canonicalPath(fixture.distribution.postgres),
       dataDirectory: fixture.layout.data,
       clusterId: fixture.marker.clusterId,
       port: 55432
