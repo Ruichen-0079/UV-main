@@ -214,6 +214,16 @@ export class DesktopSupervisor {
   private lifecycleSequence = 0;
   private readonly hooks: SupervisorHooks;
   private migrationDiagnostics: PostgresMigrationDiagnostics | undefined;
+  /**
+   * Strong fresh-launch proof remains authoritative only until D2 bootstrap
+   * crosses its boundary. Generic inspection authority is unchanged outside
+   * this narrow private-Postgres transition.
+   */
+  private privatePostgresFreshLaunchAuthority: {
+    pid: number;
+    processStartedAtUtc: string;
+    applicationReady: boolean;
+  } | null = null;
 
   constructor(
     private config: SupervisorConfig,
@@ -438,12 +448,19 @@ export class DesktopSupervisor {
 
   async bootstrap(): Promise<SupervisorSnapshot> {
     if (this.shuttingDown) return this.snapshot();
-    if ((this.config.postgresMode ?? "external") === "private") {
-      await this.prepareAndStartPrivatePostgres();
-    } else {
-      await this.refreshService("postgres");
+    this.privatePostgresFreshLaunchAuthority = null;
+    try {
+      if ((this.config.postgresMode ?? "external") === "private") {
+        await this.prepareAndStartPrivatePostgres();
+      } else {
+        await this.refreshService("postgres");
+      }
+      await this.runSchemaBootstrap();
+    } finally {
+      // The composite proof is deliberately not a generic refresh/adoption
+      // authority after the initial D2 transition has completed.
+      this.privatePostgresFreshLaunchAuthority = null;
     }
-    await this.runSchemaBootstrap();
     await this.refreshService("ollama");
 
     if (this.config.autostartRuntime) {
@@ -516,11 +533,23 @@ export class DesktopSupervisor {
       mem0.spec.managed &&
       mem0.spec.autostart &&
       mem0.ownership === "none" &&
-      mem0.status === "stopped"
+      mem0.status === "stopped" &&
+      this.memorySearchAllowsMem0()
     ) {
       await this.queue(mem0, async () => {
         await this.startManagedIfNeeded("mem0");
       });
+    } else if (
+      mem0 &&
+      !this.memorySearchAllowsMem0() &&
+      mem0.spec.autostart &&
+      mem0.ownership !== "owned"
+    ) {
+      mem0.summary = "Memory-search schema is not ready.";
+      mem0.lastError =
+        this.migrationDiagnostics?.memorySearchErrorCode ??
+        this.migrationDiagnostics?.memorySearchStatus ??
+        "unavailable";
     }
     this.emit();
     return this.snapshot();
@@ -987,6 +1016,34 @@ export class DesktopSupervisor {
     }
 
     if (ownership.status === "unavailable" && !ownership.owned) {
+      const freshLaunchAuthority = this.privatePostgresFreshLaunchAuthority;
+      const preserveFreshLaunchAuthority = Boolean(
+        svc.spec.id === "postgres" &&
+        (this.config.postgresMode ?? "external") === "private" &&
+        freshLaunchAuthority &&
+        ownership.processId === freshLaunchAuthority.pid &&
+        ownership.processInspectionStatus === "unavailable" &&
+        ownership.processAlive &&
+        ownership.metadataSnapshotMatch &&
+        ownership.metadata?.pid === freshLaunchAuthority.pid &&
+        ownership.metadata.processStartedAtUtc === freshLaunchAuthority.processStartedAtUtc
+      );
+      if (preserveFreshLaunchAuthority && freshLaunchAuthority) {
+        svc.ownership = "owned";
+        svc.pid = freshLaunchAuthority.pid;
+        svc.pendingExternal = false;
+        svc.status = freshLaunchAuthority.applicationReady ? "healthy" : "starting";
+        svc.summary = freshLaunchAuthority.applicationReady
+          ? "Private PostgreSQL running (owned)"
+          : "Starting private PostgreSQL…";
+        svc.detail = null;
+        svc.lastError = null;
+        this.lifecycleEvent("memory.classification.result", svc, {
+          phase: "private-postgres-fresh-launch-authority",
+          ...ownershipDiagnostics
+        });
+        return;
+      }
       svc.status = "unavailable";
       svc.ownership = "none";
       svc.pid = null;
@@ -1170,9 +1227,15 @@ export class DesktopSupervisor {
   }
 
   private memorySearchAllowsMem0(): boolean {
-    const status = this.migrationDiagnostics?.memorySearchStatus;
-    if (status == null) return true;
-    return status === "ready";
+    if (!this.migrationDiagnostics) {
+      // External/detect-only mode may intentionally run without a Yuvi
+      // migration target. A private launch has no such safe bypass.
+      return (this.config.postgresMode ?? "external") !== "private";
+    }
+    return (
+      this.migrationDiagnostics.schemaReady === true &&
+      this.migrationDiagnostics.memorySearchStatus === "ready"
+    );
   }
 
   private toMigrationDiagnostics(diagnostics: MigrationDiagnostics): PostgresMigrationDiagnostics {
@@ -1486,12 +1549,19 @@ export class DesktopSupervisor {
       return;
     }
 
+    this.privatePostgresFreshLaunchAuthority = {
+      pid: launched.pid,
+      processStartedAtUtc: launched.processStartedAtUtc,
+      applicationReady: false
+    };
+
     const applicationReady = await this.completePrivatePostgresApplicationReady();
     if (!applicationReady.ok) {
       const stopped = this.stopPrivatePostgresOwned();
       const stopProven = this.privatePostgresStopProven(stopped, launched.pid);
       this.emitFencedStopDiagnostic(svc, stopped, stopProven);
       if (!stopProven) {
+        this.privatePostgresFreshLaunchAuthority = null;
         svc.status = "unavailable";
         svc.ownership = "owned";
         svc.pid = launched.pid;
@@ -1511,6 +1581,9 @@ export class DesktopSupervisor {
     svc.ownership = "owned";
     svc.summary = "Private PostgreSQL is ready.";
     svc.child = null;
+    if (this.privatePostgresFreshLaunchAuthority?.pid === launched.pid) {
+      this.privatePostgresFreshLaunchAuthority.applicationReady = true;
+    }
   }
 
   private async prepareAndStartPrivatePostgres(): Promise<void> {
@@ -1882,6 +1955,7 @@ export class DesktopSupervisor {
       | "POSTGRES_START_IDENTITY_UNCERTAIN"
       | "POSTGRES_POSTMASTER_IDENTITY_UNPROVEN" = "POSTGRES_START_IDENTITY_UNCERTAIN"
   ): void {
+    this.privatePostgresFreshLaunchAuthority = null;
     svc.status = "unavailable";
     svc.summary = message;
     svc.lastError = code;
@@ -1898,6 +1972,7 @@ export class DesktopSupervisor {
     message: string,
     detail?: string
   ): void {
+    this.privatePostgresFreshLaunchAuthority = null;
     const password = this.resolvePrivatePostgresPassword();
     svc.status = "unavailable";
     svc.summary = message;
