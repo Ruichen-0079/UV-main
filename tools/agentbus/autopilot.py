@@ -602,7 +602,18 @@ def campaign_tick(
     in the same pass so “立即同步” does not miss the next work unit.
     """
     results: list[dict[str, Any]] = []
-    with _tick_lock(ctx):
+    tick_lock = _tick_lock(ctx)
+    if not tick_lock.try_acquire():
+        return {
+            "ok": True,
+            "surface": surface,
+            "busy": True,
+            "coalesced": True,
+            "reason": "campaign tick already in progress",
+            "results": [],
+            "synced": [],
+        }
+    try:
         existing = set(list_stream_ids_safe(ctx))
         if stream_id:
             pending = [stream_id]
@@ -643,6 +654,8 @@ def campaign_tick(
                 if stream_id and sid in existing:
                     continue
                 pending.append(sid)
+    finally:
+        tick_lock.release()
     return {"ok": True, "surface": surface, "results": results, "synced": [item.get("stream_id") for item in results]}
 
 

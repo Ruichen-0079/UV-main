@@ -6,6 +6,7 @@ import stat
 import threading
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
 from agentbus.actions import bind_browser_gpt, unbind_browser_gpt
 from agentbus.launcher import existing_url, probe
@@ -119,6 +120,8 @@ if log:
         self.assertIn("I18N_ZH_CN", js)
         self.assertIn("PHASE_LABELS_ZH", js)
         self.assertIn("WAITING_FOR_SPEC", js)
+        self.assertIn("同步进行中", js)
+        self.assertIn("sync_in_progress", js)
         self.create_stream("s1", "--goal", "zh check")
         _, view = self.http("/api/streams/s1")
         self.assertEqual(view["phase"], WAITING_FOR_SPEC)
@@ -275,6 +278,37 @@ if log:
         synced = data.get("synced") or []
         self.assertIn("a1", synced)
         self.assertIn("b1", synced)
+
+    def test_sync_busy_is_successful_and_non_error(self) -> None:
+        self.create_stream("s1")
+        busy = {
+            "ok": True,
+            "surface": "webui",
+            "busy": True,
+            "coalesced": True,
+            "reason": "campaign tick already in progress",
+            "results": [],
+            "synced": [],
+        }
+        with patch("agentbus.autopilot.campaign_tick", return_value=busy):
+            code, data = self.http("/api/streams/s1/sync", {})
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["sync_in_progress"])
+        self.assertTrue(data["coalesced"])
+        self.assertEqual(data["stream"]["stream_id"], "s1")
+        self.assertNotIn("Sync failed", data)
+
+    def test_sync_internal_error_remains_502(self) -> None:
+        self.create_stream("s1")
+        with patch(
+            "agentbus.autopilot.campaign_tick",
+            side_effect=RuntimeError("real scheduler failure"),
+        ):
+            code, data = self.http("/api/sync", {})
+        self.assertEqual(code, 502)
+        self.assertEqual(data["error"], "Sync failed")
+        self.assertIn("real scheduler failure", data["detail"])
 
     def test_delete_completed_and_refuse_active(self) -> None:
         from agentbus.machine import MERGED, READY_FOR_GPT

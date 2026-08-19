@@ -963,9 +963,12 @@ def run_role(
             try:
                 from agentbus.autopilot import campaign_tick
 
+                # Scheduler contention is a normal coalesced result.  Keep
+                # the role watch moving without waiting or emitting noise.
                 campaign_tick(ctx, env=env, surface="runner")
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 — role watch stays alive, real errors remain visible
+                out.write(f"\nCampaign tick error (continuing role watch): {exc}\n")
+                out.flush()
             out.write("\n" + render_banner(state, role, env=env) + "\n")
             for note in notes:
                 out.write(f"- {note}\n")

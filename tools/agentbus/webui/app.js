@@ -354,6 +354,7 @@ const I18N_ZH_CN = {
   toast: {
     select_sync: "请先选择一个任务再同步",
     synced: "已同步全部任务（含 continuation）",
+    sync_in_progress: "同步进行中",
     deleted: "已归档任务",
     archived: "已归档任务",
     unarchived: "已恢复显示",
@@ -488,6 +489,16 @@ function toastError(err) {
   const extra = info.key === "lock" ? t("toast.lock_retry") : "";
   const detail = [extra, info.detail].filter(Boolean).join("\n");
   toast(`${title}`, `${t("err.detail")}：\n${detail}`);
+}
+
+function toastSyncResult(result) {
+  if (result && (result.sync_in_progress || result.coalesced)) {
+    toast(t("toast.sync_in_progress"), result.message || undefined);
+    return true;
+  }
+  const notes = (result.notes || (result.results || []).flatMap((item) => item.notes || [])).join("; ");
+  toast(t("toast.synced"), notes || (result.synced || []).join(", ") || undefined);
+  return false;
 }
 
 async function api(path, opts) {
@@ -1008,8 +1019,7 @@ async function act(name, stream) {
         err.detail = r.detail || r.error;
         throw err;
       }
-      const notes = (r.notes || (r.results || []).flatMap((item) => item.notes || [])).join("; ");
-      toast(t("toast.synced"), notes || (r.synced || []).join(", ") || undefined);
+      if (toastSyncResult(r)) return;
     }
     if (name === "archive") {
       if (!stream.archivable) { toast(stream.archive_reason || t("actions.archive")); return; }
@@ -1323,8 +1333,7 @@ $("btn-archived").onclick = async () => {
 $("btn-sync").onclick = async () => {
   try {
     const r = await post("/api/sync", {});
-    const notes = (r.notes || (r.results || []).flatMap((item) => item.notes || [])).join("; ");
-    toast(t("toast.synced"), notes || (r.synced || []).join(", ") || undefined);
+    if (toastSyncResult(r)) return;
     await refresh();
   } catch (err) { toastError(err); }
 };

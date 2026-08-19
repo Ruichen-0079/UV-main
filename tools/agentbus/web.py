@@ -58,6 +58,38 @@ def _json_bytes(payload: Any, status: int = 200) -> tuple[int, str, bytes]:
     return status, "application/json; charset=utf-8", body
 
 
+def _coalesced_stream_snapshot(store: StreamStore) -> dict[str, Any] | None:
+    """Return a best-effort projection without waiting on the stream lock."""
+
+    try:
+        state = store.load()
+    except Exception:  # noqa: BLE001 — the busy response must remain useful
+        return None
+    return {
+        "stream_id": state.get("stream_id") or store.stream_id,
+        "phase": state.get("phase"),
+        "control": state.get("control"),
+        "status": state.get("status") or {},
+        "heads": state.get("heads") or {},
+        "updated_at": state.get("updated_at"),
+    }
+
+
+def _sync_payload(result: dict[str, Any], *, stream: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = {"ok": True, **result}
+    if result.get("busy") or result.get("coalesced"):
+        payload.update(
+            {
+                "sync_in_progress": True,
+                "coalesced": True,
+                "message": "AgentBus is already synchronizing",
+            }
+        )
+        if stream is not None:
+            payload["stream"] = stream
+    return payload
+
+
 class AgentBusHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
@@ -192,7 +224,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                 from agentbus.autopilot import campaign_tick
 
                 result = campaign_tick(self.ctx.repo, env=self.ctx.env, force_sync=True, surface="webui")
-                return self._send(*_json_bytes({"ok": True, **result}))
+                return self._send(*_json_bytes(_sync_payload(result)))
             if path == "/api/streams":
                 return self._create(payload)
             if path.startswith("/api/streams/"):
@@ -350,6 +382,15 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                 result = campaign_tick(
                     self.ctx.repo, env=self.ctx.env, force_sync=True, surface="webui"
                 )
+                if result.get("busy") or result.get("coalesced"):
+                    return self._send(
+                        *_json_bytes(
+                            _sync_payload(
+                                result,
+                                stream=_coalesced_stream_snapshot(store),
+                            )
+                        )
+                    )
                 view = views.stream_view(self.ctx.repo, store, env=self.ctx.env)
                 notes: list[str] = []
                 for item in result.get("results") or []:
