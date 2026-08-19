@@ -79,6 +79,9 @@ def empty_state(stream_id: str) -> dict[str, Any]:
             "unauthenticated": False,
             "last_error": None,
         },
+        # Operational evidence for a current-base Actions validation.  This is
+        # never workflow authority or merge approval.
+        "current_base_ci": None,
         "browser_gpt": {
             "display_name": None,
             "url": None,
@@ -133,6 +136,7 @@ def migrate_state(state: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("merge_gpt", {"display_name": None, "url": None, "note": None, "bound_at": None})
     state.setdefault("final_gpt", {"display_name": None, "url": None, "note": None, "bound_at": None})
     state.setdefault("wait", None)
+    state.setdefault("current_base_ci", None)
     state.setdefault("codex_interruption", None)
     state.setdefault("final_repair", {})
     state.setdefault("merge_txn", {})

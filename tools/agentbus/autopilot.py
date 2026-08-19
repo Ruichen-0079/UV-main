@@ -712,6 +712,22 @@ def tick_stream(
             notes.append(f"marked AgentBus-owned PR #{state.get('pr')} ready for review")
         elif ready.get("status") == "already-ready":
             notes.append(f"AgentBus-owned PR #{state.get('pr')} is already ready for review")
+        from agentbus.ci import reconcile_current_base_ci
+
+        ci_live = (state.get("github") or {}).get("pr")
+        current_ci = reconcile_current_base_ci(
+            ctx,
+            store,
+            state,
+            ci_live if isinstance(ci_live, dict) else None,
+            env=env,
+        )
+        if current_ci.get("status") in {"WAIT", "RUNNING"}:
+            notes.append(f"current-base CI: {current_ci.get('reason') or current_ci.get('status')}")
+        elif current_ci.get("status") in {"PASS", "FAIL"}:
+            notes.append(f"current-base CI: {current_ci.get('status')}")
+        if current_ci.get("cleanup") and current_ci["cleanup"].get("status") in {"deleted", "already-absent"}:
+            notes.append(f"current-base CI branch cleanup: {current_ci['cleanup']['status']}")
         campaign = load_campaign(ctx, cid)
         if campaign is not None:
             from agentbus.campaign import persist_campaign_projection, save_campaign

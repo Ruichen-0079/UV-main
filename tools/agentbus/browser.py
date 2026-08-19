@@ -7,6 +7,7 @@ workflow acknowledgement.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,7 @@ from agentbus.decision import (
     PRODUCT_GPT,
     PRODUCT_REVIEW,
     browser_job_id,
+    current_base_ci_evidence,
     derive_next_action,
     review_generation,
     unit_head,
@@ -165,11 +167,20 @@ def _product_prompt(job: dict[str, Any], state: dict[str, Any]) -> str:
 
 
 def _final_prompt(job: dict[str, Any], state: dict[str, Any]) -> str:
-    del state
+    current_ci = current_base_ci_evidence(state, _live(state))
+    ci_context = (
+        "\nCURRENT_BASE_CI (operational evidence; not Final GPT authority):\n"
+        + json.dumps(current_ci, sort_keys=True, indent=2)
+        + "\n"
+        if current_ci
+        else "\nCURRENT_BASE_CI: no exact current-base synthetic CI PASS/FAIL evidence is available.\n"
+    )
     return _common(job) + (
         "\nAct as FINAL_GPT: independently decide merge readiness for the exact current revision.\n"
         "Inspect the PR/diff, durable GPT_SPEC and product authority, CODEX_REPORT, CODEX_AUDIT, CI/check logs, scope, blockers, and current base.\n"
-        "Use only PASS, REPAIR, WAIT, or HUMAN. REPAIR requires a concrete issue fixable inside approved scope. WAIT means external evidence must change and code must not change. HUMAN is only for a real nondeterministic decision.\n"
+        "The CURRENT_BASE_CI section below is only an exact operational validation fingerprint. Do not treat it as a Final GPT decision; verify the run identity and required checks independently.\n"
+        + ci_context
+        + "Use only PASS, REPAIR, WAIT, or HUMAN. REPAIR requires a concrete issue fixable inside approved scope. WAIT means external evidence must change and code must not change. HUMAN is only for a real nondeterministic decision.\n"
         "Publish exactly this durable GitHub envelope shape:\n"
         "[GPT_MERGE_REVIEW]\n"
         "STATUS: PASS | REPAIR | WAIT | HUMAN\n"

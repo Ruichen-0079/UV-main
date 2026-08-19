@@ -449,6 +449,65 @@ def ci_snapshot(live: dict[str, Any] | None) -> dict[str, Any]:
     return {"status": status, "checks": rows}
 
 
+def current_base_ci_evidence(state: dict[str, Any], live: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return only exact current-base CI evidence usable in a new review job."""
+    record = state.get("current_base_ci")
+    if not isinstance(record, dict):
+        return {}
+    current = _live_pr(state, live)
+    head = str(unit_head(state) or "").strip()
+    base = str(current.get("baseRefOid") or "").strip()
+    pr = state.get("pr")
+    if not head or not base or not pr:
+        return {}
+    from agentbus.ci import current_base_ci_matches
+
+    if not current_base_ci_matches(record, pr=pr, head=head, base=base):
+        return {}
+    if str(record.get("status") or "").upper() not in {"PASS", "FAIL"}:
+        return {}
+    return {
+        "generation": record.get("generation"),
+        "base": record.get("base"),
+        "head": record.get("head"),
+        "synthetic_merge": record.get("synthetic_merge"),
+        "source": record.get("source"),
+        "workflow": record.get("workflow"),
+        "workflow_file": record.get("workflow_file"),
+        "branch": record.get("branch"),
+        "run_id": record.get("run_id"),
+        "status": str(record.get("status") or "").upper(),
+        "result": record.get("result"),
+        "checks": record.get("checks") or [],
+    }
+
+
+def current_base_ci_wait(state: dict[str, Any], live: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Return a WAIT fence while exact current-base CI is not settled."""
+    current = _live_pr(state, live)
+    from agentbus.ci import current_base_ci_record, current_base_ci_required, current_base_ci_matches
+
+    if not current_base_ci_required(state, current):
+        return None
+    record = current_base_ci_record(state)
+    head = str(unit_head(state) or "").strip()
+    base = str(current.get("baseRefOid") or "").strip()
+    if current_base_ci_matches(record, pr=state.get("pr"), head=head, base=base) and str(
+        record.get("status") or ""
+    ).upper() in {"PASS", "FAIL"}:
+        return None
+    status = str(record.get("status") or "WAIT").upper()
+    reason = str(record.get("last_error") or "current-base synthetic CI is not complete")
+    if status == "FAIL":
+        return None
+    return {
+        "reason": reason,
+        "status": status,
+        "generation": record.get("generation"),
+        "run_id": record.get("run_id"),
+    }
+
+
 def review_generation_evidence(
     state: dict[str, Any],
     campaign: dict[str, Any] | None = None,
@@ -483,6 +542,7 @@ def review_generation_evidence(
         "spec": [spec.get("digest"), spec.get("source_id"), spec.get("status"), spec.get("head")],
         "review_authority": state.get("review_authority"),
         "ci": ci_snapshot(pr),
+        "current_base_ci": current_base_ci_evidence(state, pr),
         "blocker": active_blocker(state),
         "scope": sha256_text(str(scope or "")),
         "publication_generation": (state.get("publication") or {}).get("generation"),
@@ -606,6 +666,27 @@ def deterministic_merge_fences(
     product = product_review_authority(state)
     if not product.get("ok"):
         reasons.append("product review authority is not valid for exact HEAD")
+    current_ci_required = False
+    current_ci = current_base_ci_evidence(state, current_live)
+    try:
+        from agentbus.ci import current_base_ci_matches, current_base_ci_record, current_base_ci_required
+
+        current_ci_required = current_base_ci_required(state, current_live)
+        record = current_base_ci_record(state)
+        exact_current_ci = current_ci_required and current_base_ci_matches(
+            record,
+            pr=state.get("pr"),
+            head=str(head or ""),
+            base=str(current_live.get("baseRefOid") or ""),
+        )
+        if current_ci_required and (not exact_current_ci or str(record.get("status") or "").upper() != "PASS"):
+            reasons.append("current-base synthetic CI is not exact PASS")
+            if str(record.get("status") or "").upper() not in {"FAIL", "PASS"}:
+                transient.append("CI_REVALIDATION")
+    except Exception:  # noqa: BLE001 — malformed operational evidence fails closed
+        if current_ci_required:
+            reasons.append("current-base synthetic CI evidence could not be verified")
+            transient.append("CI_REVALIDATION")
     final = final_review_for_current(state, campaign, current_live)
     if not final or final.get("normalized_status") != "PASS":
         reasons.append("GPT_MERGE_REVIEW is not durable PASS for current evidence")
@@ -650,6 +731,11 @@ def deterministic_merge_fences(
         if merge_state and merge_state not in {"CLEAN", "HAS_HOOKS"}:
             reasons.append(f"PR merge state is {merge_state}")
         ci = ci_snapshot(current_live)
+        # The PR rollup may still describe an older synthetic merge. Once the
+        # exact current B+H generation passes, that stale rollup is not used as
+        # a substitute, nor is it allowed to veto the exact generation.
+        if current_ci_required and current_ci.get("status") == "PASS":
+            ci = {"status": "PASS", "checks": current_ci.get("checks") or []}
         if ci["status"] in {"FAIL", "PENDING"}:
             reasons.append(f"CI is {ci['status'].lower()}")
             transient.append(f"CI_{ci['status']}")
@@ -830,6 +916,15 @@ def derive_next_action(
             ),
             state,
             external,
+        )
+    current_ci_wait = current_base_ci_wait(state, current_live)
+    if current_ci_wait:
+        return _decision(
+            WAIT,
+            str(current_ci_wait.get("reason") or "current-base synthetic CI is not complete"),
+            wait_reason="CI_REVALIDATION",
+            transient=True,
+            current_base_ci=current_ci_wait,
         )
     final = final_review_for_current(state, campaign, current_live)
     final_status = (final or {}).get("normalized_status")
