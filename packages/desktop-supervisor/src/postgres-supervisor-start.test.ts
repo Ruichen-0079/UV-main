@@ -26,6 +26,15 @@ const tempDirs: string[] = [];
 const supervisors: DesktopSupervisor[] = [];
 let lifecycleDiagnosticsWasEnabled = false;
 let previousLifecycleDiagnostics: string | undefined;
+let nextSyntheticPid = 1_000_000_000;
+
+function unavailableTestPid(): number {
+  for (let attempts = 0; attempts < 1_000; attempts += 1) {
+    const candidate = nextSyntheticPid++;
+    if (!processWindows.isProcessAlive(candidate)) return candidate;
+  }
+  throw new Error("could not allocate a test PID that is not live");
+}
 
 function enableLifecycleDiagnostics(): void {
   if (!lifecycleDiagnosticsWasEnabled) {
@@ -648,6 +657,7 @@ describe("private postgres Windows start state machine", () => {
     enableLifecycleDiagnostics();
     const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const { config, layout, marker, dist } = privateConfig();
+    const postmasterPid = unavailableTestPid();
     const migratePostgres = vi.fn();
     const started = new Date();
     let alive = true;
@@ -670,7 +680,7 @@ describe("private postgres Windows start state machine", () => {
           ? ownedInspection(dist, layout, marker.clusterId, started, processId)
           : { status: "not-running", processId, reason: "process-not-alive" },
       spawnWindowsPgCtl: async () => {
-        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), `${postmasterPid}\n`);
         return {
           ok: true,
           kind: "SUCCESS",
@@ -727,6 +737,7 @@ describe("private postgres Windows start state machine", () => {
     enableLifecycleDiagnostics();
     const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const { config, layout, marker, dist } = privateConfig();
+    const postmasterPid = unavailableTestPid();
     const migratePostgres = vi.fn();
     const started = new Date();
     let alive = true;
@@ -746,7 +757,7 @@ describe("private postgres Windows start state machine", () => {
           : { status: "not-running", processId, reason: "process-not-alive" },
       spawnWindowsPgCtl: async () => {
         alive = true;
-        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), `${postmasterPid}\n`);
         return { ok: true, kind: "SUCCESS", status: 0, signal: null, stdout: "", stderr: "" };
       },
       invokePostgresStop: () => {
@@ -1155,6 +1166,8 @@ describe("private postgres Windows start state machine", () => {
 
   it("fenced-stops an owned leftover from a failed pg_ctl and does not overlap launches", async () => {
     const { config, layout, marker, dist } = privateConfig();
+    const firstPostmasterPid = unavailableTestPid();
+    const secondPostmasterPid = unavailableTestPid();
     const started = new Date();
     let launches = 0;
     let alive = true;
@@ -1181,7 +1194,8 @@ describe("private postgres Windows start state machine", () => {
       spawnWindowsPgCtl: async () => {
         launches += 1;
         alive = true;
-        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), `${4200 + launches}\n`);
+        const postmasterPid = launches === 1 ? firstPostmasterPid : secondPostmasterPid;
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), `${postmasterPid}\n`);
         if (launches === 1) {
           return {
             ok: false,
@@ -1207,7 +1221,7 @@ describe("private postgres Windows start state machine", () => {
     expect(stopped).toBeGreaterThanOrEqual(1);
     const postgres = supervisor.snapshot().services.find((service) => service.id === "postgres");
     expect(postgres?.status).toBe("healthy");
-    expect(postgres?.pid).toBe(4202);
+    expect(postgres?.pid).toBe(secondPostmasterPid);
   });
 
   it("halts when fenced stop of an owned leftover fails", async () => {
@@ -1397,6 +1411,8 @@ describe("private postgres Windows start state machine", () => {
 
   it("reconciles a delayed owned postmaster.pid after launcher failure before any retry", async () => {
     const { config, layout, marker, dist } = privateConfig();
+    const delayedPostmasterPid = unavailableTestPid();
+    const launchedPostmasterPid = unavailableTestPid();
     const started = new Date();
     let launches = 0;
     let alive = true;
@@ -1423,7 +1439,7 @@ describe("private postgres Windows start state machine", () => {
       sleep: async () => {
         if (launches === 1 && !fs.existsSync(path.join(layout.data, "postmaster.pid"))) {
           alive = true;
-          fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
+          fs.writeFileSync(path.join(layout.data, "postmaster.pid"), `${delayedPostmasterPid}\n`);
         }
       },
       spawnWindowsPgCtl: async () => {
@@ -1440,7 +1456,7 @@ describe("private postgres Windows start state machine", () => {
           };
         }
         alive = true;
-        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4243\n");
+        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), `${launchedPostmasterPid}\n`);
         return { ok: true, kind: "SUCCESS", status: 0, signal: null, stdout: "", stderr: "" };
       },
       invokePostgresStop: () => {
@@ -1455,7 +1471,7 @@ describe("private postgres Windows start state machine", () => {
     expect(stopped).toBeGreaterThanOrEqual(1);
     const postgres = supervisor.snapshot().services.find((service) => service.id === "postgres");
     expect(postgres?.status).toBe("healthy");
-    expect(postgres?.pid).toBe(4243);
+    expect(postgres?.pid).toBe(launchedPostmasterPid);
   });
 
   it("halts when a delayed postmaster.pid cannot be strongly owned", async () => {
