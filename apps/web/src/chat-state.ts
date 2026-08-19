@@ -17,8 +17,14 @@ export type ChatMessage = {
   provider?: ProviderCallMetadata | string;
 };
 
+export type StreamingAssistantChatMessage = Omit<ChatMessage, "role" | "status"> & {
+  role: "assistant";
+  status: "streaming";
+};
+
 export type ChatMessageAction =
   | { type: "append-turn"; user: ChatMessage; assistant: ChatMessage }
+  | { type: "append-assistant"; assistant: StreamingAssistantChatMessage }
   | { type: "append-delta"; assistantId: string; text: string; traceId: string }
   | {
       type: "complete";
@@ -36,6 +42,9 @@ export function reduceChatMessages(
 ): ChatMessage[] {
   if (action.type === "append-turn") {
     return [...messages, action.user, action.assistant];
+  }
+  if (action.type === "append-assistant") {
+    return [...messages, action.assistant];
   }
 
   const target = messages.find(

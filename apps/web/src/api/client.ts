@@ -144,6 +144,16 @@ export type SendMessageRequest = {
   };
 };
 
+export type ProactiveTurnStreamRequest = {
+  sessionId: string;
+  idempotencyKey: string;
+  modality: "text";
+  options: {
+    readMemory: boolean;
+    promptPreview?: boolean;
+  };
+};
+
 export type MessageResponse = RuntimeEvent & {
   reply: string;
   promptPreview?: PromptPreviewResponse["promptPreview"];
@@ -881,6 +891,11 @@ export class ApiError extends Error {
   }
 }
 
+export type MessageStreamOptions = {
+  signal?: AbortSignal;
+  onEvent?: (event: MessageStreamEvent) => void;
+};
+
 export const apiClient = {
   setDashboardDevToken(token: string): void {
     dashboardDevToken = token;
@@ -901,88 +916,22 @@ export const apiClient = {
     });
   },
 
-  async streamMessage(
+  streamMessage(
     input: SendMessageRequest,
-    options: {
-      signal?: AbortSignal;
-      onEvent?: (event: MessageStreamEvent) => void;
-    } = {}
+    options: MessageStreamOptions = {}
   ): Promise<CompletedMessage> {
-    const headers = new Headers({ "content-type": "application/json" });
-    if (dashboardDevToken && shouldAttachDashboardDevToken("/v1/messages/stream", "POST")) {
-      headers.set("authorization", `Bearer ${dashboardDevToken}`);
-    }
+    return streamTextResponse("/v1/messages/stream", input, options);
+  },
 
-    const requestInit: RequestInit = {
-      method: "POST",
-      headers,
-      body: JSON.stringify(input)
-    };
-    if (options.signal) {
-      requestInit.signal = options.signal;
-    }
-    const response = await fetch(`${apiBaseUrl}/v1/messages/stream`, requestInit);
-
-    if (!response.ok) {
-      throw new ApiError(await safeHttpStreamError(response), response.status);
-    }
-
-    if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
-      throw new MessageStreamProtocolError("The streaming response was not SSE.");
-    }
-    if (!response.body) {
-      throw new MessageStreamProtocolError("The streaming response has no body.");
-    }
-
-    const parser = new MessageSseParser();
-    const reader = response.body.getReader();
-    let accumulatedText = "";
-    let completed: CompletedMessage | undefined;
-    let readerDone = false;
-
-    try {
-      while (true) {
-        const result = await reader.read();
-        if (result.done) {
-          readerDone = true;
-          break;
-        }
-        for (const event of parser.push(result.value)) {
-          if (event.type === "text-delta") {
-            if (completed) {
-              throw new MessageStreamProtocolError(
-                "The message stream continued after completion."
-              );
-            }
-            accumulatedText += event.text;
-            options.onEvent?.(event);
-            continue;
-          }
-          if (event.type === "error") {
-            options.onEvent?.(event);
-            throw new MessageStreamError(event);
-          }
-          if (event.content !== accumulatedText) {
-            throw new MessageStreamProtocolError(
-              "The completed message does not match its text deltas."
-            );
-          }
-          completed = event;
-          options.onEvent?.(event);
-        }
-      }
-
-      parser.finish();
-      if (!completed) {
-        throw new MessageStreamProtocolError("The message stream ended before completion.");
-      }
-      return completed;
-    } finally {
-      if (!readerDone) {
-        await reader.cancel().catch(() => undefined);
-      }
-      reader.releaseLock();
-    }
+  streamProactiveTurn(
+    input: ProactiveTurnStreamRequest,
+    options: MessageStreamOptions = {}
+  ): Promise<CompletedMessage> {
+    return streamTextResponse(
+      "/v1/proactive-turns/stream",
+      toProactiveTurnStreamRequestBody(input),
+      options
+    );
   },
 
   listRecentMemories(limit = 20, signal?: AbortSignal): Promise<{ memories: MemoryRecord[] }> {
@@ -1449,6 +1398,102 @@ export const apiClient = {
 
 function signalRequestInit(signal: AbortSignal | undefined): RequestInit | undefined {
   return signal ? { signal } : undefined;
+}
+
+async function streamTextResponse(
+  path: "/v1/messages/stream" | "/v1/proactive-turns/stream",
+  input: SendMessageRequest | ProactiveTurnStreamRequest,
+  options: MessageStreamOptions
+): Promise<CompletedMessage> {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (dashboardDevToken && shouldAttachDashboardDevToken(path, "POST")) {
+    headers.set("authorization", `Bearer ${dashboardDevToken}`);
+  }
+
+  const requestInit: RequestInit = {
+    method: "POST",
+    headers,
+    body: JSON.stringify(input)
+  };
+  if (options.signal) {
+    requestInit.signal = options.signal;
+  }
+  const response = await fetch(`${apiBaseUrl}${path}`, requestInit);
+
+  if (!response.ok) {
+    throw new ApiError(await safeHttpStreamError(response), response.status);
+  }
+
+  if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+    throw new MessageStreamProtocolError("The streaming response was not SSE.");
+  }
+  if (!response.body) {
+    throw new MessageStreamProtocolError("The streaming response has no body.");
+  }
+
+  const parser = new MessageSseParser();
+  const reader = response.body.getReader();
+  let accumulatedText = "";
+  let completed: CompletedMessage | undefined;
+  let readerDone = false;
+
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) {
+        readerDone = true;
+        break;
+      }
+      for (const event of parser.push(result.value)) {
+        if (event.type === "text-delta") {
+          if (completed) {
+            throw new MessageStreamProtocolError("The message stream continued after completion.");
+          }
+          accumulatedText += event.text;
+          options.onEvent?.(event);
+          continue;
+        }
+        if (event.type === "error") {
+          options.onEvent?.(event);
+          throw new MessageStreamError(event);
+        }
+        if (event.content !== accumulatedText) {
+          throw new MessageStreamProtocolError(
+            "The completed message does not match its text deltas."
+          );
+        }
+        completed = event;
+        options.onEvent?.(event);
+      }
+    }
+
+    parser.finish();
+    if (!completed) {
+      throw new MessageStreamProtocolError("The message stream ended before completion.");
+    }
+    return completed;
+  } finally {
+    if (!readerDone) {
+      await reader.cancel().catch(() => undefined);
+    }
+    reader.releaseLock();
+  }
+}
+
+function toProactiveTurnStreamRequestBody(
+  input: ProactiveTurnStreamRequest
+): ProactiveTurnStreamRequest {
+  return {
+    sessionId: input.sessionId,
+    idempotencyKey: input.idempotencyKey,
+    modality: "text",
+    options: {
+      readMemory: input.options.readMemory,
+      ...(input.options.promptPreview === undefined
+        ? {}
+        : { promptPreview: input.options.promptPreview })
+    }
+  };
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
