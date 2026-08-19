@@ -1,4 +1,8 @@
 import type { SpeechQueueState } from "./speech-queue.js";
+import type {
+  ProactiveTurnAdmission,
+  ProactiveTurnAdmissionDecision
+} from "./proactive-turn-admission.js";
 
 /**
  * Minimal cross-window bus for the YUVI desktop split.
@@ -22,6 +26,17 @@ export type CompanionTtsConfiguration = {
   mode: "managed" | "external";
 };
 
+export type CompanionProactiveTextRequest = {
+  kind: "proactive-text-request";
+  decisionId: string;
+  modality: "text";
+};
+
+export type CompanionProactiveTextAdmissionResult = {
+  kind: "proactive-text-admission-result";
+  decisionId: string;
+} & ProactiveTurnAdmission;
+
 export type CompanionBusMessage =
   | { kind: "user-gesture" }
   | { kind: "start-generation"; requestId: string; sessionId: string }
@@ -38,7 +53,9 @@ export type CompanionBusMessage =
       segmentSequence: number;
       state: CompanionPlaybackState;
     }
-  | { kind: "speech-status"; requestId: string; state: SpeechQueueState };
+  | { kind: "speech-status"; requestId: string; state: SpeechQueueState }
+  | CompanionProactiveTextRequest
+  | CompanionProactiveTextAdmissionResult;
 
 type WireMessage = { from: CompanionBusRole; message: CompanionBusMessage };
 
@@ -55,7 +72,9 @@ const knownKinds = new Set<string>([
   "generation-state",
   "companion-ready",
   "playback-status",
-  "speech-status"
+  "speech-status",
+  "proactive-text-request",
+  "proactive-text-admission-result"
 ]);
 
 export class CompanionBus {
@@ -137,8 +156,25 @@ export function isCompanionBusMessage(value: unknown): value is CompanionBusMess
       );
     case "speech-status":
       return isNonEmptyString(message["requestId"]) && isSpeechQueueState(message["state"]);
+    case "proactive-text-request":
+      return (
+        hasExactKeys(message, ["kind", "decisionId", "modality"]) &&
+        isNonEmptyString(message["decisionId"]) &&
+        message["modality"] === "text"
+      );
+    case "proactive-text-admission-result":
+      return (
+        hasExactKeys(message, ["kind", "decisionId", "decision", "reason"]) &&
+        isNonEmptyString(message["decisionId"]) &&
+        isProactiveTurnAdmissionResult(message["decision"], message["reason"])
+      );
   }
   return false;
+}
+
+function hasExactKeys(message: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actualKeys = Object.keys(message);
+  return actualKeys.length === keys.length && keys.every((key) => actualKeys.includes(key));
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -167,6 +203,17 @@ function isSpeechQueueState(value: unknown): value is SpeechQueueState {
     value === "stopped" ||
     value === "error"
   );
+}
+
+function isProactiveTurnAdmissionResult(
+  decision: unknown,
+  reason: unknown
+): decision is ProactiveTurnAdmissionDecision {
+  if (decision === "accepted") return reason === "consent-enabled";
+  if (decision === "denied") {
+    return reason === "consent-disabled" || reason === "consent-unavailable";
+  }
+  return false;
 }
 
 function isWireMessage(value: unknown): value is WireMessage {

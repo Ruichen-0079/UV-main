@@ -40,6 +40,43 @@ describe("CompanionBus", () => {
     }
   });
 
+  it("relays correlated proactive text requests and admission results", async () => {
+    const main = new CompanionBus("main");
+    const companion = new CompanionBus("companion");
+    try {
+      const requests: string[] = [];
+      const results: Array<[string, string, string]> = [];
+      main.subscribe((message) => {
+        if (message.kind === "proactive-text-request") requests.push(message.decisionId);
+      });
+      companion.subscribe((message) => {
+        if (message.kind === "proactive-text-admission-result") {
+          results.push([message.decisionId, message.decision, message.reason]);
+        }
+      });
+
+      companion.post({
+        kind: "proactive-text-request",
+        decisionId: "decision-1",
+        modality: "text"
+      });
+      main.post({
+        kind: "proactive-text-admission-result",
+        decisionId: "decision-1",
+        decision: "denied",
+        reason: "consent-unavailable"
+      });
+
+      await vi.waitFor(() => {
+        expect(requests).toEqual(["decision-1"]);
+        expect(results).toEqual([["decision-1", "denied", "consent-unavailable"]]);
+      });
+    } finally {
+      main.close();
+      companion.close();
+    }
+  });
+
   it("relays correlated browser playback status messages", async () => {
     const main = new CompanionBus("main");
     const companion = new CompanionBus("companion");
@@ -122,6 +159,25 @@ describe("CompanionBus", () => {
         message: { kind: "speak", requestId: "r1", sequence: 0, text: "x", language: "zh" }
       });
       channel.postMessage({ from: "main", message: { kind: "unknown" } });
+      channel.postMessage({
+        from: "main",
+        message: {
+          kind: "proactive-text-request",
+          decisionId: "decision-1",
+          modality: "text",
+          prompt: "not allowed"
+        }
+      });
+      channel.postMessage({
+        from: "main",
+        message: {
+          kind: "proactive-text-admission-result",
+          decisionId: "decision-1",
+          decision: "accepted",
+          reason: "consent-enabled",
+          content: "not allowed"
+        }
+      });
       channel.postMessage("junk");
       await vi.waitFor(() => expect(listener).not.toHaveBeenCalled());
       channel.close();
@@ -217,5 +273,110 @@ describe("CompanionBus", () => {
       })
     ).toBe(true);
     expect(isCompanionBusMessage({ kind: "tts-config", config: { enabled: true } })).toBe(false);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-request",
+        decisionId: "decision-1",
+        modality: "text"
+      })
+    ).toBe(true);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-request",
+        decisionId: "decision-1",
+        modality: "speech"
+      })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-request",
+        decisionId: "   ",
+        modality: "text"
+      })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-request",
+        decisionId: "decision-1",
+        modality: "text",
+        sessionId: "runtime-session"
+      })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-request",
+        decisionId: "decision-1",
+        modality: "text",
+        idempotencyKey: "runtime-key"
+      })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-request",
+        decisionId: "decision-1",
+        modality: "text",
+        prompt: "do not cross the gate"
+      })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-request",
+        decisionId: "decision-1",
+        modality: "text",
+        createdAtMs: 1,
+        expiresAtMs: 2
+      })
+    ).toBe(false);
+    for (const forbiddenField of [
+      "text",
+      "content",
+      "writeMemory",
+      "memoryWrite",
+      "voiceOutput",
+      "tts",
+      "speech"
+    ]) {
+      expect(
+        isCompanionBusMessage({
+          kind: "proactive-text-request",
+          decisionId: "decision-1",
+          modality: "text",
+          [forbiddenField]: true
+        })
+      ).toBe(false);
+    }
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-admission-result",
+        decisionId: "decision-1",
+        decision: "accepted",
+        reason: "consent-enabled"
+      })
+    ).toBe(true);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-admission-result",
+        decisionId: "decision-1",
+        decision: "denied",
+        reason: "consent-disabled"
+      })
+    ).toBe(true);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-admission-result",
+        decisionId: "decision-1",
+        decision: "accepted",
+        reason: "consent-disabled"
+      })
+    ).toBe(false);
+    expect(
+      isCompanionBusMessage({
+        kind: "proactive-text-admission-result",
+        decisionId: "decision-1",
+        decision: "denied",
+        reason: "consent-unavailable",
+        content: "not a result payload"
+      })
+    ).toBe(false);
   });
 });
