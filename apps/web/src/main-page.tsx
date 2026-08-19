@@ -40,6 +40,14 @@ import {
   type ProactiveConsentAction
 } from "./proactive-consent.js";
 import { evaluateProactiveTurnAdmission } from "./proactive-turn-admission.js";
+import {
+  createProactiveTurnExecution,
+  isCurrentProactiveEffect,
+  isCurrentRequest,
+  preemptProactiveRequest,
+  type ActiveRequestOwnership,
+  type ProactiveTurnEffect
+} from "./proactive-turn-execution.js";
 import type { TtsSettingsProjection } from "./user-settings-state.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
@@ -91,6 +99,17 @@ export function MainPage(): JSX.Element {
   const ttsConfigRef = useRef(ttsConfig);
   const ttsConfigRevisionRef = useRef(-1);
   const proactiveConsentRef = useRef(proactiveConsent);
+  const runtimeContextRef = useRef({ sessionId, readMemory, promptPreview });
+  runtimeContextRef.current = { sessionId, readMemory, promptPreview };
+  const proactiveExecutionRef = useRef<ReturnType<typeof createProactiveTurnExecution> | null>(
+    null
+  );
+  if (proactiveExecutionRef.current === null) {
+    proactiveExecutionRef.current = createProactiveTurnExecution({
+      createRequestId: () => createSurfaceId("proactive-turn"),
+      createAssistantId: () => createSurfaceId("proactive-assistant")
+    });
+  }
   const speechSessionRef = useRef<{
     generation: string;
     segmenter: SpeechSegmenter;
@@ -101,12 +120,7 @@ export function MainPage(): JSX.Element {
   const playbackCorrelationRef = useRef<SpeechPlaybackCorrelationState>(
     createSpeechPlaybackCorrelation()
   );
-  const activeRequestRef = useRef<{
-    id: string;
-    assistantId: string;
-    controller: AbortController;
-    completedObserved: boolean;
-  } | null>(null);
+  const activeRequestRef = useRef<ActiveRequestOwnership | null>(null);
 
   const capabilityProjection = useMemo(
     () =>
@@ -242,6 +256,44 @@ export function MainPage(): JSX.Element {
     mountedRef.current = true;
     const bus = new CompanionBus("main");
     busRef.current = bus;
+    const handleProactiveTextRequest = (
+      message: Extract<CompanionBusMessage, { kind: "proactive-text-request" }>
+    ): void => {
+      const admission = evaluateProactiveTurnAdmission(proactiveConsentRef.current);
+      // The correlated E2B answer is always posted before any execution
+      // arbitration, claim, local row, key generation, or Runtime call.
+      bus.post({
+        kind: "proactive-text-admission-result",
+        decisionId: message.decisionId,
+        ...admission
+      });
+
+      const execution = proactiveExecutionRef.current;
+      if (execution === null) return;
+      const result = execution.tryCommit({
+        decisionId: message.decisionId,
+        admission,
+        active: activeRequestRef.current,
+        context: runtimeContextRef.current
+      });
+      if (result.kind !== "committed") return;
+
+      const { effect } = result;
+      dispatchMessages({
+        type: "append-assistant",
+        assistant: {
+          id: effect.assistantId,
+          requestId: effect.requestId,
+          role: "assistant",
+          content: "",
+          status: "streaming"
+        }
+      });
+      activeRequestRef.current = effect.ownership;
+      setError(null);
+      setRequestStatus("sending");
+      void executeProactiveTurn(effect);
+    };
     const unsubscribe = bus.subscribe((message: CompanionBusMessage) => {
       if (!mountedRef.current) return;
       if (message.kind === "companion-ready") {
@@ -271,14 +323,7 @@ export function MainPage(): JSX.Element {
         if (!result.accepted) return;
         applyPlaybackStatus(message.state, setVoicePlaybackStatus, setActualPlaybackActive);
       } else if (message.kind === "proactive-text-request") {
-        const admission = evaluateProactiveTurnAdmission(proactiveConsentRef.current);
-        // This is only the cross-window consent gate. It must not create a
-        // chat turn, call Runtime, or grant any execution authority.
-        bus.post({
-          kind: "proactive-text-admission-result",
-          decisionId: message.decisionId,
-          ...admission
-        });
+        handleProactiveTextRequest(message);
       }
     });
     // Announce the persisted preference so a companion that is already open
@@ -315,11 +360,30 @@ export function MainPage(): JSX.Element {
     busRef.current?.post({ kind: "voice-enabled", enabled });
   }
 
+  function cancelActiveProactiveRequest(active: ActiveRequestOwnership): void {
+    if (!isCurrentRequest(activeRequestRef.current, active)) return;
+    // Clear the page owner before aborting so the rejected promise and any
+    // late stream event cannot touch the user request that follows.
+    activeRequestRef.current = null;
+    preemptProactiveRequest(active);
+    dispatchMessages({
+      type: "cancel",
+      assistantId: active.assistantId,
+      error: "生成已取消，以上内容可能不完整。"
+    });
+    setRequestStatus("idle");
+  }
+
   async function send(): Promise<void> {
     // Capture the exact draft once, then clear the controlled state immediately
     // so async work never re-reads or restores the textarea contents.
     const submit = beginControlledDraftSubmit(input);
-    if (submit === null || activeRequestRef.current) return;
+    if (submit === null) return;
+    const active = activeRequestRef.current;
+    if (active?.origin === "user") return;
+    if (active?.origin === "proactive") {
+      cancelActiveProactiveRequest(active);
+    }
     const content = submit.submittedText;
     setInput(submit.nextDraft);
     setError(null);
@@ -327,12 +391,14 @@ export function MainPage(): JSX.Element {
     const requestId = createSurfaceId("turn");
     const assistantId = createSurfaceId("assistant");
     const controller = new AbortController();
-    activeRequestRef.current = {
+    const ownership: ActiveRequestOwnership = {
       id: requestId,
       assistantId,
       controller,
-      completedObserved: false
+      completedObserved: false,
+      origin: "user"
     };
+    activeRequestRef.current = ownership;
     const shouldRequestTts = effectiveVoiceOutputRef.current.requestTts;
     speechEpochRef.current = shouldRequestTts ? requestId : null;
     playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
@@ -385,7 +451,7 @@ export function MainPage(): JSX.Element {
         {
           signal: controller.signal,
           onEvent: (event: MessageStreamEvent) => {
-            if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+            if (!mountedRef.current || !isCurrentRequest(activeRequestRef.current, ownership)) {
               return;
             }
             if (event.type === "text-delta") {
@@ -405,7 +471,7 @@ export function MainPage(): JSX.Element {
               forwardSpeechEnd(requestId, "failed");
               return;
             }
-            activeRequestRef.current.completedObserved = true;
+            ownership.completedObserved = true;
             setLastTraceId(event.traceId);
             dispatchMessages({
               type: "complete",
@@ -420,9 +486,10 @@ export function MainPage(): JSX.Element {
         }
       );
 
-      if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+      if (!mountedRef.current || !isCurrentRequest(activeRequestRef.current, ownership)) {
         return;
       }
+      ownership.completedObserved = true;
       dispatchMessages({
         type: "complete",
         assistantId,
@@ -434,7 +501,7 @@ export function MainPage(): JSX.Element {
       setRequestStatus("success");
       forwardSpeechEnd(requestId, "completed");
     } catch (caught) {
-      if (!mountedRef.current || activeRequestRef.current?.id !== requestId) {
+      if (!mountedRef.current || !isCurrentRequest(activeRequestRef.current, ownership)) {
         return;
       }
       if (controller.signal.aborted) {
@@ -456,13 +523,86 @@ export function MainPage(): JSX.Element {
       setError(message);
       setRequestStatus("error");
     } finally {
-      const isCurrentRequest = activeRequestRef.current?.id === requestId;
-      if (isCurrentRequest) {
+      if (isCurrentRequest(activeRequestRef.current, ownership)) {
         activeRequestRef.current = null;
         bus?.post({ kind: "generation-state", requestId, state: "idle" });
       }
       if (speechSessionRef.current?.generation === requestId) {
         speechSessionRef.current = null;
+      }
+    }
+  }
+
+  async function executeProactiveTurn(effect: ProactiveTurnEffect): Promise<void> {
+    const isCurrent = (): boolean =>
+      mountedRef.current && isCurrentProactiveEffect(activeRequestRef.current, effect);
+
+    try {
+      const response = await apiClient.streamProactiveTurn(effect.request, {
+        signal: effect.ownership.controller.signal,
+        onEvent: (event: MessageStreamEvent) => {
+          if (!isCurrent()) return;
+          if (event.type === "text-delta") {
+            setLastTraceId(event.traceId);
+            dispatchMessages({
+              type: "append-delta",
+              assistantId: effect.assistantId,
+              text: event.text,
+              traceId: event.traceId
+            });
+            return;
+          }
+          if (event.type === "error") {
+            dispatchMessages({
+              type: "fail",
+              assistantId: effect.assistantId,
+              error: event.message
+            });
+            setError(event.message);
+            return;
+          }
+          effect.ownership.completedObserved = true;
+          setLastTraceId(event.traceId);
+          dispatchMessages({
+            type: "complete",
+            assistantId: effect.assistantId,
+            content: event.content,
+            traceId: event.traceId,
+            provider: event.provider
+          });
+          setRequestStatus("success");
+        }
+      });
+
+      if (!isCurrent()) return;
+      effect.ownership.completedObserved = true;
+      dispatchMessages({
+        type: "complete",
+        assistantId: effect.assistantId,
+        content: response.content,
+        traceId: response.traceId,
+        provider: response.provider
+      });
+      setLastTraceId(response.traceId);
+      setRequestStatus("success");
+    } catch (caught) {
+      if (!isCurrent()) return;
+      if (effect.ownership.controller.signal.aborted) {
+        dispatchMessages({
+          type: "cancel",
+          assistantId: effect.assistantId,
+          error: "生成已取消，以上内容可能不完整。"
+        });
+        setRequestStatus("idle");
+        return;
+      }
+      const message = friendlyChatError(caught);
+      dispatchMessages({ type: "fail", assistantId: effect.assistantId, error: message });
+      setError(message);
+      setRequestStatus("error");
+    } finally {
+      if (isCurrent()) {
+        activeRequestRef.current = null;
       }
     }
   }
@@ -515,7 +655,12 @@ export function MainPage(): JSX.Element {
 
   function stopGeneration(): void {
     const active = activeRequestRef.current;
-    if (!active || active.completedObserved) return;
+    if (!active) return;
+    if (active.origin === "proactive") {
+      cancelActiveProactiveRequest(active);
+      return;
+    }
+    if (active.completedObserved) return;
     busRef.current?.post({ kind: "stop-speech", requestId: active.id });
     busRef.current?.post({
       kind: "generation-state",
