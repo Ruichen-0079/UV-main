@@ -54,6 +54,12 @@ export type SettingsViewDto = {
   loadError: string | null;
 };
 
+export type SettingsChangedEventDto = {
+  revision: number;
+  changedSections: string[];
+  restartServices: string[];
+};
+
 export type SupervisorSyncStatusDto = {
   applied: boolean;
   error: string | null;

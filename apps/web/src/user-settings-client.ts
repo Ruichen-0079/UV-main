@@ -7,6 +7,7 @@ import { isTauriRuntime } from "./tauri-window.js";
 import type {
   SecretMutationResultDto,
   SecretStatusDto,
+  SettingsChangedEventDto,
   SettingsViewDto,
   UpdateSettingsResultDto,
   UserSecretKey
@@ -25,6 +26,67 @@ export async function fetchUserSettings(): Promise<SettingsViewDto> {
   }
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<SettingsViewDto>("get_user_settings");
+}
+
+/**
+ * Subscribe to the desktop settings event already emitted by the Tauri side.
+ * The synchronous cleanup handle also covers the async listener registration
+ * race when a React surface unmounts before the event module is ready.
+ */
+export function subscribeUserSettingsChanged(
+  onChanged: (event: SettingsChangedEventDto) => void
+): () => void {
+  if (!isTauriRuntime()) return () => undefined;
+
+  let cancelled = false;
+  let unlisten: (() => void) | null = null;
+
+  void (async () => {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      if (cancelled) return;
+      const remove = await listen<unknown>("settings.changed", (event) => {
+        if (cancelled) return;
+        const payload = parseSettingsChangedEvent(event.payload);
+        if (payload) onChanged(payload);
+      });
+      if (cancelled) {
+        remove();
+      } else {
+        unlisten = remove;
+      }
+    } catch {
+      // A missing live event bridge leaves the read model fail-closed.
+    }
+  })();
+
+  return () => {
+    cancelled = true;
+    if (unlisten) {
+      unlisten();
+      unlisten = null;
+    }
+  };
+}
+
+function parseSettingsChangedEvent(payload: unknown): SettingsChangedEventDto | null {
+  if (!payload || typeof payload !== "object") return null;
+  const value = payload as Record<string, unknown>;
+  const revision = value["revision"];
+  const changedSections = value["changedSections"];
+  const restartServices = value["restartServices"];
+  if (
+    typeof revision !== "number" ||
+    !Number.isFinite(revision) ||
+    revision < 0 ||
+    !Array.isArray(changedSections) ||
+    !changedSections.every((section): section is string => typeof section === "string") ||
+    !Array.isArray(restartServices) ||
+    !restartServices.every((service): service is string => typeof service === "string")
+  ) {
+    return null;
+  }
+  return { revision, changedSections, restartServices };
 }
 
 export async function saveUserSettings(
