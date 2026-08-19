@@ -27,6 +27,74 @@ function turn(requestId = "request-1"): { user: ChatMessage; assistant: ChatMess
 }
 
 describe("chat message state", () => {
+  it("appends one assistant-only streaming entry and keeps all stream transitions on it", () => {
+    const assistant = {
+      id: "assistant-proactive-1",
+      role: "assistant" as const,
+      content: "",
+      status: "streaming" as const
+    };
+    let messages = reduceChatMessages([], { type: "append-assistant", assistant });
+
+    expect(messages).toEqual([assistant]);
+    expect(messages.every((message) => message.role === "assistant")).toBe(true);
+
+    messages = reduceChatMessages(messages, {
+      type: "append-delta",
+      assistantId: assistant.id,
+      text: "第一段",
+      traceId: "trace-proactive-1"
+    });
+    messages = reduceChatMessages(messages, {
+      type: "complete",
+      assistantId: assistant.id,
+      content: "第一段完成",
+      traceId: "trace-proactive-1",
+      provider: "mock"
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      id: assistant.id,
+      role: "assistant",
+      content: "第一段完成",
+      status: "completed"
+    });
+  });
+
+  it("allows fail and cancel to terminate assistant-only streaming entries", () => {
+    const failed = {
+      id: "assistant-proactive-fail",
+      role: "assistant" as const,
+      content: "",
+      status: "streaming" as const
+    };
+    const cancelled = {
+      id: "assistant-proactive-cancel",
+      role: "assistant" as const,
+      content: "",
+      status: "streaming" as const
+    };
+    let messages = reduceChatMessages([], { type: "append-assistant", assistant: failed });
+    messages = reduceChatMessages(messages, { type: "append-assistant", assistant: cancelled });
+    messages = reduceChatMessages(messages, {
+      type: "fail",
+      assistantId: failed.id,
+      error: "stream failed"
+    });
+    messages = reduceChatMessages(messages, {
+      type: "cancel",
+      assistantId: cancelled.id,
+      error: "stream cancelled"
+    });
+
+    expect(messages).toHaveLength(2);
+    expect(messages).toEqual([
+      expect.objectContaining({ id: failed.id, role: "assistant", status: "failed" }),
+      expect.objectContaining({ id: cancelled.id, role: "assistant", status: "cancelled" })
+    ]);
+  });
+
   it("keeps multiline user content and appends multiline deltas to one assistant", () => {
     const current = turn();
     let messages = reduceChatMessages([], {
