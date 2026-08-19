@@ -8,9 +8,12 @@ from agentbus.gitutil import (
     find_worktree_by_path,
     find_worktree_for_branch,
     git_ok,
+    head_sha,
+    is_dirty,
     primary_worktree,
     remove_worktree,
     reset_hard,
+    run_cmd,
     worktree_list,
 )
 from agentbus.paths import AgentbusError
@@ -112,6 +115,109 @@ def ensure_audit_worktree(
     state["audit_worktree"] = path
     state["created_worktrees"]["audit"] = True
     return path
+
+
+def discard_rejected_scope_attempt(
+    store: StreamStore,
+    state: dict[str, Any],
+    *,
+    runtime_role: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Clear one uncommitted, scope-rejected attempt from a managed worktree.
+
+    This is deliberately narrower than general recovery. It only acts on a
+    worktree AgentBus created, whose Codex invocation started clean, whose
+    HEAD never advanced, and whose publication was rejected by the explicit
+    scope fence. It restores only paths currently reported by Git and removes
+    only those untracked paths; it never resets a committed HEAD or a
+    user-owned worktree.
+    """
+
+    from agentbus.decision import scope_failure_route
+    from agentbus.recover import role_process_healthy
+
+    path = str(state.get("impl_worktree") or "").strip()
+    publication = state.get("publication") if isinstance(state.get("publication"), dict) else {}
+    created = state.get("created_worktrees") if isinstance(state.get("created_worktrees"), dict) else {}
+    baseline = str(
+        publication.get("baseline_head")
+        or (state.get("heads") or {}).get("current")
+        or ""
+    ).strip()
+
+    def refused(reason: str) -> dict[str, Any]:
+        return {"ok": False, "recovered": False, "reason": reason, "paths": []}
+
+    if not path or not created.get("impl"):
+        return refused("implementation worktree is not AgentBus-created")
+    if not os.path.isdir(path) or find_worktree_by_path(store.ctx.repo_root, path) is None:
+        return refused("implementation worktree is not a registered repository worktree")
+    if str(publication.get("status") or "").lower() != "failed":
+        return refused("publication is not failed")
+    if "scope fence rejected files" not in str(publication.get("reason") or "").lower():
+        return refused("publication failure is not an explicit scope rejection")
+    route = scope_failure_route(state)
+    if not route or route.get("scope_failure_kind") != "CODER_SCOPE_VIOLATION":
+        return refused("scope failure is not classified as coder-only")
+    if not baseline or head_sha(path) != baseline:
+        return refused("worktree HEAD is not the failed attempt baseline")
+    if not is_dirty(path):
+        return refused("worktree is already clean")
+    role = runtime_role or {}
+    if role_process_healthy(role):
+        return refused("Codex invocation is still active")
+    if role.get("clean_at_start") is not True:
+        return refused("failed Codex invocation did not start from a clean worktree")
+    interruption = state.get("codex_interruption") if isinstance(state.get("codex_interruption"), dict) else {}
+    if interruption.get("kind") == "INTERRUPTED_CAPACITY":
+        return refused("capacity interruption owns the dirty worktree")
+
+    status = run_cmd(["git", "status", "--porcelain", "-uall"], cwd=path, timeout=20)
+    if status.returncode != 0:
+        return refused(status.stderr.strip() or "could not inspect rejected worktree")
+    tracked: list[str] = []
+    untracked: list[str] = []
+    paths: list[str] = []
+    for line in status.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        item = line[3:].strip().strip('"')
+        if " -> " in item:
+            item = item.split(" -> ", 1)[1]
+        normalized = os.path.normpath(item)
+        if not normalized or normalized == "." or normalized.startswith("..") or os.path.isabs(normalized):
+            return refused(f"unsafe worktree path in status: {item}")
+        if normalized.startswith(".git"):
+            return refused(f"refusing to clean Git metadata path: {item}")
+        if normalized not in paths:
+            paths.append(normalized)
+        if line[:2] == "??":
+            untracked.append(normalized)
+        else:
+            tracked.append(normalized)
+    if not paths:
+        return refused("worktree status contained no recoverable paths")
+
+    if tracked:
+        restored = run_cmd(
+            ["git", "restore", "--source", baseline, "--staged", "--worktree", "--", *tracked],
+            cwd=path,
+            timeout=30,
+        )
+        if restored.returncode != 0:
+            return refused(restored.stderr.strip() or "could not restore rejected tracked paths")
+    if untracked:
+        cleaned = run_cmd(["git", "clean", "-fd", "--", *untracked], cwd=path, timeout=30)
+        if cleaned.returncode != 0:
+            return refused(cleaned.stderr.strip() or "could not remove rejected untracked paths")
+    if is_dirty(path) or head_sha(path) != baseline:
+        return refused("rejected worktree did not return cleanly to its baseline")
+
+    store.append_event(
+        "scope-attempt-discarded",
+        {"baseline": baseline, "paths": paths, "reason": "coder-only scope rejection"},
+    )
+    return {"ok": True, "recovered": True, "baseline": baseline, "paths": paths}
 
 
 def cleanup_stream_worktrees(

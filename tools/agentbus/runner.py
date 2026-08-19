@@ -520,10 +520,24 @@ def invoke_codex(
             and interruption.get("work_key") == impl_work_key(state)
         )
         if is_dirty(workdir) and not capacity_takeover:
-            raise AgentbusError(
-                "impl worktree is dirty; refusing to start Codex. "
-                "Publish existing changes with `agentctl publish STREAM --recover`."
+            from agentbus.worktree import discard_rejected_scope_attempt
+
+            discarded = discard_rejected_scope_attempt(
+                store,
+                state,
+                runtime_role=store.load_runtime().get("impl") or {},
             )
+            if discarded.get("recovered"):
+                out.write(
+                    "Discarded the unpublishable coder-only scope attempt and "
+                    "restarted the same IMPL generation.\n"
+                )
+            else:
+                raise AgentbusError(
+                    "impl worktree is dirty; refusing to start Codex. "
+                    "Publish existing changes with `agentctl publish STREAM --recover`. "
+                    f"Safe scope recovery unavailable: {discarded.get('reason')}"
+                )
         spec = (state.get("envelopes") or {}).get("GPT_SPEC")
         current = head_sha(workdir)
         if spec and spec.get("head"):

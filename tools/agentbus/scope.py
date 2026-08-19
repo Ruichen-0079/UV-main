@@ -186,14 +186,10 @@ def attach_scope(state: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]
 
 
 def scope_of(state: dict[str, Any]) -> dict[str, Any] | None:
-    existing = state.get("scope")
-    if isinstance(existing, dict) and (
-        existing.get("explicit_paths") or existing.get("allowed_patterns") or existing.get("raw")
-    ):
-        return existing
     spec = ((state.get("envelopes") or {}).get("GPT_SPEC") or {}).get("fields") or {}
     if not isinstance(spec, dict):
-        return None
+        existing = state.get("scope")
+        return existing if isinstance(existing, dict) else None
     source = spec.get("SOURCE_CONTINUATION_COMMENT_ID") or spec.get("CONTINUATION_OF")
     if source and str(source).isdigit():
         source = f"continuation:{source}"
@@ -208,6 +204,12 @@ def scope_of(state: dict[str, Any]) -> dict[str, Any] | None:
         path_scope_field=spec.get("PATH_SCOPE"),
         source=source,
     )
+    existing = state.get("scope")
+    if isinstance(existing, dict) and all(
+        existing.get(key) == scope.get(key)
+        for key in ("raw", "source", "explicit_paths", "allowed_patterns")
+    ):
+        return existing
     attach_scope(state, scope)
     return scope
 

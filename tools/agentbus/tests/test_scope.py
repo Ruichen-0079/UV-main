@@ -30,6 +30,8 @@ from agentbus.store import StreamStore
 from agentbus.tests.harness import AgentbusTest
 from agentbus.tests.test_campaign import continuation_text
 from agentbus.transport import ensure_durable_pr_transport
+from agentbus.util import atomic_write_text
+from agentbus.worktree import discard_rejected_scope_attempt
 
 
 P7_SCOPE = """
@@ -108,6 +110,68 @@ class ScopeTests(AgentbusTest):
         check = validate_files_against_scope(["apps/foo.ts"], scope)
         self.assertFalse(check["ok"])
         self.assertEqual(check.get("error"), "SCOPE_MATERIALIZATION_ERROR")
+
+    def test_scope_refreshes_when_latest_durable_spec_changes_scope(self) -> None:
+        self.create_stream("scope-refresh")
+        store = self.store("scope-refresh")
+        state = store.load()
+        state["scope"] = materialize_path_scope(
+            raw_scope="only `apps/web/src/main-page.tsx`",
+            source="continuation:old",
+        )
+        state["envelopes"]["GPT_SPEC"] = {
+            "kind": "GPT_SPEC",
+            "source_id": "5337586902",
+            "status": "ACTIONABLE",
+            "fields": {
+                "STATUS": "ACTIONABLE",
+                "SOURCE_CONTINUATION_COMMENT_ID": "5337586902",
+                "SCOPE": "Production: `apps/web/src/main-page.tsx` and helper `apps/web/src/proactive-turn-execution.ts`.",
+                "PATH_SCOPE": "EXACT:\n- apps/web/src/main-page.tsx\n- apps/web/src/proactive-turn-execution.ts",
+            },
+        }
+
+        refreshed = scope_of(state)
+
+        self.assertEqual(refreshed["source"], "continuation:5337586902")
+        self.assertIn("apps/web/src/proactive-turn-execution.ts", refreshed["explicit_paths"])
+        self.assertEqual(state["scope"]["source"], "continuation:5337586902")
+
+    def test_coder_scope_rejection_discards_only_managed_unpublished_attempt(self) -> None:
+        self.create_stream("scope-discard", "--create-worktree")
+        store = self.store("scope-discard")
+        state = store.load()
+        worktree = state["impl_worktree"]
+        baseline = self.git("rev-parse", "HEAD", cwd=worktree)
+        atomic_write_text(os.path.join(worktree, "README.md"), "generated attempt\n")
+        atomic_write_text(os.path.join(worktree, "unapproved.ts"), "generated\n")
+        state["phase"] = IMPLEMENTING
+        state["heads"]["current"] = baseline
+        state["scope"] = {"raw": "only `README.md`", "explicit_paths": ["README.md"], "allowed_patterns": []}
+        state["envelopes"]["GPT_SPEC"] = {
+            "kind": "GPT_SPEC",
+            "status": "ACTIONABLE",
+            "fields": {"STATUS": "ACTIONABLE", "SCOPE": "only `README.md`"},
+        }
+        state["publication"] = {
+            "status": "failed",
+            "baseline_head": baseline,
+            "commit": None,
+            "reason": "scope fence rejected files\nunexpected:\n- unapproved.ts\nauthorized_exact:\n- README.md",
+        }
+        state["created_worktrees"]["impl"] = True
+        store.save(state)
+        runtime = store.load_runtime()
+        runtime["impl"] = {"clean_at_start": True, "pid": None, "start_token": None}
+        store.save_runtime(runtime)
+
+        result = discard_rejected_scope_attempt(store, state, runtime_role=runtime["impl"])
+
+        self.assertTrue(result["recovered"], result)
+        self.assertEqual(self.git("status", "--porcelain", cwd=worktree), "")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=worktree), baseline)
+        with open(store.events_path, encoding="utf-8") as handle:
+            self.assertTrue(any("scope-attempt-discarded" in line for line in handle))
 
     def test_successor_keeps_explicit_paths_and_source(self) -> None:
         self.create_stream("sc-a", "--pr", "40")
