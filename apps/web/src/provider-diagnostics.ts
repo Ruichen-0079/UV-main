@@ -11,7 +11,14 @@ import type {
  * instead of presenting it as proof of remote reachability.
  */
 export function providerReadinessLabel(readiness: ProviderHealth["readiness"]): string {
-  return readiness === "ready" ? "ready (local configuration)" : "not ready (local configuration)";
+  switch (readiness) {
+    case "ready":
+      return "ready (local configuration)";
+    case "not_ready":
+      return "not ready (local configuration)";
+    default:
+      return "unknown (local configuration not loaded)";
+  }
 }
 
 export function providerObservationLabel(observed: ProviderHealth["observed"]): string {

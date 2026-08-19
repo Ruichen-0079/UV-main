@@ -3221,9 +3221,12 @@ function ProviderChainBlock(props: { title: string; routes: ProviderRouteHealth[
                   <div className="text-rose-700">Missing: {route.missingFields.join(", ")}</div>
                 ) : null}
               </span>
-              <span className="flex items-center gap-2">
-                <Pill status={route.status ?? "unknown"} />
-                <span className="text-ink-500">{route.mock ? "mock" : "real"}</span>
+              <span className="text-right text-ink-500">
+                <div>Local readiness: {providerReadinessLabel(route.readiness)}</div>
+                <div className="mt-1">
+                  Cached observation: {providerObservationLabel(route.observed)}
+                </div>
+                <div className="mt-1">{route.mock ? "mock" : "real"}</div>
               </span>
             </li>
           ))}
@@ -3566,6 +3569,7 @@ function SettingsPage(): JSX.Element {
   async function verify(capability: ProviderCapability): Promise<void> {
     setVerifying(capability);
     setVerification(null);
+    const configOnly = capability === "tts" || capability === "stt" || capability === "vision";
     try {
       const result = await apiClient.verifyProvider(capability);
       if (mountedRef.current) setVerification(result);
@@ -3576,7 +3580,8 @@ function SettingsPage(): JSX.Element {
           provider: "unknown",
           capability,
           mock: false,
-          verificationMode: "live",
+          ...(configOnly ? { configOnly: true as const } : {}),
+          verificationMode: configOnly ? "config_only" : "live",
           error: caught instanceof Error ? caught.message : "Provider 验证失败"
         });
       }

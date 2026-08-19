@@ -12,6 +12,7 @@ import {
 describe("provider diagnostics presentation", () => {
   it("keeps local readiness separate from remote observation", () => {
     expect(providerReadinessLabel("ready")).toBe("ready (local configuration)");
+    expect(providerReadinessLabel(undefined)).toBe("unknown (local configuration not loaded)");
     expect(providerObservationLabel("unknown")).toBe("unknown (no cached live observation)");
     expect(
       cachedObservationDetail({
@@ -28,6 +29,9 @@ describe("provider diagnostics presentation", () => {
     expect(verificationModeLabel(configOnly)).toContain("no provider I/O");
     expect(verificationOutcomeLabel(configOnly)).toBe("Local readiness inspection passed");
     expect(verificationModeExplanation(configOnly)).toContain("does not prove remote reachability");
+    expect(
+      verificationOutcomeLabel({ ok: false, configOnly: true, verificationMode: "config_only" })
+    ).toBe("Local readiness inspection failed");
     expect(providerAttemptLabel({ provider: "xai", status: "skipped" })).toContain(
       "route was not called"
     );
