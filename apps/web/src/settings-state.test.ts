@@ -3,12 +3,31 @@ import {
   compareSettingsForms,
   isCurrentSettingsOperation,
   reduceSettingsState,
+  resolveSettingsOperationState,
   shouldReplaceSettingsDraft,
   settingsDraftDiffers,
   settingsStateLabels
 } from "./settings-state.js";
 
 describe("settings apply state", () => {
+  it("keeps Save Only in a saved/effective but not applied state", () => {
+    expect(reduceSettingsState("saving", "save-only-success")).toBe("saved-not-applied");
+    expect(
+      resolveSettingsOperationState("save-only", {
+        saveSucceeded: true,
+        refreshSucceeded: true
+      })
+    ).toBe("saved-not-applied");
+    expect(settingsStateLabels["saved-not-applied"]).toBe("已保存，尚未应用");
+    expect(
+      resolveSettingsOperationState("save-only", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        restartRequired: true
+      })
+    ).toBe("restart-required");
+  });
+
   it("models save, reload, refresh and applied in order", () => {
     let state = reduceSettingsState("dirty", "save-start");
     state = reduceSettingsState(state, "reload-start");
@@ -18,11 +37,63 @@ describe("settings apply state", () => {
     expect(settingsStateLabels[state]).toBe("已应用");
   });
 
+  it("reports Save & Apply as applied only after refresh confirmation", () => {
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        applyConfirmed: true
+      })
+    ).toBe("applied");
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        applyConfirmed: false
+      })
+    ).toBe("failed");
+  });
+
   it("keeps failure and restart-required outcomes distinct", () => {
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: false
+      })
+    ).toBe("failed");
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        applyConfirmed: true,
+        restartRequired: true
+      })
+    ).toBe("restart-required");
     expect(reduceSettingsState("refreshing", "failure")).toBe("failed");
     expect(reduceSettingsState("refreshing", "restart-required")).toBe("restart-required");
     expect(settingsStateLabels.failed).toBe("应用失败");
     expect(settingsStateLabels["restart-required"]).toBe("已保存，需要重启");
+  });
+
+  it("keeps edits made during an operation as a new dirty draft", () => {
+    expect(reduceSettingsState("saving", "edit")).toBe("saving");
+    expect(reduceSettingsState("reloading", "edit")).toBe("reloading");
+    expect(reduceSettingsState("refreshing", "edit")).toBe("refreshing");
+    expect(
+      resolveSettingsOperationState("save-only", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        draftChangedDuringOperation: true
+      })
+    ).toBe("dirty");
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        applyConfirmed: true,
+        draftChangedDuringOperation: true
+      })
+    ).toBe("dirty");
   });
 
   it("does not turn an applied configuration into a save failure when verification fails", () => {

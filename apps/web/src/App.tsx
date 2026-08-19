@@ -91,11 +91,13 @@ import { isTauriRuntime } from "./tauri-window.js";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
+  resolveSettingsOperationState,
   settingsDraftDiffers,
   settingsFingerprint,
   settingsStateLabels,
   shouldReplaceSettingsDraft,
-  type SettingsApplyState
+  type SettingsApplyState,
+  type SettingsOperationMode
 } from "./settings-state.js";
 import {
   normalizeVisionImageMimeType,
@@ -3314,10 +3316,10 @@ function SettingsPage(): JSX.Element {
   const settings = useAsyncData((signal) => apiClient.getRuntimeSettings(signal), []);
   const [form, setForm] = useState<SettingsForm>(() => emptySettingsForm());
   const [loadedForm, setLoadedForm] = useState<SettingsForm | null>(null);
-  const [lastAppliedForm, setLastAppliedForm] = useState<SettingsForm | null>(null);
   const [settingsState, setSettingsState] = useState<SettingsApplyState>("clean");
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{
+    mode: SettingsOperationMode;
     changedKeys: string[];
     restartRequired: boolean;
   } | null>(null);
@@ -3361,7 +3363,6 @@ function SettingsPage(): JSX.Element {
     if (settings.data) {
       const next = settingsFormFromResponse(settings.data);
       setLoadedForm((current) => current ?? next);
-      setLastAppliedForm((current) => current ?? next);
       if (!seededRef.current) {
         const replaceDraft = shouldReplaceSettingsDraft(
           seededRef.current,
@@ -3441,6 +3442,7 @@ function SettingsPage(): JSX.Element {
       });
       if (!operationIsCurrent(operation)) return;
       setSaveResult({
+        mode: "save-and-apply",
         changedKeys: response.changedKeys,
         restartRequired: response.restartRequired
       });
@@ -3455,31 +3457,65 @@ function SettingsPage(): JSX.Element {
       const refreshedResponse = await settings.refresh();
       if (!operationIsCurrent(operation)) return;
       if (!refreshedResponse) {
-        setSettingsState("failed");
+        setSettingsState(
+          resolveSettingsOperationState("save-and-apply", {
+            saveSucceeded: true,
+            refreshSucceeded: false
+          })
+        );
         setApplyError("配置已保存，但重新读取生效值失败。");
         return;
       }
       const refreshedForm = settingsFormFromResponse(refreshedResponse);
       const comparison = compareSettingsForms(snapshot, refreshedForm, new Set(settingsSecretKeys));
+      const activeRuntimeMismatch =
+        refreshedResponse.runtime.serverHost !== refreshedResponse.activeRuntimeConfig.serverHost ||
+        refreshedResponse.runtime.serverPort !== refreshedResponse.activeRuntimeConfig.serverPort ||
+        refreshedResponse.runtime.eventBus !== refreshedResponse.activeRuntimeConfig.eventBus ||
+        refreshedResponse.memory.memoryRepository !==
+          refreshedResponse.activeRuntimeConfig.memoryRepository ||
+        (refreshedResponse.memory.memoryExtractor !== undefined &&
+          refreshedResponse.activeRuntimeConfig.memoryExtractor !== undefined &&
+          refreshedResponse.memory.memoryExtractor !==
+            refreshedResponse.activeRuntimeConfig.memoryExtractor);
       updateBaselineAfterSave(snapshot, refreshedForm);
       const currentFingerprint = settingsFingerprint(formRef.current, clearedSecretsRef.current);
       const draftChangedDuringSave = currentFingerprint !== fingerprint;
       if (!draftChangedDuringSave) {
         setClearedSecrets(new Set());
       }
-      if (reloadResponse.notHotReloaded.length > 0 || response.restartRequired) {
-        setSettingsState("restart-required");
+      const restartRequired =
+        response.restartRequired ||
+        reloadResponse.restartRequired ||
+        refreshedResponse.restartRequired ||
+        refreshedResponse.runtime.pendingRestart ||
+        reloadResponse.notHotReloaded.length > 0;
+      const applyConfirmed =
+        reloadResponse.applied && !restartRequired && comparison.mismatchedKeys.length === 0;
+      const confirmedActiveRuntime = applyConfirmed && !activeRuntimeMismatch;
+      const resolvedState = resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        applyConfirmed: confirmedActiveRuntime,
+        restartRequired,
+        draftChangedDuringOperation: draftChangedDuringSave
+      });
+      setSettingsState(resolvedState);
+      if (resolvedState === "restart-required") {
         setApplyError(
           reloadResponse.notHotReloaded.length > 0
             ? `配置已保存，需要重启后生效：${reloadResponse.notHotReloaded.join(", ")}`
             : "配置已保存，需要重启后生效。"
         );
-      } else if (comparison.mismatchedKeys.length > 0) {
-        setSettingsState("failed");
-        setApplyError(`配置已保存，但实际生效值不一致：${comparison.mismatchedKeys.join(", ")}`);
-      } else {
-        setLastAppliedForm(snapshot);
-        setSettingsState(draftChangedDuringSave ? "dirty" : "applied");
+      } else if (resolvedState === "failed") {
+        let applyFailureMessage = "配置已保存，但 Runtime 应用或刷新确认未完成。";
+        if (comparison.mismatchedKeys.length > 0) {
+          applyFailureMessage = `配置已保存，但实际生效值不一致：${comparison.mismatchedKeys.join(", ")}`;
+        } else if (activeRuntimeMismatch) {
+          applyFailureMessage =
+            "配置已保存，但 refreshed activeRuntimeConfig 仍与 saved / effective configuration 不一致。";
+        }
+        setApplyError(applyFailureMessage);
       }
     } catch (caught) {
       if (!operationIsCurrent(operation)) return;
@@ -3513,23 +3549,39 @@ function SettingsPage(): JSX.Element {
         values: buildSettingsUpdate(snapshot, snapshotClearedSecrets)
       });
       if (!operationIsCurrent(operation)) return;
-      const refreshed = await settings.refresh();
-      if (!operationIsCurrent(operation)) return;
-      if (!refreshed) {
-        setSettingsState("failed");
-        setApplyError("配置已保存，但重新读取配置失败。");
-        return;
-      }
-      updateBaselineAfterSave(snapshot, settingsFormFromResponse(refreshed));
       setSaveResult({
+        mode: "save-only",
         changedKeys: response.changedKeys,
         restartRequired: response.restartRequired
       });
-      setSettingsState(response.restartRequired ? "restart-required" : "clean");
-      if (
-        settingsFingerprint(formRef.current, clearedSecretsRef.current) ===
-        settingsFingerprint(snapshot, snapshotClearedSecrets)
-      ) {
+      const refreshed = await settings.refresh();
+      if (!operationIsCurrent(operation)) return;
+      if (!refreshed) {
+        setSettingsState(
+          resolveSettingsOperationState("save-only", {
+            saveSucceeded: true,
+            refreshSucceeded: false
+          })
+        );
+        setApplyError("配置已保存，但重新读取配置失败。");
+        return;
+      }
+      const refreshedForm = settingsFormFromResponse(refreshed);
+      updateBaselineAfterSave(snapshot, refreshedForm);
+      const draftChangedDuringSave =
+        settingsFingerprint(formRef.current, clearedSecretsRef.current) !==
+        settingsFingerprint(snapshot, snapshotClearedSecrets);
+      const restartRequired =
+        response.restartRequired || refreshed.restartRequired || refreshed.runtime.pendingRestart;
+      setSettingsState(
+        resolveSettingsOperationState("save-only", {
+          saveSucceeded: true,
+          refreshSucceeded: true,
+          restartRequired,
+          draftChangedDuringOperation: draftChangedDuringSave
+        })
+      );
+      if (!draftChangedDuringSave) {
         setClearedSecrets(new Set());
       }
     } catch (caught) {
@@ -3558,7 +3610,6 @@ function SettingsPage(): JSX.Element {
       const next = settingsFormFromResponse(refreshed);
       setForm(next);
       setLoadedForm(next);
-      setLastAppliedForm(next);
       setClearedSecrets(new Set());
       setSettingsState("clean");
     } catch (caught) {
@@ -3626,11 +3677,15 @@ function SettingsPage(): JSX.Element {
     savedDeepSeekButRuntimeMock ||
     Boolean(
       settings.data &&
-        (settings.data.memory.memoryRepository !== settings.data.memory.activeMemoryRepository ||
-          settings.data.memory.memoryExtractor !== settings.data.memory.activeMemoryExtractor ||
-          settings.data.runtime.serverHost !== settings.data.runtime.activeServerHost ||
-          settings.data.runtime.serverPort !== settings.data.runtime.activeServerPort ||
-          settings.data.runtime.eventBus !== settings.data.runtime.activeEventBus)
+        (settings.data.runtime.serverHost !== settings.data.activeRuntimeConfig.serverHost ||
+          settings.data.runtime.serverPort !== settings.data.activeRuntimeConfig.serverPort ||
+          settings.data.runtime.eventBus !== settings.data.activeRuntimeConfig.eventBus ||
+          settings.data.memory.memoryRepository !==
+            settings.data.activeRuntimeConfig.memoryRepository ||
+          (settings.data.memory.memoryExtractor !== undefined &&
+            settings.data.activeRuntimeConfig.memoryExtractor !== undefined &&
+            settings.data.memory.memoryExtractor !==
+              settings.data.activeRuntimeConfig.memoryExtractor))
     );
   const configLayerKeys = [
     "SERVER_HOST",
@@ -3655,6 +3710,14 @@ function SettingsPage(): JSX.Element {
     restartBusy ||
     settings.data?.runtime.runtimeMode === "production" ||
     restartSupported === false;
+  const savedEffectiveRuntimeSummary = settings.data
+    ? `${settings.data.runtime.serverHost}:${settings.data.runtime.serverPort} · event bus ${settings.data.runtime.eventBus} · memory ${settings.data.memory.memoryRepository}`
+    : "unknown";
+  const activeRuntimeSummary = settings.data
+    ? `${settings.data.activeRuntimeConfig.serverHost}:${settings.data.activeRuntimeConfig.serverPort} · event bus ${settings.data.activeRuntimeConfig.eventBus} · memory ${settings.data.activeRuntimeConfig.memoryRepository}`
+    : "unknown";
+  const effectiveConfigKeyCount = Object.keys(settings.data?.effectiveConfig ?? {}).length;
+  const pendingRestart = settings.data?.runtime.pendingRestart ?? false;
 
   function updateDashboardDevToken(value: string): void {
     setDashboardDevTokenState(value);
@@ -3669,6 +3732,42 @@ function SettingsPage(): JSX.Element {
       {settings.error && (
         <Notice tone="error" title="Settings load failed" message={settings.error} />
       )}
+      <Panel title="Settings truth">
+        <div className="grid grid-cols-3 gap-3">
+          <Definition
+            label="Draft (editor only)"
+            value={draftDirty ? "Unsaved changes" : "No unsaved changes"}
+          />
+          <Definition
+            label="Saved / effective configuration"
+            value={
+              settings.data ? `effectiveConfig · ${effectiveConfigKeyCount} safe keys` : "unknown"
+            }
+          />
+          <Definition label="Active Runtime" value="activeRuntimeConfig" />
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-3 text-sm leading-6 text-ink-600">
+          <p>
+            Saved / effective:{" "}
+            <span className="font-mono text-ink-700">{savedEffectiveRuntimeSummary}</span>
+          </p>
+          <p>
+            Active Runtime: <span className="font-mono text-ink-700">{activeRuntimeSummary}</span>
+          </p>
+        </div>
+        <p className="mt-2 text-xs leading-5 text-ink-500">
+          Draft values exist only in this editor. Saved / effective values come from the layered
+          .env and .env.local configuration; Active Runtime values come from the running Runtime
+          snapshot. They can differ until Save &amp; Apply or Deep Restart completes.
+        </p>
+        {pendingRestart && (
+          <Notice
+            tone="info"
+            title="Restart evidence"
+            message="Saved / effective configuration contains a pending restart difference; Active Runtime has not converged for those settings."
+          />
+        )}
+      </Panel>
       {(draftDirty || settingsState === "dirty") && (
         <Notice
           tone="info"
@@ -3693,11 +3792,25 @@ function SettingsPage(): JSX.Element {
           message="正在重新读取配置以确认生效。"
         />
       )}
+      {settingsState === "saved-not-applied" && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels["saved-not-applied"]}
+          message="配置已写入 .env.local，并在 saved / effective configuration 中确认；本次“仅保存”没有重新加载 Active Runtime。使用“保存并应用”或 Deep Restart 才会尝试让 Active Runtime 收敛。"
+        />
+      )}
       {settingsState === "applied" && (
         <Notice
           tone="info"
           title={settingsStateLabels.applied}
-          message="配置已保存并确认在 Runtime 中生效。"
+          message="保存、Runtime reload 和刷新确认均成功；本次保存快照已确认在 Active Runtime 中生效。"
+        />
+      )}
+      {settingsState === "restart-required" && !applyError && (
+        <Notice
+          tone="info"
+          title={settingsStateLabels["restart-required"]}
+          message="Saved / effective configuration 已更新，但 Active Runtime 尚未应用需要重启的设置。请执行 Deep Restart。"
         />
       )}
       {saveError && <Notice tone="error" title="保存失败" message={saveError} />}
@@ -3715,8 +3828,8 @@ function SettingsPage(): JSX.Element {
       {saveResult && (
         <Notice
           tone="info"
-          title="配置已保存"
-          message={`${saveResult.changedKeys.length || 0} 项发生变化。${saveResult.restartRequired ? "部分配置需要重启。" : ""}`}
+          title={saveResult.mode === "save-only" ? "已保存（saved / effective）" : "保存阶段完成"}
+          message={`${saveResult.changedKeys.length || 0} 项发生变化。${saveResult.mode === "save-only" ? "本次 Save Only 未应用到 Active Runtime。" : "Save & Apply 的 Active Runtime 结果以 Runtime 应用和刷新确认状态为准。"}${saveResult.restartRequired ? "部分配置需要重启。" : ""}`}
         />
       )}
       {applyResult && (
@@ -3736,8 +3849,8 @@ function SettingsPage(): JSX.Element {
       {savedConfigDiffersFromActive && (
         <Notice
           tone="info"
-          title="保存配置与 Runtime 不一致"
-          message="配置已写入 .env.local。请点击“保存并应用”重新加载可热更新配置；记忆或服务边界变更需要重启。"
+          title="Saved / effective 与 Active Runtime 不一致"
+          message="配置已写入 .env.local，但 activeRuntimeConfig 仍显示不同值。请点击“保存并应用”重新加载可热更新配置；记忆或服务边界变更需要 Deep Restart。"
         />
       )}
       <div className="grid grid-cols-2 gap-4">
@@ -3769,7 +3882,8 @@ function SettingsPage(): JSX.Element {
             PATCH, and DELETE requests.
           </p>
           <p className="text-xs leading-5 text-ink-500">
-            Active: {settings.data?.runtime.activeServerHost ?? "unknown"}:
+            Active Runtime (activeRuntimeConfig):{" "}
+            {settings.data?.runtime.activeServerHost ?? "unknown"}:
             {settings.data?.runtime.activeServerPort ?? "unknown"} · event bus{" "}
             {settings.data?.runtime.activeEventBus ?? "unknown"}
           </p>
@@ -3939,7 +4053,11 @@ function SettingsPage(): JSX.Element {
           </div>
         </Panel>
       </div>
-      <Panel title="Active Runtime">
+      <Panel title="Active Runtime" badge="activeRuntimeConfig">
+        <p className="mb-3 text-sm leading-6 text-ink-600">
+          These values describe the running Runtime, not the editor draft or saved / effective
+          configuration.
+        </p>
         <div className="grid grid-cols-5 gap-3">
           <Definition label="Chat Provider" value={activeChat?.provider ?? "unknown"} />
           <Definition label="Chat Model" value={activeChat?.model ?? "unknown"} />
@@ -3957,19 +4075,20 @@ function SettingsPage(): JSX.Element {
           />
           <Definition
             label="Memory Repository"
-            value={settings.data?.memory.activeMemoryRepository ?? "unknown"}
+            value={settings.data?.activeRuntimeConfig.memoryRepository ?? "unknown"}
           />
           <Definition
             label="Memory Extractor"
-            value={`${settings.data?.memory.activeMemoryExtractor ?? "unknown"} / ${settings.data?.memory.memoryExtractorActive ?? "unknown"}`}
+            value={`${settings.data?.activeRuntimeConfig.memoryExtractor ?? "unknown"} / ${settings.data?.activeRuntimeConfig.memoryExtractorActive ?? "unknown"}`}
           />
         </div>
       </Panel>
       <Panel title="Developer Tools / Deep Restart" badge="Development only">
         <div className="grid grid-cols-[1fr_1fr] gap-4">
           <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
-            <h3 className="mb-2 text-sm font-semibold text-ink-800">保存并应用</h3>
+            <h3 className="mb-2 text-sm font-semibold text-ink-800">Save &amp; Apply / 保存并应用</h3>
             <ul className="space-y-1 text-sm leading-6 text-ink-600">
+              <li>Save Only / 仅保存 updates saved / effective configuration only.</li>
               <li>Reloads supported runtime config in-process.</li>
               <li>Does not restart the server.</li>
               <li>Does not run migrations.</li>
@@ -4023,11 +4142,11 @@ function SettingsPage(): JSX.Element {
           )}
         </div>
       </Panel>
-      <Panel title="Config Layering">
+      <Panel title="Saved / Effective Configuration" badge="layered settings">
         <Notice
           tone="info"
-          title="How settings are saved"
-          message=".env.local overrides .env. Dashboard writes to .env.local for safety and does not modify .env automatically."
+          title="Saved / effective source"
+          message=".env.local overrides .env. Dashboard writes to .env.local for safety and does not modify .env automatically. The effective column is the saved configuration source; it is separate from Active Runtime."
         />
         <div className="mt-3 grid grid-cols-2 gap-3">
           <Definition

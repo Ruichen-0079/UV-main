@@ -2,9 +2,33 @@
 
 The Dashboard is a local development UI for observing and steering the runtime. It must not expose raw API keys, Authorization headers, dashboard tokens, `DATABASE_URL`, raw vectors, raw audio, or raw images.
 
-## Apply Now vs Deep Restart
+## Settings state: draft, saved/effective, and active Runtime
 
-**Apply Now** calls `POST /settings/runtime/reload`.
+The Settings page presents three different sources of truth:
+
+- **Draft** is the value currently edited in the page. It is unsaved until an operation completes.
+- **Saved / effective configuration** is the layered `.env` + `.env.local` result shown by the
+  `/settings/runtime` `effectiveConfig` and `settings` fields. Dashboard writes editable values to
+  `.env.local`.
+- **Active Runtime** is the running process snapshot reported by `activeRuntimeConfig`. It can
+  remain different from saved/effective configuration when a reload is not possible or a restart
+  is required.
+
+**Save Only** writes the draft and refreshes the saved/effective view. Its final state is
+“saved, not applied”; it must not be read as proof that the running Runtime changed. Use Save &
+Apply or Deep Restart when the active process must converge.
+
+**Save & Apply** writes the draft, calls the existing Runtime reload endpoint, and refreshes the
+settings response. The page says “applied” only after those steps and the refreshed-state
+confirmation succeed. A refresh mismatch or failure, `notHotReloaded` keys, or pending-restart
+evidence remains non-applied and includes an actionable restart/apply message. Editing while an
+operation is in flight preserves the newer edit as a separate dirty draft.
+
+## Save Only / Save & Apply vs Deep Restart
+
+**Save Only** calls `POST /settings/runtime` and does not call the Runtime reload endpoint.
+
+**Save & Apply** calls `POST /settings/runtime/reload` after saving.
 
 - Reloads supported provider/runtime config in-process.
 - Does not restart the server.

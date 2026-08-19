@@ -4,14 +4,26 @@ export type SettingsApplyState =
   | "saving"
   | "reloading"
   | "refreshing"
+  | "saved-not-applied"
   | "applied"
   | "failed"
   | "restart-required";
+
+export type SettingsOperationMode = "save-only" | "save-and-apply";
+
+export type SettingsOperationOutcome = {
+  saveSucceeded: boolean;
+  refreshSucceeded: boolean;
+  applyConfirmed?: boolean;
+  restartRequired?: boolean;
+  draftChangedDuringOperation?: boolean;
+};
 
 export type SettingsStateEvent =
   | "edit"
   | "save-start"
   | "save-success"
+  | "save-only-success"
   | "reload-start"
   | "refresh-start"
   | "apply-success"
@@ -27,6 +39,7 @@ export const settingsStateLabels: Record<SettingsApplyState, string> = {
   saving: "正在保存",
   reloading: "正在应用到 Runtime",
   refreshing: "正在确认生效结果",
+  "saved-not-applied": "已保存，尚未应用",
   applied: "已应用",
   failed: "应用失败",
   "restart-required": "已保存，需要重启"
@@ -44,7 +57,8 @@ export function reduceSettingsState(
     case "save-start":
       return "saving";
     case "save-success":
-      return "clean";
+    case "save-only-success":
+      return "saved-not-applied";
     case "reload-start":
       return "reloading";
     case "refresh-start":
@@ -61,6 +75,24 @@ export function reduceSettingsState(
     case "provider-verify-failure":
       return state;
   }
+}
+
+/**
+ * Resolve the presentation state only after the operation's required evidence
+ * has arrived. A save-only operation never produces an applied state because
+ * it does not reload the Runtime.
+ */
+export function resolveSettingsOperationState(
+  mode: SettingsOperationMode,
+  outcome: SettingsOperationOutcome
+): SettingsApplyState {
+  if (!outcome.saveSucceeded || !outcome.refreshSucceeded) return "failed";
+  if (outcome.restartRequired) return "restart-required";
+  if (mode === "save-only") {
+    return outcome.draftChangedDuringOperation ? "dirty" : "saved-not-applied";
+  }
+  if (!outcome.applyConfirmed) return "failed";
+  return outcome.draftChangedDuringOperation ? "dirty" : "applied";
 }
 
 export function settingsFingerprint<T extends Record<string, string>>(
