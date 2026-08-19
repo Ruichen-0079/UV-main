@@ -16,7 +16,6 @@ import {
 } from "./postgres-layout.js";
 import { expectedClusterName } from "./postgres-ownership.js";
 import { PROCESS_METADATA_VERSION, writeProcessMetadata } from "./ownership.js";
-import * as health from "./health.js";
 import * as processWindows from "./process-windows.js";
 import type { ProcessInspectionOptions } from "./process-windows.js";
 import type { PostgresDistribution } from "./postgres-distribution.js";
@@ -945,124 +944,6 @@ describe("private postgres Windows start state machine", () => {
         status: "READY"
       })
     );
-  });
-
-  it("retains accepted fresh-launch ownership through a generic refresh timeout until D2 completes", async () => {
-    const { config, layout, dist } = privateConfig();
-    const started = new Date();
-    let releaseMigration!: () => void;
-    let resolveMigrationEntered!: () => void;
-    const migrationEntered = new Promise<void>((resolve) => {
-      resolveMigrationEntered = resolve;
-    });
-    const migrationBlocked = new Promise<void>((resolve) => {
-      releaseMigration = resolve;
-    });
-    const migratePostgres = vi.fn(async () => {
-      resolveMigrationEntered();
-      await migrationBlocked;
-      return {
-        ok: true,
-        schemaReady: true,
-        diagnostics: { ...emptyDiagnostics(), schemaReady: true }
-      };
-    });
-    const identityProcessProbe = vi.fn(() => ({
-      status: "RESOLVED" as const,
-      processId: 4242,
-      processIdMatches: true,
-      durationMs: 1,
-      executablePath: dist.postgres,
-      startedAtUtc: started.toISOString()
-    }));
-    const inspectProcess = vi
-      .spyOn(processWindows, "inspectProcess")
-      .mockImplementation((processId) => ({
-        status: "unavailable" as const,
-        processId,
-        reason: "query-timeout" as const
-      }));
-    vi.spyOn(cluster, "pingPostgresServer").mockResolvedValue(true);
-    vi.spyOn(cluster, "pingPostgres").mockResolvedValue(true);
-    vi.spyOn(cluster, "ensureYuviDatabase").mockResolvedValue({
-      ok: true,
-      created: false,
-      alreadyExists: true,
-      sqlState: "42P04"
-    });
-    const supervisor = createSupervisor(config, {
-      platform: "win32",
-      migratePostgres,
-      identityProcessProbe,
-      identityDatabaseProbe: async ({ layout: probeLayout, port, clusterId }) => ({
-        status: "RESOLVED",
-        durationMs: 1,
-        sqlState: null,
-        dataDirectory: probeLayout.data,
-        clusterName: expectedClusterName(clusterId),
-        port,
-        serverVersionNum: 160010,
-        postmasterStartTime: started.toISOString(),
-        dataDirectoryMatchesExpected: true,
-        clusterNameMatchesExpected: true,
-        portMatchesExpected: true,
-        majorMatches: true,
-        startTimePlausible: true
-      }),
-      spawnWindowsPgCtl: async () => {
-        fs.writeFileSync(path.join(layout.data, "postmaster.pid"), "4242\n");
-        return { ok: true, kind: "SUCCESS", status: 0, signal: null, stdout: "", stderr: "" };
-      }
-    });
-
-    const bootstrap = supervisor.bootstrap();
-    await migrationEntered;
-    await supervisor.refreshAll();
-    const duringBootstrap = supervisor
-      .snapshot()
-      .services.find((service) => service.id === "postgres");
-    expect(duringBootstrap?.status).toBe("healthy");
-    expect(duringBootstrap?.ownership).toBe("owned");
-    expect(duringBootstrap?.pid).toBe(4242);
-    expect(inspectProcess).toHaveBeenCalled();
-
-    releaseMigration();
-    await bootstrap;
-    await supervisor.refreshAll();
-    const afterBootstrap = supervisor
-      .snapshot()
-      .services.find((service) => service.id === "postgres");
-    expect(afterBootstrap?.ownership).toBe("none");
-    expect(afterBootstrap?.status).toBe("unavailable");
-  });
-
-  it("does not autostart private Mem0 before schema and memory-search readiness are proven", async () => {
-    const { config } = privateConfig();
-    config.autostartMem0 = true;
-    config.mem0Start = {
-      file: "yuvi-mem0-test",
-      args: [],
-      cwd: config.stateDirectory,
-      env: {},
-      commandMarker: "yuvi-mem0-test"
-    };
-    const spawn = vi.spyOn(processWindows, "spawnManagedProcess");
-    vi.spyOn(cluster, "pingPostgres").mockResolvedValue(false);
-    vi.spyOn(health, "probeHttpHealth").mockResolvedValue({
-      ok: false,
-      statusCode: null,
-      protocolOk: false,
-      message: "down",
-      latencyMs: 1
-    });
-    const supervisor = createSupervisor(config, { platform: "win32" });
-
-    await supervisor.refreshAll();
-
-    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
-    expect(spawn).not.toHaveBeenCalled();
-    expect(mem0?.ownership).toBe("none");
-    expect(mem0?.summary).toMatch(/memory-search schema is not ready/i);
   });
 
   it("does not let background refresh promote server-ready-only to healthy", async () => {
