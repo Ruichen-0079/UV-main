@@ -627,10 +627,12 @@ def reconcile_current_base_ci(
         or not _is_sha(base)
     ):
         return {"ok": True, "status": "WAIT", "reason": "PR HEAD/base/state drifted during CI fence", "wait_reason": "CI_REVALIDATION"}
-    mergeable = str(current.get("mergeable") or "").upper()
-    merge_state = str(current.get("mergeStateStatus") or "").upper()
-    if mergeable != "MERGEABLE" or merge_state not in {"CLEAN", "HAS_HOOKS"}:
-        return {"ok": True, "status": "WAIT", "reason": "PR is not currently mergeable for synthetic CI", "wait_reason": "CI_REVALIDATION"}
+    # Synthetic CI is an operational push for the exact B+H object.  Draft and
+    # GitHub review-state projections (including BLOCKED) do not authorize a
+    # merge and must not prevent this materialization.  Git's exact
+    # merge-tree fence below remains the conflict/cleanliness gate; ordinary
+    # final merge fences continue to enforce GitHub mergeability and review
+    # state.
     resolved_base = adapter.live_base(ctx.repo_root, base_ref, env=env)
     if str(resolved_base).lower() != base.lower():
         return {"ok": True, "status": "WAIT", "reason": "remote base advanced during CI fence", "wait_reason": "CI_REVALIDATION"}

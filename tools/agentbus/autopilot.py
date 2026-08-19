@@ -528,6 +528,7 @@ def ensure_pr_reviewable(
     )
     from agentbus.github import mark_pr_ready, pr_view
     from agentbus.scope import scope_of, validate_files_against_scope
+    from agentbus.ci import current_base_ci_matches, current_base_ci_record, current_base_ci_required
 
     def refused(reason: str) -> dict[str, Any]:
         return {"ok": True, "status": "not-eligible", "mutated": False, "reason": reason}
@@ -574,7 +575,23 @@ def ensure_pr_reviewable(
     base = str(live.get("baseRefOid") or "").strip()
     if not str(live.get("baseRefName") or "").strip() or not base:
         return refused("current PR base ref/tip is unavailable")
+    exact_current_ci_pass = False
+    if current_base_ci_required(state, live):
+        current_ci = current_base_ci_record(state)
+        if not current_base_ci_matches(
+            current_ci,
+            pr=pr,
+            head=head,
+            base=base,
+        ) or str(current_ci.get("status") or "").upper() != "PASS":
+            return refused("exact current-base CI PASS is required before Ready")
+        exact_current_ci_pass = True
     ci = ci_snapshot(live)
+    if exact_current_ci_pass:
+        # The PR rollup can still contain checks from the historical GitHub
+        # merge base.  Exact current B+H CI is the replacement evidence for
+        # this operational Ready transition.
+        ci = {"status": "PASS", "checks": []}
     if ci.get("status") in {"FAIL", "PENDING"}:
         return refused(f"required CI evidence is {str(ci.get('status')).lower()}")
 
@@ -707,11 +724,6 @@ def tick_stream(
                     notes.append(f"durable CODEX_AUDIT comment {durable.get('comment_id')}")
                 elif durable.get("reason"):
                     notes.append(f"durable audit: {durable.get('reason')}")
-        ready = ensure_pr_reviewable(ctx, store, state, env=env)
-        if ready.get("status") == "ready":
-            notes.append(f"marked AgentBus-owned PR #{state.get('pr')} ready for review")
-        elif ready.get("status") == "already-ready":
-            notes.append(f"AgentBus-owned PR #{state.get('pr')} is already ready for review")
         from agentbus.ci import reconcile_current_base_ci
 
         ci_live = (state.get("github") or {}).get("pr")
@@ -728,6 +740,11 @@ def tick_stream(
             notes.append(f"current-base CI: {current_ci.get('status')}")
         if current_ci.get("cleanup") and current_ci["cleanup"].get("status") in {"deleted", "already-absent"}:
             notes.append(f"current-base CI branch cleanup: {current_ci['cleanup']['status']}")
+        ready = ensure_pr_reviewable(ctx, store, state, env=env)
+        if ready.get("status") == "ready":
+            notes.append(f"marked AgentBus-owned PR #{state.get('pr')} ready for review")
+        elif ready.get("status") == "already-ready":
+            notes.append(f"AgentBus-owned PR #{state.get('pr')} is already ready for review")
         campaign = load_campaign(ctx, cid)
         if campaign is not None:
             from agentbus.campaign import persist_campaign_projection, save_campaign

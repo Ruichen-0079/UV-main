@@ -5,6 +5,7 @@ import os
 
 from agentbus.autopilot import ensure_pr_reviewable
 from agentbus.browser import job_for_state
+from agentbus.ci import ci_branch_name, synthetic_generation
 from agentbus.decision import (
     FINAL_GPT,
     FINAL_REVIEW,
@@ -278,6 +279,74 @@ class ControlPlaneResidueTests(AgentbusTest):
         gate = deterministic_merge_fences(state, live=advanced)
         self.assertFalse(gate["ok"])
         self.assertIn("GPT_MERGE_REVIEW is not durable PASS for current evidence", gate["reasons"])
+
+    def test_stale_historical_ci_cannot_make_advanced_draft_ready(self) -> None:
+        state, live, head, historical = self._ready_fixture("stale-ci-ready")
+        new_base = "c" * 40
+        live = {**live, "baseRefOid": new_base, "liveBaseRefOid": new_base}
+        live["statusCheckRollup"] = [
+            {"name": "old-check", "status": "COMPLETED", "conclusion": "SUCCESS"}
+        ]
+        state["github"]["pr"] = live
+        state["current_base_ci"] = None
+        pr_state = os.environ["FAKE_GH_PR_STATE"]
+        with open(pr_state, "w", encoding="utf-8") as handle:
+            json.dump(live, handle)
+        os.environ["FAKE_GH_LIVE_BASE_SHA"] = new_base
+        count = os.path.join(self.root, "stale-ci-ready-count")
+        self._write_text(count, "0")
+        os.environ["FAKE_GH_READY_COUNT"] = count
+
+        result = ensure_pr_reviewable(self.ctx, self.store("stale-ci-ready"), state, env=dict(os.environ))
+
+        self.assertEqual(result["status"], "not-eligible")
+        self.assertIn("current-base CI PASS", result["reason"])
+        self.assertEqual(self._read_text(count), "0")
+        self.assertTrue(state["github"]["pr"]["isDraft"])
+        self.assertNotEqual(new_base, historical)
+
+    def test_current_base_ci_pass_enables_ready_without_changing_head_or_base(self) -> None:
+        state, live, head, historical = self._ready_fixture("current-ci-ready")
+        new_base = "c" * 40
+        live = {**live, "baseRefOid": new_base, "liveBaseRefOid": new_base}
+        live["statusCheckRollup"] = [
+            {"name": "historical-check", "status": "IN_PROGRESS", "conclusion": ""}
+        ]
+        state["github"]["pr"] = live
+        merge = "d" * 40
+        generation = synthetic_generation(pr=46, head=head, base=new_base, synthetic_merge=merge)
+        state["current_base_ci"] = {
+            "status": "PASS",
+            "result": "success",
+            "pr": 46,
+            "stream": "current-ci-ready",
+            "head": head,
+            "base": new_base,
+            "synthetic_merge": merge,
+            "generation": generation,
+            "workflow": "Check",
+            "workflow_file": ".github/workflows/check.yml",
+            "branch": ci_branch_name("current-ci-ready", generation),
+            "run_id": "7005",
+            "checks": [],
+        }
+        pr_state = os.environ["FAKE_GH_PR_STATE"]
+        with open(pr_state, "w", encoding="utf-8") as handle:
+            json.dump(live, handle)
+        os.environ["FAKE_GH_LIVE_BASE_SHA"] = new_base
+        count = os.path.join(self.root, "current-ci-ready-count")
+        self._write_text(count, "0")
+        os.environ["FAKE_GH_READY_COUNT"] = count
+
+        result = ensure_pr_reviewable(self.ctx, self.store("current-ci-ready"), state, env=dict(os.environ))
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["head"], head)
+        self.assertEqual(result["base"], new_base)
+        self.assertFalse(result["pr"]["isDraft"])
+        self.assertEqual(self._read_text(count), "1")
+        self.assertEqual(state["heads"]["implemented"], head)
+        self.assertNotEqual(new_base, historical)
 
     def test_scope_failure_routes_only_spec_insufficient_helper_to_product_gpt(self) -> None:
         self.create_stream("scope-replan", "--worktree", self.repo)

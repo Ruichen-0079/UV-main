@@ -156,15 +156,12 @@ def strong_current_publication_ownership(
         return False
     if state.get("pr") and str(transport.get("pr") or "") != str(state.get("pr")):
         return False
-    spec = _record(state, "GPT_SPEC")
-    fields = spec.get("fields") if isinstance(spec.get("fields"), dict) else {}
-    if str(fields.get("MATERIALIZED_BY") or "").strip().upper() != "AGENTBUS":
-        return False
-    continuation = str(
-        fields.get("SOURCE_CONTINUATION_COMMENT_ID")
-        or transport.get("continuation_comment_id")
-        or ""
-    ).strip()
+    # The transport record is the durable materialization authority.  Older
+    # continuation specs may predate the redundant provenance fields in
+    # GPT_SPEC;
+    # requiring the Product GPT spec to repeat transport ownership would make
+    # a valid pushed PR permanently invisible to current-base CI recovery.
+    continuation = str(transport.get("continuation_comment_id") or "").strip()
     if not continuation:
         return False
     heads = state.get("heads") if isinstance(state.get("heads"), dict) else {}
