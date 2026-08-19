@@ -498,6 +498,7 @@ export function CompanionPage(): JSX.Element {
         case "companion-ready":
         case "playback-status":
         case "speech-status":
+        case "proactive-text-admission-result":
           return;
       }
     }

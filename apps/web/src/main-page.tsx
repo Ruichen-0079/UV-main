@@ -39,6 +39,7 @@ import {
   reduceProactiveConsent,
   type ProactiveConsentAction
 } from "./proactive-consent.js";
+import { evaluateProactiveTurnAdmission } from "./proactive-turn-admission.js";
 import type { TtsSettingsProjection } from "./user-settings-state.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
@@ -269,6 +270,15 @@ export function MainPage(): JSX.Element {
         playbackCorrelationRef.current = result.state;
         if (!result.accepted) return;
         applyPlaybackStatus(message.state, setVoicePlaybackStatus, setActualPlaybackActive);
+      } else if (message.kind === "proactive-text-request") {
+        const admission = evaluateProactiveTurnAdmission(proactiveConsentRef.current);
+        // This is only the cross-window consent gate. It must not create a
+        // chat turn, call Runtime, or grant any execution authority.
+        bus.post({
+          kind: "proactive-text-admission-result",
+          decisionId: message.decisionId,
+          ...admission
+        });
       }
     });
     // Announce the persisted preference so a companion that is already open
