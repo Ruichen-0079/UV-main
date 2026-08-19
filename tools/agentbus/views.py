@@ -182,7 +182,9 @@ def stream_view(
         except Exception:  # noqa: BLE001
             live_pr = None
     merge_card = merge_review_card(state, loaded, live=live_pr, ctx=ctx)
-    blocker = sanitize_display_text((state.get("status") or {}).get("blocker"), roots=display_roots)
+    from agentbus.decision import active_blocker
+
+    blocker = sanitize_display_text(active_blocker(state), roots=display_roots)
     decision_live = live_pr or ((state.get("github") or {}).get("pr") if isinstance((state.get("github") or {}).get("pr"), dict) else None)
     decision = decision_for_stream(ctx, state, loaded, decision_live, runtime, env=env)
     classified = classify_attention(state, runtime, campaign=loaded, decision=decision)

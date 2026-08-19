@@ -444,6 +444,143 @@ def ensure_executor_surface(
     return result
 
 
+def ensure_pr_reviewable(
+    ctx: RepoContext,
+    store: StreamStore,
+    state: dict[str, Any],
+    *,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Make an AgentBus-owned draft PR reviewable at the final boundary.
+
+    This is an operational ref transition only.  It is fenced by current
+    durable evidence and verifies the live PR again after the gh mutation,
+    so it cannot change HEAD/base or make an arbitrary user PR ready.
+    """
+    from agentbus.decision import (
+        active_blocker,
+        audit_pass_exact,
+        ci_snapshot,
+        product_review_authority,
+        report_valid_exact,
+        strong_current_publication_ownership,
+        unit_head,
+    )
+    from agentbus.github import mark_pr_ready, pr_view
+    from agentbus.scope import scope_of, validate_files_against_scope
+
+    def refused(reason: str) -> dict[str, Any]:
+        return {"ok": True, "status": "not-eligible", "mutated": False, "reason": reason}
+
+    pr = state.get("pr")
+    if not pr:
+        return refused("no durable PR")
+    head = str(unit_head(state) or "").strip()
+    if not head or not strong_current_publication_ownership(state, head):
+        return refused("current publication is not strongly AgentBus-owned")
+    if not report_valid_exact(state):
+        return refused("exact durable CODEX_REPORT is missing")
+    if not audit_pass_exact(state):
+        return refused("exact durable CODEX_AUDIT PASS is missing")
+    if not product_review_authority(state).get("ok"):
+        return refused("product review authority is missing or stale")
+    if active_blocker(state):
+        return refused("current blocker is active")
+
+    heads = state.get("heads") if isinstance(state.get("heads"), dict) else {}
+    for key in ("current", "implemented", "last_seen"):
+        value = str(heads.get(key) or "").strip()
+        if value and value != head:
+            return refused(f"conflicting {key} HEAD")
+    files = (state.get("publication") or {}).get("files") or []
+    scope = scope_of(state)
+    if not scope or not (scope.get("explicit_paths") or scope.get("allowed_patterns")):
+        return refused("current scope is not materialized")
+    if files and not validate_files_against_scope(files, scope).get("ok"):
+        return refused("published files are outside the current scope")
+
+    try:
+        live = pr_view(ctx.repo_root, int(pr), env=env)
+    except Exception as exc:  # noqa: BLE001 — no mutation without a live fence
+        return refused(f"could not fetch live PR for ready transition: {exc}")
+    state.setdefault("github", {})["pr"] = dict(live)
+    if str(live.get("state") or "").upper() != "OPEN":
+        return refused(f"PR state is {live.get('state') or 'unknown'}")
+    if str(live.get("headRefOid") or "").strip() != head:
+        return refused("PR HEAD is not the exact implementation HEAD")
+    branch = str(state.get("branch") or "").strip()
+    if branch and str(live.get("headRefName") or "").strip() != branch:
+        return refused("PR branch is not the expected AgentBus branch")
+    spec = (state.get("envelopes") or {}).get("GPT_SPEC") or {}
+    spec_fields = spec.get("fields") if isinstance(spec.get("fields"), dict) else {}
+    expected_base = str(
+        (state.get("transport") or {}).get("base_sha")
+        or spec_fields.get("BASE_HEAD")
+        or (heads.get("spec_base") or "")
+    ).strip()
+    base = str(live.get("baseRefOid") or "").strip()
+    if not expected_base or base != expected_base:
+        return refused("PR base is not the expected durable base")
+    ci = ci_snapshot(live)
+    if ci.get("status") in {"FAIL", "PENDING"}:
+        return refused(f"required CI evidence is {str(ci.get('status')).lower()}")
+
+    draft = live.get("isDraft", live.get("draft"))
+    if draft is None:
+        return refused("live PR draft status is unavailable")
+    if not bool(draft):
+        return {
+            "ok": True,
+            "status": "already-ready",
+            "mutated": False,
+            "pr": dict(live),
+            "head": head,
+            "base": base,
+        }
+
+    before_head = str(live.get("headRefOid") or "").strip()
+    before_base = str(live.get("baseRefOid") or "").strip()
+    try:
+        mark_pr_ready(ctx.repo_root, int(pr), env=env)
+    except Exception as exc:  # noqa: BLE001 — verify response-loss before retrying
+        try:
+            verified = pr_view(ctx.repo_root, int(pr), env=env)
+        except Exception:
+            return refused(f"could not verify ready transition: {exc}")
+        if not (
+            not bool(verified.get("isDraft", verified.get("draft")))
+            and str(verified.get("headRefOid") or "").strip() == before_head
+            and str(verified.get("baseRefOid") or "").strip() == before_base
+        ):
+            return refused(f"ready transition failed: {exc}")
+        live = verified
+    else:
+        try:
+            live = pr_view(ctx.repo_root, int(pr), env=env)
+        except Exception as exc:  # noqa: BLE001 — accept only after verification
+            return refused(f"could not verify ready transition: {exc}")
+
+    if bool(live.get("isDraft", live.get("draft"))):
+        return refused("PR remains draft after ready transition")
+    if str(live.get("headRefOid") or "").strip() != before_head:
+        return refused("ready transition changed PR HEAD")
+    if str(live.get("baseRefOid") or "").strip() != before_base:
+        return refused("ready transition changed PR base")
+    state.setdefault("github", {})["pr"] = dict(live)
+    store.append_event(
+        "pr-ready",
+        {"pr": int(pr), "head": before_head, "base": before_base, "ownership": "AgentBus"},
+    )
+    return {
+        "ok": True,
+        "status": "ready",
+        "mutated": True,
+        "pr": dict(live),
+        "head": before_head,
+        "base": before_base,
+    }
+
+
 def tick_stream(
     ctx: RepoContext,
     store: StreamStore,
@@ -517,6 +654,11 @@ def tick_stream(
                     notes.append(f"durable CODEX_AUDIT comment {durable.get('comment_id')}")
                 elif durable.get("reason"):
                     notes.append(f"durable audit: {durable.get('reason')}")
+        ready = ensure_pr_reviewable(ctx, store, state, env=env)
+        if ready.get("status") == "ready":
+            notes.append(f"marked AgentBus-owned PR #{state.get('pr')} ready for review")
+        elif ready.get("status") == "already-ready":
+            notes.append(f"AgentBus-owned PR #{state.get('pr')} is already ready for review")
         campaign = load_campaign(ctx, cid)
         if campaign is not None:
             from agentbus.campaign import persist_campaign_projection, save_campaign

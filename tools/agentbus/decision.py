@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -111,6 +112,88 @@ def audit_pass_exact(state: dict[str, Any]) -> bool:
         and sha_equal(_record_head(rec, "AUDITED_HEAD"), unit_head(state))
         and durable_github_record(state, "CODEX_AUDIT")
     )
+
+
+def strong_current_publication_ownership(
+    state: dict[str, Any],
+    head: str | None = None,
+) -> bool:
+    """Recognize a current, pushed, structured AgentBus publication."""
+    expected = str(head or unit_head(state) or "").strip()
+    if not expected:
+        return False
+    publication = state.get("publication") if isinstance(state.get("publication"), dict) else {}
+    if str(publication.get("commit") or "").strip() != expected:
+        return False
+    if str(publication.get("status") or "").strip().lower() != "pushed":
+        return False
+    if publication.get("pushed") is not True:
+        return False
+    if str(publication.get("remote_sha") or "").strip() != expected:
+        return False
+    history = publication.get("history")
+    if not isinstance(history, list) or not any(
+        isinstance(item, dict) and str(item.get("commit") or "").strip() == expected
+        for item in history
+    ):
+        return False
+    transport = state.get("transport") if isinstance(state.get("transport"), dict) else {}
+    if transport.get("owned") is not True:
+        return False
+    if str(transport.get("materialized_by") or "").strip().upper() != "AGENTBUS":
+        return False
+    if str(transport.get("status") or "").strip().lower() != "pr_ready":
+        return False
+    if state.get("pr") and str(transport.get("pr") or "") != str(state.get("pr")):
+        return False
+    spec = _record(state, "GPT_SPEC")
+    fields = spec.get("fields") if isinstance(spec.get("fields"), dict) else {}
+    if str(fields.get("MATERIALIZED_BY") or "").strip().upper() != "AGENTBUS":
+        return False
+    continuation = str(
+        fields.get("SOURCE_CONTINUATION_COMMENT_ID")
+        or transport.get("continuation_comment_id")
+        or ""
+    ).strip()
+    if not continuation:
+        return False
+    heads = state.get("heads") if isinstance(state.get("heads"), dict) else {}
+    for key in ("current", "implemented", "last_seen"):
+        value = str(heads.get(key) or "").strip()
+        if value and value != expected:
+            return False
+    return True
+
+
+_LEGACY_OWNERSHIP_BLOCKER = re.compile(
+    r"CODEX_REPORT\s+([0-9a-f]{12,40})\s+is\s+not\s+an\s+AgentBus-owned\s+publication",
+    re.IGNORECASE,
+)
+
+
+def active_blocker(state: dict[str, Any]) -> str | None:
+    """Return only the blocker which applies to the current generation."""
+    status = state.get("status") if isinstance(state.get("status"), dict) else {}
+    raw = str(status.get("blocker") or "").strip()
+    if not raw:
+        return None
+    meta = status.get("blocker_meta") if isinstance(status.get("blocker_meta"), dict) else {}
+    kind = str(meta.get("kind") or "").strip().upper()
+    scoped_head = str(meta.get("head") or "").strip()
+    if kind not in {"PUBLICATION_OWNERSHIP", "PUBLICATION_NOT_OWNED", "PUBLICATION_OWNERSHIP_NOT_PROVEN"}:
+        match = _LEGACY_OWNERSHIP_BLOCKER.search(raw)
+        if not match:
+            return raw
+        scoped_head = match.group(1).strip()
+    current = str(unit_head(state) or "").strip()
+    if not scoped_head or not current:
+        return raw
+    same_head = current.lower() == scoped_head.lower() or current.lower().startswith(scoped_head.lower())
+    if same_head:
+        return raw
+    if strong_current_publication_ownership(state, current) and report_valid_exact(state):
+        return None
+    return raw
 
 
 def _repair_record(state: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
@@ -296,6 +379,7 @@ def review_generation_evidence(
         "base": pr.get("baseRefOid"),
         "pr_head": pr.get("headRefOid"),
         "pr_state": pr.get("state"),
+        "pr_draft": pr.get("isDraft", pr.get("draft")),
         "mergeable": pr.get("mergeable"),
         "merge_state": pr.get("mergeStateStatus"),
         "report": [report.get("digest"), report.get("source_id"), report.get("status"), report.get("head")],
@@ -304,7 +388,7 @@ def review_generation_evidence(
         "spec": [spec.get("digest"), spec.get("source_id"), spec.get("status"), spec.get("head")],
         "review_authority": state.get("review_authority"),
         "ci": ci_snapshot(pr),
-        "blocker": (state.get("status") or {}).get("blocker"),
+        "blocker": active_blocker(state),
         "scope": sha256_text(str(scope or "")),
         "publication_generation": (state.get("publication") or {}).get("generation"),
         "repair_cycles": state.get("repair_cycles") or 0,
@@ -432,7 +516,7 @@ def deterministic_merge_fences(
         reasons.append("GPT_MERGE_REVIEW is not durable PASS for current evidence")
     elif require_current_job and not str(((final.get("fields") or {}).get("JOB_ID") or "")).strip():
         reasons.append("GPT_MERGE_REVIEW predates the current Browser job generation")
-    blocker = (state.get("status") or {}).get("blocker")
+    blocker = active_blocker(state)
     if blocker:
         reasons.append("blocker present")
     try:
@@ -586,7 +670,9 @@ def derive_next_action(
     if phase == "BLOCKED_FOR_REVIEW":
         return _decision(HUMAN, "repair budget exhausted")
     if phase == "RE_REVIEW_REQUIRED":
-        return _decision(HUMAN, "unexplained external mutation or stale SHA authority")
+        raw_blocker = str((state.get("status") or {}).get("blocker") or "").strip()
+        if not raw_blocker or active_blocker(state):
+            return _decision(HUMAN, "unexplained external mutation or stale SHA authority")
     if phase in {"BLOCKED", "RECOVERY_REQUIRED"}:
         wait = _active_wait(state)
         if wait:

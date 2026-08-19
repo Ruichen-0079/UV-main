@@ -167,6 +167,29 @@ if args[:2] == ["pr", "merge"]:
         sys.exit(1)
     print("MERGED")
     sys.exit(0)
+if args[:2] == ["pr", "ready"]:
+    if mode in {"down", "unauth"}:
+        print("github unavailable", file=sys.stderr)
+        sys.exit(1)
+    state_path = os.environ.get("FAKE_GH_PR_STATE", "")
+    rec = {}
+    if state_path and os.path.isfile(state_path):
+        try:
+            rec = json.loads(open(state_path).read() or "{}")
+        except Exception:
+            rec = {}
+    rec["isDraft"] = False
+    if state_path:
+        open(state_path, "w").write(json.dumps(rec))
+    count_path = os.environ.get("FAKE_GH_READY_COUNT", "")
+    if count_path:
+        try:
+            count = int(open(count_path).read() or "0")
+        except Exception:
+            count = 0
+        open(count_path, "w").write(str(count + 1))
+    print("PR marked ready")
+    sys.exit(0)
 if mode == "missing":
     sys.exit(127)
 if args[:2] == ["auth", "status"]:
@@ -193,6 +216,7 @@ if args[:2] == ["pr", "view"]:
         "headRefOid": rec.get("headRefOid") or os.environ.get("FAKE_GH_HEAD") or ("0" * 40),
         "baseRefOid": rec.get("baseRefOid") or ("b" * 40),
         "state": rec.get("state") or "OPEN",
+        "isDraft": rec.get("isDraft"),
         "url": "https://github.com/example/yuvi-test/pull/" + args[2],
         "statusCheckRollup": rec.get("statusCheckRollup") or [],
         "mergeable": rec.get("mergeable", "MERGEABLE"),

@@ -222,7 +222,7 @@ def wait_reason_for_state(state: dict[str, Any], campaign: dict[str, Any] | None
 
 def gpt_suggestion(state: dict[str, Any], campaign: dict[str, Any] | None = None) -> dict[str, Any]:
     """Compatibility projection of the canonical workflow decision."""
-    from agentbus.decision import DONE, FINAL_GPT, HUMAN, IMPL, MERGE, PRODUCT_GPT, WAIT, derive_next_action
+    from agentbus.decision import DONE, FINAL_GPT, HUMAN, IMPL, MERGE, PRODUCT_GPT, WAIT, active_blocker, derive_next_action
 
     product = product_review_authority(state)
     live = (state.get("github") or {}).get("pr")
@@ -251,7 +251,7 @@ def gpt_suggestion(state: dict[str, Any], campaign: dict[str, Any] | None = None
             "audit": (((state.get("envelopes") or {}).get("CODEX_AUDIT") or {}).get("source_id")),
             "merge_gpt": (rec or {}).get("source_id"),
             "head": unit_head(state),
-            "scope": "PASS" if not (state.get("status") or {}).get("blocker") else "issue",
+            "scope": "PASS" if not active_blocker(state) else "issue",
         },
     }
 
@@ -1127,6 +1127,8 @@ def merge_review_card(
     ctx: RepoContext | None = None,
 ) -> dict[str, Any]:
     product = product_review_authority(state)
+    from agentbus.decision import active_blocker
+
     suggestion = gpt_suggestion(state, campaign)
     gate = merge_enablement(state, campaign, live=live)
     rec = merge_review_for_head(state, unit_head(state))
@@ -1163,7 +1165,7 @@ def merge_review_card(
             {"ok": bool(live) and sha_equal(unit_head(state), (live or {}).get("headRefOid")), "label": "HEAD exact (live)"},
             {"ok": audit_pass_exact(state), "label": "CODEX_AUDIT PASS"},
             {"ok": bool(product.get("ok")), "label": "Product review authority valid"},
-            {"ok": not (state.get("status") or {}).get("blocker"), "label": "No blocker"},
+            {"ok": not active_blocker(state), "label": "No blocker"},
             {"ok": bool(live) and "PR is not mergeable" not in gate["reasons"], "label": "PR mergeable (live)"},
         ],
         "sources": suggestion["sources"],

@@ -97,7 +97,7 @@ def pr_view(cwd: str, number: int, env: dict[str, str] | None = None) -> dict[st
             "view",
             str(number),
             "--json",
-            "number,title,headRefName,headRefOid,baseRefOid,state,url,statusCheckRollup,mergeCommit,mergeable,mergeStateStatus",
+            "number,title,headRefName,headRefOid,baseRefOid,state,isDraft,url,statusCheckRollup,mergeCommit,mergeable,mergeStateStatus",
         ],
         cwd=cwd,
         env=env,
@@ -106,6 +106,19 @@ def pr_view(cwd: str, number: int, env: dict[str, str] | None = None) -> dict[st
     if code != 0:
         raise AgentbusError(err.strip() or out.strip() or f"gh pr view {number} failed")
     return json.loads(out)
+
+
+def mark_pr_ready(cwd: str, number: int, env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Mark one already-fenced PR ready without changing its ref or base."""
+    code, out, err = run_gh(
+        ["pr", "ready", str(int(number))],
+        cwd=cwd,
+        env=env,
+        timeout=45,
+    )
+    if code != 0:
+        raise AgentbusError(err.strip() or out.strip() or f"gh pr ready {number} failed")
+    return {"ok": True, "stdout": (out or "").strip()}
 
 
 def list_issue_comments(

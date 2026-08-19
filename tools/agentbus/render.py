@@ -64,6 +64,9 @@ def render_plan(state: dict[str, Any], *, env: dict[str, str] | None = None) -> 
     visible = display_state(phase, control=control)
     roles = state.get("roles") or {}
     status = state.get("status") or {}
+    from agentbus.decision import active_blocker
+
+    blocker = active_blocker(state)
     envelopes = state.get("envelopes") or {}
     github = state.get("github") or {}
     lines = [
@@ -84,8 +87,8 @@ def render_plan(state: dict[str, Any], *, env: dict[str, str] | None = None) -> 
         f"IMPLEMENTATION:      {status.get('impl')}",
         f"AUDIT:               {status.get('audit')}",
         f"REPAIR CYCLES:       {state.get('repair_cycles')}/{state.get('max_repair_cycles')}",
-        f"BLOCKING ISSUE:      {_display_text(status.get('blocker')) or '-'}",
-        f"NEXT ACTION:         {_display_text(describe_next(state, control=control, blocker=status.get('blocker')))}",
+        f"BLOCKING ISSUE:      {_display_text(blocker) or '-'}",
+        f"NEXT ACTION:         {_display_text(describe_next(state, control=control, blocker=blocker))}",
         f"SPEC_BASE_HEAD:      {(state.get('heads') or {}).get('spec_base') or '-'}",
         f"IMPLEMENTED_HEAD:    {(state.get('heads') or {}).get('implemented') or '-'}",
         f"AUDITED_HEAD:        {(state.get('heads') or {}).get('audited') or '-'}",
@@ -111,8 +114,11 @@ def _github_line(github: dict[str, Any]) -> str:
 
 def _why(state: dict[str, Any]) -> str:
     status = state.get("status") or {}
-    if status.get("blocker"):
-        return _display_text(status["blocker"])
+    from agentbus.decision import active_blocker
+
+    blocker = active_blocker(state)
+    if blocker:
+        return _display_text(blocker)
     phase = state.get("phase")
     control = state.get("control")
     if control == "paused":
@@ -135,6 +141,9 @@ def _intervention(state: dict[str, Any]) -> str:
 def render_inbox_item(state: dict[str, Any]) -> str:
     pr = f"PR #{state['pr']}" if state.get("pr") else "no PR"
     status = state.get("status") or {}
+    from agentbus.decision import active_blocker
+
+    blocker = active_blocker(state)
     control = state.get("control") or "running"
     phase = display_state(state.get("phase") or "", control=control)
     lines = [
@@ -143,16 +152,18 @@ def render_inbox_item(state: dict[str, Any]) -> str:
         f"IMPL: {status.get('impl')}",
         f"AUDIT: {status.get('audit')}",
     ]
-    if status.get("blocker"):
-        lines.append(f"REASON: {_display_text(status['blocker'])}")
+    if blocker:
+        lines.append(f"REASON: {_display_text(blocker)}")
     lines.append(
-        f"NEXT: {_display_text(describe_next(state, control=control, blocker=status.get('blocker')))}"
+        f"NEXT: {_display_text(describe_next(state, control=control, blocker=blocker))}"
     )
     return _display_text("\n".join(lines))
 
 
 def render_brief(state: dict[str, Any]) -> str:
     envelopes = state.get("envelopes") or {}
+    from agentbus.decision import active_blocker
+
     lines = [
         f"STREAM: {state.get('stream_id')}",
         f"GOAL: {state.get('goal') or '-'}",
@@ -162,7 +173,7 @@ def render_brief(state: dict[str, Any]) -> str:
         f"CURRENT HEAD: {(state.get('heads') or {}).get('current') or '-'}",
         f"LATEST AUTHORITY: {(state.get('status') or {}).get('latest_authority') or '-'}",
         f"REPAIR CYCLES: {state.get('repair_cycles')}/{state.get('max_repair_cycles')}",
-        f"BLOCKER: {_display_text((state.get('status') or {}).get('blocker')) or 'None'}",
+        f"BLOCKER: {_display_text(active_blocker(state)) or 'None'}",
         f"NEXT ACTION: {(state.get('status') or {}).get('next_action')}",
         "",
         "CURRENT SPEC:",
