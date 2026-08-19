@@ -12,6 +12,7 @@ from agentbus.campaign import campaigns_dir
 from agentbus.lock import StreamLock
 from agentbus.runner import run_role
 from agentbus.tests.harness import AgentbusTest
+from agentbus.util import atomic_write_text
 
 
 def _hold_lock(path: str, ready: multiprocessing.synchronize.Event, release: multiprocessing.synchronize.Event) -> None:
@@ -31,11 +32,13 @@ class TickLockTests(AgentbusTest):
         os.makedirs(directory, exist_ok=True)
         return os.path.join(directory, "tick.lock")
 
-    def _locked_by_other_process(self) -> tuple[multiprocessing.Process, multiprocessing.synchronize.Event]:
+    def _locked_by_other_process(
+        self, path: str | None = None
+    ) -> tuple[multiprocessing.Process, multiprocessing.synchronize.Event]:
         context = multiprocessing.get_context("fork")
         ready = context.Event()
         release = context.Event()
-        process = context.Process(target=_hold_lock, args=(self._tick_lock_path(), ready, release))
+        process = context.Process(target=_hold_lock, args=(path or self._tick_lock_path(), ready, release))
         process.start()
         self.assertTrue(ready.wait(3), "test lock holder did not become ready")
         return process, release
@@ -78,6 +81,46 @@ class TickLockTests(AgentbusTest):
                     "synced": [],
                 },
             )
+        finally:
+            self._stop_lock_holder(process, release)
+
+    def test_held_stream_lock_coalesces_immediately(self) -> None:
+        self.create_stream("s1")
+        process, release = self._locked_by_other_process(self.store("s1").lock_path)
+        try:
+            started = time.monotonic()
+            result = campaign_tick(self.ctx, stream_id="s1", force_sync=True, surface="runner")
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 1.0)
+            self.assertTrue(result["ok"])
+            self.assertFalse(result.get("busy"))
+            self.assertEqual(len(result["results"]), 1)
+            self.assertEqual(
+                result["results"][0],
+                {
+                    "ok": True,
+                    "stream_id": "s1",
+                    "busy": True,
+                    "coalesced": True,
+                    "reason": "stream reconciliation already in progress",
+                    "notes": [],
+                },
+            )
+        finally:
+            self._stop_lock_holder(process, release)
+
+    def test_runner_stream_contention_skips_without_watch_error(self) -> None:
+        self.create_stream("s1")
+        process, release = self._locked_by_other_process(self.store("s1").lock_path)
+        try:
+            output = StringIO()
+            started = time.monotonic()
+            code = run_role(self.ctx, self.store("s1"), "impl", once=True, env=os.environ.copy(), out=output)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 1.0)
+            self.assertEqual(code, 0)
+            self.assertNotIn("Watch loop error", output.getvalue())
+            self.assertNotIn("Runner error", output.getvalue())
         finally:
             self._stop_lock_holder(process, release)
 
@@ -150,6 +193,15 @@ class TickLockTests(AgentbusTest):
         ):
             with self.assertRaisesRegex(RuntimeError, "scheduler state read failed"):
                 campaign_tick(self.ctx, stream_id="s1", surface="cli")
+
+    def test_corrupt_state_remains_a_real_stream_error(self) -> None:
+        self.create_stream("s1")
+        atomic_write_text(self.store("s1").state_path, "{\n")
+        result = campaign_tick(self.ctx, stream_id="s1", surface="cli")
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["results"]), 1)
+        self.assertIn("corrupt state.json", result["results"][0].get("error", ""))
+        self.assertFalse(result["results"][0].get("busy"))
 
     def test_runner_reports_real_tick_error_but_stays_alive(self) -> None:
         self.create_stream("s1")

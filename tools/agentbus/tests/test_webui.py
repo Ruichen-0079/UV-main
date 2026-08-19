@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import stat
 import threading
@@ -10,9 +11,25 @@ from unittest.mock import patch
 
 from agentbus.actions import bind_browser_gpt, unbind_browser_gpt
 from agentbus.launcher import existing_url, probe
+from agentbus.lock import StreamLock
 from agentbus.machine import WAITING_FOR_SPEC
 from agentbus.tests.harness import AgentbusTest
 from agentbus.web import DEFAULT_HOST, make_server
+
+
+def _hold_stream_lock(
+    path: str,
+    ready: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+) -> None:
+    lock = StreamLock(path)
+    if not lock.try_acquire():
+        raise RuntimeError(f"could not acquire test stream lock {path}")
+    try:
+        ready.set()
+        release.wait(10)
+    finally:
+        lock.release()
 
 
 class WebUITests(AgentbusTest):
@@ -43,6 +60,30 @@ if log:
         os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
         os.environ["YUVI_AGENTBUS_KONSOLE"] = path
         os.environ["FAKE_KONSOLE_LOG"] = os.path.join(self.root, "konsole.log")
+
+    def _locked_stream(self, stream_id: str) -> tuple[multiprocessing.Process, multiprocessing.synchronize.Event]:
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        release = context.Event()
+        process = context.Process(
+            target=_hold_stream_lock,
+            args=(self.store(stream_id).lock_path, ready, release),
+        )
+        process.start()
+        self.assertTrue(ready.wait(3), "test stream lock holder did not become ready")
+        return process, release
+
+    def _stop_locked_stream(
+        self,
+        process: multiprocessing.Process,
+        release: multiprocessing.synchronize.Event,
+    ) -> None:
+        release.set()
+        process.join(3)
+        if process.is_alive():
+            process.terminate()
+            process.join(3)
+        self.assertFalse(process.is_alive())
 
     def http(self, path: str, payload: dict | None = None, method: str | None = None) -> tuple[int, dict | str]:
         url = f"http://{self.host}:{self.port}{path}"
@@ -298,6 +339,44 @@ if log:
         self.assertTrue(data["coalesced"])
         self.assertEqual(data["stream"]["stream_id"], "s1")
         self.assertNotIn("Sync failed", data)
+
+    def test_stream_sync_busy_result_is_successful_and_non_error(self) -> None:
+        self.create_stream("s1")
+        busy = {
+            "ok": True,
+            "surface": "webui",
+            "results": [
+                {
+                    "ok": True,
+                    "stream_id": "s1",
+                    "busy": True,
+                    "coalesced": True,
+                    "reason": "stream reconciliation already in progress",
+                    "notes": [],
+                }
+            ],
+            "synced": ["s1"],
+        }
+        with patch("agentbus.autopilot.campaign_tick", return_value=busy):
+            code, data = self.http("/api/streams/s1/sync", {})
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["sync_in_progress"])
+        self.assertTrue(data["coalesced"])
+        self.assertTrue(data["busy"])
+        self.assertEqual(data["stream"]["stream_id"], "s1")
+        self.assertNotIn("Sync failed", data)
+
+    def test_stream_view_uses_durable_snapshot_while_busy(self) -> None:
+        self.create_stream("s1", "--goal", "persisted while busy")
+        process, release = self._locked_stream("s1")
+        try:
+            code, data = self.http("/api/streams/s1")
+            self.assertEqual(code, 200, data)
+            self.assertTrue(data["stream_busy"])
+            self.assertEqual(data["goal"], "persisted while busy")
+        finally:
+            self._stop_locked_stream(process, release)
 
     def test_sync_internal_error_remains_502(self) -> None:
         self.create_stream("s1")

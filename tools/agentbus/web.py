@@ -75,11 +75,30 @@ def _coalesced_stream_snapshot(store: StreamStore) -> dict[str, Any] | None:
     }
 
 
-def _sync_payload(result: dict[str, Any], *, stream: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload = {"ok": True, **result}
+def _result_is_busy(result: dict[str, Any], *, stream_id: str | None = None) -> bool:
     if result.get("busy") or result.get("coalesced"):
+        return True
+    for item in result.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        if not (item.get("busy") or item.get("coalesced")):
+            continue
+        if stream_id is None or item.get("stream_id") == stream_id:
+            return True
+    return False
+
+
+def _sync_payload(
+    result: dict[str, Any],
+    *,
+    stream: dict[str, Any] | None = None,
+    stream_id: str | None = None,
+) -> dict[str, Any]:
+    payload = {"ok": True, **result}
+    if _result_is_busy(result, stream_id=stream_id):
         payload.update(
             {
+                "busy": True,
                 "sync_in_progress": True,
                 "coalesced": True,
                 "message": "AgentBus is already synchronizing",
@@ -182,13 +201,26 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                 self._maybe_tick()
                 qs = parse_qs(parsed.query)
                 include_archived = (qs.get("include_archived") or ["0"])[0] in {"1", "true", "yes"}
-                return self._send(*_json_bytes(views.overview(self.ctx.repo, self.ctx.env, include_archived=include_archived)))
+                return self._send(
+                    *_json_bytes(
+                        views.overview(
+                            self.ctx.repo,
+                            self.ctx.env,
+                            include_archived=include_archived,
+                            allow_busy=True,
+                        )
+                    )
+                )
             if path == "/api/models":
                 return self._send(*_json_bytes(views.catalog(self.ctx.env)))
             if path == "/api/live":
                 return self._sse()
             if path == "/api/streams":
-                return self._send(*_json_bytes({"streams": views.list_stream_views(self.ctx.repo, self.ctx.env)}))
+                return self._send(
+                    *_json_bytes(
+                        {"streams": views.list_stream_views(self.ctx.repo, self.ctx.env, allow_busy=True)}
+                    )
+                )
             if path.startswith("/api/streams/"):
                 return self._get_stream(path, parsed.query)
         except AgentbusError as exc:
@@ -298,7 +330,17 @@ class AgentBusHandler(BaseHTTPRequestHandler):
         store = self._store(stream_id)
         qs = parse_qs(query)
         if len(parts) == 3:
-            return self._send(*_json_bytes(views.stream_view(self.ctx.repo, store, env=self.ctx.env, recover=True)))
+            return self._send(
+                *_json_bytes(
+                    views.stream_view(
+                        self.ctx.repo,
+                        store,
+                        env=self.ctx.env,
+                        recover=True,
+                        allow_busy=True,
+                    )
+                )
+            )
         if parts[3] == "events":
             limit = int((qs.get("limit") or ["80"])[0])
             return self._send(*_json_bytes({"events": views.event_rows(store, limit=min(limit, 300))}))
@@ -359,7 +401,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
             browser_note=payload.get("browser_note") or None,
         )
         store = StreamStore(self.ctx.repo, state["stream_id"])
-        view = views.stream_view(self.ctx.repo, store, env=self.ctx.env)
+        view = views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True)
         return self._send(*_json_bytes({"ok": True, "notes": notes, "stream": view}, 201))
 
     def _mutate(self, path: str, payload: dict[str, Any]) -> None:
@@ -382,16 +424,17 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                 result = campaign_tick(
                     self.ctx.repo, env=self.ctx.env, force_sync=True, surface="webui"
                 )
-                if result.get("busy") or result.get("coalesced"):
+                if _result_is_busy(result, stream_id=stream_id):
                     return self._send(
                         *_json_bytes(
                             _sync_payload(
                                 result,
                                 stream=_coalesced_stream_snapshot(store),
+                                stream_id=stream_id,
                             )
                         )
                     )
-                view = views.stream_view(self.ctx.repo, store, env=self.ctx.env)
+                view = views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True)
                 notes: list[str] = []
                 for item in result.get("results") or []:
                     notes.extend(item.get("notes") or [])
@@ -427,10 +470,10 @@ class AgentBusHandler(BaseHTTPRequestHandler):
             return self._send(*_json_bytes(result))
         elif action == "archive":
             result = archive_stream(self.ctx.repo, store)
-            return self._send(*_json_bytes({**result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env)}))
+            return self._send(*_json_bytes({**result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True)}))
         elif action == "unarchive":
             result = unarchive_stream(self.ctx.repo, store)
-            return self._send(*_json_bytes({**result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env)}))
+            return self._send(*_json_bytes({**result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True)}))
         elif action == "purge":
             if not payload.get("confirm"):
                 raise AgentbusError("purge requires confirm=true")
@@ -452,7 +495,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "commit": result.get("commit"),
                         "files": result.get("files"),
-                        "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env),
+                        "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True),
                     }
                 )
             )
@@ -463,7 +506,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                 allow_pr_head=bool(payload.get("allow_pr_head")),
                 pr_head=payload.get("pr_head"),
             )
-            return self._send(*_json_bytes({"ok": True, **result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env)}))
+            return self._send(*_json_bytes({"ok": True, **result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True)}))
         elif action == "model":
             set_role_model(
                 store,
@@ -511,7 +554,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
             status = 200 if result.get("ok") else 409
             return self._send(
                 *_json_bytes(
-                    {**result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env)},
+                    {**result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True)},
                     status,
                 )
             )
@@ -529,7 +572,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
             status = 200 if result.get("ok") else 409
             return self._send(
                 *_json_bytes(
-                    {**result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env)},
+                    {**result, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True)},
                     status,
                 )
             )
@@ -548,7 +591,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "url": binding.get("url"),
                         "review_complete": False,
-                        "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env),
+                        "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True),
                     }
                 )
             )
@@ -561,7 +604,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
             return self._workspace(store, stream_id)
         else:
             raise AgentbusError(f"unknown action {action}")
-        view = views.stream_view(self.ctx.repo, store, env=self.ctx.env)
+        view = views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True)
         return self._send(*_json_bytes({"ok": True, "stream": view}))
 
     def _open_terminal(self, store: StreamStore, stream_id: str, role: str) -> None:
@@ -574,7 +617,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
         if not workdir:
             raise AgentbusError("no worktree for this role")
         info = launch_role_konsole(store, stream_id, role, workdir, env=self.ctx.env)
-        return self._send(*_json_bytes({"ok": True, "konsole": info, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env)}))
+        return self._send(*_json_bytes({"ok": True, "konsole": info, "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True)}))
 
     def _step(self, store: StreamStore, stream_id: str) -> None:
         state = arm_step(store)
@@ -599,7 +642,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                         "launched": role,
                         "konsole": info,
                         "message": f"Step armed and {role.upper()} Konsole opened. Codex stays visible in the terminal.",
-                        "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env),
+                        "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True),
                     }
                 )
             )
@@ -609,7 +652,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "launched": None,
                     "message": "No Codex step to run; stream is waiting for human/GPT.",
-                    "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env),
+                    "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True),
                 }
             )
         )
@@ -638,7 +681,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
                     "browser_url": browser,
                     "pr_url": pr_web_url(self.ctx.repo.origin, state.get("pr")),
                     "message": "Workspace ready. Existing role terminals were reused when alive. Focus was not stolen.",
-                    "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env),
+                    "stream": views.stream_view(self.ctx.repo, store, env=self.ctx.env, allow_busy=True),
                 }
             )
         )
@@ -652,7 +695,7 @@ class AgentBusHandler(BaseHTTPRequestHandler):
         last = ""
         try:
             while True:
-                payload = views.overview(self.ctx.repo, self.ctx.env)
+                payload = views.overview(self.ctx.repo, self.ctx.env, allow_busy=True)
                 digest = sha256_text(json.dumps(payload, sort_keys=True, default=str))
                 if digest != last:
                     last = digest

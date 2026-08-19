@@ -788,8 +788,20 @@ def tick_stream(
 
     if locked:
         return work()
-    with store.lock():
+    stream_lock = store.lock()
+    if not stream_lock.try_acquire():
+        return {
+            "ok": True,
+            "stream_id": store.stream_id,
+            "busy": True,
+            "coalesced": True,
+            "reason": "stream reconciliation already in progress",
+            "notes": [],
+        }
+    try:
         result = work()
+    finally:
+        stream_lock.release()
     if result.pop("dispatch_merge", False):
         from agentbus.mergegate import autonomous_merge
 

@@ -249,19 +249,22 @@ def mark_done(store: StreamStore, role: str, key: str) -> None:
     store.save_runtime(runtime)
 
 
-def register_runner(store: StreamStore, role: str) -> None:
+def register_runner(store: StreamStore, role: str) -> bool:
     from agentbus.konsolebind import AGENTBUS_EXECUTOR_GENERATION
 
     # Registration is the hand-off point from the Konsole process to the
     # watch runner.  Serialize it with executor reconciliation so a runner
     # that is being replaced cannot overwrite a newer slot.
-    with store.lock():
+    stream_lock = store.lock()
+    if not stream_lock.try_acquire():
+        return False
+    try:
         runtime = store.load_runtime()
         slot = runtime.setdefault("konsole", {}).setdefault(role, {})
         launch_token = os.environ.get("YUVI_AGENTBUS_EXECUTOR_TOKEN")
         recorded_launch_token = slot.get("runner_launch_token")
         if recorded_launch_token and launch_token and recorded_launch_token != launch_token:
-            return
+            return True
         slot["runner_pid"] = os.getpid()
         slot["runner_token"] = pid_start_token(os.getpid())
         slot["runner_start_token"] = slot["runner_token"]
@@ -274,6 +277,9 @@ def register_runner(store: StreamStore, role: str) -> None:
         slot["owner"] = slot.get("owner") or "agentbus"
         slot["managed_by"] = slot.get("managed_by") or "agentbus"
         store.save_runtime(runtime)
+    finally:
+        stream_lock.release()
+    return True
 
 
 def waiting_banner(state: dict[str, Any], role: str, *, github: dict[str, Any] | None) -> str:
@@ -929,13 +935,20 @@ def run_role(
     from agentbus.notify import maybe_notify_transition
 
     out = out or sys.stdout
-    register_runner(store, role)
+    registered = False
     last_github = 0.0
     interval = sync_interval(env)
     once_failovers = 0
     while True:
         try:
-            with store.lock():
+            if not registered:
+                registered = register_runner(store, role)
+                if not registered:
+                    if once:
+                        return 0
+                    time.sleep(poll_seconds(env))
+                    continue
+            with store.lock(wait=0):
                 state = store.load()
                 before = state.get("phase")
                 do_github = bool(state.get("pr")) and (time.time() - last_github >= interval)
@@ -1034,7 +1047,7 @@ def run_role(
                     )
                 out.flush()
                 try:
-                    with store.lock():
+                    with store.lock(wait=0):
                         state = store.load()
                         if not role_should_work(state, role):
                             continue
@@ -1066,6 +1079,11 @@ def run_role(
                         return code
                     continue
                 except Exception as exc:  # noqa: BLE001 — watch runner must stay alive
+                    if isinstance(exc, TimeoutError) and str(exc).startswith("stream is locked:"):
+                        if once:
+                            return 0
+                        time.sleep(poll_seconds(env))
+                        continue
                     out.write(f"\nRunner error (staying alive): {exc}\n")
                     out.flush()
                     if once:
@@ -1078,7 +1096,7 @@ def run_role(
             out.write(waiting_banner(state, role, github=state.get("github")))
             out.flush()
             time.sleep(poll_seconds(env))
-            with store.lock():
+            with store.lock(wait=0):
                 state = store.load()
                 impl = state.get("impl_worktree") or ctx.repo_root
                 process_inbox(store, state, repo=impl, current_head=head_sha(impl))
@@ -1086,6 +1104,15 @@ def run_role(
                 store.save(state)
         except KeyboardInterrupt:
             raise
+        except TimeoutError as exc:
+            if str(exc).startswith("stream is locked:"):
+                if once:
+                    return 0
+                time.sleep(poll_seconds(env))
+                continue
+            out.write(f"\nWatch loop error (staying alive): {exc}\n")
+            out.flush()
+            time.sleep(max(poll_seconds(env), 2.0))
         except Exception as exc:  # noqa: BLE001
             out.write(f"\nWatch loop error (staying alive): {exc}\n")
             out.flush()

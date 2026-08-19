@@ -30,8 +30,14 @@ class StreamStore:
     def exists(self) -> bool:
         return os.path.isfile(self.state_path)
 
-    def lock(self, *, exclusive: bool = True) -> StreamLock:
-        return StreamLock(self.lock_path, exclusive=exclusive)
+    def lock(self, *, exclusive: bool = True, wait: float = 3.0) -> StreamLock:
+        """Return the stream lock with its normal bounded-wait default.
+
+        Top-level orchestration may pass ``wait=0`` for a coalescing attempt;
+        authoritative callers keep the existing three-second default.
+        """
+
+        return StreamLock(self.lock_path, exclusive=exclusive, wait=wait)
 
     def initialize(self, **overrides: Any) -> dict[str, Any]:
         if self.exists():

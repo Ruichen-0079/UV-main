@@ -139,8 +139,28 @@ def stream_view(
     *,
     env: dict[str, str] | None = None,
     recover: bool = False,
+    allow_busy: bool = False,
 ) -> dict[str, Any]:
-    if recover:
+    stream_busy = False
+    if allow_busy:
+        view_lock = store.lock(exclusive=recover)
+        if not view_lock.try_acquire():
+            # State/runtime writes are atomic.  A view can safely render the
+            # last durable snapshot while the owner performs reconciliation;
+            # it must not turn normal stream serialization into a 500.
+            state = store.load()
+            runtime = store.load_runtime()
+            stream_busy = True
+        else:
+            try:
+                state = store.load()
+                if recover:
+                    recover_stream(store, state)
+                    store.save(state)
+                runtime = store.load_runtime()
+            finally:
+                view_lock.release()
+    elif recover:
         with store.lock():
             state = store.load()
             recover_stream(store, state)
@@ -196,6 +216,7 @@ def stream_view(
     final_binding = resolve_final_gpt_binding(state, settings)
     return {
         "stream_id": state.get("stream_id"),
+        "stream_busy": stream_busy,
         "goal": state.get("goal") or "",
         "pr": state.get("pr"),
         "pr_url": pr_web_url(ctx.origin, state.get("pr")),
@@ -274,8 +295,9 @@ def list_stream_views(
     env: dict[str, str] | None = None,
     *,
     include_archived: bool = False,
+    allow_busy: bool = False,
 ) -> list[dict[str, Any]]:
-    views = [stream_view(ctx, store, env=env) for store in iter_stores(ctx)]
+    views = [stream_view(ctx, store, env=env, allow_busy=allow_busy) for store in iter_stores(ctx)]
     for item in views:
         for rec in (item.get("envelopes") or {}).values():
             if isinstance(rec, dict):
@@ -285,8 +307,14 @@ def list_stream_views(
     return sorted(views, key=lambda item: item.get("stream_id") or "")
 
 
-def overview(ctx: RepoContext, env: dict[str, str] | None = None, *, include_archived: bool = False) -> dict[str, Any]:
-    all_views = list_stream_views(ctx, env, include_archived=True)
+def overview(
+    ctx: RepoContext,
+    env: dict[str, str] | None = None,
+    *,
+    include_archived: bool = False,
+    allow_busy: bool = False,
+) -> dict[str, Any]:
+    all_views = list_stream_views(ctx, env, include_archived=True, allow_busy=allow_busy)
     archived = [item for item in all_views if item.get("archived")]
     streams = all_views if include_archived else [item for item in all_views if not item.get("archived")]
     counts = {
