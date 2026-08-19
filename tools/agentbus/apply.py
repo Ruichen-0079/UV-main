@@ -45,6 +45,13 @@ def record_envelope(store: StreamStore, state: dict[str, Any], envelope: Envelop
     )
     if errors:
         raise AgentbusError("invalid envelope: " + "; ".join(errors))
+    if envelope.kind == "GPT_SPEC" and envelope.status in {"ACTIONABLE", "APPROVED"}:
+        # Capture the prior spec epoch before replacing the compatibility
+        # envelope.  This is what makes a Product GPT replan a new bounded
+        # epoch while a duplicate comment remains idempotent.
+        from agentbus.repair import prepare_replan_for_new_spec
+
+        prepare_replan_for_new_spec(state)
     rendered = render_envelope(envelope)
     envelope.raw = rendered
     path = store.write_artifact(f"{envelope.kind.lower()}.md", rendered)
@@ -333,7 +340,9 @@ def _apply_spec(
         return state
     state["status"]["gpt"] = "READY"
     state["status"]["blocker"] = None
-    state["repair_cycles"] = 0
+    from agentbus.repair import start_spec_epoch
+
+    start_spec_epoch(state, state.get("envelopes", {}).get("GPT_SPEC") or {})
     if control == "paused":
         return refresh_next(state)
     if state["phase"] in {machine.MATERIALIZING, machine.WORKTREE_READY, machine.BOOTSTRAP_PR_READY}:
@@ -377,7 +386,6 @@ def _apply_review(
         return refresh_next(state)
     if envelope.status in {"CHANGES_REQUIRED", "REJECT", "REJECTED"}:
         state["status"]["gpt"] = "CHANGES_REQUIRED"
-        state["repair_cycles"] = 0
         state["status"]["impl"] = "WAITING"
         if state["phase"] == machine.READY_FOR_GPT:
             set_phase(state, machine.GPT_REVIEW, reason="GPT requested changes")
@@ -457,6 +465,7 @@ def _apply_report(
         pub["status"] = pub.get("status") or "committed"
     state["status"]["impl"] = "PASS"
     state["status"]["audit"] = "WAITING"
+    state["spec_epoch_pending_implementation"] = False
     if state["phase"] in {
         machine.IMPLEMENTING,
         machine.VALIDATING,
@@ -529,6 +538,15 @@ def _apply_audit(
                 state["status"]["impl"] = "PAUSED"
                 return refresh_next(state)
             state["repair_cycles"] = cycles + 1
+            from agentbus.repair import note_repair_attempt
+
+            note_repair_attempt(
+                state,
+                kind="CODEX_AUDIT",
+                authority=envelope.source_id or envelope.digest,
+                head=audited,
+                cycle=state["repair_cycles"],
+            )
             state.setdefault("publication", {})["last_product_audit_head"] = audited
         state["status"]["impl"] = "WAITING"
         set_phase(state, machine.IMPLEMENTING, reason="audit CHANGES_REQUIRED")
@@ -560,7 +578,6 @@ def _apply_final_gate(
             set_phase(state, machine.FINAL_GATE, reason="FINAL_GATE approved")
         return refresh_next(state)
     if envelope.status in {"REJECTED", "CHANGES_REQUIRED"}:
-        state["repair_cycles"] = 0
         set_phase(state, machine.IMPLEMENTING, reason="FINAL_GATE rejected")
         return refresh_next(state)
     return refresh_next(state)

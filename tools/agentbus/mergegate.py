@@ -414,6 +414,7 @@ def bind_merge_gpt(
 def apply_merge_review(state: dict[str, Any], envelope: Envelope) -> dict[str, Any]:
     from agentbus.apply import refresh_next, set_phase
     from agentbus.decision import normalize_final_status
+    from agentbus.repair import clear_replan_lineage, note_repair_attempt, note_repair_exhausted
 
     status = envelope.status
     reviewed = (envelope.fields.get("REVIEWED_HEAD") or "").strip()
@@ -445,17 +446,29 @@ def apply_merge_review(state: dict[str, Any], envelope: Envelope) -> dict[str, A
     if normalized == "REPAIR":
         token = envelope.source_id or envelope.digest
         repair = state.setdefault("final_repair", {})
+        cycles = int(state.get("repair_cycles") or 0)
+        maximum = int(state.get("max_repair_cycles") or 2)
+        if cycles >= maximum:
+            # BLOCKED_FOR_REVIEW remains a useful compatibility/diagnostic
+            # phase, but canonical decision derivation may now route a
+            # concrete exact-current REPAIR to Product GPT for a new epoch.
+            note_repair_exhausted(state, authority=token, head=reviewed or head)
+            if state.get("phase") != BLOCKED_FOR_REVIEW:
+                set_phase(state, BLOCKED_FOR_REVIEW, reason="Final GPT repair budget exhausted")
+            state.setdefault("status", {})["impl"] = "PAUSED"
+            repair["exhausted_review"] = token
+            repair["exhausted_epoch_id"] = (state.get("repair_epoch") or {}).get("id")
+            repair["exhausted_at"] = utc_now()
+            return refresh_next(state)
         if repair.get("consumed_review") != token:
-            cycles = int(state.get("repair_cycles") or 0)
-            maximum = int(state.get("max_repair_cycles") or 2)
-            if cycles >= maximum:
-                if state.get("phase") != BLOCKED_FOR_REVIEW:
-                    set_phase(state, BLOCKED_FOR_REVIEW, reason="Final GPT repair budget exhausted")
-                state.setdefault("status", {})["impl"] = "PAUSED"
-                repair["exhausted_review"] = token
-                repair["exhausted_at"] = utc_now()
-                return refresh_next(state)
             state["repair_cycles"] = cycles + 1
+            note_repair_attempt(
+                state,
+                kind="GPT_MERGE_REVIEW",
+                authority=token,
+                head=reviewed or head,
+                cycle=state["repair_cycles"],
+            )
             repair["consumed_review"] = token
             repair["consumed_head"] = reviewed or head
             repair["job_id"] = envelope.fields.get("JOB_ID") or None
@@ -470,6 +483,7 @@ def apply_merge_review(state: dict[str, Any], envelope: Envelope) -> dict[str, A
         state.setdefault("status", {})["gpt"] = "HUMAN"
     elif normalized == "PASS":
         state.setdefault("status", {})["gpt"] = "PASS"
+        clear_replan_lineage(state)
     return refresh_next(state)
 
 

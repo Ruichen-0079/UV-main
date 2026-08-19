@@ -110,6 +110,7 @@ LEGAL_TRANSITIONS: dict[str, set[str]] = {
         RECOVERY_REQUIRED,
         RE_REVIEW_REQUIRED,
         FINAL_GATE,
+        BLOCKED_FOR_REVIEW,
         READY_FOR_GPT,
     },
     VALIDATING: {
@@ -365,7 +366,7 @@ def describe_next(phase: str | dict[str, Any], *, control: str = "running", bloc
         BLOCKED: "Human/GPT decision required",
         PAUSED: "paused",
         RECOVERY_REQUIRED: "Human: inspect crash/dirty state, then resume or step",
-        BLOCKED_FOR_REVIEW: "Repair cycle limit reached; GPT/human must re-authorize",
+        BLOCKED_FOR_REVIEW: "Repair epoch limit reached; Product GPT may issue one bounded replan",
         RE_REVIEW_REQUIRED: "Instruction SHA is stale; GPT/human must re-issue",
     }
     return labels.get(phase, phase)

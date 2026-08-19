@@ -209,6 +209,11 @@ def stream_view(
     decision = decision_for_stream(ctx, state, loaded, decision_live, runtime, env=env)
     classified = classify_attention(state, runtime, campaign=loaded, decision=decision)
     kind = classified["kind"]
+    repair_epoch = state.get("repair_epoch") if isinstance(state.get("repair_epoch"), dict) else {}
+    repair_replan = state.get("repair_replan") if isinstance(state.get("repair_replan"), dict) else {}
+    detail = blocker or decision.reason
+    if decision.action == "PRODUCT_GPT" and decision.evidence.get("repair_epoch_exhausted"):
+        detail = decision.reason
     from agentbus.settings import load_settings, resolve_final_gpt_binding, resolve_product_gpt_binding
 
     settings = load_settings(ctx)
@@ -239,9 +244,14 @@ def stream_view(
         "planner_provider": state.get("planner_provider") or "browser",
         "repair_cycles": state.get("repair_cycles") or 0,
         "max_repair_cycles": state.get("max_repair_cycles") or 2,
+        "repair_epoch_id": repair_epoch.get("id") or state.get("repair_epoch_id"),
+        "repair_epoch_repair_cycles": state.get("repair_cycles") or 0,
+        "repair_replan_count": state.get("repair_replan_count") or 0,
+        "max_repair_replans": state.get("max_repair_replans") or 1,
+        "repair_replan": sanitize_display_value(repair_replan, roots=display_roots),
         "latest_authority": current_generation_authority(state),
         "next_action": decision.action,
-        "next_detail": sanitize_display_text(blocker or decision.reason, roots=display_roots),
+        "next_detail": sanitize_display_text(detail, roots=display_roots),
         "blocker": blocker or None,
         "who": decision.action,
         "impl": _role_view(state, runtime, "impl", env, roots=display_roots),

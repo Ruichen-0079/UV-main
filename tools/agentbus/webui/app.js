@@ -22,7 +22,7 @@ const PHASE_LABELS_ZH = {
   BLOCKED: "已阻塞",
   PAUSED: "已暂停",
   RECOVERY_REQUIRED: "需要恢复",
-  BLOCKED_FOR_REVIEW: "等待人工处理",
+  BLOCKED_FOR_REVIEW: "修复预算已达上限，等待自动重新规划",
   RE_REVIEW_REQUIRED: "需要重新审阅",
   COMPLETE: "已完成",
 };

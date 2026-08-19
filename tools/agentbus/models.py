@@ -8,8 +8,9 @@ from agentbus.machine import WAITING_FOR_SPEC
 from agentbus.util import utc_now
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_MAX_REPAIR = 2
+DEFAULT_MAX_REPAIR_REPLANS = 1
 
 
 def default_role(sandbox: str) -> dict[str, Any]:
@@ -48,6 +49,14 @@ def empty_state(stream_id: str) -> dict[str, Any]:
         "step_armed": False,
         "repair_cycles": 0,
         "max_repair_cycles": DEFAULT_MAX_REPAIR,
+        "repair_epoch_id": None,
+        "repair_epoch": {},
+        "repair_epochs": [],
+        "repair_history": [],
+        "spec_epoch_pending_implementation": False,
+        "repair_replan_count": 0,
+        "max_repair_replans": DEFAULT_MAX_REPAIR_REPLANS,
+        "repair_replan": {},
         "heads": {
             "current": None,
             "spec_base": None,
@@ -139,6 +148,14 @@ def migrate_state(state: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("current_base_ci", None)
     state.setdefault("codex_interruption", None)
     state.setdefault("final_repair", {})
+    state.setdefault("repair_epoch_id", None)
+    state.setdefault("repair_epoch", {})
+    state.setdefault("repair_epochs", [])
+    state.setdefault("repair_history", [])
+    state.setdefault("spec_epoch_pending_implementation", False)
+    state.setdefault("repair_replan_count", 0)
+    state.setdefault("max_repair_replans", DEFAULT_MAX_REPAIR_REPLANS)
+    state.setdefault("repair_replan", {})
     state.setdefault("merge_txn", {})
     state.setdefault("merge_review_history", [])
     state.setdefault("merge_gpt_gate", {})
@@ -150,6 +167,9 @@ def migrate_state(state: dict[str, Any]) -> dict[str, Any]:
         migrate_role_config(cfg)
     if int(state.get("schema_version") or 1) < SCHEMA_VERSION:
         state["schema_version"] = SCHEMA_VERSION
+    from agentbus.repair import ensure_repair_state
+
+    ensure_repair_state(state)
     return state
 
 

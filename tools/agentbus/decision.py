@@ -10,6 +10,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agentbus.util import sha256_text
+from agentbus.repair import (
+    REPAIR_EPOCH_EXHAUSTED_REPLAN,
+    REPAIR_REPLAN_LIMIT_EXHAUSTED,
+    max_repair_replans,
+    repair_epoch_exhausted,
+    repair_replan_count,
+    spec_epoch_id,
+)
 
 
 PRODUCT_GPT = "PRODUCT_GPT"
@@ -455,6 +463,32 @@ def normalize_final_status(record: dict[str, Any] | None) -> str | None:
         # interpretation unless the old fields explicitly said WAIT/HUMAN.
         return "REPAIR"
     return None
+
+
+def final_repair_is_actionable(record: dict[str, Any] | None) -> bool:
+    """Require concrete repair authority before automatic Product replanning.
+
+    Final GPT's normalized ``REPAIR`` status is the normal actionable signal.
+    Producers may add a structured actionability/classification field when a
+    finding is actually ambiguous; free-form finding prose is not interpreted
+    as a security or destructive approval decision here.
+    """
+
+    if not record or normalize_final_status(record) != "REPAIR":
+        return False
+    fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    marker = str(
+        fields.get("ACTIONABILITY")
+        or fields.get("REPAIR_ACTIONABILITY")
+        or fields.get("DECISION_CLASS")
+        or ""
+    ).strip().upper()
+    if marker in {"HUMAN", "AMBIGUOUS", "SECURITY_AMBIGUITY", "DESTRUCTIVE_AMBIGUITY", "SCOPE_AMBIGUITY"}:
+        return False
+    if marker in {"CONCRETE", "ACTIONABLE", "IN_SCOPE", "YES"}:
+        return True
+    findings = str(fields.get("FINDINGS") or record.get("findings") or "").strip()
+    return bool(findings and findings.lower() not in {"none", "- none", "n/a", "na"})
 
 
 def _live_pr(state: dict[str, Any], live: dict[str, Any] | None) -> dict[str, Any]:
@@ -937,8 +971,6 @@ def derive_next_action(
     ambiguity = _campaign_ambiguity(campaign)
     if ambiguity:
         return _decision(HUMAN, ambiguity, ambiguity="campaign")
-    if phase == "BLOCKED_FOR_REVIEW":
-        return _decision(HUMAN, "repair budget exhausted")
     if phase == "RE_REVIEW_REQUIRED":
         raw_blocker = str((state.get("status") or {}).get("blocker") or "").strip()
         if not raw_blocker or active_blocker(state):
@@ -1030,9 +1062,44 @@ def derive_next_action(
         cycles = int(state.get("repair_cycles") or 0)
         maximum = int(state.get("max_repair_cycles") or 2)
         review_token = str(final.get("source_id") or final.get("digest") or "")
-        consumed = str((state.get("final_repair") or {}).get("consumed_review") or "") == review_token
-        if cycles >= maximum and not consumed:
-            return _decision(HUMAN, "Final GPT requested repair after repair budget was exhausted")
+        if cycles >= maximum or repair_epoch_exhausted(state):
+            if not final_repair_is_actionable(final):
+                return _decision(
+                    HUMAN,
+                    "Final GPT repair finding is ambiguous and requires a human decision",
+                    final_review_id=final.get("source_id"),
+                )
+            replans = repair_replan_count(state)
+            replan_limit = max_repair_replans(state)
+            if replans >= replan_limit:
+                return _decision(
+                    HUMAN,
+                    REPAIR_REPLAN_LIMIT_EXHAUSTED,
+                    final_review_id=final.get("source_id"),
+                    repair_epoch_id=spec_epoch_id(state),
+                    repair_cycles=cycles,
+                    max_repair_cycles=maximum,
+                    repair_replan_count=replans,
+                    max_repair_replans=replan_limit,
+                )
+            return _externalize(
+                _decision(
+                    PRODUCT_GPT,
+                    REPAIR_EPOCH_EXHAUSTED_REPLAN,
+                    task=PLAN_SPEC,
+                    final_review_id=final.get("source_id"),
+                    final_repair_authority=review_token,
+                    repair_epoch_id=spec_epoch_id(state),
+                    repair_epoch_repair_count=cycles,
+                    repair_cycles=cycles,
+                    max_repair_cycles=maximum,
+                    repair_replan_count=replans,
+                    max_repair_replans=replan_limit,
+                    repair_epoch_exhausted=True,
+                ),
+                state,
+                external,
+            )
         return _externalize(
             _decision(IMPL, "Final GPT requested an in-scope repair", final_review_id=final.get("source_id")),
             state,
@@ -1048,6 +1115,16 @@ def derive_next_action(
             transient=True,
             final_review_id=final.get("source_id"),
         )
+    if state.get("spec_epoch_pending_implementation"):
+        spec = _record(state, "GPT_SPEC")
+        if str(spec.get("status") or "").upper() in {"ACTIONABLE", "APPROVED"}:
+            return _externalize(
+                _decision(IMPL, "new GPT_SPEC repair epoch requires implementation"),
+                state,
+                external,
+            )
+    if phase == "BLOCKED_FOR_REVIEW":
+        return _decision(HUMAN, "repair budget exhausted")
     if final_status == "PASS":
         gate = deterministic_merge_fences(state, campaign, current_live, require_current_job=True)
         if gate["ok"]:

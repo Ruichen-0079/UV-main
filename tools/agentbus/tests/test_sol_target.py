@@ -114,6 +114,64 @@ class SolTargetDecisionTests(AgentbusTest):
         state["envelopes"]["GPT_MERGE_REVIEW"] = envelope.as_record()
         return envelope
 
+    def spec_envelope(self, state: dict, *, source_id: str) -> Envelope:
+        head = state["heads"]["current"]
+        envelope = Envelope(
+            kind="GPT_SPEC",
+            fields={
+                "STATUS": "ACTIONABLE",
+                "STREAM": state["stream_id"],
+                "GOAL": "focused repair",
+                "TARGET": "README.md",
+                "BASE_HEAD": head,
+                "SCOPE": "README.md",
+                "OUT_OF_SCOPE": "all other paths",
+                "ACCEPTANCE_CRITERIA": "focused repair is validated",
+                "REQUIRED_VALIDATION": "python3 -m unittest",
+                "PATH_SCOPE": "README.md",
+                "NEXT_ACTION": "IMPL",
+            },
+            source="github",
+            source_id=source_id,
+        )
+        envelope.raw = render_envelope(envelope)
+        return envelope
+
+    def report_envelope(self, state: dict, *, source_id: str = "report-new") -> Envelope:
+        head = state["heads"]["current"]
+        envelope = Envelope(
+            kind="CODEX_REPORT",
+            fields={
+                "STATUS": "READY_FOR_AUDIT",
+                "STREAM": state["stream_id"],
+                "IMPLEMENTED_HEAD": head,
+                "CHANGED_FILES": "README.md",
+                "VALIDATION": "python3 -m unittest",
+                "NEXT_ACTION": "AUDIT",
+            },
+            source="github",
+            source_id=source_id,
+        )
+        envelope.raw = render_envelope(envelope)
+        return envelope
+
+    def audit_envelope(self, state: dict, *, source_id: str = "audit-new") -> Envelope:
+        head = state["heads"]["current"]
+        envelope = Envelope(
+            kind="CODEX_AUDIT",
+            fields={
+                "STATUS": "PASS",
+                "STREAM": state["stream_id"],
+                "AUDITED_HEAD": head,
+                "FINDINGS": "none",
+                "NEXT_ACTION": "GPT_REVIEW",
+            },
+            source="github",
+            source_id=source_id,
+        )
+        envelope.raw = render_envelope(envelope)
+        return envelope
+
     def test_one_derive_function_covers_every_canonical_action(self) -> None:
         actions = set()
 
@@ -308,7 +366,7 @@ class SolTargetDecisionTests(AgentbusTest):
         self.assertEqual(first.job_id, second.job_id)
         self.assertIn("revision of the current blocked GPT_SPEC", first.prompt)
         self.assertIn("same stream and PR", first.prompt)
-        self.assertIn("separate Mem0 fail-closed HIGH", first.prompt)
+        self.assertIn("independent Final GPT findings", first.prompt)
 
     def test_final_statuses_and_legacy_normalization(self) -> None:
         expected = {"PASS": MERGE, "REPAIR": IMPL, "WAIT": WAIT, "HUMAN": HUMAN}
@@ -369,7 +427,7 @@ class SolTargetDecisionTests(AgentbusTest):
         self.assertIsNone(final_review_for_current(state, None, live))
         self.assertEqual(derive_next_action(state, live=live).action, FINAL_GPT)
 
-    def test_final_repair_budget_exhaustion_is_human(self) -> None:
+    def test_final_repair_budget_exhaustion_requests_product_replan(self) -> None:
         self.create_stream("repair-max", "--pr", "44")
         store = self.store("repair-max")
         state, live, _ = self.ready_state("repair-max")
@@ -378,7 +436,138 @@ class SolTargetDecisionTests(AgentbusTest):
         apply_envelope(store, state, envelope, repo=self.repo, current_head=state["heads"]["current"])
         self.assertEqual(state["phase"], BLOCKED_FOR_REVIEW)
         self.assertEqual(state["repair_cycles"], state["max_repair_cycles"])
+        decision = derive_next_action(state, live=live)
+        self.assertEqual(decision.action, PRODUCT_GPT)
+        self.assertEqual(decision.task, PLAN_SPEC)
+        self.assertEqual(decision.reason, "REPAIR_EPOCH_EXHAUSTED_REPLAN")
+
+    def test_repair_budget_is_epoch_scoped_and_history_survives_reports_and_specs(self) -> None:
+        self.create_stream("repair-epochs", "--pr", "44")
+        store = self.store("repair-epochs")
+        state, live, head = self.ready_state("repair-epochs")
+
+        first_spec = self.spec_envelope(state, source_id="spec-1")
+        apply_envelope(store, state, first_spec, repo=self.repo, current_head=head, allow_stale=True)
+        state["repair_cycles"] = 1
+        state["spec_epoch_pending_implementation"] = False
+        epoch_one = state["repair_epoch_id"]
+
+        # Replaying the same durable authority is idempotent.
+        apply_envelope(store, state, first_spec, repo=self.repo, current_head=head, allow_stale=True)
+        self.assertEqual(state["repair_cycles"], 1)
+
+        # New Codex evidence is not a repair-epoch boundary.
+        apply_envelope(
+            store,
+            state,
+            self.report_envelope(state),
+            repo=self.repo,
+            current_head=head,
+            allow_stale=True,
+        )
+        self.assertEqual(state["repair_cycles"], 1)
+        apply_envelope(
+            store,
+            state,
+            self.audit_envelope(state),
+            repo=self.repo,
+            current_head=head,
+            allow_stale=True,
+        )
+        self.assertEqual(state["repair_cycles"], 1)
+
+        # A new exact Product GPT authority starts the next bounded epoch and
+        # retains the completed epoch as durable diagnostics.
+        second_spec = self.spec_envelope(state, source_id="spec-2")
+        apply_envelope(store, state, second_spec, repo=self.repo, current_head=head, allow_stale=True)
+        self.assertNotEqual(state["repair_epoch_id"], epoch_one)
+        self.assertEqual(state["repair_cycles"], 0)
+        self.assertEqual(state["repair_epochs"][-1]["repair_count"], 1)
+        self.assertTrue(any(item["id"] == epoch_one for item in state["repair_epochs"]))
+        self.assertTrue(state["spec_epoch_pending_implementation"])
+
+    def test_exhausted_repair_replans_once_then_human_after_second_epoch(self) -> None:
+        self.create_stream("repair-replan-limit", "--pr", "44")
+        store = self.store("repair-replan-limit")
+        state, live, head = self.ready_state("repair-replan-limit")
+        apply_envelope(
+            store,
+            state,
+            self.spec_envelope(state, source_id="spec-first"),
+            repo=self.repo,
+            current_head=head,
+            allow_stale=True,
+        )
+        state["spec_epoch_pending_implementation"] = False
+        state["repair_cycles"] = state["max_repair_cycles"]
+        exhausted = self.final_envelope(state, live, "REPAIR", source_id="final-first")
+        apply_envelope(store, state, exhausted, repo=self.repo, current_head=head)
+        self.assertEqual(derive_next_action(state, live=live).action, PRODUCT_GPT)
+        self.assertEqual(state["repair_replan"]["pending"], True)
+
+        from agentbus.browser import job_for_state, list_browser_jobs
+        from agentbus.settings import note_browser_poll, set_global_binding
+
+        set_global_binding(self.ctx, "PRODUCT_GPT", url="https://chatgpt.com/c/product")
+        job = job_for_state(self.ctx, state)
+        self.assertIsNotNone(job)
+        self.assertEqual((job.role, job.task), (PRODUCT_GPT, PLAN_SPEC))
+        self.assertIn("Final GPT REPAIR authority", job.prompt)
+        self.assertIn("Current GPT_SPEC", job.prompt)
+        self.assertIn("Remaining mandatory Final GPT findings", job.prompt)
+        self.assertIn("Repair history", job.prompt)
+        state_store = self.store("repair-replan-limit")
+        state_store.save(state)
+        jobs = [item for item in list_browser_jobs(self.ctx) if item["stream"] == "repair-replan-limit"]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["task"], PLAN_SPEC)
+        note_browser_poll(self.ctx)
+        from agentbus.views import stream_view
+
+        view = stream_view(self.ctx, store, env=dict(os.environ))
+        self.assertEqual(view["attention_category"], "AUTO_WAIT")
+        self.assertFalse(view["needs_you"])
+        self.assertEqual(view["next_action"], PRODUCT_GPT)
+        self.assertEqual(view["next_detail"], "REPAIR_EPOCH_EXHAUSTED_REPLAN")
+
+        # The exact replacement authority starts epoch two. Its first repair
+        # is again an implementation action, not an immediate human stop.
+        apply_envelope(
+            store,
+            state,
+            self.spec_envelope(state, source_id="spec-second"),
+            repo=self.repo,
+            current_head=head,
+            allow_stale=True,
+        )
+        self.assertEqual(state["repair_replan_count"], 1)
+        self.assertEqual(state["repair_cycles"], 0)
+        first_repair = self.final_envelope(state, live, "REPAIR", source_id="final-second")
+        apply_envelope(store, state, first_repair, repo=self.repo, current_head=head)
+        self.assertEqual(state["repair_cycles"], 1)
+        self.assertEqual(derive_next_action(state, live=live).action, IMPL)
+
+        # A second exhaustion on the same bounded replan lineage is the real
+        # circuit breaker and may escalate to a human.
+        state["repair_cycles"] = state["max_repair_cycles"]
+        second_exhaustion = self.final_envelope(state, live, "REPAIR", source_id="final-second-exhausted")
+        apply_envelope(store, state, second_exhaustion, repo=self.repo, current_head=head)
         self.assertEqual(derive_next_action(state, live=live).action, HUMAN)
+        self.assertEqual(derive_next_action(state, live=live).reason, "REPAIR_REPLAN_LIMIT_EXHAUSTED")
+        store.save(state)
+        view = stream_view(self.ctx, store, env=dict(os.environ))
+        self.assertEqual(view["attention_category"], "NEEDS_YOU")
+
+    def test_exhausted_ambiguous_repair_and_explicit_final_human_escalate_immediately(self) -> None:
+        for suffix, marker in (("ambiguous", "SECURITY_AMBIGUITY"), ("explicit", "HUMAN")):
+            state, live, head = self.ready_state(f"repair-{suffix}")
+            state["repair_cycles"] = state["max_repair_cycles"]
+            envelope = self.final_envelope(state, live, "REPAIR", source_id=f"final-{suffix}")
+            envelope.fields["ACTIONABILITY"] = marker
+            envelope.raw = render_envelope(envelope)
+            state["envelopes"]["GPT_MERGE_REVIEW"] = envelope.as_record()
+            decision = derive_next_action(state, live=live)
+            self.assertEqual(decision.action, HUMAN)
 
     def _autonomous_fixture(self, stream: str, pr: int) -> tuple:
         self.create_stream(stream, "--pr", str(pr))

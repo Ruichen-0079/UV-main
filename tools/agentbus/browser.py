@@ -92,18 +92,43 @@ def _common(job: dict[str, Any]) -> str:
 def _product_prompt(job: dict[str, Any], state: dict[str, Any]) -> str:
     task = job["task"]
     if task == PLAN_SPEC:
-        replan = bool(job.get("replan_scope"))
+        replan = bool(job.get("replan_scope") or job.get("replan_reason"))
         replan_protocol = ""
         if replan:
-            replan_protocol = (
-                "This is a revision of the current blocked GPT_SPEC for the same stream and PR, "
-                "not a new campaign, unit, stream, or PR. Re-read the durable current GPT_REVIEW, "
-                "CODEX_REPORT VERDICT=BLOCKED, CODEX_AUDIT, exact HEAD, and current GitHub comments. "
-                "Issue a replacement bounded GPT_SPEC for the existing HEAD lineage and define the "
-                "smallest honest scope expansion needed to complete the approved goal. Do not mix the "
-                "separate Mem0 fail-closed HIGH finding into this repair; keep it as a separate focused "
-                "generation before FINAL_GATE.\n\n"
-            )
+            replan_protocol = [
+                "This is a revision of the current blocked GPT_SPEC for the same stream and PR, not a new campaign, unit, stream, or PR.",
+                "Re-read the exact current HEAD/base, current GPT_SPEC, GPT_REVIEW, CODEX_REPORT, CODEX_AUDIT, current GitHub comments, and all durable product constraints.",
+                "Issue the smallest bounded replacement GPT_SPEC for the existing HEAD lineage.",
+                "Do not silently combine independent Final GPT findings merely because they appeared in one review. Select one focused repair order and preserve every remaining mandatory finding as pending authority before FINAL_GATE.",
+            ]
+            if job.get("replan_reason") == "REPAIR_EPOCH_EXHAUSTED_REPLAN":
+                final = (state.get("envelopes") or {}).get("GPT_MERGE_REVIEW") or {}
+                spec = (state.get("envelopes") or {}).get("GPT_SPEC") or {}
+                final_fields = final.get("fields") if isinstance(final.get("fields"), dict) else {}
+                remaining_findings = final_fields.get("FINDINGS") or final.get("raw") or "(none recorded)"
+                replan_protocol.extend(
+                    [
+                        "The current repair epoch is exhausted. This Product GPT job is the bounded replan authority; it does not reset the budget merely because Codex committed or reported.",
+                        "Final GPT REPAIR authority (exact current):\n" + str(final.get("raw") or final),
+                        "Remaining mandatory Final GPT findings (preserve any not selected for this focused repair):\n"
+                        + str(remaining_findings),
+                        "Current GPT_SPEC:\n" + str(spec.get("raw") or spec),
+                        "Repair history and completed epoch diagnostics:\n"
+                        + json.dumps(
+                            {
+                                "repair_epoch": state.get("repair_epoch") or {},
+                                "repair_epochs": state.get("repair_epochs") or [],
+                                "repair_history": state.get("repair_history") or [],
+                                "repair_cycles": state.get("repair_cycles") or 0,
+                                "max_repair_cycles": state.get("max_repair_cycles") or 2,
+                            },
+                            sort_keys=True,
+                            indent=2,
+                        ),
+                        "The new spec must keep the Final GPT findings concrete, bounded, and separately traceable; do not turn an ambiguity into autonomous implementation authority.",
+                    ]
+                )
+            replan_protocol = "\n".join(replan_protocol) + "\n\n"
         protocol = (
             replan_protocol +
             "Produce the smallest actionable product specification using the existing durable protocol:\n"
@@ -117,6 +142,7 @@ def _product_prompt(job: dict[str, Any], state: dict[str, Any]) -> str:
             "SCOPE: <bounded scope>\n"
             "OUT_OF_SCOPE: <explicit exclusions>\n"
             "ACCEPTANCE_CRITERIA: <testable criteria>\n"
+            "PENDING_FINDINGS: <remaining mandatory Final GPT findings, or none>\n"
             "ARCHITECTURAL_CONSTRAINTS: <constraints>\n"
             "REQUIRED_VALIDATION: <commands/evidence>\n"
             "REVIEW_POLICY: GPT_REQUIRED | AUDIT_SUFFICIENT\n"
@@ -249,6 +275,7 @@ def job_for_state(
         "expected_head": unit_head(state) or (state.get("heads") or {}).get("current") or "UNKNOWN",
         "expected_base": live.get("baseRefOid") or "UNKNOWN",
         "replan_scope": bool(decision.evidence.get("scope_blocked")),
+        "replan_reason": decision.reason if decision.action == PRODUCT_GPT else "",
     }
     prompt = _product_prompt(values, state) if decision.action == PRODUCT_GPT else _final_prompt(values, state)
     return BrowserGPTJob(
