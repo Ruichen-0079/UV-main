@@ -214,6 +214,8 @@ export class DesktopSupervisor {
   private lifecycleSequence = 0;
   private readonly hooks: SupervisorHooks;
   private migrationDiagnostics: PostgresMigrationDiagnostics | undefined;
+  /** Transient scheduling fence only; never used as PostgreSQL ownership authority. */
+  private privatePostgresBootstrapTransition = false;
 
   constructor(
     private config: SupervisorConfig,
@@ -439,11 +441,17 @@ export class DesktopSupervisor {
   async bootstrap(): Promise<SupervisorSnapshot> {
     if (this.shuttingDown) return this.snapshot();
     if ((this.config.postgresMode ?? "external") === "private") {
-      await this.prepareAndStartPrivatePostgres();
+      this.privatePostgresBootstrapTransition = true;
+      try {
+        await this.prepareAndStartPrivatePostgres();
+        await this.runSchemaBootstrap();
+      } finally {
+        this.privatePostgresBootstrapTransition = false;
+      }
     } else {
       await this.refreshService("postgres");
+      await this.runSchemaBootstrap();
     }
-    await this.runSchemaBootstrap();
     await this.refreshService("ollama");
 
     if (this.config.autostartRuntime) {
@@ -491,6 +499,8 @@ export class DesktopSupervisor {
     const mem0 = this.services.get("mem0");
     if (mem0) this.lifecycleEvent("memory.refresh.queued", mem0);
     for (const id of this.services.keys()) {
+      // D2 consumes the fresh-launch composite proof before generic inspection resumes.
+      if (id === "postgres" && this.privatePostgresBootstrapTransition) continue;
       const svc = this.services.get(id);
       if (!svc) continue;
       await this.queue(svc, async () => {
