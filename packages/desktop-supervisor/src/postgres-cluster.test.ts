@@ -32,6 +32,7 @@ import {
   launcherProcessWasNeverCreated,
   POSTGRES_IDENTITY_DB_PROBE_SQL,
   POSTGRES_IDENTITY_DB_PROBE_TIMEOUT_MS,
+  evaluatePostgresCompositeOwnership,
   isPostgresIdentityStartTimePlausible,
   probePrivatePostgresIdentity,
   reconcileWindowsPrivatePostgresLaunch,
@@ -43,6 +44,8 @@ import {
 import { generatePostgresPassword, redactSecretText } from "./postgres-secret.js";
 import { CREATION_TIME_TOLERANCE_MS, expectedClusterName } from "./postgres-ownership.js";
 import type { PostgresDistribution } from "./postgres-distribution.js";
+import type { PostgresIdentityDbProbeResult } from "./postgres-cluster.js";
+import type { WindowsNativeProcessIdentityResult } from "./process-windows.js";
 import type { ProcessInspectionResult } from "./types.js";
 
 type SpawnSyncOverride = (
@@ -87,6 +90,62 @@ afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function compositeFixture() {
+  const layout = layoutFromRoot(fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-composite-")));
+  tempDirs.push(layout.root);
+  ensurePostgresDirectories(layout);
+  const marker = createClusterMarker(layout);
+  writeClusterMarker(layout, marker);
+  fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+  writeLocalOnlyConfig(layout, 55432);
+  const distribution: PostgresDistribution = {
+    home: "/opt/pg16",
+    binDir: "/opt/pg16/bin",
+    postgres: "/opt/pg16/bin/postgres",
+    pgCtl: "/opt/pg16/bin/pg_ctl",
+    initdb: "/opt/pg16/bin/initdb",
+    createdb: null,
+    psql: "/opt/pg16/bin/psql",
+    major: 16,
+    versionText: "postgres (PostgreSQL) 16.10"
+  };
+  const launchStartedAt = new Date("2026-08-17T00:00:00.000Z");
+  const startedAtUtc = new Date(launchStartedAt.getTime() + 100).toISOString();
+  const native: WindowsNativeProcessIdentityResult = {
+    status: "RESOLVED",
+    processId: 4242,
+    processIdMatches: true,
+    durationMs: 1,
+    executablePath: distribution.postgres,
+    startedAtUtc
+  };
+  const database: PostgresIdentityDbProbeResult = {
+    status: "RESOLVED",
+    durationMs: 1,
+    sqlState: null,
+    dataDirectory: layout.data,
+    clusterName: expectedClusterName(marker.clusterId),
+    port: 55432,
+    serverVersionNum: 160010,
+    postmasterStartTime: startedAtUtc,
+    dataDirectoryMatchesExpected: true,
+    clusterNameMatchesExpected: true,
+    portMatchesExpected: true,
+    majorMatches: true,
+    startTimePlausible: true
+  };
+  return {
+    layout,
+    marker,
+    distribution,
+    clusterId: marker.clusterId,
+    port: 55432,
+    launchStartedAt,
+    native,
+    database
+  };
+}
 
 describe("private postgres cluster safety", () => {
   it("runs the read-only authenticated identity probe with bounded postgres-client settings", async () => {
@@ -239,6 +298,75 @@ describe("private postgres cluster safety", () => {
       )
     ).toBe(false);
     delayedClock.mockRestore();
+  });
+
+  it("accepts fresh-launch ownership only when native and database identity are complete", () => {
+    const fixture = compositeFixture();
+    const accepted = evaluatePostgresCompositeOwnership({
+      ...fixture,
+      nominatedPid: 4242
+    });
+    expect(accepted.owned, accepted.reason).toBe(true);
+    expect(accepted.evidence).toMatchObject({
+      owned: true,
+      pid: 4242,
+      executable: fixture.distribution.postgres,
+      dataDirectory: fixture.layout.data,
+      clusterId: fixture.marker.clusterId,
+      port: 55432
+    });
+  });
+
+  it("fails closed for every native, database, timing, and security mismatch", () => {
+    const cases: Array<{
+      name: string;
+      native?: Partial<WindowsNativeProcessIdentityResult>;
+      database?: Partial<PostgresIdentityDbProbeResult>;
+      nominatedPid?: number;
+      mutate?: (fixture: ReturnType<typeof compositeFixture>) => void;
+    }> = [
+      { name: "native failure", native: { status: "ERROR" } },
+      { name: "database failure", database: { status: "QUERY_FAILED" } },
+      { name: "PID mismatch", nominatedPid: 4343 },
+      { name: "native PID evidence mismatch", native: { processIdMatches: false } },
+      { name: "executable mismatch", native: { executablePath: "/opt/other/postgres" } },
+      {
+        name: "native start outside launch window",
+        native: { startedAtUtc: "2026-08-16T23:59:50.000Z" }
+      },
+      { name: "database PGDATA mismatch", database: { dataDirectoryMatchesExpected: false } },
+      { name: "database cluster mismatch", database: { clusterNameMatchesExpected: false } },
+      { name: "database port mismatch", database: { portMatchesExpected: false } },
+      { name: "database major mismatch", database: { majorMatches: false } },
+      { name: "database start mismatch", database: { startTimePlausible: false } },
+      {
+        name: "native and database start correlation mismatch",
+        database: {
+          postmasterStartTime: "2026-08-17T00:00:03.000Z",
+          startTimePlausible: true
+        }
+      },
+      {
+        name: "security invariant mismatch",
+        mutate: ({ layout }) =>
+          fs.writeFileSync(
+            path.join(layout.data, "pg_hba.conf"),
+            "local all all scram-sha-256\nhost all all 0.0.0.0/0 scram-sha-256\n"
+          )
+      }
+    ];
+
+    for (const testCase of cases) {
+      const fixture = compositeFixture();
+      testCase.mutate?.(fixture);
+      const result = evaluatePostgresCompositeOwnership({
+        ...fixture,
+        nominatedPid: testCase.nominatedPid ?? 4242,
+        native: { ...fixture.native, ...testCase.native },
+        database: { ...fixture.database, ...testCase.database }
+      });
+      expect(result.owned, testCase.name).toBe(false);
+    }
   });
 
   it("applies the fixed launch window to the authenticated postmaster timestamp", async () => {

@@ -10,24 +10,26 @@ import type { ProcessInfo, ProcessInspectionResult, StartCommandSpec } from "./t
 
 export const DEFAULT_WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 2_500;
 export const MAX_WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 10_000;
-/** Diagnostic-only bound for the non-CIM PostgreSQL identity experiment. */
-export const NON_CIM_PROCESS_PROBE_TIMEOUT_MS = 4_000;
+/** Dedicated fresh-launch native identity bound; this is not generic inspection. */
+export const WINDOWS_NATIVE_PROCESS_IDENTITY_TIMEOUT_MS = 2_000;
+export const WINDOWS_NATIVE_PROCESS_IDENTITY_MAX_OUTPUT_CHARS = 4_096;
 
 export type ProcessInspectionOptions = {
   windowsQueryTimeoutMs?: number;
 };
 
-export type NonCimProcessProbeStatus =
+export type WindowsNativeProcessIdentityStatus =
   | "RESOLVED"
   | "NOT_RUNNING"
   | "TIMEOUT"
   | "EXIT_NONZERO"
   | "EMPTY_OUTPUT"
   | "PARSE_FAILED"
+  | "OVERSIZE_OUTPUT"
   | "ERROR";
 
-export type NonCimProcessProbeResult = {
-  status: NonCimProcessProbeStatus;
+export type WindowsNativeProcessIdentityResult = {
+  status: WindowsNativeProcessIdentityStatus;
   processId: number;
   processIdMatches: boolean | null;
   durationMs: number;
@@ -115,9 +117,10 @@ $obj | ConvertTo-Json -Compress
   });
 }
 
-type NonCimProcessQueryResult = {
+type WindowsNativeProcessIdentityChildResult = {
   status: number | null;
   stdout?: string | null | undefined;
+  stderr?: string | null | undefined;
   signal?: NodeJS.Signals | string | null | undefined;
   error?: NodeJS.ErrnoException | null | undefined;
 };
@@ -126,16 +129,39 @@ function boundedProbeDurationMs(value: number): number {
   return Number.isFinite(value) ? Math.min(Math.max(Math.round(value), 0), 60_000) : 0;
 }
 
-function classifyNonCimProcessProbeResult(
+function classifyWindowsNativeProcessIdentityResult(
   processId: number,
   durationMs: number,
-  result: NonCimProcessQueryResult
-): NonCimProcessProbeResult {
+  result: WindowsNativeProcessIdentityChildResult
+): WindowsNativeProcessIdentityResult {
   const duration = boundedProbeDurationMs(durationMs);
   const errorCode = result.error?.code ? String(result.error.code) : "";
   if (errorCode === "ETIMEDOUT" || (result.signal === "SIGTERM" && result.status === null)) {
     return {
       status: "TIMEOUT",
+      processId,
+      processIdMatches: null,
+      durationMs: duration,
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+  if (
+    (result.stdout?.length ?? 0) > WINDOWS_NATIVE_PROCESS_IDENTITY_MAX_OUTPUT_CHARS ||
+    (result.stderr?.length ?? 0) > WINDOWS_NATIVE_PROCESS_IDENTITY_MAX_OUTPUT_CHARS
+  ) {
+    return {
+      status: "OVERSIZE_OUTPUT",
+      processId,
+      processIdMatches: null,
+      durationMs: duration,
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+  if (result.stderr?.trim()) {
+    return {
+      status: "PARSE_FAILED",
       processId,
       processIdMatches: null,
       durationMs: duration,
@@ -164,14 +190,34 @@ function classifyNonCimProcessProbeResult(
     };
   }
   try {
-    const parsed = JSON.parse(result.stdout.trim()) as {
-      processId?: unknown;
-      executablePath?: unknown;
-      startedAtUtc?: unknown;
-    };
-    const parsedProcessId = parsed.processId;
-    const executablePath = parsed.executablePath;
-    const startedAtUtc = parsed.startedAtUtc;
+    const parsed = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
+    const keys = Object.keys(parsed).sort();
+    if (
+      keys.join(",") !==
+      ["executablePath", "processId", "protocol", "startedAtUtc", "status"].join(",")
+    ) {
+      return {
+        status: "PARSE_FAILED",
+        processId,
+        processIdMatches: null,
+        durationMs: duration,
+        executablePath: null,
+        startedAtUtc: null
+      };
+    }
+    if (parsed["protocol"] !== 1 || parsed["status"] !== "RESOLVED") {
+      return {
+        status: "PARSE_FAILED",
+        processId,
+        processIdMatches: null,
+        durationMs: duration,
+        executablePath: null,
+        startedAtUtc: null
+      };
+    }
+    const parsedProcessId = parsed["processId"];
+    const executablePath = parsed["executablePath"];
+    const startedAtUtc = parsed["startedAtUtc"];
     if (
       typeof parsedProcessId !== "number" ||
       !Number.isInteger(parsedProcessId) ||
@@ -179,10 +225,14 @@ function classifyNonCimProcessProbeResult(
       typeof executablePath !== "string" ||
       executablePath.length === 0 ||
       executablePath.length > 1_024 ||
+      executablePath !== executablePath.trim() ||
+      (!path.isAbsolute(executablePath) && !path.win32.isAbsolute(executablePath)) ||
       typeof startedAtUtc !== "string" ||
       startedAtUtc.length === 0 ||
       startedAtUtc.length > 128 ||
-      !Number.isFinite(Date.parse(startedAtUtc))
+      !startedAtUtc.endsWith("Z") ||
+      !Number.isFinite(Date.parse(startedAtUtc)) ||
+      new Date(startedAtUtc).toISOString() !== startedAtUtc
     ) {
       return {
         status: "PARSE_FAILED",
@@ -214,10 +264,14 @@ function classifyNonCimProcessProbeResult(
 }
 
 /**
- * Diagnostic-only Windows identity experiment. This deliberately does not
- * use CIM/WMI and never participates in ownership or lifecycle decisions.
+ * Query one nominated Windows process through the packaged read-only native
+ * helper. This is intentionally separate from generic inspectProcess(): it is
+ * only suitable for the dedicated private-PostgreSQL fresh-launch theorem.
  */
-export function inspectWindowsProcessWithoutCim(processId: number): NonCimProcessProbeResult {
+export function inspectWindowsProcessIdentity(
+  processId: number,
+  helperPath: string
+): WindowsNativeProcessIdentityResult {
   const started = Date.now();
   if (!Number.isInteger(processId) || processId <= 0) {
     return {
@@ -225,16 +279,6 @@ export function inspectWindowsProcessWithoutCim(processId: number): NonCimProces
       processId,
       processIdMatches: null,
       durationMs: 0,
-      executablePath: null,
-      startedAtUtc: null
-    };
-  }
-  if (!isProcessAlive(processId)) {
-    return {
-      status: "NOT_RUNNING",
-      processId,
-      processIdMatches: null,
-      durationMs: boundedProbeDurationMs(Date.now() - started),
       executablePath: null,
       startedAtUtc: null
     };
@@ -249,40 +293,26 @@ export function inspectWindowsProcessWithoutCim(processId: number): NonCimProces
       startedAtUtc: null
     };
   }
-
-  const script = `
-try {
-  $p = [System.Diagnostics.Process]::GetProcessById(${processId})
-  $obj = [ordered]@{
-    processId = [int]$p.Id
-    executablePath = [string]$p.MainModule.FileName
-    startedAtUtc = $p.StartTime.ToUniversalTime().ToString('o')
+  if (!helperPath || (!path.isAbsolute(helperPath) && !path.win32.isAbsolute(helperPath))) {
+    return {
+      status: "ERROR",
+      processId,
+      processIdMatches: null,
+      durationMs: boundedProbeDurationMs(Date.now() - started),
+      executablePath: null,
+      startedAtUtc: null
+    };
   }
-  $obj | ConvertTo-Json -Compress
-} catch {
-  exit 5
-}
-`;
-  let result: NonCimProcessQueryResult;
+  let result: WindowsNativeProcessIdentityChildResult;
   try {
-    result = spawnSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-WindowStyle",
-        "Hidden",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        script
-      ],
-      {
-        encoding: "utf8",
-        windowsHide: true,
-        timeout: NON_CIM_PROCESS_PROBE_TIMEOUT_MS
-      }
-    );
+    result = spawnSync(helperPath, [String(processId)], {
+      encoding: "utf8",
+      windowsHide: true,
+      shell: false,
+      timeout: WINDOWS_NATIVE_PROCESS_IDENTITY_TIMEOUT_MS,
+      maxBuffer: WINDOWS_NATIVE_PROCESS_IDENTITY_MAX_OUTPUT_CHARS,
+      env: {}
+    });
   } catch {
     return {
       status: "ERROR",
@@ -293,7 +323,7 @@ try {
       startedAtUtc: null
     };
   }
-  return classifyNonCimProcessProbeResult(processId, Date.now() - started, result);
+  return classifyWindowsNativeProcessIdentityResult(processId, Date.now() - started, result);
 }
 
 function inspectPosixProcess(processId: number): ProcessInspectionResult {

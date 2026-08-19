@@ -31,13 +31,19 @@ import {
 import { redactSecretText } from "./postgres-secret.js";
 import {
   CREATION_TIME_TOLERANCE_MS,
+  creationTimesMatch,
   evaluatePostgresOwnership,
   expectedClusterName,
+  processStartedDuringLaunch,
   postgresOwnershipDiagnosticReason,
   readPostmasterPid,
   type PostgresOwnershipDiagnosticReason,
   type PostgresOwnershipEvidence
 } from "./postgres-ownership.js";
+import type {
+  WindowsNativeProcessIdentityResult,
+  WindowsNativeProcessIdentityStatus
+} from "./process-windows.js";
 import type { ProcessInspectionResult } from "./types.js";
 
 export const INITDB_REASON_MAX_CHARS = 180;
@@ -48,8 +54,6 @@ export const PG_CTL_LAUNCH_TIMEOUT_MS = (PG_CTL_START_WAIT_SECONDS + 10) * 1000;
 export const PG_CTL_OUTPUT_MAX_CHARS = 2048;
 /** Small, secret-safe tails surfaced through the lifecycle diagnostic only. */
 export const PG_CTL_DIAGNOSTIC_OUTPUT_MAX_CHARS = 512;
-/** Startup-only identity budget for the private PostgreSQL launch path. */
-export const POSTGRES_LAUNCH_PROCESS_QUERY_TIMEOUT_MS = 10_000;
 export const POSTMASTER_SETTLE_WINDOW_MS = 1_500;
 export const POSTMASTER_SETTLE_INTERVAL_MS = 50;
 export const DUPLICATE_DATABASE_SQLSTATE = "42P04";
@@ -409,6 +413,34 @@ export type PostgresLaunchDiagnostic =
       processId: number;
     }
   | {
+      phase: "NATIVE_PROCESS_IDENTITY";
+      status: WindowsNativeProcessIdentityStatus;
+      processId: number;
+      processIdMatches: boolean | null;
+      durationMs: number;
+      helperPath: string;
+      executablePath: string | null;
+      startedAtUtc: string | null;
+      executableMatches: boolean | null;
+      startTimePlausible: boolean | null;
+    }
+  | {
+      phase: "DATABASE_IDENTITY";
+      status: PostgresIdentityDbProbeResult["status"];
+      durationMs: number;
+      sqlState: string | null;
+      dataDirectory: string | null;
+      clusterName: string | null;
+      port: number | null;
+      serverVersionNum: number | null;
+      postmasterStartTime: string | null;
+      dataDirectoryMatches: boolean | null;
+      clusterNameMatches: boolean | null;
+      portMatches: boolean | null;
+      majorMatches: boolean | null;
+      startTimePlausible: boolean | null;
+    }
+  | {
       phase: "OWNERSHIP";
       status: "NOT_RUN" | "ACCEPTED" | "REJECTED" | "UNCERTAIN";
       reason: PostgresOwnershipDiagnosticReason;
@@ -732,6 +764,153 @@ export function reconcileWindowsPrivatePostgresLaunch(input: {
   };
 }
 
+export async function reconcileWindowsPrivatePostgresLaunchWithCompositeIdentity(input: {
+  layout: PostgresLayout;
+  distribution: PostgresDistribution;
+  port: number;
+  clusterId: string;
+  identityHelperPath: string;
+  identityProcessProbe: (
+    processId: number,
+    helperPath: string
+  ) => WindowsNativeProcessIdentityResult;
+  identityDatabaseProbe: typeof probePrivatePostgresIdentity;
+  identityPassword: string | null;
+  launchStartedAt: Date;
+  readPid?: (dataDirectory: string) => number | null;
+  diagnosticSink?: PostgresLaunchDiagnosticSink;
+  diagnosticSource?: "immediate" | "delayed-settle";
+}): Promise<WindowsLaunchReconciliation> {
+  const readPid = input.readPid ?? readPostmasterPid;
+  const pid = readPid(input.layout.data);
+  reportPostgresLaunchDiagnostic(input.diagnosticSink, {
+    phase: "POSTMASTER_PID",
+    status: pid == null ? "MISSING" : "PRESENT",
+    postmasterPid: pid,
+    source: input.diagnosticSource ?? "immediate"
+  });
+  if (pid == null) return { disposition: "missing" };
+
+  let native: WindowsNativeProcessIdentityResult;
+  try {
+    const candidate = input.identityProcessProbe(pid, input.identityHelperPath);
+    native =
+      candidate && typeof candidate === "object" && typeof candidate.status === "string"
+        ? candidate
+        : {
+            status: "ERROR",
+            processId: pid,
+            processIdMatches: null,
+            durationMs: 0,
+            executablePath: null,
+            startedAtUtc: null
+          };
+  } catch {
+    native = {
+      status: "ERROR",
+      processId: pid,
+      processIdMatches: null,
+      durationMs: 0,
+      executablePath: null,
+      startedAtUtc: null
+    };
+  }
+  const executableMatches =
+    native.status === "RESOLVED" && native.executablePath
+      ? pathsEqual(native.executablePath, input.distribution.postgres)
+      : null;
+  const startTimePlausible =
+    native.status === "RESOLVED" && native.startedAtUtc
+      ? isPostgresIdentityStartTimePlausible(native.startedAtUtc, input.launchStartedAt)
+      : null;
+  reportPostgresLaunchDiagnostic(input.diagnosticSink, {
+    phase: "NATIVE_PROCESS_IDENTITY",
+    status: native.status,
+    processId: native.processId,
+    processIdMatches: native.processIdMatches,
+    durationMs: native.durationMs,
+    helperPath: input.identityHelperPath,
+    executablePath: native.executablePath,
+    startedAtUtc: native.startedAtUtc,
+    executableMatches,
+    startTimePlausible
+  });
+
+  let database: PostgresIdentityDbProbeResult;
+  if (!input.identityPassword) {
+    database = identityProbeFailure("PASSWORD_UNAVAILABLE", 0);
+  } else {
+    try {
+      const candidate = await input.identityDatabaseProbe({
+        layout: input.layout,
+        distribution: input.distribution,
+        port: input.port,
+        password: input.identityPassword,
+        clusterId: input.clusterId,
+        launchStartedAt: input.launchStartedAt
+      });
+      database =
+        candidate && typeof candidate === "object" && typeof candidate.status === "string"
+          ? candidate
+          : identityProbeFailure("PARSE_FAILED", 0);
+    } catch {
+      database = identityProbeFailure("QUERY_FAILED", 0);
+    }
+  }
+  reportPostgresLaunchDiagnostic(input.diagnosticSink, {
+    phase: "DATABASE_IDENTITY",
+    status: database.status,
+    durationMs: database.durationMs,
+    sqlState: database.sqlState,
+    dataDirectory: database.dataDirectory,
+    clusterName: database.clusterName,
+    port: database.port,
+    serverVersionNum: database.serverVersionNum,
+    postmasterStartTime: database.postmasterStartTime,
+    dataDirectoryMatches: database.dataDirectoryMatchesExpected,
+    clusterNameMatches: database.clusterNameMatchesExpected,
+    portMatches: database.portMatchesExpected,
+    majorMatches: database.majorMatches,
+    startTimePlausible: database.startTimePlausible
+  });
+
+  const proof = evaluatePostgresCompositeOwnership({
+    layout: input.layout,
+    distribution: input.distribution,
+    port: input.port,
+    clusterId: input.clusterId,
+    nominatedPid: pid,
+    launchStartedAt: input.launchStartedAt,
+    native,
+    database
+  });
+  reportPostgresLaunchDiagnostic(input.diagnosticSink, {
+    phase: "OWNERSHIP",
+    status: proof.owned
+      ? "ACCEPTED"
+      : native.status === "RESOLVED" && database.status === "RESOLVED"
+        ? "REJECTED"
+        : "UNCERTAIN",
+    reason: proof.owned ? "NONE" : postgresOwnershipDiagnosticReason(proof.reason),
+    postmasterPid: pid
+  });
+  if (proof.owned) {
+    return {
+      disposition: "owned",
+      pid,
+      processStartedAtUtc:
+        proof.evidence.processStartedAtUtc ?? input.launchStartedAt.toISOString(),
+      evidence: proof.evidence
+    };
+  }
+  return {
+    disposition: "uncertain",
+    code: "POSTGRES_START_IDENTITY_UNCERTAIN",
+    message: proof.reason,
+    nominatedPid: pid
+  };
+}
+
 export async function waitForPostmasterCandidate(input: {
   dataDirectory: string;
   timeoutMs?: number;
@@ -805,6 +984,14 @@ export async function launchWindowsPrivatePostgres(input: {
   readPid?: (dataDirectory: string) => number | null;
   diagnosticSecrets?: readonly string[];
   diagnosticSink?: PostgresLaunchDiagnosticSink;
+  identityHelperPath?: string;
+  identityProcessProbe?: (
+    processId: number,
+    helperPath: string
+  ) => WindowsNativeProcessIdentityResult;
+  identityDatabaseProbe?: typeof probePrivatePostgresIdentity;
+  identityPassword?: string | null;
+  identityPasswordResolver?: () => string | null;
 }): Promise<WindowsPrivatePostgresLaunchResult> {
   const launchStartedAt = (input.now ?? (() => new Date()))();
   const launcher = await invokeWindowsPgCtlStart(input);
@@ -826,7 +1013,44 @@ export async function launchWindowsPrivatePostgres(input: {
     diagnosticSource: "immediate" as const,
     ...(input.readPid ? { readPid: input.readPid } : {})
   };
-  let reconciled = reconcileWindowsPrivatePostgresLaunch(reconcileInput);
+  const useCompositeIdentity = Boolean(
+    input.identityHelperPath && input.identityProcessProbe && input.identityDatabaseProbe
+  );
+  let identityPassword = input.identityPassword ?? null;
+  if (
+    useCompositeIdentity &&
+    !launcherProcessWasNeverCreated(launcher) &&
+    input.identityPasswordResolver
+  ) {
+    try {
+      identityPassword = input.identityPasswordResolver();
+    } catch {
+      identityPassword = null;
+    }
+  }
+  const reconcile = (source: "immediate" | "delayed-settle") =>
+    useCompositeIdentity && !launcherProcessWasNeverCreated(launcher)
+      ? reconcileWindowsPrivatePostgresLaunchWithCompositeIdentity({
+          layout: input.layout,
+          distribution: input.distribution,
+          port: input.port,
+          clusterId: input.clusterId,
+          identityHelperPath: input.identityHelperPath!,
+          identityProcessProbe: input.identityProcessProbe!,
+          identityDatabaseProbe: input.identityDatabaseProbe!,
+          identityPassword,
+          launchStartedAt,
+          ...(input.diagnosticSink ? { diagnosticSink: input.diagnosticSink } : {}),
+          diagnosticSource: source,
+          ...(input.readPid ? { readPid: input.readPid } : {})
+        })
+      : Promise.resolve(
+          reconcileWindowsPrivatePostgresLaunch({
+            ...reconcileInput,
+            diagnosticSource: source
+          })
+        );
+  let reconciled = await reconcile("immediate");
   if (reconciled.disposition === "missing" && !launcherProcessWasNeverCreated(launcher)) {
     await waitForPostmasterCandidate({
       dataDirectory: input.layout.data,
@@ -836,10 +1060,7 @@ export async function launchWindowsPrivatePostgres(input: {
       ...(input.nowMs ? { now: input.nowMs } : {}),
       ...(input.readPid ? { readPid: input.readPid } : {})
     });
-    reconciled = reconcileWindowsPrivatePostgresLaunch({
-      ...reconcileInput,
-      diagnosticSource: "delayed-settle"
-    });
+    reconciled = await reconcile("delayed-settle");
   }
   if (reconciled.disposition === "owned") {
     if (launcher.ok) {
@@ -1201,6 +1422,185 @@ export async function probePrivatePostgresIdentity(input: {
   } catch {
     return identityProbeFailure("QUERY_FAILED", Date.now() - started);
   }
+}
+
+function readTextIfRegularFile(file: string): string | null {
+  try {
+    if (!fs.statSync(file).isFile()) return null;
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-check the immutable private-cluster safety contract at fresh-launch
+ * ownership time. These checks are deliberately local and do not infer
+ * ownership from reachability or pg_ctl success.
+ */
+export function privatePostgresSecurityInvariantsHold(
+  layout: PostgresLayout,
+  port: number
+): boolean {
+  const mainConfig = readTextIfRegularFile(path.join(layout.data, "postgresql.conf"));
+  const yuviConfig = readTextIfRegularFile(path.join(layout.data, "postgresql.yuvi.conf"));
+  const hba = readTextIfRegularFile(path.join(layout.data, "pg_hba.conf"));
+  if (!mainConfig || !yuviConfig || !hba) return false;
+  if (!/\binclude\s*=\s*['"]?postgresql\.yuvi\.conf['"]?/iu.test(mainConfig)) return false;
+  if (!/^\s*listen_addresses\s*=\s*['"]?127\.0\.0\.1['"]?\s*$/imu.test(yuviConfig)) {
+    return false;
+  }
+  if (!new RegExp(`^\\s*port\\s*=\\s*${port}\\s*$`, "imu").test(yuviConfig)) return false;
+  if (!/^\s*password_encryption\s*=\s*['"]?scram-sha-256['"]?\s*$/imu.test(yuviConfig)) {
+    return false;
+  }
+  const activeHbaEntries = hba
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*#/u.test(line))
+    .map((line) => line.trim().replace(/\s+/gu, " "))
+    .filter(Boolean);
+  if (activeHbaEntries.some((line) => /\btrust\b/iu.test(line))) return false;
+  return (
+    activeHbaEntries.length === 3 &&
+    activeHbaEntries.includes("local all all scram-sha-256") &&
+    activeHbaEntries.includes("host all all 127.0.0.1/32 scram-sha-256") &&
+    activeHbaEntries.includes("host all all ::1/128 reject")
+  );
+}
+
+export type PostgresCompositeOwnershipResult = {
+  owned: boolean;
+  reason: string;
+  evidence: PostgresOwnershipEvidence;
+};
+
+function compositeOwnershipFailure(reason: string): PostgresCompositeOwnershipResult {
+  return {
+    owned: false,
+    reason,
+    evidence: {
+      owned: false,
+      reason,
+      pid: null,
+      executable: null,
+      dataDirectory: null,
+      clusterId: null,
+      clusterName: null,
+      port: null,
+      processStartedAtUtc: null
+    }
+  };
+}
+
+/**
+ * Fresh-launch ownership theorem: native nominated-PID identity and the
+ * authenticated read-only PostgreSQL identity must both match every existing
+ * private-cluster invariant. No single signal is authoritative.
+ */
+export function evaluatePostgresCompositeOwnership(input: {
+  layout: PostgresLayout;
+  distribution: PostgresDistribution;
+  port: number;
+  clusterId: string;
+  nominatedPid: number;
+  launchStartedAt: Date;
+  native: WindowsNativeProcessIdentityResult;
+  database: PostgresIdentityDbProbeResult;
+}): PostgresCompositeOwnershipResult {
+  let marker: YuviClusterMarker | null;
+  try {
+    assertPgdataContained(input.layout);
+    marker = readClusterMarker(input.layout);
+  } catch {
+    return compositeOwnershipFailure("PGDATA containment invariant is not satisfied");
+  }
+  if (!marker) return compositeOwnershipFailure("YUVI cluster marker is missing");
+  if (marker.postgresMajor !== PRIVATE_POSTGRES_MAJOR) {
+    return compositeOwnershipFailure("cluster marker major is not 16");
+  }
+  if (readPgVersion(input.layout) !== PRIVATE_POSTGRES_MAJOR) {
+    return compositeOwnershipFailure("PG_VERSION is not 16");
+  }
+  if (!pathsEqual(marker.dataDirectory, input.layout.data)) {
+    return compositeOwnershipFailure("cluster marker PGDATA does not match layout");
+  }
+  if (!privatePostgresSecurityInvariantsHold(input.layout, input.port)) {
+    return compositeOwnershipFailure(
+      "private PostgreSQL localhost/SCRAM invariants are not satisfied"
+    );
+  }
+
+  if (input.native.status !== "RESOLVED") {
+    return compositeOwnershipFailure(`process is not inspectable (native ${input.native.status})`);
+  }
+  if (input.native.processId !== input.nominatedPid || !input.native.processIdMatches) {
+    return compositeOwnershipFailure("inspected process is not the nominated postmaster PID");
+  }
+  if (
+    !input.native.executablePath ||
+    !pathsEqual(input.native.executablePath, input.distribution.postgres)
+  ) {
+    return compositeOwnershipFailure(
+      "executable is not the selected PostgreSQL 16 postgres binary"
+    );
+  }
+  if (
+    !input.native.startedAtUtc ||
+    !processStartedDuringLaunch(
+      input.native.startedAtUtc,
+      input.launchStartedAt,
+      PG_CTL_START_WAIT_SECONDS * 1_000,
+      CREATION_TIME_TOLERANCE_MS
+    )
+  ) {
+    return compositeOwnershipFailure("process start time is not plausible for this launch");
+  }
+
+  const expectedName = expectedClusterName(input.clusterId);
+  if (
+    input.database.status !== "RESOLVED" ||
+    !input.database.dataDirectory ||
+    !pathsEqual(input.database.dataDirectory, input.layout.data) ||
+    input.database.clusterName !== expectedName ||
+    input.database.port !== input.port ||
+    input.database.serverVersionNum == null ||
+    Math.floor(input.database.serverVersionNum / 10_000) !== PRIVATE_POSTGRES_MAJOR ||
+    !input.database.postmasterStartTime ||
+    !isPostgresIdentityStartTimePlausible(
+      input.database.postmasterStartTime,
+      input.launchStartedAt
+    ) ||
+    input.database.dataDirectoryMatchesExpected !== true ||
+    input.database.clusterNameMatchesExpected !== true ||
+    input.database.portMatchesExpected !== true ||
+    input.database.majorMatches !== true ||
+    input.database.startTimePlausible !== true
+  ) {
+    return compositeOwnershipFailure(
+      "authenticated PostgreSQL identity does not match the private cluster"
+    );
+  }
+  if (!creationTimesMatch(input.native.startedAtUtc, input.database.postmasterStartTime)) {
+    return compositeOwnershipFailure(
+      "native process and PostgreSQL postmaster start times do not correlate"
+    );
+  }
+
+  return {
+    owned: true,
+    reason: "strong private PostgreSQL native and authenticated ownership",
+    evidence: {
+      owned: true,
+      reason: "strong private PostgreSQL native and authenticated ownership",
+      pid: input.nominatedPid,
+      executable: canonicalPath(input.distribution.postgres),
+      dataDirectory: canonicalPath(input.layout.data),
+      clusterId: marker.clusterId,
+      clusterName: expectedName,
+      port: input.port,
+      processStartedAtUtc: input.native.startedAtUtc
+    }
+  };
 }
 
 function pingMatchesCluster(output: string, clusterId: string): boolean {

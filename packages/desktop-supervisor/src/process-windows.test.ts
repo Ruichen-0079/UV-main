@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyProcessQueryResult,
-  inspectWindowsProcessWithoutCim,
+  inspectWindowsProcessIdentity,
   isProcessAlive,
-  NON_CIM_PROCESS_PROBE_TIMEOUT_MS
+  WINDOWS_NATIVE_PROCESS_IDENTITY_MAX_OUTPUT_CHARS,
+  WINDOWS_NATIVE_PROCESS_IDENTITY_TIMEOUT_MS
 } from "./process-windows.js";
 
 type SpawnSyncCapture = {
@@ -30,7 +31,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   return {
     ...actual,
     spawnSync: ((command: string, args?: readonly string[], options?: Record<string, unknown>) => {
-      if (command !== "powershell.exe") {
+      if (command !== "powershell.exe" && !String(command).endsWith("yuvi-process-identity.exe")) {
         return actual.spawnSync(command, args as string[] | undefined, options);
       }
       processQueryState.calls.push({ command, args: args ?? [], options });
@@ -60,8 +61,10 @@ function resolvedWindowsProcessOutput(processId: number): string {
   });
 }
 
-function resolvedNonCimProcessOutput(processId: number): string {
+function resolvedNativeProcessOutput(processId: number): string {
   return JSON.stringify({
+    protocol: 1,
+    status: "RESOLVED",
     processId,
     executablePath: "C:\\YUVI\\Postgres\\bin\\postgres.exe",
     startedAtUtc: "2026-08-06T00:00:00.000Z"
@@ -74,15 +77,17 @@ afterEach(() => {
 });
 
 describe("Windows process inspection result classification", () => {
-  it("runs the bounded non-CIM .NET identity experiment without command-line data", async () => {
+  it("runs the bounded native identity helper with no secret-bearing execution data", () => {
     processQueryState.result = {
       status: 0,
       signal: null,
-      stdout: resolvedNonCimProcessOutput(process.pid),
+      stdout: resolvedNativeProcessOutput(process.pid),
       stderr: ""
     };
 
-    const result = withWindowsPlatform(() => inspectWindowsProcessWithoutCim(process.pid));
+    const result = withWindowsPlatform(() =>
+      inspectWindowsProcessIdentity(process.pid, "C:\\YUVI\\native\\yuvi-process-identity.exe")
+    );
 
     expect(result).toMatchObject({
       status: "RESOLVED",
@@ -93,15 +98,16 @@ describe("Windows process inspection result classification", () => {
     });
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
     expect(processQueryState.calls).toHaveLength(1);
-    expect(processQueryState.calls[0]?.options?.["timeout"]).toBe(NON_CIM_PROCESS_PROBE_TIMEOUT_MS);
-    const script = String(processQueryState.calls[0]?.args.at(-1));
-    expect(script).toContain("[System.Diagnostics.Process]::GetProcessById");
-    expect(script).not.toContain("Get-CimInstance");
-    expect(script).not.toContain("Win32_Process");
-    expect(script).not.toContain("CommandLine");
+    const call = processQueryState.calls[0];
+    expect(call?.command).toBe("C:\\YUVI\\native\\yuvi-process-identity.exe");
+    expect(call?.args).toEqual([String(process.pid)]);
+    expect(call?.options?.["shell"]).toBe(false);
+    expect(call?.options?.["timeout"]).toBe(WINDOWS_NATIVE_PROCESS_IDENTITY_TIMEOUT_MS);
+    expect(call?.options?.["maxBuffer"]).toBe(WINDOWS_NATIVE_PROCESS_IDENTITY_MAX_OUTPUT_CHARS);
+    expect(call?.options?.["env"]).toEqual({});
   });
 
-  it("classifies non-CIM timeout, process failure, empty output, and malformed output safely", async () => {
+  it("classifies native timeout, process failure, empty, malformed, and oversize output safely", () => {
     const cases = [
       [
         {
@@ -115,17 +121,82 @@ describe("Windows process inspection result classification", () => {
       ],
       [{ status: 5, signal: null, stdout: "", stderr: "" }, "EXIT_NONZERO"],
       [{ status: 0, signal: null, stdout: "", stderr: "" }, "EMPTY_OUTPUT"],
-      [{ status: 0, signal: null, stdout: "not-json", stderr: "" }, "PARSE_FAILED"]
+      [{ status: 0, signal: null, stdout: "not-json", stderr: "" }, "PARSE_FAILED"],
+      [
+        {
+          status: 0,
+          signal: null,
+          stdout: resolvedNativeProcessOutput(process.pid),
+          stderr: "unexpected diagnostic"
+        },
+        "PARSE_FAILED"
+      ],
+      [
+        {
+          status: 0,
+          signal: null,
+          stdout: "x".repeat(WINDOWS_NATIVE_PROCESS_IDENTITY_MAX_OUTPUT_CHARS + 1),
+          stderr: ""
+        },
+        "OVERSIZE_OUTPUT"
+      ]
     ] as const;
     for (const [result, status] of cases) {
       processQueryState.result = result;
-      expect(withWindowsPlatform(() => inspectWindowsProcessWithoutCim(process.pid))).toMatchObject(
-        {
-          status,
-          processId: process.pid
-        }
-      );
+      expect(
+        withWindowsPlatform(() =>
+          inspectWindowsProcessIdentity(process.pid, "C:\\YUVI\\native\\yuvi-process-identity.exe")
+        )
+      ).toMatchObject({ status, processId: process.pid });
     }
+  });
+
+  it("rejects helper records with extra fields, non-UTC time, or a wrong PID", () => {
+    processQueryState.result = {
+      status: 0,
+      signal: null,
+      stdout: JSON.stringify({
+        protocol: 1,
+        status: "RESOLVED",
+        processId: process.pid + 1,
+        executablePath: "C:\\YUVI\\Postgres\\bin\\postgres.exe",
+        startedAtUtc: "2026-08-06T00:00:00.000Z",
+        commandLine: "secret"
+      }),
+      stderr: ""
+    };
+    const extra = withWindowsPlatform(() =>
+      inspectWindowsProcessIdentity(process.pid, "C:\\YUVI\\native\\yuvi-process-identity.exe")
+    );
+    expect(extra.status).toBe("PARSE_FAILED");
+
+    processQueryState.result = {
+      status: 0,
+      signal: null,
+      stdout: JSON.stringify({
+        protocol: 1,
+        status: "RESOLVED",
+        processId: process.pid + 1,
+        executablePath: "C:\\YUVI\\Postgres\\bin\\postgres.exe",
+        startedAtUtc: "2026-08-06T00:00:00.000+00:00"
+      }),
+      stderr: ""
+    };
+    const wrongTime = withWindowsPlatform(() =>
+      inspectWindowsProcessIdentity(process.pid, "C:\\YUVI\\native\\yuvi-process-identity.exe")
+    );
+    expect(wrongTime.status).toBe("PARSE_FAILED");
+
+    processQueryState.result = {
+      status: 0,
+      signal: null,
+      stdout: resolvedNativeProcessOutput(process.pid + 1),
+      stderr: ""
+    };
+    const wrongPid = withWindowsPlatform(() =>
+      inspectWindowsProcessIdentity(process.pid, "C:\\YUVI\\native\\yuvi-process-identity.exe")
+    );
+    expect(wrongPid).toMatchObject({ status: "RESOLVED", processIdMatches: false });
   });
 
   it("uses the bounded 2500 ms default for generic Windows inspection", async () => {
@@ -141,6 +212,8 @@ describe("Windows process inspection result classification", () => {
 
     expect(result.status).toBe("resolved");
     expect(processQueryState.calls).toHaveLength(1);
+    expect(processQueryState.calls[0]?.command).toBe("powershell.exe");
+    expect(processQueryState.calls[0]?.command).not.toContain("yuvi-process-identity.exe");
     expect(processQueryState.calls[0]?.options?.["timeout"]).toBe(2_500);
   });
 

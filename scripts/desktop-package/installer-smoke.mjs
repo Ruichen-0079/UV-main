@@ -737,8 +737,9 @@ export function validateInstalledResources(resourceRoot) {
   const runtime = path.join(resourceRoot, "runtime");
   const supervisor = path.join(resourceRoot, "supervisor");
   const mem0 = path.join(resourceRoot, "mem0");
+  const native = path.join(resourceRoot, "native");
   const infoPath = path.join(resourceRoot, "packaging-info.json");
-  for (const required of [runtime, supervisor, mem0, infoPath])
+  for (const required of [runtime, supervisor, mem0, native, infoPath])
     if (!fs.existsSync(required)) fail(`installed resource missing: ${required}`);
   const info = validatePackagingInfo(readJson(infoPath));
   const supervisorBuildInfoPath = path.join(resourceRoot, info.supervisorBuildInfo);
@@ -755,6 +756,19 @@ export function validateInstalledResources(resourceRoot) {
   ])
     if (!fs.existsSync(required)) fail(`installed resource missing: ${required}`);
   const supervisorExe = findUniqueSupervisorExecutable(supervisor);
+  const processIdentityHelper = path.join(native, "yuvi-process-identity.exe");
+  if (!fs.existsSync(processIdentityHelper) || !fs.statSync(processIdentityHelper).isFile())
+    fail(`installed resource missing: ${processIdentityHelper}`);
+  const nativeFiles = listFiles(native);
+  if (
+    nativeFiles.length !== 1 ||
+    path.resolve(nativeFiles[0]) !== path.resolve(processIdentityHelper)
+  )
+    fail("native resource tree must contain exactly one process identity helper");
+  if (fs.statSync(processIdentityHelper).size <= 2)
+    fail("installed process identity helper is empty");
+  if (fs.readFileSync(processIdentityHelper).subarray(0, 2).toString("ascii") !== "MZ")
+    fail("installed process identity helper is not a PE executable");
   if (
     path.resolve(supervisorExe) !==
     path.resolve(path.join(resourceRoot, supervisorBuildInfo.executableRelativePath))
@@ -782,6 +796,8 @@ export function validateInstalledResources(resourceRoot) {
     supervisor,
     supervisorExe,
     supervisorBuildInfo,
+    native,
+    processIdentityHelper,
     mem0,
     runtimeManifest,
     mem0Result
@@ -2094,6 +2110,7 @@ function createEmptyPostgresAttemptDiagnostic(postgresAttempt = 0) {
     postgresIdentityOsDurationMs: null,
     postgresIdentityOsProcessId: null,
     postgresIdentityOsPidMatches: null,
+    postgresIdentityOsHelperPath: null,
     postgresIdentityOsExecutablePath: null,
     postgresIdentityOsStartedAtUtc: null,
     postgresIdentityOsExecutableMatches: null,
@@ -2379,6 +2396,7 @@ export function parsePostgresLifecycleDiagnostics(output = "", secrets = []) {
         "TIMEOUT",
         "EXIT_NONZERO",
         "EMPTY_OUTPUT",
+        "OVERSIZE_OUTPUT",
         "PARSE_FAILED",
         "ERROR"
       ]);
@@ -2391,6 +2409,10 @@ export function parsePostgresLifecycleDiagnostics(output = "", secrets = []) {
       diagnostic.postgresIdentityOsProcessId = boundedPid(event.processId);
       diagnostic.postgresIdentityOsPidMatches =
         typeof event.processIdMatches === "boolean" ? event.processIdMatches : null;
+      diagnostic.postgresIdentityOsHelperPath =
+        typeof event.helperPath === "string"
+          ? boundedRedactedPostgresLifecycleOutput(event.helperPath, secrets)
+          : null;
       diagnostic.postgresIdentityOsExecutablePath =
         typeof event.executablePath === "string"
           ? boundedRedactedPostgresLifecycleOutput(event.executablePath, secrets)
@@ -2532,6 +2554,7 @@ export function formatInstallerSmokePostgresDiagnostic(diagnostic) {
     ["postgresIdentityOsDurationMs", diagnostic.postgresIdentityOsDurationMs],
     ["postgresIdentityOsProcessId", diagnostic.postgresIdentityOsProcessId],
     ["postgresIdentityOsPidMatches", diagnostic.postgresIdentityOsPidMatches],
+    ["postgresIdentityOsHelperPath", diagnostic.postgresIdentityOsHelperPath],
     ["postgresIdentityOsExecutablePath", diagnostic.postgresIdentityOsExecutablePath],
     ["postgresIdentityOsStartedAtUtc", diagnostic.postgresIdentityOsStartedAtUtc],
     ["postgresIdentityOsExecutableMatches", diagnostic.postgresIdentityOsExecutableMatches],
@@ -4114,6 +4137,56 @@ async function runPackagedSupervisor({
     }
     if (!schemaReadyFromStatus(statusValue))
       fail("Supervisor bootstrap did not reach schemaReady=true");
+    const postgresLifecycleDiagnostic = collectInstallerSmokePostgresDiagnostics({
+      smokeRoot: layout.root,
+      localAppData: layout.localAppData,
+      supervisorOutput: `${stdout}\n${stderr}`,
+      secrets: [postgresPassword]
+    });
+    const expectedIdentityHelper =
+      resource.processIdentityHelper ??
+      path.join(resource.root, "native", "yuvi-process-identity.exe");
+    if (
+      postgresLifecycleDiagnostic.postgresIdentityOsStatus !== "RESOLVED" ||
+      postgresLifecycleDiagnostic.postgresIdentityOsPidMatches !== true ||
+      postgresLifecycleDiagnostic.postgresIdentityOsExecutableMatches !== true ||
+      postgresLifecycleDiagnostic.postgresIdentityOsStartTimePlausible !== true ||
+      path.resolve(postgresLifecycleDiagnostic.postgresIdentityOsHelperPath ?? "") !==
+        path.resolve(expectedIdentityHelper)
+    )
+      fail(
+        "packaged private PostgreSQL native identity proof was not resolved by the staged helper"
+      );
+    if (
+      postgresLifecycleDiagnostic.postgresIdentityDbStatus !== "RESOLVED" ||
+      postgresLifecycleDiagnostic.postgresIdentityDbDataDirectoryMatches !== true ||
+      postgresLifecycleDiagnostic.postgresIdentityDbClusterNameMatches !== true ||
+      postgresLifecycleDiagnostic.postgresIdentityDbPortMatches !== true ||
+      postgresLifecycleDiagnostic.postgresIdentityDbMajorMatches !== true ||
+      postgresLifecycleDiagnostic.postgresIdentityDbStartTimePlausible !== true
+    )
+      fail("packaged private PostgreSQL authenticated identity proof was not resolved");
+    if (
+      postgresLifecycleDiagnostic.ownershipStatus !== "ACCEPTED" ||
+      postgresLifecycleDiagnostic.metadataRecorded !== "SUCCESS" ||
+      postgresLifecycleDiagnostic.metadataReadback !== "SUCCESS" ||
+      postgresLifecycleDiagnostic.serverReady !== "READY" ||
+      !["CREATED", "ALREADY_EXISTS"].includes(postgresLifecycleDiagnostic.databaseCreateStatus) ||
+      postgresLifecycleDiagnostic.yuviReady !== "READY"
+    )
+      fail("packaged private PostgreSQL composite ownership/readiness sequence was incomplete");
+    const coreMigrations = [
+      "006_conversation_v1.sql",
+      "007_conversation_streaming.sql",
+      "008_finalized_ingestion_ledger_v1.sql",
+      "009_finalized_ingestion_work_discovery_v1.sql"
+    ];
+    const appliedMigrations = statusValue?.postgres?.migration?.applied;
+    if (
+      !Array.isArray(appliedMigrations) ||
+      coreMigrations.some((migration) => !appliedMigrations.includes(migration))
+    )
+      fail("packaged private PostgreSQL core migrations 006-009 were not all applied");
     const memorySearchStatus = memorySearchStatusFromStatus(statusValue);
     const mem0Gate = assertMem0FollowsMemorySearch({
       mem0,

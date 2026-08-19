@@ -3,12 +3,14 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   BUILD_ROOT,
   MEM0_EXE_NAME,
   MEM0_MANIFEST_NAME,
   MEM0_OUT_DIR,
   NODE_EXE_NAME,
+  REPO_ROOT,
   RUNTIME_ENTRY_NAME,
   RUNTIME_MANIFEST_NAME,
   RUNTIME_OUT_DIR,
@@ -22,6 +24,63 @@ import { buildPackagedMem0, validateMem0Artifact } from "./build-mem0.mjs";
 import { bundleRuntimeServer } from "./build-runtime.mjs";
 import { prepareBundledNode } from "./download-node.mjs";
 import { assertFile, assertSafeGeneratedTarget, ensureDir, writeJson } from "./paths.mjs";
+
+const PROCESS_IDENTITY_HELPER_SOURCE = path.join(
+  REPO_ROOT,
+  "scripts",
+  "desktop-package",
+  "native",
+  "yuvi-process-identity.rs"
+);
+const PROCESS_IDENTITY_HELPER_NAME = "yuvi-process-identity.exe";
+
+export function compileWindowsProcessIdentityHelper(
+  outputDirectory = path.join(BUILD_ROOT, "native")
+) {
+  assertFile(PROCESS_IDENTITY_HELPER_SOURCE, "Windows process identity helper source");
+  ensureDir(outputDirectory);
+  const output = path.join(outputDirectory, PROCESS_IDENTITY_HELPER_NAME);
+  fs.rmSync(output, { force: true });
+  const rustc = process.env.YUVI_RUSTC?.trim() || "rustc";
+  const result = spawnSync(
+    rustc,
+    [
+      PROCESS_IDENTITY_HELPER_SOURCE,
+      "--target",
+      "x86_64-pc-windows-msvc",
+      "--edition",
+      "2021",
+      "-C",
+      "opt-level=z",
+      "-C",
+      "panic=abort",
+      "-C",
+      "codegen-units=1",
+      "-o",
+      output
+    ],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      shell: false,
+      windowsHide: true,
+      timeout: 120_000
+    }
+  );
+  if (result.error || result.status !== 0) {
+    const detail = String(result.stderr ?? result.stdout ?? "")
+      .trim()
+      .slice(-2_000);
+    throw new Error(
+      `Windows process identity helper compilation failed${detail ? `: ${detail}` : ""}`
+    );
+  }
+  assertFile(output, "compiled Windows process identity helper");
+  const header = fs.readFileSync(output).subarray(0, 2).toString("ascii");
+  if (header !== "MZ")
+    throw new Error("compiled Windows process identity helper is not a PE executable");
+  return output;
+}
 
 export async function prepareDesktopPackage() {
   console.info("[desktop-package] prepare start");
@@ -40,6 +99,8 @@ export async function prepareDesktopPackage() {
   assertFile(supervisor.cjsPath, "supervisor cjs");
   assertFile(supervisor.exePath, "supervisor exe");
 
+  const processIdentityHelper = compileWindowsProcessIdentityHelper();
+
   const mem0 = await buildPackagedMem0();
   validateMem0Artifact(MEM0_OUT_DIR);
 
@@ -48,10 +109,12 @@ export async function prepareDesktopPackage() {
   const stagedRuntime = path.join(TAURI_GENERATED, "runtime");
   const stagedSupervisor = path.join(TAURI_GENERATED, "supervisor");
   const stagedMem0 = path.join(TAURI_GENERATED, "mem0");
+  const stagedNative = path.join(TAURI_GENERATED, "native");
   fs.rmSync(TAURI_GENERATED, { recursive: true, force: true });
   ensureDir(stagedRuntime);
   ensureDir(stagedSupervisor);
   ensureDir(stagedMem0);
+  ensureDir(stagedNative);
 
   copyFile(path.join(RUNTIME_OUT_DIR, NODE_EXE_NAME), path.join(stagedRuntime, NODE_EXE_NAME));
   copyFile(
@@ -88,6 +151,12 @@ export async function prepareDesktopPackage() {
   writeJson(buildInfoPath, supervisorProvenance);
   copyFile(buildInfoPath, path.join(stagedSupervisor, SUPERVISOR_BUILD_INFO_NAME));
   copyDir(MEM0_OUT_DIR, stagedMem0);
+  const stagedProcessIdentityHelper = path.join(stagedNative, PROCESS_IDENTITY_HELPER_NAME);
+  copyFile(processIdentityHelper, stagedProcessIdentityHelper);
+  assertFile(stagedProcessIdentityHelper, "staged Windows process identity helper");
+  if (fs.readFileSync(stagedProcessIdentityHelper).subarray(0, 2).toString("ascii") !== "MZ") {
+    throw new Error("staged Windows process identity helper is not a PE executable");
+  }
   const stagedMem0Artifact = validateMem0Artifact(stagedMem0);
 
   const packagingInfo = {
@@ -114,6 +183,7 @@ export async function prepareDesktopPackage() {
     staged: TAURI_GENERATED,
     buildRoot: BUILD_ROOT,
     mem0: stagedMem0Artifact,
+    processIdentityHelper: stagedProcessIdentityHelper,
     interpreter: mem0.python
   };
 }

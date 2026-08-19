@@ -96,6 +96,7 @@ function privateConfig(): {
   const marker = createClusterMarker(layout);
   writeClusterMarker(layout, marker);
   fs.writeFileSync(path.join(layout.data, "PG_VERSION"), "16\n");
+  cluster.writeLocalOnlyConfig(layout, 55432);
   writeInitializationState(layout, "ready");
   const dist = distribution();
   const start = cluster.buildPostgresStartCommand(layout, dist, 55432, marker.clusterId);
@@ -161,17 +162,58 @@ function ownedInspection(
 }
 
 function createSupervisor(config: SupervisorConfig, hooks: SupervisorHooks): DesktopSupervisor {
+  const supplied = { ...hooks };
+  if (hooks.platform === "win32" && !hooks.identityProcessProbe) {
+    supplied.identityProcessProbe = (processId) => {
+      const inspection = hooks.inspectProcess?.(processId);
+      if (inspection && inspection.status !== "resolved") {
+        return {
+          status: "ERROR",
+          processId,
+          processIdMatches: null,
+          durationMs: 1,
+          executablePath: null,
+          startedAtUtc: null
+        };
+      }
+      return {
+        status: "RESOLVED",
+        processId,
+        processIdMatches: true,
+        durationMs: 1,
+        executablePath: config.postgresDistribution!.postgres,
+        startedAtUtc: new Date().toISOString()
+      };
+    };
+  }
+  if (hooks.platform === "win32" && !hooks.identityDatabaseProbe) {
+    supplied.identityDatabaseProbe = async ({ layout, port, clusterId }) => ({
+      status: "RESOLVED",
+      durationMs: 1,
+      sqlState: null,
+      dataDirectory: layout.data,
+      clusterName: expectedClusterName(clusterId),
+      port,
+      serverVersionNum: 160010,
+      postmasterStartTime: new Date().toISOString(),
+      dataDirectoryMatchesExpected: true,
+      clusterNameMatchesExpected: true,
+      portMatchesExpected: true,
+      majorMatches: true,
+      startTimePlausible: true
+    });
+  }
   const supervisor = new DesktopSupervisor(config, {
     postmasterSettleTimeoutMs: 20,
     postmasterSettleIntervalMs: 5,
-    ...hooks
+    ...supplied
   });
   supervisors.push(supervisor);
   return supervisor;
 }
 
 describe("private postgres Windows start state machine", () => {
-  it("runs supplemental identity probes only after uncertain launch and never establishes ownership", async () => {
+  it("requires native and authenticated identity together and never publishes uncertain ownership", async () => {
     enableLifecycleDiagnostics();
     const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const { config, layout, marker, dist } = privateConfig();
@@ -181,11 +223,7 @@ describe("private postgres Windows start state machine", () => {
       .spyOn(postgresSecret, "resolvePostgresPassword")
       .mockImplementation((layout, env, authority) => {
         const stack = new Error().stack ?? "";
-        order.push(
-          stack.includes("runPostgresIdentityDiagnosticExperiment")
-            ? "experiment-resolve-password"
-            : "other-resolve-password"
-        );
+        order.push("resolve-password");
         return originalResolve(layout, env, authority);
       });
     const identityProcessProbe = vi.fn(() => {
@@ -210,7 +248,7 @@ describe("private postgres Windows start state machine", () => {
         port: 55432,
         serverVersionNum: 160010,
         postmasterStartTime: new Date().toISOString(),
-        dataDirectoryMatchesExpected: true,
+        dataDirectoryMatchesExpected: false,
         clusterNameMatchesExpected: true,
         portMatchesExpected: true,
         majorMatches: true,
@@ -245,8 +283,7 @@ describe("private postgres Windows start state machine", () => {
     expect(identityDatabaseProbe).toHaveBeenCalledTimes(1);
     expect(order.indexOf("pgctl-launch")).toBeGreaterThanOrEqual(0);
     expect(order.indexOf("os-probe")).toBeGreaterThan(order.indexOf("pgctl-launch"));
-    expect(order.indexOf("experiment-resolve-password")).toBeGreaterThan(order.indexOf("os-probe"));
-    expect(order.indexOf("db-probe")).toBeGreaterThan(order.indexOf("experiment-resolve-password"));
+    expect(order.indexOf("db-probe")).toBeGreaterThan(order.indexOf("pgctl-launch"));
     expect(resolver).toHaveBeenCalled();
     const postgres = supervisor.snapshot().services.find((service) => service.id === "postgres");
     expect(postgres?.ownership).not.toBe("owned");
@@ -255,14 +292,14 @@ describe("private postgres Windows start state machine", () => {
     const events = capturedLifecycleEvents(lifecycleLog);
     expect(events).toContainEqual(
       expect.objectContaining({
-        event: "postgres.private.inspect",
-        status: "QUERY_TIMEOUT"
+        event: "postgres.private.identity_os",
+        status: "RESOLVED"
       })
     );
     expect(events).toContainEqual(
       expect.objectContaining({
         event: "postgres.private.ownership",
-        status: "UNCERTAIN"
+        status: "REJECTED"
       })
     );
     expect(events).toContainEqual(
@@ -277,7 +314,7 @@ describe("private postgres Windows start state machine", () => {
       expect.objectContaining({
         event: "postgres.private.identity_db",
         status: "RESOLVED",
-        dataDirectoryMatches: true,
+        dataDirectoryMatches: false,
         clusterNameMatches: true,
         portMatches: true,
         majorMatches: true,
@@ -300,12 +337,8 @@ describe("private postgres Windows start state machine", () => {
         resolverStacks.push(new Error().stack ?? "");
         return originalResolve(layout, env, authority);
       });
-    const identityProcessProbe = vi.fn();
-    const identityDatabaseProbe = vi.fn();
     const supervisor = createSupervisor(config, {
       platform: "win32",
-      identityProcessProbe,
-      identityDatabaseProbe,
       spawnWindowsPgCtl: async () => {
         return {
           ok: false,
@@ -332,14 +365,12 @@ describe("private postgres Windows start state machine", () => {
     expect(directStartCalls).toHaveLength(0);
     expect(resolver.mock.calls.length).toBeGreaterThan(0);
     expect(config.env["YUVI_POSTGRES_PASSWORD"]).toBe("unit-test-password");
-    expect(identityProcessProbe).not.toHaveBeenCalled();
-    expect(identityDatabaseProbe).not.toHaveBeenCalled();
   });
 
-  it("contains failures from both identity experiment probes and preserves uncertain service state", async () => {
+  it("contains failures from both native and database identity probes", async () => {
     const { config, layout } = privateConfig();
     const identityProcessProbe = vi.fn(() => {
-      throw new Error("non-CIM probe failed");
+      throw new Error("native helper failed");
     });
     const identityDatabaseProbe = vi.fn(async () => {
       throw new Error("identity SQL probe failed");
@@ -382,7 +413,7 @@ describe("private postgres Windows start state machine", () => {
     const originalResolve = postgresSecret.resolvePostgresPassword;
     vi.spyOn(postgresSecret, "resolvePostgresPassword").mockImplementation(
       (layout, env, authority) => {
-        if ((new Error().stack ?? "").includes("runPostgresIdentityDiagnosticExperiment")) {
+        if ((new Error().stack ?? "").includes("launchWindowsPrivatePostgres")) {
           throw new Error("password provider unavailable");
         }
         return originalResolve(layout, env, authority);
@@ -431,7 +462,7 @@ describe("private postgres Windows start state machine", () => {
     );
   });
 
-  it("redacts identity experiment strings before lifecycle emission", async () => {
+  it("redacts native and database identity strings before lifecycle emission", async () => {
     enableLifecycleDiagnostics();
     const lifecycleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const { config, layout } = privateConfig();
@@ -767,8 +798,29 @@ describe("private postgres Windows start state machine", () => {
     const inspectProcess = vi.fn((processId: number, _options?: ProcessInspectionOptions) =>
       ownedInspection(dist, layout, marker.clusterId, started, processId)
     );
-    const identityProcessProbe = vi.fn();
-    const identityDatabaseProbe = vi.fn();
+    const identityProcessProbe = vi.fn((_processId: number, _helperPath: string) => ({
+      status: "RESOLVED" as const,
+      processId: 4242,
+      processIdMatches: true,
+      durationMs: 1,
+      executablePath: dist.postgres,
+      startedAtUtc: started.toISOString()
+    }));
+    const identityDatabaseProbe = vi.fn(async ({ layout: probeLayout, port, clusterId }) => ({
+      status: "RESOLVED" as const,
+      durationMs: 1,
+      sqlState: null,
+      dataDirectory: probeLayout.data,
+      clusterName: expectedClusterName(clusterId),
+      port,
+      serverVersionNum: 160010,
+      postmasterStartTime: started.toISOString(),
+      dataDirectoryMatchesExpected: true,
+      clusterNameMatchesExpected: true,
+      portMatchesExpected: true,
+      majorMatches: true,
+      startTimePlausible: true
+    }));
     vi.spyOn(cluster, "pingPostgresServer").mockResolvedValue(true);
     vi.spyOn(cluster, "pingPostgres").mockResolvedValue(true);
     vi.spyOn(cluster, "ensureYuviDatabase").mockResolvedValue({
@@ -801,11 +853,21 @@ describe("private postgres Windows start state machine", () => {
     expect(postgres?.ownership).toBe("owned");
     expect(postgres?.pid).toBe(4242);
     expect(migratePostgres).toHaveBeenCalledTimes(1);
-    expect(identityProcessProbe).not.toHaveBeenCalled();
-    expect(identityDatabaseProbe).not.toHaveBeenCalled();
-    expect(inspectProcess).toHaveBeenCalledWith(4242, {
-      windowsQueryTimeoutMs: cluster.POSTGRES_LAUNCH_PROCESS_QUERY_TIMEOUT_MS
-    });
+    expect(identityProcessProbe).toHaveBeenCalledTimes(1);
+    expect(identityDatabaseProbe).toHaveBeenCalledTimes(1);
+    expect(identityProcessProbe.mock.calls[0]?.[1]).toBe(
+      path.resolve(
+        config.repositoryRoot,
+        "apps",
+        "desktop",
+        "src-tauri",
+        "generated",
+        "win32-x64",
+        "native",
+        "yuvi-process-identity.exe"
+      )
+    );
+    expect(inspectProcess).not.toHaveBeenCalled();
     const listen = readListenMetadata(layout);
     expect(listen?.clusterId).toBe(marker.clusterId);
     expect(listen?.port).toBe(supervisor.snapshot().postgres?.port ?? null);
@@ -830,10 +892,12 @@ describe("private postgres Windows start state machine", () => {
     );
     expect(events).toContainEqual(
       expect.objectContaining({
-        event: "postgres.private.inspect",
-        phase: "PROCESS_INSPECTION",
+        event: "postgres.private.identity_os",
+        phase: "NATIVE_PROCESS_IDENTITY",
         status: "RESOLVED",
-        processId: 4242
+        processId: 4242,
+        executableMatches: true,
+        startTimePlausible: true
       })
     );
     expect(events).toContainEqual(
@@ -885,6 +949,29 @@ describe("private postgres Windows start state machine", () => {
   it("does not let background refresh promote server-ready-only to healthy", async () => {
     const { config, layout, marker, dist } = privateConfig();
     const started = new Date();
+    const identityProcessProbe = vi.fn(() => ({
+      status: "RESOLVED" as const,
+      processId: 4242,
+      processIdMatches: true,
+      durationMs: 1,
+      executablePath: dist.postgres,
+      startedAtUtc: started.toISOString()
+    }));
+    const identityDatabaseProbe = vi.fn(async () => ({
+      status: "RESOLVED" as const,
+      durationMs: 1,
+      sqlState: null,
+      dataDirectory: layout.data,
+      clusterName: expectedClusterName(marker.clusterId),
+      port: 55432,
+      serverVersionNum: 160010,
+      postmasterStartTime: started.toISOString(),
+      dataDirectoryMatchesExpected: true,
+      clusterNameMatchesExpected: true,
+      portMatchesExpected: true,
+      majorMatches: true,
+      startTimePlausible: true
+    }));
     const pingYuvi = vi.spyOn(cluster, "pingPostgres").mockResolvedValue(true);
     vi.spyOn(cluster, "pingPostgresServer").mockResolvedValue(true);
     vi.spyOn(cluster, "ensureYuviDatabase").mockResolvedValue({
@@ -895,6 +982,8 @@ describe("private postgres Windows start state machine", () => {
     });
     const supervisor = createSupervisor(config, {
       platform: "win32",
+      identityProcessProbe,
+      identityDatabaseProbe,
       migratePostgres: async () => ({
         ok: true,
         schemaReady: true,
@@ -910,6 +999,8 @@ describe("private postgres Windows start state machine", () => {
     await supervisor.bootstrap();
     pingYuvi.mockResolvedValue(false);
     await supervisor.refreshAll();
+    expect(identityProcessProbe).toHaveBeenCalledTimes(1);
+    expect(identityDatabaseProbe).toHaveBeenCalledTimes(1);
     const postgres = supervisor.snapshot().services.find((service) => service.id === "postgres");
     expect(postgres?.status).not.toBe("healthy");
   });
@@ -1081,6 +1172,8 @@ describe("private postgres Windows start state machine", () => {
       instanceId: config.instanceId
     });
     const migratePostgres = vi.fn();
+    const identityProcessProbe = vi.fn();
+    const identityDatabaseProbe = vi.fn();
     vi.spyOn(cluster, "pingPostgresServer").mockResolvedValue(true);
     vi.spyOn(cluster, "pingPostgres").mockResolvedValue(false);
     vi.spyOn(cluster, "ensureYuviDatabase").mockResolvedValue({
@@ -1091,6 +1184,8 @@ describe("private postgres Windows start state machine", () => {
     const supervisor = createSupervisor(config, {
       platform: "win32",
       migratePostgres,
+      identityProcessProbe,
+      identityDatabaseProbe,
       inspectProcess: () => ownedInspection(dist, layout, marker.clusterId, started),
       spawnWindowsPgCtl: async () => {
         throw new Error("adopted postgres must not relaunch");
@@ -1098,6 +1193,8 @@ describe("private postgres Windows start state machine", () => {
     });
     await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE" });
     expect(migratePostgres).not.toHaveBeenCalled();
+    expect(identityProcessProbe).not.toHaveBeenCalled();
+    expect(identityDatabaseProbe).not.toHaveBeenCalled();
     const postgres = supervisor.snapshot().services.find((service) => service.id === "postgres");
     expect(postgres?.status).not.toBe("healthy");
     expect(postgres?.ownership).toBe("owned");

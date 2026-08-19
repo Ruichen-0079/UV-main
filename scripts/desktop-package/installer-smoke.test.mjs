@@ -2980,6 +2980,60 @@ test("D1 lifecycle diagnostics preserve first phase and cleanup evidence without
   }
 });
 
+test("D1 lifecycle diagnostics require and retain the native composite identity evidence", () => {
+  const line = (event, fields = {}) =>
+    `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({ event, role: "postgres", ...fields })}`;
+  const output = [
+    line("postgres.private.launch", { status: "SUCCESS", exitCode: 0, signal: null }),
+    line("postgres.private.identity_os", {
+      phase: "NATIVE_PROCESS_IDENTITY",
+      status: "RESOLVED",
+      helperPath: "C:\\app\\resources\\native\\yuvi-process-identity.exe",
+      processId: 4242,
+      processIdMatches: true,
+      executablePath: "C:\\pgsql\\bin\\postgres.exe",
+      startedAtUtc: "2026-08-17T00:00:00.100Z",
+      executableMatches: true,
+      startTimePlausible: true
+    }),
+    line("postgres.private.identity_db", {
+      phase: "DATABASE_IDENTITY",
+      status: "RESOLVED",
+      durationMs: 12,
+      dataDirectory: "C:\\Users\\test\\AppData\\Local\\YUVI\\Postgres\\data",
+      clusterName: "yuvi-pg-cluster",
+      port: 55432,
+      serverVersionNum: 160010,
+      postmasterStartTime: "2026-08-17T00:00:00.100Z",
+      dataDirectoryMatches: true,
+      clusterNameMatches: true,
+      portMatches: true,
+      majorMatches: true,
+      startTimePlausible: true
+    }),
+    line("postgres.private.ownership", { status: "ACCEPTED", reason: "NONE" })
+  ].join("\n");
+  const diagnostic = parsePostgresLifecycleDiagnostics(output);
+  assert.equal(diagnostic.postgresIdentityOsStatus, "RESOLVED");
+  assert.equal(
+    diagnostic.postgresIdentityOsHelperPath,
+    "C:\\app\\resources\\native\\yuvi-process-identity.exe"
+  );
+  assert.equal(diagnostic.postgresIdentityOsPidMatches, true);
+  assert.equal(diagnostic.postgresIdentityDbStatus, "RESOLVED");
+  assert.equal(diagnostic.postgresIdentityDbMajorMatches, true);
+  assert.equal(diagnostic.ownershipStatus, "ACCEPTED");
+  assert.match(formatInstallerSmokePostgresDiagnostic(diagnostic), /yuvi-process-identity\.exe/);
+
+  const failed = parsePostgresLifecycleDiagnostics(
+    line("postgres.private.identity_os", {
+      status: "OVERSIZE_OUTPUT",
+      helperPath: "C:\\app\\resources\\native\\yuvi-process-identity.exe"
+    })
+  );
+  assert.equal(failed.postgresIdentityOsStatus, "OVERSIZE_OUTPUT");
+});
+
 test("D1 lifecycle diagnostics reset all phase fields at a new launch attempt", () => {
   const line = (event, fields = {}) =>
     `YUVI_SUPERVISOR_LIFECYCLE ${JSON.stringify({ event, role: "postgres", ...fields })}`;
