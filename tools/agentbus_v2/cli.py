@@ -69,6 +69,11 @@ def parser() -> argparse.ArgumentParser:
     watch.add_argument("p_id")
     watch.add_argument("--allow-merge", action="store_true")
 
+    schedule = commands.add_parser("schedule", help="poll all enabled registered Ps")
+    schedule.add_argument("--interval", type=float, default=20.0)
+    schedule.add_argument("--workers", type=int)
+    schedule.add_argument("--registry", type=Path)
+
     submit = commands.add_parser("gpt-submit", help="validate and ingest one manual GPT result")
     submit.add_argument("p_id")
     submit.add_argument("response", type=Path)
@@ -176,6 +181,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if result and result.changed:
                     continue
                 time.sleep(20.0)
+        if args.command == "schedule":
+            from .scheduler import Scheduler
+
+            scheduler = Scheduler(
+                args.state_root,
+                registry_path=args.registry,
+                poll_interval=args.interval,
+                max_workers=args.workers,
+            )
+            seen_manual: set[tuple[str, str, str]] = set()
+
+            def emit(event) -> None:
+                key = (event.p_id, event.action, event.detail)
+                if event.action in {ActionKind.PLAN.value, ActionKind.JUDGE.value} and not event.changed:
+                    if key in seen_manual:
+                        return
+                    seen_manual.add(key)
+                _print(event.as_dict())
+
+            scheduler.run(on_event=emit)
+            return 0
     except KeyboardInterrupt:
         return 130
     except (FactError, OSError) as error:
