@@ -160,6 +160,7 @@ class FactAndEffectTests(unittest.TestCase):
             self.assertEqual(first.path, second.path)
             packet = first.path.read_text(encoding="utf-8")
             self.assertEqual(packet, render_gpt_prompt(paths, config, snapshot, action))
+            self.assertIn(f"SHA256={sha256_text(packet)}", first.detail)
             self.assertIn(f"JOB_ID: {action.effect_id}", packet)
             for section in (
                 "## SEMANTIC INPUTS",
