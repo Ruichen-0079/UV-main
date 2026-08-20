@@ -779,6 +779,47 @@ def _ci_checks(
     if not isinstance(raw, list) or not raw:
         return "ABSENT", [], {}
     slug = github_slug(config.repository)
+    # A pull_request Actions run reports the branch head in `headSha`, not the
+    # synthetic merge commit that was tested against the live base.  Bind the
+    # evidence to the PR's current merge commit and its exact first-parent
+    # relationship instead of guessing that run.headSha is that merge commit.
+    pr_result = _run(
+        ("gh", "api", f"repos/{slug}/pulls/{pr_number}"),
+        check=False,
+        timeout=60,
+    )
+    try:
+        pr_data = json.loads(pr_result.stdout)
+    except json.JSONDecodeError:
+        pr_data = {}
+    if not isinstance(pr_data, dict):
+        pr_data = {}
+    pr_head = str((pr_data.get("head") or {}).get("sha", ""))
+    pr_base = str((pr_data.get("base") or {}).get("sha", ""))
+    merge_sha = str(pr_data.get("merge_commit_sha") or "")
+    merge_result = _run(
+        ("gh", "api", f"repos/{slug}/git/commits/{merge_sha}"),
+        check=False,
+        timeout=60,
+    ) if merge_sha else None
+    try:
+        merge_data = json.loads(merge_result.stdout) if merge_result else {}
+        merge_parents = [
+            str(parent.get("sha", ""))
+            for parent in merge_data.get("parents", [])
+        ]
+    except (json.JSONDecodeError, AttributeError):
+        merge_parents = []
+    merge_identity = (
+        pr_result.returncode == 0
+        and merge_result is not None
+        and merge_result.returncode == 0
+        and pr_head == expected_head
+        and pr_base == expected_base
+        and len(merge_parents) == 2
+        and merge_parents[0] == expected_base
+        and merge_parents[1] == expected_head
+    )
     runs: dict[str, dict[str, Any]] = {}
     failed_logs: dict[str, str] = {}
     checks: list[dict[str, Any]] = []
@@ -810,23 +851,11 @@ def _ci_checks(
             if not isinstance(run_data, dict):
                 run_data = {}
             head_sha = str(run_data.get("headSha", "")) if isinstance(run_data, dict) else ""
-            commit_result = _run(
-                ("gh", "api", f"repos/{slug}/git/commits/{head_sha}"),
-                check=False,
-                timeout=60,
-            )
-            try:
-                commit_data = json.loads(commit_result.stdout)
-                parents = [str(parent.get("sha", "")) for parent in commit_data.get("parents", [])]
-            except (json.JSONDecodeError, AttributeError):
-                parents = []
             current_base = (
                 run_result.returncode == 0
-                and commit_result.returncode == 0
                 and run_data.get("event") == "pull_request"
-                and len(parents) == 2
-                and parents[0] == expected_base
-                and parents[1] == expected_head
+                and head_sha == expected_head
+                and merge_identity
             )
             runs[run_id] = {
                 "run_id": run_id,
@@ -836,7 +865,10 @@ def _ci_checks(
                 "conclusion": run_data.get("conclusion"),
                 "workflow": run_data.get("workflowName"),
                 "url": run_data.get("url"),
-                "parents": parents,
+                "merge_sha": merge_sha,
+                "merge_parents": merge_parents,
+                "pr_head": pr_head,
+                "pr_base": pr_base,
                 "current_base_identity": current_base,
             }
         if not runs[run_id]["current_base_identity"]:

@@ -450,10 +450,16 @@ AgentBus-V2-Input-Head: %s
             def fake_run(argv, **_kwargs):
                 if argv[1:3] == ("pr", "checks"):
                     value = checks
+                elif argv[1] == "api" and "/pulls/" in argv[2]:
+                    value = {
+                        "head": {"sha": head},
+                        "base": {"sha": base},
+                        "merge_commit_sha": merge_sha,
+                    }
                 elif argv[1:3] == ("run", "view"):
                     value = {
                         "event": "pull_request",
-                        "headSha": merge_sha,
+                        "headSha": head,
                         "status": "completed",
                         "conclusion": "success",
                         "workflowName": "check",
