@@ -458,8 +458,6 @@ def run_codex_work(
             "codex",
             "exec",
             "--ephemeral",
-            "--sandbox",
-            "workspace-write",
             "--approve-for-me",
             "-C",
             config.worktree,
