@@ -12,6 +12,8 @@ const CONFIG = globalThis.AGENTBUS_V2_BROWSER_CONFIG || {
 };
 const LANES = ["plan", "judge"];
 const DEFAULT_RESPONSE_TIMEOUT_MS = 240000;
+const DEFAULT_RESPONSE_POLL_MS = 500;
+const DEFAULT_RESPONSE_STABILITY_MS = 2500;
 
 function newClientId() {
   const uuid = globalThis.crypto?.randomUUID?.();
@@ -392,9 +394,55 @@ function responseTimeoutMs(request) {
   return value;
 }
 
-async function waitForResponse(request, before = null) {
-  const deadline = Date.now() + responseTimeoutMs(request);
+function responsePollMs(request) {
+  const value = Number(request?.response_poll_ms ?? CONFIG.response_poll_ms ?? DEFAULT_RESPONSE_POLL_MS);
+  if (!Number.isFinite(value) || value < 1 || value > 5000) {
+    throw new Error("browser response poll interval is invalid");
+  }
+  return value;
+}
+
+function responseStabilityMs(request) {
+  const value = Number(
+    request?.response_stability_ms ?? CONFIG.response_stability_ms ?? DEFAULT_RESPONSE_STABILITY_MS
+  );
+  if (!Number.isFinite(value) || value < 1 || value > 60000) {
+    throw new Error("browser response stability interval is invalid");
+  }
+  return value;
+}
+
+async function responseDiagnosticDetail(value, extra = {}) {
+  const text = String(value);
+  let sha256 = null;
+  try {
+    const digest = await globalThis.crypto?.subtle?.digest(
+      "SHA-256", new TextEncoder().encode(text)
+    );
+    if (digest) {
+      sha256 = [...new Uint8Array(digest)]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    }
+  } catch (_) {
+    // Hashing is diagnostic only. Completion still relies on exact DOM text.
+  }
+  return JSON.stringify({length: text.length, sha256, ...extra});
+}
+
+async function waitForResponse(request) {
+  const timeoutMs = responseTimeoutMs(request);
+  const pollMs = responsePollMs(request);
+  const stabilityMs = responseStabilityMs(request);
+  if (stabilityMs >= timeoutMs) {
+    throw new Error("browser response stability interval must be shorter than response timeout");
+  }
+  const deadline = Date.now() + timeoutMs;
   let generationReported = false;
+  let responseObserved = false;
+  let candidate = null;
+  let candidateSince = null;
+  let candidateObservations = 0;
   while (Date.now() < deadline) {
     const generationBusy = generating();
     if (generationBusy && !generationReported) {
@@ -404,19 +452,77 @@ async function waitForResponse(request, before = null) {
       );
     }
     const observation = exactConversationObservation(request.packet);
-    const response = observation.assistant_response !== null
-      ? observation.assistant_response
-      : (before === null ? null : newAssistantText(before));
-    if (response !== null && !generationBusy) {
+    const response = observation.assistant_response;
+    if (generationBusy) {
+      if (candidate !== null) {
+        await reportDiagnostic(
+          request.lane,
+          request.job_id,
+          "ASSISTANT_RESPONSE_CHANGED",
+          await responseDiagnosticDetail(response ?? "", {reason: "generation_resumed"})
+        );
+      }
+      candidate = null;
+      candidateSince = null;
+      candidateObservations = 0;
+    } else if (response !== null && response !== "") {
+      if (!responseObserved) {
+        responseObserved = true;
+        await reportDiagnostic(
+          request.lane,
+          request.job_id,
+          "ASSISTANT_RESPONSE_OBSERVED",
+          await responseDiagnosticDetail(response)
+        );
+      }
+      if (candidate === null) {
+        candidate = response;
+        candidateSince = Date.now();
+        candidateObservations = 1;
+        await reportDiagnostic(
+          request.lane,
+          request.job_id,
+          "ASSISTANT_RESPONSE_CANDIDATE",
+          await responseDiagnosticDetail(response)
+        );
+      } else if (response !== candidate) {
+        candidate = response;
+        candidateSince = Date.now();
+        candidateObservations = 1;
+        await reportDiagnostic(
+          request.lane,
+          request.job_id,
+          "ASSISTANT_RESPONSE_CHANGED",
+          await responseDiagnosticDetail(response, {reason: "text_changed"})
+        );
+      } else {
+        candidateObservations += 1;
+        if (
+          candidateObservations >= 2 &&
+          candidateSince !== null &&
+          Date.now() - candidateSince >= stabilityMs
+        ) {
+          await reportDiagnostic(
+            request.lane,
+            request.job_id,
+            "ASSISTANT_RESPONSE_STABLE",
+            await responseDiagnosticDetail(response)
+          );
+          return response;
+        }
+      }
+    } else if (candidate !== null) {
+      candidate = null;
+      candidateSince = null;
+      candidateObservations = 0;
       await reportDiagnostic(
         request.lane,
         request.job_id,
-        "ASSISTANT_RESPONSE_OBSERVED",
-        "a response after the exact current packet is visible"
+        "ASSISTANT_RESPONSE_CHANGED",
+        await responseDiagnosticDetail("", {reason: "candidate_disappeared"})
       );
-      return response;
     }
-    await sleep(500);
+    await sleep(pollMs);
   }
   await reportDiagnostic(
     request.lane,
@@ -546,7 +652,6 @@ async function processRequest(request) {
     return false;
   }
 
-  const before = assistantNodes();
   if (resumesExactPendingPacket) {
     await reportDiagnostic(
       request.lane,
@@ -636,7 +741,7 @@ async function processRequest(request) {
     "SEND_CLICK_RETURNED",
     "send control click returned without a synchronous exception"
   );
-  const rawResponse = await waitForResponse(request, before);
+  const rawResponse = await waitForResponse(request);
   await postResult(request, rawResponse);
   return true;
 }
@@ -689,6 +794,9 @@ const API = {
   setComposer,
   composerInsertionStable,
   responseTimeoutMs,
+  responsePollMs,
+  responseStabilityMs,
+  responseDiagnosticDetail,
   waitForResponse,
   reportDiagnostic,
   processRequest,

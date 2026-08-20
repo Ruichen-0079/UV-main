@@ -26,7 +26,13 @@ sandbox.browser = {{runtime: {{sendMessage: async (message) => {{
   bridgeMessages.push(message);
   return {{ok: true, status: 200, body: ''}};
 }}}}}};
-let assistants = [];
+let messages = [];
+function roleNode(role, value) {{
+  return {{
+    innerText: value, textContent: value, hidden: false,
+    getAttribute: (name) => name === 'data-message-author-role' ? role : null
+  }};
+}}
 const composer = {{
   tagName: 'DIV', hidden: false,
   // Firefox innerText is layout-derived and may normalize a real editor newline
@@ -36,7 +42,7 @@ const composer = {{
 }};
 const send = {{
   hidden: false, disabled: false, getAttribute: () => null,
-  click: () => {{ assistants = [{{innerText: 'RAW', hidden: false, getAttribute: () => null}}]; }}
+  click: () => {{ messages = [roleNode('user', 'PACKET'), roleNode('assistant', 'RAW')]; }}
 }};
 sandbox.document = {{
   querySelector: (selector) => {{
@@ -44,7 +50,13 @@ sandbox.document = {{
     if (selector === 'button[data-testid="send-button"]') return send;
     return null;
   }},
-  querySelectorAll: (selector) => selector.includes('assistant') ? assistants : []
+  querySelectorAll: (selector) => {{
+    if (selector === '[data-message-author-role="assistant"]') {{
+      return messages.filter((node) => node.getAttribute('data-message-author-role') === 'assistant');
+    }}
+    if (selector.includes('data-message-author-role="user"')) return messages;
+    return [];
+  }}
 }};
 vm.runInNewContext(fs.readFileSync({json.dumps(str(CONTENT))}, 'utf8'), sandbox);
 const api = sandbox.module.exports;
@@ -56,7 +68,8 @@ if (api.editorPacketMatches('PACKET', 'PACKET\\n\\n')) throw Error('more than on
 (async () => {{
   const ok = await api.processRequest({{
     lane: 'plan', job_id: 'plan-' + '1'.repeat(24), operation: 'PLAN_GPT',
-    conversation_url: 'https://chatgpt.com/c/plan-lane', packet: 'PACKET\\n'
+    conversation_url: 'https://chatgpt.com/c/plan-lane', packet: 'PACKET\\n',
+    response_timeout_ms: 1000, response_stability_ms: 2, response_poll_ms: 1
   }});
   if (!ok) throw Error('existing exact pending packet was not resumed');
   const diagnostics = bridgeMessages.filter((m) => m.path === '/bridge/diagnostic');

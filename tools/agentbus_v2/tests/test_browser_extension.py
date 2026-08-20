@@ -120,7 +120,15 @@ async function scenario(sendAfterInsertion) {{
   let send = null;
   if (sendAfterInsertion) {{
     send = {{disabled: false, hidden: false, getAttribute: () => null,
-      click: () => {{ events.push('click'); assistants = [{{innerText: 'raw answer', hidden: false, getAttribute: () => null}}]; }}}};
+      click: () => {{
+        events.push('click');
+        assistants = [
+          {{innerText: 'PACKET', textContent: 'PACKET', hidden: false,
+            getAttribute: (name) => name === 'data-message-author-role' ? 'user' : null}},
+          {{innerText: 'raw answer', textContent: 'raw answer', hidden: false,
+            getAttribute: (name) => name === 'data-message-author-role' ? 'assistant' : null}}
+        ];
+      }}}};
   }}
   sandbox.document = {{
     querySelector: (selector) => {{
@@ -135,12 +143,13 @@ async function scenario(sendAfterInsertion) {{
       }}
       return null;
     }},
-    querySelectorAll: (selector) => selector.includes('assistant') ? assistants : []
+    querySelectorAll: (selector) => selector.includes('data-message-author-role') ? assistants : []
   }};
   bridgeMessages.length = 0;
   const result = await api.processRequest({{
     lane: 'plan', job_id: 'plan-' + (sendAfterInsertion ? '1' : '2').repeat(24),
-    operation: 'PLAN_GPT', conversation_url: 'https://chatgpt.com/c/plan-lane', packet: 'PACKET'
+    operation: 'PLAN_GPT', conversation_url: 'https://chatgpt.com/c/plan-lane', packet: 'PACKET',
+    response_timeout_ms: 1000, response_stability_ms: 2, response_poll_ms: 1
   }});
   const firstInsert = events.indexOf('insert');
   const firstSendLookup = events.indexOf('send_lookup_after_insert');
@@ -257,7 +266,7 @@ function assertOrdered(codes, expected) {{
   const success = await api.processRequest({{
     lane: 'plan', job_id: successJob, operation: 'PLAN_GPT',
     conversation_url: sandbox.location.href, packet: 'SUCCESS_PACKET',
-    response_timeout_ms: 1000
+    response_timeout_ms: 1000, response_stability_ms: 2, response_poll_ms: 1
   }});
   if (!success || clicks !== 1) throw Error('successful send boundary did not complete once');
   const successEvents = diagnosticsFor(successJob);
@@ -291,7 +300,7 @@ function assertOrdered(codes, expected) {{
     await api.processRequest({{
       lane: 'plan', job_id: timeoutJob, operation: 'PLAN_GPT',
       conversation_url: sandbox.location.href, packet: 'TIMEOUT_PACKET',
-      response_timeout_ms: 1
+      response_timeout_ms: 10, response_stability_ms: 2, response_poll_ms: 1
     }});
   }} catch (error) {{
     timedOut = String(error).includes('timed out');
@@ -306,7 +315,7 @@ function assertOrdered(codes, expected) {{
   const replay = await api.processRequest({{
     lane: 'plan', job_id: timeoutJob, operation: 'PLAN_GPT',
     conversation_url: sandbox.location.href, packet: 'TIMEOUT_PACKET',
-    response_timeout_ms: 1
+    response_timeout_ms: 10, response_stability_ms: 2, response_poll_ms: 1
   }});
   if (replay !== false || clicks !== 2) throw Error('post-Send job was clicked twice');
   timeoutEvents = diagnosticsFor(timeoutJob);
@@ -352,6 +361,207 @@ function assertOrdered(codes, expected) {{
   if (!sinkCodes.includes('SEND_ATTEMPTED') || sinkCodes.includes('SEND_CLICK_RETURNED')) {{
     throw Error('sink failure boundary was misclassified');
   }}
+  console.log('ok');
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("ok", result.stdout)
+
+    def test_response_completion_requires_stable_exact_dom_candidate(self) -> None:
+        content = EXTENSION / "content.js"
+        script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const nodeCrypto = require('crypto').webcrypto;
+const {{TextEncoder}} = require('util');
+const hostSetImmediate = setImmediate;
+let clock = 0;
+class FakeDate extends Date {{ static now() {{ return clock; }} }}
+const bridgeMessages = [];
+const sandbox = {{
+  module: {{exports: {{}}}}, console, URL, TextEncoder, crypto: nodeCrypto, Date: FakeDate,
+  InputEvent: class {{}},
+  setTimeout: (fn, ms) => {{ clock += Number(ms) || 0; hostSetImmediate(fn); }}
+}};
+sandbox.globalThis = sandbox;
+sandbox.getComputedStyle = () => ({{display: '', visibility: ''}});
+sandbox.location = {{href: 'https://chatgpt.com/c/plan-lane'}};
+sandbox.browser = {{runtime: {{sendMessage: async (message) => {{
+  bridgeMessages.push(message);
+  return {{ok: true, status: 200, body: '{{}}'}};
+}}}}}};
+vm.runInNewContext(fs.readFileSync({json.dumps(str(content))}, 'utf8'), sandbox);
+const api = sandbox.module.exports;
+
+let frames = [];
+let frameIndex = 0;
+let packet = '';
+let composerText = '';
+let clicks = 0;
+function currentFrame() {{ return frames[Math.min(frameIndex, frames.length - 1)]; }}
+function roleNode(role, value) {{
+  return {{
+    innerText: value, textContent: value, hidden: false,
+    getAttribute: (name) => name === 'data-message-author-role' ? role : null
+  }};
+}}
+const composer = {{
+  tagName: 'DIV', hidden: false, focus: () => {{}}, dispatchEvent: () => {{}},
+  getAttribute: () => null
+}};
+Object.defineProperty(composer, 'textContent', {{
+  get: () => composerText,
+  set: (value) => {{ composerText = String(value); }}
+}});
+const send = {{
+  disabled: false, hidden: false, getAttribute: () => null,
+  click: () => {{ clicks += 1; }}
+}};
+sandbox.document = {{
+  querySelector: (selector) => {{
+    if (selector.includes('stop')) return currentFrame()?.generation ? roleNode('button', '') : null;
+    if (selector === 'div#prompt-textarea[contenteditable="true"]') return composer;
+    if (selector === 'button[data-testid="send-button"]') return composerText ? send : null;
+    return null;
+  }},
+  querySelectorAll: (selector) => {{
+    const frame = currentFrame() || {{generation: false, text: null}};
+    let nodes = [];
+    if (selector === '[data-message-author-role="assistant"]') {{
+      if (frame.text !== null) nodes = [roleNode('assistant', frame.text)];
+    }} else if (selector.includes('data-message-author-role="user"')) {{
+      nodes = [roleNode('user', packet)];
+      if (frame.later_user) nodes.push(roleNode('user', 'UNRELATED_LATER_PACKET'));
+      if (frame.text !== null) nodes.push(roleNode('assistant', frame.text));
+      frameIndex += 1;
+    }}
+    return nodes;
+  }}
+}};
+
+function reset(nextPacket, nextFrames) {{
+  clock = 0;
+  packet = nextPacket;
+  frames = nextFrames;
+  frameIndex = 0;
+  bridgeMessages.length = 0;
+  composerText = '';
+}}
+function diagnostics(job) {{
+  return bridgeMessages
+    .filter((message) => message.path === '/bridge/diagnostic')
+    .map((message) => JSON.parse(message.body))
+    .filter((event) => event.job_id === job);
+}}
+async function wait(job, timeout = 10000) {{
+  return api.waitForResponse({{
+    lane: 'plan', job_id: job, packet,
+    response_timeout_ms: timeout, response_stability_ms: 1000, response_poll_ms: 500
+  }});
+}}
+
+(async () => {{
+  if (api.responseStabilityMs({{}}) !== 2500 || api.responsePollMs({{}}) !== 500) {{
+    throw Error('production response stabilization defaults changed');
+  }}
+  let invalidOrdering = false;
+  try {{
+    await api.waitForResponse({{
+      lane: 'plan', job_id: 'plan-' + '0'.repeat(24), packet: 'ORDERING_PACKET',
+      response_timeout_ms: 1000, response_stability_ms: 1000, response_poll_ms: 500
+    }});
+  }} catch (error) {{ invalidOrdering = String(error).includes('shorter than response timeout'); }}
+  if (!invalidOrdering) throw Error('invalid response timeout ordering was accepted');
+
+  const flapJob = 'plan-' + '5'.repeat(24);
+  const partialOne = '{{"job_id":"pla';
+  const partialTwo = '{{"job_id":"plan-dd924';
+  const partialThree = '{{"job_id":"plan-dd924e1335d1255e0dca1fa4"';
+  const finalValid = '{{"job_id":"' + flapJob + '","operation":"PLAN_GPT","decision":"SPEC","body":"super-secret-response"}}';
+  reset('FLAP_PACKET', [
+    {{generation: true, text: partialOne}},
+    {{generation: false, text: partialTwo}},
+    {{generation: true, text: partialThree}},
+    {{generation: false, text: finalValid}},
+    {{generation: false, text: finalValid}},
+    {{generation: false, text: finalValid}}
+  ]);
+  const flapResult = await wait(flapJob);
+  if (flapResult !== finalValid) throw Error('generation flap returned a partial response');
+  const flapEvents = diagnostics(flapJob);
+  const flapCodes = flapEvents.map((event) => event.code);
+  if (!flapCodes.includes('ASSISTANT_RESPONSE_CANDIDATE') ||
+      !flapCodes.includes('ASSISTANT_RESPONSE_CHANGED') ||
+      !flapCodes.includes('ASSISTANT_RESPONSE_STABLE')) {{
+    throw Error('generation flap diagnostics were incomplete');
+  }}
+  if (flapCodes.indexOf('ASSISTANT_RESPONSE_STABLE') < flapCodes.indexOf('ASSISTANT_RESPONSE_CHANGED')) {{
+    throw Error('partial response was marked stable before reset');
+  }}
+  for (const event of flapEvents.filter((event) => event.code.startsWith('ASSISTANT_RESPONSE_'))) {{
+    const detail = JSON.parse(event.detail);
+    if (!Number.isInteger(detail.length) || !/^[0-9a-f]{{64}}$/.test(detail.sha256)) {{
+      throw Error('response diagnostic metadata is incomplete');
+    }}
+    if (event.detail.includes('super-secret-response')) throw Error('raw response leaked to diagnostics');
+  }}
+
+  const growthJob = 'plan-' + '6'.repeat(24);
+  reset('GROWTH_PACKET', [
+    {{generation: false, text: 'a'}},
+    {{generation: false, text: 'ab'}},
+    {{generation: false, text: 'abc'}},
+    {{generation: false, text: 'abc'}},
+    {{generation: false, text: 'abc'}}
+  ]);
+  if (await wait(growthJob) !== 'abc') throw Error('growing response did not stabilize at final text');
+  if (diagnostics(growthJob).filter((event) => event.code === 'ASSISTANT_RESPONSE_CHANGED').length < 2) {{
+    throw Error('text growth did not reset stability');
+  }}
+
+  const malformedJob = 'plan-' + '7'.repeat(24);
+  const malformed = '{{"job_id":"unterminated';
+  reset('MALFORMED_PACKET', [
+    {{generation: false, text: malformed}},
+    {{generation: false, text: malformed}},
+    {{generation: false, text: malformed}}
+  ]);
+  if (await wait(malformedJob) !== malformed) throw Error('stable malformed text was repaired or changed');
+
+  const timeoutJob = 'plan-' + '8'.repeat(24);
+  reset('TIMEOUT_PACKET', [{{generation: false, text: null}}]);
+  let timedOut = false;
+  try {{ await wait(timeoutJob, 2000); }} catch (error) {{ timedOut = String(error).includes('timed out'); }}
+  if (!timedOut || !diagnostics(timeoutJob).some((event) => event.code === 'RESPONSE_TIMEOUT')) {{
+    throw Error('missing bounded response timeout');
+  }}
+
+  const isolationJob = 'plan-' + '9'.repeat(24);
+  reset('EXACT_PACKET', [{{generation: false, text: 'unrelated answer', later_user: true}}]);
+  timedOut = false;
+  try {{ await wait(isolationJob, 2000); }} catch (error) {{ timedOut = String(error).includes('timed out'); }}
+  if (!timedOut) throw Error('assistant after a later user crossed exact packet boundary');
+
+  const recoveryJob = 'plan-' + 'a'.repeat(24);
+  const recoveryText = '{{"job_id":"' + recoveryJob + '","operation":"PLAN_GPT","decision":"SPEC","body":"recovered"}}';
+  reset('RECOVERY_PACKET', [
+    {{generation: false, text: recoveryText}},
+    {{generation: false, text: recoveryText}},
+    {{generation: false, text: recoveryText}}
+  ]);
+  const recovered = await api.processRequest({{
+    lane: 'plan', job_id: recoveryJob, operation: 'PLAN_GPT',
+    conversation_url: sandbox.location.href, packet,
+    response_timeout_ms: 10000, response_stability_ms: 1000, response_poll_ms: 500
+  }});
+  if (!recovered || clicks !== 0) throw Error('DOM recovery sent a duplicate request');
+  const recoveryCodes = diagnostics(recoveryJob).map((event) => event.code);
+  const stableIndex = recoveryCodes.indexOf('ASSISTANT_RESPONSE_STABLE');
+  const postIndex = recoveryCodes.indexOf('RESULT_POST_ATTEMPTED');
+  if (stableIndex < 0 || postIndex <= stableIndex) throw Error('recovery relayed before stable response');
   console.log('ok');
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
 """
