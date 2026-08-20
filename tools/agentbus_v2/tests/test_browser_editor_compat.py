@@ -51,6 +51,10 @@ if (api.structuralText(root) !== 'A\\n\\nB') throw Error('BR serialization lost 
 if (root.textContent !== 'A\\n\\nB') throw Error('prompt textContent compatibility view was not installed');
 root.childNodes = [block(text('A')), block(), block(text('B'))];
 if (api.structuralText(root) !== 'A\\n\\nB') throw Error('empty block serialization lost blank line');
+root.childNodes = [block(text('A')), block(br()), block(text('B'))];
+if (api.structuralText(root) !== 'A\\n\\nB') throw Error('placeholder-BR block added an extra newline');
+root.childNodes = [block(text('A'), br(), text('B'))];
+if (api.structuralText(root) !== 'A\\nB') throw Error('real inline BR was not preserved');
 const other = new FakeNode();
 other.nodeType = 1; other.id = 'other'; other.getAttribute = () => null; other._raw = 'RAW';
 if (other.textContent !== 'RAW') throw Error('non-composer textContent behavior changed');
