@@ -28,7 +28,10 @@ sandbox.browser = {{runtime: {{sendMessage: async (message) => {{
 }}}}}};
 let assistants = [];
 const composer = {{
-  tagName: 'DIV', hidden: false, innerText: 'PACKET', textContent: 'PACKET',
+  tagName: 'DIV', hidden: false,
+  // Firefox innerText is layout-derived and may normalize a real editor newline
+  // to a space. textContent remains the data-bearing packet text.
+  innerText: 'PACKET ', textContent: 'PACKET',
   focus: () => {{}}, getAttribute: () => null
 }};
 const send = {{
@@ -45,6 +48,7 @@ sandbox.document = {{
 }};
 vm.runInNewContext(fs.readFileSync({json.dumps(str(CONTENT))}, 'utf8'), sandbox);
 const api = sandbox.module.exports;
+if (api.composerText(composer) !== 'PACKET') throw Error('contenteditable verification used layout-normalized innerText');
 if (!api.editorPacketMatches('A\\r\\nB', 'A\\nB')) throw Error('CRLF normalization failed');
 if (!api.editorPacketMatches('PACKET', 'PACKET\\n')) throw Error('single terminal editor newline was not tolerated');
 if (api.editorPacketMatches('PACET', 'PACKET\\n')) throw Error('interior packet corruption was accepted');
