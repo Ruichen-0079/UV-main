@@ -137,17 +137,11 @@ class KernelTableTests(unittest.TestCase):
         self.assertEqual(ActionKind.HUMAN, action.kind)
         self.assertIn("WAIT", action.reason)
 
-    def test_c_spec_without_work_requests_work(self) -> None:
+    def test_c_spec_requests_work(self) -> None:
         snapshot, spec = with_spec(blank())
         action = decide(snapshot)
         self.assertEqual(ActionKind.WORK, action.kind)
         self.assertEqual(spec.spec_id, action.payload["spec_id"])
-
-    def test_d_running_work_is_idle(self) -> None:
-        snapshot, spec = with_spec(blank())
-        effect = work_effect_id(snapshot, spec)
-        action = decide(replace(snapshot, active_effects=frozenset({effect})))
-        self.assertEqual(ActionKind.IDLE, action.kind)
 
     def test_e_confirmed_work_failure_requests_judge(self) -> None:
         snapshot, spec = with_spec(blank())
@@ -262,19 +256,6 @@ class KernelTableTests(unittest.TestCase):
         )
         self.assertEqual(ActionKind.WORK, action.kind)
         self.assertEqual(second.spec_id, action.payload["spec_id"])
-
-    def test_i_running_prove_is_idle(self) -> None:
-        snapshot, spec = with_spec(replace(blank(), head=H1))
-        work = work_pass(snapshot, spec)
-        proof_id = proof_effect_id(snapshot, spec)
-        action = decide(
-            replace(
-                snapshot,
-                work_facts=(work,),
-                active_effects=frozenset({proof_id}),
-            )
-        )
-        self.assertEqual(ActionKind.IDLE, action.kind)
 
     def test_j_mechanical_prove_failure_requests_judge(self) -> None:
         snapshot, spec = with_spec(replace(blank(), head=H1))

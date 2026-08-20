@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import subprocess
@@ -23,9 +22,9 @@ from tools.agentbus_v2.core import (
     stable_id,
     work_effect_id,
 )
+from tools.agentbus_v2.cli import _tick_lock
 from tools.agentbus_v2.effects import (
     _ci_checks,
-    _lease,
     dispatch_manual_gpt,
     run_prove,
     submit_gpt_response,
@@ -37,6 +36,7 @@ from tools.agentbus_v2.facts import (
     ProofCommand,
     _load_gpt,
     _load_proof,
+    _load_work,
     _work_from_head,
     canonical_repository,
     init_p,
@@ -132,6 +132,14 @@ def snapshot_for(config: PConfig) -> Snapshot:
 
 
 class FactAndEffectTests(unittest.TestCase):
+    def test_duplicate_ticks_are_excluded_by_per_p_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "P-TEST" / "tick.lock"
+            with _tick_lock(lock_path) as first:
+                self.assertTrue(first)
+                with _tick_lock(lock_path) as second:
+                    self.assertFalse(second)
+
     def test_manual_gpt_job_is_deterministic_and_response_is_strict(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -265,24 +273,74 @@ AgentBus-V2-Input-Head: %s
             head = run(repo.work, "git", "rev-parse", "HEAD")
             paths = PPaths(root / "state" / "P-TEST")
             paths.create_dirs()
-            request = {
-                "schema_version": 1,
-                "effect_id": work_id,
-                "p_id": "P-TEST",
-                "spec_id": "spec-123",
-                "input_head": input_head,
-                "trigger_judge_id": None,
-            }
-            (paths.work_requests / f"{work_id}.json").write_text(
-                json.dumps(request), encoding="utf-8"
-            )
-            fact = _work_from_head(config, paths, head)
+            fact = _work_from_head(config, head)
             self.assertIsNotNone(fact)
             assert fact is not None
             self.assertEqual(work_id, fact.effect_id)
             self.assertEqual("spec-123", fact.spec_id)
             self.assertEqual(input_head, fact.input_head)
             self.assertEqual(head, fact.output_head)
+
+            run(repo.work, "git", "switch", "-c", "other")
+            (repo.work / "README.md").write_text("stale\n", encoding="utf-8")
+            run(repo.work, "git", "add", "README.md")
+            stale_message = """stale identity
+
+AgentBus-V2-P: P-TEST
+AgentBus-V2-Spec: spec-123
+AgentBus-V2-Work: work-000000000000000000000000
+AgentBus-V2-Input-Head: %s
+""" % head
+            run(repo.work, "git", "commit", "-m", stale_message)
+            stale_head = run(repo.work, "git", "rev-parse", "HEAD")
+            with self.assertRaisesRegex(FactError, "deterministic effect identity"):
+                _work_from_head(config, stale_head)
+
+    def test_executor_crash_before_commit_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            charter = "P_ID: P-TEST\nGOAL: absent work\n"
+            config = config_for(repo, charter)
+            paths = PPaths(root / "state" / "P-TEST")
+            paths.create_dirs()
+            self.assertIsNone(_work_from_head(config, repo.base))
+            self.assertEqual([], _load_work(paths, config))
+
+    def test_confirmed_codex_failure_is_one_durable_work_fact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            charter = "P_ID: P-TEST\nGOAL: durable work failure\n"
+            config = config_for(repo, charter)
+            paths = PPaths(root / "state" / "P-TEST")
+            paths.create_dirs()
+            effect = stable_id(
+                "work",
+                {
+                    "p_id": config.p_id,
+                    "spec": "spec-123",
+                    "input_head": repo.base,
+                    "trigger_judge": None,
+                },
+            )
+            (paths.work_results / f"{effect}.json").write_text(
+                json.dumps(
+                    {
+                        "effect_id": effect,
+                        "spec_id": "spec-123",
+                        "input_head": repo.base,
+                        "status": "FAIL",
+                        "evidence_digest": "failure-evidence",
+                        "trigger_judge_id": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            facts = _load_work(paths, config)
+            self.assertEqual(1, len(facts))
+            self.assertIs(Observation.FAIL, facts[0].status)
+            self.assertEqual(effect, facts[0].effect_id)
 
     def test_initialized_p_persists_no_workflow_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -301,24 +359,6 @@ AgentBus-V2-Input-Head: %s
             serialized = json.loads(paths.config.read_text(encoding="utf-8"))
             self.assertFalse(FORBIDDEN & set(serialized))
             self.assertEqual(FORBIDDEN & set(asdict(load_config(paths))), set())
-
-    def test_expired_operational_lease_is_reclaimed(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            paths = PPaths(Path(directory) / "P-TEST")
-            paths.create_dirs()
-            lease = paths.leases / "work-expired.json"
-            lease.write_text(
-                json.dumps(
-                    {
-                        "effect_id": "work-expired",
-                        "expires_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with _lease(paths, "work-expired") as acquired:
-                self.assertTrue(acquired)
-            self.assertFalse(lease.exists())
 
     def test_local_mechanical_failure_is_durable_without_a_pr(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,13 +1,13 @@
 """Durable fact collection for AgentBus v2.
 
-Files in a P directory are immutable requests/results or operational leases.
-No file stores a phase, current step, retry count, or derived workflow status.
+Files in a P directory are immutable requests/results or bounded executor
+evidence. No file stores a phase, current step, retry count, or derived
+workflow status.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
@@ -99,14 +99,6 @@ class PPaths:
         return self.root / "work" / "results"
 
     @property
-    def work_outbox(self) -> Path:
-        return self.root / "work" / "outbox"
-
-    @property
-    def work_requests(self) -> Path:
-        return self.root / "work" / "requests"
-
-    @property
     def work_logs(self) -> Path:
         return self.root / "work" / "logs"
 
@@ -122,23 +114,16 @@ class PPaths:
     def proof_logs(self) -> Path:
         return self.root / "prove" / "logs"
 
-    @property
-    def leases(self) -> Path:
-        return self.root / "leases"
-
     def create_dirs(self) -> None:
         for path in (
             self.gpt_requests,
             self.gpt_outbox,
             self.gpt_inbox,
-            self.work_outbox,
-            self.work_requests,
             self.work_results,
             self.work_logs,
             self.proof_results,
             self.proof_partials,
             self.proof_logs,
-            self.leases,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -586,71 +571,35 @@ def _load_gpt(paths: PPaths, config: PConfig) -> tuple[
     return tuple(responses.values()), tuple(specs), pending
 
 
-def _load_work_requests(paths: PPaths, config: PConfig) -> frozenset[str]:
-    requests: set[str] = set()
-    for path in sorted(paths.work_requests.glob("*.json")):
-        value = _load_json(path)
-        if set(value) != {
-            "schema_version",
-            "effect_id",
-            "p_id",
-            "spec_id",
-            "input_head",
-            "trigger_judge_id",
-        }:
-            raise FactError(f"WORK request has unexpected fields: {path}")
-        expected_id = stable_id(
-            "work",
-            {
-                "p_id": config.p_id,
-                "spec": value.get("spec_id"),
-                "input_head": value.get("input_head"),
-                "trigger_judge": value.get("trigger_judge_id"),
-            },
-        )
-        if (
-            value.get("schema_version") != 1
-            or value.get("p_id") != config.p_id
-            or value.get("effect_id") != path.stem
-            or expected_id != path.stem
-        ):
-            raise FactError(f"WORK request identity mismatch: {path}")
-        requests.add(path.stem)
-    return frozenset(requests)
-
-
 def _load_work(paths: PPaths, config: PConfig) -> list[WorkFact]:
     facts: list[WorkFact] = []
     for path in sorted(paths.work_results.glob("*.json")):
         value = _load_json(path)
+        # PASS is commit-trailer evidence; no result artifact is loaded.
+        if value.get("status") == Observation.PASS.value:
+            continue
         try:
             if set(value) != {
                 "effect_id", "spec_id", "input_head", "status",
-                "evidence_digest", "output_head", "trigger_judge_id", "summary",
+                "evidence_digest", "trigger_judge_id",
             }:
                 raise FactError(f"WORK result has unexpected fields: {path}")
-            string_fields = (
+            if any(type(value.get(key)) is not str for key in (
                 "effect_id", "spec_id", "input_head", "status",
-                "evidence_digest", "summary",
-            )
-            if any(type(value.get(key)) is not str for key in string_fields):
+                "evidence_digest",
+            )):
                 raise FactError(f"WORK result fields have invalid types: {path}")
-            for key in ("output_head", "trigger_judge_id"):
-                if value.get(key) is not None and type(value[key]) is not str:
-                    raise FactError(f"WORK result {key} has an invalid type: {path}")
+            if value.get("trigger_judge_id") is not None and type(value["trigger_judge_id"]) is not str:
+                raise FactError(f"WORK result trigger has an invalid type: {path}")
             fact = WorkFact(
                 effect_id=value["effect_id"],
                 spec_id=value["spec_id"],
                 input_head=value["input_head"],
-                status=Observation(value["status"]),
+                status=Observation.FAIL,
                 evidence_digest=value["evidence_digest"],
-                output_head=value["output_head"]
-                if value.get("output_head") is not None
-                else None,
                 trigger_judge_id=value["trigger_judge_id"]
                 if value.get("trigger_judge_id") is not None
                 else None,
-                summary=value["summary"],
             )
         except (KeyError, ValueError) as error:
             raise FactError(f"invalid WORK fact {path}: {error}") from error
@@ -666,38 +615,16 @@ def _load_work(paths: PPaths, config: PConfig) -> list[WorkFact]:
         if (
             fact.effect_id != path.stem
             or fact.effect_id != expected_id
-            or fact.status is Observation.ABSENT
+            or value["status"] != Observation.FAIL.value
             or not SHA_RE.fullmatch(fact.input_head)
-            or (
-                fact.status is Observation.PASS
-                and (
-                    fact.output_head is None
-                    or not SHA_RE.fullmatch(fact.output_head)
-                    or fact.output_head == fact.input_head
-                )
-            )
-            or (fact.status is Observation.FAIL and fact.output_head is not None)
+            or (fact.trigger_judge_id is not None and not GPT_JOB_RE.fullmatch(fact.trigger_judge_id))
         ):
             raise FactError(f"invalid WORK result identity/status: {path}")
-        request_path = paths.work_requests / f"{fact.effect_id}.json"
-        if not request_path.exists():
-            raise FactError(f"WORK result has no immutable request: {path}")
-        request = _load_json(request_path)
-        expected = {
-            "schema_version": 1,
-            "effect_id": fact.effect_id,
-            "p_id": config.p_id,
-            "spec_id": fact.spec_id,
-            "input_head": fact.input_head,
-            "trigger_judge_id": fact.trigger_judge_id,
-        }
-        if request != expected:
-            raise FactError(f"WORK result/request mismatch: {path}")
         facts.append(fact)
     return facts
 
 
-def _work_from_head(config: PConfig, paths: PPaths, head: str) -> WorkFact | None:
+def _work_from_head(config: PConfig, head: str) -> WorkFact | None:
     worktree = Path(config.worktree)
     message = git(worktree, "show", "-s", "--format=%B", head)
     trailers = {
@@ -710,20 +637,22 @@ def _work_from_head(config: PConfig, paths: PPaths, head: str) -> WorkFact | Non
         return None
     if trailers["P"] != config.p_id:
         return None
-    request_path = paths.work_requests / f"{trailers['Work']}.json"
-    if not request_path.exists():
-        raise FactError("WORK commit names an effect with no immutable request")
-    request = _load_json(request_path)
-    expected_request = {
-        "schema_version": 1,
-        "effect_id": trailers["Work"],
-        "p_id": config.p_id,
-        "spec_id": trailers["Spec"],
-        "input_head": trailers["Input-Head"],
-        "trigger_judge_id": request.get("trigger_judge_id"),
-    }
-    if request != expected_request:
-        raise FactError("WORK commit trailers do not match its immutable request")
+    trigger = trailers.get("Trigger")
+    if trigger in (None, "", "NONE"):
+        trigger = None
+    elif not GPT_JOB_RE.fullmatch(trigger):
+        raise FactError("invalid WORK commit Trigger trailer")
+    expected_effect = stable_id(
+        "work",
+        {
+            "p_id": config.p_id,
+            "spec": trailers["Spec"],
+            "input_head": trailers["Input-Head"],
+            "trigger_judge": trigger,
+        },
+    )
+    if trailers["Work"] != expected_effect:
+        raise FactError("WORK commit trailers do not match deterministic effect identity")
     input_head = trailers["Input-Head"]
     if not SHA_RE.fullmatch(input_head) or input_head == head:
         raise FactError("invalid WORK commit Input-Head trailer")
@@ -741,10 +670,7 @@ def _work_from_head(config: PConfig, paths: PPaths, head: str) -> WorkFact | Non
         status=Observation.PASS,
         evidence_digest=sha256_text(f"{head}\n{message}"),
         output_head=head,
-        trigger_judge_id=str(request["trigger_judge_id"])
-        if request.get("trigger_judge_id") is not None
-        else None,
-        summary="Recovered from immutable Git commit trailers",
+        trigger_judge_id=trigger,
     )
 
 
@@ -839,22 +765,6 @@ def _load_proof(
             raise FactError(f"invalid PROVE result identity/status: {path}")
         facts.append(fact)
     return tuple(facts)
-
-
-def _active_leases(paths: PPaths) -> frozenset[str]:
-    now = datetime.now(UTC)
-    active: set[str] = set()
-    for path in paths.leases.glob("*.json"):
-        value = _load_json(path)
-        try:
-            expires = datetime.fromisoformat(str(value["expires_at"]))
-        except (KeyError, ValueError) as error:
-            raise FactError(f"invalid operational lease {path}: {error}") from error
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=UTC)
-        if expires > now:
-            active.add(path.stem)
-    return frozenset(active)
 
 
 def _markers(body: str) -> dict[str, str]:
@@ -993,9 +903,8 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         base = config.seed_base
         repository_available = False
     results, specs, pending = _load_gpt(paths, config)
-    _load_work_requests(paths, config)
     work = _load_work(paths, config)
-    recovered = _work_from_head(config, paths, head)
+    recovered = _work_from_head(config, head)
     if recovered is not None:
         stored = [item for item in work if item.effect_id == recovered.effect_id]
         if stored:
@@ -1025,7 +934,6 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         gpt_requests=pending,
         work_facts=tuple(work),
         proof_facts=_load_proof(paths, config, contract),
-        active_effects=_active_leases(paths),
         merge=read_merge_facts(config, live_base=base),
         expected_owner_token=config.owner_token,
         proof_contract_digest=contract,

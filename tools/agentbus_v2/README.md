@@ -16,8 +16,9 @@ The default GPT adapter is manual. It writes a self-contained prompt to the P's
 `JOB_ID` through `gpt-submit`. Browser lane or conversation identity is not part
 of correctness.
 
-The local P directory contains only the immutable charter, content-addressed
-requests/results/evidence, and operational leases. The default location is
+The local P directory contains the immutable charter, content-addressed GPT
+requests/results, WORK failure facts, and bounded executor/proof evidence. The
+default location is
 `$XDG_STATE_HOME/yuvi-agentbus-v2`, or
 `~/.local/state/yuvi-agentbus-v2`.
 

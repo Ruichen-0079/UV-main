@@ -200,7 +200,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     result is not None
                     and not result.ran
                     and result.outcome == "WORK_ABSENT"
-                    and "lease" not in result.detail.lower()
                     and "drift" not in result.detail.lower()
                 )
                 signature = (action.effect_id, result.outcome) if no_progress and result else None

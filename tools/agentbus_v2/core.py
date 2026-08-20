@@ -78,7 +78,6 @@ class WorkFact:
     evidence_digest: str
     output_head: str | None = None
     trigger_judge_id: str | None = None
-    summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -129,7 +128,6 @@ class Snapshot:
     gpt_requests: frozenset[str] = frozenset()
     work_facts: tuple[WorkFact, ...] = ()
     proof_facts: tuple[ProofFact, ...] = ()
-    active_effects: frozenset[str] = frozenset()
     merge: MergeFacts = field(default_factory=MergeFacts)
     expected_owner_token: str = ""
     proof_contract_digest: str = ""
@@ -261,7 +259,7 @@ def _unique(items: tuple[Any, ...], key: str, label: str) -> dict[str, Any]:
 
 def _current_spec(s: Snapshot, results: Mapping[str, GptResult]) -> SpecFact | None:
     # A successful WORK result causally anchors the SPEC after its planning HEAD
-    # changes. Merely issuing a request or writing a lease never does.
+    # changes. Merely issuing a request never does.
     anchored = {
         item.spec_id for item in s.work_facts if item.status is Observation.PASS
     }
@@ -305,8 +303,6 @@ def _action(
 def _request(s: Snapshot, kind: ActionKind, effect_id: str, **payload: Any) -> Action:
     if effect_id in s.gpt_requests:
         return _action(ActionKind.IDLE, reason="GPT result is absent", job_id=effect_id)
-    if effect_id in s.active_effects:
-        return _action(ActionKind.IDLE, reason="effect has no durable result", effect_id=effect_id)
     return _action(kind, effect_id, **payload)
 
 
@@ -418,8 +414,6 @@ def _work(
     if len(matches) != 1:
         return _action(ActionKind.HUMAN, reason="conflicting WORK evidence", effect_id=effect)
     work = matches[0]
-    if work.status is Observation.ABSENT:
-        return _action(ActionKind.IDLE, reason="WORK result is absent", effect_id=effect)
     if work.status is Observation.PASS:
         if not work.output_head or work.output_head == work.input_head:
             return _action(ActionKind.HUMAN, reason="WORK PASS produced no new HEAD", effect_id=effect)
@@ -462,8 +456,6 @@ def _prove(
     if len(matches) != 1:
         return _action(ActionKind.HUMAN, reason="conflicting PROVE evidence", effect_id=effect)
     proof = matches[0]
-    if proof.status is Observation.ABSENT:
-        return _action(ActionKind.IDLE, reason="PROVE result is absent", effect_id=effect)
     if proof.status is Observation.FAIL:
         judged = _judge(
             s, results, spec, "PROVE_MECHANICAL", proof.effect_id, proof.evidence_digest
