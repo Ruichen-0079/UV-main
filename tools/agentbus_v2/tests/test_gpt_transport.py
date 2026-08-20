@@ -31,6 +31,7 @@ from tools.agentbus_v2.gpt_transport import (
     lane_for_action,
     lane_for_operation,
     lane_lock,
+    load_lane_config,
 )
 from tools.agentbus_v2.scheduler import ProjectEntry, ProjectRegistry, Scheduler
 
@@ -146,6 +147,32 @@ class GPTTransportTests(unittest.TestCase):
         self.assertEqual("plan", lane_for_action(Action(ActionKind.PLAN)))
         self.assertEqual("judge", lane_for_action(Action(ActionKind.JUDGE)))
         self.assertIsNone(lane_for_action(Action(ActionKind.WORK)))
+
+    def test_enabled_browser_lanes_require_distinct_conversations_and_shared_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            config = state / "gpt_lanes.json"
+            base = {
+                "bridge_token": "shared",
+                "plan": {
+                    "enabled": True,
+                    "transport": "browser",
+                    "conversation_url": "https://chatgpt.com/c/same",
+                },
+                "judge": {
+                    "enabled": True,
+                    "transport": "browser",
+                    "conversation_url": "https://chatgpt.com/c/same#fragment",
+                },
+            }
+            config.write_text(json.dumps(base), encoding="utf-8")
+            with self.assertRaisesRegex(FactError, "distinct conversation"):
+                load_lane_config(state)
+            base["judge"]["conversation_url"] = "https://chatgpt.com/c/judge"
+            base["judge"]["bridge_token"] = "different"
+            config.write_text(json.dumps(base), encoding="utf-8")
+            with self.assertRaisesRegex(FactError, "share one bridge_token"):
+                load_lane_config(state)
 
     def test_pending_plan_dispatches_after_decide_becomes_idle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -491,6 +518,109 @@ class GPTTransportTests(unittest.TestCase):
                 self.assertFalse((paths.root / "gpt" / "results" / f"{job}.json").exists())
             finally:
                 transport.close()
+
+    def test_same_lane_jobs_are_fifo_and_both_ps_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_paths, second_paths = setup_p(root, "P1"), setup_p(root, "P2")
+            write_lane_config(root, judge=False)
+            first_job = "plan-" + "1" * 24
+            second_job = "plan-" + "2" * 24
+            write_packet(first_paths, first_job, "PLAN_GPT")
+            write_packet(second_paths, second_job, "PLAN_GPT")
+            actions = {
+                "P1": Action(ActionKind.PLAN, effect_id=first_job),
+                "P2": Action(ActionKind.PLAN, effect_id=second_job),
+            }
+            calls: list[str] = []
+            first_started = threading.Event()
+            release_first = threading.Event()
+
+            class OrderedFake(FakeGPTAdapter):
+                def send(self, lane, job_id, operation, packet_text):
+                    calls.append(job_id)
+                    if job_id == first_job:
+                        first_started.set()
+                        release_first.wait(3)
+                    return response(job_id, operation, "WAIT")
+
+            transport = GPTTransport(
+                root / "state", adapters={"fake": OrderedFake()}, max_workers=2
+            )
+            try:
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    side_effect=lambda paths, allow_merge=False: snapshot_for(
+                        paths.root.name,
+                        pending=actions[paths.root.name].effect_id,
+                    ),
+                ):
+                    self.assertTrue(transport.try_dispatch("P1", actions["P1"]).accepted)
+                    self.assertTrue(first_started.wait(2))
+                    queued = transport.try_dispatch("P2", actions["P2"])
+                    self.assertTrue(queued.accepted)
+                    self.assertIn("queued", queued.detail)
+                    time.sleep(0.05)
+                    self.assertEqual([first_job], calls)
+                    release_first.set()
+                    self.wait_result(
+                        first_paths.root / "gpt" / "results" / f"{first_job}.json"
+                    )
+                    self.wait_result(
+                        second_paths.root / "gpt" / "results" / f"{second_job}.json"
+                    )
+                self.assertEqual([first_job, second_job], calls)
+            finally:
+                release_first.set()
+                transport.close()
+
+    def test_close_cancels_queued_job_and_is_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_paths, second_paths = setup_p(root, "P1"), setup_p(root, "P2")
+            write_lane_config(root, judge=False)
+            first_job = "plan-" + "3" * 24
+            second_job = "plan-" + "4" * 24
+            write_packet(first_paths, first_job, "PLAN_GPT")
+            write_packet(second_paths, second_job, "PLAN_GPT")
+            actions = {
+                "P1": Action(ActionKind.PLAN, effect_id=first_job),
+                "P2": Action(ActionKind.PLAN, effect_id=second_job),
+            }
+            started = threading.Event()
+            release = threading.Event()
+            cancelled: list[object] = []
+
+            class BlockingFake(FakeGPTAdapter):
+                def send(self, lane, job_id, operation, packet_text):
+                    started.set()
+                    release.wait(3)
+                    return response(job_id, operation, "WAIT")
+
+            transport = GPTTransport(root / "state", adapters={"fake": BlockingFake()})
+            with patch(
+                "tools.agentbus_v2.gpt_transport.read_snapshot",
+                side_effect=lambda paths, allow_merge=False: snapshot_for(
+                    paths.root.name,
+                    pending=actions[paths.root.name].effect_id,
+                ),
+            ):
+                self.assertTrue(transport.try_dispatch("P1", actions["P1"]).accepted)
+                self.assertTrue(started.wait(2))
+                self.assertTrue(
+                    transport.try_dispatch(
+                        "P2", actions["P2"], on_complete=cancelled.append
+                    ).accepted
+                )
+                transport.close()
+                self.assertEqual(1, len(cancelled))
+                self.assertFalse(cancelled[0].accepted)
+                self.assertIn("closed", cancelled[0].detail)
+                refused = transport.try_dispatch("P2", actions["P2"])
+                self.assertFalse(refused.accepted)
+                self.assertIn("closed", refused.detail)
+                release.set()
+                self.wait_idle(transport)
 
     def test_plan_and_judge_lanes_run_concurrently(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

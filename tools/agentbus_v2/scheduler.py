@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
@@ -12,11 +13,12 @@ import threading
 import time
 from typing import Callable, Sequence
 
-from .core import Action, ActionKind
-from .facts import FactError, load_config, load_gpt_packet, paths_for, read_snapshot
+from .core import Action, ActionKind, Snapshot
+from .facts import FactError, PPaths, load_config, load_gpt_packet, paths_for, read_snapshot
 
 
 DEFAULT_POLL_INTERVAL = 20.0
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -192,17 +194,13 @@ def _default_tick(state_root: Path, p_id: str, *, allow_merge: bool):
     return tick_once(state_root, p_id, allow_merge=allow_merge)
 
 
-def _pending_gpt_action(
-    state_root: Path, p_id: str, *, allow_merge: bool
-) -> Action | None:
-    """Reconstruct one exact pending GPT delivery from durable facts.
+def pending_gpt_action(paths: PPaths, snapshot: Snapshot) -> Action | None:
+    """Reconstruct one exact pending GPT delivery from a fresh snapshot.
 
-    The scheduler keeps no recovery state.  A fresh snapshot projects at most
-    the exact causally current GPT outbox into ``gpt_pending``; the packet then
-    supplies only the logical operation needed to select the transport lane.
+    A fresh snapshot projects at most the exact causally current GPT outbox
+    into ``gpt_pending``; the packet supplies only the logical operation needed
+    to select the transport lane.
     """
-    paths = paths_for(state_root, p_id)
-    snapshot = read_snapshot(paths, allow_merge=allow_merge)
     if len(snapshot.gpt_pending) != 1:
         return None
     job_id = next(iter(snapshot.gpt_pending))
@@ -213,6 +211,17 @@ def _pending_gpt_action(
     if operation == "JUDGE_GPT":
         return Action(ActionKind.JUDGE, effect_id=job_id)
     raise FactError(f"current GPT packet has unsupported operation: {operation!r}")
+
+
+def _pending_gpt_action(
+    state_root: Path, p_id: str, *, allow_merge: bool
+) -> Action | None:
+    """Fresh-read wrapper used by memoryless scheduler recovery."""
+    paths = paths_for(state_root, p_id)
+    return pending_gpt_action(
+        paths,
+        read_snapshot(paths, allow_merge=allow_merge),
+    )
 
 
 class Scheduler:
@@ -249,6 +258,8 @@ class Scheduler:
         self._stop = threading.Event()
         self._state_lock = threading.RLock()
         self._running = False
+        self._closed = False
+        self._wake_requested: set[str] = set()
         if gpt_transport is None:
             from .gpt_transport import GPTTransport
 
@@ -261,8 +272,13 @@ class Scheduler:
         return load_registry(self.state_root, self.registry_file)
 
     def _pool_for(self, registry: ProjectRegistry) -> ThreadPoolExecutor:
+        if self._closed:
+            raise RuntimeError("scheduler is closed")
         if self._pool is None:
-            workers = self.max_workers or max(1, len(registry.enabled))
+            # Registry membership is stable while enable flags are operational.
+            # Size for every registered P so later re-enable cannot silently
+            # collapse otherwise independent Ps onto the first-start capacity.
+            workers = self.max_workers or max(1, len(registry.entries))
             self._pool = ThreadPoolExecutor(
                 max_workers=workers, thread_name_prefix="agentbus-v2-p"
             )
@@ -276,7 +292,12 @@ class Scheduler:
         force: bool = False,
     ) -> bool:
         with self._state_lock:
-            if (not entry.enabled and not force) or entry.p_id in self._in_flight or self._stop.is_set():
+            if (
+                self._closed
+                or (not entry.enabled and not force)
+                or entry.p_id in self._in_flight
+                or self._stop.is_set()
+            ):
                 return False
             future = self._pool_for(registry).submit(
                 self.tick_function,
@@ -285,6 +306,7 @@ class Scheduler:
                 allow_merge=entry.allow_merge,
             )
             self._in_flight[entry.p_id] = future
+            self._wake_requested.discard(entry.p_id)
             return True
 
     def is_in_flight(self, p_id: str) -> bool:
@@ -307,6 +329,8 @@ class Scheduler:
         if entry is None:
             raise FactError(f"unknown scheduler P_ID: {p_id}")
         with self._state_lock:
+            if self._closed:
+                raise RuntimeError("scheduler is closed")
             if p_id in self._in_flight:
                 raise RuntimeError(f"P is already in flight: {p_id}")
             was_stopped = self._stop.is_set()
@@ -322,7 +346,8 @@ class Scheduler:
             # no collector to retire its future.  Retire it from the callback
             # in that case; a running loop remains the collector so it can
             # apply its normal immediate-retick policy.
-            if on_event is not None or not self._running:
+            running = self._running
+            if not running:
                 def finish(done: Future[tuple[Action, object | None]]) -> None:
                     with self._state_lock:
                         if self._in_flight.get(p_id) is not done:
@@ -333,11 +358,18 @@ class Scheduler:
                     except Exception:
                         action = None
                     if action is not None:
-                        self._dispatch_gpt(p_id, action, registry)
+                        self._dispatch_gpt(p_id, action)
                     if on_event is not None:
-                        on_event(self._event(p_id, done))
+                        self._emit(on_event, self._event(p_id, done))
 
                 future.add_done_callback(finish)
+            elif on_event is not None:
+                # The polling loop remains the sole lifecycle collector.  A
+                # per-submit callback may observe completion but must not race
+                # the loop to retire or redispatch the same future.
+                future.add_done_callback(
+                    lambda done: self._emit(on_event, self._event(p_id, done))
+                )
             if was_stopped:
                 self._stop.set()
             return future
@@ -346,9 +378,33 @@ class Scheduler:
         for entry in registry.enabled:
             self._submit(entry, registry)
 
-    def _dispatch_gpt(self, p_id: str, action: Action, registry: ProjectRegistry) -> None:
-        entry = next((item for item in registry.entries if item.p_id == p_id), None)
-        if entry is None:
+    @staticmethod
+    def _emit(
+        callback: Callable[[SchedulerEvent], None], event: SchedulerEvent
+    ) -> None:
+        try:
+            callback(event)
+        except Exception:
+            LOGGER.exception("scheduler event callback failed")
+
+    def _current_entry(self, p_id: str) -> ProjectEntry | None:
+        registry = self._registry()
+        return next((item for item in registry.entries if item.p_id == p_id), None)
+
+    def _is_enabled(self, p_id: str) -> bool:
+        entry = self._current_entry(p_id)
+        return bool(entry is not None and entry.enabled)
+
+    def _dispatch_gpt(self, p_id: str, action: Action) -> None:
+        with self._state_lock:
+            if self._closed or self._stop.is_set():
+                return
+            wake_on_complete = self._running
+        try:
+            entry = self._current_entry(p_id)
+        except (FactError, OSError):
+            return
+        if entry is None or not entry.enabled:
             return
         candidate = action
         if candidate.kind not in {ActionKind.PLAN, ActionKind.JUDGE}:
@@ -366,7 +422,41 @@ class Scheduler:
             p_id,
             candidate,
             allow_merge=entry.allow_merge,
+            should_send=lambda: self._is_enabled(p_id),
+            on_complete=(
+                (lambda result: self._gpt_completed(p_id, result))
+                if wake_on_complete
+                else None
+            ),
         )
+
+    def _gpt_completed(self, p_id: str, result: object) -> None:
+        if not bool(getattr(result, "changed", False)):
+            return
+        with self._state_lock:
+            if self._closed or self._stop.is_set():
+                return
+            self._wake_requested.add(p_id)
+        self._drain_wake(p_id)
+
+    def _drain_wake(self, p_id: str) -> None:
+        with self._state_lock:
+            if (
+                p_id not in self._wake_requested
+                or self._closed
+                or self._stop.is_set()
+            ):
+                return
+        try:
+            registry = self._registry()
+        except (FactError, OSError):
+            return
+        entry = next((item for item in registry.entries if item.p_id == p_id), None)
+        if entry is None or not entry.enabled:
+            with self._state_lock:
+                self._wake_requested.discard(p_id)
+            return
+        self._submit(entry, registry)
 
     @staticmethod
     def _event(p_id: str, future: Future[tuple[Action, object | None]]) -> SchedulerEvent:
@@ -380,6 +470,10 @@ class Scheduler:
         return SchedulerEvent(now, p_id, action.kind.value, changed, str(detail))
 
     def _collect(self, done: Sequence[Future[tuple[Action, object | None]]], registry: ProjectRegistry) -> tuple[SchedulerEvent, ...]:
+        # Registry flags are operational and may change while a long tick is in
+        # flight.  Completion must use the fresh enable/merge permissions, not
+        # the registry instance that originally submitted the tick.
+        registry = self._registry()
         with self._state_lock:
             by_future = {future: p_id for p_id, future in self._in_flight.items()}
         pending = [future for future in done if future in by_future]
@@ -395,13 +489,14 @@ class Scheduler:
             except Exception:
                 action = None
             if action is not None:
-                self._dispatch_gpt(p_id, action, registry)
+                self._dispatch_gpt(p_id, action)
             entry = next((item for item in registry.entries if item.p_id == p_id), None)
             if event.changed and p_id not in self._immediate_used and entry is not None and entry.enabled:
-                self._immediate_used.add(p_id)
-                self._submit(entry, registry)
+                if self._submit(entry, registry):
+                    self._immediate_used.add(p_id)
             else:
                 self._immediate_used.discard(p_id)
+            self._drain_wake(p_id)
         return tuple(events)
 
     def run_once(self) -> tuple[SchedulerEvent, ...]:
@@ -443,10 +538,13 @@ class Scheduler:
                 if done:
                     for event in self._collect(tuple(done), registry):
                         if on_event is not None:
-                            on_event(event)
+                            self._emit(on_event, event)
         except KeyboardInterrupt:
             self.stop()
         finally:
+            # Fence GPT completion callbacks before publishing that the polling
+            # loop is no longer running or closing its pools.
+            self.stop()
             with self._state_lock:
                 self._running = False
             self.close()
@@ -455,7 +553,13 @@ class Scheduler:
         self._stop.set()
 
     def close(self) -> None:
-        pool, self._pool = self._pool, None
+        self.stop()
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._wake_requested.clear()
+            pool, self._pool = self._pool, None
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
         close_transport = getattr(self.gpt_transport, "close", None)

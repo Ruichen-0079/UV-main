@@ -9,6 +9,7 @@ const BRIDGE_BASE = "http://127.0.0.1:6791";
 const BRIDGE_PATHS = new Set([
   "/bridge/config",
   "/bridge/pull",
+  "/bridge/claim",
   "/bridge/heartbeat",
   "/bridge/diagnostic",
   "/bridge/result"

@@ -12,6 +12,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import logging
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Any, Mapping
@@ -21,10 +22,12 @@ from urllib.parse import parse_qs, urlsplit
 LOGGER = logging.getLogger(__name__)
 DEFAULT_BRIDGE_HOST = "127.0.0.1"
 DEFAULT_BRIDGE_PORT = 6791
+DEFAULT_BROWSER_TIMEOUT = 150.0
 BRIDGE_TOKEN_HEADER = "X-AgentBus-Token"
 MAX_BRIDGE_BODY = 1_000_000
 LANES = frozenset(("plan", "judge"))
 OPERATIONS = {"plan": "PLAN_GPT", "judge": "JUDGE_GPT"}
+CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 class BrowserTransportError(RuntimeError):
@@ -49,6 +52,7 @@ class PendingBrowserJob:
     conversation_url: str
     event: threading.Event
     response: str | BaseException | None = None
+    claimed_by: str | None = None
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -127,23 +131,47 @@ class _BridgeState:
                 item.response = BrowserTransportError("browser bridge stopped")
                 item.event.set()
 
-    def pull(self, lane: str) -> dict[str, str] | None:
+    def pull(self, lane: str, client_id: str) -> dict[str, str] | None:
+        if not CLIENT_ID_RE.fullmatch(client_id):
+            raise BrowserTransportError("browser client_id is invalid")
         with self.lock:
             item = self.pending.get(lane)
-            return None if item is None else item.as_dict()
+            if item is None:
+                return None
+            if item.claimed_by is not None and item.claimed_by != client_id:
+                return None
+            return item.as_dict()
+
+    def claim(self, lane: str, job_id: str, client_id: str) -> None:
+        if not CLIENT_ID_RE.fullmatch(client_id):
+            raise BrowserTransportError("browser client_id is invalid")
+        with self.lock:
+            item = self.pending.get(lane)
+            if item is None or item.job_id != job_id:
+                raise BrowserTransportError("no matching browser request is pending")
+            if item.claimed_by is None:
+                item.claimed_by = client_id
+            elif item.claimed_by != client_id:
+                raise BrowserTransportError("browser request is claimed by another client")
 
     def config(self, lane: str) -> dict[str, str] | None:
         with self.lock:
             url = self.conversation_urls.get(lane)
         return None if url is None else {"lane": lane, "conversation_url": url}
 
-    def accept_result(self, lane: str, job_id: str, raw_response: str) -> None:
+    def accept_result(
+        self, lane: str, job_id: str, client_id: str, raw_response: str
+    ) -> None:
+        if not CLIENT_ID_RE.fullmatch(client_id):
+            raise BrowserTransportError("browser client_id is invalid")
         with self.lock:
             item = self.pending.get(lane)
             if item is None:
                 raise BrowserTransportError("no matching browser request is pending")
             if item.job_id != job_id:
                 raise BrowserTransportError("browser result job_id does not match pending job")
+            if item.claimed_by is None or item.claimed_by != client_id:
+                raise BrowserTransportError("browser result client_id does not own pending job")
             if not isinstance(raw_response, str) or not raw_response.strip():
                 raise BrowserTransportError("browser result raw_response must be non-empty text")
             if item.response is not None:
@@ -183,6 +211,7 @@ class _BridgeState:
             heartbeat = self.heartbeats.get(lane)
         result: dict[str, object] = {
             "bridge_pending": pending is not None,
+            "bridge_claimed": bool(pending is not None and pending.claimed_by is not None),
             "bridge_connected": bool(
                 heartbeat is not None and time.time() - heartbeat[0] <= 15.0
             ),
@@ -295,6 +324,8 @@ class BrowserBridgeRequestHandler(BaseHTTPRequestHandler):
             if lane not in LANES:
                 raise BrowserTransportError("unsupported browser lane")
             if parsed.path == "/bridge/config":
+                if set(values) != {"lane"} or len(values["lane"]) != 1:
+                    raise BrowserTransportError("browser config query is invalid")
                 payload = self.server.bridge_state.config(lane)
                 if payload is None:
                     self._write(404, {"error": "browser lane is not configured"})
@@ -303,7 +334,13 @@ class BrowserBridgeRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path != "/bridge/pull":
                 raise BrowserTransportError("unknown browser bridge endpoint")
-            payload = self.server.bridge_state.pull(lane)
+            if (
+                set(values) != {"lane", "client_id"}
+                or len(values["lane"]) != 1
+                or len(values["client_id"]) != 1
+            ):
+                raise BrowserTransportError("browser pull query is invalid")
+            payload = self.server.bridge_state.pull(lane, values["client_id"][0])
             if payload is None:
                 self._write(204, empty=True)
             else:
@@ -319,12 +356,25 @@ class BrowserBridgeRequestHandler(BaseHTTPRequestHandler):
             self._token()
             parsed = urlsplit(self.path)
             body = self._body()
+            if parsed.path == "/bridge/claim":
+                self._exact(body, {"lane", "job_id", "client_id"})
+                lane = body["lane"]
+                job_id = body["job_id"]
+                client_id = body["client_id"]
+                if not all(type(value) is str for value in (lane, job_id, client_id)):
+                    raise BrowserTransportError("bridge claim fields must be strings")
+                self.server.bridge_state.claim(lane, job_id, client_id)
+                self._write(200, {"accepted": True})
+                return
             if parsed.path == "/bridge/result":
-                self._exact(body, {"lane", "job_id", "raw_response"})
-                lane, job_id, raw = body["lane"], body["job_id"], body["raw_response"]
-                if type(lane) is not str or type(job_id) is not str or type(raw) is not str:
+                self._exact(body, {"lane", "job_id", "client_id", "raw_response"})
+                lane = body["lane"]
+                job_id = body["job_id"]
+                client_id = body["client_id"]
+                raw = body["raw_response"]
+                if not all(type(value) is str for value in (lane, job_id, client_id, raw)):
                     raise BrowserTransportError("bridge result fields must be strings")
-                self.server.bridge_state.accept_result(lane, job_id, raw)
+                self.server.bridge_state.accept_result(lane, job_id, client_id, raw)
                 self._write(200, {"accepted": True})
                 return
             if parsed.path == "/bridge/heartbeat":
@@ -435,9 +485,11 @@ class BrowserAdapter:
         config_path: Path | None = None,
         host: str = DEFAULT_BRIDGE_HOST,
         port: int = DEFAULT_BRIDGE_PORT,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_BROWSER_TIMEOUT,
         bridge: BrowserBridge | None = None,
     ) -> None:
+        if timeout <= 0:
+            raise ValueError("browser response timeout must be positive")
         self.state_root = Path(state_root).resolve()
         self.config_path = Path(config_path).resolve() if config_path else None
         self.timeout = timeout

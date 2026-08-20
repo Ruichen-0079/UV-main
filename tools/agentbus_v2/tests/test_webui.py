@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import http.client
 import json
 from pathlib import Path
@@ -137,6 +138,32 @@ class WebUITests(unittest.TestCase):
         dispatch.assert_not_called()
         self.assertEqual([], payload["events"])
 
+    def test_status_keeps_exact_retained_gpt_packet_deliverable_when_core_is_idle(self) -> None:
+        job_id = self.action.effect_id
+        packet_path = self.state_root / "P1" / "gpt" / "outbox" / f"{job_id}.md"
+        packet_path.parent.mkdir(parents=True)
+        packet_path.write_text(
+            "# packet\n## SEMANTIC INPUTS\n```json\n"
+            + json.dumps({
+                "packet_schema": GPT_PACKET_SCHEMA,
+                "job_id": job_id,
+                "operation": "PLAN_GPT",
+                "semantic_input": {"job_id": job_id, "operation": "PLAN_GPT"},
+            })
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        pending = replace(self.snapshot, gpt_pending=frozenset({job_id}))
+        idle = Action(ActionKind.IDLE, reason="GPT result is absent")
+        with patch.object(webui, "read_snapshot", return_value=pending), patch.object(
+            webui, "decide", return_value=idle
+        ):
+            status, payload = self.server.request("/api/status")
+        self.assertEqual(200, status)
+        self.assertEqual("IDLE", payload["projects"][0]["action"])
+        self.assertEqual(job_id, payload["projects"][0]["manual_gpt"]["job_id"])
+        self.assertEqual("PLAN_GPT", payload["projects"][0]["manual_gpt"]["operation"])
+
     def test_mutations_change_registry_only_and_unknown_is_rejected(self) -> None:
         status, payload = self.post("/api/project/P1/enabled", {"enabled": False})
         self.assertEqual(200, status)
@@ -154,6 +181,8 @@ class WebUITests(unittest.TestCase):
         self.assertIn("unknown", payload["error"])
 
     def test_mutations_require_exact_json_and_loopback_token(self) -> None:
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            webui.make_server(self.state, host="0.0.0.0", port=0)
         status, payload = self.server.request(
             "/api/project/P1/enabled", method="POST", body={"enabled": False}
         )

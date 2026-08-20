@@ -23,6 +23,7 @@ from .scheduler import (
     Scheduler,
     SchedulerEvent,
     load_registry,
+    pending_gpt_action,
     update_project,
 )
 
@@ -195,17 +196,24 @@ class WebUIState:
                 config = load_config(paths)
                 snapshot = read_snapshot(paths, allow_merge=entry.allow_merge)
                 action = decide(snapshot)
+                delivery = (
+                    action
+                    if action.kind in {ActionKind.PLAN, ActionKind.JUDGE}
+                    else pending_gpt_action(paths, snapshot)
+                )
                 projection.update(
                     {
                         "action": action.kind.value,
                         "detail": projection["detail"] or action.reason,
                         "head": snapshot.head[:8],
                         "spec_id": snapshot.specs[-1].spec_id if snapshot.specs else None,
-                        "manual_gpt": self._manual_packet(paths, action),
+                        "manual_gpt": self._manual_packet(paths, delivery)
+                        if delivery is not None
+                        else None,
                     }
                 )
                 if projection["manual_gpt"] is not None:
-                    projection["manual_gpt"]["mode"] = gpt_transport.mode_for(action)
+                    projection["manual_gpt"]["mode"] = gpt_transport.mode_for(delivery)
                 # Keep config loading explicit: it fences the registered P before
                 # projecting any of its durable facts.
                 if config.p_id != entry.p_id:
@@ -405,8 +413,8 @@ def make_server(
     host: str = DEFAULT_WEB_HOST,
     port: int = DEFAULT_WEB_PORT,
 ) -> WebUIHTTPServer:
-    if not host:
-        raise ValueError("webui host cannot be empty")
+    if host != DEFAULT_WEB_HOST:
+        raise ValueError("webui must bind the IPv4 loopback address")
     if port < 0 or port > 65535:
         raise ValueError("webui port must be between 0 and 65535")
     return WebUIHTTPServer((host, port), state)

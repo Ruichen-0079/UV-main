@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass
 import fcntl
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
@@ -22,6 +24,7 @@ from .facts import FactError, load_config, load_gpt_packet, paths_for, read_snap
 LANE_NAMES = ("plan", "judge")
 OPERATION_LANES = {"PLAN_GPT": "plan", "JUDGE_GPT": "judge"}
 LANE_CONFIG_FILE = "gpt_lanes.json"
+LOGGER = logging.getLogger(__name__)
 
 
 class TransportError(RuntimeError):
@@ -47,6 +50,17 @@ class TransportResult:
     accepted: bool
     changed: bool = False
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class _QueuedDispatch:
+    p_id: str
+    action: Action
+    allow_merge: bool
+    lane: str
+    transport_name: str
+    should_send: Callable[[], bool] | None
+    on_complete: Callable[[TransportResult], None] | None
 
 
 def lane_for_operation(operation: str) -> str:
@@ -116,6 +130,32 @@ def load_lane_config(state_root: Path, path: Path | None = None) -> dict[str, La
         unknown = set(value) - set(LANE_NAMES) - {"bridge_token"}
         if unknown:
             raise TypeError(f"unknown GPT lanes: {sorted(unknown)}")
+        enabled_browser = [
+            config
+            for config in result.values()
+            if config.enabled and config.transport == "browser"
+        ]
+        if enabled_browser:
+            from .browser_transport import canonical_conversation_url
+
+            if any(
+                config.conversation_url is None or config.bridge_token is None
+                for config in enabled_browser
+            ):
+                raise TypeError(
+                    "enabled browser lanes require conversation_url and bridge_token"
+                )
+            try:
+                urls = [
+                    canonical_conversation_url(str(config.conversation_url))
+                    for config in enabled_browser
+                ]
+            except RuntimeError as error:
+                raise TypeError(str(error)) from error
+            if len(set(urls)) != len(urls):
+                raise TypeError("enabled browser lanes require distinct conversation URLs")
+            if len({config.bridge_token for config in enabled_browser}) != 1:
+                raise TypeError("enabled browser lanes must share one bridge_token")
         return result
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
         raise FactError(f"invalid GPT lane configuration {source}: {error}") from error
@@ -182,13 +222,21 @@ class GPTTransport:
         browser_adapter: GPTAdapter | None = None,
         max_workers: int = 2,
     ) -> None:
+        if max_workers <= 0:
+            raise ValueError("max workers must be positive")
         self.state_root = Path(state_root).resolve()
         self.config_path = Path(config_path).resolve() if config_path else None
         self.adapters = dict(adapters or {})
         self._browser_adapter = browser_adapter
         self.max_workers = max_workers
         self._lock = threading.RLock()
-        self._in_flight: dict[str, tuple[str, Future[TransportResult]]] = {}
+        self._queues: dict[str, deque[_QueuedDispatch]] = {
+            lane: deque() for lane in LANE_NAMES
+        }
+        self._active: dict[
+            str, tuple[_QueuedDispatch, Future[TransportResult]]
+        ] = {}
+        self._jobs: set[str] = set()
         self._last_errors: dict[str, str] = {}
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="agentbus-v2-gpt")
         self._closed = False
@@ -203,6 +251,8 @@ class GPTTransport:
         if transport_name != "browser":
             return None
         with self._lock:
+            if self._closed:
+                raise TransportError("GPT transport is closed")
             if self._browser_adapter is None:
                 from .browser_transport import BrowserAdapter
 
@@ -218,25 +268,67 @@ class GPTTransport:
             return None
         config = self._config()[lane]
         with self._lock:
-            dispatching = bool(action.effect_id and action.effect_id in self._in_flight)
+            dispatching = bool(action.effect_id and action.effect_id in self._jobs)
         if config.enabled and config.transport != "manual":
             return "AUTO DISPATCHING" if dispatching else "AUTO"
         return "MANUAL"
 
-    def _finish(self, job_id: str, future: Future[TransportResult]) -> None:
+    @staticmethod
+    def _notify(
+        callback: Callable[[TransportResult], None] | None,
+        result: TransportResult,
+    ) -> None:
+        if callback is None:
+            return
+        try:
+            callback(result)
+        except Exception:
+            LOGGER.exception("GPT transport completion callback failed")
+
+    def _start_next_locked(self, lane: str) -> None:
+        if self._closed or lane in self._active or not self._queues[lane]:
+            return
+        queued = self._queues[lane].popleft()
+        future = self._pool.submit(
+            self._run,
+            queued.p_id,
+            queued.action,
+            queued.allow_merge,
+            queued.lane,
+            queued.transport_name,
+            queued.should_send,
+        )
+        self._active[lane] = (queued, future)
+        future.add_done_callback(
+            lambda done, lane=lane, queued=queued: self._finish(lane, queued, done)
+        )
+
+    def _finish(
+        self,
+        lane: str,
+        queued: _QueuedDispatch,
+        future: Future[TransportResult],
+    ) -> None:
+        try:
+            result = future.result()
+        except CancelledError:
+            result = TransportResult(False, detail="GPT dispatch was cancelled during close")
+        except Exception as error:
+            result = TransportResult(False, detail=f"GPT transport exception: {error}")
+        job_id = queued.action.effect_id
         with self._lock:
-            item = self._in_flight.get(job_id)
-            if item is not None and item[1] is future:
-                self._in_flight.pop(job_id, None)
-                try:
-                    result = future.result()
-                except Exception as error:
-                    self._last_errors[item[0]] = str(error)
-                else:
-                    if result.accepted:
-                        self._last_errors.pop(item[0], None)
-                    else:
-                        self._last_errors[item[0]] = result.detail
+            active = self._active.get(lane)
+            if active is None or active[0] is not queued or active[1] is not future:
+                return
+            self._active.pop(lane, None)
+            if job_id is not None:
+                self._jobs.discard(job_id)
+            if result.accepted:
+                self._last_errors.pop(lane, None)
+            else:
+                self._last_errors[lane] = result.detail
+            self._start_next_locked(lane)
+        self._notify(queued.on_complete, result)
 
     @staticmethod
     def _operation_for_lane(lane: str) -> str:
@@ -278,6 +370,7 @@ class GPTTransport:
         action: Action,
         *,
         allow_merge: bool = False,
+        should_send: Callable[[], bool] | None = None,
         on_complete: Callable[[TransportResult], None] | None = None,
     ) -> TransportResult:
         lane = lane_for_action(action)
@@ -313,20 +406,24 @@ class GPTTransport:
             return TransportResult(False, detail="GPT result appeared before dispatch")
         with self._lock:
             if self._closed:
-                self._pool = ThreadPoolExecutor(
-                    max_workers=self.max_workers, thread_name_prefix="agentbus-v2-gpt"
-                )
-                self._closed = False
-            if job_id in self._in_flight:
-                return TransportResult(False, detail=f"GPT job already in flight: {job_id}")
-            future = self._pool.submit(
-                self._run, p_id, action, allow_merge, lane, config.transport
+                return TransportResult(False, detail="GPT transport is closed")
+            if job_id in self._jobs:
+                return TransportResult(False, detail=f"GPT job already queued or in flight: {job_id}")
+            queued = _QueuedDispatch(
+                p_id,
+                action,
+                allow_merge,
+                lane,
+                config.transport,
+                should_send,
+                on_complete,
             )
-            self._in_flight[job_id] = (lane, future)
-            future.add_done_callback(lambda done: self._finish(job_id, done))
-            if on_complete is not None:
-                future.add_done_callback(lambda done: on_complete(done.result()))
-        return TransportResult(True, detail=f"dispatched {job_id} on {lane}")
+            self._jobs.add(job_id)
+            self._queues[lane].append(queued)
+            queued_behind = lane in self._active
+            self._start_next_locked(lane)
+        detail = "queued" if queued_behind else "dispatched"
+        return TransportResult(True, detail=f"{detail} {job_id} on {lane}")
 
     def _run(
         self,
@@ -335,6 +432,7 @@ class GPTTransport:
         allow_merge: bool,
         lane: str,
         transport_name: str,
+        should_send: Callable[[], bool] | None,
     ) -> TransportResult:
         paths = paths_for(self.state_root, p_id)
         result_path = paths.root / "gpt" / "results" / f"{action.effect_id}.json"
@@ -344,7 +442,12 @@ class GPTTransport:
                     return TransportResult(False, detail=f"{lane} lane is busy")
                 if result_path.exists():
                     return TransportResult(False, detail="GPT result appeared before send")
-                config = load_config(paths)
+                if should_send is not None and not should_send():
+                    return TransportResult(False, detail="P was disabled before GPT send")
+                lane_config = self._config()[lane]
+                if not lane_config.enabled or lane_config.transport != transport_name:
+                    return TransportResult(False, detail="GPT lane configuration changed before send")
+                load_config(paths)
                 operation = self._recheck_pending(
                     paths,
                     action,
@@ -358,6 +461,8 @@ class GPTTransport:
                     raise TransportError(f"no adapter configured for {transport_name}")
                 if result_path.exists():
                     return TransportResult(False, detail="GPT result appeared before send")
+                if should_send is not None and not should_send():
+                    return TransportResult(False, detail="P was disabled before GPT send")
                 self._recheck_pending(
                     paths,
                     action,
@@ -392,7 +497,8 @@ class GPTTransport:
         except FactError as error:
             return ({"error": str(error)},)
         with self._lock:
-            busy = {lane for lane, _future in self._in_flight.values()}
+            busy = set(self._active)
+            queued = {lane: len(items) for lane, items in self._queues.items()}
         rows: list[dict[str, object]] = []
         for lane in LANE_NAMES:
             row: dict[str, object] = {
@@ -400,6 +506,7 @@ class GPTTransport:
                 "enabled": configs[lane].enabled,
                 "transport": configs[lane].transport,
                 "busy": lane in busy,
+                "queued": queued[lane],
             }
             if lane in self._last_errors:
                 row["last_error"] = self._last_errors[lane]
@@ -419,10 +526,17 @@ class GPTTransport:
         return tuple(rows)
 
     def close(self) -> None:
+        cancelled: list[_QueuedDispatch] = []
         with self._lock:
             if self._closed:
                 return
             self._closed = True
+            for lane in LANE_NAMES:
+                cancelled.extend(self._queues[lane])
+                for queued in self._queues[lane]:
+                    if queued.action.effect_id is not None:
+                        self._jobs.discard(queued.action.effect_id)
+                self._queues[lane].clear()
         self._pool.shutdown(wait=False, cancel_futures=True)
         adapters = list(self.adapters.values())
         if self._browser_adapter is not None:
@@ -435,3 +549,6 @@ class GPTTransport:
             close_adapter = getattr(adapter, "close", None)
             if close_adapter is not None:
                 close_adapter()
+        result = TransportResult(False, detail="GPT transport closed before queued dispatch")
+        for queued in cancelled:
+            self._notify(queued.on_complete, result)

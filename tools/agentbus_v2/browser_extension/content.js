@@ -11,7 +11,15 @@ const CONFIG = globalThis.AGENTBUS_V2_BROWSER_CONFIG || {
   response_timeout_ms: 120000
 };
 const LANES = ["plan", "judge"];
+
+function newClientId() {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return `client-${uuid}`;
+  return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 const state = {
+  client_id: newClientId(),
   current_job_id: null,
   matched_lanes: new Set(),
   heartbeat_lanes: new Set(),
@@ -243,7 +251,9 @@ async function bridgeFetch(path, options = {}) {
 }
 
 async function pull(lane) {
-  const response = await bridgeFetch(`/bridge/pull?lane=${encodeURIComponent(lane)}`);
+  const response = await bridgeFetch(
+    `/bridge/pull?lane=${encodeURIComponent(lane)}&client_id=${encodeURIComponent(state.client_id)}`
+  );
   if (response.status === 204) return null;
   if (!response.ok) throw new Error(`bridge pull HTTP ${response.status}`);
   return response.json();
@@ -254,6 +264,21 @@ async function laneConfig(lane) {
   if (response.status === 404 || response.status === 204) return null;
   if (!response.ok) throw new Error(`bridge config HTTP ${response.status}`);
   return response.json();
+}
+
+async function claim(request) {
+  const response = await bridgeFetch("/bridge/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      lane: request.lane,
+      job_id: request.job_id,
+      client_id: state.client_id
+    })
+  });
+  if (response.status === 409) return false;
+  if (!response.ok) throw new Error(`bridge claim HTTP ${response.status}`);
+  return true;
 }
 
 async function heartbeat(request) {
@@ -345,6 +370,12 @@ async function processRequest(request) {
     await reportDiagnostic(request.lane, "COMPOSER_NOT_EMPTY", "existing user text preserved");
     return false;
   }
+  if (!(await claim(request))) {
+    await reportDiagnostic(
+      request.lane, "CLAIM_BUSY", "another exact conversation client owns this job"
+    );
+    return false;
+  }
 
   await heartbeat(request);
   const before = assistantNodes();
@@ -398,7 +429,12 @@ async function processRequest(request) {
   const result = await bridgeFetch("/bridge/result", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ lane: request.lane, job_id: request.job_id, raw_response: rawResponse })
+    body: JSON.stringify({
+      lane: request.lane,
+      job_id: request.job_id,
+      client_id: state.client_id,
+      raw_response: rawResponse
+    })
   });
   if (!result.ok) throw new Error(`bridge result HTTP ${result.status}`);
   return true;
@@ -410,7 +446,8 @@ async function poll() {
     let request = null;
     try {
       const matched = await heartbeatIfBound(lane);
-      if (matched) await probeDom(lane);
+      if (!matched) continue;
+      await probeDom(lane);
       request = await pull(lane);
       if (!request || state.current_job_id) continue;
       if (canonicalUrl(location.href) !== canonicalUrl(request.conversation_url)) continue;

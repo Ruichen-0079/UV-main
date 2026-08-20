@@ -21,6 +21,7 @@ from tools.agentbus_v2.gpt_transport import GPTTransport
 
 SHA = "1" * 40
 TOKEN = "test-browser-token"
+CLIENT_ID = "test-browser-client"
 CONVERSATIONS = {
     "plan": "https://chatgpt.com/c/plan-lane",
     "judge": "https://chatgpt.com/c/judge-lane",
@@ -172,11 +173,19 @@ class BrowserTransportTests(unittest.TestCase):
         thread.start()
         return thread, result
 
-    def wait_pending(self, bridge: BrowserBridge, lane: str, timeout: float = 2.0) -> dict[str, str]:
+    def wait_pending(
+        self,
+        bridge: BrowserBridge,
+        lane: str,
+        timeout: float = 2.0,
+        *,
+        client_id: str = CLIENT_ID,
+    ) -> dict[str, str]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            pending = bridge.state.pull(lane)
+            pending = bridge.state.pull(lane, client_id)
             if pending is not None:
+                bridge.state.claim(lane, pending["job_id"], client_id)
                 return pending
             time.sleep(0.005)
         raise AssertionError(f"no pending {lane} browser request")
@@ -225,14 +234,14 @@ class BrowserTransportTests(unittest.TestCase):
                         bridge,
                         "/bridge/result",
                         method="POST",
-                        body={"lane": "plan", "job_id": plan_job, "raw_response": response(plan_job, "PLAN_GPT", "SPEC")},
+                        body={"lane": "plan", "job_id": plan_job, "client_id": CLIENT_ID, "raw_response": response(plan_job, "PLAN_GPT", "SPEC")},
                     )
                     self.assertEqual(200, status)
                     status, _ = request_json(
                         bridge,
                         "/bridge/result",
                         method="POST",
-                        body={"lane": "judge", "job_id": judge_job, "raw_response": response(judge_job, "JUDGE_GPT", "RETURN_WORK")},
+                        body={"lane": "judge", "job_id": judge_job, "client_id": CLIENT_ID, "raw_response": response(judge_job, "JUDGE_GPT", "RETURN_WORK")},
                     )
                     self.assertEqual(200, status)
                     deadline = time.monotonic() + 3
@@ -273,7 +282,7 @@ class BrowserTransportTests(unittest.TestCase):
                         bridge,
                         "/bridge/result",
                         method="POST",
-                        body={"lane": "plan", "job_id": job, "raw_response": response(job, "PLAN_GPT", "WAIT")},
+                        body={"lane": "plan", "job_id": job, "client_id": CLIENT_ID, "raw_response": response(job, "PLAN_GPT", "WAIT")},
                     )
                     self.assertEqual(200, status)
                     self.assertEqual(job, pending["job_id"])
@@ -294,12 +303,17 @@ class BrowserTransportTests(unittest.TestCase):
             thread, result = self.start_send(adapter, "plan", "plan-" + "c" * 24, "PLAN_GPT", "packet")
             bridge = wait_bridge(adapter)
             pending = self.wait_pending(bridge, "plan")
-            self.assertEqual(204, request_json(bridge, "/bridge/pull?lane=judge")[0])
+            self.assertEqual(
+                204,
+                request_json(
+                    bridge, f"/bridge/pull?lane=judge&client_id={CLIENT_ID}"
+                )[0],
+            )
             status, payload = request_json(
                 bridge,
                 "/bridge/result",
                 method="POST",
-                body={"lane": "judge", "job_id": pending["job_id"], "raw_response": "wrong lane"},
+                body={"lane": "judge", "job_id": pending["job_id"], "client_id": CLIENT_ID, "raw_response": "wrong lane"},
             )
             self.assertEqual(409, status)
             self.assertIn("pending", payload["error"])
@@ -307,7 +321,7 @@ class BrowserTransportTests(unittest.TestCase):
                 bridge,
                 "/bridge/result",
                 method="POST",
-                body={"lane": "plan", "job_id": "plan-" + "d" * 24, "raw_response": "wrong job"},
+                body={"lane": "plan", "job_id": "plan-" + "d" * 24, "client_id": CLIENT_ID, "raw_response": "wrong job"},
             )
             self.assertEqual(409, status)
             self.assertIn("job_id", payload["error"])
@@ -316,10 +330,86 @@ class BrowserTransportTests(unittest.TestCase):
                 bridge,
                 "/bridge/result",
                 method="POST",
-                body={"lane": "plan", "job_id": pending["job_id"], "raw_response": "raw answer"},
+                body={"lane": "plan", "job_id": pending["job_id"], "client_id": CLIENT_ID, "raw_response": "raw answer"},
             )
             thread.join(timeout=2)
             self.assertEqual(["raw answer"], result)
+            adapter.close()
+
+    def test_multiple_exact_tabs_get_one_ephemeral_claim_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            setup_p(root, "P1")
+            config_path = write_config(root)
+            adapter = BrowserAdapter(
+                root / "state", config_path=config_path, port=0, timeout=2
+            )
+            job = "plan-" + "d" * 24
+            thread, result = self.start_send(
+                adapter, "plan", job, "PLAN_GPT", "packet"
+            )
+            bridge = wait_bridge(adapter)
+            owner = "exact-tab-owner"
+            other = "duplicate-exact-tab"
+            deadline = time.monotonic() + 2
+            status, pending = 204, None
+            while time.monotonic() < deadline and status == 204:
+                status, pending = request_json(
+                    bridge, f"/bridge/pull?lane=plan&client_id={owner}"
+                )
+                if status == 204:
+                    time.sleep(0.005)
+            self.assertEqual(200, status)
+            self.assertEqual(job, pending["job_id"])
+            self.assertEqual(
+                200,
+                request_json(
+                    bridge, f"/bridge/pull?lane=plan&client_id={other}"
+                )[0],
+            )
+            status, _ = request_json(
+                bridge,
+                "/bridge/claim",
+                method="POST",
+                body={"lane": "plan", "job_id": job, "client_id": owner},
+            )
+            self.assertEqual(200, status)
+            self.assertEqual(
+                204,
+                request_json(
+                    bridge, f"/bridge/pull?lane=plan&client_id={other}"
+                )[0],
+            )
+            status, payload = request_json(
+                bridge,
+                "/bridge/result",
+                method="POST",
+                body={
+                    "lane": "plan",
+                    "job_id": job,
+                    "client_id": other,
+                    "raw_response": "duplicate",
+                },
+            )
+            self.assertEqual(409, status)
+            self.assertIn("does not own", payload["error"])
+            self.assertEqual(
+                400, request_json(bridge, "/bridge/pull?lane=plan")[0]
+            )
+            status, _ = request_json(
+                bridge,
+                "/bridge/result",
+                method="POST",
+                body={
+                    "lane": "plan",
+                    "job_id": job,
+                    "client_id": owner,
+                    "raw_response": "one response",
+                },
+            )
+            self.assertEqual(200, status)
+            thread.join(timeout=2)
+            self.assertEqual(["one response"], result)
             adapter.close()
 
     def test_same_lane_double_use_and_plan_judge_concurrency(self) -> None:
@@ -338,8 +428,8 @@ class BrowserTransportTests(unittest.TestCase):
             judge_pending = self.wait_pending(bridge, "judge")
             self.assertIsNotNone(judge_pending)
             plan_pending = self.wait_pending(bridge, "plan")
-            request_json(bridge, "/bridge/result", method="POST", body={"lane": "plan", "job_id": plan_pending["job_id"], "raw_response": "plan"})
-            request_json(bridge, "/bridge/result", method="POST", body={"lane": "judge", "job_id": judge_pending["job_id"], "raw_response": "judge"})
+            request_json(bridge, "/bridge/result", method="POST", body={"lane": "plan", "job_id": plan_pending["job_id"], "client_id": CLIENT_ID, "raw_response": "plan"})
+            request_json(bridge, "/bridge/result", method="POST", body={"lane": "judge", "job_id": judge_pending["job_id"], "client_id": CLIENT_ID, "raw_response": "judge"})
             first.join(timeout=2)
             judge.join(timeout=2)
             self.assertEqual(["plan"], first_result)
@@ -357,12 +447,14 @@ class BrowserTransportTests(unittest.TestCase):
             thread.join(timeout=2)
             self.assertIsInstance(result[0], BrowserTransportError)
             self.assertEqual([], list((root / "state" / "P1" / "gpt" / "results").glob("*.json")))
-            status, payload = request_json(bridge, "/bridge/pull?lane=plan", token="bad")
+            status, payload = request_json(
+                bridge, f"/bridge/pull?lane=plan&client_id={CLIENT_ID}", token="bad"
+            )
             self.assertEqual(403, status)
             self.assertIn("token", payload["error"])
             status, payload = request_json(
                 bridge,
-                "/bridge/pull?lane=plan",
+                f"/bridge/pull?lane=plan&client_id={CLIENT_ID}",
                 origin="https://evil.example",
             )
             self.assertEqual(403, status)
@@ -373,7 +465,7 @@ class BrowserTransportTests(unittest.TestCase):
             thread, result = self.start_send(restarted, "plan", "plan-" + "2" * 24, "PLAN_GPT", "packet")
             bridge = wait_bridge(restarted)
             pending = self.wait_pending(bridge, "plan")
-            request_json(bridge, "/bridge/result", method="POST", body={"lane": "plan", "job_id": pending["job_id"], "raw_response": "retry"})
+            request_json(bridge, "/bridge/result", method="POST", body={"lane": "plan", "job_id": pending["job_id"], "client_id": CLIENT_ID, "raw_response": "retry"})
             thread.join(timeout=2)
             self.assertEqual(["retry"], result)
             restarted.close()
@@ -402,7 +494,7 @@ class BrowserTransportTests(unittest.TestCase):
                 body={"lane": "plan", "conversation_url": CONVERSATIONS["plan"] + "#view"},
             )
             pending = self.wait_pending(bridge, "plan")
-            request_json(bridge, "/bridge/result", method="POST", body={"lane": "plan", "job_id": pending["job_id"], "raw_response": "ok"})
+            request_json(bridge, "/bridge/result", method="POST", body={"lane": "plan", "job_id": pending["job_id"], "client_id": CLIENT_ID, "raw_response": "ok"})
             thread.join(timeout=2)
             self.assertEqual(["ok"], result)
             adapter.close()

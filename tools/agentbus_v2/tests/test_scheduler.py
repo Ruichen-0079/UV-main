@@ -21,6 +21,7 @@ from tools.agentbus_v2.executor_pool import (
     worktree_lock_path,
 )
 from tools.agentbus_v2.facts import FactError
+from tools.agentbus_v2.gpt_transport import TransportResult
 from tools.agentbus_v2.scheduler import (
     ProjectEntry,
     ProjectRegistry,
@@ -231,6 +232,169 @@ class SchedulerTests(unittest.TestCase):
             finally:
                 self.stop(scheduler, thread)
 
+    def test_initially_disabled_registered_p_gets_full_concurrency_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            for p_id in ("P1", "P2"):
+                worktree = root / f"worktree-{p_id}"
+                worktree.mkdir()
+                make_config(state, p_id, worktree)
+            registry_file = root / "projects.json"
+            write_registry(
+                registry_file,
+                [
+                    {"p_id": "P1", "enabled": True},
+                    {"p_id": "P2", "enabled": False},
+                ],
+            )
+            warm = threading.Event()
+            concurrent_phase = threading.Event()
+            entered = {p_id: threading.Event() for p_id in ("P1", "P2")}
+            release = threading.Event()
+
+            def tick(_state: Path, p_id: str, *, allow_merge: bool):
+                if not concurrent_phase.is_set():
+                    warm.set()
+                    return Action(ActionKind.IDLE), EffectResult(False, "warm")
+                entered[p_id].set()
+                release.wait(3)
+                return Action(ActionKind.IDLE), EffectResult(False, "concurrent")
+
+            scheduler = Scheduler(
+                state,
+                registry_path=registry_file,
+                tick_function=tick,
+                poll_interval=5,
+            )
+            scheduler.run_once()
+            self.assertTrue(warm.wait(2))
+            deadline = time.monotonic() + 2
+            while scheduler.is_in_flight("P1") and time.monotonic() < deadline:
+                scheduler.run_once()
+                time.sleep(0.01)
+            write_registry(
+                registry_file,
+                [
+                    {"p_id": "P1", "enabled": True},
+                    {"p_id": "P2", "enabled": True},
+                ],
+            )
+            concurrent_phase.set()
+            thread = self.start(scheduler)
+            try:
+                self.assertTrue(entered["P1"].wait(2))
+                self.assertTrue(entered["P2"].wait(2))
+            finally:
+                release.set()
+                self.stop(scheduler, thread)
+
+    def test_disable_during_tick_prevents_gpt_dispatch_and_immediate_retick(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            worktree = root / "worktree"
+            worktree.mkdir()
+            make_config(state, "P1", worktree)
+            registry_file = root / "projects.json"
+            write_registry(registry_file, [{"p_id": "P1", "enabled": True}])
+            entered = threading.Event()
+            release = threading.Event()
+            calls: list[str] = []
+
+            def tick(_state: Path, p_id: str, *, allow_merge: bool):
+                calls.append(p_id)
+                entered.set()
+                release.wait(3)
+                return (
+                    Action(ActionKind.PLAN, effect_id="plan-" + "1" * 24),
+                    EffectResult(True, "packet created"),
+                )
+
+            class RecordingTransport:
+                def __init__(self) -> None:
+                    self.calls: list[str] = []
+
+                def try_dispatch(self, p_id, action, **kwargs):
+                    self.calls.append(p_id)
+                    return TransportResult(True)
+
+                def close(self):
+                    pass
+
+            transport = RecordingTransport()
+            scheduler = Scheduler(
+                state,
+                registry_path=registry_file,
+                tick_function=tick,
+                poll_interval=5,
+                max_workers=1,
+                gpt_transport=transport,
+            )
+            thread = self.start(scheduler)
+            try:
+                self.assertTrue(entered.wait(2))
+                write_registry(registry_file, [{"p_id": "P1", "enabled": False}])
+                release.set()
+                deadline = time.monotonic() + 2
+                while scheduler.is_in_flight("P1") and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(scheduler.is_in_flight("P1"))
+                self.assertEqual(["P1"], calls)
+                self.assertEqual([], transport.calls)
+            finally:
+                release.set()
+                self.stop(scheduler, thread)
+
+    def test_changed_gpt_completion_wakes_p_without_waiting_for_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls: list[float] = []
+            second = threading.Event()
+
+            def tick(_state: Path, _p_id: str, *, allow_merge: bool):
+                calls.append(time.monotonic())
+                if len(calls) == 1:
+                    return (
+                        Action(ActionKind.PLAN, effect_id="plan-" + "2" * 24),
+                        EffectResult(False, "pending"),
+                    )
+                second.set()
+                return Action(ActionKind.IDLE), EffectResult(False, "observed result")
+
+            class CompletingTransport:
+                def __init__(self) -> None:
+                    self.callback = None
+                    self.dispatched = threading.Event()
+
+                def try_dispatch(self, p_id, action, **kwargs):
+                    self.callback = kwargs.get("on_complete")
+                    self.dispatched.set()
+                    return TransportResult(True)
+
+                def close(self):
+                    pass
+
+            transport = CompletingTransport()
+            scheduler = Scheduler(
+                root / "state",
+                registry=self.registry(root, "P1"),
+                tick_function=tick,
+                poll_interval=5,
+                max_workers=1,
+                gpt_transport=transport,
+            )
+            thread = self.start(scheduler)
+            try:
+                self.assertTrue(transport.dispatched.wait(2))
+                self.assertIsNotNone(transport.callback)
+                completed_at = time.monotonic()
+                transport.callback(TransportResult(True, changed=True, detail="stored"))
+                self.assertTrue(second.wait(2))
+                self.assertLess(calls[1] - completed_at, 0.5)
+            finally:
+                self.stop(scheduler, thread)
+
     def test_allow_merge_is_passed_as_operational_permission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -277,6 +441,8 @@ class SchedulerTests(unittest.TestCase):
             scheduler.run_once()
             scheduler.close()
             self.assertFalse((root / "state" / "scheduler.json").exists())
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                scheduler.submit_now("P1")
             restarted = Scheduler(root / "state", registry=registry, tick_function=idle_tick)
             self.assertEqual([], restarted.status()["in_flight_p_ids"])
             restarted.close()
