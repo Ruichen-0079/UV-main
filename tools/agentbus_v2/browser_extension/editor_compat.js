@@ -3,38 +3,72 @@
 /*
  * Firefox/ChatGPT contenteditable compatibility shim for AgentBus v2.
  *
- * Firefox's execCommand("insertText", ..., multiLineText) can hand the editor a
- * single accepted value whose embedded LF characters are represented as spaces.
- * That is enough to make ChatGPT enable Send, but it is not semantically the
- * packet we intended to submit.  Insert multiline packets one line at a time,
- * using editor-native line-break commands between lines, and expose a narrow
- * structural text view for the prompt composer so verification sees <br>/block
- * boundaries as LF without weakening packet equality.
+ * Firefox can flatten embedded LF characters when a whole multiline packet is
+ * passed to execCommand("insertText").  Preserve packet line structure by
+ * inserting one line at a time and creating editor-native paragraph boundaries
+ * between lines.  This file runs in the same WebExtension content-script world
+ * as content.js; no page semantic state is persisted here.
  */
 (() => {
   const originalExec = typeof document.execCommand === "function"
     ? document.execCommand.bind(document)
     : null;
 
-  if (originalExec) {
-    document.execCommand = function agentBusExecCommand(command, showUI, value) {
-      if (command !== "insertText" || typeof value !== "string" || !/[\r\n]/.test(value)) {
-        return originalExec(command, showUI, value);
-      }
+  function multilineExec(command, showUI, value) {
+    if (
+      !originalExec ||
+      command !== "insertText" ||
+      typeof value !== "string" ||
+      !/[\r\n]/.test(value)
+    ) {
+      return originalExec ? originalExec(command, showUI, value) : false;
+    }
 
-      const lines = value.replace(/\r\n?/g, "\n").split("\n");
-      for (let index = 0; index < lines.length; index += 1) {
-        if (index > 0) {
-          let broke = originalExec("insertLineBreak", false, null);
-          if (!broke) broke = originalExec("insertParagraph", false, null);
-          if (!broke) return false;
-        }
-        if (lines[index] !== "" && !originalExec("insertText", false, lines[index])) {
-          return false;
-        }
+    const lines = value.replace(/\r\n?/g, "\n").split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      if (index > 0) {
+        // ChatGPT's structured editor treats paragraph boundaries as real text
+        // boundaries. Firefox insertLineBreak can be normalized to a space in
+        // this editor, so prefer insertParagraph and keep line-break as fallback.
+        let broke = originalExec("insertParagraph", false, null);
+        if (!broke) broke = originalExec("insertLineBreak", false, null);
+        if (!broke) return false;
       }
-      return true;
-    };
+      if (lines[index] !== "" && !originalExec("insertText", false, lines[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Xray-wrapped DOM objects in Firefox do not always honor a plain expando
+  // assignment for inherited native methods. Install an own property explicitly,
+  // then fall back to the content-world Document prototype when necessary.
+  let execShimInstalled = false;
+  if (originalExec) {
+    try {
+      Object.defineProperty(document, "execCommand", {
+        configurable: true,
+        writable: true,
+        value: multilineExec
+      });
+      execShimInstalled = document.execCommand === multilineExec;
+    } catch (_) {
+      execShimInstalled = false;
+    }
+
+    if (!execShimInstalled && typeof Document !== "undefined") {
+      try {
+        Object.defineProperty(Document.prototype, "execCommand", {
+          configurable: true,
+          writable: true,
+          value: multilineExec
+        });
+        execShimInstalled = document.execCommand === multilineExec;
+      } catch (_) {
+        execShimInstalled = false;
+      }
+    }
   }
 
   const BLOCK_TAGS = new Set([
@@ -45,6 +79,7 @@
   ]);
 
   function rawTextContent(node) {
+    if (typeof Node === "undefined") return "";
     const descriptor = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
     return descriptor?.get ? String(descriptor.get.call(node) || "") : "";
   }
@@ -60,29 +95,31 @@
     if (String(node.tagName || "").toUpperCase() === "BR") return "\n";
 
     const children = Array.from(node.childNodes || []);
+    const containsBlocks = children.some(isBlock);
     let output = "";
-    let previous = null;
+    let seenDataChild = false;
+    let previousWasBlock = false;
+
     for (const child of children) {
       const childBlock = isBlock(child);
-      const previousBlock = isBlock(previous);
-      let piece = structuralText(child);
+      const piece = structuralText(child);
 
-      // Pretty-printed/inter-block whitespace is layout, not message data.
-      if (child.nodeType === 3 && piece.trim() === "" && (previousBlock || children.some(isBlock))) {
-        previous = child;
+      // Pretty-print whitespace between block children is layout, not prompt data.
+      if (child.nodeType === 3 && piece.trim() === "" && (previousWasBlock || containsBlocks)) {
         continue;
       }
 
-      if (output && (previousBlock || childBlock) && !output.endsWith("\n") && !piece.startsWith("\n")) {
-        output += "\n";
-      }
+      if (childBlock && seenDataChild) output += "\n";
       output += piece;
-      previous = child;
+      seenDataChild = true;
+      previousWasBlock = childBlock;
     }
     return output;
   }
 
-  const textContentDescriptor = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
+  const textContentDescriptor = typeof Node !== "undefined"
+    ? Object.getOwnPropertyDescriptor(Node.prototype, "textContent")
+    : null;
   if (textContentDescriptor?.get && textContentDescriptor?.set && textContentDescriptor.configurable) {
     Object.defineProperty(Node.prototype, "textContent", {
       configurable: true,
@@ -93,8 +130,7 @@
           this.id === "prompt-textarea" &&
           this.getAttribute?.("contenteditable") === "true"
         ) {
-          const structured = structuralText(this);
-          if (structured !== "") return structured;
+          return structuralText(this);
         }
         return textContentDescriptor.get.call(this);
       },
@@ -104,7 +140,12 @@
     });
   }
 
-  const API = { structuralText, rawTextContent };
+  const API = {
+    structuralText,
+    rawTextContent,
+    multilineExec,
+    execShimInstalled
+  };
   globalThis.AgentBusV2EditorCompat = API;
   if (typeof module !== "undefined" && module.exports) module.exports = API;
 })();
