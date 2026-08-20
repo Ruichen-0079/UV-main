@@ -385,16 +385,11 @@ def gpt_response_schema(operation: str, job_id: str) -> str:
     decisions = GPT_DECISIONS.get(operation)
     if decisions is None:
         raise FactError(f"unsupported GPT operation: {operation}")
-    return f'''Return exactly one JSON object and no Markdown fence:
-{{
-  "job_id": "{job_id}",
-  "operation": "{operation}",
-  "decision": "{' | '.join(sorted(decisions))}",
-  "body": "string"
-}}
-
-Keys are exactly job_id, operation, decision, body. Repeat JOB_ID verbatim and
-put the complete bounded plan or judgment in body.'''
+    return (f'Return exactly one JSON object and no Markdown fence:\n{{\n'
+            f'  "job_id": "{job_id}",\n  "operation": "{operation}",\n'
+            f'  "decision": "{" | ".join(sorted(decisions))}",\n  "body": "string"\n}}\n\n'
+            'Keys are exactly job_id, operation, decision, body. Repeat JOB_ID '
+            'verbatim; body is the complete bounded plan or judgment.')
 
 
 def parse_gpt_response(
@@ -403,14 +398,14 @@ def parse_gpt_response(
     value: Mapping[str, Any],
     source: str = "GPT response",
 ) -> GptResult:
-    if not isinstance(value, Mapping) or set(value) != {"job_id", "operation", "decision", "body"}:
+    keys = {"job_id", "operation", "decision", "body"}
+    if not isinstance(value, Mapping) or set(value) != keys:
         raise FactError(f"{source} keys must be exactly job_id, operation, decision, body")
     if any(type(item) is not str for item in value.values()):
         raise FactError(f"{source} fields must all be JSON strings")
-    if value["job_id"] != expected_job_id:
-        raise FactError(f"{source} JOB_ID mismatch")
-    if not GPT_JOB_RE.fullmatch(expected_job_id):
-        raise FactError(f"{source} JOB_ID has an invalid shape")
+    if value["job_id"] != expected_job_id or not GPT_JOB_RE.fullmatch(expected_job_id):
+        message = "JOB_ID mismatch" if value["job_id"] != expected_job_id else "JOB_ID has an invalid shape"
+        raise FactError(f"{source} {message}")
     if value["operation"] != expected_operation:
         raise FactError(f"{source} operation mismatch")
     allowed = GPT_DECISIONS.get(expected_operation)
@@ -434,11 +429,10 @@ def load_gpt_packet(paths: PPaths, job_id: str) -> dict[str, Any]:
         packet = json.loads(encoded)
     except (IndexError, json.JSONDecodeError) as error:
         raise FactError(f"GPT packet semantic inputs are malformed: {path}") from error
-    if not isinstance(packet, dict):
-        raise FactError(f"GPT packet semantic inputs must be an object: {path}")
-    semantic = packet.get("semantic_input")
+    semantic = packet.get("semantic_input") if isinstance(packet, dict) else None
     if (
-        packet.get("packet_schema") != GPT_PACKET_SCHEMA
+        not isinstance(packet, dict)
+        or packet.get("packet_schema") != GPT_PACKET_SCHEMA
         or packet.get("job_id") != job_id
         or packet.get("operation") not in GPT_DECISIONS
         or not isinstance(semantic, dict)
@@ -478,20 +472,11 @@ def _load_gpt(paths: PPaths, config: PConfig) -> tuple[
         planning_digest = str(semantic.get("planning_facts_digest", ""))
         if not planning_digest:
             raise FactError(f"PLAN packet lacks planning facts: {job_id}")
-        specs.append(SpecFact(
-            spec_id(config.charter_digest, planning_digest, result.body),
-            job_id,
-            result.body,
-            planning_digest,
-            str(semantic["head"]),
-            str(semantic["base"]),
-            str(semantic["parent_spec_id"])
-            if semantic.get("parent_spec_id") is not None
-            else None,
-            str(semantic["trigger_judge_id"])
-            if semantic.get("trigger_judge_id") is not None
-            else None,
-        ))
+        parent = str(semantic["parent_spec_id"]) if semantic.get("parent_spec_id") is not None else None
+        trigger_id = str(semantic["trigger_judge_id"]) if semantic.get("trigger_judge_id") is not None else None
+        specs.append(SpecFact(spec_id(config.charter_digest, planning_digest, result.body), job_id,
+                              result.body, planning_digest, str(semantic["head"]),
+                              str(semantic["base"]), parent, trigger_id))
     for item in specs:
         if item.parent_spec_id is None:
             if item.trigger_judge_id is not None:
@@ -511,11 +496,8 @@ def _load_gpt(paths: PPaths, config: PConfig) -> tuple[
             or trigger_semantic.get("spec_id") != item.parent_spec_id
         ):
             raise FactError(f"successor SPEC lacks a valid RETURN_PLAN edge: {item.spec_id}")
-    pending = frozenset(
-        path.stem
-        for path in paths.gpt_outbox.glob("*.md")
-        if GPT_JOB_RE.fullmatch(path.stem) and path.stem not in responses
-    )
+    pending = frozenset(path.stem for path in paths.gpt_outbox.glob("*.md")
+                        if GPT_JOB_RE.fullmatch(path.stem) and path.stem not in responses)
     return tuple(responses.values()), tuple(specs), pending
 
 

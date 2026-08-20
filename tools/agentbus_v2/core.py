@@ -157,35 +157,23 @@ def gpt_job_id(
     parent_spec_id: str | None = None,
     trigger_judge_id: str | None = None,
 ) -> str:
-    common = {
-        "p_id": s.p_id,
-        "operation": operation,
-        "packet_schema": GPT_PACKET_SCHEMA,
-        "charter": s.charter_digest,
-    }
+    common = {"p_id": s.p_id, "operation": operation,
+              "packet_schema": GPT_PACKET_SCHEMA, "charter": s.charter_digest}
     if operation == "PLAN_GPT":
         return stable_id("plan", {
-            **common, "repository": s.expected_repository,
-            "planning_facts": plan_facts_digest(s), "parent_spec": parent_spec_id,
+            **common, "repository": s.expected_repository, "planning_facts": plan_facts_digest(s),
+            "parent_spec": parent_spec_id,
             "previous_judge": trigger_judge_id,
         })
     if operation != "JUDGE_GPT" or spec is None:
         raise ValueError("GPT operation requires a PLAN or JUDGE semantic input")
     if failed_step is None or evidence_id is None or evidence_digest is None:
         raise ValueError("JUDGE_GPT identity lacks failure/evidence inputs")
-    return stable_id("judge", {
-        **common,
-        "spec": spec.spec_id,
+    return stable_id("judge", {**common, "spec": spec.spec_id,
         "spec_content": stable_id("spec-text", {"text": spec.text}),
-        "head": s.head,
-        "base": s.base,
-        "failed_step": failed_step,
-        "evidence_id": evidence_id,
-        "evidence_digest": evidence_digest,
-        "trigger_judge": (
-            trigger_judge_id if trigger_judge_id is not None else spec.trigger_judge_id
-        ),
-    })
+        "head": s.head, "base": s.base, "failed_step": failed_step,
+        "evidence_id": evidence_id, "evidence_digest": evidence_digest,
+        "trigger_judge": trigger_judge_id if trigger_judge_id is not None else spec.trigger_judge_id})
 
 
 def plan_job_id(s: Snapshot, *, parent_spec_id: str | None = None,

@@ -100,37 +100,26 @@ def render_gpt_prompt(
     current = _spec(snapshot, action.payload.get("spec_id")) or parent
     planning_digest = plan_facts_digest(snapshot)
     semantic: dict[str, Any] = {
-        "packet_schema": GPT_PACKET_SCHEMA,
-        "job_id": action.effect_id,
-        "p_id": config.p_id,
-        "operation": operation,
-        "charter_digest": config.charter_digest,
-        "repository": config.repository,
-        "branch": config.branch,
-        "base_ref": config.base_ref,
-        "head": snapshot.head,
-        "base": snapshot.base,
+        "packet_schema": GPT_PACKET_SCHEMA, "job_id": action.effect_id,
+        "p_id": config.p_id, "operation": operation,
+        "charter_digest": config.charter_digest, "repository": config.repository,
+        "branch": config.branch, "base_ref": config.base_ref,
+        "head": snapshot.head, "base": snapshot.base,
         "parent_spec_id": parent.spec_id if parent else None,
         "trigger_judge_id": action.payload.get("trigger_judge_id"),
         "planning_facts_digest": planning_digest,
     }
     if operation == "JUDGE_GPT":
-        semantic.update(
-            {
-                "spec_id": action.payload["spec_id"],
-                "spec_content_digest": stable_id(
-                    "spec-text", {"text": current.text if current else ""}
-                ),
-                "failed_step": action.payload["failed_step"],
-                "evidence_id": action.payload["evidence_id"],
-                "evidence_digest": action.payload["evidence_digest"],
-                "trigger_judge_id": (
-                    action.payload.get("trigger_judge_id")
-                    if action.payload.get("trigger_judge_id") is not None
-                    else current.trigger_judge_id if current else None
-                ),
-            }
-        )
+        semantic.update({
+            "spec_id": action.payload["spec_id"],
+            "spec_content_digest": stable_id("spec-text", {"text": current.text if current else ""}),
+            "failed_step": action.payload["failed_step"],
+            "evidence_id": action.payload["evidence_id"],
+            "evidence_digest": action.payload["evidence_digest"],
+            "trigger_judge_id": action.payload.get("trigger_judge_id")
+            if action.payload.get("trigger_judge_id") is not None
+            else current.trigger_judge_id if current else None,
+        })
     prior = "NONE"
     trigger = semantic.get("trigger_judge_id")
     if trigger:
