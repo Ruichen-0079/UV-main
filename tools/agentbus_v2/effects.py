@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 from typing import Any, Callable, Sequence
@@ -31,18 +30,24 @@ from .facts import (
     _run,
     _work_from_head,
     git,
-    github_slug,
     load_charter,
     load_gpt_packet,
     load_config,
     parse_gpt_response,
     _proof_commands,
-    read_merge_facts,
     read_snapshot,
     sha256_text,
     gpt_response_schema,
     write_json_once,
     write_text_once,
+)
+from .github import (
+    check_evidence,
+    ensure_owned_pr,
+    failed_log_evidence,
+    merge_pr,
+    observe_required_checks,
+    read_github_facts,
 )
 
 
@@ -388,71 +393,6 @@ def run_codex_work(
     return EffectResult(True, "WORK_FAIL", summary, destination)
 
 
-def _owned_pr_body(config: PConfig, spec: SpecFact) -> str:
-    return f"""Standalone AgentBus v2 maintenance P.
-
-AgentBus-V2-P: {config.p_id}
-AgentBus-V2-Spec: {spec.spec_id}
-AgentBus-V2-Owner: {config.owner_token}
-
-This PR is never auto-merged during Experiment 1.
-"""
-
-
-def ensure_owned_pr(config: PConfig, snapshot: Snapshot, spec: SpecFact) -> bool:
-    worktree = Path(config.worktree)
-    pushed = _run(
-        ("git", "push", "--set-upstream", config.remote, config.branch),
-        cwd=worktree,
-        check=False,
-        timeout=120,
-    )
-    if pushed.returncode != 0:
-        return False
-    merge = read_merge_facts(config)
-    slug = github_slug(config.repository)
-    body = _owned_pr_body(config, spec)
-    if merge.pr_number is None:
-        created = _run(
-            (
-                "gh",
-                "pr",
-                "create",
-                "--repo",
-                slug,
-                "--base",
-                config.base_ref,
-                "--head",
-                config.branch,
-                "--title",
-                f"{config.p_id}: implement current specification",
-                "--body",
-                body,
-            ),
-            cwd=worktree,
-            check=False,
-            timeout=120,
-        )
-        return created.returncode == 0
-    if merge.p_id != config.p_id or merge.owner_token != config.owner_token:
-        raise FactError("refusing to alter a PR not owned by this P")
-    if merge.spec_id != spec.spec_id:
-        updated = _run(
-            (
-                "gh",
-                "api",
-                "--method",
-                "PATCH",
-                f"repos/{slug}/pulls/{merge.pr_number}",
-                "-f",
-                f"body={body}",
-            ),
-            check=False,
-        )
-        return updated.returncode == 0
-    return True
-
-
 def _command_evidence(
     config: PConfig, snapshot: Snapshot
 ) -> tuple[dict[str, Any] | None, Observation | None]:
@@ -485,168 +425,6 @@ def _command_evidence(
         return None, None
     records.append(record(("git", "status", "--porcelain=v1"), after, 1 if after else 0))
     return {"commands": records}, Observation.PASS if not after else Observation.FAIL
-
-
-def _ci_checks(
-    config: PConfig, pr_number: int, expected_head: str, expected_base: str
-) -> tuple[str, list[dict[str, Any]], dict[str, str]]:
-    completed = _run(
-        (
-            "gh",
-            "pr",
-            "checks",
-            str(pr_number),
-            "--repo",
-            github_slug(config.repository),
-            "--json",
-            "name,state,bucket,workflow,link",
-        ),
-        check=False,
-        timeout=60,
-    )
-    try:
-        raw = json.loads(completed.stdout)
-    except json.JSONDecodeError:
-        return "ABSENT", [], {}
-    if not isinstance(raw, list) or not raw:
-        return "ABSENT", [], {}
-    slug = github_slug(config.repository)
-    # A pull_request Actions run reports the branch head in `headSha`, not the
-    # synthetic merge commit that was tested against the live base.  Bind the
-    # evidence to the PR's current merge commit and its exact first-parent
-    # relationship instead of guessing that run.headSha is that merge commit.
-    pr_result = _run(
-        ("gh", "api", f"repos/{slug}/pulls/{pr_number}"),
-        check=False,
-        timeout=60,
-    )
-    try:
-        pr_data = json.loads(pr_result.stdout)
-    except json.JSONDecodeError:
-        pr_data = {}
-    if not isinstance(pr_data, dict):
-        pr_data = {}
-    pr_head = str((pr_data.get("head") or {}).get("sha", ""))
-    pr_base = str((pr_data.get("base") or {}).get("sha", ""))
-    merge_sha = str(pr_data.get("merge_commit_sha") or "")
-    merge_result = _run(
-        ("gh", "api", f"repos/{slug}/git/commits/{merge_sha}"),
-        check=False,
-        timeout=60,
-    ) if merge_sha else None
-    try:
-        merge_data = json.loads(merge_result.stdout) if merge_result else {}
-        merge_parents = [
-            str(parent.get("sha", ""))
-            for parent in merge_data.get("parents", [])
-        ]
-    except (json.JSONDecodeError, AttributeError):
-        merge_parents = []
-    merge_identity = (
-        pr_result.returncode == 0
-        and merge_result is not None
-        and merge_result.returncode == 0
-        and pr_head == expected_head
-        and pr_base == expected_base
-        and len(merge_parents) == 2
-        and merge_parents[0] == expected_base
-        and merge_parents[1] == expected_head
-    )
-    runs: dict[str, dict[str, Any]] = {}
-    failed_logs: dict[str, str] = {}
-    checks: list[dict[str, Any]] = []
-    for item in raw:
-        link = str(item.get("link", ""))
-        match = re.search(r"/actions/runs/(\d+)(?:/|$)", link)
-        if not match:
-            continue
-        run_id = match.group(1)
-        if run_id not in runs:
-            run_result = _run(
-                (
-                    "gh",
-                    "run",
-                    "view",
-                    run_id,
-                    "--repo",
-                    slug,
-                    "--json",
-                    "event,headSha,status,conclusion,workflowName,url",
-                ),
-                check=False,
-                timeout=60,
-            )
-            try:
-                run_data = json.loads(run_result.stdout)
-            except json.JSONDecodeError:
-                run_data = {}
-            if not isinstance(run_data, dict):
-                run_data = {}
-            head_sha = str(run_data.get("headSha", "")) if isinstance(run_data, dict) else ""
-            current_base = (
-                run_result.returncode == 0
-                and run_data.get("event") == "pull_request"
-                and head_sha == expected_head
-                and merge_identity
-            )
-            runs[run_id] = {
-                "run_id": run_id,
-                "event": run_data.get("event"),
-                "head_sha": head_sha,
-                "status": run_data.get("status"),
-                "conclusion": run_data.get("conclusion"),
-                "workflow": run_data.get("workflowName"),
-                "url": run_data.get("url"),
-                "merge_sha": merge_sha,
-                "merge_parents": merge_parents,
-                "pr_head": pr_head,
-                "pr_base": pr_base,
-                "current_base_identity": current_base,
-            }
-        if not runs[run_id]["current_base_identity"]:
-            continue
-        checks.append(
-            {
-                "name": str(item.get("name", "")),
-                "state": str(item.get("state", "")),
-                "bucket": str(item.get("bucket", "")),
-                "workflow": str(item.get("workflow", "")),
-                "link": link,
-                "run": runs[run_id],
-            }
-        )
-    checks.sort(key=lambda item: (item["workflow"], item["name"], item["link"]))
-    if not checks:
-        return "ABSENT", [], {}
-    buckets = {item["bucket"] for item in checks}
-    if buckets & {"fail", "cancel"}:
-        for run_id in sorted({str(item["run"]["run_id"]) for item in checks if item["bucket"] in {"fail", "cancel"}}):
-            failed = _run(
-                ("gh", "run", "view", run_id, "--repo", slug, "--log-failed"),
-                check=False,
-                timeout=180,
-            )
-            # Keep JUDGE packets self-contained without allowing CI output to
-            # grow the manual packet without bound.
-            failed_logs[run_id] = failed.stdout[-65536:]
-        return "FAIL", checks, failed_logs
-    if config.required_ci_checks:
-        for required in config.required_ci_checks:
-            matches = [
-                item
-                for item in checks
-                if item["name"] == required
-                or f"{item['workflow']} / {item['name']}" == required
-            ]
-            if not matches or any(item["bucket"] == "pending" for item in matches):
-                return "ABSENT", checks, {}
-            if any(item["bucket"] != "pass" for item in matches):
-                return "FAIL", checks, failed_logs
-    if "pending" in buckets:
-        return "ABSENT", checks, {}
-    if buckets <= {"pass", "skipping"}:
-        return "PASS", checks, {}
-    return "ABSENT", checks, {}
 
 
 def run_prove(
@@ -684,24 +462,29 @@ def run_prove(
         require_pr_fence = False
     else:
         require_pr_fence = True
-        if not ensure_owned_pr(config, snapshot, spec):
+        if not ensure_owned_pr(config, spec):
             return EffectResult(False, "PROVE_ABSENT", "push or PR transport unavailable")
-        merge = read_merge_facts(config)
+        merge = read_github_facts(config)
         if (
             merge.pr_number is None
-            or merge.head != snapshot.head
-            or merge.base != snapshot.base
-            or merge.pr_base != snapshot.base
+            or merge.head_sha != snapshot.head
+            or merge.live_base != snapshot.base
+            or merge.pr_base_sha != snapshot.base
+            or merge.head_branch != config.branch
+            or merge.base_branch != config.base_ref
             or merge.p_id != config.p_id
             or merge.spec_id != spec.spec_id
             or merge.owner_token != config.owner_token
         ):
             return EffectResult(False, "PROVE_ABSENT", "PR identities have not converged")
-        ci_status, checks, failed_logs = (
-            _ci_checks(config, merge.pr_number, snapshot.head, snapshot.base)
-            if config.required_ci_checks else ("PASS", [], {})
-        )
-        if ci_status == "ABSENT":
+        if config.required_ci_checks:
+            merge = observe_required_checks(config, merge, snapshot.head, snapshot.base)
+            checks = check_evidence(merge)
+            failed_logs = failed_log_evidence(merge)
+            ci_status = merge.check_status
+        else:
+            ci_status, checks, failed_logs = "PASS", [], {}
+        if ci_status in {"MISSING", "RUNNING"}:
             return EffectResult(False, "PROVE_ABSENT", "GitHub CI is queued/running/absent")
         status = Observation(ci_status)
     evidence = {
@@ -711,6 +494,12 @@ def run_prove(
     }
     final = read_snapshot(paths)
     final_merge = final.merge
+    if require_pr_fence and config.required_ci_checks and status is Observation.PASS:
+        final_merge = observe_required_checks(config, final_merge, snapshot.head, snapshot.base)
+        if final_merge.check_status != "PASS":
+            return EffectResult(False, "PROVE_ABSENT", "CI drifted before proof result")
+        checks = check_evidence(final_merge)
+        failed_logs = failed_log_evidence(final_merge)
     final_action = decide(final)
     if (
         final.head != snapshot.head
@@ -721,9 +510,11 @@ def run_prove(
         or (
             require_pr_fence
             and (
-                final_merge.head != snapshot.head
-                or final_merge.base != snapshot.base
-                or final_merge.pr_base != snapshot.base
+                final_merge.head_sha != snapshot.head
+                or final_merge.live_base != snapshot.base
+                or final_merge.pr_base_sha != snapshot.base
+                or final_merge.head_branch != config.branch
+                or final_merge.base_branch != config.base_ref
                 or final_merge.p_id != config.p_id
                 or final_merge.spec_id != spec.spec_id
                 or final_merge.owner_token != config.owner_token
@@ -772,21 +563,11 @@ def execute_merge(
     worktree = Path(config.worktree)
     if git(worktree, "status", "--porcelain"):
         return EffectResult(False, "MERGE_FENCE_DRIFT", "worktree is not clean")
-    completed = command_runner(
-        (
-            "gh",
-            "pr",
-            "merge",
-            str(recalculated.payload["pr_number"]),
-            "--repo",
-            github_slug(config.repository),
-            "--merge",
-            "--match-head-commit",
-            str(recalculated.payload["head"]),
-        ),
-        cwd=worktree,
-        check=False,
-        timeout=120,
+    completed = merge_pr(
+        config,
+        int(recalculated.payload["pr_number"]),
+        str(recalculated.payload["head"]),
+        command_runner=command_runner,
     )
     if completed.returncode != 0:
         return EffectResult(False, "MERGE_ABSENT", completed.stderr.strip())

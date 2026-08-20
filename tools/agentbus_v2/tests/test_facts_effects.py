@@ -25,7 +25,6 @@ from tools.agentbus_v2.core import (
 )
 from tools.agentbus_v2.cli import _tick_lock
 from tools.agentbus_v2.effects import (
-    _ci_checks,
     dispatch_manual_gpt,
     render_gpt_prompt,
     run_prove,
@@ -45,6 +44,13 @@ from tools.agentbus_v2.facts import (
     load_config,
     proof_contract_digest,
     sha256_text,
+)
+from tools.agentbus_v2.github import (
+    GitHubFacts,
+    check_evidence,
+    merge_pr,
+    observe_required_checks,
+    read_github_facts,
 )
 
 
@@ -716,6 +722,8 @@ AgentBus-V2-Input-Head: %s
                 required_ci_checks=required,
             )
             head, base, merge_sha = "1" * 40, "a" * 40, "f" * 40
+            synthetic_parents = [base, head]
+            run_head_sha = head
             checks = [
                 {
                     "name": name,
@@ -739,30 +747,101 @@ AgentBus-V2-Input-Head: %s
                 elif argv[1:3] == ("run", "view"):
                     value = {
                         "event": "pull_request",
-                        "headSha": head,
+                        "headSha": run_head_sha,
                         "status": "completed",
                         "conclusion": "success",
                         "workflowName": "check",
                         "url": "https://github.com/acme/repo/actions/runs/99",
                     }
                 else:
-                    value = {"parents": [{"sha": base}, {"sha": head}]}
+                    value = {"parents": [{"sha": value} for value in synthetic_parents]}
                 return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
 
-            with patch("tools.agentbus_v2.effects._run", side_effect=fake_run):
-                status, evidence, _ = _ci_checks(config, 7, head, base)
-            self.assertEqual("PASS", status)
-            self.assertEqual(set(required), {item["name"] for item in evidence})
-            self.assertTrue(all(item["run"]["current_base_identity"] for item in evidence))
-
-            with patch("tools.agentbus_v2.effects._run", side_effect=fake_run):
-                status, _, _ = _ci_checks(
-                    replace(config, required_ci_checks=required + ("missing",)),
-                    7,
-                    head,
-                    base,
+            with patch("tools.agentbus_v2.facts._run", side_effect=fake_run):
+                observed = observe_required_checks(
+                    config, GitHubFacts(pr_number=7), head, base
                 )
-            self.assertEqual("ABSENT", status)
+            self.assertEqual("PASS", observed.check_status)
+            evidence = check_evidence(observed)
+            self.assertEqual(set(required), {item["name"] for item in evidence})
+            self.assertTrue(all(item["current_integration"] for item in evidence))
+
+            with patch("tools.agentbus_v2.facts._run", side_effect=fake_run):
+                observed = observe_required_checks(
+                    replace(config, required_ci_checks=required + ("missing",)),
+                    GitHubFacts(pr_number=7), head, base,
+                )
+            self.assertEqual("MISSING", observed.check_status)
+
+            synthetic_parents[:] = [base, "e" * 40]
+            with patch("tools.agentbus_v2.facts._run", side_effect=fake_run):
+                observed = observe_required_checks(config, GitHubFacts(pr_number=7), head, base)
+            self.assertEqual("MISSING", observed.check_status)
+
+            synthetic_parents[:] = [base, head]
+            run_head_sha = merge_sha
+            with patch("tools.agentbus_v2.facts._run", side_effect=fake_run):
+                observed = observe_required_checks(config, GitHubFacts(pr_number=7), head, base)
+            self.assertEqual("MISSING", observed.check_status)
+
+    def test_github_snapshot_is_one_normalized_owned_pr_fact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = RepoFixture(Path(directory))
+            config = replace(
+                config_for(repo, "P_ID: P-TEST\n"),
+                repository="github.com/acme/repo",
+            )
+            head, base = "1" * 40, "a" * 40
+
+            def fake_run(argv, **_kwargs):
+                if argv[:2] == ("git", "ls-remote"):
+                    return subprocess.CompletedProcess(argv, 0, f"{base}\trefs/heads/main\n", "")
+                self.assertEqual(("gh", "pr", "list"), tuple(argv[:3]))
+                value = [{
+                    "number": 7,
+                    "state": "OPEN",
+                    "isDraft": False,
+                    "mergeable": "MERGEABLE",
+                    "headRefName": config.branch,
+                    "headRefOid": head,
+                    "baseRefName": config.base_ref,
+                    "baseRefOid": base,
+                    "body": (
+                        "AgentBus-V2-P: P-TEST\n"
+                        "AgentBus-V2-Spec: spec-7\n"
+                        "AgentBus-V2-Owner: owner-test\n"
+                    ),
+                    "mergedAt": None,
+                    "mergeCommit": None,
+                }]
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+
+            with patch("tools.agentbus_v2.facts._run", side_effect=fake_run):
+                facts = read_github_facts(config)
+            self.assertEqual(7, facts.pr_number)
+            self.assertEqual(head, facts.head_sha)
+            self.assertEqual(base, facts.live_base)
+            self.assertEqual(base, facts.pr_base_sha)
+            self.assertEqual(config.branch, facts.head_branch)
+            self.assertEqual(config.base_ref, facts.base_branch)
+            self.assertEqual(("P-TEST", "spec-7", "owner-test"),
+                             (facts.p_id, facts.spec_id, facts.owner_token))
+
+    def test_merge_adapter_keeps_exact_head_argument(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = RepoFixture(Path(directory))
+            config = replace(config_for(repo, "P_ID: P-TEST\n"),
+                             repository="github.com/acme/repo")
+            seen = []
+
+            def runner(argv, **_kwargs):
+                seen.append(tuple(argv))
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            merge_pr(config, 7, "1" * 40, command_runner=runner)
+            self.assertEqual(1, len(seen))
+            self.assertIn("--match-head-commit", seen[0])
+            self.assertEqual("1" * 40, seen[0][seen[0].index("--match-head-commit") + 1])
 
 
 if __name__ == "__main__":

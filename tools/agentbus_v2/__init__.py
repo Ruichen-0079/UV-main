@@ -4,7 +4,6 @@ from .core import (
     Action,
     ActionKind,
     GptResult,
-    MergeFacts,
     Observation,
     ProofFact,
     Snapshot,
@@ -12,12 +11,13 @@ from .core import (
     WorkFact,
     decide,
 )
+from .github import GitHubFacts
 
 __all__ = [
     "Action",
     "ActionKind",
     "GptResult",
-    "MergeFacts",
+    "GitHubFacts",
     "Observation",
     "ProofFact",
     "Snapshot",

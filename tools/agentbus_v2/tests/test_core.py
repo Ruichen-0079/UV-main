@@ -6,7 +6,6 @@ import unittest
 from tools.agentbus_v2.core import (
     ActionKind,
     GptResult,
-    MergeFacts,
     Observation,
     ProofFact,
     Snapshot,
@@ -14,6 +13,7 @@ from tools.agentbus_v2.core import (
     WorkFact,
     decide,
     judge_job_id,
+    merge_fence_failures,
     plan_facts_digest,
     plan_job_id,
     proof_id,
@@ -21,6 +21,7 @@ from tools.agentbus_v2.core import (
     spec_id,
     work_effect_id,
 )
+from tools.agentbus_v2.github import GitHubFacts
 from tools.agentbus_v2.effects import execute_merge
 from tools.agentbus_v2.facts import PPaths
 from pathlib import Path
@@ -86,18 +87,17 @@ def proof_pass(snapshot: Snapshot, spec: SpecFact) -> ProofFact:
     )
 
 
-def merge_facts(snapshot: Snapshot, spec: SpecFact) -> MergeFacts:
-    return MergeFacts(
-        repository=snapshot.expected_repository,
+def merge_facts(snapshot: Snapshot, spec: SpecFact) -> GitHubFacts:
+    return GitHubFacts(
         pr_number=123,
         state="OPEN",
         draft=False,
         mergeable=True,
-        head=snapshot.head,
-        base=snapshot.base,
-        pr_base=snapshot.base,
-        head_ref=snapshot.expected_branch,
-        base_ref=snapshot.base_ref,
+        head_sha=snapshot.head,
+        live_base=snapshot.base,
+        pr_base_sha=snapshot.base,
+        head_branch=snapshot.expected_branch,
+        base_branch=snapshot.base_ref,
         p_id=snapshot.p_id,
         spec_id=spec.spec_id,
         owner_token=snapshot.expected_owner_token,
@@ -431,11 +431,26 @@ class KernelTableTests(unittest.TestCase):
                 work_facts=(work,),
                 proof_facts=(proof,),
                 gpt_results=snapshot.gpt_results + (semantic,),
-                merge=replace(merge_facts(snapshot, spec), pr_base=B2),
+            merge=replace(merge_facts(snapshot, spec), pr_base_sha=B2),
             )
         )
         self.assertEqual(ActionKind.IDLE, action.kind)
         self.assertIn("PR BASE drift", action.payload["failures"])
+
+    def test_merge_fences_reject_foreign_draft_and_nonmergeable_prs(self) -> None:
+        snapshot, spec = with_spec(replace(blank(), head=H1))
+        cases = (
+            ("foreign", replace(merge_facts(snapshot, spec), owner_token="foreign"),
+             "resource ownership mismatch"),
+            ("draft", replace(merge_facts(snapshot, spec), draft=True), "PR is draft or unknown"),
+            ("nonmergeable", replace(merge_facts(snapshot, spec), mergeable=False),
+             "PR is not confirmed mergeable"),
+        )
+        for name, facts, expected in cases:
+            with self.subTest(name=name):
+                self.assertIn(expected, merge_fence_failures(
+                    replace(snapshot, merge=facts), spec
+                ))
 
     def test_n_merge_fence_drift_never_calls_merge(self) -> None:
         snapshot, spec = with_spec(replace(blank(), head=H1, allow_merge=True))
@@ -496,9 +511,8 @@ class KernelTableTests(unittest.TestCase):
             merge_facts(snapshot, spec),
             state="MERGED",
             mergeable=None,
-            merge_commit="c" * 40,
-            merge_parent_base=B1,
-            merge_parent_head=H1,
+            merge_commit_sha="c" * 40,
+            merge_parents=(B1, H1),
         )
         after_merge = replace(
             snapshot,

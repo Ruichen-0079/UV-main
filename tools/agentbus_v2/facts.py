@@ -22,7 +22,6 @@ from .core import (
     GPT_PACKET_SCHEMA,
     PROOF_SCHEMA,
     GptResult,
-    MergeFacts,
     Observation,
     ProofFact,
     Snapshot,
@@ -128,14 +127,6 @@ def canonical_repository(value: str) -> str:
     result = re.sub(r"^[^@]+@([^:]+):", r"\1/", result)
     result = result.removesuffix(".git").rstrip("/")
     return result
-
-
-def github_slug(repository: str) -> str:
-    canonical = canonical_repository(repository)
-    prefix = "github.com/"
-    if not canonical.startswith(prefix) or canonical.count("/") != 2:
-        raise FactError(f"GitHub repository required, got {repository!r}")
-    return canonical.removeprefix(prefix)
 
 
 def _run(
@@ -755,106 +746,9 @@ def _load_proof(
     return tuple(facts)
 
 
-def _markers(body: str) -> dict[str, str]:
-    prefixes = {
-        "AgentBus-V2-P:": "p_id",
-        "AgentBus-V2-Spec:": "spec_id",
-        "AgentBus-V2-Owner:": "owner_token",
-    }
-    found: dict[str, str] = {}
-    for line in body.splitlines():
-        for prefix, key in prefixes.items():
-            if line.startswith(prefix):
-                found[key] = line.removeprefix(prefix).strip()
-    return found
-
-
-def read_merge_facts(config: PConfig, *, live_base: str | None = None) -> MergeFacts:
-    slug = github_slug(config.repository)
-    if live_base is None:
-        try:
-            live_base = live_remote_sha(Path(config.worktree), config.remote, config.base_ref)
-        except FactError:
-            return MergeFacts(available=False, repository=config.repository)
-    completed = _run(
-        (
-            "gh",
-            "pr",
-            "list",
-            "--repo",
-            slug,
-            "--head",
-            config.branch,
-            "--state",
-            "all",
-            "--limit",
-            "20",
-            "--json",
-            "number,state,isDraft,mergeable,headRefName,headRefOid,baseRefName,baseRefOid,body,mergedAt,mergeCommit",
-        ),
-        check=False,
-    )
-    if completed.returncode != 0:
-        return MergeFacts(available=False, repository=config.repository)
-    try:
-        records = json.loads(completed.stdout)
-    except json.JSONDecodeError:
-        return MergeFacts(available=False, repository=config.repository)
-    if not isinstance(records, list):
-        return MergeFacts(available=False, repository=config.repository)
-    open_records = [item for item in records if item.get("state") == "OPEN"]
-    candidates = open_records or [item for item in records if item.get("mergedAt")]
-    if not candidates:
-        return MergeFacts(repository=config.repository)
-    if len(candidates) != 1:
-        return MergeFacts(available=False, repository=config.repository)
-    record = candidates[0]
-    marker = _markers(str(record.get("body", "")))
-    raw_mergeable = str(record.get("mergeable", "UNKNOWN"))
-    mergeable = True if raw_mergeable == "MERGEABLE" else False if raw_mergeable == "CONFLICTING" else None
-    state = "MERGED" if record.get("mergedAt") else str(record.get("state", "UNKNOWN"))
-    merge_commit_value = record.get("mergeCommit")
-    merge_commit = (
-        str(merge_commit_value.get("oid"))
-        if isinstance(merge_commit_value, dict) and merge_commit_value.get("oid")
-        else None
-    )
-    merge_parent_base = None
-    merge_parent_head = None
-    if state == "MERGED" and merge_commit:
-        commit_result = _run(
-            ("gh", "api", f"repos/{slug}/git/commits/{merge_commit}"), check=False
-        )
-        try:
-            commit_data = json.loads(commit_result.stdout)
-            parents = commit_data.get("parents", [])
-        except (json.JSONDecodeError, AttributeError):
-            parents = []
-        if commit_result.returncode != 0 or not isinstance(parents, list) or len(parents) != 2:
-            return MergeFacts(available=False, repository=config.repository)
-        merge_parent_base = str(parents[0].get("sha", ""))
-        merge_parent_head = str(parents[1].get("sha", ""))
-    return MergeFacts(
-        repository=config.repository,
-        pr_number=int(record["number"]),
-        state=state,
-        draft=bool(record.get("isDraft")),
-        mergeable=mergeable,
-        head=str(record.get("headRefOid", "")),
-        base=live_base,
-        pr_base=str(record.get("baseRefOid", "")),
-        head_ref=str(record.get("headRefName", "")),
-        base_ref=str(record.get("baseRefName", "")),
-        p_id=marker.get("p_id"),
-        spec_id=marker.get("spec_id"),
-        owner_token=marker.get("owner_token"),
-        merge_commit=merge_commit,
-        merge_parent_base=merge_parent_base,
-        merge_parent_head=merge_parent_head,
-    )
-
-
 def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
+    from .github import read_github_facts
+
     config = load_config(paths)
     load_charter(paths, config)
     worktree = Path(config.worktree).resolve()
@@ -922,7 +816,7 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         gpt_pending=pending,
         work_facts=tuple(work),
         proof_facts=_load_proof(paths, config, specs, results, head, base, contract),
-        merge=read_merge_facts(config, live_base=base),
+        merge=read_github_facts(config),
         expected_owner_token=config.owner_token,
         proof_contract_digest=contract,
         allow_merge=allow_merge,

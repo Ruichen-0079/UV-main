@@ -12,6 +12,8 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+from .github import GitHubFacts
+
 
 class Observation(str, Enum):
     PASS = "PASS"
@@ -94,27 +96,6 @@ class ProofFact:
 
 
 @dataclass(frozen=True)
-class MergeFacts:
-    available: bool = True
-    repository: str = ""
-    pr_number: int | None = None
-    state: str = "ABSENT"
-    draft: bool | None = None
-    mergeable: bool | None = None
-    head: str | None = None
-    base: str | None = None       # independently read live base
-    pr_base: str | None = None    # base observed on the PR
-    head_ref: str | None = None
-    base_ref: str | None = None
-    p_id: str | None = None
-    spec_id: str | None = None
-    owner_token: str | None = None
-    merge_commit: str | None = None
-    merge_parent_base: str | None = None
-    merge_parent_head: str | None = None
-
-
-@dataclass(frozen=True)
 class Snapshot:
     p_id: str
     charter_digest: str
@@ -129,7 +110,7 @@ class Snapshot:
     gpt_pending: frozenset[str] = frozenset()
     work_facts: tuple[WorkFact, ...] = ()
     proof_facts: tuple[ProofFact, ...] = ()
-    merge: MergeFacts = field(default_factory=MergeFacts)
+    merge: GitHubFacts = field(default_factory=GitHubFacts)
     expected_owner_token: str = ""
     proof_contract_digest: str = ""
     allow_merge: bool = False
@@ -510,16 +491,15 @@ def merge_fence_failures(s: Snapshot, spec: SpecFact) -> tuple[str, ...]:
     m = s.merge
     checks = (
         (m.available, "github facts unavailable"),
-        (m.repository == s.expected_repository, "repository mismatch"),
         (m.pr_number is not None, "PR absent"),
         (m.state == "OPEN", "PR not open"),
         (m.draft is False, "PR is draft or unknown"),
         (m.mergeable is True, "PR is not confirmed mergeable"),
-        (m.head == s.head, "PR HEAD drift"),
-        (m.base == s.base, "live BASE drift"),
-        (m.pr_base == s.base, "PR BASE drift"),
-        (m.head_ref == s.expected_branch, "PR head branch mismatch"),
-        (m.base_ref == s.base_ref, "PR base branch mismatch"),
+        (m.head_sha == s.head, "PR HEAD drift"),
+        (m.live_base == s.base, "live BASE drift"),
+        (m.pr_base_sha == s.base, "PR BASE drift"),
+        (m.head_branch == s.expected_branch, "PR head branch mismatch"),
+        (m.base_branch == s.base_ref, "PR base branch mismatch"),
         (m.p_id == s.p_id, "PR P identity mismatch"),
         (m.spec_id == spec.spec_id, "PR SPEC identity mismatch"),
         (m.owner_token == s.expected_owner_token, "resource ownership mismatch"),
@@ -568,24 +548,24 @@ def _done(
         return None
     identity_ok = (
         m.available
-        and m.repository == s.expected_repository
-        and m.head == s.head
-        and m.head_ref == s.expected_branch
-        and m.base_ref == s.base_ref
+        and m.head_sha == s.head
+        and m.head_branch == s.expected_branch
+        and m.base_branch == s.base_ref
         and m.p_id == s.p_id
         and m.spec_id == spec.spec_id
         and m.owner_token == s.expected_owner_token
-        and m.merge_parent_head == s.head
-        and bool(m.merge_parent_base)
+        and len(m.merge_parents) == 2
+        and m.merge_parents[1] == s.head
+        and bool(m.merge_parents[0])
     )
     if not identity_ok or _work_pass(s, spec) is None:
         return _action(ActionKind.HUMAN, reason="merged PR identities/evidence do not match")
-    prior = replace(s, base=m.merge_parent_base)
+    prior = replace(s, base=m.merge_parents[0])
     for proof in s.proof_facts:
         if (
             proof.spec_id == spec.spec_id
             and proof.head == s.head
-            and proof.base == m.merge_parent_base
+            and proof.base == m.merge_parents[0]
             and proof.status is Observation.PASS
         ):
             result = results.get(semantic_judge_job_id(prior, spec, proof))
