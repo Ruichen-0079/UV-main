@@ -38,6 +38,8 @@ class LaneConfig:
     name: str
     enabled: bool
     transport: str
+    conversation_url: str | None = None
+    bridge_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -79,16 +81,39 @@ def load_lane_config(state_root: Path, path: Path | None = None) -> dict[str, La
         if not isinstance(value, dict):
             raise TypeError("lane config must be an object")
         result: dict[str, LaneConfig] = {}
+        bridge_token = value.get("bridge_token")
+        if bridge_token is not None and (
+            type(bridge_token) is not str or not bridge_token.strip()
+        ):
+            raise TypeError("bridge_token must be a non-empty string when supplied")
         for name in LANE_NAMES:
             raw = value.get(name, {})
             if not isinstance(raw, dict):
                 raise TypeError(f"{name} lane must be an object")
             enabled = raw.get("enabled", False)
             transport = raw.get("transport", "manual")
-            if type(enabled) is not bool or transport not in {"manual", "fake"}:
-                raise TypeError(f"{name} lane requires boolean enabled and manual/fake transport")
-            result[name] = LaneConfig(name, enabled, transport)
-        unknown = set(value) - set(LANE_NAMES)
+            conversation_url = raw.get("conversation_url")
+            lane_token = raw.get("bridge_token", bridge_token)
+            if conversation_url is not None and (
+                type(conversation_url) is not str or not conversation_url.strip()
+            ):
+                raise TypeError(f"{name} conversation_url must be a non-empty string")
+            if lane_token is not None and (
+                type(lane_token) is not str or not lane_token.strip()
+            ):
+                raise TypeError(f"{name} bridge_token must be a non-empty string")
+            if type(enabled) is not bool or transport not in {"manual", "fake", "browser"}:
+                raise TypeError(
+                    f"{name} lane requires boolean enabled and manual/fake/browser transport"
+                )
+            result[name] = LaneConfig(
+                name,
+                enabled,
+                transport,
+                conversation_url=conversation_url,
+                bridge_token=lane_token,
+            )
+        unknown = set(value) - set(LANE_NAMES) - {"bridge_token"}
         if unknown:
             raise TypeError(f"unknown GPT lanes: {sorted(unknown)}")
         return result
@@ -154,11 +179,13 @@ class GPTTransport:
         *,
         config_path: Path | None = None,
         adapters: Mapping[str, GPTAdapter] | None = None,
+        browser_adapter: GPTAdapter | None = None,
         max_workers: int = 2,
     ) -> None:
         self.state_root = Path(state_root).resolve()
         self.config_path = Path(config_path).resolve() if config_path else None
         self.adapters = dict(adapters or {})
+        self._browser_adapter = browser_adapter
         self.max_workers = max_workers
         self._lock = threading.RLock()
         self._in_flight: dict[str, tuple[str, Future[TransportResult]]] = {}
@@ -168,6 +195,22 @@ class GPTTransport:
 
     def _config(self) -> dict[str, LaneConfig]:
         return load_lane_config(self.state_root, self.config_path)
+
+    def _adapter_for(self, transport_name: str) -> GPTAdapter | None:
+        adapter = self.adapters.get(transport_name)
+        if adapter is not None:
+            return adapter
+        if transport_name != "browser":
+            return None
+        with self._lock:
+            if self._browser_adapter is None:
+                from .browser_transport import BrowserAdapter
+
+                self._browser_adapter = BrowserAdapter(
+                    self.state_root,
+                    config_path=self.config_path,
+                )
+            return self._browser_adapter
 
     def mode_for(self, action: Action) -> str | None:
         lane = lane_for_action(action)
@@ -263,7 +306,7 @@ class GPTTransport:
                     return TransportResult(False, detail="GPT job is no longer current")
                 packet = paths.root / "gpt" / "outbox" / f"{action.effect_id}.md"
                 packet_text = packet.read_text(encoding="utf-8")
-                adapter = self.adapters.get(transport_name)
+                adapter = self._adapter_for(transport_name)
                 if adapter is None:
                     raise TransportError(f"no adapter configured for {transport_name}")
                 raw_response = adapter.send(
@@ -295,16 +338,30 @@ class GPTTransport:
             return ({"error": str(error)},)
         with self._lock:
             busy = {lane for lane, _future in self._in_flight.values()}
-        return tuple(
-            {
+        rows: list[dict[str, object]] = []
+        for lane in LANE_NAMES:
+            row: dict[str, object] = {
                 "name": lane,
                 "enabled": configs[lane].enabled,
                 "transport": configs[lane].transport,
                 "busy": lane in busy,
-                **({"last_error": self._last_errors[lane]} if lane in self._last_errors else {}),
             }
-            for lane in LANE_NAMES
-        )
+            if lane in self._last_errors:
+                row["last_error"] = self._last_errors[lane]
+            if configs[lane].transport == "browser":
+                row["conversation_configured"] = bool(configs[lane].conversation_url)
+                row["bridge_token_configured"] = bool(configs[lane].bridge_token)
+            adapter = self.adapters.get(configs[lane].transport)
+            if adapter is None and configs[lane].transport == "browser":
+                adapter = self._browser_adapter
+            lane_status = getattr(adapter, "lane_status", None)
+            if lane_status is not None:
+                try:
+                    row.update(lane_status(lane))
+                except Exception:
+                    pass
+            rows.append(row)
+        return tuple(rows)
 
     def close(self) -> None:
         with self._lock:
@@ -312,3 +369,14 @@ class GPTTransport:
                 return
             self._closed = True
         self._pool.shutdown(wait=False, cancel_futures=True)
+        adapters = list(self.adapters.values())
+        if self._browser_adapter is not None:
+            adapters.append(self._browser_adapter)
+        seen: set[int] = set()
+        for adapter in adapters:
+            if id(adapter) in seen:
+                continue
+            seen.add(id(adapter))
+            close_adapter = getattr(adapter, "close", None)
+            if close_adapter is not None:
+                close_adapter()

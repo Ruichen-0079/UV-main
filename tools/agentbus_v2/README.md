@@ -53,3 +53,24 @@ and has no semantic no-progress policy.
 Watched-resource fingerprints and not-before scheduling are deliberately
 deferred for Experiment 1. A GPT `WAIT` therefore stops as `HUMAN` for manual
 wake handling; it never creates a persisted workflow WAIT state.
+
+## Browser GPT transport (7D.2A)
+
+The separate v2 browser adapter is transport-only.  It binds a loopback bridge
+at `127.0.0.1:6791` and exposes only `/bridge/pull`, `/bridge/result`, and
+`/bridge/heartbeat`.  The bridge has memory-only pending requests; no sent,
+generating, queue, or recovery files are written.  Configure each browser lane
+in `gpt_lanes.json` with `transport: "browser"`, an exact ChatGPT
+`conversation_url`, and the same operational `bridge_token` (the token may be
+top-level or repeated per lane).  The extension source is under
+`tools/agentbus_v2/browser_extension/`; its `config.js` contains a placeholder
+token and is not installed automatically.
+
+The extension polls both fixed logical lanes, injects only into the exact
+configured conversation when the composer is empty and idle, and returns the
+new assistant message as raw text.  Manual packet/result submission remains a
+first-class fallback.  To perform a later 7D.2B canary, copy the configured
+token into the extension's local `config.js`, load that directory as a
+temporary unsigned Firefox extension, open the exact PLAN and JUDGE
+conversation URLs, then enable the browser lanes.  No v1 bridge or browser
+profile is modified by this phase.

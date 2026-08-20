@@ -1,0 +1,26 @@
+{
+  "manifest_version": 2,
+  "name": "AgentBus v2 GPT Browser Transport",
+  "version": "0.1.0",
+  "description": "Transport-only bridge for the two configured AgentBus v2 GPT lanes.",
+  "permissions": [
+    "http://127.0.0.1:6791/*",
+    "https://chatgpt.com/c/*",
+    "https://chat.openai.com/c/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/c/*",
+        "https://chat.openai.com/c/*"
+      ],
+      "js": ["config.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "agentbus-v2-gpt-transport@local"
+    }
+  }
+}
