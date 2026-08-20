@@ -180,7 +180,12 @@ def dispatch_manual_gpt(
     packet = render_gpt_prompt(paths, config, snapshot, action)
     prompt_path = paths.gpt_outbox / f"{action.effect_id}.md"
     created = write_text_once(prompt_path, packet)
-    return EffectResult(created, "MANUAL_GPT_REQUIRED", path=prompt_path)
+    return EffectResult(
+        created,
+        "MANUAL_GPT_REQUIRED",
+        detail=f"JOB_ID={action.effect_id} SHA256={sha256_text(packet)}",
+        path=prompt_path,
+    )
 
 
 def submit_gpt_response(paths: PPaths, response_path: Path) -> EffectResult:
