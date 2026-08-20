@@ -26,6 +26,9 @@ from tools.agentbus_v2.core import (
 )
 from tools.agentbus_v2.cli import _tick_lock
 from tools.agentbus_v2.effects import (
+    CODEX_WORK_MODEL,
+    CODEX_WORK_REASONING_EFFORT,
+    _codex_work_command,
     _command_evidence,
     dispatch_manual_gpt,
     render_gpt_prompt,
@@ -137,6 +140,30 @@ def snapshot_for(config: PConfig) -> Snapshot:
 
 
 class FactAndEffectTests(unittest.TestCase):
+    def test_codex_work_command_explicitly_binds_model_and_reasoning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            config = config_for(repo, "P_ID: P-TEST\n")
+            common_git = root / "common.git"
+            schema = root / "schema.json"
+            response = root / "response.json"
+
+            command = _codex_work_command(config, common_git, schema, response)
+
+            self.assertEqual("gpt-5.6-luna", CODEX_WORK_MODEL)
+            self.assertEqual("max", CODEX_WORK_REASONING_EFFORT)
+            model_index = command.index("--model")
+            effort_index = command.index("--config")
+            self.assertEqual(
+                ("--model", "gpt-5.6-luna"),
+                command[model_index:model_index + 2],
+            )
+            self.assertEqual(
+                ("--config", 'model_reasoning_effort="max"'),
+                command[effort_index:effort_index + 2],
+            )
+
     def test_duplicate_ticks_are_excluded_by_per_p_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / "P-TEST" / "tick.lock"

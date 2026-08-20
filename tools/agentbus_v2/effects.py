@@ -253,6 +253,27 @@ CODEX_OUTPUT_SCHEMA = (
     '"required":["status","summary","head","evidence"]}\n'
 )
 
+CODEX_WORK_MODEL = "gpt-5.6-luna"
+CODEX_WORK_REASONING_EFFORT = "max"
+
+
+def _codex_work_command(
+    config: PConfig,
+    common_git: Path,
+    schema_path: Path,
+    response_path: Path,
+) -> tuple[str, ...]:
+    # Executor selection is operational only. Keep it explicit here without
+    # adding the model or account to any durable semantic identity.
+    return (
+        "codex", "exec", "--ephemeral", "--approve-for-me",
+        "--model", CODEX_WORK_MODEL,
+        "--config", f'model_reasoning_effort="{CODEX_WORK_REASONING_EFFORT}"',
+        "-C", config.worktree, "--add-dir", str(common_git),
+        "--output-schema", str(schema_path),
+        "--output-last-message", str(response_path), "-",
+    )
+
 
 def _local_branch_refs(worktree: Path) -> dict[str, str]:
     lines = git(worktree, "for-each-ref", "--format=%(refname) %(objectname)",
@@ -299,11 +320,7 @@ def run_codex_work(
     try:
         schema.write(CODEX_OUTPUT_SCHEMA)
         schema.close()
-        command = (
-            "codex", "exec", "--ephemeral", "--approve-for-me", "-C", config.worktree,
-            "--add-dir", str(common_git), "--output-schema", str(schema_path),
-            "--output-last-message", str(response_path), "-",
-        )
+        command = _codex_work_command(config, common_git, schema_path, response_path)
         environment = os.environ.copy()
         if codex_home is not None:
             environment["CODEX_HOME"] = str(codex_home)
