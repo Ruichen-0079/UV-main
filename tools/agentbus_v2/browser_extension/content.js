@@ -68,6 +68,39 @@ function composerText(node) {
   return String(node.innerText || node.textContent || "");
 }
 
+function normalizedEditorText(value) {
+  return String(value == null ? "" : value).replace(/\r\n?/g, "\n");
+}
+
+function editorPacketMatches(actual, expected) {
+  const current = normalizedEditorText(actual);
+  const packet = normalizedEditorText(expected);
+  if (current === packet) return true;
+  // contenteditable editors commonly cannot retain a terminal line break as
+  // message data.  Permit exactly that one representation difference and no
+  // interior/content difference.
+  return packet.endsWith("\n") && current === packet.slice(0, -1);
+}
+
+function packetMismatchSummary(actual, expected) {
+  const current = normalizedEditorText(actual);
+  const packet = normalizedEditorText(expected);
+  let prefix = 0;
+  while (prefix < current.length && prefix < packet.length && current[prefix] === packet[prefix]) {
+    prefix += 1;
+  }
+  const actualCode = prefix < current.length ? current.codePointAt(prefix) : null;
+  const expectedCode = prefix < packet.length ? packet.codePointAt(prefix) : null;
+  return JSON.stringify({
+    actual_length: current.length,
+    expected_length: packet.length,
+    common_prefix: prefix,
+    actual_codepoint: actualCode,
+    expected_codepoint: expectedCode,
+    expected_terminal_newline: packet.endsWith("\n")
+  });
+}
+
 function generating() {
   const selectors = [
     'button[data-testid="stop-button"]',
@@ -173,7 +206,7 @@ async function composerInsertionStable(expected) {
   for (const delay of [0, 50, 150, 300]) {
     if (delay) await sleep(delay);
     const current = findComposer();
-    if (!current || composerText(current) !== expected) return false;
+    if (!current || !editorPacketMatches(composerText(current), expected)) return false;
   }
   return true;
 }
@@ -294,30 +327,56 @@ async function processRequest(request) {
     await reportDiagnostic(request.lane, "COMPOSER_NOT_FOUND", "no unique visible composer");
     return false;
   }
-  if (composerText(composer).trim() !== "") {
-    await reportDiagnostic(request.lane, "COMPOSER_NOT_EMPTY", "existing user text preserved");
-    return false;
-  }
   if (generating()) {
     await reportDiagnostic(request.lane, "GENERATION_BUSY", "target conversation is generating");
     return false;
   }
-  await heartbeat(request);
-  if (composerText(composer).trim() !== "" || generating()) {
-    await reportDiagnostic(request.lane, "PRE_INSERT_BUSY", "composer or generation changed before insertion");
+
+  const existingText = composerText(composer);
+  const hasExistingText = existingText.trim() !== "";
+  const resumesExactPendingPacket = hasExistingText && editorPacketMatches(existingText, request.packet);
+  if (hasExistingText && !resumesExactPendingPacket) {
+    await reportDiagnostic(request.lane, "COMPOSER_NOT_EMPTY", "existing user text preserved");
     return false;
   }
+
+  await heartbeat(request);
   const before = assistantNodes();
-  const insertionMethod = setComposer(composer, request.packet);
-  if (!(await composerInsertionStable(request.packet))) {
+  if (resumesExactPendingPacket) {
+    await reportDiagnostic(
+      request.lane,
+      "PENDING_PACKET_ALREADY_PRESENT",
+      "composer contains the exact current packet modulo one terminal editor newline"
+    );
+  } else {
+    if (composerText(composer).trim() !== "" || generating()) {
+      await reportDiagnostic(request.lane, "PRE_INSERT_BUSY", "composer or generation changed before insertion");
+      return false;
+    }
+    const insertionMethod = setComposer(composer, request.packet);
+    if (!(await composerInsertionStable(request.packet))) {
+      const current = findComposer();
+      const actual = current ? composerText(current) : "";
+      await reportDiagnostic(
+        request.lane,
+        "COMPOSER_INSERTION_MISMATCH",
+        `packet text did not remain editor-equivalent after insertion (${insertionMethod}); ${packetMismatchSummary(actual, request.packet)}`
+      );
+      return false;
+    }
+    diagnostic("composer insertion stable", request.lane, insertionMethod);
+  }
+
+  const postInsertionComposer = findComposer();
+  if (!postInsertionComposer || !editorPacketMatches(composerText(postInsertionComposer), request.packet)) {
+    const actual = postInsertionComposer ? composerText(postInsertionComposer) : "";
     await reportDiagnostic(
       request.lane,
       "COMPOSER_INSERTION_MISMATCH",
-      `packet text did not remain stable after insertion (${insertionMethod})`
+      `packet changed before Send lookup; ${packetMismatchSummary(actual, request.packet)}`
     );
     return false;
   }
-  diagnostic("composer insertion stable", request.lane, insertionMethod);
   const postInsertionSend = sendButton(false);
   if (!postInsertionSend) {
     await reportDiagnostic(request.lane, "SEND_BUTTON_NOT_FOUND", "send control was not available after stable insertion");
@@ -371,6 +430,9 @@ async function poll() {
 const API = {
   canonicalUrl,
   composerText,
+  normalizedEditorText,
+  editorPacketMatches,
+  packetMismatchSummary,
   generating,
   assistantNodes,
   newAssistantText,
