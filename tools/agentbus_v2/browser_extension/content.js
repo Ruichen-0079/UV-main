@@ -108,23 +108,74 @@ function sendButton(requireEnabled = true) {
   return button;
 }
 
+function dispatchInput(node, text) {
+  try {
+    node.dispatchEvent(new InputEvent("input", {
+      bubbles: true,
+      composed: true,
+      inputType: "insertText",
+      data: text
+    }));
+  } catch (_) {
+    if (typeof Event === "function") {
+      node.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    }
+  }
+}
+
+function selectComposerContents(node) {
+  const getter = typeof globalThis.getSelection === "function"
+    ? globalThis.getSelection.bind(globalThis)
+    : (typeof window !== "undefined" && typeof window.getSelection === "function"
+        ? window.getSelection.bind(window)
+        : null);
+  if (!getter || typeof document.createRange !== "function") return false;
+  const selection = getter();
+  if (!selection) return false;
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
+}
+
 function setComposer(node, text) {
   node.focus();
   if (node.tagName === "TEXTAREA") {
     const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
     descriptor.set.call(node, text);
-  } else {
-    node.textContent = text;
+    dispatchInput(node, text);
+    return "textarea-native-value";
   }
-  node.dispatchEvent(new InputEvent("input", {
-    bubbles: true,
-    inputType: "insertText",
-    data: text
-  }));
+
+  if (selectComposerContents(node) && typeof document.execCommand === "function") {
+    try {
+      if (document.execCommand("insertText", false, text)) {
+        return "contenteditable-execCommand-insertText";
+      }
+    } catch (error) {
+      diagnostic("composer execCommand failed", String(error));
+    }
+  }
+
+  // Compatibility fallback only.  The asynchronous persistence check below keeps
+  // a DOM-only mutation from being mistaken for accepted editor state.
+  node.textContent = text;
+  dispatchInput(node, text);
+  return "contenteditable-dom-fallback";
 }
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function composerInsertionStable(expected) {
+  for (const delay of [0, 50, 150, 300]) {
+    if (delay) await sleep(delay);
+    const current = findComposer();
+    if (!current || composerText(current) !== expected) return false;
+  }
+  return true;
 }
 
 async function bridgeFetch(path, options = {}) {
@@ -257,15 +308,19 @@ async function processRequest(request) {
     return false;
   }
   const before = assistantNodes();
-  setComposer(composer, request.packet);
-  const afterInsert = findComposer();
-  if (!afterInsert || composerText(afterInsert) !== request.packet) {
-    await reportDiagnostic(request.lane, "COMPOSER_INSERTION_MISMATCH", "packet text was not present after insertion");
+  const insertionMethod = setComposer(composer, request.packet);
+  if (!(await composerInsertionStable(request.packet))) {
+    await reportDiagnostic(
+      request.lane,
+      "COMPOSER_INSERTION_MISMATCH",
+      `packet text did not remain stable after insertion (${insertionMethod})`
+    );
     return false;
   }
+  diagnostic("composer insertion stable", request.lane, insertionMethod);
   const postInsertionSend = sendButton(false);
   if (!postInsertionSend) {
-    await reportDiagnostic(request.lane, "SEND_BUTTON_NOT_FOUND", "send control was not available after insertion");
+    await reportDiagnostic(request.lane, "SEND_BUTTON_NOT_FOUND", "send control was not available after stable insertion");
     return false;
   }
   const readySend = sendButton(true);
@@ -321,6 +376,8 @@ const API = {
   newAssistantText,
   findComposer,
   sendButton,
+  setComposer,
+  composerInsertionStable,
   processRequest,
   poll
 };
