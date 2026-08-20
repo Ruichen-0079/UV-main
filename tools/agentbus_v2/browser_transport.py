@@ -24,6 +24,7 @@ DEFAULT_BRIDGE_PORT = 6791
 BRIDGE_TOKEN_HEADER = "X-AgentBus-Token"
 MAX_BRIDGE_BODY = 1_000_000
 LANES = frozenset(("plan", "judge"))
+OPERATIONS = {"plan": "PLAN_GPT", "judge": "JUDGE_GPT"}
 
 
 class BrowserTransportError(RuntimeError):
@@ -80,6 +81,8 @@ class _BridgeState:
     ) -> str:
         if lane not in LANES:
             raise BrowserTransportError(f"unsupported browser lane: {lane}")
+        if operation != OPERATIONS[lane]:
+            raise BrowserTransportError(f"operation does not match browser lane: {lane}")
         pending = PendingBrowserJob(
             lane,
             job_id,
