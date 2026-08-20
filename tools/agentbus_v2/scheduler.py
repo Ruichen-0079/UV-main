@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
+import os
 from pathlib import Path
+import tempfile
 import threading
 import time
 from typing import Callable, Sequence
@@ -126,6 +128,64 @@ def load_registry(
     return result
 
 
+def update_project(
+    state_root: Path,
+    p_id: str,
+    *,
+    enabled: bool | None = None,
+    allow_merge: bool | None = None,
+    path: Path | None = None,
+) -> ProjectRegistry:
+    """Atomically update one operational registry entry and nothing semantic."""
+    if enabled is None and allow_merge is None:
+        raise FactError("project update requires enabled or allow_merge")
+    source = Path(path) if path is not None else registry_path(state_root)
+    with _REGISTRY_MUTATION_LOCK:
+        current = load_registry(state_root, source)
+        updated: list[ProjectEntry] = []
+        found = False
+        for entry in current.entries:
+            if entry.p_id != p_id:
+                updated.append(entry)
+                continue
+            found = True
+            updated.append(
+                replace(
+                    entry,
+                    enabled=entry.enabled if enabled is None else enabled,
+                    allow_merge=entry.allow_merge if allow_merge is None else allow_merge,
+                )
+            )
+        if not found:
+            raise FactError(f"unknown scheduler P_ID: {p_id}")
+        _validate_entries(Path(state_root).resolve(), updated)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            {"projects": [
+                {"p_id": item.p_id, "enabled": item.enabled, "allow_merge": item.allow_merge}
+                for item in updated
+            ]},
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{source.name}.", suffix=".tmp", dir=source.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, source)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return load_registry(state_root, source)
+
+
+_REGISTRY_MUTATION_LOCK = threading.Lock()
+
+
 def _default_tick(state_root: Path, p_id: str, *, allow_merge: bool):
     from .cli import tick_once
 
@@ -163,6 +223,8 @@ class Scheduler:
         self._immediate_used: set[str] = set()
         self._pool: ThreadPoolExecutor | None = None
         self._stop = threading.Event()
+        self._state_lock = threading.RLock()
+        self._running = False
 
     def _registry(self) -> ProjectRegistry:
         if self._fixed_registry is not None:
@@ -177,17 +239,73 @@ class Scheduler:
             )
         return self._pool
 
-    def _submit(self, entry: ProjectEntry, registry: ProjectRegistry) -> bool:
-        if not entry.enabled or entry.p_id in self._in_flight or self._stop.is_set():
-            return False
-        future = self._pool_for(registry).submit(
-            self.tick_function,
-            self.state_root,
-            entry.p_id,
-            allow_merge=entry.allow_merge,
-        )
-        self._in_flight[entry.p_id] = future
-        return True
+    def _submit(
+        self,
+        entry: ProjectEntry,
+        registry: ProjectRegistry,
+        *,
+        force: bool = False,
+    ) -> bool:
+        with self._state_lock:
+            if (not entry.enabled and not force) or entry.p_id in self._in_flight or self._stop.is_set():
+                return False
+            future = self._pool_for(registry).submit(
+                self.tick_function,
+                self.state_root,
+                entry.p_id,
+                allow_merge=entry.allow_merge,
+            )
+            self._in_flight[entry.p_id] = future
+            return True
+
+    def is_in_flight(self, p_id: str) -> bool:
+        with self._state_lock:
+            return p_id in self._in_flight
+
+    def is_running(self) -> bool:
+        with self._state_lock:
+            return self._running
+
+    def submit_now(
+        self,
+        p_id: str,
+        *,
+        on_event: Callable[[SchedulerEvent], None] | None = None,
+    ) -> Future[tuple[Action, object | None]]:
+        """Submit one registered P without creating a persisted tick request."""
+        registry = self._registry()
+        entry = next((item for item in registry.entries if item.p_id == p_id), None)
+        if entry is None:
+            raise FactError(f"unknown scheduler P_ID: {p_id}")
+        with self._state_lock:
+            if p_id in self._in_flight:
+                raise RuntimeError(f"P is already in flight: {p_id}")
+            was_stopped = self._stop.is_set()
+            if was_stopped:
+                self._stop.clear()
+            submitted = self._submit(entry, registry, force=True)
+            if not submitted:
+                if was_stopped:
+                    self._stop.set()
+                raise RuntimeError(f"P could not be submitted: {p_id}")
+            future = self._in_flight[p_id]
+            # A one-shot submission made while the polling loop is stopped has
+            # no collector to retire its future.  Retire it from the callback
+            # in that case; a running loop remains the collector so it can
+            # apply its normal immediate-retick policy.
+            if on_event is not None or not self._running:
+                def finish(done: Future[tuple[Action, object | None]]) -> None:
+                    with self._state_lock:
+                        if self._in_flight.get(p_id) is not done:
+                            return
+                        self._in_flight.pop(p_id, None)
+                    if on_event is not None:
+                        on_event(self._event(p_id, done))
+
+                future.add_done_callback(finish)
+            if was_stopped:
+                self._stop.set()
+            return future
 
     def _submit_enabled(self, registry: ProjectRegistry) -> None:
         for entry in registry.enabled:
@@ -205,11 +323,14 @@ class Scheduler:
         return SchedulerEvent(now, p_id, action.kind.value, changed, str(detail))
 
     def _collect(self, done: Sequence[Future[tuple[Action, object | None]]], registry: ProjectRegistry) -> tuple[SchedulerEvent, ...]:
-        by_future = {future: p_id for p_id, future in self._in_flight.items()}
+        with self._state_lock:
+            by_future = {future: p_id for p_id, future in self._in_flight.items()}
+        pending = [future for future in done if future in by_future]
         events: list[SchedulerEvent] = []
-        for future in sorted(done, key=lambda item: by_future[item]):
+        for future in sorted(pending, key=lambda item: by_future[item]):
             p_id = by_future[future]
-            self._in_flight.pop(p_id, None)
+            with self._state_lock:
+                self._in_flight.pop(p_id, None)
             event = self._event(p_id, future)
             events.append(event)
             entry = next((item for item in registry.entries if item.p_id == p_id), None)
@@ -224,7 +345,9 @@ class Scheduler:
         """Submit due P ticks and collect already completed work once."""
         registry = self._registry()
         self._submit_enabled(registry)
-        done = tuple(future for future in self._in_flight.values() if future.done())
+        with self._state_lock:
+            futures = tuple(self._in_flight.values())
+        done = tuple(future for future in futures if future.done())
         return self._collect(done, registry) if done else ()
 
     def run(
@@ -234,6 +357,8 @@ class Scheduler:
     ) -> None:
         next_poll = 0.0
         registry: ProjectRegistry | None = None
+        with self._state_lock:
+            self._running = True
         try:
             while not self._stop.is_set():
                 now = time.monotonic()
@@ -241,12 +366,14 @@ class Scheduler:
                     registry = self._registry()
                     self._submit_enabled(registry)
                     next_poll = now + self.poll_interval
-                if not self._in_flight:
+                with self._state_lock:
+                    futures = tuple(self._in_flight.values())
+                if not futures:
                     self._stop.wait(max(0.0, next_poll - time.monotonic()))
                     continue
                 timeout = min(0.2, max(0.0, next_poll - time.monotonic()))
                 done, _ = wait(
-                    tuple(self._in_flight.values()),
+                    futures,
                     timeout=timeout,
                     return_when=FIRST_COMPLETED,
                 )
@@ -257,6 +384,8 @@ class Scheduler:
         except KeyboardInterrupt:
             self.stop()
         finally:
+            with self._state_lock:
+                self._running = False
             self.close()
 
     def stop(self) -> None:
@@ -269,10 +398,13 @@ class Scheduler:
 
     def status(self) -> dict[str, object]:
         registry = self._registry()
+        with self._state_lock:
+            in_flight = sorted(self._in_flight)
+            running = self._running
         return {
-            "running": not self._stop.is_set(),
+            "running": running,
             "enabled_p_ids": [item.p_id for item in registry.enabled],
-            "in_flight_p_ids": sorted(self._in_flight),
+            "in_flight_p_ids": in_flight,
         }
 
 

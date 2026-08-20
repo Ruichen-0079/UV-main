@@ -74,6 +74,12 @@ def parser() -> argparse.ArgumentParser:
     schedule.add_argument("--workers", type=int)
     schedule.add_argument("--registry", type=Path)
 
+    web = commands.add_parser("web", help="serve the loopback operational WebUI")
+    web.add_argument("--host", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=6790)
+    web.add_argument("--start-scheduler", action="store_true")
+    web.add_argument("--registry", type=Path)
+
     submit = commands.add_parser("gpt-submit", help="validate and ingest one manual GPT result")
     submit.add_argument("p_id")
     submit.add_argument("response", type=Path)
@@ -201,6 +207,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print(event.as_dict())
 
             scheduler.run(on_event=emit)
+            return 0
+        if args.command == "web":
+            from .webui import WebUIState, make_server
+
+            state = WebUIState(args.state_root, registry_path=args.registry)
+            if args.start_scheduler:
+                state.start_scheduler()
+            server = make_server(state, host=args.host, port=args.port)
+            bound_host, bound_port = server.server_address[:2]
+            print(
+                f"AgentBus v2 WebUI listening on http://{bound_host}:{bound_port}/",
+                flush=True,
+            )
+            try:
+                server.serve_forever()
+            finally:
+                server.server_close()
+                state.stop_scheduler()
             return 0
     except KeyboardInterrupt:
         return 130
