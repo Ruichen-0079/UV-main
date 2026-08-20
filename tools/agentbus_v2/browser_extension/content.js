@@ -65,7 +65,13 @@ function findComposer() {
 function composerText(node) {
   if (!node) return "";
   if (node.tagName === "TEXTAREA" || node.tagName === "INPUT") return String(node.value || "");
-  return String(node.innerText || node.textContent || "");
+  // For contenteditable editors, textContent is the data-bearing DOM text. innerText
+  // is layout-derived and Firefox may rewrite embedded newlines as spaces even when
+  // the underlying editor state contains the exact packet. Prefer textContent when
+  // it carries data; fall back to innerText only for empty structural editors.
+  const domText = String(node.textContent || "");
+  if (domText !== "") return domText;
+  return String(node.innerText || "");
 }
 
 function normalizedEditorText(value) {
