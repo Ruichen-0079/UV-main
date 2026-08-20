@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import threading
@@ -134,8 +135,10 @@ class SchedulerGPTRecoveryTests(unittest.TestCase):
                 tick_function=idle_tick,
                 gpt_transport=transport,
             )
-            empty = pending_snapshot("plan-" + "3" * 24)
-            empty = Snapshot(**{**empty.__dict__, "gpt_pending": frozenset()})
+            empty = replace(
+                pending_snapshot("plan-" + "3" * 24),
+                gpt_pending=frozenset(),
+            )
             try:
                 with patch(
                     "tools.agentbus_v2.scheduler.read_snapshot",
