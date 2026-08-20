@@ -4,39 +4,41 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import subprocess
+import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
 from .core import (
     Action,
     ActionKind,
-    JUDGE_RESULTS,
-    PLAN_RESULTS,
+    GPT_PACKET_SCHEMA,
     Observation,
     Snapshot,
     SpecFact,
     decide,
     plan_facts_digest,
+    stable_id,
 )
 from .facts import (
     FactError,
     GPT_JOB_RE,
     PConfig,
     PPaths,
-    _validate_gpt_request,
     _load_json,
     _run,
     _work_from_head,
     git,
     github_slug,
     load_charter,
+    load_gpt_packet,
     load_config,
     parse_gpt_response,
     read_merge_facts,
     read_snapshot,
     sha256_text,
+    gpt_response_schema,
     write_json_once,
     write_text_once,
 )
@@ -57,117 +59,39 @@ def _spec(snapshot: Snapshot, spec_id: str | None) -> SpecFact | None:
     return matches[0] if matches else None
 
 
-def _safe_context_path(value: str) -> str:
-    path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts or not path.parts:
-        raise FactError(f"unsafe repository context path: {value!r}")
-    return path.as_posix()
-
-
-def _repository_context(config: PConfig, snapshot: Snapshot) -> str:
+def _repository_diff(config: PConfig, snapshot: Snapshot) -> str:
     worktree = Path(config.worktree)
-    sections = [
-        ("RECENT COMMITS", git(worktree, "log", "-8", "--format=%H %s", snapshot.head)),
-        (
-            "CURRENT-BASE DIFF STAT",
-            git(worktree, "diff", "--stat", f"{snapshot.base}...{snapshot.head}"),
-        ),
-        (
-            "CURRENT-BASE TEXT DIFF",
-            git(
-                worktree,
-                "diff",
-                "--no-ext-diff",
-                "--no-color",
-                f"{snapshot.base}...{snapshot.head}",
-            ),
-        ),
-    ]
-    paths = tuple(_safe_context_path(value) for value in config.context_paths)
-    if paths:
-        listing = git(worktree, "ls-tree", "-r", "--name-only", snapshot.head, "--", *paths)
-        sections.append(("CONTEXT FILE INVENTORY", listing))
-    if config.context_terms:
-        pattern = "|".join(re.escape(term) for term in config.context_terms)
-        command = (
-            "git",
-            "grep",
-            "-n",
-            "-i",
-            "-E",
-            pattern,
-            snapshot.head,
-            "--",
-            *(paths or (".",)),
-        )
-        completed = _run(command, cwd=worktree, check=False)
-        sections.append(("MATCHING SOURCE LINES", completed.stdout.strip()))
-    for value in paths:
-        completed = _run(
-            ("git", "cat-file", "-t", f"{snapshot.head}:{value}"),
-            cwd=worktree,
-            check=False,
-        )
-        if completed.returncode != 0 or completed.stdout.strip() != "blob":
-            continue
-        raw = _run(
-            ("git", "show", f"{snapshot.head}:{value}"), cwd=worktree, check=False
-        ).stdout
-        if "\x00" not in raw:
-            sections.append((f"FILE {value}", raw.rstrip()))
-    return "\n\n".join(f"## {title}\n\n```text\n{body}\n```" for title, body in sections)
+    diff = git(
+        worktree,
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        f"{snapshot.base}...{snapshot.head}",
+    )
+    return f"## CURRENT-BASE DIFF\n\n```diff\n{diff}\n```"
 
 
 def _evidence_text(paths: PPaths, evidence_id: str) -> str:
-    candidates = (
+    candidates = [
         paths.work_results / f"{evidence_id}.json",
         paths.proof_results / f"{evidence_id}.json",
         paths.proof_partials / f"{evidence_id}.json",
-    )
+        paths.work_logs / f"{evidence_id}.response.json",
+        paths.work_logs / f"{evidence_id}.codex.log",
+    ] + sorted(paths.proof_logs.glob(f"{evidence_id}.*"))
     pieces: list[str] = []
     for path in candidates:
-        if path.exists():
-            value = path.read_text(encoding="utf-8", errors="replace")
-            marker = (
-                f"\n[truncated to final 65536 characters; full SHA-256 "
-                f"{sha256_text(value)}]"
-                if len(value) > 65536
-                else ""
-            )
-            pieces.append(value[-65536:].rstrip() + marker)
-    for directory in (paths.work_logs, paths.proof_logs):
-        for path in sorted(directory.glob(f"{evidence_id}*")):
-            value = path.read_text(encoding="utf-8", errors="replace")
-            marker = (
-                f"\n[truncated to final 65536 characters; full SHA-256 "
-                f"{sha256_text(value)}]"
-                if len(value) > 65536
-                else ""
-            )
-            pieces.append(f"FILE: {path.name}\n{value[-65536:].rstrip()}{marker}")
+        if not path.exists():
+            continue
+        value = path.read_text(encoding="utf-8", errors="replace")
+        marker = f"\n[full SHA-256 {sha256_text(value)}]" if len(value) > 65536 else ""
+        pieces.append(f"FILE: {path.name}\n{value[-65536:].rstrip()}{marker}")
     return "\n\n".join(pieces) or "No additional evidence payload was found."
-
-
-def _strict_schema(job_id: str, operation: str) -> str:
-    decisions = sorted(PLAN_RESULTS if operation == "PLAN_GPT" else JUDGE_RESULTS)
-    return f"""Return exactly one JSON object and no Markdown fence or extra text:
-{{
-  "job_id": "{job_id}",
-  "operation": "{operation}",
-  "decision": "{' | '.join(decisions)}",
-  "body": "string"
-}}
-
-The keys must be exactly job_id, operation, decision, body. Repeat JOB_ID
-verbatim. For SPEC, body is the complete concrete implementation plan. For a
-RETURN_* result, body is the exact diagnosis and bounded direction. For WAIT
-or HUMAN, body states the exact dependency or question. PASS body briefly
-states why current evidence satisfies the requested judgment."""
 
 
 def render_gpt_prompt(
     paths: PPaths, config: PConfig, snapshot: Snapshot, action: Action
-) -> tuple[dict[str, Any], str]:
+) -> str:
     if action.kind not in {ActionKind.PLAN, ActionKind.JUDGE} or not action.effect_id:
         raise FactError("not a GPT effect")
     operation = "PLAN_GPT" if action.kind is ActionKind.PLAN else "JUDGE_GPT"
@@ -176,6 +100,8 @@ def render_gpt_prompt(
     current = _spec(snapshot, action.payload.get("spec_id")) or parent
     planning_digest = plan_facts_digest(snapshot)
     semantic: dict[str, Any] = {
+        "packet_schema": GPT_PACKET_SCHEMA,
+        "job_id": action.effect_id,
         "p_id": config.p_id,
         "operation": operation,
         "charter_digest": config.charter_digest,
@@ -192,17 +118,19 @@ def render_gpt_prompt(
         semantic.update(
             {
                 "spec_id": action.payload["spec_id"],
+                "spec_content_digest": stable_id(
+                    "spec-text", {"text": current.text if current else ""}
+                ),
                 "failed_step": action.payload["failed_step"],
                 "evidence_id": action.payload["evidence_id"],
                 "evidence_digest": action.payload["evidence_digest"],
+                "trigger_judge_id": (
+                    action.payload.get("trigger_judge_id")
+                    if action.payload.get("trigger_judge_id") is not None
+                    else current.trigger_judge_id if current else None
+                ),
             }
         )
-    request = {
-        "schema_version": 1,
-        "job_id": action.effect_id,
-        "operation": operation,
-        "semantic_input": semantic,
-    }
     prior = "NONE"
     trigger = semantic.get("trigger_judge_id")
     if trigger:
@@ -210,22 +138,17 @@ def render_gpt_prompt(
         if len(matches) == 1:
             prior = json.dumps(asdict(matches[0]), indent=2, ensure_ascii=False)
     spec_block = current.text if current else "NONE (PLAN_GPT must create CURRENT_SPEC)"
-    evidence = (
-        _evidence_text(paths, str(semantic["evidence_id"]))
-        if operation == "JUDGE_GPT"
-        else "PLAN_GPT evidence is the immutable charter and exact repository facts below."
-    )
-    role = (
-        "Produce one concrete, bounded CURRENT_SPEC. Do not implement it."
-        if operation == "PLAN_GPT"
-        else "Judge the exact current evidence semantically. Do not invent missing evidence."
-    )
-    prompt = f"""# AGENTBUS V2 SELF-CONTAINED GPT PACKET
+    evidence = _evidence_text(paths, str(semantic["evidence_id"])) if operation == "JUDGE_GPT" else "No prior evidence; use the exact repository diff below."
+    packet = f"""# AGENTBUS V2 SELF-CONTAINED GPT PACKET
 
 JOB_ID: {action.effect_id}
-REQUESTED_ROLE: {operation}
+OPERATION: {operation}
+P_ID: {config.p_id}
 
-{role}
+## SEMANTIC INPUTS
+```json
+{json.dumps({"packet_schema": GPT_PACKET_SCHEMA, "job_id": action.effect_id, "operation": operation, "semantic_input": semantic}, sort_keys=True, separators=(",", ":"))}
+```
 
 ## P_CHARTER (immutable)
 
@@ -235,15 +158,7 @@ REQUESTED_ROLE: {operation}
 
 {spec_block}
 
-## EXACT REPOSITORY FACTS
-
-- repository: {config.repository}
-- branch: {config.branch}
-- HEAD: {semantic['head']}
-- live BASE ({config.base_ref}): {semantic['base']}
-- planning facts digest: {planning_digest}
-
-{_repository_context(config, snapshot)}
+{_repository_diff(config, snapshot)}
 
 ## PREVIOUS RELEVANT JUDGE RESULT
 
@@ -259,31 +174,23 @@ REQUESTED_ROLE: {operation}
 
 ## SEMANTIC RULES
 
-There are only PLAN, WORK, PROVE, MERGE. ABSENT is never sent for semantic
-diagnosis. There is no repair/replan/wait workflow state. A correction is only
-RETURN_PLAN, RETURN_WORK, or RETURN_PROVE. GPT cannot bypass required mechanical
-proof or merge fences. PASS is valid for the final PROVE_SEMANTIC judgment; it
-cannot replace a missing WORK PASS or a confirmed mechanical PROVE failure.
-For those failures choose RETURN_*, WAIT, or HUMAN. Base every conclusion only
-on this packet.
+Only PLAN, WORK, PROVE, and MERGE exist. ABSENT is not a judgment. Corrections
+are RETURN_PLAN, RETURN_WORK, or RETURN_PROVE; GPT cannot bypass proof or merge
+fences. Base the decision only on this packet.
 
 ## STRICT RESPONSE SCHEMA
 
-{_strict_schema(action.effect_id, operation)}
+{gpt_response_schema(operation, action.effect_id)}
 """
-    request["prompt_digest"] = sha256_text(prompt)
-    return request, prompt
+    return packet
 
 
 def dispatch_manual_gpt(
     paths: PPaths, config: PConfig, snapshot: Snapshot, action: Action
 ) -> EffectResult:
-    request, prompt = render_gpt_prompt(paths, config, snapshot, action)
-    request_path = paths.gpt_requests / f"{action.effect_id}.json"
+    packet = render_gpt_prompt(paths, config, snapshot, action)
     prompt_path = paths.gpt_outbox / f"{action.effect_id}.md"
-    created = write_text_once(prompt_path, prompt)
-    if write_json_once(request_path, request):
-        created = True
+    created = write_text_once(prompt_path, packet)
     return EffectResult(created, "MANUAL_GPT_REQUIRED", path=prompt_path)
 
 
@@ -292,13 +199,9 @@ def submit_gpt_response(paths: PPaths, response_path: Path) -> EffectResult:
     job_id = value.get("job_id")
     if type(job_id) is not str or not GPT_JOB_RE.fullmatch(job_id):
         raise FactError("GPT response does not contain a valid generated JOB_ID")
-    request_path = paths.gpt_requests / f"{job_id}.json"
-    if not request_path.exists():
-        raise FactError("GPT response does not name an issued JOB_ID")
-    request = _load_json(request_path)
-    _validate_gpt_request(paths, load_config(paths), job_id, request)
-    result = parse_gpt_response(request, value)
-    destination = paths.gpt_inbox / f"{result.job_id}.json"
+    packet = load_gpt_packet(paths, job_id)
+    result = parse_gpt_response(job_id, str(packet["operation"]), value)
+    destination = paths.gpt_results / f"{result.job_id}.json"
     created = write_json_once(destination, asdict(result))
     return EffectResult(created, "GPT_RESULT_INGESTED", path=destination)
 
@@ -396,40 +299,31 @@ def run_codex_work(
     common_git = Path(git(worktree, "rev-parse", "--git-common-dir"))
     if not common_git.is_absolute():
         common_git = (worktree / common_git).resolve()
-    schema_path = paths.root / "codex-output-schema.json"
     response_path = paths.work_logs / f"{action.effect_id}.response.json"
     log_path = paths.work_logs / f"{action.effect_id}.codex.log"
     response_path.unlink(missing_ok=True)
-    write_text_once(schema_path, CODEX_OUTPUT_SCHEMA)
-    command = (
-        "codex",
-        "exec",
-        "--ephemeral",
-        "--approve-for-me",
-        "-C",
-        config.worktree,
-        "--add-dir",
-        str(common_git),
-        "--output-schema",
-        str(schema_path),
-        "--output-last-message",
-        str(response_path),
-        "-",
-    )
+    schema = tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8", delete=False)
+    schema_path = Path(schema.name)
     try:
-        completed = subprocess.run(
-            command,
-            input=prompt,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-            timeout=7200,
+        schema.write(CODEX_OUTPUT_SCHEMA)
+        schema.close()
+        command = (
+            "codex", "exec", "--ephemeral", "--approve-for-me", "-C", config.worktree,
+            "--add-dir", str(common_git), "--output-schema", str(schema_path),
+            "--output-last-message", str(response_path), "-",
         )
-    except subprocess.TimeoutExpired as error:
-        output = error.stdout if isinstance(error.stdout, str) else ""
-        log_path.write_text(output[-262144:], encoding="utf-8", errors="replace")
-        return EffectResult(False, "WORK_ABSENT", "Codex exceeded the executor timeout", log_path)
+        try:
+            completed = subprocess.run(
+                command, input=prompt, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, check=False, timeout=7200,
+            )
+        except subprocess.TimeoutExpired as error:
+            output = error.stdout if isinstance(error.stdout, str) else ""
+            log_path.write_text(output[-262144:], encoding="utf-8", errors="replace")
+            return EffectResult(False, "WORK_ABSENT", "Codex exceeded the executor timeout", log_path)
+    finally:
+        schema.close()
+        schema_path.unlink(missing_ok=True)
     log_path.write_text(completed.stdout[-262144:], encoding="utf-8", errors="replace")
     if completed.returncode != 0 or not response_path.exists():
         return EffectResult(False, "WORK_ABSENT", "Codex exited without a durable result", log_path)

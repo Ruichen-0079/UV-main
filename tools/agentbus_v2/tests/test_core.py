@@ -113,7 +113,7 @@ class KernelTableTests(unittest.TestCase):
     def test_b_plan_result_absent_is_idle(self) -> None:
         snapshot = blank()
         requested = plan_job_id(snapshot)
-        action = decide(replace(snapshot, gpt_requests=frozenset({requested})))
+        action = decide(replace(snapshot, gpt_pending=frozenset({requested})))
         self.assertEqual(ActionKind.IDLE, action.kind)
 
     def test_late_plan_response_from_old_head_is_stale_without_work(self) -> None:
@@ -271,6 +271,37 @@ class KernelTableTests(unittest.TestCase):
         action = decide(replace(snapshot, work_facts=(work,), proof_facts=(proof,)))
         self.assertEqual(ActionKind.JUDGE, action.kind)
         self.assertEqual("PROVE_MECHANICAL", action.payload["failed_step"])
+
+    def test_stale_judge_response_cannot_satisfy_new_evidence_identity(self) -> None:
+        snapshot, spec = with_spec(replace(blank(), head=H1))
+        work = work_pass(snapshot, spec, input_head=H0)
+        first_proof = ProofFact(
+            proof_effect_id(snapshot, spec),
+            spec.spec_id,
+            H1,
+            B1,
+            Observation.FAIL,
+            "first-failure",
+        )
+        first = decide(replace(snapshot, work_facts=(work,), proof_facts=(first_proof,)))
+        self.assertEqual(ActionKind.JUDGE, first.kind)
+        stale = GptResult(
+            first.effect_id or "",
+            "JUDGE_GPT",
+            "RETURN_PROVE",
+            "rerun proof",
+        )
+        changed_proof = replace(first_proof, evidence_digest="new-failure")
+        current = decide(
+            replace(
+                snapshot,
+                work_facts=(work,),
+                proof_facts=(changed_proof,),
+                gpt_results=snapshot.gpt_results + (stale,),
+            )
+        )
+        self.assertEqual(ActionKind.JUDGE, current.kind)
+        self.assertNotEqual(first.effect_id, current.effect_id)
 
     def test_return_prove_rekeys_proof_without_repair_state(self) -> None:
         snapshot, spec = with_spec(replace(blank(), head=H1))

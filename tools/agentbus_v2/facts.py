@@ -66,8 +66,6 @@ class PConfig:
     proof_commands: tuple[ProofCommand, ...]
     require_github_ci: bool
     required_ci_checks: tuple[str, ...]
-    context_paths: tuple[str, ...]
-    context_terms: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -83,16 +81,12 @@ class PPaths:
         return self.root / "charter.md"
 
     @property
-    def gpt_requests(self) -> Path:
-        return self.root / "gpt" / "requests"
-
-    @property
     def gpt_outbox(self) -> Path:
         return self.root / "gpt" / "outbox"
 
     @property
-    def gpt_inbox(self) -> Path:
-        return self.root / "gpt" / "inbox"
+    def gpt_results(self) -> Path:
+        return self.root / "gpt" / "results"
 
     @property
     def work_results(self) -> Path:
@@ -116,9 +110,8 @@ class PPaths:
 
     def create_dirs(self) -> None:
         for path in (
-            self.gpt_requests,
             self.gpt_outbox,
-            self.gpt_inbox,
+            self.gpt_results,
             self.work_results,
             self.work_logs,
             self.proof_results,
@@ -253,8 +246,6 @@ def init_p(
     proof_commands: Iterable[ProofCommand] = (),
     require_github_ci: bool = True,
     required_ci_checks: Iterable[str] = (),
-    context_paths: Iterable[str] = (),
-    context_terms: Iterable[str] = (),
 ) -> PPaths:
     paths = paths_for(state_root, p_id)
     worktree = worktree.resolve()
@@ -317,8 +308,6 @@ def init_p(
         ],
         "require_github_ci": require_github_ci,
         "required_ci_checks": list(checks),
-        "context_paths": list(context_paths),
-        "context_terms": list(context_terms),
     }
     if paths.config.exists():
         existing = load_config(paths)
@@ -356,8 +345,6 @@ def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
             required_ci_checks=tuple(
                 str(item) for item in value.get("required_ci_checks", [])
             ),
-            context_paths=tuple(str(item) for item in value.get("context_paths", [])),
-            context_terms=tuple(str(item) for item in value.get("context_terms", [])),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise FactError(f"invalid P config {source}: {error}") from error
@@ -388,156 +375,109 @@ def load_charter(paths: PPaths, config: PConfig) -> str:
     return charter
 
 
+GPT_DECISIONS = {
+    "PLAN_GPT": PLAN_RESULTS,
+    "JUDGE_GPT": JUDGE_RESULTS,
+}
+
+
+def gpt_response_schema(operation: str, job_id: str) -> str:
+    decisions = GPT_DECISIONS.get(operation)
+    if decisions is None:
+        raise FactError(f"unsupported GPT operation: {operation}")
+    return f'''Return exactly one JSON object and no Markdown fence:
+{{
+  "job_id": "{job_id}",
+  "operation": "{operation}",
+  "decision": "{' | '.join(sorted(decisions))}",
+  "body": "string"
+}}
+
+Keys are exactly job_id, operation, decision, body. Repeat JOB_ID verbatim and
+put the complete bounded plan or judgment in body.'''
+
+
 def parse_gpt_response(
-    request: Mapping[str, Any], value: Mapping[str, Any], source: str = "GPT response"
+    expected_job_id: str,
+    expected_operation: str,
+    value: Mapping[str, Any],
+    source: str = "GPT response",
 ) -> GptResult:
-    if set(value) != {"job_id", "operation", "decision", "body"}:
+    if not isinstance(value, Mapping) or set(value) != {"job_id", "operation", "decision", "body"}:
         raise FactError(f"{source} keys must be exactly job_id, operation, decision, body")
-    if any(type(value[key]) is not str for key in value):
+    if any(type(item) is not str for item in value.values()):
         raise FactError(f"{source} fields must all be JSON strings")
-    result = GptResult(
-        job_id=value["job_id"],
-        operation=value["operation"],
-        decision=value["decision"],
-        body=value["body"],
-    )
-    if not GPT_JOB_RE.fullmatch(result.job_id):
-        raise FactError(f"{source} JOB_ID has an invalid shape")
-    if result.job_id != request.get("job_id"):
+    if value["job_id"] != expected_job_id:
         raise FactError(f"{source} JOB_ID mismatch")
-    if result.operation != request.get("operation"):
+    if not GPT_JOB_RE.fullmatch(expected_job_id):
+        raise FactError(f"{source} JOB_ID has an invalid shape")
+    if value["operation"] != expected_operation:
         raise FactError(f"{source} operation mismatch")
-    if result.operation == "PLAN_GPT":
-        allowed = PLAN_RESULTS
-    elif result.operation == "JUDGE_GPT":
-        allowed = JUDGE_RESULTS
-    else:
+    allowed = GPT_DECISIONS.get(expected_operation)
+    if allowed is None:
         raise FactError(f"{source} operation is invalid")
-    if result.decision not in allowed:
-        raise FactError(f"{source} decision is not allowed for {result.operation}")
-    if not result.body.strip():
+    if value["decision"] not in allowed:
+        raise FactError(f"{source} decision is not allowed for {expected_operation}")
+    if not value["body"].strip():
         raise FactError(f"{source} body must be nonempty")
-    return result
+    return GptResult(value["job_id"], value["operation"], value["decision"], value["body"])
 
 
-def _validate_gpt_request(
-    paths: PPaths, config: PConfig, job_id: str, request: Mapping[str, Any]
-) -> None:
-    if set(request) != {
-        "schema_version",
-        "job_id",
-        "operation",
-        "semantic_input",
-        "prompt_digest",
-    }:
-        raise FactError(f"GPT request has unexpected fields: {job_id}")
-    if request.get("schema_version") != 1 or request.get("job_id") != job_id:
-        raise FactError(f"GPT request identity mismatch: {job_id}")
-    semantic = request.get("semantic_input")
-    if not isinstance(semantic, dict):
-        raise FactError(f"GPT request lacks semantic input: {job_id}")
-    operation = str(request.get("operation"))
-    common = {
-        "p_id": config.p_id,
-        "charter_digest": config.charter_digest,
-        "repository": config.repository,
-        "branch": config.branch,
-        "base_ref": config.base_ref,
-    }
-    if any(semantic.get(key) != value for key, value in common.items()):
-        raise FactError(f"GPT request P/repository identity mismatch: {job_id}")
-    if operation == "PLAN_GPT":
-        expected = stable_id(
-            "plan",
-            {
-                "p_id": config.p_id,
-                "role": "PLAN_GPT",
-                "packet_schema": GPT_PACKET_SCHEMA,
-                "charter": config.charter_digest,
-                "repository": config.repository,
-                "repository_facts": {
-                    "head": semantic.get("head"),
-                    "base": semantic.get("base"),
-                    "branch": config.branch,
-                    "base_ref": config.base_ref,
-                },
-                "parent_spec": semantic.get("parent_spec_id"),
-                "previous_judge": semantic.get("trigger_judge_id"),
-            },
-        )
-        planning = stable_id(
-            "planfacts",
-            {
-                "repository": config.repository,
-                "branch": config.branch,
-                "base_ref": config.base_ref,
-                "head": semantic.get("head"),
-                "base": semantic.get("base"),
-            },
-        )
-        if semantic.get("planning_facts_digest") != planning:
-            raise FactError(f"PLAN planning fingerprint mismatch: {job_id}")
-        parent = semantic.get("parent_spec_id")
-        trigger = semantic.get("trigger_judge_id")
-        if (parent is None) != (trigger is None):
-            raise FactError(f"PLAN successor must name parent and judge together: {job_id}")
-    elif operation == "JUDGE_GPT":
-        expected = stable_id(
-            "judge",
-            {
-                "p_id": config.p_id,
-                "role": "JUDGE_GPT",
-                "packet_schema": GPT_PACKET_SCHEMA,
-                "charter": config.charter_digest,
-                "spec": semantic.get("spec_id"),
-                "head": semantic.get("head"),
-                "base": semantic.get("base"),
-                "failed_step": semantic.get("failed_step"),
-                "evidence_id": semantic.get("evidence_id"),
-                "evidence_digest": semantic.get("evidence_digest"),
-            },
-        )
-    else:
-        raise FactError(f"unsupported GPT operation: {job_id}")
-    if expected != job_id:
-        raise FactError(f"GPT JOB_ID is not the deterministic semantic identity: {job_id}")
-    prompt_path = paths.gpt_outbox / f"{job_id}.md"
-    if not prompt_path.exists() or sha256_text(prompt_path.read_text(encoding="utf-8")) != request.get(
-        "prompt_digest"
+def load_gpt_packet(paths: PPaths, job_id: str) -> dict[str, Any]:
+    path = paths.gpt_outbox / f"{job_id}.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise FactError(f"GPT packet is absent: {path}") from error
+    try:
+        encoded = text.split("## SEMANTIC INPUTS\n```json\n", 1)[1].split("\n```", 1)[0]
+        packet = json.loads(encoded)
+    except (IndexError, json.JSONDecodeError) as error:
+        raise FactError(f"GPT packet semantic inputs are malformed: {path}") from error
+    if not isinstance(packet, dict):
+        raise FactError(f"GPT packet semantic inputs must be an object: {path}")
+    semantic = packet.get("semantic_input")
+    if (
+        packet.get("packet_schema") != GPT_PACKET_SCHEMA
+        or packet.get("job_id") != job_id
+        or packet.get("operation") not in GPT_DECISIONS
+        or not isinstance(semantic, dict)
+        or semantic.get("job_id") != job_id
+        or semantic.get("operation") != packet.get("operation")
     ):
-        raise FactError(f"GPT prompt/request digest mismatch: {job_id}")
+        raise FactError(f"GPT packet lacks semantic inputs: {path}")
+    return packet
 
 
 def _load_gpt(paths: PPaths, config: PConfig) -> tuple[
     tuple[GptResult, ...], tuple[SpecFact, ...], frozenset[str]
 ]:
-    requests = {
-        path.stem: _load_json(path) for path in sorted(paths.gpt_requests.glob("*.json"))
-    }
-    for job_id, request in requests.items():
-        _validate_gpt_request(paths, config, job_id, request)
     responses: dict[str, GptResult] = {}
-    for path in sorted(paths.gpt_inbox.glob("*.json")):
+    packets: dict[str, dict[str, Any]] = {}
+    for path in sorted(paths.gpt_results.glob("*.json")):
+        job_id = path.stem
+        if not GPT_JOB_RE.fullmatch(job_id):
+            raise FactError(f"GPT result JOB_ID is invalid: {path}")
         value = _load_json(path)
-        raw_job_id = value.get("job_id")
-        if type(raw_job_id) is not str or not GPT_JOB_RE.fullmatch(raw_job_id):
-            raise FactError(f"GPT response JOB_ID is invalid: {path}")
-        if raw_job_id != path.stem or raw_job_id not in requests:
-            raise FactError(f"GPT response does not match an issued job: {path}")
-        result = parse_gpt_response(requests[raw_job_id], value, str(path))
-        responses[result.job_id] = result
+        operation = value.get("operation")
+        if type(operation) is not str:
+            raise FactError(f"GPT result operation is invalid: {path}")
+        result = parse_gpt_response(job_id, operation, value, str(path))
+        responses[job_id] = result
+        if result.operation == "PLAN_GPT" and result.decision == "SPEC":
+            packet = load_gpt_packet(paths, job_id)
+            if packet["operation"] != result.operation:
+                raise FactError(f"GPT packet/result operation mismatch: {job_id}")
+            packets[job_id] = packet
 
     specs: list[SpecFact] = []
     for job_id, result in responses.items():
         if result.operation != "PLAN_GPT" or result.decision != "SPEC":
             continue
-        request = requests[job_id]
-        semantic = request.get("semantic_input")
-        if not isinstance(semantic, dict):
-            raise FactError(f"PLAN request lacks semantic_input: {job_id}")
+        semantic = packets[job_id]["semantic_input"]
         planning_digest = str(semantic.get("planning_facts_digest", ""))
         if not planning_digest:
-            raise FactError(f"PLAN request lacks planning facts: {job_id}")
+            raise FactError(f"PLAN packet lacks planning facts: {job_id}")
         specs.append(SpecFact(
             spec_id(config.charter_digest, planning_digest, result.body),
             job_id,
@@ -558,8 +498,12 @@ def _load_gpt(paths: PPaths, config: PConfig) -> tuple[
                 raise FactError(f"root SPEC has a judge trigger: {item.spec_id}")
             continue
         trigger = responses.get(item.trigger_judge_id or "")
-        trigger_request = requests.get(item.trigger_judge_id or "", {})
-        trigger_semantic = trigger_request.get("semantic_input", {})
+        trigger_packet = packets.get(item.trigger_judge_id or "")
+        if trigger_packet is None and trigger is not None:
+            trigger_packet = load_gpt_packet(paths, trigger.job_id)
+            if trigger_packet["operation"] != trigger.operation:
+                raise FactError(f"GPT packet/result operation mismatch: {trigger.job_id}")
+        trigger_semantic = trigger_packet.get("semantic_input", {}) if trigger_packet else {}
         if (
             trigger is None
             or trigger.decision != "RETURN_PLAN"
@@ -567,7 +511,11 @@ def _load_gpt(paths: PPaths, config: PConfig) -> tuple[
             or trigger_semantic.get("spec_id") != item.parent_spec_id
         ):
             raise FactError(f"successor SPEC lacks a valid RETURN_PLAN edge: {item.spec_id}")
-    pending = frozenset(set(requests) - set(responses))
+    pending = frozenset(
+        path.stem
+        for path in paths.gpt_outbox.glob("*.md")
+        if GPT_JOB_RE.fullmatch(path.stem) and path.stem not in responses
+    )
     return tuple(responses.values()), tuple(specs), pending
 
 
@@ -931,7 +879,7 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         repository_available=repository_available,
         specs=specs,
         gpt_results=results,
-        gpt_requests=pending,
+        gpt_pending=pending,
         work_facts=tuple(work),
         proof_facts=_load_proof(paths, config, contract),
         merge=read_merge_facts(config, live_base=base),

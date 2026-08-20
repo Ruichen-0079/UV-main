@@ -26,6 +26,7 @@ from tools.agentbus_v2.cli import _tick_lock
 from tools.agentbus_v2.effects import (
     _ci_checks,
     dispatch_manual_gpt,
+    render_gpt_prompt,
     run_prove,
     submit_gpt_response,
 )
@@ -113,8 +114,6 @@ def config_for(repo: RepoFixture, charter: str) -> PConfig:
         proof_commands=(),
         require_github_ci=False,
         required_ci_checks=(),
-        context_paths=("README.md",),
-        context_terms=(),
     )
 
 
@@ -159,7 +158,19 @@ class FactAndEffectTests(unittest.TestCase):
             self.assertTrue(first.ran)
             self.assertFalse(second.ran)
             self.assertEqual(first.path, second.path)
-            self.assertIn(f"JOB_ID: {action.effect_id}", first.path.read_text(encoding="utf-8"))
+            packet = first.path.read_text(encoding="utf-8")
+            self.assertEqual(packet, render_gpt_prompt(paths, config, snapshot, action))
+            self.assertIn(f"JOB_ID: {action.effect_id}", packet)
+            for section in (
+                "## SEMANTIC INPUTS",
+                "## P_CHARTER (immutable)",
+                "## CURRENT_SPEC",
+                "## CURRENT-BASE DIFF",
+                "## STRICT RESPONSE SCHEMA",
+            ):
+                self.assertIn(section, packet)
+            self.assertFalse((paths.root / "gpt" / "requests").exists())
+            self.assertFalse((paths.root / "gpt" / "inbox").exists())
 
             response = root / "response.json"
             response.write_text(
@@ -195,6 +206,56 @@ class FactAndEffectTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "not allowed"):
                 submit_gpt_response(paths, invalid)
 
+    def test_gpt_response_rejects_wrong_job_and_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            charter = "P_ID: P-TEST\nGOAL: strict response\n"
+            config = config_for(repo, charter)
+            paths = PPaths(root / "state" / config.p_id)
+            paths.create_dirs()
+            paths.charter.write_text(charter, encoding="utf-8")
+            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            snapshot = snapshot_for(config)
+            action = decide(snapshot)
+            dispatch_manual_gpt(paths, config, snapshot, action)
+            for name, update, message in (
+                ("wrong-job.json", {"job_id": "plan-" + "0" * 24}, "GPT packet is absent"),
+                ("wrong-operation.json", {"operation": "JUDGE_GPT"}, "operation mismatch"),
+            ):
+                value = {
+                    "job_id": action.effect_id,
+                    "operation": "PLAN_GPT",
+                    "decision": "SPEC",
+                    "body": "bounded plan",
+                    **update,
+                }
+                path = root / name
+                path.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaisesRegex(FactError, message):
+                    submit_gpt_response(paths, path)
+
+    def test_unrelated_historical_packet_is_not_read_or_required(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            charter = "P_ID: P-TEST\nGOAL: packet lookup\n"
+            config = config_for(repo, charter)
+            paths = PPaths(root / "state" / config.p_id)
+            paths.create_dirs()
+            paths.charter.write_text(charter, encoding="utf-8")
+            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            snapshot = snapshot_for(config)
+            action = decide(snapshot)
+            dispatch_manual_gpt(paths, config, snapshot, action)
+            (paths.gpt_outbox / ("plan-" + "f" * 24 + ".md")).write_text(
+                "not a packet and not a current input", encoding="utf-8"
+            )
+            results, specs, pending = _load_gpt(paths, config)
+            self.assertEqual((), results)
+            self.assertEqual((), specs)
+            self.assertIn(action.effect_id, pending)
+
     def test_restart_reloads_disk_facts_and_derives_same_effect(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -228,7 +289,7 @@ class FactAndEffectTests(unittest.TestCase):
                     snapshot,
                     gpt_results=first_results,
                     specs=first_specs,
-                    gpt_requests=first_pending,
+                    gpt_pending=first_pending,
                 )
             )
             # Simulate a fresh process by loading new objects from disk.
@@ -238,11 +299,70 @@ class FactAndEffectTests(unittest.TestCase):
                     snapshot,
                     gpt_results=second_results,
                     specs=second_specs,
-                    gpt_requests=second_pending,
+                    gpt_pending=second_pending,
                 )
             )
             self.assertEqual(ActionKind.WORK, first.kind)
             self.assertEqual(first, second)
+
+    def test_judge_packet_is_self_contained_and_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            charter = "P_ID: P-TEST\nGOAL: judge packet\n"
+            config = config_for(repo, charter)
+            paths = PPaths(root / "state" / config.p_id)
+            paths.create_dirs()
+            paths.charter.write_text(charter, encoding="utf-8")
+            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            initial = snapshot_for(config)
+            planning = plan_facts_digest(initial)
+            plan = plan_job_id(initial)
+            spec = SpecFact(
+                spec_id(initial.charter_digest, planning, "Fix and prove the change"),
+                plan,
+                "Fix and prove the change",
+                planning,
+                initial.head,
+                initial.base,
+            )
+            failure = WorkFact(
+                work_effect_id(initial, spec),
+                spec.spec_id,
+                initial.head,
+                Observation.FAIL,
+                "confirmed-failure",
+            )
+            snapshot = replace(
+                initial,
+                specs=(spec,),
+                gpt_results=(GptResult(plan, "PLAN_GPT", "SPEC", spec.text),),
+                work_facts=(failure,),
+            )
+            action = decide(snapshot)
+            self.assertEqual(ActionKind.JUDGE, action.kind)
+            packet_result = dispatch_manual_gpt(paths, config, snapshot, action)
+            packet = packet_result.path.read_text(encoding="utf-8")
+            self.assertEqual(packet, render_gpt_prompt(paths, config, snapshot, action))
+            self.assertIn(spec.text, packet)
+            self.assertIn(initial.head, packet)
+            self.assertIn(initial.base, packet)
+            self.assertIn("confirmed-failure", packet)
+            response = root / "judge.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "job_id": action.effect_id,
+                        "operation": "JUDGE_GPT",
+                        "decision": "RETURN_WORK",
+                        "body": "The implementation failure is confirmed.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(submit_gpt_response(paths, response).ran)
+            loaded, _, _ = _load_gpt(paths, config)
+            self.assertEqual("RETURN_WORK", loaded[0].decision)
 
     def test_work_commit_trailers_recover_pass_after_executor_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

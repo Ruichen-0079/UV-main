@@ -62,8 +62,6 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--proof-command", action="append", type=_proof_command, default=[])
     initialize.add_argument("--no-github-ci", action="store_true")
     initialize.add_argument("--required-ci-check", action="append", default=[])
-    initialize.add_argument("--context-path", action="append", default=[])
-    initialize.add_argument("--context-term", action="append", default=[])
 
     tick = commands.add_parser("tick", help="reread all facts and run at most one effect")
     tick.add_argument("p_id")
@@ -157,8 +155,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 proof_commands=args.proof_command,
                 require_github_ci=not args.no_github_ci,
                 required_ci_checks=args.required_ci_check,
-                context_paths=args.context_path,
-                context_terms=args.context_term,
             )
             _print({"outcome": "P_INITIALIZED", "p_id": args.p_id, "path": str(paths.root)})
             return 0

@@ -36,7 +36,7 @@ JUDGE_RESULTS = frozenset(
     {"PASS", "RETURN_PLAN", "RETURN_WORK", "RETURN_PROVE", "WAIT", "HUMAN"}
 )
 IDENTITY_SCHEMA = "agentbus-v2/schema-v1"
-GPT_PACKET_SCHEMA = "agentbus-v2/manual-packet-v1"
+GPT_PACKET_SCHEMA = "agentbus-v2/manual-packet-v2"
 
 
 def stable_id(prefix: str, payload: Mapping[str, Any]) -> str:
@@ -125,7 +125,7 @@ class Snapshot:
     repository_available: bool = True
     specs: tuple[SpecFact, ...] = ()
     gpt_results: tuple[GptResult, ...] = ()
-    gpt_requests: frozenset[str] = frozenset()
+    gpt_pending: frozenset[str] = frozenset()
     work_facts: tuple[WorkFact, ...] = ()
     proof_facts: tuple[ProofFact, ...] = ()
     merge: MergeFacts = field(default_factory=MergeFacts)
@@ -146,31 +146,52 @@ class FactConflict(ValueError):
     pass
 
 
-def _repo_identity(s: Snapshot) -> dict[str, str]:
-    return {
-        "head": s.head,
-        "base": s.base,
-        "branch": s.expected_branch,
-        "base_ref": s.base_ref,
-    }
-
-
-def plan_job_id(
+def gpt_job_id(
     s: Snapshot,
+    operation: str,
     *,
+    spec: SpecFact | None = None,
+    failed_step: str | None = None,
+    evidence_id: str | None = None,
+    evidence_digest: str | None = None,
     parent_spec_id: str | None = None,
     trigger_judge_id: str | None = None,
 ) -> str:
-    return stable_id("plan", {
+    common = {
         "p_id": s.p_id,
-        "role": "PLAN_GPT",
+        "operation": operation,
         "packet_schema": GPT_PACKET_SCHEMA,
         "charter": s.charter_digest,
-        "repository": s.expected_repository,
-        "repository_facts": _repo_identity(s),
-        "parent_spec": parent_spec_id,
-        "previous_judge": trigger_judge_id,
+    }
+    if operation == "PLAN_GPT":
+        return stable_id("plan", {
+            **common, "repository": s.expected_repository,
+            "planning_facts": plan_facts_digest(s), "parent_spec": parent_spec_id,
+            "previous_judge": trigger_judge_id,
+        })
+    if operation != "JUDGE_GPT" or spec is None:
+        raise ValueError("GPT operation requires a PLAN or JUDGE semantic input")
+    if failed_step is None or evidence_id is None or evidence_digest is None:
+        raise ValueError("JUDGE_GPT identity lacks failure/evidence inputs")
+    return stable_id("judge", {
+        **common,
+        "spec": spec.spec_id,
+        "spec_content": stable_id("spec-text", {"text": spec.text}),
+        "head": s.head,
+        "base": s.base,
+        "failed_step": failed_step,
+        "evidence_id": evidence_id,
+        "evidence_digest": evidence_digest,
+        "trigger_judge": (
+            trigger_judge_id if trigger_judge_id is not None else spec.trigger_judge_id
+        ),
     })
+
+
+def plan_job_id(s: Snapshot, *, parent_spec_id: str | None = None,
+                trigger_judge_id: str | None = None) -> str:
+    return gpt_job_id(s, "PLAN_GPT", parent_spec_id=parent_spec_id,
+                      trigger_judge_id=trigger_judge_id)
 
 
 def plan_facts_digest(s: Snapshot) -> str:
@@ -225,25 +246,18 @@ def judge_job_id(
     failed_step: str,
     evidence_id: str,
     evidence_digest: str,
+    trigger_judge_id: str | None = None,
 ) -> str:
-    return stable_id("judge", {
-        "p_id": s.p_id,
-        "role": "JUDGE_GPT",
-        "packet_schema": GPT_PACKET_SCHEMA,
-        "charter": s.charter_digest,
-        "spec": spec.spec_id,
-        "head": s.head,
-        "base": s.base,
-        "failed_step": failed_step,
-        "evidence_id": evidence_id,
-        "evidence_digest": evidence_digest,
-    })
+    return gpt_job_id(s, "JUDGE_GPT", spec=spec, failed_step=failed_step,
+                      evidence_id=evidence_id, evidence_digest=evidence_digest,
+                      trigger_judge_id=trigger_judge_id)
 
 
 def semantic_judge_job_id(s: Snapshot, spec: SpecFact, proof: ProofFact) -> str:
     return judge_job_id(
         s, spec, failed_step="PROVE_SEMANTIC",
         evidence_id=proof.effect_id, evidence_digest=proof.evidence_digest,
+        trigger_judge_id=proof.trigger_judge_id,
     )
 
 
@@ -301,7 +315,7 @@ def _action(
 
 
 def _request(s: Snapshot, kind: ActionKind, effect_id: str, **payload: Any) -> Action:
-    if effect_id in s.gpt_requests:
+    if effect_id in s.gpt_pending:
         return _action(ActionKind.IDLE, reason="GPT result is absent", job_id=effect_id)
     return _action(kind, effect_id, **payload)
 
@@ -362,9 +376,11 @@ def _judge(
     step: str,
     evidence_id: str,
     digest: str,
+    trigger: str | None = None,
 ) -> Action | GptResult:
     job = judge_job_id(
-        s, spec, failed_step=step, evidence_id=evidence_id, evidence_digest=digest
+        s, spec, failed_step=step, evidence_id=evidence_id, evidence_digest=digest,
+        trigger_judge_id=trigger,
     )
     checked = _checked_result(results.get(job), "JUDGE_GPT", JUDGE_RESULTS)
     if checked is not None:
@@ -378,6 +394,7 @@ def _judge(
         failed_step=step,
         evidence_id=evidence_id,
         evidence_digest=digest,
+        trigger_judge_id=trigger,
     )
 
 
@@ -422,7 +439,10 @@ def _work(
             if work.output_head == s.head
             else _action(ActionKind.IDLE, reason="WORK HEAD has not converged", effect_id=effect)
         )
-    judged = _judge(s, results, spec, "WORK", work.effect_id, work.evidence_digest)
+    judged = _judge(
+        s, results, spec, "WORK", work.effect_id, work.evidence_digest,
+        work.trigger_judge_id,
+    )
     if isinstance(judged, Action):
         return judged
     return _route(
@@ -458,7 +478,8 @@ def _prove(
     proof = matches[0]
     if proof.status is Observation.FAIL:
         judged = _judge(
-            s, results, spec, "PROVE_MECHANICAL", proof.effect_id, proof.evidence_digest
+            s, results, spec, "PROVE_MECHANICAL", proof.effect_id,
+            proof.evidence_digest, proof.trigger_judge_id,
         )
         if isinstance(judged, Action):
             return judged
@@ -474,7 +495,8 @@ def _prove(
             ),
         )
     judged = _judge(
-        s, results, spec, "PROVE_SEMANTIC", proof.effect_id, proof.evidence_digest
+        s, results, spec, "PROVE_SEMANTIC", proof.effect_id,
+        proof.evidence_digest, proof.trigger_judge_id,
     )
     if isinstance(judged, Action):
         return judged

@@ -11,13 +11,14 @@ PLAN -> WORK -> PROVE -> MERGE -> DONE
 and recomputes. There is no persisted phase, current step, repair state, repair
 budget, or workflow WAIT state.
 
-The default GPT adapter is manual. It writes a self-contained prompt to the P's
-`gpt/outbox` and accepts only a strict response with the same deterministic
-`JOB_ID` through `gpt-submit`. Browser lane or conversation identity is not part
-of correctness.
+The default GPT adapter is manual. It writes one immutable, self-contained
+packet to `gpt/outbox/<JOB_ID>.md` and accepts one strict response at
+`gpt/results/<JOB_ID>.json` through `gpt-submit`. Browser lane or conversation
+identity is not part of correctness; there are no request, inbox, context, or
+per-job schema artifacts.
 
-The local P directory contains the immutable charter, content-addressed GPT
-requests/results, WORK failure facts, and bounded executor/proof evidence. The
+The local P directory contains the immutable charter, addressed GPT
+packets/results, WORK failure facts, and bounded executor/proof evidence. The
 default location is
 `$XDG_STATE_HOME/yuvi-agentbus-v2`, or
 `~/.local/state/yuvi-agentbus-v2`.
