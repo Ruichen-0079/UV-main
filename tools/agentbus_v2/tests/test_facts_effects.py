@@ -34,7 +34,7 @@ from tools.agentbus_v2.facts import (
     FactError,
     PConfig,
     PPaths,
-    _load_gpt,
+    _load_gpt_result,
     _load_proof,
     _load_work,
     _proof_commands,
@@ -43,6 +43,7 @@ from tools.agentbus_v2.facts import (
     init_p,
     load_config,
     proof_contract_digest,
+    read_snapshot,
     sha256_text,
 )
 from tools.agentbus_v2.github import (
@@ -193,7 +194,8 @@ class FactAndEffectTests(unittest.TestCase):
             )
             ingested = submit_gpt_response(paths, response)
             self.assertTrue(ingested.ran)
-            results, specs, pending = _load_gpt(paths, config)
+            loaded = read_snapshot(paths)
+            results, specs, pending = loaded.gpt_results, loaded.specs, loaded.gpt_pending
             self.assertEqual(1, len(results))
             self.assertEqual(1, len(specs))
             self.assertFalse(pending)
@@ -258,10 +260,89 @@ class FactAndEffectTests(unittest.TestCase):
             (paths.gpt_outbox / ("plan-" + "f" * 24 + ".md")).write_text(
                 "not a packet and not a current input", encoding="utf-8"
             )
-            results, specs, pending = _load_gpt(paths, config)
+            loaded = read_snapshot(paths)
+            results, specs, pending = loaded.gpt_results, loaded.specs, loaded.gpt_pending
             self.assertEqual((), results)
             self.assertEqual((), specs)
             self.assertIn(action.effect_id, pending)
+
+    def test_current_loader_follows_exact_return_plan_lineage_without_history_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            config = config_for(repo, "P_ID: P-TEST\nGOAL: causal lookup\n")
+            paths = PPaths(root / "state" / config.p_id)
+            paths.create_dirs()
+            paths.charter.write_text("P_ID: P-TEST\nGOAL: causal lookup\n", encoding="utf-8")
+            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+
+            root_plan = decide(snapshot_for(config))
+            dispatch_manual_gpt(paths, config, snapshot_for(config), root_plan)
+            response = root / "root-plan.json"
+            response.write_text(json.dumps({
+                "job_id": root_plan.effect_id,
+                "operation": "PLAN_GPT",
+                "decision": "SPEC",
+                "body": "First exact plan",
+            }), encoding="utf-8")
+            submit_gpt_response(paths, response)
+            current = read_snapshot(paths)
+            first = current.specs[-1]
+            work = decide(current)
+            self.assertEqual(ActionKind.WORK, work.kind)
+
+            failure = {
+                "effect_id": work.effect_id,
+                "spec_id": first.spec_id,
+                "input_head": current.head,
+                "status": "FAIL",
+                "evidence_digest": "first-work-failure",
+                "trigger_judge_id": None,
+            }
+            (paths.work_results / f"{work.effect_id}.json").write_text(
+                json.dumps(failure), encoding="utf-8"
+            )
+            judged = decide(read_snapshot(paths))
+            self.assertEqual(ActionKind.JUDGE, judged.kind)
+            dispatch_manual_gpt(paths, config, read_snapshot(paths), judged)
+            judge_response = root / "return-plan.json"
+            judge_response.write_text(json.dumps({
+                "job_id": judged.effect_id,
+                "operation": "JUDGE_GPT",
+                "decision": "RETURN_PLAN",
+                "body": "The first plan was wrong",
+            }), encoding="utf-8")
+            submit_gpt_response(paths, judge_response)
+
+            successor_pending = decide(read_snapshot(paths))
+            self.assertEqual(ActionKind.PLAN, successor_pending.kind)
+            dispatch_manual_gpt(paths, config, read_snapshot(paths), successor_pending)
+            successor_response = root / "successor-plan.json"
+            successor_response.write_text(json.dumps({
+                "job_id": successor_pending.effect_id,
+                "operation": "PLAN_GPT",
+                "decision": "SPEC",
+                "body": "Second exact plan",
+            }), encoding="utf-8")
+            submit_gpt_response(paths, successor_response)
+            before_noise = decide(read_snapshot(paths))
+
+            stale = (
+                paths.gpt_results / ("judge-" + "e" * 24 + ".json"),
+                paths.work_results / ("work-" + "e" * 24 + ".json"),
+                paths.proof_results / ("prove-" + "e" * 24 + ".json"),
+                paths.gpt_outbox / ("plan-" + "d" * 24 + ".md"),
+            )
+            for path in stale:
+                path.write_text("historical noise", encoding="utf-8")
+            stale[0].touch()
+            with patch.object(Path, "glob", side_effect=AssertionError("history scan")):
+                final = read_snapshot(paths)
+            action = decide(final)
+            self.assertEqual(before_noise, action)
+            self.assertEqual(ActionKind.WORK, action.kind)
+            self.assertEqual("Second exact plan", final.specs[-1].text)
+            self.assertEqual(final.specs[-1].spec_id, action.payload["spec_id"])
 
     def test_restart_reloads_disk_facts_and_derives_same_effect(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -290,7 +371,8 @@ class FactAndEffectTests(unittest.TestCase):
             )
             submit_gpt_response(paths, response)
 
-            first_results, first_specs, first_pending = _load_gpt(paths, config)
+            loaded = read_snapshot(paths)
+            first_results, first_specs, first_pending = loaded.gpt_results, loaded.specs, loaded.gpt_pending
             first = decide(
                 replace(
                     snapshot,
@@ -300,7 +382,8 @@ class FactAndEffectTests(unittest.TestCase):
                 )
             )
             # Simulate a fresh process by loading new objects from disk.
-            second_results, second_specs, second_pending = _load_gpt(paths, config)
+            loaded = read_snapshot(paths)
+            second_results, second_specs, second_pending = loaded.gpt_results, loaded.specs, loaded.gpt_pending
             second = decide(
                 replace(
                     snapshot,
@@ -327,11 +410,7 @@ class FactAndEffectTests(unittest.TestCase):
             plan = plan_job_id(initial)
             spec = SpecFact(
                 spec_id(initial.charter_digest, planning, "Fix and prove the change"),
-                plan,
                 "Fix and prove the change",
-                planning,
-                initial.head,
-                initial.base,
             )
             failure = WorkFact(
                 work_effect_id(initial, spec),
@@ -368,8 +447,10 @@ class FactAndEffectTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertTrue(submit_gpt_response(paths, response).ran)
-            loaded, _, _ = _load_gpt(paths, config)
-            self.assertEqual("RETURN_WORK", loaded[0].decision)
+            loaded = _load_gpt_result(paths, action.effect_id, "JUDGE_GPT")
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual("RETURN_WORK", loaded.decision)
 
     def test_work_commit_trailers_recover_pass_after_executor_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -395,7 +476,8 @@ AgentBus-V2-P: P-TEST
 AgentBus-V2-Spec: spec-123
 AgentBus-V2-Work: %s
 AgentBus-V2-Input-Head: %s
-""" % (work_id, input_head)
+AgentBus-V2-Plan: plan-%s
+""" % (work_id, input_head, "0" * 24)
             run(repo.work, "git", "commit", "-m", message)
             head = run(repo.work, "git", "rev-parse", "HEAD")
             paths = PPaths(root / "state" / "P-TEST")
@@ -417,11 +499,45 @@ AgentBus-V2-P: P-TEST
 AgentBus-V2-Spec: spec-123
 AgentBus-V2-Work: work-000000000000000000000000
 AgentBus-V2-Input-Head: %s
-""" % head
+AgentBus-V2-Plan: plan-%s
+""" % (head, "0" * 24)
             run(repo.work, "git", "commit", "-m", stale_message)
             stale_head = run(repo.work, "git", "rev-parse", "HEAD")
             with self.assertRaisesRegex(FactError, "deterministic effect identity"):
                 _work_from_head(config, stale_head)
+
+    def test_fresh_snapshot_recovers_spec_from_work_plan_trailer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            charter = "P_ID: P-TEST\nGOAL: restart after work\n"
+            config = config_for(repo, charter)
+            paths = PPaths(root / "state" / config.p_id)
+            paths.create_dirs()
+            paths.charter.write_text(charter, encoding="utf-8")
+            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            plan = decide(read_snapshot(paths))
+            dispatch_manual_gpt(paths, config, read_snapshot(paths), plan)
+            response = root / "plan.json"
+            response.write_text(json.dumps({
+                "job_id": plan.effect_id, "operation": "PLAN_GPT",
+                "decision": "SPEC", "body": "Implement the restart proof",
+            }), encoding="utf-8")
+            submit_gpt_response(paths, response)
+            before = read_snapshot(paths)
+            work = decide(before)
+            spec = before.specs[-1]
+            (repo.work / "README.md").write_text("implemented\n", encoding="utf-8")
+            run(repo.work, "git", "add", "README.md")
+            run(repo.work, "git", "commit", "-m", f"work\n\n"
+                f"AgentBus-V2-P: {config.p_id}\n"
+                f"AgentBus-V2-Spec: {spec.spec_id}\n"
+                f"AgentBus-V2-Work: {work.effect_id}\n"
+                f"AgentBus-V2-Input-Head: {before.head}\n"
+                f"AgentBus-V2-Plan: {spec.plan_job_id}\n")
+            after = read_snapshot(paths)
+            self.assertEqual(ActionKind.PROVE, decide(after).kind)
+            self.assertEqual(Observation.PASS, after.work_facts[0].status)
 
     def test_executor_crash_before_commit_is_absent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -432,7 +548,9 @@ AgentBus-V2-Input-Head: %s
             paths = PPaths(root / "state" / "P-TEST")
             paths.create_dirs()
             self.assertIsNone(_work_from_head(config, repo.base))
-            self.assertEqual([], _load_work(paths, config))
+            identity = snapshot_for(config)
+            spec = SpecFact("spec-123", "current")
+            self.assertIsNone(_load_work(paths, config, identity, spec))
 
     def test_confirmed_codex_failure_is_one_durable_work_fact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -464,10 +582,13 @@ AgentBus-V2-Input-Head: %s
                 ),
                 encoding="utf-8",
             )
-            facts = _load_work(paths, config)
-            self.assertEqual(1, len(facts))
-            self.assertIs(Observation.FAIL, facts[0].status)
-            self.assertEqual(effect, facts[0].effect_id)
+            identity = snapshot_for(config)
+            spec = SpecFact("spec-123", "current")
+            fact = _load_work(paths, config, identity, spec)
+            self.assertIsNotNone(fact)
+            assert fact is not None
+            self.assertIs(Observation.FAIL, fact.status)
+            self.assertEqual(effect, fact.effect_id)
 
     def test_initialized_p_persists_no_workflow_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -502,11 +623,7 @@ AgentBus-V2-Input-Head: %s
             plan = plan_job_id(initial)
             spec = SpecFact(
                 spec_id(initial.charter_digest, planning, "Test the change"),
-                plan,
                 "Test the change",
-                planning,
-                initial.head,
-                initial.base,
             )
             implemented_head = "1" * 40
             work = WorkFact(
@@ -563,11 +680,7 @@ AgentBus-V2-Input-Head: %s
             paths.create_dirs()
             spec = SpecFact(
                 spec_id(config.charter_digest, "planning", "current spec"),
-                "plan-" + "0" * 24,
                 "current spec",
-                "planning",
-                repo.base,
-                repo.base,
             )
             snapshot = replace(
                 snapshot_for(config),
@@ -601,10 +714,8 @@ AgentBus-V2-Input-Head: %s
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(FactError, "identity"):
-                _load_proof(
-                    paths, config, (spec,), (), repo.base, repo.base,
-                    snapshot.proof_contract_digest,
-                )
+                _load_proof(paths, config, spec, repo.base, repo.base,
+                            snapshot.proof_contract_digest)
 
     def test_exact_proof_result_reloads_pass_and_missing_is_absent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -615,11 +726,7 @@ AgentBus-V2-Input-Head: %s
             paths.create_dirs()
             spec = SpecFact(
                 spec_id(config.charter_digest, "planning", "current spec"),
-                "plan-" + "0" * 24,
                 "current spec",
-                "planning",
-                repo.base,
-                repo.base,
             )
             snapshot = replace(
                 snapshot_for(config),
@@ -659,14 +766,16 @@ AgentBus-V2-Input-Head: %s
                 encoding="utf-8",
             )
             loaded = _load_proof(
-                paths, config, (spec,), (), repo.base, repo.base,
+                paths, config, spec, repo.base, repo.base,
                 snapshot.proof_contract_digest,
             )
-            self.assertEqual((Observation.PASS,), tuple(item.status for item in loaded))
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertIs(Observation.PASS, loaded.status)
             (paths.proof_results / f"{proof}.json").unlink()
             self.assertEqual(
-                (), _load_proof(
-                    paths, config, (spec,), (), repo.base, repo.base,
+                None, _load_proof(
+                    paths, config, spec, repo.base, repo.base,
                     snapshot.proof_contract_digest,
                 )
             )
@@ -680,11 +789,7 @@ AgentBus-V2-Input-Head: %s
             paths.create_dirs()
             spec = SpecFact(
                 spec_id(config.charter_digest, "planning", "current spec"),
-                "plan-" + "0" * 24,
                 "current spec",
-                "planning",
-                repo.base,
-                repo.base,
             )
             snapshot = replace(
                 snapshot_for(config),
@@ -702,8 +807,8 @@ AgentBus-V2-Input-Head: %s
                 proof_commands=(("cargo", "fmt", "--check"),),
             )
             self.assertEqual(
-                (), _load_proof(
-                    paths, changed, (spec,), (), repo.base, repo.base,
+                None, _load_proof(
+                    paths, changed, spec, repo.base, repo.base,
                     proof_contract_digest(changed),
                 )
             )

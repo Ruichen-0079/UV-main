@@ -27,9 +27,14 @@ from .core import (
     Snapshot,
     SpecFact,
     WorkFact,
+    judge_job_id,
+    plan_facts_digest,
+    plan_job_id,
     proof_id,
     spec_id,
     stable_id,
+    work_effect_id,
+    work_identity_id,
 )
 
 
@@ -412,117 +417,97 @@ def load_gpt_packet(paths: PPaths, job_id: str) -> dict[str, Any]:
         raise FactError(f"GPT packet lacks semantic inputs: {path}")
     return packet
 
+def _load_gpt_result(
+    paths: PPaths, job_id: str, operation: str
+) -> GptResult | None:
+    path = paths.gpt_results / f"{job_id}.json"
+    return (
+        parse_gpt_response(job_id, operation, _load_json(path), str(path))
+        if path.exists() else None
+    )
 
-def _load_gpt(paths: PPaths, config: PConfig) -> tuple[
-    tuple[GptResult, ...], tuple[SpecFact, ...], frozenset[str]
-]:
-    responses: dict[str, GptResult] = {}
-    packets: dict[str, dict[str, Any]] = {}
-    for path in sorted(paths.gpt_results.glob("*.json")):
-        job_id = path.stem
-        if not GPT_JOB_RE.fullmatch(job_id):
-            raise FactError(f"GPT result JOB_ID is invalid: {path}")
-        value = _load_json(path)
-        operation = value.get("operation")
-        if type(operation) is not str:
-            raise FactError(f"GPT result operation is invalid: {path}")
-        result = parse_gpt_response(job_id, operation, value, str(path))
-        responses[job_id] = result
-        if result.operation == "PLAN_GPT" and result.decision == "SPEC":
-            packet = load_gpt_packet(paths, job_id)
-            if packet["operation"] != result.operation:
-                raise FactError(f"GPT packet/result operation mismatch: {job_id}")
-            packets[job_id] = packet
-
-    specs: list[SpecFact] = []
-    for job_id, result in responses.items():
-        if result.operation != "PLAN_GPT" or result.decision != "SPEC":
-            continue
-        semantic = packets[job_id]["semantic_input"]
-        planning_digest = str(semantic.get("planning_facts_digest", ""))
-        if not planning_digest:
-            raise FactError(f"PLAN packet lacks planning facts: {job_id}")
-        parent = str(semantic["parent_spec_id"]) if semantic.get("parent_spec_id") is not None else None
-        trigger_id = str(semantic["trigger_judge_id"]) if semantic.get("trigger_judge_id") is not None else None
-        specs.append(SpecFact(spec_id(config.charter_digest, planning_digest, result.body), job_id,
-                              result.body, planning_digest, str(semantic["head"]),
-                              str(semantic["base"]), parent, trigger_id))
-    for item in specs:
-        if item.parent_spec_id is None:
-            if item.trigger_judge_id is not None:
-                raise FactError(f"root SPEC has a judge trigger: {item.spec_id}")
-            continue
-        trigger = responses.get(item.trigger_judge_id or "")
-        trigger_packet = packets.get(item.trigger_judge_id or "")
-        if trigger_packet is None and trigger is not None:
-            trigger_packet = load_gpt_packet(paths, trigger.job_id)
-            if trigger_packet["operation"] != trigger.operation:
-                raise FactError(f"GPT packet/result operation mismatch: {trigger.job_id}")
-        trigger_semantic = trigger_packet.get("semantic_input", {}) if trigger_packet else {}
-        if (
-            trigger is None
-            or trigger.decision != "RETURN_PLAN"
-            or not isinstance(trigger_semantic, dict)
-            or trigger_semantic.get("spec_id") != item.parent_spec_id
-        ):
-            raise FactError(f"successor SPEC lacks a valid RETURN_PLAN edge: {item.spec_id}")
-    pending = frozenset(path.stem for path in paths.gpt_outbox.glob("*.md")
-                        if GPT_JOB_RE.fullmatch(path.stem) and path.stem not in responses)
-    return tuple(responses.values()), tuple(specs), pending
-
-
-def _load_work(paths: PPaths, config: PConfig) -> list[WorkFact]:
-    facts: list[WorkFact] = []
-    for path in sorted(paths.work_results.glob("*.json")):
-        value = _load_json(path)
-        # PASS is commit-trailer evidence; no result artifact is loaded.
-        if value.get("status") == Observation.PASS.value:
-            continue
-        try:
-            if set(value) != {
-                "effect_id", "spec_id", "input_head", "status",
-                "evidence_digest", "trigger_judge_id",
-            }:
-                raise FactError(f"WORK result has unexpected fields: {path}")
-            if any(type(value.get(key)) is not str for key in (
-                "effect_id", "spec_id", "input_head", "status",
-                "evidence_digest",
-            )):
-                raise FactError(f"WORK result fields have invalid types: {path}")
-            if value.get("trigger_judge_id") is not None and type(value["trigger_judge_id"]) is not str:
-                raise FactError(f"WORK result trigger has an invalid type: {path}")
-            fact = WorkFact(
-                effect_id=value["effect_id"],
-                spec_id=value["spec_id"],
-                input_head=value["input_head"],
-                status=Observation.FAIL,
-                evidence_digest=value["evidence_digest"],
-                trigger_judge_id=value["trigger_judge_id"]
-                if value.get("trigger_judge_id") is not None
-                else None,
-            )
-        except (KeyError, ValueError) as error:
-            raise FactError(f"invalid WORK fact {path}: {error}") from error
-        expected_id = stable_id(
-            "work",
-            {
-                "p_id": config.p_id,
-                "spec": fact.spec_id,
-                "input_head": fact.input_head,
-                "trigger_judge": fact.trigger_judge_id,
-            },
+def _load_plan_spec(
+    paths: PPaths, config: PConfig, identity: Snapshot,
+    parent: SpecFact | None, trigger: str | None, job_id: str | None = None,
+) -> tuple[str, GptResult | None, SpecFact | None]:
+    direct = job_id is not None
+    if job_id is None:
+        job_id = plan_job_id(
+            identity, parent_spec_id=parent.spec_id if parent else None,
+            trigger_judge_id=trigger,
         )
-        if (
-            fact.effect_id != path.stem
-            or fact.effect_id != expected_id
-            or value["status"] != Observation.FAIL.value
-            or not SHA_RE.fullmatch(fact.input_head)
-            or (fact.trigger_judge_id is not None and not GPT_JOB_RE.fullmatch(fact.trigger_judge_id))
-        ):
-            raise FactError(f"invalid WORK result identity/status: {path}")
-        facts.append(fact)
-    return facts
+    result = _load_gpt_result(paths, job_id, "PLAN_GPT")
+    if result is None or result.decision != "SPEC":
+        return job_id, result, None
+    packet = load_gpt_packet(paths, job_id)
+    semantic = packet["semantic_input"]
+    if direct:
+        packet_head, packet_base = semantic.get("head"), semantic.get("base")
+        parent_id, trigger = semantic.get("parent_spec_id"), semantic.get("trigger_judge_id")
+        valid = (
+            type(packet_head) is str and type(packet_base) is str
+            and SHA_RE.fullmatch(packet_head) and SHA_RE.fullmatch(packet_base)
+            and (parent_id is None or type(parent_id) is str)
+            and (trigger is None or GPT_JOB_RE.fullmatch(str(trigger)))
+        )
+        if not valid:
+            raise FactError(f"PLAN packet identity is malformed: {job_id}")
+        identity = _identity(config, packet_head, packet_base, "")
+        if plan_job_id(identity, parent_spec_id=parent_id, trigger_judge_id=trigger) != job_id:
+            raise FactError(f"PLAN packet identity mismatch: {job_id}")
+    else:
+        parent_id = parent.spec_id if parent else None
+    expected_planning = plan_facts_digest(identity)
+    if packet["operation"] != "PLAN_GPT" or any(
+        semantic.get(key) != expected
+        for key, expected in {
+            "parent_spec_id": parent_id, "trigger_judge_id": trigger,
+            "head": identity.head, "base": identity.base,
+            "planning_facts_digest": expected_planning,
+        }.items()
+    ):
+        raise FactError(f"PLAN packet identity mismatch: {job_id}")
+    return job_id, result, SpecFact(
+        spec_id(config.charter_digest, expected_planning, result.body), result.body,
+        parent_id, trigger, job_id,
+    )
 
+def _load_work(
+    paths: PPaths, config: PConfig, identity: Snapshot, spec: SpecFact,
+    trigger: str | None = None, recovered: WorkFact | None = None,
+) -> WorkFact | None:
+    effect_id = work_effect_id(identity, spec, trigger_judge_id=trigger)
+    if recovered is not None and recovered.effect_id == effect_id:
+        return recovered
+    path = paths.work_results / f"{effect_id}.json"
+    if not path.exists():
+        return None
+    value = _load_json(path)
+    if set(value) != {
+        "effect_id", "spec_id", "input_head", "status", "evidence_digest", "trigger_judge_id",
+    } or value.get("status") != Observation.FAIL.value:
+        raise FactError(f"invalid WORK result: {path}")
+    if any(type(value[key]) is not str for key in (
+        "effect_id", "spec_id", "input_head", "status", "evidence_digest",
+    )):
+        raise FactError(f"WORK result fields have invalid types: {path}")
+    stored_trigger = value.get("trigger_judge_id")
+    if stored_trigger is not None and type(stored_trigger) is not str:
+        raise FactError(f"WORK result trigger has an invalid type: {path}")
+    if (
+        value["effect_id"] != effect_id
+        or value["spec_id"] != spec.spec_id
+        or value["input_head"] != identity.head
+        or stored_trigger != trigger
+        or not SHA_RE.fullmatch(value["input_head"])
+        or (stored_trigger is not None and not GPT_JOB_RE.fullmatch(stored_trigger))
+    ):
+        raise FactError(f"invalid WORK result identity/status: {path}")
+    return WorkFact(
+        effect_id=effect_id, spec_id=spec.spec_id, input_head=identity.head,
+        status=Observation.FAIL, evidence_digest=value["evidence_digest"],
+        trigger_judge_id=trigger,
+    )
 
 def _work_from_head(config: PConfig, head: str) -> WorkFact | None:
     worktree = Path(config.worktree)
@@ -542,14 +527,11 @@ def _work_from_head(config: PConfig, head: str) -> WorkFact | None:
         trigger = None
     elif not GPT_JOB_RE.fullmatch(trigger):
         raise FactError("invalid WORK commit Trigger trailer")
-    expected_effect = stable_id(
-        "work",
-        {
-            "p_id": config.p_id,
-            "spec": trailers["Spec"],
-            "input_head": trailers["Input-Head"],
-            "trigger_judge": trigger,
-        },
+    plan = trailers.get("Plan")
+    if plan is not None and not GPT_JOB_RE.fullmatch(plan):
+        raise FactError("invalid WORK commit Plan trailer")
+    expected_effect = work_identity_id(
+        config.p_id, trailers["Spec"], trailers["Input-Head"], trigger,
     )
     if trailers["Work"] != expected_effect:
         raise FactError("WORK commit trailers do not match deterministic effect identity")
@@ -571,13 +553,12 @@ def _work_from_head(config: PConfig, head: str) -> WorkFact | None:
         evidence_digest=sha256_text(f"{head}\n{message}"),
         output_head=head,
         trigger_judge_id=trigger,
+        plan_job_id=plan,
     )
-
 
 def _proof_commands(
     config: PConfig, base: str = "<BASE>", head: str = "<HEAD>"
 ) -> tuple[tuple[str, ...], ...]:
-    """Return the one ordered mechanical proof contract."""
     return (
         ("git", "status", "--porcelain=v1"),
         ("git", "diff", "--check", f"{base}...{head}"),
@@ -586,7 +567,6 @@ def _proof_commands(
         ("git", "status", "--porcelain=v1"),
     )
 
-
 def proof_contract_digest(config: PConfig) -> str:
     commands = _proof_commands(config)
     return stable_id("proofcontract", {
@@ -594,7 +574,6 @@ def proof_contract_digest(config: PConfig) -> str:
         "commands": [list(command) for command in commands],
         "required_ci_checks": list(config.required_ci_checks),
     })
-
 
 def _validate_proof_commands(
     value: list[Any], config: PConfig, head: str, base: str, status: str, path: Path
@@ -632,7 +611,6 @@ def _validate_proof_commands(
     elif any(item["exit_code"] != 0 for item in value[first_failure + 1:]):
         raise FactError(f"PROVE command evidence continues after failure: {path}")
 
-
 def _validate_proof_ci(
     value: list[Any], failed_logs: dict[str, Any], config: PConfig,
     local_commands: list[Any], status: str, path: Path,
@@ -663,91 +641,177 @@ def _validate_proof_ci(
                 raise FactError(f"PROVE PASS lacks required CI evidence: {path}")
 
 
-def _load_proof(
-    paths: PPaths,
-    config: PConfig,
-    specs: tuple[SpecFact, ...],
-    results: tuple[GptResult, ...],
-    head: str,
-    base: str,
-    contract_digest: str,
-) -> tuple[ProofFact, ...]:
-    identity = Snapshot(
+def _identity(config: PConfig, head: str, base: str, contract: str) -> Snapshot:
+    return Snapshot(
         p_id=config.p_id, charter_digest=config.charter_digest,
         expected_repository=config.repository, expected_branch=config.branch,
         base_ref=config.base_ref, head=head, base=base,
-        proof_contract_digest=contract_digest,
+        proof_contract_digest=contract,
     )
-    candidates: dict[str, tuple[SpecFact, str | None]] = {}
-    triggers = (None, *(
-        item.job_id for item in results
-        if item.operation == "JUDGE_GPT" and item.decision == "RETURN_PROVE"
-    ))
-    for spec in specs:
-        for trigger in triggers:
-            identity_id = proof_id(identity, spec, trigger_judge_id=trigger)
-            candidates[identity_id] = (spec, trigger)
-    facts: list[ProofFact] = []
-    for proof_key, (spec, trigger) in candidates.items():
-        path = paths.proof_results / f"{proof_key}.json"
-        if not path.exists():
-            continue
-        value = _load_json(path)
-        expected = {
-            "schema", "proof_id", "spec_id", "head", "base", "status",
-            "trigger_judge_id", "contract_digest", "summary", "local_commands",
-            "github_checks", "failed_ci_logs", "evidence_digest",
-        }
-        if set(value) != expected or value.get("schema") != PROOF_SCHEMA:
-            raise FactError(f"PROVE result has unexpected fields: {path}")
-        if (
-            value.get("proof_id") != proof_key
-            or value.get("spec_id") != spec.spec_id
-            or value.get("head") != head
-            or value.get("base") != base
-            or value.get("trigger_judge_id") != trigger
-            or value.get("contract_digest") != contract_digest
-            or value.get("status") not in {Observation.PASS.value, Observation.FAIL.value}
-        ):
-            raise FactError(f"PROVE result identity/status mismatch: {path}")
-        if any(type(value.get(key)) is not str for key in (
-            "proof_id", "spec_id", "head", "base", "status", "contract_digest",
-            "summary", "evidence_digest",
-        )) or not isinstance(value["local_commands"], list) \
-                or not isinstance(value["github_checks"], list) \
-                or not isinstance(value["failed_ci_logs"], dict):
-            raise FactError(f"PROVE result fields have invalid types: {path}")
-        if (
-            not value["summary"].strip()
-            or not re.fullmatch(r"[0-9a-f]{64}", value["evidence_digest"])
-            or not SHA_RE.fullmatch(value["head"])
-            or not SHA_RE.fullmatch(value["base"])
-        ):
-            raise FactError(f"PROVE result fields are malformed: {path}")
-        _validate_proof_commands(
-            value["local_commands"], config, head, base, value["status"], path
+
+
+def _load_proof(
+    paths: PPaths, config: PConfig, spec: SpecFact, head: str, base: str,
+    contract_digest: str, trigger: str | None = None,
+) -> ProofFact | None:
+    identity = _identity(config, head, base, contract_digest)
+    proof_key = proof_id(identity, spec, trigger_judge_id=trigger)
+    path = paths.proof_results / f"{proof_key}.json"
+    if not path.exists():
+        return None
+    value = _load_json(path)
+    fields = {
+        "schema", "proof_id", "spec_id", "head", "base", "status", "trigger_judge_id",
+        "contract_digest", "summary", "local_commands", "github_checks", "failed_ci_logs", "evidence_digest",
+    }
+    if set(value) != fields or value.get("schema") != PROOF_SCHEMA:
+        raise FactError(f"PROVE result has unexpected fields: {path}")
+    if any(value.get(key) != expected for key, expected in {
+        "proof_id": proof_key, "spec_id": spec.spec_id, "head": head, "base": base,
+        "trigger_judge_id": trigger, "contract_digest": contract_digest,
+    }.items()) or value["status"] not in {Observation.PASS.value, Observation.FAIL.value}:
+        raise FactError(f"PROVE result identity/status mismatch: {path}")
+    if any(type(value.get(key)) is not str for key in (
+        "proof_id", "spec_id", "head", "base", "status", "contract_digest",
+        "summary", "evidence_digest",
+    )) or not isinstance(value["local_commands"], list) \
+            or not isinstance(value["github_checks"], list) \
+            or not isinstance(value["failed_ci_logs"], dict):
+        raise FactError(f"PROVE result fields have invalid types: {path}")
+    if (
+        not value["summary"].strip()
+        or not re.fullmatch(r"[0-9a-f]{64}", value["evidence_digest"])
+        or not SHA_RE.fullmatch(value["head"])
+        or not SHA_RE.fullmatch(value["base"])
+    ):
+        raise FactError(f"PROVE result fields are malformed: {path}")
+    _validate_proof_commands(value["local_commands"], config, head, base, value["status"], path)
+    _validate_proof_ci(
+        value["github_checks"], value["failed_ci_logs"], config,
+        value["local_commands"], value["status"], path,
+    )
+    evidence = {
+        "local_commands": value["local_commands"],
+        "github_checks": value["github_checks"],
+        "failed_ci_logs": value["failed_ci_logs"],
+    }
+    if sha256_text(json.dumps(evidence, sort_keys=True)) != value["evidence_digest"]:
+        raise FactError(f"PROVE evidence digest mismatch: {path}")
+    return ProofFact(
+        proof_id=proof_key, spec_id=spec.spec_id, head=head, base=base,
+        status=Observation(value["status"]), evidence_digest=value["evidence_digest"],
+        trigger_judge_id=trigger, summary=value["summary"],
+    )
+
+
+def _judge_result(
+    paths: PPaths, identity: Snapshot, spec: SpecFact, step: str,
+    evidence_id: str, evidence_digest: str,
+) -> GptResult | None:
+    return _load_gpt_result(
+        paths,
+        judge_job_id(
+            identity, spec, failed_step=step, evidence_id=evidence_id,
+            evidence_digest=evidence_digest,
+        ),
+        "JUDGE_GPT",
+    )
+
+
+def _current_stage(
+    paths: PPaths, config: PConfig, identity: Snapshot, spec: SpecFact,
+) -> tuple[tuple[WorkFact, ...], tuple[ProofFact, ...], tuple[GptResult, ...], GptResult | None]:
+    recovered = _work_from_head(config, identity.head)
+    recovered_current = recovered if recovered and recovered.spec_id == spec.spec_id else None
+    work = recovered_current or _load_work(paths, config, identity, spec)
+    if work is None:
+        return (), (), (), None
+    stage_results: list[GptResult] = []
+    if work.status is Observation.FAIL:
+        judge = _judge_result(paths, identity, spec, "WORK", work.effect_id, work.evidence_digest)
+        if judge:
+            stage_results.append(judge)
+        if judge is not None and judge.decision == "RETURN_WORK":
+            retry = _load_work(
+                paths, config, identity, spec, trigger=judge.job_id,
+                recovered=recovered_current,
+            )
+            if retry is not None:
+                work = retry
+                if work.status is Observation.PASS:
+                    return (work,), (), tuple(stage_results), None
+                judge = _judge_result(paths, identity, spec, "WORK", work.effect_id, work.evidence_digest)
+                if judge:
+                    stage_results.append(judge)
+        return (work,), (), tuple(stage_results), judge if judge and judge.decision == "RETURN_PLAN" else None
+    proof = _load_proof(
+        paths, config, spec, identity.head, identity.base, identity.proof_contract_digest
+    )
+    if proof is None:
+        return (work,), (), (), None
+    step = "PROVE_MECHANICAL" if proof.status is Observation.FAIL else "PROVE_SEMANTIC"
+    judge = _judge_result(paths, identity, spec, step, proof.proof_id, proof.evidence_digest)
+    if judge:
+        stage_results.append(judge)
+    if judge is not None and judge.decision == "RETURN_PROVE":
+        retry = _load_proof(
+            paths, config, spec, identity.head, identity.base,
+            identity.proof_contract_digest, trigger=judge.job_id,
         )
-        _validate_proof_ci(
-            value["github_checks"], value["failed_ci_logs"], config,
-            value["local_commands"], value["status"], path,
+        if retry is not None:
+            proof = retry
+            step = "PROVE_MECHANICAL" if proof.status is Observation.FAIL else "PROVE_SEMANTIC"
+            retry_judge = _judge_result(
+                paths, identity, spec, step, proof.proof_id, proof.evidence_digest,
+            )
+            if retry_judge:
+                stage_results.append(retry_judge)
+            judge = retry_judge
+    return (work,), (proof,), tuple(stage_results), judge if judge and judge.decision == "RETURN_PLAN" else None
+
+
+def _load_current(
+    paths: PPaths, config: PConfig, head: str, base: str, contract_digest: str,
+) -> tuple[tuple[GptResult, ...], tuple[SpecFact, ...], frozenset[str],
+           tuple[WorkFact, ...], tuple[ProofFact, ...]]:
+    identity = _identity(config, head, base, contract_digest)
+    results: list[GptResult] = []
+    specs: list[SpecFact] = []
+    parent: SpecFact | None = None
+    trigger: str | None = None
+    work: tuple[WorkFact, ...] = ()
+    proof: tuple[ProofFact, ...] = ()
+    seen: set[str] = set()
+    recovered = _work_from_head(config, head)
+    head_plan = recovered.plan_job_id if recovered else None
+    while True:
+        if head_plan is not None:
+            job_id = head_plan
+            job_id, result, spec = _load_plan_spec(paths, config, identity, parent, trigger, job_id)
+            head_plan = None
+        else:
+            job_id, result, spec = _load_plan_spec(paths, config, identity, parent, trigger)
+        if job_id in seen:
+            raise FactError(f"PLAN lineage cycle: {job_id}")
+        seen.add(job_id)
+        if result is None:
+            pending = frozenset({job_id}) if (paths.gpt_outbox / f"{job_id}.md").exists() else frozenset()
+            return tuple(results), tuple(specs), pending, work, proof
+        results.append(result)
+        if spec is None:
+            return tuple(results), tuple(specs), frozenset(), work, proof
+        specs.append(spec)
+        work, proof, stage_results, return_plan = _current_stage(
+            paths, config, identity, spec
         )
-        evidence = {
-            "local_commands": value["local_commands"],
-            "github_checks": value["github_checks"],
-            "failed_ci_logs": value["failed_ci_logs"],
-        }
-        if sha256_text(json.dumps(evidence, sort_keys=True)) != value["evidence_digest"]:
-            raise FactError(f"PROVE evidence digest mismatch: {path}")
-        facts.append(ProofFact(
-            proof_id=proof_key, spec_id=spec.spec_id, head=head, base=base,
-            status=Observation(value["status"]), evidence_digest=value["evidence_digest"],
-            trigger_judge_id=trigger, summary=value["summary"],
-        ))
-    return tuple(facts)
+        results.extend(stage_results)
+        if return_plan is None:
+            return tuple(results), tuple(specs), frozenset(), work, proof
+        parent, trigger = spec, return_plan.job_id
 
 
 def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
-    from .github import read_github_facts
+    from .github import GitHubFacts, read_github_facts
 
     config = load_config(paths)
     load_charter(paths, config)
@@ -784,24 +848,13 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
     except FactError:
         base = config.seed_base
         repository_available = False
-    results, specs, pending = _load_gpt(paths, config)
-    work = _load_work(paths, config)
-    recovered = _work_from_head(config, head)
-    if recovered is not None:
-        stored = [item for item in work if item.effect_id == recovered.effect_id]
-        if stored:
-            item = stored[0]
-            if (
-                item.status is not Observation.PASS
-                or item.spec_id != recovered.spec_id
-                or item.input_head != recovered.input_head
-                or item.output_head != recovered.output_head
-                or item.trigger_judge_id != recovered.trigger_judge_id
-            ):
-                raise FactError("stored WORK result conflicts with Git commit evidence")
-        else:
-            work.append(recovered)
     contract = proof_contract_digest(config)
+    if repository_available:
+        results, specs, pending, work, proof = _load_current(
+            paths, config, head, base, contract
+        )
+    else:
+        results, specs, pending, work, proof = (), (), frozenset(), (), ()
     snapshot = Snapshot(
         p_id=config.p_id,
         charter_digest=config.charter_digest,
@@ -815,8 +868,10 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         gpt_results=results,
         gpt_pending=pending,
         work_facts=tuple(work),
-        proof_facts=_load_proof(paths, config, specs, results, head, base, contract),
-        merge=read_github_facts(config),
+        proof_facts=proof,
+        merge=read_github_facts(config)
+        if allow_merge or any(item.status is Observation.PASS for item in proof)
+        else GitHubFacts(),
         expected_owner_token=config.owner_token,
         proof_contract_digest=contract,
         allow_merge=allow_merge,

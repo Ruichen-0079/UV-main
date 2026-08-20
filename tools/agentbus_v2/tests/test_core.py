@@ -54,11 +54,7 @@ def with_spec(snapshot: Snapshot, text: str = "Implement the change") -> tuple[S
     planning = plan_facts_digest(snapshot)
     spec = SpecFact(
         spec_id(snapshot.charter_digest, planning, text),
-        job,
         text,
-        planning,
-        snapshot.head,
-        snapshot.base,
     )
     result = GptResult(job, "PLAN_GPT", "SPEC", text)
     return replace(snapshot, specs=(spec,), gpt_results=(result,)), spec
@@ -118,10 +114,10 @@ class KernelTableTests(unittest.TestCase):
 
     def test_late_plan_response_from_old_head_is_stale_without_work(self) -> None:
         original, old_spec = with_spec(blank())
-        moved = replace(original, head=H2)
+        moved = replace(original, head=H2, specs=())
         action = decide(moved)
         self.assertEqual(ActionKind.PLAN, action.kind)
-        self.assertNotEqual(old_spec.plan_job_id, action.effect_id)
+        self.assertNotEqual(plan_job_id(original), action.effect_id)
 
     def test_base_drift_alone_does_not_invalidate_current_spec(self) -> None:
         snapshot, spec = with_spec(blank())
@@ -227,16 +223,12 @@ class KernelTableTests(unittest.TestCase):
         second_planning = plan_facts_digest(awaiting)
         second = SpecFact(
             spec_id(awaiting.charter_digest, second_planning, second_text),
-            plan_action.effect_id or "",
             second_text,
-            second_planning,
-            awaiting.head,
-            awaiting.base,
             parent_spec_id=first.spec_id,
             trigger_judge_id=judge,
         )
         second_plan_result = GptResult(
-            second.plan_job_id, "PLAN_GPT", "SPEC", second_text
+            plan_action.effect_id or "", "PLAN_GPT", "SPEC", second_text
         )
         old_proof = ProofFact(
             "old-proof",

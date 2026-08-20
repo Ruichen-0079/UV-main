@@ -60,10 +60,7 @@ class EffectResult:
 
 
 def _spec(snapshot: Snapshot, spec_id: str | None) -> SpecFact | None:
-    matches = [item for item in snapshot.specs if item.spec_id == spec_id]
-    if len(matches) > 1:
-        raise FactError(f"multiple SPEC facts for {spec_id}")
-    return matches[0] if matches else None
+    return next((item for item in snapshot.specs if item.spec_id == spec_id), None)
 
 
 def _repository_diff(config: PConfig, snapshot: Snapshot) -> str:
@@ -214,10 +211,13 @@ def _work_prompt(
         if len(matches) == 1:
             direction = matches[0].body
     trigger_trailer = f"\nAgentBus-V2-Trigger: {trigger}" if trigger else ""
+    if not spec.plan_job_id:
+        raise FactError("CURRENT_SPEC lacks its causal PLAN job identity")
     trailers = f"""AgentBus-V2-P: {config.p_id}
 AgentBus-V2-Spec: {spec.spec_id}
 AgentBus-V2-Work: {action.effect_id}
-AgentBus-V2-Input-Head: {snapshot.head}{trigger_trailer}"""
+AgentBus-V2-Input-Head: {snapshot.head}
+AgentBus-V2-Plan: {spec.plan_job_id}{trigger_trailer}"""
     return f"""Implement this AgentBus v2 WORK job in the current repository.
 
 P_CHARTER:

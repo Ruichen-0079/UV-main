@@ -55,13 +55,10 @@ def stable_id(prefix: str, payload: Mapping[str, Any]) -> str:
 @dataclass(frozen=True)
 class SpecFact:
     spec_id: str
-    plan_job_id: str
     text: str
-    planning_facts_digest: str
-    planning_head: str
-    planning_base: str
     parent_spec_id: str | None = None
     trigger_judge_id: str | None = None
+    plan_job_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +78,7 @@ class WorkFact:
     evidence_digest: str
     output_head: str | None = None
     trigger_judge_id: str | None = None
+    plan_job_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,10 +120,6 @@ class Action:
     effect_id: str | None = None
     reason: str = ""
     payload: Mapping[str, Any] = field(default_factory=dict)
-
-
-class FactConflict(ValueError):
-    pass
 
 
 def gpt_job_id(
@@ -188,10 +182,16 @@ def spec_id(charter_digest: str, planning_digest: str, text: str) -> str:
 def work_effect_id(
     s: Snapshot, spec: SpecFact, *, trigger_judge_id: str | None = None
 ) -> str:
+    return work_identity_id(s.p_id, spec.spec_id, s.head, trigger_judge_id)
+
+
+def work_identity_id(
+    p_id: str, spec_id_value: str, input_head: str, trigger_judge_id: str | None = None
+) -> str:
     return stable_id("work", {
-        "p_id": s.p_id,
-        "spec": spec.spec_id,
-        "input_head": s.head,
+        "p_id": p_id,
+        "spec": spec_id_value,
+        "input_head": input_head,
         "trigger_judge": trigger_judge_id,
     })
 
@@ -232,48 +232,8 @@ def semantic_judge_job_id(s: Snapshot, spec: SpecFact, proof: ProofFact) -> str:
     )
 
 
-def _unique(items: tuple[Any, ...], key: str, label: str) -> dict[str, Any]:
-    indexed: dict[str, Any] = {}
-    for item in items:
-        identity = getattr(item, key)
-        if identity in indexed and indexed[identity] != item:
-            raise FactConflict(f"conflicting {label} facts for {identity}")
-        indexed[identity] = item
-    return indexed
-
-
-def _current_spec(s: Snapshot, results: Mapping[str, GptResult]) -> SpecFact | None:
-    # A successful WORK result causally anchors the SPEC after its planning HEAD
-    # changes. Merely issuing a request never does.
-    anchored = {
-        item.spec_id for item in s.work_facts if item.status is Observation.PASS
-    }
-    applicable = lambda item: item.planning_head == s.head or item.spec_id in anchored
-    roots = [
-        item for item in s.specs
-        if item.parent_spec_id is None and item.trigger_judge_id is None and applicable(item)
-    ]
-    if not roots:
-        return None
-    if len(roots) != 1:
-        raise FactConflict("multiple applicable root SPEC facts")
-    current, seen = roots[0], set()
-    while current.spec_id not in seen:
-        seen.add(current.spec_id)
-        children = [
-            item for item in s.specs
-            if item.parent_spec_id == current.spec_id
-            and item.trigger_judge_id is not None
-            and (trigger := results.get(item.trigger_judge_id)) is not None
-            and trigger.decision == "RETURN_PLAN"
-            and applicable(item)
-        ]
-        if not children:
-            return current
-        if len(children) != 1:
-            raise FactConflict(f"multiple successor SPEC facts for {current.spec_id}")
-        current = children[0]
-    raise FactConflict("SPEC lineage cycle")
+def _current_spec(s: Snapshot) -> SpecFact | None:
+    return s.specs[-1] if s.specs else None
 
 
 def _action(
@@ -388,9 +348,23 @@ def _route(
 def _work(
     s: Snapshot, results: Mapping[str, GptResult], spec: SpecFact, trigger: str | None
 ) -> Action:
+    if trigger is None:
+        current = next(
+            (
+                item
+                for item in s.work_facts
+                if item.spec_id == spec.spec_id
+                and item.input_head == s.head
+                and work_effect_id(s, spec, trigger_judge_id=item.trigger_judge_id)
+                == item.effect_id
+            ),
+            None,
+        )
+        if current is not None:
+            trigger = current.trigger_judge_id
     effect = work_effect_id(s, spec, trigger_judge_id=trigger)
-    matches = [item for item in s.work_facts if item.effect_id == effect]
-    if not matches:
+    work = next((item for item in s.work_facts if item.effect_id == effect), None)
+    if work is None:
         return _request(
             s,
             ActionKind.WORK,
@@ -399,9 +373,6 @@ def _work(
             input_head=s.head,
             trigger_judge_id=trigger,
         )
-    if len(matches) != 1:
-        return _action(ActionKind.HUMAN, reason="conflicting WORK evidence", effect_id=effect)
-    work = matches[0]
     if work.status is Observation.PASS:
         if not work.output_head or work.output_head == work.input_head:
             return _action(ActionKind.HUMAN, reason="WORK PASS produced no new HEAD", effect_id=effect)
@@ -432,9 +403,24 @@ def _work(
 def _prove(
     s: Snapshot, results: Mapping[str, GptResult], spec: SpecFact, trigger: str | None
 ) -> Action:
+    if trigger is None:
+        current = next(
+            (
+                item
+                for item in s.proof_facts
+                if item.spec_id == spec.spec_id
+                and item.head == s.head
+                and item.base == s.base
+                and proof_id(s, spec, trigger_judge_id=item.trigger_judge_id)
+                == item.proof_id
+            ),
+            None,
+        )
+        if current is not None:
+            trigger = current.trigger_judge_id
     effect = proof_id(s, spec, trigger_judge_id=trigger)
-    matches = [item for item in s.proof_facts if item.proof_id == effect]
-    if not matches:
+    proof = next((item for item in s.proof_facts if item.proof_id == effect), None)
+    if proof is None:
         return _request(
             s,
             ActionKind.PROVE,
@@ -444,9 +430,6 @@ def _prove(
             base=s.base,
             trigger_judge_id=trigger,
         )
-    if len(matches) != 1:
-        return _action(ActionKind.HUMAN, reason="conflicting PROVE evidence", effect_id=effect)
-    proof = matches[0]
     if proof.status is Observation.FAIL:
         judged = _judge(
             s, results, spec, "PROVE_MECHANICAL", proof.proof_id,
@@ -475,16 +458,12 @@ def _prove(
 
 
 def _work_pass(s: Snapshot, spec: SpecFact) -> WorkFact | None:
-    matches = [
-        item
-        for item in s.work_facts
+    return next((
+        item for item in s.work_facts
         if item.spec_id == spec.spec_id
         and item.status is Observation.PASS
         and item.output_head == s.head
-    ]
-    if len(matches) > 1:
-        raise FactConflict("multiple WORK PASS facts match current SPEC/HEAD")
-    return matches[0] if matches else None
+    ), None)
 
 
 def merge_fence_failures(s: Snapshot, spec: SpecFact) -> tuple[str, ...]:
@@ -578,17 +557,14 @@ def decide(s: Snapshot) -> Action:
     """Scan PLAN, WORK, PROVE, MERGE from immutable facts on every call."""
     if not s.repository_available:
         return _action(ActionKind.IDLE, reason="repository facts are absent")
-    try:
-        results = _unique(s.gpt_results, "job_id", "GPT result")
-        spec = _current_spec(s, results)
-        if spec is None:
-            return _plan(s, results)
-        if (done := _done(s, results, spec)) is not None:
-            return done
-        return (
-            _prove(s, results, spec, None)
-            if _work_pass(s, spec)
-            else _work(s, results, spec, None)
-        )
-    except FactConflict as error:
-        return _action(ActionKind.HUMAN, reason="durable fact conflict", detail=str(error))
+    results = {item.job_id: item for item in s.gpt_results}
+    spec = _current_spec(s)
+    if spec is None:
+        return _plan(s, results)
+    if (done := _done(s, results, spec)) is not None:
+        return done
+    return (
+        _prove(s, results, spec, None)
+        if _work_pass(s, spec)
+        else _work(s, results, spec, None)
+    )
