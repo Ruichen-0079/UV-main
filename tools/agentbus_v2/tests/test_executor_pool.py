@@ -25,7 +25,7 @@ from tools.agentbus_v2.executor_pool import (
     list_executor_accounts,
     load_accounts,
 )
-from tools.agentbus_v2.facts import PPaths
+from tools.agentbus_v2.facts import FactError, PPaths
 
 from tools.agentbus_v2.tests.test_facts_effects import (
     RepoFixture,
@@ -90,6 +90,32 @@ class ExecutorPoolTests(unittest.TestCase):
                 ({"name": "one", "enabled": True}, {"name": "two", "enabled": False}),
                 list_executor_accounts(state),
             )
+
+    def test_duplicate_codex_home_cannot_bypass_account_capacity_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            shared = Path(directory) / "account"
+            config_file(
+                state,
+                [
+                    {"name": "one", "codex_home": str(shared), "enabled": True},
+                    {
+                        "name": "two",
+                        "codex_home": str(shared / ".." / "account"),
+                        "enabled": True,
+                    },
+                ],
+            )
+            with self.assertRaisesRegex(FactError, "share one CODEX_HOME"):
+                load_accounts(state)
+            with self.assertRaisesRegex(FactError, "share one CODEX_HOME"):
+                ExecutorPool(
+                    state,
+                    (
+                        ExecutorAccount("one", shared),
+                        ExecutorAccount("two", shared),
+                    ),
+                )
 
     def test_free_account_is_selected_once_and_account_is_not_in_work_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

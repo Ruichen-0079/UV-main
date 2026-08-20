@@ -21,7 +21,15 @@ GUARDIAN_TIMEOUT = 124
 GUARDIAN_ERROR = 126
 WORKTREE_BUSY = 123
 ACCOUNT_BUSY = 122
-_GUARDIAN_CODES = {PARENT_GONE, GUARDIAN_TIMEOUT, GUARDIAN_ERROR, WORKTREE_BUSY, ACCOUNT_BUSY}
+IDENTITY_DRIFT = 121
+_GUARDIAN_CODES = {
+    PARENT_GONE,
+    GUARDIAN_TIMEOUT,
+    GUARDIAN_ERROR,
+    WORKTREE_BUSY,
+    ACCOUNT_BUSY,
+    IDENTITY_DRIFT,
+}
 
 
 @dataclass(frozen=True)
@@ -31,6 +39,7 @@ class GuardianResult:
     timed_out: bool = False
     worktree_busy: bool = False
     account_busy: bool = False
+    identity_drift: bool = False
 
 
 def _group_alive(pgid: int) -> bool:
@@ -96,6 +105,8 @@ def _guarded_main(
     worktree_lock: Path,
     account_lock: Path,
     timeout: float,
+    expected_head: str | None = None,
+    expected_branch: str | None = None,
 ) -> int:
     child: subprocess.Popen[bytes] | None = None
     stop_requested = False
@@ -122,6 +133,53 @@ def _guarded_main(
             with _owned_lock(account_lock) as account_handle:
                 if account_handle is None:
                     return ACCOUNT_BUSY
+                if _parent_gone(read_fd) or stop_requested:
+                    return PARENT_GONE
+                if expected_head is not None or expected_branch is not None:
+                    if expected_head is None or expected_branch is None:
+                        return GUARDIAN_ERROR
+                    try:
+                        head = subprocess.run(
+                            ("git", "rev-parse", "HEAD"),
+                            cwd=cwd,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=10,
+                            check=False,
+                        )
+                        branch = subprocess.run(
+                            ("git", "branch", "--show-current"),
+                            cwd=cwd,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=10,
+                            check=False,
+                        )
+                        status = subprocess.run(
+                            ("git", "status", "--porcelain=v1"),
+                            cwd=cwd,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=10,
+                            check=False,
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        return GUARDIAN_ERROR
+                    if (
+                        head.returncode != 0
+                        or branch.returncode != 0
+                        or status.returncode != 0
+                    ):
+                        return GUARDIAN_ERROR
+                    if (
+                        head.stdout.strip() != expected_head
+                        or branch.stdout.strip() != expected_branch
+                        or bool(status.stdout.strip())
+                    ):
+                        return IDENTITY_DRIFT
                 if _parent_gone(read_fd) or stop_requested:
                     return PARENT_GONE
                 log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,6 +237,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--worktree-lock", type=Path, required=True)
     parser.add_argument("--account-lock", type=Path, required=True)
     parser.add_argument("--timeout", type=float, required=True)
+    parser.add_argument("--expected-head")
+    parser.add_argument("--expected-branch")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
@@ -198,6 +258,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
         args.worktree_lock,
         args.account_lock,
         args.timeout,
+        args.expected_head,
+        args.expected_branch,
     )
 
 
@@ -211,6 +273,8 @@ def run_guardian(
     worktree_lock: Path,
     account_lock: Path,
     input_text: str | None = None,
+    expected_head: str | None = None,
+    expected_branch: str | None = None,
 ) -> GuardianResult:
     """Run an owned Codex guardian while retaining parent-liveness signaling."""
 
@@ -226,6 +290,10 @@ def run_guardian(
         "--account-lock", str(account_lock),
         "--timeout", str(timeout),
     ]
+    if expected_head is not None:
+        guardian_command.extend(("--expected-head", expected_head))
+    if expected_branch is not None:
+        guardian_command.extend(("--expected-branch", expected_branch))
     guardian_command.extend(("--", *command))
     process: subprocess.Popen[bytes] | None = None
     read_closed = False
@@ -267,6 +335,7 @@ def run_guardian(
             timed_out=returncode == GUARDIAN_TIMEOUT,
             worktree_busy=returncode == WORKTREE_BUSY,
             account_busy=returncode == ACCOUNT_BUSY,
+            identity_drift=returncode == IDENTITY_DRIFT,
         )
     finally:
         if not read_closed:

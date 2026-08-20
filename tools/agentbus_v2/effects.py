@@ -318,6 +318,8 @@ def run_codex_work(
             worktree_lock=worktree_lock_path,
             account_lock=account_lock_path,
             input_text=prompt,
+            expected_head=snapshot.head,
+            expected_branch=config.branch,
         )
     finally:
         schema.close()
@@ -334,6 +336,8 @@ def run_codex_work(
         return EffectResult(False, "worktree execution lock is unavailable")
     if guarded.account_busy:
         return EffectResult(False, "Codex account lock is unavailable")
+    if guarded.identity_drift:
+        return EffectResult(False, "WORK identities drifted before Codex")
     if guarded.returncode == GUARDIAN_ERROR:
         return EffectResult(False, "Codex guardian could not start or own the executor")
     if guarded.returncode != 0 or not response_path.exists():

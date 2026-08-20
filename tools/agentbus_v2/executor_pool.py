@@ -50,6 +50,26 @@ def _default_accounts() -> tuple[ExecutorAccount, ...]:
     )
 
 
+def _validated_accounts(
+    accounts: tuple[ExecutorAccount, ...], source: str
+) -> tuple[ExecutorAccount, ...]:
+    names: set[str] = set()
+    homes: set[Path] = set()
+    validated: list[ExecutorAccount] = []
+    for account in accounts:
+        home = Path(account.codex_home).expanduser().resolve()
+        if not ACCOUNT_NAME_RE.fullmatch(account.name) or account.name in names:
+            raise FactError(f"executor accounts require unique valid names: {source}")
+        if home in homes:
+            raise FactError(f"executor accounts share one CODEX_HOME: {source}")
+        if type(account.enabled) is not bool:
+            raise FactError(f"executor account enabled flag is invalid: {source}")
+        names.add(account.name)
+        homes.add(home)
+        validated.append(ExecutorAccount(account.name, home, account.enabled))
+    return tuple(validated)
+
+
 def load_accounts(state_root: Path) -> tuple[ExecutorAccount, ...]:
     path = executor_config_path(state_root)
     if not path.exists():
@@ -77,8 +97,8 @@ def load_accounts(state_root: Path) -> tuple[ExecutorAccount, ...]:
             ):
                 raise TypeError("account requires unique name, codex_home, and boolean enabled")
             names.add(name)
-            accounts.append(ExecutorAccount(name, Path(codex_home).expanduser(), enabled))
-        return tuple(accounts)
+            accounts.append(ExecutorAccount(name, Path(codex_home), enabled))
+        return _validated_accounts(tuple(accounts), str(path))
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         raise FactError(f"invalid executor configuration {path}: {error}") from error
 
@@ -178,7 +198,11 @@ class ExecutorPool:
         self, state_root: Path, accounts: tuple[ExecutorAccount, ...] | None = None
     ) -> None:
         self.state_root = Path(state_root)
-        self.accounts = accounts if accounts is not None else load_accounts(self.state_root)
+        self.accounts = (
+            _validated_accounts(accounts, "ExecutorPool")
+            if accounts is not None
+            else load_accounts(self.state_root)
+        )
 
     def run(
         self,

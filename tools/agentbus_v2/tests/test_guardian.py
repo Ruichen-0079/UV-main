@@ -9,7 +9,7 @@ import tempfile
 import time
 import unittest
 
-from tools.agentbus_v2.codex_guardian import GUARDIAN_TIMEOUT, run_guardian
+from tools.agentbus_v2.codex_guardian import GUARDIAN_TIMEOUT, IDENTITY_DRIFT, run_guardian
 from tools.agentbus_v2.executor_pool import (
     ExecutorAccount,
     account_lock,
@@ -134,6 +134,40 @@ class GuardianTests(unittest.TestCase):
             grandchild_pid = int(wait_for(grandchild_marker))
             self.assertFalse(process_alive(child_pid))
             self.assertFalse(process_alive(grandchild_pid))
+            with worktree_execution_lock(state, worktree) as acquired:
+                self.assertTrue(acquired)
+            with account_lock(state, account) as acquired:
+                self.assertTrue(acquired)
+
+    def test_locked_preflight_rejects_head_branch_or_dirty_drift_before_mutator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            account, worktree = self._locks(root)
+            state = root / "state"
+            subprocess.run(("git", "init", "-b", "work"), cwd=worktree, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(("git", "config", "user.name", "Guardian Test"), cwd=worktree, check=True)
+            subprocess.run(("git", "config", "user.email", "guardian@example.invalid"), cwd=worktree, check=True)
+            tracked = worktree / "tracked.txt"
+            tracked.write_text("initial\n", encoding="utf-8")
+            subprocess.run(("git", "add", "tracked.txt"), cwd=worktree, check=True)
+            subprocess.run(("git", "commit", "-m", "initial"), cwd=worktree, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            head = subprocess.run(
+                ("git", "rev-parse", "HEAD"), cwd=worktree, check=True,
+                text=True, stdout=subprocess.PIPE,
+            ).stdout.strip()
+            marker = root / "mutator-ran"
+            tracked.write_text("dirty\n", encoding="utf-8")
+            result = run_guardian(
+                [sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('ran')", str(marker)],
+                expected_head=head,
+                expected_branch="work",
+                **self._guardian_kwargs(root, state, account, worktree),
+            )
+            self.assertEqual(IDENTITY_DRIFT, result.returncode)
+            self.assertTrue(result.identity_drift)
+            self.assertFalse(marker.exists())
             with worktree_execution_lock(state, worktree) as acquired:
                 self.assertTrue(acquired)
             with account_lock(state, account) as acquired:
