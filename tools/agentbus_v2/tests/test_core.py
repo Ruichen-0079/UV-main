@@ -16,7 +16,7 @@ from tools.agentbus_v2.core import (
     judge_job_id,
     plan_facts_digest,
     plan_job_id,
-    proof_effect_id,
+    proof_id,
     semantic_judge_job_id,
     spec_id,
     work_effect_id,
@@ -77,7 +77,7 @@ def work_pass(snapshot: Snapshot, spec: SpecFact, input_head: str = H0) -> WorkF
 
 def proof_pass(snapshot: Snapshot, spec: SpecFact) -> ProofFact:
     return ProofFact(
-        effect_id=proof_effect_id(snapshot, spec),
+        proof_id=proof_id(snapshot, spec),
         spec_id=spec.spec_id,
         head=snapshot.head,
         base=snapshot.base,
@@ -195,7 +195,7 @@ class KernelTableTests(unittest.TestCase):
         action = decide(replace(moved, work_facts=(work1, work2), proof_facts=(old_proof,)))
         self.assertEqual(ActionKind.PROVE, action.kind)
         self.assertEqual(H2, action.payload["head"])
-        self.assertNotEqual(old_proof.effect_id, action.effect_id)
+        self.assertNotEqual(old_proof.proof_id, action.effect_id)
 
     def test_h_return_plan_selects_new_spec_and_old_evidence_is_stale(self) -> None:
         snapshot, first = with_spec(blank(), "First plan")
@@ -261,7 +261,7 @@ class KernelTableTests(unittest.TestCase):
         snapshot, spec = with_spec(replace(blank(), head=H1))
         work = work_pass(snapshot, spec)
         proof = ProofFact(
-            proof_effect_id(snapshot, spec),
+            proof_id(snapshot, spec),
             spec.spec_id,
             H1,
             B1,
@@ -276,7 +276,7 @@ class KernelTableTests(unittest.TestCase):
         snapshot, spec = with_spec(replace(blank(), head=H1))
         work = work_pass(snapshot, spec, input_head=H0)
         first_proof = ProofFact(
-            proof_effect_id(snapshot, spec),
+            proof_id(snapshot, spec),
             spec.spec_id,
             H1,
             B1,
@@ -307,7 +307,7 @@ class KernelTableTests(unittest.TestCase):
         snapshot, spec = with_spec(replace(blank(), head=H1))
         work = work_pass(snapshot, spec)
         failed = ProofFact(
-            proof_effect_id(snapshot, spec),
+            proof_id(snapshot, spec),
             spec.spec_id,
             H1,
             B1,
@@ -318,7 +318,7 @@ class KernelTableTests(unittest.TestCase):
             snapshot,
             spec,
             failed_step="PROVE_MECHANICAL",
-            evidence_id=failed.effect_id,
+            evidence_id=failed.proof_id,
             evidence_digest=failed.evidence_digest,
         )
         result = GptResult(judge, "JUDGE_GPT", "RETURN_PROVE", "Rerun external proof")
@@ -331,14 +331,14 @@ class KernelTableTests(unittest.TestCase):
             )
         )
         self.assertEqual(ActionKind.PROVE, action.kind)
-        self.assertNotEqual(failed.effect_id, action.effect_id)
+        self.assertNotEqual(failed.proof_id, action.effect_id)
         self.assertEqual(judge, action.payload["trigger_judge_id"])
 
     def test_prove_failure_can_return_to_work_without_repair_state(self) -> None:
         snapshot, spec = with_spec(replace(blank(), head=H1))
         work = work_pass(snapshot, spec)
         failed = ProofFact(
-            proof_effect_id(snapshot, spec),
+            proof_id(snapshot, spec),
             spec.spec_id,
             H1,
             B1,
@@ -349,7 +349,7 @@ class KernelTableTests(unittest.TestCase):
             snapshot,
             spec,
             failed_step="PROVE_MECHANICAL",
-            evidence_id=failed.effect_id,
+            evidence_id=failed.proof_id,
             evidence_digest=failed.evidence_digest,
         )
         result = GptResult(judge, "JUDGE_GPT", "RETURN_WORK", "Correct the implementation")

@@ -20,6 +20,7 @@ from .core import (
     JUDGE_RESULTS,
     PLAN_RESULTS,
     GPT_PACKET_SCHEMA,
+    PROOF_SCHEMA,
     GptResult,
     MergeFacts,
     Observation,
@@ -27,27 +28,21 @@ from .core import (
     Snapshot,
     SpecFact,
     WorkFact,
+    proof_id,
     spec_id,
     stable_id,
 )
 
 
-CONFIG_SCHEMA = 1
+CONFIG_SCHEMA = 2
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 P_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 TRAILER_RE = re.compile(r"^AgentBus-V2-([A-Za-z-]+):\s*(.+?)\s*$")
 GPT_JOB_RE = re.compile(r"^(?:plan|judge)-[0-9a-f]{24}$")
-SPEC_ID_RE = re.compile(r"^spec-[0-9a-f]{24}$")
 
 
 class FactError(RuntimeError):
     pass
-
-
-@dataclass(frozen=True)
-class ProofCommand:
-    name: str
-    argv: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -63,8 +58,7 @@ class PConfig:
     seed_base: str
     charter_digest: str
     owner_token: str
-    proof_commands: tuple[ProofCommand, ...]
-    require_github_ci: bool
+    proof_commands: tuple[tuple[str, ...], ...]
     required_ci_checks: tuple[str, ...]
 
 
@@ -100,14 +94,6 @@ class PPaths:
     def proof_results(self) -> Path:
         return self.root / "prove" / "results"
 
-    @property
-    def proof_partials(self) -> Path:
-        return self.root / "prove" / "partials"
-
-    @property
-    def proof_logs(self) -> Path:
-        return self.root / "prove" / "logs"
-
     def create_dirs(self) -> None:
         for path in (
             self.gpt_outbox,
@@ -115,8 +101,6 @@ class PPaths:
             self.work_results,
             self.work_logs,
             self.proof_results,
-            self.proof_partials,
-            self.proof_logs,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -243,8 +227,7 @@ def init_p(
     branch: str,
     base_ref: str = "main",
     remote: str = "origin",
-    proof_commands: Iterable[ProofCommand] = (),
-    require_github_ci: bool = True,
+    proof_commands: Iterable[tuple[str, ...]] = (),
     required_ci_checks: Iterable[str] = (),
 ) -> PPaths:
     paths = paths_for(state_root, p_id)
@@ -267,9 +250,10 @@ def init_p(
         raise FactError("P initialization requires a clean dedicated worktree")
     if head != base:
         raise FactError("P initialization HEAD must equal the freshly read live BASE")
-    checks = tuple(required_ci_checks)
-    if require_github_ci and not checks:
-        raise FactError("GitHub proof requires at least one exact required CI check")
+    commands = tuple(tuple(str(arg) for arg in command) for command in proof_commands)
+    if any(not command for command in commands):
+        raise FactError("proof command argv cannot be empty")
+    checks = tuple(str(check) for check in required_ci_checks)
     remote_branch = _run(
         ("git", "ls-remote", "--exit-code", "--heads", remote, f"refs/heads/{branch}"),
         cwd=worktree,
@@ -302,11 +286,7 @@ def init_p(
         "seed_base": base,
         "charter_digest": charter_digest,
         "owner_token": owner_token,
-        "proof_commands": [
-            {"name": command.name, "argv": list(command.argv)}
-            for command in proof_commands
-        ],
-        "require_github_ci": require_github_ci,
+        "proof_commands": [list(command) for command in commands],
         "required_ci_checks": list(checks),
     }
     if paths.config.exists():
@@ -324,10 +304,12 @@ def init_p(
 
 def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
     try:
-        commands = tuple(
-            ProofCommand(str(item["name"]), tuple(str(arg) for arg in item["argv"]))
-            for item in value.get("proof_commands", [])
-        )
+        raw_commands = value.get("proof_commands", [])
+        if not isinstance(raw_commands, list) or any(
+            not isinstance(item, list) for item in raw_commands
+        ):
+            raise TypeError("proof_commands must be a list of argv lists")
+        commands = tuple(tuple(str(arg) for arg in item) for item in raw_commands)
         config = PConfig(
             schema_version=int(value["schema_version"]),
             p_id=str(value["p_id"]),
@@ -341,7 +323,6 @@ def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
             charter_digest=str(value["charter_digest"]),
             owner_token=str(value["owner_token"]),
             proof_commands=commands,
-            require_github_ci=bool(value.get("require_github_ci", True)),
             required_ci_checks=tuple(
                 str(item) for item in value.get("required_ci_checks", [])
             ),
@@ -354,10 +335,8 @@ def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
         raise FactError(f"invalid P_ID in {source}")
     if not SHA_RE.fullmatch(config.seed_head) or not SHA_RE.fullmatch(config.seed_base):
         raise FactError(f"invalid seed SHA in {source}")
-    if any(not command.argv for command in commands):
+    if any(not command for command in commands):
         raise FactError(f"empty proof command in {source}")
-    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_. -]*", command.name) for command in commands):
-        raise FactError(f"unsafe proof command name in {source}")
     return config
 
 
@@ -604,96 +583,175 @@ def _work_from_head(config: PConfig, head: str) -> WorkFact | None:
     )
 
 
-def proof_contract_digest(config: PConfig) -> str:
-    return stable_id(
-        "proofcontract",
-        {
-            "builtins": [
-                "clean-worktree",
-                "diff-check",
-                "merge-tree",
-                "clean-worktree-after",
-            ],
-            "commands": [asdict(item) for item in config.proof_commands],
-            "github_ci": config.require_github_ci,
-            "required_ci_checks": list(config.required_ci_checks),
-        },
+def _proof_commands(
+    config: PConfig, base: str = "<BASE>", head: str = "<HEAD>"
+) -> tuple[tuple[str, ...], ...]:
+    """Return the one ordered mechanical proof contract."""
+    return (
+        ("git", "status", "--porcelain=v1"),
+        ("git", "diff", "--check", f"{base}...{head}"),
+        ("git", "merge-tree", "--write-tree", base, head),
+        *config.proof_commands,
+        ("git", "status", "--porcelain=v1"),
     )
 
 
-def _load_proof(
-    paths: PPaths, config: PConfig, contract_digest: str
-) -> tuple[ProofFact, ...]:
-    facts: list[ProofFact] = []
-    for path in sorted(paths.proof_results.glob("*.json")):
-        value = _load_json(path)
-        try:
-            if set(value) != {
-                "effect_id",
-                "spec_id",
-                "head",
-                "base",
-                "status",
-                "evidence_digest",
-                "trigger_judge_id",
-                "summary",
-                "evidence",
-            }:
-                raise FactError(f"PROVE result has unexpected fields: {path}")
-            evidence = value["evidence"]
-            if not isinstance(evidence, dict) or sha256_text(
-                json.dumps(evidence, sort_keys=True)
-            ) != value["evidence_digest"]:
-                raise FactError(f"PROVE evidence digest mismatch: {path}")
-            string_fields = ("effect_id", "spec_id", "head", "base", "status",
-                             "evidence_digest", "summary")
-            if any(type(value.get(key)) is not str for key in string_fields):
-                raise FactError(f"PROVE result fields have invalid types: {path}")
-            if value.get("trigger_judge_id") is not None and type(
-                value["trigger_judge_id"]
-            ) is not str:
-                raise FactError(f"PROVE trigger has an invalid type: {path}")
-            fact = ProofFact(
-                effect_id=value["effect_id"],
-                spec_id=value["spec_id"],
-                head=value["head"],
-                base=value["base"],
-                status=Observation(value["status"]),
-                evidence_digest=value["evidence_digest"],
-                trigger_judge_id=value["trigger_judge_id"]
-                if value.get("trigger_judge_id") is not None
-                else None,
-                summary=value["summary"],
-            )
-        except (KeyError, ValueError) as error:
-            raise FactError(f"invalid PROVE fact {path}: {error}") from error
-        expected_id = stable_id(
-            "prove",
-            {
-                "p_id": config.p_id,
-                "spec": fact.spec_id,
-                "head": fact.head,
-                "base": fact.base,
-                "trigger_judge": fact.trigger_judge_id,
-                "proof_contract": contract_digest,
-            },
-        )
-        if fact.effect_id != path.stem:
-            raise FactError(f"invalid PROVE result identity/status: {path}")
-        if fact.effect_id != expected_id:
-            # A changed proof contract makes earlier evidence naturally stale.
-            # Keep malformed/tampered records fatal, but do not let a valid
-            # prior contract block recomputation under the new identity.
-            if not SPEC_ID_RE.fullmatch(fact.spec_id):
-                raise FactError(f"invalid PROVE result identity/status: {path}")
-            continue
+def proof_contract_digest(config: PConfig) -> str:
+    commands = _proof_commands(config)
+    return stable_id("proofcontract", {
+        "schema": PROOF_SCHEMA,
+        "commands": [list(command) for command in commands],
+        "required_ci_checks": list(config.required_ci_checks),
+    })
+
+
+def _validate_proof_commands(
+    value: list[Any], config: PConfig, head: str, base: str, status: str, path: Path
+) -> None:
+    expected = _proof_commands(config, base, head)
+    if not value or len(value) > len(expected):
+        raise FactError(f"PROVE command evidence has an invalid length: {path}")
+    first_failure: int | None = None
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or set(item) != {
+            "argv", "exit_code", "output", "output_digest"
+        }:
+            raise FactError(f"PROVE command evidence has invalid fields: {path}")
+        argv = item["argv"]
         if (
-            fact.status is Observation.ABSENT
-            or not SHA_RE.fullmatch(fact.head)
-            or not SHA_RE.fullmatch(fact.base)
+            not isinstance(argv, list)
+            or argv != list(expected[index])
+            or any(type(arg) is not str for arg in argv)
+            or type(item["exit_code"]) is not int
+            or not isinstance(item["output"], str)
+            or type(item["output_digest"]) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", item["output_digest"])
+            or len(item["output"]) > 65536
         ):
-            raise FactError(f"invalid PROVE result identity/status: {path}")
-        facts.append(fact)
+            raise FactError(f"PROVE command evidence does not match contract: {path}")
+        if len(item["output"]) < 65536 and sha256_text(item["output"]) != item["output_digest"]:
+            raise FactError(f"PROVE command output digest mismatch: {path}")
+        if item["exit_code"] != 0 and first_failure is None:
+            first_failure = index
+    if status == Observation.PASS.value:
+        if len(value) != len(expected) or first_failure is not None:
+            raise FactError(f"PROVE PASS lacks complete passing commands: {path}")
+    elif first_failure is None:
+        raise FactError(f"PROVE FAIL lacks a confirmed command failure: {path}")
+    elif any(item["exit_code"] != 0 for item in value[first_failure + 1:]):
+        raise FactError(f"PROVE command evidence continues after failure: {path}")
+
+
+def _validate_proof_ci(
+    value: list[Any], failed_logs: dict[str, Any], config: PConfig,
+    local_commands: list[Any], status: str, path: Path,
+) -> None:
+    if any(not isinstance(item, dict) for item in value) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in failed_logs.items()
+    ):
+        raise FactError(f"PROVE CI evidence has invalid types: {path}")
+    local_failed = any(
+        isinstance(item, dict) and item.get("exit_code") != 0 for item in local_commands
+    )
+    if local_failed:
+        if value or failed_logs:
+            raise FactError(f"local PROVE failure contains CI evidence: {path}")
+        return
+    if status != Observation.PASS.value and not config.required_ci_checks:
+        raise FactError(f"PROVE FAIL lacks required CI evidence: {path}")
+    checks = [item for item in value if isinstance(item, dict)]
+    for required in config.required_ci_checks:
+        matches = [
+            item for item in checks
+            if item.get("name") == required
+            or f"{item.get('workflow')} / {item.get('name')}" == required
+        ]
+        if not matches or any(item.get("bucket") != "pass" for item in matches):
+            if status == Observation.PASS.value:
+                raise FactError(f"PROVE PASS lacks required CI evidence: {path}")
+
+
+def _load_proof(
+    paths: PPaths,
+    config: PConfig,
+    specs: tuple[SpecFact, ...],
+    results: tuple[GptResult, ...],
+    head: str,
+    base: str,
+    contract_digest: str,
+) -> tuple[ProofFact, ...]:
+    identity = Snapshot(
+        p_id=config.p_id, charter_digest=config.charter_digest,
+        expected_repository=config.repository, expected_branch=config.branch,
+        base_ref=config.base_ref, head=head, base=base,
+        proof_contract_digest=contract_digest,
+    )
+    candidates: dict[str, tuple[SpecFact, str | None]] = {}
+    triggers = (None, *(
+        item.job_id for item in results
+        if item.operation == "JUDGE_GPT" and item.decision == "RETURN_PROVE"
+    ))
+    for spec in specs:
+        for trigger in triggers:
+            identity_id = proof_id(identity, spec, trigger_judge_id=trigger)
+            candidates[identity_id] = (spec, trigger)
+    facts: list[ProofFact] = []
+    for proof_key, (spec, trigger) in candidates.items():
+        path = paths.proof_results / f"{proof_key}.json"
+        if not path.exists():
+            continue
+        value = _load_json(path)
+        expected = {
+            "schema", "proof_id", "spec_id", "head", "base", "status",
+            "trigger_judge_id", "contract_digest", "summary", "local_commands",
+            "github_checks", "failed_ci_logs", "evidence_digest",
+        }
+        if set(value) != expected or value.get("schema") != PROOF_SCHEMA:
+            raise FactError(f"PROVE result has unexpected fields: {path}")
+        if (
+            value.get("proof_id") != proof_key
+            or value.get("spec_id") != spec.spec_id
+            or value.get("head") != head
+            or value.get("base") != base
+            or value.get("trigger_judge_id") != trigger
+            or value.get("contract_digest") != contract_digest
+            or value.get("status") not in {Observation.PASS.value, Observation.FAIL.value}
+        ):
+            raise FactError(f"PROVE result identity/status mismatch: {path}")
+        if any(type(value.get(key)) is not str for key in (
+            "proof_id", "spec_id", "head", "base", "status", "contract_digest",
+            "summary", "evidence_digest",
+        )) or not isinstance(value["local_commands"], list) \
+                or not isinstance(value["github_checks"], list) \
+                or not isinstance(value["failed_ci_logs"], dict):
+            raise FactError(f"PROVE result fields have invalid types: {path}")
+        if (
+            not value["summary"].strip()
+            or not re.fullmatch(r"[0-9a-f]{64}", value["evidence_digest"])
+            or not SHA_RE.fullmatch(value["head"])
+            or not SHA_RE.fullmatch(value["base"])
+        ):
+            raise FactError(f"PROVE result fields are malformed: {path}")
+        _validate_proof_commands(
+            value["local_commands"], config, head, base, value["status"], path
+        )
+        _validate_proof_ci(
+            value["github_checks"], value["failed_ci_logs"], config,
+            value["local_commands"], value["status"], path,
+        )
+        evidence = {
+            "local_commands": value["local_commands"],
+            "github_checks": value["github_checks"],
+            "failed_ci_logs": value["failed_ci_logs"],
+        }
+        if sha256_text(json.dumps(evidence, sort_keys=True)) != value["evidence_digest"]:
+            raise FactError(f"PROVE evidence digest mismatch: {path}")
+        facts.append(ProofFact(
+            proof_id=proof_key, spec_id=spec.spec_id, head=head, base=base,
+            status=Observation(value["status"]), evidence_digest=value["evidence_digest"],
+            trigger_judge_id=trigger, summary=value["summary"],
+        ))
     return tuple(facts)
 
 
@@ -863,7 +921,7 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         gpt_results=results,
         gpt_pending=pending,
         work_facts=tuple(work),
-        proof_facts=_load_proof(paths, config, contract),
+        proof_facts=_load_proof(paths, config, specs, results, head, base, contract),
         merge=read_merge_facts(config, live_base=base),
         expected_owner_token=config.owner_token,
         proof_contract_digest=contract,

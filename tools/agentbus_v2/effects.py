@@ -8,12 +8,13 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Sequence
 
 from .core import (
     Action,
     ActionKind,
     GPT_PACKET_SCHEMA,
+    PROOF_SCHEMA,
     Observation,
     Snapshot,
     SpecFact,
@@ -35,6 +36,7 @@ from .facts import (
     load_gpt_packet,
     load_config,
     parse_gpt_response,
+    _proof_commands,
     read_merge_facts,
     read_snapshot,
     sha256_text,
@@ -72,13 +74,10 @@ def _repository_diff(config: PConfig, snapshot: Snapshot) -> str:
 
 
 def _evidence_text(paths: PPaths, evidence_id: str) -> str:
-    candidates = [
-        paths.work_results / f"{evidence_id}.json",
-        paths.proof_results / f"{evidence_id}.json",
-        paths.proof_partials / f"{evidence_id}.json",
-        paths.work_logs / f"{evidence_id}.response.json",
-        paths.work_logs / f"{evidence_id}.codex.log",
-    ] + sorted(paths.proof_logs.glob(f"{evidence_id}.*"))
+    candidates = [paths.work_results / f"{evidence_id}.json",
+                  paths.proof_results / f"{evidence_id}.json",
+                  paths.work_logs / f"{evidence_id}.response.json",
+                  paths.work_logs / f"{evidence_id}.codex.log"]
     pieces: list[str] = []
     for path in candidates:
         if not path.exists():
@@ -455,131 +454,37 @@ def ensure_owned_pr(config: PConfig, snapshot: Snapshot, spec: SpecFact) -> bool
 
 
 def _command_evidence(
-    paths: PPaths, config: PConfig, snapshot: Snapshot, action: Action
-) -> tuple[dict[str, Any], bool]:
+    config: PConfig, snapshot: Snapshot
+) -> tuple[dict[str, Any] | None, Observation | None]:
     worktree = Path(config.worktree)
-    commands = [
-        ("git-diff-check", ("git", "diff", "--check", f"{snapshot.base}...{snapshot.head}")),
-        ("merge-tree", ("git", "merge-tree", "--write-tree", snapshot.base, snapshot.head)),
-        *((item.name, item.argv) for item in config.proof_commands),
-    ]
-    status_text = git(worktree, "status", "--porcelain=v1")
-    status_log = paths.proof_logs / f"{action.effect_id}.00.clean-worktree.log"
-    status_log.write_text(status_text, encoding="utf-8")
-    records: list[dict[str, Any]] = [
-        {
-            "name": "clean-worktree",
-            "argv": ["git", "status", "--porcelain=v1"],
-            "exit_code": 1 if status_text else 0,
-            "output_digest": sha256_text(status_text),
+    commands = _proof_commands(config, snapshot.base, snapshot.head)
+    def record(argv: Sequence[str], output: str, exit_code: int) -> dict[str, Any]:
+        return {
+            "argv": list(argv), "exit_code": exit_code,
+            "output": output[-65536:], "output_digest": sha256_text(output),
         }
-    ]
+    try:
+        status_text = git(worktree, "status", "--porcelain=v1")
+    except FactError:
+        return None, None
+    records = [record(("git", "status", "--porcelain=v1"), status_text, 1 if status_text else 0)]
     if status_text:
-        value = {
-            "effect_id": action.effect_id,
-            "spec_id": action.payload["spec_id"],
-            "head": snapshot.head,
-            "base": snapshot.base,
-            "trigger_judge_id": action.payload.get("trigger_judge_id"),
-            "commands": records,
-        }
-        return value, False
-    passed = True
-    for index, (name, argv) in enumerate(commands, start=1):
-        completed = _run(argv, cwd=worktree, check=False, timeout=1800)
+        return {"commands": records}, Observation.FAIL
+    for argv in commands[1:-1]:
+        try:
+            completed = _run(argv, cwd=worktree, check=False, timeout=1800)
+        except FactError:
+            return None, None
         log = completed.stdout + ("\nSTDERR:\n" + completed.stderr if completed.stderr else "")
-        log_path = paths.proof_logs / f"{action.effect_id}.{index:02d}.{name}.log"
-        log_path.write_text(log, encoding="utf-8", errors="replace")
-        records.append(
-            {
-                "name": name,
-                "argv": list(argv),
-                "exit_code": completed.returncode,
-                "output_digest": sha256_text(log),
-            }
-        )
+        records.append(record(argv, log, completed.returncode))
         if completed.returncode != 0:
-            passed = False
-            break
-    if passed:
+            return {"commands": records}, Observation.FAIL
+    try:
         after = git(worktree, "status", "--porcelain=v1")
-        log_path = paths.proof_logs / f"{action.effect_id}.{len(records):02d}.clean-worktree-after.log"
-        log_path.write_text(after, encoding="utf-8")
-        records.append(
-            {
-                "name": "clean-worktree-after",
-                "argv": ["git", "status", "--porcelain=v1"],
-                "exit_code": 1 if after else 0,
-                "output_digest": sha256_text(after),
-            }
-        )
-        passed = not after
-    value = {
-        "effect_id": action.effect_id,
-        "spec_id": action.payload["spec_id"],
-        "head": snapshot.head,
-        "base": snapshot.base,
-        "trigger_judge_id": action.payload.get("trigger_judge_id"),
-        "commands": records,
-    }
-    return value, passed
-
-
-def _validate_partial(
-    paths: PPaths,
-    config: PConfig,
-    snapshot: Snapshot,
-    action: Action,
-    value: Mapping[str, Any],
-) -> bool:
-    if set(value) != {
-        "effect_id",
-        "spec_id",
-        "head",
-        "base",
-        "trigger_judge_id",
-        "commands",
-    }:
-        raise FactError("PROVE partial has unexpected fields")
-    expected_identity = {
-        "effect_id": action.effect_id,
-        "spec_id": action.payload["spec_id"],
-        "head": snapshot.head,
-        "base": snapshot.base,
-        "trigger_judge_id": action.payload.get("trigger_judge_id"),
-    }
-    if any(value.get(key) != expected for key, expected in expected_identity.items()):
-        raise FactError("PROVE partial identity mismatch")
-    commands = value.get("commands")
-    if not isinstance(commands, list) or not commands:
-        raise FactError("PROVE partial command evidence is absent")
-    expected_commands = [
-        ("clean-worktree", ["git", "status", "--porcelain=v1"]),
-        ("git-diff-check", ["git", "diff", "--check", f"{snapshot.base}...{snapshot.head}"]),
-        ("merge-tree", ["git", "merge-tree", "--write-tree", snapshot.base, snapshot.head]),
-        *((item.name, list(item.argv)) for item in config.proof_commands),
-        ("clean-worktree-after", ["git", "status", "--porcelain=v1"]),
-    ]
-    for index, item in enumerate(commands):
-        if not isinstance(item, dict) or set(item) != {
-            "name",
-            "argv",
-            "exit_code",
-            "output_digest",
-        }:
-            raise FactError("invalid PROVE command evidence")
-        if index >= len(expected_commands) or (item["name"], item["argv"]) != expected_commands[index]:
-            raise FactError("PROVE command contract mismatch")
-        log_path = paths.proof_logs / f"{action.effect_id}.{index:02d}.{item['name']}.log"
-        if not log_path.exists() or sha256_text(
-            log_path.read_text(encoding="utf-8", errors="replace")
-        ) != item["output_digest"]:
-            raise FactError("PROVE command log digest mismatch")
-    if all(int(item["exit_code"]) == 0 for item in commands) and len(commands) != len(
-        expected_commands
-    ):
-        raise FactError("passing PROVE partial omitted required commands")
-    return all(int(item["exit_code"]) == 0 for item in commands)
+    except FactError:
+        return None, None
+    records.append(record(("git", "status", "--porcelain=v1"), after, 1 if after else 0))
+    return {"commands": records}, Observation.PASS if not after else Observation.FAIL
 
 
 def _ci_checks(
@@ -769,17 +674,11 @@ def run_prove(
         or dict(recalculated.payload) != dict(action.payload)
     ):
         return EffectResult(False, "PROVE_ABSENT", "PROVE identities drifted before proof")
-    partial_path = paths.proof_partials / f"{action.effect_id}.json"
-    if partial_path.exists():
-        mechanical = _load_json(partial_path)
-        local_pass = _validate_partial(paths, config, snapshot, action, mechanical)
-    else:
-        mechanical, local_pass = _command_evidence(paths, config, snapshot, action)
-        write_json_once(partial_path, mechanical)
-    if not local_pass or any(
-        int(item.get("exit_code", 1)) != 0 for item in mechanical.get("commands", [])
-    ):
-        status = Observation.FAIL
+    mechanical, local_status = _command_evidence(config, snapshot)
+    if mechanical is None or local_status is None:
+        return EffectResult(False, "PROVE_ABSENT", "mechanical proof was interrupted")
+    if local_status is Observation.FAIL:
+        status = local_status
         checks: list[dict[str, Any]] = []
         failed_logs: dict[str, str] = {}
         require_pr_fence = False
@@ -800,14 +699,13 @@ def run_prove(
             return EffectResult(False, "PROVE_ABSENT", "PR identities have not converged")
         ci_status, checks, failed_logs = (
             _ci_checks(config, merge.pr_number, snapshot.head, snapshot.base)
-            if config.require_github_ci
-            else ("PASS", [], {})
+            if config.required_ci_checks else ("PASS", [], {})
         )
         if ci_status == "ABSENT":
             return EffectResult(False, "PROVE_ABSENT", "GitHub CI is queued/running/absent")
         status = Observation(ci_status)
     evidence = {
-        "mechanical": mechanical,
+        "local_commands": mechanical["commands"],
         "github_checks": checks,
         "failed_ci_logs": failed_logs,
     }
@@ -834,17 +732,21 @@ def run_prove(
     ):
         return EffectResult(False, "PROVE_ABSENT", "HEAD, BASE, or PR drifted before proof result")
     result = {
-        "effect_id": action.effect_id,
+        "schema": PROOF_SCHEMA,
+        "proof_id": action.effect_id,
         "spec_id": spec.spec_id,
         "head": snapshot.head,
         "base": snapshot.base,
         "status": status.value,
         "trigger_judge_id": action.payload.get("trigger_judge_id"),
+        "contract_digest": snapshot.proof_contract_digest,
         "summary": "required mechanical and CI evidence passed"
         if status is Observation.PASS
         else "required mechanical or CI evidence failed",
         "evidence_digest": sha256_text(json.dumps(evidence, sort_keys=True)),
-        "evidence": evidence,
+        "local_commands": evidence["local_commands"],
+        "github_checks": evidence["github_checks"],
+        "failed_ci_logs": evidence["failed_ci_logs"],
     }
     destination = paths.proof_results / f"{action.effect_id}.json"
     write_json_once(destination, result)

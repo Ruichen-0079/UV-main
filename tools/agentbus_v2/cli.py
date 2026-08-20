@@ -22,7 +22,6 @@ from .effects import (
 )
 from .facts import (
     FactError,
-    ProofCommand,
     default_state_root,
     init_p,
     load_config,
@@ -31,18 +30,18 @@ from .facts import (
 )
 
 
-def _proof_command(value: str) -> ProofCommand:
+def _proof_command(value: str) -> tuple[str, ...]:
     try:
         parsed = json.loads(value)
-        if set(parsed) != {"name", "argv"} or not isinstance(parsed["argv"], list):
+        if not isinstance(parsed, list):
             raise ValueError
-        result = ProofCommand(str(parsed["name"]), tuple(str(item) for item in parsed["argv"]))
+        result = tuple(str(item) for item in parsed)
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         raise argparse.ArgumentTypeError(
-            'proof command must be JSON: {"name":"...","argv":["..."]}'
+            'proof command must be JSON: ["program","arg",...]'
         ) from error
-    if not result.name or not result.argv:
-        raise argparse.ArgumentTypeError("proof command name and argv cannot be empty")
+    if not result:
+        raise argparse.ArgumentTypeError("proof command argv cannot be empty")
     return result
 
 
@@ -60,7 +59,6 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--base", default="main")
     initialize.add_argument("--remote", default="origin")
     initialize.add_argument("--proof-command", action="append", type=_proof_command, default=[])
-    initialize.add_argument("--no-github-ci", action="store_true")
     initialize.add_argument("--required-ci-check", action="append", default=[])
 
     tick = commands.add_parser("tick", help="reread all facts and run at most one effect")
@@ -153,7 +151,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 base_ref=args.base,
                 remote=args.remote,
                 proof_commands=args.proof_command,
-                require_github_ci=not args.no_github_ci,
                 required_ci_checks=args.required_ci_check,
             )
             _print({"outcome": "P_INITIALIZED", "p_id": args.p_id, "path": str(paths.root)})

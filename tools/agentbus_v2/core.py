@@ -37,6 +37,7 @@ JUDGE_RESULTS = frozenset(
 )
 IDENTITY_SCHEMA = "agentbus-v2/schema-v1"
 GPT_PACKET_SCHEMA = "agentbus-v2/manual-packet-v2"
+PROOF_SCHEMA = "agentbus-v2/proof-v2"
 
 
 def stable_id(prefix: str, payload: Mapping[str, Any]) -> str:
@@ -82,7 +83,7 @@ class WorkFact:
 
 @dataclass(frozen=True)
 class ProofFact:
-    effect_id: str
+    proof_id: str
     spec_id: str
     head: str
     base: str
@@ -214,10 +215,11 @@ def work_effect_id(
     })
 
 
-def proof_effect_id(
+def proof_id(
     s: Snapshot, spec: SpecFact, *, trigger_judge_id: str | None = None
 ) -> str:
     return stable_id("prove", {
+        "proof_schema": PROOF_SCHEMA,
         "p_id": s.p_id,
         "spec": spec.spec_id,
         "head": s.head,
@@ -244,7 +246,7 @@ def judge_job_id(
 def semantic_judge_job_id(s: Snapshot, spec: SpecFact, proof: ProofFact) -> str:
     return judge_job_id(
         s, spec, failed_step="PROVE_SEMANTIC",
-        evidence_id=proof.effect_id, evidence_digest=proof.evidence_digest,
+        evidence_id=proof.proof_id, evidence_digest=proof.evidence_digest,
         trigger_judge_id=proof.trigger_judge_id,
     )
 
@@ -449,8 +451,8 @@ def _work(
 def _prove(
     s: Snapshot, results: Mapping[str, GptResult], spec: SpecFact, trigger: str | None
 ) -> Action:
-    effect = proof_effect_id(s, spec, trigger_judge_id=trigger)
-    matches = [item for item in s.proof_facts if item.effect_id == effect]
+    effect = proof_id(s, spec, trigger_judge_id=trigger)
+    matches = [item for item in s.proof_facts if item.proof_id == effect]
     if not matches:
         return _request(
             s,
@@ -466,7 +468,7 @@ def _prove(
     proof = matches[0]
     if proof.status is Observation.FAIL:
         judged = _judge(
-            s, results, spec, "PROVE_MECHANICAL", proof.effect_id,
+            s, results, spec, "PROVE_MECHANICAL", proof.proof_id,
             proof.evidence_digest, proof.trigger_judge_id,
         )
         if isinstance(judged, Action):
@@ -483,7 +485,7 @@ def _prove(
             ),
         )
     judged = _judge(
-        s, results, spec, "PROVE_SEMANTIC", proof.effect_id,
+        s, results, spec, "PROVE_SEMANTIC", proof.proof_id,
         proof.evidence_digest, proof.trigger_judge_id,
     )
     if isinstance(judged, Action):
@@ -544,7 +546,7 @@ def _merge(s: Snapshot, spec: SpecFact, proof: ProofFact) -> Action:
         "spec_id": spec.spec_id,
         "head": s.head,
         "base": s.base,
-        "proof_effect_id": proof.effect_id,
+        "proof_effect_id": proof.proof_id,
         "proof_evidence_digest": proof.evidence_digest,
         "pr_number": s.merge.pr_number,
     }

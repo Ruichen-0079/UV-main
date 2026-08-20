@@ -18,6 +18,7 @@ from tools.agentbus_v2.core import (
     decide,
     plan_facts_digest,
     plan_job_id,
+    proof_id,
     spec_id,
     stable_id,
     work_effect_id,
@@ -34,10 +35,10 @@ from tools.agentbus_v2.facts import (
     FactError,
     PConfig,
     PPaths,
-    ProofCommand,
     _load_gpt,
     _load_proof,
     _load_work,
+    _proof_commands,
     _work_from_head,
     canonical_repository,
     init_p,
@@ -100,7 +101,7 @@ class RepoFixture:
 
 def config_for(repo: RepoFixture, charter: str) -> PConfig:
     return PConfig(
-        schema_version=1,
+        schema_version=2,
         p_id="P-TEST",
         worktree=str(repo.work),
         repository=canonical_repository(str(repo.remote)),
@@ -112,7 +113,6 @@ def config_for(repo: RepoFixture, charter: str) -> PConfig:
         charter_digest=sha256_text(charter),
         owner_token="owner-test",
         proof_commands=(),
-        require_github_ci=False,
         required_ci_checks=(),
     )
 
@@ -475,7 +475,6 @@ AgentBus-V2-Input-Head: %s
                 worktree=repo.work,
                 repository=str(repo.remote),
                 branch="agentbus/p-test",
-                require_github_ci=False,
             )
             serialized = json.loads(paths.config.read_text(encoding="utf-8"))
             self.assertFalse(FORBIDDEN & set(serialized))
@@ -522,14 +521,8 @@ AgentBus-V2-Input-Head: %s
             action = decide(snapshot)
             self.assertEqual(ActionKind.PROVE, action.kind)
             mechanical = {
-                "effect_id": action.effect_id,
-                "spec_id": spec.spec_id,
-                "head": snapshot.head,
-                "base": snapshot.base,
-                "trigger_judge_id": None,
                 "commands": [
                     {
-                        "name": "git-diff-check",
                         "argv": ["git", "diff", "--check"],
                         "exit_code": 1,
                         "output_digest": sha256_text("failure"),
@@ -545,14 +538,15 @@ AgentBus-V2-Input-Head: %s
                 ),
                 patch(
                     "tools.agentbus_v2.effects._command_evidence",
-                    return_value=(mechanical, False),
+                    return_value=(mechanical, Observation.FAIL),
                 ),
             ):
                 result = run_prove(paths, config, snapshot, action)
             self.assertEqual("PROVE_FAIL", result.outcome)
             saved = json.loads(result.path.read_text(encoding="utf-8"))
             self.assertEqual("FAIL", saved["status"])
-            self.assertEqual([], saved["evidence"]["github_checks"])
+            self.assertEqual([], saved["github_checks"])
+            self.assertEqual(action.effect_id, saved["proof_id"])
 
     def test_proof_result_identity_corruption_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -561,27 +555,115 @@ AgentBus-V2-Input-Head: %s
             config = config_for(repo, "P_ID: P-TEST\n")
             paths = PPaths(root / "state" / "P-TEST")
             paths.create_dirs()
-            evidence: dict[str, object] = {}
-            digest = sha256_text(json.dumps(evidence, sort_keys=True))
-            effect = "prove-" + "0" * 24
+            spec = SpecFact(
+                spec_id(config.charter_digest, "planning", "current spec"),
+                "plan-" + "0" * 24,
+                "current spec",
+                "planning",
+                repo.base,
+                repo.base,
+            )
+            snapshot = replace(
+                snapshot_for(config),
+                specs=(spec,),
+                proof_contract_digest=proof_contract_digest(config),
+            )
+            effect = proof_id(snapshot, spec)
+            evidence = {
+                "local_commands": [],
+                "github_checks": [],
+                "failed_ci_logs": {},
+            }
             (paths.proof_results / f"{effect}.json").write_text(
                 json.dumps(
                     {
-                        "effect_id": effect,
+                        "schema": "agentbus-v2/proof-v2",
+                        "proof_id": effect,
                         "spec_id": "spec-invalid",
                         "head": repo.base,
                         "base": repo.base,
                         "status": "PASS",
-                        "evidence_digest": digest,
+                        "contract_digest": snapshot.proof_contract_digest,
                         "trigger_judge_id": None,
                         "summary": "tampered",
-                        "evidence": evidence,
+                        **evidence,
+                        "evidence_digest": sha256_text(
+                            json.dumps(evidence, sort_keys=True)
+                        ),
                     }
                 ),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(FactError, "identity"):
-                _load_proof(paths, config, proof_contract_digest(config))
+                _load_proof(
+                    paths, config, (spec,), (), repo.base, repo.base,
+                    snapshot.proof_contract_digest,
+                )
+
+    def test_exact_proof_result_reloads_pass_and_missing_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            config = config_for(repo, "P_ID: P-TEST\n")
+            paths = PPaths(root / "state" / "P-TEST")
+            paths.create_dirs()
+            spec = SpecFact(
+                spec_id(config.charter_digest, "planning", "current spec"),
+                "plan-" + "0" * 24,
+                "current spec",
+                "planning",
+                repo.base,
+                repo.base,
+            )
+            snapshot = replace(
+                snapshot_for(config),
+                specs=(spec,),
+                proof_contract_digest=proof_contract_digest(config),
+            )
+            evidence = {
+                "local_commands": [
+                    {
+                        "argv": list(argv),
+                        "exit_code": 0,
+                        "output": "",
+                        "output_digest": sha256_text(""),
+                    }
+                    for argv in _proof_commands(config, repo.base, repo.base)
+                ],
+                "github_checks": [],
+                "failed_ci_logs": {},
+            }
+            proof = proof_id(snapshot, spec)
+            (paths.proof_results / f"{proof}.json").write_text(
+                json.dumps({
+                    "schema": "agentbus-v2/proof-v2",
+                    "proof_id": proof,
+                    "spec_id": spec.spec_id,
+                    "head": repo.base,
+                    "base": repo.base,
+                    "status": "PASS",
+                    "trigger_judge_id": None,
+                    "contract_digest": snapshot.proof_contract_digest,
+                    "summary": "local proof passed",
+                    **evidence,
+                    "evidence_digest": sha256_text(
+                        json.dumps(evidence, sort_keys=True)
+                    ),
+                }),
+                encoding="utf-8",
+            )
+            loaded = _load_proof(
+                paths, config, (spec,), (), repo.base, repo.base,
+                snapshot.proof_contract_digest,
+            )
+            self.assertEqual((Observation.PASS,), tuple(item.status for item in loaded))
+            (paths.proof_results / f"{proof}.json").unlink()
+            self.assertEqual(
+                (), _load_proof(
+                    paths, config, (spec,), (), repo.base, repo.base,
+                    snapshot.proof_contract_digest,
+                )
+            )
 
     def test_prior_proof_contract_result_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -590,43 +672,34 @@ AgentBus-V2-Input-Head: %s
             config = config_for(repo, "P_ID: P-TEST\n")
             paths = PPaths(root / "state" / "P-TEST")
             paths.create_dirs()
-            evidence: dict[str, object] = {}
-            old_contract = proof_contract_digest(config)
-            effect = stable_id(
-                "prove",
-                {
-                    "p_id": config.p_id,
-                    "spec": "spec-" + "1" * 24,
-                    "head": repo.base,
-                    "base": repo.base,
-                    "trigger_judge": None,
-                    "proof_contract": old_contract,
-                },
+            spec = SpecFact(
+                spec_id(config.charter_digest, "planning", "current spec"),
+                "plan-" + "0" * 24,
+                "current spec",
+                "planning",
+                repo.base,
+                repo.base,
             )
+            snapshot = replace(
+                snapshot_for(config),
+                specs=(spec,),
+                proof_contract_digest=proof_contract_digest(config),
+            )
+            effect = proof_id(snapshot, spec)
+            # An old-format/corrupt result must never be opened while looking
+            # up the new contract's exact proof identity.
             (paths.proof_results / f"{effect}.json").write_text(
-                json.dumps(
-                    {
-                        "effect_id": effect,
-                        "spec_id": "spec-" + "1" * 24,
-                        "head": repo.base,
-                        "base": repo.base,
-                        "status": "PASS",
-                        "evidence_digest": sha256_text(
-                            json.dumps(evidence, sort_keys=True)
-                        ),
-                        "trigger_judge_id": None,
-                        "summary": "old contract",
-                        "evidence": evidence,
-                    }
-                ),
-                encoding="utf-8",
+                "not the current proof artifact", encoding="utf-8"
             )
             changed = replace(
                 config,
-                proof_commands=(ProofCommand("cargo-fmt-check", ("cargo", "fmt", "--check")),),
+                proof_commands=(("cargo", "fmt", "--check"),),
             )
             self.assertEqual(
-                (), _load_proof(paths, changed, proof_contract_digest(changed))
+                (), _load_proof(
+                    paths, changed, (spec,), (), repo.base, repo.base,
+                    proof_contract_digest(changed),
+                )
             )
 
     def test_ci_requires_named_current_base_pull_request_checks(self) -> None:
@@ -640,7 +713,6 @@ AgentBus-V2-Input-Head: %s
             config = replace(
                 config_for(repo, "P_ID: P-TEST\n"),
                 repository="github.com/acme/repo",
-                require_github_ci=True,
                 required_ci_checks=required,
             )
             head, base, merge_sha = "1" * 40, "a" * 40, "f" * 40

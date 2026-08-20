@@ -18,8 +18,10 @@ identity is not part of correctness; there are no request, inbox, context, or
 per-job schema artifacts.
 
 The local P directory contains the immutable charter, addressed GPT
-packets/results, WORK failure facts, and bounded executor/proof evidence. The
-default location is
+packets/results, WORK failure facts, and one addressed mechanical proof result
+at `prove/results/<proof_id>.json`. A proof process that dies before publishing
+that result is simply ABSENT on the next tick; partial manifests and proof-log
+files are not workflow inputs. The default location is
 `$XDG_STATE_HOME/yuvi-agentbus-v2`, or
 `~/.local/state/yuvi-agentbus-v2`.
 
