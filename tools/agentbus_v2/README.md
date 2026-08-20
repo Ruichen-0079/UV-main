@@ -58,7 +58,7 @@ wake handling; it never creates a persisted workflow WAIT state.
 
 The separate v2 browser adapter is transport-only.  It binds a loopback bridge
 at `127.0.0.1:6791` and exposes only `/bridge/pull`, `/bridge/result`, and
-`/bridge/heartbeat`.  The bridge has memory-only pending requests; no sent,
+`/bridge/config`, `/bridge/heartbeat`.  The bridge has memory-only pending requests; no sent,
 generating, queue, or recovery files are written.  Configure each browser lane
 in `gpt_lanes.json` with `transport: "browser"`, an exact ChatGPT
 `conversation_url`, and the same operational `bridge_token` (the token may be

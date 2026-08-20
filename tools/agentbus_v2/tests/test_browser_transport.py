@@ -404,6 +404,29 @@ class BrowserTransportTests(unittest.TestCase):
             self.assertEqual(["ok"], result)
             adapter.close()
 
+    def test_preflight_config_and_heartbeat_are_ephemeral_binding_diagnostics(self) -> None:
+        bridge = BrowserBridge(
+            TOKEN,
+            port=0,
+            conversation_urls=CONVERSATIONS,
+        )
+        bridge.start()
+        try:
+            status, payload = request_json(bridge, "/bridge/config?lane=plan")
+            self.assertEqual(200, status)
+            self.assertEqual("plan", payload["lane"])
+            self.assertEqual(CONVERSATIONS["plan"], payload["conversation_url"])
+            status, _ = request_json(
+                bridge,
+                "/bridge/heartbeat",
+                method="POST",
+                body={"lane": "plan", "conversation_url": CONVERSATIONS["plan"]},
+            )
+            self.assertEqual(200, status)
+            self.assertTrue(bridge.lane_status("plan")["bridge_connected"])
+        finally:
+            bridge.close()
+
 
 if __name__ == "__main__":
     unittest.main()

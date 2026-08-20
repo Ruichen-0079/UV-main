@@ -127,6 +127,13 @@ async function pull(lane) {
   return response.json();
 }
 
+async function laneConfig(lane) {
+  const response = await bridgeFetch(`/bridge/config?lane=${encodeURIComponent(lane)}`);
+  if (response.status === 404 || response.status === 204) return null;
+  if (!response.ok) throw new Error(`bridge config HTTP ${response.status}`);
+  return response.json();
+}
+
 async function heartbeat(request) {
   const response = await bridgeFetch("/bridge/heartbeat", {
     method: "POST",
@@ -134,6 +141,13 @@ async function heartbeat(request) {
     body: JSON.stringify({ lane: request.lane, conversation_url: canonicalUrl(location.href) })
   });
   if (!response.ok) throw new Error(`bridge heartbeat HTTP ${response.status}`);
+}
+
+async function heartbeatIfBound(lane) {
+  const config = await laneConfig(lane);
+  if (!config || canonicalUrl(location.href) !== canonicalUrl(config.conversation_url)) return false;
+  await heartbeat(config);
+  return true;
 }
 
 async function waitForResponse(before) {
@@ -177,6 +191,7 @@ async function poll() {
   if (state.current_job_id) return;
   for (const lane of LANES) {
     try {
+      await heartbeatIfBound(lane);
       const request = await pull(lane);
       if (!request || state.current_job_id) continue;
       if (canonicalUrl(location.href) !== canonicalUrl(request.conversation_url)) continue;

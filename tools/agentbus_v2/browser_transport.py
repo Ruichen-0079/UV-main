@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -61,13 +61,18 @@ class PendingBrowserJob:
 
 
 class _BridgeState:
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, conversation_urls: Mapping[str, str] | None = None) -> None:
         if not token:
             raise BrowserTransportError("browser bridge token is required")
         self.token = token
         self.lock = threading.RLock()
         self.pending: dict[str, PendingBrowserJob] = {}
         self.heartbeats: dict[str, tuple[float, str]] = {}
+        self.conversation_urls = {
+            lane: canonical_conversation_url(url)
+            for lane, url in (conversation_urls or {}).items()
+            if lane in LANES and url
+        }
         self.stopped = False
 
     def register(
@@ -125,6 +130,11 @@ class _BridgeState:
         with self.lock:
             item = self.pending.get(lane)
             return None if item is None else item.as_dict()
+
+    def config(self, lane: str) -> dict[str, str] | None:
+        with self.lock:
+            url = self.conversation_urls.get(lane)
+        return None if url is None else {"lane": lane, "conversation_url": url}
 
     def accept_result(self, lane: str, job_id: str, raw_response: str) -> None:
         with self.lock:
@@ -263,12 +273,19 @@ class BrowserBridgeRequestHandler(BaseHTTPRequestHandler):
         try:
             self._token()
             parsed = urlsplit(self.path)
-            if parsed.path != "/bridge/pull":
-                raise BrowserTransportError("unknown browser bridge endpoint")
             values = parse_qs(parsed.query, keep_blank_values=True)
             lane = values.get("lane", [""])[0]
             if lane not in LANES:
                 raise BrowserTransportError("unsupported browser lane")
+            if parsed.path == "/bridge/config":
+                payload = self.server.bridge_state.config(lane)
+                if payload is None:
+                    self._write(404, {"error": "browser lane is not configured"})
+                else:
+                    self._write(200, payload)
+                return
+            if parsed.path != "/bridge/pull":
+                raise BrowserTransportError("unknown browser bridge endpoint")
             payload = self.server.bridge_state.pull(lane)
             if payload is None:
                 self._write(204, empty=True)
@@ -320,12 +337,13 @@ class BrowserBridge:
         *,
         host: str = DEFAULT_BRIDGE_HOST,
         port: int = DEFAULT_BRIDGE_PORT,
+        conversation_urls: Mapping[str, str] | None = None,
     ) -> None:
         if host != DEFAULT_BRIDGE_HOST:
             raise BrowserTransportError("browser bridge must bind loopback")
         if not 0 <= port <= 65535:
             raise ValueError("browser bridge port must be between 0 and 65535")
-        self.state = _BridgeState(token)
+        self.state = _BridgeState(token, conversation_urls)
         self.host = host
         self.requested_port = port
         self.server: BrowserBridgeHTTPServer | None = None
@@ -363,6 +381,10 @@ class BrowserBridge:
     def lane_status(self, lane: str) -> dict[str, object]:
         return self.state.lane_status(lane)
 
+    def configured_url(self, lane: str) -> str | None:
+        value = self.state.config(lane)
+        return None if value is None else value["conversation_url"]
+
     def close(self) -> None:
         self.state.stop()
         server, thread = self.server, self.thread
@@ -397,34 +419,45 @@ class BrowserAdapter:
         self._token: str | None = None
         self._lock = threading.Lock()
 
-    def _lane_config(self, lane: str):
+    def _lane_configs(self):
         from .gpt_transport import load_lane_config
 
-        try:
-            return load_lane_config(self.state_root, self.config_path)[lane]
-        except KeyError as error:
-            raise BrowserTransportError(f"unsupported browser lane: {lane}") from error
+        return load_lane_config(self.state_root, self.config_path)
 
-    def _bridge_for(self, token: str) -> BrowserBridge:
+    def _bridge_for(self, token: str, conversation_urls: Mapping[str, str]) -> BrowserBridge:
         with self._lock:
             if self._token is not None and self._token != token:
                 raise BrowserTransportError("plan and judge browser bridge tokens must match")
             self._token = token
             if self.bridge is None:
-                self.bridge = BrowserBridge(token, host=self.host, port=self.port)
+                self.bridge = BrowserBridge(
+                    token,
+                    host=self.host,
+                    port=self.port,
+                    conversation_urls=conversation_urls,
+                )
             elif self.bridge.state.token != token:
                 raise BrowserTransportError("browser bridge token does not match lane config")
             return self.bridge
 
     def send(self, lane: str, job_id: str, operation: str, packet_text: str) -> str:
-        config = self._lane_config(lane)
+        try:
+            configs = self._lane_configs()
+            config = configs[lane]
+        except KeyError as error:
+            raise BrowserTransportError(f"unsupported browser lane: {lane}") from error
         if config.transport != "browser":
             raise BrowserTransportError(f"{lane} lane is not configured for browser transport")
         if not config.conversation_url:
             raise BrowserTransportError(f"{lane} browser conversation_url is not configured")
         if not config.bridge_token:
             raise BrowserTransportError(f"{lane} browser bridge_token is not configured")
-        bridge = self._bridge_for(config.bridge_token)
+        conversation_urls = {
+            name: item.conversation_url
+            for name, item in configs.items()
+            if item.conversation_url
+        }
+        bridge = self._bridge_for(config.bridge_token, conversation_urls)
         return bridge.request(
             lane,
             job_id,
@@ -433,6 +466,26 @@ class BrowserAdapter:
             config.conversation_url,
             self.timeout,
         )
+
+    def start_bridge(self) -> BrowserBridge:
+        """Start the configured loopback bridge without dispatching a GPT job."""
+        configs = self._lane_configs()
+        browser_configs = [item for item in configs.values() if item.transport == "browser"]
+        if not browser_configs:
+            raise BrowserTransportError("no browser GPT lane is configured")
+        first = browser_configs[0]
+        if not first.bridge_token:
+            raise BrowserTransportError(f"{first.name} browser bridge_token is not configured")
+        if any(item.bridge_token != first.bridge_token for item in browser_configs):
+            raise BrowserTransportError("plan and judge browser bridge tokens must match")
+        urls = {
+            item.name: item.conversation_url
+            for item in browser_configs
+            if item.conversation_url
+        }
+        bridge = self._bridge_for(first.bridge_token, urls)
+        bridge.start()
+        return bridge
 
     def lane_status(self, lane: str) -> dict[str, object]:
         with self._lock:
