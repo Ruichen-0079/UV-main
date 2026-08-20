@@ -4,7 +4,6 @@ mod supervisor;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
 
 use tauri::{Manager, RunEvent};
 
@@ -137,7 +136,6 @@ pub fn run() {
           let win = window.clone();
           thread::spawn(move || {
             begin_app_shutdown(&app);
-            thread::sleep(Duration::from_millis(1200));
             let _ = win.destroy();
             app.exit(0);
           });

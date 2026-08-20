@@ -12,6 +12,156 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+#[cfg(target_os = "windows")]
+mod windows_job {
+  use std::ffi::c_void;
+  use std::io;
+  use std::mem::size_of;
+  use std::os::windows::io::AsRawHandle;
+  use std::process::Child;
+  use std::ptr::{null, null_mut};
+
+  type Handle = *mut c_void;
+
+  const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
+  const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+
+  #[repr(C)]
+  #[derive(Default)]
+  struct JobObjectBasicLimitInformation {
+    per_process_user_time_limit: i64,
+    per_job_user_time_limit: i64,
+    limit_flags: u32,
+    minimum_working_set_size: usize,
+    maximum_working_set_size: usize,
+    active_process_limit: u32,
+    affinity: usize,
+    priority_class: u32,
+    scheduling_class: u32,
+  }
+
+  #[repr(C)]
+  #[derive(Default)]
+  struct IoCounters {
+    read_operation_count: u64,
+    write_operation_count: u64,
+    other_operation_count: u64,
+    read_transfer_count: u64,
+    write_transfer_count: u64,
+    other_transfer_count: u64,
+  }
+
+  #[repr(C)]
+  #[derive(Default)]
+  struct JobObjectExtendedLimitInformation {
+    basic_limit_information: JobObjectBasicLimitInformation,
+    io_info: IoCounters,
+    process_memory_limit: usize,
+    job_memory_limit: usize,
+    peak_process_memory_used: usize,
+    peak_job_memory_used: usize,
+  }
+
+  #[link(name = "kernel32")]
+  extern "system" {
+    fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
+    fn SetInformationJobObject(
+      job: Handle,
+      info_class: u32,
+      info: *mut c_void,
+      info_length: u32,
+    ) -> i32;
+    fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+    fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
+    fn CloseHandle(handle: Handle) -> i32;
+  }
+
+  pub(super) struct OwnedSupervisorJob {
+    handle: Handle,
+  }
+
+  // Kernel handles are process-wide and may be closed or terminated from the
+  // shutdown worker thread. Ownership remains unique to this value.
+  unsafe impl Send for OwnedSupervisorJob {}
+  unsafe impl Sync for OwnedSupervisorJob {}
+
+  impl OwnedSupervisorJob {
+    pub(super) fn new_for_child(child: &Child) -> Result<Self, String> {
+      let job = Self::create()?;
+      job.assign_child(child)?;
+      Ok(job)
+    }
+
+    fn create() -> Result<Self, String> {
+      // A null name creates a private, unnamed Job Object for this instance.
+      let handle = unsafe { CreateJobObjectW(null_mut(), null()) };
+      if handle.is_null() {
+        return Err(format!(
+          "CreateJobObjectW failed: {}",
+          io::Error::last_os_error()
+        ));
+      }
+
+      let mut limits = JobObjectExtendedLimitInformation::default();
+      limits.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      let configured = unsafe {
+        SetInformationJobObject(
+          handle,
+          JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+          &mut limits as *mut _ as *mut c_void,
+          size_of::<JobObjectExtendedLimitInformation>() as u32,
+        )
+      };
+      if configured == 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+          CloseHandle(handle);
+        }
+        return Err(format!("SetInformationJobObject failed: {error}"));
+      }
+
+      Ok(Self { handle })
+    }
+
+    fn assign_child(&self, child: &Child) -> Result<(), String> {
+      let assigned =
+        unsafe { AssignProcessToJobObject(self.handle, child.as_raw_handle() as Handle) };
+      if assigned == 0 {
+        return Err(format!(
+          "AssignProcessToJobObject failed: {}",
+          io::Error::last_os_error()
+        ));
+      }
+      Ok(())
+    }
+
+    pub(super) fn terminate(&self) -> Result<(), String> {
+      let terminated = unsafe { TerminateJobObject(self.handle, 1) };
+      if terminated == 0 {
+        return Err(format!(
+          "TerminateJobObject failed: {}",
+          io::Error::last_os_error()
+        ));
+      }
+      Ok(())
+    }
+  }
+
+  impl Drop for OwnedSupervisorJob {
+    fn drop(&mut self) {
+      if !self.handle.is_null() {
+        unsafe {
+          CloseHandle(self.handle);
+        }
+        self.handle = null_mut();
+      }
+    }
+  }
+}
+
+#[cfg(target_os = "windows")]
+use windows_job::OwnedSupervisorJob;
+
 #[derive(Default)]
 pub struct SupervisorState {
   inner: Mutex<SupervisorInner>,
@@ -26,6 +176,8 @@ struct SupervisorInner {
   expected_pid: Option<u32>,
   repo_root: Option<PathBuf>,
   state_dir: Option<PathBuf>,
+  #[cfg(target_os = "windows")]
+  job: Option<OwnedSupervisorJob>,
   poll_stop: bool,
   shutting_down: bool,
 }
@@ -216,6 +368,24 @@ pub fn bootstrap_supervisor(
     .spawn()
     .map_err(|e| format!("failed to spawn supervisor: {e}"))?;
 
+  #[cfg(target_os = "windows")]
+  let mut child = child;
+
+  #[cfg(target_os = "windows")]
+  let owned_job = match OwnedSupervisorJob::new_for_child(&child) {
+    Ok(job) => job,
+    Err(error) => {
+      let kill_error = child.kill().err().map(|kill_error| kill_error.to_string());
+      let _ = child.wait();
+      return Err(match kill_error {
+        Some(kill_error) => format!(
+          "failed to create/assign Windows Supervisor Job Object: {error}; failed to terminate child: {kill_error}"
+        ),
+        None => format!("failed to create/assign Windows Supervisor Job Object: {error}"),
+      });
+    }
+  };
+
   let endpoint = wait_for_active_endpoint(&active_pointer, Duration::from_secs(25))?;
   // Validate endpoint PID is alive and host is loopback.
   if endpoint.host != "127.0.0.1" && endpoint.host != "localhost" && endpoint.host != "::1" {
@@ -243,6 +413,10 @@ pub fn bootstrap_supervisor(
     guard.expected_pid = Some(endpoint.pid);
     guard.repo_root = repo_root_for_state;
     guard.state_dir = Some(instance_state_dir);
+    #[cfg(target_os = "windows")]
+    {
+      guard.job = Some(owned_job);
+    }
     guard.poll_stop = false;
     guard.shutting_down = false;
   }
@@ -322,78 +496,145 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let token = guard.control_token.clone();
   let mut child = guard.child.take();
   let state_dir = guard.state_dir.clone();
+  #[cfg(not(target_os = "windows"))]
   let expected_pid = guard.expected_pid;
+  #[cfg(target_os = "windows")]
+  let owned_job = guard.job.take();
   guard.base_url = None;
-  // Keep token only for the shutdown request below.
+  guard.control_token = None;
+  guard.instance_id = None;
+  guard.expected_pid = None;
   drop(guard);
 
-  // Ask Supervisor to stop owned Runtime/Mem0 (best-effort, short timeout path).
-  if let (Some(base), Some(token)) = (base, token) {
-    let _ = http_json(
-      "POST",
-      &format!("{base}/v1/shutdown"),
-      None,
-      Some(&token),
-    );
-  }
+  #[cfg(target_os = "windows")]
+  {
+    // A successful response is the Runtime/Mem0 graceful completion barrier.
+    // Errors only select the forced owned cleanup below; they never extend it.
+    if let (Some(base), Some(token)) = (base, token) {
+      let _ = http_json_with_timeouts(
+        "POST",
+        &format!("{base}/v1/shutdown"),
+        None,
+        Some(&token),
+        HttpTimeouts {
+          connect: SHUTDOWN_CONNECT_TIMEOUT,
+          write: SHUTDOWN_WRITE_TIMEOUT,
+          read: SHUTDOWN_READ_TIMEOUT,
+        },
+      );
+    }
 
-  // Belt-and-suspenders: Windows does not kill Node Runtime when Supervisor exits.
-  // Kill runtime.pid.json from this instance if still alive.
-  if let Some(dir) = state_dir.as_ref() {
-    force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
-    force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
-  }
+    // The Supervisor's HTTP route acknowledges shutdown but does not exit the
+    // packaged Supervisor process. Terminate only this instance's owned Job.
+    if let Some(job) = owned_job.as_ref() {
+      let _ = job.terminate();
+    }
 
-  if let Some(mut child) = child.take() {
-    let supervisor_pid = child.id();
-    // Bounded wait for supervisor process to exit after graceful shutdown.
-    for _ in 0..12 {
-      match child.try_wait() {
-        Ok(Some(_)) => break,
-        Ok(None) => thread::sleep(Duration::from_millis(100)),
-        Err(_) => break,
+    if let Some(mut child) = child.take() {
+      let exited = wait_for_child_exit(
+        &mut child,
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+      );
+      if !exited {
+        // The Child handle is the only fallback target; never fall back to a
+        // bare PID or a process-name lookup.
+        let _ = child.kill();
+        let _ = wait_for_child_exit(
+          &mut child,
+          Duration::from_secs(1),
+          Duration::from_millis(50),
+        );
       }
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    // Force entire process tree (supervisor + any remaining runtime/node children).
-    force_kill_process_tree(supervisor_pid);
-  } else if let Some(pid) = expected_pid {
-    force_kill_process_tree(pid);
+
+    // Close the Job handle before deleting this instance's state files. Its
+    // KILL_ON_JOB_CLOSE policy is an additional owned-process boundary.
+    drop(owned_job);
   }
 
-  // Best-effort cleanup of active pointer + instance lock.
+  #[cfg(not(target_os = "windows"))]
+  {
+    // Ask Supervisor to stop owned Runtime/Mem0 (best-effort, short timeout path).
+    if let (Some(base), Some(token)) = (base, token) {
+      let _ = http_json(
+        "POST",
+        &format!("{base}/v1/shutdown"),
+        None,
+        Some(&token),
+      );
+    }
+
+    if let Some(dir) = state_dir.as_ref() {
+      force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
+      force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
+    }
+
+    if let Some(mut child) = child.take() {
+      let supervisor_pid = child.id();
+      // Bounded wait for supervisor process to exit after graceful shutdown.
+      for _ in 0..12 {
+        match child.try_wait() {
+          Ok(Some(_)) => break,
+          Ok(None) => thread::sleep(Duration::from_millis(100)),
+          Err(_) => break,
+        }
+      }
+      let _ = child.kill();
+      let _ = child.wait();
+      // Preserve the existing non-Windows process cleanup behavior.
+      force_kill_process_tree(supervisor_pid);
+    } else if let Some(pid) = expected_pid {
+      force_kill_process_tree(pid);
+    }
+  }
+
+  cleanup_shutdown_files(state_dir.as_deref());
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_child_exit(child: &mut Child, timeout: Duration, interval: Duration) -> bool {
+  let deadline = std::time::Instant::now() + timeout;
+  loop {
+    match child.try_wait() {
+      Ok(Some(_)) => return true,
+      Ok(None) => {}
+      Err(_) => return false,
+    }
+
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.as_nanos() == 0 {
+      return false;
+    }
+    thread::sleep(std::cmp::min(interval, remaining));
+  }
+}
+
+fn cleanup_shutdown_files(_state_dir: Option<&Path>) {
+  #[cfg(target_os = "windows")]
+  if let Some(dir) = _state_dir {
+    let _ = fs::remove_file(dir.join("control-endpoint.json"));
+    let _ = fs::remove_file(dir.join("runtime.pid.json"));
+    let _ = fs::remove_file(dir.join("mem0.pid.json"));
+  }
+
   let root = crate::packaging::desktop_state_dir();
   let _ = fs::remove_file(root.join("active-instance.json"));
   let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
   let _ = fs::remove_file(root.join("supervisor.instance.lock"));
 }
 
-/// Force-kill a process tree on Windows (taskkill /T /F). No-op elsewhere / pid 0.
+#[cfg(not(target_os = "windows"))]
 fn force_kill_process_tree(pid: u32) {
   if pid == 0 {
     return;
   }
-  #[cfg(target_os = "windows")]
-  {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = Command::new("taskkill")
-      .args(["/PID", &pid.to_string(), "/T", "/F"])
-      .creation_flags(CREATE_NO_WINDOW)
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .status();
-  }
-  #[cfg(not(target_os = "windows"))]
-  {
-    let _ = Command::new("kill")
-      .args(["-TERM", &pid.to_string()])
-      .status();
-  }
+  let _ = Command::new("kill")
+    .args(["-TERM", &pid.to_string()])
+    .status();
 }
 
-/// Read `{ "pid": N }` metadata and force-kill that tree if present.
+#[cfg(not(target_os = "windows"))]
 fn force_kill_pid_from_metadata(path: &Path) {
   let Ok(text) = fs::read_to_string(path) else {
     return;
@@ -544,6 +785,20 @@ fn wait_for_active_endpoint(pointer_path: &Path, timeout: Duration) -> Result<En
   Err("desktop supervisor did not publish a control endpoint in time".to_string())
 }
 
+#[derive(Clone, Copy)]
+struct HttpTimeouts {
+  connect: Duration,
+  write: Duration,
+  read: Duration,
+}
+
+#[cfg(target_os = "windows")]
+const SHUTDOWN_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(target_os = "windows")]
+const SHUTDOWN_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(target_os = "windows")]
+const SHUTDOWN_READ_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// Loopback JSON over plain TCP — never shell out to PowerShell/curl.
 /// PowerShell was flashing console windows on every 5s status poll ("已退出进程").
 fn http_json(
@@ -552,8 +807,36 @@ fn http_json(
   body: Option<&str>,
   token: Option<&str>,
 ) -> Result<Value, String> {
+  let is_get = method.eq_ignore_ascii_case("GET");
+  let read_timeout = if is_get {
+    Duration::from_secs(5)
+  } else {
+    Duration::from_secs(60)
+  };
+  http_json_with_timeouts(
+    method,
+    url,
+    body,
+    token,
+    HttpTimeouts {
+      // Keep the existing GET/normal-POST read and write behavior while
+      // placing a finite bound on loopback connect establishment.
+      connect: read_timeout,
+      write: Duration::from_secs(10),
+      read: read_timeout,
+    },
+  )
+}
+
+fn http_json_with_timeouts(
+  method: &str,
+  url: &str,
+  body: Option<&str>,
+  token: Option<&str>,
+  timeouts: HttpTimeouts,
+) -> Result<Value, String> {
   use std::io::{Read, Write};
-  use std::net::TcpStream;
+  use std::net::{SocketAddr, TcpStream};
 
   let parsed = url::Url::parse(url).map_err(|e| format!("invalid supervisor url: {e}"))?;
   if parsed.scheme() != "http" {
@@ -578,22 +861,13 @@ fn http_json(
   };
 
   let is_get = method.eq_ignore_ascii_case("GET");
-  let timeout = if is_get {
-    Duration::from_secs(5)
-  } else {
-    Duration::from_secs(60)
-  };
-
   // Prefer IPv4 loopback; `localhost` can resolve to ::1 first on some hosts.
-  let connect_host = if host_l == "localhost" || host_l == "::1" {
-    "127.0.0.1"
-  } else {
-    host.as_str()
-  };
-  let mut stream = TcpStream::connect((connect_host, port))
+  // The host was validated above, so this address cannot leave loopback.
+  let address = SocketAddr::from(([127, 0, 0, 1], port));
+  let mut stream = TcpStream::connect_timeout(&address, timeouts.connect)
     .map_err(|e| format!("supervisor connect failed: {e}"))?;
-  let _ = stream.set_read_timeout(Some(timeout));
-  let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+  let _ = stream.set_read_timeout(Some(timeouts.read));
+  let _ = stream.set_write_timeout(Some(timeouts.write));
 
   let body_bytes = if is_get {
     None
@@ -780,4 +1054,91 @@ fn which_command(name: &str) -> Option<PathBuf> {
     }
   }
   None
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+  use super::*;
+  use std::os::windows::process::CommandExt;
+
+  const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+  struct ChildCleanup(Option<Child>);
+
+  impl Drop for ChildCleanup {
+    fn drop(&mut self) {
+      if let Some(mut child) = self.0.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+      }
+    }
+  }
+
+  fn spawn_long_running_child() -> Child {
+    let mut command = Command::new("cmd.exe");
+    command
+      .args(["/d", "/c", "ping 127.0.0.1 -n 120 > nul"])
+      .creation_flags(CREATE_NO_WINDOW)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    command.spawn().expect("failed to spawn Windows test child")
+  }
+
+  fn assert_child_running(child: &mut Child) {
+    assert!(
+      child
+        .try_wait()
+        .expect("failed to poll Windows test child")
+        .is_none(),
+      "test child exited before ownership check"
+    );
+  }
+
+  #[test]
+  fn terminating_owned_job_preserves_unassigned_child() {
+    let mut owned = ChildCleanup(Some(spawn_long_running_child()));
+    let mut control = ChildCleanup(Some(spawn_long_running_child()));
+    assert_child_running(owned.0.as_mut().expect("owned child missing"));
+    assert_child_running(control.0.as_mut().expect("control child missing"));
+
+    let job = OwnedSupervisorJob::new_for_child(owned.0.as_ref().expect("owned child missing"))
+      .expect("failed to assign owned child to Job Object");
+    job
+      .terminate()
+      .expect("failed to terminate owned Job Object");
+
+    assert!(wait_for_child_exit(
+      owned.0.as_mut().expect("owned child missing"),
+      Duration::from_secs(2),
+      Duration::from_millis(50),
+    ));
+    assert!(
+      control
+        .0
+        .as_mut()
+        .expect("control child missing")
+        .try_wait()
+        .expect("failed to poll control child")
+        .is_none(),
+      "unassigned control child was terminated with the owned job"
+    );
+  }
+
+  #[test]
+  fn dropping_kill_on_close_job_terminates_assigned_child() {
+    let mut owned = ChildCleanup(Some(spawn_long_running_child()));
+    assert_child_running(owned.0.as_mut().expect("owned child missing"));
+
+    {
+      let _job = OwnedSupervisorJob::new_for_child(owned.0.as_ref().expect("owned child missing"))
+        .expect("failed to assign owned child to Job Object");
+    }
+
+    assert!(wait_for_child_exit(
+      owned.0.as_mut().expect("owned child missing"),
+      Duration::from_secs(2),
+      Duration::from_millis(50),
+    ));
+  }
 }
