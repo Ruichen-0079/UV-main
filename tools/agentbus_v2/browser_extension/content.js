@@ -11,7 +11,12 @@ const CONFIG = globalThis.AGENTBUS_V2_BROWSER_CONFIG || {
   response_timeout_ms: 120000
 };
 const LANES = ["plan", "judge"];
-const state = { current_job_id: null, matched_lanes: new Set(), heartbeat_lanes: new Set() };
+const state = {
+  current_job_id: null,
+  matched_lanes: new Set(),
+  heartbeat_lanes: new Set(),
+  dom_probe_lanes: new Set()
+};
 
 function diagnostic(...values) {
   if (typeof console !== "undefined" && typeof console.debug === "function") {
@@ -190,6 +195,21 @@ async function heartbeatIfBound(lane) {
   return true;
 }
 
+async function probeDom(lane) {
+  if (state.dom_probe_lanes.has(lane)) return;
+  const composer = findComposer();
+  const send = sendButton(false);
+  const detail = JSON.stringify({
+    composer_found: Boolean(composer),
+    composer_empty: composer ? composerText(composer).trim() === "" : null,
+    generation_busy: generating(),
+    send_button_found: Boolean(send),
+    send_button_enabled: Boolean(send && !send.disabled && send.getAttribute?.("aria-disabled") !== "true")
+  });
+  state.dom_probe_lanes.add(lane);
+  await reportDiagnostic(lane, "DOM_PROBE", detail);
+}
+
 async function reportDiagnostic(lane, code, detail) {
   diagnostic(code, lane, detail);
   try {
@@ -271,7 +291,8 @@ async function poll() {
   for (const lane of LANES) {
     let request = null;
     try {
-      await heartbeatIfBound(lane);
+      const matched = await heartbeatIfBound(lane);
+      if (matched) await probeDom(lane);
       request = await pull(lane);
       if (!request || state.current_job_id) continue;
       if (canonicalUrl(location.href) !== canonicalUrl(request.conversation_url)) continue;
