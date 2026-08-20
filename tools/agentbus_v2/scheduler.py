@@ -13,7 +13,7 @@ import time
 from typing import Callable, Sequence
 
 from .core import Action, ActionKind
-from .facts import FactError, load_config, paths_for
+from .facts import FactError, load_config, load_gpt_packet, paths_for, read_snapshot
 
 
 DEFAULT_POLL_INTERVAL = 20.0
@@ -192,6 +192,29 @@ def _default_tick(state_root: Path, p_id: str, *, allow_merge: bool):
     return tick_once(state_root, p_id, allow_merge=allow_merge)
 
 
+def _pending_gpt_action(
+    state_root: Path, p_id: str, *, allow_merge: bool
+) -> Action | None:
+    """Reconstruct one exact pending GPT delivery from durable facts.
+
+    The scheduler keeps no recovery state.  A fresh snapshot projects at most
+    the exact causally current GPT outbox into ``gpt_pending``; the packet then
+    supplies only the logical operation needed to select the transport lane.
+    """
+    paths = paths_for(state_root, p_id)
+    snapshot = read_snapshot(paths, allow_merge=allow_merge)
+    if len(snapshot.gpt_pending) != 1:
+        return None
+    job_id = next(iter(snapshot.gpt_pending))
+    packet = load_gpt_packet(paths, job_id)
+    operation = packet.get("operation")
+    if operation == "PLAN_GPT":
+        return Action(ActionKind.PLAN, effect_id=job_id)
+    if operation == "JUDGE_GPT":
+        return Action(ActionKind.JUDGE, effect_id=job_id)
+    raise FactError(f"current GPT packet has unsupported operation: {operation!r}")
+
+
 class Scheduler:
     """A memory-only level-triggered collection of independent P ticks."""
 
@@ -324,14 +347,24 @@ class Scheduler:
             self._submit(entry, registry)
 
     def _dispatch_gpt(self, p_id: str, action: Action, registry: ProjectRegistry) -> None:
-        if action.kind not in {ActionKind.PLAN, ActionKind.JUDGE}:
-            return
         entry = next((item for item in registry.entries if item.p_id == p_id), None)
         if entry is None:
             return
+        candidate = action
+        if candidate.kind not in {ActionKind.PLAN, ActionKind.JUDGE}:
+            try:
+                candidate = _pending_gpt_action(
+                    self.state_root,
+                    p_id,
+                    allow_merge=entry.allow_merge,
+                )
+            except (FactError, OSError):
+                return
+            if candidate is None:
+                return
         self.gpt_transport.try_dispatch(
             p_id,
-            action,
+            candidate,
             allow_merge=entry.allow_merge,
         )
 
