@@ -174,6 +174,7 @@ class WebUIState:
     def status(self) -> dict[str, object]:
         registry = self.registry()
         scheduler_status = self.scheduler_status()
+        gpt_transport = self.scheduler.gpt_transport
         with self._lock:
             events = [event.as_dict() for event in self._events]
         projects: list[dict[str, object]] = []
@@ -203,6 +204,8 @@ class WebUIState:
                         "manual_gpt": self._manual_packet(paths, action),
                     }
                 )
+                if projection["manual_gpt"] is not None:
+                    projection["manual_gpt"]["mode"] = gpt_transport.mode_for(action)
                 # Keep config loading explicit: it fences the registered P before
                 # projecting any of its durable facts.
                 if config.p_id != entry.p_id:
@@ -214,6 +217,7 @@ class WebUIState:
             "server": {"name": "agentbus-v2-webui", "loopback": True},
             "scheduler": scheduler_status,
             "executors": list_executor_accounts(self.state_root),
+            "gpt_lanes": gpt_transport.status(),
             "projects": projects,
             "events": events,
         }
@@ -223,7 +227,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AgentBus v2</title><style>
 :root{font:14px system-ui,sans-serif;color:#e8edf2;background:#171a1e}body{margin:20px}button{margin:2px;padding:5px 9px;background:#29313a;color:#e8edf2;border:1px solid #56616d;border-radius:4px}button:hover{background:#35414d}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{border-bottom:1px solid #30363d;padding:7px;text-align:left;vertical-align:top}th{color:#9da9b5}.muted{color:#9da9b5}.ok{color:#8ed081}.warn{color:#ffd166}.err{color:#ff7b72}textarea{width:100%;min-height:90px;background:#0f1114;color:#e8edf2;border:1px solid #56616d}code{font-size:12px}#error{min-height:20px;color:#ff7b72}.events{max-height:180px;overflow:auto;white-space:pre-wrap;font:12px ui-monospace,monospace}
-</style></head><body><h1>AgentBus v2</h1><div id="toolbar"><button onclick="scheduler('start')">Start Scheduler</button><button onclick="scheduler('stop')">Stop Scheduler</button><span id="summary" class="muted"></span></div><div id="error"></div><table><thead><tr><th>P</th><th>Schedule</th><th>Action</th><th>HEAD / SPEC</th><th>GPT</th><th>Controls</th></tr></thead><tbody id="projects"></tbody></table><h3>Executors</h3><pre id="executors" class="muted"></pre><h3>Recent events</h3><div id="events" class="events"></div><script>
+</style></head><body><h1>AgentBus v2</h1><div id="toolbar"><button onclick="scheduler('start')">Start Scheduler</button><button onclick="scheduler('stop')">Stop Scheduler</button><span id="summary" class="muted"></span></div><div id="error"></div><table><thead><tr><th>P</th><th>Schedule</th><th>Action</th><th>HEAD / SPEC</th><th>GPT</th><th>Controls</th></tr></thead><tbody id="projects"></tbody></table><h3>Executors</h3><pre id="executors" class="muted"></pre><h3>GPT lanes</h3><pre id="gpt-lanes" class="muted"></pre><h3>Recent events</h3><div id="events" class="events"></div><script>
 const TOKEN=__TOKEN__;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function request(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-AgentBus-Token':TOKEN},body:JSON.stringify(body??{})});let v;try{v=await r.json()}catch{throw Error('HTTP '+r.status+' (non-JSON response)')}if(!r.ok)throw Error(v.error||('HTTP '+r.status));return v}
@@ -232,7 +236,7 @@ async function project(p,op,body){try{await request('/api/project/'+encodeURICom
 async function submit(p){const box=document.getElementById('gpt-'+CSS.escape(p));try{const v=JSON.parse(box.value);await request('/api/project/'+encodeURIComponent(p)+'/gpt-submit',v);box.value='';await refresh()}catch(e){showError(e)}}
 function copyText(v){navigator.clipboard?.writeText(v)}
 function showError(e){document.getElementById('error').textContent=String(e);setTimeout(()=>document.getElementById('error').textContent='',5000)}
-function render(v){const s=v.scheduler||{};document.getElementById('summary').textContent='scheduler '+(s.running?'RUNNING':'STOPPED')+' · enabled '+(s.enabled_p_ids||[]).length+' · in-flight '+(s.in_flight_p_ids||[]).length;document.getElementById('executors').textContent=JSON.stringify(v.executors||[],null,2);document.getElementById('events').textContent=(v.events||[]).slice().reverse().map(e=>JSON.stringify(e)).join('\n');document.getElementById('projects').innerHTML=(v.projects||[]).map(p=>{const g=p.manual_gpt;return `<tr><td><strong>${esc(p.p_id)}</strong><br><span class="muted">${p.in_flight?'IN-FLIGHT':'IDLE'}</span></td><td>${p.enabled?'<span class="ok">ENABLED</span>':'<span class="muted">DISABLED</span>'}<br>merge ${p.allow_merge?'ON':'OFF'}</td><td><strong>${esc(p.action)}</strong><br><span class="${p.action==='HUMAN'?'err':'muted'}">${esc(p.detail)}</span></td><td><code>${esc(p.head||'—')}</code><br><code>${esc(p.spec_id||'—')}</code></td><td>${g?`<b class="warn">${esc(g.operation)}</b><br><code>${esc(g.job_id)}</code><br><button onclick="copyText(decodeURIComponent('${encodeURIComponent(g.packet_path).replaceAll("'","%27")}'))">Copy packet path</button><button onclick="copyText('${esc(g.instruction)}')">Copy instruction</button><br><code>${esc(g.packet_sha256||'packet not generated yet')}</code><textarea id="gpt-${esc(p.p_id)}" placeholder="Paste exact GPT JSON here"></textarea><button onclick="submit('${esc(p.p_id)}')">Submit</button>`:'—'}</td><td><button onclick="project('${esc(p.p_id)}','enabled',{enabled:${!p.enabled}})">${p.enabled?'Disable':'Enable'}</button><button onclick="project('${esc(p.p_id)}','allow-merge',{allow_merge:${!p.allow_merge}})">${p.allow_merge?'Disallow merge':'Allow merge'}</button><button onclick="project('${esc(p.p_id)}','tick',{})">Tick now</button></td></tr>`}).join('')}
+function render(v){const s=v.scheduler||{};document.getElementById('summary').textContent='scheduler '+(s.running?'RUNNING':'STOPPED')+' · enabled '+(s.enabled_p_ids||[]).length+' · in-flight '+(s.in_flight_p_ids||[]).length;document.getElementById('executors').textContent=JSON.stringify(v.executors||[],null,2);document.getElementById('gpt-lanes').textContent=JSON.stringify(v.gpt_lanes||[],null,2);document.getElementById('events').textContent=(v.events||[]).slice().reverse().map(e=>JSON.stringify(e)).join('\n');document.getElementById('projects').innerHTML=(v.projects||[]).map(p=>{const g=p.manual_gpt;return `<tr><td><strong>${esc(p.p_id)}</strong><br><span class="muted">${p.in_flight?'IN-FLIGHT':'IDLE'}</span></td><td>${p.enabled?'<span class="ok">ENABLED</span>':'<span class="muted">DISABLED</span>'}<br>merge ${p.allow_merge?'ON':'OFF'}</td><td><strong>${esc(p.action)}</strong><br><span class="${p.action==='HUMAN'?'err':'muted'}">${esc(p.detail)}</span></td><td><code>${esc(p.head||'—')}</code><br><code>${esc(p.spec_id||'—')}</code></td><td>${g?`<b class="warn">${esc(g.operation)}</b> <span class="muted">${esc(g.mode||'MANUAL')}</span><br><code>${esc(g.job_id)}</code><br><button onclick="copyText(decodeURIComponent('${encodeURIComponent(g.packet_path).replaceAll("'","%27")}'))">Copy packet path</button><button onclick="copyText('${esc(g.instruction)}')">Copy instruction</button><br><code>${esc(g.packet_sha256||'packet not generated yet')}</code><textarea id="gpt-${esc(p.p_id)}" placeholder="Paste exact GPT JSON here"></textarea><button onclick="submit('${esc(p.p_id)}')">Submit</button>`:'—'}</td><td><button onclick="project('${esc(p.p_id)}','enabled',{enabled:${!p.enabled}})">${p.enabled?'Disable':'Enable'}</button><button onclick="project('${esc(p.p_id)}','allow-merge',{allow_merge:${!p.allow_merge}})">${p.allow_merge?'Disallow merge':'Allow merge'}</button><button onclick="project('${esc(p.p_id)}','tick',{})">Tick now</button></td></tr>`}).join('')}
 async function refresh(){try{const r=await fetch('/api/status');if(!r.ok)throw Error('HTTP '+r.status);render(await r.json())}catch(e){showError('Server unreachable or status failed: '+e)}}refresh();setInterval(refresh,1500);
 </script></body></html>"""
 

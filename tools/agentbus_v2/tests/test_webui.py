@@ -119,7 +119,8 @@ class WebUITests(unittest.TestCase):
         packet.parent.mkdir(parents=True)
         packet.write_text("manual packet", encoding="utf-8")
         with patch.object(webui, "read_snapshot", return_value=self.snapshot) as read, \
-                patch.object(webui, "decide", return_value=self.action) as decide:
+                patch.object(webui, "decide", return_value=self.action) as decide, \
+                patch.object(self.state.scheduler.gpt_transport, "try_dispatch") as dispatch:
             status, html = self.server.request("/")
             self.assertEqual(200, status)
             self.assertIn("AgentBus v2", str(html))
@@ -130,8 +131,10 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(SHA[:8], payload["projects"][0]["head"])
         self.assertEqual(self.action.effect_id, payload["projects"][0]["manual_gpt"]["job_id"])
         self.assertEqual("PLAN_GPT", payload["projects"][0]["manual_gpt"]["operation"])
+        self.assertEqual({"plan", "judge"}, {item["name"] for item in payload["gpt_lanes"]})
         self.assertGreater(read.call_count, 0)
         self.assertGreater(decide.call_count, 0)
+        dispatch.assert_not_called()
         self.assertEqual([], payload["events"])
 
     def test_mutations_change_registry_only_and_unknown_is_rejected(self) -> None:

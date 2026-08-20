@@ -204,6 +204,7 @@ class Scheduler:
         max_workers: int | None = None,
         tick_function: TickFunction | None = None,
         registry: ProjectRegistry | None = None,
+        gpt_transport=None,
     ) -> None:
         if poll_interval <= 0:
             raise ValueError("poll interval must be positive")
@@ -225,6 +226,11 @@ class Scheduler:
         self._stop = threading.Event()
         self._state_lock = threading.RLock()
         self._running = False
+        if gpt_transport is None:
+            from .gpt_transport import GPTTransport
+
+            gpt_transport = GPTTransport(self.state_root)
+        self.gpt_transport = gpt_transport
 
     def _registry(self) -> ProjectRegistry:
         if self._fixed_registry is not None:
@@ -299,6 +305,12 @@ class Scheduler:
                         if self._in_flight.get(p_id) is not done:
                             return
                         self._in_flight.pop(p_id, None)
+                    try:
+                        action, _result = done.result()
+                    except Exception:
+                        action = None
+                    if action is not None:
+                        self._dispatch_gpt(p_id, action, registry)
                     if on_event is not None:
                         on_event(self._event(p_id, done))
 
@@ -310,6 +322,18 @@ class Scheduler:
     def _submit_enabled(self, registry: ProjectRegistry) -> None:
         for entry in registry.enabled:
             self._submit(entry, registry)
+
+    def _dispatch_gpt(self, p_id: str, action: Action, registry: ProjectRegistry) -> None:
+        if action.kind not in {ActionKind.PLAN, ActionKind.JUDGE}:
+            return
+        entry = next((item for item in registry.entries if item.p_id == p_id), None)
+        if entry is None:
+            return
+        self.gpt_transport.try_dispatch(
+            p_id,
+            action,
+            allow_merge=entry.allow_merge,
+        )
 
     @staticmethod
     def _event(p_id: str, future: Future[tuple[Action, object | None]]) -> SchedulerEvent:
@@ -333,6 +357,12 @@ class Scheduler:
                 self._in_flight.pop(p_id, None)
             event = self._event(p_id, future)
             events.append(event)
+            try:
+                action, _result = future.result()
+            except Exception:
+                action = None
+            if action is not None:
+                self._dispatch_gpt(p_id, action, registry)
             entry = next((item for item in registry.entries if item.p_id == p_id), None)
             if event.changed and p_id not in self._immediate_used and entry is not None and entry.enabled:
                 self._immediate_used.add(p_id)
@@ -395,6 +425,9 @@ class Scheduler:
         pool, self._pool = self._pool, None
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
+        close_transport = getattr(self.gpt_transport, "close", None)
+        if close_transport is not None:
+            close_transport()
 
     def status(self) -> dict[str, object]:
         registry = self._registry()
