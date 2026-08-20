@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -10,6 +10,7 @@ import subprocess
 from typing import Any, Iterable, Mapping, Sequence
 
 from .core import (
+    ActionKind,
     JUDGE_RESULTS,
     PLAN_RESULTS,
     GPT_PACKET_SCHEMA,
@@ -28,6 +29,7 @@ from .core import (
     stable_id,
     work_effect_id,
     work_identity_id,
+    decide,
 )
 
 
@@ -736,6 +738,48 @@ def _load_current(
         parent, trigger = spec, return_plan.job_id
 
 
+
+def _project_current_gpt_pending(
+    paths: PPaths, snapshot: Snapshot
+) -> Snapshot:
+    """Project one exact already-created GPT outbox as current pending.
+
+    The outbox is never authority by itself.  Fresh core.decide() first derives
+    the only current semantic GPT identity from durable causal facts; only an
+    exact-addressed packet for that identity, with no result yet present, is
+    projected into gpt_pending.
+    """
+    if snapshot.gpt_pending or not snapshot.repository_available:
+        return snapshot
+
+    action = decide(snapshot)
+    if (
+        action.kind not in {ActionKind.PLAN, ActionKind.JUDGE}
+        or not action.effect_id
+    ):
+        return snapshot
+
+    job_id = action.effect_id
+    packet_path = paths.root / "gpt" / "outbox" / f"{job_id}.md"
+    result_path = paths.root / "gpt" / "results" / f"{job_id}.json"
+
+    if not packet_path.exists() or result_path.exists():
+        return snapshot
+
+    packet = load_gpt_packet(paths, job_id)
+    expected_operation = (
+        "PLAN_GPT" if action.kind is ActionKind.PLAN else "JUDGE_GPT"
+    )
+    if packet.get("operation") != expected_operation:
+        raise FactError(
+            f"current GPT packet operation mismatch for {job_id}"
+        )
+
+    return replace(
+        snapshot,
+        gpt_pending=frozenset({job_id}),
+    )
+
 def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
     from .github import GitHubFacts, read_github_facts
 
@@ -802,4 +846,4 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         proof_contract_digest=contract,
         allow_merge=allow_merge,
     )
-    return snapshot
+    return _project_current_gpt_pending(paths, snapshot)
