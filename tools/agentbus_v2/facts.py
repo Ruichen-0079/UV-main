@@ -1,10 +1,3 @@
-"""Durable fact collection for AgentBus v2.
-
-Files in a P directory are immutable requests/results or bounded executor
-evidence. No file stores a phase, current step, retry count, or derived
-workflow status.
-"""
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -38,7 +31,6 @@ from .core import (
 )
 
 
-CONFIG_SCHEMA = 2
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 P_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 TRAILER_RE = re.compile(r"^AgentBus-V2-([A-Za-z-]+):\s*(.+?)\s*$")
@@ -51,7 +43,6 @@ class FactError(RuntimeError):
 
 @dataclass(frozen=True)
 class PConfig:
-    schema_version: int
     p_id: str
     worktree: str
     repository: str
@@ -59,63 +50,22 @@ class PConfig:
     branch: str
     base_ref: str
     seed_head: str
-    seed_base: str
     charter_digest: str
-    owner_token: str
     proof_commands: tuple[tuple[str, ...], ...]
     required_ci_checks: tuple[str, ...]
+
+    @property
+    def owner_token(self) -> str:
+        return stable_id("owner", {"p_id": self.p_id, "repository": self.repository, "branch": self.branch, "seed_head": self.seed_head})
 
 
 @dataclass(frozen=True)
 class PPaths:
     root: Path
 
-    @property
-    def config(self) -> Path:
-        return self.root / "config.json"
-
-    @property
-    def charter(self) -> Path:
-        return self.root / "charter.md"
-
-    @property
-    def gpt_outbox(self) -> Path:
-        return self.root / "gpt" / "outbox"
-
-    @property
-    def gpt_results(self) -> Path:
-        return self.root / "gpt" / "results"
-
-    @property
-    def work_results(self) -> Path:
-        return self.root / "work" / "results"
-
-    @property
-    def work_logs(self) -> Path:
-        return self.root / "work" / "logs"
-
-    @property
-    def proof_results(self) -> Path:
-        return self.root / "prove" / "results"
-
     def create_dirs(self) -> None:
-        for path in (
-            self.gpt_outbox,
-            self.gpt_results,
-            self.work_results,
-            self.work_logs,
-            self.proof_results,
-        ):
-            path.mkdir(parents=True, exist_ok=True)
-
-
-def default_state_root() -> Path:
-    base = os.environ.get("XDG_STATE_HOME")
-    if base:
-        return Path(base).expanduser() / "yuvi-agentbus-v2"
-    return Path.home() / ".local" / "state" / "yuvi-agentbus-v2"
-
-
+        for path in ("gpt/outbox", "gpt/results", "work/results", "work/logs", "prove/results"):
+            (self.root / path).mkdir(parents=True, exist_ok=True)
 def paths_for(state_root: Path, p_id: str) -> PPaths:
     if not P_ID_RE.fullmatch(p_id):
         raise FactError(f"invalid P_ID: {p_id!r}")
@@ -172,15 +122,11 @@ def live_remote_sha(worktree: Path, remote: str, ref: str) -> str:
 
 
 def write_json_once(path: Path, value: Mapping[str, Any]) -> bool:
-    """Create an immutable JSON fact, or verify an identical existing fact."""
-
     data = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     return write_text_once(path, data)
 
 
 def write_text_once(path: Path, text: str) -> bool:
-    """Publish immutable text with create-only filesystem semantics."""
-
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
     try:
@@ -255,23 +201,15 @@ def init_p(
         cwd=worktree,
         check=False,
     )
-    if remote_branch.returncode == 0 and not paths.config.exists():
+    config_path = paths.root / "config.json"
+    charter_path = paths.root / "charter.md"
+    if remote_branch.returncode == 0 and not config_path.exists():
         raise FactError("refusing to claim an existing remote experiment branch")
     if remote_branch.returncode not in {0, 2}:
         raise FactError("cannot verify experiment branch ownership at the remote")
     charter = charter_text.replace("\r\n", "\n").strip() + "\n"
     charter_digest = sha256_text(charter)
-    owner_token = stable_id(
-        "owner",
-        {
-            "p_id": p_id,
-            "repository": expected_repository,
-            "branch": branch,
-            "seed_head": head,
-        },
-    )
     config = {
-        "schema_version": CONFIG_SCHEMA,
         "p_id": p_id,
         "worktree": str(worktree),
         "repository": expected_repository,
@@ -279,22 +217,20 @@ def init_p(
         "branch": branch,
         "base_ref": base_ref,
         "seed_head": head,
-        "seed_base": base,
         "charter_digest": charter_digest,
-        "owner_token": owner_token,
         "proof_commands": [list(command) for command in commands],
         "required_ci_checks": list(checks),
     }
-    if paths.config.exists():
+    if config_path.exists():
         existing = load_config(paths)
-        if paths.charter.read_text(encoding="utf-8") != charter or asdict(existing) != asdict(
-            _parse_config(config, paths.config)
+        if charter_path.read_text(encoding="utf-8") != charter or asdict(existing) != asdict(
+            _parse_config(config, config_path)
         ):
             raise FactError(f"P directory already exists with different facts: {paths.root}")
         return paths
     paths.create_dirs()
-    write_text_once(paths.charter, charter)
-    write_json_once(paths.config, config)
+    write_text_once(charter_path, charter)
+    write_json_once(config_path, config)
     return paths
 
 
@@ -307,7 +243,6 @@ def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
             raise TypeError("proof_commands must be a list of argv lists")
         commands = tuple(tuple(str(arg) for arg in item) for item in raw_commands)
         config = PConfig(
-            schema_version=int(value["schema_version"]),
             p_id=str(value["p_id"]),
             worktree=str(value["worktree"]),
             repository=canonical_repository(str(value["repository"])),
@@ -315,9 +250,7 @@ def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
             branch=str(value["branch"]),
             base_ref=str(value["base_ref"]),
             seed_head=str(value["seed_head"]),
-            seed_base=str(value["seed_base"]),
             charter_digest=str(value["charter_digest"]),
-            owner_token=str(value["owner_token"]),
             proof_commands=commands,
             required_ci_checks=tuple(
                 str(item) for item in value.get("required_ci_checks", [])
@@ -325,26 +258,26 @@ def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
         )
     except (KeyError, TypeError, ValueError) as error:
         raise FactError(f"invalid P config {source}: {error}") from error
-    if config.schema_version != CONFIG_SCHEMA:
-        raise FactError(f"unsupported config schema in {source}")
     if not P_ID_RE.fullmatch(config.p_id):
         raise FactError(f"invalid P_ID in {source}")
-    if not SHA_RE.fullmatch(config.seed_head) or not SHA_RE.fullmatch(config.seed_base):
-        raise FactError(f"invalid seed SHA in {source}")
+    if not SHA_RE.fullmatch(config.seed_head):
+        raise FactError(f"invalid seed HEAD in {source}")
     if any(not command for command in commands):
         raise FactError(f"empty proof command in {source}")
     return config
 
 
 def load_config(paths: PPaths) -> PConfig:
-    return _parse_config(_load_json(paths.config), paths.config)
+    path = paths.root / "config.json"
+    return _parse_config(_load_json(path), path)
 
 
 def load_charter(paths: PPaths, config: PConfig) -> str:
+    path = paths.root / "charter.md"
     try:
-        charter = paths.charter.read_text(encoding="utf-8")
+        charter = path.read_text(encoding="utf-8")
     except OSError as error:
-        raise FactError(f"cannot read charter {paths.charter}: {error}") from error
+        raise FactError(f"cannot read charter {path}: {error}") from error
     if sha256_text(charter) != config.charter_digest:
         raise FactError("P_CHARTER changed after initialization")
     return charter
@@ -354,17 +287,6 @@ GPT_DECISIONS = {
     "PLAN_GPT": PLAN_RESULTS,
     "JUDGE_GPT": JUDGE_RESULTS,
 }
-
-
-def gpt_response_schema(operation: str, job_id: str) -> str:
-    decisions = GPT_DECISIONS.get(operation)
-    if decisions is None:
-        raise FactError(f"unsupported GPT operation: {operation}")
-    return (f'Return exactly one JSON object and no Markdown fence:\n{{\n'
-            f'  "job_id": "{job_id}",\n  "operation": "{operation}",\n'
-            f'  "decision": "{" | ".join(sorted(decisions))}",\n  "body": "string"\n}}\n\n'
-            'Keys are exactly job_id, operation, decision, body. Repeat JOB_ID '
-            'verbatim; body is the complete bounded plan or judgment.')
 
 
 def parse_gpt_response(
@@ -394,7 +316,7 @@ def parse_gpt_response(
 
 
 def load_gpt_packet(paths: PPaths, job_id: str) -> dict[str, Any]:
-    path = paths.gpt_outbox / f"{job_id}.md"
+    path = paths.root / "gpt" / "outbox" / f"{job_id}.md"
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
@@ -420,7 +342,7 @@ def load_gpt_packet(paths: PPaths, job_id: str) -> dict[str, Any]:
 def _load_gpt_result(
     paths: PPaths, job_id: str, operation: str
 ) -> GptResult | None:
-    path = paths.gpt_results / f"{job_id}.json"
+    path = paths.root / "gpt" / "results" / f"{job_id}.json"
     return (
         parse_gpt_response(job_id, operation, _load_json(path), str(path))
         if path.exists() else None
@@ -479,7 +401,7 @@ def _load_work(
     effect_id = work_effect_id(identity, spec, trigger_judge_id=trigger)
     if recovered is not None and recovered.effect_id == effect_id:
         return recovered
-    path = paths.work_results / f"{effect_id}.json"
+    path = paths.root / "work" / "results" / f"{effect_id}.json"
     if not path.exists():
         return None
     value = _load_json(path)
@@ -656,7 +578,7 @@ def _load_proof(
 ) -> ProofFact | None:
     identity = _identity(config, head, base, contract_digest)
     proof_key = proof_id(identity, spec, trigger_judge_id=trigger)
-    path = paths.proof_results / f"{proof_key}.json"
+    path = paths.root / "prove" / "results" / f"{proof_key}.json"
     if not path.exists():
         return None
     value = _load_json(path)
@@ -795,7 +717,11 @@ def _load_current(
             raise FactError(f"PLAN lineage cycle: {job_id}")
         seen.add(job_id)
         if result is None:
-            pending = frozenset({job_id}) if (paths.gpt_outbox / f"{job_id}.md").exists() else frozenset()
+            pending = (
+                frozenset({job_id})
+                if (paths.root / "gpt" / "outbox" / f"{job_id}.md").exists()
+                else frozenset()
+            )
             return tuple(results), tuple(specs), pending, work, proof
         results.append(result)
         if spec is None:
@@ -846,7 +772,7 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
             git(worktree, "cat-file", "-e", f"{base}^{{commit}}")
         repository_available = True
     except FactError:
-        base = config.seed_base
+        base = head
         repository_available = False
     contract = proof_contract_digest(config)
     if repository_available:

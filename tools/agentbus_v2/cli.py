@@ -1,15 +1,16 @@
-"""Command-line entry point for AgentBus v2."""
-
 from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
 import fcntl
 import json
+import os
 from pathlib import Path
 import sys
 import time
 from typing import Iterator, Sequence
+
+STATE_ROOT = (Path(os.environ["XDG_STATE_HOME"]).expanduser() / "yuvi-agentbus-v2" if os.environ.get("XDG_STATE_HOME") else Path.home() / ".local" / "state" / "yuvi-agentbus-v2")
 
 from .core import Action, ActionKind, decide
 from .effects import (
@@ -22,7 +23,6 @@ from .effects import (
 )
 from .facts import (
     FactError,
-    default_state_root,
     init_p,
     load_config,
     paths_for,
@@ -47,7 +47,7 @@ def _proof_command(value: str) -> tuple[str, ...]:
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="agentbus-v2")
-    root.add_argument("--state-root", type=Path, default=default_state_root())
+    root.add_argument("--state-root", type=Path, default=STATE_ROOT)
     commands = root.add_subparsers(dest="command", required=True)
 
     initialize = commands.add_parser("init", help="seed one immutable P_CHARTER")
@@ -68,15 +68,11 @@ def parser() -> argparse.ArgumentParser:
     watch = commands.add_parser("watch", help="poll by repeated stateless ticks")
     watch.add_argument("p_id")
     watch.add_argument("--allow-merge", action="store_true")
-    watch.add_argument("--interval", type=float, default=20.0)
 
     submit = commands.add_parser("gpt-submit", help="validate and ingest one manual GPT result")
     submit.add_argument("p_id")
     submit.add_argument("response", type=Path)
 
-    show = commands.add_parser("show", help="show the action derived from current facts")
-    show.add_argument("p_id")
-    show.add_argument("--allow-merge", action="store_true")
     return root
 
 
@@ -91,10 +87,8 @@ def _action_json(action: Action) -> dict[str, object]:
 
 def _result_json(result: EffectResult) -> dict[str, object]:
     return {
-        "effect_ran": result.ran,
-        "outcome": result.outcome,
+        "changed": result.changed,
         "detail": result.detail,
-        "path": str(result.path) if result.path else None,
     }
 
 
@@ -159,12 +153,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = submit_gpt_response(paths_for(args.state_root, args.p_id), args.response)
             _print(_result_json(result))
             return 0
-        if args.command == "show":
-            snapshot = read_snapshot(
-                paths_for(args.state_root, args.p_id), allow_merge=args.allow_merge
-            )
-            _print(_action_json(decide(snapshot)))
-            return 0
         if args.command == "tick":
             action, result = tick_once(
                 args.state_root, args.p_id, allow_merge=args.allow_merge
@@ -175,10 +163,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print(output)
             return 0
         if args.command == "watch":
-            if args.interval <= 0 or args.interval > 300:
-                raise FactError("watch interval must be in (0, 300] seconds")
-            stalled: tuple[str | None, str] | None = None
-            stalled_count = 0
             while True:
                 action, result = tick_once(
                     args.state_root, args.p_id, allow_merge=args.allow_merge
@@ -189,38 +173,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print(output)
                 if action.kind in {ActionKind.HUMAN, ActionKind.MERGE_READY, ActionKind.DONE}:
                     return 0
-                no_progress = (
-                    result is not None
-                    and not result.ran
-                    and result.outcome == "WORK_ABSENT"
-                    and "drift" not in result.detail.lower()
-                )
-                signature = (action.effect_id, result.outcome) if no_progress and result else None
-                if signature is not None and signature == stalled:
-                    stalled_count += 1
-                elif signature is not None:
-                    stalled, stalled_count = signature, 1
-                else:
-                    stalled, stalled_count = None, 0
-                if stalled_count >= 3:
-                    _print(
-                        {
-                            "action": "HUMAN",
-                            "error": (
-                                "no-progress fuse: identical WORK facts/effect "
-                                "completed three times without a durable result"
-                            ),
-                            "effect_id": action.effect_id,
-                        }
-                    )
-                    return 2
-                if result and result.ran:
+                if result and result.changed:
                     continue
-                time.sleep(args.interval)
+                time.sleep(20.0)
     except KeyboardInterrupt:
         return 130
     except (FactError, OSError) as error:
-        _print({"action": "HUMAN", "error": str(error)})
+        _print({"error": str(error)})
         return 2
     return 1
 

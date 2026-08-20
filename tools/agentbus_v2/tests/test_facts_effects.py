@@ -48,7 +48,6 @@ from tools.agentbus_v2.facts import (
 )
 from tools.agentbus_v2.github import (
     GitHubFacts,
-    check_evidence,
     merge_pr,
     observe_required_checks,
     read_github_facts,
@@ -108,7 +107,6 @@ class RepoFixture:
 
 def config_for(repo: RepoFixture, charter: str) -> PConfig:
     return PConfig(
-        schema_version=2,
         p_id="P-TEST",
         worktree=str(repo.work),
         repository=canonical_repository(str(repo.remote)),
@@ -116,23 +114,22 @@ def config_for(repo: RepoFixture, charter: str) -> PConfig:
         branch="agentbus/p-test",
         base_ref="main",
         seed_head=repo.base,
-        seed_base=repo.base,
         charter_digest=sha256_text(charter),
-        owner_token="owner-test",
         proof_commands=(),
         required_ci_checks=(),
     )
 
 
 def snapshot_for(config: PConfig) -> Snapshot:
+    head = run(Path(config.worktree), "git", "rev-parse", "HEAD")
     return Snapshot(
         p_id=config.p_id,
         charter_digest=config.charter_digest,
         expected_repository=config.repository,
         expected_branch=config.branch,
         base_ref=config.base_ref,
-        head=config.seed_head,
-        base=config.seed_base,
+        head=head,
+        base=head,
         expected_owner_token=config.owner_token,
     )
 
@@ -154,18 +151,18 @@ class FactAndEffectTests(unittest.TestCase):
             config = config_for(repo, charter)
             paths = PPaths(root / "state" / config.p_id)
             paths.create_dirs()
-            paths.charter.write_text(charter, encoding="utf-8")
-            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            (paths.root / "charter.md").write_text(charter, encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
             snapshot = snapshot_for(config)
             action = decide(snapshot)
             self.assertEqual(ActionKind.PLAN, action.kind)
 
             first = dispatch_manual_gpt(paths, config, snapshot, action)
             second = dispatch_manual_gpt(paths, config, snapshot, action)
-            self.assertTrue(first.ran)
-            self.assertFalse(second.ran)
-            self.assertEqual(first.path, second.path)
-            packet = first.path.read_text(encoding="utf-8")
+            self.assertTrue(first.changed)
+            self.assertFalse(second.changed)
+            packet_path = paths.root / "gpt" / "outbox" / f"{action.effect_id}.md"
+            packet = packet_path.read_text(encoding="utf-8")
             self.assertEqual(packet, render_gpt_prompt(paths, config, snapshot, action))
             self.assertIn(f"SHA256={sha256_text(packet)}", first.detail)
             self.assertIn(f"JOB_ID: {action.effect_id}", packet)
@@ -193,7 +190,7 @@ class FactAndEffectTests(unittest.TestCase):
                 encoding="utf-8",
             )
             ingested = submit_gpt_response(paths, response)
-            self.assertTrue(ingested.ran)
+            self.assertTrue(ingested.changed)
             loaded = read_snapshot(paths)
             results, specs, pending = loaded.gpt_results, loaded.specs, loaded.gpt_pending
             self.assertEqual(1, len(results))
@@ -223,8 +220,8 @@ class FactAndEffectTests(unittest.TestCase):
             config = config_for(repo, charter)
             paths = PPaths(root / "state" / config.p_id)
             paths.create_dirs()
-            paths.charter.write_text(charter, encoding="utf-8")
-            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            (paths.root / "charter.md").write_text(charter, encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
             snapshot = snapshot_for(config)
             action = decide(snapshot)
             dispatch_manual_gpt(paths, config, snapshot, action)
@@ -252,12 +249,12 @@ class FactAndEffectTests(unittest.TestCase):
             config = config_for(repo, charter)
             paths = PPaths(root / "state" / config.p_id)
             paths.create_dirs()
-            paths.charter.write_text(charter, encoding="utf-8")
-            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            (paths.root / "charter.md").write_text(charter, encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
             snapshot = snapshot_for(config)
             action = decide(snapshot)
             dispatch_manual_gpt(paths, config, snapshot, action)
-            (paths.gpt_outbox / ("plan-" + "f" * 24 + ".md")).write_text(
+            (paths.root / "gpt" / "outbox" / ("plan-" + "f" * 24 + ".md")).write_text(
                 "not a packet and not a current input", encoding="utf-8"
             )
             loaded = read_snapshot(paths)
@@ -273,8 +270,8 @@ class FactAndEffectTests(unittest.TestCase):
             config = config_for(repo, "P_ID: P-TEST\nGOAL: causal lookup\n")
             paths = PPaths(root / "state" / config.p_id)
             paths.create_dirs()
-            paths.charter.write_text("P_ID: P-TEST\nGOAL: causal lookup\n", encoding="utf-8")
-            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            (paths.root / "charter.md").write_text("P_ID: P-TEST\nGOAL: causal lookup\n", encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
 
             root_plan = decide(snapshot_for(config))
             dispatch_manual_gpt(paths, config, snapshot_for(config), root_plan)
@@ -299,7 +296,7 @@ class FactAndEffectTests(unittest.TestCase):
                 "evidence_digest": "first-work-failure",
                 "trigger_judge_id": None,
             }
-            (paths.work_results / f"{work.effect_id}.json").write_text(
+            (paths.root / "work" / "results" / f"{work.effect_id}.json").write_text(
                 json.dumps(failure), encoding="utf-8"
             )
             judged = decide(read_snapshot(paths))
@@ -328,10 +325,10 @@ class FactAndEffectTests(unittest.TestCase):
             before_noise = decide(read_snapshot(paths))
 
             stale = (
-                paths.gpt_results / ("judge-" + "e" * 24 + ".json"),
-                paths.work_results / ("work-" + "e" * 24 + ".json"),
-                paths.proof_results / ("prove-" + "e" * 24 + ".json"),
-                paths.gpt_outbox / ("plan-" + "d" * 24 + ".md"),
+                paths.root / "gpt" / "results" / ("judge-" + "e" * 24 + ".json"),
+                paths.root / "work" / "results" / ("work-" + "e" * 24 + ".json"),
+                paths.root / "prove" / "results" / ("prove-" + "e" * 24 + ".json"),
+                paths.root / "gpt" / "outbox" / ("plan-" + "d" * 24 + ".md"),
             )
             for path in stale:
                 path.write_text("historical noise", encoding="utf-8")
@@ -352,8 +349,8 @@ class FactAndEffectTests(unittest.TestCase):
             config = config_for(repo, charter)
             paths = PPaths(root / "state" / config.p_id)
             paths.create_dirs()
-            paths.charter.write_text(charter, encoding="utf-8")
-            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            (paths.root / "charter.md").write_text(charter, encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
             snapshot = snapshot_for(config)
             plan = decide(snapshot)
             dispatch_manual_gpt(paths, config, snapshot, plan)
@@ -403,8 +400,8 @@ class FactAndEffectTests(unittest.TestCase):
             config = config_for(repo, charter)
             paths = PPaths(root / "state" / config.p_id)
             paths.create_dirs()
-            paths.charter.write_text(charter, encoding="utf-8")
-            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            (paths.root / "charter.md").write_text(charter, encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
             initial = snapshot_for(config)
             planning = plan_facts_digest(initial)
             plan = plan_job_id(initial)
@@ -428,7 +425,9 @@ class FactAndEffectTests(unittest.TestCase):
             action = decide(snapshot)
             self.assertEqual(ActionKind.JUDGE, action.kind)
             packet_result = dispatch_manual_gpt(paths, config, snapshot, action)
-            packet = packet_result.path.read_text(encoding="utf-8")
+            packet = (paths.root / "gpt" / "outbox" / f"{action.effect_id}.md").read_text(
+                encoding="utf-8"
+            )
             self.assertEqual(packet, render_gpt_prompt(paths, config, snapshot, action))
             self.assertIn(spec.text, packet)
             self.assertIn(initial.head, packet)
@@ -446,7 +445,7 @@ class FactAndEffectTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            self.assertTrue(submit_gpt_response(paths, response).ran)
+            self.assertTrue(submit_gpt_response(paths, response).changed)
             loaded = _load_gpt_result(paths, action.effect_id, "JUDGE_GPT")
             self.assertIsNotNone(loaded)
             assert loaded is not None
@@ -514,8 +513,8 @@ AgentBus-V2-Plan: plan-%s
             config = config_for(repo, charter)
             paths = PPaths(root / "state" / config.p_id)
             paths.create_dirs()
-            paths.charter.write_text(charter, encoding="utf-8")
-            paths.config.write_text(json.dumps(asdict(config)), encoding="utf-8")
+            (paths.root / "charter.md").write_text(charter, encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
             plan = decide(read_snapshot(paths))
             dispatch_manual_gpt(paths, config, read_snapshot(paths), plan)
             response = root / "plan.json"
@@ -569,7 +568,7 @@ AgentBus-V2-Plan: plan-%s
                     "trigger_judge": None,
                 },
             )
-            (paths.work_results / f"{effect}.json").write_text(
+            (paths.root / "work" / "results" / f"{effect}.json").write_text(
                 json.dumps(
                     {
                         "effect_id": effect,
@@ -603,7 +602,7 @@ AgentBus-V2-Plan: plan-%s
                 repository=str(repo.remote),
                 branch="agentbus/p-test",
             )
-            serialized = json.loads(paths.config.read_text(encoding="utf-8"))
+            serialized = json.loads((paths.root / "config.json").read_text(encoding="utf-8"))
             self.assertFalse(FORBIDDEN & set(serialized))
             self.assertEqual(FORBIDDEN & set(asdict(load_config(paths))), set())
 
@@ -665,8 +664,10 @@ AgentBus-V2-Plan: plan-%s
                 ),
             ):
                 result = run_prove(paths, config, snapshot, action)
-            self.assertEqual("PROVE_FAIL", result.outcome)
-            saved = json.loads(result.path.read_text(encoding="utf-8"))
+            self.assertTrue(result.changed)
+            saved = json.loads(
+                (paths.root / "prove" / "results" / f"{action.effect_id}.json").read_text()
+            )
             self.assertEqual("FAIL", saved["status"])
             self.assertEqual([], saved["github_checks"])
             self.assertEqual(action.effect_id, saved["proof_id"])
@@ -693,7 +694,7 @@ AgentBus-V2-Plan: plan-%s
                 "github_checks": [],
                 "failed_ci_logs": {},
             }
-            (paths.proof_results / f"{effect}.json").write_text(
+            (paths.root / "prove" / "results" / f"{effect}.json").write_text(
                 json.dumps(
                     {
                         "schema": "agentbus-v2/proof-v2",
@@ -747,7 +748,7 @@ AgentBus-V2-Plan: plan-%s
                 "failed_ci_logs": {},
             }
             proof = proof_id(snapshot, spec)
-            (paths.proof_results / f"{proof}.json").write_text(
+            (paths.root / "prove" / "results" / f"{proof}.json").write_text(
                 json.dumps({
                     "schema": "agentbus-v2/proof-v2",
                     "proof_id": proof,
@@ -772,7 +773,7 @@ AgentBus-V2-Plan: plan-%s
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertIs(Observation.PASS, loaded.status)
-            (paths.proof_results / f"{proof}.json").unlink()
+            (paths.root / "prove" / "results" / f"{proof}.json").unlink()
             self.assertEqual(
                 None, _load_proof(
                     paths, config, spec, repo.base, repo.base,
@@ -799,7 +800,7 @@ AgentBus-V2-Plan: plan-%s
             effect = proof_id(snapshot, spec)
             # An old-format/corrupt result must never be opened while looking
             # up the new contract's exact proof identity.
-            (paths.proof_results / f"{effect}.json").write_text(
+            (paths.root / "prove" / "results" / f"{effect}.json").write_text(
                 "not the current proof artifact", encoding="utf-8"
             )
             changed = replace(
@@ -867,7 +868,7 @@ AgentBus-V2-Plan: plan-%s
                     config, GitHubFacts(pr_number=7), head, base
                 )
             self.assertEqual("PASS", observed.check_status)
-            evidence = check_evidence(observed)
+            evidence = [asdict(item) for item in observed.checks]
             self.assertEqual(set(required), {item["name"] for item in evidence})
             self.assertTrue(all(item["current_integration"] for item in evidence))
 
@@ -914,7 +915,7 @@ AgentBus-V2-Plan: plan-%s
                     "body": (
                         "AgentBus-V2-P: P-TEST\n"
                         "AgentBus-V2-Spec: spec-7\n"
-                        "AgentBus-V2-Owner: owner-test\n"
+                        f"AgentBus-V2-Owner: {config.owner_token}\n"
                     ),
                     "mergedAt": None,
                     "mergeCommit": None,
@@ -929,7 +930,7 @@ AgentBus-V2-Plan: plan-%s
             self.assertEqual(base, facts.pr_base_sha)
             self.assertEqual(config.branch, facts.head_branch)
             self.assertEqual(config.base_ref, facts.base_branch)
-            self.assertEqual(("P-TEST", "spec-7", "owner-test"),
+            self.assertEqual(("P-TEST", "spec-7", config.owner_token),
                              (facts.p_id, facts.spec_id, facts.owner_token))
 
     def test_merge_adapter_keeps_exact_head_argument(self) -> None:

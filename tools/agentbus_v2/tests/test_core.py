@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
 
 from tools.agentbus_v2.core import (
     ActionKind,
@@ -475,14 +476,11 @@ class KernelTableTests(unittest.TestCase):
             called = True
             raise AssertionError("merge command must not run after drift")
 
-        with tempfile.TemporaryDirectory() as directory:
-            result = execute_merge(
-                PPaths(Path(directory)),
-                merge_action,
-                snapshot_reader=reader,
-                command_runner=runner,
-            )
-        self.assertEqual("MERGE_FENCE_DRIFT", result.outcome)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("tools.agentbus_v2.effects.read_snapshot", side_effect=reader), \
+                patch("tools.agentbus_v2.effects.merge_pr", side_effect=runner):
+            result = execute_merge(PPaths(Path(directory)), merge_action)
+        self.assertFalse(result.changed)
         self.assertFalse(called)
 
     def test_o_restart_same_facts_gives_same_effect(self) -> None:

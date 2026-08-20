@@ -33,7 +33,7 @@ scripts/agentbus-v2 init P-ID \
   --branch agentbus/p-id
 
 scripts/agentbus-v2 tick P-ID
-scripts/agentbus-v2 watch P-ID --interval 20
+scripts/agentbus-v2 watch P-ID
 scripts/agentbus-v2 gpt-submit P-ID /path/to/response.json
 ```
 
@@ -47,8 +47,8 @@ read-time fences pass.
 
 Successful WORK commits carry deterministic P/SPEC/WORK/input-HEAD trailers.
 That lets a restarted tick recover a commit made just before an executor crash
-without storing executor lifecycle state. `watch` has a small in-memory fuse for
-an identical WORK effect that repeatedly exits without any durable fact.
+without storing executor lifecycle state. `watch` polls at a bounded interval
+and has no semantic no-progress policy.
 
 Watched-resource fingerprints and not-before scheduling are deliberately
 deferred for Experiment 1. A GPT `WAIT` therefore stops as `HUMAN` for manual

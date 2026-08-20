@@ -1,8 +1,6 @@
-"""Concrete GitHub facts and side effects for the single-P v2 kernel."""
-
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import re
@@ -60,12 +58,12 @@ def _markers(body: str) -> dict[str, str]:
         "AgentBus-V2-Spec:": "spec_id",
         "AgentBus-V2-Owner:": "owner_token",
     }
-    found: dict[str, str] = {}
-    for line in body.splitlines():
-        for prefix, key in prefixes.items():
-            if line.startswith(prefix):
-                found[key] = line.removeprefix(prefix).strip()
-    return found
+    return {
+        key: line.removeprefix(prefix).strip()
+        for line in body.splitlines()
+        for prefix, key in prefixes.items()
+        if line.startswith(prefix)
+    }
 def _merge_parents(commit: str | None, slug: str) -> tuple[str, ...]:
     if not commit:
         return ()
@@ -274,22 +272,6 @@ def observe_required_checks(
     status = "RUNNING" if "pending" in buckets else "PASS" if buckets <= {"pass", "skipping"} else "MISSING"
     return replace(facts, check_status=status, checks=tuple(checks), failed_ci_logs=tuple(logs))
 
-def check_evidence(facts: GitHubFacts) -> list[dict[str, Any]]:
-    return [asdict(item) for item in facts.checks]
-
-
-def failed_log_evidence(facts: GitHubFacts) -> dict[str, str]:
-    return dict(facts.failed_ci_logs)
-
-def _owned_pr_body(config: PConfig, spec: Any) -> str:
-    return f"""Standalone AgentBus v2 maintenance P.
-
-AgentBus-V2-P: {config.p_id}
-AgentBus-V2-Spec: {spec.spec_id}
-AgentBus-V2-Owner: {config.owner_token}
-"""
-
-
 def ensure_owned_pr(config: PConfig, spec: Any) -> bool:
     FactError, _run, _, _ = _deps()
     worktree = Path(config.worktree)
@@ -301,7 +283,12 @@ def ensure_owned_pr(config: PConfig, spec: Any) -> bool:
         return False
     facts = read_github_facts(config)
     slug = github_slug(config.repository)
-    body = _owned_pr_body(config, spec)
+    body = f"""Standalone AgentBus v2 maintenance P.
+
+AgentBus-V2-P: {config.p_id}
+AgentBus-V2-Spec: {spec.spec_id}
+AgentBus-V2-Owner: {config.owner_token}
+"""
     if facts.pr_number is None:
         created = _run(
             (

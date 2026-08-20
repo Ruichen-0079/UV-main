@@ -1,9 +1,3 @@
-"""Pure, level-triggered AgentBus v2 decision kernel.
-
-Every call receives all durable facts. Identity matching—not a stored phase—
-selects the sole next effect in PLAN -> WORK -> PROVE -> MERGE.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -232,10 +226,6 @@ def semantic_judge_job_id(s: Snapshot, spec: SpecFact, proof: ProofFact) -> str:
     )
 
 
-def _current_spec(s: Snapshot) -> SpecFact | None:
-    return s.specs[-1] if s.specs else None
-
-
 def _action(
     kind: ActionKind,
     effect_id: str | None = None,
@@ -259,8 +249,6 @@ def _checked_result(
     if result.operation != operation or result.decision not in allowed:
         return _action(ActionKind.HUMAN, reason=f"invalid {operation} result", job_id=result.job_id)
     if result.decision in {"WAIT", "HUMAN"}:
-        # Watched-resource fingerprints are deliberately absent in Experiment 1.
-        # Stopping is safer than persisting workflow WAIT state.
         label = (
             "manual WAIT handling required"
             if result.decision == "WAIT"
@@ -294,7 +282,6 @@ def _plan(
         s,
         ActionKind.PLAN,
         job,
-        role="PLAN_GPT",
         parent_spec_id=parent.spec_id if parent else None,
         trigger_judge_id=trigger,
     )
@@ -320,7 +307,6 @@ def _judge(
         s,
         ActionKind.JUDGE,
         job,
-        role="JUDGE_GPT",
         spec_id=spec.spec_id,
         failed_step=step,
         evidence_id=evidence_id,
@@ -554,11 +540,10 @@ def _done(
 
 
 def decide(s: Snapshot) -> Action:
-    """Scan PLAN, WORK, PROVE, MERGE from immutable facts on every call."""
     if not s.repository_available:
         return _action(ActionKind.IDLE, reason="repository facts are absent")
     results = {item.job_id: item for item in s.gpt_results}
-    spec = _current_spec(s)
+    spec = s.specs[-1] if s.specs else None
     if spec is None:
         return _plan(s, results)
     if (done := _done(s, results, spec)) is not None:

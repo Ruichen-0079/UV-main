@@ -1,5 +1,3 @@
-"""Effect adapters for the fact-recomputed AgentBus v2 kernel."""
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -7,7 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
-from typing import Any, Callable, Sequence
+from typing import Any, Sequence
 
 from .core import (
     Action,
@@ -37,14 +35,11 @@ from .facts import (
     _proof_commands,
     read_snapshot,
     sha256_text,
-    gpt_response_schema,
     write_json_once,
     write_text_once,
 )
 from .github import (
-    check_evidence,
     ensure_owned_pr,
-    failed_log_evidence,
     merge_pr,
     observe_required_checks,
     read_github_facts,
@@ -53,33 +48,21 @@ from .github import (
 
 @dataclass(frozen=True)
 class EffectResult:
-    ran: bool
-    outcome: str
-    detail: str = ""
-    path: Path | None = None
+    changed: bool
+    detail: str
 
 
 def _spec(snapshot: Snapshot, spec_id: str | None) -> SpecFact | None:
     return next((item for item in snapshot.specs if item.spec_id == spec_id), None)
 
 
-def _repository_diff(config: PConfig, snapshot: Snapshot) -> str:
-    worktree = Path(config.worktree)
-    diff = git(
-        worktree,
-        "diff",
-        "--no-ext-diff",
-        "--no-color",
-        f"{snapshot.base}...{snapshot.head}",
-    )
-    return f"## CURRENT-BASE DIFF\n\n```diff\n{diff}\n```"
-
-
 def _evidence_text(paths: PPaths, evidence_id: str) -> str:
-    candidates = [paths.work_results / f"{evidence_id}.json",
-                  paths.proof_results / f"{evidence_id}.json",
-                  paths.work_logs / f"{evidence_id}.response.json",
-                  paths.work_logs / f"{evidence_id}.codex.log"]
+    candidates = [
+        paths.root / "work" / "results" / f"{evidence_id}.json",
+        paths.root / "prove" / "results" / f"{evidence_id}.json",
+        paths.root / "work" / "logs" / f"{evidence_id}.response.json",
+        paths.root / "work" / "logs" / f"{evidence_id}.codex.log",
+    ]
     pieces: list[str] = []
     for path in candidates:
         if not path.exists():
@@ -97,8 +80,18 @@ def render_gpt_prompt(
         raise FactError("not a GPT effect")
     operation = "PLAN_GPT" if action.kind is ActionKind.PLAN else "JUDGE_GPT"
     charter = load_charter(paths, config)
+    diff = git(
+        Path(config.worktree), "diff", "--no-ext-diff", "--no-color",
+        f"{snapshot.base}...{snapshot.head}",
+    )
     parent = _spec(snapshot, action.payload.get("parent_spec_id"))
     current = _spec(snapshot, action.payload.get("spec_id")) or parent
+    allowed = " | ".join(sorted(
+        {"SPEC", "WAIT", "HUMAN"} if operation == "PLAN_GPT"
+        else {"PASS", "RETURN_PLAN", "RETURN_WORK", "RETURN_PROVE", "WAIT", "HUMAN"}
+    ))
+    schema = (f'{{"job_id":"{action.effect_id}","operation":"{operation}",'
+              f'"decision":"{allowed}","body":"string"}}')
     planning_digest = plan_facts_digest(snapshot)
     semantic: dict[str, Any] = {
         "packet_schema": GPT_PACKET_SCHEMA, "job_id": action.effect_id,
@@ -148,7 +141,11 @@ P_ID: {config.p_id}
 
 {spec_block}
 
-{_repository_diff(config, snapshot)}
+## CURRENT-BASE DIFF
+
+```diff
+{diff}
+```
 
 ## PREVIOUS RELEVANT JUDGE RESULT
 
@@ -170,7 +167,9 @@ fences. Base the decision only on this packet.
 
 ## STRICT RESPONSE SCHEMA
 
-{gpt_response_schema(operation, action.effect_id)}
+Return exactly this JSON shape (with no Markdown):
+{schema}
+Repeat JOB_ID verbatim and put the complete bounded plan or judgment in body.
 """
     return packet
 
@@ -179,13 +178,11 @@ def dispatch_manual_gpt(
     paths: PPaths, config: PConfig, snapshot: Snapshot, action: Action
 ) -> EffectResult:
     packet = render_gpt_prompt(paths, config, snapshot, action)
-    prompt_path = paths.gpt_outbox / f"{action.effect_id}.md"
+    prompt_path = paths.root / "gpt" / "outbox" / f"{action.effect_id}.md"
     created = write_text_once(prompt_path, packet)
     return EffectResult(
         created,
-        "MANUAL_GPT_REQUIRED",
-        detail=f"JOB_ID={action.effect_id} SHA256={sha256_text(packet)}",
-        path=prompt_path,
+        detail=f"JOB_ID={action.effect_id} PACKET={prompt_path} SHA256={sha256_text(packet)}",
     )
 
 
@@ -196,9 +193,9 @@ def submit_gpt_response(paths: PPaths, response_path: Path) -> EffectResult:
         raise FactError("GPT response does not contain a valid generated JOB_ID")
     packet = load_gpt_packet(paths, job_id)
     result = parse_gpt_response(job_id, str(packet["operation"]), value)
-    destination = paths.gpt_results / f"{result.job_id}.json"
+    destination = paths.root / "gpt" / "results" / f"{result.job_id}.json"
     created = write_json_once(destination, asdict(result))
-    return EffectResult(created, "GPT_RESULT_INGESTED", path=destination)
+    return EffectResult(created, f"stored {destination}")
 
 
 def _work_prompt(
@@ -218,7 +215,7 @@ AgentBus-V2-Spec: {spec.spec_id}
 AgentBus-V2-Work: {action.effect_id}
 AgentBus-V2-Input-Head: {snapshot.head}
 AgentBus-V2-Plan: {spec.plan_job_id}{trigger_trailer}"""
-    return f"""Implement this AgentBus v2 WORK job in the current repository.
+    return f"""Implement this AgentBus v2 WORK job.
 
 P_CHARTER:
 {load_charter(paths, config).rstrip()}
@@ -237,17 +234,14 @@ Exact identities:
 - live BASE: {snapshot.base}
 - WORK effect: {action.effect_id}
 
-Inspect the repository, implement only the approved scope, and validate in
-proportion to the change. Do not modify AgentBus v1, AgentBus v2, the Browser
-Bridge, P6 proactive code, or any other worktree. Do not merge. Finish with a
-clean worktree and a new commit descended from input HEAD. The final commit
+Implement only the approved scope, validate proportionally, do not merge, and
+finish with a clean worktree and a commit descended from input HEAD. Its
 message must contain these exact trailers:
 
 {trailers}
 
-Return only the JSON required by the supplied output schema. Use PASS only when
-the committed implementation is complete; otherwise return a durable FAIL with
-the exact blocker. An executor/process crash is not FAIL.
+Return only the supplied JSON schema. PASS requires a complete commit; otherwise
+return FAIL with the exact blocker. An executor/process crash is not FAIL.
 """
 
 
@@ -260,12 +254,8 @@ CODEX_OUTPUT_SCHEMA = (
 
 
 def _local_branch_refs(worktree: Path) -> dict[str, str]:
-    lines = git(
-        worktree,
-        "for-each-ref",
-        "--format=%(refname) %(objectname)",
-        "refs/heads",
-    ).splitlines()
+    lines = git(worktree, "for-each-ref", "--format=%(refname) %(objectname)",
+                "refs/heads").splitlines()
     return dict(line.split(" ", 1) for line in lines if " " in line)
 
 
@@ -278,10 +268,6 @@ def run_codex_work(
     if spec is None:
         raise FactError("WORK effect references an absent SPEC")
     prompt = _work_prompt(paths, config, snapshot, action, spec)
-    # The per-P flock held by cli.tick_once is the only local exclusion. A
-    # fresh fact read here prevents a queued effect from running against stale
-    # semantic identities, while a crash simply leaves WORK ABSENT unless its
-    # commit trailers can be recovered on the next tick.
     fresh = read_snapshot(paths)
     recalculated = decide(fresh)
     if (
@@ -289,7 +275,7 @@ def run_codex_work(
         or recalculated.effect_id != action.effect_id
         or dict(recalculated.payload) != dict(action.payload)
     ):
-        return EffectResult(False, "WORK_ABSENT", "WORK identities drifted before Codex")
+        return EffectResult(False, "WORK identities drifted before Codex")
     if git(Path(config.worktree), "status", "--porcelain=v1"):
         raise FactError("refusing to launch Codex in a dirty WORK worktree")
     worktree = Path(config.worktree)
@@ -297,8 +283,8 @@ def run_codex_work(
     common_git = Path(git(worktree, "rev-parse", "--git-common-dir"))
     if not common_git.is_absolute():
         common_git = (worktree / common_git).resolve()
-    response_path = paths.work_logs / f"{action.effect_id}.response.json"
-    log_path = paths.work_logs / f"{action.effect_id}.codex.log"
+    response_path = paths.root / "work" / "logs" / f"{action.effect_id}.response.json"
+    log_path = paths.root / "work" / "logs" / f"{action.effect_id}.codex.log"
     response_path.unlink(missing_ok=True)
     schema = tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8", delete=False)
     schema_path = Path(schema.name)
@@ -318,13 +304,13 @@ def run_codex_work(
         except subprocess.TimeoutExpired as error:
             output = error.stdout if isinstance(error.stdout, str) else ""
             log_path.write_text(output[-262144:], encoding="utf-8", errors="replace")
-            return EffectResult(False, "WORK_ABSENT", "Codex exceeded the executor timeout", log_path)
+            return EffectResult(False, "Codex exceeded the executor timeout")
     finally:
         schema.close()
         schema_path.unlink(missing_ok=True)
     log_path.write_text(completed.stdout[-262144:], encoding="utf-8", errors="replace")
     if completed.returncode != 0 or not response_path.exists():
-        return EffectResult(False, "WORK_ABSENT", "Codex exited without a durable result", log_path)
+        return EffectResult(False, "Codex exited without a durable result")
     try:
         response = _load_json(response_path)
         if set(response) != {"status", "summary", "head", "evidence"}:
@@ -340,7 +326,7 @@ def run_codex_work(
             raise FactError("Codex response fields have invalid types or are empty")
         status = Observation(response["status"])
     except (FactError, ValueError) as error:
-        return EffectResult(False, "WORK_ABSENT", f"invalid Codex result: {error}", response_path)
+        return EffectResult(False, f"invalid Codex result: {error}")
     live_head = git(worktree, "rev-parse", "HEAD")
     summary = response["summary"]
     current_refs = _local_branch_refs(worktree)
@@ -369,10 +355,7 @@ def run_codex_work(
             raise FactError(
                 "Codex claimed PASS without the exact committed WORK identity trailers"
             )
-        # The commit is the durable PASS fact. The response remains in the
-        # bounded executor log for diagnosis but is not persisted as a WORK
-        # result artifact.
-        return EffectResult(True, "WORK_PASS", summary)
+        return EffectResult(True, summary)
     if live_head != snapshot.head or changed_refs or response["head"] != live_head:
         raise FactError("Codex returned FAIL after changing repository HEAD")
     evidence = {
@@ -388,9 +371,9 @@ def run_codex_work(
         "trigger_judge_id": action.payload.get("trigger_judge_id"),
         "evidence_digest": sha256_text(json.dumps(evidence, sort_keys=True)),
     }
-    destination = paths.work_results / f"{action.effect_id}.json"
+    destination = paths.root / "work" / "results" / f"{action.effect_id}.json"
     write_json_once(destination, result)
-    return EffectResult(True, "WORK_FAIL", summary, destination)
+    return EffectResult(True, f"{summary}; stored {destination}")
 
 
 def _command_evidence(
@@ -399,10 +382,8 @@ def _command_evidence(
     worktree = Path(config.worktree)
     commands = _proof_commands(config, snapshot.base, snapshot.head)
     def record(argv: Sequence[str], output: str, exit_code: int) -> dict[str, Any]:
-        return {
-            "argv": list(argv), "exit_code": exit_code,
-            "output": output[-65536:], "output_digest": sha256_text(output),
-        }
+        return {"argv": list(argv), "exit_code": exit_code,
+                "output": output[-65536:], "output_digest": sha256_text(output)}
     try:
         status_text = git(worktree, "status", "--porcelain=v1")
     except FactError:
@@ -443,7 +424,7 @@ def run_prove(
         timeout=120,
     )
     if fetched.returncode != 0:
-        return EffectResult(False, "PROVE_ABSENT", "base fetch unavailable")
+        return EffectResult(False, "base fetch unavailable")
     fresh = read_snapshot(paths)
     recalculated = decide(fresh)
     if (
@@ -451,10 +432,10 @@ def run_prove(
         or recalculated.effect_id != action.effect_id
         or dict(recalculated.payload) != dict(action.payload)
     ):
-        return EffectResult(False, "PROVE_ABSENT", "PROVE identities drifted before proof")
+        return EffectResult(False, "PROVE identities drifted before proof")
     mechanical, local_status = _command_evidence(config, snapshot)
     if mechanical is None or local_status is None:
-        return EffectResult(False, "PROVE_ABSENT", "mechanical proof was interrupted")
+        return EffectResult(False, "mechanical proof was interrupted")
     if local_status is Observation.FAIL:
         status = local_status
         checks: list[dict[str, Any]] = []
@@ -463,7 +444,7 @@ def run_prove(
     else:
         require_pr_fence = True
         if not ensure_owned_pr(config, spec):
-            return EffectResult(False, "PROVE_ABSENT", "push or PR transport unavailable")
+            return EffectResult(False, "push or PR transport unavailable")
         merge = read_github_facts(config)
         if (
             merge.pr_number is None
@@ -476,16 +457,16 @@ def run_prove(
             or merge.spec_id != spec.spec_id
             or merge.owner_token != config.owner_token
         ):
-            return EffectResult(False, "PROVE_ABSENT", "PR identities have not converged")
+            return EffectResult(False, "PR identities have not converged")
         if config.required_ci_checks:
             merge = observe_required_checks(config, merge, snapshot.head, snapshot.base)
-            checks = check_evidence(merge)
-            failed_logs = failed_log_evidence(merge)
+            checks = [asdict(item) for item in merge.checks]
+            failed_logs = dict(merge.failed_ci_logs)
             ci_status = merge.check_status
         else:
             ci_status, checks, failed_logs = "PASS", [], {}
         if ci_status in {"MISSING", "RUNNING"}:
-            return EffectResult(False, "PROVE_ABSENT", "GitHub CI is queued/running/absent")
+            return EffectResult(False, "GitHub CI is queued/running/absent")
         status = Observation(ci_status)
     evidence = {
         "local_commands": mechanical["commands"],
@@ -497,9 +478,9 @@ def run_prove(
     if require_pr_fence and config.required_ci_checks and status is Observation.PASS:
         final_merge = observe_required_checks(config, final_merge, snapshot.head, snapshot.base)
         if final_merge.check_status != "PASS":
-            return EffectResult(False, "PROVE_ABSENT", "CI drifted before proof result")
-        checks = check_evidence(final_merge)
-        failed_logs = failed_log_evidence(final_merge)
+            return EffectResult(False, "CI drifted before proof result")
+        checks = [asdict(item) for item in final_merge.checks]
+        failed_logs = dict(final_merge.failed_ci_logs)
     final_action = decide(final)
     if (
         final.head != snapshot.head
@@ -521,7 +502,7 @@ def run_prove(
             )
         )
     ):
-        return EffectResult(False, "PROVE_ABSENT", "HEAD, BASE, or PR drifted before proof result")
+        return EffectResult(False, "HEAD, BASE, or PR drifted before proof result")
     result = {
         "schema": PROOF_SCHEMA,
         "proof_id": action.effect_id,
@@ -539,36 +520,32 @@ def run_prove(
         "github_checks": evidence["github_checks"],
         "failed_ci_logs": evidence["failed_ci_logs"],
     }
-    destination = paths.proof_results / f"{action.effect_id}.json"
+    destination = paths.root / "prove" / "results" / f"{action.effect_id}.json"
     write_json_once(destination, result)
-    return EffectResult(True, f"PROVE_{status.value}", result["summary"], destination)
+    return EffectResult(True, f"{result['summary']}; stored {destination}")
 
 
 def execute_merge(
     paths: PPaths,
     expected: Action,
-    *,
-    snapshot_reader: Callable[..., Snapshot] = read_snapshot,
-    command_runner: Callable[..., subprocess.CompletedProcess[str]] = _run,
 ) -> EffectResult:
     if expected.kind is not ActionKind.MERGE or not expected.effect_id:
         raise FactError("not a permitted MERGE effect")
-    fresh = snapshot_reader(paths, allow_merge=True)
+    fresh = read_snapshot(paths, allow_merge=True)
     recalculated = decide(fresh)
     if recalculated.kind is not ActionKind.MERGE or recalculated.effect_id != expected.effect_id:
-        return EffectResult(False, "MERGE_FENCE_DRIFT", recalculated.reason)
+        return EffectResult(False, recalculated.reason)
     if dict(recalculated.payload) != dict(expected.payload):
-        return EffectResult(False, "MERGE_FENCE_DRIFT", "merge payload drifted")
+        return EffectResult(False, "merge payload drifted")
     config = load_config(paths)
     worktree = Path(config.worktree)
     if git(worktree, "status", "--porcelain"):
-        return EffectResult(False, "MERGE_FENCE_DRIFT", "worktree is not clean")
+        return EffectResult(False, "worktree is not clean")
     completed = merge_pr(
         config,
         int(recalculated.payload["pr_number"]),
         str(recalculated.payload["head"]),
-        command_runner=command_runner,
     )
     if completed.returncode != 0:
-        return EffectResult(False, "MERGE_ABSENT", completed.stderr.strip())
-    return EffectResult(True, "MERGE_SUBMITTED", "next tick must derive DONE from GitHub")
+        return EffectResult(False, completed.stderr.strip())
+    return EffectResult(True, "next tick must derive DONE from GitHub")
