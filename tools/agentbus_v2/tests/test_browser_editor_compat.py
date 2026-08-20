@@ -31,9 +31,11 @@ sandbox.document = {{
 }};
 vm.runInNewContext(fs.readFileSync({json.dumps(str(COMPAT))}, 'utf8'), sandbox);
 const api = sandbox.module.exports;
+if (!api.execShimInstalled) throw Error('execCommand shim was not installed');
+if (sandbox.document.execCommand !== api.multilineExec) throw Error('document did not expose installed shim');
 if (!sandbox.document.execCommand('insertText', false, 'A\\n\\nB\\n')) throw Error('multiline insert failed');
 const commands = calls.map((row) => row[0] + ':' + String(row[2] ?? '')).join('|');
-if (commands !== 'insertText:A|insertLineBreak:|insertLineBreak:|insertText:B|insertLineBreak:') {{
+if (commands !== 'insertText:A|insertParagraph:|insertParagraph:|insertText:B|insertParagraph:') {{
   throw Error('unexpected editor-native command sequence: ' + commands);
 }}
 const text = (value) => ({{nodeType: 3, nodeValue: value}});
@@ -47,8 +49,8 @@ root.getAttribute = (name) => name === 'contenteditable' ? 'true' : null;
 root.childNodes = [text('A'), br(), br(), text('B')];
 if (api.structuralText(root) !== 'A\\n\\nB') throw Error('BR serialization lost line boundaries');
 if (root.textContent !== 'A\\n\\nB') throw Error('prompt textContent compatibility view was not installed');
-root.childNodes = [block(text('A')), block(text('B'))];
-if (api.structuralText(root) !== 'A\\nB') throw Error('block boundary serialization lost line boundary');
+root.childNodes = [block(text('A')), block(), block(text('B'))];
+if (api.structuralText(root) !== 'A\\n\\nB') throw Error('empty block serialization lost blank line');
 const other = new FakeNode();
 other.nodeType = 1; other.id = 'other'; other.getAttribute = () => null; other._raw = 'RAW';
 if (other.textContent !== 'RAW') throw Error('non-composer textContent behavior changed');
