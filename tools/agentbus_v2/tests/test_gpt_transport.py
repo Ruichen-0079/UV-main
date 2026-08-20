@@ -15,9 +15,13 @@ from tools.agentbus_v2.core import (
     ActionKind,
     GPT_PACKET_SCHEMA,
     GptResult,
+    Observation,
     Snapshot,
     SpecFact,
+    WorkFact,
     decide as core_decide,
+    plan_job_id,
+    work_effect_id,
 )
 from tools.agentbus_v2.effects import EffectResult, submit_gpt_response
 from tools.agentbus_v2.facts import FactError, PPaths
@@ -96,7 +100,7 @@ def response(job_id: str, operation: str, decision: str, body: str = "bounded") 
     )
 
 
-def snapshot_for(p_id: str) -> Snapshot:
+def snapshot_for(p_id: str, *, pending: str | None = None) -> Snapshot:
     return Snapshot(
         p_id=p_id,
         charter_digest="c" * 64,
@@ -105,7 +109,18 @@ def snapshot_for(p_id: str) -> Snapshot:
         base_ref="main",
         head=SHA,
         base=SHA,
+        gpt_pending=frozenset({pending}) if pending else frozenset(),
     )
+
+
+class RecordingFake(FakeGPTAdapter):
+    def __init__(self, responses=None, *, started=None):
+        super().__init__(responses, started=started)
+        self.calls: list[tuple[str, str, str]] = []
+
+    def send(self, lane, job_id, operation, packet_text):
+        self.calls.append((lane, job_id, operation))
+        return super().send(lane, job_id, operation, packet_text)
 
 
 class GPTTransportTests(unittest.TestCase):
@@ -132,6 +147,212 @@ class GPTTransportTests(unittest.TestCase):
         self.assertEqual("judge", lane_for_action(Action(ActionKind.JUDGE)))
         self.assertIsNone(lane_for_action(Action(ActionKind.WORK)))
 
+    def test_pending_plan_dispatches_after_decide_becomes_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = setup_p(root, "P1")
+            write_lane_config(root, judge=False)
+            initial = snapshot_for("P1")
+            self.assertEqual(ActionKind.PLAN, core_decide(initial).kind)
+            job = plan_job_id(initial)
+            write_packet(paths, job, "PLAN_GPT")
+            pending = replace(initial, gpt_pending=frozenset({job}))
+            self.assertEqual(ActionKind.IDLE, core_decide(pending).kind)
+            fake = RecordingFake({job: response(job, "PLAN_GPT", "WAIT")})
+            transport = GPTTransport(root / "state", adapters={"fake": fake})
+            try:
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=pending,
+                ):
+                    self.assertTrue(
+                        transport.try_dispatch("P1", Action(ActionKind.PLAN, effect_id=job)).accepted
+                    )
+                    self.wait_result(paths.root / "gpt" / "results" / f"{job}.json")
+                self.assertEqual([("plan", job, "PLAN_GPT")], fake.calls)
+            finally:
+                transport.close()
+
+    def test_pending_judge_dispatches_after_decide_becomes_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = setup_p(root, "P1")
+            write_lane_config(root, plan=False)
+            base = snapshot_for("P1")
+            spec = SpecFact("spec-" + "1" * 24, "bounded test", plan_job_id="plan-" + "2" * 24)
+            work_id = work_effect_id(base, spec)
+            failed = WorkFact(
+                effect_id=work_id,
+                spec_id=spec.spec_id,
+                input_head=SHA,
+                status=Observation.FAIL,
+                evidence_digest="evidence",
+            )
+            current = replace(base, specs=(spec,), work_facts=(failed,))
+            action = core_decide(current)
+            self.assertEqual(ActionKind.JUDGE, action.kind)
+            assert action.effect_id is not None
+            write_packet(paths, action.effect_id, "JUDGE_GPT")
+            pending = replace(current, gpt_pending=frozenset({action.effect_id}))
+            self.assertEqual(ActionKind.IDLE, core_decide(pending).kind)
+            fake = RecordingFake(
+                {action.effect_id: response(action.effect_id, "JUDGE_GPT", "WAIT")}
+            )
+            transport = GPTTransport(root / "state", adapters={"fake": fake})
+            try:
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=pending,
+                ):
+                    self.assertTrue(transport.try_dispatch("P1", action).accepted)
+                    self.wait_result(paths.root / "gpt" / "results" / f"{action.effect_id}.json")
+                self.assertEqual([("judge", action.effect_id, "JUDGE_GPT")], fake.calls)
+            finally:
+                transport.close()
+
+    def test_result_race_after_lane_wait_prevents_send(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = setup_p(root, "P1")
+            write_lane_config(root, judge=False)
+            job = "plan-" + "6" * 24
+            write_packet(paths, job, "PLAN_GPT")
+            pending = snapshot_for("P1", pending=job)
+            fake = RecordingFake({job: response(job, "PLAN_GPT", "WAIT")})
+            transport = GPTTransport(root / "state", adapters={"fake": fake})
+            try:
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=pending,
+                ):
+                    with lane_lock(root / "state", "plan") as locked:
+                        self.assertTrue(locked)
+                        self.assertTrue(
+                            transport.try_dispatch(
+                                "P1", Action(ActionKind.PLAN, effect_id=job)
+                            ).accepted
+                        )
+                        time.sleep(0.05)
+                        (paths.root / "gpt" / "results" / f"{job}.json").write_text(
+                            response(job, "PLAN_GPT", "WAIT"), encoding="utf-8"
+                        )
+                self.wait_idle(transport)
+                self.assertEqual([], fake.calls)
+            finally:
+                transport.close()
+
+    def test_pending_job_drift_after_lane_wait_prevents_stale_send(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = setup_p(root, "P1")
+            write_lane_config(root, judge=False)
+            old_job, new_job = "plan-" + "7" * 24, "plan-" + "8" * 24
+            write_packet(paths, old_job, "PLAN_GPT")
+            write_packet(paths, new_job, "PLAN_GPT")
+            snapshots = [
+                snapshot_for("P1", pending=old_job),
+                snapshot_for("P1", pending=new_job),
+            ]
+            fake = RecordingFake({old_job: response(old_job, "PLAN_GPT", "WAIT")})
+            transport = GPTTransport(root / "state", adapters={"fake": fake})
+
+            def reread(_paths, allow_merge=False):
+                return snapshots.pop(0) if snapshots else snapshot_for("P1", pending=new_job)
+
+            try:
+                with patch("tools.agentbus_v2.gpt_transport.read_snapshot", side_effect=reread):
+                    with lane_lock(root / "state", "plan") as locked:
+                        self.assertTrue(locked)
+                        self.assertTrue(
+                            transport.try_dispatch(
+                                "P1", Action(ActionKind.PLAN, effect_id=old_job)
+                            ).accepted
+                        )
+                        time.sleep(0.05)
+                self.wait_idle(transport)
+                self.assertEqual([], fake.calls)
+            finally:
+                transport.close()
+
+    def test_stale_outbox_without_current_pending_identity_does_not_send(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = setup_p(root, "P1")
+            write_lane_config(root, judge=False)
+            old_job, current_job = "plan-" + "9" * 24, "plan-" + "a" * 24
+            write_packet(paths, old_job, "PLAN_GPT")
+            fake = RecordingFake({old_job: response(old_job, "PLAN_GPT", "WAIT")})
+            transport = GPTTransport(root / "state", adapters={"fake": fake})
+            try:
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=snapshot_for("P1", pending=current_job),
+                ):
+                    result = transport.try_dispatch(
+                        "P1", Action(ActionKind.PLAN, effect_id=old_job)
+                    )
+                self.assertFalse(result.accepted)
+                self.assertIn("pending", result.detail)
+                self.assertEqual([], fake.calls)
+            finally:
+                transport.close()
+
+    def test_packet_operation_must_match_current_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = setup_p(root, "P1")
+            write_lane_config(root, judge=False)
+            job = "plan-" + "b" * 24
+            write_packet(paths, job, "JUDGE_GPT")
+            fake = RecordingFake({job: response(job, "PLAN_GPT", "WAIT")})
+            transport = GPTTransport(root / "state", adapters={"fake": fake})
+            try:
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=snapshot_for("P1", pending=job),
+                ):
+                    result = transport.try_dispatch(
+                        "P1", Action(ActionKind.PLAN, effect_id=job)
+                    )
+                self.assertFalse(result.accepted)
+                self.assertIn("operation", result.detail)
+                self.assertEqual([], fake.calls)
+            finally:
+                transport.close()
+
+    def test_manual_result_race_prevents_external_send(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = setup_p(root, "P1")
+            write_lane_config(root, judge=False)
+            job = "plan-" + "d" * 24
+            write_packet(paths, job, "PLAN_GPT")
+            pending = snapshot_for("P1", pending=job)
+            fake = RecordingFake({job: response(job, "PLAN_GPT", "WAIT")})
+            transport = GPTTransport(root / "state", adapters={"fake": fake})
+            try:
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=pending,
+                ):
+                    with lane_lock(root / "state", "plan") as locked:
+                        self.assertTrue(locked)
+                        self.assertTrue(
+                            transport.try_dispatch(
+                                "P1", Action(ActionKind.PLAN, effect_id=job)
+                            ).accepted
+                        )
+                        time.sleep(0.05)
+                        manual = root / "manual.json"
+                        manual.write_text(
+                            response(job, "PLAN_GPT", "WAIT"), encoding="utf-8"
+                        )
+                        self.assertTrue(submit_gpt_response(paths, manual).changed)
+                self.wait_idle(transport)
+                self.assertEqual([], fake.calls)
+            finally:
+                transport.close()
+
     def test_plan_auto_roundtrip_uses_existing_ingestion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -143,8 +364,10 @@ class GPTTransportTests(unittest.TestCase):
             fake = FakeGPTAdapter({job: response(job, "PLAN_GPT", "SPEC", "make the change")})
             transport = GPTTransport(root / "state", adapters={"fake": fake})
             try:
-                with patch("tools.agentbus_v2.gpt_transport.read_snapshot", return_value=snapshot_for("P1")), \
-                        patch("tools.agentbus_v2.gpt_transport.decide", return_value=action):
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=snapshot_for("P1", pending=job),
+                ):
                     dispatched = transport.try_dispatch("P1", action)
                     self.assertTrue(dispatched.accepted)
                     self.wait_result(paths.root / "gpt" / "results" / f"{job}.json")
@@ -175,8 +398,10 @@ class GPTTransportTests(unittest.TestCase):
             fake = FakeGPTAdapter({job: response(job, "JUDGE_GPT", "RETURN_WORK", "redo work")})
             transport = GPTTransport(root / "state", adapters={"fake": fake})
             try:
-                with patch("tools.agentbus_v2.gpt_transport.read_snapshot", return_value=snapshot_for("P1")), \
-                        patch("tools.agentbus_v2.gpt_transport.decide", return_value=action):
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=snapshot_for("P1", pending=job),
+                ):
                     self.assertTrue(transport.try_dispatch("P1", action).accepted)
                     result_path = paths.root / "gpt" / "results" / f"{job}.json"
                     self.wait_result(result_path)
@@ -213,8 +438,10 @@ class GPTTransportTests(unittest.TestCase):
                 transport = GPTTransport(root / "state", adapters={"fake": fake})
                 try:
                     action = Action(ActionKind.PLAN, effect_id=job)
-                    with patch("tools.agentbus_v2.gpt_transport.read_snapshot", return_value=snapshot_for("P1")), \
-                            patch("tools.agentbus_v2.gpt_transport.decide", return_value=action):
+                    with patch(
+                        "tools.agentbus_v2.gpt_transport.read_snapshot",
+                        return_value=snapshot_for("P1", pending=job),
+                    ):
                         self.assertTrue(transport.try_dispatch("P1", action).accepted)
                         self.wait_idle(transport)
                     self.assertFalse((paths.root / "gpt" / "results" / f"{job}.json").exists())
@@ -232,8 +459,10 @@ class GPTTransportTests(unittest.TestCase):
             transport = GPTTransport(root / "state", adapters={"fake": fake})
             try:
                 action = Action(ActionKind.PLAN, effect_id=job)
-                with patch("tools.agentbus_v2.gpt_transport.read_snapshot", return_value=snapshot_for("P1")), \
-                        patch("tools.agentbus_v2.gpt_transport.decide", return_value=action):
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=snapshot_for("P1", pending=job),
+                ):
                     self.assertTrue(transport.try_dispatch("P1", action).accepted)
                     self.wait_idle(transport)
                 self.assertFalse((paths.root / "gpt" / "results" / f"{job}.json").exists())
@@ -253,8 +482,10 @@ class GPTTransportTests(unittest.TestCase):
             try:
                 with lane_lock(root / "state", "plan") as locked:
                     self.assertTrue(locked)
-                    with patch("tools.agentbus_v2.gpt_transport.read_snapshot", return_value=snapshot_for("P1")), \
-                            patch("tools.agentbus_v2.gpt_transport.decide", return_value=action):
+                    with patch(
+                        "tools.agentbus_v2.gpt_transport.read_snapshot",
+                        return_value=snapshot_for("P1", pending=job),
+                    ):
                         self.assertTrue(transport.try_dispatch("P1", action).accepted)
                         self.wait_idle(transport)
                 self.assertFalse((paths.root / "gpt" / "results" / f"{job}.json").exists())
@@ -294,10 +525,10 @@ class GPTTransportTests(unittest.TestCase):
             try:
                 with patch(
                     "tools.agentbus_v2.gpt_transport.read_snapshot",
-                    side_effect=lambda paths, allow_merge=False: snapshot_for(paths.root.name),
-                ), patch(
-                    "tools.agentbus_v2.gpt_transport.decide",
-                    side_effect=lambda snapshot: actions[snapshot.p_id],
+                    side_effect=lambda paths, allow_merge=False: snapshot_for(
+                        paths.root.name,
+                        pending=actions[paths.root.name].effect_id,
+                    ),
                 ):
                     self.assertTrue(transport.try_dispatch("P1", actions["P1"]).accepted)
                     self.assertTrue(transport.try_dispatch("P2", actions["P2"]).accepted)
@@ -331,8 +562,12 @@ class GPTTransportTests(unittest.TestCase):
             current = [old_action]
             transport = GPTTransport(root / "state", adapters={"fake": LateFake()})
             try:
-                with patch("tools.agentbus_v2.gpt_transport.read_snapshot", return_value=snapshot_for("P1")), \
-                        patch("tools.agentbus_v2.gpt_transport.decide", side_effect=lambda _snapshot: current[0]):
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    side_effect=lambda paths, allow_merge=False: snapshot_for(
+                        "P1", pending=current[0].effect_id
+                    ),
+                ):
                     self.assertTrue(transport.try_dispatch("P1", old_action).accepted)
                     self.assertTrue(started.wait(2))
                     current[0] = new_action
@@ -362,8 +597,10 @@ class GPTTransportTests(unittest.TestCase):
 
             first = GPTTransport(root / "state", adapters={"fake": CrashedFake()})
             try:
-                with patch("tools.agentbus_v2.gpt_transport.read_snapshot", return_value=snapshot_for("P1")), \
-                        patch("tools.agentbus_v2.gpt_transport.decide", return_value=action):
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=snapshot_for("P1", pending=job),
+                ):
                     self.assertTrue(first.try_dispatch("P1", action).accepted)
                     self.assertTrue(started.wait(2))
                     first.close()
@@ -394,8 +631,10 @@ class GPTTransportTests(unittest.TestCase):
             fake = FakeGPTAdapter({job: response(job, "PLAN_GPT", "WAIT")})
             transport = GPTTransport(root / "state", adapters={"fake": fake})
             try:
-                with patch("tools.agentbus_v2.gpt_transport.read_snapshot", return_value=snapshot_for("P1")), \
-                        patch("tools.agentbus_v2.gpt_transport.decide", return_value=action):
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=snapshot_for("P1", pending=job),
+                ):
                     self.assertTrue(transport.try_dispatch("P1", action).accepted)
                     result_path = paths.root / "gpt" / "results" / f"{job}.json"
                     self.wait_result(result_path)

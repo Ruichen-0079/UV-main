@@ -14,9 +14,9 @@ import threading
 import time
 from typing import Callable, Mapping, Protocol
 
-from .core import Action, ActionKind, decide
+from .core import Action, ActionKind
 from .effects import submit_gpt_response
-from .facts import FactError, load_config, paths_for, read_snapshot
+from .facts import FactError, load_config, load_gpt_packet, paths_for, read_snapshot
 
 
 LANE_NAMES = ("plan", "judge")
@@ -238,6 +238,40 @@ class GPTTransport:
                     else:
                         self._last_errors[item[0]] = result.detail
 
+    @staticmethod
+    def _operation_for_lane(lane: str) -> str:
+        if lane == "plan":
+            return "PLAN_GPT"
+        if lane == "judge":
+            return "JUDGE_GPT"
+        raise TransportError(f"unsupported GPT lane: {lane}")
+
+    def _recheck_pending(
+        self,
+        paths,
+        action: Action,
+        lane: str,
+        *,
+        allow_merge: bool,
+    ) -> str:
+        """Confirm an already-created exact GPT effect remains deliverable.
+
+        Once the packet exists, ``core.decide`` intentionally observes IDLE while
+        the exact result is absent.  Delivery authority is instead the freshly
+        recomputed, causally filtered ``gpt_pending`` identity plus the validated
+        packet at that exact address.
+        """
+        if not action.effect_id:
+            raise TransportError("GPT action has no effect identity")
+        snapshot = read_snapshot(paths, allow_merge=allow_merge)
+        if action.effect_id not in snapshot.gpt_pending:
+            raise TransportError("GPT job is no longer a current pending effect")
+        expected_operation = self._operation_for_lane(lane)
+        packet = load_gpt_packet(paths, action.effect_id)
+        if packet.get("operation") != expected_operation:
+            raise TransportError("GPT packet operation no longer matches its lane")
+        return expected_operation
+
     def try_dispatch(
         self,
         p_id: str,
@@ -266,6 +300,17 @@ class GPTTransport:
             return TransportResult(False, detail=f"GPT result already exists: {job_id}")
         if not packet_path.exists():
             return TransportResult(False, detail=f"GPT packet is absent: {packet_path}")
+        try:
+            self._recheck_pending(
+                paths,
+                action,
+                lane,
+                allow_merge=allow_merge,
+            )
+        except (FactError, OSError, TransportError) as error:
+            return TransportResult(False, detail=f"GPT transport unavailable: {error}")
+        if result_path.exists():
+            return TransportResult(False, detail="GPT result appeared before dispatch")
         with self._lock:
             if self._closed:
                 self._pool = ThreadPoolExecutor(
@@ -300,17 +345,27 @@ class GPTTransport:
                 if result_path.exists():
                     return TransportResult(False, detail="GPT result appeared before send")
                 config = load_config(paths)
-                snapshot = read_snapshot(paths, allow_merge=allow_merge)
-                current = decide(snapshot)
-                if current.kind is not action.kind or current.effect_id != action.effect_id:
-                    return TransportResult(False, detail="GPT job is no longer current")
+                operation = self._recheck_pending(
+                    paths,
+                    action,
+                    lane,
+                    allow_merge=allow_merge,
+                )
                 packet = paths.root / "gpt" / "outbox" / f"{action.effect_id}.md"
                 packet_text = packet.read_text(encoding="utf-8")
                 adapter = self._adapter_for(transport_name)
                 if adapter is None:
                     raise TransportError(f"no adapter configured for {transport_name}")
+                if result_path.exists():
+                    return TransportResult(False, detail="GPT result appeared before send")
+                self._recheck_pending(
+                    paths,
+                    action,
+                    lane,
+                    allow_merge=allow_merge,
+                )
                 raw_response = adapter.send(
-                    lane, action.effect_id, "PLAN_GPT" if lane == "plan" else "JUDGE_GPT", packet_text
+                    lane, action.effect_id, operation, packet_text
                 )
                 if not isinstance(raw_response, str) or not raw_response.strip():
                     raise TransportError("GPT adapter returned an empty response")

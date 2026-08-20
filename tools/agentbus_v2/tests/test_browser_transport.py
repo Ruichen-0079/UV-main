@@ -102,7 +102,7 @@ def response(job_id: str, operation: str, decision: str) -> str:
     )
 
 
-def snapshot_for(p_id: str) -> Snapshot:
+def snapshot_for(p_id: str, *, pending: str | None = None) -> Snapshot:
     return Snapshot(
         p_id=p_id,
         charter_digest="c" * 64,
@@ -111,6 +111,7 @@ def snapshot_for(p_id: str) -> Snapshot:
         base_ref="main",
         head=SHA,
         base=SHA,
+        gpt_pending=frozenset({pending}) if pending else frozenset(),
     )
 
 
@@ -198,10 +199,10 @@ class BrowserTransportTests(unittest.TestCase):
             try:
                 with patch(
                     "tools.agentbus_v2.gpt_transport.read_snapshot",
-                    side_effect=lambda paths, allow_merge=False: snapshot_for(paths.root.name),
-                ), patch(
-                    "tools.agentbus_v2.gpt_transport.decide",
-                    side_effect=lambda snapshot: actions[snapshot.p_id],
+                    side_effect=lambda paths, allow_merge=False: snapshot_for(
+                        paths.root.name,
+                        pending=actions[paths.root.name].effect_id,
+                    ),
                 ):
                     self.assertTrue(transport.try_dispatch("P1", actions["P1"]).accepted)
                     self.assertTrue(transport.try_dispatch("P2", actions["P2"]).accepted)
@@ -255,8 +256,10 @@ class BrowserTransportTests(unittest.TestCase):
             action = Action(ActionKind.PLAN, effect_id=job)
             transport = GPTTransport(root / "state", max_workers=1)
             try:
-                with patch("tools.agentbus_v2.gpt_transport.read_snapshot", return_value=snapshot_for("P1")), \
-                        patch("tools.agentbus_v2.gpt_transport.decide", return_value=action):
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    return_value=snapshot_for("P1", pending=job),
+                ):
                     self.assertTrue(transport.try_dispatch("P1", action).accepted)
                     deadline = time.monotonic() + 2
                     while time.monotonic() < deadline and transport._browser_adapter is None:
