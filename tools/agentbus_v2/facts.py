@@ -10,6 +10,7 @@ import subprocess
 from typing import Any, Iterable, Mapping, Sequence
 
 from .core import (
+    Action,
     ActionKind,
     JUDGE_RESULTS,
     PLAN_RESULTS,
@@ -21,7 +22,6 @@ from .core import (
     Snapshot,
     SpecFact,
     WorkFact,
-    judge_job_id,
     plan_facts_digest,
     plan_job_id,
     proof_id,
@@ -341,6 +341,55 @@ def load_gpt_packet(paths: PPaths, job_id: str) -> dict[str, Any]:
         raise FactError(f"GPT packet lacks semantic inputs: {path}")
     return packet
 
+
+def _validate_gpt_packet(
+    packet: Mapping[str, Any], snapshot: Snapshot, action: Action
+) -> None:
+    if action.kind not in {ActionKind.PLAN, ActionKind.JUDGE} or not action.effect_id:
+        raise FactError("current GPT packet validation requires an exact GPT action")
+    operation = "PLAN_GPT" if action.kind is ActionKind.PLAN else "JUDGE_GPT"
+    semantic: dict[str, Any] = {
+        "packet_schema": GPT_PACKET_SCHEMA,
+        "job_id": action.effect_id,
+        "p_id": snapshot.p_id,
+        "operation": operation,
+        "charter_digest": snapshot.charter_digest,
+        "repository": snapshot.expected_repository,
+        "branch": snapshot.expected_branch,
+        "base_ref": snapshot.base_ref,
+        "head": snapshot.head,
+        "base": snapshot.base,
+        "parent_spec_id": action.payload.get("parent_spec_id"),
+        "trigger_judge_id": action.payload.get("trigger_judge_id"),
+        "planning_facts_digest": plan_facts_digest(snapshot),
+    }
+    if action.kind is ActionKind.JUDGE:
+        spec_id_value = action.payload.get("spec_id")
+        spec = next(
+            (item for item in snapshot.specs if item.spec_id == spec_id_value), None
+        )
+        if spec is None:
+            raise FactError("current JUDGE packet references an absent SPEC")
+        trigger = action.payload.get("trigger_judge_id")
+        semantic.update({
+            "spec_id": spec.spec_id,
+            "spec_content_digest": stable_id("spec-text", {"text": spec.text}),
+            "failed_step": action.payload.get("failed_step"),
+            "evidence_id": action.payload.get("evidence_id"),
+            "evidence_digest": action.payload.get("evidence_digest"),
+            "trigger_judge_id": (
+                trigger if trigger is not None else spec.trigger_judge_id
+            ),
+        })
+    expected = {
+        "packet_schema": GPT_PACKET_SCHEMA,
+        "job_id": action.effect_id,
+        "operation": operation,
+        "semantic_input": semantic,
+    }
+    if dict(packet) != expected:
+        raise FactError(f"current GPT packet causal identity mismatch: {action.effect_id}")
+
 def _load_gpt_result(
     paths: PPaths, job_id: str, operation: str
 ) -> GptResult | None:
@@ -361,7 +410,7 @@ def _load_plan_spec(
             trigger_judge_id=trigger,
         )
     result = _load_gpt_result(paths, job_id, "PLAN_GPT")
-    if result is None or result.decision != "SPEC":
+    if result is None:
         return job_id, result, None
     packet = load_gpt_packet(paths, job_id)
     semantic = packet["semantic_input"]
@@ -381,6 +430,20 @@ def _load_plan_spec(
             raise FactError(f"PLAN packet identity mismatch: {job_id}")
     else:
         parent_id = parent.spec_id if parent else None
+    _validate_gpt_packet(
+        packet,
+        identity,
+        Action(
+            ActionKind.PLAN,
+            effect_id=job_id,
+            payload={
+                "parent_spec_id": parent_id,
+                "trigger_judge_id": trigger,
+            },
+        ),
+    )
+    if result.decision != "SPEC":
+        return job_id, result, None
     expected_planning = plan_facts_digest(identity)
     if packet["operation"] != "PLAN_GPT" or any(
         semantic.get(key) != expected
@@ -628,70 +691,121 @@ def _load_proof(
     )
 
 
-def _judge_result(
-    paths: PPaths, identity: Snapshot, spec: SpecFact, step: str,
-    evidence_id: str, evidence_digest: str,
-) -> GptResult | None:
-    return _load_gpt_result(
-        paths,
-        judge_job_id(
-            identity, spec, failed_step=step, evidence_id=evidence_id,
-            evidence_digest=evidence_digest,
-        ),
-        "JUDGE_GPT",
-    )
-
-
 def _current_stage(
     paths: PPaths, config: PConfig, identity: Snapshot, spec: SpecFact,
 ) -> tuple[tuple[WorkFact, ...], tuple[ProofFact, ...], tuple[GptResult, ...], GptResult | None]:
+    """Replay the exact current WORK/PROVE/JUDGE causal chain.
+
+    A GLOBAL JUDGE may return to WORK or PROVE any number of times.  This is
+    deliberately not a repair counter or workflow state: each iteration asks
+    the pure core for the one next exact identity, then reads only that
+    immutable address.  Missing facts stop reconstruction as ABSENT.
+    """
     recovered = _work_from_head(config, identity.head)
-    recovered_current = recovered if recovered and recovered.spec_id == spec.spec_id else None
-    work = recovered_current or _load_work(paths, config, identity, spec)
-    if work is None:
-        return (), (), (), None
+    recovered_current = (
+        recovered
+        if recovered is not None
+        and recovered.spec_id == spec.spec_id
+        and recovered.plan_job_id == spec.plan_job_id
+        else None
+    )
+    work_facts: list[WorkFact] = []
+    proof_facts: list[ProofFact] = []
     stage_results: list[GptResult] = []
-    if work.status is Observation.FAIL:
-        judge = _judge_result(paths, identity, spec, "WORK", work.effect_id, work.evidence_digest)
-        if judge:
-            stage_results.append(judge)
-        if judge is not None and judge.decision == "RETURN_WORK":
-            retry = _load_work(
-                paths, config, identity, spec, trigger=judge.job_id,
+    seen_actions: set[tuple[ActionKind, str]] = set()
+
+    if recovered_current is not None:
+        if recovered_current.trigger_judge_id is not None:
+            cause = _load_gpt_result(
+                paths, recovered_current.trigger_judge_id, "JUDGE_GPT"
+            )
+            if cause is None or cause.decision != "RETURN_WORK":
+                raise FactError(
+                    "recovered WORK commit lacks its exact RETURN_WORK cause"
+                )
+            stage_results.append(cause)
+        work_facts.append(recovered_current)
+
+    while True:
+        stage = replace(
+            identity,
+            specs=(spec,),
+            gpt_results=tuple(stage_results),
+            work_facts=tuple(work_facts),
+            proof_facts=tuple(proof_facts),
+        )
+        action = decide(stage)
+        if action.effect_id is None:
+            return (
+                tuple(work_facts), tuple(proof_facts), tuple(stage_results), None
+            )
+        key = (action.kind, action.effect_id)
+        if key in seen_actions:
+            raise FactError(
+                f"current causal reconstruction repeated {action.kind.value} "
+                f"identity: {action.effect_id}"
+            )
+        seen_actions.add(key)
+
+        if action.kind is ActionKind.WORK:
+            work = _load_work(
+                paths,
+                config,
+                identity,
+                spec,
+                trigger=action.payload.get("trigger_judge_id"),
                 recovered=recovered_current,
             )
-            if retry is not None:
-                work = retry
-                if work.status is Observation.PASS:
-                    return (work,), (), tuple(stage_results), None
-                judge = _judge_result(paths, identity, spec, "WORK", work.effect_id, work.evidence_digest)
-                if judge:
-                    stage_results.append(judge)
-        return (work,), (), tuple(stage_results), judge if judge and judge.decision == "RETURN_PLAN" else None
-    proof = _load_proof(
-        paths, config, spec, identity.head, identity.base, identity.proof_contract_digest
-    )
-    if proof is None:
-        return (work,), (), (), None
-    step = "PROVE_MECHANICAL" if proof.status is Observation.FAIL else "PROVE_SEMANTIC"
-    judge = _judge_result(paths, identity, spec, step, proof.proof_id, proof.evidence_digest)
-    if judge:
-        stage_results.append(judge)
-    if judge is not None and judge.decision == "RETURN_PROVE":
-        retry = _load_proof(
-            paths, config, spec, identity.head, identity.base,
-            identity.proof_contract_digest, trigger=judge.job_id,
-        )
-        if retry is not None:
-            proof = retry
-            step = "PROVE_MECHANICAL" if proof.status is Observation.FAIL else "PROVE_SEMANTIC"
-            retry_judge = _judge_result(
-                paths, identity, spec, step, proof.proof_id, proof.evidence_digest,
+            if work is None:
+                return (
+                    tuple(work_facts), tuple(proof_facts), tuple(stage_results), None
+                )
+            work_facts.append(work)
+            continue
+
+        if action.kind is ActionKind.PROVE:
+            proof = _load_proof(
+                paths,
+                config,
+                spec,
+                identity.head,
+                identity.base,
+                identity.proof_contract_digest,
+                trigger=action.payload.get("trigger_judge_id"),
             )
-            if retry_judge:
-                stage_results.append(retry_judge)
-            judge = retry_judge
-    return (work,), (proof,), tuple(stage_results), judge if judge and judge.decision == "RETURN_PLAN" else None
+            if proof is None:
+                return (
+                    tuple(work_facts), tuple(proof_facts), tuple(stage_results), None
+                )
+            proof_facts.append(proof)
+            continue
+
+        if action.kind is ActionKind.JUDGE:
+            result = _load_gpt_result(paths, action.effect_id, "JUDGE_GPT")
+            if result is None:
+                return (
+                    tuple(work_facts), tuple(proof_facts), tuple(stage_results), None
+                )
+            _validate_gpt_packet(load_gpt_packet(paths, action.effect_id), stage, action)
+            stage_results.append(result)
+            continue
+
+        if action.kind is ActionKind.PLAN:
+            trigger = action.payload.get("trigger_judge_id")
+            return_plan = next(
+                (item for item in reversed(stage_results) if item.job_id == trigger),
+                None,
+            )
+            if return_plan is None or return_plan.decision != "RETURN_PLAN":
+                raise FactError("PLAN reconstruction lacks its exact RETURN_PLAN cause")
+            return (
+                tuple(work_facts),
+                tuple(proof_facts),
+                tuple(stage_results),
+                return_plan,
+            )
+
+        return tuple(work_facts), tuple(proof_facts), tuple(stage_results), None
 
 
 def _load_current(
@@ -719,15 +833,33 @@ def _load_current(
             raise FactError(f"PLAN lineage cycle: {job_id}")
         seen.add(job_id)
         if result is None:
-            pending = (
-                frozenset({job_id})
-                if (paths.root / "gpt" / "outbox" / f"{job_id}.md").exists()
-                else frozenset()
-            )
+            packet_path = paths.root / "gpt" / "outbox" / f"{job_id}.md"
+            pending = frozenset()
+            if packet_path.exists():
+                packet = load_gpt_packet(paths, job_id)
+                _validate_gpt_packet(
+                    packet,
+                    replace(identity, specs=tuple(specs)),
+                    Action(
+                        ActionKind.PLAN,
+                        effect_id=job_id,
+                        payload={
+                            "parent_spec_id": parent.spec_id if parent else None,
+                            "trigger_judge_id": trigger,
+                        },
+                    ),
+                )
+                pending = frozenset({job_id})
             return tuple(results), tuple(specs), pending, work, proof
         results.append(result)
         if spec is None:
             return tuple(results), tuple(specs), frozenset(), work, proof
+        if (
+            recovered is not None
+            and recovered.plan_job_id == job_id
+            and recovered.spec_id != spec.spec_id
+        ):
+            raise FactError("recovered WORK commit Plan/SPEC identities disagree")
         specs.append(spec)
         work, proof, stage_results, return_plan = _current_stage(
             paths, config, identity, spec
@@ -766,14 +898,7 @@ def _project_current_gpt_pending(
     if not packet_path.exists() or result_path.exists():
         return snapshot
 
-    packet = load_gpt_packet(paths, job_id)
-    expected_operation = (
-        "PLAN_GPT" if action.kind is ActionKind.PLAN else "JUDGE_GPT"
-    )
-    if packet.get("operation") != expected_operation:
-        raise FactError(
-            f"current GPT packet operation mismatch for {job_id}"
-        )
+    _validate_gpt_packet(load_gpt_packet(paths, job_id), snapshot, action)
 
     return replace(
         snapshot,
@@ -825,6 +950,39 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         )
     else:
         results, specs, pending, work, proof = (), (), frozenset(), (), ()
+    head_is_in_live_base = False
+    if repository_available and head != base:
+        head_is_in_live_base = _run(
+            ("git", "merge-base", "--is-ancestor", head, base),
+            cwd=worktree,
+            check=False,
+        ).returncode == 0
+    merge = (
+        read_github_facts(config)
+        if allow_merge
+        or any(item.status is Observation.PASS for item in proof)
+        or head_is_in_live_base
+        else GitHubFacts()
+    )
+    if merge.state == "MERGED" and not head_is_in_live_base:
+        # A PR record alone is not DONE authority while the freshly read live
+        # base does not contain its exact head (remote lag or a later rewrite).
+        merge = replace(merge, available=False, state="ABSENT")
+    if (
+        repository_available
+        and merge.state == "MERGED"
+        and head_is_in_live_base
+        and len(merge.merge_parents) == 2
+        and merge.merge_parents[1] == head
+        and merge.merge_parents[0] != base
+    ):
+        # The live base moves to (or beyond) the merge commit after MERGE.  DONE
+        # still depends on the exact pre-merge PROVE/JUDGE addresses.  The
+        # immutable merge parent supplies that base without scheduler recovery
+        # state or historical directory scans.
+        results, specs, pending, work, proof = _load_current(
+            paths, config, head, merge.merge_parents[0], contract
+        )
     snapshot = Snapshot(
         p_id=config.p_id,
         charter_digest=config.charter_digest,
@@ -839,9 +997,7 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         gpt_pending=pending,
         work_facts=tuple(work),
         proof_facts=proof,
-        merge=read_github_facts(config)
-        if allow_merge or any(item.status is Observation.PASS for item in proof)
-        else GitHubFacts(),
+        merge=merge,
         expected_owner_token=config.owner_token,
         proof_contract_digest=contract,
         allow_merge=allow_merge,

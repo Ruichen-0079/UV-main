@@ -501,6 +501,7 @@ class KernelTableTests(unittest.TestCase):
             merge_facts(snapshot, spec),
             state="MERGED",
             mergeable=None,
+            live_base=B2,
             merge_commit_sha="c" * 40,
             merge_parents=(B1, H1),
         )

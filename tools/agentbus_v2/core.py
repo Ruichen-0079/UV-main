@@ -514,12 +514,15 @@ def _done(
     identity_ok = (
         m.available
         and m.head_sha == s.head
+        and m.live_base == s.base
         and m.head_branch == s.expected_branch
         and m.base_branch == s.base_ref
         and m.p_id == s.p_id
         and m.spec_id == spec.spec_id
         and m.owner_token == s.expected_owner_token
+        and bool(m.merge_commit_sha)
         and len(m.merge_parents) == 2
+        and m.pr_base_sha == m.merge_parents[0]
         and m.merge_parents[1] == s.head
         and bool(m.merge_parents[0])
     )
