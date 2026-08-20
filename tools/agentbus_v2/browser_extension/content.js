@@ -190,6 +190,19 @@ async function heartbeatIfBound(lane) {
   return true;
 }
 
+async function reportDiagnostic(lane, code, detail) {
+  diagnostic(code, lane, detail);
+  try {
+    await bridgeFetch("/bridge/diagnostic", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lane, code, detail: String(detail || "") })
+    });
+  } catch (error) {
+    diagnostic("diagnostic relay error", lane, String(error));
+  }
+}
+
 async function waitForResponse(before) {
   const deadline = Date.now() + Number(CONFIG.response_timeout_ms || 120000);
   while (Date.now() < deadline) {
@@ -201,21 +214,47 @@ async function waitForResponse(before) {
 }
 
 async function processRequest(request) {
-  if (canonicalUrl(location.href) !== canonicalUrl(request.conversation_url)) return false;
+  if (canonicalUrl(location.href) !== canonicalUrl(request.conversation_url)) {
+    await reportDiagnostic(request.lane, "LANE_URL_MISMATCH", "current URL did not match request");
+    return false;
+  }
   const composer = findComposer();
-  if (!composer || composerText(composer).trim() !== "" || generating()) return false;
+  if (!composer) {
+    await reportDiagnostic(request.lane, "COMPOSER_NOT_FOUND", "no unique visible composer");
+    return false;
+  }
+  if (composerText(composer).trim() !== "") {
+    await reportDiagnostic(request.lane, "COMPOSER_NOT_EMPTY", "existing user text preserved");
+    return false;
+  }
+  if (generating()) {
+    await reportDiagnostic(request.lane, "GENERATION_BUSY", "target conversation is generating");
+    return false;
+  }
   // An empty composer commonly has a disabled send button.  Locate the
   // control first, then require it to become enabled after insertion.
   const send = sendButton(false);
-  if (!send) return false;
+  if (!send) {
+    await reportDiagnostic(request.lane, "SEND_BUTTON_NOT_FOUND", "no unique visible send button");
+    return false;
+  }
   await heartbeat(request);
-  if (composerText(composer).trim() !== "" || generating()) return false;
+  if (composerText(composer).trim() !== "" || generating()) {
+    await reportDiagnostic(request.lane, "PRE_INSERT_BUSY", "composer or generation changed before insertion");
+    return false;
+  }
   const before = assistantNodes();
   setComposer(composer, request.packet);
   const afterInsert = findComposer();
-  if (!afterInsert || composerText(afterInsert) !== request.packet) return false;
+  if (!afterInsert || composerText(afterInsert) !== request.packet) {
+    await reportDiagnostic(request.lane, "COMPOSER_INSERTION_MISMATCH", "packet text was not present after insertion");
+    return false;
+  }
   const readySend = sendButton(true);
-  if (!readySend) return false;
+  if (!readySend) {
+    await reportDiagnostic(request.lane, "SEND_BUTTON_DISABLED", "send control did not become enabled");
+    return false;
+  }
   readySend.click();
   const rawResponse = await waitForResponse(before);
   const result = await bridgeFetch("/bridge/result", {
@@ -230,9 +269,10 @@ async function processRequest(request) {
 async function poll() {
   if (state.current_job_id) return;
   for (const lane of LANES) {
+    let request = null;
     try {
       await heartbeatIfBound(lane);
-      const request = await pull(lane);
+      request = await pull(lane);
       if (!request || state.current_job_id) continue;
       if (canonicalUrl(location.href) !== canonicalUrl(request.conversation_url)) continue;
       state.current_job_id = request.job_id;
@@ -247,6 +287,9 @@ async function poll() {
       // operational conditions.  The next poll retries without semantic state.
       state.current_job_id = null;
       diagnostic("heartbeat/poll error", String(error));
+      if (request && request.lane) {
+        await reportDiagnostic(request.lane, "POLL_ERROR", String(error));
+      }
     }
   }
 }

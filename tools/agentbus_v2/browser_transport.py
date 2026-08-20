@@ -68,6 +68,7 @@ class _BridgeState:
         self.lock = threading.RLock()
         self.pending: dict[str, PendingBrowserJob] = {}
         self.heartbeats: dict[str, tuple[float, str]] = {}
+        self.diagnostics: list[dict[str, object]] = []
         self.conversation_urls = {
             lane: canonical_conversation_url(url)
             for lane, url in (conversation_urls or {}).items()
@@ -159,6 +160,22 @@ class _BridgeState:
             if pending is not None and pending.conversation_url != canonical:
                 raise BrowserTransportError("heartbeat conversation does not match pending lane")
             self.heartbeats[lane] = (time.time(), canonical)
+
+    def diagnostic(self, lane: str, code: str, detail: str) -> None:
+        if lane not in LANES:
+            raise BrowserTransportError(f"unsupported browser lane: {lane}")
+        if not code or len(code) > 80 or len(detail) > 1000:
+            raise BrowserTransportError("browser diagnostic is invalid")
+        with self.lock:
+            self.diagnostics.append({
+                "at": time.time(), "lane": lane, "code": code, "detail": detail
+            })
+            del self.diagnostics[:-100]
+        LOGGER.info("browser diagnostic lane=%s code=%s detail=%s", lane, code, detail)
+
+    def diagnostic_snapshot(self) -> tuple[dict[str, object], ...]:
+        with self.lock:
+            return tuple(self.diagnostics)
 
     def lane_status(self, lane: str) -> dict[str, object]:
         with self.lock:
@@ -318,6 +335,14 @@ class BrowserBridgeRequestHandler(BaseHTTPRequestHandler):
                 self.server.bridge_state.heartbeat(lane, url)
                 self._write(200, {"accepted": True})
                 return
+            if parsed.path == "/bridge/diagnostic":
+                self._exact(body, {"lane", "code", "detail"})
+                lane, code, detail = body["lane"], body["code"], body["detail"]
+                if not all(type(value) is str for value in (lane, code, detail)):
+                    raise BrowserTransportError("diagnostic fields must be strings")
+                self.server.bridge_state.diagnostic(lane, code, detail)
+                self._write(200, {"accepted": True})
+                return
             raise BrowserTransportError("unknown browser bridge endpoint")
         except BrowserTransportError as error:
             text = str(error)
@@ -380,6 +405,9 @@ class BrowserBridge:
 
     def lane_status(self, lane: str) -> dict[str, object]:
         return self.state.lane_status(lane)
+
+    def diagnostic_snapshot(self) -> tuple[dict[str, object], ...]:
+        return self.state.diagnostic_snapshot()
 
     def configured_url(self, lane: str) -> str | None:
         value = self.state.config(lane)
@@ -491,6 +519,11 @@ class BrowserAdapter:
         with self._lock:
             bridge = self.bridge
         return {} if bridge is None else bridge.lane_status(lane)
+
+    def diagnostic_snapshot(self) -> tuple[dict[str, object], ...]:
+        with self._lock:
+            bridge = self.bridge
+        return () if bridge is None else bridge.diagnostic_snapshot()
 
     def close(self) -> None:
         with self._lock:

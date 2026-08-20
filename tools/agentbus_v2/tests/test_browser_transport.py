@@ -424,6 +424,15 @@ class BrowserTransportTests(unittest.TestCase):
             )
             self.assertEqual(200, status)
             self.assertTrue(bridge.lane_status("plan")["bridge_connected"])
+            status, _ = request_json(
+                bridge,
+                "/bridge/diagnostic",
+                method="POST",
+                body={"lane": "plan", "code": "COMPOSER_NOT_FOUND", "detail": "test"},
+            )
+            self.assertEqual(200, status)
+            diagnostics = bridge.diagnostic_snapshot()
+            self.assertEqual("COMPOSER_NOT_FOUND", diagnostics[-1]["code"])
         finally:
             bridge.close()
 

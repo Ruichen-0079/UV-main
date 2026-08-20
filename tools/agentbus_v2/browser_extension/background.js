@@ -10,6 +10,7 @@ const BRIDGE_PATHS = new Set([
   "/bridge/config",
   "/bridge/pull",
   "/bridge/heartbeat",
+  "/bridge/diagnostic",
   "/bridge/result"
 ]);
 const BRIDGE_METHODS = new Set(["GET", "POST"]);
