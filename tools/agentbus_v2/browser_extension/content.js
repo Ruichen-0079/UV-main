@@ -251,13 +251,6 @@ async function processRequest(request) {
     await reportDiagnostic(request.lane, "GENERATION_BUSY", "target conversation is generating");
     return false;
   }
-  // An empty composer commonly has a disabled send button.  Locate the
-  // control first, then require it to become enabled after insertion.
-  const send = sendButton(false);
-  if (!send) {
-    await reportDiagnostic(request.lane, "SEND_BUTTON_NOT_FOUND", "no unique visible send button");
-    return false;
-  }
   await heartbeat(request);
   if (composerText(composer).trim() !== "" || generating()) {
     await reportDiagnostic(request.lane, "PRE_INSERT_BUSY", "composer or generation changed before insertion");
@@ -270,9 +263,14 @@ async function processRequest(request) {
     await reportDiagnostic(request.lane, "COMPOSER_INSERTION_MISMATCH", "packet text was not present after insertion");
     return false;
   }
+  const postInsertionSend = sendButton(false);
+  if (!postInsertionSend) {
+    await reportDiagnostic(request.lane, "SEND_BUTTON_NOT_FOUND", "send control was not available after insertion");
+    return false;
+  }
   const readySend = sendButton(true);
   if (!readySend) {
-    await reportDiagnostic(request.lane, "SEND_BUTTON_DISABLED", "send control did not become enabled");
+    await reportDiagnostic(request.lane, "SEND_BUTTON_DISABLED", "send control did not become enabled after insertion");
     return false;
   }
   readySend.click();

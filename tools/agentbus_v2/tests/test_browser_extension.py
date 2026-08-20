@@ -90,6 +90,77 @@ console.log('ok');
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("ok", result.stdout)
 
+    def test_process_request_inserts_before_post_insertion_send_lookup(self) -> None:
+        content = EXTENSION / "content.js"
+        script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const sandbox = {{module: {{exports: {{}}}}, console, URL, InputEvent: class {{}}}};
+sandbox.globalThis = sandbox;
+sandbox.getComputedStyle = () => ({{display: '', visibility: ''}});
+sandbox.location = {{href: 'https://chatgpt.com/c/plan-lane'}};
+const bridgeMessages = [];
+sandbox.browser = {{runtime: {{sendMessage: async (message) => {{
+  bridgeMessages.push(message);
+  return {{ok: true, status: 200, body: ''}};
+}}}}}};
+vm.runInNewContext(fs.readFileSync({json.dumps(str(content))}, 'utf8'), sandbox);
+const api = sandbox.module.exports;
+
+async function scenario(sendAfterInsertion) {{
+  const events = [];
+  let text = '';
+  let assistants = [];
+  const composer = {{tagName: 'DIV', hidden: false, focus: () => {{}},
+    getAttribute: () => null, dispatchEvent: () => {{}}}};
+  Object.defineProperty(composer, 'textContent', {{
+    get: () => text,
+    set: (value) => {{ text = String(value); events.push('insert'); }}
+  }});
+  let send = null;
+  if (sendAfterInsertion) {{
+    send = {{disabled: false, hidden: false, getAttribute: () => null,
+      click: () => {{ events.push('click'); assistants = [{{innerText: 'raw answer', hidden: false, getAttribute: () => null}}]; }}}};
+  }}
+  sandbox.document = {{
+    querySelector: (selector) => {{
+      if (selector === 'div#prompt-textarea[contenteditable="true"]') return composer;
+      if (selector === 'button[data-testid="send-button"]') {{
+        events.push('send_lookup');
+        return sendAfterInsertion && text ? send : null;
+      }}
+      if (selector === 'button[aria-label="Send prompt"]') {{
+        events.push('send_lookup');
+        return null;
+      }}
+      return null;
+    }},
+    querySelectorAll: (selector) => selector.includes('assistant') ? assistants : []
+  }};
+  bridgeMessages.length = 0;
+  const result = await api.processRequest({{
+    lane: 'plan', job_id: 'plan-' + '1'.repeat(24),
+    operation: 'PLAN_GPT', conversation_url: 'https://chatgpt.com/c/plan-lane', packet: 'PACKET'
+  }});
+  const firstInsert = events.indexOf('insert');
+  const firstSendLookup = events.indexOf('send_lookup');
+  if (firstInsert < 0 || firstSendLookup < 0 || firstInsert > firstSendLookup) throw Error('send lookup preceded insertion');
+  if (sendAfterInsertion) {{
+    if (result !== true || !events.includes('click')) throw Error('post-insertion send did not proceed');
+  }} else {{
+    if (result !== false || events.includes('click')) throw Error('absent post-insertion send clicked');
+    const diagnostic = bridgeMessages.find((m) => m.path === '/bridge/diagnostic');
+    if (!diagnostic || !String(diagnostic.body).includes('SEND_BUTTON_NOT_FOUND')) throw Error('missing send diagnostic');
+  }}
+}}
+(async () => {{ await scenario(true); await scenario(false); console.log('ok'); }})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("ok", result.stdout)
+
     def test_background_bridge_is_fixed_loopback_allowlist(self) -> None:
         background = EXTENSION / "background.js"
         script = f"""
