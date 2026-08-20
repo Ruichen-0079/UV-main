@@ -73,4 +73,7 @@ first-class fallback.  To perform a later 7D.2B canary, copy the configured
 token into the extension's local `config.js`, load that directory as a
 temporary unsigned Firefox extension, open the exact PLAN and JUDGE
 conversation URLs, then enable the browser lanes.  No v1 bridge or browser
-profile is modified by this phase.
+profile is modified by this phase.  Localhost bridge requests are delegated
+from the content script to the extension background context, where the fixed
+loopback host permission applies; the background handler exposes only the four
+transport endpoints and stores no semantic state.

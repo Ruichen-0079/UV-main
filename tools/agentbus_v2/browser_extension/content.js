@@ -11,7 +11,19 @@ const CONFIG = globalThis.AGENTBUS_V2_BROWSER_CONFIG || {
   response_timeout_ms: 120000
 };
 const LANES = ["plan", "judge"];
-const state = { current_job_id: null };
+const state = { current_job_id: null, matched_lanes: new Set(), heartbeat_lanes: new Set() };
+
+function diagnostic(...values) {
+  if (typeof console !== "undefined" && typeof console.debug === "function") {
+    console.debug("[AgentBusV2]", ...values);
+  }
+}
+
+diagnostic("content script loaded");
+diagnostic("config loaded", {
+  bridge_base: CONFIG.bridge_base,
+  token_configured: Boolean(CONFIG.bridge_token)
+});
 
 function canonicalUrl(value) {
   try {
@@ -111,13 +123,28 @@ function sleep(ms) {
 }
 
 async function bridgeFetch(path, options = {}) {
-  const headers = Object.assign({}, options.headers || {}, {
-    "X-AgentBus-Token": CONFIG.bridge_token
+  if (typeof browser === "undefined" || !browser.runtime?.sendMessage) {
+    throw new Error("Firefox extension runtime messaging is unavailable");
+  }
+  const response = await browser.runtime.sendMessage({
+    type: "AGENTBUS_V2_BRIDGE_REQUEST",
+    bridge_base: CONFIG.bridge_base,
+    bridge_token: CONFIG.bridge_token,
+    path,
+    method: options.method || "GET",
+    headers: options.headers || {},
+    body: options.body === undefined ? null : options.body
   });
-  return fetch(`${CONFIG.bridge_base}${path}`, Object.assign({}, options, {
-    headers,
-    mode: "cors"
-  }));
+  if (!response || typeof response.status !== "number") {
+    throw new Error("bridge background response is invalid");
+  }
+  if (response.error) throw new Error(String(response.error));
+  return {
+    ok: Boolean(response.ok),
+    status: response.status,
+    json: async () => JSON.parse(response.body || ""),
+    text: async () => String(response.body || "")
+  };
 }
 
 async function pull(lane) {
@@ -135,17 +162,30 @@ async function laneConfig(lane) {
 }
 
 async function heartbeat(request) {
-  const response = await bridgeFetch("/bridge/heartbeat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ lane: request.lane, conversation_url: canonicalUrl(location.href) })
-  });
-  if (!response.ok) throw new Error(`bridge heartbeat HTTP ${response.status}`);
+  const first = !state.heartbeat_lanes.has(request.lane);
+  if (first) diagnostic("heartbeat attempt", request.lane);
+  try {
+    const response = await bridgeFetch("/bridge/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lane: request.lane, conversation_url: canonicalUrl(location.href) })
+    });
+    if (!response.ok) throw new Error(`bridge heartbeat HTTP ${response.status}`);
+    state.heartbeat_lanes.add(request.lane);
+    if (first) diagnostic("heartbeat response", request.lane, response.status);
+  } catch (error) {
+    diagnostic("heartbeat error", request.lane, String(error));
+    throw error;
+  }
 }
 
 async function heartbeatIfBound(lane) {
   const config = await laneConfig(lane);
   if (!config || canonicalUrl(location.href) !== canonicalUrl(config.conversation_url)) return false;
+  if (!state.matched_lanes.has(lane)) {
+    state.matched_lanes.add(lane);
+    diagnostic("lane matched", lane);
+  }
   await heartbeat(config);
   return true;
 }
@@ -206,7 +246,7 @@ async function poll() {
       // A closed tab, a busy composer, and a bridge restart are all temporary
       // operational conditions.  The next poll retries without semantic state.
       state.current_job_id = null;
-      if (typeof console !== "undefined") console.debug("AgentBus v2 browser transport", error);
+      diagnostic("heartbeat/poll error", String(error));
     }
   }
 }

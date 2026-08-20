@@ -22,6 +22,7 @@ class BrowserExtensionTests(unittest.TestCase):
             },
             permissions,
         )
+        self.assertEqual(["background.js"], manifest["background"]["scripts"])
         self.assertNotIn("tools/agentbus", (EXTENSION / "content.js").read_text(encoding="utf-8"))
 
     def test_javascript_syntax_and_dom_safety_helpers(self) -> None:
@@ -36,6 +37,14 @@ class BrowserExtensionTests(unittest.TestCase):
         except FileNotFoundError:
             self.skipTest("node is not installed")
         self.assertEqual(0, checked.returncode, checked.stderr)
+        background = EXTENSION / "background.js"
+        checked_background = subprocess.run(
+            ["node", "--check", str(background)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, checked_background.returncode, checked_background.stderr)
         script = f"""
 const fs = require('fs');
 const vm = require('vm');
@@ -77,6 +86,38 @@ console.log('ok');
             capture_output=True,
             text=True,
             check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("ok", result.stdout)
+
+    def test_background_bridge_is_fixed_loopback_allowlist(self) -> None:
+        background = EXTENSION / "background.js"
+        script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const sandbox = {{module: {{exports: {{}}}}, URL, fetch: async (url, options) => ({{
+  ok: true, status: 204, text: async () => ''
+}})}};
+sandbox.globalThis = sandbox;
+vm.runInNewContext(fs.readFileSync({json.dumps(str(background))}, 'utf8'), sandbox);
+const api = sandbox.module.exports;
+if (api.requestSpec({{type:'NOPE'}}) !== null) throw Error('ignored message was not ignored');
+const spec = api.requestSpec({{
+  type:'AGENTBUS_V2_BRIDGE_REQUEST', bridge_base:'http://127.0.0.1:6791',
+  bridge_token:'x', path:'/bridge/heartbeat', method:'POST',
+  headers:{{'Content-Type':'application/json'}}, body:'{{}}'
+}});
+if (spec.url !== 'http://127.0.0.1:6791/bridge/heartbeat') throw Error('wrong bridge URL');
+for (const bad of ['/api/status', 'http://example.test/bridge/pull']) {{
+  let rejected = false;
+  try {{ api.requestSpec({{type:'AGENTBUS_V2_BRIDGE_REQUEST', bridge_base:'http://127.0.0.1:6791', bridge_token:'x', path:bad}}); }}
+  catch (_) {{ rejected = true; }}
+  if (!rejected) throw Error('unapproved bridge path accepted');
+}}
+console.log('ok');
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("ok", result.stdout)
