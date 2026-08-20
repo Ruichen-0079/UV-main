@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 from typing import Any, Sequence
 
@@ -39,6 +38,7 @@ from .facts import (
     write_json_once,
     write_text_once,
 )
+from .codex_guardian import GUARDIAN_ERROR, run_guardian
 from .github import (
     ensure_owned_pr,
     merge_pr,
@@ -266,6 +266,9 @@ def run_codex_work(
     snapshot: Snapshot,
     action: Action,
     codex_home: Path | None = None,
+    *,
+    worktree_lock_path: Path | None = None,
+    account_lock_path: Path | None = None,
 ) -> EffectResult:
     if action.kind is not ActionKind.WORK or not action.effect_id:
         raise FactError("not a WORK effect")
@@ -301,23 +304,39 @@ def run_codex_work(
             "--add-dir", str(common_git), "--output-schema", str(schema_path),
             "--output-last-message", str(response_path), "-",
         )
-        try:
-            environment = os.environ.copy()
-            if codex_home is not None:
-                environment["CODEX_HOME"] = str(codex_home)
-            completed = subprocess.run(
-                command, input=prompt, text=True, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, check=False, timeout=7200, env=environment,
-            )
-        except subprocess.TimeoutExpired as error:
-            output = error.stdout if isinstance(error.stdout, str) else ""
-            log_path.write_text(output[-262144:], encoding="utf-8", errors="replace")
-            return EffectResult(False, "Codex exceeded the executor timeout")
+        environment = os.environ.copy()
+        if codex_home is not None:
+            environment["CODEX_HOME"] = str(codex_home)
+        if worktree_lock_path is None or account_lock_path is None:
+            return EffectResult(False, "Codex ownership locks were not supplied")
+        guarded = run_guardian(
+            command,
+            cwd=worktree,
+            env=environment,
+            log_path=log_path,
+            timeout=7200.0,
+            worktree_lock=worktree_lock_path,
+            account_lock=account_lock_path,
+            input_text=prompt,
+        )
     finally:
         schema.close()
         schema_path.unlink(missing_ok=True)
-    log_path.write_text(completed.stdout[-262144:], encoding="utf-8", errors="replace")
-    if completed.returncode != 0 or not response_path.exists():
+    try:
+        completed_output = log_path.read_text(encoding="utf-8", errors="replace")[-262144:]
+    except OSError:
+        completed_output = ""
+    if guarded.timed_out:
+        return EffectResult(False, "Codex exceeded the executor timeout")
+    if guarded.parent_lost:
+        return EffectResult(False, "Codex guardian cleaned up after AgentBus parent loss")
+    if guarded.worktree_busy:
+        return EffectResult(False, "worktree execution lock is unavailable")
+    if guarded.account_busy:
+        return EffectResult(False, "Codex account lock is unavailable")
+    if guarded.returncode == GUARDIAN_ERROR:
+        return EffectResult(False, "Codex guardian could not start or own the executor")
+    if guarded.returncode != 0 or not response_path.exists():
         return EffectResult(False, "Codex exited without a durable result")
     try:
         response = _load_json(response_path)
@@ -368,7 +387,7 @@ def run_codex_work(
         raise FactError("Codex returned FAIL after changing repository HEAD")
     evidence = {
         "codex_response": response,
-        "codex_log_sha256": sha256_text(completed.stdout),
+        "codex_log_sha256": sha256_text(completed_output),
         "live_head": live_head,
     }
     result = {

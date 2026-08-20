@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -87,8 +88,7 @@ def list_executor_accounts(state_root: Path) -> tuple[dict[str, object], ...]:
 
 
 @contextmanager
-def account_lock(state_root: Path, account: ExecutorAccount) -> Iterator[bool]:
-    path = Path(state_root) / "executors" / f"{account.name}.lock"
+def _lock_path(path: Path, *, expose_fd: bool = False) -> Iterator[bool | int | None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+") as handle:
         try:
@@ -97,9 +97,33 @@ def account_lock(state_root: Path, account: ExecutorAccount) -> Iterator[bool]:
             yield False
             return
         try:
-            yield True
+            yield handle.fileno() if expose_fd else True
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def account_lock(
+    state_root: Path, account: ExecutorAccount, *, expose_fd: bool = False
+) -> Iterator[bool | int | None]:
+    with _lock_path(account_lock_path(state_root, account), expose_fd=expose_fd) as locked:
+        yield locked
+
+
+def account_lock_path(state_root: Path, account: ExecutorAccount) -> Path:
+    return Path(state_root) / "executors" / f"{account.name}.lock"
+
+
+def worktree_lock_path(state_root: Path, worktree: str | Path) -> Path:
+    identity = str(Path(worktree).expanduser().resolve()).encode("utf-8")
+    key = hashlib.sha256(identity).hexdigest()[:32]
+    return Path(state_root) / "executors" / "worktrees" / f"{key}.lock"
+
+
+def worktree_execution_lock(
+    state_root: Path, worktree: str | Path, *, expose_fd: bool = False
+) -> Iterator[bool | int | None]:
+    return _lock_path(worktree_lock_path(state_root, worktree), expose_fd=expose_fd)
 
 
 def _branch_refs(config: PConfig) -> dict[str, str]:
@@ -167,73 +191,107 @@ class ExecutorPool:
     ) -> "EffectResult":
         if action.kind is not ActionKind.WORK or not action.effect_id:
             raise FactError("executor pool received a non-WORK action")
+        use_owned_executor = executor is None
         if executor is None:
             from .effects import run_codex_work
 
             executor = run_codex_work
         attempted: list[str] = []
-        for account in self.accounts:
-            if not account.enabled:
-                continue
-            with account_lock(self.state_root, account) as acquired:
-                if not acquired:
+        worktree_path = worktree_lock_path(self.state_root, config.worktree)
+        worktree_context = (
+            nullcontext(True)
+            if use_owned_executor
+            else worktree_execution_lock(self.state_root, config.worktree)
+        )
+        with worktree_context as worktree_fd:
+            if worktree_fd is None or worktree_fd is False:
+                return _result(False, "worktree execution lock is unavailable")
+            for account in self.accounts:
+                if not account.enabled:
                     continue
-                attempted.append(account.name)
-                existing = _semantic_work_state(paths, config, snapshot, action)
-                if existing in {"PASS", "FAIL"}:
-                    return _result(False, f"executor={account.name}; recovered WORK {existing}")
-                worktree = Path(config.worktree)
-                before_head = git(worktree, "rev-parse", "HEAD")
-                before_refs = _branch_refs(config)
-                try:
-                    result = executor(paths, config, snapshot, action, account.codex_home)
-                except UnsafeExecutorAttempt as error:
-                    return _result(
-                        False,
-                        f"executor={account.name}; operational retry blocked: {error}",
-                    )
-                except FactError as error:
-                    result = None
-                    fatal_error = str(error) or type(error).__name__
-                except Exception as error:  # an executor crash is not semantic FAIL
-                    result = None
-                    fatal_error = None
-                else:
-                    fatal_error = None
+                account_context = (
+                    nullcontext(True)
+                    if use_owned_executor
+                    else account_lock(self.state_root, account)
+                )
+                with account_context as account_fd:
+                    if account_fd is None or account_fd is False:
+                        continue
+                    attempted.append(account.name)
+                    existing = _semantic_work_state(paths, config, snapshot, action)
+                    if existing in {"PASS", "FAIL"}:
+                        return _result(False, f"executor={account.name}; recovered WORK {existing}")
+                    worktree = Path(config.worktree)
+                    before_head = git(worktree, "rev-parse", "HEAD")
+                    before_refs = _branch_refs(config)
+                    try:
+                        if use_owned_executor:
+                            result = executor(
+                                paths,
+                                config,
+                                snapshot,
+                                action,
+                                account.codex_home,
+                                worktree_lock_path=worktree_path,
+                                account_lock_path=account_lock_path(
+                                    self.state_root, account
+                                ),
+                            )
+                        else:
+                            result = executor(paths, config, snapshot, action, account.codex_home)
+                    except UnsafeExecutorAttempt as error:
+                        return _result(
+                            False,
+                            f"executor={account.name}; operational retry blocked: {error}",
+                        )
+                    except FactError as error:
+                        result = None
+                        fatal_error = str(error) or type(error).__name__
+                    except Exception:
+                        result = None
+                        fatal_error = None
+                    else:
+                        fatal_error = None
 
-                state = _semantic_work_state(paths, config, snapshot, action)
-                if state in {"PASS", "FAIL"}:
-                    return _result(
-                        bool(result and result.changed),
-                        f"executor={account.name}; recovered WORK {state}"
-                        if result is None
-                        else f"executor={account.name}; {result.detail}",
-                    )
-                if fatal_error is not None:
-                    return _result(
-                        False,
-                        f"executor={account.name}; operational retry blocked: {fatal_error}",
-                    )
-                if result is not None and result.changed:
-                    return _result(True, f"executor={account.name}; {result.detail}")
+                    if use_owned_executor and result is not None:
+                        if result.detail == "worktree execution lock is unavailable":
+                            return _result(False, f"executor={account.name}; {result.detail}")
+                        if result.detail == "Codex account lock is unavailable":
+                            continue
 
-                try:
-                    after_head = git(worktree, "rev-parse", "HEAD")
-                    after_refs = _branch_refs(config)
-                    dirty = git(worktree, "status", "--porcelain=v1")
-                except FactError as error:
-                    return _result(
-                        False,
-                        f"executor={account.name}; operational retry blocked: {error}",
-                    )
-                if after_head != before_head or after_refs != before_refs or dirty:
-                    return _result(
-                        False,
-                        f"executor={account.name}; operational retry blocked by ambiguous worktree",
-                    )
-                if result is not None and "identities drifted before Codex" in result.detail:
-                    return _result(False, f"executor={account.name}; {result.detail}")
-                continue
+                    state = _semantic_work_state(paths, config, snapshot, action)
+                    if state in {"PASS", "FAIL"}:
+                        return _result(
+                            bool(result and result.changed),
+                            f"executor={account.name}; recovered WORK {state}"
+                            if result is None
+                            else f"executor={account.name}; {result.detail}",
+                        )
+                    if fatal_error is not None:
+                        return _result(
+                            False,
+                            f"executor={account.name}; operational retry blocked: {fatal_error}",
+                        )
+                    if result is not None and result.changed:
+                        return _result(True, f"executor={account.name}; {result.detail}")
+
+                    try:
+                        after_head = git(worktree, "rev-parse", "HEAD")
+                        after_refs = _branch_refs(config)
+                        dirty = git(worktree, "status", "--porcelain=v1")
+                    except FactError as error:
+                        return _result(
+                            False,
+                            f"executor={account.name}; operational retry blocked: {error}",
+                        )
+                    if after_head != before_head or after_refs != before_refs or dirty:
+                        return _result(
+                            False,
+                            f"executor={account.name}; operational retry blocked by ambiguous worktree",
+                        )
+                    if result is not None and "identities drifted before Codex" in result.detail:
+                        return _result(False, f"executor={account.name}; {result.detail}")
+                    continue
         if attempted:
             return _result(
                 False,
