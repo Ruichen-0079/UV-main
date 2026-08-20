@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -260,7 +261,11 @@ def _local_branch_refs(worktree: Path) -> dict[str, str]:
 
 
 def run_codex_work(
-    paths: PPaths, config: PConfig, snapshot: Snapshot, action: Action
+    paths: PPaths,
+    config: PConfig,
+    snapshot: Snapshot,
+    action: Action,
+    codex_home: Path | None = None,
 ) -> EffectResult:
     if action.kind is not ActionKind.WORK or not action.effect_id:
         raise FactError("not a WORK effect")
@@ -297,9 +302,12 @@ def run_codex_work(
             "--output-last-message", str(response_path), "-",
         )
         try:
+            environment = os.environ.copy()
+            if codex_home is not None:
+                environment["CODEX_HOME"] = str(codex_home)
             completed = subprocess.run(
                 command, input=prompt, text=True, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, check=False, timeout=7200,
+                stderr=subprocess.STDOUT, check=False, timeout=7200, env=environment,
             )
         except subprocess.TimeoutExpired as error:
             output = error.stdout if isinstance(error.stdout, str) else ""

@@ -17,10 +17,10 @@ from .effects import (
     EffectResult,
     dispatch_manual_gpt,
     execute_merge,
-    run_codex_work,
     run_prove,
     submit_gpt_response,
 )
+from .executor_pool import dispatch_work
 from .facts import (
     FactError,
     init_p,
@@ -119,7 +119,7 @@ def tick_once(state_root: Path, p_id: str, *, allow_merge: bool) -> tuple[Action
         if action.kind in {ActionKind.PLAN, ActionKind.JUDGE}:
             result = dispatch_manual_gpt(paths, config, snapshot, action)
         elif action.kind is ActionKind.WORK:
-            result = run_codex_work(paths, config, snapshot, action)
+            result = dispatch_work(state_root, paths, config, snapshot, action)
         elif action.kind is ActionKind.PROVE:
             result = run_prove(paths, config, snapshot, action)
         elif action.kind is ActionKind.MERGE:
