@@ -95,7 +95,7 @@ console.log('ok');
         script = f"""
 const fs = require('fs');
 const vm = require('vm');
-const sandbox = {{module: {{exports: {{}}}}, console, URL, InputEvent: class {{}}}};
+const sandbox = {{module: {{exports: {{}}}}, console, URL, InputEvent: class {{}}, setTimeout}};
 sandbox.globalThis = sandbox;
 sandbox.getComputedStyle = () => ({{display: '', visibility: ''}});
 sandbox.location = {{href: 'https://chatgpt.com/c/plan-lane'}};
@@ -154,6 +154,68 @@ async function scenario(sendAfterInsertion) {{
   }}
 }}
 (async () => {{ await scenario(true); await scenario(false); console.log('ok'); }})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("ok", result.stdout)
+
+    def test_contenteditable_uses_editor_native_insert_and_rejects_dom_only_false_positive(self) -> None:
+        content = EXTENSION / "content.js"
+        script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const sandbox = {{
+  module: {{exports: {{}}}}, console, URL, setTimeout,
+  InputEvent: class {{}}, Event: class {{}}
+}};
+sandbox.globalThis = sandbox;
+sandbox.getComputedStyle = () => ({{display: '', visibility: ''}});
+let text = '';
+let editorState = '';
+let execCalls = 0;
+const composer = {{
+  tagName: 'DIV', hidden: false, focus: () => {{}}, getAttribute: () => null,
+  dispatchEvent: () => {{}}
+}};
+Object.defineProperty(composer, 'textContent', {{
+  get: () => text,
+  set: (value) => {{
+    text = String(value);
+    if (!editorState) setTimeout(() => {{ text = ''; }}, 5);
+  }}
+}});
+const selection = {{removeAllRanges: () => {{}}, addRange: () => {{}}}};
+sandbox.getSelection = () => selection;
+sandbox.document = {{
+  createRange: () => ({{selectNodeContents: () => {{}}}}),
+  execCommand: (command, _ui, value) => {{
+    if (command !== 'insertText') return false;
+    execCalls += 1;
+    editorState = String(value);
+    text = editorState;
+    return true;
+  }},
+  querySelector: (selector) => selector === 'div#prompt-textarea[contenteditable="true"]' ? composer : null,
+  querySelectorAll: () => []
+}};
+vm.runInNewContext(fs.readFileSync({json.dumps(str(content))}, 'utf8'), sandbox);
+const api = sandbox.module.exports;
+(async () => {{
+  const method = api.setComposer(composer, 'PACKET');
+  if (method !== 'contenteditable-execCommand-insertText') throw Error('native contenteditable insert was not preferred');
+  if (execCalls !== 1) throw Error('execCommand insertText was not invoked exactly once');
+  if (!(await api.composerInsertionStable('PACKET'))) throw Error('accepted editor text did not remain stable');
+
+  editorState = '';
+  text = '';
+  sandbox.document.execCommand = () => false;
+  const fallback = api.setComposer(composer, 'EPHEMERAL');
+  if (fallback !== 'contenteditable-dom-fallback') throw Error('fallback path not exercised');
+  if (await api.composerInsertionStable('EPHEMERAL')) throw Error('DOM-only false positive survived async verification');
+  console.log('ok');
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
 """
         result = subprocess.run(
             ["node", "-e", script], capture_output=True, text=True, check=False
