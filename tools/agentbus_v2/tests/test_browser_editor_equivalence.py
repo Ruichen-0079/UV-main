@@ -59,8 +59,8 @@ if (api.editorPacketMatches('PACKET', 'PACKET\\n\\n')) throw Error('more than on
     conversation_url: 'https://chatgpt.com/c/plan-lane', packet: 'PACKET\\n'
   }});
   if (!ok) throw Error('existing exact pending packet was not resumed');
-  const diag = bridgeMessages.find((m) => m.path === '/bridge/diagnostic');
-  if (!diag || !String(diag.body).includes('PENDING_PACKET_ALREADY_PRESENT')) throw Error('resume diagnostic missing');
+  const diagnostics = bridgeMessages.filter((m) => m.path === '/bridge/diagnostic');
+  if (!diagnostics.some((m) => String(m.body).includes('PENDING_PACKET_ALREADY_PRESENT'))) throw Error('resume diagnostic missing');
   const result = bridgeMessages.find((m) => m.path === '/bridge/result');
   if (!result || !String(result.body).includes('RAW')) throw Error('browser result was not posted');
   console.log('ok');

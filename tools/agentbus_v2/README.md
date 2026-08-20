@@ -71,8 +71,18 @@ token and is not installed automatically.
 The extension checks both fixed logical lanes, pulls only the lane bound to its
 exact configured conversation, claims immediately before insertion, injects
 only when the composer is empty and idle, and returns the new assistant message
-as raw text. Automatic jobs use a memory-only FIFO per lane, while PLAN and
-JUDGE lanes may run independently. Manual packet/result submission remains a
+as raw text.  Job-addressed operational diagnostics fence and expose the claim,
+insertion, Send attempt, generation, response observation, and result relay
+boundaries; a caller-supplied synchronous sink can journal them without making
+them semantic authority.  After any operational lane failure the in-process
+transport halts that lane instead of replaying the ambiguous job or starting its
+next FIFO entry.  The extension can observe an exact current packet already in
+the conversation and relay its following assistant response, but it never uses
+conversation history as durable authority and never clicks Send twice after a
+recorded attempt.  Response observation defaults to 240 seconds inside a
+bounded 300-second adapter wait, leaving relay/ingestion margin. Automatic jobs
+use a memory-only FIFO per lane, while PLAN and JUDGE lanes may run
+independently. Manual packet/result submission remains a
 first-class fallback. To perform a later 7D.2B canary, copy the configured
 token into the extension's local `config.js`, load that directory as a
 temporary unsigned Firefox extension, open the exact PLAN and JUDGE

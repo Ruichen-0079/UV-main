@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -13,6 +14,9 @@ from tools.agentbus_v2.browser_transport import (
     BrowserAdapter,
     BrowserBridge,
     BrowserTransportError,
+    DEFAULT_BROWSER_TIMEOUT,
+    DEFAULT_RESPONSE_OBSERVATION_TIMEOUT,
+    MIN_RESULT_RELAY_MARGIN,
 )
 from tools.agentbus_v2.core import Action, ActionKind, GPT_PACKET_SCHEMA, Snapshot
 from tools.agentbus_v2.facts import PPaths
@@ -523,13 +527,154 @@ class BrowserTransportTests(unittest.TestCase):
                 bridge,
                 "/bridge/diagnostic",
                 method="POST",
-                body={"lane": "plan", "code": "COMPOSER_NOT_FOUND", "detail": "test"},
+                body={
+                    "lane": "plan",
+                    "job_id": "",
+                    "code": "COMPOSER_NOT_FOUND",
+                    "detail": "test",
+                },
             )
             self.assertEqual(200, status)
             diagnostics = bridge.diagnostic_snapshot()
             self.assertEqual("COMPOSER_NOT_FOUND", diagnostics[-1]["code"])
         finally:
             bridge.close()
+
+    def test_job_diagnostics_are_sinkable_bounded_and_secret_free(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = setup_p(root, "P1")
+            events: list[dict[str, object]] = []
+            journal = root / "state" / "canary-browser-diagnostics.jsonl"
+
+            def capture(event: dict[str, object]) -> None:
+                events.append(event)
+                with journal.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(event, sort_keys=True) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+
+            bridge = BrowserBridge(
+                TOKEN,
+                port=0,
+                conversation_urls=CONVERSATIONS,
+                diagnostic_callback=capture,
+            )
+            bridge.start()
+            job = "plan-" + "a" * 24
+            try:
+                status, _ = request_json(
+                    bridge,
+                    "/bridge/diagnostic",
+                    method="POST",
+                    body={
+                        "lane": "plan",
+                        "job_id": job,
+                        "code": "SEND_ATTEMPTED",
+                        "detail": f"must redact {TOKEN}",
+                    },
+                )
+                self.assertEqual(200, status)
+                self.assertEqual(job, events[-1]["job_id"])
+                self.assertEqual("SEND_ATTEMPTED", events[-1]["code"])
+                serialized = journal.read_text(encoding="utf-8")
+                self.assertNotIn(TOKEN, serialized)
+                self.assertIn("[REDACTED]", serialized)
+                self.assertNotIn("bridge_token", events[-1])
+                self.assertEqual(
+                    [], list((paths.root / "gpt" / "results").glob("*.json"))
+                )
+                self.assertFalse((paths.root / "scheduler.json").exists())
+                self.assertFalse((paths.root / "browser-state.json").exists())
+            finally:
+                bridge.close()
+
+    def test_diagnostic_sink_failure_blocks_required_send_boundary(self) -> None:
+        def broken_sink(_event: dict[str, object]) -> None:
+            raise OSError("evidence file is unavailable")
+
+        bridge = BrowserBridge(
+            TOKEN,
+            port=0,
+            conversation_urls=CONVERSATIONS,
+            diagnostic_callback=broken_sink,
+        )
+        bridge.start()
+        try:
+            with patch("tools.agentbus_v2.browser_transport.LOGGER.exception"):
+                status, payload = request_json(
+                    bridge,
+                    "/bridge/diagnostic",
+                    method="POST",
+                    body={
+                        "lane": "plan",
+                        "job_id": "plan-" + "b" * 24,
+                        "code": "SEND_ATTEMPTED",
+                        "detail": "before click",
+                    },
+                )
+            self.assertEqual(409, status)
+            self.assertIn("sink", payload["error"])
+        finally:
+            bridge.close()
+
+    def test_response_observation_timeout_precedes_outer_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "state").mkdir()
+            write_config(root)
+            adapter = BrowserAdapter(root / "state", port=0)
+            self.assertEqual(DEFAULT_BROWSER_TIMEOUT, adapter.timeout)
+            self.assertEqual(
+                DEFAULT_RESPONSE_OBSERVATION_TIMEOUT, adapter.response_timeout
+            )
+            self.assertGreaterEqual(
+                adapter.timeout - adapter.response_timeout,
+                MIN_RESULT_RELAY_MARGIN,
+            )
+            adapter.close()
+            with self.assertRaisesRegex(ValueError, "relay margin"):
+                BrowserAdapter(
+                    root / "state",
+                    port=0,
+                    timeout=10,
+                    response_timeout=9.5,
+                )
+
+    def test_pull_carries_bounded_response_timeout_not_a_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            setup_p(root, "P1")
+            config_path = write_config(root)
+            adapter = BrowserAdapter(
+                root / "state",
+                config_path=config_path,
+                port=0,
+                timeout=2,
+                response_timeout=1.5,
+            )
+            job = "plan-" + "c" * 24
+            thread, result = self.start_send(
+                adapter, "plan", job, "PLAN_GPT", "packet"
+            )
+            bridge = wait_bridge(adapter)
+            pending = self.wait_pending(bridge, "plan")
+            self.assertEqual(1500, pending["response_timeout_ms"])
+            self.assertNotIn("bridge_token", pending)
+            request_json(
+                bridge,
+                "/bridge/result",
+                method="POST",
+                body={
+                    "lane": "plan",
+                    "job_id": job,
+                    "client_id": CLIENT_ID,
+                    "raw_response": "done",
+                },
+            )
+            thread.join(timeout=2)
+            self.assertEqual(["done"], result)
+            adapter.close()
 
 
 if __name__ == "__main__":

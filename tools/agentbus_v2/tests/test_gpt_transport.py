@@ -574,6 +574,63 @@ class GPTTransportTests(unittest.TestCase):
                 release_first.set()
                 transport.close()
 
+    def test_same_lane_failure_halts_replay_and_next_fifo_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_paths, second_paths = setup_p(root, "P1"), setup_p(root, "P2")
+            write_lane_config(root, judge=False)
+            first_job = "plan-" + "5" * 24
+            second_job = "plan-" + "6" * 24
+            write_packet(first_paths, first_job, "PLAN_GPT")
+            write_packet(second_paths, second_job, "PLAN_GPT")
+            actions = {
+                "P1": Action(ActionKind.PLAN, effect_id=first_job),
+                "P2": Action(ActionKind.PLAN, effect_id=second_job),
+            }
+            calls: list[str] = []
+            first_started = threading.Event()
+            release_first = threading.Event()
+
+            class AmbiguousFailure(FakeGPTAdapter):
+                def send(self, lane, job_id, operation, packet_text):
+                    calls.append(job_id)
+                    if job_id == first_job:
+                        first_started.set()
+                        release_first.wait(3)
+                        raise TimeoutError("ambiguous post-Send timeout")
+                    return response(job_id, operation, "WAIT")
+
+            transport = GPTTransport(
+                root / "state", adapters={"fake": AmbiguousFailure()}, max_workers=2
+            )
+            try:
+                with patch(
+                    "tools.agentbus_v2.gpt_transport.read_snapshot",
+                    side_effect=lambda paths, allow_merge=False: snapshot_for(
+                        paths.root.name,
+                        pending=actions[paths.root.name].effect_id,
+                    ),
+                ):
+                    self.assertTrue(transport.try_dispatch("P1", actions["P1"]).accepted)
+                    self.assertTrue(first_started.wait(2))
+                    self.assertTrue(transport.try_dispatch("P2", actions["P2"]).accepted)
+                    release_first.set()
+                    self.wait_idle(transport)
+                    status = next(
+                        item for item in transport.status() if item.get("name") == "plan"
+                    )
+                    self.assertTrue(status["halted"])
+                    self.assertEqual(1, status["queued"])
+                    self.assertIn("ambiguous post-Send timeout", status["last_error"])
+                    self.assertEqual([first_job], calls)
+                    replay = transport.try_dispatch("P1", actions["P1"])
+                    self.assertFalse(replay.accepted)
+                    self.assertIn("halted", replay.detail)
+                    self.assertEqual([first_job], calls)
+            finally:
+                release_first.set()
+                transport.close()
+
     def test_close_cancels_queued_job_and_is_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -238,6 +238,10 @@ class GPTTransport:
         ] = {}
         self._jobs: set[str] = set()
         self._last_errors: dict[str, str] = {}
+        # Ephemeral operational fencing only. A failed external boundary must
+        # not cause this process to replay the same job or advance its lane
+        # before an operator has classified whether Send may have happened.
+        self._halted_lanes: set[str] = set()
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="agentbus-v2-gpt")
         self._closed = False
 
@@ -325,9 +329,12 @@ class GPTTransport:
                 self._jobs.discard(job_id)
             if result.accepted:
                 self._last_errors.pop(lane, None)
+                self._halted_lanes.discard(lane)
             else:
                 self._last_errors[lane] = result.detail
-            self._start_next_locked(lane)
+                self._halted_lanes.add(lane)
+            if result.accepted:
+                self._start_next_locked(lane)
         self._notify(queued.on_complete, result)
 
     @staticmethod
@@ -407,6 +414,14 @@ class GPTTransport:
         with self._lock:
             if self._closed:
                 return TransportResult(False, detail="GPT transport is closed")
+            if lane in self._halted_lanes:
+                return TransportResult(
+                    False,
+                    detail=(
+                        f"{lane} lane is halted after operational failure: "
+                        f"{self._last_errors.get(lane, 'unknown failure')}"
+                    ),
+                )
             if job_id in self._jobs:
                 return TransportResult(False, detail=f"GPT job already queued or in flight: {job_id}")
             queued = _QueuedDispatch(
@@ -499,6 +514,7 @@ class GPTTransport:
         with self._lock:
             busy = set(self._active)
             queued = {lane: len(items) for lane, items in self._queues.items()}
+            halted = set(self._halted_lanes)
         rows: list[dict[str, object]] = []
         for lane in LANE_NAMES:
             row: dict[str, object] = {
@@ -507,6 +523,7 @@ class GPTTransport:
                 "transport": configs[lane].transport,
                 "busy": lane in busy,
                 "queued": queued[lane],
+                "halted": lane in halted,
             }
             if lane in self._last_errors:
                 row["last_error"] = self._last_errors[lane]

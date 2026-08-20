@@ -11,23 +11,28 @@ from dataclasses import dataclass
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import logging
+import math
 from pathlib import Path
 import re
 import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlsplit
 
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_BRIDGE_HOST = "127.0.0.1"
 DEFAULT_BRIDGE_PORT = 6791
-DEFAULT_BROWSER_TIMEOUT = 150.0
+DEFAULT_BROWSER_TIMEOUT = 300.0
+DEFAULT_RESPONSE_OBSERVATION_TIMEOUT = 240.0
+MIN_RESULT_RELAY_MARGIN = 15.0
 BRIDGE_TOKEN_HEADER = "X-AgentBus-Token"
 MAX_BRIDGE_BODY = 1_000_000
 LANES = frozenset(("plan", "judge"))
 OPERATIONS = {"plan": "PLAN_GPT", "judge": "JUDGE_GPT"}
 CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+DIAGNOSTIC_JOB_RE = re.compile(r"^(?:plan|judge)-[0-9a-f]{24}$")
+DIAGNOSTIC_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,79}$")
 
 
 class BrowserTransportError(RuntimeError):
@@ -50,22 +55,29 @@ class PendingBrowserJob:
     operation: str
     packet: str
     conversation_url: str
+    response_timeout_ms: int
     event: threading.Event
     response: str | BaseException | None = None
     claimed_by: str | None = None
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "lane": self.lane,
             "job_id": self.job_id,
             "operation": self.operation,
             "packet": self.packet,
             "conversation_url": self.conversation_url,
+            "response_timeout_ms": self.response_timeout_ms,
         }
 
 
 class _BridgeState:
-    def __init__(self, token: str, conversation_urls: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        conversation_urls: Mapping[str, str] | None = None,
+        diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
         if not token:
             raise BrowserTransportError("browser bridge token is required")
         self.token = token
@@ -73,6 +85,7 @@ class _BridgeState:
         self.pending: dict[str, PendingBrowserJob] = {}
         self.heartbeats: dict[str, tuple[float, str]] = {}
         self.diagnostics: list[dict[str, object]] = []
+        self.diagnostic_callback = diagnostic_callback
         self.conversation_urls = {
             lane: canonical_conversation_url(url)
             for lane, url in (conversation_urls or {}).items()
@@ -88,6 +101,7 @@ class _BridgeState:
         packet: str,
         conversation_url: str,
         timeout: float,
+        response_timeout: float,
     ) -> str:
         if lane not in LANES:
             raise BrowserTransportError(f"unsupported browser lane: {lane}")
@@ -99,6 +113,7 @@ class _BridgeState:
             operation,
             packet,
             canonical_conversation_url(conversation_url),
+            int(response_timeout * 1000),
             threading.Event(),
         )
         with self.lock:
@@ -131,7 +146,7 @@ class _BridgeState:
                 item.response = BrowserTransportError("browser bridge stopped")
                 item.event.set()
 
-    def pull(self, lane: str, client_id: str) -> dict[str, str] | None:
+    def pull(self, lane: str, client_id: str) -> dict[str, object] | None:
         if not CLIENT_ID_RE.fullmatch(client_id):
             raise BrowserTransportError("browser client_id is invalid")
         with self.lock:
@@ -189,17 +204,37 @@ class _BridgeState:
                 raise BrowserTransportError("heartbeat conversation does not match pending lane")
             self.heartbeats[lane] = (time.time(), canonical)
 
-    def diagnostic(self, lane: str, code: str, detail: str) -> None:
+    def diagnostic(self, lane: str, job_id: str, code: str, detail: str) -> None:
         if lane not in LANES:
             raise BrowserTransportError(f"unsupported browser lane: {lane}")
-        if not code or len(code) > 80 or len(detail) > 1000:
+        if job_id and not DIAGNOSTIC_JOB_RE.fullmatch(job_id):
+            raise BrowserTransportError("browser diagnostic job_id is invalid")
+        if not DIAGNOSTIC_CODE_RE.fullmatch(code) or len(detail) > 1000:
             raise BrowserTransportError("browser diagnostic is invalid")
+        safe_detail = detail.replace(self.token, "[REDACTED]")
+        event = {
+            "at": time.time(),
+            "lane": lane,
+            "job_id": job_id,
+            "code": code,
+            "detail": safe_detail,
+        }
         with self.lock:
-            self.diagnostics.append({
-                "at": time.time(), "lane": lane, "code": code, "detail": detail
-            })
+            self.diagnostics.append(event)
             del self.diagnostics[:-100]
-        LOGGER.info("browser diagnostic lane=%s code=%s detail=%s", lane, code, detail)
+        if self.diagnostic_callback is not None:
+            try:
+                self.diagnostic_callback(dict(event))
+            except Exception as error:
+                LOGGER.exception("browser diagnostic sink failed")
+                raise BrowserTransportError("browser diagnostic sink failed") from error
+        LOGGER.info(
+            "browser diagnostic lane=%s job_id=%s code=%s detail=%s",
+            lane,
+            job_id,
+            code,
+            safe_detail,
+        )
 
     def diagnostic_snapshot(self) -> tuple[dict[str, object], ...]:
         with self.lock:
@@ -218,6 +253,8 @@ class _BridgeState:
         }
         if heartbeat is not None:
             result["heartbeat_at"] = heartbeat[0]
+        if pending is not None:
+            result["bridge_job_id"] = pending.job_id
         return result
 
 
@@ -386,11 +423,16 @@ class BrowserBridgeRequestHandler(BaseHTTPRequestHandler):
                 self._write(200, {"accepted": True})
                 return
             if parsed.path == "/bridge/diagnostic":
-                self._exact(body, {"lane", "code", "detail"})
-                lane, code, detail = body["lane"], body["code"], body["detail"]
-                if not all(type(value) is str for value in (lane, code, detail)):
+                self._exact(body, {"lane", "job_id", "code", "detail"})
+                lane = body["lane"]
+                job_id = body["job_id"]
+                code = body["code"]
+                detail = body["detail"]
+                if not all(
+                    type(value) is str for value in (lane, job_id, code, detail)
+                ):
                     raise BrowserTransportError("diagnostic fields must be strings")
-                self.server.bridge_state.diagnostic(lane, code, detail)
+                self.server.bridge_state.diagnostic(lane, job_id, code, detail)
                 self._write(200, {"accepted": True})
                 return
             raise BrowserTransportError("unknown browser bridge endpoint")
@@ -413,12 +455,13 @@ class BrowserBridge:
         host: str = DEFAULT_BRIDGE_HOST,
         port: int = DEFAULT_BRIDGE_PORT,
         conversation_urls: Mapping[str, str] | None = None,
+        diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         if host != DEFAULT_BRIDGE_HOST:
             raise BrowserTransportError("browser bridge must bind loopback")
         if not 0 <= port <= 65535:
             raise ValueError("browser bridge port must be between 0 and 65535")
-        self.state = _BridgeState(token, conversation_urls)
+        self.state = _BridgeState(token, conversation_urls, diagnostic_callback)
         self.host = host
         self.requested_port = port
         self.server: BrowserBridgeHTTPServer | None = None
@@ -449,9 +492,18 @@ class BrowserBridge:
         packet: str,
         conversation_url: str,
         timeout: float,
+        response_timeout: float,
     ) -> str:
         self.start()
-        return self.state.register(lane, job_id, operation, packet, conversation_url, timeout)
+        return self.state.register(
+            lane,
+            job_id,
+            operation,
+            packet,
+            conversation_url,
+            timeout,
+            response_timeout,
+        )
 
     def lane_status(self, lane: str) -> dict[str, object]:
         return self.state.lane_status(lane)
@@ -486,14 +538,30 @@ class BrowserAdapter:
         host: str = DEFAULT_BRIDGE_HOST,
         port: int = DEFAULT_BRIDGE_PORT,
         timeout: float = DEFAULT_BROWSER_TIMEOUT,
+        response_timeout: float | None = None,
         bridge: BrowserBridge | None = None,
+        diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
-        if timeout <= 0:
+        if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("browser response timeout must be positive")
+        if response_timeout is None:
+            response_timeout = min(DEFAULT_RESPONSE_OBSERVATION_TIMEOUT, timeout * 0.8)
+        minimum_margin = min(MIN_RESULT_RELAY_MARGIN, timeout * 0.1)
+        if (
+            not math.isfinite(response_timeout)
+            or response_timeout < 0.001
+            or response_timeout > timeout - minimum_margin
+        ):
+            raise ValueError(
+                "browser response observation timeout must precede the outer "
+                "adapter timeout with a relay margin"
+            )
         self.state_root = Path(state_root).resolve()
         self.config_path = Path(config_path).resolve() if config_path else None
         self.timeout = timeout
+        self.response_timeout = response_timeout
         self.bridge = bridge
+        self.diagnostic_callback = diagnostic_callback
         self.host = host
         self.port = port
         self._token: str | None = None
@@ -515,6 +583,7 @@ class BrowserAdapter:
                     host=self.host,
                     port=self.port,
                     conversation_urls=conversation_urls,
+                    diagnostic_callback=self.diagnostic_callback,
                 )
             elif self.bridge.state.token != token:
                 raise BrowserTransportError("browser bridge token does not match lane config")
@@ -545,6 +614,7 @@ class BrowserAdapter:
             packet_text,
             config.conversation_url,
             self.timeout,
+            self.response_timeout,
         )
 
     def start_bridge(self) -> BrowserBridge:

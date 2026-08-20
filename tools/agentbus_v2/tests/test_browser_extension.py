@@ -126,11 +126,11 @@ async function scenario(sendAfterInsertion) {{
     querySelector: (selector) => {{
       if (selector === 'div#prompt-textarea[contenteditable="true"]') return composer;
       if (selector === 'button[data-testid="send-button"]') {{
-        events.push('send_lookup');
+        events.push(text ? 'send_lookup_after_insert' : 'send_lookup_before_insert');
         return sendAfterInsertion && text ? send : null;
       }}
       if (selector === 'button[aria-label="Send prompt"]') {{
-        events.push('send_lookup');
+        events.push(text ? 'send_lookup_after_insert' : 'send_lookup_before_insert');
         return null;
       }}
       return null;
@@ -139,21 +139,221 @@ async function scenario(sendAfterInsertion) {{
   }};
   bridgeMessages.length = 0;
   const result = await api.processRequest({{
-    lane: 'plan', job_id: 'plan-' + '1'.repeat(24),
+    lane: 'plan', job_id: 'plan-' + (sendAfterInsertion ? '1' : '2').repeat(24),
     operation: 'PLAN_GPT', conversation_url: 'https://chatgpt.com/c/plan-lane', packet: 'PACKET'
   }});
   const firstInsert = events.indexOf('insert');
-  const firstSendLookup = events.indexOf('send_lookup');
+  const firstSendLookup = events.indexOf('send_lookup_after_insert');
   if (firstInsert < 0 || firstSendLookup < 0 || firstInsert > firstSendLookup) throw Error('send lookup preceded insertion');
   if (sendAfterInsertion) {{
     if (result !== true || !events.includes('click')) throw Error('post-insertion send did not proceed');
   }} else {{
     if (result !== false || events.includes('click')) throw Error('absent post-insertion send clicked');
-    const diagnostic = bridgeMessages.find((m) => m.path === '/bridge/diagnostic');
-    if (!diagnostic || !String(diagnostic.body).includes('SEND_BUTTON_NOT_FOUND')) throw Error('missing send diagnostic');
+    const diagnostics = bridgeMessages.filter((m) => m.path === '/bridge/diagnostic');
+    if (!diagnostics.some((m) => String(m.body).includes('SEND_BUTTON_NOT_FOUND'))) throw Error('missing send diagnostic');
   }}
 }}
 (async () => {{ await scenario(true); await scenario(false); console.log('ok'); }})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("ok", result.stdout)
+
+    def test_send_boundary_diagnostics_classify_before_and_after_send(self) -> None:
+        content = EXTENSION / "content.js"
+        script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const hostSetTimeout = setTimeout;
+const sandbox = {{
+  module: {{exports: {{}}}}, console, URL, InputEvent: class {{}},
+  setTimeout: (fn, ms) => hostSetTimeout(fn, Math.min(Number(ms) || 0, 1))
+}};
+sandbox.globalThis = sandbox;
+sandbox.AGENTBUS_V2_BROWSER_CONFIG = {{
+  bridge_base: 'http://127.0.0.1:6791',
+  bridge_token: 'super-secret-token',
+  poll_ms: 1000,
+  response_timeout_ms: 120000
+}};
+sandbox.getComputedStyle = () => ({{display: '', visibility: ''}});
+sandbox.location = {{href: 'https://chatgpt.com/c/plan-lane'}};
+const bridgeMessages = [];
+let rejectSendBoundaryDiagnostic = false;
+sandbox.browser = {{runtime: {{sendMessage: async (message) => {{
+  bridgeMessages.push(message);
+  if (
+    rejectSendBoundaryDiagnostic && message.path === '/bridge/diagnostic' &&
+    JSON.parse(message.body).code === 'SEND_ATTEMPTED'
+  ) return {{ok: false, status: 409, body: '{{"error":"sink failed"}}'}};
+  return {{ok: true, status: 200, body: '{{}}'}};
+}}}}}};
+vm.runInNewContext(fs.readFileSync({json.dumps(str(content))}, 'utf8'), sandbox);
+const api = sandbox.module.exports;
+
+let text = '';
+let messages = [];
+let sendAvailable = true;
+let clickMode = 'success';
+let clicks = 0;
+const composer = {{
+  tagName: 'DIV', hidden: false, focus: () => {{}},
+  getAttribute: () => null, dispatchEvent: () => {{}}
+}};
+Object.defineProperty(composer, 'textContent', {{
+  get: () => text,
+  set: (value) => {{ text = String(value); }}
+}});
+function roleNode(role, value) {{
+  return {{
+    innerText: value, textContent: value, hidden: false,
+    getAttribute: (name) => name === 'data-message-author-role' ? role : null
+  }};
+}}
+const send = {{
+  disabled: false, hidden: false, getAttribute: () => null,
+  click: () => {{
+    clicks += 1;
+    const packet = text;
+    text = '';
+    messages = [roleNode('user', packet)];
+    if (clickMode === 'success') messages.push(roleNode('assistant', 'raw answer'));
+  }}
+}};
+sandbox.document = {{
+  querySelector: (selector) => {{
+    if (selector === 'div#prompt-textarea[contenteditable="true"]') return composer;
+    if (selector === 'button[data-testid="send-button"]') return sendAvailable && text ? send : null;
+    return null;
+  }},
+  querySelectorAll: (selector) => {{
+    if (selector === '[data-message-author-role="assistant"]') {{
+      return messages.filter((node) => node.getAttribute('data-message-author-role') === 'assistant');
+    }}
+    if (selector.includes('data-message-author-role="user"')) return messages;
+    return [];
+  }}
+}};
+
+function diagnosticsFor(job) {{
+  return bridgeMessages
+    .filter((message) => message.path === '/bridge/diagnostic')
+    .map((message) => JSON.parse(message.body))
+    .filter((event) => event.job_id === job);
+}}
+function assertOrdered(codes, expected) {{
+  let position = -1;
+  for (const code of expected) {{
+    const next = codes.indexOf(code, position + 1);
+    if (next < 0) throw Error(`missing/out-of-order diagnostic ${{code}} in ${{codes}}`);
+    position = next;
+  }}
+}}
+
+(async () => {{
+  const successJob = 'plan-' + '1'.repeat(24);
+  const success = await api.processRequest({{
+    lane: 'plan', job_id: successJob, operation: 'PLAN_GPT',
+    conversation_url: sandbox.location.href, packet: 'SUCCESS_PACKET',
+    response_timeout_ms: 1000
+  }});
+  if (!success || clicks !== 1) throw Error('successful send boundary did not complete once');
+  const successEvents = diagnosticsFor(successJob);
+  const successCodes = successEvents.map((event) => event.code);
+  assertOrdered(successCodes, [
+    'CLAIM_ACQUIRED', 'DOM_PROBE', 'PACKET_INSERTED', 'SEND_BUTTON_READY',
+    'SEND_ATTEMPTED', 'SEND_CLICK_RETURNED', 'ASSISTANT_RESPONSE_OBSERVED',
+    'RESULT_POST_ATTEMPTED', 'RESULT_ACCEPTED'
+  ]);
+  if (successEvents.some((event) => event.job_id !== successJob)) throw Error('diagnostic job mismatch');
+  if (successEvents.some((event) => JSON.stringify(event).includes('super-secret-token'))) {{
+    throw Error('diagnostic body leaked bridge token');
+  }}
+  messages = [
+    roleNode('user', 'SUCCESS_PACKET'),
+    roleNode('user', 'UNRELATED_LATER_PACKET'),
+    roleNode('assistant', 'unrelated answer')
+  ];
+  const boundedHistory = api.exactConversationObservation('SUCCESS_PACKET');
+  if (!boundedHistory.exact_user_packet_observed || boundedHistory.assistant_response !== null) {{
+    throw Error('assistant after a later user message contaminated exact recovery');
+  }}
+
+  bridgeMessages.length = 0;
+  text = '';
+  messages = [];
+  clickMode = 'timeout';
+  const timeoutJob = 'plan-' + '2'.repeat(24);
+  let timedOut = false;
+  try {{
+    await api.processRequest({{
+      lane: 'plan', job_id: timeoutJob, operation: 'PLAN_GPT',
+      conversation_url: sandbox.location.href, packet: 'TIMEOUT_PACKET',
+      response_timeout_ms: 1
+    }});
+  }} catch (error) {{
+    timedOut = String(error).includes('timed out');
+    await api.reportDiagnostic('plan', timeoutJob, 'POLL_ERROR', String(error));
+  }}
+  if (!timedOut || clicks !== 2) throw Error('post-Send timeout was not exercised');
+  let timeoutEvents = diagnosticsFor(timeoutJob);
+  let timeoutCodes = timeoutEvents.map((event) => event.code);
+  assertOrdered(timeoutCodes, [
+    'SEND_ATTEMPTED', 'SEND_CLICK_RETURNED', 'RESPONSE_TIMEOUT', 'POLL_ERROR'
+  ]);
+  const replay = await api.processRequest({{
+    lane: 'plan', job_id: timeoutJob, operation: 'PLAN_GPT',
+    conversation_url: sandbox.location.href, packet: 'TIMEOUT_PACKET',
+    response_timeout_ms: 1
+  }});
+  if (replay !== false || clicks !== 2) throw Error('post-Send job was clicked twice');
+  timeoutEvents = diagnosticsFor(timeoutJob);
+  if (timeoutEvents.filter((event) => event.code === 'SEND_ATTEMPTED').length !== 1) {{
+    throw Error('SEND_ATTEMPTED was duplicated');
+  }}
+  if (!timeoutEvents.some((event) => event.code === 'EXACT_USER_PACKET_OBSERVED')) {{
+    throw Error('exact DOM recovery evidence was absent');
+  }}
+
+  bridgeMessages.length = 0;
+  text = '';
+  messages = [];
+  sendAvailable = false;
+  const beforeJob = 'plan-' + '3'.repeat(24);
+  const before = await api.processRequest({{
+    lane: 'plan', job_id: beforeJob, operation: 'PLAN_GPT',
+    conversation_url: sandbox.location.href, packet: 'NO_SEND_PACKET',
+    response_timeout_ms: 1000
+  }});
+  const beforeCodes = diagnosticsFor(beforeJob).map((event) => event.code);
+  if (before !== false || beforeCodes.includes('SEND_ATTEMPTED')) {{
+    throw Error('pre-Send failure was classified as attempted');
+  }}
+  if (!beforeCodes.includes('SEND_BUTTON_NOT_FOUND')) throw Error('pre-Send boundary missing');
+
+  bridgeMessages.length = 0;
+  text = '';
+  messages = [];
+  sendAvailable = true;
+  rejectSendBoundaryDiagnostic = true;
+  const sinkJob = 'plan-' + '4'.repeat(24);
+  let sinkFailed = false;
+  try {{
+    await api.processRequest({{
+      lane: 'plan', job_id: sinkJob, operation: 'PLAN_GPT',
+      conversation_url: sandbox.location.href, packet: 'SINK_FAILURE_PACKET',
+      response_timeout_ms: 1000
+    }});
+  }} catch (error) {{ sinkFailed = String(error).includes('diagnostic'); }}
+  if (!sinkFailed || clicks !== 2) throw Error('failed evidence sink did not fence click');
+  const sinkCodes = diagnosticsFor(sinkJob).map((event) => event.code);
+  if (!sinkCodes.includes('SEND_ATTEMPTED') || sinkCodes.includes('SEND_CLICK_RETURNED')) {{
+    throw Error('sink failure boundary was misclassified');
+  }}
+  console.log('ok');
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
 """
         result = subprocess.run(
             ["node", "-e", script], capture_output=True, text=True, check=False
