@@ -37,6 +37,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 P_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 TRAILER_RE = re.compile(r"^AgentBus-V2-([A-Za-z-]+):\s*(.+?)\s*$")
 GPT_JOB_RE = re.compile(r"^(?:plan|judge)-[0-9a-f]{24}$")
+SPEC_ID_RE = re.compile(r"^spec-[0-9a-f]{24}$")
 
 
 class FactError(RuntimeError):
@@ -821,10 +822,17 @@ def _load_proof(
                 "proof_contract": contract_digest,
             },
         )
+        if fact.effect_id != path.stem:
+            raise FactError(f"invalid PROVE result identity/status: {path}")
+        if fact.effect_id != expected_id:
+            # A changed proof contract makes earlier evidence naturally stale.
+            # Keep malformed/tampered records fatal, but do not let a valid
+            # prior contract block recomputation under the new identity.
+            if not SPEC_ID_RE.fullmatch(fact.spec_id):
+                raise FactError(f"invalid PROVE result identity/status: {path}")
+            continue
         if (
-            fact.effect_id != path.stem
-            or fact.effect_id != expected_id
-            or fact.status is Observation.ABSENT
+            fact.status is Observation.ABSENT
             or not SHA_RE.fullmatch(fact.head)
             or not SHA_RE.fullmatch(fact.base)
         ):

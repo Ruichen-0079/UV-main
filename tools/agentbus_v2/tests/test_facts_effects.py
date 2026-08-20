@@ -34,6 +34,7 @@ from tools.agentbus_v2.facts import (
     FactError,
     PConfig,
     PPaths,
+    ProofCommand,
     _load_gpt,
     _load_proof,
     _work_from_head,
@@ -420,6 +421,52 @@ AgentBus-V2-Input-Head: %s
             )
             with self.assertRaisesRegex(FactError, "identity"):
                 _load_proof(paths, config, proof_contract_digest(config))
+
+    def test_prior_proof_contract_result_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            config = config_for(repo, "P_ID: P-TEST\n")
+            paths = PPaths(root / "state" / "P-TEST")
+            paths.create_dirs()
+            evidence: dict[str, object] = {}
+            old_contract = proof_contract_digest(config)
+            effect = stable_id(
+                "prove",
+                {
+                    "p_id": config.p_id,
+                    "spec": "spec-" + "1" * 24,
+                    "head": repo.base,
+                    "base": repo.base,
+                    "trigger_judge": None,
+                    "proof_contract": old_contract,
+                },
+            )
+            (paths.proof_results / f"{effect}.json").write_text(
+                json.dumps(
+                    {
+                        "effect_id": effect,
+                        "spec_id": "spec-" + "1" * 24,
+                        "head": repo.base,
+                        "base": repo.base,
+                        "status": "PASS",
+                        "evidence_digest": sha256_text(
+                            json.dumps(evidence, sort_keys=True)
+                        ),
+                        "trigger_judge_id": None,
+                        "summary": "old contract",
+                        "evidence": evidence,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            changed = replace(
+                config,
+                proof_commands=(ProofCommand("cargo-fmt-check", ("cargo", "fmt", "--check")),),
+            )
+            self.assertEqual(
+                (), _load_proof(paths, changed, proof_contract_digest(changed))
+            )
 
     def test_ci_requires_named_current_base_pull_request_checks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
