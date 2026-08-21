@@ -81,7 +81,10 @@ class LegacyV1BrowserCompatTests(unittest.TestCase):
         )
         write_json(
             self.state / "projects.json",
-            {"projects": [{"p_id": "P1", "enabled": True, "allow_merge": False}]},
+            {"projects": [{
+                "p_id": "P1", "enabled": True, "allow_merge": False,
+                "global_plan_fallback": True,
+            }]},
         )
         write_json(
             self.state / "legacy_v1_browser_compat.json",

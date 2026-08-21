@@ -64,6 +64,17 @@ class GptResult:
 
 
 @dataclass(frozen=True)
+class OperatorDirective:
+    """One immutable human constraint for the next PLAN authority."""
+
+    directive_id: str
+    text: str
+    text_digest: str
+    authority_plan_job_id: str
+    parent_spec_id: str | None = None
+
+
+@dataclass(frozen=True)
 class WorkFact:
     effect_id: str
     spec_id: str
@@ -106,6 +117,7 @@ class Snapshot:
     expected_owner_token: str = ""
     proof_contract_digest: str = ""
     allow_merge: bool = False
+    operator_directive: OperatorDirective | None = None
 
 
 @dataclass(frozen=True)
@@ -130,11 +142,20 @@ def gpt_job_id(
     common = {"p_id": s.p_id, "operation": operation,
               "packet_schema": GPT_PACKET_SCHEMA, "charter": s.charter_digest}
     if operation == "PLAN_GPT":
-        return stable_id("plan", {
+        directive = s.operator_directive
+        payload = {
             **common, "repository": s.expected_repository, "planning_facts": plan_facts_digest(s),
             "parent_spec": parent_spec_id,
             "previous_judge": trigger_judge_id,
-        })
+        }
+        if directive is not None:
+            payload["operator_directive"] = {
+                "directive_id": directive.directive_id,
+                "text_digest": directive.text_digest,
+                "authority_plan_job_id": directive.authority_plan_job_id,
+                "parent_spec_id": directive.parent_spec_id,
+            }
+        return stable_id("plan", payload)
     if operation != "JUDGE_GPT" or spec is None:
         raise ValueError("GPT operation requires a PLAN or JUDGE semantic input")
     if failed_step is None or evidence_id is None or evidence_digest is None:
@@ -150,6 +171,25 @@ def plan_job_id(s: Snapshot, *, parent_spec_id: str | None = None,
                 trigger_judge_id: str | None = None) -> str:
     return gpt_job_id(s, "PLAN_GPT", parent_spec_id=parent_spec_id,
                       trigger_judge_id=trigger_judge_id)
+
+
+def operator_directive_text_digest(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def operator_directive_id(
+    s: Snapshot, text: str, *, parent_spec_id: str | None = None
+) -> str:
+    """Derive an immutable directive identity from prior planning authority."""
+    authority = replace(s, operator_directive=None)
+    authority_plan = plan_job_id(authority, parent_spec_id=parent_spec_id)
+    return stable_id("directive", {
+        "p_id": s.p_id,
+        "authority_plan_job_id": authority_plan,
+        "parent_spec_id": parent_spec_id,
+        "text_digest": operator_directive_text_digest(text),
+    })
 
 
 def plan_facts_digest(s: Snapshot) -> str:
@@ -549,6 +589,11 @@ def decide(s: Snapshot) -> Action:
     spec = s.specs[-1] if s.specs else None
     if spec is None:
         return _plan(s, results)
+    if (
+        s.operator_directive is not None
+        and s.operator_directive.parent_spec_id == spec.spec_id
+    ):
+        return _plan(s, results, spec)
     if (done := _done(s, results, spec)) is not None:
         return done
     return (

@@ -100,7 +100,9 @@ class WebUITests(unittest.TestCase):
         self.worktree.mkdir()
         make_config(self.state_root, "P1", self.worktree)
         self.registry_file = self.state_root / "projects.json"
-        write_registry(self.registry_file, [{"p_id": "P1", "enabled": True}])
+        write_registry(self.registry_file, [{
+            "p_id": "P1", "enabled": True, "global_plan_fallback": True,
+        }])
         self.state = webui.WebUIState(self.state_root)
         self.snapshot = Snapshot(
             p_id="P1",
@@ -351,7 +353,10 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(True, payload["allow_merge"])
         registry = json.loads(self.registry_file.read_text(encoding="utf-8"))
         self.assertEqual(
-            {"p_id": "P1", "enabled": False, "allow_merge": True},
+            {
+                "p_id": "P1", "enabled": False, "allow_merge": True,
+                "global_plan_fallback": True,
+            },
             registry["projects"][0],
         )
         status, payload = self.post("/api/project/UNKNOWN/enabled", {"enabled": True})
@@ -450,6 +455,70 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(400, response.status)
         self.assertIn("malformed", response.read().decode("utf-8"))
         connection.close()
+
+    def test_plan_binding_and_operator_directive_controls_use_control_plane(self) -> None:
+        with patch.object(webui, "read_snapshot", return_value=self.snapshot), patch.object(
+            webui, "decide", return_value=self.action
+        ):
+            status, payload = self.post(
+                "/api/project/P1/plan-binding",
+                {"conversation_url": "https://chatgpt.com/c/p1-plan"},
+            )
+        self.assertEqual(200, status)
+        self.assertEqual("https://chatgpt.com/c/p1-plan", payload["plan_conversation_url"])
+        with patch.object(webui, "read_snapshot", return_value=self.snapshot), patch.object(
+            webui, "decide", return_value=self.action
+        ):
+            status, payload = self.post(
+                "/api/project/P1/plan-directive",
+                {"directive": "Only fix the bounded defect.", "request_replan": False},
+            )
+        self.assertEqual(200, status)
+        self.assertTrue(payload["changed"])
+        status, payload = self.server.request("/api/status")
+        self.assertEqual(200, status)
+        project = payload["projects"][0]
+        self.assertTrue(project["plan_binding"]["bound"])
+        self.assertEqual("Only fix the bounded defect.", project["operator_directive"]["text"])
+        status, html = self.server.request("/")
+        self.assertEqual(200, status)
+        self.assertIn("PLAN 会话", html)
+        self.assertIn("人工 PLAN 约束", html)
+
+    def test_existing_spec_replan_requires_disabled_project(self) -> None:
+        spec = type("Spec", (), {"spec_id": "spec-" + "a" * 24})()
+        snapshot = replace(self.snapshot, specs=(spec,))
+        with patch.object(webui, "read_snapshot", return_value=snapshot):
+            status, payload = self.post(
+                "/api/project/P1/plan-directive",
+                {"directive": "Replan narrowly.", "request_replan": True},
+            )
+        self.assertEqual(409, status)
+        self.assertIn("暂停", payload["error"])
+        self.post("/api/project/P1/enabled", {"enabled": False})
+        with patch.object(webui, "read_snapshot", return_value=snapshot):
+            status, payload = self.post(
+                "/api/project/P1/plan-directive",
+                {"directive": "Replan narrowly.", "request_replan": True},
+            )
+        self.assertEqual(200, status)
+        self.assertTrue(payload["changed"])
+
+    def test_unbound_production_plan_is_presentationally_awaiting_binding(self) -> None:
+        registry = json.loads(self.registry_file.read_text(encoding="utf-8"))
+        registry["projects"][0].pop("global_plan_fallback", None)
+        self.registry_file.write_text(json.dumps(registry), encoding="utf-8")
+        pending = replace(self.snapshot, gpt_pending=frozenset({self.action.effect_id}))
+        self._write_packet(self.action.effect_id)
+        with patch.object(webui, "read_snapshot", return_value=pending), patch.object(
+            webui, "decide", return_value=Action(ActionKind.IDLE, reason="GPT result is absent")
+        ), patch.object(self.state.legacy_browser_compat, "status", return_value=self._compat_status()):
+            status, payload = self.server.request("/api/status")
+        self.assertEqual(200, status)
+        gpt = payload["projects"][0]["gpt_transport"]
+        self.assertEqual("AWAITING_PLAN_BINDING", gpt["state"])
+        self.assertEqual("WAITING", gpt["mode"])
+        self.assertEqual("PER_P_PLAN_BINDING", gpt["transport"])
 
     def test_scheduler_start_stop_is_single_instance(self) -> None:
         self.post("/api/project/P1/enabled", {"enabled": False})

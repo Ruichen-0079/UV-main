@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from typing import Callable, Sequence
+from urllib.parse import urlsplit
 
 from .core import Action, ActionKind, Snapshot
 from .facts import FactError, PPaths, load_config, load_gpt_packet, paths_for, read_snapshot
@@ -26,6 +27,8 @@ class ProjectEntry:
     p_id: str
     enabled: bool = True
     allow_merge: bool = False
+    plan_conversation_url: str | None = None
+    global_plan_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,7 @@ def _validate_entries(state_root: Path, entries: Sequence[ProjectEntry]) -> None
     seen_ids: set[str] = set()
     seen_states: set[Path] = set()
     seen_worktrees: dict[Path, str] = {}
+    seen_plan_urls: dict[str, str] = {}
     for entry in entries:
         if entry.p_id in seen_ids:
             raise FactError(f"duplicate scheduler P_ID: {entry.p_id}")
@@ -85,6 +89,15 @@ def _validate_entries(state_root: Path, entries: Sequence[ProjectEntry]) -> None
             raise FactError(
                 f"scheduler P_ID/config mismatch: {entry.p_id} != {config.p_id}"
             )
+        if entry.plan_conversation_url is not None:
+            plan_url = _validate_plan_url_syntax(entry.plan_conversation_url)
+            if entry.enabled:
+                prior_plan = seen_plan_urls.get(plan_url)
+                if prior_plan is not None:
+                    raise FactError(
+                        f"enabled scheduler Ps share PLAN conversation URL: {prior_plan}, {entry.p_id}"
+                    )
+                seen_plan_urls[plan_url] = entry.p_id
         if not entry.enabled:
             continue
         worktree = Path(config.worktree).expanduser().resolve()
@@ -94,6 +107,19 @@ def _validate_entries(state_root: Path, entries: Sequence[ProjectEntry]) -> None
                 f"enabled scheduler Ps share worktree {worktree}: {prior}, {entry.p_id}"
             )
         seen_worktrees[worktree] = entry.p_id
+
+
+def _validate_plan_url_syntax(value: str) -> str:
+    from .browser_transport import BrowserTransportError, canonical_conversation_url
+
+    try:
+        canonical = canonical_conversation_url(value)
+    except BrowserTransportError as error:
+        raise FactError(str(error)) from error
+    parsed = urlsplit(canonical)
+    if parsed.scheme != "https" or parsed.netloc != "chatgpt.com" or not parsed.path.startswith("/c/"):
+        raise FactError("PLAN conversation URL must be an https://chatgpt.com/c/... URL")
+    return canonical
 
 
 def load_registry(
@@ -123,7 +149,13 @@ def load_registry(
             raise FactError(
                 f"scheduler entry requires string p_id and boolean enabled/allow_merge: {source}"
             )
-        entries.append(ProjectEntry(p_id, enabled, allow_merge))
+        plan_url = raw.get("plan_conversation_url")
+        if plan_url is not None and type(plan_url) is not str:
+            raise FactError(f"scheduler plan_conversation_url must be a string or null: {source}")
+        fallback = raw.get("global_plan_fallback", False)
+        if type(fallback) is not bool:
+            raise FactError(f"scheduler global_plan_fallback must be boolean: {source}")
+        entries.append(ProjectEntry(p_id, enabled, allow_merge, plan_url, fallback))
     result = ProjectRegistry(source.resolve(), tuple(entries))
     if validate:
         _validate_entries(root, result.entries)
@@ -164,7 +196,7 @@ def update_project(
         source.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
             {"projects": [
-                {"p_id": item.p_id, "enabled": item.enabled, "allow_merge": item.allow_merge}
+                _entry_payload(item)
                 for item in updated
             ]},
             indent=2,
@@ -186,6 +218,72 @@ def update_project(
 
 
 _REGISTRY_MUTATION_LOCK = threading.Lock()
+
+
+def _entry_payload(item: ProjectEntry) -> dict[str, object]:
+    value: dict[str, object] = {
+        "p_id": item.p_id,
+        "enabled": item.enabled,
+        "allow_merge": item.allow_merge,
+    }
+    if item.plan_conversation_url is not None:
+        value["plan_conversation_url"] = item.plan_conversation_url
+    if item.global_plan_fallback:
+        value["global_plan_fallback"] = True
+    return value
+
+
+def validate_plan_conversation_url(
+    state_root: Path, p_id: str, conversation_url: str, *, path: Path | None = None,
+) -> str:
+    """Validate a dedicated production PLAN conversation binding."""
+    canonical = _validate_plan_url_syntax(conversation_url)
+    try:
+        from .legacy_v1_browser_compat import load_compat_config
+        compat = load_compat_config(Path(state_root))
+    except FactError:
+        compat = None
+    if compat is not None and compat.conversations.get("judge") == canonical:
+        raise FactError("PLAN conversation URL cannot equal the global JUDGE conversation")
+    registry = load_registry(Path(state_root), path)
+    for entry in registry.entries:
+        if entry.p_id != p_id and entry.enabled and entry.plan_conversation_url:
+            other = _validate_plan_url_syntax(entry.plan_conversation_url)
+            if other == canonical:
+                raise FactError("PLAN conversation URL is already bound to an active P")
+    return canonical
+
+
+def set_plan_conversation_binding(
+    state_root: Path, p_id: str, conversation_url: str, *, path: Path | None = None,
+) -> ProjectRegistry:
+    source = Path(path) if path is not None else registry_path(state_root)
+    with _REGISTRY_MUTATION_LOCK:
+        canonical = validate_plan_conversation_url(
+            state_root, p_id, conversation_url, path=source
+        )
+        current = load_registry(state_root, source)
+        if not any(item.p_id == p_id for item in current.entries):
+            raise FactError(f"unknown scheduler P_ID: {p_id}")
+        updated = tuple(
+            replace(item, plan_conversation_url=canonical)
+            if item.p_id == p_id else item
+            for item in current.entries
+        )
+        _validate_entries(Path(state_root).resolve(), updated)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({"projects": [_entry_payload(item) for item in updated]}, indent=2, sort_keys=True) + "\n"
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{source.name}.", suffix=".tmp", dir=source.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, source)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return load_registry(state_root, source)
 
 
 def _default_tick(state_root: Path, p_id: str, *, allow_merge: bool):

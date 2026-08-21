@@ -340,6 +340,17 @@ class LegacyV1BrowserCompat:
         if operation not in ROLE_TASK:
             raise FactError(f"unsupported current GPT operation: {operation!r}")
         lane = "plan" if operation == "PLAN_GPT" else "judge"
+        if (
+            lane == "plan"
+            and entry.plan_conversation_url is None
+            and not entry.global_plan_fallback
+        ):
+            return None
+        conversation_url = (
+            entry.plan_conversation_url
+            if lane == "plan" and entry.plan_conversation_url is not None
+            else config.conversations[lane]
+        )
         issue = config.mailboxes.get(p_config.repository)
         if issue is None:
             raise LegacyCompatError(f"mailbox is not configured for {p_config.repository}")
@@ -352,7 +363,7 @@ class LegacyV1BrowserCompat:
             operation,
             packet_text,
             sha256_text(packet_text),
-            config.conversations[lane],
+            conversation_url,
             snapshot.head,
             snapshot.base,
             issue,

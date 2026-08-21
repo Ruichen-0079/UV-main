@@ -104,6 +104,13 @@ def render_gpt_prompt(
         "trigger_judge_id": action.payload.get("trigger_judge_id"),
         "planning_facts_digest": planning_digest,
     }
+    if snapshot.operator_directive is not None:
+        semantic["operator_directive"] = {
+            "directive_id": snapshot.operator_directive.directive_id,
+            "text_digest": snapshot.operator_directive.text_digest,
+            "authority_plan_job_id": snapshot.operator_directive.authority_plan_job_id,
+            "parent_spec_id": snapshot.operator_directive.parent_spec_id,
+        }
     if operation == "JUDGE_GPT":
         semantic.update({
             "spec_id": action.payload["spec_id"],
@@ -122,6 +129,11 @@ def render_gpt_prompt(
         if len(matches) == 1:
             prior = json.dumps(asdict(matches[0]), indent=2, ensure_ascii=False)
     spec_block = current.text if current else "NONE (PLAN_GPT must create CURRENT_SPEC)"
+    directive_block = (
+        "NONE"
+        if snapshot.operator_directive is None
+        else snapshot.operator_directive.text
+    )
     evidence = _evidence_text(paths, str(semantic["evidence_id"])) if operation == "JUDGE_GPT" else "No prior evidence; use the exact repository diff below."
     packet = f"""# AGENTBUS V2 SELF-CONTAINED GPT PACKET
 
@@ -137,6 +149,14 @@ P_ID: {config.p_id}
 ## P_CHARTER (immutable)
 
 {charter.rstrip()}
+
+## OPERATOR_DIRECTIVE (binding human planning authority)
+
+{directive_block}
+
+If an operator directive is present, respect it unless it conflicts with the
+immutable P_CHARTER or repository facts. If the bounded strategy cannot be
+implemented correctly, return HUMAN rather than silently expanding scope.
 
 ## CURRENT_SPEC
 

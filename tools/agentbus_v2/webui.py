@@ -16,8 +16,16 @@ from urllib.parse import unquote, urlsplit
 
 from .core import ActionKind, decide
 from .effects import submit_gpt_response
-from .executor_pool import list_executor_accounts
-from .facts import FactError, load_config, paths_for, read_snapshot, sha256_text
+from .executor_pool import list_executor_accounts, worktree_execution_lock
+from .facts import (
+    FactError,
+    add_operator_directive,
+    load_config,
+    load_operator_directive,
+    paths_for,
+    read_snapshot,
+    sha256_text,
+)
 from .legacy_v1_browser_compat import LegacyV1BrowserCompat
 from .scheduler import (
     ProjectEntry,
@@ -25,6 +33,7 @@ from .scheduler import (
     SchedulerEvent,
     load_registry,
     pending_gpt_action,
+    set_plan_conversation_binding,
     update_project,
 )
 
@@ -148,6 +157,48 @@ class WebUIState:
         )
         return next(item for item in result.entries if item.p_id == p_id)
 
+    def set_plan_binding(self, p_id: str, conversation_url: str) -> ProjectEntry:
+        try:
+            result = set_plan_conversation_binding(
+                self.state_root, p_id, conversation_url, path=self.registry_file
+            )
+        except FactError as error:
+            raise WebUIError(422, str(error)) from error
+        return next(item for item in result.entries if item.p_id == p_id)
+
+    def add_plan_directive(
+        self, p_id: str, text: str, *, request_replan: bool = False
+    ) -> dict[str, object]:
+        entry = self.project(p_id)
+        paths = paths_for(self.state_root, p_id)
+        snapshot = read_snapshot(paths, allow_merge=entry.allow_merge)
+        if snapshot.specs and not request_replan:
+            raise WebUIError(409, "已有 CURRENT_SPEC，请使用要求重新规划")
+        parent_spec_id = snapshot.specs[-1].spec_id if snapshot.specs else None
+        if request_replan or snapshot.specs:
+            if entry.enabled:
+                raise WebUIError(409, "要求重新规划前必须先暂停该 P")
+            if self.scheduler.is_in_flight(p_id):
+                raise WebUIError(409, "该 P 当前仍有 scheduler effect in flight")
+            try:
+                with worktree_execution_lock(self.state_root, load_config(paths).worktree) as acquired:
+                    if not acquired:
+                        raise WebUIError(409, "该 P 当前由 WORK executor 占用")
+            except WebUIError:
+                raise
+        try:
+            directive, changed = add_operator_directive(
+                paths, snapshot, text, parent_spec_id=parent_spec_id
+            )
+        except FactError as error:
+            raise WebUIError(422, str(error)) from error
+        return {
+            "p_id": p_id,
+            "directive_id": directive.directive_id,
+            "changed": changed,
+            "request_replan": request_replan,
+        }
+
     def tick_now(self, p_id: str) -> dict[str, object]:
         self.project(p_id)
         scheduler = self.scheduler
@@ -255,6 +306,24 @@ class WebUIState:
         return projection
 
     @staticmethod
+    def _awaiting_plan_binding_projection(
+        operation: str, job_id: str, manual_fallback: dict[str, object] | None,
+    ) -> dict[str, object]:
+        return {
+            "operation": operation,
+            "mode": "WAITING",
+            "transport": "PER_P_PLAN_BINDING",
+            "state": "AWAITING_PLAN_BINDING",
+            "job_id": job_id,
+            "extension": "NOT_DISPATCHED",
+            "mailbox": "NOT_DISPATCHED",
+            "last_poll": None,
+            "last_error": None,
+            "manual_fallback": manual_fallback,
+            "warning": "请先绑定该 P 的专用 PLAN 会话；不会使用全局 PLAN 会话。",
+        }
+
+    @staticmethod
     def _gpt_lane_projection(
         lane_status: tuple[dict[str, object], ...],
         browser_status: dict[str, object],
@@ -306,6 +375,12 @@ class WebUIState:
                 "p_id": entry.p_id,
                 "enabled": entry.enabled,
                 "allow_merge": entry.allow_merge,
+                "plan_binding": {
+                    "bound": entry.plan_conversation_url is not None,
+                    "conversation_url": entry.plan_conversation_url,
+                    "global_fallback": entry.global_plan_fallback,
+                },
+                "operator_directive": None,
                 "in_flight": self.scheduler.is_in_flight(entry.p_id),
                 "action": "ERROR",
                 "detail": self._latest_detail(entry.p_id),
@@ -315,6 +390,13 @@ class WebUIState:
                 "gpt_transport": None,
             }
             try:
+                directive = load_operator_directive(paths)
+                if directive is not None:
+                    projection["operator_directive"] = {
+                        "directive_id": directive.directive_id,
+                        "text": directive.text,
+                        "text_digest": directive.text_digest,
+                    }
                 config = load_config(paths)
                 snapshot = read_snapshot(paths, allow_merge=entry.allow_merge)
                 action = decide(snapshot)
@@ -342,6 +424,13 @@ class WebUIState:
                         str(packet["operation"]),
                         str(packet["job_id"]),
                         packet,
+                    ) if not (
+                        packet["operation"] == "PLAN_GPT"
+                        and entry.plan_conversation_url is None
+                        and not entry.global_plan_fallback
+                        and browser_status.get("configured") is True
+                    ) else self._awaiting_plan_binding_projection(
+                        str(packet["operation"]), str(packet["job_id"]), packet
                     )
                 elif snapshot.gpt_results:
                     result = snapshot.gpt_results[-1]
@@ -354,6 +443,16 @@ class WebUIState:
                             result_received=True,
                             decision=result.decision,
                         )
+                if (
+                    projection["gpt_transport"] is None
+                    and action.kind is ActionKind.PLAN
+                    and entry.plan_conversation_url is None
+                    and not entry.global_plan_fallback
+                    and browser_status.get("configured") is True
+                ):
+                    projection["gpt_transport"] = self._awaiting_plan_binding_projection(
+                        "PLAN_GPT", str(action.effect_id or "pending"), None
+                    )
                 # Keep config loading explicit: it fences the registered P before
                 # projecting any of its durable facts.
                 if config.p_id != entry.p_id:
@@ -388,11 +487,15 @@ async function submit(p){const box=document.getElementById('gpt-'+CSS.escape(p))
 function copyText(v){navigator.clipboard?.writeText(v)}
 function showError(e){document.getElementById('error').textContent=String(e);setTimeout(()=>document.getElementById('error').textContent='',5000)}
  function copyValue(v){return `decodeURIComponent('${encodeURIComponent(v??'').replaceAll("'","%27")}')`}
+ function shortUrl(v){if(!v)return '';return v.length>52?v.slice(0,24)+'…'+v.slice(-20):v}
+ async function bindPlan(p){const current=p.plan_binding?.conversation_url||'';const url=prompt('PLAN 会话 URL（https://chatgpt.com/c/...）',current);if(url===null)return;if(!url.trim())return showError('PLAN 会话 URL 不能为空');await project(p.p_id,'plan-binding',{conversation_url:url.trim()})}
+ async function setDirective(p,replan){if(replan&&!confirm('该 P 必须先暂停。应用新约束会产生新的 exact PLAN 请求，旧请求即使稍后返回也不会成为当前结果。继续？'))return;const current=p.operator_directive?.text||'';const text=prompt(replan?'人工 PLAN 约束（要求重新规划）':'人工 PLAN 约束',current);if(text===null)return;if(!text.trim())return showError('人工 PLAN 约束不能为空');await project(p.p_id,'plan-directive',{directive:text,request_replan:replan})}
+ function renderPlanControls(p){const b=p.plan_binding||{};const bound=b.bound?`<span class="ok">已绑定</span> <code>${esc(shortUrl(b.conversation_url))}</code>`:'<span class="warn">未绑定</span>';const d=p.operator_directive?`<div class="muted">当前约束：${esc(p.operator_directive.text)}</div>`:'<div class="muted">当前约束：无</div>';const replan=Boolean(p.spec_id);return `<div><b>PLAN 会话</b>：${bound}</div><button onclick="bindPlan(${copyValue(p.p_id)})">${b.bound?'修改 PLAN 会话':'绑定 PLAN 会话'}</button>${d}<button onclick="setDirective(${copyValue(p.p_id)},${replan})">${replan?'要求重新规划':'添加约束'}</button>`}
  function manualFallback(p,g){const m=g.manual_fallback;if(!m)return '';return `<details class="manual-fallback"><summary>Advanced manual GPT fallback</summary><button onclick="copyText(${copyValue(m.packet_path)})">Copy packet path</button><button onclick="copyText(${copyValue(m.instruction)})">Copy instruction</button><br><code>${esc(m.packet_sha256||'packet not generated yet')}</code><textarea id="gpt-${esc(p.p_id)}" placeholder="Paste exact GPT JSON here"></textarea><button onclick="submit('${esc(p.p_id)}')">Submit exact JSON</button></details>`}
  function renderGpt(p){const g=p.gpt_transport;if(!g)return '—';const result=g.state==='RESULT_RECEIVED'?`<br><span class="muted">Decision: ${esc(g.decision||'accepted')}</span>`:'';const warning=g.mode==='AUTO'&&g.manual_fallback?`<p class="warn">${esc(g.warning)}</p>`:'';const fallback=manualFallback(p,g);return `<div class="transport"><b>${esc(g.operation)} · ${esc(g.mode)}</b><br>Transport: <strong>${esc(g.transport)}</strong><br>State: <strong>${esc(g.state)}</strong><br>Job: <code>${esc(g.job_id)}</code>${result}<br>Extension: ${esc(g.extension)}<br>Mailbox: ${esc(g.mailbox)}${g.last_poll?`<br>Last poll: ${esc(g.last_poll)}`:''}${g.last_error?`<br><span class="err">Error: ${esc(g.last_error)}</span>`:''}${warning}${fallback}</div>`}
  function renderLanes(rows){return (rows||[]).map(l=>`${l.semantic_operation||l.name} · production transport: ${l.production_transport||l.transport||'UNKNOWN'}\nextension: ${l.extension||'UNKNOWN'} · mailbox: ${l.mailbox||'UNKNOWN'} · pending jobs: ${l.pending_jobs??l.queued??0}`).join('\n\n')}
  function renderBrowserTransport(b){return [`Browser transport: ${b.transport_mode||'UNKNOWN'}`,`Extension: ${b.legacy_v1_extension||'UNKNOWN'}`,`Last poll: ${b.last_poll||'—'}`,`Mailbox: ${b.mailbox||'UNKNOWN'}`,`Pending PLAN: ${b.plan?.pending??0} (${b.plan?.state||'unknown'})`,`Pending JUDGE: ${b.judge?.pending??0} (${b.judge?.state||'unknown'})`].join('\n')}
- function render(v){const s=v.scheduler||{};document.getElementById('summary').textContent='scheduler '+(s.running?'RUNNING':'STOPPED')+' · enabled '+(s.enabled_p_ids||[]).length+' · in-flight '+(s.in_flight_p_ids||[]).length;document.getElementById('executors').textContent=JSON.stringify(v.executors||[],null,2);document.getElementById('gpt-lanes').textContent=renderLanes(v.gpt_lanes);document.getElementById('browser-transport').textContent=renderBrowserTransport(v.browser_transport||{});document.getElementById('events').textContent=(v.events||[]).slice().reverse().map(e=>JSON.stringify(e)).join('\n');document.getElementById('projects').innerHTML=(v.projects||[]).map(p=>`<tr><td><strong>${esc(p.p_id)}</strong><br><span class="muted">${p.in_flight?'IN-FLIGHT':'IDLE'}</span></td><td>${p.enabled?'<span class="ok">ENABLED</span>':'<span class="muted">DISABLED</span>'}<br>merge ${p.allow_merge?'ON':'OFF'}</td><td><strong>${esc(p.action)}</strong><br><span class="${p.action==='HUMAN'?'err':'muted'}">${esc(p.detail)}</span></td><td><code>${esc(p.head||'—')}</code><br><code>${esc(p.spec_id||'—')}</code></td><td>${renderGpt(p)}</td><td><button onclick="project('${esc(p.p_id)}','enabled',{enabled:${!p.enabled}})">${p.enabled?'Disable':'Enable'}</button><button onclick="project('${esc(p.p_id)}','allow-merge',{allow_merge:${!p.allow_merge}})">${p.allow_merge?'Disallow merge':'Allow merge'}</button><button onclick="project('${esc(p.p_id)}','tick',{})">Tick now</button></td></tr>`).join('')}
+ function render(v){const s=v.scheduler||{};document.getElementById('summary').textContent='scheduler '+(s.running?'RUNNING':'STOPPED')+' · enabled '+(s.enabled_p_ids||[]).length+' · in-flight '+(s.in_flight_p_ids||[]).length;document.getElementById('executors').textContent=JSON.stringify(v.executors||[],null,2);document.getElementById('gpt-lanes').textContent=renderLanes(v.gpt_lanes);document.getElementById('browser-transport').textContent=renderBrowserTransport(v.browser_transport||{});document.getElementById('events').textContent=(v.events||[]).slice().reverse().map(e=>JSON.stringify(e)).join('\n');document.getElementById('projects').innerHTML=(v.projects||[]).map(p=>`<tr><td><strong>${esc(p.p_id)}</strong><br><span class="muted">${p.in_flight?'IN-FLIGHT':'IDLE'}</span><br>${renderPlanControls(p)}</td><td>${p.enabled?'<span class="ok">ENABLED</span>':'<span class="muted">DISABLED</span>'}<br>merge ${p.allow_merge?'ON':'OFF'}</td><td><strong>${esc(p.action)}</strong><br><span class="${p.action==='HUMAN'?'err':'muted'}">${esc(p.detail)}</span></td><td><code>${esc(p.head||'—')}</code><br><code>${esc(p.spec_id||'—')}</code></td><td>${renderGpt(p)}</td><td><button onclick="project('${esc(p.p_id)}','enabled',{enabled:${!p.enabled}})">${p.enabled?'Disable':'Enable'}</button><button onclick="project('${esc(p.p_id)}','allow-merge',{allow_merge:${!p.allow_merge}})">${p.allow_merge?'Disallow merge':'Allow merge'}</button><button onclick="project('${esc(p.p_id)}','tick',{})">Tick now</button></td></tr>`).join('')}
 async function refresh(){try{const r=await fetch('/api/status');if(!r.ok)throw Error('HTTP '+r.status);render(await r.json())}catch(e){showError('Server unreachable or status failed: '+e)}}refresh();setInterval(refresh,1500);
 </script></body></html>"""
 
@@ -508,6 +611,24 @@ class WebUIRequestHandler(BaseHTTPRequestHandler):
                         raise WebUIError(400, "allow_merge must be boolean")
                     entry = self.server.state.set_allow_merge(p_id, body["allow_merge"])
                     self._write(200, {"p_id": entry.p_id, "allow_merge": entry.allow_merge})
+                    return
+                if operation == "plan-binding":
+                    self._exact(body, {"conversation_url"})
+                    if type(body["conversation_url"]) is not str:
+                        raise WebUIError(400, "conversation_url must be a string")
+                    entry = self.server.state.set_plan_binding(p_id, body["conversation_url"])
+                    self._write(200, {
+                        "p_id": entry.p_id,
+                        "plan_conversation_url": entry.plan_conversation_url,
+                    })
+                    return
+                if operation == "plan-directive":
+                    self._exact(body, {"directive", "request_replan"})
+                    if type(body["directive"]) is not str or type(body["request_replan"]) is not bool:
+                        raise WebUIError(400, "directive must be string and request_replan boolean")
+                    self._write(200, self.server.state.add_plan_directive(
+                        p_id, body["directive"], request_replan=body["request_replan"]
+                    ))
                     return
                 if operation == "tick":
                     self._exact(body, set())

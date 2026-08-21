@@ -22,6 +22,7 @@ from .effects import (
 )
 from .executor_pool import dispatch_work
 from .facts import (
+    add_operator_directive,
     FactError,
     init_p,
     load_config,
@@ -99,6 +100,20 @@ def parser() -> argparse.ArgumentParser:
     submit.add_argument("p_id")
     submit.add_argument("response", type=Path)
 
+    binding = commands.add_parser(
+        "set-plan-binding", help="bind one P to an exact dedicated ChatGPT PLAN conversation"
+    )
+    binding.add_argument("p_id")
+    binding.add_argument("--url", required=True)
+    binding.add_argument("--registry", type=Path)
+
+    directive = commands.add_parser(
+        "add-plan-directive", help="add one immutable operator constraint to PLAN"
+    )
+    directive.add_argument("p_id")
+    directive.add_argument("--text", required=True)
+    directive.add_argument("--replan", action="store_true")
+
     return root
 
 
@@ -143,6 +158,21 @@ def tick_once(state_root: Path, p_id: str, *, allow_merge: bool) -> tuple[Action
         action = decide(snapshot)
         result: EffectResult | None = None
         if action.kind in {ActionKind.PLAN, ActionKind.JUDGE}:
+            if action.kind is ActionKind.PLAN:
+                from .scheduler import load_registry
+
+                try:
+                    entry = next(
+                        item for item in load_registry(state_root).entries if item.p_id == p_id
+                    )
+                except StopIteration:
+                    entry = None
+                if (
+                    entry is not None
+                    and entry.plan_conversation_url is None
+                    and not entry.global_plan_fallback
+                ):
+                    return Action(ActionKind.IDLE, reason="AWAITING_PLAN_BINDING"), None
             result = dispatch_manual_gpt(paths, config, snapshot, action)
         elif action.kind is ActionKind.WORK:
             result = dispatch_work(state_root, paths, config, snapshot, action)
@@ -202,6 +232,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "gpt-submit":
             result = submit_gpt_response(paths_for(args.state_root, args.p_id), args.response)
             _print(_result_json(result))
+            return 0
+        if args.command == "set-plan-binding":
+            from .scheduler import set_plan_conversation_binding
+
+            registry = set_plan_conversation_binding(
+                args.state_root, args.p_id, args.url, path=args.registry
+            )
+            _print({
+                "outcome": "PLAN_BINDING_SET",
+                "p_id": args.p_id,
+                "plan_conversation_url": next(
+                    item.plan_conversation_url
+                    for item in registry.entries if item.p_id == args.p_id
+                ),
+            })
+            return 0
+        if args.command == "add-plan-directive":
+            paths = paths_for(args.state_root, args.p_id)
+            snapshot = read_snapshot(paths)
+            if args.replan and not snapshot.specs:
+                raise FactError("request-replan requires an existing CURRENT_SPEC")
+            parent = snapshot.specs[-1].spec_id if args.replan and snapshot.specs else None
+            if args.replan:
+                from .scheduler import load_registry
+                from .executor_pool import worktree_execution_lock
+
+                entry = next(item for item in load_registry(args.state_root).entries if item.p_id == args.p_id)
+                if entry.enabled:
+                    raise FactError("request-replan requires a disabled P")
+                with worktree_execution_lock(args.state_root, load_config(paths).worktree) as acquired:
+                    if not acquired:
+                        raise FactError("request-replan is blocked by an active WORK executor")
+            directive, changed = add_operator_directive(
+                paths, snapshot, args.text, parent_spec_id=parent
+            )
+            _print({
+                "outcome": "PLAN_DIRECTIVE_ADDED" if changed else "PLAN_DIRECTIVE_PRESENT",
+                "p_id": args.p_id,
+                "directive_id": directive.directive_id,
+                "changed": changed,
+            })
             return 0
         if args.command == "tick":
             action, result = tick_once(

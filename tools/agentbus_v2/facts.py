@@ -17,6 +17,7 @@ from .core import (
     GPT_PACKET_SCHEMA,
     PROOF_SCHEMA,
     GptResult,
+    OperatorDirective,
     Observation,
     ProofFact,
     Snapshot,
@@ -24,6 +25,8 @@ from .core import (
     WorkFact,
     plan_facts_digest,
     plan_job_id,
+    operator_directive_id,
+    operator_directive_text_digest,
     proof_id,
     spec_id,
     stable_id,
@@ -84,7 +87,10 @@ class PPaths:
     root: Path
 
     def create_dirs(self) -> None:
-        for path in ("gpt/outbox", "gpt/results", "work/results", "work/logs", "prove/results"):
+        for path in (
+            "gpt/outbox", "gpt/results", "work/results", "work/logs", "prove/results",
+            "operator",
+        ):
             (self.root / path).mkdir(parents=True, exist_ok=True)
 def paths_for(state_root: Path, p_id: str) -> PPaths:
     if not P_ID_RE.fullmatch(p_id):
@@ -428,6 +434,78 @@ def load_charter(paths: PPaths, config: PConfig) -> str:
     return charter
 
 
+def load_operator_directive(paths: PPaths) -> OperatorDirective | None:
+    path = paths.root / "operator" / "directive.json"
+    if not path.exists():
+        return None
+    value = _load_json(path)
+    fields = {
+        "directive_id", "text", "text_digest", "authority_plan_job_id", "parent_spec_id",
+    }
+    if set(value) != fields or any(
+        type(value.get(key)) is not str
+        for key in ("directive_id", "text", "text_digest", "authority_plan_job_id")
+    ):
+        raise FactError(f"invalid operator directive fact: {path}")
+    parent = value["parent_spec_id"]
+    if parent is not None and type(parent) is not str:
+        raise FactError(f"invalid operator directive parent: {path}")
+    if parent is not None and not re.fullmatch(r"spec-[0-9a-f]{24}", parent):
+        raise FactError(f"invalid operator directive parent: {path}")
+    text = value["text"].replace("\r\n", "\n").strip()
+    if not text or text != value["text"]:
+        raise FactError(f"operator directive text is not normalized: {path}")
+    if not re.fullmatch(r"directive-[0-9a-f]{24}", value["directive_id"]):
+        raise FactError(f"invalid operator directive ID: {path}")
+    if not GPT_JOB_RE.fullmatch(value["authority_plan_job_id"]):
+        raise FactError(f"invalid operator directive authority: {path}")
+    if not re.fullmatch(r"[0-9a-f]{64}", value["text_digest"]):
+        raise FactError(f"invalid operator directive digest: {path}")
+    if operator_directive_text_digest(text) != value["text_digest"]:
+        raise FactError(f"operator directive digest mismatch: {path}")
+    return OperatorDirective(
+        directive_id=value["directive_id"], text=text,
+        text_digest=value["text_digest"],
+        authority_plan_job_id=value["authority_plan_job_id"],
+        parent_spec_id=parent,
+    )
+
+
+def add_operator_directive(
+    paths: PPaths,
+    snapshot: Snapshot,
+    text: str,
+    *,
+    parent_spec_id: str | None = None,
+) -> tuple[OperatorDirective, bool]:
+    """Write one immutable directive fact, idempotently.
+
+    The file is intentionally singular: a conflicting rewrite fails closed
+    instead of creating a hidden directive timeline or mutable pointer.
+    """
+    normalized = text.replace("\r\n", "\n").strip()
+    if not normalized:
+        raise FactError("operator directive cannot be empty")
+    if parent_spec_id is not None and not re.fullmatch(r"spec-[0-9a-f]{24}", parent_spec_id):
+        raise FactError("operator directive parent SPEC has an invalid identity")
+    authority = replace(snapshot, operator_directive=None)
+    authority_job = plan_job_id(authority, parent_spec_id=parent_spec_id)
+    directive = OperatorDirective(
+        directive_id=operator_directive_id(authority, normalized, parent_spec_id=parent_spec_id),
+        text=normalized,
+        text_digest=operator_directive_text_digest(normalized),
+        authority_plan_job_id=authority_job,
+        parent_spec_id=parent_spec_id,
+    )
+    encoded = asdict(directive)
+    existing = load_operator_directive(paths)
+    if existing is not None:
+        if existing != directive:
+            raise FactError("conflicting immutable operator directive")
+        return existing, False
+    return directive, write_json_once(paths.root / "operator" / "directive.json", encoded)
+
+
 GPT_DECISIONS = {
     "PLAN_GPT": PLAN_RESULTS,
     "JUDGE_GPT": JUDGE_RESULTS,
@@ -506,6 +584,13 @@ def _validate_gpt_packet(
         "trigger_judge_id": action.payload.get("trigger_judge_id"),
         "planning_facts_digest": plan_facts_digest(snapshot),
     }
+    if snapshot.operator_directive is not None:
+        semantic["operator_directive"] = {
+            "directive_id": snapshot.operator_directive.directive_id,
+            "text_digest": snapshot.operator_directive.text_digest,
+            "authority_plan_job_id": snapshot.operator_directive.authority_plan_job_id,
+            "parent_spec_id": snapshot.operator_directive.parent_spec_id,
+        }
     if action.kind is ActionKind.JUDGE:
         spec_id_value = action.payload.get("spec_id")
         spec = next(
@@ -568,7 +653,9 @@ def _load_plan_spec(
         )
         if not valid:
             raise FactError(f"PLAN packet identity is malformed: {job_id}")
-        identity = _identity(config, packet_head, packet_base, "")
+        identity = _identity(
+            config, packet_head, packet_base, "", identity.operator_directive
+        )
         if plan_job_id(identity, parent_spec_id=parent_id, trigger_judge_id=trigger) != job_id:
             raise FactError(f"PLAN packet identity mismatch: {job_id}")
     else:
@@ -771,12 +858,19 @@ def _validate_proof_ci(
                 raise FactError(f"PROVE PASS lacks required CI evidence: {path}")
 
 
-def _identity(config: PConfig, head: str, base: str, contract: str) -> Snapshot:
+def _identity(
+    config: PConfig,
+    head: str,
+    base: str,
+    contract: str,
+    operator_directive: OperatorDirective | None = None,
+) -> Snapshot:
     return Snapshot(
         p_id=config.p_id, charter_digest=config.charter_digest,
         expected_repository=config.repository, expected_branch=config.branch,
         base_ref=config.base_ref, head=head, base=base,
         proof_contract_digest=contract,
+        operator_directive=operator_directive,
     )
 
 
@@ -953,9 +1047,67 @@ def _current_stage(
 
 def _load_current(
     paths: PPaths, config: PConfig, head: str, base: str, contract_digest: str,
+    operator_directive: OperatorDirective | None = None,
 ) -> tuple[tuple[GptResult, ...], tuple[SpecFact, ...], frozenset[str],
            tuple[WorkFact, ...], tuple[ProofFact, ...]]:
-    identity = _identity(config, head, base, contract_digest)
+    identity = _identity(config, head, base, contract_digest, operator_directive)
+    if operator_directive is not None:
+        authority = replace(identity, operator_directive=None)
+        expected_authority = plan_job_id(
+            authority, parent_spec_id=operator_directive.parent_spec_id
+        )
+        if operator_directive.authority_plan_job_id != expected_authority:
+            raise FactError("operator directive authority does not match current planning facts")
+        if operator_directive.parent_spec_id is not None:
+            # Reconstruct the historical SPEC lineage without the new
+            # directive first.  A replan must not make the old root PLAN (and
+            # its SPEC) disappear merely because the new directive changes
+            # the next PLAN identity.
+            historical = _load_current(
+                paths, config, head, base, contract_digest, None
+            )
+            old_results, old_specs, _, _, _ = historical
+            parent_spec = next(
+                (item for item in old_specs if item.spec_id == operator_directive.parent_spec_id),
+                None,
+            )
+            if parent_spec is None:
+                raise FactError("operator directive parent SPEC is not current durable history")
+            replan_job, replan_result, replan_spec = _load_plan_spec(
+                paths, config, identity, parent_spec, None
+            )
+            if replan_result is None:
+                packet_path = paths.root / "gpt" / "outbox" / f"{replan_job}.md"
+                pending = frozenset()
+                if packet_path.exists():
+                    packet = load_gpt_packet(paths, replan_job)
+                    _validate_gpt_packet(
+                        packet,
+                        replace(identity, specs=old_specs),
+                        Action(
+                            ActionKind.PLAN,
+                            effect_id=replan_job,
+                            payload={
+                                "parent_spec_id": parent_spec.spec_id,
+                                "trigger_judge_id": None,
+                            },
+                        ),
+                    )
+                    pending = frozenset({replan_job})
+                return old_results, old_specs, pending, (), ()
+            results = list(old_results)
+            specs = list(old_specs)
+            results.append(replan_result)
+            if replan_spec is None:
+                return tuple(results), tuple(specs), frozenset(), (), ()
+            specs.append(replan_spec)
+            work, proof, stage_results, return_plan = _current_stage(
+                paths, config, identity, replan_spec
+            )
+            results.extend(stage_results)
+            if return_plan is None:
+                return tuple(results), tuple(specs), frozenset(), work, proof
+            return tuple(results), tuple(specs), frozenset(), work, proof
     results: list[GptResult] = []
     specs: list[SpecFact] = []
     parent: SpecFact | None = None
@@ -1004,6 +1156,40 @@ def _load_current(
         ):
             raise FactError("recovered WORK commit Plan/SPEC identities disagree")
         specs.append(spec)
+        if (
+            operator_directive is not None
+            and operator_directive.parent_spec_id == spec.spec_id
+        ):
+            replan_job, replan_result, replan_spec = _load_plan_spec(
+                paths, config, identity, spec, None
+            )
+            if replan_job in seen:
+                raise FactError(f"PLAN lineage cycle: {replan_job}")
+            seen.add(replan_job)
+            if replan_result is None:
+                packet_path = paths.root / "gpt" / "outbox" / f"{replan_job}.md"
+                pending = frozenset()
+                if packet_path.exists():
+                    packet = load_gpt_packet(paths, replan_job)
+                    _validate_gpt_packet(
+                        packet,
+                        replace(identity, specs=tuple(specs)),
+                        Action(
+                            ActionKind.PLAN,
+                            effect_id=replan_job,
+                            payload={
+                                "parent_spec_id": spec.spec_id,
+                                "trigger_judge_id": None,
+                            },
+                        ),
+                    )
+                    pending = frozenset({replan_job})
+                return tuple(results), tuple(specs), pending, work, proof
+            results.append(replan_result)
+            if replan_spec is None:
+                return tuple(results), tuple(specs), frozenset(), work, proof
+            specs.append(replan_spec)
+            spec = replan_spec
         work, proof, stage_results, return_plan = _current_stage(
             paths, config, identity, spec
         )
@@ -1056,6 +1242,7 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
     worktree = Path(config.worktree).resolve()
     if Path(git(worktree, "rev-parse", "--show-toplevel")).resolve() != worktree:
         raise FactError("configured worktree is no longer its Git root")
+    operator_directive = load_operator_directive(paths)
     actual_repository = canonical_repository(
         git(worktree, "remote", "get-url", config.remote)
     )
@@ -1089,7 +1276,7 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
     contract = proof_contract_digest(config)
     if repository_available:
         results, specs, pending, work, proof = _load_current(
-            paths, config, head, base, contract
+            paths, config, head, base, contract, operator_directive
         )
     else:
         results, specs, pending, work, proof = (), (), frozenset(), (), ()
@@ -1124,7 +1311,7 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         # immutable merge parent supplies that base without scheduler recovery
         # state or historical directory scans.
         results, specs, pending, work, proof = _load_current(
-            paths, config, head, merge.merge_parents[0], contract
+            paths, config, head, merge.merge_parents[0], contract, operator_directive
         )
     snapshot = Snapshot(
         p_id=config.p_id,
@@ -1144,5 +1331,6 @@ def read_snapshot(paths: PPaths, *, allow_merge: bool = False) -> Snapshot:
         expected_owner_token=config.owner_token,
         proof_contract_digest=contract,
         allow_merge=allow_merge,
+        operator_directive=operator_directive,
     )
     return _project_current_gpt_pending(paths, snapshot)
