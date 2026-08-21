@@ -44,6 +44,15 @@ class FactError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class AdoptedPr:
+    number: int
+    seed_head_sha: str
+    head_branch: str
+    base_branch: str
+    observed_base_sha: str
+
+
+@dataclass(frozen=True)
 class PConfig:
     p_id: str
     worktree: str
@@ -55,10 +64,19 @@ class PConfig:
     charter_digest: str
     proof_commands: tuple[tuple[str, ...], ...]
     required_ci_checks: tuple[str, ...]
+    adopted_pr: AdoptedPr | None = None
 
     @property
     def owner_token(self) -> str:
-        return stable_id("owner", {"p_id": self.p_id, "repository": self.repository, "branch": self.branch, "seed_head": self.seed_head})
+        identity: dict[str, Any] = {
+            "p_id": self.p_id,
+            "repository": self.repository,
+            "branch": self.branch,
+            "seed_head": self.seed_head,
+        }
+        if self.adopted_pr is not None:
+            identity["adopted_pr"] = asdict(self.adopted_pr)
+        return stable_id("owner", identity)
 
 
 @dataclass(frozen=True)
@@ -236,6 +254,97 @@ def init_p(
     return paths
 
 
+def init_adopted_p_facts(
+    state_root: Path,
+    *,
+    p_id: str,
+    charter_text: str,
+    worktree: Path,
+    repository: str,
+    branch: str,
+    adopted_pr: AdoptedPr,
+    base_ref: str = "main",
+    remote: str = "origin",
+    proof_commands: Iterable[tuple[str, ...]] = (),
+    required_ci_checks: Iterable[str] = (),
+) -> PPaths:
+    """Write only the immutable local half of an already-validated PR adoption.
+
+    The public administrative operation lives in ``github.adopt_existing_pr``;
+    it validates the exact GitHub PR before calling this helper.  Local facts
+    are deliberately written before the idempotent remote ownership claim, so
+    a fresh process can resume convergence without a recovery-state file.
+    """
+    paths = paths_for(state_root, p_id)
+    worktree = worktree.resolve()
+    actual_root = Path(git(worktree, "rev-parse", "--show-toplevel")).resolve()
+    if actual_root != worktree:
+        raise FactError(f"worktree must be its Git root: {worktree}")
+    actual_branch = git(worktree, "branch", "--show-current")
+    if actual_branch != branch or adopted_pr.head_branch != branch:
+        raise FactError(f"branch mismatch: expected {branch}, found {actual_branch}")
+    if adopted_pr.base_branch != base_ref:
+        raise FactError("adopted PR base branch does not match configured base")
+    actual_repository = canonical_repository(git(worktree, "remote", "get-url", remote))
+    expected_repository = canonical_repository(repository)
+    if actual_repository != expected_repository:
+        raise FactError(
+            f"repository mismatch: expected {expected_repository}, found {actual_repository}"
+        )
+    head = git(worktree, "rev-parse", "HEAD")
+    if head != adopted_pr.seed_head_sha:
+        raise FactError("local HEAD does not match adopted PR seed HEAD")
+    if git(worktree, "status", "--porcelain=v1"):
+        raise FactError("P adoption requires a clean dedicated worktree")
+    remote_head = live_remote_sha(worktree, remote, branch)
+    if remote_head != head:
+        raise FactError("remote branch, PR seed HEAD, and local HEAD do not match")
+    commands = tuple(tuple(str(arg) for arg in command) for command in proof_commands)
+    if any(not command for command in commands):
+        raise FactError("proof command argv cannot be empty")
+    checks = tuple(str(check) for check in required_ci_checks)
+    charter = charter_text.replace("\r\n", "\n").strip() + "\n"
+    config = {
+        "p_id": p_id,
+        "worktree": str(worktree),
+        "repository": expected_repository,
+        "remote": remote,
+        "branch": branch,
+        "base_ref": base_ref,
+        "seed_head": head,
+        "charter_digest": sha256_text(charter),
+        "proof_commands": [list(command) for command in commands],
+        "required_ci_checks": list(checks),
+        "adopted_pr": asdict(adopted_pr),
+    }
+    config_path = paths.root / "config.json"
+    charter_path = paths.root / "charter.md"
+    if config_path.exists():
+        if not charter_path.exists():
+            raise FactError(f"adopted P config exists without its charter: {paths.root}")
+        existing = load_config(paths)
+        expected = _parse_config(config, config_path)
+        if (
+            charter_path.read_text(encoding="utf-8") != charter
+            or asdict(existing) != asdict(expected)
+        ):
+            raise FactError(f"P directory already exists with different facts: {paths.root}")
+        return paths
+    if paths.root.exists():
+        conflicting = [
+            item for item in paths.root.rglob("*")
+            if item.is_file() and item != charter_path
+        ]
+        if conflicting:
+            raise FactError(f"P directory already contains conflicting facts: {paths.root}")
+        if charter_path.exists() and charter_path.read_text(encoding="utf-8") != charter:
+            raise FactError(f"P directory already contains a conflicting charter: {paths.root}")
+    paths.create_dirs()
+    write_text_once(charter_path, charter)
+    write_json_once(config_path, config)
+    return paths
+
+
 def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
     try:
         raw_commands = value.get("proof_commands", [])
@@ -244,6 +353,29 @@ def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
         ):
             raise TypeError("proof_commands must be a list of argv lists")
         commands = tuple(tuple(str(arg) for arg in item) for item in raw_commands)
+        raw_adopted = value.get("adopted_pr")
+        adopted_pr: AdoptedPr | None
+        if raw_adopted is None:
+            adopted_pr = None
+        else:
+            fields = {
+                "number", "seed_head_sha", "head_branch", "base_branch",
+                "observed_base_sha",
+            }
+            if not isinstance(raw_adopted, dict) or set(raw_adopted) != fields:
+                raise TypeError("adopted_pr has unexpected fields")
+            if type(raw_adopted["number"]) is not int or raw_adopted["number"] <= 0:
+                raise TypeError("adopted PR number must be a positive integer")
+            for field in fields - {"number"}:
+                if type(raw_adopted[field]) is not str or not raw_adopted[field]:
+                    raise TypeError(f"adopted_pr {field} must be a non-empty string")
+            adopted_pr = AdoptedPr(
+                number=raw_adopted["number"],
+                seed_head_sha=raw_adopted["seed_head_sha"],
+                head_branch=raw_adopted["head_branch"],
+                base_branch=raw_adopted["base_branch"],
+                observed_base_sha=raw_adopted["observed_base_sha"],
+            )
         config = PConfig(
             p_id=str(value["p_id"]),
             worktree=str(value["worktree"]),
@@ -257,6 +389,7 @@ def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
             required_ci_checks=tuple(
                 str(item) for item in value.get("required_ci_checks", [])
             ),
+            adopted_pr=adopted_pr,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise FactError(f"invalid P config {source}: {error}") from error
@@ -264,6 +397,16 @@ def _parse_config(value: Mapping[str, Any], source: Path) -> PConfig:
         raise FactError(f"invalid P_ID in {source}")
     if not SHA_RE.fullmatch(config.seed_head):
         raise FactError(f"invalid seed HEAD in {source}")
+    if config.adopted_pr is not None:
+        adopted = config.adopted_pr
+        if (
+            not SHA_RE.fullmatch(adopted.seed_head_sha)
+            or not SHA_RE.fullmatch(adopted.observed_base_sha)
+            or adopted.seed_head_sha != config.seed_head
+            or adopted.head_branch != config.branch
+            or adopted.base_branch != config.base_ref
+        ):
+            raise FactError(f"adopted PR identity does not match P config in {source}")
     if any(not command for command in commands):
         raise FactError(f"empty proof command in {source}")
     return config

@@ -61,6 +61,21 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--proof-command", action="append", type=_proof_command, default=[])
     initialize.add_argument("--required-ci-check", action="append", default=[])
 
+    adopt = commands.add_parser(
+        "adopt-pr", help="initialize a fresh P by claiming one exact existing open PR"
+    )
+    adopt.add_argument("p_id")
+    adopt.add_argument("--charter", type=Path, required=True)
+    adopt.add_argument("--worktree", type=Path, required=True)
+    adopt.add_argument("--repository", required=True)
+    adopt.add_argument("--pr-number", type=int, required=True)
+    adopt.add_argument("--branch", required=True)
+    adopt.add_argument("--base", default="main")
+    adopt.add_argument("--remote", default="origin")
+    adopt.add_argument("--proof-command", action="append", type=_proof_command, default=[])
+    adopt.add_argument("--required-ci-check", action="append", default=[])
+    adopt.add_argument("--registry", type=Path)
+
     tick = commands.add_parser("tick", help="reread all facts and run at most one effect")
     tick.add_argument("p_id")
     tick.add_argument("--allow-merge", action="store_true")
@@ -159,6 +174,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 required_ci_checks=args.required_ci_check,
             )
             _print({"outcome": "P_INITIALIZED", "p_id": args.p_id, "path": str(paths.root)})
+            return 0
+        if args.command == "adopt-pr":
+            from .github import adopt_existing_pr
+
+            paths = adopt_existing_pr(
+                args.state_root,
+                p_id=args.p_id,
+                charter_text=args.charter.read_text(encoding="utf-8"),
+                worktree=args.worktree,
+                repository=args.repository,
+                pr_number=args.pr_number,
+                branch=args.branch,
+                base_ref=args.base,
+                remote=args.remote,
+                proof_commands=args.proof_command,
+                required_ci_checks=args.required_ci_check,
+                registry=args.registry,
+            )
+            _print({
+                "outcome": "EXISTING_PR_ADOPTED",
+                "p_id": args.p_id,
+                "pr_number": args.pr_number,
+                "path": str(paths.root),
+            })
             return 0
         if args.command == "gpt-submit":
             result = submit_gpt_response(paths_for(args.state_root, args.p_id), args.response)
