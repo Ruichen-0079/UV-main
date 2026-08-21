@@ -29,6 +29,9 @@ class ProjectEntry:
     allow_merge: bool = False
     plan_conversation_url: str | None = None
     global_plan_fallback: bool = False
+    # Operational control-plane metadata only.  It is deliberately excluded
+    # from semantic facts and therefore cannot become workflow authority.
+    archived: bool = False
 
 
 @dataclass(frozen=True)
@@ -38,7 +41,7 @@ class ProjectRegistry:
 
     @property
     def enabled(self) -> tuple[ProjectEntry, ...]:
-        return tuple(item for item in self.entries if item.enabled)
+        return tuple(item for item in self.entries if item.enabled and not item.archived)
 
 
 @dataclass(frozen=True)
@@ -91,14 +94,14 @@ def _validate_entries(state_root: Path, entries: Sequence[ProjectEntry]) -> None
             )
         if entry.plan_conversation_url is not None:
             plan_url = _validate_plan_url_syntax(entry.plan_conversation_url)
-            if entry.enabled:
+            if entry.enabled and not entry.archived:
                 prior_plan = seen_plan_urls.get(plan_url)
                 if prior_plan is not None:
                     raise FactError(
                         f"enabled scheduler Ps share PLAN conversation URL: {prior_plan}, {entry.p_id}"
                     )
                 seen_plan_urls[plan_url] = entry.p_id
-        if not entry.enabled:
+        if not entry.enabled or entry.archived:
             continue
         worktree = Path(config.worktree).expanduser().resolve()
         prior = seen_worktrees.get(worktree)
@@ -155,7 +158,12 @@ def load_registry(
         fallback = raw.get("global_plan_fallback", False)
         if type(fallback) is not bool:
             raise FactError(f"scheduler global_plan_fallback must be boolean: {source}")
-        entries.append(ProjectEntry(p_id, enabled, allow_merge, plan_url, fallback))
+        archived = raw.get("archived", False)
+        if type(archived) is not bool:
+            raise FactError(f"scheduler archived flag must be boolean: {source}")
+        if archived and enabled:
+            raise FactError(f"archived scheduler P must be disabled: {p_id}")
+        entries.append(ProjectEntry(p_id, enabled, allow_merge, plan_url, fallback, archived))
     result = ProjectRegistry(source.resolve(), tuple(entries))
     if validate:
         _validate_entries(root, result.entries)
@@ -168,11 +176,12 @@ def update_project(
     *,
     enabled: bool | None = None,
     allow_merge: bool | None = None,
+    archived: bool | None = None,
     path: Path | None = None,
 ) -> ProjectRegistry:
     """Atomically update one operational registry entry and nothing semantic."""
-    if enabled is None and allow_merge is None:
-        raise FactError("project update requires enabled or allow_merge")
+    if enabled is None and allow_merge is None and archived is None:
+        raise FactError("project update requires enabled, allow_merge, or archived")
     source = Path(path) if path is not None else registry_path(state_root)
     with _REGISTRY_MUTATION_LOCK:
         current = load_registry(state_root, source)
@@ -183,13 +192,13 @@ def update_project(
                 updated.append(entry)
                 continue
             found = True
-            updated.append(
-                replace(
-                    entry,
-                    enabled=entry.enabled if enabled is None else enabled,
-                    allow_merge=entry.allow_merge if allow_merge is None else allow_merge,
-                )
-            )
+            next_archived = entry.archived if archived is None else archived
+            next_enabled = entry.enabled if enabled is None else enabled
+            if next_archived:
+                next_enabled = False
+            updated.append(replace(entry, enabled=next_enabled,
+                                   allow_merge=entry.allow_merge if allow_merge is None else allow_merge,
+                                   archived=next_archived))
         if not found:
             raise FactError(f"unknown scheduler P_ID: {p_id}")
         _validate_entries(Path(state_root).resolve(), updated)
@@ -230,7 +239,91 @@ def _entry_payload(item: ProjectEntry) -> dict[str, object]:
         value["plan_conversation_url"] = item.plan_conversation_url
     if item.global_plan_fallback:
         value["global_plan_fallback"] = True
+    if item.archived:
+        value["archived"] = True
     return value
+
+
+def register_project(
+    state_root: Path,
+    entry: ProjectEntry,
+    *,
+    path: Path | None = None,
+) -> ProjectRegistry:
+    """Register a freshly initialized P, disabled by default.
+
+    This is an operational registry mutation; it never creates or changes
+    semantic facts.  Existing entries are accepted only when identical.
+    """
+    source = Path(path) if path is not None else registry_path(state_root)
+    with _REGISTRY_MUTATION_LOCK:
+        try:
+            current = load_registry(state_root, source)
+        except FactError as error:
+            if not source.exists():
+                current = ProjectRegistry(source.resolve(), ())
+            else:
+                raise error
+        existing = next((item for item in current.entries if item.p_id == entry.p_id), None)
+        if existing is not None:
+            if existing != entry:
+                raise FactError(f"scheduler P_ID already registered with different entry: {entry.p_id}")
+            return current
+        if entry.enabled:
+            raise FactError("new project registration must start disabled")
+        updated = (*current.entries, entry)
+        _validate_entries(Path(state_root).resolve(), updated)
+        _write_registry(source, updated)
+        return load_registry(state_root, source)
+
+
+def _write_registry(source: Path, entries: Sequence[ProjectEntry]) -> None:
+    source.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"projects": [_entry_payload(item) for item in entries]},
+                         indent=2, sort_keys=True) + "\n"
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{source.name}.", suffix=".tmp", dir=source.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, source)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def archive_project(
+    state_root: Path, p_id: str, *, archived: bool = True, path: Path | None = None
+) -> ProjectRegistry:
+    """Archive/unarchive a disabled registry entry without touching P facts."""
+    source = Path(path) if path is not None else registry_path(state_root)
+    with _REGISTRY_MUTATION_LOCK:
+        current = load_registry(state_root, source)
+        if not any(item.p_id == p_id for item in current.entries):
+            raise FactError(f"unknown scheduler P_ID: {p_id}")
+        updated = tuple(
+            replace(item, archived=archived, enabled=False if archived else item.enabled)
+            if item.p_id == p_id else item for item in current.entries
+        )
+        _validate_entries(Path(state_root).resolve(), updated)
+        _write_registry(source, updated)
+        return load_registry(state_root, source)
+
+
+def remove_project(
+    state_root: Path, p_id: str, *, path: Path | None = None
+) -> ProjectRegistry:
+    """Remove only the control-list entry; durable P facts remain on disk."""
+    source = Path(path) if path is not None else registry_path(state_root)
+    with _REGISTRY_MUTATION_LOCK:
+        current = load_registry(state_root, source)
+        if not any(item.p_id == p_id for item in current.entries):
+            raise FactError(f"unknown scheduler P_ID: {p_id}")
+        updated = tuple(item for item in current.entries if item.p_id != p_id)
+        _validate_entries(Path(state_root).resolve(), updated)
+        _write_registry(source, updated)
+        return load_registry(state_root, source)
 
 
 def validate_plan_conversation_url(
@@ -491,7 +584,7 @@ class Scheduler:
 
     def _is_enabled(self, p_id: str) -> bool:
         entry = self._current_entry(p_id)
-        return bool(entry is not None and entry.enabled)
+        return bool(entry is not None and entry.enabled and not entry.archived)
 
     def _dispatch_gpt(self, p_id: str, action: Action) -> None:
         with self._state_lock:
@@ -502,7 +595,7 @@ class Scheduler:
             entry = self._current_entry(p_id)
         except (FactError, OSError):
             return
-        if entry is None or not entry.enabled:
+        if entry is None or not entry.enabled or entry.archived:
             return
         candidate = action
         if candidate.kind not in {ActionKind.PLAN, ActionKind.JUDGE}:
@@ -558,7 +651,7 @@ class Scheduler:
         except (FactError, OSError):
             return
         entry = next((item for item in registry.entries if item.p_id == p_id), None)
-        if entry is None or not entry.enabled:
+        if entry is None or not entry.enabled or entry.archived:
             with self._state_lock:
                 self._wake_requested.discard(p_id)
             return
