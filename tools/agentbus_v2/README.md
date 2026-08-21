@@ -79,8 +79,8 @@ transport halts that lane instead of replaying the ambiguous job or starting its
 next FIFO entry.  The extension can observe an exact current packet already in
 the conversation and relay its following assistant response, but it never uses
 conversation history as durable authority and never clicks Send twice after a
-recorded attempt.  Response observation defaults to 240 seconds inside a
-bounded 300-second adapter wait, leaving relay/ingestion margin. Automatic jobs
+recorded attempt.  Response observation defaults to 900 seconds inside a
+bounded 960-second adapter wait, leaving relay/ingestion margin. Automatic jobs
 use a memory-only FIFO per lane, while PLAN and JUDGE lanes may run
 independently. Manual packet/result submission remains a
 first-class fallback. To perform a later 7D.2B canary, copy the configured
@@ -93,3 +93,39 @@ profile is modified by this phase.  Localhost bridge requests are delegated
 from the content script to the extension background context, where the fixed
 loopback host permission applies; the background handler exposes only the
 listed transport endpoints and stores no semantic state.
+
+## Signed v1 extension compatibility transport
+
+The production browser option reuses the already signed v1 Firefox extension
+as a legacy send-only client, while v2 remains the only kernel, scheduler,
+WebUI, and semantic workflow. Run the v2 WebUI on its default loopback endpoint
+`127.0.0.1:6738`; its read-only `GET /api/browser/jobs` projects only enabled
+projects' freshly reconstructed exact `gpt_pending` identities into the wire
+shape understood by that extension. No v1 campaign, stream phase, repair, PR,
+or state directory is imported. A stale extension-local job that is absent
+from the fresh v2 projection cannot recreate a v2 effect.
+
+Create `legacy_v1_browser_compat.json` under the v2 state root as operational
+configuration (do not commit conversation bindings):
+
+```json
+{
+  "enabled": true,
+  "conversations": {
+    "plan": "https://chatgpt.com/c/EXACT_PLAN_CONVERSATION",
+    "judge": "https://chatgpt.com/c/EXACT_JUDGE_CONVERSATION"
+  },
+  "mailboxes": {
+    "github.com/OWNER/REPOSITORY": 123
+  }
+}
+```
+
+The projected prompt appends only a transport wrapper asking Web GPT to post
+one exact, packet-hash-addressed envelope to the configured issue. Each browser
+poll checks at most the most recent 100 comments on that one mailbox, rejects
+wrong or duplicate identities, and passes the unmodified raw JSON through the
+existing strict `submit_gpt_response` function. Comments are transport payloads,
+not snapshot facts. Poll times, extension-online status, served-job hints, and
+mailbox availability are memory-only WebUI diagnostics; restart reconstructs
+the projection solely from v2 durable facts.

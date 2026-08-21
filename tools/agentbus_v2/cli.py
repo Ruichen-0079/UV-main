@@ -76,7 +76,7 @@ def parser() -> argparse.ArgumentParser:
 
     web = commands.add_parser("web", help="serve the loopback operational WebUI")
     web.add_argument("--host", default="127.0.0.1")
-    web.add_argument("--port", type=int, default=6790)
+    web.add_argument("--port", type=int, default=6738)
     web.add_argument("--start-scheduler", action="store_true")
     web.add_argument("--registry", type=Path)
 

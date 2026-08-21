@@ -133,10 +133,29 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(self.action.effect_id, payload["projects"][0]["manual_gpt"]["job_id"])
         self.assertEqual("PLAN_GPT", payload["projects"][0]["manual_gpt"]["operation"])
         self.assertEqual({"plan", "judge"}, {item["name"] for item in payload["gpt_lanes"]})
+        self.assertEqual(
+            "SIGNED_V1_EXTENSION_COMPAT",
+            payload["browser_transport"]["transport_mode"],
+        )
         self.assertGreater(read.call_count, 0)
         self.assertGreater(decide.call_count, 0)
         dispatch.assert_not_called()
         self.assertEqual([], payload["events"])
+
+    def test_legacy_browser_jobs_endpoint_is_v2_owned_and_read_only(self) -> None:
+        projected = {
+            "jobs": [{"job_id": self.action.effect_id, "role": "PRODUCT_GPT"}],
+            "bridge": {"transport_mode": "SIGNED_V1_EXTENSION_COMPAT"},
+        }
+        with patch.object(
+            self.state.legacy_browser_compat,
+            "poll_and_project",
+            return_value=projected,
+        ) as poll:
+            status, payload = self.server.request("/api/browser/jobs")
+        self.assertEqual(200, status)
+        self.assertEqual(projected, payload)
+        poll.assert_called_once_with()
 
     def test_status_keeps_exact_retained_gpt_packet_deliverable_when_core_is_idle(self) -> None:
         job_id = self.action.effect_id
