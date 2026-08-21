@@ -522,7 +522,11 @@ def run_prove(
         "failed_ci_logs": failed_logs,
     }
     final = read_snapshot(paths)
-    final_merge = final.merge
+    # Before the first durable PASS proof exists, the normal semantic snapshot
+    # deliberately omits GitHub facts unless merge permission was requested.
+    # PROVE still needs a fresh final PR identity fence; read that operational
+    # fact directly instead of smuggling merge permission into recomputation.
+    final_merge = read_github_facts(config) if require_pr_fence else final.merge
     if require_pr_fence and config.required_ci_checks and status is Observation.PASS:
         final_merge = observe_required_checks(config, final_merge, snapshot.head, snapshot.base)
         if final_merge.check_status != "PASS":

@@ -1081,6 +1081,88 @@ AgentBus-V2-Plan: plan-%s
             self.assertEqual([], saved["github_checks"])
             self.assertEqual(action.effect_id, saved["proof_id"])
 
+    def test_passing_proof_final_fence_rereads_github_without_merge_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            config = config_for(repo, "P_ID: P-TEST\nGOAL: passing proof final fence\n")
+            paths = PPaths(root / "state" / "P-TEST")
+            paths.create_dirs()
+            initial = replace(
+                snapshot_for(config),
+                proof_contract_digest=proof_contract_digest(config),
+            )
+            planning = plan_facts_digest(initial)
+            plan = plan_job_id(initial)
+            spec = SpecFact(
+                spec_id(initial.charter_digest, planning, "Test the passing change"),
+                "Test the passing change",
+                plan_job_id=plan,
+            )
+            implemented_head = "1" * 40
+            work = WorkFact(
+                work_effect_id(initial, spec),
+                spec.spec_id,
+                initial.head,
+                Observation.PASS,
+                "work-evidence",
+                output_head=implemented_head,
+                plan_job_id=plan,
+            )
+            snapshot = replace(
+                initial,
+                head=implemented_head,
+                specs=(spec,),
+                gpt_results=(GptResult(plan, "PLAN_GPT", "SPEC", spec.text),),
+                work_facts=(work,),
+                # This is the real pre-first-PASS shape: semantic snapshot
+                # merge facts remain absent and allow_merge remains false.
+                merge=GitHubFacts(),
+                allow_merge=False,
+            )
+            action = decide(snapshot)
+            self.assertEqual(ActionKind.PROVE, action.kind)
+            merge = GitHubFacts(
+                pr_number=99,
+                state="OPEN",
+                draft=False,
+                mergeable=True,
+                head_sha=snapshot.head,
+                live_base=snapshot.base,
+                pr_base_sha=snapshot.base,
+                head_branch=config.branch,
+                base_branch=config.base_ref,
+                p_id=config.p_id,
+                spec_id=spec.spec_id,
+                owner_token=config.owner_token,
+            )
+            completed = subprocess.CompletedProcess(("git", "fetch"), 0, "", "")
+            with (
+                patch("tools.agentbus_v2.effects._run", return_value=completed),
+                patch(
+                    "tools.agentbus_v2.effects.read_snapshot",
+                    side_effect=(snapshot, snapshot),
+                ) as snapshots,
+                patch(
+                    "tools.agentbus_v2.effects._command_evidence",
+                    return_value=({"commands": []}, Observation.PASS),
+                ),
+                patch("tools.agentbus_v2.effects.ensure_owned_pr", return_value=True),
+                patch(
+                    "tools.agentbus_v2.effects.read_github_facts",
+                    side_effect=(merge, merge),
+                ) as github_reads,
+            ):
+                result = run_prove(paths, config, snapshot, action)
+            self.assertTrue(result.changed)
+            self.assertEqual(2, snapshots.call_count)
+            self.assertEqual(2, github_reads.call_count)
+            saved = json.loads(
+                (paths.root / "prove" / "results" / f"{action.effect_id}.json").read_text()
+            )
+            self.assertEqual("PASS", saved["status"])
+            self.assertFalse(snapshot.allow_merge)
+
     def test_proof_result_identity_corruption_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
