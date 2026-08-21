@@ -10,7 +10,13 @@ import time
 import unittest
 from unittest.mock import patch
 
-from tools.agentbus_v2.core import Action, ActionKind, Snapshot, GPT_PACKET_SCHEMA
+from tools.agentbus_v2.core import (
+    Action,
+    ActionKind,
+    GptResult,
+    Snapshot,
+    GPT_PACKET_SCHEMA,
+)
 from tools.agentbus_v2.effects import EffectResult
 from tools.agentbus_v2.facts import FactError
 from tools.agentbus_v2 import webui
@@ -115,6 +121,46 @@ class WebUITests(unittest.TestCase):
     def post(self, path: str, body: object, *, token: str | None = None):
         return self.server.request(path, method="POST", body=body, token=token or self.state.token)
 
+    def _write_packet(self, job_id: str, operation: str = "PLAN_GPT") -> None:
+        packet = self.state_root / "P1" / "gpt" / "outbox" / f"{job_id}.md"
+        packet.parent.mkdir(parents=True, exist_ok=True)
+        packet.write_text(
+            "# packet\n## SEMANTIC INPUTS\n```json\n"
+            + json.dumps(
+                {
+                    "packet_schema": GPT_PACKET_SCHEMA,
+                    "job_id": job_id,
+                    "operation": operation,
+                    "semantic_input": {"job_id": job_id, "operation": operation},
+                }
+            )
+            + "\n```\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _compat_status(
+        *,
+        plan_state: str = "waiting-mailbox",
+        judge_state: str = "idle",
+        plan_pending: int = 1,
+        judge_pending: int = 0,
+        extension: str = "ONLINE",
+        mailbox: str = "available",
+        last_error: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "configured": True,
+            "transport_mode": "SIGNED_V1_EXTENSION_COMPAT",
+            "legacy_v1_extension": extension,
+            "last_poll": "2026-01-01T00:00:00+00:00",
+            "mailbox": mailbox,
+            "last_error": last_error,
+            "plan": {"state": plan_state, "pending": plan_pending},
+            "judge": {"state": judge_state, "pending": judge_pending},
+            "recent_ingestion": [],
+        }
+
     def test_root_and_status_are_live_projection(self) -> None:
         packet = self.state_root / "P1" / "gpt" / "outbox" / f"{self.action.effect_id}.md"
         packet.parent.mkdir(parents=True)
@@ -182,6 +228,119 @@ class WebUITests(unittest.TestCase):
         self.assertEqual("IDLE", payload["projects"][0]["action"])
         self.assertEqual(job_id, payload["projects"][0]["manual_gpt"]["job_id"])
         self.assertEqual("PLAN_GPT", payload["projects"][0]["manual_gpt"]["operation"])
+
+    def test_pending_plan_is_auto_signed_v1_and_manual_fallback_is_advanced(self) -> None:
+        job_id = self.action.effect_id
+        self._write_packet(job_id)
+        pending = replace(self.snapshot, gpt_pending=frozenset({job_id}))
+        with patch.object(webui, "read_snapshot", return_value=pending), patch.object(
+            webui, "decide", return_value=Action(ActionKind.IDLE, reason="GPT result is absent")
+        ), patch.object(
+            self.state.legacy_browser_compat,
+            "status",
+            return_value=self._compat_status(),
+        ):
+            status, payload = self.server.request("/api/status")
+            root_status, html = self.server.request("/")
+        self.assertEqual(200, status)
+        self.assertEqual(200, root_status)
+        gpt = payload["projects"][0]["gpt_transport"]
+        self.assertEqual("PLAN_GPT", gpt["operation"])
+        self.assertEqual("AUTO", gpt["mode"])
+        self.assertEqual("SIGNED_V1_EXTENSION_COMPAT", gpt["transport"])
+        self.assertEqual("WAITING_FOR_MAILBOX", gpt["state"])
+        self.assertEqual(job_id, gpt["job_id"])
+        self.assertEqual("ONLINE", gpt["extension"])
+        self.assertEqual("available", gpt["mailbox"])
+        self.assertIn("Automatic signed-extension transport is active", gpt["warning"])
+        self.assertEqual("IDLE", payload["projects"][0]["action"])
+        self.assertIn('details class="manual-fallback"', html)
+        self.assertNotIn('details class="manual-fallback" open', html)
+        self.assertIn("Advanced manual GPT fallback", html)
+
+    def test_pending_judge_uses_auto_signed_v1_lane(self) -> None:
+        job_id = "judge-" + "b" * 24
+        self._write_packet(job_id, "JUDGE_GPT")
+        pending = replace(self.snapshot, gpt_pending=frozenset({job_id}))
+        with patch.object(webui, "read_snapshot", return_value=pending), patch.object(
+            webui, "decide", return_value=Action(ActionKind.IDLE, reason="GPT result is absent")
+        ), patch.object(
+            self.state.legacy_browser_compat,
+            "status",
+            return_value=self._compat_status(
+                plan_state="idle", plan_pending=0, judge_state="pending", judge_pending=1
+            ),
+        ):
+            status, payload = self.server.request("/api/status")
+        self.assertEqual(200, status)
+        gpt = payload["projects"][0]["gpt_transport"]
+        self.assertEqual("JUDGE_GPT", gpt["operation"])
+        self.assertEqual("AUTO", gpt["mode"])
+        self.assertEqual("WAITING_FOR_BROWSER", gpt["state"])
+        self.assertEqual(job_id, gpt["job_id"])
+
+    def test_auto_transport_offline_and_mailbox_errors_are_operational_only(self) -> None:
+        projection = webui.WebUIState._gpt_transport_projection(
+            self._compat_status(extension="OFFLINE"),
+            "PLAN_GPT",
+            self.action.effect_id,
+            None,
+        )
+        self.assertEqual("TRANSPORT_OFFLINE", projection["state"])
+        projection = webui.WebUIState._gpt_transport_projection(
+            self._compat_status(mailbox="unavailable", last_error="mailbox unavailable"),
+            "PLAN_GPT",
+            self.action.effect_id,
+            None,
+        )
+        self.assertEqual("TRANSPORT_ERROR", projection["state"])
+        self.assertEqual("mailbox unavailable", projection["last_error"])
+
+    def test_durable_result_is_reported_as_result_received_without_manual_fallback(self) -> None:
+        result = GptResult(self.action.effect_id, "PLAN_GPT", "SPEC", "bounded spec")
+        snapshot = replace(self.snapshot, gpt_results=(result,))
+        with patch.object(webui, "read_snapshot", return_value=snapshot), patch.object(
+            webui, "decide", return_value=Action(ActionKind.WORK, reason="SPEC accepted")
+        ), patch.object(
+            self.state.legacy_browser_compat,
+            "status",
+            return_value=self._compat_status(plan_state="idle", plan_pending=0),
+        ):
+            status, payload = self.server.request("/api/status")
+        self.assertEqual(200, status)
+        self.assertEqual("WORK", payload["projects"][0]["action"])
+        gpt = payload["projects"][0]["gpt_transport"]
+        self.assertEqual("RESULT_RECEIVED", gpt["state"])
+        self.assertEqual(self.action.effect_id, gpt["job_id"])
+        self.assertEqual("SPEC", gpt["decision"])
+        self.assertIsNone(payload["projects"][0]["manual_gpt"])
+
+    def test_manual_only_fallback_remains_available_when_compat_is_unconfigured(self) -> None:
+        job_id = self.action.effect_id
+        self._write_packet(job_id)
+        pending = replace(self.snapshot, gpt_pending=frozenset({job_id}))
+        manual_status = {
+            "configured": False,
+            "transport_mode": "SIGNED_V1_EXTENSION_COMPAT",
+            "legacy_v1_extension": "OFFLINE",
+            "last_poll": None,
+            "mailbox": "unconfigured",
+            "last_error": None,
+            "plan": {"state": "idle", "pending": 0},
+            "judge": {"state": "idle", "pending": 0},
+            "recent_ingestion": [],
+        }
+        with patch.object(webui, "read_snapshot", return_value=pending), patch.object(
+            webui, "decide", return_value=Action(ActionKind.IDLE, reason="GPT result is absent")
+        ), patch.object(
+            self.state.legacy_browser_compat, "status", return_value=manual_status
+        ):
+            status, payload = self.server.request("/api/status")
+        self.assertEqual(200, status)
+        gpt = payload["projects"][0]["gpt_transport"]
+        self.assertEqual("MANUAL", gpt["mode"])
+        self.assertEqual("MANUAL_FALLBACK", gpt["state"])
+        self.assertIsNotNone(gpt["manual_fallback"])
 
     def test_mutations_change_registry_only_and_unknown_is_rejected(self) -> None:
         status, payload = self.post("/api/project/P1/enabled", {"enabled": False})

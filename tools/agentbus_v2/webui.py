@@ -33,6 +33,12 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 6738
 MAX_REQUEST_BYTES = 1_000_000
+SIGNED_V1_COMPAT_TRANSPORT = "SIGNED_V1_EXTENSION_COMPAT"
+AUTO_WARNING = (
+    "Automatic signed-extension transport is active for this exact job. "
+    "Do not manually submit the same result unless recovering from a confirmed "
+    "transport failure."
+)
 
 
 class WebUIError(RuntimeError):
@@ -183,10 +189,114 @@ class WebUIState:
             "instruction": f"Return the exact JSON response for {operation} job {action.effect_id}.",
         }
 
+    @staticmethod
+    def _gpt_transport_projection(
+        browser_status: dict[str, object],
+        operation: str,
+        job_id: str,
+        manual_fallback: dict[str, object] | None,
+        *,
+        result_received: bool = False,
+        decision: str | None = None,
+    ) -> dict[str, object]:
+        """Build a presentation-only GPT transport projection.
+
+        The compatibility status is operational telemetry.  It never changes
+        the semantic action or creates a durable transport state.
+        """
+        configured = (
+            browser_status.get("configured") is True
+            and browser_status.get("transport_mode") == SIGNED_V1_COMPAT_TRANSPORT
+        )
+        lane = "plan" if operation == "PLAN_GPT" else "judge"
+        lane_status = browser_status.get(lane)
+        if not isinstance(lane_status, dict):
+            lane_status = {}
+        extension = browser_status.get("legacy_v1_extension", "UNKNOWN")
+        mailbox = browser_status.get("mailbox", "UNKNOWN")
+        if result_received:
+            mode = "AUTO" if configured else "MANUAL"
+            transport = (
+                SIGNED_V1_COMPAT_TRANSPORT if configured else "MANUAL_FALLBACK"
+            )
+            state = "RESULT_RECEIVED"
+        elif not configured:
+            mode = "MANUAL"
+            transport = "MANUAL_FALLBACK"
+            state = "MANUAL_FALLBACK"
+        else:
+            mode = "AUTO"
+            transport = SIGNED_V1_COMPAT_TRANSPORT
+            if extension != "ONLINE":
+                state = "TRANSPORT_OFFLINE"
+            elif mailbox == "unavailable" or browser_status.get("last_error"):
+                state = "TRANSPORT_ERROR"
+            elif lane_status.get("state") == "waiting-mailbox":
+                state = "WAITING_FOR_MAILBOX"
+            elif lane_status.get("state") == "pending":
+                state = "WAITING_FOR_BROWSER"
+            else:
+                state = "AUTO_QUEUED"
+        projection: dict[str, object] = {
+            "operation": operation,
+            "mode": mode,
+            "transport": transport,
+            "state": state,
+            "job_id": job_id,
+            "extension": extension if configured else "NOT_CONFIGURED",
+            "mailbox": mailbox if configured else "NOT_CONFIGURED",
+            "last_poll": browser_status.get("last_poll") if configured else None,
+            "last_error": browser_status.get("last_error") if configured else None,
+            "manual_fallback": manual_fallback,
+            "warning": AUTO_WARNING if configured and not result_received else None,
+        }
+        if decision is not None:
+            projection["decision"] = decision
+        return projection
+
+    @staticmethod
+    def _gpt_lane_projection(
+        lane_status: tuple[dict[str, object], ...],
+        browser_status: dict[str, object],
+    ) -> tuple[dict[str, object], ...]:
+        configured = (
+            browser_status.get("configured") is True
+            and browser_status.get("transport_mode") == SIGNED_V1_COMPAT_TRANSPORT
+        )
+        result: list[dict[str, object]] = []
+        for row in lane_status:
+            lane = str(row.get("name", ""))
+            operation = "PLAN_GPT" if lane == "plan" else "JUDGE_GPT"
+            lane_browser = browser_status.get(lane)
+            lane_browser = lane_browser if isinstance(lane_browser, dict) else {}
+            projected = dict(row)
+            # Keep the internal ``transport`` field intact for diagnostics.
+            # These fields describe the production projection shown to users.
+            projected.update(
+                {
+                    "semantic_operation": operation,
+                    "production_transport": (
+                        SIGNED_V1_COMPAT_TRANSPORT if configured else "MANUAL_FALLBACK"
+                    ),
+                    "extension": browser_status.get(
+                        "legacy_v1_extension", "NOT_CONFIGURED"
+                    )
+                    if configured
+                    else "NOT_CONFIGURED",
+                    "mailbox": browser_status.get("mailbox", "NOT_CONFIGURED")
+                    if configured
+                    else "NOT_CONFIGURED",
+                    "pending_jobs": lane_browser.get("pending", 0),
+                }
+            )
+            result.append(projected)
+        return tuple(result)
+
     def status(self) -> dict[str, object]:
         registry = self.registry()
         scheduler_status = self.scheduler_status()
         gpt_transport = self.scheduler.gpt_transport
+        browser_status = self.legacy_browser_compat.status()
         with self._lock:
             events = [event.as_dict() for event in self._events]
         projects: list[dict[str, object]] = []
@@ -202,6 +312,7 @@ class WebUIState:
                 "head": None,
                 "spec_id": None,
                 "manual_gpt": None,
+                "gpt_transport": None,
             }
             try:
                 config = load_config(paths)
@@ -225,6 +336,24 @@ class WebUIState:
                 )
                 if projection["manual_gpt"] is not None:
                     projection["manual_gpt"]["mode"] = gpt_transport.mode_for(delivery)
+                    packet = projection["manual_gpt"]
+                    projection["gpt_transport"] = self._gpt_transport_projection(
+                        browser_status,
+                        str(packet["operation"]),
+                        str(packet["job_id"]),
+                        packet,
+                    )
+                elif snapshot.gpt_results:
+                    result = snapshot.gpt_results[-1]
+                    if result.operation in {"PLAN_GPT", "JUDGE_GPT"}:
+                        projection["gpt_transport"] = self._gpt_transport_projection(
+                            browser_status,
+                            result.operation,
+                            result.job_id,
+                            None,
+                            result_received=True,
+                            decision=result.decision,
+                        )
                 # Keep config loading explicit: it fences the registered P before
                 # projecting any of its durable facts.
                 if config.p_id != entry.p_id:
@@ -236,8 +365,10 @@ class WebUIState:
             "server": {"name": "agentbus-v2-webui", "loopback": True},
             "scheduler": scheduler_status,
             "executors": list_executor_accounts(self.state_root),
-            "gpt_lanes": gpt_transport.status(),
-            "browser_transport": self.legacy_browser_compat.status(),
+            "gpt_lanes": self._gpt_lane_projection(
+                gpt_transport.status(), browser_status
+            ),
+            "browser_transport": browser_status,
             "projects": projects,
             "events": events,
         }
@@ -246,8 +377,8 @@ class WebUIState:
 INDEX_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AgentBus v2</title><style>
-:root{font:14px system-ui,sans-serif;color:#e8edf2;background:#171a1e}body{margin:20px}button{margin:2px;padding:5px 9px;background:#29313a;color:#e8edf2;border:1px solid #56616d;border-radius:4px}button:hover{background:#35414d}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{border-bottom:1px solid #30363d;padding:7px;text-align:left;vertical-align:top}th{color:#9da9b5}.muted{color:#9da9b5}.ok{color:#8ed081}.warn{color:#ffd166}.err{color:#ff7b72}textarea{width:100%;min-height:90px;background:#0f1114;color:#e8edf2;border:1px solid #56616d}code{font-size:12px}#error{min-height:20px;color:#ff7b72}.events{max-height:180px;overflow:auto;white-space:pre-wrap;font:12px ui-monospace,monospace}
-</style></head><body><h1>AgentBus v2</h1><div id="toolbar"><button onclick="scheduler('start')">Start Scheduler</button><button onclick="scheduler('stop')">Stop Scheduler</button><span id="summary" class="muted"></span></div><div id="error"></div><table><thead><tr><th>P</th><th>Schedule</th><th>Action</th><th>HEAD / SPEC</th><th>GPT</th><th>Controls</th></tr></thead><tbody id="projects"></tbody></table><h3>Executors</h3><pre id="executors" class="muted"></pre><h3>GPT lanes</h3><pre id="gpt-lanes" class="muted"></pre><h3>Browser Transport</h3><pre id="browser-transport" class="muted"></pre><h3>Recent events</h3><div id="events" class="events"></div><script>
+ :root{font:14px system-ui,sans-serif;color:#e8edf2;background:#171a1e}body{margin:20px}button{margin:2px;padding:5px 9px;background:#29313a;color:#e8edf2;border:1px solid #56616d;border-radius:4px}button:hover{background:#35414d}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{border-bottom:1px solid #30363d;padding:7px;text-align:left;vertical-align:top}th{color:#9da9b5}.muted{color:#9da9b5}.ok{color:#8ed081}.warn{color:#ffd166}.err{color:#ff7b72}textarea{width:100%;min-height:90px;background:#0f1114;color:#e8edf2;border:1px solid #56616d}code{font-size:12px}#error{min-height:20px;color:#ff7b72}.events{max-height:180px;overflow:auto;white-space:pre-wrap;font:12px ui-monospace,monospace}details{margin-top:6px}summary{cursor:pointer;color:#9da9b5}.transport{line-height:1.45}
+</style></head><body><h1>AgentBus v2</h1><div id="toolbar"><button onclick="scheduler('start')">Start Scheduler</button><button onclick="scheduler('stop')">Stop Scheduler</button><span id="summary" class="muted"></span></div><div id="error"></div><table><thead><tr><th>P</th><th>Schedule</th><th>Action</th><th>HEAD / SPEC</th><th>GPT transport</th><th>Controls</th></tr></thead><tbody id="projects"></tbody></table><h3>Executors</h3><pre id="executors" class="muted"></pre><h3>GPT lanes</h3><pre id="gpt-lanes" class="muted"></pre><h3>Browser Transport</h3><pre id="browser-transport" class="muted"></pre><h3>Recent events</h3><div id="events" class="events"></div><script>
 const TOKEN=__TOKEN__;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function request(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-AgentBus-Token':TOKEN},body:JSON.stringify(body??{})});let v;try{v=await r.json()}catch{throw Error('HTTP '+r.status+' (non-JSON response)')}if(!r.ok)throw Error(v.error||('HTTP '+r.status));return v}
@@ -256,7 +387,12 @@ async function project(p,op,body){try{await request('/api/project/'+encodeURICom
 async function submit(p){const box=document.getElementById('gpt-'+CSS.escape(p));try{const v=JSON.parse(box.value);await request('/api/project/'+encodeURIComponent(p)+'/gpt-submit',v);box.value='';await refresh()}catch(e){showError(e)}}
 function copyText(v){navigator.clipboard?.writeText(v)}
 function showError(e){document.getElementById('error').textContent=String(e);setTimeout(()=>document.getElementById('error').textContent='',5000)}
-function render(v){const s=v.scheduler||{};document.getElementById('summary').textContent='scheduler '+(s.running?'RUNNING':'STOPPED')+' · enabled '+(s.enabled_p_ids||[]).length+' · in-flight '+(s.in_flight_p_ids||[]).length;document.getElementById('executors').textContent=JSON.stringify(v.executors||[],null,2);document.getElementById('gpt-lanes').textContent=JSON.stringify(v.gpt_lanes||[],null,2);document.getElementById('browser-transport').textContent=JSON.stringify(v.browser_transport||{},null,2);document.getElementById('events').textContent=(v.events||[]).slice().reverse().map(e=>JSON.stringify(e)).join('\n');document.getElementById('projects').innerHTML=(v.projects||[]).map(p=>{const g=p.manual_gpt;return `<tr><td><strong>${esc(p.p_id)}</strong><br><span class="muted">${p.in_flight?'IN-FLIGHT':'IDLE'}</span></td><td>${p.enabled?'<span class="ok">ENABLED</span>':'<span class="muted">DISABLED</span>'}<br>merge ${p.allow_merge?'ON':'OFF'}</td><td><strong>${esc(p.action)}</strong><br><span class="${p.action==='HUMAN'?'err':'muted'}">${esc(p.detail)}</span></td><td><code>${esc(p.head||'—')}</code><br><code>${esc(p.spec_id||'—')}</code></td><td>${g?`<b class="warn">${esc(g.operation)}</b> <span class="muted">${esc(g.mode||'MANUAL')}</span><br><code>${esc(g.job_id)}</code><br><button onclick="copyText(decodeURIComponent('${encodeURIComponent(g.packet_path).replaceAll("'","%27")}'))">Copy packet path</button><button onclick="copyText('${esc(g.instruction)}')">Copy instruction</button><br><code>${esc(g.packet_sha256||'packet not generated yet')}</code><textarea id="gpt-${esc(p.p_id)}" placeholder="Paste exact GPT JSON here"></textarea><button onclick="submit('${esc(p.p_id)}')">Submit</button>`:'—'}</td><td><button onclick="project('${esc(p.p_id)}','enabled',{enabled:${!p.enabled}})">${p.enabled?'Disable':'Enable'}</button><button onclick="project('${esc(p.p_id)}','allow-merge',{allow_merge:${!p.allow_merge}})">${p.allow_merge?'Disallow merge':'Allow merge'}</button><button onclick="project('${esc(p.p_id)}','tick',{})">Tick now</button></td></tr>`}).join('')}
+ function copyValue(v){return `decodeURIComponent('${encodeURIComponent(v??'').replaceAll("'","%27")}')`}
+ function manualFallback(p,g){const m=g.manual_fallback;if(!m)return '';return `<details class="manual-fallback"><summary>Advanced manual GPT fallback</summary><button onclick="copyText(${copyValue(m.packet_path)})">Copy packet path</button><button onclick="copyText(${copyValue(m.instruction)})">Copy instruction</button><br><code>${esc(m.packet_sha256||'packet not generated yet')}</code><textarea id="gpt-${esc(p.p_id)}" placeholder="Paste exact GPT JSON here"></textarea><button onclick="submit('${esc(p.p_id)}')">Submit exact JSON</button></details>`}
+ function renderGpt(p){const g=p.gpt_transport;if(!g)return '—';const result=g.state==='RESULT_RECEIVED'?`<br><span class="muted">Decision: ${esc(g.decision||'accepted')}</span>`:'';const warning=g.mode==='AUTO'&&g.manual_fallback?`<p class="warn">${esc(g.warning)}</p>`:'';const fallback=manualFallback(p,g);return `<div class="transport"><b>${esc(g.operation)} · ${esc(g.mode)}</b><br>Transport: <strong>${esc(g.transport)}</strong><br>State: <strong>${esc(g.state)}</strong><br>Job: <code>${esc(g.job_id)}</code>${result}<br>Extension: ${esc(g.extension)}<br>Mailbox: ${esc(g.mailbox)}${g.last_poll?`<br>Last poll: ${esc(g.last_poll)}`:''}${g.last_error?`<br><span class="err">Error: ${esc(g.last_error)}</span>`:''}${warning}${fallback}</div>`}
+ function renderLanes(rows){return (rows||[]).map(l=>`${l.semantic_operation||l.name} · production transport: ${l.production_transport||l.transport||'UNKNOWN'}\nextension: ${l.extension||'UNKNOWN'} · mailbox: ${l.mailbox||'UNKNOWN'} · pending jobs: ${l.pending_jobs??l.queued??0}`).join('\n\n')}
+ function renderBrowserTransport(b){return [`Browser transport: ${b.transport_mode||'UNKNOWN'}`,`Extension: ${b.legacy_v1_extension||'UNKNOWN'}`,`Last poll: ${b.last_poll||'—'}`,`Mailbox: ${b.mailbox||'UNKNOWN'}`,`Pending PLAN: ${b.plan?.pending??0} (${b.plan?.state||'unknown'})`,`Pending JUDGE: ${b.judge?.pending??0} (${b.judge?.state||'unknown'})`].join('\n')}
+ function render(v){const s=v.scheduler||{};document.getElementById('summary').textContent='scheduler '+(s.running?'RUNNING':'STOPPED')+' · enabled '+(s.enabled_p_ids||[]).length+' · in-flight '+(s.in_flight_p_ids||[]).length;document.getElementById('executors').textContent=JSON.stringify(v.executors||[],null,2);document.getElementById('gpt-lanes').textContent=renderLanes(v.gpt_lanes);document.getElementById('browser-transport').textContent=renderBrowserTransport(v.browser_transport||{});document.getElementById('events').textContent=(v.events||[]).slice().reverse().map(e=>JSON.stringify(e)).join('\n');document.getElementById('projects').innerHTML=(v.projects||[]).map(p=>`<tr><td><strong>${esc(p.p_id)}</strong><br><span class="muted">${p.in_flight?'IN-FLIGHT':'IDLE'}</span></td><td>${p.enabled?'<span class="ok">ENABLED</span>':'<span class="muted">DISABLED</span>'}<br>merge ${p.allow_merge?'ON':'OFF'}</td><td><strong>${esc(p.action)}</strong><br><span class="${p.action==='HUMAN'?'err':'muted'}">${esc(p.detail)}</span></td><td><code>${esc(p.head||'—')}</code><br><code>${esc(p.spec_id||'—')}</code></td><td>${renderGpt(p)}</td><td><button onclick="project('${esc(p.p_id)}','enabled',{enabled:${!p.enabled}})">${p.enabled?'Disable':'Enable'}</button><button onclick="project('${esc(p.p_id)}','allow-merge',{allow_merge:${!p.allow_merge}})">${p.allow_merge?'Disallow merge':'Allow merge'}</button><button onclick="project('${esc(p.p_id)}','tick',{})">Tick now</button></td></tr>`).join('')}
 async function refresh(){try{const r=await fetch('/api/status');if(!r.ok)throw Error('HTTP '+r.status);render(await r.json())}catch(e){showError('Server unreachable or status failed: '+e)}}refresh();setInterval(refresh,1500);
 </script></body></html>"""
 
