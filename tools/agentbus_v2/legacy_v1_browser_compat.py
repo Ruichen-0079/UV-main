@@ -410,6 +410,8 @@ class LegacyV1BrowserCompat:
         self._last_error: str | None = None
         self._mailbox_available: bool | None = None
         self._served_jobs: set[str] = set()
+        self._served_first_at: dict[str, float] = {}
+        self._served_last_at: dict[str, float] = {}
         self._outcomes: tuple[IngestionOutcome, ...] = ()
 
     def _config(self) -> LegacyCompatConfig:
@@ -611,7 +613,20 @@ class LegacyV1BrowserCompat:
                     self._outcomes = outcomes
                     current_ids = {item.job_id for item in jobs}
                     self._served_jobs.intersection_update(current_ids)
-                    self._served_jobs.update(item.job_id for item in jobs)
+                    self._served_first_at = {
+                        job_id: value
+                        for job_id, value in self._served_first_at.items()
+                        if job_id in current_ids
+                    }
+                    self._served_last_at = {
+                        job_id: value
+                        for job_id, value in self._served_last_at.items()
+                        if job_id in current_ids
+                    }
+                    for item in jobs:
+                        self._served_jobs.add(item.job_id)
+                        self._served_first_at.setdefault(item.job_id, timestamp)
+                        self._served_last_at[item.job_id] = timestamp
             except (FactError, LegacyCompatError, OSError) as error:
                 with self._telemetry_lock:
                     self._last_error = str(error)[:1000]
@@ -637,19 +652,21 @@ class LegacyV1BrowserCompat:
             last_error = config_error or self._last_error
             mailbox_available = self._mailbox_available
             served = set(self._served_jobs)
+            served_first_at = dict(self._served_first_at)
+            served_last_at = dict(self._served_last_at)
             outcomes = self._outcomes
         online = bool(last_poll is not None and self.clock() - last_poll <= ONLINE_WINDOW_SECONDS)
         lane_rows: dict[str, dict[str, object]] = {}
         for lane, operation in (("plan", "PLAN_GPT"), ("judge", "JUDGE_GPT")):
             lane_jobs = [job for job in jobs if job.operation == operation]
-            state = "idle"
-            if lane_jobs:
-                state = (
-                    "waiting-mailbox"
-                    if any(job.job_id in served for job in lane_jobs)
-                    else "pending"
-                )
-            lane_rows[lane] = {"state": state, "pending": len(lane_jobs)}
+            lane_rows[lane] = {
+                # Being projected by /api/browser/jobs is not evidence that
+                # the extension selected the job or clicked Send.  Keep this
+                # lane truthful until a durable result exists.
+                "state": "waiting-browser" if lane_jobs else "idle",
+                "pending": len(lane_jobs),
+                "served_to_extension": any(job.job_id in served for job in lane_jobs),
+            }
         block_jobs = [job for job in jobs if job.operation == BLOCK_OPERATION]
         try:
             block_bound = load_block_config(self.state_root).conversation_url is not None
@@ -677,6 +694,24 @@ class LegacyV1BrowserCompat:
                 "pending": len(block_jobs),
                 "bound": block_bound,
             },
+            "jobs": [
+                {
+                    "job_id": job.job_id,
+                    "operation": job.operation,
+                    "p_id": job.p_id,
+                    "conversation_url": job.conversation_url,
+                    "served_to_extension": job.job_id in served,
+                    "first_server_serve": (
+                        datetime.fromtimestamp(served_first_at[job.job_id], timezone.utc).isoformat()
+                        if job.job_id in served_first_at else None
+                    ),
+                    "last_server_serve": (
+                        datetime.fromtimestamp(served_last_at[job.job_id], timezone.utc).isoformat()
+                        if job.job_id in served_last_at else None
+                    ),
+                }
+                for job in jobs
+            ],
             "last_error": last_error,
             "recent_ingestion": [
                 {

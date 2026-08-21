@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -375,13 +378,87 @@ class LegacyV1BrowserCompatTests(unittest.TestCase):
     def test_status_is_ephemeral_operational_projection(self) -> None:
         before = self.compat.status()
         self.assertEqual("OFFLINE", before["legacy_v1_extension"])
+        self.assertEqual("waiting-browser", before["plan"]["state"])
+        self.assertFalse(before["plan"]["served_to_extension"])
         self.compat.poll_and_project()
         after = self.compat.status()
         self.assertEqual("ONLINE", after["legacy_v1_extension"])
         self.assertEqual("SIGNED_V1_EXTENSION_COMPAT", after["transport_mode"])
-        self.assertEqual("waiting-mailbox", after["plan"]["state"])
+        self.assertEqual("waiting-browser", after["plan"]["state"])
+        self.assertTrue(after["plan"]["served_to_extension"])
+        self.assertEqual(1, len(after["jobs"]))
+        self.assertTrue(after["jobs"][0]["served_to_extension"])
+        self.assertIsNotNone(after["jobs"][0]["first_server_serve"])
+        self.assertIsNotNone(after["jobs"][0]["last_server_serve"])
+        self.assertEqual([], after["recent_ingestion"])
         self.assertFalse((self.state / "browser_state.json").exists())
         self.assertFalse((self.state / "scheduler_recovery.json").exists())
+
+    def test_server_serve_and_mailbox_availability_never_claim_submission(self) -> None:
+        self.assertEqual("waiting-browser", self.compat.status()["plan"]["state"])
+        self.assertEqual("configured", self.compat.status()["mailbox"])
+        self.compat.poll_and_project()
+        status = self.compat.status()
+        self.assertEqual("waiting-browser", status["plan"]["state"])
+        self.assertTrue(status["plan"]["served_to_extension"])
+        self.assertNotIn("waiting-mailbox", {status["plan"]["state"]})
+        self.assertFalse((self.state / "P1" / "gpt" / "results" / f"{PLAN_JOB}.json").exists())
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for signed-extension fixture")
+    def test_signed_extension_done_tombstone_blocks_same_job_reappearance(self) -> None:
+        """Document the installed signed-v1 extension's local DONE fence.
+
+        This is intentionally a read-only fixture: the extension source is not
+        changed and browser.storage.local is not touched.  It proves that an
+        exact job can be served, marked submitted, disappear, and later
+        reappear without being selected again by the existing client.
+        """
+        extension = Path(__file__).parents[2] / "agentbus" / "browser_extension" / "background.js"
+        fixture = self.root / "signed_extension_tombstone_fixture.cjs"
+        fixture.write_text(textwrap.dedent(f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const source = fs.readFileSync({json.dumps(str(extension))}, "utf8");
+            const sandboxModule = {{exports: {{}}}};
+            const context = {{module: sandboxModule, exports: sandboxModule.exports, console, setInterval: () => {{}}}};
+            vm.runInNewContext(source, context, {{filename: {json.dumps(str(extension))}}});
+            const extension = sandboxModule.exports;
+            const job = {{
+              job_id: "{PLAN_JOB}", role: "PRODUCT_GPT", task: "PLAN_SPEC",
+              conversation_url: "https://chatgpt.com/c/plan-test", prompt: "packet"
+            }};
+            let serverJobs = [job];
+            let sendCount = 0;
+            const storage = {{jobs: {{}}, lastSubmitAt: 0, bridgeStatus: "ONLINE"}};
+            context.browser = {{
+              storage: {{local: {{
+                get: async () => ({{...storage}}),
+                set: async (value) => Object.assign(storage, value)
+              }}}},
+              tabs: {{
+                query: async () => [{{id: 1, url: job.conversation_url, status: "complete"}}],
+                get: async () => ({{id: 1, url: job.conversation_url, status: "complete"}}),
+                sendMessage: async () => {{ sendCount += 1; return {{code: "SUBMITTED_CONFIRMED", evidence: {{}}}}; }},
+                create: async () => ({{id: 1, url: job.conversation_url, status: "complete"}})
+              }}
+            }};
+            context.fetch = async () => ({{ok: true, json: async () => ({{jobs: serverJobs}})}});
+            (async () => {{
+              await extension.tick();
+              serverJobs = [];
+              await extension.tick();
+              if (storage.jobs["{PLAN_JOB}"].state !== "DONE") throw new Error("missing DONE tombstone");
+              serverJobs = [job];
+              await extension.tick();
+              if (sendCount !== 1) throw new Error("same job was unexpectedly requeued");
+              console.log("signed-v1 tombstone reproduction PASS");
+            }})().catch(error => {{ console.error(error); process.exitCode = 1; }});
+        """), encoding="utf-8")
+        completed = subprocess.run(
+            ["node", str(fixture)], capture_output=True, text=True, timeout=10, check=False
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("signed-v1 tombstone reproduction PASS", completed.stdout)
 
     def test_parser_rejects_outside_text_and_multiple_envelopes(self) -> None:
         job = self.compat.current_jobs()[0]

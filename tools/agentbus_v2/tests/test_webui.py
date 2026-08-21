@@ -144,14 +144,37 @@ class WebUITests(unittest.TestCase):
     @staticmethod
     def _compat_status(
         *,
-        plan_state: str = "waiting-mailbox",
+        plan_state: str = "waiting-browser",
         judge_state: str = "idle",
         plan_pending: int = 1,
         judge_pending: int = 0,
         extension: str = "ONLINE",
         mailbox: str = "available",
         last_error: str | None = None,
+        served_jobs: tuple[str, ...] = (),
     ) -> dict[str, object]:
+        plan_job_id = "plan-" + "a" * 24
+        jobs = []
+        if plan_pending:
+            jobs.append({
+                "job_id": plan_job_id,
+                "operation": "PLAN_GPT",
+                "p_id": "P1",
+                "conversation_url": "https://chatgpt.com/c/plan-test",
+                "served_to_extension": plan_job_id in served_jobs,
+                "first_server_serve": "2026-01-01T00:00:00+00:00" if plan_job_id in served_jobs else None,
+                "last_server_serve": "2026-01-01T00:00:00+00:00" if plan_job_id in served_jobs else None,
+            })
+        if judge_pending:
+            jobs.append({
+                "job_id": "judge-" + "b" * 24,
+                "operation": "JUDGE_GPT",
+                "p_id": "P1",
+                "conversation_url": "https://chatgpt.com/c/judge-test",
+                "served_to_extension": ("judge-" + "b" * 24) in served_jobs,
+                "first_server_serve": "2026-01-01T00:00:00+00:00" if ("judge-" + "b" * 24) in served_jobs else None,
+                "last_server_serve": "2026-01-01T00:00:00+00:00" if ("judge-" + "b" * 24) in served_jobs else None,
+            })
         return {
             "configured": True,
             "transport_mode": "SIGNED_V1_EXTENSION_COMPAT",
@@ -161,6 +184,7 @@ class WebUITests(unittest.TestCase):
             "last_error": last_error,
             "plan": {"state": plan_state, "pending": plan_pending},
             "judge": {"state": judge_state, "pending": judge_pending},
+            "jobs": jobs,
             "recent_ingestion": [],
         }
 
@@ -251,7 +275,8 @@ class WebUITests(unittest.TestCase):
         self.assertEqual("PLAN_GPT", gpt["operation"])
         self.assertEqual("AUTO", gpt["mode"])
         self.assertEqual("SIGNED_V1_EXTENSION_COMPAT", gpt["transport"])
-        self.assertEqual("WAITING_FOR_MAILBOX", gpt["state"])
+        self.assertEqual("WAITING_FOR_BROWSER", gpt["state"])
+        self.assertTrue(gpt["served_to_extension"] is False)
         self.assertEqual(job_id, gpt["job_id"])
         self.assertEqual("ONLINE", gpt["extension"])
         self.assertEqual("available", gpt["mailbox"])
@@ -260,6 +285,23 @@ class WebUITests(unittest.TestCase):
         self.assertIn('details class="manual-fallback"', html)
         self.assertNotIn('details class="manual-fallback" open', html)
         self.assertIn("Advanced manual GPT fallback", html)
+
+    def test_served_job_stays_waiting_for_browser_without_submission_evidence(self) -> None:
+        job_id = self.action.effect_id
+        self._write_packet(job_id)
+        pending = replace(self.snapshot, gpt_pending=frozenset({job_id}))
+        with patch.object(webui, "read_snapshot", return_value=pending), patch.object(
+            webui, "decide", return_value=Action(ActionKind.IDLE, reason="GPT result is absent")
+        ), patch.object(
+            self.state.legacy_browser_compat,
+            "status",
+            return_value=self._compat_status(served_jobs=(job_id,)),
+        ):
+            _, payload = self.server.request("/api/status")
+        gpt = payload["projects"][0]["gpt_transport"]
+        self.assertEqual("WAITING_FOR_BROWSER", gpt["state"])
+        self.assertTrue(gpt["served_to_extension"])
+        self.assertNotIn("submitted", str(gpt).lower())
 
     def test_pending_judge_uses_auto_signed_v1_lane(self) -> None:
         job_id = "judge-" + "b" * 24
