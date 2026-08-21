@@ -88,6 +88,8 @@ class DailyControlPlaneTests(unittest.TestCase):
         self.assertEqual("AWAITING_PLAN_BINDING", row["status_code"])
         self.assertEqual("等待 PLAN 会话绑定", row["semantic_status"])
         self.assertTrue(row["attention"])
+        self.assertFalse(row["active"])
+        self.assertEqual("bind-plan", row["primary_action"]["key"])
         state.stop_scheduler()
 
     def test_status_projection_work_running_and_executor_binding(self):
@@ -125,8 +127,39 @@ class DailyControlPlaneTests(unittest.TestCase):
             self.assertIn(text, html)
         self.assertIn('class="manual-fallback"', html)
         self.assertNotIn('class="manual-fallback" open', html)
+        self.assertNotIn("prompt(", html)
+        self.assertIn("task-list", html)
+        self.assertIn("attention-row", html)
+        self.assertIn("要求重新规划", html)
+        self.assertIn("@media(max-width:760px)", html)
         self.assertEqual(1, len(value["projects"]))
         state.stop_scheduler()
+
+    def test_lifecycle_grouping_is_enabled_not_inflight(self):
+        root = self.state
+        config(root, "P2", self.worktree.parent / "worktree2")
+        (root / "projects.json").write_text(json.dumps({"projects": [
+            {"p_id": "P1", "enabled": True},
+            {"p_id": "P2", "enabled": False},
+        ]}), encoding="utf-8")
+        state = webui.WebUIState(root)
+        snap = self.snapshot()
+        with patch.object(webui, "read_snapshot", return_value=snap), \
+                patch.object(webui, "decide", return_value=Action(ActionKind.IDLE)), \
+                patch.object(webui, "_worktree_observation", return_value=(True, None)), \
+                patch.object(state.scheduler, "is_in_flight", return_value=False):
+            value = state.status()
+        self.assertEqual({"P1"}, {p["p_id"] for p in value["active"]})
+        self.assertEqual({"P2"}, {p["p_id"] for p in value["paused"]})
+        self.assertEqual([], value["running"])
+        state.stop_scheduler()
+
+    def test_attention_is_not_a_second_full_card_renderer(self):
+        html = webui.render_index("test-token").decode()
+        self.assertIn("function attentionRow", html)
+        self.assertIn("function taskCard", html)
+        self.assertIn("map(attentionRow)", html)
+        self.assertIn("list.map(taskCard)", html)
 
     def test_archived_entry_cannot_be_enabled_through_webui(self):
         state = webui.WebUIState(self.state)
