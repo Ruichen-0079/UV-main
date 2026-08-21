@@ -8,6 +8,13 @@ import unittest
 from unittest.mock import patch
 
 from tools.agentbus_v2.core import GPT_PACKET_SCHEMA, Snapshot
+from tools.agentbus_v2.core import Action, ActionKind
+from tools.agentbus_v2.effects import EffectResult
+from tools.agentbus_v2.block_diagnosis import (
+    derive_operational_block,
+    render_block_packet,
+    set_block_config,
+)
 from tools.agentbus_v2.legacy_v1_browser_compat import (
     ENVELOPE_END,
     ENVELOPE_START,
@@ -177,6 +184,55 @@ class LegacyV1BrowserCompatTests(unittest.TestCase):
         job = payload["jobs"][0]
         self.assertEqual(("FINAL_GPT", "FINAL_REVIEW"), (job["role"], job["task"]))
         self.assertEqual("https://chatgpt.com/c/judge-test", job["conversation_url"])
+
+    def test_block_packet_uses_same_wire_and_strict_ingestion_path(self) -> None:
+        work_id = "work-" + "c" * 24
+        action = Action(ActionKind.WORK, effect_id=work_id)
+        observation = derive_operational_block(
+            "P1", action, EffectResult(False, "Codex exceeded the executor timeout")
+        )
+        set_block_config(
+            self.state,
+            conversation_url="https://chatgpt.com/c/block-test",
+            update_url=True,
+        )
+        set_block_config(self.state, enabled=True)
+        packet = render_block_packet(self.snapshot, action, observation)
+        path = self.state / "P1" / "block" / "outbox" / f"{observation.block_id}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(packet, encoding="utf-8")
+        with patch(
+            "tools.agentbus_v2.legacy_v1_browser_compat.read_snapshot",
+            return_value=replace(self.snapshot, gpt_pending=frozenset()),
+        ), patch(
+            "tools.agentbus_v2.block_diagnosis.read_snapshot",
+            return_value=replace(self.snapshot, gpt_pending=frozenset()),
+        ), patch(
+            "tools.agentbus_v2.block_diagnosis.decide",
+            return_value=action,
+        ):
+            jobs = self.compat.current_jobs()
+            self.assertEqual(1, len(jobs))
+            job = jobs[0]
+            self.assertEqual("BLOCK_GPT", job.operation)
+            self.assertEqual("FINAL_GPT", job.wire_dict()["role"])
+            raw = json.dumps({
+                "block_id": observation.block_id,
+                "operation": "BLOCK_GPT",
+                "decision": "WAIT",
+                "reason": "observe again",
+                "recovery_instruction": None,
+                "expected_postcondition": None,
+                "human_action": None,
+            }, separators=(",", ":"))
+            self.comments = (MailboxComment("99", envelope(
+                observation.block_id, "BLOCK_GPT", job.packet_sha256, raw
+            )),)
+            payload = self.compat.poll_and_project()
+        self.assertEqual([], payload["jobs"])
+        result = self.state / "P1" / "block" / "results" / f"{observation.block_id}.json"
+        self.assertTrue(result.exists())
+        self.assertEqual("WAIT", json.loads(result.read_text())["decision"])
 
     def test_only_enabled_exact_current_pending_is_projected(self) -> None:
         self.snapshot = replace(self.snapshot, gpt_pending=frozenset())

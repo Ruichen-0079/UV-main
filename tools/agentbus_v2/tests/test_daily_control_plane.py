@@ -131,6 +131,9 @@ class DailyControlPlaneTests(unittest.TestCase):
         self.assertIn("task-list", html)
         self.assertIn("attention-row", html)
         self.assertIn("要求重新规划", html)
+        self.assertIn("BLOCK_GPT", html)
+        self.assertIn("自动诊断运行阻塞", html)
+        self.assertIn("尚未执行", html)
         self.assertIn("@media(max-width:760px)", html)
         self.assertEqual(1, len(value["projects"]))
         state.stop_scheduler()
@@ -176,6 +179,16 @@ class DailyControlPlaneTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 state.status()
         self.assertFalse((self.state / "P1" / "block_reason.json").exists())
+        state.stop_scheduler()
+
+    def test_block_gpt_control_is_operational_and_off_by_default(self):
+        state = webui.WebUIState(self.state)
+        self.assertFalse(state.status()["block_gpt"]["enabled"])
+        config = state.set_block_binding("https://chatgpt.com/c/block-test")
+        self.assertFalse(config.enabled)
+        config = state.set_block_enabled(True)
+        self.assertTrue(config.enabled)
+        self.assertEqual("https://chatgpt.com/c/block-test", state.status()["block_gpt"]["conversation_url"])
         state.stop_scheduler()
 
 

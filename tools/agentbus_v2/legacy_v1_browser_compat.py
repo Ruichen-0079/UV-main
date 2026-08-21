@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 from .effects import submit_gpt_response
+from .block_diagnosis import BLOCK_OPERATION, current_block_request, load_block_config, submit_block_gpt_response
 from .facts import (
     FactError,
     PPaths,
@@ -46,6 +47,7 @@ ENVELOPE_END = "[/AGENTBUS_V2_GPT_TRANSPORT]"
 ROLE_TASK = {
     "PLAN_GPT": ("PRODUCT_GPT", "PLAN_SPEC"),
     "JUDGE_GPT": ("FINAL_GPT", "FINAL_REVIEW"),
+    "BLOCK_GPT": ("FINAL_GPT", "BLOCK_DIAGNOSIS"),
 }
 _JOB_HEADER_RE = re.compile(r"(?m)^JOB_ID: ([A-Za-z0-9_.:-]+)$")
 
@@ -175,6 +177,27 @@ def load_compat_config(state_root: Path, path: Path | None = None) -> LegacyComp
 def render_transport_prompt(job: CurrentJob) -> str:
     slug = job.repository.removeprefix("github.com/")
     mailbox_url = f"https://github.com/{slug}/issues/{job.mailbox_issue}"
+    if job.operation == BLOCK_OPERATION:
+        raw_example = (
+            '{"block_id":"' + job.job_id + '","operation":"BLOCK_GPT",'
+            '"decision":"RECOVER|WAIT|HUMAN","reason":"...",'
+            '"recovery_instruction":null,"expected_postcondition":null,'
+            '"human_action":null}'
+        )
+        instruction = (
+            "Diagnose only the bounded operational blocker in this self-contained packet. "
+            "Do not modify code or execute recovery. Return exactly one JSON object with "
+            "decision RECOVER, WAIT, or HUMAN. RECOVER is a proposal only."
+        )
+    else:
+        raw_example = (
+            '{"job_id":"' + job.job_id + '","operation":"' + job.operation + '",'
+            '"decision":"<one packet-allowed decision>","body":"<complete JSON-escaped body>"}'
+        )
+        instruction = (
+            "RAW_RESPONSE_JSON must be one valid JSON object matching the packet's strict "
+            "response schema, with no Markdown, prose, repair, or transformation."
+        )
     return (
         job.packet_text.rstrip()
         + "\n\n## SIGNED V1 EXTENSION TRANSPORT WRAPPER (OPERATIONAL ONLY)\n\n"
@@ -186,14 +209,10 @@ def render_transport_prompt(job: CurrentJob) -> str:
         + f"OPERATION: {job.operation}\n"
         + f"PACKET_SHA256: {job.packet_sha256}\n"
         + "RAW_RESPONSE_JSON:\n"
-        + '{"job_id":"'
-        + job.job_id
-        + '","operation":"'
-        + job.operation
-        + '","decision":"<one packet-allowed decision>","body":"<complete JSON-escaped body>"}\n'
+        + raw_example
+        + "\n"
         + f"{ENVELOPE_END}\n\n"
-        + "RAW_RESPONSE_JSON must be one valid JSON object matching the packet's strict "
-        + "response schema, with no Markdown, prose, repair, or transformation. Repeat "
+        + instruction + " Repeat "
         + "JOB_ID, OPERATION, and PACKET_SHA256 verbatim. A chat reply alone does not "
         + "complete transport. Do not modify code and do not merge.\n"
     )
@@ -369,6 +388,29 @@ class LegacyV1BrowserCompat:
             issue,
         )
 
+    def _current_block_job(self, entry: ProjectEntry, config: LegacyCompatConfig) -> CurrentJob | None:
+        """Project an exact BLOCK packet through the same signed extension lane."""
+        block_config = load_block_config(self.state_root)
+        if block_config.conversation_url is None:
+            return None
+        request = current_block_request(self.state_root, entry)
+        if request is None:
+            return None
+        return CurrentJob(
+            request.p_id,
+            request.allow_merge,
+            request.paths,
+            request.repository,
+            request.block_id,
+            BLOCK_OPERATION,
+            request.packet_text,
+            request.packet_sha256,
+            request.conversation_url,
+            request.head,
+            request.base,
+            request.mailbox_issue,
+        )
+
     def current_jobs(self) -> tuple[CurrentJob, ...]:
         config = self._config()
         if not config.enabled:
@@ -380,6 +422,9 @@ class LegacyV1BrowserCompat:
                 job = self._current_job(entry, config)
                 if job is not None:
                     jobs.append(job)
+                block_job = self._current_block_job(entry, config)
+                if block_job is not None:
+                    jobs.append(block_job)
             except (FactError, LegacyCompatError, OSError) as error:
                 errors.append(f"{entry.p_id}: {error}")
         if errors:
@@ -410,7 +455,11 @@ class LegacyV1BrowserCompat:
         entry = next((item for item in self._entries() if item.p_id == job.p_id), None)
         if entry is None or entry.allow_merge != job.allow_merge:
             return False
-        current = self._current_job(entry, config)
+        current = (
+            self._current_block_job(entry, config)
+            if job.operation == BLOCK_OPERATION
+            else self._current_job(entry, config)
+        )
         return bool(
             current is not None
             and current.job_id == job.job_id
@@ -439,7 +488,11 @@ class LegacyV1BrowserCompat:
                 with os.fdopen(fd, "w", encoding="utf-8") as stream:
                     stream.write(envelope.raw_response_json)
                     stream.flush()
-                result = submit_gpt_response(job.paths, temporary)
+                result = (
+                    submit_block_gpt_response(job.paths, temporary)
+                    if job.operation == BLOCK_OPERATION
+                    else submit_gpt_response(job.paths, temporary)
+                )
             finally:
                 temporary.unlink(missing_ok=True)
             return IngestionOutcome(job.p_id, job.job_id, result.changed, result.detail)
@@ -521,6 +574,11 @@ class LegacyV1BrowserCompat:
                     else "pending"
                 )
             lane_rows[lane] = {"state": state, "pending": len(lane_jobs)}
+        block_jobs = [job for job in jobs if job.operation == BLOCK_OPERATION]
+        try:
+            block_bound = load_block_config(self.state_root).conversation_url is not None
+        except FactError:
+            block_bound = False
         return {
             "legacy_v1_extension": "ONLINE" if online else "OFFLINE",
             "last_poll": (
@@ -538,6 +596,11 @@ class LegacyV1BrowserCompat:
             ),
             "plan": lane_rows["plan"],
             "judge": lane_rows["judge"],
+            "block": {
+                "state": "pending" if block_jobs else "idle",
+                "pending": len(block_jobs),
+                "bound": block_bound,
+            },
             "last_error": last_error,
             "recent_ingestion": [
                 {

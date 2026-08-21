@@ -428,6 +428,7 @@ class Scheduler:
         tick_function: TickFunction | None = None,
         registry: ProjectRegistry | None = None,
         gpt_transport=None,
+        block_supervisor=None,
     ) -> None:
         if poll_interval <= 0:
             raise ValueError("poll interval must be positive")
@@ -456,6 +457,13 @@ class Scheduler:
 
             gpt_transport = GPTTransport(self.state_root)
         self.gpt_transport = gpt_transport
+        if block_supervisor is None:
+            from .block_diagnosis import BlockDiagnosisSupervisor
+
+            block_supervisor = BlockDiagnosisSupervisor(
+                self.state_root, registry_path=self.registry_file
+            )
+        self.block_supervisor = block_supervisor
 
     def _registry(self) -> ProjectRegistry:
         if self._fixed_registry is not None:
@@ -545,9 +553,11 @@ class Scheduler:
                             return
                         self._in_flight.pop(p_id, None)
                     try:
-                        action, _result = done.result()
-                    except Exception:
-                        action = None
+                        action, result = done.result()
+                        error = None
+                    except Exception as exc:
+                        action, result, error = None, None, str(exc)
+                    self._observe_block_completion(p_id, action, result, error)
                     if action is not None:
                         self._dispatch_gpt(p_id, action)
                     if on_event is not None:
@@ -638,6 +648,22 @@ class Scheduler:
             self._wake_requested.add(p_id)
         self._drain_wake(p_id)
 
+    def _observe_block_completion(
+        self,
+        p_id: str,
+        action: Action | None,
+        result: object | None,
+        error: str | None = None,
+    ) -> None:
+        """Observe one normal tick without changing its semantic outcome."""
+        try:
+            entry = self._current_entry(p_id)
+            self.block_supervisor.observe(
+                p_id, action, result, error, entry=entry
+            )
+        except Exception:
+            LOGGER.exception("BLOCK_GPT operational observation failed for %s", p_id)
+
     def _drain_wake(self, p_id: str) -> None:
         with self._state_lock:
             if (
@@ -684,9 +710,11 @@ class Scheduler:
             event = self._event(p_id, future)
             events.append(event)
             try:
-                action, _result = future.result()
+                action, result = future.result()
+                error = None
             except Exception:
-                action = None
+                action, result, error = None, None, event.error
+            self._observe_block_completion(p_id, action, result, error)
             if action is not None:
                 self._dispatch_gpt(p_id, action)
             entry = next((item for item in registry.entries if item.p_id == p_id), None)
