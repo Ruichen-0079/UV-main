@@ -23,8 +23,8 @@ from urllib.parse import parse_qs, urlsplit
 LOGGER = logging.getLogger(__name__)
 DEFAULT_BRIDGE_HOST = "127.0.0.1"
 DEFAULT_BRIDGE_PORT = 6791
-DEFAULT_BROWSER_TIMEOUT = 300.0
-DEFAULT_RESPONSE_OBSERVATION_TIMEOUT = 240.0
+DEFAULT_BROWSER_TIMEOUT = 960.0
+DEFAULT_RESPONSE_OBSERVATION_TIMEOUT = 900.0
 MIN_RESULT_RELAY_MARGIN = 15.0
 BRIDGE_TOKEN_HEADER = "X-AgentBus-Token"
 MAX_BRIDGE_BODY = 1_000_000
@@ -544,9 +544,12 @@ class BrowserAdapter:
     ) -> None:
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("browser response timeout must be positive")
-        if response_timeout is None:
-            response_timeout = min(DEFAULT_RESPONSE_OBSERVATION_TIMEOUT, timeout * 0.8)
         minimum_margin = min(MIN_RESULT_RELAY_MARGIN, timeout * 0.1)
+        if response_timeout is None:
+            response_timeout = min(
+                DEFAULT_RESPONSE_OBSERVATION_TIMEOUT,
+                timeout - minimum_margin,
+            )
         if (
             not math.isfinite(response_timeout)
             or response_timeout < 0.001

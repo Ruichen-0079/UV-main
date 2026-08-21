@@ -632,6 +632,7 @@ class BrowserTransportTests(unittest.TestCase):
                 adapter.timeout - adapter.response_timeout,
                 MIN_RESULT_RELAY_MARGIN,
             )
+            self.assertEqual(60.0, adapter.timeout - adapter.response_timeout)
             adapter.close()
             with self.assertRaisesRegex(ValueError, "relay margin"):
                 BrowserAdapter(

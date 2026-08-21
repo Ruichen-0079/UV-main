@@ -23,7 +23,11 @@ class BrowserExtensionTests(unittest.TestCase):
             permissions,
         )
         self.assertEqual(["background.js"], manifest["background"]["scripts"])
-        self.assertNotIn("tools/agentbus", (EXTENSION / "content.js").read_text(encoding="utf-8"))
+        content = (EXTENSION / "content.js").read_text(encoding="utf-8")
+        self.assertNotIn("tools/agentbus", content)
+        self.assertNotIn("localStorage", content)
+        self.assertNotIn("sessionStorage", content)
+        self.assertNotIn("browser.storage", content)
 
     def test_javascript_syntax_and_dom_safety_helpers(self) -> None:
         content = EXTENSION / "content.js"
@@ -207,6 +211,7 @@ let messages = [];
 let sendAvailable = true;
 let clickMode = 'success';
 let clicks = 0;
+let activeJob = null;
 const composer = {{
   tagName: 'DIV', hidden: false, focus: () => {{}},
   getAttribute: () => null, dispatchEvent: () => {{}}
@@ -227,7 +232,10 @@ const send = {{
     clicks += 1;
     const packet = text;
     text = '';
-    messages = [roleNode('user', packet)];
+    messages = [roleNode(
+      'user',
+      clickMode === 'success' ? packet : `rendered exact job ${{activeJob}}`
+    )];
     if (clickMode === 'success') messages.push(roleNode('assistant', 'raw answer'));
   }}
 }};
@@ -263,6 +271,7 @@ function assertOrdered(codes, expected) {{
 
 (async () => {{
   const successJob = 'plan-' + '1'.repeat(24);
+  activeJob = successJob;
   const success = await api.processRequest({{
     lane: 'plan', job_id: successJob, operation: 'PLAN_GPT',
     conversation_url: sandbox.location.href, packet: 'SUCCESS_PACKET',
@@ -295,6 +304,7 @@ function assertOrdered(codes, expected) {{
   messages = [];
   clickMode = 'timeout';
   const timeoutJob = 'plan-' + '2'.repeat(24);
+  activeJob = timeoutJob;
   let timedOut = false;
   try {{
     await api.processRequest({{
@@ -312,18 +322,51 @@ function assertOrdered(codes, expected) {{
   assertOrdered(timeoutCodes, [
     'SEND_ATTEMPTED', 'SEND_CLICK_RETURNED', 'RESPONSE_TIMEOUT', 'POLL_ERROR'
   ]);
+  const lateResponse = '{{"job_id":"' + timeoutJob + '","operation":"PLAN_GPT","decision":"SPEC","body":"late"}}';
+  messages.push(roleNode('assistant', lateResponse));
   const replay = await api.processRequest({{
     lane: 'plan', job_id: timeoutJob, operation: 'PLAN_GPT',
     conversation_url: sandbox.location.href, packet: 'TIMEOUT_PACKET',
-    response_timeout_ms: 10, response_stability_ms: 2, response_poll_ms: 1
+    response_timeout_ms: 1000, response_stability_ms: 2, response_poll_ms: 1
   }});
-  if (replay !== false || clicks !== 2) throw Error('post-Send job was clicked twice');
+  if (replay !== true || clicks !== 2) throw Error('late response was not harvested without re-Send');
   timeoutEvents = diagnosticsFor(timeoutJob);
   if (timeoutEvents.filter((event) => event.code === 'SEND_ATTEMPTED').length !== 1) {{
     throw Error('SEND_ATTEMPTED was duplicated');
   }}
-  if (!timeoutEvents.some((event) => event.code === 'EXACT_USER_PACKET_OBSERVED')) {{
-    throw Error('exact DOM recovery evidence was absent');
+  if (!timeoutEvents.some((event) => event.code === 'EXACT_JOB_USER_MESSAGE_OBSERVED')) {{
+    throw Error('exact job DOM recovery evidence was absent');
+  }}
+  if (!timeoutEvents.some((event) => event.code === 'RESULT_ACCEPTED')) {{
+    throw Error('late response did not traverse the bridge result path');
+  }}
+
+  bridgeMessages.length = 0;
+  text = '';
+  messages = [];
+  const noCorrelationJob = 'plan-' + 'f'.repeat(24);
+  activeJob = noCorrelationJob;
+  let noCorrelationTimedOut = false;
+  try {{
+    await api.processRequest({{
+      lane: 'plan', job_id: noCorrelationJob, operation: 'PLAN_GPT',
+      conversation_url: sandbox.location.href, packet: 'NO_CORRELATION_PACKET',
+      response_timeout_ms: 10, response_stability_ms: 2, response_poll_ms: 1
+    }});
+  }} catch (error) {{ noCorrelationTimedOut = String(error).includes('timed out'); }}
+  messages = [];
+  const noCorrelationReplay = await api.processRequest({{
+    lane: 'plan', job_id: noCorrelationJob, operation: 'PLAN_GPT',
+    conversation_url: sandbox.location.href, packet: 'NO_CORRELATION_PACKET',
+    response_timeout_ms: 10, response_stability_ms: 2, response_poll_ms: 1
+  }});
+  if (!noCorrelationTimedOut || noCorrelationReplay !== false || clicks !== 3) {{
+    throw Error('missing post-Send correlation did not fail closed');
+  }}
+  const noCorrelationCodes = diagnosticsFor(noCorrelationJob).map((event) => event.code);
+  if (noCorrelationCodes.filter((code) => code === 'SEND_ATTEMPTED').length !== 1 ||
+      !noCorrelationCodes.includes('SEND_ATTEMPT_ALREADY_RECORDED')) {{
+    throw Error('missing correlation permitted a duplicate Send');
   }}
 
   bridgeMessages.length = 0;
@@ -331,6 +374,7 @@ function assertOrdered(codes, expected) {{
   messages = [];
   sendAvailable = false;
   const beforeJob = 'plan-' + '3'.repeat(24);
+  activeJob = beforeJob;
   const before = await api.processRequest({{
     lane: 'plan', job_id: beforeJob, operation: 'PLAN_GPT',
     conversation_url: sandbox.location.href, packet: 'NO_SEND_PACKET',
@@ -348,6 +392,7 @@ function assertOrdered(codes, expected) {{
   sendAvailable = true;
   rejectSendBoundaryDiagnostic = true;
   const sinkJob = 'plan-' + '4'.repeat(24);
+  activeJob = sinkJob;
   let sinkFailed = false;
   try {{
     await api.processRequest({{
@@ -356,7 +401,7 @@ function assertOrdered(codes, expected) {{
       response_timeout_ms: 1000
     }});
   }} catch (error) {{ sinkFailed = String(error).includes('diagnostic'); }}
-  if (!sinkFailed || clicks !== 2) throw Error('failed evidence sink did not fence click');
+  if (!sinkFailed || clicks !== 3) throw Error('failed evidence sink did not fence click');
   const sinkCodes = diagnosticsFor(sinkJob).map((event) => event.code);
   if (!sinkCodes.includes('SEND_ATTEMPTED') || sinkCodes.includes('SEND_CLICK_RETURNED')) {{
     throw Error('sink failure boundary was misclassified');
@@ -399,6 +444,7 @@ const api = sandbox.module.exports;
 let frames = [];
 let frameIndex = 0;
 let packet = '';
+let renderedUser = '';
 let composerText = '';
 let clicks = 0;
 function currentFrame() {{ return frames[Math.min(frameIndex, frames.length - 1)]; }}
@@ -433,7 +479,7 @@ sandbox.document = {{
     if (selector === '[data-message-author-role="assistant"]') {{
       if (frame.text !== null) nodes = [roleNode('assistant', frame.text)];
     }} else if (selector.includes('data-message-author-role="user"')) {{
-      nodes = [roleNode('user', packet)];
+      nodes = [roleNode('user', renderedUser)];
       if (frame.later_user) nodes.push(roleNode('user', 'UNRELATED_LATER_PACKET'));
       if (frame.text !== null) nodes.push(roleNode('assistant', frame.text));
       frameIndex += 1;
@@ -445,6 +491,7 @@ sandbox.document = {{
 function reset(nextPacket, nextFrames) {{
   clock = 0;
   packet = nextPacket;
+  renderedUser = nextPacket;
   frames = nextFrames;
   frameIndex = 0;
   bridgeMessages.length = 0;
@@ -464,7 +511,14 @@ async function wait(job, timeout = 10000) {{
 }}
 
 (async () => {{
-  if (api.responseStabilityMs({{}}) !== 2500 || api.responsePollMs({{}}) !== 500) {{
+  const markerProbe = 'judge-' + 'd'.repeat(24);
+  if (!api.exactJobMarkerInText(`prefix ${{markerProbe}} suffix`, markerProbe) ||
+      api.exactJobMarkerInText(`${{markerProbe}}f`, markerProbe) ||
+      api.exactJobMarkerInText(`x${{markerProbe}}`, markerProbe)) {{
+    throw Error('exact job marker boundaries were weakened');
+  }}
+  if (api.responseTimeoutMs({{}}) !== 900000 ||
+      api.responseStabilityMs({{}}) !== 2500 || api.responsePollMs({{}}) !== 500) {{
     throw Error('production response stabilization defaults changed');
   }}
   let invalidOrdering = false;
@@ -475,6 +529,18 @@ async function wait(job, timeout = 10000) {{
     }});
   }} catch (error) {{ invalidOrdering = String(error).includes('shorter than response timeout'); }}
   if (!invalidOrdering) throw Error('invalid response timeout ordering was accepted');
+
+  const longJob = 'plan-' + '4'.repeat(24);
+  const longResponse = '{{"job_id":"' + longJob + '","operation":"PLAN_GPT","decision":"SPEC","body":"long"}}';
+  reset('LONG_PACKET_' + longJob, [
+    ...Array.from({{length: 485}}, () => ({{generation: true, text: null}})),
+    {{generation: false, text: longResponse}},
+    {{generation: false, text: longResponse}},
+    {{generation: false, text: longResponse}}
+  ]);
+  if (await wait(longJob, 300000) !== longResponse || clock <= 240000) {{
+    throw Error('response exceeding the former 240s limit was not observed');
+  }}
 
   const flapJob = 'plan-' + '5'.repeat(24);
   const partialOne = '{{"job_id":"pla';
@@ -552,6 +618,7 @@ async function wait(job, timeout = 10000) {{
     {{generation: false, text: recoveryText}},
     {{generation: false, text: recoveryText}}
   ]);
+  renderedUser = `ChatGPT rendered current job ${{recoveryJob}} without the full packet`;
   const recovered = await api.processRequest({{
     lane: 'plan', job_id: recoveryJob, operation: 'PLAN_GPT',
     conversation_url: sandbox.location.href, packet,
@@ -562,6 +629,27 @@ async function wait(job, timeout = 10000) {{
   const stableIndex = recoveryCodes.indexOf('ASSISTANT_RESPONSE_STABLE');
   const postIndex = recoveryCodes.indexOf('RESULT_POST_ATTEMPTED');
   if (stableIndex < 0 || postIndex <= stableIndex) throw Error('recovery relayed before stable response');
+  if (!recoveryCodes.includes('EXACT_JOB_USER_MESSAGE_OBSERVED')) {{
+    throw Error('fresh exact-job DOM correlation was not used');
+  }}
+
+  const wrongJob = 'plan-' + 'b'.repeat(24);
+  reset('WRONG_JOB_PACKET_' + wrongJob, [{{generation: false, text: recoveryText}}]);
+  renderedUser = 'rendered different job plan-' + 'c'.repeat(24);
+  const wrongObservation = api.currentJobConversationObservation({{
+    job_id: wrongJob, packet
+  }});
+  if (wrongObservation.exact_job_user_observed || wrongObservation.assistant_response !== null) {{
+    throw Error('wrong job user message was accepted as recovery correlation');
+  }}
+  const wrongConversation = await api.processRequest({{
+    lane: 'plan', job_id: wrongJob, operation: 'PLAN_GPT',
+    conversation_url: 'https://chatgpt.com/c/different-conversation', packet,
+    response_timeout_ms: 10000, response_stability_ms: 1000, response_poll_ms: 500
+  }});
+  if (wrongConversation !== false || clicks !== 0) {{
+    throw Error('wrong conversation recovered or sent the current job');
+  }}
   console.log('ok');
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
 """

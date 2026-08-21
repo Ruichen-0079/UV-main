@@ -8,10 +8,10 @@ const CONFIG = globalThis.AGENTBUS_V2_BROWSER_CONFIG || {
   bridge_base: "http://127.0.0.1:6791",
   bridge_token: "REPLACE_WITH_BRIDGE_TOKEN",
   poll_ms: 1000,
-  response_timeout_ms: 240000
+  response_timeout_ms: 900000
 };
 const LANES = ["plan", "judge"];
-const DEFAULT_RESPONSE_TIMEOUT_MS = 240000;
+const DEFAULT_RESPONSE_TIMEOUT_MS = 900000;
 const DEFAULT_RESPONSE_POLL_MS = 500;
 const DEFAULT_RESPONSE_STABILITY_MS = 2500;
 
@@ -27,7 +27,11 @@ const state = {
   matched_lanes: new Set(),
   heartbeat_lanes: new Set(),
   dom_probe_jobs: new Set(),
-  send_attempted_jobs: new Set()
+  user_observed_jobs: new Set(),
+  send_attempted_jobs: new Set(),
+  // Operational correlation only. This is deliberately memory-only and is
+  // never consulted as semantic authority or written to browser storage.
+  sent_user_locators: new Map()
 };
 
 function diagnostic(...values) {
@@ -155,6 +159,99 @@ function messageText(node) {
   return String(node?.innerText || node?.textContent || "");
 }
 
+function exactJobMarkerInText(text, jobId) {
+  const value = String(text || "");
+  const marker = String(jobId || "");
+  if (!/^(?:plan|judge)-[0-9a-f]{24}$/.test(marker)) return false;
+  let offset = 0;
+  while (offset <= value.length - marker.length) {
+    const index = value.indexOf(marker, offset);
+    if (index < 0) return false;
+    const before = index > 0 ? value[index - 1] : "";
+    const afterIndex = index + marker.length;
+    const after = afterIndex < value.length ? value[afterIndex] : "";
+    if (!/[A-Za-z0-9_-]/.test(before) && !/[A-Za-z0-9_-]/.test(after)) return true;
+    offset = index + marker.length;
+  }
+  return false;
+}
+
+function stableMessageId(node) {
+  for (const name of ["data-message-id", "data-turn-id", "id"]) {
+    const value = String(node?.getAttribute?.(name) || "");
+    if (value) return {name, value};
+  }
+  return null;
+}
+
+function observationAfterUser(messages, userNode, correlation) {
+  const userIndex = messages.indexOf(userNode);
+  if (userIndex < 0) return null;
+  let assistantResponse = null;
+  for (let index = userIndex + 1; index < messages.length; index += 1) {
+    const node = messages[index];
+    const role = node.getAttribute?.("data-message-author-role");
+    if (role === "user") break;
+    if (role === "assistant") assistantResponse = messageText(node);
+  }
+  return {
+    exact_user_packet_observed: correlation === "exact_packet",
+    exact_job_user_observed: true,
+    correlation,
+    assistant_response: assistantResponse
+  };
+}
+
+function rememberSentUser(jobId, node) {
+  state.sent_user_locators.set(jobId, {node, message_id: stableMessageId(node)});
+}
+
+function currentJobConversationObservation(request) {
+  const messages = conversationMessages();
+  const isExactJobUser = (node) => (
+    node?.getAttribute?.("data-message-author-role") === "user" &&
+    exactJobMarkerInText(messageText(node), request.job_id)
+  );
+  const locator = state.sent_user_locators.get(request.job_id);
+  if (locator?.node && messages.includes(locator.node) && isExactJobUser(locator.node)) {
+    return observationAfterUser(messages, locator.node, "memory_locator");
+  }
+  if (locator?.message_id) {
+    const matches = messages.filter((node) => (
+      isExactJobUser(node) &&
+      String(node.getAttribute?.(locator.message_id.name) || "") === locator.message_id.value
+    ));
+    if (matches.length === 1) {
+      rememberSentUser(request.job_id, matches[0]);
+      return observationAfterUser(messages, matches[0], "dom_message_id");
+    }
+  }
+
+  const exactPacketUsers = messages.filter((node) => (
+    node.getAttribute?.("data-message-author-role") === "user" &&
+    editorPacketMatches(messageText(node), request.packet)
+  ));
+  if (exactPacketUsers.length === 1) {
+    rememberSentUser(request.job_id, exactPacketUsers[0]);
+    return observationAfterUser(messages, exactPacketUsers[0], "exact_packet");
+  }
+
+  // ChatGPT's rendered user turn may not preserve the packet's complete text.
+  // An exact immutable job marker is sufficient operational correlation only
+  // when it identifies one user-role message in this exact conversation.
+  const exactJobUsers = messages.filter(isExactJobUser);
+  if (exactJobUsers.length === 1) {
+    rememberSentUser(request.job_id, exactJobUsers[0]);
+    return observationAfterUser(messages, exactJobUsers[0], "exact_job_marker");
+  }
+  return {
+    exact_user_packet_observed: false,
+    exact_job_user_observed: false,
+    correlation: null,
+    assistant_response: null
+  };
+}
+
 function exactConversationObservation(packet) {
   const messages = conversationMessages();
   let exactUserIndex = -1;
@@ -170,19 +267,7 @@ function exactConversationObservation(packet) {
   if (exactUserIndex < 0) {
     return { exact_user_packet_observed: false, assistant_response: null };
   }
-  let assistantResponse = null;
-  for (let index = exactUserIndex + 1; index < messages.length; index += 1) {
-    const node = messages[index];
-    const role = node.getAttribute?.("data-message-author-role");
-    if (role === "user") break;
-    if (role === "assistant") {
-      assistantResponse = messageText(node);
-    }
-  }
-  return {
-    exact_user_packet_observed: true,
-    assistant_response: assistantResponse
-  };
+  return observationAfterUser(messages, messages[exactUserIndex], "exact_packet");
 }
 
 function sendButton(requireEnabled = true) {
@@ -388,7 +473,7 @@ async function reportDiagnostic(lane, jobId, code, detail, required = false) {
 
 function responseTimeoutMs(request) {
   const value = Number(request?.response_timeout_ms ?? DEFAULT_RESPONSE_TIMEOUT_MS);
-  if (!Number.isFinite(value) || value < 1 || value > 600000) {
+  if (!Number.isFinite(value) || value < 1 || value > 1200000) {
     throw new Error("browser response timeout is invalid");
   }
   return value;
@@ -430,6 +515,19 @@ async function responseDiagnosticDetail(value, extra = {}) {
   return JSON.stringify({length: text.length, sha256, ...extra});
 }
 
+async function reportUserObservation(request, observation) {
+  if (!observation.exact_job_user_observed || state.user_observed_jobs.has(request.job_id)) return;
+  await reportDiagnostic(
+    request.lane,
+    request.job_id,
+    observation.exact_user_packet_observed
+      ? "EXACT_USER_PACKET_OBSERVED"
+      : "EXACT_JOB_USER_MESSAGE_OBSERVED",
+    `the exact current job user message is visible (${observation.correlation})`
+  );
+  state.user_observed_jobs.add(request.job_id);
+}
+
 async function waitForResponse(request) {
   const timeoutMs = responseTimeoutMs(request);
   const pollMs = responsePollMs(request);
@@ -451,7 +549,8 @@ async function waitForResponse(request) {
         request.lane, request.job_id, "GENERATION_OBSERVED", "generation UI is active"
       );
     }
-    const observation = exactConversationObservation(request.packet);
+    const observation = currentJobConversationObservation(request);
+    await reportUserObservation(request, observation);
     const response = observation.assistant_response;
     if (generationBusy) {
       if (candidate !== null) {
@@ -609,15 +708,10 @@ async function processRequest(request) {
   // Conversation DOM is operational evidence only. The exact current packet
   // contains its immutable job identity; any recovered response still goes
   // through the strict bridge result path and submit_gpt_response.
-  const recovery = exactConversationObservation(request.packet);
-  if (recovery.exact_user_packet_observed) {
+  const recovery = currentJobConversationObservation(request);
+  if (recovery.exact_job_user_observed) {
     state.send_attempted_jobs.add(request.job_id);
-    await reportDiagnostic(
-      request.lane,
-      request.job_id,
-      "EXACT_USER_PACKET_OBSERVED",
-      "the exact current packet is already visible as a user message"
-    );
+    await reportUserObservation(request, recovery);
     if (recovery.assistant_response !== null || generating()) {
       const recoveredResponse = await waitForResponse(request);
       await postResult(request, recoveredResponse);
@@ -788,7 +882,9 @@ const API = {
   assistantNodes,
   newAssistantText,
   conversationMessages,
+  exactJobMarkerInText,
   exactConversationObservation,
+  currentJobConversationObservation,
   findComposer,
   sendButton,
   setComposer,
