@@ -516,6 +516,14 @@ class Scheduler:
                 return
             if candidate is None:
                 return
+        if (
+            candidate.kind is ActionKind.PLAN
+            and entry.plan_conversation_url is None
+            and not entry.global_plan_fallback
+        ):
+            # A retained exact PLAN packet is still semantic evidence, but an
+            # unbound production P has no permitted transport destination.
+            return
         self.gpt_transport.try_dispatch(
             p_id,
             candidate,

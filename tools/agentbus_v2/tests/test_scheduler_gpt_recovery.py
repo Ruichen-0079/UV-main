@@ -51,7 +51,9 @@ class RecordingTransport:
 
 class SchedulerGPTRecoveryTests(unittest.TestCase):
     def registry(self, root: Path) -> ProjectRegistry:
-        return ProjectRegistry(root / "projects.json", (ProjectEntry("P1"),))
+        return ProjectRegistry(
+            root / "projects.json", (ProjectEntry("P1", global_plan_fallback=True),)
+        )
 
     def test_fresh_scheduler_redispatches_retained_plan_after_idle_tick(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

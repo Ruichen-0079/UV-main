@@ -66,7 +66,8 @@ def idle_tick(_state: Path, _p_id: str, *, allow_merge: bool):
 class SchedulerTests(unittest.TestCase):
     def registry(self, root: Path, *p_ids: str) -> ProjectRegistry:
         return ProjectRegistry(
-            root / "projects.json", tuple(ProjectEntry(p_id) for p_id in p_ids)
+            root / "projects.json",
+            tuple(ProjectEntry(p_id, global_plan_fallback=True) for p_id in p_ids),
         )
 
     def start(self, scheduler: Scheduler):
