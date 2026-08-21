@@ -184,11 +184,33 @@ def operator_directive_id(
     """Derive an immutable directive identity from prior planning authority."""
     authority = replace(s, operator_directive=None)
     authority_plan = plan_job_id(authority, parent_spec_id=parent_spec_id)
+    return operator_directive_id_from_authority(
+        s.p_id,
+        authority_plan,
+        operator_directive_text_digest(text),
+        parent_spec_id=parent_spec_id,
+    )
+
+
+def operator_directive_id_from_authority(
+    p_id: str,
+    authority_plan_job_id: str,
+    text_digest: str,
+    *,
+    parent_spec_id: str | None = None,
+) -> str:
+    """Validate an immutable directive from its stored authority identity.
+
+    Unlike :func:`operator_directive_id`, this helper deliberately does not
+    recompute planning facts from today's HEAD/BASE.  It is used when loading
+    historical directive facts whose creation-time authority is already
+    recorded durably.
+    """
     return stable_id("directive", {
-        "p_id": s.p_id,
-        "authority_plan_job_id": authority_plan,
+        "p_id": p_id,
+        "authority_plan_job_id": authority_plan_job_id,
         "parent_spec_id": parent_spec_id,
-        "text_digest": operator_directive_text_digest(text),
+        "text_digest": text_digest,
     })
 
 

@@ -26,6 +26,7 @@ from .core import (
     plan_facts_digest,
     plan_job_id,
     operator_directive_id,
+    operator_directive_id_from_authority,
     operator_directive_text_digest,
     proof_id,
     spec_id,
@@ -463,6 +464,15 @@ def load_operator_directive(paths: PPaths) -> OperatorDirective | None:
         raise FactError(f"invalid operator directive digest: {path}")
     if operator_directive_text_digest(text) != value["text_digest"]:
         raise FactError(f"operator directive digest mismatch: {path}")
+    config = load_config(paths)
+    expected_id = operator_directive_id_from_authority(
+        config.p_id,
+        value["authority_plan_job_id"],
+        value["text_digest"],
+        parent_spec_id=parent,
+    )
+    if value["directive_id"] != expected_id:
+        raise FactError(f"operator directive identity does not match its immutable content: {path}")
     return OperatorDirective(
         directive_id=value["directive_id"], text=text,
         text_digest=value["text_digest"],
@@ -692,6 +702,74 @@ def _load_plan_spec(
         spec_id(config.charter_digest, expected_planning, result.body), result.body,
         parent_id, trigger, job_id,
     )
+
+
+def _historical_directive_plan(
+    paths: PPaths,
+    config: PConfig,
+    contract_digest: str,
+    directive: OperatorDirective,
+) -> tuple[GptResult, SpecFact] | None:
+    """Find the accepted PLAN/SPEC that this immutable directive produced.
+
+    The search is deliberately limited to exact durable PLAN result/packet
+    identities.  It is not a history authority by itself: the matching packet
+    is revalidated against the HEAD/BASE it recorded, and the strict result
+    parser remains the only source of accepted GPT authority.
+    """
+    expected_directive = {
+        "directive_id": directive.directive_id,
+        "text_digest": directive.text_digest,
+        "authority_plan_job_id": directive.authority_plan_job_id,
+        "parent_spec_id": directive.parent_spec_id,
+    }
+    result_dir = paths.root / "gpt" / "results"
+    matches: list[tuple[GptResult, SpecFact]] = []
+    if not result_dir.exists():
+        return None
+    for result_path in sorted(result_dir.glob("plan-*.json")):
+        job_id = result_path.stem
+        if not GPT_JOB_RE.fullmatch(job_id):
+            continue
+        try:
+            result = _load_gpt_result(paths, job_id, "PLAN_GPT")
+        except FactError:
+            # Unrelated malformed historical material is not part of this
+            # directive's lineage. A matching packet/result is re-raised by
+            # the strict validation below.
+            continue
+        if result is None or result.decision != "SPEC":
+            continue
+        packet_path = paths.root / "gpt" / "outbox" / f"{job_id}.md"
+        if not packet_path.exists():
+            continue
+        packet = load_gpt_packet(paths, job_id)
+        semantic = packet.get("semantic_input")
+        if not isinstance(semantic, dict):
+            continue
+        if semantic.get("operator_directive") != expected_directive:
+            continue
+        packet_head = semantic.get("head")
+        packet_base = semantic.get("base")
+        if (
+            not isinstance(packet_head, str)
+            or not isinstance(packet_base, str)
+            or not SHA_RE.fullmatch(packet_head)
+            or not SHA_RE.fullmatch(packet_base)
+        ):
+            raise FactError(f"historical PLAN packet identity is malformed: {job_id}")
+        historical_identity = _identity(
+            config, packet_head, packet_base, contract_digest, directive
+        )
+        loaded_job, loaded_result, spec = _load_plan_spec(
+            paths, config, historical_identity, None, None, job_id
+        )
+        if loaded_job != job_id or loaded_result is None or spec is None:
+            raise FactError(f"historical directive PLAN lineage is incomplete: {job_id}")
+        matches.append((loaded_result, spec))
+    if len(matches) > 1:
+        raise FactError("operator directive has ambiguous accepted PLAN lineage")
+    return matches[0] if matches else None
 
 def _load_work(
     paths: PPaths, config: PConfig, identity: Snapshot, spec: SpecFact,
@@ -1063,20 +1141,39 @@ def _load_current(
     proof: tuple[ProofFact, ...] = ()
     seen: set[str] = set()
     if operator_directive is not None:
+        expected_stored_id = operator_directive_id_from_authority(
+            config.p_id,
+            operator_directive.authority_plan_job_id,
+            operator_directive.text_digest,
+            parent_spec_id=operator_directive.parent_spec_id,
+        )
+        if operator_directive.directive_id != expected_stored_id:
+            raise FactError("operator directive identity does not match its immutable content")
         authority = replace(identity, operator_directive=None)
         expected_authority = plan_job_id(
             authority, parent_spec_id=operator_directive.parent_spec_id
         )
-        if operator_directive.authority_plan_job_id != expected_authority:
-            raise FactError("operator directive authority does not match current planning facts")
-        expected_directive = operator_directive_id(
-            authority,
-            operator_directive.text,
-            parent_spec_id=operator_directive.parent_spec_id,
+        historical_plan = _historical_directive_plan(
+            paths, config, contract_digest, operator_directive
         )
-        if operator_directive.directive_id != expected_directive:
-            raise FactError("operator directive identity does not match its immutable content")
-        if operator_directive.parent_spec_id is not None:
+        if historical_plan is not None:
+            historical_result, historical_spec = historical_plan
+            results.append(historical_result)
+            specs.append(historical_spec)
+            seen.add(historical_result.job_id)
+            work, proof, stage_results, return_plan = _current_stage(
+                paths, config, identity, historical_spec
+            )
+            results.extend(stage_results)
+            if return_plan is None:
+                return tuple(results), tuple(specs), frozenset(), work, proof
+            parent, trigger = historical_spec, return_plan.job_id
+        elif operator_directive.authority_plan_job_id != expected_authority:
+            # Before an accepted PLAN/SPEC lineage exists, the creation-time
+            # freshness fence remains fail-closed. Only proven historical
+            # lineage is allowed to survive later HEAD/BASE movement.
+            raise FactError("operator directive authority does not match current planning facts")
+        elif operator_directive.parent_spec_id is not None:
             # Reconstruct the historical SPEC lineage without the new
             # directive first.  A replan must not make the old root PLAN (and
             # its SPEC) disappear merely because the new directive changes
