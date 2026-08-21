@@ -488,6 +488,10 @@ def add_operator_directive(
         raise FactError("operator directive cannot be empty")
     if parent_spec_id is not None and not re.fullmatch(r"spec-[0-9a-f]{24}", parent_spec_id):
         raise FactError("operator directive parent SPEC has an invalid identity")
+    if parent_spec_id is not None and not any(
+        item.spec_id == parent_spec_id for item in snapshot.specs
+    ):
+        raise FactError("operator directive parent SPEC is absent from the fresh snapshot")
     authority = replace(snapshot, operator_directive=None)
     authority_job = plan_job_id(authority, parent_spec_id=parent_spec_id)
     directive = OperatorDirective(
