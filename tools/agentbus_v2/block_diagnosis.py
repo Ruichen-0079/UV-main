@@ -19,6 +19,7 @@ import threading
 from typing import Any, Mapping
 
 from .core import Action, ActionKind, Snapshot, stable_id, decide
+from .effects import GPT_PACKET_BUDGET_BYTES, assert_gpt_packet_budget
 from .facts import FactError, PPaths, _load_json, load_config, paths_for, read_snapshot, sha256_text, write_json_once, write_text_once
 
 
@@ -389,6 +390,10 @@ def render_block_packet(
     )
     if len(text.encode("utf-8")) > MAX_PACKET_TEXT:
         raise FactError("BLOCK_GPT packet exceeds bounded size")
+    assert_gpt_packet_budget(
+        text, job_id=observation.block_id, operation=BLOCK_OPERATION,
+        budget_bytes=GPT_PACKET_BUDGET_BYTES,
+    )
     return text
 
 

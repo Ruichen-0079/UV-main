@@ -152,6 +152,7 @@ class WebUITests(unittest.TestCase):
         mailbox: str = "available",
         last_error: str | None = None,
         served_jobs: tuple[str, ...] = (),
+        packet_errors: tuple[dict[str, object], ...] = (),
     ) -> dict[str, object]:
         plan_job_id = "plan-" + "a" * 24
         jobs = []
@@ -185,6 +186,7 @@ class WebUITests(unittest.TestCase):
             "plan": {"state": plan_state, "pending": plan_pending},
             "judge": {"state": judge_state, "pending": judge_pending},
             "jobs": jobs,
+            "packet_errors": list(packet_errors),
             "recent_ingestion": [],
         }
 
@@ -302,6 +304,26 @@ class WebUITests(unittest.TestCase):
         self.assertEqual("WAITING_FOR_BROWSER", gpt["state"])
         self.assertTrue(gpt["served_to_extension"])
         self.assertNotIn("submitted", str(gpt).lower())
+
+    def test_oversized_packet_is_operational_attention_and_not_browser_wait(self) -> None:
+        job_id = self.action.effect_id
+        projection = webui.WebUIState._gpt_transport_projection(
+            self._compat_status(packet_errors=({
+                "job_id": job_id,
+                "code": "GPT_PACKET_OVERSIZE",
+                "rendered_packet_bytes": 200000,
+                "packet_budget_bytes": 122880,
+                "evidence_bytes": 100000,
+                "evidence_truncated": True,
+                "detail": "GPT_PACKET_OVERSIZE: rendered packet is too large",
+            },)),
+            "PLAN_GPT",
+            job_id,
+            None,
+        )
+        self.assertEqual("GPT_PACKET_OVERSIZE", projection["state"])
+        self.assertEqual(200000, projection["rendered_packet_bytes"])
+        self.assertTrue(projection["evidence_truncated"])
 
     def test_pending_judge_uses_auto_signed_v1_lane(self) -> None:
         job_id = "judge-" + "b" * 24

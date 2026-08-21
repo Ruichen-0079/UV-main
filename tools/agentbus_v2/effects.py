@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Any, Sequence
 
@@ -53,6 +54,81 @@ class EffectResult:
     detail: str
 
 
+# This is the hard byte budget for the complete prompt sent through a GPT
+# transport adapter, including the signed-v1 operational wrapper.  The
+# renderer reserves a small deterministic amount for that wrapper.
+GPT_PACKET_BUDGET_BYTES = 120 * 1024
+GPT_TRANSPORT_WRAPPER_RESERVE_BYTES = 4096
+GPT_RENDER_BUDGET_BYTES = GPT_PACKET_BUDGET_BYTES - GPT_TRANSPORT_WRAPPER_RESERVE_BYTES
+GPT_PACKET_OVERSIZE = "GPT_PACKET_OVERSIZE"
+_MAX_CHANGED_FILE_MANIFEST_BYTES = 12_000
+_MAX_DIFF_EVIDENCE_BYTES = 64_000
+_EVIDENCE_START = "## BOUNDED CURRENT EVIDENCE"
+_EVIDENCE_END = "## REPOSITORY RE-READ REQUIREMENT"
+
+
+class GPTPacketOversizeError(FactError):
+    """A GPT packet is not eligible for browser transport."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        job_id: str | None = None,
+        operation: str | None = None,
+        rendered_bytes: int | None = None,
+        budget_bytes: int = GPT_PACKET_BUDGET_BYTES,
+        evidence_bytes: int | None = None,
+        evidence_truncated: bool | None = None,
+    ) -> None:
+        super().__init__(f"{GPT_PACKET_OVERSIZE}: {message}")
+        self.job_id = job_id
+        self.operation = operation
+        self.rendered_bytes = rendered_bytes
+        self.budget_bytes = budget_bytes
+        self.evidence_bytes = evidence_bytes
+        self.evidence_truncated = evidence_truncated
+
+
+def packet_telemetry(packet_text: str) -> dict[str, object]:
+    """Return bounded operational size facts for an already-rendered packet."""
+    rendered = len(packet_text.encode("utf-8"))
+    evidence_bytes = 0
+    start = packet_text.find(_EVIDENCE_START)
+    end = packet_text.find(_EVIDENCE_END, start + len(_EVIDENCE_START)) if start >= 0 else -1
+    if start >= 0:
+        evidence = packet_text[start:end if end >= 0 else len(packet_text)]
+        evidence_bytes = len(evidence.encode("utf-8"))
+    return {
+        "rendered_packet_bytes": rendered,
+        "packet_budget_bytes": GPT_PACKET_BUDGET_BYTES,
+        "evidence_bytes": evidence_bytes,
+        "evidence_truncated": "EVIDENCE_TRUNCATED: true" in packet_text,
+    }
+
+
+def assert_gpt_packet_budget(
+    packet_text: str,
+    *,
+    job_id: str | None = None,
+    operation: str | None = None,
+    budget_bytes: int = GPT_PACKET_BUDGET_BYTES,
+) -> dict[str, object]:
+    telemetry = packet_telemetry(packet_text)
+    rendered = int(telemetry["rendered_packet_bytes"])
+    if rendered > budget_bytes:
+        raise GPTPacketOversizeError(
+            f"rendered packet is {rendered} bytes; budget is {budget_bytes} bytes",
+            job_id=job_id,
+            operation=operation,
+            rendered_bytes=rendered,
+            budget_bytes=budget_bytes,
+            evidence_bytes=int(telemetry["evidence_bytes"]),
+            evidence_truncated=bool(telemetry["evidence_truncated"]),
+        )
+    return telemetry
+
+
 def _spec(snapshot: Snapshot, spec_id: str | None) -> SpecFact | None:
     return next((item for item in snapshot.specs if item.spec_id == spec_id), None)
 
@@ -74,6 +150,205 @@ def _evidence_text(paths: PPaths, evidence_id: str) -> str:
     return "\n\n".join(pieces) or "No additional evidence payload was found."
 
 
+_TOKEN_STOPWORDS = frozenset({
+    "agentbus", "current", "exact", "must", "only", "preserve", "return",
+    "this", "that", "with", "from", "when", "into", "should", "have",
+    "will", "then", "also", "before", "after", "under", "without",
+})
+
+
+def _evidence_keywords(*values: str) -> tuple[str, ...]:
+    tokens: set[str] = set()
+    for value in values:
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_./-]{3,}", value or ""):
+            lowered = token.lower().strip("./-")
+            if lowered and lowered not in _TOKEN_STOPWORDS:
+                tokens.add(lowered)
+    return tuple(sorted(tokens))
+
+
+def _bounded_lines(text: str, budget_bytes: int) -> tuple[str, bool]:
+    """Keep complete UTF-8 lines and add an explicit deterministic marker."""
+    marker = "... [EVIDENCE_TRUNCATED]\n"
+    if budget_bytes <= 0:
+        return marker.rstrip(), True
+    lines = text.splitlines()
+    if not lines:
+        return "", False
+    selected: list[str] = []
+    used = 0
+    for line in lines:
+        encoded = (line + "\n").encode("utf-8")
+        marker_bytes = marker.encode("utf-8")
+        if used + len(encoded) + len(marker_bytes) > budget_bytes:
+            return "".join(selected) + marker.rstrip(), True
+        selected.append(line + "\n")
+        used += len(encoded)
+    return "".join(selected).rstrip(), False
+
+
+def _changed_file_manifest(worktree: Path, base: str, head: str) -> tuple[str, int, bool]:
+    raw = git(worktree, "diff", "--no-ext-diff", "--no-color", "--name-only", f"{base}...{head}")
+    files = sorted({line.strip() for line in raw.splitlines() if line.strip()})
+    total = len(files)
+    lines = [f"total_changed_files: {total}"]
+    if not files:
+        lines.append("- (none)")
+        return "\n".join(lines), total, False
+    candidate = [f"- {item}" for item in files]
+    rendered = "\n".join(lines + candidate)
+    if len(rendered.encode("utf-8")) <= _MAX_CHANGED_FILE_MANIFEST_BYTES:
+        return rendered, total, False
+    # Preserve a deterministic first/last window and never cut a path.  The
+    # final line-boundary guard handles unusually long repository paths.
+    keep_each = max(1, (_MAX_CHANGED_FILE_MANIFEST_BYTES // 2) // 80)
+    window = candidate[:keep_each] + [f"- ... manifest truncated ({total} files) ..."]
+    window.extend(candidate[-keep_each:])
+    bounded, _ = _bounded_lines(
+        "\n".join(lines + window), _MAX_CHANGED_FILE_MANIFEST_BYTES
+    )
+    return bounded, total, True
+
+
+def _bounded_repository_evidence(
+    worktree: Path,
+    base: str,
+    head: str,
+    keywords: tuple[str, ...],
+    budget_bytes: int,
+    supplemental: str = "",
+) -> tuple[str, bool, int, str, int, bool]:
+    """Render deterministic changed-file and keyword-selected diff evidence."""
+    manifest, file_count, manifest_truncated = _changed_file_manifest(worktree, base, head)
+    diffstat = git(
+        worktree, "diff", "--no-ext-diff", "--no-color", "--stat", f"{base}...{head}"
+    ).strip() or "(no diffstat)"
+    diffstat, diffstat_truncated = _bounded_lines(diffstat, 6000)
+    raw_diff = git(worktree, "diff", "--no-ext-diff", "--no-color", f"{base}...{head}")
+    chunks = raw_diff.split("\ndiff --git ") if raw_diff else []
+    if raw_diff.startswith("diff --git "):
+        chunks = [chunks[0]] + ["diff --git " + item for item in chunks[1:]] if chunks else []
+    selected: list[str] = []
+    if supplemental:
+        selected.append(f"# bounded_runtime_evidence\n{supplemental.strip()}")
+    for index, chunk in enumerate(chunks):
+        lowered = chunk.lower()
+        path_match = any(keyword in lowered.split("\n", 1)[0] for keyword in keywords)
+        content_match = any(keyword in lowered for keyword in keywords)
+        if path_match or content_match:
+            selected.append(f"# selected_hunk: {index}\n{chunk.strip()}")
+    if not selected:
+        selected = ["No keyword-matching diff hunk was selected; re-read the exact repository state."]
+    selected_text = "\n\n".join(selected)
+    selected_text, evidence_truncated = _bounded_lines(
+        selected_text, min(max(0, budget_bytes), _MAX_DIFF_EVIDENCE_BYTES)
+    )
+    evidence_truncated = evidence_truncated or manifest_truncated or diffstat_truncated
+    metadata = (
+        f"changed_file_count: {file_count}\n"
+        f"manifest_truncated: {str(manifest_truncated).lower()}\n"
+        f"evidence_keywords: {', '.join(keywords) if keywords else '(none)'}\n"
+        f"diffstat:\n{diffstat}\n"
+        f"changed_files:\n{manifest}\n"
+        f"evidence_truncated: {str(evidence_truncated).lower()}\n"
+        f"selected_hunks:\n{selected_text}"
+    )
+    metadata, metadata_truncated = _bounded_lines(metadata, max(0, budget_bytes))
+    evidence_truncated = evidence_truncated or metadata_truncated
+    return metadata, evidence_truncated, len(metadata.encode("utf-8")), diffstat, file_count, manifest_truncated
+
+
+def _render_gpt_packet(
+    *,
+    action: Action,
+    operation: str,
+    config: PConfig,
+    semantic: dict[str, Any],
+    charter: str,
+    directive_block: str,
+    spec_block: str,
+    prior: str,
+    repository_evidence: str,
+    evidence_truncated: bool,
+) -> str:
+    allowed = " | ".join(sorted(
+        {"SPEC", "WAIT", "HUMAN"} if operation == "PLAN_GPT"
+        else {"PASS", "RETURN_PLAN", "RETURN_WORK", "RETURN_PROVE", "WAIT", "HUMAN"}
+    ))
+    schema = (f'{{"job_id":"{action.effect_id}","operation":"{operation}",'
+              f'"decision":"{allowed}","body":"string"}}')
+    return f"""# AGENTBUS V2 SELF-CONTAINED GPT PACKET
+
+JOB_ID: {action.effect_id}
+OPERATION: {operation}
+P_ID: {config.p_id}
+
+## SEMANTIC INPUTS
+```json
+{json.dumps({"packet_schema": GPT_PACKET_SCHEMA, "job_id": action.effect_id, "operation": operation, "semantic_input": semantic}, sort_keys=True, separators=(",", ":"))}
+```
+
+## P_CHARTER (immutable)
+
+{charter.rstrip()}
+
+## OPERATOR_DIRECTIVE (binding human planning authority)
+
+{directive_block}
+
+If an operator directive is present, respect it unless it conflicts with the
+immutable P_CHARTER or repository facts. If the bounded strategy cannot be
+implemented correctly, return HUMAN rather than silently expanding scope.
+
+## CURRENT_SPEC
+
+{spec_block}
+
+## REPOSITORY SNAPSHOT
+
+repository: {config.repository}
+branch: {config.branch}
+base_ref: {config.base_ref}
+BASE: {semantic["base"]}
+HEAD: {semantic["head"]}
+
+## BOUNDED CURRENT EVIDENCE
+
+{repository_evidence}
+
+Repository evidence in this prompt is bounded transport evidence, not a claim
+that omitted diff is irrelevant.
+
+## REPOSITORY RE-READ REQUIREMENT
+
+Before deciding, re-read the exact current
+PR/HEAD and relevant repository files using GitHub tools when available.
+If required evidence cannot be accessed and this packet is insufficient for a
+safe plan or judgment, return WAIT or HUMAN according to the role contract.
+
+EVIDENCE_TRUNCATED: {str(evidence_truncated).lower()}
+
+## PREVIOUS RELEVANT JUDGE RESULT
+
+```json
+{prior}
+```
+
+## SEMANTIC RULES
+
+Only PLAN, WORK, PROVE, and MERGE exist. ABSENT is not a judgment. Corrections
+are RETURN_PLAN, RETURN_WORK, or RETURN_PROVE; GPT cannot bypass proof or merge
+fences. Base the decision only on this packet and the exact repository facts
+you re-read; previous conversation history is not authority.
+
+## STRICT RESPONSE SCHEMA
+
+Return exactly this JSON shape (with no Markdown):
+{schema}
+Repeat JOB_ID verbatim and put the complete bounded plan or judgment in body.
+"""
+
+
 def render_gpt_prompt(
     paths: PPaths, config: PConfig, snapshot: Snapshot, action: Action
 ) -> str:
@@ -81,18 +356,8 @@ def render_gpt_prompt(
         raise FactError("not a GPT effect")
     operation = "PLAN_GPT" if action.kind is ActionKind.PLAN else "JUDGE_GPT"
     charter = load_charter(paths, config)
-    diff = git(
-        Path(config.worktree), "diff", "--no-ext-diff", "--no-color",
-        f"{snapshot.base}...{snapshot.head}",
-    )
     parent = _spec(snapshot, action.payload.get("parent_spec_id"))
     current = _spec(snapshot, action.payload.get("spec_id")) or parent
-    allowed = " | ".join(sorted(
-        {"SPEC", "WAIT", "HUMAN"} if operation == "PLAN_GPT"
-        else {"PASS", "RETURN_PLAN", "RETURN_WORK", "RETURN_PROVE", "WAIT", "HUMAN"}
-    ))
-    schema = (f'{{"job_id":"{action.effect_id}","operation":"{operation}",'
-              f'"decision":"{allowed}","body":"string"}}')
     planning_digest = plan_facts_digest(snapshot)
     semantic: dict[str, Any] = {
         "packet_schema": GPT_PACKET_SCHEMA, "job_id": action.effect_id,
@@ -134,64 +399,57 @@ def render_gpt_prompt(
         if snapshot.operator_directive is None
         else snapshot.operator_directive.text
     )
-    evidence = _evidence_text(paths, str(semantic["evidence_id"])) if operation == "JUDGE_GPT" else "No prior evidence; use the exact repository diff below."
-    packet = f"""# AGENTBUS V2 SELF-CONTAINED GPT PACKET
-
-JOB_ID: {action.effect_id}
-OPERATION: {operation}
-P_ID: {config.p_id}
-
-## SEMANTIC INPUTS
-```json
-{json.dumps({"packet_schema": GPT_PACKET_SCHEMA, "job_id": action.effect_id, "operation": operation, "semantic_input": semantic}, sort_keys=True, separators=(",", ":"))}
-```
-
-## P_CHARTER (immutable)
-
-{charter.rstrip()}
-
-## OPERATOR_DIRECTIVE (binding human planning authority)
-
-{directive_block}
-
-If an operator directive is present, respect it unless it conflicts with the
-immutable P_CHARTER or repository facts. If the bounded strategy cannot be
-implemented correctly, return HUMAN rather than silently expanding scope.
-
-## CURRENT_SPEC
-
-{spec_block}
-
-## CURRENT-BASE DIFF
-
-```diff
-{diff}
-```
-
-## PREVIOUS RELEVANT JUDGE RESULT
-
-```json
-{prior}
-```
-
-## CURRENT EVIDENCE
-
-```text
-{evidence}
-```
-
-## SEMANTIC RULES
-
-Only PLAN, WORK, PROVE, and MERGE exist. ABSENT is not a judgment. Corrections
-are RETURN_PLAN, RETURN_WORK, or RETURN_PROVE; GPT cannot bypass proof or merge
-fences. Base the decision only on this packet.
-
-## STRICT RESPONSE SCHEMA
-
-Return exactly this JSON shape (with no Markdown):
-{schema}
-Repeat JOB_ID verbatim and put the complete bounded plan or judgment in body.
-"""
+    directive_and_spec = "\n".join((directive_block, spec_block))
+    keywords = _evidence_keywords(
+        charter, directive_and_spec, str(action.payload.get("failed_step", "")),
+        str(action.payload.get("evidence_id", "")),
+    )
+    worktree = Path(config.worktree)
+    # Render once without repository evidence to establish the mandatory
+    # authority footprint.  If it cannot fit, fail closed rather than dropping
+    # charter, directive, SPEC, identity, or response schema.
+    empty_packet = _render_gpt_packet(
+        action=action, operation=operation, config=config, semantic=semantic,
+        charter=charter, directive_block=directive_block, spec_block=spec_block,
+        prior=prior, repository_evidence="(bounded evidence omitted)",
+        evidence_truncated=True,
+    )
+    mandatory_bytes = len(empty_packet.encode("utf-8"))
+    if mandatory_bytes > GPT_RENDER_BUDGET_BYTES:
+        raise GPTPacketOversizeError(
+            f"mandatory authority is {mandatory_bytes} bytes; render budget is {GPT_RENDER_BUDGET_BYTES} bytes",
+            job_id=action.effect_id, operation=operation,
+            rendered_bytes=mandatory_bytes, budget_bytes=GPT_PACKET_BUDGET_BYTES,
+            evidence_bytes=0, evidence_truncated=True,
+        )
+    evidence_budget = GPT_RENDER_BUDGET_BYTES - mandatory_bytes
+    evidence, evidence_truncated, _, _, _, _ = _bounded_repository_evidence(
+        worktree, snapshot.base, snapshot.head, keywords, evidence_budget,
+        _evidence_text(paths, str(semantic["evidence_id"]))
+        if operation == "JUDGE_GPT" else "",
+    )
+    packet = _render_gpt_packet(
+        action=action, operation=operation, config=config, semantic=semantic,
+        charter=charter, directive_block=directive_block, spec_block=spec_block,
+        prior=prior, repository_evidence=evidence,
+        evidence_truncated=evidence_truncated,
+    )
+    # Final guard is on UTF-8 bytes, never Python character count.  The
+    # transport wrapper has a deterministic reserve and is guarded separately
+    # before /api/browser/jobs projects this packet.
+    telemetry = assert_gpt_packet_budget(
+        packet, job_id=action.effect_id, operation=operation,
+        budget_bytes=GPT_RENDER_BUDGET_BYTES,
+    )
+    if int(telemetry["rendered_packet_bytes"]) > GPT_RENDER_BUDGET_BYTES:
+        raise GPTPacketOversizeError(
+            "bounded evidence did not fit the render budget",
+            job_id=action.effect_id, operation=operation,
+            rendered_bytes=int(telemetry["rendered_packet_bytes"]),
+            budget_bytes=GPT_PACKET_BUDGET_BYTES,
+            evidence_bytes=int(telemetry["evidence_bytes"]),
+            evidence_truncated=evidence_truncated,
+        )
     return packet
 
 
@@ -200,11 +458,65 @@ def dispatch_manual_gpt(
 ) -> EffectResult:
     packet = render_gpt_prompt(paths, config, snapshot, action)
     prompt_path = paths.root / "gpt" / "outbox" / f"{action.effect_id}.md"
-    created = write_text_once(prompt_path, packet)
+    result_path = paths.root / "gpt" / "results" / f"{action.effect_id}.json"
+    if result_path.exists():
+        return EffectResult(
+            False,
+            detail=f"GPT result already exists; packet was not replaced: {result_path}",
+        )
+    created = False
+    if prompt_path.exists():
+        # A pre-budget packet may already exist for the same unaccepted
+        # semantic job.  Replace only after proving its immutable semantic
+        # identity is exactly equal; the atomic replacement changes transport
+        # bytes/digest, never the job identity or result authority.
+        existing = load_gpt_packet(paths, action.effect_id)
+        candidate = _packet_json(packet)
+        if existing != candidate:
+            raise FactError(
+                f"existing GPT packet semantic identity differs: {action.effect_id}"
+            )
+        previous = prompt_path.read_text(encoding="utf-8")
+        if previous != packet:
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{prompt_path.name}.", suffix=".tmp", dir=prompt_path.parent
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(packet)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, prompt_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            created = True
+    else:
+        created = write_text_once(prompt_path, packet)
+    telemetry = packet_telemetry(packet)
     return EffectResult(
         created,
-        detail=f"JOB_ID={action.effect_id} PACKET={prompt_path} SHA256={sha256_text(packet)}",
+        detail=(
+            f"JOB_ID={action.effect_id} PACKET={prompt_path} SHA256={sha256_text(packet)} "
+            f"rendered_packet_bytes={telemetry['rendered_packet_bytes']} "
+            f"packet_budget_bytes={telemetry['packet_budget_bytes']} "
+            f"evidence_bytes={telemetry['evidence_bytes']} "
+            f"evidence_truncated={telemetry['evidence_truncated']}"
+        ),
     )
+
+
+def _packet_json(packet_text: str) -> dict[str, Any]:
+    marker = "## SEMANTIC INPUTS\n```json\n"
+    try:
+        encoded = packet_text.split(marker, 1)[1].split("\n```", 1)[0]
+        value = json.loads(encoded)
+    except (IndexError, json.JSONDecodeError) as error:
+        raise FactError("GPT packet semantic inputs are malformed") from error
+    if not isinstance(value, dict):
+        raise FactError("GPT packet semantic inputs must be an object")
+    return value
 
 
 def submit_gpt_response(paths: PPaths, response_path: Path) -> EffectResult:

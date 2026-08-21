@@ -26,6 +26,7 @@ from tools.agentbus_v2.legacy_v1_browser_compat import (
     load_compat_config,
     parse_transport_envelope,
 )
+from tools.agentbus_v2.effects import GPT_PACKET_BUDGET_BYTES
 
 
 SHA = "1" * 40
@@ -178,7 +179,20 @@ class LegacyV1BrowserCompatTests(unittest.TestCase):
         self.assertEqual("PLAN_SPEC", job["task"])
         self.assertIn(packet_text(PLAN_JOB, "PLAN_GPT").rstrip(), job["prompt"])
         self.assertIn("RAW_RESPONSE_JSON", job["prompt"])
+        self.assertLessEqual(len(job["prompt"].encode("utf-8")), GPT_PACKET_BUDGET_BYTES)
         self.assertNotIn("campaign state", job["prompt"].lower())
+
+    def test_oversized_packet_is_fail_closed_before_browser_projection(self) -> None:
+        packet_path = self.state / "P1" / "gpt" / "outbox" / f"{PLAN_JOB}.md"
+        packet_path.write_text(packet_path.read_text(encoding="utf-8") + ("\nlarge evidence\n" * 30_000), encoding="utf-8")
+        self.assertEqual((), self.compat.current_jobs())
+        status = self.compat.status()
+        self.assertEqual([], status["jobs"])
+        self.assertEqual(1, len(status["packet_errors"]))
+        error = status["packet_errors"][0]
+        self.assertEqual(PLAN_JOB, error["job_id"])
+        self.assertEqual("GPT_PACKET_OVERSIZE", error["code"])
+        self.assertGreater(error["rendered_packet_bytes"], error["packet_budget_bytes"])
 
     def test_judge_projection_uses_final_transport_role_only(self) -> None:
         self._write_packet(JUDGE_JOB, "JUDGE_GPT")

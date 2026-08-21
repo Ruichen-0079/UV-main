@@ -11,6 +11,7 @@ from unittest.mock import patch
 from tools.agentbus_v2.core import (
     ActionKind,
     GptResult,
+    OperatorDirective,
     Observation,
     PROOF_SCHEMA,
     Snapshot,
@@ -28,9 +29,13 @@ from tools.agentbus_v2.cli import _tick_lock
 from tools.agentbus_v2.effects import (
     CODEX_WORK_MODEL,
     CODEX_WORK_REASONING_EFFORT,
+    GPT_PACKET_BUDGET_BYTES,
+    GPT_RENDER_BUDGET_BYTES,
+    GPTPacketOversizeError,
     _codex_work_command,
     _command_evidence,
     dispatch_manual_gpt,
+    packet_telemetry,
     render_gpt_prompt,
     run_prove,
     submit_gpt_response,
@@ -199,7 +204,9 @@ class FactAndEffectTests(unittest.TestCase):
                 "## SEMANTIC INPUTS",
                 "## P_CHARTER (immutable)",
                 "## CURRENT_SPEC",
-                "## CURRENT-BASE DIFF",
+                "## REPOSITORY SNAPSHOT",
+                "## BOUNDED CURRENT EVIDENCE",
+                "## REPOSITORY RE-READ REQUIREMENT",
                 "## STRICT RESPONSE SCHEMA",
             ):
                 self.assertIn(section, packet)
@@ -240,6 +247,91 @@ class FactAndEffectTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(Exception, "not allowed"):
                 submit_gpt_response(paths, invalid)
+
+    def test_large_repository_diff_is_deterministically_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            charter = "P_ID: P-TEST\nGOAL: repair migrationsDir path only\n"
+            config = config_for(repo, charter)
+            paths = PPaths(root / "state" / config.p_id)
+            paths.create_dirs()
+            (paths.root / "charter.md").write_text(charter, encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
+            huge = "migrationsDir = undefined;\n" + ("x" * 700_000) + "\n"
+            (repo.work / "packaged-bootstrap.js").write_text(huge, encoding="utf-8")
+            run(repo.work, "git", "add", "packaged-bootstrap.js")
+            run(repo.work, "git", "commit", "-m", "large packaged diff")
+            initial = snapshot_for(config)
+            snapshot = replace(
+                initial,
+                base=repo.base,
+                operator_directive=OperatorDirective(
+                    "directive-" + "a" * 24,
+                    "Only repair the migrationsDir/path defect; do not redesign packaging.",
+                    "b" * 64,
+                    "plan-" + "b" * 24,
+                ),
+            )
+            action = decide(snapshot)
+            packet = render_gpt_prompt(paths, config, snapshot, action)
+            telemetry = packet_telemetry(packet)
+            self.assertLessEqual(telemetry["rendered_packet_bytes"], GPT_RENDER_BUDGET_BYTES)
+            self.assertLessEqual(telemetry["rendered_packet_bytes"], GPT_PACKET_BUDGET_BYTES)
+            self.assertIn("changed_file_count:", packet)
+            self.assertIn("evidence_truncated:", packet)
+            self.assertIn("migrationsDir", packet)
+            self.assertIn("Only repair the migrationsDir/path defect", packet)
+            self.assertIn(snapshot.head, packet)
+            self.assertIn(repo.base, packet)
+            self.assertNotIn("x" * 100_000, packet)
+            self.assertEqual(packet, render_gpt_prompt(paths, config, snapshot, action))
+            self.assertEqual(
+                packet_telemetry(packet), packet_telemetry(render_gpt_prompt(paths, config, snapshot, action))
+            )
+
+    def test_same_semantic_job_replaces_only_an_unaccepted_oversized_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            charter = "P_ID: P-TEST\nGOAL: bounded rerender\n"
+            config = config_for(repo, charter)
+            paths = PPaths(root / "state" / config.p_id)
+            paths.create_dirs()
+            (paths.root / "charter.md").write_text(charter, encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
+            snapshot = snapshot_for(config)
+            action = decide(snapshot)
+            bounded = render_gpt_prompt(paths, config, snapshot, action)
+            old = bounded + ("\nlegacy oversized transport evidence\n" * 30_000)
+            packet_path = paths.root / "gpt" / "outbox" / f"{action.effect_id}.md"
+            packet_path.write_text(old, encoding="utf-8")
+            result = dispatch_manual_gpt(paths, config, snapshot, action)
+            self.assertTrue(result.changed)
+            self.assertEqual(bounded, packet_path.read_text(encoding="utf-8"))
+            self.assertLessEqual(len(bounded.encode("utf-8")), GPT_RENDER_BUDGET_BYTES)
+            response_path = paths.root / "gpt" / "results" / f"{action.effect_id}.json"
+            response_path.parent.mkdir(parents=True, exist_ok=True)
+            response_path.write_text("{}", encoding="utf-8")
+            unchanged = dispatch_manual_gpt(paths, config, snapshot, action)
+            self.assertFalse(unchanged.changed)
+            self.assertEqual(bounded, packet_path.read_text(encoding="utf-8"))
+
+    def test_mandatory_authority_over_budget_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            charter = "P_ID: P-TEST\n" + ("权威约束" * GPT_RENDER_BUDGET_BYTES)
+            config = config_for(repo, charter)
+            paths = PPaths(root / "state" / config.p_id)
+            paths.create_dirs()
+            (paths.root / "charter.md").write_text(charter, encoding="utf-8")
+            (paths.root / "config.json").write_text(json.dumps(asdict(config)), encoding="utf-8")
+            snapshot = snapshot_for(config)
+            action = decide(snapshot)
+            with self.assertRaises(GPTPacketOversizeError):
+                dispatch_manual_gpt(paths, config, snapshot, action)
+            self.assertFalse((paths.root / "gpt" / "outbox" / f"{action.effect_id}.md").exists())
 
     def test_gpt_response_rejects_wrong_job_and_operation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

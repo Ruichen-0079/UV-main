@@ -141,6 +141,12 @@ def _human_status(
                 "attention": True}
     if delivery is not None and transport is not None:
         state = str(transport.get("state", ""))
+        if state == "GPT_PACKET_OVERSIZE":
+            size = transport.get("rendered_packet_bytes")
+            budget = transport.get("packet_budget_bytes")
+            return {"status": "GPT 请求过大，未发送", "status_code": state,
+                    "block_reason": f"渲染 packet {size} bytes 超过预算 {budget} bytes",
+                    "next_wait": "缩减传输证据后重新检查", "attention": True}
         if state in {"WAITING_FOR_BROWSER", "AUTO_QUEUED"}:
             op = str(transport.get("operation", "PLAN_GPT"))
             served = bool(transport.get("served_to_extension"))
@@ -587,6 +593,16 @@ class WebUIState:
             lane_status = {}
         extension = browser_status.get("legacy_v1_extension", "UNKNOWN")
         mailbox = browser_status.get("mailbox", "UNKNOWN")
+        packet_error_rows = browser_status.get("packet_errors", [])
+        if not isinstance(packet_error_rows, (list, tuple)):
+            packet_error_rows = ()
+        packet_error = next(
+            (
+                item for item in packet_error_rows
+                if isinstance(item, dict) and item.get("job_id") == job_id
+            ),
+            None,
+        )
         if result_received:
             mode = "AUTO" if configured else "MANUAL"
             transport = (
@@ -600,7 +616,9 @@ class WebUIState:
         else:
             mode = "AUTO"
             transport = SIGNED_V1_COMPAT_TRANSPORT
-            if extension != "ONLINE":
+            if packet_error is not None:
+                state = "GPT_PACKET_OVERSIZE"
+            elif extension != "ONLINE":
                 state = "TRANSPORT_OFFLINE"
             elif mailbox == "unavailable" or browser_status.get("last_error"):
                 state = "TRANSPORT_ERROR"
@@ -636,6 +654,19 @@ class WebUIState:
             "first_server_serve": job_telemetry.get("first_server_serve") if job_telemetry else None,
             "last_server_serve": job_telemetry.get("last_server_serve") if job_telemetry else None,
         }
+        if packet_error is not None:
+            for key in (
+                "rendered_packet_bytes", "packet_budget_bytes", "evidence_bytes",
+                "evidence_truncated", "detail",
+            ):
+                projection[key] = packet_error.get(key)
+        elif job_telemetry is not None:
+            for key in (
+                "rendered_packet_bytes", "packet_budget_bytes", "evidence_bytes",
+                "evidence_truncated",
+            ):
+                if key in job_telemetry:
+                    projection[key] = job_telemetry.get(key)
         if decision is not None:
             projection["decision"] = decision
         return projection
@@ -1017,8 +1048,8 @@ async function createOrAdopt(kind){const get=id=>document.getElementById(id)?.va
 async function removeProject(p_id){if(confirm('只移出控制列表，保留 durable facts、PR、branch 和 worktree。继续？'))await project(p_id,'remove',{})}
 function tickProject(p_id){project(p_id,'tick',{})}
 /* presentation helpers */
-function statusLabel(p){const map={AWAITING_PLAN_BINDING:'等待 PLAN',TRANSPORT_OFFLINE:'传输离线',TRANSPORT_ERROR:'传输异常',WORK_RUNNING:'Luna 执行中',WAITING_EXECUTOR:'等待执行器',PROVE:'等待 PROVE',PROVE_FAILED:'验证失败',HUMAN:'需要人工',WAIT:'等待外部条件',MERGE_READY:'待允许合并',DIRTY_WORKTREE:'阻塞',PR_IDENTITY_MISMATCH:'安全栅栏',OPERATIONAL_BLOCK:'运行阻塞',ARCHIVED:'已归档',IDLE:'等待检查'};if(!p.enabled&&!p.archived)return '已暂停';if(p.status_code==='WAITING_FOR_BROWSER'||p.status_code==='AUTO_QUEUED'||p.status_code==='WAITING_FOR_MAILBOX'){const op=p.gpt_transport?.operation||'PLAN_GPT';return `等待 ${op} 浏览器提交`}return map[p.status_code]||p.semantic_status||p.action}
-function statusClass(p){const c=p.status_code||'';if(['HUMAN','PROVE_FAILED','TRANSPORT_ERROR','TRANSPORT_OFFLINE','DIRTY_WORKTREE','PR_IDENTITY_MISMATCH','OPERATIONAL_BLOCK'].includes(c))return'red';if(['AWAITING_PLAN_BINDING','WAITING_FOR_MAILBOX','WAITING_EXECUTOR','MERGE_READY','WAIT'].includes(c))return'amber';if(['WORK_RUNNING','PROVE','WAITING_FOR_BROWSER','AUTO_QUEUED'].includes(c))return'blue';if(['ARCHIVED'].includes(c)||!p.enabled)return'gray';return'green'}
+function statusLabel(p){const map={AWAITING_PLAN_BINDING:'等待 PLAN',GPT_PACKET_OVERSIZE:'GPT 请求过大，未发送',TRANSPORT_OFFLINE:'传输离线',TRANSPORT_ERROR:'传输异常',WORK_RUNNING:'Luna 执行中',WAITING_EXECUTOR:'等待执行器',PROVE:'等待 PROVE',PROVE_FAILED:'验证失败',HUMAN:'需要人工',WAIT:'等待外部条件',MERGE_READY:'待允许合并',DIRTY_WORKTREE:'阻塞',PR_IDENTITY_MISMATCH:'安全栅栏',OPERATIONAL_BLOCK:'运行阻塞',ARCHIVED:'已归档',IDLE:'等待检查'};if(!p.enabled&&!p.archived)return '已暂停';if(p.status_code==='WAITING_FOR_BROWSER'||p.status_code==='AUTO_QUEUED'||p.status_code==='WAITING_FOR_MAILBOX'){const op=p.gpt_transport?.operation||'PLAN_GPT';return `等待 ${op} 浏览器提交`}return map[p.status_code]||p.semantic_status||p.action}
+function statusClass(p){const c=p.status_code||'';if(['HUMAN','PROVE_FAILED','GPT_PACKET_OVERSIZE','TRANSPORT_ERROR','TRANSPORT_OFFLINE','DIRTY_WORKTREE','PR_IDENTITY_MISMATCH','OPERATIONAL_BLOCK'].includes(c))return'red';if(['AWAITING_PLAN_BINDING','WAITING_FOR_MAILBOX','WAITING_EXECUTOR','MERGE_READY','WAIT'].includes(c))return'amber';if(['WORK_RUNNING','PROVE','WAITING_FOR_BROWSER','AUTO_QUEUED'].includes(c))return'blue';if(['ARCHIVED'].includes(c)||!p.enabled)return'gray';return'green'}
 function prMeta(p){const parts=[];if(p.pr?.number)parts.push('PR #'+p.pr.number);if(p.head)parts.push('HEAD '+p.head);if(p.worktree?.clean===true)parts.push('工作树 clean');else if(p.worktree?.clean===false)parts.push('工作树 dirty');if(p.plan_binding?.bound)parts.push('PLAN 已绑定');return parts.map((x,i)=>`<span class="meta-item">${esc(x)}</span>`).join('')}
 function blockerLine(p){const show=p.attention&&p.block_reason&&p.status_code!=='IDLE';if(!show)return'';return `<div class="blocker" title="${attr(p.block_reason)}"><span>⚠</span><span class="blocker-text">${esc(p.block_reason)}</span></div>${p.next_wait&&p.status_code!=='AWAITING_PLAN_BINDING'?`<div class="next-wait">下一步：${esc(p.next_wait)}</div>`:''}`}
 function primaryButton(p){const a=p.primary_action;if(!a)return'';const fn=a.key==='bind-plan'?`togglePlanEditor(${copyProject(p)})`:a.key==='show-human'?`showHuman(${copyProject(p)})`:a.key==='allow-merge'?`confirmMerge(${copyProject(p)})`:`project(${copyValue(p.p_id)},'enabled',{enabled:true})`;return `<button class="button primary" onclick="${fn}">${esc(a.label)}</button>`}
@@ -1033,7 +1064,7 @@ const baseToggleDirectiveEditor=toggleDirectiveEditor;
 toggleDirectiveEditor=function(value){const id=projectId(value);if(ui.editingDirective===id)ui.replan=null;baseToggleDirectiveEditor(value)};
 const baseSaveDirective=saveDirective;
 saveDirective=async function(p,replan){const useReplan=Boolean(replan||ui.replan===p.p_id);await baseSaveDirective(p,useReplan);if(useReplan&&!ui.errors['directive-'+p.p_id])ui.replan=null};
-function gptDetails(p){const g=p.gpt_transport;if(!g)return'';const result=g.state==='RESULT_RECEIVED'?`<div class="detail-row"><span>Decision</span><span>${esc(g.decision||'accepted')}</span></div>`:'';const served=g.served_to_extension?'<div class="detail-row"><span>服务端证据</span><span>扩展已获取任务（无 Send 确认）</span></div>':'';return `<div class="detail-group"><h4>GPT transport</h4><div class="detail-row"><span>GPT 操作</span><span class="technical">${esc(g.operation)}</span></div><div class="detail-row"><span>模式</span><span>${g.mode==='AUTO'?'自动':esc(g.mode)}</span></div><div class="detail-row"><span>传输</span><span class="technical">${esc(g.transport)}</span></div><div class="detail-row"><span>状态</span><span>${esc(g.state)}</span></div><div class="detail-row"><span>Job</span><span class="technical">${esc(g.job_id)}</span></div><div class="detail-row"><span>Extension</span><span>${esc(g.extension)}</span></div><div class="detail-row"><span>Mailbox</span><span>${esc(g.mailbox)}</span></div>${served}${g.first_server_serve?`<div class="detail-row"><span>首次服务</span><span class="technical">${esc(g.first_server_serve)}</span></div>`:''}${g.last_server_serve?`<div class="detail-row"><span>最近服务</span><span class="technical">${esc(g.last_server_serve)}</span></div>`:''}${g.last_poll?`<div class="detail-row"><span>Last poll</span><span>${esc(g.last_poll)}</span></div>`:''}${g.last_error?`<div class="detail-row"><span>Last error</span><span class="danger-text">${esc(g.last_error)}</span></div>`:''}${result}${manualFallback(p,g)}</div>`}
+function gptDetails(p){const g=p.gpt_transport;if(!g)return'';const result=g.state==='RESULT_RECEIVED'?`<div class="detail-row"><span>Decision</span><span>${esc(g.decision||'accepted')}</span></div>`:'';const served=g.served_to_extension?'<div class="detail-row"><span>服务端证据</span><span>扩展已获取任务（无 Send 确认）</span></div>':'';const size=g.rendered_packet_bytes!=null?`<div class="detail-row"><span>Packet</span><span class="technical">${esc(g.rendered_packet_bytes)} / ${esc(g.packet_budget_bytes)} bytes</span></div><div class="detail-row"><span>Evidence</span><span>${g.evidence_truncated?'已裁剪':'完整'}</span></div>`:'';const oversize=g.state==='GPT_PACKET_OVERSIZE'&&g.detail?`<div class="detail-row"><span>诊断</span><span class="danger-text">${esc(g.detail)}</span></div>`:'';return `<div class="detail-group"><h4>GPT transport</h4><div class="detail-row"><span>GPT 操作</span><span class="technical">${esc(g.operation)}</span></div><div class="detail-row"><span>模式</span><span>${g.mode==='AUTO'?'自动':esc(g.mode)}</span></div><div class="detail-row"><span>传输</span><span class="technical">${esc(g.transport)}</span></div><div class="detail-row"><span>状态</span><span>${esc(g.state)}</span></div><div class="detail-row"><span>Job</span><span class="technical">${esc(g.job_id)}</span></div>${size}${oversize}<div class="detail-row"><span>Extension</span><span>${esc(g.extension)}</span></div><div class="detail-row"><span>Mailbox</span><span>${esc(g.mailbox)}</span></div>${served}${g.first_server_serve?`<div class="detail-row"><span>首次服务</span><span class="technical">${esc(g.first_server_serve)}</span></div>`:''}${g.last_server_serve?`<div class="detail-row"><span>最近服务</span><span class="technical">${esc(g.last_server_serve)}</span></div>`:''}${g.last_poll?`<div class="detail-row"><span>Last poll</span><span>${esc(g.last_poll)}</span></div>`:''}${g.last_error?`<div class="detail-row"><span>Last error</span><span class="danger-text">${esc(g.last_error)}</span></div>`:''}${result}${manualFallback(p,g)}</div>`}
 function blockDetails(p){const b=p.block_gpt,o=p.operational_block;if(!b&&!o)return'';const obs=o||b?.observation||{},r=b?.result;if(!r)return `<div class="detail-group"><h4>运行阻塞</h4><div class="detail-row"><span>代码</span><span class="technical">${esc(obs.code||'UNKNOWN')}</span></div><div class="detail-row"><span>摘要</span><span>${esc(obs.summary||'运行阻塞')}</span></div><div class="warning-text">自动诊断：${b?.request?.pending?'等待 BLOCK_GPT':'BLOCK_GPT 未绑定或未启用'}</div></div>`;const d=r.decision;return `<div class="detail-group"><h4>BLOCK_GPT 判断</h4><div class="detail-row"><span>Decision</span><span class="technical">${esc(d)}</span></div><div class="detail-row"><span>原因</span><span>${esc(r.reason||'')}</span></div>${d==='RECOVER'?`<div class="detail-row"><span>建议恢复操作</span><span>${esc(r.recovery_instruction||'')}</span></div><div class="detail-row"><span>预期恢复后条件</span><span>${esc(r.expected_postcondition||'')}</span></div><div class="warning-text">可自动恢复（尚未执行）</div>`:''}${d==='WAIT'?'<div class="warning-text">建议等待</div>':''}${d==='HUMAN'?`<div class="human-reason">需要人工处理<br>${esc(r.human_action||'')}</div>`:''}</div>`}
 function manualFallback(p,g){const m=g.manual_fallback;if(!m)return'';return `<details class="manual-fallback"><summary>高级手工 GPT 回退（Advanced manual GPT fallback）</summary><p class="warning-text">自动传输可用时，不要为同一 exact job 重复提交。</p><button class="button ghost" onclick="navigator.clipboard?.writeText(${copyValue(m.packet_path)})">复制 packet 路径</button> <button class="button ghost" onclick="navigator.clipboard?.writeText(${copyValue(m.instruction)})">复制 instruction</button><div class="technical">${esc(m.packet_sha256||'packet 尚未生成')}</div><textarea id="gpt-${esc(p.p_id)}" placeholder="粘贴 exact GPT JSON"></textarea><button class="button secondary" onclick="submit('${esc(p.p_id)}')">提交 exact JSON</button></details>`}
 function evidenceDetails(p){return `<details class="nested-details"><summary>日志 / 证据</summary><pre class="console">${esc(JSON.stringify(p.evidence||[],null,2))}</pre></details>`}

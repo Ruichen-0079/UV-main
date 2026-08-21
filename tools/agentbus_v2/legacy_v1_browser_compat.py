@@ -21,7 +21,13 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
-from .effects import submit_gpt_response
+from .effects import (
+    GPTPacketOversizeError,
+    GPT_PACKET_BUDGET_BYTES,
+    assert_gpt_packet_budget,
+    packet_telemetry,
+    submit_gpt_response,
+)
 from .block_diagnosis import BLOCK_OPERATION, current_block_request, load_block_config, submit_block_gpt_response
 from .facts import (
     FactError,
@@ -274,7 +280,7 @@ def render_transport_prompt(job: CurrentJob) -> str:
             "RAW_RESPONSE_JSON must be one valid JSON object matching the packet's strict "
             "response schema, with no Markdown, prose, repair, or transformation."
         )
-    return (
+    prompt = (
         job.packet_text.rstrip()
         + "\n\n## SIGNED V1 EXTENSION TRANSPORT WRAPPER (OPERATIONAL ONLY)\n\n"
         + "After making the decision required by the packet, publish exactly one "
@@ -292,6 +298,11 @@ def render_transport_prompt(job: CurrentJob) -> str:
         + "JOB_ID, OPERATION, and PACKET_SHA256 verbatim. A chat reply alone does not "
         + "complete transport. Do not modify code and do not merge.\n"
     )
+    assert_gpt_packet_budget(
+        prompt, job_id=job.job_id, operation=job.operation,
+        budget_bytes=GPT_PACKET_BUDGET_BYTES,
+    )
+    return prompt
 
 
 def parse_transport_envelope(body: str) -> TransportEnvelope | None:
@@ -412,6 +423,7 @@ class LegacyV1BrowserCompat:
         self._served_jobs: set[str] = set()
         self._served_first_at: dict[str, float] = {}
         self._served_last_at: dict[str, float] = {}
+        self._packet_errors: dict[str, dict[str, object]] = {}
         self._outcomes: tuple[IngestionOutcome, ...] = ()
 
     def _config(self) -> LegacyCompatConfig:
@@ -451,7 +463,7 @@ class LegacyV1BrowserCompat:
         issue = config.mailboxes.get(p_config.repository)
         if issue is None:
             raise LegacyCompatError(f"mailbox is not configured for {p_config.repository}")
-        return CurrentJob(
+        job = CurrentJob(
             entry.p_id,
             entry.allow_merge,
             paths,
@@ -465,6 +477,10 @@ class LegacyV1BrowserCompat:
             snapshot.base,
             issue,
         )
+        # Guard the complete wrapper before the job can be projected to the
+        # signed extension.  This is validation only; no browser action occurs.
+        render_transport_prompt(job)
+        return job
 
     def _current_block_job(self, entry: ProjectEntry, config: LegacyCompatConfig) -> CurrentJob | None:
         """Project an exact BLOCK packet through the same signed extension lane."""
@@ -474,7 +490,7 @@ class LegacyV1BrowserCompat:
         request = current_block_request(self.state_root, entry)
         if request is None:
             return None
-        return CurrentJob(
+        job = CurrentJob(
             request.p_id,
             request.allow_merge,
             request.paths,
@@ -488,6 +504,8 @@ class LegacyV1BrowserCompat:
             request.base,
             request.mailbox_issue,
         )
+        render_transport_prompt(job)
+        return job
 
     def current_jobs(self) -> tuple[CurrentJob, ...]:
         config = self._config()
@@ -495,6 +513,8 @@ class LegacyV1BrowserCompat:
             return ()
         jobs: list[CurrentJob] = []
         errors: list[str] = []
+        with self._telemetry_lock:
+            self._packet_errors = {}
         for entry in self._entries():
             try:
                 job = self._current_job(entry, config)
@@ -503,6 +523,22 @@ class LegacyV1BrowserCompat:
                 block_job = self._current_block_job(entry, config)
                 if block_job is not None:
                     jobs.append(block_job)
+            except GPTPacketOversizeError as error:
+                detail = {
+                    "p_id": entry.p_id,
+                    "job_id": error.job_id,
+                    "operation": error.operation,
+                    "code": "GPT_PACKET_OVERSIZE",
+                    "rendered_packet_bytes": error.rendered_bytes,
+                    "packet_budget_bytes": error.budget_bytes,
+                    "evidence_bytes": error.evidence_bytes,
+                    "evidence_truncated": error.evidence_truncated,
+                    "detail": str(error),
+                }
+                with self._telemetry_lock:
+                    key = str(error.job_id or entry.p_id)
+                    self._packet_errors[key] = detail
+                errors.append(f"{entry.p_id}: {error}")
             except (FactError, LegacyCompatError, OSError) as error:
                 errors.append(f"{entry.p_id}: {error}")
         if errors:
@@ -654,6 +690,7 @@ class LegacyV1BrowserCompat:
             served = set(self._served_jobs)
             served_first_at = dict(self._served_first_at)
             served_last_at = dict(self._served_last_at)
+            packet_errors = tuple(self._packet_errors.values())
             outcomes = self._outcomes
         online = bool(last_poll is not None and self.clock() - last_poll <= ONLINE_WINDOW_SECONDS)
         lane_rows: dict[str, dict[str, object]] = {}
@@ -709,9 +746,11 @@ class LegacyV1BrowserCompat:
                         datetime.fromtimestamp(served_last_at[job.job_id], timezone.utc).isoformat()
                         if job.job_id in served_last_at else None
                     ),
+                    **packet_telemetry(job.packet_text),
                 }
                 for job in jobs
             ],
+            "packet_errors": list(packet_errors),
             "last_error": last_error,
             "recent_ingestion": [
                 {
