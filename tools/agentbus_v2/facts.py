@@ -1051,63 +1051,6 @@ def _load_current(
 ) -> tuple[tuple[GptResult, ...], tuple[SpecFact, ...], frozenset[str],
            tuple[WorkFact, ...], tuple[ProofFact, ...]]:
     identity = _identity(config, head, base, contract_digest, operator_directive)
-    if operator_directive is not None:
-        authority = replace(identity, operator_directive=None)
-        expected_authority = plan_job_id(
-            authority, parent_spec_id=operator_directive.parent_spec_id
-        )
-        if operator_directive.authority_plan_job_id != expected_authority:
-            raise FactError("operator directive authority does not match current planning facts")
-        if operator_directive.parent_spec_id is not None:
-            # Reconstruct the historical SPEC lineage without the new
-            # directive first.  A replan must not make the old root PLAN (and
-            # its SPEC) disappear merely because the new directive changes
-            # the next PLAN identity.
-            historical = _load_current(
-                paths, config, head, base, contract_digest, None
-            )
-            old_results, old_specs, _, _, _ = historical
-            parent_spec = next(
-                (item for item in old_specs if item.spec_id == operator_directive.parent_spec_id),
-                None,
-            )
-            if parent_spec is None:
-                raise FactError("operator directive parent SPEC is not current durable history")
-            replan_job, replan_result, replan_spec = _load_plan_spec(
-                paths, config, identity, parent_spec, None
-            )
-            if replan_result is None:
-                packet_path = paths.root / "gpt" / "outbox" / f"{replan_job}.md"
-                pending = frozenset()
-                if packet_path.exists():
-                    packet = load_gpt_packet(paths, replan_job)
-                    _validate_gpt_packet(
-                        packet,
-                        replace(identity, specs=old_specs),
-                        Action(
-                            ActionKind.PLAN,
-                            effect_id=replan_job,
-                            payload={
-                                "parent_spec_id": parent_spec.spec_id,
-                                "trigger_judge_id": None,
-                            },
-                        ),
-                    )
-                    pending = frozenset({replan_job})
-                return old_results, old_specs, pending, (), ()
-            results = list(old_results)
-            specs = list(old_specs)
-            results.append(replan_result)
-            if replan_spec is None:
-                return tuple(results), tuple(specs), frozenset(), (), ()
-            specs.append(replan_spec)
-            work, proof, stage_results, return_plan = _current_stage(
-                paths, config, identity, replan_spec
-            )
-            results.extend(stage_results)
-            if return_plan is None:
-                return tuple(results), tuple(specs), frozenset(), work, proof
-            return tuple(results), tuple(specs), frozenset(), work, proof
     results: list[GptResult] = []
     specs: list[SpecFact] = []
     parent: SpecFact | None = None
@@ -1115,8 +1058,41 @@ def _load_current(
     work: tuple[WorkFact, ...] = ()
     proof: tuple[ProofFact, ...] = ()
     seen: set[str] = set()
+    if operator_directive is not None:
+        authority = replace(identity, operator_directive=None)
+        expected_authority = plan_job_id(
+            authority, parent_spec_id=operator_directive.parent_spec_id
+        )
+        if operator_directive.authority_plan_job_id != expected_authority:
+            raise FactError("operator directive authority does not match current planning facts")
+        expected_directive = operator_directive_id(
+            authority,
+            operator_directive.text,
+            parent_spec_id=operator_directive.parent_spec_id,
+        )
+        if operator_directive.directive_id != expected_directive:
+            raise FactError("operator directive identity does not match its immutable content")
+        if operator_directive.parent_spec_id is not None:
+            # Reconstruct the historical SPEC lineage without the new
+            # directive first.  A replan must not make the old root PLAN (and
+            # its SPEC) disappear merely because the new directive changes
+            # the next PLAN identity.
+            historical = _load_current(paths, config, head, base, contract_digest, None)
+            old_results, old_specs, _, _, _ = historical
+            parent_spec = next(
+                (item for item in old_specs if item.spec_id == operator_directive.parent_spec_id),
+                None,
+            )
+            if parent_spec is None:
+                raise FactError("operator directive parent SPEC is not current durable history")
+            results.extend(old_results)
+            specs.extend(old_specs)
+            seen.update(item.plan_job_id for item in old_specs if item.plan_job_id)
+            parent = parent_spec
     recovered = _work_from_head(config, head)
-    head_plan = recovered.plan_job_id if recovered else None
+    # A recovered WORK commit for a replan is resolved by the parent lineage
+    # above; using it as a root PLAN would incorrectly lose the old SPEC.
+    head_plan = recovered.plan_job_id if recovered and parent is None else None
     while True:
         if head_plan is not None:
             job_id = head_plan
@@ -1156,40 +1132,6 @@ def _load_current(
         ):
             raise FactError("recovered WORK commit Plan/SPEC identities disagree")
         specs.append(spec)
-        if (
-            operator_directive is not None
-            and operator_directive.parent_spec_id == spec.spec_id
-        ):
-            replan_job, replan_result, replan_spec = _load_plan_spec(
-                paths, config, identity, spec, None
-            )
-            if replan_job in seen:
-                raise FactError(f"PLAN lineage cycle: {replan_job}")
-            seen.add(replan_job)
-            if replan_result is None:
-                packet_path = paths.root / "gpt" / "outbox" / f"{replan_job}.md"
-                pending = frozenset()
-                if packet_path.exists():
-                    packet = load_gpt_packet(paths, replan_job)
-                    _validate_gpt_packet(
-                        packet,
-                        replace(identity, specs=tuple(specs)),
-                        Action(
-                            ActionKind.PLAN,
-                            effect_id=replan_job,
-                            payload={
-                                "parent_spec_id": spec.spec_id,
-                                "trigger_judge_id": None,
-                            },
-                        ),
-                    )
-                    pending = frozenset({replan_job})
-                return tuple(results), tuple(specs), pending, work, proof
-            results.append(replan_result)
-            if replan_spec is None:
-                return tuple(results), tuple(specs), frozenset(), work, proof
-            specs.append(replan_spec)
-            spec = replan_spec
         work, proof, stage_results, return_plan = _current_stage(
             paths, config, identity, spec
         )
