@@ -36,7 +36,12 @@ from .facts import (
     read_snapshot,
     sha256_text,
 )
-from .legacy_v1_browser_compat import LegacyV1BrowserCompat
+from .legacy_v1_browser_compat import (
+    LegacyV1BrowserCompat,
+    LegacyCompatConfig,
+    load_compat_config,
+    set_global_judge_conversation,
+)
 from .scheduler import (
     ProjectEntry,
     Scheduler,
@@ -447,6 +452,13 @@ class WebUIState:
             raise WebUIError(422, str(error)) from error
         return next(item for item in result.entries if item.p_id == p_id)
 
+    def set_judge_binding(self, conversation_url: str) -> LegacyCompatConfig:
+        """Update only the operational global JUDGE transport binding."""
+        try:
+            return set_global_judge_conversation(self.state_root, conversation_url)
+        except (FactError, TypeError, ValueError) as error:
+            raise WebUIError(422, str(error)) from error
+
     def block_config(self) -> BlockGPTConfig:
         return load_block_config(self.state_root)
 
@@ -663,6 +675,51 @@ class WebUIState:
             result.append(projected)
         return tuple(result)
 
+    def _gpt_conversation_projection(self, registry) -> dict[str, object]:
+        """Project operational GPT conversation ownership for the control plane."""
+        try:
+            compat = load_compat_config(self.state_root)
+        except FactError as error:
+            judge = {"bound": False, "conversation_url": None}
+            compat_error: str | None = str(error)
+        else:
+            judge = {
+                "bound": bool(compat.conversations.get("judge")),
+                "conversation_url": compat.conversations.get("judge"),
+            }
+            compat_error = None
+        try:
+            block = load_block_config(self.state_root)
+        except FactError as error:
+            block_row = {
+                "bound": False,
+                "conversation_url": None,
+                "auto_diagnosis_enabled": False,
+            }
+            block_error: str | None = str(error)
+        else:
+            block_row = {
+                "bound": block.conversation_url is not None,
+                "conversation_url": block.conversation_url,
+                "auto_diagnosis_enabled": block.enabled,
+            }
+            block_error = None
+        plans = [
+            {
+                "p_id": entry.p_id,
+                "bound": entry.plan_conversation_url is not None,
+                "conversation_url": entry.plan_conversation_url,
+            }
+            for entry in registry.entries
+            if entry.enabled and not entry.archived
+        ]
+        return {
+            "judge": judge,
+            "block": block_row,
+            "per_p_plan": plans,
+            "error": compat_error or block_error,
+        }
+
     def status(self) -> dict[str, object]:
         """Return a fresh, presentation-only operator projection."""
         registry = self.registry()
@@ -845,6 +902,7 @@ class WebUIState:
                 "active": active, "running": running, "paused": paused, "archived": archived,
                 "gpt_lanes": self._gpt_lane_projection(gpt_transport.status(), browser_status),
                 "browser_transport": browser_status, "projects": projects, "events": events,
+                "gpt_conversations": self._gpt_conversation_projection(registry),
                 "block_gpt": {
                     "enabled": block_config.enabled,
                     "bound": block_config.conversation_url is not None,
@@ -869,6 +927,8 @@ POLISHED_INDEX_HTML = r"""<!doctype html>
 .button{border:1px solid var(--border-strong);border-radius:4px;padding:6px 10px;background:var(--surface-2);color:var(--text);line-height:1.25}.button:hover{background:var(--surface-hover);border-color:var(--accent)}.button.primary{background:var(--accent);border-color:var(--accent);color:#0d131a;font-weight:600}.button.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover)}.button.ghost{background:transparent;border-color:transparent;color:var(--text-secondary)}.button.ghost:hover{background:var(--surface-hover);border-color:var(--border)}.button.danger{color:var(--danger);border-color:rgba(217,103,103,.55);background:transparent}.button.danger:hover{background:rgba(217,103,103,.12);border-color:var(--danger)}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px}.toolbar .spacer{flex:1}
 /* system strip */
 .system-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--border);background:var(--surface-1);border-radius:5px;overflow:hidden}.health-cell{min-height:58px;padding:10px 12px;border-right:1px solid var(--border)}.health-cell:last-child{border-right:0}.health-label{display:block;color:var(--text-muted);font-size:12px}.health-value{display:flex;align-items:center;gap:6px;margin-top:2px;font-size:13px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--text-muted);flex:0 0 auto}.dot.ok{background:var(--success)}.dot.warn{background:var(--warning)}.dot.err{background:var(--danger)}.health-cell button{margin-left:6px;padding:3px 7px;font-size:12px}
+/* GPT conversation ownership */
+.gpt-conversations{border:1px solid var(--border);border-radius:5px;background:var(--surface-1);overflow:hidden}.gpt-group-label{padding:7px 12px;color:var(--text-muted);font-size:12px;background:var(--surface-2);border-bottom:1px solid var(--border)}.gpt-row{display:grid;grid-template-columns:150px 110px minmax(0,1fr) auto;align-items:center;gap:10px;min-height:44px;padding:7px 12px;border-bottom:1px solid var(--border)}.gpt-row:last-child{border-bottom:0}.gpt-role{font-weight:600;color:var(--text-secondary)}.gpt-state{font-size:12px}.gpt-url{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.gpt-row .button{justify-self:end}.gpt-editor-row{display:block;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface-2)}
 /* attention */
 .attention-inbox{border-top:1px solid var(--border);background:var(--surface-1)}.attention-row{display:flex;align-items:center;gap:10px;min-height:58px;padding:9px 12px;border-bottom:1px solid var(--border)}.attention-row:last-child{border-bottom:0}.attention-row .severity{color:var(--warning);font-size:15px}.attention-id{min-width:190px;max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,"SFMono-Regular",Consolas,monospace;font-size:12px}.attention-reason{color:var(--text-secondary);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attention-row .button{flex:0 0 auto}
 /* tabs */
@@ -885,17 +945,18 @@ POLISHED_INDEX_HTML = r"""<!doctype html>
 .toast{min-height:0;margin-top:10px;padding:0;border-radius:4px;color:var(--text-secondary)}.toast.visible{padding:8px 10px;border:1px solid rgba(217,103,103,.6);background:rgba(217,103,103,.1);color:var(--danger)}
 /* responsive */
 @media(max-width:900px){.shell{padding:18px 16px 32px}.system-strip{grid-template-columns:repeat(3,minmax(0,1fr))}.health-cell:nth-child(3){border-right:0}.health-cell:nth-child(-n+3){border-bottom:1px solid var(--border)}.health-cell:nth-child(4){border-right:1px solid var(--border)}}
-@media(max-width:760px){.shell{padding:14px 14px 28px}.header{display:block}.header-actions{justify-content:flex-start;margin-top:10px}.system-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.health-cell{border-right:0!important;border-bottom:1px solid var(--border)}.health-cell:nth-last-child(-n+2){border-bottom:0}.details-grid,.advanced-grid,.form-grid{grid-template-columns:1fr}.task-top{align-items:flex-start}.task-id{max-width:62%}.attention-id{min-width:0;max-width:36%}.meta-row{gap:4px 10px}.meta-item+.meta-item:before{margin-right:10px}.task-actions .spacer{display:none}.more-content{right:auto;left:0}}
+@media(max-width:760px){.shell{padding:14px 14px 28px}.header{display:block}.header-actions{justify-content:flex-start;margin-top:10px}.system-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.health-cell{border-right:0!important;border-bottom:1px solid var(--border)}.health-cell:nth-last-child(-n+2){border-bottom:0}.details-grid,.advanced-grid,.form-grid{grid-template-columns:1fr}.task-top{align-items:flex-start}.task-id{max-width:62%}.attention-id{min-width:0;max-width:36%}.meta-row{gap:4px 10px}.meta-item+.meta-item:before{margin-right:10px}.task-actions .spacer{display:none}.more-content{right:auto;left:0}.gpt-row{grid-template-columns:1fr auto;gap:4px 10px}.gpt-row .gpt-url{grid-column:1/-1;grid-row:2}.gpt-row .button{grid-column:2;grid-row:1}}
 </style></head><body><main class="shell">
 <header class="header"><div><div class="brand">AgentBus v2</div><div class="toolbar"><button class="button primary" onclick="showForm('create')">+ 新建任务</button><button class="button secondary" onclick="showForm('adopt')">接管现有 PR</button></div></div><div class="header-actions"><div id="health" class="health"><span class="dot"></span>检查中</div><button class="button secondary" onclick="refresh()">刷新</button></div></header>
 <div id="toast" class="toast" role="status" aria-live="polite"></div><div id="forms"></div>
 <section class="section" aria-labelledby="system-title"><h2 id="system-title" class="section-title">系统状态</h2><div id="system-strip" class="system-strip"></div></section>
+<section class="section" aria-labelledby="gpt-conversations-title"><h2 id="gpt-conversations-title" class="section-title">GPT 会话</h2><div id="gpt-conversations" class="gpt-conversations"></div></section>
 <section class="section" aria-labelledby="attention-title"><h2 id="attention-title" class="section-title">需要处理 <span id="attention-count" class="tab-count"></span></h2><div id="attention" class="attention-inbox"></div></section>
 <section class="section" aria-labelledby="tasks-title"><h2 id="tasks-title" class="section-title">任务</h2><div id="tabs" class="tabs" role="tablist" aria-label="任务生命周期"></div><div id="task-list" class="task-list"></div></section>
 <details class="advanced"><summary>高级诊断</summary><section class="block-panel"><h3>BLOCK_GPT</h3><div id="block-gpt-controls"></div></section><div class="advanced-grid"><div class="advanced-box"><h3>Executors</h3><pre id="executors"></pre></div><div class="advanced-box"><h3>GPT lanes</h3><pre id="gpt-lanes"></pre></div><div class="advanced-box"><h3>Browser transport</h3><pre id="browser-transport"></pre></div><div class="advanced-box"><h3>Recent scheduler events</h3><pre id="events"></pre></div></div></details>
 </main><script>
 /* state and API */
-const TOKEN=__TOKEN__;const ui={tab:'active',editingPlan:null,editingDirective:null,replan:null,editingBlock:false,form:null,errors:{},current:null};
+const TOKEN=__TOKEN__;const ui={tab:'active',editingPlan:null,editingDirective:null,replan:null,editingBlock:false,editingJudge:false,form:null,errors:{},current:null};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const attr=s=>esc(s).replace(/`/g,'&#96;');
 const copyValue=v=>`decodeURIComponent('${encodeURIComponent(v??'').replaceAll("'","%27")}')`;
@@ -905,17 +966,21 @@ async function request(url,body){const r=await fetch(url,{method:'POST',headers:
 function showToast(message,kind='error'){const el=document.getElementById('toast');el.textContent=String(message||'');el.className='toast'+(message?' visible':'');if(message)setTimeout(()=>{if(el.textContent===String(message)){el.textContent='';el.className='toast'}},5000)}
 async function refresh(){try{const r=await fetch('/api/status');if(!r.ok)throw Error('HTTP '+r.status);ui.current=await r.json();render(ui.current);document.getElementById('last-refresh')?.replaceChildren(new Date().toLocaleTimeString())}catch(e){showToast('状态读取失败：'+e)}}
 async function scheduler(op){try{await request('/api/scheduler/'+op,{});await refresh()}catch(e){showToast(e)}}
-function toggleBlockEditor(){ui.editingBlock=!ui.editingBlock;render(ui.current)}
+function toggleBlockEditor(){ui.editingBlock=!ui.editingBlock;render(ui.current);if(ui.editingBlock)requestAnimationFrame(()=>document.querySelector('.advanced')?.setAttribute('open',''))}
+function toggleJudgeEditor(){ui.editingJudge=!ui.editingJudge;delete ui.errors.judge;render(ui.current);if(ui.editingJudge)requestAnimationFrame(()=>document.getElementById('judge-url')?.focus())}
+async function saveJudgeBinding(){const input=document.getElementById('judge-url'),value=(input?.value||'').trim();if(!/^https:\/\/chatgpt\.com\/c\/[^\s/]+$/.test(value)){ui.errors.judge='请输入 https://chatgpt.com/c/... 会话 URL';render(ui.current);return}try{await request('/api/gpt-conversations/judge',{conversation_url:value});ui.editingJudge=false;delete ui.errors.judge;await refresh()}catch(e){ui.errors.judge=String(e);render(ui.current)}}
 async function saveBlockBinding(){const input=document.getElementById('block-url'),value=(input?.value||'').trim();if(!/^https:\/\/chatgpt\.com\/c\/[^\s/]+/.test(value)){ui.errors.block='请输入 https://chatgpt.com/c/... 会话 URL';render(ui.current);return}try{await request('/api/block-gpt/binding',{conversation_url:value});ui.editingBlock=false;delete ui.errors.block;await refresh()}catch(e){ui.errors.block=String(e);render(ui.current)}}
 async function setBlockEnabled(enabled){try{await request('/api/block-gpt/enabled',{enabled:Boolean(enabled)});await refresh()}catch(e){showToast(e)}}
 async function project(p,op,body){try{await request('/api/project/'+encodeURIComponent(p)+'/'+op,body);await refresh()}catch(e){showToast(e)}}
 async function submit(p){const box=document.getElementById('gpt-'+CSS.escape(p));try{const v=JSON.parse(box.value);await request('/api/project/'+encodeURIComponent(p)+'/gpt-submit',v);box.value='';await refresh()}catch(e){showToast(e)}}
 function setTab(tab){ui.tab=tab;render(ui.current)}
+function projectId(value){return typeof value==='string'?value:value?.p_id}
+function projectFor(value){const id=projectId(value);return (ui.current?.projects||[]).find(x=>x.p_id===id)||null}
 function focusTask(p){const item=(ui.current?.projects||[]).find(x=>x.p_id===p);if(!item)return;ui.tab=item.archived?'archived':item.active?'active':'paused';render(ui.current);requestAnimationFrame(()=>{const el=document.getElementById('task-card-'+encodeURIComponent(p));if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('highlight');setTimeout(()=>el.classList.remove('highlight'),1200)}})}
-function showHuman(p_id){const p=projectFor(p_id);if(!p)return;ui.tab=p.active?'active':p.archived?'archived':'paused';render(ui.current);requestAnimationFrame(()=>{const card=document.getElementById('task-card-'+encodeURIComponent(p_id));card?.scrollIntoView({behavior:'smooth',block:'center'});const details=card?.querySelector('.task-details');if(details)details.open=true;const reason=card?.querySelector('.human-reason');if(reason){reason.classList.add('highlight');reason.focus?.()}})}
+function showHuman(value){const p=projectFor(value);if(!p)return;const p_id=p.p_id;ui.tab=p.active?'active':p.archived?'archived':'paused';render(ui.current);requestAnimationFrame(()=>{const card=document.getElementById('task-card-'+encodeURIComponent(p_id));card?.scrollIntoView({behavior:'smooth',block:'center'});const details=card?.querySelector('.task-details');if(details)details.open=true;const reason=card?.querySelector('.human-reason');if(reason){reason.classList.add('highlight');reason.focus?.()}})}
 function confirmMerge(p_id){if(!confirm('该操作将允许 AgentBus 在所有现有 deterministic merge fences 通过后执行合并。\n是否继续？'))return;project(p_id,'allow-merge',{allow_merge:true})}
-function togglePlanEditor(p_id){const p=projectFor(p_id);if(!p)return;if(ui.editingPlan===p_id){ui.editingPlan=null;delete ui.errors['plan-'+p_id]}else{ui.editingPlan=p_id;ui.editingDirective=null}render(ui.current);requestAnimationFrame(()=>document.getElementById('plan-url-'+encodeURIComponent(p_id))?.focus())}
-async function savePlan(p_id){const p=projectFor(p_id);if(!p)return;const id=encodeURIComponent(p_id),input=document.getElementById('plan-url-'+id),value=(input?.value||'').trim();if(!/^https:\/\/chatgpt\.com\/c\/[^\s/]+/.test(value)){ui.errors['plan-'+p_id]='请输入 https://chatgpt.com/c/... 会话 URL';render(ui.current);return}try{await request('/api/project/'+encodeURIComponent(p_id)+'/plan-binding',{conversation_url:value});ui.editingPlan=null;delete ui.errors['plan-'+p_id];await refresh()}catch(e){ui.errors['plan-'+p_id]=String(e);render(ui.current)}}
+function togglePlanEditor(value){const p_id=projectId(value),p=projectFor(p_id);if(!p)return;if(ui.editingPlan===p_id){ui.editingPlan=null;delete ui.errors['plan-'+p_id]}else{ui.editingPlan=p_id;ui.editingDirective=null}render(ui.current);requestAnimationFrame(()=>document.getElementById('plan-url-'+encodeURIComponent(p_id))?.focus())}
+async function savePlan(value){const p_id=projectId(value),p=projectFor(p_id);if(!p)return;const id=encodeURIComponent(p_id),input=document.getElementById('plan-url-'+id),valueText=(input?.value||'').trim();if(!/^https:\/\/chatgpt\.com\/c\/[^\s/]+/.test(valueText)){ui.errors['plan-'+p_id]='请输入 https://chatgpt.com/c/... 会话 URL';render(ui.current);return}try{await request('/api/project/'+encodeURIComponent(p_id)+'/plan-binding',{conversation_url:valueText});ui.editingPlan=null;delete ui.errors['plan-'+p_id];await refresh()}catch(e){ui.errors['plan-'+p_id]=String(e);render(ui.current)}}
 function toggleDirectiveEditor(p_id){const p=projectFor(p_id);if(!p)return;if(ui.editingDirective===p_id){ui.editingDirective=null;delete ui.errors['directive-'+p_id]}else{ui.editingDirective=p_id;ui.editingPlan=null}render(ui.current);requestAnimationFrame(()=>document.getElementById('directive-'+encodeURIComponent(p_id))?.focus())}
 async function saveDirective(p_id,replan){const p=projectFor(p_id);if(!p)return;const input=document.getElementById('directive-'+encodeURIComponent(p_id)),value=(input?.value||'').trim();if(!value){ui.errors['directive-'+p_id]='人工 PLAN 约束不能为空';render(ui.current);return}if(replan&&!confirm('该 P 必须先暂停。应用新约束会产生新的 exact PLAN 请求，旧请求即使稍后返回也不会成为当前结果。继续？'))return;try{await request('/api/project/'+encodeURIComponent(p_id)+'/plan-directive',{directive:value,request_replan:replan});ui.editingDirective=null;delete ui.errors['directive-'+p_id];await refresh()}catch(e){ui.errors['directive-'+p_id]=String(e);render(ui.current)}}
 function showForm(kind){ui.form=kind;render(ui.current||{projects:[],scheduler:{},browser_transport:{},executors:[]});document.getElementById('form-pid')?.focus()}
@@ -950,10 +1015,12 @@ function attentionRow(p){return `<div class="attention-row"><span class="severit
 function formPanel(kind){const adopt=kind==='adopt';return `<section class="form-panel"><h2>${adopt?'接管现有 PR':'新建任务'}</h2><p class="secondary-text">${adopt?'只继承 PR / branch / HEAD identity，不继承旧 AgentBus 语义历史。':'使用现有 v2 init 校验；创建后默认暂停，不自动发送 PLAN。'}</p><div class="form-grid"><label class="form-field">P_ID<input id="f-pid" autocomplete="off"></label><label class="form-field">repository<input id="f-repo" value="github.com/"></label>${adopt?'<label class="form-field">PR number<input id="f-pr" type="number"></label>':''}<label class="form-field">worktree<input id="f-wt"></label><label class="form-field">branch<input id="f-branch"></label><label class="form-field">base branch<input id="f-base" value="main"></label><label class="form-field wide">任务说明 / charter<textarea id="f-charter"></textarea></label></div><div class="task-actions"><span class="spacer"></span><button class="button secondary" onclick="closeForm()">取消</button><button class="button primary" onclick="createOrAdopt('${kind}')">${adopt?'接管现有 PR':'创建任务'}</button></div></section>`}
 function renderForm(){document.getElementById('forms').innerHTML=ui.form?formPanel(ui.form):''}
 /* global render */
+function openPlanBinding(value){const p=projectFor(value);if(!p)return;ui.tab=p.archived?'archived':p.active?'active':'paused';ui.editingPlan=p.p_id;ui.editingDirective=null;render(ui.current);requestAnimationFrame(()=>{const card=document.getElementById('task-card-'+encodeURIComponent(p.p_id));if(card){card.scrollIntoView({behavior:'smooth',block:'center'});card.classList.add('highlight');setTimeout(()=>card.classList.remove('highlight'),1200);const details=card.querySelector('.task-details');if(details)details.open=true}document.getElementById('plan-url-'+encodeURIComponent(p.p_id))?.focus()})}
+function renderConversations(v){const el=document.getElementById('gpt-conversations');if(!el)return;const c=v.gpt_conversations||{},judge=c.judge||{},block=c.block||{},status=row=>row.bound?'<span class="success-text"><span class="dot ok"></span>已绑定</span>':'<span class="muted"><span class="dot"></span>未绑定</span>',url=row=>row.bound?`<span class="technical gpt-url" title="${attr(row.conversation_url)}">${esc(shortUrl(row.conversation_url))}</span>`:'<span class="muted">—</span>',button=(label,handler)=>`<button class="button ghost" onclick="${handler}">${label}</button>`;let html=`<div class="gpt-row"><span class="gpt-role">JUDGE</span><span class="gpt-state">${status(judge)}</span>${url(judge)}${button(judge.bound?'修改':'绑定','toggleJudgeEditor()')}</div>`;if(ui.editingJudge)html+=`<div class="gpt-editor-row"><div class="inline-editor"><label for="judge-url">JUDGE 会话 URL</label><input id="judge-url" value="${attr(judge.conversation_url||'')}" placeholder="https://chatgpt.com/c/..." autocomplete="off"><div class="inline-error">${esc(ui.errors.judge||'')}</div><div class="task-actions"><span class="spacer"></span><button class="button secondary" onclick="toggleJudgeEditor()">取消</button><button class="button primary" onclick="saveJudgeBinding()">保存</button></div></div></div>`;html+=`<div class="gpt-row"><span class="gpt-role">BLOCK</span><span class="gpt-state">${status(block)}</span>${url(block)}${button(block.bound?'修改':'绑定','toggleBlockEditor()')}</div><div class="gpt-group-label">P 专用 PLAN</div>`;const plans=(c.per_p_plan||[]).filter(row=>(ui.current?.projects||[]).some(p=>p.p_id===row.p_id));if(plans.length)html+=plans.map(row=>`<div class="gpt-row"><span class="gpt-role technical" title="${attr(row.p_id)}">${esc(row.p_id)}</span><span class="gpt-state">${status(row)}</span>${url(row)}${button(row.bound?'修改':'绑定',`openPlanBinding(${copyValue(row.p_id)})`)}</div>`).join('');else html+='<div class="gpt-row"><span class="muted">暂无 active P</span></div>';if(c.error)html+=`<div class="gpt-editor-row warning-text">${esc(c.error)}</div>`;el.innerHTML=html}
 function renderBlockPanel(v){const b=v.block_gpt||{},el=document.getElementById('block-gpt-controls');if(!el)return;const bound=b.bound?'已绑定':'未绑定';const warning=b.enabled&&!b.bound?'<div class="warning-text">BLOCK_GPT 未绑定；不会使用 PLAN/JUDGE 会话。</div>':'';const editor=ui.editingBlock?`<div class="inline-editor"><label for="block-url">BLOCK_GPT 会话 URL</label><input id="block-url" value="${attr(b.conversation_url||'')}" placeholder="https://chatgpt.com/c/..." autocomplete="off"><div class="inline-error">${esc(ui.errors.block||'')}</div><div class="task-actions"><span class="spacer"></span><button class="button secondary" onclick="toggleBlockEditor()">取消</button><button class="button primary" onclick="saveBlockBinding()">保存</button></div></div>`:'';el.innerHTML=`<div class="detail-row"><span>会话</span><span>${bound} <button class="button ghost" onclick="toggleBlockEditor()">${b.bound?'修改':'绑定 BLOCK_GPT 会话'}</button></span></div><div class="detail-row"><span>自动诊断运行阻塞</span><span><span class="${b.enabled?'success-text':'muted'}">${b.enabled?'ON':'OFF'}</span><button class="button ${b.enabled?'secondary':'primary'}" onclick="setBlockEnabled(${!b.enabled})">${b.enabled?'关闭':'启用'}</button></span></div>${warning}${editor}`}
 function renderSystem(v){const s=v.scheduler||{},b=v.browser_transport||{},executors=v.executors||[],working=executors.filter(x=>x.state==='工作中').length,total=executors.filter(x=>x.enabled).length,mailboxReady=b.mailbox==='available'||b.mailbox==='configured';const health=document.getElementById('health');const attention=(v.attention||[]).length;health.innerHTML=`<span class="dot ${attention?'warn':'ok'}"></span>${attention?'需要处理 '+attention:'系统正常'}`;document.getElementById('system-strip').innerHTML=`<div class="health-cell"><span class="health-label">调度器</span><span class="health-value"><span class="dot ${s.running?'ok':'warn'}"></span>${s.running?'运行中':'已停止'}<button class="button ghost" onclick="scheduler('${s.running?'stop':'start'}')">${s.running?'停止':'启动'}</button></span></div><div class="health-cell"><span class="health-label">浏览器</span><span class="health-value"><span class="dot ${b.legacy_v1_extension==='ONLINE'?'ok':'err'}"></span>${b.legacy_v1_extension==='ONLINE'?'在线':'离线'}</span></div><div class="health-cell"><span class="health-label">Mailbox</span><span class="health-value"><span class="dot ${mailboxReady?'ok':'err'}"></span>${mailboxReady?'可用':'不可用'}</span></div><div class="health-cell"><span class="health-label">Luna</span><span class="health-value">${working} / ${total} 工作中</span></div><div class="health-cell"><span class="health-label">PLAN</span><span class="health-value">${b.plan?.pending??0}</span></div><div class="health-cell"><span class="health-label">JUDGE</span><span class="health-value">${b.judge?.pending??0}</span></div>`;document.getElementById('executors').textContent=JSON.stringify(executors,null,2);document.getElementById('gpt-lanes').textContent=(v.gpt_lanes||[]).map(l=>`${l.semantic_operation||l.name} · ${l.production_transport||l.transport||'UNKNOWN'}\nextension: ${l.extension||'UNKNOWN'} · mailbox: ${l.mailbox||'UNKNOWN'} · pending: ${l.pending_jobs??0}`).join('\n\n');document.getElementById('browser-transport').textContent=JSON.stringify(b,null,2);document.getElementById('events').textContent=(v.events||[]).slice().reverse().map(e=>JSON.stringify(e)).join('\n');renderBlockPanel(v)}
 function renderTabs(v){const rows={active:v.active||[],paused:v.paused||[],archived:v.archived||[]};document.getElementById('tabs').innerHTML=[['active','进行中'],['paused','已暂停'],['archived','已归档']].map(([key,label])=>`<button role="tab" aria-selected="${ui.tab===key}" class="tab ${ui.tab===key?'selected':''}" onclick="setTab('${key}')">${label}<span class="tab-count">${rows[key].length}</span></button>`).join('');const list=rows[ui.tab]||[];document.getElementById('task-list').innerHTML=list.length?list.map(taskCard).join(''):`<div class="empty">${ui.tab==='archived'?'暂无已归档任务':ui.tab==='paused'?'暂无已暂停任务':'暂无进行中的任务'}</div>`}
-function render(v){ui.current=v;renderForm();document.getElementById('attention-count').textContent='('+((v.attention||[]).length)+')';document.getElementById('attention').innerHTML=(v.attention||[]).length?(v.attention||[]).map(attentionRow).join(''):'<div class="empty">当前没有需要人工处理的任务。</div>';renderTabs(v);renderSystem(v)}
+function render(v){ui.current=v;renderForm();document.getElementById('attention-count').textContent='('+((v.attention||[]).length)+')';document.getElementById('attention').innerHTML=(v.attention||[]).length?(v.attention||[]).map(attentionRow).join(''):'<div class="empty">当前没有需要人工处理的任务。</div>';renderTabs(v);renderConversations(v);renderSystem(v)}
 refresh();setInterval(refresh,1500);
 </script></body></html>"""
 
@@ -1064,6 +1131,16 @@ class WebUIRequestHandler(BaseHTTPRequestHandler):
                 self._write(200, {
                     "bound": config.conversation_url is not None,
                     "conversation_url": config.conversation_url,
+                })
+                return
+            if parts == ["api", "gpt-conversations", "judge"]:
+                self._exact(body, {"conversation_url"})
+                if type(body["conversation_url"]) is not str:
+                    raise WebUIError(400, "conversation_url must be a string")
+                config = self.server.state.set_judge_binding(body["conversation_url"])
+                self._write(200, {
+                    "bound": True,
+                    "conversation_url": config.conversations["judge"],
                 })
                 return
             if parts == ["api", "block-gpt", "enabled"]:

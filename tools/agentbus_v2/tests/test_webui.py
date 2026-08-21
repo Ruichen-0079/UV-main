@@ -20,6 +20,7 @@ from tools.agentbus_v2.core import (
 from tools.agentbus_v2.effects import EffectResult
 from tools.agentbus_v2.facts import FactError
 from tools.agentbus_v2 import webui
+from tools.agentbus_v2.scheduler import ProjectEntry
 
 
 SHA = "1" * 40
@@ -484,6 +485,63 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertIn("PLAN 会话", html)
         self.assertIn("人工 PLAN 约束", html)
+
+    def test_global_judge_binding_route_and_conversation_overview(self) -> None:
+        source = self.state_root / "legacy_v1_browser_compat.json"
+        source.write_text(json.dumps({
+            "enabled": True,
+            "conversations": {
+                "plan": "https://chatgpt.com/c/global-plan",
+                "judge": "https://chatgpt.com/c/global-judge",
+            },
+            "mailboxes": {"github.com/test/repo": 51},
+        }), encoding="utf-8")
+        before = json.loads(source.read_text(encoding="utf-8"))
+        with patch.object(self.state, "tick_now") as tick:
+            status, payload = self.post(
+                "/api/gpt-conversations/judge",
+                {"conversation_url": "https://chatgpt.com/c/judge-new"},
+            )
+        self.assertEqual(200, status)
+        self.assertEqual("https://chatgpt.com/c/judge-new", payload["conversation_url"])
+        tick.assert_not_called()
+        after = json.loads(source.read_text(encoding="utf-8"))
+        self.assertEqual(before["enabled"], after["enabled"])
+        self.assertEqual(before["conversations"]["plan"], after["conversations"]["plan"])
+        self.assertEqual(before["mailboxes"], after["mailboxes"])
+        self.assertEqual("https://chatgpt.com/c/judge-new", after["conversations"]["judge"])
+        status, html = self.server.request("/")
+        self.assertEqual(200, status)
+        self.assertIn("GPT 会话", html)
+        self.assertIn("toggleJudgeEditor", html)
+        self.assertIn("/api/gpt-conversations/judge", html)
+        self.assertIn("toggleBlockEditor", html)
+        self.assertIn("P 专用 PLAN", html)
+        self.assertNotIn("prompt(", html)
+
+    def test_conversation_overview_filters_archived_projects(self) -> None:
+        self.post(
+            "/api/project/P1/plan-binding",
+            {"conversation_url": "https://chatgpt.com/c/p1-plan"},
+        )
+        registry = type(
+            "Registry",
+            (),
+            {
+                "entries": (
+                    ProjectEntry("P1", enabled=True, plan_conversation_url="https://chatgpt.com/c/p1-plan"),
+                    ProjectEntry("ARCHIVED", enabled=False, archived=True,
+                                 plan_conversation_url="https://chatgpt.com/c/old-plan"),
+                )
+            },
+        )()
+        projection = self.state._gpt_conversation_projection(registry)
+        self.assertEqual(
+            [{"p_id": "P1", "bound": True, "conversation_url": "https://chatgpt.com/c/p1-plan"}],
+            projection["per_p_plan"],
+        )
+        self.assertIn("judge", projection)
+        self.assertIn("block", projection)
 
     def test_existing_spec_replan_requires_disabled_project(self) -> None:
         spec = type("Spec", (), {"spec_id": "spec-" + "a" * 24})()

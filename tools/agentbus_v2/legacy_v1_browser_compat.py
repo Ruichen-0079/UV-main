@@ -44,6 +44,7 @@ MAX_MAILBOX_COMMENTS = 100
 MAX_COMMENT_BYTES = 1_000_000
 ENVELOPE_START = "[AGENTBUS_V2_GPT_TRANSPORT]"
 ENVELOPE_END = "[/AGENTBUS_V2_GPT_TRANSPORT]"
+_COMPAT_MUTATION_LOCK = threading.RLock()
 ROLE_TASK = {
     "PLAN_GPT": ("PRODUCT_GPT", "PLAN_SPEC"),
     "JUDGE_GPT": ("FINAL_GPT", "FINAL_REVIEW"),
@@ -172,6 +173,81 @@ def load_compat_config(state_root: Path, path: Path | None = None) -> LegacyComp
         return LegacyCompatConfig(value["enabled"], conversations, mailboxes)
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
         raise FactError(f"invalid legacy browser compatibility config {source}: {error}") from error
+
+
+def set_global_judge_conversation(
+    state_root: Path,
+    conversation_url: str,
+    *,
+    path: Path | None = None,
+) -> LegacyCompatConfig:
+    """Atomically replace only ``conversations.judge`` in the v1 wire config.
+
+    The file remains a legacy transport configuration document.  No semantic
+    fact, GPT packet, or scheduler action is touched by this mutation.
+    """
+    source = Path(path).resolve() if path is not None else config_path(state_root)
+    if not source.exists():
+        raise FactError(f"legacy browser compatibility config is missing: {source}")
+    with _COMPAT_MUTATION_LOCK:
+        # load_compat_config is intentionally performed before any write so a
+        # malformed existing document fails closed rather than being repaired.
+        current = load_compat_config(state_root, source)
+        from .scheduler import _validate_plan_url_syntax, load_registry
+        try:
+            canonical = _validate_plan_url_syntax(conversation_url)
+        except (AttributeError, FactError, TypeError, ValueError) as error:
+            raise FactError(str(error)) from error
+        if canonical == current.conversations["plan"]:
+            raise FactError("global JUDGE conversation must differ from global PLAN")
+
+        from .block_diagnosis import load_block_config
+        block_path = Path(state_root).resolve() / "block_gpt.json"
+        if block_path.exists():
+            block = load_block_config(state_root)
+            if block.conversation_url == canonical:
+                raise FactError("global JUDGE conversation must differ from BLOCK_GPT")
+
+        registry_path = Path(state_root).resolve() / "projects.json"
+        if registry_path.exists():
+            registry = load_registry(state_root)
+            for entry in registry.enabled:
+                if entry.plan_conversation_url is None:
+                    continue
+                if _validate_plan_url_syntax(entry.plan_conversation_url) == canonical:
+                    raise FactError(
+                        f"global JUDGE conversation is already bound to active PLAN P {entry.p_id}"
+                    )
+        if canonical == current.conversations["judge"]:
+            return current
+
+        try:
+            raw = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise FactError(f"invalid legacy browser compatibility config {source}: {error}") from error
+        if not isinstance(raw, dict) or not isinstance(raw.get("conversations"), dict):
+            raise FactError(f"invalid legacy browser compatibility config {source}")
+        # Retain every unrelated raw value exactly; only this one field is
+        # replaced with the canonical URL.
+        raw["conversations"]["judge"] = canonical
+        payload = json.dumps(raw, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{source.name}.", suffix=".tmp", dir=source.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, source)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return load_compat_config(state_root, source)
+
+
+# Explicit alias for callers that use the control-plane vocabulary.
+set_judge_conversation_binding = set_global_judge_conversation
 
 
 def render_transport_prompt(job: CurrentJob) -> str:

@@ -23,7 +23,12 @@ from tools.agentbus_v2.facts import (
     load_operator_directive,
     paths_for,
 )
-from tools.agentbus_v2.legacy_v1_browser_compat import LegacyV1BrowserCompat
+from tools.agentbus_v2.legacy_v1_browser_compat import (
+    LegacyV1BrowserCompat,
+    load_compat_config,
+    set_global_judge_conversation,
+)
+from tools.agentbus_v2.block_diagnosis import set_block_config
 from tools.agentbus_v2.scheduler import (
     load_registry,
     set_plan_conversation_binding,
@@ -108,8 +113,60 @@ class PlanBindingDirectiveTests(unittest.TestCase):
             set_plan_conversation_binding(self.state, "P7", "https://chatgpt.com/c/p4-plan")
         with self.assertRaises(FactError):
             set_plan_conversation_binding(self.state, "P7", "https://chatgpt.com/c/global-judge")
+        set_block_config(
+            self.state, conversation_url="https://chatgpt.com/c/block", update_url=True
+        )
+        with self.assertRaises(FactError):
+            set_plan_conversation_binding(self.state, "P7", "https://chatgpt.com/c/block")
         with self.assertRaises(FactError):
             set_plan_conversation_binding(self.state, "P7", "http://chatgpt.com/c/not-https")
+
+    def test_global_judge_binding_preserves_compat_config_and_rejects_collisions(self) -> None:
+        source = self.state / "legacy_v1_browser_compat.json"
+        before = json.loads(source.read_text(encoding="utf-8"))
+        updated = set_global_judge_conversation(
+            self.state, "https://chatgpt.com/c/new-judge"
+        )
+        after = json.loads(source.read_text(encoding="utf-8"))
+        self.assertEqual("https://chatgpt.com/c/new-judge", updated.conversations["judge"])
+        self.assertEqual(before["enabled"], after["enabled"])
+        self.assertEqual(before["conversations"]["plan"], after["conversations"]["plan"])
+        self.assertEqual(before["mailboxes"], after["mailboxes"])
+        self.assertEqual("https://chatgpt.com/c/new-judge", after["conversations"]["judge"])
+        set_plan_conversation_binding(self.state, "P4", "https://chatgpt.com/c/p4-plan")
+        with self.assertRaises(FactError):
+            set_global_judge_conversation(self.state, "https://chatgpt.com/c/p4-plan")
+        with self.assertRaises(FactError):
+            set_global_judge_conversation(self.state, "https://chatgpt.com/c/global-plan")
+        set_block_config(
+            self.state, conversation_url="https://chatgpt.com/c/block", update_url=True
+        )
+        with self.assertRaises(FactError):
+            set_global_judge_conversation(self.state, "https://chatgpt.com/c/block")
+        with self.assertRaises(FactError):
+            set_global_judge_conversation(self.state, "http://chatgpt.com/c/not-https")
+
+    def test_global_judge_binding_fails_closed_on_malformed_config(self) -> None:
+        source = self.state / "legacy_v1_browser_compat.json"
+        original = source.read_bytes()
+        source.write_text('{"enabled": true, "conversations": {}}', encoding="utf-8")
+        malformed = source.read_bytes()
+        with self.assertRaises(FactError):
+            set_global_judge_conversation(self.state, "https://chatgpt.com/c/new-judge")
+        self.assertEqual(malformed, source.read_bytes())
+        self.assertNotEqual(original, malformed)
+
+    def test_global_judge_binding_is_operational_only(self) -> None:
+        before = load_compat_config(self.state)
+        old_job = plan_job_id(self.snapshot())
+        set_global_judge_conversation(self.state, "https://chatgpt.com/c/new-judge")
+        self.assertEqual(old_job, plan_job_id(self.snapshot()))
+        self.assertEqual(before.enabled, load_compat_config(self.state).enabled)
+        self.assertEqual(
+            before.conversations["plan"],
+            load_compat_config(self.state).conversations["plan"],
+        )
+        self.assertFalse((self.state / "P4" / "gpt" / "results").exists())
 
     def test_url_is_operational_only_and_unbound_does_not_use_global_plan(self) -> None:
         before = plan_job_id(self.snapshot())

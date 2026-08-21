@@ -338,6 +338,13 @@ def validate_plan_conversation_url(
         compat = None
     if compat is not None and compat.conversations.get("judge") == canonical:
         raise FactError("PLAN conversation URL cannot equal the global JUDGE conversation")
+    block_path = Path(state_root).resolve() / "block_gpt.json"
+    if block_path.exists():
+        from .block_diagnosis import load_block_config
+
+        block = load_block_config(Path(state_root))
+        if block.conversation_url == canonical:
+            raise FactError("PLAN conversation URL cannot equal the BLOCK_GPT conversation")
     registry = load_registry(Path(state_root), path)
     for entry in registry.entries:
         if entry.p_id != p_id and entry.enabled and entry.plan_conversation_url:
