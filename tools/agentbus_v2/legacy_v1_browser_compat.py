@@ -217,10 +217,10 @@ def parse_transport_envelope(body: str) -> TransportEnvelope | None:
     if not block.startswith("\n"):
         raise LegacyCompatError("transport envelope must begin on its own line")
     block = block[1:]
-    marker = "\nRAW_RESPONSE_JSON:\n"
+    marker = "\nRAW_RESPONSE_JSON:"
     if marker not in block:
         raise LegacyCompatError("transport envelope lacks RAW_RESPONSE_JSON boundary")
-    header_text, raw = block.split(marker, 1)
+    header_text, framed_raw = block.split(marker, 1)
     header_lines = header_text.splitlines()
     if len(header_lines) != 3:
         raise LegacyCompatError("transport envelope must contain exactly three identity headers")
@@ -230,6 +230,16 @@ def parse_transport_envelope(body: str) -> TransportEnvelope | None:
         if not line.startswith(prefix_text) or not line.removeprefix(prefix_text):
             raise LegacyCompatError("transport envelope identity headers are malformed")
         values.append(line.removeprefix(prefix_text))
+    # GitHub transport has produced both exact machine-readable framings in
+    # practice: a JSON value on the next line, and one ASCII space followed by
+    # the JSON value on the header line.  Selecting either delimiter does not
+    # parse, repair, normalize, or rewrite the raw response itself.
+    if framed_raw.startswith("\n"):
+        raw = framed_raw[1:]
+    elif framed_raw.startswith(" ") and not framed_raw.startswith("  "):
+        raw = framed_raw[1:]
+    else:
+        raise LegacyCompatError("RAW_RESPONSE_JSON requires one exact transport delimiter")
     if not raw.endswith("\n"):
         raise LegacyCompatError("RAW_RESPONSE_JSON must end before the closing marker")
     raw = raw[:-1]

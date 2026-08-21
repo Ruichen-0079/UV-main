@@ -334,6 +334,17 @@ class LegacyV1BrowserCompatTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "exactly one"):
             parse_transport_envelope(body + "\n" + body)
 
+    def test_parser_accepts_exact_same_line_raw_json_without_rewriting_it(self) -> None:
+        job = self.compat.current_jobs()[0]
+        raw = self._valid_response()
+        body = envelope(job.job_id, job.operation, job.packet_sha256, raw).replace(
+            "RAW_RESPONSE_JSON:\n", "RAW_RESPONSE_JSON: ", 1
+        )
+        parsed = parse_transport_envelope(body)
+        self.assertEqual(raw, parsed.raw_response_json)
+        with self.assertRaisesRegex(Exception, "exact transport delimiter"):
+            parse_transport_envelope(body.replace("RAW_RESPONSE_JSON: ", "RAW_RESPONSE_JSON:  ", 1))
+
 
 if __name__ == "__main__":
     unittest.main()
