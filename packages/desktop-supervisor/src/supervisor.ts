@@ -1239,8 +1239,13 @@ export class DesktopSupervisor {
       }
     }
     const migrate = this.hooks.migratePostgres ?? migrateSupervisorTarget;
+    const migrationsDir =
+      this.config.layout.mode === "packaged"
+        ? path.resolve(this.config.layout.resourceRoot, "migrations")
+        : undefined;
     try {
       const result = await migrate(target, {
+        ...(migrationsDir === undefined ? {} : { migrationsDir }),
         settings: migrationSettingsFromEnv(this.config.env)
       });
       this.migrationDiagnostics = this.toMigrationDiagnostics(result.diagnostics);

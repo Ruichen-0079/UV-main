@@ -3,6 +3,7 @@
  * Run: node --test scripts/desktop-package/prepare.test.mjs
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +15,8 @@ import {
   isNodeBuiltin,
   packageNameFromSpecifier
 } from "./build-runtime.mjs";
+import { REPO_ROOT } from "./constants.mjs";
+import { stagePackagedMigrations } from "./prepare.mjs";
 import { assertRelativeSafe } from "./paths.mjs";
 
 test("manifest generation is relative and secret-free", () => {
@@ -59,4 +62,35 @@ test("metafile disallows unresolved package externals except optional natives", 
   assert.equal(ALLOWED_OPTIONAL_NATIVE_EXTERNALS.has("pg-native"), true);
   assert.equal(isNodeBuiltin("node:http"), true);
   assert.equal(packageNameFromSpecifier("@scope/pkg/sub"), "@scope/pkg");
+});
+
+test("packaged migration staging preserves the authoritative SQL registry byte-for-byte", () => {
+  const sourceDirectory = path.join(REPO_ROOT, "packages", "memory", "migrations");
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-migrations-stage-test-"));
+  const targetDirectory = path.join(tempRoot, "resource", "migrations");
+  try {
+    const sourceNames = fs
+      .readdirSync(sourceDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
+      .map((entry) => entry.name)
+      .sort();
+
+    stagePackagedMigrations(targetDirectory);
+
+    const stagedNames = fs.readdirSync(targetDirectory).sort();
+    assert.deepEqual(stagedNames, sourceNames);
+    for (const name of sourceNames) {
+      const source = fs.readFileSync(path.join(sourceDirectory, name));
+      const staged = fs.readFileSync(path.join(targetDirectory, name));
+      assert.equal(
+        createHash("sha256").update(staged).digest("hex"),
+        createHash("sha256").update(source).digest("hex"),
+        name
+      );
+      assert.equal(staged.equals(source), true, name);
+      assert.equal(staged.toString("utf8").includes(REPO_ROOT), false, name);
+    }
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });

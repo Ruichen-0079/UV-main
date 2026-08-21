@@ -1349,4 +1349,78 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
     expect(processMock.spawn).not.toHaveBeenCalled();
     expect(JSON.stringify(supervisor.snapshot())).not.toContain("postgres://yuvi");
   });
+
+  it("passes packaged resourceRoot/migrations to the migration primitive", async () => {
+    mockMem0Health(false);
+    const config = packagedConfig({
+      DATABASE_URL: "postgres://yuvi:x@127.0.0.1:5432/yuvi",
+      YUVI_AUTOSTART_RUNTIME: "false",
+      YUVI_AUTOSTART_MEM0: "false"
+    });
+    if (config.layout.mode !== "packaged") throw new Error("expected packaged layout");
+    const expectedMigrationsDir = path.resolve(config.layout.resourceRoot, "migrations");
+    let observedMigrationsDir: string | undefined;
+    const supervisor = createSupervisor(config, {
+      migratePostgres: async (_target, options) => {
+        observedMigrationsDir = options?.migrationsDir;
+        const diagnostics = emptyDiagnostics();
+        diagnostics.schemaReady = true;
+        return { ok: true, schemaReady: true, diagnostics };
+      }
+    });
+
+    await supervisor.bootstrap();
+
+    expect(observedMigrationsDir).toBe(expectedMigrationsDir);
+  });
+
+  it("keeps development migration resolution on the default path", async () => {
+    mockMem0Health(false);
+    const config = baseConfig({
+      autostartRuntime: false,
+      autostartMem0: false,
+      postgresMode: "external"
+    });
+    let observedMigrationsDir: string | undefined;
+    const supervisor = createSupervisor(config, {
+      migratePostgres: async (_target, options) => {
+        observedMigrationsDir = options?.migrationsDir;
+        const diagnostics = emptyDiagnostics();
+        diagnostics.schemaReady = true;
+        return { ok: true, schemaReady: true, diagnostics };
+      }
+    });
+
+    await supervisor.bootstrap();
+
+    expect(observedMigrationsDir).toBeUndefined();
+  });
+
+  it("fails closed when packaged migrations are missing without falling back", async () => {
+    mockMem0Health(false);
+    const config = packagedConfig({
+      DATABASE_URL: "postgres://yuvi:x@127.0.0.1:5432/yuvi",
+      YUVI_AUTOSTART_RUNTIME: "false",
+      YUVI_AUTOSTART_MEM0: "false"
+    });
+    if (config.layout.mode !== "packaged") throw new Error("expected packaged layout");
+    const expectedMigrationsDir = path.resolve(config.layout.resourceRoot, "migrations");
+    expect(fs.existsSync(expectedMigrationsDir)).toBe(false);
+    const migratePostgres: NonNullable<SupervisorHooks["migratePostgres"]> = async (
+      _target,
+      options
+    ) => {
+      expect(options?.migrationsDir).toBe(expectedMigrationsDir);
+      expect(options?.migrationsDir).not.toContain(path.join("packages", "memory", "migrations"));
+      const error = Object.assign(new Error(`ENOENT: ${expectedMigrationsDir}`), {
+        code: "ENOENT"
+      });
+      throw error;
+    };
+    const supervisor = createSupervisor(config, { migratePostgres });
+
+    await expect(supervisor.bootstrap()).rejects.toMatchObject({ code: "ENOENT" });
+
+    expect(supervisor.snapshot().postgres?.migration?.schemaReady).not.toBe(true);
+  });
 });

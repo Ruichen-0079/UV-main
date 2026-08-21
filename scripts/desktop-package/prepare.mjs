@@ -23,7 +23,13 @@ import { buildSupervisor, sha256File, SUPERVISOR_BUILD_INFO_NAME } from "./build
 import { buildPackagedMem0, validateMem0Artifact } from "./build-mem0.mjs";
 import { bundleRuntimeServer } from "./build-runtime.mjs";
 import { prepareBundledNode } from "./download-node.mjs";
-import { assertFile, assertSafeGeneratedTarget, ensureDir, writeJson } from "./paths.mjs";
+import {
+  assertDir,
+  assertFile,
+  assertSafeGeneratedTarget,
+  ensureDir,
+  writeJson
+} from "./paths.mjs";
 
 const PROCESS_IDENTITY_HELPER_SOURCE = path.join(
   REPO_ROOT,
@@ -33,6 +39,7 @@ const PROCESS_IDENTITY_HELPER_SOURCE = path.join(
   "yuvi-process-identity.rs"
 );
 const PROCESS_IDENTITY_HELPER_NAME = "yuvi-process-identity.exe";
+const MEMORY_MIGRATIONS_SOURCE = path.join(REPO_ROOT, "packages", "memory", "migrations");
 
 export function compileWindowsProcessIdentityHelper(
   outputDirectory = path.join(BUILD_ROOT, "native")
@@ -110,11 +117,13 @@ export async function prepareDesktopPackage() {
   const stagedSupervisor = path.join(TAURI_GENERATED, "supervisor");
   const stagedMem0 = path.join(TAURI_GENERATED, "mem0");
   const stagedNative = path.join(TAURI_GENERATED, "native");
+  const stagedMigrations = path.join(TAURI_GENERATED, "migrations");
   fs.rmSync(TAURI_GENERATED, { recursive: true, force: true });
   ensureDir(stagedRuntime);
   ensureDir(stagedSupervisor);
   ensureDir(stagedMem0);
   ensureDir(stagedNative);
+  ensureDir(stagedMigrations);
 
   copyFile(path.join(RUNTIME_OUT_DIR, NODE_EXE_NAME), path.join(stagedRuntime, NODE_EXE_NAME));
   copyFile(
@@ -151,6 +160,7 @@ export async function prepareDesktopPackage() {
   writeJson(buildInfoPath, supervisorProvenance);
   copyFile(buildInfoPath, path.join(stagedSupervisor, SUPERVISOR_BUILD_INFO_NAME));
   copyDir(MEM0_OUT_DIR, stagedMem0);
+  stagePackagedMigrations(stagedMigrations);
   const stagedProcessIdentityHelper = path.join(stagedNative, PROCESS_IDENTITY_HELPER_NAME);
   copyFile(processIdentityHelper, stagedProcessIdentityHelper);
   assertFile(stagedProcessIdentityHelper, "staged Windows process identity helper");
@@ -186,6 +196,13 @@ export async function prepareDesktopPackage() {
     processIdentityHelper: stagedProcessIdentityHelper,
     interpreter: mem0.python
   };
+}
+
+export function stagePackagedMigrations(targetDirectory) {
+  assertDir(MEMORY_MIGRATIONS_SOURCE, "memory migration registry");
+  ensureDir(targetDirectory);
+  copyDir(MEMORY_MIGRATIONS_SOURCE, targetDirectory);
+  return targetDirectory;
 }
 
 function copyFile(from, to) {
