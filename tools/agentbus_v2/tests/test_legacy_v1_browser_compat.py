@@ -25,6 +25,7 @@ from tools.agentbus_v2.legacy_v1_browser_compat import (
     MailboxComment,
     load_compat_config,
     parse_transport_envelope,
+    derive_browser_delivery_id,
 )
 from tools.agentbus_v2.effects import GPT_PACKET_BUDGET_BYTES
 
@@ -171,14 +172,19 @@ class LegacyV1BrowserCompatTests(unittest.TestCase):
             {
                 "job_id", "role", "task", "conversation_url", "campaign",
                 "stream", "pr", "expected_head", "expected_base", "generation", "prompt",
+                "semantic_job_id", "browser_delivery_id",
             },
             set(job),
         )
-        self.assertEqual(PLAN_JOB, job["job_id"])
+        self.assertEqual(PLAN_JOB, job["semantic_job_id"])
+        self.assertEqual(job["job_id"], job["browser_delivery_id"])
+        self.assertNotEqual(PLAN_JOB, job["job_id"])
         self.assertEqual("PRODUCT_GPT", job["role"])
         self.assertEqual("PLAN_SPEC", job["task"])
         self.assertIn(packet_text(PLAN_JOB, "PLAN_GPT").rstrip(), job["prompt"])
         self.assertIn("RAW_RESPONSE_JSON", job["prompt"])
+        self.assertIn(f"JOB_ID: {PLAN_JOB}", job["prompt"])
+        self.assertIn(f"BROWSER_DELIVERY_ID: {job['job_id']}", job["prompt"])
         self.assertLessEqual(len(job["prompt"].encode("utf-8")), GPT_PACKET_BUDGET_BYTES)
         self.assertNotIn("campaign state", job["prompt"].lower())
 
@@ -277,7 +283,32 @@ class LegacyV1BrowserCompatTests(unittest.TestCase):
         ).poll_and_project()["jobs"]
         self.assertEqual(first, second)
         self.assertEqual(first, restarted)
-        self.assertEqual(PLAN_JOB, first[0]["job_id"])
+        self.assertNotEqual(PLAN_JOB, first[0]["job_id"])
+        self.assertEqual(PLAN_JOB, first[0]["semantic_job_id"])
+        self.assertEqual(
+            derive_browser_delivery_id(PLAN_JOB, self.compat.current_jobs()[0].packet_sha256),
+            first[0]["job_id"],
+        )
+
+    def test_delivery_id_binds_semantic_job_and_packet_digest_only(self) -> None:
+        job = self.compat.current_jobs()[0]
+        same = derive_browser_delivery_id(job.job_id, job.packet_sha256)
+        changed = derive_browser_delivery_id(job.job_id, "f" * 64)
+        other_job = derive_browser_delivery_id("plan-" + "c" * 24, job.packet_sha256)
+        self.assertEqual(job.browser_delivery_id, same)
+        self.assertNotEqual(same, changed)
+        self.assertNotEqual(same, other_job)
+        self.assertEqual(job.job_id, PLAN_JOB)
+
+    def test_delivery_id_has_no_mailbox_or_semantic_authority(self) -> None:
+        job = self.compat.current_jobs()[0]
+        body = envelope(job.job_id, job.operation, job.packet_sha256, self._valid_response())
+        self.comments = (MailboxComment("1", body),)
+        payload = self.compat.poll_and_project()
+        self.assertEqual([], payload["jobs"])
+        result = self.state / "P1" / "gpt" / "results" / f"{PLAN_JOB}.json"
+        self.assertTrue(result.exists())
+        self.assertEqual(PLAN_JOB, json.loads(result.read_text())["job_id"])
 
     def test_exact_mailbox_payload_traverses_strict_ingestion_then_disappears(self) -> None:
         job = self.compat.current_jobs()[0]
@@ -402,6 +433,11 @@ class LegacyV1BrowserCompatTests(unittest.TestCase):
         self.assertTrue(after["plan"]["served_to_extension"])
         self.assertEqual(1, len(after["jobs"]))
         self.assertTrue(after["jobs"][0]["served_to_extension"])
+        self.assertEqual(PLAN_JOB, after["jobs"][0]["semantic_job_id"])
+        self.assertEqual(
+            derive_browser_delivery_id(PLAN_JOB, self.compat.current_jobs()[0].packet_sha256),
+            after["jobs"][0]["browser_delivery_id"],
+        )
         self.assertIsNotNone(after["jobs"][0]["first_server_serve"])
         self.assertIsNotNone(after["jobs"][0]["last_server_serve"])
         self.assertEqual([], after["recent_ingestion"])
@@ -473,6 +509,66 @@ class LegacyV1BrowserCompatTests(unittest.TestCase):
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("signed-v1 tombstone reproduction PASS", completed.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for signed-extension fixture")
+    def test_fresh_delivery_id_requeues_same_semantic_job_after_tombstone(self) -> None:
+        """An unmodified extension queues a new delivery alias after DONE."""
+        extension = Path(__file__).parents[2] / "agentbus" / "browser_extension" / "background.js"
+        fixture = self.root / "signed_extension_delivery_fixture.cjs"
+        semantic = PLAN_JOB
+        old_delivery = "browser-delivery-old-aaaaaaaaaaaaaaaa"
+        new_delivery = "browser-delivery-new-bbbbbbbbbbbbbbbb"
+        fixture.write_text(textwrap.dedent(f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const source = fs.readFileSync({json.dumps(str(extension))}, "utf8");
+            const sandboxModule = {{exports: {{}}}};
+            const context = {{module: sandboxModule, exports: sandboxModule.exports, console, setInterval: () => {{}}}};
+            vm.runInNewContext(source, context, {{filename: {json.dumps(str(extension))}}});
+            const extension = sandboxModule.exports;
+            const makeJob = (delivery) => ({{
+              job_id: delivery, semantic_job_id: "{semantic}", role: "PRODUCT_GPT",
+              task: "PLAN_SPEC", conversation_url: "https://chatgpt.com/c/plan-test",
+              prompt: "JOB_ID: {semantic}\\nBROWSER_DELIVERY_ID: " + delivery
+            }});
+            let serverJobs = [makeJob("{old_delivery}")];
+            let sendCount = 0;
+            const storage = {{jobs: {{}}, lastSubmitAt: 0, bridgeStatus: "ONLINE"}};
+            context.browser = {{
+              storage: {{local: {{
+                get: async () => ({{...storage}}),
+                set: async (value) => Object.assign(storage, value)
+              }}}},
+              tabs: {{
+                query: async () => [{{id: 1, url: "https://chatgpt.com/c/plan-test", status: "complete"}}],
+                get: async () => ({{id: 1, url: "https://chatgpt.com/c/plan-test", status: "complete"}}),
+                sendMessage: async (tab, message) => {{
+                  if (!message.prompt.includes(message.job_id)) throw new Error("delivery id absent from prompt");
+                  sendCount += 1; return {{code: "SUBMITTED_CONFIRMED", evidence: {{}}}};
+                }},
+                create: async () => ({{id: 1, url: "https://chatgpt.com/c/plan-test", status: "complete"}})
+              }}
+            }};
+            context.fetch = async () => ({{ok: true, json: async () => ({{jobs: serverJobs}})}});
+            (async () => {{
+              await extension.tick();
+              serverJobs = [];
+              await extension.tick();
+              if (storage.jobs["{old_delivery}"].state !== "DONE") throw new Error("missing old DONE tombstone");
+              storage.lastSubmitAt = 0;
+              serverJobs = [makeJob("{new_delivery}")];
+              await extension.tick();
+              if (sendCount !== 2) throw new Error("fresh delivery was not submitted once");
+              await extension.tick();
+              if (sendCount !== 2) throw new Error("delivery rotated or duplicated");
+              console.log("fresh delivery tombstone recovery PASS");
+            }})().catch(error => {{ console.error(error); process.exitCode = 1; }});
+        """), encoding="utf-8")
+        completed = subprocess.run(
+            ["node", str(fixture)], capture_output=True, text=True, timeout=10, check=False
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("fresh delivery tombstone recovery PASS", completed.stdout)
 
     def test_parser_rejects_outside_text_and_multiple_envelopes(self) -> None:
         job = self.compat.current_jobs()[0]

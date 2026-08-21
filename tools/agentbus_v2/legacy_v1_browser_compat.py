@@ -40,6 +40,7 @@ from .facts import (
     read_snapshot,
     sha256_text,
 )
+from .core import stable_id
 from .scheduler import ProjectEntry, load_registry
 
 
@@ -94,6 +95,7 @@ class CurrentJob:
     operation: str
     packet_text: str
     packet_sha256: str
+    browser_delivery_id: str
     conversation_url: str
     head: str
     base: str
@@ -102,7 +104,12 @@ class CurrentJob:
     def wire_dict(self) -> dict[str, object]:
         role, task = ROLE_TASK[self.operation]
         return {
-            "job_id": self.job_id,
+            # The signed v1 client uses ``job_id`` only as its local
+            # scheduler/tombstone key. Semantic identity remains in the
+            # packet and is projected separately for v2 diagnostics.
+            "job_id": self.browser_delivery_id,
+            "semantic_job_id": self.job_id,
+            "browser_delivery_id": self.browser_delivery_id,
             "role": role,
             "task": task,
             "conversation_url": self.conversation_url,
@@ -113,7 +120,7 @@ class CurrentJob:
             "pr": None,
             "expected_head": self.head,
             "expected_base": self.base,
-            "generation": self.job_id,
+            "generation": self.browser_delivery_id,
             "prompt": render_transport_prompt(self),
         }
 
@@ -124,6 +131,21 @@ class IngestionOutcome:
     job_id: str
     changed: bool
     detail: str
+
+
+def derive_browser_delivery_id(semantic_job_id: str, packet_sha256: str) -> str:
+    """Derive a stable, transport-only scheduler identity.
+
+    The exact semantic job and rendered packet digest are inputs so a bounded
+    transport replacement cannot inherit a legacy extension tombstone. This
+    value is never accepted by semantic or mailbox ingestion paths.
+    """
+    if not semantic_job_id or not packet_sha256:
+        raise ValueError("semantic job and packet digest are required")
+    return stable_id(
+        "browser-delivery",
+        {"semantic_job_id": semantic_job_id, "packet_sha256": packet_sha256},
+    )
 
 
 CommentReader = Callable[[str, int, int], tuple[MailboxComment, ...]]
@@ -283,6 +305,9 @@ def render_transport_prompt(job: CurrentJob) -> str:
     prompt = (
         job.packet_text.rstrip()
         + "\n\n## SIGNED V1 EXTENSION TRANSPORT WRAPPER (OPERATIONAL ONLY)\n\n"
+        + f"BROWSER_DELIVERY_ID: {job.browser_delivery_id}\n"
+        + "This delivery id is a local browser scheduler correlation marker only. "
+        + "Do not use it as semantic JOB_ID or in RAW_RESPONSE_JSON.\n\n"
         + "After making the decision required by the packet, publish exactly one "
         + f"comment on {mailbox_url}. Do not publish anywhere else. The comment must "
         + "contain exactly one envelope in this form:\n\n"
@@ -472,6 +497,7 @@ class LegacyV1BrowserCompat:
             operation,
             packet_text,
             sha256_text(packet_text),
+            derive_browser_delivery_id(job_id, sha256_text(packet_text)),
             conversation_url,
             snapshot.head,
             snapshot.base,
@@ -499,6 +525,7 @@ class LegacyV1BrowserCompat:
             BLOCK_OPERATION,
             request.packet_text,
             request.packet_sha256,
+            derive_browser_delivery_id(request.block_id, request.packet_sha256),
             request.conversation_url,
             request.head,
             request.base,
@@ -647,7 +674,7 @@ class LegacyV1BrowserCompat:
                 jobs = self.current_jobs()
                 with self._telemetry_lock:
                     self._outcomes = outcomes
-                    current_ids = {item.job_id for item in jobs}
+                    current_ids = {item.browser_delivery_id for item in jobs}
                     self._served_jobs.intersection_update(current_ids)
                     self._served_first_at = {
                         job_id: value
@@ -660,9 +687,10 @@ class LegacyV1BrowserCompat:
                         if job_id in current_ids
                     }
                     for item in jobs:
-                        self._served_jobs.add(item.job_id)
-                        self._served_first_at.setdefault(item.job_id, timestamp)
-                        self._served_last_at[item.job_id] = timestamp
+                        delivery_id = item.browser_delivery_id
+                        self._served_jobs.add(delivery_id)
+                        self._served_first_at.setdefault(delivery_id, timestamp)
+                        self._served_last_at[delivery_id] = timestamp
             except (FactError, LegacyCompatError, OSError) as error:
                 with self._telemetry_lock:
                     self._last_error = str(error)[:1000]
@@ -702,7 +730,9 @@ class LegacyV1BrowserCompat:
                 # lane truthful until a durable result exists.
                 "state": "waiting-browser" if lane_jobs else "idle",
                 "pending": len(lane_jobs),
-                "served_to_extension": any(job.job_id in served for job in lane_jobs),
+                "served_to_extension": any(
+                    job.browser_delivery_id in served for job in lane_jobs
+                ),
             }
         block_jobs = [job for job in jobs if job.operation == BLOCK_OPERATION]
         try:
@@ -734,17 +764,23 @@ class LegacyV1BrowserCompat:
             "jobs": [
                 {
                     "job_id": job.job_id,
+                    "semantic_job_id": job.job_id,
+                    "browser_delivery_id": job.browser_delivery_id,
                     "operation": job.operation,
                     "p_id": job.p_id,
                     "conversation_url": job.conversation_url,
-                    "served_to_extension": job.job_id in served,
+                    "served_to_extension": job.browser_delivery_id in served,
                     "first_server_serve": (
-                        datetime.fromtimestamp(served_first_at[job.job_id], timezone.utc).isoformat()
-                        if job.job_id in served_first_at else None
+                        datetime.fromtimestamp(
+                            served_first_at[job.browser_delivery_id], timezone.utc
+                        ).isoformat()
+                        if job.browser_delivery_id in served_first_at else None
                     ),
                     "last_server_serve": (
-                        datetime.fromtimestamp(served_last_at[job.job_id], timezone.utc).isoformat()
-                        if job.job_id in served_last_at else None
+                        datetime.fromtimestamp(
+                            served_last_at[job.browser_delivery_id], timezone.utc
+                        ).isoformat()
+                        if job.browser_delivery_id in served_last_at else None
                     ),
                     **packet_telemetry(job.packet_text),
                 }
