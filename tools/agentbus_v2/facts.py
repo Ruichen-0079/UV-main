@@ -91,6 +91,8 @@ class PPaths:
         for path in (
             "gpt/outbox", "gpt/results", "work/results", "work/logs", "prove/results",
             "operator", "control/outbox", "control/results",
+            "diagnosis/results", "diagnosis/logs",
+            "recovery/results", "recovery/logs",
         ):
             (self.root / path).mkdir(parents=True, exist_ok=True)
 def paths_for(state_root: Path, p_id: str) -> PPaths:

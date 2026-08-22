@@ -29,6 +29,12 @@ BLOCK_RESULT_SCHEMA = "agentbus-v2/block-result-v1"
 BLOCK_CONFIG_FILE = "block_gpt.json"
 BLOCK_ID_RE = re.compile(r"^block-[0-9a-f]{24}$")
 BLOCK_DECISIONS = frozenset({"RECOVER", "WAIT", "HUMAN"})
+BLOCK_SOURCE_WORK_RUNTIME = "WORK_RUNTIME"
+BLOCK_SOURCE_DIAGNOSED_STALL = "DIAGNOSED_STALL"
+DIAGNOSED_STALL_CODE = "DIAGNOSED_STALL"
+STALL_BLOCK_KINDS = frozenset({
+    ActionKind.PLAN, ActionKind.WORK, ActionKind.PROVE, ActionKind.JUDGE,
+})
 SUPPORTED_BLOCK_CODES = frozenset({
     "CODEX_RUNTIME_START_FAILED",
     "EXECUTOR_LAUNCH_FAILED",
@@ -216,6 +222,9 @@ def _check_binding_collisions(state_root: Path, conversation_url: str) -> None:
             raise FactError(
                 f"BLOCK_GPT conversation is already bound to active PLAN P {entry.p_id}"
             )
+    from .control import reject_if_control_conversation
+
+    reject_if_control_conversation(state_root, conversation_url, role="BLOCK_GPT")
 
 
 def set_block_config(
@@ -294,6 +303,7 @@ def derive_operational_block(
     """Derive an eligible observation from one completed normal tick only."""
     if action is None or action.kind is not ActionKind.WORK or not action.effect_id:
         return None
+    # The automatic string classifier remains a narrow WORK runtime-error surface.
     detail = error if error else str(getattr(result, "detail", "") or "")
     classified = _classify_detail(detail)
     if classified is None:
@@ -308,6 +318,41 @@ def derive_operational_block(
         summary=summary,
         evidence_fingerprint=fingerprint,
         evidence=evidence,
+    )
+
+
+def derive_diagnosed_stall_block(
+    p_id: str,
+    action: Action,
+    diagnosis: Mapping[str, Any],
+) -> OperationalBlockObservation:
+    """Build a BLOCK observation from an accepted read-only diagnosis.
+
+    This path is independent of the WORK runtime-error string classifier.
+    """
+    if action.kind not in STALL_BLOCK_KINDS or not action.effect_id:
+        raise FactError("diagnosed stall BLOCK requires an exact PLAN/WORK/PROVE/JUDGE effect")
+    report = diagnosis.get("report") if isinstance(diagnosis.get("report"), dict) else {}
+    evidence = json.dumps(
+        {
+            "diagnosis_id": diagnosis.get("diagnosis_id"),
+            "summary": report.get("summary"),
+            "root_cause": report.get("root_cause"),
+            "likely_domain": report.get("likely_domain"),
+            "evidence": report.get("evidence"),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    fingerprint = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
+    return OperationalBlockObservation(
+        p_id=p_id,
+        causal_effect_id=action.effect_id,
+        code=DIAGNOSED_STALL_CODE,
+        summary=str(report.get("summary") or "diagnosed stall"),
+        evidence_fingerprint=fingerprint,
+        evidence=_redact_evidence(evidence),
     )
 
 
@@ -387,6 +432,100 @@ def render_block_packet(
         "reason, recovery_instruction, expected_postcondition, and human_action.\n"
         "Allowed decisions are RECOVER, WAIT, HUMAN. RECOVER is a proposal only;\n"
         "no recovery will be executed in this phase.\n"
+    )
+    if len(text.encode("utf-8")) > MAX_PACKET_TEXT:
+        raise FactError("BLOCK_GPT packet exceeds bounded size")
+    assert_gpt_packet_budget(
+        text, job_id=observation.block_id, operation=BLOCK_OPERATION,
+        budget_bytes=GPT_PACKET_BUDGET_BYTES,
+    )
+    return text
+
+
+def render_diagnosed_block_packet(
+    snapshot: Snapshot,
+    action: Action,
+    observation: OperationalBlockObservation,
+    diagnosis: Mapping[str, Any],
+) -> str:
+    """Render a BLOCK packet for an accepted read-only diagnosed stall."""
+    if action.kind not in STALL_BLOCK_KINDS or action.effect_id != observation.causal_effect_id:
+        raise FactError("diagnosed stall BLOCK packet requires the exact current causal effect")
+    if observation.code != DIAGNOSED_STALL_CODE:
+        raise FactError("diagnosed stall BLOCK requires DIAGNOSED_STALL")
+    spec = snapshot.specs[-1] if snapshot.specs else None
+    merge = snapshot.merge
+    report = diagnosis.get("report") if isinstance(diagnosis.get("report"), dict) else {}
+    semantic: dict[str, object] = {
+        "packet_schema": BLOCK_PACKET_SCHEMA,
+        "block_id": observation.block_id,
+        "block_source": BLOCK_SOURCE_DIAGNOSED_STALL,
+        "operation": BLOCK_OPERATION,
+        "p_id": snapshot.p_id,
+        "causal_effect_id": observation.causal_effect_id,
+        "causal_action_kind": action.kind.value,
+        "current_semantic_decision": action.kind.value,
+        "charter_digest": snapshot.charter_digest,
+        "repository": snapshot.expected_repository,
+        "branch": snapshot.expected_branch,
+        "base_ref": snapshot.base_ref,
+        "head": snapshot.head,
+        "base": snapshot.base,
+        "spec_id": spec.spec_id if spec else None,
+        "plan_job_id": spec.plan_job_id if spec else None,
+        "work_effect_id": action.effect_id if action.kind is ActionKind.WORK else None,
+        "prove_id": snapshot.proof_facts[-1].proof_id if snapshot.proof_facts else None,
+        "judge_job_id": next(
+            (item.job_id for item in reversed(snapshot.gpt_results)
+             if item.operation == "JUDGE_GPT"),
+            None,
+        ),
+        "operator_directive_id": (
+            snapshot.operator_directive.directive_id
+            if snapshot.operator_directive else None
+        ),
+        "pr_number": merge.pr_number if merge.available else None,
+        "blocker_code": observation.code,
+        "blocker_summary": observation.summary,
+        "evidence_fingerprint": observation.evidence_fingerprint,
+        "diagnosis_id": diagnosis.get("diagnosis_id"),
+        "diagnosis_status": report.get("status"),
+        "diagnosis_root_cause": report.get("root_cause"),
+        "diagnosis_likely_domain": report.get("likely_domain"),
+    }
+    context = {
+        "diagnosis_evidence": report.get("evidence") or [],
+        "diagnosis_summary": report.get("summary"),
+        "bounded_log_evidence": observation.evidence,
+        "available_recovery_capabilities": [
+            "restart one local process",
+            "clean one owned temporary runtime artifact",
+            "repair one local process/runtime precondition",
+            "release/revalidate one stale operational resource",
+            "rerun a bounded external operational probe",
+        ],
+        "recovery_authority": (
+            "BLOCK_GPT does not execute recovery, does not modify source, and chooses only "
+            "RECOVER, WAIT, or HUMAN. RECOVER is valid only for a bounded operational repair "
+            "with an objective postcondition. Semantic or source correctness defects require HUMAN."
+        ),
+    }
+    if spec is not None:
+        context["current_spec"] = spec.text[:4000]
+    text = (
+        "# AgentBus v2 BLOCK_GPT packet\n\n"
+        "This packet diagnoses one stalled current semantic effect using a read-only\n"
+        "diagnosis as evidence.  It is not a request to modify code or execute recovery.\n\n"
+        "## BLOCK SEMANTIC INPUTS\n```json\n"
+        + json.dumps(semantic, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        + "\n```\n\n## BOUNDED OPERATIONAL CONTEXT\n```json\n"
+        + json.dumps(context, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        + "\n```\n\n"
+        "Return exactly one JSON object with keys block_id, operation, decision,\n"
+        "reason, recovery_instruction, expected_postcondition, and human_action.\n"
+        "Allowed decisions are RECOVER, WAIT, HUMAN. BLOCK_GPT does not execute recovery\n"
+        "and does not modify source. RECOVER is a proposal only until AgentBus executes\n"
+        "one bounded operational recovery after CONTROL recovery routing.\n"
     )
     if len(text.encode("utf-8")) > MAX_PACKET_TEXT:
         raise FactError("BLOCK_GPT packet exceeds bounded size")
@@ -516,7 +655,15 @@ def submit_block_gpt_response(paths: PPaths, response_path: Path) -> object:
     packet = load_block_packet(paths, block_id)
     snapshot = read_snapshot(paths)
     action = decide(snapshot)
-    if action.kind is not ActionKind.WORK or action.effect_id != packet.get("causal_effect_id"):
+    source = packet.get("block_source") or BLOCK_SOURCE_WORK_RUNTIME
+    if source == BLOCK_SOURCE_DIAGNOSED_STALL:
+        if (
+            action.kind not in STALL_BLOCK_KINDS
+            or action.kind.value != packet.get("causal_action_kind")
+            or action.effect_id != packet.get("causal_effect_id")
+        ):
+            raise FactError("BLOCK_GPT response is no longer current for this diagnosed stall")
+    elif action.kind is not ActionKind.WORK or action.effect_id != packet.get("causal_effect_id"):
         raise FactError("BLOCK_GPT response is no longer current for this WORK effect")
     try:
         value = _load_json(Path(response_path))
@@ -533,17 +680,29 @@ def _packet_request(paths: PPaths, entry: Any, config: BlockGPTConfig) -> BlockR
         return None
     snapshot = read_snapshot(paths, allow_merge=entry.allow_merge)
     action = decide(snapshot)
-    if action.kind is not ActionKind.WORK or not action.effect_id:
+    if not action.effect_id:
         return None
     candidates: list[tuple[Path, dict[str, Any], str]] = []
     for path in sorted(block_packet_dir(paths).glob("block-*.md")):
         try:
             text = path.read_text(encoding="utf-8")
             value = _packet_json(text)
+            source = value.get("block_source") or BLOCK_SOURCE_WORK_RUNTIME
+            if source == BLOCK_SOURCE_DIAGNOSED_STALL:
+                current = (
+                    action.kind in STALL_BLOCK_KINDS
+                    and action.kind.value == value.get("causal_action_kind")
+                    and action.effect_id == value.get("causal_effect_id")
+                )
+            else:
+                current = (
+                    action.kind is ActionKind.WORK
+                    and action.effect_id == value.get("causal_effect_id")
+                )
             if (
-                value.get("p_id") == entry.p_id
+                current
+                and value.get("p_id") == entry.p_id
                 and value.get("operation") == BLOCK_OPERATION
-                and value.get("causal_effect_id") == action.effect_id
                 and value.get("block_id") == path.stem
                 and not (block_result_dir(paths) / f"{path.stem}.json").exists()
                 and stable_id(
@@ -648,7 +807,7 @@ def block_view(
     action: Action,
     observation: OperationalBlockObservation | None = None,
 ) -> dict[str, object] | None:
-    if action.kind is not ActionKind.WORK or not action.effect_id:
+    if action.kind not in STALL_BLOCK_KINDS or not action.effect_id:
         return None
     if observation is None:
         packet_paths = sorted(block_packet_dir(paths_for(state_root, entry.p_id)).glob("block-*.md"))

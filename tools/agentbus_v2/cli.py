@@ -157,16 +157,23 @@ def tick_once(state_root: Path, p_id: str, *, allow_merge: bool) -> tuple[Action
         snapshot = read_snapshot(paths, allow_merge=allow_merge)
         action = decide(snapshot)
         result: EffectResult | None = None
+        from .scheduler import load_registry
+
+        try:
+            entry = next(
+                item for item in load_registry(state_root).entries if item.p_id == p_id
+            )
+        except (FactError, OSError, StopIteration):
+            entry = None
+        from .control_supervisor import drive_authorized_operations
+
+        driven = drive_authorized_operations(
+            state_root, entry, snapshot, action, allow_merge=allow_merge
+        )
+        if driven is not None:
+            return action, driven
         if action.kind in {ActionKind.PLAN, ActionKind.JUDGE}:
             if action.kind is ActionKind.PLAN:
-                from .scheduler import load_registry
-
-                try:
-                    entry = next(
-                        item for item in load_registry(state_root).entries if item.p_id == p_id
-                    )
-                except StopIteration:
-                    entry = None
                 if (
                     entry is not None
                     and entry.plan_conversation_url is None
@@ -175,14 +182,6 @@ def tick_once(state_root: Path, p_id: str, *, allow_merge: bool) -> tuple[Action
                     return Action(ActionKind.IDLE, reason="AWAITING_PLAN_BINDING"), None
             result = dispatch_manual_gpt(paths, config, snapshot, action)
         elif action.kind is ActionKind.WORK:
-            from .scheduler import load_registry
-
-            try:
-                entry = next(
-                    item for item in load_registry(state_root).entries if item.p_id == p_id
-                )
-            except (FactError, OSError, StopIteration):
-                entry = None
             result = route_work(
                 state_root,
                 paths,

@@ -345,6 +345,9 @@ def validate_plan_conversation_url(
         block = load_block_config(Path(state_root))
         if block.conversation_url == canonical:
             raise FactError("PLAN conversation URL cannot equal the BLOCK_GPT conversation")
+    from .control import reject_if_control_conversation
+
+    reject_if_control_conversation(state_root, canonical, role="PLAN")
     registry = load_registry(Path(state_root), path)
     for entry in registry.entries:
         if entry.p_id != p_id and entry.enabled and entry.plan_conversation_url:
@@ -436,6 +439,7 @@ class Scheduler:
         registry: ProjectRegistry | None = None,
         gpt_transport=None,
         block_supervisor=None,
+        control_supervisor=None,
     ) -> None:
         if poll_interval <= 0:
             raise ValueError("poll interval must be positive")
@@ -471,6 +475,13 @@ class Scheduler:
                 self.state_root, registry_path=self.registry_file
             )
         self.block_supervisor = block_supervisor
+        if control_supervisor is None:
+            from .control_supervisor import ControlSupervisor
+
+            control_supervisor = ControlSupervisor(
+                self.state_root, registry_path=self.registry_file
+            )
+        self.control_supervisor = control_supervisor
 
     def _registry(self) -> ProjectRegistry:
         if self._fixed_registry is not None:
@@ -668,8 +679,19 @@ class Scheduler:
             self.block_supervisor.observe(
                 p_id, action, result, error, entry=entry
             )
+            snapshot = None
+            try:
+                if entry is not None:
+                    snapshot = read_snapshot(
+                        paths_for(self.state_root, p_id), allow_merge=entry.allow_merge
+                    )
+            except (FactError, OSError):
+                snapshot = None
+            self.control_supervisor.observe(
+                p_id, action, result, error, entry=entry, snapshot=snapshot,
+            )
         except Exception:
-            LOGGER.exception("BLOCK_GPT operational observation failed for %s", p_id)
+            LOGGER.exception("operational CONTROL/BLOCK observation failed for %s", p_id)
 
     def _drain_wake(self, p_id: str) -> None:
         with self._state_lock:

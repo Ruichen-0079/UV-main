@@ -573,8 +573,10 @@ message must contain these exact trailers:
 
 {trailers}
 
-Return only the supplied JSON schema. PASS requires a complete commit; otherwise
+Return only this JSON object. PASS requires a complete commit; otherwise
 return FAIL with the exact blocker. An executor/process crash is not FAIL.
+
+{WORK_OUTPUT_SCHEMA.strip()}
 """
 
 
@@ -783,6 +785,8 @@ def _grok_work_command(
         config.worktree,
         "--output-format",
         "json",
+        "--json-schema",
+        WORK_OUTPUT_SCHEMA.strip(),
         "--always-approve",
         "--no-alt-screen",
     )
@@ -842,7 +846,7 @@ def run_grok_work(
         timeout=7200.0,
         worktree_lock=worktree_lock_path,
         account_lock=account_lock_path,
-        input_text=prompt,
+        input_text="",
         expected_head=snapshot.head,
         expected_branch=config.branch,
     )
@@ -867,11 +871,18 @@ def run_grok_work(
 
     try:
         outer = json.loads(completed_output.strip())
-        if not isinstance(outer, dict) or "text" not in outer:
-            raise FactError("Grok outer result lacks text")
-        if type(outer["text"]) is not str or not outer["text"].strip():
-            raise FactError("Grok outer result text is missing or empty")
-        response = json.loads(outer["text"])
+        if not isinstance(outer, dict):
+            raise FactError("Grok outer result is not an object")
+        if "text" in outer:
+            raw_text = outer["text"]
+            if isinstance(raw_text, dict):
+                response = raw_text
+            elif type(raw_text) is str and raw_text.strip():
+                response = json.loads(raw_text)
+            else:
+                raise FactError("Grok outer result text is missing or empty")
+        else:
+            response = outer
         if not isinstance(response, dict) or set(response) != {
             "status", "summary", "head", "evidence"
         }:

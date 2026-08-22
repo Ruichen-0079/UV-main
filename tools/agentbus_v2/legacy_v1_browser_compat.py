@@ -31,7 +31,8 @@ from .effects import (
 from .block_diagnosis import BLOCK_OPERATION, current_block_request, load_block_config, submit_block_gpt_response
 from .control import (
     CONTROL_OPERATION,
-    current_control_request,
+    CONTROL_WIRE_TASK,
+    current_control_requests,
     load_control_config,
     submit_control_response,
 )
@@ -107,9 +108,15 @@ class CurrentJob:
     head: str
     base: str
     mailbox_issue: int
+    purpose: str | None = None
 
     def wire_dict(self) -> dict[str, object]:
-        role, task = ROLE_TASK[self.operation]
+        if self.operation == CONTROL_OPERATION:
+            role, task = "PRODUCT_GPT", CONTROL_WIRE_TASK.get(
+                self.purpose or "WORK_ROUTE", "WORK_ROUTING"
+            )
+        else:
+            role, task = ROLE_TASK[self.operation]
         return {
             # The signed v1 client uses ``job_id`` only as its local
             # scheduler/tombstone key. Semantic identity remains in the
@@ -242,6 +249,9 @@ def set_global_judge_conversation(
             block = load_block_config(state_root)
             if block.conversation_url == canonical:
                 raise FactError("global JUDGE conversation must differ from BLOCK_GPT")
+        from .control import reject_if_control_conversation
+
+        reject_if_control_conversation(state_root, canonical, role="global JUDGE")
 
         registry_path = Path(state_root).resolve() / "projects.json"
         if registry_path.exists():
@@ -541,34 +551,39 @@ class LegacyV1BrowserCompat:
         render_transport_prompt(job)
         return job
 
-    def _current_control_job(self, entry: ProjectEntry, config: LegacyCompatConfig) -> CurrentJob | None:
-        """Project one exact operational CONTROL request through signed v1."""
+    def _current_control_jobs(self, entry: ProjectEntry, config: LegacyCompatConfig) -> tuple[CurrentJob, ...]:
+        """Project current operational CONTROL requests through signed v1."""
         control_config = load_control_config(self.state_root)
         if not control_config.enabled or control_config.conversation_url is None:
-            return None
-        request = current_control_request(self.state_root, entry)
-        if request is None:
-            return None
-        issue = config.mailboxes.get(request.repository)
-        if issue is None:
-            raise LegacyCompatError(f"mailbox is not configured for {request.repository}")
-        job = CurrentJob(
-            request.p_id,
-            request.allow_merge,
-            request.paths,
-            request.repository,
-            request.control_id,
-            CONTROL_OPERATION,
-            request.packet_text,
-            request.packet_sha256,
-            derive_browser_delivery_id(request.control_id, request.packet_sha256),
-            request.conversation_url,
-            request.head,
-            request.base,
-            issue,
-        )
-        render_transport_prompt(job)
-        return job
+            return ()
+        jobs: list[CurrentJob] = []
+        for request in current_control_requests(self.state_root, entry):
+            issue = config.mailboxes.get(request.repository)
+            if issue is None:
+                raise LegacyCompatError(f"mailbox is not configured for {request.repository}")
+            job = CurrentJob(
+                request.p_id,
+                request.allow_merge,
+                request.paths,
+                request.repository,
+                request.control_id,
+                CONTROL_OPERATION,
+                request.packet_text,
+                request.packet_sha256,
+                derive_browser_delivery_id(request.control_id, request.packet_sha256),
+                request.conversation_url,
+                request.head,
+                request.base,
+                issue,
+                request.purpose,
+            )
+            render_transport_prompt(job)
+            jobs.append(job)
+        return tuple(jobs)
+
+    def _current_control_job(self, entry: ProjectEntry, config: LegacyCompatConfig) -> CurrentJob | None:
+        jobs = self._current_control_jobs(entry, config)
+        return jobs[0] if jobs else None
 
     def current_jobs(self) -> tuple[CurrentJob, ...]:
         config = self._config()
@@ -586,9 +601,7 @@ class LegacyV1BrowserCompat:
                 block_job = self._current_block_job(entry, config)
                 if block_job is not None:
                     jobs.append(block_job)
-                control_job = self._current_control_job(entry, config)
-                if control_job is not None:
-                    jobs.append(control_job)
+                jobs.extend(self._current_control_jobs(entry, config))
             except GPTPacketOversizeError as error:
                 detail = {
                     "p_id": entry.p_id,
@@ -635,13 +648,15 @@ class LegacyV1BrowserCompat:
         entry = next((item for item in self._entries() if item.p_id == job.p_id), None)
         if entry is None or entry.allow_merge != job.allow_merge:
             return False
-        current = (
-            self._current_block_job(entry, config)
-            if job.operation == BLOCK_OPERATION
-            else self._current_control_job(entry, config)
-            if job.operation == CONTROL_OPERATION
-            else self._current_job(entry, config)
-        )
+        if job.operation == BLOCK_OPERATION:
+            current = self._current_block_job(entry, config)
+        elif job.operation == CONTROL_OPERATION:
+            current = next(
+                (item for item in self._current_control_jobs(entry, config) if item.job_id == job.job_id),
+                None,
+            )
+        else:
+            current = self._current_job(entry, config)
         return bool(
             current is not None
             and current.job_id == job.job_id

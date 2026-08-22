@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 from tools.agentbus_v2.control import (
     CONTROL_OPERATION,
+    CONTROL_PURPOSE_WORK_ROUTE,
     ControlError,
+    bound_control_conversation_url,
     control_id,
     control_packet_path,
     control_result_path,
@@ -141,12 +143,22 @@ class ControlRoutingTests(unittest.TestCase):
             entry=entry or self.fixture.entry,
         )
 
+    def _id(self, action=None, spec=None) -> str:
+        action = action or decide(self.current)
+        spec = spec or self.fixture.spec
+        return control_id(
+            purpose=CONTROL_PURPOSE_WORK_ROUTE,
+            p_id=self.fixture.config.p_id,
+            causal_effect_id=action.effect_id or "",
+            spec_id=spec.spec_id,
+        )
+
     def _accept(self, decision: str) -> str:
         ensured = ensure_control_request(
             self.fixture.state, self.fixture.entry, expected_action=decide(self.current)
         )
         self.assertIn("WORK awaiting CONTROL_GPT routing", ensured.detail)
-        job_id = control_id(decide(self.current).effect_id or "", self.fixture.spec.spec_id)
+        job_id = self._id()
         submit_control_response(
             self.fixture.paths,
             self.fixture.response_file(job_id, decision),
@@ -188,7 +200,7 @@ class ControlRoutingTests(unittest.TestCase):
         self.assertEqual([], dispatch.call_args_list)
         outbox = list((self.fixture.paths.root / "control" / "outbox").glob("*.md"))
         self.assertEqual(1, len(outbox))
-        expected = control_id(self.fixture.action.effect_id or "", self.fixture.spec.spec_id)
+        expected = self._id()
         self.assertEqual(expected, outbox[0].stem)
 
     def test_control_request_is_restart_stable_and_packet_is_bounded(self) -> None:
@@ -197,7 +209,7 @@ class ControlRoutingTests(unittest.TestCase):
         request = current_control_request(self.fixture.state, self.fixture.entry)
         self.assertIsNotNone(request)
         self.assertEqual(
-            control_id(self.fixture.action.effect_id or "", self.fixture.spec.spec_id),
+            self._id(),
             request.control_id,
         )
         self.assertEqual(request.packet_sha256, request.packet_sha256)
@@ -218,14 +230,8 @@ class ControlRoutingTests(unittest.TestCase):
                 self.assertTrue(result.changed)
                 self.assertEqual(decision, dispatch.call_args.kwargs["backend"])
                 dispatch.reset_mock()
-                control_result_path(
-                    self.fixture.paths,
-                    control_id(self.fixture.action.effect_id or "", self.fixture.spec.spec_id),
-                ).unlink()
-                control_packet_path(
-                    self.fixture.paths,
-                    control_id(self.fixture.action.effect_id or "", self.fixture.spec.spec_id),
-                ).unlink()
+                control_result_path(self.fixture.paths, self._id()).unlink()
+                control_packet_path(self.fixture.paths, self._id()).unlink()
         for decision, detail in (
             ("SIMPLIFY", "CONTROL_SIMPLIFY_RECOMMENDED"),
             ("WAIT", "CONTROL_WAIT"),
@@ -240,14 +246,8 @@ class ControlRoutingTests(unittest.TestCase):
                 self.assertIn(detail, result.detail)
                 dispatch.assert_not_called()
                 self.assertEqual([], list((self.fixture.paths.root / "work" / "results").glob("*.json")))
-                control_result_path(
-                    self.fixture.paths,
-                    control_id(self.fixture.action.effect_id or "", self.fixture.spec.spec_id),
-                ).unlink()
-                control_packet_path(
-                    self.fixture.paths,
-                    control_id(self.fixture.action.effect_id or "", self.fixture.spec.spec_id),
-                ).unlink()
+                control_result_path(self.fixture.paths, self._id()).unlink()
+                control_packet_path(self.fixture.paths, self._id()).unlink()
 
     def test_stale_result_is_not_applicable_to_a_new_work_effect(self) -> None:
         self.fixture.enable_control()
@@ -265,7 +265,7 @@ class ControlRoutingTests(unittest.TestCase):
         self.current = replace(self.current, specs=(new_spec,))
         new_action = decide(self.current)
         self.assertEqual(ActionKind.WORK, new_action.kind)
-        self.assertNotEqual(old_job, control_id(new_action.effect_id or "", new_spec.spec_id))
+        self.assertNotEqual(old_job, self._id(new_action, new_spec))
         with patch("tools.agentbus_v2.executor_pool.dispatch_work") as dispatch:
             result = self._route()
         self.assertIn("awaiting CONTROL_GPT", result.detail)
@@ -273,19 +273,20 @@ class ControlRoutingTests(unittest.TestCase):
         self.assertTrue(control_result_path(self.fixture.paths, old_job).exists())
         self.assertTrue(
             control_packet_path(
-                self.fixture.paths, control_id(new_action.effect_id or "", new_spec.spec_id)
+                self.fixture.paths, self._id(new_action, new_spec)
             ).exists()
         )
 
     def test_tampered_control_result_and_operation_fail_closed(self) -> None:
         self.fixture.enable_control()
         ensure_control_request(self.fixture.state, self.fixture.entry)
-        job_id = control_id(self.fixture.action.effect_id or "", self.fixture.spec.spec_id)
+        job_id = self._id()
         with self.assertRaises(ControlError):
             parse_control_response(
                 {"job_id": "control-" + "0" * 24, "operation": CONTROL_OPERATION,
                  "decision": "CODEX", "body": "x"},
                 expected_job_id=job_id,
+                purpose=CONTROL_PURPOSE_WORK_ROUTE,
             )
         with self.assertRaises(ControlError):
             submit_control_response(
@@ -370,6 +371,74 @@ class ControlRoutingTests(unittest.TestCase):
             ),
         )
         self.assertNotIn("control", asdict(self.current))
+
+    def test_disabling_control_honors_existing_stop_and_grok_results(self) -> None:
+        self.fixture.enable_control()
+        with patch("tools.agentbus_v2.executor_pool.dispatch_work") as dispatch:
+            self._accept("SIMPLIFY")
+            set_control_config(self.fixture.state, enabled=False)
+            result = self._route()
+        self.assertFalse(result.changed)
+        self.assertIn("CONTROL_SIMPLIFY_RECOMMENDED", result.detail)
+        dispatch.assert_not_called()
+        control_result_path(self.fixture.paths, self._id()).unlink()
+        control_packet_path(self.fixture.paths, self._id()).unlink()
+        self.fixture.enable_control()
+        with patch(
+            "tools.agentbus_v2.executor_pool.dispatch_work",
+            return_value=EffectResult(True, "grok"),
+        ) as dispatch:
+            self._accept("GROK")
+            set_control_config(self.fixture.state, enabled=False)
+            result = self._route()
+        self.assertTrue(result.changed)
+        self.assertEqual("GROK", dispatch.call_args.kwargs["backend"])
+
+    def test_live_base_change_does_not_brick_the_same_work_control_id(self) -> None:
+        self.fixture.enable_control()
+        first = self._route()
+        self.assertIn("awaiting CONTROL_GPT", first.detail)
+        job = self._id()
+        moved = replace(self.current, base="b" * 40)
+        self.current = moved
+        with patch("tools.agentbus_v2.executor_pool.dispatch_work") as dispatch:
+            second = self._route()
+        self.assertIn("awaiting CONTROL_GPT", second.detail)
+        dispatch.assert_not_called()
+        self.assertTrue(control_packet_path(self.fixture.paths, job).exists())
+        self.assertEqual(job, self._id())
+
+    def test_plan_judge_block_bindings_cannot_steal_control_url(self) -> None:
+        self.fixture.enable_control()
+        url = bound_control_conversation_url(self.fixture.state)
+        self.assertIsNotNone(url)
+        from tools.agentbus_v2.scheduler import validate_plan_conversation_url
+        from tools.agentbus_v2.block_diagnosis import set_block_config
+        from tools.agentbus_v2.legacy_v1_browser_compat import set_global_judge_conversation
+
+        (self.fixture.state / "legacy_v1_browser_compat.json").write_text(
+            json.dumps({
+                "enabled": True,
+                "conversations": {
+                    "plan": "https://chatgpt.com/c/plan-control-test",
+                    "judge": "https://chatgpt.com/c/judge-control-test",
+                },
+                "mailboxes": {"github.com/test/repo": 1},
+            }),
+            encoding="utf-8",
+        )
+        (self.fixture.state / "projects.json").write_text(
+            json.dumps({"projects": [{
+                "p_id": self.fixture.config.p_id, "enabled": True,
+            }]}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(FactError):
+            validate_plan_conversation_url(self.fixture.state, self.fixture.config.p_id, url)
+        with self.assertRaises(FactError):
+            set_global_judge_conversation(self.fixture.state, url)
+        with self.assertRaises(FactError):
+            set_block_config(self.fixture.state, conversation_url=url, update_url=True)
 
 
 class ControlBrowserTransportTests(unittest.TestCase):
@@ -465,7 +534,7 @@ class GrokAdapterTests(unittest.TestCase):
         self.fixture = ControlFixture(Path(self.temp.name))
         self.snapshot = self.fixture.snapshot
         self.action = self.fixture.action
-        self.guardian_calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+        self.guardian_calls: list[tuple[tuple[str, ...], dict[str, str], str | None]] = []
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -474,7 +543,7 @@ class GrokAdapterTests(unittest.TestCase):
         outer_value = {"text": json.dumps(inner)} if outer is None else outer
 
         def fake_guardian(command, *, cwd, env, log_path, **kwargs):
-            self.guardian_calls.append((tuple(command), dict(env)))
+            self.guardian_calls.append((tuple(command), dict(env), kwargs.get("input_text")))
             if mutate is not None:
                 mutate()
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -536,7 +605,7 @@ class GrokAdapterTests(unittest.TestCase):
         inner = self._pass_inner()
 
         def fake_guardian(command, *, cwd, env, log_path, **kwargs):
-            self.guardian_calls.append((tuple(command), dict(env)))
+            self.guardian_calls.append((tuple(command), dict(env), kwargs.get("input_text")))
             head = self._commit_exact_work()
             head_holder["head"] = head
             inner["head"] = head
@@ -554,12 +623,14 @@ class GrokAdapterTests(unittest.TestCase):
                 account_lock_path=self.fixture.state / "grok.lock",
             )
         self.assertTrue(result.changed)
-        command, environment = self.guardian_calls[-1]
+        command, environment, input_text = self.guardian_calls[-1]
         self.assertIn("--prompt-file", command)
+        self.assertIn("--json-schema", command)
         self.assertIn("--always-approve", command)
         self.assertIn("--no-alt-screen", command)
         self.assertNotIn("--yolo", command)
         self.assertNotIn("--no-auto-update", command)
+        self.assertEqual("", input_text)
         self.assertEqual(str(self.temp_path("grok-home")), environment["GROK_HOME"])
         recovered = _work_from_head(self.fixture.config, head_holder["head"])
         self.assertEqual(self.action.effect_id, recovered.effect_id if recovered else None)
