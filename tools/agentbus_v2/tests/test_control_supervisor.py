@@ -19,7 +19,15 @@ from tools.agentbus_v2.block_diagnosis import (
     submit_block_gpt_response,
     derive_diagnosed_stall_block,
 )
-from tools.agentbus_v2.block_recovery import RecoveryRun, recovery_id, run_block_recovery
+from tools.agentbus_v2.block_recovery import (
+    RecoveryRun,
+    _codex_recovery_command,
+    _grok_recovery_command,
+    _parse_grok_json,
+    _postcondition_holds,
+    recovery_id,
+    run_block_recovery,
+)
 from tools.agentbus_v2.control import (
     CONTROL_PURPOSE_RECOVERY_ROUTE,
     CONTROL_PURPOSE_STALL_TRIAGE,
@@ -52,6 +60,7 @@ from tools.agentbus_v2.facts import FactError, read_snapshot
 from tools.agentbus_v2.github import GitHubFacts
 from tools.agentbus_v2.readonly_diagnosis import (
     DiagnosisRun,
+    _codex_diagnosis_command,
     current_diagnosis,
     diagnosis_id,
     observation_fingerprint,
@@ -609,6 +618,77 @@ class BlockHandoffAndRecoveryTests(unittest.TestCase):
         self.assertNotIn("CONTROL", [item.value for item in CoreActionKind])
         self.assertNotIn("DIAGNOSE", [item.value for item in CoreActionKind])
         self.assertNotIn("RECOVER", [item.value for item in CoreActionKind])
+
+
+class CodexReadonlyCommandTests(unittest.TestCase):
+    def test_diagnosis_puts_approval_policy_before_exec(self) -> None:
+        from pathlib import Path
+        command = _codex_diagnosis_command(
+            type("C", (), {"worktree": "/tmp/wt"})(),
+            Path("/tmp/schema.json"),
+            Path("/tmp/out.json"),
+        )
+        self.assertEqual(("codex", "--ask-for-approval", "never", "exec"), command[:4])
+        self.assertEqual("read-only", command[command.index("--sandbox") + 1])
+
+    def test_recovery_puts_approval_policy_before_exec(self) -> None:
+        command = _codex_recovery_command(
+            type("C", (), {"worktree": "/tmp/wt"})(),
+            Path("/tmp/schema.json"),
+            Path("/tmp/out.json"),
+        )
+        self.assertEqual(("codex", "--ask-for-approval", "never", "exec"), command[:4])
+        self.assertEqual("workspace-write", command[command.index("--sandbox") + 1])
+
+    def test_grok_recovery_does_not_constrain_first_output_to_schema(self) -> None:
+        command = _grok_recovery_command(
+            type("C", (), {"worktree": "/tmp/wt"})(),
+            Path("/tmp/prompt.md"),
+            "grok-4.6",
+        )
+        self.assertIn("--prompt-file", command)
+        self.assertIn("--output-format", command)
+        self.assertIn("json", command)
+        self.assertIn("--always-approve", command)
+        self.assertNotIn("--json-schema", command)
+
+
+class RecoveryPostconditionTests(unittest.TestCase):
+    def test_named_absolute_paths_are_observed_independently(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        marker = Path(temp.name) / "runtime.marker"
+        action = Action(ActionKind.WORK, effect_id="work-" + "a" * 24, reason="executor launch failed")
+        block = BlockResult(
+            "block-" + "a" * 24,
+            BLOCK_OPERATION,
+            "RECOVER",
+            "bounded operational diagnosis",
+            f"recreate the missing runtime marker at {marker}",
+            f"{marker} exists and is observable",
+            None,
+        )
+        report = {"status": "APPLIED", "summary": "claimed write", "evidence": ["ok"]}
+        self.assertFalse(_postcondition_holds(None, action, action, block, report))
+        marker.write_text("ok\n", encoding="utf-8")
+        self.assertTrue(_postcondition_holds(None, action, action, block, report))
+        self.assertFalse(
+            _postcondition_holds(
+                None, action, action, block, {"status": "NOT_APPLIED", "summary": "x", "evidence": []}
+            )
+        )
+
+    def test_grok_recovery_parses_json_after_prose_prefix(self) -> None:
+        payload = {
+            "sessionId": "ignored",
+            "text": (
+                "Inspecting the named marker before applying the bounded recovery."
+                '{"status":"APPLIED","summary":"recreated marker","evidence":["ok"]}'
+            ),
+        }
+        report = _parse_grok_json(json.dumps(payload))
+        self.assertEqual("APPLIED", report["status"])
+        self.assertEqual("recreated marker", report["summary"])
 
 
 class SemanticAuthorityFingerprintTests(unittest.TestCase):

@@ -375,9 +375,10 @@ def _codex_diagnosis_command(
     config: PConfig, schema_path: Path, response_path: Path
 ) -> tuple[str, ...]:
     return (
-        "codex", "exec", "--ephemeral",
-        "--sandbox", "read-only",
+        "codex",
         "--ask-for-approval", "never",
+        "exec", "--ephemeral",
+        "--sandbox", "read-only",
         "--model", CODEX_WORK_MODEL,
         "-C", config.worktree,
         "--output-schema", str(schema_path),

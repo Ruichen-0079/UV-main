@@ -648,6 +648,52 @@ class GrokAdapterTests(unittest.TestCase):
         self.assertNotIn("executor", work_result)
         self.assertNotIn("grok", json.dumps(work_result).lower())
 
+    def test_concatenated_text_uses_structured_output_or_last_json_object(self) -> None:
+        inner = {
+            "status": "PASS",
+            "summary": "Created the exact file.",
+            "head": self.snapshot.head,
+            "evidence": ["canary"],
+        }
+        outer = {
+            "sessionId": "ignored",
+            "text": "",
+            "modelUsage": {"grok-4.6-build": {"costUSD": 0.01}},
+            "structuredOutput": inner,
+        }
+
+        def mutate():
+            head = self._commit_exact_work()
+            inner["head"] = head
+            outer["structuredOutput"] = dict(inner)
+            outer["text"] = (
+                '{"status":"FAIL","summary":"inspecting","head":"","evidence":[]}'
+                + json.dumps(inner)
+            )
+
+        result = self._run(inner, outer=outer, mutate=mutate)
+        self.assertTrue(result.changed)
+        self.assertEqual("Created the exact file.", result.detail)
+        self.assertNotIn("cost", result.detail.lower())
+
+    def test_text_json_after_prose_prefix_uses_last_object(self) -> None:
+        inner = {
+            "status": "PASS",
+            "summary": "Created the exact file.",
+            "head": self.snapshot.head,
+            "evidence": ["canary"],
+        }
+        outer = {"sessionId": "ignored", "text": ""}
+
+        def mutate():
+            head = self._commit_exact_work()
+            inner["head"] = head
+            outer["text"] = "Inspecting the worktree before writing.\n" + json.dumps(inner)
+
+        result = self._run(inner, outer=outer, mutate=mutate)
+        self.assertTrue(result.changed)
+        self.assertEqual("Created the exact file.", result.detail)
+
     def test_malformed_outer_missing_text_and_malformed_inner_are_operational_only(self) -> None:
         for outer in ({"not_text": True}, {"text": "not json"}):
             with self.subTest(outer=outer):

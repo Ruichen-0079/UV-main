@@ -11,13 +11,14 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Any, Callable, Mapping
 
 from .block_diagnosis import BlockResult, load_block_packet
 from .codex_guardian import GUARDIAN_ERROR, run_guardian
 from .core import Action, Snapshot, decide, stable_id
-from .effects import CODEX_WORK_MODEL, EffectResult
+from .effects import CODEX_WORK_MODEL, EffectResult, parse_grok_cli_payload
 from .facts import (
     FactError,
     PConfig,
@@ -36,7 +37,8 @@ from .readonly_diagnosis import (
 
 
 RECOVERY_STATUSES = frozenset({"APPLIED", "NOT_APPLIED", "UNSAFE"})
-RECOVERY_ID_RE = __import__("re").compile(r"^recovery-[0-9a-f]{24}$")
+RECOVERY_ID_RE = re.compile(r"^recovery-[0-9a-f]{24}$")
+_ABS_PATH_RE = re.compile(r"(/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+)")
 RECOVERY_TIMEOUT_SECONDS = 600.0
 RECOVERY_OUTPUT_SCHEMA = (
     '{"type":"object","additionalProperties":false,"properties":'
@@ -133,17 +135,10 @@ def _parse_report(value: object) -> dict[str, Any]:
 
 
 def _parse_grok_json(text: str) -> dict[str, Any]:
-    outer = json.loads(text.strip())
-    if not isinstance(outer, dict):
-        raise RecoveryError("Grok recovery result is not an object")
-    if "text" in outer:
-        raw = outer["text"]
-        if isinstance(raw, dict):
-            return _parse_report(raw)
-        if type(raw) is not str or not raw.strip():
-            raise RecoveryError("Grok recovery result text is missing")
-        return _parse_report(json.loads(raw))
-    return _parse_report(outer)
+    try:
+        return _parse_report(parse_grok_cli_payload(text))
+    except FactError as error:
+        raise RecoveryError(str(error)) from error
 
 
 def _recovery_prompt(
@@ -158,23 +153,38 @@ def _recovery_prompt(
         packet = load_block_packet(paths, block.block_id)
     except (FactError, OSError):
         packet = {"block_id": block.block_id}
-    return f"""You are an operational recovery executor for Yuvi AgentBus v2.
+    return f"""Implement this AgentBus v2 operational recovery job.
 
-Perform only the exact bounded operational action authorized by BLOCK_GPT.
-Do not change source, product implementation, Git authority, PR identity, or
-AgentBus semantic facts.
+Execute the exact BLOCK recovery_instruction with tools in this worktree
+before returning JSON. A JSON report is not the recovery.
+
+CURRENT_RECOVERY_INSTRUCTION:
+{block.recovery_instruction or ""}
+
+EXPECTED_POSTCONDITION:
+{block.expected_postcondition or ""}
+
+Allowed: the bounded operational repair named by recovery_instruction,
+including creating or recreating a missing local runtime marker, socket, or
+file that is not tracked Git source.
+
+Do not change tracked source, product implementation, Git authority, PR
+identity, or AgentBus semantic facts.
 
 Prohibited mutations:
 {chr(10).join(f"- {item}" for item in PROHIBITED_MUTATIONS)}
 
-P identity:
-- P_ID: {snapshot.p_id}
+Exact identities:
+- P: {snapshot.p_id}
 - repository: {config.repository}
 - branch: {config.branch}
 - HEAD: {snapshot.head}
 - BASE: {snapshot.base}
 - current action: {action.kind.value}
 - current effect: {action.effect_id}
+- block_id: {block.block_id}
+- causal_effect_id: {packet.get("causal_effect_id")}
+- causal_action_kind: {packet.get("causal_action_kind")}
 
 BLOCK result:
 ```json
@@ -186,12 +196,13 @@ Diagnosis evidence:
 {json.dumps({} if diagnosis is None else dict(diagnosis), sort_keys=True, ensure_ascii=False, separators=(",", ":"))}
 ```
 
-BLOCK packet identity:
-```json
-{json.dumps({"block_id": packet.get("block_id"), "causal_effect_id": packet.get("causal_effect_id"), "causal_action_kind": packet.get("causal_action_kind")}, sort_keys=True, separators=(",", ":"))}
-```
+Use tools to inspect the named target, perform only the authorized repair,
+independently re-read the expected_postcondition, then return only this JSON
+object. APPLIED requires the postcondition to be true on disk; otherwise
+return NOT_APPLIED with the exact blocker. UNSAFE means a prohibited
+mutation occurred or would be required.
 
-Return exactly one JSON object matching the supplied schema.
+{RECOVERY_OUTPUT_SCHEMA}
 """
 
 
@@ -199,9 +210,10 @@ def _codex_recovery_command(
     config: PConfig, schema_path: Path, response_path: Path
 ) -> tuple[str, ...]:
     return (
-        "codex", "exec", "--ephemeral",
-        "--sandbox", "workspace-write",
+        "codex",
         "--ask-for-approval", "never",
+        "exec", "--ephemeral",
+        "--sandbox", "workspace-write",
         "--model", CODEX_WORK_MODEL,
         "-C", config.worktree,
         "--output-schema", str(schema_path),
@@ -211,13 +223,16 @@ def _codex_recovery_command(
 
 
 def _grok_recovery_command(config: PConfig, prompt_path: Path, model: str) -> tuple[str, ...]:
+    # Recovery must use tools before reporting. Constraining the first model
+    # output with --json-schema lets Grok emit APPLIED/NOT_APPLIED without
+    # performing the authorized repair. WORK keeps --json-schema because PASS
+    # is independently reconstructed from commit trailers.
     return (
         "grok",
         "--prompt-file", str(prompt_path),
         "--model", model,
         "--cwd", config.worktree,
         "--output-format", "json",
-        "--json-schema", RECOVERY_OUTPUT_SCHEMA,
         "--always-approve",
         "--no-alt-screen",
     )
@@ -361,6 +376,27 @@ def _pr_identity(snapshot: Snapshot) -> tuple[object, object, object]:
     return merge.pr_number, merge.head_sha, merge.base_branch
 
 
+def _named_absolute_paths(*texts: str | None) -> tuple[Path, ...]:
+    found: list[Path] = []
+    seen: set[str] = set()
+    for text in texts:
+        if not text:
+            continue
+        for match in _ABS_PATH_RE.findall(text):
+            if match in seen or len(match) < 8:
+                continue
+            seen.add(match)
+            found.append(Path(match))
+    return tuple(found)
+
+
+def _path_is_observable(path: Path) -> bool:
+    try:
+        return path.exists() and not path.is_dir()
+    except OSError:
+        return False
+
+
 def _postcondition_holds(
     snapshot: Snapshot,
     action: Action,
@@ -372,6 +408,9 @@ def _postcondition_holds(
         return False
     if action.kind is not before_action.kind or action.effect_id != before_action.effect_id:
         return True
+    named = _named_absolute_paths(block.recovery_instruction, block.expected_postcondition)
+    if named:
+        return all(_path_is_observable(path) for path in named)
     expected = (block.expected_postcondition or "").strip().lower()
     if expected and expected in (action.reason or "").lower():
         return True

@@ -587,6 +587,49 @@ WORK_OUTPUT_SCHEMA = (
     '"required":["status","summary","head","evidence"]}\n'
 )
 
+
+def _last_json_object(text: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    last: dict[str, Any] | None = None
+    idx = 0
+    stripped = text.strip()
+    while idx < len(stripped):
+        brace = stripped.find("{", idx)
+        if brace < 0:
+            break
+        try:
+            value, end = decoder.raw_decode(stripped, brace)
+        except json.JSONDecodeError:
+            idx = brace + 1
+            continue
+        if isinstance(value, dict):
+            last = value
+        idx = end
+    if last is None:
+        raise FactError("Grok JSON payload is not an object")
+    return last
+
+
+def parse_grok_cli_payload(completed_output: str) -> dict[str, Any]:
+    """Extract the schema result from Grok ``--output-format json``.
+
+    The installed CLI emits one outer object.  ``text`` may include prose
+    plus concatenated JSON objects; ``structuredOutput`` is the
+    ``--json-schema`` result when present.  Session/cost telemetry is ignored.
+    """
+    outer = _last_json_object(completed_output)
+    structured = outer.get("structuredOutput")
+    if isinstance(structured, dict):
+        return structured
+    if "text" in outer:
+        raw_text = outer["text"]
+        if isinstance(raw_text, dict):
+            return raw_text
+        if type(raw_text) is str and raw_text.strip():
+            return _last_json_object(raw_text)
+        raise FactError("Grok outer result text is missing or empty")
+    return outer
+
 # Kept as a compatibility name for the existing Codex path and tests.  The
 # result contract is semantic WORK, not a backend-specific contract.
 CODEX_OUTPUT_SCHEMA = WORK_OUTPUT_SCHEMA
@@ -870,19 +913,7 @@ def run_grok_work(
         return EffectResult(False, "Grok exited without a durable result")
 
     try:
-        outer = json.loads(completed_output.strip())
-        if not isinstance(outer, dict):
-            raise FactError("Grok outer result is not an object")
-        if "text" in outer:
-            raw_text = outer["text"]
-            if isinstance(raw_text, dict):
-                response = raw_text
-            elif type(raw_text) is str and raw_text.strip():
-                response = json.loads(raw_text)
-            else:
-                raise FactError("Grok outer result text is missing or empty")
-        else:
-            response = outer
+        response = parse_grok_cli_payload(completed_output)
         if not isinstance(response, dict) or set(response) != {
             "status", "summary", "head", "evidence"
         }:
@@ -898,6 +929,30 @@ def run_grok_work(
             raise FactError("Grok inner WORK result fields have invalid types or are empty")
         status = Observation(response["status"])
     except (FactError, ValueError, TypeError, json.JSONDecodeError) as error:
+        live_head = git(worktree, "rev-parse", "HEAD")
+        current_refs = _local_branch_refs(worktree)
+        changed_refs = {
+            name
+            for name in set(protected_refs) | set(current_refs)
+            if protected_refs.get(name) != current_refs.get(name)
+        }
+        allowed_ref = f"refs/heads/{config.branch}"
+        if changed_refs - {allowed_ref}:
+            raise FactError(
+                "Grok altered protected local refs: "
+                + ", ".join(sorted(changed_refs - {allowed_ref}))
+            )
+        if git(worktree, "status", "--porcelain=v1"):
+            raise FactError("Grok completed with a dirty WORK worktree")
+        recovered = _work_from_head(config, live_head)
+        if (
+            recovered is not None
+            and recovered.effect_id == action.effect_id
+            and recovered.spec_id == spec.spec_id
+            and recovered.input_head == snapshot.head
+            and live_head != snapshot.head
+        ):
+            return EffectResult(True, "Grok WORK recovered from commit trailers")
         return EffectResult(False, f"invalid Grok result: {error}")
 
     live_head = git(worktree, "rev-parse", "HEAD")
