@@ -57,6 +57,7 @@ from tools.agentbus_v2.facts import (
     sha256_text,
 )
 from tools.agentbus_v2.github import (
+    CheckFact,
     GitHubFacts,
     merge_pr,
     observe_required_checks,
@@ -1255,6 +1256,115 @@ AgentBus-V2-Plan: plan-%s
             self.assertEqual("PASS", saved["status"])
             self.assertFalse(snapshot.allow_merge)
 
+    def test_prove_materializes_ci_failure_with_stale_pr_metadata_base(self) -> None:
+        """Current integration, not PR metadata, gates an OPEN-PR proof."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = RepoFixture(root)
+            config = replace(
+                config_for(repo, "P_ID: P-TEST\nGOAL: stale metadata base\n"),
+                required_ci_checks=("validate (ubuntu-latest)",),
+            )
+            paths = PPaths(root / "state" / config.p_id)
+            paths.create_dirs()
+            initial = replace(
+                snapshot_for(config),
+                proof_contract_digest=proof_contract_digest(config),
+            )
+            plan = plan_job_id(initial)
+            spec = SpecFact(
+                spec_id(initial.charter_digest, plan_facts_digest(initial), "Test the change"),
+                "Test the change",
+                plan_job_id=plan,
+            )
+            implemented_head = "1" * 40
+            work = WorkFact(
+                work_effect_id(initial, spec),
+                spec.spec_id,
+                initial.head,
+                Observation.PASS,
+                "work-evidence",
+                output_head=implemented_head,
+                plan_job_id=plan,
+            )
+            snapshot = replace(
+                initial,
+                head=implemented_head,
+                specs=(spec,),
+                gpt_results=(GptResult(plan, "PLAN_GPT", "SPEC", spec.text),),
+                work_facts=(work,),
+                merge=GitHubFacts(),
+            )
+            action = decide(snapshot)
+            self.assertEqual(ActionKind.PROVE, action.kind)
+            stale_metadata_base = "b" * 40
+            merge = GitHubFacts(
+                pr_number=20,
+                state="OPEN",
+                draft=False,
+                mergeable=True,
+                head_sha=snapshot.head,
+                live_base=snapshot.base,
+                pr_base_sha=stale_metadata_base,
+                head_branch=config.branch,
+                base_branch=config.base_ref,
+                p_id=config.p_id,
+                spec_id=spec.spec_id,
+                owner_token=config.owner_token,
+            )
+            check = CheckFact(
+                name="validate (ubuntu-latest)",
+                state="FAILURE",
+                bucket="fail",
+                workflow="validate",
+                link="https://github.com/acme/repo/actions/runs/20/job/1",
+                run_id="20",
+                head_sha=snapshot.head,
+                synthetic_merge_sha="c" * 40,
+                synthetic_parents=(snapshot.base, snapshot.head),
+                pr_head_sha=snapshot.head,
+                pr_base_sha=stale_metadata_base,
+                current_integration=True,
+            )
+            observed = replace(
+                merge,
+                check_status="FAIL",
+                checks=(check,),
+                failed_ci_logs=(("20", "Direct installer smoke: failure"),),
+            )
+            completed = subprocess.CompletedProcess(("git", "fetch"), 0, "", "")
+            with (
+                patch("tools.agentbus_v2.effects._run", return_value=completed),
+                patch(
+                    "tools.agentbus_v2.effects.read_snapshot",
+                    side_effect=(snapshot, snapshot),
+                ),
+                patch(
+                    "tools.agentbus_v2.effects._command_evidence",
+                    return_value=({"commands": []}, Observation.PASS),
+                ),
+                patch("tools.agentbus_v2.effects.ensure_owned_pr", return_value=True),
+                patch(
+                    "tools.agentbus_v2.effects.read_github_facts",
+                    side_effect=(merge, merge),
+                ),
+                patch(
+                    "tools.agentbus_v2.effects.observe_required_checks",
+                    return_value=observed,
+                ),
+            ):
+                result = run_prove(paths, config, snapshot, action)
+            self.assertTrue(result.changed)
+            saved = json.loads(
+                (paths.root / "prove" / "results" / f"{action.effect_id}.json").read_text()
+            )
+            self.assertEqual("FAIL", saved["status"])
+            self.assertEqual(action.effect_id, saved["proof_id"])
+            self.assertEqual(
+                ["validate (ubuntu-latest)"],
+                [item["name"] for item in saved["github_checks"]],
+            )
+
     def test_proof_result_identity_corruption_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1411,6 +1521,7 @@ AgentBus-V2-Plan: plan-%s
                 required_ci_checks=required,
             )
             head, base, merge_sha = "1" * 40, "a" * 40, "f" * 40
+            stale_metadata_base = "b" * 40
             synthetic_parents = [base, head]
             run_head_sha = head
             checks = [
@@ -1430,7 +1541,7 @@ AgentBus-V2-Plan: plan-%s
                 elif argv[1] == "api" and "/pulls/" in argv[2]:
                     value = {
                         "head": {"sha": head},
-                        "base": {"sha": base},
+                        "base": {"sha": stale_metadata_base},
                         "merge_commit_sha": merge_sha,
                     }
                 elif argv[1:3] == ("run", "view"):
@@ -1454,6 +1565,10 @@ AgentBus-V2-Plan: plan-%s
             evidence = [asdict(item) for item in observed.checks]
             self.assertEqual(set(required), {item["name"] for item in evidence})
             self.assertTrue(all(item["current_integration"] for item in evidence))
+            self.assertEqual(
+                {stale_metadata_base},
+                {item["pr_base_sha"] for item in evidence},
+            )
 
             with patch("tools.agentbus_v2.facts._run", side_effect=fake_run):
                 observed = observe_required_checks(

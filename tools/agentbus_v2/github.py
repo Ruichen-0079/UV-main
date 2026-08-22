@@ -636,7 +636,6 @@ def observe_required_checks(
     synthetic_ok = (
         pr_result.returncode == 0
         and pr_head == expected_head
-        and pr_base == expected_base
         and len(parents) == 2
         and parents[0] == expected_base
         and parents[1] == expected_head

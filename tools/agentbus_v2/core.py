@@ -524,7 +524,6 @@ def merge_fence_failures(s: Snapshot, spec: SpecFact) -> tuple[str, ...]:
         (m.mergeable is True, "PR is not confirmed mergeable"),
         (m.head_sha == s.head, "PR HEAD drift"),
         (m.live_base == s.base, "live BASE drift"),
-        (m.pr_base_sha == s.base, "PR BASE drift"),
         (m.head_branch == s.expected_branch, "PR head branch mismatch"),
         (m.base_branch == s.base_ref, "PR base branch mismatch"),
         (m.p_id == s.p_id, "PR P identity mismatch"),

@@ -830,7 +830,6 @@ def run_prove(
             merge.pr_number is None
             or merge.head_sha != snapshot.head
             or merge.live_base != snapshot.base
-            or merge.pr_base_sha != snapshot.base
             or merge.head_branch != config.branch
             or merge.base_branch != config.base_ref
             or merge.p_id != config.p_id
@@ -877,7 +876,6 @@ def run_prove(
             and (
                 final_merge.head_sha != snapshot.head
                 or final_merge.live_base != snapshot.base
-                or final_merge.pr_base_sha != snapshot.base
                 or final_merge.head_branch != config.branch
                 or final_merge.base_branch != config.base_ref
                 or final_merge.p_id != config.p_id

@@ -408,7 +408,7 @@ class KernelTableTests(unittest.TestCase):
         self.assertEqual(ActionKind.MERGE_READY, action.kind)
         self.assertNotEqual(ActionKind.MERGE, action.kind)
 
-    def test_pr_base_drift_blocks_merge_even_when_live_base_matches(self) -> None:
+    def test_stale_pr_metadata_base_does_not_block_merge_when_live_base_matches(self) -> None:
         snapshot, spec = with_spec(replace(blank(), head=H1))
         work = work_pass(snapshot, spec)
         proof = proof_pass(snapshot, spec)
@@ -427,8 +427,8 @@ class KernelTableTests(unittest.TestCase):
             merge=replace(merge_facts(snapshot, spec), pr_base_sha=B2),
             )
         )
-        self.assertEqual(ActionKind.IDLE, action.kind)
-        self.assertIn("PR BASE drift", action.payload["failures"])
+        self.assertEqual(ActionKind.MERGE_READY, action.kind)
+        self.assertNotIn("PR BASE drift", action.payload.get("failures", ()))
 
     def test_merge_fences_reject_foreign_draft_and_nonmergeable_prs(self) -> None:
         snapshot, spec = with_spec(replace(blank(), head=H1))
