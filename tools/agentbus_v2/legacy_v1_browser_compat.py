@@ -29,6 +29,12 @@ from .effects import (
     submit_gpt_response,
 )
 from .block_diagnosis import BLOCK_OPERATION, current_block_request, load_block_config, submit_block_gpt_response
+from .control import (
+    CONTROL_OPERATION,
+    current_control_request,
+    load_control_config,
+    submit_control_response,
+)
 from .facts import (
     FactError,
     PPaths,
@@ -56,6 +62,7 @@ ROLE_TASK = {
     "PLAN_GPT": ("PRODUCT_GPT", "PLAN_SPEC"),
     "JUDGE_GPT": ("FINAL_GPT", "FINAL_REVIEW"),
     "BLOCK_GPT": ("FINAL_GPT", "BLOCK_DIAGNOSIS"),
+    "CONTROL_GPT": ("PRODUCT_GPT", "WORK_ROUTING"),
 }
 _JOB_HEADER_RE = re.compile(r"(?m)^JOB_ID: ([A-Za-z0-9_.:-]+)$")
 
@@ -534,6 +541,35 @@ class LegacyV1BrowserCompat:
         render_transport_prompt(job)
         return job
 
+    def _current_control_job(self, entry: ProjectEntry, config: LegacyCompatConfig) -> CurrentJob | None:
+        """Project one exact operational CONTROL request through signed v1."""
+        control_config = load_control_config(self.state_root)
+        if not control_config.enabled or control_config.conversation_url is None:
+            return None
+        request = current_control_request(self.state_root, entry)
+        if request is None:
+            return None
+        issue = config.mailboxes.get(request.repository)
+        if issue is None:
+            raise LegacyCompatError(f"mailbox is not configured for {request.repository}")
+        job = CurrentJob(
+            request.p_id,
+            request.allow_merge,
+            request.paths,
+            request.repository,
+            request.control_id,
+            CONTROL_OPERATION,
+            request.packet_text,
+            request.packet_sha256,
+            derive_browser_delivery_id(request.control_id, request.packet_sha256),
+            request.conversation_url,
+            request.head,
+            request.base,
+            issue,
+        )
+        render_transport_prompt(job)
+        return job
+
     def current_jobs(self) -> tuple[CurrentJob, ...]:
         config = self._config()
         if not config.enabled:
@@ -550,6 +586,9 @@ class LegacyV1BrowserCompat:
                 block_job = self._current_block_job(entry, config)
                 if block_job is not None:
                     jobs.append(block_job)
+                control_job = self._current_control_job(entry, config)
+                if control_job is not None:
+                    jobs.append(control_job)
             except GPTPacketOversizeError as error:
                 detail = {
                     "p_id": entry.p_id,
@@ -599,6 +638,8 @@ class LegacyV1BrowserCompat:
         current = (
             self._current_block_job(entry, config)
             if job.operation == BLOCK_OPERATION
+            else self._current_control_job(entry, config)
+            if job.operation == CONTROL_OPERATION
             else self._current_job(entry, config)
         )
         return bool(
@@ -632,6 +673,8 @@ class LegacyV1BrowserCompat:
                 result = (
                     submit_block_gpt_response(job.paths, temporary)
                     if job.operation == BLOCK_OPERATION
+                    else submit_control_response(job.paths, temporary)
+                    if job.operation == CONTROL_OPERATION
                     else submit_gpt_response(job.paths, temporary)
                 )
             finally:
@@ -735,10 +778,21 @@ class LegacyV1BrowserCompat:
                 ),
             }
         block_jobs = [job for job in jobs if job.operation == BLOCK_OPERATION]
+        control_jobs = [job for job in jobs if job.operation == CONTROL_OPERATION]
         try:
             block_bound = load_block_config(self.state_root).conversation_url is not None
         except FactError:
             block_bound = False
+        try:
+            control_config = load_control_config(self.state_root)
+            control_bound = control_config.conversation_url is not None
+            control_enabled = control_config.enabled
+            control_url = control_config.conversation_url
+        except FactError:
+            control_bound = False
+            control_enabled = False
+            control_url = None
+        current_control = control_jobs[0] if control_jobs else None
         return {
             "legacy_v1_extension": "ONLINE" if online else "OFFLINE",
             "last_poll": (
@@ -760,6 +814,14 @@ class LegacyV1BrowserCompat:
                 "state": "pending" if block_jobs else "idle",
                 "pending": len(block_jobs),
                 "bound": block_bound,
+            },
+            "control": {
+                "state": "pending" if control_jobs else "idle",
+                "pending": len(control_jobs),
+                "bound": control_bound,
+                "enabled": control_enabled,
+                "conversation_url": control_url,
+                "current_job_id": current_control.job_id if current_control else None,
             },
             "jobs": [
                 {

@@ -1,4 +1,4 @@
-"""Operational Codex account selection; semantic WORK facts stay authoritative."""
+"""Operational executor selection; semantic WORK facts stay authoritative."""
 
 from __future__ import annotations
 
@@ -32,6 +32,14 @@ ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 class ExecutorAccount:
     name: str
     codex_home: Path
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class GrokExecutorAccount:
+    name: str
+    grok_home: Path
+    model: str
     enabled: bool = True
 
 
@@ -105,6 +113,104 @@ def load_accounts(state_root: Path) -> tuple[ExecutorAccount, ...]:
 
 def list_executor_accounts(state_root: Path) -> tuple[dict[str, object], ...]:
     return tuple({"name": item.name, "enabled": item.enabled} for item in load_accounts(state_root))
+
+
+def grok_executor_config_path(state_root: Path) -> Path:
+    return Path(state_root) / "grok_executors.json"
+
+
+def _validated_grok_accounts(
+    accounts: tuple[GrokExecutorAccount, ...], source: str
+) -> tuple[GrokExecutorAccount, ...]:
+    names: set[str] = set()
+    homes: set[Path] = set()
+    validated: list[GrokExecutorAccount] = []
+    for account in accounts:
+        home = Path(account.grok_home).expanduser().resolve()
+        if not ACCOUNT_NAME_RE.fullmatch(account.name) or account.name in names:
+            raise FactError(f"Grok executors require unique valid names: {source}")
+        if home in homes:
+            raise FactError(f"Grok executors share one GROK_HOME: {source}")
+        if type(account.enabled) is not bool:
+            raise FactError(f"Grok executor enabled flag is invalid: {source}")
+        if type(account.model) is not str or not account.model.strip():
+            raise FactError(f"Grok executor model must be non-empty: {source}")
+        names.add(account.name)
+        homes.add(home)
+        validated.append(GrokExecutorAccount(account.name, home, account.model, account.enabled))
+    return tuple(validated)
+
+
+def load_grok_executors(state_root: Path) -> tuple[GrokExecutorAccount, ...]:
+    path = grok_executor_config_path(state_root)
+    if not path.exists():
+        return ()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        entries = value.get("executors") if isinstance(value, dict) else None
+        if not isinstance(entries, list):
+            raise TypeError("executors must be a list")
+        accounts: list[GrokExecutorAccount] = []
+        names: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {
+                "name", "grok_home", "model", "enabled"
+            }:
+                raise TypeError("each Grok executor requires name, grok_home, model, enabled")
+            name = entry.get("name")
+            grok_home = entry.get("grok_home")
+            model = entry.get("model")
+            enabled = entry.get("enabled")
+            if (
+                type(name) is not str
+                or not ACCOUNT_NAME_RE.fullmatch(name)
+                or name in names
+                or type(grok_home) is not str
+                or not grok_home.strip()
+                or type(model) is not str
+                or not model.strip()
+                or type(enabled) is not bool
+            ):
+                raise TypeError("Grok executor requires unique name, home, model, and boolean enabled")
+            names.add(name)
+            accounts.append(GrokExecutorAccount(name, Path(grok_home), model, enabled))
+        return _validated_grok_accounts(tuple(accounts), str(path))
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise FactError(f"invalid Grok executor configuration {path}: {error}") from error
+
+
+def grok_account_lock_path(state_root: Path, account: GrokExecutorAccount) -> Path:
+    return Path(state_root) / "executors" / "grok" / f"{account.name}.lock"
+
+
+@contextmanager
+def grok_account_lock(
+    state_root: Path, account: GrokExecutorAccount, *, expose_fd: bool = False
+) -> Iterator[bool | int | None]:
+    with _lock_path(grok_account_lock_path(state_root, account), expose_fd=expose_fd) as locked:
+        yield locked
+
+
+def _account_availability(state_root: Path, account: GrokExecutorAccount) -> str:
+    if not account.enabled:
+        return "disabled"
+    with grok_account_lock(state_root, account) as acquired:
+        return "configured" if acquired else "busy"
+
+
+def list_grok_executors(state_root: Path) -> tuple[dict[str, object], ...]:
+    accounts = load_grok_executors(state_root)
+    return tuple(
+        {
+            "backend": "GROK",
+            "name": item.name,
+            "enabled": item.enabled,
+            "model": item.model,
+            "grok_home": str(item.grok_home),
+            "availability": _account_availability(state_root, item),
+        }
+        for item in accounts
+    )
 
 
 @contextmanager
@@ -195,13 +301,21 @@ Executor = Callable[[PPaths, PConfig, Snapshot, Action, Path], "EffectResult"]
 
 class ExecutorPool:
     def __init__(
-        self, state_root: Path, accounts: tuple[ExecutorAccount, ...] | None = None
+        self,
+        state_root: Path,
+        accounts: tuple[ExecutorAccount, ...] | None = None,
+        grok_accounts: tuple[GrokExecutorAccount, ...] | None = None,
     ) -> None:
         self.state_root = Path(state_root)
         self.accounts = (
             _validated_accounts(accounts, "ExecutorPool")
             if accounts is not None
             else load_accounts(self.state_root)
+        )
+        self.grok_accounts = (
+            _validated_grok_accounts(grok_accounts, "ExecutorPool")
+            if grok_accounts is not None
+            else load_grok_executors(self.state_root)
         )
 
     def run(
@@ -212,14 +326,27 @@ class ExecutorPool:
         action: Action,
         *,
         executor: Executor | None = None,
+        backend: str = "CODEX",
     ) -> "EffectResult":
         if action.kind is not ActionKind.WORK or not action.effect_id:
             raise FactError("executor pool received a non-WORK action")
+        backend = str(backend).upper()
+        if backend not in {"CODEX", "GROK"}:
+            raise FactError(f"unsupported executor backend: {backend}")
         use_owned_executor = executor is None
+        default_grok_executor = False
         if executor is None:
-            from .effects import run_codex_work
+            if backend == "CODEX":
+                from .effects import run_codex_work
 
-            executor = run_codex_work
+                executor = run_codex_work
+            else:
+                from .effects import run_grok_work
+
+                executor = run_grok_work
+                default_grok_executor = True
+        accounts = self.accounts if backend == "CODEX" else self.grok_accounts
+        backend_label = "Codex" if backend == "CODEX" else "Grok"
         attempted: list[str] = []
         worktree_path = worktree_lock_path(self.state_root, config.worktree)
         worktree_context = (
@@ -230,13 +357,17 @@ class ExecutorPool:
         with worktree_context as worktree_fd:
             if worktree_fd is None or worktree_fd is False:
                 return _result(False, "worktree execution lock is unavailable")
-            for account in self.accounts:
+            for account in accounts:
                 if not account.enabled:
                     continue
                 account_context = (
                     nullcontext(True)
                     if use_owned_executor
-                    else account_lock(self.state_root, account)
+                    else (
+                        account_lock(self.state_root, account)
+                        if backend == "CODEX"
+                        else grok_account_lock(self.state_root, account)
+                    )
                 )
                 with account_context as account_fd:
                     if account_fd is None or account_fd is False:
@@ -248,21 +379,29 @@ class ExecutorPool:
                     worktree = Path(config.worktree)
                     before_head = git(worktree, "rev-parse", "HEAD")
                     before_refs = _branch_refs(config)
+                    account_home = (
+                        account.codex_home
+                        if backend == "CODEX"
+                        else account.grok_home
+                    )
+                    account_path = (
+                        account_lock_path(self.state_root, account)
+                        if backend == "CODEX"
+                        else grok_account_lock_path(self.state_root, account)
+                    )
                     try:
                         if use_owned_executor:
+                            executor_kwargs = {
+                                "worktree_lock_path": worktree_path,
+                                "account_lock_path": account_path,
+                            }
+                            if default_grok_executor:
+                                executor_kwargs["model"] = account.model
                             result = executor(
-                                paths,
-                                config,
-                                snapshot,
-                                action,
-                                account.codex_home,
-                                worktree_lock_path=worktree_path,
-                                account_lock_path=account_lock_path(
-                                    self.state_root, account
-                                ),
+                                paths, config, snapshot, action, account_home, **executor_kwargs
                             )
                         else:
-                            result = executor(paths, config, snapshot, action, account.codex_home)
+                            result = executor(paths, config, snapshot, action, account_home)
                     except UnsafeExecutorAttempt as error:
                         return _result(
                             False,
@@ -280,7 +419,7 @@ class ExecutorPool:
                     if use_owned_executor and result is not None:
                         if result.detail == "worktree execution lock is unavailable":
                             return _result(False, f"executor={account.name}; {result.detail}")
-                        if result.detail == "Codex account lock is unavailable":
+                        if result.detail == f"{backend_label} account lock is unavailable":
                             continue
 
                     state = _semantic_work_state(paths, config, snapshot, action)
@@ -313,19 +452,32 @@ class ExecutorPool:
                             False,
                             f"executor={account.name}; operational retry blocked by ambiguous worktree",
                         )
-                    if result is not None and "identities drifted before Codex" in result.detail:
+                    if result is not None and "identities drifted before" in result.detail:
                         return _result(False, f"executor={account.name}; {result.detail}")
                     continue
         if attempted:
             return _result(
                 False,
-                "all selected Codex attempts were operationally unavailable: "
+                f"all selected {backend_label} attempts were operationally unavailable: "
                 + ", ".join(attempted),
             )
-        return _result(False, "no configured Codex account is currently available")
+        return _result(
+            False,
+            "no configured Codex account is currently available"
+            if backend == "CODEX"
+            else "no configured Grok executor is currently available",
+        )
 
 
 def dispatch_work(
-    state_root: Path, paths: PPaths, config: PConfig, snapshot: Snapshot, action: Action
+    state_root: Path,
+    paths: PPaths,
+    config: PConfig,
+    snapshot: Snapshot,
+    action: Action,
+    *,
+    backend: str = "CODEX",
 ) -> "EffectResult":
-    return ExecutorPool(state_root).run(paths, config, snapshot, action)
+    return ExecutorPool(state_root).run(
+        paths, config, snapshot, action, backend=backend
+    )

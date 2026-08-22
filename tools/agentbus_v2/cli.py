@@ -13,6 +13,7 @@ from typing import Iterator, Sequence
 STATE_ROOT = (Path(os.environ["XDG_STATE_HOME"]).expanduser() / "yuvi-agentbus-v2" if os.environ.get("XDG_STATE_HOME") else Path.home() / ".local" / "state" / "yuvi-agentbus-v2")
 
 from .core import Action, ActionKind, decide
+from .control import route_work
 from .effects import (
     EffectResult,
     dispatch_manual_gpt,
@@ -20,7 +21,6 @@ from .effects import (
     run_prove,
     submit_gpt_response,
 )
-from .executor_pool import dispatch_work
 from .facts import (
     add_operator_directive,
     FactError,
@@ -175,7 +175,23 @@ def tick_once(state_root: Path, p_id: str, *, allow_merge: bool) -> tuple[Action
                     return Action(ActionKind.IDLE, reason="AWAITING_PLAN_BINDING"), None
             result = dispatch_manual_gpt(paths, config, snapshot, action)
         elif action.kind is ActionKind.WORK:
-            result = dispatch_work(state_root, paths, config, snapshot, action)
+            from .scheduler import load_registry
+
+            try:
+                entry = next(
+                    item for item in load_registry(state_root).entries if item.p_id == p_id
+                )
+            except (FactError, OSError, StopIteration):
+                entry = None
+            result = route_work(
+                state_root,
+                paths,
+                config,
+                snapshot,
+                action,
+                entry=entry,
+                allow_merge=allow_merge,
+            )
         elif action.kind is ActionKind.PROVE:
             result = run_prove(paths, config, snapshot, action)
         elif action.kind is ActionKind.MERGE:

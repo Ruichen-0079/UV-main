@@ -90,7 +90,7 @@ class PPaths:
     def create_dirs(self) -> None:
         for path in (
             "gpt/outbox", "gpt/results", "work/results", "work/logs", "prove/results",
-            "operator",
+            "operator", "control/outbox", "control/results",
         ):
             (self.root / path).mkdir(parents=True, exist_ok=True)
 def paths_for(state_root: Path, p_id: str) -> PPaths:

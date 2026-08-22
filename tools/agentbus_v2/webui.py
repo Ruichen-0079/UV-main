@@ -15,6 +15,11 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
 from .core import ActionKind, decide
+from .control import (
+    control_route_view,
+    load_control_config,
+    set_control_config,
+)
 from .block_diagnosis import (
     BLOCK_OPERATION,
     BlockGPTConfig,
@@ -23,7 +28,7 @@ from .block_diagnosis import (
     set_block_config,
 )
 from .effects import submit_gpt_response
-from .executor_pool import list_executor_accounts, worktree_execution_lock
+from .executor_pool import list_executor_accounts, list_grok_executors, worktree_execution_lock
 from .facts import (
     FactError,
     add_operator_directive,
@@ -492,6 +497,28 @@ class WebUIState:
         except FactError as error:
             raise WebUIError(422, str(error)) from error
 
+    def control_config(self):
+        try:
+            return load_control_config(self.state_root)
+        except FactError as error:
+            raise WebUIError(422, str(error)) from error
+
+    def set_control_binding(self, conversation_url: str):
+        try:
+            return set_control_config(
+                self.state_root,
+                conversation_url=conversation_url,
+                update_url=True,
+            )
+        except FactError as error:
+            raise WebUIError(422, str(error)) from error
+
+    def set_control_enabled(self, enabled: bool):
+        try:
+            return set_control_config(self.state_root, enabled=enabled)
+        except FactError as error:
+            raise WebUIError(422, str(error)) from error
+
     def add_plan_directive(
         self, p_id: str, text: str, *, request_replan: bool = False
     ) -> dict[str, object]:
@@ -731,7 +758,9 @@ class WebUIState:
             result.append(projected)
         return tuple(result)
 
-    def _gpt_conversation_projection(self, registry) -> dict[str, object]:
+    def _gpt_conversation_projection(
+        self, registry, browser_status: dict[str, object] | None = None
+    ) -> dict[str, object]:
         """Project operational GPT conversation ownership for the control plane."""
         try:
             compat = load_compat_config(self.state_root)
@@ -760,6 +789,30 @@ class WebUIState:
                 "auto_diagnosis_enabled": block.enabled,
             }
             block_error = None
+        try:
+            control = load_control_config(self.state_root)
+            control_browser = (
+                browser_status.get("control", {})
+                if isinstance(browser_status, dict)
+                else {}
+            )
+            control_row = {
+                "enabled": control.enabled,
+                "bound": control.conversation_url is not None,
+                "conversation_url": control.conversation_url,
+                "pending": int(control_browser.get("pending", 0)),
+                "current_job_id": control_browser.get("current_job_id"),
+            }
+            control_error: str | None = None
+        except FactError as error:
+            control_row = {
+                "enabled": False,
+                "bound": False,
+                "conversation_url": None,
+                "pending": 0,
+                "current_job_id": None,
+            }
+            control_error = str(error)
         plans = [
             {
                 "p_id": entry.p_id,
@@ -772,8 +825,9 @@ class WebUIState:
         return {
             "judge": judge,
             "block": block_row,
+            "control": control_row,
             "per_p_plan": plans,
-            "error": compat_error or block_error,
+            "error": compat_error or block_error or control_error,
         }
 
     def status(self) -> dict[str, object]:
@@ -804,6 +858,7 @@ class WebUIState:
                 "attention": True, "executor": None, "evidence": [],
                 "manual_gpt": None, "gpt_transport": None,
                 "operational_block": None, "block_gpt": None,
+                "execution_route": None, "control": None,
             }
             try:
                 directive = load_operator_directive(paths)
@@ -861,6 +916,64 @@ class WebUIState:
                                    "block_reason": human["block_reason"], "next_wait": human["next_wait"],
                                    "attention": human["attention"],
                                    "active": bool(entry.enabled and not entry.archived)})
+                if action.kind is ActionKind.WORK:
+                    control = control_route_view(
+                        self.state_root, entry, snapshot, action
+                    )
+                    route = str(control.get("route") or "CODEX")
+                    route_label = {
+                        "awaiting CONTROL": "awaiting CONTROL",
+                        "CODEX": "CODEX",
+                        "GROK": "GROK",
+                        "SIMPLIFY": "SIMPLIFY recommended",
+                        "WAIT": "WAIT",
+                        "HUMAN": "HUMAN",
+                    }.get(route, route)
+                    projection["control"] = control
+                    projection["execution_route"] = route_label
+                    if route == "awaiting CONTROL":
+                        projection.update({
+                            "semantic_status": "等待 CONTROL_GPT 路由",
+                            "status_code": "CONTROL_PENDING",
+                            "block_reason": "WORK 尚未取得执行后端路由",
+                            "next_wait": "等待 CONTROL_GPT",
+                            "attention": False,
+                        })
+                    elif route == "SIMPLIFY":
+                        projection.update({
+                            "semantic_status": "建议 PLAN 简化",
+                            "status_code": "CONTROL_SIMPLIFY_RECOMMENDED",
+                            "block_reason": "CONTROL recommends PLAN simplification",
+                            "next_wait": "由操作员显式处理 PLAN 简化",
+                            "attention": True,
+                        })
+                    elif route == "WAIT":
+                        projection.update({
+                            "semantic_status": "等待执行能力",
+                            "status_code": "CONTROL_WAIT",
+                            "block_reason": "CONTROL_GPT recommends waiting",
+                            "next_wait": "等待执行能力恢复",
+                            "attention": True,
+                        })
+                    elif route == "HUMAN":
+                        projection.update({
+                            "semantic_status": "需要人工处理",
+                            "status_code": "CONTROL_HUMAN",
+                            "block_reason": "CONTROL_GPT cannot safely determine a route",
+                            "next_wait": "人工决定执行路径",
+                            "attention": True,
+                        })
+                    elif route == "GROK" and any(
+                        marker in str(projection.get("detail", ""))
+                        for marker in ("no configured Grok", "Grok attempts", "Grok guardian")
+                    ):
+                        projection.update({
+                            "semantic_status": "GROK 执行能力不可用",
+                            "status_code": "CONTROL_GROK_UNAVAILABLE",
+                            "block_reason": str(projection.get("detail")),
+                            "next_wait": "检查 Grok executor 配置或运行环境",
+                            "attention": True,
+                        })
                 observation = self.scheduler.block_supervisor.observation(entry.p_id)
                 diagnosis = block_view(
                     self.state_root, entry, snapshot, action, observation
@@ -897,9 +1010,19 @@ class WebUIState:
                         )
                     projection["attention"] = True
                 if action.kind is ActionKind.WORK:
-                    projection["executor"] = {"state": "WORKING" if in_flight else "WAITING",
-                                               "p_id": entry.p_id, "model": "gpt-5.6-luna",
-                                               "reasoning_effort": "max"}
+                    selected_route = str(projection.get("execution_route") or "CODEX")
+                    if selected_route == "GROK":
+                        projection["executor"] = {
+                            "backend": "GROK",
+                            "state": "WORKING" if in_flight else "WAITING",
+                            "p_id": entry.p_id,
+                            "model": "configured Grok model",
+                        }
+                    elif selected_route == "CODEX":
+                        projection["executor"] = {"backend": "CODEX",
+                                                   "state": "WORKING" if in_flight else "WAITING",
+                                                   "p_id": entry.p_id, "model": "gpt-5.6-luna",
+                                                   "reasoning_effort": "max"}
                 evidence: list[dict[str, object]] = []
                 for item in snapshot.gpt_results[-3:]:
                     evidence.append({"kind": "GPT_RESULT", "job_id": item.job_id,
@@ -933,6 +1056,16 @@ class WebUIState:
         # competing with actionable active work in the operator inbox.
         attention = [item for item in active if item.get("attention")]
         executors = list(list_executor_accounts(self.state_root))
+        grok_executors = list(list_grok_executors(self.state_root))
+        enabled_grok = [item for item in grok_executors if item.get("enabled") is True]
+        if not grok_executors:
+            grok_availability = "unconfigured"
+        elif any(item.get("availability") == "configured" for item in enabled_grok):
+            grok_availability = "configured"
+        elif any(item.get("availability") == "busy" for item in enabled_grok):
+            grok_availability = "busy"
+        else:
+            grok_availability = "unknown"
         working = [item["p_id"] for item in projects
                    if isinstance(item.get("executor"), dict)
                    and item["executor"].get("state") == "WORKING"]
@@ -954,11 +1087,18 @@ class WebUIState:
         )
         return {"server": {"name": "agentbus-v2-webui", "loopback": True},
                 "scheduler": scheduler_status, "executors": executors,
+                "grok_executors": grok_executors,
+                "grok_executor_status": {
+                    "configured": bool(grok_executors),
+                    "enabled_account_count": len(enabled_grok),
+                    "availability": grok_availability,
+                    "models": sorted({str(item["model"]) for item in enabled_grok}),
+                },
                 "mailbox": browser_status.get("mailbox"), "attention": attention,
                 "active": active, "running": running, "paused": paused, "archived": archived,
                 "gpt_lanes": self._gpt_lane_projection(gpt_transport.status(), browser_status),
                 "browser_transport": browser_status, "projects": projects, "events": events,
-                "gpt_conversations": self._gpt_conversation_projection(registry),
+                "gpt_conversations": self._gpt_conversation_projection(registry, browser_status),
                 "block_gpt": {
                     "enabled": block_config.enabled,
                     "bound": block_config.conversation_url is not None,
@@ -1012,7 +1152,7 @@ POLISHED_INDEX_HTML = r"""<!doctype html>
 <details class="advanced"><summary>高级诊断</summary><section class="block-panel"><h3>BLOCK_GPT</h3><div id="block-gpt-controls"></div></section><div class="advanced-grid"><div class="advanced-box"><h3>Executors</h3><pre id="executors"></pre></div><div class="advanced-box"><h3>GPT lanes</h3><pre id="gpt-lanes"></pre></div><div class="advanced-box"><h3>Browser transport</h3><pre id="browser-transport"></pre></div><div class="advanced-box"><h3>Recent scheduler events</h3><pre id="events"></pre></div></div></details>
 </main><script>
 /* state and API */
-const TOKEN=__TOKEN__;const ui={tab:'active',editingPlan:null,editingDirective:null,replan:null,editingBlock:false,editingJudge:false,form:null,errors:{},current:null,drafts:{judgeUrl:null,blockUrl:null,planUrls:{},directives:{},form:{}},openDetails:new Set(),advancedOpen:false};
+const TOKEN=__TOKEN__;const ui={tab:'active',editingPlan:null,editingDirective:null,replan:null,editingBlock:false,editingJudge:false,editingControl:false,form:null,errors:{},current:null,drafts:{judgeUrl:null,blockUrl:null,controlUrl:null,planUrls:{},directives:{},form:{}},openDetails:new Set(),advancedOpen:false};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const attr=s=>esc(s).replace(/`/g,'&#96;');
 const copyValue=v=>`decodeURIComponent('${encodeURIComponent(v??'').replaceAll("'","%27")}')`;
@@ -1023,7 +1163,7 @@ function showToast(message,kind='error'){const el=document.getElementById('toast
 function captureViewState(){ui.openDetails=new Set(Array.from(document.querySelectorAll('.task-details[open]')).map(x=>x.dataset.pId).filter(Boolean));const advanced=document.querySelector('.advanced');if(advanced)ui.advancedOpen=advanced.open}
 function restoreViewState(){document.querySelectorAll('.task-details[data-p-id]').forEach(x=>{x.open=ui.openDetails.has(x.dataset.pId)});const advanced=document.querySelector('.advanced');if(advanced)advanced.open=ui.advancedOpen}
 function editableFocused(){const active=document.activeElement;return Boolean(active&&/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName))}
-function interactionActive(){return Boolean(ui.form||ui.editingJudge||ui.editingBlock||ui.editingPlan!==null||ui.editingDirective!==null||ui.replan!==null||editableFocused()||document.querySelector('.task-details[open]')||document.querySelector('.advanced[open]'))}
+function interactionActive(){return Boolean(ui.form||ui.editingJudge||ui.editingBlock||ui.editingControl||ui.editingPlan!==null||ui.editingDirective!==null||ui.replan!==null||editableFocused()||document.querySelector('.task-details[open]')||document.querySelector('.advanced[open]'))}
 async function fetchStatus({forceRender=false}={}){const r=await fetch('/api/status');if(!r.ok)throw Error('HTTP '+r.status);const latest=await r.json();ui.current=latest;if(forceRender||!interactionActive())render(latest);document.getElementById('last-refresh')?.replaceChildren(new Date().toLocaleTimeString());return latest}
 async function refresh(forceRender=false){try{await fetchStatus({forceRender})}catch(e){showToast('状态读取失败：'+e)}}
 async function autoRefresh(){try{await fetchStatus()}catch(e){showToast('状态读取失败：'+e)}}
@@ -1031,6 +1171,9 @@ async function scheduler(op){try{await request('/api/scheduler/'+op,{});await re
 function focusBlockEditor(){requestAnimationFrame(()=>{document.getElementById('gpt-conversations')?.scrollIntoView({behavior:'smooth',block:'center'});document.getElementById('block-url')?.focus()})}
 function toggleBlockEditor(){if(ui.editingBlock){ui.editingBlock=false;ui.drafts.blockUrl=null;delete ui.errors.block}else{ui.editingBlock=true;ui.drafts.blockUrl=ui.drafts.blockUrl??(ui.current?.gpt_conversations?.block?.conversation_url||'')}render(ui.current);if(ui.editingBlock)focusBlockEditor()}
 function toggleJudgeEditor(){if(ui.editingJudge){ui.editingJudge=false;ui.drafts.judgeUrl=null;delete ui.errors.judge}else{ui.editingJudge=true;ui.drafts.judgeUrl=ui.drafts.judgeUrl??(ui.current?.gpt_conversations?.judge?.conversation_url||'')}render(ui.current);if(ui.editingJudge)requestAnimationFrame(()=>document.getElementById('judge-url')?.focus())}
+function toggleControlEditor(){if(ui.editingControl){ui.editingControl=false;ui.drafts.controlUrl=null;delete ui.errors.control}else{ui.editingControl=true;ui.drafts.controlUrl=ui.drafts.controlUrl??(ui.current?.gpt_conversations?.control?.conversation_url||'')}render(ui.current);if(ui.editingControl)requestAnimationFrame(()=>document.getElementById('control-url')?.focus())}
+async function saveControlBinding(){const input=document.getElementById('control-url'),value=(input?.value||'').trim();ui.drafts.controlUrl=input?.value||'';if(!/^https:\/\/chatgpt\.com\/c\/[^\s/]+$/.test(value)){ui.errors.control='请输入 https://chatgpt.com/c/... 会话 URL';render(ui.current);requestAnimationFrame(()=>document.getElementById('control-url')?.focus());return}try{await request('/api/gpt-conversations/control',{conversation_url:value});ui.editingControl=false;ui.drafts.controlUrl=null;delete ui.errors.control;await refresh(true)}catch(e){ui.errors.control=String(e);render(ui.current);requestAnimationFrame(()=>document.getElementById('control-url')?.focus())}}
+async function setControlEnabled(enabled){try{await request('/api/control-gpt/enabled',{enabled:Boolean(enabled)});await refresh(true)}catch(e){showToast(e)}}
 async function saveJudgeBinding(){const input=document.getElementById('judge-url'),value=(input?.value||'').trim();ui.drafts.judgeUrl=input?.value||'';if(!/^https:\/\/chatgpt\.com\/c\/[^\s/]+$/.test(value)){ui.errors.judge='请输入 https://chatgpt.com/c/... 会话 URL';render(ui.current);requestAnimationFrame(()=>document.getElementById('judge-url')?.focus());return}try{await request('/api/gpt-conversations/judge',{conversation_url:value});ui.editingJudge=false;ui.drafts.judgeUrl=null;delete ui.errors.judge;await refresh(true)}catch(e){ui.errors.judge=String(e);render(ui.current);requestAnimationFrame(()=>document.getElementById('judge-url')?.focus())}}
 async function saveBlockBinding(){const input=document.getElementById('block-url'),value=(input?.value||'').trim();ui.drafts.blockUrl=input?.value||'';if(!/^https:\/\/chatgpt\.com\/c\/[^\s/]+$/.test(value)){ui.errors.block='请输入 https://chatgpt.com/c/... 会话 URL';render(ui.current);requestAnimationFrame(()=>document.getElementById('block-url')?.focus());return}try{await request('/api/block-gpt/binding',{conversation_url:value});ui.editingBlock=false;ui.drafts.blockUrl=null;delete ui.errors.block;await refresh(true)}catch(e){ui.errors.block=String(e);render(ui.current);requestAnimationFrame(()=>document.getElementById('block-url')?.focus())}}
 async function setBlockEnabled(enabled){try{await request('/api/block-gpt/enabled',{enabled:Boolean(enabled)});await refresh(true)}catch(e){showToast(e)}}
@@ -1052,8 +1195,8 @@ async function createOrAdopt(kind){const get=id=>document.getElementById(id)?.va
 async function removeProject(p_id){if(confirm('只移出控制列表，保留 durable facts、PR、branch 和 worktree。继续？'))await project(p_id,'remove',{})}
 function tickProject(p_id){project(p_id,'tick',{})}
 /* presentation helpers */
-function statusLabel(p){const map={AWAITING_PLAN_BINDING:'等待 PLAN',GPT_PACKET_OVERSIZE:'GPT 请求过大，未发送',TRANSPORT_OFFLINE:'传输离线',TRANSPORT_ERROR:'传输异常',WORK_RUNNING:'Luna 执行中',WAITING_EXECUTOR:'等待执行器',PROVE:'等待 PROVE',PROVE_FAILED:'验证失败',HUMAN:'需要人工',WAIT:'等待外部条件',MERGE_READY:'待允许合并',DIRTY_WORKTREE:'阻塞',PR_IDENTITY_MISMATCH:'安全栅栏',OPERATIONAL_BLOCK:'运行阻塞',ARCHIVED:'已归档',IDLE:'等待检查'};if(!p.enabled&&!p.archived)return '已暂停';if(p.status_code==='WAITING_FOR_BROWSER'||p.status_code==='AUTO_QUEUED'||p.status_code==='WAITING_FOR_MAILBOX'){const op=p.gpt_transport?.operation||'PLAN_GPT';return `等待 ${op} 浏览器提交`}return map[p.status_code]||p.semantic_status||p.action}
-function statusClass(p){const c=p.status_code||'';if(['HUMAN','PROVE_FAILED','GPT_PACKET_OVERSIZE','TRANSPORT_ERROR','TRANSPORT_OFFLINE','DIRTY_WORKTREE','PR_IDENTITY_MISMATCH','OPERATIONAL_BLOCK'].includes(c))return'red';if(['AWAITING_PLAN_BINDING','WAITING_FOR_MAILBOX','WAITING_EXECUTOR','MERGE_READY','WAIT'].includes(c))return'amber';if(['WORK_RUNNING','PROVE','WAITING_FOR_BROWSER','AUTO_QUEUED'].includes(c))return'blue';if(['ARCHIVED'].includes(c)||!p.enabled)return'gray';return'green'}
+function statusLabel(p){const map={AWAITING_PLAN_BINDING:'等待 PLAN',GPT_PACKET_OVERSIZE:'GPT 请求过大，未发送',TRANSPORT_OFFLINE:'传输离线',TRANSPORT_ERROR:'传输异常',WORK_RUNNING:'Luna 执行中',WAITING_EXECUTOR:'等待执行器',CONTROL_PENDING:'等待 CONTROL',CONTROL_SIMPLIFY_RECOMMENDED:'建议 PLAN 简化',CONTROL_WAIT:'等待执行能力',CONTROL_HUMAN:'需要人工处理',CONTROL_GROK_UNAVAILABLE:'GROK 不可用',PROVE:'等待 PROVE',PROVE_FAILED:'验证失败',HUMAN:'需要人工',WAIT:'等待外部条件',MERGE_READY:'待允许合并',DIRTY_WORKTREE:'阻塞',PR_IDENTITY_MISMATCH:'安全栅栏',OPERATIONAL_BLOCK:'运行阻塞',ARCHIVED:'已归档',IDLE:'等待检查'};if(!p.enabled&&!p.archived)return '已暂停';if(p.status_code==='WAITING_FOR_BROWSER'||p.status_code==='AUTO_QUEUED'||p.status_code==='WAITING_FOR_MAILBOX'){const op=p.gpt_transport?.operation||'PLAN_GPT';return `等待 ${op} 浏览器提交`}return map[p.status_code]||p.semantic_status||p.action}
+function statusClass(p){const c=p.status_code||'';if(['HUMAN','CONTROL_HUMAN','CONTROL_GROK_UNAVAILABLE','PROVE_FAILED','GPT_PACKET_OVERSIZE','TRANSPORT_ERROR','TRANSPORT_OFFLINE','DIRTY_WORKTREE','PR_IDENTITY_MISMATCH','OPERATIONAL_BLOCK'].includes(c))return'red';if(['AWAITING_PLAN_BINDING','CONTROL_PENDING','CONTROL_SIMPLIFY_RECOMMENDED','CONTROL_WAIT','WAITING_FOR_MAILBOX','WAITING_EXECUTOR','MERGE_READY','WAIT'].includes(c))return'amber';if(['WORK_RUNNING','PROVE','WAITING_FOR_BROWSER','AUTO_QUEUED'].includes(c))return'blue';if(['ARCHIVED'].includes(c)||!p.enabled)return'gray';return'green'}
 function prMeta(p){const parts=[];if(p.pr?.number)parts.push('PR #'+p.pr.number);if(p.head)parts.push('HEAD '+p.head);if(p.worktree?.clean===true)parts.push('工作树 clean');else if(p.worktree?.clean===false)parts.push('工作树 dirty');if(p.plan_binding?.bound)parts.push('PLAN 已绑定');return parts.map((x,i)=>`<span class="meta-item">${esc(x)}</span>`).join('')}
 function blockerLine(p){const show=p.attention&&p.block_reason&&p.status_code!=='IDLE';if(!show)return'';return `<div class="blocker" title="${attr(p.block_reason)}"><span>⚠</span><span class="blocker-text">${esc(p.block_reason)}</span></div>${p.next_wait&&p.status_code!=='AWAITING_PLAN_BINDING'?`<div class="next-wait">下一步：${esc(p.next_wait)}</div>`:''}`}
 function primaryButton(p){const a=p.primary_action;if(!a)return'';const fn=a.key==='bind-plan'?`togglePlanEditor(${copyProject(p)})`:a.key==='show-human'?`showHuman(${copyProject(p)})`:a.key==='allow-merge'?`confirmMerge(${copyProject(p)})`:`project(${copyValue(p.p_id)},'enabled',{enabled:true})`;return `<button class="button primary" onclick="${fn}">${esc(a.label)}</button>`}
@@ -1073,6 +1216,8 @@ function blockDetails(p){const b=p.block_gpt,o=p.operational_block;if(!b&&!o)ret
 function manualFallback(p,g){const m=g.manual_fallback;if(!m)return'';return `<details class="manual-fallback"><summary>高级手工 GPT 回退（Advanced manual GPT fallback）</summary><p class="warning-text">自动传输可用时，不要为同一 exact job 重复提交。</p><button class="button ghost" onclick="navigator.clipboard?.writeText(${copyValue(m.packet_path)})">复制 packet 路径</button> <button class="button ghost" onclick="navigator.clipboard?.writeText(${copyValue(m.instruction)})">复制 instruction</button><div class="technical">${esc(m.packet_sha256||'packet 尚未生成')}</div><textarea id="gpt-${esc(p.p_id)}" placeholder="粘贴 exact GPT JSON"></textarea><button class="button secondary" onclick="submit('${esc(p.p_id)}')">提交 exact JSON</button></details>`}
 function evidenceDetails(p){return `<details class="nested-details"><summary>日志 / 证据</summary><pre class="console">${esc(JSON.stringify(p.evidence||[],null,2))}</pre></details>`}
 function detailsPanel(p){const d=p.operator_directive,action=p.action;return `<details class="task-details" data-p-id="${attr(p.p_id)}"><summary>详情</summary><div class="details-grid"><div class="detail-group"><h4>当前任务</h4><div class="detail-row"><span>语义动作</span><span class="technical">${esc(action)}</span></div><div class="detail-row"><span>状态</span><span>${esc(p.semantic_status)}</span></div>${p.charter_summary?`<div class="detail-row"><span>Charter</span><span>${esc(p.charter_summary)}</span></div>`:''}${p.status_code==='HUMAN'?`<div tabindex="-1" class="human-reason"><strong>需要人工决定</strong><br>${esc(p.block_reason)}</div>`:''}</div><div class="detail-group"><h4>Git / PR</h4>${p.pr?`<div class="detail-row"><span>PR</span><span>#${esc(p.pr.number)} · ${esc(p.pr.state||'UNKNOWN')}${p.pr.draft?' · DRAFT':''}</span></div>`:''}<div class="detail-row"><span>HEAD</span><span class="technical">${esc(p.head||'—')}</span></div><div class="detail-row"><span>BASE</span><span class="technical">${esc(p.base||'—')}</span></div>${p.pr?.branch?`<div class="detail-row"><span>branch</span><span class="technical">${esc(p.pr.branch)}</span></div>`:''}<div class="detail-row"><span>worktree</span><span>${p.worktree?.clean===true?'clean':p.worktree?.clean===false?'dirty':'未知'}</span></div></div><div class="detail-group"><h4>PLAN</h4>${planBinding(p)}${directiveBlock(p)}<div class="detail-row"><span>CURRENT_SPEC</span><span class="technical">${esc(p.spec_id||'—')}</span></div></div>${gptDetails(p)}${blockDetails(p)}${p.executor?`<div class="detail-group"><h4>Executor</h4><div class="detail-row"><span>状态</span><span>${esc(p.executor.state)}</span></div><div class="detail-row"><span>model</span><span class="technical">${esc(p.executor.model||'gpt-5.6-luna')}</span></div><div class="detail-row"><span>reasoning</span><span class="technical">${esc(p.executor.reasoning_effort||'max')}</span></div></div>`:''}</div>${evidenceDetails(p)}<details class="nested-details"><summary>高级操作</summary><div class="task-actions"><button class="button secondary" onclick="tickProject(${copyProject(p)})">立即检查 / Tick now</button><span class="muted">重新读取事实并执行最多一个合法 effect。</span>${p.allow_merge?`<span class="warning-text">允许合并：ON</span><button class="button danger" onclick="project(${copyValue(p.p_id)},'allow-merge',{allow_merge:false})">关闭允许合并</button>`:''}${p.archived?`<button class="button secondary" onclick="project(${copyValue(p.p_id)},'unarchive',{})">取消归档</button>`:`<button class="button secondary" onclick="project(${copyValue(p.p_id)},'archive',{})">归档</button>`}<button class="button danger" onclick="removeProject(${copyProject(p)})">移出任务列表</button></div></details></details>`}
+const baseDetailsPanel=detailsPanel;
+detailsPanel=function(p){const html=baseDetailsPanel(p);if(!p.execution_route)return html;return html.replace('<div class="detail-row"><span>状态</span>',`<div class="detail-row"><span>Execution route</span><span class="technical">${esc(p.execution_route)}</span></div><div class="detail-row"><span>状态</span>`)};
 function taskCard(p){const id=encodeURIComponent(p.p_id),status=statusLabel(p),cls=statusClass(p),secondary=p.enabled&&!p.archived?`<button class="button secondary" onclick="project(${copyValue(p.p_id)},'enabled',{enabled:false})">暂停</button>`:'';return `<article id="task-card-${id}" class="task-card"><div class="task-top"><div class="task-id" title="${attr(p.p_id)}">${esc(p.p_id)}</div><span class="status-badge ${cls}"><span class="dot ${cls==='green'?'ok':cls==='amber'?'warn':cls==='red'?'err':''}"></span>${esc(status)}</span></div><div class="task-title">${esc(p.charter_summary||'未提供任务摘要')}</div>${blockerLine(p)}<div class="meta-row">${prMeta(p)}</div><div class="task-actions">${primaryButton(p)}<span class="spacer"></span>${secondary}<details class="more-menu"><summary class="button ghost">···</summary><div class="more-content"><button class="button" onclick="tickProject(${copyProject(p)})">立即检查</button>${p.archived?`<button class="button" onclick="project(${copyValue(p.p_id)},'unarchive',{})">取消归档</button>`:`<button class="button" onclick="project(${copyValue(p.p_id)},'archive',{})">归档</button>`}<button class="button danger" onclick="removeProject(${copyProject(p)})">移出任务列表</button></div></details></div>${detailsPanel(p)}</article>`}
 function attentionRow(p){return `<div class="attention-row"><span class="severity">⚠</span><span class="attention-id" title="${attr(p.p_id)}">${esc(p.p_id)}</span><span class="attention-reason">${esc(p.block_reason||p.semantic_status)}</span><button class="button secondary" onclick="focusTask(${copyValue(p.p_id)})">处理</button></div>`}
 /* forms */
@@ -1084,9 +1229,12 @@ function renderForm(){document.getElementById('forms').innerHTML=ui.form?formPan
 function openPlanBinding(value){const p=projectFor(value);if(!p)return;ui.tab=p.archived?'archived':p.active?'active':'paused';ui.editingPlan=p.p_id;ui.editingDirective=null;render(ui.current);requestAnimationFrame(()=>{const card=document.getElementById('task-card-'+encodeURIComponent(p.p_id));if(card){card.scrollIntoView({behavior:'smooth',block:'center'});card.classList.add('highlight');setTimeout(()=>card.classList.remove('highlight'),1200);const details=card.querySelector('.task-details');if(details)details.open=true}document.getElementById('plan-url-'+encodeURIComponent(p.p_id))?.focus()})}
 /* canonical GPT conversation editors; Advanced only projects read-only controls */
 function conversationEditor(kind,row){const judge=kind==='judge',id=judge?'judge-url':'block-url',label=judge?'JUDGE 会话 URL':'BLOCK 会话 URL',draft=judge?(ui.drafts.judgeUrl??(row.conversation_url||'')):(ui.drafts.blockUrl??(row.conversation_url||'')),error=judge?ui.errors.judge:ui.errors.block,oninput=judge?'ui.drafts.judgeUrl=this.value':'ui.drafts.blockUrl=this.value',cancel=judge?'toggleJudgeEditor()':'toggleBlockEditor()',save=judge?'saveJudgeBinding()':'saveBlockBinding()';return `<div class="gpt-editor-row"><div class="inline-editor"><label for="${id}">${label}</label><input id="${id}" value="${attr(draft)}" placeholder="https://chatgpt.com/c/..." autocomplete="off" oninput="${oninput}"><div class="inline-error">${esc(error||'')}</div><div class="task-actions"><span class="spacer"></span><button class="button secondary" onclick="${cancel}">取消</button><button class="button primary" onclick="${save}">保存</button></div></div></div>`}
-function renderConversations(v){const el=document.getElementById('gpt-conversations');if(!el)return;const c=v.gpt_conversations||{},judge=c.judge||{},block=c.block||{},status=row=>row.bound?'<span class="success-text"><span class="dot ok"></span>已绑定</span>':'<span class="muted"><span class="dot"></span>未绑定</span>',url=row=>row.bound?`<span class="technical gpt-url" title="${attr(row.conversation_url)}">${esc(shortUrl(row.conversation_url))}</span>`:'<span class="muted">—</span>',button=(label,handler)=>`<button class="button ghost" onclick="${handler}">${label}</button>`;let html=`<div class="gpt-row"><span class="gpt-role">JUDGE</span><span class="gpt-state">${status(judge)}</span>${url(judge)}${button(judge.bound?'修改':'绑定','toggleJudgeEditor()')}</div>`;if(ui.editingJudge)html+=conversationEditor('judge',judge);html+=`<div class="gpt-row"><span class="gpt-role">BLOCK</span><span class="gpt-state">${status(block)}</span>${url(block)}${button(block.bound?'修改':'绑定','toggleBlockEditor()')}</div>`;if(ui.editingBlock)html+=conversationEditor('block',block);html+='<div class="gpt-group-label">P 专用 PLAN</div>';const plans=(c.per_p_plan||[]).filter(row=>(ui.current?.projects||[]).some(p=>p.p_id===row.p_id));if(plans.length)html+=plans.map(row=>`<div class="gpt-row"><span class="gpt-role technical" title="${attr(row.p_id)}">${esc(row.p_id)}</span><span class="gpt-state">${status(row)}</span>${url(row)}${button(row.bound?'修改':'绑定',`openPlanBinding(${copyValue(row.p_id)})`)}</div>`).join('');else html+='<div class="gpt-row"><span class="muted">暂无 active P</span></div>';if(c.error)html+=`<div class="gpt-editor-row warning-text">${esc(c.error)}</div>`;el.innerHTML=html}
+function controlEditor(row){const draft=ui.drafts.controlUrl??(row.conversation_url||'');return `<div class="gpt-editor-row"><div class="inline-editor"><label for="control-url">CONTROL 会话 URL</label><input id="control-url" value="${attr(draft)}" placeholder="https://chatgpt.com/c/..." autocomplete="off" oninput="ui.drafts.controlUrl=this.value"><div class="inline-error">${esc(ui.errors.control||'')}</div><div class="task-actions"><span class="spacer"></span><button class="button secondary" onclick="toggleControlEditor()">取消</button><button class="button primary" onclick="saveControlBinding()">保存</button></div></div></div>`}
+function renderConversations(v){const el=document.getElementById('gpt-conversations');if(!el)return;const c=v.gpt_conversations||{},judge=c.judge||{},block=c.block||{},control=c.control||{},status=row=>row.bound?'<span class="success-text"><span class="dot ok"></span>已绑定</span>':'<span class="muted"><span class="dot"></span>未绑定</span>',url=row=>row.bound?`<span class="technical gpt-url" title="${attr(row.conversation_url)}">${esc(shortUrl(row.conversation_url))}</span>`:'<span class="muted">—</span>',button=(label,handler)=>`<button class="button ghost" onclick="${handler}">${label}</button>`,controlState=control.enabled?'启用':'停用',controlPending=control.pending?` · pending ${esc(control.pending)}`:'',controlJob=control.current_job_id?` · ${esc(control.current_job_id)}`:'';let html=`<div class="gpt-row"><span class="gpt-role">JUDGE</span><span class="gpt-state">${status(judge)}</span>${url(judge)}${button(judge.bound?'修改':'绑定','toggleJudgeEditor()')}</div>`;if(ui.editingJudge)html+=conversationEditor('judge',judge);html+=`<div class="gpt-row"><span class="gpt-role">BLOCK</span><span class="gpt-state">${status(block)}</span>${url(block)}${button(block.bound?'修改':'绑定','toggleBlockEditor()')}</div>`;if(ui.editingBlock)html+=conversationEditor('block',block);html+=`<div class="gpt-row"><span class="gpt-role">CONTROL</span><span class="gpt-state">${status(control)} · ${controlState}${controlPending}${controlJob}</span>${url(control)}${button(control.bound?'修改':'绑定','toggleControlEditor()')}<button class="button ghost" onclick="setControlEnabled(${!control.enabled})">${control.enabled?'停用':'启用'}</button></div>`;if(ui.editingControl)html+=controlEditor(control);html+='<div class="gpt-group-label">P 专用 PLAN</div>';const plans=(c.per_p_plan||[]).filter(row=>(ui.current?.projects||[]).some(p=>p.p_id===row.p_id));if(plans.length)html+=plans.map(row=>`<div class="gpt-row"><span class="gpt-role technical" title="${attr(row.p_id)}">${esc(row.p_id)}</span><span class="gpt-state">${status(row)}</span>${url(row)}${button(row.bound?'修改':'绑定',`openPlanBinding(${copyValue(row.p_id)})`)}</div>`).join('');else html+='<div class="gpt-row"><span class="muted">暂无 active P</span></div>';if(c.error)html+=`<div class="gpt-editor-row warning-text">${esc(c.error)}</div>`;el.innerHTML=html}
 function renderBlockPanel(v){const b=v.block_gpt||{},el=document.getElementById('block-gpt-controls');if(!el)return;const bound=b.bound?'已绑定':'未绑定',warning=b.enabled&&!b.bound?'<div class="warning-text">BLOCK_GPT 未绑定；不会使用 PLAN/JUDGE 会话。</div>':'';el.innerHTML=`<div class="detail-row"><span>会话</span><span>${bound} <button class="button ghost" onclick="toggleBlockEditor()">${b.bound?'修改':'配置会话'}</button></span></div><div class="detail-row"><span>自动诊断运行阻塞</span><span><span class="${b.enabled?'success-text':'muted'}">${b.enabled?'ON':'OFF'}</span><button class="button ${b.enabled?'secondary':'primary'}" onclick="setBlockEnabled(${!b.enabled})">${b.enabled?'关闭':'启用'}</button></span></div>${warning}`}
 function renderSystem(v){const s=v.scheduler||{},b=v.browser_transport||{},executors=v.executors||[],working=executors.filter(x=>x.state==='工作中').length,total=executors.filter(x=>x.enabled).length,mailboxReady=b.mailbox==='available'||b.mailbox==='configured';const health=document.getElementById('health');const attention=(v.attention||[]).length;health.innerHTML=`<span class="dot ${attention?'warn':'ok'}"></span>${attention?'需要处理 '+attention:'系统正常'}`;document.getElementById('system-strip').innerHTML=`<div class="health-cell"><span class="health-label">调度器</span><span class="health-value"><span class="dot ${s.running?'ok':'warn'}"></span>${s.running?'运行中':'已停止'}<button class="button ghost" onclick="scheduler('${s.running?'stop':'start'}')">${s.running?'停止':'启动'}</button></span></div><div class="health-cell"><span class="health-label">浏览器</span><span class="health-value"><span class="dot ${b.legacy_v1_extension==='ONLINE'?'ok':'err'}"></span>${b.legacy_v1_extension==='ONLINE'?'在线':'离线'}</span></div><div class="health-cell"><span class="health-label">Mailbox</span><span class="health-value"><span class="dot ${mailboxReady?'ok':'err'}"></span>${mailboxReady?'可用':'不可用'}</span></div><div class="health-cell"><span class="health-label">Luna</span><span class="health-value">${working} / ${total} 工作中</span></div><div class="health-cell"><span class="health-label">PLAN</span><span class="health-value">${b.plan?.pending??0}</span></div><div class="health-cell"><span class="health-label">JUDGE</span><span class="health-value">${b.judge?.pending??0}</span></div>`;document.getElementById('executors').textContent=JSON.stringify(executors,null,2);document.getElementById('gpt-lanes').textContent=(v.gpt_lanes||[]).map(l=>`${l.semantic_operation||l.name} · ${l.production_transport||l.transport||'UNKNOWN'}\nextension: ${l.extension||'UNKNOWN'} · mailbox: ${l.mailbox||'UNKNOWN'} · pending: ${l.pending_jobs??0}`).join('\n\n');document.getElementById('browser-transport').textContent=JSON.stringify(b,null,2);document.getElementById('events').textContent=(v.events||[]).slice().reverse().map(e=>JSON.stringify(e)).join('\n');renderBlockPanel(v)}
+const baseRenderSystem=renderSystem;
+renderSystem=function(v){baseRenderSystem(v);const el=document.getElementById('executors');if(el)el.textContent=JSON.stringify({codex:v.executors||[],grok:v.grok_executors||[]},null,2)};
 function renderTabs(v){const rows={active:v.active||[],paused:v.paused||[],archived:v.archived||[]};document.getElementById('tabs').innerHTML=[['active','进行中'],['paused','已暂停'],['archived','已归档']].map(([key,label])=>`<button role="tab" aria-selected="${ui.tab===key}" class="tab ${ui.tab===key?'selected':''}" onclick="setTab('${key}')">${label}<span class="tab-count">${rows[key].length}</span></button>`).join('');const list=rows[ui.tab]||[];document.getElementById('task-list').innerHTML=list.length?list.map(taskCard).join(''):`<div class="empty">${ui.tab==='archived'?'暂无已归档任务':ui.tab==='paused'?'暂无已暂停任务':'暂无进行中的任务'}</div>`}
 function render(v){captureViewState();ui.current=v;renderForm();document.getElementById('attention-count').textContent='('+((v.attention||[]).length)+')';document.getElementById('attention').innerHTML=(v.attention||[]).length?(v.attention||[]).map(attentionRow).join(''):'<div class="empty">当前没有需要人工处理的任务。</div>';renderTabs(v);renderConversations(v);renderSystem(v);restoreViewState()}
 refresh();setInterval(autoRefresh,1500);
@@ -1211,12 +1359,33 @@ class WebUIRequestHandler(BaseHTTPRequestHandler):
                     "conversation_url": config.conversations["judge"],
                 })
                 return
+            if parts == ["api", "gpt-conversations", "control"]:
+                self._exact(body, {"conversation_url"})
+                if type(body["conversation_url"]) is not str:
+                    raise WebUIError(400, "conversation_url must be a string")
+                config = self.server.state.set_control_binding(body["conversation_url"])
+                self._write(200, {
+                    "enabled": config.enabled,
+                    "bound": config.conversation_url is not None,
+                    "conversation_url": config.conversation_url,
+                })
+                return
             if parts == ["api", "block-gpt", "enabled"]:
                 self._exact(body, {"enabled"})
                 if type(body["enabled"]) is not bool:
                     raise WebUIError(400, "enabled must be boolean")
                 config = self.server.state.set_block_enabled(body["enabled"])
                 self._write(200, {"enabled": config.enabled, "bound": config.conversation_url is not None})
+                return
+            if parts == ["api", "control-gpt", "enabled"]:
+                self._exact(body, {"enabled"})
+                if type(body["enabled"]) is not bool:
+                    raise WebUIError(400, "enabled must be boolean")
+                config = self.server.state.set_control_enabled(body["enabled"])
+                self._write(200, {
+                    "enabled": config.enabled,
+                    "bound": config.conversation_url is not None,
+                })
                 return
             if parts == ["api", "projects", "create"]:
                 entry = self.server.state.create_p(body)

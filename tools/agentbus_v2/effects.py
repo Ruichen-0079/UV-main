@@ -578,12 +578,16 @@ return FAIL with the exact blocker. An executor/process crash is not FAIL.
 """
 
 
-CODEX_OUTPUT_SCHEMA = (
+WORK_OUTPUT_SCHEMA = (
     '{"type":"object","additionalProperties":false,"properties":'
     '{"status":{"enum":["PASS","FAIL"]},"summary":{"type":"string"},'
     '"head":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}}},'
     '"required":["status","summary","head","evidence"]}\n'
 )
+
+# Kept as a compatibility name for the existing Codex path and tests.  The
+# result contract is semantic WORK, not a backend-specific contract.
+CODEX_OUTPUT_SCHEMA = WORK_OUTPUT_SCHEMA
 
 CODEX_WORK_MODEL = "gpt-5.6-luna"
 CODEX_WORK_REASONING_EFFORT = "max"
@@ -741,6 +745,184 @@ def run_codex_work(
     evidence = {
         "codex_response": response,
         "codex_log_sha256": sha256_text(completed_output),
+        "live_head": live_head,
+    }
+    result = {
+        "effect_id": action.effect_id,
+        "spec_id": spec.spec_id,
+        "input_head": snapshot.head,
+        "status": Observation.FAIL.value,
+        "trigger_judge_id": action.payload.get("trigger_judge_id"),
+        "evidence_digest": sha256_text(json.dumps(evidence, sort_keys=True)),
+    }
+    destination = paths.root / "work" / "results" / f"{action.effect_id}.json"
+    write_json_once(destination, result)
+    return EffectResult(True, f"{summary}; stored {destination}")
+
+
+def _grok_work_command(
+    config: PConfig,
+    prompt_path: Path,
+    model: str,
+) -> tuple[str, ...]:
+    """Build the locally verified headless Grok Build command.
+
+    The installed CLI exposes ``--always-approve`` and ``--no-alt-screen``;
+    it does not expose the example ``--yolo``/``--no-auto-update`` aliases.
+    Keep the prompt in a file so a bounded WORK packet never becomes argv.
+    """
+    if not model.strip():
+        raise FactError("Grok executor model must be non-empty")
+    return (
+        "grok",
+        "--prompt-file",
+        str(prompt_path),
+        "--model",
+        model,
+        "--cwd",
+        config.worktree,
+        "--output-format",
+        "json",
+        "--always-approve",
+        "--no-alt-screen",
+    )
+
+
+def run_grok_work(
+    paths: PPaths,
+    config: PConfig,
+    snapshot: Snapshot,
+    action: Action,
+    grok_home: Path | None = None,
+    *,
+    model: str = "grok-build",
+    worktree_lock_path: Path | None = None,
+    account_lock_path: Path | None = None,
+) -> EffectResult:
+    """Execute the exact semantic WORK contract through Grok Build.
+
+    This intentionally mirrors the Codex fence.  The only backend-specific
+    data is the command, GROK_HOME, and operational log; semantic facts are
+    reconstructed from the resulting commit exactly as for Codex.
+    """
+    if action.kind is not ActionKind.WORK or not action.effect_id:
+        raise FactError("not a WORK effect")
+    spec = _spec(snapshot, str(action.payload.get("spec_id")))
+    if spec is None:
+        raise FactError("WORK effect references an absent SPEC")
+    prompt = _work_prompt(paths, config, snapshot, action, spec)
+    fresh = read_snapshot(paths)
+    recalculated = decide(fresh)
+    if (
+        recalculated.kind is not ActionKind.WORK
+        or recalculated.effect_id != action.effect_id
+        or dict(recalculated.payload) != dict(action.payload)
+    ):
+        return EffectResult(False, "WORK identities drifted before Grok")
+    worktree = Path(config.worktree)
+    if git(worktree, "status", "--porcelain=v1"):
+        raise FactError("refusing to launch Grok in a dirty WORK worktree")
+    protected_refs = _local_branch_refs(worktree)
+    prompt_path = paths.root / "work" / "logs" / f"{action.effect_id}.grok.prompt.md"
+    log_path = paths.root / "work" / "logs" / f"{action.effect_id}.grok.log"
+    write_text_once(prompt_path, prompt)
+    log_path.unlink(missing_ok=True)
+    if grok_home is None:
+        return EffectResult(False, "Grok executor home was not supplied")
+    if worktree_lock_path is None or account_lock_path is None:
+        return EffectResult(False, "Grok ownership locks were not supplied")
+    environment = os.environ.copy()
+    environment["GROK_HOME"] = str(grok_home)
+    command = _grok_work_command(config, prompt_path, model)
+    guarded = run_guardian(
+        command,
+        cwd=worktree,
+        env=environment,
+        log_path=log_path,
+        timeout=7200.0,
+        worktree_lock=worktree_lock_path,
+        account_lock=account_lock_path,
+        input_text=prompt,
+        expected_head=snapshot.head,
+        expected_branch=config.branch,
+    )
+    try:
+        completed_output = log_path.read_text(encoding="utf-8", errors="replace")[-262144:]
+    except OSError:
+        completed_output = ""
+    if guarded.timed_out:
+        return EffectResult(False, "Grok exceeded the executor timeout")
+    if guarded.parent_lost:
+        return EffectResult(False, "Grok guardian cleaned up after AgentBus parent loss")
+    if guarded.worktree_busy:
+        return EffectResult(False, "worktree execution lock is unavailable")
+    if guarded.account_busy:
+        return EffectResult(False, "Grok account lock is unavailable")
+    if guarded.identity_drift:
+        return EffectResult(False, "WORK identities drifted before Grok")
+    if guarded.returncode == GUARDIAN_ERROR:
+        return EffectResult(False, "Grok guardian could not start or own the executor")
+    if guarded.returncode != 0:
+        return EffectResult(False, "Grok exited without a durable result")
+
+    try:
+        outer = json.loads(completed_output.strip())
+        if not isinstance(outer, dict) or "text" not in outer:
+            raise FactError("Grok outer result lacks text")
+        if type(outer["text"]) is not str or not outer["text"].strip():
+            raise FactError("Grok outer result text is missing or empty")
+        response = json.loads(outer["text"])
+        if not isinstance(response, dict) or set(response) != {
+            "status", "summary", "head", "evidence"
+        }:
+            raise FactError("Grok inner WORK result has unexpected fields")
+        if (
+            type(response["status"]) is not str
+            or type(response["summary"]) is not str
+            or type(response["head"]) is not str
+            or not isinstance(response["evidence"], list)
+            or any(type(item) is not str for item in response["evidence"])
+            or not response["summary"].strip()
+        ):
+            raise FactError("Grok inner WORK result fields have invalid types or are empty")
+        status = Observation(response["status"])
+    except (FactError, ValueError, TypeError, json.JSONDecodeError) as error:
+        return EffectResult(False, f"invalid Grok result: {error}")
+
+    live_head = git(worktree, "rev-parse", "HEAD")
+    summary = response["summary"]
+    current_refs = _local_branch_refs(worktree)
+    changed_refs = {
+        name
+        for name in set(protected_refs) | set(current_refs)
+        if protected_refs.get(name) != current_refs.get(name)
+    }
+    allowed_ref = f"refs/heads/{config.branch}"
+    if changed_refs - {allowed_ref}:
+        raise FactError(
+            "Grok altered protected local refs: "
+            + ", ".join(sorted(changed_refs - {allowed_ref}))
+        )
+    if git(worktree, "status", "--porcelain=v1"):
+        raise FactError("Grok completed with a dirty WORK worktree")
+    if status is Observation.PASS:
+        recovered = _work_from_head(config, live_head)
+        if (
+            recovered is None
+            or recovered.effect_id != action.effect_id
+            or recovered.spec_id != spec.spec_id
+            or recovered.input_head != snapshot.head
+            or response["head"] != live_head
+        ):
+            raise FactError(
+                "Grok claimed PASS without the exact committed WORK identity trailers"
+            )
+        return EffectResult(True, summary)
+    if live_head != snapshot.head or changed_refs or response["head"] != live_head:
+        raise FactError("Grok returned FAIL after changing repository HEAD")
+    evidence = {
+        "work_response": response,
+        "grok_log_sha256": sha256_text(completed_output),
         "live_head": live_head,
     }
     result = {
