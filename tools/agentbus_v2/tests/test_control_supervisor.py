@@ -25,6 +25,7 @@ from tools.agentbus_v2.block_recovery import (
     _grok_recovery_command,
     _parse_grok_json,
     _postcondition_holds,
+    is_proof_as_recovery,
     recovery_id,
     run_block_recovery,
 )
@@ -619,6 +620,157 @@ class BlockHandoffAndRecoveryTests(unittest.TestCase):
         self.assertNotIn("CONTROL", [item.value for item in CoreActionKind])
         self.assertNotIn("DIAGNOSE", [item.value for item in CoreActionKind])
         self.assertNotIn("RECOVER", [item.value for item in CoreActionKind])
+
+
+class OperationalRecoveryBoundaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.fx = SupervisorFixture(Path(self.temp.name))
+        self.patches = [
+            patch("tools.agentbus_v2.control.read_snapshot", return_value=self.fx.snapshot),
+            patch("tools.agentbus_v2.control.decide", return_value=self.fx.action),
+            patch("tools.agentbus_v2.block_diagnosis.read_snapshot", return_value=self.fx.snapshot),
+            patch("tools.agentbus_v2.block_diagnosis.decide", return_value=self.fx.action),
+        ]
+        for item in self.patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _diagnosed_block(self):
+        result = run_readonly_diagnosis(
+            self.fx.control.state, self.fx.control.paths, self.fx.control.config,
+            self.fx.snapshot, self.fx.action, detail="executor launch failed",
+            executor=lambda *args, **kwargs: DiagnosisRun(True, _report(), "ok"),
+        )
+        self.assertTrue(result.changed)
+        diagnosis = current_diagnosis(
+            self.fx.control.paths, self.fx.snapshot, self.fx.action,
+            detail="executor launch failed",
+        )
+        obs = derive_diagnosed_stall_block(self.fx.control.config.p_id, self.fx.action, diagnosis)
+        packet = render_diagnosed_block_packet(self.fx.snapshot, self.fx.action, obs, diagnosis)
+        (self.fx.control.paths.root / "block" / "outbox").mkdir(parents=True, exist_ok=True)
+        (self.fx.control.paths.root / "block" / "outbox" / f"{obs.block_id}.md").write_text(packet)
+        return obs, diagnosis, packet
+
+    def _submit_recover(self, block_id: str, instruction: str, postcondition: str) -> BlockResult:
+        path = self.fx.control.state / "block-recover.json"
+        path.write_text(json.dumps({
+            "block_id": block_id,
+            "operation": BLOCK_OPERATION,
+            "decision": "RECOVER",
+            "reason": "bounded operational diagnosis",
+            "recovery_instruction": instruction,
+            "expected_postcondition": postcondition,
+            "human_action": None,
+        }), encoding="utf-8")
+        submit_block_gpt_response(self.fx.control.paths, path)
+        return parse_block_response(
+            json.loads((self.fx.control.paths.root / "block" / "results" / f"{block_id}.json").read_text()),
+            expected_block_id=block_id,
+        )
+
+    def test_block_packet_forbids_proof_as_recovery(self) -> None:
+        _, _, packet = self._diagnosed_block()
+        self.assertIn("must not execute or substitute for PLAN, WORK, PROVE, or JUDGE", packet)
+        self.assertIn("schemaReady=true", packet)
+        self.assertNotIn("rerun a bounded external operational probe", packet)
+
+    def test_installer_smoke_schema_ready_cannot_execute(self) -> None:
+        obs, diagnosis = self._diagnosed_block()[:2]
+        block = self._submit_recover(
+            obs.block_id,
+            "rerun installer smoke; postcondition schemaReady=true",
+            "schemaReady=true",
+        )
+        self.assertTrue(is_proof_as_recovery(block))
+        before = semantic_fact_fingerprint(self.fx.snapshot)
+        result = run_block_recovery(
+            self.fx.control.state, self.fx.control.paths, self.fx.control.config,
+            self.fx.snapshot, self.fx.action, block, route="CODEX",
+            diagnosis=diagnosis.get("report"),
+            executor=lambda *args, **kwargs: self.fail("proof recovery executed"),
+        )
+        self.assertTrue(result.changed)
+        self.assertIn("semantic proof", result.detail)
+        stored = json.loads(next((self.fx.control.paths.root / "recovery" / "results").glob("recovery-*.json")).read_text())
+        self.assertEqual("INVALID", stored["operational_status"])
+        self.assertFalse(stored["launched"])
+        self.assertEqual(before, semantic_fact_fingerprint(self.fx.snapshot))
+        self.assertEqual(self.fx.action, decide(self.fx.snapshot))
+
+    def test_rerun_ci_until_check_passes_cannot_execute(self) -> None:
+        obs, diagnosis = self._diagnosed_block()[:2]
+        block = self._submit_recover(
+            obs.block_id,
+            "rerun CI until check passes",
+            "CI becomes green",
+        )
+        self.assertTrue(is_proof_as_recovery(block))
+        before = semantic_fact_fingerprint(self.fx.snapshot)
+        result = run_block_recovery(
+            self.fx.control.state, self.fx.control.paths, self.fx.control.config,
+            self.fx.snapshot, self.fx.action, block, route="CODEX",
+            diagnosis=diagnosis.get("report"),
+            executor=lambda *args, **kwargs: self.fail("CI recovery executed"),
+        )
+        self.assertTrue(result.changed)
+        self.assertIn("semantic proof", result.detail)
+        self.assertEqual(before, semantic_fact_fingerprint(self.fx.snapshot))
+
+    def test_valid_operational_prerequisite_recovery_still_runs(self) -> None:
+        obs, diagnosis = self._diagnosed_block()[:2]
+        block = self._submit_recover(
+            obs.block_id,
+            "restart the dead local executor process and restore the missing runtime socket",
+            "required process is running and the stale lock is gone",
+        )
+        self.assertFalse(is_proof_as_recovery(block))
+        result = run_block_recovery(
+            self.fx.control.state, self.fx.control.paths, self.fx.control.config,
+            self.fx.snapshot, self.fx.action, block, route="CODEX",
+            diagnosis=diagnosis.get("report"),
+            executor=lambda *args, **kwargs: RecoveryRun(True, {
+                "status": "APPLIED",
+                "summary": "restarted local process and recreated socket",
+                "evidence": ["ok"],
+            }, "ok", "CODEX"),
+        )
+        self.assertTrue(result.changed)
+        self.assertNotIn("semantic proof", result.detail)
+        stored = json.loads(next((self.fx.control.paths.root / "recovery" / "results").glob("recovery-*.json")).read_text())
+        self.assertTrue(stored["launched"])
+        self.assertNotEqual("INVALID", stored["operational_status"])
+
+    def test_rejected_proof_recovery_consumes_one_shot_identity(self) -> None:
+        obs, diagnosis = self._diagnosed_block()[:2]
+        block = self._submit_recover(
+            obs.block_id,
+            "rerun installer smoke; postcondition schemaReady=true",
+            "schemaReady=true",
+        )
+        from tools.agentbus_v2.block_recovery import block_result_digest
+        rid = recovery_id(block_id=block.block_id, block_result_digest=block_result_digest(block))
+        first = run_block_recovery(
+            self.fx.control.state, self.fx.control.paths, self.fx.control.config,
+            self.fx.snapshot, self.fx.action, block, route="CODEX",
+            diagnosis=diagnosis.get("report"),
+            executor=lambda *args, **kwargs: self.fail("first launch"),
+        )
+        second = run_block_recovery(
+            self.fx.control.state, self.fx.control.paths, self.fx.control.config,
+            self.fx.snapshot, self.fx.action, block, route="GROK",
+            diagnosis=diagnosis.get("report"),
+            executor=lambda *args, **kwargs: self.fail("second launch"),
+        )
+        self.assertTrue(first.changed)
+        self.assertFalse(second.changed)
+        self.assertIn(rid, first.detail)
+        self.assertIn(rid, second.detail)
+        self.assertTrue((self.fx.control.paths.root / "recovery" / "results" / f"{rid}.json").exists())
 
 
 class StallDiagnosisHandoffTests(unittest.TestCase):

@@ -53,7 +53,42 @@ PROHIBITED_MUTATIONS = (
     "operator directive creation", "GPT semantic-result fabrication",
     "browser storage mutation", "source/product implementation changes",
     "semantic-fact mutation",
+    "rerun CI, tests, or installer smoke as proof",
 )
+
+# Narrow, literal markers.  This is not a policy engine: only these exact
+# proof-as-recovery phrases fail closed.  Arbitrary prose still relies on the
+# BLOCK packet contract and the recovery executor prompt.
+_PROOF_AS_RECOVERY_MARKERS = (
+    "schemaready",
+    "installer smoke",
+    "installer-smoke",
+    "desktop:installer",
+    "desktop-windows-package",
+    "rerun ci",
+    "rerun github",
+    "github actions",
+    "until check passes",
+    "ci pass",
+    "ci green",
+    "test pass",
+    "prove succeed",
+    "prove success",
+    "acceptance criterion",
+    "prepare.test",
+    "package-preparation proof",
+    "package preparation proof",
+)
+
+
+def is_proof_as_recovery(block: BlockResult) -> bool:
+    """True when RECOVER substitutes semantic proof for an operational repair."""
+    blob = " ".join(
+        item.lower()
+        for item in (block.recovery_instruction, block.expected_postcondition)
+        if item
+    )
+    return any(marker in blob for marker in _PROOF_AS_RECOVERY_MARKERS)
 
 
 class RecoveryError(FactError):
@@ -167,6 +202,16 @@ EXPECTED_POSTCONDITION:
 Allowed: the bounded operational repair named by recovery_instruction,
 including creating or recreating a missing local runtime marker, socket, or
 file that is not tracked Git source.
+
+Recovery may restore an operational prerequisite required for the current
+semantic effect to execute. It must not execute, repeat, or substitute for
+PLAN, WORK, PROVE, or JUDGE. Do not rerun CI, tests, or installer smoke
+merely to obtain proof. EXPECTED_POSTCONDITION must describe the repaired
+operational prerequisite itself, never schemaReady=true, CI PASS, test PASS,
+or PROVE success.
+
+If CURRENT_RECOVERY_INSTRUCTION or EXPECTED_POSTCONDITION is itself semantic
+proof, refuse without performing it and return NOT_APPLIED.
 
 Do not change tracked source, product implementation, Git authority, PR
 identity, or AgentBus semantic facts.
@@ -439,6 +484,14 @@ def run_block_recovery(
     existing = load_recovery_result(paths, job_id) if recovery_result_path(paths, job_id).exists() else None
     if existing is not None:
         return EffectResult(False, f"recovery result already present: {job_id}")
+    if is_proof_as_recovery(block):
+        _store(
+            paths, job_id, block_id=block.block_id, route=route, launched=False,
+            accepted=False, operational_status="INVALID",
+            detail="recovery instruction/postcondition is semantic proof, not an operational prerequisite",
+            report=None, same_blocker=True,
+        )
+        return EffectResult(True, f"recovery rejected as semantic proof: {job_id}")
     prompt = _recovery_prompt(paths, config, snapshot, action, block, diagnosis)
     prompt_path = recovery_log_dir(paths) / f"{job_id}.{route.lower()}.prompt.md"
     log_path = recovery_log_dir(paths) / f"{job_id}.{route.lower()}.log"

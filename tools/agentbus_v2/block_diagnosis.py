@@ -53,11 +53,17 @@ self-contained immutable BLOCK packet.
 Allowed decisions are exactly RECOVER, WAIT, and HUMAN.  Use RECOVER only when
 the operational root cause is clear, the proposed repair is bounded, no
 tracked source or semantic authority change is required, no destructive
-Git/PR/worktree authority is required, and an objective postcondition exists.
-Use WAIT when observation should continue without local mutation.  Use HUMAN
-whenever the cause is uncertain, source or semantic authority may need to
-change, destructive/manual authority is required, or bounded recovery cannot
-be proven safe.  Prefer HUMAN over speculative RECOVER.
+Git/PR/worktree authority is required, and an objective postcondition exists
+for the repaired operational prerequisite itself.  RECOVER may restore a
+prerequisite required for PLAN, WORK, PROVE, or JUDGE to execute.  RECOVER
+must not execute, repeat, or substitute for those semantic effects, rerun CI
+or tests/smokes merely to obtain proof, or use schemaReady=true, CI PASS,
+test PASS, or PROVE success as the postcondition.  Use WAIT when observation
+should continue without local mutation.  Use HUMAN whenever the cause is
+uncertain, source or semantic authority may need to change, the remaining
+work is itself semantic proof, destructive/manual authority is required, or
+bounded recovery cannot be proven safe.  Prefer HUMAN over speculative
+RECOVER.
 
 Return exactly the requested machine-readable JSON object and no Markdown or
 prose.  A RECOVER response is a proposal only; AgentBus v2 will not execute it
@@ -431,7 +437,9 @@ def render_block_packet(
         "Return exactly one JSON object with keys block_id, operation, decision,\n"
         "reason, recovery_instruction, expected_postcondition, and human_action.\n"
         "Allowed decisions are RECOVER, WAIT, HUMAN. RECOVER is a proposal only;\n"
-        "no recovery will be executed in this phase.\n"
+        "no recovery will be executed in this phase. RECOVER may restore an\n"
+        "operational prerequisite; it must not substitute for PLAN, WORK, PROVE,\n"
+        "or JUDGE, and expected_postcondition must not be proof/CI/test success.\n"
     )
     if len(text.encode("utf-8")) > MAX_PACKET_TEXT:
         raise FactError("BLOCK_GPT packet exceeds bounded size")
@@ -502,12 +510,16 @@ def render_diagnosed_block_packet(
             "clean one owned temporary runtime artifact",
             "repair one local process/runtime precondition",
             "release/revalidate one stale operational resource",
-            "rerun a bounded external operational probe",
+            "restore a missing operational executable, permission, or network/runtime prerequisite",
         ],
         "recovery_authority": (
             "BLOCK_GPT does not execute recovery, does not modify source, and chooses only "
-            "RECOVER, WAIT, or HUMAN. RECOVER is valid only for a bounded operational repair "
-            "with an objective postcondition. Semantic or source correctness defects require HUMAN."
+            "RECOVER, WAIT, or HUMAN. RECOVER may restore a bounded operational prerequisite "
+            "required for the current semantic effect to execute. RECOVER must not execute or "
+            "substitute for PLAN, WORK, PROVE, or JUDGE; must not rerun CI, tests, or installer "
+            "smoke merely to obtain proof; and expected_postcondition must describe the repaired "
+            "prerequisite, never schemaReady=true, CI PASS, test PASS, or PROVE success. Semantic "
+            "or source correctness defects, and missing proof evidence itself, require HUMAN."
         ),
     }
     if spec is not None:
@@ -525,7 +537,10 @@ def render_diagnosed_block_packet(
         "reason, recovery_instruction, expected_postcondition, and human_action.\n"
         "Allowed decisions are RECOVER, WAIT, HUMAN. BLOCK_GPT does not execute recovery\n"
         "and does not modify source. RECOVER is a proposal only until AgentBus executes\n"
-        "one bounded operational recovery after CONTROL recovery routing.\n"
+        "one bounded operational recovery after CONTROL recovery routing. RECOVER may\n"
+        "restore an operational prerequisite; it must not substitute for PLAN, WORK,\n"
+        "PROVE, or JUDGE. expected_postcondition must not be schemaReady=true, CI PASS,\n"
+        "test PASS, installer-smoke success, or PROVE success.\n"
     )
     if len(text.encode("utf-8")) > MAX_PACKET_TEXT:
         raise FactError("BLOCK_GPT packet exceeds bounded size")
