@@ -28,7 +28,7 @@ from .block_diagnosis import (
     load_block_config,
     set_block_config,
 )
-from .effects import submit_gpt_response
+from .effects import PROVE_UNCHANGED_DETAIL, submit_gpt_response
 from .executor_pool import list_executor_accounts, list_grok_executors, worktree_execution_lock
 from .facts import (
     FactError,
@@ -117,6 +117,7 @@ def _human_status(
     worktree_clean: bool | None,
     worktree_error: str | None,
     scheduler_status: dict[str, object],
+    latest_detail: str = "",
 ) -> dict[str, object]:
     """Pure operator projection; none of these values are durable facts."""
     if entry.archived:
@@ -183,12 +184,10 @@ def _human_status(
                 "block_reason": "当前尚未取得 executor", "next_wait": "等待执行器可用",
                 "attention": True}
     if action.kind is ActionKind.PROVE:
-        failed = next((item for item in reversed(snapshot.proof_facts)
-                       if item.status.value == "FAIL"), None)
-        if failed is not None:
-            reason = failed.summary.strip() or "PROVE 返回 FAIL"
-            return {"status": "验证失败", "status_code": "PROVE_FAILED",
-                    "block_reason": reason[:500], "next_wait": "等待 JUDGE 决策", "attention": True}
+        if latest_detail == PROVE_UNCHANGED_DETAIL:
+            return {"status": "等待新的 PROVE 证据", "status_code": "PROVE",
+                    "block_reason": PROVE_UNCHANGED_DETAIL,
+                    "next_wait": "等待新的 PROVE 证据", "attention": False}
         return {"status": "等待验证", "status_code": "PROVE", "block_reason": "",
                 "next_wait": "执行 PROVE", "attention": False}
     if action.kind is ActionKind.HUMAN and "WAIT" in action.reason.upper():
@@ -914,7 +913,8 @@ class WebUIState:
                 transport = projection["gpt_transport"]
                 human = _human_status(entry, snapshot, action, delivery, transport,
                                       in_flight=in_flight, worktree_clean=clean,
-                                      worktree_error=wt_error, scheduler_status=scheduler_status)
+                                      worktree_error=wt_error, scheduler_status=scheduler_status,
+                                      latest_detail=str(projection.get("detail") or ""))
                 projection.update({"semantic_status": human["status"], "status_code": human["status_code"],
                                    "block_reason": human["block_reason"], "next_wait": human["next_wait"],
                                    "attention": human["attention"],

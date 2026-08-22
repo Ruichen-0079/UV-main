@@ -25,7 +25,9 @@ from .facts import (
     GPT_JOB_RE,
     PConfig,
     PPaths,
+    _load_gpt_result,
     _load_json,
+    _load_proof,
     _run,
     _work_from_head,
     git,
@@ -52,6 +54,12 @@ from .github import (
 class EffectResult:
     changed: bool
     detail: str
+
+
+PROVE_UNCHANGED_DETAIL = "PROVE evidence unchanged since RETURN_PROVE"
+_PROVE_RETURN_STEPS = frozenset({"PROVE_MECHANICAL", "PROVE_SEMANTIC"})
+_PROOF_ID_RE = re.compile(r"^prove-[0-9a-f]{24}$")
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # This is the hard byte budget for the complete prompt sent through a GPT
@@ -1036,6 +1044,94 @@ def _command_evidence(
     return {"commands": records}, Observation.PASS if not after else Observation.FAIL
 
 
+def _prior_proof_seen_by_return_prove(
+    paths: PPaths,
+    config: PConfig,
+    snapshot: Snapshot,
+    spec: SpecFact,
+    action: Action,
+):
+    """Return the exact prior ProofFact a RETURN_PROVE JUDGE already judged.
+
+    Fail closed: missing, malformed, stale, or unrelated trigger authority
+    yields None and must not suppress a new ProofFact.
+    """
+    trigger = action.payload.get("trigger_judge_id")
+    if type(trigger) is not str or not GPT_JOB_RE.fullmatch(trigger):
+        return None
+    accepted = next((item for item in snapshot.gpt_results if item.job_id == trigger), None)
+    if (
+        accepted is None
+        or accepted.operation != "JUDGE_GPT"
+        or accepted.decision != "RETURN_PROVE"
+    ):
+        return None
+    try:
+        disk = _load_gpt_result(paths, trigger, "JUDGE_GPT")
+        packet = load_gpt_packet(paths, trigger)
+    except (FactError, OSError, TypeError, ValueError, KeyError):
+        return None
+    if disk is None or disk.job_id != trigger or disk.decision != "RETURN_PROVE":
+        return None
+    semantic = packet.get("semantic_input") if isinstance(packet, dict) else None
+    if not isinstance(semantic, dict):
+        return None
+    if (
+        packet.get("operation") != "JUDGE_GPT"
+        or packet.get("job_id") != trigger
+        or semantic.get("operation") != "JUDGE_GPT"
+        or semantic.get("job_id") != trigger
+        or semantic.get("p_id") != snapshot.p_id
+        or semantic.get("spec_id") != spec.spec_id
+        or semantic.get("head") != snapshot.head
+        or semantic.get("base") != snapshot.base
+        or semantic.get("failed_step") not in _PROVE_RETURN_STEPS
+    ):
+        return None
+    evidence_id = semantic.get("evidence_id")
+    evidence_digest = semantic.get("evidence_digest")
+    if (
+        type(evidence_id) is not str
+        or type(evidence_digest) is not str
+        or not _PROOF_ID_RE.fullmatch(evidence_id)
+        or not _DIGEST_RE.fullmatch(evidence_digest)
+    ):
+        return None
+    path = paths.root / "prove" / "results" / f"{evidence_id}.json"
+    try:
+        value = _load_json(path)
+    except (FactError, OSError):
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("proof_id") != evidence_id
+        or value.get("evidence_digest") != evidence_digest
+        or value.get("spec_id") != spec.spec_id
+        or value.get("head") != snapshot.head
+        or value.get("base") != snapshot.base
+        or value.get("contract_digest") != snapshot.proof_contract_digest
+        or value.get("status") not in {Observation.PASS.value, Observation.FAIL.value}
+    ):
+        return None
+    try:
+        loaded = _load_proof(
+            paths, config, spec, snapshot.head, snapshot.base,
+            snapshot.proof_contract_digest, trigger=value.get("trigger_judge_id"),
+        )
+    except (FactError, OSError, TypeError, ValueError):
+        return None
+    if (
+        loaded is None
+        or loaded.proof_id != evidence_id
+        or loaded.evidence_digest != evidence_digest
+        or loaded.spec_id != spec.spec_id
+        or loaded.head != snapshot.head
+        or loaded.base != snapshot.base
+    ):
+        return None
+    return loaded
+
+
 def run_prove(
     paths: PPaths, config: PConfig, snapshot: Snapshot, action: Action
 ) -> EffectResult:
@@ -1150,6 +1246,16 @@ def run_prove(
         "github_checks": evidence["github_checks"],
         "failed_ci_logs": evidence["failed_ci_logs"],
     }
+    prior = _prior_proof_seen_by_return_prove(paths, config, snapshot, spec, action)
+    if (
+        prior is not None
+        and prior.status is status
+        and prior.evidence_digest == result["evidence_digest"]
+        and prior.spec_id == spec.spec_id
+        and prior.head == snapshot.head
+        and prior.base == snapshot.base
+    ):
+        return EffectResult(False, PROVE_UNCHANGED_DETAIL)
     destination = paths.root / "prove" / "results" / f"{action.effect_id}.json"
     write_json_once(destination, result)
     return EffectResult(True, f"{result['summary']}; stored {destination}")

@@ -39,6 +39,7 @@ from tools.agentbus_v2.effects import (
     render_gpt_prompt,
     run_prove,
     submit_gpt_response,
+    PROVE_UNCHANGED_DETAIL,
 )
 from tools.agentbus_v2.facts import (
     FactError,
@@ -573,33 +574,48 @@ class FactAndEffectTests(unittest.TestCase):
                 "force deterministic local proof failure\n", encoding="utf-8"
             )
 
-            prior_judge: str | None = None
-            for attempt in range(3):
-                current = read_snapshot(paths)
-                prove = decide(current)
-                self.assertEqual(ActionKind.PROVE, prove.kind)
-                self.assertEqual(prior_judge, prove.payload.get("trigger_judge_id"))
-                self.assertTrue(run_prove(paths, config, current, prove).changed)
+            current = read_snapshot(paths)
+            first = decide(current)
+            self.assertEqual(ActionKind.PROVE, first.kind)
+            self.assertIsNone(first.payload.get("trigger_judge_id"))
+            self.assertTrue(run_prove(paths, config, current, first).changed)
 
-                failed = read_snapshot(paths)
-                judge = decide(failed)
-                self.assertEqual(ActionKind.JUDGE, judge.kind)
-                self.assertEqual(prior_judge, judge.payload.get("trigger_judge_id"))
-                if attempt == 2:
-                    self.assertEqual(3, len(failed.proof_facts))
-                    self.assertEqual(3, len({item.proof_id for item in failed.proof_facts}))
-                    break
+            failed = read_snapshot(paths)
+            judge = decide(failed)
+            self.assertEqual(ActionKind.JUDGE, judge.kind)
+            dispatch_manual_gpt(paths, config, failed, judge)
+            judge_response = root / "prove-judge.json"
+            judge_response.write_text(json.dumps({
+                "job_id": judge.effect_id,
+                "operation": "JUDGE_GPT",
+                "decision": "RETURN_PROVE",
+                "body": "Repeat proof with the same local failure.",
+            }), encoding="utf-8")
+            submit_gpt_response(paths, judge_response)
 
-                dispatch_manual_gpt(paths, config, failed, judge)
-                judge_response = root / f"prove-judge-{attempt}.json"
-                judge_response.write_text(json.dumps({
-                    "job_id": judge.effect_id,
-                    "operation": "JUDGE_GPT",
-                    "decision": "RETURN_PROVE",
-                    "body": f"Repeat proof with correction {attempt}.",
-                }), encoding="utf-8")
-                submit_gpt_response(paths, judge_response)
-                prior_judge = judge.effect_id
+            retried = read_snapshot(paths)
+            second = decide(retried)
+            self.assertEqual(ActionKind.PROVE, second.kind)
+            self.assertEqual(judge.effect_id, second.payload.get("trigger_judge_id"))
+            self.assertNotEqual(first.effect_id, second.effect_id)
+            result = run_prove(paths, config, retried, second)
+            self.assertFalse(result.changed)
+            self.assertEqual(PROVE_UNCHANGED_DETAIL, result.detail)
+            self.assertFalse(
+                (paths.root / "prove" / "results" / f"{second.effect_id}.json").exists()
+            )
+            again = run_prove(paths, config, read_snapshot(paths), decide(read_snapshot(paths)))
+            self.assertFalse(again.changed)
+            live = read_snapshot(paths)
+            live_action = decide(live)
+            self.assertEqual(ActionKind.PROVE, live_action.kind)
+            self.assertEqual(second.effect_id, live_action.effect_id)
+            self.assertEqual(1, len(live.proof_facts))
+            self.assertEqual({first.effect_id}, {item.proof_id for item in live.proof_facts})
+            self.assertEqual(
+                [judge.effect_id],
+                [path.stem for path in (paths.root / "gpt" / "outbox").glob("judge-*.md")],
+            )
 
     def test_recovered_retry_commit_requires_its_exact_return_work_cause(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
