@@ -10,6 +10,7 @@ from unittest.mock import patch
 from tools.agentbus_v2.block_diagnosis import (
     BLOCK_OPERATION,
     BlockDiagnosisSupervisor,
+    BlockResult,
     derive_operational_block,
     load_block_packet,
     parse_block_response,
@@ -35,9 +36,20 @@ from tools.agentbus_v2.control_supervisor import (
     ControlSupervisor,
     drive_authorized_operations,
 )
-from tools.agentbus_v2.core import Action, ActionKind, Observation, decide
+from tools.agentbus_v2.core import (
+    Action,
+    ActionKind,
+    GptResult,
+    Observation,
+    OperatorDirective,
+    ProofFact,
+    SpecFact,
+    WorkFact,
+    decide,
+)
 from tools.agentbus_v2.effects import EffectResult
 from tools.agentbus_v2.facts import FactError, read_snapshot
+from tools.agentbus_v2.github import GitHubFacts
 from tools.agentbus_v2.readonly_diagnosis import (
     DiagnosisRun,
     current_diagnosis,
@@ -597,6 +609,184 @@ class BlockHandoffAndRecoveryTests(unittest.TestCase):
         self.assertNotIn("CONTROL", [item.value for item in CoreActionKind])
         self.assertNotIn("DIAGNOSE", [item.value for item in CoreActionKind])
         self.assertNotIn("RECOVER", [item.value for item in CoreActionKind])
+
+
+class SemanticAuthorityFingerprintTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.fx = SupervisorFixture(Path(self.temp.name))
+        self.snapshot = replace(
+            self.fx.snapshot,
+            allow_merge=True,
+            merge=GitHubFacts(
+                available=True, pr_number=4, check_status="PENDING",
+                head_sha=self.fx.snapshot.head, base_branch="main",
+            ),
+        )
+        self.action = self.fx.action
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _live_drift(self, snapshot):
+        return replace(
+            snapshot,
+            repository_available=False,
+            allow_merge=False,
+            gpt_pending=frozenset({"plan-" + "b" * 24}),
+            merge=GitHubFacts(
+                available=True, pr_number=4, check_status="FAIL", mergeable=False,
+                head_sha=snapshot.head, base_branch="main",
+            ),
+        )
+
+    def test_fingerprint_ignores_live_observations_and_tracks_durable_facts(self) -> None:
+        original = semantic_fact_fingerprint(self.snapshot)
+        drifted = self._live_drift(self.snapshot)
+        self.assertEqual(original, semantic_fact_fingerprint(drifted))
+        self.assertEqual(original, semantic_fact_fingerprint(replace(self.snapshot, head="c" * 40, base="d" * 40)))
+
+        spec = SpecFact("spec-" + "b" * 24, "different spec", plan_job_id=self.fx.control.spec.plan_job_id)
+        self.assertNotEqual(original, semantic_fact_fingerprint(replace(self.snapshot, specs=(spec,))))
+        gpt = GptResult("plan-" + "b" * 24, "PLAN_GPT", "SPEC", "other")
+        self.assertNotEqual(original, semantic_fact_fingerprint(replace(self.snapshot, gpt_results=(gpt,))))
+        work = WorkFact(
+            "work-" + "b" * 24, self.fx.control.spec.spec_id, self.snapshot.head,
+            Observation.FAIL, "e" * 64,
+        )
+        self.assertNotEqual(original, semantic_fact_fingerprint(replace(self.snapshot, work_facts=(work,))))
+        proof = ProofFact(
+            "prove-" + "b" * 24, self.fx.control.spec.spec_id, self.snapshot.head,
+            self.snapshot.base, Observation.FAIL, "f" * 64, summary="failed",
+        )
+        self.assertNotEqual(original, semantic_fact_fingerprint(replace(self.snapshot, proof_facts=(proof,))))
+        directive = OperatorDirective(
+            "directive-" + "b" * 24, "do not weaken requirements", "g" * 64,
+            self.fx.control.plan_id,
+        )
+        self.assertNotEqual(
+            original,
+            semantic_fact_fingerprint(replace(self.snapshot, operator_directive=directive)),
+        )
+
+    def test_operational_artifact_writes_do_not_change_fingerprint(self) -> None:
+        before = semantic_fact_fingerprint(self.snapshot)
+        root = self.fx.control.paths.root
+        for relative in (
+            "control/outbox/control-" + "a" * 24 + ".md",
+            "block/outbox/block-" + "a" * 24 + ".md",
+            "diagnosis/results/diagnosis-" + "a" * 24 + ".json",
+            "recovery/results/recovery-" + "a" * 24 + ".json",
+        ):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n", encoding="utf-8")
+        self.assertEqual(before, semantic_fact_fingerprint(self.snapshot))
+
+    def _diagnose(self, after_snapshot, *, decide_action=None, executor=None, detail="live drift"):
+        recorded: list[bool] = []
+
+        def fake_read(paths, *, allow_merge=False):
+            recorded.append(allow_merge)
+            return after_snapshot
+
+        with patch("tools.agentbus_v2.readonly_diagnosis.read_snapshot", side_effect=fake_read), \
+             patch("tools.agentbus_v2.readonly_diagnosis.decide", return_value=decide_action or self.action):
+            result = run_readonly_diagnosis(
+                self.fx.control.state, self.fx.control.paths, self.fx.control.config,
+                self.snapshot, self.action, detail=detail,
+                executor=executor or (lambda *args, **kwargs: DiagnosisRun(True, _report(), "ok")),
+            )
+        return result, recorded
+
+    def test_diagnosis_preserves_allow_merge_and_ignores_github_observation_drift(self) -> None:
+        after = self._live_drift(self.snapshot)
+        result, recorded = self._diagnose(after, detail="allow-merge diagnosis")
+        self.assertEqual([True], recorded)
+        self.assertTrue(result.changed)
+        self.assertIn("accepted", result.detail)
+        self.assertNotIn("UNSAFE", result.detail)
+
+        stale_action = Action(ActionKind.WORK, effect_id="work-" + "d" * 24, payload=self.action.payload)
+        result, _ = self._diagnose(after, decide_action=stale_action, detail="github drift stale")
+        self.assertIn("stale", result.detail)
+        self.assertNotIn("UNSAFE", result.detail)
+
+    def test_diagnosis_git_and_durable_fact_mutations_are_unsafe(self) -> None:
+        worktree = Path(self.fx.control.config.worktree)
+
+        def mutate_head(*args, **kwargs):
+            (worktree / "head-mut.txt").write_text("mutated\n", encoding="utf-8")
+            from tools.agentbus_v2.tests.test_facts_effects import run
+            run(worktree, "git", "add", "head-mut.txt")
+            import subprocess
+            subprocess.run(
+                ("git", "commit", "-m", "head mutation"),
+                cwd=worktree, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            return DiagnosisRun(True, _report(), "ok")
+
+        result, _ = self._diagnose(self.snapshot, executor=mutate_head, detail="head mutation")
+        self.assertIn("UNSAFE", result.detail)
+
+        def mutate_ref(*args, **kwargs):
+            from tools.agentbus_v2.tests.test_facts_effects import run
+            run(worktree, "git", "branch", "unrelated-authority")
+            return DiagnosisRun(True, _report(), "ok")
+
+        result, _ = self._diagnose(self.snapshot, executor=mutate_ref, detail="ref mutation")
+        self.assertIn("UNSAFE", result.detail)
+
+        def mutate_tracked(*args, **kwargs):
+            (worktree / "README.md").write_text("tracked dirty\n", encoding="utf-8")
+            return DiagnosisRun(True, _report(), "ok")
+
+        result, _ = self._diagnose(self.snapshot, executor=mutate_tracked, detail="tracked mutation")
+        self.assertIn("UNSAFE", result.detail)
+        from tools.agentbus_v2.tests.test_facts_effects import run
+        run(worktree, "git", "checkout", "--", "README.md")
+
+        mutated_facts = replace(
+            self.snapshot,
+            gpt_results=self.snapshot.gpt_results + (
+                GptResult("judge-" + "b" * 24, "JUDGE_GPT", "HUMAN", "mutated"),
+            ),
+        )
+        result, _ = self._diagnose(mutated_facts, detail="semantic fact mutation")
+        self.assertIn("UNSAFE", result.detail)
+
+    def _recover(self, after_snapshot, *, executor=None):
+        recorded: list[bool] = []
+        block = BlockResult(
+            "block-" + "c" * 24, BLOCK_OPERATION, "RECOVER",
+            "bounded operational diagnosis",
+            "recreate the missing local runtime socket",
+            "executor can be launched safely", None,
+        )
+
+        def fake_read(paths, *, allow_merge=False):
+            recorded.append(allow_merge)
+            return after_snapshot
+
+        applied = RecoveryRun(
+            True, {"status": "APPLIED", "summary": "recreated socket", "evidence": ["ok"]},
+            "ok", "CODEX",
+        )
+        with patch("tools.agentbus_v2.readonly_diagnosis.read_snapshot", side_effect=fake_read), \
+             patch("tools.agentbus_v2.readonly_diagnosis.decide", return_value=self.action):
+            result = run_block_recovery(
+                self.fx.control.state, self.fx.control.paths, self.fx.control.config,
+                self.snapshot, self.action, block, route="CODEX",
+                executor=executor or (lambda *args, **kwargs: applied),
+            )
+        return result, recorded
+
+    def test_recovery_preserves_allow_merge_and_ignores_github_observation_drift(self) -> None:
+        after = self._live_drift(self.snapshot)
+        result, recorded = self._recover(after)
+        self.assertEqual([True], recorded)
+        self.assertTrue(result.changed)
+        self.assertNotIn("UNSAFE", result.detail)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ authority and the semantic-fact fingerprint are unchanged.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, is_dataclass
 from enum import Enum
 import json
 import os
@@ -77,11 +77,21 @@ DiagnosisExecutor = Callable[..., DiagnosisRun]
 
 
 def semantic_fact_fingerprint(snapshot: Snapshot) -> str:
-    """Hash only durable semantic Snapshot fields, never operational dirs."""
+    """Hash durable AgentBus semantic facts, not live or operational observations.
+
+    Git HEAD/BASE, GitHub/merge projection, gpt_pending transport materialization,
+    repository_available, and allow_merge are excluded.  Those have separate
+    currentness or Git-authority fences and are not executor semantic mutation.
+    """
 
     def normalize(value: Any) -> Any:
         if isinstance(value, Enum):
             return value.value
+        if is_dataclass(value) and not isinstance(value, type):
+            return {
+                field: normalize(getattr(value, field))
+                for field in value.__dataclass_fields__
+            }
         if isinstance(value, dict):
             return {str(key): normalize(item) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
@@ -90,8 +100,26 @@ def semantic_fact_fingerprint(snapshot: Snapshot) -> str:
             return sorted(normalize(item) for item in value)
         return value
 
-    payload = normalize(asdict(snapshot))
+    payload = {
+        "p_id": snapshot.p_id,
+        "charter_digest": snapshot.charter_digest,
+        "expected_repository": snapshot.expected_repository,
+        "expected_branch": snapshot.expected_branch,
+        "base_ref": snapshot.base_ref,
+        "specs": normalize(snapshot.specs),
+        "gpt_results": normalize(snapshot.gpt_results),
+        "work_facts": normalize(snapshot.work_facts),
+        "proof_facts": normalize(snapshot.proof_facts),
+        "expected_owner_token": snapshot.expected_owner_token,
+        "proof_contract_digest": snapshot.proof_contract_digest,
+        "operator_directive": normalize(snapshot.operator_directive),
+    }
     return sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+
+
+def reread_authorized_snapshot(paths: PPaths, snapshot: Snapshot) -> Snapshot:
+    """Reread durable facts with the same operational allow_merge projection."""
+    return read_snapshot(paths, allow_merge=snapshot.allow_merge)
 
 
 def observation_fingerprint(action: Action, detail: str) -> str:
@@ -500,7 +528,7 @@ def run_readonly_diagnosis(
         except DiagnosisError as error:
             detail_text = f"invalid diagnosis JSON: {error}"
 
-    after_snapshot = read_snapshot(paths)
+    after_snapshot = reread_authorized_snapshot(paths, snapshot)
     after_action = decide(after_snapshot)
     after = capture_authority(config, after_snapshot)
     if authority_mutated(before, after):

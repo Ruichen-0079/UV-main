@@ -23,7 +23,6 @@ from .facts import (
     PConfig,
     PPaths,
     _load_json,
-    read_snapshot,
     sha256_text,
     write_json_once,
     write_text_once,
@@ -31,6 +30,7 @@ from .facts import (
 from .readonly_diagnosis import (
     authority_mutated,
     capture_authority,
+    reread_authorized_snapshot,
     semantic_fact_fingerprint,
 )
 
@@ -462,7 +462,7 @@ def run_block_recovery(
     if not run.launched:
         return EffectResult(False, run.detail)
 
-    after_snapshot = read_snapshot(paths)
+    after_snapshot = reread_authorized_snapshot(paths, snapshot)
     after_action = decide(after_snapshot)
     after = capture_authority(config, after_snapshot)
     after_pr = _pr_identity(after_snapshot)
