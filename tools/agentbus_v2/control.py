@@ -645,6 +645,38 @@ def load_control_packet(paths: PPaths, job_id: str) -> dict[str, Any]:
     return packet
 
 
+def load_stall_triage_context(paths: PPaths, job_id: str) -> dict[str, str] | None:
+    """Read the immutable STALL_TRIAGE observation that authorized DIAGNOSE.
+
+    Tick-local scheduler detail is not authority.  Fail closed if the packet
+    or its bounded operational context is absent or malformed.
+    """
+    path = control_packet_path(paths, job_id)
+    try:
+        text = path.read_text(encoding="utf-8")
+        packet = load_control_packet(paths, job_id)
+    except (ControlError, FactError, OSError):
+        return None
+    if packet.get("purpose") != CONTROL_PURPOSE_STALL_TRIAGE:
+        return None
+    marker = "## BOUNDED OPERATIONAL CONTEXT\n```json\n"
+    try:
+        encoded = text.split(marker, 1)[1].split("\n```", 1)[0]
+        extra = json.loads(encoded)
+    except (IndexError, json.JSONDecodeError):
+        return None
+    if not isinstance(extra, dict):
+        return None
+    detail = extra.get("result_detail")
+    fingerprint = extra.get("observation_fingerprint")
+    if type(detail) is not str or type(fingerprint) is not str or not fingerprint.strip():
+        return None
+    return {
+        "result_detail": detail,
+        "observation_fingerprint": fingerprint,
+    }
+
+
 def _packet_matches_current(
     packet: Mapping[str, Any],
     config,

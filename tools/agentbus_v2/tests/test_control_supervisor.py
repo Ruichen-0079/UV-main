@@ -36,6 +36,7 @@ from tools.agentbus_v2.control import (
     control_packet_path,
     control_result_path,
     ensure_control_request,
+    load_stall_triage_context,
     set_control_config,
     submit_control_response,
 )
@@ -270,8 +271,8 @@ class StallSupervisorTests(unittest.TestCase):
                 stall_detail="PR identities have not converged",
             )
         self.assertTrue(first.changed)
-        self.assertTrue(second is None or second.changed is False)
         self.assertEqual([1], calls)
+        self.assertTrue(second is None or "diagnosis" not in second.detail or second.changed is False)
 
 
 class DiagnosisRecoveryTests(unittest.TestCase):
@@ -618,6 +619,165 @@ class BlockHandoffAndRecoveryTests(unittest.TestCase):
         self.assertNotIn("CONTROL", [item.value for item in CoreActionKind])
         self.assertNotIn("DIAGNOSE", [item.value for item in CoreActionKind])
         self.assertNotIn("RECOVER", [item.value for item in CoreActionKind])
+
+
+class StallDiagnosisHandoffTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.fx = SupervisorFixture(Path(self.temp.name))
+        self.patches = [
+            patch("tools.agentbus_v2.control.read_snapshot", return_value=self.fx.snapshot),
+            patch("tools.agentbus_v2.control.decide", return_value=self.fx.action),
+            patch("tools.agentbus_v2.block_diagnosis.read_snapshot", return_value=self.fx.snapshot),
+            patch("tools.agentbus_v2.block_diagnosis.decide", return_value=self.fx.action),
+        ]
+        for item in self.patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _authorize_diagnose(self, detail: str) -> str:
+        self.fx.observe(EffectResult(False, detail))
+        self.fx.clock.advance(600)
+        self.fx.observe(EffectResult(False, detail))
+        job = self.fx.stall_id()
+        path = self.fx.control.state / "diagnose.json"
+        path.write_text(json.dumps({
+            "job_id": job, "operation": "CONTROL_GPT", "decision": "DIAGNOSE", "body": "probe",
+        }), encoding="utf-8")
+        submit_control_response(self.fx.control.paths, path)
+        return job
+
+    def _drive(self, stall_detail: str = "", executor=None):
+        with patch("tools.agentbus_v2.readonly_diagnosis.read_snapshot", return_value=self.fx.snapshot), \
+             patch("tools.agentbus_v2.readonly_diagnosis.decide", return_value=self.fx.action):
+            return drive_authorized_operations(
+                self.fx.control.state, self.fx.entry, self.fx.snapshot, self.fx.action,
+                diagnosis_executor=executor or (
+                    lambda *args, **kwargs: DiagnosisRun(True, _report(), "ok")
+                ),
+                stall_detail=stall_detail,
+            )
+
+    def test_empty_tick_detail_cannot_diverge_from_stall_packet(self) -> None:
+        detail = "PROVE evidence unchanged since RETURN_PROVE"
+        job = self._authorize_diagnose(detail)
+        context = load_stall_triage_context(self.fx.control.paths, job)
+        self.assertIsNotNone(context)
+        packet_fp = context["observation_fingerprint"]
+        self.assertEqual(packet_fp, observation_fingerprint(self.fx.action, detail))
+        self.assertNotEqual(packet_fp, observation_fingerprint(self.fx.action, ""))
+        first = self._drive(stall_detail="")
+        self.assertTrue(first.changed)
+        matched = current_diagnosis(self.fx.control.paths, self.fx.snapshot, self.fx.action, detail=detail)
+        empty = current_diagnosis(self.fx.control.paths, self.fx.snapshot, self.fx.action, detail="")
+        self.assertIsNotNone(matched)
+        self.assertTrue(matched.get("accepted"))
+        self.assertEqual(packet_fp, matched["identity"]["observation_fingerprint"])
+        self.assertTrue(empty is None or empty.get("diagnosis_id") != matched["diagnosis_id"])
+
+    def test_packet_detail_is_used_and_later_tick_text_does_not_rekey(self) -> None:
+        detail = "PROVE evidence unchanged since RETURN_PROVE"
+        job = self._authorize_diagnose(detail)
+        expected_id = diagnosis_id(
+            p_id=self.fx.snapshot.p_id,
+            action_kind=self.fx.action.kind.value,
+            causal_effect_id=self.fx.action.effect_id or "",
+            head=self.fx.snapshot.head,
+            base=self.fx.snapshot.base,
+            observation_fingerprint=observation_fingerprint(self.fx.action, detail),
+        )
+        self._drive(stall_detail="")
+        other = self._drive(stall_detail="later scheduler text Y")
+        self.assertTrue(other is None or other.changed is True)
+        diagnosis = current_diagnosis(
+            self.fx.control.paths, self.fx.snapshot, self.fx.action, detail=detail
+        )
+        self.assertEqual(expected_id, diagnosis["diagnosis_id"])
+        self.assertEqual(
+            1,
+            len(list((self.fx.control.paths.root / "diagnosis" / "results").glob("diagnosis-*.json"))),
+        )
+
+    def test_accepted_diagnosis_creates_one_block_and_repeated_ticks_do_not_duplicate(self) -> None:
+        detail = "PROVE evidence unchanged since RETURN_PROVE"
+        self._authorize_diagnose(detail)
+        first = self._drive(stall_detail="")
+        self.assertIn("accepted", first.detail)
+        second = self._drive(stall_detail="")
+        self.assertIsNotNone(second)
+        self.assertIn("BLOCK packet created", second.detail)
+        blocks = list((self.fx.control.paths.root / "block" / "outbox").glob("block-*.md"))
+        self.assertEqual(1, len(blocks))
+        third = self._drive(stall_detail="another tick")
+        self.assertTrue(third is None or "BLOCK packet created" not in (third.detail or ""))
+        self.assertEqual(1, len(list((self.fx.control.paths.root / "block" / "outbox").glob("block-*.md"))))
+
+    def test_fresh_supervisor_recovers_durable_stall_observation(self) -> None:
+        detail = "PROVE evidence unchanged since RETURN_PROVE"
+        self._authorize_diagnose(detail)
+        self._drive(stall_detail="")
+        self._drive(stall_detail="")
+        block_before = list((self.fx.control.paths.root / "block" / "outbox").glob("block-*.md"))
+        self.assertEqual(1, len(block_before))
+        fresh = ControlSupervisor(self.fx.control.state, clock=self.fx.clock, threshold=600)
+        fresh.observe(
+            self.fx.control.config.p_id, self.fx.action,
+            EffectResult(False, "later scheduler text Y"),
+            entry=self.fx.entry, snapshot=self.fx.snapshot,
+        )
+        self.fx.clock.advance(600)
+        fresh.observe(
+            self.fx.control.config.p_id, self.fx.action,
+            EffectResult(False, "later scheduler text Y"),
+            entry=self.fx.entry, snapshot=self.fx.snapshot,
+        )
+        self.assertEqual(
+            1,
+            len(list((self.fx.control.paths.root / "block" / "outbox").glob("block-*.md"))),
+        )
+        diagnosis = current_diagnosis(
+            self.fx.control.paths, self.fx.snapshot, self.fx.action, detail=detail
+        )
+        self.assertTrue(diagnosis.get("accepted"))
+        self.assertIsNone(
+            current_diagnosis(
+                self.fx.control.paths, self.fx.snapshot, self.fx.action,
+                detail="later scheduler text Y",
+            )
+        )
+
+    def test_different_stall_effect_cannot_reuse_unrelated_diagnosis(self) -> None:
+        detail = "PROVE evidence unchanged since RETURN_PROVE"
+        self._authorize_diagnose(detail)
+        self._drive(stall_detail="")
+        other = Action(ActionKind.WORK, effect_id="work-" + "b" * 24, payload=self.fx.action.payload)
+        from tools.agentbus_v2.control_supervisor import _authorized_stall_observation_detail
+        self.assertIsNone(
+            _authorized_stall_observation_detail(self.fx.control.paths, self.fx.snapshot, other)
+        )
+        self.assertIsNone(
+            current_diagnosis(self.fx.control.paths, self.fx.snapshot, other, detail=detail)
+        )
+
+    def test_diagnosis_mutation_fences_remain(self) -> None:
+        detail = "PROVE evidence unchanged since RETURN_PROVE"
+        self._authorize_diagnose(detail)
+
+        def dirty(*args, **kwargs):
+            Path(self.fx.control.config.worktree, "mut.txt").write_text("nope\n")
+            return DiagnosisRun(True, _report(), "ok")
+
+        with patch("tools.agentbus_v2.readonly_diagnosis.read_snapshot", return_value=self.fx.snapshot), \
+             patch("tools.agentbus_v2.readonly_diagnosis.decide", return_value=self.fx.action):
+            result = drive_authorized_operations(
+                self.fx.control.state, self.fx.entry, self.fx.snapshot, self.fx.action,
+                diagnosis_executor=dirty, stall_detail="",
+            )
+        self.assertIn("UNSAFE", result.detail)
+        Path(self.fx.control.config.worktree, "mut.txt").unlink(missing_ok=True)
 
 
 class CodexReadonlyCommandTests(unittest.TestCase):

@@ -33,6 +33,7 @@ from .control import (
     ensure_control_request,
     load_control_config,
     load_control_result,
+    load_stall_triage_context,
 )
 from .core import Action, ActionKind, Snapshot, decide
 from .effects import EffectResult
@@ -223,7 +224,10 @@ class ControlSupervisor:
         if result is None or result.decision != "DIAGNOSE":
             return
         paths = paths_for(self.state_root, p_id)
-        diagnosis = current_diagnosis(paths, snapshot, action, detail=memory.last_detail)
+        detail = _authorized_stall_observation_detail(paths, snapshot, action)
+        if detail is None:
+            return
+        diagnosis = current_diagnosis(paths, snapshot, action, detail=detail)
         if diagnosis is None or not diagnosis.get("accepted") or not diagnosis.get("report"):
             return
         block_config = load_block_config(self.state_root)
@@ -231,14 +235,7 @@ class ControlSupervisor:
             return
         block = _current_block(paths, snapshot, action)
         if block is None:
-            if any(
-                not (block_result_dir(paths) / f"{path.stem}.json").exists()
-                for path in block_packet_dir(paths).glob("block-*.md")
-            ):
-                return
-            observation = derive_diagnosed_stall_block(p_id, action, diagnosis)
-            packet = render_diagnosed_block_packet(snapshot, action, observation, diagnosis)
-            write_text_once(block_packet_dir(paths) / f"{observation.block_id}.md", packet)
+            _ensure_diagnosed_stall_block(paths, snapshot, action, diagnosis)
             return
         if block.decision != "RECOVER":
             return
@@ -355,6 +352,45 @@ def _current_block(paths, snapshot: Snapshot, action: Action) -> BlockResult | N
     return None
 
 
+def _authorized_stall_observation_detail(paths, snapshot: Snapshot, action: Action) -> str | None:
+    """Return the STALL_TRIAGE packet result_detail that authorized DIAGNOSE.
+
+    Scheduler tick text is not used.  A fingerprint mismatch fails closed.
+    """
+    stall_job = _stall_job_id(snapshot, action)
+    if stall_job is None:
+        return None
+    stall_result = load_control_result(paths, stall_job)
+    if stall_result is None or stall_result.decision != "DIAGNOSE":
+        return None
+    context = load_stall_triage_context(paths, stall_job)
+    if context is None:
+        return None
+    detail = context["result_detail"]
+    if observation_fingerprint(action, detail) != context["observation_fingerprint"]:
+        return None
+    return detail
+
+
+def _ensure_diagnosed_stall_block(
+    paths, snapshot: Snapshot, action: Action, diagnosis: Mapping[str, Any]
+) -> tuple[str | None, bool]:
+    observation = derive_diagnosed_stall_block(snapshot.p_id, action, diagnosis)
+    destination = block_packet_dir(paths) / f"{observation.block_id}.md"
+    if destination.exists():
+        return observation.block_id, False
+    if any(
+        not (block_result_dir(paths) / f"{path.stem}.json").exists()
+        for path in block_packet_dir(paths).glob("block-*.md")
+    ):
+        return None, False
+    write_text_once(
+        destination,
+        render_diagnosed_block_packet(snapshot, action, observation, diagnosis),
+    )
+    return observation.block_id, True
+
+
 def drive_authorized_operations(
     state_root,
     entry: Any,
@@ -366,11 +402,13 @@ def drive_authorized_operations(
     recovery_executor=None,
     stall_detail: str = "",
 ) -> EffectResult | None:
-    """Run at most one authorized diagnosis or recovery on the P worker.
+    """Run at most one authorized diagnosis, BLOCK handoff, or recovery.
 
-    Packet creation stays in the memory-only supervisor.  This function never
-    waits for Web GPT and does not change semantic identity.
+    Diagnosis identity is recovered from the immutable STALL_TRIAGE packet.
+    ``stall_detail`` is ignored for that identity so tick-local text cannot
+    diverge from the DIAGNOSE authorization.
     """
+    del stall_detail
     if entry is None or not getattr(entry, "enabled", True) or getattr(entry, "archived", False):
         return None
     if action.kind not in STALL_ELIGIBLE_KINDS or not action.effect_id:
@@ -383,14 +421,30 @@ def drive_authorized_operations(
     stall_job = _stall_job_id(snapshot, action)
     stall_result = load_control_result(paths, stall_job) if stall_job else None
     if stall_result is not None and stall_result.decision == "DIAGNOSE":
-        existing = current_diagnosis(paths, snapshot, action, detail=stall_detail)
+        detail = _authorized_stall_observation_detail(paths, snapshot, action)
+        if detail is None:
+            return None
+        existing = current_diagnosis(paths, snapshot, action, detail=detail)
         if existing is None:
             return run_readonly_diagnosis(
                 state_root, paths, config, snapshot, action,
-                detail=stall_detail, executor=diagnosis_executor,
+                detail=detail, executor=diagnosis_executor,
             )
         if existing.get("accepted") and existing.get("report"):
+            block_config = load_block_config(state_root)
             block = _current_block(paths, snapshot, action)
+            if (
+                block is None
+                and block_config.enabled
+                and block_config.conversation_url is not None
+            ):
+                block_id, created = _ensure_diagnosed_stall_block(
+                    paths, snapshot, action, existing
+                )
+                if created:
+                    return EffectResult(
+                        True, f"diagnosed-stall BLOCK packet created: {block_id}"
+                    )
             if block is not None and block.decision == "RECOVER":
                 recovery_job = _recovery_job_id(snapshot, action, block.block_id)
                 recovery_result = load_control_result(paths, recovery_job) if recovery_job else None
@@ -456,8 +510,12 @@ def _operational_view_body(
     elapsed = None if stall is None else max(0, int(clock() - stall.started))
     stall_job = _stall_job_id(snapshot, action) if action.kind in STALL_ELIGIBLE_KINDS else None
     stall_result = load_control_result(paths, stall_job) if stall_job else None
+    authorized_detail = _authorized_stall_observation_detail(paths, snapshot, action)
     diagnosis = current_diagnosis(
-        paths, snapshot, action, detail="" if stall is None else stall.last_detail,
+        paths, snapshot, action,
+        detail=authorized_detail if authorized_detail is not None else (
+            "" if stall is None else stall.last_detail
+        ),
     )
     block = _current_block(paths, snapshot, action)
     recovery = current_recovery(paths, block) if block is not None else None
