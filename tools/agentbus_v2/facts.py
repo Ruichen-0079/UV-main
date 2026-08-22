@@ -906,7 +906,11 @@ def _validate_proof_commands(
         if len(value) != len(expected) or first_failure is not None:
             raise FactError(f"PROVE PASS lacks complete passing commands: {path}")
     elif first_failure is None:
-        raise FactError(f"PROVE FAIL lacks a confirmed command failure: {path}")
+        # A PROVE FAIL may be established by a required CI check after all
+        # local mechanical commands pass.  CI evidence is validated below;
+        # retain the complete local command contract in that case.
+        if not config.required_ci_checks or len(value) != len(expected):
+            raise FactError(f"PROVE FAIL lacks a confirmed command failure: {path}")
     elif any(item["exit_code"] != 0 for item in value[first_failure + 1:]):
         raise FactError(f"PROVE command evidence continues after failure: {path}")
 
@@ -935,9 +939,17 @@ def _validate_proof_ci(
             if item.get("name") == required
             or f"{item.get('workflow')} / {item.get('name')}" == required
         ]
-        if not matches or any(item.get("bucket") != "pass" for item in matches):
-            if status == Observation.PASS.value:
-                raise FactError(f"PROVE PASS lacks required CI evidence: {path}")
+        if not matches:
+            if status in {Observation.PASS.value, Observation.FAIL.value}:
+                raise FactError(f"PROVE result lacks required CI evidence: {path}")
+        elif status == Observation.PASS.value and any(
+            item.get("bucket") != "pass" for item in matches
+        ):
+            raise FactError(f"PROVE PASS lacks required CI evidence: {path}")
+    if status == Observation.FAIL.value and not local_failed and not any(
+        item.get("bucket") in {"fail", "cancel"} for item in checks
+    ):
+        raise FactError(f"PROVE FAIL lacks a confirmed CI failure: {path}")
 
 
 def _identity(

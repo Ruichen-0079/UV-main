@@ -1332,6 +1332,15 @@ AgentBus-V2-Plan: plan-%s
                 checks=(check,),
                 failed_ci_logs=(("20", "Direct installer smoke: failure"),),
             )
+            local_commands = [
+                {
+                    "argv": list(command),
+                    "exit_code": 0,
+                    "output": "",
+                    "output_digest": sha256_text(""),
+                }
+                for command in _proof_commands(config, snapshot.base, snapshot.head)
+            ]
             completed = subprocess.CompletedProcess(("git", "fetch"), 0, "", "")
             with (
                 patch("tools.agentbus_v2.effects._run", return_value=completed),
@@ -1341,7 +1350,7 @@ AgentBus-V2-Plan: plan-%s
                 ),
                 patch(
                     "tools.agentbus_v2.effects._command_evidence",
-                    return_value=({"commands": []}, Observation.PASS),
+                    return_value=({"commands": local_commands}, Observation.PASS),
                 ),
                 patch("tools.agentbus_v2.effects.ensure_owned_pr", return_value=True),
                 patch(
@@ -1364,6 +1373,17 @@ AgentBus-V2-Plan: plan-%s
                 ["validate (ubuntu-latest)"],
                 [item["name"] for item in saved["github_checks"]],
             )
+            loaded = _load_proof(
+                paths,
+                config,
+                spec,
+                snapshot.head,
+                snapshot.base,
+                snapshot.proof_contract_digest,
+            )
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertIs(Observation.FAIL, loaded.status)
 
     def test_proof_result_identity_corruption_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
