@@ -3,17 +3,28 @@ import {
   MessageSseParser,
   MessageStreamError,
   MessageStreamProtocolError,
+  ProactiveSseParser,
   type CompletedMessage,
-  type MessageStreamEvent
+  type MessageStreamEvent,
+  type ProactiveDecisionEvent,
+  type ProactiveMessageStreamEvent
 } from "./stream.js";
 
-export { MessageSseParser, MessageStreamError, MessageStreamProtocolError } from "./stream.js";
+export {
+  MessageSseParser,
+  MessageStreamError,
+  MessageStreamProtocolError,
+  ProactiveSseParser
+} from "./stream.js";
 export type {
   CompletedMessage,
   MessageStreamCompleted,
   MessageStreamErrorEvent,
   MessageStreamEvent,
-  MessageStreamTextDelta
+  MessageStreamTextDelta,
+  ProactiveDecisionEvent,
+  ProactiveMessageStreamEvent,
+  ProactiveShouldSpeak
 } from "./stream.js";
 
 export type ProviderHealth = {
@@ -929,6 +940,13 @@ export type MessageStreamOptions = {
   onEvent?: (event: MessageStreamEvent) => void;
 };
 
+export type ProactiveStreamOptions = {
+  signal?: AbortSignal;
+  onEvent?: (event: ProactiveMessageStreamEvent) => void;
+};
+
+export type ProactiveTurnResult = CompletedMessage | ProactiveDecisionEvent;
+
 export const apiClient = {
   setDashboardDevToken(token: string): void {
     dashboardDevToken = token;
@@ -958,13 +976,9 @@ export const apiClient = {
 
   streamProactiveTurn(
     input: ProactiveTurnStreamRequest,
-    options: MessageStreamOptions = {}
-  ): Promise<CompletedMessage> {
-    return streamTextResponse(
-      "/v1/proactive-turns/stream",
-      toProactiveTurnStreamRequestBody(input),
-      options
-    );
+    options: ProactiveStreamOptions = {}
+  ): Promise<ProactiveTurnResult> {
+    return streamProactiveTextResponse(toProactiveTurnStreamRequestBody(input), options);
   },
 
   listRecentMemories(limit = 20, signal?: AbortSignal): Promise<{ memories: MemoryRecord[] }> {
@@ -1501,6 +1515,84 @@ async function streamTextResponse(
     if (!readerDone) {
       await reader.cancel().catch(() => undefined);
     }
+    reader.releaseLock();
+  }
+}
+
+async function streamProactiveTextResponse(
+  input: ProactiveTurnStreamRequest,
+  options: ProactiveStreamOptions
+): Promise<ProactiveTurnResult> {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (dashboardDevToken && shouldAttachDashboardDevToken("/v1/proactive-turns/stream", "POST")) {
+    headers.set("authorization", `Bearer ${dashboardDevToken}`);
+  }
+
+  const requestInit: RequestInit = {
+    method: "POST",
+    headers,
+    body: JSON.stringify(input)
+  };
+  if (options.signal) requestInit.signal = options.signal;
+  const response = await fetch(`${apiBaseUrl}/v1/proactive-turns/stream`, requestInit);
+
+  if (!response.ok) {
+    throw new ApiError(await safeHttpStreamError(response), response.status);
+  }
+  if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+    throw new MessageStreamProtocolError("The streaming response was not SSE.");
+  }
+  if (!response.body) {
+    throw new MessageStreamProtocolError("The streaming response has no body.");
+  }
+
+  const parser = new ProactiveSseParser();
+  const reader = response.body.getReader();
+  let accumulatedText = "";
+  let decision: ProactiveDecisionEvent | undefined;
+  let completed: CompletedMessage | undefined;
+  let readerDone = false;
+
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) {
+        readerDone = true;
+        break;
+      }
+      for (const event of parser.push(result.value)) {
+        if (event.type === "proactive-decision") {
+          decision = event;
+          options.onEvent?.(event);
+          continue;
+        }
+        if (event.type === "text-delta") {
+          accumulatedText += event.text;
+          options.onEvent?.(event);
+          continue;
+        }
+        if (event.type === "error") {
+          options.onEvent?.(event);
+          throw new MessageStreamError(event);
+        }
+        if (event.content !== accumulatedText || accumulatedText.length === 0) {
+          throw new MessageStreamProtocolError(
+            "The proactive completion does not match meaningful text deltas."
+          );
+        }
+        completed = event;
+        options.onEvent?.(event);
+      }
+    }
+
+    parser.finish();
+    if (decision?.decision === "NO_OP") return decision;
+    if (!completed || decision?.decision !== "REQUEST_TEXT") {
+      throw new MessageStreamProtocolError("The proactive stream ended before completion.");
+    }
+    return completed;
+  } finally {
+    if (!readerDone) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

@@ -1,6 +1,7 @@
 import {
   AssistantTurnConflictError,
   ConversationPersistenceError,
+  type ProactiveShouldSpeak,
   type RuntimeReplyStreamEvent
 } from "@companion/core";
 import { ProviderError, ProviderErrorCode } from "@companion/providers";
@@ -121,22 +122,42 @@ export async function registerProactiveTurnStreamRoutes(
         ...desktopCorsHeaders(request.headers.origin)
       });
 
-      let completed = false;
+      let successful = false;
+      let decision: ProactiveShouldSpeak | undefined;
+      let sawTextDelta = false;
       while (!next.done) {
         if (clientDisconnected) {
           return;
         }
+        if (next.value.type === "proactive-decision") {
+          if (decision !== undefined) {
+            throw new Error("Proactive Runtime emitted multiple decisions.");
+          }
+          decision = next.value.decision;
+        } else if (next.value.type === "text-delta") {
+          if (decision !== "REQUEST_TEXT") {
+            throw new Error("Proactive Runtime emitted text before REQUEST_TEXT.");
+          }
+          sawTextDelta = true;
+        } else if (next.value.type === "completed") {
+          if (decision !== "REQUEST_TEXT" || !sawTextDelta) {
+            throw new Error("Proactive Runtime completed without REQUEST_TEXT.");
+          }
+        }
         await writeSseFrame(reply.raw, next.value.type, next.value, abortController.signal);
-        if (next.value.type === "completed") {
-          completed = true;
+        if (
+          next.value.type === "completed" ||
+          (next.value.type === "proactive-decision" && next.value.decision === "NO_OP")
+        ) {
+          successful = true;
           responseFinalized = true;
           break;
         }
         next = await iterator.next();
       }
 
-      if (!completed) {
-        throw new Error("Proactive turn stream ended before a completed event was produced.");
+      if (!successful) {
+        throw new Error("Proactive turn stream ended before a successful terminal event.");
       }
       if (!reply.raw.writableEnded) {
         reply.raw.end();

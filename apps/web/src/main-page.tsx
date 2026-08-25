@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ApiError, apiClient, type MessageStreamEvent } from "./api/client.js";
+import {
+  ApiError,
+  apiClient,
+  type MessageStreamEvent,
+  type ProactiveMessageStreamEvent
+} from "./api/client.js";
 import {
   beginControlledDraftSubmit,
   reduceChatMessages,
@@ -279,16 +284,6 @@ export function MainPage(): JSX.Element {
       if (result.kind !== "committed") return;
 
       const { effect } = result;
-      dispatchMessages({
-        type: "append-assistant",
-        assistant: {
-          id: effect.assistantId,
-          requestId: effect.requestId,
-          role: "assistant",
-          content: "",
-          status: "streaming"
-        }
-      });
       activeRequestRef.current = effect.ownership;
       setError(null);
       setRequestStatus("sending");
@@ -536,20 +531,44 @@ export function MainPage(): JSX.Element {
   async function executeProactiveTurn(effect: ProactiveTurnEffect): Promise<void> {
     const isCurrent = (): boolean =>
       mountedRef.current && isCurrentProactiveEffect(activeRequestRef.current, effect);
+    let assistantProjected = false;
 
     try {
       const response = await apiClient.streamProactiveTurn(effect.request, {
         signal: effect.ownership.controller.signal,
-        onEvent: (event: MessageStreamEvent) => {
+        onEvent: (event: ProactiveMessageStreamEvent) => {
           if (!isCurrent()) return;
+          if (event.type === "proactive-decision") {
+            setLastTraceId(event.traceId);
+            if (event.decision === "NO_OP") {
+              effect.ownership.completedObserved = true;
+              setRequestStatus("idle");
+            }
+            return;
+          }
           if (event.type === "text-delta") {
             setLastTraceId(event.traceId);
-            dispatchMessages({
-              type: "append-delta",
-              assistantId: effect.assistantId,
-              text: event.text,
-              traceId: event.traceId
-            });
+            if (!assistantProjected) {
+              assistantProjected = true;
+              dispatchMessages({
+                type: "append-assistant",
+                assistant: {
+                  id: effect.assistantId,
+                  requestId: effect.requestId,
+                  role: "assistant",
+                  content: event.text,
+                  status: "streaming",
+                  traceId: event.traceId
+                }
+              });
+            } else {
+              dispatchMessages({
+                type: "append-delta",
+                assistantId: effect.assistantId,
+                text: event.text,
+                traceId: event.traceId
+              });
+            }
             return;
           }
           if (event.type === "error") {
@@ -575,6 +594,12 @@ export function MainPage(): JSX.Element {
       });
 
       if (!isCurrent()) return;
+      if (response.type === "proactive-decision") {
+        effect.ownership.completedObserved = true;
+        setLastTraceId(response.traceId);
+        setRequestStatus("idle");
+        return;
+      }
       effect.ownership.completedObserved = true;
       dispatchMessages({
         type: "complete",
