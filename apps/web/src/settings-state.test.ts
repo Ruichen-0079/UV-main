@@ -2,13 +2,37 @@ import { describe, expect, it } from "vitest";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
+  mergeSettingsBaseline,
+  normalizeRuntimeSettingForComparison,
+  normalizeSettingsFormValueForComparison,
+  reconcileSavedSecretClears,
   reduceSettingsState,
+  resolveSettingsOperationState,
   shouldReplaceSettingsDraft,
   settingsDraftDiffers,
-  settingsStateLabels
+  settingsStateLabels,
+  synchronizeSettingsDraftState
 } from "./settings-state.js";
 
 describe("settings apply state", () => {
+  it("keeps Save Only in a saved/effective but not applied state", () => {
+    expect(reduceSettingsState("saving", "save-only-success")).toBe("saved-not-applied");
+    expect(
+      resolveSettingsOperationState("save-only", {
+        saveSucceeded: true,
+        refreshSucceeded: true
+      })
+    ).toBe("saved-not-applied");
+    expect(settingsStateLabels["saved-not-applied"]).toBe("已保存，尚未应用");
+    expect(
+      resolveSettingsOperationState("save-only", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        restartRequired: true
+      })
+    ).toBe("restart-required");
+  });
+
   it("models save, reload, refresh and applied in order", () => {
     let state = reduceSettingsState("dirty", "save-start");
     state = reduceSettingsState(state, "reload-start");
@@ -18,11 +42,63 @@ describe("settings apply state", () => {
     expect(settingsStateLabels[state]).toBe("已应用");
   });
 
+  it("reports Save & Apply as applied only after refresh confirmation", () => {
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        applyConfirmed: true
+      })
+    ).toBe("applied");
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        applyConfirmed: false
+      })
+    ).toBe("failed");
+  });
+
   it("keeps failure and restart-required outcomes distinct", () => {
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: false
+      })
+    ).toBe("failed");
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        applyConfirmed: true,
+        restartRequired: true
+      })
+    ).toBe("restart-required");
     expect(reduceSettingsState("refreshing", "failure")).toBe("failed");
     expect(reduceSettingsState("refreshing", "restart-required")).toBe("restart-required");
     expect(settingsStateLabels.failed).toBe("应用失败");
     expect(settingsStateLabels["restart-required"]).toBe("已保存，需要重启");
+  });
+
+  it("keeps edits made during an operation as a new dirty draft", () => {
+    expect(reduceSettingsState("saving", "edit")).toBe("saving");
+    expect(reduceSettingsState("reloading", "edit")).toBe("reloading");
+    expect(reduceSettingsState("refreshing", "edit")).toBe("refreshing");
+    expect(
+      resolveSettingsOperationState("save-only", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        draftChangedDuringOperation: true
+      })
+    ).toBe("dirty");
+    expect(
+      resolveSettingsOperationState("save-and-apply", {
+        saveSucceeded: true,
+        refreshSucceeded: true,
+        applyConfirmed: true,
+        draftChangedDuringOperation: true
+      })
+    ).toBe("dirty");
   });
 
   it("does not turn an applied configuration into a save failure when verification fails", () => {
@@ -35,6 +111,54 @@ describe("settings apply state", () => {
     expect(settingsDraftDiffers({ ...baseline, SERVER_PORT: "7000" }, baseline)).toBe(true);
     expect(settingsDraftDiffers(baseline, baseline)).toBe(false);
     expect(settingsDraftDiffers({ ...baseline, DEEPSEEK_API_KEY: "new" }, baseline)).toBe(true);
+  });
+
+  it("treats accepted canonical settings representations as the same saved value", () => {
+    const baseline = {
+      SERVER_PORT: "6121",
+      PROVIDER_ALLOW_MOCKS: "true",
+      EVENT_BUS: "in-memory",
+      MEMORY_REPOSITORY: "postgres"
+    };
+    expect(
+      settingsDraftDiffers(
+        {
+          SERVER_PORT: "06121",
+          PROVIDER_ALLOW_MOCKS: "1",
+          EVENT_BUS: " memory ",
+          MEMORY_REPOSITORY: " POSTGRES "
+        },
+        baseline
+      )
+    ).toBe(false);
+    expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "yes")).toBe("true");
+    expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "off")).toBe("false");
+  });
+
+  it("does not canonicalize invalid editor values into a clean draft", () => {
+    expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "maybe")).toBe("maybe");
+    expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", " true ")).toBe(
+      " true "
+    );
+    expect(
+      settingsDraftDiffers({ MEMORY_REPOSITORY: "" }, { MEMORY_REPOSITORY: "in-memory" })
+    ).toBe(true);
+    expect(settingsDraftDiffers({ EVENT_BUS: " nats " }, { EVENT_BUS: "nats" })).toBe(true);
+    expect(settingsDraftDiffers({ SERVER_PORT: "70000" }, { SERVER_PORT: "070000" })).toBe(true);
+    expect(
+      settingsDraftDiffers({ PROVIDER_ALLOW_MOCKS: "maybe" }, { PROVIDER_ALLOW_MOCKS: "false" })
+    ).toBe(true);
+  });
+
+  it("clears only the transient dirty state when a draft is restored", () => {
+    expect(synchronizeSettingsDraftState("dirty", false, false)).toBe("clean");
+    expect(synchronizeSettingsDraftState("saved-not-applied", false, false)).toBe(
+      "saved-not-applied"
+    );
+    expect(synchronizeSettingsDraftState("restart-required", false, false)).toBe(
+      "restart-required"
+    );
+    expect(synchronizeSettingsDraftState("dirty", false, true)).toBe("dirty");
   });
 
   it("does not replace a dirty draft when settings data refreshes", () => {
@@ -51,6 +175,54 @@ describe("settings apply state", () => {
     );
     expect(result.mismatchedKeys).toEqual(["SERVER_PORT"]);
     expect(result.ignoredSensitiveKeys).toEqual(["DEEPSEEK_API_KEY"]);
+  });
+
+  it("compares canonical saved settings without false mismatches", () => {
+    const result = compareSettingsForms(
+      { SERVER_PORT: "06121", PROVIDER_ALLOW_MOCKS: "1" },
+      { SERVER_PORT: "6121", PROVIDER_ALLOW_MOCKS: "true" },
+      new Set()
+    );
+    expect(result.mismatchedKeys).toEqual([]);
+  });
+
+  it("keeps the successful persistence response as the saved baseline", () => {
+    expect(
+      mergeSettingsBaseline(
+        { SERVER_PORT: "6121", DEEPSEEK_API_KEY: "old-secret" },
+        { SERVER_PORT: "7000", DEEPSEEK_API_KEY: "" },
+        { SERVER_PORT: "7000", DEEPSEEK_API_KEY: "new-secret" },
+        new Set(["DEEPSEEK_API_KEY"])
+      )
+    ).toEqual({ SERVER_PORT: "7000", DEEPSEEK_API_KEY: "new-secret" });
+  });
+
+  it("does not erase a newer secret clear intent when an older save completes", () => {
+    expect(
+      reconcileSavedSecretClears(
+        new Set(["DEEPSEEK_API_KEY"]),
+        new Set(["DEEPSEEK_API_KEY"]),
+        new Map([["DEEPSEEK_API_KEY", 1]]),
+        new Map([["DEEPSEEK_API_KEY", 2]])
+      )
+    ).toEqual(new Set(["DEEPSEEK_API_KEY"]));
+    expect(
+      reconcileSavedSecretClears(
+        new Set(["DEEPSEEK_API_KEY"]),
+        new Set(["DEEPSEEK_API_KEY"]),
+        new Map([["DEEPSEEK_API_KEY", 2]]),
+        new Map([["DEEPSEEK_API_KEY", 2]])
+      )
+    ).toEqual(new Set());
+  });
+
+  it("normalizes valid runtime aliases before comparing saved and active values", () => {
+    expect(normalizeRuntimeSettingForComparison("EVENT_BUS", "memory")).toBe("in-memory");
+    expect(normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", "memory")).toBe("in-memory");
+    expect(normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", "in-memory")).toBe(
+      "in-memory"
+    );
+    expect(normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", undefined)).toBe("in-memory");
   });
 
   it("rejects stale responses and callbacks after unmount", () => {
