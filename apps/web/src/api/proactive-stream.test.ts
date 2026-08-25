@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   apiClient,
   MessageStreamProtocolError,
-  type MessageStreamEvent,
+  type ProactiveMessageStreamEvent,
   type ProactiveTurnStreamRequest
 } from "./client.js";
 
@@ -40,6 +40,18 @@ const textDelta = {
   traceId: "trace-1"
 };
 
+const decision = {
+  type: "proactive-decision" as const,
+  decision: "REQUEST_TEXT" as const,
+  sessionId: "session-1",
+  traceId: "trace-1"
+};
+
+const noOpDecision = {
+  ...decision,
+  decision: "NO_OP" as const
+};
+
 const completed = {
   type: "completed" as const,
   content: "你好",
@@ -60,12 +72,13 @@ describe("apiClient.streamProactiveTurn", () => {
       .fn()
       .mockResolvedValue(
         responseFromChunks([
+          encoder.encode(frame("proactive-decision", decision)),
           encoder.encode(frame("text-delta", textDelta)),
           encoder.encode(frame("completed", completed))
         ])
       );
     vi.stubGlobal("fetch", fetchMock);
-    const events: MessageStreamEvent[] = [];
+    const events: ProactiveMessageStreamEvent[] = [];
 
     await expect(
       apiClient.streamProactiveTurn(request, { onEvent: (event) => events.push(event) })
@@ -80,7 +93,11 @@ describe("apiClient.streamProactiveTurn", () => {
       modality: "text",
       options: { readMemory: true, promptPreview: true }
     });
-    expect(events.map((event) => event.type)).toEqual(["text-delta", "completed"]);
+    expect(events.map((event) => event.type)).toEqual([
+      "proactive-decision",
+      "text-delta",
+      "completed"
+    ]);
   });
 
   it("validates completed content against accumulated deltas", async () => {
@@ -91,7 +108,9 @@ describe("apiClient.streamProactiveTurn", () => {
         .mockResolvedValue(
           responseFromChunks([
             encoder.encode(
-              frame("text-delta", textDelta) + frame("completed", { ...completed, content: "不同" })
+              frame("proactive-decision", decision) +
+                frame("text-delta", textDelta) +
+                frame("completed", { ...completed, content: "不同" })
             )
           ])
         )
@@ -100,6 +119,61 @@ describe("apiClient.streamProactiveTurn", () => {
     await expect(apiClient.streamProactiveTurn(request)).rejects.toBeInstanceOf(
       MessageStreamProtocolError
     );
+  });
+
+  it("accepts NO_OP as a successful terminal proactive result", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          responseFromChunks([encoder.encode(frame("proactive-decision", noOpDecision))])
+        )
+    );
+    const events: ProactiveMessageStreamEvent[] = [];
+
+    await expect(
+      apiClient.streamProactiveTurn(request, { onEvent: (event) => events.push(event) })
+    ).resolves.toEqual(noOpDecision);
+    expect(events).toEqual([noOpDecision]);
+  });
+
+  it("rejects proactive text before a decision", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          responseFromChunks([
+            encoder.encode(frame("text-delta", textDelta) + frame("completed", completed))
+          ])
+        )
+    );
+
+    await expect(apiClient.streamProactiveTurn(request)).rejects.toBeInstanceOf(
+      MessageStreamProtocolError
+    );
+  });
+
+  it("rejects a second decision and events after NO_OP", async () => {
+    for (const chunks of [
+      [
+        frame("proactive-decision", decision),
+        frame("proactive-decision", noOpDecision),
+        frame("text-delta", textDelta),
+        frame("completed", completed)
+      ],
+      [frame("proactive-decision", noOpDecision), frame("text-delta", textDelta)]
+    ]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(responseFromChunks([encoder.encode(chunks.join(""))]))
+      );
+      await expect(apiClient.streamProactiveTurn(request)).rejects.toBeInstanceOf(
+        MessageStreamProtocolError
+      );
+      vi.unstubAllGlobals();
+    }
   });
 
   it("surfaces a pre-SSE idempotency conflict without retrying", async () => {

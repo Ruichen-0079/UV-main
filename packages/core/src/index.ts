@@ -68,8 +68,7 @@ import {
 
 const assistantTurnClaimRetentionMs = 15 * 60 * 1000;
 const assistantTurnClaimMaxTerminal = 256;
-const proactiveInstruction =
-  "Generate one natural assistant-initiated conversational message using the available conversation context and permitted memory.";
+const proactiveInstruction = `Decide whether to proactively speak using the available permitted conversation, direct context, and memory. Bias toward silence. Output exactly one control preamble as the first logical line: NO_OP or REQUEST_TEXT. Output NO_OP\\n when there is no specific, context-grounded reason that makes one proactive message meaningfully more natural or useful than silence. Choose NO_OP when the only reason is user idleness, when there is no concrete context, when the result would be a generic greeting/check-in/filler question, when it would substantially repeat or rephrase a recent assistant message, when the topic is complete or too stale, when speaking requires guessing the user's present emotion/activity/environment, or when relevance is uncertain. Output REQUEST_TEXT\\n followed by one concise natural conversational message, preferably one or two short sentences, only when such a specific reason exists. Do not explain the decision, mention proactive policy, fabricate a user statement, request tools, or add meta-language. The control line is Runtime protocol data and must not appear in the assistant message.`;
 
 export {
   MemoryContextBuilder,
@@ -268,11 +267,19 @@ export type AssistantInitiatedTurnOptions = {
   promptPreview?: boolean | undefined;
 };
 
+export type ProactiveShouldSpeak = "NO_OP" | "REQUEST_TEXT";
+
 export type MaybeSynthesizeSpeechOptions = {
   signal?: AbortSignal | undefined;
 };
 
 export type RuntimeReplyStreamEvent =
+  | {
+      type: "proactive-decision";
+      decision: ProactiveShouldSpeak;
+      sessionId: string;
+      traceId: string;
+    }
   | {
       type: "text-delta";
       text: string;
@@ -1400,6 +1407,8 @@ export class RuntimeOrchestrator {
       let finalized = false;
       let failure: unknown;
       const startedAt = performance.now();
+      const controlPreamble = new ProactiveControlPreamble(chatProvider.name);
+      let proactiveDecision: ProactiveShouldSpeak | undefined;
 
       try {
         if (controller.signal.aborted) {
@@ -1446,13 +1455,42 @@ export class RuntimeOrchestrator {
                 "Provider emitted an empty text delta."
               );
             }
+            const parsed = controlPreamble.push(event.text);
+            if (parsed.decision !== undefined) {
+              proactiveDecision = parsed.decision;
+              if (parsed.decision === "NO_OP") {
+                if (parsed.text.length > 0) {
+                  throw runtimeStreamProtocolError(
+                    chatProvider.name,
+                    "NO_OP proactive control must not contain assistant content."
+                  );
+                }
+                finalized = true;
+                yield {
+                  type: "proactive-decision",
+                  decision: "NO_OP",
+                  sessionId: input.sessionId,
+                  traceId
+                };
+                return;
+              }
+              yield {
+                type: "proactive-decision",
+                decision: "REQUEST_TEXT",
+                sessionId: input.sessionId,
+                traceId
+              };
+            }
+            if (proactiveDecision !== "REQUEST_TEXT" || parsed.text.length === 0) {
+              continue;
+            }
             if (!assistantCreated && this.options.conversation) {
               await this.createStreamingAssistantMessage({
                 id: assistantMessageId,
                 sessionId: input.sessionId,
                 traceId,
                 parentMessageId: null,
-                content: event.text,
+                content: parsed.text,
                 createdAt: new Date().toISOString(),
                 metadata: {
                   origin: "assistant-initiated",
@@ -1462,12 +1500,12 @@ export class RuntimeOrchestrator {
               });
               assistantCreated = true;
             } else if (assistantCreated) {
-              await this.appendStreamingAssistantContent(assistantMessageId, event.text);
+              await this.appendStreamingAssistantContent(assistantMessageId, parsed.text);
             }
-            accumulatedText += event.text;
+            accumulatedText += parsed.text;
             yield {
               type: "text-delta",
-              text: event.text,
+              text: parsed.text,
               messageId: assistantMessageId,
               sessionId: input.sessionId,
               traceId
@@ -1482,7 +1520,16 @@ export class RuntimeOrchestrator {
                 "Provider emitted multiple completed events."
               );
             }
-            if (!accumulatedText || event.output.message.content !== accumulatedText) {
+            if (proactiveDecision !== "REQUEST_TEXT") {
+              throw runtimeStreamProtocolError(
+                chatProvider.name,
+                "Provider completed before emitting a valid proactive decision."
+              );
+            }
+            const completedContent = controlPreamble.parseCompletedContent(
+              event.output.message.content
+            );
+            if (!accumulatedText || completedContent !== accumulatedText) {
               throw runtimeStreamProtocolError(
                 chatProvider.name,
                 "Provider completed output did not match meaningful text deltas."
@@ -1569,7 +1616,7 @@ export class RuntimeOrchestrator {
           input.sessionId,
           traceId,
           input.idempotencyKey,
-          finalOutput.message.content,
+          accumulatedText,
           providerMetadata,
           replyId
         );
@@ -1584,7 +1631,7 @@ export class RuntimeOrchestrator {
           messageId: assistantMessageId,
           sessionId: input.sessionId,
           traceId,
-          content: finalOutput.message.content,
+          content: accumulatedText,
           provider: providerMetadata.finalProvider ?? providerMetadata.name
         };
       } catch (error) {
@@ -3842,6 +3889,70 @@ async function* compatibleRuntimeStream(
     throw createRuntimeCancelledError(provider.name);
   }
   yield { type: "completed", output };
+}
+
+const proactiveControlPreambleMaxLength = 64;
+
+class ProactiveControlPreamble {
+  private buffer = "";
+  private decision: ProactiveShouldSpeak | undefined;
+
+  constructor(private readonly provider: string) {}
+
+  push(text: string): { decision?: ProactiveShouldSpeak; text: string } {
+    if (this.decision !== undefined) {
+      return { text };
+    }
+
+    this.buffer += text;
+    if (this.buffer.length > proactiveControlPreambleMaxLength) {
+      throw runtimeStreamProtocolError(
+        this.provider,
+        "Provider proactive control preamble exceeded its bounded length."
+      );
+    }
+
+    const newlineIndex = this.buffer.indexOf("\n");
+    if (newlineIndex < 0) {
+      return { text: "" };
+    }
+
+    const control = this.buffer.slice(0, newlineIndex);
+    if (control !== "NO_OP" && control !== "REQUEST_TEXT") {
+      throw runtimeStreamProtocolError(
+        this.provider,
+        "Provider emitted an unknown proactive control preamble."
+      );
+    }
+    this.decision = control;
+    const remainder = this.buffer.slice(newlineIndex + 1);
+    this.buffer = "";
+    return { decision: control, text: remainder };
+  }
+
+  parseCompletedContent(content: string): string {
+    if (this.decision === undefined) {
+      throw runtimeStreamProtocolError(
+        this.provider,
+        "Provider completed without a proactive control decision."
+      );
+    }
+    const newlineIndex = content.indexOf("\n");
+    if (newlineIndex < 0 || content.slice(0, newlineIndex) !== this.decision) {
+      throw runtimeStreamProtocolError(
+        this.provider,
+        "Provider completed output did not preserve the proactive control preamble."
+      );
+    }
+    const messageContent = content.slice(newlineIndex + 1);
+    if (this.decision === "NO_OP" && messageContent.length > 0) {
+      throw runtimeStreamProtocolError(
+        this.provider,
+        "NO_OP proactive control must not contain assistant content."
+      );
+    }
+    return messageContent;
+  }
 }
 
 function normalizeRuntimeStreamError(

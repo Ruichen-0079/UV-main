@@ -28,6 +28,17 @@ export type MessageStreamEvent =
   | MessageStreamCompleted
   | MessageStreamErrorEvent;
 
+export type ProactiveShouldSpeak = "NO_OP" | "REQUEST_TEXT";
+
+export type ProactiveDecisionEvent = {
+  type: "proactive-decision";
+  decision: ProactiveShouldSpeak;
+  sessionId: string;
+  traceId: string;
+};
+
+export type ProactiveMessageStreamEvent = MessageStreamEvent | ProactiveDecisionEvent;
+
 export type CompletedMessage = MessageStreamCompleted;
 
 export class MessageStreamProtocolError extends Error {
@@ -56,15 +67,22 @@ type ParsedFrame = {
   data: unknown;
 };
 
-export class MessageSseParser {
+type StreamEvent = { type: string };
+
+class SseParser<TEvent extends StreamEvent> {
   private readonly decoder = new TextDecoder("utf-8", { fatal: true });
   private buffer = "";
-  private completedSeen = false;
-  private errorSeen = false;
+  private terminalSeen = false;
 
-  push(chunk: Uint8Array): MessageStreamEvent[] {
+  constructor(
+    private readonly parseEvent: (frame: ParsedFrame) => TEvent,
+    private readonly isTerminal: (event: TEvent) => boolean,
+    private readonly validateEvent: (event: TEvent) => void = () => undefined
+  ) {}
+
+  push(chunk: Uint8Array): TEvent[] {
     this.buffer += this.decode(chunk, true);
-    const events: MessageStreamEvent[] = [];
+    const events: TEvent[] = [];
 
     while (true) {
       const boundary = findFrameBoundary(this.buffer);
@@ -88,24 +106,22 @@ export class MessageSseParser {
     if (this.buffer.trim() !== "") {
       throw new MessageStreamProtocolError("The message stream ended with an incomplete frame.");
     }
-    if (!this.completedSeen && !this.errorSeen) {
+    if (!this.terminalSeen) {
       throw new MessageStreamProtocolError("The message stream ended before completion.");
     }
   }
 
-  private parseFrame(frame: string): MessageStreamEvent {
+  private parseFrame(frame: string): TEvent {
     const parsed = parseFrameFields(frame);
-    if (this.completedSeen || this.errorSeen) {
-      throw new MessageStreamProtocolError("The message stream continued after its terminal event.");
+    if (this.terminalSeen) {
+      throw new MessageStreamProtocolError(
+        "The message stream continued after its terminal event."
+      );
     }
 
-    const event = parseMessageStreamEvent(parsed);
-    if (event.type === "completed") {
-      this.completedSeen = true;
-    }
-    if (event.type === "error") {
-      this.errorSeen = true;
-    }
+    const event = this.parseEvent(parsed);
+    this.validateEvent(event);
+    if (this.isTerminal(event)) this.terminalSeen = true;
     return event;
   }
 
@@ -115,6 +131,51 @@ export class MessageSseParser {
     } catch {
       throw new MessageStreamProtocolError("The message stream contains invalid UTF-8.");
     }
+  }
+}
+
+export class MessageSseParser extends SseParser<MessageStreamEvent> {
+  constructor() {
+    super(parseMessageStreamEvent, (event) => event.type === "completed" || event.type === "error");
+  }
+}
+
+export class ProactiveSseParser extends SseParser<ProactiveMessageStreamEvent> {
+  private decisionSeen = false;
+  private requestTextSeen = false;
+
+  constructor() {
+    super(
+      parseProactiveStreamEvent,
+      (event) =>
+        event.type === "error" ||
+        event.type === "completed" ||
+        (event.type === "proactive-decision" && event.decision === "NO_OP"),
+      (event) => {
+        if (event.type === "error") return;
+        if (event.type === "proactive-decision") {
+          if (this.decisionSeen) {
+            throw new MessageStreamProtocolError(
+              "The proactive stream emitted multiple decisions."
+            );
+          }
+          this.decisionSeen = true;
+          if (event.decision === "NO_OP") return;
+          this.requestTextSeen = true;
+          return;
+        }
+        if (!this.decisionSeen) {
+          throw new MessageStreamProtocolError(
+            "The proactive stream emitted content before its decision."
+          );
+        }
+        if (!this.requestTextSeen) {
+          throw new MessageStreamProtocolError(
+            "The proactive stream emitted content without REQUEST_TEXT."
+          );
+        }
+      }
+    );
   }
 }
 
@@ -217,6 +278,25 @@ function parseMessageStreamEvent(frame: ParsedFrame): MessageStreamEvent {
     throw new MessageStreamProtocolError("The message stream error is invalid.");
   }
   return frame.data as unknown as MessageStreamErrorEvent;
+}
+
+function parseProactiveStreamEvent(frame: ParsedFrame): ProactiveMessageStreamEvent {
+  if (frame.event !== "proactive-decision") {
+    return parseMessageStreamEvent(frame);
+  }
+  if (!isRecord(frame.data) || frame.data["type"] !== frame.event) {
+    throw new MessageStreamProtocolError("The proactive decision event is invalid.");
+  }
+  if (
+    (frame.data["decision"] !== "NO_OP" && frame.data["decision"] !== "REQUEST_TEXT") ||
+    typeof frame.data["sessionId"] !== "string" ||
+    frame.data["sessionId"].length === 0 ||
+    typeof frame.data["traceId"] !== "string" ||
+    frame.data["traceId"].length === 0
+  ) {
+    throw new MessageStreamProtocolError("The proactive decision event is invalid.");
+  }
+  return frame.data as unknown as ProactiveDecisionEvent;
 }
 
 function hasMessageIdentity(value: Record<string, unknown>): boolean {

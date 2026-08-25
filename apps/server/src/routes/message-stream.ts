@@ -160,12 +160,18 @@ export async function registerMessageStreamRoutes(
 
 function runtimeEventToSseFrame(event: RuntimeReplyStreamEvent): {
   event: "text-delta" | "completed";
-  data: RuntimeReplyStreamEvent;
+  data: Exclude<RuntimeReplyStreamEvent, { type: "proactive-decision" }>;
 } {
+  if (event.type === "proactive-decision") {
+    throw new Error("A proactive decision cannot appear on the ordinary message stream.");
+  }
   return { event: event.type, data: event };
 }
 
-function toSseError(error: unknown, traceId: string): {
+function toSseError(
+  error: unknown,
+  traceId: string
+): {
   type: "error";
   code: string;
   message: string;

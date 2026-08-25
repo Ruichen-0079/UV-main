@@ -264,6 +264,12 @@ afterEach(() => {
 
 describe("MainPage proactive CompanionBus bridge", () => {
   it("admits a bus candidate, streams it, and projects one assistant-only reply", async () => {
+    const decision = {
+      type: "proactive-decision" as const,
+      decision: "REQUEST_TEXT" as const,
+      sessionId: "default",
+      traceId: "trace-proactive"
+    };
     const completed = {
       type: "completed" as const,
       content: "proactive reply",
@@ -273,6 +279,7 @@ describe("MainPage proactive CompanionBus bridge", () => {
       provider: "mock"
     };
     mockState.streamProactiveTurn.mockImplementation(async (_request, options) => {
+      options.onEvent?.(decision);
       options.onEvent?.({
         type: "text-delta",
         text: completed.content,
@@ -322,6 +329,49 @@ describe("MainPage proactive CompanionBus bridge", () => {
       expect(readText(dom.container)).toContain("proactive reply");
       expect(readText(dom.container)).toContain("assistant");
       expect(readText(dom.container)).not.toContain("user");
+    } finally {
+      await act(async () => root?.unmount());
+      dom.restore();
+    }
+  });
+
+  it("does not project an assistant row for a successful NO_OP", async () => {
+    const noOp = {
+      type: "proactive-decision" as const,
+      decision: "NO_OP" as const,
+      sessionId: "default",
+      traceId: "trace-no-op"
+    };
+    mockState.streamProactiveTurn.mockImplementation(async (_request, options) => {
+      options.onEvent?.(noOp);
+      return noOp;
+    });
+
+    const dom = installFakeDom();
+    let root!: Root;
+    try {
+      await act(async () => {
+        root = createRoot(dom.container as unknown as Element);
+        root.render(createElement((await import("./main-page.js")).MainPage));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const bus = mockState.buses[0];
+      await act(async () => {
+        bus?.emit({
+          kind: "proactive-text-request",
+          decisionId: "decision-no-op",
+          modality: "text"
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(mockState.streamProactiveTurn).toHaveBeenCalledTimes(1);
+      expect(readText(dom.container)).not.toContain("assistant");
+      expect(readText(dom.container)).not.toContain("user");
+      expect(readText(dom.container)).not.toContain("trace-no-op");
     } finally {
       await act(async () => root?.unmount());
       dom.restore();

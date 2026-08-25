@@ -23,6 +23,12 @@ describe("proactive turn SSE route", () => {
       runtimeFor(async function* (input): AsyncIterable<RuntimeReplyStreamEvent> {
         receivedInput = input;
         yield {
+          type: "proactive-decision",
+          decision: "REQUEST_TEXT",
+          sessionId: "session-1",
+          traceId: "trace-1"
+        };
+        yield {
           type: "text-delta",
           text: "hello",
           messageId: "assistant-1",
@@ -53,6 +59,7 @@ describe("proactive turn SSE route", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("text/event-stream");
+    expect(response.body).toContain("event: proactive-decision");
     expect(response.body).toContain("event: text-delta");
     expect(response.body).toContain("event: completed");
     expect(receivedInput).toEqual({
@@ -60,6 +67,66 @@ describe("proactive turn SSE route", () => {
       idempotencyKey: "decision-1",
       readMemory: false
     });
+    await app.close();
+  });
+
+  it("ends a successful NO_OP stream without a completed assistant event", async () => {
+    const app = await createTestApp(
+      runtimeFor(async function* (): AsyncIterable<RuntimeReplyStreamEvent> {
+        yield {
+          type: "proactive-decision",
+          decision: "NO_OP",
+          sessionId: "session-no-op",
+          traceId: "trace-no-op"
+        };
+      })
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/proactive-turns/stream",
+      payload: {
+        sessionId: "session-no-op",
+        idempotencyKey: "decision-no-op",
+        modality: "text",
+        options: { readMemory: false }
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("event: proactive-decision");
+    expect(response.body).not.toContain("event: completed");
+    expect(response.body).not.toContain("event: error");
+    await app.close();
+  });
+
+  it("maps an invalid Runtime proactive sequence through the SSE error path", async () => {
+    const app = await createTestApp(
+      runtimeFor(async function* (): AsyncIterable<RuntimeReplyStreamEvent> {
+        yield {
+          type: "text-delta",
+          text: "unexpected",
+          messageId: "assistant-invalid",
+          sessionId: "session-invalid",
+          traceId: "trace-invalid"
+        };
+      })
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/proactive-turns/stream",
+      payload: {
+        sessionId: "session-invalid",
+        idempotencyKey: "decision-invalid-sequence",
+        modality: "text",
+        options: { readMemory: false }
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("event: error");
+    expect(response.body).toContain('"code":"INTERNAL"');
     await app.close();
   });
 
