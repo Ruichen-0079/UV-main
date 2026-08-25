@@ -67,6 +67,39 @@ export function normalizeRuntimeSettingForComparison(
   return normalized;
 }
 
+/**
+ * Normalize only values whose safe settings response intentionally projects a
+ * canonical representation. This keeps draft/saved comparisons aligned with
+ * the existing settings authority without introducing a second settings
+ * model. Invalid editor values remain distinct so validation errors cannot be
+ * hidden by comparison normalization.
+ */
+export function normalizeSettingsFormValueForComparison(key: string, value: string): string {
+  if (key === "PROVIDER_ALLOW_MOCKS") {
+    switch (value.toLowerCase()) {
+      case "true":
+      case "1":
+      case "yes":
+      case "on":
+        return "true";
+      case "false":
+      case "0":
+      case "no":
+      case "off":
+        return "false";
+      default:
+        return value;
+    }
+  }
+
+  if (key === "SERVER_PORT" && /^\d+$/u.test(value)) {
+    const parsed = Number(value);
+    if (Number.isSafeInteger(parsed)) return String(parsed);
+  }
+
+  return value;
+}
+
 export function reduceSettingsState(
   state: SettingsApplyState,
   event: SettingsStateEvent
@@ -140,7 +173,12 @@ export function settingsFingerprint<T extends Record<string, string>>(
   clearedSecrets: Iterable<string> = []
 ): string {
   return JSON.stringify({
-    form,
+    form: Object.fromEntries(
+      Object.entries(form).map(([key, value]) => [
+        key,
+        normalizeSettingsFormValueForComparison(key, value)
+      ])
+    ),
     clearedSecrets: [...clearedSecrets].sort()
   });
 }
@@ -166,7 +204,12 @@ export function compareSettingsForms<T extends Record<string, string>>(
       ignoredSensitiveKeys.push(key);
       continue;
     }
-    if (expected[key] !== actual[key]) mismatchedKeys.push(key);
+    if (
+      normalizeSettingsFormValueForComparison(key, expected[key]) !==
+      normalizeSettingsFormValueForComparison(key, actual[key])
+    ) {
+      mismatchedKeys.push(key);
+    }
   }
   return { mismatchedKeys, ignoredSensitiveKeys };
 }
