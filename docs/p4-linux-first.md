@@ -36,7 +36,7 @@ Yuvi core does **not** need to establish operating-system ownership of the Postg
 | P4-2C2A | merged | Durable coordinator/recovery orchestration is retained. |
 | P4-2C2B | merged | Serialized scheduling, retry budget, and ambiguity safety are retained. |
 | P4-2D1 | merged | Windows private-PostgreSQL lifecycle substrate is preserved but is no longer the Linux/product gate. |
-| P4-2D2 / PR #20 | open, not merged | Do not merge or continue wholesale. Separate platform-neutral ideas from Windows packaged ownership/bootstrap machinery. |
+| P4-2D2 / PR #20 | closed, deferred, not merged | Do not merge or continue wholesale. Separate platform-neutral ideas from Windows packaged ownership/bootstrap machinery. |
 | P4-2D3 | not implemented | Packaged private `DATABASE_URL` and default durable wiring are deferred to a future Windows packaging adapter. |
 | P4-2D4 | not implemented | Bundled PostgreSQL/pgvector and installer integration are deferred to Windows packaging. |
 
