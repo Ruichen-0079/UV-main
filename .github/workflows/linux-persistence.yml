@@ -1,0 +1,73 @@
+name: Linux Persistence
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-persistence-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-persistence:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: yuvi
+          POSTGRES_PASSWORD: yuvi_dev_password
+          POSTGRES_DB: yuvi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yuvi -d yuvi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      DATABASE_URL: postgres://yuvi:yuvi_dev_password@127.0.0.1:5432/yuvi
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript and host checks
+        run: pnpm check
+
+      - name: Memory tests with PostgreSQL
+        run: pnpm --filter @companion/memory test
+
+      - name: Core tests
+        run: pnpm --filter @companion/core test
+
+      - name: Server tests
+        run: pnpm --filter @companion/server test
+
+      - name: Apply PostgreSQL migrations
+        run: pnpm db:migrate
+
+      - name: Re-run PostgreSQL migrations
+        run: pnpm db:migrate
+
+      - name: PostgreSQL-backed runtime smoke
+        run: pnpm smoke:postgres
