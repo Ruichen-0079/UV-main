@@ -26,6 +26,7 @@ export type BehaviorPolicyControllerOptions = {
   readonly setTimer: (callback: () => void, delayMs: number) => BehaviorPolicyTimerHandle;
   readonly clearTimer: (handle: BehaviorPolicyTimerHandle) => void;
   readonly setGazeTarget: (target: SuppliedGazeTarget | null) => void;
+  readonly onSilentAttentionAdmitted?: () => void;
   readonly controllerId?: string;
 };
 
@@ -455,6 +456,12 @@ export function createBehaviorPolicyController(
         if (admitted) {
           consumedThisIdleEpisode = true;
           lastSilentAttentionAtMs = callbackNow;
+          try {
+            options.onSilentAttentionAdmitted?.();
+          } catch {
+            // Candidate transport is best-effort. The admitted opportunity is
+            // already consumed and must not spin or retry inside this episode.
+          }
         }
       }, delayMs);
       proactiveTimer = {
