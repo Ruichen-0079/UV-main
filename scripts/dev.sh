@@ -111,8 +111,8 @@ run_auto_migrate_if_needed() {
     return
   fi
   if [ -z "${DATABASE_URL:-}" ]; then
-    echo "MEMORY_REPOSITORY=postgres but DATABASE_URL is not configured; skipping db:migrate." >&2
-    return
+    echo "MEMORY_REPOSITORY=postgres requires DATABASE_URL; refusing to start durable mode." >&2
+    exit 1
   fi
   if [ "${YUVI_AUTO_MIGRATE:-1}" = "0" ]; then
     echo "YUVI_AUTO_MIGRATE=0 set; skipping db:migrate."
