@@ -114,9 +114,22 @@ describe("settings apply state", () => {
   });
 
   it("treats accepted canonical settings representations as the same saved value", () => {
-    const baseline = { SERVER_PORT: "6121", PROVIDER_ALLOW_MOCKS: "true" };
+    const baseline = {
+      SERVER_PORT: "6121",
+      PROVIDER_ALLOW_MOCKS: "true",
+      EVENT_BUS: "in-memory",
+      MEMORY_REPOSITORY: "postgres"
+    };
     expect(
-      settingsDraftDiffers({ SERVER_PORT: "06121", PROVIDER_ALLOW_MOCKS: "1" }, baseline)
+      settingsDraftDiffers(
+        {
+          SERVER_PORT: "06121",
+          PROVIDER_ALLOW_MOCKS: "1",
+          EVENT_BUS: " memory ",
+          MEMORY_REPOSITORY: " POSTGRES "
+        },
+        baseline
+      )
     ).toBe(false);
     expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "yes")).toBe("true");
     expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "off")).toBe("false");
@@ -130,6 +143,8 @@ describe("settings apply state", () => {
     expect(
       settingsDraftDiffers({ MEMORY_REPOSITORY: "" }, { MEMORY_REPOSITORY: "in-memory" })
     ).toBe(true);
+    expect(settingsDraftDiffers({ EVENT_BUS: " nats " }, { EVENT_BUS: "nats" })).toBe(true);
+    expect(settingsDraftDiffers({ SERVER_PORT: "70000" }, { SERVER_PORT: "070000" })).toBe(true);
     expect(
       settingsDraftDiffers({ PROVIDER_ALLOW_MOCKS: "maybe" }, { PROVIDER_ALLOW_MOCKS: "false" })
     ).toBe(true);

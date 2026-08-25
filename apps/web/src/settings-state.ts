@@ -60,7 +60,9 @@ export function normalizeSettingsValueForComparison(
 
   if (key === "EVENT_BUS" || key === "MEMORY_REPOSITORY") {
     const normalized = value.trim().toLowerCase();
-    return normalized === "memory" ? "in-memory" : normalized;
+    if (normalized === "memory" || normalized === "in-memory") return "in-memory";
+    if (key === "MEMORY_REPOSITORY" && normalized === "postgres") return "postgres";
+    return value;
   }
 
   if (key === "PROVIDER_ALLOW_MOCKS") {
@@ -75,7 +77,9 @@ export function normalizeSettingsValueForComparison(
 
   if (key === "SERVER_PORT" && /^\d+$/u.test(value)) {
     const parsed = Number(value);
-    if (Number.isSafeInteger(parsed)) return String(parsed);
+    if (Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 65535) {
+      return String(parsed);
+    }
   }
 
   return value;
@@ -92,7 +96,11 @@ export function normalizeRuntimeSettingForComparison(
   value: string | undefined
 ): string {
   const normalized = value?.trim().toLowerCase() ?? "";
-  return !normalized || normalized === "memory" ? "in-memory" : normalized;
+  if (!normalized || normalized === "memory" || normalized === "in-memory") {
+    return "in-memory";
+  }
+  if (key === "MEMORY_REPOSITORY" && normalized === "postgres") return "postgres";
+  return value ?? "";
 }
 
 /**
