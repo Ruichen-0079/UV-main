@@ -48,52 +48,28 @@ export const settingsStateLabels: Record<SettingsApplyState, string> = {
 };
 
 /**
- * Compare the saved/effective and active Runtime representations using the
- * same aliases accepted by the existing settings authority. The authority
- * reports the active value canonically as `in-memory`, while either editable
- * setting may still contain the valid `memory` alias (or its default empty
- * representation).
+ * Normalize only representations that the existing settings authority accepts
+ * and projects canonically. Unknown values, invalid values, and missing values
+ * remain distinct so comparison cannot hide an invalid editor draft.
  */
-export function normalizeRuntimeSettingForComparison(
-  key: RuntimeAliasSettingKey,
-  value: string | undefined
-): string {
-  const normalized = value?.trim().toLowerCase() ?? "";
-  switch (key) {
-    case "EVENT_BUS":
-    case "MEMORY_REPOSITORY":
-      return !normalized || normalized === "memory" ? "in-memory" : normalized;
-  }
-  return normalized;
-}
-
-/**
- * Normalize only values whose safe settings response intentionally projects a
- * canonical representation. This keeps draft/saved comparisons aligned with
- * the existing settings authority without introducing a second settings
- * model. Invalid editor values remain distinct so validation errors cannot be
- * hidden by comparison normalization.
- */
-export function normalizeSettingsFormValueForComparison(
+export function normalizeSettingsValueForComparison(
   key: string,
   value: string | undefined
 ): string | undefined {
   if (value === undefined) return undefined;
 
+  if (key === "EVENT_BUS" || key === "MEMORY_REPOSITORY") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "memory" ? "in-memory" : normalized;
+  }
+
   if (key === "PROVIDER_ALLOW_MOCKS") {
-    switch (value.toLowerCase()) {
-      case "true":
-      case "1":
-      case "yes":
-      case "on":
-        return "true";
-      case "false":
-      case "0":
-      case "no":
-      case "off":
-        return "false";
-      default:
-        return value;
+    const normalized = value.toLowerCase();
+    if (normalized === "" || ["false", "0", "no", "off"].includes(normalized)) {
+      return "false";
+    }
+    if (["true", "1", "yes", "on"].includes(normalized)) {
+      return "true";
     }
   }
 
@@ -103,6 +79,31 @@ export function normalizeSettingsFormValueForComparison(
   }
 
   return value;
+}
+
+/**
+ * Runtime responses use empty and `memory` as aliases for the canonical
+ * in-memory implementations. This helper intentionally keeps that defaulting
+ * behavior separate from editor comparison, where an empty invalid draft must
+ * remain visible as different from an explicit canonical value.
+ */
+export function normalizeRuntimeSettingForComparison(
+  key: RuntimeAliasSettingKey,
+  value: string | undefined
+): string {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  return !normalized || normalized === "memory" ? "in-memory" : normalized;
+}
+
+/**
+ * Compatibility name retained for the focused settings-state tests and callers
+ * that specifically compare editor forms.
+ */
+export function normalizeSettingsFormValueForComparison(
+  key: string,
+  value: string | undefined
+): string | undefined {
+  return normalizeSettingsValueForComparison(key, value);
 }
 
 export function reduceSettingsState(
@@ -217,6 +218,52 @@ export function compareSettingsForms<T extends Record<string, string>>(
     }
   }
   return { mismatchedKeys, ignoredSensitiveKeys };
+}
+
+/**
+ * Merge a successful persistence response into the saved baseline. Secret
+ * response values are intentionally empty or masked, so only the submitted
+ * operation snapshot may supply secret baseline values.
+ */
+export function mergeSettingsBaseline<T extends Record<string, string>>(
+  currentBaseline: T | null,
+  persistedForm: T,
+  submittedSnapshot: T,
+  sensitiveKeys: ReadonlySet<string>
+): T {
+  const baseline: Record<string, string> = { ...(currentBaseline ?? persistedForm) };
+  for (const key of Object.keys(persistedForm)) {
+    baseline[key] = sensitiveKeys.has(key)
+      ? (submittedSnapshot[key] ?? "")
+      : (persistedForm[key] ?? "");
+  }
+  return baseline as T;
+}
+
+/**
+ * Remove only clear intents that were included in a successful operation.
+ * Revision maps let the UI preserve a same-key clear created after the
+ * operation snapshot; the optional maps keep the helper useful for simple
+ * set-based reconciliation tests and callers.
+ */
+export function reconcileSavedSecretClears<T extends string>(
+  currentClearedSecrets: Iterable<T>,
+  persistedClearedSecrets: Iterable<T>,
+  snapshotClearRevisions?: ReadonlyMap<T, number>,
+  currentClearRevisions?: ReadonlyMap<T, number>
+): Set<T> {
+  const next = new Set<T>(currentClearedSecrets);
+  const persisted = new Set<T>(persistedClearedSecrets);
+  for (const key of persisted) {
+    if (snapshotClearRevisions && currentClearRevisions) {
+      const snapshotRevision = snapshotClearRevisions.get(key);
+      if (snapshotRevision !== undefined && currentClearRevisions.get(key) !== snapshotRevision) {
+        continue;
+      }
+    }
+    next.delete(key);
+  }
+  return next;
 }
 
 export function isCurrentSettingsOperation(

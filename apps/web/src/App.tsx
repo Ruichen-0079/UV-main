@@ -91,7 +91,9 @@ import { isTauriRuntime } from "./tauri-window.js";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
+  mergeSettingsBaseline,
   normalizeRuntimeSettingForComparison,
+  reconcileSavedSecretClears,
   resolveSettingsOperationState,
   settingsDraftDiffers,
   settingsFingerprint,
@@ -3342,6 +3344,7 @@ function SettingsPage(): JSX.Element {
   const draftTouchedBeforeLoadRef = useRef(false);
   const formRef = useRef(form);
   const clearedSecretsRef = useRef(clearedSecrets);
+  const clearRevisionRef = useRef(new Map<SettingsKey, number>());
   formRef.current = form;
   clearedSecretsRef.current = clearedSecrets;
 
@@ -3407,20 +3410,39 @@ function SettingsPage(): JSX.Element {
     return null;
   }
 
-  function updateBaselineAfterSave(snapshot: SettingsForm, refreshed: SettingsForm): void {
+  function updateSavedBaseline(snapshot: SettingsForm, persisted: SettingsForm): void {
     setLoadedForm((current) => {
-      const baseline = { ...(current ?? refreshed) };
-      for (const key of Object.keys(refreshed) as SettingsKey[]) {
-        baseline[key] = isSecretSettingsKey(key) ? snapshot[key] : refreshed[key];
-      }
-      return baseline;
+      return mergeSettingsBaseline(current, persisted, snapshot, new Set(settingsSecretKeys));
     });
+  }
+
+  function reconcileSavedClearIntents(
+    snapshotClearedSecrets: Set<SettingsKey>,
+    snapshotClearRevisions: ReadonlyMap<SettingsKey, number>
+  ): Set<SettingsKey> {
+    const reconciled = reconcileSavedSecretClears(
+      clearedSecretsRef.current,
+      snapshotClearedSecrets,
+      snapshotClearRevisions,
+      clearRevisionRef.current
+    );
+    clearedSecretsRef.current = reconciled;
+    setClearedSecrets(reconciled);
+    return reconciled;
+  }
+
+  function clearSecretField(key: SettingsKey): void {
+    clearSecret(setForm, setClearedSecrets, key);
+    const nextRevision = (clearRevisionRef.current.get(key) ?? 0) + 1;
+    clearRevisionRef.current.set(key, nextRevision);
+    clearedSecretsRef.current = new Set([...clearedSecretsRef.current, key]);
   }
 
   async function saveAndApply(): Promise<void> {
     if (operationBusy) return;
     const snapshot = { ...form };
     const snapshotClearedSecrets = new Set(clearedSecrets);
+    const snapshotClearRevisions = new Map(clearRevisionRef.current);
     const validationError = localValidation(snapshot);
     if (validationError) {
       setSettingsState("failed");
@@ -3428,7 +3450,6 @@ function SettingsPage(): JSX.Element {
       return;
     }
     const operation = beginOperation();
-    const fingerprint = settingsFingerprint(snapshot, snapshotClearedSecrets);
     let stage: "save" | "reload" | "refresh" = "save";
     setSaving(true);
     setSettingsState("saving");
@@ -3437,6 +3458,9 @@ function SettingsPage(): JSX.Element {
         values: buildSettingsUpdate(snapshot, snapshotClearedSecrets)
       });
       if (!operationIsCurrent(operation)) return;
+      const persistedForm = settingsFormFromResponse(response.settings);
+      updateSavedBaseline(snapshot, persistedForm);
+      reconcileSavedClearIntents(snapshotClearedSecrets, snapshotClearRevisions);
       setSaveResult({
         mode: "save-and-apply",
         changedKeys: response.changedKeys,
@@ -3463,7 +3487,11 @@ function SettingsPage(): JSX.Element {
         return;
       }
       const refreshedForm = settingsFormFromResponse(refreshedResponse);
-      const comparison = compareSettingsForms(snapshot, refreshedForm, new Set(settingsSecretKeys));
+      const comparison = compareSettingsForms(
+        persistedForm,
+        refreshedForm,
+        new Set(settingsSecretKeys)
+      );
       const activeRuntimeMismatch =
         refreshedResponse.runtime.serverHost !== refreshedResponse.activeRuntimeConfig.serverHost ||
         refreshedResponse.runtime.serverPort !== refreshedResponse.activeRuntimeConfig.serverPort ||
@@ -3484,12 +3512,12 @@ function SettingsPage(): JSX.Element {
           refreshedResponse.activeRuntimeConfig.memoryExtractor !== undefined &&
           refreshedResponse.memory.memoryExtractor !==
             refreshedResponse.activeRuntimeConfig.memoryExtractor);
-      updateBaselineAfterSave(snapshot, refreshedForm);
-      const currentFingerprint = settingsFingerprint(formRef.current, clearedSecretsRef.current);
-      const draftChangedDuringSave = currentFingerprint !== fingerprint;
-      if (!draftChangedDuringSave) {
-        setClearedSecrets(new Set());
+      if (comparison.mismatchedKeys.length === 0) {
+        updateSavedBaseline(snapshot, refreshedForm);
       }
+      const draftChangedDuringSave =
+        settingsFingerprint(formRef.current, clearedSecretsRef.current) !==
+        settingsFingerprint(snapshot);
       const restartRequired =
         response.restartRequired ||
         reloadResponse.restartRequired ||
@@ -3527,8 +3555,11 @@ function SettingsPage(): JSX.Element {
       if (!operationIsCurrent(operation)) return;
       setSettingsState("failed");
       const message = caught instanceof Error ? caught.message : "保存或应用配置失败";
-      if (stage === "save") setSaveError(message);
-      else setApplyError(message);
+      if (stage === "save") {
+        setSaveError(message);
+      } else {
+        setApplyError("配置已保存，但 Runtime 应用或刷新确认失败。请检查 Runtime 状态后重试。");
+      }
     } finally {
       if (operationIsCurrent(operation)) {
         setSaving(false);
@@ -3541,6 +3572,7 @@ function SettingsPage(): JSX.Element {
     if (operationBusy) return;
     const snapshot = { ...form };
     const snapshotClearedSecrets = new Set(clearedSecrets);
+    const snapshotClearRevisions = new Map(clearRevisionRef.current);
     const validationError = localValidation(snapshot);
     if (validationError) {
       setSettingsState("failed");
@@ -3548,6 +3580,7 @@ function SettingsPage(): JSX.Element {
       return;
     }
     const operation = beginOperation();
+    let stage: "save" | "refresh" = "save";
     setSaving(true);
     setSettingsState("saving");
     try {
@@ -3555,11 +3588,15 @@ function SettingsPage(): JSX.Element {
         values: buildSettingsUpdate(snapshot, snapshotClearedSecrets)
       });
       if (!operationIsCurrent(operation)) return;
+      const persistedForm = settingsFormFromResponse(response.settings);
+      updateSavedBaseline(snapshot, persistedForm);
+      reconcileSavedClearIntents(snapshotClearedSecrets, snapshotClearRevisions);
       setSaveResult({
         mode: "save-only",
         changedKeys: response.changedKeys,
         restartRequired: response.restartRequired
       });
+      stage = "refresh";
       const refreshed = await settings.refresh();
       if (!operationIsCurrent(operation)) return;
       if (!refreshed) {
@@ -3569,14 +3606,21 @@ function SettingsPage(): JSX.Element {
             refreshSucceeded: false
           })
         );
-        setApplyError("配置已保存，但重新读取配置失败。");
+        setApplyError("配置已保存，但刷新观察失败；Active Runtime 未在本次仅保存操作中应用。");
         return;
       }
       const refreshedForm = settingsFormFromResponse(refreshed);
-      updateBaselineAfterSave(snapshot, refreshedForm);
+      const observationComparison = compareSettingsForms(
+        persistedForm,
+        refreshedForm,
+        new Set(settingsSecretKeys)
+      );
+      if (observationComparison.mismatchedKeys.length === 0) {
+        updateSavedBaseline(snapshot, refreshedForm);
+      }
       const draftChangedDuringSave =
         settingsFingerprint(formRef.current, clearedSecretsRef.current) !==
-        settingsFingerprint(snapshot, snapshotClearedSecrets);
+        settingsFingerprint(snapshot);
       const restartRequired =
         response.restartRequired || refreshed.restartRequired || refreshed.runtime.pendingRestart;
       setSettingsState(
@@ -3593,7 +3637,11 @@ function SettingsPage(): JSX.Element {
     } catch (caught) {
       if (!operationIsCurrent(operation)) return;
       setSettingsState("failed");
-      setSaveError(caught instanceof Error ? caught.message : "保存配置失败");
+      if (stage === "save") {
+        setSaveError(caught instanceof Error ? caught.message : "保存配置失败");
+      } else {
+        setApplyError("配置已保存，但刷新观察失败；Active Runtime 未在本次仅保存操作中应用。");
+      }
     } finally {
       if (operationIsCurrent(operation)) setSaving(false);
     }
@@ -3959,7 +4007,7 @@ function SettingsPage(): JSX.Element {
             preview={undefined}
             value={form.DATABASE_URL}
             onChange={(value) => setFormValue(setForm, "DATABASE_URL", value)}
-            onClear={() => clearSecret(setForm, setClearedSecrets, "DATABASE_URL")}
+            onClear={() => clearSecretField("DATABASE_URL")}
           />
           <div className="mt-4 border-t border-ink-100 pt-4">
             <Field label="MEMORY_EXTRACTOR">
@@ -4249,7 +4297,7 @@ function SettingsPage(): JSX.Element {
             preview={settings.data?.providers.deepseek.apiKeyPreview}
             value={form.DEEPSEEK_API_KEY}
             onChange={(value) => setFormValue(setForm, "DEEPSEEK_API_KEY", value)}
-            onClear={() => clearSecret(setForm, setClearedSecrets, "DEEPSEEK_API_KEY")}
+            onClear={() => clearSecretField("DEEPSEEK_API_KEY")}
           />
           <SettingsInput form={form} name="DEEPSEEK_CHAT_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="DEEPSEEK_REASONING_MODEL" setForm={setForm} />
@@ -4270,7 +4318,7 @@ function SettingsPage(): JSX.Element {
             preview={settings.data?.providers.xai.apiKeyPreview}
             value={form.XAI_API_KEY}
             onChange={(value) => setFormValue(setForm, "XAI_API_KEY", value)}
-            onClear={() => clearSecret(setForm, setClearedSecrets, "XAI_API_KEY")}
+            onClear={() => clearSecretField("XAI_API_KEY")}
           />
           <SettingsInput form={form} name="XAI_TTS_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="XAI_TTS_VOICE" setForm={setForm} />
@@ -4292,7 +4340,7 @@ function SettingsPage(): JSX.Element {
             preview={secretSettingPreview(settings.data, "NVIDIA_API_KEY")}
             value={form.NVIDIA_API_KEY}
             onChange={(value) => setFormValue(setForm, "NVIDIA_API_KEY", value)}
-            onClear={() => clearSecret(setForm, setClearedSecrets, "NVIDIA_API_KEY")}
+            onClear={() => clearSecretField("NVIDIA_API_KEY")}
           />
           <SettingsInput form={form} name="NVIDIA_CHAT_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="NVIDIA_REASONING_MODEL" setForm={setForm} />
@@ -4353,7 +4401,7 @@ function SettingsPage(): JSX.Element {
             preview={settings.data?.providers.dashscope.apiKeyPreview}
             value={form.DASHSCOPE_API_KEY}
             onChange={(value) => setFormValue(setForm, "DASHSCOPE_API_KEY", value)}
-            onClear={() => clearSecret(setForm, setClearedSecrets, "DASHSCOPE_API_KEY")}
+            onClear={() => clearSecretField("DASHSCOPE_API_KEY")}
           />
           <SettingsInput form={form} name="DASHSCOPE_STT_MODEL" setForm={setForm} />
           <ProviderDiagnosticsSummary
@@ -4394,7 +4442,7 @@ function SettingsPage(): JSX.Element {
             preview={settings.data?.providers.embedding.apiKeyPreview}
             value={form.EMBEDDING_API_KEY}
             onChange={(value) => setFormValue(setForm, "EMBEDDING_API_KEY", value)}
-            onClear={() => clearSecret(setForm, setClearedSecrets, "EMBEDDING_API_KEY")}
+            onClear={() => clearSecretField("EMBEDDING_API_KEY")}
           />
         </Panel>
       </div>

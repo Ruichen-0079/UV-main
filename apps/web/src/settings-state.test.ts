@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   compareSettingsForms,
   isCurrentSettingsOperation,
+  mergeSettingsBaseline,
   normalizeRuntimeSettingForComparison,
   normalizeSettingsFormValueForComparison,
+  reconcileSavedSecretClears,
   reduceSettingsState,
   resolveSettingsOperationState,
   shouldReplaceSettingsDraft,
@@ -114,10 +116,7 @@ describe("settings apply state", () => {
   it("treats accepted canonical settings representations as the same saved value", () => {
     const baseline = { SERVER_PORT: "6121", PROVIDER_ALLOW_MOCKS: "true" };
     expect(
-      settingsDraftDiffers(
-        { SERVER_PORT: "06121", PROVIDER_ALLOW_MOCKS: "1" },
-        baseline
-      )
+      settingsDraftDiffers({ SERVER_PORT: "06121", PROVIDER_ALLOW_MOCKS: "1" }, baseline)
     ).toBe(false);
     expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "yes")).toBe("true");
     expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "off")).toBe("false");
@@ -125,11 +124,14 @@ describe("settings apply state", () => {
 
   it("does not canonicalize invalid editor values into a clean draft", () => {
     expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "maybe")).toBe("maybe");
+    expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", " true ")).toBe(
+      " true "
+    );
     expect(
-      settingsDraftDiffers(
-        { PROVIDER_ALLOW_MOCKS: "maybe" },
-        { PROVIDER_ALLOW_MOCKS: "false" }
-      )
+      settingsDraftDiffers({ MEMORY_REPOSITORY: "" }, { MEMORY_REPOSITORY: "in-memory" })
+    ).toBe(true);
+    expect(
+      settingsDraftDiffers({ PROVIDER_ALLOW_MOCKS: "maybe" }, { PROVIDER_ALLOW_MOCKS: "false" })
     ).toBe(true);
   });
 
@@ -169,17 +171,43 @@ describe("settings apply state", () => {
     expect(result.mismatchedKeys).toEqual([]);
   });
 
+  it("keeps the successful persistence response as the saved baseline", () => {
+    expect(
+      mergeSettingsBaseline(
+        { SERVER_PORT: "6121", DEEPSEEK_API_KEY: "old-secret" },
+        { SERVER_PORT: "7000", DEEPSEEK_API_KEY: "" },
+        { SERVER_PORT: "7000", DEEPSEEK_API_KEY: "new-secret" },
+        new Set(["DEEPSEEK_API_KEY"])
+      )
+    ).toEqual({ SERVER_PORT: "7000", DEEPSEEK_API_KEY: "new-secret" });
+  });
+
+  it("does not erase a newer secret clear intent when an older save completes", () => {
+    expect(
+      reconcileSavedSecretClears(
+        new Set(["DEEPSEEK_API_KEY"]),
+        new Set(["DEEPSEEK_API_KEY"]),
+        new Map([["DEEPSEEK_API_KEY", 1]]),
+        new Map([["DEEPSEEK_API_KEY", 2]])
+      )
+    ).toEqual(new Set(["DEEPSEEK_API_KEY"]));
+    expect(
+      reconcileSavedSecretClears(
+        new Set(["DEEPSEEK_API_KEY"]),
+        new Set(["DEEPSEEK_API_KEY"]),
+        new Map([["DEEPSEEK_API_KEY", 2]]),
+        new Map([["DEEPSEEK_API_KEY", 2]])
+      )
+    ).toEqual(new Set());
+  });
+
   it("normalizes valid runtime aliases before comparing saved and active values", () => {
     expect(normalizeRuntimeSettingForComparison("EVENT_BUS", "memory")).toBe("in-memory");
-    expect(normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", "memory")).toBe(
-      "in-memory"
-    );
+    expect(normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", "memory")).toBe("in-memory");
     expect(normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", "in-memory")).toBe(
       "in-memory"
     );
-    expect(
-      normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", undefined)
-    ).toBe("in-memory");
+    expect(normalizeRuntimeSettingForComparison("MEMORY_REPOSITORY", undefined)).toBe("in-memory");
   });
 
   it("rejects stale responses and callbacks after unmount", () => {
