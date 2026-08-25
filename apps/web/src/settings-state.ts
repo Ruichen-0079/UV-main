@@ -74,7 +74,12 @@ export function normalizeRuntimeSettingForComparison(
  * model. Invalid editor values remain distinct so validation errors cannot be
  * hidden by comparison normalization.
  */
-export function normalizeSettingsFormValueForComparison(key: string, value: string): string {
+export function normalizeSettingsFormValueForComparison(
+  key: string,
+  value: string | undefined
+): string | undefined {
+  if (value === undefined) return undefined;
+
   if (key === "PROVIDER_ALLOW_MOCKS") {
     switch (value.toLowerCase()) {
       case "true":
