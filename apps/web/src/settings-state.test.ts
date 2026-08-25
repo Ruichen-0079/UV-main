@@ -3,6 +3,7 @@ import {
   compareSettingsForms,
   isCurrentSettingsOperation,
   normalizeRuntimeSettingForComparison,
+  normalizeSettingsFormValueForComparison,
   reduceSettingsState,
   resolveSettingsOperationState,
   shouldReplaceSettingsDraft,
@@ -110,6 +111,28 @@ describe("settings apply state", () => {
     expect(settingsDraftDiffers({ ...baseline, DEEPSEEK_API_KEY: "new" }, baseline)).toBe(true);
   });
 
+  it("treats accepted canonical settings representations as the same saved value", () => {
+    const baseline = { SERVER_PORT: "6121", PROVIDER_ALLOW_MOCKS: "true" };
+    expect(
+      settingsDraftDiffers(
+        { SERVER_PORT: "06121", PROVIDER_ALLOW_MOCKS: "1" },
+        baseline
+      )
+    ).toBe(false);
+    expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "yes")).toBe("true");
+    expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "off")).toBe("false");
+  });
+
+  it("does not canonicalize invalid editor values into a clean draft", () => {
+    expect(normalizeSettingsFormValueForComparison("PROVIDER_ALLOW_MOCKS", "maybe")).toBe("maybe");
+    expect(
+      settingsDraftDiffers(
+        { PROVIDER_ALLOW_MOCKS: "maybe" },
+        { PROVIDER_ALLOW_MOCKS: "false" }
+      )
+    ).toBe(true);
+  });
+
   it("clears only the transient dirty state when a draft is restored", () => {
     expect(synchronizeSettingsDraftState("dirty", false, false)).toBe("clean");
     expect(synchronizeSettingsDraftState("saved-not-applied", false, false)).toBe(
@@ -135,6 +158,15 @@ describe("settings apply state", () => {
     );
     expect(result.mismatchedKeys).toEqual(["SERVER_PORT"]);
     expect(result.ignoredSensitiveKeys).toEqual(["DEEPSEEK_API_KEY"]);
+  });
+
+  it("compares canonical saved settings without false mismatches", () => {
+    const result = compareSettingsForms(
+      { SERVER_PORT: "06121", PROVIDER_ALLOW_MOCKS: "1" },
+      { SERVER_PORT: "6121", PROVIDER_ALLOW_MOCKS: "true" },
+      new Set()
+    );
+    expect(result.mismatchedKeys).toEqual([]);
   });
 
   it("normalizes valid runtime aliases before comparing saved and active values", () => {
