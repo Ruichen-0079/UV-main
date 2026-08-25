@@ -57,6 +57,9 @@ jobs:
       - name: TypeScript and host checks
         run: pnpm check
 
+      - name: Apply PostgreSQL migrations
+        run: pnpm db:migrate
+
       - name: Memory tests with PostgreSQL
         run: pnpm --filter @companion/memory test
 
@@ -65,9 +68,6 @@ jobs:
 
       - name: Server tests
         run: pnpm --filter @companion/server test
-
-      - name: Apply PostgreSQL migrations
-        run: pnpm db:migrate
 
       - name: Re-run PostgreSQL migrations
         run: pnpm db:migrate
