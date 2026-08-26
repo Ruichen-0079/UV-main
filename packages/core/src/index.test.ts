@@ -2460,8 +2460,14 @@ describe("RuntimeOrchestrator", () => {
     ]);
     expect(providerInputs[0]?.messages.map((message) => message.role)).toEqual(["system"]);
     expect(providerInputs[0]?.messages[0]?.content).toContain("ProactiveInstruction");
-    expect(providerInputs[0]?.messages[0]?.content).toContain("NO_OP");
-    expect(providerInputs[0]?.messages[0]?.content).toContain("REQUEST_TEXT");
+    const proactivePrompt = providerInputs[0]?.messages[0]?.content ?? "";
+    expect(proactivePrompt).toContain("specific open conversational reason");
+    expect(proactivePrompt).toContain("remains meaningfully open or unresolved");
+    expect(proactivePrompt).toContain("adequately answered or closed");
+    expect(proactivePrompt).toContain("merely elaborate on or repeat a completed answer");
+    expect(proactivePrompt).toContain("generic greeting or check-in");
+    expect(proactivePrompt).toContain("When uncertain, choose NO_OP.");
+    expect(proactivePrompt).toContain("REQUEST_TEXT");
     expect(providerInputs[0]?.messages[0]?.content).not.toContain("<UserMessage>");
     expect(runtime.getLatestPromptPreview()).toMatchObject({
       turnOrigin: "assistant-initiated",
