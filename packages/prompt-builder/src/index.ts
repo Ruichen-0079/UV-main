@@ -159,7 +159,7 @@ export class PromptBuilder {
   }
 
   private createSections(input: PromptBuildInput): PromptSection[] {
-    return [
+    const sharedSections: PromptSection[] = [
       {
         name: "SystemIdentity",
         content: input.systemIdentity,
@@ -210,33 +210,42 @@ export class PromptBuilder {
         content: input.currentSituation ?? "No additional situation context is available.",
         priority: 60,
         stable: false
-      },
-      ...(input.turnOrigin === "assistant-initiated"
-        ? [
-            {
-              name: "ProactiveInstruction" as const,
-              content: input.proactiveInstruction,
-              priority: 100,
-              stable: false
-            }
-          ]
-        : []),
+      }
+    ];
+
+    if (input.turnOrigin === "assistant-initiated") {
+      return [
+        sharedSections[0]!,
+        sharedSections[1]!,
+        {
+          name: "ProactiveInstruction",
+          content: input.proactiveInstruction,
+          priority: 100,
+          stable: true
+        },
+        {
+          ...sharedSections[2]!,
+          stable: true
+        },
+        sharedSections[5]!,
+        sharedSections[6]!
+      ];
+    }
+
+    return [
+      ...sharedSections,
       {
         name: "Tools",
         content: formatTools(input.tools ?? []),
         priority: 50,
         stable: false
       },
-      ...(input.turnOrigin === "assistant-initiated"
-        ? []
-        : [
-            {
-              name: "UserMessage" as const,
-              content: input.userMessage,
-              priority: 100,
-              stable: false
-            }
-          ])
+      {
+        name: "UserMessage",
+        content: input.userMessage,
+        priority: 100,
+        stable: false
+      }
     ];
   }
 

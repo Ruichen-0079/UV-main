@@ -58,6 +58,80 @@ describe("PromptBuilder", () => {
     expect(output.prompt).not.toContain("<UserMessage>");
   });
 
+  it("keeps proactive prompts stable-first and removes non-semantic sections", () => {
+    const build = (isoTimestamp: string) =>
+      new PromptBuilder().buildPrompt({
+        systemIdentity: "You are Companion.",
+        characterStyle: "Warm and concise.",
+        relationshipContext: "Use remembered context only when relevant.",
+        currentTime: {
+          isoTimestamp,
+          timezone: "Asia/Shanghai",
+          localDate: "2026-08-26"
+        },
+        currentAffect: "User appears focused.",
+        directContext: "- Previous turn: The reading order is still unresolved.",
+        retrievedMemories: ["The user is planning a reading project."],
+        currentSituation: "The assistant is initiating a proactive message.",
+        tools: [{ name: "memory.search", available: false }],
+        turnOrigin: "assistant-initiated",
+        proactiveInstruction: "Choose NO_OP or REQUEST_TEXT."
+      });
+
+    const first = build("2026-08-26T10:00:00.000Z");
+    const second = build("2026-08-26T10:00:01.000Z");
+
+    expect(first.sections.map((section) => section.name)).toEqual([
+      "SystemIdentity",
+      "CharacterStyle",
+      "ProactiveInstruction",
+      "RelationshipContext",
+      "DirectContext",
+      "RelevantMemory"
+    ]);
+    expect(
+      first.sections.filter((section) => section.stable).map((section) => section.name)
+    ).toEqual(["SystemIdentity", "CharacterStyle", "ProactiveInstruction", "RelationshipContext"]);
+    expect(first.sections.slice(0, 4).map((section) => section.content)).toEqual(
+      second.sections.slice(0, 4).map((section) => section.content)
+    );
+    expect(first.prompt).toContain("The reading order is still unresolved.");
+    expect(first.prompt).toContain("The user is planning a reading project.");
+    expect(first.prompt).not.toContain("<CurrentTime>");
+    expect(first.prompt).not.toContain("<CurrentAffect>");
+    expect(first.prompt).not.toContain("<CurrentSituation>");
+    expect(first.prompt).not.toContain("<Tools>");
+    expect(first.messages).toHaveLength(1);
+    expect(first.messages[0]?.role).toBe("system");
+  });
+
+  it("preserves normal user-turn section order and message serialization", () => {
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "You are Companion.",
+      relationshipContext: "Use remembered context only when relevant.",
+      currentTime: { isoTimestamp: "2026-08-26T10:00:00.000Z" },
+      currentSituation: "The user is interacting with the companion runtime.",
+      tools: [],
+      userMessage: "Continue the topic."
+    });
+
+    expect(output.sections.map((section) => section.name)).toEqual([
+      "SystemIdentity",
+      "CharacterStyle",
+      "RelationshipContext",
+      "CurrentTime",
+      "CurrentAffect",
+      "DirectContext",
+      "RelevantMemory",
+      "CurrentSituation",
+      "Tools",
+      "UserMessage"
+    ]);
+    expect(output.messages.map((message) => message.role)).toEqual(["system", "user"]);
+    expect(output.messages[1]?.content).toContain("Continue the topic.");
+    expect(output.prompt).not.toContain("<ProactiveInstruction>");
+  });
+
   it("keeps DirectContext separate from RelevantMemory", () => {
     const output = new PromptBuilder().buildPrompt({
       systemIdentity: "You are Companion.",
