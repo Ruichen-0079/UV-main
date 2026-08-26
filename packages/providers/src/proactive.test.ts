@@ -45,7 +45,12 @@ describe("proactive OpenAI-compatible capabilities", () => {
       jsonResponse({
         model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         choices: [{ finish_reason: "stop", message: { content: "REQUEST_TEXT" } }],
-        usage: { prompt_tokens: 321, completion_tokens: 3, total_tokens: 324 }
+        usage: {
+          prompt_tokens: 321,
+          completion_tokens: 3,
+          total_tokens: 324,
+          prompt_tokens_details: { cached_tokens: 280 }
+        }
       })
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -54,7 +59,7 @@ describe("proactive OpenAI-compatible capabilities", () => {
     await expect(provider.decide({ prompt: "frozen semantic prompt" })).resolves.toMatchObject({
       decision: "REQUEST_TEXT",
       model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-      tokenUsage: { inputTokens: 321, outputTokens: 3, totalTokens: 324 }
+      tokenUsage: { inputTokens: 321, outputTokens: 3, totalTokens: 324, cachedInputTokens: 280 }
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -100,7 +105,12 @@ describe("proactive OpenAI-compatible capabilities", () => {
       jsonResponse({
         model: "deepseek-ai/DeepSeek-V4-Flash-0731",
         choices: [{ finish_reason: "stop", text: "A grounded continuation." }],
-        usage: { prompt_tokens: 220, completion_tokens: 7, total_tokens: 227 }
+        usage: {
+          prompt_tokens: 220,
+          completion_tokens: 7,
+          total_tokens: 227,
+          prompt_tokens_details: { cached_tokens: 180 }
+        }
       })
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -114,7 +124,8 @@ describe("proactive OpenAI-compatible capabilities", () => {
     ).resolves.toMatchObject({
       message: { role: "assistant", content: "A grounded continuation." },
       finishReason: "stop",
-      model: "deepseek-ai/DeepSeek-V4-Flash-0731"
+      model: "deepseek-ai/DeepSeek-V4-Flash-0731",
+      tokenUsage: { cachedInputTokens: 180 }
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);

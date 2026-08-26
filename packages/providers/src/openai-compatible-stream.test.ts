@@ -64,7 +64,15 @@ describe("OpenAI-compatible native chat streaming", () => {
       frame({ choices: [{ delta: { content: "你" }, finish_reason: null }] }, "\r\n"),
       frame({ choices: [{ delta: { content: "好\n" }, finish_reason: null }] }, "\r\n"),
       frame(
-        { choices: [], usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 } },
+        {
+          choices: [],
+          usage: {
+            prompt_tokens: 4,
+            completion_tokens: 2,
+            total_tokens: 6,
+            prompt_tokens_details: { cached_tokens: 2 }
+          }
+        },
         "\r\n"
       ),
       frame({ choices: [{ delta: {}, finish_reason: "stop" }] }, "\r\n"),
@@ -95,7 +103,7 @@ describe("OpenAI-compatible native chat streaming", () => {
       output: {
         message: { content: "你好\n" },
         model: "deepseek-chat",
-        tokenUsage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 }
+        tokenUsage: { inputTokens: 4, outputTokens: 2, totalTokens: 6, cachedInputTokens: 2 }
       }
     });
     expect((fetch as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]?.body).toContain('"stream":true');

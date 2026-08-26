@@ -32,6 +32,7 @@ type OpenAIStreamUsage = {
   prompt_tokens?: unknown;
   completion_tokens?: unknown;
   total_tokens?: unknown;
+  prompt_tokens_details?: unknown;
 };
 
 /**
@@ -452,10 +453,14 @@ function normalizeUsage(
     throw protocolError(provider, capability, "OpenAI-compatible usage frame was invalid.");
   }
   const usage = value as OpenAIStreamUsage;
+  const promptTokenDetails = isRecord(usage.prompt_tokens_details)
+    ? usage.prompt_tokens_details
+    : undefined;
   return {
     inputTokens: numberOrUndefined(usage.prompt_tokens),
     outputTokens: numberOrUndefined(usage.completion_tokens),
-    totalTokens: numberOrUndefined(usage.total_tokens)
+    totalTokens: numberOrUndefined(usage.total_tokens),
+    cachedInputTokens: numberOrUndefined(promptTokenDetails?.["cached_tokens"])
   };
 }
 
