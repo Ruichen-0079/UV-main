@@ -106,6 +106,26 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
   const environment = parseEnvironment(env["NODE_ENV"]);
   const allowMocks = parseBoolean(env["PROVIDER_ALLOW_MOCKS"], false);
   const defaults = parseProviderSelection(env);
+  const chatEndpoint: ProviderEndpointConfig =
+    defaults.chat === "openai-compatible"
+      ? {
+          provider: defaults.chat,
+          enabled: true,
+          baseUrl: emptyToUndefined(env["OPENAI_COMPATIBLE_API_BASEURL"]),
+          apiKey: emptyToUndefined(env["OPENAI_COMPATIBLE_API_KEY"]),
+          model: emptyToUndefined(env["OPENAI_COMPATIBLE_CHAT_MODEL"])
+        }
+      : {
+          provider: defaults.chat,
+          enabled: true,
+          baseUrl: readProviderBaseUrl(
+            defaults.chat,
+            env["DEEPSEEK_API_BASEURL"],
+            "https://api.deepseek.com"
+          ),
+          apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
+          model: emptyToUndefined(env["DEEPSEEK_CHAT_MODEL"])
+        };
 
   return {
     environment,
@@ -131,17 +151,7 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
       includeRawResponses: parseBoolean(env["PROVIDER_INCLUDE_RAW_RESPONSES"], false),
       defaults,
       endpoints: {
-        chat: {
-          provider: defaults.chat,
-          enabled: true,
-          baseUrl: readProviderBaseUrl(
-            defaults.chat,
-            env["DEEPSEEK_API_BASEURL"],
-            "https://api.deepseek.com"
-          ),
-          apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
-          model: emptyToUndefined(env["DEEPSEEK_CHAT_MODEL"])
-        },
+        chat: chatEndpoint,
         reasoning: {
           provider: defaults.reasoning,
           enabled: true,
@@ -248,6 +258,14 @@ export function collectRuntimeConfigIssues(config: RuntimeConfig): ConfigValidat
       issues.push({
         path: `providers.endpoints.${capability}.model`,
         message: `Model is required when ${capability} provider '${endpoint.provider}' is enabled.`
+      });
+    }
+
+    if (capability === "chat" && endpoint.provider === "openai-compatible" && !endpoint.baseUrl) {
+      issues.push({
+        path: "providers.endpoints.chat.baseUrl",
+        message:
+          "OPENAI_COMPATIBLE_API_BASEURL is required when Chat provider 'openai-compatible' is enabled."
       });
     }
   }

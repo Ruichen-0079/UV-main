@@ -117,6 +117,64 @@ describe("ProviderRegistry", () => {
     expect(JSON.stringify(status)).not.toContain("embedding-secret-key");
   });
 
+  it("registers the generic OpenAI-compatible Chat provider without exposing its key", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "openai-compatible",
+      CHAT_PROVIDER_CHAIN: "openai-compatible",
+      OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
+      OPENAI_COMPATIBLE_API_KEY: "openai-compatible-secret",
+      OPENAI_COMPATIBLE_CHAT_MODEL: "gateway/chat-model"
+    });
+
+    const status = registry.getStatus().providers.chat;
+
+    expect(status).toMatchObject({
+      provider: "openai-compatible",
+      capability: "chat",
+      configured: true,
+      readiness: "ready",
+      available: true,
+      mock: false,
+      required: true,
+      baseUrl: "https://gateway.example/v1",
+      model: "gateway/chat-model"
+    });
+    expect(registry.getChatStreamingMode()).toBe("native");
+    expect(JSON.stringify(status)).not.toContain("openai-compatible-secret");
+  });
+
+  it("reports missing generic OpenAI-compatible Chat configuration as unavailable", async () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "openai-compatible",
+      CHAT_PROVIDER_CHAIN: "openai-compatible"
+    });
+
+    expect(registry.getStatus().providers.chat).toMatchObject({
+      provider: "openai-compatible",
+      configured: false,
+      readiness: "not_ready",
+      available: false,
+      mock: false,
+      status: "unavailable",
+      missingFields: [
+        "OPENAI_COMPATIBLE_API_BASEURL",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "OPENAI_COMPATIBLE_CHAT_MODEL"
+      ]
+    });
+    await expect(
+      registry.getChatProvider().generateReply({ messages: [{ role: "user", content: "hello" }] })
+    ).rejects.toMatchObject({
+      provider: "openai-compatible",
+      capability: "chat",
+      code: ProviderErrorCode.ProviderUnavailable
+    });
+  });
+
   it("reports configured DeepSeek providers without making health HTTP calls", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);

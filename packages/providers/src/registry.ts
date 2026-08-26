@@ -81,6 +81,11 @@ export type ProviderRegistryConfig = {
     model: string | undefined;
     dimensions: number;
   };
+  openaiCompatible: {
+    apiKey: string | undefined;
+    baseUrl: string | undefined;
+    chatModel: string | undefined;
+  };
   nvidia: {
     apiKey: string | undefined;
     baseUrl: string;
@@ -370,6 +375,14 @@ export class ProviderRegistry implements ProviderResolver {
       );
     }
 
+    if (capability === "chat" && name === "openai-compatible") {
+      return Boolean(
+        this.config.openaiCompatible.apiKey &&
+        this.config.openaiCompatible.baseUrl &&
+        this.config.openaiCompatible.chatModel
+      );
+    }
+
     if (name === "nvidia") {
       if (capability === "chat")
         return Boolean(this.config.nvidia.apiKey && this.config.nvidia.chatModel);
@@ -428,6 +441,13 @@ export class ProviderRegistry implements ProviderResolver {
         ...(capability === "reasoning" && !this.config.deepseek.reasoningModel
           ? ["DEEPSEEK_REASONING_MODEL"]
           : [])
+      ];
+    }
+    if (capability === "chat" && name === "openai-compatible") {
+      return [
+        ...(!this.config.openaiCompatible.baseUrl ? ["OPENAI_COMPATIBLE_API_BASEURL"] : []),
+        ...(!this.config.openaiCompatible.apiKey ? ["OPENAI_COMPATIBLE_API_KEY"] : []),
+        ...(!this.config.openaiCompatible.chatModel ? ["OPENAI_COMPATIBLE_CHAT_MODEL"] : [])
       ];
     }
     if (name === "nvidia") {
@@ -498,6 +518,13 @@ export class ProviderRegistry implements ProviderResolver {
           capability === "chat"
             ? this.config.deepseek.chatModel
             : this.config.deepseek.reasoningModel
+      };
+    }
+
+    if (capability === "chat" && name === "openai-compatible") {
+      return {
+        baseUrl: this.config.openaiCompatible.baseUrl,
+        model: this.config.openaiCompatible.chatModel
       };
     }
 
@@ -667,7 +694,9 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
     chains: {
       chat: parseProviderChain(
         env["CHAT_PROVIDER_CHAIN"],
-        ["deepseek", "nvidia", "local", "mock"],
+        env["DEFAULT_CHAT_PROVIDER"] === "openai-compatible"
+          ? ["openai-compatible", "deepseek", "nvidia", "local", "mock"]
+          : ["deepseek", "nvidia", "local", "mock"],
         allowMocks
       ),
       reasoning: parseProviderChain(
@@ -724,6 +753,11 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       model: emptyToUndefined(env["EMBEDDING_MODEL"]),
       dimensions: parsePositiveInteger(env["EMBEDDING_DIMENSIONS"], 1536)
     },
+    openaiCompatible: {
+      apiKey: emptyToUndefined(env["OPENAI_COMPATIBLE_API_KEY"]),
+      baseUrl: emptyToUndefined(env["OPENAI_COMPATIBLE_API_BASEURL"]),
+      chatModel: emptyToUndefined(env["OPENAI_COMPATIBLE_CHAT_MODEL"])
+    },
     nvidia: {
       apiKey: emptyToUndefined(env["NVIDIA_API_KEY"]),
       baseUrl: env["NVIDIA_API_BASEURL"] ?? "https://integrate.api.nvidia.com/v1",
@@ -777,6 +811,36 @@ export function validateRequiredProviderConfig(config: ProviderRegistryConfig): 
     errors.push("DEEPSEEK_CHAT_MODEL is required when DEFAULT_CHAT_PROVIDER=deepseek.");
   }
 
+  if (
+    !config.allowMocks &&
+    config.defaults.chat === "openai-compatible" &&
+    !config.openaiCompatible.baseUrl
+  ) {
+    errors.push(
+      "OPENAI_COMPATIBLE_API_BASEURL is required when DEFAULT_CHAT_PROVIDER=openai-compatible."
+    );
+  }
+
+  if (
+    !config.allowMocks &&
+    config.defaults.chat === "openai-compatible" &&
+    !config.openaiCompatible.apiKey
+  ) {
+    errors.push(
+      "OPENAI_COMPATIBLE_API_KEY is required when DEFAULT_CHAT_PROVIDER=openai-compatible."
+    );
+  }
+
+  if (
+    !config.allowMocks &&
+    config.defaults.chat === "openai-compatible" &&
+    !config.openaiCompatible.chatModel
+  ) {
+    errors.push(
+      "OPENAI_COMPATIBLE_CHAT_MODEL is required when DEFAULT_CHAT_PROVIDER=openai-compatible."
+    );
+  }
+
   if (!config.allowMocks && config.defaults.reasoning === "deepseek" && !config.deepseek.apiKey) {
     errors.push("DEEPSEEK_API_KEY is required when DEFAULT_REASONING_PROVIDER=deepseek.");
   }
@@ -803,6 +867,23 @@ export function validateRequiredProviderConfig(config: ProviderRegistryConfig): 
 type ProviderFactory<TProvider> = (config: ProviderRegistryConfig) => TProvider | undefined;
 
 const chatProviderFactories: Record<string, ProviderFactory<ChatProvider>> = {
+  "openai-compatible"(config) {
+    if (
+      !config.openaiCompatible.apiKey ||
+      !config.openaiCompatible.baseUrl ||
+      !config.openaiCompatible.chatModel
+    ) {
+      return undefined;
+    }
+
+    return new OpenAICompatibleChatProvider({
+      provider: "openai-compatible",
+      apiKey: config.openaiCompatible.apiKey,
+      baseUrl: config.openaiCompatible.baseUrl,
+      model: config.openaiCompatible.chatModel,
+      includeRawResponse: config.includeRawProviderResponses
+    });
+  },
   deepseek(config) {
     if (!config.deepseek.apiKey || !config.deepseek.chatModel) {
       return undefined;
@@ -1114,6 +1195,13 @@ function missingFieldsForConfig(
       ...(capability === "reasoning" && !config.deepseek.reasoningModel
         ? ["DEEPSEEK_REASONING_MODEL"]
         : [])
+    ];
+  }
+  if (capability === "chat" && name === "openai-compatible") {
+    return [
+      ...(!config.openaiCompatible.baseUrl ? ["OPENAI_COMPATIBLE_API_BASEURL"] : []),
+      ...(!config.openaiCompatible.apiKey ? ["OPENAI_COMPATIBLE_API_KEY"] : []),
+      ...(!config.openaiCompatible.chatModel ? ["OPENAI_COMPATIBLE_CHAT_MODEL"] : [])
     ];
   }
   if (name === "nvidia") {

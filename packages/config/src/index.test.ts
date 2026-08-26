@@ -72,6 +72,29 @@ describe("runtime config", () => {
     expect(config.providers.endpoints.embedding.dimensions).toBe(1536);
   });
 
+  it("parses and validates the generic OpenAI-compatible Chat endpoint", () => {
+    const config = parseRuntimeConfig({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "openai-compatible",
+      DEEPSEEK_API_KEY: "reasoning-secret",
+      DEEPSEEK_REASONING_MODEL: "deepseek-reasoner",
+      EMBEDDING_API_KEY: "embedding-secret",
+      EMBEDDING_MODEL: "embedding-model",
+      OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
+      OPENAI_COMPATIBLE_API_KEY: "gateway-secret",
+      OPENAI_COMPATIBLE_CHAT_MODEL: "gateway/chat-model"
+    });
+
+    expect(config.providers.endpoints.chat).toMatchObject({
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "gateway-secret",
+      model: "gateway/chat-model"
+    });
+    expect(() => validateRuntimeConfig(config)).not.toThrow();
+  });
+
   it("redacts secrets and authorization-like fields", () => {
     expect(redactSecret("sk-1234567890")).toBe("sk-...[redacted]...890");
 
