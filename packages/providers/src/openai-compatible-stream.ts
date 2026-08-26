@@ -150,7 +150,7 @@ export async function* streamOpenAICompatibleChatCompletion(
         model = chunk.model;
       }
 
-      if (chunk.usage !== undefined) {
+      if (chunk.usage !== undefined && chunk.usage !== null) {
         tokenUsage = normalizeUsage(chunk.usage, options.provider, capability);
       }
 

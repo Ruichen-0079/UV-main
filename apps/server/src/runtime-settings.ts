@@ -27,6 +27,9 @@ export const editableKeys = [
   "DEEPSEEK_API_KEY",
   "DEEPSEEK_CHAT_MODEL",
   "DEEPSEEK_REASONING_MODEL",
+  "OPENAI_COMPATIBLE_API_BASEURL",
+  "OPENAI_COMPATIBLE_API_KEY",
+  "OPENAI_COMPATIBLE_CHAT_MODEL",
   "XAI_API_BASEURL",
   "XAI_API_KEY",
   "XAI_TTS_MODEL",
@@ -80,6 +83,7 @@ export type EditableRuntimeSetting = (typeof editableKeys)[number];
 export const secretKeys = new Set<EditableRuntimeSetting>([
   "DATABASE_URL",
   "DEEPSEEK_API_KEY",
+  "OPENAI_COMPATIBLE_API_KEY",
   "XAI_API_KEY",
   "DASHSCOPE_API_KEY",
   "NVIDIA_API_KEY",
@@ -146,7 +150,7 @@ const booleanKeys = new Set<EditableRuntimeSetting>([
 ]);
 
 const providerChainRules: Record<string, Set<string>> = {
-  CHAT_PROVIDER_CHAIN: new Set(["deepseek", "nvidia", "local", "mock"]),
+  CHAT_PROVIDER_CHAIN: new Set(["openai-compatible", "deepseek", "nvidia", "local", "mock"]),
   REASONING_PROVIDER_CHAIN: new Set(["deepseek", "nvidia", "local", "mock"]),
   EMBEDDING_PROVIDER_CHAIN: new Set(["openai-compatible", "nvidia", "local", "mock"]),
   TTS_PROVIDER_CHAIN: new Set(["xai", "local", "mock"]),
@@ -158,6 +162,7 @@ const embeddingProviderNames = new Set(["openai-compatible", "nvidia", "local", 
 
 const urlKeys = new Set<EditableRuntimeSetting>([
   "DEEPSEEK_API_BASEURL",
+  "OPENAI_COMPATIBLE_API_BASEURL",
   "XAI_API_BASEURL",
   "DASHSCOPE_API_BASEURL",
   "NVIDIA_API_BASEURL",

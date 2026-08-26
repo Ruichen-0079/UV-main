@@ -77,6 +77,19 @@ DEEPSEEK_API_KEY=...
 DEEPSEEK_CHAT_MODEL=...
 ```
 
+对于 DeepInfra、OpenRouter 等远程 OpenAI-compatible Chat 网关，可使用独立的
+Chat provider identity：
+
+```env
+DEFAULT_CHAT_PROVIDER=openai-compatible
+OPENAI_COMPATIBLE_API_BASEURL=https://api.deepinfra.com/v1/openai
+OPENAI_COMPATIBLE_API_KEY=...
+OPENAI_COMPATIBLE_CHAT_MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
+```
+
+该 provider 只负责 Chat，复用现有 `/chat/completions` streaming transport；model
+ID 原样传递，API key 只作为 Bearer credential 发送，不会出现在 status/log 中。
+
 Reasoning 也默认使用 DeepSeek：
 
 ```env

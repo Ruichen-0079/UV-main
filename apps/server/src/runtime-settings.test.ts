@@ -13,6 +13,7 @@ describe("runtime settings contract", () => {
     expect(editableKeys.every((key) => getRuntimeSettingApplyMode(key))).toBe(true);
     expect(getRuntimeSettingApplyMode("SERVER_PORT")).toBe("restart_required");
     expect(getRuntimeSettingApplyMode("DEEPSEEK_CHAT_MODEL")).toBe("hot_reload");
+    expect(getRuntimeSettingApplyMode("OPENAI_COMPATIBLE_CHAT_MODEL")).toBe("hot_reload");
     expect(getRuntimeSettingApplyMode("MEMORY_VECTOR_IVFFLAT_PROBES")).toBe("restart_required");
     expect(getRuntimeSettingApplyMode("GPT_SOVITS_TTS_GPT_WEIGHTS")).toBe("restart_required");
   });
@@ -40,6 +41,7 @@ describe("runtime settings contract", () => {
       SERVER_PORT: "6121abc",
       PROVIDER_ALLOW_MOCKS: "maybe",
       CHAT_PROVIDER_CHAIN: "deepseek,unknown",
+      OPENAI_COMPATIBLE_API_BASEURL: "not-a-url",
       XAI_API_BASEURL: "not-a-url",
       EMBEDDING_PROVIDER: "unsupported",
       GPT_SOVITS_TTS_TOP_P: "2"
@@ -51,6 +53,7 @@ describe("runtime settings contract", () => {
       SERVER_PORT: expect.any(String),
       PROVIDER_ALLOW_MOCKS: expect.any(String),
       CHAT_PROVIDER_CHAIN: expect.any(String),
+      OPENAI_COMPATIBLE_API_BASEURL: expect.any(String),
       XAI_API_BASEURL: expect.any(String),
       GPT_SOVITS_TTS_TOP_P: expect.any(String)
     });

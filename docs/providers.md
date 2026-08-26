@@ -14,7 +14,7 @@ The runtime uses provider interfaces and a `ProviderRegistry` so core orchestrat
 Provider Priority/Fallback v1 lets each capability define an ordered provider chain:
 
 ```env
-CHAT_PROVIDER_CHAIN=deepseek,nvidia,local,mock
+CHAT_PROVIDER_CHAIN=openai-compatible,deepseek,nvidia,local,mock
 REASONING_PROVIDER_CHAIN=deepseek,nvidia,local,mock
 EMBEDDING_PROVIDER_CHAIN=openai-compatible,nvidia,local,mock
 TTS_PROVIDER_CHAIN=xai,local,mock
@@ -96,6 +96,23 @@ DEEPSEEK_API_BASEURL=https://api.deepseek.com
 DEEPSEEK_API_KEY=...
 DEEPSEEK_CHAT_MODEL=...
 ```
+
+For a generic remote OpenAI-compatible Chat gateway such as DeepInfra or
+OpenRouter, configure the explicit Chat-only identity below. The provider is
+not vendor-specific and reuses Yuvi's existing `/chat/completions` streaming
+transport:
+
+```env
+DEFAULT_CHAT_PROVIDER=openai-compatible
+OPENAI_COMPATIBLE_API_BASEURL=https://api.deepinfra.com/v1/openai
+OPENAI_COMPATIBLE_API_KEY=...
+OPENAI_COMPATIBLE_CHAT_MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
+```
+
+The API key is sent as Bearer authentication, the model ID is passed through
+unchanged, and status output exposes only safe configuration metadata.
+Missing base URL, key, or model configuration leaves the route
+`not_ready`/`unavailable` under the existing registry semantics.
 
 Reasoning defaults to DeepSeek too:
 

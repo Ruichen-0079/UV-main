@@ -127,6 +127,26 @@ describe("OpenAI-compatible native chat streaming", () => {
     expect(JSON.parse(String(request?.body))).toMatchObject({ stream: false });
   });
 
+  it("accepts a nullable usage frame from an OpenAI-compatible gateway", async () => {
+    const body = [
+      frame({ choices: [{ delta: { content: "nullable usage" } }] }),
+      frame({ choices: [], usage: null }),
+      frame({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+      frame("[DONE]")
+    ].join("");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => streamResponse([encoded(body)]))
+    );
+
+    const events = await collect(createProvider());
+
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      output: { message: { content: "nullable usage" }, tokenUsage: undefined }
+    });
+  });
+
   it("does not expose provider reasoning_content as normalized stream output", async () => {
     const body = [
       frame({ choices: [{ delta: { reasoning_content: "private trace", content: "visible" } }] }),
@@ -194,6 +214,39 @@ describe("OpenAI-compatible native chat streaming", () => {
       type: "completed",
       output: { message: { content: "NVIDIA" }, finalProvider: "nvidia" }
     });
+  });
+
+  it("uses the generic OpenAI-compatible Chat route with the configured model and Bearer key", async () => {
+    const body = `${frame({ model: "deepseek-ai/DeepSeek-V4-Flash-0731", choices: [{ delta: { content: "remote" } }] })}${frame({ choices: [{ delta: {}, finish_reason: "stop" }] })}${frame("[DONE]")}`;
+    const fetchMock = vi.fn(async () => streamResponse([encoded(body)]));
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "test",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "openai-compatible",
+      CHAT_PROVIDER_CHAIN: "openai-compatible",
+      OPENAI_COMPATIBLE_API_BASEURL: "https://api.deepinfra.com/v1/openai",
+      OPENAI_COMPATIBLE_API_KEY: "deepinfra-key",
+      OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-ai/DeepSeek-V4-Flash-0731"
+    });
+
+    const events = await collect(registry.getChatProvider());
+
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      output: {
+        message: { content: "remote" },
+        model: "deepseek-ai/DeepSeek-V4-Flash-0731",
+        finalProvider: "openai-compatible"
+      }
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.deepinfra.com/v1/openai/chat/completions",
+      expect.objectContaining({
+        body: expect.stringContaining('"model":"deepseek-ai/DeepSeek-V4-Flash-0731"'),
+        headers: expect.objectContaining({ authorization: "Bearer deepinfra-key" })
+      })
+    );
   });
 
   it("falls back between real OpenAI-compatible routes before the first delta", async () => {
