@@ -13,17 +13,21 @@ import {
   ProviderError,
   ProviderErrorCode,
   FallbackChatProvider,
+  createMockAssistantContinuationProvider,
   type ChatStreamEvent,
   type ChatOutput,
   type ChatProvider,
   createMockChatProvider,
+  createMockProactiveDecisionProvider,
   createMockStreamingChatProvider as createRawMockStreamingChatProvider,
   createMockReasoningProvider,
   createMockSTTProvider,
   createMockVisionProvider,
   type ChatInput,
   type ChatStreamOptions,
+  type AssistantContinuationInput,
   type MockStreamingChatProviderOptions,
+  type ProactiveDecisionInput,
   type TTSOutput
 } from "@companion/providers";
 import { createEvent, type RuntimeEvent } from "@companion/protocol";
@@ -2408,8 +2412,8 @@ describe("RuntimeOrchestrator", () => {
       published.push(event);
     });
     const conversation = new InMemoryConversationRepository();
-    const providerInputs: ChatInput[] = [];
-    const baseProvider = createMockStreamingChatProvider("assistant-only", { chunks: ["hello"] });
+    const decisionInputs: ProactiveDecisionInput[] = [];
+    const continuationInputs: AssistantContinuationInput[] = [];
     const runtime = new RuntimeOrchestrator({
       eventBus,
       memory: createRecordingMemory([]),
@@ -2417,11 +2421,22 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () => ({
-          ...baseProvider,
-          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
-            providerInputs.push(input);
-            yield* baseProvider.streamReply!(input, options);
+        getProactiveDecisionProvider: () => ({
+          name: "assistant-only-decision",
+          async decide(input: ProactiveDecisionInput) {
+            decisionInputs.push(input);
+            return { decision: "REQUEST_TEXT" as const, model: "decision-model" };
+          }
+        }),
+        getAssistantContinuationProvider: () => ({
+          name: "assistant-only-continuation",
+          async generateContinuation(input: AssistantContinuationInput) {
+            continuationInputs.push(input);
+            return {
+              message: { role: "assistant" as const, content: "hello" },
+              model: "text-model",
+              finishReason: "stop" as const
+            };
           }
         })
       }
@@ -2458,9 +2473,10 @@ describe("RuntimeOrchestrator", () => {
         }
       }
     ]);
-    expect(providerInputs[0]?.messages.map((message) => message.role)).toEqual(["system"]);
-    expect(providerInputs[0]?.messages[0]?.content).toContain("ProactiveInstruction");
-    const proactivePrompt = providerInputs[0]?.messages[0]?.content ?? "";
+    expect(decisionInputs).toHaveLength(1);
+    expect(continuationInputs).toHaveLength(1);
+    const proactivePrompt = decisionInputs[0]?.prompt ?? "";
+    expect(proactivePrompt).toContain("ProactiveInstruction");
     expect(proactivePrompt).toContain("specific open conversational reason");
     expect(proactivePrompt).toContain("remains meaningfully open or unresolved");
     expect(proactivePrompt).toContain("adequately answered or closed");
@@ -2468,7 +2484,8 @@ describe("RuntimeOrchestrator", () => {
     expect(proactivePrompt).toContain("generic greeting or check-in");
     expect(proactivePrompt).toContain("When uncertain, choose NO_OP.");
     expect(proactivePrompt).toContain("REQUEST_TEXT");
-    expect(providerInputs[0]?.messages[0]?.content).not.toContain("<UserMessage>");
+    expect(proactivePrompt).not.toContain("<UserMessage>");
+    expect(continuationInputs[0]?.prompt).toContain("decision is already REQUEST_TEXT");
     expect(runtime.getLatestPromptPreview()).toMatchObject({
       turnOrigin: "assistant-initiated",
       proactiveInstruction: expect.any(String),
@@ -2502,8 +2519,7 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () =>
-          createExactStreamingChatProvider("no-op", [{ type: "text-delta", text: "NO_OP\n" }])
+        getProactiveDecisionProvider: () => createMockProactiveDecisionProvider("NO_OP")
       }
     });
 
@@ -2532,7 +2548,7 @@ describe("RuntimeOrchestrator", () => {
     ).rejects.toMatchObject({ name: "AssistantTurnConflictError" });
   });
 
-  it("parses a split REQUEST_TEXT control line and strips it from persistence", async () => {
+  it("buffers proactive text and emits one validated full delta", async () => {
     const conversation = new InMemoryConversationRepository();
     const published: RuntimeEvent[] = [];
     const eventBus = new InMemoryEventBus({ development: false });
@@ -2546,19 +2562,8 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () =>
-          createExactStreamingChatProvider("split-control", [
-            { type: "text-delta", text: "REQ" },
-            { type: "text-delta", text: "UEST_TEXT\nhel" },
-            { type: "text-delta", text: "lo" },
-            {
-              type: "completed",
-              output: {
-                message: { role: "assistant", content: "REQUEST_TEXT\nhello" },
-                finishReason: "stop"
-              }
-            }
-          ])
+        getAssistantContinuationProvider: () =>
+          createMockAssistantContinuationProvider("hello", "buffered-continuation")
       }
     });
 
@@ -2573,12 +2578,11 @@ describe("RuntimeOrchestrator", () => {
     expect(events.map((event) => event.type)).toEqual([
       "proactive-decision",
       "text-delta",
-      "text-delta",
       "completed"
     ]);
     expect(
       events.filter((event) => event.type === "text-delta").map((event) => event.text)
-    ).toEqual(["hel", "lo"]);
+    ).toEqual(["hello"]);
     expect((await conversation.listRecentMessages("split-control-session"))[0]).toMatchObject({
       role: "assistant",
       content: "hello"
@@ -2588,36 +2592,33 @@ describe("RuntimeOrchestrator", () => {
     });
   });
 
-  it("parses REQUEST_TEXT and content from one provider delta", async () => {
+  it("fails closed when assistant text leaks a control label", async () => {
+    const conversation = new InMemoryConversationRepository();
     const runtime = new RuntimeOrchestrator({
       eventBus: new InMemoryEventBus({ development: false }),
       memory: createRecordingMemory([]),
+      conversation,
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () =>
-          createExactStreamingChatProvider("same-delta", [
-            { type: "text-delta", text: "REQUEST_TEXT\nhello" },
-            {
-              type: "completed",
-              output: {
-                message: { role: "assistant", content: "REQUEST_TEXT\nhello" },
-                finishReason: "stop"
-              }
-            }
-          ])
+        getAssistantContinuationProvider: () =>
+          createMockAssistantContinuationProvider(
+            "REQUEST_TEXT\nhello",
+            "leaked-control-continuation"
+          )
       }
     });
 
-    const events = await collectRuntimeStream(
-      runtime.streamAssistantInitiatedTurn({
-        sessionId: "same-delta-session",
-        idempotencyKey: "same-delta-key",
-        readMemory: false
-      })
-    );
-    expect(events[0]).toMatchObject({ type: "proactive-decision", decision: "REQUEST_TEXT" });
-    expect(events[1]).toMatchObject({ type: "text-delta", text: "hello" });
+    await expect(
+      collectRuntimeStream(
+        runtime.streamAssistantInitiatedTurn({
+          sessionId: "leaked-control-session",
+          idempotencyKey: "leaked-control-key",
+          readMemory: false
+        })
+      )
+    ).rejects.toMatchObject({ code: ProviderErrorCode.MalformedResponse });
+    expect(await conversation.listRecentMessages("leaked-control-session")).toHaveLength(0);
   });
 
   it("fails closed on malformed proactive control without persistence", async () => {
@@ -2629,10 +2630,18 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () =>
-          createExactStreamingChatProvider("malformed-control", [
-            { type: "text-delta", text: "MAYBE\nhello" }
-          ])
+        getProactiveDecisionProvider: () => ({
+          name: "malformed-decision",
+          async decide() {
+            throw new ProviderError({
+              provider: "malformed-decision",
+              capability: "chat",
+              code: ProviderErrorCode.MalformedResponse,
+              message: "invalid decision",
+              retryable: false
+            });
+          }
+        })
       }
     });
 
@@ -2657,17 +2666,8 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () =>
-          createExactStreamingChatProvider("empty-request-text", [
-            { type: "text-delta", text: "REQUEST_TEXT\n" },
-            {
-              type: "completed",
-              output: {
-                message: { role: "assistant", content: "REQUEST_TEXT\n" },
-                finishReason: "stop"
-              }
-            }
-          ])
+        getAssistantContinuationProvider: () =>
+          createMockAssistantContinuationProvider("   ", "empty-continuation")
       }
     });
 
@@ -2683,6 +2683,39 @@ describe("RuntimeOrchestrator", () => {
     expect(await conversation.listRecentMessages("empty-request-text-session")).toHaveLength(0);
   });
 
+  it("fails REQUEST_TEXT when the bounded continuation is truncated", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getAssistantContinuationProvider: () => ({
+          name: "truncated-continuation",
+          async generateContinuation() {
+            return {
+              message: { role: "assistant" as const, content: "unfinished text" },
+              finishReason: "length" as const
+            };
+          }
+        })
+      }
+    });
+
+    await expect(
+      collectRuntimeStream(
+        runtime.streamAssistantInitiatedTurn({
+          sessionId: "truncated-request-text-session",
+          idempotencyKey: "truncated-request-text-key",
+          readMemory: false
+        })
+      )
+    ).rejects.toMatchObject({ code: ProviderErrorCode.MalformedResponse });
+    expect(await conversation.listRecentMessages("truncated-request-text-session")).toHaveLength(0);
+  });
+
   it("preserves cancellation before the proactive decision", async () => {
     const providerStarted = deferred<void>();
     const controller = new AbortController();
@@ -2694,9 +2727,9 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () => ({
-          ...createMockProviders().getChatProvider(),
-          async *streamReply(_input: ChatInput, options?: ChatStreamOptions) {
+        getProactiveDecisionProvider: () => ({
+          name: "cancelled-decision",
+          async decide(_input: ProactiveDecisionInput, options?: ChatStreamOptions) {
             providerStarted.resolve();
             await new Promise<void>((resolve) => {
               if (options?.signal?.aborted) {
@@ -2705,7 +2738,13 @@ describe("RuntimeOrchestrator", () => {
               }
               options?.signal?.addEventListener("abort", () => resolve(), { once: true });
             });
-            throw new Error("cancelled before proactive decision");
+            throw new ProviderError({
+              provider: "cancelled-decision",
+              capability: "chat",
+              code: ProviderErrorCode.Cancelled,
+              message: "cancelled before proactive decision",
+              retryable: false
+            });
           }
         })
       }
@@ -2727,6 +2766,113 @@ describe("RuntimeOrchestrator", () => {
     expect(await conversation.listRecentMessages("cancel-before-decision-session")).toHaveLength(0);
   });
 
+  it("does not start proactive text after cancellation wins between stages", async () => {
+    const controller = new AbortController();
+    const conversation = new InMemoryConversationRepository();
+    let continuationCalls = 0;
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getAssistantContinuationProvider: () => ({
+          name: "must-not-start",
+          async generateContinuation() {
+            continuationCalls += 1;
+            return {
+              message: { role: "assistant" as const, content: "stale text" },
+              finishReason: "stop" as const
+            };
+          }
+        })
+      }
+    });
+    const input = {
+      sessionId: "cancel-between-stages-session",
+      idempotencyKey: "cancel-between-stages-key",
+      readMemory: false
+    } as const;
+    const iterator = runtime
+      .streamAssistantInitiatedTurn(input, {
+        signal: controller.signal
+      })
+      [Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: "proactive-decision", decision: "REQUEST_TEXT" }
+    });
+    controller.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ code: ProviderErrorCode.Cancelled });
+
+    expect(continuationCalls).toBe(0);
+    expect(await conversation.listRecentMessages(input.sessionId)).toHaveLength(0);
+    await expect(
+      collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input))
+    ).rejects.toMatchObject({ name: "AssistantTurnConflictError" });
+  });
+
+  it("discards proactive text when cancellation wins during the text stage", async () => {
+    const providerStarted = deferred<void>();
+    const controller = new AbortController();
+    const conversation = new InMemoryConversationRepository();
+    const published: RuntimeEvent[] = [];
+    const eventBus = new InMemoryEventBus({ development: false });
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getAssistantContinuationProvider: () => ({
+          name: "cancelled-continuation",
+          async generateContinuation(
+            _input: AssistantContinuationInput,
+            options?: ChatStreamOptions
+          ) {
+            providerStarted.resolve();
+            await new Promise<void>((resolve) => {
+              if (options?.signal?.aborted) {
+                resolve();
+                return;
+              }
+              options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+            });
+            throw new ProviderError({
+              provider: "cancelled-continuation",
+              capability: "chat",
+              code: ProviderErrorCode.Cancelled,
+              message: "cancelled during proactive text",
+              retryable: false
+            });
+          }
+        })
+      }
+    });
+    const input = {
+      sessionId: "cancel-during-text-session",
+      idempotencyKey: "cancel-during-text-key",
+      readMemory: false
+    } as const;
+    const pending = collectRuntimeStream(
+      runtime.streamAssistantInitiatedTurn(input, { signal: controller.signal })
+    );
+
+    await providerStarted.promise;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: ProviderErrorCode.Cancelled });
+
+    expect(await conversation.listRecentMessages(input.sessionId)).toHaveLength(0);
+    expect(published.filter((event) => event.type === "agent.reply")).toHaveLength(0);
+    expect(published.filter((event) => event.type === "assistant.message")).toHaveLength(0);
+  });
+
   it("restores assistant-only history without inventing a user message", async () => {
     const conversation = new InMemoryConversationRepository();
     const first = new RuntimeOrchestrator({
@@ -2736,7 +2882,8 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () => createMockStreamingChatProvider("first", { chunks: ["earlier"] })
+        getAssistantContinuationProvider: () =>
+          createMockAssistantContinuationProvider("earlier", "first")
       }
     });
     await collectRuntimeStream(
@@ -2747,8 +2894,7 @@ describe("RuntimeOrchestrator", () => {
       })
     );
 
-    let restoredInput: ChatInput | undefined;
-    const secondBase = createMockStreamingChatProvider("second", { chunks: ["later"] });
+    let restoredInput: ProactiveDecisionInput | undefined;
     const second = new RuntimeOrchestrator({
       eventBus: new InMemoryEventBus({ development: false }),
       memory: createRecordingMemory([]),
@@ -2756,13 +2902,15 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () => ({
-          ...secondBase,
-          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+        getProactiveDecisionProvider: () => ({
+          name: "second-decision",
+          async decide(input: ProactiveDecisionInput) {
             restoredInput = input;
-            yield* secondBase.streamReply!(input, options);
+            return { decision: "REQUEST_TEXT" as const };
           }
-        })
+        }),
+        getAssistantContinuationProvider: () =>
+          createMockAssistantContinuationProvider("later", "second")
       }
     });
     await collectRuntimeStream(
@@ -2773,27 +2921,25 @@ describe("RuntimeOrchestrator", () => {
       })
     );
 
-    expect(restoredInput?.messages.map((message) => message.role)).toEqual(["system"]);
-    expect(restoredInput?.messages[0]?.content).toContain("earlier");
-    expect(restoredInput?.messages[0]?.content).not.toContain("<UserMessage>");
+    expect(restoredInput?.prompt).toContain("earlier");
+    expect(restoredInput?.prompt).not.toContain("<UserMessage>");
   });
 
   it("rejects a duplicate idempotency key while the first provider effect is running", async () => {
     const providerStarted = deferred<void>();
     const releaseProvider = deferred<void>();
-    const baseProvider = createMockStreamingChatProvider("blocked", { chunks: ["done"] });
     const runtime = new RuntimeOrchestrator({
       eventBus: new InMemoryEventBus({ development: false }),
       memory: createRecordingMemory([]),
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () => ({
-          ...baseProvider,
-          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+        getProactiveDecisionProvider: () => ({
+          name: "blocked-decision",
+          async decide() {
             providerStarted.resolve();
             await releaseProvider.promise;
-            yield* baseProvider.streamReply!(input, options);
+            return { decision: "REQUEST_TEXT" as const };
           }
         })
       }
@@ -2895,7 +3041,6 @@ describe("RuntimeOrchestrator", () => {
 
   it("keeps historical proactive context while excluding a restored current user", async () => {
     const conversation = new InMemoryConversationRepository();
-    let firstProviderCall = 0;
     const first = new RuntimeOrchestrator({
       eventBus: new InMemoryEventBus({ development: false }),
       memory: createRecordingMemory([]),
@@ -2903,12 +3048,10 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () => {
-          firstProviderCall += 1;
-          return createMockStreamingChatProvider("history-user", {
-            chunks: [firstProviderCall === 1 ? "first assistant" : "proactive assistant"]
-          });
-        }
+        getChatProvider: () =>
+          createMockStreamingChatProvider("history-user", { chunks: ["first assistant"] }),
+        getAssistantContinuationProvider: () =>
+          createMockAssistantContinuationProvider("proactive assistant", "history-proactive")
       }
     });
 
@@ -3104,8 +3247,7 @@ describe("RuntimeOrchestrator", () => {
       timestampMs: 6
     });
 
-    let providerInput: ChatInput | undefined;
-    const provider = createMockStreamingChatProvider("source-link", { chunks: ["reply"] });
+    let providerInput: ProactiveDecisionInput | undefined;
     const runtime = new RuntimeOrchestrator({
       eventBus: new InMemoryEventBus({ development: false }),
       memory: createRecordingMemory([]),
@@ -3113,11 +3255,11 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () => ({
-          ...provider,
-          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+        getProactiveDecisionProvider: () => ({
+          name: "source-link",
+          async decide(input: ProactiveDecisionInput) {
             providerInput = input;
-            yield* provider.streamReply!(input, options);
+            return { decision: "REQUEST_TEXT" as const };
           }
         })
       }
@@ -3131,9 +3273,7 @@ describe("RuntimeOrchestrator", () => {
       })
     );
 
-    const systemContent = providerInput?.messages.find(
-      (message) => message.role === "system"
-    )?.content;
+    const systemContent = providerInput?.prompt;
     expect(systemContent).toContain("User: source-user-1\n  Assistant: source-answer-1");
     expect(systemContent).toContain("User: source-user-2\n  Assistant: source-answer-2");
     expect(systemContent).toContain("Assistant: proactive-history");
@@ -3186,8 +3326,7 @@ describe("RuntimeOrchestrator", () => {
       timestampMs: 4
     });
 
-    let providerInput: ChatInput | undefined;
-    const provider = createMockStreamingChatProvider("fallback-source", { chunks: ["reply"] });
+    let providerInput: ProactiveDecisionInput | undefined;
     const runtime = new RuntimeOrchestrator({
       eventBus: new InMemoryEventBus({ development: false }),
       memory: createRecordingMemory([]),
@@ -3195,11 +3334,11 @@ describe("RuntimeOrchestrator", () => {
       promptBuilder: new PromptBuilder(),
       providers: {
         ...createMockProviders(),
-        getChatProvider: () => ({
-          ...provider,
-          async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+        getProactiveDecisionProvider: () => ({
+          name: "fallback-source",
+          async decide(input: ProactiveDecisionInput) {
             providerInput = input;
-            yield* provider.streamReply!(input, options);
+            return { decision: "REQUEST_TEXT" as const };
           }
         })
       }
@@ -3213,9 +3352,7 @@ describe("RuntimeOrchestrator", () => {
       })
     );
 
-    const systemContent = providerInput?.messages.find(
-      (message) => message.role === "system"
-    )?.content;
+    const systemContent = providerInput?.prompt;
     expect(systemContent).toContain("User: fallback-user-2\n  Assistant: fallback-answer-1");
     expect(systemContent).toContain("User: fallback-user-1\n  Assistant: fallback-answer-2");
   });
@@ -3238,16 +3375,16 @@ describe("RuntimeOrchestrator", () => {
         promptBuilder: new PromptBuilder(),
         providers: {
           ...createMockProviders(),
-          getChatProvider: () => {
-            const provider = createMockStreamingChatProvider("effect-id", { chunks: [output] });
-            return {
-              ...provider,
-              async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
-                providerCalls += 1;
-                yield* provider.streamReply!(input, options);
-              }
-            };
-          }
+          getAssistantContinuationProvider: () => ({
+            name: "effect-id",
+            async generateContinuation() {
+              providerCalls += 1;
+              return {
+                message: { role: "assistant" as const, content: output },
+                finishReason: "stop" as const
+              };
+            }
+          })
         }
       });
       const input = {
@@ -3297,18 +3434,20 @@ describe("RuntimeOrchestrator", () => {
     vi.useFakeTimers();
     try {
       let providerCalls = 0;
-      const provider = createMockStreamingChatProvider("race-id", { chunks: ["race-output"] });
       const runtime = new RuntimeOrchestrator({
         eventBus: new InMemoryEventBus({ development: false }),
         memory: createRecordingMemory([]),
         promptBuilder: new PromptBuilder(),
         providers: {
           ...createMockProviders(),
-          getChatProvider: () => ({
-            ...provider,
-            async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
+          getAssistantContinuationProvider: () => ({
+            name: "race-id",
+            async generateContinuation() {
               providerCalls += 1;
-              yield* provider.streamReply!(input, options);
+              return {
+                message: { role: "assistant" as const, content: "race-output" },
+                finishReason: "stop" as const
+              };
             }
           })
         }
@@ -3347,16 +3486,16 @@ describe("RuntimeOrchestrator", () => {
         promptBuilder: new PromptBuilder(),
         providers: {
           ...createMockProviders(),
-          getChatProvider: () => {
-            const provider = createMockStreamingChatProvider("cap-id", { chunks: [output] });
-            return {
-              ...provider,
-              async *streamReply(input: ChatInput, options?: ChatStreamOptions) {
-                providerCalls += 1;
-                yield* provider.streamReply!(input, options);
-              }
-            };
-          }
+          getAssistantContinuationProvider: () => ({
+            name: "cap-id",
+            async generateContinuation() {
+              providerCalls += 1;
+              return {
+                message: { role: "assistant" as const, content: output },
+                finishReason: "stop" as const
+              };
+            }
+          })
         }
       });
       const reusable = {
@@ -3682,6 +3821,9 @@ async function runFinalizedStatusSchedule(fixture: {
 function createMockProviders() {
   return {
     getChatProvider: () => createAssistantAwareChatProvider(createMockChatProvider("mock-chat")),
+    getProactiveDecisionProvider: () => createMockProactiveDecisionProvider("REQUEST_TEXT"),
+    getAssistantContinuationProvider: () =>
+      createMockAssistantContinuationProvider("Mock proactive continuation."),
     getReasoningProvider: () => createMockReasoningProvider("mock-reasoning"),
     getTTSProvider: () => ({
       name: "mock-tts",

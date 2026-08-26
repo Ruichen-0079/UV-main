@@ -107,12 +107,22 @@ DEFAULT_CHAT_PROVIDER=openai-compatible
 OPENAI_COMPATIBLE_API_BASEURL=https://api.deepinfra.com/v1/openai
 OPENAI_COMPATIBLE_API_KEY=...
 OPENAI_COMPATIBLE_CHAT_MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
+OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL=meta-llama/Llama-3.3-70B-Instruct-Turbo
+OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT=deepseek-v4
 ```
 
 The API key is sent as Bearer authentication, the model ID is passed through
 unchanged, and status output exposes only safe configuration metadata.
 Missing base URL, key, or model configuration leaves the route
 `not_ready`/`unavailable` under the existing registry semantics.
+
+P6 reuses the same generic gateway credential through two narrow capabilities.
+The decision model returns only `NO_OP` or `REQUEST_TEXT`. Only `REQUEST_TEXT`
+starts a second call, which asks the configured Chat model for one short
+assistant continuation. `deepseek-v4` explicitly selects that model family's
+raw `/completions` assistant cue; it is never inferred from a provider or model
+name. Ordinary user Chat remains on the existing streaming
+`/chat/completions` route.
 
 Reasoning defaults to DeepSeek too:
 
