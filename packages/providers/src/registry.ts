@@ -20,7 +20,8 @@ import type {
   ProviderHealth,
   ProviderObservedState,
   ProviderReadinessState,
-  ProviderRouteStatus
+  ProviderRouteStatus,
+  TokenUsage
 } from "./types/common.js";
 import {
   normalizeReasoningOutput,
@@ -2766,9 +2767,16 @@ type OpenAICompatibleChatCompletion = {
   reasoningContent?: string | undefined;
   finishReason?: "stop" | "length" | "tool_call" | "content_filter" | "unknown" | undefined;
   model?: string | undefined;
-  tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined;
+  tokenUsage?: TokenUsage | undefined;
   rawResponse?: unknown | undefined;
   latencyMs: number;
+};
+
+type OpenAICompatibleUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: unknown } | null;
 };
 
 async function createOpenAICompatibleChatCompletion(
@@ -2802,7 +2810,7 @@ async function createOpenAICompatibleChatCompletion(
       finish_reason?: string | null;
       message?: { content?: string | null; reasoning_content?: string | null };
     }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    usage?: OpenAICompatibleUsage;
   };
   const choice = raw.choices?.[0];
   const content = choice?.message?.content;
@@ -2850,7 +2858,7 @@ async function createOpenAICompatibleRawCompletion(
   const raw = response.raw as {
     model?: string;
     choices?: Array<{ finish_reason?: string | null; text?: string | null }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    usage?: OpenAICompatibleUsage;
   };
   const choice = raw.choices?.[0];
   if (typeof choice?.text !== "string" || !choice.text.trim()) {
@@ -2926,13 +2934,17 @@ async function createOpenAICompatibleJsonCompletion(
 }
 
 function normalizeOpenAICompatibleUsage(
-  usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined
+  usage: OpenAICompatibleUsage | undefined
 ): OpenAICompatibleChatCompletion["tokenUsage"] {
   if (!usage) return undefined;
   return {
     ...(usage.prompt_tokens !== undefined ? { inputTokens: usage.prompt_tokens } : {}),
     ...(usage.completion_tokens !== undefined ? { outputTokens: usage.completion_tokens } : {}),
-    ...(usage.total_tokens !== undefined ? { totalTokens: usage.total_tokens } : {})
+    ...(usage.total_tokens !== undefined ? { totalTokens: usage.total_tokens } : {}),
+    ...(typeof usage.prompt_tokens_details?.cached_tokens === "number" &&
+    Number.isFinite(usage.prompt_tokens_details.cached_tokens)
+      ? { cachedInputTokens: usage.prompt_tokens_details.cached_tokens }
+      : {})
   };
 }
 

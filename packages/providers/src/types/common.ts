@@ -102,6 +102,8 @@ export type TokenUsage = {
   inputTokens?: number | undefined;
   outputTokens?: number | undefined;
   totalTokens?: number | undefined;
+  /** Provider-reported input tokens served from a prompt cache, when available. */
+  cachedInputTokens?: number | undefined;
 };
 
 export type ProviderDebug = {
