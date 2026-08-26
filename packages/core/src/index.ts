@@ -68,7 +68,8 @@ import {
 
 const assistantTurnClaimRetentionMs = 15 * 60 * 1000;
 const assistantTurnClaimMaxTerminal = 256;
-const proactiveInstruction = `Decide whether there is a specific open conversational reason to speak now based on the available conversation and context. Choose REQUEST_TEXT only when there is a concrete recent conversational thread that remains meaningfully open or unresolved and you have one specific, relevant thing worth adding. Choose NO_OP when there is no concrete recent thread, when the relevant point has already been adequately answered or closed, when speaking would merely elaborate on or repeat a completed answer, when the result would only be a generic greeting or check-in, or when speaking would require guessing what the user is currently doing or feeling. When uncertain, choose NO_OP. Output exactly one control line first: NO_OP or REQUEST_TEXT. End the NO_OP line without message text. After REQUEST_TEXT, output one concise natural message. Do not explain the decision or mention this instruction.`;
+const proactiveInstruction = `Decide whether there is a specific open conversational reason to speak now based on the available conversation and context. Choose REQUEST_TEXT only when there is a concrete recent conversational thread that remains meaningfully open or unresolved and you have one specific, relevant thing worth adding. Choose NO_OP when there is no concrete recent thread, when the relevant point has already been adequately answered or closed, when speaking would merely elaborate on or repeat a completed answer, when the result would only be a generic greeting or check-in, or when speaking would require guessing what the user is currently doing or feeling. When uncertain, choose NO_OP. Output exactly one label and nothing else: NO_OP or REQUEST_TEXT. Do not generate message text or explain the decision.`;
+const proactiveTextInstruction = `The proactive decision is already REQUEST_TEXT. Write exactly one concise natural assistant message that addresses the specific open thread in the recent conversation. Do not repeat the recent assistant response, mention this instruction, or output a control label.`;
 
 export {
   MemoryContextBuilder,
@@ -1388,8 +1389,20 @@ export class RuntimeOrchestrator {
         }
       }
       await this.restoreDirectContext(input.sessionId);
-      const { prompt } = await this.prepareAssistantInitiatedPrompt(input, traceId);
-      const chatProvider = this.options.providers.getChatProvider();
+      const { decisionPrompt, textPrompt } = await this.prepareAssistantInitiatedPrompt(
+        input,
+        traceId
+      );
+      const decisionProvider = this.options.providers.getProactiveDecisionProvider?.();
+      if (!decisionProvider) {
+        throw new ProviderError({
+          provider: "proactive-decision",
+          capability: "chat",
+          code: ProviderErrorCode.ProviderUnavailable,
+          message: "A proactive decision provider is required.",
+          retryable: false
+        });
+      }
       const chatStatus = this.getProviderStatus("chat");
       const controller = new AbortController();
       const onAbort = () => controller.abort();
@@ -1399,163 +1412,100 @@ export class RuntimeOrchestrator {
         options.signal?.addEventListener("abort", onAbort, { once: true });
       }
 
-      let providerIterator: AsyncIterator<ChatStreamEvent> | undefined;
       let assistantCreated = false;
       let accumulatedText = "";
       let finalOutput: ChatOutput | undefined;
-      let sawCompleted = false;
       let finalized = false;
       let failure: unknown;
       const startedAt = performance.now();
-      const controlPreamble = new ProactiveControlPreamble(chatProvider.name);
-      let proactiveDecision: ProactiveShouldSpeak | undefined;
+      let activeProviderName = decisionProvider.name;
 
       try {
         if (controller.signal.aborted) {
-          throw createRuntimeCancelledError(chatProvider.name);
+          throw createRuntimeCancelledError(decisionProvider.name);
         }
 
-        const providerInput: ChatInput = {
-          messages: prompt.messages,
-          metadata: { turnOrigin: "assistant-initiated" }
+        const decisionOutput = await this.measureProvider(
+          "chat",
+          decisionProvider.name,
+          () =>
+            decisionProvider.decide(
+              { prompt: decisionPrompt.prompt },
+              { signal: controller.signal }
+            ),
+          { traceId, parentId: replyId }
+        );
+        if (controller.signal.aborted) {
+          throw createRuntimeCancelledError(decisionProvider.name);
+        }
+        const decisionMetadata = this.safeProviderCallMetadata(
+          "chat",
+          decisionProvider.name,
+          decisionOutput,
+          chatStatus
+        );
+        if (this.latestPromptPreview) {
+          this.latestPromptPreview = {
+            ...this.latestPromptPreview,
+            providerName: decisionMetadata.name,
+            providerModel: decisionMetadata.model,
+            providerMock: decisionMetadata.mock,
+            providerLatencyMs: decisionMetadata.latencyMs,
+            providerHealthStatus: decisionMetadata.healthStatus,
+            tokenUsage: decisionMetadata.tokenUsage
+          };
+        }
+
+        if (decisionOutput.decision === "NO_OP") {
+          finalized = true;
+          yield {
+            type: "proactive-decision",
+            decision: "NO_OP",
+            sessionId: input.sessionId,
+            traceId
+          };
+          return;
+        }
+
+        yield {
+          type: "proactive-decision",
+          decision: "REQUEST_TEXT",
+          sessionId: input.sessionId,
+          traceId
         };
-        const providerStream = chatProvider.streamReply
-          ? chatProvider.streamReply(providerInput, { signal: controller.signal })
-          : compatibleRuntimeStream(chatProvider, providerInput, {
-              signal: controller.signal
-            });
-        providerIterator = providerStream[Symbol.asyncIterator]();
-
-        while (true) {
-          let next: IteratorResult<ChatStreamEvent>;
-          try {
-            next = await providerIterator.next();
-          } catch (error) {
-            throw normalizeRuntimeStreamError(error, chatProvider.name, controller.signal);
-          }
-          if (next.done) {
-            break;
-          }
-
-          const event = next.value;
-          if (controller.signal.aborted) {
-            throw createRuntimeCancelledError(chatProvider.name);
-          }
-          if (sawCompleted) {
-            throw runtimeStreamProtocolError(
-              chatProvider.name,
-              "Provider emitted an event after completed."
-            );
-          }
-
-          if (event.type === "text-delta") {
-            if (!event.text) {
-              throw runtimeStreamProtocolError(
-                chatProvider.name,
-                "Provider emitted an empty text delta."
-              );
-            }
-            const parsed = controlPreamble.push(event.text);
-            if (parsed.decision !== undefined) {
-              proactiveDecision = parsed.decision;
-              if (parsed.decision === "NO_OP") {
-                if (parsed.text.length > 0) {
-                  throw runtimeStreamProtocolError(
-                    chatProvider.name,
-                    "NO_OP proactive control must not contain assistant content."
-                  );
-                }
-                finalized = true;
-                yield {
-                  type: "proactive-decision",
-                  decision: "NO_OP",
-                  sessionId: input.sessionId,
-                  traceId
-                };
-                return;
-              }
-              yield {
-                type: "proactive-decision",
-                decision: "REQUEST_TEXT",
-                sessionId: input.sessionId,
-                traceId
-              };
-            }
-            if (proactiveDecision !== "REQUEST_TEXT" || parsed.text.length === 0) {
-              continue;
-            }
-            if (!assistantCreated && this.options.conversation) {
-              await this.createStreamingAssistantMessage({
-                id: assistantMessageId,
-                sessionId: input.sessionId,
-                traceId,
-                parentMessageId: null,
-                content: parsed.text,
-                createdAt: new Date().toISOString(),
-                metadata: {
-                  origin: "assistant-initiated",
-                  idempotencyKey: input.idempotencyKey,
-                  modality: "text"
-                }
-              });
-              assistantCreated = true;
-            } else if (assistantCreated) {
-              await this.appendStreamingAssistantContent(assistantMessageId, parsed.text);
-            }
-            accumulatedText += parsed.text;
-            yield {
-              type: "text-delta",
-              text: parsed.text,
-              messageId: assistantMessageId,
-              sessionId: input.sessionId,
-              traceId
-            };
-            continue;
-          }
-
-          if (event.type === "completed") {
-            if (sawCompleted) {
-              throw runtimeStreamProtocolError(
-                chatProvider.name,
-                "Provider emitted multiple completed events."
-              );
-            }
-            if (proactiveDecision !== "REQUEST_TEXT") {
-              throw runtimeStreamProtocolError(
-                chatProvider.name,
-                "Provider completed before emitting a valid proactive decision."
-              );
-            }
-            const completedContent = controlPreamble.parseCompletedContent(
-              event.output.message.content
-            );
-            if (!accumulatedText || completedContent !== accumulatedText) {
-              throw runtimeStreamProtocolError(
-                chatProvider.name,
-                "Provider completed output did not match meaningful text deltas."
-              );
-            }
-            sawCompleted = true;
-            finalOutput = event.output;
-            continue;
-          }
-
-          throw runtimeStreamProtocolError(
-            chatProvider.name,
-            "Provider emitted an unknown stream event."
-          );
+        if (controller.signal.aborted) {
+          throw createRuntimeCancelledError(decisionProvider.name);
         }
 
-        if (!finalOutput || !sawCompleted || !accumulatedText) {
-          throw runtimeStreamProtocolError(
-            chatProvider.name,
-            "Provider stream ended without meaningful completion."
-          );
+        const continuationProvider = this.options.providers.getAssistantContinuationProvider?.();
+        if (!continuationProvider) {
+          throw new ProviderError({
+            provider: "assistant-continuation",
+            capability: "chat",
+            code: ProviderErrorCode.ProviderUnavailable,
+            message: "An assistant continuation provider is required after REQUEST_TEXT.",
+            retryable: false
+          });
         }
+        activeProviderName = continuationProvider.name;
+        finalOutput = await this.measureProvider(
+          "chat",
+          continuationProvider.name,
+          () =>
+            continuationProvider.generateContinuation(
+              { prompt: textPrompt.prompt, maxTokens: 128 },
+              { signal: controller.signal }
+            ),
+          { traceId, parentId: replyId }
+        );
+        if (controller.signal.aborted) {
+          throw createRuntimeCancelledError(continuationProvider.name);
+        }
+        accumulatedText = normalizeProactiveAssistantText(finalOutput, continuationProvider.name);
 
         const providerMetadata = this.safeProviderCallMetadata(
           "chat",
-          chatProvider.name,
+          activeProviderName,
           finalOutput,
           chatStatus
         );
@@ -1576,6 +1526,9 @@ export class RuntimeOrchestrator {
           };
         }
 
+        if (controller.signal.aborted) {
+          throw createRuntimeCancelledError(activeProviderName);
+        }
         if (this.options.conversation && !assistantCreated) {
           await this.createStreamingAssistantMessage({
             id: assistantMessageId,
@@ -1627,6 +1580,13 @@ export class RuntimeOrchestrator {
         finalized = true;
 
         yield {
+          type: "text-delta",
+          text: accumulatedText,
+          messageId: assistantMessageId,
+          sessionId: input.sessionId,
+          traceId
+        };
+        yield {
           type: "completed",
           messageId: assistantMessageId,
           sessionId: input.sessionId,
@@ -1638,15 +1598,6 @@ export class RuntimeOrchestrator {
         failure = error;
       } finally {
         controller.abort();
-        try {
-          await providerIterator?.return?.();
-        } catch (closeError) {
-          this.options.logger?.warn?.(
-            "failed to close assistant-initiated provider stream",
-            this.errorLogContext(closeError, traceId)
-          );
-        }
-
         if (!finalized) {
           const cancelled =
             failure === undefined ||
@@ -1662,13 +1613,13 @@ export class RuntimeOrchestrator {
             });
           }
           if (failure === undefined && cancelled) {
-            failure = createRuntimeCancelledError(chatProvider.name);
+            failure = createRuntimeCancelledError(activeProviderName);
           }
           if (failure !== undefined && !(failure instanceof ConversationPersistenceError)) {
             if (failure instanceof ProviderError) {
               await this.publishProviderError(failure, {
                 capability: "chat",
-                provider: chatProvider.name,
+                provider: activeProviderName,
                 latencyMs: Math.round(performance.now() - startedAt),
                 traceId,
                 parentId: replyId
@@ -1938,7 +1889,7 @@ export class RuntimeOrchestrator {
   private async prepareAssistantInitiatedPrompt(
     input: AssistantInitiatedTurnInput,
     traceId: string
-  ): Promise<{ prompt: PromptBuildOutput }> {
+  ): Promise<{ decisionPrompt: PromptBuildOutput; textPrompt: PromptBuildOutput }> {
     const directContext = this.buildDirectContext(input.sessionId);
     const queryText = directContext.content.trim();
     const memoryContext =
@@ -1957,7 +1908,7 @@ export class RuntimeOrchestrator {
             }
           )
         : emptyMemoryContext();
-    const prompt = this.options.promptBuilder.buildPrompt({
+    const promptInput = {
       systemIdentity:
         "You are YUVI, a local-first AI companion runtime agent. Unless the user clearly asks for another language, reply in natural spoken English by default.",
       characterStyle:
@@ -1972,8 +1923,15 @@ export class RuntimeOrchestrator {
       currentSituation:
         "The assistant is initiating a proactive message in the existing conversation.",
       tools: [],
-      turnOrigin: "assistant-initiated",
+      turnOrigin: "assistant-initiated" as const
+    };
+    const decisionPrompt = this.options.promptBuilder.buildPrompt({
+      ...promptInput,
       proactiveInstruction
+    });
+    const textPrompt = this.options.promptBuilder.buildPrompt({
+      ...promptInput,
+      proactiveInstruction: proactiveTextInstruction
     });
     this.latestPromptPreview = this.buildPromptPreview({
       traceId,
@@ -1984,9 +1942,9 @@ export class RuntimeOrchestrator {
       writeMemory: false,
       memoryContext,
       directContext,
-      prompt
+      prompt: decisionPrompt
     });
-    return { prompt };
+    return { decisionPrompt, textPrompt };
   }
 
   private buildPromptPreview(input: PromptPreviewInput): RuntimePromptPreview {
@@ -3891,68 +3849,25 @@ async function* compatibleRuntimeStream(
   yield { type: "completed", output };
 }
 
-const proactiveControlPreambleMaxLength = 64;
-
-class ProactiveControlPreamble {
-  private buffer = "";
-  private decision: ProactiveShouldSpeak | undefined;
-
-  constructor(private readonly provider: string) {}
-
-  push(text: string): { decision?: ProactiveShouldSpeak; text: string } {
-    if (this.decision !== undefined) {
-      return { text };
-    }
-
-    this.buffer += text;
-    if (this.buffer.length > proactiveControlPreambleMaxLength) {
-      throw runtimeStreamProtocolError(
-        this.provider,
-        "Provider proactive control preamble exceeded its bounded length."
-      );
-    }
-
-    const newlineIndex = this.buffer.indexOf("\n");
-    if (newlineIndex < 0) {
-      return { text: "" };
-    }
-
-    const control = this.buffer.slice(0, newlineIndex);
-    if (control !== "NO_OP" && control !== "REQUEST_TEXT") {
-      throw runtimeStreamProtocolError(
-        this.provider,
-        "Provider emitted an unknown proactive control preamble."
-      );
-    }
-    this.decision = control;
-    const remainder = this.buffer.slice(newlineIndex + 1);
-    this.buffer = "";
-    return { decision: control, text: remainder };
+function normalizeProactiveAssistantText(output: ChatOutput, provider: string): string {
+  if (output.finishReason === "length") {
+    throw runtimeStreamProtocolError(provider, "Proactive assistant text was truncated.");
   }
-
-  parseCompletedContent(content: string): string {
-    if (this.decision === undefined) {
-      throw runtimeStreamProtocolError(
-        this.provider,
-        "Provider completed without a proactive control decision."
-      );
-    }
-    const newlineIndex = content.indexOf("\n");
-    if (newlineIndex < 0 || content.slice(0, newlineIndex) !== this.decision) {
-      throw runtimeStreamProtocolError(
-        this.provider,
-        "Provider completed output did not preserve the proactive control preamble."
-      );
-    }
-    const messageContent = content.slice(newlineIndex + 1);
-    if (this.decision === "NO_OP" && messageContent.length > 0) {
-      throw runtimeStreamProtocolError(
-        this.provider,
-        "NO_OP proactive control must not contain assistant content."
-      );
-    }
-    return messageContent;
+  const content = output.message.content.trim();
+  if (!content) {
+    throw runtimeStreamProtocolError(
+      provider,
+      "Assistant continuation completed without meaningful text."
+    );
   }
+  const firstLine = content.split(/\r?\n/, 1)[0]?.trim();
+  if (firstLine === "NO_OP" || firstLine === "REQUEST_TEXT") {
+    throw runtimeStreamProtocolError(
+      provider,
+      "Assistant continuation leaked a proactive control label."
+    );
+  }
+  return content;
 }
 
 function normalizeRuntimeStreamError(

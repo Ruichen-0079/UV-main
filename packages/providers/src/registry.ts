@@ -8,6 +8,12 @@ import type {
 } from "./types/chat.js";
 import type { EmbeddingProvider } from "./types/embedding.js";
 import type {
+  AssistantContinuationInput,
+  AssistantContinuationProvider,
+  ProactiveDecisionOutput,
+  ProactiveDecisionProvider
+} from "./types/proactive.js";
+import type {
   ProviderCallOptions,
   ProviderAttempt,
   ProviderCapability,
@@ -85,6 +91,8 @@ export type ProviderRegistryConfig = {
     apiKey: string | undefined;
     baseUrl: string | undefined;
     chatModel: string | undefined;
+    proactiveDecisionModel: string | undefined;
+    assistantContinuationFormat: "deepseek-v4" | undefined;
   };
   nvidia: {
     apiKey: string | undefined;
@@ -132,6 +140,8 @@ type ProviderEnv = Record<string, string | undefined>;
 export interface ProviderResolver {
   getChatProvider(): ChatProvider;
   getChatStreamingMode?(): ChatStreamingMode;
+  getProactiveDecisionProvider?(): ProactiveDecisionProvider;
+  getAssistantContinuationProvider?(): AssistantContinuationProvider;
   getReasoningProvider(): ReasoningProvider;
   getTTSProvider(): TTSProvider;
   getSTTProvider(): STTProvider;
@@ -166,6 +176,8 @@ export class ProviderRegistry implements ProviderResolver {
   private readonly sttProviders = new Map<string, STTProvider>();
   private readonly visionProviders = new Map<string, VisionProvider>();
   private readonly embeddingProviders = new Map<string, EmbeddingProvider>();
+  private proactiveDecisionProvider: ProactiveDecisionProvider | undefined;
+  private assistantContinuationProvider: AssistantContinuationProvider | undefined;
   /**
    * Live observations belong to this registry instance only. Runtime config
    * reload replaces the registry, which intentionally starts with an empty
@@ -199,12 +211,36 @@ export class ProviderRegistry implements ProviderResolver {
     this.embeddingProviders.set(provider.name, provider);
   }
 
+  registerProactiveDecisionProvider(provider: ProactiveDecisionProvider): void {
+    this.proactiveDecisionProvider = provider;
+  }
+
+  registerAssistantContinuationProvider(provider: AssistantContinuationProvider): void {
+    this.assistantContinuationProvider = provider;
+  }
+
   getChatProvider(): ChatProvider {
     return this.getRequiredProvider(this.chatProviders, this.config.defaults.chat, "chat");
   }
 
   getChatStreamingMode(): ChatStreamingMode {
     return getChatStreamingMode(this.getChatProvider());
+  }
+
+  getProactiveDecisionProvider(): ProactiveDecisionProvider {
+    return (
+      this.proactiveDecisionProvider ??
+      new UnavailableProactiveDecisionProvider("Proactive decision provider is not configured.")
+    );
+  }
+
+  getAssistantContinuationProvider(): AssistantContinuationProvider {
+    return (
+      this.assistantContinuationProvider ??
+      new UnavailableAssistantContinuationProvider(
+        "Assistant continuation provider is not configured."
+      )
+    );
   }
 
   getReasoningProvider(): ReasoningProvider {
@@ -666,6 +702,8 @@ export function createProviderRegistryFromEnv(env: ProviderEnv = process.env): P
   registry.registerSTTProvider(resolveSTTProvider(config));
   registry.registerVisionProvider(resolveVisionProvider(config));
   registry.registerEmbeddingProvider(resolveEmbeddingProvider(config));
+  registry.registerProactiveDecisionProvider(resolveProactiveDecisionProvider(config));
+  registry.registerAssistantContinuationProvider(resolveAssistantContinuationProvider(config));
 
   return registry;
 }
@@ -756,7 +794,11 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
     openaiCompatible: {
       apiKey: emptyToUndefined(env["OPENAI_COMPATIBLE_API_KEY"]),
       baseUrl: emptyToUndefined(env["OPENAI_COMPATIBLE_API_BASEURL"]),
-      chatModel: emptyToUndefined(env["OPENAI_COMPATIBLE_CHAT_MODEL"])
+      chatModel: emptyToUndefined(env["OPENAI_COMPATIBLE_CHAT_MODEL"]),
+      proactiveDecisionModel: emptyToUndefined(env["OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL"]),
+      assistantContinuationFormat: parseAssistantContinuationFormat(
+        env["OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT"]
+      )
     },
     nvidia: {
       apiKey: emptyToUndefined(env["NVIDIA_API_KEY"]),
@@ -1095,6 +1137,51 @@ function resolveChatProvider(config: ProviderRegistryConfig): ChatProvider {
       (name) => new UnavailableChatProvider(name, unavailableProviderMessage("chat", name, config))
     ),
     config.defaults.chat
+  );
+}
+
+function resolveProactiveDecisionProvider(
+  config: ProviderRegistryConfig
+): ProactiveDecisionProvider {
+  const { apiKey, baseUrl, proactiveDecisionModel } = config.openaiCompatible;
+  if (!apiKey || !baseUrl || !proactiveDecisionModel) {
+    if (config.allowMocks) {
+      return createMockProactiveDecisionProvider();
+    }
+    return new UnavailableProactiveDecisionProvider(
+      "OPENAI_COMPATIBLE_API_BASEURL, OPENAI_COMPATIBLE_API_KEY, and OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL are required for proactive decisions."
+    );
+  }
+  return new OpenAICompatibleProactiveDecisionProvider({
+    provider: "openai-compatible-proactive-decision",
+    apiKey,
+    baseUrl,
+    model: proactiveDecisionModel,
+    includeRawResponse: config.includeRawProviderResponses
+  });
+}
+
+function resolveAssistantContinuationProvider(
+  config: ProviderRegistryConfig
+): AssistantContinuationProvider {
+  const { apiKey, baseUrl, chatModel, assistantContinuationFormat } = config.openaiCompatible;
+  if (!apiKey || !baseUrl || !chatModel || !assistantContinuationFormat) {
+    if (config.allowMocks) {
+      return createMockAssistantContinuationProvider();
+    }
+    return new UnavailableAssistantContinuationProvider(
+      "OPENAI_COMPATIBLE Chat configuration and OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT are required for assistant continuation."
+    );
+  }
+  return new OpenAICompatibleAssistantContinuationProvider(
+    {
+      provider: "openai-compatible-assistant-continuation",
+      apiKey,
+      baseUrl,
+      model: chatModel,
+      includeRawResponse: config.includeRawProviderResponses
+    },
+    assistantContinuationFormat
   );
 }
 
@@ -1723,7 +1810,10 @@ async function* runProviderStreamChain(
       if (!canFallbackProviderError(providerError, fallbackContext)) {
         if (
           !anotherProviderExists &&
-          canFallbackProviderError(providerError, { ...fallbackContext, anotherProviderExists: true })
+          canFallbackProviderError(providerError, {
+            ...fallbackContext,
+            anotherProviderExists: true
+          })
         ) {
           throw createExhaustedChainError("chat", attempts, providerError, provider.name);
         }
@@ -1809,7 +1899,9 @@ function createCancelledError(
     capability,
     code: ProviderErrorCode.Cancelled,
     message:
-      capability === "chat" ? "Chat stream was cancelled." : `${provider} ${capability} was cancelled.`,
+      capability === "chat"
+        ? "Chat stream was cancelled."
+        : `${provider} ${capability} was cancelled.`,
     retryable: false,
     fallbackEligible: false,
     effectState: options?.effectState ?? "unknown",
@@ -1999,6 +2091,26 @@ class UnavailableSTTProvider extends UnimplementedSTTProvider {}
 class UnavailableVisionProvider extends UnimplementedVisionProvider {}
 class UnavailableEmbeddingProvider extends UnimplementedEmbeddingProvider {}
 
+class UnavailableProactiveDecisionProvider implements ProactiveDecisionProvider {
+  readonly name = "unavailable-proactive-decision";
+
+  constructor(private readonly message: string) {}
+
+  async decide(): Promise<never> {
+    throw unavailableError(this.name, "chat", this.message);
+  }
+}
+
+class UnavailableAssistantContinuationProvider implements AssistantContinuationProvider {
+  readonly name = "unavailable-assistant-continuation";
+
+  constructor(private readonly message: string) {}
+
+  async generateContinuation(): Promise<never> {
+    throw unavailableError(this.name, "chat", this.message);
+  }
+}
+
 type OpenAICompatibleTextOptions = {
   provider: string;
   apiKey?: string | undefined;
@@ -2006,6 +2118,110 @@ type OpenAICompatibleTextOptions = {
   model: string;
   includeRawResponse?: boolean | undefined;
 };
+
+function formatAssistantContinuationPrompt(prompt: string, format: "deepseek-v4"): string {
+  const safePrompt = prompt
+    .trim()
+    .replaceAll("<｜", "<\u200b｜")
+    .replaceAll("<think>", "<\u200bthink>")
+    .replaceAll("</think>", "</\u200bthink>");
+  if (!safePrompt) {
+    throw new ProviderError({
+      provider: "openai-compatible-assistant-continuation",
+      capability: "chat",
+      code: ProviderErrorCode.MalformedResponse,
+      message: "Assistant continuation prompt must not be empty.",
+      retryable: false
+    });
+  }
+  if (format === "deepseek-v4") {
+    return `<｜begin▁of▁sentence｜>${safePrompt}<｜Assistant｜></think>`;
+  }
+  return safePrompt;
+}
+
+class OpenAICompatibleProactiveDecisionProvider implements ProactiveDecisionProvider {
+  readonly name: string;
+
+  constructor(private readonly options: OpenAICompatibleTextOptions) {
+    this.name = options.provider;
+  }
+
+  async decide(
+    input: { prompt: string },
+    options?: ProviderCallOptions
+  ): Promise<ProactiveDecisionOutput> {
+    const completion = await createOpenAICompatibleChatCompletion(
+      this.options,
+      "chat",
+      {
+        messages: [
+          { role: "system", content: input.prompt },
+          {
+            role: "user",
+            content:
+              "Return the proactive decision now. Output exactly one label and nothing else: NO_OP or REQUEST_TEXT."
+          }
+        ],
+        temperature: 0,
+        maxTokens: 8,
+        stopSequences: ["\n"]
+      },
+      options
+    );
+    const decision = completion.content.trim();
+    if (decision !== "NO_OP" && decision !== "REQUEST_TEXT") {
+      throw new ProviderError({
+        provider: this.name,
+        capability: "chat",
+        code: ProviderErrorCode.MalformedResponse,
+        message: `${this.name} returned an invalid proactive decision.`,
+        retryable: false
+      });
+    }
+    return {
+      decision,
+      model: completion.model,
+      latencyMs: completion.latencyMs,
+      tokenUsage: completion.tokenUsage,
+      debug: completion.rawResponse ? { rawResponse: completion.rawResponse } : undefined
+    };
+  }
+}
+
+class OpenAICompatibleAssistantContinuationProvider implements AssistantContinuationProvider {
+  readonly name: string;
+
+  constructor(
+    private readonly options: OpenAICompatibleTextOptions,
+    private readonly format: "deepseek-v4"
+  ) {
+    this.name = options.provider;
+  }
+
+  async generateContinuation(
+    input: AssistantContinuationInput,
+    options?: ProviderCallOptions
+  ): Promise<ChatOutput> {
+    const completion = await createOpenAICompatibleRawCompletion(
+      this.options,
+      {
+        prompt: formatAssistantContinuationPrompt(input.prompt, this.format),
+        maxTokens: input.maxTokens,
+        stopSequences: ["<｜end▁of▁sentence｜>"]
+      },
+      options
+    );
+    return {
+      message: { role: "assistant", content: completion.content },
+      finishReason: completion.finishReason,
+      model: completion.model,
+      latencyMs: completion.latencyMs,
+      tokenUsage: completion.tokenUsage,
+      debug: completion.rawResponse ? { rawResponse: completion.rawResponse } : undefined
+    };
+  }
+}
 
 class OpenAICompatibleChatProvider implements ChatProvider {
   readonly name: string;
@@ -2033,12 +2249,17 @@ class OpenAICompatibleChatProvider implements ChatProvider {
   }
 
   async generateReply(input: ChatInput, options?: ProviderCallOptions): Promise<ChatOutput> {
-    const completion = await createOpenAICompatibleChatCompletion(this.options, "chat", {
-      messages: input.messages,
-      temperature: input.temperature,
-      maxTokens: input.maxTokens ?? input.maxOutputTokens,
-      stopSequences: input.stopSequences
-    }, options);
+    const completion = await createOpenAICompatibleChatCompletion(
+      this.options,
+      "chat",
+      {
+        messages: input.messages,
+        temperature: input.temperature,
+        maxTokens: input.maxTokens ?? input.maxOutputTokens,
+        stopSequences: input.stopSequences
+      },
+      options
+    );
     return {
       message: { role: "assistant", content: completion.content },
       finishReason: completion.finishReason,
@@ -2082,11 +2303,16 @@ class OpenAICompatibleReasoningProvider implements ReasoningProvider {
     input: ReasoningInput,
     options?: ProviderCallOptions
   ): Promise<ReasoningOutput> {
-    const completion = await createOpenAICompatibleChatCompletion(this.options, "reasoning", {
-      messages: input.messages,
-      temperature: input.temperature,
-      maxTokens: input.maxTokens ?? input.maxOutputTokens
-    }, options);
+    const completion = await createOpenAICompatibleChatCompletion(
+      this.options,
+      "reasoning",
+      {
+        messages: input.messages,
+        temperature: input.temperature,
+        maxTokens: input.maxTokens ?? input.maxOutputTokens
+      },
+      options
+    );
     return normalizeReasoningOutput(this.name, {
       // OpenAI-compatible reasoning_content is provider-internal trace and
       // is intentionally discarded at the normalized boundary.
@@ -2153,10 +2379,7 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
     return vector ?? [];
   }
 
-  override async embedBatch(
-    texts: string[],
-    options?: ProviderCallOptions
-  ): Promise<number[][]> {
+  override async embedBatch(texts: string[], options?: ProviderCallOptions): Promise<number[][]> {
     const transport = createTransportAbort({
       signal: options?.signal,
       timeoutMs: this.timeoutMs
@@ -2258,6 +2481,35 @@ export function createMockChatProvider(name = "mock-chat"): ChatProvider {
             input.messages.map((message) => message.content).join("\n") + content
           )
         },
+        finishReason: "stop"
+      };
+    }
+  };
+}
+
+export function createMockProactiveDecisionProvider(
+  decision: "NO_OP" | "REQUEST_TEXT" = "REQUEST_TEXT",
+  name = "mock-proactive-decision"
+): ProactiveDecisionProvider {
+  return {
+    name,
+    async decide() {
+      return { decision, model: "mock", latencyMs: 0 };
+    }
+  };
+}
+
+export function createMockAssistantContinuationProvider(
+  content = "Mock proactive continuation.",
+  name = "mock-assistant-continuation"
+): AssistantContinuationProvider {
+  return {
+    name,
+    async generateContinuation() {
+      return {
+        message: { role: "assistant", content },
+        model: "mock",
+        latencyMs: 0,
         finishReason: "stop"
       };
     }
@@ -2530,6 +2782,103 @@ async function createOpenAICompatibleChatCompletion(
   },
   callOptions?: ProviderCallOptions
 ): Promise<OpenAICompatibleChatCompletion> {
+  const response = await createOpenAICompatibleJsonCompletion(
+    options,
+    capability,
+    "/chat/completions",
+    {
+      model: options.model,
+      messages: request.messages,
+      temperature: request.temperature,
+      max_tokens: request.maxTokens,
+      stop: request.stopSequences,
+      stream: false
+    },
+    callOptions
+  );
+  const raw = response.raw as {
+    model?: string;
+    choices?: Array<{
+      finish_reason?: string | null;
+      message?: { content?: string | null; reasoning_content?: string | null };
+    }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
+  const choice = raw.choices?.[0];
+  const content = choice?.message?.content;
+  if (typeof content !== "string") {
+    throw new ProviderError({
+      provider: options.provider,
+      capability,
+      code: ProviderErrorCode.MalformedResponse,
+      message: `${options.provider} ${capability} response did not include assistant content.`,
+      retryable: false
+    });
+  }
+  return {
+    content,
+    reasoningContent: choice?.message?.reasoning_content ?? undefined,
+    finishReason: normalizeFinishReason(choice?.finish_reason),
+    model: raw.model ?? options.model,
+    latencyMs: response.latencyMs,
+    tokenUsage: normalizeOpenAICompatibleUsage(raw.usage),
+    rawResponse: options.includeRawResponse ? raw : undefined
+  };
+}
+
+async function createOpenAICompatibleRawCompletion(
+  options: OpenAICompatibleTextOptions,
+  request: {
+    prompt: string;
+    maxTokens?: number | undefined;
+    stopSequences?: string[] | undefined;
+  },
+  callOptions?: ProviderCallOptions
+): Promise<OpenAICompatibleChatCompletion> {
+  const response = await createOpenAICompatibleJsonCompletion(
+    options,
+    "chat",
+    "/completions",
+    {
+      model: options.model,
+      prompt: request.prompt,
+      max_tokens: request.maxTokens,
+      stop: request.stopSequences
+    },
+    callOptions
+  );
+  const raw = response.raw as {
+    model?: string;
+    choices?: Array<{ finish_reason?: string | null; text?: string | null }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
+  const choice = raw.choices?.[0];
+  if (typeof choice?.text !== "string" || !choice.text.trim()) {
+    throw new ProviderError({
+      provider: options.provider,
+      capability: "chat",
+      code: ProviderErrorCode.MalformedResponse,
+      message: `${options.provider} assistant continuation did not include meaningful text.`,
+      retryable: false
+    });
+  }
+  return {
+    content: choice.text.trim(),
+    finishReason: normalizeFinishReason(choice.finish_reason),
+    model: raw.model ?? options.model,
+    latencyMs: response.latencyMs,
+    tokenUsage: normalizeOpenAICompatibleUsage(raw.usage),
+    rawResponse: options.includeRawResponse ? raw : undefined
+  };
+}
+
+async function createOpenAICompatibleJsonCompletion(
+  options: OpenAICompatibleTextOptions,
+  capability: "chat" | "reasoning",
+  path: "/chat/completions" | "/completions",
+  body: Record<string, unknown>,
+  callOptions?: ProviderCallOptions
+): Promise<{ raw: unknown; latencyMs: number }> {
   const transport = createTransportAbort({ signal: callOptions?.signal, timeoutMs: 30000 });
 
   try {
@@ -2543,17 +2892,10 @@ async function createOpenAICompatibleChatCompletion(
       throwIfOpenAICompatibleTransportAborted(options.provider, capability, transport);
       throw new Error("OpenAI-compatible transport could not start.");
     }
-    const response = await fetch(`${trimTrailingSlash(options.baseUrl)}/chat/completions`, {
+    const response = await fetch(`${trimTrailingSlash(options.baseUrl)}${path}`, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        model: options.model,
-        messages: request.messages,
-        temperature: request.temperature,
-        max_tokens: request.maxTokens,
-        stop: request.stopSequences,
-        stream: false
-      }),
+      body: JSON.stringify(body),
       signal: transport.signal
     });
 
@@ -2561,50 +2903,9 @@ async function createOpenAICompatibleChatCompletion(
       throw await createOpenAICompatibleStatusError(options.provider, capability, response);
     }
 
-    const raw = (await parseOpenAICompatibleJsonResponse(
-      options.provider,
-      capability,
-      response
-    )) as {
-      model?: string;
-      choices?: Array<{
-        finish_reason?: string | null;
-        message?: { content?: string | null; reasoning_content?: string | null };
-      }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-    };
+    const raw = await parseOpenAICompatibleJsonResponse(options.provider, capability, response);
     throwIfOpenAICompatibleTransportAborted(options.provider, capability, transport);
-    const choice = raw.choices?.[0];
-    const content = choice?.message?.content;
-    if (typeof content !== "string") {
-      throw new ProviderError({
-        provider: options.provider,
-        capability,
-        code: ProviderErrorCode.MalformedResponse,
-        message: `${options.provider} ${capability} response did not include assistant content.`,
-        retryable: false
-      });
-    }
-
-    return {
-      content,
-      reasoningContent: choice?.message?.reasoning_content ?? undefined,
-      finishReason: normalizeFinishReason(choice?.finish_reason),
-      model: raw.model ?? options.model,
-      latencyMs: Math.round(performance.now() - startedAt),
-      tokenUsage: raw.usage
-        ? {
-            ...(raw.usage.prompt_tokens !== undefined
-              ? { inputTokens: raw.usage.prompt_tokens }
-              : {}),
-            ...(raw.usage.completion_tokens !== undefined
-              ? { outputTokens: raw.usage.completion_tokens }
-              : {}),
-            ...(raw.usage.total_tokens !== undefined ? { totalTokens: raw.usage.total_tokens } : {})
-          }
-        : undefined,
-      rawResponse: options.includeRawResponse ? raw : undefined
-    };
+    return { raw, latencyMs: Math.round(performance.now() - startedAt) };
   } catch (error) {
     if (transport.source !== null) {
       throw createOpenAICompatibleTransportAbortError(options.provider, capability, transport);
@@ -2622,6 +2923,17 @@ async function createOpenAICompatibleChatCompletion(
   } finally {
     transport.cleanup();
   }
+}
+
+function normalizeOpenAICompatibleUsage(
+  usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined
+): OpenAICompatibleChatCompletion["tokenUsage"] {
+  if (!usage) return undefined;
+  return {
+    ...(usage.prompt_tokens !== undefined ? { inputTokens: usage.prompt_tokens } : {}),
+    ...(usage.completion_tokens !== undefined ? { outputTokens: usage.completion_tokens } : {}),
+    ...(usage.total_tokens !== undefined ? { totalTokens: usage.total_tokens } : {})
+  };
 }
 
 async function createOpenAICompatibleStatusError(
@@ -2733,6 +3045,15 @@ function parseEnvironment(value: string | undefined): ProviderRegistryConfig["en
 
 function parseBoolean(value: string | undefined): boolean {
   return value === "1" || value === "true" || value === "TRUE";
+}
+
+function parseAssistantContinuationFormat(value: string | undefined): "deepseek-v4" | undefined {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  if (normalized === "deepseek-v4") return normalized;
+  throw new Error(
+    "OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT must be deepseek-v4 when configured."
+  );
 }
 
 function parseProviderChain(

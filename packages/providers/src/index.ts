@@ -41,6 +41,14 @@ export type {
   ChatStreamOptions,
   ChatStreamingMode
 } from "./types/chat.js";
+export type {
+  AssistantContinuationInput,
+  AssistantContinuationProvider,
+  ProactiveDecision,
+  ProactiveDecisionInput,
+  ProactiveDecisionOutput,
+  ProactiveDecisionProvider
+} from "./types/proactive.js";
 export { normalizeReasoningOutput } from "./types/reasoning.js";
 export type { ReasoningInput, ReasoningOutput, ReasoningProvider } from "./types/reasoning.js";
 export type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
@@ -55,7 +63,9 @@ export {
   MockEmbeddingProvider,
   FallbackChatProvider,
   ProviderRegistry,
+  createMockAssistantContinuationProvider,
   createMockChatProvider,
+  createMockProactiveDecisionProvider,
   createMockStreamingChatProvider,
   createMockReasoningProvider,
   createMockSTTProvider,

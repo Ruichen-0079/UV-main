@@ -30,6 +30,8 @@ export const editableKeys = [
   "OPENAI_COMPATIBLE_API_BASEURL",
   "OPENAI_COMPATIBLE_API_KEY",
   "OPENAI_COMPATIBLE_CHAT_MODEL",
+  "OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL",
+  "OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT",
   "XAI_API_BASEURL",
   "XAI_API_KEY",
   "XAI_TTS_MODEL",
@@ -192,6 +194,13 @@ export function validateRuntimeSettings(
   const extractor = value("MEMORY_EXTRACTOR")?.trim();
   if (extractor && !["llm", "rule-based"].includes(extractor)) {
     add("MEMORY_EXTRACTOR", "Supported values are llm and rule-based.");
+  }
+
+  const assistantContinuationFormat = value(
+    "OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT"
+  )?.trim();
+  if (assistantContinuationFormat && assistantContinuationFormat !== "deepseek-v4") {
+    add("OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT", "Supported value is deepseek-v4.");
   }
 
   const embeddingProvider = value("EMBEDDING_PROVIDER");

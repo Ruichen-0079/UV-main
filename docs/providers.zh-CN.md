@@ -85,10 +85,18 @@ DEFAULT_CHAT_PROVIDER=openai-compatible
 OPENAI_COMPATIBLE_API_BASEURL=https://api.deepinfra.com/v1/openai
 OPENAI_COMPATIBLE_API_KEY=...
 OPENAI_COMPATIBLE_CHAT_MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
+OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL=meta-llama/Llama-3.3-70B-Instruct-Turbo
+OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT=deepseek-v4
 ```
 
 该 provider 只负责 Chat，复用现有 `/chat/completions` streaming transport；model
 ID 原样传递，API key 只作为 Bearer credential 发送，不会出现在 status/log 中。
+
+P6 通过同一个通用网关 credential 使用两个窄能力：decision model 只返回
+`NO_OP` 或 `REQUEST_TEXT`；仅在 `REQUEST_TEXT` 时，才由已配置的 Chat model
+生成一条简短的 assistant continuation。`deepseek-v4` 显式选择该模型族的 raw
+`/completions` assistant cue，不会根据 provider 或 model 名称猜测。普通用户 Chat
+仍使用原有 `/chat/completions` streaming 路径。
 
 Reasoning 也默认使用 DeepSeek：
 
