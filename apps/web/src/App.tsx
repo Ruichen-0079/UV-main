@@ -122,6 +122,12 @@ import {
 } from "./dashboard-ui.js";
 import { formatDate } from "./dashboard-format.js";
 import { EventTable } from "./dashboard-events.js";
+import {
+  formatRankComponents,
+  formatScope,
+  memoryPreview,
+  shortTrace
+} from "./dashboard-memory-view.js";
 import { EventsPage } from "./pages/events-page.js";
 
 type PageId =
@@ -4835,13 +4841,6 @@ function formatIncludedScopes(scopes: Array<{ scope: string; scopeId?: string | 
     .join(", ");
 }
 
-function formatRankComponents(rank: NonNullable<RetrievedMemoryDebug["rankComponents"]>): string {
-  return Object.entries(rank)
-    .filter(([, value]) => typeof value === "number" && value > 0)
-    .map(([key, value]) => `${key.replace(/Score$/, "")}:${Number(value).toFixed(1)}`)
-    .join(" · ");
-}
-
 function ProviderVerificationResult(props: { result: ProviderVerificationResponse }): JSX.Element {
   const result = props.result;
   return (
@@ -5213,11 +5212,6 @@ function parseTags(value: string): string[] {
     .filter(Boolean);
 }
 
-function memoryPreview(memory: MemoryRecord): string {
-  const text = (memory.summary || memory.content).replace(/\s+/g, " ").trim();
-  return text.length > 140 ? `${text.slice(0, 137)}...` : text;
-}
-
 function relationshipPreviews(
   candidate: MemoryCandidateReview
 ): Array<{ id: string; relation: string; contentPreview: string }> {
@@ -5265,10 +5259,6 @@ function temporalWarningForText(text: string): string | null {
         ? `在 ${date} 晚上`
         : `在 ${date}`;
   return text.replace(match[0], phrase).replace(/^我/u, "用户").trim();
-}
-
-function formatScope(memory: MemoryRecord): string {
-  return `${memory.scope ?? "user"}${memory.scopeId ? `/${memory.scopeId}` : ""}`;
 }
 
 function toDateTimeLocalValue(value: string | null | undefined): string {
@@ -5933,10 +5923,6 @@ function MemoryCandidateList(props: {
       ))}
     </div>
   );
-}
-
-function shortTrace(value: string | undefined): string {
-  return value ? value.slice(0, 8) : "unknown";
 }
 
 function promptSections(
