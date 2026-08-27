@@ -129,6 +129,7 @@ import {
   memoryPreview,
   shortTrace
 } from "./dashboard-memory-view.js";
+import { memoryModeFromHealth } from "./dashboard-memory-health.js";
 import { MemoryCandidateList } from "./dashboard-memory-candidates.js";
 import { EventsPage } from "./pages/events-page.js";
 
@@ -4929,17 +4930,6 @@ function ProviderDiagnosticsSummary(props: {
       <div className="mt-1">Cached observation: {cachedObservationDetail(props.health ?? {})}</div>
     </div>
   );
-}
-
-function memoryModeFromHealth(health: HealthResponse | null): string {
-  const message = health?.database.message?.toLowerCase() ?? "";
-  if (message.includes("in-memory")) {
-    return "in-memory";
-  }
-  if (health?.database.status === "healthy" && !message.includes("in-memory")) {
-    return "postgres";
-  }
-  return "unknown";
 }
 
 function memoryHealthEntries(
