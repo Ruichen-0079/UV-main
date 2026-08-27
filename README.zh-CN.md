@@ -2,105 +2,52 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-YUVI Runtime 是一个本地优先、事件驱动的 AI 伴侣运行时。它受到 Project AIRI 架构愿景启发，但本仓库是原创实现，不复制 AIRI 代码。术语以[统一术语表](docs/terminology.zh-CN.md)为准。
+YUVI 是一个本地优先、事件驱动的 AI 伴侣运行时。当前产品是一个可运行的 TypeScript monorepo，包含 Fastify runtime server、Web Companion / Web 控制台界面、记忆与会话边界、可替换的提供方链，以及仍在进行打包工作的 Tauri 桌面外壳。
 
-项目目标是构建一个可扩展的 Companion Runtime，而不是只做一个聊天页面。当前重点包括：
+当前已实现的主要能力包括：
 
-- 事件驱动 runtime
-- 记忆系统
-- prompt builder
-- provider abstraction
-- 开发期 Web 控制台
-- 未来 Tauri desktop app
-- 未来 Live2D / VRM / voice / vision 集成
-- 最终面向 Windows、macOS、Linux 的一体化桌面应用
+- 支持流式和非流式文本回复的普通用户回合；
+- 短期直接上下文、可配置的记忆检索、Legacy 与 Mem0 记忆后端，以及 PostgreSQL 持久化会话/记忆路径；
+- P4 已定稿回合的摄取持久性、幂等投递、重试/对账、崩溃恢复和持久化边界 fail-closed 行为；
+- P6 带有精确 `NO_OP` / `REQUEST_TEXT` 决策边界的助手主动文本回合；
+- P7 提供方本地就绪/远程观测诊断、设置事实与重载行为，以及 Voice 和 Vision 开发端点；
+- 带有 Lumi Live2D/Cubism 渲染、语音播放和能力门控状态行为的 Web Companion 表现层。
 
-## 当前开发环境
-
-当前推荐开发环境是：
-
-- Windows LTSC host
-- WSL2 Ubuntu
-- Docker Engine inside WSL
-- Node.js / pnpm inside WSL
-
-推荐仓库路径：
-
-```text
-~/uv-main
-```
-
-如果当前仓库位于 `~/uv-main/uv-main`，现有脚本也会识别。
-
-Windows 原路径参考：
-
-```text
-C:\Users\Administrator.DESKTOP-NPU6DHJ\Desktop\uv-main
-```
-
-开发期使用 WSL2 + Docker Engine，是为了避免 Windows LTSC 上 Docker Desktop、PowerShell execution policy、文件监听、依赖安装性能等问题。生产桌面模式不会依赖 WSL、Docker、Node.js、pnpm、PostgreSQL、Redis 或 NATS。
-
-## 仓库结构
-
-- `apps/server`: Fastify HTTP 和 WebSocket 运行时服务器。
-- `apps/web`: Vite + React + TypeScript + Tailwind CSS 开发期 Web 控制台。
-- `packages/protocol`: 运行时事件类型和 Schema。
-- `packages/event-bus`: 事件总线抽象和内存实现。
-- `packages/memory`: 记忆仓储和记忆服务。
-- `packages/prompt-builder`: 提示词构建。
-- `packages/providers`: 提供方接口、注册表和厂商专用实现。
-- `packages/core`: 运行时编排。
-- `packages/config`: 类型化运行时配置边界。
-- `infra/docker-compose.yml`: development-only PostgreSQL + pgvector、Redis、NATS。
+Linux 是主要开发和生产验证平台。Windows 开发兼容路径仍然可用，但 Windows 打包私有 PostgreSQL 的所有权和安装器集成属于延后的打包工作。
 
 ## 快速启动
 
-复制 `.env.example`：
-
 ```bash
+pnpm install
 cp .env.example .env
-```
-
-启动开发环境：
-
-```bash
 ./scripts/dev.sh
 ```
 
-Windows host convenience wrapper：
+脚本会加载仓库根目录的 `.env` 和 `.env.local`，启动可选的开发基础设施；选择持久化 PostgreSQL 模式时会运行 migration，然后启动 server 和 Web UI。只需内存模式时可使用 `SKIP_INFRA=1 ./scripts/dev.sh`。请配置真实 Chat 提供方，或为了离线开发显式开启 mock。持久化模式需要外部、系统管理或独立管理的容器 PostgreSQL，并设置 `DATABASE_URL`；使用前运行 `pnpm db:migrate`。
 
-```cmd
-scripts\start-dev.cmd
-```
+打开 `http://localhost:5173`。Server 监听 `http://localhost:6121`，WebSocket 端点为 `ws://localhost:6121/ws`。
 
-打开控制台：
+Windows 用户请从[Windows 开发兼容路径](docs/windows-development.md)开始。WSL 不是产品文档要求，只是受支持的开发环境之一。
 
-```text
-http://localhost:5173
-```
+## 文档
 
-停止开发环境：
+- [当前状态](docs/current-state.zh-CN.md)——当前、已验证、实验、规划、延后和历史工作的状态权威。
+- [架构](docs/architecture.zh-CN.md)
+- [开发者快速启动](docs/quickstart.zh-CN.md)
+- [P4 Linux-first 持久化基线](docs/p4-linux-first.md)
+- [Memory](docs/memory.zh-CN.md)
+- [Providers](docs/providers.zh-CN.md)
+- [Testing](docs/testing.zh-CN.md)
 
-```bash
-./scripts/stop.sh
-```
+英文文档入口见 [README.md](README.md)。中文术语以[统一术语表](docs/terminology.zh-CN.md)为准。
 
-Windows host convenience wrapper：
-
-```cmd
-scripts\stop-dev.cmd
-```
-
-## 常用命令
+## 验证
 
 ```bash
-pnpm install
 pnpm check
-pnpm build
 pnpm test
-docker compose -f infra/docker-compose.yml up -d
-docker compose -f infra/docker-compose.yml down
-./scripts/health.sh
+pnpm build
+git diff --check
 ```
 
-更多说明见 [docs/quickstart.zh-CN.md](docs/quickstart.zh-CN.md)。
+Provider credential、本地模型服务、数据库 URL 和控制台令牌都应放在未跟踪的本地配置中。不要提交或打印这些值。
