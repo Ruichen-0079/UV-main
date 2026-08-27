@@ -2,7 +2,8 @@
 
 [English](current-state.md) | [简体中文](current-state.zh-CN.md)
 
-**Status snapshot date: 2026-08-27**  
+**Status snapshot date: 2026-08-27**
+
 **Repository baseline: `62028e41d78383fc47f22f4afa1c1e9996d5bab1` (`origin/main` when DOC-R1 was prepared for PR)**
 
 Status labels used here:
