@@ -3,6 +3,7 @@ name: Check
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -71,8 +72,70 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: pnpm smoke
 
+  desktop-package-gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run_desktop_package: ${{ steps.classify.outputs.run_desktop_package }}
+
+    steps:
+      - name: Checkout history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify desktop packaging changes
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          run_desktop_package=false
+          changed_paths=""
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            run_desktop_package=true
+          elif [[ "$EVENT_NAME" == "push" && "$REF_NAME" == "refs/heads/main" ]]; then
+            run_desktop_package=true
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            changed_paths="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+            echo "Changed paths:"
+            if [[ -n "$changed_paths" ]]; then
+              printf '%s\n' "$changed_paths"
+            else
+              echo "<none>"
+            fi
+
+            while IFS= read -r path; do
+              case "$path" in
+                apps/desktop/*|services/memory-mem0/*|scripts/desktop-package/*|.github/workflows/check.yml|package.json|pnpm-lock.yaml|pnpm-workspace.yaml|apps/server/package.json|packages/desktop-supervisor/package.json|scripts/yuvi-runtime-server.packaged.mts|scripts/yuvi-desktop-supervisor.packaged.mjs)
+                  run_desktop_package=true
+                  ;;
+                packages/desktop-supervisor/src/*.ts)
+                  if [[ "$path" != *.test.ts ]]; then
+                    run_desktop_package=true
+                  fi
+                  ;;
+              esac
+            done <<< "$changed_paths"
+          fi
+
+          echo "Event: $EVENT_NAME"
+          echo "Ref: $REF_NAME"
+          echo "run_desktop_package=$run_desktop_package"
+          printf 'run_desktop_package=%s\n' "$run_desktop_package" >> "$GITHUB_OUTPUT"
+
   desktop-windows-package:
-    needs: validate
+    needs:
+      - validate
+      - desktop-package-gate
+    if: needs.desktop-package-gate.outputs.run_desktop_package == 'true'
     runs-on: windows-latest
     permissions:
       contents: read
