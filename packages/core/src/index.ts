@@ -88,6 +88,10 @@ import type {
   SafeProviderCallMetadata,
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
+import {
+  AssistantTurnConflictError,
+  ConversationPersistenceError
+} from "./runtime-errors.js";
 
 const assistantTurnClaimRetentionMs = 15 * 60 * 1000;
 const assistantTurnClaimMaxTerminal = 256;
@@ -133,31 +137,7 @@ export type {
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
 
-export class ConversationPersistenceError extends Error {
-  readonly operation: ConversationPersistenceOperation;
-
-  constructor(
-    operation: ConversationPersistenceOperation,
-    message = "Conversation persistence failed."
-  ) {
-    super(message);
-    this.name = "ConversationPersistenceError";
-    this.operation = operation;
-  }
-}
-
-export class AssistantTurnConflictError extends Error {
-  readonly idempotencyKey: string;
-
-  constructor(
-    idempotencyKey: string,
-    message = "Assistant turn idempotency key is already claimed."
-  ) {
-    super(message);
-    this.name = "AssistantTurnConflictError";
-    this.idempotencyKey = idempotencyKey;
-  }
-}
+export { AssistantTurnConflictError, ConversationPersistenceError };
 
 type DirectContextEntry =
   | {
