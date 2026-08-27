@@ -102,6 +102,17 @@ import { MemoryCandidateList } from "./dashboard-memory-candidates.js";
 import { EventsPage } from "./pages/events-page.js";
 import { MemoryPage } from "./pages/memory-page.js";
 import { SettingsPage } from "./pages/settings-page.js";
+import {
+  dashboardVoicePlaybackStatusLabel,
+  deriveDashboardTtsPolicy,
+  flushDashboardSpeechTail
+} from "./dashboard-chat-speech.js";
+
+export {
+  dashboardVoicePlaybackStatusLabel,
+  deriveDashboardTtsPolicy,
+  flushDashboardSpeechTail
+};
 
 type PageId =
   | "overview"
@@ -136,25 +147,6 @@ type ChatTimingMetrics = {
   finalAudioEndedAt?: number;
   assistantCompletedAt?: number;
 };
-/** Dashboard chat uses the frozen P5-D selector without adding another policy. */
-export function deriveDashboardTtsPolicy(
-  input: Parameters<typeof deriveEffectiveVoiceOutput>[0]
-): ReturnType<typeof deriveEffectiveVoiceOutput> {
-  return deriveEffectiveVoiceOutput(input);
-}
-
-export function flushDashboardSpeechTail(
-  tail: readonly string[],
-  requestTts: boolean,
-  enqueue: (text: string) => void,
-  finish: () => void
-): void {
-  if (requestTts) {
-    for (const text of tail) enqueue(text);
-  }
-  finish();
-}
-
 function recordChatTiming(
   timingRef: MutableRefObject<ChatTimingMetrics | null>,
   patch: Partial<ChatTimingMetrics>
@@ -1028,25 +1020,6 @@ function ChatPage(): JSX.Element {
       </div>
     </PageShell>
   );
-}
-
-export function dashboardVoicePlaybackStatusLabel(
-  status: SpeechQueueState,
-  actualPlaybackActive: boolean
-): string {
-  if (actualPlaybackActive) return "Speaking…";
-  switch (status) {
-    case "synthesizing":
-      return "Preparing speech…";
-    case "playing":
-      return "Speech queued…";
-    case "stopped":
-      return "Speech stopped; generated text is preserved.";
-    case "error":
-      return "Speech unavailable; text response is preserved.";
-    default:
-      return "";
-  }
 }
 
 function createChatMessageId(prefix: string): string {
