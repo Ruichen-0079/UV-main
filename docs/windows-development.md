@@ -1,26 +1,29 @@
 # Windows Development
 
-YUVI Runtime supports a Windows-first development loop with PowerShell and Docker Desktop.
-Linux and Bash scripts remain supported for WSL/Linux developers.
+Windows development compatibility exists, but Linux is the primary YUVI product-development and production-validation platform.
+
+Windows packaged-private PostgreSQL ownership is deferred platform packaging. It is not the current product persistence gate, and closed unmerged PR #20 must not be resumed wholesale as current architecture.
+
+This page documents the native PowerShell development path that still exists on current main.
 
 ## Requirements
 
 - Windows 11
 - Git for Windows
 - Node.js 22 or newer
-- pnpm 9 or newer
-- Docker Desktop with the Docker Engine running
-- PowerShell 7 recommended; Windows PowerShell 5.1 is supported by the scripts
+- pnpm `9.15.4`
+- A working Docker Engine + Compose only when using `infra/docker-compose.yml`; Docker Desktop is one Windows development option, not a YUVI product requirement
+- PowerShell 7 recommended; the scripts also support Windows PowerShell 5.1
 
-The recommended checkout path is:
+A simple checkout location is:
 
 ```powershell
 C:\Dev\UV-main
 ```
 
-## Environment Files
+## Environment files
 
-Runtime env files are loaded from the repository root only:
+Runtime environment files live at the repository root:
 
 ```text
 .env
@@ -28,15 +31,9 @@ process environment
 .env.local
 ```
 
-Later sources override earlier sources, so `.env.local` wins over shell variables and `.env`.
-Set `YUVI_RUNTIME_ENV_DIR` only when you intentionally want another directory to contain the
-runtime `.env` and `.env.local` files.
+Later sources override earlier sources, so `.env.local` wins over process environment and `.env`. `apps/server/.env.local` is a legacy path and is not loaded by the current development script.
 
-`apps/server/.env` and `apps/server/.env.local` are legacy paths. The runtime warns when the old
-local file exists at the default root but does not load it.
-
-Never commit `.env`, `.env.local`, API keys, tokens, Authorization headers, passwords, or database
-secrets.
+Never commit or print `.env`, `.env.local`, API keys, tokens, Authorization headers, passwords, or database credentials.
 
 ## Start
 
@@ -47,7 +44,7 @@ pnpm install --frozen-lockfile
 .\scripts\dev.ps1
 ```
 
-Useful options:
+Current supported switches include:
 
 ```powershell
 .\scripts\dev.ps1 -SkipInfra
@@ -58,119 +55,62 @@ Useful options:
 .\scripts\dev.ps1 -ServerPort 6121
 ```
 
-`dev.ps1` checks `node`, `pnpm`, `docker`, and `docker compose`, starts:
+Without `-SkipInfra`, the script uses the repository Compose development infrastructure, waits for PostgreSQL health, and runs `pnpm db:migrate` when `MEMORY_REPOSITORY=postgres` unless migration is explicitly skipped.
 
-```powershell
-docker compose -f infra/docker-compose.yml up -d
-```
+The Web UI binds to loopback by default. Expose it to a LAN only intentionally.
 
-It waits for PostgreSQL health, runs `pnpm db:migrate` when `MEMORY_REPOSITORY=postgres`, then starts
-the server and web dashboard.
+## State, logs, stop, and health
 
-The web dashboard binds to `127.0.0.1` by default. To expose it intentionally:
-
-```powershell
-$env:YUVI_WEB_HOST = "0.0.0.0"
-.\scripts\dev.ps1 -WebHost 0.0.0.0
-```
-
-The scripts do not modify Windows Firewall.
-
-## State And Logs
-
-Runtime state is stored in:
+The native Windows development scripts store process metadata and logs under:
 
 ```text
 %LOCALAPPDATA%\YUVI\Runtime
 ```
 
-Files:
-
-```text
-server.pid
-web.pid
-server.log
-web.log
-restart-request.json
-```
-
-The `.pid` files are JSON metadata files, not raw process IDs. `stop.ps1` and `health.ps1` validate
-the process start time, command marker, repository root, state directory, and role before treating a
-process as owned by this checkout.
-
-## Deep Restart
-
-Run supervisor mode when testing Dashboard Deep Restart:
+The PID metadata is ownership-aware rather than a bare PID. The stop/health scripts validate process identity before treating a process as owned by the checkout.
 
 ```powershell
-.\scripts\dev.ps1 -Supervisor
-```
-
-When the server exits with code `42` or writes `restart-request.json`, the supervisor reloads root
-`.env` plus `.env.local`, optionally runs `pnpm db:migrate` for PostgreSQL memory, and restarts the
-server.
-
-## Stop And Health
-
-Stop server and web process trees:
-
-```powershell
+.\scripts\health.ps1
 .\scripts\stop.ps1
 ```
 
-Stop server, web, and Docker infrastructure:
+To also stop the repository Compose infrastructure:
 
 ```powershell
 .\scripts\stop.ps1 -Infra
 ```
 
-Check Docker Engine, PostgreSQL, Redis, NATS, server `/health`, web, and PID files:
+## Development supervisor
+
+For the existing development Deep Restart path:
 
 ```powershell
-.\scripts\health.ps1
+.\scripts\dev.ps1 -Supervisor
 ```
 
-## PostgreSQL Memory
+The supervisor reloads root `.env` / `.env.local` around a requested development restart and can run migrations when PostgreSQL Memory is selected. This is development orchestration, not ownership of an external PostgreSQL process.
 
-For PostgreSQL memory, set these in root `.env.local` or `.env`:
+## PostgreSQL on Windows development
+
+The same repository boundary applies to durable development:
 
 ```env
 MEMORY_REPOSITORY=postgres
-DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
+DATABASE_URL=postgres://...
 ```
 
-Then run:
-
 ```powershell
-docker compose -f .\infra\docker-compose.yml up -d
 pnpm db:migrate
 ```
 
-The compose file uses named Docker volumes:
+A reachable PostgreSQL instance is sufficient. The repository Compose stack is a convenience for development; the core persistence contract is `DATABASE_URL` plus YUVI migrations.
 
-```text
-companion-postgres-data
-companion-redis-data
-companion-nats-data
-```
+## Deferred Windows packaging
 
-It does not bind-mount Windows folders for database storage.
-Its PostgreSQL, Redis, and NATS ports are bound to `127.0.0.1` only for local development.
+Current main contains historical/compatibility substrate for Windows desktop and private PostgreSQL lifecycle work, and CI still exercises Windows packaging. That code does not redefine the Linux-first product persistence model.
 
-## UTF-8 Notes
+Deferred packaging concerns include bundled PostgreSQL, private cluster ownership, PID/process authority, Windows ACL and Credential Manager ownership, installer provisioning, private `DATABASE_URL` synthesis, and bundled pgvector resources.
 
-Keep text files UTF-8. The PowerShell scripts read env files as UTF-8 and do not rewrite source files
-with system ANSI encoding. On Windows PowerShell 5.1, keep commands in the provided scripts or use
-PowerShell 7 when editing files interactively.
+PR #20 (`P4-2D2`) was closed without merge and is explicitly deferred. If Windows packaging is revisited, requirements should be re-derived from current main and current product needs; do not merge or reconstruct PR #20 wholesale.
 
-## Linux And Bash
-
-The Bash scripts are still supported:
-
-```bash
-./scripts/dev.sh
-./scripts/health.sh
-./scripts/stop.sh
-```
-
-Windows-first development does not remove the Linux path.
+For the primary product-development path, use [quickstart.md](quickstart.md) and [p4-linux-first.md](p4-linux-first.md).

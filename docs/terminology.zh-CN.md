@@ -1,180 +1,117 @@
 # YUVI 统一术语表
 
-本文件是 YUVI 面向用户的中文文案、中文文档和中文代码注释的唯一术语来源。代码标识符、API 路径、事件键、枚举值和数据库字段保持英文不变。
+本文件是 YUVI 中文文档与面向用户技术文案的术语基线。代码标识符、API 路径、事件键、枚举值、数据库字段和 source identifier 保持英文，不为它们另造中文标识符。
 
 ## 基本规则
 
-- 首次出现可写作“中文名（English term）”，其后使用中文名。
-- `YUVI Runtime`、`Provider`、`Trace ID`、`Session ID` 等英文名称及 TypeScript 标识符不改名。
-- 当前仓库没有预置人格、固定角色、世界观或用户档案；默认提示词模板不构成既定 YUVI 人设。
-- API 端点、路由和 TypeScript 接口/端口是不同概念，必须分别表述。
+- 首次出现可写“中文说明（English term）”，随后按语境使用中文说明或原英文标识符。
+- `YUVI Runtime`、`RuntimeOrchestrator`、`ProviderRegistry`、`MemoryProvider`、`MemoryEvent`、`RelationshipContext` 等 source identifier 保持原样。
+- “当前已实现”“已验证本地部署”“计划中”“已延后”“历史”必须明确区分。
+- Prompt 中存在某个 section，不等于 Runtime 已经存在对应的权威状态 producer。
+- Memory 是 evidence，不是 Persona/Relationship 的权威状态数据库。
 
-## 产品与角色
+## 产品与呈现
 
-| 英文术语 | 统一中文名 | 说明 |
+| English term | 中文说明 | 当前含义 |
 | --- | --- | --- |
-| YUVI Runtime | YUVI 运行时 | 产品及运行时总称；简短用户文案可写“YUVI”。 |
-| AI Companion Runtime | AI 伴侣运行时 | 产品定位：**本地优先、事件驱动的 AI 伴侣运行时。** |
-| Companion | AI 伴侣 | 产品关系定位，不等于具体人格。 |
-| Assistant | 助手 | 面向用户生成和发送回复的一方。 |
-| Agent | 智能体 | 具有运行、决策或调用能力的执行主体。 |
-| Persona | 人格 | 可配置的角色身份、性格和行为设定。 |
-| Avatar | 虚拟形象 | 视觉、语音或动画表现载体。 |
-| Companion Name | 伴侣名称 | 不自动等同于人格。 |
-| Persona ID | 人格 ID | 未来多角色或多人格配置预留字段。 |
-| Voice Profile ID | 声线档案 ID | TTS 声线及参数的配置标识。 |
+| YUVI Runtime | YUVI 运行时 | 本地优先 AI 伴侣 Runtime。 |
+| AI Companion Runtime | AI 伴侣运行时 | 产品定位。 |
+| Companion | AI 伴侣 | 产品关系定位，不自动等于固定 Persona。 |
+| Assistant | 助手 | 生成或发布 assistant output 的角色。 |
+| Persona | 人格 | P8 要解决的稳定身份/行为边界之一；当前没有可由普通对话任意漂移的权威持久 Persona state。 |
+| Avatar | 虚拟形象 | Live2D 等视觉/动画呈现载体。 |
+| Dashboard | 控制台；强调载体时为 Web 控制台 | 当前调试、设置与观察界面。 |
+| Desktop Mode | 桌面运行形态 | 当前仓库已有 Tauri/Companion desktop surface 与 Windows packaging substrate；不表示 Windows packaging 是主产品验证路径。 |
+| Companion presentation | 伴侣呈现层 | Live2D、speech playback、presence/behavior projection 等执行/呈现职责，不拥有语义事实权威。 |
 
-## 架构与运行
+## Runtime 与 turn
 
-| 英文术语 | 统一中文名 |
-| --- | --- |
-| Dashboard | 控制台；强调载体时为 Web 控制台 |
-| Provider | 能力提供方；后续正文与导航可简称提供方 |
-| Runtime Orchestrator | 运行时编排器 |
-| Event Bus | 事件总线 |
-| Provider Registry | 提供方注册表 |
-| Provider Chain | 提供方链 |
-| Mock Provider | 模拟提供方 |
-| Development Mode | 开发模式 |
-| Desktop Mode | 桌面模式（规划中的 Tauri 形态） |
-| Direct Context | 直接上下文 |
-| Prompt Preview | 提示词预览 |
-| Trace ID | 链路追踪 ID |
-| Session ID | 会话 ID |
-| Subject User ID | 记忆主体用户 ID |
-| Created By User ID | 记忆创建者用户 ID |
-| Speaker ID | 说话者 ID |
-
-提供方链是在同一提供方能力下，按照优先级排列的主用、备用提供方调用顺序。直接上下文是未经记忆检索重写、直接加入本轮提示词的近期原始对话。控制台是当前 Web 开发与调试界面，不代表最终用户端产品界面。
-
-## 记忆系统
-
-| 英文术语 | 统一中文名 |
-| --- | --- |
-| Memory | 记忆 |
-| Memory Candidate | 候选记忆 |
-| Memory Extractor | 记忆提取器 |
-| Memory Retrieval | 记忆检索 |
-| Memory Reconstruction | 记忆重构 |
-| Memory Maintenance | 记忆维护 |
-| Memory Admission Policy | 记忆准入策略 |
-| Memory Candidate Review | 候选记忆审核 |
-| Explicit Remember Request | 显式记忆请求 |
-| Correction Request | 更正请求 |
-| Provenance | 来源信息 |
-| Assistant-only Restatement | 仅助手复述 |
-| Canonical Fingerprint | 规范化指纹 |
-| Canonical Event Key | 规范化事件键 |
-| Temporal Normalization | 时间规范化 |
-| Supersession | 记忆替代 |
-| Retention Policy | 保留策略 |
-| Vector Index | 向量索引 |
-| ANN Index | 近似最近邻索引 |
-| Hybrid Retrieval | 混合检索 |
-| Current Affect | 当前情感状态 |
-
-来源信息包含内容来源、陈述者和写入操作等溯源信息。记忆替代不表示物理覆盖或删除旧记录。当前情感状态是即时状态，不等于长期保存的情感记忆。时间规范化把相对或模糊时间表达转换为可比较、可保存的时间信息。
-
-### 记忆类型（`MemoryType`）
-
-| 枚举值 | 统一中文名 |
-| --- | --- |
-| `working` | 工作记忆 |
-| `episodic` | 情景记忆 |
-| `semantic` | 语义记忆 |
-| `emotional` | 情感记忆 |
-| `procedural` | 程序性记忆 |
-| `relationship` | 关系记忆 |
-
-### 记忆细分类型（`MemorySubtype`）
-
-| 枚举值 | 统一中文名 |
-| --- | --- |
-| `preference` | 偏好 |
-| `fact` | 事实 |
-| `project` | 项目 |
-| `workflow` | 工作流 |
-| `event` | 事件 |
-| `milestone` | 里程碑 |
-| `provider-choice` | 提供方选择 |
-| `path` | 路径 |
-| `repo` | 仓库 |
-| `command` | 命令 |
-| `troubleshooting` | 排障 |
-| `config` | 配置 |
-| `identity` | 身份 |
-| `project-fact` | 项目事实 |
-| `config-decision` | 配置决策 |
-| `emotional-state` | 情感状态 |
-| `emotional-pattern` | 情感模式 |
-| `health-note` | 健康备注 |
-| `schedule` | 日程 |
-| `test` | 测试 |
-| `emotion` | 情绪 |
-| `relationship` | 关系 |
-
-### 记忆层级（`MemoryLayer`）与状态（`MemoryStatus`）
-
-| 层级枚举值 | 统一中文名 | 状态枚举值 | 统一中文名 |
-| --- | --- | --- | --- |
-| `core` | 核心层 | `active` | 有效 |
-| `recall` | 召回层 | `superseded` | 已被替代 |
-| `archival` | 归档层 | `archived` | 已归档 |
-| `working` | 工作层 | `forgotten` | 已遗忘 |
-|  |  | `expired` | 已过期 |
-
-界面必须标示“类型”和“层级”两个维度，例如“类型：工作记忆；层级：工作层”。
-
-## 提供方能力与品牌显示
-
-| 枚举值 | 统一中文名 |
-| --- | --- |
-| `chat` | 对话 |
-| `reasoning` | 推理 |
-| `tts` | 语音合成 |
-| `stt` | 语音转写 |
-| `vision` | 视觉理解 |
-| `embedding` | 向量嵌入 |
-
-| 代码或品牌名称 | 中文显示 |
-| --- | --- |
-| DeepSeek | DeepSeek |
-| xAI | xAI |
-| Alibaba DashScope | 阿里云 DashScope |
-| OpenAI-compatible | OpenAI 兼容提供方 |
-| NVIDIA | NVIDIA |
-| Local | 本地提供方 |
-| Mock | 模拟提供方 |
-
-提供方健康状态：`healthy` 为“正常”，`degraded` 为“降级可用”，`unavailable` 为“不可用”。
-
-## API、路由与代码边界
-
-| 概念 | 统一中文名 | 示例 |
+| English term / identifier | 中文说明 | 当前含义 |
 | --- | --- | --- |
-| HTTP/WebSocket Endpoint | API 端点 | `POST /v1/messages` |
-| Route | 路由 | Fastify 路由注册 |
-| TypeScript Interface/Port | 接口或端口 | `RuntimeMemoryPort` |
+| Runtime Orchestrator / `RuntimeOrchestrator` | 运行时编排器 | 用户 turn 与 assistant-initiated turn 的语义编排核心。 |
+| user turn | 用户 turn | 由真实用户输入触发的 Runtime turn。 |
+| assistant-initiated turn | 助手发起的 turn | 没有 synthetic user message 的助手主动 Runtime 路径。 |
+| proactive candidate | 主动候选机会 | Presentation policy 准入后产生的一次性候选；不是 Runtime idempotency identity。 |
+| proactive decision | 主动决策 | P6 `ProactiveDecisionProvider` 的 `NO_OP | REQUEST_TEXT` machine-control 输出。 |
+| proactive continuation | 主动续写 | 仅在 `REQUEST_TEXT` 后由 `AssistantContinuationProvider` 生成的一条 assistant-only continuation。 |
+| finalized turn | 已最终确定的 turn | 已跨过 Runtime finalized-turn lifecycle 边界、可进入 durable semantic ingestion 协调的 turn。 |
+| finalized-ingestion ledger | finalized-ingestion 持久账本 | 记录 finalized turn 的 durable ingestion/admission/delivery 状态，用于 crash recovery 与 idempotency。 |
+| reconciliation | 对账 / reconciliation | 对不确定外部副作用进行精确状态核对；正文可保留英文以避免与普通“同步”混淆。 |
+| idempotency identity | 幂等身份 | 防止同一语义 effect 被重复提交的稳定 identity。 |
+| stale callback fencing | 过期回调 fencing | 通过 identity/generation 等边界阻止旧 async callback 重新产生 effect。 |
+| Event Bus | 事件总线 | 当前 active Runtime 实现是 in-memory；NATS 是保留边界，不是当前 active bus。 |
+| Direct Context | 直接上下文 | 同会话近期原始对话上下文；不是长期 Memory。 |
 
-版本化 API 端点优先用于文档；未版本化端点必须标为兼容端点或旧端点。`Port` 在架构语境中译为“端口”。核心代码标识符的中文说明见本规范 v1.0 的第十二节；其英文标识符保持不变。
+## P4 persistence / reliability
 
-## 事件与提示词分段
+| English term | 中文说明 | 当前含义 |
+| --- | --- | --- |
+| durable persistence | 持久化存储 | Linux 主路径通过 repository interface + `DATABASE_URL` + PostgreSQL + YUVI migrations。 |
+| ingestion ledger | 摄取账本 | finalized Memory ingestion 的持久状态，不等于 Memory 内容本身。 |
+| retryable | 可重试 | 只有语义/side-effect 边界允许时才能自动或人工重试。 |
+| ambiguous side effect | 不确定副作用 | 无法证明外部 effect 是否已发生的状态；必须防止盲目 replay。 |
+| fail-closed | 失败关闭 | 必要持久化/Memory 语义失败时拒绝继续产生不安全 effect，而不是伪装成功。 |
 
-`agent.reply` 是运行时编排器生成的内部回复事件，承载已生成但尚未由传输层发布的回复；`assistant.message` 是最终对用户发布的文本消息事件。当前运行时主对话流发布 `agent.reply`，当外部消费者需要最终发布语义时应使用或转换为 `assistant.message`；二者不是可任意互换的同义事件。
+Windows private PostgreSQL process ownership、ACL、Credential Manager、installer provisioning 等属于 deferred platform packaging，不称为当前主 persistence architecture。
 
-| 事件键 | 中文说明 |
-| --- | --- |
-| `user.message` | 用户消息 |
-| `user.voice.transcript` | 用户语音转写 |
-| `assistant.message` | 助手消息 |
-| `agent.reply` | 智能体回复 |
-| `avatar.speak` | 虚拟形象发声 |
-| `memory.retrieved` | 记忆已召回 |
-| `tts.started` | 语音合成已开始 |
-| `perception.vision` | 视觉感知 |
-| `stt.completed` | 语音转写已完成 |
-| `vision.completed` | 视觉分析已完成 |
-| `provider.error` | 提供方错误 |
-| `runtime.error` | 运行时错误 |
+## Provider
 
-提示词分段：`SystemIdentity` 系统身份、`CharacterStyle` 角色风格、`RelationshipContext` 关系上下文、`CurrentTime` 当前时间、`CurrentAffect` 当前情感状态、`DirectContext` 直接上下文、`RelevantMemory` 相关记忆、`CurrentSituation` 当前情境、`Tools` 可用工具、`UserMessage` 用户消息。
+| English term / source state | 中文说明 | 当前含义 |
+| --- | --- | --- |
+| Provider | 能力提供方；正文可简称 Provider | Chat/Reasoning/TTS/STT/Vision/Embedding 的可替换实现。 |
+| Provider Chain | Provider 链 | 同一 capability 下按优先级排列的 route。 |
+| Provider readiness / `ready` / `not_ready` | Provider 本地就绪状态 | 只表示本地配置/构造是否就绪；零 provider I/O，不证明远端可达。 |
+| Provider observed state / `unknown` / `available` / `degraded` / `unavailable` | Provider 观察状态 | 最近一次显式 verification 的缓存结果。 |
+| Provider Verify | Provider 显式验证 | 明确发起 live verification；可能产生远端或计费调用。 |
+| config-only inspection | 仅配置检查 | 不执行 Provider 网络 I/O。 |
+| fallback | 备用 route 切换 | 受当前 provider error/effect policy 约束，不等于所有错误都可 replay。 |
+| cancellation boundary | 取消边界 | `AbortSignal` 等 caller-owned cancellation 在 Runtime/server/provider transport 之间传播的边界。 |
+
+普通 `/health` 和 provider status inspection 不称为“live health probe”；它们不会因为读取状态而主动执行远端 verification。
+
+## Memory
+
+| English term / identifier | 中文说明 | 当前含义 |
+| --- | --- | --- |
+| Memory | 记忆 | 可检索的历史 evidence，不是 Persona database。 |
+| `MemoryBackend` | Memory storage contract | 物理/backend 存储边界。 |
+| `MemoryProvider` | Runtime-facing semantic Memory boundary | Runtime-facing vendor-neutral 读写语义。 |
+| `MemoryEvent` | Memory evidence object | 保留 provenance、scope、timestamp/unknown 等证据语义。 |
+| `MemoryRetrievalOutcome` | Memory retrieval outcome | 同时携带 events 和 `ok/empty/unavailable/error/partial` 状态。 |
+| provenance | 来源信息 | evidence 的来源、记录 identity、turn link、参与者等。 |
+| Hybrid Retrieval | 混合检索 | lexical/trigram/full-text 与 optional vector signal 共存。 |
+| explicit remember request | 显式记忆请求 | 用户要求记录某项 claim；表示“用户这样说/要求记住”，不自动变成已验证客观真相。 |
+| correction | 更正 evidence | 用户提供的新 evidence，可影响旧 evidence 的使用，但不通过 assistant prose 自我强化。 |
+
+正常 assistant text 是上下文，不是默认 fact authority。assistant-only relationship/affect prose 不能自动成为权威 Persona/Relationship state。
+
+## Prompt / P8
+
+以下名称是当前 PromptBuilder 的 source section identifier，保持英文：
+
+`SystemIdentity`, `CharacterStyle`, `RelationshipContext`, `CurrentTime`, `CurrentAffect`, `DirectContext`, `RelevantMemory`, `CurrentSituation`, `Tools`, `ProactiveInstruction`, `UserMessage`。
+
+其中：
+
+- `RelationshipContext` 是现有 prompt 语法槽位，不代表 persistent P8 `RelationshipState` 已实现；没有权威 producer 时可为空/默认说明。
+- `CurrentAffect` 是即时、低权威的当前上下文表达，不等于长期情感关系 state。
+- `ProactiveInstruction` 属于 assistant-initiated P6 决策/续写 prompt，不是 synthetic `UserMessage`。
+- P8 当前应理解为未来的 Persona/relationship interpretation 工作；不得把 `RelationshipState`、affinity/trust score、`DynamicSelf` 等历史设计草图写成当前实现。
+
+## API 与事件
+
+API 路径和事件 key 保持 source spelling，例如：
+
+- `POST /v1/messages/stream`
+- `POST /v1/proactive-turns/stream`
+- `POST /v1/audio/transcriptions`
+- `POST /v1/voice/message`
+- `POST /v1/tts`
+- `POST /v1/vision/analyze`
+- `user.message`
+- `agent.reply`
+- `assistant.message`
+- `avatar.speak`
+- `provider.error`
+
+不要把不同 source identifier 仅因为中文含义接近就视为同一个协议语义。
