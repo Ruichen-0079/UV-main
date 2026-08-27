@@ -3,7 +3,7 @@
 [English](current-state.md) | [简体中文](current-state.zh-CN.md)
 
 **Status snapshot date: 2026-08-27**  
-**Repository baseline: `757c1e0990368a199bf91e17c8a94bebee56968f` (`origin/main` when DOC-R1 began)**
+**Repository baseline: `62028e41d78383fc47f22f4afa1c1e9996d5bab1` (`origin/main` when DOC-R1 was prepared for PR)**
 
 Status labels used here:
 
@@ -122,7 +122,7 @@ Two axes are intentionally separate:
 
 Normal `/health` and provider status inspection do not perform live provider verification.
 
-Settings distinguish unsaved/draft state, saved/effective configuration, and active Runtime state. Save-only behavior must not be described as already applied Runtime state; explicit apply/reload behavior is a separate action.
+Settings distinguish unsaved/draft state, saved/effective configuration, and active Runtime state. **Save Only** must not be described as already applied Runtime state; **Save & Apply** / explicit apply-reload behavior is a separate action.
 
 ## 8. Memory
 
@@ -216,7 +216,7 @@ No personal machine paths belong in repository documentation.
 
 ## 11. Structural debt paydown
 
-**CURRENT / IN PROGRESS:** behavior-preserving structural decomposition is running separately from product semantics. On this baseline, Web dashboard presentation primitives, shared date formatting, and `EventTable` have already been extracted into dedicated modules.
+**CURRENT / IN PROGRESS:** behavior-preserving structural decomposition is running separately from product semantics. On this baseline, Web dashboard presentation primitives, shared date formatting, `EventTable`, and `EventsPage` have already been extracted into dedicated modules.
 
 Further decomposition of large Web/Core files may continue. Proposed future file/module names are not stable product architecture and should not be documented as contracts.
 

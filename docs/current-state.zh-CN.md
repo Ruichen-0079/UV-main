@@ -3,7 +3,7 @@
 [English](current-state.md) | [简体中文](current-state.zh-CN.md)
 
 **Status snapshot date: 2026-08-27**  
-**Repository baseline: `757c1e0990368a199bf91e17c8a94bebee56968f`（DOC-R1 开始时的 `origin/main`）**
+**Repository baseline: `62028e41d78383fc47f22f4afa1c1e9996d5bab1`（DOC-R1 准备开 PR 时的 `origin/main`）**
 
 本文使用以下状态标签：
 
@@ -216,7 +216,7 @@ Stable Persona Rules
 
 ## 11. Structural debt paydown
 
-**CURRENT / IN PROGRESS：** 行为保持型 structural decomposition 与产品语义修改分离进行。在本 baseline 上，Web dashboard presentation primitive、shared `formatDate` 与 `EventTable` 已经抽离到独立 module。
+**CURRENT / IN PROGRESS：** 行为保持型 structural decomposition 与产品语义修改分离进行。在本 baseline 上，Web dashboard presentation primitive、shared `formatDate`、`EventTable` 与 `EventsPage` 已经抽离到独立 module。
 
 后续仍可能继续拆分较大的 Web/Core 文件。提议中的 future file/module name 不是稳定 product architecture，不应写成 contract。
 
