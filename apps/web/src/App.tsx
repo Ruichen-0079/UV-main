@@ -120,6 +120,7 @@ import {
   StatusDot,
   Toggle
 } from "./dashboard-ui.js";
+import { formatDate } from "./dashboard-format.js";
 
 type PageId =
   | "overview"
@@ -6008,11 +6009,6 @@ function MemoryCandidateList(props: {
       ))}
     </div>
   );
-}
-
-function formatDate(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
 function shortTrace(value: string | undefined): string {
