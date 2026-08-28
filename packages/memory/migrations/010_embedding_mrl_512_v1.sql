@@ -55,6 +55,20 @@ begin
     select 1
     from memories
     where embedding is not null
+      and vector_dims(embedding) = 512
+      and (
+        embedding_provider is distinct from 'local'
+        or embedding_model is distinct from 'Qwen3-Embedding-0.6B-Q8_0.gguf'
+        or embedding_dimensions is distinct from 512
+      )
+  ) then
+    raise exception 'P8-0C MRL migration refused: an existing 512 vector has incompatible Qwen production provenance.';
+  end if;
+
+  if exists (
+    select 1
+    from memories
+    where embedding is not null
       and vector_dims(embedding) = 1024
       and (
         embedding_provider is distinct from 'local'
@@ -79,12 +93,9 @@ begin
   end if;
 
   update memories
-  set embedding = l2_normalize(subvector(embedding, 1, 512))
+  set embedding = l2_normalize(subvector(embedding, 1, 512)),
+      embedding_dimensions = 512
   where embedding is not null and vector_dims(embedding) = 1024;
-
-  update memories
-  set embedding_dimensions = 512
-  where embedding is not null and embedding_dimensions is distinct from 512;
 
   -- An ANN index built before this migration can be rewritten by PostgreSQL
   -- during the typmod change while retaining an index structure built for

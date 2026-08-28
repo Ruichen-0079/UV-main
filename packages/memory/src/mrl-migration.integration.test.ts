@@ -103,6 +103,48 @@ describe("P8-0C MRL migration PostgreSQL integration", () => {
       }
     }
   );
+
+  it.skipIf(!DATABASE_URL)(
+    "rejects incompatible existing 512-D provenance and rolls back atomically",
+    async () => {
+      const pool = createPool();
+      const client = await pool.connect();
+      try {
+        await createPre010Fixture(
+          client,
+          {
+            embeddingProvider: "openai-compatible",
+            embeddingModel: "text-embedding-other"
+          },
+          TARGET_DIMENSIONS
+        );
+        const migration = await readMigration();
+        await configureMigration(client);
+        const before = await readFixture(client);
+        const indexBefore = await readIndexDefinition(client);
+        const indexOidBefore = await readIndexOid(client);
+
+        await expect(client.query(migration.sql)).rejects.toThrow(
+          "incompatible Qwen production provenance"
+        );
+        await client.query("rollback").catch(() => undefined);
+
+        const after = await readFixture(client);
+        expect(after).toEqual(before);
+        expect(await readIndexDefinition(client)).toBe(indexBefore);
+        expect(await readIndexOid(client)).toBe(indexOidBefore);
+        expect(after.row.column_type).toBe("vector");
+        expect(after.row.vector_dims).toBe(TARGET_DIMENSIONS);
+        expect(after.row.embedding_dimensions).toBe(TARGET_DIMENSIONS);
+        expect(after.row.embedding_provider).toBe("openai-compatible");
+        expect(after.row.embedding_model).toBe("text-embedding-other");
+      } finally {
+        await dropFixtureSchema(client);
+        client.release();
+        await pool.end();
+      }
+    }
+  );
 });
 
 function createPool(): Pool {
@@ -137,7 +179,8 @@ async function configureMigration(client: PoolClient): Promise<void> {
 
 async function createPre010Fixture(
   client: PoolClient,
-  provenance: { embeddingProvider: string; embeddingModel: string }
+  provenance: { embeddingProvider: string; embeddingModel: string },
+  embeddingDimensions = 1024
 ): Promise<void> {
   await client.query(`create schema ${quoteIdentifier(fixtureSchema)}`);
   await client.query(`set search_path to ${quoteIdentifier(fixtureSchema)}, public`);
@@ -162,8 +205,8 @@ async function createPre010Fixture(
   await client.query(`
     create index memories_embedding_hnsw_idx
       on memories
-      using hnsw ((embedding::vector(1024)) vector_cosine_ops)
-      where embedding is not null and vector_dims(embedding) = 1024
+      using hnsw ((embedding::vector(${embeddingDimensions})) vector_cosine_ops)
+      where embedding is not null and vector_dims(embedding) = ${embeddingDimensions}
   `);
 
   await client.query(
@@ -172,7 +215,7 @@ async function createPre010Fixture(
        created_at, updated_at, embedding, embedding_model, embedding_provider,
        embedding_dimensions, embedded_at
      ) values ($1, 'semantic', $2, $3::jsonb, 'active', 'p8-0c-test', $4,
-       $5::timestamptz, $6::timestamptz, $7::vector, $8, $9, 1024, $5::timestamptz)`,
+       $5::timestamptz, $6::timestamptz, $7::vector, $8, $9, $10, $5::timestamptz)`,
     [
       fixtureId,
       "P8-0C migration integration memory",
@@ -180,9 +223,12 @@ async function createPre010Fixture(
       "p8-0c-migration-trace",
       "2026-08-28T00:00:00.000Z",
       "2026-08-28T00:00:01.000Z",
-      vectorLiteral(nativeQwenVector()),
+      vectorLiteral(
+        embeddingDimensions === TARGET_DIMENSIONS ? normalizedQwenVector() : nativeQwenVector()
+      ),
       provenance.embeddingModel,
-      provenance.embeddingProvider
+      provenance.embeddingProvider,
+      embeddingDimensions
     ]
   );
 }

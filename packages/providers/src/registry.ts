@@ -695,6 +695,7 @@ function providerStatusMessage(input: {
 
 export function createProviderRegistryFromEnv(env: ProviderEnv = process.env): ProviderRegistry {
   const config = createProviderRegistryConfigFromEnv(env);
+  validateQwen512DurableEmbeddingConfig(config);
 
   const registry = new ProviderRegistry(config);
   registry.registerChatProvider(resolveChatProvider(config));
@@ -2460,6 +2461,30 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
 }
 
 const QWEN3_EMBEDDING_MRL_MODEL = "Qwen3-Embedding-0.6B-Q8_0.gguf";
+
+function validateQwen512DurableEmbeddingConfig(config: ProviderRegistryConfig): void {
+  if (
+    config.defaults.embedding !== "local" ||
+    config.local.embeddingModel !== QWEN3_EMBEDDING_MRL_MODEL ||
+    config.local.embeddingDimensions !== 512
+  ) {
+    return;
+  }
+
+  if (config.chains.embedding.length !== 1 || config.chains.embedding[0] !== "local") {
+    throw new ProviderError({
+      provider: "registry",
+      capability: "embedding",
+      code: ProviderErrorCode.UnsupportedInput,
+      message:
+        "Qwen512 durable embedding contract requires DEFAULT_EMBEDDING_PROVIDER=local, " +
+        "LOCAL_EMBEDDING_MODEL=Qwen3-Embedding-0.6B-Q8_0.gguf, " +
+        "LOCAL_EMBEDDING_DIMENSIONS=512, and EMBEDDING_PROVIDER_CHAIN=local. " +
+        "Heterogeneous embedding chains are not supported for this production embedding space.",
+      retryable: false
+    });
+  }
+}
 
 function transformLocalMrlEmbedding(
   provider: string,

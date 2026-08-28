@@ -2842,7 +2842,7 @@ describe("server", () => {
     }
   });
 
-  it("keeps dimension-changing embedding settings pending restart", async () => {
+  it("keeps embedding identity and dimension changes pending restart", async () => {
     const previousCwd = process.cwd();
     const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-dimension-reload-"));
     const env = createTestEnv({
@@ -2873,9 +2873,15 @@ describe("server", () => {
         const update = await app.inject({
           method: "POST",
           url: "/settings/runtime",
-          payload: { values: { LOCAL_EMBEDDING_DIMENSIONS: "256" } }
+          payload: {
+            values: {
+              LOCAL_EMBEDDING_MODEL: "pending-local-embedding-model",
+              LOCAL_EMBEDDING_DIMENSIONS: "256"
+            }
+          }
         });
         expect(update.statusCode).toBe(200);
+        expect(update.json().pendingRestartKeys).toContain("LOCAL_EMBEDDING_MODEL");
         expect(update.json().pendingRestartKeys).toContain("LOCAL_EMBEDDING_DIMENSIONS");
 
         const reload = await app.inject({
@@ -2888,14 +2894,22 @@ describe("server", () => {
           applied: true,
           restartRequired: true
         });
+        expect(reload.json().notHotReloaded).toContain("LOCAL_EMBEDDING_MODEL");
         expect(reload.json().notHotReloaded).toContain("LOCAL_EMBEDDING_DIMENSIONS");
         expect(reload.json().active.providers.embedding).toMatchObject({
           provider: "local",
+          model: "Qwen3-Embedding-0.6B-Q8_0.gguf",
           dimensions: 512
         });
 
         const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
+        expect(settings.json().effectiveConfig.LOCAL_EMBEDDING_MODEL).toBe(
+          "pending-local-embedding-model"
+        );
         expect(settings.json().effectiveConfig.LOCAL_EMBEDDING_DIMENSIONS).toBe("256");
+        expect(settings.json().activeRuntimeConfig.providers.embedding.model).toBe(
+          "Qwen3-Embedding-0.6B-Q8_0.gguf"
+        );
         expect(settings.json().activeRuntimeConfig.providers.embedding.dimensions).toBe(512);
       } finally {
         await app.close();

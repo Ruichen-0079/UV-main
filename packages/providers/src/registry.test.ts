@@ -142,6 +142,22 @@ describe("ProviderRegistry", () => {
     });
   });
 
+  it("rejects heterogeneous chains for the Qwen512 durable embedding contract", () => {
+    expect(() =>
+      createProviderRegistryFromEnv({
+        NODE_ENV: "production",
+        DEFAULT_EMBEDDING_PROVIDER: "local",
+        EMBEDDING_PROVIDER: "local",
+        EMBEDDING_PROVIDER_CHAIN: "local,nvidia",
+        LOCAL_MODEL_BASEURL: "http://127.0.0.1:8128/v1",
+        LOCAL_EMBEDDING_MODEL: "Qwen3-Embedding-0.6B-Q8_0.gguf",
+        LOCAL_EMBEDDING_DIMENSIONS: "512"
+      })
+    ).toThrow(
+      "Heterogeneous embedding chains are not supported for this production embedding space."
+    );
+  });
+
   it("registers the generic OpenAI-compatible Chat provider without exposing its key", () => {
     const registry = createProviderRegistryFromEnv({
       NODE_ENV: "production",
