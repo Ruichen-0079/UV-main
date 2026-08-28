@@ -145,8 +145,13 @@ identity-only migration backfill (`legacy:conversation:<message-id>`); their
 historical ingestion outcome remains unknown and is discoverable rather than
 being marked complete.
 
-Voice remains outside this durable-finalized-turn path:
-`VOICE_DURABLE_INGESTION: DEFERRED`.
+Voice transcripts now enter the same durable finalized-turn path as text. The
+`user.voice.transcript` event is persisted as the canonical user message,
+followed by the normal assistant finalization, ingestion admission, durable
+Mem0 write scheduling, and optional TTS side effect. STT failures stop before a
+user turn is persisted; later chat failures leave the persisted user turn
+without a finalized assistant row. The transcript retains language,
+confidence, speaker, and voice-profile metadata when supplied.
 
 ## Categories
 
@@ -271,7 +276,7 @@ Memory records now include identity foundation fields for future multi-user and 
 
 Single-user behavior remains unchanged. When no identity is supplied, YUVI defaults `personaId` to `default-persona` and user fields to `default-user`. Retrieval can filter by persona, subject user, speaker, session, and existing scope/scopeId so unrelated users do not mix once identity fields are present. This is foundation only; YUVI does not implement STT diarization or voiceprint recognition yet.
 
-The developer voice route (`POST /v1/voice/message`) preserves supplied `speakerId`, `voiceProfileId`, `subjectUserId`, `createdByUserId`, and `sessionId` metadata when it transcribes audio and calls the normal message runtime. `writeMemory=false` still prevents memory creation. These fields are metadata only in v1 and do not imply actual speaker recognition.
+The developer voice route (`POST /v1/voice/message`) preserves supplied `speakerId`, `voiceProfileId`, `subjectUserId`, `createdByUserId`, and `sessionId` metadata when it transcribes audio and passes a `user.voice.transcript` event through the normal durable message runtime. These fields are metadata only in v1 and do not imply actual speaker recognition.
 
 Automatic extraction favors durable user information: explicit name/nickname, long-term preferences, project/provider/model choices, device or environment facts, workflow habits, communication/accessibility preferences, stable constraints, explicit important relationships, and explicit useful health/safety notes. It avoids storing trivial daily events, casual temporary moods, ambiguous guesses, and sensitive inferences that the user did not state.
 

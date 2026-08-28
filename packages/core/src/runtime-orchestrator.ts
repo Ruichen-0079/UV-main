@@ -18,7 +18,7 @@ import type {
   FinalizedIngestionAdmission,
   FinalizedIngestionPort,
   MemoryIngestionCoordinatorPort,
-  type ConversationRecoveryOptions
+  ConversationRecoveryOptions
 } from "@companion/memory";
 import {
   DEFAULT_STALE_STREAMING_MESSAGE_AGE_MS,
@@ -91,10 +91,7 @@ import type {
   SafeProviderCallMetadata,
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
-import {
-  AssistantTurnConflictError,
-  ConversationPersistenceError
-} from "./runtime-errors.js";
+import { AssistantTurnConflictError, ConversationPersistenceError } from "./runtime-errors.js";
 
 const assistantTurnClaimRetentionMs = 15 * 60 * 1000;
 const assistantTurnClaimMaxTerminal = 256;
@@ -184,10 +181,11 @@ export class RuntimeOrchestrator {
    * Runtime-lifetime dedupe for the same finalized event. This is deliberately
    * not advertised as durable exactly-once delivery across process restarts.
    */
-  private readonly finalizedMemoryWrites = new BoundedPromiseCache<MemoryConversationTurnWriteResult>(
-    runtimePromiseCacheMaxEntries,
-    runtimeCacheRetentionMs
-  );
+  private readonly finalizedMemoryWrites =
+    new BoundedPromiseCache<MemoryConversationTurnWriteResult>(
+      runtimePromiseCacheMaxEntries,
+      runtimeCacheRetentionMs
+    );
   private readonly pendingMemoryWrites = new Set<Promise<MemoryConversationTurnWriteResult>>();
   private readonly directContextConfig: DirectContextConfig;
   private readonly memoryContextBuilder: Pick<MemoryContextBuilder, "build">;
@@ -195,9 +193,11 @@ export class RuntimeOrchestrator {
     runtimePromiseCacheMaxEntries,
     runtimeCacheRetentionMs
   );
-  private readonly finalizedAdmissions = new BoundedPromiseCache<
-    FinalizedIngestionAdmission | null
-  >(runtimePromiseCacheMaxEntries, runtimeCacheRetentionMs);
+  private readonly finalizedAdmissions =
+    new BoundedPromiseCache<FinalizedIngestionAdmission | null>(
+      runtimePromiseCacheMaxEntries,
+      runtimeCacheRetentionMs
+    );
   private inlineIngestionCoordinator: MemoryIngestionCoordinator | undefined;
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
@@ -2483,7 +2483,7 @@ export class RuntimeOrchestrator {
   }
 
   private async resolveFinalizedTurnId(
-    _sourceEvent: UserMessageEvent,
+    _sourceEvent: RuntimeUserTurnEvent,
     assistantMessageId: string
   ): Promise<string> {
     const existing = this.finalizedTurnIds.get(assistantMessageId);
@@ -2492,8 +2492,7 @@ export class RuntimeOrchestrator {
       const persisted = await this.options.conversation?.getMessageById?.(assistantMessageId);
       return persisted?.finalizedTurnId ?? `finalized-turn:${crypto.randomUUID()}`;
     })();
-    this.finalizedTurnIds.set(assistantMessageId, finalizedTurnId);
-    return finalizedTurnId;
+    return this.finalizedTurnIds.set(assistantMessageId, finalizedTurnId);
   }
 
   private durableIngestionDecision(writeMemory: boolean): {
@@ -2553,8 +2552,7 @@ export class RuntimeOrchestrator {
     const existing = this.finalizedAdmissions.get(input.finalizedTurnId);
     if (existing) return existing;
     const admission = this.admitFinalizedIngestion(input);
-    this.finalizedAdmissions.set(input.finalizedTurnId, admission);
-    return admission;
+    return this.finalizedAdmissions.set(input.finalizedTurnId, admission);
   }
 
   private async createStreamingAssistantMessage(input: {
@@ -3816,23 +3814,8 @@ function conversationMessageFromEvent(
   role: "user" | "assistant",
   status: ConversationMessage["status"]
 ): ConversationMessageInput {
-  const isUserEvent = event.type === "user.message" || event.type === "user.voice.transcript";
-  const userMetadata = isUserEvent
-    ? {
-        ...(event.type === "user.voice.transcript" ? { modality: "voice" } : {}),
-        ...(event.payload.language ? { language: event.payload.language } : {}),
-        ...(event.payload.confidence !== undefined
-          ? { confidence: event.payload.confidence }
-          : {}),
-        ...(event.payload.createdByUserId !== undefined
-          ? { createdByUserId: event.payload.createdByUserId }
-          : {}),
-        ...(event.payload.speakerId !== undefined ? { speakerId: event.payload.speakerId } : {}),
-        ...(event.payload.voiceProfileId !== undefined
-          ? { voiceProfileId: event.payload.voiceProfileId }
-          : {})
-      }
-    : {};
+  const isUserEvent = isRuntimeUserTurnEvent(event);
+  const userMetadata = isUserEvent ? userEventMetadata(event) : {};
   return {
     id: event.id,
     sessionId: event.payload.sessionId,
@@ -3853,6 +3836,25 @@ function conversationMessageFromEvent(
   };
 }
 
+function userEventMetadata(event: RuntimeUserTurnEvent): Record<string, unknown> {
+  return {
+    ...(event.type === "user.voice.transcript" ? { modality: "voice" } : {}),
+    ...(event.type === "user.voice.transcript" && event.payload.language
+      ? { language: event.payload.language }
+      : {}),
+    ...(event.type === "user.voice.transcript" && event.payload.confidence !== undefined
+      ? { confidence: event.payload.confidence }
+      : {}),
+    ...(event.payload.createdByUserId !== undefined
+      ? { createdByUserId: event.payload.createdByUserId }
+      : {}),
+    ...(event.payload.speakerId !== undefined ? { speakerId: event.payload.speakerId } : {}),
+    ...(event.payload.voiceProfileId !== undefined
+      ? { voiceProfileId: event.payload.voiceProfileId }
+      : {})
+  };
+}
+
 function buildDirectContextEntries(
   messages: ConversationMessage[],
   excludedMessageId?: string
@@ -3868,6 +3870,13 @@ function buildDirectContextEntries(
   const discardedUserIds = new Set<string>();
   for (const assistant of ordered) {
     if (assistant.message.role !== "assistant" || assistant.message.status === "completed") {
+      continue;
+    }
+    const recoveryReason = assistant.message.metadata?.["recoveryReason"];
+    if (recoveryReason === "stale-streaming-message") {
+      // A maintenance recovery closes an abandoned assistant row. It must not
+      // make an otherwise completed preceding user turn disappear from the
+      // rebuilt context just because the abandoned row has no matching user.
       continue;
     }
     const precedingUser = [...allCompletedUsers]
@@ -4102,9 +4111,11 @@ function isRuntimeUserMessageEvent(
 }
 
 function isRuntimeUserTurnEvent(
-  input: RuntimeUserTurnEvent | HandleUserMessageInput
+  input: RuntimeUserTurnEvent | HandleUserMessageInput | AssistantMessageEvent
 ): input is RuntimeUserTurnEvent {
-  return "type" in input && (input.type === "user.message" || input.type === "user.voice.transcript");
+  return (
+    "type" in input && (input.type === "user.message" || input.type === "user.voice.transcript")
+  );
 }
 
 /** Stable assistant identity for a finalized runtime turn. */
@@ -4125,7 +4136,6 @@ function finalizedTurnIdempotencyKey(assistantMessageId: string): string {
 
 type BoundedPromiseCacheEntry<T> = {
   value: Promise<T>;
-  storedAtMs: number;
   lastAccessedAtMs: number;
   settled: boolean;
 };
@@ -4154,13 +4164,10 @@ class BoundedPromiseCache<T> {
   set(key: string, promise: Promise<T>): Promise<T> {
     this.entries.delete(key);
     const now = Date.now();
-    const entry = {
+    const entry: BoundedPromiseCacheEntry<T> = {
       value: undefined as unknown as Promise<T>,
-      storedAtMs: now,
       lastAccessedAtMs: now,
       settled: false
-    } satisfies Omit<BoundedPromiseCacheEntry<T>, "value"> & {
-      value: Promise<T>;
     };
     const tracked = promise.then(
       (value) => {

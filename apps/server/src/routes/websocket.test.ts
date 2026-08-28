@@ -1,6 +1,11 @@
 import { createEvent } from "@companion/protocol";
-import { describe, expect, it } from "vitest";
-import { shouldForwardEvent } from "./websocket.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  ACTIVE_TRACE_MAX_ENTRIES,
+  ACTIVE_TRACE_RETENTION_MS,
+  ActiveTraceRegistry,
+  shouldForwardEvent
+} from "./websocket.js";
 
 describe("WebSocket reply compatibility filter", () => {
   it("forwards agent.reply but does not forward assistant.message twice", () => {
@@ -21,5 +26,66 @@ describe("WebSocket reply compatibility filter", () => {
 
     expect(shouldForwardEvent(agent)).toBe(true);
     expect(shouldForwardEvent(assistant)).toBe(false);
+  });
+
+  it("bounds terminal traces while preserving active in-flight traces", () => {
+    const registry = new ActiveTraceRegistry();
+    for (let index = 0; index < ACTIVE_TRACE_MAX_ENTRIES + 44; index += 1) {
+      expect(registry.add(`terminal-${index}`)).toBe(true);
+      registry.observe(
+        createEvent(
+          "agent.reply",
+          {
+            sessionId: "session-1",
+            content: "done"
+          },
+          { traceId: `terminal-${index}` }
+        )
+      );
+    }
+
+    expect(registry.size).toBe(ACTIVE_TRACE_MAX_ENTRIES);
+    expect(registry.has("terminal-0")).toBe(false);
+    expect(registry.has(`terminal-${ACTIVE_TRACE_MAX_ENTRIES + 43}`)).toBe(true);
+
+    const inFlight = new ActiveTraceRegistry();
+    for (let index = 0; index < ACTIVE_TRACE_MAX_ENTRIES; index += 1) {
+      expect(inFlight.add(`active-${index}`)).toBe(true);
+    }
+    expect(inFlight.add("overflow")).toBe(false);
+    expect(inFlight.size).toBe(ACTIVE_TRACE_MAX_ENTRIES);
+    expect(inFlight.has("active-0")).toBe(true);
+
+    inFlight.observe(
+      createEvent(
+        "agent.reply",
+        {
+          sessionId: "session-1",
+          content: "done"
+        },
+        { traceId: "active-0" }
+      )
+    );
+    expect(inFlight.add("overflow")).toBe(true);
+    expect(inFlight.has("active-0")).toBe(false);
+  });
+
+  it("expires terminal traces after the configured retention window", () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new ActiveTraceRegistry();
+      registry.add("expiring-trace");
+      registry.observe(
+        createEvent(
+          "agent.reply",
+          { sessionId: "session-1", content: "done" },
+          { traceId: "expiring-trace" }
+        )
+      );
+      vi.advanceTimersByTime(ACTIVE_TRACE_RETENTION_MS);
+      expect(registry.has("expiring-trace")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

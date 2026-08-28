@@ -85,7 +85,10 @@ export async function buildServer(config: ServerConfig) {
       );
     }
   } catch (error) {
-    app.log.warn({ err: error }, "stale streaming conversation recovery was unavailable at startup");
+    app.log.warn(
+      { err: error },
+      "stale streaming conversation recovery was unavailable at startup"
+    );
   }
   const maintenanceScheduler = new MemoryMaintenanceScheduler(context, config, app.log);
   context.memoryMaintenanceScheduler = maintenanceScheduler;

@@ -618,6 +618,53 @@ describe("public batch STT disconnect cancellation", () => {
       await app.close();
     }
   });
+
+  it("/v1/voice/message passes a canonical voice transcript event to Runtime", async () => {
+    const transcribeAudio = vi.fn<TestSTTTranscriber>(async () => recognizedOutput());
+    const { app, handleUserMessage } = await createLifecycleApp(
+      "/v1/voice/message",
+      transcribeAudio
+    );
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/voice/message",
+        payload: {
+          audioBase64: "AQID",
+          sessionId: "voice-route-session",
+          personaId: "alice",
+          subjectUserId: "user-a",
+          createdByUserId: "user-a",
+          speakerId: "speaker-a",
+          voiceProfileId: "voice-a",
+          options: { readMemory: false, writeMemory: false }
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(handleUserMessage.mock.calls[0]?.[0]).toMatchObject({
+        type: "user.voice.transcript",
+        payload: {
+          sessionId: "voice-route-session",
+          content: "recognized speech",
+          language: "en",
+          confidence: 0.9,
+          personaId: "alice",
+          subjectUserId: "user-a",
+          createdByUserId: "user-a",
+          speakerId: "speaker-a",
+          voiceProfileId: "voice-a"
+        }
+      });
+      expect(handleUserMessage.mock.calls[0]?.[1]).toMatchObject({
+        readMemory: false,
+        writeMemory: false
+      });
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe("public Vision input validation", () => {

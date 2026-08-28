@@ -322,14 +322,11 @@ export async function registerMediaRoutes(
         confidence: transcription.confidence,
         ...identityMetadata(parsed.data)
       });
-      const response = await context.runtime.handleUserMessage(
-        transcriptEvent,
-        {
-          readMemory: parsed.data.options?.readMemory,
-          writeMemory: parsed.data.options?.writeMemory,
-          voiceOutput: parsed.data.options?.voiceOutput
-        }
-      );
+      const response = await context.runtime.handleUserMessage(transcriptEvent, {
+        readMemory: parsed.data.options?.readMemory,
+        writeMemory: parsed.data.options?.writeMemory,
+        voiceOutput: parsed.data.options?.voiceOutput
+      });
 
       const sttMetadata = standardProviderMetadata("stt", transcription);
       return reply.send({

@@ -837,6 +837,114 @@ describe("RuntimeOrchestrator", () => {
     expect(published.filter((event) => event.type === "assistant.message")).toHaveLength(0);
   });
 
+  it("surfaces failure-state persistence errors and recovers abandoned streams", async () => {
+    const conversation = new InMemoryConversationRepository();
+    conversation.failMessage = async () => {
+      throw new Error("failure state unavailable");
+    };
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () =>
+          createMockStreamingChatProvider("native", {
+            chunks: ["partial", "ignored"],
+            failAfterChunks: 1,
+            failAfter: new ProviderError({
+              provider: "native",
+              capability: "chat",
+              code: ProviderErrorCode.NetworkError,
+              message: "interrupted"
+            })
+          })
+      }
+    });
+
+    await expect(
+      collectRuntimeStream(
+        runtime.streamUserMessage(
+          { sessionId: "failure-state-session", content: "hello" },
+          { readMemory: false, writeMemory: false }
+        )
+      )
+    ).rejects.toMatchObject({
+      name: "ConversationPersistenceError",
+      operation: "assistant_stream_fail"
+    });
+    expect((await conversation.listRecentMessages("failure-state-session")).at(-1)).toMatchObject({
+      status: "streaming"
+    });
+
+    const recovered = await runtime.recoverStaleStreamingMessages({
+      olderThan: new Date(Date.now() + 1),
+      recoveredAt: new Date("2026-08-28T12:00:00.000Z")
+    });
+    expect(recovered).toMatchObject([
+      {
+        status: "failed",
+        metadata: { recoveryReason: "stale-streaming-message" }
+      }
+    ]);
+  });
+
+  it("does not let recovered abandoned rows poison rebuilt direct context", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const timestampMs = Date.now() - 60 * 60 * 1000;
+    await appendCompletedConversationMessage(conversation, {
+      id: "prior-user",
+      sessionId: "recovery-context-session",
+      traceId: "prior-trace",
+      role: "user",
+      content: "prior completed context",
+      timestampMs
+    });
+    await appendCompletedConversationMessage(conversation, {
+      id: "prior-assistant",
+      sessionId: "recovery-context-session",
+      traceId: "prior-trace",
+      role: "assistant",
+      content: "prior completed answer",
+      sourceUserEventId: "prior-user",
+      timestampMs: timestampMs + 1
+    });
+    await conversation.ensureSession("recovery-context-session");
+    await conversation.appendMessage({
+      id: "abandoned-assistant",
+      sessionId: "recovery-context-session",
+      traceId: "abandoned-trace",
+      parentMessageId: null,
+      role: "assistant",
+      content: "stranded partial output",
+      status: "streaming",
+      createdAt: new Date(timestampMs + 2).toISOString(),
+      completedAt: null,
+      metadata: {}
+    });
+
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    await runtime.recoverStaleStreamingMessages({ olderThan: new Date(), limit: 10 });
+    await runtime.handleUserMessage(
+      { sessionId: "recovery-context-session", content: "new question" },
+      { readMemory: false, writeMemory: false }
+    );
+
+    const directContext = runtime
+      .getLatestPromptPreview()
+      ?.sections.find((section) => section.name === "DirectContext")?.content;
+    expect(directContext).toContain("prior completed context");
+    expect(directContext).toContain("prior completed answer");
+    expect(directContext).not.toContain("stranded partial output");
+  });
+
   it("marks an assistant message failed when an incremental append fails", async () => {
     const conversation = new InMemoryConversationRepository();
     const appendMessageContent = conversation.appendMessageContent.bind(conversation);
@@ -1249,7 +1357,6 @@ describe("RuntimeOrchestrator", () => {
       "assistant.message"
     ]);
   });
-
 });
 
 function createFailingMemory(): RuntimeMemoryPort {
