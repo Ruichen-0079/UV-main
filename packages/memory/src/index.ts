@@ -213,8 +213,11 @@ export {
   type ConversationMessageInput,
   type ConversationMessageRole,
   type ConversationMessageStatus,
+  type ConversationRecoveryOptions,
   type ConversationRepository,
-  type ConversationRepositoryKind
+  type ConversationRepositoryKind,
+  DEFAULT_STALE_STREAMING_MESSAGE_AGE_MS,
+  DEFAULT_STALE_STREAMING_MESSAGE_LIMIT
 } from "./conversation-repository.js";
 export {
   FINALIZED_INGESTION_POLICY_VERSION,

@@ -6,6 +6,15 @@ export type ConversationRepositoryKind = MemoryRepositoryKind;
 export type ConversationMessageRole = "user" | "assistant";
 export type ConversationMessageStatus = "streaming" | "completed" | "failed" | "cancelled";
 
+export const DEFAULT_STALE_STREAMING_MESSAGE_AGE_MS = 30 * 60 * 1000;
+export const DEFAULT_STALE_STREAMING_MESSAGE_LIMIT = 100;
+
+export type ConversationRecoveryOptions = {
+  olderThan?: Date | string | undefined;
+  limit?: number | undefined;
+  recoveredAt?: Date | string | undefined;
+};
+
 export type ConversationMessage = {
   id: string;
   sessionId: string;
@@ -83,6 +92,9 @@ export interface ConversationRepository {
   listRecentMessages(
     sessionId: string,
     options?: ConversationListOptions
+  ): Promise<ConversationMessage[]>;
+  recoverStaleStreamingMessages?(
+    options?: ConversationRecoveryOptions
   ): Promise<ConversationMessage[]>;
   close?(): Promise<void>;
 }
@@ -259,7 +271,8 @@ export class PostgresConversationRepository implements ConversationRepository {
   ): Promise<ConversationMessage> {
     const result = await this.pool.query(
       `update conversation_messages
-       set status = $2, metadata = metadata || $3::jsonb
+       set status = $2, completed_at = coalesce(completed_at, now()),
+           metadata = metadata || $3::jsonb
        where id = $1 and status = 'streaming'
        returning *`,
       [messageId, status, JSON.stringify(metadata)]
@@ -327,6 +340,39 @@ export class PostgresConversationRepository implements ConversationRepository {
 
   getDatabaseClient(): ConversationDatabaseClient {
     return this.pool;
+  }
+
+  async recoverStaleStreamingMessages(
+    options: ConversationRecoveryOptions = {}
+  ): Promise<ConversationMessage[]> {
+    const recoveredAt = toDate(options.recoveredAt) ?? new Date();
+    const olderThan =
+      toDate(options.olderThan) ??
+      new Date(recoveredAt.getTime() - DEFAULT_STALE_STREAMING_MESSAGE_AGE_MS);
+    const limit = clampLimit(options.limit ?? DEFAULT_STALE_STREAMING_MESSAGE_LIMIT);
+    const recoveryMetadata = JSON.stringify({
+      recoveryReason: "stale-streaming-message",
+      recoveredAt: recoveredAt.toISOString()
+    });
+    const result = await this.pool.query(
+      `with stale as (
+         select id
+         from conversation_messages
+         where status = 'streaming' and created_at < $1
+         order by created_at asc
+         limit $2
+         for update skip locked
+       )
+       update conversation_messages as message
+       set status = 'failed',
+           completed_at = coalesce(message.completed_at, $3),
+           metadata = message.metadata || $4::jsonb
+       from stale
+       where message.id = stale.id
+       returning message.*`,
+      [olderThan.toISOString(), limit, recoveredAt.toISOString(), recoveryMetadata]
+    );
+    return result.rows.map(mapConversationMessageRow);
   }
 }
 
@@ -431,6 +477,7 @@ export class InMemoryConversationRepository implements ConversationRepository {
       );
     }
     message.status = status;
+    message.completedAt = message.completedAt ?? new Date().toISOString();
     message.metadata = { ...message.metadata, ...metadata };
     return cloneConversationMessage(message);
   }
@@ -469,6 +516,39 @@ export class InMemoryConversationRepository implements ConversationRepository {
   async getMessageById(messageId: string): Promise<ConversationMessage | null> {
     const message = this.findMessage(messageId);
     return message ? cloneConversationMessage(message) : null;
+  }
+
+  async recoverStaleStreamingMessages(
+    options: ConversationRecoveryOptions = {}
+  ): Promise<ConversationMessage[]> {
+    const recoveredAt = toDate(options.recoveredAt) ?? new Date();
+    const olderThan =
+      toDate(options.olderThan) ??
+      new Date(recoveredAt.getTime() - DEFAULT_STALE_STREAMING_MESSAGE_AGE_MS);
+    const limit = clampLimit(options.limit ?? DEFAULT_STALE_STREAMING_MESSAGE_LIMIT);
+    const recovered: ConversationMessage[] = [];
+
+    for (const messages of this.messages.values()) {
+      for (const message of messages) {
+        if (
+          recovered.length >= limit ||
+          message.status !== "streaming" ||
+          !isBefore(message.createdAt, olderThan)
+        ) {
+          continue;
+        }
+        message.status = "failed";
+        message.completedAt = message.completedAt ?? recoveredAt.toISOString();
+        message.metadata = {
+          ...message.metadata,
+          recoveryReason: "stale-streaming-message",
+          recoveredAt: recoveredAt.toISOString()
+        };
+        recovered.push(cloneConversationMessage(message));
+      }
+    }
+
+    return recovered;
   }
 }
 
@@ -592,6 +672,19 @@ function parseMetadata(value: unknown): Record<string, unknown> {
 
 function toIsoString(value: unknown): string {
   return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function toDate(value: Date | string | undefined): Date | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function isBefore(value: Date | string, boundary: Date): boolean {
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.getTime() < boundary.getTime();
 }
 
 function clampLimit(value: number): number {
