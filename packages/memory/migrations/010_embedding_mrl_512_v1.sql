@@ -57,6 +57,20 @@ begin
     where embedding is not null
       and vector_dims(embedding) = 1024
       and (
+        embedding_provider is distinct from 'local'
+        or embedding_model is distinct from 'Qwen3-Embedding-0.6B-Q8_0.gguf'
+        or embedding_dimensions is distinct from 1024
+      )
+  ) then
+    raise exception 'P8-0C MRL migration refused: a 1024 vector has unsupported Qwen production provenance.';
+  end if;
+
+  if exists (
+    select 1
+    from memories
+    where embedding is not null
+      and vector_dims(embedding) = 1024
+      and (
         vector_norm(subvector(embedding, 1, 512)) <= 0
         or vector_norm(subvector(embedding, 1, 512))::text in ('NaN', 'Infinity', '-Infinity')
       )
@@ -71,6 +85,38 @@ begin
   update memories
   set embedding_dimensions = 512
   where embedding is not null and embedding_dimensions is distinct from 512;
+
+  -- An ANN index built before this migration can be rewritten by PostgreSQL
+  -- during the typmod change while retaining an index structure built for
+  -- 1024-D vectors. Drop those definitions before altering the column so the
+  -- post-migration index is rebuilt against the normalized 512-D values.
+  select indexdef into hnsw_definition
+  from pg_indexes
+  where schemaname = current_schema()
+    and tablename = 'memories'
+    and indexname = 'memories_embedding_hnsw_idx';
+  if hnsw_definition is not null
+     and (
+       position('vector(1024)' in lower(hnsw_definition)) > 0
+       or position('vector_dims(embedding) = 1024' in lower(hnsw_definition)) > 0
+     ) then
+    execute 'drop index if exists memories_embedding_hnsw_idx';
+    hnsw_definition := null;
+  end if;
+
+  select indexdef into ivfflat_definition
+  from pg_indexes
+  where schemaname = current_schema()
+    and tablename = 'memories'
+    and indexname = 'memories_embedding_ivfflat_idx';
+  if ivfflat_definition is not null
+     and (
+       position('vector(1024)' in lower(ivfflat_definition)) > 0
+       or position('vector_dims(embedding) = 1024' in lower(ivfflat_definition)) > 0
+     ) then
+    execute 'drop index if exists memories_embedding_ivfflat_idx';
+    ivfflat_definition := null;
+  end if;
 
   if not exists (
     select 1
@@ -91,7 +137,10 @@ begin
     and tablename = 'memories'
     and indexname = 'memories_embedding_hnsw_idx';
   if hnsw_definition is not null
-     and position('vector_dims(embedding) = 512' in lower(hnsw_definition)) = 0 then
+     and (
+       position('vector_dims(embedding) = 512' in lower(hnsw_definition)) = 0
+       or position('vector(1024)' in lower(hnsw_definition)) > 0
+     ) then
     execute 'drop index if exists memories_embedding_hnsw_idx';
     hnsw_definition := null;
   end if;
@@ -102,7 +151,10 @@ begin
     and tablename = 'memories'
     and indexname = 'memories_embedding_ivfflat_idx';
   if ivfflat_definition is not null
-     and position('vector_dims(embedding) = 512' in lower(ivfflat_definition)) = 0 then
+     and (
+       position('vector_dims(embedding) = 512' in lower(ivfflat_definition)) = 0
+       or position('vector(1024)' in lower(ivfflat_definition)) > 0
+     ) then
     execute 'drop index if exists memories_embedding_ivfflat_idx';
     ivfflat_definition := null;
   end if;

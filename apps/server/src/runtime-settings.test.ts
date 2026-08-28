@@ -21,6 +21,11 @@ describe("runtime settings contract", () => {
       "hot_reload"
     );
     expect(getRuntimeSettingApplyMode("MEMORY_VECTOR_IVFFLAT_PROBES")).toBe("restart_required");
+    expect(getRuntimeSettingApplyMode("EMBEDDING_PROVIDER_CHAIN")).toBe("restart_required");
+    expect(getRuntimeSettingApplyMode("EMBEDDING_PROVIDER")).toBe("restart_required");
+    expect(getRuntimeSettingApplyMode("LOCAL_EMBEDDING_DIMENSIONS")).toBe("restart_required");
+    expect(getRuntimeSettingApplyMode("NVIDIA_EMBEDDING_DIMENSIONS")).toBe("restart_required");
+    expect(getRuntimeSettingApplyMode("EMBEDDING_DIMENSIONS")).toBe("restart_required");
     expect(getRuntimeSettingApplyMode("GPT_SOVITS_TTS_GPT_WEIGHTS")).toBe("restart_required");
   });
 

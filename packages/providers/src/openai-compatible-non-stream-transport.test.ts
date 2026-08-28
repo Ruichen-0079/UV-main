@@ -505,6 +505,31 @@ describe("OpenAI-compatible non-stream transport", () => {
     });
   });
 
+  it("does not apply Qwen MRL to an unrelated local embedding model", async () => {
+    const native = Array.from({ length: 1024 }, (_, index) => (index === 0 ? 3 : 1));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(embeddingPayload([native])), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+      )
+    );
+
+    const output = await openAICompatibleLeaves({
+      DEFAULT_EMBEDDING_PROVIDER: "local",
+      EMBEDDING_PROVIDER_CHAIN: "local",
+      LOCAL_MODEL_BASEURL: "http://127.0.0.1:8128/v1",
+      LOCAL_EMBEDDING_MODEL: "unrelated-local-embedding-model",
+      LOCAL_EMBEDDING_DIMENSIONS: "512"
+    }).embedding.embedText("hello");
+
+    expect(output).toEqual(native);
+    expect(output).toHaveLength(1024);
+  });
+
   it.each([
     ["short", Array.from({ length: 511 }, () => 1)],
     ["zero prefix", Array.from({ length: 512 }, () => 0)],

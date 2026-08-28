@@ -2842,6 +2842,70 @@ describe("server", () => {
     }
   });
 
+  it("keeps dimension-changing embedding settings pending restart", async () => {
+    const previousCwd = process.cwd();
+    const tempDir = await mkdtemp(path.join(tmpdir(), "yuvi-dimension-reload-"));
+    const env = createTestEnv({
+      YUVI_RUNTIME_ENV_DIR: tempDir,
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_EMBEDDING_PROVIDER: "local",
+      EMBEDDING_PROVIDER: "local",
+      EMBEDDING_PROVIDER_CHAIN: "local",
+      EMBEDDING_DIMENSIONS: "1024",
+      LOCAL_MODEL_BASEURL: "http://127.0.0.1:8128/v1",
+      LOCAL_EMBEDDING_MODEL: "Qwen3-Embedding-0.6B-Q8_0.gguf",
+      LOCAL_EMBEDDING_DIMENSIONS: "512"
+    });
+
+    try {
+      process.chdir(tempDir);
+      process.env = { ...env };
+      const app = await buildServer(loadServerConfig(env));
+
+      try {
+        const initial = await app.inject({ method: "GET", url: "/providers/status" });
+        expect(initial.json().providers.embedding).toMatchObject({
+          provider: "local",
+          model: "Qwen3-Embedding-0.6B-Q8_0.gguf",
+          dimensions: 512
+        });
+
+        const update = await app.inject({
+          method: "POST",
+          url: "/settings/runtime",
+          payload: { values: { LOCAL_EMBEDDING_DIMENSIONS: "256" } }
+        });
+        expect(update.statusCode).toBe(200);
+        expect(update.json().pendingRestartKeys).toContain("LOCAL_EMBEDDING_DIMENSIONS");
+
+        const reload = await app.inject({
+          method: "POST",
+          url: "/settings/runtime/reload"
+        });
+        expect(reload.statusCode).toBe(200);
+        expect(reload.json()).toMatchObject({
+          ok: true,
+          applied: true,
+          restartRequired: true
+        });
+        expect(reload.json().notHotReloaded).toContain("LOCAL_EMBEDDING_DIMENSIONS");
+        expect(reload.json().active.providers.embedding).toMatchObject({
+          provider: "local",
+          dimensions: 512
+        });
+
+        const settings = await app.inject({ method: "GET", url: "/settings/runtime" });
+        expect(settings.json().effectiveConfig.LOCAL_EMBEDDING_DIMENSIONS).toBe("256");
+        expect(settings.json().activeRuntimeConfig.providers.embedding.dimensions).toBe(512);
+      } finally {
+        await app.close();
+      }
+    } finally {
+      process.chdir(previousCwd);
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("exposes memory extractor diagnostics only in development runtime settings", async () => {
     const devApp = await buildTestServer({ RUNTIME_MODE: "development" });
     try {

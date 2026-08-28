@@ -32,6 +32,12 @@ jobs:
 
     env:
       DATABASE_URL: postgres://yuvi:yuvi_dev_password@127.0.0.1:5432/yuvi
+      DEFAULT_EMBEDDING_PROVIDER: local
+      EMBEDDING_PROVIDER: local
+      EMBEDDING_PROVIDER_CHAIN: local
+      LOCAL_MODEL_BASEURL: http://127.0.0.1:8128/v1
+      LOCAL_EMBEDDING_MODEL: Qwen3-Embedding-0.6B-Q8_0.gguf
+      LOCAL_EMBEDDING_DIMENSIONS: "512"
 
     steps:
       - name: Checkout

@@ -2790,6 +2790,7 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("l2_normalize(subvector(embedding, 1, 512))");
     expect(combinedSql).toContain("alter column embedding type vector(512)");
     expect(combinedSql).toContain("mixed 512 and 1024 dimensional vectors");
+    expect(combinedSql).toContain("unsupported qwen production provenance");
   });
 });
 

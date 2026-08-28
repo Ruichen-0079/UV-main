@@ -4,6 +4,7 @@ import {
   readSqlMigrations,
   runPostgresMigrations
 } from "../packages/memory/src/migrations.js";
+import { createProviderRegistryFromEnv } from "../packages/providers/src/index.js";
 
 async function main(): Promise<void> {
   const runtimeEnvFiles = await readRuntimeEnvFiles();
@@ -15,11 +16,17 @@ async function main(): Promise<void> {
     throw new MissingDatabaseUrlError();
   }
   const migrations = await readSqlMigrations();
+  const embeddingProvider = createProviderRegistryFromEnv(
+    runtimeEnvFiles.env
+  ).getEmbeddingProvider();
 
   if (migrations.length === 0) {
     throw new Error("No SQL migration files found in packages/memory/migrations.");
   }
 
+  console.log(
+    `[embedding] selectedProvider=${embeddingProvider.name} model=${embeddingProvider.model ?? embeddingProvider.name} dimensions=${embeddingProvider.dimensions} semanticEmbedding=${String(!embeddingProvider.mock)}`
+  );
   console.log(`Running ${migrations.length} PostgreSQL memory migration(s).`);
   await runPostgresMigrations({
     databaseUrl,
@@ -29,7 +36,7 @@ async function main(): Promise<void> {
         runtimeEnvFiles.env["MEMORY_VECTOR_INDEX_ENABLED"] ?? "true",
       "yuvi.memory_vector_index_type": runtimeEnvFiles.env["MEMORY_VECTOR_INDEX_TYPE"] ?? "hnsw",
       "yuvi.memory_vector_distance": runtimeEnvFiles.env["MEMORY_VECTOR_DISTANCE"] ?? "cosine",
-      "yuvi.memory_vector_dimensions": runtimeEnvFiles.env["EMBEDDING_DIMENSIONS"] ?? "1536"
+      "yuvi.memory_vector_dimensions": String(embeddingProvider.dimensions)
     },
     logger: console
   });

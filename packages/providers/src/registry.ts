@@ -2437,7 +2437,7 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
         });
       }
       return vectors.map((vector) =>
-        transformLocalMrlEmbedding(this.name, this.dimensions, vector)
+        transformLocalMrlEmbedding(this.name, this.model, this.dimensions, vector)
       );
     } catch (error) {
       if (transport.source !== null) {
@@ -2459,8 +2459,11 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
   }
 }
 
+const QWEN3_EMBEDDING_MRL_MODEL = "Qwen3-Embedding-0.6B-Q8_0.gguf";
+
 function transformLocalMrlEmbedding(
   provider: string,
+  model: string | undefined,
   dimensions: number,
   vector: number[]
 ): number[] {
@@ -2468,7 +2471,7 @@ function transformLocalMrlEmbedding(
   // when the OpenAI-compatible request includes `dimensions`. Keep the MRL
   // transform at the existing local-provider boundary so Core and Memory see
   // only the configured production dimension.
-  if (provider !== "local" || dimensions !== 512) {
+  if (provider !== "local" || model !== QWEN3_EMBEDDING_MRL_MODEL || dimensions !== 512) {
     return vector;
   }
 
