@@ -2,27 +2,61 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-YUVI Runtime is a local-first, event-driven AI Companion Runtime inspired by Project AIRI architecture goals, without copying AIRI code.
+YUVI is a local-first, event-driven AI companion runtime. The runtime—not a particular avatar, UI, model vendor, or operating system wrapper—is the product core.
 
-This repository starts as a small runnable TypeScript monorepo:
+The repository is an original implementation inspired by the architectural ambition of projects such as AIRI. It is designed to support durable conversation and memory, provider-neutral reasoning and media capabilities, proactive behavior, avatar presentation, and a longer-term character/cognition architecture without coupling those concerns into one monolith.
 
-- `apps/server`: Fastify HTTP and WebSocket runtime server.
-- `packages/protocol`: event types and schemas.
-- `packages/event-bus`: event bus abstraction and in-memory implementation.
-- `packages/memory`: memory repository/service interfaces and MVP in-memory implementation.
-- `packages/prompt-builder`: dynamic prompt assembly.
-- `packages/providers`: provider interfaces, registry, normalized errors, and local echo provider for development.
-- `packages/core`: runtime orchestrator and agent loop boundary.
+## Current Baseline
 
-## Getting Started
+YUVI is **Linux-first** for active development and production validation.
 
-The recommended Windows development environment is Windows 11 with Docker Desktop.
-Linux/WSL development remains supported through the Bash scripts.
+The primary development path is native Linux with Node.js, pnpm, Docker Engine, and the Bash lifecycle scripts. Windows support remains in the repository, including PowerShell helpers and desktop-packaging work, but Windows-specific packaged infrastructure is not a prerequisite for product development.
 
-```powershell
+The current durable persistence boundary is intentionally simple:
+
+```text
+YUVI Runtime / Memory
+  -> repository ports
+  -> DATABASE_URL
+  -> PostgreSQL
+  -> packages/memory/migrations
+```
+
+PostgreSQL may be system-managed, externally managed, or provided by the development Docker Compose stack. Core runtime correctness does not depend on owning the PostgreSQL process.
+
+Already-proven reliability semantics remain part of the baseline, including finalized-turn lifecycle handling, durable ingestion state, semantic idempotency, crash recovery, retry/reconcile behavior, cancellation fencing, and fail-closed persistence boundaries where required.
+
+See [docs/p4-linux-first.md](docs/p4-linux-first.md) for the persistence/reliability rebaseline and [docs/future/README.md](docs/future/README.md) for the planned post-structural companion roadmap.
+
+## Repository Layout
+
+- `apps/server` — Fastify HTTP/WebSocket runtime server and composition root.
+- `apps/web` — React/Vite developer dashboard and current companion presentation surface.
+- `apps/desktop` — Tauri desktop shell and packaging integration work.
+- `packages/core` — runtime orchestration and semantic execution boundaries.
+- `packages/memory` — conversation persistence, long-term memory, finalized-ingestion reliability, PostgreSQL repositories, and migrations.
+- `packages/prompt-builder` — structured provider-neutral prompt construction.
+- `packages/providers` — provider contracts, routing, adapters, and normalized provider errors.
+- `packages/protocol` — runtime event contracts and schemas.
+- `packages/event-bus` — runtime event-bus abstraction; current runtime mode is in-memory.
+- `packages/config` — typed runtime configuration and redaction boundaries.
+- `packages/desktop-supervisor` — desktop/platform supervision code; not part of the Linux runtime correctness path.
+- `infra/docker-compose.yml` — development PostgreSQL + pgvector, Redis, and NATS services.
+
+## Quick Start — Linux
+
+Requirements:
+
+- Node.js 22+
+- pnpm 9+
+- Docker Engine + Docker Compose plugin when using development infrastructure
+
+From the repository root:
+
+```bash
 pnpm install
-Copy-Item .env.example .env
-.\scripts\dev.ps1
+cp .env.example .env
+./scripts/dev.sh
 ```
 
 Development URLs:
@@ -31,155 +65,149 @@ Development URLs:
 - Web UI: `http://localhost:5173`
 - WebSocket: `ws://localhost:6121/ws`
 
-Check and stop Windows development services:
-
-```powershell
-.\scripts\health.ps1
-.\scripts\stop.ps1
-```
-
-Bash/Linux:
+Check or stop the development runtime:
 
 ```bash
-pnpm install
-cp .env.example .env
-./scripts/dev.sh
 ./scripts/health.sh
 ./scripts/stop.sh
 ```
 
-See [docs/windows-development.md](docs/windows-development.md) for Windows setup, Docker Desktop,
-PowerShell 5.1 notes, and Deep Restart supervisor behavior.
-
-## Scripts
-
-- `./scripts/dev.sh`: WSL/Linux development entry point. Sets `YUVI_RUNTIME_ENV_DIR` to the repo root, loads `.env` plus `.env.local`, starts Docker infra, optionally auto-runs `pnpm db:migrate` for PostgreSQL memory, starts the server, and starts the web dashboard when present.
-- `./scripts/health.sh`: check Docker Compose status plus server and web health when started by `dev.sh`.
-- `./scripts/stop.sh`: stop development processes and Docker Compose services.
-- `.\scripts\dev.ps1`: Windows PowerShell development entry point. Uses Docker Desktop, loads root `.env`, shell environment, then root `.env.local`, starts server and web, and stores PID/log state under `%LOCALAPPDATA%\YUVI\Runtime`.
-- `.\scripts\stop.ps1`: stop Windows server and web process trees. Use `-Infra` to also stop Docker Compose services.
-- `.\scripts\health.ps1`: check Docker Engine, PostgreSQL, Redis, NATS, server `/health`, web, and PID files.
-- `scripts\start-dev.cmd`: Windows convenience wrapper that calls `scripts\dev.ps1`.
-- `pnpm dev`: run only the Fastify server in development mode. The server resolves runtime env files from `YUVI_RUNTIME_ENV_DIR` when set, otherwise it walks up to the workspace root and reads root `.env` plus `.env.local`.
-- `pnpm build`: build all workspace packages.
-- `pnpm check`: type-check all workspace packages.
-- `pnpm test`: run package tests where present.
-- `pnpm smoke`: build the repo and verify the runtime health, message, and memory endpoints in explicit mock/in-memory mode. Provider verification is the path for checking real remote APIs.
-- `pnpm db:migrate`: apply PostgreSQL memory migrations using merged root runtime env. Precedence is `.env`, process environment, then `.env.local`.
-- `pnpm db:reset:dev`: interactively delete development Docker volumes after a strong confirmation prompt.
-- `pnpm smoke:postgres`: apply migrations against the development Postgres container, then run the smoke test in `MEMORY_REPOSITORY=postgres` mode.
-- `pnpm memory:embed:backfill`: embed existing PostgreSQL memories with the configured embedding provider. Use `pnpm memory:embed:backfill -- --dry-run` first, and `--force` when intentionally re-embedding existing vectors.
-- `pnpm memory:index:status`: report safe pgvector/ANN index diagnostics.
-- `pnpm memory:maintenance`: mark expired memories, report stale episodic memories, and audit supersession state without hard delete.
-
-## Infrastructure
+For lightweight in-memory development without starting Docker infrastructure:
 
 ```bash
-docker compose -f infra/docker-compose.yml up -d
+SKIP_INFRA=1 ./scripts/dev.sh
 ```
 
-This starts PostgreSQL with pgvector, Redis, and NATS for future event bus work. It supports Docker
-Desktop on Windows and Docker Engine on Linux/WSL, binds service ports to `127.0.0.1` only, and uses
-named volumes rather than Windows bind mounts for database data.
+See [docs/quickstart.md](docs/quickstart.md) for the full development path.
 
-Development memory defaults to in-memory storage:
+## Durable PostgreSQL Mode
+
+The fastest development mode is in-memory:
 
 ```env
 MEMORY_REPOSITORY=in-memory
+CONVERSATION_REPOSITORY=in-memory
 ```
 
-To switch memory to PostgreSQL, set:
+For durable memory and conversation recovery:
 
 ```env
 MEMORY_REPOSITORY=postgres
+CONVERSATION_REPOSITORY=postgres
 DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 
-Then start infra and apply the migrations in `packages/memory/migrations` before using memory endpoints. `.env` is local sensitive state and must not be committed or printed.
+Start the development database and apply migrations:
 
 ```bash
+docker compose -f infra/docker-compose.yml up -d postgres
 pnpm db:migrate
 ```
 
-To verify Postgres memory mode against the development container:
+`./scripts/dev.sh` refuses to start durable PostgreSQL mode without `DATABASE_URL`. Unless `YUVI_AUTO_MIGRATE=0` is set, the development script also applies migrations before starting the runtime when PostgreSQL memory is active.
+
+Useful persistence checks:
 
 ```bash
-docker compose -f infra/docker-compose.yml up -d
-pnpm db:migrate
 pnpm smoke:postgres
+pnpm memory:index:status
+pnpm memory:maintenance
 ```
 
-Embeddings are optional but recommended for semantic memory search. DashScope `text-embedding-v4` can be used through OpenAI-compatible mode:
-
-```env
-EMBEDDING_PROVIDER=openai-compatible
-EMBEDDING_API_BASEURL=https://dashscope.aliyuncs.com/compatible-mode/v1
-EMBEDDING_API_KEY=<DashScope API key>
-EMBEDDING_MODEL=text-embedding-v4
-EMBEDDING_DIMENSIONS=1536
-```
-
-Mock embeddings are non-semantic and should be used only for tests, CI, or intentional offline mode. Existing PostgreSQL memories need backfill after enabling a real embedding provider:
+Existing memories can be embedded after a real embedding provider is configured:
 
 ```bash
 pnpm memory:embed:backfill -- --dry-run
 pnpm memory:embed:backfill
-pnpm memory:embed:backfill -- --force
 ```
 
-Dashboard **Verify Embedding** is explicit and may consume provider usage. Keyword, trigram, and full-text retrieval remain important for env vars, commands, paths, ports, provider names, model names, error messages, and tags. ANN vector indexing is optional acceleration only:
+## Providers
 
-```env
-MEMORY_VECTOR_INDEX_ENABLED=true
-MEMORY_VECTOR_INDEX_TYPE=hnsw
-MEMORY_VECTOR_DISTANCE=cosine
+Provider routing is configuration-driven. The repository currently supports provider boundaries for chat, reasoning, embeddings, TTS, STT, vision, proactive decisions, and assistant continuations.
+
+The normal runtime path is real-provider-first. Mock providers are for tests, CI, or intentional offline development and must be enabled explicitly where required.
+
+Provider-specific code belongs in `packages/providers`; `packages/core` should not depend directly on vendor SDK classes.
+
+See [docs/providers.md](docs/providers.md) for provider configuration and verification.
+
+## Runtime Semantics
+
+The main runtime path is roughly:
+
+```text
+input
+  -> Runtime admission / persistence
+  -> direct context + memory retrieval
+  -> prompt construction
+  -> provider execution
+  -> persisted assistant result
+  -> runtime events
+  -> optional presentation effects
 ```
 
-If HNSW/IVFFLAT is unavailable, retrieval still works without ANN acceleration. Check status with `pnpm memory:index:status` or the Dashboard memory status panel.
+Long-term memory is not raw chat history. Raw conversation persistence and semantic memory are separate concerns.
 
-Provider routing is priority-based. The default chain keeps DeepSeek first for chat/reasoning, then NVIDIA API, then a local OpenAI-compatible server, with mock only when explicitly enabled:
+The current proactive P6 path is also deliberately bounded: the proactive decision contract chooses `NO_OP` or `REQUEST_TEXT`; assistant-initiated continuation is assistant-only, non-replayable under the same active claim, and does not invent a synthetic user turn.
 
-```env
-CHAT_PROVIDER_CHAIN=deepseek,nvidia,local,mock
-REASONING_PROVIDER_CHAIN=deepseek,nvidia,local,mock
-EMBEDDING_PROVIDER_CHAIN=openai-compatible,nvidia,local,mock
-TTS_PROVIDER_CHAIN=xai,local,mock
-STT_PROVIDER_CHAIN=dashscope,local,mock
-VISION_PROVIDER_CHAIN=xai,nvidia,local,mock
-NVIDIA_API_BASEURL=https://integrate.api.nvidia.com/v1
-LOCAL_MODEL_BASEURL=http://localhost:11434/v1
-```
+Future identity/persona/relationship, continuity, character/cognition, capability, temporal, embodiment, and post-training work is documented under [docs/future](docs/future/README.md) and is not current runtime behavior unless implemented elsewhere in the repository.
 
-Fallback metadata is returned as safe attempted-provider summaries without API keys, Authorization headers, raw media, or database URLs. Developer media routes are available for STT, voice message, TTS, and vision:
+## Validation
 
-- `POST /v1/audio/transcriptions`
-- `POST /v1/voice/message`
-- `POST /v1/tts`
-- `POST /v1/vision/analyze`
-
-These wire provider-chain fallback into the runtime, but do not implement speaker diarization, voiceprint enrollment, Tauri, or production voice/vision UX.
-
-For development Deep Restart support from the Dashboard, run `./scripts/dev.sh` with:
-
-```env
-YUVI_DEV_SUPERVISOR=1
-YUVI_AUTO_MIGRATE=1
-```
-
-The Dashboard Settings page distinguishes **Apply Now** from **Deep Restart**. Apply Now reloads supported runtime config in-process and does not run migrations. Deep Restart is dev-only, requires the dashboard token when configured, reloads root env files on restart, and runs `pnpm db:migrate` automatically only when PostgreSQL memory is active and `YUVI_AUTO_MIGRATE` is not `0`.
-
-To reset development database volumes, prefer the guarded helper:
+Primary repository validation:
 
 ```bash
-pnpm db:reset:dev
+pnpm check
+pnpm test
+pnpm build
 ```
 
-This asks for an exact confirmation phrase and then deletes development database data.
-
-Advanced/manual reset:
+Useful smoke paths:
 
 ```bash
-docker compose -f infra/docker-compose.yml down -v
+pnpm smoke
+pnpm smoke:postgres
 ```
 
-If an old Docker volume was initialized with earlier `airi` or `companion` credentials, changing `infra/docker-compose.yml` will not update that existing volume. Run `pnpm db:reset:dev`, then `docker compose -f infra/docker-compose.yml up -d`, `pnpm db:migrate`, and `pnpm smoke:postgres` to recreate fresh development data with `yuvi / yuvi_dev_password / yuvi`.
+CI includes Linux persistence validation with PostgreSQL + pgvector. Windows validation remains useful for compatibility and packaging regressions, but Linux is the primary product-development and persistence-validation platform.
+
+## Common Scripts
+
+- `./scripts/dev.sh` — primary Linux development entry point; loads root `.env` and `.env.local`, optionally starts Docker infrastructure, runs PostgreSQL migrations when required, and starts server/web development processes.
+- `./scripts/health.sh` — reports development process and infrastructure health.
+- `./scripts/stop.sh` — stops Linux development processes and associated development infrastructure as configured.
+- `pnpm dev` — starts only the Fastify server package in development mode.
+- `pnpm check` — host-safety checks plus TypeScript validation.
+- `pnpm test` — workspace tests plus host-environment safety tests.
+- `pnpm build` — prepares Cubism assets and builds the TypeScript project graph.
+- `pnpm db:migrate` — applies PostgreSQL migrations.
+- `pnpm db:reset:dev` — guarded destructive reset of development volumes.
+
+## Windows
+
+Windows is a supported compatibility and packaging platform, not the primary development authority.
+
+PowerShell helpers remain available:
+
+```powershell
+.\scripts\dev.ps1
+.\scripts\health.ps1
+.\scripts\stop.ps1
+```
+
+Do not infer Linux runtime requirements from Windows packaging machinery. Platform-specific process ownership, installer provisioning, bundled PostgreSQL, ACL/Credential Manager integration, and similar concerns belong to the Windows packaging layer.
+
+See [docs/windows-development.md](docs/windows-development.md) for Windows-specific details.
+
+## Documentation
+
+- [Developer Quickstart](docs/quickstart.md)
+- [Architecture](docs/architecture.md)
+- [P4 Linux-first persistence baseline](docs/p4-linux-first.md)
+- [Memory](docs/memory.md)
+- [Providers](docs/providers.md)
+- [Testing](docs/testing.md)
+- [Dashboard](docs/dashboard.md)
+- [Future companion roadmap](docs/future/README.md)
+
+Secrets belong only in local configuration such as `.env` / `.env.local` or another secure configuration source. Do not commit or print API keys, authorization headers, tokens, passwords, or database credentials beyond development placeholders.

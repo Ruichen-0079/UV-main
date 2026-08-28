@@ -1,174 +1,223 @@
 # Architecture
 
+[English](architecture.md) | [简体中文](architecture.zh-CN.md)
+
 ## 项目目标
 
-YUVI Runtime 是一个本地优先、事件驱动的 AI 伴侣运行时。它受到 Project AIRI 架构愿景启发，但本仓库是原创实现，不复制 AIRI 代码。中文用词以[统一术语表](terminology.zh-CN.md)为准。
+YUVI Runtime 是一个本地优先、事件驱动的 AI 伴侣运行时。
 
-最终目标是一个面向 Windows、macOS、Linux 的一体化桌面应用。当前阶段先构建可运行、可调试、可扩展的 runtime 基础。
+核心产品是 Runtime 本身。Web、Desktop、Live2D/VRM、语音界面、游戏集成以及未来 Character Model，都应该消费同一套 Runtime 语义，而不是分别拥有自己的会话、记忆和执行逻辑。
 
-核心方向：
+本仓库是原创实现。架构目标不是搭一个庞大的通用 assistant framework，而是保留清晰、窄小、可验证的语义边界。
 
-- 运行时核心
-- 协议事件
-- 记忆子系统
-- 提示词构建器
-- 提供方抽象
-- 开发期 Web 控制台
-- 规划中的 Tauri 桌面模式
-- future Live2D / VRM / voice / vision integration
+中文术语以 [统一术语表](terminology.zh-CN.md) 为准。
 
-## 当前开发环境
+## 当前平台基线
 
-当前推荐使用：
+YUVI 当前采用 **Linux-first**。
 
-- Windows LTSC host
-- WSL2 Ubuntu
-- Docker Engine inside WSL
-- Node.js / pnpm inside WSL
+原生 Linux 是主要开发平台，也是当前生产行为、持久化和可靠性验证的主要平台。主路径使用 Node.js、pnpm、Bash lifecycle scripts，并在需要 durable state 时接 PostgreSQL。
 
-推荐仓库路径：
+Windows 继续作为兼容与 packaging 平台存在，但 Windows 专用的进程 ownership、installer provisioning、bundled PostgreSQL、ACL/Credential Manager 等不属于 Runtime correctness requirement。
+
+P4 当前主要 durable boundary：
 
 ```text
-~/uv-main
+Runtime / Memory
+  -> repository ports
+  -> DATABASE_URL
+  -> PostgreSQL
+  -> YUVI migrations
 ```
 
-Windows 原路径参考：
+PostgreSQL 可以来自外部实例、系统服务或容器。Runtime Core 不需要拥有数据库进程。
 
-```text
-C:\Users\Administrator.DESKTOP-NPU6DHJ\Desktop\uv-main
-```
-
-开发期使用 WSL2 + Docker Engine 的原因：
-
-- Windows LTSC 上 Docker Desktop 可能不可用或不稳定。
-- WSL filesystem 中安装依赖和运行 watcher 通常更快。
-- Node.js、pnpm、Docker、docker compose 可以统一在 Ubuntu 中运行。
-- Windows PowerShell execution policy 不会影响 WSL 内 pnpm。
-- 规划中的桌面模式必须与开发基础设施解耦。
+持久化重基线见 [p4-linux-first.md](p4-linux-first.md)。
 
 ## 核心原则
 
-运行时是核心产品。虚拟形象、Web 控制台、终端客户端和规划中的桌面外壳都应通过同一个运行时通信。
+### Runtime 拥有执行语义
 
-`packages/core` 只依赖接口，不直接 import DeepSeek、xAI、Alibaba concrete class。provider-specific 代码属于 `packages/providers`。
+`packages/core` 负责 Runtime 编排：admission、lifecycle、provider execution、cancellation fencing、persistence ordering、finalized-turn coordination 和 authoritative runtime event publication。
 
-记忆不是把原始聊天日志直接塞进 prompt。记忆必须被检索、排序、压缩、重构，然后再注入 prompt。
+它不应该变成 vendor SDK layer、操作系统 supervisor 或 presentation engine。
 
-所有主要输入/输出都应该表示为 runtime event。
+### 持久化与呈现分离
 
-事件语义中，`agent.reply` 是运行时编排器产生的内部回复，`assistant.message` 是最终向用户发布的文本消息。主对话流当前产生 `agent.reply`；面向最终发布语义的传输层或消费者应使用或转换为 `assistant.message`。两者不是可随意互换的同义事件。
+原始会话持久化、semantic long-term memory 和可见 presentation 是三个不同职责。
 
-HTTP 和 WebSocket handler 应保持轻薄，业务逻辑属于 `packages/core` 或 service。
+一个 assistant effect 在被 presentation 当作权威结果前，必须先满足当前路径要求的 persistence / lifecycle semantics。
 
-## 数据流
+### Memory 是证据，不是原始聊天日志
+
+`packages/memory` 拥有 durable memory record、retrieval/ranking、memory validity/status、Conversation Repository、finalized-ingestion persistence 和 PostgreSQL migration。
+
+原始 conversation message 不会自动成为长期 semantic memory。
+
+### Provider 可替换
+
+厂商专用网络请求和 response handling 属于 `packages/providers`。
+
+Runtime Core 只消费 provider-neutral contract，不直接 import DeepSeek、xAI、Alibaba/DashScope 等厂商 client concrete class。
+
+### Presentation 负责呈现结果，不拥有 Runtime truth
+
+Web、Desktop、speech、avatar、gaze 和未来 embodied behavior 负责渲染或汇报已被 admission 的 effect。它们不单独拥有 persistence、relationship truth 或 capability admission authority。
+
+## 主 Runtime 数据流
+
+普通用户回合概念上是：
 
 ```text
 User input
-  -> runtime event
-  -> memory retrieval
-  -> prompt builder
-  -> provider interface
-  -> agent.reply event
-  -> optional TTS / avatar output
+  -> Runtime admission
+  -> conversation persistence
+  -> Direct Context + Memory retrieval
+  -> PromptBuilder
+  -> provider execution
+  -> assistant persistence/finalization
+  -> runtime events
+  -> optional presentation effects
 ```
 
-语音和视觉也进入事件模型：
+可选 TTS、avatar rendering 等 presentation side effect，不应该反过来让已经按 Runtime contract finalized 的 assistant reply 失效。
+
+## 当前 P6 主动行为边界
+
+当前 proactive path 有意保持很窄。
+
+`ProactiveDecisionProvider` 是当前 proactive text decision 的语义 authority：
 
 ```text
-Audio input
-  -> Alibaba Cloud DashScope STT
-  -> user.voice.transcript
-  -> normal reply flow
-
-Image or screen input
-  -> xAI Vision
-  -> perception.vision
-  -> runtime context
+NO_OP | REQUEST_TEXT
 ```
+
+- `NO_OP` 不产生 assistant text effect。
+- `REQUEST_TEXT` 才允许进入 assistant-only continuation。
+- assistant-initiated continuation 不制造 synthetic user event 或 user conversation row。
+- proactive output 不因为是主动生成就获得 semantic Memory-write authority。
+- active/retained idempotency claim 防止不安全 replay。
+- cancellation 和 stale async result 在 persistence/publication 前被 fencing。
+
+如果未来 Character / Continuity 扩展为更广泛的 proactive authority，必须通过明确的 atomic migration 替换当前 authority；同一个 effect 不能同时由两个 proactive decision owner 决定。
 
 ## 包职责
 
 ### `apps/server`
 
-Fastify HTTP/WebSocket runtime server。负责 route、transport、health、startup/shutdown。Handler 应保持轻薄。
-
-当前 Web 控制台需要的主要 API 端点：
-
-- `GET /health`
-- `GET /providers/status`
-- `POST /v1/messages`（版本化端点）
-- `POST /message`（兼容端点）
-- `GET /memory/recent`
-- `POST /memory`
-- `GET /memory/search?q=`
-- `GET /events/recent`
-- `GET /debug/prompt/latest`
-- `GET /ws`
+Fastify composition root 与 HTTP/WebSocket transport。负责 process startup/shutdown、route wiring、configuration composition、health surface 和 dependency construction。Handler 应保持轻薄。
 
 ### `apps/web`
 
-Vite + React + TypeScript + Tailwind CSS 开发期 Web 控制台。它用于调试运行时，不是 Live2D 用户界面。
+开发控制台与当前 Companion presentation surface。它消费 Runtime/server contract，不应在 UI state 中复制 Runtime 语义。
 
-### `packages/protocol`
+### `apps/desktop`
 
-共享 runtime event 类型和 schema。所有主要 I/O 都应该通过事件表达。
-
-### `packages/event-bus`
-
-事件总线抽象。MVP 使用内存实现，未来可在同一接口背后接入 NATS / JetStream。
-
-### `packages/memory`
-
-记忆与会话持久化仓储以及记忆服务。长期记忆使用 PostgreSQL + pgvector 或内存回退实现；原始会话消息使用独立的 Conversation Repository。In-Memory 会话仓储只能在同一进程内重建 Runtime 时恢复上下文，PostgreSQL 才支持进程重启后的恢复。Core 只依赖 Conversation Repository 端口，由 Server 创建并注入具体实现；会话原始消息不等同于长期记忆。
-
-### `packages/prompt-builder`
-
-把系统身份、角色风格、关系上下文、相关记忆、当前情境、可用工具和用户消息组装为提供方中立的提示词。
-
-### `packages/config`
-
-typed runtime configuration boundary。负责 env parsing、provider selection、validation、redaction helper。它不实例化 provider client。
-
-### `packages/providers`
-
-提供方接口、注册表、标准化错误和厂商专用实现。DeepSeek、xAI、DashScope 的具体请求/响应处理都属于这里。
+Tauri desktop shell 与 platform packaging integration。Desktop packaging concern 应位于产品行为和 Runtime correctness 的下游。
 
 ### `packages/core`
 
-运行时编排。负责接收事件、检索记忆、构建提示词、调用提供方接口、写入重要交互和发布运行时事件。
+Runtime 编排与 semantic execution boundary。
 
-## Provider Mapping
+主要职责：
 
-默认 provider：
+- 用户/assistant turn orchestration；
+- 通过 interface 执行 provider；
+- cancellation 与 lifecycle fencing；
+- conversation/persistence ordering；
+- finalized-turn memory ingestion coordination；
+- proactive assistant-only Runtime execution；
+- authoritative runtime event publication。
 
-- Chat: DeepSeek API
-- Reasoning: DeepSeek API
-- TTS: xAI
-- Vision: xAI
-- STT: Alibaba Cloud DashScope
-- Embedding: configurable
+### `packages/memory`
 
-密钥只应存在于本地 `.env` 或安全配置来源中，不应出现在日志、控制台、事件负载或错误响应中。
+Persistence 与 Memory authority。
 
-## 开发与生产模式
+主要职责：
 
-development mode 可以依赖：
+- Conversation Repository implementation；
+- long-term memory record 与 retrieval；
+- Memory provider/backend boundary；
+- finalized-ingestion durable parent/child state；
+- retry/reconcile persistence primitive；
+- PostgreSQL repository 与 migration；
+- memory expiry/validity/status semantics。
 
-- WSL2
-- Docker Engine
-- Node.js
-- pnpm
-- PostgreSQL + pgvector
-- Redis
-- NATS
+### `packages/prompt-builder`
 
-规划中的桌面模式不得要求用户安装这些开发依赖。其本地存储应转向嵌入式本地存储，例如 SQLite + 向量扩展或 LanceDB。
+把上游已经授权的输入组装为结构化、provider-neutral prompt context。
 
-## MVP 非目标
+它不拥有 persistence、relationship truth、provider routing 或 execution lifecycle。
 
-- 不实现完整 Live2D。
-- 不实现复杂自主行为。
-- 不实现多角色系统。
-- 不做重型微服务拆分。
+### `packages/providers`
 
-MVP 应保持小、可运行、可测试、易扩展。
+Provider interface、registry/routing、vendor adapter、normalized provider error 和厂商专用 transport behavior。
+
+### `packages/protocol`
+
+共享 Runtime event contract 与 schema。
+
+### `packages/event-bus`
+
+Runtime event-bus 抽象。当前已经实现的运行模式是 in-memory；未来 transport implementation 必须保留 event semantics，而不是重新定义它们。
+
+### `packages/config`
+
+类型化配置 parsing、selection boundary、validation 与 secret redaction helper。
+
+### `packages/desktop-supervisor`
+
+Desktop/platform supervision 与 packaging substrate。它不能成为 Linux Runtime persistence correctness 的必需依赖。
+
+## 可靠性基线
+
+以下内容是已经证明的 reliability asset，不是结构重构时应删掉或削弱的对象：
+
+- finalized-turn lifecycle 与 sealing/draining；
+- durable finalized-ingestion ledger；
+- semantic idempotency；
+- crash/restart recovery；
+- retry 与 exact reconciliation；
+- ambiguous external side effect protection；
+- 正确的 fail-closed persistence/memory boundary；
+- cancellation 与 stale-effect fencing。
+
+结构重构可以移动代码或测试，但不能改变这些语义。
+
+## 开发基础设施
+
+`infra/docker-compose.yml` 提供 PostgreSQL + pgvector、Redis、NATS 等开发服务。
+
+这些是 development infrastructure，不代表最终产品必须以 containerized microservice stack 形式交付。
+
+PostgreSQL 是当前主要 durable persistence implementation。Redis/NATS 或未来 event infrastructure 都应留在明确 interface 后面，不能仅为了“架构更完整”而提前引入额外 abstraction。
+
+## Future Architecture
+
+结构收口后的 Companion roadmap 位于 [future/README.md](future/README.md)。
+
+它把未来职责拆成：
+
+- P8 identity/persona/relationship interpretation；
+- temporal substrate；
+- continuity and attention；
+- Character Model behavior；
+- Cognition complex reliable reasoning；
+- thin Character Harness；
+- capability/MCP boundary；
+- embodied presentation；
+- Character post-training。
+
+这些文档描述 planned contract。它们不是提前创建新 Manager、Engine、generic agent graph 或 duplicate authority 的许可；只有进入对应 product phase 后才实现。
+
+## 非目标
+
+- 不为了形式做重型微服务拆分。
+- 不为同一个 semantic decision 创建第二个 owner。
+- 不把 platform-packaging machinery 塞进 Runtime Core。
+- 不让 Core 直接耦合 raw provider SDK。
+- 不把 raw chat log 当作 authoritative long-term memory。
+- 不把随机 avatar motion 伪装成 autonomous agency。
+- 当 narrow domain seam 足够时，不创建 broad generic framework。
+
+架构应保持 explicit、testable、reversible，并且足够小，让下一步设计由产品行为推动，而不是由基础设施推动。

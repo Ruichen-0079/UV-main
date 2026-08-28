@@ -1,147 +1,86 @@
 # Developer Quickstart
 
-This guide gets the MVP runtime running locally with Windows PowerShell or WSL/Linux scripts, Docker development infra, in-memory memory by default, and mock optional providers when real keys are not configured.
+[English](quickstart.md) | [简体中文](quickstart.zh-CN.md)
+
+This guide describes the current **Linux-first** development path for YUVI Runtime.
+
+Linux is the primary development and persistence-validation platform. Windows PowerShell helpers remain supported for compatibility, but WSL/Windows-specific infrastructure is no longer the authority for normal product development.
 
 ## 1. Prerequisites
 
-- Node.js 22 or newer
-- pnpm 9 or newer
-- Docker Desktop on Windows, or Docker Engine on Linux/WSL
-- Docker development infra through `infra/docker-compose.yml`, with ports bound to `127.0.0.1` only
+Required:
 
-Check local tools:
+- Node.js 22+
+- pnpm 9+
+- Git
+
+For PostgreSQL-backed development:
+
+- Docker Engine
+- Docker Compose plugin
+
+Check the local toolchain:
 
 ```bash
 node --version
 pnpm --version
+git --version
 docker --version
 docker compose version
 ```
 
-On Windows PowerShell, use `pnpm.cmd` if `pnpm` is blocked by execution policy. The recommended Windows checkout path is `C:\Dev\UV-main`.
+Docker is optional when working entirely in in-memory mode.
 
-## 2. Environment Setup
+## 2. Clone and install
 
-Copy the example env file:
+From a normal Linux filesystem checkout:
+
+```bash
+git clone https://github.com/Ruichen-0079/UV-main.git
+cd UV-main
+pnpm install
+```
+
+Copy the environment template:
 
 ```bash
 cp .env.example .env
 ```
 
-PowerShell:
+`.env` and `.env.local` are local sensitive state. Do not commit or print real API keys, authorization headers, tokens, passwords, or private database URLs.
 
-```powershell
-Copy-Item .env.example .env
+Runtime env precedence is:
+
+```text
+.env
+-> process environment
+-> .env.local
 ```
 
-Development defaults to in-memory memory:
+The development scripts load the root runtime env automatically.
+
+## 3. Choose persistence mode
+
+### Lightweight in-memory mode
+
+For fast UI/runtime development:
 
 ```env
 MEMORY_REPOSITORY=in-memory
-# Optional. If unset, conversation persistence uses MEMORY_REPOSITORY.
 CONVERSATION_REPOSITORY=in-memory
-MEMORY_EXTRACTOR=llm
-EVENT_BUS=in-memory
-DIRECT_CONTEXT_ENABLED=true
-DIRECT_CONTEXT_MAX_TURNS=6
-DIRECT_CONTEXT_MAX_CHARS=6000
 ```
 
-`EVENT_BUS=in-memory` is the only implemented event bus runtime mode today. `EVENT_BUS=nats` is a reserved future boundary and will fail clearly until NATS integration is implemented.
-
-`MEMORY_EXTRACTOR=llm` is the default and uses DeepSeek Reasoning to propose memory candidates when configured. It consumes reasoning tokens only on turns where `writeMemory=true`, and candidates are still validated/scored by `MemoryService` before storage. If DeepSeek Reasoning is not configured, YUVI falls back safely to `rule-based`. Use `MEMORY_EXTRACTOR=rule-based` for deterministic no-token extraction.
-
-Direct Context is enabled by default. It injects bounded recent same-session turns into a separate `<DirectContext>` prompt section for conversational continuity. It is not long-term memory and is trimmed by `DIRECT_CONTEXT_MAX_TURNS` and `DIRECT_CONTEXT_MAX_CHARS`.
-
-Conversation persistence stores raw user and assistant messages separately from long-term memory. `CONVERSATION_REPOSITORY` accepts `in-memory`, `memory`, or `postgres`; when it is unset, `MEMORY_REPOSITORY` is used (`memory` and `in-memory` both normalize to the in-memory store). The in-memory store can restore context when a Runtime instance is rebuilt in the same process, but it cannot recover after a process restart. Use PostgreSQL for durable conversation recovery across restarts.
-
-Fill DeepSeek values when you want real provider calls:
-
-```env
-DEEPSEEK_API_BASEURL=https://api.deepseek.com
-DEEPSEEK_API_KEY=replace-with-your-key
-DEEPSEEK_CHAT_MODEL=replace-with-chat-model
-DEEPSEEK_REASONING_MODEL=replace-with-reasoning-model
-```
-
-Optional xAI values for TTS and Vision:
-
-```env
-XAI_API_BASEURL=https://api.x.ai/v1
-XAI_API_KEY=replace-with-your-key
-XAI_TTS_MODEL=replace-with-tts-model
-XAI_TTS_VOICE=replace-with-voice
-XAI_VISION_MODEL=replace-with-vision-model
-```
-
-Optional Alibaba DashScope values for STT:
-
-```env
-DASHSCOPE_API_BASEURL=https://dashscope.aliyuncs.com/api/v1
-DASHSCOPE_API_KEY=replace-with-your-key
-DASHSCOPE_STT_MODEL=replace-with-stt-model
-```
-
-Optional local Dashboard/API development guard:
-
-```env
-DASHBOARD_DEV_TOKEN=replace-with-local-dev-token
-```
-
-When set, sensitive development endpoints such as runtime settings updates and provider verification require the `X-YUVI-Dev-Token` header. The token is never returned by the API and should not be logged.
-
-Normal development/runtime is real-provider-first. Use explicit mock mode only for CI, tests, or intentional offline work:
-
-```env
-NODE_ENV=development
-PROVIDER_ALLOW_MOCKS=true
-DEFAULT_EMBEDDING_PROVIDER=mock
-```
-
-Keep `SERVER_HOST=127.0.0.1` for local development. If you intentionally set `SERVER_HOST=0.0.0.0`, the server prints a warning because the development API may be reachable from the local network.
-
-Runtime env files are loaded from the workspace root as `.env`, then the current process environment, then `.env.local`. `apps/server/.env.local` is a legacy path and is not loaded.
-
-`./scripts/dev.sh` and `.\scripts\dev.ps1` load env automatically and do not print secret values. If you start the server without the scripts, load `.env` into your shell first.
-
-Bash or WSL:
+Run without Docker infrastructure:
 
 ```bash
-set -a
-source .env
-set +a
+SKIP_INFRA=1 ./scripts/dev.sh
 ```
 
-PowerShell:
+In-memory conversation state survives rebuilding a Runtime instance only while the process remains alive. It is not restart-durable.
 
-```powershell
-Get-Content .env |
-  Where-Object { $_ -match '^\s*[^#][^=]+=' } |
-  ForEach-Object {
-    $name, $value = $_ -split '=', 2
-    Set-Item -Path "Env:$name" -Value $value
-  }
-```
+### Durable PostgreSQL mode
 
-## 3. Start Infrastructure
-
-From the repo root:
-
-```bash
-docker compose -f infra/docker-compose.yml up -d
-```
-
-Check containers:
-
-```bash
-docker compose -f infra/docker-compose.yml ps
-```
-
-This starts PostgreSQL with pgvector, Redis, and NATS with JetStream enabled.
-
-## 4. Optional PostgreSQL Memory Mode
-
-The development default is in-memory memory. To switch to PostgreSQL memory, set:
+For durable memory and conversation recovery:
 
 ```env
 MEMORY_REPOSITORY=postgres
@@ -149,365 +88,187 @@ CONVERSATION_REPOSITORY=postgres
 DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
 ```
 
-Then apply the SQL migration:
+Start the development PostgreSQL service:
 
-Bash or WSL:
+```bash
+docker compose -f infra/docker-compose.yml up -d postgres
+```
+
+Apply migrations:
 
 ```bash
 pnpm db:migrate
 ```
 
-Migrations enable Postgres Search v2 and optional pgvector retrieval for long-term memory: `pg_trgm` trigram indexes, structured filters, tag/metadata indexes, a built-in full-text index, embedding metadata columns, and pgvector storage. In-memory mode remains simpler and resets on restart; Postgres mode persists memory and improves retrieval for mixed Chinese/English text, commands, paths, URLs, ports, env keys, provider names, and semantic matches.
+The normal durable architecture is:
 
-Embeddings are optional. Real-provider-first configuration uses:
-
-```env
-EMBEDDING_PROVIDER=openai-compatible
-EMBEDDING_DIMENSIONS=1536
+```text
+YUVI Runtime / Memory
+  -> repository ports
+  -> DATABASE_URL
+  -> PostgreSQL
+  -> packages/memory/migrations
 ```
 
-Mock embeddings remain available for explicit offline/test mode with `PROVIDER_ALLOW_MOCKS=true` and `EMBEDDING_PROVIDER=mock`; they report `semanticEmbedding=false` because they do not provide real semantic similarity. Real OpenAI-compatible embeddings may consume provider tokens. Keyword/trigram/full-text search remains important for exact technical queries, so paths, ports, commands, env vars, provider names, and error messages can still outrank vague vector matches. Existing Postgres memories can be embedded after migrations:
+PostgreSQL can be system-managed, externally managed, or container-managed. YUVI Core does not require ownership of the PostgreSQL process.
 
-```bash
-pnpm memory:embed:backfill
-```
+`./scripts/dev.sh` fails closed when PostgreSQL memory is selected without `DATABASE_URL`. Unless `YUVI_AUTO_MIGRATE=0` is set, it also runs migrations before starting the runtime in PostgreSQL mode.
 
-Verify the memory table exists:
+See [p4-linux-first.md](p4-linux-first.md) for the current persistence/reliability baseline.
 
-```bash
-docker compose -f infra/docker-compose.yml exec postgres \
-  psql -U yuvi -d yuvi -c "\dt"
-```
+## 4. Configure providers
 
-Run a Postgres-backed smoke test:
+Normal development is real-provider-first. Configure only the capabilities you need in `.env` / `.env.local`.
 
-```bash
-pnpm smoke:postgres
-```
+Current provider boundaries include:
 
-Reset development database volumes only when you intentionally want to delete local development data. Prefer the guarded helper:
+- chat
+- reasoning
+- embeddings
+- TTS
+- STT
+- vision
+- proactive decision
+- assistant continuation
 
-```bash
-pnpm db:reset:dev
-```
+Mock providers are for tests, CI, or intentional offline development and should be enabled explicitly when needed.
 
-Warning: this deletes the development PostgreSQL data volume.
+Provider-specific implementation belongs in `packages/providers`; Runtime Core consumes provider-neutral interfaces.
 
-Advanced/manual reset:
+See [providers.md](providers.md) for the current variables, routing, verification behavior, and provider-specific notes.
 
-```bash
-docker compose -f infra/docker-compose.yml down -v
-```
+## 5. Start development
 
-Changing `POSTGRES_USER` or `POSTGRES_PASSWORD` in `infra/docker-compose.yml` only affects a brand-new database volume. Existing Postgres volumes keep the role and password they were initialized with.
-
-## 5. Start Development Services
-
-Install dependencies if needed:
-
-```bash
-pnpm install
-```
-
-Start the server and web dashboard on Windows:
-
-```powershell
-.\scripts\dev.ps1
-```
-
-Start the server and web dashboard on Bash/Linux:
+Primary Linux entry point:
 
 ```bash
 ./scripts/dev.sh
 ```
 
-For lightweight in-memory development without starting Docker infrastructure:
+The script:
 
-```bash
-SKIP_INFRA=1 ./scripts/dev.sh
-```
-
-The web dashboard binds to `127.0.0.1` by default. Set `YUVI_WEB_HOST=0.0.0.0` only when you intentionally expose it on the LAN.
-
-Windows `.cmd` wrapper:
-
-```cmd
-scripts\start-dev.cmd
-```
+- sets the repository as `YUVI_RUNTIME_ENV_DIR`;
+- loads `.env` and `.env.local` without printing secrets;
+- installs dependencies when needed;
+- starts Docker development infrastructure unless `SKIP_INFRA=1`;
+- validates durable PostgreSQL configuration;
+- runs migrations when required;
+- starts the server and web development processes.
 
 Development URLs:
 
 ```text
-Server: http://localhost:6121
-Web UI: http://localhost:5173
+Server:    http://localhost:6121
+Web UI:    http://localhost:5173
 WebSocket: ws://localhost:6121/ws
 ```
 
-Check or stop services:
+Check health:
 
 ```bash
 ./scripts/health.sh
+```
+
+Stop the development environment:
+
+```bash
 ./scripts/stop.sh
 ```
 
-PowerShell:
+`pnpm dev` is a narrower command: it starts only the Fastify server package in development mode.
 
-```powershell
-.\scripts\health.ps1
-.\scripts\stop.ps1
-```
+## 6. Basic runtime checks
 
-## 6. Test Health Endpoint
+Health:
 
 ```bash
 curl http://127.0.0.1:6121/health
 ```
 
-Expected shape:
-
-```json
-{
-  "ok": true
-}
-```
-
-`ok` depends on server, database, and chat provider status. Optional providers can report `unavailable`.
-
-## 7. Test Message Endpoint
+Send a normal message through the compatibility endpoint:
 
 ```bash
 curl -X POST http://127.0.0.1:6121/message \
-  -H "content-type: application/json" \
-  -d '{"sessionId":"dev","text":"Hello companion runtime","options":{"useMemory":true,"voiceOutput":false}}'
+  -H 'content-type: application/json' \
+  -d '{"sessionId":"dev","text":"Hello YUVI","options":{"useMemory":true,"voiceOutput":false}}'
 ```
 
-PowerShell:
+The versioned runtime endpoints remain authoritative where both compatibility and versioned routes exist. Use the Dashboard or current API docs/source when testing newer behavior.
 
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:6121/message `
-  -ContentType "application/json" `
-  -Body '{"sessionId":"dev","text":"Hello companion runtime","options":{"useMemory":true,"voiceOutput":false}}'
-```
+## 7. Validate the repository
 
-With mocks enabled, the reply starts with `Mock reply:` when real provider keys are unavailable.
-
-For the versioned Runtime text stream, use `POST /v1/messages/stream` with the same JSON body
-(`sessionId`, `content` or `text`, and the existing memory options). Read the response with
-`fetch()` and consume the `text/event-stream` body one frame at a time. Browser `EventSource`
-cannot send a JSON body with `POST`, so it is not the client for this endpoint. The existing
-`POST /message` and `POST /v1/messages` endpoints remain non-streaming compatibility APIs.
-
-## 8. Test Memory Endpoint
-
-Create a memory:
+Before opening or reviewing a PR:
 
 ```bash
-curl -X POST http://127.0.0.1:6121/memory \
-  -H "content-type: application/json" \
-  -d '{"type":"semantic","content":"The developer is testing the quickstart.","source":"quickstart","tags":["dev"]}'
+pnpm check
+pnpm test
+pnpm build
 ```
 
-Read recent memories:
-
-```bash
-curl "http://127.0.0.1:6121/memory/recent?limit=5"
-```
-
-Search memory:
-
-```bash
-curl "http://127.0.0.1:6121/memory/search?q=developer&limit=5"
-```
-
-For Unicode queries, prefer URL encoding or the JSON POST endpoint:
-
-```bash
-curl -G "http://127.0.0.1:6121/memory/search" --data-urlencode "q=模型供应商偏好"
-curl -X POST "http://127.0.0.1:6121/memory/search" \
-  -H "content-type: application/json" \
-  -d '{"q":"模型供应商偏好","limit":10}'
-```
-
-PowerShell:
-
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:6121/memory `
-  -ContentType "application/json" `
-  -Body '{"type":"semantic","content":"The developer is testing the quickstart.","source":"quickstart","tags":["dev"]}'
-
-Invoke-RestMethod "http://127.0.0.1:6121/memory/recent?limit=5"
-```
-
-## 9. Smoke Test
+Standard smoke test:
 
 ```bash
 pnpm smoke
 ```
 
-The smoke script builds the repo, starts the built server in explicit mock/in-memory mode (`PROVIDER_ALLOW_MOCKS=true`, `EMBEDDING_PROVIDER=mock`), and verifies `GET /health`, `POST /message`, `POST /memory`, `GET /memory/recent`, `GET /memory/search?q=...`, and `POST /memory/search`.
-
-For PostgreSQL memory mode, start Docker infra and run:
+PostgreSQL-backed smoke:
 
 ```bash
 pnpm smoke:postgres
 ```
 
-## 10. Common Errors
-
-### Missing API Key
-
-Symptoms:
-
-- `MISSING_API_KEY`
-- startup or health check says provider config is incomplete
-
-Fix:
-
-```env
-DEEPSEEK_API_KEY=your-real-key
-PROVIDER_ALLOW_MOCKS=true
-```
-
-Use mocks for development, or provide real keys for production-like runs.
-
-### Database Connection Failed
-
-Symptoms:
-
-- `/health` reports database unhealthy
-- server logs connection errors
-
-Fix:
+Useful memory maintenance commands:
 
 ```bash
-docker compose -f infra/docker-compose.yml ps
-docker compose -f infra/docker-compose.yml up -d postgres
+pnpm memory:index:status
+pnpm memory:maintenance
+pnpm memory:embed:backfill -- --dry-run
 ```
 
-Confirm `DATABASE_URL` matches:
+The dedicated Linux persistence CI path provisions PostgreSQL + pgvector and validates migrations, focused memory/core/server behavior, migration re-entry, and a PostgreSQL-backed runtime smoke.
 
-```env
-DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
-```
+## 8. Development database reset
 
-### Role "yuvi" Does Not Exist
-
-Symptoms:
-
-- `Role "yuvi" does not exist`
-- `password authentication failed for user "yuvi"`
-- `pnpm db:migrate` fails even though `infra/docker-compose.yml` contains `POSTGRES_USER=yuvi`
-
-Cause:
-
-PostgreSQL initializes roles only when the Docker data volume is created. If the existing volume was created by an older compose file, it may still contain previous `airi/airi_dev_password` or `companion/companion` credentials. Changing `POSTGRES_USER` later does not rewrite an existing volume.
-
-Option A, reset development data and recreate the volume with current credentials:
+Use the guarded reset helper only when local development data may be destroyed:
 
 ```bash
 pnpm db:reset:dev
-docker compose -f infra/docker-compose.yml up -d
-pnpm db:migrate
 ```
 
-Warning: resetting volumes deletes development database data.
+This is destructive.
 
-Option B, keep using the old local volume credentials by setting `DATABASE_URL` to the exact
-user, password, and database name that originally initialized your local Docker volume.
-
-Older local volumes may have used `companion/companion` or `airi/airi_dev_password`, but those are
-not current defaults. Fresh development environments should use:
-
-```env
-DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
-```
-
-Option C, manually create the current role inside the existing development database:
+Manual Docker-volume removal is an advanced fallback:
 
 ```bash
-docker exec -it companion-postgres psql -U companion -d companion
+docker compose -f infra/docker-compose.yml down -v
 ```
 
-Then run SQL equivalent to:
+Changing PostgreSQL usernames or passwords in Compose does not rewrite an existing initialized volume.
 
-```sql
-create role yuvi with login password 'yuvi_dev_password';
-create database yuvi owner yuvi;
-grant all privileges on database yuvi to yuvi;
-grant all privileges on all tables in schema public to yuvi;
-grant all privileges on all sequences in schema public to yuvi;
+## 9. Windows compatibility
+
+Windows is supported, but it is no longer the primary development baseline.
+
+PowerShell helpers remain available:
+
+```powershell
+.\scripts\dev.ps1
+.\scripts\health.ps1
+.\scripts\stop.ps1
 ```
 
-### Provider Unavailable
+Windows-specific installer, process-ownership, bundled-database, ACL, and packaging concerns belong to the Windows platform layer and must not become prerequisites for Linux Runtime correctness.
 
-Symptoms:
+See [windows-development.md](windows-development.md) for platform-specific details.
 
-- optional TTS, STT, Vision, or Embedding health is `unavailable`
-- `PROVIDER_UNAVAILABLE`
+## 10. Where to read next
 
-Fix:
+- [Architecture](architecture.md)
+- [P4 Linux-first persistence baseline](p4-linux-first.md)
+- [Memory](memory.md)
+- [Providers](providers.md)
+- [Testing](testing.md)
+- [Dashboard](dashboard.md)
+- [Future companion roadmap](future/README.md)
 
-- For optional providers, this is acceptable in MVP development.
-- Fill the provider-specific API key and model variables when you need real calls.
-- Use `PROVIDER_ALLOW_MOCKS=true` only for explicit test/CI/offline mock mode.
-
-### Model Not Found
-
-Symptoms:
-
-- `MODEL_NOT_FOUND`
-
-Fix:
-
-Check model env vars:
-
-```env
-DEEPSEEK_CHAT_MODEL=...
-DEEPSEEK_REASONING_MODEL=...
-XAI_TTS_MODEL=...
-XAI_VISION_MODEL=...
-DASHSCOPE_STT_MODEL=...
-```
-
-Do not hardcode model names in source files.
-
-### Invalid Key
-
-Symptoms:
-
-- `INVALID_API_KEY`
-- HTTP 401 from provider
-
-Fix:
-
-- Recheck the key value in `.env`.
-- Make sure the shell was reloaded after editing `.env`.
-- Confirm the key belongs to the provider configured by `DEFAULT_*_PROVIDER`.
-
-### Docker Not Running
-
-Symptoms:
-
-- `Cannot connect to the Docker daemon`
-- compose commands fail
-
-Fix:
-
-Start Docker Desktop, or start Docker Engine inside WSL2:
-
-```bash
-sudo service docker start
-docker ps
-```
-
-## 10. Notes For Windows LTSC Users
-
-- Prefer WSL2 + Ubuntu + Docker Engine.
-- Avoid relying on Docker Desktop if your Windows LTSC version is unsupported.
-- Keep project files inside the WSL filesystem, for example `~/src/ai-companion-runtime`, for better file watcher and dependency install performance.
-- Run `pnpm install`, `./scripts/dev.sh`, and Docker commands inside WSL when possible.
-- If working from PowerShell, use `pnpm.cmd` when the `pnpm.ps1` shim is blocked.
+When documentation and implementation disagree, current repository behavior, tests, migrations, and CI evidence take precedence; update the documentation rather than preserving a stale platform assumption.
