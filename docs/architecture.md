@@ -181,19 +181,19 @@ Provider failures are normalized at provider boundaries. Optional post-processin
 
 ## Structural Status
 
-The large Runtime implementation has already been extracted from `packages/core/src/index.ts` into focused implementation seams. Runtime tests are being decomposed by semantic island without changing behavior:
+The large Runtime implementation has already been extracted from `packages/core/src/index.ts` into focused implementation seams. Runtime tests have been decomposed by semantic island without changing behavior:
 
 - streaming/reply
 - finalized persistence / P4
 - Memory integration
 - proactive / P6
 
-R5A1 through R5A3 are complete. R5A4 and final structural closeout remain before product development resumes.
+R5A1 through R5A4 are complete. Runtime test decomposition and Structural Debt Paydown are complete; product development is unblocked to begin P8.
 
 This decomposition is intentionally mechanical: duplicate small test helpers are acceptable; changing assertions, state shape, Runtime APIs, provider semantics, or production behavior is not.
 
 ## Future Boundary
 
-Future companion work begins after structural closeout. The planned sequence starts with P8 identity/persona/relationship, then temporal/continuity/attention, Character/Cognition boundaries, capabilities, embodied presentation, and Character post-training.
+P8 is the next product phase. The planned sequence starts with identity/persona/relationship, then temporal/continuity/attention, Character/Cognition boundaries, capabilities, embodied presentation, and Character post-training.
 
 Those documents are planning authority only and do not imply implementation. See [`future/README.md`](future/README.md).

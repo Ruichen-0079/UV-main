@@ -8,7 +8,7 @@ YUVI 的目标不是做一个聊天页面，而是构建一个长期可演进的
 
 ## 当前状态
 
-项目当前处于 **结构债务收口阶段**。P4 的可靠性资产与第一版可用 P6 主动文本行为已经建立，现在正在把大文件、大测试闭包拆到清晰的语义边界中，同时严格保持行为不变。
+**结构债务收口已完成**。P4 的可靠性资产与第一版可用 P6 主动文本行为已经建立，结构拆分在严格保持行为不变的前提下完成。
 
 目前已经确定并保留的能力包括：
 
@@ -16,9 +16,9 @@ YUVI 的目标不是做一个聊天页面，而是构建一个长期可演进的
 - 会话持久化与 finalized-turn ingestion 已具备 durable lifecycle、幂等、retry/reconcile、崩溃恢复和 fail-closed 语义。
 - P6 主动文本支持严格的 `NO_OP` / `REQUEST_TEXT` 控制、assistant-only turn、取消竞态隔离、one-shot 幂等、fresh effect identity，并且不会伪造用户消息，也不会获得主动记忆写入权限。
 - Dashboard、Settings、Chat 与 Core 大型职责已经按小步结构重构拆分，没有借重构改变产品行为。
-- Core Runtime 测试正在按语义岛机械拆分。R5A1、R5A2、R5A3 已完成；R5A4 与最终 structural closeout 完成后，结构债务阶段结束。
+- Core Runtime 测试已按语义岛完成机械拆分。R5A1–R5A4 全部完成，Runtime 测试拆分已完成；当前产品工作已解除阻塞，可以开始 P8。
 
-结构收口后的下一项产品工作是 **P8：Who is Yuvi / identity / persona / relationship**。P8 必须基于可追溯证据解释身份与关系，而不是把隐式推断直接当作权威角色状态。后续伴侣架构见 [`docs/future/`](docs/future/)。
+下一项产品工作是 **P8：Who is Yuvi / identity / persona / relationship**。P8 必须基于可追溯证据解释身份与关系，而不是把隐式推断直接当作权威角色状态。后续伴侣架构见 [`docs/future/`](docs/future/)。
 
 ## 开发基线
 
@@ -200,12 +200,10 @@ pnpm memory:maintenance
 
 ## 路线图边界
 
-当前顺序：
+下一阶段产品顺序：
 
 ```text
-R5A4 proactive test-island extraction
-  -> structural final closeout
-  -> P8 identity / persona / relationship
+P8 identity / persona / relationship
   -> temporal substrate
   -> continuity and attention
   -> Character ABI / Character Harness

@@ -8,7 +8,7 @@ The product goal is not a chatbot page. YUVI is being built as a durable compani
 
 ## Current Status
 
-YUVI is currently in a structural-debt paydown phase after the P4 reliability work and the first useful P6 proactive-text implementation.
+Structural Debt Paydown is complete after the P4 reliability work and the first useful P6 proactive-text implementation.
 
 Already established:
 
@@ -16,9 +16,9 @@ Already established:
 - Conversation persistence and finalized-turn ingestion preserve durable lifecycle, idempotency, retry/reconcile, crash-recovery, and fail-closed semantics.
 - P6 proactive text supports assistant-only turns, strict `NO_OP` / `REQUEST_TEXT` control, cancellation fencing, one-shot idempotency, fresh effect identities, and no synthetic user message or proactive memory-write authority.
 - Dashboard presentation, Settings, Chat, and large Core runtime responsibilities have been decomposed without redesigning behavior.
-- Core Runtime tests are being split mechanically by semantic island. R5A1, R5A2, and R5A3 are complete; R5A4 and final structural closeout remain before product work resumes.
+- Core Runtime tests were split mechanically by semantic island. R5A1–R5A4 are complete, Runtime test decomposition is complete, and current product work is unblocked to begin P8.
 
-After structural closeout, the next product phase is P8: explicit identity/persona/relationship behavior grounded in evidence rather than inferred as hidden authoritative state. The broader companion roadmap is documented under [`docs/future/`](docs/future/).
+The next product phase is P8: explicit identity/persona/relationship behavior grounded in evidence rather than inferred as hidden authoritative state. The broader companion roadmap is documented under [`docs/future/`](docs/future/).
 
 ## Development Baseline
 
@@ -202,12 +202,10 @@ Useful scripts:
 
 The implementation roadmap is intentionally staged.
 
-Current order:
+Next product order:
 
 ```text
-R5A4 proactive test-island extraction
-  -> structural final closeout
-  -> P8 identity / persona / relationship
+P8 identity / persona / relationship
   -> temporal substrate
   -> continuity and attention
   -> Character ABI / Character Harness

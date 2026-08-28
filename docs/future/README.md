@@ -2,8 +2,9 @@
 
 > **Status: PLANNED / NOT IMPLEMENTED**
 >
-> **Current-state baseline inspected:** `origin/main` at
-> `bd256047ee4eab92a8c7fae9f8ae3037285f95a2` (2026-08-28)
+> **Current-state authority:** the current `origin/main` source, tests, and
+> current-state documentation are authoritative. This roadmap remains planning
+> only.
 >
 > **Scope:** long-term semantic architecture only; this directory is not
 > current product behavior or an implementation specification.
@@ -15,10 +16,10 @@ implemented behavior. In particular, [P4 Linux-first](../p4-linux-first.md),
 current Runtime contracts take precedence over this roadmap wherever a future
 proposal could otherwise be read as present fact.
 
-Two current-state rebaseline PRs were open when this roadmap was prepared. They
-correctly label P8 as not implemented, Memory as evidence rather than Persona
-authority, and P6 as frozen current behavior. This additive roadmap does not
-replace those pending current-state documents.
+Structural Debt Paydown is complete, including R5A1–R5A4 and the final closeout.
+P8 is the next implementation phase, but it remains planned and not
+implemented. Memory remains evidence rather than Persona authority, and P6
+remains frozen current behavior.
 
 ## Product north star
 
@@ -52,16 +53,13 @@ none is an authoritative P8, temporal, or Continuity implementation.
 seams for post-Structural work. They do not define detailed TypeScript types,
 class hierarchies, storage tables, concrete MCP servers, or source-file changes.
 
-**CURRENT / IN PROGRESS:** Structural R closeout is phase 0. R3B production
-Runtime extraction is complete and GitHub PR #81
-(`refactor(core): extract runtime orchestrator`) is merged. Structural R as a
-whole is not complete: R5 Core test decomposition and final structural closeout
-remain. No P8 implementation should begin until those remaining Structural
-units are explicitly accepted.
+**CURRENT / COMPLETE:** Structural R closeout is complete. R3B production
+Runtime extraction and R5A1–R5A4 Core test decomposition are complete, including
+the final closeout. P8 is the next implementation phase and remains planned /
+not implemented.
 
 ## Expected sequence
 
-0. Finish Structural R closeout without semantic redesign.
 1. Implement P8 identity, persona, and relationship interpretation.
 2. Establish the Character ABI and Character/Cognition responsibility split.
 3. Add the temporal substrate.
@@ -265,14 +263,13 @@ callers or invariants need that seam.
 ## Known current-document tension
 
 Older current docs still describe Live2D and autonomous behavior as wholly
-future work and list a future “emotion engine.” Current source/tests and the
-pending current-state rebaseline show Live2D and bounded P6 behavior are
-already implemented. This roadmap therefore treats those older phrases as
-stale summaries, not as a mandate for a generic mood engine. No current
-Runtime semantic contradiction was found.
+future work and list a future “emotion engine.” Current source/tests and
+current-state documentation show Live2D and bounded P6 behavior are already
+implemented. This roadmap therefore treats those older phrases as stale
+summaries, not as a mandate for a generic mood engine. No current Runtime
+semantic contradiction was found.
 
 The top-level README/Windows guidance and parts of `memory.md` also retain
 Windows-first or packaged-private-PostgreSQL language that is narrower or older
-than the explicit Linux-first P4 baseline. That documentation tension is being
-handled by the separate current-state rebaseline work; it does not change this
-roadmap's semantic ownership.
+than the explicit Linux-first P4 baseline. That non-blocking documentation
+tension does not change this roadmap's semantic ownership.
