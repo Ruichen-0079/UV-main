@@ -1,112 +1,199 @@
 # Architecture
 
+[English](architecture.md) | [简体中文](architecture.zh-CN.md)
+
 ## Project Goal
 
-AI Companion Runtime is an event-driven, local-first companion runtime.
+YUVI Runtime is a local-first, event-driven AI companion runtime. It is an original implementation inspired by the architectural ambition of Project AIRI.
 
-It is inspired by the architectural ambition of Project AIRI, but this repository is an original implementation. The goal is not a simple chatbot. The goal is a runtime foundation that can support memory, prompt construction, provider abstraction, voice, vision, avatar presentation, and future game-agent behavior.
+The product is the runtime, not a single chat UI. Web, desktop, avatar, terminal, voice, vision, and future character surfaces should converge on the same Runtime authority instead of implementing parallel product logic.
 
-## Core Principle
+## Current Development Baseline
 
-The runtime is the core product.
+YUVI is Linux-first for development and production validation.
 
-Avatar rendering is presentation. A Live2D, VRM, game character, terminal client, or web UI should all talk to the same runtime.
+The currently proven durable path is:
 
-Providers are replaceable. Runtime orchestration depends on small interfaces, including the provider resolver interface, not vendor SDKs.
+```text
+Linux Runtime
+  -> repository ports
+  -> DATABASE_URL
+  -> PostgreSQL + pgvector
+  -> migrations
+  -> durable conversation / finalized-ingestion / Memory behavior
+```
 
-Memory is not raw chat logs. Memory must be stored as structured records, retrieved, ranked, compressed, and reconstructed before it enters a prompt.
+Windows remains a supported target, but platform-specific packaged PostgreSQL ownership machinery is deferred until product behavior is stable. Architecture decisions should optimize for correct Runtime semantics first and translate to Windows later rather than expanding a second persistence ownership model.
+
+## Core Principles
+
+### Runtime is execution authority
+
+Runtime owns:
+
+- effect lifecycle
+- execution admission
+- cancellation and stale-result fencing
+- conversation persistence coordination
+- finalized-turn handling
+- provider execution
+- canonical runtime publication
+
+Transport, Dashboard, Presentation, and future Character layers do not bypass this authority.
+
+### Reliability semantics are preserved assets
+
+Already-proven semantics such as finalized-turn lifecycle, durable ingestion, semantic idempotency, retry/reconcile, crash recovery, lifecycle sealing/draining, and protection from ambiguous external side effects are architectural assets. Structural refactors must preserve them.
+
+### Memory is evidence, not authoritative persona state
+
+Conversation persistence and long-term Memory are separate concerns.
+
+Memory owns evidence records and their retrieval/ranking/validity/status/retention/expiry semantics. It does not own authoritative relationship truth or future P8 persona state. Future consumers may interpret authorized evidence, but they must not rewrite Memory into hidden relationship authority.
+
+### Providers are replaceable
+
+`packages/core` depends on provider-facing contracts rather than vendor SDKs. Vendor request/response translation and concrete client construction belong to `packages/providers`.
+
+### Small semantic diffs beat premature abstraction
+
+When a broad abstraction conflicts with a smaller behavior-preserving extraction, prefer the smaller semantic diff. Avoid Manager/Engine/Service layers that merely rename existing responsibility without proving a necessary boundary.
 
 ## Main Data Flow
 
+Normal user turn:
+
 ```text
 User input
-  -> runtime event
-  -> memory retrieval
-  -> prompt builder
-  -> DeepSeek chat/reasoning
-  -> agent.reply event
-  -> optional xAI TTS
-  -> avatar.speak / avatar output
+  -> Runtime admission
+  -> conversation persistence
+  -> DirectContext / Memory retrieval
+  -> prompt construction
+  -> provider execution
+  -> assistant persistence
+  -> finalized-turn handling
+  -> runtime publication
+  -> optional presentation side effects
 ```
 
-Voice and vision enter the same event model:
+Voice and vision enter Runtime through provider-normalized inputs rather than separate product architectures:
 
 ```text
 Audio input
-  -> Alibaba DashScope STT
-  -> user.voice.transcript
-  -> normal reply flow
+  -> STT provider
+  -> transcript / runtime input
+  -> normal Runtime flow
 
 Image or screen input
-  -> xAI vision
-  -> perception.vision
-  -> runtime context
+  -> vision provider
+  -> normalized perception/context
+  -> Runtime flow
 ```
+
+Current assistant-initiated P6 text flow:
+
+```text
+ProactiveDecisionProvider
+  -> NO_OP
+     or
+  -> REQUEST_TEXT
+  -> assistant continuation
+  -> Runtime execution commit
+  -> assistant-only proactive Runtime stream
+```
+
+P6 preserves strict user-over-proactive priority, one-shot execution, fresh Runtime identities, cancellation fencing, no synthetic user event, no proactive Memory-write authority, and no separate proactive TTS/voice authority.
 
 ## Package Responsibilities
 
 ### `apps/server`
 
-Fastify runtime server. Owns HTTP routes, WebSocket transport, health checks, startup, and graceful shutdown. Handlers should stay thin and delegate to `packages/core`.
+Fastify HTTP/WebSocket server and composition root. Owns transport, startup/shutdown, health/configuration wiring, and construction/injection of concrete repositories/providers. Route handlers should remain thin and delegate product semantics to Runtime/package boundaries.
+
+### `apps/web`
+
+Development Dashboard. It observes and controls Runtime behavior through supported APIs. It is not the product authority for conversation, identity, Memory, or proactive semantics.
 
 ### `packages/protocol`
 
-Shared runtime event types and schemas. All runtime input and output should be represented as events.
+Shared runtime event types and schemas. Canonical event semantics live here rather than being inferred independently by each transport or UI.
 
 ### `packages/event-bus`
 
-Event bus abstraction. The MVP uses an in-memory implementation with wildcard subscriptions. NATS can be added later behind the same interface.
+Event-bus abstraction and current in-memory implementation. NATS may remain supporting/future infrastructure behind the same boundary; it is not a reason to split Runtime into microservices prematurely.
 
 ### `packages/memory`
 
-Memory and conversation persistence repositories plus the memory service layer. Uses PostgreSQL with pgvector for durable memory and raw conversation recovery, plus in-memory development fallbacks. Conversation persistence is separate from long-term memory: the in-memory conversation store can restore context only when a Runtime is rebuilt in the same process, while PostgreSQL supports recovery after process restart. Core consumes the Conversation Repository port; Server creates and injects the concrete implementation.
+Owns conversation repositories, durable Memory repositories/services, finalized-ingestion ledger/service, retrieval/ranking, and Memory maintenance semantics.
+
+Important boundaries:
+
+- raw conversation messages are not long-term Memory
+- PostgreSQL supports durable recovery across process restart
+- in-memory repositories are development/test fallbacks
+- finalized ingestion preserves durable parent/child status and idempotency semantics
+- Core consumes repository/service ports; Server wires concrete implementations
 
 ### `packages/prompt-builder`
 
-Builds structured, provider-neutral prompts from identity, character style, relationship context, retrieved memories, current situation, tools, and user message.
+Builds provider-neutral prompt/context structures from authorized inputs. It does not own Runtime execution, Memory persistence, or future persona/relationship authority.
+
+### `packages/config`
+
+Typed runtime configuration, env parsing/validation, provider selection configuration, and redaction helpers. It does not instantiate product semantics.
 
 ### `packages/providers`
 
-Provider interfaces, registry, normalized errors, and concrete provider implementations. Vendor-specific request/response handling stays here.
+Provider contracts, registry/factories, normalized errors, and vendor adapters. Current provider families include chat/reasoning, proactive decision/continuation, TTS, STT, vision, and embedding.
 
 ### `packages/core`
 
-Runtime orchestration. Receives events, retrieves memory, builds prompts, calls provider interfaces, stores important interactions, and emits runtime events.
+Owns Runtime contracts/errors and RuntimeOrchestrator execution semantics. It coordinates persistence, context retrieval, prompt construction, provider calls, cancellation, finalized-turn behavior, and runtime publication.
+
+The package root is a public barrel; implementation modules should not become accidental second public APIs merely for test convenience.
+
+## Runtime Contracts and Errors
+
+Canonical Runtime contract types and errors have dedicated module seams. Consumers should preserve identity of canonical errors rather than duplicate equivalent classes.
+
+Examples include persistence failures and assistant-turn idempotency conflicts. Server handlers may depend on `instanceof` behavior, so duplicate error definitions are not semantically equivalent.
+
+## Persistence and Finalized Turns
+
+The durable Runtime path protects the distinction between a successfully produced assistant reply and later optional Memory ingestion side effects.
+
+Finalized-turn ingestion supports durable states including processing, retryable failure, reconcile-required, partial, complete, terminal failure, and skipped outcomes where applicable. Re-entry must preserve durable status instead of fabricating completion from process-local state.
+
+Lifecycle transitions preserve admitted work across sealing/disposal. Shutdown/reload behavior waits for already-admitted operations where required and rejects new lifecycle-sensitive work once sealing has begun.
 
 ## Provider Mapping
 
-Default provider choices:
+Current default direction:
 
-- Chat: DeepSeek API
-- Reasoning: DeepSeek API
+- Chat: DeepSeek
+- Reasoning: DeepSeek
 - TTS: xAI
-- Vision: xAI
 - STT: Alibaba Cloud DashScope
+- Vision: xAI
 - Embedding: configurable
 
-`packages/core` must not import DeepSeek, xAI, or Alibaba classes directly. Provider-specific construction belongs in `packages/providers`, where factory maps bind configured provider names to implementations.
+Provider failures are normalized at provider boundaries. Optional post-processing failures must not retroactively invalidate an already finalized successful reply unless the relevant Runtime contract explicitly requires failure.
 
-Provider failures are normalized into `provider.error` events. Non-critical side effects, such as memory persistence after a reply and optional TTS output, should not prevent an already generated agent reply from being returned.
+## Structural Status
 
-## Future Modules
+The large Runtime implementation has already been extracted from `packages/core/src/index.ts` into focused implementation seams. Runtime tests are being decomposed by semantic island without changing behavior:
 
-Planned modules and integrations:
+- streaming/reply
+- finalized persistence / P4
+- Memory integration
+- proactive / P6
 
-- Live2D / VRM frontend
-- autonomous loop
-- screen perception
-- Minecraft/game agent
-- emotion engine
-- procedural memory
-- NATS event bus implementation
+R5A1 through R5A3 are complete. R5A4 and final structural closeout remain before product development resumes.
 
-These should integrate through the protocol and event bus rather than bypassing runtime core.
+This decomposition is intentionally mechanical: duplicate small test helpers are acceptable; changing assertions, state shape, Runtime APIs, provider semantics, or production behavior is not.
 
-## Non-Goals For MVP
+## Future Boundary
 
-- No full Live2D integration yet.
-- No complex autonomous behavior yet.
-- No multi-character system yet.
-- No heavy microservice split yet.
+Future companion work begins after structural closeout. The planned sequence starts with P8 identity/persona/relationship, then temporal/continuity/attention, Character/Cognition boundaries, capabilities, embodied presentation, and Character post-training.
 
-The MVP should stay small, runnable, and easy to extend.
+Those documents are planning authority only and do not imply implementation. See [`future/README.md`](future/README.md).
