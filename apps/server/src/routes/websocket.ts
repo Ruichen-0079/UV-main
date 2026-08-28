@@ -9,6 +9,84 @@ import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { redactValue } from "../services/dashboard.js";
 
+export const ACTIVE_TRACE_MAX_ENTRIES = 256;
+export const ACTIVE_TRACE_RETENTION_MS = 15 * 60 * 1000;
+
+type ActiveTraceEntry = {
+  lastSeenAtMs: number;
+  terminal: boolean;
+};
+
+export class ActiveTraceRegistry {
+  private readonly entries = new Map<string, ActiveTraceEntry>();
+
+  add(traceId: string): boolean {
+    this.prune();
+    const existing = this.entries.get(traceId);
+    if (existing) {
+      existing.lastSeenAtMs = Date.now();
+      this.entries.delete(traceId);
+      this.entries.set(traceId, existing);
+      return true;
+    }
+
+    if (this.entries.size >= ACTIVE_TRACE_MAX_ENTRIES) {
+      const oldestTerminal = [...this.entries.entries()].find(([, entry]) => entry.terminal);
+      if (!oldestTerminal) {
+        return false;
+      }
+      this.entries.delete(oldestTerminal[0]);
+    }
+    this.entries.set(traceId, { lastSeenAtMs: Date.now(), terminal: false });
+    return true;
+  }
+
+  has(traceId: string): boolean {
+    this.prune();
+    return this.entries.has(traceId);
+  }
+
+  observe(event: RuntimeEvent): void {
+    const entry = this.entries.get(event.traceId);
+    if (!entry) {
+      return;
+    }
+    if (
+      event.type === "avatar.speak" ||
+      event.type === "provider.error" ||
+      event.type === "runtime.error"
+    ) {
+      this.entries.delete(event.traceId);
+      return;
+    }
+    entry.lastSeenAtMs = Date.now();
+    if (event.type === "agent.reply") {
+      entry.terminal = true;
+    }
+  }
+
+  delete(traceId: string): void {
+    this.entries.delete(traceId);
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+
+  get size(): number {
+    this.prune();
+    return this.entries.size;
+  }
+
+  private prune(now = Date.now()): void {
+    for (const [traceId, entry] of this.entries) {
+      if (entry.terminal && now - entry.lastSeenAtMs >= ACTIVE_TRACE_RETENTION_MS) {
+        this.entries.delete(traceId);
+      }
+    }
+  }
+}
+
 const WebSocketQuerySchema = z.object({
   dashboard: z.coerce.boolean().optional().default(false)
 });
@@ -20,7 +98,7 @@ export async function registerWebSocketRoutes(
   app.get("/ws", { websocket: true }, (socket, request) => {
     const query = WebSocketQuerySchema.safeParse(request.query);
     const dashboardMode = query.success ? query.data.dashboard : false;
-    const activeTraceIds = new Set<string>();
+    const activeTraceIds = new ActiveTraceRegistry();
     const subscription = context.eventBus.subscribe("*", (event) => {
       if (dashboardMode) {
         sendJson(socket, redactRuntimeEvent(event));
@@ -29,6 +107,7 @@ export async function registerWebSocketRoutes(
 
       if (activeTraceIds.has(event.traceId) && shouldForwardEvent(event)) {
         sendJson(socket, redactRuntimeEvent(event));
+        activeTraceIds.observe(event);
       }
     });
 
@@ -51,9 +130,22 @@ export async function registerWebSocketRoutes(
           JSON.parse(rawMessage.toString())
         ) as RuntimeEvent;
         envelope = parsedEnvelope;
-        activeTraceIds.add(parsedEnvelope.traceId);
+        if (!activeTraceIds.add(parsedEnvelope.traceId)) {
+          sendJson(
+            socket,
+            redactRuntimeEvent(
+              createEvent(
+                "runtime.error",
+                { message: "WebSocket trace capacity is full; retry after active turns finish." },
+                { traceId: parsedEnvelope.traceId, parentId: parsedEnvelope.id }
+              )
+            )
+          );
+          return;
+        }
 
         if (parsedEnvelope.type !== "user.message") {
+          activeTraceIds.delete(parsedEnvelope.traceId);
           sendJson(
             socket,
             redactRuntimeEvent(
@@ -73,13 +165,15 @@ export async function registerWebSocketRoutes(
         }
 
         const parsed = UserMessageEventSchema.parse(parsedEnvelope);
-        activeTraceIds.add(parsed.traceId);
         app.log.info(
           { traceId: parsed.traceId, sessionId: parsed.payload.sessionId },
           "websocket user.message received"
         );
         await context.runtime.handleUserMessage(parsed);
       } catch (error) {
+        if (envelope) {
+          activeTraceIds.delete(envelope.traceId);
+        }
         sendJson(
           socket,
           redactRuntimeEvent(

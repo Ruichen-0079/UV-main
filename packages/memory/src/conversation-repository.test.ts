@@ -80,6 +80,43 @@ describe("ConversationRepository", () => {
     );
   });
 
+  it("recovers stale streaming messages without reaping fresh active rows", async () => {
+    const repository = new InMemoryConversationRepository();
+    await repository.appendMessage({
+      ...message("stale", "session-a", "assistant", "partial"),
+      createdAt: "2026-08-28T10:00:00.000Z",
+      completedAt: null,
+      status: "streaming"
+    });
+    await repository.appendMessage({
+      ...message("fresh", "session-a", "assistant", "active"),
+      createdAt: "2026-08-28T11:59:00.000Z",
+      completedAt: null,
+      status: "streaming"
+    });
+
+    const recovered = await repository.recoverStaleStreamingMessages({
+      olderThan: "2026-08-28T11:00:00.000Z",
+      recoveredAt: "2026-08-28T12:00:00.000Z"
+    });
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      id: "stale",
+      status: "failed",
+      completedAt: "2026-08-28T12:00:00.000Z",
+      metadata: {
+        recoveryReason: "stale-streaming-message",
+        recoveredAt: "2026-08-28T12:00:00.000Z"
+      }
+    });
+    expect(await repository.getMessageById("fresh")).toMatchObject({
+      id: "fresh",
+      status: "streaming",
+      completedAt: null
+    });
+  });
+
   it("uses the injectable PostgreSQL client for append and ordered reads", async () => {
     const rows: Array<Record<string, unknown>> = [];
     const queries: string[] = [];
@@ -195,6 +232,58 @@ describe("ConversationRepository", () => {
     expect(completeQuery?.values).toEqual(["stream", JSON.stringify({ provider: "mock" })]);
   });
 
+  it("uses bounded atomic SQL for stale streaming recovery", async () => {
+    const row = {
+      id: "stale",
+      session_id: "session-a",
+      trace_id: "trace-stale",
+      parent_message_id: null,
+      role: "assistant",
+      content: "partial",
+      status: "failed",
+      created_at: "2026-08-28T10:00:00.000Z",
+      completed_at: "2026-08-28T12:00:00.000Z",
+      metadata: {
+        recoveryReason: "stale-streaming-message",
+        recoveredAt: "2026-08-28T12:00:00.000Z"
+      },
+      sequence: 1
+    };
+    const queries: Array<{ sql: string; values: unknown[] }> = [];
+    const client = {
+      async query(sql: string, values: unknown[] = []) {
+        queries.push({ sql, values });
+        if (sql.includes("with stale as")) {
+          return { rows: [row] };
+        }
+        return { rows: [] };
+      },
+      async end() {}
+    };
+    const repository = new PostgresConversationRepository(client);
+
+    await expect(
+      repository.recoverStaleStreamingMessages({
+        olderThan: "2026-08-28T11:00:00.000Z",
+        recoveredAt: "2026-08-28T12:00:00.000Z",
+        limit: 10
+      })
+    ).resolves.toMatchObject([{ id: "stale", status: "failed" }]);
+
+    const recoveryQuery = queries.find((query) => query.sql.includes("with stale as"));
+    expect(recoveryQuery?.sql).toMatch(/status = 'streaming'/);
+    expect(recoveryQuery?.sql).toContain("for update skip locked");
+    expect(recoveryQuery?.values).toEqual([
+      "2026-08-28T11:00:00.000Z",
+      10,
+      "2026-08-28T12:00:00.000Z",
+      JSON.stringify({
+        recoveryReason: "stale-streaming-message",
+        recoveredAt: "2026-08-28T12:00:00.000Z"
+      })
+    ]);
+  });
+
   it("does not treat zero-row streaming updates as successful", async () => {
     const rows: Record<string, unknown>[] = [
       {
@@ -259,9 +348,7 @@ describe("ConversationRepository", () => {
     await expect(repository.completeMessage("streaming")).rejects.toThrow(
       /update affected no rows while status is 'streaming'/
     );
-    await expect(repository.appendMessageContent("missing", "x")).rejects.toThrow(
-      /was not found/
-    );
+    await expect(repository.appendMessageContent("missing", "x")).rejects.toThrow(/was not found/);
     expect(updates).toHaveLength(7);
   });
 

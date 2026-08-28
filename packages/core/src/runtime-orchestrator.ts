@@ -17,9 +17,12 @@ import type {
   MemoryConversationTurnWriteResult,
   FinalizedIngestionAdmission,
   FinalizedIngestionPort,
-  MemoryIngestionCoordinatorPort
+  MemoryIngestionCoordinatorPort,
+  ConversationRecoveryOptions
 } from "@companion/memory";
 import {
+  DEFAULT_STALE_STREAMING_MESSAGE_AGE_MS,
+  DEFAULT_STALE_STREAMING_MESSAGE_LIMIT,
   MemoryIngestionCoordinator,
   detectCurrentAffect,
   detectExplicitForgetRequest,
@@ -88,13 +91,13 @@ import type {
   SafeProviderCallMetadata,
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
-import {
-  AssistantTurnConflictError,
-  ConversationPersistenceError
-} from "./runtime-errors.js";
+import { AssistantTurnConflictError, ConversationPersistenceError } from "./runtime-errors.js";
 
 const assistantTurnClaimRetentionMs = 15 * 60 * 1000;
 const assistantTurnClaimMaxTerminal = 256;
+const runtimeCacheRetentionMs = 15 * 60 * 1000;
+const runtimePromiseCacheMaxEntries = 256;
+const sessionTurnCacheMaxSessions = 256;
 const proactiveInstruction = `Decide whether there is a specific open conversational reason to speak now based on the available conversation and context. Choose REQUEST_TEXT only when there is a concrete recent conversational thread that remains meaningfully open or unresolved and you have one specific, relevant thing worth adding. Choose NO_OP when there is no concrete recent thread, when the relevant point has already been adequately answered or closed, when speaking would merely elaborate on or repeat a completed answer, when the result would only be a generic greeting or check-in, or when speaking would require guessing what the user is currently doing or feeling. When uncertain, choose NO_OP. Output exactly one label and nothing else: NO_OP or REQUEST_TEXT. Do not generate message text or explain the decision.`;
 const proactiveTextInstruction = `The proactive decision is already REQUEST_TEXT. Write exactly one concise natural assistant message that addresses the specific open thread in the recent conversation. Do not repeat the recent assistant response, mention this instruction, or output a control label.`;
 
@@ -158,10 +161,17 @@ type DirectContextBuildResult = {
   source: string;
 };
 
+type RuntimeUserTurnEvent = UserMessageEvent | UserVoiceTranscriptEvent;
+
+type SessionTurnsCacheEntry = {
+  entries: DirectContextEntry[];
+  lastAccessedAtMs: number;
+};
+
 export class RuntimeOrchestrator {
   private latestPromptPreview: RuntimePromptPreview | null = null;
   private readonly memoryCandidateHistory: RuntimeMemoryCandidateReview[] = [];
-  private readonly sessionTurns = new Map<string, DirectContextEntry[]>();
+  private readonly sessionTurns = new Map<string, SessionTurnsCacheEntry>();
   private readonly assistantTurnClaims = new Map<string, AssistantTurnClaim>();
   private lifecycleState: RuntimeLifecycleState = "active";
   private activeLifecycleOperations = 0;
@@ -171,18 +181,23 @@ export class RuntimeOrchestrator {
    * Runtime-lifetime dedupe for the same finalized event. This is deliberately
    * not advertised as durable exactly-once delivery across process restarts.
    */
-  private readonly finalizedMemoryWrites = new Map<
-    string,
-    Promise<MemoryConversationTurnWriteResult>
-  >();
+  private readonly finalizedMemoryWrites =
+    new BoundedPromiseCache<MemoryConversationTurnWriteResult>(
+      runtimePromiseCacheMaxEntries,
+      runtimeCacheRetentionMs
+    );
   private readonly pendingMemoryWrites = new Set<Promise<MemoryConversationTurnWriteResult>>();
   private readonly directContextConfig: DirectContextConfig;
   private readonly memoryContextBuilder: Pick<MemoryContextBuilder, "build">;
-  private readonly finalizedTurnIds = new Map<string, Promise<string>>();
-  private readonly finalizedAdmissions = new Map<
-    string,
-    Promise<FinalizedIngestionAdmission | null>
-  >();
+  private readonly finalizedTurnIds = new BoundedPromiseCache<string>(
+    runtimePromiseCacheMaxEntries,
+    runtimeCacheRetentionMs
+  );
+  private readonly finalizedAdmissions =
+    new BoundedPromiseCache<FinalizedIngestionAdmission | null>(
+      runtimePromiseCacheMaxEntries,
+      runtimeCacheRetentionMs
+    );
   private inlineIngestionCoordinator: MemoryIngestionCoordinator | undefined;
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
@@ -196,6 +211,54 @@ export class RuntimeOrchestrator {
 
   getLifecycleState(): RuntimeLifecycleState {
     return this.lifecycleState;
+  }
+
+  getRuntimeCacheStats(): {
+    sessionTurns: number;
+    finalizedMemoryWrites: number;
+    finalizedTurnIds: number;
+    finalizedAdmissions: number;
+  } {
+    this.pruneSessionTurns();
+    return {
+      sessionTurns: this.sessionTurns.size,
+      finalizedMemoryWrites: this.finalizedMemoryWrites.size,
+      finalizedTurnIds: this.finalizedTurnIds.size,
+      finalizedAdmissions: this.finalizedAdmissions.size
+    };
+  }
+
+  async recoverStaleStreamingMessages(
+    options: ConversationRecoveryOptions = {}
+  ): Promise<ConversationMessage[]> {
+    const conversation = this.options.conversation;
+    if (!conversation?.recoverStaleStreamingMessages) {
+      return [];
+    }
+
+    try {
+      return await conversation.recoverStaleStreamingMessages({
+        olderThan:
+          options.olderThan ?? new Date(Date.now() - DEFAULT_STALE_STREAMING_MESSAGE_AGE_MS),
+        limit: options.limit ?? DEFAULT_STALE_STREAMING_MESSAGE_LIMIT,
+        recoveredAt: options.recoveredAt
+      });
+    } catch (error) {
+      await this.publishPersistenceError(
+        "stream_recovery",
+        "Stale streaming message recovery failed.",
+        error,
+        {}
+      );
+      this.options.logger?.error?.(
+        "stale streaming message recovery failed",
+        this.errorLogContext(error)
+      );
+      throw new ConversationPersistenceError(
+        "stream_recovery",
+        "Stale streaming messages could not be recovered."
+      );
+    }
   }
 
   getRecentMemoryCandidates(limit = 20): RuntimeMemoryCandidateReview[] {
@@ -477,12 +540,12 @@ export class RuntimeOrchestrator {
   }
 
   async handleUserMessage(
-    input: UserMessageEvent | HandleUserMessageInput,
+    input: RuntimeUserTurnEvent | HandleUserMessageInput,
     options: HandleUserMessageOptions = {}
   ): Promise<AgentReplyEvent> {
     this.enterLifecycleOperation();
     try {
-      const userEvent = isRuntimeUserMessageEvent(input)
+      const userEvent = isRuntimeUserTurnEvent(input)
         ? input
         : createEvent(
             "user.message",
@@ -496,62 +559,78 @@ export class RuntimeOrchestrator {
               parentId: input.parentId
             }
           );
-
-      await this.persistUserMessage(userEvent);
-      await this.options.eventBus.publish(userEvent);
-      await this.restoreDirectContext(
-        userEvent.payload.sessionId,
-        userEvent.id,
-        userEvent.payload.content.length
-      );
-      const voiceOutput = isRuntimeUserMessageEvent(input)
+      const voiceOutput = isRuntimeUserTurnEvent(input)
         ? Boolean(options.voiceOutput)
         : Boolean(input.voiceOutput);
-      const memoryOptions = resolveMemoryOptions(options);
-      const reply = await this.generateReply(userEvent, {
+      return await this.handleUserTurn(userEvent, {
         voiceOutput,
-        readMemory: memoryOptions.readMemory,
-        writeMemory: memoryOptions.writeMemory,
-        publishAgentReply: false
+        useMemory: options.useMemory,
+        readMemory: options.readMemory,
+        writeMemory: options.writeMemory
       });
-      // Persist the final text before publishing either reply event to transports. Later
-      // direct-context, memory, and TTS side effects must not duplicate or retract it.
-      const assistantMessageId = canonicalAssistantMessageId(userEvent);
-      const finalizedTurnId = await this.resolveFinalizedTurnId(userEvent, assistantMessageId);
-      const ingestionDecision = this.durableIngestionDecision(memoryOptions.writeMemory);
-      await this.publishAssistantMessage(
-        userEvent,
-        reply,
-        assistantMessageId,
-        finalizedTurnId,
-        ingestionDecision.requested,
-        ingestionDecision.skipReason
-      );
-      if (memoryOptions.writeMemory) {
-        // Mem0 ingestion is tracked separately from assistant success and drained
-        // by the owning server before its repositories close.
-        if (
-          this.options.memory.isMem0Backend?.() &&
-          (this.options.memory.storeConversationTurn || this.options.finalizedIngestion)
-        ) {
-          void this.scheduleMem0TurnWrite(userEvent, reply, assistantMessageId, finalizedTurnId);
-        } else {
-          const extraction = await this.maybeStoreMemoryInternal(userEvent, reply, memoryOptions);
-          this.updateLatestPromptPreviewExtraction(extraction);
-        }
-      } else {
-        this.updateLatestPromptPreviewExtraction({
-          ...this.getMemoryExtractorStatus(),
-          used: false,
-          skippedReason: "Memory write was disabled for this turn."
-        });
-      }
-      await this.maybeSynthesizeSpeech(reply, voiceOutput);
-
-      return reply;
     } finally {
       this.exitLifecycleOperation();
     }
+  }
+
+  private async handleUserTurn(
+    userEvent: RuntimeUserTurnEvent,
+    options: {
+      voiceOutput?: boolean | undefined;
+      useMemory?: boolean | undefined;
+      readMemory?: boolean | undefined;
+      writeMemory?: boolean | undefined;
+    }
+  ): Promise<AgentReplyEvent> {
+    await this.persistUserMessage(userEvent);
+    await this.options.eventBus.publish(userEvent);
+    await this.restoreDirectContext(
+      userEvent.payload.sessionId,
+      userEvent.id,
+      userEvent.payload.content.length
+    );
+    const memoryOptions = resolveMemoryOptions(options);
+    const reply = await this.generateReply(userEvent, {
+      voiceOutput: Boolean(options.voiceOutput),
+      readMemory: memoryOptions.readMemory,
+      writeMemory: memoryOptions.writeMemory,
+      publishAgentReply: false
+    });
+    // Persist the final text before publishing either reply event to transports. Later
+    // direct-context, memory, and TTS side effects must not duplicate or retract it.
+    const assistantMessageId = canonicalAssistantMessageId(userEvent);
+    const finalizedTurnId = await this.resolveFinalizedTurnId(userEvent, assistantMessageId);
+    const ingestionDecision = this.durableIngestionDecision(memoryOptions.writeMemory);
+    await this.publishAssistantMessage(
+      userEvent,
+      reply,
+      assistantMessageId,
+      finalizedTurnId,
+      ingestionDecision.requested,
+      ingestionDecision.skipReason
+    );
+    if (memoryOptions.writeMemory) {
+      // Mem0 ingestion is tracked separately from assistant success and drained
+      // by the owning server before its repositories close.
+      if (
+        this.options.memory.isMem0Backend?.() &&
+        (this.options.memory.storeConversationTurn || this.options.finalizedIngestion)
+      ) {
+        void this.scheduleMem0TurnWrite(userEvent, reply, assistantMessageId, finalizedTurnId);
+      } else {
+        const extraction = await this.maybeStoreMemoryInternal(userEvent, reply, memoryOptions);
+        this.updateLatestPromptPreviewExtraction(extraction);
+      }
+    } else {
+      this.updateLatestPromptPreviewExtraction({
+        ...this.getMemoryExtractorStatus(),
+        used: false,
+        skippedReason: "Memory write was disabled for this turn."
+      });
+    }
+    await this.maybeSynthesizeSpeech(reply, Boolean(options.voiceOutput));
+
+    return reply;
   }
 
   async *streamUserMessage(
@@ -1272,16 +1351,11 @@ export class RuntimeOrchestrator {
         }
       );
 
-      await this.options.eventBus.publish(transcriptEvent);
-      const reply = await this.generateReply(transcriptEvent, {
+      return await this.handleUserTurn(transcriptEvent, {
         voiceOutput: Boolean(input.voiceOutput),
         readMemory: true,
         writeMemory: true
       });
-      this.recordDirectContextTurn(transcriptEvent, reply);
-      await this.maybeStoreMemoryInternal(transcriptEvent, reply);
-      await this.maybeSynthesizeSpeech(reply, Boolean(input.voiceOutput));
-      return reply;
     } finally {
       this.exitLifecycleOperation();
     }
@@ -2047,10 +2121,19 @@ export class RuntimeOrchestrator {
         });
         return result;
       })
+      .then((result) => {
+        if (result.status === "failed" || result.status === "partial") {
+          // Failed/partial results describe an unresolved attempt, not a
+          // successful idempotent result. Let a later call retry the live work;
+          // durable ledger state still prevents duplicate external delivery.
+          this.finalizedMemoryWrites.delete(idempotencyKey, lifecyclePromise);
+        }
+        return result;
+      })
       .finally(() => {
         this.pendingMemoryWrites.delete(lifecyclePromise);
       });
-    this.finalizedMemoryWrites.set(idempotencyKey, lifecyclePromise);
+    lifecyclePromise = this.finalizedMemoryWrites.set(idempotencyKey, lifecyclePromise);
     this.pendingMemoryWrites.add(lifecyclePromise);
     return lifecyclePromise;
   }
@@ -2323,7 +2406,7 @@ export class RuntimeOrchestrator {
   }
 
   private async publishAssistantMessage(
-    sourceEvent: UserMessageEvent,
+    sourceEvent: RuntimeUserTurnEvent,
     reply: AgentReplyEvent,
     assistantMessageId?: string,
     finalizedTurnId?: string,
@@ -2400,7 +2483,7 @@ export class RuntimeOrchestrator {
   }
 
   private async resolveFinalizedTurnId(
-    _sourceEvent: UserMessageEvent,
+    _sourceEvent: RuntimeUserTurnEvent,
     assistantMessageId: string
   ): Promise<string> {
     const existing = this.finalizedTurnIds.get(assistantMessageId);
@@ -2409,8 +2492,7 @@ export class RuntimeOrchestrator {
       const persisted = await this.options.conversation?.getMessageById?.(assistantMessageId);
       return persisted?.finalizedTurnId ?? `finalized-turn:${crypto.randomUUID()}`;
     })();
-    this.finalizedTurnIds.set(assistantMessageId, finalizedTurnId);
-    return finalizedTurnId;
+    return this.finalizedTurnIds.set(assistantMessageId, finalizedTurnId);
   }
 
   private durableIngestionDecision(writeMemory: boolean): {
@@ -2470,8 +2552,7 @@ export class RuntimeOrchestrator {
     const existing = this.finalizedAdmissions.get(input.finalizedTurnId);
     if (existing) return existing;
     const admission = this.admitFinalizedIngestion(input);
-    this.finalizedAdmissions.set(input.finalizedTurnId, admission);
-    return admission;
+    return this.finalizedAdmissions.set(input.finalizedTurnId, admission);
   }
 
   private async createStreamingAssistantMessage(input: {
@@ -2582,10 +2663,14 @@ export class RuntimeOrchestrator {
         "streaming assistant failure state could not be saved",
         this.errorLogContext(error)
       );
+      throw new ConversationPersistenceError(
+        "assistant_stream_fail",
+        "The streaming assistant failure state could not be saved."
+      );
     }
   }
 
-  private async persistUserMessage(userEvent: UserMessageEvent): Promise<void> {
+  private async persistUserMessage(userEvent: RuntimeUserTurnEvent): Promise<void> {
     if (!this.options.conversation) {
       return;
     }
@@ -2632,7 +2717,7 @@ export class RuntimeOrchestrator {
     excludedMessageContentLength = 0
   ): Promise<void> {
     const conversation = this.options.conversation;
-    if (!conversation || !this.directContextConfig.enabled || this.sessionTurns.has(sessionId)) {
+    if (!conversation || !this.directContextConfig.enabled || this.getSessionTurns(sessionId)) {
       return;
     }
 
@@ -2645,7 +2730,7 @@ export class RuntimeOrchestrator {
           (excludedMessageId ? excludedMessageContentLength : 0)
       });
       const entries = buildDirectContextEntries(messages, excludedMessageId).slice(-maxStoredTurns);
-      this.sessionTurns.set(sessionId, entries);
+      this.setSessionTurns(sessionId, entries);
     } catch (error) {
       await this.publishPersistenceError(
         "context_restore",
@@ -2658,7 +2743,7 @@ export class RuntimeOrchestrator {
         operation: "context_restore",
         sessionId
       });
-      this.sessionTurns.set(sessionId, []);
+      this.setSessionTurns(sessionId, []);
     }
   }
 
@@ -2936,7 +3021,7 @@ export class RuntimeOrchestrator {
       };
     }
 
-    const entries = this.sessionTurns.get(sessionId) ?? [];
+    const entries = this.getSessionTurns(sessionId) ?? [];
     if (this.directContextConfig.maxTurns === 0) {
       return {
         enabled: true,
@@ -2983,9 +3068,9 @@ export class RuntimeOrchestrator {
     }
 
     const sessionId = userEvent.payload.sessionId;
-    const turns = this.sessionTurns.get(sessionId) ?? [];
+    const turns = this.getSessionTurns(sessionId) ?? [];
     if (this.directContextConfig.maxTurns === 0) {
-      this.sessionTurns.set(sessionId, []);
+      this.setSessionTurns(sessionId, []);
       return;
     }
 
@@ -2998,7 +3083,7 @@ export class RuntimeOrchestrator {
     });
 
     const maxStoredTurns = Math.max(this.directContextConfig.maxTurns * 3, 12);
-    this.sessionTurns.set(sessionId, turns.slice(-maxStoredTurns));
+    this.setSessionTurns(sessionId, turns.slice(-maxStoredTurns));
   }
 
   private recordDirectContextAssistant(sessionId: string, reply: AgentReplyEvent): void {
@@ -3006,9 +3091,9 @@ export class RuntimeOrchestrator {
       return;
     }
 
-    const entries = this.sessionTurns.get(sessionId) ?? [];
+    const entries = this.getSessionTurns(sessionId) ?? [];
     if (this.directContextConfig.maxTurns === 0) {
-      this.sessionTurns.set(sessionId, []);
+      this.setSessionTurns(sessionId, []);
       return;
     }
 
@@ -3019,7 +3104,43 @@ export class RuntimeOrchestrator {
       assistantMessage: redactUnsafeText(reply.payload.content)
     });
     const maxStoredTurns = Math.max(this.directContextConfig.maxTurns * 3, 12);
-    this.sessionTurns.set(sessionId, entries.slice(-maxStoredTurns));
+    this.setSessionTurns(sessionId, entries.slice(-maxStoredTurns));
+  }
+
+  private getSessionTurns(sessionId: string): DirectContextEntry[] | undefined {
+    this.pruneSessionTurns();
+    const entry = this.sessionTurns.get(sessionId);
+    if (!entry) {
+      return undefined;
+    }
+    entry.lastAccessedAtMs = Date.now();
+    this.sessionTurns.delete(sessionId);
+    this.sessionTurns.set(sessionId, entry);
+    return entry.entries;
+  }
+
+  private setSessionTurns(sessionId: string, entries: DirectContextEntry[]): void {
+    this.sessionTurns.delete(sessionId);
+    this.sessionTurns.set(sessionId, {
+      entries,
+      lastAccessedAtMs: Date.now()
+    });
+    this.pruneSessionTurns();
+  }
+
+  private pruneSessionTurns(now = Date.now()): void {
+    for (const [sessionId, entry] of this.sessionTurns) {
+      if (now - entry.lastAccessedAtMs >= runtimeCacheRetentionMs) {
+        this.sessionTurns.delete(sessionId);
+      }
+    }
+    while (this.sessionTurns.size > sessionTurnCacheMaxSessions) {
+      const oldestSessionId = this.sessionTurns.keys().next().value as string | undefined;
+      if (!oldestSessionId) {
+        break;
+      }
+      this.sessionTurns.delete(oldestSessionId);
+    }
   }
 
   private async measureProvider<TOutput>(
@@ -3689,10 +3810,12 @@ function clampInteger(value: number, min: number, max: number): number {
 }
 
 function conversationMessageFromEvent(
-  event: UserMessageEvent | AssistantMessageEvent,
+  event: RuntimeUserTurnEvent | AssistantMessageEvent,
   role: "user" | "assistant",
   status: ConversationMessage["status"]
 ): ConversationMessageInput {
+  const isUserEvent = isRuntimeUserTurnEvent(event);
+  const userMetadata = isUserEvent ? userEventMetadata(event) : {};
   return {
     id: event.id,
     sessionId: event.payload.sessionId,
@@ -3703,7 +3826,32 @@ function conversationMessageFromEvent(
     status,
     createdAt: event.timestamp,
     completedAt: status === "completed" ? event.timestamp : null,
-    metadata: {}
+    ...(isUserEvent
+      ? {
+          personaId: event.payload.personaId ?? null,
+          subjectUserId: event.payload.subjectUserId ?? null
+        }
+      : {}),
+    metadata: userMetadata
+  };
+}
+
+function userEventMetadata(event: RuntimeUserTurnEvent): Record<string, unknown> {
+  return {
+    ...(event.type === "user.voice.transcript" ? { modality: "voice" } : {}),
+    ...(event.type === "user.voice.transcript" && event.payload.language
+      ? { language: event.payload.language }
+      : {}),
+    ...(event.type === "user.voice.transcript" && event.payload.confidence !== undefined
+      ? { confidence: event.payload.confidence }
+      : {}),
+    ...(event.payload.createdByUserId !== undefined
+      ? { createdByUserId: event.payload.createdByUserId }
+      : {}),
+    ...(event.payload.speakerId !== undefined ? { speakerId: event.payload.speakerId } : {}),
+    ...(event.payload.voiceProfileId !== undefined
+      ? { voiceProfileId: event.payload.voiceProfileId }
+      : {})
   };
 }
 
@@ -3722,6 +3870,13 @@ function buildDirectContextEntries(
   const discardedUserIds = new Set<string>();
   for (const assistant of ordered) {
     if (assistant.message.role !== "assistant" || assistant.message.status === "completed") {
+      continue;
+    }
+    const recoveryReason = assistant.message.metadata?.["recoveryReason"];
+    if (recoveryReason === "stale-streaming-message") {
+      // A maintenance recovery closes an abandoned assistant row. It must not
+      // make an otherwise completed preceding user turn disappear from the
+      // rebuilt context just because the abandoned row has no matching user.
       continue;
     }
     const precedingUser = [...allCompletedUsers]
@@ -3950,9 +4105,17 @@ function redactUnsafeMetadata(value: unknown): Record<string, unknown> | undefin
 }
 
 function isRuntimeUserMessageEvent(
-  input: UserMessageEvent | HandleUserMessageInput
+  input: RuntimeUserTurnEvent | HandleUserMessageInput
 ): input is UserMessageEvent {
   return "type" in input && input.type === "user.message";
+}
+
+function isRuntimeUserTurnEvent(
+  input: RuntimeUserTurnEvent | HandleUserMessageInput | AssistantMessageEvent
+): input is RuntimeUserTurnEvent {
+  return (
+    "type" in input && (input.type === "user.message" || input.type === "user.voice.transcript")
+  );
 }
 
 /** Stable assistant identity for a finalized runtime turn. */
@@ -3969,6 +4132,86 @@ function canonicalAgentReplyId(sourceEvent: UserMessageEvent | UserVoiceTranscri
 
 function finalizedTurnIdempotencyKey(assistantMessageId: string): string {
   return `yuvi:finalized-turn:${assistantMessageId}`;
+}
+
+type BoundedPromiseCacheEntry<T> = {
+  value: Promise<T>;
+  lastAccessedAtMs: number;
+  settled: boolean;
+};
+
+/** Small runtime-lifetime cache that never evicts an in-flight promise. */
+class BoundedPromiseCache<T> {
+  private readonly entries = new Map<string, BoundedPromiseCacheEntry<T>>();
+
+  constructor(
+    private readonly maxEntries: number,
+    private readonly retentionMs: number
+  ) {}
+
+  get(key: string): Promise<T> | undefined {
+    this.prune();
+    const entry = this.entries.get(key);
+    if (!entry) {
+      return undefined;
+    }
+    entry.lastAccessedAtMs = Date.now();
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+    return entry.value;
+  }
+
+  set(key: string, promise: Promise<T>): Promise<T> {
+    this.entries.delete(key);
+    const now = Date.now();
+    const entry: BoundedPromiseCacheEntry<T> = {
+      value: undefined as unknown as Promise<T>,
+      lastAccessedAtMs: now,
+      settled: false
+    };
+    const tracked = promise.then(
+      (value) => {
+        entry.settled = true;
+        return value;
+      },
+      (error: unknown) => {
+        entry.settled = true;
+        this.delete(key, tracked);
+        throw error;
+      }
+    );
+    entry.value = tracked;
+    this.entries.set(key, entry);
+    this.prune();
+    return tracked;
+  }
+
+  delete(key: string, expected?: Promise<T>): void {
+    if (!expected || this.entries.get(key)?.value === expected) {
+      this.entries.delete(key);
+    }
+  }
+
+  get size(): number {
+    this.prune();
+    return this.entries.size;
+  }
+
+  private prune(now = Date.now()): void {
+    for (const [key, entry] of this.entries) {
+      if (entry.settled && now - entry.lastAccessedAtMs >= this.retentionMs) {
+        this.entries.delete(key);
+      }
+    }
+
+    while (this.entries.size > this.maxEntries) {
+      const oldestSettled = [...this.entries.entries()].find(([, entry]) => entry.settled);
+      if (!oldestSettled) {
+        return;
+      }
+      this.entries.delete(oldestSettled[0]);
+    }
+  }
 }
 
 function isSafeProviderCallMetadata(value: unknown): value is SafeProviderCallMetadata {

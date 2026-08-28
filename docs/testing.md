@@ -90,7 +90,7 @@ Normal development/runtime is real-provider-first (`PROVIDER_ALLOW_MOCKS=false`)
 
 Provider fallback tests cover chat chains where DeepSeek fails and a local OpenAI-compatible provider succeeds, route status for NVIDIA/local providers, mock opt-in behavior, STT/TTS/Vision fallback to explicit mock providers, unavailable media providers when mocks are disabled, and redaction of API keys and `sk-...` style tokens in attempted-provider metadata.
 
-Media route tests use JSON/base64 developer payloads for hermetic coverage. They assert mock STT returns deterministic transcription text, `/v1/voice/message` passes through the normal message runtime and can keep `writeMemory=false`, CurrentAffect can be detected from transcribed text, TTS and vision return standard fallback metadata, and raw audio/image data or secrets are not leaked.
+Media route tests use JSON/base64 developer payloads for hermetic coverage. They assert mock STT returns deterministic transcription text, `/v1/voice/message` emits a canonical `user.voice.transcript` through the normal durable message runtime, CurrentAffect can be detected from transcribed text, TTS and vision return standard fallback metadata, and raw audio/image data or secrets are not leaked.
 
 Embedding verification is explicit. `POST /providers/verify/embedding` and the Dashboard **Verify Embedding** button call the active embedding provider with a small test string, may consume provider usage, and return only safe provider/model/dimension/latency metadata. Default tests use mock embedding or stubbed HTTP responses. A dimension mismatch returns `ok=false` with expected and actual dimensions, and raw vectors/API keys are never returned.
 

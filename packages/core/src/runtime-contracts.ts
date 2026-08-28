@@ -56,6 +56,7 @@ export type ConversationPersistenceOperation =
   | "assistant_stream_append"
   | "assistant_stream_complete"
   | "assistant_stream_fail"
+  | "stream_recovery"
   | "context_restore";
 
 export type DirectContextConfig = {

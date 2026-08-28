@@ -67,6 +67,230 @@ function deferred<T>(): {
 }
 
 describe("RuntimeOrchestrator", () => {
+  it("routes voice through the durable user-turn and finalized-ingestion flow", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    const conversation = new InMemoryConversationRepository();
+    const ledger = new InMemoryFinalizedIngestionRepository();
+    const admissions: string[] = [];
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createMem0RecordingMemory(async () => completeMemoryWrite()),
+      conversation,
+      finalizedIngestion: new FinalizedIngestionService(ledger),
+      memoryIngestionCoordinator: {
+        async notifyAdmitted(admission) {
+          admissions.push(admission.turn.finalizedTurnId);
+        },
+        wake() {}
+      },
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    const reply = await runtime.handleAudioInput({
+      sessionId: "voice-durable-session",
+      audioBase64: "AQID",
+      language: "en",
+      metadata: { mockTranscription: "I prefer concise replies." },
+      personaId: "alice",
+      subjectUserId: "user-a",
+      createdByUserId: "user-a",
+      speakerId: "speaker-a",
+      voiceProfileId: "voice-a"
+    });
+    await runtime.drainMemoryWrites();
+
+    const transcript = published.find((event) => event.type === "user.voice.transcript");
+    const user = transcript ? await conversation.getMessageById(transcript.id) : null;
+    const assistant = transcript
+      ? await conversation.getMessageById(`assistant:${transcript.id}`)
+      : null;
+    const turn = assistant?.finalizedTurnId
+      ? await ledger.getTurn(assistant.finalizedTurnId)
+      : null;
+
+    expect(reply.payload.content).toBeTruthy();
+    expect(transcript).toMatchObject({
+      type: "user.voice.transcript",
+      payload: {
+        sessionId: "voice-durable-session",
+        content: "I prefer concise replies.",
+        language: "en",
+        personaId: "alice",
+        subjectUserId: "user-a"
+      }
+    });
+    expect(user).toMatchObject({
+      role: "user",
+      status: "completed",
+      content: "I prefer concise replies.",
+      personaId: "alice",
+      subjectUserId: "user-a",
+      metadata: {
+        modality: "voice",
+        language: "en",
+        confidence: 1,
+        createdByUserId: "user-a",
+        speakerId: "speaker-a",
+        voiceProfileId: "voice-a"
+      }
+    });
+    expect(assistant).toMatchObject({
+      role: "assistant",
+      status: "completed",
+      sourceUserEventId: transcript?.id,
+      personaId: "alice",
+      subjectUserId: "user-a",
+      ingestionRequested: true
+    });
+    expect(assistant?.finalizedTurnId).toBeTruthy();
+    expect(turn?.status).toBe("pending");
+    expect(admissions).toEqual([assistant?.finalizedTurnId]);
+    expect(published.some((event) => event.type === "agent.reply")).toBe(true);
+    expect(published.some((event) => event.type === "assistant.message")).toBe(true);
+  });
+
+  it("evicts a rejected finalized-admission promise while retaining successful dedupe", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const ledger = new InMemoryFinalizedIngestionRepository();
+    const service = new FinalizedIngestionService(ledger);
+    const originalAdmit = service.admit.bind(service);
+    const admit = vi.spyOn(service, "admit");
+    admit
+      .mockRejectedValueOnce(new Error("transient admission outage"))
+      .mockImplementation((input) => originalAdmit(input));
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createMem0RecordingMemory(async () => completeMemoryWrite()),
+      finalizedIngestion: service,
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const admissionInput = finalizedStatusAdmission("retry-admission");
+    const ensure = (
+      runtime as unknown as {
+        ensureFinalizedAdmission(
+          input: ReturnType<typeof finalizedStatusAdmission>
+        ): Promise<unknown>;
+      }
+    ).ensureFinalizedAdmission.bind(runtime);
+
+    await expect(ensure(admissionInput)).rejects.toThrow("transient admission outage");
+    await expect(ensure(admissionInput)).resolves.toBeTruthy();
+    await expect(ensure(admissionInput)).resolves.toBeTruthy();
+    expect(admit).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts a rejected finalized-turn lookup while retaining the successful identity", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const originalLookup = conversation.getMessageById.bind(conversation);
+    let lookups = 0;
+    conversation.getMessageById = async (messageId) => {
+      lookups += 1;
+      if (lookups === 1) {
+        throw new Error("transient conversation lookup outage");
+      }
+      return originalLookup(messageId);
+    };
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async () => completeMemoryWrite()),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const event = createEvent("user.message", {
+      sessionId: "retry-finalized-id-session",
+      content: "hello"
+    });
+
+    await expect(
+      runtime.handleUserMessage(event, { readMemory: false, writeMemory: false })
+    ).rejects.toThrow("transient conversation lookup outage");
+    await expect(
+      runtime.handleUserMessage(event, { readMemory: false, writeMemory: false })
+    ).resolves.toBeTruthy();
+    await expect(
+      runtime.handleUserMessage(event, { readMemory: false, writeMemory: false })
+    ).resolves.toBeTruthy();
+    expect(lookups).toBe(2);
+  });
+
+  it("evicts a failed finalized memory write and deduplicates its later success", async () => {
+    let writes = 0;
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async (input) => {
+        writes += 1;
+        if (writes === 1) {
+          throw new Error("transient memory outage");
+        }
+        return completeMemoryWrite(
+          typeof input["idempotencyKey"] === "string" ? input["idempotencyKey"] : undefined
+        );
+      }),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const event = createEvent("user.message", {
+      sessionId: "retry-memory-session",
+      content: "I prefer concise replies."
+    });
+
+    await runtime.handleUserMessage(event);
+    await runtime.drainMemoryWrites();
+    await runtime.handleUserMessage(event);
+    await runtime.drainMemoryWrites();
+    await runtime.handleUserMessage(event);
+    await runtime.drainMemoryWrites();
+
+    expect(writes).toBe(2);
+    expect(runtime.getRuntimeCacheStats().finalizedMemoryWrites).toBe(1);
+  });
+
+  it("bounds completed runtime cache entries and expires inactive session state", async () => {
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(async () => completeMemoryWrite()),
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    for (let index = 0; index < 300; index += 1) {
+      await runtime.handleUserMessage(
+        { sessionId: `bounded-session-${index}`, content: `turn-${index}` },
+        { readMemory: false, writeMemory: false }
+      );
+    }
+
+    expect(runtime.getRuntimeCacheStats()).toMatchObject({
+      sessionTurns: 256,
+      finalizedTurnIds: 256,
+      finalizedMemoryWrites: 0,
+      finalizedAdmissions: 0
+    });
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + 15 * 60 * 1000 + 1);
+      await runtime.handleUserMessage(
+        { sessionId: "ttl-session", content: "ttl" },
+        { readMemory: false, writeMemory: false }
+      );
+      vi.advanceTimersByTime(15 * 60 * 1000 + 1);
+      expect(runtime.getRuntimeCacheStats()).toMatchObject({
+        sessionTurns: 0,
+        finalizedTurnIds: 0
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("tracks one finalized non-stream Mem0 write with canonical IDs", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const published: RuntimeEvent[] = [];
@@ -804,7 +1028,6 @@ describe("RuntimeOrchestrator", () => {
       operation: "finalized_turn_ingestion"
     });
   });
-
 });
 
 function completeMemoryWrite(idempotencyKey?: string): MemoryConversationTurnWriteResult {

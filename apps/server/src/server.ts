@@ -74,6 +74,22 @@ export async function buildServer(config: ServerConfig) {
   }
 
   const context = await createAppContext(app.log, config);
+  try {
+    const recovered = await context.runtime.recoverStaleStreamingMessages({
+      limit: config.memoryMaintenance.limit
+    });
+    if (recovered.length > 0) {
+      app.log.warn(
+        { recoveredCount: recovered.length },
+        "recovered stale streaming conversation messages at startup"
+      );
+    }
+  } catch (error) {
+    app.log.warn(
+      { err: error },
+      "stale streaming conversation recovery was unavailable at startup"
+    );
+  }
   const maintenanceScheduler = new MemoryMaintenanceScheduler(context, config, app.log);
   context.memoryMaintenanceScheduler = maintenanceScheduler;
   maintenanceScheduler.start();

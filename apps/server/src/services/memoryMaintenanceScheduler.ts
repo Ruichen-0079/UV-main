@@ -33,7 +33,7 @@ export class MemoryMaintenanceScheduler {
   private nextRunAt: Date | null = null;
 
   constructor(
-    context: AppContext,
+    private readonly context: AppContext,
     config: ServerConfig,
     private readonly logger: FastifyBaseLogger
   ) {
@@ -73,6 +73,17 @@ export class MemoryMaintenanceScheduler {
     this.running = true;
     this.lastError = null;
     try {
+      if (!options.dryRun) {
+        const recoveredStreaming = await this.context.runtime.recoverStaleStreamingMessages({
+          limit: options.limit ?? this.limit
+        });
+        if (recoveredStreaming.length > 0) {
+          this.logger.warn(
+            { reason, recoveredCount: recoveredStreaming.length },
+            "recovered stale streaming conversation messages during maintenance"
+          );
+        }
+      }
       const summary = await this.service.run({
         ...options,
         dryRun: options.dryRun ?? false,

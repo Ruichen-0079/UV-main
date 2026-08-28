@@ -8,6 +8,7 @@ import {
   type STTOutput,
   type STTProvider
 } from "@companion/providers";
+import { createEvent } from "@companion/protocol";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
@@ -314,18 +315,18 @@ export async function registerMediaRoutes(
           ...(parsed.data.mockText ? { mockTranscription: parsed.data.mockText } : {})
         }
       });
-      const response = await context.runtime.handleUserMessage(
-        {
-          sessionId: parsed.data.sessionId,
-          content: transcription.text,
-          ...identityMetadata(parsed.data)
-        },
-        {
-          readMemory: parsed.data.options?.readMemory,
-          writeMemory: parsed.data.options?.writeMemory,
-          voiceOutput: parsed.data.options?.voiceOutput
-        }
-      );
+      const transcriptEvent = createEvent("user.voice.transcript", {
+        sessionId: parsed.data.sessionId,
+        content: transcription.text,
+        language: transcription.language,
+        confidence: transcription.confidence,
+        ...identityMetadata(parsed.data)
+      });
+      const response = await context.runtime.handleUserMessage(transcriptEvent, {
+        readMemory: parsed.data.options?.readMemory,
+        writeMemory: parsed.data.options?.writeMemory,
+        voiceOutput: parsed.data.options?.voiceOutput
+      });
 
       const sttMetadata = standardProviderMetadata("stt", transcription);
       return reply.send({
