@@ -184,6 +184,8 @@ LOCAL_EMBEDDING_DIMENSIONS=1536
 
 Local means a developer-controlled OpenAI-compatible gateway such as Ollama, llama.cpp server, vLLM, LM Studio, or another local adapter. Configuration does not prove the local server is running; explicit Verify actions are the check.
 
+The current Linux Qwen3-Embedding-0.6B Q8_0 deployment uses `llama-server` on loopback at `http://127.0.0.1:8128/v1`, with `LOCAL_EMBEDDING_MODEL=Qwen3-Embedding-0.6B-Q8_0.gguf` and effective `LOCAL_EMBEDDING_DIMENSIONS=512`. The model emits native 1024-dimensional vectors; Yuvi's existing local embedding provider truncates the first 512 values and L2-normalizes that prefix before Memory sees it. The deployment is CPU-only and does not depend on an OpenAI `dimensions` response feature.
+
 YUVI is real-provider-first by default. `EMBEDDING_PROVIDER=openai-compatible` uses an OpenAI-style `/embeddings` endpoint when `EMBEDDING_API_BASEURL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSIONS` are configured. DashScope `text-embedding-v4` can be used through compatible mode:
 
 ```env

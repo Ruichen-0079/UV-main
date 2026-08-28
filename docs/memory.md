@@ -240,6 +240,8 @@ MEMORY_VECTOR_HNSW_EF_SEARCH=
 
 Allowed index types are `hnsw`, `ivfflat`, and `none`. Set `MEMORY_VECTOR_INDEX_ENABLED=false` or `MEMORY_VECTOR_INDEX_TYPE=none` to skip index creation in small development setups. `EMBEDDING_DIMENSIONS` controls the fixed-dimension expression used during migration; DashScope `text-embedding-v4` commonly uses `1536`.
 
+For the current Linux Qwen3-Embedding-0.6B Q8_0 local deployment, set `EMBEDDING_DIMENSIONS=512`. Migration `010_embedding_mrl_512_v1.sql` converts existing 1024-dimensional Qwen vectors in place to the first-512 L2-normalized prefix, preserves memory identity/content/metadata and temporal fields, and rebuilds the configured cosine ANN index at 512 dimensions. It is target-aware and leaves other configured dimensions unchanged.
+
 Run migrations normally:
 
 ```bash

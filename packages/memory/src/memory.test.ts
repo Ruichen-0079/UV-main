@@ -2786,6 +2786,10 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("memory_vector_index_enabled");
     expect(combinedSql).toContain("memory_vector_index_type");
     expect(combinedSql).toContain("memory_vector_distance");
+    expect(migrations.map((migration) => migration.name)).toContain("010_embedding_mrl_512_v1.sql");
+    expect(combinedSql).toContain("l2_normalize(subvector(embedding, 1, 512))");
+    expect(combinedSql).toContain("alter column embedding type vector(512)");
+    expect(combinedSql).toContain("mixed 512 and 1024 dimensional vectors");
   });
 });
 

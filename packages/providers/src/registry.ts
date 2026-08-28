@@ -2436,7 +2436,9 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
           retryable: false
         });
       }
-      return vectors;
+      return vectors.map((vector) =>
+        transformLocalMrlEmbedding(this.name, this.dimensions, vector)
+      );
     } catch (error) {
       if (transport.source !== null) {
         throw createOpenAICompatibleTransportAbortError(this.name, "embedding", transport);
@@ -2455,6 +2457,59 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
       transport.cleanup();
     }
   }
+}
+
+function transformLocalMrlEmbedding(
+  provider: string,
+  dimensions: number,
+  vector: number[]
+): number[] {
+  // llama-server currently returns the model's native embedding length even
+  // when the OpenAI-compatible request includes `dimensions`. Keep the MRL
+  // transform at the existing local-provider boundary so Core and Memory see
+  // only the configured production dimension.
+  if (provider !== "local" || dimensions !== 512) {
+    return vector;
+  }
+
+  const prefix = vector.slice(0, dimensions);
+  if (prefix.length !== dimensions || prefix.some((value) => !Number.isFinite(value))) {
+    throw malformedLocalMrlEmbedding(
+      provider,
+      "Embedding prefix is shorter than 512 or non-finite."
+    );
+  }
+
+  const norm = Math.sqrt(prefix.reduce((sum, value) => sum + value * value, 0));
+  if (!Number.isFinite(norm) || norm === 0) {
+    throw malformedLocalMrlEmbedding(provider, "Embedding prefix has no finite non-zero norm.");
+  }
+
+  const normalized = prefix.map((value) => value / norm);
+  const normalizedNorm = Math.sqrt(normalized.reduce((sum, value) => sum + value * value, 0));
+  if (
+    normalized.length !== dimensions ||
+    normalized.some((value) => !Number.isFinite(value)) ||
+    !Number.isFinite(normalizedNorm) ||
+    Math.abs(normalizedNorm - 1) > 1e-6
+  ) {
+    throw malformedLocalMrlEmbedding(
+      provider,
+      "Embedding normalization did not produce a finite unit vector."
+    );
+  }
+
+  return normalized;
+}
+
+function malformedLocalMrlEmbedding(provider: string, message: string): ProviderError {
+  return new ProviderError({
+    provider,
+    capability: "embedding",
+    code: ProviderErrorCode.MalformedResponse,
+    message,
+    retryable: false
+  });
 }
 
 export function createMockChatProvider(name = "mock-chat"): ChatProvider {
