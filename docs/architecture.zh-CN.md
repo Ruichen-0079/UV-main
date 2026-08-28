@@ -183,19 +183,19 @@ Provider failure 在 provider boundary 标准化。除非 Runtime contract 明�
 
 ## 当前结构状态
 
-大型 Runtime implementation 已经从 `packages/core/src/index.ts` 中抽离到明确 implementation seam。Runtime 测试也正在按 semantic island 拆分：
+大型 Runtime implementation 已经从 `packages/core/src/index.ts` 中抽离到明确 implementation seam。Runtime 测试也已经按 semantic island 完成拆分：
 
 - streaming/reply
 - finalized persistence / P4
 - Memory integration
 - proactive / P6
 
-R5A1、R5A2、R5A3 已完成；R5A4 与最终 structural closeout 完成后，才恢复产品开发。
+R5A1、R5A2、R5A3、R5A4 已完成。Runtime 测试拆分与 Structural Debt Paydown 均已完成；产品开发已解除阻塞，可以开始 P8。
 
 这一轮拆分刻意保持机械性：允许小型 test helper 重复；不允许修改 assertion、state shape、Runtime API、provider semantics 或 production behavior。
 
 ## Future Boundary
 
-结构收口后进入未来 companion work。规划顺序从 P8 identity/persona/relationship 开始，再到 temporal、continuity/attention、Character/Cognition boundary、capabilities、embodied presentation，以及 Character post-training。
+P8 是下一阶段产品工作。规划顺序从 identity/persona/relationship 开始，再到 temporal、continuity/attention、Character/Cognition boundary、capabilities、embodied presentation，以及 Character post-training。
 
 这些文件是规划权威，不代表对应系统已经实现。入口见 [`future/README.md`](future/README.md)。
