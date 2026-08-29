@@ -44,10 +44,13 @@ It is not serialized into prompt sections.
 
 P8-1A defines the complete epistemic vocabulary `KNOWN`, `UNKNOWN`,
 `CONFLICTING`, `PARTIAL`, `EMPTY`, `UNAVAILABLE`, and `ERROR`. Authored-only
-projection currently uses `KNOWN` when explicit invariants exist and `EMPTY`
-when that target has no authored invariant. The remaining states are retained
-for later evidence-backed phases and must not be collapsed: missing evidence,
-an unavailable source, and an error are different meanings.
+projection currently uses `KNOWN` when explicit invariants exist and `UNKNOWN`
+when that target has no authored invariant. P8-1A performs no evidence query,
+so it does not manufacture `EMPTY`: that state is reserved for a successful
+evidence query that produced no relevant evidence. `UNAVAILABLE` and `ERROR`
+are likewise reserved for later evidence-backed phases. These meanings must
+not be collapsed: insufficient authoritative meaning, an empty successful
+query, an unavailable source, and an error are different states.
 
 The authored surface is intentionally tiny: stable character name or
 description, an explicit identity boundary, and a semantically appropriate

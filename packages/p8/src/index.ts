@@ -119,7 +119,7 @@ export function createP8Projection(input: P8ProjectionInput): P8Projection {
 }
 
 function statusFor(invariants: readonly P8AuthoredInvariant[]): P8EpistemicState {
-  return invariants.length > 0 ? "KNOWN" : "EMPTY";
+  return invariants.length > 0 ? "KNOWN" : "UNKNOWN";
 }
 
 function freezeAddress(address: P8IdentityAddress): P8IdentityAddress {

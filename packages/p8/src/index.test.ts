@@ -152,12 +152,25 @@ describe("P8-1A semantic identity projection", () => {
       authoredInvariants: DEFAULT_AUTHORED_INVARIANTS
     });
 
-    expect(projection.persona.status).toBe("EMPTY");
+    expect(projection.identity.status).toBe("KNOWN");
+    expect(projection.persona.status).toBe("UNKNOWN");
     expect(projection).not.toHaveProperty("retrievedMemories");
     expect(projection).not.toHaveProperty("rankedMemories");
     expect(projection).not.toHaveProperty("recentConversation");
     expect(projection).not.toHaveProperty("prompt");
     expect(projection).not.toHaveProperty("sections");
+  });
+
+  it("uses UNKNOWN when authored identity or persona meaning is absent", () => {
+    const projection = createP8Projection({
+      address: createDefaultP8IdentityAddress(),
+      authoredInvariants: []
+    });
+
+    expect(projection.identity.status).toBe("UNKNOWN");
+    expect(projection.persona.status).toBe("UNKNOWN");
+    expect(projection.identity.status).not.toBe("EMPTY");
+    expect(projection.persona.status).not.toBe("EMPTY");
   });
 
   it("is deeply immutable and accepts bounded authored provenance only", () => {
