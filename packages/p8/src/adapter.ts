@@ -52,6 +52,8 @@ export type P8MemoryEvidenceAdapterInput = Readonly<{
 }>;
 
 export type P8InterpretationCandidateInput = Readonly<{
+  /** Stable caller-supplied semantic identity; never derived from text or position. */
+  interpretationReference: string;
   domain: P8EvidenceInterpretationInput["domain"];
   meaning?: string;
   evidenceLinks?: readonly P8InterpretationEvidenceLinkInput[];
@@ -199,6 +201,7 @@ export function createP8EvidenceAdapterProjection(
   const interpretations = (input.interpretationCandidates ?? []).map((candidate) => {
     const accessStatus = accessStatusForCandidate(candidate, longTerm, recent, allEvidence);
     return createP8EvidenceInterpretation({
+      interpretationReference: candidate.interpretationReference,
       domain: candidate.domain,
       ...(candidate.meaning === undefined ? {} : { meaning: candidate.meaning }),
       access: {

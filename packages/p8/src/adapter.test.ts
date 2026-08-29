@@ -75,6 +75,7 @@ function directCandidate(
     | "RELATIONSHIP_CONTEXT" = "BACKGROUND"
 ) {
   return {
+    interpretationReference: `interpretation-${evidenceReference}`,
     domain,
     meaning,
     evidenceLinks: [
@@ -468,6 +469,7 @@ describe("P8-1C read-only evidence adapter", () => {
       },
       interpretationCandidates: [
         {
+          interpretationReference: "relationship-interpretation",
           domain: "RELATIONSHIP_CONTEXT",
           meaning: "The relationship has a stable property.",
           evidenceLinks: [

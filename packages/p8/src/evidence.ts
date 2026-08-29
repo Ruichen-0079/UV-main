@@ -105,6 +105,8 @@ export type P8EvidenceAccessOutcome = Readonly<{
 }>;
 
 export type P8EvidenceInterpretationInput = Readonly<{
+  /** Stable semantic identity for future correction/revision targeting. */
+  interpretationReference: string;
   domain: P8InterpretationDomain;
   meaning?: string;
   access: P8EvidenceAccessOutcomeInput;
@@ -113,6 +115,7 @@ export type P8EvidenceInterpretationInput = Readonly<{
 
 export type P8EvidenceInterpretation = Readonly<{
   interpretationVersion: typeof P8_1B_CONTRACT_VERSION;
+  interpretationReference: string;
   domain: P8InterpretationDomain;
   accessStatus: P8EvidenceAccessStatus;
   status: P8EpistemicState;
@@ -190,6 +193,7 @@ export function createP8EvidenceAccessOutcome(
 export function createP8EvidenceInterpretation(
   input: P8EvidenceInterpretationInput
 ): P8EvidenceInterpretation {
+  validateBoundedText(input.interpretationReference, "interpretation.interpretationReference", 160);
   validateEnum(input.domain, P8_INTERPRETATION_DOMAINS, "interpretation.domain");
   const meaning = normalizeOptionalText(input.meaning, "interpretation.meaning", 500);
   const access = createP8EvidenceAccessOutcome(input.access);
@@ -212,6 +216,7 @@ export function createP8EvidenceInterpretation(
 
   return Object.freeze({
     interpretationVersion: P8_1B_CONTRACT_VERSION,
+    interpretationReference: input.interpretationReference,
     domain: input.domain,
     accessStatus: access.status,
     status,

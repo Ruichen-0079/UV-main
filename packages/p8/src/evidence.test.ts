@@ -44,9 +44,11 @@ function interpretation(
     | "COMMUNICATION_PREFERENCE"
     | "SHARED_HISTORY"
     | "RELATIONSHIP_CONTEXT" = "RELATIONSHIP_CONTEXT",
-  evidenceLinks: readonly P8InterpretationEvidenceLinkInput[] = []
+  evidenceLinks: readonly P8InterpretationEvidenceLinkInput[] = [],
+  interpretationReference = "test-interpretation"
 ) {
   return createP8EvidenceInterpretation({
+    interpretationReference,
     domain,
     ...(meaning === undefined ? {} : { meaning }),
     access: accessOutcome,
