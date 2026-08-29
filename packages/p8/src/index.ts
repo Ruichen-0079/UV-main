@@ -27,17 +27,11 @@ export type P8ProvenanceReference = Readonly<{
   revision?: string;
 }>;
 
-export const P8_AUTHORED_INVARIANT_REVISABILITY = ["FIXED", "USER_REVISABLE"] as const;
-
-export type P8AuthoredInvariantRevisability = (typeof P8_AUTHORED_INVARIANT_REVISABILITY)[number];
-
 export type P8AuthoredInvariant = Readonly<{
   key: string;
   target: "identity" | "persona";
   statement: string;
   provenance: P8ProvenanceReference;
-  /** Defaults to FIXED so core identity is not silently user-editable. */
-  revisability?: P8AuthoredInvariantRevisability;
 }>;
 
 export type P8ProjectedInvariant = P8AuthoredInvariant;
@@ -166,7 +160,6 @@ function freezeInvariant(invariant: P8AuthoredInvariant): P8ProjectedInvariant {
     key: invariant.key,
     target: invariant.target,
     statement: invariant.statement,
-    revisability: invariant.revisability ?? "FIXED",
     provenance: Object.freeze({
       source: "authored",
       reference: provenance.reference,

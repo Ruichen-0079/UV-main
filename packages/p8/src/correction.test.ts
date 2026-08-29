@@ -12,7 +12,8 @@ import type { P8RecentConversationMessageInput } from "./adapter.js";
 import {
   P8_1D_VERSION,
   applyP8Corrections,
-  type P8CorrectionApplicationInput,
+  type P8AuthoredInvariantRevisionPolicy,
+  type P8CorrectionTargetableInterpretation,
   type P8ExplicitCorrection
 } from "./correction.js";
 
@@ -100,7 +101,6 @@ function baseProjection(
       : {
           interpretationCandidates: [
             {
-              interpretationReference: interpretation.reference,
               domain: interpretation.domain ?? "BACKGROUND",
               meaning: interpretation.meaning,
               evidenceLinks: (
@@ -123,6 +123,15 @@ type CorrectionOverrides = Omit<Partial<P8ExplicitCorrection>, "replacementMeani
 
 function correction(overrides: CorrectionOverrides = {}): P8ExplicitCorrection {
   const { replacementMeaning: requestedReplacementMeaning, ...otherOverrides } = overrides;
+  const hasReplacementMeaning = Object.prototype.hasOwnProperty.call(
+    overrides,
+    "replacementMeaning"
+  );
+  const replacementMeaning = hasReplacementMeaning
+    ? requestedReplacementMeaning
+    : overrides.action === "RETRACT"
+      ? undefined
+      : "The corrected semantic meaning.";
   return {
     correctionReference: "correction-1",
     address: ADDRESS,
@@ -138,20 +147,48 @@ function correction(overrides: CorrectionOverrides = {}): P8ExplicitCorrection {
       suppliedAt: "2026-08-29T00:02:00.000Z"
     },
     ...otherOverrides,
-    ...(overrides.action === "RETRACT"
-      ? {}
-      : { replacementMeaning: requestedReplacementMeaning ?? "The corrected semantic meaning." })
+    ...(replacementMeaning === undefined ? {} : { replacementMeaning })
   } as P8ExplicitCorrection;
 }
 
 function apply(
   projection: ReturnType<typeof baseProjection>,
-  corrections: readonly P8ExplicitCorrection[]
+  corrections: readonly P8ExplicitCorrection[],
+  options: {
+    targetableInterpretations?: readonly P8CorrectionTargetableInterpretation[];
+    authoredInvariantRevisionPolicies?: readonly P8AuthoredInvariantRevisionPolicy[];
+  } = {}
 ) {
   return applyP8Corrections({
     baseProjection: projection,
     scopeReference: SCOPE,
-    corrections
+    corrections,
+    ...options
+  });
+}
+
+function bindInterpretations(
+  projection: ReturnType<typeof baseProjection>,
+  references: readonly string[] = ["interpretation-1"]
+): readonly P8CorrectionTargetableInterpretation[] {
+  if (projection.interpretations.length !== references.length) {
+    throw new Error("test interpretation binding count mismatch");
+  }
+  return projection.interpretations.map((interpretation, index) => ({
+    interpretationReference: references[index]!,
+    interpretation
+  }));
+}
+
+function applyToInterpretations(
+  projection: ReturnType<typeof baseProjection>,
+  corrections: readonly P8ExplicitCorrection[],
+  references?: readonly string[],
+  options: { authoredInvariantRevisionPolicies?: readonly P8AuthoredInvariantRevisionPolicy[] } = {}
+) {
+  return apply(projection, corrections, {
+    targetableInterpretations: bindInterpretations(projection, references),
+    ...options
   });
 }
 
@@ -180,21 +217,24 @@ function interpretationBase(
 
 describe("P8-1D explicit correction semantics", () => {
   it("revises an interpretation with explicit user authority", () => {
-    const result = apply(interpretationBase(), [correction()]);
+    const result = applyToInterpretations(interpretationBase(), [correction()]);
 
     expect(result.correctionVersion).toBe(P8_1D_VERSION);
     expect(result.interpretations[0]).toMatchObject({
-      interpretationReference: "interpretation-1",
       status: "KNOWN",
       support: "DIRECT",
       meaning: "The corrected semantic meaning.",
       evidenceLinks: [],
       provenance: []
     });
+    expect(result.interpretations[0]).not.toHaveProperty("interpretationReference");
+    expect(result.targetableInterpretations?.[0]?.interpretationReference).toBe(
+      "interpretation-1"
+    );
   });
 
   it("preserves audit references while hiding superseded meaning from current output", () => {
-    const result = apply(interpretationBase(), [
+    const result = applyToInterpretations(interpretationBase(), [
       correction({
         supersededEvidenceReferences: ["memory-1"]
       })
@@ -227,7 +267,7 @@ describe("P8-1D explicit correction semantics", () => {
   });
 
   it("retracts an interpretation without inventing its opposite", () => {
-    const result = apply(interpretationBase(), [
+    const result = applyToInterpretations(interpretationBase(), [
       correction({
         action: "RETRACT",
         replacementMeaning: undefined
@@ -246,7 +286,7 @@ describe("P8-1D explicit correction semantics", () => {
   });
 
   it("removes a weak interpretation on explicit retraction", () => {
-    const result = apply(
+    const result = applyToInterpretations(
       interpretationBase({ assertion: { source: "user", verification: "unverified" } }),
       [correction({ action: "RETRACT", replacementMeaning: undefined })]
     );
@@ -259,7 +299,7 @@ describe("P8-1D explicit correction semantics", () => {
   });
 
   it("lets explicit correction outrank old direct evidence", () => {
-    const result = apply(interpretationBase(), [correction()]);
+    const result = applyToInterpretations(interpretationBase(), [correction()]);
 
     expect(result.interpretations[0]?.meaning).toBe("The corrected semantic meaning.");
     expect(result.interpretations[0]?.status).toBe("KNOWN");
@@ -283,9 +323,11 @@ describe("P8-1D explicit correction semantics", () => {
         evidenceReferences: ["memory-1", "assistant-restatement"]
       }
     });
-    const result = apply(projection, [
-      correction({ replacementMeaning: "The relationship is not romantic." })
-    ]);
+    const result = applyToInterpretations(
+      projection,
+      [correction({ replacementMeaning: "The relationship is not romantic." })],
+      ["interpretation-1"]
+    );
 
     expect(result.interpretations[0]?.meaning).toBe("The relationship is not romantic.");
     expect(result.provenance.some((reference) => reference.source === "evidence")).toBe(true);
@@ -294,7 +336,7 @@ describe("P8-1D explicit correction semantics", () => {
 
   it("rejects non-explicit correction authority instead of downgrading it", () => {
     expect(() =>
-      apply(interpretationBase(), [
+      applyToInterpretations(interpretationBase(), [
         correction({
           provenance: {
             source: "ASSISTANT_MODEL_GENERATED",
@@ -335,7 +377,9 @@ describe("P8-1D explicit correction semantics", () => {
 
   it("fails closed for a scope mismatch", () => {
     expect(() =>
-      apply(interpretationBase(), [correction({ scopeReference: { reference: "scope-user-b" } })])
+      applyToInterpretations(interpretationBase(), [
+        correction({ scopeReference: { reference: "scope-user-b" } })
+      ])
     ).toThrow("scope is not authorized");
   });
 
@@ -345,9 +389,9 @@ describe("P8-1D explicit correction semantics", () => {
       personaProfileId: "profile-b",
       subjectScopeId: "subject-a"
     } as const;
-    expect(() => apply(interpretationBase(), [correction({ address: otherAddress })])).toThrow(
-      "address is not authorized"
-    );
+    expect(() =>
+      applyToInterpretations(interpretationBase(), [correction({ address: otherAddress })])
+    ).toThrow("address is not authorized");
   });
 
   it("targets same-text interpretations by stable reference, never by text", () => {
@@ -363,7 +407,6 @@ describe("P8-1D explicit correction semantics", () => {
       longTerm: retrieval("ok", [first, second]),
       interpretationCandidates: [
         {
-          interpretationReference: "interpretation-a",
           domain: "BACKGROUND",
           meaning: "Same text meaning.",
           evidenceLinks: [
@@ -371,7 +414,6 @@ describe("P8-1D explicit correction semantics", () => {
           ]
         },
         {
-          interpretationReference: "interpretation-b",
           domain: "BACKGROUND",
           meaning: "Same text meaning.",
           evidenceLinks: [
@@ -380,20 +422,28 @@ describe("P8-1D explicit correction semantics", () => {
         }
       ]
     });
-    const result = apply(projection, [
-      correction({
-        target: { kind: "INTERPRETATION", interpretationReference: "interpretation-a" }
-      })
-    ]);
+    const result = applyToInterpretations(
+      projection,
+      [
+        correction({
+          target: { kind: "INTERPRETATION", interpretationReference: "interpretation-a" }
+        })
+      ],
+      ["interpretation-a", "interpretation-b"]
+    );
 
     expect(
-      result.interpretations.find((item) => item.interpretationReference === "interpretation-a")
+      result.targetableInterpretations?.find(
+        (item) => item.interpretationReference === "interpretation-a"
+      )?.interpretation
     )?.toMatchObject({
       meaning: "The corrected semantic meaning.",
       status: "KNOWN"
     });
     expect(
-      result.interpretations.find((item) => item.interpretationReference === "interpretation-b")
+      result.targetableInterpretations?.find(
+        (item) => item.interpretationReference === "interpretation-b"
+      )?.interpretation
     )?.toMatchObject({
       meaning: "Same text meaning.",
       status: "KNOWN"
@@ -420,7 +470,6 @@ describe("P8-1D explicit correction semantics", () => {
       key: "persona.user-boundary",
       target: "persona",
       statement: "The user controls this authored boundary.",
-      revisability: "USER_REVISABLE",
       provenance: { source: "authored", reference: "test/revisable" }
     };
     const result = apply(
@@ -433,15 +482,23 @@ describe("P8-1D explicit correction semantics", () => {
             invariantKey: "persona.user-boundary"
           }
         })
-      ]
+      ],
+      {
+        authoredInvariantRevisionPolicies: [
+          {
+            invariantTarget: "persona",
+            invariantKey: "persona.user-boundary",
+            policy: "USER_REVISABLE"
+          }
+        ]
+      }
     );
 
     expect(result.persona.invariants).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           key: "persona.user-boundary",
-          statement: "The corrected semantic meaning.",
-          revisability: "USER_REVISABLE"
+          statement: "The corrected semantic meaning."
         })
       ])
     );
@@ -455,7 +512,6 @@ describe("P8-1D explicit correction semantics", () => {
       key: "persona.user-boundary",
       target: "persona",
       statement: "The user controls this authored boundary.",
-      revisability: "USER_REVISABLE",
       provenance: { source: "authored", reference: "test/revisable" }
     };
     const result = apply(
@@ -470,7 +526,16 @@ describe("P8-1D explicit correction semantics", () => {
             invariantKey: "persona.user-boundary"
           }
         })
-      ]
+      ],
+      {
+        authoredInvariantRevisionPolicies: [
+          {
+            invariantTarget: "persona",
+            invariantKey: "persona.user-boundary",
+            policy: "USER_REVISABLE"
+          }
+        ]
+      }
     );
 
     expect(result.persona.invariants).toEqual([]);
@@ -487,7 +552,7 @@ describe("P8-1D explicit correction semantics", () => {
           evidenceReferences: []
         }
       });
-      const result = apply(projection, [correction()]);
+      const result = applyToInterpretations(projection, [correction()]);
       const expectedStatus =
         status === "empty" ? "SUCCESS_WITH_NO_RELEVANT_EVIDENCE" : status.toUpperCase();
 
@@ -498,7 +563,7 @@ describe("P8-1D explicit correction semantics", () => {
   });
 
   it("resolves explicit correction lineage deterministically", () => {
-    const result = apply(interpretationBase(), [
+    const result = applyToInterpretations(interpretationBase(), [
       correction({
         correctionReference: "correction-1",
         replacementMeaning: "First correction."
@@ -524,7 +589,7 @@ describe("P8-1D explicit correction semantics", () => {
   });
 
   it("keeps incompatible equal-authority corrections CONFLICTING", () => {
-    const result = apply(interpretationBase(), [
+    const result = applyToInterpretations(interpretationBase(), [
       correction({ correctionReference: "correction-a", replacementMeaning: "Meaning A." }),
       correction({
         correctionReference: "correction-b",
@@ -563,8 +628,8 @@ describe("P8-1D explicit correction semantics", () => {
         suppliedAt: "2000-01-01"
       }
     });
-    const forward = apply(interpretationBase(), [first, second]);
-    const reversed = apply(interpretationBase(), [second, first]);
+    const forward = applyToInterpretations(interpretationBase(), [first, second]);
+    const reversed = applyToInterpretations(interpretationBase(), [second, first]);
 
     expect(forward).toEqual(reversed);
     expect(forward.interpretations[0]?.status).toBe("CONFLICTING");
@@ -574,15 +639,15 @@ describe("P8-1D explicit correction semantics", () => {
     const input = [
       correction({ provenance: { source: "EXPLICIT_USER_CORRECTION", reference: "source-a" } })
     ];
-    const first = apply(interpretationBase(), input);
-    const second = apply(interpretationBase(), input);
+    const first = applyToInterpretations(interpretationBase(), input);
+    const second = applyToInterpretations(interpretationBase(), input);
 
     expect(first).toEqual(second);
     expect(first.correctionProvenance[0]?.suppliedAt).toBeUndefined();
   });
 
   it("preserves current Memory access state and adds no relationship scalar or prompt contract", () => {
-    const result = apply(interpretationBase(), [correction()]);
+    const result = applyToInterpretations(interpretationBase(), [correction()]);
     const serialized = JSON.stringify(result);
 
     expect(result.longTermEvidence.accessStatus).toBe("SUCCESS_WITH_EVIDENCE");
@@ -593,11 +658,275 @@ describe("P8-1D explicit correction semantics", () => {
   });
 
   it("returns an immutable correction result", () => {
-    const result = apply(interpretationBase(), [correction()]);
+    const result = applyToInterpretations(interpretationBase(), [correction()]);
 
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.interpretations)).toBe(true);
+    expect(Object.isFrozen(result.targetableInterpretations)).toBe(true);
     expect(Object.isFrozen(result.correctionAudits)).toBe(true);
     expect(Object.isFrozen(result.correctionProvenance)).toBe(true);
+  });
+
+  it("requires an explicit P8-1D binding for an interpretation correction target", () => {
+    expect(() => apply(interpretationBase(), [correction()])).toThrow(
+      "target interpretation is not present"
+    );
+  });
+
+  it("rejects a correction-lineage cycle in either direction", () => {
+    const first = correction({
+      correctionReference: "correction-1",
+      supersedesCorrectionReference: "correction-2"
+    });
+    const second = correction({
+      correctionReference: "correction-2",
+      supersedesCorrectionReference: "correction-1",
+      provenance: { source: "EXPLICIT_USER_CORRECTION", reference: "source-2" }
+    });
+
+    expect(() => applyToInterpretations(interpretationBase(), [first, second])).toThrow(
+      "lineage cannot contain a cycle"
+    );
+  });
+
+  it("rejects correction self-supersession", () => {
+    expect(() =>
+      applyToInterpretations(interpretationBase(), [
+        correction({ supersedesCorrectionReference: "correction-1" })
+      ])
+    ).toThrow("lineage cannot contain a cycle");
+  });
+
+  it("rejects a superseded correction reference that is not supplied", () => {
+    expect(() =>
+      applyToInterpretations(interpretationBase(), [
+        correction({ supersedesCorrectionReference: "correction-missing" })
+      ])
+    ).toThrow("references unavailable correction");
+  });
+
+  it("rejects correction lineage that crosses semantic targets", () => {
+    const revisable: P8AuthoredInvariant = {
+      key: "persona.user-boundary",
+      target: "persona",
+      statement: "The user controls this authored boundary.",
+      provenance: { source: "authored", reference: "test/revisable-cross-target" }
+    };
+    const projection = baseProjection({
+      authoredInvariants: [...DEFAULT_AUTHORED_INVARIANTS, revisable],
+      events: [memoryEvent()],
+      interpretation: {
+        reference: "interpretation-1",
+        meaning: "The original semantic meaning."
+      }
+    });
+
+    expect(() =>
+      applyToInterpretations(
+        projection,
+        [
+          correction({ correctionReference: "correction-1" }),
+          correction({
+            correctionReference: "correction-2",
+            target: {
+              kind: "AUTHORED_INVARIANT",
+              invariantTarget: "persona",
+              invariantKey: "persona.user-boundary"
+            },
+            supersedesCorrectionReference: "correction-1",
+            provenance: { source: "EXPLICIT_USER_CORRECTION", reference: "source-2" }
+          })
+        ],
+        undefined,
+        {
+          authoredInvariantRevisionPolicies: [
+            {
+              invariantTarget: "persona",
+              invariantKey: "persona.user-boundary",
+              policy: "USER_REVISABLE"
+            }
+          ]
+        }
+      )
+    ).toThrow("same semantic target");
+  });
+
+  it.each([
+    ["different payload", "Meaning A.", "Meaning B."],
+    ["identical payload", "Meaning A.", "Meaning A."]
+  ] as const)(
+    "rejects duplicate correction references with %s",
+    (_case, firstMeaning, secondMeaning) => {
+      expect(() =>
+        applyToInterpretations(interpretationBase(), [
+          correction({ correctionReference: "duplicate", replacementMeaning: firstMeaning }),
+          correction({
+            correctionReference: "duplicate",
+            replacementMeaning: secondMeaning,
+            provenance: { source: "EXPLICIT_USER_CORRECTION", reference: "source-2" }
+          })
+        ])
+      ).toThrow("correction reference must be unique");
+    }
+  );
+
+  it("rejects duplicate P8-1D interpretation target bindings", () => {
+    const projection = interpretationBase();
+    const binding = bindInterpretations(projection)[0]!;
+
+    expect(() =>
+      apply(projection, [], {
+        targetableInterpretations: [binding, binding]
+      })
+    ).toThrow("interpretation target binding must be unique");
+  });
+
+  it("rejects unknown interpretation and authored-invariant targets", () => {
+    const projection = interpretationBase();
+
+    expect(() =>
+      applyToInterpretations(projection, [
+        correction({
+          target: { kind: "INTERPRETATION", interpretationReference: "interpretation-missing" }
+        })
+      ])
+    ).toThrow("target interpretation is not present");
+
+    expect(() =>
+      apply(projection, [
+        correction({
+          target: {
+            kind: "AUTHORED_INVARIANT",
+            invariantTarget: "persona",
+            invariantKey: "persona.missing"
+          }
+        })
+      ])
+    ).toThrow("target authored invariant is not present");
+  });
+
+  it.each([
+    "ASSISTANT_MODEL_GENERATED",
+    "SYSTEM_INFERRED",
+    "WEAK_INFERRED",
+    "MEMORY_CORRECTION_EVENT"
+  ] as const)("rejects non-explicit correction authority %s", (source) => {
+    expect(() =>
+      applyToInterpretations(interpretationBase(), [
+        correction({
+          provenance: { source, reference: `spoof-${source}` }
+        })
+      ])
+    ).toThrow("explicit user correction authority");
+  });
+
+  it("rejects malformed REVISE and RETRACT actions without normalizing them", () => {
+    expect(() =>
+      applyToInterpretations(interpretationBase(), [
+        correction({ action: "REVISE", replacementMeaning: undefined })
+      ])
+    ).toThrow("correction.replacementMeaning");
+
+    expect(() =>
+      applyToInterpretations(interpretationBase(), [
+        correction({ action: "RETRACT", replacementMeaning: "must be absent" })
+      ])
+    ).toThrow("cannot supply a replacement meaning");
+  });
+
+  it("does not manufacture supersession provenance for a conflict without a winner", () => {
+    const result = applyToInterpretations(interpretationBase(), [
+      correction({ correctionReference: "correction-a", replacementMeaning: "Meaning A." }),
+      correction({
+        correctionReference: "correction-b",
+        replacementMeaning: "Meaning B.",
+        provenance: { source: "EXPLICIT_USER_CORRECTION", reference: "source-b" }
+      })
+    ]);
+
+    expect(result.interpretations[0]?.status).toBe("CONFLICTING");
+    expect(result.correctionAudits.every((audit) => audit.currentStatus === "CONFLICTING")).toBe(
+      true
+    );
+    expect(
+      result.correctionAudits.every((audit) => audit.supersededByCorrectionReference === undefined)
+    ).toBe(true);
+    expect(result.supersededReferences).toEqual([]);
+  });
+
+  it("deeply freezes P8-1D bindings, projections, provenance, audits, and policies", () => {
+    const revisable: P8AuthoredInvariant = {
+      key: "persona.user-boundary",
+      target: "persona",
+      statement: "The user controls this authored boundary.",
+      provenance: { source: "authored", reference: "test/revisable-freeze" }
+    };
+    const result = applyToInterpretations(
+      baseProjection({
+        authoredInvariants: [...DEFAULT_AUTHORED_INVARIANTS, revisable],
+        events: [memoryEvent()],
+        interpretation: {
+          reference: "interpretation-1",
+          meaning: "The original semantic meaning."
+        }
+      }),
+      [correction({ supersededEvidenceReferences: ["memory-1"] })],
+      ["interpretation-1"],
+      {
+        authoredInvariantRevisionPolicies: [
+          {
+            invariantTarget: "persona",
+            invariantKey: "persona.user-boundary",
+            policy: "USER_REVISABLE"
+          }
+        ]
+      }
+    );
+
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.address)).toBe(true);
+    expect(Object.isFrozen(result.scopeReference)).toBe(true);
+    expect(Object.isFrozen(result.longTermEvidence)).toBe(true);
+    expect(Object.isFrozen(result.longTermEvidence.provenance)).toBe(true);
+    expect(Object.isFrozen(result.identity)).toBe(true);
+    expect(Object.isFrozen(result.identity.invariants)).toBe(true);
+    expect(Object.isFrozen(result.identity.invariants[0])).toBe(true);
+    expect(Object.isFrozen(result.identity.invariants[0]?.provenance)).toBe(true);
+    expect(Object.isFrozen(result.persona.invariants)).toBe(true);
+    expect(Object.isFrozen(result.targetableInterpretations)).toBe(true);
+    expect(Object.isFrozen(result.targetableInterpretations?.[0])).toBe(true);
+    expect(Object.isFrozen(result.targetableInterpretations?.[0]?.interpretation)).toBe(true);
+    expect(
+      Object.isFrozen(result.targetableInterpretations?.[0]?.interpretation.evidenceLinks)
+    ).toBe(true);
+    expect(
+      Object.isFrozen(result.targetableInterpretations?.[0]?.interpretation.evidenceLinks[0])
+    ).toBe(true);
+    expect(Object.isFrozen(result.targetableInterpretations?.[0]?.interpretation.provenance)).toBe(
+      true
+    );
+    expect(
+      Object.isFrozen(result.targetableInterpretations?.[0]?.interpretation.provenance[0])
+    ).toBe(true);
+    expect(
+      Object.isFrozen(
+        result.targetableInterpretations?.[0]?.interpretation.provenance[0]?.scopeReference
+      )
+    ).toBe(true);
+    expect(
+      Object.isFrozen(
+        result.targetableInterpretations?.[0]?.interpretation.provenance[0]?.contradictionReferences
+      )
+    ).toBe(true);
+    expect(Object.isFrozen(result.correctionProvenance[0])).toBe(true);
+    expect(Object.isFrozen(result.correctionProvenance[0]?.address)).toBe(true);
+    expect(Object.isFrozen(result.correctionProvenance[0]?.scopeReference)).toBe(true);
+    expect(Object.isFrozen(result.correctionAudits[0])).toBe(true);
+    expect(Object.isFrozen(result.correctionAudits[0]?.target)).toBe(true);
+    expect(Object.isFrozen(result.correctionAudits[0]?.provenance)).toBe(true);
+    expect(Object.isFrozen(result.correctionAudits[0]?.previousEvidenceReferences)).toBe(true);
+    expect(Object.isFrozen(result.supersededReferences[0])).toBe(true);
+    expect(Object.isFrozen(result.authoredInvariantRevisionPolicies)).toBe(true);
+    expect(Object.isFrozen(result.authoredInvariantRevisionPolicies[0])).toBe(true);
   });
 });

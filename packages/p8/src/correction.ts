@@ -3,10 +3,15 @@ import type {
   P8IdentityAddress,
   P8IdentityProjection,
   P8PersonaProjection,
+  P8ProvenanceReference,
   P8ProjectedInvariant,
   P8SemanticProvenanceReference
 } from "./index.js";
-import type { P8EvidenceInterpretation, P8EvidenceScopeReference } from "./evidence.js";
+import type {
+  P8EvidenceInterpretation,
+  P8EvidenceProvenanceReference,
+  P8EvidenceScopeReference
+} from "./evidence.js";
 import type { P8EvidenceChannelProjection, P8ReadOnlyEvidenceProjection } from "./adapter.js";
 
 /** The pure correction semantic contract introduced by P8-1D. */
@@ -24,6 +29,10 @@ export const P8_CORRECTION_AUTHORITY_SOURCES = [
 ] as const;
 export type P8CorrectionAuthoritySource = (typeof P8_CORRECTION_AUTHORITY_SOURCES)[number];
 
+export const P8_AUTHORED_INVARIANT_REVISION_POLICIES = ["FIXED", "USER_REVISABLE"] as const;
+export type P8AuthoredInvariantRevisionPolicyValue =
+  (typeof P8_AUTHORED_INVARIANT_REVISION_POLICIES)[number];
+
 export type P8CorrectionTarget = Readonly<
   | {
       kind: "INTERPRETATION";
@@ -35,6 +44,19 @@ export type P8CorrectionTarget = Readonly<
       invariantKey: string;
     }
 >;
+
+/** P8-1D owns the stable target identity layered over the frozen P8-1B output. */
+export type P8CorrectionTargetableInterpretation = Readonly<{
+  interpretationReference: string;
+  interpretation: P8EvidenceInterpretation;
+}>;
+
+/** Revision policy is an explicit P8-1D overlay, not P8-1A invariant metadata. */
+export type P8AuthoredInvariantRevisionPolicy = Readonly<{
+  invariantTarget: "identity" | "persona";
+  invariantKey: string;
+  policy: P8AuthoredInvariantRevisionPolicyValue;
+}>;
 
 export type P8CorrectionProvenanceInput = Readonly<{
   source: P8CorrectionAuthoritySource;
@@ -68,6 +90,10 @@ export type P8ExplicitCorrection = Readonly<{
 
 export type P8CorrectionApplicationInput = Readonly<{
   baseProjection: P8ReadOnlyEvidenceProjection;
+  /** Stable interpretation identity is supplied only by this P8-1D wrapper. */
+  targetableInterpretations?: readonly P8CorrectionTargetableInterpretation[];
+  /** Missing policy means FIXED; policy entries must name existing invariants. */
+  authoredInvariantRevisionPolicies?: readonly P8AuthoredInvariantRevisionPolicy[];
   /** The caller-supplied scope authorized for the projection being corrected. */
   scopeReference: P8EvidenceScopeReference;
   corrections: readonly P8ExplicitCorrection[];
@@ -104,6 +130,9 @@ export type P8CorrectionApplicationResult = Readonly<{
   recentConversation?: P8EvidenceChannelProjection;
   /** Only current corrected meaning is exposed here; prior meaning remains in audits. */
   interpretations: readonly P8EvidenceInterpretation[];
+  /** Present when P8-1D received stable interpretation target bindings. */
+  targetableInterpretations?: readonly P8CorrectionTargetableInterpretation[];
+  authoredInvariantRevisionPolicies: readonly P8AuthoredInvariantRevisionPolicy[];
   provenance: readonly P8SemanticProvenanceReference[];
   correctionProvenance: readonly P8CorrectionProvenanceReference[];
   correctionAudits: readonly P8CorrectionAudit[];
@@ -129,6 +158,8 @@ type CorrectionDecision = Readonly<{
   conflict: boolean;
 }>;
 
+type NormalizedTargetableInterpretation = P8CorrectionTargetableInterpretation;
+
 /**
  * Applies already-classified explicit user corrections to a supplied compact
  * P8 projection. This function performs no language detection, retrieval,
@@ -144,25 +175,50 @@ export function applyP8Corrections(
   );
   assertUniqueCorrections(corrections);
 
-  const interpretations = [...input.baseProjection.interpretations];
-  assertUniqueInterpretations(interpretations);
+  const targetableInterpretations =
+    input.targetableInterpretations === undefined
+      ? undefined
+      : normalizeTargetableInterpretations(input.targetableInterpretations);
+  const interpretations =
+    targetableInterpretations === undefined
+      ? input.baseProjection.interpretations.map(cloneInterpretation)
+      : targetableInterpretations.map((binding) => binding.interpretation);
+  const interpretationReferences = new Set(
+    targetableInterpretations?.map((binding) => binding.interpretationReference) ?? []
+  );
   const authoredInvariants = [
     ...input.baseProjection.identity.invariants,
     ...input.baseProjection.persona.invariants
   ];
   assertUniqueAuthoredInvariants(authoredInvariants);
-  validateCorrectionTargets(corrections, interpretations, authoredInvariants);
+  const authoredInvariantRevisionPolicies = normalizeRevisionPolicies(
+    input.authoredInvariantRevisionPolicies ?? [],
+    authoredInvariants
+  );
+  validateCorrectionTargets(
+    corrections,
+    interpretationReferences,
+    authoredInvariants,
+    authoredInvariantRevisionPolicies
+  );
   validateCorrectionLineage(corrections);
 
   const decisions = decideCorrections(corrections);
-  const correctedInterpretations = applyInterpretationDecisions(interpretations, decisions);
+  const correctedTargetableInterpretations =
+    targetableInterpretations === undefined
+      ? undefined
+      : applyInterpretationDecisions(targetableInterpretations, decisions);
+  const correctedInterpretations =
+    correctedTargetableInterpretations === undefined
+      ? interpretations
+      : correctedTargetableInterpretations.map((binding) => binding.interpretation);
   const correctedInvariants = applyInvariantDecisions(authoredInvariants, decisions);
   const identity = createProjection("identity", correctedInvariants);
   const persona = createProjection("persona", correctedInvariants);
   const correctionAudits = createCorrectionAudits(
     corrections,
     decisions,
-    interpretations,
+    targetableInterpretations ?? [],
     authoredInvariants
   );
   const supersededReferences = createSupersededReferences(corrections, decisions);
@@ -179,7 +235,11 @@ export function applyP8Corrections(
       ? {}
       : { recentConversation: cloneChannelProjection(input.baseProjection.recentConversation) }),
     interpretations: Object.freeze(correctedInterpretations),
-    provenance: Object.freeze([...input.baseProjection.provenance]),
+    ...(correctedTargetableInterpretations === undefined
+      ? {}
+      : { targetableInterpretations: Object.freeze(correctedTargetableInterpretations) }),
+    authoredInvariantRevisionPolicies: Object.freeze(authoredInvariantRevisionPolicies),
+    provenance: Object.freeze(input.baseProjection.provenance.map(cloneProvenance)),
     correctionProvenance: Object.freeze(
       corrections.map((correction) => correction.provenance).sort(compareCorrectionProvenance)
     ),
@@ -257,14 +317,17 @@ function normalizeCorrection(
 
 function validateCorrectionTargets(
   corrections: readonly NormalizedCorrection[],
-  interpretations: readonly P8EvidenceInterpretation[],
-  authoredInvariants: readonly P8ProjectedInvariant[]
+  interpretationReferences: ReadonlySet<string>,
+  authoredInvariants: readonly P8ProjectedInvariant[],
+  revisionPolicies: readonly P8AuthoredInvariantRevisionPolicy[]
 ): void {
-  const interpretationReferences = new Set(
-    interpretations.map((interpretation) => interpretation.interpretationReference)
-  );
   const invariantKeys = new Set(
     authoredInvariants.map((invariant) => authoredInvariantKey(invariant.target, invariant.key))
+  );
+  const userRevisableInvariantKeys = new Set(
+    revisionPolicies
+      .filter((policy) => policy.policy === "USER_REVISABLE")
+      .map((policy) => authoredInvariantKey(policy.invariantTarget, policy.invariantKey))
   );
 
   for (const correction of corrections) {
@@ -284,13 +347,7 @@ function validateCorrectionTargets(
     if (!invariantKeys.has(targetKey)) {
       throw new Error(`P8 correction target authored invariant is not present: ${targetKey}.`);
     }
-    if (
-      !authoredInvariants.some(
-        (invariant) =>
-          authoredInvariantKey(invariant.target, invariant.key) === targetKey &&
-          invariant.revisability === "USER_REVISABLE"
-      )
-    ) {
+    if (!userRevisableInvariantKeys.has(targetKey)) {
       throw new Error(`P8 authored invariant is not user-revisable: ${targetKey}.`);
     }
   }
@@ -370,24 +427,27 @@ function decideCorrections(
 }
 
 function applyInterpretationDecisions(
-  interpretations: readonly P8EvidenceInterpretation[],
+  interpretations: readonly NormalizedTargetableInterpretation[],
   decisions: readonly CorrectionDecision[]
-): P8EvidenceInterpretation[] {
+): NormalizedTargetableInterpretation[] {
   const byTarget = new Map(
     decisions
       .filter((decision) => decision.targetKey.startsWith("INTERPRETATION\u0000"))
       .map((decision) => [decision.targetKey, decision])
   );
   return interpretations
-    .map((interpretation) => {
+    .map((binding) => {
       const decision = byTarget.get(
         correctionTargetKey({
           kind: "INTERPRETATION",
-          interpretationReference: interpretation.interpretationReference
+          interpretationReference: binding.interpretationReference
         })
       );
       if (decision === undefined) {
-        return cloneInterpretation(interpretation);
+        return Object.freeze({
+          interpretationReference: binding.interpretationReference,
+          interpretation: cloneInterpretation(binding.interpretation)
+        });
       }
       const status = decision.conflict
         ? "CONFLICTING"
@@ -395,7 +455,10 @@ function applyInterpretationDecisions(
           ? "KNOWN"
           : "UNKNOWN";
       const meaning = decision.conflict ? undefined : decision.winner?.replacementMeaning;
-      return correctedInterpretation(interpretation, status, meaning);
+      return Object.freeze({
+        interpretationReference: binding.interpretationReference,
+        interpretation: correctedInterpretation(binding.interpretation, status, meaning)
+      });
     })
     .sort((left, right) =>
       compareText(left.interpretationReference, right.interpretationReference)
@@ -441,18 +504,23 @@ function createProjection(
 function createCorrectionAudits(
   corrections: readonly NormalizedCorrection[],
   decisions: readonly CorrectionDecision[],
-  interpretations: readonly P8EvidenceInterpretation[],
+  targetableInterpretations: readonly NormalizedTargetableInterpretation[],
   authoredInvariants: readonly P8ProjectedInvariant[]
 ): P8CorrectionAudit[] {
   const decisionByTarget = new Map(decisions.map((decision) => [decision.targetKey, decision]));
   return [...corrections].sort(compareCorrections).map((correction) => {
     const targetKey = correctionTargetKey(correction.target);
     const decision = decisionByTarget.get(targetKey)!;
-    const previous = previousTargetState(correction.target, interpretations, authoredInvariants);
+    const previous = previousTargetState(
+      correction.target,
+      targetableInterpretations,
+      authoredInvariants
+    );
     const supersededByCorrectionReference =
-      decision.winner?.correctionReference === correction.correctionReference
+      decision.winner?.correctionReference === undefined ||
+      decision.winner.correctionReference === correction.correctionReference
         ? undefined
-        : decision.winner?.correctionReference;
+        : decision.winner.correctionReference;
     const currentStatus = decision.conflict
       ? "CONFLICTING"
       : decision.winner?.action === "REVISE"
@@ -491,23 +559,27 @@ function createSupersededReferences(
     const decision = decisions.find(
       (candidate) => candidate.targetKey === correctionTargetKey(correction.target)
     )!;
-    if (decision.winner?.correctionReference !== correction.correctionReference) {
+    const winnerReference = decision.winner?.correctionReference;
+    if (winnerReference !== undefined && winnerReference !== correction.correctionReference) {
       references.push({
         kind: "CORRECTION",
         reference: correction.correctionReference,
-        supersededByCorrectionReference:
-          decision.winner?.correctionReference ?? correction.correctionReference
+        supersededByCorrectionReference: winnerReference
       });
     }
-    references.push({
-      kind: correction.target.kind,
-      reference:
-        correction.target.kind === "INTERPRETATION"
-          ? correction.target.interpretationReference
-          : authoredInvariantKey(correction.target.invariantTarget, correction.target.invariantKey),
-      supersededByCorrectionReference:
-        decision.winner?.correctionReference ?? correction.correctionReference
-    });
+    if (winnerReference !== undefined) {
+      references.push({
+        kind: correction.target.kind,
+        reference:
+          correction.target.kind === "INTERPRETATION"
+            ? correction.target.interpretationReference
+            : authoredInvariantKey(
+                correction.target.invariantTarget,
+                correction.target.invariantKey
+              ),
+        supersededByCorrectionReference: winnerReference
+      });
+    }
     for (const evidenceReference of correction.supersededEvidenceReferences) {
       references.push({
         kind: "EVIDENCE",
@@ -522,7 +594,7 @@ function createSupersededReferences(
       [reference.kind, reference.reference, reference.supersededByCorrectionReference].join(
         "\u0000"
       ),
-      reference
+      Object.freeze(reference)
     ])
   );
   return [...unique.values()].sort((left, right) =>
@@ -535,13 +607,14 @@ function createSupersededReferences(
 
 function previousTargetState(
   target: P8CorrectionTarget,
-  interpretations: readonly P8EvidenceInterpretation[],
+  targetableInterpretations: readonly NormalizedTargetableInterpretation[],
   authoredInvariants: readonly P8ProjectedInvariant[]
 ): { status: P8EpistemicState; meaning?: string; evidenceReferences: readonly string[] } {
   if (target.kind === "INTERPRETATION") {
-    const interpretation = interpretations.find(
+    const binding = targetableInterpretations.find(
       (candidate) => candidate.interpretationReference === target.interpretationReference
     )!;
+    const interpretation = binding.interpretation;
     return {
       status: interpretation.status,
       ...(interpretation.meaning === undefined ? {} : { meaning: interpretation.meaning }),
@@ -567,7 +640,6 @@ function correctedInterpretation(
 ): P8EvidenceInterpretation {
   return Object.freeze({
     interpretationVersion: interpretation.interpretationVersion,
-    interpretationReference: interpretation.interpretationReference,
     domain: interpretation.domain,
     accessStatus: interpretation.accessStatus,
     status,
@@ -581,9 +653,16 @@ function correctedInterpretation(
 
 function cloneInterpretation(interpretation: P8EvidenceInterpretation): P8EvidenceInterpretation {
   return Object.freeze({
-    ...interpretation,
-    evidenceLinks: Object.freeze([...interpretation.evidenceLinks]),
-    provenance: Object.freeze([...interpretation.provenance]),
+    interpretationVersion: interpretation.interpretationVersion,
+    domain: interpretation.domain,
+    accessStatus: interpretation.accessStatus,
+    status: interpretation.status,
+    support: interpretation.support,
+    ...(interpretation.meaning === undefined ? {} : { meaning: interpretation.meaning }),
+    evidenceLinks: Object.freeze(
+      interpretation.evidenceLinks.map((link) => Object.freeze({ ...link }))
+    ),
+    provenance: Object.freeze(interpretation.provenance.map(cloneEvidenceProvenance)),
     conflictReferences: Object.freeze([...interpretation.conflictReferences])
   });
 }
@@ -596,14 +675,7 @@ function cloneInvariant(
     key: invariant.key,
     target: invariant.target,
     statement: replacementMeaning ?? invariant.statement,
-    revisability: invariant.revisability ?? "FIXED",
-    provenance: Object.freeze({
-      source: invariant.provenance.source,
-      reference: invariant.provenance.reference,
-      ...(invariant.provenance.revision === undefined
-        ? {}
-        : { revision: invariant.provenance.revision })
-    })
+    provenance: cloneAuthoredProvenance(invariant.provenance)
   });
 }
 
@@ -612,8 +684,106 @@ function cloneChannelProjection(input: P8EvidenceChannelProjection): P8EvidenceC
     accessStatus: input.accessStatus,
     status: input.status,
     evidenceCount: input.evidenceCount,
-    provenance: Object.freeze([...input.provenance])
+    provenance: Object.freeze(input.provenance.map(cloneEvidenceProvenance))
   });
+}
+
+function cloneProvenance(provenance: P8SemanticProvenanceReference): P8SemanticProvenanceReference {
+  if (provenance.source === "authored") {
+    return cloneAuthoredProvenance(provenance);
+  }
+
+  return cloneEvidenceProvenance(provenance);
+}
+
+function cloneAuthoredProvenance(provenance: P8ProvenanceReference): P8ProvenanceReference {
+  return Object.freeze({
+    source: "authored" as const,
+    reference: provenance.reference,
+    ...(provenance.revision === undefined ? {} : { revision: provenance.revision })
+  });
+}
+
+function cloneEvidenceProvenance(
+  provenance: P8EvidenceProvenanceReference
+): P8EvidenceProvenanceReference {
+  return Object.freeze({
+    source: "evidence" as const,
+    reference: provenance.reference,
+    scopeReference: Object.freeze({ reference: provenance.scopeReference.reference }),
+    channel: provenance.channel,
+    sourceClass: provenance.sourceClass,
+    ...(provenance.suppliedAt === undefined ? {} : { suppliedAt: provenance.suppliedAt }),
+    contradictionReferences: Object.freeze([...provenance.contradictionReferences])
+  });
+}
+
+function normalizeTargetableInterpretations(
+  bindings: readonly P8CorrectionTargetableInterpretation[]
+): readonly NormalizedTargetableInterpretation[] {
+  const references = new Set<string>();
+  const normalized = bindings.map((binding) => {
+    validateBoundedText(
+      binding.interpretationReference,
+      "targetable interpretation.interpretationReference",
+      160
+    );
+    if (references.has(binding.interpretationReference)) {
+      throw new Error(
+        `P8 interpretation target binding must be unique: ${binding.interpretationReference}.`
+      );
+    }
+    references.add(binding.interpretationReference);
+    return Object.freeze({
+      interpretationReference: binding.interpretationReference,
+      interpretation: cloneInterpretation(binding.interpretation)
+    });
+  });
+
+  return Object.freeze(
+    normalized.sort((left, right) =>
+      compareText(left.interpretationReference, right.interpretationReference)
+    )
+  );
+}
+
+function normalizeRevisionPolicies(
+  policies: readonly P8AuthoredInvariantRevisionPolicy[],
+  authoredInvariants: readonly P8ProjectedInvariant[]
+): readonly P8AuthoredInvariantRevisionPolicy[] {
+  const invariantKeys = new Set(
+    authoredInvariants.map((invariant) => authoredInvariantKey(invariant.target, invariant.key))
+  );
+  const policyKeys = new Set<string>();
+  const normalized = policies.map((policy) => {
+    if (policy.invariantTarget !== "identity" && policy.invariantTarget !== "persona") {
+      throw new Error("P8 authored invariant revision policy target is not recognized.");
+    }
+    validateBoundedText(policy.invariantKey, "revision policy.invariantKey", 160);
+    validateEnum(policy.policy, P8_AUTHORED_INVARIANT_REVISION_POLICIES, "revision policy.policy");
+    const key = authoredInvariantKey(policy.invariantTarget, policy.invariantKey);
+    if (!invariantKeys.has(key)) {
+      throw new Error(`P8 revision policy authored invariant is not present: ${key}.`);
+    }
+    if (policyKeys.has(key)) {
+      throw new Error(`P8 authored invariant revision policy must be unique: ${key}.`);
+    }
+    policyKeys.add(key);
+    return Object.freeze({
+      invariantTarget: policy.invariantTarget,
+      invariantKey: policy.invariantKey,
+      policy: policy.policy
+    });
+  });
+
+  return Object.freeze(
+    normalized.sort((left, right) =>
+      compareText(
+        authoredInvariantKey(left.invariantTarget, left.invariantKey),
+        authoredInvariantKey(right.invariantTarget, right.invariantKey)
+      )
+    )
+  );
 }
 
 function validateTarget(target: P8CorrectionTarget): void {
@@ -665,23 +835,6 @@ function assertUniqueCorrections(corrections: readonly NormalizedCorrection[]): 
       throw new Error(`P8 correction reference must be unique: ${correction.correctionReference}.`);
     }
     references.add(correction.correctionReference);
-  }
-}
-
-function assertUniqueInterpretations(interpretations: readonly P8EvidenceInterpretation[]): void {
-  const references = new Set<string>();
-  for (const interpretation of interpretations) {
-    validateBoundedText(
-      interpretation.interpretationReference,
-      "interpretation.interpretationReference",
-      160
-    );
-    if (references.has(interpretation.interpretationReference)) {
-      throw new Error(
-        `P8 interpretation reference must be unique: ${interpretation.interpretationReference}.`
-      );
-    }
-    references.add(interpretation.interpretationReference);
   }
 }
 

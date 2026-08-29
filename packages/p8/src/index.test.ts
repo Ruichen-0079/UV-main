@@ -173,6 +173,25 @@ describe("P8-1A semantic identity projection", () => {
     expect(projection.persona.status).not.toBe("EMPTY");
   });
 
+  it("keeps P8-1A output free of correction revision metadata", () => {
+    const projection = createP8Projection({
+      address: createDefaultP8IdentityAddress(),
+      authoredInvariants: DEFAULT_AUTHORED_INVARIANTS
+    });
+
+    expect(projection.identity.invariants[0]).toEqual({
+      key: "character.name",
+      target: "identity",
+      statement: "Yuvi",
+      provenance: {
+        source: "authored",
+        reference: "p8-1a/default/character-name",
+        revision: "p8-1a"
+      }
+    });
+    expect(projection.identity.invariants[0]).not.toHaveProperty("revisability");
+  });
+
   it("is deeply immutable and accepts bounded authored provenance only", () => {
     const projection = createP8Projection({
       address: createDefaultP8IdentityAddress(),

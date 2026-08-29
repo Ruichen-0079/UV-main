@@ -162,6 +162,10 @@ facts, infer relationships, call an LLM, treat assistant repetition as truth,
 or turn a recent question into mood or durable relationship state. Long-term
 and recent access states remain separate during outage and recovery.
 
+P8-1C interpretation candidates retain their existing public shape; they do
+not acquire correction IDs or revision metadata. Stable interpretation target
+identity is layered on later by the P8-1D correction contract.
+
 The resulting read-only projection contains the identity address, P8-1A
 identity/persona projection, compact per-channel access status/state, evidence
 counts, candidate-linked interpretations, and bounded opaque provenance. It
@@ -178,10 +182,18 @@ P8-1A/P8-1B/P8-1C projection. A correction is received only as an explicit
 semantic object already classified by an upstream authority; P8 does not parse
 free-form language, detect corrections, call a model, retrieve Memory, or
 persist anything. The contract has bounded correction references, identity and
-scope addresses, explicit `REVISE` and `RETRACT` actions, stable interpretation
-or explicitly targetable authored-invariant references, user-correction
-provenance, optional source time, superseded evidence references, and explicit
-revision lineage.
+scope addresses, explicit `REVISE` and `RETRACT` actions, a P8-1D-local binding
+that layers stable interpretation references over the unchanged P8-1B output,
+explicit authored-invariant references, user-correction provenance, optional
+source time, superseded evidence references, and explicit revision lineage.
+
+The P8-1B and P8-1C public contracts remain unchanged at `p8-1b.v1` and
+`p8-1c.v1`; neither interpretations nor interpretation candidates carry
+correction-target metadata. Likewise, P8-1A remains `p8-1a.v1`: authored
+invariants do not expose a revision-policy field. P8-1D receives an explicit
+revision-policy overlay, treats an omitted policy as `FIXED`, and permits a
+correction to revise an authored invariant only when that overlay explicitly
+sets the exact target to `USER_REVISABLE`.
 
 Explicit user correction/control is the highest P8 semantic authority. It
 outranks old strong evidence, weak inference, recency, rank, repetition,
@@ -198,9 +210,9 @@ explicit correction declares that it supersedes another correction. Supplied
 timestamps are provenance only and never determine precedence. Corrections are
 scope- and identity-addressed, so a correction for one character instance,
 persona profile, or evidence scope cannot alter another. Authored invariants
-are fixed by default; only an invariant explicitly marked user-revisable may
-be revised or retracted by this stage. The default `character.name = Yuvi`
-invariant therefore remains non-revisable.
+are fixed by default; only an invariant named by the explicit P8-1D policy
+overlay as user-revisable may be revised or retracted by this stage. The
+default `character.name = Yuvi` invariant therefore remains non-revisable.
 
 P8-1D preserves P8-1C Memory access states independently: a correction cannot
 turn `EMPTY`, `UNAVAILABLE`, or `ERROR` evidence access into another backend
