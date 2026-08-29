@@ -20,6 +20,10 @@ export const P8_EVIDENCE_SUPPORT_LEVELS = ["DIRECT", "LIMITED", "NON_AUTHORITATI
 
 export type P8EvidenceSupport = (typeof P8_EVIDENCE_SUPPORT_LEVELS)[number];
 
+export const P8_EVIDENCE_LINK_RELATIONS = ["SUPPORTS", "CONTRADICTS"] as const;
+
+export type P8EvidenceLinkRelation = (typeof P8_EVIDENCE_LINK_RELATIONS)[number];
+
 export const P8_EVIDENCE_ACCESS_STATES = [
   "SUCCESS_WITH_EVIDENCE",
   "SUCCESS_WITH_NO_RELEVANT_EVIDENCE",
@@ -78,6 +82,18 @@ export type P8AuthorizedEvidence = Readonly<{
   provenance: P8EvidenceProvenanceReference;
 }>;
 
+export type P8InterpretationEvidenceLinkInput = Readonly<{
+  evidenceReference: string;
+  relation: P8EvidenceLinkRelation;
+  support: P8EvidenceSupport;
+}>;
+
+export type P8InterpretationEvidenceLink = Readonly<{
+  evidenceReference: string;
+  relation: P8EvidenceLinkRelation;
+  support: P8EvidenceSupport;
+}>;
+
 export type P8EvidenceAccessOutcomeInput = Readonly<{
   status: P8EvidenceAccessStatus;
   evidence: readonly (P8AuthorizedEvidence | P8AuthorizedEvidenceInput)[];
@@ -92,6 +108,7 @@ export type P8EvidenceInterpretationInput = Readonly<{
   domain: P8InterpretationDomain;
   meaning?: string;
   access: P8EvidenceAccessOutcomeInput;
+  evidenceLinks?: readonly P8InterpretationEvidenceLinkInput[];
 }>;
 
 export type P8EvidenceInterpretation = Readonly<{
@@ -101,6 +118,7 @@ export type P8EvidenceInterpretation = Readonly<{
   status: P8EpistemicState;
   support: P8EvidenceSupport;
   meaning?: string;
+  evidenceLinks: readonly P8InterpretationEvidenceLink[];
   provenance: readonly P8EvidenceProvenanceReference[];
   conflictReferences: readonly string[];
 }>;
@@ -159,6 +177,9 @@ export function createP8EvidenceAccessOutcome(
   if (input.status === "SUCCESS_WITH_NO_RELEVANT_EVIDENCE" && evidence.length > 0) {
     throw new Error("P8 empty evidence access cannot contain evidence.");
   }
+  if ((input.status === "UNAVAILABLE" || input.status === "ERROR") && evidence.length > 0) {
+    throw new Error(`P8 ${input.status.toLowerCase()} evidence access cannot contain evidence.`);
+  }
 
   return Object.freeze({
     status: input.status,
@@ -172,10 +193,22 @@ export function createP8EvidenceInterpretation(
   validateEnum(input.domain, P8_INTERPRETATION_DOMAINS, "interpretation.domain");
   const meaning = normalizeOptionalText(input.meaning, "interpretation.meaning", 500);
   const access = createP8EvidenceAccessOutcome(input.access);
-  const conflictReferences = findConflictReferences(access.evidence);
-  const status = deriveStatus(access.status, access.evidence, meaning, conflictReferences);
-  const provenance = Object.freeze(access.evidence.map((atom) => atom.provenance));
-  const projectedMeaning = shouldProjectMeaning(status, access.evidence) ? meaning : undefined;
+  const evidenceLinks = normalizeInterpretationLinks(input.evidenceLinks ?? [], access.evidence);
+  const linkedEvidence = evidenceLinks.map(
+    (link) => access.evidence.find((atom) => atom.evidenceReference === link.evidenceReference)!
+  );
+  const conflictReferences = findConflictReferences(evidenceLinks, linkedEvidence);
+  const status = deriveStatus(
+    access.status,
+    evidenceLinks,
+    linkedEvidence,
+    meaning,
+    conflictReferences
+  );
+  const provenance = Object.freeze(linkedEvidence.map((atom) => atom.provenance));
+  const projectedMeaning = shouldProjectMeaning(status, evidenceLinks, linkedEvidence)
+    ? meaning
+    : undefined;
 
   return Object.freeze({
     interpretationVersion: P8_1B_CONTRACT_VERSION,
@@ -184,9 +217,41 @@ export function createP8EvidenceInterpretation(
     status,
     support: supportFor(status),
     ...(projectedMeaning === undefined ? {} : { meaning: projectedMeaning }),
+    evidenceLinks: Object.freeze(evidenceLinks),
     provenance,
     conflictReferences: Object.freeze(conflictReferences)
   });
+}
+
+function normalizeInterpretationLinks(
+  links: readonly P8InterpretationEvidenceLinkInput[],
+  evidence: readonly P8AuthorizedEvidence[]
+): P8InterpretationEvidenceLink[] {
+  const evidenceReferences = new Set(evidence.map((atom) => atom.evidenceReference));
+  const linkedReferences = new Set<string>();
+  const normalized = links.map((link) => {
+    validateEnum(link.relation, P8_EVIDENCE_LINK_RELATIONS, "interpretation evidence relation");
+    validateEnum(link.support, P8_EVIDENCE_SUPPORT_LEVELS, "interpretation evidence support");
+    validateBoundedText(link.evidenceReference, "interpretation evidence.evidenceReference", 160);
+    if (!evidenceReferences.has(link.evidenceReference)) {
+      throw new Error(
+        `P8 interpretation evidence link references unavailable evidence: ${link.evidenceReference}.`
+      );
+    }
+    if (linkedReferences.has(link.evidenceReference)) {
+      throw new Error(`P8 interpretation evidence link must be unique: ${link.evidenceReference}.`);
+    }
+    linkedReferences.add(link.evidenceReference);
+    return Object.freeze({
+      evidenceReference: link.evidenceReference,
+      relation: link.relation,
+      support: link.support
+    });
+  });
+
+  return normalized.sort((left, right) =>
+    compareText(left.evidenceReference, right.evidenceReference)
+  );
 }
 
 function normalizeEvidence(
@@ -233,7 +298,8 @@ function sameProvenance(
 
 function deriveStatus(
   accessStatus: P8EvidenceAccessStatus,
-  evidence: readonly P8AuthorizedEvidence[],
+  evidenceLinks: readonly P8InterpretationEvidenceLink[],
+  linkedEvidence: readonly P8AuthorizedEvidence[],
   meaning: string | undefined,
   conflictReferences: readonly string[]
 ): P8EpistemicState {
@@ -253,33 +319,65 @@ function deriveStatus(
       if (meaning === undefined) {
         return "UNKNOWN";
       }
-      if (evidence.some(canSupportKnown)) {
+      if (evidenceLinks.some((link, index) => canSupportKnown(link, linkedEvidence[index]!))) {
         return "KNOWN";
       }
-      return evidence.some(canSupportPartial) ? "PARTIAL" : "UNKNOWN";
+      return evidenceLinks.some((link, index) => canSupportPartial(link, linkedEvidence[index]!))
+        ? "PARTIAL"
+        : "UNKNOWN";
   }
 }
 
-function canSupportKnown(atom: P8AuthorizedEvidence): boolean {
+function canSupportKnown(link: P8InterpretationEvidenceLink, atom: P8AuthorizedEvidence): boolean {
   return (
-    atom.support === "DIRECT" &&
+    link.relation === "SUPPORTS" &&
+    effectiveSupport(link, atom) === "DIRECT" &&
     atom.sourceClass !== "WEAK_INFERRED" &&
     atom.sourceClass !== "ASSISTANT_MODEL_GENERATED"
   );
 }
 
-function canSupportPartial(atom: P8AuthorizedEvidence): boolean {
-  return atom.sourceClass !== "ASSISTANT_MODEL_GENERATED";
+function canSupportPartial(
+  link: P8InterpretationEvidenceLink,
+  atom: P8AuthorizedEvidence
+): boolean {
+  return (
+    link.relation === "SUPPORTS" &&
+    effectiveSupport(link, atom) !== "NON_AUTHORITATIVE" &&
+    atom.sourceClass !== "ASSISTANT_MODEL_GENERATED"
+  );
+}
+
+function effectiveSupport(
+  link: P8InterpretationEvidenceLink,
+  atom: P8AuthorizedEvidence
+): P8EvidenceSupport {
+  if (supportRank(link.support) <= supportRank(atom.support)) {
+    return link.support;
+  }
+  return atom.support;
+}
+
+function supportRank(support: P8EvidenceSupport): number {
+  switch (support) {
+    case "NON_AUTHORITATIVE":
+      return 0;
+    case "LIMITED":
+      return 1;
+    case "DIRECT":
+      return 2;
+  }
 }
 
 function shouldProjectMeaning(
   status: P8EpistemicState,
-  evidence: readonly P8AuthorizedEvidence[]
+  evidenceLinks: readonly P8InterpretationEvidenceLink[],
+  linkedEvidence: readonly P8AuthorizedEvidence[]
 ): boolean {
   return (
     status === "KNOWN" ||
     (status === "PARTIAL" &&
-      evidence.some((atom) => atom.sourceClass !== "ASSISTANT_MODEL_GENERATED"))
+      evidenceLinks.some((link, index) => canSupportPartial(link, linkedEvidence[index]!)))
   );
 }
 
@@ -293,28 +391,33 @@ function supportFor(status: P8EpistemicState): P8EvidenceSupport {
   return "NON_AUTHORITATIVE";
 }
 
-function findConflictReferences(evidence: readonly P8AuthorizedEvidence[]): string[] {
-  const byReference = new Map(evidence.map((atom) => [atom.evidenceReference, atom]));
-  const conflicts = new Set<string>();
+function findConflictReferences(
+  evidenceLinks: readonly P8InterpretationEvidenceLink[],
+  linkedEvidence: readonly P8AuthorizedEvidence[]
+): string[] {
+  const supportingReferences = new Set<string>();
+  const contradictingReferences = new Set<string>();
 
-  for (const atom of evidence) {
-    if (atom.sourceClass === "ASSISTANT_MODEL_GENERATED") {
-      continue;
+  evidenceLinks.forEach((link, index) => {
+    const atom = linkedEvidence[index]!;
+    if (
+      atom.sourceClass === "ASSISTANT_MODEL_GENERATED" ||
+      effectiveSupport(link, atom) === "NON_AUTHORITATIVE"
+    ) {
+      return;
     }
-    for (const contradictionReference of atom.contradictionReferences) {
-      const counterpart = byReference.get(contradictionReference);
-      if (
-        counterpart !== undefined &&
-        counterpart.evidenceReference !== atom.evidenceReference &&
-        counterpart.sourceClass !== "ASSISTANT_MODEL_GENERATED"
-      ) {
-        conflicts.add(atom.evidenceReference);
-        conflicts.add(counterpart.evidenceReference);
-      }
+    if (link.relation === "SUPPORTS") {
+      supportingReferences.add(link.evidenceReference);
+    } else {
+      contradictingReferences.add(link.evidenceReference);
     }
+  });
+
+  if (supportingReferences.size === 0 || contradictingReferences.size === 0) {
+    return [];
   }
 
-  return [...conflicts].sort(compareText);
+  return [...new Set([...supportingReferences, ...contradictingReferences])].sort(compareText);
 }
 
 function freezeScopeReference(input: P8EvidenceScopeReference): P8EvidenceScopeReference {

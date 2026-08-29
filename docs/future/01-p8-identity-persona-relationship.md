@@ -77,8 +77,12 @@ supported, ordinary observed interaction, weak/inferred, and
 assistant/model-generated sources. Assistant/model output cannot create P8
 truth, and repetition cannot increase its authority. Weak or limited evidence
 cannot produce a `KNOWN` strong interpretation. An explicitly supplied meaning
-may be projected only with the resulting epistemic/support status; P8-1B does
-not infer a social story from an evidence statement.
+may be projected only through explicit bounded links identifying the evidence
+references that `SUPPORTS` or `CONTRADICTS` that candidate. Link support is
+qualitative support for that candidate, not an absolute property that
+authorizes every possible meaning. Direct but unrelated evidence therefore
+cannot authorize an arbitrary meaning, and P8-1B does not infer a social story
+from an evidence statement.
 
 Evidence access status is separate from relationship fact. Successful access
 with no relevant evidence produces `EMPTY`; successful access with evidence but
@@ -87,9 +91,11 @@ access produce `UNAVAILABLE` and `ERROR`; incomplete access produces `PARTIAL`.
 Unresolved explicit contradiction produces `CONFLICTING` and preserves both
 provenance paths. None of these states means “Yuvi has no history with this
 person.” Scope and provenance are preserved, but P8-1B performs no scope
-filtering. The output is a compact semantic envelope, not a prompt string, and
-contains no relationship scalar, transient mood, Continuity, or channel
-behavior state.
+filtering. Interpretation provenance contains only the linked evidence that
+participates in the candidate; other access-level evidence remains separate
+and cannot masquerade as support provenance. The output is a compact semantic
+envelope, not a prompt string, and contains no relationship scalar, transient
+mood, Continuity, or channel behavior state.
 
 Future semantic authority precedence is explicit user correction or control,
 then explicit authored identity authority where applicable, then

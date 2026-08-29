@@ -10,12 +10,14 @@ import {
   P8_EVIDENCE_ACCESS_STATES,
   P8_EVIDENCE_AUTHORITY_CLASSES,
   P8_EVIDENCE_CHANNELS,
+  P8_EVIDENCE_LINK_RELATIONS,
   P8_EVIDENCE_SUPPORT_LEVELS,
   createP8AuthorizedEvidence,
   createP8EvidenceAccessOutcome,
   createP8EvidenceInterpretation,
   type P8AuthorizedEvidenceInput,
-  type P8EvidenceAccessStatus
+  type P8EvidenceAccessStatus,
+  type P8InterpretationEvidenceLinkInput
 } from "./evidence.js";
 
 function evidence(overrides: Partial<P8AuthorizedEvidenceInput> = {}) {
@@ -41,13 +43,27 @@ function interpretation(
     | "BACKGROUND"
     | "COMMUNICATION_PREFERENCE"
     | "SHARED_HISTORY"
-    | "RELATIONSHIP_CONTEXT" = "RELATIONSHIP_CONTEXT"
+    | "RELATIONSHIP_CONTEXT" = "RELATIONSHIP_CONTEXT",
+  evidenceLinks: readonly P8InterpretationEvidenceLinkInput[] = []
 ) {
   return createP8EvidenceInterpretation({
     domain,
     ...(meaning === undefined ? {} : { meaning }),
-    access: accessOutcome
+    access: accessOutcome,
+    evidenceLinks
   });
+}
+
+function link(
+  evidenceReference = "evidence-1",
+  overrides: Partial<P8InterpretationEvidenceLinkInput> = {}
+): P8InterpretationEvidenceLinkInput {
+  return {
+    evidenceReference,
+    relation: "SUPPORTS",
+    support: "DIRECT",
+    ...overrides
+  };
 }
 
 describe("P8-1B evidence interpretation semantics", () => {
@@ -79,11 +95,17 @@ describe("P8-1B evidence interpretation semantics", () => {
   });
 
   it("maps partial evidence access to PARTIAL without upgrading it to KNOWN", () => {
-    const result = interpretation(access("PARTIAL", [evidence()]), "A history exists.");
+    const result = interpretation(
+      access("PARTIAL", [evidence()]),
+      "A history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link()]
+    );
 
     expect(result.status).toBe("PARTIAL");
     expect(result.support).toBe("LIMITED");
     expect(result.status).not.toBe("KNOWN");
+    expect(result.provenance.map((item) => item.reference)).toEqual(["evidence-1"]);
   });
 
   it("uses UNKNOWN when evidence exists but no meaning is justified", () => {
@@ -91,7 +113,7 @@ describe("P8-1B evidence interpretation semantics", () => {
 
     expect(result.status).toBe("UNKNOWN");
     expect(result.status).not.toBe("EMPTY");
-    expect(result.provenance[0]?.reference).toBe("evidence-1");
+    expect(result.provenance).toEqual([]);
   });
 
   it("allows KNOWN only for explicit meaning with direct non-assistant support", () => {
@@ -99,12 +121,73 @@ describe("P8-1B evidence interpretation semantics", () => {
       access("SUCCESS_WITH_EVIDENCE", [
         evidence({ sourceClass: "VERIFIED_SUPPORTED", support: "DIRECT" })
       ]),
-      "A shared history exists."
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link()]
     );
 
     expect(result.status).toBe("KNOWN");
     expect(result.support).toBe("DIRECT");
     expect(result.meaning).toBe("A shared history exists.");
+  });
+
+  it("does not let unrelated direct evidence authorize an arbitrary meaning", () => {
+    const result = interpretation(
+      access("SUCCESS_WITH_EVIDENCE", [
+        evidence({
+          statement: "The user studies computer science."
+        })
+      ]),
+      "We are romantically involved."
+    );
+
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.meaning).toBeUndefined();
+    expect(result.provenance).toEqual([]);
+  });
+
+  it("maps linked LIMITED authoritative support to PARTIAL", () => {
+    const result = interpretation(
+      access("SUCCESS_WITH_EVIDENCE", [evidence({ sourceClass: "VERIFIED_SUPPORTED" })]),
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("evidence-1", { support: "LIMITED" })]
+    );
+
+    expect(result.status).toBe("PARTIAL");
+    expect(result.support).toBe("LIMITED");
+    expect(result.meaning).toBe("A shared history exists.");
+    expect(result.status).not.toBe("KNOWN");
+  });
+
+  it("requires an explicit linked supporting reference even when access has strong evidence", () => {
+    const result = interpretation(
+      access("SUCCESS_WITH_EVIDENCE", [evidence()]),
+      "A shared history exists."
+    );
+
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.status).not.toBe("KNOWN");
+    expect(result.provenance).toEqual([]);
+  });
+
+  it("uses only linked evidence as interpretation provenance", () => {
+    const result = interpretation(
+      access("SUCCESS_WITH_EVIDENCE", [
+        evidence({ evidenceReference: "linked" }),
+        evidence({
+          evidenceReference: "unrelated",
+          statement: "The user studies computer science."
+        })
+      ]),
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("linked")]
+    );
+
+    expect(result.status).toBe("KNOWN");
+    expect(result.provenance.map((item) => item.reference)).toEqual(["linked"]);
+    expect(result.evidenceLinks.map((item) => item.evidenceReference)).toEqual(["linked"]);
   });
 
   it("keeps a weak pre-classified item at PARTIAL rather than KNOWN", () => {
@@ -116,7 +199,9 @@ describe("P8-1B evidence interpretation semantics", () => {
           support: "LIMITED"
         })
       ]),
-      "A positive relational signal may be present."
+      "A positive relational signal may be present.",
+      "RELATIONSHIP_CONTEXT",
+      [link("evidence-1", { support: "LIMITED" })]
     );
 
     expect(result.status).toBe("PARTIAL");
@@ -132,7 +217,9 @@ describe("P8-1B evidence interpretation semantics", () => {
           support: "DIRECT"
         })
       ]),
-      "A shared history exists."
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link()]
     );
 
     expect(result.status).toBe("PARTIAL");
@@ -148,7 +235,9 @@ describe("P8-1B evidence interpretation semantics", () => {
           support: "DIRECT"
         })
       ]),
-      "We are extremely close."
+      "We are extremely close.",
+      "RELATIONSHIP_CONTEXT",
+      [link()]
     );
 
     expect(result.status).toBe("UNKNOWN");
@@ -178,7 +267,9 @@ describe("P8-1B evidence interpretation semantics", () => {
           support: "DIRECT"
         })
       ]),
-      "We are extremely close."
+      "We are extremely close.",
+      "RELATIONSHIP_CONTEXT",
+      [link("evidence-1"), link("evidence-2")]
     );
 
     expect(repeated.status).toBe(one.status);
@@ -198,7 +289,9 @@ describe("P8-1B evidence interpretation semantics", () => {
     });
     const result = interpretation(
       access("SUCCESS_WITH_EVIDENCE", [second, first]),
-      "A shared history exists."
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("evidence-a"), link("evidence-b", { relation: "CONTRADICTS" })]
     );
 
     expect(result.status).toBe("CONFLICTING");
@@ -209,6 +302,47 @@ describe("P8-1B evidence interpretation semantics", () => {
       "scope-user-a",
       "scope-user-b"
     ]);
+  });
+
+  it("ignores an unrelated contradiction in the access envelope", () => {
+    const result = interpretation(
+      access("SUCCESS_WITH_EVIDENCE", [
+        evidence({ evidenceReference: "linked" }),
+        evidence({
+          evidenceReference: "unrelated-a",
+          contradictionReferences: ["unrelated-b"]
+        }),
+        evidence({
+          evidenceReference: "unrelated-b",
+          contradictionReferences: ["unrelated-a"]
+        })
+      ]),
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("linked")]
+    );
+
+    expect(result.status).toBe("KNOWN");
+    expect(result.conflictReferences).toEqual([]);
+    expect(result.provenance.map((item) => item.reference)).toEqual(["linked"]);
+  });
+
+  it("rejects unavailable access with evidence instead of discarding it", () => {
+    expect(() =>
+      createP8EvidenceAccessOutcome({
+        status: "UNAVAILABLE",
+        evidence: [evidence()]
+      })
+    ).toThrow("unavailable evidence access cannot contain evidence");
+  });
+
+  it("rejects error access with evidence instead of discarding it", () => {
+    expect(() =>
+      createP8EvidenceAccessOutcome({
+        status: "ERROR",
+        evidence: [evidence()]
+      })
+    ).toThrow("error evidence access cannot contain evidence");
   });
 
   it("keeps long-term evidence and recent conversation distinct", () => {
@@ -223,7 +357,9 @@ describe("P8-1B evidence interpretation semantics", () => {
           channel: "RECENT_CONVERSATION"
         })
       ]),
-      "A shared history exists."
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("long-term"), link("recent")]
     );
 
     expect(result.provenance.map((item) => item.channel)).toEqual([
@@ -244,7 +380,9 @@ describe("P8-1B evidence interpretation semantics", () => {
           scopeReference: { reference: "conversation-group-b" }
         })
       ]),
-      "A shared history exists."
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("scope-a"), link("scope-b")]
     );
 
     expect(result.provenance.map((item) => item.scopeReference.reference)).toEqual([
@@ -272,6 +410,7 @@ describe("P8-1B evidence interpretation semantics", () => {
   it("keeps the vocabulary distinct and adds no scalar relationship authority", () => {
     expect(new Set(P8_EVIDENCE_CHANNELS).size).toBe(2);
     expect(new Set(P8_EVIDENCE_AUTHORITY_CLASSES).size).toBe(5);
+    expect(P8_EVIDENCE_LINK_RELATIONS).toEqual(["SUPPORTS", "CONTRADICTS"]);
     expect(new Set(P8_EVIDENCE_SUPPORT_LEVELS).size).toBe(3);
     expect(P8_EVIDENCE_ACCESS_STATES).toEqual([
       "SUCCESS_WITH_EVIDENCE",
@@ -283,7 +422,9 @@ describe("P8-1B evidence interpretation semantics", () => {
 
     const result = interpretation(
       access("SUCCESS_WITH_EVIDENCE", [evidence()]),
-      "A history exists."
+      "A history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link()]
     );
     for (const field of [
       "affinity",
@@ -300,7 +441,9 @@ describe("P8-1B evidence interpretation semantics", () => {
   it("retains supplied time and creates no generated timestamp or identifier", () => {
     const result = interpretation(
       access("SUCCESS_WITH_EVIDENCE", [evidence({ suppliedAt: "2026-08-29T00:00:00Z" })]),
-      "A history exists."
+      "A history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link()]
     );
 
     expect(result.provenance[0]?.suppliedAt).toBe("2026-08-29T00:00:00Z");
@@ -313,11 +456,15 @@ describe("P8-1B evidence interpretation semantics", () => {
     const second = evidence({ evidenceReference: "b", channel: "RECENT_CONVERSATION" });
     const firstResult = interpretation(
       access("SUCCESS_WITH_EVIDENCE", [first, second]),
-      "A shared history exists."
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("a"), link("b")]
     );
     const secondResult = interpretation(
       access("SUCCESS_WITH_EVIDENCE", [second, first]),
-      "A shared history exists."
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("b"), link("a")]
     );
 
     expect(firstResult).toEqual(secondResult);
@@ -327,7 +474,9 @@ describe("P8-1B evidence interpretation semantics", () => {
   it("does not expose provider, model, Memory DTO, or PromptBuilder fields", () => {
     const result = interpretation(
       access("SUCCESS_WITH_EVIDENCE", [evidence()]),
-      "A history exists."
+      "A history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link()]
     );
     const serialized = JSON.stringify(result);
 
