@@ -186,6 +186,10 @@ scope addresses, explicit `REVISE` and `RETRACT` actions, a P8-1D-local binding
 that layers stable interpretation references over the unchanged P8-1B output,
 explicit authored-invariant references, user-correction provenance, optional
 source time, superseded evidence references, and explicit revision lineage.
+Bindings are an overlay only: each one must identify exactly one existing base
+interpretation, subset bindings preserve all unbound interpretations in base
+order, and foreign, modified, or aliased bindings fail closed. They cannot add,
+remove, or replace the base interpretation collection.
 
 The P8-1B and P8-1C public contracts remain unchanged at `p8-1b.v1` and
 `p8-1c.v1`; neither interpretations nor interpretation candidates carry

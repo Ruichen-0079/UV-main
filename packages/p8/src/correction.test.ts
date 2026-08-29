@@ -20,6 +20,13 @@ import {
 const SCOPE = { reference: "scope-user-a" } as const;
 const ADDRESS = createDefaultP8IdentityAddress("subject-a");
 
+type TestInterpretation = {
+  reference: string;
+  meaning: string;
+  domain?: "BACKGROUND" | "COMMUNICATION_PREFERENCE" | "SHARED_HISTORY" | "RELATIONSHIP_CONTEXT";
+  evidenceReferences?: readonly string[];
+};
+
 function memoryEvent(overrides: Partial<MemoryEvent> = {}): MemoryEvent {
   return {
     id: "memory-1",
@@ -66,22 +73,16 @@ function baseProjection(
     authoredInvariants?: readonly P8AuthoredInvariant[];
     longTermStatus?: MemoryRetrievalOutcome["status"];
     events?: MemoryEvent[];
-    interpretation?: {
-      reference: string;
-      meaning: string;
-      domain?:
-        | "BACKGROUND"
-        | "COMMUNICATION_PREFERENCE"
-        | "SHARED_HISTORY"
-        | "RELATIONSHIP_CONTEXT";
-      evidenceReferences?: readonly string[];
-    };
+    interpretation?: TestInterpretation;
+    interpretations?: readonly TestInterpretation[];
     recentMessages?: readonly P8RecentConversationMessageInput[];
   } = {}
 ) {
   const scopeReference = options.scopeReference ?? SCOPE;
   const events = options.events ?? [];
   const interpretation = options.interpretation;
+  const interpretations =
+    options.interpretations ?? (interpretation === undefined ? undefined : [interpretation]);
   const input: P8EvidenceAdapterInput = {
     address: options.address ?? ADDRESS,
     authoredInvariants: options.authoredInvariants ?? DEFAULT_AUTHORED_INVARIANTS,
@@ -96,22 +97,20 @@ function baseProjection(
             maxCharacters: 1000
           }
         }),
-    ...(interpretation === undefined
+    ...(interpretations === undefined
       ? {}
       : {
-          interpretationCandidates: [
-            {
-              domain: interpretation.domain ?? "BACKGROUND",
-              meaning: interpretation.meaning,
-              evidenceLinks: (
-                interpretation.evidenceReferences ?? events.map((event) => event.id)
-              ).map((evidenceReference) => ({
+          interpretationCandidates: interpretations.map((candidate) => ({
+            domain: candidate.domain ?? "BACKGROUND",
+            meaning: candidate.meaning,
+            evidenceLinks: (candidate.evidenceReferences ?? events.map((event) => event.id)).map(
+              (evidenceReference) => ({
                 evidenceReference,
                 relation: "SUPPORTS" as const,
                 support: "DIRECT" as const
-              }))
-            }
-          ]
+              })
+            )
+          }))
         })
   };
   return createP8EvidenceAdapterProjection(input);
@@ -215,6 +214,26 @@ function interpretationBase(
   });
 }
 
+function twoInterpretationBase(sameMeaning = false) {
+  const firstEvent = memoryEvent({ id: "memory-a", content: "The first bounded fact." });
+  const secondEvent = memoryEvent({ id: "memory-b", content: "The second bounded fact." });
+  return baseProjection({
+    events: [firstEvent, secondEvent],
+    interpretations: [
+      {
+        reference: "candidate-a",
+        meaning: sameMeaning ? "The shared semantic meaning." : "The first semantic meaning.",
+        evidenceReferences: [firstEvent.id]
+      },
+      {
+        reference: "candidate-b",
+        meaning: sameMeaning ? "The shared semantic meaning." : "The second semantic meaning.",
+        evidenceReferences: [secondEvent.id]
+      }
+    ]
+  });
+}
+
 describe("P8-1D explicit correction semantics", () => {
   it("revises an interpretation with explicit user authority", () => {
     const result = applyToInterpretations(interpretationBase(), [correction()]);
@@ -228,9 +247,7 @@ describe("P8-1D explicit correction semantics", () => {
       provenance: []
     });
     expect(result.interpretations[0]).not.toHaveProperty("interpretationReference");
-    expect(result.targetableInterpretations?.[0]?.interpretationReference).toBe(
-      "interpretation-1"
-    );
+    expect(result.targetableInterpretations?.[0]?.interpretationReference).toBe("interpretation-1");
   });
 
   it("preserves audit references while hiding superseded meaning from current output", () => {
@@ -671,6 +688,140 @@ describe("P8-1D explicit correction semantics", () => {
     expect(() => apply(interpretationBase(), [correction()])).toThrow(
       "target interpretation is not present"
     );
+  });
+
+  it("treats a subset of targetable bindings as an overlay without corrections", () => {
+    const projection = twoInterpretationBase();
+    const first = projection.interpretations[0]!;
+
+    const result = apply(projection, [], {
+      targetableInterpretations: [{ interpretationReference: "ref-a", interpretation: first }]
+    });
+
+    expect(result.interpretations).toHaveLength(2);
+    expect(result.interpretations).toEqual(projection.interpretations);
+    expect(result.interpretations[0]).toEqual(first);
+    expect(result.interpretations[1]).toEqual(projection.interpretations[1]);
+  });
+
+  it("corrects a bound interpretation while preserving every unbound base interpretation", () => {
+    const projection = twoInterpretationBase();
+    const first = projection.interpretations[0]!;
+    const second = projection.interpretations[1]!;
+
+    const result = apply(
+      projection,
+      [
+        correction({
+          target: { kind: "INTERPRETATION", interpretationReference: "ref-a" }
+        })
+      ],
+      {
+        targetableInterpretations: [{ interpretationReference: "ref-a", interpretation: first }]
+      }
+    );
+
+    expect(result.interpretations).toHaveLength(2);
+    expect(result.interpretations[0]).toMatchObject({
+      meaning: "The corrected semantic meaning.",
+      status: "KNOWN"
+    });
+    expect(result.interpretations[1]).toEqual(second);
+  });
+
+  it("uses the stable binding reference rather than similar interpretation text", () => {
+    const projection = twoInterpretationBase(true);
+    const first = projection.interpretations[0]!;
+    const second = projection.interpretations[1]!;
+
+    const result = apply(
+      projection,
+      [
+        correction({
+          target: { kind: "INTERPRETATION", interpretationReference: "ref-a" }
+        })
+      ],
+      {
+        targetableInterpretations: [{ interpretationReference: "ref-a", interpretation: first }]
+      }
+    );
+
+    expect(result.interpretations[0]?.meaning).toBe("The corrected semantic meaning.");
+    expect(result.interpretations[1]).toEqual(second);
+  });
+
+  it("rejects a foreign interpretation binding", () => {
+    const projection = interpretationBase();
+    const foreignProjection = interpretationBase({ id: "memory-foreign" });
+
+    expect(() =>
+      apply(projection, [], {
+        targetableInterpretations: [
+          {
+            interpretationReference: "ref-foreign",
+            interpretation: foreignProjection.interpretations[0]!
+          }
+        ]
+      })
+    ).toThrow("exactly one existing base interpretation");
+  });
+
+  it("rejects a modified clone of a base interpretation binding", () => {
+    const projection = interpretationBase();
+    const modifiedClone = {
+      ...projection.interpretations[0]!,
+      meaning: "A modified clone must not replace the base meaning."
+    };
+
+    expect(() =>
+      apply(projection, [], {
+        targetableInterpretations: [
+          { interpretationReference: "ref-clone", interpretation: modifiedClone }
+        ]
+      })
+    ).toThrow("exactly one existing base interpretation");
+  });
+
+  it("rejects aliases that bind one base interpretation to multiple references", () => {
+    const projection = twoInterpretationBase();
+    const first = projection.interpretations[0]!;
+
+    expect(() =>
+      apply(projection, [], {
+        targetableInterpretations: [
+          { interpretationReference: "ref-a", interpretation: first },
+          { interpretationReference: "ref-alias", interpretation: first }
+        ]
+      })
+    ).toThrow("cannot alias one base interpretation");
+  });
+
+  it("rejects a correction targeting an unbound interpretation reference", () => {
+    const projection = twoInterpretationBase();
+
+    expect(() =>
+      apply(
+        projection,
+        [
+          correction({
+            target: { kind: "INTERPRETATION", interpretationReference: "ref-unbound" }
+          })
+        ],
+        {
+          targetableInterpretations: [
+            { interpretationReference: "ref-a", interpretation: projection.interpretations[0]! }
+          ]
+        }
+      )
+    ).toThrow("target interpretation is not present");
+  });
+
+  it("preserves the existing pass-through when no bindings or corrections are supplied", () => {
+    const projection = twoInterpretationBase();
+    const result = apply(projection, []);
+
+    expect(result.interpretations).toEqual(projection.interpretations);
+    expect(result).not.toHaveProperty("targetableInterpretations");
   });
 
   it("rejects a correction-lineage cycle in either direction", () => {

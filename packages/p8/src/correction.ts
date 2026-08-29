@@ -178,11 +178,11 @@ export function applyP8Corrections(
   const targetableInterpretations =
     input.targetableInterpretations === undefined
       ? undefined
-      : normalizeTargetableInterpretations(input.targetableInterpretations);
-  const interpretations =
-    targetableInterpretations === undefined
-      ? input.baseProjection.interpretations.map(cloneInterpretation)
-      : targetableInterpretations.map((binding) => binding.interpretation);
+      : normalizeTargetableInterpretations(
+          input.targetableInterpretations,
+          input.baseProjection.interpretations
+        );
+  const baseInterpretations = input.baseProjection.interpretations;
   const interpretationReferences = new Set(
     targetableInterpretations?.map((binding) => binding.interpretationReference) ?? []
   );
@@ -210,8 +210,12 @@ export function applyP8Corrections(
       : applyInterpretationDecisions(targetableInterpretations, decisions);
   const correctedInterpretations =
     correctedTargetableInterpretations === undefined
-      ? interpretations
-      : correctedTargetableInterpretations.map((binding) => binding.interpretation);
+      ? baseInterpretations.map(cloneInterpretation)
+      : overlayInterpretationDecisions(
+          baseInterpretations,
+          targetableInterpretations ?? [],
+          correctedTargetableInterpretations
+        );
   const correctedInvariants = applyInvariantDecisions(authoredInvariants, decisions);
   const identity = createProjection("identity", correctedInvariants);
   const persona = createProjection("persona", correctedInvariants);
@@ -463,6 +467,39 @@ function applyInterpretationDecisions(
     .sort((left, right) =>
       compareText(left.interpretationReference, right.interpretationReference)
     );
+}
+
+function overlayInterpretationDecisions(
+  baseInterpretations: readonly P8EvidenceInterpretation[],
+  targetableInterpretations: readonly NormalizedTargetableInterpretation[],
+  correctedTargetableInterpretations: readonly NormalizedTargetableInterpretation[]
+): P8EvidenceInterpretation[] {
+  const referenceByBaseInterpretation = new Map(
+    targetableInterpretations.map((binding) => [
+      binding.interpretation,
+      binding.interpretationReference
+    ])
+  );
+  const correctedByReference = new Map(
+    correctedTargetableInterpretations.map((binding) => [
+      binding.interpretationReference,
+      binding.interpretation
+    ])
+  );
+
+  return baseInterpretations.map((interpretation) => {
+    const interpretationReference = referenceByBaseInterpretation.get(interpretation);
+    if (interpretationReference === undefined) {
+      return cloneInterpretation(interpretation);
+    }
+    const corrected = correctedByReference.get(interpretationReference);
+    if (corrected === undefined) {
+      throw new Error(
+        `P8 interpretation target binding has no corrected result: ${interpretationReference}.`
+      );
+    }
+    return corrected;
+  });
 }
 
 function applyInvariantDecisions(
@@ -719,9 +756,18 @@ function cloneEvidenceProvenance(
 }
 
 function normalizeTargetableInterpretations(
-  bindings: readonly P8CorrectionTargetableInterpretation[]
+  bindings: readonly P8CorrectionTargetableInterpretation[],
+  baseInterpretations: readonly P8EvidenceInterpretation[]
 ): readonly NormalizedTargetableInterpretation[] {
   const references = new Set<string>();
+  const baseInterpretationOccurrences = new Map<P8EvidenceInterpretation, number>();
+  for (const interpretation of baseInterpretations) {
+    baseInterpretationOccurrences.set(
+      interpretation,
+      (baseInterpretationOccurrences.get(interpretation) ?? 0) + 1
+    );
+  }
+  const boundInterpretations = new Set<P8EvidenceInterpretation>();
   const normalized = bindings.map((binding) => {
     validateBoundedText(
       binding.interpretationReference,
@@ -734,9 +780,20 @@ function normalizeTargetableInterpretations(
       );
     }
     references.add(binding.interpretationReference);
+    if ((baseInterpretationOccurrences.get(binding.interpretation) ?? 0) !== 1) {
+      throw new Error(
+        `P8 interpretation target binding must reference exactly one existing base interpretation: ${binding.interpretationReference}.`
+      );
+    }
+    if (boundInterpretations.has(binding.interpretation)) {
+      throw new Error(
+        `P8 interpretation target binding cannot alias one base interpretation: ${binding.interpretationReference}.`
+      );
+    }
+    boundInterpretations.add(binding.interpretation);
     return Object.freeze({
       interpretationReference: binding.interpretationReference,
-      interpretation: cloneInterpretation(binding.interpretation)
+      interpretation: binding.interpretation
     });
   });
 
