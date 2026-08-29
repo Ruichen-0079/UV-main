@@ -230,6 +230,10 @@ importers:
         version: 2.1.9(@types/node@22.19.18)
 
   packages/p8:
+    dependencies:
+      '@companion/memory':
+        specifier: workspace:*
+        version: link:../memory
     devDependencies:
       typescript:
         specifier: ^5.7.3
