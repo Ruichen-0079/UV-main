@@ -84,6 +84,17 @@ function directCandidate(
 }
 
 describe("P8-1C read-only evidence adapter", () => {
+  it("accepts a legacy interpretation candidate without a target reference", () => {
+    const result = projection({
+      longTerm: retrieval("ok", [memoryEvent()]),
+      interpretationCandidates: [directCandidate("memory-1")]
+    });
+
+    expect(result.interpretations).toHaveLength(1);
+    expect(result.interpretations[0]?.interpretationVersion).toBe("p8-1b.v1");
+    expect(result.interpretations[0]).not.toHaveProperty("interpretationReference");
+  });
+
   it("uses the versioned compact projection without changing P8-1A identity semantics", () => {
     const result = projection({
       longTerm: retrieval("ok", [memoryEvent()])

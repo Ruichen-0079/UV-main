@@ -67,6 +67,21 @@ function link(
 }
 
 describe("P8-1B evidence interpretation semantics", () => {
+  it("preserves the legacy construction without an interpretation reference", () => {
+    const result = createP8EvidenceInterpretation({
+      domain: "BACKGROUND",
+      meaning: "A meaning without a P8-1D target binding.",
+      access: {
+        status: "SUCCESS_WITH_NO_RELEVANT_EVIDENCE",
+        evidence: []
+      }
+    });
+
+    expect(result.interpretationVersion).toBe(P8_1B_CONTRACT_VERSION);
+    expect(result).not.toHaveProperty("interpretationReference");
+    expect(result.status).toBe("EMPTY");
+  });
+
   it("keeps the P8-1A default projection unchanged", () => {
     const projection = createP8Projection({
       address: createDefaultP8IdentityAddress(),

@@ -1,6 +1,6 @@
 # Phase 1 — P8 Identity, Persona, and Relationship
 
-> **Status: P8-1A, P8-1B, AND P8-1C IMPLEMENTED; LATER P8 STAGES PLANNED**
+> **Status: P8-1A, P8-1B, P8-1C, AND P8-1D IMPLEMENTED; LATER P8 STAGES PLANNED**
 
 ## 1. Purpose
 
@@ -162,6 +162,10 @@ facts, infer relationships, call an LLM, treat assistant repetition as truth,
 or turn a recent question into mood or durable relationship state. Long-term
 and recent access states remain separate during outage and recovery.
 
+P8-1C interpretation candidates retain their existing public shape; they do
+not acquire correction IDs or revision metadata. Stable interpretation target
+identity is layered on later by the P8-1D correction contract.
+
 The resulting read-only projection contains the identity address, P8-1A
 identity/persona projection, compact per-channel access status/state, evidence
 counts, candidate-linked interpretations, and bounded opaque provenance. It
@@ -170,6 +174,56 @@ embeddings, rank scores, backend details, provider/model configuration, prompt
 strings, mood, Continuity/open-thread fields, proactive authority, or
 relationship scalars. No Runtime or PromptBuilder behavior is changed by
 P8-1C.
+
+## P8-1D implementation boundary
+
+P8-1D adds a pure correction/revision semantic contract over the supplied
+P8-1A/P8-1B/P8-1C projection. A correction is received only as an explicit
+semantic object already classified by an upstream authority; P8 does not parse
+free-form language, detect corrections, call a model, retrieve Memory, or
+persist anything. The contract has bounded correction references, identity and
+scope addresses, explicit `REVISE` and `RETRACT` actions, a P8-1D-local binding
+that layers stable interpretation references over the unchanged P8-1B output,
+explicit authored-invariant references, user-correction provenance, optional
+source time, superseded evidence references, and explicit revision lineage.
+Bindings are an overlay only: each one must identify exactly one existing base
+interpretation, subset bindings preserve all unbound interpretations in base
+order, and foreign, modified, or aliased bindings fail closed. They cannot add,
+remove, or replace the base interpretation collection.
+
+The P8-1B and P8-1C public contracts remain unchanged at `p8-1b.v1` and
+`p8-1c.v1`; neither interpretations nor interpretation candidates carry
+correction-target metadata. Likewise, P8-1A remains `p8-1a.v1`: authored
+invariants do not expose a revision-policy field. P8-1D receives an explicit
+revision-policy overlay, treats an omitted policy as `FIXED`, and permits a
+correction to revise an authored invariant only when that overlay explicitly
+sets the exact target to `USER_REVISABLE`.
+
+Explicit user correction/control is the highest P8 semantic authority. It
+outranks old strong evidence, weak inference, recency, rank, repetition,
+confidence, and assistant/model output. `REVISE` replaces the current meaning
+with the supplied correction-authoritative meaning; `RETRACT` removes the old
+current meaning without inferring its opposite and normally leaves the target
+`UNKNOWN`. Corrected interpretations expose only the current meaning, while
+audits preserve the prior meaning and opaque interpretation/evidence
+references. Historical evidence remains intact and auditable; correction is
+not destructive Memory editing.
+
+Two incompatible equal-authority corrections remain `CONFLICTING` unless an
+explicit correction declares that it supersedes another correction. Supplied
+timestamps are provenance only and never determine precedence. Corrections are
+scope- and identity-addressed, so a correction for one character instance,
+persona profile, or evidence scope cannot alter another. Authored invariants
+are fixed by default; only an invariant named by the explicit P8-1D policy
+overlay as user-revisable may be revised or retracted by this stage. The
+default `character.name = Yuvi` invariant therefore remains non-revisable.
+
+P8-1D preserves P8-1C Memory access states independently: a correction cannot
+turn `EMPTY`, `UNAVAILABLE`, or `ERROR` evidence access into another backend
+state. It adds no relationship scalar, transient affect, Continuity, channel
+social mode, prompt string, Runtime integration, Memory write, or persistence.
+P8-1E remains responsible for correction persistence, versioning, and
+reconstruction integration.
 
 ## 3. Inputs
 
@@ -282,8 +336,16 @@ conversation input into P8-1B evidence and a compact projection. It preserves
 scope, access-state, authority, support, candidate-link, and provenance
 boundaries without wiring the projection into Runtime or PromptBuilder.
 
-**PLANNED:** P8-1D/E/F will add correction/revision, persistence/reconstruction,
-and adversarial closure. Character ABI integration, prompt projection,
+**IMPLEMENTED P8-1D:** P8 now accepts only explicit user-authorized semantic
+correction objects and applies deterministic `REVISE`/`RETRACT` behavior to
+stable interpretation references and explicitly user-revisable authored
+invariants. It preserves correction provenance, prior meaning/evidence
+references, explicit supersession lineage, conflict status, scope/identity
+isolation, and independent Memory access state. It performs no NLP, Memory
+mutation, persistence, Runtime integration, or PromptBuilder integration.
+
+**PLANNED:** P8-1E/F will add correction persistence/reconstruction and
+adversarial closure. Character ABI integration, prompt projection,
 Continuity, channel social mode, and relationship growth modeling remain
 planned. Weak evidence must produce only weak interpretation; contradictory,
 empty, unavailable, or erroneous evidence must remain explicit.
@@ -292,6 +354,14 @@ empty, unavailable, or erroneous evidence must remain explicit.
 
 - Memory owns evidence, including scope, eligibility, validity, retrieval, and
   ranking. P8 owns grounded identity/persona/relationship meaning only.
+- Explicit user correction/control is a first-class P8 semantic authority, but
+  a Memory event category, recent user utterance, assistant output, or model
+  guess does not become correction authority without a separately supplied,
+  explicit semantic correction object.
+- Corrections remain addressed to a character instance/persona profile and an
+  opaque evidence scope. Future person, group, and platform-local scopes, plus
+  multiple character instances and persona profiles, must remain possible
+  without turning P8 into a global relationship registry.
 - Relationship meaning remains qualitative and evidence-grounded. Weak
   evidence cannot justify a strong interpretation, and no affinity, trust,
   intimacy, relationship-level, mood, or dependency scalar is permitted.
