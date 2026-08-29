@@ -6,6 +6,7 @@ import {
   type P8EvidenceAdapterInput,
   P8_1C_VERSION,
   adaptP8MemoryRetrievalOutcome,
+  adaptP8RecentConversation,
   createP8EvidenceAdapterProjection,
   recentEvidenceReference,
   type P8RecentConversationMessageInput
@@ -64,9 +65,17 @@ function projection(overrides: Partial<P8EvidenceAdapterInput> = {}) {
   });
 }
 
-function directCandidate(evidenceReference: string, meaning = "The user supplied this fact.") {
+function directCandidate(
+  evidenceReference: string,
+  meaning = "The user supplied this fact.",
+  domain:
+    | "BACKGROUND"
+    | "COMMUNICATION_PREFERENCE"
+    | "SHARED_HISTORY"
+    | "RELATIONSHIP_CONTEXT" = "BACKGROUND"
+) {
   return {
-    domain: "BACKGROUND" as const,
+    domain,
     meaning,
     evidenceLinks: [
       { evidenceReference, relation: "SUPPORTS" as const, support: "DIRECT" as const }
@@ -316,6 +325,30 @@ describe("P8-1C read-only evidence adapter", () => {
   });
 
   it("maps recent user and assistant authority without turning conversation into long-term memory", () => {
+    const adapted = adaptP8RecentConversation(
+      {
+        messages: [
+          recentMessage({ messageReference: "user-message", role: "user" }),
+          recentMessage({ messageReference: "assistant-message", role: "assistant" })
+        ],
+        maxMessages: 2,
+        maxCharacters: 200
+      },
+      SCOPE
+    );
+    const adaptedByReference = new Map(
+      adapted.outcome.evidence.map((evidence) => [evidence.evidenceReference, evidence])
+    );
+
+    expect(adaptedByReference.get(recentEvidenceReference("user-message"))).toMatchObject({
+      sourceClass: "EXPLICIT_USER_ORIGINATED",
+      support: "LIMITED"
+    });
+    expect(adaptedByReference.get(recentEvidenceReference("assistant-message"))).toMatchObject({
+      sourceClass: "ASSISTANT_MODEL_GENERATED",
+      support: "NON_AUTHORITATIVE"
+    });
+
     const result = projection({
       recentConversation: {
         messages: [
@@ -493,9 +526,73 @@ describe("P8-1C read-only evidence adapter", () => {
     });
 
     expect(result.interpretations[0]).toMatchObject({
-      status: "KNOWN",
+      status: "PARTIAL",
+      support: "LIMITED",
       accessStatus: "SUCCESS_WITH_EVIDENCE"
     });
+    expect(result.interpretations[0]?.evidenceLinks).toEqual([
+      {
+        evidenceReference: recentEvidenceReference(recent.messageReference),
+        relation: "SUPPORTS",
+        support: "LIMITED"
+      }
+    ]);
+  });
+
+  it("does not treat a raw recent relationship utterance as known meaning", () => {
+    const recent = recentMessage({
+      messageReference: "love-you",
+      content: "I love you"
+    });
+    const result = projection({
+      recentConversation: {
+        messages: [recent],
+        maxMessages: 1,
+        maxCharacters: 200
+      },
+      interpretationCandidates: [
+        directCandidate(
+          recentEvidenceReference(recent.messageReference),
+          "The relationship has a stable romantic property.",
+          "RELATIONSHIP_CONTEXT"
+        )
+      ]
+    });
+
+    expect(result.interpretations[0]).toMatchObject({
+      domain: "RELATIONSHIP_CONTEXT",
+      status: "PARTIAL",
+      support: "LIMITED"
+    });
+    expect(result.interpretations[0]?.status).not.toBe("KNOWN");
+  });
+
+  it("does not treat a raw recent relationship question as known meaning", () => {
+    const recent = recentMessage({
+      messageReference: "annoyed-question",
+      content: "Are you annoyed with me?"
+    });
+    const result = projection({
+      recentConversation: {
+        messages: [recent],
+        maxMessages: 1,
+        maxCharacters: 200
+      },
+      interpretationCandidates: [
+        directCandidate(
+          recentEvidenceReference(recent.messageReference),
+          "The current relationship has a stable conflict state.",
+          "RELATIONSHIP_CONTEXT"
+        )
+      ]
+    });
+
+    expect(result.interpretations[0]).toMatchObject({
+      domain: "RELATIONSHIP_CONTEXT",
+      status: "PARTIAL",
+      support: "LIMITED"
+    });
+    expect(result.interpretations[0]?.status).not.toBe("KNOWN");
   });
 
   it("remains deterministic and keeps distinct identity addresses isolated", () => {

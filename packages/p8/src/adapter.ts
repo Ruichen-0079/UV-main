@@ -268,7 +268,7 @@ function adaptRecentMessage(
     sourceClass:
       message.role === "assistant" ? "ASSISTANT_MODEL_GENERATED" : "EXPLICIT_USER_ORIGINATED",
     channel: "RECENT_CONVERSATION",
-    support: message.role === "assistant" ? "NON_AUTHORITATIVE" : "DIRECT",
+    support: message.role === "assistant" ? "NON_AUTHORITATIVE" : "LIMITED",
     scopeReference: expectedScopeReference,
     ...(message.suppliedAt === undefined ? {} : { suppliedAt: message.suppliedAt })
   });

@@ -148,7 +148,12 @@ persisted by this adapter. The current message is excluded by its identity
 before the supplied message/character bound is applied; equal text is never
 used for identity or deduplication. Scope mismatch or missing scope fails
 closed, and no global, user-wide, persona-wide, cross-session, or platform
-scope is invented.
+scope is invented. Recent user messages retain their
+`EXPLICIT_USER_ORIGINATED` source class but default to `LIMITED` support because
+this stage cannot distinguish a fact from a joke, hypothetical, quotation,
+roleplay, rhetorical speech, transient concern, correction, or control. Recent
+assistant messages remain `ASSISTANT_MODEL_GENERATED` with
+`NON_AUTHORITATIVE` support.
 
 P8-1C accepts only explicitly supplied semantic interpretation candidates and
 candidate-specific evidence links, then delegates their bounded status,
