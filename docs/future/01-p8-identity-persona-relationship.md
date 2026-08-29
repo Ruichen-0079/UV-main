@@ -1,6 +1,6 @@
 # Phase 1 — P8 Identity, Persona, and Relationship
 
-> **Status: P8-1A IMPLEMENTED; LATER P8 STAGES PLANNED**
+> **Status: P8-1A AND P8-1B IMPLEMENTED; LATER P8 STAGES PLANNED**
 
 ## 1. Purpose
 
@@ -58,10 +58,57 @@ user-controlled invariant. It does not encode learned behavior, wording,
 warmth, brevity, jokes, teasing, sentence structure, or other Character Model
 style. No relationship conclusion or relationship scalar is implemented.
 
-Only P8-1A semantics are implemented here. Memory-backed evidence
-interpretation, recent-conversation projection, correction/revision
-persistence, Character ABI integration, and all later P8 stages remain
-planned.
+P8-1A remains limited to authored identity/persona semantics. Memory-backed
+adapters, recent-conversation integration, correction/revision persistence,
+Character ABI integration, and all later P8 stages remain planned.
+
+## P8-1B implementation boundary
+
+P8-1B adds a provider- and backend-neutral semantic contract for evidence that
+has already passed upstream authorization. It does not retrieve, filter, rank,
+or persist evidence, and it does not import the Memory package. Each bounded
+evidence atom preserves its source class, channel, qualitative support, opaque
+scope reference, supplied source time when present, contradiction references,
+and evidence provenance. `LONG_TERM_EVIDENCE` and `RECENT_CONVERSATION` remain
+distinct inputs; recent conversation is not thereby made durable Memory.
+
+The contract distinguishes explicit user-originated, verified/strongly
+supported, ordinary observed interaction, weak/inferred, and
+assistant/model-generated sources. Assistant/model output cannot create P8
+truth, and repetition cannot increase its authority. Weak or limited evidence
+cannot produce a `KNOWN` strong interpretation. An explicitly supplied meaning
+may be projected only through explicit bounded links identifying the evidence
+references that `SUPPORTS` or `CONTRADICTS` that candidate. Link support is
+qualitative support for that candidate, not an absolute property that
+authorizes every possible meaning; normalized link support cannot exceed the
+source atom's support. Direct but unrelated evidence therefore cannot
+authorize an arbitrary meaning, and P8-1B does not infer a social story from
+an evidence statement.
+
+Evidence access status is separate from relationship fact. Successful access
+with no relevant evidence produces `EMPTY`; successful access with evidence but
+no sufficiently supported meaning produces `UNKNOWN`; unavailable and failed
+access produce `UNAVAILABLE` and `ERROR`; incomplete access produces `PARTIAL`.
+Unresolved explicit contradiction produces `CONFLICTING` and preserves both
+provenance paths. None of these states means “Yuvi has no history with this
+person.” Scope and provenance are preserved, but P8-1B performs no scope
+filtering. Interpretation provenance contains only the linked evidence that
+participates in the candidate; other access-level evidence remains separate
+and cannot masquerade as support provenance. The output is a compact semantic
+envelope, not a prompt string, and contains no relationship scalar, transient
+mood, Continuity, or channel behavior state.
+
+Future semantic authority precedence is explicit user correction or control,
+then explicit authored identity authority where applicable, then
+strong/current evidence in the correct scope, then weak inference, then
+model-generated output. P8-1B does not implement correction persistence or full
+conflict resolution, so unresolved contradiction remains `CONFLICTING` rather
+than being resolved by ordering, repetition, confidence wording, or recency
+alone.
+
+Only P8-1A and P8-1B semantics are implemented here. Memory-backed adapters,
+recent-conversation integration, correction/revision persistence, Character ABI
+integration, and all later P8 stages remain planned.
 
 ## 3. Inputs
 
@@ -164,10 +211,15 @@ projection described above. Existing prompt fields remain Character/surface
 behavior and are not consumed by this package. No existing Memory category is
 reclassified as P8 truth.
 
+**IMPLEMENTED P8-1B:** P8 defines the pure evidence interpretation semantics
+described above. The future adapter will translate the vendor-neutral
+`MemoryEvent` boundary into this contract without giving P8 Memory retrieval or
+ranking authority.
+
 **PLANNED:** Later P8 stages will interpret already-authorized Memory evidence
-and bounded recent conversation without taking Memory retrieval or ranking
-authority. Weak evidence must produce only weak interpretation; contradictory,
-empty, unavailable, or erroneous evidence must remain explicit.
+and bounded recent conversation. Weak evidence must produce only weak
+interpretation; contradictory, empty, unavailable, or erroneous evidence must
+remain explicit.
 
 ## Future-stage constraints
 
@@ -200,10 +252,11 @@ empty, unavailable, or erroneous evidence must remain explicit.
 
 1. **Implemented in P8-1A:** Freeze the concise authored identity/persona
    invariant representation and minimum projection vocabulary.
-2. P8-1B: Define minimum evidence interpretation/projection meanings,
-   including unknown/conflict.
-3. P8-1C: Produce the projection from explicit rules plus Memory-authorized evidence
-   and recent conversation.
+2. **Implemented in P8-1B:** Define minimum evidence interpretation/projection
+   meanings, including unknown, empty, unavailable, error, partial, and
+   conflict.
+3. P8-1C: Produce the projection from explicit rules plus Memory-authorized
+   evidence and recent conversation.
 4. P8-1D/E: Add correction/revision, audit, persistence, and reconstruction
    behavior using Runtime-owned persistence.
 5. P8-1F: Validate multi-session stability, scope isolation, privacy, outage,
