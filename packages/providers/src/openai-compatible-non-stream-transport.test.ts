@@ -8,7 +8,7 @@ import { createProviderRegistryFromEnv } from "./registry.js";
 const chatInput = { messages: [{ role: "user" as const, content: "hello" }] };
 const reasoningInput = { messages: [{ role: "user" as const, content: "think" }] };
 
-function openAICompatibleLeaves(): {
+function openAICompatibleLeaves(embeddingOverrides: Record<string, string> = {}): {
   chat: ChatProvider;
   reasoning: ReasoningProvider;
   embedding: EmbeddingProvider;
@@ -29,7 +29,8 @@ function openAICompatibleLeaves(): {
     EMBEDDING_API_KEY: "embedding-key",
     EMBEDDING_API_BASEURL: "https://embedding.test/v1",
     EMBEDDING_MODEL: "embedding-model",
-    EMBEDDING_DIMENSIONS: "2"
+    EMBEDDING_DIMENSIONS: "2",
+    ...embeddingOverrides
   });
 
   return {
@@ -466,6 +467,98 @@ describe("OpenAI-compatible non-stream transport", () => {
       retryable: true,
       fallbackEligible: true,
       effectState: "unknown"
+    });
+  });
+
+  it("truncates and L2-normalizes local 1024-d embeddings at the provider boundary", async () => {
+    const native = Array.from({ length: 1024 }, (_, index) =>
+      index === 0 ? 3 : index === 1 ? 4 : 1
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(embeddingPayload([native])), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+      )
+    );
+
+    const output = await openAICompatibleLeaves({
+      DEFAULT_EMBEDDING_PROVIDER: "local",
+      EMBEDDING_PROVIDER_CHAIN: "local",
+      LOCAL_MODEL_BASEURL: "http://127.0.0.1:8128/v1",
+      LOCAL_EMBEDDING_MODEL: "Qwen3-Embedding-0.6B-Q8_0.gguf",
+      LOCAL_EMBEDDING_DIMENSIONS: "512"
+    }).embedding.embedText("hello");
+    const expectedNorm = Math.sqrt(3 * 3 + 4 * 4 + 510);
+
+    expect(output).toHaveLength(512);
+    expect(output[0]).toBeCloseTo(3 / expectedNorm, 8);
+    expect(output[1]).toBeCloseTo(4 / expectedNorm, 8);
+    expect(output.every(Number.isFinite)).toBe(true);
+    expect(Math.hypot(...output)).toBeCloseTo(1, 6);
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body))).toMatchObject({
+      model: "Qwen3-Embedding-0.6B-Q8_0.gguf",
+      dimensions: 512
+    });
+  });
+
+  it("does not apply Qwen MRL to an unrelated local embedding model", async () => {
+    const native = Array.from({ length: 1024 }, (_, index) => (index === 0 ? 3 : 1));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(embeddingPayload([native])), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+      )
+    );
+
+    const output = await openAICompatibleLeaves({
+      DEFAULT_EMBEDDING_PROVIDER: "local",
+      EMBEDDING_PROVIDER_CHAIN: "local",
+      LOCAL_MODEL_BASEURL: "http://127.0.0.1:8128/v1",
+      LOCAL_EMBEDDING_MODEL: "unrelated-local-embedding-model",
+      LOCAL_EMBEDDING_DIMENSIONS: "512"
+    }).embedding.embedText("hello");
+
+    expect(output).toEqual(native);
+    expect(output).toHaveLength(1024);
+  });
+
+  it.each([
+    ["short", Array.from({ length: 511 }, () => 1)],
+    ["zero prefix", Array.from({ length: 512 }, () => 0)],
+    ["non-finite prefix", [Number.NaN, ...Array.from({ length: 511 }, () => 1)]]
+  ])("fails closed for a local MRL %s embedding", async (_label, vector) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(embeddingPayload([vector])), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+      )
+    );
+
+    await expect(
+      openAICompatibleLeaves({
+        DEFAULT_EMBEDDING_PROVIDER: "local",
+        EMBEDDING_PROVIDER_CHAIN: "local",
+        LOCAL_MODEL_BASEURL: "http://127.0.0.1:8128/v1",
+        LOCAL_EMBEDDING_MODEL: "Qwen3-Embedding-0.6B-Q8_0.gguf",
+        LOCAL_EMBEDDING_DIMENSIONS: "512"
+      }).embedding.embedText("hello")
+    ).rejects.toMatchObject({
+      code: ProviderErrorCode.MalformedResponse,
+      retryable: false,
+      provider: "local",
+      capability: "embedding"
     });
   });
 

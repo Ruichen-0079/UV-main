@@ -27,6 +27,8 @@ packages/memory/migrations/
 
 PostgreSQL 模式会使用 YUVI Postgres Search v2，并可选启用 pgvector retrieval。`pg_trgm` trigram、PostgreSQL 内置 `simple` full-text index、结构化 filter、tag / metadata GIN index 和 embedding metadata 会一起工作。
 
+对于当前 Linux 上的 Qwen3-Embedding-0.6B Q8_0 本地部署，应设置 `EMBEDDING_DIMENSIONS=512`。Migration `010_embedding_mrl_512_v1.sql` 会把已有的 1024 维 Qwen 向量原地转换为前 512 维并做 L2 normalize，保留 memory identity/content/metadata 和时间字段，并按当前配置重建 512 维 cosine ANN index。该 migration 会检查目标配置，其他维度配置不会被它修改。
+
 Embedding 是增强信号，不会替代 keyword/trigram/full-text。路径、端口、命令、provider 名称、model 名称、env var、tag 和错误信息这类精确技术匹配仍然优先。real-provider-first 模式推荐 `EMBEDDING_PROVIDER=openai-compatible`；`EMBEDDING_PROVIDER=mock` 只用于测试、CI 或显式离线模式，并会报告 `semanticEmbedding=false`，表示它只能验证检索管线，不能提供真实语义相似度。真实 provider 可能消耗 token。新写入的 memory 会在 provider 可用时生成 embedding；如果 embedding 失败，memory 仍会保存，并回退到 keyword/trigram/full-text 检索。已有 Postgres memory 可在 migration 后回填：
 
 ```bash

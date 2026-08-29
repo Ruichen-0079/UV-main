@@ -133,6 +133,8 @@ EMBEDDING_DIMENSIONS=1536
 
 YUVI 默认采用 real-provider-first。`EMBEDDING_PROVIDER=openai-compatible` 会在配置 `EMBEDDING_API_BASEURL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL` 和 `EMBEDDING_DIMENSIONS` 后调用 OpenAI-style `/embeddings` endpoint。`EMBEDDING_PROVIDER=mock` 只用于测试、CI 或显式离线模式，并会报告 `semanticEmbedding=false`，表示它只能验证检索管线，不能提供真实语义相似度。Embedding status 只返回 provider、model、dimensions、mock/configured/available 状态，绝不返回 API key。
 
+当前 Linux 上的 Qwen3-Embedding-0.6B Q8_0 部署通过 loopback 的 `http://127.0.0.1:8128/v1` 使用 `llama-server`，配置为 `LOCAL_EMBEDDING_MODEL=Qwen3-Embedding-0.6B-Q8_0.gguf`，Yuvi 的有效维度为 `LOCAL_EMBEDDING_DIMENSIONS=512`。模型原生输出 1024 维向量；Yuvi 现有 local embedding provider 会在 Memory 看到向量之前截取前 512 个值并对该 prefix 做 L2 normalize。部署使用 CPU-only，不依赖 OpenAI `dimensions` response feature。
+
 如果缺少可选提供方配置并且禁用了模拟实现，注册表会将路由报告为本地
 `not_ready`/`unavailable`；实际调用会抛出标准化的 `ProviderError`。状态和健康检查
 不会把这个配置结果升级为远程探测。

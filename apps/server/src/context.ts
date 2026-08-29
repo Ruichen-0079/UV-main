@@ -255,20 +255,31 @@ export async function createAppContext(
     activeMemoryRepository,
     activeRuntimeEnv,
     async reloadRuntimeConfig(env) {
-      const nextProviders = createProviderRegistryFromEnv(env);
+      const previousActiveRuntimeEnv = { ...context.activeRuntimeEnv };
+      const notHotReloaded = getPendingRestartKeys(env, previousActiveRuntimeEnv);
+      const reloadEnv = { ...env };
+      for (const key of notHotReloaded) {
+        if (previousActiveRuntimeEnv[key] === undefined) {
+          delete reloadEnv[key];
+        } else {
+          reloadEnv[key] = previousActiveRuntimeEnv[key];
+        }
+      }
+
+      const nextProviders = createProviderRegistryFromEnv(reloadEnv);
       const nextMemory = createMemoryService(
         nextProviders,
-        parseMemoryExtractorMode(env["MEMORY_EXTRACTOR"]),
-        env
+        parseMemoryExtractorMode(reloadEnv["MEMORY_EXTRACTOR"]),
+        reloadEnv
       );
       const nextRuntime = createRuntime(nextProviders, nextMemory, {
-        enabled: parseBoolean(env["DIRECT_CONTEXT_ENABLED"], config.directContext.enabled),
+        enabled: parseBoolean(reloadEnv["DIRECT_CONTEXT_ENABLED"], config.directContext.enabled),
         maxTurns: parsePositiveInteger(
-          env["DIRECT_CONTEXT_MAX_TURNS"],
+          reloadEnv["DIRECT_CONTEXT_MAX_TURNS"],
           config.directContext.maxTurns
         ),
         maxChars: parsePositiveInteger(
-          env["DIRECT_CONTEXT_MAX_CHARS"],
+          reloadEnv["DIRECT_CONTEXT_MAX_CHARS"],
           config.directContext.maxChars
         )
       });
@@ -284,7 +295,6 @@ export async function createAppContext(
       context.memory = nextMemory;
       context.runtime = nextRuntime;
 
-      const previousActiveRuntimeEnv = { ...context.activeRuntimeEnv };
       const appliedKeys: string[] = [];
       for (const key of editableKeys) {
         if (getRuntimeSettingApplyMode(key) === "hot_reload") {
@@ -295,15 +305,15 @@ export async function createAppContext(
         }
       }
 
-      const notHotReloaded = getPendingRestartKeys(env, context.activeRuntimeEnv);
-      const restartRequired = notHotReloaded.length > 0;
+      const pendingRestartKeys = getPendingRestartKeys(env, context.activeRuntimeEnv);
+      const restartRequired = pendingRestartKeys.length > 0;
 
       return {
         providers: nextProviders.getStatus(),
         restartRequired,
-        notHotReloaded,
+        notHotReloaded: pendingRestartKeys,
         appliedKeys,
-        pendingRestartKeys: notHotReloaded,
+        pendingRestartKeys,
         message: restartRequired
           ? "Hot-reloadable settings applied. Some saved settings still require a server restart."
           : "Hot-reloadable settings applied."
