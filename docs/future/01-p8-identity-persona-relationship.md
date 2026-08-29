@@ -80,9 +80,10 @@ cannot produce a `KNOWN` strong interpretation. An explicitly supplied meaning
 may be projected only through explicit bounded links identifying the evidence
 references that `SUPPORTS` or `CONTRADICTS` that candidate. Link support is
 qualitative support for that candidate, not an absolute property that
-authorizes every possible meaning. Direct but unrelated evidence therefore
-cannot authorize an arbitrary meaning, and P8-1B does not infer a social story
-from an evidence statement.
+authorizes every possible meaning; normalized link support cannot exceed the
+source atom's support. Direct but unrelated evidence therefore cannot
+authorize an arbitrary meaning, and P8-1B does not infer a social story from
+an evidence statement.
 
 Evidence access status is separate from relationship fact. Successful access
 with no relevant evidence produces `EMPTY`; successful access with evidence but

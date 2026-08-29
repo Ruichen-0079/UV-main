@@ -242,10 +242,13 @@ function normalizeInterpretationLinks(
       throw new Error(`P8 interpretation evidence link must be unique: ${link.evidenceReference}.`);
     }
     linkedReferences.add(link.evidenceReference);
+    const atom = evidence.find(
+      (candidate) => candidate.evidenceReference === link.evidenceReference
+    )!;
     return Object.freeze({
       evidenceReference: link.evidenceReference,
       relation: link.relation,
-      support: link.support
+      support: weakerSupport(link.support, atom.support)
     });
   });
 
@@ -331,7 +334,7 @@ function deriveStatus(
 function canSupportKnown(link: P8InterpretationEvidenceLink, atom: P8AuthorizedEvidence): boolean {
   return (
     link.relation === "SUPPORTS" &&
-    effectiveSupport(link, atom) === "DIRECT" &&
+    link.support === "DIRECT" &&
     atom.sourceClass !== "WEAK_INFERRED" &&
     atom.sourceClass !== "ASSISTANT_MODEL_GENERATED"
   );
@@ -343,19 +346,16 @@ function canSupportPartial(
 ): boolean {
   return (
     link.relation === "SUPPORTS" &&
-    effectiveSupport(link, atom) !== "NON_AUTHORITATIVE" &&
+    link.support !== "NON_AUTHORITATIVE" &&
     atom.sourceClass !== "ASSISTANT_MODEL_GENERATED"
   );
 }
 
-function effectiveSupport(
-  link: P8InterpretationEvidenceLink,
-  atom: P8AuthorizedEvidence
-): P8EvidenceSupport {
-  if (supportRank(link.support) <= supportRank(atom.support)) {
-    return link.support;
+function weakerSupport(left: P8EvidenceSupport, right: P8EvidenceSupport): P8EvidenceSupport {
+  if (supportRank(left) <= supportRank(right)) {
+    return left;
   }
-  return atom.support;
+  return right;
 }
 
 function supportRank(support: P8EvidenceSupport): number {
@@ -400,10 +400,7 @@ function findConflictReferences(
 
   evidenceLinks.forEach((link, index) => {
     const atom = linkedEvidence[index]!;
-    if (
-      atom.sourceClass === "ASSISTANT_MODEL_GENERATED" ||
-      effectiveSupport(link, atom) === "NON_AUTHORITATIVE"
-    ) {
+    if (atom.sourceClass === "ASSISTANT_MODEL_GENERATED" || link.support === "NON_AUTHORITATIVE") {
       return;
     }
     if (link.relation === "SUPPORTS") {

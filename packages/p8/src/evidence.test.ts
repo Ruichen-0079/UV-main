@@ -131,6 +131,57 @@ describe("P8-1B evidence interpretation semantics", () => {
     expect(result.meaning).toBe("A shared history exists.");
   });
 
+  it("keeps DIRECT source and DIRECT candidate support as DIRECT", () => {
+    const result = interpretation(
+      access("SUCCESS_WITH_EVIDENCE", [evidence({ support: "DIRECT" })]),
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("evidence-1", { support: "DIRECT" })]
+    );
+
+    expect(result.evidenceLinks[0]?.support).toBe("DIRECT");
+    expect(result.status).toBe("KNOWN");
+  });
+
+  it("normalizes a LIMITED candidate link against a DIRECT source", () => {
+    const result = interpretation(
+      access("SUCCESS_WITH_EVIDENCE", [evidence({ support: "DIRECT" })]),
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("evidence-1", { support: "LIMITED" })]
+    );
+
+    expect(result.evidenceLinks[0]?.support).toBe("LIMITED");
+    expect(result.status).toBe("PARTIAL");
+    expect(result.support).toBe("LIMITED");
+  });
+
+  it("normalizes a DIRECT candidate link against a LIMITED source", () => {
+    const result = interpretation(
+      access("SUCCESS_WITH_EVIDENCE", [evidence({ support: "LIMITED" })]),
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("evidence-1", { support: "DIRECT" })]
+    );
+
+    expect(result.evidenceLinks[0]?.support).toBe("LIMITED");
+    expect(result.status).toBe("PARTIAL");
+    expect(result.support).toBe("LIMITED");
+  });
+
+  it("normalizes a DIRECT candidate link against a NON_AUTHORITATIVE source", () => {
+    const result = interpretation(
+      access("SUCCESS_WITH_EVIDENCE", [evidence({ support: "NON_AUTHORITATIVE" })]),
+      "A shared history exists.",
+      "RELATIONSHIP_CONTEXT",
+      [link("evidence-1", { support: "DIRECT" })]
+    );
+
+    expect(result.evidenceLinks[0]?.support).toBe("NON_AUTHORITATIVE");
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.support).toBe("NON_AUTHORITATIVE");
+  });
+
   it("does not let unrelated direct evidence authorize an arbitrary meaning", () => {
     const result = interpretation(
       access("SUCCESS_WITH_EVIDENCE", [
