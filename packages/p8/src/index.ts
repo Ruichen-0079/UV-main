@@ -74,6 +74,8 @@ export const DEFAULT_AUTHORED_INVARIANTS: readonly P8AuthoredInvariant[] = Objec
   Object.freeze(DEFAULT_AUTHORED_INVARIANT)
 ]);
 
+export * from "./evidence.js";
+
 export function createDefaultP8IdentityAddress(subjectScopeId?: string): P8IdentityAddress {
   return freezeAddress({
     characterInstanceId: DEFAULT_CHARACTER_INSTANCE_ID,
