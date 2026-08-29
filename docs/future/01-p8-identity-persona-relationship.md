@@ -1,6 +1,6 @@
 # Phase 1 — P8 Identity, Persona, and Relationship
 
-> **Status: PLANNED / NOT IMPLEMENTED**
+> **Status: P8-1A IMPLEMENTED; LATER P8 STAGES PLANNED**
 
 ## 1. Purpose
 
@@ -25,6 +25,40 @@ P8 owns:
 P8 does not reduce a relationship to an affinity, trust, intimacy, or mood
 score. It may express qualitative, evidence-grounded context only when the
 evidence supports it.
+
+## P8-1A implementation boundary
+
+P8-1A establishes only the smallest independent semantic authority for stable
+identity and authored persona invariants. It is implemented in the tiny,
+dependency-free `@companion/p8` package as plain immutable TypeScript data and
+one pure projection constructor. The package has no Runtime, Memory,
+PromptBuilder, provider, model, or platform dependency.
+
+The implemented input is an explicitly supplied identity address plus a small
+authored invariant set. The address keeps `characterInstanceId`,
+`personaProfileId`, and an optional future `subjectScopeId` separate, so a
+default instance/profile does not become a singleton assumption. The output is
+a compact semantic projection with identity/persona status, authored
+invariants, bounded authored provenance references, and a projection version.
+It is not serialized into prompt sections.
+
+P8-1A defines the complete epistemic vocabulary `KNOWN`, `UNKNOWN`,
+`CONFLICTING`, `PARTIAL`, `EMPTY`, `UNAVAILABLE`, and `ERROR`. Authored-only
+projection currently uses `KNOWN` when explicit invariants exist and `EMPTY`
+when that target has no authored invariant. The remaining states are retained
+for later evidence-backed phases and must not be collapsed: missing evidence,
+an unavailable source, and an error are different meanings.
+
+The authored surface is intentionally tiny: stable character name or
+description, an explicit identity boundary, and a semantically appropriate
+user-controlled invariant. It does not encode learned behavior, wording,
+warmth, brevity, jokes, teasing, sentence structure, or other Character Model
+style. No relationship conclusion or relationship scalar is implemented.
+
+Only P8-1A semantics are implemented here. Memory-backed evidence
+interpretation, recent-conversation projection, correction/revision
+persistence, Character ABI integration, and all later P8 stages remain
+planned.
 
 ## 3. Inputs
 
@@ -122,19 +156,55 @@ handling. `PromptBuilder` has syntactic `SystemIdentity`, `CharacterStyle`, and
 is not authoritative Relationship, Affect, Persona, Interest, or Commitment
 state.
 
-**PLANNED:** P8 becomes the semantic producer of stable identity and
-evidence-grounded persona/relationship interpretation. Existing prompt fields
-may be projection targets, but their presence does not prove P8 already exists.
-No existing Memory category is reclassified as P8 truth.
+**IMPLEMENTED P8-1A:** P8 now owns only the pure, authored identity/persona
+projection described above. Existing prompt fields remain Character/surface
+behavior and are not consumed by this package. No existing Memory category is
+reclassified as P8 truth.
+
+**PLANNED:** Later P8 stages will interpret already-authorized Memory evidence
+and bounded recent conversation without taking Memory retrieval or ranking
+authority. Weak evidence must produce only weak interpretation; contradictory,
+empty, unavailable, or erroneous evidence must remain explicit.
+
+## Future-stage constraints
+
+- Memory owns evidence, including scope, eligibility, validity, retrieval, and
+  ranking. P8 owns grounded identity/persona/relationship meaning only.
+- Relationship meaning remains qualitative and evidence-grounded. Weak
+  evidence cannot justify a strong interpretation, and no affinity, trust,
+  intimacy, relationship-level, mood, or dependency scalar is permitted.
+- Recent conversation is a separate bounded input, not long-term Memory and
+  not a durable identity fact. P8 is not Continuity and does not own unfinished
+  relevance, commitments, residue, or attention.
+- P8 is not channel social mode and cannot own QQ/group behavior or platform
+  adapters. Future person/group/platform scope must remain possible without
+  exposing account identifiers to the model-facing projection.
+- Multiple character instances and persona profiles must remain possible;
+  current defaults do not establish a global singleton.
+- A semantic P8 projection is not `PromptBuilder` output and must not be
+  defined by `PromptBuildInput`, `PromptSectionName`, or prompt section text.
+  A later Character ABI adapter may consume a compact projection.
+- Character post-training may learn expression and preferences, but it cannot
+  redefine P8 identity, provenance, uncertainty, or correction semantics.
+- Corrections and revisions are first-class future P8 capabilities. Derived
+  artifacts must remain reconstructable from explicit source inputs and bounded
+  provenance rather than becoming opaque new authority.
+- Provenance should be sufficient for audit while minimizing private content;
+  raw Memory records, database identifiers, provider/backend details, and
+  platform account IDs must not cross into Character-facing semantics.
 
 ## 10. Likely staged implementation shape
 
-1. Freeze a concise identity/persona invariant set and evidence rules.
-2. Define the minimum P8 projection meanings, including unknown/conflict.
-3. Produce the projection from explicit rules plus Memory-authorized evidence
+1. **Implemented in P8-1A:** Freeze the concise authored identity/persona
+   invariant representation and minimum projection vocabulary.
+2. P8-1B: Define minimum evidence interpretation/projection meanings,
+   including unknown/conflict.
+3. P8-1C: Produce the projection from explicit rules plus Memory-authorized evidence
    and recent conversation.
-4. Add revision/correction and audit behavior using Runtime-owned persistence.
-5. Validate multi-session stability, scope isolation, and backend replacement.
+4. P8-1D/E: Add correction/revision, audit, persistence, and reconstruction
+   behavior using Runtime-owned persistence.
+5. P8-1F: Validate multi-session stability, scope isolation, privacy, outage,
+   and backend replacement.
 
 Each stage should add the smallest semantic unit and tests needed. Do not build
 a generic relationship framework in anticipation of hypothetical consumers.
