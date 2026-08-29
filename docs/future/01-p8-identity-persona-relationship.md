@@ -1,6 +1,6 @@
 # Phase 1 — P8 Identity, Persona, and Relationship
 
-> **Status: P8-1A AND P8-1B IMPLEMENTED; LATER P8 STAGES PLANNED**
+> **Status: P8-1A, P8-1B, AND P8-1C IMPLEMENTED; LATER P8 STAGES PLANNED**
 
 ## 1. Purpose
 
@@ -29,10 +29,10 @@ evidence supports it.
 ## P8-1A implementation boundary
 
 P8-1A establishes only the smallest independent semantic authority for stable
-identity and authored persona invariants. It is implemented in the tiny,
-dependency-free `@companion/p8` package as plain immutable TypeScript data and
-one pure projection constructor. The package has no Runtime, Memory,
-PromptBuilder, provider, model, or platform dependency.
+identity and authored persona invariants. It is implemented in the tiny
+`@companion/p8` package as plain immutable TypeScript data and one pure
+projection constructor. The P8-1A contract has no Runtime, Memory,
+PromptBuilder, provider, model, or platform semantics.
 
 The implemented input is an explicitly supplied identity address plus a small
 authored invariant set. The address keeps `characterInstanceId`,
@@ -59,8 +59,9 @@ warmth, brevity, jokes, teasing, sentence structure, or other Character Model
 style. No relationship conclusion or relationship scalar is implemented.
 
 P8-1A remains limited to authored identity/persona semantics. Memory-backed
-adapters, recent-conversation integration, correction/revision persistence,
-Character ABI integration, and all later P8 stages remain planned.
+evidence adaptation, recent-conversation integration, correction/revision
+persistence, Character ABI integration, and all later P8 stages remain outside
+P8-1A.
 
 ## P8-1B implementation boundary
 
@@ -106,9 +107,64 @@ conflict resolution, so unresolved contradiction remains `CONFLICTING` rather
 than being resolved by ordering, repetition, confidence wording, or recency
 alone.
 
-Only P8-1A and P8-1B semantics are implemented here. Memory-backed adapters,
-recent-conversation integration, correction/revision persistence, Character ABI
-integration, and all later P8 stages remain planned.
+P8-1B remains a pure contract: it accepts already-authorized evidence and
+explicit candidate links, but does not retrieve or interpret raw Memory. The
+P8-1C adapter below is the first narrow read-only boundary that supplies this
+contract from current vendor-neutral evidence types.
+
+## P8-1C implementation boundary
+
+P8-1C adds a pure, read-only adapter in `@companion/p8`. It has only a
+type-level dependency on the vendor-neutral `MemoryEvent` and
+`MemoryRetrievalOutcome` contracts from `@companion/memory`; it does not depend
+on `MemoryProvider`, MemoryService, repositories, Postgres, Mem0, Core,
+Runtime, or PromptBuilder. Memory remains the owner of retrieval authorization,
+scope selection, eligibility, filtering, ranking, and evidence persistence.
+The adapter consumes an already-authorized outcome and never performs a second
+query, filtering pass, rerank, vector lookup, or write.
+
+Memory retrieval statuses map without semantic collapse: `ok` with authorized
+events becomes successful evidence access, `empty` becomes successful access
+with no relevant evidence and therefore P8 `EMPTY`, `partial` remains
+`PARTIAL`, and `unavailable` and `error` remain distinct. Inconsistent status
+and event combinations fail closed. Successful access with evidence but no
+explicit candidate meaning is `UNKNOWN`; evidence alone never creates a P8
+relationship conclusion.
+
+The event adapter uses the canonical event identity, content, an exact caller-
+supplied authorized scope, and the first supplied timestamp in
+`occurredAt`, `observedAt`, `recordedAt` order. Assertion source and
+verification determine only a bounded P8 authority/support classification:
+verified explicit user or supported source may be `DIRECT`, weak or
+unverifiable evidence is at most `LIMITED`, and assistant/model-generated
+content is `NON_AUTHORITATIVE`. Memory confidence, rank, repetition, kind,
+metadata, provider/source-record identifiers, participants, and conversation
+identifiers do not become P8 truth or confidence.
+
+The recent-conversation input is a separate, caller-bounded current-session
+channel containing role, source-supplied message identity, content, opaque
+scope, and optional source time. It is not long-term Memory and is not
+persisted by this adapter. The current message is excluded by its identity
+before the supplied message/character bound is applied; equal text is never
+used for identity or deduplication. Scope mismatch or missing scope fails
+closed, and no global, user-wide, persona-wide, cross-session, or platform
+scope is invented.
+
+P8-1C accepts only explicitly supplied semantic interpretation candidates and
+candidate-specific evidence links, then delegates their bounded status,
+support, conflict, and provenance semantics to P8-1B. It does not extract
+facts, infer relationships, call an LLM, treat assistant repetition as truth,
+or turn a recent question into mood or durable relationship state. Long-term
+and recent access states remain separate during outage and recovery.
+
+The resulting read-only projection contains the identity address, P8-1A
+identity/persona projection, compact per-channel access status/state, evidence
+counts, candidate-linked interpretations, and bounded opaque provenance. It
+does not contain raw Memory or conversation DTO collections, statements,
+embeddings, rank scores, backend details, provider/model configuration, prompt
+strings, mood, Continuity/open-thread fields, proactive authority, or
+relationship scalars. No Runtime or PromptBuilder behavior is changed by
+P8-1C.
 
 ## 3. Inputs
 
@@ -212,14 +268,20 @@ behavior and are not consumed by this package. No existing Memory category is
 reclassified as P8 truth.
 
 **IMPLEMENTED P8-1B:** P8 defines the pure evidence interpretation semantics
-described above. The future adapter will translate the vendor-neutral
-`MemoryEvent` boundary into this contract without giving P8 Memory retrieval or
-ranking authority.
+described above. The contract still receives only already-authorized evidence
+and does not give P8 Memory retrieval or ranking authority.
 
-**PLANNED:** Later P8 stages will interpret already-authorized Memory evidence
-and bounded recent conversation. Weak evidence must produce only weak
-interpretation; contradictory, empty, unavailable, or erroneous evidence must
-remain explicit.
+**IMPLEMENTED P8-1C:** The pure read-only adapter translates the current
+vendor-neutral Memory outcome/event boundary and a separately bounded recent
+conversation input into P8-1B evidence and a compact projection. It preserves
+scope, access-state, authority, support, candidate-link, and provenance
+boundaries without wiring the projection into Runtime or PromptBuilder.
+
+**PLANNED:** P8-1D/E/F will add correction/revision, persistence/reconstruction,
+and adversarial closure. Character ABI integration, prompt projection,
+Continuity, channel social mode, and relationship growth modeling remain
+planned. Weak evidence must produce only weak interpretation; contradictory,
+empty, unavailable, or erroneous evidence must remain explicit.
 
 ## Future-stage constraints
 
@@ -255,8 +317,9 @@ remain explicit.
 2. **Implemented in P8-1B:** Define minimum evidence interpretation/projection
    meanings, including unknown, empty, unavailable, error, partial, and
    conflict.
-3. P8-1C: Produce the projection from explicit rules plus Memory-authorized
-   evidence and recent conversation.
+3. **Implemented in P8-1C:** Adapt Memory-authorized evidence and a separately
+   bounded recent-conversation input into the read-only P8-1B contract and
+   compact projection.
 4. P8-1D/E: Add correction/revision, audit, persistence, and reconstruction
    behavior using Runtime-owned persistence.
 5. P8-1F: Validate multi-session stability, scope isolation, privacy, outage,
