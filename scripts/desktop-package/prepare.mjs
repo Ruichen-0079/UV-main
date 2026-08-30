@@ -32,7 +32,8 @@ export function ensureRuntimeBuildPrerequisites() {
   const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
   const result = spawnSync(pnpm, ["--filter", RUNTIME_BUILD_WORKSPACE_FILTER, "build"], {
     cwd: REPO_ROOT,
-    stdio: "inherit"
+    stdio: "inherit",
+    shell: process.platform === "win32"
   });
   if (result.error) {
     throw result.error;
