@@ -114,7 +114,7 @@ function measureSemanticCharacters(section: CharacterAbiSemanticSection): number
 }
 
 function boundedInteger(input: unknown, field: string, maximum: number): number {
-  if (!Number.isInteger(input) || typeof input !== "number" || input < 0 || input > maximum) {
+  if (typeof input !== "number" || !Number.isInteger(input) || input < 0 || input > maximum) {
     throw new Error(`${field} must be an integer between 0 and ${maximum}.`);
   }
   return input;
