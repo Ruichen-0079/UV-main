@@ -8,9 +8,11 @@ import {
   type CharacterAbiSemanticSection,
   type CharacterProposal
 } from "../../character-abi/src/index.js";
+import type { ChatOutput } from "../../providers/src/types/chat.js";
 
 export const CHARACTER_HARNESS_5A_VERSION = "character-harness-5a.v1" as const;
 export const CHARACTER_HARNESS_5B_VERSION = "character-harness-5b.v1" as const;
+export const CHARACTER_HARNESS_5C_VERSION = "character-harness-5c.v1" as const;
 
 export type CharacterHarnessAssemblyBudget = Readonly<{
   /** Prefix-only section budget. Zero is valid and produces an empty context. */
@@ -42,11 +44,49 @@ export type CharacterHarnessOutputInterpretation = Readonly<
     }
 >;
 
+type CharacterHarnessRejectedGenerationStatus =
+  | "TRUNCATED"
+  | "CONTENT_FILTERED"
+  | "UNSUPPORTED_TOOL_CALL"
+  | "UNKNOWN_TERMINATION"
+  | "OVER_BUDGET"
+  | "MALFORMED";
+
+type CharacterHarnessRejectedGenerationReason =
+  | "LENGTH_TERMINATION"
+  | "CONTENT_FILTER_TERMINATION"
+  | "TOOL_CALL_TERMINATION"
+  | "UNKNOWN_FINISH_REASON"
+  | "RESPONSE_CHARACTER_BUDGET_EXCEEDED"
+  | "INVALID_CHARACTER_PROPOSAL";
+
+export type CharacterHarnessGenerationSupervision = Readonly<
+  | {
+      version: typeof CHARACTER_HARNESS_5C_VERSION;
+      status: "ACCEPTED";
+      proposal: CharacterProposal;
+    }
+  | {
+      version: typeof CHARACTER_HARNESS_5C_VERSION;
+      status: CharacterHarnessRejectedGenerationStatus;
+      reason: CharacterHarnessRejectedGenerationReason;
+    }
+>;
+
+type NormalizedChatFinishReason = NonNullable<ChatOutput["finishReason"]>;
+
 type UnknownObject = Record<string, unknown> & {
   context?: unknown;
   budget?: unknown;
   maxSections?: unknown;
   maxSemanticCharacters?: unknown;
+  interpretation?: unknown;
+  finishReason?: unknown;
+  maxResponseCharacters?: unknown;
+  version?: unknown;
+  status?: unknown;
+  proposal?: unknown;
+  reason?: unknown;
 };
 
 /**
@@ -124,6 +164,59 @@ export function interpretCharacterHarnessOutput(input: unknown): CharacterHarnes
   }
 }
 
+/**
+ * Supervise termination and response length without consuming a raw provider
+ * DTO and without executing retry/fallback. `finishReason` uses the existing
+ * normalized ChatOutput vocabulary; all non-stop endings fail closed.
+ */
+export function superviseCharacterHarnessGeneration(
+  input: unknown
+): CharacterHarnessGenerationSupervision {
+  const value = expectObject(input, "Character Harness generation supervision input");
+  assertAllowedKeys(
+    value,
+    ["interpretation", "finishReason", "maxResponseCharacters"],
+    "Character Harness generation supervision input"
+  );
+
+  const interpretation = normalizeOutputInterpretation(value.interpretation);
+  const finishReason = normalizeChatFinishReason(value.finishReason);
+  const maxResponseCharacters = nonNegativeSafeInteger(
+    value.maxResponseCharacters,
+    "Character Harness maxResponseCharacters"
+  );
+
+  switch (finishReason) {
+    case "length":
+      return rejectedGeneration("TRUNCATED", "LENGTH_TERMINATION");
+    case "content_filter":
+      return rejectedGeneration("CONTENT_FILTERED", "CONTENT_FILTER_TERMINATION");
+    case "tool_call":
+      return rejectedGeneration("UNSUPPORTED_TOOL_CALL", "TOOL_CALL_TERMINATION");
+    case "unknown":
+      return rejectedGeneration("UNKNOWN_TERMINATION", "UNKNOWN_FINISH_REASON");
+    case "stop":
+      break;
+  }
+
+  if (interpretation.status === "MALFORMED") {
+    return rejectedGeneration("MALFORMED", "INVALID_CHARACTER_PROPOSAL");
+  }
+
+  if (
+    interpretation.proposal.disposition === "RESPOND" &&
+    interpretation.proposal.text.length > maxResponseCharacters
+  ) {
+    return rejectedGeneration("OVER_BUDGET", "RESPONSE_CHARACTER_BUDGET_EXCEEDED");
+  }
+
+  return Object.freeze({
+    version: CHARACTER_HARNESS_5C_VERSION,
+    status: "ACCEPTED",
+    proposal: interpretation.proposal
+  });
+}
+
 function normalizeBudget(input: unknown): CharacterHarnessAssemblyBudget {
   const value = expectObject(input, "Character Harness assembly budget");
   assertAllowedKeys(
@@ -146,11 +239,80 @@ function normalizeBudget(input: unknown): CharacterHarnessAssemblyBudget {
   return Object.freeze({ maxSections, maxSemanticCharacters });
 }
 
+function normalizeOutputInterpretation(input: unknown): CharacterHarnessOutputInterpretation {
+  const value = expectObject(input, "Character Harness output interpretation");
+  if (value.version !== CHARACTER_HARNESS_5B_VERSION) {
+    throw new Error(`Character Harness output interpretation version must be ${CHARACTER_HARNESS_5B_VERSION}.`);
+  }
+
+  if (value.status === "ACCEPTED") {
+    assertAllowedKeys(
+      value,
+      ["version", "status", "proposal"],
+      "Accepted Character Harness output interpretation"
+    );
+    return Object.freeze({
+      version: CHARACTER_HARNESS_5B_VERSION,
+      status: "ACCEPTED",
+      proposal: createCharacterProposal(value.proposal)
+    });
+  }
+
+  if (value.status === "MALFORMED") {
+    assertAllowedKeys(
+      value,
+      ["version", "status", "reason"],
+      "Malformed Character Harness output interpretation"
+    );
+    if (value.reason !== "INVALID_CHARACTER_PROPOSAL") {
+      throw new Error("Malformed Character Harness output interpretation reason is invalid.");
+    }
+    return Object.freeze({
+      version: CHARACTER_HARNESS_5B_VERSION,
+      status: "MALFORMED",
+      reason: "INVALID_CHARACTER_PROPOSAL"
+    });
+  }
+
+  throw new Error("Character Harness output interpretation status is invalid.");
+}
+
+function normalizeChatFinishReason(input: unknown): NormalizedChatFinishReason {
+  switch (input) {
+    case "stop":
+    case "length":
+    case "tool_call":
+    case "content_filter":
+      return input;
+    case "unknown":
+    default:
+      return "unknown";
+  }
+}
+
+function rejectedGeneration(
+  status: CharacterHarnessRejectedGenerationStatus,
+  reason: CharacterHarnessRejectedGenerationReason
+): CharacterHarnessGenerationSupervision {
+  return Object.freeze({
+    version: CHARACTER_HARNESS_5C_VERSION,
+    status,
+    reason
+  });
+}
+
 function measureSemanticCharacters(section: CharacterAbiSemanticSection): number {
   const summaryCharacters = section.summary?.length ?? 0;
   const provenanceCharacters =
     section.provenanceReferences?.reduce((total, reference) => total + reference.length, 0) ?? 0;
   return summaryCharacters + provenanceCharacters;
+}
+
+function nonNegativeSafeInteger(input: unknown, field: string): number {
+  if (typeof input !== "number" || !Number.isSafeInteger(input) || input < 0) {
+    throw new Error(`${field} must be a non-negative safe integer.`);
+  }
+  return input;
 }
 
 function boundedInteger(input: unknown, field: string, maximum: number): number {
