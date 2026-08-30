@@ -44,6 +44,22 @@ export type CharacterHarnessOutputInterpretation = Readonly<
     }
 >;
 
+type CharacterHarnessRejectedGenerationStatus =
+  | "TRUNCATED"
+  | "CONTENT_FILTERED"
+  | "UNSUPPORTED_TOOL_CALL"
+  | "UNKNOWN_TERMINATION"
+  | "OVER_BUDGET"
+  | "MALFORMED";
+
+type CharacterHarnessRejectedGenerationReason =
+  | "LENGTH_TERMINATION"
+  | "CONTENT_FILTER_TERMINATION"
+  | "TOOL_CALL_TERMINATION"
+  | "UNKNOWN_FINISH_REASON"
+  | "RESPONSE_CHARACTER_BUDGET_EXCEEDED"
+  | "INVALID_CHARACTER_PROPOSAL";
+
 export type CharacterHarnessGenerationSupervision = Readonly<
   | {
       version: typeof CHARACTER_HARNESS_5C_VERSION;
@@ -52,20 +68,8 @@ export type CharacterHarnessGenerationSupervision = Readonly<
     }
   | {
       version: typeof CHARACTER_HARNESS_5C_VERSION;
-      status:
-        | "TRUNCATED"
-        | "CONTENT_FILTERED"
-        | "UNSUPPORTED_TOOL_CALL"
-        | "UNKNOWN_TERMINATION"
-        | "OVER_BUDGET"
-        | "MALFORMED";
-      reason:
-        | "LENGTH_TERMINATION"
-        | "CONTENT_FILTER_TERMINATION"
-        | "TOOL_CALL_TERMINATION"
-        | "UNKNOWN_FINISH_REASON"
-        | "RESPONSE_CHARACTER_BUDGET_EXCEEDED"
-        | "INVALID_CHARACTER_PROPOSAL";
+      status: CharacterHarnessRejectedGenerationStatus;
+      reason: CharacterHarnessRejectedGenerationReason;
     }
 >;
 
@@ -287,17 +291,14 @@ function normalizeChatFinishReason(input: unknown): NormalizedChatFinishReason {
 }
 
 function rejectedGeneration(
-  status: Exclude<CharacterHarnessGenerationSupervision["status"], "ACCEPTED">,
-  reason: Exclude<
-    CharacterHarnessGenerationSupervision extends { reason: infer TReason } ? TReason : never,
-    undefined
-  >
+  status: CharacterHarnessRejectedGenerationStatus,
+  reason: CharacterHarnessRejectedGenerationReason
 ): CharacterHarnessGenerationSupervision {
   return Object.freeze({
     version: CHARACTER_HARNESS_5C_VERSION,
     status,
     reason
-  }) as CharacterHarnessGenerationSupervision;
+  });
 }
 
 function measureSemanticCharacters(section: CharacterAbiSemanticSection): number {
