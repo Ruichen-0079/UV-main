@@ -1,6 +1,6 @@
 # Phase 1 — P8 Identity, Persona, and Relationship
 
-> **Status: P8-1A, P8-1B, P8-1C, AND P8-1D IMPLEMENTED; LATER P8 STAGES PLANNED**
+> **Status: P8-1A, P8-1B, P8-1C, P8-1D, AND P8-1E IMPLEMENTED; P8-1F AND LATER P8 STAGES PLANNED**
 
 ## 1. Purpose
 
@@ -222,8 +222,64 @@ P8-1D preserves P8-1C Memory access states independently: a correction cannot
 turn `EMPTY`, `UNAVAILABLE`, or `ERROR` evidence access into another backend
 state. It adds no relationship scalar, transient affect, Continuity, channel
 social mode, prompt string, Runtime integration, Memory write, or persistence.
-P8-1E remains responsible for correction persistence, versioning, and
-reconstruction integration.
+
+## P8-1E implementation boundary
+
+P8-1E makes explicit user corrections durable without making a derived P8
+projection a second source of truth. The pure `@companion/p8` contract owns the
+versioned correction record, append/load store interface, record validation and
+canonicalization, and reconstruction function. The PostgreSQL implementation
+lives in the existing Core persistence boundary and uses the existing Memory
+migration runner and `DATABASE_URL`; `@companion/p8` does not depend on `pg`, a
+PostgreSQL client, Runtime, PromptBuilder, or Mem0.
+
+Only correction authority inputs are persisted: the P8-1E record version,
+correction reference, exact character/persona/optional subject address and
+opaque scope reference, target, `REVISE`/`RETRACT` action, replacement meaning
+when applicable, explicit-user provenance, source-supplied time when present,
+explicit correction lineage, and explicitly superseded opaque evidence
+references. P8 does not persist Memory event DTOs, conversation messages,
+embeddings, retrieval rank, model explanations, prompt strings, assistant
+output, transient affect, relationship summaries, or a derived projection.
+Corrections are append-only: the same correction reference and canonical
+payload is idempotent, a different payload is a conflict, and there is no
+semantic delete or last-write-wins update. No user-interface correction
+capture is implied by this storage contract.
+
+Stable interpretation references are explicit P8-1E declarations around the
+unchanged P8-1C candidate input. They survive process restart and distinguish
+identical candidate meanings. P8-1D's exact JavaScript object-identity check
+remains only a same-call membership guard: reconstruction creates fresh P8-1C
+interpretation objects, then creates fresh P8-1D bindings over them. A missing,
+duplicate, or foreign referenced candidate fails closed; P8 never recovers a
+target from text, domain, evidence equality, embeddings, or array position.
+
+Reconstruction is versioned by a compact manifest containing
+`p8-1a.v1`, `p8-1b.v1`, `p8-1c.v1`, `p8-1d.v1`, and `p8-1e.v1`. It combines the
+stable authored rules, the supplied Memory-authorized outcome, separately
+bounded recent conversation, explicitly referenced candidates, configured
+authored-invariant revision policies, and loaded durable corrections through
+the existing P8-1C/P8-1D pure functions. The result is deterministic and
+reconstructable; database sequence/order, `stored_at`, process identity, and
+source-supplied timestamps never establish correction precedence. Explicit
+lineage remains the only correction supersession authority.
+
+Correction lookup distinguishes `SUCCESS_WITH_CORRECTIONS`,
+`SUCCESS_WITH_NO_CORRECTIONS`, `UNAVAILABLE`, and `ERROR`. A successful empty
+lookup means there is no correction history for that exact address and scope;
+it is not an outage. If correction storage is unavailable or errors, P8-1E
+does not emit an uncorrected projection as current authoritative truth, because
+doing so could resurrect a retracted meaning. Stored rows are validated again
+on read; unknown record versions, malformed rows, invalid authority, action,
+target, address, scope, or lineage fail closed rather than being skipped.
+
+P8-1E leaves Memory as the evidence owner and P8 as the grounded-meaning
+owner. P8 correction rows are not Memory events and do not change Memory
+retrieval, hybrid ranking, scope filtering, expiry, or writes. The durable
+reconstruction is not wired to Runtime, PromptBuilder, the Character ABI,
+voice, proactive behavior, Continuity, or channel social mode. P8-1F remains
+the later adversarial closure for persistence/reconstruction edge cases,
+privacy, outage, scope isolation, and backend replacement.
 
 ## 3. Inputs
 
@@ -248,7 +304,9 @@ that no relationship history exists.
 - uncertainty, conflict, and “unknown” indications;
 - bounded context suitable for Character ABI projection.
 
-The exact storage and wire format are deliberately deferred.
+The Character ABI wire format and prompt adapter remain deliberately deferred;
+P8-1E defines only the narrow durable correction record and reconstruction
+boundary described below.
 
 ## 5. Authority boundaries
 
@@ -344,8 +402,18 @@ references, explicit supersession lineage, conflict status, scope/identity
 isolation, and independent Memory access state. It performs no NLP, Memory
 mutation, persistence, Runtime integration, or PromptBuilder integration.
 
-**PLANNED:** P8-1E/F will add correction persistence/reconstruction and
-adversarial closure. Character ABI integration, prompt projection,
+**IMPLEMENTED P8-1E:** P8 now persists explicit correction authority through
+the existing PostgreSQL migration/persistence boundary and reconstructs a
+versioned corrected projection from fresh P8-1C objects plus stable P8-1D
+references. Stored correction history is append-only, idempotent by canonical
+payload, exact-address/scope isolated, validated on read, and fail-closed on
+storage outage or malformed/unknown records. Derived projections are not
+persisted as authority, and no Memory event is created for a P8 correction.
+There is no Runtime, PromptBuilder, Character ABI, UI, or response behavior
+integration in this stage.
+
+**PLANNED:** P8-1F will add adversarial closure. Character ABI integration,
+prompt projection,
 Continuity, channel social mode, and relationship growth modeling remain
 planned. Weak evidence must produce only weak interpretation; contradictory,
 empty, unavailable, or erroneous evidence must remain explicit.
@@ -395,9 +463,12 @@ empty, unavailable, or erroneous evidence must remain explicit.
 3. **Implemented in P8-1C:** Adapt Memory-authorized evidence and a separately
    bounded recent-conversation input into the read-only P8-1B contract and
    compact projection.
-4. P8-1D/E: Add correction/revision, audit, persistence, and reconstruction
-   behavior using Runtime-owned persistence.
-5. P8-1F: Validate multi-session stability, scope isolation, privacy, outage,
+4. **Implemented in P8-1D:** Add correction/revision and audit behavior over
+   stable P8-1D target bindings.
+5. **Implemented in P8-1E:** Add append-only durable correction authority and
+   deterministic versioned reconstruction through the existing persistence
+   boundary.
+6. P8-1F: Validate multi-session stability, scope isolation, privacy, outage,
    and backend replacement.
 
 Each stage should add the smallest semantic unit and tests needed. Do not build
