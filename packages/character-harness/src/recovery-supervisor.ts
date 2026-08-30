@@ -39,7 +39,10 @@ export type CharacterHarnessRecoverySupervisorInterpretation = Readonly<
   | {
       version: typeof CHARACTER_HARNESS_5F_VERSION;
       status: "NOT_ADMITTED";
-      reason: "RETRY_NOT_ADMITTED" | "COGNITION_NOT_AVAILABLE";
+      reason:
+        | "RETRY_NOT_ADMITTED"
+        | "RETRY_BUDGET_EXHAUSTED"
+        | "COGNITION_NOT_AVAILABLE";
     }
 >;
 
@@ -101,7 +104,8 @@ export function createCharacterHarnessRecoverySupervisorRequest(
 /**
  * Interpret an adapter-decoded intelligent supervisor proposal without
  * executing it. The supervisor may only propose retry, cognition fallback, or
- * failure. Runtime admission facts still fence retry and cognition fallback.
+ * failure. Runtime admission facts and the 5E one-retry ceiling still fence
+ * retry and cognition fallback.
  */
 export function interpretCharacterHarnessRecoverySupervisorOutput(
   input: unknown
@@ -123,12 +127,21 @@ export function interpretCharacterHarnessRecoverySupervisorOutput(
     });
   }
 
-  if (proposal.disposition === "RETRY_CHARACTER_GENERATION" && !request.retryAllowed) {
-    return Object.freeze({
-      version: CHARACTER_HARNESS_5F_VERSION,
-      status: "NOT_ADMITTED",
-      reason: "RETRY_NOT_ADMITTED"
-    });
+  if (proposal.disposition === "RETRY_CHARACTER_GENERATION") {
+    if (!request.retryAllowed) {
+      return Object.freeze({
+        version: CHARACTER_HARNESS_5F_VERSION,
+        status: "NOT_ADMITTED",
+        reason: "RETRY_NOT_ADMITTED"
+      });
+    }
+    if (request.characterRetriesUsed >= 1) {
+      return Object.freeze({
+        version: CHARACTER_HARNESS_5F_VERSION,
+        status: "NOT_ADMITTED",
+        reason: "RETRY_BUDGET_EXHAUSTED"
+      });
+    }
   }
 
   if (proposal.disposition === "FALLBACK_TO_COGNITION" && !request.cognitionAvailable) {
