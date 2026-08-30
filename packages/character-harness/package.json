@@ -23,6 +23,11 @@
       "types": "./src/cognition-request.ts",
       "development": "./src/cognition-request.ts",
       "import": "./dist/cognition-request.js"
+    },
+    "./cognition-result": {
+      "types": "./src/cognition-result.ts",
+      "development": "./src/cognition-result.ts",
+      "import": "./dist/cognition-result.js"
     }
   },
   "scripts": {
