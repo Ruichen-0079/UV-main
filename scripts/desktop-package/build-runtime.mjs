@@ -167,6 +167,7 @@ export async function bundleRuntimeServer(outDir = RUNTIME_OUT_DIR) {
     external: [...ALLOWED_OPTIONAL_NATIVE_EXTERNALS],
     metafile: true,
     packages: "bundle",
+    conditions: ["development"],
     sourcemap: false,
     logLevel: "info",
     // Polyfill CJS require() for packages that use dynamic require (e.g. fastify plugins).

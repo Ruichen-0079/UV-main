@@ -278,10 +278,14 @@ describe("P8-1E PostgreSQL correction persistence", () => {
             status: "ERROR"
           });
 
-          const table = await client.query("select to_regclass($1) as table_name", [
-            `${schema}.p8_corrections`
-          ]);
-          expect(table.rows[0]?.["table_name"]).toBe(`${schema}.p8_corrections`);
+          const table = await client.query(
+            `select table_schema, table_name
+               from information_schema.tables
+              where table_schema = $1
+                and table_name = $2`,
+            [schema, "p8_corrections"]
+          );
+          expect(table.rows).toEqual([{ table_schema: schema, table_name: "p8_corrections" }]);
           const index = await client.query(
             `select indexname from pg_indexes where schemaname = $1 and indexname = $2`,
             [schema, "p8_corrections_address_scope_idx"]
