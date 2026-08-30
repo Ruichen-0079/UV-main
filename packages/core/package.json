@@ -18,11 +18,14 @@
   "dependencies": {
     "@companion/event-bus": "workspace:*",
     "@companion/memory": "workspace:*",
+    "@companion/p8": "workspace:*",
     "@companion/prompt-builder": "workspace:*",
     "@companion/protocol": "workspace:*",
     "@companion/providers": "workspace:*"
   },
   "devDependencies": {
+    "@types/pg": "^8.20.0",
+    "pg": "^8.20.0",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"
   }
