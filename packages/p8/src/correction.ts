@@ -252,36 +252,6 @@ export function applyP8Corrections(
   });
 }
 
-/** Returns the validated, deterministic correction input used by persistence. */
-export function canonicalizeP8ExplicitCorrection(
-  correction: P8ExplicitCorrection
-): P8ExplicitCorrection {
-  const address = normalizeAddress(correction.address, "correction.address");
-  const scopeReference = normalizeScopeReference(correction.scopeReference, "correction.scope");
-  const normalized = normalizeCorrection(correction, address, scopeReference);
-  return Object.freeze({
-    correctionReference: normalized.correctionReference,
-    address: normalized.address,
-    scopeReference: normalized.scopeReference,
-    target: normalized.target,
-    action: normalized.action,
-    ...(normalized.replacementMeaning === undefined
-      ? {}
-      : { replacementMeaning: normalized.replacementMeaning }),
-    provenance: Object.freeze({
-      source: "EXPLICIT_USER_CORRECTION" as const,
-      reference: normalized.provenance.reference,
-      ...(normalized.provenance.suppliedAt === undefined
-        ? {}
-        : { suppliedAt: normalized.provenance.suppliedAt })
-    }),
-    supersededEvidenceReferences: Object.freeze([...normalized.supersededEvidenceReferences]),
-    ...(normalized.supersedesCorrectionReference === undefined
-      ? {}
-      : { supersedesCorrectionReference: normalized.supersedesCorrectionReference })
-  });
-}
-
 function normalizeCorrection(
   correction: P8ExplicitCorrection,
   expectedAddress: P8IdentityAddress,

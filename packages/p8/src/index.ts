@@ -1,6 +1,4 @@
-import { P8_PROJECTION_VERSION } from "./versions.js";
-
-export { P8_PROJECTION_VERSION } from "./versions.js";
+export const P8_PROJECTION_VERSION = "p8-1a.v1" as const;
 
 export const DEFAULT_CHARACTER_INSTANCE_ID = "yuvi-default-character-instance" as const;
 export const DEFAULT_PERSONA_PROFILE_ID = "yuvi-default-persona-profile" as const;
@@ -79,8 +77,6 @@ export const DEFAULT_AUTHORED_INVARIANTS: readonly P8AuthoredInvariant[] = Objec
 export * from "./evidence.js";
 export * from "./adapter.js";
 export * from "./correction.js";
-export * from "./persistence.js";
-export * from "./reconstruction.js";
 
 export function createDefaultP8IdentityAddress(subjectScopeId?: string): P8IdentityAddress {
   return freezeAddress({

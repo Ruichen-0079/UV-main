@@ -40,8 +40,3 @@ export type {
 export { AssistantTurnConflictError, ConversationPersistenceError } from "./runtime-errors.js";
 
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
-export {
-  PostgresP8CorrectionStore,
-  type P8PostgresClient,
-  type P8PostgresRow
-} from "./p8-correction-store.js";
