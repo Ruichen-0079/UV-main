@@ -157,20 +157,6 @@ describe("P8-1E PostgreSQL correction persistence", () => {
             address: ADDRESS,
             scopeReference: SCOPE
           });
-          await expect(store.appendCorrection(second)).resolves.toMatchObject({ status: "STORED" });
-
-          const loaded = await store.loadCorrections({ address: ADDRESS, scopeReference: SCOPE });
-          expect(loaded).toMatchObject({
-            status: "SUCCESS_WITH_CORRECTIONS",
-            corrections: [
-              expect.objectContaining({ correctionReference: first.correctionReference }),
-              expect.objectContaining({
-                correctionReference: second.correctionReference,
-                action: "RETRACT"
-              })
-            ]
-          });
-          expect(loaded).not.toHaveProperty("storedAt");
 
           const processA = reconstructP8Projection({
             address: ADDRESS,
@@ -205,6 +191,20 @@ describe("P8-1E PostgreSQL correction persistence", () => {
           expect(processA.projection.targetableInterpretations?.[0]?.interpretation).not.toBe(
             processB.projection.targetableInterpretations?.[0]?.interpretation
           );
+
+          await expect(store.appendCorrection(second)).resolves.toMatchObject({ status: "STORED" });
+          const loaded = await store.loadCorrections({ address: ADDRESS, scopeReference: SCOPE });
+          expect(loaded).toMatchObject({
+            status: "SUCCESS_WITH_CORRECTIONS",
+            corrections: [
+              expect.objectContaining({ correctionReference: first.correctionReference }),
+              expect.objectContaining({
+                correctionReference: second.correctionReference,
+                action: "RETRACT"
+              })
+            ]
+          });
+          expect(loaded).not.toHaveProperty("storedAt");
 
           const processAfterRetract = reconstructP8Projection({
             address: ADDRESS,
