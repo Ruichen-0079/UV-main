@@ -2,13 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_AUTHORED_INVARIANTS,
   createDefaultP8IdentityAddress,
-  reconstructP8Projection
+  reconstructP8Projection,
+  type P8ExplicitCorrection,
+  type P8ReconstructionInput,
+  type P8ReferencedInterpretationCandidate
 } from "../../p8/src/index.js";
-import type { P8ExplicitCorrection } from "../../p8/src/correction.js";
-import type {
-  P8ReconstructionInput,
-  P8ReferencedInterpretationCandidate
-} from "../../p8/src/reconstruction.js";
 import {
   projectP8ReconstructionToCharacterAbi,
   P8_CHARACTER_ABI_PROJECTION_VERSION
@@ -149,7 +147,7 @@ describe("Character ABI 2B P8 projection", () => {
     expect(context.sections.some((section) => section.kind === "RELATIONSHIP_CONTEXT")).toBe(false);
   });
 
-  it("projects grounded relationship meaning without leaking Memory backend details", () => {
+  it("projects grounded relationship meaning without leaking Memory backend or scope details", () => {
     const event = memoryEvent({
       source: "secret-backend-name",
       sourceRecordId: "database-row-42",
@@ -169,13 +167,12 @@ describe("Character ABI 2B P8 projection", () => {
       kind: "RELATIONSHIP_CONTEXT",
       state: "KNOWN",
       summary: "The relationship is familiar and grounded.",
-      provenanceReferences: [
-        "p8:evidence:scope-character-abi-2b:relationship-memory"
-      ]
+      provenanceReferences: ["p8:evidence:relationship-memory"]
     });
     expect(JSON.stringify(context)).not.toContain("secret-backend-name");
     expect(JSON.stringify(context)).not.toContain("database-row-42");
     expect(JSON.stringify(context)).not.toContain("providerPayload");
+    expect(JSON.stringify(context)).not.toContain(SCOPE.reference);
   });
 
   it("keeps Memory and recent-conversation channels out of the P8-owned ABI adapter", () => {
@@ -202,6 +199,34 @@ describe("Character ABI 2B P8 projection", () => {
     expect(kinds).toEqual(["IDENTITY", "PERSONA", "RELATIONSHIP_CONTEXT"]);
     expect(kinds).not.toContain("MEMORY_EVIDENCE");
     expect(kinds).not.toContain("RECENT_CONVERSATION");
+  });
+
+  it("keeps unsupported relationship candidates out of the summary and reports mixed support as PARTIAL", () => {
+    const context = projectP8ReconstructionToCharacterAbi(
+      reconstruct({
+        longTerm: retrieval([memoryEvent()]),
+        candidates: [
+          relationshipCandidate("Grounded current relationship meaning."),
+          {
+            interpretationReference: "unsupported-relationship-ref",
+            candidate: {
+              domain: "RELATIONSHIP_CONTEXT",
+              meaning: "Unsupported relationship claim."
+            }
+          }
+        ]
+      })
+    );
+    const relationship = context.sections.find(
+      (section) => section.kind === "RELATIONSHIP_CONTEXT"
+    );
+
+    expect(relationship).toMatchObject({
+      kind: "RELATIONSHIP_CONTEXT",
+      state: "PARTIAL",
+      summary: "Grounded current relationship meaning."
+    });
+    expect(JSON.stringify(relationship)).not.toContain("Unsupported relationship claim.");
   });
 
   it("projects explicit correction authority as current relationship meaning", () => {
