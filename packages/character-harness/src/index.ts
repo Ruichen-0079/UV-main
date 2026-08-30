@@ -13,6 +13,7 @@ import type { ChatOutput } from "../../providers/src/types/chat.js";
 export const CHARACTER_HARNESS_5A_VERSION = "character-harness-5a.v1" as const;
 export const CHARACTER_HARNESS_5B_VERSION = "character-harness-5b.v1" as const;
 export const CHARACTER_HARNESS_5C_VERSION = "character-harness-5c.v1" as const;
+export const CHARACTER_HARNESS_5D_VERSION = "character-harness-5d.v1" as const;
 
 export type CharacterHarnessAssemblyBudget = Readonly<{
   /** Prefix-only section budget. Zero is valid and produces an empty context. */
@@ -73,6 +74,21 @@ export type CharacterHarnessGenerationSupervision = Readonly<
     }
 >;
 
+export type CharacterHarnessRepetitionSupervision = Readonly<
+  | {
+      version: typeof CHARACTER_HARNESS_5D_VERSION;
+      status: "ACCEPTED";
+      proposal: CharacterProposal;
+    }
+  | {
+      version: typeof CHARACTER_HARNESS_5D_VERSION;
+      status: "REPETITION_DETECTED";
+      reason: "EXACT_CHARACTER_NGRAM_REPETITION";
+      ngramCharacters: number;
+      observedOccurrences: number;
+    }
+>;
+
 type NormalizedChatFinishReason = NonNullable<ChatOutput["finishReason"]>;
 
 type UnknownObject = Record<string, unknown> & {
@@ -83,6 +99,9 @@ type UnknownObject = Record<string, unknown> & {
   interpretation?: unknown;
   finishReason?: unknown;
   maxResponseCharacters?: unknown;
+  generation?: unknown;
+  ngramCharacters?: unknown;
+  maxOccurrences?: unknown;
   version?: unknown;
   status?: unknown;
   proposal?: unknown;
@@ -217,6 +236,62 @@ export function superviseCharacterHarnessGeneration(
   });
 }
 
+/**
+ * Detect exact character n-gram repetition on an already publishable 5C
+ * response. This is deterministic, language-neutral, and deliberately does not
+ * perform semantic similarity or choose a recovery action.
+ */
+export function superviseCharacterHarnessRepetition(
+  input: unknown
+): CharacterHarnessRepetitionSupervision {
+  const value = expectObject(input, "Character Harness repetition supervision input");
+  assertAllowedKeys(
+    value,
+    ["generation", "ngramCharacters", "maxOccurrences"],
+    "Character Harness repetition supervision input"
+  );
+
+  const generation = normalizeAcceptedGeneration(value.generation);
+  const ngramCharacters = safeIntegerAtLeast(
+    value.ngramCharacters,
+    "Character Harness ngramCharacters",
+    2
+  );
+  const maxOccurrences = safeIntegerAtLeast(
+    value.maxOccurrences,
+    "Character Harness maxOccurrences",
+    1
+  );
+
+  if (generation.proposal.disposition !== "RESPOND") {
+    return acceptedRepetition(generation.proposal);
+  }
+
+  const normalized = normalizeRepetitionText(generation.proposal.text);
+  const characters = Array.from(normalized);
+  if (characters.length < ngramCharacters) {
+    return acceptedRepetition(generation.proposal);
+  }
+
+  const counts = new Map<string, number>();
+  for (let index = 0; index <= characters.length - ngramCharacters; index += 1) {
+    const ngram = characters.slice(index, index + ngramCharacters).join("");
+    const occurrences = (counts.get(ngram) ?? 0) + 1;
+    if (occurrences > maxOccurrences) {
+      return Object.freeze({
+        version: CHARACTER_HARNESS_5D_VERSION,
+        status: "REPETITION_DETECTED",
+        reason: "EXACT_CHARACTER_NGRAM_REPETITION",
+        ngramCharacters,
+        observedOccurrences: occurrences
+      });
+    }
+    counts.set(ngram, occurrences);
+  }
+
+  return acceptedRepetition(generation.proposal);
+}
+
 function normalizeBudget(input: unknown): CharacterHarnessAssemblyBudget {
   const value = expectObject(input, "Character Harness assembly budget");
   assertAllowedKeys(
@@ -277,6 +352,23 @@ function normalizeOutputInterpretation(input: unknown): CharacterHarnessOutputIn
   throw new Error("Character Harness output interpretation status is invalid.");
 }
 
+function normalizeAcceptedGeneration(input: unknown): Extract<CharacterHarnessGenerationSupervision, { status: "ACCEPTED" }> {
+  const value = expectObject(input, "Character Harness accepted generation supervision");
+  assertAllowedKeys(
+    value,
+    ["version", "status", "proposal"],
+    "Character Harness accepted generation supervision"
+  );
+  if (value.version !== CHARACTER_HARNESS_5C_VERSION || value.status !== "ACCEPTED") {
+    throw new Error("Character Harness repetition supervision requires an accepted 5C generation.");
+  }
+  return Object.freeze({
+    version: CHARACTER_HARNESS_5C_VERSION,
+    status: "ACCEPTED",
+    proposal: createCharacterProposal(value.proposal)
+  });
+}
+
 function normalizeChatFinishReason(input: unknown): NormalizedChatFinishReason {
   switch (input) {
     case "stop":
@@ -301,11 +393,30 @@ function rejectedGeneration(
   });
 }
 
+function acceptedRepetition(proposal: CharacterProposal): CharacterHarnessRepetitionSupervision {
+  return Object.freeze({
+    version: CHARACTER_HARNESS_5D_VERSION,
+    status: "ACCEPTED",
+    proposal
+  });
+}
+
+function normalizeRepetitionText(text: string): string {
+  return text.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
+}
+
 function measureSemanticCharacters(section: CharacterAbiSemanticSection): number {
   const summaryCharacters = section.summary?.length ?? 0;
   const provenanceCharacters =
     section.provenanceReferences?.reduce((total, reference) => total + reference.length, 0) ?? 0;
   return summaryCharacters + provenanceCharacters;
+}
+
+function safeIntegerAtLeast(input: unknown, field: string, minimum: number): number {
+  if (typeof input !== "number" || !Number.isSafeInteger(input) || input < minimum) {
+    throw new Error(`${field} must be a safe integer greater than or equal to ${minimum}.`);
+  }
+  return input;
 }
 
 function nonNegativeSafeInteger(input: unknown, field: string): number {
