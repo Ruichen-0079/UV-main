@@ -1,7 +1,11 @@
-import type { P8EpistemicState, P8ProjectedInvariant } from "../../p8/src/index.js";
-import type { P8CorrectionApplicationResult, P8CorrectionAudit } from "../../p8/src/correction.js";
-import type { P8EvidenceInterpretation } from "../../p8/src/evidence.js";
-import type { P8ReconstructionOutcome } from "../../p8/src/reconstruction.js";
+import type {
+  P8CorrectionApplicationResult,
+  P8CorrectionAudit,
+  P8EpistemicState,
+  P8EvidenceInterpretation,
+  P8ProjectedInvariant,
+  P8ReconstructionOutcome
+} from "../../p8/src/index.js";
 import {
   CHARACTER_ABI_2A_VERSION,
   createCharacterAbiContext,
@@ -38,8 +42,20 @@ export function projectP8ReconstructionToCharacterAbi(
 
   const projection = outcome.projection;
   const sections: CharacterAbiSemanticSection[] = [
-    projectInvariantSection("IDENTITY", "identity", projection.identity.status, projection.identity.invariants, projection),
-    projectInvariantSection("PERSONA", "persona", projection.persona.status, projection.persona.invariants, projection)
+    projectInvariantSection(
+      "IDENTITY",
+      "identity",
+      projection.identity.status,
+      projection.identity.invariants,
+      projection
+    ),
+    projectInvariantSection(
+      "PERSONA",
+      "persona",
+      projection.persona.status,
+      projection.persona.invariants,
+      projection
+    )
   ];
   const relationship = projectRelationshipSection(projection);
   if (relationship !== undefined) {
@@ -114,10 +130,7 @@ function projectRelationshipSection(
   );
   const provenanceReferences = uniqueSorted([
     ...interpretations.flatMap((interpretation) =>
-      interpretation.provenance.map(
-        (provenance) =>
-          `p8:evidence:${provenance.scopeReference.reference}:${provenance.reference}`
-      )
+      interpretation.provenance.map((provenance) => `p8:evidence:${provenance.reference}`)
     ),
     ...activeAudits.map(correctionProvenanceReference)
   ]);
@@ -167,7 +180,11 @@ function joinMeaning(values: readonly string[]): string | undefined {
 }
 
 function uniqueSorted(values: readonly string[]): readonly string[] {
-  return Object.freeze([...new Set(values)].sort((left, right) => left.localeCompare(right)));
+  return Object.freeze([...new Set(values)].sort(compareText));
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function mapP8State(state: P8EpistemicState): CharacterAbiEpistemicState {
