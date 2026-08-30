@@ -13,6 +13,11 @@
       "types": "./src/recovery.ts",
       "development": "./src/recovery.ts",
       "import": "./dist/recovery.js"
+    },
+    "./recovery-supervisor": {
+      "types": "./src/recovery-supervisor.ts",
+      "development": "./src/recovery-supervisor.ts",
+      "import": "./dist/recovery-supervisor.js"
     }
   },
   "scripts": {
