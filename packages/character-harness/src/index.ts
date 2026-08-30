@@ -2,12 +2,15 @@ import {
   CHARACTER_ABI_2A_VERSION,
   CHARACTER_ABI_SECTION_KINDS,
   createCharacterAbiContext,
+  createCharacterProposal,
   type CharacterAbiContext,
   type CharacterAbiSectionKind,
-  type CharacterAbiSemanticSection
+  type CharacterAbiSemanticSection,
+  type CharacterProposal
 } from "../../character-abi/src/index.js";
 
 export const CHARACTER_HARNESS_5A_VERSION = "character-harness-5a.v1" as const;
+export const CHARACTER_HARNESS_5B_VERSION = "character-harness-5b.v1" as const;
 
 export type CharacterHarnessAssemblyBudget = Readonly<{
   /** Prefix-only section budget. Zero is valid and produces an empty context. */
@@ -25,6 +28,19 @@ export type CharacterHarnessAssembly = Readonly<{
   omittedSectionKinds: readonly CharacterAbiSectionKind[];
   usedSemanticCharacters: number;
 }>;
+
+export type CharacterHarnessOutputInterpretation = Readonly<
+  | {
+      version: typeof CHARACTER_HARNESS_5B_VERSION;
+      status: "ACCEPTED";
+      proposal: CharacterProposal;
+    }
+  | {
+      version: typeof CHARACTER_HARNESS_5B_VERSION;
+      status: "MALFORMED";
+      reason: "INVALID_CHARACTER_PROPOSAL";
+    }
+>;
 
 type UnknownObject = Record<string, unknown> & {
   context?: unknown;
@@ -82,6 +98,30 @@ export function assembleCharacterHarnessContext(input: unknown): CharacterHarnes
     omittedSectionKinds: Object.freeze(omitted),
     usedSemanticCharacters
   });
+}
+
+/**
+ * Interpret adapter-decoded Character semantic output without executing it.
+ *
+ * The Character ABI remains the authority for proposal shape. Malformed output
+ * collapses to a bounded diagnostic and the raw model/provider payload is never
+ * echoed into the result. Retry/fallback decisions are deliberately deferred.
+ */
+export function interpretCharacterHarnessOutput(input: unknown): CharacterHarnessOutputInterpretation {
+  try {
+    const proposal = createCharacterProposal(input);
+    return Object.freeze({
+      version: CHARACTER_HARNESS_5B_VERSION,
+      status: "ACCEPTED",
+      proposal
+    });
+  } catch {
+    return Object.freeze({
+      version: CHARACTER_HARNESS_5B_VERSION,
+      status: "MALFORMED",
+      reason: "INVALID_CHARACTER_PROPOSAL"
+    });
+  }
 }
 
 function normalizeBudget(input: unknown): CharacterHarnessAssemblyBudget {
