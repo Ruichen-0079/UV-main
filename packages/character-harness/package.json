@@ -18,6 +18,11 @@
       "types": "./src/recovery-supervisor.ts",
       "development": "./src/recovery-supervisor.ts",
       "import": "./dist/recovery-supervisor.js"
+    },
+    "./cognition-request": {
+      "types": "./src/cognition-request.ts",
+      "development": "./src/cognition-request.ts",
+      "import": "./dist/cognition-request.js"
     }
   },
   "scripts": {
