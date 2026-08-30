@@ -60,3 +60,18 @@ test("metafile disallows unresolved package externals except optional natives", 
   assert.equal(isNodeBuiltin("node:http"), true);
   assert.equal(packageNameFromSpecifier("@scope/pkg/sub"), "@scope/pkg");
 });
+
+test("packaged Runtime uses normal production export resolution", () => {
+  const buildRuntimeSource = fs.readFileSync(
+    new URL("./build-runtime.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.equal(buildRuntimeSource.includes('conditions: ["development"]'), false);
+  const rootPackage = JSON.parse(
+    fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8")
+  );
+  assert.equal(
+    rootPackage.scripts["desktop:package:prepare"],
+    "pnpm --filter @companion/server... build && node scripts/desktop-package/prepare.mjs"
+  );
+});
