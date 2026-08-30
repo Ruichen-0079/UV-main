@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import {
   createDefaultP8IdentityAddress,
   createP8CorrectionRecord,
-  type P8ExplicitCorrection
+  type P8CorrectionTarget,
+  type P8ExplicitCorrection,
+  type P8IdentityAddress
 } from "@companion/p8";
 import type { MemoryEvent, MemoryRetrievalOutcome } from "@companion/memory";
 import {
@@ -63,20 +65,25 @@ function referencedCandidate(): P8ReferencedInterpretationCandidate {
 function correction(
   overrides: {
     correctionReference?: string;
+    address?: P8IdentityAddress;
+    scopeReference?: { reference: string };
     action?: "REVISE" | "RETRACT";
     replacementMeaning?: string;
     supersedesCorrectionReference?: string;
+    target?: P8CorrectionTarget;
   } = {}
 ): P8ExplicitCorrection {
   const action = overrides.action ?? "REVISE";
   return {
     correctionReference: overrides.correctionReference ?? "p8-1e-correction-a",
-    address: ADDRESS,
-    scopeReference: SCOPE,
-    target: {
-      kind: "INTERPRETATION",
-      interpretationReference: "p8-1e-interpretation-a"
-    },
+    address: overrides.address ?? ADDRESS,
+    scopeReference: overrides.scopeReference ?? SCOPE,
+    target:
+      overrides.target ??
+      ({
+        kind: "INTERPRETATION",
+        interpretationReference: "p8-1e-interpretation-a"
+      } as const),
     action,
     ...(action === "REVISE"
       ? { replacementMeaning: overrides.replacementMeaning ?? "Persisted meaning two." }
@@ -291,6 +298,151 @@ describe("P8-1E PostgreSQL correction persistence", () => {
             [schema, "p8_corrections_address_scope_idx"]
           );
           expect(index.rows).toHaveLength(1);
+        } finally {
+          client.release();
+        }
+      } finally {
+        await setupPool.query(`drop schema if exists ${quoteIdentifier(schema)} cascade`);
+        await setupPool.end();
+      }
+    }
+  );
+
+  it.skipIf(!DATABASE_URL)(
+    "rejects missing and mismatched lineage before insert without poisoning valid history",
+    async () => {
+      const schema = `p8_1e_lineage_${randomUUID().replaceAll("-", "")}`;
+      const migrationSql = await readFile(
+        new URL("../../memory/migrations/011_p8_corrections_v1.sql", import.meta.url),
+        "utf8"
+      );
+      const setupPool = createPool();
+      try {
+        await setupPool.query(`create schema ${quoteIdentifier(schema)}`);
+        await runPostgresMigrations({
+          databaseUrl: DATABASE_URL!,
+          migrations: [{ name: "011_p8_corrections_v1.sql", sql: migrationSql }],
+          settings: { search_path: `${quoteIdentifier(schema)}, public` }
+        });
+
+        const client = await setupPool.connect();
+        try {
+          await client.query(`set search_path to ${quoteIdentifier(schema)}, public`);
+          const store = new PostgresP8CorrectionStore({
+            query: async (text, values) => {
+              const result = await client.query(text, values);
+              return { rows: result.rows as readonly P8PostgresRow[] };
+            }
+          });
+          const rowCount = async (correctionReference: string) => {
+            const result = await client.query(
+              `select correction_reference
+                 from p8_corrections
+                where correction_reference = $1`,
+              [correctionReference]
+            );
+            return result.rows.length;
+          };
+
+          const missingChild = correction({
+            correctionReference: "p8-1e-missing-child",
+            supersedesCorrectionReference: "p8-1e-missing-parent"
+          });
+          await expect(store.appendCorrection(missingChild)).resolves.toEqual({ status: "ERROR" });
+          expect(await rowCount(missingChild.correctionReference)).toBe(0);
+
+          const parent = correction({ correctionReference: "p8-1e-lineage-parent" });
+          const child = correction({
+            correctionReference: "p8-1e-lineage-child",
+            supersedesCorrectionReference: parent.correctionReference
+          });
+          await expect(store.appendCorrection(parent)).resolves.toMatchObject({ status: "STORED" });
+          await expect(store.appendCorrection(child)).resolves.toMatchObject({ status: "STORED" });
+
+          const mismatchCases: Array<{
+            parent: P8ExplicitCorrection;
+            child: P8ExplicitCorrection;
+          }> = [
+            {
+              parent: correction({
+                correctionReference: "p8-1e-parent-other-scope",
+                scopeReference: { reference: "p8-1e-other-scope" }
+              }),
+              child: correction({
+                correctionReference: "p8-1e-child-other-scope",
+                supersedesCorrectionReference: "p8-1e-parent-other-scope"
+              })
+            },
+            {
+              parent: correction({
+                correctionReference: "p8-1e-parent-other-character",
+                address: { ...ADDRESS, characterInstanceId: "p8-1e-other-character" }
+              }),
+              child: correction({
+                correctionReference: "p8-1e-child-other-character",
+                supersedesCorrectionReference: "p8-1e-parent-other-character"
+              })
+            },
+            {
+              parent: correction({
+                correctionReference: "p8-1e-parent-other-persona",
+                address: { ...ADDRESS, personaProfileId: "p8-1e-other-persona" }
+              }),
+              child: correction({
+                correctionReference: "p8-1e-child-other-persona",
+                supersedesCorrectionReference: "p8-1e-parent-other-persona"
+              })
+            },
+            {
+              parent: correction({
+                correctionReference: "p8-1e-parent-other-target",
+                target: { kind: "INTERPRETATION", interpretationReference: "p8-1e-other-target" }
+              }),
+              child: correction({
+                correctionReference: "p8-1e-child-other-target",
+                supersedesCorrectionReference: "p8-1e-parent-other-target"
+              })
+            },
+            {
+              parent: correction({
+                correctionReference: "p8-1e-parent-invariant-a",
+                target: {
+                  kind: "AUTHORED_INVARIANT",
+                  invariantTarget: "identity",
+                  invariantKey: "invariant-a"
+                }
+              }),
+              child: correction({
+                correctionReference: "p8-1e-child-invariant-b",
+                target: {
+                  kind: "AUTHORED_INVARIANT",
+                  invariantTarget: "identity",
+                  invariantKey: "invariant-b"
+                },
+                supersedesCorrectionReference: "p8-1e-parent-invariant-a"
+              })
+            }
+          ];
+
+          for (const mismatch of mismatchCases) {
+            await expect(store.appendCorrection(mismatch.parent)).resolves.toMatchObject({
+              status: "STORED"
+            });
+            await expect(store.appendCorrection(mismatch.child)).resolves.toEqual({
+              status: "ERROR"
+            });
+            expect(await rowCount(mismatch.child.correctionReference)).toBe(0);
+          }
+
+          await expect(
+            store.loadCorrections({ address: ADDRESS, scopeReference: SCOPE })
+          ).resolves.toMatchObject({
+            status: "SUCCESS_WITH_CORRECTIONS",
+            corrections: expect.arrayContaining([
+              expect.objectContaining({ correctionReference: parent.correctionReference }),
+              expect.objectContaining({ correctionReference: child.correctionReference })
+            ])
+          });
         } finally {
           client.release();
         }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createDefaultP8IdentityAddress,
   createP8CorrectionRecord,
+  parseP8CorrectionRecord,
   serializeP8CorrectionRecord,
   type P8CorrectionRecord,
   type P8CorrectionTarget,
@@ -97,6 +98,60 @@ function clientFor(
   return { query: queryHandler };
 }
 
+function inMemoryClient(): {
+  client: P8PostgresClient;
+  records: Map<string, P8CorrectionRecord>;
+  queries: string[];
+} {
+  const records = new Map<string, P8CorrectionRecord>();
+  const queries: string[] = [];
+  return {
+    records,
+    queries,
+    client: clientFor(async (text, values) => {
+      queries.push(text);
+      if (text.includes("insert into p8_corrections")) {
+        const record = parseP8CorrectionRecord(values[17]);
+        if (records.has(record.correctionReference)) {
+          return { rows: [] };
+        }
+        if (record.supersedesCorrectionReference !== undefined) {
+          const parent = records.get(record.supersedesCorrectionReference);
+          if (
+            parent === undefined ||
+            parent.address.characterInstanceId !== record.address.characterInstanceId ||
+            parent.address.personaProfileId !== record.address.personaProfileId ||
+            parent.address.subjectScopeId !== record.address.subjectScopeId ||
+            parent.scopeReference.reference !== record.scopeReference.reference ||
+            JSON.stringify(parent.target) !== JSON.stringify(record.target)
+          ) {
+            return { rows: [] };
+          }
+        }
+        records.set(record.correctionReference, record);
+        return { rows: [{ correction_reference: record.correctionReference }] };
+      }
+      if (text.includes("select payload")) {
+        const record = records.get(String(values[0]));
+        return record === undefined ? { rows: [] } : { rows: [{ payload: record }] };
+      }
+      if (text.includes("from p8_corrections")) {
+        const rows = [...records.values()]
+          .filter(
+            (record) =>
+              record.address.characterInstanceId === values[0] &&
+              record.address.personaProfileId === values[1] &&
+              record.address.subjectScopeId === (values[2] === null ? undefined : values[2]) &&
+              record.scopeReference.reference === values[3]
+          )
+          .map((record) => rowForRecord(record));
+        return { rows };
+      }
+      throw new Error(`Unexpected P8 store query: ${text}`);
+    })
+  };
+}
+
 describe("PostgresP8CorrectionStore", () => {
   it("appends once, makes an identical retry idempotent, and rejects a payload conflict", async () => {
     const original = createP8CorrectionRecord(correction());
@@ -124,6 +179,112 @@ describe("PostgresP8CorrectionStore", () => {
       store.appendCorrection(correction({ replacementMeaning: "A different meaning." }))
     ).resolves.toEqual({ status: "CONFLICT" });
     expect(storedPayload).toBe(serializeP8CorrectionRecord(original));
+  });
+
+  it("validates append-only lineage atomically before storing a child", async () => {
+    const state = inMemoryClient();
+    const store = new PostgresP8CorrectionStore(state.client);
+
+    await expect(
+      store.appendCorrection(
+        correction({
+          correctionReference: "missing-child",
+          supersedesCorrectionReference: "missing-parent"
+        })
+      )
+    ).resolves.toEqual({ status: "ERROR" });
+    expect(state.records.has("missing-child")).toBe(false);
+
+    const parent = correction({ correctionReference: "lineage-parent" });
+    await expect(store.appendCorrection(parent)).resolves.toMatchObject({ status: "STORED" });
+    await expect(
+      store.appendCorrection(
+        correction({
+          correctionReference: "lineage-child",
+          supersedesCorrectionReference: parent.correctionReference
+        })
+      )
+    ).resolves.toMatchObject({ status: "STORED" });
+
+    const mismatchCases: Array<{
+      name: string;
+      parent: P8ExplicitCorrection;
+      child: P8ExplicitCorrection;
+    }> = [
+      {
+        name: "scope",
+        parent: correction({
+          correctionReference: "parent-other-scope",
+          scopeReference: { reference: "scope-other" }
+        }),
+        child: correction({
+          correctionReference: "child-other-scope",
+          supersedesCorrectionReference: "parent-other-scope"
+        })
+      },
+      {
+        name: "character",
+        parent: correction({
+          correctionReference: "parent-other-character",
+          address: { ...ADDRESS, characterInstanceId: "character-other" }
+        }),
+        child: correction({
+          correctionReference: "child-other-character",
+          supersedesCorrectionReference: "parent-other-character"
+        })
+      },
+      {
+        name: "persona",
+        parent: correction({
+          correctionReference: "parent-other-persona",
+          address: { ...ADDRESS, personaProfileId: "persona-other" }
+        }),
+        child: correction({
+          correctionReference: "child-other-persona",
+          supersedesCorrectionReference: "parent-other-persona"
+        })
+      },
+      {
+        name: "interpretation target",
+        parent: correction({
+          correctionReference: "parent-other-interpretation",
+          target: { kind: "INTERPRETATION", interpretationReference: "interpretation-other" }
+        }),
+        child: correction({
+          correctionReference: "child-other-interpretation",
+          supersedesCorrectionReference: "parent-other-interpretation"
+        })
+      },
+      {
+        name: "authored invariant target",
+        parent: correction({
+          correctionReference: "parent-invariant-a",
+          target: { kind: "AUTHORED_INVARIANT", invariantTarget: "identity", invariantKey: "a" }
+        }),
+        child: correction({
+          correctionReference: "child-invariant-b",
+          target: { kind: "AUTHORED_INVARIANT", invariantTarget: "identity", invariantKey: "b" },
+          supersedesCorrectionReference: "parent-invariant-a"
+        })
+      }
+    ];
+
+    for (const mismatch of mismatchCases) {
+      await expect(store.appendCorrection(mismatch.parent)).resolves.toMatchObject({
+        status: "STORED"
+      });
+      await expect(store.appendCorrection(mismatch.child)).resolves.toEqual({ status: "ERROR" });
+      expect(state.records.has(mismatch.child.correctionReference)).toBe(false);
+    }
+
+    await expect(store.appendCorrection(parent)).resolves.toMatchObject({
+      status: "ALREADY_STORED"
+    });
+    await expect(
+      store.loadCorrections({ address: ADDRESS, scopeReference: SCOPE })
+    ).resolves.toMatchObject({ status: "SUCCESS_WITH_CORRECTIONS" });
+    expect(state.queries[0]).toContain("with candidate_parent as materialized");
+    expect(state.queries[0]).toContain("where $16::text is null or exists");
   });
 
   it("loads only the exact address and scope and returns deterministic reference order", async () => {

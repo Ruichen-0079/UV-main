@@ -14,6 +14,7 @@ import {
   isNodeBuiltin,
   packageNameFromSpecifier
 } from "./build-runtime.mjs";
+import { RUNTIME_BUILD_WORKSPACE_FILTER } from "./prepare.mjs";
 import { assertRelativeSafe } from "./paths.mjs";
 
 test("manifest generation is relative and secret-free", () => {
@@ -59,4 +60,13 @@ test("metafile disallows unresolved package externals except optional natives", 
   assert.equal(ALLOWED_OPTIONAL_NATIVE_EXTERNALS.has("pg-native"), true);
   assert.equal(isNodeBuiltin("node:http"), true);
   assert.equal(packageNameFromSpecifier("@scope/pkg/sub"), "@scope/pkg");
+});
+
+test("packaged Runtime uses normal production export resolution", () => {
+  const buildRuntimeSource = fs.readFileSync(
+    new URL("./build-runtime.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.equal(buildRuntimeSource.includes('conditions: ["development"]'), false);
+  assert.equal(RUNTIME_BUILD_WORKSPACE_FILTER, "@companion/server...");
 });

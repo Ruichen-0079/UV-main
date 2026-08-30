@@ -28,17 +28,57 @@ export class PostgresP8CorrectionStore implements P8CorrectionStore {
 
     try {
       const inserted = await this.client.query(
-        `insert into p8_corrections (
+        `with candidate_parent as materialized (
+           select 1
+             from p8_corrections as parent
+            where parent.correction_reference = $16
+              and parent.record_version = $1
+              and parent.character_instance_id = $3
+              and parent.persona_profile_id = $4
+              and parent.subject_scope_id is not distinct from $5
+              and parent.scope_reference = $6
+              and parent.target_kind = $7
+              and parent.interpretation_reference is not distinct from $8
+              and parent.invariant_target is not distinct from $9
+              and parent.invariant_key is not distinct from $10
+              and parent.payload = jsonb_strip_nulls(jsonb_build_object(
+                'recordVersion', parent.record_version,
+                'correctionReference', parent.correction_reference,
+                'address', jsonb_strip_nulls(jsonb_build_object(
+                  'characterInstanceId', parent.character_instance_id,
+                  'personaProfileId', parent.persona_profile_id,
+                  'subjectScopeId', parent.subject_scope_id
+                )),
+                'scopeReference', jsonb_build_object('reference', parent.scope_reference),
+                'target', jsonb_strip_nulls(jsonb_build_object(
+                  'kind', parent.target_kind,
+                  'interpretationReference', parent.interpretation_reference,
+                  'invariantTarget', parent.invariant_target,
+                  'invariantKey', parent.invariant_key
+                )),
+                'action', parent.action,
+                'replacementMeaning', parent.replacement_meaning,
+                'provenance', jsonb_strip_nulls(jsonb_build_object(
+                  'source', parent.provenance_source,
+                  'reference', parent.provenance_reference,
+                  'suppliedAt', parent.supplied_at
+                )),
+                'supersededEvidenceReferences', to_jsonb(parent.superseded_evidence_references),
+                'supersedesCorrectionReference', parent.supersedes_correction_reference
+              ))
+         )
+         insert into p8_corrections (
            record_version, correction_reference,
            character_instance_id, persona_profile_id, subject_scope_id, scope_reference,
            target_kind, interpretation_reference, invariant_target, invariant_key,
            action, replacement_meaning,
            provenance_source, provenance_reference, supplied_at,
            supersedes_correction_reference, superseded_evidence_references, payload
-         ) values (
+         )
+         select
            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
            $11, $12, $13, $14, $15, $16, $17, $18::jsonb
-         )
+          where $16::text is null or exists (select 1 from candidate_parent)
          on conflict (correction_reference) do nothing
          returning correction_reference`,
         recordValues(record)

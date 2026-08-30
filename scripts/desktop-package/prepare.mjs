@@ -2,6 +2,7 @@
  * Prepare Windows x64 packaged artifacts and stage them into Tauri generated/.
  */
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import {
   BUILD_ROOT,
@@ -23,12 +24,30 @@ import { bundleRuntimeServer } from "./build-runtime.mjs";
 import { prepareBundledNode } from "./download-node.mjs";
 import { assertFile, assertSafeGeneratedTarget, ensureDir, writeJson } from "./paths.mjs";
 
+export const RUNTIME_BUILD_WORKSPACE_FILTER = "@companion/server...";
+
+/** Build the packaged Runtime and its workspace dependencies before esbuild resolves import exports. */
+export function ensureRuntimeBuildPrerequisites() {
+  const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+  const result = spawnSync(pnpm, ["--filter", RUNTIME_BUILD_WORKSPACE_FILTER, "build"], {
+    cwd: REPO_ROOT,
+    stdio: "inherit"
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`Runtime workspace prerequisite build failed with exit code ${result.status}.`);
+  }
+}
+
 export async function prepareDesktopPackage() {
   console.info("[desktop-package] prepare start");
   ensureDir(BUILD_ROOT);
   ensureDir(RUNTIME_OUT_DIR);
   ensureDir(SUPERVISOR_OUT_DIR);
 
+  ensureRuntimeBuildPrerequisites();
   await prepareBundledNode(RUNTIME_OUT_DIR);
   assertFile(path.join(RUNTIME_OUT_DIR, NODE_EXE_NAME), "node.exe");
 
