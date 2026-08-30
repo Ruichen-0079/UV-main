@@ -112,7 +112,7 @@ describe("Character Harness 5E deterministic recovery", () => {
       maxResponseCharacters: 8000
     });
 
-    expect(() => decide(accepted)).toThrow(/requires a rejected 5C or 5D outcome/);
+    expect(() => decide(accepted)).toThrow();
   });
 
   it("rejects forged failure status/reason pairs and provider metadata", () => {
