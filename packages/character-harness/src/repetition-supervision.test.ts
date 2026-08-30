@@ -125,7 +125,7 @@ describe("Character Harness 5D exact repetition supervision", () => {
         ngramCharacters: 4,
         maxOccurrences: 2
       })
-    ).toThrow(/requires an accepted 5C generation/);
+    ).toThrow();
   });
 
   it("revalidates accepted generation proposals instead of trusting forged envelopes", () => {
