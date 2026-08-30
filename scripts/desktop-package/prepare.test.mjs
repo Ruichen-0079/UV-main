@@ -14,7 +14,6 @@ import {
   isNodeBuiltin,
   packageNameFromSpecifier
 } from "./build-runtime.mjs";
-import { RUNTIME_BUILD_WORKSPACE_FILTER } from "./prepare.mjs";
 import { assertRelativeSafe } from "./paths.mjs";
 
 test("manifest generation is relative and secret-free", () => {
@@ -68,5 +67,11 @@ test("packaged Runtime uses normal production export resolution", () => {
     "utf8"
   );
   assert.equal(buildRuntimeSource.includes('conditions: ["development"]'), false);
-  assert.equal(RUNTIME_BUILD_WORKSPACE_FILTER, "@companion/server...");
+  const rootPackage = JSON.parse(
+    fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8")
+  );
+  assert.equal(
+    rootPackage.scripts["desktop:package:prepare"],
+    "pnpm --filter @companion/server... build && node scripts/desktop-package/prepare.mjs"
+  );
 });
