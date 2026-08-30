@@ -152,9 +152,6 @@ importers:
       '@companion/memory':
         specifier: workspace:*
         version: link:../memory
-      '@companion/p8':
-        specifier: workspace:*
-        version: link:../p8
       '@companion/prompt-builder':
         specifier: workspace:*
         version: link:../prompt-builder
@@ -165,12 +162,6 @@ importers:
         specifier: workspace:*
         version: link:../providers
     devDependencies:
-      '@types/pg':
-        specifier: ^8.20.0
-        version: 8.20.0
-      pg:
-        specifier: ^8.20.0
-        version: 8.20.0
       typescript:
         specifier: ^5.7.3
         version: 5.9.3

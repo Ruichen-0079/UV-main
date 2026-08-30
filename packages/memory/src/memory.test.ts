@@ -2792,13 +2792,6 @@ describe("MemoryRepository", () => {
     expect(combinedSql).toContain("mixed 512 and 1024 dimensional vectors");
     expect(combinedSql).toContain("unsupported qwen production provenance");
     expect(combinedSql).toContain("incompatible qwen production provenance");
-    expect(migrations.map((migration) => migration.name)).toContain("011_p8_corrections_v1.sql");
-    expect(combinedSql).toContain("create table if not exists p8_corrections");
-    expect(combinedSql).toContain("p8_corrections_address_scope_idx");
-    expect(combinedSql).toContain("explicit_user_correction");
-    expect(combinedSql).toContain("p8_corrections_action_shape");
-    expect(combinedSql).toContain("p8_corrections_target_shape");
-    expect(combinedSql).toContain("p8_corrections_no_self_lineage");
   });
 });
 
