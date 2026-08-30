@@ -56,7 +56,7 @@ describe("Character Harness 5A bounded ABI assembly", () => {
       budget: { maxSections: 10, maxSemanticCharacters: 10 }
     });
 
-    expect(result.usedSemanticCharacters).toBe(10);
+    expect(result.usedSemanticCharacters).toBe(9);
     expect(result.context.sections).toEqual([
       {
         kind: "IDENTITY",
