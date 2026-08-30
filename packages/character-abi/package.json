@@ -8,6 +8,11 @@
       "types": "./src/index.ts",
       "development": "./src/index.ts",
       "import": "./dist/index.js"
+    },
+    "./p8-projection": {
+      "types": "./src/p8-projection.ts",
+      "development": "./src/p8-projection.ts",
+      "import": "./dist/p8-projection.js"
     }
   },
   "scripts": {
