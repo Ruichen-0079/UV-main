@@ -106,6 +106,29 @@ export type NormalizedCognitionResult = Readonly<{
   caveats?: readonly string[];
 }>;
 
+type UnknownObject = Record<string, unknown> & {
+  abiVersion?: unknown;
+  sections?: unknown;
+  disposition?: unknown;
+  text?: unknown;
+  presentation?: unknown;
+  focus?: unknown;
+  version?: unknown;
+  status?: unknown;
+  answer?: unknown;
+  keyFacts?: unknown;
+  evidence?: unknown;
+  uncertainty?: unknown;
+  caveats?: unknown;
+  kind?: unknown;
+  state?: unknown;
+  summary?: unknown;
+  provenanceReferences?: unknown;
+  intent?: unknown;
+  reference?: unknown;
+  statement?: unknown;
+};
+
 export function createCharacterAbiContext(input: unknown): CharacterAbiContext {
   const value = expectObject(input, "Character ABI context");
   assertAllowedKeys(value, ["abiVersion", "sections"], "Character ABI context");
@@ -302,11 +325,11 @@ function boundedText(input: unknown, field: string, maximum: number): string {
   return input;
 }
 
-function expectObject(input: unknown, field: string): Record<string, unknown> {
+function expectObject(input: unknown, field: string): UnknownObject {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     throw new Error(`${field} must be an object.`);
   }
-  return input as Record<string, unknown>;
+  return input as UnknownObject;
 }
 
 function assertAllowedKeys(
