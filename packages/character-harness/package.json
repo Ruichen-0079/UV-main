@@ -8,6 +8,11 @@
       "types": "./src/index.ts",
       "development": "./src/index.ts",
       "import": "./dist/index.js"
+    },
+    "./recovery": {
+      "types": "./src/recovery.ts",
+      "development": "./src/recovery.ts",
+      "import": "./dist/recovery.js"
     }
   },
   "scripts": {
