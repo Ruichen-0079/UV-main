@@ -1,0 +1,48 @@
+:root {
+  --yuvi-bg: #f6f1ea;
+  --yuvi-bg-elevated: #fffaf4;
+  --yuvi-ink: #2a221c;
+  --yuvi-muted: #6f6258;
+  --yuvi-line: #e6d9cc;
+  --yuvi-accent: #c45c26;
+  --yuvi-accent-soft: #f3d7c4;
+  --yuvi-ok: #2f6f4f;
+  --yuvi-warn: #9a6b16;
+  --yuvi-bad: #a33b32;
+  --yuvi-radius: 14px;
+  --yuvi-focus: 0 0 0 2px #fffaf4, 0 0 0 4px #c45c26;
+}
+
+html[data-yuvi-theme="dark"] {
+  --yuvi-bg: #161310;
+  --yuvi-bg-elevated: #221c18;
+  --yuvi-ink: #f4ece4;
+  --yuvi-muted: #b3a59a;
+  --yuvi-line: #3a312b;
+  --yuvi-accent: #e08a58;
+  --yuvi-accent-soft: #3a271c;
+  --yuvi-ok: #7dcea0;
+  --yuvi-warn: #e0b567;
+  --yuvi-bad: #e08a84;
+}
+
+html[data-yuvi-surface="main"] body {
+  background: var(--yuvi-bg);
+  color: var(--yuvi-ink);
+}
+
+.yuvi-shell {
+  min-height: 100vh;
+  background:
+    radial-gradient(1200px 480px at 10% -10%, rgba(196, 92, 38, 0.08), transparent 55%),
+    var(--yuvi-bg);
+  color: var(--yuvi-ink);
+}
+
+.yuvi-shell button:focus-visible,
+.yuvi-shell input:focus-visible,
+.yuvi-shell textarea:focus-visible,
+.yuvi-shell select:focus-visible {
+  outline: none;
+  box-shadow: var(--yuvi-focus);
+}

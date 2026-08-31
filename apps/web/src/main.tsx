@@ -5,6 +5,7 @@ import { MainPage } from "./main-page.js";
 import { CompanionPage } from "./companion-page.js";
 import { resolveDesktopSurface, type DesktopSurface } from "./desktop-runtime.js";
 import "./styles.css";
+import "./product-ui.css";
 
 /**
  * Lightweight surface routing for the desktop split.

@@ -10,6 +10,7 @@ import { registerMessageRoutes } from "./routes/message.js";
 import { registerMessageStreamRoutes } from "./routes/message-stream.js";
 import { registerProactiveTurnStreamRoutes } from "./routes/proactive-turn-stream.js";
 import { registerProviderRoutes } from "./routes/providers.js";
+import { registerProductRoutes } from "./routes/product.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerEventRoutes } from "./routes/events.js";
@@ -109,6 +110,7 @@ export async function buildServer(config: ServerConfig) {
   await registerHealthRoutes(app, context, config);
   await registerProviderRoutes(app, context, config);
   await registerSettingsRoutes(app, context, config);
+  await registerProductRoutes(app, context, config);
   await registerSystemRoutes(app, config);
   await registerMessageRoutes(app, context);
   await registerMessageStreamRoutes(app, context);

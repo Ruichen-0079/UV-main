@@ -54,6 +54,7 @@ import {
   type ProactiveTurnEffect
 } from "./proactive-turn-execution.js";
 import type { TtsSettingsProjection } from "./user-settings-state.js";
+import { ProductShell } from "./product/ProductShell.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
@@ -728,54 +729,12 @@ export function MainPage(): JSX.Element {
   }
 
   return (
-    <div className="min-h-screen bg-ink-100">
+    <ProductShell
+      companionReady={companionReady}
+      onCompanion={(action) => void controlCompanion(action)}
+    >
       <ServiceStatusPanel />
-      <div className={`mx-auto space-y-4 p-6 ${showSettings ? "max-w-6xl" : "max-w-3xl"}`}>
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-normal">YUVI Chat</h1>
-            <p className="mt-1 text-sm text-ink-500">
-              Main window: chat input and streaming text. Speech and Lumi live in the companion
-              window.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Pill status={companionReady ? "companion connected" : "companion offline"} />
-            {isTauriRuntime() && (
-              <>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={() => setShowSettings((value) => !value)}
-                >
-                  {showSettings ? "关闭设置" : "设置"}
-                </button>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={() => void controlCompanion("show_companion")}
-                >
-                  显示形象
-                </button>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={() => void controlCompanion("hide_companion")}
-                >
-                  隐藏形象
-                </button>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={() => void controlCompanion("reopen_companion")}
-                >
-                  重新打开
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
+      <div className="space-y-4">
         {showSettings && <UserSettingsPanel onTtsSettings={onTtsSettings} />}
 
         <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
@@ -876,8 +835,11 @@ export function MainPage(): JSX.Element {
           )}
         </Panel>
 
-        <Panel title="Turn Options">
-          <div className="grid gap-3">
+        <details className="rounded-[16px] border border-[var(--yuvi-line)] bg-[var(--yuvi-bg-elevated)] p-4">
+          <summary className="cursor-pointer text-sm font-medium text-[var(--yuvi-muted)]">
+            Advanced turn options
+          </summary>
+          <div className="mt-3 grid gap-3">
             <Field label="Session ID">
               <input
                 className="field"
@@ -905,9 +867,9 @@ export function MainPage(): JSX.Element {
               note="Streams sentence segments to the companion window for synthesis and lip sync."
             />
           </div>
-        </Panel>
+        </details>
       </div>
-    </div>
+    </ProductShell>
   );
 }
 
