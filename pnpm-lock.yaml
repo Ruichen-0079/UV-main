@@ -132,6 +132,26 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
+  packages/character-abi: {}
+
+  packages/character-harness:
+    dependencies:
+      '@companion/character-abi':
+        specifier: workspace:*
+        version: link:../character-abi
+
+  packages/cognition:
+    dependencies:
+      '@companion/character-abi':
+        specifier: workspace:*
+        version: link:../character-abi
+      '@companion/character-harness':
+        specifier: workspace:*
+        version: link:../character-harness
+      '@companion/providers':
+        specifier: workspace:*
+        version: link:../providers
+
   packages/config:
     devDependencies:
       '@types/node':

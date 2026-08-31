@@ -2,11 +2,11 @@ import {
   NORMALIZED_COGNITION_RESULT_VERSION,
   createNormalizedCognitionResult,
   type NormalizedCognitionResult
-} from "../../character-abi/dist/index.js";
+} from "@companion/character-abi";
 import {
   CHARACTER_HARNESS_5G_VERSION,
   type CharacterHarnessCognitionRequest
-} from "../../character-harness/dist/cognition-request.js";
+} from "@companion/character-harness/cognition-request";
 import type { ReasoningInput, ReasoningOutput } from "@companion/providers";
 
 export const COGNITION_6A_VERSION = "cognition-6a.v1" as const;

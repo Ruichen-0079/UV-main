@@ -7,7 +7,7 @@ import {
   type CharacterAbiSectionKind,
   type CharacterAbiSemanticSection,
   type CharacterProposal
-} from "../../character-abi/dist/index.js";
+} from "@companion/character-abi";
 import type { ChatOutput } from "@companion/providers";
 import { CHARACTER_HARNESS_5D_VERSION } from "./versions.js";
 

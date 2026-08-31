@@ -2,7 +2,7 @@ import {
   createCharacterProposal,
   createNormalizedCognitionResult,
   type NormalizedCognitionResult
-} from "../../character-abi/dist/index.js";
+} from "@companion/character-abi";
 import {
   CHARACTER_HARNESS_5G_VERSION,
   type CharacterHarnessCognitionRequest
