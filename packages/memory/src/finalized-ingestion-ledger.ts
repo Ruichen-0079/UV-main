@@ -10,7 +10,7 @@ import {
   type Mem0TurnKind
 } from "./mem0-chat.js";
 import { detectExplicitForgetRequest } from "./intent.js";
-import { normalizePostgresConnectionString } from "./postgres-connection.js";
+import { createYuviPostgresPool } from "./postgres-pool.js";
 import type {
   MemoryReconciliationResult,
   MemoryWriteEventInput,
@@ -299,10 +299,7 @@ export class PostgresFinalizedIngestionRepository implements FinalizedIngestionR
     this.ownsClient = typeof connectionString === "string";
     this.client =
       typeof connectionString === "string"
-        ? new Pool({
-            connectionString: normalizePostgresConnectionString(connectionString),
-            connectionTimeoutMillis: 10_000
-          })
+        ? createYuviPostgresPool(connectionString)
         : connectionString;
   }
 

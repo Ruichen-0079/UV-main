@@ -31,6 +31,29 @@ def test_health_does_not_reinitialize_mem0(monkeypatch) -> None:  # type: ignore
     assert data.status == "degraded"
 
 
+def test_health_does_not_load_deferred_resources() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        mem0_pg_connection_string="postgres://yuvi:yuvi@127.0.0.1:5432/yuvi",
+    )
+    service = Mem0Service(settings=settings)
+
+    def should_not_probe(*, force: bool = False) -> tuple[str, str | None]:
+        raise AssertionError("health must not probe deferred resources")
+
+    service.probe_embedder = should_not_probe  # type: ignore[method-assign]
+    service.probe_vector_store = should_not_probe  # type: ignore[method-assign]
+
+    data = service.health()
+    assert data.status == "degraded"
+    assert data.components.mem0 == "deferred"
+    assert data.components.embedder == "deferred"
+    assert data.components.vectorStore == "deferred"
+    assert data.capabilities.infer is False
+    assert data.capabilities.crud is False
+    assert data.capabilities.search is False
+
+
 def test_health_embed_cache_avoids_repeat_calls() -> None:
     settings = Settings(
         _env_file=None,  # type: ignore[call-arg]

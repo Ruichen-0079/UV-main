@@ -45,18 +45,11 @@ def _validate_fixed_settings() -> None:
         raise RuntimeError("DiskANN must remain disabled.")
 
 
-def _startup_initialize() -> None:
-    """Run once at process start: validate config and init Mem0Service singleton."""
+def _startup_validate() -> None:
+    """Validate fixed config without loading optional Mem0 resources."""
     _validate_fixed_settings()
     settings = get_settings()
-    service = get_service()
-    if settings.has_pg:
-        try:
-            service.initialize()
-        except SidecarError as exc:
-            # Degraded start: health reports unhealthy/degraded; CRUD may retry init.
-            logger.error("Mem0 startup init deferred/failed: %s", exc.message)
-    else:
+    if not settings.has_pg:
         logger.warning("MEM0_PG_CONNECTION_STRING missing; sidecar starts degraded.")
 
 
@@ -72,7 +65,9 @@ def _shutdown_release() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """FastAPI lifespan (replaces deprecated on_event startup/shutdown)."""
-    _startup_initialize()
+    # Keep sidecar startup lightweight. Mem0, Ollama, and PostgreSQL are loaded
+    # by the first memory operation, not by process launch or /health polling.
+    _startup_validate()
     try:
         yield
     finally:

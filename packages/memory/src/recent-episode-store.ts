@@ -2,7 +2,7 @@ import { Pool } from "pg";
 import type { QueryResultRow } from "pg";
 import { parseMemoryRepositoryEnv } from "./env.js";
 import { DEFAULT_L1_MAX_EPISODES, DEFAULT_L1_RETENTION_MS } from "./hierarchy.js";
-import { normalizePostgresConnectionString } from "./postgres-connection.js";
+import { createYuviPostgresPool } from "./postgres-pool.js";
 import type { RecentEpisode, RecentEpisodeStatus } from "./recent-episode.js";
 
 export type RecentEpisodeListQuery = {
@@ -135,10 +135,7 @@ export class PostgresRecentEpisodeStore implements RecentEpisodeStore {
     this.ownsPool = typeof connectionString === "string";
     this.pool =
       typeof connectionString === "string"
-        ? new Pool({
-            connectionString: normalizePostgresConnectionString(connectionString),
-            connectionTimeoutMillis: 10_000
-          })
+        ? createYuviPostgresPool(connectionString)
         : connectionString;
   }
 
