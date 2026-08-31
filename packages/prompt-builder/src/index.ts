@@ -5,6 +5,7 @@ export type PromptSectionName =
   | "CurrentTime"
   | "CurrentAffect"
   | "DirectContext"
+  | "RecentEpisodicMemory"
   | "RelevantMemory"
   | "CurrentSituation"
   | "Tools"
@@ -36,6 +37,9 @@ export type RetrievedMemoryForPrompt = {
   createdAt?: Date | string;
   lastAccessedAt?: Date | string;
   tags?: string[];
+  associated?: boolean;
+  ageBand?: string;
+  relevanceReason?: string;
 };
 
 export type ToolContext = {
@@ -54,10 +58,16 @@ type PromptBuildSharedInput = {
     isoTimestamp?: string;
     timezone?: string;
     localDate?: string;
+    localDateTime?: string;
+    elapsedSinceLastInteraction?: string;
+    lastInteractionAgeBand?: string;
+    temporalNotes?: string;
   };
   currentAffect?: string;
   directContext?: string;
   directContextEnabled?: boolean;
+  recentEpisodicMemory?: string;
+  recentEpisodicMemoryEnabled?: boolean;
   currentSituation?: string;
   tools?: ToolContext[];
   maxCharacters?: number;
@@ -197,6 +207,15 @@ export class PromptBuilder {
         stable: false
       },
       {
+        name: "RecentEpisodicMemory",
+        content: formatRecentEpisodicMemory(
+          input.recentEpisodicMemory,
+          input.recentEpisodicMemoryEnabled ?? true
+        ),
+        priority: 72,
+        stable: false
+      },
+      {
         name: "RelevantMemory",
         content: this.compressMemoryNarrative(
           input.retrievedMemories ?? [],
@@ -228,7 +247,7 @@ export class PromptBuilder {
           stable: true
         },
         sharedSections[5]!,
-        sharedSections[6]!
+        sharedSections[7]!
       ];
     }
 
@@ -300,11 +319,32 @@ function formatCurrentTime(currentTime?: PromptBuildInput["currentTime"]): strin
   const timezone = currentTime?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const localDate =
     currentTime?.localDate ?? now.toLocaleDateString("en-CA", { timeZone: timezone });
-  return [
+  const lines = [
     `ISO timestamp: ${isoTimestamp}`,
     `Timezone: ${timezone}`,
     `Local date: ${localDate}`
-  ].join("\n");
+  ];
+  if (currentTime?.localDateTime) {
+    lines.push(`Local date-time: ${currentTime.localDateTime}`);
+  }
+  if (currentTime?.elapsedSinceLastInteraction) {
+    const band = currentTime.lastInteractionAgeBand
+      ? ` [${currentTime.lastInteractionAgeBand}]`
+      : "";
+    lines.push(`Elapsed since last interaction: ${currentTime.elapsedSinceLastInteraction}${band}`);
+  }
+  if (currentTime?.temporalNotes) {
+    lines.push(currentTime.temporalNotes);
+  }
+  return lines.join("\n");
+}
+
+function formatRecentEpisodicMemory(content: string | undefined, enabled: boolean): string {
+  if (!enabled) {
+    return "Recent episodic memory was disabled for this turn.";
+  }
+  const trimmed = content?.trim();
+  return trimmed ? trimmed : "No recent episodic memory available.";
 }
 
 function formatDirectContext(context: string | undefined, enabled: boolean): string {
@@ -387,6 +427,8 @@ function displayTextForMemory(memory: RetrievedMemoryForPrompt): string {
 
 function formatMemoryForPrompt(memory: RetrievedMemoryForPrompt): string {
   const hints = [
+    memory.associated ? "associated" : null,
+    memory.ageBand ?? null,
     formatEventTimeHint(memory),
     memory.type ?? null,
     memory.scope ? (memory.scopeId ? `${memory.scope}:${memory.scopeId}` : memory.scope) : null,

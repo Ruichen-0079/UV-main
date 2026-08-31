@@ -18,7 +18,10 @@ import type {
   FinalizedIngestionAdmission,
   FinalizedIngestionPort,
   MemoryIngestionCoordinatorPort,
-  ConversationRecoveryOptions
+  ConversationRecoveryOptions,
+  MemoryVNextAssembly,
+  RecentEpisodeStore,
+  DreamJobStore
 } from "@companion/memory";
 import {
   DEFAULT_STALE_STREAMING_MESSAGE_AGE_MS,
@@ -26,7 +29,12 @@ import {
   MemoryIngestionCoordinator,
   detectCurrentAffect,
   detectExplicitForgetRequest,
-  detectExplicitRememberRequest
+  detectExplicitRememberRequest,
+  assembleMemoryVNextContext,
+  InMemoryRecentEpisodeStore,
+  InMemoryDreamJobStore,
+  DreamConsolidationEngine,
+  memoryVNextMessageWindow
 } from "@companion/memory";
 import type {
   PromptBuildInput,
@@ -199,10 +207,21 @@ export class RuntimeOrchestrator {
       runtimeCacheRetentionMs
     );
   private inlineIngestionCoordinator: MemoryIngestionCoordinator | undefined;
+  private readonly recentEpisodeStore: RecentEpisodeStore;
+  private readonly dreamEngine: DreamConsolidationEngine;
+  private readonly associativeShown = new Map<
+    string,
+    { ids: string[]; lastTurnIntruded: boolean }
+  >();
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
     this.directContextConfig = normalizeDirectContextConfig(options.directContext);
     this.memoryContextBuilder = options.memoryContextBuilder ?? new MemoryContextBuilder();
+    this.recentEpisodeStore = options.recentEpisodeStore ?? new InMemoryRecentEpisodeStore();
+    const dreamJobs: DreamJobStore = options.dreamJobStore ?? new InMemoryDreamJobStore();
+    this.dreamEngine = new DreamConsolidationEngine(dreamJobs, this.recentEpisodeStore, {
+      ...(options.dreamWriter ? { writer: options.dreamWriter } : {})
+    });
   }
 
   getLatestPromptPreview(): RuntimePromptPreview | null {
@@ -889,6 +908,10 @@ export class RuntimeOrchestrator {
         }
         await this.options.eventBus.publish(reply);
         this.recordDirectContextTurn(userEvent, reply);
+        this.scheduleRecentEpisodePersistence(userEvent.payload.sessionId, {
+          personaId: userEvent.payload.personaId,
+          subjectUserId: userEvent.payload.subjectUserId
+        });
         const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
         await this.options.eventBus.publish(assistantMessage);
 
@@ -1440,7 +1463,19 @@ export class RuntimeOrchestrator {
           directContextText: directContext.content
         })
       : emptyMemoryContext();
-    const promptMemories = promptMemoriesForBuilder(memoryContext);
+    const vnext = await this.assembleHierarchicalMemory(event.payload.sessionId, {
+      queryText: event.payload.content,
+      currentTurnText: event.payload.content,
+      directContextText: directContext.content,
+      personaId: event.payload.personaId,
+      subjectUserId: event.payload.subjectUserId,
+      longTermStatus: memoryContext.memoryFinalStatus,
+      promptMemories: memoryContext.promptMemories
+    });
+    const promptMemories = [
+      ...promptMemoriesForBuilder(memoryContext),
+      ...associativePromptMemories(vnext)
+    ];
     const situationParts = [
       voiceOutput
         ? "The user is interacting through voice."
@@ -1458,14 +1493,29 @@ export class RuntimeOrchestrator {
         "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
       retrievedMemories: promptMemories,
       memoryEnabled: memoryOptions.readMemory,
-      currentTime: currentTimeContext(),
+      currentTime: {
+        ...currentTimeContext(),
+        localDateTime: vnext.temporal.localDateTime,
+        ...(vnext.temporal.elapsedSinceLastInteractionLabel
+          ? { elapsedSinceLastInteraction: vnext.temporal.elapsedSinceLastInteractionLabel }
+          : {}),
+        lastInteractionAgeBand: vnext.temporal.lastInteractionAgeBand,
+        ...(vnext.temporal.gapAcknowledged
+          ? {
+              temporalNotes:
+                "An interaction gap exists. Do not invent events, feelings, or an off-screen life during the gap. Missing timestamps remain unknown."
+            }
+          : {})
+      },
       ...(currentAffect ? { currentAffect: formatCurrentAffectForPrompt(currentAffect) } : {}),
       directContext: directContext.content,
       directContextEnabled: directContext.enabled,
+      recentEpisodicMemory: vnext.recentEpisodicText,
       currentSituation: situationParts.join(" "),
       tools: [],
       userMessage: event.payload.content
     });
+    this.rememberAssociativeIntrusion(event.payload.sessionId, vnext);
     this.latestPromptPreview = {
       traceId: event.traceId,
       timestamp: new Date().toISOString(),
@@ -1536,6 +1586,12 @@ export class RuntimeOrchestrator {
       directContextCharCount: directContext.charCount,
       directContextTruncated: directContext.truncated,
       directContextSource: directContext.source,
+      recentEpisodicCount: vnext.promptEpisodes.length,
+      associativeCount: vnext.associative.items.length,
+      ...(vnext.associative.skippedReason
+        ? { associativeSkippedReason: vnext.associative.skippedReason }
+        : {}),
+      temporalAgeBand: vnext.temporal.lastInteractionAgeBand,
       excludedByStatus: memoryContext.excludedByStatus,
       excludedByTime: memoryContext.excludedByTime,
       excludedByScope: memoryContext.excludedByScope,
@@ -2478,6 +2534,10 @@ export class RuntimeOrchestrator {
     // Persist the final text before exposing the compatibility reply to transports.
     await this.options.eventBus.publish(reply);
     this.recordDirectContextTurn(sourceEvent, reply);
+    this.scheduleRecentEpisodePersistence(sourceEvent.payload.sessionId, {
+      personaId: sourceEvent.payload.personaId,
+      subjectUserId: sourceEvent.payload.subjectUserId
+    });
     await this.options.eventBus.publish(assistantMessage);
     return assistantMessage;
   }
@@ -3007,6 +3067,107 @@ export class RuntimeOrchestrator {
       memory,
       storageReason: "legacy importance threshold"
     };
+  }
+
+  private async assembleHierarchicalMemory(
+    sessionId: string,
+    input: {
+      queryText: string;
+      currentTurnText: string;
+      directContextText: string;
+      personaId?: string | null | undefined;
+      subjectUserId?: string | null | undefined;
+      longTermStatus?: MemoryRetrievalStatus | undefined;
+      promptMemories: Array<RetrievedMemoryDebug | PromptMemoryCompatibility>;
+    }
+  ): Promise<MemoryVNextAssembly> {
+    const shown = this.associativeShown.get(sessionId);
+    try {
+      const window = memoryVNextMessageWindow();
+      const messages = this.options.conversation
+        ? await this.options.conversation.listRecentMessages(sessionId, window)
+        : sessionTurnsToMessages(sessionId, this.getSessionTurns(sessionId) ?? []);
+      return await assembleMemoryVNextContext({
+        now: new Date(),
+        queryText: input.queryText,
+        currentTurnText: input.currentTurnText,
+        sessionId,
+        personaId: input.personaId,
+        subjectUserId: input.subjectUserId,
+        directContextText: input.directContextText,
+        messages,
+        longTerm: {
+          status: input.longTermStatus ?? "empty",
+          events: promptMemoriesToEvents(input.promptMemories)
+        },
+        previouslyShownAssociativeIds: shown?.ids,
+        lastTurnIntruded: shown?.lastTurnIntruded,
+        episodeStore: this.recentEpisodeStore,
+        persistEpisodes: true
+      });
+    } catch (error) {
+      this.options.logger?.warn?.(
+        "memory vNext assembly failed; continuing with empty L1",
+        this.errorLogContext(error)
+      );
+      return assembleMemoryVNextContext({
+        now: new Date(),
+        queryText: input.queryText,
+        currentTurnText: input.currentTurnText,
+        sessionId,
+        directContextText: input.directContextText,
+        messages: [],
+        longTerm: {
+          status: input.longTermStatus ?? "empty",
+          events: promptMemoriesToEvents(input.promptMemories)
+        }
+      });
+    }
+  }
+
+  private rememberAssociativeIntrusion(sessionId: string, assembly: MemoryVNextAssembly): void {
+    this.associativeShown.set(sessionId, {
+      ids: assembly.associative.items.map((item) => item.id),
+      lastTurnIntruded: assembly.associative.items.length > 0
+    });
+  }
+
+  private scheduleRecentEpisodePersistence(
+    sessionId: string,
+    identity: { personaId?: string | null | undefined; subjectUserId?: string | null | undefined }
+  ): void {
+    void this.persistRecentEpisodes(sessionId, identity).catch((error) => {
+      this.options.logger?.warn?.("recent episode persistence failed", this.errorLogContext(error));
+    });
+  }
+
+  private async persistRecentEpisodes(
+    sessionId: string,
+    identity: { personaId?: string | null | undefined; subjectUserId?: string | null | undefined }
+  ): Promise<void> {
+    const window = memoryVNextMessageWindow();
+    const messages = this.options.conversation
+      ? await this.options.conversation.listRecentMessages(sessionId, window)
+      : sessionTurnsToMessages(sessionId, this.getSessionTurns(sessionId) ?? []);
+    const assembly = await assembleMemoryVNextContext({
+      now: new Date(),
+      queryText: "",
+      sessionId,
+      personaId: identity.personaId,
+      subjectUserId: identity.subjectUserId,
+      directContextText: "",
+      messages,
+      episodeStore: this.recentEpisodeStore,
+      persistEpisodes: true
+    });
+    const newest = assembly.episodes[0];
+    if (!newest) return;
+    await this.dreamEngine.consider({
+      episode: newest,
+      existing: assembly.episodes,
+      now: new Date()
+    });
+    await this.dreamEngine.runDue(new Date(), `runtime:${sessionId}`, 2);
   }
 
   private buildDirectContext(sessionId: string): DirectContextBuildResult {
@@ -4248,6 +4409,102 @@ function isPromptMemoryCompatibility(
     typeof (memory as Partial<PromptMemoryCompatibility>).provenanceId === "string" &&
     typeof (memory as Partial<PromptMemoryCompatibility>).sourceRecordId === "string"
   );
+}
+
+function associativePromptMemories(assembly: MemoryVNextAssembly): RetrievedMemoryForPrompt[] {
+  return assembly.associative.items.map((item) => ({
+    content: item.content,
+    displayText: item.content,
+    associated: true,
+    ageBand: item.ageBand,
+    relevanceReason: item.reason,
+    importance: item.score
+  }));
+}
+
+function promptMemoriesToEvents(
+  memories: Array<RetrievedMemoryDebug | PromptMemoryCompatibility>
+): MemoryEvent[] {
+  return memories
+    .map((memory) => {
+      const content = "displayText" in memory ? memory.displayText : memory.content;
+      if (!content?.trim()) return null;
+      const id =
+        "provenanceId" in memory && typeof memory.provenanceId === "string"
+          ? memory.provenanceId
+          : "id" in memory && typeof memory.id === "string"
+            ? memory.id
+            : `prompt:${content.slice(0, 24)}`;
+      const event: MemoryEvent = {
+        id,
+        kind: "fact",
+        content,
+        source: "source" in memory && typeof memory.source === "string" ? memory.source : "legacy",
+        sourceRecordId:
+          "sourceRecordId" in memory && typeof memory.sourceRecordId === "string"
+            ? memory.sourceRecordId
+            : id,
+        metadata: {}
+      };
+      return event;
+    })
+    .filter((event): event is MemoryEvent => event !== null);
+}
+
+function sessionTurnsToMessages(
+  sessionId: string,
+  entries: DirectContextEntry[]
+): ConversationMessage[] {
+  const messages: ConversationMessage[] = [];
+  let sequence = 1;
+  for (const entry of entries) {
+    if (entry.kind === "turn" || entry.kind === "user-only") {
+      messages.push({
+        id: `${entry.traceId}:user`,
+        sessionId,
+        traceId: entry.traceId,
+        parentMessageId: null,
+        role: "user",
+        content: entry.userMessage,
+        status: "completed",
+        createdAt: entry.timestamp,
+        completedAt: entry.timestamp,
+        metadata: {},
+        sequence: sequence++
+      });
+    }
+    if (entry.kind === "turn") {
+      messages.push({
+        id: `${entry.traceId}:assistant`,
+        sessionId,
+        traceId: entry.traceId,
+        parentMessageId: `${entry.traceId}:user`,
+        role: "assistant",
+        content: entry.assistantReply,
+        status: "completed",
+        createdAt: entry.timestamp,
+        completedAt: entry.timestamp,
+        metadata: {},
+        sequence: sequence++
+      });
+    }
+    if (entry.kind === "assistant-only") {
+      messages.push({
+        id: `${entry.traceId}:assistant`,
+        sessionId,
+        traceId: entry.traceId,
+        parentMessageId: null,
+        role: "assistant",
+        content: entry.assistantMessage,
+        status: "completed",
+        createdAt: entry.timestamp,
+        completedAt: entry.timestamp,
+        metadata: {},
+        sequence: sequence++
+      });
+    }
+  }
+  return messages;
 }
 
 function promptMemoriesForBuilder(memoryContext: MemoryContext): RetrievedMemoryForPrompt[] {

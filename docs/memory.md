@@ -391,10 +391,22 @@ Prompt Preview reports Direct Context budget metadata: `directContextEnabled`, `
 ...
 </DirectContext>
 
+<RecentEpisodicMemory>
+...
+</RecentEpisodicMemory>
+
 <RelevantMemory>
 ...
 </RelevantMemory>
 ```
+
+Memory vNext adds a Yuvi-native hierarchical context on top of this pipeline
+without replacing MemoryProvider or MemoryEvent authority. `DirectContext` is
+L0 working context. `RecentEpisodicMemory` is the L1 hours/days episode layer.
+`RelevantMemory` remains L2 durable evidence, optionally plus bounded
+associative recalls. Dream consolidation, compression, and thin temporal
+projection are documented in [Memory vNext](./memory-vnext.md). Continuity and
+the full Temporal substrate remain planned and are not implemented here.
 
 ## Lightweight Supersession And Contradiction Suggestions
 

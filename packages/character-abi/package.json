@@ -18,6 +18,11 @@
       "types": "./src/v2d.ts",
       "development": "./src/v2d.ts",
       "import": "./dist/v2d.js"
+    },
+    "./memory-vnext-projection": {
+      "types": "./src/memory-vnext-projection.ts",
+      "development": "./src/memory-vnext-projection.ts",
+      "import": "./dist/memory-vnext-projection.js"
     }
   },
   "scripts": {

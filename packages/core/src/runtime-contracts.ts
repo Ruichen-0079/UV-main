@@ -2,6 +2,7 @@ import type { EventBus } from "@companion/event-bus";
 import type {
   ConversationRepository,
   CurrentAffect,
+  DreamWriter,
   FinalizedIngestionPort,
   Memory,
   MemoryCandidate,
@@ -13,6 +14,8 @@ import type {
   MemoryRetrievalMode,
   MemoryRetrievalResult,
   MemoryRetrievalStatus,
+  RecentEpisodeStore,
+  DreamJobStore,
   RetrievedMemoryDebug
 } from "@companion/memory";
 import type { PromptBuildInput, PromptBuildOutput } from "@companion/prompt-builder";
@@ -45,6 +48,9 @@ export type RuntimeOrchestratorOptions = {
   memoryRepository?: string | undefined;
   directContext?: Partial<DirectContextConfig> | undefined;
   memoryContextBuilder?: Pick<MemoryContextBuilder, "build"> | undefined;
+  recentEpisodeStore?: RecentEpisodeStore | undefined;
+  dreamJobStore?: DreamJobStore | undefined;
+  dreamWriter?: DreamWriter | undefined;
   logger?: RuntimeLogger;
 };
 
@@ -278,6 +284,12 @@ export type RuntimePromptPreview = {
   directContextCharCount: number;
   directContextTruncated: boolean;
   directContextSource: string;
+  recentEpisodicCount?: number | undefined;
+  associativeCount?: number | undefined;
+  associativeSkippedReason?: string | undefined;
+  temporalAgeBand?: string | undefined;
+  contextCompressionBeforeTokens?: number | undefined;
+  contextCompressionAfterTokens?: number | undefined;
   excludedByStatus: number;
   excludedByTime: number;
   excludedByScope: number;
