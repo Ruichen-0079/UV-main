@@ -76,6 +76,12 @@ export {
   type RuntimeEmbodiedEffectAdmissionRejectionReason
 } from "./runtime-embodied-effect-admission.js";
 
+export {
+  RUNTIME_EMBODIED_EFFECT_COMMIT_7J_VERSION,
+  decideRuntimeEmbodiedEffectCommitAuthorization,
+  type RuntimeEmbodiedEffectCommitAuthorization
+} from "./runtime-embodied-effect-commit.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
