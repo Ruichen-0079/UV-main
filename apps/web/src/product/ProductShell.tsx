@@ -15,11 +15,15 @@ export function ProductShell(props: {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [firstRunOpen, setFirstRunOpen] = useState(false);
 
   async function reload(): Promise<void> {
     const next = await productClient.overview();
     setOverview(next);
     document.documentElement.dataset["yuviTheme"] = next.preferences.appearance.theme;
+    if (!next.preferences.firstRun.completed && !next.preferences.firstRun.skipped) {
+      setFirstRunOpen(true);
+    }
   }
 
   useEffect(() => {
@@ -90,6 +94,43 @@ export function ProductShell(props: {
         health={overview?.compactHealth ?? []}
         events={props.events ?? []}
       />
+
+      {firstRunOpen ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/30 p-4" role="dialog" aria-label="First run">
+          <div className="max-w-md rounded-[20px] border border-[var(--yuvi-line)] bg-[var(--yuvi-bg-elevated)] p-6">
+            <h2 className="text-xl font-semibold">Set up YUVI</h2>
+            <p className="mt-2 text-sm text-[var(--yuvi-muted)]">
+              You can configure chat, voice, and Memory from Settings. Nothing here creates an
+              account. Skip anytime.
+            </p>
+            <ol className="mt-4 list-decimal space-y-1 pl-5 text-sm">
+              <li>Add a Character provider</li>
+              <li>Optionally connect Cognition and Voice</li>
+              <li>Check Memory backend health</li>
+            </ol>
+            <div className="mt-5 flex gap-2">
+              <Button
+                onClick={() => {
+                  setFirstRunOpen(false);
+                  setSettingsOpen(true);
+                  void productClient.savePreferences({ firstRun: { completed: true } });
+                }}
+              >
+                Open settings
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setFirstRunOpen(false);
+                  void productClient.savePreferences({ firstRun: { skipped: true } });
+                }}
+              >
+                Skip
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {commandOpen ? (
         <div className="fixed inset-0 z-50 grid place-items-start bg-black/20 pt-24" onClick={() => setCommandOpen(false)}>
