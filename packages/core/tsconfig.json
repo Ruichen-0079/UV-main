@@ -12,7 +12,6 @@
     { "path": "../memory" },
     { "path": "../p8" },
     { "path": "../prompt-builder" },
-    { "path": "../providers" },
-    { "path": "../cognition" }
+    { "path": "../providers" }
   ]
 }
