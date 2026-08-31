@@ -9,6 +9,7 @@
   "references": [
     { "path": "../character-abi" },
     { "path": "../character-harness" },
-    { "path": "../providers" }
+    { "path": "../providers" },
+    { "path": "../core" }
   ]
 }
