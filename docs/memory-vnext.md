@@ -33,9 +33,9 @@ L0 working context     = DirectContext / near-verbatim recent completed turns
 L1 recent episodic     = durable/reconstructable narrative episodes (hours/days)
 L2 long-term evidence  = existing MemoryEvent / MemoryProvider / MemoryService
 
-Dream                  = idle/recurrence consolidation into L2 write events
+Dream                  = recurrence/salience/explicit consolidation into L2 write events
 Associative intrusion  = bounded context-triggered recall (not permission to speak)
-Compression            = authority-partitioned structured reduction
+Compression            = IMPLEMENTED_PRIMITIVE_NOT_RUNTIME_ACTIVE
 Thin temporal          = elapsed/age/occurredAt vs recordedAt projection
 ```
 
@@ -46,22 +46,32 @@ something repeated, or treat assistant prose as user truth.
 ## L0 / L1 / L2
 
 - L0 is unchanged DirectContext, still not long-term Memory.
-- L1 groups completed conversation turns by session and a 30-minute gap,
-  stores what happened, important user statements, task/result, unresolved
-  context, timestamps, provenance, and source turn ids. Retention is seven
-  days with rollover. Restart reconstructs from `conversation_messages` and
-  upserts by `source_digest`.
+- L1 groups completed conversation turns by session and a 30-minute gap
+  under one stable logical episode id (`episode:<sessionId>:<firstTurnId>`).
+  Later messages in the same gap update that episode; they do not create a
+  second recurrence observation. User-grounded fields are searchable evidence.
+  Assistant output is stored as non-authoritative continuity and is labeled
+  `Assistant previously said (non-authoritative, not evidence)` in the
+  Character-facing projection. Retention is seven days with rollover. Restart
+  reconstructs from `conversation_messages` and upserts by logical episode id.
 - L2 is existing durable evidence. Dream may propose additional
-  `MemoryWriteEventInput` values; MemoryProvider/ledger remain the write path.
+  `MemoryWriteEventInput` values.
 
 ## Dream
 
-Triggers: recurrence of user-grounded statements, explicit importance,
-salience, idle, or bounded scheduled maintenance. Not every turn.
+Triggers that are actually wired: recurrence of user-grounded statements with
+non-overlapping `sourceTurnIds`, explicit importance, and salience. Idle and
+scheduled maintenance exist as engine kinds only; production Runtime does not
+currently supply idle semantics, so idle Dream is **deferred**.
 
-Jobs are idempotent on `source_digest`, lease-recoverable, inspectable, and
-safe to rerun. Assistant text is context only. Recurrence does not upgrade
-verification. Ambiguous writes stay `reconcile_required`.
+Delivery authority is `MemoryProvider.writeEventIdempotent` plus
+`MemoryProvider.reconcileEvent` (the same primitives as finalized C1
+delivery). Keys are `yuvi:dream-job:<jobId>:event:<payloadDigest>`. Dream
+does not call `writeEvent`. `reconcile_required` is not due work and is never
+auto-retried. An explicit `reconcileJob()` path may rewrite only after
+`reconcileEvent` returns `not_applied`. Jobs are claimed atomically
+(`FOR UPDATE SKIP LOCKED` in PostgreSQL; serialized claim in memory). Missing
+writer/provider skips the job without marking L1 episodes consolidated.
 
 “Dream” is a product metaphor. It does not simulate hidden experiences.
 
@@ -74,9 +84,12 @@ not a speak gate.
 
 ## Compression and temporal projection
 
-Protected: system/character invariants, current user turn, epistemic markers.
-Compressible: old DirectContext, extra L1 detail, supporting retrieved
-evidence.
+`compressHierarchicalContext()` is implemented as a primitive and is
+**not** wired into the live Runtime/Character prompt
+(`IMPLEMENTED_PRIMITIVE_NOT_RUNTIME_ACTIVE`). No TTFT claim is made.
+
+Thin temporal projection excludes the current user turn when computing
+`lastInteractionAt`, so a long gap is not collapsed to ~0.
 
 Thin temporal projection adds current local time, elapsed gap, age bands,
 and occurredAt vs recordedAt when known. Missing timestamps stay unknown.

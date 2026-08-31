@@ -277,9 +277,11 @@ export {
 } from "./hierarchy.js";
 export {
   assembleRecentEpisodes,
+  ASSISTANT_CONTEXT_DISCLAIMER,
   episodeSearchCorpus,
   formatRecentEpisodeForPrompt,
   rankRecentEpisodesForQuery,
+  sourceTurnIdsOverlap,
   RECENT_EPISODE_SOURCE,
   RecentEpisodeStatuses,
   TemporalConfidenceLevels,
@@ -320,7 +322,13 @@ export {
   type DreamWriter
 } from "./dream-consolidation.js";
 export {
+  DREAM_DELIVERY_KEY_PREFIX,
+  DREAM_SEMANTIC_DELIVERY_AUTHORITY,
+  stampDreamWriteEvent
+} from "./dream-delivery.js";
+export {
   compressHierarchicalContext,
+  CONTEXT_COMPRESSION_RUNTIME_STATUS,
   CONTEXT_COMPRESSION_VERSION,
   ProtectedPromptSectionNames,
   type ContextCompressionInput,

@@ -158,10 +158,9 @@ export async function assembleMemoryVNextContext(
     budgets
   });
 
-  const lastInteractionAt =
-    input.messages[input.messages.length - 1]?.completedAt ??
-    input.messages[input.messages.length - 1]?.createdAt ??
-    episodes[0]?.endedAt;
+  const priorMessages = excludeCurrentUserTurn(input.messages, input.currentTurnText);
+  const lastPrior = priorMessages[priorMessages.length - 1];
+  const lastInteractionAt = lastPrior?.completedAt ?? lastPrior?.createdAt;
   const temporal = projectThinTemporalContext({
     now: input.now,
     timezone: input.timezone,
@@ -218,11 +217,17 @@ export function defaultMemoryVNextBudgets(): MemoryHierarchyBudgets {
 }
 
 function mergeEpisodes(stored: RecentEpisode[], reconstructed: RecentEpisode[]): RecentEpisode[] {
-  const byDigest = new Map<string, RecentEpisode>();
-  for (const episode of [...reconstructed, ...stored]) {
-    byDigest.set(episode.sourceDigest, episode);
+  const byId = new Map<string, RecentEpisode>();
+  for (const episode of stored) {
+    byId.set(episode.id, episode);
   }
-  return [...byDigest.values()].sort((left, right) => right.endedAt.localeCompare(left.endedAt));
+  for (const episode of reconstructed) {
+    const existing = byId.get(episode.id);
+    if (!existing || episode.sourceTurnIds.length >= existing.sourceTurnIds.length) {
+      byId.set(episode.id, episode);
+    }
+  }
+  return [...byId.values()].sort((left, right) => right.endedAt.localeCompare(left.endedAt));
 }
 
 function normalizeLongTerm(input: MemoryVNextLongTerm | undefined): MemoryRetrievalOutcome {

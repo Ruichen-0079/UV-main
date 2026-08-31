@@ -1,4 +1,6 @@
 export const CONTEXT_COMPRESSION_VERSION = "memory-vnext-compression.v1" as const;
+export const CONTEXT_COMPRESSION_RUNTIME_STATUS =
+  "IMPLEMENTED_PRIMITIVE_NOT_RUNTIME_ACTIVE" as const;
 
 export const ProtectedPromptSectionNames = [
   "SystemIdentity",

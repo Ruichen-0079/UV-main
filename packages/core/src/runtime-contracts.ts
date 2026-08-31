@@ -51,6 +51,7 @@ export type RuntimeOrchestratorOptions = {
   recentEpisodeStore?: RecentEpisodeStore | undefined;
   dreamJobStore?: DreamJobStore | undefined;
   dreamWriter?: DreamWriter | undefined;
+  dreamProvider?: MemoryProvider | undefined;
   logger?: RuntimeLogger;
 };
 

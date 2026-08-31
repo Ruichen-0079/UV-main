@@ -133,7 +133,7 @@ export function formatRecentEpisodeForPrompt(episode: RecentEpisode, timezone?: 
     episode.whatHappened,
     episode.unresolved ? `Unresolved: ${episode.unresolved}` : null,
     episode.taskState ? `Task state: ${episode.taskState}` : null,
-    episode.outcome ? `Outcome: ${episode.outcome}` : null
+    episode.assistantContext ? `${ASSISTANT_CONTEXT_DISCLAIMER}: ${episode.assistantContext}` : null
   ].filter(Boolean);
   return `- [${hints.join("][")}] ${details.join(" ")}`;
 }
@@ -230,7 +230,7 @@ function buildEpisode(
   ).toISOString();
 
   return {
-    id: `episode:${sessionId}:${sourceDigest.slice(0, 12)}`,
+    id: `episode:${sessionId}:${first.id}`,
     sessionId,
     personaId,
     subjectUserId,
@@ -264,11 +264,14 @@ function buildEpisode(
   };
 }
 
+export const ASSISTANT_CONTEXT_DISCLAIMER =
+  "Assistant previously said (non-authoritative, not evidence)";
+
 function buildWhatHappened(
   userStatements: string[],
   taskState: string | null,
   unresolved: string | null,
-  outcome: string | null,
+  _outcome: string | null,
   startedAt: string,
   endedAt: string
 ): string {
@@ -277,8 +280,7 @@ function buildWhatHappened(
     `From ${startedAt} to ${endedAt}.`,
     important ? `User said: ${important}.` : "No user statements were captured.",
     taskState ? `Current task/context: ${taskState}.` : null,
-    unresolved ? `Still unresolved: ${unresolved}.` : null,
-    outcome ? `Latest result: ${outcome}.` : null
+    unresolved ? `Still unresolved: ${unresolved}.` : null
   ];
   return parts.filter(Boolean).join(" ");
 }
@@ -411,10 +413,15 @@ export function episodeSearchCorpus(episode: RecentEpisode): string {
       episode.whatHappened,
       ...episode.userStatements,
       episode.taskState ?? "",
-      episode.unresolved ?? "",
-      episode.outcome ?? ""
+      episode.unresolved ?? ""
     ]
       .filter(Boolean)
       .join(" ")
   );
+}
+
+export function sourceTurnIdsOverlap(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length === 0 || right.length === 0) return false;
+  const rightSet = new Set(right);
+  return left.some((id) => rightSet.has(id));
 }

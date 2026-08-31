@@ -217,17 +217,7 @@ export async function createAppContext(
       directContext,
       recentEpisodeStore,
       dreamJobStore,
-      ...(provider
-        ? {
-            dreamWriter: async (events) => {
-              const outcomes = [];
-              for (const event of events) {
-                outcomes.push(await provider.writeEvent(event));
-              }
-              return outcomes;
-            }
-          }
-        : {}),
+      ...(provider ? { dreamProvider: provider } : {}),
       logger: runtimeLogger
     });
   }

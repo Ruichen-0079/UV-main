@@ -39,11 +39,11 @@ export class InMemoryRecentEpisodeStore implements RecentEpisodeStore {
   private readonly digestIndex = new Map<string, string>();
 
   async upsert(episode: RecentEpisode): Promise<RecentEpisode> {
-    const existingId = this.digestIndex.get(episode.sourceDigest);
-    const stored = cloneEpisode({
-      ...episode,
-      id: existingId ?? episode.id
-    });
+    const existing = this.episodes.get(episode.id);
+    if (existing) {
+      this.digestIndex.delete(existing.sourceDigest);
+    }
+    const stored = cloneEpisode(episode);
     this.episodes.set(stored.id, stored);
     this.digestIndex.set(stored.sourceDigest, stored.id);
     return cloneEpisode(stored);
@@ -155,7 +155,7 @@ export class PostgresRecentEpisodeStore implements RecentEpisodeStore {
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15::jsonb,
         $16,$17,$18,$19,$20::jsonb,$21,$22,$23,$24,$25
       )
-      on conflict (source_digest) do update set
+      on conflict (episode_id) do update set
         session_id = excluded.session_id,
         persona_id = excluded.persona_id,
         subject_user_id = excluded.subject_user_id,
@@ -172,6 +172,8 @@ export class PostgresRecentEpisodeStore implements RecentEpisodeStore {
         outcome = excluded.outcome,
         assistant_context = excluded.assistant_context,
         metadata = excluded.metadata,
+        source_turn_ids = excluded.source_turn_ids,
+        source_digest = excluded.source_digest,
         last_accessed_at = excluded.last_accessed_at,
         expires_at = excluded.expires_at,
         updated_at = now()

@@ -220,7 +220,8 @@ export class RuntimeOrchestrator {
     this.recentEpisodeStore = options.recentEpisodeStore ?? new InMemoryRecentEpisodeStore();
     const dreamJobs: DreamJobStore = options.dreamJobStore ?? new InMemoryDreamJobStore();
     this.dreamEngine = new DreamConsolidationEngine(dreamJobs, this.recentEpisodeStore, {
-      ...(options.dreamWriter ? { writer: options.dreamWriter } : {})
+      ...(options.dreamWriter ? { writer: options.dreamWriter } : {}),
+      ...(options.dreamProvider ? { provider: options.dreamProvider } : {})
     });
   }
 
