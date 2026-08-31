@@ -13,6 +13,11 @@
       "types": "./src/p8-projection.ts",
       "development": "./src/p8-projection.ts",
       "import": "./dist/p8-projection.js"
+    },
+    "./v2d": {
+      "types": "./src/v2d.ts",
+      "development": "./src/v2d.ts",
+      "import": "./dist/v2d.js"
     }
   },
   "scripts": {
