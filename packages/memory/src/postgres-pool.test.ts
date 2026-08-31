@@ -4,6 +4,7 @@ import {
   YUVI_POSTGRES_IDLE_TIMEOUT_MS,
   YUVI_POSTGRES_POOL_MAX
 } from "./postgres-pool.js";
+import { normalizePostgresConnectionString } from "./postgres-connection.js";
 
 describe("createYuviPostgresPool", () => {
   const pools: ReturnType<typeof createYuviPostgresPool>[] = [];
@@ -20,6 +21,8 @@ describe("createYuviPostgresPool", () => {
     expect(options["max"]).toBe(YUVI_POSTGRES_POOL_MAX);
     expect(options["idleTimeoutMillis"]).toBe(YUVI_POSTGRES_IDLE_TIMEOUT_MS);
     expect(options["connectionTimeoutMillis"]).toBe(10_000);
-    expect(options["connectionString"]).toBe("postgres://yuvi:secret@localhost:5432/yuvi");
+    expect(options["connectionString"]).toBe(
+      normalizePostgresConnectionString("postgres://yuvi:secret@localhost:5432/yuvi")
+    );
   });
 });
