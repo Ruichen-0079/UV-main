@@ -43,6 +43,11 @@
       "types": "./src/post-cognition-assembly.ts",
       "development": "./src/post-cognition-assembly.ts",
       "import": "./dist/post-cognition-assembly.js"
+    },
+    "./adapter-request": {
+      "types": "./src/adapter-request.ts",
+      "development": "./src/adapter-request.ts",
+      "import": "./dist/adapter-request.js"
     }
   },
   "scripts": {
