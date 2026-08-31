@@ -151,13 +151,35 @@ export function createCognitionCapabilityRequest(
 }
 
 /**
+ * Validate the stable 6A semantic reasoning task without performing provider
+ * serialization or execution. This is the single task-shape authority reused
+ * by initial and post-capability Cognition paths.
+ */
+export function createCognitionReasoningTask(input: unknown): Cognition6AReasoningTask {
+  const value = expectObject(input, "Cognition 6A reasoning task");
+  assertAllowedKeys(value, ["version", "escalation", "problem"], "Cognition 6A reasoning task");
+  if (value.version !== COGNITION_6A_VERSION) {
+    throw new Error(`Cognition reasoning task version must be ${COGNITION_6A_VERSION}.`);
+  }
+
+  const escalation = normalizeEscalation(value.escalation);
+  const problem = boundedProblem(value.problem);
+
+  return Object.freeze({
+    version: COGNITION_6A_VERSION,
+    escalation,
+    problem
+  });
+}
+
+/**
  * Build the provider-neutral reasoning input for one admitted Character
  * escalation. Runtime owns task/context authorization and provider execution;
  * this boundary only validates the stable 5G escalation and carries the
  * Runtime-supplied bounded problem into the existing ReasoningProvider shape.
  */
 export function createCognitionReasoningInput(input: unknown): ReasoningInput {
-  const task = normalizeReasoningTask(input);
+  const task = createCognitionReasoningTask(input);
   const messages: ReasoningInput["messages"] = [
     Object.freeze({
       role: "user",
@@ -228,23 +250,6 @@ export function createCognitionFailureResult(input: unknown): NormalizedCognitio
   return createNormalizedCognitionResult({
     version: NORMALIZED_COGNITION_RESULT_VERSION,
     status: value.status
-  });
-}
-
-function normalizeReasoningTask(input: unknown): Cognition6AReasoningTask {
-  const value = expectObject(input, "Cognition 6A reasoning task");
-  assertAllowedKeys(value, ["version", "escalation", "problem"], "Cognition 6A reasoning task");
-  if (value.version !== COGNITION_6A_VERSION) {
-    throw new Error(`Cognition reasoning task version must be ${COGNITION_6A_VERSION}.`);
-  }
-
-  const escalation = normalizeEscalation(value.escalation);
-  const problem = boundedProblem(value.problem);
-
-  return Object.freeze({
-    version: COGNITION_6A_VERSION,
-    escalation,
-    problem
   });
 }
 
