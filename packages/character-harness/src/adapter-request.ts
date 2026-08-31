@@ -1,12 +1,12 @@
 import {
   CHARACTER_ABI_SECTION_KINDS,
   type CharacterAbiSectionKind
-} from "../../character-abi/src/index.js";
+} from "@companion/character-abi";
 import {
   createCharacterAbi2DContext,
   type CharacterAbi2DContext,
   type CharacterAbi2DSection
-} from "../../character-abi/src/v2d.js";
+} from "@companion/character-abi/v2d";
 import { CHARACTER_HARNESS_5J_VERSION } from "./assembly-v2d.js";
 import { CHARACTER_HARNESS_5K_VERSION } from "./post-cognition-assembly.js";
 

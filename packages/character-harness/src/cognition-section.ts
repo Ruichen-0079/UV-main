@@ -2,7 +2,7 @@ import {
   CHARACTER_ABI_2D_VERSION,
   createCharacterAbi2DContext,
   type CharacterAbi2DCognitionResultSection
-} from "../../character-abi/src/v2d.js";
+} from "@companion/character-abi/v2d";
 import {
   CHARACTER_HARNESS_5H_VERSION,
   createCharacterHarnessCognitionRoundTrip

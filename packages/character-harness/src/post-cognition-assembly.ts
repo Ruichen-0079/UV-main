@@ -1,13 +1,13 @@
 import {
   CHARACTER_ABI_SECTION_KINDS,
   type CharacterAbiSectionKind
-} from "../../character-abi/src/index.js";
+} from "@companion/character-abi";
 import {
   CHARACTER_ABI_2D_VERSION,
   createCharacterAbi2DContext,
   type CharacterAbi2DCognitionResultSection,
   type CharacterAbi2DContext
-} from "../../character-abi/src/v2d.js";
+} from "@companion/character-abi/v2d";
 import type { CharacterHarnessAssemblyBudget } from "./index.js";
 import { assembleCharacterHarness2DContext } from "./assembly-v2d.js";
 import {

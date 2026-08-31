@@ -1,13 +1,13 @@
 import {
   CHARACTER_ABI_SECTION_KINDS,
   type CharacterAbiSectionKind
-} from "../../character-abi/src/index.js";
+} from "@companion/character-abi";
 import {
   CHARACTER_ABI_2D_VERSION,
   createCharacterAbi2DContext,
   type CharacterAbi2DContext,
   type CharacterAbi2DSection
-} from "../../character-abi/src/v2d.js";
+} from "@companion/character-abi/v2d";
 import type { CharacterHarnessAssemblyBudget } from "./index.js";
 
 export const CHARACTER_HARNESS_5J_VERSION = "character-harness-5j.v1" as const;
