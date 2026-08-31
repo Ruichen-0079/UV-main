@@ -9,10 +9,7 @@ import {
   type CharacterAbi2DContext
 } from "../../character-abi/src/v2d.js";
 import type { CharacterHarnessAssemblyBudget } from "./index.js";
-import {
-  assembleCharacterHarness2DContext,
-  type CharacterHarness2DAssembly
-} from "./assembly-v2d.js";
+import { assembleCharacterHarness2DContext } from "./assembly-v2d.js";
 
 export const CHARACTER_HARNESS_5K_VERSION = "character-harness-5k.v1" as const;
 
@@ -94,19 +91,17 @@ export function assembleCharacterHarnessPostCognitionContext(
     }
   });
 
-  const acceptedRegularAssembly = requireAccepted5JAssembly(regularAssembly);
   const finalContext = createCharacterAbi2DContext({
     abiVersion: CHARACTER_ABI_2D_VERSION,
-    sections: [...acceptedRegularAssembly.context.sections, cognitionSection]
+    sections: [...regularAssembly.context.sections, cognitionSection]
   });
 
   return Object.freeze({
     version: CHARACTER_HARNESS_5K_VERSION,
     status: "ACCEPTED",
     context: finalContext,
-    omittedSectionKinds: acceptedRegularAssembly.omittedSectionKinds,
-    usedSemanticCharacters:
-      acceptedRegularAssembly.usedSemanticCharacters + cognitionCharacters
+    omittedSectionKinds: regularAssembly.omittedSectionKinds,
+    usedSemanticCharacters: regularAssembly.usedSemanticCharacters + cognitionCharacters
   });
 }
 
@@ -122,12 +117,6 @@ function normalizeCognitionSection(input: unknown): CharacterAbi2DCognitionResul
     );
   }
   return section;
-}
-
-function requireAccepted5JAssembly(
-  assembly: CharacterHarness2DAssembly
-): CharacterHarness2DAssembly {
-  return assembly;
 }
 
 function measureCognitionSemanticCharacters(
