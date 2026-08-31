@@ -11,6 +11,7 @@ import type { ReasoningInput, ReasoningOutput } from "@companion/providers";
 
 export const COGNITION_6A_VERSION = "cognition-6a.v1" as const;
 export const COGNITION_6G_VERSION = "cognition-6g.v1" as const;
+export const COGNITION_6H_VERSION = "cognition-6h.v1" as const;
 
 export const COGNITION_6A_FAILURE_STATUSES = ["UNAVAILABLE", "CANCELLED", "ERROR"] as const;
 export type Cognition6AFailureStatus = (typeof COGNITION_6A_FAILURE_STATUSES)[number];
@@ -34,9 +35,19 @@ export type CognitionCapabilityDescriptionSet = Readonly<{
   capabilities: readonly CognitionCapabilityDescription[];
 }>;
 
+export type CognitionCapabilityRequest = Readonly<{
+  version: typeof COGNITION_6H_VERSION;
+  kind: "REQUEST_CAPABILITY";
+  /** Must identify one capability in the current validated 6G inventory. */
+  capabilityRef: string;
+  /** Semantic task meaning only; concrete MCP/tool arguments remain outside Cognition. */
+  request: string;
+}>;
+
 const COGNITION_6G_MAX_CAPABILITIES = 32;
 const COGNITION_6G_MAX_CAPABILITY_REF_CHARACTERS = 200;
 const COGNITION_6G_MAX_DESCRIPTION_CHARACTERS = 1_000;
+const COGNITION_6H_MAX_REQUEST_CHARACTERS = 4_000;
 
 type UnknownObject = Record<string, unknown> & {
   version?: unknown;
@@ -51,6 +62,7 @@ type UnknownObject = Record<string, unknown> & {
   capabilities?: unknown;
   capabilityRef?: unknown;
   description?: unknown;
+  request?: unknown;
 };
 
 /**
@@ -92,6 +104,49 @@ export function createCognitionCapabilityDescriptions(
   return Object.freeze({
     version: COGNITION_6G_VERSION,
     capabilities
+  });
+}
+
+/**
+ * Validate one Cognition proposal to request a capability from the current
+ * bounded 6G inventory.
+ *
+ * The request is semantic only. It does not carry MCP method names, concrete
+ * tool/server/provider identities, tool schemas, wire arguments, or execution
+ * authority. Runtime remains responsible for binding the opaque ref, admitting
+ * the effect, enforcing the one-round budget, and performing any invocation.
+ */
+export function createCognitionCapabilityRequest(
+  input: unknown,
+  capabilityDescriptions: unknown
+): CognitionCapabilityRequest {
+  const inventory = createCognitionCapabilityDescriptions(capabilityDescriptions);
+  const value = expectObject(input, "Cognition 6H capability request");
+  assertAllowedKeys(
+    value,
+    ["version", "kind", "capabilityRef", "request"],
+    "Cognition 6H capability request"
+  );
+  if (value.version !== COGNITION_6H_VERSION || value.kind !== "REQUEST_CAPABILITY") {
+    throw new Error(
+      `Cognition capability request must use ${COGNITION_6H_VERSION} REQUEST_CAPABILITY.`
+    );
+  }
+
+  const capabilityRef = boundedCapabilityRef(
+    value.capabilityRef,
+    "Cognition capability request capabilityRef"
+  );
+  if (!inventory.capabilities.some((capability) => capability.capabilityRef === capabilityRef)) {
+    throw new Error("Cognition capability request must reference the current capability inventory.");
+  }
+
+  const request = boundedCapabilityRequest(value.request);
+  return Object.freeze({
+    version: COGNITION_6H_VERSION,
+    kind: "REQUEST_CAPABILITY",
+    capabilityRef,
+    request
   });
 }
 
@@ -258,6 +313,18 @@ function boundedCapabilityDescription(input: unknown, field: string): string {
   if (input.length > COGNITION_6G_MAX_DESCRIPTION_CHARACTERS) {
     throw new Error(
       `${field} must not exceed ${COGNITION_6G_MAX_DESCRIPTION_CHARACTERS} characters.`
+    );
+  }
+  return input;
+}
+
+function boundedCapabilityRequest(input: unknown): string {
+  if (typeof input !== "string" || input.trim().length === 0) {
+    throw new Error("Cognition capability request must be a non-empty string.");
+  }
+  if (input.length > COGNITION_6H_MAX_REQUEST_CHARACTERS) {
+    throw new Error(
+      `Cognition capability request must not exceed ${COGNITION_6H_MAX_REQUEST_CHARACTERS} characters.`
     );
   }
   return input;
