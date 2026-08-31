@@ -30,6 +30,10 @@ import type {
   VisionInput
 } from "@companion/providers";
 import type { MemoryContextBuilder, MemoryContextDrop } from "./memory-context.js";
+import type {
+  RuntimeContextCompressionDiagnostics,
+  RuntimeContextCompressionMode
+} from "./runtime-context-compression.js";
 
 export type RuntimeLogger = {
   info(message: string, context?: Record<string, unknown>): void;
@@ -47,6 +51,7 @@ export type RuntimeOrchestratorOptions = {
   memoryIngestionCoordinator?: MemoryIngestionCoordinatorPort | undefined;
   memoryRepository?: string | undefined;
   directContext?: Partial<DirectContextConfig> | undefined;
+  memoryContextCompression?: RuntimeContextCompressionMode | undefined;
   memoryContextBuilder?: Pick<MemoryContextBuilder, "build"> | undefined;
   recentEpisodeStore?: RecentEpisodeStore | undefined;
   dreamJobStore?: DreamJobStore | undefined;
@@ -291,6 +296,7 @@ export type RuntimePromptPreview = {
   temporalAgeBand?: string | undefined;
   contextCompressionBeforeTokens?: number | undefined;
   contextCompressionAfterTokens?: number | undefined;
+  contextCompression?: RuntimeContextCompressionDiagnostics | undefined;
   excludedByStatus: number;
   excludedByTime: number;
   excludedByScope: number;

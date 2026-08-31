@@ -40,6 +40,15 @@ export type {
 export { AssistantTurnConflictError, ConversationPersistenceError } from "./runtime-errors.js";
 
 export {
+  buildPromptWithContextCompression,
+  DEFAULT_NEAR_TURN_PROTECTION_LINES,
+  type RuntimeContextCompressionDiagnostics,
+  type RuntimeContextCompressionMode,
+  type RuntimeContextCompressionResult,
+  type RuntimePromptBuilder
+} from "./runtime-context-compression.js";
+
+export {
   RUNTIME_COGNITION_FAILURE_STATUSES,
   executeRuntimeCognitionOnce,
   type RuntimeCognitionBoundary,

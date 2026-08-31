@@ -100,6 +100,7 @@ import type {
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
 import { AssistantTurnConflictError, ConversationPersistenceError } from "./runtime-errors.js";
+import { buildPromptWithContextCompression } from "./runtime-context-compression.js";
 
 const assistantTurnClaimRetentionMs = 15 * 60 * 1000;
 const assistantTurnClaimMaxTerminal = 256;
@@ -1485,7 +1486,7 @@ export class RuntimeOrchestrator {
     if (forgetNote) {
       situationParts.push(forgetNote);
     }
-    const prompt = this.options.promptBuilder.buildPrompt({
+    const promptInput: PromptBuildInput = {
       systemIdentity:
         "You are YUVI, a local-first AI companion runtime agent. Unless the user clearly asks for another language, reply in natural spoken English by default.",
       characterStyle:
@@ -1494,6 +1495,9 @@ export class RuntimeOrchestrator {
         "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
       retrievedMemories: promptMemories,
       memoryEnabled: memoryOptions.readMemory,
+      ...(memoryContext.memoryFinalStatus
+        ? { memoryRetrievalState: memoryContext.memoryFinalStatus }
+        : {}),
       currentTime: {
         ...currentTimeContext(),
         localDateTime: vnext.temporal.localDateTime,
@@ -1515,7 +1519,13 @@ export class RuntimeOrchestrator {
       currentSituation: situationParts.join(" "),
       tools: [],
       userMessage: event.payload.content
+    };
+    const promptResult = buildPromptWithContextCompression({
+      promptBuilder: this.options.promptBuilder,
+      promptInput,
+      mode: this.options.memoryContextCompression ?? "off"
     });
+    const prompt = promptResult.prompt;
     this.rememberAssociativeIntrusion(event.payload.sessionId, vnext);
     this.latestPromptPreview = {
       traceId: event.traceId,
@@ -1593,6 +1603,9 @@ export class RuntimeOrchestrator {
         ? { associativeSkippedReason: vnext.associative.skippedReason }
         : {}),
       temporalAgeBand: vnext.temporal.lastInteractionAgeBand,
+      contextCompression: promptResult.diagnostics,
+      contextCompressionBeforeTokens: promptResult.diagnostics.originalTokens,
+      contextCompressionAfterTokens: promptResult.diagnostics.finalTokens,
       excludedByStatus: memoryContext.excludedByStatus,
       excludedByTime: memoryContext.excludedByTime,
       excludedByScope: memoryContext.excludedByScope,
@@ -1643,6 +1656,9 @@ export class RuntimeOrchestrator {
         "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
       retrievedMemories: promptMemoriesForBuilder(memoryContext),
       memoryEnabled: input.readMemory,
+      ...(memoryContext.memoryFinalStatus
+        ? { memoryRetrievalState: memoryContext.memoryFinalStatus }
+        : {}),
       currentTime: currentTimeContext(),
       directContext: directContext.content,
       directContextEnabled: directContext.enabled,

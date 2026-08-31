@@ -17,7 +17,14 @@ export type PromptSection = {
   content: string;
   priority: number;
   stable: boolean;
+  /** Semantic contract sections are never truncated by the generic budgeter. */
+  protected?: boolean | undefined;
+  compressible?: boolean | undefined;
 };
+
+export type PreformattedPromptContext = Partial<
+  Record<"DirectContext" | "RecentEpisodicMemory" | "RelevantMemory", string>
+>;
 
 export type RetrievedMemoryForPrompt = {
   content: string;
@@ -42,6 +49,8 @@ export type RetrievedMemoryForPrompt = {
   relevanceReason?: string;
 };
 
+export type MemoryRetrievalState = "ok" | "empty" | "unavailable" | "error" | "partial";
+
 export type ToolContext = {
   name: string;
   description?: string;
@@ -54,6 +63,7 @@ type PromptBuildSharedInput = {
   relationshipContext?: string;
   retrievedMemories?: Array<string | RetrievedMemoryForPrompt>;
   memoryEnabled?: boolean;
+  memoryRetrievalState?: MemoryRetrievalState;
   currentTime?: {
     isoTimestamp?: string;
     timezone?: string;
@@ -68,6 +78,8 @@ type PromptBuildSharedInput = {
   directContextEnabled?: boolean;
   recentEpisodicMemory?: string;
   recentEpisodicMemoryEnabled?: boolean;
+  /** Runtime-only structured compression overrides for designated sections. */
+  preformattedContext?: PreformattedPromptContext;
   currentSituation?: string;
   tools?: ToolContext[];
   maxCharacters?: number;
@@ -110,11 +122,11 @@ export type BuiltPrompt = {
   user: string;
 };
 
-const defaultMaxCharacters = 12000;
+export const DEFAULT_PROMPT_MAX_CHARACTERS = 12000;
 
 export class PromptBuilder {
   buildPrompt(input: PromptBuildInput): PromptBuildOutput {
-    const maxCharacters = input.maxCharacters ?? defaultMaxCharacters;
+    const maxCharacters = input.maxCharacters ?? DEFAULT_PROMPT_MAX_CHARACTERS;
     const sections = this.createSections(input);
     const budgetedSections = this.enforceBudget(sections, maxCharacters);
     const prompt = budgetedSections.map(formatSection).join("\n\n");
@@ -174,61 +186,77 @@ export class PromptBuilder {
         name: "SystemIdentity",
         content: input.systemIdentity,
         priority: 100,
-        stable: true
+        stable: true,
+        protected: true
       },
       {
         name: "CharacterStyle",
         content: input.characterStyle ?? "Be helpful, grounded, and emotionally aware.",
         priority: 90,
-        stable: true
+        stable: true,
+        protected: true
       },
       {
         name: "RelationshipContext",
         content: input.relationshipContext ?? "No specific relationship context is available.",
         priority: 80,
-        stable: false
+        stable: false,
+        protected: true
       },
       {
         name: "CurrentTime",
         content: formatCurrentTime(input.currentTime),
         priority: 85,
-        stable: true
+        stable: true,
+        protected: true
       },
       {
         name: "CurrentAffect",
         content: formatCurrentAffect(input.currentAffect),
         priority: 84,
-        stable: false
+        stable: false,
+        protected: true
       },
       {
         name: "DirectContext",
-        content: formatDirectContext(input.directContext, input.directContextEnabled ?? true),
+        content:
+          input.preformattedContext?.DirectContext ??
+          formatDirectContext(input.directContext, input.directContextEnabled ?? true),
         priority: 68,
-        stable: false
+        stable: false,
+        compressible: true
       },
       {
         name: "RecentEpisodicMemory",
-        content: formatRecentEpisodicMemory(
-          input.recentEpisodicMemory,
-          input.recentEpisodicMemoryEnabled ?? true
-        ),
+        content:
+          input.preformattedContext?.RecentEpisodicMemory ??
+          formatRecentEpisodicMemory(
+            input.recentEpisodicMemory,
+            input.recentEpisodicMemoryEnabled ?? true
+          ),
         priority: 72,
-        stable: false
+        stable: false,
+        compressible: true
       },
       {
         name: "RelevantMemory",
-        content: this.compressMemoryNarrative(
-          input.retrievedMemories ?? [],
-          input.memoryEnabled ?? true
-        ),
+        content:
+          input.preformattedContext?.RelevantMemory ??
+          this.compressMemoryNarrative(
+            input.retrievedMemories ?? [],
+            input.memoryEnabled ?? true,
+            input.memoryRetrievalState
+          ),
         priority: 70,
-        stable: false
+        stable: false,
+        compressible: true
       },
       {
         name: "CurrentSituation",
         content: input.currentSituation ?? "No additional situation context is available.",
         priority: 60,
-        stable: false
+        stable: false,
+        protected: true
       }
     ];
 
@@ -244,7 +272,8 @@ export class PromptBuilder {
         },
         {
           ...sharedSections[2]!,
-          stable: true
+          stable: true,
+          protected: true
         },
         sharedSections[5]!,
         sharedSections[7]!
@@ -257,34 +286,39 @@ export class PromptBuilder {
         name: "Tools",
         content: formatTools(input.tools ?? []),
         priority: 50,
-        stable: false
+        stable: false,
+        protected: true
       },
       {
         name: "UserMessage",
         content: input.userMessage,
         priority: 100,
-        stable: false
+        stable: false,
+        protected: true
       }
     ];
   }
 
   private compressMemoryNarrative(
     memories: Array<string | RetrievedMemoryForPrompt>,
-    memoryEnabled: boolean
+    memoryEnabled: boolean,
+    retrievalState?: MemoryRetrievalState
   ): string {
     if (!memoryEnabled) {
       return "Memory was disabled for this turn.";
     }
 
+    const statusNote = formatMemoryRetrievalState(retrievalState);
     if (memories.length === 0) {
-      return "No relevant memory retrieved.";
+      return statusNote ?? "No relevant memory retrieved.";
     }
 
     const ranked = dedupePromptMemories(
       memories.map(normalizeMemory).sort(compareMemoryForPrompt)
     ).slice(0, 5);
 
-    return ranked.map((memory) => `- ${formatMemoryForPrompt(memory)}`).join("\n");
+    const rendered = ranked.map((memory) => `- ${formatMemoryForPrompt(memory)}`).join("\n");
+    return statusNote ? `${statusNote}\n${rendered}` : rendered;
   }
 
   private enforceBudget(sections: PromptSection[], maxCharacters: number): PromptSection[] {
@@ -292,7 +326,13 @@ export class PromptBuilder {
 
     while (sectionsToText(result).length > maxCharacters) {
       const candidate = [...result]
-        .filter((section) => !section.stable && section.content.length > 120)
+        .filter(
+          (section) =>
+            !section.stable &&
+            !section.protected &&
+            section.compressible !== false &&
+            section.content.length > 120
+        )
         .sort((left, right) => left.priority - right.priority)[0];
 
       if (!candidate) {
@@ -345,6 +385,19 @@ function formatRecentEpisodicMemory(content: string | undefined, enabled: boolea
   }
   const trimmed = content?.trim();
   return trimmed ? trimmed : "No recent episodic memory available.";
+}
+
+function formatMemoryRetrievalState(state: MemoryRetrievalState | undefined): string | null {
+  if (state === "unavailable") {
+    return "Long-term memory retrieval is UNAVAILABLE; do not treat this as EMPTY.";
+  }
+  if (state === "error") {
+    return "Long-term memory retrieval returned ERROR; do not treat this as EMPTY.";
+  }
+  if (state === "partial") {
+    return "Long-term memory retrieval is PARTIAL; preserve that uncertainty.";
+  }
+  return null;
 }
 
 function formatDirectContext(context: string | undefined, enabled: boolean): string {

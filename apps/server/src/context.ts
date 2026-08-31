@@ -30,7 +30,7 @@ import {
   type ProviderStatusMap
 } from "@companion/providers";
 import type { FastifyBaseLogger } from "fastify";
-import type { ServerConfig } from "./config.js";
+import { parseMemoryContextCompression, type ServerConfig } from "./config.js";
 import { readRuntimeEnvFiles } from "./env.js";
 import {
   editableKeys,
@@ -202,7 +202,8 @@ export async function createAppContext(
   function createRuntime(
     providers: ProviderRegistry,
     memory: MemoryService,
-    directContext = config.directContext
+    directContext = config.directContext,
+    memoryContextCompression = config.memoryContextCompression
   ): RuntimeOrchestrator {
     const provider = memory.getMemoryProvider?.();
     return new RuntimeOrchestrator({
@@ -215,6 +216,7 @@ export async function createAppContext(
       memoryIngestionCoordinator: coordinator,
       memoryRepository: activeMemoryRepository,
       directContext,
+      memoryContextCompression,
       recentEpisodeStore,
       dreamJobStore,
       ...(provider ? { dreamProvider: provider } : {}),
@@ -286,17 +288,24 @@ export async function createAppContext(
         parseMemoryExtractorMode(reloadEnv["MEMORY_EXTRACTOR"]),
         reloadEnv
       );
-      const nextRuntime = createRuntime(nextProviders, nextMemory, {
-        enabled: parseBoolean(reloadEnv["DIRECT_CONTEXT_ENABLED"], config.directContext.enabled),
-        maxTurns: parsePositiveInteger(
-          reloadEnv["DIRECT_CONTEXT_MAX_TURNS"],
-          config.directContext.maxTurns
-        ),
-        maxChars: parsePositiveInteger(
-          reloadEnv["DIRECT_CONTEXT_MAX_CHARS"],
-          config.directContext.maxChars
-        )
-      });
+      const nextRuntime = createRuntime(
+        nextProviders,
+        nextMemory,
+        {
+          enabled: parseBoolean(reloadEnv["DIRECT_CONTEXT_ENABLED"], config.directContext.enabled),
+          maxTurns: parsePositiveInteger(
+            reloadEnv["DIRECT_CONTEXT_MAX_TURNS"],
+            config.directContext.maxTurns
+          ),
+          maxChars: parsePositiveInteger(
+            reloadEnv["DIRECT_CONTEXT_MAX_CHARS"],
+            config.directContext.maxChars
+          )
+        },
+        reloadEnv["MEMORY_CONTEXT_COMPRESSION"] === undefined
+          ? config.memoryContextCompression
+          : parseMemoryContextCompression(reloadEnv["MEMORY_CONTEXT_COMPRESSION"])
+      );
 
       // Stage all replacements before sealing or mutating the current
       // Runtime. Construction failures therefore leave the live context

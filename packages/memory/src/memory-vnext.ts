@@ -174,14 +174,20 @@ export async function assembleMemoryVNextContext(
           sections: [
             {
               name: "DirectContext",
-              content: input.directContextText || "No recent direct context available."
+              content: input.directContextText || "No recent direct context available.",
+              partition: "COMPRESSIBLE_RECENT"
             },
-            { name: "RecentEpisodicMemory", content: recentEpisodicText },
+            {
+              name: "RecentEpisodicMemory",
+              content: recentEpisodicText,
+              partition: "COMPRESSIBLE_EPISODIC"
+            },
             {
               name: "RelevantMemory",
               content: associative.items
                 .map((item) => `- [associated][${item.ageBand}] ${item.content}`)
-                .join("\n")
+                .join("\n"),
+              partition: "COMPRESSIBLE_LONG_TERM"
             }
           ],
           maxCharacters: input.maxPromptCharacters

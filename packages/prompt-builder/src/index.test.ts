@@ -214,6 +214,41 @@ describe("PromptBuilder", () => {
     );
   });
 
+  it.each([
+    ["unavailable", "UNAVAILABLE", "do not treat this as EMPTY"],
+    ["error", "ERROR", "do not treat this as EMPTY"],
+    ["partial", "PARTIAL", "preserve that uncertainty"]
+  ] as const)("keeps %s retrieval distinct from empty", (state, marker, note) => {
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "You are Companion.",
+      memoryRetrievalState: state,
+      retrievedMemories: [],
+      userMessage: "What do you know?"
+    });
+    const relevantMemory = output.sections.find((section) => section.name === "RelevantMemory");
+
+    expect(relevantMemory?.content).toContain(marker);
+    expect(relevantMemory?.content).toContain(note);
+    expect(relevantMemory?.content).not.toBe("No relevant memory retrieved.");
+  });
+
+  it("does not truncate the current user turn or Character contract during budget enforcement", () => {
+    const userMessage = "Current user evidence: ".repeat(80);
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "Protected system contract.",
+      characterStyle: "Protected Character contract.",
+      relationshipContext: "Protected relationship boundary.",
+      currentTime: { isoTimestamp: "2026-08-31T10:00:00.000Z" },
+      directContext: "Older context.",
+      userMessage,
+      maxCharacters: 600
+    });
+
+    expect(output.prompt).toContain("Protected system contract.");
+    expect(output.prompt).toContain("Protected Character contract.");
+    expect(output.prompt).toContain(userMessage.trim());
+  });
+
   it("renders absolute event hints for time-bound episodic memories", () => {
     const output = new PromptBuilder().buildPrompt({
       systemIdentity: "You are Companion.",

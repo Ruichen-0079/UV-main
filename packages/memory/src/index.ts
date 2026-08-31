@@ -330,9 +330,12 @@ export {
   compressHierarchicalContext,
   CONTEXT_COMPRESSION_RUNTIME_STATUS,
   CONTEXT_COMPRESSION_VERSION,
+  ContextCompressionPartitions,
   ProtectedPromptSectionNames,
   type ContextCompressionInput,
   type ContextCompressionMetrics,
+  type ContextCompressionPartition,
+  type ContextCompressionPartitionCounts,
   type ContextCompressionResult,
   type HierarchicalContextSection
 } from "./context-compression.js";

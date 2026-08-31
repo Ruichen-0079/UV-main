@@ -10,6 +10,7 @@ export type ServerConfig = {
     maxTurns: number;
     maxChars: number;
   };
+  memoryContextCompression: "off" | "auto";
   memoryMaintenance: {
     enabled: boolean;
     runOnStartup: boolean;
@@ -60,6 +61,7 @@ export function loadServerConfig(
       maxTurns: parsePositiveInteger(env["DIRECT_CONTEXT_MAX_TURNS"], 6),
       maxChars: parsePositiveInteger(env["DIRECT_CONTEXT_MAX_CHARS"], 6000)
     },
+    memoryContextCompression: parseMemoryContextCompression(env["MEMORY_CONTEXT_COMPRESSION"]),
     memoryMaintenance: {
       enabled: parseBoolean(env["MEMORY_MAINTENANCE_ENABLED"], false),
       runOnStartup: parseBoolean(env["MEMORY_MAINTENANCE_RUN_ON_STARTUP"], false),
@@ -130,6 +132,15 @@ function parseMemoryExtractor(value: string | undefined): "rule-based" | "llm" {
   }
 
   throw new Error(`Unsupported MEMORY_EXTRACTOR '${value}'. Supported values: rule-based, llm.`);
+}
+
+export function parseMemoryContextCompression(value: string | undefined): "off" | "auto" {
+  if (!value || value === "off" || value === "auto") {
+    return value === "auto" ? "auto" : "off";
+  }
+  throw new Error(
+    `Unsupported MEMORY_CONTEXT_COMPRESSION '${value}'. Supported values: off, auto.`
+  );
 }
 
 function emptyToUndefined(value: string | undefined): string | undefined {
