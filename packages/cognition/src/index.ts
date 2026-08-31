@@ -2,12 +2,11 @@ import {
   NORMALIZED_COGNITION_RESULT_VERSION,
   createNormalizedCognitionResult,
   type NormalizedCognitionResult
-} from "../../character-abi/src/index.js";
-import {
-  CHARACTER_HARNESS_5G_VERSION,
-  type CharacterHarnessCognitionRequest
-} from "../../character-harness/src/cognition-request.js";
-import type { ReasoningInput, ReasoningOutput } from "../../providers/src/types/reasoning.js";
+} from "@companion/character-abi";
+import type { CharacterHarnessCognitionRequest } from "@companion/character-harness/cognition-request";
+import type { ReasoningInput, ReasoningOutput } from "@companion/providers";
+
+const CHARACTER_HARNESS_5G_VERSION = "character-harness-5g.v1" as const;
 
 export const COGNITION_6A_VERSION = "cognition-6a.v1" as const;
 
