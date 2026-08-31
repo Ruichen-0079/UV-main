@@ -47,6 +47,14 @@ export {
   type RuntimeCognitionOneShotInput
 } from "./runtime-cognition-one-shot.js";
 
+export {
+  RUNTIME_CAPABILITY_ADMISSION_6J_VERSION,
+  RUNTIME_CAPABILITY_ADMISSION_REJECTION_REASONS,
+  admitRuntimeCapabilityRound,
+  type RuntimeCapabilityAdmissionDecision,
+  type RuntimeCapabilityAdmissionRejectionReason
+} from "./runtime-capability-admission.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
