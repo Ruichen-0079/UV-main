@@ -10,6 +10,7 @@ import {
 import type { ReasoningInput, ReasoningOutput } from "@companion/providers";
 
 export const COGNITION_6A_VERSION = "cognition-6a.v1" as const;
+export const COGNITION_6G_VERSION = "cognition-6g.v1" as const;
 
 export const COGNITION_6A_FAILURE_STATUSES = ["UNAVAILABLE", "CANCELLED", "ERROR"] as const;
 export type Cognition6AFailureStatus = (typeof COGNITION_6A_FAILURE_STATUSES)[number];
@@ -21,6 +22,22 @@ export type Cognition6AReasoningTask = Readonly<{
   problem: string;
 }>;
 
+export type CognitionCapabilityDescription = Readonly<{
+  /** Opaque Runtime binding handle; Cognition must not interpret its format. */
+  capabilityRef: string;
+  /** Bounded semantic description of what the capability can provide. */
+  description: string;
+}>;
+
+export type CognitionCapabilityDescriptionSet = Readonly<{
+  version: typeof COGNITION_6G_VERSION;
+  capabilities: readonly CognitionCapabilityDescription[];
+}>;
+
+const COGNITION_6G_MAX_CAPABILITIES = 32;
+const COGNITION_6G_MAX_CAPABILITY_REF_CHARACTERS = 200;
+const COGNITION_6G_MAX_DESCRIPTION_CHARACTERS = 1_000;
+
 type UnknownObject = Record<string, unknown> & {
   version?: unknown;
   escalation?: unknown;
@@ -31,7 +48,52 @@ type UnknownObject = Record<string, unknown> & {
   answer?: unknown;
   finishReason?: unknown;
   status?: unknown;
+  capabilities?: unknown;
+  capabilityRef?: unknown;
+  description?: unknown;
 };
+
+/**
+ * Validate the bounded semantic capability inventory visible to Cognition.
+ *
+ * This is description-only. The opaque reference carries no execution
+ * authority, no provider/tool/server identity is admitted into the stable
+ * contract, and Runtime remains the sole owner of capability binding and
+ * admission. Empty inventories are valid when the current environment exposes
+ * no authorized capabilities.
+ */
+export function createCognitionCapabilityDescriptions(
+  input: unknown
+): CognitionCapabilityDescriptionSet {
+  const value = expectObject(input, "Cognition 6G capability descriptions");
+  assertAllowedKeys(
+    value,
+    ["version", "capabilities"],
+    "Cognition 6G capability descriptions"
+  );
+  if (value.version !== COGNITION_6G_VERSION) {
+    throw new Error(`Cognition capability descriptions version must be ${COGNITION_6G_VERSION}.`);
+  }
+  if (!Array.isArray(value.capabilities)) {
+    throw new Error("Cognition capabilities must be an array.");
+  }
+  if (value.capabilities.length > COGNITION_6G_MAX_CAPABILITIES) {
+    throw new Error(
+      `Cognition capabilities must not exceed ${COGNITION_6G_MAX_CAPABILITIES} entries.`
+    );
+  }
+
+  const seenRefs = new Set<string>();
+  const capabilities = Array.from(value.capabilities, (entry, index) =>
+    normalizeCapabilityDescription(entry, index, seenRefs)
+  );
+  Object.freeze(capabilities);
+
+  return Object.freeze({
+    version: COGNITION_6G_VERSION,
+    capabilities
+  });
+}
 
 /**
  * Build the provider-neutral reasoning input for one admitted Character
@@ -131,6 +193,25 @@ function normalizeReasoningTask(input: unknown): Cognition6AReasoningTask {
   });
 }
 
+function normalizeCapabilityDescription(
+  input: unknown,
+  index: number,
+  seenRefs: Set<string>
+): CognitionCapabilityDescription {
+  const field = `Cognition capability ${index}`;
+  const value = expectObject(input, field);
+  assertAllowedKeys(value, ["capabilityRef", "description"], field);
+
+  const capabilityRef = boundedCapabilityRef(value.capabilityRef, `${field} capabilityRef`);
+  if (seenRefs.has(capabilityRef)) {
+    throw new Error("Cognition capabilityRef values must be unique.");
+  }
+  seenRefs.add(capabilityRef);
+
+  const description = boundedCapabilityDescription(value.description, `${field} description`);
+  return Object.freeze({ capabilityRef, description });
+}
+
 function normalizeEscalation(input: unknown): CharacterHarnessCognitionRequest {
   const value = expectObject(input, "Cognition Character escalation");
   assertAllowedKeys(value, ["version", "kind", "focus"], "Cognition Character escalation");
@@ -154,6 +235,30 @@ function boundedProblem(input: unknown): string {
   }
   if (input.length > 16_000) {
     throw new Error("Cognition problem must not exceed 16000 characters.");
+  }
+  return input;
+}
+
+function boundedCapabilityRef(input: unknown, field: string): string {
+  if (typeof input !== "string" || input.length === 0 || input.trim() !== input) {
+    throw new Error(`${field} must be a non-empty opaque string without surrounding whitespace.`);
+  }
+  if (input.length > COGNITION_6G_MAX_CAPABILITY_REF_CHARACTERS) {
+    throw new Error(
+      `${field} must not exceed ${COGNITION_6G_MAX_CAPABILITY_REF_CHARACTERS} characters.`
+    );
+  }
+  return input;
+}
+
+function boundedCapabilityDescription(input: unknown, field: string): string {
+  if (typeof input !== "string" || input.trim().length === 0) {
+    throw new Error(`${field} must be a non-empty string.`);
+  }
+  if (input.length > COGNITION_6G_MAX_DESCRIPTION_CHARACTERS) {
+    throw new Error(
+      `${field} must not exceed ${COGNITION_6G_MAX_DESCRIPTION_CHARACTERS} characters.`
+    );
   }
   return input;
 }
