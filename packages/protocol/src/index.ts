@@ -16,7 +16,8 @@ export const EventTypeSchema = z.enum([
   "stt.completed",
   "vision.completed",
   "provider.error",
-  "runtime.error"
+  "runtime.error",
+  "runtime.embodied.effect"
 ]);
 
 export const TurnOriginSchema = z.enum(["user-turn", "assistant-initiated"]);
