@@ -42,6 +42,12 @@ importers:
 
   apps/server:
     dependencies:
+      '@companion/character-harness':
+        specifier: workspace:*
+        version: link:../../packages/character-harness
+      '@companion/cognition':
+        specifier: workspace:*
+        version: link:../../packages/cognition
       '@companion/config':
         specifier: workspace:*
         version: link:../../packages/config
