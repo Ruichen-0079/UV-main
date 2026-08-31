@@ -122,6 +122,20 @@ export class LumiPresentationController {
   private generation = 0;
   private disposed = false;
   private running = false;
+  private animation: ((now: number) => void) | null = null;
+  private readonly visibilityHandler = () => {
+    if (this.disposed || !this.running) return;
+    if (this.isHidden()) {
+      this.cancelScheduledFrame();
+      this.previousNow = null;
+      this.debug = { ...this.debug, running: false, frameDeltaMs: 0 };
+      return;
+    }
+    this.previousNow = null;
+    if (this.frame === null && this.animation !== null) {
+      this.schedule(this.animation);
+    }
+  };
   private debug: LumiPresentationDebug = {
     running: false,
     generation: 0,
@@ -152,6 +166,9 @@ export class LumiPresentationController {
     // The initial scheduler is diagnostics-only until start() creates the
     // lifecycle-owned pair. It avoids a nullable debug shape before mount.
     this.disposeSchedulers();
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", this.visibilityHandler);
+    }
   }
 
   setProjection(projection: CompanionPresenceProjection): void {
@@ -177,10 +194,15 @@ export class LumiPresentationController {
     this.behaviorTransition = createPresenceBehaviorTransition(this.currentState());
 
     const animate = (now: number) => {
+      this.frame = null;
       if (this.disposed || !this.running || generation !== this.generation) return;
       if (this.isHidden()) {
-        this.previousNow = now;
-        this.schedule(animate);
+        this.previousNow = null;
+        this.debug = { ...this.debug, running: false, frameDeltaMs: 0 };
+        // In browser/Tauri documents the visibility listener restarts this
+        // callback when the surface becomes visible. Keep the injected clock
+        // behavior used by deterministic tests when no document exists.
+        if (typeof document === "undefined") this.schedule(animate);
         return;
       }
       const previous = this.previousNow;
@@ -219,6 +241,7 @@ export class LumiPresentationController {
       };
       this.schedule(animate);
     };
+    this.animation = animate;
     this.schedule(animate);
   }
 
@@ -226,9 +249,9 @@ export class LumiPresentationController {
     if (!this.running && this.frame === null) return;
     this.running = false;
     this.generation += 1;
-    if (this.frame !== null) this.cancelFrame?.(this.frame);
-    this.frame = null;
+    this.cancelScheduledFrame();
     this.previousNow = null;
+    this.animation = null;
     this.disposeSchedulers();
     this.debug = { ...this.debug, running: false, frameDeltaMs: 0 };
   }
@@ -237,6 +260,9 @@ export class LumiPresentationController {
     if (this.disposed) return;
     this.stop();
     this.disposed = true;
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.visibilityHandler);
+    }
     this.projection = createInitialCompanionPresence();
     this.suppliedGazeTarget = null;
   }
@@ -252,8 +278,13 @@ export class LumiPresentationController {
   }
 
   private schedule(callback: (now: number) => void): void {
-    if (!this.running || this.requestFrame === null) return;
+    if (!this.running || this.requestFrame === null || this.isHidden()) return;
     this.frame = this.requestFrame(callback);
+  }
+
+  private cancelScheduledFrame(): void {
+    if (this.frame !== null) this.cancelFrame?.(this.frame);
+    this.frame = null;
   }
 
   private disposeSchedulers(): void {
@@ -271,11 +302,50 @@ export class CubismLive2DAdapter implements Live2DAdapter {
   private frame: number | null = null;
   private previousFrameAt: number | null = null;
   private loadAbort: AbortController | null = null;
+  private source: string | null = null;
+  private contextLost = false;
+  private readonly visibilityHandler = () => {
+    if (this.disposed) return;
+    if (isDocumentHidden()) {
+      this.stopRenderLoop();
+    } else if (this.model && !this.contextLost) {
+      this.startRenderLoop();
+    }
+  };
+  private readonly contextLostHandler = (event: Event) => {
+    event.preventDefault();
+    this.contextLost = true;
+    this.stopRenderLoop();
+    this.loadAbort?.abort();
+    this.loadAbort = null;
+    this.model?.dispose();
+    this.model = null;
+  };
+  private readonly contextRestoredHandler = () => {
+    if (this.disposed) return;
+    this.contextLost = false;
+    const source = this.source;
+    if (!source) return;
+    // WebGL resources are invalid after loss. Rebuild the official Cubism
+    // model on restore instead of drawing into a half-restored context.
+    void this.load(source).catch((error: unknown) => {
+      if (import.meta.env.DEV) {
+        console.warn("Lumi WebGL context restore failed.", error);
+      }
+    });
+  };
 
-  constructor(private readonly canvas: HTMLCanvasElement) {}
+  constructor(private readonly canvas: HTMLCanvasElement) {
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", this.visibilityHandler);
+    }
+    canvas.addEventListener("webglcontextlost", this.contextLostHandler);
+    canvas.addEventListener("webglcontextrestored", this.contextRestoredHandler);
+  }
 
   async load(source: string): Promise<void> {
     if (this.disposed) throw new Error("Live2D adapter is disposed.");
+    this.source = source;
     const loadAbort = new AbortController();
     this.loadAbort = loadAbort;
     const model = await loadLumiCubismModel(this.canvas, source, loadAbort.signal);
@@ -285,6 +355,7 @@ export class CubismLive2DAdapter implements Live2DAdapter {
     }
     this.model = model;
     this.loadAbort = null;
+    this.contextLost = false;
     this.resize(this.canvas.clientWidth || 320, this.canvas.clientHeight || 420);
     this.resetMouth();
     this.startRenderLoop();
@@ -361,18 +432,23 @@ export class CubismLive2DAdapter implements Live2DAdapter {
     this.disposed = true;
     this.loadAbort?.abort();
     this.loadAbort = null;
-    if (this.frame !== null) cancelAnimationFrame(this.frame);
-    this.frame = null;
+    this.stopRenderLoop();
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.visibilityHandler);
+    }
+    this.canvas.removeEventListener("webglcontextlost", this.contextLostHandler);
+    this.canvas.removeEventListener("webglcontextrestored", this.contextRestoredHandler);
     this.model?.dispose();
     this.model = null;
   }
 
   private startRenderLoop(): void {
+    if (this.frame !== null || isDocumentHidden()) return;
     const render = (now: number) => {
+      this.frame = null;
       if (this.disposed || !this.model) return;
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
-        this.previousFrameAt = now;
-        this.frame = requestAnimationFrame(render);
+      if (this.contextLost || isDocumentHidden()) {
+        this.previousFrameAt = null;
         return;
       }
       const delta =
@@ -385,6 +461,16 @@ export class CubismLive2DAdapter implements Live2DAdapter {
     };
     this.frame = requestAnimationFrame(render);
   }
+
+  private stopRenderLoop(): void {
+    if (this.frame !== null) cancelAnimationFrame(this.frame);
+    this.frame = null;
+    this.previousFrameAt = null;
+  }
+}
+
+function isDocumentHidden(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
 }
 
 export type LumiControllerHandle = {

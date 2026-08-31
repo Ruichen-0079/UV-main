@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "cd ../../apps/web && node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173",
+    "beforeBuildCommand": "node ../../scripts/prepare-cubism-framework.mjs && cd ../../apps/web && node ../../node_modules/typescript/lib/tsc.js -b tsconfig.json && node node_modules/vite/bin/vite.js build"
+  },
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "resources": []
+  }
+}

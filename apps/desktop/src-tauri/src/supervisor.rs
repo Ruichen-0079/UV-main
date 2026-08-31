@@ -136,7 +136,28 @@ pub fn bootstrap_supervisor(
           dev.supervisor_script.to_string_lossy().as_ref(),
           "--repo-root",
           dev.repo_root.to_string_lossy().as_ref(),
+          "--state-directory",
+          root_state_dir.to_string_lossy().as_ref(),
         ]);
+        cmd
+      } else if {
+        let local_tsx = dev.repo_root.join("node_modules").join(".bin").join("tsx");
+        local_tsx.is_file()
+      } {
+        // Prefer the repo-local runtime on Linux/macOS. This keeps desktop
+        // development independent of pnpm's install/build policy and makes
+        // the already-installed workspace dependencies usable as-is.
+        let local_tsx = dev.repo_root.join("node_modules").join(".bin").join("tsx");
+        let mut cmd = Command::new(local_tsx);
+        cmd.args([
+          "--conditions",
+          "development",
+          dev.supervisor_script.to_string_lossy().as_ref(),
+          "--repo-root",
+        ])
+        .arg(&dev.repo_root)
+        .arg("--state-directory")
+        .arg(&root_state_dir);
         cmd
       } else if let Some(pnpm) = which_command("pnpm") {
         let mut cmd = Command::new(pnpm);
@@ -146,7 +167,9 @@ pub fn bootstrap_supervisor(
           dev.supervisor_script.to_string_lossy().as_ref(),
           "--repo-root",
         ])
-        .arg(&dev.repo_root);
+        .arg(&dev.repo_root)
+        .arg("--state-directory")
+        .arg(&root_state_dir);
         cmd
       } else {
         let node = which_command("node")
@@ -156,7 +179,9 @@ pub fn bootstrap_supervisor(
           .arg("tsx")
           .arg(&dev.supervisor_script)
           .arg("--repo-root")
-          .arg(&dev.repo_root);
+          .arg(&dev.repo_root)
+          .arg("--state-directory")
+          .arg(&root_state_dir);
         cmd
       };
       (command, dev.repo_root.clone(), Some(dev.repo_root.clone()))
