@@ -8,6 +8,7 @@ import {
   projectLifecycleGazeToEmbodiedBehavior,
   type EmbodiedBehaviorCanonicalizer
 } from "./embodied-lifecycle-gaze-projection.js";
+import { projectInterruptAcknowledgementToEmbodiedBehavior } from "./embodied-interrupt-reaction-projection.js";
 
 export type BehaviorPolicyEmbodiedShadowOptions<TResult> = {
   readonly controller: BehaviorPolicyControllerOptions;
@@ -45,7 +46,9 @@ export function createBehaviorPolicyControllerWithEmbodiedShadow<TResult>(
     // never spin or retry merely because a shadow consumer rejects or throws.
     lastAttemptedRef = Object.freeze({ ...ref });
 
-    const projection = projectLifecycleGazeToEmbodiedBehavior(active, options.canonicalize);
+    const projection =
+      projectLifecycleGazeToEmbodiedBehavior(active, options.canonicalize) ??
+      projectInterruptAcknowledgementToEmbodiedBehavior(active, options.canonicalize);
     if (projection === null) return;
 
     try {
