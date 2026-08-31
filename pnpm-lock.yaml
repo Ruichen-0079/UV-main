@@ -54,6 +54,9 @@ importers:
       '@companion/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@companion/desktop-supervisor':
+        specifier: workspace:*
+        version: link:../../packages/desktop-supervisor
       '@companion/event-bus':
         specifier: workspace:*
         version: link:../../packages/event-bus

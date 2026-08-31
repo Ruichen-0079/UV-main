@@ -40,6 +40,7 @@ export type SupervisorSnapshot = {
   services: ServiceSnapshot[];
   updatedAt: string;
   postgres?: PostgresDiagnostics | undefined;
+  localAi?: import("./local-ai/types.js").LocalAiCatalogSnapshot | undefined;
 };
 
 export type PostgresMode = "private" | "external";

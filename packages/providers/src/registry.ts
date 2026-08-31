@@ -48,6 +48,7 @@ import { XAIVisionProvider } from "./xai/XAIVisionProvider.js";
 import { DashScopeSTTProvider } from "./alibaba/DashScopeSTTProvider.js";
 import { streamOpenAICompatibleChatCompletion } from "./openai-compatible-stream.js";
 import { GPTSoVITSTTSProvider } from "./local/GPTSoVITSTTSProvider.js";
+import { LocalSTTProvider } from "./local/LocalSTTProvider.js";
 import { createTransportAbort, type TransportAbort } from "./transport-abort.js";
 
 export type ProviderRegistryConfig = {
@@ -112,6 +113,7 @@ export type ProviderRegistryConfig = {
     embeddingDimensions: number;
     ttsModel: string | undefined;
     sttModel: string | undefined;
+    sttBaseUrl: string | undefined;
     visionModel: string | undefined;
   };
   gptSovits: {
@@ -504,7 +506,9 @@ export class ProviderRegistry implements ProviderResolver {
     }
     if (name === "local") {
       return [
-        ...(!this.config.local.baseUrl ? ["LOCAL_MODEL_BASEURL"] : []),
+        ...(capability !== "tts" && capability !== "stt" && !this.config.local.baseUrl
+          ? ["LOCAL_MODEL_BASEURL"]
+          : []),
         ...(capability === "chat" && !this.config.local.chatModel ? ["LOCAL_CHAT_MODEL"] : []),
         ...(capability === "reasoning" && !this.config.local.reasoningModel
           ? ["LOCAL_REASONING_MODEL"]
@@ -819,6 +823,7 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       embeddingDimensions: parsePositiveInteger(env["LOCAL_EMBEDDING_DIMENSIONS"], 1536),
       ttsModel: emptyToUndefined(env["LOCAL_TTS_MODEL"]),
       sttModel: emptyToUndefined(env["LOCAL_STT_MODEL"]),
+      sttBaseUrl: emptyToUndefined(env["LOCAL_STT_BASEURL"] ?? env["YUVI_STT_BASE_URL"]),
       visionModel: emptyToUndefined(env["LOCAL_VISION_MODEL"])
     },
     gptSovits: {
@@ -1051,14 +1056,14 @@ const sttProviderFactories: Record<string, ProviderFactory<STTProvider>> = {
     });
   },
   local(config) {
-    if (!config.local.baseUrl || !config.local.sttModel) {
+    if (!config.local.sttModel) {
       return undefined;
     }
 
-    return new UnimplementedSTTProvider(
-      "local",
-      "Local STT provider is configured, but runtime transcription is not implemented in v1."
-    );
+    return new LocalSTTProvider({
+      baseUrl: config.local.sttBaseUrl ?? "http://127.0.0.1:9876",
+      model: config.local.sttModel
+    });
   }
 };
 
@@ -1308,7 +1313,9 @@ function missingFieldsForConfig(
   }
   if (name === "local") {
     return [
-      ...(capability !== "tts" && !config.local.baseUrl ? ["LOCAL_MODEL_BASEURL"] : []),
+      ...(capability !== "tts" && capability !== "stt" && !config.local.baseUrl
+        ? ["LOCAL_MODEL_BASEURL"]
+        : []),
       ...(capability === "chat" && !config.local.chatModel ? ["LOCAL_CHAT_MODEL"] : []),
       ...(capability === "reasoning" && !config.local.reasoningModel
         ? ["LOCAL_REASONING_MODEL"]

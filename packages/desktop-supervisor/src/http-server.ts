@@ -1,5 +1,6 @@
 import http from "node:http";
 import type { DesktopSupervisor } from "./supervisor.js";
+import { isLocalAiServiceId } from "./local-ai/allowlist.js";
 import type { RuntimeConfigUpdate, ServiceId } from "./types.js";
 import { assertLoopbackHost } from "./config.js";
 
@@ -129,6 +130,30 @@ async function handle(
     if (method === "POST" && url.pathname === "/v1/shutdown") {
       await supervisor.shutdown();
       return sendJson(res, 200, { ok: true });
+    }
+
+    if (method === "GET" && url.pathname === "/v1/local-services") {
+      return sendJson(res, 200, await supervisor.localAi.refreshAll());
+    }
+    const localMatch = url.pathname.match(
+      /^\/v1\/local-services\/([a-z0-9._-]+)\/(start|stop|restart|test)$/
+    );
+    if (method === "POST" && localMatch) {
+      const localId = localMatch[1] ?? "";
+      const action = localMatch[2];
+      if (!isLocalAiServiceId(localId)) {
+        return sendJson(res, 404, { error: "unknown_service" });
+      }
+      if (action === "start") {
+        return sendJson(res, 200, await supervisor.localAi.start(localId));
+      }
+      if (action === "stop") {
+        return sendJson(res, 200, await supervisor.localAi.stop(localId));
+      }
+      if (action === "restart") {
+        return sendJson(res, 200, await supervisor.localAi.restart(localId));
+      }
+      return sendJson(res, 200, await supervisor.localAi.test(localId));
     }
 
     const serviceMatch = url.pathname.match(/^\/v1\/services\/([a-z_]+)\/(restart|stop|start)$/);

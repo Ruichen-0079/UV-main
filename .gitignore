@@ -18,3 +18,8 @@ apps/desktop/src-tauri/generated/
 # Environment files
 .env.*
 !.env.example
+
+# Local model weights and STT venv — never commit.
+*.onnx
+*.gguf
+services/local-stt/.venv/

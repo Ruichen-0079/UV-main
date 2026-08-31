@@ -88,3 +88,4 @@ export { XAITTSProvider } from "./xai/XAITTSProvider.js";
 export { XAIVisionProvider } from "./xai/XAIVisionProvider.js";
 export { DashScopeSTTProvider } from "./alibaba/DashScopeSTTProvider.js";
 export { GPTSoVITSTTSProvider } from "./local/GPTSoVITSTTSProvider.js";
+export { LocalSTTProvider } from "./local/LocalSTTProvider.js";

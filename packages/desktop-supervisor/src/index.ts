@@ -126,3 +126,27 @@ export {
   CONTROL_TOKEN_HEADER
 } from "./http-server.js";
 export type { ControlEndpointFile } from "./types.js";
+export {
+  ALLOWLISTED_SYSTEMD_UNITS,
+  DEFAULT_START_POLICY,
+  LOCAL_AI_SERVICE_IDS,
+  LocalAiServiceManager,
+  assertAllowlistedUnit,
+  defaultSttThreadCount,
+  isLocalAiServiceId,
+  loadLocalAiManagerConfig,
+  systemdUnitFor
+} from "./local-ai/index.js";
+export type {
+  LocalAiActionResult,
+  LocalAiCatalogSnapshot,
+  LocalAiLifecycle,
+  LocalAiManagerConfig,
+  LocalAiOwnershipKind,
+  LocalAiServiceId,
+  LocalAiServiceSnapshot,
+  LocalAiStartPolicy,
+  LocalAiTestResult,
+  SpeakerIdentifyResult,
+  SpeakerProfilePublic
+} from "./local-ai/index.js";

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "device": "cpu",
+  "notes": "Weights live under ~/.local/share/yuvi/models/stt and are not committed. Install with: node scripts/download-local-stt-models.mjs",
+  "models": [
+    {
+      "id": "sense-voice-zh-en-ja-ko-yue-2024-07-17-int8",
+      "role": "asr",
+      "file": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2",
+      "upstream": "https://github.com/FunAudioLLM/SenseVoice",
+      "license": "Apache-2.0",
+      "languages": ["zh", "en", "ja", "ko", "yue"],
+      "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+      "bytes": 239233841
+    },
+    {
+      "id": "3dspeaker-eres2net-base-sv-zh-cn-16k",
+      "role": "speaker-embedding",
+      "file": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+      "upstream": "https://github.com/alibaba-damo-academy/3D-Speaker",
+      "license": "Apache-2.0",
+      "sha256": "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+      "bytes": 39593761
+    },
+    {
+      "id": "pyannote-segmentation-3-0",
+      "role": "diarization-segmentation",
+      "file": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+      "upstream": "https://huggingface.co/pyannote/segmentation-3.0",
+      "license": "MIT",
+      "sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+      "bytes": 5992913
+    }
+  ]
+}

@@ -15,6 +15,7 @@
     { "path": "../../packages/providers" },
     { "path": "../../packages/character-harness" },
     { "path": "../../packages/cognition" },
-    { "path": "../../packages/core" }
+    { "path": "../../packages/core" },
+    { "path": "../../packages/desktop-supervisor" }
   ]
 }

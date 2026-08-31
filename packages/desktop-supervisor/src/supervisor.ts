@@ -48,6 +48,8 @@ import {
   requestGracefulStop,
   spawnManagedProcess
 } from "./process-windows.js";
+import { LocalAiServiceManager } from "./local-ai/manager.js";
+import { loadLocalAiManagerConfig } from "./local-ai/config.js";
 import type {
   ManagedServiceSpec,
   ProcessMetadata,
@@ -172,6 +174,7 @@ export class DesktopSupervisor {
   private readonly lifecycleStartedAt = process.hrtime.bigint();
   private lifecycleSequence = 0;
   private readonly hooks: SupervisorHooks;
+  readonly localAi: LocalAiServiceManager;
 
   constructor(
     private config: SupervisorConfig,
@@ -206,6 +209,17 @@ export class DesktopSupervisor {
         op: null
       });
     }
+    this.localAi = new LocalAiServiceManager(
+      loadLocalAiManagerConfig({
+        repositoryRoot: config.repositoryRoot,
+        stateDirectory: path.join(config.stateDirectory, "local-ai"),
+        instanceId: config.instanceId,
+        ownershipToken: config.ownershipToken,
+        env: this.baseEnv,
+        ttsWrapperUrl: config.ttsWrapperUrl,
+        ttsUpstreamUrl: config.ttsUpstreamUrl
+      })
+    );
   }
 
   getConfig(): SupervisorConfig {
@@ -371,7 +385,8 @@ export class DesktopSupervisor {
         distributionError: this.config.postgresDistributionError ?? null,
         ownership: postgres?.ownership ?? "none",
         status: postgres?.status ?? "stopped"
-      })
+      }),
+      localAi: this.localAi.snapshot()
     };
   }
 
@@ -419,6 +434,8 @@ export class DesktopSupervisor {
       await this.refreshService("tts_upstream");
       await this.refreshService("tts_wrapper");
     }
+
+    await this.localAi.refreshAll();
 
     this.emit();
     return this.snapshot();
@@ -669,6 +686,7 @@ export class DesktopSupervisor {
         await this.stopOwned(svc);
       }
     }
+    await this.localAi.shutdown();
     this.appendExitLog("shutdown complete");
     this.emit();
   }
