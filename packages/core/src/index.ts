@@ -68,6 +68,14 @@ export {
   type RuntimeEmbodiedEffectFenceDecision
 } from "./runtime-embodied-effect-fence.js";
 
+export {
+  RUNTIME_EMBODIED_EFFECT_ADMISSION_7I_VERSION,
+  RUNTIME_EMBODIED_EFFECT_ADMISSION_REJECTION_REASONS,
+  admitRuntimeEmbodiedEffect,
+  type RuntimeEmbodiedEffectAdmissionDecision,
+  type RuntimeEmbodiedEffectAdmissionRejectionReason
+} from "./runtime-embodied-effect-admission.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
