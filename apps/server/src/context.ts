@@ -9,13 +9,18 @@ import {
   createMemoryRepositoryFromEnv,
   createConversationRepositoryFromEnv,
   createFinalizedIngestionRepositoryFromEnv,
+  createRecentEpisodeStoreFromEnv,
   FinalizedIngestionService,
   MemoryIngestionCoordinator,
+  InMemoryDreamJobStore,
+  PostgresDreamJobStore,
   parseMemoryRepositoryEnv,
   type ConversationRepository,
+  type DreamJobStore,
   type FinalizedIngestionRepository,
   type MemoryProvider,
-  type MemoryRepository
+  type MemoryRepository,
+  type RecentEpisodeStore
 } from "@companion/memory";
 import { parseRuntimeConfig } from "@companion/config";
 import { PromptBuilder } from "@companion/prompt-builder";
@@ -119,6 +124,11 @@ export async function createAppContext(
     throw error;
   }
   const promptBuilder = new PromptBuilder();
+  const recentEpisodeStore: RecentEpisodeStore = createRecentEpisodeStoreFromEnv();
+  const dreamJobStore: DreamJobStore =
+    parseMemoryRepositoryEnv().kind === "postgres" && process.env["DATABASE_URL"]
+      ? new PostgresDreamJobStore(process.env["DATABASE_URL"])
+      : new InMemoryDreamJobStore();
   const finalizedIngestion = new FinalizedIngestionService(finalizedIngestionRepository!);
   const ruleBasedExtractor = new RuleBasedMemoryExtractor();
   const runtimeLogger = createRuntimeLogger(logger);
@@ -194,6 +204,7 @@ export async function createAppContext(
     memory: MemoryService,
     directContext = config.directContext
   ): RuntimeOrchestrator {
+    const provider = memory.getMemoryProvider?.();
     return new RuntimeOrchestrator({
       eventBus,
       memory,
@@ -204,6 +215,9 @@ export async function createAppContext(
       memoryIngestionCoordinator: coordinator,
       memoryRepository: activeMemoryRepository,
       directContext,
+      recentEpisodeStore,
+      dreamJobStore,
+      ...(provider ? { dreamProvider: provider } : {}),
       logger: runtimeLogger
     });
   }

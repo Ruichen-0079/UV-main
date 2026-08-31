@@ -267,3 +267,97 @@ export {
   runPostgresMigrations,
   type SqlMigration
 } from "./migrations.js";
+export {
+  DEFAULT_MEMORY_HIERARCHY_BUDGETS,
+  MEMORY_HIERARCHY_VERSION,
+  MemoryHierarchyLayers,
+  normalizeMemoryHierarchyBudgets,
+  type MemoryHierarchyBudgets,
+  type MemoryHierarchyLayer
+} from "./hierarchy.js";
+export {
+  assembleRecentEpisodes,
+  ASSISTANT_CONTEXT_DISCLAIMER,
+  episodeSearchCorpus,
+  formatRecentEpisodeForPrompt,
+  rankRecentEpisodesForQuery,
+  sourceTurnIdsOverlap,
+  RECENT_EPISODE_SOURCE,
+  RecentEpisodeStatuses,
+  TemporalConfidenceLevels,
+  type RecentEpisode,
+  type RecentEpisodeAssembleInput,
+  type RecentEpisodeStatus,
+  type TemporalConfidence
+} from "./recent-episode.js";
+export {
+  createRecentEpisodeStoreFromEnv,
+  InMemoryRecentEpisodeStore,
+  PostgresRecentEpisodeStore,
+  type RecentEpisodeListQuery,
+  type RecentEpisodeStore
+} from "./recent-episode-store.js";
+export {
+  activateAssociativeMemories,
+  ASSOCIATIVE_RECALL_VERSION,
+  type AssociativeRecallInput,
+  type AssociativeRecallItem,
+  type AssociativeRecallResult
+} from "./associative-recall.js";
+export {
+  DEFAULT_DREAM_LEASE_MS,
+  DREAM_CONSOLIDATION_VERSION,
+  DreamConsolidationEngine,
+  DreamJobStatuses,
+  DreamTriggerKinds,
+  findRecurrenceCluster,
+  InMemoryDreamJobStore,
+  PostgresDreamJobStore,
+  type DreamConsiderInput,
+  type DreamConsiderResult,
+  type DreamJob,
+  type DreamJobStatus,
+  type DreamJobStore,
+  type DreamTriggerKind,
+  type DreamWriter
+} from "./dream-consolidation.js";
+export {
+  DREAM_DELIVERY_KEY_PREFIX,
+  DREAM_SEMANTIC_DELIVERY_AUTHORITY,
+  stampDreamWriteEvent
+} from "./dream-delivery.js";
+export {
+  compressHierarchicalContext,
+  CONTEXT_COMPRESSION_RUNTIME_STATUS,
+  CONTEXT_COMPRESSION_VERSION,
+  ProtectedPromptSectionNames,
+  type ContextCompressionInput,
+  type ContextCompressionMetrics,
+  type ContextCompressionResult,
+  type HierarchicalContextSection
+} from "./context-compression.js";
+export {
+  ageBand,
+  projectThinTemporalContext,
+  TemporalAgeBands,
+  THIN_TEMPORAL_PROJECTION_VERSION,
+  type TemporalAgeBand,
+  type ThinTemporalProjection,
+  type ThinTemporalProjectionInput
+} from "./temporal-projection.js";
+export {
+  assembleMemoryVNextContext,
+  defaultMemoryVNextBudgets,
+  MEMORY_VNEXT_VERSION,
+  memoryVNextMessageWindow,
+  type MemoryVNextAssembleInput,
+  type MemoryVNextAssembly,
+  type MemoryVNextCharacterProjection
+} from "./memory-vnext.js";
+export {
+  compactMemoryText,
+  hasTechnicalExactOverlap,
+  jaccardSimilarity,
+  redactUnsafeMemoryText,
+  tokenizeMemoryText
+} from "./memory-vnext-text.js";

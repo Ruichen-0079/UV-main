@@ -391,10 +391,26 @@ Prompt Preview reports Direct Context budget metadata: `directContextEnabled`, `
 ...
 </DirectContext>
 
+<RecentEpisodicMemory>
+...
+</RecentEpisodicMemory>
+
 <RelevantMemory>
 ...
 </RelevantMemory>
 ```
+
+Memory vNext adds a Yuvi-native hierarchical context on top of this pipeline
+without replacing MemoryProvider or MemoryEvent authority. `DirectContext` is
+L0 working context. `RecentEpisodicMemory` is the L1 hours/days episode
+ledger. `RelevantMemory` remains L2 durable evidence, optionally plus bounded
+associative recalls (context only, not a speak gate). Dream delivery uses
+`MemoryProvider.writeEventIdempotent` and `reconcileEvent`. Idle Dream is
+deferred / not Runtime-active. Structured compression exists as a primitive
+and is not applied to the live Runtime/Character prompt. Thin temporal
+projection and remaining boundaries are documented in
+[Memory vNext](./memory-vnext.md). Continuity and the full Temporal substrate
+remain planned and are not implemented here.
 
 ## Lightweight Supersession And Contradiction Suggestions
 

@@ -99,6 +99,7 @@ describe("PromptBuilder", () => {
     expect(first.prompt).toContain("The user is planning a reading project.");
     expect(first.prompt).not.toContain("<CurrentTime>");
     expect(first.prompt).not.toContain("<CurrentAffect>");
+    expect(first.prompt).not.toContain("<RecentEpisodicMemory>");
     expect(first.prompt).not.toContain("<CurrentSituation>");
     expect(first.prompt).not.toContain("<Tools>");
     expect(first.messages).toHaveLength(1);
@@ -122,6 +123,7 @@ describe("PromptBuilder", () => {
       "CurrentTime",
       "CurrentAffect",
       "DirectContext",
+      "RecentEpisodicMemory",
       "RelevantMemory",
       "CurrentSituation",
       "Tools",
@@ -159,6 +161,9 @@ describe("PromptBuilder", () => {
       output.prompt.indexOf("<DirectContext>")
     );
     expect(output.prompt.indexOf("<DirectContext>")).toBeLessThan(
+      output.prompt.indexOf("<RecentEpisodicMemory>")
+    );
+    expect(output.prompt.indexOf("<RecentEpisodicMemory>")).toBeLessThan(
       output.prompt.indexOf("<RelevantMemory>")
     );
   });
@@ -231,5 +236,36 @@ describe("PromptBuilder", () => {
       "- [2026-05-23 morning][episodic][recall][active] 用户吃了芒果蛋糕。"
     );
     expect(relevantMemory?.content).not.toContain("今早");
+  });
+
+  it("keeps L0 DirectContext, L1 recent episodes, and L2 relevant memory distinct", () => {
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "You are Companion.",
+      currentTime: {
+        isoTimestamp: "2026-08-31T10:00:00.000Z",
+        timezone: "Asia/Shanghai",
+        localDate: "2026-08-31",
+        elapsedSinceLastInteraction: "16 hours",
+        lastInteractionAgeBand: "yesterday"
+      },
+      directContext: "- Previous turn: User: 刚才那个端口还是 6121 吗",
+      recentEpisodicMemory:
+        "- [L1][2026-08-30 15:00] User said: 下午把训练脚本改到 6121 端口。 Task state: 训练 6121.",
+      retrievedMemories: [
+        {
+          content: "用户偏好本地 Character 模型。",
+          associated: true,
+          ageBand: "this-week",
+          importance: 0.8
+        }
+      ],
+      userMessage: "昨天那个训练怎么样了？"
+    });
+
+    expect(output.prompt).toContain("<RecentEpisodicMemory>");
+    expect(output.prompt).toContain("训练脚本改到 6121");
+    expect(output.prompt).toContain("Elapsed since last interaction: 16 hours [yesterday]");
+    expect(output.prompt).toContain("[associated][this-week]");
+    expect(output.sections.map((section) => section.name)).toContain("RecentEpisodicMemory");
   });
 });
