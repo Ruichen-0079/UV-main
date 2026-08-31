@@ -54,7 +54,7 @@ function createHarness(
   };
 }
 
-describe("Phase 7D behavior-policy embodied shadow", () => {
+describe("Phase 7D/7F behavior-policy embodied shadow", () => {
   it("shadows only the already-arbitrated active thinking lifecycle gaze", () => {
     const harness = createHarness();
 
@@ -125,6 +125,43 @@ describe("Phase 7D behavior-policy embodied shadow", () => {
       kind: "gaze",
       reason: "speech-active"
     });
+  });
+
+  it("shadows the already-arbitrated interrupt acknowledgement without changing P5 gaze execution", () => {
+    const harness = createHarness();
+
+    harness.controller.updatePresence(presence("idle"));
+    const interrupted = { ...presence("idle"), transition: "interrupted" as const };
+    harness.controller.updatePresence(interrupted);
+
+    expect(harness.controller.getState().active).toMatchObject({
+      kind: "reaction",
+      reason: "interrupt-acknowledgement",
+      intentId: "shadow-test:0:0:interrupt-acknowledgement"
+    });
+    expect(harness.setGazeTarget).toHaveBeenLastCalledWith(
+      expect.objectContaining({ strength: 0.5 })
+    );
+    expect(harness.canonicalize).toHaveBeenCalledTimes(1);
+    expect(harness.canonicalize).toHaveBeenCalledWith({
+      version: "embodied-behavior-7b.v1",
+      behavior: {
+        version: "embodied-behavior-7a.v1",
+        kind: "EXPRESSION",
+        cause: { kind: "user-interaction", reference: "request-42" },
+        intent: "acknowledge-interrupt"
+      },
+      sourceInstance: {
+        reference: "shadow-test:0:0:interrupt-acknowledgement",
+        createdAtMs: 1000
+      },
+      correlation: { kind: "turn", reference: "request-42" }
+    });
+    expect(harness.observe).toHaveBeenCalledTimes(1);
+
+    harness.controller.updatePresence({ ...interrupted, connectivity: "reconnecting" });
+    expect(harness.canonicalize).toHaveBeenCalledTimes(1);
+    expect(harness.observe).toHaveBeenCalledTimes(1);
   });
 
   it("does not project a lower-priority lifecycle candidate that never becomes active", () => {
