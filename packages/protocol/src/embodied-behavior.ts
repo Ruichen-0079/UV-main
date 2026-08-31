@@ -20,7 +20,7 @@ export const EmbodiedBehaviorCauseKindSchema = z.enum([
 
 export type EmbodiedBehaviorCauseKind = z.infer<typeof EmbodiedBehaviorCauseKindSchema>;
 
-const OpaqueCausalReferenceSchema = z
+export const EmbodiedOpaqueReferenceSchema = z
   .string()
   .min(1)
   .max(200)
@@ -30,7 +30,7 @@ export const EmbodiedBehaviorCauseSchema = z
   .object({
     kind: EmbodiedBehaviorCauseKindSchema,
     /** Opaque lookup/audit identity only; never raw private context or payload text. */
-    reference: OpaqueCausalReferenceSchema
+    reference: EmbodiedOpaqueReferenceSchema
   })
   .strict();
 
