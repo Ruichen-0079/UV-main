@@ -27,6 +27,7 @@ type UnknownObject = Record<string, unknown> & {
   problem?: unknown;
   kind?: unknown;
   focus?: unknown;
+  reasoning?: unknown;
   answer?: unknown;
   finishReason?: unknown;
   status?: unknown;
@@ -55,11 +56,17 @@ export function createCognitionReasoningInput(input: unknown): ReasoningInput {
  * Sole phase-6 normalization from the existing provider-normalized reasoning
  * output into the Character-facing Normalized Cognition Result.
  *
- * Raw reasoning, provider identity/metadata, token accounting, request IDs,
- * debug payloads, and fallback traces are deliberately not projected.
+ * The existing ReasoningProvider boundary must already have discarded raw
+ * reasoning. Provider identity/metadata, token accounting, request IDs, debug
+ * payloads, and fallback traces are deliberately not projected.
  */
 export function normalizeCognitionReasoningOutput(input: unknown): NormalizedCognitionResult {
   const output = expectObject(input, "Cognition reasoning output");
+  if (output.reasoning !== "") {
+    throw new Error(
+      "Cognition reasoning output must be provider-normalized with an empty reasoning field."
+    );
+  }
   const finishReason = normalizeFinishReason(output.finishReason);
 
   switch (finishReason) {
