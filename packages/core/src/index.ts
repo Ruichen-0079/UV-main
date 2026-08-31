@@ -105,6 +105,13 @@ export {
   type RuntimeEmbodiedEffectLifecycleEventPayload
 } from "./runtime-embodied-effect-event.js";
 
+export {
+  RUNTIME_EMBODIED_EFFECT_STATE_COMMIT_7O_VERSION,
+  commitRuntimeEmbodiedEffectState,
+  type RuntimeEmbodiedEffectSnapshot,
+  type RuntimeEmbodiedEffectStateCommitDecision
+} from "./runtime-embodied-effect-state-commit.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
