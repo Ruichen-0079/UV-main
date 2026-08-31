@@ -39,6 +39,14 @@ export type {
 
 export { AssistantTurnConflictError, ConversationPersistenceError } from "./runtime-errors.js";
 
+export {
+  RUNTIME_COGNITION_FAILURE_STATUSES,
+  executeRuntimeCognitionOnce,
+  type RuntimeCognitionBoundary,
+  type RuntimeCognitionFailureStatus,
+  type RuntimeCognitionOneShotInput
+} from "./runtime-cognition-one-shot.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
