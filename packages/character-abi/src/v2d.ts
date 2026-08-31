@@ -2,7 +2,6 @@ import {
   CHARACTER_ABI_2A_VERSION,
   createCharacterAbiContext,
   createNormalizedCognitionResult,
-  type CharacterAbiEpistemicState,
   type CharacterAbiSectionKind,
   type CharacterAbiSemanticSection,
   type NormalizedCognitionResult
@@ -128,5 +127,3 @@ function assertAllowedKeys(
     throw new Error(`${field} contains unknown field: ${unknown.sort().join(", ")}.`);
   }
 }
-
-export type { CharacterAbiEpistemicState };
