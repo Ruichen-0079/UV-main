@@ -102,101 +102,54 @@ export class LocalAiServiceManager {
       return this.actionFrom(id, false, "Supervisor is shutting down.");
     }
     if (id === "alice") {
-      const upstream = await this.start("alice.upstream");
-      if (!upstream.ok) return this.actionFrom("alice", false, upstream.error);
-      const wrapper = await this.start("alice.wrapper");
-      await this.refresh("alice");
-      return this.actionFrom("alice", wrapper.ok, wrapper.error);
+      return this.queue("alice", async () => {
+        const upstream = await this.queue("alice.upstream", () => this.startWork("alice.upstream"));
+        if (!upstream.ok) return this.actionFrom("alice", false, upstream.error);
+        const wrapper = await this.queue("alice.wrapper", () => this.startWork("alice.wrapper"));
+        await this.refresh("alice");
+        return this.actionFrom("alice", wrapper.ok, wrapper.error);
+      });
     }
-    return this.queue(id, async () => {
-      const svc = this.require(id);
-      await this.refresh(id);
-      if (svc.snapshot.lifecycle === "READY" || svc.snapshot.lifecycle === "BUSY") {
-        return this.actionFrom(id, true);
-      }
-      if (!svc.snapshot.canStart) {
-        return this.actionFrom(id, false, "Start is not allowed for this ownership.");
-      }
-      svc.snapshot.lifecycle = "STARTING";
-      svc.snapshot.summary = "Starting…";
-      if (id === "stt") {
-        const started = await this.startManagedStt(svc);
-        await this.refresh(id);
-        return this.actionFrom(id, started.ok, started.error);
-      }
-      const unit = systemdUnitFor(id);
-      if (!unit) {
-        return this.actionFrom(id, false, "No managed start path for this service.");
-      }
-      const result = controlAllowlistedUnit(unit, "start");
-      await this.refresh(id);
-      return this.actionFrom(id, result.ok, result.ok ? undefined : result.message);
-    });
+    return this.queueFamily(id, () => this.startWork(id));
   }
 
   async stop(id: LocalAiServiceId): Promise<LocalAiActionResult> {
     if (id === "alice") {
-      const wrapper = await this.stop("alice.wrapper");
-      const upstream = await this.stop("alice.upstream");
-      await this.refresh("alice");
-      const ok = wrapper.ok && upstream.ok;
-      return this.actionFrom("alice", ok, ok ? undefined : wrapper.error ?? upstream.error);
+      return this.queue("alice", async () => {
+        const wrapper = await this.queue("alice.wrapper", () => this.stopWork("alice.wrapper"));
+        const upstream = await this.queue("alice.upstream", () => this.stopWork("alice.upstream"));
+        await this.refresh("alice");
+        const ok = wrapper.ok && upstream.ok;
+        return this.actionFrom("alice", ok, ok ? undefined : wrapper.error ?? upstream.error);
+      });
     }
-    return this.queue(id, async () => {
-      await this.refresh(id);
-      const svc = this.require(id);
-      if (
-        svc.snapshot.lifecycle === "STOPPED" &&
-        (svc.snapshot.ownership === "managed-process" || svc.snapshot.ownership === "systemd-user")
-      ) {
-        return this.actionFrom(id, true);
-      }
-      if (!svc.snapshot.canStop) {
-        return this.actionFrom(id, false, "Refusing to stop a service that is not owned by YUVI.");
-      }
-      if (id === "stt") {
-        await this.stopManagedStt(svc);
-        await this.refresh(id);
-        return this.actionFrom(id, true);
-      }
-      const unit = systemdUnitFor(id);
-      if (!unit) {
-        return this.actionFrom(id, false, "No stop path for this service.");
-      }
-      const result = controlAllowlistedUnit(unit, "stop");
-      await this.refresh(id);
-      return this.actionFrom(id, result.ok, result.ok ? undefined : result.message);
-    });
+    return this.queueFamily(id, () => this.stopWork(id));
   }
 
   async restart(id: LocalAiServiceId): Promise<LocalAiActionResult> {
     if (id === "alice") {
-      const stopped = await this.stop("alice");
-      if (!stopped.ok && stopped.service.lifecycle !== "STOPPED") {
-        return stopped;
-      }
-      return this.start("alice");
+      return this.queue("alice", async () => {
+        const wrapperStop = await this.queue("alice.wrapper", () => this.stopWork("alice.wrapper"));
+        const upstreamStop = await this.queue("alice.upstream", () => this.stopWork("alice.upstream"));
+        if (!wrapperStop.ok && wrapperStop.service.lifecycle !== "STOPPED") {
+          await this.refresh("alice");
+          return this.actionFrom("alice", false, wrapperStop.error);
+        }
+        if (!upstreamStop.ok && upstreamStop.service.lifecycle !== "STOPPED") {
+          await this.refresh("alice");
+          return this.actionFrom("alice", false, upstreamStop.error);
+        }
+        const upstream = await this.queue("alice.upstream", () => this.startWork("alice.upstream"));
+        if (!upstream.ok) {
+          await this.refresh("alice");
+          return this.actionFrom("alice", false, upstream.error);
+        }
+        const wrapper = await this.queue("alice.wrapper", () => this.startWork("alice.wrapper"));
+        await this.refresh("alice");
+        return this.actionFrom("alice", wrapper.ok, wrapper.error);
+      });
     }
-    return this.queue(id, async () => {
-      await this.refresh(id);
-      const svc = this.require(id);
-      if (!svc.snapshot.canRestart) {
-        return this.actionFrom(id, false, "Restart is not allowed for this ownership.");
-      }
-      if (id === "stt") {
-        await this.stopManagedStt(svc);
-        const started = await this.startManagedStt(svc);
-        await this.refresh(id);
-        return this.actionFrom(id, started.ok, started.error);
-      }
-      const unit = systemdUnitFor(id);
-      if (!unit) {
-        return this.actionFrom(id, false, "No restart path for this service.");
-      }
-      const result = controlAllowlistedUnit(unit, "restart");
-      await this.refresh(id);
-      return this.actionFrom(id, result.ok, result.ok ? undefined : result.message);
-    });
+    return this.queueFamily(id, () => this.restartWork(id));
   }
 
   async test(id: LocalAiServiceId): Promise<LocalAiTestResult> {
@@ -318,10 +271,7 @@ export class LocalAiServiceManager {
     if (!probe.ok || !probe.body || typeof probe.body !== "object") {
       throw new Error(probe.message);
     }
-    const body = { ...(probe.body as Record<string, unknown>) };
-    delete body["embedding"];
-    delete body["rawEmbedding"];
-    return body;
+    return redactSttMeta(probe.body);
   }
 
   async shutdown(): Promise<void> {
@@ -907,22 +857,111 @@ export class LocalAiServiceManager {
     return { ok, service: this.require(id).snapshot, error };
   }
 
-  private async queue<T>(id: LocalAiServiceId, fn: () => Promise<T>): Promise<T> {
+  private async startWork(id: Exclude<LocalAiServiceId, "alice">): Promise<LocalAiActionResult> {
     const svc = this.require(id);
-    const previous = svc.op;
-    let release: () => void = () => undefined;
-    svc.op = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    if (previous) await previous.catch(() => undefined);
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (svc.op && svc.op === svc.op) {
-        // keep last op slot
-      }
+    await this.refresh(id);
+    if (svc.snapshot.lifecycle === "READY" || svc.snapshot.lifecycle === "BUSY") {
+      return this.actionFrom(id, true);
     }
+    if (!svc.snapshot.canStart) {
+      return this.actionFrom(id, false, "Start is not allowed for this ownership.");
+    }
+    svc.snapshot.lifecycle = "STARTING";
+    svc.snapshot.summary = "Starting…";
+    if (id === "stt") {
+      const started = await this.startManagedStt(svc);
+      await this.refresh(id);
+      return this.actionFrom(id, started.ok, started.error);
+    }
+    const unit = systemdUnitFor(id);
+    if (!unit) {
+      return this.actionFrom(id, false, "No managed start path for this service.");
+    }
+    const result = controlAllowlistedUnit(unit, "start");
+    await this.refresh(id);
+    return this.actionFrom(id, result.ok, result.ok ? undefined : result.message);
+  }
+
+  private async stopWork(id: Exclude<LocalAiServiceId, "alice">): Promise<LocalAiActionResult> {
+    await this.refresh(id);
+    const svc = this.require(id);
+    if (
+      svc.snapshot.lifecycle === "STOPPED" &&
+      (svc.snapshot.ownership === "managed-process" || svc.snapshot.ownership === "systemd-user")
+    ) {
+      return this.actionFrom(id, true);
+    }
+    if (!svc.snapshot.canStop) {
+      return this.actionFrom(id, false, "Refusing to stop a service that is not owned by YUVI.");
+    }
+    if (id === "stt") {
+      await this.stopManagedStt(svc);
+      await this.refresh(id);
+      return this.actionFrom(id, true);
+    }
+    const unit = systemdUnitFor(id);
+    if (!unit) {
+      return this.actionFrom(id, false, "No stop path for this service.");
+    }
+    const result = controlAllowlistedUnit(unit, "stop");
+    await this.refresh(id);
+    return this.actionFrom(id, result.ok, result.ok ? undefined : result.message);
+  }
+
+  private async restartWork(id: Exclude<LocalAiServiceId, "alice">): Promise<LocalAiActionResult> {
+    await this.refresh(id);
+    const svc = this.require(id);
+    if (!svc.snapshot.canRestart) {
+      return this.actionFrom(id, false, "Restart is not allowed for this ownership.");
+    }
+    if (id === "stt") {
+      await this.stopManagedStt(svc);
+      const started = await this.startManagedStt(svc);
+      await this.refresh(id);
+      return this.actionFrom(id, started.ok, started.error);
+    }
+    const unit = systemdUnitFor(id);
+    if (!unit) {
+      return this.actionFrom(id, false, "No restart path for this service.");
+    }
+    const result = controlAllowlistedUnit(unit, "restart");
+    await this.refresh(id);
+    return this.actionFrom(id, result.ok, result.ok ? undefined : result.message);
+  }
+
+  private familyId(id: LocalAiServiceId): LocalAiServiceId {
+    if (id === "alice" || id === "alice.upstream" || id === "alice.wrapper") return "alice";
+    return id;
+  }
+
+  /**
+   * Serialize start/stop/restart. Alice and its children share one family
+   * lock so a logical Alice op cannot interleave with a child op.
+   */
+  private async queueFamily<T>(id: LocalAiServiceId, work: () => Promise<T>): Promise<T> {
+    const family = this.familyId(id);
+    if (family === id) return this.queue(id, work);
+    return this.queue(family, () => this.queue(id, work));
+  }
+
+  /**
+   * Per-service FIFO matching DesktopSupervisor: chain onto the previous
+   * op promise. The latest waiter owns `svc.op`; completed ops are not
+   * compared or kept alive by identity checks.
+   */
+  private async queue<T>(id: LocalAiServiceId, work: () => Promise<T>): Promise<T> {
+    const svc = this.require(id);
+    const previous = svc.op ?? Promise.resolve();
+    let result!: T;
+    const next = previous.catch(() => undefined).then(async () => {
+      result = await work();
+    });
+    svc.op = next.then(
+      () => undefined,
+      () => undefined
+    );
+    await next;
+    return result;
   }
 }
 

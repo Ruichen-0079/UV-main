@@ -16,3 +16,11 @@ node scripts/download-local-stt-models.mjs
 
 Default bind: `127.0.0.1:9876`. Threads cap at `min(4, nproc/4)`.
 `CUDA_VISIBLE_DEVICES` is forced empty.
+
+Speaker profiles (`YUVI_STT_SPEAKER_DIR`, default `<model-dir>/speakers`):
+- `speakers.json` — metadata only, file mode `0600`
+- `speakers.npz` — raw embeddings, file mode `0600`
+
+The sidecar reloads both files on start. HTTP JSON never includes embedding
+vectors; delete removes the metadata row and the vector. Identify is
+fail-closed: cosine score below threshold returns `UNKNOWN`.

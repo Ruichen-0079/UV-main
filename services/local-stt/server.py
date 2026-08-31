@@ -105,6 +105,8 @@ def _resample(samples: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
 
 
 class SpeakerStore:
+    """Local speaker profiles: speakers.json metadata + speakers.npz vectors (0600)."""
+
     def __init__(self, directory: Path, dim: int, threshold: float) -> None:
         self.directory = directory
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -141,7 +143,10 @@ class SpeakerStore:
         os.replace(tmp_meta, self.meta_path)
         os.chmod(self.meta_path, 0o600)
         tmp_vec = self.vec_path.with_suffix(".tmp.npz")
-        np.savez(tmp_vec, **{key: value for key, value in self.vectors.items()})
+        if self.vectors:
+            np.savez(tmp_vec, **{key: value for key, value in self.vectors.items()})
+        else:
+            np.savez(tmp_vec)
         os.replace(tmp_vec, self.vec_path)
         os.chmod(self.vec_path, 0o600)
 
@@ -369,6 +374,20 @@ class SttEngine:
         return result
 
 
+def _public_json(value: Any) -> Any:
+    """Drop raw embedding fields before any HTTP or log serialization."""
+
+    if isinstance(value, dict):
+        return {
+            key: _public_json(item)
+            for key, item in value.items()
+            if key not in {"embedding", "rawEmbedding", "embeddings"}
+        }
+    if isinstance(value, list):
+        return [_public_json(item) for item in value]
+    return value
+
+
 ENGINE: SttEngine | None = None
 
 
@@ -379,7 +398,7 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def _json(self, status: int, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(_public_json(payload), ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("content-type", "application/json; charset=utf-8")
         self.send_header("content-length", str(len(body)))

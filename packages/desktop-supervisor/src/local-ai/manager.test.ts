@@ -92,6 +92,68 @@ describe("LocalAiServiceManager", () => {
     expect(stopped.ok).toBe(false);
   });
 
+  it("strips raw embeddings from speaker list, identify, and transcribe", async () => {
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      if (req.url === "/speakers" && req.method === "GET") {
+        res.end(
+          JSON.stringify({
+            speakers: [
+              {
+                speakerId: "alice-user",
+                label: "Alice",
+                enrolledAt: "2026-09-01T00:00:00Z",
+                embedding: [0.11, 0.22, 0.33]
+              }
+            ]
+          })
+        );
+        return;
+      }
+      if (req.url === "/identify") {
+        res.end(
+          JSON.stringify({
+            identity: "KNOWN",
+            speakerId: "alice-user",
+            label: "Alice",
+            score: 0.91,
+            threshold: 0.55,
+            embedding: [0.11, 0.22]
+          })
+        );
+        return;
+      }
+      res.end(
+        JSON.stringify({
+          text: "hello",
+          embedding: [9.9],
+          rawEmbedding: [8.8],
+          embeddings: [[7.7]]
+        })
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    servers.push(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected tcp");
+    const manager = new LocalAiServiceManager(
+      cfg({ sttUrl: `http://127.0.0.1:${address.port}` })
+    );
+    const listed = await manager.listSpeakers();
+    const identified = await manager.identifySpeaker({ audioBase64: "AAAA" });
+    const transcribed = await manager.transcribe({ audioBase64: "AAAA" });
+    const dumped = JSON.stringify({ listed, identified, transcribed });
+    expect(listed).toEqual([
+      { speakerId: "alice-user", label: "Alice", enrolledAt: "2026-09-01T00:00:00Z" }
+    ]);
+    expect(identified.identity).toBe("KNOWN");
+    expect(transcribed["text"]).toBe("hello");
+    expect(dumped).not.toContain("0.11");
+    expect(dumped).not.toContain("9.9");
+    expect(dumped).not.toContain("8.8");
+    expect(dumped).not.toContain("embedding");
+  });
+
   it("does not assign Character or Cognition roles in LLM discovery metadata", async () => {
     const server = http.createServer((req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
