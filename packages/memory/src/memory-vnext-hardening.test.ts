@@ -319,6 +319,156 @@ describe("Memory vNext adversarial hardening", () => {
   it("classifies structured compression as a primitive that is not runtime-active", () => {
     expect(CONTEXT_COMPRESSION_RUNTIME_STATUS).toBe("IMPLEMENTED_PRIMITIVE_NOT_RUNTIME_ACTIVE");
   });
+
+  it("does not enqueue idle Dream unless idleMs is explicitly supplied", async () => {
+    const store = new InMemoryRecentEpisodeStore();
+    const jobs = new InMemoryDreamJobStore();
+    const engine = new DreamConsolidationEngine(jobs, store);
+    const episode = assembleRecentEpisodes({
+      messages: [
+        message("1", "user", "我喜欢蓝色。", "2026-08-31T08:00:00.000Z"),
+        message("2", "assistant", "好。", "2026-08-31T08:00:01.000Z")
+      ],
+      now,
+      timezone
+    })[0]!;
+    const withoutIdle = await engine.consider({ episode, existing: [episode], now });
+    expect(withoutIdle.triggered).toBe(false);
+    expect(withoutIdle.skippedReason).toBe("no-trigger");
+    const withIdle = await engine.consider({
+      episode,
+      existing: [episode],
+      now,
+      idleMs: 31 * 60 * 1000
+    });
+    expect(withIdle.triggered).toBe(true);
+    expect(withIdle.triggerKind).toBe("idle");
+  });
+
+  it("proves applied Dream effects via reconcileEvent without rewriting", async () => {
+    const store = new InMemoryRecentEpisodeStore();
+    const jobs = new InMemoryDreamJobStore();
+    let writes = 0;
+    let reconciles = 0;
+    const provider: Pick<MemoryProvider, "writeEventIdempotent" | "reconcileEvent"> = {
+      writeEventIdempotent: async () => {
+        writes += 1;
+        return { status: "rejected", failureClass: "ambiguous", errorCode: "TIMEOUT" };
+      },
+      reconcileEvent: async () => {
+        reconciles += 1;
+        return { status: "applied" };
+      }
+    };
+    const engine = new DreamConsolidationEngine(jobs, store, { provider });
+    const episode = assembleRecentEpisodes({
+      messages: [
+        message("1", "user", "记住：我住在上海。", "2026-08-31T08:00:00.000Z"),
+        message("2", "assistant", "好。", "2026-08-31T08:00:01.000Z")
+      ],
+      now,
+      timezone
+    })[0]!;
+    await store.upsert(episode);
+    const considered = await engine.consider({
+      episode,
+      existing: [episode],
+      now,
+      explicitImportance: true
+    });
+    const first = await engine.runJob(considered.job!, now, "owner-1");
+    expect(first.status).toBe("reconcile_required");
+    expect(writes).toBeGreaterThan(0);
+    const writesAfterAmbiguous = writes;
+    await engine.runDue(now, "owner-2");
+    expect(writes).toBe(writesAfterAmbiguous);
+    const reconciled = await engine.reconcileJob(first, now, "owner-3");
+    expect(reconciled.status).toBe("complete");
+    expect(reconciles).toBeGreaterThan(0);
+    expect(writes).toBe(writesAfterAmbiguous);
+    const stored = await store.getById(episode.id);
+    expect(stored?.status).toBe("consolidated");
+  });
+
+  it("rewrites Dream events only after reconcileEvent proves not_applied", async () => {
+    const store = new InMemoryRecentEpisodeStore();
+    const jobs = new InMemoryDreamJobStore();
+    let writes = 0;
+    const provider: Pick<MemoryProvider, "writeEventIdempotent" | "reconcileEvent"> = {
+      writeEventIdempotent: async () => {
+        writes += 1;
+        if (writes === 1) {
+          return { status: "rejected", failureClass: "ambiguous", errorCode: "TIMEOUT" };
+        }
+        return { status: "written" };
+      },
+      reconcileEvent: async () => ({ status: "not_applied" })
+    };
+    const engine = new DreamConsolidationEngine(jobs, store, { provider });
+    const episode = assembleRecentEpisodes({
+      messages: [
+        message("1", "user", "记住：我用 DeepSeek。", "2026-08-31T08:00:00.000Z"),
+        message("2", "assistant", "好。", "2026-08-31T08:00:01.000Z")
+      ],
+      now,
+      timezone
+    })[0]!;
+    await store.upsert(episode);
+    const considered = await engine.consider({
+      episode,
+      existing: [episode],
+      now,
+      explicitImportance: true
+    });
+    const first = await engine.runJob(considered.job!, now, "owner-1");
+    expect(first.status).toBe("reconcile_required");
+    const writesAfterAmbiguous = writes;
+    const stillDue = await engine.runDue(now, "owner-2");
+    expect(stillDue).toEqual([]);
+    expect(writes).toBe(writesAfterAmbiguous);
+    const reconciled = await engine.reconcileJob(first, now, "owner-3");
+    expect(reconciled.status).toBe("complete");
+    expect(writes).toBeGreaterThan(writesAfterAmbiguous);
+    const stored = await store.getById(episode.id);
+    expect(stored?.status).toBe("consolidated");
+  });
+
+  it("keeps reconcile_required when canonical evidence is still unknown", async () => {
+    const store = new InMemoryRecentEpisodeStore();
+    const jobs = new InMemoryDreamJobStore();
+    let writes = 0;
+    const provider: Pick<MemoryProvider, "writeEventIdempotent" | "reconcileEvent"> = {
+      writeEventIdempotent: async () => {
+        writes += 1;
+        return { status: "rejected", failureClass: "ambiguous", errorCode: "TIMEOUT" };
+      },
+      reconcileEvent: async () => ({ status: "unknown" })
+    };
+    const engine = new DreamConsolidationEngine(jobs, store, { provider });
+    const episode = assembleRecentEpisodes({
+      messages: [
+        message("1", "user", "记住：我喜欢蓝色。", "2026-08-31T08:00:00.000Z"),
+        message("2", "assistant", "好。", "2026-08-31T08:00:01.000Z")
+      ],
+      now,
+      timezone
+    })[0]!;
+    await store.upsert(episode);
+    const considered = await engine.consider({
+      episode,
+      existing: [episode],
+      now,
+      explicitImportance: true
+    });
+    const first = await engine.runJob(considered.job!, now, "owner-1");
+    expect(first.status).toBe("reconcile_required");
+    const writesAfterAmbiguous = writes;
+    const reconciled = await engine.reconcileJob(first, now, "owner-2");
+    expect(reconciled.status).toBe("reconcile_required");
+    expect(writes).toBe(writesAfterAmbiguous);
+    const stored = await store.getById(episode.id);
+    expect(stored?.status).toBe("active");
+  });
 });
 
 describe("Memory vNext postgres atomic claim", () => {
