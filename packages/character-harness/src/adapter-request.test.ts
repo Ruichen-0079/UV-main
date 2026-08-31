@@ -6,9 +6,7 @@ import {
   assembleCharacterHarness2DContext
 } from "./assembly-v2d.js";
 import { CHARACTER_HARNESS_5I_VERSION } from "./cognition-section.js";
-import {
-  assembleCharacterHarnessPostCognitionContext
-} from "./post-cognition-assembly.js";
+import { assembleCharacterHarnessPostCognitionContext } from "./post-cognition-assembly.js";
 import {
   CHARACTER_HARNESS_5L_VERSION,
   createCharacterHarnessAdapterRequest
@@ -160,7 +158,7 @@ describe("Character Harness 5L adapter request seam", () => {
     ).toThrow(/does not match the bounded context/);
   });
 
-  it("fails closed on malformed omitted-section diagnostics", () => {
+  it("fails closed on malformed or contradictory omitted-section diagnostics", () => {
     expect(() =>
       createCharacterHarnessAdapterRequest({
         assembly: {
@@ -188,6 +186,20 @@ describe("Character Harness 5L adapter request seam", () => {
         }
       })
     ).toThrow(/invalid kind/);
+
+    expect(() =>
+      createCharacterHarnessAdapterRequest({
+        assembly: {
+          version: CHARACTER_HARNESS_5J_VERSION,
+          context: {
+            abiVersion: CHARACTER_ABI_2D_VERSION,
+            sections: [{ kind: "IDENTITY", state: "KNOWN", summary: "Yuvi" }]
+          },
+          omittedSectionKinds: ["IDENTITY"],
+          usedSemanticCharacters: 4
+        }
+      })
+    ).toThrow(/cannot be both included and omitted/);
   });
 
   it("keeps provider/model/generation knobs outside the stable request", () => {
