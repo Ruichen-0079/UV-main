@@ -82,6 +82,12 @@ export {
   type RuntimeEmbodiedEffectCommitAuthorization
 } from "./runtime-embodied-effect-commit.js";
 
+export {
+  RUNTIME_EMBODIED_PRESENTATION_OUTCOME_ACCEPTANCE_7L_VERSION,
+  decideRuntimeEmbodiedPresentationOutcomeAcceptance,
+  type RuntimeEmbodiedPresentationOutcomeAcceptanceDecision
+} from "./runtime-embodied-presentation-outcome-acceptance.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
