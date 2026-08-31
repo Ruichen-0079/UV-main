@@ -55,6 +55,13 @@ export {
   type RuntimeCapabilityAdmissionRejectionReason
 } from "./runtime-capability-admission.js";
 
+export {
+  RUNTIME_EMBODIED_EFFECT_IDENTITY_7G_VERSION,
+  allocateRuntimeEmbodiedEffectIdentity,
+  type RuntimeEmbodiedEffectIdAllocator,
+  type RuntimeEmbodiedEffectIdentity
+} from "./runtime-embodied-effect-identity.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
