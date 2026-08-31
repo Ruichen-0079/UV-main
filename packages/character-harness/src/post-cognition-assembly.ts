@@ -10,6 +10,10 @@ import {
 } from "../../character-abi/src/v2d.js";
 import type { CharacterHarnessAssemblyBudget } from "./index.js";
 import { assembleCharacterHarness2DContext } from "./assembly-v2d.js";
+import {
+  CHARACTER_HARNESS_5I_VERSION,
+  type CharacterHarnessCognitionSectionProjection
+} from "./cognition-section.js";
 
 export const CHARACTER_HARNESS_5K_VERSION = "character-harness-5k.v1" as const;
 
@@ -34,7 +38,9 @@ export type CharacterHarnessPostCognitionAssembly = Readonly<
 
 type UnknownObject = Record<string, unknown> & {
   context?: unknown;
-  cognitionSection?: unknown;
+  cognitionProjection?: unknown;
+  section?: unknown;
+  version?: unknown;
   budget?: unknown;
   maxSections?: unknown;
   maxSemanticCharacters?: unknown;
@@ -42,7 +48,7 @@ type UnknownObject = Record<string, unknown> & {
 
 /**
  * Assemble the post-cognition Character context while treating the already
- * normalized Cognition Result as mandatory continuation payload.
+ * validated 5I Cognition Result projection as mandatory continuation payload.
  *
  * One section slot and the exact semantic-string character cost of the
  * COGNITION_RESULT are reserved first. Ordinary sections then consume only the
@@ -56,7 +62,7 @@ export function assembleCharacterHarnessPostCognitionContext(
   const value = expectObject(input, "Character Harness post-cognition assembly input");
   assertAllowedKeys(
     value,
-    ["context", "cognitionSection", "budget"],
+    ["context", "cognitionProjection", "budget"],
     "Character Harness post-cognition assembly input"
   );
 
@@ -67,7 +73,8 @@ export function assembleCharacterHarnessPostCognitionContext(
     );
   }
 
-  const cognitionSection = normalizeCognitionSection(value.cognitionSection);
+  const cognitionProjection = normalizeCognitionProjection(value.cognitionProjection);
+  const cognitionSection = cognitionProjection.section;
   const budget = normalizeBudget(value.budget);
   const cognitionCharacters = measureCognitionSemanticCharacters(cognitionSection);
 
@@ -105,10 +112,24 @@ export function assembleCharacterHarnessPostCognitionContext(
   });
 }
 
-function normalizeCognitionSection(input: unknown): CharacterAbi2DCognitionResultSection {
+function normalizeCognitionProjection(
+  input: unknown
+): CharacterHarnessCognitionSectionProjection {
+  const value = expectObject(input, "Character Harness post-cognition projection");
+  assertAllowedKeys(
+    value,
+    ["version", "section"],
+    "Character Harness post-cognition projection"
+  );
+  if (value.version !== CHARACTER_HARNESS_5I_VERSION) {
+    throw new Error(
+      `Character Harness post-cognition assembly requires ${CHARACTER_HARNESS_5I_VERSION}.`
+    );
+  }
+
   const context = createCharacterAbi2DContext({
     abiVersion: CHARACTER_ABI_2D_VERSION,
-    sections: [input]
+    sections: [value.section]
   });
   const section = context.sections[0];
   if (section?.kind !== "COGNITION_RESULT") {
@@ -116,7 +137,11 @@ function normalizeCognitionSection(input: unknown): CharacterAbi2DCognitionResul
       "Character Harness post-cognition assembly requires a structured COGNITION_RESULT section."
     );
   }
-  return section;
+
+  return Object.freeze({
+    version: CHARACTER_HARNESS_5I_VERSION,
+    section
+  });
 }
 
 function measureCognitionSemanticCharacters(
