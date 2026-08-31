@@ -33,6 +33,11 @@
       "types": "./src/cognition-section.ts",
       "development": "./src/cognition-section.ts",
       "import": "./dist/cognition-section.js"
+    },
+    "./assembly-v2d": {
+      "types": "./src/assembly-v2d.ts",
+      "development": "./src/assembly-v2d.ts",
+      "import": "./dist/assembly-v2d.js"
     }
   },
   "scripts": {
