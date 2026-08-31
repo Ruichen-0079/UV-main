@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { AssistantMessagePayloadSchema, TurnOriginSchema } from "./index.js";
+import {
+  AssistantMessagePayloadSchema,
+  EventTypeSchema,
+  RuntimeEventSchema,
+  TurnOriginSchema,
+  createEvent
+} from "./index.js";
 
 describe("assistant-origin protocol metadata", () => {
   it("accepts the canonical assistant-initiated origin and idempotency metadata", () => {
@@ -12,5 +18,26 @@ describe("assistant-origin protocol metadata", () => {
         idempotencyKey: "decision-1"
       })
     ).toMatchObject({ turnOrigin: "assistant-initiated", idempotencyKey: "decision-1" });
+  });
+});
+
+describe("Phase 7P embodied effect Runtime event type", () => {
+  it("admits the canonical Runtime-owned embodied effect event type", () => {
+    expect(EventTypeSchema.parse("runtime.embodied.effect")).toBe("runtime.embodied.effect");
+
+    const event = createEvent(
+      "runtime.embodied.effect",
+      { effectId: "runtime-effect:7g:1" },
+      { traceId: "turn-1" }
+    );
+
+    expect(event.type).toBe("runtime.embodied.effect");
+    expect(event.traceId).toBe("turn-1");
+    expect(RuntimeEventSchema.parse(event)).toEqual(event);
+  });
+
+  it("does not broaden the event type to arbitrary embodied or Presentation-owned names", () => {
+    expect(EventTypeSchema.safeParse("presentation.embodied.effect").success).toBe(false);
+    expect(EventTypeSchema.safeParse("runtime.embodied.render").success).toBe(false);
   });
 });
