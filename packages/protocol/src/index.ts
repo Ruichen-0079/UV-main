@@ -1,3 +1,5 @@
+export * from "./embodied-behavior.js";
+
 import { z } from "zod";
 
 export const EventTypeSchema = z.enum([
