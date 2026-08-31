@@ -129,6 +129,8 @@ const MEM0_CONFIG_KEYS = new Set([
   "YUVI_MEM0_LOG_DIR"
 ]);
 
+const OPTIONAL_LOCAL_AI_BOOTSTRAP_TIMEOUT_MS = 15_000;
+
 type Mem0ReconcileAction = "none" | "start" | "stop" | "restart" | "pending_external";
 
 type ServiceConfigState = {
@@ -435,10 +437,21 @@ export class DesktopSupervisor {
       await this.refreshService("tts_wrapper");
     }
 
-    await this.localAi.refreshAll();
+    this.startOptionalLocalAiRefresh();
 
     this.emit();
     return this.snapshot();
+  }
+
+  private startOptionalLocalAiRefresh(): void {
+    void withTimeout(
+      this.localAi.refreshAll(),
+      OPTIONAL_LOCAL_AI_BOOTSTRAP_TIMEOUT_MS,
+      `Local AI refresh timed out after ${OPTIONAL_LOCAL_AI_BOOTSTRAP_TIMEOUT_MS}ms`
+    ).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[desktop-supervisor] optional Local AI refresh failed: ${message}`);
+    });
   }
 
   async refreshAll(): Promise<SupervisorSnapshot> {
@@ -1730,6 +1743,22 @@ export class DesktopSupervisor {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 function startCommandEqual(

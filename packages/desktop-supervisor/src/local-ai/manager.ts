@@ -79,9 +79,9 @@ export class LocalAiServiceManager {
   async refreshAll(): Promise<LocalAiCatalogSnapshot> {
     for (const id of this.ordered()) {
       if (id === "alice") continue;
-      await this.refresh(id);
+      await this.refreshSafely(id);
     }
-    await this.refresh("alice");
+    await this.refreshSafely("alice");
     return this.snapshot();
   }
 
@@ -304,6 +304,27 @@ export class LocalAiServiceManager {
       return;
     }
     await this.refreshHttpService(id, `${this.config.ttsUpstreamUrl}/openapi.json`);
+  }
+
+  private async refreshSafely(id: LocalAiServiceId): Promise<void> {
+    try {
+      await this.refresh(id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const svc = this.require(id);
+      svc.snapshot = {
+        ...svc.snapshot,
+        lifecycle: "ERROR",
+        canStart: false,
+        canStop: false,
+        canRestart: false,
+        canTest: false,
+        summary: "Local AI refresh failed.",
+        detail: message,
+        lastError: message,
+        checkedAt: new Date().toISOString()
+      };
+    }
   }
 
   private async refreshHttpService(
