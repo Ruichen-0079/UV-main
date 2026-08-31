@@ -84,7 +84,15 @@ function normalizeAssemblyFields(
   source: "5J" | "5K"
 ): CharacterAbi2DContext {
   const context = createCharacterAbi2DContext(value.context);
-  normalizeOmittedSectionKinds(value.omittedSectionKinds, source);
+  const omittedSectionKinds = normalizeOmittedSectionKinds(value.omittedSectionKinds, source);
+  for (const section of context.sections) {
+    if (omittedSectionKinds.has(section.kind)) {
+      throw new Error(
+        `Character Harness ${source} section ${section.kind} cannot be both included and omitted.`
+      );
+    }
+  }
+
   const usedSemanticCharacters = boundedInteger(
     value.usedSemanticCharacters,
     `Character Harness ${source} usedSemanticCharacters`,
@@ -99,7 +107,10 @@ function normalizeAssemblyFields(
   return context;
 }
 
-function normalizeOmittedSectionKinds(input: unknown, source: "5J" | "5K"): void {
+function normalizeOmittedSectionKinds(
+  input: unknown,
+  source: "5J" | "5K"
+): ReadonlySet<CharacterAbiSectionKind> {
   if (!Array.isArray(input)) {
     throw new Error(`Character Harness ${source} omittedSectionKinds must be an array.`);
   }
@@ -114,6 +125,7 @@ function normalizeOmittedSectionKinds(input: unknown, source: "5J" | "5K"): void
     }
     seen.add(kind);
   }
+  return seen;
 }
 
 function measureContextSemanticCharacters(context: CharacterAbi2DContext): number {
