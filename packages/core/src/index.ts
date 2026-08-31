@@ -98,6 +98,13 @@ export {
   type RuntimeEmbodiedEffectStateTransitionRejectionReason
 } from "./runtime-embodied-effect-state-transition.js";
 
+export {
+  RUNTIME_EMBODIED_EFFECT_EVENT_7N_VERSION,
+  decideRuntimeEmbodiedEffectEvent,
+  type RuntimeEmbodiedEffectEventDecision,
+  type RuntimeEmbodiedEffectLifecycleEventPayload
+} from "./runtime-embodied-effect-event.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
