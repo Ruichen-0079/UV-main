@@ -88,6 +88,16 @@ export {
   type RuntimeEmbodiedPresentationOutcomeAcceptanceDecision
 } from "./runtime-embodied-presentation-outcome-acceptance.js";
 
+export {
+  RUNTIME_EMBODIED_EFFECT_STATE_TRANSITION_7M_VERSION,
+  RUNTIME_EMBODIED_EFFECT_STATES,
+  RUNTIME_EMBODIED_EFFECT_STATE_TRANSITION_REJECTION_REASONS,
+  decideRuntimeEmbodiedEffectStateTransition,
+  type RuntimeEmbodiedEffectState,
+  type RuntimeEmbodiedEffectStateTransitionDecision,
+  type RuntimeEmbodiedEffectStateTransitionRejectionReason
+} from "./runtime-embodied-effect-state-transition.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
