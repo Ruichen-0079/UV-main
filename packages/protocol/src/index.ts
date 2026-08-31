@@ -1,5 +1,6 @@
 export * from "./embodied-behavior.js";
 export * from "./embodied-behavior-correlation.js";
+export * from "./embodied-presentation-outcome.js";
 
 import { z } from "zod";
 
