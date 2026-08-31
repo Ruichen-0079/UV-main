@@ -106,7 +106,7 @@ describe("Cognition 6A boundary", () => {
     for (const finishReason of [undefined, "stop"] as const) {
       const result = normalizeCognitionReasoningOutput({
         answer: "Verified answer.",
-        reasoning: "must not cross the boundary",
+        reasoning: "",
         ...(finishReason === undefined ? {} : { finishReason })
       });
 
@@ -123,7 +123,7 @@ describe("Cognition 6A boundary", () => {
     expect(
       normalizeCognitionReasoningOutput({
         answer: "Available partial answer.",
-        reasoning: "hidden",
+        reasoning: "",
         finishReason: "length"
       })
     ).toEqual({
@@ -136,7 +136,7 @@ describe("Cognition 6A boundary", () => {
   it("maps content filtering to UNSAFE_TO_ANSWER without leaking provider text", () => {
     const result = normalizeCognitionReasoningOutput({
       answer: "Provider text that must not cross.",
-      reasoning: "hidden reasoning",
+      reasoning: "",
       finishReason: "content_filter",
       provider: "provider-a",
       model: "model-a"
@@ -149,12 +149,12 @@ describe("Cognition 6A boundary", () => {
     expect(JSON.stringify(result)).not.toContain("Provider text");
   });
 
-  it("fails closed for unsupported tool calls and unknown termination", () => {
+  it("maps unsupported tool calls and unknown termination to ERROR", () => {
     for (const finishReason of ["tool_call", "unknown"] as const) {
       expect(
         normalizeCognitionReasoningOutput({
           answer: "Do not expose this output.",
-          reasoning: "hidden",
+          reasoning: "",
           finishReason
         })
       ).toEqual({
@@ -164,10 +164,27 @@ describe("Cognition 6A boundary", () => {
     }
   });
 
-  it("never projects raw reasoning or provider metadata into the normalized Character result", () => {
+  it("rejects non-normalized raw reasoning before it can cross the Phase 6 boundary", () => {
+    expect(() =>
+      normalizeCognitionReasoningOutput({
+        answer: "Safe final answer.",
+        reasoning: "secret chain of thought",
+        finishReason: "stop"
+      })
+    ).toThrow(/provider-normalized with an empty reasoning field/);
+
+    expect(() =>
+      normalizeCognitionReasoningOutput({
+        answer: "Safe final answer.",
+        finishReason: "stop"
+      })
+    ).toThrow(/provider-normalized with an empty reasoning field/);
+  });
+
+  it("never projects provider metadata into the normalized Character result", () => {
     const result = normalizeCognitionReasoningOutput({
       answer: "Safe final answer.",
-      reasoning: "secret chain of thought",
+      reasoning: "",
       finishReason: "stop",
       provider: "deepinfra",
       model: "some-model",
@@ -180,7 +197,6 @@ describe("Cognition 6A boundary", () => {
 
     expect(serialized).toContain("Safe final answer.");
     for (const forbidden of [
-      "secret chain of thought",
       "deepinfra",
       "some-model",
       "request-1",
@@ -197,6 +213,7 @@ describe("Cognition 6A boundary", () => {
       expect(() =>
         normalizeCognitionReasoningOutput({
           answer: "   ",
+          reasoning: "",
           finishReason
         })
       ).toThrow(/requires a non-empty answer/);
@@ -205,6 +222,7 @@ describe("Cognition 6A boundary", () => {
     expect(() =>
       normalizeCognitionReasoningOutput({
         answer: "x".repeat(16_001),
+        reasoning: "",
         finishReason: "stop"
       })
     ).toThrow(/16000/);
@@ -248,6 +266,7 @@ describe("Cognition 6A boundary", () => {
     expect(() =>
       normalizeCognitionReasoningOutput({
         answer: "Answer.",
+        reasoning: "",
         finishReason: "vendor_specific"
       })
     ).toThrow(/finishReason is invalid/);
