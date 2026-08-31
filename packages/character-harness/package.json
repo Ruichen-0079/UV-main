@@ -28,6 +28,11 @@
       "types": "./src/cognition-result.ts",
       "development": "./src/cognition-result.ts",
       "import": "./dist/cognition-result.js"
+    },
+    "./cognition-section": {
+      "types": "./src/cognition-section.ts",
+      "development": "./src/cognition-section.ts",
+      "import": "./dist/cognition-section.js"
     }
   },
   "scripts": {
