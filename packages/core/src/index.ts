@@ -125,6 +125,12 @@ export {
   type RuntimeEmbodiedEffectEventPublicationResult
 } from "./runtime-embodied-effect-event-publication.js";
 
+export {
+  RUNTIME_EMBODIED_EFFECT_SNAPSHOT_INITIALIZATION_7S_VERSION,
+  initializeRuntimeEmbodiedEffectSnapshot,
+  type RuntimeEmbodiedEffectSnapshotInitializationDecision
+} from "./runtime-embodied-effect-snapshot-initialization.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
