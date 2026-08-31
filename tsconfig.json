@@ -5,6 +5,7 @@
     { "path": "packages/p8" },
     { "path": "packages/character-abi" },
     { "path": "packages/character-harness" },
+    { "path": "packages/cognition" },
     { "path": "packages/event-bus" },
     { "path": "packages/memory" },
     { "path": "packages/prompt-builder" },
