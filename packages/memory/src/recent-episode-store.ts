@@ -1,5 +1,4 @@
-import { Pool } from "pg";
-import type { QueryResultRow } from "pg";
+import type { Pool, QueryResultRow } from "pg";
 import { parseMemoryRepositoryEnv } from "./env.js";
 import { DEFAULT_L1_MAX_EPISODES, DEFAULT_L1_RETENTION_MS } from "./hierarchy.js";
 import { createYuviPostgresPool } from "./postgres-pool.js";

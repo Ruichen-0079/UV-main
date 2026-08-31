@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Pool, type QueryResultRow } from "pg";
+import type { Pool, QueryResultRow } from "pg";
 import { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
 import { MemoryIngestionPolicy, type MemoryIngestionInput } from "./ingestion.js";
 import {

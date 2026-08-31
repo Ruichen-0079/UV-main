@@ -1,4 +1,4 @@
-import { Pool, type QueryResultRow } from "pg";
+import type { Pool, QueryResultRow } from "pg";
 import type {
   CreateEntityInput,
   CreateMemoryInput,

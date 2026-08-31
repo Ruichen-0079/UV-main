@@ -1,4 +1,4 @@
-import { Pool, type QueryResultRow } from "pg";
+import type { Pool, QueryResultRow } from "pg";
 import { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
 import { createYuviPostgresPool } from "./postgres-pool.js";
 

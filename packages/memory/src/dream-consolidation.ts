@@ -1,5 +1,4 @@
-import { Pool } from "pg";
-import type { QueryResultRow } from "pg";
+import type { Pool, QueryResultRow } from "pg";
 import { MemoryIngestionPolicy } from "./ingestion.js";
 import { createYuviPostgresPool } from "./postgres-pool.js";
 import {
