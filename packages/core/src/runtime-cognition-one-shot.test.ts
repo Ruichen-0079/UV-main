@@ -129,6 +129,41 @@ describe("Runtime cognition one-shot execution", () => {
     expect(getReasoningProvider).not.toHaveBeenCalled();
   });
 
+  it("discards a provider result when cancellation becomes visible before normalization", async () => {
+    const controller = new AbortController();
+    const cognitionBoundary = boundary();
+    const normalize = vi.spyOn(cognitionBoundary, "normalizeReasoningOutput");
+    const reasoningProvider: ReasoningProvider = {
+      name: "cancel-before-normalize",
+      async healthCheck() {
+        return {
+          provider: "cancel-before-normalize",
+          status: "healthy" as const,
+          checkedAt: new Date().toISOString()
+        };
+      },
+      async generateReasoning(): Promise<ReasoningOutput> {
+        controller.abort();
+        return {
+          reasoning: "",
+          answer: "must be discarded",
+          finishReason: "stop"
+        };
+      }
+    };
+
+    await expect(
+      executeRuntimeCognitionOnce({
+        providers: { getReasoningProvider: () => reasoningProvider },
+        boundary: cognitionBoundary,
+        task: { valid: true },
+        signal: controller.signal
+      })
+    ).resolves.toEqual({ status: "CANCELLED" });
+
+    expect(normalize).not.toHaveBeenCalled();
+  });
+
   it("classifies provider selection and execution availability failures as UNAVAILABLE", async () => {
     for (const code of [
       ProviderErrorCode.MissingApiKey,
