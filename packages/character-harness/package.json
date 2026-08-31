@@ -38,6 +38,11 @@
       "types": "./src/assembly-v2d.ts",
       "development": "./src/assembly-v2d.ts",
       "import": "./dist/assembly-v2d.js"
+    },
+    "./post-cognition-assembly": {
+      "types": "./src/post-cognition-assembly.ts",
+      "development": "./src/post-cognition-assembly.ts",
+      "import": "./dist/post-cognition-assembly.js"
     }
   },
   "scripts": {
