@@ -13,6 +13,8 @@
     { "path": "../../packages/memory" },
     { "path": "../../packages/prompt-builder" },
     { "path": "../../packages/providers" },
+    { "path": "../../packages/character-harness" },
+    { "path": "../../packages/cognition" },
     { "path": "../../packages/core" }
   ]
 }
