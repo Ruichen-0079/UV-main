@@ -14,5 +14,10 @@
     "build": "tsc -b tsconfig.json",
     "check": "tsc -b tsconfig.json --pretty false",
     "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@companion/character-abi": "workspace:*",
+    "@companion/character-harness": "workspace:*",
+    "@companion/providers": "workspace:*"
   }
 }
