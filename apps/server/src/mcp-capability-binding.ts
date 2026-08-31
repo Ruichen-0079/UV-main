@@ -5,6 +5,7 @@ import {
   type CognitionCapabilityDescriptionSet,
   type CognitionCapabilityRequest
 } from "@companion/cognition";
+import type { ServerMcpTool } from "./mcp-client.js";
 
 export const SERVER_MCP_CAPABILITY_BINDINGS_6K_VERSION =
   "server-mcp-capability-bindings-6k.v1" as const;
@@ -85,6 +86,49 @@ export function createServerMcpCapabilityBindings(input: unknown): ServerMcpCapa
     version: SERVER_MCP_CAPABILITY_BINDINGS_6K_VERSION,
     descriptions,
     bindings
+  });
+}
+
+/**
+ * Intersect the explicit 6K allowlist with the tools currently reported by an
+ * MCP server.
+ *
+ * Discovery may only remove unavailable allowlisted capabilities. It can never
+ * create a new capability, replace semantic descriptions, or promote an
+ * unlisted server tool. Static ordering is preserved.
+ */
+export function createCurrentServerMcpCapabilityBindings(
+  staticRegistry: ServerMcpCapabilityBindings,
+  discoveredTools: readonly ServerMcpTool[]
+): ServerMcpCapabilityBindings {
+  const discoveredNames = new Set(discoveredTools.map((tool) => tool.name));
+  const descriptionByRef = new Map(
+    staticRegistry.descriptions.capabilities.map((capability) => [
+      capability.capabilityRef,
+      capability.description
+    ])
+  );
+
+  const capabilities = staticRegistry.bindings.flatMap((binding) => {
+    if (!discoveredNames.has(binding.toolName)) {
+      return [];
+    }
+    const description = descriptionByRef.get(binding.capabilityRef);
+    if (description === undefined) {
+      throw new Error("Server MCP static binding is missing its semantic description.");
+    }
+    return [
+      {
+        capabilityRef: binding.capabilityRef,
+        description,
+        toolName: binding.toolName
+      }
+    ];
+  });
+
+  return createServerMcpCapabilityBindings({
+    version: SERVER_MCP_CAPABILITY_BINDINGS_6K_VERSION,
+    capabilities
   });
 }
 
