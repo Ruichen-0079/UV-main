@@ -62,6 +62,12 @@ export {
   type RuntimeEmbodiedEffectIdentity
 } from "./runtime-embodied-effect-identity.js";
 
+export {
+  RUNTIME_EMBODIED_EFFECT_FENCE_7H_VERSION,
+  decideRuntimeEmbodiedEffectCallbackFence,
+  type RuntimeEmbodiedEffectFenceDecision
+} from "./runtime-embodied-effect-fence.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
