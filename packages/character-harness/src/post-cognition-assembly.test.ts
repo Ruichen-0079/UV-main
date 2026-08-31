@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  NORMALIZED_COGNITION_RESULT_VERSION
-} from "../../character-abi/src/index.js";
-import {
-  CHARACTER_ABI_2D_VERSION
-} from "../../character-abi/src/v2d.js";
+import { NORMALIZED_COGNITION_RESULT_VERSION } from "../../character-abi/src/index.js";
+import { CHARACTER_ABI_2D_VERSION } from "../../character-abi/src/v2d.js";
+import { CHARACTER_HARNESS_5I_VERSION } from "./cognition-section.js";
 import {
   CHARACTER_HARNESS_5K_VERSION,
   assembleCharacterHarnessPostCognitionContext
@@ -18,6 +15,13 @@ function cognitionSection(answer = "result") {
       status: "SUCCESS",
       answer
     }
+  } as const;
+}
+
+function cognitionProjection(answer = "result") {
+  return {
+    version: CHARACTER_HARNESS_5I_VERSION,
+    section: cognitionSection(answer)
   } as const;
 }
 
@@ -48,7 +52,7 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
   it("reserves cognition budget first, keeps regular prefix order, and appends cognition last", () => {
     const result = assembleCharacterHarnessPostCognitionContext({
       context: regularContext(),
-      cognitionSection: cognitionSection("12345"),
+      cognitionProjection: cognitionProjection("12345"),
       budget: {
         maxSections: 3,
         maxSemanticCharacters: 11
@@ -75,7 +79,9 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
     expect(Object.isFrozen(result)).toBe(true);
     if (result.status === "ACCEPTED") {
       expect(Object.isFrozen(result.context)).toBe(true);
-      expect(result.context.sections.at(-1)?.kind).toBe("COGNITION_RESULT");
+      expect(result.context.sections[result.context.sections.length - 1]?.kind).toBe(
+        "COGNITION_RESULT"
+      );
     }
   });
 
@@ -88,11 +94,14 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
           { kind: "PERSONA", state: "KNOWN", summary: "Calm" }
         ]
       },
-      cognitionSection: {
-        kind: "COGNITION_RESULT",
-        result: {
-          version: NORMALIZED_COGNITION_RESULT_VERSION,
-          status: "UNAVAILABLE"
+      cognitionProjection: {
+        version: CHARACTER_HARNESS_5I_VERSION,
+        section: {
+          kind: "COGNITION_RESULT",
+          result: {
+            version: NORMALIZED_COGNITION_RESULT_VERSION,
+            status: "UNAVAILABLE"
+          }
         }
       },
       budget: {
@@ -118,7 +127,7 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
         abiVersion: CHARACTER_ABI_2D_VERSION,
         sections: []
       },
-      cognitionSection: cognitionSection("12345"),
+      cognitionProjection: cognitionProjection("12345"),
       budget: {
         maxSections: 5,
         maxSemanticCharacters: 4
@@ -143,11 +152,14 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
         abiVersion: CHARACTER_ABI_2D_VERSION,
         sections: []
       },
-      cognitionSection: {
-        kind: "COGNITION_RESULT",
-        result: {
-          version: NORMALIZED_COGNITION_RESULT_VERSION,
-          status: "UNAVAILABLE"
+      cognitionProjection: {
+        version: CHARACTER_HARNESS_5I_VERSION,
+        section: {
+          kind: "COGNITION_RESULT",
+          result: {
+            version: NORMALIZED_COGNITION_RESULT_VERSION,
+            status: "UNAVAILABLE"
+          }
         }
       },
       budget: {
@@ -171,7 +183,7 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
           abiVersion: CHARACTER_ABI_2D_VERSION,
           sections: [cognitionSection()]
         },
-        cognitionSection: cognitionSection(),
+        cognitionProjection: cognitionProjection(),
         budget: {
           maxSections: 2,
           maxSemanticCharacters: 100
@@ -180,17 +192,37 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
     ).toThrow(/must not already contain COGNITION_RESULT/);
   });
 
-  it("requires a structured cognition result section and rejects ordinary sections", () => {
+  it("requires the 5I projection envelope and a structured cognition result section", () => {
     expect(() =>
       assembleCharacterHarnessPostCognitionContext({
         context: {
           abiVersion: CHARACTER_ABI_2D_VERSION,
           sections: []
         },
-        cognitionSection: {
-          kind: "IDENTITY",
-          state: "KNOWN",
-          summary: "Yuvi"
+        cognitionProjection: {
+          version: "character-harness-5h.v1",
+          section: cognitionSection()
+        },
+        budget: {
+          maxSections: 2,
+          maxSemanticCharacters: 100
+        }
+      })
+    ).toThrow(/requires character-harness-5i.v1/);
+
+    expect(() =>
+      assembleCharacterHarnessPostCognitionContext({
+        context: {
+          abiVersion: CHARACTER_ABI_2D_VERSION,
+          sections: []
+        },
+        cognitionProjection: {
+          version: CHARACTER_HARNESS_5I_VERSION,
+          section: {
+            kind: "IDENTITY",
+            state: "KNOWN",
+            summary: "Yuvi"
+          }
         },
         budget: {
           maxSections: 2,
@@ -207,11 +239,14 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
           abiVersion: CHARACTER_ABI_2D_VERSION,
           sections: []
         },
-        cognitionSection: {
-          kind: "COGNITION_RESULT",
-          result: {
-            ...cognitionSection().result,
-            provider: "deepinfra"
+        cognitionProjection: {
+          version: CHARACTER_HARNESS_5I_VERSION,
+          section: {
+            kind: "COGNITION_RESULT",
+            result: {
+              ...cognitionSection().result,
+              provider: "deepinfra"
+            }
           }
         },
         budget: {
@@ -227,7 +262,7 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
           abiVersion: CHARACTER_ABI_2D_VERSION,
           sections: []
         },
-        cognitionSection: cognitionSection(),
+        cognitionProjection: cognitionProjection(),
         budget: {
           maxSections: 2,
           maxSemanticCharacters: 100
@@ -243,16 +278,19 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
         abiVersion: CHARACTER_ABI_2D_VERSION,
         sections: [{ kind: "IDENTITY", state: "KNOWN", summary: "Y" }]
       },
-      cognitionSection: {
-        kind: "COGNITION_RESULT",
-        result: {
-          version: NORMALIZED_COGNITION_RESULT_VERSION,
-          status: "PARTIAL",
-          answer: "aa",
-          keyFacts: ["bbb"],
-          evidence: [{ reference: "r", statement: "ssss" }],
-          uncertainty: ["uu"],
-          caveats: ["c"]
+      cognitionProjection: {
+        version: CHARACTER_HARNESS_5I_VERSION,
+        section: {
+          kind: "COGNITION_RESULT",
+          result: {
+            version: NORMALIZED_COGNITION_RESULT_VERSION,
+            status: "PARTIAL",
+            answer: "aa",
+            keyFacts: ["bbb"],
+            evidence: [{ reference: "r", statement: "ssss" }],
+            uncertainty: ["uu"],
+            caveats: ["c"]
+          }
         }
       },
       budget: {
