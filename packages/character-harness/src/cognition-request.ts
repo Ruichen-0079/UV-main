@@ -1,4 +1,4 @@
-import { createCharacterProposal } from "../../character-abi/dist/index.js";
+import { createCharacterProposal } from "@companion/character-abi";
 import type { CharacterHarnessRepetitionSupervision } from "./index.js";
 import { CHARACTER_HARNESS_5D_VERSION } from "./versions.js";
 
