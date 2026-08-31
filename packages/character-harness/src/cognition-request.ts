@@ -1,8 +1,6 @@
-import {
-  CHARACTER_HARNESS_5D_VERSION,
-  type CharacterHarnessRepetitionSupervision
-} from "./index.js";
-import { createCharacterProposal } from "../../character-abi/src/index.js";
+import { createCharacterProposal } from "../../character-abi/dist/index.js";
+import type { CharacterHarnessRepetitionSupervision } from "./index.js";
+import { CHARACTER_HARNESS_5D_VERSION } from "./versions.js";
 
 export const CHARACTER_HARNESS_5G_VERSION = "character-harness-5g.v1" as const;
 

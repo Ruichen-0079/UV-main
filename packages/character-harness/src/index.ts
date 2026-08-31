@@ -7,13 +7,14 @@ import {
   type CharacterAbiSectionKind,
   type CharacterAbiSemanticSection,
   type CharacterProposal
-} from "../../character-abi/src/index.js";
-import type { ChatOutput } from "../../providers/src/types/chat.js";
+} from "../../character-abi/dist/index.js";
+import type { ChatOutput } from "@companion/providers";
+import { CHARACTER_HARNESS_5D_VERSION } from "./versions.js";
 
+export { CHARACTER_HARNESS_5D_VERSION } from "./versions.js";
 export const CHARACTER_HARNESS_5A_VERSION = "character-harness-5a.v1" as const;
 export const CHARACTER_HARNESS_5B_VERSION = "character-harness-5b.v1" as const;
 export const CHARACTER_HARNESS_5C_VERSION = "character-harness-5c.v1" as const;
-export const CHARACTER_HARNESS_5D_VERSION = "character-harness-5d.v1" as const;
 
 export type CharacterHarnessAssemblyBudget = Readonly<{
   /** Prefix-only section budget. Zero is valid and produces an empty context. */
