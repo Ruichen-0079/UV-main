@@ -139,7 +139,9 @@ export async function registerProductRoutes(
         });
       } catch (error) {
         if (error instanceof InvalidRuntimeSettingsError) {
-          return reply.status(400).send({ error: "invalid_settings", fieldErrors: error.fieldErrors });
+          return reply
+            .status(400)
+            .send({ error: "invalid_settings", fieldErrors: error.fieldErrors });
         }
         throw error;
       }
@@ -199,7 +201,8 @@ export async function registerProductRoutes(
   app.get("/product/memory", async (request, reply) => {
     if (!requireLocalDashboardAccess(config, request, reply)) return reply;
     const query = typeof request.query === "object" && request.query ? request.query : {};
-    const search = typeof (query as { q?: string }).q === "string" ? (query as { q: string }).q : "";
+    const search =
+      typeof (query as { q?: string }).q === "string" ? (query as { q: string }).q : "";
     return reply.send(await buildMemorySurface(context, search));
   });
 
@@ -244,8 +247,7 @@ export async function registerProductRoutes(
     const started = Date.now();
     try {
       const output = await provider.synthesizeSpeech({
-        text: "Hello, this is YUVI.",
-        format: "mp3"
+        text: "Hello, this is YUVI."
       });
       return reply.send({
         ok: true,
@@ -297,7 +299,11 @@ async function buildProductOverview(context: AppContext, config: ServerConfig) {
       id: "memory",
       label: "Memory",
       ...mapMemoryEpistemic(
-        database.status === "healthy" ? "ok" : database.status === "unavailable" ? "unavailable" : "error"
+        database.status === "healthy"
+          ? "ok"
+          : database.status === "unavailable"
+            ? "unavailable"
+            : "error"
       ),
       detail: database.message
     },

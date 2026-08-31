@@ -32,7 +32,9 @@ html[data-yuvi-surface="main"] body {
 }
 
 .yuvi-shell {
+  display: flex;
   min-height: 100vh;
+  flex-direction: column;
   background:
     radial-gradient(1200px 480px at 10% -10%, rgba(196, 92, 38, 0.08), transparent 55%),
     var(--yuvi-bg);
@@ -45,4 +47,363 @@ html[data-yuvi-surface="main"] body {
 .yuvi-shell select:focus-visible {
   outline: none;
   box-shadow: var(--yuvi-focus);
+}
+
+.yuvi-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--yuvi-line);
+  background: color-mix(in srgb, var(--yuvi-bg) 92%, white);
+  backdrop-filter: blur(10px);
+}
+
+.yuvi-topbar-actions {
+  margin-left: auto;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.yuvi-shell-main {
+  box-sizing: border-box;
+  flex: 1;
+  width: min(48rem, calc(100% - 1.5rem));
+  margin: 0 auto;
+  min-height: 0;
+  padding: 16px 12px 24px;
+}
+
+.yuvi-health-chip {
+  display: inline-flex;
+  max-width: min(28rem, 42vw);
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 999px;
+  background: var(--yuvi-bg-elevated);
+  padding: 4px 8px 4px 10px;
+  text-align: left;
+}
+
+.yuvi-health-chip-label {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--yuvi-muted);
+}
+
+.yuvi-health-chip span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yuvi-settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.yuvi-settings {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  width: min(72rem, 100%);
+  height: calc(100vh - 24px);
+  overflow: hidden;
+  border: 1px solid var(--yuvi-line);
+  border-radius: var(--yuvi-radius);
+  background: var(--yuvi-bg-elevated);
+}
+
+.yuvi-settings-nav {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 12px;
+  border-right: 1px solid var(--yuvi-line);
+  overflow: auto;
+}
+
+.yuvi-settings-nav-title {
+  margin: 4px 8px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--yuvi-muted);
+}
+
+.yuvi-settings-nav-item {
+  width: 100%;
+  margin-bottom: 2px;
+  border-radius: 12px;
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--yuvi-muted);
+}
+
+.yuvi-settings-nav-item.is-active {
+  background: var(--yuvi-accent-soft);
+  color: var(--yuvi-ink);
+  font-weight: 600;
+}
+
+.yuvi-settings-body {
+  min-width: 0;
+  overflow: auto;
+  padding: 20px 24px 28px;
+}
+
+.yuvi-card {
+  border: 1px solid var(--yuvi-line);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: color-mix(in srgb, var(--yuvi-bg) 70%, var(--yuvi-bg-elevated));
+}
+
+.yuvi-card-dashed {
+  border-style: dashed;
+}
+
+.yuvi-card-alert {
+  border-color: color-mix(in srgb, var(--yuvi-bad) 45%, var(--yuvi-line));
+}
+
+.yuvi-dialog {
+  width: min(28rem, 100%);
+  border: 1px solid var(--yuvi-line);
+  border-radius: 20px;
+  background: var(--yuvi-bg-elevated);
+  padding: 24px;
+}
+
+.yuvi-palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh 16px 16px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.yuvi-palette {
+  width: min(32rem, 100%);
+  height: fit-content;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 18px;
+  background: var(--yuvi-bg-elevated);
+  padding: 12px;
+  box-shadow: 0 18px 40px rgba(42, 34, 28, 0.16);
+}
+
+.yuvi-diagnostics {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  max-height: min(34vh, 280px);
+  overflow: hidden;
+  border-top: 1px solid var(--yuvi-line);
+  background: var(--yuvi-bg-elevated);
+  box-shadow: 0 -12px 32px rgba(42, 34, 28, 0.12);
+}
+
+.yuvi-diagnostics-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--yuvi-line);
+}
+
+.yuvi-diagnostics-body {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  gap: 12px;
+  height: calc(min(34vh, 280px) - 44px);
+  padding: 12px 16px 16px;
+}
+
+.yuvi-diagnostics-health {
+  overflow: auto;
+  font-size: 13px;
+}
+
+.yuvi-diagnostics-health-row {
+  margin-bottom: 10px;
+}
+
+.yuvi-diagnostics-events {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.yuvi-diagnostics-log {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  border-radius: 12px;
+  background: var(--yuvi-bg);
+  padding: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.yuvi-advanced {
+  border: 1px solid var(--yuvi-line);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.yuvi-advanced summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.yuvi-table {
+  overflow: hidden;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 16px;
+}
+
+.yuvi-table-head,
+.yuvi-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) 7.5rem minmax(0, 1.6fr);
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.yuvi-table-head {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--yuvi-muted);
+  background: var(--yuvi-bg);
+}
+
+.yuvi-table-row {
+  border-top: 1px solid var(--yuvi-line);
+  align-items: start;
+}
+
+.yuvi-chat-thread {
+  height: min(52vh, calc(100vh - 16.5rem));
+  min-height: 12rem;
+  overflow: auto;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--yuvi-bg) 80%, white);
+  padding: 12px;
+}
+
+.yuvi-composer {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.yuvi-composer textarea {
+  min-height: 5.5rem;
+  border-radius: 14px;
+  font-size: 0.95rem;
+}
+
+html[data-yuvi-surface="main"] .yuvi-shell .panel {
+  border-color: var(--yuvi-line);
+  border-radius: 16px;
+  background: var(--yuvi-bg-elevated);
+  box-shadow: none;
+}
+
+@media (max-width: 1280px) {
+  .yuvi-settings {
+    grid-template-columns: 148px minmax(0, 1fr);
+  }
+
+  .yuvi-health-chip {
+    max-width: 34vw;
+  }
+
+  .yuvi-settings-body {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 900px) {
+  .yuvi-settings {
+    grid-template-columns: 1fr;
+    height: calc(100vh - 16px);
+  }
+
+  .yuvi-settings-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+    border-right: 0;
+    border-bottom: 1px solid var(--yuvi-line);
+  }
+
+  .yuvi-settings-nav-item {
+    width: auto;
+    margin: 0;
+  }
+
+  .yuvi-table-head,
+  .yuvi-table-row {
+    grid-template-columns: 1fr;
+  }
+
+  .yuvi-diagnostics-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-height: 720px) {
+  .yuvi-shell-main {
+    padding-top: 12px;
+    padding-bottom: 16px;
+  }
+
+  .yuvi-chat-thread {
+    height: min(46vh, calc(100vh - 14.5rem));
+  }
+
+  .yuvi-diagnostics {
+    max-height: 38vh;
+  }
+
+  .yuvi-diagnostics-body {
+    height: calc(38vh - 44px);
+  }
+
+  .yuvi-palette-overlay {
+    padding-top: 8vh;
+  }
 }

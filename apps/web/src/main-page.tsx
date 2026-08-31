@@ -728,6 +728,8 @@ export function MainPage(): JSX.Element {
     }
   }
 
+  void lastTraceId;
+
   return (
     <ProductShell
       companionReady={companionReady}
@@ -737,10 +739,13 @@ export function MainPage(): JSX.Element {
       <div className="space-y-4">
         {showSettings && <UserSettingsPanel onTtsSettings={onTtsSettings} />}
 
-        <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
-          <div className="h-[420px] overflow-auto rounded-md border border-ink-100 bg-ink-50 p-3">
+        <Panel title="Chat" actions={<Pill status={requestStatus} />}>
+          <div className="yuvi-chat-thread">
             {messages.length === 0 ? (
-              <EmptyState title="No chat yet" message="Send a message to exercise the runtime." />
+              <EmptyState
+                title="No chat yet"
+                message="Send a message to start talking with YUVI."
+              />
             ) : (
               <div className="space-y-3">
                 {messages.map((message) => (
@@ -775,16 +780,11 @@ export function MainPage(): JSX.Element {
               <Notice tone="error" title="Companion" message={companionActionError} />
             </div>
           )}
-          {lastTraceId && (
-            <div className="mt-2">
-              <Notice tone="info" title="Latest trace" message={lastTraceId} />
-            </div>
-          )}
-          <div className="mt-3 flex gap-2">
+          <div className="yuvi-composer">
             <textarea
               ref={inputRef}
               className="field min-h-20"
-              placeholder="Type a runtime test message"
+              placeholder="Message YUVI"
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {

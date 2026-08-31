@@ -7,13 +7,15 @@ export function Badge(props: {
 }): JSX.Element {
   const tone = props.tone ?? "idle";
   const colors = {
-    ok: "bg-emerald-50 text-[var(--yuvi-ok)]",
-    warn: "bg-amber-50 text-[var(--yuvi-warn)]",
-    bad: "bg-rose-50 text-[var(--yuvi-bad)]",
+    ok: "bg-[color-mix(in_srgb,var(--yuvi-ok)_16%,transparent)] text-[var(--yuvi-ok)]",
+    warn: "bg-[color-mix(in_srgb,var(--yuvi-warn)_16%,transparent)] text-[var(--yuvi-warn)]",
+    bad: "bg-[color-mix(in_srgb,var(--yuvi-bad)_16%,transparent)] text-[var(--yuvi-bad)]",
     idle: "bg-[var(--yuvi-accent-soft)] text-[var(--yuvi-muted)]"
   };
   return (
-    <span className={cn("inline-flex rounded-full px-2 py-0.5 text-xs font-semibold", colors[tone])}>
+    <span
+      className={cn("inline-flex rounded-full px-2 py-0.5 text-xs font-semibold", colors[tone])}
+    >
       {props.children}
     </span>
   );

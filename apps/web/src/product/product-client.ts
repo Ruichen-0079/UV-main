@@ -42,19 +42,69 @@ export type ProductOverview = {
     status: string;
     reason: string;
   }>;
-  memory: {
-    backend: string;
-    extractor?: string;
-    databaseConfigured: boolean;
-    ingestion: Record<string, unknown>;
-    compression: { classification: string; operational: boolean };
-    idleDream: { classification: string; operational: boolean };
-  };
+  memory: ProductMemoryOverview;
   settings: {
     settings: Record<string, LayeredValue>;
     runtime?: { pendingRestart?: boolean; pendingRestartKeys?: string[] };
     providers?: Record<string, Record<string, unknown>>;
   };
+};
+
+export type ProductMemoryOverview = {
+  backend: string;
+  extractor?: string;
+  databaseConfigured: boolean;
+  ingestion: {
+    status: string;
+    diagnosticsAvailability?: string;
+    pendingCount?: number;
+    reconcileRequiredCount?: number;
+    terminalFailedCount?: number;
+  };
+  compression: { classification: string; operational: boolean };
+  idleDream: { classification: string; operational: boolean };
+};
+
+export type ProductMemorySurface = {
+  l0: { name: string; description: string };
+  l1: {
+    name: string;
+    episodes: Array<{
+      id: string;
+      status: string;
+      whatHappened: string;
+      startedAt?: string;
+      endedAt?: string;
+      temporalConfidence?: string;
+    }>;
+  };
+  l2: {
+    name: string;
+    state: string;
+    tone: "ok" | "warn" | "bad" | "idle";
+    summary: string;
+    epistemic?: string;
+    query: string | null;
+    events: Array<{ id: string; content: string; kind?: string }>;
+  };
+  dream: {
+    idleClassification: string;
+    dueJobs: Array<{
+      jobId: string;
+      triggerKind: string;
+      status: string;
+      lastErrorCode?: string;
+    }>;
+  };
+};
+
+export type ProductCapabilitiesSurface = {
+  authority: string;
+  userConfigurableServers: boolean;
+  deferredReason: string;
+  version: string;
+  capabilities: Array<{ capabilityRef: string; toolName: string }>;
+  descriptions: Record<string, string> | Array<{ capabilityRef: string; description: string }>;
 };
 
 export type LayeredValue =
@@ -78,10 +128,10 @@ export const productClient = {
     return apiClient.discoverProductModels(connectionId);
   },
   memory(query?: string) {
-    return apiClient.getProductMemory(query);
+    return apiClient.getProductMemory(query) as Promise<ProductMemorySurface>;
   },
   capabilities() {
-    return apiClient.getProductCapabilities();
+    return apiClient.getProductCapabilities() as Promise<ProductCapabilitiesSurface>;
   },
   testVoice() {
     return apiClient.testProductVoice();

@@ -83,6 +83,39 @@ describe("product UI routes", () => {
     }
   });
 
+  it("returns a Memory surface with layer cards instead of requiring a JSON dump", async () => {
+    const env = testEnv();
+    process.env = { ...env };
+    const app = await buildServer(loadServerConfig(env));
+    try {
+      const response = await app.inject({ method: "GET", url: "/product/memory" });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.l0.name).toBe("DirectContext");
+      expect(Array.isArray(body.l1.episodes)).toBe(true);
+      expect(body.l2.epistemic).toBeTruthy();
+      expect(body.dream.idleClassification).toContain("DEFERRED");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns a static capability allowlist and does not imply editable MCP servers", async () => {
+    const env = testEnv();
+    process.env = { ...env };
+    const app = await buildServer(loadServerConfig(env));
+    try {
+      const response = await app.inject({ method: "GET", url: "/product/capabilities" });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.userConfigurableServers).toBe(false);
+      expect(body.deferredReason).toContain("static allowlist");
+      expect(Array.isArray(body.capabilities)).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("rejects unknown connection keys", async () => {
     const env = testEnv();
     process.env = { ...env };

@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_RUNTIME_HTTP,
   resolveApiBaseUrl,
-  resolveRuntimeAssetUrl
+  resolveRuntimeAssetUrl,
+  surfaceFromLocation
 } from "./desktop-runtime.js";
 
 describe("desktop-runtime API base", () => {
@@ -41,6 +42,17 @@ describe("desktop-runtime API base", () => {
     vi.stubGlobal("window", {});
     expect(resolveRuntimeAssetUrl("/api/live2d/Lumi/Lumi.model3.json")).toBe(
       "/api/live2d/Lumi/Lumi.model3.json"
+    );
+  });
+});
+
+describe("desktop surface routing", () => {
+  it("defaults the browser to Product UI instead of the developer dashboard", () => {
+    expect(surfaceFromLocation({ hash: "", pathname: "/" })).toBe("main");
+    expect(surfaceFromLocation({ hash: "#/main/settings/memory", pathname: "/" })).toBe("main");
+    expect(surfaceFromLocation({ hash: "#/dashboard", pathname: "/" })).toBe("dashboard");
+    expect(surfaceFromLocation({ hash: "", pathname: "/", tauriLabel: "companion" })).toBe(
+      "companion"
     );
   });
 });
