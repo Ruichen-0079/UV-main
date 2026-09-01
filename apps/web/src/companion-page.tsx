@@ -19,10 +19,8 @@ import {
   reduceCompanionPresence,
   type CompanionPresenceProjection
 } from "./companion-presence.js";
-import {
-  createBehaviorPolicyController,
-  type BehaviorPolicyController
-} from "./behavior-policy-controller.js";
+import type { BehaviorPolicyController } from "./behavior-policy-controller.js";
+import { createCompanionEmbodiedBehaviorController } from "./companion-embodied-behavior-controller.js";
 import { createProactiveTextCandidate } from "./proactive-text-candidate.js";
 import { createCompanionSpeechBuffer } from "./companion-speech-buffer.js";
 import { createCompanionReadyAnnouncer } from "./companion-voice-sync.js";
@@ -124,7 +122,7 @@ export function CompanionPage(): JSX.Element {
   }
 
   useEffect(() => {
-    const controller = createBehaviorPolicyController({
+    const controller = createCompanionEmbodiedBehaviorController({
       sessionId: behaviorSessionIdRef.current,
       controllerId: "companion-page",
       now: () => performance.now(),
