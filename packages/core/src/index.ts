@@ -144,6 +144,12 @@ export {
   type RuntimeEmbodiedEffectRecordAdvancementDecision
 } from "./runtime-embodied-effect-record-advancement.js";
 
+export {
+  RUNTIME_EMBODIED_PRESENTATION_REQUEST_PROJECTION_7AE_VERSION,
+  projectRuntimeEmbodiedEffectAdmissionToPresentationRequest,
+  type RuntimeEmbodiedPresentationRequestProjection
+} from "./runtime-embodied-presentation-request-projection.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
