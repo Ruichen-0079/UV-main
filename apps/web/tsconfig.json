@@ -16,5 +16,6 @@
     "vite.config.ts",
     "tailwind.config.ts",
     "postcss.config.cjs"
-  ]
+  ],
+  "references": [{ "path": "../../packages/protocol" }]
 }
