@@ -138,6 +138,12 @@ export {
   type RuntimeEmbodiedEffectRecordInitializationDecision
 } from "./runtime-embodied-effect-record-initialization.js";
 
+export {
+  RUNTIME_EMBODIED_EFFECT_RECORD_ADVANCEMENT_7U_VERSION,
+  advanceRuntimeEmbodiedEffectRecord,
+  type RuntimeEmbodiedEffectRecordAdvancementDecision
+} from "./runtime-embodied-effect-record-advancement.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
