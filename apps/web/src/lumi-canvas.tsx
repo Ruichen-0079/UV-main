@@ -12,6 +12,10 @@ import type {
   CompanionPresenceProjection,
   CompanionPresentationState
 } from "./companion-presence.js";
+import type {
+  EmbodiedPresentationOutcomeReport,
+  EmbodiedPresentationRequest
+} from "@companion/protocol";
 import { resolveRuntimeAssetUrl } from "./desktop-runtime.js";
 
 const DEFAULT_MODEL_PATH = "/api/live2d/Lumi/Lumi.model3.json";
@@ -53,6 +57,14 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       setPresentationProjection: (projection) =>
         controllerRef.current?.setPresentationProjection(projection),
       setGazeTarget: (target) => controllerRef.current?.setGazeTarget(target),
+      executeEmbodiedPresentationRequest: (
+        request: EmbodiedPresentationRequest
+      ): EmbodiedPresentationOutcomeReport =>
+        controllerRef.current?.executeEmbodiedPresentationRequest(request) ?? {
+          version: "embodied-presentation-outcome-7k.v1",
+          effectId: request.effectId,
+          outcome: "REJECTED"
+        },
       setPresenceAnimation: ((
         animationOrBlink: LumiPresenceAnimation | number,
         breath?: number

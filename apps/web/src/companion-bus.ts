@@ -3,6 +3,12 @@ import type {
   ProactiveTurnAdmission,
   ProactiveTurnAdmissionDecision
 } from "./proactive-turn-admission.js";
+import {
+  createEmbodiedPresentationOutcomeReport,
+  createEmbodiedPresentationRequest,
+  type EmbodiedPresentationRequest,
+  type EmbodiedPresentationOutcomeReport
+} from "@companion/protocol";
 
 /**
  * Minimal cross-window bus for the YUVI desktop split.
@@ -54,6 +60,8 @@ export type CompanionBusMessage =
       state: CompanionPlaybackState;
     }
   | { kind: "speech-status"; requestId: string; state: SpeechQueueState }
+  | { kind: "embodied-presentation-request"; request: EmbodiedPresentationRequest }
+  | { kind: "embodied-presentation-outcome"; report: EmbodiedPresentationOutcomeReport }
   | CompanionProactiveTextRequest
   | CompanionProactiveTextAdmissionResult;
 
@@ -73,6 +81,8 @@ const knownKinds = new Set<string>([
   "companion-ready",
   "playback-status",
   "speech-status",
+  "embodied-presentation-request",
+  "embodied-presentation-outcome",
   "proactive-text-request",
   "proactive-text-admission-result"
 ]);
@@ -156,6 +166,22 @@ export function isCompanionBusMessage(value: unknown): value is CompanionBusMess
       );
     case "speech-status":
       return isNonEmptyString(message["requestId"]) && isSpeechQueueState(message["state"]);
+    case "embodied-presentation-request":
+      try {
+        if (!hasExactKeys(message, ["kind", "request"])) return false;
+        createEmbodiedPresentationRequest(message["request"]);
+        return true;
+      } catch {
+        return false;
+      }
+    case "embodied-presentation-outcome":
+      try {
+        if (!hasExactKeys(message, ["kind", "report"])) return false;
+        createEmbodiedPresentationOutcomeReport(message["report"]);
+        return true;
+      } catch {
+        return false;
+      }
     case "proactive-text-request":
       return (
         hasExactKeys(message, ["kind", "decisionId", "modality"]) &&
