@@ -202,7 +202,7 @@ export const defaultUserSettingsForm = (): UserSettingsForm => ({
   chatProvider: "openai-compatible",
   chatModel: "deepseek-ai/DeepSeek-V4-Flash-0731",
   cognitionProvider: "openai-compatible",
-  cognitionModel: "glm-4.7-flash",
+  cognitionModel: "zai-org/GLM-5.3-Flash",
   openaiCompatibleBaseUrl: "https://api.deepinfra.com/v1/openai",
   deepseekApiKeyInput: "",
   openaiCompatibleApiKeyInput: "",

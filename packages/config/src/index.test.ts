@@ -104,7 +104,7 @@ describe("runtime config", () => {
       OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
       OPENAI_COMPATIBLE_API_KEY: "gateway-secret",
       OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-flash",
-      OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash",
+      OPENAI_COMPATIBLE_REASONING_MODEL: "zai-org/GLM-5.3-Flash",
       EMBEDDING_API_KEY: "embedding-secret",
       EMBEDDING_MODEL: "embedding-model"
     });
@@ -113,7 +113,7 @@ describe("runtime config", () => {
       provider: "openai-compatible",
       baseUrl: "https://gateway.example/v1",
       apiKey: "gateway-secret",
-      model: "glm-4.7-flash"
+      model: "zai-org/GLM-5.3-Flash"
     });
     expect(() => validateRuntimeConfig(config)).not.toThrow();
 
@@ -122,7 +122,7 @@ describe("runtime config", () => {
       PROVIDER_ALLOW_MOCKS: "false",
       DEFAULT_REASONING_PROVIDER: "openai-compatible",
       OPENAI_COMPATIBLE_API_KEY: "gateway-secret",
-      OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash"
+      OPENAI_COMPATIBLE_REASONING_MODEL: "zai-org/GLM-5.3-Flash"
     });
     expect(() => validateRuntimeConfig(missingBaseUrl)).toThrow(/reasoning\.baseUrl/);
   });

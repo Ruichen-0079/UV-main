@@ -49,7 +49,7 @@ fn defaults_when_no_file() {
         "deepseek-ai/DeepSeek-V4-Flash-0731"
     );
     assert_eq!(view.settings.cognition.provider, "openai-compatible");
-    assert_eq!(view.settings.cognition.model, "glm-4.7-flash");
+    assert_eq!(view.settings.cognition.model, "zai-org/GLM-5.3-Flash");
     assert!(!view.secrets.openai_compatible_api_key);
     assert!(!view.settings.proactive.enabled);
     assert!(!view.secrets.deepseek_api_key);
@@ -91,7 +91,7 @@ fn cognition_selection_persists_and_projects_shared_openai_connection() {
     let mut patch = UserSettingsPatch::default();
     patch.cognition = Some(super::schema::CognitionSettingsPatch {
         provider: Some("openai-compatible".into()),
-        model: Some("glm-4.7-flash".into()),
+        model: Some("zai-org/GLM-5.3-Flash".into()),
     });
     patch.openai_compatible = Some(super::schema::OpenAiCompatibleSettingsPatch {
         base_url: Some("https://gateway.example/v1".into()),
@@ -99,7 +99,7 @@ fn cognition_selection_persists_and_projects_shared_openai_connection() {
 
     let result = service.update_settings(patch).unwrap();
     assert!(result.restart_services.contains(&"runtime".to_string()));
-    assert_eq!(result.settings.cognition.model, "glm-4.7-flash");
+    assert_eq!(result.settings.cognition.model, "zai-org/GLM-5.3-Flash");
 
     service
         .set_secret(SECRET_OPENAI_COMPATIBLE_API_KEY, "shared-api-key")
@@ -140,7 +140,7 @@ fn cognition_selection_persists_and_projects_shared_openai_connection() {
     assert_eq!(
         env.get("OPENAI_COMPATIBLE_REASONING_MODEL")
             .map(String::as_str),
-        Some("glm-4.7-flash")
+        Some("zai-org/GLM-5.3-Flash")
     );
     assert_eq!(
         env.get("OPENAI_COMPATIBLE_API_KEY").map(String::as_str),
@@ -163,7 +163,7 @@ fn chat_and_cognition_provider_selection_projects_separate_models() {
     settings.chat.provider = "deepseek".into();
     settings.chat.model = "deepseek-chat".into();
     settings.cognition.provider = "openai-compatible".into();
-    settings.cognition.model = "glm-4.7-flash".into();
+    settings.cognition.model = "zai-org/GLM-5.3-Flash".into();
 
     let env = combined_env_for_supervisor(&settings, &secrets).unwrap();
     assert_eq!(
@@ -173,7 +173,7 @@ fn chat_and_cognition_provider_selection_projects_separate_models() {
     assert_eq!(
         env.get("OPENAI_COMPATIBLE_REASONING_MODEL")
             .map(String::as_str),
-        Some("glm-4.7-flash")
+        Some("zai-org/GLM-5.3-Flash")
     );
     assert!(env.get("OPENAI_COMPATIBLE_CHAT_MODEL").is_none());
     assert!(env.get("DEEPSEEK_REASONING_MODEL").is_none());

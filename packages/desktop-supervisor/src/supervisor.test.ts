@@ -563,7 +563,7 @@ describe("DesktopSupervisor runtime config push", () => {
         OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
         OPENAI_COMPATIBLE_API_KEY: "shared-secret",
         OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-flash",
-        OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash"
+        OPENAI_COMPATIBLE_REASONING_MODEL: "zai-org/GLM-5.3-Flash"
       },
       unsetEnv: []
     });
@@ -576,7 +576,7 @@ describe("DesktopSupervisor runtime config push", () => {
     expect(env?.["REASONING_PROVIDER_CHAIN"]).toBe("openai-compatible");
     expect(env?.["OPENAI_COMPATIBLE_API_BASEURL"]).toBe("https://gateway.example/v1");
     expect(env?.["OPENAI_COMPATIBLE_CHAT_MODEL"]).toBe("deepseek-flash");
-    expect(env?.["OPENAI_COMPATIBLE_REASONING_MODEL"]).toBe("glm-4.7-flash");
+    expect(env?.["OPENAI_COMPATIBLE_REASONING_MODEL"]).toBe("zai-org/GLM-5.3-Flash");
     expect(env?.["OPENAI_COMPATIBLE_API_KEY"]).toBe("shared-secret");
     expect(JSON.stringify(result)).not.toContain("shared-secret");
     expect(result.appliedEnvKeys).not.toContain("OPENAI_COMPATIBLE_API_KEY");
