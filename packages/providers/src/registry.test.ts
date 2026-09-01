@@ -193,10 +193,10 @@ describe("ProviderRegistry", () => {
       vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         requests.push(body);
-        const model = body.model === "deepseek-flash" ? "chat answer" : "cognition answer";
+        const model = body["model"] === "deepseek-flash" ? "chat answer" : "cognition answer";
         return new Response(
           JSON.stringify({
-            model: body.model,
+            model: body["model"],
             choices: [
               {
                 finish_reason: "stop",
@@ -234,7 +234,10 @@ describe("ProviderRegistry", () => {
       messages: [{ role: "user", content: "decide" }]
     });
 
-    expect(requests.map((request) => request.model)).toEqual(["deepseek-flash", "glm-4.7-flash"]);
+    expect(requests.map((request) => request["model"])).toEqual([
+      "deepseek-flash",
+      "glm-4.7-flash"
+    ]);
     expect(chat.message.content).toBe("chat answer");
     expect(cognition.answer).toBe("cognition answer");
     expect(cognition.reasoning).toBe("");

@@ -95,7 +95,7 @@ describe("runtime settings contract", () => {
     expect(
       validateRuntimeSettings({
         OPENAI_COMPATIBLE_API_BASEURL: "https://user:password@gateway.example/v1"
-      }).fieldErrors.OPENAI_COMPATIBLE_API_BASEURL
+      }).fieldErrors["OPENAI_COMPATIBLE_API_BASEURL"]
     ).toContain("credentials");
   });
 
