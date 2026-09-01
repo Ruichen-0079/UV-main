@@ -19,7 +19,9 @@ const sampleView = (): SettingsViewDto => ({
   settings: {
     schemaVersion: 1,
     app: { language: "en" },
-    chat: { provider: "deepseek", model: "deepseek-chat" },
+    chat: { provider: "openai-compatible", model: "deepseek-ai/DeepSeek-V4-Flash-0731" },
+    cognition: { provider: "openai-compatible", model: "glm-4.7-flash" },
+    openaiCompatible: { baseUrl: "https://api.deepinfra.com/v1/openai" },
     runtime: { mode: "managed", autostart: true, url: "http://127.0.0.1:6121" },
     memory: {
       enabled: true,
@@ -47,7 +49,12 @@ const sampleView = (): SettingsViewDto => ({
     companion: { alwaysOnTop: true },
     proactive: { enabled: false }
   },
-  secrets: { deepseekApiKey: false, databaseUrl: false, memoryLlmApiKey: false },
+  secrets: {
+    deepseekApiKey: false,
+    openaiCompatibleApiKey: false,
+    databaseUrl: false,
+    memoryLlmApiKey: false
+  },
   revision: 1,
   configPath: "C:/Users/test/AppData/Roaming/com.yuvi.companion/settings.json",
   loadError: null
@@ -58,11 +65,14 @@ describe("user settings reducer", () => {
     let state = initialUserSettingsUiState();
     state = reduceUserSettings(state, { type: "load-success", view: sampleView() });
     expect(state.loading).toBe(false);
-    expect(state.form.chatModel).toBe("deepseek-chat");
+    expect(state.form.chatModel).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
+    expect(state.form.cognitionModel).toBe("glm-4.7-flash");
+    expect(state.form.openaiCompatibleBaseUrl).toBe("https://api.deepinfra.com/v1/openai");
     expect(state.form.proactiveEnabled).toBe(false);
     expect(state.form.sttProvider).toBe("dashscope");
     expect(state.form.deepseekApiKeyInput).toBe("");
     expect(state.secrets.deepseekApiKey).toBe(false);
+    expect(state.secrets.openaiCompatibleApiKey).toBe(false);
     assertNoSecretMaterial(state);
   });
 
@@ -90,7 +100,12 @@ describe("user settings reducer", () => {
       restartApplication: false,
       revision: 2,
       settings: sampleView().settings,
-      secrets: { deepseekApiKey: true, databaseUrl: false, memoryLlmApiKey: false },
+      secrets: {
+        deepseekApiKey: true,
+        openaiCompatibleApiKey: false,
+        databaseUrl: false,
+        memoryLlmApiKey: false
+      },
       supervisorSync: { applied: true, error: null }
     };
     state = reduceUserSettings(state, {
@@ -115,7 +130,12 @@ describe("user settings reducer", () => {
       restartApplication: false,
       revision: 3,
       settings: sampleView().settings,
-      secrets: { deepseekApiKey: false, databaseUrl: false, memoryLlmApiKey: false },
+      secrets: {
+        deepseekApiKey: false,
+        openaiCompatibleApiKey: false,
+        databaseUrl: false,
+        memoryLlmApiKey: false
+      },
       supervisorSync: { applied: false, error: "Supervisor unavailable" }
     };
     state = reduceUserSettings(state, {
@@ -143,7 +163,12 @@ describe("user settings reducer", () => {
     state = reduceUserSettings(state, {
       type: "secrets-updated",
       key: "chat.deepseekApiKey",
-      secrets: { deepseekApiKey: true, databaseUrl: false, memoryLlmApiKey: false },
+      secrets: {
+        deepseekApiKey: true,
+        openaiCompatibleApiKey: false,
+        databaseUrl: false,
+        memoryLlmApiKey: false
+      },
       restartServices: ["runtime"],
       supervisorSync: { applied: true, error: null },
       saved: true
@@ -343,6 +368,11 @@ describe("user settings reducer", () => {
       view: sampleView()
     });
     state = reduceUserSettings(state, { type: "field", key: "deepseekApiKeyInput", value: "chat" });
+    state = reduceUserSettings(state, {
+      type: "field",
+      key: "openaiCompatibleApiKeyInput",
+      value: "shared"
+    });
     state = reduceUserSettings(state, { type: "field", key: "databaseUrlInput", value: "db" });
     state = reduceUserSettings(state, {
       type: "field",
@@ -351,6 +381,7 @@ describe("user settings reducer", () => {
     });
     const base = {
       deepseekApiKey: true,
+      openaiCompatibleApiKey: false,
       databaseUrl: true,
       memoryLlmApiKey: true
     };
@@ -363,6 +394,7 @@ describe("user settings reducer", () => {
     });
     expect(state.form.memoryLlmApiKeyInput).toBe("");
     expect(state.form.deepseekApiKeyInput).toBe("chat");
+    expect(state.form.openaiCompatibleApiKeyInput).toBe("shared");
     expect(state.form.databaseUrlInput).toBe("db");
     expect(JSON.stringify(state)).not.toContain("P3_UI_MEMORY_LLM_SECRET_NEVER_EXPOSE");
   });
@@ -373,6 +405,11 @@ describe("user settings reducer", () => {
       view: sampleView()
     });
     state = reduceUserSettings(state, { type: "field", key: "deepseekApiKeyInput", value: "chat" });
+    state = reduceUserSettings(state, {
+      type: "field",
+      key: "openaiCompatibleApiKeyInput",
+      value: "shared"
+    });
     state = reduceUserSettings(state, { type: "field", key: "databaseUrlInput", value: "db" });
     state = reduceUserSettings(state, {
       type: "field",
@@ -385,7 +422,12 @@ describe("user settings reducer", () => {
       restartApplication: false,
       revision: 2,
       settings: sampleView().settings,
-      secrets: { deepseekApiKey: true, databaseUrl: true, memoryLlmApiKey: true },
+      secrets: {
+        deepseekApiKey: true,
+        openaiCompatibleApiKey: false,
+        databaseUrl: true,
+        memoryLlmApiKey: true
+      },
       supervisorSync: { applied: true, error: null }
     };
     const saved = reduceUserSettings(state, {
@@ -394,6 +436,7 @@ describe("user settings reducer", () => {
       clearSecrets: true
     });
     expect(saved.form.deepseekApiKeyInput).toBe("");
+    expect(saved.form.openaiCompatibleApiKeyInput).toBe("");
     expect(saved.form.databaseUrlInput).toBe("");
     expect(saved.form.memoryLlmApiKeyInput).toBe("");
     expect(
@@ -411,7 +454,12 @@ describe("user settings reducer", () => {
       key: "memoryLlmApiKeyInput",
       value: "unsaved-memory-key"
     });
-    const secrets = { deepseekApiKey: true, databaseUrl: true, memoryLlmApiKey: false };
+    const secrets = {
+      deepseekApiKey: true,
+      openaiCompatibleApiKey: false,
+      databaseUrl: true,
+      memoryLlmApiKey: false
+    };
     state = reduceUserSettings(state, {
       type: "secrets-updated",
       key: "chat.deepseekApiKey",
@@ -441,7 +489,12 @@ describe("user settings reducer", () => {
     state = reduceUserSettings(state, {
       type: "secrets-updated",
       key: "memory.llmApiKey",
-      secrets: { deepseekApiKey: false, databaseUrl: false, memoryLlmApiKey: false },
+      secrets: {
+        deepseekApiKey: false,
+        openaiCompatibleApiKey: false,
+        databaseUrl: false,
+        memoryLlmApiKey: false
+      },
       restartServices: ["memory"],
       supervisorSync: { applied: true, error: null },
       saved: true

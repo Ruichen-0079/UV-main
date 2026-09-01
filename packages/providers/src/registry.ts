@@ -93,6 +93,7 @@ export type ProviderRegistryConfig = {
     apiKey: string | undefined;
     baseUrl: string | undefined;
     chatModel: string | undefined;
+    reasoningModel: string | undefined;
     proactiveDecisionModel: string | undefined;
     assistantContinuationFormat: "deepseek-v4" | undefined;
   };
@@ -413,11 +414,13 @@ export class ProviderRegistry implements ProviderResolver {
       );
     }
 
-    if (capability === "chat" && name === "openai-compatible") {
+    if ((capability === "chat" || capability === "reasoning") && name === "openai-compatible") {
       return Boolean(
         this.config.openaiCompatible.apiKey &&
         this.config.openaiCompatible.baseUrl &&
-        this.config.openaiCompatible.chatModel
+        (capability === "chat"
+          ? this.config.openaiCompatible.chatModel
+          : this.config.openaiCompatible.reasoningModel)
       );
     }
 
@@ -481,11 +484,16 @@ export class ProviderRegistry implements ProviderResolver {
           : [])
       ];
     }
-    if (capability === "chat" && name === "openai-compatible") {
+    if ((capability === "chat" || capability === "reasoning") && name === "openai-compatible") {
       return [
         ...(!this.config.openaiCompatible.baseUrl ? ["OPENAI_COMPATIBLE_API_BASEURL"] : []),
         ...(!this.config.openaiCompatible.apiKey ? ["OPENAI_COMPATIBLE_API_KEY"] : []),
-        ...(!this.config.openaiCompatible.chatModel ? ["OPENAI_COMPATIBLE_CHAT_MODEL"] : [])
+        ...(capability === "chat" && !this.config.openaiCompatible.chatModel
+          ? ["OPENAI_COMPATIBLE_CHAT_MODEL"]
+          : []),
+        ...(capability === "reasoning" && !this.config.openaiCompatible.reasoningModel
+          ? ["OPENAI_COMPATIBLE_REASONING_MODEL"]
+          : [])
       ];
     }
     if (name === "nvidia") {
@@ -559,10 +567,13 @@ export class ProviderRegistry implements ProviderResolver {
       };
     }
 
-    if (capability === "chat" && name === "openai-compatible") {
+    if ((capability === "chat" || capability === "reasoning") && name === "openai-compatible") {
       return {
         baseUrl: this.config.openaiCompatible.baseUrl,
-        model: this.config.openaiCompatible.chatModel
+        model:
+          capability === "chat"
+            ? this.config.openaiCompatible.chatModel
+            : this.config.openaiCompatible.reasoningModel
       };
     }
 
@@ -742,7 +753,9 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       ),
       reasoning: parseProviderChain(
         env["REASONING_PROVIDER_CHAIN"],
-        ["deepseek", "nvidia", "local", "mock"],
+        env["DEFAULT_REASONING_PROVIDER"] === "openai-compatible"
+          ? ["openai-compatible", "deepseek", "nvidia", "local", "mock"]
+          : ["deepseek", "nvidia", "local", "mock"],
         allowMocks
       ),
       embedding: parseProviderChain(
@@ -798,6 +811,7 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       apiKey: emptyToUndefined(env["OPENAI_COMPATIBLE_API_KEY"]),
       baseUrl: emptyToUndefined(env["OPENAI_COMPATIBLE_API_BASEURL"]),
       chatModel: emptyToUndefined(env["OPENAI_COMPATIBLE_CHAT_MODEL"]),
+      reasoningModel: emptyToUndefined(env["OPENAI_COMPATIBLE_REASONING_MODEL"]),
       proactiveDecisionModel: emptyToUndefined(env["OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL"]),
       assistantContinuationFormat: parseAssistantContinuationFormat(
         env["OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT"]
@@ -863,6 +877,36 @@ export function validateRequiredProviderConfig(config: ProviderRegistryConfig): 
   ) {
     errors.push(
       "OPENAI_COMPATIBLE_API_BASEURL is required when DEFAULT_CHAT_PROVIDER=openai-compatible."
+    );
+  }
+
+  if (
+    !config.allowMocks &&
+    config.defaults.reasoning === "openai-compatible" &&
+    !config.openaiCompatible.baseUrl
+  ) {
+    errors.push(
+      "OPENAI_COMPATIBLE_API_BASEURL is required when DEFAULT_REASONING_PROVIDER=openai-compatible."
+    );
+  }
+
+  if (
+    !config.allowMocks &&
+    config.defaults.reasoning === "openai-compatible" &&
+    !config.openaiCompatible.apiKey
+  ) {
+    errors.push(
+      "OPENAI_COMPATIBLE_API_KEY is required when DEFAULT_REASONING_PROVIDER=openai-compatible."
+    );
+  }
+
+  if (
+    !config.allowMocks &&
+    config.defaults.reasoning === "openai-compatible" &&
+    !config.openaiCompatible.reasoningModel
+  ) {
+    errors.push(
+      "OPENAI_COMPATIBLE_REASONING_MODEL is required when DEFAULT_REASONING_PROVIDER=openai-compatible."
     );
   }
 
@@ -963,6 +1007,23 @@ const chatProviderFactories: Record<string, ProviderFactory<ChatProvider>> = {
 };
 
 const reasoningProviderFactories: Record<string, ProviderFactory<ReasoningProvider>> = {
+  "openai-compatible"(config) {
+    if (
+      !config.openaiCompatible.apiKey ||
+      !config.openaiCompatible.baseUrl ||
+      !config.openaiCompatible.reasoningModel
+    ) {
+      return undefined;
+    }
+
+    return new OpenAICompatibleReasoningProvider({
+      provider: "openai-compatible",
+      apiKey: config.openaiCompatible.apiKey,
+      baseUrl: config.openaiCompatible.baseUrl,
+      model: config.openaiCompatible.reasoningModel,
+      includeRawResponse: config.includeRawProviderResponses
+    });
+  },
   deepseek(config) {
     if (!config.deepseek.apiKey || !config.deepseek.reasoningModel) {
       return undefined;
@@ -1287,11 +1348,16 @@ function missingFieldsForConfig(
         : [])
     ];
   }
-  if (capability === "chat" && name === "openai-compatible") {
+  if ((capability === "chat" || capability === "reasoning") && name === "openai-compatible") {
     return [
       ...(!config.openaiCompatible.baseUrl ? ["OPENAI_COMPATIBLE_API_BASEURL"] : []),
       ...(!config.openaiCompatible.apiKey ? ["OPENAI_COMPATIBLE_API_KEY"] : []),
-      ...(!config.openaiCompatible.chatModel ? ["OPENAI_COMPATIBLE_CHAT_MODEL"] : [])
+      ...(capability === "chat" && !config.openaiCompatible.chatModel
+        ? ["OPENAI_COMPATIBLE_CHAT_MODEL"]
+        : []),
+      ...(capability === "reasoning" && !config.openaiCompatible.reasoningModel
+        ? ["OPENAI_COMPATIBLE_REASONING_MODEL"]
+        : [])
     ];
   }
   if (name === "nvidia") {

@@ -13,7 +13,10 @@ describe("runtime settings contract", () => {
     expect(editableKeys.every((key) => getRuntimeSettingApplyMode(key))).toBe(true);
     expect(getRuntimeSettingApplyMode("SERVER_PORT")).toBe("restart_required");
     expect(getRuntimeSettingApplyMode("DEEPSEEK_CHAT_MODEL")).toBe("hot_reload");
+    expect(getRuntimeSettingApplyMode("DEFAULT_CHAT_PROVIDER")).toBe("hot_reload");
+    expect(getRuntimeSettingApplyMode("DEFAULT_REASONING_PROVIDER")).toBe("hot_reload");
     expect(getRuntimeSettingApplyMode("OPENAI_COMPATIBLE_CHAT_MODEL")).toBe("hot_reload");
+    expect(getRuntimeSettingApplyMode("OPENAI_COMPATIBLE_REASONING_MODEL")).toBe("hot_reload");
     expect(getRuntimeSettingApplyMode("OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL")).toBe(
       "hot_reload"
     );
@@ -54,6 +57,8 @@ describe("runtime settings contract", () => {
       EVENT_BUS: "nats",
       SERVER_PORT: "6121abc",
       PROVIDER_ALLOW_MOCKS: "maybe",
+      DEFAULT_CHAT_PROVIDER: "unsupported",
+      DEFAULT_REASONING_PROVIDER: "",
       CHAT_PROVIDER_CHAIN: "deepseek,unknown",
       OPENAI_COMPATIBLE_API_BASEURL: "not-a-url",
       OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT: "unknown",
@@ -67,6 +72,8 @@ describe("runtime settings contract", () => {
       EMBEDDING_PROVIDER: expect.any(String),
       SERVER_PORT: expect.any(String),
       PROVIDER_ALLOW_MOCKS: expect.any(String),
+      DEFAULT_CHAT_PROVIDER: expect.any(String),
+      DEFAULT_REASONING_PROVIDER: expect.any(String),
       CHAT_PROVIDER_CHAIN: expect.any(String),
       OPENAI_COMPATIBLE_API_BASEURL: expect.any(String),
       OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT: expect.any(String),
@@ -85,6 +92,11 @@ describe("runtime settings contract", () => {
     expect(validateRuntimeSettings({ EMBEDDING_PROVIDER: "" }).fieldErrors).toMatchObject({
       EMBEDDING_PROVIDER: expect.any(String)
     });
+    expect(
+      validateRuntimeSettings({
+        OPENAI_COMPATIBLE_API_BASEURL: "https://user:password@gateway.example/v1"
+      }).fieldErrors.OPENAI_COMPATIBLE_API_BASEURL
+    ).toContain("credentials");
   });
 
   it("redacts URL userinfo without changing the URL path", () => {

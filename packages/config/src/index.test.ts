@@ -95,6 +95,38 @@ describe("runtime config", () => {
     expect(() => validateRuntimeConfig(config)).not.toThrow();
   });
 
+  it("parses and validates the generic OpenAI-compatible Cognition endpoint", () => {
+    const config = parseRuntimeConfig({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "openai-compatible",
+      DEFAULT_REASONING_PROVIDER: "openai-compatible",
+      OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
+      OPENAI_COMPATIBLE_API_KEY: "gateway-secret",
+      OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-flash",
+      OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash",
+      EMBEDDING_API_KEY: "embedding-secret",
+      EMBEDDING_MODEL: "embedding-model"
+    });
+
+    expect(config.providers.endpoints.reasoning).toMatchObject({
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "gateway-secret",
+      model: "glm-4.7-flash"
+    });
+    expect(() => validateRuntimeConfig(config)).not.toThrow();
+
+    const missingBaseUrl = parseRuntimeConfig({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_REASONING_PROVIDER: "openai-compatible",
+      OPENAI_COMPATIBLE_API_KEY: "gateway-secret",
+      OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash"
+    });
+    expect(() => validateRuntimeConfig(missingBaseUrl)).toThrow(/reasoning\.baseUrl/);
+  });
+
   it("redacts secrets and authorization-like fields", () => {
     expect(redactSecret("sk-1234567890")).toBe("sk-...[redacted]...890");
 

@@ -15,6 +15,8 @@ export const editableKeys = [
   "YUVI_DEV_SUPERVISOR",
   "EVENT_BUS",
   "PROVIDER_ALLOW_MOCKS",
+  "DEFAULT_CHAT_PROVIDER",
+  "DEFAULT_REASONING_PROVIDER",
   "CHAT_PROVIDER_CHAIN",
   "REASONING_PROVIDER_CHAIN",
   "EMBEDDING_PROVIDER_CHAIN",
@@ -30,6 +32,7 @@ export const editableKeys = [
   "OPENAI_COMPATIBLE_API_BASEURL",
   "OPENAI_COMPATIBLE_API_KEY",
   "OPENAI_COMPATIBLE_CHAT_MODEL",
+  "OPENAI_COMPATIBLE_REASONING_MODEL",
   "OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL",
   "OPENAI_COMPATIBLE_ASSISTANT_CONTINUATION_FORMAT",
   "XAI_API_BASEURL",
@@ -161,11 +164,16 @@ const booleanKeys = new Set<EditableRuntimeSetting>([
 
 const providerChainRules: Record<string, Set<string>> = {
   CHAT_PROVIDER_CHAIN: new Set(["openai-compatible", "deepseek", "nvidia", "local", "mock"]),
-  REASONING_PROVIDER_CHAIN: new Set(["deepseek", "nvidia", "local", "mock"]),
+  REASONING_PROVIDER_CHAIN: new Set(["openai-compatible", "deepseek", "nvidia", "local", "mock"]),
   EMBEDDING_PROVIDER_CHAIN: new Set(["openai-compatible", "nvidia", "local", "mock"]),
   TTS_PROVIDER_CHAIN: new Set(["xai", "local", "mock"]),
   STT_PROVIDER_CHAIN: new Set(["dashscope", "local", "mock"]),
   VISION_PROVIDER_CHAIN: new Set(["xai", "nvidia", "local", "mock"])
+};
+
+const providerSelectionRules: Record<string, Set<string>> = {
+  DEFAULT_CHAT_PROVIDER: new Set(["openai-compatible", "deepseek", "nvidia", "local", "mock"]),
+  DEFAULT_REASONING_PROVIDER: new Set(["openai-compatible", "deepseek", "nvidia", "local", "mock"])
 };
 
 const embeddingProviderNames = new Set(["openai-compatible", "nvidia", "local", "mock"]);
@@ -300,10 +308,28 @@ export function validateRuntimeSettings(
     }
   }
 
+  for (const [key, supported] of Object.entries(providerSelectionRules)) {
+    const candidate = value(key);
+    if (candidate === undefined) continue;
+    const selected = candidate.trim();
+    if (!selected || !supported.has(selected)) {
+      add(
+        key,
+        `Unsupported provider selection. Supported providers: ${Array.from(supported).join(", ")}.`
+      );
+    }
+  }
+
   for (const key of urlKeys) {
     const candidate = value(key)?.trim();
     if (candidate && !isHttpUrl(candidate)) {
       add(key, "Expected a valid http:// or https:// URL.");
+    } else if (
+      candidate &&
+      key === "OPENAI_COMPATIBLE_API_BASEURL" &&
+      urlHasCredentials(candidate)
+    ) {
+      add(key, "URL credentials are not allowed; store the API key separately.");
     }
   }
 
@@ -389,6 +415,15 @@ function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
     return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function urlHasCredentials(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return Boolean(url.username || url.password);
   } catch {
     return false;
   }

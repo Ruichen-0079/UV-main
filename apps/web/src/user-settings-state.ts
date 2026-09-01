@@ -8,12 +8,18 @@ export type MemoryBackend = "mem0" | "legacy";
 export type MemoryLlmProvider = "none" | "deepseek" | "openai";
 export type SttProvider = "local" | "dashscope";
 
-export type UserSecretKey = "chat.deepseekApiKey" | "memory.databaseUrl" | "memory.llmApiKey";
+export type UserSecretKey =
+  | "chat.deepseekApiKey"
+  | "models.openaiCompatibleApiKey"
+  | "memory.databaseUrl"
+  | "memory.llmApiKey";
 
 export type UserSettingsDto = {
   schemaVersion: number;
   app: { language: string };
   chat: { provider: string; model: string };
+  cognition: { provider: string; model: string };
+  openaiCompatible: { baseUrl: string };
   runtime: { mode: ServiceMode; autostart: boolean; url: string };
   memory: {
     enabled: boolean;
@@ -50,6 +56,7 @@ export type TtsSettingsProjection = Pick<UserSettingsDto["tts"], "enabled" | "mo
 
 export type SecretStatusDto = {
   deepseekApiKey: boolean;
+  openaiCompatibleApiKey: boolean;
   databaseUrl: boolean;
   memoryLlmApiKey: boolean;
 };
@@ -137,7 +144,11 @@ export type UserSettingsForm = {
   language: string;
   chatProvider: string;
   chatModel: string;
+  cognitionProvider: string;
+  cognitionModel: string;
+  openaiCompatibleBaseUrl: string;
   deepseekApiKeyInput: string;
+  openaiCompatibleApiKeyInput: string;
   runtimeMode: ServiceMode;
   runtimeAutostart: boolean;
   runtimeUrl: string;
@@ -181,15 +192,20 @@ export type UserSettingsUiState = {
 
 export const emptySecretStatus = (): SecretStatusDto => ({
   deepseekApiKey: false,
+  openaiCompatibleApiKey: false,
   databaseUrl: false,
   memoryLlmApiKey: false
 });
 
 export const defaultUserSettingsForm = (): UserSettingsForm => ({
   language: "en",
-  chatProvider: "deepseek",
-  chatModel: "deepseek-chat",
+  chatProvider: "openai-compatible",
+  chatModel: "deepseek-ai/DeepSeek-V4-Flash-0731",
+  cognitionProvider: "openai-compatible",
+  cognitionModel: "glm-4.7-flash",
+  openaiCompatibleBaseUrl: "https://api.deepinfra.com/v1/openai",
   deepseekApiKeyInput: "",
+  openaiCompatibleApiKeyInput: "",
   runtimeMode: "managed",
   runtimeAutostart: true,
   runtimeUrl: "http://127.0.0.1:6121",
@@ -237,7 +253,11 @@ export function formFromView(view: SettingsViewDto): UserSettingsForm {
     language: s.app.language,
     chatProvider: s.chat.provider,
     chatModel: s.chat.model,
+    cognitionProvider: s.cognition.provider,
+    cognitionModel: s.cognition.model,
+    openaiCompatibleBaseUrl: s.openaiCompatible.baseUrl,
     deepseekApiKeyInput: "",
+    openaiCompatibleApiKeyInput: "",
     runtimeMode: s.runtime.mode,
     runtimeAutostart: s.runtime.autostart,
     runtimeUrl: s.runtime.url,
@@ -271,6 +291,8 @@ export function patchFromForm(form: UserSettingsForm): Record<string, unknown> {
   return {
     app: { language: form.language },
     chat: { provider: form.chatProvider, model: form.chatModel },
+    cognition: { provider: form.cognitionProvider, model: form.cognitionModel },
+    openaiCompatible: { baseUrl: form.openaiCompatibleBaseUrl },
     runtime: {
       mode: form.runtimeMode,
       autostart: form.runtimeAutostart,
@@ -345,6 +367,28 @@ export function assertNoSecretMaterial(payload: unknown): void {
 }
 
 export function validateUserSettingsForm(form: UserSettingsForm): string | null {
+  for (const [label, provider, model] of [
+    ["Chat", form.chatProvider, form.chatModel],
+    ["Cognition", form.cognitionProvider, form.cognitionModel]
+  ] as const) {
+    if (provider !== "deepseek" && provider !== "openai-compatible") {
+      return `${label} provider must be DeepSeek or OpenAI-compatible.`;
+    }
+    if (!model.trim()) {
+      return `${label} model is required.`;
+    }
+  }
+  if (form.chatProvider === "openai-compatible" || form.cognitionProvider === "openai-compatible") {
+    const baseUrl = form.openaiCompatibleBaseUrl.trim();
+    try {
+      const parsed = new URL(baseUrl);
+      if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) {
+        return "OpenAI-compatible base URL must use HTTP(S) without credentials.";
+      }
+    } catch {
+      return "OpenAI-compatible base URL must be a valid HTTP(S) URL without credentials.";
+    }
+  }
   if (form.memoryLlmProvider !== "none" && !form.memoryLlmModel.trim()) {
     return "Memory LLM model is required when a provider is selected.";
   }
@@ -435,10 +479,12 @@ export function reduceUserSettings(
       });
       if (action.clearSecrets) {
         form.deepseekApiKeyInput = "";
+        form.openaiCompatibleApiKeyInput = "";
         form.databaseUrlInput = "";
         form.memoryLlmApiKeyInput = "";
       } else {
         form.deepseekApiKeyInput = state.form.deepseekApiKeyInput;
+        form.openaiCompatibleApiKeyInput = state.form.openaiCompatibleApiKeyInput;
         form.databaseUrlInput = state.form.databaseUrlInput;
         form.memoryLlmApiKeyInput = state.form.memoryLlmApiKeyInput;
       }
@@ -464,6 +510,7 @@ export function reduceUserSettings(
       const restart = action.restartServices ?? state.lastRestartServices;
       const form = { ...state.form };
       if (action.key === "chat.deepseekApiKey") form.deepseekApiKeyInput = "";
+      if (action.key === "models.openaiCompatibleApiKey") form.openaiCompatibleApiKeyInput = "";
       if (action.key === "memory.databaseUrl") form.databaseUrlInput = "";
       if (action.key === "memory.llmApiKey") form.memoryLlmApiKeyInput = "";
       return {

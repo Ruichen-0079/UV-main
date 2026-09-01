@@ -797,6 +797,17 @@ export type RuntimeSettingsResponse = {
         reasoning: ProviderHealth;
       };
     };
+    openaiCompatible: {
+      baseUrl: string;
+      apiKeyConfigured: boolean;
+      apiKeyPreview?: string;
+      chatModel: string;
+      reasoningModel: string;
+      status?: {
+        chat: ProviderHealth;
+        reasoning: ProviderHealth;
+      };
+    };
     xai: {
       baseUrl: string;
       apiKeyConfigured: boolean;

@@ -1297,6 +1297,41 @@ describe("server", () => {
     }
   });
 
+  it("reports the selected OpenAI-compatible Chat and Cognition health metadata", async () => {
+    const app = await buildTestServer({
+      DEFAULT_CHAT_PROVIDER: "openai-compatible",
+      CHAT_PROVIDER_CHAIN: "openai-compatible",
+      DEFAULT_REASONING_PROVIDER: "openai-compatible",
+      REASONING_PROVIDER_CHAIN: "openai-compatible",
+      OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
+      OPENAI_COMPATIBLE_API_KEY: "shared-secret",
+      OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-flash",
+      OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash"
+    });
+
+    try {
+      const response = await app.inject({ method: "GET", url: "/providers/status" });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().providers.chat).toMatchObject({
+        provider: "openai-compatible",
+        model: "deepseek-flash",
+        baseUrl: "https://gateway.example/v1",
+        configured: true,
+        available: true
+      });
+      expect(response.json().providers.reasoning).toMatchObject({
+        provider: "openai-compatible",
+        model: "glm-4.7-flash",
+        baseUrl: "https://gateway.example/v1",
+        configured: true,
+        available: true
+      });
+      expect(response.body).not.toContain("shared-secret");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("verifies providers only when explicit endpoints are called", async () => {
     const app = await buildTestServer();
 

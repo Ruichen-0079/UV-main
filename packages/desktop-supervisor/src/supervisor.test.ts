@@ -552,6 +552,36 @@ describe("DesktopSupervisor runtime config push", () => {
     expect(envB?.["DEEPSEEK_API_KEY"]).toBe("key-B");
   });
 
+  it("propagates the selected Chat and Cognition model paths to packaged Runtime", async () => {
+    const supervisor = createSupervisor(baseConfig());
+    const result = await supervisor.applyRuntimeConfig({
+      env: {
+        DEFAULT_CHAT_PROVIDER: "openai-compatible",
+        CHAT_PROVIDER_CHAIN: "openai-compatible",
+        DEFAULT_REASONING_PROVIDER: "openai-compatible",
+        REASONING_PROVIDER_CHAIN: "openai-compatible",
+        OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
+        OPENAI_COMPATIBLE_API_KEY: "shared-secret",
+        OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-flash",
+        OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash"
+      },
+      unsetEnv: []
+    });
+
+    expect(result.restartedServices).toContain("runtime");
+    const env = supervisor.resolveSpawnEnv("runtime");
+    expect(env?.["DEFAULT_CHAT_PROVIDER"]).toBe("openai-compatible");
+    expect(env?.["CHAT_PROVIDER_CHAIN"]).toBe("openai-compatible");
+    expect(env?.["DEFAULT_REASONING_PROVIDER"]).toBe("openai-compatible");
+    expect(env?.["REASONING_PROVIDER_CHAIN"]).toBe("openai-compatible");
+    expect(env?.["OPENAI_COMPATIBLE_API_BASEURL"]).toBe("https://gateway.example/v1");
+    expect(env?.["OPENAI_COMPATIBLE_CHAT_MODEL"]).toBe("deepseek-flash");
+    expect(env?.["OPENAI_COMPATIBLE_REASONING_MODEL"]).toBe("glm-4.7-flash");
+    expect(env?.["OPENAI_COMPATIBLE_API_KEY"]).toBe("shared-secret");
+    expect(JSON.stringify(result)).not.toContain("shared-secret");
+    expect(result.appliedEnvKeys).not.toContain("OPENAI_COMPATIBLE_API_KEY");
+  });
+
   it("projects local STT selection and preserves the Supervisor-owned command", async () => {
     const supervisor = createSupervisor(
       baseConfig({
