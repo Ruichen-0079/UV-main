@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useMemo,
-  useReducer,
-  useRef,
-  useState
-} from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   apiClient,
   type DashboardWebSocketMessage,
@@ -64,12 +58,10 @@ import {
   deriveDashboardTtsPolicy,
   flushDashboardSpeechTail
 } from "./dashboard-chat-speech.js";
+import { CompanionBus } from "./companion-bus.js";
+import { createEmbodiedPresentationRequest } from "@companion/protocol";
 
-export {
-  dashboardVoicePlaybackStatusLabel,
-  deriveDashboardTtsPolicy,
-  flushDashboardSpeechTail
-};
+export { dashboardVoicePlaybackStatusLabel, deriveDashboardTtsPolicy, flushDashboardSpeechTail };
 
 type PageId =
   | "overview"
@@ -110,10 +102,29 @@ export function App(): JSX.Element {
   const eventState = useAsyncData((signal) => apiClient.listRecentEvents(50, signal), []);
   const [localEvents, setLocalEvents] = useState<RuntimeEvent[]>([]);
   const [liveEvents, setLiveEvents] = useState<RuntimeEvent[]>([]);
+  const embodiedBusRef = useRef<CompanionBus | null>(null);
+  useEffect(() => {
+    const bus = new CompanionBus("main");
+    embodiedBusRef.current = bus;
+    return () => {
+      bus.close();
+      embodiedBusRef.current = null;
+    };
+  }, []);
   const [eventsPaused, setEventsPaused] = useState(false);
   const wsStatus = useDashboardEventStream({
     paused: eventsPaused,
-    onEvent: (event) => setLiveEvents((current) => [event, ...current].slice(0, 100))
+    onEvent: (event) => {
+      setLiveEvents((current) => [event, ...current].slice(0, 100));
+      if (event.type === "runtime.embodied.presentation.request") {
+        try {
+          const request = createEmbodiedPresentationRequest(event.payload);
+          embodiedBusRef.current?.post({ kind: "embodied-presentation-request", request });
+        } catch {
+          // Dashboard transport must fail closed on malformed Runtime input.
+        }
+      }
+    }
   });
 
   const events = useMemo(
@@ -268,8 +279,6 @@ function OverviewPage(props: {
     </PageShell>
   );
 }
-
-
 function ProvidersPage(props: {
   state: ReturnType<typeof useAsyncData<ProvidersStatusResponse>>;
 }): JSX.Element {
@@ -712,11 +721,11 @@ function isDashboardConnectedMessage(
 function isRuntimeEvent(value: unknown): value is RuntimeEvent {
   return Boolean(
     value &&
-      typeof value === "object" &&
-      "id" in value &&
-      "type" in value &&
-      "traceId" in value &&
-      "payload" in value
+    typeof value === "object" &&
+    "id" in value &&
+    "type" in value &&
+    "traceId" in value &&
+    "payload" in value
   );
 }
 
@@ -1421,9 +1430,9 @@ async function loadFileAsBase64(
 function isTTSResult(value: unknown): value is { audioBase64: string; mimeType: string } {
   return Boolean(
     value &&
-      typeof value === "object" &&
-      typeof (value as { audioBase64?: unknown }).audioBase64 === "string" &&
-      typeof (value as { mimeType?: unknown }).mimeType === "string"
+    typeof value === "object" &&
+    typeof (value as { audioBase64?: unknown }).audioBase64 === "string" &&
+    typeof (value as { mimeType?: unknown }).mimeType === "string"
   );
 }
 
@@ -1433,8 +1442,6 @@ function friendlyMediaError(message: string): string {
   }
   return message;
 }
-
-
 function formatIncludedScopes(scopes: Array<{ scope: string; scopeId?: string | null }>): string {
   if (scopes.length === 0) {
     return "none";

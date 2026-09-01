@@ -1,4 +1,5 @@
 import { resolveApiBaseUrl } from "../desktop-runtime.js";
+import type { EmbodiedPresentationOutcomeReport } from "@companion/protocol";
 import {
   MessageSseParser,
   MessageStreamError,
@@ -1433,6 +1434,13 @@ export const apiClient = {
 
   createDashboardWebSocket(): WebSocket {
     return new WebSocket(getWebSocketUrl("/ws?dashboard=true"));
+  },
+
+  async postEmbodiedPresentationOutcome(report: EmbodiedPresentationOutcomeReport): Promise<void> {
+    await request("/v1/embodied-presentation/outcome", {
+      method: "POST",
+      body: JSON.stringify(report)
+    });
   }
 };
 

@@ -247,7 +247,8 @@ export class RuntimeOrchestrator {
     decision: RuntimeEmbodiedEffectRecordInitializationDecision,
     traceAnchor: RuntimeEvent,
     present: (
-      request: EmbodiedPresentationRequest
+      request: EmbodiedPresentationRequest,
+      traceAnchor: RuntimeEvent
     ) => EmbodiedPresentationOutcomeReport | Promise<EmbodiedPresentationOutcomeReport>
   ): Promise<RuntimeEmbodiedPresentationExecutionResult> {
     return executeRuntimeEmbodiedPresentation(
@@ -256,6 +257,32 @@ export class RuntimeOrchestrator {
       present,
       this.options.eventBus
     );
+  }
+
+  private scheduleEmbodiedPresentation(reply: AgentReplyEvent): void {
+    const port = this.options.embodiedPresentation;
+    if (!port) return;
+
+    let decision: RuntimeEmbodiedEffectRecordInitializationDecision | null;
+    try {
+      decision = port.propose(reply);
+    } catch (error) {
+      void this.publishRuntimeError("Character embodied proposal failed.", error, {
+        traceId: reply.traceId,
+        parentId: reply.id,
+        category: "embodied"
+      });
+      return;
+    }
+    if (decision === null) return;
+
+    void this.executeAdmittedEmbodiedPresentation(decision, reply, port.present).catch((error) => {
+      void this.publishRuntimeError("Embodied Presentation execution failed.", error, {
+        traceId: reply.traceId,
+        parentId: reply.id,
+        category: "embodied"
+      });
+    });
   }
 
   getLifecycleState(): RuntimeLifecycleState {
@@ -944,6 +971,7 @@ export class RuntimeOrchestrator {
         });
         const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
         await this.options.eventBus.publish(assistantMessage);
+        this.scheduleEmbodiedPresentation(reply);
 
         // Final persistence and user-visible events establish the completed reply.
         // Optional post-processing must not move it back to failed/cancelled or
@@ -1304,6 +1332,7 @@ export class RuntimeOrchestrator {
         this.recordDirectContextAssistant(input.sessionId, reply);
         const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
         await this.options.eventBus.publish(assistantMessage);
+        this.scheduleEmbodiedPresentation(reply);
         finalized = true;
 
         yield {
