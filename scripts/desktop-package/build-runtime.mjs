@@ -95,37 +95,67 @@ export function isNodeBuiltin(specifier) {
   return NODE_BUILTINS.has(bare) || NODE_BUILTINS.has(specifier);
 }
 
+function isDisallowedExternalSpecifier(pathSpec, isExternal) {
+  if (!isExternal) return false;
+  const spec = String(pathSpec ?? "");
+  if (!spec) return false;
+  // esbuild internal markers such as "<runtime>"
+  if (spec.startsWith("<") && spec.endsWith(">")) return false;
+  if (isNodeBuiltin(spec)) return false;
+  const pkgName = packageNameFromSpecifier(spec);
+  if (ALLOWED_OPTIONAL_NATIVE_EXTERNALS.has(pkgName)) return false;
+  // Absolute/relative file paths are not package externals.
+  if (spec.startsWith(".") || spec.startsWith("/") || /^[A-Za-z]:/.test(spec)) return false;
+  return true;
+}
+
+/**
+ * Preserve the fail-closed package-external rule while reporting the exact
+ * metafile importer that produced each unresolved package reference.
+ */
+export function collectDisallowedExternalDetails(metafile) {
+  const details = [];
+  const seen = new Set();
+  const collect = (section, importer, imp) => {
+    if (!isDisallowedExternalSpecifier(imp?.path, Boolean(imp?.external))) return;
+    const detail = {
+      specifier: String(imp.path),
+      section,
+      importer,
+      kind: String(imp.kind ?? "unknown")
+    };
+    const key = `${detail.section}\u0000${detail.importer}\u0000${detail.kind}\u0000${detail.specifier}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    details.push(detail);
+  };
+
+  for (const [importer, info] of Object.entries(metafile?.inputs ?? {})) {
+    for (const imp of info.imports ?? []) {
+      collect("input", importer, imp);
+    }
+  }
+  for (const [importer, info] of Object.entries(metafile?.outputs ?? {})) {
+    for (const imp of info.imports ?? []) {
+      collect("output", importer, imp);
+    }
+  }
+
+  return details.sort((a, b) =>
+    `${a.specifier}\u0000${a.section}\u0000${a.importer}\u0000${a.kind}`.localeCompare(
+      `${b.specifier}\u0000${b.section}\u0000${b.importer}\u0000${b.kind}`
+    )
+  );
+}
+
 /**
  * Collect package-like external imports from an esbuild metafile.
  * Returns unresolved third-party package names (not builtins / allowed natives).
  */
 export function collectDisallowedExternals(metafile) {
-  const disallowed = new Set();
-  const consider = (pathSpec, isExternal) => {
-    if (!isExternal) return;
-    const spec = String(pathSpec ?? "");
-    if (!spec) return;
-    // esbuild internal markers such as "<runtime>"
-    if (spec.startsWith("<") && spec.endsWith(">")) return;
-    if (isNodeBuiltin(spec)) return;
-    const pkgName = packageNameFromSpecifier(spec);
-    if (ALLOWED_OPTIONAL_NATIVE_EXTERNALS.has(pkgName)) return;
-    // Absolute/relative file paths are not package externals.
-    if (spec.startsWith(".") || spec.startsWith("/") || /^[A-Za-z]:/.test(spec)) return;
-    disallowed.add(spec);
-  };
-
-  for (const info of Object.values(metafile?.inputs ?? {})) {
-    for (const imp of info.imports ?? []) {
-      consider(imp.path, Boolean(imp.external));
-    }
-  }
-  for (const info of Object.values(metafile?.outputs ?? {})) {
-    for (const imp of info.imports ?? []) {
-      consider(imp.path, Boolean(imp.external));
-    }
-  }
-  return [...disallowed].sort();
+  return [
+    ...new Set(collectDisallowedExternalDetails(metafile).map((detail) => detail.specifier))
+  ].sort();
 }
 
 export function packageNameFromSpecifier(specifier) {
@@ -192,10 +222,17 @@ const __dirname = __yuviDirname(__filename);
   }
 
   writeJson(metafilePath, result.metafile);
-  const disallowed = collectDisallowedExternals(result.metafile);
+  const disallowedDetails = collectDisallowedExternalDetails(result.metafile);
+  const disallowed = [...new Set(disallowedDetails.map((detail) => detail.specifier))].sort();
   if (disallowed.length > 0) {
+    const origins = disallowedDetails
+      .map(
+        (detail) =>
+          `${detail.specifier} <- ${detail.section}:${detail.importer} [${detail.kind}]`
+      )
+      .join("; ");
     throw new Error(
-      `Runtime bundle has disallowed external packages (would need node_modules at runtime): ${disallowed.join(", ")}`
+      `Runtime bundle has disallowed external packages (would need node_modules at runtime): ${disallowed.join(", ")}. Origins: ${origins}`
     );
   }
 
