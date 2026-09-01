@@ -150,6 +150,12 @@ export {
   type RuntimeEmbodiedPresentationRequestProjection
 } from "./runtime-embodied-presentation-request-projection.js";
 
+export {
+  RUNTIME_EMBODIED_PRESENTATION_EXECUTION_7AK_VERSION,
+  executeRuntimeEmbodiedPresentation,
+  type RuntimeEmbodiedPresentationExecutionResult
+} from "./runtime-embodied-presentation-execution.js";
+
 export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,

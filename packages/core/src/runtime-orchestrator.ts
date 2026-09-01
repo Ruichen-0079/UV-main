@@ -99,6 +99,15 @@ import type {
   SafeProviderCallMetadata,
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
+import {
+  executeRuntimeEmbodiedPresentation,
+  type RuntimeEmbodiedPresentationExecutionResult
+} from "./runtime-embodied-presentation-execution.js";
+import type { RuntimeEmbodiedEffectRecordInitializationDecision } from "./runtime-embodied-effect-record-initialization.js";
+import type {
+  EmbodiedPresentationOutcomeReport,
+  EmbodiedPresentationRequest
+} from "@companion/protocol";
 import { AssistantTurnConflictError, ConversationPersistenceError } from "./runtime-errors.js";
 
 const assistantTurnClaimRetentionMs = 15 * 60 * 1000;
@@ -227,6 +236,26 @@ export class RuntimeOrchestrator {
 
   getLatestPromptPreview(): RuntimePromptPreview | null {
     return this.latestPromptPreview;
+  }
+
+  /**
+   * Execute one already-admitted embodied effect through the Runtime-owned
+   * Presentation boundary. The returned record must be threaded by the caller;
+   * this method deliberately does not create a second active-effect store.
+   */
+  async executeAdmittedEmbodiedPresentation(
+    decision: RuntimeEmbodiedEffectRecordInitializationDecision,
+    traceAnchor: RuntimeEvent,
+    present: (
+      request: EmbodiedPresentationRequest
+    ) => EmbodiedPresentationOutcomeReport | Promise<EmbodiedPresentationOutcomeReport>
+  ): Promise<RuntimeEmbodiedPresentationExecutionResult> {
+    return executeRuntimeEmbodiedPresentation(
+      decision,
+      traceAnchor,
+      present,
+      this.options.eventBus
+    );
   }
 
   getLifecycleState(): RuntimeLifecycleState {
