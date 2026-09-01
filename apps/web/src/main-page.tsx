@@ -3,8 +3,16 @@ import {
   ApiError,
   apiClient,
   type MessageStreamEvent,
-  type ProactiveMessageStreamEvent
+  type ProactiveMessageStreamEvent,
+  type TranscriptionResponse
 } from "./api/client.js";
+import {
+  releaseMicrophoneCapture,
+  startMicrophoneCapture,
+  stopMicrophoneCapture,
+  type ActiveAudioCapture,
+  type RecordedAudio
+} from "./audio-capture.js";
 import {
   beginControlledDraftSubmit,
   reduceChatMessages,
@@ -57,6 +65,7 @@ import type { TtsSettingsProjection } from "./user-settings-state.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
+type VoiceCaptureStatus = "idle" | "requesting" | "recording" | "stopping" | "transcribing";
 
 let surfaceSequence = 0;
 
@@ -96,6 +105,10 @@ export function MainPage(): JSX.Element {
   const [input, setInput] = useState("");
   const [companionActionError, setCompanionActionError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [voiceCaptureStatus, setVoiceCaptureStatus] = useState<VoiceCaptureStatus>("idle");
+  const [recordedAudio, setRecordedAudio] = useState<RecordedAudio | null>(null);
+  const [voiceTranscription, setVoiceTranscription] = useState<TranscriptionResponse | null>(null);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -126,6 +139,7 @@ export function MainPage(): JSX.Element {
     createSpeechPlaybackCorrelation()
   );
   const activeRequestRef = useRef<ActiveRequestOwnership | null>(null);
+  const audioCaptureRef = useRef<ActiveAudioCapture | null>(null);
 
   const capabilityProjection = useMemo(
     () =>
@@ -334,6 +348,8 @@ export function MainPage(): JSX.Element {
       activeRequestRef.current = null;
       speechSessionRef.current = null;
       speechEpochRef.current = null;
+      releaseMicrophoneCapture(audioCaptureRef.current);
+      audioCaptureRef.current = null;
       playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
     };
   }, []);
@@ -716,6 +732,66 @@ export function MainPage(): JSX.Element {
     playbackCorrelationRef.current = retireActiveSpeechPlayback(playbackCorrelationRef.current);
   }
 
+  async function startVoiceCapture(): Promise<void> {
+    if (voiceCaptureStatus !== "idle") return;
+    setVoiceError(null);
+    setRecordedAudio(null);
+    setVoiceTranscription(null);
+    setVoiceCaptureStatus("requesting");
+    try {
+      const capture = await startMicrophoneCapture();
+      if (!mountedRef.current) {
+        releaseMicrophoneCapture(capture);
+        return;
+      }
+      audioCaptureRef.current = capture;
+      setVoiceCaptureStatus("recording");
+    } catch (caught) {
+      audioCaptureRef.current = null;
+      setVoiceCaptureStatus("idle");
+      setVoiceError(friendlyAudioError(caught));
+    }
+  }
+
+  async function stopVoiceCapture(): Promise<void> {
+    const capture = audioCaptureRef.current;
+    if (!capture || voiceCaptureStatus !== "recording") return;
+    audioCaptureRef.current = null;
+    setVoiceCaptureStatus("stopping");
+    setVoiceError(null);
+    try {
+      setRecordedAudio(await stopMicrophoneCapture(capture));
+    } catch (caught) {
+      setVoiceError(friendlyAudioError(caught));
+    } finally {
+      setVoiceCaptureStatus("idle");
+    }
+  }
+
+  async function transcribeVoiceCapture(): Promise<void> {
+    const recording = recordedAudio;
+    if (!recording || voiceCaptureStatus !== "idle") return;
+    setVoiceCaptureStatus("transcribing");
+    setVoiceError(null);
+    try {
+      const result = await apiClient.transcribeAudio({
+        sessionId,
+        audioBase64: recording.audioBase64,
+        mimeType: recording.mimeType
+      });
+      if (!mountedRef.current) return;
+      setVoiceTranscription(result);
+      if (result.text.trim()) {
+        setInput((current) => (current.trim() ? current : result.text));
+        inputRef.current?.focus();
+      }
+    } catch (caught) {
+      if (mountedRef.current) setVoiceError(friendlyAudioError(caught));
+    } finally {
+      if (mountedRef.current) setVoiceCaptureStatus("idle");
+    }
+  }
+
   async function controlCompanion(
     action: "show_companion" | "hide_companion" | "reopen_companion"
   ): Promise<void> {
@@ -876,6 +952,67 @@ export function MainPage(): JSX.Element {
           )}
         </Panel>
 
+        <Panel title="Voice input" actions={<Pill status={voiceCaptureStatus} />}>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className={voiceCaptureStatus === "recording" ? "button-secondary" : "button-primary"}
+              disabled={voiceCaptureStatus !== "idle" && voiceCaptureStatus !== "recording"}
+              onClick={() =>
+                void (voiceCaptureStatus === "recording" ? stopVoiceCapture() : startVoiceCapture())
+              }
+              aria-label={voiceCaptureStatus === "recording" ? "Stop recording" : "Record voice"}
+            >
+              {voiceCaptureStatus === "requesting"
+                ? "Requesting microphone…"
+                : voiceCaptureStatus === "recording"
+                  ? "Stop recording"
+                  : voiceCaptureStatus === "stopping"
+                    ? "Finishing recording…"
+                    : "Record voice"}
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={!recordedAudio || voiceCaptureStatus !== "idle"}
+              onClick={() => void transcribeVoiceCapture()}
+              aria-label="Transcribe recording"
+            >
+              {voiceCaptureStatus === "transcribing" ? "Transcribing…" : "Transcribe recording"}
+            </button>
+            {recordedAudio && voiceCaptureStatus === "idle" && (
+              <span className="text-xs text-ink-500" aria-live="polite">
+                Recording ready · {Math.max(1, Math.round(recordedAudio.durationMs / 1000))}s
+              </span>
+            )}
+          </div>
+          <p className="mt-2 text-xs text-ink-500">
+            Captures one microphone recording and sends it through the Runtime STT media route. The
+            transcript is placed in the chat draft for review before sending.
+          </p>
+          {voiceCaptureStatus === "recording" && (
+            <p className="mt-2 text-xs text-ink-600" aria-live="polite">
+              Microphone is active. Press Stop recording when you are finished.
+            </p>
+          )}
+          {voiceError && (
+            <div className="mt-2">
+              <Notice tone="error" title="Voice input" message={voiceError} />
+            </div>
+          )}
+          {voiceTranscription && (
+            <div className="mt-3 rounded-md border border-cyan-100 bg-cyan-50 p-3">
+              <div className="text-xs font-semibold uppercase text-ink-500">Transcript</div>
+              <div className="mt-1 text-sm text-ink-800">
+                {voiceTranscription.text || "(empty)"}
+              </div>
+              <div className="mt-1 text-xs text-ink-500">
+                Loaded into the chat draft for review.
+              </div>
+            </div>
+          )}
+        </Panel>
+
         <Panel title="Turn Options">
           <div className="grid gap-3">
             <Field label="Session ID">
@@ -983,4 +1120,15 @@ function friendlyChatError(error: unknown): string {
     return error.message || "消息流处理失败。";
   }
   return "网络连接中断，回复未完成。";
+}
+
+function friendlyAudioError(error: unknown): string {
+  if (error instanceof ApiError) return error.message || "语音转写请求失败。";
+  if (error instanceof Error) {
+    if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+      return "麦克风权限被拒绝，请在桌面应用设置中允许麦克风访问。";
+    }
+    if (error.message) return error.message;
+  }
+  return "语音录音或转写失败，请检查麦克风权限和本地语音服务。";
 }
