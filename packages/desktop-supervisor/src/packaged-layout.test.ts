@@ -63,6 +63,31 @@ function makePackagedResourceTree(): {
       defaultPort: 6131
     })
   );
+  const localSttDir = path.join(resourceRoot, "local-stt");
+  fs.mkdirSync(path.join(localSttDir, "_internal"), { recursive: true });
+  fs.writeFileSync(path.join(localSttDir, "yuvi-local-stt.exe"), "MZ-placeholder");
+  fs.writeFileSync(path.join(localSttDir, "_internal", "placeholder.dat"), "x");
+  fs.mkdirSync(path.join(localSttDir, "models", "sense-voice"), { recursive: true });
+  fs.writeFileSync(path.join(localSttDir, "models", "sense-voice", "tokens.txt"), "tokens\n");
+  fs.writeFileSync(
+    path.join(localSttDir, "models.manifest.json"),
+    JSON.stringify({ models: [], runtimeFiles: [] })
+  );
+  fs.writeFileSync(
+    path.join(localSttDir, "local-stt-manifest.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      protocolVersion: 1,
+      platform: "win32",
+      arch: "x64",
+      executable: "yuvi-local-stt.exe",
+      modelDirectory: "models",
+      modelManifest: "models.manifest.json",
+      healthPath: "/health",
+      defaultHost: "127.0.0.1",
+      defaultPort: 9876
+    })
+  );
   return { resourceRoot, dataRoot, manifestPath, mem0ManifestPath, nodeExe, entry };
 }
 
@@ -114,6 +139,14 @@ describe("packaged supervisor layout", () => {
     );
     expect(cfg.autostartMem0).toBe(false);
     expect(cfg.mem0Start).toBeNull();
+    expect(cfg.localSttStart).not.toBeNull();
+    expect(cfg.localSttStart?.file).toBe(
+      path.join(tree.resourceRoot, "local-stt", "yuvi-local-stt.exe")
+    );
+    expect(cfg.localSttStart?.args).toContain(path.join(tree.resourceRoot, "local-stt", "models"));
+    expect(cfg.localSttStart?.env["YUVI_STT_SPEAKER_DIR"]).toBe(
+      path.join(tree.dataRoot, "local-stt", "speakers")
+    );
     expect(cfg.postgresMode).toBe("private");
     expect(cfg.postgresStart).toBeNull();
   });
@@ -302,6 +335,20 @@ describe("packaged supervisor layout", () => {
         runtimeManifestPath: tree.manifestPath
       })
     ).toThrow(/mem0 manifest missing/i);
+  });
+
+  it("validates the packaged local STT manifest and model root during bootstrap", () => {
+    const tree = makePackagedResourceTree();
+    const manifestPath = path.join(tree.resourceRoot, "local-stt", "local-stt-manifest.json");
+    fs.rmSync(manifestPath);
+    expect(() =>
+      loadPackagedSupervisorConfig({
+        resourceRoot: tree.resourceRoot,
+        dataRoot: tree.dataRoot,
+        runtimeManifestPath: tree.manifestPath,
+        mem0ManifestPath: tree.mem0ManifestPath
+      })
+    ).toThrow(/local stt manifest missing/i);
   });
 
   it("gates packaged managed Mem0 on backend and YUVI_AUTOSTART_MEM0", () => {

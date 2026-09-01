@@ -139,8 +139,11 @@ function packagedConfig(env: Record<string, string> = {}): SupervisorConfig {
   tempDirs.push(resourceRoot, dataRoot);
   const runtimeDir = path.join(resourceRoot, "runtime");
   const mem0Dir = path.join(resourceRoot, "mem0");
+  const localSttDir = path.join(resourceRoot, "local-stt");
   fs.mkdirSync(runtimeDir, { recursive: true });
   fs.mkdirSync(mem0Dir, { recursive: true });
+  fs.mkdirSync(path.join(localSttDir, "_internal"), { recursive: true });
+  fs.mkdirSync(path.join(localSttDir, "models"), { recursive: true });
   fs.writeFileSync(path.join(runtimeDir, "node.exe"), "MZ");
   fs.writeFileSync(path.join(runtimeDir, "yuvi-runtime-server.mjs"), "export {};\n");
   fs.writeFileSync(
@@ -165,6 +168,27 @@ function packagedConfig(env: Record<string, string> = {}): SupervisorConfig {
       healthPath: "/health",
       defaultHost: "127.0.0.1",
       defaultPort: 6131
+    })
+  );
+  fs.writeFileSync(path.join(localSttDir, "yuvi-local-stt.exe"), "MZ");
+  fs.writeFileSync(path.join(localSttDir, "_internal", "placeholder.dat"), "x");
+  fs.writeFileSync(
+    path.join(localSttDir, "models.manifest.json"),
+    JSON.stringify({ models: [], runtimeFiles: [] })
+  );
+  fs.writeFileSync(
+    path.join(localSttDir, "local-stt-manifest.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      protocolVersion: 1,
+      platform: "win32",
+      arch: "x64",
+      executable: "yuvi-local-stt.exe",
+      modelDirectory: "models",
+      modelManifest: "models.manifest.json",
+      healthPath: "/health",
+      defaultHost: "127.0.0.1",
+      defaultPort: 9876
     })
   );
   return loadPackagedSupervisorConfig({

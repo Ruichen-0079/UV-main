@@ -329,11 +329,12 @@ pub fn shutdown_supervisor(app: &AppHandle) {
 
   // Ask Supervisor to stop owned Runtime/Mem0 (best-effort, short timeout path).
   if let (Some(base), Some(token)) = (base, token) {
-    let _ = http_json(
+    let _ = http_json_with_timeout(
       "POST",
       &format!("{base}/v1/shutdown"),
       None,
       Some(&token),
+      Duration::from_secs(5),
     );
   }
 
@@ -552,6 +553,21 @@ fn http_json(
   body: Option<&str>,
   token: Option<&str>,
 ) -> Result<Value, String> {
+  let timeout = if method.eq_ignore_ascii_case("GET") {
+    Duration::from_secs(5)
+  } else {
+    Duration::from_secs(60)
+  };
+  http_json_with_timeout(method, url, body, token, timeout)
+}
+
+fn http_json_with_timeout(
+  method: &str,
+  url: &str,
+  body: Option<&str>,
+  token: Option<&str>,
+  read_timeout: Duration,
+) -> Result<Value, String> {
   use std::io::{Read, Write};
   use std::net::TcpStream;
 
@@ -578,11 +594,6 @@ fn http_json(
   };
 
   let is_get = method.eq_ignore_ascii_case("GET");
-  let timeout = if is_get {
-    Duration::from_secs(5)
-  } else {
-    Duration::from_secs(60)
-  };
 
   // Prefer IPv4 loopback; `localhost` can resolve to ::1 first on some hosts.
   let connect_host = if host_l == "localhost" || host_l == "::1" {
@@ -592,7 +603,7 @@ fn http_json(
   };
   let mut stream = TcpStream::connect((connect_host, port))
     .map_err(|e| format!("supervisor connect failed: {e}"))?;
-  let _ = stream.set_read_timeout(Some(timeout));
+  let _ = stream.set_read_timeout(Some(read_timeout));
   let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
 
   let body_bytes = if is_get {

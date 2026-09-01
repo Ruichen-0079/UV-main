@@ -18,6 +18,10 @@ const COMPANION_WINDOW_URL: &str = "index.html#/companion";
 
 static EXIT_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
 
+fn claim_app_shutdown() -> bool {
+  !EXIT_CLEANUP_STARTED.swap(true, Ordering::SeqCst)
+}
+
 fn build_companion_window(
   app: &tauri::AppHandle,
   always_on_top: bool,
@@ -84,7 +88,7 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn begin_app_shutdown(app: &tauri::AppHandle) {
-  if EXIT_CLEANUP_STARTED.swap(true, Ordering::SeqCst) {
+  if !claim_app_shutdown() {
     return;
   }
   supervisor::shutdown_supervisor(app);
@@ -132,11 +136,17 @@ pub fn run() {
           return;
         }
         if window.label() == "main" {
+          // `WebviewWindow::destroy()` below emits another CloseRequested.
+          // Let that internal close through after the cleanup claim, while
+          // preventing the original user/system close until services stop.
+          if !claim_app_shutdown() {
+            return;
+          }
           api.prevent_close();
           let app = window.app_handle().clone();
           let win = window.clone();
           thread::spawn(move || {
-            begin_app_shutdown(&app);
+            supervisor::shutdown_supervisor(&app);
             thread::sleep(Duration::from_millis(1200));
             let _ = win.destroy();
             app.exit(0);

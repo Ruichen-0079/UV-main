@@ -216,6 +216,19 @@ export type RuntimeManifest = {
   runtimeEntry: string;
 };
 
+export type LocalSttManifest = {
+  schemaVersion: 1;
+  protocolVersion: 1;
+  platform: "win32";
+  arch: "x64";
+  executable: string;
+  modelDirectory: string;
+  modelManifest: string;
+  healthPath: "/health";
+  defaultHost: "127.0.0.1";
+  defaultPort: number;
+};
+
 export type SupervisorConfig = {
   layout: SupervisorLayout;
   /**

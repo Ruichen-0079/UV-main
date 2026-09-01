@@ -22,6 +22,20 @@ class FakeStream {
   }
 }
 
+class FakeAudioContext {
+  async decodeAudioData(): Promise<AudioBuffer> {
+    const samples = new Float32Array([0, 0.5, -0.5, 1]);
+    return {
+      length: samples.length,
+      numberOfChannels: 1,
+      sampleRate: 16_000,
+      getChannelData: () => samples
+    } as unknown as AudioBuffer;
+  }
+
+  async close(): Promise<void> {}
+}
+
 class FakeMediaRecorder extends EventTarget {
   static isTypeSupported(mimeType: string): boolean {
     return mimeType === "audio/webm;codecs=opus";
@@ -69,6 +83,7 @@ describe("microphone capture", () => {
     const stream = new FakeStream([track]);
     const getUserMedia = vi.fn(async () => stream as unknown as MediaStream);
     vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+    vi.stubGlobal("AudioContext", FakeAudioContext);
     vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
 
     const capture = await startMicrophoneCapture();
@@ -78,9 +93,12 @@ describe("microphone capture", () => {
     const recording = await stopMicrophoneCapture(capture);
 
     expect(recording).toMatchObject({
-      audioBase64: "AQID",
-      mimeType: "audio/webm;codecs=opus"
+      mimeType: "audio/wav"
     });
+    const wav = Uint8Array.from(atob(recording.audioBase64), (character) =>
+      character.charCodeAt(0)
+    );
+    expect(new TextDecoder().decode(wav.slice(0, 4))).toBe("RIFF");
     expect(recording.durationMs).toBeGreaterThanOrEqual(0);
     expect(track.stopped).toBe(true);
   });

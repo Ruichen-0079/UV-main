@@ -14,6 +14,9 @@ import net from "node:net";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   BUILD_ROOT,
+  LOCAL_STT_EXE_NAME,
+  LOCAL_STT_MANIFEST_NAME,
+  LOCAL_STT_MODEL_MANIFEST_NAME,
   MEM0_EXE_NAME,
   MEM0_MANIFEST_NAME,
   MEM0_INTERNAL_DIR_NAME,
@@ -27,6 +30,7 @@ import {
 } from "./constants.mjs";
 import { assertRelativeSafe, readJson } from "./paths.mjs";
 import { validateMem0Artifact } from "./build-mem0.mjs";
+import { validateLocalSttArtifact } from "./build-local-stt.mjs";
 
 const NSIS_DIR = path.join(
   REPO_ROOT,
@@ -467,10 +471,20 @@ export function validatePackagingInfo(info) {
     fail("packaging-info schema mismatch");
   if (info.hasMem0 !== true || info.mem0ProtocolVersion !== 1)
     fail("packaging-info does not declare packaged Mem0");
+  if (info.hasLocalStt !== true || info.localSttProtocolVersion !== 1)
+    fail("packaging-info does not declare packaged local STT");
   if (info.hasSupervisorExe !== true || info.supervisorMode !== "pkg-exe")
     fail("packaging-info does not declare packaged Supervisor exe");
   assertRelativeSafe(info.supervisorBuildInfo, "packaging-info.supervisorBuildInfo");
-  for (const field of ["runtimeEntry", "nodeExecutable", "mem0Executable", "mem0Manifest"])
+  for (const field of [
+    "runtimeEntry",
+    "nodeExecutable",
+    "mem0Executable",
+    "mem0Manifest",
+    "localSttExecutable",
+    "localSttManifest",
+    "localSttModelManifest"
+  ])
     assertRelativeSafe(info[field], `packaging-info.${field}`);
   assertNoSecrets(info, "packaging-info");
   return info;
@@ -570,7 +584,12 @@ export function validateInstalledResources(resourceRoot) {
     path.join(supervisor, SUPERVISOR_BUNDLE_NAME),
     path.join(mem0, MEM0_EXE_NAME),
     path.join(mem0, MEM0_MANIFEST_NAME),
-    path.join(mem0, MEM0_INTERNAL_DIR_NAME)
+    path.join(mem0, MEM0_INTERNAL_DIR_NAME),
+    path.join(resourceRoot, "local-stt", LOCAL_STT_EXE_NAME),
+    path.join(resourceRoot, "local-stt", LOCAL_STT_MANIFEST_NAME),
+    path.join(resourceRoot, "local-stt", LOCAL_STT_MODEL_MANIFEST_NAME),
+    path.join(resourceRoot, "local-stt", "_internal"),
+    path.join(resourceRoot, "local-stt", "models")
   ])
     if (!fs.existsSync(required)) fail(`installed resource missing: ${required}`);
   const supervisorExe = findUniqueSupervisorExecutable(supervisor);
@@ -581,6 +600,9 @@ export function validateInstalledResources(resourceRoot) {
     assertRelativeSafe(runtimeManifest[field], `runtime-manifest.${field}`);
   assertNoSecrets(runtimeManifest, "runtime-manifest");
   const mem0Result = validateMem0Artifact(mem0, { repoRoot: REPO_ROOT });
+  const localStt = path.join(resourceRoot, "local-stt");
+  if (!fs.existsSync(localStt)) fail("installed resource missing: local-stt");
+  const localSttResult = validateLocalSttArtifact(localStt, { repoRoot: REPO_ROOT });
   const forbidden =
     /(?:^|[\\/])(?:\.env|cache|history\.db|config\.json|logs?|sqlite(?:3)?)(?:$|[\\/])/i;
   for (const file of listFiles(resourceRoot)) {
@@ -600,7 +622,9 @@ export function validateInstalledResources(resourceRoot) {
     supervisorBuildInfo,
     mem0,
     runtimeManifest,
-    mem0Result
+    mem0Result,
+    localStt,
+    localSttResult
   };
 }
 

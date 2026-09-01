@@ -10,6 +10,11 @@ import {
   parseUrlOrigin
 } from "./paths.js";
 import { readMem0Manifest, resolveMem0ManifestExecutable } from "./mem0-manifest.js";
+import {
+  readLocalSttManifest,
+  resolveLocalSttManifestExecutable,
+  resolveLocalSttManifestPath
+} from "./local-stt-manifest.js";
 import { readRuntimeManifest, resolveManifestFile } from "./runtime-manifest.js";
 import { resolvePostgresDistribution } from "./postgres-distribution.js";
 import { resolvePostgresLayout } from "./postgres-layout.js";
@@ -233,7 +238,7 @@ export function deriveConfigFromEnv(
     localSttUrl,
     localSttStart:
       layout.mode === "packaged"
-        ? null
+        ? resolvePackagedLocalSttStart(layout, env, localSttUrl)
         : resolveOptionalStartCommand(env, "YUVI_LOCAL_STT_START_COMMAND", ownershipRoot),
     autostartLocalStt: envFlag(env, "YUVI_AUTOSTART_LOCAL_STT", false),
     databaseUrl,
@@ -437,7 +442,7 @@ export function resolvePackagedMem0Start(
 ): StartCommandSpec {
   const manifest = readMem0Manifest(layout.mem0ManifestPath);
   const executable = resolveMem0ManifestExecutable(layout.mem0ManifestPath, manifest);
-  const port = resolveManagedMem0Port(mem0Url);
+  const port = resolveManagedLoopbackPort(mem0Url, "MEM0_BASE_URL");
   const resourceDir = canonicalPath(path.dirname(layout.mem0ManifestPath));
   const dataDir = resolvePackagedMem0DataDir(layout, env);
   const logDir = resolvePackagedMem0LogDir(layout, env);
@@ -482,12 +487,60 @@ export function resolvePackagedMem0Start(
   };
 }
 
-function resolveManagedMem0Port(mem0Url: string): number {
+export function resolvePackagedLocalSttStart(
+  layout: Extract<SupervisorLayout, { mode: "packaged" }>,
+  _env: Record<string, string>,
+  localSttUrl: string
+): StartCommandSpec {
+  const manifestPath = path.join(layout.resourceRoot, "local-stt", "local-stt-manifest.json");
+  const manifest = readLocalSttManifest(manifestPath);
+  const executable = resolveLocalSttManifestExecutable(manifestPath, manifest);
+  const modelRoot = resolveLocalSttManifestPath(
+    manifestPath,
+    manifest.modelDirectory,
+    "modelDirectory"
+  );
+  const modelManifest = resolveLocalSttManifestPath(
+    manifestPath,
+    manifest.modelManifest,
+    "modelManifest"
+  );
+  if (!fs.existsSync(modelRoot) || !fs.statSync(modelRoot).isDirectory()) {
+    throw new Error(`Local STT model directory missing: ${modelRoot}`);
+  }
+  if (!fs.existsSync(modelManifest) || !fs.statSync(modelManifest).isFile()) {
+    throw new Error(`Local STT model manifest missing: ${modelManifest}`);
+  }
+  const port = resolveManagedLoopbackPort(localSttUrl, "LOCAL_STT_BASE_URL");
+  const dataDir = canonicalPath(path.join(layout.dataRoot, "local-stt"));
+  const speakerDir = canonicalPath(path.join(dataDir, "speakers"));
+  fs.mkdirSync(speakerDir, { recursive: true });
+  return {
+    file: executable,
+    args: [
+      "--host",
+      manifest.defaultHost,
+      "--port",
+      String(port),
+      "--model-dir",
+      modelRoot,
+      "--yuvi-local-stt"
+    ],
+    cwd: path.dirname(manifestPath),
+    env: {
+      YUVI_LOCAL_STT_PACKAGED: "1",
+      YUVI_STT_SPEAKER_DIR: speakerDir
+    },
+    commandMarker: executable
+  };
+}
+
+function resolveManagedLoopbackPort(url: string, key: string): number {
   let parsed: URL;
   try {
-    parsed = new URL(mem0Url);
+    parsed = new URL(url);
   } catch {
-    throw new Error("MEM0_BASE_URL must be a valid loopback HTTP URL.");
+    throw new Error(`${key} must be a valid loopback HTTP URL.`);
   }
   if (
     parsed.protocol !== "http:" ||
@@ -496,18 +549,18 @@ function resolveManagedMem0Port(mem0Url: string): number {
     parsed.search ||
     parsed.hash
   ) {
-    throw new Error("MEM0_BASE_URL must be a loopback HTTP URL without credentials.");
+    throw new Error(`${key} must be a loopback HTTP URL without credentials.`);
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
-    throw new Error("Managed MEM0_BASE_URL must target loopback.");
+    throw new Error(`Managed ${key} must target loopback.`);
   }
   if (parsed.pathname !== "" && parsed.pathname !== "/") {
-    throw new Error("MEM0_BASE_URL must not include a path.");
+    throw new Error(`${key} must not include a path.`);
   }
   const port = parsed.port ? Number(parsed.port) : 80;
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error("MEM0_BASE_URL port must be between 1 and 65535.");
+    throw new Error(`${key} port must be between 1 and 65535.`);
   }
   return port;
 }

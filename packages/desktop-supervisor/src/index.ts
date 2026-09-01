@@ -9,6 +9,7 @@ export type {
   RuntimeConfigUpdate,
   RuntimeConfigUpdateResult,
   RuntimeManifest,
+  LocalSttManifest,
   ServiceId,
   ServiceLifecycle,
   ServiceOwnership,
@@ -27,6 +28,7 @@ export {
   deriveConfigFromEnv,
   buildChildProcessEnv,
   resolvePackagedLive2DEnv,
+  resolvePackagedLocalSttStart,
   resolvePackagedMem0Start,
   resolvePackagedRuntimeStart,
   resolveRuntimeStartForLayout
@@ -41,6 +43,12 @@ export {
   validateMem0Manifest,
   resolveMem0ManifestExecutable
 } from "./mem0-manifest.js";
+export {
+  readLocalSttManifest,
+  validateLocalSttManifest,
+  resolveLocalSttManifestExecutable,
+  resolveLocalSttManifestPath
+} from "./local-stt-manifest.js";
 export { loadYuviEnvFiles, envFlag, envString } from "./env.js";
 export {
   probeHttpHealth,

@@ -43,6 +43,19 @@ export const MEM0_BUILD_SCRIPT = path.join(
   "build.py"
 );
 export const MEM0_SERVICE_ROOT = path.join(REPO_ROOT, "services", "memory-mem0");
+export const LOCAL_STT_OUT_DIR = path.join(BUILD_ROOT, "local-stt");
+export const LOCAL_STT_MODEL_BUILD_DIR = path.join(BUILD_ROOT, "local-stt-models");
+export const LOCAL_STT_EXE_NAME = "yuvi-local-stt.exe";
+export const LOCAL_STT_MANIFEST_NAME = "local-stt-manifest.json";
+export const LOCAL_STT_MODEL_MANIFEST_NAME = "models.manifest.json";
+export const LOCAL_STT_BUILD_SCRIPT = path.join(
+  REPO_ROOT,
+  "services",
+  "local-stt",
+  "packaging",
+  "build.py"
+);
+export const LOCAL_STT_SERVICE_ROOT = path.join(REPO_ROOT, "services", "local-stt");
 export const CACHE_DIR = process.env["YUVI_NODE_CACHE"]?.trim()
   ? path.resolve(process.env["YUVI_NODE_CACHE"].trim())
   : path.join(REPO_ROOT, ".cache", "desktop-package");

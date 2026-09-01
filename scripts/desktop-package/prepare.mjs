@@ -5,6 +5,11 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   BUILD_ROOT,
+  LOCAL_STT_EXE_NAME,
+  LOCAL_STT_MANIFEST_NAME,
+  LOCAL_STT_MODEL_BUILD_DIR,
+  LOCAL_STT_MODEL_MANIFEST_NAME,
+  LOCAL_STT_OUT_DIR,
   MEMORY_MIGRATIONS_DIR,
   MEM0_EXE_NAME,
   MEM0_MANIFEST_NAME,
@@ -16,13 +21,22 @@ import {
   SUPERVISOR_BUNDLE_NAME,
   SUPERVISOR_EXE_NAME,
   SUPERVISOR_OUT_DIR,
-  TAURI_GENERATED
+  TAURI_GENERATED,
+  REPO_ROOT
 } from "./constants.mjs";
 import { buildSupervisor, sha256File, SUPERVISOR_BUILD_INFO_NAME } from "./build-supervisor.mjs";
 import { buildPackagedMem0, validateMem0Artifact } from "./build-mem0.mjs";
+import { buildPackagedLocalStt, validateLocalSttArtifact } from "./build-local-stt.mjs";
 import { bundleRuntimeServer } from "./build-runtime.mjs";
 import { prepareBundledNode } from "./download-node.mjs";
-import { assertDir, assertFile, assertSafeGeneratedTarget, ensureDir, writeJson } from "./paths.mjs";
+import { downloadLocalSttModels } from "../download-local-stt-models.mjs";
+import {
+  assertDir,
+  assertFile,
+  assertSafeGeneratedTarget,
+  ensureDir,
+  writeJson
+} from "./paths.mjs";
 
 export async function prepareDesktopPackage() {
   console.info("[desktop-package] prepare start");
@@ -47,16 +61,25 @@ export async function prepareDesktopPackage() {
 
   const mem0 = await buildPackagedMem0();
   validateMem0Artifact(MEM0_OUT_DIR);
+  downloadLocalSttModels({ dest: LOCAL_STT_MODEL_BUILD_DIR });
+  await buildPackagedLocalStt({
+    python: mem0.python,
+    modelDir: LOCAL_STT_MODEL_BUILD_DIR,
+    artifactDir: LOCAL_STT_OUT_DIR
+  });
+  validateLocalSttArtifact(LOCAL_STT_OUT_DIR, { repoRoot: REPO_ROOT });
 
   // Stage into Tauri resources tree.
   assertSafeGeneratedTarget(TAURI_GENERATED);
   const stagedRuntime = path.join(TAURI_GENERATED, "runtime");
   const stagedSupervisor = path.join(TAURI_GENERATED, "supervisor");
   const stagedMem0 = path.join(TAURI_GENERATED, "mem0");
+  const stagedLocalStt = path.join(TAURI_GENERATED, "local-stt");
   fs.rmSync(TAURI_GENERATED, { recursive: true, force: true });
   ensureDir(stagedRuntime);
   ensureDir(stagedSupervisor);
   ensureDir(stagedMem0);
+  ensureDir(stagedLocalStt);
 
   copyFile(path.join(RUNTIME_OUT_DIR, NODE_EXE_NAME), path.join(stagedRuntime, NODE_EXE_NAME));
   copyFile(
@@ -95,6 +118,8 @@ export async function prepareDesktopPackage() {
   copyFile(buildInfoPath, path.join(stagedSupervisor, SUPERVISOR_BUILD_INFO_NAME));
   copyDir(MEM0_OUT_DIR, stagedMem0);
   const stagedMem0Artifact = validateMem0Artifact(stagedMem0);
+  copyDir(LOCAL_STT_OUT_DIR, stagedLocalStt);
+  const stagedLocalSttArtifact = validateLocalSttArtifact(stagedLocalStt, { repoRoot: REPO_ROOT });
 
   const packagingInfo = {
     schemaVersion: 1,
@@ -108,7 +133,12 @@ export async function prepareDesktopPackage() {
     hasMem0: true,
     mem0Executable: MEM0_EXE_NAME,
     mem0Manifest: MEM0_MANIFEST_NAME,
-    mem0ProtocolVersion: 1
+    mem0ProtocolVersion: 1,
+    hasLocalStt: true,
+    localSttProtocolVersion: 1,
+    localSttExecutable: `local-stt/${LOCAL_STT_EXE_NAME}`,
+    localSttManifest: `local-stt/${LOCAL_STT_MANIFEST_NAME}`,
+    localSttModelManifest: `local-stt/${LOCAL_STT_MODEL_MANIFEST_NAME}`
   };
   writeJson(path.join(TAURI_GENERATED, "packaging-info.json"), packagingInfo);
   writeJson(path.join(BUILD_ROOT, "packaging-info.json"), packagingInfo);
@@ -120,6 +150,7 @@ export async function prepareDesktopPackage() {
     staged: TAURI_GENERATED,
     buildRoot: BUILD_ROOT,
     mem0: stagedMem0Artifact,
+    localStt: stagedLocalSttArtifact,
     interpreter: mem0.python
   };
 }
