@@ -506,6 +506,13 @@ export function CompanionPage(): JSX.Element {
         case "speech-status":
         case "proactive-text-admission-result":
           return;
+        case "embodied-presentation-request": {
+          const report = lumiRef.current?.executeEmbodiedPresentationRequest(message.request);
+          if (report) bus.post({ kind: "embodied-presentation-outcome", report });
+          return;
+        }
+        case "embodied-presentation-outcome":
+          return;
       }
     }
 

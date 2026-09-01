@@ -5,6 +5,14 @@ import {
 } from "./lumi-audio.js";
 import type { SpeechPlaybackEvent } from "./speech-queue.js";
 import {
+  executeEmbodiedPresentationRequest,
+  type EmbodiedPresentationExecutorActions
+} from "./embodied-presentation-executor.js";
+import type {
+  EmbodiedPresentationRequest,
+  EmbodiedPresentationOutcomeReport
+} from "@companion/protocol";
+import {
   composeCompanionPresenceAnimation,
   createGazeScheduler,
   type GazeScheduler,
@@ -393,6 +401,9 @@ export type LumiControllerHandle = {
   setFraming(framing: LumiFraming): void;
   setPresentationProjection(projection: CompanionPresenceProjection): void;
   setGazeTarget(target: SuppliedGazeTarget | null): void;
+  executeEmbodiedPresentationRequest(
+    request: EmbodiedPresentationRequest
+  ): EmbodiedPresentationOutcomeReport;
   setPresenceAnimation(animation: LumiPresenceAnimation): void;
   setPresenceAnimation(blink: number, breath: number): void;
   resumeAudio(): void;
@@ -527,6 +538,15 @@ export class LumiController {
 
   setGazeTarget(target: SuppliedGazeTarget | null): void {
     this.presentationController.setGazeTarget(target);
+  }
+
+  executeEmbodiedPresentationRequest(
+    request: EmbodiedPresentationRequest
+  ): EmbodiedPresentationOutcomeReport {
+    const actions: EmbodiedPresentationExecutorActions = {
+      setGazeTarget: (target) => this.setGazeTarget(target)
+    };
+    return executeEmbodiedPresentationRequest(request, actions);
   }
 
   private applyPresenceAnimation(animation: LumiPresenceAnimation): void {
