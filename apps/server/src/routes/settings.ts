@@ -168,7 +168,7 @@ export async function registerSettingsRoutes(
   });
 }
 
-async function withSettingsOperationLock<T>(operation: () => Promise<T>): Promise<T> {
+export async function withSettingsOperationLock<T>(operation: () => Promise<T>): Promise<T> {
   const previous = settingsOperationQueue;
   let release!: () => void;
   settingsOperationQueue = new Promise<void>((resolve) => {
@@ -182,7 +182,7 @@ async function withSettingsOperationLock<T>(operation: () => Promise<T>): Promis
   }
 }
 
-async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
+export async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
   const runtimeEnvFiles = await readRuntimeEnvFiles();
   const baseEnvFile = runtimeEnvFiles.base;
   const localEnvFile = runtimeEnvFiles.local;
@@ -415,7 +415,7 @@ function buildLayeredSettings(
   return layeredSettings;
 }
 
-async function writeLocalRuntimeSettings(
+export async function writeLocalRuntimeSettings(
   updates: Record<string, string | null>,
   removeOverrides: string[]
 ): Promise<string[]> {
@@ -459,7 +459,7 @@ async function writeLocalRuntimeSettings(
   return uniqueChangedKeys;
 }
 
-class InvalidRuntimeSettingsError extends Error {
+export class InvalidRuntimeSettingsError extends Error {
   constructor(readonly fieldErrors: Record<string, string>) {
     super("Runtime settings are invalid.");
     this.name = "InvalidRuntimeSettingsError";

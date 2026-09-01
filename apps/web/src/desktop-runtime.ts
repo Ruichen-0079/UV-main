@@ -54,28 +54,47 @@ export function resolveRuntimeAssetUrl(pathOrUrl: string): string {
 
 export type DesktopSurface = "dashboard" | "main" | "companion";
 
+export function surfaceFromLocation(input: {
+  hash: string;
+  pathname: string;
+  tauriLabel?: string | undefined;
+}): DesktopSurface {
+  if (input.tauriLabel === "main") return "main";
+  if (input.tauriLabel === "companion") return "companion";
+  if (input.tauriLabel === "dashboard") return "dashboard";
+  const hash = input.hash;
+  if (hash.startsWith("#/dashboard")) return "dashboard";
+  if (hash.startsWith("#/companion")) return "companion";
+  if (hash.startsWith("#/main")) return "main";
+  const path = input.pathname;
+  if (path === "/dashboard" || path.endsWith("/dashboard")) return "dashboard";
+  if (path === "/companion" || path.endsWith("/companion")) return "companion";
+  if (path === "/main" || path.endsWith("/main")) return "main";
+  return "main";
+}
+
 /**
  * Prefer Tauri window label (reliable in packaged builds) over hash routing.
  * Hash is kept for browser debugging and as a fallback.
+ * Browser default is Product UI (`main`); the developer dashboard is `#/dashboard`.
  */
 export async function resolveDesktopSurface(): Promise<DesktopSurface> {
+  let tauriLabel: string | undefined;
   if (isTauriRuntime()) {
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      const label = getCurrentWindow().label;
-      if (label === "main") return "main";
-      if (label === "companion") return "companion";
+      tauriLabel = getCurrentWindow().label;
     } catch {
       // fall through to hash
     }
   }
 
-  if (typeof window === "undefined") return "dashboard";
-  const hash = window.location.hash;
-  if (hash.startsWith("#/main")) return "main";
-  if (hash.startsWith("#/companion")) return "companion";
-  const path = window.location.pathname;
-  if (path === "/main" || path.endsWith("/main")) return "main";
-  if (path === "/companion" || path.endsWith("/companion")) return "companion";
-  return "dashboard";
+  if (typeof window === "undefined") {
+    return surfaceFromLocation({ hash: "", pathname: "/", tauriLabel });
+  }
+  return surfaceFromLocation({
+    hash: window.location.hash,
+    pathname: window.location.pathname,
+    tauriLabel
+  });
 }

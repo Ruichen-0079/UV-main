@@ -1399,6 +1399,72 @@ export const apiClient = {
     return request<PromptPreviewResponse>("/debug/prompt/latest", signalRequestInit(signal));
   },
 
+  getProductOverview(signal?: AbortSignal): Promise<unknown> {
+    return request("/product/overview", signalRequestInit(signal));
+  },
+
+  saveProductPreferences(patch: Record<string, unknown>): Promise<{ ok: boolean; preferences: unknown }> {
+    return request("/product/preferences", {
+      method: "POST",
+      body: JSON.stringify(patch)
+    });
+  },
+
+  saveProductConnections(input: {
+    values: Record<string, string | null>;
+    removeOverrides?: string[];
+    apply?: boolean;
+  }): Promise<{
+    ok: boolean;
+    changedKeys: string[];
+    restartRequired: boolean;
+    pendingRestartKeys: string[];
+    message: string;
+  }> {
+    return request("/product/connections", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
+  testProductConnection(connectionId: string): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+    return request("/product/connections/test", {
+      method: "POST",
+      body: JSON.stringify({ connectionId })
+    });
+  },
+
+  discoverProductModels(
+    connectionId: string
+  ): Promise<{ ok: boolean; models: Array<{ id: string }>; error?: string }> {
+    return request("/product/models/discover", {
+      method: "POST",
+      body: JSON.stringify({ connectionId })
+    });
+  },
+
+  getProductMemory(query?: string): Promise<unknown> {
+    const search = query ? `?q=${encodeURIComponent(query)}` : "";
+    return request(`/product/memory${search}`);
+  },
+
+  getProductCapabilities(): Promise<unknown> {
+    return request("/product/capabilities");
+  },
+
+  testProductVoice(): Promise<{
+    ok: boolean;
+    error?: string;
+    audioBase64?: string;
+    mimeType?: string;
+  }> {
+    return request("/product/voice/test", { method: "POST", body: "{}" });
+  },
+
+  exportProductDiagnostics(): Promise<{ ok: boolean; text: string }> {
+    return request("/product/diagnostics/export");
+  },
+
   getRuntimeSettings(signal?: AbortSignal): Promise<RuntimeSettingsResponse> {
     return request<RuntimeSettingsResponse>("/settings/runtime", signalRequestInit(signal));
   },
@@ -1641,7 +1707,7 @@ function shouldAttachDashboardDevToken(path: string, method: string | undefined)
     return true;
   }
   const normalized = method?.toUpperCase() ?? "GET";
-  if (normalized === "GET" && path === "/settings/runtime") {
+  if (normalized === "GET" && (path === "/settings/runtime" || path.startsWith("/product/"))) {
     return true;
   }
   return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";

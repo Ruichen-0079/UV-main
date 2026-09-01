@@ -53,6 +53,8 @@ export type AppContext = {
   memory: MemoryService;
   providers: ProviderRegistry;
   runtime: RuntimeOrchestrator;
+  recentEpisodeStore: RecentEpisodeStore;
+  dreamJobStore: DreamJobStore;
   activeMemoryRepository: string;
   activeRuntimeEnv: Record<string, string | undefined>;
   memoryMaintenanceScheduler?: MemoryMaintenanceScheduler | undefined;
@@ -266,6 +268,8 @@ export async function createAppContext(
     memory,
     providers,
     runtime,
+    recentEpisodeStore,
+    dreamJobStore,
     activeMemoryRepository,
     activeRuntimeEnv,
     async reloadRuntimeConfig(env) {

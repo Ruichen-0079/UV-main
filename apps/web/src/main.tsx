@@ -5,6 +5,7 @@ import { MainPage } from "./main-page.js";
 import { CompanionPage } from "./companion-page.js";
 import { resolveDesktopSurface, type DesktopSurface } from "./desktop-runtime.js";
 import "./styles.css";
+import "./product-ui.css";
 
 /**
  * Lightweight surface routing for the desktop split.
@@ -23,8 +24,22 @@ function renderSurface(surface: DesktopSurface): JSX.Element {
 
 const rootElement = document.getElementById("root") as HTMLElement;
 const root = createRoot(rootElement);
+let renderedSurface: DesktopSurface | null = null;
 
-void resolveDesktopSurface().then((surface) => {
-  document.documentElement.dataset["yuviSurface"] = surface;
-  root.render(<StrictMode>{renderSurface(surface)}</StrictMode>);
-});
+function bootSurface(): void {
+  void resolveDesktopSurface().then((surface) => {
+    document.documentElement.dataset["yuviSurface"] = surface;
+    document.title =
+      surface === "companion"
+        ? "YUVI Companion"
+        : surface === "dashboard"
+          ? "YUVI Developer Dashboard"
+          : "YUVI";
+    if (surface === renderedSurface) return;
+    renderedSurface = surface;
+    root.render(<StrictMode>{renderSurface(surface)}</StrictMode>);
+  });
+}
+
+bootSurface();
+window.addEventListener("hashchange", bootSurface);
