@@ -1,25 +1,38 @@
 # Post-Structural Companion Roadmap
 
-> **Status: PLANNED / NOT IMPLEMENTED**
+> **Status: CURRENT ROADMAP / IMPLEMENTATION MIXED — REBASELINED TO THE MEMORY-FIRST OPERATIONAL PATH**
 >
-> **Current-state authority:** the current `origin/main` source, tests, and
-> current-state documentation are authoritative. This roadmap remains planning
-> only.
+> **Current-state authority:** the current `origin/main` source, tests, closure
+> documents, and current-state documentation are authoritative.
 >
-> **Scope:** long-term semantic architecture only; this directory is not
-> current product behavior or an implementation specification.
+> **Scope:** long-term semantic architecture and staged product direction. This
+> directory must not override implemented behavior or create work merely because
+> an older phase sequence listed it.
 
-Current source, tests, and current-state documentation remain authoritative for
-implemented behavior. In particular, [P4 Linux-first](../p4-linux-first.md),
-[Memory](../memory.md), [Mem0 Memory Foundation](../mem0-memory-foundation.md),
+Current source, tests, closure documents, and current-state documentation remain
+authoritative for implemented behavior. In particular, [P4 Linux-first](../p4-linux-first.md),
+[Memory](../memory.md), [Memory vNext](../memory-vnext.md),
 [Providers](../providers.md), [Prompt Pipeline](../prompt-pipeline.md), and the
-current Runtime contracts take precedence over this roadmap wherever a future
-proposal could otherwise be read as present fact.
+current Runtime contracts take precedence over older roadmap status text.
 
-Structural Debt Paydown is complete, including R5A1–R5A4 and the final closeout.
-P8 is the next implementation phase, but it remains planned and not
-implemented. Memory remains evidence rather than Persona authority, and P6
-remains frozen current behavior.
+Structural Debt Paydown is complete. P8 identity/persona/relationship work is
+closed through P8-1F; Character ABI 2A–2D is implemented; the Character Harness
+semantic kernel is closed through 5L; the initial bounded Cognition/capability
+slice is closed; and Phase 7 embodied agency is closed. Memory vNext already
+provides the operational L0/L1/L2 hierarchy, bounded associative intrusion, and
+a thin temporal projection used by the live user-turn prompt.
+
+The immediate product path is therefore **not** to rebuild full Temporal and
+Continuity subsystems before Yuvi can run. Use the implemented Memory-first
+path, evaluate real failures, and add only the smallest missing explicit
+semantic artifact when evidence proves one is required. P6 remains frozen
+current proactive-text behavior.
+
+Formal Phase 8 behavior assets may proceed now. Phases 9–13 — base-model
+bakeoff, QLoRA SFT, DPO, shadow/A-B, and the preference-data flywheel — are
+deferred until Yuvi is landed, has run for a sustained period, and has produced
+reviewed real-usage evaluation evidence. The current DeepSeek V4 Flash-class
+Chat path is replaceable operational infrastructure, not Character identity.
 
 ## Product north star
 
@@ -43,50 +56,75 @@ high-reliability factual work belong to the Cognition Core.
 ## Current and planned boundary
 
 **CURRENT:** Runtime lifecycle, event publication, provider abstraction,
-conversation persistence, evidence-oriented Memory, prompt sections, P5
-Live2D presentation, and the bounded P6 assistant-initiated text path are
-implemented. Current `RelationshipContext`, `CurrentAffect`, persona IDs,
-relationship memory categories, and Direct Context are useful foundations;
-none is an authoritative P8, temporal, or Continuity implementation.
+conversation persistence, evidence-oriented Memory, P8 through 1F, Character
+ABI through 2D, prompt sections, Memory vNext L0/L1/L2 context, associative
+recall, thin temporal projection, the Character Harness semantic kernel,
+initial bounded Cognition/capability execution, bounded P6 assistant-initiated
+text, and Phase 7 embodied presentation are implemented to their respective
+closure boundaries.
 
-**PLANNED:** the documents in this directory define semantic owners and narrow
-seams for post-Structural work. They do not define detailed TypeScript types,
-class hierarchies, storage tables, concrete MCP servers, or source-file changes.
+The live user-turn prompt already receives current/local time, elapsed time from
+the prior interaction, Direct Context, time-labelled L1 recent episodes, and
+bounded associated L1/L2 Memory. This is the current operational continuity/time
+strategy. It is intentionally simpler than the originally planned full Phase 3
+and Phase 4 systems.
 
-**CURRENT / COMPLETE:** Structural R closeout is complete. R3B production
-Runtime extraction and R5A1–R5A4 Core test decomposition are complete, including
-the final closeout. P8 is the next implementation phase and remains planned /
-not implemented.
+**RESERVED / GAP-DRIVEN:** Temporal remains the semantic owner for any future
+shared elapsed/horizon calculation beyond the implemented thin projection.
+Continuity remains the reserved owner for any future explicit durable
+unfinished-relevance state. Neither reserved owner authorizes building a large
+subsystem before a repeatable real failure proves it necessary.
+
+**NEXT:** Phase 8 behavior assets: `YUVI_BEHAVIOR_SPEC`, `YUVI_BEHAVIOR_EVAL`,
+and `YUVI_PREFERENCE_DATASET` schema/governance. The current prompt/provider
+Chat model is the operational baseline against which those assets can evaluate
+behavior.
+
+**DEFERRED:** Phases 9–13 wait until Yuvi is actually operational for sustained
+daily use and enough reviewed evidence exists to distinguish model-behavior
+failures from Memory, prompt, Runtime, provider, or presentation defects.
 
 ## Expected sequence
 
-1. Implement P8 identity, persona, and relationship interpretation.
-2. Establish the Character ABI and Character/Cognition responsibility split.
-3. Add the temporal substrate.
-4. Add Continuity and attention projections.
-5. Add the thin Character Harness and generation supervision.
-6. Integrate a replaceable Cognition Core and MCP capability semantics.
-7. Add embodied agency and causally grounded UI/Live2D behavior.
-8. Build the behavior specification, evaluation, and data pipeline.
-9. Run a base-model bakeoff.
-10. Run QLoRA SFT.
-11. Run DPO.
-12. Run shadow and A/B evaluation.
-13. Operate an iterative preference-data flywheel.
+1. Keep the closed P8 / Character ABI / Harness / Cognition / embodiment
+   boundaries stable; do not reopen them without a proven regression or an
+   explicitly authorized extension.
+2. Use the implemented Memory-first continuity/time path in product:
+   Direct Context + reconstructable L1 + bounded associated L2 + thin temporal
+   projection.
+3. Evaluate minutes/hours/days/older-memory resumption and real daily-use
+   failures. Fix retrieval, prompt, or model interpretation first when those
+   are the actual cause.
+4. Add a Temporal or Continuity semantic atom only when a repeatable failure
+   cannot be solved by the current context/time projection; never build a
+   generic manager pre-emptively.
+5. Build Phase 8 behavior spec, eval, and dataset-governance assets.
+6. Land and operate Yuvi using the replaceable DeepSeek V4 Flash-class Chat
+   path plus the existing separate Cognition path.
+7. Accumulate reviewed real-use evaluation evidence and fix non-model defects.
+8. Only after the operational gate passes, consider Phase 9 base-model bakeoff,
+   then evidence-gated Phase 10 SFT, Phase 11 DPO, Phase 12 shadow/A-B, and
+   Phase 13 preference-data flywheel.
 
-Data collection may begin earlier when provenance and labeling are sound.
-Post-training must not compensate for missing Runtime architecture, unclear
-authority, or an unstable model boundary.
+Data/evaluation collection may begin earlier when provenance and labeling are
+sound. Raw private conversation is not training data by default. Post-training
+must not compensate for missing Runtime architecture, unclear authority, weak
+Memory retrieval, or an unstable model boundary.
 
 ## Frozen responsibility map
+
+The semantic ownership map remains valid even when an owner is currently only
+reserved. “Owner” means where that meaning must live if/when it is explicitly
+implemented; it does not require a dedicated service, manager, table, or phase
+before product evidence needs it.
 
 | Layer                | Semantic responsibility                                                                                                                                            | Must not absorb                                                                                               |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
 | Runtime              | Execution authority, lifecycle, concurrency, durability, persistence, provider/cognition execution, capability admission, hard loop containment, event publication | Persona interpretation, attention judgment, cognition semantics, presentation meaning                         |
-| Memory               | Durable, provenance-preserving evidence plus record retrieval/ranking, validity, status, retention, and expiry                                                     | Relationship truth, Continuity state, consumer-specific relevance                                             |
+| Memory               | Durable, provenance-preserving evidence plus record retrieval/ranking, validity, status, retention, and expiry                                                     | Relationship truth, explicit Continuity authority, consumer-specific semantic relevance                       |
 | P8                   | Stable identity plus evidence-grounded persona and relationship interpretation                                                                                     | Transient attention, generic mood, execution authority                                                        |
-| Temporal substrate   | Non-mutating time position, elapsed time, age, temporal distance, consumer horizons, and derived relevance/attention decay                                         | Memory record expiry/status, fake off-screen life, relationship interpretation, scheduling authority          |
-| Continuity           | What remains unfinished or relevant: open threads, commitments, expectations, uncertainty, residue, and attention anchors                                          | Durable factual Memory, Persona authority, execution                                                          |
+| Temporal substrate   | Shared non-mutating time position, elapsed time, age, temporal distance, consumer horizons, and derived relevance/attention decay when such shared semantics are needed | Memory record expiry/status, fake off-screen life, relationship interpretation, scheduling authority          |
+| Continuity           | Reserved authority for explicit unfinished relevance: open threads, commitments, expectations, uncertainty, residue, and attention anchors                        | Durable factual Memory, Persona authority, execution                                                          |
 | Character Model      | Character expression, reactive attention and termination/silence, coarse `NEED_COGNITION`, result expression                                                       | Current P6 proactive admission, capability selection, reliable complex reasoning, backend/model identity      |
 | Cognition Core       | Complex reasoning, coding, research, planning, complex social interpretation, verification, and tool-assisted reasoning                                            | Yuvi's identity, final character voice, direct effect authority                                               |
 | Character Harness    | Character ABI inclusion/assembly, output interpretation, cognition-escalation requests, generation supervision, semantic recovery disposition                      | Durable state, cognition-result normalization, execution/retry, independent orchestration, provider lifecycle |
@@ -97,36 +135,40 @@ authority, or an unstable model boundary.
 
 Each row answers why the responsibility belongs to its owner instead of every
 other candidate layer. A future implementation may cross process or package
-boundaries, but it must preserve these semantic owners.
+boundaries, but it must preserve these semantic owners. The Memory-first
+operational shortcut may supply enough context to avoid instantiating a reserved
+owner; that does not transfer the reserved semantics to Memory or Runtime.
 
 | Responsibility                                                                 | Owner and reason                                                                                                                           | Why not Runtime / Memory / P8 / Continuity                                                                                                         | Why not Character Model / Cognition Core / Harness / MCP / Presentation                                                                            |
 | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Execute, cancel, serialize, persist, admit, contain, and publish effects       | **Runtime**, because one effect authority is required for lifecycle, loop containment, and durability correctness                          | Memory records evidence; P8 interprets identity; Continuity tracks relevance. None may execute effects                                             | Models propose; Harness requests; MCP performs one admitted invocation; Presentation renders/reports. None may become a second Runtime             |
-| Preserve, retrieve, filter, rank, and lifecycle durable evidence               | **Memory**, because evidence fidelity and record eligibility must survive model replacement                                                | Runtime supplies persistence mechanics but not evidence meaning; P8 interprets already-authorized evidence; Continuity derives relevance           | Models and Harness consume authorized projections; MCP may produce evidence; Presentation may report observations. None is the evidence authority  |
-| Define who Yuvi is and interpret the relationship from evidence                | **P8**, because identity stability and relationship meaning require one evidence-grounded semantic authority                               | Runtime stores/executes; Memory supplies evidence; Continuity owns transient unresolved state                                                      | Character expresses the projection; Cognition may assist hard interpretation; Harness assembles it; MCP and Presentation cannot define identity    |
-| Derive time position, elapsed gaps, age, distance, and consumer horizons       | **Temporal substrate**, because the same non-mutating calculations must serve P8, Continuity, and attention                                | Runtime supplies clock observations; Memory owns record validity/status/expiry and supplies timestamps; P8 and Continuity consume temporal meaning | Models interpret the projection; Harness passes it; MCP and Presentation do not define elapsed reality                                             |
-| Track unfinished relevance across interaction gaps                             | **Continuity**, because open threads and commitments are neither facts alone nor stable identity                                           | Runtime persists the projection; Memory is evidence; P8 may influence interpretation but does not own transient conversational residue             | Character judges response-worthiness; Cognition resolves hard work; Harness mediates; MCP/Presentation cannot decide what remains open             |
-| Decide reactive character response, silence/termination, and coarse escalation | **Character Model**, because these are learned social judgments at Yuvi's surface; current proactive text remains P6-owned until migration | Runtime enforces effects; Memory/P8/Continuity provide grounded context rather than generate behavior                                              | Cognition performs hard reasoning; Harness supervises/interprets; MCP supplies capabilities to Cognition; Presentation renders the admitted choice |
-| Perform serious reasoning and propose semantic continuation/capability need    | **Cognition Core**, because reasoning can be replaced independently of character identity                                                  | Runtime contains and executes the bounded cognition/capability session; Memory/P8/Continuity provide evidence and context                          | Character only emits `NEED_COGNITION` and expresses results; Harness mediates requests; MCP cannot decide continuation                             |
-| Assemble the model projection, validate crossings, and supervise generation    | **Character Harness**, because adaptation and safety need a thin replaceable seam around the local model                                   | Runtime remains lifecycle/effect/retry authority; Memory/P8/Continuity remain state authorities                                                    | Phase-6 cognition boundary normalizes results; Character/Cognition remain models; MCP remains capability protocol; Presentation remains rendering  |
-| Describe and perform one admitted invocation of dynamic capabilities           | **MCP capability layer**, because tool/server identities and protocol mechanics change independently from models                           | Runtime admits and contains execution; Memory records resulting evidence; P8/Continuity do not route tools                                         | Cognition proposes `REQUEST_CAPABILITY`; Character emits only `NEED_COGNITION`; Harness requests; Presentation cannot be the capability registry   |
-| Render embodied behavior                                                       | **Presentation**, because device/UI-specific execution should consume semantic intent                                                      | Runtime admits/publishes; Memory/P8/Continuity do not animate                                                                                      | Character proposes expression; Cognition does not animate; Harness mediates; MCP may provide an environment action but does not render embodiment  |
+| Execute, cancel, serialize, persist, admit, contain, and publish effects       | **Runtime**, because one effect authority is required for lifecycle, loop containment, and durability correctness                          | Memory records evidence; P8 interprets identity; Continuity, if introduced, tracks relevance. None may execute effects                            | Models propose; Harness requests; MCP performs one admitted invocation; Presentation renders/reports. None may become a second Runtime             |
+| Preserve, retrieve, filter, rank, and lifecycle durable evidence               | **Memory**, because evidence fidelity and record eligibility must survive model replacement                                                | Runtime supplies persistence mechanics but not evidence meaning; P8 interprets already-authorized evidence; future Continuity may derive relevance | Models and Harness consume authorized projections; MCP may produce evidence; Presentation may report observations. None is the evidence authority  |
+| Define who Yuvi is and interpret the relationship from evidence                | **P8**, because identity stability and relationship meaning require one evidence-grounded semantic authority                               | Runtime stores/executes; Memory supplies evidence; future Continuity owns transient unresolved state                                             | Character expresses the projection; Cognition may assist hard interpretation; Harness assembles it; MCP and Presentation cannot define identity    |
+| Derive shared time position, elapsed gaps, age, distance, and consumer horizons | **Temporal substrate**, when semantics beyond the thin current projection are proven necessary                                            | Runtime supplies clock observations; Memory owns record validity/status/expiry and supplies timestamps; P8/future Continuity consume temporal meaning | Models interpret the projection; Harness passes it; MCP and Presentation do not define elapsed reality                                          |
+| Track explicit unfinished relevance across interaction gaps                    | **Continuity**, if contextual L0/L1 recovery proves insufficient                                                                          | Runtime may persist the projection; Memory is evidence/context; P8 may influence interpretation but does not own transient conversational residue   | Character judges response-worthiness; Cognition resolves hard work; Harness mediates; MCP/Presentation cannot decide what remains open             |
+| Decide reactive character response, silence/termination, and coarse escalation | **Character Model**, because these are learned social judgments at Yuvi's surface; current proactive text remains P6-owned until migration | Runtime enforces effects; Memory/P8/time/future Continuity provide grounded context rather than generate behavior                                 | Cognition performs hard reasoning; Harness supervises/interprets; MCP supplies capabilities to Cognition; Presentation renders the admitted choice |
+| Perform serious reasoning and propose semantic continuation/capability need    | **Cognition Core**, because reasoning can be replaced independently of character identity                                                  | Runtime contains and executes the bounded cognition/capability session; Memory/P8/context provide evidence                                       | Character only emits `NEED_COGNITION` and expresses results; Harness mediates requests; MCP cannot decide continuation                             |
+| Assemble the model projection, validate crossings, and supervise generation    | **Character Harness**, because adaptation and safety need a thin replaceable seam around the Character model                               | Runtime remains lifecycle/effect/retry authority; Memory/P8/future Continuity remain state authorities                                           | Phase-6 cognition boundary normalizes results; Character/Cognition remain models; MCP remains capability protocol; Presentation remains rendering  |
+| Describe and perform one admitted invocation of dynamic capabilities           | **MCP capability layer**, because tool/server identities and protocol mechanics change independently from models                           | Runtime admits and contains execution; Memory records resulting evidence; P8/future Continuity do not route tools                                | Cognition proposes `REQUEST_CAPABILITY`; Character emits only `NEED_COGNITION`; Harness requests; Presentation cannot be the capability registry   |
+| Render embodied behavior                                                       | **Presentation**, because device/UI-specific execution should consume semantic intent                                                      | Runtime admits/publishes; Memory/P8/future Continuity do not animate                                                                              | Character proposes expression; Cognition does not animate; Harness mediates; MCP may provide an environment action but does not render embodiment  |
 
 ## Authoritative decision ownership
 
 Each concern below has one authority. Other layers may propose, consume,
 project, validate, or transport, but those verbs do not transfer authority.
+Reserved future concerns do not require an implementation until evidence proves
+they are needed.
 
 | Concern                                            | Sole authority                                                                                                       | May propose or consume                                                                                  | Explicitly not authority                                         |
 | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| Memory record retrieval/ranking                    | Memory                                                                                                               | Runtime requests; P8/Continuity consume authorized evidence                                             | P8, Harness, Character Model                                     |
-| Memory record expiry/status                        | Memory                                                                                                               | Temporal supplies non-mutating calculations; Runtime persists a Memory-owned admitted mutation          | Temporal, P8, Continuity, Harness                                |
+| Memory record retrieval/ranking                    | Memory                                                                                                               | Runtime requests; P8/future Continuity consume authorized evidence                                      | P8, Harness, Character Model                                     |
+| Memory record expiry/status                        | Memory                                                                                                               | Thin/shared Temporal may supply non-mutating calculations; Runtime persists a Memory-owned admitted mutation | Temporal, P8, Continuity, Harness                            |
 | P8 evidence interpretation                         | P8                                                                                                                   | Memory supplies evidence; Cognition may return bounded analysis; Harness projects                       | Memory, Cognition, Harness                                       |
-| Temporal elapsed/horizon calculation               | Temporal substrate                                                                                                   | Runtime supplies clocks; Memory supplies timestamps; P8/Continuity consume                              | Memory record lifecycle, Character narration                     |
-| Continuity unresolved relevance                    | Continuity                                                                                                           | Memory/events/time supply evidence; Character consumes anchors                                          | Memory, P8, Harness, Presentation                                |
-| Current proactive text `NO_OP \| REQUEST_TEXT`     | Existing P6 `ProactiveDecisionProvider` until atomic migration                                                       | Continuity/attention/Character may supply context only through an explicitly admitted compatible change | Character Model as a second gate, Harness, Presentation          |
+| Shared temporal elapsed/horizon calculation        | Temporal substrate when semantics beyond current thin projection are needed                                          | Runtime supplies clocks; Memory supplies timestamps; P8/future Continuity consume                       | Memory record lifecycle, Character narration                     |
+| Explicit Continuity unresolved relevance           | Continuity if/when such durable semantics are introduced                                                             | Memory/events/time supply evidence/context; Character consumes anchors                                  | Memory, P8, Harness, Presentation                                |
+| Current proactive text `NO_OP \| REQUEST_TEXT`     | Existing P6 `ProactiveDecisionProvider` until atomic migration                                                       | Context/attention/Character may supply input only through an explicitly admitted compatible change      | Character Model as a second gate, Harness, Presentation          |
 | Reactive character response disposition            | Character Model                                                                                                      | Harness validates; Runtime admits effects                                                               | Current P6 proactive decision, Harness, Presentation             |
-| Future generalized proactive response disposition  | Sole replacement semantic authority designated by the explicit atomic P6 migration; none is active before the switch | Character/Continuity may supply context under the migrated contract; Runtime admits effects             | Old P6 producer after retirement, any parallel second gate       |
+| Future generalized proactive response disposition  | Sole replacement semantic authority designated by the explicit atomic P6 migration; none is active before the switch | Character/context may supply input under the migrated contract; Runtime admits effects                  | Old P6 producer after retirement, any parallel second gate       |
 | Cognition escalation                               | Character Model emits `NEED_COGNITION`                                                                               | Harness validates/projects; Runtime executes the request                                                | Harness as reasoning policy, MCP                                 |
 | Cognition semantic continuation                    | Cognition Core emits `CONTINUE_REASONING \| REQUEST_CAPABILITY \| COMPLETE`                                          | Runtime enforces bounds; Harness transports normalized outcomes                                         | Runtime as semantic reasoner, MCP adapter                        |
 | Cognition-result normalization                     | Phase-6 cognition boundary/adapter                                                                                   | Phase 2 defines meanings; Harness validates/budgets/consumes; Runtime transports                        | Character Harness, Runtime, Character Model                      |
@@ -144,8 +186,9 @@ project, validate, or transport, but those verbs do not transfer authority.
 
 The roadmap depends on four narrow seams, not a generic agent graph:
 
-1. **Evidence to interpretation:** Memory evidence enters P8 or Continuity with
-   provenance, status, temporal uncertainty, and scope intact.
+1. **Evidence to interpretation:** Memory evidence enters P8 or any future
+   explicit Continuity artifact with provenance, status, temporal uncertainty,
+   and scope intact.
 2. **Character ABI:** the Character Model receives a stable semantic projection,
    not Runtime internal objects or provider DTOs.
 3. **Normalized Cognition Result:** the Character Model receives a stable
@@ -156,11 +199,11 @@ The roadmap depends on four narrow seams, not a generic agent graph:
    outside model weights. Direct Character-to-capability execution is reserved
    and non-executable in the initial architecture.
 
-Likely Character ABI sections are identity, relationship/persona evidence,
-recent conversation, relevant Memory, temporal context, Continuity/open
-threads, attention, current perception, and a normalized Cognition Result.
-Dynamic capability descriptions belong to Cognition task context in the
-initial architecture; any future Character-facing capability section is
+Current Character-facing context already includes recent conversation, relevant
+Memory, and temporal context through the Memory vNext / Prompt path. A future
+explicit Continuity/open-thread section is added only if gap-driven evaluation
+requires it. Dynamic capability descriptions belong to Cognition task context
+in the initial architecture; any future Character-facing capability section is
 reserved and absent until an explicit later contract admits it. These are
 semantic sections, not frozen wire fields.
 
@@ -189,9 +232,9 @@ The directional seam is:
 `Cognition backend → phase-6 cognition boundary → NORMALIZED_COGNITION_RESULT → Character Harness → Character Model`
 
 Candidate meanings include status, answer, key facts, evidence, uncertainty,
-and caveats. Exact names and wire format remain open. Raw chain-of-thought,
-vendor-specific payloads, provider model names, tool traces, and one backend's
-formatting are not part of the stable seam.
+and caveats. Raw chain-of-thought, vendor-specific payloads, provider model
+names, tool traces, and one backend's formatting are not part of the stable
+seam.
 
 ## P6 compatibility freeze
 
@@ -212,9 +255,9 @@ explicitly scoped replacement proves equivalent behavior:
 - proactive execution has no TTS, voice, or tool authority unless a later
   phase adds a separately admitted contract.
 
-Future initiative should consume Continuity, attention, and temporal context;
-it must not casually rewrite the proven P6 mechanism or reinterpret random
-idle animation as semantic agency.
+Future initiative may consume current Memory/time context and any later
+explicit Continuity/attention context; it must not casually rewrite the proven
+P6 mechanism or reinterpret random idle animation as semantic agency.
 
 ### Atomic P6 authority migration
 
@@ -245,9 +288,15 @@ write authority, and no implied proactive TTS/tool authority remain frozen.
 Future implementation agents must implement the smallest unit that realizes a
 proven semantic requirement. Do not create `PersonaManager`,
 `ContinuityEngine`, `AgencyManager`, `CharacterService`, `ToolOrchestrator`,
-`RelationshipEngine`, or a generic agent graph merely to mirror this roadmap.
-Introduce a named abstraction only when current evidence proves multiple
-callers or invariants need that seam.
+`RelationshipEngine`, `TemporalManager`, or a generic agent graph merely to
+mirror this roadmap. Introduce a named abstraction only when current evidence
+proves multiple callers or invariants need that seam.
+
+In particular, do not implement the formerly linear Phase 3 → Phase 4 sequence
+as mandatory infrastructure. The current Memory-first context path is the
+baseline. Full Temporal/Continuity work is gap-driven. Likewise, do not begin
+Phases 9–13 merely because Phase 8 assets exist; the sustained real-use gate is
+mandatory.
 
 ## Document map
 
@@ -258,18 +307,18 @@ callers or invariants need that seam.
 5. [Character Harness](05-character-harness.md)
 6. [Cognition and Capabilities](06-cognition-and-capabilities.md)
 7. [Embodied Agency](07-embodied-agency.md)
-8. [Character Post-Training](08-character-post-training.md)
+8. [Character Behavior Assets and Deferred Post-Training](08-character-post-training.md)
 
 ## Known current-document tension
 
-Older current docs still describe Live2D and autonomous behavior as wholly
-future work and list a future “emotion engine.” Current source/tests and
-current-state documentation show Live2D and bounded P6 behavior are already
-implemented. This roadmap therefore treats those older phrases as stale
-summaries, not as a mandate for a generic mood engine. No current Runtime
-semantic contradiction was found.
+Some per-phase and older current documents still contain stale status lines from
+before P8, Character ABI, Harness, Cognition, Phase 7, and Memory vNext landed.
+Current source/tests, merged closure documents, and this rebaselined sequence
+take precedence until those individual status headers are reconciled.
 
-The top-level README/Windows guidance and parts of `memory.md` also retain
-Windows-first or packaged-private-PostgreSQL language that is narrower or older
-than the explicit Linux-first P4 baseline. That non-blocking documentation
-tension does not change this roadmap's semantic ownership.
+The key operational correction is that Memory vNext already supplies a thin,
+live time/continuity path. A standalone full Temporal or Continuity subsystem is
+not automatically “next” merely because the old roadmap numbered it earlier.
+Likewise, the formal post-training roadmap is split: Phase 8 behavior assets may
+proceed now, while Phases 9–13 remain intentionally deferred until sustained
+real YUVI usage produces reviewed evidence.
