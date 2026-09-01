@@ -117,7 +117,11 @@ export {
   parsePostgresArgv,
   stopPrivatePostgresIfOwned
 } from "./postgres-ownership.js";
-export { preparePrivatePostgres, postgresDiagnostics } from "./postgres-lifecycle.js";
+export {
+  buildPrivatePostgresDatabaseUrl,
+  preparePrivatePostgres,
+  postgresDiagnostics
+} from "./postgres-lifecycle.js";
 export { resolvePostgresMode } from "./config.js";
 export { DesktopSupervisor } from "./supervisor.js";
 export {

@@ -6,6 +6,7 @@ import { buildChildProcessEnv, deriveConfigFromEnv } from "./config.js";
 import { buildPostgresStartCommand, pingPostgres } from "./postgres-cluster.js";
 import {
   adoptSurvivingPostgres,
+  buildPrivatePostgresDatabaseUrl,
   postgresDiagnostics,
   preparePrivatePostgres,
   publishListenMetadata
@@ -1039,6 +1040,10 @@ export class DesktopSupervisor {
   }
 
   private async prepareAndStartPrivatePostgres(): Promise<void> {
+    // Reconstruct the generated connection URL only after the private cluster
+    // is healthy; buildSpecs will then project it into packaged child env.
+    this.config.postgresListenPort = null;
+    this.rebuildSpecsInPlace();
     const layout = this.config.postgresLayout;
     const distribution = this.config.postgresDistribution;
     const svc = this.services.get("postgres");
@@ -1119,16 +1124,18 @@ export class DesktopSupervisor {
       const ready = this.services.get("postgres");
       if (ready?.status === "healthy" && ready.ownership === "owned") {
         const password = this.resolvePrivatePostgresPassword();
-        const sqlReady =
-          Boolean(password) &&
-          (await pingPostgres({
-            layout,
-            distribution,
-            port: listen.port,
-            password: password!,
-            clusterId: prepared.marker.clusterId
-          }));
+        const sqlReady = password
+          ? await pingPostgres({
+              layout,
+              distribution,
+              port: listen.port,
+              password,
+              clusterId: prepared.marker.clusterId
+            })
+          : false;
         if (sqlReady) {
+          this.config.postgresListenPort = listen.port;
+          this.rebuildSpecsInPlace();
           publishListenMetadata(layout, listen);
           return;
         }
@@ -1282,6 +1289,7 @@ export class DesktopSupervisor {
     const ttsU = parseUrlOrigin(this.config.ttsUpstreamUrl);
     const ollama = parseUrlOrigin(this.config.ollamaUrl);
     const db = this.config.databaseUrl ? tryParseDb(this.config.databaseUrl) : null;
+    const privatePostgresDatabaseUrl = this.resolvePackagedPrivatePostgresDatabaseUrl();
 
     return [
       {
@@ -1293,7 +1301,16 @@ export class DesktopSupervisor {
         healthUrl: `${this.config.runtimeUrl.replace(/\/$/, "")}/health`,
         startTimeoutMs: 45_000,
         readinessIntervalMs: 500,
-        startCommand: this.config.runtimeStart,
+        startCommand: mergeStartCommandEnv(
+          this.config.runtimeStart,
+          privatePostgresDatabaseUrl
+            ? {
+                MEMORY_REPOSITORY: "postgres",
+                CONVERSATION_REPOSITORY: "postgres",
+                DATABASE_URL: privatePostgresDatabaseUrl
+              }
+            : {}
+        ),
         metadataFile: path.join(state, "runtime.pid.json"),
         logFile: path.join(state, "runtime.log"),
         validateHealthBody: runtimeHealthOk
@@ -1311,7 +1328,15 @@ export class DesktopSupervisor {
         healthUrl: `${this.config.mem0Url.replace(/\/$/, "")}/health`,
         startTimeoutMs: 60_000,
         readinessIntervalMs: 800,
-        startCommand: this.config.memoryBackend === "mem0" ? this.config.mem0Start : null,
+        startCommand:
+          this.config.memoryBackend === "mem0"
+            ? mergeStartCommandEnv(
+                this.config.mem0Start,
+                privatePostgresDatabaseUrl
+                  ? { MEM0_PG_CONNECTION_STRING: privatePostgresDatabaseUrl }
+                  : {}
+              )
+            : null,
         metadataFile: path.join(state, "mem0.pid.json"),
         logFile: path.join(state, "mem0.log"),
         validateHealthBody: mem0HealthOk
@@ -1380,6 +1405,20 @@ export class DesktopSupervisor {
         validateHealthBody: ttsUpstreamHealthOk
       }
     ];
+  }
+
+  private resolvePackagedPrivatePostgresDatabaseUrl(): string | null {
+    if (
+      this.config.layout.mode !== "packaged" ||
+      this.config.postgresMode !== "private" ||
+      !this.config.postgresListenPort
+    ) {
+      return null;
+    }
+    const password = this.resolvePrivatePostgresPassword();
+    return password
+      ? buildPrivatePostgresDatabaseUrl(this.config.postgresListenPort, password)
+      : null;
   }
 
   /** Replace service specs in place; keep live ownership/pid state. Does not spawn/kill. */
@@ -1735,6 +1774,14 @@ export class DesktopSupervisor {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function mergeStartCommandEnv(
+  command: ManagedServiceSpec["startCommand"],
+  env: Record<string, string>
+): ManagedServiceSpec["startCommand"] {
+  if (!command || Object.keys(env).length === 0) return command;
+  return { ...command, env: { ...command.env, ...env } };
 }
 
 function startCommandEqual(

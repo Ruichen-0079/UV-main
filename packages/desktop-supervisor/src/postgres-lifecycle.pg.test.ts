@@ -7,10 +7,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { DesktopSupervisor } from "./supervisor.js";
-import { preparePrivatePostgres } from "./postgres-lifecycle.js";
+import { buildPrivatePostgresDatabaseUrl, preparePrivatePostgres } from "./postgres-lifecycle.js";
 import { resolvePostgresDistribution } from "./postgres-distribution.js";
 import { layoutFromRoot, resolvePostgresLayout } from "./postgres-layout.js";
 import { execAuthenticatedSql, inspectExistingCluster, pingPostgres } from "./postgres-cluster.js";
@@ -179,6 +180,56 @@ describePg("private postgres real PG16 acceptance", () => {
       })
     ).toBe(true);
 
+    const databaseUrl = buildPrivatePostgresDatabaseUrl(prepared.listen.port, prepared.password);
+    const migrationDir = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../memory/migrations"
+    );
+    const migrationSettings = `
+      select set_config('yuvi.memory_vector_index_enabled', 'false', false);
+      select set_config('yuvi.memory_vector_index_type', 'hnsw', false);
+      select set_config('yuvi.memory_vector_distance', 'cosine', false);
+      select set_config('yuvi.memory_vector_dimensions', '1536', false);
+    `;
+    const migrationFiles = fs
+      .readdirSync(migrationDir)
+      .filter((file) => file.endsWith(".sql"))
+      .sort();
+    expect(migrationFiles.length).toBeGreaterThan(0);
+    for (const migrationFile of migrationFiles) {
+      const migration = await execAuthenticatedSql({
+        distribution: distribution.distribution,
+        port: prepared.listen.port,
+        password: prepared.password,
+        sql: `${migrationSettings}\n${fs.readFileSync(path.join(migrationDir, migrationFile), "utf8")}`
+      });
+      expect(migration.ok, `${migrationFile}: ${migration.output}`).toBe(true);
+    }
+    const persistedMemoryId = "00000000-0000-0000-0000-000000000002";
+    const persistedMemory = await execAuthenticatedSql({
+      distribution: distribution.distribution,
+      port: prepared.listen.port,
+      password: prepared.password,
+      sql: `INSERT INTO memories (id, type, content, source, source_trace_id)
+            VALUES ('${persistedMemoryId}', 'semantic', 'B2 survives Runtime reconstruction.',
+                    'b2-postgres-acceptance', 'b2-restart-memory')
+            ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content;`
+    });
+    expect(persistedMemory.ok, persistedMemory.output).toBe(true);
+    const persistedConversation = await execAuthenticatedSql({
+      distribution: distribution.distribution,
+      port: prepared.listen.port,
+      password: prepared.password,
+      sql: `INSERT INTO conversation_sessions (id) VALUES ('b2-restart-session')
+            ON CONFLICT (id) DO NOTHING;
+            INSERT INTO conversation_messages
+              (id, session_id, trace_id, role, content, status, created_at, completed_at, metadata)
+            VALUES ('b2-restart-message', 'b2-restart-session', 'b2-restart-trace', 'user',
+                    'B2 conversation survives restart.', 'completed', now(), now(), '{}'::jsonb)
+            ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content;`
+    });
+    expect(persistedConversation.ok, persistedConversation.output).toBe(true);
+
     const create = await execAuthenticatedSql({
       distribution: distribution.distribution,
       port: prepared.listen.port,
@@ -216,6 +267,23 @@ describePg("private postgres real PG16 acceptance", () => {
     });
     expect(read.ok, read.output).toBe(true);
     expect(read.output).toContain("survives-restart");
+
+    const reconstructedMemory = await execAuthenticatedSql({
+      distribution: distribution.distribution,
+      port: prepared.listen.port,
+      password: prepared.password,
+      sql: `SELECT content FROM memories WHERE id = '${persistedMemoryId}';`
+    });
+    expect(reconstructedMemory.ok, reconstructedMemory.output).toBe(true);
+    expect(reconstructedMemory.output).toContain("B2 survives Runtime reconstruction.");
+    const reconstructedConversation = await execAuthenticatedSql({
+      distribution: distribution.distribution,
+      port: prepared.listen.port,
+      password: prepared.password,
+      sql: "SELECT content FROM conversation_messages WHERE id = 'b2-restart-message';"
+    });
+    expect(reconstructedConversation.ok, reconstructedConversation.output).toBe(true);
+    expect(reconstructedConversation.output).toContain("B2 conversation survives restart.");
     await restarted.shutdown();
   }, 120_000);
 

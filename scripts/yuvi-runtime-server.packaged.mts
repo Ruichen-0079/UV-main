@@ -9,6 +9,42 @@ import {
   readRuntimeEnvFiles
 } from "../apps/server/src/env.ts";
 import { buildServer } from "../apps/server/src/server.ts";
+import { parseMemoryRepositoryEnv } from "../packages/memory/src/env.ts";
+import { readSqlMigrations, runPostgresMigrations } from "../packages/memory/src/migrations.ts";
+import { createProviderRegistryFromEnv } from "../packages/providers/src/index.ts";
+
+async function preparePackagedPostgres(): Promise<void> {
+  const isPackaged =
+    process.env["YUVI_PACKAGED"] === "1" || process.env["YUVI_PACKAGED"] === "true";
+  if (!isPackaged || parseMemoryRepositoryEnv(process.env).kind !== "postgres") return;
+
+  const databaseUrl = process.env["DATABASE_URL"]?.trim();
+  if (!databaseUrl) throw new Error("Packaged PostgreSQL Runtime requires DATABASE_URL.");
+  const migrationsDir = process.env["YUVI_RUNTIME_MIGRATIONS_DIR"]?.trim();
+  if (!migrationsDir) {
+    throw new Error("Packaged PostgreSQL Runtime migrations directory is not configured.");
+  }
+  const migrations = await readSqlMigrations(migrationsDir);
+  if (migrations.length === 0) {
+    throw new Error(`No SQL migration files found in ${migrationsDir}.`);
+  }
+  const embeddingProvider = createProviderRegistryFromEnv(process.env).getEmbeddingProvider();
+  console.info(
+    `[postgres] applying ${migrations.length} migration(s); embedding=${embeddingProvider.name} dimensions=${embeddingProvider.dimensions}`
+  );
+  await runPostgresMigrations({
+    databaseUrl,
+    migrations,
+    settings: {
+      "yuvi.memory_vector_index_enabled": process.env["MEMORY_VECTOR_INDEX_ENABLED"] ?? "true",
+      "yuvi.memory_vector_index_type": process.env["MEMORY_VECTOR_INDEX_TYPE"] ?? "hnsw",
+      "yuvi.memory_vector_distance": process.env["MEMORY_VECTOR_DISTANCE"] ?? "cosine",
+      "yuvi.memory_vector_dimensions": String(embeddingProvider.dimensions)
+    },
+    logger: console
+  });
+  console.info("[postgres] memory schema is ready.");
+}
 
 async function main(): Promise<void> {
   const runtimeEnvFiles = await readRuntimeEnvFiles();
@@ -29,6 +65,7 @@ async function main(): Promise<void> {
     }
   }
 
+  await preparePackagedPostgres();
   const config = loadServerConfig();
   const app = await buildServer(config);
 

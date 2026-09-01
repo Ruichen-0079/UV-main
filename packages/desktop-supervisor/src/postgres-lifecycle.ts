@@ -18,6 +18,8 @@ import { selectPrivatePostgresPort } from "./postgres-port.js";
 import {
   PRIVATE_POSTGRES_HOST,
   PRIVATE_POSTGRES_MAJOR,
+  PRIVATE_POSTGRES_DATABASE,
+  PRIVATE_POSTGRES_USER,
   assertPgdataContained,
   ensurePostgresDirectories,
   readClusterMarker,
@@ -33,6 +35,17 @@ import type { PostgresDistribution } from "./postgres-distribution.js";
 import type { ProcessInspectionResult, ProcessMetadata, StartCommandSpec } from "./types.js";
 import { buildPostgresStartCommand } from "./postgres-cluster.js";
 import { evaluatePostgresOwnership, stopPrivatePostgresIfOwned } from "./postgres-ownership.js";
+
+/** Build the private loopback connection string without exposing it in args or diagnostics. */
+export function buildPrivatePostgresDatabaseUrl(port: number, password: string): string {
+  const url = new URL("postgresql://localhost");
+  url.hostname = PRIVATE_POSTGRES_HOST;
+  url.port = String(port);
+  url.username = PRIVATE_POSTGRES_USER;
+  url.password = password;
+  url.pathname = `/${PRIVATE_POSTGRES_DATABASE}`;
+  return url.toString();
+}
 
 export type PrivatePostgresPrepareResult =
   | {
