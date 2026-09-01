@@ -155,7 +155,9 @@ describe("supervisor postgres mode", () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-dev-"));
     tempDirs.push(repo);
     fs.mkdirSync(path.join(repo, "scripts"), { recursive: true });
-    fs.writeFileSync(path.join(repo, "scripts", "dev-server-runner.ps1"), "#x\n");
+    const runnerName =
+      process.platform === "win32" ? "dev-server-runner.ps1" : "dev-server-runner.sh";
+    fs.writeFileSync(path.join(repo, "scripts", runnerName), "#x\n");
     const derived = deriveConfigFromEnv({ mode: "development", repositoryRoot: repo }, {});
     expect(derived.postgresMode).toBe("external");
     expect(derived.postgresStart).toBeNull();

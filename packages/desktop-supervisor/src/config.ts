@@ -564,28 +564,32 @@ export function resolveRuntimeStart(
   const explicit = resolveOptionalStartCommand(env, "YUVI_RUNTIME_START_COMMAND", repositoryRoot);
   if (explicit) return explicit;
 
-  const runner = path.join(repositoryRoot, "scripts", "dev-server-runner.ps1");
+  const isWindows = process.platform === "win32";
+  const runnerName = isWindows ? "dev-server-runner.ps1" : "dev-server-runner.sh";
+  const runner = path.join(repositoryRoot, "scripts", runnerName);
   if (!fs.existsSync(runner)) return null;
-  const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+  const shell = isWindows ? "powershell.exe" : "bash";
   return {
     file: shell,
-    args: [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      runner,
-      "-RepoRoot",
-      repositoryRoot,
-      "-ServerPort",
-      runtimePort
-    ],
+    args: isWindows
+      ? [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          runner,
+          "-RepoRoot",
+          repositoryRoot,
+          "-ServerPort",
+          runtimePort
+        ]
+      : [runner, "--repo-root", repositoryRoot, "--server-port", runtimePort],
     cwd: repositoryRoot,
     env: {
       SERVER_PORT: runtimePort,
       YUVI_RUNTIME_ENV_DIR: repositoryRoot
     },
-    commandMarker: "dev-server-runner.ps1"
+    commandMarker: runnerName
   };
 }
 

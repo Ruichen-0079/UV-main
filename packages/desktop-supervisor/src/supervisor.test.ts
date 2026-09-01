@@ -64,16 +64,17 @@ afterEach(async () => {
 
 /**
  * Platform-independent fake repo root so deriveConfigFromEnv / resolveRuntimeStart
- * keep finding scripts/dev-server-runner.ps1 after applyRuntimeConfig (not a
- * hardcoded Windows path that is missing on Ubuntu CI).
+ * keep finding the platform-native dev server runner after applyRuntimeConfig.
  */
 function makeTempRepositoryRoot(): string {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-repo-"));
   tempDirs.push(repositoryRoot);
   const scriptsDir = path.join(repositoryRoot, "scripts");
   fs.mkdirSync(scriptsDir, { recursive: true });
+  const runnerName =
+    process.platform === "win32" ? "dev-server-runner.ps1" : "dev-server-runner.sh";
   fs.writeFileSync(
-    path.join(scriptsDir, "dev-server-runner.ps1"),
+    path.join(scriptsDir, runnerName),
     "# fixture placeholder for supervisor tests\n",
     "utf8"
   );
