@@ -44,7 +44,10 @@ fn defaults_when_no_file() {
     let view = service.get_view().unwrap();
     assert_eq!(view.settings.schema_version, SCHEMA_VERSION);
     assert_eq!(view.settings.chat.provider, "openai-compatible");
-    assert_eq!(view.settings.chat.model, "deepseek-ai/DeepSeek-V4-Flash-0731");
+    assert_eq!(
+        view.settings.chat.model,
+        "deepseek-ai/DeepSeek-V4-Flash-0731"
+    );
     assert_eq!(view.settings.cognition.provider, "openai-compatible");
     assert_eq!(view.settings.cognition.model, "glm-4.7-flash");
     assert!(!view.secrets.openai_compatible_api_key);
@@ -103,12 +106,21 @@ fn cognition_selection_persists_and_projects_shared_openai_connection() {
         .unwrap();
     let reloaded = ConfigService::open(dir.path().to_path_buf(), secrets);
     let view = reloaded.get_view().unwrap();
-    assert_eq!(view.settings.openai_compatible.base_url, "https://gateway.example/v1");
+    assert_eq!(
+        view.settings.openai_compatible.base_url,
+        "https://gateway.example/v1"
+    );
     assert!(view.secrets.openai_compatible_api_key);
 
     let env = reloaded.supervisor_env().unwrap();
-    assert_eq!(env.get("DEFAULT_CHAT_PROVIDER").map(String::as_str), Some("openai-compatible"));
-    assert_eq!(env.get("CHAT_PROVIDER_CHAIN").map(String::as_str), Some("openai-compatible"));
+    assert_eq!(
+        env.get("DEFAULT_CHAT_PROVIDER").map(String::as_str),
+        Some("openai-compatible")
+    );
+    assert_eq!(
+        env.get("CHAT_PROVIDER_CHAIN").map(String::as_str),
+        Some("openai-compatible")
+    );
     assert_eq!(
         env.get("DEFAULT_REASONING_PROVIDER").map(String::as_str),
         Some("openai-compatible")
@@ -126,7 +138,8 @@ fn cognition_selection_persists_and_projects_shared_openai_connection() {
         Some("deepseek-ai/DeepSeek-V4-Flash-0731")
     );
     assert_eq!(
-        env.get("OPENAI_COMPATIBLE_REASONING_MODEL").map(String::as_str),
+        env.get("OPENAI_COMPATIBLE_REASONING_MODEL")
+            .map(String::as_str),
         Some("glm-4.7-flash")
     );
     assert_eq!(
@@ -140,7 +153,9 @@ fn cognition_selection_persists_and_projects_shared_openai_connection() {
 #[test]
 fn chat_and_cognition_provider_selection_projects_separate_models() {
     let secrets = MemorySecretStore::default();
-    secrets.set(SECRET_DEEPSEEK_API_KEY, "deepseek-key").unwrap();
+    secrets
+        .set(SECRET_DEEPSEEK_API_KEY, "deepseek-key")
+        .unwrap();
     secrets
         .set(SECRET_OPENAI_COMPATIBLE_API_KEY, "shared-key")
         .unwrap();
@@ -151,14 +166,21 @@ fn chat_and_cognition_provider_selection_projects_separate_models() {
     settings.cognition.model = "glm-4.7-flash".into();
 
     let env = combined_env_for_supervisor(&settings, &secrets).unwrap();
-    assert_eq!(env.get("DEEPSEEK_CHAT_MODEL").map(String::as_str), Some("deepseek-chat"));
     assert_eq!(
-        env.get("OPENAI_COMPATIBLE_REASONING_MODEL").map(String::as_str),
+        env.get("DEEPSEEK_CHAT_MODEL").map(String::as_str),
+        Some("deepseek-chat")
+    );
+    assert_eq!(
+        env.get("OPENAI_COMPATIBLE_REASONING_MODEL")
+            .map(String::as_str),
         Some("glm-4.7-flash")
     );
     assert!(env.get("OPENAI_COMPATIBLE_CHAT_MODEL").is_none());
     assert!(env.get("DEEPSEEK_REASONING_MODEL").is_none());
-    assert_eq!(env.get("DEEPSEEK_API_KEY").map(String::as_str), Some("deepseek-key"));
+    assert_eq!(
+        env.get("DEEPSEEK_API_KEY").map(String::as_str),
+        Some("deepseek-key")
+    );
     assert_eq!(
         env.get("OPENAI_COMPATIBLE_API_KEY").map(String::as_str),
         Some("shared-key")
@@ -1083,7 +1105,10 @@ fn platform_credential_manager_roundtrip_and_config_push() {
             .set(super::secrets::SECRET_DEEPSEEK_API_KEY, CHAT_SECRET)
             .expect("set chat test credential");
         store
-            .set(super::secrets::SECRET_OPENAI_COMPATIBLE_API_KEY, OPENAI_SECRET)
+            .set(
+                super::secrets::SECRET_OPENAI_COMPATIBLE_API_KEY,
+                OPENAI_SECRET,
+            )
             .expect("set OpenAI-compatible test credential");
         store
             .set(super::secrets::SECRET_DATABASE_URL, DATABASE_SECRET)
@@ -1152,7 +1177,10 @@ fn platform_credential_manager_roundtrip_and_config_push() {
             .expect("build Supervisor config push");
         assert!(push.env.get("DEEPSEEK_API_KEY").map(String::as_str) == Some(CHAT_SECRET));
         assert!(
-            push.env.get("OPENAI_COMPATIBLE_API_KEY").map(String::as_str) == Some(OPENAI_SECRET)
+            push.env
+                .get("OPENAI_COMPATIBLE_API_KEY")
+                .map(String::as_str)
+                == Some(OPENAI_SECRET)
         );
         assert!(push.env.get("DATABASE_URL").map(String::as_str) == Some(DATABASE_SECRET));
         assert!(push.env.get("MEM0_LLM_API_KEY").map(String::as_str) == Some(MEMORY_SECRET));
