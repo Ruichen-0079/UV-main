@@ -528,6 +528,49 @@ describe("DesktopSupervisor runtime config push", () => {
     expect(envB?.["DEEPSEEK_API_KEY"]).toBe("key-B");
   });
 
+  it("projects local STT selection and preserves the Supervisor-owned command", async () => {
+    const supervisor = createSupervisor(
+      baseConfig({
+        localSttStart: {
+          file: "python",
+          args: ["services/local-stt/server.py"],
+          cwd: "/tmp/yuvi-local-stt",
+          env: {},
+          commandMarker: "server.py"
+        },
+        autostartLocalStt: false
+      })
+    );
+
+    const result = await supervisor.applyRuntimeConfig({
+      env: {
+        DEFAULT_STT_PROVIDER: "local",
+        STT_PROVIDER_CHAIN: "local",
+        LOCAL_MODEL_BASEURL: "http://127.0.0.1:9876",
+        LOCAL_STT_BASE_URL: "http://127.0.0.1:9876",
+        LOCAL_STT_MODEL: "sense-voice",
+        YUVI_AUTOSTART_LOCAL_STT: "false"
+      },
+      unsetEnv: []
+    });
+
+    expect(result.restartedServices).toContain("runtime");
+    expect(supervisor.resolveSpawnEnv("runtime")?.["DEFAULT_STT_PROVIDER"]).toBe("local");
+    expect(supervisor.resolveSpawnEnv("runtime")?.["STT_PROVIDER_CHAIN"]).toBe("local");
+    expect(supervisor.resolveSpawnEnv("runtime")?.["LOCAL_MODEL_BASEURL"]).toBe(
+      "http://127.0.0.1:9876"
+    );
+    expect(
+      supervisor.snapshot().services.find((service) => service.id === "local_stt")
+    ).toMatchObject({ managed: true });
+
+    const changed = await supervisor.applyRuntimeConfig({
+      env: { LOCAL_STT_BASE_URL: "http://127.0.0.1:9987" },
+      unsetEnv: []
+    });
+    expect(changed.restartedServices).toContain("runtime");
+  });
+
   it("base fallback A → override B → delete restores A (not stale B)", async () => {
     process.env["DEEPSEEK_API_KEY"] = "fallback-A";
     const supervisor = createSupervisor(

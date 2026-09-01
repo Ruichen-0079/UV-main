@@ -37,6 +37,13 @@ const sampleView = (): SettingsViewDto => ({
       wrapperUrl: "http://127.0.0.1:9881",
       upstreamUrl: "http://127.0.0.1:9880"
     },
+    stt: {
+      provider: "dashscope",
+      mode: "external",
+      autostart: false,
+      baseUrl: "http://127.0.0.1:9876",
+      model: "sense-voice-zh-en-ja-ko-yue-2024-07-17-int8"
+    },
     companion: { alwaysOnTop: true },
     proactive: { enabled: false }
   },
@@ -53,6 +60,7 @@ describe("user settings reducer", () => {
     expect(state.loading).toBe(false);
     expect(state.form.chatModel).toBe("deepseek-chat");
     expect(state.form.proactiveEnabled).toBe(false);
+    expect(state.form.sttProvider).toBe("dashscope");
     expect(state.form.deepseekApiKeyInput).toBe("");
     expect(state.secrets.deepseekApiKey).toBe(false);
     assertNoSecretMaterial(state);
@@ -199,6 +207,24 @@ describe("user settings reducer", () => {
     expect(patchFromForm(form)).toMatchObject({ proactive: { enabled: false } });
     form.proactiveEnabled = true;
     expect(patchFromForm(form)).toMatchObject({ proactive: { enabled: true } });
+  });
+
+  it("maps the explicit local STT configuration into the save patch", () => {
+    const form = defaultUserSettingsForm();
+    form.sttProvider = "local";
+    form.sttMode = "managed";
+    form.sttAutostart = true;
+    form.sttBaseUrl = "http://127.0.0.1:9876";
+    form.sttModel = "sense-voice";
+    expect(patchFromForm(form)).toMatchObject({
+      stt: {
+        provider: "local",
+        mode: "managed",
+        autostart: true,
+        baseUrl: "http://127.0.0.1:9876",
+        model: "sense-voice"
+      }
+    });
   });
 
   it("field edits only update form local state (no secret leak)", () => {

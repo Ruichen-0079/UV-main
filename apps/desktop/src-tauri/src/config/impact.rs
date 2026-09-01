@@ -20,6 +20,11 @@ pub fn compute_restart_services(before: &UserSettings, after: &UserSettings) -> 
     out.push("tts".into());
   }
 
+  if before.stt != after.stt {
+    out.push("runtime".into());
+    out.push("local_stt".into());
+  }
+
   // companion.alwaysOnTop is applied immediately — no service restart.
   // app.language is frontend-only.
 

@@ -6,7 +6,8 @@ use super::impact::{compute_restart_services, restart_application_needed};
 use super::schema::{redact_supervisor_error, SecretMutationResult, SupervisorSyncStatus};
 use super::schema::{
     MemoryBackend, MemoryLlmProvider, MemoryLlmSettingsPatch, MemorySettingsPatch,
-    ProactiveSettingsPatch, ServiceMode, UserSettings, UserSettingsPatch, SCHEMA_VERSION,
+    ProactiveSettingsPatch, ServiceMode, SttProvider, UserSettings, UserSettingsPatch,
+    SCHEMA_VERSION,
 };
 use super::secrets::{
     MemorySecretStore, SecretStore, SECRET_DATABASE_URL, SECRET_DEEPSEEK_API_KEY,
@@ -158,6 +159,13 @@ fn restart_services_impact() {
     let services = compute_restart_services(&before, &after_mem);
     assert!(services.contains(&"memory".to_string()));
     assert!(!services.contains(&"runtime".to_string()));
+
+    let mut after_stt = before.clone();
+    after_stt.stt.provider = SttProvider::Local;
+    after_stt.stt.mode = ServiceMode::Managed;
+    after_stt.stt.autostart = true;
+    let services = compute_restart_services(&before, &after_stt);
+    assert_eq!(services, vec!["runtime", "local_stt"]);
 }
 
 #[test]
@@ -209,6 +217,44 @@ fn managed_env_includes_secrets_external_runtime_skips_chat_key() {
         public.get("LOCAL_TTS_MODEL").map(String::as_str),
         Some("alice-v4")
     );
+
+    let mut local_stt = managed.clone();
+    local_stt.stt.provider = SttProvider::Local;
+    local_stt.stt.mode = ServiceMode::Managed;
+    local_stt.stt.autostart = true;
+    let public = public_env_overrides(&local_stt);
+    assert_eq!(
+        public.get("DEFAULT_STT_PROVIDER").map(String::as_str),
+        Some("local")
+    );
+    assert_eq!(
+        public.get("STT_PROVIDER_CHAIN").map(String::as_str),
+        Some("local")
+    );
+    assert_eq!(
+        public.get("LOCAL_STT_BASE_URL").map(String::as_str),
+        Some("http://127.0.0.1:9876")
+    );
+    assert_eq!(
+        public.get("LOCAL_MODEL_BASEURL").map(String::as_str),
+        Some("http://127.0.0.1:9876")
+    );
+    assert_eq!(
+        public.get("YUVI_AUTOSTART_LOCAL_STT").map(String::as_str),
+        Some("true")
+    );
+
+    let public = public_env_overrides(&managed);
+    assert_eq!(
+        public.get("DEFAULT_STT_PROVIDER").map(String::as_str),
+        Some("dashscope")
+    );
+    assert_eq!(
+        public.get("YUVI_AUTOSTART_LOCAL_STT").map(String::as_str),
+        Some("false")
+    );
+    let unset = unset_env_for_supervisor(&managed, &secrets).unwrap();
+    assert!(unset.iter().any(|key| key == "LOCAL_MODEL_BASEURL"));
 }
 
 #[test]

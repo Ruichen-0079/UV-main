@@ -439,6 +439,58 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
         </section>
 
         <section className="settings-card">
+          <h3>Speech input</h3>
+          <Field label="Provider">
+            <select
+              className="setting-input"
+              value={form.sttProvider}
+              onChange={(e) => setField("sttProvider", e.target.value as "local" | "dashscope")}
+            >
+              <option value="local">local CPU STT</option>
+              <option value="dashscope">dashscope</option>
+            </select>
+          </Field>
+          <Field label="Mode">
+            <select
+              className="setting-input"
+              value={form.sttMode}
+              onChange={(e) => setField("sttMode", e.target.value as "managed" | "external")}
+            >
+              <option value="managed">managed</option>
+              <option value="external">external</option>
+            </select>
+          </Field>
+          <label className="setting-checkbox">
+            <input
+              type="checkbox"
+              checked={form.sttAutostart}
+              onChange={(e) => setField("sttAutostart", e.target.checked)}
+            />
+            Start local sidecar automatically
+          </label>
+          <Field label="Local STT URL">
+            <input
+              className="setting-input"
+              type="url"
+              value={form.sttBaseUrl}
+              onChange={(e) => setField("sttBaseUrl", e.target.value)}
+            />
+          </Field>
+          <Field label="Local STT model">
+            <input
+              className="setting-input"
+              value={form.sttModel}
+              onChange={(e) => setField("sttModel", e.target.value)}
+            />
+          </Field>
+          <p className="mt-2 text-xs text-ink-500">
+            Local mode uses the existing Supervisor-owned local_stt service. Managed autostart takes
+            effect only when an explicit sidecar start command is available; packaging the sidecar
+            and model is the next B3c atom.
+          </p>
+        </section>
+
+        <section className="settings-card">
           <h3>Desktop</h3>
           <label className="setting-checkbox">
             <input

@@ -106,7 +106,12 @@ const RUNTIME_RELOAD_KEYS = new Set([
   "MEMORY_BACKEND",
   "MEM0_BASE_URL",
   "MEMORY_SUBJECT_USER_ID",
-  "MEMORY_PERSONA_ID"
+  "MEMORY_PERSONA_ID",
+  "DEFAULT_STT_PROVIDER",
+  "STT_PROVIDER_CHAIN",
+  "LOCAL_STT_BASE_URL",
+  "LOCAL_MODEL_BASEURL",
+  "LOCAL_STT_MODEL"
 ]);
 
 const MEM0_CONFIG_KEYS = new Set([
@@ -130,6 +135,7 @@ const MEM0_CONFIG_KEYS = new Set([
 ]);
 
 type Mem0ReconcileAction = "none" | "start" | "stop" | "restart" | "pending_external";
+type LocalSttReconcileAction = Mem0ReconcileAction;
 
 type ServiceConfigState = {
   spec: ManagedServiceSpec;
@@ -142,12 +148,14 @@ type SupervisorConfigState = {
   env: Record<string, string>;
   runtime: ServiceConfigState;
   mem0: ServiceConfigState;
+  localStt: ServiceConfigState;
 };
 
 type ConfigReconcilePlan = {
   generation: number;
   runtimeChanged: boolean;
   mem0Action: Mem0ReconcileAction;
+  localSttAction: LocalSttReconcileAction;
 };
 
 export class DesktopSupervisor {
@@ -291,10 +299,14 @@ export class DesktopSupervisor {
         autostartTts: preserveMissingFlag("YUVI_AUTOSTART_TTS")
           ? this.config.autostartTts
           : derived.autostartTts,
+        autostartLocalStt: preserveMissingFlag("YUVI_AUTOSTART_LOCAL_STT")
+          ? (this.config.autostartLocalStt ?? false)
+          : derived.autostartLocalStt,
         // Rust only sends user settings; preserve existing TTS commands when
         // the update does not include their explicit start-command variables.
         ttsWrapperStart: derived.ttsWrapperStart ?? this.config.ttsWrapperStart,
         ttsUpstreamStart: derived.ttsUpstreamStart ?? this.config.ttsUpstreamStart,
+        localSttStart: derived.localSttStart ?? this.config.localSttStart,
         postgresStart: derived.postgresStart ?? this.config.postgresStart
       };
 
@@ -309,7 +321,7 @@ export class DesktopSupervisor {
       const nextState = this.captureConfigState();
       plan = this.buildReconcilePlan(previousState, nextState);
       plan.generation = this.configGeneration;
-      if (plan.runtimeChanged || plan.mem0Action !== "none") {
+      if (plan.runtimeChanged || plan.mem0Action !== "none" || plan.localSttAction !== "none") {
         this.enqueueConfigReconcile(plan);
       }
     });
@@ -321,7 +333,8 @@ export class DesktopSupervisor {
       unsetEnvKeys: [...unsetEnvKeys],
       restartedServices: [
         ...(plan.runtimeChanged ? (["runtime"] as const) : []),
-        ...(plan.mem0Action !== "none" ? (["mem0"] as const) : [])
+        ...(plan.mem0Action !== "none" ? (["mem0"] as const) : []),
+        ...(plan.localSttAction !== "none" ? (["local_stt"] as const) : [])
       ],
       updatedAt: new Date().toISOString()
     };
@@ -1462,7 +1475,8 @@ export class DesktopSupervisor {
     return {
       env: { ...this.config.env },
       runtime: capture("runtime"),
-      mem0: capture("mem0")
+      mem0: capture("mem0"),
+      localStt: capture("local_stt")
     };
   }
 
@@ -1473,7 +1487,8 @@ export class DesktopSupervisor {
     return {
       generation: this.configGeneration,
       runtimeChanged: this.runtimeConfigChanged(previous, next),
-      mem0Action: this.mem0ReconcileAction(previous.mem0, next.mem0, previous, next)
+      mem0Action: this.mem0ReconcileAction(previous.mem0, next.mem0, previous, next),
+      localSttAction: this.localSttReconcileAction(previous.localStt, next.localStt, previous, next)
     };
   }
 
@@ -1547,6 +1562,40 @@ export class DesktopSupervisor {
     return false;
   }
 
+  private localSttReconcileAction(
+    previous: ServiceConfigState,
+    next: ServiceConfigState,
+    previousConfig: SupervisorConfigState,
+    nextConfig: SupervisorConfigState
+  ): LocalSttReconcileAction {
+    const previousManaged = previous.spec.managed;
+    const nextManaged = next.spec.managed;
+    const previousOwned = previous.ownership === "owned";
+
+    if (!previousManaged && !nextManaged) return "none";
+    if (previousManaged && !nextManaged) return previousOwned ? "stop" : "none";
+    if (!previousManaged && nextManaged) {
+      return next.spec.autostart ? "start" : "none";
+    }
+
+    if (previous.spec.autostart && !next.spec.autostart) {
+      return previousOwned ? "stop" : "none";
+    }
+    if (!next.spec.autostart) return "none";
+
+    const effectiveChanged =
+      previous.spec.healthUrl !== next.spec.healthUrl ||
+      !startCommandEqual(previous.spec.startCommand, next.spec.startCommand) ||
+      ["DEFAULT_STT_PROVIDER", "STT_PROVIDER_CHAIN", "LOCAL_STT_BASE_URL", "LOCAL_STT_MODEL"].some(
+        (key) => previousConfig.env[key] !== nextConfig.env[key]
+      );
+    if (!effectiveChanged) return "none";
+    if (previous.ownership === "external" || next.ownership === "external") {
+      return "pending_external";
+    }
+    return previousOwned ? "restart" : "start";
+  }
+
   private mem0ConfigValue(
     state: ServiceConfigState,
     config: SupervisorConfigState,
@@ -1579,6 +1628,9 @@ export class DesktopSupervisor {
     if (this.shuttingDown) return;
     if (plan.runtimeChanged) await this.reconcileRuntimeConfig();
     if (plan.mem0Action !== "none") await this.reconcileMem0Config(plan.mem0Action);
+    if (plan.localSttAction !== "none") {
+      await this.reconcileLocalSttConfig(plan.localSttAction);
+    }
   }
 
   private async reconcileRuntimeConfig(): Promise<void> {
@@ -1645,6 +1697,48 @@ export class DesktopSupervisor {
         svc.status = "unavailable";
         svc.summary = "Mem0 reconcile failed.";
         svc.lastError = "Mem0 reconcile failed.";
+        this.emit();
+      }
+    });
+  }
+
+  private async reconcileLocalSttConfig(action: LocalSttReconcileAction): Promise<void> {
+    const svc = this.services.get("local_stt");
+    if (!svc || this.shuttingDown) return;
+    await this.queue(svc, async () => {
+      try {
+        if (action === "stop") {
+          if (svc.ownership === "owned" || svc.pid || svc.child) await this.stopOwned(svc);
+          svc.pendingExternal = false;
+          svc.status = "stopped";
+          svc.summary = "Local STT disabled — external detection only.";
+          svc.detail = null;
+          svc.lastError = null;
+          this.emit();
+          return;
+        }
+
+        if (action === "restart" && svc.ownership === "owned") {
+          svc.status = "restarting";
+          svc.summary = "Restarting…";
+          this.emit();
+          await this.stopOwned(svc);
+          await this.startManagedIfNeeded("local_stt");
+          return;
+        }
+        await this.refreshService("local_stt");
+        if (svc.status === "healthy" && svc.ownership === "external") {
+          this.markExternalPending(svc, "Local STT");
+          return;
+        }
+        await this.startManagedIfNeeded("local_stt");
+        if (svc.status === "healthy" && svc.ownership === "external") {
+          this.markExternalPending(svc, "Local STT");
+        }
+      } catch {
+        svc.status = "unavailable";
+        svc.summary = "Local STT reconcile failed.";
+        svc.lastError = "Local STT reconcile failed.";
         this.emit();
       }
     });

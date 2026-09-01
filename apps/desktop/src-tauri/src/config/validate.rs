@@ -13,12 +13,16 @@ pub fn validate_settings(settings: &UserSettings) -> Result<(), String> {
     validate_http_url(&settings.memory.ollama_url, "memory.ollamaUrl")?;
     validate_http_url(&settings.tts.wrapper_url, "tts.wrapperUrl")?;
     validate_http_url(&settings.tts.upstream_url, "tts.upstreamUrl")?;
+    validate_http_url(&settings.stt.base_url, "stt.baseUrl")?;
     validate_memory_llm(&settings.memory.llm)?;
     if settings.chat.provider.trim().is_empty() {
         return Err("chat.provider is required".into());
     }
     if settings.chat.model.trim().is_empty() {
         return Err("chat.model is required".into());
+    }
+    if settings.stt.model.trim().is_empty() {
+        return Err("stt.model is required".into());
     }
     if settings.memory.subject_user_id.trim().is_empty() {
         return Err("memory.subjectUserId is required".into());
@@ -103,6 +107,23 @@ pub fn apply_patch(base: &UserSettings, patch: &UserSettingsPatch) -> Result<Use
         }
         if let Some(url) = &tts.upstream_url {
             next.tts.upstream_url = url.trim().to_string();
+        }
+    }
+    if let Some(stt) = &patch.stt {
+        if let Some(provider) = stt.provider {
+            next.stt.provider = provider;
+        }
+        if let Some(mode) = stt.mode {
+            next.stt.mode = mode;
+        }
+        if let Some(autostart) = stt.autostart {
+            next.stt.autostart = autostart;
+        }
+        if let Some(url) = &stt.base_url {
+            next.stt.base_url = url.trim().to_string();
+        }
+        if let Some(model) = &stt.model {
+            next.stt.model = model.trim().to_string();
         }
     }
     if let Some(companion) = &patch.companion {

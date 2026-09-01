@@ -1,7 +1,7 @@
 //! Build env overrides for the desktop supervisor / managed child processes.
 //! Never puts secrets into logs or command-line arguments.
 
-use super::schema::{MemoryBackend, MemoryLlmProvider, ServiceMode, UserSettings};
+use super::schema::{MemoryBackend, MemoryLlmProvider, ServiceMode, SttProvider, UserSettings};
 use super::secrets::{
     SecretStore, SECRET_DATABASE_URL, SECRET_DEEPSEEK_API_KEY, SECRET_MEMORY_LLM_API_KEY,
     SECRET_POSTGRES_LOCAL_PASSWORD,
@@ -57,6 +57,30 @@ pub fn public_env_overrides(settings: &UserSettings) -> BTreeMap<String, String>
         settings.memory.ollama_url.clone(),
     );
     env.insert("OLLAMA_HOST".into(), settings.memory.ollama_url.clone());
+
+    env.insert(
+        "DEFAULT_STT_PROVIDER".into(),
+        stt_provider_name(settings.stt.provider).into(),
+    );
+    env.insert(
+        "STT_PROVIDER_CHAIN".into(),
+        stt_provider_name(settings.stt.provider).into(),
+    );
+    env.insert("LOCAL_STT_BASE_URL".into(), settings.stt.base_url.clone());
+    env.insert("LOCAL_STT_MODEL".into(), settings.stt.model.clone());
+    env.insert(
+        "YUVI_AUTOSTART_LOCAL_STT".into(),
+        bool_flag(
+            settings.stt.provider == SttProvider::Local
+                && settings.stt.mode == ServiceMode::Managed
+                && settings.stt.autostart,
+        ),
+    );
+    if settings.stt.provider == SttProvider::Local {
+        // The provider registry's existing local adapter uses this shared
+        // endpoint key; the Supervisor service keeps its dedicated health URL.
+        env.insert("LOCAL_MODEL_BASEURL".into(), settings.stt.base_url.clone());
+    }
 
     env.insert(
         "GPT_SOVITS_TTS_BASE_URL".into(),
@@ -197,6 +221,10 @@ pub fn unset_env_for_supervisor(
         }
     }
 
+    if settings.stt.provider != SttProvider::Local {
+        push_unique(&mut unset, "LOCAL_MODEL_BASEURL");
+    }
+
     Ok(unset)
 }
 
@@ -213,6 +241,13 @@ fn memory_llm_provider_name(settings: &UserSettings) -> &'static str {
         MemoryLlmProvider::Deepseek => "deepseek",
         MemoryLlmProvider::Openai => "openai",
         MemoryLlmProvider::None => "none",
+    }
+}
+
+fn stt_provider_name(provider: SttProvider) -> &'static str {
+    match provider {
+        SttProvider::Local => "local",
+        SttProvider::Dashscope => "dashscope",
     }
 }
 

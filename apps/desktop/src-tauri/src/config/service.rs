@@ -343,6 +343,9 @@ fn changed_sections(before: &UserSettings, after: &UserSettings) -> Vec<String> 
     if before.tts != after.tts {
         sections.push("tts".into());
     }
+    if before.stt != after.stt {
+        sections.push("stt".into());
+    }
     if before.companion != after.companion {
         sections.push("companion".into());
     }

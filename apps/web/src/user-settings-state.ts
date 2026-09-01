@@ -6,6 +6,7 @@
 export type ServiceMode = "managed" | "external";
 export type MemoryBackend = "mem0" | "legacy";
 export type MemoryLlmProvider = "none" | "deepseek" | "openai";
+export type SttProvider = "local" | "dashscope";
 
 export type UserSecretKey = "chat.deepseekApiKey" | "memory.databaseUrl" | "memory.llmApiKey";
 
@@ -33,6 +34,13 @@ export type UserSettingsDto = {
     mode: ServiceMode;
     wrapperUrl: string;
     upstreamUrl: string;
+  };
+  stt: {
+    provider: SttProvider;
+    mode: ServiceMode;
+    autostart: boolean;
+    baseUrl: string;
+    model: string;
   };
   companion: { alwaysOnTop: boolean };
   proactive: { enabled: boolean };
@@ -84,7 +92,7 @@ export type SecretMutationResultDto = {
 
 /** Keep service restart hints deterministic for both mutations and settings saves. */
 export function mergeRestartServices(...serviceLists: readonly (readonly string[])[]): string[] {
-  const ordered = ["runtime", "memory", "tts"];
+  const ordered = ["runtime", "memory", "tts", "local_stt"];
   const seen = new Set<string>();
   const result: string[] = [];
   for (const service of ordered) {
@@ -149,6 +157,11 @@ export type UserSettingsForm = {
   ttsMode: ServiceMode;
   ttsWrapperUrl: string;
   ttsUpstreamUrl: string;
+  sttProvider: SttProvider;
+  sttMode: ServiceMode;
+  sttAutostart: boolean;
+  sttBaseUrl: string;
+  sttModel: string;
   companionAlwaysOnTop: boolean;
   proactiveEnabled: boolean;
 };
@@ -196,6 +209,11 @@ export const defaultUserSettingsForm = (): UserSettingsForm => ({
   ttsMode: "external",
   ttsWrapperUrl: "http://127.0.0.1:9881",
   ttsUpstreamUrl: "http://127.0.0.1:9880",
+  sttProvider: "dashscope",
+  sttMode: "external",
+  sttAutostart: false,
+  sttBaseUrl: "http://127.0.0.1:9876",
+  sttModel: "sense-voice-zh-en-ja-ko-yue-2024-07-17-int8",
   companionAlwaysOnTop: true,
   proactiveEnabled: false
 });
@@ -239,6 +257,11 @@ export function formFromView(view: SettingsViewDto): UserSettingsForm {
     ttsMode: s.tts.mode,
     ttsWrapperUrl: s.tts.wrapperUrl,
     ttsUpstreamUrl: s.tts.upstreamUrl,
+    sttProvider: s.stt.provider,
+    sttMode: s.stt.mode,
+    sttAutostart: s.stt.autostart,
+    sttBaseUrl: s.stt.baseUrl,
+    sttModel: s.stt.model,
     companionAlwaysOnTop: s.companion.alwaysOnTop,
     proactiveEnabled: s.proactive.enabled
   };
@@ -272,6 +295,13 @@ export function patchFromForm(form: UserSettingsForm): Record<string, unknown> {
       mode: form.ttsMode,
       wrapperUrl: form.ttsWrapperUrl,
       upstreamUrl: form.ttsUpstreamUrl
+    },
+    stt: {
+      provider: form.sttProvider,
+      mode: form.sttMode,
+      autostart: form.sttAutostart,
+      baseUrl: form.sttBaseUrl,
+      model: form.sttModel
     },
     companion: { alwaysOnTop: form.companionAlwaysOnTop },
     proactive: { enabled: form.proactiveEnabled }
@@ -315,23 +345,32 @@ export function assertNoSecretMaterial(payload: unknown): void {
 }
 
 export function validateUserSettingsForm(form: UserSettingsForm): string | null {
-  if (form.memoryLlmProvider === "none") {
-    return null;
-  }
-  if (!form.memoryLlmModel.trim()) {
+  if (form.memoryLlmProvider !== "none" && !form.memoryLlmModel.trim()) {
     return "Memory LLM model is required when a provider is selected.";
   }
-  const baseUrl = form.memoryLlmBaseUrl.trim();
-  if (!baseUrl) {
-    return null;
+  if (form.memoryLlmProvider !== "none") {
+    const baseUrl = form.memoryLlmBaseUrl.trim();
+    if (baseUrl) {
+      try {
+        const parsed = new URL(baseUrl);
+        if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) {
+          return "Memory LLM base URL must use HTTP(S) without credentials.";
+        }
+      } catch {
+        return "Memory LLM base URL must be a valid HTTP(S) URL without credentials.";
+      }
+    }
+  }
+  if (!form.sttModel.trim()) {
+    return "STT model is required.";
   }
   try {
-    const parsed = new URL(baseUrl);
+    const parsed = new URL(form.sttBaseUrl.trim());
     if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) {
-      return "Memory LLM base URL must use HTTP(S) without credentials.";
+      return "STT base URL must use HTTP(S) without credentials.";
     }
   } catch {
-    return "Memory LLM base URL must be a valid HTTP(S) URL without credentials.";
+    return "STT base URL must be a valid HTTP(S) URL without credentials.";
   }
   return null;
 }

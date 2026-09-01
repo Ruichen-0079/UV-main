@@ -279,7 +279,7 @@ export type RuntimeConfigUpdateResult = {
   ok: true;
   appliedEnvKeys: string[];
   unsetEnvKeys: string[];
-  /** Services with a background config reconcile scheduled (runtime or mem0). */
+  /** Services with a background config reconcile scheduled. */
   restartedServices?: string[];
   updatedAt: string;
 };
