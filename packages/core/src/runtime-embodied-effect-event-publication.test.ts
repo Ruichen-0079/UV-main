@@ -14,7 +14,10 @@ import {
 } from "./runtime-embodied-effect-runtime-event.js";
 import { RUNTIME_EMBODIED_EFFECT_STATE_COMMIT_7O_VERSION } from "./runtime-embodied-effect-state-commit.js";
 
-function behavior() {
+function behavior(
+  correlationKind: "turn" | "session" | "decision" = "turn",
+  correlationReference = "turn-1"
+) {
   return {
     version: "embodied-behavior-7b.v1",
     behavior: {
@@ -24,15 +27,15 @@ function behavior() {
       intent: "acknowledge-interrupt"
     },
     sourceInstance: { reference: "intent-1", createdAtMs: 100 },
-    correlation: { kind: "turn", reference: "turn-1" }
+    correlation: { kind: correlationKind, reference: correlationReference }
   };
 }
 
-function identity() {
+function identity(correlatedBehavior: ReturnType<typeof behavior> = behavior()) {
   return {
     version: "runtime-embodied-effect-identity-7g.v1",
     effectId: "runtime-effect:7g:1",
-    behavior: behavior()
+    behavior: correlatedBehavior
   };
 }
 
@@ -52,10 +55,10 @@ function report(outcome: "STARTED" | "COMPLETED") {
   };
 }
 
-function constructedDecision() {
+function constructedDecision(correlatedBehavior: ReturnType<typeof behavior> = behavior()) {
   return constructRuntimeEmbodiedEffectRuntimeEvent({
     version: RUNTIME_EMBODIED_EFFECT_RUNTIME_EVENT_7Q_VERSION,
-    identity: identity(),
+    identity: identity(correlatedBehavior),
     snapshot: snapshot("ADMITTED"),
     report: report("STARTED")
   });
@@ -88,7 +91,7 @@ function recordingEventBus() {
 }
 
 describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
-  it("publishes exactly one canonical 7Q event after cross-contract revalidation", async () => {
+  it("publishes exactly one canonical self-traced 7Q event after cross-contract revalidation", async () => {
     const { eventBus, published } = recordingEventBus();
     const decision = constructedDecision();
     expect(decision.status).toBe("EVENT_CONSTRUCTED");
@@ -108,7 +111,6 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
     const event = published[0];
     expect(event).toMatchObject({
       type: "runtime.embodied.effect",
-      traceId: "turn-1",
       payload: {
         version: "runtime-embodied-effect-event-7n.v1",
         effectId: "runtime-effect:7g:1",
@@ -117,9 +119,30 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
         behavior: behavior()
       }
     });
+    expect(event?.traceId).toBe(event?.id);
+    expect(event?.traceId).not.toBe("turn-1");
+    expect(event).not.toHaveProperty("parentId");
     expect(Object.isFrozen(event)).toBe(true);
     const payload = event?.payload as Record<string, unknown> | undefined;
     expect(Object.isFrozen(payload)).toBe(true);
+  });
+
+  it("publishes session correlation as payload metadata without promoting it to Runtime trace", async () => {
+    const semantic = behavior("session", "session-1");
+    const decision = constructedDecision(semantic);
+    expect(decision.status).toBe("EVENT_CONSTRUCTED");
+    if (decision.status !== "EVENT_CONSTRUCTED") return;
+
+    const { eventBus, published } = recordingEventBus();
+    await publishRuntimeEmbodiedEffectEvent(publicationInput(decision), eventBus);
+
+    expect(published).toHaveLength(1);
+    const event = published[0];
+    expect(event?.traceId).toBe(event?.id);
+    expect(event?.traceId).not.toBe("session-1");
+    expect(event?.payload).toMatchObject({
+      behavior: { correlation: { kind: "session", reference: "session-1" } }
+    });
   });
 
   it("publishes nothing for canonical 7Q NO_EVENT", async () => {
@@ -133,7 +156,7 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
     expect(published).toHaveLength(0);
   });
 
-  it("fails closed before publication when snapshot, transition, payload, or trace facts disagree", async () => {
+  it("fails closed before publication when snapshot, transition, payload, trace, or parent facts disagree", async () => {
     const canonical = constructedDecision();
     expect(canonical.status).toBe("EVENT_CONSTRUCTED");
     if (canonical.status !== "EVENT_CONSTRUCTED") return;
@@ -152,6 +175,13 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
         event: {
           ...canonical.event,
           traceId: "caller-trace"
+        }
+      },
+      {
+        ...canonical,
+        event: {
+          ...canonical.event,
+          parentId: "caller-parent"
         }
       },
       {
