@@ -61,6 +61,14 @@ const sampleView = (): SettingsViewDto => ({
 });
 
 describe("user settings reducer", () => {
+  it("defaults fresh installs to disabled external TTS", () => {
+    const form = defaultUserSettingsForm();
+    expect(form.ttsEnabled).toBe(false);
+    expect(form.ttsMode).toBe("external");
+    expect(form.ttsWrapperUrl).toBe("http://127.0.0.1:9881");
+    expect(form.ttsUpstreamUrl).toBe("http://127.0.0.1:9880");
+  });
+
   it("initializes from view without secret values", () => {
     let state = initialUserSettingsUiState();
     state = reduceUserSettings(state, { type: "load-success", view: sampleView() });
