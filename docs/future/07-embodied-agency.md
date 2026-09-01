@@ -1,6 +1,6 @@
 # Phase 7 — Embodied Agency
 
-> **Status: PLANNED / NOT IMPLEMENTED**
+> **Status: IMPLEMENTED — PHASE 7 CLOSED**
 
 ## 1. Purpose
 
@@ -118,10 +118,18 @@ interruption/fencing behavior. P6 adds bounded silent-attention eligibility and
 a text-only assistant-initiated path. P6 grants no proactive TTS, voice, tool,
 or general environment-action authority.
 
-**PLANNED:** embodied agency consumes richer attention, Continuity, temporal,
-perception, and Character intent. It generalizes causal behavior while
-preserving P5/P6 as proven subsets and keeping random blink/idle animation in
-the presentation-fallback category.
+**IMPLEMENTED:** the first bounded Character-driven slice consumes a
+turn-correlated Character/Harness proposal, receives Runtime-owned identity and
+admission, and crosses the existing dashboard WebSocket/CompanionBus into the
+Lumi Presentation surface. Presentation returns only a validated device
+observation; Runtime reduces and publishes the authoritative lifecycle event.
+The bridge rejects malformed or stale reports, times out without fake success,
+and keeps idle animation outside semantic effect identity. P5/P6 remain
+unchanged; P6 is still `NO_OP | REQUEST_TEXT`.
+
+Broader attention, Continuity, temporal, perception, speech-authority, and
+environment-action expansion remain deferred until separately admitted by the
+same authority rules.
 
 ## 10. Likely staged implementation shape
 
