@@ -6,7 +6,10 @@ import {
 } from "./runtime-embodied-effect-runtime-event.js";
 import { RUNTIME_EMBODIED_EFFECT_STATE_COMMIT_7O_VERSION } from "./runtime-embodied-effect-state-commit.js";
 
-function behavior() {
+function behavior(
+  correlationKind: "turn" | "session" | "decision" = "turn",
+  correlationReference = "turn-1"
+) {
   return {
     version: "embodied-behavior-7b.v1",
     behavior: {
@@ -16,15 +19,18 @@ function behavior() {
       intent: "acknowledge-interrupt"
     },
     sourceInstance: { reference: "intent-1", createdAtMs: 100 },
-    correlation: { kind: "turn", reference: "turn-1" }
+    correlation: { kind: correlationKind, reference: correlationReference }
   };
 }
 
-function identity(effectId = "runtime-effect:7g:1") {
+function identity(
+  effectId = "runtime-effect:7g:1",
+  correlatedBehavior: ReturnType<typeof behavior> = behavior()
+) {
   return {
     version: "runtime-embodied-effect-identity-7g.v1",
     effectId,
-    behavior: behavior()
+    behavior: correlatedBehavior
   };
 }
 
@@ -60,7 +66,7 @@ function input(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Phase 7Q Runtime embodied-effect RuntimeEvent construction", () => {
-  it("constructs one canonical RuntimeEvent only after a committed state update", () => {
+  it("constructs one canonical self-traced RuntimeEvent only after a committed state update", () => {
     const decision = constructRuntimeEmbodiedEffectRuntimeEvent(input());
 
     expect(decision.status).toBe("EVENT_CONSTRUCTED");
@@ -77,7 +83,9 @@ describe("Phase 7Q Runtime embodied-effect RuntimeEvent construction", () => {
       nextState: "STARTED"
     });
     expect(decision.event.type).toBe("runtime.embodied.effect");
-    expect(decision.event.traceId).toBe("turn-1");
+    expect(decision.event.traceId).toBe(decision.event.id);
+    expect(decision.event.traceId).not.toBe("turn-1");
+    expect(decision.event).not.toHaveProperty("parentId");
     expect(decision.event.id.length).toBeGreaterThan(0);
     expect(Number.isNaN(Date.parse(decision.event.timestamp))).toBe(false);
     expect(decision.event.payload).toEqual({
@@ -92,13 +100,22 @@ describe("Phase 7Q Runtime embodied-effect RuntimeEvent construction", () => {
     expect(Object.isFrozen(decision.event.payload)).toBe(true);
   });
 
-  it("derives traceId from 7B correlation rather than caller metadata", () => {
-    const decision = constructRuntimeEmbodiedEffectRuntimeEvent(input());
-    expect(decision.status).toBe("EVENT_CONSTRUCTED");
-    if (decision.status === "EVENT_CONSTRUCTED") {
-      expect(decision.event.traceId).toBe(
-        decision.event.payload.behavior.correlation.reference
+  it("keeps turn, session, and decision correlation payload-only until Runtime trace binding", () => {
+    for (const [kind, reference] of [
+      ["turn", "turn-1"],
+      ["session", "session-1"],
+      ["decision", "decision-1"]
+    ] as const) {
+      const correlatedBehavior = behavior(kind, reference);
+      const decision = constructRuntimeEmbodiedEffectRuntimeEvent(
+        input({ identity: identity("runtime-effect:7g:1", correlatedBehavior) })
       );
+
+      expect(decision.status).toBe("EVENT_CONSTRUCTED");
+      if (decision.status !== "EVENT_CONSTRUCTED") continue;
+      expect(decision.event.traceId).toBe(decision.event.id);
+      expect(decision.event.traceId).not.toBe(reference);
+      expect(decision.event.payload.behavior.correlation).toEqual({ kind, reference });
       expect(decision.event).not.toHaveProperty("parentId");
     }
   });

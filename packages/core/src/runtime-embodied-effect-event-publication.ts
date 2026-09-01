@@ -43,7 +43,11 @@ type UnknownObject = Record<string, unknown> & {
  * admission, lifecycle transition, state commit, event construction, or model /
  * Presentation logic. Before publishing it revalidates the cross-contract facts
  * that make the 7Q event safe: snapshot, applied transition, 7N payload, Runtime
- * event type, and correlation-derived traceId must all agree.
+ * event type, and the current self-traced event metadata must all agree.
+ *
+ * 7B turn/session/decision correlation stays payload-only here. Until a later
+ * Runtime composition boundary binds a real execution trace, canonical 7Q events
+ * must remain self-traced (`traceId === id`) and have no parentId.
  *
  * NO_EVENT decisions always produce zero EventBus calls. EventBus failures
  * propagate and are never retried here. This seam does not retain snapshots,
@@ -108,8 +112,15 @@ export async function publishRuntimeEmbodiedEffectEvent(
   ) {
     throw new Error("Runtime embodied effect publication facts are inconsistent.");
   }
-  if (parsedEvent.traceId !== payload.behavior.correlation.reference) {
-    throw new Error("Runtime embodied effect event traceId must equal the 7B correlation reference.");
+  if (parsedEvent.traceId !== parsedEvent.id) {
+    throw new Error(
+      "Runtime embodied effect event must remain self-traced until Runtime trace binding."
+    );
+  }
+  if (parsedEvent.parentId !== undefined) {
+    throw new Error(
+      "Runtime embodied effect event must not claim a parent before Runtime trace binding."
+    );
   }
 
   const event = Object.freeze({

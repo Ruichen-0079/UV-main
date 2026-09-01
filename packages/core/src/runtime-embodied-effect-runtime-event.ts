@@ -51,9 +51,12 @@ type UnknownObject = Record<string, unknown> & {
  * matching 7G identity and prepares the canonical payload, then the shared
  * protocol createEvent factory owns event ID/timestamp allocation.
  *
- * traceId is derived from the stable 7B correlation reference. This seam does
- * not accept caller-supplied event metadata and does not publish to EventBus,
- * retain state, invoke Presentation, render, persist, or create Memory/P8 truth.
+ * 7B turn/session/decision correlation remains semantic payload metadata and is
+ * deliberately not promoted into RuntimeEvent.traceId. Until a later Runtime
+ * composition boundary supplies a real execution trace, this seam keeps the
+ * createEvent default self-trace (`traceId === id`). It does not accept caller-
+ * supplied event metadata and does not publish to EventBus, retain state, invoke
+ * Presentation, render, persist, or create Memory/P8 truth.
  */
 export function constructRuntimeEmbodiedEffectRuntimeEvent(
   input: unknown
@@ -100,9 +103,7 @@ export function constructRuntimeEmbodiedEffectRuntimeEvent(
   }
 
   const event = Object.freeze(
-    createEvent("runtime.embodied.effect", eventDecision.payload, {
-      traceId: eventDecision.payload.behavior.correlation.reference
-    })
+    createEvent("runtime.embodied.effect", eventDecision.payload)
   );
 
   return Object.freeze({

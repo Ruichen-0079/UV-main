@@ -58,7 +58,7 @@ function input(record: unknown, outcomeReport: unknown, extra: Record<string, un
 }
 
 describe("Phase 7U Runtime embodied-effect record advancement", () => {
-  it("threads one immutable record through STARTED then COMPLETED", () => {
+  it("threads one immutable record through STARTED then COMPLETED without promoting semantic correlation to trace", () => {
     const admitted = initialRecord();
     const started = advanceRuntimeEmbodiedEffectRecord(input(admitted, report("STARTED")));
 
@@ -73,14 +73,17 @@ describe("Phase 7U Runtime embodied-effect record advancement", () => {
       status: "EVENT_CONSTRUCTED",
       event: {
         type: "runtime.embodied.effect",
-        traceId: "turn-1",
         payload: {
           effectId: "runtime-effect:7g:1",
           previousState: "ADMITTED",
-          state: "STARTED"
+          state: "STARTED",
+          behavior: { correlation: { kind: "turn", reference: "turn-1" } }
         }
       }
     });
+    expect(started.decision.event.traceId).toBe(started.decision.event.id);
+    expect(started.decision.event.traceId).not.toBe("turn-1");
+    expect(started.decision.event).not.toHaveProperty("parentId");
 
     const completed = advanceRuntimeEmbodiedEffectRecord(
       input(started.record, report("COMPLETED"))
@@ -93,6 +96,8 @@ describe("Phase 7U Runtime embodied-effect record advancement", () => {
       previousState: "STARTED",
       state: "COMPLETED"
     });
+    expect(completed.decision.event.traceId).toBe(completed.decision.event.id);
+    expect(completed.decision.event.traceId).not.toBe("turn-1");
 
     expect(admitted.snapshot.state).toBe("ADMITTED");
     expect(started.record.snapshot.state).toBe("STARTED");
