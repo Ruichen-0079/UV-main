@@ -129,3 +129,9 @@ export function ollamaTagsOk(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
   return Array.isArray((body as Record<string, unknown>)["models"]);
 }
+
+export function localSttHealthOk(body: unknown): boolean {
+  return Boolean(
+    body && typeof body === "object" && (body as Record<string, unknown>)["ok"] === true
+  );
+}

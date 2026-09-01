@@ -48,7 +48,8 @@ export {
   runtimeHealthOk,
   mem0HealthOk,
   ttsWrapperHealthOk,
-  ollamaTagsOk
+  ollamaTagsOk,
+  localSttHealthOk
 } from "./health.js";
 export {
   PROCESS_METADATA_VERSION,
