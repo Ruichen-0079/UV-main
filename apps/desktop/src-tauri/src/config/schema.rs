@@ -13,6 +13,8 @@ pub struct UserSettings {
     pub runtime: RuntimeSettings,
     pub memory: MemorySettings,
     pub tts: TtsSettings,
+    #[serde(default)]
+    pub stt: SttSettings,
     pub companion: CompanionSettings,
     #[serde(default)]
     pub proactive: ProactiveSettings,
@@ -82,6 +84,35 @@ pub struct TtsSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SttSettings {
+    pub provider: SttProvider,
+    pub mode: ServiceMode,
+    pub autostart: bool,
+    pub base_url: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SttProvider {
+    Local,
+    Dashscope,
+}
+
+impl Default for SttSettings {
+    fn default() -> Self {
+        Self {
+            provider: SttProvider::Dashscope,
+            mode: ServiceMode::External,
+            autostart: false,
+            base_url: "http://127.0.0.1:9876".into(),
+            model: "sense-voice-zh-en-ja-ko-yue-2024-07-17-int8".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompanionSettings {
     pub always_on_top: bool,
 }
@@ -146,6 +177,7 @@ impl Default for UserSettings {
                 wrapper_url: "http://127.0.0.1:9881".into(),
                 upstream_url: "http://127.0.0.1:9880".into(),
             },
+            stt: SttSettings::default(),
             companion: CompanionSettings {
                 always_on_top: true,
             },
@@ -163,6 +195,7 @@ pub struct UserSettingsPatch {
     pub runtime: Option<RuntimeSettingsPatch>,
     pub memory: Option<MemorySettingsPatch>,
     pub tts: Option<TtsSettingsPatch>,
+    pub stt: Option<SttSettingsPatch>,
     pub companion: Option<CompanionSettingsPatch>,
     pub proactive: Option<ProactiveSettingsPatch>,
 }
@@ -216,6 +249,16 @@ pub struct TtsSettingsPatch {
     pub mode: Option<ServiceMode>,
     pub wrapper_url: Option<String>,
     pub upstream_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SttSettingsPatch {
+    pub provider: Option<SttProvider>,
+    pub mode: Option<ServiceMode>,
+    pub autostart: Option<bool>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
