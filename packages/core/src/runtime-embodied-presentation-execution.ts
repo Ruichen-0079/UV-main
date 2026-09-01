@@ -67,6 +67,12 @@ export async function executeRuntimeEmbodiedPresentation(
     });
   }
 
+  if (decision.status !== "RECORD_INITIALIZED") {
+    throw new Error(
+      "Runtime embodied Presentation projection produced an invalid admitted decision."
+    );
+  }
+
   const report = await present(projection.request);
   const advancement = advanceRuntimeEmbodiedEffectRecord({
     version: RUNTIME_EMBODIED_EFFECT_RECORD_ADVANCEMENT_7U_VERSION,
