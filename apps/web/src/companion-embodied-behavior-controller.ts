@@ -7,6 +7,7 @@ import type {
   BehaviorPolicyController,
   BehaviorPolicyControllerOptions
 } from "./behavior-policy-controller.js";
+import { recordCompanionEmbodiedBehaviorDiagnostic } from "./companion-embodied-behavior-diagnostics.js";
 
 export type CompanionEmbodiedShadowObserver = (
   projection: CorrelatedEmbodiedBehavior
@@ -17,14 +18,15 @@ export type CompanionEmbodiedShadowObserver = (
  * controller plus its read-only Phase-7 semantic shadow.
  *
  * P5 continues to own arbitration, timers, gaze execution, and interruption.
- * The Protocol canonicalizer only validates the observed 7B projection. This
- * seam allocates no Runtime effect identity, performs no Runtime admission or
+ * The Protocol canonicalizer only validates the observed 7B projection. The
+ * default observer records a bounded DEV-only diagnostic ledger. This seam
+ * allocates no Runtime effect identity, performs no Runtime admission or
  * lifecycle transition, publishes no event, and performs no renderer/device
  * mapping.
  */
 export function createCompanionEmbodiedBehaviorController(
   options: BehaviorPolicyControllerOptions,
-  observe: CompanionEmbodiedShadowObserver = () => undefined
+  observe: CompanionEmbodiedShadowObserver = recordCompanionEmbodiedBehaviorDiagnostic
 ): BehaviorPolicyController {
   return createBehaviorPolicyControllerWithEmbodiedShadow({
     controller: options,
