@@ -1,0 +1,42 @@
+name: Tmp 7AB Lock Regen
+
+on:
+  push:
+    branches:
+      - tmp/7ab-lockregen-20260901
+
+permissions:
+  contents: write
+
+jobs:
+  regen:
+    if: github.event.head_commit.message == 'tmp: seed 7AB lock regeneration'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Regenerate lock from exact main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout c1cfd551f97a4b837519e80ad5ba98d08e25704a -- pnpm-lock.yaml
+          pnpm install --lockfile-only
+          git diff -- pnpm-lock.yaml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add pnpm-lock.yaml
+          git commit -m "tmp: regenerate exact 7AB lock"
+          git push origin HEAD:tmp/7ab-lockregen-20260901
