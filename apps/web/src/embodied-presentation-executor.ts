@@ -30,12 +30,12 @@ export function executeEmbodiedPresentationRequest(
 
   switch (request.behavior.behavior.kind) {
     case "SILENCE":
-      return outcome(request, "COMPLETED");
+      return outcome(request, "STARTED");
     case "GAZE":
       actions.setGazeTarget(
         gazeTarget(request.behavior.behavior.target, request.behavior.behavior.strength)
       );
-      return outcome(request, "COMPLETED");
+      return outcome(request, "STARTED");
     case "EXPRESSION":
       return outcome(request, "REJECTED");
   }

@@ -47,14 +47,14 @@ describe("production embodied Presentation executor", () => {
   it("maps an admitted gaze request through the existing gaze action", () => {
     const setGazeTarget = vi.fn();
     const report = executeEmbodiedPresentationRequest(base, { setGazeTarget });
-    expect(report).toMatchObject({ effectId: base.effectId, outcome: "COMPLETED" });
+    expect(report).toMatchObject({ effectId: base.effectId, outcome: "STARTED" });
     expect(setGazeTarget).toHaveBeenCalledWith({ x: -0.65, y: 0.05, strength: 2 });
   });
 
   it("preserves semantic silence without creating a visual action", () => {
     const setGazeTarget = vi.fn();
     const report = executeEmbodiedPresentationRequest(silence, { setGazeTarget });
-    expect(report.outcome).toBe("COMPLETED");
+    expect(report.outcome).toBe("STARTED");
     expect(setGazeTarget).not.toHaveBeenCalled();
   });
 
