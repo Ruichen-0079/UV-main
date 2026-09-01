@@ -48,13 +48,18 @@
       "types": "./src/adapter-request.ts",
       "development": "./src/adapter-request.ts",
       "import": "./dist/adapter-request.js"
+    },
+    "./accepted-proposal-instance": {
+      "types": "./src/accepted-proposal-instance.ts",
+      "development": "./src/accepted-proposal-instance.ts",
+      "import": "./dist/accepted-proposal-instance.js"
     }
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "check": "tsc -b tsconfig.json --pretty false",
     "test": "vitest run --passWithNoTests && pnpm run test:runtime-import",
-    "test:runtime-import": "tsc -b tsconfig.json && node --input-type=module -e \"await import('./dist/cognition-section.js'); await import('./dist/post-cognition-assembly.js'); await import('./dist/adapter-request.js')\""
+    "test:runtime-import": "tsc -b tsconfig.json && node --input-type=module -e \"await import('./dist/cognition-section.js'); await import('./dist/post-cognition-assembly.js'); await import('./dist/adapter-request.js'); await import('./dist/accepted-proposal-instance.js')\""
   },
   "dependencies": {
     "@companion/character-abi": "workspace:*"
