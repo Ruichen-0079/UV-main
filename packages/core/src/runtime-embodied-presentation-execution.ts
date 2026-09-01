@@ -49,7 +49,8 @@ export async function executeRuntimeEmbodiedPresentation(
   decision: RuntimeEmbodiedEffectRecordInitializationDecision,
   traceAnchor: RuntimeEvent,
   present: (
-    request: EmbodiedPresentationRequest
+    request: EmbodiedPresentationRequest,
+    traceAnchor: RuntimeEvent
   ) => EmbodiedPresentationOutcomeReport | Promise<EmbodiedPresentationOutcomeReport>,
   eventBus: Pick<EventBus, "publish">
 ): Promise<RuntimeEmbodiedPresentationExecutionResult> {
@@ -73,7 +74,7 @@ export async function executeRuntimeEmbodiedPresentation(
     );
   }
 
-  const report = await present(projection.request);
+  const report = await present(projection.request, traceAnchor);
   const advancement = advanceRuntimeEmbodiedEffectRecord({
     version: RUNTIME_EMBODIED_EFFECT_RECORD_ADVANCEMENT_7U_VERSION,
     record: decision.record,

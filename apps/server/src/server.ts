@@ -16,6 +16,7 @@ import { registerEventRoutes } from "./routes/events.js";
 import { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
 import { registerWebSocketRoutes } from "./routes/websocket.js";
 import { registerLive2DCoreRoute, registerLive2DRoutes } from "./routes/live2d.js";
+import { registerEmbodiedPresentationRoutes } from "./routes/embodied-presentation.js";
 import { desktopCorsHeaders } from "./cors.js";
 
 export async function buildServer(config: ServerConfig) {
@@ -99,6 +100,7 @@ export async function buildServer(config: ServerConfig) {
 
   app.addHook("onClose", async () => {
     maintenanceScheduler.close();
+    context.embodiedPresentationBridge.close();
     await context.memoryIngestionCoordinator.shutdown({ graceMs: 2_000 });
     await context.runtime.sealAndDrainMemoryWrites();
     await context.finalizedIngestionRepository.close?.();
@@ -119,6 +121,7 @@ export async function buildServer(config: ServerConfig) {
   await registerDebugRoutes(app, context, config);
   await registerWebSocketRoutes(app, context);
   await registerLive2DRoutes(app, config);
+  await registerEmbodiedPresentationRoutes(app, context);
   await registerLive2DCoreRoute(app, config);
 
   return app;

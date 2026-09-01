@@ -508,7 +508,10 @@ export function CompanionPage(): JSX.Element {
           return;
         case "embodied-presentation-request": {
           const report = lumiRef.current?.executeEmbodiedPresentationRequest(message.request);
-          if (report) bus.post({ kind: "embodied-presentation-outcome", report });
+          if (report) {
+            bus.post({ kind: "embodied-presentation-outcome", report });
+            void apiClient.postEmbodiedPresentationOutcome(report);
+          }
           return;
         }
         case "embodied-presentation-outcome":

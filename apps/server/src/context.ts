@@ -41,6 +41,13 @@ import {
 } from "./runtime-settings.js";
 import { DashboardStateService } from "./services/dashboard.js";
 import type { MemoryMaintenanceScheduler } from "./services/memoryMaintenanceScheduler.js";
+import {
+  interpretCharacterHarnessOutput,
+  superviseCharacterHarnessGeneration,
+  superviseCharacterHarnessRepetition
+} from "@companion/character-harness";
+import { composeServerCharacterSoftSmileEmbodiedEffect } from "./character-embodied-soft-smile-composition.js";
+import { EmbodiedPresentationBridge } from "./embodied-presentation-bridge.js";
 
 export type AppContext = {
   eventBus: InMemoryEventBus;
@@ -53,6 +60,7 @@ export type AppContext = {
   memory: MemoryService;
   providers: ProviderRegistry;
   runtime: RuntimeOrchestrator;
+  embodiedPresentationBridge: EmbodiedPresentationBridge;
   activeMemoryRepository: string;
   activeRuntimeEnv: Record<string, string | undefined>;
   memoryMaintenanceScheduler?: MemoryMaintenanceScheduler | undefined;
@@ -78,6 +86,7 @@ export async function createAppContext(
 
   const bootEnv = (await readRuntimeEnvFiles()).env;
   const eventBus = new InMemoryEventBus();
+  const embodiedPresentationBridge = new EmbodiedPresentationBridge(eventBus);
   const dashboard = new DashboardStateService();
   eventBus.subscribe("*", (event) => {
     dashboard.recordEvent(event);
@@ -218,7 +227,37 @@ export async function createAppContext(
       recentEpisodeStore,
       dreamJobStore,
       ...(provider ? { dreamProvider: provider } : {}),
-      logger: runtimeLogger
+      logger: runtimeLogger,
+      embodiedPresentation: {
+        propose: (reply) => {
+          const generation = superviseCharacterHarnessRepetition({
+            generation: superviseCharacterHarnessGeneration({
+              interpretation: interpretCharacterHarnessOutput({
+                disposition: "RESPOND",
+                text: reply.payload.content,
+                presentation: { intent: "soft-smile" }
+              }),
+              finishReason: "stop",
+              maxResponseCharacters: 4000
+            }),
+            ngramCharacters: 64,
+            maxOccurrences: 3
+          });
+          return composeServerCharacterSoftSmileEmbodiedEffect(
+            generation,
+            { kind: "turn", reference: reply.traceId },
+            {
+              allocateProposalInstance: () => ({
+                reference: `character-proposal:${crypto.randomUUID()}`,
+                createdAtMs: Date.now()
+              }),
+              allocateEffectId: () => `runtime-effect:${crypto.randomUUID()}`,
+              policyAllowsEmbodiedEffect: () => true
+            }
+          );
+        },
+        present: (request, traceAnchor) => embodiedPresentationBridge.present(request, traceAnchor)
+      }
     });
   }
 
@@ -266,6 +305,7 @@ export async function createAppContext(
     memory,
     providers,
     runtime,
+    embodiedPresentationBridge,
     activeMemoryRepository,
     activeRuntimeEnv,
     async reloadRuntimeConfig(env) {

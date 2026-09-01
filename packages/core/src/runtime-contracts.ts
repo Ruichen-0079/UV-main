@@ -19,7 +19,13 @@ import type {
   RetrievedMemoryDebug
 } from "@companion/memory";
 import type { PromptBuildInput, PromptBuildOutput } from "@companion/prompt-builder";
-import type { TurnOrigin } from "@companion/protocol";
+import type {
+  EmbodiedPresentationOutcomeReport,
+  EmbodiedPresentationRequest,
+  RuntimeEvent,
+  TurnOrigin
+} from "@companion/protocol";
+import type { RuntimeEmbodiedEffectRecordInitializationDecision } from "./runtime-embodied-effect-record-initialization.js";
 import type {
   ProviderCapability,
   ProviderHealth,
@@ -53,7 +59,24 @@ export type RuntimeOrchestratorOptions = {
   dreamWriter?: DreamWriter | undefined;
   dreamProvider?: MemoryProvider | undefined;
   logger?: RuntimeLogger;
+  /** Optional production Character -> Runtime -> Presentation composition. */
+  embodiedPresentation?: RuntimeEmbodiedPresentationPort | undefined;
 };
+
+export type RuntimeEmbodiedPresentationPort = Readonly<{
+  propose(
+    reply: RuntimeEventLikeAssistantReply
+  ): RuntimeEmbodiedEffectRecordInitializationDecision | null;
+  present(
+    request: EmbodiedPresentationRequest,
+    traceAnchor: RuntimeEvent
+  ): EmbodiedPresentationOutcomeReport | Promise<EmbodiedPresentationOutcomeReport>;
+}>;
+
+export type RuntimeEventLikeAssistantReply = RuntimeEvent<
+  "agent.reply",
+  { content: string; sessionId?: string }
+>;
 
 export type ConversationPersistenceOperation =
   | "session_create"

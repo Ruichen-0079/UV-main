@@ -30,6 +30,8 @@ export type {
   RuntimeMemoryWriteStatus,
   RuntimeLogger,
   RuntimeOrchestratorOptions,
+  RuntimeEmbodiedPresentationPort,
+  RuntimeEventLikeAssistantReply,
   RuntimePromptBuilderPort,
   RuntimePromptPreview,
   RuntimeReplyStreamEvent,
