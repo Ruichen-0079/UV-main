@@ -1,6 +1,7 @@
 import type { EventBus } from "@companion/event-bus";
 import {
   EMBODIED_PRESENTATION_OUTCOME_7K_VERSION,
+  createEvent,
   type RuntimeEvent
 } from "@companion/protocol";
 import { describe, expect, it } from "vitest";
@@ -73,10 +74,19 @@ function noEventDecision() {
   });
 }
 
-function publicationInput(decision: unknown) {
+function traceAnchor(traceId = "runtime-trace-1") {
+  return createEvent(
+    "user.message",
+    { sessionId: "session-1", content: "hello" },
+    { traceId }
+  );
+}
+
+function publicationInput(decision: unknown, anchor?: unknown) {
   return {
     version: RUNTIME_EMBODIED_EFFECT_EVENT_PUBLICATION_7R_VERSION,
-    decision
+    decision,
+    ...(anchor === undefined ? {} : { traceAnchor: anchor })
   };
 }
 
@@ -91,13 +101,17 @@ function recordingEventBus() {
 }
 
 describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
-  it("publishes exactly one canonical self-traced 7Q event after cross-contract revalidation", async () => {
+  it("binds one canonical 7Q event to an existing Runtime trace anchor and publishes once", async () => {
     const { eventBus, published } = recordingEventBus();
     const decision = constructedDecision();
     expect(decision.status).toBe("EVENT_CONSTRUCTED");
+    if (decision.status !== "EVENT_CONSTRUCTED") return;
+    expect(decision.event.traceId).toBe(decision.event.id);
+    expect(decision.event).not.toHaveProperty("parentId");
 
+    const anchor = traceAnchor();
     const result = await publishRuntimeEmbodiedEffectEvent(
-      publicationInput(decision),
+      publicationInput(decision, anchor),
       eventBus
     );
 
@@ -110,7 +124,11 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
 
     const event = published[0];
     expect(event).toMatchObject({
+      id: decision.event.id,
+      timestamp: decision.event.timestamp,
       type: "runtime.embodied.effect",
+      traceId: anchor.traceId,
+      parentId: anchor.id,
       payload: {
         version: "runtime-embodied-effect-event-7n.v1",
         effectId: "runtime-effect:7g:1",
@@ -119,33 +137,33 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
         behavior: behavior()
       }
     });
-    expect(event?.traceId).toBe(event?.id);
     expect(event?.traceId).not.toBe("turn-1");
-    expect(event).not.toHaveProperty("parentId");
     expect(Object.isFrozen(event)).toBe(true);
     const payload = event?.payload as Record<string, unknown> | undefined;
     expect(Object.isFrozen(payload)).toBe(true);
   });
 
-  it("publishes session correlation as payload metadata without promoting it to Runtime trace", async () => {
+  it("keeps session correlation payload-only while the Runtime anchor supplies trace identity", async () => {
     const semantic = behavior("session", "session-1");
     const decision = constructedDecision(semantic);
     expect(decision.status).toBe("EVENT_CONSTRUCTED");
     if (decision.status !== "EVENT_CONSTRUCTED") return;
 
+    const anchor = traceAnchor("runtime-trace-session");
     const { eventBus, published } = recordingEventBus();
-    await publishRuntimeEmbodiedEffectEvent(publicationInput(decision), eventBus);
+    await publishRuntimeEmbodiedEffectEvent(publicationInput(decision, anchor), eventBus);
 
     expect(published).toHaveLength(1);
     const event = published[0];
-    expect(event?.traceId).toBe(event?.id);
+    expect(event?.traceId).toBe("runtime-trace-session");
+    expect(event?.parentId).toBe(anchor.id);
     expect(event?.traceId).not.toBe("session-1");
     expect(event?.payload).toMatchObject({
       behavior: { correlation: { kind: "session", reference: "session-1" } }
     });
   });
 
-  it("publishes nothing for canonical 7Q NO_EVENT", async () => {
+  it("publishes nothing for canonical 7Q NO_EVENT without requiring a trace anchor", async () => {
     const { eventBus, published } = recordingEventBus();
     const result = await publishRuntimeEmbodiedEffectEvent(
       publicationInput(noEventDecision()),
@@ -156,10 +174,36 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
     expect(published).toHaveLength(0);
   });
 
-  it("fails closed before publication when snapshot, transition, payload, trace, or parent facts disagree", async () => {
+  it("requires a distinct canonical Runtime trace anchor before EVENT_CONSTRUCTED publication", async () => {
     const canonical = constructedDecision();
     expect(canonical.status).toBe("EVENT_CONSTRUCTED");
     if (canonical.status !== "EVENT_CONSTRUCTED") return;
+
+    const { eventBus, published } = recordingEventBus();
+    await expect(
+      publishRuntimeEmbodiedEffectEvent(publicationInput(canonical), eventBus)
+    ).rejects.toThrow(/trace anchor/);
+
+    const selfAnchor = { ...traceAnchor(), id: canonical.event.id };
+    await expect(
+      publishRuntimeEmbodiedEffectEvent(publicationInput(canonical, selfAnchor), eventBus)
+    ).rejects.toThrow(/distinct/);
+
+    await expect(
+      publishRuntimeEmbodiedEffectEvent(
+        publicationInput(canonical, { id: "not-a-runtime-event" }),
+        eventBus
+      )
+    ).rejects.toThrow();
+
+    expect(published).toHaveLength(0);
+  });
+
+  it("fails closed before publication when snapshot, transition, payload, pre-bound trace, or parent facts disagree", async () => {
+    const canonical = constructedDecision();
+    expect(canonical.status).toBe("EVENT_CONSTRUCTED");
+    if (canonical.status !== "EVENT_CONSTRUCTED") return;
+    const anchor = traceAnchor();
 
     const cases = [
       {
@@ -199,7 +243,7 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
     for (const tampered of cases) {
       const { eventBus, published } = recordingEventBus();
       await expect(
-        publishRuntimeEmbodiedEffectEvent(publicationInput(tampered), eventBus)
+        publishRuntimeEmbodiedEffectEvent(publicationInput(tampered, anchor), eventBus)
       ).rejects.toThrow();
       expect(published).toHaveLength(0);
     }
@@ -209,6 +253,7 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
     const canonical = constructedDecision();
     expect(canonical.status).toBe("EVENT_CONSTRUCTED");
     if (canonical.status !== "EVENT_CONSTRUCTED") return;
+    const anchor = traceAnchor();
 
     for (const tampered of [
       {
@@ -225,7 +270,7 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
     ]) {
       const { eventBus, published } = recordingEventBus();
       await expect(
-        publishRuntimeEmbodiedEffectEvent(publicationInput(tampered), eventBus)
+        publishRuntimeEmbodiedEffectEvent(publicationInput(tampered, anchor), eventBus)
       ).rejects.toThrow();
       expect(published).toHaveLength(0);
     }
@@ -242,7 +287,10 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
     };
 
     await expect(
-      publishRuntimeEmbodiedEffectEvent(publicationInput(constructedDecision()), eventBus)
+      publishRuntimeEmbodiedEffectEvent(
+        publicationInput(constructedDecision(), traceAnchor()),
+        eventBus
+      )
     ).rejects.toBe(failure);
     expect(calls).toBe(1);
   });
@@ -279,8 +327,10 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
     expect(published).toHaveLength(0);
   });
 
-  it("does not accept publication policy, persistence, Presentation, or execution authority", async () => {
+  it("does not accept raw trace metadata, publication policy, persistence, Presentation, or execution authority", async () => {
     for (const extra of [
+      { traceId: "raw-trace" },
+      { parentId: "raw-parent" },
       { retry: true },
       { persist: true },
       { device: "live2d" },
@@ -292,8 +342,7 @@ describe("Phase 7R Runtime embodied-effect EventBus publication", () => {
       await expect(
         publishRuntimeEmbodiedEffectEvent(
           {
-            version: RUNTIME_EMBODIED_EFFECT_EVENT_PUBLICATION_7R_VERSION,
-            decision: constructedDecision(),
+            ...publicationInput(constructedDecision(), traceAnchor()),
             ...extra
           },
           eventBus

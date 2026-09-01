@@ -24,6 +24,7 @@ export type RuntimeEmbodiedEffectEventPublicationResult = Readonly<{
 type UnknownObject = Record<string, unknown> & {
   version?: unknown;
   decision?: unknown;
+  traceAnchor?: unknown;
   status?: unknown;
   snapshot?: unknown;
   transition?: unknown;
@@ -39,19 +40,23 @@ type UnknownObject = Record<string, unknown> & {
 /**
  * Publish exactly one already-constructed 7Q embodied RuntimeEvent.
  *
- * This adapter owns only the final EventBus side effect. It does not rerun
- * admission, lifecycle transition, state commit, event construction, or model /
- * Presentation logic. Before publishing it revalidates the cross-contract facts
- * that make the 7Q event safe: snapshot, applied transition, 7N payload, Runtime
- * event type, and the current self-traced event metadata must all agree.
+ * This adapter owns the final EventBus side effect and Runtime trace binding. It
+ * does not rerun admission, lifecycle transition, state commit, event
+ * construction, or model / Presentation logic. Before publishing it revalidates
+ * the cross-contract facts that make the 7Q event safe: snapshot, applied
+ * transition, 7N payload, Runtime event type, and the current unbound self-trace
+ * metadata must all agree.
  *
- * 7B turn/session/decision correlation stays payload-only here. Until a later
- * Runtime composition boundary binds a real execution trace, canonical 7Q events
- * must remain self-traced (`traceId === id`) and have no parentId.
+ * 7B turn/session/decision correlation stays payload-only. A real Runtime trace
+ * is derived only from an existing canonical RuntimeEvent traceAnchor: the
+ * published embodied event inherits `traceAnchor.traceId` and uses
+ * `traceAnchor.id` as parentId. Raw traceId/parentId inputs remain outside this
+ * seam. The anchor must be a distinct canonical Runtime event.
  *
- * NO_EVENT decisions always produce zero EventBus calls. EventBus failures
- * propagate and are never retried here. This seam does not retain snapshots,
- * persist, render, cancel, or create Memory/P8 truth.
+ * NO_EVENT decisions always produce zero EventBus calls and do not require a
+ * trace anchor. EventBus failures propagate and are never retried here. This
+ * seam does not retain snapshots, render, cancel, persist, or create Memory/P8
+ * truth.
  */
 export async function publishRuntimeEmbodiedEffectEvent(
   input: unknown,
@@ -62,7 +67,7 @@ export async function publishRuntimeEmbodiedEffectEvent(
   }
 
   const value = expectObject(input, "Runtime embodied effect publication input");
-  assertAllowedKeys(value, ["version", "decision"], "publication input");
+  assertAllowedKeys(value, ["version", "decision", "traceAnchor"], "publication input");
   if (value.version !== RUNTIME_EMBODIED_EFFECT_EVENT_PUBLICATION_7R_VERSION) {
     throw new Error(
       `Runtime embodied effect publication version must be ${RUNTIME_EMBODIED_EFFECT_EVENT_PUBLICATION_7R_VERSION}.`
@@ -114,7 +119,7 @@ export async function publishRuntimeEmbodiedEffectEvent(
   }
   if (parsedEvent.traceId !== parsedEvent.id) {
     throw new Error(
-      "Runtime embodied effect event must remain self-traced until Runtime trace binding."
+      "Runtime embodied effect event must remain self-traced before Runtime trace binding."
     );
   }
   if (parsedEvent.parentId !== undefined) {
@@ -123,8 +128,15 @@ export async function publishRuntimeEmbodiedEffectEvent(
     );
   }
 
+  const traceAnchor = normalizeTraceAnchor(value.traceAnchor);
+  if (traceAnchor.id === parsedEvent.id) {
+    throw new Error("Runtime embodied effect trace anchor must be distinct from the embodied event.");
+  }
+
   const event = Object.freeze({
     ...parsedEvent,
+    traceId: traceAnchor.traceId,
+    parentId: traceAnchor.id,
     payload
   }) as RuntimeEvent<"runtime.embodied.effect", typeof payload>;
 
@@ -181,6 +193,13 @@ function normalizeRuntimeEvent(input: unknown): RuntimeEvent<"runtime.embodied.e
     throw new Error("Runtime embodied effect publication requires runtime.embodied.effect event type.");
   }
   return parsed as RuntimeEvent<"runtime.embodied.effect", unknown>;
+}
+
+function normalizeTraceAnchor(input: unknown): RuntimeEvent {
+  if (input === undefined) {
+    throw new Error("Runtime embodied effect publication requires a canonical Runtime trace anchor.");
+  }
+  return RuntimeEventSchema.parse(input) as RuntimeEvent;
 }
 
 function normalizeLifecyclePayload(input: unknown): Readonly<{
