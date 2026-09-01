@@ -283,6 +283,20 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
           reasoning: sanitizeProviderStatus(providerStatus.providers.reasoning)
         }
       },
+      openaiCompatible: {
+        baseUrl: sanitizeSettingValue(
+          "OPENAI_COMPATIBLE_API_BASEURL",
+          env["OPENAI_COMPATIBLE_API_BASEURL"] ?? ""
+        ),
+        apiKeyConfigured: Boolean(env["OPENAI_COMPATIBLE_API_KEY"]),
+        apiKeyPreview: maskSecret(env["OPENAI_COMPATIBLE_API_KEY"]),
+        chatModel: env["OPENAI_COMPATIBLE_CHAT_MODEL"] ?? "",
+        reasoningModel: env["OPENAI_COMPATIBLE_REASONING_MODEL"] ?? "",
+        status: {
+          chat: sanitizeProviderStatus(providerStatus.providers.chat),
+          reasoning: sanitizeProviderStatus(providerStatus.providers.reasoning)
+        }
+      },
       xai: {
         baseUrl: sanitizeSettingValue(
           "XAI_API_BASEURL",

@@ -498,6 +498,8 @@ export function SettingsPage(): JSX.Element {
     "SERVER_PORT",
     "EVENT_BUS",
     "PROVIDER_ALLOW_MOCKS",
+    "DEFAULT_CHAT_PROVIDER",
+    "DEFAULT_REASONING_PROVIDER",
     "MEMORY_REPOSITORY",
     "DATABASE_URL",
     "MEMORY_EXTRACTOR",
@@ -505,6 +507,10 @@ export function SettingsPage(): JSX.Element {
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_CHAT_MODEL",
     "DEEPSEEK_REASONING_MODEL",
+    "OPENAI_COMPATIBLE_API_BASEURL",
+    "OPENAI_COMPATIBLE_API_KEY",
+    "OPENAI_COMPATIBLE_CHAT_MODEL",
+    "OPENAI_COMPATIBLE_REASONING_MODEL",
     "XAI_API_KEY",
     "DASHSCOPE_API_KEY",
     "EMBEDDING_PROVIDER",
@@ -993,6 +999,8 @@ export function SettingsPage(): JSX.Element {
       </Panel>
       <Panel title="Model Priority Chains" badge="Provider fallback">
         <div className="grid grid-cols-3 gap-3">
+          <SettingsInput form={form} name="DEFAULT_CHAT_PROVIDER" setForm={setForm} />
+          <SettingsInput form={form} name="DEFAULT_REASONING_PROVIDER" setForm={setForm} />
           <SettingsInput form={form} name="CHAT_PROVIDER_CHAIN" setForm={setForm} />
           <SettingsInput form={form} name="REASONING_PROVIDER_CHAIN" setForm={setForm} />
           <SettingsInput form={form} name="EMBEDDING_PROVIDER_CHAIN" setForm={setForm} />
@@ -1050,6 +1058,27 @@ export function SettingsPage(): JSX.Element {
           <ProviderDiagnosticsSummary
             label="Reasoning"
             health={settings.data?.activeRuntimeConfig.providers.reasoning}
+          />
+        </Panel>
+        <Panel title="OpenAI-compatible" badge="Chat + Cognition">
+          <SettingsInput form={form} name="OPENAI_COMPATIBLE_API_BASEURL" setForm={setForm} />
+          <SecretInput
+            label="OPENAI_COMPATIBLE_API_KEY"
+            configured={settings.data?.providers.openaiCompatible.apiKeyConfigured}
+            preview={settings.data?.providers.openaiCompatible.apiKeyPreview}
+            value={form.OPENAI_COMPATIBLE_API_KEY}
+            onChange={(value) => setFormValue(setForm, "OPENAI_COMPATIBLE_API_KEY", value)}
+            onClear={() => clearSecretField("OPENAI_COMPATIBLE_API_KEY")}
+          />
+          <SettingsInput form={form} name="OPENAI_COMPATIBLE_CHAT_MODEL" setForm={setForm} />
+          <SettingsInput form={form} name="OPENAI_COMPATIBLE_REASONING_MODEL" setForm={setForm} />
+          <ProviderDiagnosticsSummary
+            label="Chat"
+            health={settings.data?.providers.openaiCompatible.status?.chat}
+          />
+          <ProviderDiagnosticsSummary
+            label="Cognition"
+            health={settings.data?.providers.openaiCompatible.status?.reasoning}
           />
         </Panel>
         <Panel title="xAI" badge="Optional · TTS and Vision implemented">
@@ -1236,6 +1265,8 @@ type SettingsKey =
   | "SERVER_PORT"
   | "EVENT_BUS"
   | "PROVIDER_ALLOW_MOCKS"
+  | "DEFAULT_CHAT_PROVIDER"
+  | "DEFAULT_REASONING_PROVIDER"
   | "MEMORY_REPOSITORY"
   | "DATABASE_URL"
   | "MEMORY_EXTRACTOR"
@@ -1249,6 +1280,10 @@ type SettingsKey =
   | "DEEPSEEK_API_KEY"
   | "DEEPSEEK_CHAT_MODEL"
   | "DEEPSEEK_REASONING_MODEL"
+  | "OPENAI_COMPATIBLE_API_BASEURL"
+  | "OPENAI_COMPATIBLE_API_KEY"
+  | "OPENAI_COMPATIBLE_CHAT_MODEL"
+  | "OPENAI_COMPATIBLE_REASONING_MODEL"
   | "NVIDIA_API_BASEURL"
   | "NVIDIA_API_KEY"
   | "NVIDIA_CHAT_MODEL"
@@ -1281,6 +1316,7 @@ type SettingsKey =
 const settingsSecretKeys: SettingsKey[] = [
   "DATABASE_URL",
   "DEEPSEEK_API_KEY",
+  "OPENAI_COMPATIBLE_API_KEY",
   "NVIDIA_API_KEY",
   "XAI_API_KEY",
   "DASHSCOPE_API_KEY",
@@ -1293,6 +1329,8 @@ function emptySettingsForm(): SettingsForm {
     SERVER_PORT: "6121",
     EVENT_BUS: "in-memory",
     PROVIDER_ALLOW_MOCKS: "false",
+    DEFAULT_CHAT_PROVIDER: "openai-compatible",
+    DEFAULT_REASONING_PROVIDER: "openai-compatible",
     MEMORY_REPOSITORY: "in-memory",
     DATABASE_URL: "",
     MEMORY_EXTRACTOR: "llm",
@@ -1306,6 +1344,10 @@ function emptySettingsForm(): SettingsForm {
     DEEPSEEK_API_KEY: "",
     DEEPSEEK_CHAT_MODEL: "",
     DEEPSEEK_REASONING_MODEL: "",
+    OPENAI_COMPATIBLE_API_BASEURL: "https://api.deepinfra.com/v1/openai",
+    OPENAI_COMPATIBLE_API_KEY: "",
+    OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-ai/DeepSeek-V4-Flash-0731",
+    OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash",
     NVIDIA_API_BASEURL: "https://integrate.api.nvidia.com/v1",
     NVIDIA_API_KEY: "",
     NVIDIA_CHAT_MODEL: "",
@@ -1343,6 +1385,8 @@ function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsFo
     SERVER_PORT: String(settings.runtime.serverPort),
     EVENT_BUS: settings.runtime.eventBus,
     PROVIDER_ALLOW_MOCKS: settings.runtime.providerAllowMocks ? "true" : "false",
+    DEFAULT_CHAT_PROVIDER: runtimeSetting(settings, "DEFAULT_CHAT_PROVIDER"),
+    DEFAULT_REASONING_PROVIDER: runtimeSetting(settings, "DEFAULT_REASONING_PROVIDER"),
     MEMORY_REPOSITORY: settings.memory.memoryRepository,
     DATABASE_URL: "",
     MEMORY_EXTRACTOR: settings.memory.memoryExtractor ?? "llm",
@@ -1356,6 +1400,10 @@ function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsFo
     DEEPSEEK_API_KEY: "",
     DEEPSEEK_CHAT_MODEL: settings.providers.deepseek.chatModel,
     DEEPSEEK_REASONING_MODEL: settings.providers.deepseek.reasoningModel,
+    OPENAI_COMPATIBLE_API_BASEURL: settings.providers.openaiCompatible.baseUrl,
+    OPENAI_COMPATIBLE_API_KEY: "",
+    OPENAI_COMPATIBLE_CHAT_MODEL: settings.providers.openaiCompatible.chatModel,
+    OPENAI_COMPATIBLE_REASONING_MODEL: settings.providers.openaiCompatible.reasoningModel,
     NVIDIA_API_BASEURL: runtimeSetting(settings, "NVIDIA_API_BASEURL"),
     NVIDIA_API_KEY: "",
     NVIDIA_CHAT_MODEL: runtimeSetting(settings, "NVIDIA_CHAT_MODEL"),
@@ -1443,6 +1491,7 @@ function buildSettingsUpdate(
 function isSecretSettingsKey(key: SettingsKey): boolean {
   return (
     key === "DEEPSEEK_API_KEY" ||
+    key === "OPENAI_COMPATIBLE_API_KEY" ||
     key === "DATABASE_URL" ||
     key === "NVIDIA_API_KEY" ||
     key === "XAI_API_KEY" ||

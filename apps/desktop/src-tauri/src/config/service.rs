@@ -8,7 +8,7 @@ use super::schema::{
 };
 use super::secrets::{
     SecretStore, SECRET_DATABASE_URL, SECRET_DEEPSEEK_API_KEY, SECRET_MEMORY_LLM_API_KEY,
-    SECRET_POSTGRES_LOCAL_PASSWORD,
+    SECRET_OPENAI_COMPATIBLE_API_KEY, SECRET_POSTGRES_LOCAL_PASSWORD,
 };
 use super::validate::{apply_patch, validate_settings};
 use std::collections::BTreeMap;
@@ -136,6 +136,9 @@ impl ConfigService {
     pub fn secret_status(&self) -> Result<SecretStatus, String> {
         Ok(SecretStatus {
             deepseek_api_key: self.secrets.is_configured(SECRET_DEEPSEEK_API_KEY)?,
+            openai_compatible_api_key: self
+                .secrets
+                .is_configured(SECRET_OPENAI_COMPATIBLE_API_KEY)?,
             database_url: self.secrets.is_configured(SECRET_DATABASE_URL)?,
             memory_llm_api_key: self.secrets.is_configured(SECRET_MEMORY_LLM_API_KEY)?,
         })
@@ -177,7 +180,10 @@ impl ConfigService {
 
 fn validate_user_secret_key(key: &str) -> Result<(), String> {
     match key {
-        SECRET_DEEPSEEK_API_KEY | SECRET_DATABASE_URL | SECRET_MEMORY_LLM_API_KEY => Ok(()),
+        SECRET_DEEPSEEK_API_KEY
+        | SECRET_OPENAI_COMPATIBLE_API_KEY
+        | SECRET_DATABASE_URL
+        | SECRET_MEMORY_LLM_API_KEY => Ok(()),
         SECRET_POSTGRES_LOCAL_PASSWORD => Err(
             "postgres.localPassword is an internal infrastructure secret and is not user-editable"
                 .into(),
@@ -333,6 +339,12 @@ fn changed_sections(before: &UserSettings, after: &UserSettings) -> Vec<String> 
     }
     if before.chat != after.chat {
         sections.push("chat".into());
+    }
+    if before.cognition != after.cognition {
+        sections.push("cognition".into());
+    }
+    if before.openai_compatible != after.openai_compatible {
+        sections.push("openaiCompatible".into());
     }
     if before.runtime != after.runtime {
         sections.push("runtime".into());

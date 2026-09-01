@@ -14,7 +14,7 @@ pub use schema::{
 };
 pub use secrets::{
     PlatformSecretStore, SecretStore, SECRET_DATABASE_URL, SECRET_DEEPSEEK_API_KEY,
-    SECRET_MEMORY_LLM_API_KEY,
+    SECRET_MEMORY_LLM_API_KEY, SECRET_OPENAI_COMPATIBLE_API_KEY,
 };
 pub use service::ConfigService;
 
@@ -157,7 +157,7 @@ pub fn get_user_secret_status(state: State<'_, ConfigState>) -> Result<SecretSta
 
 fn secret_restart_hint(key: &str) -> Vec<String> {
     match key {
-        SECRET_DEEPSEEK_API_KEY => vec!["runtime".into()],
+        SECRET_DEEPSEEK_API_KEY | SECRET_OPENAI_COMPATIBLE_API_KEY => vec!["runtime".into()],
         SECRET_DATABASE_URL => vec!["memory".into(), "runtime".into()],
         SECRET_MEMORY_LLM_API_KEY => vec!["memory".into()],
         _ => Vec::new(),

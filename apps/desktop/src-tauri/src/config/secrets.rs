@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub const SECRET_DEEPSEEK_API_KEY: &str = "chat.deepseekApiKey";
+pub const SECRET_OPENAI_COMPATIBLE_API_KEY: &str = "models.openaiCompatibleApiKey";
 pub const SECRET_DATABASE_URL: &str = "memory.databaseUrl";
 pub const SECRET_MEMORY_LLM_API_KEY: &str = "memory.llmApiKey";
 pub const SECRET_POSTGRES_LOCAL_PASSWORD: &str = "postgres.localPassword";
@@ -77,6 +78,7 @@ fn base64url(bytes: &[u8]) -> String {
 }
 
 pub const WIN_CRED_DEEPSEEK: &str = "YUVI/chat/deepseek-api-key";
+pub const WIN_CRED_OPENAI_COMPATIBLE: &str = "YUVI/models/openai-compatible-api-key";
 pub const WIN_CRED_DATABASE: &str = "YUVI/memory/database-url";
 pub const WIN_CRED_MEMORY_LLM_API_KEY: &str = "YUVI/memory/llm-api-key";
 pub const WIN_CRED_POSTGRES_LOCAL: &str = "YUVI/postgres/local";
@@ -139,6 +141,7 @@ impl PlatformSecretStore {
     fn map_key(key: &str) -> Result<&'static str, String> {
         match key {
             SECRET_DEEPSEEK_API_KEY => Ok(WIN_CRED_DEEPSEEK),
+            SECRET_OPENAI_COMPATIBLE_API_KEY => Ok(WIN_CRED_OPENAI_COMPATIBLE),
             SECRET_DATABASE_URL => Ok(WIN_CRED_DATABASE),
             SECRET_MEMORY_LLM_API_KEY => Ok(WIN_CRED_MEMORY_LLM_API_KEY),
             SECRET_POSTGRES_LOCAL_PASSWORD => Ok(WIN_CRED_POSTGRES_LOCAL),
@@ -210,6 +213,10 @@ mod tests {
 
     #[test]
     fn memory_llm_key_maps_to_fixed_credential_target() {
+        assert_eq!(
+            PlatformSecretStore::map_key(SECRET_OPENAI_COMPATIBLE_API_KEY).unwrap(),
+            WIN_CRED_OPENAI_COMPATIBLE
+        );
         assert_eq!(
             PlatformSecretStore::map_key(SECRET_MEMORY_LLM_API_KEY).unwrap(),
             WIN_CRED_MEMORY_LLM_API_KEY

@@ -5,6 +5,8 @@ pub fn compute_restart_services(before: &UserSettings, after: &UserSettings) -> 
   let mut out = Vec::new();
 
   if before.chat != after.chat
+    || before.cognition != after.cognition
+    || before.openai_compatible != after.openai_compatible
     || before.runtime.url != after.runtime.url
     || before.runtime.mode != after.runtime.mode
     || before.runtime.autostart != after.runtime.autostart

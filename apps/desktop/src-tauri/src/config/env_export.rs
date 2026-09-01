@@ -4,7 +4,7 @@
 use super::schema::{MemoryBackend, MemoryLlmProvider, ServiceMode, SttProvider, UserSettings};
 use super::secrets::{
     SecretStore, SECRET_DATABASE_URL, SECRET_DEEPSEEK_API_KEY, SECRET_MEMORY_LLM_API_KEY,
-    SECRET_POSTGRES_LOCAL_PASSWORD,
+    SECRET_OPENAI_COMPATIBLE_API_KEY, SECRET_POSTGRES_LOCAL_PASSWORD,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -34,6 +34,23 @@ pub fn public_env_overrides(settings: &UserSettings) -> BTreeMap<String, String>
     if let Some((host, port)) = split_http_host_port(&settings.runtime.url) {
         env.insert("SERVER_HOST".into(), host);
         env.insert("SERVER_PORT".into(), port);
+    }
+
+    env.insert("DEFAULT_CHAT_PROVIDER".into(), settings.chat.provider.clone());
+    env.insert("CHAT_PROVIDER_CHAIN".into(), settings.chat.provider.clone());
+    env.insert(
+        "DEFAULT_REASONING_PROVIDER".into(),
+        settings.cognition.provider.clone(),
+    );
+    env.insert(
+        "REASONING_PROVIDER_CHAIN".into(),
+        settings.cognition.provider.clone(),
+    );
+    if uses_openai_compatible(settings) {
+        env.insert(
+            "OPENAI_COMPATIBLE_API_BASEURL".into(),
+            settings.openai_compatible.base_url.clone(),
+        );
     }
 
     env.insert(
@@ -113,8 +130,32 @@ pub fn public_env_overrides(settings: &UserSettings) -> BTreeMap<String, String>
         }
     }
 
-    if settings.chat.provider == "deepseek" {
-        env.insert("DEEPSEEK_CHAT_MODEL".into(), settings.chat.model.clone());
+    match settings.chat.provider.as_str() {
+        "deepseek" => {
+            env.insert("DEEPSEEK_CHAT_MODEL".into(), settings.chat.model.clone());
+        }
+        "openai-compatible" => {
+            env.insert(
+                "OPENAI_COMPATIBLE_CHAT_MODEL".into(),
+                settings.chat.model.clone(),
+            );
+        }
+        _ => {}
+    }
+    match settings.cognition.provider.as_str() {
+        "deepseek" => {
+            env.insert(
+                "DEEPSEEK_REASONING_MODEL".into(),
+                settings.cognition.model.clone(),
+            );
+        }
+        "openai-compatible" => {
+            env.insert(
+                "OPENAI_COMPATIBLE_REASONING_MODEL".into(),
+                settings.cognition.model.clone(),
+            );
+        }
+        _ => {}
     }
 
     env
@@ -127,11 +168,18 @@ pub fn secret_env_overrides(
 ) -> Result<BTreeMap<String, String>, String> {
     let mut env = BTreeMap::new();
 
-    // Chat key: only when runtime is managed (Runtime process will read DEEPSEEK_API_KEY).
-    if settings.runtime.mode == ServiceMode::Managed {
+    // Provider keys are injected only for the selected managed model paths.
+    if settings.runtime.mode == ServiceMode::Managed && uses_deepseek(settings) {
         if let Some(key) = secrets.get(SECRET_DEEPSEEK_API_KEY)? {
             if !key.trim().is_empty() {
                 env.insert("DEEPSEEK_API_KEY".into(), key);
+            }
+        }
+    }
+    if settings.runtime.mode == ServiceMode::Managed && uses_openai_compatible(settings) {
+        if let Some(key) = secrets.get(SECRET_OPENAI_COMPATIBLE_API_KEY)? {
+            if !key.trim().is_empty() {
+                env.insert("OPENAI_COMPATIBLE_API_KEY".into(), key);
             }
         }
     }
@@ -182,11 +230,37 @@ pub fn unset_env_for_supervisor(
 ) -> Result<Vec<String>, String> {
     let mut unset = Vec::new();
     let inject_deepseek = settings.runtime.mode == ServiceMode::Managed
+        && uses_deepseek(settings)
         && secrets
             .is_configured(SECRET_DEEPSEEK_API_KEY)
             .unwrap_or(false);
     if !inject_deepseek {
         unset.push("DEEPSEEK_API_KEY".into());
+    }
+
+    let inject_openai_compatible = settings.runtime.mode == ServiceMode::Managed
+        && uses_openai_compatible(settings)
+        && secrets
+            .is_configured(SECRET_OPENAI_COMPATIBLE_API_KEY)
+            .unwrap_or(false);
+    if !inject_openai_compatible {
+        push_unique(&mut unset, "OPENAI_COMPATIBLE_API_KEY");
+    }
+
+    if settings.chat.provider != "deepseek" {
+        push_unique(&mut unset, "DEEPSEEK_CHAT_MODEL");
+    }
+    if settings.chat.provider != "openai-compatible" {
+        push_unique(&mut unset, "OPENAI_COMPATIBLE_CHAT_MODEL");
+    }
+    if settings.cognition.provider != "deepseek" {
+        push_unique(&mut unset, "DEEPSEEK_REASONING_MODEL");
+    }
+    if settings.cognition.provider != "openai-compatible" {
+        push_unique(&mut unset, "OPENAI_COMPATIBLE_REASONING_MODEL");
+    }
+    if !uses_openai_compatible(settings) {
+        push_unique(&mut unset, "OPENAI_COMPATIBLE_API_BASEURL");
     }
 
     let inject_db = settings.memory.mode == ServiceMode::Managed
@@ -234,6 +308,15 @@ fn memory_llm_active(settings: &UserSettings) -> bool {
         && matches!(settings.memory.backend, MemoryBackend::Mem0)
         && !matches!(settings.memory.llm.provider, MemoryLlmProvider::None)
         && !settings.memory.llm.model.trim().is_empty()
+}
+
+fn uses_deepseek(settings: &UserSettings) -> bool {
+    settings.chat.provider == "deepseek" || settings.cognition.provider == "deepseek"
+}
+
+fn uses_openai_compatible(settings: &UserSettings) -> bool {
+    settings.chat.provider == "openai-compatible"
+        || settings.cognition.provider == "openai-compatible"
 }
 
 fn memory_llm_provider_name(settings: &UserSettings) -> &'static str {

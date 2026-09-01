@@ -186,6 +186,100 @@ describe("ProviderRegistry", () => {
     expect(JSON.stringify(status)).not.toContain("openai-compatible-secret");
   });
 
+  it("binds Chat and Cognition to separate OpenAI-compatible models", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        requests.push(body);
+        const model = body["model"] === "deepseek-flash" ? "chat answer" : "cognition answer";
+        return new Response(
+          JSON.stringify({
+            model: body["model"],
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  content: model,
+                  reasoning_content: "provider-private-trace"
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      })
+    );
+
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_CHAT_PROVIDER: "openai-compatible",
+      CHAT_PROVIDER_CHAIN: "openai-compatible",
+      DEFAULT_REASONING_PROVIDER: "openai-compatible",
+      REASONING_PROVIDER_CHAIN: "openai-compatible",
+      OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
+      OPENAI_COMPATIBLE_API_KEY: "shared-secret",
+      OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-flash",
+      OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash"
+    });
+
+    expect(registry.getChatProvider().name).toBe("openai-compatible");
+    expect(registry.getReasoningProvider().name).toBe("openai-compatible");
+    const chat = await registry.getChatProvider().generateReply({
+      messages: [{ role: "user", content: "hello" }]
+    });
+    const cognition = await registry.getReasoningProvider().generateReasoning({
+      messages: [{ role: "user", content: "decide" }]
+    });
+
+    expect(requests.map((request) => request["model"])).toEqual([
+      "deepseek-flash",
+      "glm-4.7-flash"
+    ]);
+    expect(chat.message.content).toBe("chat answer");
+    expect(cognition.answer).toBe("cognition answer");
+    expect(cognition.reasoning).toBe("");
+    expect(JSON.stringify(cognition)).not.toContain("provider-private-trace");
+    expect(registry.getStatus().providers.reasoning).toMatchObject({
+      provider: "openai-compatible",
+      configured: true,
+      baseUrl: "https://gateway.example/v1",
+      model: "glm-4.7-flash"
+    });
+    expect(JSON.stringify(registry.getStatus())).not.toContain("shared-secret");
+  });
+
+  it("reports missing OpenAI-compatible Cognition configuration", async () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "production",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_REASONING_PROVIDER: "openai-compatible",
+      REASONING_PROVIDER_CHAIN: "openai-compatible"
+    });
+
+    expect(registry.getStatus().providers.reasoning).toMatchObject({
+      provider: "openai-compatible",
+      configured: false,
+      readiness: "not_ready",
+      missingFields: [
+        "OPENAI_COMPATIBLE_API_BASEURL",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "OPENAI_COMPATIBLE_REASONING_MODEL"
+      ]
+    });
+    await expect(
+      registry.getReasoningProvider().generateReasoning({
+        messages: [{ role: "user", content: "decide" }]
+      })
+    ).rejects.toMatchObject({
+      provider: "openai-compatible",
+      capability: "reasoning",
+      code: ProviderErrorCode.ProviderUnavailable
+    });
+  });
+
   it("reports missing generic OpenAI-compatible Chat configuration as unavailable", async () => {
     const registry = createProviderRegistryFromEnv({
       NODE_ENV: "production",

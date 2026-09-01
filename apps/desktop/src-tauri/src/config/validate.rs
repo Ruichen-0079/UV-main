@@ -15,11 +15,15 @@ pub fn validate_settings(settings: &UserSettings) -> Result<(), String> {
     validate_http_url(&settings.tts.upstream_url, "tts.upstreamUrl")?;
     validate_http_url(&settings.stt.base_url, "stt.baseUrl")?;
     validate_memory_llm(&settings.memory.llm)?;
-    if settings.chat.provider.trim().is_empty() {
-        return Err("chat.provider is required".into());
-    }
-    if settings.chat.model.trim().is_empty() {
-        return Err("chat.model is required".into());
+    validate_model_selection(&settings.chat.provider, &settings.chat.model, "chat")?;
+    validate_model_selection(&settings.cognition.provider, &settings.cognition.model, "cognition")?;
+    if settings.chat.provider == "openai-compatible"
+        || settings.cognition.provider == "openai-compatible"
+    {
+        validate_http_url_without_credentials(
+            &settings.openai_compatible.base_url,
+            "openaiCompatible.baseUrl",
+        )?;
     }
     if settings.stt.model.trim().is_empty() {
         return Err("stt.model is required".into());
@@ -48,6 +52,19 @@ pub fn apply_patch(base: &UserSettings, patch: &UserSettingsPatch) -> Result<Use
         }
         if let Some(model) = &chat.model {
             next.chat.model = model.trim().to_string();
+        }
+    }
+    if let Some(cognition) = &patch.cognition {
+        if let Some(provider) = &cognition.provider {
+            next.cognition.provider = provider.trim().to_string();
+        }
+        if let Some(model) = &cognition.model {
+            next.cognition.model = model.trim().to_string();
+        }
+    }
+    if let Some(openai_compatible) = &patch.openai_compatible {
+        if let Some(base_url) = &openai_compatible.base_url {
+            next.openai_compatible.base_url = base_url.trim().to_string();
         }
     }
     if let Some(runtime) = &patch.runtime {
@@ -151,6 +168,31 @@ fn validate_http_url(raw: &str, field: &str) -> Result<(), String> {
         "http" | "https" => Ok(()),
         other => Err(format!("{field} must be http/https (got {other})")),
     }
+}
+
+fn validate_http_url_without_credentials(raw: &str, field: &str) -> Result<(), String> {
+    validate_http_url(raw, field)?;
+    let parsed = Url::parse(raw.trim()).map_err(|_| format!("{field} is not a valid URL"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("{field} must not include credentials"));
+    }
+    Ok(())
+}
+
+fn validate_model_selection(provider: &str, model: &str, field: &str) -> Result<(), String> {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return Err(format!("{field}.provider is required"));
+    }
+    if !matches!(provider, "deepseek" | "openai-compatible") {
+        return Err(format!(
+            "{field}.provider must be deepseek or openai-compatible"
+        ));
+    }
+    if model.trim().is_empty() {
+        return Err(format!("{field}.model is required"));
+    }
+    Ok(())
 }
 
 fn validate_memory_llm(settings: &super::schema::MemoryLlmSettings) -> Result<(), String> {

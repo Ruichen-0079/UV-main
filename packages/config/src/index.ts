@@ -126,6 +126,26 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
           apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
           model: emptyToUndefined(env["DEEPSEEK_CHAT_MODEL"])
         };
+  const reasoningEndpoint: ProviderEndpointConfig =
+    defaults.reasoning === "openai-compatible"
+      ? {
+          provider: defaults.reasoning,
+          enabled: true,
+          baseUrl: emptyToUndefined(env["OPENAI_COMPATIBLE_API_BASEURL"]),
+          apiKey: emptyToUndefined(env["OPENAI_COMPATIBLE_API_KEY"]),
+          model: emptyToUndefined(env["OPENAI_COMPATIBLE_REASONING_MODEL"])
+        }
+      : {
+          provider: defaults.reasoning,
+          enabled: true,
+          baseUrl: readProviderBaseUrl(
+            defaults.reasoning,
+            env["DEEPSEEK_API_BASEURL"],
+            "https://api.deepseek.com"
+          ),
+          apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
+          model: emptyToUndefined(env["DEEPSEEK_REASONING_MODEL"])
+        };
 
   return {
     environment,
@@ -152,17 +172,7 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
       defaults,
       endpoints: {
         chat: chatEndpoint,
-        reasoning: {
-          provider: defaults.reasoning,
-          enabled: true,
-          baseUrl: readProviderBaseUrl(
-            defaults.reasoning,
-            env["DEEPSEEK_API_BASEURL"],
-            "https://api.deepseek.com"
-          ),
-          apiKey: emptyToUndefined(env["DEEPSEEK_API_KEY"]),
-          model: emptyToUndefined(env["DEEPSEEK_REASONING_MODEL"])
-        },
+        reasoning: reasoningEndpoint,
         tts: {
           provider: defaults.tts,
           enabled: parseBoolean(env["TTS_ENABLED"], true),
@@ -261,11 +271,14 @@ export function collectRuntimeConfigIssues(config: RuntimeConfig): ConfigValidat
       });
     }
 
-    if (capability === "chat" && endpoint.provider === "openai-compatible" && !endpoint.baseUrl) {
+    if (
+      (capability === "chat" || capability === "reasoning") &&
+      endpoint.provider === "openai-compatible" &&
+      !endpoint.baseUrl
+    ) {
       issues.push({
-        path: "providers.endpoints.chat.baseUrl",
-        message:
-          "OPENAI_COMPATIBLE_API_BASEURL is required when Chat provider 'openai-compatible' is enabled."
+        path: `providers.endpoints.${capability}.baseUrl`,
+        message: `OPENAI_COMPATIBLE_API_BASEURL is required when ${capability === "chat" ? "Chat" : "Cognition"} provider 'openai-compatible' is enabled.`
       });
     }
   }

@@ -10,6 +10,10 @@ pub struct UserSettings {
     pub schema_version: u32,
     pub app: AppSettings,
     pub chat: ChatSettings,
+    #[serde(default)]
+    pub cognition: CognitionSettings,
+    #[serde(default)]
+    pub openai_compatible: OpenAiCompatibleSettings,
     pub runtime: RuntimeSettings,
     pub memory: MemorySettings,
     pub tts: TtsSettings,
@@ -31,6 +35,36 @@ pub struct AppSettings {
 pub struct ChatSettings {
     pub provider: String,
     pub model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CognitionSettings {
+    pub provider: String,
+    pub model: String,
+}
+
+impl Default for CognitionSettings {
+    fn default() -> Self {
+        Self {
+            provider: "openai-compatible".into(),
+            model: "glm-4.7-flash".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAiCompatibleSettings {
+    pub base_url: String,
+}
+
+impl Default for OpenAiCompatibleSettings {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.deepinfra.com/v1/openai".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,9 +187,11 @@ impl Default for UserSettings {
                 language: "en".into(),
             },
             chat: ChatSettings {
-                provider: "deepseek".into(),
-                model: "deepseek-chat".into(),
+                provider: "openai-compatible".into(),
+                model: "deepseek-ai/DeepSeek-V4-Flash-0731".into(),
             },
+            cognition: CognitionSettings::default(),
+            openai_compatible: OpenAiCompatibleSettings::default(),
             runtime: RuntimeSettings {
                 mode: ServiceMode::Managed,
                 autostart: true,
@@ -192,6 +228,8 @@ impl Default for UserSettings {
 pub struct UserSettingsPatch {
     pub app: Option<AppSettingsPatch>,
     pub chat: Option<ChatSettingsPatch>,
+    pub cognition: Option<CognitionSettingsPatch>,
+    pub openai_compatible: Option<OpenAiCompatibleSettingsPatch>,
     pub runtime: Option<RuntimeSettingsPatch>,
     pub memory: Option<MemorySettingsPatch>,
     pub tts: Option<TtsSettingsPatch>,
@@ -211,6 +249,19 @@ pub struct AppSettingsPatch {
 pub struct ChatSettingsPatch {
     pub provider: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CognitionSettingsPatch {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenAiCompatibleSettingsPatch {
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -277,6 +328,7 @@ pub struct ProactiveSettingsPatch {
 #[serde(rename_all = "camelCase")]
 pub struct SecretStatus {
     pub deepseek_api_key: bool,
+    pub openai_compatible_api_key: bool,
     pub database_url: bool,
     pub memory_llm_api_key: bool,
 }

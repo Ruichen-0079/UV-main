@@ -76,6 +76,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
     try {
       const secretInputs: Array<{ key: UserSecretKey; value: string }> = [
         { key: "chat.deepseekApiKey", value: form.deepseekApiKeyInput },
+        { key: "models.openaiCompatibleApiKey", value: form.openaiCompatibleApiKeyInput },
         { key: "memory.databaseUrl", value: form.databaseUrlInput },
         { key: "memory.llmApiKey", value: form.memoryLlmApiKeyInput }
       ];
@@ -192,6 +193,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               onChange={(e) => setField("chatProvider", e.target.value)}
             >
               <option value="deepseek">deepseek</option>
+              <option value="openai-compatible">OpenAI-compatible</option>
             </select>
           </Field>
           <Field label="Model">
@@ -226,9 +228,66 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
           {!state.secrets.deepseekApiKey ? (
             <p className="mt-2 text-xs text-ink-500">
               Paste the key and click Save. Provider stays unavailable until this shows Configured
-              and Runtime is owned (not external).
+              and the local service is managed by YUVI.
             </p>
           ) : null}
+        </section>
+
+        <section className="settings-card">
+          <h3>Cognition</h3>
+          <Field label="Provider">
+            <select
+              className="setting-input"
+              value={form.cognitionProvider}
+              onChange={(e) => setField("cognitionProvider", e.target.value)}
+            >
+              <option value="openai-compatible">OpenAI-compatible</option>
+              <option value="deepseek">deepseek</option>
+            </select>
+          </Field>
+          <Field label="Model">
+            <input
+              className="setting-input"
+              value={form.cognitionModel}
+              onChange={(e) => setField("cognitionModel", e.target.value)}
+            />
+          </Field>
+          <Field label="Shared OpenAI-compatible base URL">
+            <input
+              className="setting-input"
+              type="url"
+              placeholder="https://provider.example/v1"
+              value={form.openaiCompatibleBaseUrl}
+              onChange={(e) => setField("openaiCompatibleBaseUrl", e.target.value)}
+            />
+          </Field>
+          <Field label="Shared OpenAI-compatible API key">
+            <input
+              className="setting-input"
+              type="password"
+              autoComplete="off"
+              placeholder={
+                state.secrets.openaiCompatibleApiKey ? "Enter to replace" : "Paste API key"
+              }
+              value={form.openaiCompatibleApiKeyInput}
+              onChange={(e) => setField("openaiCompatibleApiKeyInput", e.target.value)}
+            />
+          </Field>
+          <div className="setting-secret-status">
+            <span>{state.secrets.openaiCompatibleApiKey ? "Configured" : "Not configured"}</span>
+            {state.secrets.openaiCompatibleApiKey ? (
+              <button
+                type="button"
+                className="button-secondary text-xs"
+                onClick={() => void clearSecret("models.openaiCompatibleApiKey")}
+              >
+                Clear key
+              </button>
+            ) : null}
+          </div>
+          <p className="mt-2 text-xs text-ink-500">
+            This connection is shared by Chat and Cognition whenever either uses OpenAI-compatible.
+          </p>
         </section>
 
         <section className="settings-card">
@@ -500,7 +559,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
             />
             Companion always on top
           </label>
-          <Field label="Runtime mode">
+          <Field label="Connection mode">
             <select
               className="setting-input"
               value={form.runtimeMode}
@@ -516,9 +575,9 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               checked={form.runtimeAutostart}
               onChange={(e) => setField("runtimeAutostart", e.target.checked)}
             />
-            Runtime autostart
+            Start the local service automatically
           </label>
-          <Field label="Runtime URL">
+          <Field label="Service URL">
             <input
               className="setting-input"
               value={form.runtimeUrl}
