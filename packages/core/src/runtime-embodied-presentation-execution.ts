@@ -4,10 +4,8 @@ import {
   type EmbodiedPresentationRequest,
   type RuntimeEvent
 } from "@companion/protocol";
-import {
-  projectRuntimeEmbodiedEffectAdmissionToPresentationRequest,
-  type RuntimeEmbodiedEffectRecordInitializationDecision
-} from "./runtime-embodied-presentation-request-projection.js";
+import { projectRuntimeEmbodiedEffectAdmissionToPresentationRequest } from "./runtime-embodied-presentation-request-projection.js";
+import type { RuntimeEmbodiedEffectRecordInitializationDecision } from "./runtime-embodied-effect-record-initialization.js";
 import {
   RUNTIME_EMBODIED_EFFECT_RECORD_ADVANCEMENT_7U_VERSION,
   advanceRuntimeEmbodiedEffectRecord,
