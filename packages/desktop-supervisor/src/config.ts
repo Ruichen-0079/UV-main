@@ -421,6 +421,7 @@ export function resolvePackagedRuntimeStart(
       YUVI_RUNTIME_RESOURCE_DIR: layout.resourceRoot,
       YUVI_RUNTIME_DATA_DIR: dataDir,
       YUVI_RUNTIME_ENV_DIR: dataDir,
+      YUVI_RUNTIME_MIGRATIONS_DIR: path.join(runtimeDir, "migrations"),
       YUVI_PACKAGED: "1",
       ...live2dEnv
     },

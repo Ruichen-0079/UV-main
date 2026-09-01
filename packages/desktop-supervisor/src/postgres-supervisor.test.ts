@@ -8,6 +8,7 @@ import {
   resolvePostgresMode
 } from "./config.js";
 import { DesktopSupervisor } from "./supervisor.js";
+import { buildPrivatePostgresDatabaseUrl } from "./postgres-lifecycle.js";
 import { redactSecretText } from "./postgres-secret.js";
 
 const tempDirs: string[] = [];
@@ -55,6 +56,12 @@ function packagedTree(): { resourceRoot: string; dataRoot: string } {
 }
 
 describe("supervisor postgres mode", () => {
+  it("builds an encoded private PostgreSQL connection URL", () => {
+    expect(buildPrivatePostgresDatabaseUrl(55432, "P3@ssword/with spaces")).toBe(
+      "postgresql://yuvi:P3%40ssword%2Fwith%20spaces@127.0.0.1:55432/yuvi"
+    );
+  });
+
   it("defaults packaged mode to private and development to external", () => {
     expect(
       resolvePostgresMode(

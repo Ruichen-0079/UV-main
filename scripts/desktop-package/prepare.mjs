@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   BUILD_ROOT,
+  MEMORY_MIGRATIONS_DIR,
   MEM0_EXE_NAME,
   MEM0_MANIFEST_NAME,
   MEM0_OUT_DIR,
@@ -21,7 +22,7 @@ import { buildSupervisor, sha256File, SUPERVISOR_BUILD_INFO_NAME } from "./build
 import { buildPackagedMem0, validateMem0Artifact } from "./build-mem0.mjs";
 import { bundleRuntimeServer } from "./build-runtime.mjs";
 import { prepareBundledNode } from "./download-node.mjs";
-import { assertFile, assertSafeGeneratedTarget, ensureDir, writeJson } from "./paths.mjs";
+import { assertDir, assertFile, assertSafeGeneratedTarget, ensureDir, writeJson } from "./paths.mjs";
 
 export async function prepareDesktopPackage() {
   console.info("[desktop-package] prepare start");
@@ -35,6 +36,10 @@ export async function prepareDesktopPackage() {
   const runtime = await bundleRuntimeServer(RUNTIME_OUT_DIR);
   assertFile(runtime.outfile, "runtime entry");
   assertFile(runtime.manifestPath, "runtime manifest");
+  assertDir(MEMORY_MIGRATIONS_DIR, "memory migration directory");
+  if (!fs.readdirSync(MEMORY_MIGRATIONS_DIR).some((entry) => entry.endsWith(".sql"))) {
+    throw new Error(`memory migration directory contains no SQL files: ${MEMORY_MIGRATIONS_DIR}`);
+  }
 
   const supervisor = await buildSupervisor(SUPERVISOR_OUT_DIR);
   assertFile(supervisor.cjsPath, "supervisor cjs");
@@ -66,6 +71,7 @@ export async function prepareDesktopPackage() {
   if (fs.existsSync(metafile)) {
     copyFile(metafile, path.join(stagedRuntime, "runtime-esbuild-metafile.json"));
   }
+  copyDir(MEMORY_MIGRATIONS_DIR, path.join(stagedRuntime, "migrations"));
   copyFile(
     path.join(SUPERVISOR_OUT_DIR, SUPERVISOR_BUNDLE_NAME),
     path.join(stagedSupervisor, SUPERVISOR_BUNDLE_NAME)
@@ -130,7 +136,7 @@ function copyDir(from, to) {
     const target = path.join(to, entry.name);
     if (entry.isDirectory()) copyDir(source, target);
     else if (entry.isFile()) copyFile(source, target);
-    else throw new Error(`Unsupported Mem0 artifact entry: ${source}`);
+    else throw new Error(`Unsupported package artifact entry: ${source}`);
   }
 }
 

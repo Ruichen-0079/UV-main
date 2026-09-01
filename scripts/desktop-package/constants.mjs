@@ -52,6 +52,7 @@ export const SUPERVISOR_BUNDLE_NAME = "yuvi-desktop-supervisor.cjs";
 export const RUNTIME_ENTRY_NAME = "yuvi-runtime-server.mjs";
 export const RUNTIME_MANIFEST_NAME = "runtime-manifest.json";
 export const NODE_EXE_NAME = "node.exe";
+export const MEMORY_MIGRATIONS_DIR = path.join(REPO_ROOT, "packages", "memory", "migrations");
 
 /** Staging dir consumed by Tauri resources (generated, gitignored). */
 export const TAURI_GENERATED = path.join(

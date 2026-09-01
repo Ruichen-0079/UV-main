@@ -75,3 +75,16 @@ test("packaged Runtime uses normal production export resolution", () => {
     "pnpm --filter @companion/server... build && node scripts/desktop-package/prepare.mjs"
   );
 });
+
+test("packaged Runtime includes and applies private memory migrations", () => {
+  const prepareSource = fs.readFileSync(new URL("./prepare.mjs", import.meta.url), "utf8");
+  assert.match(prepareSource, /MEMORY_MIGRATIONS_DIR/);
+  assert.match(prepareSource, /stagedRuntime, "migrations"/);
+  const runtimeSource = fs.readFileSync(
+    new URL("../../scripts/yuvi-runtime-server.packaged.mts", import.meta.url),
+    "utf8"
+  );
+  assert.match(runtimeSource, /YUVI_RUNTIME_MIGRATIONS_DIR/);
+  assert.match(runtimeSource, /runPostgresMigrations/);
+  assert.match(runtimeSource, /MEMORY_REPOSITORY/);
+});

@@ -4,6 +4,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildChildProcessEnv, loadPackagedSupervisorConfig } from "./config.js";
+import { layoutFromRoot } from "./postgres-layout.js";
 import { DesktopSupervisor } from "./supervisor.js";
 import type { StartCommandSpec, SupervisorConfig } from "./types.js";
 import * as health from "./health.js";
@@ -201,6 +202,56 @@ function fakeChild(pid: number): EventEmitter & { pid: number; killed: boolean; 
 }
 
 describe("DesktopSupervisor classification", () => {
+  it("projects the private packaged database into Runtime and Mem0 child env", () => {
+    const resourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-packaged-res-"));
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-packaged-data-"));
+    const postgresRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-packaged-pg-"));
+    tempDirs.push(resourceRoot, dataRoot, postgresRoot);
+    const config = baseConfig({
+      layout: {
+        mode: "packaged",
+        resourceRoot,
+        dataRoot,
+        runtimeManifestPath: path.join(resourceRoot, "runtime-manifest.json"),
+        mem0ManifestPath: path.join(resourceRoot, "mem0-manifest.json")
+      },
+      repositoryRoot: resourceRoot,
+      env: { YUVI_POSTGRES_PASSWORD: "P3@ssword/with spaces" },
+      runtimeStart: {
+        file: "node",
+        args: ["runtime.mjs"],
+        cwd: dataRoot,
+        env: { YUVI_PACKAGED: "1" },
+        commandMarker: "runtime.mjs"
+      },
+      mem0Start: {
+        file: "mem0.exe",
+        args: [],
+        cwd: dataRoot,
+        env: { YUVI_MEM0_PACKAGED: "1" },
+        commandMarker: "mem0.exe"
+      },
+      postgresMode: "private",
+      postgresLayout: layoutFromRoot(postgresRoot),
+      postgresListenPort: 55432,
+      postgresSecretAuthority: "credential-manager"
+    });
+    const supervisor = createSupervisor(config);
+
+    const runtimeEnv = supervisor.resolveSpawnEnv("runtime");
+    expect(runtimeEnv).toMatchObject({
+      MEMORY_REPOSITORY: "postgres",
+      CONVERSATION_REPOSITORY: "postgres",
+      DATABASE_URL: "postgresql://yuvi:P3%40ssword%2Fwith%20spaces@127.0.0.1:55432/yuvi"
+    });
+
+    const mem0Env = supervisor.resolveSpawnEnv("mem0");
+    expect(mem0Env?.["MEM0_PG_CONNECTION_STRING"]).toBe(
+      "postgresql://yuvi:P3%40ssword%2Fwith%20spaces@127.0.0.1:55432/yuvi"
+    );
+    expect(mem0Env?.["DATABASE_URL"]).toBeUndefined();
+  });
+
   it("treats packaged Mem0 without a start command as external detect-only", async () => {
     const resourceRoot = makeTempRepositoryRoot();
     const config = baseConfig({

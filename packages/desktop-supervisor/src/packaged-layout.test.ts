@@ -109,6 +109,9 @@ describe("packaged supervisor layout", () => {
     expect(joined.toLowerCase()).not.toContain("pnpm");
     expect(joined.toLowerCase()).not.toContain("tsx");
     expect(cfg.runtimeStart?.env["YUVI_PACKAGED"]).toBe("1");
+    expect(cfg.runtimeStart?.env["YUVI_RUNTIME_MIGRATIONS_DIR"]).toBe(
+      path.join(tree.resourceRoot, "runtime", "migrations")
+    );
     expect(cfg.autostartMem0).toBe(false);
     expect(cfg.mem0Start).toBeNull();
     expect(cfg.postgresMode).toBe("private");
