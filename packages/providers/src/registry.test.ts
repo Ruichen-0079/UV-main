@@ -7,6 +7,8 @@ import {
   createProviderRegistryFromEnv
 } from "./index.js";
 
+const DEEPINFRA_GLM_COGNITION_MODEL = "zai-org/GLM-5.3-Flash";
+
 describe("ProviderRegistry", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -186,7 +188,7 @@ describe("ProviderRegistry", () => {
     expect(JSON.stringify(status)).not.toContain("openai-compatible-secret");
   });
 
-  it("binds Chat and Cognition to separate OpenAI-compatible models", async () => {
+  it("binds Chat and Cognition to separate provider-facing model IDs", async () => {
     const requests: Array<Record<string, unknown>> = [];
     vi.stubGlobal(
       "fetch",
@@ -202,7 +204,7 @@ describe("ProviderRegistry", () => {
                 finish_reason: "stop",
                 message: {
                   content: model,
-                  reasoning_content: "provider-private-trace"
+                  reasoning_content: "<think>provider-private-trace</think>"
                 }
               }
             ]
@@ -222,7 +224,7 @@ describe("ProviderRegistry", () => {
       OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
       OPENAI_COMPATIBLE_API_KEY: "shared-secret",
       OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-flash",
-      OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash"
+      OPENAI_COMPATIBLE_REASONING_MODEL: DEEPINFRA_GLM_COGNITION_MODEL
     });
 
     expect(registry.getChatProvider().name).toBe("openai-compatible");
@@ -236,17 +238,18 @@ describe("ProviderRegistry", () => {
 
     expect(requests.map((request) => request["model"])).toEqual([
       "deepseek-flash",
-      "glm-4.7-flash"
+      DEEPINFRA_GLM_COGNITION_MODEL
     ]);
     expect(chat.message.content).toBe("chat answer");
     expect(cognition.answer).toBe("cognition answer");
     expect(cognition.reasoning).toBe("");
+    expect(JSON.stringify(cognition)).not.toContain("<think>");
     expect(JSON.stringify(cognition)).not.toContain("provider-private-trace");
     expect(registry.getStatus().providers.reasoning).toMatchObject({
       provider: "openai-compatible",
       configured: true,
       baseUrl: "https://gateway.example/v1",
-      model: "glm-4.7-flash"
+      model: DEEPINFRA_GLM_COGNITION_MODEL
     });
     expect(JSON.stringify(registry.getStatus())).not.toContain("shared-secret");
   });

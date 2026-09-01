@@ -1306,7 +1306,7 @@ describe("server", () => {
       OPENAI_COMPATIBLE_API_BASEURL: "https://gateway.example/v1",
       OPENAI_COMPATIBLE_API_KEY: "shared-secret",
       OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-flash",
-      OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash"
+      OPENAI_COMPATIBLE_REASONING_MODEL: "zai-org/GLM-5.3-Flash"
     });
 
     try {
@@ -1321,7 +1321,7 @@ describe("server", () => {
       });
       expect(response.json().providers.reasoning).toMatchObject({
         provider: "openai-compatible",
-        model: "glm-4.7-flash",
+        model: "zai-org/GLM-5.3-Flash",
         baseUrl: "https://gateway.example/v1",
         configured: true,
         available: true

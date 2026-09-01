@@ -1347,7 +1347,7 @@ function emptySettingsForm(): SettingsForm {
     OPENAI_COMPATIBLE_API_BASEURL: "https://api.deepinfra.com/v1/openai",
     OPENAI_COMPATIBLE_API_KEY: "",
     OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-ai/DeepSeek-V4-Flash-0731",
-    OPENAI_COMPATIBLE_REASONING_MODEL: "glm-4.7-flash",
+    OPENAI_COMPATIBLE_REASONING_MODEL: "zai-org/GLM-5.3-Flash",
     NVIDIA_API_BASEURL: "https://integrate.api.nvidia.com/v1",
     NVIDIA_API_KEY: "",
     NVIDIA_CHAT_MODEL: "",

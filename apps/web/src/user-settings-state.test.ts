@@ -20,7 +20,7 @@ const sampleView = (): SettingsViewDto => ({
     schemaVersion: 1,
     app: { language: "en" },
     chat: { provider: "openai-compatible", model: "deepseek-ai/DeepSeek-V4-Flash-0731" },
-    cognition: { provider: "openai-compatible", model: "glm-4.7-flash" },
+    cognition: { provider: "openai-compatible", model: "zai-org/GLM-5.3-Flash" },
     openaiCompatible: { baseUrl: "https://api.deepinfra.com/v1/openai" },
     runtime: { mode: "managed", autostart: true, url: "http://127.0.0.1:6121" },
     memory: {
@@ -66,7 +66,7 @@ describe("user settings reducer", () => {
     state = reduceUserSettings(state, { type: "load-success", view: sampleView() });
     expect(state.loading).toBe(false);
     expect(state.form.chatModel).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
-    expect(state.form.cognitionModel).toBe("glm-4.7-flash");
+    expect(state.form.cognitionModel).toBe("zai-org/GLM-5.3-Flash");
     expect(state.form.openaiCompatibleBaseUrl).toBe("https://api.deepinfra.com/v1/openai");
     expect(state.form.proactiveEnabled).toBe(false);
     expect(state.form.sttProvider).toBe("dashscope");

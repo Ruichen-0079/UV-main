@@ -48,7 +48,7 @@ impl Default for CognitionSettings {
     fn default() -> Self {
         Self {
             provider: "openai-compatible".into(),
-            model: "glm-4.7-flash".into(),
+            model: "zai-org/GLM-5.3-Flash".into(),
         }
     }
 }
