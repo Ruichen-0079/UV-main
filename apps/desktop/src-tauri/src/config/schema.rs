@@ -208,7 +208,10 @@ impl Default for UserSettings {
                 llm: MemoryLlmSettings::default(),
             },
             tts: TtsSettings {
-                enabled: true,
+                // GPT-SoVITS/Alice is not a distributable packaged artifact.
+                // Keep fresh installs truthful until an external service is
+                // explicitly configured by the user.
+                enabled: false,
                 mode: ServiceMode::External,
                 wrapper_url: "http://127.0.0.1:9881".into(),
                 upstream_url: "http://127.0.0.1:9880".into(),

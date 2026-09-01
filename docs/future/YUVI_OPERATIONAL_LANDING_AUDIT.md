@@ -2,7 +2,7 @@
 
 **Status:** Phase 8 operational landing audit (Stage 2)
 
-**Audit baseline:** `05b0ddfa0c528cdfd2577264c74304ab1f40a052` (`main`, 2026-09-01)
+**Audit baseline:** `098204ba24b17383ccd249e1b12c2b10179378de` (`main`, 2026-09-02)
 
 **Scope:**
 
@@ -115,21 +115,30 @@ desktop path is not yet wired to the current V4 Flash-class baseline. This is a
 configuration/selection gap, not a request to make DeepSeek part of Character
 identity.
 
-### PRODUCT_GAP P2 — Packaged TTS configuration claims a local Alice stack that is not packaged or managed
+### P2 — Packaged Alice TTS is not distributable from repository authority
 
-The packaged settings export forces `DEFAULT_TTS_PROVIDER=local`,
-`TTS_PROVIDER_CHAIN=local`, and `LOCAL_TTS_MODEL=alice-v4`
-(`apps/desktop/src-tauri/src/config/env_export.rs:70-75`). The packaged
-Supervisor nevertheless sets both GPT-SoVITS start commands to null
-(`packages/desktop-supervisor/src/config.ts:247-254`), and the package prepare
-step stages no GPT-SoVITS wrapper/upstream or model assets
-(`scripts/desktop-package/prepare.mjs:46-107`). The default user setting is
-TTS enabled but external (`apps/desktop/src-tauri/src/config/schema.rs:143-148`).
+The fetched repository contains the existing `GPTSoVITSTTSProvider` adapter and
+its `9881` wrapper / `9880` API-v2 boundary, but contains no GPT-SoVITS wrapper
+or upstream runtime, pinned Windows dependency/runtime artifact, Alice GPT or
+SoVITS weights, reference audio, or asset provenance/redistribution record.
+The packaged Supervisor therefore still has no verified
+`ttsWrapperStart`/`ttsUpstreamStart`, and `prepare.mjs` stages no TTS artifact.
 
-The companion playback and `/v1/tts` path are wired, but a fresh packaged
-install needs a separately running compatible TTS service to produce audio.
-This is a product gap for zero-ritual embodied voice use; it is not a reason to
-change Presentation or Runtime authority.
+The `.env.example` paths are explicitly user-supplied deployment configuration;
+they are not package inputs. Treating the adapter's `alice-v4` model label as a
+packaged voice would be an unverified redistribution of missing user-specific
+assets. A first-run downloader cannot resolve that missing identity/permission
+or provide a reproducible Windows runtime, while asking the user to assemble
+the stack would not be turnkey.
+
+P2 is therefore closed by the truthful fallback permitted by the landing gate:
+fresh installs default to TTS disabled and external
+(`apps/desktop/src-tauri/src/config/schema.rs` and
+`apps/web/src/user-settings-state.ts`). Users may explicitly enable the
+existing external Alice service; the Supervisor will continue to observe it
+without claiming ownership. The companion playback and `/v1/tts` path remain
+unchanged. This is not a reason to change Presentation, Runtime authority, or
+TTS semantics.
 
 ## Confirmed working seams
 
@@ -176,8 +185,10 @@ merge:
    and Supervisor ownership needed by that UI.
 5. **B3c:** package/provision the local STT runtime and model assets only after
    the preceding path is proven, keeping weights out of Git.
-6. **P1/P2:** close Chat baseline selection and packaged TTS provisioning as
-   separate product atoms, with real-use evidence determining any further work.
+6. **P1:** close Chat baseline selection as a separate product atom.
+7. **P2:** packaged managed Alice TTS is closed by the documented external
+   asset/runtime blocker and truthful disabled-external defaults. Reopen only
+   when a pinned, licensed runtime plus Alice asset provenance is supplied.
 
 ## Explicit deferrals
 

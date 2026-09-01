@@ -302,6 +302,21 @@ fn restart_services_impact() {
 }
 
 #[test]
+fn fresh_install_tts_default_is_truthfully_external_and_disabled() {
+    let settings = UserSettings::default();
+    assert!(!settings.tts.enabled);
+    assert_eq!(settings.tts.mode, ServiceMode::External);
+    assert_eq!(settings.tts.wrapper_url, "http://127.0.0.1:9881");
+    assert_eq!(settings.tts.upstream_url, "http://127.0.0.1:9880");
+
+    let env = public_env_overrides(&settings);
+    assert_eq!(
+        env.get("YUVI_AUTOSTART_TTS").map(String::as_str),
+        Some("false")
+    );
+}
+
+#[test]
 fn managed_env_includes_secrets_external_runtime_skips_chat_key() {
     let secrets = MemorySecretStore::default();
     secrets.set(SECRET_DEEPSEEK_API_KEY, "sk-secret").unwrap();

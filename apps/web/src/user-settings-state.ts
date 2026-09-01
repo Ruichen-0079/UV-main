@@ -221,7 +221,9 @@ export const defaultUserSettingsForm = (): UserSettingsForm => ({
   memoryLlmModel: "",
   memoryLlmBaseUrl: "",
   memoryLlmApiKeyInput: "",
-  ttsEnabled: true,
+  // Fresh installs do not ship an Alice GPT-SoVITS runtime or voice assets.
+  // External mode remains available when the user supplies that service.
+  ttsEnabled: false,
   ttsMode: "external",
   ttsWrapperUrl: "http://127.0.0.1:9881",
   ttsUpstreamUrl: "http://127.0.0.1:9880",
