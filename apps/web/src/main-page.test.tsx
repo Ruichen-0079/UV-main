@@ -45,6 +45,15 @@ describe("MainPage TTS output preference", () => {
   });
 });
 
+describe("MainPage voice input", () => {
+  it("exposes ordinary microphone capture and transcription actions", () => {
+    const markup = renderMainPage();
+    expect(markup).toContain("Voice input");
+    expect(markup).toContain("Record voice");
+    expect(markup).toContain("Transcribe recording");
+  });
+});
+
 describe("MainPage speech lifecycle correlation", () => {
   it("retains the speech epoch after generation ownership ends", () => {
     expect(resolveSpeechCommandEpoch("turn-a", null)).toBe("turn-a");
