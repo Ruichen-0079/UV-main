@@ -4,13 +4,14 @@ on:
   push:
     branches:
       - tmp/7ab-lockregen-20260901
+    paths:
+      - .github/workflows/tmp-7ab-lockregen.yml
 
 permissions:
   contents: write
 
 jobs:
   regen:
-    if: github.event.head_commit.message == 'tmp: seed 7AB lock regeneration'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
