@@ -41,8 +41,13 @@ function spawnResult(candidate, args, spawnSyncImpl = nodeSpawnSync) {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
-  if (result.error) throw new Error(`Python 3.11 probe failed (${path.basename(candidate.file)}).`);
+  if (result.error)
+    throw new Error(`Python 3.11 probe failed (${safeInterpreterLabel(candidate.file)}).`);
   return result;
+}
+
+function safeInterpreterLabel(file) {
+  return path.win32.basename(String(file).replaceAll("/", "\\"));
 }
 
 function assertCandidate(candidate) {
@@ -65,7 +70,7 @@ export function validatePython311(candidate, options = {}) {
   assertCandidate(candidate);
   const result = spawnResult(candidate, ["-c", PYTHON_PROBE], options.spawnSyncImpl);
   if (result.status !== 0) {
-    throw new Error(`Python 3.11 probe failed (${path.basename(candidate.file)}).`);
+    throw new Error(`Python 3.11 probe failed (${safeInterpreterLabel(candidate.file)}).`);
   }
   let info;
   try {

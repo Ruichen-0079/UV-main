@@ -476,10 +476,15 @@ test("packaging-info fixed schema and relative fields validate", () => {
     supervisorBuildInfo: "supervisor/supervisor-build-info.json",
     hasMem0: true,
     mem0ProtocolVersion: 1,
+    hasLocalStt: true,
+    localSttProtocolVersion: 1,
     runtimeEntry: "runtime/yuvi-runtime-server.mjs",
     nodeExecutable: "runtime/node.exe",
     mem0Executable: "mem0/yuvi-mem0.exe",
-    mem0Manifest: "mem0/mem0-manifest.json"
+    mem0Manifest: "mem0/mem0-manifest.json",
+    localSttExecutable: "local-stt/yuvi-local-stt.exe",
+    localSttManifest: "local-stt/local-stt-manifest.json",
+    localSttModelManifest: "local-stt/models.manifest.json"
   });
   assert.equal(info.hasMem0, true);
 });
@@ -496,10 +501,15 @@ test("packaging-info rejects absolute executable paths", () => {
         supervisorBuildInfo: "supervisor/supervisor-build-info.json",
         hasMem0: true,
         mem0ProtocolVersion: 1,
+        hasLocalStt: true,
+        localSttProtocolVersion: 1,
         runtimeEntry: "C:\\repo\\runtime.mjs",
         nodeExecutable: "runtime/node.exe",
         mem0Executable: "mem0/yuvi-mem0.exe",
-        mem0Manifest: "mem0/mem0-manifest.json"
+        mem0Manifest: "mem0/mem0-manifest.json",
+        localSttExecutable: "local-stt/yuvi-local-stt.exe",
+        localSttManifest: "local-stt/local-stt-manifest.json",
+        localSttModelManifest: "local-stt/models.manifest.json"
       }),
     /absolute/
   );

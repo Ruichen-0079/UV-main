@@ -11,11 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dest = process.env.YUVI_STT_MODEL_DIR?.trim() || path.join(os.homedir(), ".local", "share", "yuvi", "models", "stt");
-const tmp = path.join(dest, "tmp");
-fs.mkdirSync(tmp, { recursive: true });
-
-const assets = [
+export const LOCAL_STT_ASSETS = [
   {
     url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2",
     archive: true,
@@ -39,46 +35,76 @@ const assets = [
   }
 ];
 
-function download(url, outPath) {
+function download(url, outPath, execFileSyncImpl) {
   if (fs.existsSync(outPath)) return;
   const partial = `${outPath}.partial`;
-  execFileSync("curl", ["-L", "--fail", "--retry", "3", "-o", partial, url], { stdio: "inherit" });
+  execFileSyncImpl("curl", ["-L", "--fail", "--retry", "3", "-o", partial, url], {
+    stdio: "inherit"
+  });
   fs.renameSync(partial, outPath);
 }
 
-function sha256(filePath) {
+export function sha256(filePath) {
   const hash = createHash("sha256");
   hash.update(fs.readFileSync(filePath));
   return hash.digest("hex");
 }
 
-for (const asset of assets) {
-  const name = path.basename(new URL(asset.url).pathname);
-  const packed = path.join(tmp, name);
-  console.log(`fetch ${asset.url}`);
-  download(asset.url, packed);
-  if (asset.archive) {
-    const entries = asset.keep ?? [];
-    execFileSync("tar", ["-xjf", packed, "-C", dest, ...entries], { stdio: "inherit" });
-  } else {
-    fs.copyFileSync(packed, path.join(dest, name));
+export function downloadLocalSttModels(options = {}) {
+  const dest =
+    options.dest ??
+    process.env.YUVI_STT_MODEL_DIR?.trim() ??
+    path.join(os.homedir(), ".local", "share", "yuvi", "models", "stt");
+  const execFileSyncImpl = options.execFileSyncImpl ?? execFileSync;
+  const tmp = path.join(dest, "tmp");
+  fs.mkdirSync(tmp, { recursive: true });
+
+  for (const asset of LOCAL_STT_ASSETS) {
+    const name = path.basename(new URL(asset.url).pathname);
+    const packed = path.join(tmp, name);
+    console.log(`fetch ${asset.url}`);
+    download(asset.url, packed, execFileSyncImpl);
+    if (asset.archive) {
+      const entries = asset.keep ?? [];
+      execFileSyncImpl("tar", ["-xjf", packed, "-C", dest, ...entries], { stdio: "inherit" });
+    } else {
+      fs.copyFileSync(packed, path.join(dest, name));
+    }
   }
+
+  const manifestPath = path.join(repoRoot, "services", "local-stt", "models.manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  for (const model of manifest.models) {
+    const filePath = path.join(dest, model.file);
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`missing required model ${filePath}`);
+    }
+    const stat = fs.statSync(filePath);
+    const actualSha256 = sha256(filePath);
+    if (actualSha256 !== model.sha256 || stat.size !== model.bytes) {
+      throw new Error(
+        `checksum mismatch for ${model.id}: expected ${model.sha256}/${model.bytes}, received ${actualSha256}/${stat.size}`
+      );
+    }
+    console.log(`${model.id} verified sha256=${actualSha256} bytes=${stat.size}`);
+  }
+  for (const file of manifest.runtimeFiles ?? []) {
+    const filePath = path.join(dest, file);
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      throw new Error(`missing required local STT runtime file ${filePath}`);
+    }
+  }
+  console.log(`models ready in ${dest}`);
+  return { dest, manifest };
 }
 
-const manifestPath = path.join(repoRoot, "services", "local-stt", "models.manifest.json");
-const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-for (const model of manifest.models) {
-  const filePath = path.join(dest, model.file);
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`missing required model ${filePath}`);
+const isMain =
+  process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (isMain) {
+  try {
+    downloadLocalSttModels();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
   }
-  const stat = fs.statSync(filePath);
-  const actualSha256 = sha256(filePath);
-  if (actualSha256 !== model.sha256 || stat.size !== model.bytes) {
-    throw new Error(
-      `checksum mismatch for ${model.id}: expected ${model.sha256}/${model.bytes}, received ${actualSha256}/${stat.size}`
-    );
-  }
-  console.log(`${model.id} verified sha256=${actualSha256} bytes=${stat.size}`);
 }
-console.log(`models ready in ${dest}`);

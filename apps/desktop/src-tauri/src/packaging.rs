@@ -27,6 +27,9 @@ pub struct PackagedLaunch {
     pub runtime_manifest: PathBuf,
     pub mem0_manifest: PathBuf,
     pub mem0_executable: PathBuf,
+    pub local_stt_manifest: PathBuf,
+    pub local_stt_executable: PathBuf,
+    pub local_stt_models: PathBuf,
     pub state_root: PathBuf,
 }
 
@@ -38,6 +41,21 @@ struct Mem0Manifest {
     platform: String,
     arch: String,
     executable: String,
+    health_path: String,
+    default_host: String,
+    default_port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalSttManifest {
+    schema_version: u8,
+    protocol_version: u8,
+    platform: String,
+    arch: String,
+    executable: String,
+    model_directory: String,
+    model_manifest: String,
     health_path: String,
     default_host: String,
     default_port: u16,
@@ -62,6 +80,9 @@ pub struct PackagingDiagnostics {
     pub runtime_manifest: Option<String>,
     pub mem0_manifest: Option<String>,
     pub mem0_executable: Option<String>,
+    pub local_stt_manifest: Option<String>,
+    pub local_stt_executable: Option<String>,
+    pub local_stt_models: Option<String>,
     pub state_root: Option<String>,
     pub repo_root: Option<String>,
 }
@@ -80,6 +101,9 @@ impl PackagingDiagnostics {
                 runtime_manifest: None,
                 mem0_manifest: None,
                 mem0_executable: None,
+                local_stt_manifest: None,
+                local_stt_executable: None,
+                local_stt_models: None,
                 state_root: None,
                 repo_root: Some(dev.repo_root.display().to_string()),
             },
@@ -94,6 +118,9 @@ impl PackagingDiagnostics {
                 runtime_manifest: Some(pkg.runtime_manifest.display().to_string()),
                 mem0_manifest: Some(pkg.mem0_manifest.display().to_string()),
                 mem0_executable: Some(pkg.mem0_executable.display().to_string()),
+                local_stt_manifest: Some(pkg.local_stt_manifest.display().to_string()),
+                local_stt_executable: Some(pkg.local_stt_executable.display().to_string()),
+                local_stt_models: Some(pkg.local_stt_models.display().to_string()),
                 state_root: Some(pkg.state_root.display().to_string()),
                 repo_root: None,
             },
@@ -112,6 +139,9 @@ impl PackagingDiagnostics {
             runtime_manifest: None,
             mem0_manifest: None,
             mem0_executable: None,
+            local_stt_manifest: None,
+            local_stt_executable: None,
+            local_stt_models: None,
             state_root: None,
             repo_root: None,
         }
@@ -261,6 +291,56 @@ pub fn resolve_packaged_launch(
         return Err("Mem0 _internal directory is missing or empty".into());
     }
 
+    let local_stt_dir = resource_root.join("local-stt");
+    if !local_stt_dir.is_dir() {
+        return Err(format!("Local STT resource missing: {}", local_stt_dir.display()));
+    }
+    let local_stt_manifest = local_stt_dir.join("local-stt-manifest.json");
+    let local_manifest_text = fs::read_to_string(&local_stt_manifest)
+        .map_err(|e| format!("Local STT manifest unreadable: {e}"))?;
+    let local_manifest: LocalSttManifest = serde_json::from_str(&local_manifest_text)
+        .map_err(|e| format!("Local STT manifest invalid: {e}"))?;
+    if local_manifest.schema_version != 1
+        || local_manifest.protocol_version != 1
+        || local_manifest.platform != "win32"
+        || local_manifest.arch != "x64"
+        || local_manifest.executable != "yuvi-local-stt.exe"
+        || local_manifest.model_directory != "models"
+        || local_manifest.model_manifest != "models.manifest.json"
+        || local_manifest.health_path != "/health"
+        || local_manifest.default_host != "127.0.0.1"
+        || local_manifest.default_port != 9876
+    {
+        return Err("Local STT manifest does not match the fixed schema".into());
+    }
+    let local_stt_root = local_stt_dir
+        .canonicalize()
+        .map_err(|e| format!("Local STT resource unavailable: {e}"))?;
+    let local_stt_executable = local_stt_dir.join(&local_manifest.executable);
+    let local_stt_exe_root = local_stt_executable
+        .canonicalize()
+        .map_err(|e| format!("Local STT executable missing: {e}"))?;
+    if !local_stt_exe_root.starts_with(&local_stt_root) || !local_stt_exe_root.is_file() {
+        return Err("Local STT executable must remain inside the local-stt resource directory".into());
+    }
+    let local_stt_internal = local_stt_dir.join("_internal");
+    if !local_stt_internal.is_dir()
+        || fs::read_dir(&local_stt_internal)
+            .map_err(|e| format!("Local STT _internal unavailable: {e}"))?
+            .next()
+            .is_none()
+    {
+        return Err("Local STT _internal directory is missing or empty".into());
+    }
+    let local_stt_models = local_stt_dir.join(&local_manifest.model_directory);
+    if !local_stt_models.is_dir() {
+        return Err("Local STT models directory is missing".into());
+    }
+    let local_stt_model_manifest = local_stt_dir.join(&local_manifest.model_manifest);
+    if !local_stt_model_manifest.is_file() {
+        return Err("Local STT models manifest is missing".into());
+    }
+
     fs::create_dir_all(&state_root).map_err(|e| format!("state root unavailable: {e}"))?;
 
     Ok(PackagedLaunch {
@@ -271,6 +351,9 @@ pub fn resolve_packaged_launch(
         runtime_manifest,
         mem0_manifest,
         mem0_executable,
+        local_stt_manifest,
+        local_stt_executable,
+        local_stt_models,
         state_root,
     })
 }
@@ -394,6 +477,18 @@ mod tests {
       r#"{"schemaVersion":1,"protocolVersion":1,"platform":"win32","arch":"x64","executable":"yuvi-mem0.exe","healthPath":"/health","defaultHost":"127.0.0.1","defaultPort":6131}"#,
     )
     .unwrap();
+
+        let local_stt = root.join("local-stt");
+        fs::create_dir_all(local_stt.join("_internal")).unwrap();
+        fs::create_dir_all(local_stt.join("models")).unwrap();
+        fs::write(local_stt.join("yuvi-local-stt.exe"), b"MZ").unwrap();
+        fs::write(local_stt.join("_internal").join("placeholder.dat"), b"x").unwrap();
+        fs::write(local_stt.join("models.manifest.json"), b"{\"models\":[],\"runtimeFiles\":[]}").unwrap();
+        fs::write(
+            local_stt.join("local-stt-manifest.json"),
+            r#"{"schemaVersion":1,"protocolVersion":1,"platform":"win32","arch":"x64","executable":"yuvi-local-stt.exe","modelDirectory":"models","modelManifest":"models.manifest.json","healthPath":"/health","defaultHost":"127.0.0.1","defaultPort":9876}"#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -436,6 +531,9 @@ mod tests {
         assert!(launch.runtime_manifest.is_file());
         assert!(launch.mem0_manifest.is_file());
         assert!(launch.mem0_executable.is_file());
+        assert!(launch.local_stt_manifest.is_file());
+        assert!(launch.local_stt_executable.is_file());
+        assert!(launch.local_stt_models.is_dir());
     }
 
     #[test]

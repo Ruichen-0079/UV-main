@@ -1,7 +1,11 @@
 {
   "schemaVersion": 1,
   "device": "cpu",
-  "notes": "Weights live under ~/.local/share/yuvi/models/stt and are not committed. Install with: node scripts/download-local-stt-models.mjs",
+  "notes": "Weights live under the provisioned local-STT data directory and are not committed. Install with: pnpm local-stt:provision",
+  "runtimeFiles": [
+    "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt",
+    "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/LICENSE"
+  ],
   "models": [
     {
       "id": "sense-voice-zh-en-ja-ko-yue-2024-07-17-int8",
