@@ -9,7 +9,8 @@ const SERVICE_IDS = new Set<ServiceId>([
   "tts_wrapper",
   "tts_upstream",
   "ollama",
-  "postgres"
+  "postgres",
+  "local_stt"
 ]);
 
 export const CONTROL_TOKEN_HEADER = "x-yuvi-control-token";

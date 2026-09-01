@@ -20,6 +20,7 @@ import {
 import {
   mem0HealthOk,
   ollamaTagsOk,
+  localSttHealthOk,
   probeHttpHealth,
   probeTcp,
   runtimeHealthOk,
@@ -418,6 +419,12 @@ export class DesktopSupervisor {
     } else {
       await this.refreshService("tts_upstream");
       await this.refreshService("tts_wrapper");
+    }
+
+    if (this.config.autostartLocalStt && this.config.localSttStart) {
+      await this.ensureService("local_stt");
+    } else {
+      await this.refreshService("local_stt");
     }
 
     this.emit();
@@ -1324,6 +1331,22 @@ export class DesktopSupervisor {
         validateHealthBody: ollamaTagsOk
       },
       this.buildPostgresSpec(state, db),
+      {
+        id: "local_stt",
+        role: "local_stt",
+        label: "Local CPU STT",
+        // Without an explicit command this remains observe-only. A healthy
+        // external sidecar is never adopted or stopped.
+        managed: Boolean(this.config.localSttStart),
+        autostart: Boolean(this.config.autostartLocalStt && this.config.localSttStart),
+        healthUrl: `${(this.config.localSttUrl ?? "http://127.0.0.1:9876").replace(/\/$/, "")}/health`,
+        startTimeoutMs: 60_000,
+        readinessIntervalMs: 500,
+        startCommand: this.config.localSttStart ?? null,
+        metadataFile: path.join(state, "local-stt.pid.json"),
+        logFile: path.join(state, "local-stt.log"),
+        validateHealthBody: localSttHealthOk
+      },
       {
         id: "tts_wrapper",
         role: "tts_wrapper",

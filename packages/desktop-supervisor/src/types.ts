@@ -3,7 +3,14 @@
  * Single source of truth for managed Runtime / Mem0 / TTS lifecycle.
  */
 
-export type ServiceId = "runtime" | "mem0" | "tts_wrapper" | "tts_upstream" | "ollama" | "postgres";
+export type ServiceId =
+  | "runtime"
+  | "mem0"
+  | "tts_wrapper"
+  | "tts_upstream"
+  | "ollama"
+  | "postgres"
+  | "local_stt";
 
 export type ServiceLifecycle =
   | "starting"
@@ -236,6 +243,10 @@ export type SupervisorConfig = {
   ttsWrapperUrl: string;
   ttsUpstreamUrl: string;
   ollamaUrl: string;
+  /** Optional local CPU STT sidecar. A start command is required for ownership. */
+  localSttUrl?: string | undefined;
+  localSttStart?: StartCommandSpec | null | undefined;
+  autostartLocalStt?: boolean | undefined;
   databaseUrl: string | null;
   runtimeStart: StartCommandSpec | null;
   mem0Start: StartCommandSpec | null;

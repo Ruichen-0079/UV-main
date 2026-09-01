@@ -174,6 +174,9 @@ export function deriveConfigFromEnv(
   | "ttsWrapperUrl"
   | "ttsUpstreamUrl"
   | "ollamaUrl"
+  | "localSttUrl"
+  | "localSttStart"
+  | "autostartLocalStt"
   | "databaseUrl"
   | "runtimeStart"
   | "mem0Start"
@@ -202,6 +205,7 @@ export function deriveConfigFromEnv(
     "MEM0_OLLAMA_BASE_URL",
     envString(env, "OLLAMA_HOST", "http://127.0.0.1:11434")
   );
+  const localSttUrl = envString(env, "LOCAL_STT_BASE_URL", "http://127.0.0.1:9876");
   const databaseUrl = env["DATABASE_URL"]?.trim() || null;
   const memoryBackend = envString(env, "MEMORY_BACKEND", "mem0") === "legacy" ? "legacy" : "mem0";
 
@@ -226,6 +230,12 @@ export function deriveConfigFromEnv(
     ttsWrapperUrl,
     ttsUpstreamUrl,
     ollamaUrl,
+    localSttUrl,
+    localSttStart:
+      layout.mode === "packaged"
+        ? null
+        : resolveOptionalStartCommand(env, "YUVI_LOCAL_STT_START_COMMAND", ownershipRoot),
+    autostartLocalStt: envFlag(env, "YUVI_AUTOSTART_LOCAL_STT", false),
     databaseUrl,
     runtimeStart: resolveRuntimeStartForLayout(layout, env, runtimePort),
     mem0Start:

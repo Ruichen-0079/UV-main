@@ -1,8 +1,8 @@
 import type { EventBus } from "@companion/event-bus";
-import {
-  type EmbodiedPresentationOutcomeReport,
-  type EmbodiedPresentationRequest,
-  type RuntimeEvent
+import type {
+  EmbodiedPresentationOutcomeReport,
+  EmbodiedPresentationRequest,
+  RuntimeEvent
 } from "@companion/protocol";
 import { projectRuntimeEmbodiedEffectAdmissionToPresentationRequest } from "./runtime-embodied-presentation-request-projection.js";
 import type { RuntimeEmbodiedEffectRecordInitializationDecision } from "./runtime-embodied-effect-record-initialization.js";

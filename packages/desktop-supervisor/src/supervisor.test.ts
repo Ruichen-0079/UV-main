@@ -420,6 +420,15 @@ describe("DesktopSupervisor classification", () => {
     expect(runtime?.lastError).toMatch(/external/i);
     expect(runtime?.status).toBe("healthy");
   });
+
+  it("keeps an unconfigured local STT sidecar observe-only", async () => {
+    const supervisor = createSupervisor(baseConfig());
+    await supervisor.stopService("local_stt");
+    const localStt = supervisor.snapshot().services.find((service) => service.id === "local_stt");
+    expect(localStt?.managed).toBe(false);
+    expect(localStt?.lastError).toMatch(/external|owned/i);
+    expect(unexpectedSpawnCalls).toBe(0);
+  });
 });
 
 describe("DesktopSupervisor runtime config push", () => {
