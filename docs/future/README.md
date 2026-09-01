@@ -75,10 +75,11 @@ Continuity remains the reserved owner for any future explicit durable
 unfinished-relevance state. Neither reserved owner authorizes building a large
 subsystem before a repeatable real failure proves it necessary.
 
-**NEXT:** Phase 8 behavior assets: `YUVI_BEHAVIOR_SPEC`, `YUVI_BEHAVIOR_EVAL`,
-and `YUVI_PREFERENCE_DATASET` schema/governance. The current prompt/provider
-Chat model is the operational baseline against which those assets can evaluate
-behavior.
+**NEXT:** Phase 8 behavior assets: [`YUVI_BEHAVIOR_SPEC`](YUVI_BEHAVIOR_SPEC.md),
+[`YUVI_BEHAVIOR_EVAL`](YUVI_BEHAVIOR_EVAL.md), and
+[`YUVI_PREFERENCE_DATASET`](YUVI_PREFERENCE_DATASET.md) schema/governance. The
+current prompt/provider Chat model is the operational baseline against which
+those assets can evaluate behavior.
 
 **DEFERRED:** Phases 9–13 wait until Yuvi is actually operational for sustained
 daily use and enough reviewed evidence exists to distinguish model-behavior
