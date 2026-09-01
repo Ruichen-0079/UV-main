@@ -48,6 +48,7 @@ import { XAIVisionProvider } from "./xai/XAIVisionProvider.js";
 import { DashScopeSTTProvider } from "./alibaba/DashScopeSTTProvider.js";
 import { streamOpenAICompatibleChatCompletion } from "./openai-compatible-stream.js";
 import { GPTSoVITSTTSProvider } from "./local/GPTSoVITSTTSProvider.js";
+import { LocalSTTProvider } from "./local/LocalSTTProvider.js";
 import { createTransportAbort, type TransportAbort } from "./transport-abort.js";
 
 export type ProviderRegistryConfig = {
@@ -1055,10 +1056,10 @@ const sttProviderFactories: Record<string, ProviderFactory<STTProvider>> = {
       return undefined;
     }
 
-    return new UnimplementedSTTProvider(
-      "local",
-      "Local STT provider is configured, but runtime transcription is not implemented in v1."
-    );
+    return new LocalSTTProvider({
+      baseUrl: config.local.baseUrl,
+      model: config.local.sttModel
+    });
   }
 };
 
