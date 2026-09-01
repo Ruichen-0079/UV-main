@@ -7,7 +7,7 @@ function admitted() {
     {
       version: "character-harness-5d.v1",
       status: "ACCEPTED",
-      proposal: { disposition: "RESPOND", presentation: { intent: "soft-smile" } }
+      proposal: { disposition: "RESPOND", text: "Hello", presentation: { intent: "soft-smile" } }
     },
     { kind: "turn", reference: "turn:7ag:1" },
     {
@@ -24,8 +24,8 @@ describe("server embodied Presentation dispatch", () => {
     const result = dispatchServerEmbodiedPresentationRequest(admitted()!, dispatch);
     expect(result.status).toBe("REQUEST_DISPATCHED");
     expect(dispatch).toHaveBeenCalledOnce();
-    expect(dispatch.mock.calls[0][0]).toMatchObject({ effectId: "runtime-effect:7ag:1" });
-    expect(dispatch.mock.calls[0][0]).not.toHaveProperty("device");
+    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({ effectId: "runtime-effect:7ag:1" });
+    expect(dispatch.mock.calls[0]?.[0]).not.toHaveProperty("device");
   });
 
   it("does not dispatch a rejected admission", () => {
@@ -33,7 +33,7 @@ describe("server embodied Presentation dispatch", () => {
       {
         version: "character-harness-5d.v1",
         status: "ACCEPTED",
-        proposal: { disposition: "RESPOND", presentation: { intent: "soft-smile" } }
+        proposal: { disposition: "RESPOND", text: "Hello", presentation: { intent: "soft-smile" } }
       },
       { kind: "turn", reference: "turn:7ag:2" },
       {
