@@ -67,15 +67,29 @@ function makePackagedResourceTree(): {
 }
 
 describe("packaged supervisor layout", () => {
-  it("development layout still generates dev Runtime command when runner exists", () => {
+  it("development layout generates a platform-native Runtime command when runner exists", () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-dev-"));
     tempDirs.push(repo);
     fs.mkdirSync(path.join(repo, "scripts"), { recursive: true });
-    fs.writeFileSync(path.join(repo, "scripts", "dev-server-runner.ps1"), "#x\n");
+    const isWindows = process.platform === "win32";
+    const runnerName = isWindows ? "dev-server-runner.ps1" : "dev-server-runner.sh";
+    fs.writeFileSync(path.join(repo, "scripts", runnerName), "#x\n");
     const cfg = loadSupervisorConfig({ repositoryRoot: repo });
     expect(cfg.layout.mode).toBe("development");
-    expect(cfg.runtimeStart?.commandMarker).toBe("dev-server-runner.ps1");
-    expect(cfg.runtimeStart?.file.toLowerCase()).toMatch(/powershell|pwsh/);
+    expect(cfg.runtimeStart?.commandMarker).toBe(runnerName);
+    if (isWindows) {
+      expect(cfg.runtimeStart?.file.toLowerCase()).toContain("powershell");
+      expect(cfg.runtimeStart?.args).toContain("-File");
+    } else {
+      expect(cfg.runtimeStart?.file).toBe("bash");
+      expect(cfg.runtimeStart?.args).toEqual([
+        path.join(repo, "scripts", runnerName),
+        "--repo-root",
+        repo,
+        "--server-port",
+        "6121"
+      ]);
+    }
   });
 
   it("packaged layout generates bundled node command without pnpm/tsx", () => {
