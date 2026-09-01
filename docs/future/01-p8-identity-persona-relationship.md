@@ -1,6 +1,6 @@
 # Phase 1 — P8 Identity, Persona, and Relationship
 
-> **Status: P8-1A, P8-1B, P8-1C, P8-1D, AND P8-1E IMPLEMENTED; P8-1F AND LATER P8 STAGES PLANNED**
+> **Status: P8-1A, P8-1B, P8-1C, P8-1D, P8-1E, AND P8-1F IMPLEMENTED; LATER P8 STAGES PLANNED**
 
 ## 1. Purpose
 
@@ -412,7 +412,14 @@ persisted as authority, and no Memory event is created for a P8 correction.
 There is no Runtime, PromptBuilder, Character ABI, UI, or response behavior
 integration in this stage.
 
-**PLANNED:** P8-1F will add adversarial closure. Character ABI integration,
+**IMPLEMENTED P8-1F:** Adversarial closure tests cover multi-session and exact
+identity/scope isolation across serialized correction-store restart, privacy and
+absence of raw backend payloads, distinct EMPTY/UNAVAILABLE/ERROR/PARTIAL/
+UNKNOWN/CONFLICTING states, malformed and unknown durable records, equivalent
+Memory backend replacement, deterministic reconstruction, and explicit lineage
+as the only correction supersession authority. Supplied timestamps and storage
+row order remain provenance or transport details and never establish semantic
+precedence. No production integration boundary was widened: Character ABI integration,
 prompt projection,
 Continuity, channel social mode, and relationship growth modeling remain
 planned. Weak evidence must produce only weak interpretation; contradictory,
@@ -468,8 +475,8 @@ empty, unavailable, or erroneous evidence must remain explicit.
 5. **Implemented in P8-1E:** Add append-only durable correction authority and
    deterministic versioned reconstruction through the existing persistence
    boundary.
-6. P8-1F: Validate multi-session stability, scope isolation, privacy, outage,
-   and backend replacement.
+6. **Implemented in P8-1F:** Validate multi-session stability, scope isolation,
+   privacy, outage, deterministic restart reconstruction, and backend replacement.
 
 Each stage should add the smallest semantic unit and tests needed. Do not build
 a generic relationship framework in anticipation of hypothetical consumers.
