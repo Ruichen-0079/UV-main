@@ -3,8 +3,6 @@ mod lifecycle;
 mod packaging;
 mod supervisor;
 
-use std::thread;
-
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, RunEvent};
@@ -159,15 +157,12 @@ fn begin_app_shutdown(app: &tauri::AppHandle) {
 }
 
 fn request_app_exit(app: &tauri::AppHandle) {
-  if !claim_app_shutdown() {
-    return;
-  }
-
-  let app = app.clone();
-  thread::spawn(move || {
-    supervisor::shutdown_supervisor(&app);
+  if !app_shutdown_started() {
+    // Let RunEvent::ExitRequested own the shutdown sequence. That keeps the
+    // explicit Quit path on the same once-only supervisor shutdown seam as
+    // OS/application exit while allowing Tauri to drive its event loop exit.
     app.exit(0);
-  });
+  }
 }
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
