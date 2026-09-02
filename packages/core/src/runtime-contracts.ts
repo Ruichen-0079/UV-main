@@ -27,6 +27,9 @@ import type {
 } from "@companion/protocol";
 import type { RuntimeEmbodiedEffectRecordInitializationDecision } from "./runtime-embodied-effect-record-initialization.js";
 import type {
+  ChatInput,
+  ChatOutput,
+  ProviderCallOptions,
   ProviderCapability,
   ProviderHealth,
   ProviderMetadata,
@@ -59,9 +62,50 @@ export type RuntimeOrchestratorOptions = {
   dreamWriter?: DreamWriter | undefined;
   dreamProvider?: MemoryProvider | undefined;
   logger?: RuntimeLogger;
+  /** Runtime-owned Character generation and its bounded cognition callback. */
+  character?: RuntimeCharacterPort | undefined;
+  characterCognition?: RuntimeCharacterCognitionExecutor | undefined;
   /** Optional production Character -> Runtime -> Presentation composition. */
   embodiedPresentation?: RuntimeEmbodiedPresentationPort | undefined;
 };
+
+export type RuntimeCharacterCognitionExecutor = (
+  request: unknown,
+  problem: string,
+  options?: Readonly<{ signal?: AbortSignal | undefined }>
+) => Promise<unknown>;
+
+export type RuntimeCharacterGenerationResult = Readonly<{
+  content: string;
+  providerMetadata: Pick<
+    ProviderMetadata,
+    "model" | "latencyMs" | "tokenUsage" | "fallbackUsed" | "attemptedProviders" | "finalProvider"
+  >;
+}>;
+
+/**
+ * Narrow Runtime-to-Character port. Runtime supplies the selected Chat call
+ * and the existing Cognition executor; the Character adapter owns only
+ * semantic proposal handling and expression.
+ */
+export type RuntimeCharacterPort = Readonly<{
+  generate(
+    input: Readonly<{
+      prompt: PromptBuildOutput;
+      userMessage: string;
+      signal?: AbortSignal | undefined;
+      generateChat(
+        input: ChatInput,
+        options?: ProviderCallOptions | undefined
+      ): Promise<ChatOutput>;
+      executeCognition(
+        request: unknown,
+        problem: string,
+        options?: Readonly<{ signal?: AbortSignal | undefined }>
+      ): Promise<unknown>;
+    }>
+  ): Promise<RuntimeCharacterGenerationResult>;
+}>;
 
 export type RuntimeEmbodiedPresentationPort = Readonly<{
   propose(
