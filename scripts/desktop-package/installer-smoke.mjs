@@ -1852,6 +1852,7 @@ title_exact = 0
 identity_valid = 0
 target_hwnd = 0
 post_result = 0
+visible_after_close = 1
 
 def emit_phase(name):
     print(f"WM_CLOSE_PHASE={name}", flush=True)
@@ -1865,6 +1866,7 @@ def emit_result(error=None):
     print(f"title_exact={title_exact}", flush=True)
     print(f"identity_valid={identity_valid}", flush=True)
     print(f"post_result={post_result}", flush=True)
+    print(f"visible_after_close={visible_after_close}", flush=True)
     if error is not None:
         print(f"win32_error={error}", flush=True)
     print(f"elapsed_ms={max(0, int((time.monotonic() - started) * 1000))}", flush=True)
@@ -1881,6 +1883,8 @@ user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.restype = ctypes.c_int
 user32.IsWindow.argtypes = [wintypes.HWND]
 user32.IsWindow.restype = wintypes.BOOL
+user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.IsWindowVisible.restype = wintypes.BOOL
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
 
@@ -1926,6 +1930,11 @@ emit_phase("before_post")
 post_result = int(bool(user32.PostMessageW(target_hwnd, WM_CLOSE, 0, 0)))
 post_error = ctypes.get_last_error() if post_result == 0 else None
 emit_phase("after_post")
+for _ in range(20):
+    if not user32.IsWindowVisible(target_hwnd):
+        visible_after_close = 0
+        break
+    time.sleep(0.05)
 emit_result(post_error)
 raise SystemExit(0 if post_result == 1 else 1)
 `;
@@ -1982,6 +1991,16 @@ export function parseWmCloseOutput(stdout, expectedPid = null) {
   const identityValid = readInteger("identity_valid");
   const postResult = readInteger("post_result");
   const elapsedMs = readInteger("elapsed_ms");
+  const visibleAfterCloseMatches = [
+    ...text.matchAll(/(?:^|\r?\n)visible_after_close=(-?\d+)(?=\r?$)/gm)
+  ];
+  if (visibleAfterCloseMatches.length > 1)
+    fail("WM_CLOSE output has duplicate visible_after_close");
+  const visibleAfterClose = visibleAfterCloseMatches.length
+    ? Number(visibleAfterCloseMatches[0][1])
+    : null;
+  if (visibleAfterClose !== null && ![0, 1].includes(visibleAfterClose))
+    fail("WM_CLOSE output has invalid visible_after_close");
   if (expectedPid !== null && targetPid !== Number(expectedPid))
     fail(`WM_CLOSE output target PID mismatch (${targetPid})`);
   if (pidTopLevelWindows < 1) fail("WM_CLOSE found no target top-level windows");
@@ -2001,6 +2020,7 @@ export function parseWmCloseOutput(stdout, expectedPid = null) {
     titleExact: titleExact === 1,
     identityValid: identityValid === 1,
     postResult: postResult === 1,
+    visibleAfterClose: visibleAfterClose === null ? null : visibleAfterClose === 1,
     elapsedMs,
     phases,
     lastPhase: phases.at(-1) ?? "unknown"
@@ -3247,6 +3267,167 @@ export function buildWmCloseArguments(pid) {
   ];
 }
 
+export const TRAY_ICON_WINDOW_CLASS = "tray_icon_app";
+export const TRAY_QUIT_MENU_COMMAND_ID = 1004;
+
+export const TRAY_QUIT_PYTHON_SOURCE = String.raw`
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+WM_COMMAND = 0x0111
+TRAY_ICON_WINDOW_CLASS = "tray_icon_app"
+TRAY_QUIT_MENU_COMMAND_ID = 1004
+started = time.monotonic()
+target_pid = int(sys.argv[1])
+tray_windows = []
+validated_pid = 0
+class_exact = 0
+identity_valid = 0
+tray_hwnd = 0
+post_result = 0
+
+def emit_phase(name):
+    print(f"TRAY_QUIT_PHASE={name}", flush=True)
+
+def emit_result(error=None):
+    print(f"target_pid={target_pid}", flush=True)
+    print(f"tray_windows={len(tray_windows)}", flush=True)
+    print(f"tray_hwnd={tray_hwnd}", flush=True)
+    print(f"validated_pid={validated_pid}", flush=True)
+    print(f"class_exact={class_exact}", flush=True)
+    print(f"identity_valid={identity_valid}", flush=True)
+    print(f"command_id={TRAY_QUIT_MENU_COMMAND_ID}", flush=True)
+    print(f"post_result={post_result}", flush=True)
+    if error is not None:
+        print(f"win32_error={error}", flush=True)
+    print(f"elapsed_ms={max(0, int((time.monotonic() - started) * 1000))}", flush=True)
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
+user32.EnumWindows.restype = wintypes.BOOL
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetClassNameW.restype = ctypes.c_int
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostMessageW.restype = wintypes.BOOL
+
+def read_class(hwnd):
+    buffer = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buffer, len(buffer))
+    return buffer.value
+
+def enum_window(hwnd, _lparam):
+    pid_value = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_value))
+    if int(pid_value.value) == target_pid and read_class(hwnd) == TRAY_ICON_WINDOW_CLASS:
+        tray_windows.append(int(hwnd))
+    return True
+
+emit_phase("start")
+emit_phase("before_enum")
+if not user32.EnumWindows(EnumWindowsProc(enum_window), 0):
+    emit_phase("after_enum")
+    emit_result(ctypes.get_last_error())
+    raise SystemExit(1)
+emit_phase("after_enum")
+if len(tray_windows) != 1:
+    emit_result()
+    raise SystemExit(1)
+tray_hwnd = tray_windows[0]
+emit_phase("before_revalidate")
+pid_value = wintypes.DWORD(0)
+user32.GetWindowThreadProcessId(tray_hwnd, ctypes.byref(pid_value))
+validated_pid = int(pid_value.value)
+class_exact = int(read_class(tray_hwnd) == TRAY_ICON_WINDOW_CLASS)
+identity_valid = int(bool(user32.IsWindow(tray_hwnd)) and validated_pid == target_pid and class_exact == 1)
+emit_phase("after_revalidate")
+if identity_valid != 1:
+    emit_result()
+    raise SystemExit(1)
+emit_phase("before_post")
+post_result = int(bool(user32.PostMessageW(tray_hwnd, WM_COMMAND, TRAY_QUIT_MENU_COMMAND_ID, 0)))
+post_error = ctypes.get_last_error() if post_result == 0 else None
+emit_phase("after_post")
+emit_result(post_error)
+raise SystemExit(0 if post_result == 1 else 1)
+`;
+
+export function buildTrayQuitScript(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) fail("tray Quit target PID is invalid");
+  return TRAY_QUIT_PYTHON_SOURCE;
+}
+
+export function buildTrayQuitArguments(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) fail("tray Quit target PID is invalid");
+  return ["-I", "-S", "-c", TRAY_QUIT_PYTHON_SOURCE, String(numericPid)];
+}
+
+export function parseTrayQuitOutput(stdout, expectedPid = null) {
+  const text = String(stdout ?? "");
+  assertNoSecrets(text, "tray Quit stdout");
+  const phases = [...text.matchAll(/(?:^|\r?\n)TRAY_QUIT_PHASE=([a-z_]+)(?=\r?$)/gm)].map(
+    (match) => match[1]
+  );
+  const requiredPhases = [
+    "start",
+    "before_enum",
+    "after_enum",
+    "before_revalidate",
+    "after_revalidate",
+    "before_post",
+    "after_post"
+  ];
+  if (phases.length !== requiredPhases.length || phases.some((phase, index) => phase !== requiredPhases[index]))
+    fail("tray Quit output has invalid phase sequence");
+  const readInteger = (name) => {
+    const matches = [...text.matchAll(new RegExp(`(?:^|\\r?\\n)${name}=(-?\\d+)(?=\\r?$)`, "gm"))];
+    if (matches.length !== 1) fail(`tray Quit output is missing or malformed ${name}`);
+    const value = Number(matches[0][1]);
+    if (!Number.isSafeInteger(value) || value < 0) fail(`tray Quit output has invalid ${name}`);
+    return value;
+  };
+  const targetPid = readInteger("target_pid");
+  const trayWindows = readInteger("tray_windows");
+  const trayHwnd = readInteger("tray_hwnd");
+  const validatedPid = readInteger("validated_pid");
+  const classExact = readInteger("class_exact");
+  const identityValid = readInteger("identity_valid");
+  const commandId = readInteger("command_id");
+  const postResult = readInteger("post_result");
+  const elapsedMs = readInteger("elapsed_ms");
+  if (expectedPid !== null && targetPid !== Number(expectedPid))
+    fail(`tray Quit output target PID mismatch (${targetPid})`);
+  if (trayWindows !== 1) fail("tray Quit requires exactly one tray icon window");
+  if (trayHwnd <= 0) fail("tray Quit output has invalid tray_hwnd");
+  if (expectedPid !== null && validatedPid !== Number(expectedPid))
+    fail(`tray Quit validated PID mismatch (${validatedPid})`);
+  if (classExact !== 1) fail("tray Quit tray icon class was not exact");
+  if (identityValid !== 1) fail("tray Quit target identity was not validated");
+  if (commandId !== TRAY_QUIT_MENU_COMMAND_ID) fail("tray Quit command ID does not match the packaged menu");
+  if (postResult !== 1) fail("tray Quit PostMessageW was not accepted");
+  return {
+    targetPid,
+    trayWindows,
+    trayHwnd,
+    validatedPid,
+    classExact: classExact === 1,
+    identityValid: identityValid === 1,
+    commandId,
+    postResult: postResult === 1,
+    elapsedMs,
+    phases,
+    lastPhase: phases.at(-1) ?? "unknown"
+  };
+}
+
 async function waitForProcessExit(pid, timeoutMs) {
   const started = Date.now();
   while (pidAlive(pid) && Date.now() - started < timeoutMs) await wait(250);
@@ -3290,6 +3471,47 @@ async function sendWmClose(pid, layout, timeoutMs) {
   ].join("\n");
   writeLog(layout.logs, "wm-close.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
   console.info(`[installer-smoke] ${diagnostic.replaceAll("\n", " ")}`);
+  return result;
+}
+
+async function sendTrayQuit(pid, layout, timeoutMs) {
+  const script = buildTrayQuitScript(pid);
+  assertNoSecrets(script, "tray Quit helper source");
+  const executable = resolveWmClosePythonExecutable();
+  const args = buildTrayQuitArguments(pid);
+  assertNoSecrets(args, "tray Quit helper argv");
+  const options = {
+    cwd: layout.emptyCwd,
+    env: sanitizeChildEnv(),
+    stdio: ["ignore", "pipe", "pipe"]
+  };
+  let result;
+  try {
+    result = await runProcess(executable, args, options, Math.min(timeoutMs, 10_000));
+    assertNoSecrets(result.stderr, "tray Quit stderr");
+    if (result.code !== 0) {
+      let parseError = null;
+      try {
+        parseTrayQuitOutput(result.stdout, pid);
+      } catch (error) {
+        parseError = error instanceof Error ? error.message : String(error);
+      }
+      fail(
+        `tray Quit helper exited with code ${result.code}${parseError ? `: ${parseError}` : ""}`
+      );
+    }
+    const parsed = parseTrayQuitOutput(result.stdout, pid);
+    const diagnostic = [
+      `TRAY_QUIT_HELPER executable_category=python-harness executable_path=${path.basename(executable)} exit_code=${result.code}`,
+      `TRAY_QUIT_RESULT target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} command_id=${parsed.commandId} post_result=${parsed.postResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`
+    ].join("\n");
+    writeLog(layout.logs, "tray-quit.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
+    console.info(`[installer-smoke] ${diagnostic.replaceAll("\n", " ")}`);
+    return parsed;
+  } catch (error) {
+    if (result) writeLog(layout.logs, "tray-quit.log", `${result.stdout}\n${result.stderr}`);
+    throw error;
+  }
 }
 
 async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
@@ -3591,15 +3813,28 @@ async function runTauriAppSmoke({ installDir, resource, layout, timeoutMs }) {
         `Tauri Runtime health protocol is invalid: ${runtimeHealthProtocol.failureReasons.join("; ")}`
       );
 
-    await sendWmClose(child.pid, layout, timeoutMs);
+    const closeResult = await sendWmClose(child.pid, layout, timeoutMs);
+    if (closeResult.visibleAfterClose !== false)
+      fail("Tauri main window did not hide after WM_CLOSE");
+    if (!pidAlive(child.pid)) fail("Tauri application exited after WM_CLOSE");
+    if (!pidAlive(Number(pointer.pid))) fail("Supervisor exited after Tauri WM_CLOSE");
+    if (!pidAlive(runtimePid)) fail("Runtime exited after Tauri WM_CLOSE");
+    if (!pidAlive(mem0Pid)) fail("Mem0 exited after Tauri WM_CLOSE");
+    timeline.mark("T10-main-close-hidden-services-persistent", {
+      appPid: child.pid,
+      supervisorPid: Number(pointer.pid),
+      runtimePid,
+      mem0Pid
+    });
+    await sendTrayQuit(child.pid, layout, timeoutMs);
     if (!(await waitForProcessExit(child.pid, Math.min(timeoutMs, 20_000))))
-      fail("Tauri application did not exit after WM_CLOSE");
+      fail("Tauri application did not exit after tray Quit");
     if (!(await waitForProcessExit(Number(pointer.pid), Math.min(timeoutMs, 20_000))))
-      fail("Supervisor did not exit after Tauri CloseRequested");
+      fail("Supervisor did not exit after tray Quit");
     if (!(await waitForProcessExit(runtimePid, Math.min(timeoutMs, 20_000))))
-      fail("Runtime did not exit after Tauri CloseRequested");
+      fail("Runtime did not exit after tray Quit");
     if (!(await waitForProcessExit(mem0Pid, Math.min(timeoutMs, 20_000))))
-      fail("Mem0 did not exit after Tauri CloseRequested");
+      fail("Mem0 did not exit after tray Quit");
     const pointerPath = path.join(
       tauriLocalAppData,
       "YUVI",
