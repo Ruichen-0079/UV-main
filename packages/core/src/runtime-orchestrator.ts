@@ -96,6 +96,7 @@ import type {
   RuntimePromptPreview,
   RuntimeReplyStreamEvent,
   RuntimeMemoryWriteStatus,
+  RuntimeCharacterGenerationResult,
   SafeProviderCallMetadata,
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
@@ -755,6 +756,20 @@ export class RuntimeOrchestrator {
       });
       const ingestionDecision = this.durableIngestionDecision(memoryOptions.writeMemory);
 
+      if (this.options.character) {
+        yield* this.streamCharacterUserMessage({
+          userEvent,
+          options,
+          voiceOutput,
+          prompt,
+          memoryOptions,
+          ingestionDecision,
+          assistantMessageId,
+          finalizedTurnId
+        });
+        return;
+      }
+
       const chatProvider = this.options.providers.getChatProvider();
       const chatStatus = this.getProviderStatus("chat");
       const controller = new AbortController();
@@ -1094,6 +1109,186 @@ export class RuntimeOrchestrator {
       }
     } finally {
       this.exitLifecycleOperation();
+    }
+  }
+
+  private async *streamCharacterUserMessage(input: {
+    userEvent: RuntimeUserTurnEvent;
+    options: StreamUserMessageOptions;
+    voiceOutput: boolean;
+    prompt: PromptBuildOutput;
+    memoryOptions: ResolvedMemoryOptions;
+    ingestionDecision: { requested: boolean | null; skipReason: string | null };
+    assistantMessageId: string;
+    finalizedTurnId: string;
+  }): AsyncIterable<RuntimeReplyStreamEvent> {
+    const chatProvider = this.options.providers.getChatProvider();
+    const chatStatus = this.getProviderStatus("chat");
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (input.options.signal?.aborted) {
+      controller.abort();
+    } else {
+      input.options.signal?.addEventListener("abort", onAbort, { once: true });
+    }
+
+    const startedAt = performance.now();
+    let finalized = false;
+    let failure: unknown;
+    try {
+      if (controller.signal.aborted) {
+        throw createRuntimeCancelledError(chatProvider.name);
+      }
+
+      const characterResult = await this.executeCharacterTurn(
+        input.userEvent,
+        input.prompt,
+        controller.signal
+      );
+      if (controller.signal.aborted) {
+        throw createRuntimeCancelledError(chatProvider.name);
+      }
+
+      const providerMetadata = this.safeProviderCallMetadata(
+        "chat",
+        chatProvider.name,
+        characterResult.providerMetadata,
+        chatStatus
+      );
+      if (this.latestPromptPreview) {
+        this.latestPromptPreview = {
+          ...this.latestPromptPreview,
+          providerName: providerMetadata.name,
+          providerModel: providerMetadata.model,
+          providerMock: providerMetadata.mock,
+          providerLatencyMs:
+            providerMetadata.latencyMs ?? Math.round(performance.now() - startedAt),
+          providerHealthStatus: providerMetadata.healthStatus,
+          tokenUsage: providerMetadata.tokenUsage,
+          ...this.extractorPreviewFields({
+            ...this.getMemoryExtractorStatus(),
+            used: false
+          })
+        };
+      }
+
+      const reply = this.createAgentReply(
+        input.userEvent,
+        characterResult.content,
+        providerMetadata,
+        canonicalAgentReplyId(input.userEvent)
+      );
+      await this.publishAssistantMessage(
+        input.userEvent,
+        reply,
+        input.assistantMessageId,
+        input.finalizedTurnId,
+        input.ingestionDecision.requested,
+        input.ingestionDecision.skipReason
+      );
+      this.scheduleEmbodiedPresentation(reply);
+      finalized = true;
+
+      try {
+        if (input.memoryOptions.writeMemory) {
+          if (
+            this.options.memory.isMem0Backend?.() &&
+            (this.options.memory.storeConversationTurn || this.options.finalizedIngestion)
+          ) {
+            void this.scheduleMem0TurnWrite(
+              input.userEvent,
+              reply,
+              input.assistantMessageId,
+              input.finalizedTurnId
+            );
+          } else {
+            const extraction = await this.maybeStoreMemoryInternal(
+              input.userEvent,
+              reply,
+              input.memoryOptions
+            );
+            this.updateLatestPromptPreviewExtraction(extraction);
+          }
+        } else {
+          this.updateLatestPromptPreviewExtraction({
+            ...this.getMemoryExtractorStatus(),
+            used: false,
+            skippedReason: "Memory write was disabled for this turn."
+          });
+        }
+      } catch (error) {
+        await this.publishRuntimeError("Optional memory post-processing failed.", error, {
+          traceId: reply.traceId,
+          parentId: reply.id
+        });
+        this.options.logger?.warn?.(
+          "optional memory post-processing failed",
+          this.errorLogContext(error, reply.traceId)
+        );
+      }
+
+      if (!input.options.signal?.aborted) {
+        try {
+          await this.maybeSynthesizeSpeech(reply, input.voiceOutput, {
+            signal: input.options.signal
+          });
+        } catch (error) {
+          await this.publishRuntimeError("Optional TTS post-processing failed.", error, {
+            traceId: reply.traceId,
+            parentId: reply.id
+          });
+          this.options.logger?.warn?.(
+            "optional TTS post-processing failed",
+            this.errorLogContext(error, reply.traceId)
+          );
+        }
+      }
+
+      if (characterResult.content) {
+        yield {
+          type: "text-delta",
+          text: characterResult.content,
+          messageId: input.assistantMessageId,
+          sessionId: input.userEvent.payload.sessionId,
+          traceId: input.userEvent.traceId
+        };
+      }
+      yield {
+        type: "completed",
+        messageId: input.assistantMessageId,
+        sessionId: input.userEvent.payload.sessionId,
+        traceId: input.userEvent.traceId,
+        content: characterResult.content,
+        provider: providerMetadata.finalProvider ?? providerMetadata.name
+      };
+    } catch (error) {
+      failure = error;
+    } finally {
+      controller.abort();
+      input.options.signal?.removeEventListener("abort", onAbort);
+    }
+
+    if (failure !== undefined) {
+      if (!finalized && !(failure instanceof ConversationPersistenceError)) {
+        if (failure instanceof ProviderError) {
+          if (failure.provider === "character" || failure.code === ProviderErrorCode.Cancelled) {
+            await this.publishProviderError(failure, {
+              capability: "chat",
+              provider: chatProvider.name,
+              latencyMs: Math.round(performance.now() - startedAt),
+              traceId: input.userEvent.traceId,
+              parentId: input.userEvent.id
+            });
+          }
+        } else {
+          await this.publishRuntimeError("Runtime Character turn failed.", failure, {
+            traceId: input.userEvent.traceId,
+            parentId: input.userEvent.id,
+            category: "character"
+          });
+        }
+      }
+      throw failure;
     }
   }
 
@@ -1831,27 +2026,42 @@ export class RuntimeOrchestrator {
       readMemory?: boolean | undefined;
       writeMemory?: boolean | undefined;
       publishAgentReply?: boolean | undefined;
+      signal?: AbortSignal | undefined;
     } = {}
   ): Promise<AgentReplyEvent> {
     const { prompt, memoryOptions } = await this.prepareChatPrompt(event, options);
 
     const chatProvider = this.options.providers.getChatProvider();
     const chatStatus = this.getProviderStatus("chat");
-    const output = await this.measureProvider(
-      "chat",
-      chatProvider.name,
-      () =>
-        chatProvider.generateReply({
-          messages: prompt.messages
-        }),
-      { traceId: event.traceId, parentId: event.id }
-    );
-    const providerMetadata = this.safeProviderCallMetadata(
-      "chat",
-      chatProvider.name,
-      output,
-      chatStatus
-    );
+    const characterResult = this.options.character
+      ? await this.executeCharacterTurn(event, prompt, options.signal)
+      : undefined;
+    let output: ChatOutput | undefined;
+    let providerMetadata: SafeProviderCallMetadata;
+    if (characterResult) {
+      providerMetadata = this.safeProviderCallMetadata(
+        "chat",
+        chatProvider.name,
+        characterResult.providerMetadata,
+        chatStatus
+      );
+    } else {
+      output = await this.measureProvider(
+        "chat",
+        chatProvider.name,
+        () =>
+          chatProvider.generateReply({
+            messages: prompt.messages
+          }),
+        { traceId: event.traceId, parentId: event.id }
+      );
+      providerMetadata = this.safeProviderCallMetadata(
+        "chat",
+        chatProvider.name,
+        output,
+        chatStatus
+      );
+    }
     if (this.latestPromptPreview) {
       this.latestPromptPreview = {
         ...this.latestPromptPreview,
@@ -1870,7 +2080,7 @@ export class RuntimeOrchestrator {
 
     const reply = this.createAgentReply(
       event,
-      output.message.content,
+      characterResult ? characterResult.content : (output?.message.content ?? ""),
       providerMetadata,
       canonicalAgentReplyId(event)
     );
@@ -1878,6 +2088,65 @@ export class RuntimeOrchestrator {
       await this.options.eventBus.publish(reply);
     }
     return reply;
+  }
+
+  private async executeCharacterTurn(
+    event: RuntimeUserTurnEvent,
+    prompt: PromptBuildOutput,
+    signal?: AbortSignal
+  ): Promise<RuntimeCharacterGenerationResult> {
+    const character = this.options.character;
+    if (!character) {
+      throw new Error("Runtime Character generation is not configured.");
+    }
+
+    const chatProvider = this.options.providers.getChatProvider();
+    let cognitionExecuted = false;
+    return character.generate({
+      prompt,
+      userMessage: event.payload.content,
+      ...(signal ? { signal } : {}),
+      generateChat: (input, callOptions) => {
+        if (callOptions?.signal?.aborted) {
+          return Promise.reject(createRuntimeCancelledError(chatProvider.name));
+        }
+        return this.measureProvider(
+          "chat",
+          chatProvider.name,
+          () => chatProvider.generateReply(input, callOptions),
+          { traceId: event.traceId, parentId: event.id }
+        );
+      },
+      executeCognition: (request, problem, callOptions) => {
+        const cognition = this.options.characterCognition;
+        if (!cognition) {
+          return Promise.reject(
+            new ProviderError({
+              provider: "character",
+              capability: "chat",
+              code: ProviderErrorCode.ProviderUnavailable,
+              message: "Character Cognition execution is unavailable.",
+              retryable: false
+            })
+          );
+        }
+        if (cognitionExecuted) {
+          return Promise.reject(
+            new ProviderError({
+              provider: "character",
+              capability: "chat",
+              code: ProviderErrorCode.MalformedResponse,
+              message: "Character Cognition round-trip budget was exhausted.",
+              retryable: false
+            })
+          );
+        }
+        cognitionExecuted = true;
+        return cognition(request, problem, {
+          signal: callOptions?.signal ?? signal
+        });
+      }
+    });
   }
 
   async maybeSynthesizeSpeech(

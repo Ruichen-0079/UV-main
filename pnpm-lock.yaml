@@ -42,6 +42,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@companion/character-abi':
+        specifier: workspace:*
+        version: link:../../packages/character-abi
       '@companion/character-harness':
         specifier: workspace:*
         version: link:../../packages/character-harness

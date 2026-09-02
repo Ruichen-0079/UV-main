@@ -10,6 +10,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@companion/character-abi": "workspace:*",
     "@companion/character-harness": "workspace:*",
     "@companion/cognition": "workspace:*",
     "@companion/core": "workspace:*",

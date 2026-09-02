@@ -1,0 +1,326 @@
+import type { RuntimeCharacterPort } from "@companion/core";
+import type { PromptBuildOutput, PromptSectionName } from "@companion/prompt-builder";
+import type {
+  CharacterAbiSectionKind,
+  CharacterAbiSemanticSection
+} from "@companion/character-abi";
+import {
+  CHARACTER_ABI_2D_VERSION,
+  createCharacterAbi2DContext,
+  type CharacterAbi2DContext
+} from "@companion/character-abi/v2d";
+import {
+  interpretCharacterHarnessOutput,
+  superviseCharacterHarnessGeneration,
+  superviseCharacterHarnessRepetition,
+  type CharacterHarnessGenerationSupervision,
+  type CharacterHarnessRepetitionSupervision
+} from "@companion/character-harness";
+import { assembleCharacterHarness2DContext } from "@companion/character-harness/assembly-v2d";
+import { createCharacterHarnessCognitionRequest } from "@companion/character-harness/cognition-request";
+import {
+  createCharacterHarnessAdapterRequest,
+  type CharacterHarnessAdapterRequest
+} from "@companion/character-harness/adapter-request";
+import { createServerPostCognitionCharacterRequest } from "./cognition-character-reentry.js";
+import { decideCharacterHarnessRecovery } from "@companion/character-harness/recovery";
+import {
+  ProviderError,
+  ProviderErrorCode,
+  type ChatInput,
+  type ChatOutput,
+  type ProviderCallOptions
+} from "@companion/providers";
+
+const CHARACTER_CONTEXT_BUDGET = Object.freeze({
+  maxSections: 8,
+  maxSemanticCharacters: 12_000
+});
+const CHARACTER_RESPONSE_MAX_CHARACTERS = 8_000;
+const CHARACTER_RETRY_LIMIT = 1;
+const CHARACTER_NGRAM_CHARACTERS = 64;
+const CHARACTER_MAX_NGRAM_OCCURRENCES = 3;
+
+const CHARACTER_GENERATION_INSTRUCTION = `You are YUVI's Character layer. Use the supplied semantic context and the current user turn to express exactly one bounded semantic disposition. Return exactly one JSON object and no Markdown or control text. The allowed shapes are:
+{"disposition":"RESPOND","text":"..."}
+{"disposition":"SILENCE"}
+{"disposition":"TERMINATE"}
+{"disposition":"NEED_COGNITION","focus":"..."}
+NEED_COGNITION means only that stronger reasoning is needed. It does not select a provider, model, tool, capability, or Runtime action. Do not include any other fields.`;
+
+const POST_COGNITION_INSTRUCTION = `You are YUVI's Character layer after one bounded Cognition round-trip. Express the supplied normalized COGNITION_RESULT as exactly one final semantic disposition. Return exactly one JSON object and no Markdown or control text. The allowed shapes are RESPOND with text, SILENCE, or TERMINATE. Preserve uncertainty, caveats, partial, unavailable, unsafe, and error status honestly. Do not claim that an unavailable or unsafe result was resolved. Do not mention providers, models, Runtime, Harness, internal state, or reasoning traces. Do not request another Cognition round-trip.`;
+
+type CharacterAdapterRequest = CharacterHarnessAdapterRequest;
+type AcceptedGeneration = Extract<CharacterHarnessRepetitionSupervision, { status: "ACCEPTED" }>;
+
+type GeneratedCharacterProposal = Readonly<{
+  output: ChatOutput;
+  generation: AcceptedGeneration;
+}>;
+
+type CharacterTurnInput = Parameters<RuntimeCharacterPort["generate"]>[0];
+
+export function createServerCharacterPort(): RuntimeCharacterPort {
+  return Object.freeze({
+    generate: generateCharacterTurn
+  });
+}
+
+async function generateCharacterTurn(
+  input: CharacterTurnInput
+): Promise<{ content: string; providerMetadata: ReturnType<typeof safeProviderMetadata> }> {
+  assertNotCancelled(input.signal);
+  const baseContext = createServerCharacterContext(input.prompt);
+  const initialRequest = createCharacterGenerationRequest(baseContext);
+  const initial = await generateAcceptedCharacterProposal(input, initialRequest, false);
+
+  switch (initial.generation.proposal.disposition) {
+    case "RESPOND":
+      return {
+        content: initial.generation.proposal.text,
+        providerMetadata: safeProviderMetadata(initial.output)
+      };
+    case "SILENCE":
+    case "TERMINATE":
+      return { content: "", providerMetadata: safeProviderMetadata(initial.output) };
+    case "NEED_COGNITION": {
+      const request = createCharacterHarnessCognitionRequest({
+        generation: initial.generation
+      });
+      const problem = createCognitionProblem(input.userMessage, initial.generation.proposal.focus);
+      const roundTrip = await input.executeCognition(request, problem, {
+        signal: input.signal
+      });
+      assertNotCancelled(input.signal);
+
+      const postRequest = createServerPostCognitionCharacterRequest({
+        roundTrip,
+        context: baseContext,
+        budget: CHARACTER_CONTEXT_BUDGET
+      });
+      if ("status" in postRequest) {
+        throw characterFailure("Character Cognition result exceeded the Character context budget.");
+      }
+
+      const final = await generateAcceptedCharacterProposal(input, postRequest, true);
+      if (final.generation.proposal.disposition === "NEED_COGNITION") {
+        throw characterFailure("Character returned NEED_COGNITION after Cognition completed.");
+      }
+      if (final.generation.proposal.disposition === "RESPOND") {
+        return {
+          content: final.generation.proposal.text,
+          providerMetadata: safeProviderMetadata(final.output)
+        };
+      }
+      return { content: "", providerMetadata: safeProviderMetadata(final.output) };
+    }
+  }
+}
+
+async function generateAcceptedCharacterProposal(
+  input: CharacterTurnInput,
+  request: CharacterAdapterRequest,
+  postCognition: boolean
+): Promise<GeneratedCharacterProposal> {
+  let characterRetriesUsed = 0;
+
+  while (true) {
+    assertNotCancelled(input.signal);
+    const output = await input.generateChat(
+      createCharacterChatInput(request, input.userMessage, postCognition, characterRetriesUsed > 0),
+      providerCallOptions(input.signal)
+    );
+    const interpretation = interpretCharacterHarnessOutput(
+      decodeCharacterOutput(output.message.content)
+    );
+    const generation: CharacterHarnessGenerationSupervision = superviseCharacterHarnessGeneration({
+      interpretation,
+      finishReason: output.finishReason,
+      maxResponseCharacters: CHARACTER_RESPONSE_MAX_CHARACTERS
+    });
+
+    let failure: CharacterHarnessGenerationSupervision | CharacterHarnessRepetitionSupervision;
+    if (generation.status !== "ACCEPTED") {
+      failure = generation;
+    } else {
+      const repetition = superviseCharacterHarnessRepetition({
+        generation,
+        ngramCharacters: CHARACTER_NGRAM_CHARACTERS,
+        maxOccurrences: CHARACTER_MAX_NGRAM_OCCURRENCES
+      });
+      if (repetition.status === "ACCEPTED") {
+        return Object.freeze({ output, generation: repetition });
+      }
+      failure = repetition;
+    }
+
+    const recovery = decideCharacterHarnessRecovery({
+      failure,
+      characterRetriesUsed,
+      retryAllowed: characterRetriesUsed < CHARACTER_RETRY_LIMIT
+    });
+    if (recovery.disposition === "RETRY_CHARACTER_GENERATION") {
+      characterRetriesUsed += 1;
+      continue;
+    }
+
+    throw characterFailure("Character generation did not produce an accepted response.");
+  }
+}
+
+function createServerCharacterContext(prompt: PromptBuildOutput): CharacterAbi2DContext {
+  const sections: CharacterAbiSemanticSection[] = [];
+  const affect: string[] = [];
+  const mapping: Partial<Record<PromptSectionName, CharacterAbiSectionKind>> = {
+    SystemIdentity: "IDENTITY",
+    CharacterStyle: "PERSONA",
+    RelationshipContext: "RELATIONSHIP_CONTEXT",
+    CurrentTime: "TEMPORAL_CONTEXT",
+    DirectContext: "RECENT_CONVERSATION",
+    RecentEpisodicMemory: "CONTINUITY",
+    RelevantMemory: "MEMORY_EVIDENCE",
+    CurrentSituation: "CURRENT_SITUATION"
+  };
+
+  for (const section of prompt.sections) {
+    if (section.name === "CurrentAffect") {
+      affect.push(section.content);
+      continue;
+    }
+    const kind = mapping[section.name];
+    if (!kind) {
+      continue;
+    }
+    sections.push({
+      kind,
+      state: "KNOWN",
+      summary: boundedSemanticSummary(section.content)
+    });
+  }
+
+  if (affect.length > 0) {
+    const situation = sections.find((section) => section.kind === "CURRENT_SITUATION");
+    if (situation) {
+      const index = sections.indexOf(situation);
+      sections[index] = {
+        ...situation,
+        summary: boundedSemanticSummary(
+          `${situation.summary ?? ""}\nImmediate affect: ${affect.join("\n")}`
+        )
+      };
+    }
+  }
+
+  return createCharacterAbi2DContext({
+    abiVersion: CHARACTER_ABI_2D_VERSION,
+    sections
+  });
+}
+
+function createCharacterGenerationRequest(context: CharacterAbi2DContext): CharacterAdapterRequest {
+  const assembly = assembleCharacterHarness2DContext({
+    context,
+    budget: CHARACTER_CONTEXT_BUDGET
+  });
+  return createCharacterHarnessAdapterRequest({ assembly });
+}
+
+function createCharacterChatInput(
+  request: CharacterAdapterRequest,
+  userMessage: string,
+  postCognition: boolean,
+  retry: boolean
+): ChatInput {
+  const instruction = postCognition ? POST_COGNITION_INSTRUCTION : CHARACTER_GENERATION_INSTRUCTION;
+  const retryInstruction = retry
+    ? "Retry this bounded Character generation. Output only the required JSON object."
+    : "";
+  return {
+    messages: [
+      {
+        role: "system",
+        content: `${instruction}\n${retryInstruction}\nSemantic context:\n${JSON.stringify(request.context)}`
+      },
+      {
+        role: "user",
+        content: userMessage
+      }
+    ]
+  };
+}
+
+function decodeCharacterOutput(content: string): unknown {
+  let sanitized = content.replace(/<think>[\s\S]*?<\/think>/giu, "");
+  sanitized = sanitized.replace(/<think>[\s\S]*$/giu, "").trim();
+  const fenced = sanitized.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu);
+  if (fenced?.[1]) {
+    sanitized = fenced[1].trim();
+  }
+
+  let decoded: Record<string, unknown>;
+  try {
+    decoded = JSON.parse(sanitized) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+  if (decoded["disposition"] === "RESPOND" && typeof decoded["text"] === "string") {
+    return { ...decoded, text: stripReasoningText(decoded["text"]) };
+  }
+  return decoded;
+}
+
+function stripReasoningText(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/giu, "")
+    .replace(/<think>[\s\S]*$/giu, "")
+    .trim();
+}
+
+function createCognitionProblem(userMessage: string, focus: string | undefined): string {
+  const problem = focus ? `Character focus:\n${focus}\n\nUser task:\n${userMessage}` : userMessage;
+  return problem.slice(0, 16_000);
+}
+
+function boundedSemanticSummary(content: string): string {
+  const summary = content.trim().slice(0, 4_000);
+  return summary || "No semantic content available.";
+}
+
+function providerCallOptions(signal: AbortSignal | undefined): ProviderCallOptions | undefined {
+  return signal ? { signal } : undefined;
+}
+
+function safeProviderMetadata(output: ChatOutput) {
+  return {
+    ...(output.model === undefined ? {} : { model: output.model }),
+    ...(output.latencyMs === undefined ? {} : { latencyMs: output.latencyMs }),
+    ...(output.tokenUsage === undefined ? {} : { tokenUsage: output.tokenUsage }),
+    ...(output.fallbackUsed === undefined ? {} : { fallbackUsed: output.fallbackUsed }),
+    ...(output.attemptedProviders === undefined
+      ? {}
+      : { attemptedProviders: output.attemptedProviders }),
+    ...(output.finalProvider === undefined ? {} : { finalProvider: output.finalProvider })
+  };
+}
+
+function assertNotCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new ProviderError({
+      provider: "character",
+      capability: "chat",
+      code: ProviderErrorCode.Cancelled,
+      message: "Character turn was cancelled.",
+      retryable: false
+    });
+  }
+}
+
+function characterFailure(message: string): ProviderError {
+  return new ProviderError({
+    provider: "character",
+    capability: "chat",
+    code: ProviderErrorCode.MalformedResponse,
+    message,
+    retryable: false
+  });
+}

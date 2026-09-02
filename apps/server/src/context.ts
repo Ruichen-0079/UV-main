@@ -46,8 +46,11 @@ import {
   superviseCharacterHarnessGeneration,
   superviseCharacterHarnessRepetition
 } from "@companion/character-harness";
+import type { CharacterHarnessCognitionRequest } from "@companion/character-harness/cognition-request";
 import { composeServerCharacterSoftSmileEmbodiedEffect } from "./character-embodied-soft-smile-composition.js";
 import { EmbodiedPresentationBridge } from "./embodied-presentation-bridge.js";
+import { createServerCharacterPort } from "./character-runtime.js";
+import { executeServerCognitionRoundTrip } from "./cognition-roundtrip.js";
 
 export type AppContext = {
   eventBus: InMemoryEventBus;
@@ -214,6 +217,14 @@ export async function createAppContext(
     directContext = config.directContext
   ): RuntimeOrchestrator {
     const provider = memory.getMemoryProvider?.();
+    // Existing test doubles and explicit offline/mock runs intentionally
+    // return ordinary Chat text rather than the production Character JSON
+    // ABI. Real non-mock construction binds Character and its Cognition
+    // callback in one place.
+    const character =
+      process.env["NODE_ENV"] === "test" || process.env["PROVIDER_ALLOW_MOCKS"] === "true"
+        ? undefined
+        : createServerCharacterPort();
     return new RuntimeOrchestrator({
       eventBus,
       memory,
@@ -228,6 +239,22 @@ export async function createAppContext(
       dreamJobStore,
       ...(provider ? { dreamProvider: provider } : {}),
       logger: runtimeLogger,
+      ...(character
+        ? {
+            character,
+            characterCognition: (
+              request: unknown,
+              problem: string,
+              options?: Readonly<{ signal?: AbortSignal | undefined }>
+            ) =>
+              executeServerCognitionRoundTrip({
+                providers,
+                request: request as CharacterHarnessCognitionRequest,
+                problem,
+                ...(options?.signal ? { signal: options.signal } : {})
+              })
+          }
+        : {}),
       embodiedPresentation: {
         propose: (reply) => {
           const generation = superviseCharacterHarnessRepetition({
