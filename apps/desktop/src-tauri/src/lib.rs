@@ -11,12 +11,17 @@ use tauri::{Manager, RunEvent};
 /// working in both dev (Vite dev server) and packaged (frontendDist) mode.
 const MAIN_WINDOW_URL: &str = "index.html#/main";
 
+/// Bundled dashboard surface. This deliberately reuses the packaged frontend
+/// instead of opening a development-only localhost URL.
+const DASHBOARD_WINDOW_URL: &str = "index.html#/dashboard";
+
 /// Companion window surface that exclusively owns Lumi, speech playback and
 /// the Web Audio analysis chain.
 const COMPANION_WINDOW_URL: &str = "index.html#/companion";
 
 const TRAY_ID: &str = "yuvi-tray";
 const TRAY_OPEN_MAIN: &str = "tray-open-main";
+const TRAY_OPEN_WEBUI: &str = "tray-open-webui";
 const TRAY_HIDE_MAIN: &str = "tray-hide-main";
 const TRAY_SHOW_COMPANION: &str = "tray-show-companion";
 const TRAY_HIDE_COMPANION: &str = "tray-hide-companion";
@@ -27,6 +32,7 @@ static APP_SHUTDOWN: lifecycle::ShutdownGate = lifecycle::ShutdownGate::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayAction {
   OpenMain,
+  OpenWebUi,
   HideMain,
   ShowCompanion,
   HideCompanion,
@@ -36,6 +42,7 @@ enum TrayAction {
 fn tray_action(id: &str) -> Option<TrayAction> {
   match id {
     TRAY_OPEN_MAIN => Some(TrayAction::OpenMain),
+    TRAY_OPEN_WEBUI => Some(TrayAction::OpenWebUi),
     TRAY_HIDE_MAIN => Some(TrayAction::HideMain),
     TRAY_SHOW_COMPANION => Some(TrayAction::ShowCompanion),
     TRAY_HIDE_COMPANION => Some(TrayAction::HideCompanion),
@@ -71,6 +78,25 @@ fn ensure_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWin
   build_main_window(app)
 }
 
+fn build_dashboard_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+  tauri::WebviewWindowBuilder::new(
+    app,
+    "dashboard",
+    tauri::WebviewUrl::App(DASHBOARD_WINDOW_URL.into()),
+  )
+  .title("YUVI WebUI")
+  .inner_size(1280.0, 820.0)
+  .min_inner_size(800.0, 600.0)
+  .build()
+}
+
+fn ensure_dashboard_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+  if let Some(window) = app.get_webview_window("dashboard") {
+    return Ok(window);
+  }
+  build_dashboard_window(app)
+}
+
 fn build_companion_window(
   app: &tauri::AppHandle,
   always_on_top: bool,
@@ -104,6 +130,12 @@ fn ensure_companion_window(app: &tauri::AppHandle) -> tauri::Result<tauri::Webvi
 
 fn show_main(app: &tauri::AppHandle) -> Result<(), String> {
   let window = ensure_main_window(app).map_err(|error| error.to_string())?;
+  window.show().map_err(|error| error.to_string())?;
+  window.set_focus().map_err(|error| error.to_string())
+}
+
+fn show_dashboard(app: &tauri::AppHandle) -> Result<(), String> {
+  let window = ensure_dashboard_window(app).map_err(|error| error.to_string())?;
   window.show().map_err(|error| error.to_string())?;
   window.set_focus().map_err(|error| error.to_string())
 }
@@ -167,6 +199,7 @@ fn request_app_exit(app: &tauri::AppHandle) {
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
   let open_main = MenuItem::with_id(app, TRAY_OPEN_MAIN, "Open YUVI", true, None::<&str>)?;
+  let open_webui = MenuItem::with_id(app, TRAY_OPEN_WEBUI, "Open WebUI", true, None::<&str>)?;
   let hide_main_item = MenuItem::with_id(app, TRAY_HIDE_MAIN, "Hide YUVI", true, None::<&str>)?;
   let show_companion_item =
     MenuItem::with_id(app, TRAY_SHOW_COMPANION, "Show Companion", true, None::<&str>)?;
@@ -177,6 +210,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     app,
     &[
       &open_main,
+      &open_webui,
       &hide_main_item,
       &show_companion_item,
       &hide_companion_item,
@@ -196,6 +230,11 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
       Some(TrayAction::OpenMain) => {
         if let Err(error) = show_main(app) {
           eprintln!("[yuvi-desktop] failed to open main window: {error}");
+        }
+      }
+      Some(TrayAction::OpenWebUi) => {
+        if let Err(error) = show_dashboard(app) {
+          eprintln!("[yuvi-desktop] failed to open WebUI window: {error}");
         }
       }
       Some(TrayAction::HideMain) => {
@@ -300,6 +339,10 @@ mod tests {
   #[test]
   fn tray_actions_cover_every_user_control() {
     assert_eq!(tray_action("tray-open-main"), Some(TrayAction::OpenMain));
+    assert_eq!(
+      tray_action("tray-open-webui"),
+      Some(TrayAction::OpenWebUi)
+    );
     assert_eq!(tray_action("tray-hide-main"), Some(TrayAction::HideMain));
     assert_eq!(
       tray_action("tray-show-companion"),
