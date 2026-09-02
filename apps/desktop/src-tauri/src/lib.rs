@@ -199,13 +199,15 @@ fn request_app_exit(app: &tauri::AppHandle) {
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
   let open_main = MenuItem::with_id(app, TRAY_OPEN_MAIN, "Open YUVI", true, None::<&str>)?;
-  let open_webui = MenuItem::with_id(app, TRAY_OPEN_WEBUI, "Open WebUI", true, None::<&str>)?;
   let hide_main_item = MenuItem::with_id(app, TRAY_HIDE_MAIN, "Hide YUVI", true, None::<&str>)?;
   let show_companion_item =
     MenuItem::with_id(app, TRAY_SHOW_COMPANION, "Show Companion", true, None::<&str>)?;
   let hide_companion_item =
     MenuItem::with_id(app, TRAY_HIDE_COMPANION, "Hide Companion", true, None::<&str>)?;
   let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit", true, None::<&str>)?;
+  // muda allocates Windows WM_COMMAND ids when MenuItems are constructed.
+  // Keep the legacy Quit allocation stable for the packaged tray lifecycle smoke.
+  let open_webui = MenuItem::with_id(app, TRAY_OPEN_WEBUI, "Open WebUI", true, None::<&str>)?;
   let menu = Menu::with_items(
     app,
     &[
