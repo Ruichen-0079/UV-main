@@ -189,6 +189,7 @@ fn begin_app_shutdown(app: &tauri::AppHandle) {
 }
 
 fn request_app_exit(app: &tauri::AppHandle) {
+  eprintln!("[yuvi-desktop] tray quit handler invoked");
   if !app_shutdown_started() {
     // Let RunEvent::ExitRequested own the shutdown sequence. That keeps the
     // explicit Quit path on the same once-only supervisor shutdown seam as
@@ -226,34 +227,37 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     .icon(icon)
     .tooltip("YUVI")
     .menu(&menu)
-    .on_menu_event(|app, event| match tray_action(event.id.as_ref()) {
-      Some(TrayAction::OpenMain) => {
-        if let Err(error) = show_main(app) {
-          eprintln!("[yuvi-desktop] failed to open main window: {error}");
+    .on_menu_event(|app, event| {
+      eprintln!("[yuvi-desktop] tray menu event id={}", event.id.as_ref());
+      match tray_action(event.id.as_ref()) {
+        Some(TrayAction::OpenMain) => {
+          if let Err(error) = show_main(app) {
+            eprintln!("[yuvi-desktop] failed to open main window: {error}");
+          }
         }
-      }
-      Some(TrayAction::OpenWebUi) => {
-        if let Err(error) = show_dashboard(app) {
-          eprintln!("[yuvi-desktop] failed to open WebUI window: {error}");
+        Some(TrayAction::OpenWebUi) => {
+          if let Err(error) = show_dashboard(app) {
+            eprintln!("[yuvi-desktop] failed to open WebUI window: {error}");
+          }
         }
-      }
-      Some(TrayAction::HideMain) => {
-        if let Err(error) = hide_main(app) {
-          eprintln!("[yuvi-desktop] failed to hide main window: {error}");
+        Some(TrayAction::HideMain) => {
+          if let Err(error) = hide_main(app) {
+            eprintln!("[yuvi-desktop] failed to hide main window: {error}");
+          }
         }
-      }
-      Some(TrayAction::ShowCompanion) => {
-        if let Err(error) = show_companion(app.clone()) {
-          eprintln!("[yuvi-desktop] failed to show companion window: {error}");
+        Some(TrayAction::ShowCompanion) => {
+          if let Err(error) = show_companion(app.clone()) {
+            eprintln!("[yuvi-desktop] failed to show companion window: {error}");
+          }
         }
-      }
-      Some(TrayAction::HideCompanion) => {
-        if let Err(error) = hide_companion(app.clone()) {
-          eprintln!("[yuvi-desktop] failed to hide companion window: {error}");
+        Some(TrayAction::HideCompanion) => {
+          if let Err(error) = hide_companion(app.clone()) {
+            eprintln!("[yuvi-desktop] failed to hide companion window: {error}");
+          }
         }
+        Some(TrayAction::Quit) => request_app_exit(app),
+        None => {}
       }
-      Some(TrayAction::Quit) => request_app_exit(app),
-      None => {}
     })
     .build(app)?;
 
