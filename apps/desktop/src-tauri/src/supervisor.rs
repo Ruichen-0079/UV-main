@@ -302,8 +302,22 @@ pub fn bootstrap_supervisor(
 fn is_secret_env_key(key: &str) -> bool {
   matches!(
     key,
-    "DEEPSEEK_API_KEY" | "DATABASE_URL" | "YUVI_POSTGRES_PASSWORD" | "PGPASSWORD"
+    "DEEPSEEK_API_KEY"
+      | "OPENAI_COMPATIBLE_API_KEY"
+      | "DATABASE_URL"
+      | "YUVI_POSTGRES_PASSWORD"
+      | "PGPASSWORD"
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::is_secret_env_key;
+
+  #[test]
+  fn openai_compatible_api_key_stays_out_of_supervisor_base_environment() {
+    assert!(is_secret_env_key("OPENAI_COMPATIBLE_API_KEY"));
+  }
 }
 
 /// Idempotent application-level shutdown. Only owned services are stopped by the supervisor.
