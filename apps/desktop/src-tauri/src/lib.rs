@@ -205,20 +205,20 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
   let hide_companion_item =
     MenuItem::with_id(app, TRAY_HIDE_COMPANION, "Hide Companion", true, None::<&str>)?;
   let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit", true, None::<&str>)?;
-  // muda allocates Windows WM_COMMAND ids when MenuItems are constructed.
-  // Keep the legacy Quit allocation stable for the packaged tray lifecycle smoke.
-  let open_webui = MenuItem::with_id(app, TRAY_OPEN_WEBUI, "Open WebUI", true, None::<&str>)?;
   let menu = Menu::with_items(
     app,
     &[
       &open_main,
-      &open_webui,
       &hide_main_item,
       &show_companion_item,
       &hide_companion_item,
       &quit,
     ],
   )?;
+  // Preserve the exact native allocation path of the established five tray
+  // controls, then add WebUI without moving its user-visible position.
+  let open_webui = MenuItem::with_id(app, TRAY_OPEN_WEBUI, "Open WebUI", true, None::<&str>)?;
+  menu.insert(&open_webui, 1)?;
   let icon = app
     .default_window_icon()
     .cloned()
