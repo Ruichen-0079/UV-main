@@ -18,6 +18,8 @@ import {
   attributeWindowsListener,
   buildWmCloseArguments,
   buildWmCloseScript,
+  buildTrayQuitArguments,
+  buildTrayQuitScript,
   chooseInstaller,
   compareSnapshots,
   createTauriAppEnv,
@@ -61,6 +63,10 @@ import {
   powershellDiagnosticPath,
   runWmCloseHelper,
   TAURI_MAIN_WINDOW_TITLE,
+  TRAY_ICON_WINDOW_CLASS,
+  TRAY_QUIT_MENU_COMMAND_ID,
+  TRAY_QUIT_PYTHON_SOURCE,
+  parseTrayQuitOutput,
   WM_CLOSE_PYTHON_SOURCE,
   waitForSpecificPidsExit,
   waitForTauriBootstrapReady,
@@ -1870,6 +1876,7 @@ const wmCloseOutput = ({
   titleExact = 1,
   identityValid = 1,
   postResult = 1,
+  visibleAfterClose = 0,
   elapsedMs = 8,
   phases = null
 } = {}) => {
@@ -1892,6 +1899,7 @@ const wmCloseOutput = ({
     `title_exact=${titleExact}`,
     `identity_valid=${identityValid}`,
     `post_result=${postResult}`,
+    `visible_after_close=${visibleAfterClose}`,
     `elapsed_ms=${elapsedMs}`
   ].join("\n");
 };
@@ -1939,6 +1947,7 @@ test("WM_CLOSE helper accepts a successful structured result", async () => {
   assert.equal(result.targetHwnd, 123456);
   assert.equal(result.identityValid, true);
   assert.equal(result.postResult, true);
+  assert.equal(result.visibleAfterClose, false);
   assert.equal(result.code, 0);
 });
 
@@ -2133,6 +2142,82 @@ test("WM_CLOSE timeout and exit race settles exactly once", async () => {
 test("WM_CLOSE output parser rejects secret-like output without retaining it", () => {
   assert.throws(
     () => parseWmCloseOutput(`${wmCloseOutput()}\nDEEPSEEK_API_KEY=do-not-echo`),
+    /secret-like material/
+  );
+});
+
+const trayQuitOutput = ({
+  targetPid = 123,
+  trayWindows = 1,
+  trayHwnd = 456789,
+  validatedPid = targetPid,
+  classExact = 1,
+  identityValid = 1,
+  commandId = TRAY_QUIT_MENU_COMMAND_ID,
+  postResult = 1,
+  elapsedMs = 8,
+  phases = null
+} = {}) => {
+  const phaseLines = [
+    "start",
+    "before_enum",
+    "after_enum",
+    "before_revalidate",
+    "after_revalidate",
+    "before_post",
+    "after_post"
+  ].map((phase) => `TRAY_QUIT_PHASE=${phase}`);
+  return [
+    ...phaseLines.filter((line) => !phases || phases.includes(line.slice(16))),
+    `target_pid=${targetPid}`,
+    `tray_windows=${trayWindows}`,
+    `tray_hwnd=${trayHwnd}`,
+    `validated_pid=${validatedPid}`,
+    `class_exact=${classExact}`,
+    `identity_valid=${identityValid}`,
+    `command_id=${commandId}`,
+    `post_result=${postResult}`,
+    `elapsed_ms=${elapsedMs}`
+  ].join("\n");
+};
+
+test("tray Quit helper targets the packaged Tauri tray window and command", () => {
+  const script = buildTrayQuitScript(12345);
+  assert.equal(script, TRAY_QUIT_PYTHON_SOURCE);
+  assert.match(script, /TRAY_ICON_WINDOW_CLASS = "tray_icon_app"/);
+  assert.match(script, /TRAY_QUIT_MENU_COMMAND_ID = 1004/);
+  for (const symbol of [
+    "EnumWindows",
+    "GetWindowThreadProcessId",
+    "GetClassNameW",
+    "IsWindow",
+    "PostMessageW"
+  ]) assert.match(script, new RegExp(symbol));
+  assert.equal(TRAY_ICON_WINDOW_CLASS, "tray_icon_app");
+  assert.match(script, /WM_COMMAND = 0x0111/);
+  assert.doesNotMatch(script, /taskkill|Stop-Process|UIAutomation|Add-Type|DllImport/i);
+});
+
+test("tray Quit helper arguments are isolated and reject invalid PIDs", () => {
+  assert.throws(() => buildTrayQuitScript(0), /invalid/);
+  assert.throws(() => buildTrayQuitScript("pid"), /invalid/);
+  assert.deepEqual(buildTrayQuitArguments(12345).slice(0, 2), ["-I", "-S"]);
+  assert.equal(buildTrayQuitArguments(12345).at(-1), "12345");
+});
+
+test("tray Quit output requires one validated tray window and the Quit command", () => {
+  const parsed = parseTrayQuitOutput(trayQuitOutput(), 123);
+  assert.equal(parsed.identityValid, true);
+  assert.equal(parsed.commandId, TRAY_QUIT_MENU_COMMAND_ID);
+  assert.equal(parsed.postResult, true);
+  for (const [output, message] of [
+    [trayQuitOutput({ trayWindows: 0 }), /exactly one tray icon window/],
+    [trayQuitOutput({ identityValid: 0 }), /identity was not validated/],
+    [trayQuitOutput({ commandId: 1003 }), /command ID does not match/],
+    [trayQuitOutput({ postResult: 0 }), /PostMessageW was not accepted/]
+  ]) assert.throws(() => parseTrayQuitOutput(output), message);
+  assert.throws(
+    () => parseTrayQuitOutput(`${trayQuitOutput()}\nDEEPSEEK_API_KEY=do-not-echo`),
     /secret-like material/
   );
 });
