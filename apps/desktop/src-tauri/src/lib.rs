@@ -188,19 +188,21 @@ fn begin_app_shutdown(app: &tauri::AppHandle) {
     return;
   }
   supervisor::shutdown_supervisor(app);
+  eprintln!("[yuvi-desktop] supervisor shutdown returned");
 }
 
 fn request_app_exit(app: &tauri::AppHandle) {
-  let shutdown_started = app_shutdown_started();
-  eprintln!(
-    "[yuvi-desktop] tray quit handler invoked shutdown_started={shutdown_started}"
-  );
-  if !shutdown_started {
-    // Let RunEvent::ExitRequested own the shutdown sequence. That keeps the
-    // explicit Quit path on the same once-only supervisor shutdown seam as
-    // OS/application exit while allowing Tauri to drive its event loop exit.
-    app.exit(0);
+  if !claim_app_shutdown() {
+    return;
   }
+
+  let app = app.clone();
+  std::thread::spawn(move || {
+    eprintln!("[yuvi-desktop] tray shutdown worker started");
+    supervisor::shutdown_supervisor(&app);
+    eprintln!("[yuvi-desktop] tray shutdown worker requesting exit");
+    app.exit(0);
+  });
 }
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
