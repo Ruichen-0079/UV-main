@@ -181,28 +181,25 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
   window.set_focus().map_err(|error| error.to_string())
 }
 
-fn begin_app_shutdown(app: &tauri::AppHandle) {
-  let claimed = claim_app_shutdown();
-  eprintln!("[yuvi-desktop] shutdown gate claim={claimed}");
-  if !claimed {
-    return;
-  }
-  supervisor::shutdown_supervisor(app);
-  eprintln!("[yuvi-desktop] supervisor shutdown returned");
-}
-
-fn request_app_exit(app: &tauri::AppHandle) {
+fn begin_app_shutdown(app: &tauri::AppHandle) -> bool {
   if !claim_app_shutdown() {
-    return;
+    return false;
   }
 
   let app = app.clone();
   std::thread::spawn(move || {
-    eprintln!("[yuvi-desktop] tray shutdown worker started");
+    eprintln!("[yuvi-desktop] shutdown worker started");
     supervisor::shutdown_supervisor(&app);
-    eprintln!("[yuvi-desktop] tray shutdown worker requesting exit");
+    eprintln!("[yuvi-desktop] shutdown worker requesting exit");
     app.exit(0);
   });
+  true
+}
+
+fn request_app_exit(app: &tauri::AppHandle) {
+  if !app_shutdown_started() {
+    app.exit(0);
+  }
 }
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
@@ -235,7 +232,6 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     .tooltip("YUVI")
     .menu(&menu)
     .on_menu_event(|app, event| {
-      eprintln!("[yuvi-desktop] tray menu event id={}", event.id.as_ref());
       match tray_action(event.id.as_ref()) {
         Some(TrayAction::OpenMain) => {
           if let Err(error) = show_main(app) {
@@ -334,13 +330,16 @@ pub fn run() {
     .build(tauri::generate_context!())
     .expect("error while building YUVI desktop app")
     .run(|app_handle, event| {
-      if let RunEvent::ExitRequested { .. } = event {
-        eprintln!("[yuvi-desktop] run event ExitRequested");
-        begin_app_shutdown(app_handle);
-      }
-      if let RunEvent::Exit = event {
-        eprintln!("[yuvi-desktop] run event Exit");
-        begin_app_shutdown(app_handle);
+      match event {
+        RunEvent::ExitRequested { api, .. } => {
+          if begin_app_shutdown(app_handle) {
+            api.prevent_exit();
+          }
+        }
+        RunEvent::Exit => {
+          let _ = begin_app_shutdown(app_handle);
+        }
+        _ => {}
       }
     });
 }
