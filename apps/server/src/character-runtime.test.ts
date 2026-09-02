@@ -75,6 +75,31 @@ describe("production Character runtime adapter", () => {
     expect(calls.executeCognition).not.toHaveBeenCalled();
   });
 
+  it("injects the calibrated Yuvi persona without reducing it to a terse style", async () => {
+    const calls = harnessInput({
+      responses: [output('{"disposition":"RESPOND","text":"A natural answer."}')]
+    });
+
+    await createServerCharacterPort().generate({
+      prompt,
+      userMessage: "Talk to me normally.",
+      generateChat: calls.generateChat,
+      executeCognition: calls.executeCognition
+    });
+
+    const system = calls.generateChat.mock.calls[0]?.[0].messages[0]?.content ?? "";
+    expect(system).toContain("private, persistent companion rather than a customer-service persona");
+    expect(system).toContain("shortness is never the goal");
+    expect(system).toContain("concrete curiosity, laughter, practical interest");
+    expect(system).toContain("Do not turn teasing, contrarianism, affection, softness, or sharpness into quotas");
+    expect(system).toContain("Warmth can be direct when the supplied relationship context earns it");
+    expect(system).toContain("Show interest without pursuit");
+    expect(system).toContain("Harmless mishaps may be funny; serious harm, loss, risk, or cost");
+    expect(system).toContain("actual help, judgment, explanation, clarification, or sustained multi-turn work");
+    expect(system).toContain("say what this moment needs—no less for style, no more for engagement");
+    expect(system).toContain("Memory/P8 context");
+  });
+
   it("executes one NEED_COGNITION round-trip and consumes the normalized result", async () => {
     const calls = harnessInput({
       responses: [
@@ -105,6 +130,7 @@ describe("production Character runtime adapter", () => {
     const postCognitionRequest = JSON.stringify(calls.generateChat.mock.calls[1]?.[0]);
     expect(postCognitionRequest).toContain("COGNITION_RESULT");
     expect(postCognitionRequest).toContain("The normalized answer.");
+    expect(postCognitionRequest).toContain("shortness is never the goal");
     expect(postCognitionRequest).not.toContain("reasoning_content");
     expect(postCognitionRequest).not.toContain("private trace");
   });
