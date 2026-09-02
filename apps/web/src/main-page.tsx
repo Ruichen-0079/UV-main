@@ -98,7 +98,6 @@ export function MainPage(): JSX.Element {
   const [messages, dispatchMessages] = useReducer(reduceChatMessages, [] as ChatMessage[]);
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [lastTraceId, setLastTraceId] = useState<string | null>(null);
   const [voicePlaybackStatus, setVoicePlaybackStatus] = useState<VoicePlaybackStatus>("idle");
   const [actualPlaybackActive, setActualPlaybackActive] = useState(false);
   const [companionReady, setCompanionReady] = useState(false);
@@ -466,7 +465,6 @@ export function MainPage(): JSX.Element {
               return;
             }
             if (event.type === "text-delta") {
-              setLastTraceId(event.traceId);
               dispatchMessages({
                 type: "append-delta",
                 assistantId,
@@ -483,7 +481,6 @@ export function MainPage(): JSX.Element {
               return;
             }
             ownership.completedObserved = true;
-            setLastTraceId(event.traceId);
             dispatchMessages({
               type: "complete",
               assistantId,
@@ -508,7 +505,6 @@ export function MainPage(): JSX.Element {
         traceId: response.traceId,
         provider: response.provider
       });
-      setLastTraceId(response.traceId);
       setRequestStatus("success");
       forwardSpeechEnd(requestId, "completed");
     } catch (caught) {
@@ -555,7 +551,6 @@ export function MainPage(): JSX.Element {
         onEvent: (event: ProactiveMessageStreamEvent) => {
           if (!isCurrent()) return;
           if (event.type === "proactive-decision") {
-            setLastTraceId(event.traceId);
             if (event.decision === "NO_OP") {
               effect.ownership.completedObserved = true;
               setRequestStatus("idle");
@@ -563,7 +558,6 @@ export function MainPage(): JSX.Element {
             return;
           }
           if (event.type === "text-delta") {
-            setLastTraceId(event.traceId);
             if (!assistantProjected) {
               assistantProjected = true;
               dispatchMessages({
@@ -597,7 +591,6 @@ export function MainPage(): JSX.Element {
             return;
           }
           effect.ownership.completedObserved = true;
-          setLastTraceId(event.traceId);
           dispatchMessages({
             type: "complete",
             assistantId: effect.assistantId,
@@ -612,7 +605,6 @@ export function MainPage(): JSX.Element {
       if (!isCurrent()) return;
       if (response.type === "proactive-decision") {
         effect.ownership.completedObserved = true;
-        setLastTraceId(response.traceId);
         setRequestStatus("idle");
         return;
       }
@@ -624,7 +616,6 @@ export function MainPage(): JSX.Element {
         traceId: response.traceId,
         provider: response.provider
       });
-      setLastTraceId(response.traceId);
       setRequestStatus("success");
     } catch (caught) {
       if (!isCurrent()) return;
@@ -890,11 +881,6 @@ export function MainPage(): JSX.Element {
           {companionActionError && (
             <div className="mt-2">
               <Notice tone="error" title="Companion" message={companionActionError} />
-            </div>
-          )}
-          {lastTraceId && (
-            <div className="mt-2">
-              <Notice tone="info" title="Latest trace" message={lastTraceId} />
             </div>
           )}
           <div className="mt-3 flex gap-2">

@@ -54,6 +54,12 @@ describe("MainPage voice input", () => {
   });
 });
 
+describe("MainPage chat presentation", () => {
+  it("does not render backend trace metadata in the ordinary chat surface", () => {
+    expect(renderMainPage()).not.toContain("Latest trace");
+  });
+});
+
 describe("MainPage speech lifecycle correlation", () => {
   it("retains the speech epoch after generation ownership ends", () => {
     expect(resolveSpeechCommandEpoch("turn-a", null)).toBe("turn-a");
