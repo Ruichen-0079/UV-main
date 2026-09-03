@@ -322,6 +322,7 @@ mod tests {
 
 /// Idempotent application-level shutdown. Only owned services are stopped by the supervisor.
 pub fn shutdown_supervisor(app: &AppHandle) {
+  eprintln!("[yuvi-desktop] supervisor shutdown: before state lock");
   let state = app.state::<SupervisorState>();
   let mut guard = match state.inner.lock() {
     Ok(g) => g,
@@ -338,11 +339,13 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let state_dir = guard.state_dir.clone();
   let expected_pid = guard.expected_pid;
   guard.base_url = None;
+  eprintln!("[yuvi-desktop] supervisor shutdown: state released");
   // Keep token only for the shutdown request below.
   drop(guard);
 
   // Ask Supervisor to stop owned Runtime/Mem0 (best-effort, short timeout path).
   if let (Some(base), Some(token)) = (base, token) {
+    eprintln!("[yuvi-desktop] supervisor shutdown: before HTTP request");
     let _ = http_json_with_timeout(
       "POST",
       &format!("{base}/v1/shutdown"),
@@ -350,15 +353,20 @@ pub fn shutdown_supervisor(app: &AppHandle) {
       Some(&token),
       Duration::from_secs(5),
     );
+    eprintln!("[yuvi-desktop] supervisor shutdown: after HTTP request");
   }
 
   if let Some(mut child) = child.take() {
     let supervisor_pid = child.id();
+    eprintln!("[yuvi-desktop] supervisor shutdown: before child kill pid={supervisor_pid}");
     // Rust owns the direct Supervisor handle. Terminate and reap that parent
     // before touching its descendants; killing the tree first races the
     // Supervisor's own child-exit handlers on Windows.
-    let _ = child.kill();
+    let kill_result = child.kill();
+    eprintln!("[yuvi-desktop] supervisor shutdown: child kill result={kill_result:?}");
+    eprintln!("[yuvi-desktop] supervisor shutdown: before child reap");
     let tree_kill_requested = if !reap_child_bounded(&mut child, 20) {
+      eprintln!("[yuvi-desktop] supervisor shutdown: direct reap timed out");
       // A failed direct termination must not turn into an unbounded wait.
       // Tree termination is the fallback only after the direct handle has
       // received its bounded termination/reap opportunity.
@@ -366,15 +374,18 @@ pub fn shutdown_supervisor(app: &AppHandle) {
       let _ = reap_child_bounded(&mut child, 20);
       true
     } else {
+      eprintln!("[yuvi-desktop] supervisor shutdown: direct reap completed");
       false
     };
 
     // The Supervisor is no longer running, so this cannot race its handlers.
     // Catch any descendants that did not honor the graceful shutdown request.
     if !tree_kill_requested {
+      eprintln!("[yuvi-desktop] supervisor shutdown: after direct reap, tree cleanup");
       force_kill_process_tree(supervisor_pid);
     }
   } else if let Some(pid) = expected_pid {
+    eprintln!("[yuvi-desktop] supervisor shutdown: no child handle, tree cleanup pid={pid}");
     force_kill_process_tree(pid);
   }
 
@@ -382,8 +393,10 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   // of truth for owned descendants. Run this only after the Supervisor has
   // been terminated so it cannot race its child-exit handlers.
   if let Some(dir) = state_dir.as_ref() {
+    eprintln!("[yuvi-desktop] supervisor shutdown: before metadata cleanup");
     force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
     force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
+    eprintln!("[yuvi-desktop] supervisor shutdown: after metadata cleanup");
   }
 
   // Best-effort cleanup of active pointer + instance lock.
@@ -391,6 +404,7 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let _ = fs::remove_file(root.join("active-instance.json"));
   let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
   let _ = fs::remove_file(root.join("supervisor.instance.lock"));
+  eprintln!("[yuvi-desktop] supervisor shutdown: complete");
 }
 
 /// Force-kill a process tree on Windows (taskkill /T /F). No-op elsewhere / pid 0.
