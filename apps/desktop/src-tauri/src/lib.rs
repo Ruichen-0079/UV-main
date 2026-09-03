@@ -181,11 +181,17 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
   window.set_focus().map_err(|error| error.to_string())
 }
 
-fn begin_app_shutdown(app: &tauri::AppHandle) {
+fn begin_app_shutdown(app: &tauri::AppHandle) -> bool {
   if !claim_app_shutdown() {
-    return;
+    return false;
   }
-  supervisor::shutdown_supervisor(app);
+
+  let app = app.clone();
+  std::thread::spawn(move || {
+    supervisor::shutdown_supervisor(&app);
+    app.exit(0);
+  });
+  true
 }
 
 fn request_app_exit(app: &tauri::AppHandle) {
@@ -323,11 +329,16 @@ pub fn run() {
     .build(tauri::generate_context!())
     .expect("error while building YUVI desktop app")
     .run(|app_handle, event| {
-      if let RunEvent::ExitRequested { .. } = event {
-        begin_app_shutdown(app_handle);
-      }
-      if let RunEvent::Exit = event {
-        begin_app_shutdown(app_handle);
+      match event {
+        RunEvent::ExitRequested { api, .. } => {
+          if begin_app_shutdown(app_handle) {
+            api.prevent_exit();
+          }
+        }
+        RunEvent::Exit => {
+          let _ = begin_app_shutdown(app_handle);
+        }
+        _ => {}
       }
     });
 }
