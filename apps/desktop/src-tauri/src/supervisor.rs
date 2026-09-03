@@ -312,28 +312,47 @@ fn is_secret_env_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-  use super::is_secret_env_key;
+  use super::{is_secret_env_key, stop_child_bounded};
+  use std::process::{Command, Stdio};
+  use std::time::{Duration, Instant};
 
   #[test]
   fn openai_compatible_api_key_stays_out_of_supervisor_base_environment() {
     assert!(is_secret_env_key("OPENAI_COMPATIBLE_API_KEY"));
   }
+
+  #[test]
+  fn supervisor_child_shutdown_reaps_without_an_unbounded_wait() {
+    let mut command = if cfg!(target_os = "windows") {
+      let mut command = Command::new("cmd.exe");
+      command.args(["/d", "/c", "ping 127.0.0.1 -n 30 > nul"]);
+      command
+    } else {
+      let mut command = Command::new("sleep");
+      command.arg("30");
+      command
+    };
+    let child = command
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .spawn()
+      .expect("test child should spawn");
+    let started = Instant::now();
+
+    assert!(stop_child_bounded(child));
+    assert!(started.elapsed() < Duration::from_secs(5));
+  }
 }
 
 /// Idempotent application-level shutdown. Only owned services are stopped by the supervisor.
 pub fn shutdown_supervisor(app: &AppHandle) {
-  eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor entered");
-  let entered = std::time::Instant::now();
   let state = app.state::<SupervisorState>();
   let mut guard = match state.inner.lock() {
     Ok(g) => g,
-    Err(_) => {
-      eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor lock-poisoned");
-      return;
-    }
+    Err(_) => return,
   };
   if guard.shutting_down {
-    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor already-shutting-down");
     return;
   }
   guard.shutting_down = true;
@@ -349,22 +368,13 @@ pub fn shutdown_supervisor(app: &AppHandle) {
 
   // Ask Supervisor to stop owned Runtime/Mem0 (best-effort, short timeout path).
   if let (Some(base), Some(token)) = (base, token) {
-    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor POST /v1/shutdown");
-    let http_started = std::time::Instant::now();
-    let http_result = http_json_with_timeout(
+    let _ = http_json_with_timeout(
       "POST",
       &format!("{base}/v1/shutdown"),
       None,
       Some(&token),
       Duration::from_secs(5),
     );
-    eprintln!(
-      "[yuvi-desktop] DIAG226 shutdown_supervisor HTTP result={} elapsed_ms={}",
-      if http_result.is_ok() { "ok" } else { "err" },
-      http_started.elapsed().as_millis()
-    );
-  } else {
-    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor no endpoint");
   }
 
   // Belt-and-suspenders: Windows does not kill Node Runtime when Supervisor exits.
@@ -374,55 +384,10 @@ pub fn shutdown_supervisor(app: &AppHandle) {
     force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
   }
 
-  if let Some(mut child) = child.take() {
-    let supervisor_pid = child.id();
-    eprintln!(
-      "[yuvi-desktop] DIAG226 shutdown_supervisor child pid={supervisor_pid} wait"
-    );
-    // Bounded wait for supervisor process to exit after graceful shutdown.
-    let mut graceful_wait = "timeout";
-    for _ in 0..12 {
-      match child.try_wait() {
-        Ok(Some(_)) => {
-          graceful_wait = "exited";
-          break;
-        }
-        Ok(None) => thread::sleep(Duration::from_millis(100)),
-        Err(_) => {
-          graceful_wait = "error";
-          break;
-        }
-      }
-    }
-    eprintln!(
-      "[yuvi-desktop] DIAG226 shutdown_supervisor graceful_wait={graceful_wait} elapsed_ms={}",
-      entered.elapsed().as_millis()
-    );
-    let kill_started = std::time::Instant::now();
-    let kill_result = child.kill();
-    eprintln!(
-      "[yuvi-desktop] DIAG226 shutdown_supervisor child kill result={} alive_after_kill={} elapsed_ms={}",
-      if kill_result.is_ok() { "ok" } else { "err" },
-      process_alive(supervisor_pid),
-      kill_started.elapsed().as_millis()
-    );
-    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor child wait begin");
-    let wait_result = child.wait();
-    eprintln!(
-      "[yuvi-desktop] DIAG226 shutdown_supervisor child wait result={}",
-      if wait_result.is_ok() { "ok" } else { "err" }
-    );
-    // Force entire process tree (supervisor + any remaining runtime/node children).
-    force_kill_process_tree(supervisor_pid);
-    eprintln!(
-      "[yuvi-desktop] DIAG226 shutdown_supervisor child pid={supervisor_pid} reaped elapsed_ms={}",
-      entered.elapsed().as_millis()
-    );
+  if let Some(child) = child.take() {
+    let _ = stop_child_bounded(child);
   } else if let Some(pid) = expected_pid {
-    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor tree-kill pid={pid}");
     force_kill_process_tree(pid);
-  } else {
-    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor no child");
   }
 
   // Best-effort cleanup of active pointer + instance lock.
@@ -430,10 +395,33 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let _ = fs::remove_file(root.join("active-instance.json"));
   let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
   let _ = fs::remove_file(root.join("supervisor.instance.lock"));
-  eprintln!(
-    "[yuvi-desktop] DIAG226 shutdown_supervisor returned elapsed_ms={}",
-    entered.elapsed().as_millis()
-  );
+}
+
+fn stop_child_bounded(mut child: Child) -> bool {
+  const ATTEMPTS: usize = 12;
+
+  for _ in 0..ATTEMPTS {
+    match child.try_wait() {
+      Ok(Some(_)) => return true,
+      Ok(None) => thread::sleep(Duration::from_millis(100)),
+      Err(_) => break,
+    }
+  }
+
+  let pid = child.id();
+  let _ = child.kill();
+  // Never block on Child::wait before forcing the owned tree. The Windows
+  // smoke observed Child::wait remaining blocked after kill reported success.
+  force_kill_process_tree(pid);
+
+  for _ in 0..ATTEMPTS {
+    match child.try_wait() {
+      Ok(Some(_)) => return true,
+      Ok(None) => thread::sleep(Duration::from_millis(100)),
+      Err(_) => return false,
+    }
+  }
+  false
 }
 
 /// Force-kill a process tree on Windows (taskkill /T /F). No-op elsewhere / pid 0.
