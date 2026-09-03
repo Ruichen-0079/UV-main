@@ -322,13 +322,11 @@ mod tests {
 
 /// Idempotent application-level shutdown. Only owned services are stopped by the supervisor.
 pub fn shutdown_supervisor(app: &AppHandle) {
-  eprintln!("[yuvi-desktop] supervisor shutdown: before state lock");
   let state = app.state::<SupervisorState>();
   let mut guard = match state.inner.lock() {
     Ok(g) => g,
     Err(_) => return,
   };
-  eprintln!("[yuvi-desktop] supervisor shutdown: state lock acquired");
   if guard.shutting_down {
     return;
   }
@@ -342,11 +340,9 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   guard.base_url = None;
   // Keep token only for the shutdown request below.
   drop(guard);
-  eprintln!("[yuvi-desktop] supervisor shutdown: state released");
 
   // Ask Supervisor to stop owned Runtime/Mem0 (best-effort, short timeout path).
   if let (Some(base), Some(token)) = (base, token) {
-    eprintln!("[yuvi-desktop] supervisor shutdown: before HTTP request");
     let _ = http_json_with_timeout(
       "POST",
       &format!("{base}/v1/shutdown"),
@@ -354,20 +350,16 @@ pub fn shutdown_supervisor(app: &AppHandle) {
       Some(&token),
       Duration::from_secs(5),
     );
-    eprintln!("[yuvi-desktop] supervisor shutdown: after HTTP request");
   }
 
   // Belt-and-suspenders: Windows does not kill Node Runtime when Supervisor exits.
   // Kill runtime.pid.json from this instance if still alive.
   if let Some(dir) = state_dir.as_ref() {
-    eprintln!("[yuvi-desktop] supervisor shutdown: before metadata kills");
     force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
     force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
-    eprintln!("[yuvi-desktop] supervisor shutdown: after metadata kills");
   }
 
   if let Some(mut child) = child.take() {
-    eprintln!("[yuvi-desktop] supervisor shutdown: before supervisor child wait");
     let supervisor_pid = child.id();
     // Bounded wait for supervisor process to exit after graceful shutdown.
     for _ in 0..12 {
@@ -377,13 +369,10 @@ pub fn shutdown_supervisor(app: &AppHandle) {
         Err(_) => break,
       }
     }
-    let kill_result = child.kill();
-    eprintln!("[yuvi-desktop] supervisor shutdown: child kill result={kill_result:?}");
-    let wait_result = child.wait();
-    eprintln!("[yuvi-desktop] supervisor shutdown: child wait result={wait_result:?}");
+    let _ = child.kill();
+    let _ = child.wait();
     // Force entire process tree (supervisor + any remaining runtime/node children).
     force_kill_process_tree(supervisor_pid);
-    eprintln!("[yuvi-desktop] supervisor shutdown: after supervisor child wait");
   } else if let Some(pid) = expected_pid {
     force_kill_process_tree(pid);
   }
@@ -393,7 +382,6 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let _ = fs::remove_file(root.join("active-instance.json"));
   let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
   let _ = fs::remove_file(root.join("supervisor.instance.lock"));
-  eprintln!("[yuvi-desktop] supervisor shutdown: complete");
 }
 
 /// Force-kill a process tree on Windows (taskkill /T /F). No-op elsewhere / pid 0.
