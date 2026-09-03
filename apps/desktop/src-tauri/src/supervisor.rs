@@ -12,6 +12,144 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+#[cfg(target_os = "windows")]
+mod windows_job {
+  use std::ffi::c_void;
+  use std::io;
+  use std::mem::size_of;
+  use std::os::windows::io::AsRawHandle;
+  use std::process::Child;
+  use std::ptr::{null, null_mut};
+
+  type Handle = *mut c_void;
+
+  const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
+  const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+
+  #[repr(C)]
+  #[derive(Default)]
+  struct JobObjectBasicLimitInformation {
+    per_process_user_time_limit: i64,
+    per_job_user_time_limit: i64,
+    limit_flags: u32,
+    minimum_working_set_size: usize,
+    maximum_working_set_size: usize,
+    active_process_limit: u32,
+    affinity: usize,
+    priority_class: u32,
+    scheduling_class: u32,
+  }
+
+  #[repr(C)]
+  #[derive(Default)]
+  struct IoCounters {
+    read_operation_count: u64,
+    write_operation_count: u64,
+    other_operation_count: u64,
+    read_transfer_count: u64,
+    write_transfer_count: u64,
+    other_transfer_count: u64,
+  }
+
+  #[repr(C)]
+  #[derive(Default)]
+  struct JobObjectExtendedLimitInformation {
+    basic_limit_information: JobObjectBasicLimitInformation,
+    io_info: IoCounters,
+    process_memory_limit: usize,
+    job_memory_limit: usize,
+    peak_process_memory_used: usize,
+    peak_job_memory_used: usize,
+  }
+
+  #[link(name = "kernel32")]
+  extern "system" {
+    fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
+    fn SetInformationJobObject(
+      job: Handle,
+      info_class: u32,
+      info: *mut c_void,
+      info_length: u32,
+    ) -> i32;
+    fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+    fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
+    fn CloseHandle(handle: Handle) -> i32;
+  }
+
+  pub(super) struct OwnedSupervisorJob {
+    handle: Handle,
+  }
+
+  // The handle is owned by SupervisorState and moved to the shutdown worker.
+  unsafe impl Send for OwnedSupervisorJob {}
+  unsafe impl Sync for OwnedSupervisorJob {}
+
+  impl OwnedSupervisorJob {
+    pub(super) fn new_for_child(child: &Child) -> Result<Self, String> {
+      let job = Self::create()?;
+      if unsafe { AssignProcessToJobObject(job.handle, child.as_raw_handle() as Handle) } == 0 {
+        let error = io::Error::last_os_error();
+        return Err(format!("AssignProcessToJobObject failed: {error}"));
+      }
+      Ok(job)
+    }
+
+    fn create() -> Result<Self, String> {
+      let handle = unsafe { CreateJobObjectW(null_mut(), null()) };
+      if handle.is_null() {
+        return Err(format!(
+          "CreateJobObjectW failed: {}",
+          io::Error::last_os_error()
+        ));
+      }
+
+      let mut limits = JobObjectExtendedLimitInformation::default();
+      limits.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      if unsafe {
+        SetInformationJobObject(
+          handle,
+          JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+          &mut limits as *mut _ as *mut c_void,
+          size_of::<JobObjectExtendedLimitInformation>() as u32,
+        )
+      } == 0
+      {
+        let error = io::Error::last_os_error();
+        unsafe {
+          CloseHandle(handle);
+        }
+        return Err(format!("SetInformationJobObject failed: {error}"));
+      }
+
+      Ok(Self { handle })
+    }
+
+    pub(super) fn terminate(&self) -> Result<(), String> {
+      if unsafe { TerminateJobObject(self.handle, 1) } == 0 {
+        return Err(format!(
+          "TerminateJobObject failed: {}",
+          io::Error::last_os_error()
+        ));
+      }
+      Ok(())
+    }
+  }
+
+  impl Drop for OwnedSupervisorJob {
+    fn drop(&mut self) {
+      if !self.handle.is_null() {
+        unsafe {
+          CloseHandle(self.handle);
+        }
+        self.handle = null_mut();
+      }
+    }
+  }
+}
+
+#[cfg(target_os = "windows")]
+use windows_job::OwnedSupervisorJob;
+
 #[derive(Default)]
 pub struct SupervisorState {
   inner: Mutex<SupervisorInner>,
@@ -26,6 +164,8 @@ struct SupervisorInner {
   expected_pid: Option<u32>,
   repo_root: Option<PathBuf>,
   state_dir: Option<PathBuf>,
+  #[cfg(target_os = "windows")]
+  job: Option<OwnedSupervisorJob>,
   poll_stop: bool,
   shutting_down: bool,
 }
@@ -216,6 +356,24 @@ pub fn bootstrap_supervisor(
     .spawn()
     .map_err(|e| format!("failed to spawn supervisor: {e}"))?;
 
+  #[cfg(target_os = "windows")]
+  let mut child = child;
+
+  #[cfg(target_os = "windows")]
+  let owned_job = match OwnedSupervisorJob::new_for_child(&child) {
+    Ok(job) => job,
+    Err(error) => {
+      let kill_error = child.kill().err().map(|error| error.to_string());
+      let _ = child.wait();
+      return Err(match kill_error {
+        Some(kill_error) => format!(
+          "failed to create/assign Windows Supervisor Job Object: {error}; failed to terminate child: {kill_error}"
+        ),
+        None => format!("failed to create/assign Windows Supervisor Job Object: {error}"),
+      });
+    }
+  };
+
   let endpoint = wait_for_active_endpoint(&active_pointer, Duration::from_secs(25))?;
   // Validate endpoint PID is alive and host is loopback.
   if endpoint.host != "127.0.0.1" && endpoint.host != "localhost" && endpoint.host != "::1" {
@@ -243,6 +401,10 @@ pub fn bootstrap_supervisor(
     guard.expected_pid = Some(endpoint.pid);
     guard.repo_root = repo_root_for_state;
     guard.state_dir = Some(instance_state_dir);
+    #[cfg(target_os = "windows")]
+    {
+      guard.job = Some(owned_job);
+    }
     guard.poll_stop = false;
     guard.shutting_down = false;
   }
@@ -322,7 +484,6 @@ mod tests {
 
 /// Idempotent application-level shutdown. Only owned services are stopped by the supervisor.
 pub fn shutdown_supervisor(app: &AppHandle) {
-  eprintln!("[yuvi-desktop] supervisor shutdown: before state lock");
   let state = app.state::<SupervisorState>();
   let mut guard = match state.inner.lock() {
     Ok(g) => g,
@@ -337,66 +498,101 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let token = guard.control_token.clone();
   let mut child = guard.child.take();
   let state_dir = guard.state_dir.clone();
+  #[cfg(not(target_os = "windows"))]
   let expected_pid = guard.expected_pid;
+  #[cfg(target_os = "windows")]
+  let owned_job = guard.job.take();
   guard.base_url = None;
-  eprintln!("[yuvi-desktop] supervisor shutdown: state released");
-  // Keep token only for the shutdown request below.
+  guard.control_token = None;
+  guard.instance_id = None;
+  guard.expected_pid = None;
   drop(guard);
 
-  // Ask Supervisor to stop owned Runtime/Mem0 (best-effort, short timeout path).
-  if let (Some(base), Some(token)) = (base, token) {
-    eprintln!("[yuvi-desktop] supervisor shutdown: before HTTP request");
-    let _ = http_json_with_timeout(
-      "POST",
-      &format!("{base}/v1/shutdown"),
-      None,
-      Some(&token),
-      Duration::from_secs(5),
-    );
-    eprintln!("[yuvi-desktop] supervisor shutdown: after HTTP request");
-  }
-
-  if let Some(mut child) = child.take() {
-    let supervisor_pid = child.id();
-    eprintln!("[yuvi-desktop] supervisor shutdown: before child kill pid={supervisor_pid}");
-    // Rust owns the direct Supervisor handle. Terminate and reap that parent
-    // before touching its descendants; killing the tree first races the
-    // Supervisor's own child-exit handlers on Windows.
-    let kill_result = child.kill();
-    eprintln!("[yuvi-desktop] supervisor shutdown: child kill result={kill_result:?}");
-    eprintln!("[yuvi-desktop] supervisor shutdown: before child reap");
-    let tree_kill_requested = if !reap_child_bounded(&mut child, 20) {
-      eprintln!("[yuvi-desktop] supervisor shutdown: direct reap timed out");
-      // A failed direct termination must not turn into an unbounded wait.
-      // Tree termination is the fallback only after the direct handle has
-      // received its bounded termination/reap opportunity.
-      force_kill_process_tree(supervisor_pid);
-      let _ = reap_child_bounded(&mut child, 20);
-      true
-    } else {
-      eprintln!("[yuvi-desktop] supervisor shutdown: direct reap completed");
-      false
-    };
-
-    // The Supervisor is no longer running, so this cannot race its handlers.
-    // Catch any descendants that did not honor the graceful shutdown request.
-    if !tree_kill_requested {
-      eprintln!("[yuvi-desktop] supervisor shutdown: after direct reap, tree cleanup");
-      force_kill_process_tree(supervisor_pid);
+  #[cfg(target_os = "windows")]
+  {
+    // The response is the graceful-stop barrier. If it times out, the owned
+    // Job Object below provides the bounded fallback for the whole process set.
+    if let (Some(base), Some(token)) = (base, token) {
+      let _ = http_json_with_timeout(
+        "POST",
+        &format!("{base}/v1/shutdown"),
+        None,
+        Some(&token),
+        Duration::from_secs(5),
+      );
     }
-  } else if let Some(pid) = expected_pid {
-    eprintln!("[yuvi-desktop] supervisor shutdown: no child handle, tree cleanup pid={pid}");
-    force_kill_process_tree(pid);
+
+    // Supervisor and every descendant inherit this private Job Object. This
+    // removes the taskkill-tree vs. Node child-exit-handler race entirely.
+    if let Some(job) = owned_job.as_ref() {
+      let _ = job.terminate();
+    }
+
+    if let Some(mut child) = child.take() {
+      if !wait_for_child_exit(&mut child, Duration::from_secs(2)) {
+        let _ = child.kill();
+        let _ = wait_for_child_exit(&mut child, Duration::from_secs(1));
+      }
+    }
+
+    // KILL_ON_JOB_CLOSE is an additional owned-process boundary. Close it only
+    // after the direct Supervisor handle has had its bounded reap opportunity.
+    drop(owned_job);
   }
 
-  // If the direct handle was already gone, metadata is the remaining source
-  // of truth for owned descendants. Run this only after the Supervisor has
-  // been terminated so it cannot race its child-exit handlers.
-  if let Some(dir) = state_dir.as_ref() {
-    eprintln!("[yuvi-desktop] supervisor shutdown: before metadata cleanup");
-    force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
-    force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
-    eprintln!("[yuvi-desktop] supervisor shutdown: after metadata cleanup");
+  #[cfg(not(target_os = "windows"))]
+  {
+    // Preserve the existing non-Windows process cleanup behavior.
+    if let (Some(base), Some(token)) = (base, token) {
+      let _ = http_json("POST", &format!("{base}/v1/shutdown"), None, Some(&token));
+    }
+    if let Some(dir) = state_dir.as_ref() {
+      force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
+      force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
+    }
+    if let Some(mut child) = child.take() {
+      let supervisor_pid = child.id();
+      for _ in 0..12 {
+        match child.try_wait() {
+          Ok(Some(_)) => break,
+          Ok(None) => thread::sleep(Duration::from_millis(100)),
+          Err(_) => break,
+        }
+      }
+      let _ = child.kill();
+      let _ = child.wait();
+      force_kill_process_tree(supervisor_pid);
+    } else if let Some(pid) = expected_pid {
+      force_kill_process_tree(pid);
+    }
+  }
+
+  cleanup_shutdown_files(state_dir.as_deref());
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+  let deadline = std::time::Instant::now() + timeout;
+  loop {
+    match child.try_wait() {
+      Ok(Some(_)) => return true,
+      Ok(None) => {}
+      Err(_) => return false,
+    }
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+      return false;
+    }
+    thread::sleep(std::cmp::min(Duration::from_millis(50), remaining));
+  }
+}
+
+fn cleanup_shutdown_files(_state_dir: Option<&Path>) {
+  #[cfg(target_os = "windows")]
+  if let Some(dir) = _state_dir {
+    let _ = fs::remove_file(dir.join("control-endpoint.json"));
+    let _ = fs::remove_file(dir.join("runtime.pid.json"));
+    let _ = fs::remove_file(dir.join("mem0.pid.json"));
   }
 
   // Best-effort cleanup of active pointer + instance lock.
@@ -404,59 +600,22 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let _ = fs::remove_file(root.join("active-instance.json"));
   let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
   let _ = fs::remove_file(root.join("supervisor.instance.lock"));
-  eprintln!("[yuvi-desktop] supervisor shutdown: complete");
 }
 
-/// Force-kill a process tree on Windows (taskkill /T /F). No-op elsewhere / pid 0.
+/// Force-kill a process tree on non-Windows platforms. Windows uses the owned
+/// Job Object above so cleanup never depends on a parent-PID tree walk.
+#[cfg(not(target_os = "windows"))]
 fn force_kill_process_tree(pid: u32) {
   if pid == 0 {
     return;
   }
-  #[cfg(target_os = "windows")]
-  {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut command = Command::new("taskkill");
-    command
-      .args(["/PID", &pid.to_string(), "/T", "/F"])
-      .creation_flags(CREATE_NO_WINDOW)
-      .stdout(Stdio::null())
-      .stderr(Stdio::null());
-    run_bounded_command(command);
-  }
-  #[cfg(not(target_os = "windows"))]
-  {
-    let mut command = Command::new("kill");
-    command.args(["-TERM", &pid.to_string()]);
-    run_bounded_command(command);
-  }
-}
-
-fn run_bounded_command(mut command: Command) {
-  let Ok(mut child) = command.spawn() else {
-    return;
-  };
-  if !reap_child_bounded(&mut child, 20) {
-    let _ = child.kill();
-    let _ = reap_child_bounded(&mut child, 4);
-  }
-}
-
-/// Poll a child handle for a bounded period. This is deliberately shared by
-/// the Supervisor child and the platform tree-kill helper: cleanup must never
-/// block the Tauri shutdown worker indefinitely.
-fn reap_child_bounded(child: &mut Child, attempts: u32) -> bool {
-  for _ in 0..attempts {
-    match child.try_wait() {
-      Ok(Some(_)) => return true,
-      Ok(None) => thread::sleep(Duration::from_millis(100)),
-      Err(_) => return false,
-    }
-  }
-  false
+  let _ = Command::new("kill")
+    .args(["-TERM", &pid.to_string()])
+    .status();
 }
 
 /// Read `{ "pid": N }` metadata and force-kill that tree if present.
+#[cfg(not(target_os = "windows"))]
 fn force_kill_pid_from_metadata(path: &Path) {
   let Ok(text) = fs::read_to_string(path) else {
     return;
@@ -469,7 +628,7 @@ fn force_kill_pid_from_metadata(path: &Path) {
     .and_then(|v| v.as_u64())
     .or_else(|| value.get("processId").and_then(|v| v.as_u64()))
     .unwrap_or(0) as u32;
-  if pid > 0 && process_alive(pid) {
+  if pid > 0 {
     force_kill_process_tree(pid);
   }
 }
@@ -631,7 +790,7 @@ fn http_json_with_timeout(
   read_timeout: Duration,
 ) -> Result<Value, String> {
   use std::io::{Read, Write};
-  use std::net::TcpStream;
+  use std::net::{SocketAddr, TcpStream};
 
   let parsed = url::Url::parse(url).map_err(|e| format!("invalid supervisor url: {e}"))?;
   if parsed.scheme() != "http" {
@@ -663,7 +822,10 @@ fn http_json_with_timeout(
   } else {
     host.as_str()
   };
-  let mut stream = TcpStream::connect((connect_host, port))
+  let connect_addr = format!("{connect_host}:{port}")
+    .parse::<SocketAddr>()
+    .map_err(|e| format!("supervisor address parse failed: {e}"))?;
+  let mut stream = TcpStream::connect_timeout(&connect_addr, read_timeout)
     .map_err(|e| format!("supervisor connect failed: {e}"))?;
   let _ = stream.set_read_timeout(Some(read_timeout));
   let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));

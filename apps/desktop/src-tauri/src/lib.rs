@@ -182,17 +182,13 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn begin_app_shutdown(app: &tauri::AppHandle) -> bool {
-  eprintln!("[yuvi-desktop] shutdown: begin requested");
   if !claim_app_shutdown() {
-    eprintln!("[yuvi-desktop] shutdown: already claimed");
     return false;
   }
 
   let app = app.clone();
   std::thread::spawn(move || {
-    eprintln!("[yuvi-desktop] shutdown: worker started");
     supervisor::shutdown_supervisor(&app);
-    eprintln!("[yuvi-desktop] shutdown: calling app.exit");
     app.exit(0);
   });
   true
