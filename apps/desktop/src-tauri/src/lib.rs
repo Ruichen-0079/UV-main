@@ -150,23 +150,41 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn begin_app_shutdown(app: &tauri::AppHandle) {
+  eprintln!("[yuvi-desktop] DIAG226 begin_app_shutdown entered");
   if !claim_app_shutdown() {
+    eprintln!("[yuvi-desktop] DIAG226 begin_app_shutdown already-claimed");
     return;
   }
+  eprintln!("[yuvi-desktop] DIAG226 begin_app_shutdown claimed");
   supervisor::shutdown_supervisor(app);
+  eprintln!("[yuvi-desktop] DIAG226 begin_app_shutdown returned");
 }
 
 fn request_app_exit(app: &tauri::AppHandle) {
+  eprintln!(
+    "[yuvi-desktop] DIAG226 request_app_exit entered shutdown_started={}",
+    app_shutdown_started()
+  );
   if !app_shutdown_started() {
     // A tray menu listener runs while Tauri is dispatching the menu event.
     // Queue the exit request as a later main-thread task so the nested
     // RequestExit event is not posted from inside that dispatch.
     let app = app.clone();
     std::thread::spawn(move || {
+      eprintln!("[yuvi-desktop] DIAG226 request_app_exit worker started");
       let exit_app = app.clone();
       let fallback_app = app.clone();
-      if let Err(error) = app.run_on_main_thread(move || exit_app.exit(0)) {
-        eprintln!("[yuvi-desktop] failed to schedule app exit: {error}");
+      let result = app.run_on_main_thread(move || {
+        eprintln!("[yuvi-desktop] DIAG226 request_app_exit main-task entered");
+        exit_app.exit(0);
+        eprintln!("[yuvi-desktop] DIAG226 request_app_exit main-task exit returned");
+      });
+      eprintln!(
+        "[yuvi-desktop] DIAG226 request_app_exit worker schedule result={}",
+        if result.is_ok() { "ok" } else { "err" }
+      );
+      if let Err(error) = result {
+        eprintln!("[yuvi-desktop] DIAG226 request_app_exit schedule error: {error}");
         fallback_app.exit(0);
       }
     });
@@ -201,6 +219,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     .tooltip("YUVI")
     .menu(&menu)
     .on_menu_event(|app, event| {
+      eprintln!("[yuvi-desktop] DIAG226 on_menu_event id={}", event.id.as_ref());
       match tray_action(event.id.as_ref()) {
         Some(TrayAction::OpenMain) => {
           if let Err(error) = show_main(app) {
@@ -294,6 +313,12 @@ pub fn run() {
     .build(tauri::generate_context!())
     .expect("error while building YUVI desktop app")
     .run(|app_handle, event| {
+      if let RunEvent::ExitRequested { .. } = &event {
+        eprintln!("[yuvi-desktop] DIAG226 RunEvent::ExitRequested received");
+      }
+      if let RunEvent::Exit = &event {
+        eprintln!("[yuvi-desktop] DIAG226 RunEvent::Exit received");
+      }
       if let RunEvent::ExitRequested { .. } = event {
         begin_app_shutdown(app_handle);
       }

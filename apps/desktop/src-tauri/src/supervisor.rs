@@ -322,12 +322,18 @@ mod tests {
 
 /// Idempotent application-level shutdown. Only owned services are stopped by the supervisor.
 pub fn shutdown_supervisor(app: &AppHandle) {
+  eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor entered");
+  let entered = std::time::Instant::now();
   let state = app.state::<SupervisorState>();
   let mut guard = match state.inner.lock() {
     Ok(g) => g,
-    Err(_) => return,
+    Err(_) => {
+      eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor lock-poisoned");
+      return;
+    }
   };
   if guard.shutting_down {
+    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor already-shutting-down");
     return;
   }
   guard.shutting_down = true;
@@ -343,13 +349,22 @@ pub fn shutdown_supervisor(app: &AppHandle) {
 
   // Ask Supervisor to stop owned Runtime/Mem0 (best-effort, short timeout path).
   if let (Some(base), Some(token)) = (base, token) {
-    let _ = http_json_with_timeout(
+    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor POST /v1/shutdown");
+    let http_started = std::time::Instant::now();
+    let http_result = http_json_with_timeout(
       "POST",
       &format!("{base}/v1/shutdown"),
       None,
       Some(&token),
       Duration::from_secs(5),
     );
+    eprintln!(
+      "[yuvi-desktop] DIAG226 shutdown_supervisor HTTP result={} elapsed_ms={}",
+      if http_result.is_ok() { "ok" } else { "err" },
+      http_started.elapsed().as_millis()
+    );
+  } else {
+    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor no endpoint");
   }
 
   // Belt-and-suspenders: Windows does not kill Node Runtime when Supervisor exits.
@@ -361,6 +376,9 @@ pub fn shutdown_supervisor(app: &AppHandle) {
 
   if let Some(mut child) = child.take() {
     let supervisor_pid = child.id();
+    eprintln!(
+      "[yuvi-desktop] DIAG226 shutdown_supervisor child pid={supervisor_pid} wait"
+    );
     // Bounded wait for supervisor process to exit after graceful shutdown.
     for _ in 0..12 {
       match child.try_wait() {
@@ -373,8 +391,15 @@ pub fn shutdown_supervisor(app: &AppHandle) {
     let _ = child.wait();
     // Force entire process tree (supervisor + any remaining runtime/node children).
     force_kill_process_tree(supervisor_pid);
+    eprintln!(
+      "[yuvi-desktop] DIAG226 shutdown_supervisor child pid={supervisor_pid} reaped elapsed_ms={}",
+      entered.elapsed().as_millis()
+    );
   } else if let Some(pid) = expected_pid {
+    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor tree-kill pid={pid}");
     force_kill_process_tree(pid);
+  } else {
+    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor no child");
   }
 
   // Best-effort cleanup of active pointer + instance lock.
@@ -382,6 +407,10 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let _ = fs::remove_file(root.join("active-instance.json"));
   let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
   let _ = fs::remove_file(root.join("supervisor.instance.lock"));
+  eprintln!(
+    "[yuvi-desktop] DIAG226 shutdown_supervisor returned elapsed_ms={}",
+    entered.elapsed().as_millis()
+  );
 }
 
 /// Force-kill a process tree on Windows (taskkill /T /F). No-op elsewhere / pid 0.
