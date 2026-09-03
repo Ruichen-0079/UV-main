@@ -354,24 +354,20 @@ pub fn shutdown_supervisor(app: &AppHandle) {
 
   if let Some(mut child) = child.take() {
     let supervisor_pid = child.id();
-    // Terminate the owned Supervisor tree before touching its direct Child
-    // handle. On Windows, killing descendants first can race the Supervisor's
-    // own child-exit handlers and leave Child::wait blocked indefinitely.
-    force_kill_process_tree(supervisor_pid);
-
-    // Reap without an unbounded wait. The tree kill is authoritative; the
-    // direct handle is only polled so the Rust child is reaped when Windows
-    // reports termination.
-    let exited = reap_child_bounded(&mut child, 20);
-
-    // A failed tree kill must not turn into an unbounded Child::wait. Give the
-    // direct process one last termination request, then poll the handle again.
-    if !exited {
-      let _ = child.kill();
+    // Rust owns the direct Supervisor handle. Terminate and reap that parent
+    // before touching its descendants; killing the tree first races the
+    // Supervisor's own child-exit handlers on Windows.
+    let _ = child.kill();
+    if !reap_child_bounded(&mut child, 20) {
+      // A failed direct termination must not turn into an unbounded wait.
+      // Tree termination is the fallback only after the direct handle has
+      // received its bounded termination/reap opportunity.
+      force_kill_process_tree(supervisor_pid);
       let _ = reap_child_bounded(&mut child, 20);
     }
 
-    // Catch descendants that were published just before the tree termination.
+    // The Supervisor is no longer running, so this cannot race its handlers.
+    // Catch any descendants that did not honor the graceful shutdown request.
     force_kill_process_tree(supervisor_pid);
   } else if let Some(pid) = expected_pid {
     force_kill_process_tree(pid);
