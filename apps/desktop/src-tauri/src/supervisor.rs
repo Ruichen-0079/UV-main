@@ -380,15 +380,38 @@ pub fn shutdown_supervisor(app: &AppHandle) {
       "[yuvi-desktop] DIAG226 shutdown_supervisor child pid={supervisor_pid} wait"
     );
     // Bounded wait for supervisor process to exit after graceful shutdown.
+    let mut graceful_wait = "timeout";
     for _ in 0..12 {
       match child.try_wait() {
-        Ok(Some(_)) => break,
+        Ok(Some(_)) => {
+          graceful_wait = "exited";
+          break;
+        }
         Ok(None) => thread::sleep(Duration::from_millis(100)),
-        Err(_) => break,
+        Err(_) => {
+          graceful_wait = "error";
+          break;
+        }
       }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    eprintln!(
+      "[yuvi-desktop] DIAG226 shutdown_supervisor graceful_wait={graceful_wait} elapsed_ms={}",
+      entered.elapsed().as_millis()
+    );
+    let kill_started = std::time::Instant::now();
+    let kill_result = child.kill();
+    eprintln!(
+      "[yuvi-desktop] DIAG226 shutdown_supervisor child kill result={} alive_after_kill={} elapsed_ms={}",
+      if kill_result.is_ok() { "ok" } else { "err" },
+      process_alive(supervisor_pid),
+      kill_started.elapsed().as_millis()
+    );
+    eprintln!("[yuvi-desktop] DIAG226 shutdown_supervisor child wait begin");
+    let wait_result = child.wait();
+    eprintln!(
+      "[yuvi-desktop] DIAG226 shutdown_supervisor child wait result={}",
+      if wait_result.is_ok() { "ok" } else { "err" }
+    );
     // Force entire process tree (supervisor + any remaining runtime/node children).
     force_kill_process_tree(supervisor_pid);
     eprintln!(
