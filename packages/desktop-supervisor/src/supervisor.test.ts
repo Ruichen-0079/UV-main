@@ -225,6 +225,64 @@ function fakeChild(pid: number): EventEmitter & { pid: number; killed: boolean; 
   return child;
 }
 
+describe("DesktopSupervisor shutdown", () => {
+  it("starts cleanup for every owned service concurrently without stopping external processes", async () => {
+    const supervisor = createSupervisor(baseConfig());
+    const services = (
+      supervisor as unknown as {
+        services: Map<
+          string,
+          {
+            child: ReturnType<typeof fakeChild> | null;
+            ownership: "none" | "owned" | "external";
+            pid: number | null;
+          }
+        >;
+      }
+    ).services;
+    const runtime = services.get("runtime");
+    const mem0 = services.get("mem0");
+    const ollama = services.get("ollama");
+    if (!runtime || !mem0 || !ollama) throw new Error("expected shutdown fixtures");
+
+    runtime.child = fakeChild(41_001);
+    runtime.pid = 41_001;
+    runtime.ownership = "owned";
+    mem0.child = fakeChild(41_002);
+    mem0.pid = 41_002;
+    mem0.ownership = "owned";
+    ollama.pid = 41_003;
+    ollama.ownership = "external";
+
+    let cleanupMayFinish = false;
+    vi.spyOn(processWindows, "isProcessAlive").mockImplementation(() => !cleanupMayFinish);
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((processId) => ({
+      status: "resolved",
+      processId,
+      info: {
+        processId,
+        parentProcessId: 1,
+        commandLine: `shutdown-fixture-${processId}`,
+        createdAtUtc: new Date()
+      }
+    }));
+    const gracefulStop = vi
+      .spyOn(processWindows, "requestGracefulStop")
+      .mockImplementation(() => undefined);
+    vi.spyOn(processWindows, "forceKillProcessTree").mockImplementation(() => undefined);
+
+    const shutdown = supervisor.shutdown();
+    await vi.waitFor(() => expect(gracefulStop).toHaveBeenCalledTimes(2), { timeout: 250 });
+    expect(gracefulStop.mock.calls.map(([processId]) => processId).sort()).toEqual([
+      41_001, 41_002
+    ]);
+    expect(gracefulStop).not.toHaveBeenCalledWith(41_003);
+
+    cleanupMayFinish = true;
+    await shutdown;
+  });
+});
+
 describe("DesktopSupervisor classification", () => {
   it("projects the private packaged database into Runtime and Mem0 child env", () => {
     const resourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-packaged-res-"));
