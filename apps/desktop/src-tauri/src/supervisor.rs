@@ -312,11 +312,36 @@ fn is_secret_env_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-  use super::is_secret_env_key;
+  use super::{is_secret_env_key, stop_child_bounded};
+  use std::process::{Command, Stdio};
+  use std::time::{Duration, Instant};
 
   #[test]
   fn openai_compatible_api_key_stays_out_of_supervisor_base_environment() {
     assert!(is_secret_env_key("OPENAI_COMPATIBLE_API_KEY"));
+  }
+
+  #[test]
+  fn supervisor_child_shutdown_reaps_without_an_unbounded_wait() {
+    let mut command = if cfg!(target_os = "windows") {
+      let mut command = Command::new("cmd.exe");
+      command.args(["/d", "/c", "ping 127.0.0.1 -n 30 > nul"]);
+      command
+    } else {
+      let mut command = Command::new("sleep");
+      command.arg("30");
+      command
+    };
+    let child = command
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .spawn()
+      .expect("test child should spawn");
+    let started = Instant::now();
+
+    assert!(stop_child_bounded(child));
+    assert!(started.elapsed() < Duration::from_secs(5));
   }
 }
 
@@ -359,20 +384,8 @@ pub fn shutdown_supervisor(app: &AppHandle) {
     force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
   }
 
-  if let Some(mut child) = child.take() {
-    let supervisor_pid = child.id();
-    // Bounded wait for supervisor process to exit after graceful shutdown.
-    for _ in 0..12 {
-      match child.try_wait() {
-        Ok(Some(_)) => break,
-        Ok(None) => thread::sleep(Duration::from_millis(100)),
-        Err(_) => break,
-      }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    // Force entire process tree (supervisor + any remaining runtime/node children).
-    force_kill_process_tree(supervisor_pid);
+  if let Some(child) = child.take() {
+    let _ = stop_child_bounded(child);
   } else if let Some(pid) = expected_pid {
     force_kill_process_tree(pid);
   }
@@ -382,6 +395,33 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let _ = fs::remove_file(root.join("active-instance.json"));
   let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
   let _ = fs::remove_file(root.join("supervisor.instance.lock"));
+}
+
+fn stop_child_bounded(mut child: Child) -> bool {
+  const ATTEMPTS: usize = 12;
+
+  for _ in 0..ATTEMPTS {
+    match child.try_wait() {
+      Ok(Some(_)) => return true,
+      Ok(None) => thread::sleep(Duration::from_millis(100)),
+      Err(_) => break,
+    }
+  }
+
+  let pid = child.id();
+  let _ = child.kill();
+  // Never block on Child::wait before forcing the owned tree. The Windows
+  // smoke observed Child::wait remaining blocked after kill reported success.
+  force_kill_process_tree(pid);
+
+  for _ in 0..ATTEMPTS {
+    match child.try_wait() {
+      Ok(Some(_)) => return true,
+      Ok(None) => thread::sleep(Duration::from_millis(100)),
+      Err(_) => return false,
+    }
+  }
+  false
 }
 
 /// Force-kill a process tree on Windows (taskkill /T /F). No-op elsewhere / pid 0.

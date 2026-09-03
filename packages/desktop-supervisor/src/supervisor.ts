@@ -695,11 +695,16 @@ export class DesktopSupervisor {
     const ops = [...this.services.values()].map((s) => s.op).filter(Boolean);
     await Promise.race([Promise.allSettled(ops), sleep(1_500)]);
 
-    for (const svc of this.services.values()) {
+    const stops = [...this.services.values()]
       // Always try to stop anything we tracked — Windows does not kill children with parent.
-      if (svc.pid || svc.child || svc.ownership === "owned") {
-        await this.stopOwned(svc);
-      }
+      .filter((svc) => svc.pid || svc.child || svc.ownership === "owned")
+      .map((svc) => this.stopOwned(svc));
+    const results = await Promise.allSettled(stops);
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected"
+    );
+    if (failure) {
+      throw failure.reason;
     }
     this.appendExitLog("shutdown complete");
     this.emit();
