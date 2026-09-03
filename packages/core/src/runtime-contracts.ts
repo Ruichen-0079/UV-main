@@ -20,8 +20,11 @@ import type {
 } from "@companion/memory";
 import type { PromptBuildInput, PromptBuildOutput } from "@companion/prompt-builder";
 import type {
+  AgentReplyEvent,
+  AssistantMessageEvent,
   EmbodiedPresentationOutcomeReport,
   EmbodiedPresentationRequest,
+  PerceptionVisionEvent,
   RuntimeEvent,
   TurnOrigin
 } from "@companion/protocol";
@@ -87,12 +90,35 @@ export type RuntimeCharacterGenerationResult = Readonly<{
  * Narrow Runtime-to-Character port. Runtime supplies the selected Chat call
  * and the existing Cognition executor; the Character adapter owns only
  * semantic proposal handling and expression.
+ *
+ * Stable provider-neutral vision evidence handed to Character is a semantic
+ * contract only. It must never contain provider names, raw provider JSON,
+ * HTTP payloads, API wire fields, or SDK-specific objects. Runtime is the
+ * sole producer via bounded normalization of VisionOutput.
  */
+export type RuntimeVisionEvidenceStatus = "AVAILABLE" | "EMPTY" | "LOW_CONFIDENCE" | "UNAVAILABLE";
+
+export type RuntimeVisionEvidence = Readonly<{
+  /** Bounded normalized description text. Empty string means no text was observed. */
+  text: string;
+  /** Bounded normalized object labels. Empty means none were observed. */
+  objects: readonly string[];
+  /** Bounded normalized scene summary, when the provider supplied a useful one. */
+  sceneSummary?: string | undefined;
+  /** Normalized confidence in [0, 1] when the provider supplied a finite one. */
+  confidence?: number | undefined;
+  /** Bounded epistemic status. EMPTY/UNAVAILABLE must not be treated as fact. */
+  status: RuntimeVisionEvidenceStatus;
+  /** True when status is LOW_CONFIDENCE or UNAVAILABLE. */
+  lowConfidence: boolean;
+}>;
+
 export type RuntimeCharacterPort = Readonly<{
   generate(
     input: Readonly<{
       prompt: PromptBuildOutput;
       userMessage: string;
+      vision?: RuntimeVisionEvidence | undefined;
       signal?: AbortSignal | undefined;
       generateChat(
         input: ChatInput,
@@ -501,3 +527,31 @@ export type HandleImageInputInput = VisionInput & {
   speakerId?: string | null | undefined;
   voiceProfileId?: string | null | undefined;
 };
+
+export type HandleImageTurnInput = VisionInput & {
+  sessionId: string;
+  traceId?: string | undefined;
+  parentId?: string | undefined;
+  personaId?: string | null | undefined;
+  subjectUserId?: string | null | undefined;
+  createdByUserId?: string | null | undefined;
+  speakerId?: string | null | undefined;
+  voiceProfileId?: string | null | undefined;
+  /** Optional neutral caption supplied alongside the image. Never synthesized. */
+  userMessage?: string | undefined;
+};
+
+export type HandleImageTurnOptions = {
+  signal?: AbortSignal | undefined;
+};
+
+export type HandleImageTurnResult = Readonly<{
+  /** Runtime-published normalized observation. Presentation must not consume this directly. */
+  vision: PerceptionVisionEvent;
+  /** Bounded provider-neutral evidence actually handed to Character. */
+  evidence: RuntimeVisionEvidence;
+  /** Runtime-owned Character decision rendered as an agent reply. Empty content means SILENCE/TERMINATE. */
+  reply: AgentReplyEvent;
+  /** Assistant-facing publication of the same decision. */
+  assistantMessage: AssistantMessageEvent;
+}>;
