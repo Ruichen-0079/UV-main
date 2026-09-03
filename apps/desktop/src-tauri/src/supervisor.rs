@@ -377,8 +377,10 @@ pub fn shutdown_supervisor(app: &AppHandle) {
         Err(_) => break,
       }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    let kill_result = child.kill();
+    eprintln!("[yuvi-desktop] supervisor shutdown: child kill result={kill_result:?}");
+    let wait_result = child.wait();
+    eprintln!("[yuvi-desktop] supervisor shutdown: child wait result={wait_result:?}");
     // Force entire process tree (supervisor + any remaining runtime/node children).
     force_kill_process_tree(supervisor_pid);
     eprintln!("[yuvi-desktop] supervisor shutdown: after supervisor child wait");
