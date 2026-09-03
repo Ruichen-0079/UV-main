@@ -151,17 +151,30 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
 
 fn begin_app_shutdown(app: &tauri::AppHandle) {
   if !claim_app_shutdown() {
+    // DIAG226-temporary: quit-path tracing, remove after root-cause.
+    eprintln!("[yuvi-desktop] DIAG226 begin_app_shutdown already-claimed");
     return;
   }
+  // DIAG226-temporary: quit-path tracing, remove after root-cause.
+  eprintln!("[yuvi-desktop] DIAG226 begin_app_shutdown claimed, calling shutdown_supervisor");
   supervisor::shutdown_supervisor(app);
+  // DIAG226-temporary: quit-path tracing, remove after root-cause.
+  eprintln!("[yuvi-desktop] DIAG226 begin_app_shutdown shutdown_supervisor returned");
 }
 
 fn request_app_exit(app: &tauri::AppHandle) {
+  // DIAG226-temporary: quit-path tracing, remove after root-cause.
+  eprintln!(
+    "[yuvi-desktop] DIAG226 request_app_exit shutdown_started={}",
+    app_shutdown_started()
+  );
   if !app_shutdown_started() {
     // Let RunEvent::ExitRequested own the shutdown sequence. That keeps the
     // explicit Quit path on the same once-only supervisor shutdown seam as
     // OS/application exit while allowing Tauri to drive its event loop exit.
+    eprintln!("[yuvi-desktop] DIAG226 request_app_exit calling app.exit(0)");
     app.exit(0);
+    eprintln!("[yuvi-desktop] DIAG226 request_app_exit app.exit(0) returned");
   }
 }
 
@@ -192,29 +205,33 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     .icon(icon)
     .tooltip("YUVI")
     .menu(&menu)
-    .on_menu_event(|app, event| match tray_action(event.id.as_ref()) {
-      Some(TrayAction::OpenMain) => {
-        if let Err(error) = show_main(app) {
-          eprintln!("[yuvi-desktop] failed to open main window: {error}");
+    .on_menu_event(|app, event| {
+      // DIAG226-temporary: quit-path tracing, remove after root-cause.
+      eprintln!("[yuvi-desktop] DIAG226 on_menu_event id={}", event.id.as_ref());
+      match tray_action(event.id.as_ref()) {
+        Some(TrayAction::OpenMain) => {
+          if let Err(error) = show_main(app) {
+            eprintln!("[yuvi-desktop] failed to open main window: {error}");
+          }
         }
-      }
-      Some(TrayAction::HideMain) => {
-        if let Err(error) = hide_main(app) {
-          eprintln!("[yuvi-desktop] failed to hide main window: {error}");
+        Some(TrayAction::HideMain) => {
+          if let Err(error) = hide_main(app) {
+            eprintln!("[yuvi-desktop] failed to hide main window: {error}");
+          }
         }
-      }
-      Some(TrayAction::ShowCompanion) => {
-        if let Err(error) = show_companion(app.clone()) {
-          eprintln!("[yuvi-desktop] failed to show companion window: {error}");
+        Some(TrayAction::ShowCompanion) => {
+          if let Err(error) = show_companion(app.clone()) {
+            eprintln!("[yuvi-desktop] failed to show companion window: {error}");
+          }
         }
-      }
-      Some(TrayAction::HideCompanion) => {
-        if let Err(error) = hide_companion(app.clone()) {
-          eprintln!("[yuvi-desktop] failed to hide companion window: {error}");
+        Some(TrayAction::HideCompanion) => {
+          if let Err(error) = hide_companion(app.clone()) {
+            eprintln!("[yuvi-desktop] failed to hide companion window: {error}");
+          }
         }
+        Some(TrayAction::Quit) => request_app_exit(app),
+        None => {}
       }
-      Some(TrayAction::Quit) => request_app_exit(app),
-      None => {}
     })
     .build(app)?;
 
@@ -251,6 +268,12 @@ pub fn run() {
     })
     .on_window_event(|window, event| {
       if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        // DIAG226-temporary: quit-path tracing, remove after root-cause.
+        eprintln!(
+          "[yuvi-desktop] DIAG226 CloseRequested label={} shutdown_started={}",
+          window.label(),
+          app_shutdown_started()
+        );
         match lifecycle::window_close_action(window.label(), app_shutdown_started()) {
           lifecycle::WindowCloseAction::Hide => {
             // Ordinary window close is a presentation action. Runtime and its
@@ -284,6 +307,13 @@ pub fn run() {
     .build(tauri::generate_context!())
     .expect("error while building YUVI desktop app")
     .run(|app_handle, event| {
+      // DIAG226-temporary: quit-path tracing, remove after root-cause.
+      if let RunEvent::ExitRequested { .. } = event {
+        eprintln!("[yuvi-desktop] DIAG226 RunEvent::ExitRequested received");
+      }
+      if let RunEvent::Exit = event {
+        eprintln!("[yuvi-desktop] DIAG226 RunEvent::Exit received");
+      }
       if let RunEvent::ExitRequested { .. } = event {
         begin_app_shutdown(app_handle);
       }
