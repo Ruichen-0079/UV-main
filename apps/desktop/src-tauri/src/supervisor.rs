@@ -352,29 +352,37 @@ pub fn shutdown_supervisor(app: &AppHandle) {
     );
   }
 
-  // Belt-and-suspenders: Windows does not kill Node Runtime when Supervisor exits.
-  // Kill runtime.pid.json from this instance if still alive.
-  if let Some(dir) = state_dir.as_ref() {
-    force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
-    force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
-  }
-
   if let Some(mut child) = child.take() {
     let supervisor_pid = child.id();
-    // Bounded wait for supervisor process to exit after graceful shutdown.
-    for _ in 0..12 {
-      match child.try_wait() {
-        Ok(Some(_)) => break,
-        Ok(None) => thread::sleep(Duration::from_millis(100)),
-        Err(_) => break,
-      }
+    // Terminate the owned Supervisor tree before touching its direct Child
+    // handle. On Windows, killing descendants first can race the Supervisor's
+    // own child-exit handlers and leave Child::wait blocked indefinitely.
+    force_kill_process_tree(supervisor_pid);
+
+    // Reap without an unbounded wait. The tree kill is authoritative; the
+    // direct handle is only polled so the Rust child is reaped when Windows
+    // reports termination.
+    let exited = reap_child_bounded(&mut child, 20);
+
+    // A failed tree kill must not turn into an unbounded Child::wait. Give the
+    // direct process one last termination request, then poll the handle again.
+    if !exited {
+      let _ = child.kill();
+      let _ = reap_child_bounded(&mut child, 20);
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    // Force entire process tree (supervisor + any remaining runtime/node children).
+
+    // Catch descendants that were published just before the tree termination.
     force_kill_process_tree(supervisor_pid);
   } else if let Some(pid) = expected_pid {
     force_kill_process_tree(pid);
+  }
+
+  // If the direct handle was already gone, metadata is the remaining source
+  // of truth for owned descendants. Run this only after the Supervisor has
+  // been terminated so it cannot race its child-exit handlers.
+  if let Some(dir) = state_dir.as_ref() {
+    force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
+    force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
   }
 
   // Best-effort cleanup of active pointer + instance lock.
@@ -393,19 +401,44 @@ fn force_kill_process_tree(pid: u32) {
   {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = Command::new("taskkill")
+    let mut command = Command::new("taskkill");
+    command
       .args(["/PID", &pid.to_string(), "/T", "/F"])
       .creation_flags(CREATE_NO_WINDOW)
       .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .status();
+      .stderr(Stdio::null());
+    run_bounded_command(command);
   }
   #[cfg(not(target_os = "windows"))]
   {
-    let _ = Command::new("kill")
-      .args(["-TERM", &pid.to_string()])
-      .status();
+    let mut command = Command::new("kill");
+    command.args(["-TERM", &pid.to_string()]);
+    run_bounded_command(command);
   }
+}
+
+fn run_bounded_command(mut command: Command) {
+  let Ok(mut child) = command.spawn() else {
+    return;
+  };
+  if !reap_child_bounded(&mut child, 20) {
+    let _ = child.kill();
+    let _ = reap_child_bounded(&mut child, 4);
+  }
+}
+
+/// Poll a child handle for a bounded period. This is deliberately shared by
+/// the Supervisor child and the platform tree-kill helper: cleanup must never
+/// block the Tauri shutdown worker indefinitely.
+fn reap_child_bounded(child: &mut Child, attempts: u32) -> bool {
+  for _ in 0..attempts {
+    match child.try_wait() {
+      Ok(Some(_)) => return true,
+      Ok(None) => thread::sleep(Duration::from_millis(100)),
+      Err(_) => return false,
+    }
+  }
+  false
 }
 
 /// Read `{ "pid": N }` metadata and force-kill that tree if present.
