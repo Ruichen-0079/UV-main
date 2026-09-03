@@ -358,17 +358,22 @@ pub fn shutdown_supervisor(app: &AppHandle) {
     // before touching its descendants; killing the tree first races the
     // Supervisor's own child-exit handlers on Windows.
     let _ = child.kill();
-    if !reap_child_bounded(&mut child, 20) {
+    let tree_kill_requested = if !reap_child_bounded(&mut child, 20) {
       // A failed direct termination must not turn into an unbounded wait.
       // Tree termination is the fallback only after the direct handle has
       // received its bounded termination/reap opportunity.
       force_kill_process_tree(supervisor_pid);
       let _ = reap_child_bounded(&mut child, 20);
-    }
+      true
+    } else {
+      false
+    };
 
     // The Supervisor is no longer running, so this cannot race its handlers.
     // Catch any descendants that did not honor the graceful shutdown request.
-    force_kill_process_tree(supervisor_pid);
+    if !tree_kill_requested {
+      force_kill_process_tree(supervisor_pid);
+    }
   } else if let Some(pid) = expected_pid {
     force_kill_process_tree(pid);
   }
@@ -450,7 +455,7 @@ fn force_kill_pid_from_metadata(path: &Path) {
     .and_then(|v| v.as_u64())
     .or_else(|| value.get("processId").and_then(|v| v.as_u64()))
     .unwrap_or(0) as u32;
-  if pid > 0 {
+  if pid > 0 && process_alive(pid) {
     force_kill_process_tree(pid);
   }
 }
