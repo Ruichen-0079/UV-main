@@ -20,6 +20,9 @@ import {
   buildWmCloseScript,
   buildTrayQuitArguments,
   buildTrayQuitScript,
+  shouldRetryTrayQuit,
+  TRAY_QUIT_MAX_ATTEMPTS,
+  TRAY_QUIT_ATTEMPT_BUDGET_MS,
   chooseInstaller,
   compareSnapshots,
   createTauriAppEnv,
@@ -2276,6 +2279,17 @@ test("tray Quit helper arguments are isolated and reject invalid PIDs", () => {
   assert.throws(() => buildTrayQuitScript("pid"), /invalid/);
   assert.deepEqual(buildTrayQuitArguments(12345).slice(0, 2), ["-I", "-S"]);
   assert.equal(buildTrayQuitArguments(12345).at(-1), "12345");
+});
+
+test("tray Quit retry policy repeats only the real path within budget", () => {
+  assert.equal(TRAY_QUIT_MAX_ATTEMPTS, 4);
+  assert.equal(TRAY_QUIT_ATTEMPT_BUDGET_MS, 40_000);
+  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 0, timeoutMs: 60_000 }), true);
+  assert.equal(shouldRetryTrayQuit({ attempt: 3, elapsedMs: 30_000, timeoutMs: 60_000 }), true);
+  assert.equal(shouldRetryTrayQuit({ attempt: 4, elapsedMs: 0, timeoutMs: 60_000 }), false);
+  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 41_000, timeoutMs: 60_000 }), false);
+  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 6_000, timeoutMs: 5_000 }), false);
+  assert.throws(() => shouldRetryTrayQuit({ attempt: 0, elapsedMs: 0, timeoutMs: 60_000 }), /invalid/);
 });
 
 test("tray Quit output resolves the semantic Quit item regardless of position", () => {

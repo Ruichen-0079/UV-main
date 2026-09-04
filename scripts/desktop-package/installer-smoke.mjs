@@ -3622,6 +3622,35 @@ export function buildTrayQuitArguments(pid) {
   return ["-I", "-S", "-c", TRAY_QUIT_PYTHON_SOURCE, String(numericPid)];
 }
 
+// Opening the live tray popup is the environmentally flaky stage: the
+// notify post is accepted but the popup sometimes never appears within one
+// helper run while the app stays alive. Every attempt below drives the same
+// real product path (open the genuine menu, resolve Quit semantically,
+// invoke the actual item); attempts only repeat that path, never bypass it.
+export const TRAY_QUIT_MAX_ATTEMPTS = 4;
+export const TRAY_QUIT_ATTEMPT_BUDGET_MS = 40_000;
+
+export function shouldRetryTrayQuit({ attempt, elapsedMs, timeoutMs } = {}) {
+  if (!Number.isInteger(attempt) || attempt < 1) fail("tray Quit attempt is invalid");
+  if (!Number.isFinite(Number(elapsedMs)) || Number(elapsedMs) < 0)
+    fail("tray Quit elapsed time is invalid");
+  if (attempt >= TRAY_QUIT_MAX_ATTEMPTS) return false;
+  return Number(elapsedMs) <= Math.min(Number(timeoutMs) || 0, TRAY_QUIT_ATTEMPT_BUDGET_MS);
+}
+
+function trayQuitExcerpt(stdout) {
+  const excerpt = String(stdout ?? "")
+    .split(/\r?\n/)
+    .filter((line) =>
+      /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
+        line
+      )
+    )
+    .join(" ");
+  assertNoSecrets(excerpt, "tray Quit excerpt");
+  return excerpt;
+}
+
 export function parseTrayQuitOutput(stdout, expectedPid = null) {
   const text = String(stdout ?? "");
   assertNoSecrets(text, "tray Quit stdout");
@@ -3808,62 +3837,59 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
     env: sanitizeChildEnv(),
     stdio: ["ignore", "pipe", "pipe"]
   };
-  let result;
-  try {
-    result = await runProcess(executable, args, options, Math.min(timeoutMs, 10_000));
-    assertNoSecrets(result.stderr, "tray Quit stderr");
-    if (result.code !== 0) {
-      let parseError = null;
-      try {
-        parseTrayQuitOutput(result.stdout, pid);
-      } catch (error) {
-        parseError = error instanceof Error ? error.message : String(error);
-      }
-      // Best-effort mapping excerpt so an early helper exit still reports
-      // the semantic discovery state in the failure message itself.
-      const excerpt = String(result.stdout ?? "")
-        .split(/\r?\n/)
-        .filter((line) =>
-          /^(?:notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
-            line
-          )
-        )
-        .join(" ");
-      assertNoSecrets(excerpt, "tray Quit failure excerpt");
+  const started = Date.now();
+  const failures = [];
+  for (let attempt = 1; ; attempt += 1) {
+    if (attempt > 1 && !pidAlive(pid))
       fail(
-        `tray Quit helper exited with code ${result.code}${parseError ? `: ${parseError}` : ""}${excerpt ? ` [${excerpt}]` : ""}`
+        `Tauri application exited without a confirmed tray Quit invoke (after ${attempt - 1} attempts: ${failures.join(" ;; ") || "none"})`
       );
+    let result;
+    try {
+      result = await runProcess(executable, args, options, Math.min(timeoutMs, 10_000));
+      assertNoSecrets(result.stderr, "tray Quit stderr");
+      if (result.code !== 0) {
+        let parseError = null;
+        try {
+          parseTrayQuitOutput(result.stdout, pid);
+        } catch (error) {
+          parseError = error instanceof Error ? error.message : String(error);
+        }
+        // Best-effort mapping excerpt so an early helper exit still reports
+        // the semantic discovery state in the failure message itself.
+        const excerpt = trayQuitExcerpt(result.stdout);
+        fail(
+          `tray Quit helper exited with code ${result.code}${parseError ? `: ${parseError}` : ""}${excerpt ? ` [${excerpt}]` : ""}`
+        );
+      }
+      const parsed = parseTrayQuitOutput(result.stdout, pid);
+      const diagnostic = [
+        `TRAY_QUIT_HELPER executable_category=python-harness executable_path=${path.basename(executable)} exit_code=${result.code}`,
+        `TRAY_QUIT_RESULT attempt=${attempt} target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_windows_any=${parsed.menuWindowsAny} menu_hwnd=${parsed.menuHwnd} tray_alive=${parsed.trayAlive ? 1 : 0} icon_rects=${parsed.iconRects.map((rect) => `${rect.uid}:${rect.left},${rect.top},${rect.right},${rect.bottom}`).join("|") || "none"} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_child_id=${parsed.quitChildId} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
+        `TRAY_QUIT_MENU_MAP ${parsed.menuMap}`
+      ].join("\n");
+      writeLog(layout.logs, "tray-quit.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
+      console.info(`[installer-smoke] ${diagnostic.replaceAll("\n", " ")}`);
+      return parsed;
+    } catch (error) {
+      // On a helper timeout runProcess rejects without a result; the partial
+      // helper output attached to the timeout error is still worth persisting
+      // so the last-known discovery progress survives for triage.
+      const partialStdout = result ? result.stdout : (error?.stdout ?? "");
+      const partialStderr = result ? result.stderr : (error?.stderr ?? "");
+      const attemptLog = `${partialStdout}\n${partialStderr}`;
+      writeLog(layout.logs, `tray-quit-attempt-${attempt}.log`, attemptLog);
+      let message = error instanceof Error ? error.message : String(error);
+      if (!result && error instanceof Error && /timed out/.test(error.message)) {
+        const excerpt = trayQuitExcerpt(partialStdout);
+        message = `${error.message}${excerpt ? ` [${excerpt}]` : ""}`;
+      }
+      assertNoSecrets(message, "tray Quit attempt failure");
+      failures.push(`attempt ${attempt}: ${message}`);
+      console.info(`[installer-smoke] TRAY_QUIT_ATTEMPT n=${attempt} failed: ${message}`);
+      if (!shouldRetryTrayQuit({ attempt, elapsedMs: Date.now() - started, timeoutMs }))
+        fail(`tray Quit failed after ${attempt} attempt(s): ${failures.join(" ;; ")}`);
     }
-    const parsed = parseTrayQuitOutput(result.stdout, pid);
-    const diagnostic = [
-      `TRAY_QUIT_HELPER executable_category=python-harness executable_path=${path.basename(executable)} exit_code=${result.code}`,
-      `TRAY_QUIT_RESULT target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_windows_any=${parsed.menuWindowsAny} menu_hwnd=${parsed.menuHwnd} tray_alive=${parsed.trayAlive ? 1 : 0} icon_rects=${parsed.iconRects.map((rect) => `${rect.uid}:${rect.left},${rect.top},${rect.right},${rect.bottom}`).join("|") || "none"} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_child_id=${parsed.quitChildId} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
-      `TRAY_QUIT_MENU_MAP ${parsed.menuMap}`
-    ].join("\n");
-    writeLog(layout.logs, "tray-quit.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
-    console.info(`[installer-smoke] ${diagnostic.replaceAll("\n", " ")}`);
-    return parsed;
-  } catch (error) {
-    // On a helper timeout runProcess rejects without a result; the partial
-    // helper output attached to the timeout error is still worth persisting
-    // so the last-known discovery progress survives for triage.
-    const partialStdout = result ? result.stdout : (error?.stdout ?? "");
-    const partialStderr = result ? result.stderr : (error?.stderr ?? "");
-    if (result || partialStdout || partialStderr)
-      writeLog(layout.logs, "tray-quit.log", `${partialStdout}\n${partialStderr}`);
-    if (!result && error instanceof Error && /timed out/.test(error.message)) {
-      const excerpt = String(partialStdout ?? "")
-        .split(/\r?\n/)
-        .filter((line) =>
-          /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
-            line
-          )
-        )
-        .join(" ");
-      assertNoSecrets(excerpt, "tray Quit timeout excerpt");
-      throw new Error(`${error.message}${excerpt ? ` [${excerpt}]` : ""}`);
-    }
-    throw error;
   }
 }
 
