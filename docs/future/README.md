@@ -314,6 +314,14 @@ mandatory.
 7. [Embodied Agency](07-embodied-agency.md)
 8. [Character Behavior Assets and Deferred Post-Training](08-character-post-training.md)
 
+## Future-state implementation atoms
+
+The September 2026 future-state architecture self-audit is decomposed into
+small-agent implementation plans under
+[**Future-State Implementation Atoms**](atoms/README.md). Those files are
+planning artifacts only: current source/tests/merged closure documents remain
+implementation authority, and each atom requires a fresh audit before work.
+
 ## Known current-document tension
 
 Some per-phase and older current documents still contain stale status lines from

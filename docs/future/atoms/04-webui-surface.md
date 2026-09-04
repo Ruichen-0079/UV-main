@@ -1,0 +1,77 @@
+# Atom 04 — WebUI Surface
+
+> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+>
+> **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
+>
+> The current `origin/main` source, tests, merged closure documents, and live
+> dependency state are authoritative. Before implementation, fresh-fetch main,
+> relevant files, relevant open PRs, and exact dependency state. Reclassify every
+> important statement below as **CURRENT / PLANNED / GAP**. If main contradicts
+> this plan, main wins and the plan must be updated rather than forcing old design
+> into new code.
+>
+> This atom must remain the smallest behavior-preserving semantic change that
+> satisfies its acceptance criteria. Do not create a second Runtime, second
+> ledger, generic orchestrator/agent graph, provider router, giant event bus, or
+> broad Manager/Engine abstraction merely to match this document.
+
+## Goal
+
+Add WebUI as one additional desktop Presentation surface using the foundation
+from Atom 03.
+
+## Dependencies
+
+Atom 03.
+
+## CURRENT at audit baseline
+
+- #221 attempted bundled WebUI tray behavior and is closed/unmerged.
+- Its branch is historical evidence only; do not resurrect its architecture
+  wholesale.
+- Current main has Main and Companion windows.
+
+## TARGET
+
+Add a `WebUI` surface to the existing DesktopSurface abstraction and expose
+the smallest truthful tray/user action needed to show it.
+
+The URL/route must be chosen from a route that actually exists on current main
+at implementation time. If no product WebUI route exists, stop as blocked
+rather than inventing a second web application.
+
+## Required constraints
+
+- WebUI is Presentation infrastructure only.
+- It may observe/control Runtime only through supported APIs.
+- No duplicated chat/proactive/Memory authority in the new window.
+- Do not alter Quit.
+- Do not add Subtitle in this atom.
+- Do not copy old #221 code merely because names match.
+
+## Acceptance
+
+- WebUI can be ensured/shown/hidden through the same surface path as Main and
+  Companion.
+- Closing it follows the explicitly chosen surface lifecycle and does not shut
+  down Runtime unless current product requirements say otherwise.
+- Existing surfaces remain unchanged.
+- Packaged desktop smoke covers the new surface enough to prove routing.
+
+## Stop condition
+
+Stop when WebUI is a truthful additional surface. Do not add product features
+inside it in this atom.
+
+## Mandatory implementation start protocol
+
+1. Fresh-fetch current `main`, the exact files this atom touches, relevant open
+   PRs/branches, and tests.
+2. Record the exact base SHA before changing anything.
+3. Confirm predecessor atoms on which this plan depends are actually merged or
+   re-evaluate the dependency.
+4. Keep provider/device/wire details outside stable Character/Cognition/P8
+   semantics unless this atom explicitly owns that boundary.
+5. Implement one immutable atom, run focused tests plus required broader gates,
+   inspect exact diff, then stop at this atom's stop condition.
