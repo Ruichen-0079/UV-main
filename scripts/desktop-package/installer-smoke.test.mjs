@@ -2173,6 +2173,7 @@ const trayQuitOutput = ({
   menuWindowsAny = 1,
   menuHwnd = 789012,
   trayAlive = 1,
+  rects = [{ uid: 1, left: 1800, top: 1040, right: 1824, bottom: 1064 }],
   items = defaultTrayQuitItems(),
   invokeHresult = 0,
   invokeResult = 1,
@@ -2190,6 +2191,8 @@ const trayQuitOutput = ({
     "after_enum",
     "before_revalidate",
     "after_revalidate",
+    "before_icon_probe",
+    "after_icon_probe",
     "before_menu_open",
     "after_menu_open",
     "before_discover",
@@ -2210,6 +2213,8 @@ const trayQuitOutput = ({
     `menu_windows_any=${menuWindowsAny}`,
     `menu_hwnd=${menuHwnd}`,
     `tray_alive=${trayAlive}`,
+    `icon_rect_count=${rects.length}`,
+    ...rects.map((rect) => `TRAY_ICON_RECT=${rect.uid}:${rect.left},${rect.top},${rect.right},${rect.bottom}`),
     `menu_item_count=${items.length}`,
     `quit_matches=${quitHits.length}`,
     `quit_child_id=${quitChildId}`,
@@ -2356,6 +2361,17 @@ test("tray Quit output fails closed when Quit is missing or ambiguous", () => {
     /menu map is truncated/
   );
   assert.throws(
+    () =>
+      parseTrayQuitOutput(
+        trayQuitOutput()
+          .split("\n")
+          .filter((line) => !line.startsWith("TRAY_ICON_RECT="))
+          .join("\n"),
+        123
+      ),
+    /icon rect map is truncated/
+  );
+  assert.throws(
     () => parseTrayQuitOutput(trayQuitOutput().replace("quit_child_id=3", "quit_child_id=5"), 123),
     /not bound to the reported menu map/
   );
@@ -2367,6 +2383,9 @@ test("tray Quit output requires the real menu surface and a successful invocatio
   assert.equal(parsed.menuWindows, 1);
   assert.equal(parsed.menuWindowsAny, 1);
   assert.equal(parsed.trayAlive, true);
+  assert.deepEqual(parsed.iconRects, [
+    { uid: 1, left: 1800, top: 1040, right: 1824, bottom: 1064 }
+  ]);
   for (const [output, message] of [
     [trayQuitOutput({ trayWindows: 0 }), /exactly one tray icon window/],
     [trayQuitOutput({ identityValid: 0 }), /identity was not validated/],

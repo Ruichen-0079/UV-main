@@ -3324,6 +3324,7 @@ menu_windows = 0
 menu_windows_any = 0
 menu_hwnd = 0
 tray_alive = 0
+icon_rect_count = 0
 menu_item_count = 0
 menu_items = []
 quit_matches = 0
@@ -3347,6 +3348,7 @@ def emit_result(error=None):
     print(f"menu_windows_any={menu_windows_any}", flush=True)
     print(f"menu_hwnd={menu_hwnd}", flush=True)
     print(f"tray_alive={tray_alive}", flush=True)
+    print(f"icon_rect_count={icon_rect_count}", flush=True)
     print(f"menu_item_count={menu_item_count}", flush=True)
     print(f"quit_matches={quit_matches}", flush=True)
     print(f"quit_child_id={quit_child_id}", flush=True)
@@ -3401,6 +3403,22 @@ oleacc.AccessibleObjectFromWindow.restype = ctypes.c_long
 oleaut32 = ctypes.WinDLL("oleaut32", use_last_error=True)
 oleaut32.SysFreeString.argtypes = [wintypes.LPVOID]
 oleaut32.SysFreeString.restype = None
+
+class NotifyIconId(ctypes.Structure):
+    _fields_ = [("size", wintypes.DWORD),
+                ("hwnd", wintypes.HWND),
+                ("uid", wintypes.UINT),
+                ("guid", Guid)]
+
+class IconRect(ctypes.Structure):
+    _fields_ = [("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG)]
+
+shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+shell32.Shell_NotifyIconGetRect.argtypes = [ctypes.POINTER(NotifyIconId), ctypes.POINTER(IconRect)]
+shell32.Shell_NotifyIconGetRect.restype = ctypes.c_long
 
 ChildCountProto = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.LPVOID, ctypes.POINTER(ctypes.c_long))
 GetNameProto = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.LPVOID, ChildVariant, ctypes.POINTER(wintypes.LPVOID))
@@ -3506,6 +3524,18 @@ emit_phase("after_revalidate")
 if identity_valid != 1:
     emit_result()
     raise SystemExit(1)
+emit_phase("before_icon_probe")
+for probe_uid in range(1, 17):
+    identifier = NotifyIconId()
+    identifier.size = ctypes.sizeof(NotifyIconId)
+    identifier.hwnd = tray_hwnd
+    identifier.uid = probe_uid
+    rect = IconRect()
+    probe_hr = int(shell32.Shell_NotifyIconGetRect(ctypes.byref(identifier), ctypes.byref(rect)))
+    if probe_hr == 0:
+        icon_rect_count += 1
+        print(f"TRAY_ICON_RECT={probe_uid}:{int(rect.left)},{int(rect.top)},{int(rect.right)},{int(rect.bottom)}", flush=True)
+emit_phase("after_icon_probe")
 emit_phase("before_menu_open")
 notify_post = 0
 notify_error = None
@@ -3604,6 +3634,8 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     "after_enum",
     "before_revalidate",
     "after_revalidate",
+    "before_icon_probe",
+    "after_icon_probe",
     "before_menu_open",
     "after_menu_open",
     "before_discover",
@@ -3636,6 +3668,16 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
   const menuWindowsAny = readInteger("menu_windows_any");
   const menuHwnd = readInteger("menu_hwnd");
   const trayAlive = readInteger("tray_alive");
+  const iconRectCount = readInteger("icon_rect_count");
+  const iconRects = [...text.matchAll(/(?:^|\r?\n)TRAY_ICON_RECT=(\d+):(-?\d+),(-?\d+),(-?\d+),(-?\d+)(?=\r?$)/gm)].map(
+    (match) => ({
+      uid: Number(match[1]),
+      left: Number(match[2]),
+      top: Number(match[3]),
+      right: Number(match[4]),
+      bottom: Number(match[5])
+    })
+  );
   const menuItemCount = readInteger("menu_item_count");
   const quitMatches = readInteger("quit_matches");
   const quitChildId = readInteger("quit_child_id");
@@ -3663,6 +3705,8 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     fail(`tray Quit requires exactly one live context menu for the target PID (found ${menuWindows}, system-wide ${menuWindowsAny})`);
   if (menuHwnd <= 0) fail("tray Quit output has invalid menu_hwnd");
   if (trayAlive !== 1) fail("tray Quit tray window died while opening the context menu");
+  if (iconRects.length !== iconRectCount)
+    fail(`tray Quit icon rect map is truncated (rects=${iconRects.length}, count=${iconRectCount})`);
   if (menuItems.length !== menuItemCount)
     fail(`tray Quit menu map is truncated (items=${menuItems.length}, count=${menuItemCount}): ${menuMap}`);
   if (quitMatches !== 1)
@@ -3691,6 +3735,8 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     menuWindowsAny,
     menuHwnd,
     trayAlive: trayAlive === 1,
+    iconRectCount,
+    iconRects,
     menuItemCount,
     quitMatches,
     quitChildId,
@@ -3778,7 +3824,7 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       const excerpt = String(result.stdout ?? "")
         .split(/\r?\n/)
         .filter((line) =>
-          /^(?:notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
+          /^(?:notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
             line
           )
         )
@@ -3791,7 +3837,7 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
     const parsed = parseTrayQuitOutput(result.stdout, pid);
     const diagnostic = [
       `TRAY_QUIT_HELPER executable_category=python-harness executable_path=${path.basename(executable)} exit_code=${result.code}`,
-      `TRAY_QUIT_RESULT target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_windows_any=${parsed.menuWindowsAny} menu_hwnd=${parsed.menuHwnd} tray_alive=${parsed.trayAlive ? 1 : 0} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_child_id=${parsed.quitChildId} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
+      `TRAY_QUIT_RESULT target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_windows_any=${parsed.menuWindowsAny} menu_hwnd=${parsed.menuHwnd} tray_alive=${parsed.trayAlive ? 1 : 0} icon_rects=${parsed.iconRects.map((rect) => `${rect.uid}:${rect.left},${rect.top},${rect.right},${rect.bottom}`).join("|") || "none"} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_child_id=${parsed.quitChildId} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
       `TRAY_QUIT_MENU_MAP ${parsed.menuMap}`
     ].join("\n");
     writeLog(layout.logs, "tray-quit.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
@@ -3809,7 +3855,7 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       const excerpt = String(partialStdout ?? "")
         .split(/\r?\n/)
         .filter((line) =>
-          /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
+          /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
             line
           )
         )
