@@ -3413,7 +3413,12 @@ ACC_GETNAME = 10
 ACC_DODEFAULT = 25
 
 def accessible_fn(pointer, index, proto):
-    table = (wintypes.LPVOID * 28).from_address(pointer)
+    # A COM interface pointer addresses the object; its first field is the
+    # vtable address. Dereference once before indexing the method slot.
+    vtable = (wintypes.LPVOID).from_address(pointer).value
+    if not vtable:
+        raise RuntimeError("accessible vtable is null")
+    table = (wintypes.LPVOID * 28).from_address(vtable)
     raw = table[index]
     address = raw if isinstance(raw, int) else raw.value
     if not address:
