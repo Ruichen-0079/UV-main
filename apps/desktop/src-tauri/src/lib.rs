@@ -22,17 +22,22 @@ const TRAY_SHOW_COMPANION: &str = "tray-show-companion";
 const TRAY_HIDE_COMPANION: &str = "tray-hide-companion";
 const TRAY_QUIT: &str = "tray-quit";
 
-// TEMPORARY DIAG229 instrumentation (tray-quit exit-chain investigation).
-// Emits one greppable stderr marker per exit-chain checkpoint (C1..C10).
+// TEMPORARY DIAG229/DIAG230 instrumentation (tray-quit exit-chain investigation).
+// Emits one greppable stderr marker per exit-chain checkpoint (C1..C11).
 // Error-tolerant on purpose: a broken stderr pipe must never panic here
 // (release builds use panic=abort) and must not change control flow.
-// Remove this helper and every diag229 call once the investigation lands.
+// Remove this helper and every diag229/emit_diag_line call once the
+// investigation lands.
 fn diag229(marker: &str) {
+  emit_diag_line(&format!("DIAG229 {marker}"));
+}
+
+fn emit_diag_line(line: &str) {
   use std::io::Write;
   let mut stderr = std::io::stderr();
   let _ = writeln!(
     stderr,
-    "DIAG229 {marker} pid={} thread={:?}",
+    "{line} pid={} thread={:?}",
     std::process::id(),
     std::thread::current().id()
   );
@@ -172,7 +177,12 @@ fn begin_app_shutdown(app: &tauri::AppHandle) {
     return;
   }
   diag229("C9 shutdown_gate_claimed");
+  let supervisor_shutdown_started = std::time::Instant::now();
   supervisor::shutdown_supervisor(app);
+  emit_diag_line(&format!(
+    "DIAG230 C11 shutdown_supervisor_returned elapsed_ms={}",
+    supervisor_shutdown_started.elapsed().as_millis()
+  ));
 }
 
 fn request_app_exit(app: &tauri::AppHandle) {
