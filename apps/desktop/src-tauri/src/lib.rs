@@ -22,6 +22,22 @@ const TRAY_SHOW_COMPANION: &str = "tray-show-companion";
 const TRAY_HIDE_COMPANION: &str = "tray-hide-companion";
 const TRAY_QUIT: &str = "tray-quit";
 
+// TEMPORARY DIAG229 instrumentation (tray-quit exit-chain investigation).
+// Emits one greppable stderr marker per exit-chain checkpoint (C1..C10).
+// Error-tolerant on purpose: a broken stderr pipe must never panic here
+// (release builds use panic=abort) and must not change control flow.
+// Remove this helper and every diag229 call once the investigation lands.
+fn diag229(marker: &str) {
+  use std::io::Write;
+  let mut stderr = std::io::stderr();
+  let _ = writeln!(
+    stderr,
+    "DIAG229 {marker} pid={} thread={:?}",
+    std::process::id(),
+    std::thread::current().id()
+  );
+}
+
 static APP_SHUTDOWN: lifecycle::ShutdownGate = lifecycle::ShutdownGate::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,29 +166,43 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn begin_app_shutdown(app: &tauri::AppHandle) {
+  diag229("C10 begin_app_shutdown_enter");
   if !claim_app_shutdown() {
+    diag229("C9 shutdown_gate_rejected");
     return;
   }
+  diag229("C9 shutdown_gate_claimed");
   supervisor::shutdown_supervisor(app);
 }
 
 fn request_app_exit(app: &tauri::AppHandle) {
-  if !app_shutdown_started() {
+  let already_started = app_shutdown_started();
+  diag229(&format!(
+    "C4 request_app_exit_enter already_started={already_started}"
+  ));
+  if !already_started {
     // A tray menu listener runs while Tauri is dispatching the menu event.
     // Queue the exit request as a later main-thread task so the nested
     // RequestExit event is not posted from inside that dispatch.
     let app = app.clone();
+    diag229("C5 exit_deferred_scheduled");
     std::thread::spawn(move || {
+      diag229("C6 exit_deferred_running");
       let exit_app = app.clone();
       let fallback_app = app.clone();
       let result = app.run_on_main_thread(move || {
+        diag229("C7 app_exit_call");
         exit_app.exit(0);
       });
+      diag229(&format!("C7r run_on_main_thread_done ok={}", result.is_ok()));
       if let Err(error) = result {
         eprintln!("[yuvi-desktop] failed to schedule app exit: {error}");
+        diag229("C7 app_exit_call");
         fallback_app.exit(0);
       }
     });
+  } else {
+    diag229("C4b exit_suppressed_already_started");
   }
 }
 
@@ -204,7 +234,10 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     .tooltip("YUVI")
     .menu(&menu)
     .on_menu_event(|app, event| {
-      match tray_action(event.id.as_ref()) {
+      diag229(&format!("C1 menu_event id={}", event.id.as_ref()));
+      let action = tray_action(event.id.as_ref());
+      diag229(&format!("C2 mapped={action:?}"));
+      match action {
         Some(TrayAction::OpenMain) => {
           if let Err(error) = show_main(app) {
             eprintln!("[yuvi-desktop] failed to open main window: {error}");
@@ -225,7 +258,10 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             eprintln!("[yuvi-desktop] failed to hide companion window: {error}");
           }
         }
-        Some(TrayAction::Quit) => request_app_exit(app),
+        Some(TrayAction::Quit) => {
+          diag229("C3 dispatch_quit_enter");
+          request_app_exit(app);
+        }
         None => {}
       }
     })
@@ -297,10 +333,12 @@ pub fn run() {
     .build(tauri::generate_context!())
     .expect("error while building YUVI desktop app")
     .run(|app_handle, event| {
-      if let RunEvent::ExitRequested { .. } = event {
+      if let RunEvent::ExitRequested { code, .. } = event {
+        diag229(&format!("C8 exit_requested code={code:?}"));
         begin_app_shutdown(app_handle);
       }
       if let RunEvent::Exit = event {
+        diag229("C8x run_event_exit");
         begin_app_shutdown(app_handle);
       }
     });
