@@ -64,7 +64,10 @@ import {
   runWmCloseHelper,
   TAURI_MAIN_WINDOW_TITLE,
   TRAY_ICON_WINDOW_CLASS,
-  TRAY_QUIT_MENU_COMMAND_ID,
+  TRAY_MENU_WINDOW_CLASS,
+  TRAY_NOTIFY_MESSAGE_ID,
+  TRAY_QUIT_MENU_TEXT,
+  TRAY_QUIT_SEMANTIC_ID,
   TRAY_QUIT_PYTHON_SOURCE,
   parseTrayQuitOutput,
   WM_CLOSE_PYTHON_SOURCE,
@@ -2146,6 +2149,17 @@ test("WM_CLOSE output parser rejects secret-like output without retaining it", (
   );
 });
 
+// Default synthetic menu deliberately avoids allocation-order coupling: the
+// Quit entry sits in the middle with a non-sequential native id, so every
+// default-case test proves resolution by semantic text, not by position.
+const defaultTrayQuitItems = () => [
+  { id: 1011, text: "Show Companion" },
+  { id: 1009, text: "Open YUVI" },
+  { id: 1042, text: "Quit" },
+  { id: 1015, text: "Hide YUVI" },
+  { id: 1022, text: "Hide Companion" }
+];
+
 const trayQuitOutput = ({
   targetPid = 123,
   trayWindows = 1,
@@ -2153,17 +2167,30 @@ const trayQuitOutput = ({
   validatedPid = targetPid,
   classExact = 1,
   identityValid = 1,
-  commandId = TRAY_QUIT_MENU_COMMAND_ID,
+  notifyPost = 1,
+  menuWindows = 1,
+  menuHwnd = 789012,
+  items = defaultTrayQuitItems(),
+  menuDismissed = 1,
   postResult = 1,
   elapsedMs = 8,
   phases = null
 } = {}) => {
+  const quitHits = items.filter((item) => item.text === "Quit");
+  const quitCommandId = quitHits.length ? quitHits[0].id : 0;
+  const quitText = quitHits.length ? quitHits[0].text : "";
   const phaseLines = [
     "start",
     "before_enum",
     "after_enum",
     "before_revalidate",
     "after_revalidate",
+    "before_menu_open",
+    "after_menu_open",
+    "before_discover",
+    "after_discover",
+    "before_menu_dismiss",
+    "after_menu_dismiss",
     "before_post",
     "after_post"
   ].map((phase) => `TRAY_QUIT_PHASE=${phase}`);
@@ -2175,27 +2202,56 @@ const trayQuitOutput = ({
     `validated_pid=${validatedPid}`,
     `class_exact=${classExact}`,
     `identity_valid=${identityValid}`,
-    `command_id=${commandId}`,
+    `notify_post=${notifyPost}`,
+    `menu_windows=${menuWindows}`,
+    `menu_hwnd=${menuHwnd}`,
+    `menu_item_count=${items.length}`,
+    `quit_matches=${quitHits.length}`,
+    `quit_command_id=${quitCommandId}`,
+    `quit_text=${quitText}`,
+    ...items.map((item, index) => `TRAY_QUIT_MENU_ITEM=${index}:${item.id}:${item.text}`),
+    `menu_dismissed=${menuDismissed}`,
     `post_result=${postResult}`,
     `elapsed_ms=${elapsedMs}`
   ].join("\n");
 };
 
-test("tray Quit helper targets the packaged Tauri tray window and command", () => {
+test("tray Quit helper uses semantic discovery and never hardcodes a native command id", () => {
   const script = buildTrayQuitScript(12345);
   assert.equal(script, TRAY_QUIT_PYTHON_SOURCE);
   assert.match(script, /TRAY_ICON_WINDOW_CLASS = "tray_icon_app"/);
-  assert.match(script, /TRAY_QUIT_MENU_COMMAND_ID = 1004/);
+  assert.match(script, /TRAY_MENU_WINDOW_CLASS = "#32768"/);
+  assert.match(script, /TRAY_QUIT_MENU_TEXT = "Quit"/);
+  assert.match(script, /WM_USER_TRAYICON = 6002/);
+  assert.match(script, /MN_GETHMENU = 0x01E1/);
+  assert.match(script, /WM_CANCELMODE = 0x001B/);
   for (const symbol of [
     "EnumWindows",
     "GetWindowThreadProcessId",
     "GetClassNameW",
     "IsWindow",
-    "PostMessageW"
+    "PostMessageW",
+    "SendMessageW",
+    "GetMenuItemCount",
+    "GetMenuStringW",
+    "GetMenuItemID",
+    "TRAY_QUIT_MENU_ITEM"
   ]) assert.match(script, new RegExp(symbol));
+  assert.doesNotMatch(script, /1004/);
+  assert.doesNotMatch(script, /TRAY_QUIT_MENU_COMMAND_ID/);
   assert.equal(TRAY_ICON_WINDOW_CLASS, "tray_icon_app");
+  assert.equal(TRAY_MENU_WINDOW_CLASS, "#32768");
+  assert.equal(TRAY_NOTIFY_MESSAGE_ID, 6002);
+  assert.equal(TRAY_QUIT_MENU_TEXT, "Quit");
+  assert.equal(TRAY_QUIT_SEMANTIC_ID, "tray-quit");
   assert.match(script, /WM_COMMAND = 0x0111/);
   assert.doesNotMatch(script, /taskkill|Stop-Process|UIAutomation|Add-Type|DllImport/i);
+  const source = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "installer-smoke.mjs"),
+    "utf8"
+  );
+  assert.doesNotMatch(source, /1004/);
+  assert.doesNotMatch(source, /TRAY_QUIT_MENU_COMMAND_ID/);
 });
 
 test("tray Quit helper arguments are isolated and reject invalid PIDs", () => {
@@ -2205,17 +2261,137 @@ test("tray Quit helper arguments are isolated and reject invalid PIDs", () => {
   assert.equal(buildTrayQuitArguments(12345).at(-1), "12345");
 });
 
-test("tray Quit output requires one validated tray window and the Quit command", () => {
+test("tray Quit output resolves the semantic Quit item regardless of allocation order", () => {
   const parsed = parseTrayQuitOutput(trayQuitOutput(), 123);
   assert.equal(parsed.identityValid, true);
-  assert.equal(parsed.commandId, TRAY_QUIT_MENU_COMMAND_ID);
+  assert.equal(parsed.quitText, "Quit");
+  assert.equal(parsed.quitCommandId, 1042);
   assert.equal(parsed.postResult, true);
+  assert.deepEqual(
+    parsed.menuItems.map((item) => item.text),
+    ["Show Companion", "Open YUVI", "Quit", "Hide YUVI", "Hide Companion"]
+  );
+  assert.match(parsed.menuMap, /2:1042:Quit/);
+
+  const cases = [
+    {
+      label: "quit first with lowest id",
+      items: [{ id: 1000, text: "Quit" }, { id: 1001, text: "Open YUVI" }],
+      expectedId: 1000
+    },
+    {
+      label: "quit last with sparse id",
+      items: [{ id: 1001, text: "Open YUVI" }, { id: 9182, text: "Quit" }],
+      expectedId: 9182
+    },
+    {
+      label: "quit single item menu",
+      items: [{ id: 4242, text: "Quit" }],
+      expectedId: 4242
+    },
+    {
+      label: "future controls do not disturb Quit resolution",
+      items: [
+        { id: 2001, text: "Open WebUI" },
+        { id: 1999, text: "Quit" },
+        { id: 2004, text: "Settings" },
+        { id: 2002, text: "Toggle Subtitle" },
+        { id: 2009, text: "Toggle Companion" }
+      ],
+      expectedId: 1999
+    }
+  ];
+  for (const { label, items, expectedId } of cases) {
+    const result = parseTrayQuitOutput(trayQuitOutput({ items }), 123);
+    assert.equal(result.quitCommandId, expectedId, label);
+    assert.equal(result.quitMatches, 1, label);
+    assert.equal(result.quitText, "Quit", label);
+  }
+
+  const dismissed = parseTrayQuitOutput(trayQuitOutput({ menuDismissed: 0 }), 123);
+  assert.equal(dismissed.menuDismissed, false);
+  assert.equal(dismissed.postResult, true);
+});
+
+test("tray Quit output fails closed when Quit is missing or ambiguous", () => {
+  for (const [items, mapFragment] of [
+    [
+      [
+        { id: 1001, text: "Open YUVI" },
+        { id: 1002, text: "Settings" }
+      ],
+      "Open YUVI"
+    ],
+    [
+      [
+        { id: 1001, text: "quit" },
+        { id: 1002, text: "Quit " },
+        { id: 1003, text: " Quit" },
+        { id: 1007, text: "Quits" },
+        { id: 1005, text: "Quit All" },
+        { id: 1006, text: "&Quit" }
+      ],
+      "Quit All"
+    ]
+  ]) {
+    assert.throws(
+      () => parseTrayQuitOutput(trayQuitOutput({ items }), 123),
+      (error) =>
+        /expected exactly one "Quit" item/.test(error.message) &&
+        error.message.includes(mapFragment),
+      "missing Quit must fail with the discovered map"
+    );
+  }
+  assert.throws(
+    () =>
+      parseTrayQuitOutput(
+        trayQuitOutput({
+          items: [
+            { id: 1001, text: "Quit" },
+            { id: 1002, text: "Open YUVI" },
+            { id: 1003, text: "Quit" }
+          ]
+        }),
+        123
+      ),
+    /expected exactly one "Quit" item, found 2 of 3/
+  );
+  assert.throws(
+    () => parseTrayQuitOutput(trayQuitOutput({ items: [{ id: 70000, text: "Quit" }] }), 123),
+    /native command id is out of range/
+  );
+  assert.throws(
+    () =>
+      parseTrayQuitOutput(
+        trayQuitOutput()
+          .split("\n")
+          .filter((line) => line !== "TRAY_QUIT_MENU_ITEM=2:1042:Quit")
+          .join("\n"),
+        123
+      ),
+    /menu map is truncated/
+  );
+  assert.throws(
+    () => parseTrayQuitOutput(trayQuitOutput().replace("quit_command_id=1042", "quit_command_id=9999"), 123),
+    /not bound to the reported menu map/
+  );
+});
+
+test("tray Quit output requires the real menu surface and an accepted invocation", () => {
+  const parsed = parseTrayQuitOutput(trayQuitOutput(), 123);
+  assert.equal(parsed.notifyPost, true);
+  assert.equal(parsed.menuWindows, 1);
   for (const [output, message] of [
     [trayQuitOutput({ trayWindows: 0 }), /exactly one tray icon window/],
     [trayQuitOutput({ identityValid: 0 }), /identity was not validated/],
-    [trayQuitOutput({ commandId: 1003 }), /command ID does not match/],
-    [trayQuitOutput({ postResult: 0 }), /PostMessageW was not accepted/]
+    [trayQuitOutput({ notifyPost: 0 }), /menu open was not accepted/],
+    [trayQuitOutput({ menuWindows: 0 }), /exactly one live context menu/],
+    [trayQuitOutput({ postResult: 0 }), /was not accepted/]
   ]) assert.throws(() => parseTrayQuitOutput(output), message);
+  assert.throws(
+    () => parseTrayQuitOutput(trayQuitOutput({ postResult: 0 }), 123),
+    (error) => error.message.includes("1042") && error.message.includes("tray-quit")
+  );
   assert.throws(
     () => parseTrayQuitOutput(`${trayQuitOutput()}\nDEEPSEEK_API_KEY=do-not-echo`),
     /secret-like material/

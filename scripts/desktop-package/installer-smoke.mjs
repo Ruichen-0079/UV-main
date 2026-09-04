@@ -3268,7 +3268,27 @@ export function buildWmCloseArguments(pid) {
 }
 
 export const TRAY_ICON_WINDOW_CLASS = "tray_icon_app";
-export const TRAY_QUIT_MENU_COMMAND_ID = 1004;
+export const TRAY_MENU_WINDOW_CLASS = "#32768";
+// Notify-icon delivery message used by the pinned tray-icon crate
+// (see Cargo.lock; tray-icon 0.24.2 platform_impl/windows defines
+// WM_USER_TRAYICON = 6002). The shell reports a right-button release on the
+// notify icon through this message, and the tray window opens the live muda
+// popup menu in response. This constant is version-pinned, unlike the menu
+// allocation order: adding tray items never changes it.
+export const TRAY_NOTIFY_MESSAGE_ID = 6002;
+export const TRAY_NOTIFY_RBUTTONUP = 0x0205;
+// MN_GETHMENU retrieves the live popup HMENU from its #32768 window so the
+// helper can enumerate the actual menu instead of assuming numeric ids.
+export const TRAY_MENU_MN_GETHMENU = 0x01e1;
+// Semantic identity of the Quit control. A native HMENU carries no string
+// ids, so runtime discovery keys on this exact visible text and requires
+// exactly one match. This is the user-visible label created in
+// apps/desktop/src-tauri (MenuItem "Quit" with semantic id "tray-quit").
+export const TRAY_QUIT_MENU_TEXT = "Quit";
+// Documented muda string id for diagnostics. Discovery binds the posted
+// native command id to TRAY_QUIT_MENU_TEXT at runtime; this label records
+// which semantic action the native id was resolved for.
+export const TRAY_QUIT_SEMANTIC_ID = "tray-quit";
 
 export const TRAY_QUIT_PYTHON_SOURCE = String.raw`
 import ctypes
@@ -3277,8 +3297,17 @@ import time
 from ctypes import wintypes
 
 WM_COMMAND = 0x0111
+WM_CANCELMODE = 0x001B
+WM_RBUTTONUP = 0x0205
+WM_USER_TRAYICON = 6002
+MN_GETHMENU = 0x01E1
+MF_BYPOSITION = 0x0400
 TRAY_ICON_WINDOW_CLASS = "tray_icon_app"
-TRAY_QUIT_MENU_COMMAND_ID = 1004
+TRAY_MENU_WINDOW_CLASS = "#32768"
+TRAY_QUIT_MENU_TEXT = "Quit"
+MENU_OPEN_TIMEOUT_S = 5.0
+MENU_DISMISS_TIMEOUT_S = 2.0
+MENU_POLL_INTERVAL_S = 0.05
 started = time.monotonic()
 target_pid = int(sys.argv[1])
 tray_windows = []
@@ -3286,6 +3315,15 @@ validated_pid = 0
 class_exact = 0
 identity_valid = 0
 tray_hwnd = 0
+notify_post = 0
+menu_windows = 0
+menu_hwnd = 0
+menu_item_count = 0
+menu_items = []
+quit_matches = 0
+quit_command_id = 0
+quit_text = ""
+menu_dismissed = 0
 post_result = 0
 
 def emit_phase(name):
@@ -3298,7 +3336,16 @@ def emit_result(error=None):
     print(f"validated_pid={validated_pid}", flush=True)
     print(f"class_exact={class_exact}", flush=True)
     print(f"identity_valid={identity_valid}", flush=True)
-    print(f"command_id={TRAY_QUIT_MENU_COMMAND_ID}", flush=True)
+    print(f"notify_post={notify_post}", flush=True)
+    print(f"menu_windows={menu_windows}", flush=True)
+    print(f"menu_hwnd={menu_hwnd}", flush=True)
+    print(f"menu_item_count={menu_item_count}", flush=True)
+    print(f"quit_matches={quit_matches}", flush=True)
+    print(f"quit_command_id={quit_command_id}", flush=True)
+    print(f"quit_text={quit_text}", flush=True)
+    for index, cmd_id, text in menu_items:
+        print(f"TRAY_QUIT_MENU_ITEM={index}:{cmd_id}:{text}", flush=True)
+    print(f"menu_dismissed={menu_dismissed}", flush=True)
     print(f"post_result={post_result}", flush=True)
     if error is not None:
         print(f"win32_error={error}", flush=True)
@@ -3316,25 +3363,48 @@ user32.IsWindow.argtypes = [wintypes.HWND]
 user32.IsWindow.restype = wintypes.BOOL
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = wintypes.LPARAM
+user32.GetMenuItemCount.argtypes = [wintypes.HMENU]
+user32.GetMenuItemCount.restype = ctypes.c_int
+user32.GetMenuStringW.argtypes = [wintypes.HMENU, wintypes.UINT, wintypes.LPWSTR, ctypes.c_int, wintypes.UINT]
+user32.GetMenuStringW.restype = ctypes.c_int
+user32.GetMenuItemID.argtypes = [wintypes.HMENU, ctypes.c_int]
+user32.GetMenuItemID.restype = ctypes.c_uint
 
 def read_class(hwnd):
     buffer = ctypes.create_unicode_buffer(256)
     user32.GetClassNameW(hwnd, buffer, len(buffer))
     return buffer.value
 
+found_tray = []
+found_menu = []
+
 def enum_window(hwnd, _lparam):
     pid_value = wintypes.DWORD(0)
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_value))
-    if int(pid_value.value) == target_pid and read_class(hwnd) == TRAY_ICON_WINDOW_CLASS:
-        tray_windows.append(int(hwnd))
+    if int(pid_value.value) != target_pid:
+        return True
+    class_name = read_class(hwnd)
+    if class_name == TRAY_ICON_WINDOW_CLASS:
+        found_tray.append(int(hwnd))
+    elif class_name == TRAY_MENU_WINDOW_CLASS:
+        found_menu.append(int(hwnd))
     return True
+
+def snapshot_menu_windows():
+    del found_menu[:]
+    user32.EnumWindows(EnumWindowsProc(enum_window), 0)
+    return list(found_menu)
 
 emit_phase("start")
 emit_phase("before_enum")
 if not user32.EnumWindows(EnumWindowsProc(enum_window), 0):
     emit_phase("after_enum")
+    tray_windows = list(found_tray)
     emit_result(ctypes.get_last_error())
     raise SystemExit(1)
+tray_windows = list(found_tray)
 emit_phase("after_enum")
 if len(tray_windows) != 1:
     emit_result()
@@ -3350,8 +3420,58 @@ emit_phase("after_revalidate")
 if identity_valid != 1:
     emit_result()
     raise SystemExit(1)
+emit_phase("before_menu_open")
+notify_post = int(bool(user32.PostMessageW(tray_hwnd, WM_USER_TRAYICON, 0, WM_RBUTTONUP)))
+notify_error = ctypes.get_last_error() if notify_post == 0 else None
+menu_deadline = time.monotonic() + MENU_OPEN_TIMEOUT_S
+menu_hits = []
+while time.monotonic() < menu_deadline:
+    menu_hits = snapshot_menu_windows()
+    if len(menu_hits) >= 1:
+        break
+    time.sleep(MENU_POLL_INTERVAL_S)
+menu_windows = len(menu_hits)
+menu_hwnd = int(menu_hits[0]) if menu_hits else 0
+emit_phase("after_menu_open")
+if notify_post != 1 or menu_windows != 1:
+    emit_result(notify_error)
+    raise SystemExit(1)
+emit_phase("before_discover")
+hmenu = int(user32.SendMessageW(menu_hwnd, MN_GETHMENU, 0, 0))
+discover_error = None
+if hmenu:
+    count = int(user32.GetMenuItemCount(hmenu))
+    if count > 0:
+        menu_item_count = count
+        for index in range(count):
+            text_buffer = ctypes.create_unicode_buffer(512)
+            copied = int(user32.GetMenuStringW(hmenu, index, text_buffer, len(text_buffer), MF_BYPOSITION))
+            text = text_buffer.value if copied > 0 else ""
+            cmd_id = int(user32.GetMenuItemID(hmenu, index))
+            menu_items.append((index, cmd_id, text))
+            if text == TRAY_QUIT_MENU_TEXT:
+                quit_matches += 1
+                quit_command_id = cmd_id
+                quit_text = text
+    else:
+        discover_error = f"menu_item_count={count}"
+else:
+    discover_error = "hmenu_unavailable"
+emit_phase("after_discover")
+if quit_matches != 1 or quit_command_id <= 0:
+    emit_result(discover_error)
+    raise SystemExit(1)
+emit_phase("before_menu_dismiss")
+user32.PostMessageW(menu_hwnd, WM_CANCELMODE, 0, 0)
+dismiss_deadline = time.monotonic() + MENU_DISMISS_TIMEOUT_S
+while time.monotonic() < dismiss_deadline:
+    if not snapshot_menu_windows():
+        menu_dismissed = 1
+        break
+    time.sleep(MENU_POLL_INTERVAL_S)
+emit_phase("after_menu_dismiss")
 emit_phase("before_post")
-post_result = int(bool(user32.PostMessageW(tray_hwnd, WM_COMMAND, TRAY_QUIT_MENU_COMMAND_ID, 0)))
+post_result = int(bool(user32.PostMessageW(tray_hwnd, WM_COMMAND, quit_command_id, 0)))
 post_error = ctypes.get_last_error() if post_result == 0 else None
 emit_phase("after_post")
 emit_result(post_error)
@@ -3382,6 +3502,12 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     "after_enum",
     "before_revalidate",
     "after_revalidate",
+    "before_menu_open",
+    "after_menu_open",
+    "before_discover",
+    "after_discover",
+    "before_menu_dismiss",
+    "after_menu_dismiss",
     "before_post",
     "after_post"
   ];
@@ -3394,15 +3520,33 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     if (!Number.isSafeInteger(value) || value < 0) fail(`tray Quit output has invalid ${name}`);
     return value;
   };
+  const readSingleLine = (name) => {
+    const matches = [...text.matchAll(new RegExp(`(?:^|\\r?\\n)${name}=(.*)(?=\\r?$)`, "gm"))];
+    if (matches.length !== 1) fail(`tray Quit output is missing or malformed ${name}`);
+    return matches[0][1];
+  };
   const targetPid = readInteger("target_pid");
   const trayWindows = readInteger("tray_windows");
   const trayHwnd = readInteger("tray_hwnd");
   const validatedPid = readInteger("validated_pid");
   const classExact = readInteger("class_exact");
   const identityValid = readInteger("identity_valid");
-  const commandId = readInteger("command_id");
+  const notifyPost = readInteger("notify_post");
+  const menuWindows = readInteger("menu_windows");
+  const menuHwnd = readInteger("menu_hwnd");
+  const menuItemCount = readInteger("menu_item_count");
+  const quitMatches = readInteger("quit_matches");
+  const quitCommandId = readInteger("quit_command_id");
+  const quitText = readSingleLine("quit_text");
+  const menuItems = [...text.matchAll(/(?:^|\r?\n)TRAY_QUIT_MENU_ITEM=(\d+):(\d+):(.*)(?=\r?$)/gm)].map(
+    (match) => ({ index: Number(match[1]), commandId: Number(match[2]), text: match[3] })
+  );
+  const menuDismissed = readInteger("menu_dismissed");
   const postResult = readInteger("post_result");
   const elapsedMs = readInteger("elapsed_ms");
+  const menuMap = menuItems.length
+    ? menuItems.map((item) => `${item.index}:${item.commandId}:${item.text}`).join(" | ")
+    : "<no menu items reported>";
   if (expectedPid !== null && targetPid !== Number(expectedPid))
     fail(`tray Quit output target PID mismatch (${targetPid})`);
   if (trayWindows !== 1) fail("tray Quit requires exactly one tray icon window");
@@ -3411,8 +3555,27 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     fail(`tray Quit validated PID mismatch (${validatedPid})`);
   if (classExact !== 1) fail("tray Quit tray icon class was not exact");
   if (identityValid !== 1) fail("tray Quit target identity was not validated");
-  if (commandId !== TRAY_QUIT_MENU_COMMAND_ID) fail("tray Quit command ID does not match the packaged menu");
-  if (postResult !== 1) fail("tray Quit PostMessageW was not accepted");
+  if (notifyPost !== 1)
+    fail("tray Quit context menu open was not accepted (WM_USER_TRAYICON/RBUTTONUP rejected)");
+  if (menuWindows !== 1)
+    fail(`tray Quit requires exactly one live context menu for the target PID (found ${menuWindows})`);
+  if (menuHwnd <= 0) fail("tray Quit output has invalid menu_hwnd");
+  if (menuItems.length !== menuItemCount)
+    fail(`tray Quit menu map is truncated (items=${menuItems.length}, count=${menuItemCount}): ${menuMap}`);
+  if (quitMatches !== 1)
+    fail(
+      `tray Quit semantic discovery failed: expected exactly one ${JSON.stringify(TRAY_QUIT_MENU_TEXT)} item, found ${quitMatches} of ${menuItemCount}: ${menuMap}`
+    );
+  if (quitText !== TRAY_QUIT_MENU_TEXT)
+    fail(`tray Quit discovered text is not the semantic Quit item (${JSON.stringify(quitText)}): ${menuMap}`);
+  if (!(quitCommandId > 0 && quitCommandId <= 0xffff))
+    fail(`tray Quit discovered native command id is out of range (${quitCommandId}): ${menuMap}`);
+  if (!menuItems.some((item) => item.commandId === quitCommandId && item.text === TRAY_QUIT_MENU_TEXT))
+    fail(`tray Quit discovered id is not bound to the reported menu map (${quitCommandId}): ${menuMap}`);
+  if (postResult !== 1)
+    fail(
+      `tray Quit PostMessageW(WM_COMMAND, ${quitCommandId}) for semantic ${TRAY_QUIT_SEMANTIC_ID}/${JSON.stringify(quitText)} was not accepted: ${menuMap}`
+    );
   return {
     targetPid,
     trayWindows,
@@ -3420,7 +3583,16 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     validatedPid,
     classExact: classExact === 1,
     identityValid: identityValid === 1,
-    commandId,
+    notifyPost: notifyPost === 1,
+    menuWindows,
+    menuHwnd,
+    menuItemCount,
+    quitMatches,
+    quitCommandId,
+    quitText,
+    menuItems,
+    menuMap,
+    menuDismissed: menuDismissed === 1,
     postResult: postResult === 1,
     elapsedMs,
     phases,
@@ -3496,14 +3668,26 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       } catch (error) {
         parseError = error instanceof Error ? error.message : String(error);
       }
+      // Best-effort mapping excerpt so an early helper exit still reports
+      // the semantic/native discovery state in the failure message itself.
+      const excerpt = String(result.stdout ?? "")
+        .split(/\r?\n/)
+        .filter((line) =>
+          /^(?:notify_post|menu_windows|menu_hwnd|menu_item_count|quit_matches|quit_command_id|quit_text|TRAY_QUIT_MENU_ITEM|post_result|win32_error)=/.test(
+            line
+          )
+        )
+        .join(" ");
+      assertNoSecrets(excerpt, "tray Quit failure excerpt");
       fail(
-        `tray Quit helper exited with code ${result.code}${parseError ? `: ${parseError}` : ""}`
+        `tray Quit helper exited with code ${result.code}${parseError ? `: ${parseError}` : ""}${excerpt ? ` [${excerpt}]` : ""}`
       );
     }
     const parsed = parseTrayQuitOutput(result.stdout, pid);
     const diagnostic = [
       `TRAY_QUIT_HELPER executable_category=python-harness executable_path=${path.basename(executable)} exit_code=${result.code}`,
-      `TRAY_QUIT_RESULT target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} command_id=${parsed.commandId} post_result=${parsed.postResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`
+      `TRAY_QUIT_RESULT target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_hwnd=${parsed.menuHwnd} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_command_id=${parsed.quitCommandId} menu_dismissed=${parsed.menuDismissed ? 1 : 0} post_result=${parsed.postResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
+      `TRAY_QUIT_MENU_MAP ${parsed.menuMap}`
     ].join("\n");
     writeLog(layout.logs, "tray-quit.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
     console.info(`[installer-smoke] ${diagnostic.replaceAll("\n", " ")}`);
