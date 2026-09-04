@@ -11,12 +11,19 @@ use tauri::{Manager, RunEvent};
 /// working in both dev (Vite dev server) and packaged (frontendDist) mode.
 const MAIN_WINDOW_URL: &str = "index.html#/main";
 
+/// Bundled dashboard surface. This deliberately reuses the packaged frontend
+/// instead of opening a development-only localhost URL.
+const DASHBOARD_WINDOW_URL: &str = "index.html#/dashboard";
+const DASHBOARD_WINDOW_LABEL: &str = "dashboard";
+const DASHBOARD_WINDOW_TITLE: &str = "YUVI WebUI";
+
 /// Companion window surface that exclusively owns Lumi, speech playback and
 /// the Web Audio analysis chain.
 const COMPANION_WINDOW_URL: &str = "index.html#/companion";
 
 const TRAY_ID: &str = "yuvi-tray";
 const TRAY_OPEN_MAIN: &str = "tray-open-main";
+const TRAY_OPEN_WEBUI: &str = "tray-open-webui";
 const TRAY_HIDE_MAIN: &str = "tray-hide-main";
 const TRAY_SHOW_COMPANION: &str = "tray-show-companion";
 const TRAY_HIDE_COMPANION: &str = "tray-hide-companion";
@@ -27,6 +34,7 @@ static APP_SHUTDOWN: lifecycle::ShutdownGate = lifecycle::ShutdownGate::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayAction {
   OpenMain,
+  OpenWebUi,
   HideMain,
   ShowCompanion,
   HideCompanion,
@@ -36,6 +44,7 @@ enum TrayAction {
 fn tray_action(id: &str) -> Option<TrayAction> {
   match id {
     TRAY_OPEN_MAIN => Some(TrayAction::OpenMain),
+    TRAY_OPEN_WEBUI => Some(TrayAction::OpenWebUi),
     TRAY_HIDE_MAIN => Some(TrayAction::HideMain),
     TRAY_SHOW_COMPANION => Some(TrayAction::ShowCompanion),
     TRAY_HIDE_COMPANION => Some(TrayAction::HideCompanion),
@@ -71,6 +80,31 @@ fn ensure_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWin
   build_main_window(app)
 }
 
+fn build_dashboard_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+  tauri::WebviewWindowBuilder::new(
+    app,
+    DASHBOARD_WINDOW_LABEL,
+    tauri::WebviewUrl::App(DASHBOARD_WINDOW_URL.into()),
+  )
+  .title(DASHBOARD_WINDOW_TITLE)
+  .inner_size(1280.0, 820.0)
+  .min_inner_size(800.0, 600.0)
+  .build()
+}
+
+fn existing_or_create_dashboard<T, E>(
+  existing: Option<T>,
+  create: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+  existing.map_or_else(create, Ok)
+}
+
+fn ensure_dashboard_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+  existing_or_create_dashboard(app.get_webview_window(DASHBOARD_WINDOW_LABEL), || {
+    build_dashboard_window(app)
+  })
+}
+
 fn build_companion_window(
   app: &tauri::AppHandle,
   always_on_top: bool,
@@ -104,6 +138,12 @@ fn ensure_companion_window(app: &tauri::AppHandle) -> tauri::Result<tauri::Webvi
 
 fn show_main(app: &tauri::AppHandle) -> Result<(), String> {
   let window = ensure_main_window(app).map_err(|error| error.to_string())?;
+  window.show().map_err(|error| error.to_string())?;
+  window.set_focus().map_err(|error| error.to_string())
+}
+
+fn show_dashboard(app: &tauri::AppHandle) -> Result<(), String> {
+  let window = ensure_dashboard_window(app).map_err(|error| error.to_string())?;
   window.show().map_err(|error| error.to_string())?;
   window.set_focus().map_err(|error| error.to_string())
 }
@@ -159,19 +199,13 @@ fn begin_app_shutdown(app: &tauri::AppHandle) {
 fn request_app_exit(app: &tauri::AppHandle) {
   if !app_shutdown_started() {
     // A tray menu listener runs while Tauri is dispatching the menu event.
-    // Queue the exit request as a later main-thread task so the nested
-    // RequestExit event is not posted from inside that dispatch.
+    // Defer the request outside that callback. Sending `exit` from this
+    // worker posts the runtime RequestExit event directly; a generic
+    // `run_on_main_thread` task can be acknowledged as queued on Windows but
+    // never reach the event-loop task handler.
     let app = app.clone();
     std::thread::spawn(move || {
-      let exit_app = app.clone();
-      let fallback_app = app.clone();
-      let result = app.run_on_main_thread(move || {
-        exit_app.exit(0);
-      });
-      if let Err(error) = result {
-        eprintln!("[yuvi-desktop] failed to schedule app exit: {error}");
-        fallback_app.exit(0);
-      }
+      app.exit(0);
     });
   }
 }
@@ -194,6 +228,11 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
       &quit,
     ],
   )?;
+  // Native menus allocate command identities when items are constructed, so
+  // preserve the established controls' construction order. Insert the new
+  // item after the root menu exists to keep the existing Quit identity.
+  let open_webui = MenuItem::with_id(app, TRAY_OPEN_WEBUI, "Open WebUI", true, None::<&str>)?;
+  menu.insert(&open_webui, 1)?;
   let icon = app
     .default_window_icon()
     .cloned()
@@ -208,6 +247,11 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         Some(TrayAction::OpenMain) => {
           if let Err(error) = show_main(app) {
             eprintln!("[yuvi-desktop] failed to open main window: {error}");
+          }
+        }
+        Some(TrayAction::OpenWebUi) => {
+          if let Err(error) = show_dashboard(app) {
+            eprintln!("[yuvi-desktop] failed to open WebUI window: {error}");
           }
         }
         Some(TrayAction::HideMain) => {
@@ -308,11 +352,18 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-  use super::{tray_action, TrayAction};
+  use super::{
+    existing_or_create_dashboard, tray_action, TrayAction, DASHBOARD_WINDOW_LABEL,
+    DASHBOARD_WINDOW_TITLE, DASHBOARD_WINDOW_URL,
+  };
 
   #[test]
   fn tray_actions_cover_every_user_control() {
     assert_eq!(tray_action("tray-open-main"), Some(TrayAction::OpenMain));
+    assert_eq!(
+      tray_action("tray-open-webui"),
+      Some(TrayAction::OpenWebUi)
+    );
     assert_eq!(tray_action("tray-hide-main"), Some(TrayAction::HideMain));
     assert_eq!(
       tray_action("tray-show-companion"),
@@ -324,6 +375,32 @@ mod tests {
     );
     assert_eq!(tray_action("tray-quit"), Some(TrayAction::Quit));
     assert_eq!(tray_action("unknown"), None);
+  }
+
+  #[test]
+  fn dashboard_uses_the_bundled_frontend_contract() {
+    assert_eq!(DASHBOARD_WINDOW_LABEL, "dashboard");
+    assert_eq!(DASHBOARD_WINDOW_TITLE, "YUVI WebUI");
+    assert_eq!(DASHBOARD_WINDOW_URL, "index.html#/dashboard");
+    assert!(!DASHBOARD_WINDOW_URL.contains("localhost"));
+  }
+
+  #[test]
+  fn repeated_dashboard_open_reuses_the_existing_window() {
+    let mut create_calls = 0;
+    let first = existing_or_create_dashboard(None, || {
+      create_calls += 1;
+      Ok::<_, ()>("dashboard-window")
+    })
+    .expect("first dashboard open should create the window");
+    let second = existing_or_create_dashboard(Some(first), || {
+      create_calls += 1;
+      Ok::<_, ()>("replacement-window")
+    })
+    .expect("second dashboard open should reuse the window");
+
+    assert_eq!(second, "dashboard-window");
+    assert_eq!(create_calls, 1);
   }
 
   #[test]
