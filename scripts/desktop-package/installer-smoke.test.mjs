@@ -2170,7 +2170,9 @@ const trayQuitOutput = ({
   identityValid = 1,
   notifyPost = 1,
   menuWindows = 1,
+  menuWindowsAny = 1,
   menuHwnd = 789012,
+  trayAlive = 1,
   items = defaultTrayQuitItems(),
   invokeHresult = 0,
   invokeResult = 1,
@@ -2205,7 +2207,9 @@ const trayQuitOutput = ({
     `identity_valid=${identityValid}`,
     `notify_post=${notifyPost}`,
     `menu_windows=${menuWindows}`,
+    `menu_windows_any=${menuWindowsAny}`,
     `menu_hwnd=${menuHwnd}`,
+    `tray_alive=${trayAlive}`,
     `menu_item_count=${items.length}`,
     `quit_matches=${quitHits.length}`,
     `quit_child_id=${quitChildId}`,
@@ -2361,11 +2365,14 @@ test("tray Quit output requires the real menu surface and a successful invocatio
   const parsed = parseTrayQuitOutput(trayQuitOutput(), 123);
   assert.equal(parsed.notifyPost, true);
   assert.equal(parsed.menuWindows, 1);
+  assert.equal(parsed.menuWindowsAny, 1);
+  assert.equal(parsed.trayAlive, true);
   for (const [output, message] of [
     [trayQuitOutput({ trayWindows: 0 }), /exactly one tray icon window/],
     [trayQuitOutput({ identityValid: 0 }), /identity was not validated/],
     [trayQuitOutput({ notifyPost: 0 }), /menu open was not accepted/],
     [trayQuitOutput({ menuWindows: 0 }), /exactly one live context menu/],
+    [trayQuitOutput({ trayAlive: 0 }), /tray window died/],
     [trayQuitOutput({ invokeResult: 0, invokeHresult: 2147500037 }), /accessibility invoke.*failed/]
   ]) assert.throws(() => parseTrayQuitOutput(output), message);
   assert.throws(

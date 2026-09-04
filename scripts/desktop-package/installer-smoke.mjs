@@ -3309,7 +3309,8 @@ TRAY_MENU_WINDOW_CLASS = "#32768"
 TRAY_QUIT_MENU_TEXT = "Quit"
 OBJID_CLIENT = 0xFFFFFFFC
 VT_I4 = 3
-MENU_OPEN_TIMEOUT_S = 5.0
+MENU_OPEN_ROUNDS = 3
+MENU_OPEN_ROUND_S = 2.0
 MENU_POLL_INTERVAL_S = 0.05
 started = time.monotonic()
 target_pid = int(sys.argv[1])
@@ -3320,7 +3321,9 @@ identity_valid = 0
 tray_hwnd = 0
 notify_post = 0
 menu_windows = 0
+menu_windows_any = 0
 menu_hwnd = 0
+tray_alive = 0
 menu_item_count = 0
 menu_items = []
 quit_matches = 0
@@ -3341,7 +3344,9 @@ def emit_result(error=None):
     print(f"identity_valid={identity_valid}", flush=True)
     print(f"notify_post={notify_post}", flush=True)
     print(f"menu_windows={menu_windows}", flush=True)
+    print(f"menu_windows_any={menu_windows_any}", flush=True)
     print(f"menu_hwnd={menu_hwnd}", flush=True)
+    print(f"tray_alive={tray_alive}", flush=True)
     print(f"menu_item_count={menu_item_count}", flush=True)
     print(f"quit_matches={quit_matches}", flush=True)
     print(f"quit_child_id={quit_child_id}", flush=True)
@@ -3446,13 +3451,16 @@ def read_class(hwnd):
 
 found_tray = []
 found_menu = []
+found_menu_any = []
 
 def enum_window(hwnd, _lparam):
     pid_value = wintypes.DWORD(0)
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_value))
+    class_name = read_class(hwnd)
+    if class_name == TRAY_MENU_WINDOW_CLASS:
+        found_menu_any.append(int(hwnd))
     if int(pid_value.value) != target_pid:
         return True
-    class_name = read_class(hwnd)
     if class_name == TRAY_ICON_WINDOW_CLASS:
         found_tray.append(int(hwnd))
     elif class_name == TRAY_MENU_WINDOW_CLASS:
@@ -3461,8 +3469,14 @@ def enum_window(hwnd, _lparam):
 
 def snapshot_menu_windows():
     del found_menu[:]
+    del found_menu_any[:]
     user32.EnumWindows(EnumWindowsProc(enum_window), 0)
-    return list(found_menu)
+    return (list(found_menu), len(found_menu_any))
+
+def revalidate_tray():
+    pid_value = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(tray_hwnd, ctypes.byref(pid_value))
+    return int(bool(user32.IsWindow(tray_hwnd)) and int(pid_value.value) == target_pid and read_class(tray_hwnd) == TRAY_ICON_WINDOW_CLASS)
 
 emit_phase("start")
 emit_phase("before_enum")
@@ -3488,17 +3502,27 @@ if identity_valid != 1:
     emit_result()
     raise SystemExit(1)
 emit_phase("before_menu_open")
-notify_post = int(bool(user32.PostMessageW(tray_hwnd, WM_USER_TRAYICON, 0, WM_RBUTTONUP)))
-notify_error = ctypes.get_last_error() if notify_post == 0 else None
-menu_deadline = time.monotonic() + MENU_OPEN_TIMEOUT_S
+notify_post = 0
+notify_error = None
 menu_hits = []
-while time.monotonic() < menu_deadline:
-    menu_hits = snapshot_menu_windows()
+menu_windows_any = 0
+for _ in range(MENU_OPEN_ROUNDS):
+    posted = user32.PostMessageW(tray_hwnd, WM_USER_TRAYICON, 0, WM_RBUTTONUP)
+    notify_post = int(bool(posted))
+    if notify_post == 0:
+        notify_error = ctypes.get_last_error()
+        break
+    menu_deadline = time.monotonic() + MENU_OPEN_ROUND_S
+    while time.monotonic() < menu_deadline:
+        menu_hits, menu_windows_any = snapshot_menu_windows()
+        if len(menu_hits) >= 1:
+            break
+        time.sleep(MENU_POLL_INTERVAL_S)
     if len(menu_hits) >= 1:
         break
-    time.sleep(MENU_POLL_INTERVAL_S)
 menu_windows = len(menu_hits)
 menu_hwnd = int(menu_hits[0]) if menu_hits else 0
+tray_alive = revalidate_tray()
 emit_phase("after_menu_open")
 if notify_post != 1 or menu_windows != 1:
     emit_result(notify_error)
@@ -3604,7 +3628,9 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
   const identityValid = readInteger("identity_valid");
   const notifyPost = readInteger("notify_post");
   const menuWindows = readInteger("menu_windows");
+  const menuWindowsAny = readInteger("menu_windows_any");
   const menuHwnd = readInteger("menu_hwnd");
+  const trayAlive = readInteger("tray_alive");
   const menuItemCount = readInteger("menu_item_count");
   const quitMatches = readInteger("quit_matches");
   const quitChildId = readInteger("quit_child_id");
@@ -3629,8 +3655,9 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
   if (notifyPost !== 1)
     fail("tray Quit context menu open was not accepted (WM_USER_TRAYICON/RBUTTONUP rejected)");
   if (menuWindows !== 1)
-    fail(`tray Quit requires exactly one live context menu for the target PID (found ${menuWindows})`);
+    fail(`tray Quit requires exactly one live context menu for the target PID (found ${menuWindows}, system-wide ${menuWindowsAny})`);
   if (menuHwnd <= 0) fail("tray Quit output has invalid menu_hwnd");
+  if (trayAlive !== 1) fail("tray Quit tray window died while opening the context menu");
   if (menuItems.length !== menuItemCount)
     fail(`tray Quit menu map is truncated (items=${menuItems.length}, count=${menuItemCount}): ${menuMap}`);
   if (quitMatches !== 1)
@@ -3656,7 +3683,9 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     identityValid: identityValid === 1,
     notifyPost: notifyPost === 1,
     menuWindows,
+    menuWindowsAny,
     menuHwnd,
+    trayAlive: trayAlive === 1,
     menuItemCount,
     quitMatches,
     quitChildId,
@@ -3744,7 +3773,7 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       const excerpt = String(result.stdout ?? "")
         .split(/\r?\n/)
         .filter((line) =>
-          /^(?:notify_post|menu_windows|menu_hwnd|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
+          /^(?:notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
             line
           )
         )
@@ -3757,7 +3786,7 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
     const parsed = parseTrayQuitOutput(result.stdout, pid);
     const diagnostic = [
       `TRAY_QUIT_HELPER executable_category=python-harness executable_path=${path.basename(executable)} exit_code=${result.code}`,
-      `TRAY_QUIT_RESULT target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_hwnd=${parsed.menuHwnd} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_child_id=${parsed.quitChildId} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
+      `TRAY_QUIT_RESULT target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_windows_any=${parsed.menuWindowsAny} menu_hwnd=${parsed.menuHwnd} tray_alive=${parsed.trayAlive ? 1 : 0} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_child_id=${parsed.quitChildId} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
       `TRAY_QUIT_MENU_MAP ${parsed.menuMap}`
     ].join("\n");
     writeLog(layout.logs, "tray-quit.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
@@ -3775,7 +3804,7 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       const excerpt = String(partialStdout ?? "")
         .split(/\r?\n/)
         .filter((line) =>
-          /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_hwnd|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
+          /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
             line
           )
         )
