@@ -3656,7 +3656,7 @@ try:
     top = ctypes.c_long(0)
     width = ctypes.c_long(0)
     height = ctypes.c_long(0)
-    location_hr = int(accessible_fn(pointer, ACC_LOCATION, LocationProto)(pointer, child_arg(quit_child_id), ctypes.byref(left), ctypes.byref(top), ctypes.byref(width), ctypes.byref(height)))
+    location_hr = int(accessible_fn(pointer, ACC_LOCATION, LocationProto)(pointer, ctypes.byref(left), ctypes.byref(top), ctypes.byref(width), ctypes.byref(height), child_arg(quit_child_id)))
     if location_hr != 0 or int(width.value) <= 0 or int(height.value) <= 0:
         invoke_hresult = location_hr & 0xFFFFFFFF
         release_accessible(pointer)
