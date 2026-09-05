@@ -1,5 +1,6 @@
 import type { RuntimeLogger } from "@companion/core";
-import { RuntimeOrchestrator } from "@companion/core";
+import { RuntimeOrchestrator, type RuntimeProactiveStateStore } from "@companion/core";
+import { createFileProactiveStateStore } from "./proactive-policy-store.js";
 import { InMemoryEventBus } from "@companion/event-bus";
 import {
   LlmMemoryExtractor,
@@ -144,6 +145,7 @@ export async function createAppContext(
   const finalizedIngestion = new FinalizedIngestionService(finalizedIngestionRepository!);
   const ruleBasedExtractor = new RuleBasedMemoryExtractor();
   const runtimeLogger = createRuntimeLogger(logger);
+  const proactiveStateStore: RuntimeProactiveStateStore = createFileProactiveStateStore(bootEnv);
 
   function createMemoryService(
     providers: ProviderRegistry,
@@ -230,6 +232,9 @@ export async function createAppContext(
       memory,
       promptBuilder,
       providers,
+      now: () => Date.now(),
+      proactiveConsentEnabled: proactiveStateStore.load()?.consentEnabled ?? false,
+      proactiveStateStore,
       conversation: conversationRepository,
       finalizedIngestion,
       memoryIngestionCoordinator: coordinator,

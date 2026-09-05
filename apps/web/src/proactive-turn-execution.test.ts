@@ -8,7 +8,7 @@ import {
   type ProactiveTurnEffect
 } from "./proactive-turn-execution.js";
 
-const accepted = { decision: "accepted", reason: "consent-enabled" } as const;
+const accepted = { decision: "accepted", reason: "runtime-admitted" } as const;
 const denied = { decision: "denied", reason: "consent-disabled" } as const;
 
 const context = {

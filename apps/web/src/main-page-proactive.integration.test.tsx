@@ -39,7 +39,8 @@ vi.mock("./api/client.js", () => ({
   ApiError: class ApiError extends Error {},
   apiClient: {
     streamMessage: vi.fn(),
-    streamProactiveTurn: mockState.streamProactiveTurn
+    streamProactiveTurn: mockState.streamProactiveTurn,
+    setProactiveConsent: vi.fn(async () => ({ ok: true, enabled: true }))
   }
 }));
 
@@ -324,7 +325,7 @@ describe("MainPage proactive CompanionBus bridge", () => {
         kind: "proactive-text-admission-result",
         decisionId: "decision-live",
         decision: "accepted",
-        reason: "consent-enabled"
+        reason: "runtime-admitted"
       });
       expect(readText(dom.container)).toContain("proactive reply");
       expect(readText(dom.container)).toContain("assistant");
@@ -372,6 +373,53 @@ describe("MainPage proactive CompanionBus bridge", () => {
       expect(readText(dom.container)).not.toContain("assistant");
       expect(readText(dom.container)).not.toContain("user");
       expect(readText(dom.container)).not.toContain("trace-no-op");
+    } finally {
+      await act(async () => root?.unmount());
+      dom.restore();
+    }
+  });
+
+  it("forwards an opportunity to Runtime even when the local settings toggle is off", async () => {
+    const { fetchUserSettings } = await import("./user-settings-client.js");
+    vi.mocked(fetchUserSettings).mockResolvedValueOnce({
+      loadError: null,
+      revision: 1,
+      settings: {
+        proactive: { enabled: false },
+        tts: { enabled: true, mode: "external" }
+      }
+    } as never);
+    mockState.streamProactiveTurn.mockImplementation(async (_request, options) => {
+      const noOp = {
+        type: "proactive-decision" as const,
+        decision: "NO_OP" as const,
+        sessionId: "default",
+        traceId: "trace-consent-off"
+      };
+      options.onEvent?.(noOp);
+      return noOp;
+    });
+
+    const dom = installFakeDom();
+    let root!: Root;
+    try {
+      await act(async () => {
+        root = createRoot(dom.container as unknown as Element);
+        root.render(createElement((await import("./main-page.js")).MainPage));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const bus = mockState.buses[0];
+      await act(async () => {
+        bus?.emit({
+          kind: "proactive-text-request",
+          decisionId: "decision-consent-off",
+          modality: "text"
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(mockState.streamProactiveTurn).toHaveBeenCalledTimes(1);
     } finally {
       await act(async () => root?.unmount());
       dom.restore();

@@ -174,7 +174,7 @@ describe("CompanionBus", () => {
           kind: "proactive-text-admission-result",
           decisionId: "decision-1",
           decision: "accepted",
-          reason: "consent-enabled",
+          reason: "runtime-admitted",
           content: "not allowed"
         }
       });
@@ -350,7 +350,7 @@ describe("CompanionBus", () => {
         kind: "proactive-text-admission-result",
         decisionId: "decision-1",
         decision: "accepted",
-        reason: "consent-enabled"
+        reason: "runtime-admitted"
       })
     ).toBe(true);
     expect(

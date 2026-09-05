@@ -112,7 +112,24 @@ import type {
   EmbodiedPresentationOutcomeReport,
   EmbodiedPresentationRequest
 } from "@companion/protocol";
-import { AssistantTurnConflictError, ConversationPersistenceError } from "./runtime-errors.js";
+import {
+  AssistantTurnConflictError,
+  ConversationPersistenceError,
+  ProactiveAdmissionError
+} from "./runtime-errors.js";
+import type { CharacterProactiveProposal } from "@companion/character-abi";
+import {
+  advanceActivityRevision,
+  applyAuthorizedEngagement,
+  applyCharacterProactiveProposal,
+  createInitialProactiveState,
+  evaluateProactiveEligibility,
+  normalizeProactiveState,
+  parseProactivePolicySnapshot,
+  serializeProactivePolicySnapshot,
+  type ProactiveControlAuthority,
+  type ProactiveState
+} from "./runtime-proactive-policy.js";
 
 const assistantTurnClaimRetentionMs = 15 * 60 * 1000;
 const assistantTurnClaimMaxTerminal = 256;
@@ -232,6 +249,9 @@ export class RuntimeOrchestrator {
     string,
     { ids: string[]; lastTurnIntruded: boolean }
   >();
+  private proactiveState: ProactiveState;
+  private proactiveConsentEnabled: boolean | undefined;
+  private currentTurnControlAuthority: ProactiveControlAuthority = "LOCAL_EXPLICIT_CONTROLLER";
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
     this.directContextConfig = normalizeDirectContextConfig(options.directContext);
@@ -242,6 +262,86 @@ export class RuntimeOrchestrator {
       ...(options.dreamWriter ? { writer: options.dreamWriter } : {}),
       ...(options.dreamProvider ? { provider: options.dreamProvider } : {})
     });
+    this.proactiveConsentEnabled = options.proactiveConsentEnabled;
+    this.proactiveState = createInitialProactiveState();
+    const loaded = options.proactiveStateStore?.load();
+    if (loaded) {
+      const parsed = parseProactivePolicySnapshot(loaded, this.nowMs());
+      if (parsed) {
+        this.proactiveState = parsed.state;
+        if (parsed.consentEnabled !== undefined && this.proactiveConsentEnabled === undefined) {
+          this.proactiveConsentEnabled = parsed.consentEnabled;
+        }
+      }
+    }
+  }
+
+  getProactiveState(): ProactiveState {
+    return normalizeProactiveState(this.proactiveState, this.nowMs());
+  }
+
+  setProactiveConsent(enabled: boolean): void {
+    this.proactiveConsentEnabled = enabled;
+    this.persistProactivePolicy();
+  }
+
+  private nowMs(): number {
+    return this.options.now?.() ?? Date.now();
+  }
+
+  private persistProactivePolicy(): void {
+    this.options.proactiveStateStore?.save(
+      serializeProactivePolicySnapshot(this.proactiveState, this.proactiveConsentEnabled)
+    );
+  }
+
+  private beginExplicitUserActivity(authority: ProactiveControlAuthority): void {
+    this.currentTurnControlAuthority = authority;
+    this.proactiveState = applyAuthorizedEngagement(
+      advanceActivityRevision(this.proactiveState),
+      this.nowMs(),
+      authority
+    );
+    this.persistProactivePolicy();
+  }
+
+  private applyTurnProactiveProposal(proposal: CharacterProactiveProposal | undefined): void {
+    if (!proposal) return;
+    this.proactiveState = applyCharacterProactiveProposal(
+      this.proactiveState,
+      proposal,
+      this.nowMs(),
+      this.currentTurnControlAuthority
+    );
+    this.persistProactivePolicy();
+  }
+
+  private admitProactiveAttempt(): number {
+    const nowMs = this.nowMs();
+    this.proactiveState = normalizeProactiveState(this.proactiveState, nowMs);
+    const eligibility = evaluateProactiveEligibility(
+      this.proactiveState,
+      nowMs,
+      this.proactiveConsentEnabled
+    );
+    if (!eligibility.admitted) {
+      throw new ProactiveAdmissionError(eligibility.reason);
+    }
+    return this.proactiveState.activityRevision;
+  }
+
+  private revalidateAdmittedProactiveRevision(admittedRevision: number): void {
+    if (this.proactiveState.activityRevision !== admittedRevision) {
+      throw new ProactiveAdmissionError("stale-revision");
+    }
+    const eligibility = evaluateProactiveEligibility(
+      this.proactiveState,
+      this.nowMs(),
+      this.proactiveConsentEnabled
+    );
+    if (!eligibility.admitted) {
+      throw new ProactiveAdmissionError(eligibility.reason);
+    }
   }
 
   getLatestPromptPreview(): RuntimePromptPreview | null {
@@ -652,7 +752,8 @@ export class RuntimeOrchestrator {
         voiceOutput,
         useMemory: options.useMemory,
         readMemory: options.readMemory,
-        writeMemory: options.writeMemory
+        writeMemory: options.writeMemory,
+        controlAuthority: options.controlAuthority ?? "LOCAL_EXPLICIT_CONTROLLER"
       });
     } finally {
       this.exitLifecycleOperation();
@@ -666,8 +767,10 @@ export class RuntimeOrchestrator {
       useMemory?: boolean | undefined;
       readMemory?: boolean | undefined;
       writeMemory?: boolean | undefined;
+      controlAuthority?: ProactiveControlAuthority | undefined;
     }
   ): Promise<AgentReplyEvent | null> {
+    this.beginExplicitUserActivity(options.controlAuthority ?? "LOCAL_EXPLICIT_CONTROLLER");
     await this.persistUserMessage(userEvent);
     await this.options.eventBus.publish(userEvent);
     await this.restoreDirectContext(
@@ -762,6 +865,7 @@ export class RuntimeOrchestrator {
         ? Boolean(options.voiceOutput)
         : Boolean(input.voiceOutput ?? options.voiceOutput);
 
+      this.beginExplicitUserActivity(options.controlAuthority ?? "LOCAL_EXPLICIT_CONTROLLER");
       await this.persistUserMessage(userEvent);
       await this.options.eventBus.publish(userEvent);
       await this.restoreDirectContext(
@@ -1358,6 +1462,7 @@ export class RuntimeOrchestrator {
     this.enterLifecycleOperation();
     let claimed = false;
     try {
+      const admittedRevision = this.admitProactiveAttempt();
       this.claimAssistantTurn(input);
       claimed = true;
 
@@ -1498,6 +1603,7 @@ export class RuntimeOrchestrator {
           throw createRuntimeCancelledError(continuationProvider.name);
         }
         accumulatedText = normalizeProactiveAssistantText(finalOutput, continuationProvider.name);
+        this.revalidateAdmittedProactiveRevision(admittedRevision);
 
         const providerMetadata = this.safeProviderCallMetadata(
           "chat",
@@ -2153,6 +2259,7 @@ export class RuntimeOrchestrator {
     });
     const initialReply = initial.decision.reply;
     if (initialReply.disposition !== "NEED_COGNITION") {
+      this.applyTurnProactiveProposal(initial.decision.proactive);
       return {
         decision: {
           addressing: initial.decision.addressing,
@@ -2208,6 +2315,7 @@ export class RuntimeOrchestrator {
         retryable: false
       });
     }
+    this.applyTurnProactiveProposal(final.decision.proactive);
     return {
       decision: {
         addressing: final.decision.addressing,

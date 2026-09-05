@@ -1,6 +1,7 @@
 import {
   AssistantTurnConflictError,
   ConversationPersistenceError,
+  ProactiveAdmissionError,
   type ProactiveShouldSpeak,
   type RuntimeReplyStreamEvent
 } from "@companion/core";
@@ -18,6 +19,12 @@ const SSE_HEADERS = {
   connection: "keep-alive",
   "x-accel-buffering": "no"
 };
+
+const ProactiveConsentRequestSchema = z
+  .object({
+    enabled: z.boolean()
+  })
+  .strict();
 
 export const ProactiveTurnStreamRequestSchema = z
   .object({
@@ -39,6 +46,15 @@ export async function registerProactiveTurnStreamRoutes(
   app: FastifyInstance,
   context: AppContext
 ): Promise<void> {
+  app.post("/v1/proactive/consent", async (request, reply) => {
+    const parsed = ProactiveConsentRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+    context.runtime.setProactiveConsent(parsed.data.enabled);
+    return reply.send({ ok: true, enabled: parsed.data.enabled });
+  });
+
   app.post("/v1/proactive-turns/stream", async (request, reply) => {
     const input = ProactiveTurnStreamRequestSchema.safeParse(request.body);
     if (!input.success) {
@@ -193,6 +209,14 @@ function sendProactiveTurnError(
   error: unknown,
   traceId: string
 ): unknown {
+  if (error instanceof ProactiveAdmissionError) {
+    return reply.status(409).send({
+      error: "proactive_not_admitted",
+      reason: error.reason,
+      message: "Runtime did not admit the proactive attempt.",
+      traceId
+    });
+  }
   if (error instanceof AssistantTurnConflictError) {
     return reply.status(409).send({
       error: "idempotency_conflict",

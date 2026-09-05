@@ -52,7 +52,7 @@ import {
   reduceProactiveConsent,
   type ProactiveConsentAction
 } from "./proactive-consent.js";
-import { evaluateProactiveTurnAdmission } from "./proactive-turn-admission.js";
+import { admissionFromRuntimeError, RUNTIME_ADMITTED } from "./proactive-turn-admission.js";
 import {
   createProactiveTurnExecution,
   isCurrentProactiveEffect,
@@ -198,12 +198,14 @@ export function MainPage(): JSX.Element {
           type: "settings-read-failed",
           requestRevision: Math.max(requestRevision, view.revision)
         });
+        void apiClient.setProactiveConsent(false).catch(() => undefined);
       } else {
         applyProactiveConsent({
           type: "settings-view",
           revision: view.revision,
           enabled: view.settings.proactive.enabled
         });
+        void apiClient.setProactiveConsent(view.settings.proactive.enabled).catch(() => undefined);
       }
     };
 
@@ -213,6 +215,7 @@ export function MainPage(): JSX.Element {
         .catch(() => {
           if (!cancelled) {
             applyProactiveConsent({ type: "settings-read-failed", requestRevision });
+            void apiClient.setProactiveConsent(false).catch(() => undefined);
           }
         });
     };
@@ -239,6 +242,7 @@ export function MainPage(): JSX.Element {
             type: "settings-read-failed",
             requestRevision: initialRequestRevision
           });
+          void apiClient.setProactiveConsent(false).catch(() => undefined);
         }
       });
 
@@ -249,7 +253,10 @@ export function MainPage(): JSX.Element {
         revision: event.revision,
         changedSections: event.changedSections
       });
-      if (invalidated) refetchProactiveConsent(event.revision);
+      if (invalidated) {
+        void apiClient.setProactiveConsent(false).catch(() => undefined);
+        refetchProactiveConsent(event.revision);
+      }
     });
 
     return () => {
@@ -277,24 +284,23 @@ export function MainPage(): JSX.Element {
     const handleProactiveTextRequest = (
       message: Extract<CompanionBusMessage, { kind: "proactive-text-request" }>
     ): void => {
-      const admission = evaluateProactiveTurnAdmission(proactiveConsentRef.current);
-      // The correlated E2B answer is always posted before any execution
-      // arbitration, claim, local row, key generation, or Runtime call.
-      bus.post({
-        kind: "proactive-text-admission-result",
-        decisionId: message.decisionId,
-        ...admission
-      });
-
       const execution = proactiveExecutionRef.current;
       if (execution === null) return;
       const result = execution.tryCommit({
         decisionId: message.decisionId,
-        admission,
+        admission: RUNTIME_ADMITTED,
         active: activeRequestRef.current,
         context: runtimeContextRef.current
       });
-      if (result.kind !== "committed") return;
+      if (result.kind !== "committed") {
+        bus.post({
+          kind: "proactive-text-admission-result",
+          decisionId: message.decisionId,
+          decision: "denied",
+          reason: "execution-busy"
+        });
+        return;
+      }
 
       const { effect } = result;
       activeRequestRef.current = effect.ownership;
@@ -551,6 +557,11 @@ export function MainPage(): JSX.Element {
         onEvent: (event: ProactiveMessageStreamEvent) => {
           if (!isCurrent()) return;
           if (event.type === "proactive-decision") {
+            busRef.current?.post({
+              kind: "proactive-text-admission-result",
+              decisionId: effect.decisionId,
+              ...RUNTIME_ADMITTED
+            });
             if (event.decision === "NO_OP") {
               effect.ownership.completedObserved = true;
               setRequestStatus("idle");
@@ -625,6 +636,17 @@ export function MainPage(): JSX.Element {
           assistantId: effect.assistantId,
           error: "生成已取消，以上内容可能不完整。"
         });
+        setRequestStatus("idle");
+        return;
+      }
+      const admission = admissionFromRuntimeError(caught);
+      if (admission) {
+        busRef.current?.post({
+          kind: "proactive-text-admission-result",
+          decisionId: effect.decisionId,
+          ...admission
+        });
+        effect.ownership.completedObserved = true;
         setRequestStatus("idle");
         return;
       }

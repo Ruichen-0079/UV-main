@@ -1,4 +1,8 @@
 import type { CharacterDecision } from "@companion/character-abi";
+import type {
+  ProactiveControlAuthority,
+  RuntimeProactiveStateStore
+} from "./runtime-proactive-policy.js";
 import type { EventBus } from "@companion/event-bus";
 import type {
   ConversationRepository,
@@ -68,6 +72,16 @@ export type RuntimeOrchestratorOptions = {
   characterCognition?: RuntimeCharacterCognitionExecutor | undefined;
   /** Optional production Character -> Runtime -> Presentation composition. */
   embodiedPresentation?: RuntimeEmbodiedPresentationPort | undefined;
+  /** Wall-clock source for suppression expiry and eligible_after. Tests inject a fake. */
+  now?: (() => number) | undefined;
+  /**
+   * User preference for proactive initiation. `undefined` preserves existing P6
+   * tests (no Runtime consent gate). Production server supplies an explicit
+   * boolean and fail-closes until a control intent arrives.
+   */
+  proactiveConsentEnabled?: boolean | undefined;
+  /** Smallest durable snapshot for suppression / eligible_after across Runtime reconstruction. */
+  proactiveStateStore?: RuntimeProactiveStateStore | undefined;
 };
 
 export type RuntimeCharacterCognitionExecutor = (
@@ -277,6 +291,11 @@ export type HandleUserMessageOptions = {
   useMemory?: boolean | undefined;
   readMemory?: boolean | undefined;
   writeMemory?: boolean | undefined;
+  /**
+   * Semantic controller boundary for durable proactive policy. This is not a
+   * person identity and must not be inferred from speakerId.
+   */
+  controlAuthority?: ProactiveControlAuthority | undefined;
 };
 
 export type AssistantInitiatedTurnInput = {

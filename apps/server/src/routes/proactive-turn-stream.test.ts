@@ -1,5 +1,9 @@
 import Fastify from "fastify";
-import { AssistantTurnConflictError, type RuntimeReplyStreamEvent } from "@companion/core";
+import {
+  AssistantTurnConflictError,
+  ProactiveAdmissionError,
+  type RuntimeReplyStreamEvent
+} from "@companion/core";
 import type { AppContext } from "../context.js";
 import { describe, expect, it } from "vitest";
 import { registerProactiveTurnStreamRoutes } from "./proactive-turn-stream.js";
@@ -218,6 +222,53 @@ describe("proactive turn SSE route", () => {
 
     expect(response.statusCode).toBe(400);
     expect(calls).toBe(0);
+    await app.close();
+  });
+
+  it("maps Runtime admission denial before P6 execution", async () => {
+    const app = await createTestApp(
+      runtimeFor(async function* (): AsyncIterable<RuntimeReplyStreamEvent> {
+        throw new ProactiveAdmissionError("suppressed");
+      })
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/proactive-turns/stream",
+      payload: {
+        sessionId: "session-1",
+        idempotencyKey: "denied",
+        modality: "text",
+        options: { readMemory: false }
+      }
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      error: "proactive_not_admitted",
+      reason: "suppressed"
+    });
+    await app.close();
+  });
+
+  it("applies consent as a Runtime control intent", async () => {
+    let enabled: boolean | undefined;
+    const app = await createTestApp({
+      runtime: {
+        streamAssistantInitiatedTurn: async function* (): AsyncIterable<RuntimeReplyStreamEvent> {
+          throw new Error("must not run");
+        },
+        setProactiveConsent(value: boolean) {
+          enabled = value;
+        }
+      }
+    } as unknown as AppContext);
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/proactive/consent",
+      payload: { enabled: true }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true, enabled: true });
+    expect(enabled).toBe(true);
     await app.close();
   });
 });
