@@ -56,6 +56,73 @@ These are **plans**, not claims that the described future state exists.
 12. Provider metadata, UI labels, STT labels, Presentation state, and convenient
     metadata cannot silently become semantic truth.
 
+## No-progress gate
+
+Every implementation or diagnostic atom is subject to an information-gain gate.
+
+If **two consecutive actions produce no new architectural or diagnostic
+evidence, STOP**. A third attempt is forbidden until the agent explicitly
+reframes the problem and records all four of the following:
+
+1. the facts already proven;
+2. the unresolved hypothesis;
+3. why the proposed next action can falsify or materially distinguish that
+   hypothesis;
+4. why another rerun or another code edit would not merely repeat the same
+   experiment.
+
+An action counts as progress only when it narrows a real uncertainty, proves or
+falsifies a hypothesis, establishes a new boundary, or validates a materially
+changed experiment. Repeating an unchanged experiment and obtaining the same
+failure mode is not progress.
+
+Hard limits:
+
+- **Rerun discipline:** for the same exact head, same harness, and same failure
+  mode, allow at most one retry for transient infrastructure noise. If the retry
+  reproduces the same failure class, stop rerunning and classify the blocking
+  boundary.
+- **Edit discipline:** do not make a second consecutive production-code change
+  merely because the first change did not fix the symptom. Before another
+  production edit, identify the failing boundary and state the falsifiable
+  hypothesis that the edit tests.
+- **Scope discipline:** never widen an atom, add a manager/orchestrator, or
+  redesign an adjacent subsystem merely to escape a failing test.
+- **Harness discipline:** when evidence shows the test stimulus or environment
+  is unreliable, classify the harness separately from product behavior. Do not
+  keep modifying product code to satisfy an untrustworthy harness.
+
+Forbidden failure loops include:
+
+```text
+same exact head
+→ same hosted job
+→ same failure
+→ rerun for luck
+→ rerun for luck
+```
+
+and:
+
+```text
+symptom
+→ speculative production edit
+→ same symptom
+→ another speculative production edit
+→ broader refactor
+```
+
+The required recovery path is:
+
+```text
+no new evidence twice
+→ STOP
+→ summarize proven facts
+→ isolate the unresolved boundary
+→ design the shortest discriminating experiment
+→ continue only if that experiment has new information value
+```
+
 ## Minimal future proactive state
 
 The preferred semantic state is only:
