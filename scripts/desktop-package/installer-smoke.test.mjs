@@ -2181,6 +2181,10 @@ const trayQuitOutput = ({
   menuWindowsAny = 1,
   menuHwnd = 789012,
   trayAlive = 1,
+  iconCenterX = 820,
+  iconCenterY = 744,
+  cursorPlace = 1,
+  sendInput = 1,
   menuHmenu = 555000,
   rects = [{ uid: 1, left: 1800, top: 1040, right: 1824, bottom: 1064 }],
   items = defaultTrayQuitItems(),
@@ -2204,6 +2208,8 @@ const trayQuitOutput = ({
     "before_icon_probe",
     "after_icon_probe",
     "before_menu_open",
+    "before_cursor_place",
+    "before_send_input",
     "after_menu_open",
     "before_discover",
     "after_discover",
@@ -2225,6 +2231,10 @@ const trayQuitOutput = ({
     `tray_alive=${trayAlive}`,
     `icon_rect_count=${rects.length}`,
     ...rects.map((rect) => `TRAY_ICON_RECT=${rect.uid}:${rect.left},${rect.top},${rect.right},${rect.bottom}`),
+    `icon_center_x=${iconCenterX}`,
+    `icon_center_y=${iconCenterY}`,
+    `cursor_place=${cursorPlace}`,
+    `send_input=${sendInput}`,
     `menu_hmenu=${menuHmenu}`,
     `menu_item_count=${items.length}`,
     `quit_matches=${quitHits.length}`,
@@ -2252,6 +2262,9 @@ test("tray Quit helper delivers the runtime-discovered command id, never an assu
     "IsWindow",
     "PostMessageW",
     "SendMessageW",
+    "SetCursorPos",
+    "mouse_event",
+    "MOUSEEVENTF_RIGHTDOWN",
     "WM_MN_GETHMENU",
     "WM_COMMAND",
     "GetMenuItemCount",
@@ -2416,6 +2429,8 @@ test("tray Quit output requires the real menu surface and a successful invocatio
   assert.equal(parsed.menuWindows, 1);
   assert.equal(parsed.menuWindowsAny, 1);
   assert.equal(parsed.trayAlive, true);
+  assert.equal(parsed.cursorPlace, true);
+  assert.equal(parsed.sendInput, 1);
   assert.deepEqual(parsed.iconRects, [
     { uid: 1, left: 1800, top: 1040, right: 1824, bottom: 1064 }
   ]);
