@@ -2,6 +2,12 @@
 
 > **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
 >
+> **Rebaseline (Linux-first CI rebaseline):** this atom no longer depends on
+> Windows Atoms 01–02; those are deferred under the Platform policy in
+> [README.md](README.md). Its dependency direction is now stable current
+> desktop lifecycle behavior on the active Linux target (CachyOS/KDE Wayland),
+> with Linux desktop operational validation when that foundation exists.
+>
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
@@ -24,12 +30,19 @@ Quit on a separate lifecycle path.
 
 ## Dependencies
 
-Atoms 01–02.
+Rebaselined (Linux-first CI rebaseline): Windows Atoms 01–02 are deferred and
+are NOT prerequisites. This atom depends on:
+
+- stable current desktop lifecycle behavior on the active Linux target
+  (CachyOS/KDE Wayland);
+- Linux desktop operational validation when that foundation exists.
 
 ## CURRENT at audit baseline
 
 `apps/desktop/src-tauri/src/lib.rs` directly defines and manipulates Main and
-Companion windows. Open #227 is a candidate implementation, not authority.
+Companion windows. Open #227 is a candidate implementation and a reference
+only; it is stale/non-authoritative until revalidated against a fresh Linux
+rebaseline.
 
 ## TARGET
 
@@ -89,7 +102,8 @@ It must not own:
 - Existing Main/Companion tray behavior remains equivalent.
 - Quit still bypasses SurfaceManager.
 - Unit tests cover semantic command mapping and surface dispatch.
-- Real semantic tray E2E from Atom 02 stays green.
+- Desktop behavior is validated by the Linux-target gates available at
+  implementation time; the deferred Windows tray E2E (Atom 02) is not a gate.
 
 ## Stop condition
 

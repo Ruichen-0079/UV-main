@@ -25,6 +25,29 @@ reconstructing the whole architecture from old chats.
 
 These are **plans**, not claims that the described future state exists.
 
+## Platform policy
+
+```text
+CURRENT PRIMARY PLATFORM:
+Linux / CachyOS / KDE Wayland
+
+WINDOWS:
+DEFERRED
+not current release target
+not current CI authority
+not current packaging target
+existing implementation retained best-effort
+requires a fresh future rebaseline before becoming mandatory again
+```
+
+This is an intentional platform-priority decision, not "temporarily ignoring a
+flaky test". Current mandatory CI is Linux-first: the `Check` workflow validates
+on Ubuntu only, and the independent `Linux Persistence` workflow remains
+mandatory. Windows validation and the Windows desktop packaging chain (NSIS,
+hosted Windows tray smoke) are not current merge gates and must not be
+reintroduced by later atoms without a fresh rebaseline. Windows production code
+may remain in the repository best-effort.
+
 ## Frozen ownership
 
 | Concern | Owner |
@@ -145,27 +168,59 @@ event history.
 
 ## Planned order
 
-1. [Windows Quit lifecycle fix](01-windows-quit-lifecycle-fix.md)
-2. [Semantic Tray E2E](02-semantic-tray-e2e.md)
-3. [Desktop Surface foundation](03-desktop-surface-foundation.md)
-4. [WebUI Surface](04-webui-surface.md)
-5. [App/Data/Cache roots](05-app-data-cache-roots.md)
-6. [Character Interaction Contract vNext](06-character-interaction-contract.md)
-7. [Runtime Character outcome + Cognition sequencing](07-runtime-character-outcome-cognition.md)
-8. [Runtime Proactive Policy + Web authority migration](08-runtime-proactive-policy.md)
-9. [Speaker-aware STT independent input](09-speaker-aware-stt-input.md)
-10. [Proactive provider binding + single Runtime scheduler](10-proactive-provider-scheduler.md)
-11. [P8 main-profile projection](11-p8-main-profile.md)
-12. [Memory multi-speaker attribution/provenance](12-memory-multispeaker-provenance.md)
-13. [Voice identity](13-voice-identity.md)
-14. [Voice Mode + barge-in](14-voice-mode-barge-in.md)
-15. [Vision → Character](15-vision-character.md)
-16. [Provider fallback UX](16-provider-fallback-ux.md)
-17. [Output language semantic preference](17-output-language.md)
-18. [Subtitle Surface](18-subtitle-surface.md)
-19. [Companion advanced presentation](19-companion-advanced-presentation.md)
-20. [Live2D calibration](20-live2d-calibration.md)
-21. [Linux/CachyOS deployment](21-linux-cachyos-deployment.md)
+Atom IDs below are stable for historical/reference continuity. They are NOT
+renumbered to look sequential; dependency authority is what matters, not list
+aesthetics.
+
+### Deferred platform atoms (Windows)
+
+Windows is not the current target (see Platform policy). These plans are
+retained as historical/reference material:
+
+- [01 — Windows Quit lifecycle fix](01-windows-quit-lifecycle-fix.md)
+  — **DEFERRED — WINDOWS NOT CURRENT TARGET**
+- [02 — Semantic Tray E2E](02-semantic-tray-e2e.md)
+  — **DEFERRED — WINDOWS NOT CURRENT TARGET**
+
+### Active semantic lane
+
+- [06 — Character Interaction Contract vNext](06-character-interaction-contract.md) — DONE
+- [07 — Runtime Character outcome + Cognition sequencing](07-runtime-character-outcome-cognition.md) — current
+- [08 — Runtime Proactive Policy + Web authority migration](08-runtime-proactive-policy.md)
+- [09 — Speaker-aware STT independent input](09-speaker-aware-stt-input.md) — 09A DONE / 09B later
+- [10 — Proactive provider binding + single Runtime scheduler](10-proactive-provider-scheduler.md)
+- [11 — P8 main-profile projection](11-p8-main-profile.md) — DONE
+- [12 — Memory multi-speaker attribution/provenance](12-memory-multispeaker-provenance.md)
+- [13 — Voice identity](13-voice-identity.md)
+- [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md)
+- [15 — Vision → Character](15-vision-character.md)
+- [16 — Provider fallback UX](16-provider-fallback-ux.md)
+- [17 — Output language semantic preference](17-output-language.md)
+- [18 — Subtitle Surface](18-subtitle-surface.md)
+- [19 — Companion advanced presentation](19-companion-advanced-presentation.md)
+- [20 — Live2D calibration](20-live2d-calibration.md)
+
+### Active Linux/platform lane
+
+Dependency direction (not numeric order):
+
+```text
+05 App/Data/Cache roots
+→ Linux desktop build/test foundation
+→ Linux Supervisor/lifecycle validation
+→ 03 Desktop Surface foundation
+→ 04 WebUI Surface
+→ later Linux packaging/deployment (decomposed from Atom 21)
+```
+
+- [05 — App/Data/Cache roots](05-app-data-cache-roots.md) — active; may proceed
+  before final Linux packaging; no Windows prerequisite
+- [03 — Desktop Surface foundation](03-desktop-surface-foundation.md)
+  — rebaselined: no longer depends on Windows Atoms 01–02
+- [04 — WebUI Surface](04-webui-surface.md)
+- [21 — Linux/CachyOS deployment](21-linux-cachyos-deployment.md)
+  — long-term target; to be implemented through smaller Linux operational
+  atoms rather than one giant deployment change
 
 The former standalone **Main cleanup** atom is intentionally deleted. Every
 authority migration must remove its obsolete Main/Web path in the same atom

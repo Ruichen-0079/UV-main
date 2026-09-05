@@ -1,6 +1,18 @@
 # Atom 01 — Windows Quit Lifecycle Fix
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: DEFERRED — WINDOWS NOT CURRENT TARGET**
+>
+> This is a FUTURE PLAN and is NOT implementation authority.
+>
+> **Rebaseline (Linux-first CI rebaseline):** Windows is deferred. It is not the
+> current release target, CI authority, or packaging target. Current main
+> development does NOT block on fixing packaged Windows tray Quit. Existing
+> Windows implementation remains in the repository best-effort. Becoming
+> mandatory again requires a fresh future rebaseline. See Platform policy in
+> [README.md](README.md).
+>
+> The diagnostic findings below are preserved as historical evidence from the
+> audit baseline. They are not a current merge condition.
 >
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >
@@ -15,6 +27,15 @@
 > satisfies its acceptance criteria. Do not create a second Runtime, second
 > ledger, generic orchestrator/agent graph, provider router, giant event bus, or
 > broad Manager/Engine abstraction merely to match this document.
+
+## Deferred PR classification
+
+- **#229 / #230: diagnostic evidence archive, DO NOT MERGE.** They exist as
+  historical diagnostic checkpoints for the Windows tray Quit investigation.
+  They are not main authority and no current atom consumes them.
+- The Windows Quit defect itself remains an open historical finding. Do not
+  resume it under the current Linux-first lane; a resumed effort would need a
+  fresh Windows rebaseline first.
 
 ## Goal
 

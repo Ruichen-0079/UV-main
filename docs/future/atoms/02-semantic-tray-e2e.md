@@ -1,6 +1,17 @@
 # Atom 02 — Semantic Tray E2E
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: DEFERRED — WINDOWS NOT CURRENT TARGET**
+>
+> This is a FUTURE PLAN and is NOT implementation authority.
+>
+> **Rebaseline (Linux-first CI rebaseline):** Windows is deferred. Hosted
+> Windows tray E2E is not current merge authority. Existing hosted
+> experimentation showed the GUI stimulus/environment is not trustworthy enough
+> for current merge gating; per the no-progress harness discipline, that
+> harness is classified separately from product behavior. Do not resume the
+> #228/#229/#230 work under the current Linux-first lane. Becoming mandatory
+> again requires a fresh future rebaseline. See Platform policy in
+> [README.md](README.md).
 >
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >
@@ -15,6 +26,14 @@
 > satisfies its acceptance criteria. Do not create a second Runtime, second
 > ledger, generic orchestrator/agent graph, provider router, giant event bus, or
 > broad Manager/Engine abstraction merely to match this document.
+
+## Deferred PR classification
+
+- **#228: superseded/deferred Windows E2E.** The semantic menu discovery
+  approach remains a reference idea, but the hosted Windows E2E lane it targets
+  is not current authority. Do not resume this work now.
+- **#229 / #230: diagnostic evidence archive, DO NOT MERGE** (shared with
+  [Atom 01](01-windows-quit-lifecycle-fix.md)).
 
 ## Goal
 
