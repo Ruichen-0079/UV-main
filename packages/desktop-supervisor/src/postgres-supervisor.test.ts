@@ -158,6 +158,22 @@ describe("supervisor postgres mode", () => {
     expect(script).toContain("Another YUVI Supervisor is already running");
   });
 
+  it("routes control-plane shutdown into terminal process exit in both entries", () => {
+    for (const entry of [
+      "yuvi-desktop-supervisor.mts",
+      "yuvi-desktop-supervisor.packaged.mjs"
+    ]) {
+      const script = fs.readFileSync(
+        path.resolve(__dirname, `../../../scripts/${entry}`),
+        "utf8"
+      );
+      // /v1/shutdown must end in supervisor process exit, not a drained-but-
+      // still-running control plane that orphans under the Tauri owner.
+      expect(script).toContain("onShutdownComplete");
+      expect(script).toContain("control-plane-shutdown");
+    }
+  });
+
   it("refuses packaged secret fallback to local.secret", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-cm-"));
     tempDirs.push(root);

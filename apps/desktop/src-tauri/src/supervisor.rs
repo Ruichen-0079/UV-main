@@ -212,6 +212,17 @@ pub fn bootstrap_supervisor(
     .stdout(Stdio::null())
     .stderr(Stdio::null());
 
+  #[cfg(unix)]
+  {
+    use std::os::unix::process::CommandExt;
+    // Own the whole descendant tree: the supervisor child becomes its own
+    // process-group leader (pgid == child pid), so shutdown can signal the
+    // exact group this instance spawned — never a name-, port-, or
+    // parent-group-based sweep. Descendants (pnpm/tsx/node/service children)
+    // inherit the group unless they deliberately leave it.
+    command.process_group(0);
+  }
+
   #[cfg(target_os = "windows")]
   {
     use std::os::windows::process::CommandExt;
@@ -319,7 +330,7 @@ fn is_secret_env_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-  use super::{is_secret_env_key, stop_child_bounded};
+  use super::{is_secret_env_key, stop_supervisor_child_bounded};
   use std::process::{Command, Stdio};
   use std::time::{Duration, Instant};
 
@@ -347,12 +358,83 @@ mod tests {
       .expect("test child should spawn");
     let started = Instant::now();
 
-    assert!(stop_child_bounded(child));
+    assert!(stop_supervisor_child_bounded(child));
     assert!(started.elapsed() < Duration::from_secs(5));
+  }
+
+  /// The supervisor child owns a descendant (pnpm/tsx/node shape). Killing the
+  /// leader alone would orphan the descendant — the owned process group must
+  /// reap both.
+  #[cfg(unix)]
+  #[test]
+  fn owned_group_termination_reaps_leader_and_descendants() {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = Command::new("sh");
+    command
+      .arg("-c")
+      .arg("sleep 30 & wait")
+      .process_group(0)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let child = command.spawn().expect("grouped test child should spawn");
+    let pgid = child.id() as i32;
+    let started = Instant::now();
+
+    assert!(stop_supervisor_child_bounded(child));
+    assert!(started.elapsed() < Duration::from_secs(8));
+    assert!(!super::process_group_has_members(pgid));
+  }
+
+  /// A descendant that ignores SIGTERM must still die: the forced stage
+  /// SIGKILLs the whole owned group even though the graceful stage failed.
+  #[cfg(unix)]
+  #[test]
+  fn term_ignoring_descendants_are_force_killed_by_the_owned_group() {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = Command::new("sh");
+    command
+      .arg("-c")
+      .arg("trap '' TERM; sleep 30 & wait")
+      .process_group(0)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let child = command.spawn().expect("grouped test child should spawn");
+    let pgid = child.id() as i32;
+    let started = Instant::now();
+
+    assert!(stop_supervisor_child_bounded(child));
+    assert!(started.elapsed() < Duration::from_secs(9));
+    assert!(!super::process_group_has_members(pgid));
+  }
+
+  /// Natural exit: a supervisor that self-exits after the /v1/shutdown drain
+  /// is reaped via the fast path, without any signal escalation.
+  #[cfg(unix)]
+  #[test]
+  fn natural_child_exit_needs_no_signal_escalation() {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = Command::new("sh");
+    command
+      .args(["-c", "sleep 1; exit 0"])
+      .process_group(0)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let child = command.spawn().expect("grouped test child should spawn");
+
+    assert!(stop_supervisor_child_bounded(child));
   }
 }
 
-/// Idempotent application-level shutdown. Only owned services are stopped by the supervisor.
+/// Idempotent application-level shutdown. The `/v1/shutdown` request drains
+/// owned services (existing Runtime/seal semantics) and the Node supervisor
+/// then self-exits; this side only escalates against the process group it
+/// spawned. Only owned services/pids are ever signalled.
 pub fn shutdown_supervisor(app: &AppHandle) {
   let state = app.state::<SupervisorState>();
   let mut guard = match state.inner.lock() {
@@ -392,7 +474,7 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   }
 
   if let Some(child) = child.take() {
-    let _ = stop_child_bounded(child);
+    let _ = stop_supervisor_child_bounded(child);
   } else if let Some(pid) = expected_pid {
     force_kill_process_tree(pid);
   }
@@ -404,34 +486,157 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let _ = fs::remove_file(root.join("supervisor.instance.lock"));
 }
 
-fn stop_child_bounded(mut child: Child) -> bool {
-  const ATTEMPTS: usize = 12;
+/// Terminal shutdown of the owned supervisor child. Stages, all bounded:
+/// 1. natural exit — a `/v1/shutdown` ACK means the Node supervisor drained and
+///    is self-exiting; pnpm/tsx wrappers unwind behind it;
+/// 2. graceful stop (Unix) — SIGTERM to the owned process group so the Node
+///    SIGTERM handler can drain + exit;
+/// 3. forced stop — SIGKILL for the group and the direct child (Windows keeps
+///    its taskkill /T /F tree kill);
+/// 4. orphan sweep (Unix) — descendants that outlived an exited group leader
+///    are SIGKILLed after one bounded settle; no owned process survives the
+///    owner.
+/// The group is only ever signalled because this instance spawned the child as
+/// a group leader (`process_group(0)`); there is no name- or port-based sweep.
+fn stop_supervisor_child_bounded(mut child: Child) -> bool {
+  const NATURAL_EXIT_WAIT: Duration = Duration::from_secs(2);
+  const GROUP_GRACE: Duration = Duration::from_millis(1_500);
+  const POST_EXIT_SETTLE: Duration = Duration::from_millis(1_500);
+  const REAP_WAIT: Duration = Duration::from_millis(1_500);
 
-  for _ in 0..ATTEMPTS {
-    match child.try_wait() {
-      Ok(Some(_)) => return true,
-      Ok(None) => thread::sleep(Duration::from_millis(100)),
-      Err(_) => break,
+  let pid = child.id();
+  #[cfg(unix)]
+  let owned_group = owned_process_group(pid);
+
+  let mut exited = wait_child_exit(&mut child, NATURAL_EXIT_WAIT);
+
+  if !exited {
+    #[cfg(unix)]
+    {
+      match owned_group {
+        Some(pgid) => signal_process_group(pgid, libc::SIGTERM),
+        // Defensive: ungrouped child (tests). The handle proves the pid is ours.
+        None => signal_pid(pid, libc::SIGTERM),
+      }
+      exited = wait_child_exit(&mut child, GROUP_GRACE);
+    }
+    if !exited {
+      let _ = child.kill();
+      #[cfg(unix)]
+      if let Some(pgid) = owned_group {
+        signal_process_group(pgid, libc::SIGKILL);
+      }
+      #[cfg(windows)]
+      force_kill_process_tree(pid);
+      exited = wait_child_exit(&mut child, REAP_WAIT);
     }
   }
 
-  let pid = child.id();
-  let _ = child.kill();
-  // Never block on Child::wait before forcing the owned tree. The Windows
-  // smoke observed Child::wait remaining blocked after kill reported success.
-  force_kill_process_tree(pid);
+  #[cfg(unix)]
+  if let Some(pgid) = owned_group {
+    if process_group_has_members(pgid) {
+      if exited && wait_process_group_empty(pgid, POST_EXIT_SETTLE) {
+        return true;
+      }
+      signal_process_group(pgid, libc::SIGKILL);
+      if !wait_process_group_empty(pgid, REAP_WAIT) {
+        return false;
+      }
+    }
+  }
 
-  for _ in 0..ATTEMPTS {
+  exited
+}
+
+fn wait_child_exit(child: &mut Child, budget: Duration) -> bool {
+  let deadline = std::time::Instant::now() + budget;
+  loop {
     match child.try_wait() {
       Ok(Some(_)) => return true,
-      Ok(None) => thread::sleep(Duration::from_millis(100)),
+      Ok(None) => {
+        if std::time::Instant::now() >= deadline {
+          return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+      }
       Err(_) => return false,
     }
   }
-  false
 }
 
-/// Force-kill a process tree on Windows (taskkill /T /F). No-op elsewhere / pid 0.
+#[cfg(unix)]
+mod unix_process {
+  /// PgID of `pid`, but only when `pid` itself leads that group — i.e. we
+  /// spawned it with `process_group(0)`. Never returns a group this instance
+  /// did not create, so callers cannot signal a foreign group.
+  pub(super) fn owned_process_group(pid: u32) -> Option<i32> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    let pgid = unsafe { libc::getpgid(pid) };
+    if pgid > 0 && pgid == pid { Some(pgid) } else { None }
+  }
+
+  /// `kill(-pgid, sig)` — reaches every descendant still in the owned group.
+  pub(super) fn signal_process_group(pgid: i32, sig: i32) {
+    unsafe {
+      libc::kill(-pgid, sig);
+    }
+  }
+
+  /// Direct-pid signal for a child we hold a live handle for.
+  pub(super) fn signal_pid(pid: u32, sig: i32) {
+    if let Ok(pid) = libc::pid_t::try_from(pid) {
+      unsafe {
+        libc::kill(pid, sig);
+      }
+    }
+  }
+
+  /// `kill(-pgid, 0)`: Ok/EPERM ⇒ members exist, ESRCH ⇒ group is empty.
+  pub(super) fn process_group_has_members(pgid: i32) -> bool {
+    let sent = unsafe { libc::kill(-pgid, 0) };
+    if sent == 0 {
+      return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+  }
+}
+
+#[cfg(unix)]
+fn owned_process_group(pid: u32) -> Option<i32> {
+  unix_process::owned_process_group(pid)
+}
+
+#[cfg(unix)]
+fn signal_process_group(pgid: i32, sig: i32) {
+  unix_process::signal_process_group(pgid, sig)
+}
+
+#[cfg(unix)]
+fn signal_pid(pid: u32, sig: i32) {
+  unix_process::signal_pid(pid, sig)
+}
+
+#[cfg(unix)]
+fn process_group_has_members(pgid: i32) -> bool {
+  unix_process::process_group_has_members(pgid)
+}
+
+#[cfg(unix)]
+fn wait_process_group_empty(pgid: i32, budget: Duration) -> bool {
+  let deadline = std::time::Instant::now() + budget;
+  while process_group_has_members(pgid) {
+    if std::time::Instant::now() >= deadline {
+      return false;
+    }
+    thread::sleep(Duration::from_millis(50));
+  }
+  true
+}
+
+/// Force-kill a process tree on Windows (taskkill /T /F). On Unix this is a
+/// direct-pid backstop for pid-metadata entries (runtime/mem0) that are group
+/// members, not leaders — the owned-group escalation in
+/// `stop_supervisor_child_bounded` covers their tree.
 fn force_kill_process_tree(pid: u32) {
   if pid == 0 {
     return;

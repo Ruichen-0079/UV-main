@@ -281,6 +281,22 @@ describe("DesktopSupervisor shutdown", () => {
     cleanupMayFinish = true;
     await shutdown;
   });
+
+  it("repeated shutdown stays idempotent and drains once", async () => {
+    const config = baseConfig();
+    const supervisor = createSupervisor(config);
+
+    const first = supervisor.shutdown();
+    const second = supervisor.shutdown();
+    await Promise.all([first, second]);
+
+    const log = fs.readFileSync(
+      path.join(config.stateDirectory, "supervisor-exit.log"),
+      "utf8"
+    );
+    expect(log.match(/shutdown complete/g)).toHaveLength(1);
+    expect(log).toContain("shutdown already in progress/complete");
+  });
 });
 
 describe("DesktopSupervisor classification", () => {

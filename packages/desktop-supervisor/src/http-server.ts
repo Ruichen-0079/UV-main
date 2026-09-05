@@ -20,6 +20,13 @@ export type SupervisorHttpServerOptions = {
   port?: number;
   /** Required high-entropy token for mutating routes. */
   controlToken: string;
+  /**
+   * Invoked exactly once after a POST /v1/shutdown drain finished (success or
+   * failure). The entry process owns process lifetime and must reach terminal
+   * exit here — /v1/shutdown is a terminal shutdown request, not a service
+   * stop. Repeated requests stay idempotent (single signal).
+   */
+  onShutdownComplete?: () => void;
 };
 
 /**
@@ -36,8 +43,17 @@ export function startSupervisorHttpServer(
     throw new Error("controlToken must be a high-entropy secret (min 32 chars).");
   }
 
+  // /v1/shutdown must lead to terminal process exit exactly once, no matter
+  // how many times the endpoint is hit.
+  let shutdownSignaled = false;
+  function signalShutdownComplete(): void {
+    if (shutdownSignaled) return;
+    shutdownSignaled = true;
+    options.onShutdownComplete?.();
+  }
+
   const server = http.createServer((req, res) => {
-    void handle(req, res, supervisor, options.controlToken);
+    void handle(req, res, supervisor, options.controlToken, signalShutdownComplete);
   });
 
   return new Promise((resolve, reject) => {
@@ -77,7 +93,8 @@ async function handle(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   supervisor: DesktopSupervisor,
-  controlToken: string
+  controlToken: string,
+  signalShutdownComplete: () => void
 ): Promise<void> {
   try {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -128,8 +145,17 @@ async function handle(
       return sendJson(res, 200, result);
     }
     if (method === "POST" && url.pathname === "/v1/shutdown") {
-      await supervisor.shutdown();
-      return sendJson(res, 200, { ok: true });
+      try {
+        // Drain first (existing Runtime/owned-service semantics); the ack only
+        // means the drain finished. Terminal exit is signalled separately so
+        // the response can flush before the entry process exits.
+        await supervisor.shutdown();
+        return sendJson(res, 200, { ok: true });
+      } finally {
+        // Fire on drain success AND failure: a failed stop must not leave a
+        // half-drained supervisor serving an owner that is going away.
+        signalShutdownComplete();
+      }
     }
 
     const serviceMatch = url.pathname.match(/^\/v1\/services\/([a-z_]+)\/(restart|stop|start)$/);

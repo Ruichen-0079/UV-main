@@ -62,7 +62,13 @@ async function main() {
   const { server, port, host } = await startSupervisorHttpServer(supervisor, {
     host: config.controlHost,
     port: config.controlPort,
-    controlToken: config.controlToken
+    controlToken: config.controlToken,
+    // /v1/shutdown is terminal: once the drain has finished, this supervisor
+    // process itself must exit so the Tauri owner never outlives a drained
+    // control plane. The timer lets the HTTP ack flush before exiting.
+    onShutdownComplete: () => {
+      setTimeout(() => void gracefulShutdown("control-plane-shutdown"), 150);
+    }
   });
 
   const endpoint = {

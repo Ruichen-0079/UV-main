@@ -227,9 +227,20 @@ Dependency direction (not numeric order):
   `tauri.windows.conf.json` so Linux compiles; the Supervisor state root now
   follows XDG data-home semantics on Linux (Rust/Node agreement);
   `restrictToCurrentUser` no longer strips the traverse bit from
-  instance directories. Known next-atom evidence: after app exit the
-  Supervisor tree outlives the Tauri shell on Linux — Linux
-  Supervisor/KDE lifecycle owns shutdown ownership)
+  instance directories.)
+- Linux Supervisor ownership & shutdown — DONE
+  (closure record, no separate atom doc: the Tauri owner now holds the whole
+  descendant tree. Rust spawns the Supervisor child as its own Unix process
+  group (`process_group(0)`), so shutdown escalates only against the group it
+  spawned — never by name/port; `POST /v1/shutdown` is terminal: the Node
+  supervisor drains owned services (existing Runtime seal/drain semantics
+  preserved) and then self-exits, unwinding the pnpm/tsx wrappers; SIGINT/
+  SIGTERM are routed through a self-pipe into the graceful exit path instead
+  of the default disposition that orphaned the tree. The smoke now FAILs if
+  the product shutdown leaves any owned process behind — PASS no longer
+  depends on the emergency cleanup, which is failure-autopsy only. Evidence
+  recorded for a later KDE atom: ordinary window close is still a hide; the
+  tray Quit path already routes through the same graceful exit gate.)
 - [03 — Desktop Surface foundation](03-desktop-surface-foundation.md)
   — rebaselined: no longer depends on Windows Atoms 01–02
 - [04 — WebUI Surface](04-webui-surface.md)
