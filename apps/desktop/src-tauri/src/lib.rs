@@ -150,22 +150,48 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn begin_app_shutdown(app: &tauri::AppHandle) {
+  // DIAG229 temporary handoff tracing (do not merge): single-line markers only.
+  eprintln!(
+    "DIAG229 C10 begin_app_shutdown_enter pid={} tid={:?}",
+    std::process::id(),
+    std::thread::current().id()
+  );
   if !claim_app_shutdown() {
     return;
   }
+  eprintln!(
+    "DIAG229 C9 shutdown_gate_claimed pid={} tid={:?}",
+    std::process::id(),
+    std::thread::current().id()
+  );
   supervisor::shutdown_supervisor(app);
 }
 
 fn request_app_exit(app: &tauri::AppHandle) {
+  eprintln!(
+    "DIAG229 C4 request_app_exit_enter pid={} tid={:?}",
+    std::process::id(),
+    std::thread::current().id()
+  );
   if !app_shutdown_started() {
     // A tray menu listener runs while Tauri is dispatching the menu event.
     // Queue the exit request as a later main-thread task so the nested
     // RequestExit event is not posted from inside that dispatch.
     let app = app.clone();
-    std::thread::spawn(move || {
+    let _diag_handle = std::thread::spawn(move || {
       let exit_app = app.clone();
       let fallback_app = app.clone();
       let result = app.run_on_main_thread(move || {
+        eprintln!(
+          "DIAG229 C6 exit_deferred_running pid={} tid={:?}",
+          std::process::id(),
+          std::thread::current().id()
+        );
+        eprintln!(
+          "DIAG229 C7 app_exit_call pid={} tid={:?}",
+          std::process::id(),
+          std::thread::current().id()
+        );
         exit_app.exit(0);
       });
       if let Err(error) = result {
@@ -173,6 +199,11 @@ fn request_app_exit(app: &tauri::AppHandle) {
         fallback_app.exit(0);
       }
     });
+    eprintln!(
+      "DIAG229 C5 exit_deferred_scheduled pid={} tid={:?}",
+      std::process::id(),
+      std::thread::current().id()
+    );
   }
 }
 
@@ -204,6 +235,13 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     .tooltip("YUVI")
     .menu(&menu)
     .on_menu_event(|app, event| {
+      // DIAG229 temporary handoff tracing (do not merge).
+      eprintln!(
+        "DIAG229 C1 menu_event id={} pid={} tid={:?}",
+        event.id.as_ref(),
+        std::process::id(),
+        std::thread::current().id()
+      );
       match tray_action(event.id.as_ref()) {
         Some(TrayAction::OpenMain) => {
           if let Err(error) = show_main(app) {
@@ -225,7 +263,20 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             eprintln!("[yuvi-desktop] failed to hide companion window: {error}");
           }
         }
-        Some(TrayAction::Quit) => request_app_exit(app),
+        Some(TrayAction::Quit) => {
+          // DIAG229 temporary handoff tracing (do not merge).
+          eprintln!(
+            "DIAG229 C2 mapped=Quit pid={} tid={:?}",
+            std::process::id(),
+            std::thread::current().id()
+          );
+          eprintln!(
+            "DIAG229 C3 dispatch_quit_enter pid={} tid={:?}",
+            std::process::id(),
+            std::thread::current().id()
+          );
+          request_app_exit(app)
+        }
         None => {}
       }
     })
@@ -298,6 +349,12 @@ pub fn run() {
     .expect("error while building YUVI desktop app")
     .run(|app_handle, event| {
       if let RunEvent::ExitRequested { .. } = event {
+        // DIAG229 temporary handoff tracing (do not merge).
+        eprintln!(
+          "DIAG229 C8 exit_requested pid={} tid={:?}",
+          std::process::id(),
+          std::thread::current().id()
+        );
         begin_app_shutdown(app_handle);
       }
       if let RunEvent::Exit = event {
