@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   correlateMainPlaybackStatus,
+  createRuntimeStreamRequest,
   MainPage,
   resolveSpeechCommandEpoch,
   voicePlaybackStatusLabel
@@ -51,6 +52,32 @@ describe("MainPage voice input", () => {
     expect(markup).toContain("Voice input");
     expect(markup).toContain("Record voice");
     expect(markup).toContain("Transcribe recording");
+  });
+
+  it("exposes a hands-free voice mode surface with an explicit state", () => {
+    const markup = renderMainPage();
+    expect(markup).toContain("Voice Mode");
+    expect(markup).toContain("Start voice");
+  });
+});
+
+describe("MainPage runtime request contract", () => {
+  it("routes voice transcripts through the normal runtime path without double TTS", () => {
+    const request = createRuntimeStreamRequest("default", "hello from voice mode", {
+      readMemory: true,
+      writeMemory: true,
+      promptPreview: true
+    });
+    expect(request).toEqual({
+      sessionId: "default",
+      text: "hello from voice mode",
+      options: {
+        readMemory: true,
+        writeMemory: true,
+        voiceOutput: false,
+        promptPreview: true
+      }
+    });
   });
 });
 

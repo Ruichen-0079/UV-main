@@ -1343,11 +1343,15 @@ export const apiClient = {
     subjectUserId?: string;
     createdByUserId?: string;
     mockText?: string;
+    signal?: AbortSignal;
   }): Promise<TranscriptionResponse> {
-    return request<TranscriptionResponse>("/v1/audio/transcriptions", {
+    const { signal, ...payload } = input;
+    const init: RequestInit = {
       method: "POST",
-      body: JSON.stringify(input)
-    });
+      body: JSON.stringify(payload)
+    };
+    if (signal) init.signal = signal;
+    return request<TranscriptionResponse>("/v1/audio/transcriptions", init);
   },
 
   sendVoiceMessage(input: {

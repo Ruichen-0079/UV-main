@@ -4,6 +4,7 @@ import {
   apiClient,
   type MessageStreamEvent,
   type ProactiveMessageStreamEvent,
+  type SendMessageRequest,
   type TranscriptionResponse
 } from "./api/client.js";
 import {
@@ -62,6 +63,8 @@ import {
   type ProactiveTurnEffect
 } from "./proactive-turn-execution.js";
 import type { TtsSettingsProjection } from "./user-settings-state.js";
+import { useVoiceMode } from "./use-voice-mode.js";
+import type { VoiceModeController } from "./voice-mode-controller.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
@@ -139,6 +142,8 @@ export function MainPage(): JSX.Element {
   );
   const activeRequestRef = useRef<ActiveRequestOwnership | null>(null);
   const audioCaptureRef = useRef<ActiveAudioCapture | null>(null);
+  const voiceControllerRef = useRef<VoiceModeController | null>(null);
+  const voiceRequestMapRef = useRef(new Map<string, string>());
 
   const capabilityProjection = useMemo(
     () =>
@@ -164,6 +169,60 @@ export function MainPage(): JSX.Element {
   const effectiveVoiceOutputRef = useRef(effectiveVoiceOutput);
   ttsConfigRef.current = ttsConfig;
   effectiveVoiceOutputRef.current = effectiveVoiceOutput;
+
+  const {
+    voiceState,
+    voiceStatusLabel,
+    voiceController
+  } = useVoiceMode({
+    startCapture: () => startMicrophoneCapture(),
+    stopCapture: (handle) => stopMicrophoneCapture(handle as ActiveAudioCapture),
+    releaseCapture: (handle) => releaseMicrophoneCapture(handle as ActiveAudioCapture | null),
+    transcribe: (audio, options) =>
+      apiClient.transcribeAudio({
+        sessionId,
+        audioBase64: audio.audioBase64,
+        mimeType: audio.mimeType,
+        signal: options.signal
+      }),
+    sendRuntimeText: (utteranceId, text) => {
+      void sendRuntimeContent(text, { utteranceId });
+    },
+    speakSentence: (sentence) => {
+      const requestId = voiceRequestMapRef.current.get(sentence.utteranceId);
+      if (!requestId) return;
+      // Live TTS gate mirrors the typed path: disabling TTS mid-turn stops
+      // new sentences while already-queued audio finishes.
+      if (!effectiveVoiceOutputRef.current.requestTts) return;
+      busRef.current?.post({
+        kind: "speak",
+        requestId,
+        sequence: sentence.sequence,
+        text: sentence.text,
+        language: sentence.language
+      });
+    },
+    finishSpeech: (utteranceId) => {
+      const requestId = voiceRequestMapRef.current.get(utteranceId);
+      if (!requestId) return;
+      busRef.current?.post({ kind: "speech-end", requestId });
+    },
+    cancelSpeech: (utteranceId) => {
+      const requestId =
+        voiceRequestMapRef.current.get(utteranceId) ?? activeRequestRef.current?.id ?? null;
+      voiceRequestMapRef.current.delete(utteranceId);
+      if (voiceRequestMapRef.current.size > 8) {
+        const oldest = voiceRequestMapRef.current.keys().next();
+        if (!oldest.done) voiceRequestMapRef.current.delete(oldest.value);
+      }
+      if (!requestId) return;
+      busRef.current?.post({ kind: "stop-speech", requestId });
+    },
+    interruptRuntimeTurn: () => {
+      stopGeneration();
+    }
+  });
+  voiceControllerRef.current = voiceController;
 
   useEffect(() => {
     voiceOutputRef.current = voiceOutput;
@@ -321,6 +380,8 @@ export function MainPage(): JSX.Element {
         setVoicePlaybackStatus(message.state);
         if (message.state === "idle" || message.state === "stopped") {
           speechEpochRef.current = null;
+          const voiceUtterance = findVoiceUtteranceId(message.requestId);
+          if (voiceUtterance) voiceControllerRef.current?.notifyPlaybackEnded(voiceUtterance);
         }
       } else if (message.kind === "playback-status") {
         if (speechEpochRef.current !== message.requestId) return;
@@ -336,6 +397,17 @@ export function MainPage(): JSX.Element {
         playbackCorrelationRef.current = result.state;
         if (!result.accepted) return;
         applyPlaybackStatus(message.state, setVoicePlaybackStatus, setActualPlaybackActive);
+        const voiceUtterance = findVoiceUtteranceId(message.requestId);
+        if (voiceUtterance) {
+          if (message.state === "ended" || message.state === "stopped") {
+            voiceControllerRef.current?.notifyPlaybackEnded(voiceUtterance);
+          } else if (message.state === "error") {
+            voiceControllerRef.current?.notifyPlaybackFailed(
+              voiceUtterance,
+              "语音播放失败，文字回复已保留。"
+            );
+          }
+        }
       } else if (message.kind === "proactive-text-request") {
         handleProactiveTextRequest(message);
       }
@@ -400,10 +472,56 @@ export function MainPage(): JSX.Element {
     if (active?.origin === "proactive") {
       cancelActiveProactiveRequest(active);
     }
-    const content = submit.submittedText;
     setInput(submit.nextDraft);
     setError(null);
     inputRef.current?.focus();
+    await sendRuntimeContent(submit.submittedText);
+  }
+
+  function findVoiceUtteranceId(requestId: string): string | null {
+    const controller = voiceControllerRef.current;
+    if (!controller) return null;
+    const state = controller.getState();
+    if (state.utteranceId === null) return null;
+    if (state.status !== "thinking" && state.status !== "speaking") return null;
+    return voiceRequestMapRef.current.get(state.utteranceId) === requestId
+      ? state.utteranceId
+      : null;
+  }
+
+  function startVoiceMode(): void {
+    // A new voice utterance interrupts any old turn (typed or voice): stop
+    // the in-flight Runtime request and its speech before capturing.
+    stopGeneration();
+    voiceControllerRef.current?.start({
+      ttsRequested: effectiveVoiceOutputRef.current.requestTts
+    });
+  }
+
+  /**
+   * Shared Runtime message execution for typed and voice turns. Both enter
+   * the normal Runtime path with the same request contract; voice turns
+   * only route their streaming deltas through the Voice Mode controller so
+   * sentence TTS stays single-sourced and stale generations are fenced.
+   */
+  async function sendRuntimeContent(
+    content: string,
+    voice?: { utteranceId: string }
+  ): Promise<void> {
+    const active = activeRequestRef.current;
+    if (active?.origin === "user") {
+      if (voice) {
+        voiceControllerRef.current?.notifyRuntimeFailed(
+          voice.utteranceId,
+          "已有进行中的对话，请稍后重试。"
+        );
+      }
+      return;
+    }
+    if (active?.origin === "proactive") {
+      cancelActiveProactiveRequest(active);
+    }
+    setError(null);
     const requestId = createSurfaceId("turn");
     const assistantId = createSurfaceId("assistant");
     const controller = new AbortController();
@@ -420,12 +538,18 @@ export function MainPage(): JSX.Element {
     playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
     setActualPlaybackActive(false);
     setRequestStatus("sending");
+    if (voice) {
+      voiceRequestMapRef.current.set(voice.utteranceId, requestId);
+    }
     const bus = busRef.current;
     bus?.post({ kind: "user-gesture" });
     bus?.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
     bus?.post({ kind: "start-generation", requestId, sessionId });
     const segmenter = new SpeechSegmenter();
-    if (shouldRequestTts) {
+    if (shouldRequestTts && !voice) {
+      // Typed turns segment here; voice turns segment inside the Voice Mode
+      // controller so sentences are emitted exactly once with utterance
+      // fencing. Either way the companion owns sentence-level TTS.
       speechSessionRef.current = { generation: requestId, segmenter, sequence: 0, ended: false };
     }
     dispatchMessages({
@@ -452,18 +576,11 @@ export function MainPage(): JSX.Element {
 
     try {
       const response = await apiClient.streamMessage(
-        {
-          sessionId,
-          text: content,
-          options: {
-            readMemory,
-            writeMemory,
-            // The companion window owns sentence-level TTS for this path;
-            // avoid asking Runtime to synthesize the full reply a second time.
-            voiceOutput: false,
-            promptPreview
-          }
-        },
+        createRuntimeStreamRequest(sessionId, content, {
+          readMemory,
+          writeMemory,
+          promptPreview
+        }),
         {
           signal: controller.signal,
           onEvent: (event: MessageStreamEvent) => {
@@ -477,13 +594,21 @@ export function MainPage(): JSX.Element {
                 text: event.text,
                 traceId: event.traceId
               });
-              forwardSpeechSegments(requestId, event.text);
+              if (voice) {
+                voiceControllerRef.current?.notifyTextDelta(voice.utteranceId, event.text);
+              } else {
+                forwardSpeechSegments(requestId, event.text);
+              }
               return;
             }
             if (event.type === "error") {
               dispatchMessages({ type: "fail", assistantId, error: event.message });
               setError(event.message);
-              forwardSpeechEnd(requestId, "failed");
+              if (voice) {
+                voiceControllerRef.current?.notifyRuntimeFailed(voice.utteranceId, event.message);
+              } else {
+                forwardSpeechEnd(requestId, "failed");
+              }
               return;
             }
             ownership.completedObserved = true;
@@ -495,7 +620,11 @@ export function MainPage(): JSX.Element {
               provider: event.provider
             });
             setRequestStatus("success");
-            forwardSpeechEnd(requestId, "completed");
+            if (voice) {
+              voiceControllerRef.current?.notifyRuntimeCompleted(voice.utteranceId);
+            } else {
+              forwardSpeechEnd(requestId, "completed");
+            }
           }
         }
       );
@@ -512,7 +641,11 @@ export function MainPage(): JSX.Element {
         provider: response.provider
       });
       setRequestStatus("success");
-      forwardSpeechEnd(requestId, "completed");
+      if (voice) {
+        voiceControllerRef.current?.notifyRuntimeCompleted(voice.utteranceId);
+      } else {
+        forwardSpeechEnd(requestId, "completed");
+      }
     } catch (caught) {
       if (!mountedRef.current || !isCurrentRequest(activeRequestRef.current, ownership)) {
         return;
@@ -521,6 +654,9 @@ export function MainPage(): JSX.Element {
         const speech = speechSessionRef.current;
         if (speech?.generation === requestId) {
           speech.segmenter.reset();
+        }
+        if (voice) {
+          voiceControllerRef.current?.notifyRuntimeAborted(voice.utteranceId);
         }
         dispatchMessages({
           type: "cancel",
@@ -531,7 +667,11 @@ export function MainPage(): JSX.Element {
         return;
       }
       const message = friendlyChatError(caught);
-      forwardSpeechEnd(requestId, "failed");
+      if (voice) {
+        voiceControllerRef.current?.notifyRuntimeFailed(voice.utteranceId, message);
+      } else {
+        forwardSpeechEnd(requestId, "failed");
+      }
       dispatchMessages({ type: "fail", assistantId, error: message });
       setError(message);
       setRequestStatus("error");
@@ -816,6 +956,14 @@ export function MainPage(): JSX.Element {
     }
   }
 
+  // Voice Mode holds the microphone for hands-free turns; keep the manual
+  // one-shot capture from racing it.
+  const voiceModeBusy =
+    voiceState.status === "recording" ||
+    voiceState.status === "transcribing" ||
+    voiceState.status === "thinking" ||
+    voiceState.status === "speaking";
+
   return (
     <div className="min-h-screen bg-ink-100">
       <ServiceStatusPanel />
@@ -965,7 +1113,10 @@ export function MainPage(): JSX.Element {
             <button
               type="button"
               className={voiceCaptureStatus === "recording" ? "button-secondary" : "button-primary"}
-              disabled={voiceCaptureStatus !== "idle" && voiceCaptureStatus !== "recording"}
+              disabled={
+                (voiceCaptureStatus !== "idle" && voiceCaptureStatus !== "recording") ||
+                voiceModeBusy
+              }
               onClick={() =>
                 void (voiceCaptureStatus === "recording" ? stopVoiceCapture() : startVoiceCapture())
               }
@@ -1018,6 +1169,73 @@ export function MainPage(): JSX.Element {
                 Loaded into the chat draft for review.
               </div>
             </div>
+          )}
+        </Panel>
+
+        <Panel title="Voice Mode" actions={<Pill status={voiceState.status} />}>
+          <div className="flex flex-wrap items-center gap-2">
+            {(voiceState.status === "idle" ||
+              voiceState.status === "error" ||
+              voiceState.status === "interrupted") && (
+              <button
+                type="button"
+                className="button-primary"
+                disabled={voiceCaptureStatus !== "idle"}
+                onClick={startVoiceMode}
+                aria-label="Start voice mode"
+              >
+                {voiceState.status === "idle" ? "Start voice" : "Start voice again"}
+              </button>
+            )}
+            {voiceState.status === "recording" && (
+              <button
+                type="button"
+                className="button-primary"
+                onClick={() => voiceController.stopRecording()}
+                aria-label="Stop recording and send"
+              >
+                Stop & send
+              </button>
+            )}
+            {(voiceState.status === "transcribing" ||
+              voiceState.status === "thinking" ||
+              voiceState.status === "speaking") && (
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => voiceController.stop()}
+                aria-label="Stop voice turn"
+              >
+                Stop
+              </button>
+            )}
+            {(voiceState.status === "error" || voiceState.status === "interrupted") && (
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => voiceController.dismiss()}
+                aria-label="Dismiss voice state"
+              >
+                Dismiss
+              </button>
+            )}
+            <span className="text-xs text-ink-500" aria-live="polite">
+              {voiceStatusLabel}
+            </span>
+          </div>
+          <p className="mt-2 text-xs text-ink-500">
+            Hands-free voice: microphone → transcription → normal Runtime reply →
+            sentence-level speech. Starting a new utterance interrupts the previous turn.
+          </p>
+          {voiceState.status === "error" && voiceState.error && (
+            <div className="mt-2">
+              <Notice tone="error" title="Voice Mode" message={voiceState.error} />
+            </div>
+          )}
+          {voiceState.status === "interrupted" && (
+            <p className="mt-2 text-xs text-ink-600" aria-live="polite">
+              The previous turn was interrupted. Start again whenever you are ready.
+            </p>
           )}
         </Panel>
 
@@ -1074,6 +1292,30 @@ export function resolveSpeechCommandEpoch(
   generationEpoch: string | null
 ): string | null {
   return speechEpoch ?? generationEpoch;
+}
+
+/**
+ * Single request contract for the normal Runtime message path. Typed and
+ * voice turns share it: `voiceOutput` is always false because the companion
+ * window owns sentence-level TTS, so a reply is never synthesized twice.
+ */
+export function createRuntimeStreamRequest(
+  sessionId: string,
+  text: string,
+  options: { readMemory: boolean; writeMemory: boolean; promptPreview: boolean }
+): SendMessageRequest {
+  return {
+    sessionId,
+    text,
+    options: {
+      readMemory: options.readMemory,
+      writeMemory: options.writeMemory,
+      // The companion window owns sentence-level TTS for this path;
+      // avoid asking Runtime to synthesize the full reply a second time.
+      voiceOutput: false,
+      promptPreview: options.promptPreview
+    }
+  };
 }
 
 export function correlateMainPlaybackStatus(
