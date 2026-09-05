@@ -45,7 +45,36 @@ export type {
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
 
-export { AssistantTurnConflictError, ConversationPersistenceError } from "./runtime-errors.js";
+export {
+  AssistantTurnConflictError,
+  ConversationPersistenceError,
+  ProactiveAdmissionError
+} from "./runtime-errors.js";
+
+export {
+  PROACTIVE_ADMISSION_REASONS,
+  PROACTIVE_CONTROL_AUTHORITIES,
+  PROACTIVE_DEFER_HORIZON_MS,
+  advanceActivityRevision,
+  applyAuthorizedEngagement,
+  applyCharacterProactiveProposal,
+  canMutateDurableProactivePolicy,
+  createInitialProactiveState,
+  evaluateProactiveEligibility,
+  isAuthorizedExplicitEngagement,
+  isProactiveSuppressionActive,
+  normalizeProactiveState,
+  parseIso8601DurationMs,
+  parseProactivePolicySnapshot,
+  serializeProactivePolicySnapshot,
+  type ProactiveAdmissionReason,
+  type ProactiveControlAuthority,
+  type ProactiveEligibility,
+  type ProactivePolicySnapshot,
+  type ProactiveState,
+  type ProactiveSuppression,
+  type RuntimeProactiveStateStore
+} from "./runtime-proactive-policy.js";
 
 export {
   RUNTIME_COGNITION_FAILURE_STATUSES,

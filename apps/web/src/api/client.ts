@@ -940,11 +940,15 @@ let dashboardDevToken = "";
 
 export class ApiError extends Error {
   readonly status: number;
+  readonly error?: string;
+  readonly reason?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, extras: { error?: string; reason?: string } = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    if (extras.error !== undefined) this.error = extras.error;
+    if (extras.reason !== undefined) this.reason = extras.reason;
   }
 }
 
@@ -992,6 +996,17 @@ export const apiClient = {
     options: ProactiveStreamOptions = {}
   ): Promise<ProactiveTurnResult> {
     return streamProactiveTextResponse(toProactiveTurnStreamRequestBody(input), options);
+  },
+
+  setProactiveConsent(
+    enabled: boolean,
+    signal?: AbortSignal
+  ): Promise<{ ok: true; enabled: boolean }> {
+    return request<{ ok: true; enabled: boolean }>("/v1/proactive/consent", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+      ...signalRequestInit(signal)
+    });
   },
 
   listRecentMemories(limit = 20, signal?: AbortSignal): Promise<{ memories: MemoryRecord[] }> {
@@ -1557,7 +1572,7 @@ async function streamProactiveTextResponse(
   const response = await fetch(`${apiBaseUrl}/v1/proactive-turns/stream`, requestInit);
 
   if (!response.ok) {
-    throw new ApiError(await safeHttpStreamError(response), response.status);
+    throw await createHttpStreamError(response);
   }
   if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
     throw new MessageStreamProtocolError("The streaming response was not SSE.");
@@ -1666,6 +1681,25 @@ function shouldAttachDashboardDevToken(path: string, method: string | undefined)
   return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";
 }
 
+async function createHttpStreamError(response: Response): Promise<ApiError> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return new ApiError(
+      response.status === 400 ? "请求内容无效。" : "消息流请求失败。",
+      response.status
+    );
+  }
+  const extras = isRecord(payload)
+    ? {
+        ...(typeof payload["error"] === "string" ? { error: payload["error"] } : {}),
+        ...(typeof payload["reason"] === "string" ? { reason: payload["reason"] } : {})
+      }
+    : {};
+  return new ApiError(describeHttpStreamError(payload, response.status), response.status, extras);
+}
+
 async function safeHttpStreamError(response: Response): Promise<string> {
   let payload: unknown;
   try {
@@ -1674,9 +1708,16 @@ async function safeHttpStreamError(response: Response): Promise<string> {
     return response.status === 400 ? "请求内容无效。" : "消息流请求失败。";
   }
 
+  return describeHttpStreamError(payload, response.status);
+}
+
+function describeHttpStreamError(payload: unknown, status: number): string {
   if (isRecord(payload)) {
     if (payload["error"] === "invalid_request") {
       return "请求内容无效。";
+    }
+    if (payload["error"] === "proactive_not_admitted") {
+      return "Runtime 未接纳此次主动发起。";
     }
     if (typeof payload["code"] === "string") {
       return safeClientErrorMessage(payload["code"]);
@@ -1685,7 +1726,7 @@ async function safeHttpStreamError(response: Response): Promise<string> {
       return "消息保存失败，请稍后重试。";
     }
   }
-  return response.status === 400 ? "请求内容无效。" : "消息流请求失败。";
+  return status === 400 ? "请求内容无效。" : "消息流请求失败。";
 }
 
 function safeClientErrorMessage(code: string): string {

@@ -185,8 +185,8 @@ retained as historical/reference material:
 ### Active semantic lane
 
 - [06 — Character Interaction Contract vNext](06-character-interaction-contract.md) — DONE
-- [07 — Runtime Character outcome + Cognition sequencing](07-runtime-character-outcome-cognition.md) — current
-- [08 — Runtime Proactive Policy + Web authority migration](08-runtime-proactive-policy.md)
+- [07 — Runtime Character outcome + Cognition sequencing](07-runtime-character-outcome-cognition.md) — DONE
+- [08 — Runtime Proactive Policy + Web authority migration](08-runtime-proactive-policy.md) — current
 - [09 — Speaker-aware STT independent input](09-speaker-aware-stt-input.md) — 09A DONE / 09B later
 - [10 — Proactive provider binding + single Runtime scheduler](10-proactive-provider-scheduler.md)
 - [11 — P8 main-profile projection](11-p8-main-profile.md) — DONE

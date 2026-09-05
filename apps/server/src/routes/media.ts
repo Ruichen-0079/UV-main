@@ -328,7 +328,8 @@ export async function registerMediaRoutes(
       const response = await context.runtime.handleUserMessage(transcriptEvent, {
         readMemory: parsed.data.options?.readMemory,
         writeMemory: parsed.data.options?.writeMemory,
-        voiceOutput: parsed.data.options?.voiceOutput
+        voiceOutput: parsed.data.options?.voiceOutput,
+        controlAuthority: "LOCAL_EXPLICIT_CONTROLLER"
       });
 
       const sttMetadata = standardProviderMetadata("stt", transcription);

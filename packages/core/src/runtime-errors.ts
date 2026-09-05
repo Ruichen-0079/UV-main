@@ -25,3 +25,16 @@ export class AssistantTurnConflictError extends Error {
     this.idempotencyKey = idempotencyKey;
   }
 }
+
+export class ProactiveAdmissionError extends Error {
+  readonly reason: "consent-disabled" | "suppressed" | "not-eligible" | "stale-revision";
+
+  constructor(
+    reason: "consent-disabled" | "suppressed" | "not-eligible" | "stale-revision",
+    message = "Proactive attempt was not admitted."
+  ) {
+    super(message);
+    this.name = "ProactiveAdmissionError";
+    this.reason = reason;
+  }
+}

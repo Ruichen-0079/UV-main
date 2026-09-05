@@ -47,7 +47,8 @@ export async function registerMessageStreamRoutes(
       voiceOutput,
       useMemory: memoryOptions.legacyUseMemory,
       readMemory: memoryOptions.readMemory,
-      writeMemory: memoryOptions.writeMemory
+      writeMemory: memoryOptions.writeMemory,
+      controlAuthority: "LOCAL_EXPLICIT_CONTROLLER"
     });
     const iterator = runtimeStream[Symbol.asyncIterator]();
     let headersStarted = false;

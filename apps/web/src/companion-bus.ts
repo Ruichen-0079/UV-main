@@ -235,9 +235,16 @@ function isProactiveTurnAdmissionResult(
   decision: unknown,
   reason: unknown
 ): decision is ProactiveTurnAdmissionDecision {
-  if (decision === "accepted") return reason === "consent-enabled";
+  if (decision === "accepted") return reason === "runtime-admitted";
   if (decision === "denied") {
-    return reason === "consent-disabled" || reason === "consent-unavailable";
+    return (
+      reason === "consent-disabled" ||
+      reason === "consent-unavailable" ||
+      reason === "suppressed" ||
+      reason === "not-eligible" ||
+      reason === "stale-revision" ||
+      reason === "execution-busy"
+    );
   }
   return false;
 }

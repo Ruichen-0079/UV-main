@@ -77,7 +77,8 @@ export async function registerMessageRoutes(
         voiceOutput,
         useMemory: memoryOptions.legacyUseMemory,
         readMemory: memoryOptions.readMemory,
-        writeMemory: memoryOptions.writeMemory
+        writeMemory: memoryOptions.writeMemory,
+        controlAuthority: "LOCAL_EXPLICIT_CONTROLLER"
       });
       if (response === null) {
         // Intentional Character silence/termination: the turn succeeded, but

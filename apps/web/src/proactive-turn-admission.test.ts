@@ -1,79 +1,27 @@
 import { describe, expect, it } from "vitest";
-import {
-  createInitialProactiveConsentState,
-  reduceProactiveConsent,
-  type ProactiveConsentState
-} from "./proactive-consent.js";
-import { evaluateProactiveTurnAdmission } from "./proactive-turn-admission.js";
-
-function read(
-  state: ProactiveConsentState,
-  revision: number,
-  enabled: boolean
-): ProactiveConsentState {
-  return reduceProactiveConsent(state, { type: "settings-view", revision, enabled });
-}
-
-function invalidate(state: ProactiveConsentState, revision: number): ProactiveConsentState {
-  return reduceProactiveConsent(state, {
-    type: "settings-changed",
-    revision,
-    changedSections: ["proactive"]
-  });
-}
+import { ApiError } from "./api/client.js";
+import { admissionFromRuntimeError, RUNTIME_ADMITTED } from "./proactive-turn-admission.js";
 
 describe("proactive text turn admission", () => {
-  it("accepts only an authoritative current enabled projection", () => {
-    expect(
-      evaluateProactiveTurnAdmission(read(createInitialProactiveConsentState(), 1, true))
-    ).toEqual({ decision: "accepted", reason: "consent-enabled" });
+  it("treats Runtime as the only semantic admission authority", () => {
+    expect(RUNTIME_ADMITTED).toEqual({ decision: "accepted", reason: "runtime-admitted" });
   });
 
-  it("denies an authoritative persisted false projection", () => {
+  it("maps Runtime 409 admission denials", () => {
     expect(
-      evaluateProactiveTurnAdmission(read(createInitialProactiveConsentState(), 1, false))
+      admissionFromRuntimeError(
+        new ApiError("denied", 409, { error: "proactive_not_admitted", reason: "suppressed" })
+      )
+    ).toEqual({ decision: "denied", reason: "suppressed" });
+    expect(
+      admissionFromRuntimeError(
+        new ApiError("denied", 409, { error: "proactive_not_admitted", reason: "consent-disabled" })
+      )
     ).toEqual({ decision: "denied", reason: "consent-disabled" });
   });
 
-  it("denies the initial unknown projection and a failed read", () => {
-    const initial = createInitialProactiveConsentState();
-    expect(evaluateProactiveTurnAdmission(initial)).toEqual({
-      decision: "denied",
-      reason: "consent-unavailable"
-    });
-
-    const failed = reduceProactiveConsent(initial, {
-      type: "settings-read-failed",
-      requestRevision: 2
-    });
-    expect(evaluateProactiveTurnAdmission(failed)).toEqual({
-      decision: "denied",
-      reason: "consent-unavailable"
-    });
-  });
-
-  it("denies a newer proactive settings invalidation until a current view returns", () => {
-    const ready = read(createInitialProactiveConsentState(), 3, true);
-    const invalidated = invalidate(ready, 4);
-
-    expect(evaluateProactiveTurnAdmission(invalidated)).toEqual({
-      decision: "denied",
-      reason: "consent-unavailable"
-    });
-    expect(evaluateProactiveTurnAdmission(read(invalidated, 4, true))).toEqual({
-      decision: "accepted",
-      reason: "consent-enabled"
-    });
-  });
-
-  it("fails closed for an inconsistent revision projection", () => {
-    expect(
-      evaluateProactiveTurnAdmission({
-        enabled: true,
-        status: "ready",
-        revisionFloor: 5,
-        projectedRevision: 4
-      })
-    ).toEqual({ decision: "denied", reason: "consent-unavailable" });
+  it("does not treat ordinary transport failures as policy admission", () => {
+    expect(admissionFromRuntimeError(new ApiError("down", 500))).toBeNull();
+    expect(admissionFromRuntimeError(new Error("nope"))).toBeNull();
   });
 });
