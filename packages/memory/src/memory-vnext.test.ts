@@ -428,18 +428,30 @@ describe("Context compression and thin temporal projection", () => {
     const result = compressHierarchicalContext({
       maxCharacters: 400,
       sections: [
-        { name: "SystemIdentity", content: "You are YUVI.", stable: true },
-        { name: "UserMessage", content: "昨天那个训练怎么样了？", stable: true },
+        {
+          name: "SystemIdentity",
+          content: "You are YUVI.",
+          stable: true,
+          partition: "PROTECTED"
+        },
+        {
+          name: "UserMessage",
+          content: "昨天那个训练怎么样了？",
+          stable: true,
+          partition: "PROTECTED"
+        },
         {
           name: "RelevantMemory",
-          content: "Memory was disabled for this turn.\nUNAVAILABLE long-term evidence."
+          content: "Memory was disabled for this turn.\nUNAVAILABLE long-term evidence.",
+          partition: "COMPRESSIBLE_LONG_TERM"
         },
         {
           name: "DirectContext",
           content: Array.from(
             { length: 12 },
             (_, index) => `- old turn ${index} ${"x".repeat(40)}`
-          ).join("\n")
+          ).join("\n"),
+          partition: "COMPRESSIBLE_RECENT"
         }
       ]
     });

@@ -2300,6 +2300,13 @@ describe("server", () => {
     expect(() => loadServerConfig({ MEMORY_EXTRACTOR: "external" })).toThrow(
       "Unsupported MEMORY_EXTRACTOR"
     );
+    expect(loadServerConfig({}).memoryContextCompression).toBe("off");
+    expect(loadServerConfig({ MEMORY_CONTEXT_COMPRESSION: "auto" }).memoryContextCompression).toBe(
+      "auto"
+    );
+    expect(() => loadServerConfig({ MEMORY_CONTEXT_COMPRESSION: "always" })).toThrow(
+      "Unsupported MEMORY_CONTEXT_COMPRESSION"
+    );
   });
 
   it("parses event bus boundary values", async () => {

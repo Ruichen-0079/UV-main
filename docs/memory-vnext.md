@@ -35,7 +35,7 @@ L2 long-term evidence  = existing MemoryEvent / MemoryProvider / MemoryService
 
 Dream                  = recurrence/salience/explicit consolidation into L2 write events
 Associative intrusion  = bounded context-triggered recall (not permission to speak)
-Compression            = IMPLEMENTED_PRIMITIVE_NOT_RUNTIME_ACTIVE
+Compression            = Runtime-active behind MEMORY_CONTEXT_COMPRESSION=auto
 Thin temporal          = elapsed/age/occurredAt vs recordedAt projection
 ```
 
@@ -84,9 +84,40 @@ not a speak gate.
 
 ## Compression and temporal projection
 
-`compressHierarchicalContext()` is implemented as a primitive and is
-**not** wired into the live Runtime/Character prompt
-(`IMPLEMENTED_PRIMITIVE_NOT_RUNTIME_ACTIVE`). No TTFT claim is made.
+`compressHierarchicalContext()` is wired into the user-turn Runtime prompt
+seam behind the conservative `MEMORY_CONTEXT_COMPRESSION=auto` flag. The
+default remains `off` until a deployment chooses the flag. The effective
+PromptBuilder budget is 12,000 characters; compression is attempted only when
+the uncompressed structured prompt exceeds that budget.
+
+The compressor receives only explicit partitions:
+
+- `PROTECTED`: system/Character/relationship/time contracts, current user
+  message, current situation, and control/tool context.
+- `COMPRESSIBLE_RECENT`: older L0 DirectContext; the newest two rendered turns
+  remain verbatim when available L1 continuity covers the older context.
+- `COMPRESSIBLE_EPISODIC`: L1 narrative detail.
+- `COMPRESSIBLE_LONG_TERM`: rendered L2 evidence lines; evidence/state lines
+  are retained, and L2 is already bounded by the existing retrieval policy.
+
+The compressor is deterministic and line-structured. It removes exact duplicate
+lines and compacts only non-semantic older detail runs. It preserves correction
+and supersession language, retrieval states (`UNKNOWN`, `UNAVAILABLE`, `ERROR`,
+`PARTIAL`), temporal markers, provenance/state labels, technical exact strings,
+and the existing assistant non-authority disclaimer. Proactive/P6 prompts do
+not use this seam. If the compressor errors, loses a protected marker, or does
+not meet the target, the existing PromptBuilder path is used unchanged.
+
+Runtime preview diagnostics expose mode, attempted/triggered state, original
+and final token estimates, saved tokens, reduction percentage, compressed
+partitions, budget compliance, and a fallback reason when applicable. No TTFT
+claim is made by this implementation.
+
+Run the local evaluation harness with:
+
+```text
+pnpm benchmark:memory-compression
+```
 
 Thin temporal projection excludes the current user turn when computing
 `lastInteractionAt`, so a long gap is not collapsed to ~0.

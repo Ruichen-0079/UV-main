@@ -119,4 +119,35 @@ describe("Runtime Memory vNext vertical slice", () => {
     expect(currentTime).not.toMatch(/Elapsed since last interaction: less than 2 minutes/);
     expect(currentTime).toMatch(/hours-ago|yesterday|this-week|hours/);
   });
+
+  it("activates structured compression only after the Runtime prompt budget is exceeded", async () => {
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMemory(),
+      promptBuilder: new PromptBuilder(),
+      providers: createProviders(),
+      conversation: new InMemoryConversationRepository(),
+      directContext: { enabled: true, maxTurns: 6, maxChars: 20_000 },
+      memoryContextCompression: "auto"
+    });
+
+    for (let index = 0; index < 6; index += 1) {
+      await runtime.handleUserMessage(
+        {
+          sessionId: "vnext-compression",
+          content: `Older ordinary conversation detail ${"context ".repeat(180)}${String.fromCharCode(97 + index)}`
+        },
+        { readMemory: true, writeMemory: false }
+      );
+    }
+
+    const preview = runtime.getLatestPromptPreview();
+    const direct = preview?.sections.find((section) => section.name === "DirectContext")?.content;
+    expect(preview?.contextCompression?.mode).toBe("auto");
+    expect(preview?.contextCompression?.attempted).toBe(true);
+    expect(preview?.contextCompression?.triggered).toBe(true);
+    expect(preview?.contextCompression?.budgetCompliant).toBe(true);
+    expect(preview?.estimatedTokens).toBeLessThanOrEqual(3_000);
+    expect(direct).toContain("Older ordinary conversation detail");
+  });
 });
