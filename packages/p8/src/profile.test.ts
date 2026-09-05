@@ -435,6 +435,109 @@ describe("P8 main-profile landing", () => {
     expect(projection.interpretations[0]).not.toHaveProperty("affinity");
   });
 
+  it("keeps UNAVAILABLE fail-closed instead of an empty or unknown profile", () => {
+    const outcome = mainProfile({
+      corrections: [],
+      longTerm: retrieval([]),
+      candidates: []
+    });
+    expect(outcome.status).toBe("RECONSTRUCTED");
+
+    const unavailable = reconstructP8MainProfile({
+      address: ADDRESS,
+      authoredInvariants: DEFAULT_AUTHORED_INVARIANTS,
+      expectedScopeReference: SCOPE,
+      longTerm: retrieval([memoryEvent()]),
+      referencedInterpretationCandidates: [
+        referencedCandidate("ref-main-a", { meaning: "A meaning." })
+      ],
+      correctionStore: { status: "UNAVAILABLE" }
+    });
+
+    expect(unavailable.status).toBe("UNAVAILABLE");
+    if (unavailable.status === "RECONSTRUCTED") {
+      throw new Error("UNAVAILABLE must not reconstruct a projection.");
+    }
+    expect(unavailable.correctionStoreStatus).toBe("UNAVAILABLE");
+  });
+
+  it("keeps ERROR fail-closed and distinct from UNAVAILABLE and EMPTY", () => {
+    const errored = reconstructP8MainProfile({
+      address: ADDRESS,
+      authoredInvariants: DEFAULT_AUTHORED_INVARIANTS,
+      expectedScopeReference: SCOPE,
+      longTerm: retrieval([memoryEvent()]),
+      referencedInterpretationCandidates: [
+        referencedCandidate("ref-main-a", { meaning: "A meaning." })
+      ],
+      correctionStore: { status: "ERROR" }
+    });
+
+    expect(errored.status).toBe("ERROR");
+    if (errored.status === "RECONSTRUCTED") {
+      throw new Error("ERROR must not reconstruct a projection.");
+    }
+    expect(errored.correctionStoreStatus).toBe("ERROR");
+  });
+
+  it("stops a lineage-defeated correction from superseding shared evidence", () => {
+    const shared = memoryEvent({ id: "memory-shared-lineage" });
+    const first: P8ExplicitCorrection = {
+      correctionReference: "correction-lineage-a",
+      address: ADDRESS,
+      scopeReference: SCOPE,
+      target: { kind: "INTERPRETATION", interpretationReference: "ref-main-a" },
+      action: "REVISE",
+      replacementMeaning: "Meaning from defeated correction.",
+      provenance: { source: "EXPLICIT_USER_CORRECTION", reference: "user-lineage-a" },
+      supersededEvidenceReferences: ["memory-shared-lineage"]
+    };
+    const second: P8ExplicitCorrection = {
+      correctionReference: "correction-lineage-b",
+      address: ADDRESS,
+      scopeReference: SCOPE,
+      target: { kind: "INTERPRETATION", interpretationReference: "ref-main-a" },
+      action: "REVISE",
+      replacementMeaning: "Meaning from lineage winner.",
+      provenance: { source: "EXPLICIT_USER_CORRECTION", reference: "user-lineage-b" },
+      supersedesCorrectionReference: "correction-lineage-a"
+    };
+    const projection = reconstructed(
+      mainProfile({
+        longTerm: retrieval([shared]),
+        candidates: [
+          referencedCandidate("ref-main-a", {
+            meaning: "Meaning A.",
+            evidenceReferences: ["memory-shared-lineage"]
+          }),
+          referencedCandidate("ref-main-b", {
+            meaning: "Meaning B via shared evidence.",
+            evidenceReferences: ["memory-shared-lineage"]
+          })
+        ],
+        corrections: [first, second]
+      })
+    );
+    const byRef = new Map(
+      projection.targetableInterpretations?.map((binding) => [
+        binding.interpretationReference,
+        binding.interpretation
+      ]) ?? []
+    );
+
+    const defeatedAudit = projection.correctionAudits.find(
+      (audit) => audit.correctionReference === "correction-lineage-a"
+    );
+    expect(defeatedAudit?.supersededByCorrectionReference).toBe("correction-lineage-b");
+    // The defeated correction's evidence supersession is not active, so the
+    // sibling interpretation keeps its evidence-grounded KNOWN status.
+    expect(byRef.get("ref-main-b")?.status).toBe("KNOWN");
+    expect(byRef.get("ref-main-a")).toMatchObject({
+      status: "KNOWN",
+      meaning: "Meaning from lineage winner."
+    });
+  });
+
   it("is deterministic and deeply frozen", () => {
     const input = {
       longTerm: retrieval([memoryEvent()]),
