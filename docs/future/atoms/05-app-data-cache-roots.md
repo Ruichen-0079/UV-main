@@ -2,6 +2,11 @@
 
 > **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
 >
+> **Rebaseline (Linux-first CI rebaseline):** this atom is ACTIVE on the
+> Linux-first lane and may proceed before final Linux packaging. No Windows
+> prerequisite blocks it; deferred Windows Atoms 01–02 are irrelevant here.
+> See Platform policy in [README.md](README.md).
+>
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
@@ -24,7 +29,8 @@ later deployment work make path migration expensive.
 ## Dependencies
 
 Desktop lifecycle/surface atoms should be stable enough that path changes are
-not mixed with tray behavior.
+not mixed with tray behavior. Per the rebaseline, this atom may proceed before
+final Linux packaging and is not blocked by any Windows prerequisite.
 
 ## CURRENT at audit baseline
 

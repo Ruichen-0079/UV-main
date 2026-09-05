@@ -2,6 +2,14 @@
 
 > **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
 >
+> **Rebaseline (Linux-first CI rebaseline):** Linux / CachyOS / KDE Wayland is
+> the current primary platform, so this atom's target is confirmed. However, it
+> must be implemented through smaller Linux operational atoms (e.g. desktop
+> build/test foundation, Supervisor/lifecycle validation, packaging,
+> deployment) rather than one giant deployment change. The atoms README tracks
+> that decomposition; this document remains the long-term target definition.
+> See Platform policy in [README.md](README.md).
+>
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
