@@ -4009,8 +4009,10 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       // 30s per attempt: the hardened open loop (foreground attach, posted
       // round + real-input fallback round, 2s poll each x 3) plus MSAA
       // discovery, click delivery, and the close poll needs headroom when
-      // the popup only opens in a later round.
-      result = await runProcess(executable, args, options, Math.min(timeoutMs, 30_000));
+      // the popup only opens in a later round. The retry budget is the
+      // dedicated TRAY_QUIT_ATTEMPT_BUDGET_MS, not the smoke-wide default
+      // timeout, so the designed attempt count always fits.
+      result = await runProcess(executable, args, options, Math.min(TRAY_QUIT_ATTEMPT_BUDGET_MS, 30_000));
       assertNoSecrets(result.stderr, "tray Quit stderr");
       if (result.code !== 0) {
         let parseError = null;
@@ -4051,7 +4053,13 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       assertNoSecrets(message, "tray Quit attempt failure");
       failures.push(`attempt ${attempt}: ${message}`);
       console.info(`[installer-smoke] TRAY_QUIT_ATTEMPT n=${attempt} failed: ${message}`);
-      if (!shouldRetryTrayQuit({ attempt, elapsedMs: Date.now() - started, timeoutMs }))
+      if (
+        !shouldRetryTrayQuit({
+          attempt,
+          elapsedMs: Date.now() - started,
+          timeoutMs: TRAY_QUIT_ATTEMPT_BUDGET_MS
+        })
+      )
         fail(`tray Quit failed after ${attempt} attempt(s): ${failures.join(" ;; ")}`);
     }
   }
