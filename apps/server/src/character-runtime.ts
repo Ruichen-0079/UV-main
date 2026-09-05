@@ -1,4 +1,4 @@
-import type { RuntimeCharacterPort } from "@companion/core";
+import type { RuntimeCharacterPort, RuntimeVisionEvidence } from "@companion/core";
 import type { PromptBuildOutput, PromptSectionName } from "@companion/prompt-builder";
 import type {
   CharacterAbiSectionKind,
@@ -33,7 +33,8 @@ import {
 } from "@companion/providers";
 
 const CHARACTER_CONTEXT_BUDGET = Object.freeze({
-  maxSections: 8,
+  // 8 text sections + 1 bounded vision section + 1 reserved cognition slot.
+  maxSections: 10,
   maxSemanticCharacters: 12_000
 });
 const CHARACTER_RESPONSE_MAX_CHARACTERS = 8_000;
@@ -76,7 +77,7 @@ async function generateCharacterTurn(
   input: CharacterTurnInput
 ): Promise<{ content: string; providerMetadata: ReturnType<typeof safeProviderMetadata> }> {
   assertNotCancelled(input.signal);
-  const baseContext = createServerCharacterContext(input.prompt);
+  const baseContext = createServerCharacterContext(input.prompt, input.vision);
   const initialRequest = createCharacterGenerationRequest(baseContext);
   const initial = await generateAcceptedCharacterProposal(input, initialRequest, false);
 
@@ -93,7 +94,11 @@ async function generateCharacterTurn(
       const request = createCharacterHarnessCognitionRequest({
         generation: initial.generation
       });
-      const problem = createCognitionProblem(input.userMessage, initial.generation.proposal.focus);
+      const problem = createCognitionProblem(
+        input.userMessage,
+        initial.generation.proposal.focus,
+        input.vision
+      );
       const roundTrip = await input.executeCognition(request, problem, {
         signal: input.signal
       });
@@ -174,7 +179,10 @@ async function generateAcceptedCharacterProposal(
   }
 }
 
-function createServerCharacterContext(prompt: PromptBuildOutput): CharacterAbi2DContext {
+function createServerCharacterContext(
+  prompt: PromptBuildOutput,
+  vision?: RuntimeVisionEvidence | undefined
+): CharacterAbi2DContext {
   const sections: CharacterAbiSemanticSection[] = [];
   const affect: string[] = [];
   const mapping: Partial<Record<PromptSectionName, CharacterAbiSectionKind>> = {
@@ -217,10 +225,71 @@ function createServerCharacterContext(prompt: PromptBuildOutput): CharacterAbi2D
     }
   }
 
+  // Bounded provider-neutral vision projection. ATTENTION_ANCHORS is unused by
+  // the text prompt mapping, so vision never collides with an existing kind.
+  // EMPTY/UNAVAILABLE carry no summary and must not invent visual facts.
+  if (vision !== undefined) {
+    const visionSection = projectVisionEvidenceToSection(vision);
+    if (visionSection) {
+      sections.push(visionSection);
+    }
+  }
+
   return createCharacterAbi2DContext({
     abiVersion: CHARACTER_ABI_2D_VERSION,
     sections
   });
+}
+
+function projectVisionEvidenceToSection(
+  vision: RuntimeVisionEvidence
+): CharacterAbiSemanticSection | null {
+  const provenanceReferences = Object.freeze(["vision-evidence"]);
+  switch (vision.status) {
+    case "EMPTY":
+      return Object.freeze({
+        kind: "ATTENTION_ANCHORS" as const,
+        state: "EMPTY" as const,
+        provenanceReferences
+      });
+    case "UNAVAILABLE":
+      return Object.freeze({
+        kind: "ATTENTION_ANCHORS" as const,
+        state: "UNAVAILABLE" as const,
+        provenanceReferences
+      });
+    case "LOW_CONFIDENCE":
+      return Object.freeze({
+        kind: "ATTENTION_ANCHORS" as const,
+        state: "PARTIAL" as const,
+        summary: boundedSemanticSummary(
+          `Uncertain visual observation (low confidence${vision.confidence !== undefined ? ` ${vision.confidence.toFixed(2)}` : ""}): ${formatVisionEvidenceText(vision)}\nDo not state uncertain details as fact.`
+        ),
+        provenanceReferences
+      });
+    case "AVAILABLE":
+      return Object.freeze({
+        kind: "ATTENTION_ANCHORS" as const,
+        state: "KNOWN" as const,
+        summary: boundedSemanticSummary(`Visual observation: ${formatVisionEvidenceText(vision)}`),
+        provenanceReferences
+      });
+  }
+}
+
+function formatVisionEvidenceText(vision: RuntimeVisionEvidence): string {
+  const parts: string[] = [];
+  if (vision.text.trim().length > 0) {
+    parts.push(vision.text.trim().slice(0, 2000));
+  }
+  if (vision.objects.length > 0) {
+    parts.push(`Objects: ${vision.objects.slice(0, 32).join(", ")}`);
+  }
+  if (vision.sceneSummary && vision.sceneSummary.trim().length > 0) {
+    parts.push(`Scene: ${vision.sceneSummary.trim().slice(0, 2000)}`);
+  }
+  const summary = parts.join("\n").trim();
+  return summary.length > 0 ? summary : "No visual details available.";
 }
 
 function createCharacterGenerationRequest(context: CharacterAbi2DContext): CharacterAdapterRequest {
@@ -282,9 +351,17 @@ function stripReasoningText(text: string): string {
     .trim();
 }
 
-function createCognitionProblem(userMessage: string, focus: string | undefined): string {
-  const problem = focus ? `Character focus:\n${focus}\n\nUser task:\n${userMessage}` : userMessage;
-  return problem.slice(0, 16_000);
+function createCognitionProblem(
+  userMessage: string,
+  focus: string | undefined,
+  vision?: RuntimeVisionEvidence | undefined
+): string {
+  const visionNote =
+    vision === undefined || vision.status === "EMPTY" || vision.status === "UNAVAILABLE"
+      ? "Visual evidence: none usable (do not invent visual facts)."
+      : `Visual evidence (${vision.status}${vision.confidence !== undefined ? `, confidence ${vision.confidence.toFixed(2)}` : ""}):\n${formatVisionEvidenceText(vision)}`;
+  const base = focus ? `Character focus:\n${focus}\n\nUser task:\n${userMessage}` : userMessage;
+  return `${base}\n\n${visionNote}`.slice(0, 16_000);
 }
 
 function boundedSemanticSummary(content: string): string {

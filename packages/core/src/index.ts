@@ -18,6 +18,9 @@ export type {
   DirectContextConfig,
   HandleAudioInputInput,
   HandleImageInputInput,
+  HandleImageTurnInput,
+  HandleImageTurnOptions,
+  HandleImageTurnResult,
   HandleUserMessageInput,
   HandleUserMessageOptions,
   MaybeSynthesizeSpeechOptions,
@@ -38,6 +41,8 @@ export type {
   RuntimePromptBuilderPort,
   RuntimePromptPreview,
   RuntimeReplyStreamEvent,
+  RuntimeVisionEvidence,
+  RuntimeVisionEvidenceStatus,
   SafeProviderCallMetadata,
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
@@ -161,7 +166,7 @@ export {
   type RuntimeEmbodiedPresentationExecutionResult
 } from "./runtime-embodied-presentation-execution.js";
 
-export { RuntimeOrchestrator } from "./runtime-orchestrator.js";
+export { RuntimeOrchestrator, normalizeRuntimeVisionEvidence } from "./runtime-orchestrator.js";
 export {
   PostgresP8CorrectionStore,
   type P8PostgresClient,

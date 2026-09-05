@@ -83,6 +83,9 @@ import type {
   DirectContextConfig,
   HandleAudioInputInput,
   HandleImageInputInput,
+  HandleImageTurnInput,
+  HandleImageTurnOptions,
+  HandleImageTurnResult,
   HandleUserMessageInput,
   HandleUserMessageOptions,
   MaybeSynthesizeSpeechOptions,
@@ -97,6 +100,8 @@ import type {
   RuntimeReplyStreamEvent,
   RuntimeMemoryWriteStatus,
   RuntimeCharacterGenerationResult,
+  RuntimeVisionEvidence,
+  RuntimeVisionEvidenceStatus,
   SafeProviderCallMetadata,
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
@@ -1638,32 +1643,229 @@ export class RuntimeOrchestrator {
     }
   }
 
-  async handleImageInput(input: HandleImageInputInput): Promise<PerceptionVisionEvent> {
-    const visionProvider = this.options.providers.getVisionProvider();
-    const vision = await this.measureProvider(
-      "vision",
-      visionProvider.name,
-      () => visionProvider.analyzeImage(input),
-      { traceId: input.traceId, parentId: input.parentId }
-    );
-
-    const event = createEvent(
-      "perception.vision",
-      {
-        sessionId: input.sessionId,
-        text: vision.text,
-        objects: vision.objects,
-        sceneSummary: vision.sceneSummary,
-        confidence: vision.confidence
-      },
-      {
-        traceId: input.traceId,
-        parentId: input.parentId
+  async handleImageInput(
+    input: HandleImageInputInput,
+    options: HandleImageTurnOptions = {}
+  ): Promise<PerceptionVisionEvent> {
+    this.enterLifecycleOperation();
+    try {
+      const sessionId = input.sessionId?.trim() ?? "";
+      if (!sessionId) {
+        throw new Error("Image input sessionId must not be empty.");
       }
-    );
+      const signal = options.signal;
+      const visionProvider = this.options.providers.getVisionProvider();
+      if (signal?.aborted) {
+        throw createVisionCancelledError(visionProvider.name);
+      }
+      const vision = await this.measureProvider(
+        "vision",
+        visionProvider.name,
+        () => visionProvider.analyzeImage(extractVisionInput(input), signal ? { signal } : undefined),
+        { traceId: input.traceId, parentId: input.parentId }
+      );
+      if (signal?.aborted) {
+        throw createVisionCancelledError(visionProvider.name);
+      }
+      const evidence = normalizeRuntimeVisionEvidence(vision);
+      const event = createEvent(
+        "perception.vision",
+        {
+          sessionId,
+          text: evidence.text,
+          objects: [...evidence.objects],
+          ...(evidence.sceneSummary !== undefined ? { sceneSummary: evidence.sceneSummary } : {}),
+          ...(evidence.confidence !== undefined ? { confidence: evidence.confidence } : {})
+        },
+        {
+          traceId: input.traceId,
+          parentId: input.parentId
+        }
+      );
 
-    await this.options.eventBus.publish(event);
-    return event;
+      await this.options.eventBus.publish(event);
+      return event;
+    } finally {
+      this.exitLifecycleOperation();
+    }
+  }
+
+  /**
+   * Runtime-owned image turn: vision provider is an observation producer only.
+   *
+   * Chain: image input -> Runtime (lifecycle/cancellation/staleness) ->
+   * vision provider -> normalized bounded evidence -> Character
+   * (RESPOND | SILENCE | TERMINATE | NEED_COGNITION via the existing bounded
+   * cognition callback) -> Runtime. Vision evidence is transient semantic
+   * evidence and is never written as durable Memory truth here. Presentation
+   * is only reached through the Character decision via the embodied port.
+   */
+  async handleImageTurn(
+    input: HandleImageTurnInput,
+    options: HandleImageTurnOptions = {}
+  ): Promise<HandleImageTurnResult> {
+    this.enterLifecycleOperation();
+    try {
+      const sessionId = input.sessionId?.trim() ?? "";
+      if (!sessionId) {
+        throw new Error("Image turn sessionId must not be empty.");
+      }
+      const signal = options.signal;
+      const visionProvider = this.options.providers.getVisionProvider();
+      if (signal?.aborted) {
+        throw createVisionCancelledError(visionProvider.name);
+      }
+      const vision = await this.measureProvider(
+        "vision",
+        visionProvider.name,
+        () => visionProvider.analyzeImage(extractVisionInput(input), signal ? { signal } : undefined),
+        { traceId: input.traceId, parentId: input.parentId }
+      );
+      if (signal?.aborted) {
+        throw createVisionCancelledError(visionProvider.name);
+      }
+      const evidence = normalizeRuntimeVisionEvidence(vision);
+      const visionEvent = createEvent(
+        "perception.vision",
+        {
+          sessionId,
+          text: evidence.text,
+          objects: [...evidence.objects],
+          ...(evidence.sceneSummary !== undefined ? { sceneSummary: evidence.sceneSummary } : {}),
+          ...(evidence.confidence !== undefined ? { confidence: evidence.confidence } : {})
+        },
+        {
+          traceId: input.traceId,
+          parentId: input.parentId
+        }
+      );
+      await this.options.eventBus.publish(visionEvent);
+      if (signal?.aborted) {
+        throw createVisionCancelledError(visionProvider.name);
+      }
+
+      const userMessage = normalizeImageCaption(input.userMessage);
+      const prompt = this.options.promptBuilder.buildPrompt({
+        systemIdentity: "You are YUVI, a local-first AI companion runtime agent.",
+        characterStyle: "Warm, concise, conversational, and practical.",
+        relationshipContext:
+          "Use remembered context only when relevant. Do not invent unseen details.",
+        currentSituation:
+          "The user shared an image. Bounded visual evidence is supplied separately as semantic evidence.",
+        userMessage
+      });
+
+      const characterResult = await this.executeVisionCharacterTurn({
+        prompt,
+        userMessage,
+        vision: evidence,
+        traceId: visionEvent.traceId,
+        parentId: visionEvent.id,
+        signal
+      });
+      if (signal?.aborted) {
+        throw createVisionCancelledError(visionProvider.name);
+      }
+
+      const chatProvider = this.options.providers.getChatProvider();
+      const chatStatus = this.getProviderStatus("chat");
+      const providerMetadata = this.safeProviderCallMetadata(
+        "chat",
+        chatProvider.name,
+        characterResult.providerMetadata,
+        chatStatus
+      );
+      const reply = createEvent(
+        "agent.reply",
+        {
+          sessionId,
+          content: characterResult.content,
+          provider: providerMetadata
+        },
+        {
+          traceId: visionEvent.traceId,
+          parentId: visionEvent.id
+        }
+      );
+      const assistantMessage = this.createAssistantMessageEvent(reply);
+      await this.options.eventBus.publish(reply);
+      this.recordDirectContextAssistant(sessionId, reply);
+      await this.options.eventBus.publish(assistantMessage);
+      this.scheduleEmbodiedPresentation(reply);
+      return Object.freeze({
+        vision: visionEvent,
+        evidence,
+        reply,
+        assistantMessage
+      });
+    } finally {
+      this.exitLifecycleOperation();
+    }
+  }
+
+  private async executeVisionCharacterTurn(input: {
+    prompt: PromptBuildOutput;
+    userMessage: string;
+    vision: RuntimeVisionEvidence;
+    traceId: string;
+    parentId: string;
+    signal?: AbortSignal | undefined;
+  }): Promise<RuntimeCharacterGenerationResult> {
+    const character = this.options.character;
+    if (!character) {
+      throw new Error("Runtime Character generation is not configured.");
+    }
+    const chatProvider = this.options.providers.getChatProvider();
+    let cognitionExecuted = false;
+    const traceId = input.traceId;
+    const parentId = input.parentId;
+    const signal = input.signal;
+    return character.generate({
+      prompt: input.prompt,
+      userMessage: input.userMessage,
+      vision: input.vision,
+      ...(signal ? { signal } : {}),
+      generateChat: (chatInput, callOptions) => {
+        if (callOptions?.signal?.aborted ?? signal?.aborted) {
+          return Promise.reject(createRuntimeCancelledError(chatProvider.name));
+        }
+        return this.measureProvider(
+          "chat",
+          chatProvider.name,
+          () => chatProvider.generateReply(chatInput, callOptions ?? (signal ? { signal } : undefined)),
+          { traceId, parentId }
+        );
+      },
+      executeCognition: (request, problem, callOptions) => {
+        const cognition = this.options.characterCognition;
+        if (!cognition) {
+          return Promise.reject(
+            new ProviderError({
+              provider: "character",
+              capability: "chat",
+              code: ProviderErrorCode.ProviderUnavailable,
+              message: "Character Cognition execution is unavailable.",
+              retryable: false
+            })
+          );
+        }
+        if (cognitionExecuted) {
+          return Promise.reject(
+            new ProviderError({
+              provider: "character",
+              capability: "chat",
+              code: ProviderErrorCode.MalformedResponse,
+              message: "Character Cognition round-trip budget was exhausted.",
+              retryable: false
+            })
+          );
+        }
+        cognitionExecuted = true;
+        return cognition(request, problem, {
+          signal: callOptions?.signal ?? signal
+        });
+      }
+    });
   }
 
   private async prepareChatPrompt(
@@ -4101,6 +4303,170 @@ function createRuntimeCancelledError(provider = "chat", cause?: unknown): Provid
     capability: "chat",
     code: ProviderErrorCode.Cancelled,
     message: "Chat stream was cancelled.",
+    retryable: false,
+    cause
+  });
+}
+
+const RUNTIME_VISION_TEXT_MAX_CHARACTERS = 2000;
+const RUNTIME_VISION_SCENE_MAX_CHARACTERS = 2000;
+const RUNTIME_VISION_OBJECTS_MAX_ITEMS = 32;
+const RUNTIME_VISION_OBJECT_LABEL_MAX_CHARACTERS = 100;
+const RUNTIME_VISION_LOW_CONFIDENCE_THRESHOLD = 0.35;
+const RUNTIME_VISION_CAPTION_MAX_CHARACTERS = 4000;
+
+/**
+ * Normalize raw vision provider output into bounded provider-neutral evidence.
+ *
+ * Malformed input fails safe to UNAVAILABLE with empty content; empty
+ * observations stay EMPTY and never manufacture facts; finite confidence below
+ * the threshold is preserved as LOW_CONFIDENCE. Provider names, raw JSON,
+ * HTTP payloads, and SDK objects are never carried into the result.
+ */
+export function normalizeRuntimeVisionEvidence(input: unknown): RuntimeVisionEvidence {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return Object.freeze({
+      text: "",
+      objects: Object.freeze([]),
+      status: "UNAVAILABLE",
+      lowConfidence: true
+    });
+  }
+  const value = input as Record<string, unknown>;
+  const text = boundedVisionText(value["text"], RUNTIME_VISION_TEXT_MAX_CHARACTERS);
+  const objects = boundedVisionObjects(value["objects"]);
+  const sceneSummary = boundedVisionOptionalText(
+    value["sceneSummary"],
+    RUNTIME_VISION_SCENE_MAX_CHARACTERS
+  );
+  const confidence = boundedVisionConfidence(value["confidence"]);
+  const hasContent = text.length > 0 || objects.length > 0 || (sceneSummary?.length ?? 0) > 0;
+  let status: RuntimeVisionEvidenceStatus;
+  if (!hasContent && confidence === undefined) {
+    const isMalformedShape =
+      value["text"] !== undefined &&
+      typeof value["text"] !== "string" &&
+      text.length === 0 &&
+      objects.length === 0 &&
+      sceneSummary === undefined;
+    status = isMalformedShape ? "UNAVAILABLE" : "EMPTY";
+  } else if (!hasContent) {
+    status = "EMPTY";
+  } else if (confidence !== undefined && confidence < RUNTIME_VISION_LOW_CONFIDENCE_THRESHOLD) {
+    status = "LOW_CONFIDENCE";
+  } else {
+    status = "AVAILABLE";
+  }
+  // Malformed wire shapes (e.g. numeric text, object maps) must not be upgraded
+  // to EMPTY facts; keep them UNAVAILABLE when nothing usable was observed and
+  // the input was not a clean empty observation.
+  if (status === "EMPTY" && isMalformedVisionShape(value)) {
+    status = "UNAVAILABLE";
+  }
+  const lowConfidence = status === "LOW_CONFIDENCE" || status === "UNAVAILABLE";
+  return Object.freeze({
+    text,
+    objects: Object.freeze(objects),
+    ...(sceneSummary !== undefined ? { sceneSummary } : {}),
+    ...(confidence !== undefined ? { confidence } : {}),
+    status,
+    lowConfidence
+  });
+}
+
+function boundedVisionText(value: unknown, maximum: number): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().slice(0, maximum);
+}
+
+function boundedVisionOptionalText(value: unknown, maximum: number): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().slice(0, maximum);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function boundedVisionObjects(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const labels: string[] = [];
+  for (const item of value.slice(0, RUNTIME_VISION_OBJECTS_MAX_ITEMS)) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const label = item.trim().slice(0, RUNTIME_VISION_OBJECT_LABEL_MAX_CHARACTERS);
+    if (label.length > 0) {
+      labels.push(label);
+    }
+    if (labels.length >= RUNTIME_VISION_OBJECTS_MAX_ITEMS) {
+      break;
+    }
+  }
+  return labels;
+}
+
+function boundedVisionConfidence(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  if (value < 0 || value > 1) {
+    return undefined;
+  }
+  return value;
+}
+
+function isMalformedVisionShape(value: Record<string, unknown>): boolean {
+  const text = value["text"];
+  const objects = value["objects"];
+  const sceneSummary = value["sceneSummary"];
+  const confidence = value["confidence"];
+  if (text !== undefined && typeof text !== "string") {
+    return true;
+  }
+  if (objects !== undefined && !Array.isArray(objects)) {
+    return true;
+  }
+  if (sceneSummary !== undefined && typeof sceneSummary !== "string") {
+    return true;
+  }
+  if (confidence !== undefined && (typeof confidence !== "number" || !Number.isFinite(confidence))) {
+    return true;
+  }
+  return false;
+}
+
+function extractVisionInput(input: HandleImageInputInput | HandleImageTurnInput): VisionInput {
+  return {
+    ...(input.image !== undefined ? { image: input.image } : {}),
+    ...(input.imageBuffer !== undefined ? { imageBuffer: input.imageBuffer } : {}),
+    ...(input.imageUrl !== undefined ? { imageUrl: input.imageUrl } : {}),
+    ...(input.localFilePath !== undefined ? { localFilePath: input.localFilePath } : {}),
+    ...(input.imageBase64 !== undefined ? { imageBase64: input.imageBase64 } : {}),
+    ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
+    ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+    ...(input.messages !== undefined ? { messages: input.messages } : {}),
+    ...(input.metadata !== undefined ? { metadata: input.metadata } : {})
+  };
+}
+
+function normalizeImageCaption(value: unknown): string {
+  if (typeof value !== "string") {
+    return "The user shared an image.";
+  }
+  const trimmed = value.trim().slice(0, RUNTIME_VISION_CAPTION_MAX_CHARACTERS);
+  return trimmed.length > 0 ? trimmed : "The user shared an image.";
+}
+
+function createVisionCancelledError(provider: string, cause?: unknown): ProviderError {
+  return new ProviderError({
+    provider,
+    capability: "vision",
+    code: ProviderErrorCode.Cancelled,
+    message: "Vision turn was cancelled.",
     retryable: false,
     cause
   });
