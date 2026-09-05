@@ -76,6 +76,65 @@ export type CharacterProposal = Readonly<
     }
 >;
 
+export const CHARACTER_ADDRESSING_STATES = [
+  "DIRECTED_TO_YUVI",
+  "NOT_DIRECTED",
+  "AMBIGUOUS"
+] as const;
+export type CharacterAddressingState = (typeof CHARACTER_ADDRESSING_STATES)[number];
+
+export const CHARACTER_PROACTIVE_PROPOSAL_ACTIONS = ["KEEP", "CLEAR", "DEFER", "SUPPRESS"] as const;
+export type CharacterProactiveProposalAction =
+  (typeof CHARACTER_PROACTIVE_PROPOSAL_ACTIONS)[number];
+
+export const CHARACTER_PROACTIVE_DEFERRAL_HORIZONS = ["SHORT", "NORMAL", "LONG"] as const;
+export type CharacterProactiveDeferralHorizon =
+  (typeof CHARACTER_PROACTIVE_DEFERRAL_HORIZONS)[number];
+
+export const CHARACTER_PROACTIVE_SUPPRESSION_SCOPES = [
+  "UNTIL",
+  "UNTIL_ENGAGEMENT",
+  "UNTIL_EXPLICIT_RESUME"
+] as const;
+export type CharacterProactiveSuppressionScopeKind =
+  (typeof CHARACTER_PROACTIVE_SUPPRESSION_SCOPES)[number];
+
+export type CharacterProactiveSuppressionScope = Readonly<
+  | {
+      kind: "UNTIL";
+      /** Absolute ISO-8601 instant, when the input anchors suppression to a clock time. */
+      time?: string;
+      /** Bounded ISO-8601 duration, when the input states a relative window. */
+      duration?: string;
+    }
+  | { kind: "UNTIL_ENGAGEMENT" }
+  | { kind: "UNTIL_EXPLICIT_RESUME" }
+>;
+
+export type CharacterProactiveProposal = Readonly<
+  | { action: "KEEP" }
+  | { action: "CLEAR" }
+  | { action: "DEFER"; horizon: CharacterProactiveDeferralHorizon }
+  | { action: "SUPPRESS"; scope: CharacterProactiveSuppressionScope }
+>;
+
+/**
+ * vNext stable Character result. Three orthogonal semantics:
+ *
+ * - `addressing`: whether the current input appears directed to YUVI;
+ * - `reply`: the preserved RESPOND/SILENCE/TERMINATE/NEED_COGNITION disposition;
+ * - `proactive`: a semantic proposal about future proactive initiation.
+ *
+ * This is a proposal only. Runtime authorization and proactive state
+ * application stay outside the Character contract. No field here is an
+ * authorization result, provider/tool identity, or Runtime lifecycle value.
+ */
+export type CharacterDecision = Readonly<{
+  addressing: CharacterAddressingState;
+  reply: CharacterProposal;
+  proactive: CharacterProactiveProposal;
+}>;
+
 export const NORMALIZED_COGNITION_STATUSES = [
   "SUCCESS",
   "PARTIAL",
@@ -113,6 +172,14 @@ type UnknownObject = Record<string, unknown> & {
   text?: unknown;
   presentation?: unknown;
   focus?: unknown;
+  addressing?: unknown;
+  reply?: unknown;
+  proactive?: unknown;
+  action?: unknown;
+  horizon?: unknown;
+  scope?: unknown;
+  time?: unknown;
+  duration?: unknown;
   version?: unknown;
   status?: unknown;
   answer?: unknown;
@@ -188,6 +255,62 @@ export function createCharacterProposal(input: unknown): CharacterProposal {
       });
     }
   }
+}
+
+/**
+ * Validate one semantic proactive-policy proposal. This is meaning only: it
+ * never carries an authorization result, principal, or Runtime state, and it
+ * does not mutate anything. Runtime owns authorization and application.
+ */
+export function createCharacterProactiveProposal(input: unknown): CharacterProactiveProposal {
+  const value = expectObject(input, "Character proactive proposal");
+  const action = value.action;
+  if (!isOneOf(action, CHARACTER_PROACTIVE_PROPOSAL_ACTIONS)) {
+    throw new Error("Character proactive proposal action is invalid.");
+  }
+
+  switch (action) {
+    case "KEEP":
+    case "CLEAR":
+      assertAllowedKeys(value, ["action"], `${action} proactive proposal`);
+      return Object.freeze({ action });
+    case "DEFER": {
+      assertAllowedKeys(value, ["action", "horizon"], "DEFER proactive proposal");
+      const horizon = value.horizon;
+      if (!isOneOf(horizon, CHARACTER_PROACTIVE_DEFERRAL_HORIZONS)) {
+        throw new Error("Character proactive deferral horizon is invalid.");
+      }
+      return Object.freeze({ action, horizon });
+    }
+    case "SUPPRESS": {
+      assertAllowedKeys(value, ["action", "scope"], "SUPPRESS proactive proposal");
+      return Object.freeze({
+        action,
+        scope: createCharacterProactiveSuppressionScope(value.scope)
+      });
+    }
+  }
+}
+
+/**
+ * Validate the vNext stable Character result. `reply` reuses the existing
+ * Character proposal contract, so the four dispositions stay first-class and
+ * no parallel response vocabulary is introduced. All three semantics are
+ * required: a decision always states addressing and proactive meaning instead
+ * of collapsing an absent field into a default.
+ */
+export function createCharacterDecision(input: unknown): CharacterDecision {
+  const value = expectObject(input, "Character decision");
+  assertAllowedKeys(value, ["addressing", "reply", "proactive"], "Character decision");
+  const addressing = value.addressing;
+  if (!isOneOf(addressing, CHARACTER_ADDRESSING_STATES)) {
+    throw new Error("Character decision addressing is invalid.");
+  }
+  return Object.freeze({
+    addressing,
+    reply: createCharacterProposal(value.reply),
+    proactive: createCharacterProactiveProposal(value.proactive)
+  });
 }
 
 export function createNormalizedCognitionResult(input: unknown): NormalizedCognitionResult {
@@ -282,6 +405,41 @@ function normalizePresentation(input: unknown): CharacterPresentationIntent {
   });
 }
 
+function createCharacterProactiveSuppressionScope(
+  input: unknown
+): CharacterProactiveSuppressionScope {
+  const value = expectObject(input, "Character proactive suppression scope");
+  const kind = value.kind;
+  if (!isOneOf(kind, CHARACTER_PROACTIVE_SUPPRESSION_SCOPES)) {
+    throw new Error("Character proactive suppression scope kind is invalid.");
+  }
+
+  switch (kind) {
+    case "UNTIL": {
+      assertAllowedKeys(value, ["kind", "time", "duration"], "UNTIL suppression scope");
+      const hasTime = value.time !== undefined;
+      const hasDuration = value.duration !== undefined;
+      if (hasTime === hasDuration) {
+        throw new Error("UNTIL suppression scope requires exactly one of time or duration.");
+      }
+      if (hasTime) {
+        return Object.freeze({
+          kind,
+          time: iso8601Instant(value.time, "suppression time")
+        });
+      }
+      return Object.freeze({
+        kind,
+        duration: iso8601Duration(value.duration, "suppression duration")
+      });
+    }
+    case "UNTIL_ENGAGEMENT":
+    case "UNTIL_EXPLICIT_RESUME":
+      assertAllowedKeys(value, ["kind"], `${kind} suppression scope`);
+      return Object.freeze({ kind });
+  }
+}
+
 function normalizeEvidence(input: unknown): readonly NormalizedCognitionEvidence[] | undefined {
   if (input === undefined) {
     return undefined;
@@ -346,4 +504,25 @@ function assertAllowedKeys(
 
 function isOneOf<T extends string>(input: unknown, values: readonly T[]): input is T {
   return typeof input === "string" && (values as readonly string[]).includes(input);
+}
+
+const ISO_8601_INSTANT_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_8601_DURATION_PATTERN =
+  /^P(?!$)(?:\d+Y)?(?:\d+M)?(?:\d+D)?(?:T(?!$)(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$/;
+
+function iso8601Instant(input: unknown, field: string): string {
+  const text = boundedText(input, field, 64);
+  if (!ISO_8601_INSTANT_PATTERN.test(text)) {
+    throw new Error(`${field} must be an ISO-8601 instant with UTC or numeric offset.`);
+  }
+  return text;
+}
+
+function iso8601Duration(input: unknown, field: string): string {
+  const text = boundedText(input, field, 64);
+  if (!ISO_8601_DURATION_PATTERN.test(text)) {
+    throw new Error(`${field} must be an ISO-8601 duration.`);
+  }
+  return text;
 }
