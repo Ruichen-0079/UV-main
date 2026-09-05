@@ -1007,6 +1007,10 @@ export const apiClient = {
     return streamProactiveTextResponse(toProactiveTurnStreamRequestBody(input), options);
   },
 
+  subscribeProactiveLive(sessionId: string, options: ProactiveStreamOptions = {}): Promise<void> {
+    return streamProactiveLive(sessionId, options);
+  },
+
   setProactiveConsent(
     enabled: boolean,
     signal?: AbortSignal
@@ -1589,6 +1593,50 @@ async function streamTextResponse(
     if (!readerDone) {
       await reader.cancel().catch(() => undefined);
     }
+    reader.releaseLock();
+  }
+}
+
+async function streamProactiveLive(
+  sessionId: string,
+  options: ProactiveStreamOptions
+): Promise<void> {
+  const headers = new Headers();
+  if (dashboardDevToken && shouldAttachDashboardDevToken("/v1/proactive-turns/live", "GET")) {
+    headers.set("authorization", `Bearer ${dashboardDevToken}`);
+  }
+  const requestInit: RequestInit = { method: "GET", headers };
+  if (options.signal) requestInit.signal = options.signal;
+  const response = await fetch(
+    `${apiBaseUrl}/v1/proactive-turns/live?sessionId=${encodeURIComponent(sessionId)}`,
+    requestInit
+  );
+  if (!response.ok) {
+    throw await createHttpStreamError(response);
+  }
+  if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+    throw new MessageStreamProtocolError("The streaming response was not SSE.");
+  }
+  if (!response.body) {
+    throw new MessageStreamProtocolError("The streaming response has no body.");
+  }
+  const parser = new ProactiveSseParser();
+  const reader = response.body.getReader();
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      for (const event of parser.push(result.value)) {
+        if (event.type === "error") {
+          options.onEvent?.(event);
+          continue;
+        }
+        options.onEvent?.(event);
+      }
+    }
+    parser.finish();
+  } finally {
+    await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

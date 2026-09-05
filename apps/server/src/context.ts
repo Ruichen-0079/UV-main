@@ -319,6 +319,7 @@ export async function createAppContext(
       }
     });
     runtime = createRuntime(providers, memory);
+    runtime.startProactiveScheduler({ sessionId: "default", readMemory: true });
   } catch (error) {
     await conversationRepository.close?.();
     await finalizedIngestionRepository?.close?.();
@@ -380,6 +381,7 @@ export async function createAppContext(
       context.providers = nextProviders;
       context.memory = nextMemory;
       context.runtime = nextRuntime;
+      context.runtime.startProactiveScheduler({ sessionId: "default", readMemory: true });
 
       const appliedKeys: string[] = [];
       for (const key of editableKeys) {

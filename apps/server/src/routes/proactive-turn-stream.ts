@@ -55,6 +55,33 @@ export async function registerProactiveTurnStreamRoutes(
     return reply.send({ ok: true, enabled: parsed.data.enabled });
   });
 
+  app.get("/v1/proactive-turns/live", async (request, reply) => {
+    const sessionId =
+      typeof request.query === "object" && request.query && "sessionId" in request.query
+        ? String((request.query as { sessionId?: unknown }).sessionId ?? "default").trim() ||
+          "default"
+        : "default";
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      ...SSE_HEADERS,
+      ...desktopCorsHeaders(request.headers.origin)
+    });
+    const abortController = new AbortController();
+    const unsubscribe = context.runtime.subscribeProactiveStream((event) => {
+      if (event.sessionId !== sessionId) return;
+      void writeSseFrame(reply.raw, event.type, event, abortController.signal).catch(() => {
+        abortController.abort();
+      });
+    });
+    const onDisconnect = () => {
+      abortController.abort();
+      unsubscribe();
+    };
+    request.raw.once("aborted", onDisconnect);
+    reply.raw.once("close", onDisconnect);
+    reply.raw.once("error", onDisconnect);
+  });
+
   app.post("/v1/proactive-turns/stream", async (request, reply) => {
     const input = ProactiveTurnStreamRequestSchema.safeParse(request.body);
     if (!input.success) {

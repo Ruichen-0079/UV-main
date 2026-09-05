@@ -88,6 +88,8 @@ export const AssistantMessagePayloadSchema = z.object({
   content: z.string(),
   turnOrigin: TurnOriginSchema.optional(),
   idempotencyKey: z.string().min(1).optional(),
+  decisionId: z.string().min(1).optional(),
+  activityRevision: z.number().int().nonnegative().optional(),
   provider: z
     .object({
       name: z.string(),

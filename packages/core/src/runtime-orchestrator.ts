@@ -133,11 +133,15 @@ import {
   applyAuthorizedEngagement,
   applyCharacterProactiveProposal,
   createInitialProactiveState,
+  deferProactiveEligibility,
   evaluateProactiveEligibility,
   normalizeProactiveState,
   parseProactivePolicySnapshot,
   serializeProactivePolicySnapshot,
+  PROACTIVE_EMIT_QUIET_MS,
+  PROACTIVE_NO_OP_BACKOFF_MS,
   type ProactiveControlAuthority,
+  type ProactiveEligibility,
   type ProactiveState
 } from "./runtime-proactive-policy.js";
 
@@ -265,6 +269,14 @@ export class RuntimeOrchestrator {
   private readonly speechCaptureStore: SpeechCaptureStore = createSpeechCaptureStore();
   private speechActive = false;
   private currentSpeechCaptureEpoch: string | null = null;
+  private explicitTurnDepth = 0;
+  private embodiedPresentationInFlight = 0;
+  private proactiveAttemptActive = false;
+  private schedulerSessionId: string | null = null;
+  private schedulerReadMemory = true;
+  private schedulerWakeHandle: unknown = null;
+  private schedulerGeneration = 0;
+  private readonly proactiveStreamListeners = new Set<(event: RuntimeReplyStreamEvent) => void>();
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
     this.directContextConfig = normalizeDirectContextConfig(options.directContext);
@@ -296,6 +308,30 @@ export class RuntimeOrchestrator {
   setProactiveConsent(enabled: boolean): void {
     this.proactiveConsentEnabled = enabled;
     this.persistProactivePolicy();
+    this.armProactiveWake();
+  }
+
+  startProactiveScheduler(input: { sessionId: string; readMemory?: boolean }): void {
+    const sessionId = input.sessionId.trim();
+    if (!sessionId) {
+      throw new Error("Proactive scheduler sessionId must not be empty.");
+    }
+    this.schedulerSessionId = sessionId;
+    this.schedulerReadMemory = input.readMemory !== false;
+    this.armProactiveWake();
+  }
+
+  stopProactiveScheduler(): void {
+    this.schedulerGeneration += 1;
+    this.schedulerSessionId = null;
+    this.clearProactiveWake();
+  }
+
+  subscribeProactiveStream(listener: (event: RuntimeReplyStreamEvent) => void): () => void {
+    this.proactiveStreamListeners.add(listener);
+    return () => {
+      this.proactiveStreamListeners.delete(listener);
+    };
   }
 
   private nowMs(): number {
@@ -327,9 +363,18 @@ export class RuntimeOrchestrator {
       this.currentTurnControlAuthority
     );
     this.persistProactivePolicy();
+    this.armProactiveWake();
   }
 
   private admitProactiveAttempt(): number {
+    const eligibility = this.evaluateProactiveHardGates(true);
+    if (!eligibility.admitted) {
+      throw new ProactiveAdmissionError(eligibility.reason);
+    }
+    return this.proactiveState.activityRevision;
+  }
+
+  private evaluateProactiveHardGates(ignoreCurrentAttempt = false): ProactiveEligibility {
     const nowMs = this.nowMs();
     this.proactiveState = normalizeProactiveState(this.proactiveState, nowMs);
     const eligibility = evaluateProactiveEligibility(
@@ -338,9 +383,17 @@ export class RuntimeOrchestrator {
       this.proactiveConsentEnabled
     );
     if (!eligibility.admitted) {
-      throw new ProactiveAdmissionError(eligibility.reason);
+      return eligibility;
     }
-    return this.proactiveState.activityRevision;
+    if (
+      this.speechActive ||
+      this.explicitTurnDepth > 0 ||
+      this.embodiedPresentationInFlight > 0 ||
+      (!ignoreCurrentAttempt && this.proactiveAttemptActive)
+    ) {
+      return { admitted: false, reason: "not-eligible" };
+    }
+    return { admitted: true };
   }
 
   private noteSpeechCaptureActivity(): void {
@@ -379,10 +432,12 @@ export class RuntimeOrchestrator {
       }
       this.speechActive = true;
       this.currentSpeechCaptureEpoch = captureEpoch;
+      this.clearProactiveWake();
       return this.getSpeechActivitySnapshot();
     }
     this.speechActive = false;
     this.currentSpeechCaptureEpoch = captureEpoch;
+    this.armProactiveWake();
     return this.getSpeechActivitySnapshot();
   }
 
@@ -403,11 +458,16 @@ export class RuntimeOrchestrator {
       throw new SpeechCaptureFenceError("duplicate", result.captureEpoch);
     }
     this.noteSpeechCaptureActivity();
+    this.armProactiveWake();
     return result.observation;
   }
 
   private revalidateAdmittedProactiveRevision(admittedRevision: number): void {
+    this.proactiveState = normalizeProactiveState(this.proactiveState, this.nowMs());
     if (this.proactiveState.activityRevision !== admittedRevision) {
+      throw new ProactiveAdmissionError("stale-revision");
+    }
+    if (this.speechActive || this.explicitTurnDepth > 0) {
       throw new ProactiveAdmissionError("stale-revision");
     }
     const eligibility = evaluateProactiveEligibility(
@@ -417,6 +477,92 @@ export class RuntimeOrchestrator {
     );
     if (!eligibility.admitted) {
       throw new ProactiveAdmissionError(eligibility.reason);
+    }
+  }
+
+  private deferProactiveQuiet(delayMs: number): void {
+    this.proactiveState = deferProactiveEligibility(this.proactiveState, this.nowMs(), delayMs);
+    this.persistProactivePolicy();
+  }
+
+  private emitProactiveStreamEvent(event: RuntimeReplyStreamEvent): void {
+    for (const listener of this.proactiveStreamListeners) {
+      listener(event);
+    }
+  }
+
+  private setProactiveWake(callback: () => void, delayMs: number): unknown {
+    return (this.options.setProactiveWake ?? setTimeout)(callback, delayMs);
+  }
+
+  private clearProactiveWake(): void {
+    if (this.schedulerWakeHandle === null) return;
+    (this.options.clearProactiveWake ?? clearTimeout)(this.schedulerWakeHandle as NodeJS.Timeout);
+    this.schedulerWakeHandle = null;
+  }
+
+  private armProactiveWake(): void {
+    this.clearProactiveWake();
+    if (this.schedulerSessionId === null || this.lifecycleState !== "active") {
+      return;
+    }
+    const nowMs = this.nowMs();
+    this.proactiveState = normalizeProactiveState(this.proactiveState, nowMs);
+    if (this.proactiveConsentEnabled === false) {
+      return;
+    }
+    if (
+      this.proactiveState.suppression.kind === "UNTIL_ENGAGEMENT" ||
+      this.proactiveState.suppression.kind === "UNTIL_EXPLICIT_RESUME"
+    ) {
+      return;
+    }
+    if (
+      this.speechActive ||
+      this.explicitTurnDepth > 0 ||
+      this.proactiveAttemptActive ||
+      this.embodiedPresentationInFlight > 0
+    ) {
+      return;
+    }
+    const delayMs = Math.max(0, this.proactiveState.eligibleAfterMs - nowMs);
+    const generation = this.schedulerGeneration;
+    this.schedulerWakeHandle = this.setProactiveWake(() => {
+      if (generation !== this.schedulerGeneration) return;
+      this.schedulerWakeHandle = null;
+      void this.runScheduledProactiveAttempt(generation);
+    }, delayMs);
+  }
+
+  private async runScheduledProactiveAttempt(generation: number): Promise<void> {
+    if (generation !== this.schedulerGeneration || this.schedulerSessionId === null) {
+      return;
+    }
+    const gates = this.evaluateProactiveHardGates();
+    if (!gates.admitted) {
+      this.armProactiveWake();
+      return;
+    }
+    const sessionId = this.schedulerSessionId;
+    try {
+      for await (const event of this.streamAssistantInitiatedTurn({
+        sessionId,
+        idempotencyKey: `proactive:${sessionId}:${crypto.randomUUID()}`,
+        readMemory: this.schedulerReadMemory
+      })) {
+        void event;
+      }
+    } catch (error) {
+      if (
+        !(error instanceof ProactiveAdmissionError) &&
+        !(error instanceof AssistantTurnConflictError)
+      ) {
+        this.deferProactiveQuiet(PROACTIVE_NO_OP_BACKOFF_MS);
+      }
+    } finally {
+      if (generation === this.schedulerGeneration) {
+        this.armProactiveWake();
+      }
     }
   }
 
@@ -462,13 +608,19 @@ export class RuntimeOrchestrator {
     }
     if (decision === null) return;
 
-    void this.executeAdmittedEmbodiedPresentation(decision, reply, port.present).catch((error) => {
-      void this.publishRuntimeError("Embodied Presentation execution failed.", error, {
-        traceId: reply.traceId,
-        parentId: reply.id,
-        category: "embodied"
+    this.embodiedPresentationInFlight += 1;
+    void this.executeAdmittedEmbodiedPresentation(decision, reply, port.present)
+      .catch((error) => {
+        void this.publishRuntimeError("Embodied Presentation execution failed.", error, {
+          traceId: reply.traceId,
+          parentId: reply.id,
+          category: "embodied"
+        });
+      })
+      .finally(() => {
+        this.embodiedPresentationInFlight = Math.max(0, this.embodiedPresentationInFlight - 1);
+        this.armProactiveWake();
       });
-    });
   }
 
   getLifecycleState(): RuntimeLifecycleState {
@@ -602,6 +754,7 @@ export class RuntimeOrchestrator {
     if (this.lifecycleState === "disposed") {
       return [];
     }
+    this.stopProactiveScheduler();
     this.lifecycleState = "sealing";
     this.lifecycleSealPromise = (async () => {
       await this.waitForLifecycleIdle();
@@ -806,6 +959,7 @@ export class RuntimeOrchestrator {
     options: HandleUserMessageOptions = {}
   ): Promise<AgentReplyEvent | null> {
     this.enterLifecycleOperation();
+    this.explicitTurnDepth += 1;
     try {
       const userEvent = isRuntimeUserTurnEvent(input)
         ? input
@@ -832,7 +986,9 @@ export class RuntimeOrchestrator {
         controlAuthority: options.controlAuthority ?? "LOCAL_EXPLICIT_CONTROLLER"
       });
     } finally {
+      this.explicitTurnDepth = Math.max(0, this.explicitTurnDepth - 1);
       this.exitLifecycleOperation();
+      this.armProactiveWake();
     }
   }
 
@@ -919,6 +1075,7 @@ export class RuntimeOrchestrator {
     }
 
     this.enterLifecycleOperation();
+    this.explicitTurnDepth += 1;
     try {
       const userEvent = isRuntimeUserMessageEvent(input)
         ? input
@@ -1309,7 +1466,9 @@ export class RuntimeOrchestrator {
         throw failure;
       }
     } finally {
+      this.explicitTurnDepth = Math.max(0, this.explicitTurnDepth - 1);
       this.exitLifecycleOperation();
+      this.armProactiveWake();
     }
   }
 
@@ -1537,10 +1696,18 @@ export class RuntimeOrchestrator {
 
     this.enterLifecycleOperation();
     let claimed = false;
+    const decisionId = crypto.randomUUID();
     try {
-      const admittedRevision = this.admitProactiveAttempt();
+      if (this.proactiveAttemptActive) {
+        if (this.assistantTurnClaims.has(input.idempotencyKey)) {
+          throw new AssistantTurnConflictError(input.idempotencyKey);
+        }
+        throw new ProactiveAdmissionError("not-eligible");
+      }
+      this.proactiveAttemptActive = true;
       this.claimAssistantTurn(input);
       claimed = true;
+      const admittedRevision = this.admitProactiveAttempt();
 
       const effectInstanceId = crypto.randomUUID();
       const traceId = crypto.randomUUID();
@@ -1633,23 +1800,29 @@ export class RuntimeOrchestrator {
           };
         }
 
+        this.revalidateAdmittedProactiveRevision(admittedRevision);
         if (decisionOutput.decision === "NO_OP") {
+          this.deferProactiveQuiet(PROACTIVE_NO_OP_BACKOFF_MS);
           finalized = true;
-          yield {
-            type: "proactive-decision",
-            decision: "NO_OP",
+          const noOpEvent = {
+            type: "proactive-decision" as const,
+            decision: "NO_OP" as const,
             sessionId: input.sessionId,
             traceId
           };
+          this.emitProactiveStreamEvent(noOpEvent);
+          yield noOpEvent;
           return;
         }
 
-        yield {
-          type: "proactive-decision",
-          decision: "REQUEST_TEXT",
+        const requestTextEvent = {
+          type: "proactive-decision" as const,
+          decision: "REQUEST_TEXT" as const,
           sessionId: input.sessionId,
           traceId
         };
+        this.emitProactiveStreamEvent(requestTextEvent);
+        yield requestTextEvent;
         if (controller.signal.aborted) {
           throw createRuntimeCancelledError(decisionProvider.name);
         }
@@ -1680,6 +1853,7 @@ export class RuntimeOrchestrator {
         }
         accumulatedText = normalizeProactiveAssistantText(finalOutput, continuationProvider.name);
         this.revalidateAdmittedProactiveRevision(admittedRevision);
+        this.deferProactiveQuiet(PROACTIVE_EMIT_QUIET_MS);
 
         const providerMetadata = this.safeProviderCallMetadata(
           "chat",
@@ -1718,7 +1892,10 @@ export class RuntimeOrchestrator {
             metadata: {
               origin: "assistant-initiated",
               idempotencyKey: input.idempotencyKey,
-              modality: "text"
+              modality: "text",
+              decision: "REQUEST_TEXT",
+              decisionId,
+              activityRevision: admittedRevision
             }
           });
           assistantCreated = true;
@@ -1732,7 +1909,10 @@ export class RuntimeOrchestrator {
               tokenUsage: providerMetadata.tokenUsage,
               origin: "assistant-initiated",
               idempotencyKey: input.idempotencyKey,
-              modality: "text"
+              modality: "text",
+              decision: "REQUEST_TEXT",
+              decisionId,
+              activityRevision: admittedRevision
             },
             {
               sourceUserEventId: null,
@@ -1749,7 +1929,9 @@ export class RuntimeOrchestrator {
           input.idempotencyKey,
           accumulatedText,
           providerMetadata,
-          replyId
+          replyId,
+          decisionId,
+          admittedRevision
         );
         await this.options.eventBus.publish(reply);
         this.recordDirectContextAssistant(input.sessionId, reply);
@@ -1758,21 +1940,25 @@ export class RuntimeOrchestrator {
         this.scheduleEmbodiedPresentation(reply);
         finalized = true;
 
-        yield {
-          type: "text-delta",
+        const deltaEvent = {
+          type: "text-delta" as const,
           text: accumulatedText,
           messageId: assistantMessageId,
           sessionId: input.sessionId,
           traceId
         };
-        yield {
-          type: "completed",
+        const completedEvent = {
+          type: "completed" as const,
           messageId: assistantMessageId,
           sessionId: input.sessionId,
           traceId,
           content: accumulatedText,
           provider: providerMetadata.finalProvider ?? providerMetadata.name
         };
+        this.emitProactiveStreamEvent(deltaEvent);
+        yield deltaEvent;
+        this.emitProactiveStreamEvent(completedEvent);
+        yield completedEvent;
       } catch (error) {
         failure = error;
       } finally {
@@ -1826,7 +2012,9 @@ export class RuntimeOrchestrator {
       if (claimed) {
         this.completeAssistantTurnClaim(input.idempotencyKey);
       }
+      this.proactiveAttemptActive = false;
       this.exitLifecycleOperation();
+      this.armProactiveWake();
     }
   }
 
@@ -3003,7 +3191,9 @@ export class RuntimeOrchestrator {
     idempotencyKey: string,
     content: string,
     provider: SafeProviderCallMetadata,
-    id: string
+    id: string,
+    decisionId: string,
+    activityRevision: number
   ): AgentReplyEvent {
     const event = createEvent(
       "agent.reply",
@@ -3011,7 +3201,9 @@ export class RuntimeOrchestrator {
         sessionId,
         content,
         turnOrigin: "assistant-initiated" as const,
-        provider
+        provider,
+        decisionId,
+        activityRevision
       },
       { traceId }
     );
@@ -3020,7 +3212,9 @@ export class RuntimeOrchestrator {
       id,
       payload: {
         ...event.payload,
-        idempotencyKey
+        idempotencyKey,
+        decisionId,
+        activityRevision
       }
     };
   }
@@ -3036,6 +3230,10 @@ export class RuntimeOrchestrator {
         content: reply.payload.content,
         ...(reply.payload.turnOrigin ? { turnOrigin: reply.payload.turnOrigin } : {}),
         ...(reply.payload.idempotencyKey ? { idempotencyKey: reply.payload.idempotencyKey } : {}),
+        ...(reply.payload.decisionId ? { decisionId: reply.payload.decisionId } : {}),
+        ...(reply.payload.activityRevision !== undefined
+          ? { activityRevision: reply.payload.activityRevision }
+          : {}),
         ...(reply.payload.provider ? { provider: reply.payload.provider } : {})
       },
       {

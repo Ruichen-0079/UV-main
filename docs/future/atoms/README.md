@@ -188,7 +188,7 @@ retained as historical/reference material:
 - [07 — Runtime Character outcome + Cognition sequencing](07-runtime-character-outcome-cognition.md) — DONE
 - [08 — Runtime Proactive Policy + Web authority migration](08-runtime-proactive-policy.md) — DONE
 - [09 — Speaker-aware STT independent input](09-speaker-aware-stt-input.md) — 09A DONE / 09B-1 DONE / 09B-2 DONE
-- [10 — Proactive provider binding + single Runtime scheduler](10-proactive-provider-scheduler.md)
+- [10 — Proactive provider binding + single Runtime scheduler](10-proactive-provider-scheduler.md) — DONE
 - [11 — P8 main-profile projection](11-p8-main-profile.md) — DONE
 - [12 — Memory multi-speaker attribution/provenance](12-memory-multispeaker-provenance.md)
 - [13 — Voice identity](13-voice-identity.md)

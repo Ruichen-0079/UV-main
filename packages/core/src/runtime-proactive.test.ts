@@ -2,7 +2,7 @@ import { InMemoryEventBus } from "@companion/event-bus";
 import {
   InMemoryConversationRepository,
   type Memory,
-  type MemoryCandidate,
+  type MemoryCandidate
 } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
 import {
@@ -23,11 +23,12 @@ import {
   type ChatStreamOptions,
   type AssistantContinuationInput,
   type MockStreamingChatProviderOptions,
-  type ProactiveDecisionInput,
+  type ProactiveDecisionInput
 } from "@companion/providers";
 import { type RuntimeEvent } from "@companion/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
+  PROACTIVE_EMIT_QUIET_MS,
   RuntimeOrchestrator,
   type RuntimeMemoryPort,
   type RuntimeReplyStreamEvent
@@ -98,9 +99,6 @@ async function appendCompletedConversationMessage(
 }
 
 describe("RuntimeOrchestrator", () => {
-
-
-
   it("streams an assistant-only turn without a user event, user row, or memory write", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const published: RuntimeEvent[] = [];
@@ -1206,7 +1204,7 @@ describe("RuntimeOrchestrator", () => {
       ).find((message) => message.role === "assistant")!;
 
       for (let index = 0; index < 256; index += 1) {
-        vi.advanceTimersByTime(1);
+        vi.advanceTimersByTime(PROACTIVE_EMIT_QUIET_MS);
         await collectRuntimeStream(
           runtime.streamAssistantInitiatedTurn({
             sessionId: reusable.sessionId,
@@ -1217,6 +1215,7 @@ describe("RuntimeOrchestrator", () => {
       }
 
       output = "cap-second";
+      vi.advanceTimersByTime(PROACTIVE_EMIT_QUIET_MS);
       await collectRuntimeStream(runtime.streamAssistantInitiatedTurn(reusable));
       const assistants = (
         await conversation.listRecentMessages(reusable.sessionId, { limit: 400 })
@@ -1262,6 +1261,7 @@ describe("RuntimeOrchestrator", () => {
       ).resolves.toHaveLength(3);
 
       for (let index = 0; index < 257; index += 1) {
+        vi.advanceTimersByTime(PROACTIVE_EMIT_QUIET_MS);
         await collectRuntimeStream(
           runtime.streamAssistantInitiatedTurn({
             sessionId: "retention-session",
@@ -1270,6 +1270,7 @@ describe("RuntimeOrchestrator", () => {
           })
         );
       }
+      vi.advanceTimersByTime(PROACTIVE_EMIT_QUIET_MS);
       await expect(
         collectRuntimeStream(
           runtime.streamAssistantInitiatedTurn({
