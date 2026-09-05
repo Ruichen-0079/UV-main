@@ -33,7 +33,8 @@
     "desktop:installer:smoke": "node scripts/desktop-package/installer-smoke.mjs",
     "desktop:installer:test": "node --test scripts/desktop-package/installer-smoke.test.mjs",
     "desktop:build:windows": "pnpm --filter @companion/desktop exec tauri build --bundles nsis",
-    "desktop:smoke:linux": "node scripts/desktop-smoke-linux.mjs"
+    "desktop:smoke:linux": "node scripts/desktop-smoke-linux.mjs",
+    "desktop:close-tray:linux": "node scripts/desktop-close-tray-lifecycle-linux.mjs"
   },
   "packageManager": "pnpm@9.15.4",
   "dependencies": {

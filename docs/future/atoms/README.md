@@ -238,9 +238,20 @@ Dependency direction (not numeric order):
   SIGTERM are routed through a self-pipe into the graceful exit path instead
   of the default disposition that orphaned the tree. The smoke now FAILs if
   the product shutdown leaves any owned process behind — PASS no longer
-  depends on the emergency cleanup, which is failure-autopsy only. Evidence
-  recorded for a later KDE atom: ordinary window close is still a hide; the
-  tray Quit path already routes through the same graceful exit gate.)
+  depends on the emergency cleanup, which is failure-autopsy only.)
+- Linux KDE close/tray lifecycle validation — DONE
+  (closure record, no separate atom doc: the frozen contract is now
+  machine-validated on the primary platform, `pnpm desktop:close-tray:linux`
+  on a real KDE Plasma Wayland session. Window close rides the compositor
+  itself — KWin scripting `closeWindow`, the same xdg_toplevel.close the
+  titlebar X button delivers — and tray clicks ride the StatusNotifierItem/
+  DBusMenu Event message Plasma itself sends, so there is no pixel
+  automation. The run asserts close ≠ quit (main window unmapped, app alive,
+  Supervisor healthy, exit gate untouched, tray still usable and controlling
+  the app), then tray Quit → graceful `exit(0)` → state cleaned → zero owned
+  descendants, with a repeated-Quit probe absorbed by the ShutdownGate. No
+  production code changed — the lifecycle audit found the behavior already
+  correct; this atom only added the missing validation contract.)
 - [03 — Desktop Surface foundation](03-desktop-surface-foundation.md)
   — rebaselined: no longer depends on Windows Atoms 01–02
 - [04 — WebUI Surface](04-webui-surface.md)
