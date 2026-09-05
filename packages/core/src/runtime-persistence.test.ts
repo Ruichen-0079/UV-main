@@ -122,7 +122,7 @@ describe("RuntimeOrchestrator", () => {
       ? await ledger.getTurn(assistant.finalizedTurnId)
       : null;
 
-    expect(reply.payload.content).toBeTruthy();
+    expect(reply!.payload.content).toBeTruthy();
     expect(transcript).toMatchObject({
       type: "user.voice.transcript",
       payload: {
@@ -381,7 +381,7 @@ describe("RuntimeOrchestrator", () => {
     expect(writes[0]).toMatchObject({
       assistantMessageId: assistant?.id,
       idempotencyKey: `yuvi:finalized-turn:${assistant?.id}`,
-      assistantMessage: reply.payload.content
+      assistantMessage: reply!.payload.content
     });
     expect(runtime.getLatestPromptPreview()).toMatchObject({ memoryWriteStatus: "complete" });
   });
@@ -429,7 +429,7 @@ describe("RuntimeOrchestrator", () => {
     });
     await runtime.drainMemoryWrites();
 
-    const sourceUserEventId = reply.parentId;
+    const sourceUserEventId = reply!.parentId;
     const assistant = await conversation.getMessageById(`assistant:${sourceUserEventId}`);
     const turn = assistant?.finalizedTurnId
       ? await ledger.getTurn(assistant.finalizedTurnId)
@@ -539,13 +539,13 @@ describe("RuntimeOrchestrator", () => {
     });
     await runtime.drainMemoryWrites();
 
-    const assistant = await conversation.getMessageById(`assistant:${reply.parentId}`);
+    const assistant = await conversation.getMessageById(`assistant:${reply!.parentId}`);
     expect(assistant?.role).toBe("assistant");
     const turns = await ledger.listNonTerminalTurns();
     expect(providerWrites).toHaveLength(2);
     expect(new Set(providerWrites.map((input) => input.idempotencyKey)).size).toBe(2);
     expect(turns).toEqual([]);
-    expect(reply.parentId).toBeTruthy();
+    expect(reply!.parentId).toBeTruthy();
   });
 
   it("keeps a durable reconcile_required child out of complete status on re-entry", async () => {
@@ -1070,7 +1070,7 @@ describe("RuntimeOrchestrator", () => {
     });
     await runtime.drainMemoryWrites();
 
-    expect(reply.type).toBe("agent.reply");
+    expect(reply!.type).toBe("agent.reply");
     expect(runtime.getLatestPromptPreview()).toMatchObject({ memoryWriteStatus: "failed" });
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]?.payload).toMatchObject({

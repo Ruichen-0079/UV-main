@@ -16,6 +16,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@companion/character-abi": "workspace:*",
     "@companion/event-bus": "workspace:*",
     "@companion/memory": "workspace:*",
     "@companion/p8": "workspace:*",

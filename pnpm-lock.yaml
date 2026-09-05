@@ -181,6 +181,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@companion/character-abi':
+        specifier: workspace:*
+        version: link:../character-abi
       '@companion/event-bus':
         specifier: workspace:*
         version: link:../event-bus

@@ -79,6 +79,25 @@ export async function registerMessageRoutes(
         readMemory: memoryOptions.readMemory,
         writeMemory: memoryOptions.writeMemory
       });
+      if (response === null) {
+        // Intentional Character silence/termination: the turn succeeded, but
+        // no assistant message exists to return.
+        return reply.send({
+          reply: null,
+          traceId: event.traceId,
+          provider: null,
+          memory: {
+            legacyUseMemory: memoryOptions.legacyUseMemory,
+            readMemory: memoryOptions.readMemory,
+            writeMemory: memoryOptions.writeMemory,
+            memoryReadEnabled: memoryOptions.readMemory,
+            memoryWriteEnabled: memoryOptions.writeMemory
+          },
+          promptPreview: input.data.options?.promptPreview
+            ? context.runtime.getLatestPromptPreview()
+            : undefined
+        });
+      }
       const provider = response.payload.provider;
       return reply.send({
         ...response,

@@ -22,13 +22,9 @@ import {
 } from "@companion/providers";
 import { type RuntimeEvent } from "@companion/protocol";
 import { describe, expect, it } from "vitest";
-import {
-  RuntimeOrchestrator,
-  type RuntimeMemoryPort
-} from "./index.js";
+import { RuntimeOrchestrator, type RuntimeMemoryPort } from "./index.js";
 
 describe("RuntimeOrchestrator", () => {
-
   it("publishes no reply events when every chat provider fails", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const published: RuntimeEvent[] = [];
@@ -94,7 +90,7 @@ describe("RuntimeOrchestrator", () => {
 
     expect(published.filter((event) => event.type === "assistant.message")).toHaveLength(1);
     expect(published.find((event) => event.type === "assistant.message")?.payload).toMatchObject({
-      content: reply.payload.content
+      content: reply!.payload.content
     });
     expect(published.filter((event) => event.type === "runtime.error")).toHaveLength(1);
   });
@@ -355,7 +351,7 @@ describe("RuntimeOrchestrator", () => {
       type: "semantic",
       subtype: "path",
       reason: "explicit-remember",
-      sourceTraceId: reply.traceId
+      sourceTraceId: reply!.traceId
     });
     const history = runtime.getRecentMemoryCandidates(5);
     expect(history.some((candidate) => candidate.decision === "stored")).toBe(true);

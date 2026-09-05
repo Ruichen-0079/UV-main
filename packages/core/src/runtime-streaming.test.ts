@@ -1324,8 +1324,8 @@ describe("RuntimeOrchestrator", () => {
       voiceOutput: true
     });
 
-    expect(reply.type).toBe("agent.reply");
-    expect(reply.payload.content).toContain("Mock reply");
+    expect(reply!.type).toBe("agent.reply");
+    expect(reply!.payload.content).toContain("Mock reply");
     expect(diagnostics).toContain("runtime.error");
     expect(diagnostics).toContain("provider.error");
 
@@ -1346,8 +1346,8 @@ describe("RuntimeOrchestrator", () => {
     expect(assistantMessage.parentId).toBe(agentReply.id);
     expect(assistantMessage.payload).toMatchObject({
       sessionId: "test-session",
-      content: reply.payload.content,
-      provider: reply.payload.provider
+      content: reply!.payload.content,
+      provider: reply!.payload.provider
     });
     expect(persistenceOrder).toEqual([
       "user:save",

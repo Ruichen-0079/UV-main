@@ -4,6 +4,7 @@ import type {
   CharacterAbiSectionKind,
   CharacterAbiSemanticSection
 } from "@companion/character-abi";
+import { createCharacterDecision } from "@companion/character-abi";
 import {
   CHARACTER_ABI_2D_VERSION,
   createCharacterAbi2DContext,
@@ -65,62 +66,79 @@ type GeneratedCharacterProposal = Readonly<{
 }>;
 
 type CharacterTurnInput = Parameters<RuntimeCharacterPort["generate"]>[0];
+type CharacterReentryInput = Parameters<RuntimeCharacterPort["generateAfterCognition"]>[0];
+type CharacterTurnResult = Awaited<ReturnType<RuntimeCharacterPort["generate"]>>;
 
 export function createServerCharacterPort(): RuntimeCharacterPort {
   return Object.freeze({
-    generate: generateCharacterTurn
+    generate: generateInitialCharacterTurn,
+    generateAfterCognition: generatePostCognitionCharacterTurn
   });
 }
 
-async function generateCharacterTurn(
+/**
+ * One Character pass over the current turn. The server chat surface is an
+ * explicitly directed YUVI input, so the transport-proven
+ * `DIRECTED_TO_YUVI` constraint is projected here instead of asking Character
+ * to infer addressing (Atom 06 input boundary). Ordinary reactive turns carry
+ * no proactive-policy meaning, expressed as the explicit `KEEP` proposal.
+ */
+async function toCharacterDecision(
+  proposal: GeneratedCharacterProposal["generation"]["proposal"],
+  output: ChatOutput
+): Promise<CharacterTurnResult> {
+  return Object.freeze({
+    decision: createCharacterDecision({
+      addressing: "DIRECTED_TO_YUVI",
+      reply: proposal,
+      proactive: { action: "KEEP" }
+    }),
+    providerMetadata: safeProviderMetadata(output)
+  });
+}
+
+async function generateInitialCharacterTurn(
   input: CharacterTurnInput
-): Promise<{ content: string; providerMetadata: ReturnType<typeof safeProviderMetadata> }> {
+): Promise<CharacterTurnResult> {
   assertNotCancelled(input.signal);
   const baseContext = createServerCharacterContext(input.prompt);
   const initialRequest = createCharacterGenerationRequest(baseContext);
   const initial = await generateAcceptedCharacterProposal(input, initialRequest, false);
 
-  switch (initial.generation.proposal.disposition) {
-    case "RESPOND":
-      return {
-        content: initial.generation.proposal.text,
-        providerMetadata: safeProviderMetadata(initial.output)
-      };
-    case "SILENCE":
-    case "TERMINATE":
-      return { content: "", providerMetadata: safeProviderMetadata(initial.output) };
-    case "NEED_COGNITION": {
-      const request = createCharacterHarnessCognitionRequest({
-        generation: initial.generation
-      });
-      const problem = createCognitionProblem(input.userMessage, initial.generation.proposal.focus);
-      const roundTrip = await input.executeCognition(request, problem, {
-        signal: input.signal
-      });
-      assertNotCancelled(input.signal);
-
-      const postRequest = createServerPostCognitionCharacterRequest({
-        roundTrip,
-        context: baseContext,
-        budget: CHARACTER_CONTEXT_BUDGET
-      });
-      if ("status" in postRequest) {
-        throw characterFailure("Character Cognition result exceeded the Character context budget.");
-      }
-
-      const final = await generateAcceptedCharacterProposal(input, postRequest, true);
-      if (final.generation.proposal.disposition === "NEED_COGNITION") {
-        throw characterFailure("Character returned NEED_COGNITION after Cognition completed.");
-      }
-      if (final.generation.proposal.disposition === "RESPOND") {
-        return {
-          content: final.generation.proposal.text,
-          providerMetadata: safeProviderMetadata(final.output)
-        };
-      }
-      return { content: "", providerMetadata: safeProviderMetadata(final.output) };
-    }
+  if (initial.generation.proposal.disposition === "NEED_COGNITION") {
+    // Runtime owns Cognition execution and the bounded sequencing; Character
+    // only hands over its own escalation semantics and stops.
+    return Object.freeze({
+      ...(await toCharacterDecision(initial.generation.proposal, initial.output)),
+      cognitionHandoff: Object.freeze({
+        request: createCharacterHarnessCognitionRequest({
+          generation: initial.generation
+        }),
+        problem: createCognitionProblem(input.userMessage, initial.generation.proposal.focus)
+      })
+    });
   }
+  return toCharacterDecision(initial.generation.proposal, initial.output);
+}
+
+async function generatePostCognitionCharacterTurn(
+  input: CharacterReentryInput
+): Promise<CharacterTurnResult> {
+  assertNotCancelled(input.signal);
+  const baseContext = createServerCharacterContext(input.prompt);
+  const postRequest = createServerPostCognitionCharacterRequest({
+    roundTrip: input.cognitionRoundTrip,
+    context: baseContext,
+    budget: CHARACTER_CONTEXT_BUDGET
+  });
+  if ("status" in postRequest) {
+    throw characterFailure("Character Cognition result exceeded the Character context budget.");
+  }
+
+  // A repeated NEED_COGNITION here is returned faithfully; Runtime owns the
+  // explicit bounded failure outcome for it.
+  const final = await generateAcceptedCharacterProposal(input, postRequest, true);
+  return toCharacterDecision(final.generation.proposal, final.output);
 }
 
 async function generateAcceptedCharacterProposal(
