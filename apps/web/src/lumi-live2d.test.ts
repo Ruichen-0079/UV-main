@@ -123,27 +123,47 @@ describe("Lumi presence and audio envelope", () => {
     expect(controller.getDebug().running).toBe(false);
   });
 
-  it("bounds the first frame after a hidden interval without stopping the controller", () => {
+  it("pauses while hidden and resumes with a bounded first frame", () => {
     const callbacks: Array<(now: number) => void> = [];
+    let cancelled = 0;
     let hidden = false;
+    const globalScope = globalThis as { document?: EventTarget };
+    const previousDocument = globalScope.document;
+    const documentTarget = new EventTarget();
+    globalScope.document = documentTarget;
     const controller = new LumiPresentationController(() => undefined, {
       random: () => 0,
       requestFrame: (callback) => {
         callbacks.push(callback);
         return callbacks.length;
       },
-      cancelFrame: () => undefined,
+      cancelFrame: () => {
+        cancelled += 1;
+        callbacks.shift();
+      },
       isHidden: () => hidden
     });
-    controller.start();
-    callbacks.shift()?.(100);
-    hidden = true;
-    callbacks.shift()?.(200);
-    hidden = false;
-    callbacks.shift()?.(100_000);
-    expect(controller.getDebug().running).toBe(true);
-    expect(controller.getDebug().frameDeltaMs).toBeLessThanOrEqual(100);
-    controller.dispose();
+    try {
+      controller.start();
+      callbacks.shift()?.(100);
+      expect(controller.getDebug().running).toBe(true);
+
+      hidden = true;
+      documentTarget.dispatchEvent(new Event("visibilitychange"));
+      expect(cancelled).toBe(1);
+      expect(callbacks).toHaveLength(0);
+
+      hidden = false;
+      documentTarget.dispatchEvent(new Event("visibilitychange"));
+      expect(callbacks).toHaveLength(1);
+      callbacks.shift()?.(100_000);
+      expect(controller.getDebug().running).toBe(true);
+      expect(controller.getDebug().frameDeltaMs).toBeLessThanOrEqual(100);
+    } finally {
+      controller.dispose();
+      if (previousDocument === undefined) delete globalScope.document;
+      else globalScope.document = previousDocument;
+    }
   });
 
   it("gates noise and clamps mouth values to Lumi's parameter range", () => {

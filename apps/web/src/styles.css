@@ -23,6 +23,11 @@
   html[data-yuvi-surface="companion"] body,
   html[data-yuvi-surface="companion"] #root {
     background: transparent !important;
+    overflow: hidden;
+  }
+
+  html[data-yuvi-surface="companion"] canvas {
+    background: transparent !important;
   }
 
   button,

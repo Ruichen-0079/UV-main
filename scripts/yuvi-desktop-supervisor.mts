@@ -3,7 +3,7 @@
  * Spawned by Tauri (dev mode). Loopback HTTP control only + control-token auth.
  *
  * Usage:
- *   pnpm exec tsx scripts/yuvi-desktop-supervisor.mts --repo-root C:\Dev\UV-main
+ *   pnpm exec tsx scripts/yuvi-desktop-supervisor.mts --repo-root C:\Dev\UV-main --state-directory C:\Users\...\DesktopSupervisor\<id>
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -18,11 +18,12 @@ import {
 
 const args = parseArgs(process.argv.slice(2));
 const repoRoot =
-  args["repo-root"] ??
-  path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  args["repo-root"] ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const explicitStateDirectory = args["state-directory"]?.trim();
 
 const config = loadSupervisorConfig({
   repositoryRoot: repoRoot,
+  stateDirectory: explicitStateDirectory || undefined,
   controlPort: args.port ? Number(args.port) : 0,
   controlHost: "127.0.0.1"
 });
@@ -32,7 +33,10 @@ fs.mkdirSync(config.stateDirectory, { recursive: true });
 restrictToCurrentUser(config.stateDirectory);
 
 // Active-instance pointer (no token): helps Rust discover the latest endpoint path.
-const activePointer = path.join(defaultDesktopSupervisorRoot(), "active-instance.json");
+const activePointer = path.join(
+  explicitStateDirectory || defaultDesktopSupervisorRoot(),
+  "active-instance.json"
+);
 const endpointFile = path.join(config.stateDirectory, "control-endpoint.json");
 // Drop stale endpoint before publishing so we never attach to an old PID.
 try {
@@ -130,14 +134,18 @@ process.on("SIGTERM", () => {
 });
 
 function writeEndpointSecure(filePath: string, data: ControlEndpointFile): void {
-  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600
+  });
   restrictToCurrentUser(filePath);
 }
 
 function restrictToCurrentUser(targetPath: string): void {
   if (process.platform !== "win32") {
     try {
-      fs.chmodSync(targetPath, 0o600);
+      const stat = fs.statSync(targetPath);
+      fs.chmodSync(targetPath, stat.isDirectory() ? 0o700 : 0o600);
     } catch {
       // ignore
     }
@@ -147,11 +155,10 @@ function restrictToCurrentUser(targetPath: string): void {
     const user = process.env["USERNAME"] ?? "";
     if (!user) return;
     // Current user full control; remove inheritance for tighter local ACL.
-    spawnSync(
-      "icacls",
-      [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`],
-      { windowsHide: true, timeout: 5_000 }
-    );
+    spawnSync("icacls", [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`], {
+      windowsHide: true,
+      timeout: 5_000
+    });
   } catch {
     // Best-effort only.
   }

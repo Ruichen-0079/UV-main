@@ -172,6 +172,27 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
         style={{ display: "block", width: "100%", height: "100%" }}
         aria-hidden="true"
       />
+      {modelLifecycle === "failed" && (
+        <div
+          className="absolute inset-0 z-20 flex items-center justify-center p-6 text-center"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="max-w-xs rounded-xl border border-white/15 bg-black/65 px-4 py-3 text-white shadow-lg backdrop-blur-sm">
+            <p className="m-0 text-sm font-semibold">Lumi is unavailable</p>
+            <p className="mt-1 text-xs leading-relaxed text-white/75">
+              Live2D Core or model assets are not available in this Runtime.
+            </p>
+            <button
+              type="button"
+              className="mt-3 rounded-md bg-white/15 px-3 py-1.5 text-xs font-semibold hover:bg-white/25"
+              onClick={() => void controllerRef.current?.load()}
+            >
+              Retry Live2D
+            </button>
+          </div>
+        </div>
+      )}
       {overlay && (
         <div className="pointer-events-none absolute inset-0 z-10" aria-hidden="true">
           {/* Viewport safe margins */}
