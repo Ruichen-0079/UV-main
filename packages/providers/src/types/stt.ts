@@ -37,6 +37,11 @@ export type STTOutput = ProviderMetadata & {
    * observation is not a user interaction on its own.
    */
   observationId?: string | undefined;
+  /**
+   * Opaque capture generation identity. Runtime owns assignment and fencing;
+   * it is never derived from transcript text or speakerClusterId.
+   */
+  captureEpoch?: string | undefined;
   text: string;
   language?: string | undefined;
   confidence?: number | undefined;

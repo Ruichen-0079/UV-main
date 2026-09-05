@@ -85,6 +85,7 @@ import type {
   DirectContextConfig,
   HandleImageInputInput,
   HandleUserMessageInput,
+  AdmitFinalizedSpeechObservationInput,
   HandleUserMessageOptions,
   MaybeSynthesizeSpeechOptions,
   RuntimeLifecycleState,
@@ -117,6 +118,12 @@ import {
   ConversationPersistenceError,
   ProactiveAdmissionError
 } from "./runtime-errors.js";
+import {
+  SpeechCaptureFenceError,
+  admitFinalizedSpeechCapture,
+  createSpeechCaptureStore,
+  type SpeechCaptureStore
+} from "./runtime-speech-capture.js";
 import type { CharacterProactiveProposal } from "@companion/character-abi";
 import {
   advanceActivityRevision,
@@ -252,6 +259,7 @@ export class RuntimeOrchestrator {
   private proactiveState: ProactiveState;
   private proactiveConsentEnabled: boolean | undefined;
   private currentTurnControlAuthority: ProactiveControlAuthority = "LOCAL_EXPLICIT_CONTROLLER";
+  private readonly speechCaptureStore: SpeechCaptureStore = createSpeechCaptureStore();
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
     this.directContextConfig = normalizeDirectContextConfig(options.directContext);
@@ -328,6 +336,31 @@ export class RuntimeOrchestrator {
       throw new ProactiveAdmissionError(eligibility.reason);
     }
     return this.proactiveState.activityRevision;
+  }
+
+  private noteSpeechCaptureActivity(): void {
+    this.proactiveState = advanceActivityRevision(this.proactiveState);
+    this.persistProactivePolicy();
+  }
+
+  /**
+   * Fence one already-finalized STT observation. This is speech activity, not
+   * engagement: it advances activity_revision and never clears suppression.
+   */
+  admitFinalizedSpeechObservation(
+    observation: STTOutput,
+    options: AdmitFinalizedSpeechObservationInput = {}
+  ): STTOutput {
+    const result = admitFinalizedSpeechCapture(this.speechCaptureStore, {
+      observation,
+      sessionId: options.sessionId,
+      captureEpoch: options.captureEpoch
+    });
+    if (result.status === "duplicate") {
+      throw new SpeechCaptureFenceError("duplicate", result.captureEpoch);
+    }
+    this.noteSpeechCaptureActivity();
+    return result.observation;
   }
 
   private revalidateAdmittedProactiveRevision(admittedRevision: number): void {
@@ -1762,12 +1795,16 @@ export class RuntimeOrchestrator {
    */
   async transcribeSpeechAudio(input: SpeechTranscriptionInput): Promise<STTOutput> {
     const sttProvider = this.options.providers.getSTTProvider();
-    return await this.measureProvider(
+    const output = await this.measureProvider(
       "stt",
       sttProvider.name,
-      () => sttProvider.transcribeAudio(input),
+      () => sttProvider.transcribeAudio(input, input.signal ? { signal: input.signal } : undefined),
       { traceId: input.traceId, parentId: input.parentId }
     );
+    return this.admitFinalizedSpeechObservation(output, {
+      sessionId: input.sessionId,
+      captureEpoch: input.captureEpoch
+    });
   }
 
   async handleImageInput(input: HandleImageInputInput): Promise<PerceptionVisionEvent> {

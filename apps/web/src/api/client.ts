@@ -454,6 +454,8 @@ export type TranscriptionResponse = CapabilityRuntimeMetadata & {
   text: string;
   language?: string;
   confidence?: number;
+  observationId?: string;
+  captureEpoch?: string;
   speakerId?: string | null;
   voiceProfileId?: string | null;
 };

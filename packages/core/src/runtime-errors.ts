@@ -26,6 +26,8 @@ export class AssistantTurnConflictError extends Error {
   }
 }
 
+export { SpeechCaptureFenceError } from "./runtime-speech-capture.js";
+
 export class ProactiveAdmissionError extends Error {
   readonly reason: "consent-disabled" | "suppressed" | "not-eligible" | "stale-revision";
 

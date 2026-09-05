@@ -52,7 +52,7 @@ export type {
 export { normalizeReasoningOutput } from "./types/reasoning.js";
 export type { ReasoningInput, ReasoningOutput, ReasoningProvider } from "./types/reasoning.js";
 export type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
-export type { STTInput, STTOutput, STTProvider } from "./types/stt.js";
+export type { STTInput, STTOutput, STTSegment, STTProvider } from "./types/stt.js";
 export type { VisionInput, VisionOutput, VisionProvider } from "./types/vision.js";
 export type {
   EmbeddingBatchOutput,

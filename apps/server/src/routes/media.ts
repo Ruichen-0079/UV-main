@@ -1,3 +1,4 @@
+import { SpeechCaptureFenceError } from "@companion/core";
 import {
   ProviderError,
   ProviderErrorCode,
@@ -19,7 +20,8 @@ const IdentitySchema = {
   subjectUserId: z.string().min(1).nullable().optional(),
   createdByUserId: z.string().min(1).nullable().optional(),
   speakerId: z.string().min(1).nullable().optional(),
-  voiceProfileId: z.string().min(1).nullable().optional()
+  voiceProfileId: z.string().min(1).nullable().optional(),
+  captureEpoch: z.string().min(1).optional()
 } as const;
 
 const TranscriptionRequestSchema = z.object({
@@ -280,19 +282,29 @@ export async function registerMediaRoutes(
           ...(parsed.data.mockText ? { mockTranscription: parsed.data.mockText } : {})
         }
       });
+      const observation = context.runtime.admitFinalizedSpeechObservation(output, {
+        sessionId: parsed.data.sessionId,
+        ...(parsed.data.captureEpoch ? { captureEpoch: parsed.data.captureEpoch } : {})
+      });
       return reply.send({
-        text: output.text,
-        language: output.language,
-        confidence: output.confidence,
-        ...(output.observationId === undefined ? {} : { observationId: output.observationId }),
+        text: observation.text,
+        language: observation.language,
+        confidence: observation.confidence,
+        ...(observation.observationId === undefined
+          ? {}
+          : { observationId: observation.observationId }),
+        ...(observation.captureEpoch === undefined
+          ? {}
+          : { captureEpoch: observation.captureEpoch }),
+        ...(observation.segments === undefined ? {} : { segments: observation.segments }),
         // Caller-supplied assertions, echoed verbatim; never recognition
         // results. Acoustic speaker evidence only appears in typed segments.
         speakerId: parsed.data.speakerId,
         voiceProfileId: parsed.data.voiceProfileId,
-        ...standardProviderMetadata("stt", output)
+        ...standardProviderMetadata("stt", observation)
       });
     } catch (error) {
-      return sendProviderFailure(reply, "stt", error);
+      return sendSpeechCaptureOrProviderFailure(reply, error);
     }
   });
 
@@ -318,11 +330,15 @@ export async function registerMediaRoutes(
           ...(parsed.data.mockText ? { mockTranscription: parsed.data.mockText } : {})
         }
       });
+      const observation = context.runtime.admitFinalizedSpeechObservation(transcription, {
+        sessionId: parsed.data.sessionId,
+        ...(parsed.data.captureEpoch ? { captureEpoch: parsed.data.captureEpoch } : {})
+      });
       const transcriptEvent = createEvent("user.voice.transcript", {
         sessionId: parsed.data.sessionId,
-        content: transcription.text,
-        language: transcription.language,
-        confidence: transcription.confidence,
+        content: observation.text,
+        language: observation.language,
+        confidence: observation.confidence,
         ...identityMetadata(parsed.data)
       });
       const response = await context.runtime.handleUserMessage(transcriptEvent, {
@@ -332,19 +348,22 @@ export async function registerMediaRoutes(
         controlAuthority: "LOCAL_EXPLICIT_CONTROLLER"
       });
 
-      const sttMetadata = standardProviderMetadata("stt", transcription);
+      const sttMetadata = standardProviderMetadata("stt", observation);
       if (response === null) {
         // Intentional Character silence/termination: the admitted voice turn
         // succeeded, but no assistant message exists to return.
         return reply.send({
           transcription: {
-            text: transcription.text,
-            language: transcription.language,
-            confidence: transcription.confidence,
-            ...(transcription.observationId === undefined
+            text: observation.text,
+            language: observation.language,
+            confidence: observation.confidence,
+            ...(observation.observationId === undefined
               ? {}
-              : { observationId: transcription.observationId }),
-            ...(transcription.segments === undefined ? {} : { segments: transcription.segments }),
+              : { observationId: observation.observationId }),
+            ...(observation.captureEpoch === undefined
+              ? {}
+              : { captureEpoch: observation.captureEpoch }),
+            ...(observation.segments === undefined ? {} : { segments: observation.segments }),
             // Caller-supplied assertions, echoed verbatim; never recognition
             // results. Acoustic speaker evidence only appears in typed segments.
             speakerId: parsed.data.speakerId,
@@ -363,13 +382,16 @@ export async function registerMediaRoutes(
       }
       return reply.send({
         transcription: {
-          text: transcription.text,
-          language: transcription.language,
-          confidence: transcription.confidence,
-          ...(transcription.observationId === undefined
+          text: observation.text,
+          language: observation.language,
+          confidence: observation.confidence,
+          ...(observation.observationId === undefined
             ? {}
-            : { observationId: transcription.observationId }),
-          ...(transcription.segments === undefined ? {} : { segments: transcription.segments }),
+            : { observationId: observation.observationId }),
+          ...(observation.captureEpoch === undefined
+            ? {}
+            : { captureEpoch: observation.captureEpoch }),
+          ...(observation.segments === undefined ? {} : { segments: observation.segments }),
           // Caller-supplied assertions, echoed verbatim; never recognition
           // results. Acoustic speaker evidence only appears in typed segments.
           speakerId: parsed.data.speakerId,
@@ -386,7 +408,7 @@ export async function registerMediaRoutes(
           : undefined
       });
     } catch (error) {
-      return sendProviderFailure(reply, "stt", error);
+      return sendSpeechCaptureOrProviderFailure(reply, error);
     }
   });
 
@@ -526,6 +548,21 @@ function standardProviderMetadata(capability: ProviderCapability, output: Provid
     mock: output.model === "mock" || finalProvider === "mock",
     latencyMs: output.latencyMs ?? success?.latencyMs
   };
+}
+
+function sendSpeechCaptureOrProviderFailure(
+  reply: { status(code: number): { send(payload: unknown): unknown } },
+  error: unknown
+): unknown {
+  if (error instanceof SpeechCaptureFenceError) {
+    return reply.status(409).send({
+      error: "speech_capture_rejected",
+      reason: error.reason,
+      captureEpoch: error.captureEpoch,
+      message: error.message
+    });
+  }
+  return sendProviderFailure(reply, "stt", error);
 }
 
 function sendProviderFailure(

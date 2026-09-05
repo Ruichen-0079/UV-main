@@ -13,6 +13,7 @@ import {
 } from "@companion/providers";
 import type { IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
+import { SpeechCaptureFenceError } from "@companion/core";
 import type { AppContext } from "../context.js";
 import { registerMediaRoutes } from "./media.js";
 
@@ -128,6 +129,10 @@ function createContext() {
         payload: { content: "reply", provider: "mock" },
         traceId: "trace-1"
       })),
+      admitFinalizedSpeechObservation: vi.fn((output: STTOutput) => ({
+        ...output,
+        captureEpoch: output.captureEpoch ?? "epoch-test"
+      })),
       getLatestPromptPreview: vi.fn(() => undefined)
     }
   } as unknown as AppContext;
@@ -150,6 +155,7 @@ async function createLifecycleApp(
   app: ReturnType<typeof Fastify>;
   transcribeAudio: TestSTTTranscriber;
   handleUserMessage: ReturnType<typeof vi.fn>;
+  admitFinalizedSpeechObservation: ReturnType<typeof vi.fn>;
   request: RequestCapture;
 }> {
   const handleUserMessage = vi.fn(
@@ -159,10 +165,15 @@ async function createLifecycleApp(
         traceId: "trace-1"
       }))
   );
+  const admitFinalizedSpeechObservation = vi.fn((output: STTOutput) => ({
+    ...output,
+    captureEpoch: output.captureEpoch ?? "epoch-test"
+  }));
   const context = {
     providers: { getSTTProvider: () => ({ transcribeAudio }) },
     runtime: {
       handleUserMessage,
+      admitFinalizedSpeechObservation,
       getLatestPromptPreview: vi.fn(() => undefined)
     }
   } as unknown as AppContext;
@@ -181,7 +192,7 @@ async function createLifecycleApp(
     configureRequest?.(request.raw, request.socket);
   });
   await registerMediaRoutes(app, context);
-  return { app, transcribeAudio, handleUserMessage, request };
+  return { app, transcribeAudio, handleUserMessage, admitFinalizedSpeechObservation, request };
 }
 
 async function createTTSLifecycleApp(
@@ -733,6 +744,59 @@ describe("public batch STT disconnect cancellation", () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.json().observationId).toBe("obs-transcribe-only");
+      expect(response.json().captureEpoch).toBe("epoch-test");
+      expect(handleUserMessage).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("/v1/voice/message does not admit a duplicate capture as a second interaction", async () => {
+    const transcribeAudio = vi.fn<TestSTTTranscriber>(async () => recognizedOutput());
+    const { app, handleUserMessage, admitFinalizedSpeechObservation } = await createLifecycleApp(
+      "/v1/voice/message",
+      transcribeAudio
+    );
+    admitFinalizedSpeechObservation.mockImplementation(() => {
+      throw new SpeechCaptureFenceError("duplicate", "epoch-dup");
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/voice/message",
+        payload: { audioBase64: "AQID", sessionId: "dup", captureEpoch: "epoch-dup" }
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: "speech_capture_rejected",
+        reason: "duplicate"
+      });
+      expect(handleUserMessage).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("/v1/audio/transcriptions rejects a stale capture epoch", async () => {
+    const transcribeAudio = vi.fn<TestSTTTranscriber>(async () => recognizedOutput());
+    const { app, handleUserMessage, admitFinalizedSpeechObservation } = await createLifecycleApp(
+      "/v1/audio/transcriptions",
+      transcribeAudio
+    );
+    admitFinalizedSpeechObservation.mockImplementation(() => {
+      throw new SpeechCaptureFenceError("stale-epoch", "epoch-old");
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/audio/transcriptions",
+        payload: { audioBase64: "AQID", sessionId: "stale", captureEpoch: "epoch-old" }
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: "speech_capture_rejected",
+        reason: "stale-epoch"
+      });
       expect(handleUserMessage).not.toHaveBeenCalled();
     } finally {
       await app.close();
