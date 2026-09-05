@@ -42,14 +42,26 @@ export type {
   RuntimePromptPreview,
   RuntimeReplyStreamEvent,
   SafeProviderCallMetadata,
-  StreamUserMessageOptions
+  StreamUserMessageOptions,
+  AdmitFinalizedSpeechObservationInput
 } from "./runtime-contracts.js";
 
 export {
   AssistantTurnConflictError,
   ConversationPersistenceError,
-  ProactiveAdmissionError
+  ProactiveAdmissionError,
+  SpeechCaptureFenceError
 } from "./runtime-errors.js";
+
+export {
+  SPEECH_CAPTURE_CLAIM_LIMIT,
+  admitFinalizedSpeechCapture,
+  claimKey,
+  createSpeechCaptureStore,
+  type SpeechCaptureAdmitResult,
+  type SpeechCaptureClaimStatus,
+  type SpeechCaptureStore
+} from "./runtime-speech-capture.js";
 
 export {
   PROACTIVE_ADMISSION_REASONS,

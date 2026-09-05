@@ -530,8 +530,16 @@ export type SafeProviderCallMetadata = {
 };
 
 export type SpeechTranscriptionInput = STTInput & {
+  sessionId?: string | undefined;
+  captureEpoch?: string | undefined;
   traceId?: string | undefined;
   parentId?: string | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+export type AdmitFinalizedSpeechObservationInput = {
+  sessionId?: string | undefined;
+  captureEpoch?: string | undefined;
 };
 
 export type HandleImageInputInput = VisionInput & {
