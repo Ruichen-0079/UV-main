@@ -2301,9 +2301,10 @@ test("tray Quit retry policy repeats only the real path within budget", () => {
   assert.equal(TRAY_QUIT_MAX_ATTEMPTS, 4);
   assert.equal(TRAY_QUIT_ATTEMPT_BUDGET_MS, 70_000);
   assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 0, timeoutMs: 60_000 }), true);
-  assert.equal(shouldRetryTrayQuit({ attempt: 3, elapsedMs: 30_000, timeoutMs: 60_000 }), true);
-  assert.equal(shouldRetryTrayQuit({ attempt: 4, elapsedMs: 0, timeoutMs: 60_000 }), false);
-  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 41_000, timeoutMs: 60_000 }), false);
+  assert.equal(shouldRetryTrayQuit({ attempt: 3, elapsedMs: 60_000, timeoutMs: 90_000 }), true);
+  assert.equal(shouldRetryTrayQuit({ attempt: 4, elapsedMs: 0, timeoutMs: 90_000 }), false);
+  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 41_000, timeoutMs: 90_000 }), true);
+  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 71_000, timeoutMs: 90_000 }), false);
   assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 6_000, timeoutMs: 5_000 }), false);
   assert.throws(() => shouldRetryTrayQuit({ attempt: 0, elapsedMs: 0, timeoutMs: 60_000 }), /invalid/);
 });
