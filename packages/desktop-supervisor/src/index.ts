@@ -76,10 +76,15 @@ export {
   stopProcessTree
 } from "./process-windows.js";
 export {
+  YUVI_APP_IDENTIFIER,
+  defaultYuviLocalDataRoot,
+  resolveAppRoots
+} from "./app-roots.js";
+export type { AppRoots } from "./app-roots.js";
+export {
   canonicalPath,
   commandLineContainsPath,
   defaultStateDirectory,
-  defaultYuviLocalDataRoot,
   isWindowsStylePath,
   parseUrlOrigin,
   pathsEqual

@@ -190,8 +190,14 @@ export type SupervisorLayout =
     }
   | {
       mode: "packaged";
+      /** Immutable installation resources (bundled runtimes/models). Never writable state. */
       resourceRoot: string;
+      /** User-editable configuration root (AppRoots contract, app-roots.ts). */
+      configRoot: string;
+      /** Durable user-owned state root; survives cache clears. */
       dataRoot: string;
+      /** Rebuildable artifacts root; deletion must not erase durable state. */
+      cacheRoot: string;
       runtimeManifestPath: string;
       mem0ManifestPath: string;
     };

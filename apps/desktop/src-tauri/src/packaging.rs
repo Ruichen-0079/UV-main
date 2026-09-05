@@ -449,11 +449,46 @@ pub fn discover_repo_root() -> Result<PathBuf, String> {
     Err("could not locate YUVI repository root for supervisor".to_string())
 }
 
+/// Root state directory for the packaged Supervisor (passed as the Node
+/// Supervisor's data root). Windows keeps `%LOCALAPPDATA%/YUVI/DesktopSupervisor`.
+/// Unix follows XDG data-home semantics: `$XDG_DATA_HOME/YUVI/DesktopSupervisor`
+/// (default `$HOME/.local/share/YUVI/DesktopSupervisor`). A temporary fallback
+/// remains only for environments without any absolute home/data base; durable
+/// data there is best-effort and never relied on by the Linux product path.
 pub fn desktop_state_dir() -> PathBuf {
+  #[cfg(target_os = "windows")]
+  {
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
+      if !local.trim().is_empty() {
         return PathBuf::from(local).join("YUVI").join("DesktopSupervisor");
+      }
     }
-    std::env::temp_dir().join("YUVI-DesktopSupervisor")
+  }
+  #[cfg(not(target_os = "windows"))]
+  {
+    if let Some(data_home) = unix_xdg_data_home() {
+      return data_home.join("YUVI").join("DesktopSupervisor");
+    }
+  }
+  std::env::temp_dir().join("YUVI-DesktopSupervisor")
+}
+
+/// XDG data home per the XDG Base Directory spec: `$XDG_DATA_HOME` when
+/// absolute, else `$HOME/.local/share`. `None` when no absolute base exists.
+#[cfg(not(target_os = "windows"))]
+pub fn unix_xdg_data_home() -> Option<PathBuf> {
+  if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+    let trimmed = xdg.trim();
+    if !trimmed.is_empty() && Path::new(trimmed).is_absolute() {
+      return Some(PathBuf::from(trimmed));
+    }
+  }
+  let home = std::env::var("HOME").ok()?;
+  let trimmed = home.trim();
+  if trimmed.is_empty() || !Path::new(trimmed).is_absolute() {
+    return None;
+  }
+  Some(Path::new(trimmed).join(".local").join("share"))
 }
 
 /// Prefer resource_dir; fall back to generated layout next to the crate for unit tests.
@@ -465,7 +500,64 @@ pub fn default_resource_root_for_tests(base: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    /// Serializes tests that mutate process-global environment variables.
+    /// Locks poisoned by a failed sibling test stay usable for the others.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn unix_state_dir_follows_xdg_data_home() {
+        let _guard = lock_env();
+        std::env::remove_var("LOCALAPPDATA");
+        std::env::set_var("XDG_DATA_HOME", "/xdg/data");
+        std::env::set_var("HOME", "/home/yuvi");
+        assert_eq!(
+            desktop_state_dir(),
+            PathBuf::from("/xdg/data/YUVI/DesktopSupervisor")
+        );
+        std::env::remove_var("XDG_DATA_HOME");
+        assert_eq!(
+            desktop_state_dir(),
+            PathBuf::from("/home/yuvi/.local/share/YUVI/DesktopSupervisor")
+        );
+        std::env::remove_var("HOME");
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn unix_xdg_data_home_requires_absolute_bases() {
+        let _guard = lock_env();
+        std::env::set_var("XDG_DATA_HOME", "relative/data");
+        std::env::set_var("HOME", "/home/yuvi");
+        assert_eq!(unix_xdg_data_home(), Some(PathBuf::from("/home/yuvi/.local/share")));
+        std::env::set_var("XDG_DATA_HOME", "/xdg/data");
+        assert_eq!(unix_xdg_data_home(), Some(PathBuf::from("/xdg/data")));
+        std::env::set_var("HOME", "");
+        std::env::set_var("XDG_DATA_HOME", "");
+        assert_eq!(unix_xdg_data_home(), None);
+        std::env::remove_var("HOME");
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_state_dir_prefers_localappdata() {
+        let _guard = lock_env();
+        std::env::set_var("LOCALAPPDATA", "C:\\Users\\yuvi\\AppData\\Local");
+        assert_eq!(
+            desktop_state_dir(),
+            PathBuf::from("C:\\Users\\yuvi\\AppData\\Local\\YUVI\\DesktopSupervisor")
+        );
+        std::env::remove_var("LOCALAPPDATA");
+    }
 
     fn write_mem0_fixture(root: &Path) {
         let mem0 = root.join("mem0");

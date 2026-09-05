@@ -293,7 +293,9 @@ describe("DesktopSupervisor classification", () => {
       layout: {
         mode: "packaged",
         resourceRoot,
+        configRoot: path.join(dataRoot, "config"),
         dataRoot,
+        cacheRoot: path.join(dataRoot, "cache"),
         runtimeManifestPath: path.join(resourceRoot, "runtime-manifest.json"),
         mem0ManifestPath: path.join(resourceRoot, "mem0-manifest.json")
       },
@@ -340,7 +342,9 @@ describe("DesktopSupervisor classification", () => {
       layout: {
         mode: "packaged",
         resourceRoot,
+        configRoot: path.join(resourceRoot, "data", "config"),
         dataRoot: path.join(resourceRoot, "data"),
+        cacheRoot: path.join(resourceRoot, "data", "cache"),
         runtimeManifestPath: path.join(resourceRoot, "runtime", "runtime-manifest.json"),
         mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
       },
@@ -389,7 +393,9 @@ describe("DesktopSupervisor classification", () => {
         layout: {
           mode: "packaged",
           resourceRoot,
+          configRoot: path.join(resourceRoot, "data", "config"),
           dataRoot: path.join(resourceRoot, "data"),
+          cacheRoot: path.join(resourceRoot, "data", "cache"),
           runtimeManifestPath: path.join(resourceRoot, "runtime", "runtime-manifest.json"),
           mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
         },

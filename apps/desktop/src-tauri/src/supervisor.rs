@@ -123,7 +123,7 @@ pub fn bootstrap_supervisor(
     }
   };
 
-  let (mut command, cwd, repo_root_for_state) = match &plan {
+  let (mut command, cwd, repo_root_for_state, packaged_data_home) = match &plan {
     SupervisorLaunchPlan::Development(dev) => {
       let command = if cfg!(target_os = "windows") {
         let mut cmd = Command::new("cmd.exe");
@@ -159,7 +159,7 @@ pub fn bootstrap_supervisor(
           .arg(&dev.repo_root);
         cmd
       };
-      (command, dev.repo_root.clone(), Some(dev.repo_root.clone()))
+      (command, dev.repo_root.clone(), Some(dev.repo_root.clone()), None)
     }
     SupervisorLaunchPlan::Packaged(pkg) => {
       use crate::packaging::{select_packaged_supervisor_command, PackagedSupervisorCommand};
@@ -180,10 +180,17 @@ pub fn bootstrap_supervisor(
           cmd
         }
       };
-      // cwd is LocalAppData state root — never the install directory.
-      (command, pkg.state_root.clone(), None)
+      // cwd is the per-user state root — never the install directory.
+      (command, pkg.state_root.clone(), None, pkg.state_root.parent().map(|p| p.to_path_buf()))
     }
   };
+
+  // Propagate the YUVI data home (parent of the packaged state root) so the
+  // Node Supervisor's PG/Live2D/Mem0 defaults resolve inside the same durable
+  // data home instead of a platform-legacy fallback. Non-secret path only.
+  if let Some(data_home) = packaged_data_home {
+    command.env("YUVI_DATA_ROOT", data_home);
+  }
 
   // Inject non-secret public overrides only. Credential secrets are applied
   // after the control plane is up via POST /v1/config so they stay in the
