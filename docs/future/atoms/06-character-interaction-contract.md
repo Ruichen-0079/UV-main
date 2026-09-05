@@ -96,6 +96,17 @@ speaker/principal and applies state. Character cannot mutate policy directly.
 - `SILENCE + KEEP` must be representable.
 - Proactive suppression semantics cannot alter current reactive admission.
 
+## No persistent semantic outcome
+
+Do not create a persisted InteractionOutcome ledger, table, or event system for
+`SILENCE`/`TERMINATE`. This atom defines only the Character semantic result.
+Future Runtime may explicitly consume `RESPOND | SILENCE | TERMINATE |
+NEED_COGNITION` during execution, but conversation history does not record
+`OUTCOME=SILENT`-style state and no empty assistant message is written.
+History describes facts that happened, not the Runtime state machine; any
+narrative projection (for example "the character did not reply") remains
+out of scope here.
+
 ## Acceptance
 
 Contract tests prove all orthogonal combinations that matter, especially:
