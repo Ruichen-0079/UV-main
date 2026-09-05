@@ -665,6 +665,79 @@ describe("public batch STT disconnect cancellation", () => {
       await app.close();
     }
   });
+
+  it("/v1/voice/message returns observation identity separate from caller speaker assertions", async () => {
+    const transcribeAudio = vi.fn<TestSTTTranscriber>(async () => ({
+      ...recognizedOutput(),
+      observationId: "obs-1",
+      segments: [
+        { segmentId: "seg-1", startMs: 0, endMs: 1200, speakerClusterId: "0" },
+        { segmentId: "seg-2", startMs: 1300, endMs: 2600, speakerClusterId: "1" }
+      ]
+    }));
+    const { app, handleUserMessage } = await createLifecycleApp(
+      "/v1/voice/message",
+      transcribeAudio
+    );
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/voice/message",
+        payload: {
+          audioBase64: "AQID",
+          sessionId: "voice-route-session",
+          speakerId: "speaker-a",
+          voiceProfileId: "voice-a"
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      // Acoustic evidence travels in typed observation fields...
+      expect(body.transcription.observationId).toBe("obs-1");
+      expect(body.transcription.segments).toEqual([
+        { segmentId: "seg-1", startMs: 0, endMs: 1200, speakerClusterId: "0" },
+        { segmentId: "seg-2", startMs: 1300, endMs: 2600, speakerClusterId: "1" }
+      ]);
+      // ...while caller-supplied speaker fields stay verbatim assertions.
+      expect(body.transcription.speakerId).toBe("speaker-a");
+      expect(body.transcription.voiceProfileId).toBe("voice-a");
+      // The admitted interaction event carries caller assertions only; it
+      // never absorbs cluster ids or observation identity as user semantics.
+      const eventPayload = handleUserMessage.mock.calls[0]?.[0].payload;
+      expect(eventPayload.speakerId).toBe("speaker-a");
+      expect(JSON.stringify(eventPayload)).not.toContain("speakerClusterId");
+      expect(JSON.stringify(eventPayload)).not.toContain("obs-1");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("/v1/audio/transcriptions returns observation identity without runtime admission", async () => {
+    const transcribeAudio = vi.fn<TestSTTTranscriber>(async () => ({
+      ...recognizedOutput(),
+      observationId: "obs-transcribe-only"
+    }));
+    const { app, handleUserMessage } = await createLifecycleApp(
+      "/v1/audio/transcriptions",
+      transcribeAudio
+    );
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/audio/transcriptions",
+        payload: { audioBase64: "AQID", sessionId: "transcribe-only-session" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().observationId).toBe("obs-transcribe-only");
+      expect(handleUserMessage).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe("public Vision input validation", () => {

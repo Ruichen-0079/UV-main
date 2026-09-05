@@ -479,16 +479,9 @@ export type SafeProviderCallMetadata = {
   finalProvider?: string | undefined;
 };
 
-export type HandleAudioInputInput = STTInput & {
-  sessionId: string;
-  voiceOutput?: boolean | undefined;
+export type SpeechTranscriptionInput = STTInput & {
   traceId?: string | undefined;
   parentId?: string | undefined;
-  personaId?: string | null | undefined;
-  subjectUserId?: string | null | undefined;
-  createdByUserId?: string | null | undefined;
-  speakerId?: string | null | undefined;
-  voiceProfileId?: string | null | undefined;
 };
 
 export type HandleImageInputInput = VisionInput & {

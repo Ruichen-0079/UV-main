@@ -16,6 +16,37 @@
 > ledger, generic orchestrator/agent graph, provider router, giant event bus, or
 > broad Manager/Engine abstraction merely to match this document.
 
+## 09A split (implementation baseline `49f8fbe`)
+
+A read-only preflight confirmed current main has **no VAD, no partial
+transcripts, no streaming STT, and no continuous capture lifecycle**: the only
+producer is push-to-talk complete-blob batch STT with one finalized result.
+The original plan below assumed capabilities that do not exist, so the scope
+is explicitly split.
+
+**09A — CURRENT TARGET**
+
+- Provider-neutral speaker-aware finalized STT contract:
+  `STTOutput.observationId` plus `STTSegment.{segmentId, text?, startMs?,
+  endMs?, confidence?, speakerClusterId?}`.
+- `LocalSTTProvider` normalizes sidecar diarization into typed segments;
+  provider-specific diarization/identity DTOs no longer travel through the
+  `providerMetadata` bag, and raw embeddings stay sidecar-internal.
+- Explicit-interaction vs observation distinction: push-to-talk
+  `/v1/voice/message` stays an admitted reactive interaction;
+  `RuntimeOrchestrator.transcribeSpeechAudio` returns finalized observations
+  with no admission. A finalized STT result never becomes a
+  `RuntimeUserTurnEvent` by itself.
+- Caller-supplied `speakerId`/`voiceProfileId` remain caller assertions and
+  are never conflated with acoustic cluster or template-match evidence.
+
+**DEFERRED (no producer seam exists on current main)**
+
+- VAD, partial/interim transcripts, streaming STT.
+- Continuous capture lifecycle, `capture_epoch`, speech-active watchdog.
+- Duplicate-final fencing/claim map (no duplicate-callback producer exists).
+- Activity-revision integration (blocked on the Atom 08 seam).
+
 ## Goal
 
 Separate speech observation from semantic user interaction and carry
