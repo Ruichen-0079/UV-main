@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { ProviderCallOptions, ProviderHealth } from "../types/common.js";
 import { ProviderError, ProviderErrorCode } from "../types/errors.js";
 import { createTransportAbort } from "../transport-abort.js";
-import type { STTInput, STTOutput, STTProvider } from "../types/stt.js";
+import type { STTInput, STTOutput, STTSegment, STTProvider } from "../types/stt.js";
 
 export type LocalSTTProviderOptions = {
   baseUrl: string;
@@ -89,19 +90,26 @@ export class LocalSTTProvider implements STTProvider {
         text?: string;
         language?: string;
         latencyMs?: number;
+        /**
+         * Acoustic template match evidence from the optional identify flag.
+         * Deliberately not surfaced: template matches are not person identity,
+         * and voice-evidence-to-person resolution belongs to a later atom.
+         */
         identity?: { identity?: string; speakerId?: string | null };
-        segments?: STTOutput["segments"];
+        /** Sidecar diarization spans: time + cluster label, no per-span transcript. */
+        segments?: Array<{ startMs?: number; endMs?: number; speaker?: string }> | null;
       };
       return {
+        observationId: randomUUID(),
         text: body.text ?? "",
         language: body.language ?? input.language,
         latencyMs: body.latencyMs,
         model: this.options.model,
         finalProvider: this.name,
+        ...(body.segments?.length ? { segments: normalizeDiarization(body.segments) } : {}),
+        // Provenance and diagnostics only; acoustic speaker evidence travels in
+        // typed STTSegment fields, never in this metadata bag.
         providerMetadata: {
-          identity: body.identity?.identity ?? null,
-          speakerId: body.identity?.speakerId ?? null,
-          diarization: body.segments ?? null,
           device: "cpu"
         }
       };
@@ -118,6 +126,22 @@ export class LocalSTTProvider implements STTProvider {
       transport.cleanup();
     }
   }
+}
+
+/**
+ * Normalizes sidecar diarization spans into provider-neutral typed segments.
+ * The sidecar cluster label is preserved verbatim as a capture-local
+ * `speakerClusterId`; it is never mapped onto a person or voice profile.
+ */
+function normalizeDiarization(
+  segments: Array<{ startMs?: number; endMs?: number; speaker?: string }>
+): STTSegment[] {
+  return segments.map((segment) => ({
+    segmentId: randomUUID(),
+    startMs: segment.startMs,
+    endMs: segment.endMs,
+    ...(segment.speaker !== undefined ? { speakerClusterId: segment.speaker } : {})
+  }));
 }
 
 function resolveAudioBase64(input: STTInput): string {

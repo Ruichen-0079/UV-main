@@ -65,6 +65,7 @@ import {
   type ProviderMetadata,
   type ProviderResolver,
   type STTInput,
+  type STTOutput,
   type TokenUsage,
   type VisionInput
 } from "@companion/providers";
@@ -81,7 +82,6 @@ import type {
   AssistantInitiatedTurnOptions,
   ConversationPersistenceOperation,
   DirectContextConfig,
-  HandleAudioInputInput,
   HandleImageInputInput,
   HandleUserMessageInput,
   HandleUserMessageOptions,
@@ -96,6 +96,7 @@ import type {
   RuntimePromptPreview,
   RuntimeReplyStreamEvent,
   RuntimeMemoryWriteStatus,
+  SpeechTranscriptionInput,
   RuntimeCharacterGenerationResult,
   SafeProviderCallMetadata,
   StreamUserMessageOptions
@@ -179,6 +180,12 @@ type DirectContextBuildResult = {
   source: string;
 };
 
+/**
+ * Admitted user interactions only. A finalized STT result is a speech
+ * observation (`STTOutput`); it never becomes a user turn by itself. Voice
+ * transcripts enter this union only when an explicit interaction source (for
+ * example push-to-talk submission) constructs and admits the event.
+ */
 type RuntimeUserTurnEvent = UserMessageEvent | UserVoiceTranscriptEvent;
 
 type SessionTurnsCacheEntry = {
@@ -1602,40 +1609,20 @@ export class RuntimeOrchestrator {
     }
   }
 
-  async handleAudioInput(input: HandleAudioInputInput): Promise<AgentReplyEvent> {
-    this.enterLifecycleOperation();
-    try {
-      const sttProvider = this.options.providers.getSTTProvider();
-      const transcript = await this.measureProvider(
-        "stt",
-        sttProvider.name,
-        () => sttProvider.transcribeAudio(input),
-        { traceId: input.traceId, parentId: input.parentId }
-      );
-
-      const transcriptEvent = createEvent(
-        "user.voice.transcript",
-        {
-          sessionId: input.sessionId,
-          content: transcript.text,
-          language: transcript.language,
-          confidence: transcript.confidence,
-          ...identityPayload(input)
-        },
-        {
-          traceId: input.traceId,
-          parentId: input.parentId
-        }
-      );
-
-      return await this.handleUserTurn(transcriptEvent, {
-        voiceOutput: Boolean(input.voiceOutput),
-        readMemory: true,
-        writeMemory: true
-      });
-    } finally {
-      this.exitLifecycleOperation();
-    }
+  /**
+   * Transcribes audio into a finalized speech observation. This seam performs
+   * no admission: an observation is not a user turn, so it never persists to
+   * the conversation, triggers a Character reply, or writes Memory. Only an
+   * explicit interaction source may admit a transcript as a reactive turn.
+   */
+  async transcribeSpeechAudio(input: SpeechTranscriptionInput): Promise<STTOutput> {
+    const sttProvider = this.options.providers.getSTTProvider();
+    return await this.measureProvider(
+      "stt",
+      sttProvider.name,
+      () => sttProvider.transcribeAudio(input),
+      { traceId: input.traceId, parentId: input.parentId }
+    );
   }
 
   async handleImageInput(input: HandleImageInputInput): Promise<PerceptionVisionEvent> {

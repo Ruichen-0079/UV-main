@@ -284,6 +284,9 @@ export async function registerMediaRoutes(
         text: output.text,
         language: output.language,
         confidence: output.confidence,
+        ...(output.observationId === undefined ? {} : { observationId: output.observationId }),
+        // Caller-supplied assertions, echoed verbatim; never recognition
+        // results. Acoustic speaker evidence only appears in typed segments.
         speakerId: parsed.data.speakerId,
         voiceProfileId: parsed.data.voiceProfileId,
         ...standardProviderMetadata("stt", output)
@@ -334,6 +337,12 @@ export async function registerMediaRoutes(
           text: transcription.text,
           language: transcription.language,
           confidence: transcription.confidence,
+          ...(transcription.observationId === undefined
+            ? {}
+            : { observationId: transcription.observationId }),
+          ...(transcription.segments === undefined ? {} : { segments: transcription.segments }),
+          // Caller-supplied assertions, echoed verbatim; never recognition
+          // results. Acoustic speaker evidence only appears in typed segments.
           speakerId: parsed.data.speakerId,
           voiceProfileId: parsed.data.voiceProfileId,
           ...sttMetadata

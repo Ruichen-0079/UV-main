@@ -3,6 +3,7 @@ import {
   InMemoryConversationRepository,
   FinalizedIngestionService,
   InMemoryFinalizedIngestionRepository,
+  type ConversationMessageInput,
   type MemoryConversationTurnWriteResult,
   type MemoryWriteEventInput
 } from "@companion/memory";
@@ -67,7 +68,7 @@ function deferred<T>(): {
 }
 
 describe("RuntimeOrchestrator", () => {
-  it("routes voice through the durable user-turn and finalized-ingestion flow", async () => {
+  it("admits an explicit voice interaction through the durable user-turn and finalized-ingestion flow", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const published: RuntimeEvent[] = [];
     eventBus.subscribe("*", (event) => {
@@ -91,17 +92,25 @@ describe("RuntimeOrchestrator", () => {
       providers: createMockProviders()
     });
 
-    const reply = await runtime.handleAudioInput({
-      sessionId: "voice-durable-session",
-      audioBase64: "AQID",
-      language: "en",
-      metadata: { mockTranscription: "I prefer concise replies." },
-      personaId: "alice",
-      subjectUserId: "user-a",
-      createdByUserId: "user-a",
-      speakerId: "speaker-a",
-      voiceProfileId: "voice-a"
-    });
+    // Explicit push-to-talk: the interaction source constructs and admits the
+    // transcript event itself, exactly like the /v1/voice/message route. A
+    // finalized STT observation alone must never reach this path.
+    const transcriptEvent = createEvent(
+      "user.voice.transcript",
+      {
+        sessionId: "voice-durable-session",
+        content: "I prefer concise replies.",
+        language: "en",
+        confidence: 1,
+        personaId: "alice",
+        subjectUserId: "user-a",
+        createdByUserId: "user-a",
+        speakerId: "speaker-a",
+        voiceProfileId: "voice-a"
+      },
+      { traceId: "trace-voice-durable" }
+    );
+    const reply = await runtime.handleUserMessage(transcriptEvent);
     await runtime.drainMemoryWrites();
 
     const transcript = published.find((event) => event.type === "user.voice.transcript");
@@ -152,6 +161,47 @@ describe("RuntimeOrchestrator", () => {
     expect(admissions).toEqual([assistant?.finalizedTurnId]);
     expect(published.some((event) => event.type === "agent.reply")).toBe(true);
     expect(published.some((event) => event.type === "assistant.message")).toBe(true);
+  });
+
+  it("returns speech observations without admitting a user turn", async () => {
+    const eventBus = new InMemoryEventBus({ development: false });
+    const published: RuntimeEvent[] = [];
+    eventBus.subscribe("*", (event) => {
+      published.push(event);
+    });
+    const memoryWrites: unknown[] = [];
+    const conversation = new RecordingConversationRepository();
+    const runtime = new RuntimeOrchestrator({
+      eventBus,
+      memory: createMem0RecordingMemory(async (input) => {
+        memoryWrites.push(input);
+        return completeMemoryWrite();
+      }),
+      conversation,
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+
+    const observation = await runtime.transcribeSpeechAudio({
+      audioBase64: "AQID",
+      language: "en",
+      metadata: { mockTranscription: "I prefer concise replies." }
+    });
+    await runtime.drainMemoryWrites();
+
+    expect(observation.text).toBe("I prefer concise replies.");
+    expect(observation.language).toBe("en");
+    // An observation is not an interaction: nothing is admitted, persisted,
+    // replied to, or ingested into Memory.
+    const admittedEventTypes = new Set([
+      "user.message",
+      "user.voice.transcript",
+      "agent.reply",
+      "assistant.message"
+    ]);
+    expect(published.filter((event) => admittedEventTypes.has(event.type))).toEqual([]);
+    expect(conversation.appendedMessages).toEqual([]);
+    expect(memoryWrites).toEqual([]);
   });
 
   it("evicts a rejected finalized-admission promise while retaining successful dedupe", async () => {
@@ -1065,6 +1115,15 @@ function createDirectMemoryTurn(sessionId: string) {
 }
 
 type DirectMemoryTurn = ReturnType<typeof createDirectMemoryTurn>;
+
+class RecordingConversationRepository extends InMemoryConversationRepository {
+  readonly appendedMessages: ConversationMessageInput[] = [];
+
+  override async appendMessage(message: ConversationMessageInput) {
+    this.appendedMessages.push(message);
+    return super.appendMessage(message);
+  }
+}
 
 function createMem0RecordingMemory(
   store: (input: Record<string, unknown>) => Promise<MemoryConversationTurnWriteResult>
