@@ -67,8 +67,6 @@ import {
   runWmCloseHelper,
   TAURI_MAIN_WINDOW_TITLE,
   TRAY_ICON_WINDOW_CLASS,
-  TRAY_COMMAND_MESSAGE_ID,
-  TRAY_MENU_GETHMENU_MESSAGE_ID,
   TRAY_MENU_WINDOW_CLASS,
   TRAY_NOTIFY_MESSAGE_ID,
   TRAY_QUIT_MENU_TEXT,
@@ -2167,8 +2165,6 @@ const defaultTrayQuitItems = () => [
   "Hide Companion"
 ];
 
-const fixtureCommandId = (position) => 3000 + position;
-
 const trayQuitOutput = ({
   targetPid = 123,
   trayWindows = 1,
@@ -2185,19 +2181,19 @@ const trayQuitOutput = ({
   iconCenterY = 744,
   cursorPlace = 1,
   sendInput = 1,
-  menuHmenu = 555000,
   rects = [{ uid: 1, left: 1800, top: 1040, right: 1824, bottom: 1064 }],
   items = defaultTrayQuitItems(),
+  itemRect = { left: 500, top: 700, right: 620, bottom: 728 },
   invokeHresult = 0,
   invokeResult = 1,
+  menuClosed = 1,
   elapsedMs = 8,
   phases = null
 } = {}) => {
   const quitHits = items
-    .map((text, index) => ({ text, position: index }))
+    .map((text, index) => ({ text, childId: index + 1 }))
     .filter((item) => item.text === "Quit");
-  const quitPosition = quitHits.length ? quitHits[0].position : 0;
-  const quitCommandId = quitHits.length ? fixtureCommandId(quitPosition) : 0;
+  const quitChildId = quitHits.length ? quitHits[0].childId : 0;
   const quitText = quitHits.length ? quitHits[0].text : "";
   const phaseLines = [
     "start",
@@ -2235,20 +2231,20 @@ const trayQuitOutput = ({
     `icon_center_y=${iconCenterY}`,
     `cursor_place=${cursorPlace}`,
     `send_input=${sendInput}`,
-    `menu_hmenu=${menuHmenu}`,
     `menu_item_count=${items.length}`,
     `quit_matches=${quitHits.length}`,
-    `quit_position=${quitPosition}`,
-    `quit_command_id=${quitCommandId}`,
+    `quit_child_id=${quitChildId}`,
     `quit_text=${quitText}`,
-    ...items.map((text, index) => `TRAY_QUIT_MENU_ITEM=${index}:${text}`),
+    ...items.map((text, index) => `TRAY_QUIT_MENU_ITEM=${index + 1}:${text}`),
+    `TRAY_QUIT_ITEM_RECT=${itemRect.left},${itemRect.top},${itemRect.right},${itemRect.bottom}`,
     `invoke_hresult=${invokeHresult}`,
     `invoke_result=${invokeResult}`,
+    `menu_closed=${menuClosed}`,
     `elapsed_ms=${elapsedMs}`
   ].join("\n");
 };
 
-test("tray Quit helper delivers the runtime-discovered command id, never an assumed one", () => {
+test("tray Quit helper delivers the semantic item via its real on-screen click", () => {
   const script = buildTrayQuitScript(12345);
   assert.equal(script, TRAY_QUIT_PYTHON_SOURCE);
   assert.match(script, /TRAY_ICON_WINDOW_CLASS = "tray_icon_app"/);
@@ -2261,28 +2257,27 @@ test("tray Quit helper delivers the runtime-discovered command id, never an assu
     "GetClassNameW",
     "IsWindow",
     "PostMessageW",
-    "SendMessageW",
     "SetCursorPos",
     "mouse_event",
-    "MOUSEEVENTF_RIGHTDOWN",
-    "WM_MN_GETHMENU",
-    "WM_COMMAND",
-    "GetMenuItemCount",
-    "GetMenuItemID",
-    "GetMenuStringW",
-    "TRAY_QUIT_MENU_ITEM"
+    "MOUSEEVENTF_LEFTDOWN",
+    "oleacc",
+    "AccessibleObjectFromWindow",
+    "IID_IACCESSIBLE",
+    "ACC_LOCATION",
+    "LocationProto",
+    "TRAY_QUIT_MENU_ITEM",
+    "TRAY_QUIT_ITEM_RECT",
+    "menu_closed"
   ]) assert.match(script, new RegExp(symbol));
   assert.doesNotMatch(script, /1004/);
-  assert.doesNotMatch(script, /accDoDefaultAction/);
-  assert.doesNotMatch(script, /AccessibleObjectFromWindow/);
-  assert.doesNotMatch(script, /oleacc/);
-  assert.doesNotMatch(script, /DoDefaultProto/);
+  assert.doesNotMatch(script, /WM_MN_GETHMENU/);
+  assert.doesNotMatch(script, /GetMenuItemID/);
+  assert.doesNotMatch(script, /PostMessageW\(tray_hwnd, WM_COMMAND/);
   assert.doesNotMatch(script, /TRAY_QUIT_MENU_COMMAND_ID/);
-  assert.doesNotMatch(script, /quit_child_id/);
+  assert.doesNotMatch(script, /quit_command_id/);
+  assert.doesNotMatch(script, /quit_position/);
   assert.equal(TRAY_ICON_WINDOW_CLASS, "tray_icon_app");
   assert.equal(TRAY_MENU_WINDOW_CLASS, "#32768");
-  assert.equal(TRAY_COMMAND_MESSAGE_ID, 0x0111);
-  assert.equal(TRAY_MENU_GETHMENU_MESSAGE_ID, 0x01eb);
   assert.equal(TRAY_NOTIFY_MESSAGE_ID, 6002);
   assert.equal(TRAY_QUIT_MENU_TEXT, "Quit");
   assert.equal(TRAY_QUIT_SEMANTIC_ID, "tray-quit");
@@ -2317,47 +2312,46 @@ test("tray Quit output resolves the semantic Quit item regardless of position", 
   const parsed = parseTrayQuitOutput(trayQuitOutput(), 123);
   assert.equal(parsed.identityValid, true);
   assert.equal(parsed.quitText, "Quit");
-  assert.equal(parsed.quitPosition, 2);
-  assert.equal(parsed.quitCommandId, fixtureCommandId(2));
-  assert.equal(parsed.menuHmenu, 555000);
+  assert.equal(parsed.quitChildId, 3);
   assert.equal(parsed.invokeResult, true);
   assert.equal(parsed.invokeHresult, 0);
+  assert.equal(parsed.menuClosed, true);
+  assert.deepEqual(parsed.itemRect, { left: 500, top: 700, right: 620, bottom: 728 });
   assert.deepEqual(
     parsed.menuItems.map((item) => item.text),
     ["Show Companion", "Open YUVI", "Quit", "Hide YUVI", "Hide Companion"]
   );
   assert.deepEqual(
-    parsed.menuItems.map((item) => item.position),
-    [0, 1, 2, 3, 4]
+    parsed.menuItems.map((item) => item.childId),
+    [1, 2, 3, 4, 5]
   );
-  assert.match(parsed.menuMap, /2:Quit/);
+  assert.match(parsed.menuMap, /3:Quit/);
 
   const cases = [
     {
       label: "quit first",
       items: ["Quit", "Open YUVI"],
-      expectedPosition: 0
+      expectedChild: 1
     },
     {
       label: "quit last",
       items: ["Open YUVI", "Quit"],
-      expectedPosition: 1
+      expectedChild: 2
     },
     {
       label: "quit single item menu",
       items: ["Quit"],
-      expectedPosition: 0
+      expectedChild: 1
     },
     {
       label: "future controls do not disturb Quit resolution",
       items: ["Open WebUI", "Quit", "Settings", "Toggle Subtitle", "Toggle Companion"],
-      expectedPosition: 1
+      expectedChild: 2
     }
   ];
-  for (const { label, items, expectedPosition } of cases) {
+  for (const { label, items, expectedChild } of cases) {
     const result = parseTrayQuitOutput(trayQuitOutput({ items }), 123);
-    assert.equal(result.quitPosition, expectedPosition, label);
-    assert.equal(result.quitCommandId, fixtureCommandId(expectedPosition), label);
+    assert.equal(result.quitChildId, expectedChild, label);
     assert.equal(result.quitMatches, 1, label);
     assert.equal(result.quitText, "Quit", label);
   }
@@ -2392,7 +2386,7 @@ test("tray Quit output fails closed when Quit is missing or ambiguous", () => {
       parseTrayQuitOutput(
         trayQuitOutput()
           .split("\n")
-          .filter((line) => line !== "TRAY_QUIT_MENU_ITEM=2:Quit")
+          .filter((line) => line !== "TRAY_QUIT_MENU_ITEM=3:Quit")
           .join("\n"),
         123
       ),
@@ -2410,16 +2404,23 @@ test("tray Quit output fails closed when Quit is missing or ambiguous", () => {
     /icon rect map is truncated/
   );
   assert.throws(
-    () => parseTrayQuitOutput(trayQuitOutput().replace("quit_position=2", "quit_position=4"), 123),
+    () => parseTrayQuitOutput(trayQuitOutput().replace("quit_child_id=3", "quit_child_id=5"), 123),
     /not bound to the reported menu map/
   );
   assert.throws(
-    () => parseTrayQuitOutput(trayQuitOutput().replace("quit_command_id=3002", "quit_command_id=0"), 123),
-    /not a live menu command id/
+    () =>
+      parseTrayQuitOutput(
+        trayQuitOutput()
+          .split("\n")
+          .filter((line) => !line.startsWith("TRAY_QUIT_ITEM_RECT="))
+          .join("\n"),
+        123
+      ),
+    /item rect is missing or duplicated/
   );
   assert.throws(
-    () => parseTrayQuitOutput(trayQuitOutput().replace("menu_hmenu=555000", "menu_hmenu=0"), 123),
-    /live menu handle was not resolved/
+    () => parseTrayQuitOutput(trayQuitOutput({ menuClosed: 0 }), 123),
+    /did not close after the delivered click/
   );
 });
 
@@ -2440,14 +2441,14 @@ test("tray Quit output requires the real menu surface and a successful invocatio
     [trayQuitOutput({ notifyPost: 0 }), /menu open was not accepted/],
     [trayQuitOutput({ menuWindows: 0 }), /exactly one live context menu/],
     [trayQuitOutput({ trayAlive: 0 }), /tray window died/],
-    [trayQuitOutput({ invokeResult: 0, invokeHresult: 2147500037 }), /WM_COMMAND delivery.*failed/]
+    [trayQuitOutput({ invokeResult: 0, invokeHresult: 2147500037 }), /MSAA location.*failed/]
   ]) assert.throws(() => parseTrayQuitOutput(output), message);
   assert.throws(
     () => parseTrayQuitOutput(trayQuitOutput({ invokeResult: 0, invokeHresult: 2147500037 }), 123),
     (error) =>
       error.message.includes("2147500037") &&
       error.message.includes("tray-quit") &&
-      error.message.includes("2:Quit")
+      error.message.includes("3:Quit")
   );
   assert.throws(
     () => parseTrayQuitOutput(`${trayQuitOutput()}\nDEEPSEEK_API_KEY=do-not-echo`),
