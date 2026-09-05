@@ -3709,7 +3709,7 @@ export function buildTrayQuitArguments(pid) {
 // the live HMENU, deliver its runtime command id through WM_COMMAND);
 // attempts only repeat that path, never bypass it.
 export const TRAY_QUIT_MAX_ATTEMPTS = 4;
-export const TRAY_QUIT_ATTEMPT_BUDGET_MS = 40_000;
+export const TRAY_QUIT_ATTEMPT_BUDGET_MS = 70_000;
 
 export function shouldRetryTrayQuit({ attempt, elapsedMs, timeoutMs } = {}) {
   if (!Number.isInteger(attempt) || attempt < 1) fail("tray Quit attempt is invalid");
@@ -3956,10 +3956,11 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       );
     let result;
     try {
-      // 15s per attempt: the hardened open loop (posted round + real-input
-      // fallback round, 2s poll each × 3) needs headroom over the previous
-      // 10s cap, which truncated the open phase mid-round on slow runners.
-      result = await runProcess(executable, args, options, Math.min(timeoutMs, 15_000));
+      // 20s per attempt: the hardened open loop (posted round + real-input
+      // fallback round, 2s poll each x 3) plus MSAA discovery needs headroom
+      // when the popup only opens in a later round; the previous caps (10s,
+      // then 15s) truncated late-opening attempts mid-discovery.
+      result = await runProcess(executable, args, options, Math.min(timeoutMs, 20_000));
       assertNoSecrets(result.stderr, "tray Quit stderr");
       if (result.code !== 0) {
         let parseError = null;

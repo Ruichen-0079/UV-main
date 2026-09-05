@@ -2299,7 +2299,7 @@ test("tray Quit helper arguments are isolated and reject invalid PIDs", () => {
 
 test("tray Quit retry policy repeats only the real path within budget", () => {
   assert.equal(TRAY_QUIT_MAX_ATTEMPTS, 4);
-  assert.equal(TRAY_QUIT_ATTEMPT_BUDGET_MS, 40_000);
+  assert.equal(TRAY_QUIT_ATTEMPT_BUDGET_MS, 70_000);
   assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 0, timeoutMs: 60_000 }), true);
   assert.equal(shouldRetryTrayQuit({ attempt: 3, elapsedMs: 30_000, timeoutMs: 60_000 }), true);
   assert.equal(shouldRetryTrayQuit({ attempt: 4, elapsedMs: 0, timeoutMs: 60_000 }), false);
