@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
@@ -205,5 +205,48 @@ describe("control plane auth + loopback", () => {
     );
     expect(res.status).toBe(409);
     expect(res.body).not.toContain("DEEPSEEK");
+  });
+
+  it("POST /v1/shutdown drains and signals terminal shutdown exactly once", async () => {
+    const config = cfg();
+    const supervisor = new DesktopSupervisor(config);
+    let shutdownSignals = 0;
+    const { server, port } = await startSupervisorHttpServer(supervisor, {
+      host: "127.0.0.1",
+      controlToken: config.controlToken,
+      onShutdownComplete: () => {
+        shutdownSignals += 1;
+      }
+    });
+    servers.push(server);
+
+    const first = await request(port, "POST", "/v1/shutdown", config.controlToken);
+    expect(first.status).toBe(200);
+    expect(JSON.parse(first.body)).toEqual({ ok: true });
+    expect(shutdownSignals).toBe(1);
+
+    // Repeated shutdown is idempotent: no second terminal-exit signal.
+    const second = await request(port, "POST", "/v1/shutdown", config.controlToken);
+    expect(second.status).toBe(200);
+    expect(shutdownSignals).toBe(1);
+  });
+
+  it("POST /v1/shutdown signals terminal shutdown even when the drain fails", async () => {
+    const config = cfg();
+    const supervisor = new DesktopSupervisor(config);
+    let shutdownSignals = 0;
+    const { server, port } = await startSupervisorHttpServer(supervisor, {
+      host: "127.0.0.1",
+      controlToken: config.controlToken,
+      onShutdownComplete: () => {
+        shutdownSignals += 1;
+      }
+    });
+    servers.push(server);
+    vi.spyOn(supervisor, "shutdown").mockRejectedValueOnce(new Error("drain failure"));
+
+    const res = await request(port, "POST", "/v1/shutdown", config.controlToken);
+    expect(res.status).toBe(500);
+    expect(shutdownSignals).toBe(1);
   });
 });

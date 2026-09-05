@@ -1,12 +1,16 @@
 /**
- * Linux desktop build + startup smoke.
+ * Linux desktop build + startup + owner-shutdown smoke.
  *
  * Proves, on a dev machine with a display:
  *   clean frontend build inputs → Tauri Linux desktop compiles →
  *   Supervisor control plane publishes an endpoint → Tauri reaches its
  *   bootstrap barrier (`tauri-bootstrap-ready.json` is written only after the
  *   Supervisor ACKs /v1/config AND /v1/bootstrap) → control plane answers
- *   health/status → the smoke exits without leaving owned processes behind.
+ *   health/status → the app exits on request → and the OWNER LIFECYCLE holds:
+ *   after the Tauri shell exits, no process belonging to the isolated test
+ *   root remains. A PASS is only valid when the product shutdown reaped its
+ *   own tree; the emergency cleanup below exists for failure autopsy only and
+ *   never runs on the pass path.
  *
  * Non-goals: packaging, tray/window interaction, lifecycle redesign.
  *
@@ -16,9 +20,9 @@
  * autostarted (control plane only) — Runtime/Mem0 lifecycle ownership is the
  * Linux Supervisor/KDE lifecycle atom's scope.
  *
- * Process cleanup is deterministic: every process this smoke started inherits
- * the isolated temp root via its environment, so leftovers are found by
- * scanning each /proc environ file for that unique path — never by name
+ * Ownership verification is deterministic: every process this smoke started
+ * inherits the isolated temp root via its environment, so leftovers are found
+ * by scanning each /proc environ file for that unique path — never by name
  * guessing or fixed sleeps.
  *
  * Exit codes: 0 pass · 1 bootstrap/validation failure · 2 preflight failure.
@@ -37,6 +41,7 @@ const READY_MARKER_SEGMENTS = ["YUVI", "DesktopSupervisor", "tauri-bootstrap-rea
 
 const BOOTSTRAP_TIMEOUT_MS = 60_000;
 const APP_EXIT_TIMEOUT_MS = 15_000;
+const OWNED_TREE_SETTLE_MS = 10_000;
 const KILL_WAIT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
 
@@ -52,8 +57,9 @@ function failPreflight(message) {
 function fail(message, detail) {
   console.error(`[desktop-smoke-linux] FAIL: ${message}`);
   if (detail) console.error(detail);
-  cleanup();
+  // Mark failure BEFORE cleanup so artifacts are kept for inspection.
   if (process.exitCode === undefined) process.exitCode = 1;
+  cleanup();
   process.exit(process.exitCode);
 }
 
@@ -287,6 +293,11 @@ async function waitForExit(child, waitMs) {
   });
 }
 
+/**
+ * Failure-path autopsy only: terminate every leftover owned by this run.
+ * Never called on the pass path — a PASS must come from the product's own
+ * owner lifecycle, and each forced kill below is reported as a WARN.
+ */
 function cleanup() {
   if (cleanupDone) return;
   cleanupDone = true;
@@ -299,13 +310,9 @@ function cleanup() {
       // ignore
     }
   }
-  // Product shutdown on Linux may leave supervisor tree members behind
-  // (lifecycle atom scope); the smoke guarantees no orphans regardless.
   for (const pid of findProcessTreeByEnvironment()) {
     if (appChild && pid === appChild.pid) continue; // handled below
-    warn(
-      `process ${pid} outlived the smoke session; terminating (Linux lifecycle evidence, see next atom)`
-    );
+    warn(`process ${pid} outlived the smoke session; terminating (failure autopsy)`);
     try {
       process.kill(pid, "SIGTERM");
     } catch {
@@ -330,11 +337,29 @@ function cleanup() {
       }
     });
   }
+  removeArtifacts();
+}
+
+function removeArtifacts() {
   if (tempRoot && fs.existsSync(tempRoot) && process.exitCode !== 1) {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   } else if (tempRoot) {
     info(`artifacts kept for inspection: ${tempRoot}`);
   }
+}
+
+/**
+ * Bounded, deterministic wait until no live process mentions the isolated
+ * temp root in its environment. Returns the leftover pids at the deadline.
+ */
+async function waitForOwnedTreeEmpty(waitMs) {
+  const deadline = Date.now() + waitMs;
+  let leftovers = findProcessTreeByEnvironment();
+  while (leftovers.length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    leftovers = findProcessTreeByEnvironment();
+  }
+  return leftovers;
 }
 
 async function main() {
@@ -393,15 +418,35 @@ async function main() {
   if (appExited(child))
     fail("desktop app exited after bootstrap although no shutdown was requested");
 
-  // Ask the app to exit. Whatever the app's own shutdown manages to reap is
-  // next-atom evidence; this smoke guarantees the tree is gone either way.
+  // Ask the app to exit and prove the owner lifecycle end to end:
+  //   Tauri exits → Runtime/Supervisor drain as required → Supervisor exits →
+  //   descendants exit → no owned process remains.
   info("requesting app shutdown (SIGTERM)");
   child.kill("SIGTERM");
   await waitForExit(child, APP_EXIT_TIMEOUT_MS);
+  if (!appExited(child)) {
+    fail(
+      `desktop app did not exit within ${APP_EXIT_TIMEOUT_MS}ms of SIGTERM (owner exit broken)`,
+      readLogs(roots)
+    );
+  }
   info(`app exited (exit=${child.exitCode} signal=${child.signalCode})`);
 
-  cleanup();
-  info("PASS: linux desktop build + bootstrap smoke");
+  // The product shutdown must reap its own tree. A leftover here is a FAIL —
+  // the emergency cleanup is reserved for failure autopsy and must not be
+  // what turns this smoke into a PASS.
+  const leftoverPids = await waitForOwnedTreeEmpty(OWNED_TREE_SETTLE_MS);
+  if (leftoverPids.length > 0) {
+    fail(
+      `owner shutdown left ${leftoverPids.length} owned process(es) behind ` +
+        `(pids: ${leftoverPids.join(", ")}) — supervisor ownership broken`,
+      readLogs(roots)
+    );
+  }
+  info("owner lifecycle verified: no owned process outlives the desktop app");
+
+  removeArtifacts();
+  info("PASS: linux desktop build + bootstrap + owner-shutdown smoke");
   process.exit(0);
 }
 

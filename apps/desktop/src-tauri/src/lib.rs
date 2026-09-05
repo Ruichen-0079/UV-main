@@ -3,6 +3,92 @@ mod lifecycle;
 mod packaging;
 mod supervisor;
 
+/// Unix process-level owner lifecycle: SIGINT/SIGTERM must reach the graceful
+/// exit path (`ExitRequested` → Supervisor drain → terminal exit) instead of
+/// the default disposition, which would kill the shell and orphan the entire
+/// owned process tree. The handler itself only writes one byte to a self-pipe
+/// (async-signal-safe); a plain thread turns it into an app exit.
+#[cfg(unix)]
+mod signal_exit {
+  use std::os::unix::io::RawFd;
+  use std::sync::atomic::{AtomicI32, Ordering};
+
+  static SIGNAL_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+  extern "C" fn on_termination_signal(sig: libc::c_int) {
+    let fd = SIGNAL_PIPE_WRITE_FD.load(Ordering::SeqCst);
+    if fd >= 0 {
+      let byte = sig as u8;
+      unsafe {
+        libc::write(fd, &byte as *const u8 as *const libc::c_void, 1);
+      }
+    }
+  }
+
+  fn set_cloexec(fd: RawFd) {
+    unsafe {
+      libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+  }
+
+  /// Install SIGINT/SIGTERM handlers → self-pipe. Returns the read end.
+  /// Handlers reset to default across exec, so the Supervisor child's own
+  /// SIGTERM handling is unaffected.
+  pub fn install() -> Option<RawFd> {
+    unsafe {
+      let mut fds: [libc::c_int; 2] = [0; 2];
+      if libc::pipe(fds.as_mut_ptr()) != 0 {
+        return None;
+      }
+      let (read_fd, write_fd) = (fds[0], fds[1]);
+      set_cloexec(read_fd);
+      set_cloexec(write_fd);
+      SIGNAL_PIPE_WRITE_FD.store(write_fd, Ordering::SeqCst);
+
+      let mut action: libc::sigaction = std::mem::zeroed();
+      action.sa_sigaction = on_termination_signal as *const () as libc::sighandler_t;
+      action.sa_flags = libc::SA_RESTART;
+      libc::sigemptyset(&mut action.sa_mask);
+      for sig in [libc::SIGTERM, libc::SIGINT] {
+        if libc::sigaction(sig, &action, std::ptr::null_mut()) != 0 {
+          return None;
+        }
+      }
+      Some(read_fd)
+    }
+  }
+
+  /// Turn pipe bytes into a graceful app exit on the main thread.
+  pub fn spawn_exit_reader(app: tauri::AppHandle, read_fd: RawFd) {
+    std::thread::Builder::new()
+      .name("yuvi-signal-exit".into())
+      .spawn(move || {
+        let mut byte = [0u8; 1];
+        loop {
+          let n = unsafe { libc::read(read_fd, byte.as_mut_ptr().cast(), 1) };
+          if n <= 0 {
+            if n < 0
+              && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+            {
+              continue;
+            }
+            break;
+          }
+          eprintln!("[yuvi-desktop] termination signal received; exiting gracefully");
+          let exit_app = app.clone();
+          let scheduled = app.run_on_main_thread(move || {
+            exit_app.exit(0);
+          });
+          if scheduled.is_err() {
+            // Main loop already gone — the OS will reap what remains.
+          }
+          break;
+        }
+      })
+      .ok();
+  }
+}
+
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, RunEvent};
@@ -235,9 +321,14 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 pub fn run() {
+  // Owner lifecycle: route termination signals into the graceful exit path
+  // before any thread exists, so the Supervisor tree is always drained.
+  #[cfg(unix)]
+  let signal_read_fd = signal_exit::install();
+
   tauri::Builder::default()
     .manage(supervisor::SupervisorState::default())
-    .setup(|app| {
+    .setup(move |app| {
       // Config must load even when Runtime/Supervisor are unavailable.
       let config_service = config::init_config_service(&app.handle())
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -247,6 +338,11 @@ pub fn run() {
         .unwrap_or(true);
       let env_overrides = config_service.supervisor_env().ok();
       app.manage(config::ConfigState::new(config_service));
+
+      #[cfg(unix)]
+      if let Some(read_fd) = signal_read_fd {
+        signal_exit::spawn_exit_reader(app.handle().clone(), read_fd);
+      }
 
       // Paint main window immediately — do not block on service startup.
       let main_window = build_main_window(&app.handle())?;
@@ -330,5 +426,19 @@ mod tests {
   fn tray_icon_asset_is_a_valid_png_resource() {
     let icon = include_bytes!("../icons/icon.png");
     assert_eq!(&icon[..8], b"\x89PNG\r\n\x1a\n");
+  }
+
+  /// SIGTERM must land in the self-pipe so the reader thread can start the
+  /// graceful exit; a dead default disposition would orphan the owned tree.
+  #[cfg(unix)]
+  #[test]
+  fn termination_signal_reaches_the_exit_self_pipe() {
+    let read_fd = super::signal_exit::install().expect("self-pipe installed");
+    unsafe {
+      assert_eq!(libc::raise(libc::SIGTERM), 0);
+      let mut byte = [0u8; 1];
+      let n = libc::read(read_fd, byte.as_mut_ptr().cast(), 1);
+      assert_eq!(n, 1);
+    }
   }
 }
