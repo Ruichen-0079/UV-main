@@ -49,6 +49,7 @@ describe("MainPage voice input", () => {
   it("exposes ordinary microphone capture and transcription actions", () => {
     const markup = renderMainPage();
     expect(markup).toContain("Voice input");
+    expect(markup).toContain("Live speech");
     expect(markup).toContain("Record voice");
     expect(markup).toContain("Transcribe recording");
   });

@@ -43,7 +43,9 @@ export type {
   RuntimeReplyStreamEvent,
   SafeProviderCallMetadata,
   StreamUserMessageOptions,
-  AdmitFinalizedSpeechObservationInput
+  AdmitFinalizedSpeechObservationInput,
+  SpeechActivityObservationInput,
+  SpeechActivitySnapshot
 } from "./runtime-contracts.js";
 
 export {
@@ -56,6 +58,7 @@ export {
 export {
   SPEECH_CAPTURE_CLAIM_LIMIT,
   admitFinalizedSpeechCapture,
+  beginLiveSpeechCapture,
   claimKey,
   createSpeechCaptureStore,
   type SpeechCaptureAdmitResult,

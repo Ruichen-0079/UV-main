@@ -28,8 +28,27 @@ async function transcribeWithSidecar(
 }
 
 describe("LocalSTTProvider", () => {
+  it("posts PCM frames to the sidecar Silero VAD endpoint", async () => {
+    const fetchMock = vi.fn(async () => sidecarResponse({ active: true, captureEpoch: "epoch-1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new LocalSTTProvider({ baseUrl: BASE_URL, model: "sense-voice" });
+    const output = await provider.detectVoiceActivity({
+      captureEpoch: "epoch-1",
+      pcmBase64: "AAEC",
+      sampleRate: 16000
+    });
+    expect(output).toEqual({ active: true, captureEpoch: "epoch-1" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:9876/vad",
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
   it("requires audio input before contacting the sidecar", async () => {
-    const provider = new LocalSTTProvider({ baseUrl: "http://127.0.0.1:65534", model: "sense-voice" });
+    const provider = new LocalSTTProvider({
+      baseUrl: "http://127.0.0.1:65534",
+      model: "sense-voice"
+    });
     await expect(provider.transcribeAudio({})).rejects.toMatchObject({
       code: ProviderErrorCode.UnsupportedInput
     });

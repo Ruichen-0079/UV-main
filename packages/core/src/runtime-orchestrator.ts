@@ -86,6 +86,8 @@ import type {
   HandleImageInputInput,
   HandleUserMessageInput,
   AdmitFinalizedSpeechObservationInput,
+  SpeechActivityObservationInput,
+  SpeechActivitySnapshot,
   HandleUserMessageOptions,
   MaybeSynthesizeSpeechOptions,
   RuntimeLifecycleState,
@@ -121,6 +123,7 @@ import {
 import {
   SpeechCaptureFenceError,
   admitFinalizedSpeechCapture,
+  beginLiveSpeechCapture,
   createSpeechCaptureStore,
   type SpeechCaptureStore
 } from "./runtime-speech-capture.js";
@@ -260,6 +263,8 @@ export class RuntimeOrchestrator {
   private proactiveConsentEnabled: boolean | undefined;
   private currentTurnControlAuthority: ProactiveControlAuthority = "LOCAL_EXPLICIT_CONTROLLER";
   private readonly speechCaptureStore: SpeechCaptureStore = createSpeechCaptureStore();
+  private speechActive = false;
+  private currentSpeechCaptureEpoch: string | null = null;
 
   constructor(private readonly options: RuntimeOrchestratorOptions) {
     this.directContextConfig = normalizeDirectContextConfig(options.directContext);
@@ -341,6 +346,44 @@ export class RuntimeOrchestrator {
   private noteSpeechCaptureActivity(): void {
     this.proactiveState = advanceActivityRevision(this.proactiveState);
     this.persistProactivePolicy();
+  }
+
+  getSpeechActivitySnapshot(): SpeechActivitySnapshot {
+    return {
+      speechActive: this.speechActive,
+      captureEpoch: this.currentSpeechCaptureEpoch,
+      activityRevision: this.getProactiveState().activityRevision
+    };
+  }
+
+  isSpeechActive(): boolean {
+    return this.speechActive;
+  }
+
+  /**
+   * Observe a VAD/live-capture transition. This is speech activity, not
+   * engagement: ACTIVE may advance activity_revision; it never clears
+   * suppression and never becomes a user turn.
+   */
+  observeSpeechActivity(input: SpeechActivityObservationInput): SpeechActivitySnapshot {
+    const captureEpoch = beginLiveSpeechCapture(
+      this.speechCaptureStore,
+      input.sessionId,
+      input.captureEpoch
+    );
+    const alreadyActiveSameEpoch =
+      this.speechActive && this.currentSpeechCaptureEpoch === captureEpoch;
+    if (input.active) {
+      if (!alreadyActiveSameEpoch) {
+        this.noteSpeechCaptureActivity();
+      }
+      this.speechActive = true;
+      this.currentSpeechCaptureEpoch = captureEpoch;
+      return this.getSpeechActivitySnapshot();
+    }
+    this.speechActive = false;
+    this.currentSpeechCaptureEpoch = captureEpoch;
+    return this.getSpeechActivitySnapshot();
   }
 
   /**

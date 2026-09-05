@@ -940,4 +940,33 @@ describe("ProviderRegistry", () => {
       code: "PROVIDER_UNAVAILABLE"
     });
   });
+
+  it("delegates live VAD through the STT fallback chain to the local sidecar", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ active: true, captureEpoch: "epoch-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "development",
+      PROVIDER_ALLOW_MOCKS: "true",
+      DEFAULT_STT_PROVIDER: "local",
+      STT_PROVIDER_CHAIN: "dashscope,local,mock",
+      LOCAL_MODEL_BASEURL: "http://127.0.0.1:9876",
+      LOCAL_STT_MODEL: "sense-voice"
+    });
+    const output = await registry.getSTTProvider().detectVoiceActivity!({
+      captureEpoch: "epoch-1",
+      pcmBase64: "AAEC",
+      sampleRate: 16000
+    });
+    expect(output).toEqual({ active: true, captureEpoch: "epoch-1" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:9876/vad",
+      expect.objectContaining({ method: "POST" })
+    );
+  });
 });

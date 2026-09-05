@@ -450,6 +450,13 @@ export type CapabilityRuntimeMetadata = {
   latencyMs?: number;
 };
 
+export type SpeechActivityResponse = {
+  sessionId: string;
+  speechActive: boolean;
+  captureEpoch: string | null;
+  activityRevision: number;
+};
+
 export type TranscriptionResponse = CapabilityRuntimeMetadata & {
   text: string;
   language?: string;
@@ -1331,6 +1338,36 @@ export const apiClient = {
     return request<ProviderChainInspectionResponse>(`/providers/verify-chain/${capability}`, {
       method: "POST"
     });
+  },
+
+  postSpeechActivity(input: {
+    sessionId: string;
+    captureEpoch: string;
+    active: boolean;
+  }): Promise<SpeechActivityResponse> {
+    return request<SpeechActivityResponse>("/v1/speech-activity", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
+  postSpeechActivityFrame(input: {
+    sessionId: string;
+    captureEpoch: string;
+    pcmBase64: string;
+    sampleRate: number;
+  }): Promise<SpeechActivityResponse> {
+    return request<SpeechActivityResponse>("/v1/speech-activity/frames", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
+  getSpeechActivity(sessionId = "default", signal?: AbortSignal): Promise<SpeechActivityResponse> {
+    return request<SpeechActivityResponse>(
+      `/v1/speech-activity?sessionId=${encodeURIComponent(sessionId)}`,
+      signalRequestInit(signal)
+    );
   },
 
   transcribeAudio(input: {

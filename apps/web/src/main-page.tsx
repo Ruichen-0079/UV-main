@@ -13,6 +13,7 @@ import {
   type ActiveAudioCapture,
   type RecordedAudio
 } from "./audio-capture.js";
+import { startLiveSpeechCapture, type LiveSpeechCapture } from "./live-speech-capture.js";
 import {
   beginControlledDraftSubmit,
   reduceChatMessages,
@@ -66,6 +67,7 @@ import type { TtsSettingsProjection } from "./user-settings-state.js";
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
 type VoiceCaptureStatus = "idle" | "requesting" | "recording" | "stopping" | "transcribing";
+type LiveSpeechStatus = "idle" | "requesting" | "listening";
 
 let surfaceSequence = 0;
 
@@ -108,6 +110,8 @@ export function MainPage(): JSX.Element {
   const [recordedAudio, setRecordedAudio] = useState<RecordedAudio | null>(null);
   const [voiceTranscription, setVoiceTranscription] = useState<TranscriptionResponse | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [liveSpeechStatus, setLiveSpeechStatus] = useState<LiveSpeechStatus>("idle");
+  const [liveSpeechActive, setLiveSpeechActive] = useState(false);
 
   const mountedRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -139,6 +143,7 @@ export function MainPage(): JSX.Element {
   );
   const activeRequestRef = useRef<ActiveRequestOwnership | null>(null);
   const audioCaptureRef = useRef<ActiveAudioCapture | null>(null);
+  const liveSpeechCaptureRef = useRef<LiveSpeechCapture | null>(null);
 
   const capabilityProjection = useMemo(
     () =>
@@ -355,6 +360,9 @@ export function MainPage(): JSX.Element {
       speechEpochRef.current = null;
       releaseMicrophoneCapture(audioCaptureRef.current);
       audioCaptureRef.current = null;
+      const live = liveSpeechCaptureRef.current;
+      liveSpeechCaptureRef.current = null;
+      void live?.stop();
       playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
     };
   }, []);
@@ -745,8 +753,57 @@ export function MainPage(): JSX.Element {
     playbackCorrelationRef.current = retireActiveSpeechPlayback(playbackCorrelationRef.current);
   }
 
+  async function startLiveSpeech(): Promise<void> {
+    if (liveSpeechStatus !== "idle" || voiceCaptureStatus !== "idle") return;
+    setVoiceError(null);
+    setLiveSpeechStatus("requesting");
+    try {
+      const capture = await startLiveSpeechCapture({
+        sessionId,
+        postFrame: async (frame) => {
+          const snapshot = await apiClient.postSpeechActivityFrame(frame);
+          if (mountedRef.current) setLiveSpeechActive(snapshot.speechActive);
+          return snapshot;
+        }
+      });
+      if (!mountedRef.current) {
+        await capture.stop();
+        return;
+      }
+      liveSpeechCaptureRef.current = capture;
+      setLiveSpeechStatus("listening");
+    } catch (caught) {
+      liveSpeechCaptureRef.current = null;
+      setLiveSpeechStatus("idle");
+      setLiveSpeechActive(false);
+      setVoiceError(friendlyAudioError(caught));
+    }
+  }
+
+  async function stopLiveSpeech(): Promise<void> {
+    const capture = liveSpeechCaptureRef.current;
+    if (!capture) return;
+    liveSpeechCaptureRef.current = null;
+    try {
+      await capture.stop();
+    } catch {
+      // Capture shutdown is best-effort; Runtime speechActive is cleared below.
+    }
+    try {
+      await apiClient.postSpeechActivity({
+        sessionId,
+        captureEpoch: capture.captureEpoch,
+        active: false
+      });
+    } catch {
+      // Stopping the producer must not fail the UI if Runtime already dropped the epoch.
+    }
+    setLiveSpeechStatus("idle");
+    setLiveSpeechActive(false);
+  }
+
   async function startVoiceCapture(): Promise<void> {
-    if (voiceCaptureStatus !== "idle") return;
+    if (voiceCaptureStatus !== "idle" || liveSpeechStatus !== "idle") return;
     setVoiceError(null);
     setRecordedAudio(null);
     setVoiceTranscription(null);
@@ -960,12 +1017,42 @@ export function MainPage(): JSX.Element {
           )}
         </Panel>
 
-        <Panel title="Voice input" actions={<Pill status={voiceCaptureStatus} />}>
+        <Panel
+          title="Voice input"
+          actions={
+            <Pill status={liveSpeechStatus === "listening" ? "listening" : voiceCaptureStatus} />
+          }
+        >
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              className={liveSpeechStatus === "listening" ? "button-secondary" : "button-primary"}
+              disabled={
+                (liveSpeechStatus !== "idle" && liveSpeechStatus !== "listening") ||
+                voiceCaptureStatus !== "idle"
+              }
+              onClick={() =>
+                void (liveSpeechStatus === "listening" ? stopLiveSpeech() : startLiveSpeech())
+              }
+              aria-label={
+                liveSpeechStatus === "listening" ? "Stop live speech" : "Start live speech"
+              }
+            >
+              {liveSpeechStatus === "requesting"
+                ? "Requesting microphone…"
+                : liveSpeechStatus === "listening"
+                  ? liveSpeechActive
+                    ? "Speech active — stop"
+                    : "Listening — stop"
+                  : "Live speech"}
+            </button>
+            <button
+              type="button"
               className={voiceCaptureStatus === "recording" ? "button-secondary" : "button-primary"}
-              disabled={voiceCaptureStatus !== "idle" && voiceCaptureStatus !== "recording"}
+              disabled={
+                (voiceCaptureStatus !== "idle" && voiceCaptureStatus !== "recording") ||
+                liveSpeechStatus !== "idle"
+              }
               onClick={() =>
                 void (voiceCaptureStatus === "recording" ? stopVoiceCapture() : startVoiceCapture())
               }
@@ -995,8 +1082,9 @@ export function MainPage(): JSX.Element {
             )}
           </div>
           <p className="mt-2 text-xs text-ink-500">
-            Captures one microphone recording and sends it through the Runtime STT media route. The
-            transcript is placed in the chat draft for review before sending.
+            Live speech sends microphone frames through the local Silero VAD sidecar into Runtime
+            speech activity. Record voice still captures one clip for transcription. The transcript
+            is placed in the chat draft for review before sending.
           </p>
           {voiceCaptureStatus === "recording" && (
             <p className="mt-2 text-xs text-ink-600" aria-live="polite">
