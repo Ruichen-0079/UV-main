@@ -216,6 +216,20 @@ Dependency direction (not numeric order):
 - [05 — App/Data/Cache roots](05-app-data-cache-roots.md) — DONE
   (config/data/cache root contract frozen in the desktop Supervisor;
   resource root remains separate; see the closure section of that document)
+- Linux desktop build/test foundation — DONE
+  (closure record, no separate atom doc: `pnpm desktop:smoke:linux` is the
+  repeatable Linux validation entry point — fresh web build, `cargo build`
+  of `apps/desktop/src-tauri`, then an isolated launch (temp XDG/YUVI roots,
+  no service autostart) that waits on the Supervisor-ACKed
+  `tauri-bootstrap-ready.json` marker, verifies the loopback control plane
+  (`/health` + token-authed `/v1/status`), and sweeps its own process tree by
+  environment match. Fixed on the way: Tauri `bundle.resources` moved to
+  `tauri.windows.conf.json` so Linux compiles; the Supervisor state root now
+  follows XDG data-home semantics on Linux (Rust/Node agreement);
+  `restrictToCurrentUser` no longer strips the traverse bit from
+  instance directories. Known next-atom evidence: after app exit the
+  Supervisor tree outlives the Tauri shell on Linux — Linux
+  Supervisor/KDE lifecycle owns shutdown ownership)
 - [03 — Desktop Surface foundation](03-desktop-surface-foundation.md)
   — rebaselined: no longer depends on Windows Atoms 01–02
 - [04 — WebUI Surface](04-webui-surface.md)

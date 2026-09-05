@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 
 const WINDOWS_DRIVE_ABS = /^[A-Za-z]:[\\/]/;
@@ -106,12 +107,31 @@ function stripQuotes(input: string): string {
   return input.replace(/"/g, "").replace(/'/g, "");
 }
 
+/**
+ * Root directory shared by the desktop Supervisor and its Tauri launcher.
+ *
+ * Windows keeps `%LOCALAPPDATA%/YUVI/DesktopSupervisor`. Other platforms
+ * follow XDG data-home semantics (`$XDG_DATA_HOME/YUVI/DesktopSupervisor`,
+ * default `$HOME/.local/share/YUVI/DesktopSupervisor`), mirroring the Rust
+ * `desktop_state_dir()` resolver in apps/desktop/src-tauri so the active
+ * instance pointer lands where the launcher expects it. The temp fallback
+ * matches the Rust fallback and is only used when no absolute home or data
+ * base exists.
+ */
 export function defaultStateDirectory(): string {
   const local = process.env["LOCALAPPDATA"];
   if (local && local.trim()) {
     return path.join(local, "YUVI", "DesktopSupervisor");
   }
-  return path.join(process.cwd(), ".yuvi-desktop-supervisor");
+  const xdgDataHome = process.env["XDG_DATA_HOME"]?.trim();
+  if (xdgDataHome && path.isAbsolute(xdgDataHome)) {
+    return path.join(xdgDataHome, "YUVI", "DesktopSupervisor");
+  }
+  const home = process.env["HOME"]?.trim();
+  if (home && path.isAbsolute(home)) {
+    return path.join(home, ".local", "share", "YUVI", "DesktopSupervisor");
+  }
+  return path.join(os.tmpdir(), "YUVI-DesktopSupervisor");
 }
 
 export function parseUrlOrigin(url: string): { host: string; port: number; origin: string } | null {

@@ -1,6 +1,8 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   canonicalPath,
+  defaultStateDirectory,
   commandLineContainsPath,
   isWindowsStylePath,
   pathsEqual
@@ -71,5 +73,66 @@ describe("commandLineContainsPath", () => {
   it("rejects unrelated paths", () => {
     const cmd = "powershell -File C:\\Other\\App\\run.ps1";
     expect(commandLineContainsPath(cmd, "C:\\Dev\\UV-main")).toBe(false);
+  });
+});
+
+describe("defaultStateDirectory", () => {
+  const SAVED: Record<string, string | undefined> = {};
+  const KEYS = ["LOCALAPPDATA", "XDG_DATA_HOME", "HOME"] as const;
+
+  function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
+    const backup: Record<string, string | undefined> = {};
+    for (const key of KEYS) {
+      backup[key] = process.env[key];
+      const value = env[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    try {
+      fn();
+    } finally {
+      for (const key of KEYS) {
+        const value = backup[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  it("keeps the Windows LOCALAPPDATA composition", () => {
+    withEnv(
+      {
+        LOCALAPPDATA: "C:\\Users\\yuvi\\AppData\\Local",
+        XDG_DATA_HOME: undefined,
+        HOME: undefined
+      },
+      () => {
+        expect(defaultStateDirectory()).toBe(
+          path.join("C:\\Users\\yuvi\\AppData\\Local", "YUVI", "DesktopSupervisor")
+        );
+      }
+    );
+  });
+
+  it("prefers an absolute XDG_DATA_HOME over HOME on unix", () => {
+    withEnv({ LOCALAPPDATA: undefined, XDG_DATA_HOME: "/xdg/data", HOME: "/home/yuvi" }, () => {
+      expect(defaultStateDirectory()).toBe(path.join("/xdg/data", "YUVI", "DesktopSupervisor"));
+    });
+  });
+
+  it("falls back to XDG data home under HOME on unix", () => {
+    withEnv({ LOCALAPPDATA: undefined, XDG_DATA_HOME: undefined, HOME: "/home/yuvi" }, () => {
+      expect(defaultStateDirectory()).toBe(
+        path.join("/home/yuvi", ".local", "share", "YUVI", "DesktopSupervisor")
+      );
+    });
+  });
+
+  it("ignores relative XDG_DATA_HOME values", () => {
+    withEnv({ LOCALAPPDATA: undefined, XDG_DATA_HOME: "relative/data", HOME: "/home/yuvi" }, () => {
+      expect(defaultStateDirectory()).toBe(
+        path.join("/home/yuvi", ".local", "share", "YUVI", "DesktopSupervisor")
+      );
+    });
   });
 });

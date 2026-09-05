@@ -4,6 +4,7 @@
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   DesktopSupervisor,
@@ -263,7 +264,9 @@ function writeEndpointSecure(filePath, data) {
 function restrictToCurrentUser(targetPath) {
   if (process.platform !== "win32") {
     try {
-      fs.chmodSync(targetPath, 0o600);
+      // Directories need the traverse bit; a 0600 directory cannot hold files.
+      const isDirectory = fs.statSync(targetPath).isDirectory();
+      fs.chmodSync(targetPath, isDirectory ? 0o700 : 0o600);
     } catch {
       // ignore
     }
@@ -288,9 +291,20 @@ function defaultDesktopSupervisorRoot() {
     fs.mkdirSync(root, { recursive: true });
     return root;
   }
-  const fallback = path.join(process.cwd(), ".yuvi-desktop-supervisor");
-  fs.mkdirSync(fallback, { recursive: true });
-  return fallback;
+  // Mirrors defaultStateDirectory() (XDG data-home) so the Tauri launcher's
+  // desktop_state_dir() and this pointer root agree on non-Windows hosts.
+  const xdgDataHome = process.env["XDG_DATA_HOME"]?.trim();
+  if (xdgDataHome && path.isAbsolute(xdgDataHome)) {
+    const root = path.join(xdgDataHome, "YUVI", "DesktopSupervisor");
+    fs.mkdirSync(root, { recursive: true });
+    return root;
+  }
+  const home = process.env["HOME"]?.trim();
+  const base = home && path.isAbsolute(home)
+    ? path.join(home, ".local", "share", "YUVI", "DesktopSupervisor")
+    : path.join(os.tmpdir(), "YUVI-DesktopSupervisor");
+  fs.mkdirSync(base, { recursive: true });
+  return base;
 }
 
 main().catch((error) => {

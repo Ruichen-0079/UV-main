@@ -11,6 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DesktopSupervisor,
+  defaultStateDirectory,
   loadSupervisorConfig,
   startSupervisorHttpServer,
   type ControlEndpointFile
@@ -18,8 +19,7 @@ import {
 
 const args = parseArgs(process.argv.slice(2));
 const repoRoot =
-  args["repo-root"] ??
-  path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  args["repo-root"] ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const config = loadSupervisorConfig({
   repositoryRoot: repoRoot,
@@ -130,14 +130,19 @@ process.on("SIGTERM", () => {
 });
 
 function writeEndpointSecure(filePath: string, data: ControlEndpointFile): void {
-  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600
+  });
   restrictToCurrentUser(filePath);
 }
 
 function restrictToCurrentUser(targetPath: string): void {
   if (process.platform !== "win32") {
     try {
-      fs.chmodSync(targetPath, 0o600);
+      // Directories need the traverse bit; a 0600 directory cannot hold files.
+      const isDirectory = fs.statSync(targetPath).isDirectory();
+      fs.chmodSync(targetPath, isDirectory ? 0o700 : 0o600);
     } catch {
       // ignore
     }
@@ -147,22 +152,19 @@ function restrictToCurrentUser(targetPath: string): void {
     const user = process.env["USERNAME"] ?? "";
     if (!user) return;
     // Current user full control; remove inheritance for tighter local ACL.
-    spawnSync(
-      "icacls",
-      [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`],
-      { windowsHide: true, timeout: 5_000 }
-    );
+    spawnSync("icacls", [targetPath, "/inheritance:r", "/grant:r", `${user}:(F)`], {
+      windowsHide: true,
+      timeout: 5_000
+    });
   } catch {
     // Best-effort only.
   }
 }
 
 function defaultDesktopSupervisorRoot(): string {
-  const local = process.env["LOCALAPPDATA"];
-  if (local && local.trim()) {
-    return path.join(local, "YUVI", "DesktopSupervisor");
-  }
-  return path.join(process.cwd(), ".yuvi-desktop-supervisor");
+  // Same resolver as the Supervisor state directory: the Tauri launcher reads
+  // the active-instance pointer from this root, so both sides must agree.
+  return defaultStateDirectory();
 }
 
 function parseArgs(argv: string[]): Record<string, string> {
