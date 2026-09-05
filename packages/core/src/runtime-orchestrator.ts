@@ -61,6 +61,7 @@ import {
   type ChatStreamEvent,
   type ChatStreamOptions,
   type ProviderCapability,
+  type ProviderCallOptions,
   type ProviderHealth,
   type ProviderMetadata,
   type ProviderResolver,
@@ -97,7 +98,8 @@ import type {
   RuntimeReplyStreamEvent,
   RuntimeMemoryWriteStatus,
   SpeechTranscriptionInput,
-  RuntimeCharacterGenerationResult,
+  RuntimeCharacterFinalTurnResult,
+  RuntimeCharacterTurnResult,
   SafeProviderCallMetadata,
   StreamUserMessageOptions
 } from "./runtime-contracts.js";
@@ -626,7 +628,7 @@ export class RuntimeOrchestrator {
   async handleUserMessage(
     input: RuntimeUserTurnEvent | HandleUserMessageInput,
     options: HandleUserMessageOptions = {}
-  ): Promise<AgentReplyEvent> {
+  ): Promise<AgentReplyEvent | null> {
     this.enterLifecycleOperation();
     try {
       const userEvent = isRuntimeUserTurnEvent(input)
@@ -665,7 +667,7 @@ export class RuntimeOrchestrator {
       readMemory?: boolean | undefined;
       writeMemory?: boolean | undefined;
     }
-  ): Promise<AgentReplyEvent> {
+  ): Promise<AgentReplyEvent | null> {
     await this.persistUserMessage(userEvent);
     await this.options.eventBus.publish(userEvent);
     await this.restoreDirectContext(
@@ -680,6 +682,18 @@ export class RuntimeOrchestrator {
       writeMemory: memoryOptions.writeMemory,
       publishAgentReply: false
     });
+    if (reply === null) {
+      // Intentional Character silence/termination: the turn succeeded without
+      // an assistant message, so assistant persistence, memory writes, and TTS
+      // are skipped instead of fabricating empty content.
+      this.updateLatestPromptPreviewExtraction({
+        ...this.getMemoryExtractorStatus(),
+        used: false,
+        skippedReason:
+          "Intentional Character no-response outcome — no assistant message for this turn."
+      });
+      return null;
+    }
     // Persist the final text before publishing either reply event to transports. Later
     // direct-context, memory, and TTS side effects must not duplicate or retract it.
     const assistantMessageId = canonicalAssistantMessageId(userEvent);
@@ -1179,9 +1193,34 @@ export class RuntimeOrchestrator {
         };
       }
 
+      const finalReply = characterResult.decision.reply;
+      if (finalReply.disposition === "SILENCE" || finalReply.disposition === "TERMINATE") {
+        // Intentional Character control-flow outcome: the turn succeeded
+        // without an assistant message. Nothing is persisted, published,
+        // presented, spoken, or memory-written for this turn — silence and
+        // termination are not empty assistant messages.
+        this.updateLatestPromptPreviewExtraction({
+          ...this.getMemoryExtractorStatus(),
+          used: false,
+          skippedReason:
+            finalReply.disposition === "SILENCE"
+              ? "Intentional Character silence — no assistant message for this turn."
+              : "Intentional Character termination — no assistant message for this turn."
+        });
+        yield {
+          type: "completed",
+          messageId: input.assistantMessageId,
+          sessionId: input.userEvent.payload.sessionId,
+          traceId: input.userEvent.traceId,
+          content: "",
+          provider: providerMetadata.finalProvider ?? providerMetadata.name
+        };
+        return;
+      }
+
       const reply = this.createAgentReply(
         input.userEvent,
-        characterResult.content,
+        finalReply.text,
         providerMetadata,
         canonicalAgentReplyId(input.userEvent)
       );
@@ -1251,10 +1290,10 @@ export class RuntimeOrchestrator {
         }
       }
 
-      if (characterResult.content) {
+      if (finalReply.text) {
         yield {
           type: "text-delta",
-          text: characterResult.content,
+          text: finalReply.text,
           messageId: input.assistantMessageId,
           sessionId: input.userEvent.payload.sessionId,
           traceId: input.userEvent.traceId
@@ -1265,7 +1304,7 @@ export class RuntimeOrchestrator {
         messageId: input.assistantMessageId,
         sessionId: input.userEvent.payload.sessionId,
         traceId: input.userEvent.traceId,
-        content: characterResult.content,
+        content: finalReply.text,
         provider: providerMetadata.finalProvider ?? providerMetadata.name
       };
     } catch (error) {
@@ -2015,7 +2054,7 @@ export class RuntimeOrchestrator {
       publishAgentReply?: boolean | undefined;
       signal?: AbortSignal | undefined;
     } = {}
-  ): Promise<AgentReplyEvent> {
+  ): Promise<AgentReplyEvent | null> {
     const { prompt, memoryOptions } = await this.prepareChatPrompt(event, options);
 
     const chatProvider = this.options.providers.getChatProvider();
@@ -2023,6 +2062,12 @@ export class RuntimeOrchestrator {
     const characterResult = this.options.character
       ? await this.executeCharacterTurn(event, prompt, options.signal)
       : undefined;
+    const characterReply = characterResult?.decision.reply;
+    if (characterReply !== undefined && characterReply.disposition !== "RESPOND") {
+      // Intentional Character silence/termination: a successful turn with no
+      // assistant message. Callers must skip assistant-side commit work.
+      return null;
+    }
     let output: ChatOutput | undefined;
     let providerMetadata: SafeProviderCallMetadata;
     if (characterResult) {
@@ -2067,7 +2112,7 @@ export class RuntimeOrchestrator {
 
     const reply = this.createAgentReply(
       event,
-      characterResult ? characterResult.content : (output?.message.content ?? ""),
+      characterReply ? characterReply.text : (output?.message.content ?? ""),
       providerMetadata,
       canonicalAgentReplyId(event)
     );
@@ -2081,59 +2126,96 @@ export class RuntimeOrchestrator {
     event: RuntimeUserTurnEvent,
     prompt: PromptBuildOutput,
     signal?: AbortSignal
-  ): Promise<RuntimeCharacterGenerationResult> {
+  ): Promise<RuntimeCharacterFinalTurnResult> {
     const character = this.options.character;
     if (!character) {
       throw new Error("Runtime Character generation is not configured.");
     }
 
     const chatProvider = this.options.providers.getChatProvider();
-    let cognitionExecuted = false;
-    return character.generate({
+    const generateChat = (input: ChatInput, callOptions?: ProviderCallOptions) => {
+      if (callOptions?.signal?.aborted) {
+        return Promise.reject(createRuntimeCancelledError(chatProvider.name));
+      }
+      return this.measureProvider(
+        "chat",
+        chatProvider.name,
+        () => chatProvider.generateReply(input, callOptions),
+        { traceId: event.traceId, parentId: event.id }
+      );
+    };
+
+    const initial = await character.generate({
       prompt,
       userMessage: event.payload.content,
       ...(signal ? { signal } : {}),
-      generateChat: (input, callOptions) => {
-        if (callOptions?.signal?.aborted) {
-          return Promise.reject(createRuntimeCancelledError(chatProvider.name));
-        }
-        return this.measureProvider(
-          "chat",
-          chatProvider.name,
-          () => chatProvider.generateReply(input, callOptions),
-          { traceId: event.traceId, parentId: event.id }
-        );
-      },
-      executeCognition: (request, problem, callOptions) => {
-        const cognition = this.options.characterCognition;
-        if (!cognition) {
-          return Promise.reject(
-            new ProviderError({
-              provider: "character",
-              capability: "chat",
-              code: ProviderErrorCode.ProviderUnavailable,
-              message: "Character Cognition execution is unavailable.",
-              retryable: false
-            })
-          );
-        }
-        if (cognitionExecuted) {
-          return Promise.reject(
-            new ProviderError({
-              provider: "character",
-              capability: "chat",
-              code: ProviderErrorCode.MalformedResponse,
-              message: "Character Cognition round-trip budget was exhausted.",
-              retryable: false
-            })
-          );
-        }
-        cognitionExecuted = true;
-        return cognition(request, problem, {
-          signal: callOptions?.signal ?? signal
-        });
-      }
+      generateChat
     });
+    const initialReply = initial.decision.reply;
+    if (initialReply.disposition !== "NEED_COGNITION") {
+      return {
+        decision: {
+          addressing: initial.decision.addressing,
+          reply: initialReply,
+          proactive: initial.decision.proactive
+        },
+        providerMetadata: initial.providerMetadata
+      };
+    }
+
+    // Runtime owns the bounded NEED_COGNITION -> Cognition -> Character
+    // re-entry sequence. The escalation request and problem statement remain
+    // Character-owned semantics; execution, cancellation, and the one-round
+    // bound are Runtime authority. The bound is structural: exactly one
+    // Cognition call feeds exactly one re-entry pass, and a repeated
+    // NEED_COGNITION fails the turn explicitly instead of recursing.
+    const cognition = this.options.characterCognition;
+    if (!cognition) {
+      throw new ProviderError({
+        provider: "character",
+        capability: "chat",
+        code: ProviderErrorCode.ProviderUnavailable,
+        message: "Character Cognition execution is unavailable.",
+        retryable: false
+      });
+    }
+    const handoff = initial.cognitionHandoff;
+    if (!handoff) {
+      throw new ProviderError({
+        provider: "character",
+        capability: "chat",
+        code: ProviderErrorCode.MalformedResponse,
+        message: "Character Cognition escalation did not include a Cognition request.",
+        retryable: false
+      });
+    }
+
+    const roundTrip = await cognition(handoff.request, handoff.problem, { signal });
+    const final = await character.generateAfterCognition({
+      prompt,
+      userMessage: event.payload.content,
+      cognitionRoundTrip: roundTrip,
+      ...(signal ? { signal } : {}),
+      generateChat
+    });
+    const finalReply = final.decision.reply;
+    if (finalReply.disposition === "NEED_COGNITION") {
+      throw new ProviderError({
+        provider: "character",
+        capability: "chat",
+        code: ProviderErrorCode.MalformedResponse,
+        message: "Character returned NEED_COGNITION after Cognition completed.",
+        retryable: false
+      });
+    }
+    return {
+      decision: {
+        addressing: final.decision.addressing,
+        reply: finalReply,
+        proactive: final.decision.proactive
+      },
+      providerMetadata: final.providerMetadata
+    };
   }
 
   async maybeSynthesizeSpeech(

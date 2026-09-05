@@ -332,6 +332,34 @@ export async function registerMediaRoutes(
       });
 
       const sttMetadata = standardProviderMetadata("stt", transcription);
+      if (response === null) {
+        // Intentional Character silence/termination: the admitted voice turn
+        // succeeded, but no assistant message exists to return.
+        return reply.send({
+          transcription: {
+            text: transcription.text,
+            language: transcription.language,
+            confidence: transcription.confidence,
+            ...(transcription.observationId === undefined
+              ? {}
+              : { observationId: transcription.observationId }),
+            ...(transcription.segments === undefined ? {} : { segments: transcription.segments }),
+            // Caller-supplied assertions, echoed verbatim; never recognition
+            // results. Acoustic speaker evidence only appears in typed segments.
+            speakerId: parsed.data.speakerId,
+            voiceProfileId: parsed.data.voiceProfileId,
+            ...sttMetadata
+          },
+          reply: null,
+          traceId: transcriptEvent.traceId,
+          provider: null,
+          stt: sttMetadata,
+          chat: null,
+          promptPreview: parsed.data.options?.promptPreview
+            ? context.runtime.getLatestPromptPreview()
+            : undefined
+        });
+      }
       return reply.send({
         transcription: {
           text: transcription.text,

@@ -42,10 +42,7 @@ function roundTrip(status: "SUCCESS" | "UNAVAILABLE" = "SUCCESS") {
   };
 }
 
-function harnessInput(overrides: {
-  responses: ChatOutput[];
-  executeCognition?: ReturnType<typeof vi.fn>;
-}) {
+function characterHarness(overrides: { responses: ChatOutput[] }) {
   const generateChat = vi.fn(async (_input: ChatInput): Promise<ChatOutput> => {
     const next = overrides.responses.shift();
     if (!next) {
@@ -53,139 +50,147 @@ function harnessInput(overrides: {
     }
     return next;
   });
-  const executeCognition = overrides.executeCognition ?? vi.fn(async () => roundTrip());
-  return { generateChat, executeCognition };
+  return { generateChat };
 }
 
 describe("production Character runtime adapter", () => {
-  it("keeps accepted RESPOND on Chat and does not call Cognition", async () => {
-    const calls = harnessInput({
+  it("returns a full orthogonal CharacterDecision for an accepted RESPOND pass", async () => {
+    const calls = characterHarness({
       responses: [output('{"disposition":"RESPOND","text":"A simple answer."}')]
     });
 
     const result = await createServerCharacterPort().generate({
       prompt,
-      userMessage: "A simple question.",
-      generateChat: calls.generateChat,
-      executeCognition: calls.executeCognition
+      userMessage: "Is this directed to YUVI?",
+      generateChat: calls.generateChat
     });
 
-    expect(result.content).toBe("A simple answer.");
+    expect(result.decision).toEqual({
+      addressing: "DIRECTED_TO_YUVI",
+      reply: { disposition: "RESPOND", text: "A simple answer." },
+      proactive: { action: "KEEP" }
+    });
+    expect(result.providerMetadata.model).toBe("private-chat-model");
+    expect(result.cognitionHandoff).toBeUndefined();
     expect(calls.generateChat).toHaveBeenCalledTimes(1);
-    expect(calls.executeCognition).not.toHaveBeenCalled();
   });
 
-  it("injects the calibrated Yuvi persona without reducing it to a terse style", async () => {
-    const calls = harnessInput({
-      responses: [output('{"disposition":"RESPOND","text":"A natural answer."}')]
+  it.each(["SILENCE", "TERMINATE"] as const)(
+    "represents %s as a first-class decision instead of empty text",
+    async (disposition) => {
+      const calls = characterHarness({
+        responses: [output(`{"disposition":"${disposition}"}`)]
+      });
+
+      const result = await createServerCharacterPort().generate({
+        prompt,
+        userMessage: "Directed input.",
+        generateChat: calls.generateChat
+      });
+
+      expect(result.decision).toEqual({
+        addressing: "DIRECTED_TO_YUVI",
+        reply: { disposition },
+        proactive: { action: "KEEP" }
+      });
+    }
+  );
+
+  it("hands the Cognition escalation to Runtime without executing it", async () => {
+    const calls = characterHarness({
+      responses: [output('{"disposition":"NEED_COGNITION","focus":"verification"}')]
     });
 
-    await createServerCharacterPort().generate({
+    const result = await createServerCharacterPort().generate({
       prompt,
-      userMessage: "Talk to me normally.",
-      generateChat: calls.generateChat,
-      executeCognition: calls.executeCognition
+      userMessage: "Verify this claim carefully.",
+      generateChat: calls.generateChat
     });
 
+    expect(result.decision.reply).toEqual({
+      disposition: "NEED_COGNITION",
+      focus: "verification"
+    });
+    expect(result.cognitionHandoff).toBeDefined();
+    expect(result.cognitionHandoff?.request).toMatchObject({
+      version: "character-harness-5g.v1",
+      kind: "NEED_COGNITION",
+      focus: "verification"
+    });
+    expect(result.cognitionHandoff?.problem).toContain("verification");
+    expect(result.cognitionHandoff?.problem).toContain("Verify this claim carefully.");
+    // One Chat call only: the adapter never executes Cognition itself.
+    expect(calls.generateChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-enters Character with the completed Cognition round-trip and keeps it opaque", async () => {
+    const calls = characterHarness({
+      responses: [output('{"disposition":"RESPOND","text":"The final answer."}')]
+    });
+
+    const result = await createServerCharacterPort().generateAfterCognition({
+      prompt,
+      userMessage: "Verify this claim carefully.",
+      cognitionRoundTrip: roundTrip(),
+      generateChat: calls.generateChat
+    });
+
+    expect(result.decision).toEqual({
+      addressing: "DIRECTED_TO_YUVI",
+      reply: { disposition: "RESPOND", text: "The final answer." },
+      proactive: { action: "KEEP" }
+    });
     const system = calls.generateChat.mock.calls[0]?.[0].messages[0]?.content ?? "";
-    expect(system).toContain("private, persistent companion rather than a customer-service persona");
-    expect(system).toContain("shortness is never the goal");
-    expect(system).toContain("concrete curiosity, laughter, practical interest");
-    expect(system).toContain("Do not turn teasing, contrarianism, affection, softness, or sharpness into quotas");
-    expect(system).toContain("Warmth can be direct when the supplied relationship context earns it");
-    expect(system).toContain("Show interest without pursuit");
-    expect(system).toContain("Harmless mishaps may be funny; serious harm, loss, risk, or cost");
-    expect(system).toContain("actual help, judgment, explanation, clarification, or sustained multi-turn work");
-    expect(system).toContain("say what this moment needs—no less for style, no more for engagement");
-    expect(system).toContain("Memory/P8 context");
+    expect(system).toContain("The normalized answer.");
+    expect(system).toContain("COGNITION_RESULT");
+    expect(system).not.toContain("reasoning_content");
   });
 
-  it("executes one NEED_COGNITION round-trip and consumes the normalized result", async () => {
-    const calls = harnessInput({
-      responses: [
-        output('{"disposition":"NEED_COGNITION","focus":"verification"}'),
-        output('{"disposition":"RESPOND","text":"<think>private trace</think>The final answer."}')
-      ]
+  it("returns a repeated NEED_COGNITION faithfully and lets Runtime fail the turn", async () => {
+    const calls = characterHarness({
+      responses: [output('{"disposition":"NEED_COGNITION"}')]
     });
 
-    const result = await createServerCharacterPort().generate({
+    const result = await createServerCharacterPort().generateAfterCognition({
       prompt,
-      userMessage: "Please verify this carefully.",
-      generateChat: calls.generateChat,
-      executeCognition: calls.executeCognition
+      userMessage: "Do not recurse.",
+      cognitionRoundTrip: roundTrip(),
+      generateChat: calls.generateChat
     });
 
-    expect(result.content).toBe("The final answer.");
-    expect(calls.generateChat).toHaveBeenCalledTimes(2);
-    expect(calls.executeCognition).toHaveBeenCalledTimes(1);
-    expect(calls.executeCognition).toHaveBeenCalledWith(
-      expect.objectContaining({
-        version: "character-harness-5g.v1",
-        kind: "NEED_COGNITION"
-      }),
-      expect.stringContaining("Please verify this carefully."),
-      expect.any(Object)
-    );
-
-    const postCognitionRequest = JSON.stringify(calls.generateChat.mock.calls[1]?.[0]);
-    expect(postCognitionRequest).toContain("COGNITION_RESULT");
-    expect(postCognitionRequest).toContain("The normalized answer.");
-    expect(postCognitionRequest).toContain("shortness is never the goal");
-    expect(postCognitionRequest).not.toContain("reasoning_content");
-    expect(postCognitionRequest).not.toContain("private trace");
+    expect(result.decision.reply).toEqual({ disposition: "NEED_COGNITION" });
+    expect(calls.generateChat).toHaveBeenCalledTimes(1);
   });
 
-  it("returns a bounded Character response when Cognition is unavailable", async () => {
-    const executeCognition = vi.fn(async () => roundTrip("UNAVAILABLE"));
-    const calls = harnessInput({
-      responses: [
-        output('{"disposition":"NEED_COGNITION","focus":"availability"}'),
-        output('{"disposition":"RESPOND","text":"I cannot verify that right now."}')
-      ],
-      executeCognition
-    });
-
-    const result = await createServerCharacterPort().generate({
-      prompt,
-      userMessage: "Check the unavailable source.",
-      generateChat: calls.generateChat,
-      executeCognition
-    });
-
-    expect(result.content).toBe("I cannot verify that right now.");
-    expect(executeCognition).toHaveBeenCalledTimes(1);
-    expect(calls.generateChat.mock.calls[1]?.[0].messages[0]?.content).toContain(
-      '"status":"UNAVAILABLE"'
-    );
-  });
-
-  it("does not issue a duplicate Cognition call when post-Cognition Character asks again", async () => {
-    const executeCognition = vi.fn(async () => roundTrip());
-    const calls = harnessInput({
-      responses: [
-        output('{"disposition":"NEED_COGNITION"}'),
-        output('{"disposition":"NEED_COGNITION"}')
-      ],
-      executeCognition
-    });
+  it("fails closed when the Cognition result exceeds the Character context budget", async () => {
+    const oversizedRoundTrip = {
+      ...roundTrip(),
+      result: {
+        version: "character-cognition-result.v1",
+        status: "SUCCESS",
+        // Valid at the 5H Cognition boundary (16k cap) yet larger than the
+        // 5K post-Cognition Character context budget (12k semantic chars).
+        answer: "x".repeat(13_000)
+      }
+    };
+    const calls = characterHarness({ responses: [] });
 
     await expect(
-      createServerCharacterPort().generate({
+      createServerCharacterPort().generateAfterCognition({
         prompt,
-        userMessage: "Do not recurse.",
-        generateChat: calls.generateChat,
-        executeCognition
+        userMessage: "Over budget.",
+        cognitionRoundTrip: oversizedRoundTrip,
+        generateChat: calls.generateChat
       })
-    ).rejects.toThrow("after Cognition completed");
-    expect(executeCognition).toHaveBeenCalledTimes(1);
-    expect(calls.generateChat).toHaveBeenCalledTimes(2);
+    ).rejects.toThrow("exceeded the Character context budget");
+    expect(calls.generateChat).not.toHaveBeenCalled();
   });
 
-  it("keeps cancellation bounded before Character or Cognition execution", async () => {
+  it("keeps cancellation bounded before Character execution", async () => {
     const controller = new AbortController();
     controller.abort();
-    const calls = harnessInput({
-      responses: [output('{"disposition":"NEED_COGNITION"}')]
+    const calls = characterHarness({
+      responses: [output('{"disposition":"RESPOND","text":"Too late."}')]
     });
 
     await expect(
@@ -193,11 +198,28 @@ describe("production Character runtime adapter", () => {
         prompt,
         userMessage: "Cancelled.",
         signal: controller.signal,
-        generateChat: calls.generateChat,
-        executeCognition: calls.executeCognition
+        generateChat: calls.generateChat
       })
     ).rejects.toThrow("cancelled");
     expect(calls.generateChat).not.toHaveBeenCalled();
-    expect(calls.executeCognition).not.toHaveBeenCalled();
+  });
+
+  it("keeps cancellation bounded before Character re-entry execution", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const calls = characterHarness({
+      responses: [output('{"disposition":"RESPOND","text":"Too late."}')]
+    });
+
+    await expect(
+      createServerCharacterPort().generateAfterCognition({
+        prompt,
+        userMessage: "Cancelled.",
+        cognitionRoundTrip: roundTrip(),
+        signal: controller.signal,
+        generateChat: calls.generateChat
+      })
+    ).rejects.toThrow("cancelled");
+    expect(calls.generateChat).not.toHaveBeenCalled();
   });
 });

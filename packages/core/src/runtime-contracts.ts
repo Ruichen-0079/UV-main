@@ -1,3 +1,4 @@
+import type { CharacterDecision } from "@companion/character-abi";
 import type { EventBus } from "@companion/event-bus";
 import type {
   ConversationRepository,
@@ -75,36 +76,66 @@ export type RuntimeCharacterCognitionExecutor = (
   options?: Readonly<{ signal?: AbortSignal | undefined }>
 ) => Promise<unknown>;
 
-export type RuntimeCharacterGenerationResult = Readonly<{
-  content: string;
+/**
+ * One Character pass result. `decision` is the stable Character semantic
+ * decision (Atom 06); Runtime consumes it but never reinterprets it. When the
+ * reply disposition is `NEED_COGNITION`, the Character side also supplies the
+ * Cognition escalation handoff — the request and bounded problem statement
+ * remain Character-owned semantics; Runtime owns execution, cancellation, and
+ * the one-round bound.
+ */
+export type RuntimeCharacterTurnResult = Readonly<{
+  decision: CharacterDecision;
   providerMetadata: Pick<
     ProviderMetadata,
     "model" | "latencyMs" | "tokenUsage" | "fallbackUsed" | "attemptedProviders" | "finalProvider"
   >;
+  cognitionHandoff?: RuntimeCharacterCognitionHandoff;
+}>;
+
+export type RuntimeCharacterCognitionHandoff = Readonly<{
+  /** Character-owned Cognition escalation request; opaque to Runtime. */
+  request: unknown;
+  /** Character-bounded task statement for the Cognition round-trip. */
+  problem: string;
 }>;
 
 /**
- * Narrow Runtime-to-Character port. Runtime supplies the selected Chat call
- * and the existing Cognition executor; the Character adapter owns only
- * semantic proposal handling and expression.
+ * Final Character outcome after the Runtime-owned bounded sequence. The reply
+ * disposition can no longer be `NEED_COGNITION`: Runtime executes at most one
+ * Cognition round-trip and fails the turn explicitly when Character asks again.
+ */
+export type RuntimeCharacterFinalTurnResult = Readonly<{
+  decision: Readonly<{
+    addressing: CharacterDecision["addressing"];
+    reply: Extract<
+      CharacterDecision["reply"],
+      { disposition: "RESPOND" | "SILENCE" | "TERMINATE" }
+    >;
+    proactive: CharacterDecision["proactive"];
+  }>;
+  providerMetadata: RuntimeCharacterTurnResult["providerMetadata"];
+}>;
+
+export type RuntimeCharacterTurnInput = Readonly<{
+  prompt: PromptBuildOutput;
+  userMessage: string;
+  signal?: AbortSignal | undefined;
+  generateChat(input: ChatInput, options?: ProviderCallOptions | undefined): Promise<ChatOutput>;
+}>;
+
+/**
+ * Narrow Runtime-to-Character port. Runtime supplies the selected Chat call and
+ * sequences the bounded Character → Cognition → Character re-entry flow; the
+ * Character adapter owns only semantic decision handling and expression. The
+ * Cognition round-trip crossing back into Character re-entry stays opaque to
+ * Runtime.
  */
 export type RuntimeCharacterPort = Readonly<{
-  generate(
-    input: Readonly<{
-      prompt: PromptBuildOutput;
-      userMessage: string;
-      signal?: AbortSignal | undefined;
-      generateChat(
-        input: ChatInput,
-        options?: ProviderCallOptions | undefined
-      ): Promise<ChatOutput>;
-      executeCognition(
-        request: unknown,
-        problem: string,
-        options?: Readonly<{ signal?: AbortSignal | undefined }>
-      ): Promise<unknown>;
-    }>
-  ): Promise<RuntimeCharacterGenerationResult>;
+  generate(input: RuntimeCharacterTurnInput): Promise<RuntimeCharacterTurnResult>;
+  generateAfterCognition(
+    input: RuntimeCharacterTurnInput & Readonly<{ cognitionRoundTrip: unknown }>
+  ): Promise<RuntimeCharacterTurnResult>;
 }>;
 
 export type RuntimeEmbodiedPresentationPort = Readonly<{

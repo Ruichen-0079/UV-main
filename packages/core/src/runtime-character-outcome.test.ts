@@ -1,0 +1,572 @@
+import { InMemoryEventBus } from "@companion/event-bus";
+import { InMemoryConversationRepository } from "@companion/memory";
+import { PromptBuilder } from "@companion/prompt-builder";
+import type { RuntimeEvent } from "@companion/protocol";
+import {
+  ProviderError,
+  ProviderErrorCode,
+  createMockChatProvider,
+  createMockProactiveDecisionProvider,
+  createMockReasoningProvider,
+  createMockSTTProvider,
+  createMockVisionProvider,
+  type ProviderResolver
+} from "@companion/providers";
+import { describe, expect, it, vi } from "vitest";
+import {
+  RuntimeOrchestrator,
+  type RuntimeCharacterCognitionExecutor,
+  type RuntimeCharacterPort,
+  type RuntimeCharacterTurnResult,
+  type RuntimeMemoryPort,
+  type RuntimeReplyStreamEvent
+} from "./index.js";
+
+function decisionFixture(
+  reply: RuntimeCharacterTurnResult["decision"]["reply"]
+): RuntimeCharacterTurnResult {
+  return Object.freeze({
+    decision: {
+      addressing: "DIRECTED_TO_YUVI",
+      reply,
+      proactive: { action: "KEEP" }
+    },
+    providerMetadata: { model: "character-test-chat-model" },
+    // Mirrors the real adapter: a NEED_COGNITION pass hands Runtime the
+    // Character-owned escalation request and bounded problem statement.
+    ...(reply.disposition === "NEED_COGNITION"
+      ? {
+          cognitionHandoff: Object.freeze({
+            request: Object.freeze({
+              version: "character-harness-5g.v1",
+              kind: "NEED_COGNITION",
+              focus: reply.focus ?? "verification"
+            }),
+            problem: `Character focus:\n${reply.focus ?? "verification"}`
+          })
+        }
+      : {})
+  });
+}
+
+function roundTripFixture() {
+  return {
+    version: "character-harness-5h.v1",
+    request: {
+      version: "character-harness-5g.v1",
+      kind: "NEED_COGNITION",
+      focus: "verification"
+    },
+    result: {
+      version: "character-cognition-result.v1",
+      status: "SUCCESS",
+      answer: "The normalized answer."
+    }
+  };
+}
+
+function memoryStub() {
+  const extractCandidates = vi.fn(async () => []);
+  const memory: RuntimeMemoryPort = {
+    async retrieveRelevantMemories() {
+      return [];
+    },
+    async retrieveRelevantMemoriesWithMetadata() {
+      return {
+        query: "",
+        keywords: [],
+        rawCount: 0,
+        count: 0,
+        retrievalMode: "keyword",
+        vectorEnabled: false,
+        vectorUsed: false,
+        queryEmbeddingGenerated: false,
+        vectorResultCount: 0,
+        keywordResultCount: 0,
+        hybridResultCount: 0,
+        fallbackUsed: false,
+        retrievalScope: "user",
+        includedScopes: [{ scope: "user" }],
+        includeArchived: false,
+        includeSuperseded: false,
+        includeExpired: false,
+        currentTime: new Date().toISOString(),
+        excludedByStatus: 0,
+        excludedByTime: 0,
+        excludedByScope: 0,
+        rawMemories: [],
+        memories: [],
+        selectedMemories: []
+      };
+    },
+    scoreImportance() {
+      return 0;
+    },
+    extractCandidates,
+    async rememberCandidate() {
+      throw new Error("rememberCandidate must not run in this suite");
+    },
+    async rememberInteraction() {
+      return null;
+    }
+  };
+  return { memory, extractCandidates };
+}
+
+function providersStub(): ProviderResolver {
+  const chat = createMockChatProvider("character-test-chat");
+  return {
+    getChatProvider: () => chat,
+    getProactiveDecisionProvider: () => createMockProactiveDecisionProvider("NO_OP"),
+    getReasoningProvider: () => createMockReasoningProvider("character-test-reasoning"),
+    getTTSProvider: () => ({
+      name: "character-test-tts",
+      async healthCheck() {
+        return {
+          provider: "character-test-tts",
+          status: "healthy" as const,
+          checkedAt: new Date().toISOString()
+        };
+      },
+      async synthesizeSpeech() {
+        throw new Error("TTS must not run for this turn");
+      }
+    }),
+    getSTTProvider: () => createMockSTTProvider("character-test-stt"),
+    getVisionProvider: () => createMockVisionProvider("character-test-vision"),
+    getEmbeddingProvider: () => ({
+      name: "character-test-embedding",
+      dimensions: 3,
+      async healthCheck() {
+        return {
+          provider: "character-test-embedding",
+          status: "healthy" as const,
+          checkedAt: new Date().toISOString()
+        };
+      },
+      async embedText() {
+        return [0, 0, 0];
+      },
+      async embedBatch(texts: string[]) {
+        return texts.map(() => [0, 0, 0]);
+      }
+    })
+  };
+}
+
+type SequenceStep = "generate" | "cognition" | "generateAfterCognition";
+
+function characterHarness(input: {
+  initial: RuntimeCharacterTurnResult;
+  reentry?: RuntimeCharacterTurnResult;
+  onCognition?: () => void;
+  cognition?: () => Promise<unknown>;
+  onReentry?: (turnInput: {
+    signal: AbortSignal | undefined;
+    generateChat(
+      chatInput: unknown,
+      callOptions?: Readonly<{ signal?: AbortSignal | undefined }>
+    ): Promise<unknown>;
+  }) => void;
+}) {
+  const order: SequenceStep[] = [];
+  const generate = vi.fn(async (turnInput: { signal?: AbortSignal | undefined }) => {
+    order.push("generate");
+    return input.initial;
+  });
+  const executeCognition = vi.fn(
+    async (
+      _request: unknown,
+      _problem: string,
+      _options?: Readonly<{ signal?: AbortSignal | undefined }>
+    ) => {
+      order.push("cognition");
+      input.onCognition?.();
+      if (input.cognition) {
+        return input.cognition();
+      }
+      return roundTripFixture();
+    }
+  );
+  const generateAfterCognition = vi.fn(
+    async (turnInput: Parameters<RuntimeCharacterPort["generateAfterCognition"]>[0]) => {
+      order.push("generateAfterCognition");
+      await input.onReentry?.({
+        signal: turnInput.signal,
+        generateChat: turnInput.generateChat as Parameters<
+          NonNullable<(typeof input)["onReentry"]>
+        >[0]["generateChat"]
+      });
+      if (!input.reentry) {
+        throw new Error("unexpected Character re-entry");
+      }
+      return input.reentry;
+    }
+  );
+  const character: RuntimeCharacterPort = Object.freeze({
+    generate,
+    generateAfterCognition
+  });
+  return { character, order, generate, executeCognition, generateAfterCognition };
+}
+
+async function runTurn(input: {
+  character: RuntimeCharacterPort;
+  cognition?: RuntimeCharacterCognitionExecutor;
+  signal?: AbortSignal;
+}): Promise<{
+  events: RuntimeReplyStreamEvent[];
+  published: RuntimeEvent[];
+  conversation: InMemoryConversationRepository;
+  extractCandidates: ReturnType<typeof vi.fn>;
+  failure: unknown;
+}> {
+  const eventBus = new InMemoryEventBus({ development: false });
+  const published: RuntimeEvent[] = [];
+  eventBus.subscribe("*", (event) => {
+    published.push(event);
+  });
+  const conversation = new InMemoryConversationRepository();
+  const { memory, extractCandidates } = memoryStub();
+  const runtime = new RuntimeOrchestrator({
+    eventBus,
+    memory,
+    promptBuilder: new PromptBuilder(),
+    providers: providersStub(),
+    conversation,
+    ...(input.cognition ? { characterCognition: input.cognition } : {}),
+    character: input.character
+  });
+
+  const events: RuntimeReplyStreamEvent[] = [];
+  let failure: unknown;
+  try {
+    const iterator = runtime.streamUserMessage(
+      { sessionId: "character-session", content: "Please verify this claim carefully." },
+      {
+        ...(input.signal ? { signal: input.signal } : {}),
+        readMemory: true,
+        writeMemory: true
+      }
+    );
+    for await (const event of iterator) {
+      events.push(event);
+    }
+  } catch (error) {
+    failure = error;
+  }
+  return { events, published, conversation, extractCandidates, failure };
+}
+
+function assistantRowId(published: RuntimeEvent[]): string {
+  const userMessage = published.find((event) => event.type === "user.message");
+  if (!userMessage) {
+    throw new Error("user.message was not published");
+  }
+  return `assistant:${userMessage.id}`;
+}
+
+function expectNoAssistantCommit(turn: {
+  published: RuntimeEvent[];
+  conversation: InMemoryConversationRepository;
+}): void {
+  expect(turn.published.some((event) => event.type === "agent.reply")).toBe(false);
+  expect(turn.published.some((event) => event.type === "assistant.message")).toBe(false);
+}
+
+describe("Runtime Character outcome sequencing", () => {
+  it("commits a RESPOND decision as exactly one assistant message", async () => {
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "RESPOND", text: "A grounded answer." })
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition
+    });
+
+    expect(turn.failure).toBeUndefined();
+    const assistantRow = await turn.conversation.getMessageById(assistantRowId(turn.published));
+    expect(assistantRow?.role).toBe("assistant");
+    expect(assistantRow?.content).toBe("A grounded answer.");
+
+    const agentReplies = turn.published.filter((event) => event.type === "agent.reply");
+    const assistantMessages = turn.published.filter((event) => event.type === "assistant.message");
+    expect(agentReplies).toHaveLength(1);
+    expect(assistantMessages).toHaveLength(1);
+
+    expect(turn.events.filter((event) => event.type === "text-delta")).toHaveLength(1);
+    const completed = turn.events.find((event) => event.type === "completed");
+    expect(completed).toMatchObject({ content: "A grounded answer." });
+    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.executeCognition).not.toHaveBeenCalled();
+    expect(harness.generateAfterCognition).not.toHaveBeenCalled();
+    expect(turn.extractCandidates).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats SILENCE as a successful turn with no assistant message", async () => {
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "SILENCE" })
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition
+    });
+
+    expect(turn.failure).toBeUndefined();
+    expect(await turn.conversation.getMessageById(assistantRowId(turn.published))).toBeNull();
+    expectNoAssistantCommit(turn);
+    expect(turn.published.some((event) => event.type === "runtime.error")).toBe(false);
+    expect(turn.published.some((event) => event.type === "provider.error")).toBe(false);
+    expect(turn.extractCandidates).not.toHaveBeenCalled();
+
+    expect(turn.events.map((event) => event.type)).toEqual(["completed"]);
+    expect(turn.events.find((event) => event.type === "completed")).toMatchObject({ content: "" });
+    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.generateAfterCognition).not.toHaveBeenCalled();
+  });
+
+  it("treats TERMINATE as a clean control-flow outcome with no follow-up generation", async () => {
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "TERMINATE" })
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition
+    });
+
+    expect(turn.failure).toBeUndefined();
+    expect(await turn.conversation.getMessageById(assistantRowId(turn.published))).toBeNull();
+    expectNoAssistantCommit(turn);
+    expect(turn.extractCandidates).not.toHaveBeenCalled();
+    expect(turn.events.map((event) => event.type)).toEqual(["completed"]);
+    expect(turn.events.find((event) => event.type === "completed")).toMatchObject({ content: "" });
+    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.executeCognition).not.toHaveBeenCalled();
+    expect(harness.generateAfterCognition).not.toHaveBeenCalled();
+  });
+
+  it("observes NEED_COGNITION before executing Cognition exactly once and re-enters once", async () => {
+    const roundTrip = roundTripFixture();
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "NEED_COGNITION", focus: "verification" }),
+      reentry: decisionFixture({ disposition: "RESPOND", text: "The verified answer." }),
+      cognition: async () => roundTrip
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition
+    });
+
+    expect(turn.failure).toBeUndefined();
+    expect(harness.order).toEqual(["generate", "cognition", "generateAfterCognition"]);
+    expect(harness.executeCognition).toHaveBeenCalledTimes(1);
+    const [request, problem] = harness.executeCognition.mock.calls[0] ?? [];
+    expect(request).toMatchObject({ kind: "NEED_COGNITION", focus: "verification" });
+    expect(String(problem)).toContain("verification");
+    expect(harness.generateAfterCognition.mock.calls[0]?.[0].cognitionRoundTrip).toBe(roundTrip);
+
+    const assistantRow = await turn.conversation.getMessageById(assistantRowId(turn.published));
+    expect(assistantRow?.content).toBe("The verified answer.");
+    const completed = turn.events.find((event) => event.type === "completed");
+    expect(completed).toMatchObject({ content: "The verified answer." });
+  });
+
+  it.each(["SILENCE", "TERMINATE"] as const)(
+    "finalizes a NEED_COGNITION turn with %s and no assistant message",
+    async (disposition) => {
+      const harness = characterHarness({
+        initial: decisionFixture({ disposition: "NEED_COGNITION", focus: "verification" }),
+        reentry: decisionFixture({ disposition })
+      });
+
+      const turn = await runTurn({
+        character: harness.character,
+        cognition: harness.executeCognition
+      });
+
+      expect(turn.failure).toBeUndefined();
+      expect(harness.order).toEqual(["generate", "cognition", "generateAfterCognition"]);
+      expect(harness.executeCognition).toHaveBeenCalledTimes(1);
+      expect(await turn.conversation.getMessageById(assistantRowId(turn.published))).toBeNull();
+      expectNoAssistantCommit(turn);
+      expect(turn.events.map((event) => event.type)).toEqual(["completed"]);
+      expect(turn.events.find((event) => event.type === "completed")).toMatchObject({
+        content: ""
+      });
+    }
+  );
+
+  it("fails the turn deterministically when post-Cognition Character asks for Cognition again", async () => {
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "NEED_COGNITION", focus: "verification" }),
+      reentry: decisionFixture({ disposition: "NEED_COGNITION" })
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition
+    });
+
+    expect(turn.failure).toBeInstanceOf(ProviderError);
+    expect(String(turn.failure)).toContain("after Cognition completed");
+    expect(harness.order).toEqual(["generate", "cognition", "generateAfterCognition"]);
+    expect(harness.executeCognition).toHaveBeenCalledTimes(1);
+    expect(harness.generateAfterCognition).toHaveBeenCalledTimes(1);
+    expect(await turn.conversation.getMessageById(assistantRowId(turn.published))).toBeNull();
+    expectNoAssistantCommit(turn);
+  });
+
+  it("fails explicitly when a NEED_COGNITION handoff carries no Cognition request", async () => {
+    const harness = characterHarness({
+      initial: {
+        decision: {
+          addressing: "DIRECTED_TO_YUVI",
+          reply: { disposition: "NEED_COGNITION", focus: "verification" },
+          proactive: { action: "KEEP" }
+        },
+        providerMetadata: { model: "character-test-chat-model" }
+      }
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition
+    });
+
+    expect(String(turn.failure)).toContain("did not include a Cognition request");
+    expect(harness.executeCognition).not.toHaveBeenCalled();
+  });
+
+  it("fails explicitly when Cognition execution is unavailable", async () => {
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "NEED_COGNITION", focus: "verification" })
+    });
+
+    const turn = await runTurn({ character: harness.character });
+
+    expect(String(turn.failure)).toContain("Character Cognition execution is unavailable");
+    expect(harness.generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not commit stale output when cancelled during Cognition", async () => {
+    const controller = new AbortController();
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "NEED_COGNITION", focus: "verification" }),
+      onCognition: () => {
+        controller.abort();
+      },
+      cognition: async () => {
+        throw new ProviderError({
+          provider: "character",
+          capability: "chat",
+          code: ProviderErrorCode.Cancelled,
+          message: "Character turn was cancelled.",
+          retryable: false
+        });
+      }
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition,
+      signal: controller.signal
+    });
+
+    expect(turn.failure).toBeInstanceOf(ProviderError);
+    expect(harness.generateAfterCognition).not.toHaveBeenCalled();
+    expect(await turn.conversation.getMessageById(assistantRowId(turn.published))).toBeNull();
+    expectNoAssistantCommit(turn);
+  });
+
+  it("does not commit stale output when cancelled before the re-entry Chat call", async () => {
+    const controller = new AbortController();
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "NEED_COGNITION", focus: "verification" }),
+      cognition: async () => {
+        controller.abort();
+        return roundTripFixture();
+      },
+      onReentry: async (turnInput) => {
+        // Simulates the re-entry Chat call under the aborted originating turn:
+        // the Runtime-owned wrapper rejects before any provider work.
+        await expect(
+          turnInput.generateChat(
+            { messages: [{ role: "user", content: "re-entry" }] },
+            {
+              signal: turnInput.signal
+            }
+          )
+        ).rejects.toThrow("cancelled");
+        throw new ProviderError({
+          provider: "character",
+          capability: "chat",
+          code: ProviderErrorCode.Cancelled,
+          message: "Character turn was cancelled.",
+          retryable: false
+        });
+      },
+      reentry: decisionFixture({ disposition: "RESPOND", text: "Too late." })
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition,
+      signal: controller.signal
+    });
+
+    expect(turn.failure).toBeInstanceOf(ProviderError);
+    expect(await turn.conversation.getMessageById(assistantRowId(turn.published))).toBeNull();
+    expectNoAssistantCommit(turn);
+  });
+
+  it("does not commit when cancellation lands after the final Character result", async () => {
+    const controller = new AbortController();
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "RESPOND", text: "Late result." })
+    });
+    // Abort the originating turn as soon as the initial pass has produced its
+    // final decision; the Runtime fence must discard it before commit.
+    harness.generate.mockImplementation(async () => {
+      controller.abort();
+      return decisionFixture({ disposition: "RESPOND", text: "Late result." });
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition,
+      signal: controller.signal
+    });
+
+    expect(turn.failure).toBeInstanceOf(ProviderError);
+    expect(await turn.conversation.getMessageById(assistantRowId(turn.published))).toBeNull();
+    expectNoAssistantCommit(turn);
+  });
+
+  it("propagates Cognition failure through the normalized failure contract without fabricating text", async () => {
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "NEED_COGNITION", focus: "verification" }),
+      cognition: async () => {
+        throw new ProviderError({
+          provider: "character",
+          capability: "chat",
+          code: ProviderErrorCode.ProviderUnavailable,
+          message: "Cognition backend is unavailable.",
+          retryable: false
+        });
+      }
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition
+    });
+
+    expect(String(turn.failure)).toContain("Cognition backend is unavailable");
+    expect(await turn.conversation.getMessageById(assistantRowId(turn.published))).toBeNull();
+    expectNoAssistantCommit(turn);
+  });
+});
