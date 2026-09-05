@@ -82,6 +82,9 @@ export type RuntimeOrchestratorOptions = {
   proactiveConsentEnabled?: boolean | undefined;
   /** Smallest durable snapshot for suppression / eligible_after across Runtime reconstruction. */
   proactiveStateStore?: RuntimeProactiveStateStore | undefined;
+  /** Injected wake timer for the Runtime-owned proactive scheduler. */
+  setProactiveWake?: ((callback: () => void, delayMs: number) => unknown) | undefined;
+  clearProactiveWake?: ((handle: unknown) => void) | undefined;
 };
 
 export type RuntimeCharacterCognitionExecutor = (

@@ -15,9 +15,16 @@ describe("assistant-origin protocol metadata", () => {
         sessionId: "session-1",
         content: "hello",
         turnOrigin: "assistant-initiated",
-        idempotencyKey: "decision-1"
+        idempotencyKey: "decision-1",
+        decisionId: "decision-uuid",
+        activityRevision: 3
       })
-    ).toMatchObject({ turnOrigin: "assistant-initiated", idempotencyKey: "decision-1" });
+    ).toMatchObject({
+      turnOrigin: "assistant-initiated",
+      idempotencyKey: "decision-1",
+      decisionId: "decision-uuid",
+      activityRevision: 3
+    });
   });
 });
 

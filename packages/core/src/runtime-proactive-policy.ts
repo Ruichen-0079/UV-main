@@ -21,6 +21,11 @@ export const PROACTIVE_DEFER_HORIZON_MS = {
   LONG: 600_000
 } as const;
 
+/** Deterministic quiet after a NO_OP so the scheduler cannot hot-loop tokens. */
+export const PROACTIVE_NO_OP_BACKOFF_MS = PROACTIVE_DEFER_HORIZON_MS.SHORT;
+/** Quiet after a committed proactive emit. */
+export const PROACTIVE_EMIT_QUIET_MS = PROACTIVE_DEFER_HORIZON_MS.NORMAL;
+
 export type ProactiveSuppression =
   | { readonly kind: "NONE" }
   | { readonly kind: "UNTIL"; readonly untilMs: number }
@@ -102,6 +107,19 @@ export function advanceActivityRevision(state: ProactiveState): ProactiveState {
   return Object.freeze({
     ...state,
     activityRevision: state.activityRevision + 1
+  });
+}
+
+export function deferProactiveEligibility(
+  state: ProactiveState,
+  nowMs: number,
+  delayMs: number
+): ProactiveState {
+  const normalized = normalizeProactiveState(state, nowMs);
+  const dueAtMs = nowMs + delayMs;
+  return Object.freeze({
+    ...normalized,
+    eligibleAfterMs: Math.max(normalized.eligibleAfterMs, dueAtMs)
   });
 }
 

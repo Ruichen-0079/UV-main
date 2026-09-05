@@ -289,29 +289,12 @@ export function MainPage(): JSX.Element {
     const handleProactiveTextRequest = (
       message: Extract<CompanionBusMessage, { kind: "proactive-text-request" }>
     ): void => {
-      const execution = proactiveExecutionRef.current;
-      if (execution === null) return;
-      const result = execution.tryCommit({
+      bus.post({
+        kind: "proactive-text-admission-result",
         decisionId: message.decisionId,
-        admission: RUNTIME_ADMITTED,
-        active: activeRequestRef.current,
-        context: runtimeContextRef.current
+        decision: "denied",
+        reason: "not-eligible"
       });
-      if (result.kind !== "committed") {
-        bus.post({
-          kind: "proactive-text-admission-result",
-          decisionId: message.decisionId,
-          decision: "denied",
-          reason: "execution-busy"
-        });
-        return;
-      }
-
-      const { effect } = result;
-      activeRequestRef.current = effect.ownership;
-      setError(null);
-      setRequestStatus("sending");
-      void executeProactiveTurn(effect);
     };
     const unsubscribe = bus.subscribe((message: CompanionBusMessage) => {
       if (!mountedRef.current) return;
@@ -366,6 +349,64 @@ export function MainPage(): JSX.Element {
       playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
     };
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let assistantId: string | null = null;
+    void apiClient
+      .subscribeProactiveLive(sessionId, {
+        signal: controller.signal,
+        onEvent: (event: ProactiveMessageStreamEvent) => {
+          if (!mountedRef.current) return;
+          if (event.type === "proactive-decision") {
+            if (event.decision === "NO_OP") assistantId = null;
+            return;
+          }
+          if (event.type === "text-delta") {
+            if (assistantId === null) {
+              assistantId = createSurfaceId("proactive-assistant");
+              dispatchMessages({
+                type: "append-assistant",
+                assistant: {
+                  id: assistantId,
+                  requestId: event.traceId,
+                  role: "assistant",
+                  content: event.text,
+                  status: "streaming",
+                  traceId: event.traceId
+                }
+              });
+            } else {
+              dispatchMessages({
+                type: "append-delta",
+                assistantId,
+                text: event.text,
+                traceId: event.traceId
+              });
+            }
+            return;
+          }
+          if (event.type === "error") {
+            if (assistantId) {
+              dispatchMessages({ type: "fail", assistantId, error: event.message });
+            }
+            return;
+          }
+          if (assistantId) {
+            dispatchMessages({
+              type: "complete",
+              assistantId,
+              content: event.content,
+              traceId: event.traceId,
+              provider: event.provider
+            });
+            assistantId = null;
+          }
+        }
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [sessionId]);
 
   useEffect(() => {
     busRef.current?.post({ kind: "tts-config", config: ttsConfig });

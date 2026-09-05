@@ -5,10 +5,12 @@ import {
   applyCharacterProactiveProposal,
   canMutateDurableProactivePolicy,
   createInitialProactiveState,
+  deferProactiveEligibility,
   evaluateProactiveEligibility,
   normalizeProactiveState,
   parseIso8601DurationMs,
   parseProactivePolicySnapshot,
+  PROACTIVE_NO_OP_BACKOFF_MS,
   serializeProactivePolicySnapshot
 } from "./runtime-proactive-policy.js";
 
@@ -122,5 +124,20 @@ describe("Runtime proactive policy", () => {
 
   it("parses PT5M as five minutes", () => {
     expect(parseIso8601DurationMs("PT5M")).toBe(5 * 60 * 1000);
+  });
+
+  it("defers eligible_after with a deterministic backoff", () => {
+    const deferred = deferProactiveEligibility(
+      createInitialProactiveState(),
+      t0,
+      PROACTIVE_NO_OP_BACKOFF_MS
+    );
+    expect(deferred.eligibleAfterMs).toBe(t0 + PROACTIVE_NO_OP_BACKOFF_MS);
+    expect(
+      evaluateProactiveEligibility(deferred, t0 + PROACTIVE_NO_OP_BACKOFF_MS - 1, true)
+    ).toEqual({
+      admitted: false,
+      reason: "not-eligible"
+    });
   });
 });

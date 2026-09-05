@@ -21,7 +21,7 @@ import {
 } from "./companion-presence.js";
 import type { BehaviorPolicyController } from "./behavior-policy-controller.js";
 import { createCompanionEmbodiedBehaviorController } from "./companion-embodied-behavior-controller.js";
-import { createProactiveTextCandidate } from "./proactive-text-candidate.js";
+
 import { createCompanionSpeechBuffer } from "./companion-speech-buffer.js";
 import { createCompanionReadyAnnouncer } from "./companion-voice-sync.js";
 import { createSpeechSegmentDeduper } from "./speech-segment-dedup.js";
@@ -128,12 +128,7 @@ export function CompanionPage(): JSX.Element {
       now: () => performance.now(),
       setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimer: (handle) => window.clearTimeout(handle as number),
-      setGazeTarget: (target) => lumiRef.current?.setGazeTarget(target),
-      onSilentAttentionAdmitted: () => {
-        const bus = companionBusRef.current;
-        if (bus === null) return;
-        bus.post(createProactiveTextCandidate());
-      }
+      setGazeTarget: (target) => lumiRef.current?.setGazeTarget(target)
     });
     behaviorControllerRef.current = controller;
     const syncVisibility = (): void => {

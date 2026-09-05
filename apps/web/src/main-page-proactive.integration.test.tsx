@@ -4,7 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 
 const mockState = vi.hoisted(() => ({
   buses: [] as MockCompanionBus[],
-  streamProactiveTurn: vi.fn()
+  streamProactiveTurn: vi.fn(),
+  subscribeProactiveLive: vi.fn()
 }));
 
 class MockCompanionBus {
@@ -40,6 +41,7 @@ vi.mock("./api/client.js", () => ({
   apiClient: {
     streamMessage: vi.fn(),
     streamProactiveTurn: mockState.streamProactiveTurn,
+    subscribeProactiveLive: mockState.subscribeProactiveLive,
     setProactiveConsent: vi.fn(async () => ({ ok: true, enabled: true }))
   }
 }));
@@ -261,35 +263,12 @@ function readText(node: FakeNode): string {
 afterEach(() => {
   mockState.buses.length = 0;
   mockState.streamProactiveTurn.mockReset();
+  mockState.subscribeProactiveLive.mockReset();
 });
 
 describe("MainPage proactive CompanionBus bridge", () => {
-  it("admits a bus candidate, streams it, and projects one assistant-only reply", async () => {
-    const decision = {
-      type: "proactive-decision" as const,
-      decision: "REQUEST_TEXT" as const,
-      sessionId: "default",
-      traceId: "trace-proactive"
-    };
-    const completed = {
-      type: "completed" as const,
-      content: "proactive reply",
-      messageId: "assistant-message",
-      sessionId: "default",
-      traceId: "trace-proactive",
-      provider: "mock"
-    };
-    mockState.streamProactiveTurn.mockImplementation(async (_request, options) => {
-      options.onEvent?.(decision);
-      options.onEvent?.({
-        type: "text-delta",
-        text: completed.content,
-        messageId: completed.messageId,
-        sessionId: completed.sessionId,
-        traceId: completed.traceId
-      });
-      return completed;
-    });
+  it("does not let a companion opportunity start a Runtime proactive attempt", async () => {
+    mockState.subscribeProactiveLive.mockImplementation(async () => undefined);
 
     const dom = installFakeDom();
     let root!: Root;
@@ -313,39 +292,49 @@ describe("MainPage proactive CompanionBus bridge", () => {
         await Promise.resolve();
       });
 
-      expect(mockState.streamProactiveTurn).toHaveBeenCalledTimes(1);
-      const [request] = mockState.streamProactiveTurn.mock.calls[0] ?? [];
-      expect(request).toMatchObject({
-        sessionId: "default",
-        modality: "text",
-        options: { readMemory: true, promptPreview: true }
-      });
-      expect(request.idempotencyKey).not.toBe("decision-live");
+      expect(mockState.streamProactiveTurn).not.toHaveBeenCalled();
       expect(bus?.posted).toContainEqual({
         kind: "proactive-text-admission-result",
         decisionId: "decision-live",
-        decision: "accepted",
-        reason: "runtime-admitted"
+        decision: "denied",
+        reason: "not-eligible"
       });
-      expect(readText(dom.container)).toContain("proactive reply");
-      expect(readText(dom.container)).toContain("assistant");
-      expect(readText(dom.container)).not.toContain("user");
+      expect(readText(dom.container)).not.toContain("proactive reply");
     } finally {
       await act(async () => root?.unmount());
       dom.restore();
     }
   });
 
-  it("does not project an assistant row for a successful NO_OP", async () => {
-    const noOp = {
-      type: "proactive-decision" as const,
-      decision: "NO_OP" as const,
-      sessionId: "default",
-      traceId: "trace-no-op"
-    };
-    mockState.streamProactiveTurn.mockImplementation(async (_request, options) => {
-      options.onEvent?.(noOp);
-      return noOp;
+  it("projects a Runtime-scheduled assistant-only reply and ignores NO_OP", async () => {
+    mockState.subscribeProactiveLive.mockImplementation(async (_sessionId, options) => {
+      options.onEvent?.({
+        type: "proactive-decision",
+        decision: "NO_OP",
+        sessionId: "default",
+        traceId: "trace-no-op"
+      });
+      options.onEvent?.({
+        type: "proactive-decision",
+        decision: "REQUEST_TEXT",
+        sessionId: "default",
+        traceId: "trace-proactive"
+      });
+      options.onEvent?.({
+        type: "text-delta",
+        text: "proactive reply",
+        messageId: "assistant-message",
+        sessionId: "default",
+        traceId: "trace-proactive"
+      });
+      options.onEvent?.({
+        type: "completed",
+        content: "proactive reply",
+        messageId: "assistant-message",
+        sessionId: "default",
+        traceId: "trace-proactive",
+        provider: "mock"
+      });
     });
 
     const dom = installFakeDom();
@@ -358,19 +347,10 @@ describe("MainPage proactive CompanionBus bridge", () => {
         await Promise.resolve();
       });
 
-      const bus = mockState.buses[0];
-      await act(async () => {
-        bus?.emit({
-          kind: "proactive-text-request",
-          decisionId: "decision-no-op",
-          modality: "text"
-        });
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-
-      expect(mockState.streamProactiveTurn).toHaveBeenCalledTimes(1);
-      expect(readText(dom.container)).not.toContain("assistant");
+      expect(mockState.subscribeProactiveLive).toHaveBeenCalled();
+      expect(mockState.streamProactiveTurn).not.toHaveBeenCalled();
+      expect(readText(dom.container)).toContain("proactive reply");
+      expect(readText(dom.container)).toContain("assistant");
       expect(readText(dom.container)).not.toContain("user");
       expect(readText(dom.container)).not.toContain("trace-no-op");
     } finally {
@@ -379,7 +359,7 @@ describe("MainPage proactive CompanionBus bridge", () => {
     }
   });
 
-  it("forwards an opportunity to Runtime even when the local settings toggle is off", async () => {
+  it("still subscribes to Runtime-scheduled turns when the local settings toggle is off", async () => {
     const { fetchUserSettings } = await import("./user-settings-client.js");
     vi.mocked(fetchUserSettings).mockResolvedValueOnce({
       loadError: null,
@@ -389,16 +369,7 @@ describe("MainPage proactive CompanionBus bridge", () => {
         tts: { enabled: true, mode: "external" }
       }
     } as never);
-    mockState.streamProactiveTurn.mockImplementation(async (_request, options) => {
-      const noOp = {
-        type: "proactive-decision" as const,
-        decision: "NO_OP" as const,
-        sessionId: "default",
-        traceId: "trace-consent-off"
-      };
-      options.onEvent?.(noOp);
-      return noOp;
-    });
+    mockState.subscribeProactiveLive.mockImplementation(async () => undefined);
 
     const dom = installFakeDom();
     let root!: Root;
@@ -419,7 +390,8 @@ describe("MainPage proactive CompanionBus bridge", () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(mockState.streamProactiveTurn).toHaveBeenCalledTimes(1);
+      expect(mockState.subscribeProactiveLive).toHaveBeenCalled();
+      expect(mockState.streamProactiveTurn).not.toHaveBeenCalled();
     } finally {
       await act(async () => root?.unmount());
       dom.restore();
