@@ -3282,18 +3282,23 @@ export const TRAY_MENU_WINDOW_CLASS = "#32768";
 // allocation order: adding tray items never changes it.
 export const TRAY_NOTIFY_MESSAGE_ID = 6002;
 export const TRAY_NOTIFY_RBUTTONUP = 0x0205;
-// MSAA object id for the client area of the live #32768 popup window.
-// The helper resolves the IAccessible menu container through oleacc
-// (a Windows system DLL) instead of assuming any numeric command id.
-export const TRAY_MENU_OBJID_CLIENT = 0xfffffffc;
+// Diagnostic delivery route (DIAG230 Atom A). The pinned muda version
+// subclasses the tray window and resolves WM_COMMAND through
+// `menu.find_by_id(LOWORD(wParam))` — the exact path a real user menu click
+// takes (tray-icon 0.24.2 shows the tray menu without TPM_RETURNCMD). The
+// helper reads the live HMENU from the open popup via WM_MN_GETHMENU,
+// resolves the Quit item's runtime command id from that menu, and posts one
+// WM_COMMAND to the owning tray window. No numeric id is assumed anywhere.
+export const TRAY_COMMAND_MESSAGE_ID = 0x0111;
+export const TRAY_MENU_GETHMENU_MESSAGE_ID = 0x01eb;
 // Semantic identity of the Quit control. Native menus carry no string ids,
-// so runtime discovery keys on this exact visible accessible name and
-// requires exactly one match. This is the user-visible label created in
+// so runtime discovery keys on this exact visible menu name and requires
+// exactly one match. This is the user-visible label created in
 // apps/desktop/src-tauri (MenuItem "Quit" with semantic id "tray-quit").
 export const TRAY_QUIT_MENU_TEXT = "Quit";
-// Documented muda string id for diagnostics. The invoked accessible child is
-// bound to TRAY_QUIT_MENU_TEXT at runtime; this label records which semantic
-// action the invocation was resolved for.
+// Documented muda string id for diagnostics. The delivered WM_COMMAND is
+// resolved to the item bound to TRAY_QUIT_MENU_TEXT at runtime; this label
+// records which semantic action the delivery was resolved for.
 export const TRAY_QUIT_SEMANTIC_ID = "tray-quit";
 
 export const TRAY_QUIT_PYTHON_SOURCE = String.raw`
@@ -3302,13 +3307,17 @@ import sys
 import time
 from ctypes import wintypes
 
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_COMMAND = 0x0111
 WM_RBUTTONUP = 0x0205
 WM_USER_TRAYICON = 6002
+WM_MN_GETHMENU = 0x01EB
+VK_ESCAPE = 0x1B
+MF_BYPOSITION = 0x00000400
 TRAY_ICON_WINDOW_CLASS = "tray_icon_app"
 TRAY_MENU_WINDOW_CLASS = "#32768"
 TRAY_QUIT_MENU_TEXT = "Quit"
-OBJID_CLIENT = 0xFFFFFFFC
-VT_I4 = 3
 MENU_OPEN_ROUNDS = 3
 MENU_OPEN_ROUND_S = 2.0
 MENU_POLL_INTERVAL_S = 0.05
@@ -3325,10 +3334,12 @@ menu_windows_any = 0
 menu_hwnd = 0
 tray_alive = 0
 icon_rect_count = 0
+menu_hmenu = 0
 menu_item_count = 0
 menu_items = []
 quit_matches = 0
-quit_child_id = 0
+quit_position = 0
+quit_command_id = 0
 quit_text = ""
 invoke_hresult = 0
 invoke_result = 0
@@ -3349,12 +3360,14 @@ def emit_result(error=None):
     print(f"menu_hwnd={menu_hwnd}", flush=True)
     print(f"tray_alive={tray_alive}", flush=True)
     print(f"icon_rect_count={icon_rect_count}", flush=True)
+    print(f"menu_hmenu={menu_hmenu}", flush=True)
     print(f"menu_item_count={menu_item_count}", flush=True)
     print(f"quit_matches={quit_matches}", flush=True)
-    print(f"quit_child_id={quit_child_id}", flush=True)
+    print(f"quit_position={quit_position}", flush=True)
+    print(f"quit_command_id={quit_command_id}", flush=True)
     print(f"quit_text={quit_text}", flush=True)
-    for child_id, text in menu_items:
-        print(f"TRAY_QUIT_MENU_ITEM={child_id}:{text}", flush=True)
+    for position, text in menu_items:
+        print(f"TRAY_QUIT_MENU_ITEM={position}:{text}", flush=True)
     print(f"invoke_hresult={invoke_hresult}", flush=True)
     print(f"invoke_result={invoke_result}", flush=True)
     if error is not None:
@@ -3373,36 +3386,20 @@ user32.IsWindow.argtypes = [wintypes.HWND]
 user32.IsWindow.restype = wintypes.BOOL
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = wintypes.LPVOID
+user32.GetMenuItemCount.argtypes = [wintypes.HMENU]
+user32.GetMenuItemCount.restype = ctypes.c_int
+user32.GetMenuItemID.argtypes = [wintypes.HMENU, ctypes.c_int]
+user32.GetMenuItemID.restype = wintypes.UINT
+user32.GetMenuStringW.argtypes = [wintypes.HMENU, wintypes.UINT, wintypes.LPWSTR, ctypes.c_int, wintypes.UINT]
+user32.GetMenuStringW.restype = ctypes.c_int
 
 class Guid(ctypes.Structure):
     _fields_ = [("data1", wintypes.DWORD),
                 ("data2", wintypes.WORD),
                 ("data3", wintypes.WORD),
                 ("data4", wintypes.BYTE * 8)]
-
-class ChildVariant(ctypes.Structure):
-    _fields_ = [("vt", wintypes.USHORT),
-                ("reserved1", wintypes.USHORT),
-                ("reserved2", wintypes.USHORT),
-                ("reserved3", wintypes.USHORT),
-                ("value", ctypes.c_int64)]
-
-IID_IACCESSIBLE = Guid(0x618736E0, 0x3C3D, 0x11CF,
-                       (wintypes.BYTE * 8)(0x81, 0x0C, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71))
-
-ole32 = ctypes.WinDLL("ole32", use_last_error=True)
-ole32.CoInitialize.argtypes = [wintypes.LPVOID]
-ole32.CoInitialize.restype = ctypes.c_long
-ole32.CoUninitialize.argtypes = []
-ole32.CoUninitialize.restype = None
-
-oleacc = ctypes.WinDLL("oleacc", use_last_error=True)
-oleacc.AccessibleObjectFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.POINTER(Guid), ctypes.POINTER(wintypes.LPVOID)]
-oleacc.AccessibleObjectFromWindow.restype = ctypes.c_long
-
-oleaut32 = ctypes.WinDLL("oleaut32", use_last_error=True)
-oleaut32.SysFreeString.argtypes = [wintypes.LPVOID]
-oleaut32.SysFreeString.restype = None
 
 class NotifyIconId(ctypes.Structure):
     _fields_ = [("size", wintypes.DWORD),
@@ -3419,53 +3416,6 @@ class IconRect(ctypes.Structure):
 shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 shell32.Shell_NotifyIconGetRect.argtypes = [ctypes.POINTER(NotifyIconId), ctypes.POINTER(IconRect)]
 shell32.Shell_NotifyIconGetRect.restype = ctypes.c_long
-
-ChildCountProto = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.LPVOID, ctypes.POINTER(ctypes.c_long))
-GetNameProto = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.LPVOID, ChildVariant, ctypes.POINTER(wintypes.LPVOID))
-DoDefaultProto = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.LPVOID, ChildVariant)
-ReleaseProto = ctypes.WINFUNCTYPE(wintypes.ULONG, wintypes.LPVOID)
-
-ACC_RELEASE = 2
-ACC_CHILDCOUNT = 8
-ACC_GETNAME = 10
-ACC_DODEFAULT = 25
-
-def accessible_fn(pointer, index, proto):
-    # A COM interface pointer addresses the object; its first field is the
-    # vtable address. Dereference once before indexing the method slot.
-    vtable = (wintypes.LPVOID).from_address(pointer).value
-    if not vtable:
-        raise RuntimeError("accessible vtable is null")
-    table = (wintypes.LPVOID * 28).from_address(vtable)
-    raw = table[index]
-    address = raw if isinstance(raw, int) else raw.value
-    if not address:
-        raise RuntimeError("accessible vtable entry is null")
-    return proto(address)
-
-def child_arg(child_id):
-    return ChildVariant(VT_I4, 0, 0, 0, child_id)
-
-def release_accessible(pointer):
-    try:
-        if pointer:
-            accessible_fn(pointer, ACC_RELEASE, ReleaseProto)(pointer)
-    except Exception:
-        pass
-    try:
-        ole32.CoUninitialize()
-    except Exception:
-        pass
-
-def read_accessible_name(pointer, child_id):
-    name_out = wintypes.LPVOID(0)
-    result = int(accessible_fn(pointer, ACC_GETNAME, GetNameProto)(pointer, child_arg(child_id), ctypes.byref(name_out)))
-    if result != 0 or not name_out.value:
-        return ""
-    try:
-        return ctypes.wstring_at(name_out.value)
-    finally:
-        oleaut32.SysFreeString(name_out)
 
 def read_class(hwnd):
     buffer = ctypes.create_unicode_buffer(256)
@@ -3563,51 +3513,55 @@ if notify_post != 1 or menu_windows != 1:
     emit_result(notify_error)
     raise SystemExit(1)
 emit_phase("before_discover")
-pointer = 0
-reached_invoke = False
-try:
-    ole32.CoInitialize(None)
-    accessible = wintypes.LPVOID(0)
-    accessible_hr = int(oleacc.AccessibleObjectFromWindow(menu_hwnd, OBJID_CLIENT, ctypes.byref(IID_IACCESSIBLE), ctypes.byref(accessible)))
-    discover_error = None
-    pointer = accessible.value
-    if accessible_hr != 0 or not pointer:
-        discover_error = f"accessible_hresult={accessible_hr & 0xFFFFFFFF}"
-    else:
-        raw_count = ctypes.c_long(0)
-        count_hr = int(accessible_fn(pointer, ACC_CHILDCOUNT, ChildCountProto)(pointer, ctypes.byref(raw_count)))
-        if count_hr != 0 or int(raw_count.value) <= 0:
-            discover_error = f"child_count_hresult={count_hr & 0xFFFFFFFF}"
-        else:
-            menu_item_count = int(raw_count.value)
-            for child_id in range(1, menu_item_count + 1):
-                name = read_accessible_name(pointer, child_id)
-                menu_items.append((child_id, name))
-                if name == TRAY_QUIT_MENU_TEXT:
-                    quit_matches += 1
-                    quit_child_id = child_id
-                    quit_text = name
-    emit_phase("after_discover")
-    if quit_matches != 1 or quit_child_id <= 0:
-        release_accessible(pointer)
-        emit_result(discover_error)
-        raise SystemExit(1)
-    emit_phase("before_invoke")
-    reached_invoke = True
-    invoke_hr = int(accessible_fn(pointer, ACC_DODEFAULT, DoDefaultProto)(pointer, child_arg(quit_child_id)))
-    invoke_hresult = invoke_hr & 0xFFFFFFFF
-    invoke_result = int(invoke_hr == 0)
-    release_accessible(pointer)
-    emit_phase("after_invoke")
-    emit_result(None if invoke_result == 1 else f"invoke_hresult={invoke_hresult}")
-    raise SystemExit(0 if invoke_result == 1 else 1)
-except SystemExit:
-    raise
-except Exception as exc:
-    release_accessible(pointer)
-    emit_phase("after_invoke" if reached_invoke else "after_discover")
-    emit_result(f"helper_error={type(exc).__name__}")
+# DIAG230 Atom A: resolve the live HMENU from the open popup. WM_MN_GETHMENU
+# is the documented menu-window message; the returned HMENU is the same one
+# muda passed to TrackPopupMenu, so GetMenuItemID yields the runtime command
+# ids muda assigned — no numeric id is assumed or hard-coded.
+menu_hmenu = int(user32.SendMessageW(menu_hwnd, WM_MN_GETHMENU, 0, 0) or 0)
+count = int(user32.GetMenuItemCount(menu_hmenu)) if menu_hmenu else 0
+menu_item_count = count if count > 0 else 0
+discover_error = None
+if not menu_hmenu:
+    discover_error = "mn_gethmenu_returned_zero"
+elif menu_item_count <= 0:
+    discover_error = f"menu_item_count_invalid={count}"
+else:
+    for position in range(menu_item_count):
+        item_id = int(user32.GetMenuItemID(menu_hmenu, position))
+        buffer = ctypes.create_unicode_buffer(256)
+        length = int(user32.GetMenuStringW(menu_hmenu, position, buffer, len(buffer), MF_BYPOSITION))
+        text = buffer.value if length > 0 else ""
+        menu_items.append((position, text))
+        if text == TRAY_QUIT_MENU_TEXT:
+            quit_matches += 1
+            quit_position = position
+            quit_command_id = item_id
+            quit_text = text
+emit_phase("after_discover")
+if discover_error is not None:
+    emit_result(discover_error)
     raise SystemExit(1)
+if quit_matches != 1:
+    emit_result()
+    raise SystemExit(1)
+if not 1 <= quit_command_id <= 0xFFFFFFFE:
+    emit_result(f"invalid_command_id={quit_command_id}")
+    raise SystemExit(1)
+emit_phase("before_invoke")
+# Deliver the Quit command through the exact production routing a real user
+# click takes: TrackPopupMenu posts WM_COMMAND(LOWORD(wParam)=item id) to the
+# tray window, where muda's subclass resolves it via menu.find_by_id and
+# fires the semantic MenuEvent. No menu state is required for the handler to
+# resolve the item; the popup is then dismissed best-effort.
+posted = bool(user32.PostMessageW(tray_hwnd, WM_COMMAND, quit_command_id, 0))
+invoke_result = int(posted)
+if not posted:
+    invoke_hresult = ctypes.get_last_error()
+user32.PostMessageW(menu_hwnd, WM_KEYDOWN, VK_ESCAPE, 0)
+user32.PostMessageW(menu_hwnd, WM_KEYUP, VK_ESCAPE, 0)
+emit_phase("after_invoke")
+emit_result(None if invoke_result == 1 else f"command_post_error={invoke_hresult}")
+raise SystemExit(0 if invoke_result == 1 else 1)
 `;
 
 export function buildTrayQuitScript(pid) {
@@ -3625,8 +3579,9 @@ export function buildTrayQuitArguments(pid) {
 // Opening the live tray popup is the environmentally flaky stage: the
 // notify post is accepted but the popup sometimes never appears within one
 // helper run while the app stays alive. Every attempt below drives the same
-// real product path (open the genuine menu, resolve Quit semantically,
-// invoke the actual item); attempts only repeat that path, never bypass it.
+// real product path (open the genuine menu, resolve Quit semantically from
+// the live HMENU, deliver its runtime command id through WM_COMMAND);
+// attempts only repeat that path, never bypass it.
 export const TRAY_QUIT_MAX_ATTEMPTS = 4;
 export const TRAY_QUIT_ATTEMPT_BUDGET_MS = 40_000;
 
@@ -3642,7 +3597,7 @@ function trayQuitExcerpt(stdout) {
   const excerpt = String(stdout ?? "")
     .split(/\r?\n/)
     .filter((line) =>
-      /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
+      /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|TRAY_ICON_RECT|menu_item_count|menu_hmenu|quit_matches|quit_position|quit_command_id|quit_text|TRAY_QUIT_MENU_ITEM|invoke_hresult|invoke_result|win32_error)=/.test(
         line
       )
     )
@@ -3708,17 +3663,19 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     })
   );
   const menuItemCount = readInteger("menu_item_count");
+  const menuHmenu = readInteger("menu_hmenu");
   const quitMatches = readInteger("quit_matches");
-  const quitChildId = readInteger("quit_child_id");
+  const quitPosition = readInteger("quit_position");
+  const quitCommandId = readInteger("quit_command_id");
   const quitText = readSingleLine("quit_text");
   const menuItems = [...text.matchAll(/(?:^|\r?\n)TRAY_QUIT_MENU_ITEM=(\d+):(.*)(?=\r?$)/gm)].map(
-    (match) => ({ childId: Number(match[1]), text: match[2] })
+    (match) => ({ position: Number(match[1]), text: match[2] })
   );
   const invokeHresult = readInteger("invoke_hresult");
   const invokeResult = readInteger("invoke_result");
   const elapsedMs = readInteger("elapsed_ms");
   const menuMap = menuItems.length
-    ? menuItems.map((item) => `${item.childId}:${item.text}`).join(" | ")
+    ? menuItems.map((item) => `${item.position}:${item.text}`).join(" | ")
     : "<no menu items reported>";
   if (expectedPid !== null && targetPid !== Number(expectedPid))
     fail(`tray Quit output target PID mismatch (${targetPid})`);
@@ -3734,6 +3691,7 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     fail(`tray Quit requires exactly one live context menu for the target PID (found ${menuWindows}, system-wide ${menuWindowsAny})`);
   if (menuHwnd <= 0) fail("tray Quit output has invalid menu_hwnd");
   if (trayAlive !== 1) fail("tray Quit tray window died while opening the context menu");
+  if (menuHmenu <= 0) fail("tray Quit live menu handle was not resolved (WM_MN_GETHMENU)");
   if (iconRects.length !== iconRectCount)
     fail(`tray Quit icon rect map is truncated (rects=${iconRects.length}, count=${iconRectCount})`);
   if (menuItems.length !== menuItemCount)
@@ -3744,13 +3702,15 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     );
   if (quitText !== TRAY_QUIT_MENU_TEXT)
     fail(`tray Quit discovered text is not the semantic Quit item (${JSON.stringify(quitText)}): ${menuMap}`);
-  if (!(quitChildId >= 1 && quitChildId <= menuItemCount))
-    fail(`tray Quit accessible child id is out of range (${quitChildId} of ${menuItemCount}): ${menuMap}`);
-  if (!menuItems.some((item) => item.childId === quitChildId && item.text === TRAY_QUIT_MENU_TEXT))
-    fail(`tray Quit invoked child is not bound to the reported menu map (${quitChildId}): ${menuMap}`);
+  if (!(quitPosition >= 0 && quitPosition < menuItemCount))
+    fail(`tray Quit menu position is out of range (${quitPosition} of ${menuItemCount}): ${menuMap}`);
+  if (!(quitCommandId >= 1 && quitCommandId <= 0xfffffffe))
+    fail(`tray Quit command id is not a live menu command id (${quitCommandId}): ${menuMap}`);
+  if (!menuItems.some((item) => item.position === quitPosition && item.text === TRAY_QUIT_MENU_TEXT))
+    fail(`tray Quit delivered position is not bound to the reported menu map (${quitPosition}): ${menuMap}`);
   if (invokeResult !== 1)
     fail(
-      `tray Quit accessibility invoke of ${TRAY_QUIT_SEMANTIC_ID}/${JSON.stringify(quitText)} child ${quitChildId} failed (hresult=${invokeHresult}): ${menuMap}`
+      `tray Quit WM_COMMAND delivery of ${TRAY_QUIT_SEMANTIC_ID}/${JSON.stringify(quitText)} (position ${quitPosition}, command id ${quitCommandId}) failed (hresult=${invokeHresult}): ${menuMap}`
     );
   return {
     targetPid,
@@ -3766,9 +3726,11 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     trayAlive: trayAlive === 1,
     iconRectCount,
     iconRects,
+    menuHmenu,
     menuItemCount,
     quitMatches,
-    quitChildId,
+    quitPosition,
+    quitCommandId,
     quitText,
     menuItems,
     menuMap,
@@ -3865,7 +3827,7 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       const parsed = parseTrayQuitOutput(result.stdout, pid);
       const diagnostic = [
         `TRAY_QUIT_HELPER executable_category=python-harness executable_path=${path.basename(executable)} exit_code=${result.code}`,
-        `TRAY_QUIT_RESULT attempt=${attempt} target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_windows_any=${parsed.menuWindowsAny} menu_hwnd=${parsed.menuHwnd} tray_alive=${parsed.trayAlive ? 1 : 0} icon_rects=${parsed.iconRects.map((rect) => `${rect.uid}:${rect.left},${rect.top},${rect.right},${rect.bottom}`).join("|") || "none"} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_child_id=${parsed.quitChildId} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
+        `TRAY_QUIT_RESULT attempt=${attempt} target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_windows_any=${parsed.menuWindowsAny} menu_hwnd=${parsed.menuHwnd} tray_alive=${parsed.trayAlive ? 1 : 0} icon_rects=${parsed.iconRects.map((rect) => `${rect.uid}:${rect.left},${rect.top},${rect.right},${rect.bottom}`).join("|") || "none"} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_position=${parsed.quitPosition} quit_command_id=${parsed.quitCommandId} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
         `TRAY_QUIT_MENU_MAP ${parsed.menuMap}`
       ].join("\n");
       writeLog(layout.logs, "tray-quit.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
