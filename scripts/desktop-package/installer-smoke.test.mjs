@@ -2181,6 +2181,8 @@ const trayQuitOutput = ({
   iconCenterY = 744,
   cursorPlace = 1,
   sendInput = 1,
+  foregroundAttached = 1,
+  foregroundOk = 1,
   clickCursorPlace = 1,
   clicksSent = 1,
   rects = [{ uid: 1, left: 1800, top: 1040, right: 1824, bottom: 1064 }],
@@ -2233,6 +2235,8 @@ const trayQuitOutput = ({
     `icon_center_y=${iconCenterY}`,
     `cursor_place=${cursorPlace}`,
     `send_input=${sendInput}`,
+    `foreground_attached=${foregroundAttached}`,
+    `foreground_ok=${foregroundOk}`,
     `menu_item_count=${items.length}`,
     `quit_matches=${quitHits.length}`,
     `quit_child_id=${quitChildId}`,
@@ -2303,12 +2307,12 @@ test("tray Quit helper arguments are isolated and reject invalid PIDs", () => {
 
 test("tray Quit retry policy repeats only the real path within budget", () => {
   assert.equal(TRAY_QUIT_MAX_ATTEMPTS, 4);
-  assert.equal(TRAY_QUIT_ATTEMPT_BUDGET_MS, 70_000);
+  assert.equal(TRAY_QUIT_ATTEMPT_BUDGET_MS, 120_000);
   assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 0, timeoutMs: 60_000 }), true);
-  assert.equal(shouldRetryTrayQuit({ attempt: 3, elapsedMs: 60_000, timeoutMs: 90_000 }), true);
-  assert.equal(shouldRetryTrayQuit({ attempt: 4, elapsedMs: 0, timeoutMs: 90_000 }), false);
-  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 41_000, timeoutMs: 90_000 }), true);
-  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 71_000, timeoutMs: 90_000 }), false);
+  assert.equal(shouldRetryTrayQuit({ attempt: 3, elapsedMs: 60_000, timeoutMs: 150_000 }), true);
+  assert.equal(shouldRetryTrayQuit({ attempt: 4, elapsedMs: 0, timeoutMs: 150_000 }), false);
+  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 41_000, timeoutMs: 150_000 }), true);
+  assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 121_000, timeoutMs: 150_000 }), false);
   assert.equal(shouldRetryTrayQuit({ attempt: 1, elapsedMs: 6_000, timeoutMs: 5_000 }), false);
   assert.throws(() => shouldRetryTrayQuit({ attempt: 0, elapsedMs: 0, timeoutMs: 60_000 }), /invalid/);
 });
@@ -2437,6 +2441,8 @@ test("tray Quit output requires the real menu surface and a successful invocatio
   assert.equal(parsed.trayAlive, true);
   assert.equal(parsed.cursorPlace, true);
   assert.equal(parsed.sendInput, 1);
+  assert.equal(parsed.foregroundAttached, true);
+  assert.equal(parsed.foregroundOk, true);
   assert.equal(parsed.clickCursorPlace, true);
   assert.equal(parsed.clicksSent, 1);
   assert.deepEqual(parsed.iconRects, [

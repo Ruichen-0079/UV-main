@@ -3336,6 +3336,8 @@ icon_center_x = -1
 icon_center_y = -1
 cursor_place = 0
 send_input = 0
+foreground_attached = 0
+foreground_ok = 0
 menu_item_count = 0
 menu_items = []
 quit_matches = 0
@@ -3368,6 +3370,8 @@ def emit_result(error=None):
     print(f"icon_center_y={icon_center_y}", flush=True)
     print(f"cursor_place={cursor_place}", flush=True)
     print(f"send_input={send_input}", flush=True)
+    print(f"foreground_attached={foreground_attached}", flush=True)
+    print(f"foreground_ok={foreground_ok}", flush=True)
     print(f"menu_item_count={menu_item_count}", flush=True)
     print(f"quit_matches={quit_matches}", flush=True)
     print(f"quit_child_id={quit_child_id}", flush=True)
@@ -3400,8 +3404,17 @@ user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, w
 user32.PostMessageW.restype = wintypes.BOOL
 user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
 user32.SetCursorPos.restype = wintypes.BOOL
+user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+user32.AttachThreadInput.restype = wintypes.BOOL
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.SetForegroundWindow.restype = wintypes.BOOL
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = wintypes.LPVOID
 user32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID]
 user32.mouse_event.restype = None
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetCurrentThreadId.argtypes = []
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 
 class Guid(ctypes.Structure):
     _fields_ = [("data1", wintypes.DWORD),
@@ -3571,12 +3584,13 @@ for probe_uid in range(1, 17):
         print(f"TRAY_ICON_RECT={probe_uid}:{int(rect.left)},{int(rect.top)},{int(rect.right)},{int(rect.bottom)}", flush=True)
 emit_phase("after_icon_probe")
 emit_phase("before_menu_open")
-# DIAG230 activation hardening: show_tray_menu positions the popup at the
-# CURRENT cursor (GetCursorPos inside tray-icon), and the runner cursor is
-# wherever the session left it. Place the cursor on the probed icon rect so
-# the popup opens at a sane on-screen location, and fall back to a real
-# injected right-click (shell → notify icon → tray window) when the posted
-# WM_USER_TRAYICON round does not produce a popup.
+# DIAG230 activation hardening, part 1 (foreground): show_tray_menu calls
+# SetForegroundWindow before TrackPopupMenu, and Windows discards the popup
+# immediately when that call loses the foreground race — on hosted runner
+# VMs the app is a background child process, so the menu can open and close
+# faster than any poll can observe it. Attach the helper's input queue to
+# the app's tray thread for the duration of the call, which lets
+# SetForegroundWindow bypass the foreground lock, then verify.
 notify_post = 0
 notify_error = None
 menu_hits = []
@@ -3584,6 +3598,14 @@ menu_windows_any = 0
 emit_phase("before_cursor_place")
 if icon_center_x >= 0:
     cursor_place = int(bool(user32.SetCursorPos(icon_center_x, icon_center_y)))
+app_tray_thread = wintypes.DWORD(0)
+user32.GetWindowThreadProcessId(tray_hwnd, ctypes.byref(app_tray_thread))
+helper_thread = int(kernel32.GetCurrentThreadId())
+if int(app_tray_thread.value) > 0 and int(app_tray_thread.value) != helper_thread:
+    foreground_attached = int(bool(user32.AttachThreadInput(helper_thread, int(app_tray_thread.value), True)))
+    user32.SetForegroundWindow(tray_hwnd)
+    foreground_ok = int(user32.GetForegroundWindow() == tray_hwnd)
+    user32.AttachThreadInput(helper_thread, int(app_tray_thread.value), False)
 emit_phase("before_send_input")
 for _ in range(MENU_OPEN_ROUNDS):
     posted = user32.PostMessageW(tray_hwnd, WM_USER_TRAYICON, 0, WM_RBUTTONUP)
@@ -3729,7 +3751,7 @@ export function buildTrayQuitArguments(pid) {
 // the live HMENU, deliver its runtime command id through WM_COMMAND);
 // attempts only repeat that path, never bypass it.
 export const TRAY_QUIT_MAX_ATTEMPTS = 4;
-export const TRAY_QUIT_ATTEMPT_BUDGET_MS = 70_000;
+export const TRAY_QUIT_ATTEMPT_BUDGET_MS = 120_000;
 
 export function shouldRetryTrayQuit({ attempt, elapsedMs, timeoutMs } = {}) {
   if (!Number.isInteger(attempt) || attempt < 1) fail("tray Quit attempt is invalid");
@@ -3743,7 +3765,7 @@ function trayQuitExcerpt(stdout) {
   const excerpt = String(stdout ?? "")
     .split(/\r?\n/)
     .filter((line) =>
-      /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|icon_center_x|icon_center_y|cursor_place|send_input|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|TRAY_QUIT_ITEM_RECT|invoke_hresult|invoke_result|click_cursor_place|clicks_sent|menu_closed|win32_error)=/.test(
+      /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|icon_center_x|icon_center_y|cursor_place|send_input|foreground_attached|foreground_ok|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|TRAY_QUIT_ITEM_RECT|invoke_hresult|invoke_result|click_cursor_place|clicks_sent|menu_closed|win32_error)=/.test(
         line
       )
     )
@@ -3805,6 +3827,8 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
   const iconCenterY = readInteger("icon_center_y");
   const cursorPlace = readInteger("cursor_place");
   const sendInput = readInteger("send_input");
+  const foregroundAttached = readInteger("foreground_attached");
+  const foregroundOk = readInteger("foreground_ok");
   const iconRects = [...text.matchAll(/(?:^|\r?\n)TRAY_ICON_RECT=(\d+):(-?\d+),(-?\d+),(-?\d+),(-?\d+)(?=\r?$)/gm)].map(
     (match) => ({
       uid: Number(match[1]),
@@ -3895,6 +3919,8 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     iconCenterY,
     cursorPlace: cursorPlace === 1,
     sendInput,
+    foregroundAttached: foregroundAttached === 1,
+    foregroundOk: foregroundOk === 1,
     iconRects,
     clickCursorPlace: clickCursorPlace === 1,
     clicksSent,
@@ -3980,11 +4006,11 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       );
     let result;
     try {
-      // 20s per attempt: the hardened open loop (posted round + real-input
-      // fallback round, 2s poll each x 3) plus MSAA discovery needs headroom
-      // when the popup only opens in a later round; the previous caps (10s,
-      // then 15s) truncated late-opening attempts mid-discovery.
-      result = await runProcess(executable, args, options, Math.min(timeoutMs, 20_000));
+      // 30s per attempt: the hardened open loop (foreground attach, posted
+      // round + real-input fallback round, 2s poll each x 3) plus MSAA
+      // discovery, click delivery, and the close poll needs headroom when
+      // the popup only opens in a later round.
+      result = await runProcess(executable, args, options, Math.min(timeoutMs, 30_000));
       assertNoSecrets(result.stderr, "tray Quit stderr");
       if (result.code !== 0) {
         let parseError = null;
@@ -4003,7 +4029,7 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       const parsed = parseTrayQuitOutput(result.stdout, pid);
       const diagnostic = [
         `TRAY_QUIT_HELPER executable_category=python-harness executable_path=${path.basename(executable)} exit_code=${result.code}`,
-        `TRAY_QUIT_RESULT attempt=${attempt} target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_windows_any=${parsed.menuWindowsAny} menu_hwnd=${parsed.menuHwnd} tray_alive=${parsed.trayAlive ? 1 : 0} icon_rects=${parsed.iconRects.map((rect) => `${rect.uid}:${rect.left},${rect.top},${rect.right},${rect.bottom}`).join("|") || "none"} cursor_place=${parsed.cursorPlace ? 1 : 0} send_input=${parsed.sendInput} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_child_id=${parsed.quitChildId} quit_rect=${parsed.itemRect ? `${parsed.itemRect.left},${parsed.itemRect.top},${parsed.itemRect.right},${parsed.itemRect.bottom}` : "none"} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} menu_closed=${parsed.menuClosed ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
+        `TRAY_QUIT_RESULT attempt=${attempt} target_pid=${parsed.targetPid} tray_windows=${parsed.trayWindows} tray_hwnd=${parsed.trayHwnd} validated_pid=${parsed.validatedPid} class_exact=${parsed.classExact ? 1 : 0} identity_valid=${parsed.identityValid ? 1 : 0} notify_post=${parsed.notifyPost ? 1 : 0} menu_windows=${parsed.menuWindows} menu_windows_any=${parsed.menuWindowsAny} menu_hwnd=${parsed.menuHwnd} tray_alive=${parsed.trayAlive ? 1 : 0} icon_rects=${parsed.iconRects.map((rect) => `${rect.uid}:${rect.left},${rect.top},${rect.right},${rect.bottom}`).join("|") || "none"} cursor_place=${parsed.cursorPlace ? 1 : 0} send_input=${parsed.sendInput} foreground_attached=${parsed.foregroundAttached ? 1 : 0} foreground_ok=${parsed.foregroundOk ? 1 : 0} menu_items=${parsed.menuItemCount} quit_matches=${parsed.quitMatches} quit_semantic=${TRAY_QUIT_SEMANTIC_ID} quit_text=${parsed.quitText} quit_child_id=${parsed.quitChildId} quit_rect=${parsed.itemRect ? `${parsed.itemRect.left},${parsed.itemRect.top},${parsed.itemRect.right},${parsed.itemRect.bottom}` : "none"} invoke_hresult=${parsed.invokeHresult} invoke_result=${parsed.invokeResult ? 1 : 0} menu_closed=${parsed.menuClosed ? 1 : 0} elapsed_ms=${parsed.elapsedMs}`,
         `TRAY_QUIT_MENU_MAP ${parsed.menuMap}`
       ].join("\n");
       writeLog(layout.logs, "tray-quit.log", `${result.stdout}\n${result.stderr}\n${diagnostic}`);
