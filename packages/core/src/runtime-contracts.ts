@@ -542,6 +542,18 @@ export type AdmitFinalizedSpeechObservationInput = {
   captureEpoch?: string | undefined;
 };
 
+export type SpeechActivityObservationInput = {
+  sessionId?: string | undefined;
+  captureEpoch: string;
+  active: boolean;
+};
+
+export type SpeechActivitySnapshot = {
+  speechActive: boolean;
+  captureEpoch: string | null;
+  activityRevision: number;
+};
+
 export type HandleImageInputInput = VisionInput & {
   sessionId: string;
   traceId?: string | undefined;

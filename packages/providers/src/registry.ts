@@ -29,7 +29,13 @@ import {
   type ReasoningOutput,
   type ReasoningProvider
 } from "./types/reasoning.js";
-import type { STTInput, STTOutput, STTProvider } from "./types/stt.js";
+import type {
+  STTInput,
+  STTOutput,
+  STTProvider,
+  VoiceActivityInput,
+  VoiceActivityOutput
+} from "./types/stt.js";
 import type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
 import type { VisionInput, VisionOutput, VisionProvider } from "./types/vision.js";
 import {
@@ -1575,6 +1581,25 @@ export class FallbackSTTProvider implements STTProvider {
       (provider) => provider.transcribeAudio(input, options),
       options
     );
+  }
+
+  async detectVoiceActivity(
+    input: VoiceActivityInput,
+    options?: ProviderCallOptions
+  ): Promise<VoiceActivityOutput> {
+    const capable = this.providers.find(
+      (provider) => typeof provider.detectVoiceActivity === "function"
+    );
+    if (!capable?.detectVoiceActivity) {
+      throw new ProviderError({
+        provider: this.name,
+        capability: "stt",
+        code: ProviderErrorCode.ProviderUnavailable,
+        message: "Live speech activity requires the local STT sidecar Silero VAD.",
+        retryable: false
+      });
+    }
+    return capable.detectVoiceActivity(input, options);
   }
 }
 

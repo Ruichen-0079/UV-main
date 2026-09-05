@@ -28,6 +28,10 @@ import numpy as np
 import sherpa_onnx
 
 
+class VadUnavailable(RuntimeError):
+    """Sidecar is up, but Silero VAD weights are not provisioned."""
+
+
 def _cpu_threads(requested: int) -> int:
     cpu = os.cpu_count() or 4
     cap = max(1, cpu // 4)
@@ -278,6 +282,71 @@ class SttEngine:
         )
         self.store = SpeakerStore(speaker_dir, dim=self.extractor.dim, threshold=threshold)
         self._lock = threading.Lock()
+        self.vad_model = self._find_vad_model()
+        self._vad_sessions: dict[str, Any] = {}
+        self._vad_lock = threading.Lock()
+
+    def _find_vad_model(self) -> Path | None:
+        names = ("silero_vad.onnx", "silero_vad_v5.onnx")
+        for name in names:
+            candidate = self.model_dir / name
+            if candidate.is_file():
+                return candidate
+        if not self.model_dir.is_dir():
+            return None
+        for name in names:
+            matches = list(self.model_dir.rglob(name))
+            if matches:
+                return matches[0]
+        return None
+
+    def _create_vad(self) -> Any:
+        if self.vad_model is None:
+            raise FileNotFoundError("silero_vad.onnx missing")
+        config = sherpa_onnx.VadModelConfig()
+        config.silero_vad.model = str(self.vad_model)
+        config.silero_vad.threshold = 0.5
+        config.silero_vad.min_silence_duration = 0.25
+        config.silero_vad.min_speech_duration = 0.15
+        config.sample_rate = 16000
+        config.num_threads = 1
+        config.provider = "cpu"
+        return sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=20)
+
+    def _vad_is_active(self, vad: Any) -> bool:
+        detected = getattr(vad, "is_speech_detected", None)
+        if callable(detected):
+            return bool(detected())
+        if detected is not None:
+            return bool(detected)
+        empty = getattr(vad, "empty", None)
+        if empty is None:
+            return False
+        return not bool(empty() if callable(empty) else empty)
+
+    def handle_vad(self, body: dict[str, Any]) -> dict[str, Any]:
+        if self.vad_model is None:
+            raise VadUnavailable("Silero VAD model is not provisioned")
+        capture_epoch = str(body.get("captureEpoch") or "").strip()
+        if not capture_epoch:
+            raise ValueError("captureEpoch is required")
+        pcm_b64 = str(body.get("pcmBase64") or "")
+        if not pcm_b64:
+            raise ValueError("pcmBase64 is required")
+        sample_rate = int(body.get("sampleRate") or 16000)
+        raw = base64.b64decode(pcm_b64)
+        samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        samples = _resample(samples, sample_rate, 16000)
+        with self._vad_lock:
+            vad = self._vad_sessions.get(capture_epoch)
+            if vad is None:
+                vad = self._create_vad()
+                self._vad_sessions[capture_epoch] = vad
+                while len(self._vad_sessions) > 8:
+                    self._vad_sessions.pop(next(iter(self._vad_sessions)))
+            vad.accept_waveform(samples)
+            active = self._vad_is_active(vad)
+        return {"active": active, "captureEpoch": capture_epoch}
 
     def _find_dir(self, names: list[str]) -> Path:
         for name in names:
@@ -300,6 +369,8 @@ class SttEngine:
             "diarizationModel": Path(self.segmentation_model).name,
             "speakerCount": len(self.store.list_public()),
             "gpu": False,
+            "vad": self.vad_model is not None,
+            "vadModel": None if self.vad_model is None else self.vad_model.name,
         }
 
     def embed(self, sample_rate: int, samples: np.ndarray) -> np.ndarray:
@@ -439,6 +510,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/transcribe":
                 self._json(200, engine.handle_transcribe(body))
                 return
+            if self.path == "/vad":
+                self._json(200, engine.handle_vad(body))
+                return
             if self.path == "/identify":
                 self._json(200, engine.handle_identify(body))
                 return
@@ -446,6 +520,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, engine.handle_enroll(body))
                 return
             self._json(404, {"error": "not_found"})
+        except VadUnavailable as exc:
+            self._json(503, {"error": "vad_unavailable", "message": str(exc)})
         except Exception as exc:  # noqa: BLE001
             self._json(400, {"error": "bad_request", "message": str(exc)})
 

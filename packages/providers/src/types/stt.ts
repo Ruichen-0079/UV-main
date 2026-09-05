@@ -48,8 +48,24 @@ export type STTOutput = ProviderMetadata & {
   segments?: STTSegment[] | undefined;
 };
 
+export type VoiceActivityInput = {
+  captureEpoch: string;
+  pcmBase64: string;
+  sampleRate?: number | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+export type VoiceActivityOutput = {
+  active: boolean;
+  captureEpoch: string;
+};
+
 export interface STTProvider {
   readonly name: string;
   healthCheck(): Promise<ProviderHealth>;
   transcribeAudio(input: STTInput, options?: ProviderCallOptions): Promise<STTOutput>;
+  detectVoiceActivity?(
+    input: VoiceActivityInput,
+    options?: ProviderCallOptions
+  ): Promise<VoiceActivityOutput>;
 }

@@ -35,6 +35,12 @@ export const LOCAL_STT_ASSETS = [
   }
 ];
 
+/** Optional Silero VAD weights used by live speech activity. Not required for transcription. */
+export const LOCAL_STT_VAD_ASSET = {
+  url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+  archive: false
+};
+
 function download(url, outPath, execFileSyncImpl) {
   if (fs.existsSync(outPath)) return;
   const partial = `${outPath}.partial`;
@@ -93,6 +99,14 @@ export function downloadLocalSttModels(options = {}) {
     if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
       throw new Error(`missing required local STT runtime file ${filePath}`);
     }
+  }
+  const vadName = path.basename(new URL(LOCAL_STT_VAD_ASSET.url).pathname);
+  const vadPacked = path.join(tmp, vadName);
+  const vadDest = path.join(dest, vadName);
+  if (!fs.existsSync(vadDest)) {
+    console.log(`fetch ${LOCAL_STT_VAD_ASSET.url}`);
+    download(LOCAL_STT_VAD_ASSET.url, vadPacked, execFileSyncImpl);
+    fs.copyFileSync(vadPacked, vadDest);
   }
   console.log(`models ready in ${dest}`);
   return { dest, manifest };

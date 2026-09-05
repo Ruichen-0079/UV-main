@@ -38,6 +38,28 @@ export function claimKey(captureEpoch: string, segmentId: string): string {
 }
 
 /**
+ * Bind a live capture generation to a session without a finalized segment.
+ * A new epoch obsoletes the previous live epoch for that session.
+ */
+export function beginLiveSpeechCapture(
+  store: SpeechCaptureStore,
+  sessionId: string | undefined,
+  captureEpoch: string
+): string {
+  const epoch = opaqueIdentity(captureEpoch, defaultCreateId, "captureEpoch");
+  if (store.obsoleteEpochs.has(epoch)) {
+    throw new SpeechCaptureFenceError("stale-epoch", epoch);
+  }
+  const session = normalizeSessionId(sessionId);
+  const live = store.liveEpochBySession.get(session);
+  if (live !== undefined && live !== epoch) {
+    markObsolete(store, live);
+  }
+  store.liveEpochBySession.set(session, epoch);
+  return epoch;
+}
+
+/**
  * Runtime-lifetime fence for one finalized speech observation.
  * Duplicate key is (captureEpoch, segmentId). Transcript text is never a key.
  */

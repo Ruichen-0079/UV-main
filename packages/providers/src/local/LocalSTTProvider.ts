@@ -2,7 +2,14 @@ import { randomUUID } from "node:crypto";
 import type { ProviderCallOptions, ProviderHealth } from "../types/common.js";
 import { ProviderError, ProviderErrorCode } from "../types/errors.js";
 import { createTransportAbort } from "../transport-abort.js";
-import type { STTInput, STTOutput, STTSegment, STTProvider } from "../types/stt.js";
+import type {
+  STTInput,
+  STTOutput,
+  STTSegment,
+  STTProvider,
+  VoiceActivityInput,
+  VoiceActivityOutput
+} from "../types/stt.js";
 
 export type LocalSTTProviderOptions = {
   baseUrl: string;
@@ -120,6 +127,71 @@ export class LocalSTTProvider implements STTProvider {
         capability: "stt",
         code: ProviderErrorCode.NetworkError,
         message: "Local STT transcription request failed.",
+        cause: error
+      });
+    } finally {
+      transport.cleanup();
+    }
+  }
+
+  async detectVoiceActivity(
+    input: VoiceActivityInput,
+    options?: ProviderCallOptions
+  ): Promise<VoiceActivityOutput> {
+    const transport = createTransportAbort({
+      signal: options?.signal ?? input.signal,
+      timeoutMs: this.options.timeoutMs ?? 8_000
+    });
+    try {
+      const response = await fetch(`${trimSlash(this.options.baseUrl)}/vad`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          captureEpoch: input.captureEpoch,
+          pcmBase64: input.pcmBase64,
+          sampleRate: input.sampleRate ?? 16_000
+        }),
+        signal: transport.signal
+      });
+      if (response.status === 503) {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "stt",
+          code: ProviderErrorCode.ProviderUnavailable,
+          message: "Local STT sidecar has no Silero VAD model.",
+          retryable: false
+        });
+      }
+      if (!response.ok) {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "stt",
+          code: ProviderErrorCode.NetworkError,
+          message: `Local STT VAD failed with HTTP ${response.status}.`,
+          retryable: response.status >= 500
+        });
+      }
+      const body = (await response.json()) as { active?: boolean; captureEpoch?: string };
+      if (typeof body.active !== "boolean") {
+        throw new ProviderError({
+          provider: this.name,
+          capability: "stt",
+          code: ProviderErrorCode.MalformedResponse,
+          message: "Local STT VAD response did not include an active boolean.",
+          retryable: false
+        });
+      }
+      return {
+        active: body.active,
+        captureEpoch: body.captureEpoch ?? input.captureEpoch
+      };
+    } catch (error) {
+      if (error instanceof ProviderError) throw error;
+      throw new ProviderError({
+        provider: this.name,
+        capability: "stt",
+        code: ProviderErrorCode.NetworkError,
+        message: "Local STT VAD request failed.",
         cause: error
       });
     } finally {

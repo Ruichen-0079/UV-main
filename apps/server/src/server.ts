@@ -6,6 +6,7 @@ import { registerDebugRoutes } from "./routes/debug.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { memorySearchValidationError, registerMemoryRoutes } from "./routes/memory.js";
 import { registerMediaRoutes } from "./routes/media.js";
+import { registerSpeechActivityRoutes } from "./routes/speech-activity.js";
 import { registerMessageRoutes } from "./routes/message.js";
 import { registerMessageStreamRoutes } from "./routes/message-stream.js";
 import { registerProactiveTurnStreamRoutes } from "./routes/proactive-turn-stream.js";
@@ -116,6 +117,7 @@ export async function buildServer(config: ServerConfig) {
   await registerMessageStreamRoutes(app, context);
   await registerProactiveTurnStreamRoutes(app, context);
   await registerMediaRoutes(app, context);
+  await registerSpeechActivityRoutes(app, context);
   await registerMemoryRoutes(app, context, config);
   await registerEventRoutes(app, context);
   await registerDebugRoutes(app, context, config);
