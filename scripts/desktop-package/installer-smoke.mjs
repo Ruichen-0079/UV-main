@@ -3318,7 +3318,7 @@ VT_I4 = 3
 MENU_OPEN_ROUNDS = 3
 MENU_OPEN_ROUND_S = 2.0
 MENU_POLL_INTERVAL_S = 0.05
-MENU_CLOSE_POLL_S = 1.0
+MENU_CLOSE_POLL_S = 2.0
 started = time.monotonic()
 target_pid = int(sys.argv[1])
 tray_windows = []
@@ -3342,6 +3342,8 @@ quit_matches = 0
 quit_child_id = 0
 quit_text = ""
 quit_rect = None
+click_cursor_place = 0
+clicks_sent = 0
 invoke_hresult = 0
 invoke_result = 0
 menu_closed = 0
@@ -3377,6 +3379,8 @@ def emit_result(error=None):
         print(f"TRAY_QUIT_ITEM_RECT={left},{top},{right},{bottom}", flush=True)
     print(f"invoke_hresult={invoke_hresult}", flush=True)
     print(f"invoke_result={invoke_result}", flush=True)
+    print(f"click_cursor_place={click_cursor_place}", flush=True)
+    print(f"clicks_sent={clicks_sent}", flush=True)
     print(f"menu_closed={menu_closed}", flush=True)
     if error is not None:
         print(f"win32_error={error}", flush=True)
@@ -3666,10 +3670,15 @@ try:
     quit_rect = (int(left.value), int(top.value), int(left.value) + int(width.value), int(top.value) + int(height.value))
     center_x = int(left.value) + int(width.value) // 2
     center_y = int(top.value) + int(height.value) // 2
-    user32.SetCursorPos(center_x, center_y)
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, None)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, None)
+    click_cursor_place = int(bool(user32.SetCursorPos(center_x, center_y)))
     invoke_result = 1
+
+    def click_quit_item():
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, None)
+        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, None)
+        return 1
+
+    clicks_sent += click_quit_item()
     close_deadline = time.monotonic() + MENU_CLOSE_POLL_S
     while time.monotonic() < close_deadline:
         closed_hits, _closed_any = snapshot_menu_windows()
@@ -3677,6 +3686,17 @@ try:
             menu_closed = 1
             break
         time.sleep(MENU_POLL_INTERVAL_S)
+    if menu_closed != 1 and click_cursor_place == 1:
+        # One retry click in case the first injection raced the menu loop.
+        user32.SetCursorPos(center_x, center_y)
+        clicks_sent += click_quit_item()
+        close_deadline = time.monotonic() + MENU_CLOSE_POLL_S
+        while time.monotonic() < close_deadline:
+            closed_hits, _closed_any = snapshot_menu_windows()
+            if len(closed_hits) == 0:
+                menu_closed = 1
+                break
+            time.sleep(MENU_POLL_INTERVAL_S)
     release_accessible(pointer)
     emit_phase("after_invoke")
     emit_result(None)
@@ -3723,7 +3743,7 @@ function trayQuitExcerpt(stdout) {
   const excerpt = String(stdout ?? "")
     .split(/\r?\n/)
     .filter((line) =>
-      /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|icon_center_x|icon_center_y|cursor_place|send_input|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|TRAY_QUIT_ITEM_RECT|invoke_hresult|invoke_result|menu_closed|win32_error)=/.test(
+      /^(?:TRAY_QUIT_PHASE|notify_post|menu_windows|menu_windows_any|menu_hwnd|tray_alive|icon_rect_count|icon_center_x|icon_center_y|cursor_place|send_input|TRAY_ICON_RECT|menu_item_count|quit_matches|quit_child_id|quit_text|TRAY_QUIT_MENU_ITEM|TRAY_QUIT_ITEM_RECT|invoke_hresult|invoke_result|click_cursor_place|clicks_sent|menu_closed|win32_error)=/.test(
         line
       )
     )
@@ -3810,6 +3830,8 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
   const menuItems = [...text.matchAll(/(?:^|\r?\n)TRAY_QUIT_MENU_ITEM=(\d+):(.*)(?=\r?$)/gm)].map(
     (match) => ({ childId: Number(match[1]), text: match[2] })
   );
+  const clickCursorPlace = readInteger("click_cursor_place");
+  const clicksSent = readInteger("clicks_sent");
   const invokeHresult = readInteger("invoke_hresult");
   const invokeResult = readInteger("invoke_result");
   const elapsedMs = readInteger("elapsed_ms");
@@ -3874,6 +3896,8 @@ export function parseTrayQuitOutput(stdout, expectedPid = null) {
     cursorPlace: cursorPlace === 1,
     sendInput,
     iconRects,
+    clickCursorPlace: clickCursorPlace === 1,
+    clicksSent,
     menuItemCount,
     quitMatches,
     quitChildId,
@@ -3994,10 +4018,10 @@ async function sendTrayQuit(pid, layout, timeoutMs) {
       const attemptLog = `${partialStdout}\n${partialStderr}`;
       writeLog(layout.logs, `tray-quit-attempt-${attempt}.log`, attemptLog);
       let message = error instanceof Error ? error.message : String(error);
-      if (!result && error instanceof Error && /timed out/.test(error.message)) {
-        const excerpt = trayQuitExcerpt(partialStdout);
-        message = `${error.message}${excerpt ? ` [${excerpt}]` : ""}`;
-      }
+      // Attach the excerpt to every attempt failure (parse rejections on a
+      // zero-exit helper included) so rect/hresult evidence is visible.
+      const excerpt = trayQuitExcerpt(partialStdout);
+      if (excerpt) message = `${message} [${excerpt}]`;
       assertNoSecrets(message, "tray Quit attempt failure");
       failures.push(`attempt ${attempt}: ${message}`);
       console.info(`[installer-smoke] TRAY_QUIT_ATTEMPT n=${attempt} failed: ${message}`);

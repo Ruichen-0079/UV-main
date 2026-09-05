@@ -2181,6 +2181,8 @@ const trayQuitOutput = ({
   iconCenterY = 744,
   cursorPlace = 1,
   sendInput = 1,
+  clickCursorPlace = 1,
+  clicksSent = 1,
   rects = [{ uid: 1, left: 1800, top: 1040, right: 1824, bottom: 1064 }],
   items = defaultTrayQuitItems(),
   itemRect = { left: 500, top: 700, right: 620, bottom: 728 },
@@ -2239,6 +2241,8 @@ const trayQuitOutput = ({
     `TRAY_QUIT_ITEM_RECT=${itemRect.left},${itemRect.top},${itemRect.right},${itemRect.bottom}`,
     `invoke_hresult=${invokeHresult}`,
     `invoke_result=${invokeResult}`,
+    `click_cursor_place=${clickCursorPlace}`,
+    `clicks_sent=${clicksSent}`,
     `menu_closed=${menuClosed}`,
     `elapsed_ms=${elapsedMs}`
   ].join("\n");
@@ -2433,6 +2437,8 @@ test("tray Quit output requires the real menu surface and a successful invocatio
   assert.equal(parsed.trayAlive, true);
   assert.equal(parsed.cursorPlace, true);
   assert.equal(parsed.sendInput, 1);
+  assert.equal(parsed.clickCursorPlace, true);
+  assert.equal(parsed.clicksSent, 1);
   assert.deepEqual(parsed.iconRects, [
     { uid: 1, left: 1800, top: 1040, right: 1824, bottom: 1064 }
   ]);
