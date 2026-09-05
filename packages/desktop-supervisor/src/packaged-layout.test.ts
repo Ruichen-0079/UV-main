@@ -9,6 +9,7 @@ import {
   resolvePackagedLive2DEnv,
   resolvePackagedRuntimeStart
 } from "./config.js";
+import { resolveAppRoots } from "./app-roots.js";
 import { validateRuntimeManifest } from "./runtime-manifest.js";
 
 const tempDirs: string[] = [];
@@ -91,6 +92,18 @@ function makePackagedResourceTree(): {
   return { resourceRoot, dataRoot, manifestPath, mem0ManifestPath, nodeExe, entry };
 }
 
+function makePackagedLayout(tree: ReturnType<typeof makePackagedResourceTree>) {
+  return {
+    mode: "packaged" as const,
+    resourceRoot: tree.resourceRoot,
+    configRoot: path.join(tree.dataRoot, "config"),
+    dataRoot: tree.dataRoot,
+    cacheRoot: path.join(tree.dataRoot, "cache"),
+    runtimeManifestPath: tree.manifestPath,
+    mem0ManifestPath: tree.mem0ManifestPath
+  };
+}
+
 describe("packaged supervisor layout", () => {
   it("development layout generates a platform-native Runtime command when runner exists", () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-dev-"));
@@ -153,13 +166,7 @@ describe("packaged supervisor layout", () => {
 
   it("packaged Live2D env prefers explicit, then bundled resources, then LOCALAPPDATA/YUVI", () => {
     const tree = makePackagedResourceTree();
-    const layout = {
-      mode: "packaged" as const,
-      resourceRoot: tree.resourceRoot,
-      dataRoot: tree.dataRoot,
-      runtimeManifestPath: tree.manifestPath,
-      mem0ManifestPath: tree.mem0ManifestPath
-    };
+    const layout = makePackagedLayout(tree);
 
     // Explicit wins even when bundled exists.
     const bundledLive2d = path.join(tree.resourceRoot, "live2d");
@@ -258,7 +265,9 @@ describe("packaged supervisor layout", () => {
       {
         mode: "packaged",
         resourceRoot,
+        configRoot: path.join(dataRoot, "config"),
         dataRoot,
+        cacheRoot: path.join(dataRoot, "cache"),
         runtimeManifestPath: manifestPath,
         mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
       },
@@ -271,13 +280,7 @@ describe("packaged supervisor layout", () => {
 
   it("deriveConfigFromEnv reuses layout after settings push", () => {
     const tree = makePackagedResourceTree();
-    const layout = {
-      mode: "packaged" as const,
-      resourceRoot: tree.resourceRoot,
-      dataRoot: tree.dataRoot,
-      runtimeManifestPath: tree.manifestPath,
-      mem0ManifestPath: tree.mem0ManifestPath
-    };
+    const layout = makePackagedLayout(tree);
     const first = deriveConfigFromEnv(layout, {
       SERVER_PORT: "6121",
       DEEPSEEK_CHAT_MODEL: "model-A"
@@ -353,13 +356,7 @@ describe("packaged supervisor layout", () => {
 
   it("gates packaged managed Mem0 on backend and YUVI_AUTOSTART_MEM0", () => {
     const tree = makePackagedResourceTree();
-    const layout = {
-      mode: "packaged" as const,
-      resourceRoot: tree.resourceRoot,
-      dataRoot: tree.dataRoot,
-      runtimeManifestPath: tree.manifestPath,
-      mem0ManifestPath: tree.mem0ManifestPath
-    };
+    const layout = makePackagedLayout(tree);
     const legacy = deriveConfigFromEnv(layout, {
       MEMORY_BACKEND: "legacy",
       YUVI_AUTOSTART_MEM0: "true"
@@ -381,13 +378,7 @@ describe("packaged supervisor layout", () => {
 
   it("validates managed loopback URL and preserves external remote probing", () => {
     const tree = makePackagedResourceTree();
-    const layout = {
-      mode: "packaged" as const,
-      resourceRoot: tree.resourceRoot,
-      dataRoot: tree.dataRoot,
-      runtimeManifestPath: tree.manifestPath,
-      mem0ManifestPath: tree.mem0ManifestPath
-    };
+    const layout = makePackagedLayout(tree);
     const external = deriveConfigFromEnv(layout, {
       YUVI_AUTOSTART_MEM0: "false",
       MEM0_BASE_URL: "https://memory.example.test:6131"
@@ -403,13 +394,7 @@ describe("packaged supervisor layout", () => {
 
   it("builds packaged Mem0 paths, env, and command marker without secret args", () => {
     const tree = makePackagedResourceTree();
-    const layout = {
-      mode: "packaged" as const,
-      resourceRoot: tree.resourceRoot,
-      dataRoot: tree.dataRoot,
-      runtimeManifestPath: tree.manifestPath,
-      mem0ManifestPath: tree.mem0ManifestPath
-    };
+    const layout = makePackagedLayout(tree);
     const secret = "P3_CONFIG_SECRET_DO_NOT_LOG";
     const resourceEntriesBefore = fs.readdirSync(tree.resourceRoot).sort();
     const start = deriveConfigFromEnv(layout, {
@@ -445,6 +430,133 @@ describe("packaged supervisor layout", () => {
     expect(JSON.stringify(start?.args)).not.toContain(secret);
     expect(start?.commandMarker).not.toContain(secret);
     expect(fs.readdirSync(tree.resourceRoot).sort()).toEqual(resourceEntriesBefore);
+  });
+
+  describe("AppRoots composition (Atom 05)", () => {
+    it("resolves config/data/cache roots via the AppRoots contract and keeps them distinct", () => {
+      const tree = makePackagedResourceTree();
+      const cfg = loadPackagedSupervisorConfig({
+        resourceRoot: tree.resourceRoot,
+        dataRoot: tree.dataRoot,
+        runtimeManifestPath: tree.manifestPath,
+        mem0ManifestPath: tree.mem0ManifestPath
+      });
+      if (cfg.layout.mode !== "packaged") throw new Error("expected packaged layout");
+      const expected = resolveAppRoots({ env: process.env });
+      expect(cfg.layout.configRoot).toBe(expected.configRoot);
+      expect(cfg.layout.dataRoot).toBe(tree.dataRoot);
+      expect(cfg.layout.cacheRoot).toBe(expected.cacheRoot);
+      const { resourceRoot, configRoot, dataRoot, cacheRoot } = cfg.layout;
+      expect(new Set([resourceRoot, configRoot, dataRoot, cacheRoot]).size).toBe(4);
+    });
+
+    it("honors explicit root overrides from the composed env", () => {
+      const tree = makePackagedResourceTree();
+      const cfg = loadPackagedSupervisorConfig({
+        resourceRoot: tree.resourceRoot,
+        dataRoot: tree.dataRoot,
+        runtimeManifestPath: tree.manifestPath,
+        mem0ManifestPath: tree.mem0ManifestPath,
+        env: {
+          YUVI_CONFIG_ROOT: path.join(tree.dataRoot, "explicit-config"),
+          YUVI_CACHE_ROOT: path.join(tree.dataRoot, "explicit-cache")
+        }
+      });
+      if (cfg.layout.mode !== "packaged") throw new Error("expected packaged layout");
+      expect(cfg.layout.configRoot).toBe(path.join(tree.dataRoot, "explicit-config"));
+      expect(cfg.layout.cacheRoot).toBe(path.join(tree.dataRoot, "explicit-cache"));
+      expect(cfg.layout.dataRoot).toBe(tree.dataRoot);
+    });
+
+    it("rejects relative root overrides", () => {
+      const tree = makePackagedResourceTree();
+      expect(() =>
+        loadPackagedSupervisorConfig({
+          resourceRoot: tree.resourceRoot,
+          dataRoot: tree.dataRoot,
+          runtimeManifestPath: tree.manifestPath,
+          mem0ManifestPath: tree.mem0ManifestPath,
+          env: { YUVI_CACHE_ROOT: "relative/cache" }
+        })
+      ).toThrow(/YUVI_CACHE_ROOT must be an absolute path/);
+    });
+
+    it("moving or clearing the cache root never moves durable derivations", () => {
+      const tree = makePackagedResourceTree();
+      const base = loadPackagedSupervisorConfig({
+        resourceRoot: tree.resourceRoot,
+        dataRoot: tree.dataRoot,
+        runtimeManifestPath: tree.manifestPath,
+        mem0ManifestPath: tree.mem0ManifestPath,
+        instanceId: "deterministic-instance",
+        ownershipToken: "ownership-token",
+        controlToken: "control-token"
+      });
+      const movedCache = loadPackagedSupervisorConfig({
+        resourceRoot: tree.resourceRoot,
+        dataRoot: tree.dataRoot,
+        runtimeManifestPath: tree.manifestPath,
+        mem0ManifestPath: tree.mem0ManifestPath,
+        instanceId: "deterministic-instance",
+        ownershipToken: "ownership-token",
+        controlToken: "control-token",
+        env: { YUVI_CACHE_ROOT: path.join(tree.dataRoot, "moved-cache") }
+      });
+      if (base.layout.mode !== "packaged" || movedCache.layout.mode !== "packaged") {
+        throw new Error("expected packaged layouts");
+      }
+      expect(movedCache.layout.cacheRoot).not.toBe(base.layout.cacheRoot);
+      // Durable state is identical under both cache roots.
+      expect(movedCache.stateDirectory).toBe(base.stateDirectory);
+      expect(movedCache.runtimeStart?.env["YUVI_RUNTIME_DATA_DIR"]).toBe(
+        base.runtimeStart?.env["YUVI_RUNTIME_DATA_DIR"]
+      );
+      expect(movedCache.runtimeStart?.cwd).toBe(base.runtimeStart?.cwd);
+      expect(movedCache.localSttStart?.env["YUVI_STT_SPEAKER_DIR"]).toBe(
+        base.localSttStart?.env["YUVI_STT_SPEAKER_DIR"]
+      );
+      expect(movedCache.postgresLayout?.root).toBe(base.postgresLayout?.root);
+      // Mem0 durable data is unchanged as well.
+      const mem0Moved = deriveConfigFromEnv(movedCache.layout, {
+        YUVI_AUTOSTART_MEM0: "true",
+        MEM0_BASE_URL: "http://127.0.0.1:6199"
+      }).mem0Start;
+      const mem0Base = deriveConfigFromEnv(base.layout, {
+        YUVI_AUTOSTART_MEM0: "true",
+        MEM0_BASE_URL: "http://127.0.0.1:6199"
+      }).mem0Start;
+      expect(mem0Moved?.env["YUVI_MEM0_DATA_DIR"]).toBe(mem0Base?.env["YUVI_MEM0_DATA_DIR"]);
+    });
+
+    it("keeps immutable resources and writable data separated for managed services", () => {
+      const tree = makePackagedResourceTree();
+      const cfg = loadPackagedSupervisorConfig({
+        resourceRoot: tree.resourceRoot,
+        dataRoot: tree.dataRoot,
+        runtimeManifestPath: tree.manifestPath,
+        mem0ManifestPath: tree.mem0ManifestPath
+      });
+      const runtime = cfg.runtimeStart;
+      expect(runtime).not.toBeNull();
+      // Bundled resources come from the resource root...
+      expect(runtime?.env["YUVI_RUNTIME_RESOURCE_DIR"]).toBe(tree.resourceRoot);
+      expect(runtime?.env["YUVI_RUNTIME_MIGRATIONS_DIR"]).toBe(
+        path.join(tree.resourceRoot, "runtime", "migrations")
+      );
+      // ...while every writable location lives under the data root.
+      const dataDir = runtime?.env["YUVI_RUNTIME_DATA_DIR"];
+      expect(dataDir).toBe(path.join(tree.dataRoot, "runtime-data"));
+      expect(dataDir?.startsWith(tree.resourceRoot)).toBe(false);
+      expect(runtime?.cwd.startsWith(tree.resourceRoot)).toBe(false);
+      expect(cfg.localSttStart?.env["YUVI_STT_SPEAKER_DIR"]).toBe(
+        path.join(tree.dataRoot, "local-stt", "speakers")
+      );
+      expect(cfg.localSttStart?.args).toContain(path.join(tree.resourceRoot, "local-stt", "models"));
+      // Speaker profiles (durable data) are never under the model resource tree.
+      expect(cfg.localSttStart?.env["YUVI_STT_SPEAKER_DIR"]?.startsWith(tree.resourceRoot)).toBe(
+        false
+      );
+    });
   });
 });
 

@@ -213,8 +213,9 @@ Dependency direction (not numeric order):
 → later Linux packaging/deployment (decomposed from Atom 21)
 ```
 
-- [05 — App/Data/Cache roots](05-app-data-cache-roots.md) — active; may proceed
-  before final Linux packaging; no Windows prerequisite
+- [05 — App/Data/Cache roots](05-app-data-cache-roots.md) — DONE
+  (config/data/cache root contract frozen in the desktop Supervisor;
+  resource root remains separate; see the closure section of that document)
 - [03 — Desktop Surface foundation](03-desktop-surface-foundation.md)
   — rebaselined: no longer depends on Windows Atoms 01–02
 - [04 — WebUI Surface](04-webui-surface.md)

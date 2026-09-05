@@ -7,12 +7,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import {
-  canonicalPath,
-  defaultYuviLocalDataRoot,
-  isWindowsStylePath,
-  pathsEqual
-} from "./paths.js";
+import { canonicalPath, isWindowsStylePath, pathsEqual } from "./paths.js";
+import { defaultYuviLocalDataRoot } from "./app-roots.js";
 import {
   aclGrantArguments as aclGrantArgumentsImpl,
   applyRestrictedPermissions,

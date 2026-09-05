@@ -93,7 +93,9 @@ describe("postgres distribution contract", () => {
         {
           mode: "packaged",
           resourceRoot,
+          configRoot: path.join(resourceRoot, "config"),
           dataRoot: resourceRoot,
+          cacheRoot: path.join(resourceRoot, "cache"),
           runtimeManifestPath: path.join(resourceRoot, "runtime.json"),
           mem0ManifestPath: path.join(resourceRoot, "mem0.json")
         }

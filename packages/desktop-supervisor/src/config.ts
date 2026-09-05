@@ -5,10 +5,10 @@ import { envFlag, envString, loadYuviEnvFiles } from "./env.js";
 import {
   canonicalPath,
   defaultStateDirectory,
-  defaultYuviLocalDataRoot,
   isWindowsStylePath,
   parseUrlOrigin
 } from "./paths.js";
+import { defaultYuviLocalDataRoot, resolveAppRoots } from "./app-roots.js";
 import { readMem0Manifest, resolveMem0ManifestExecutable } from "./mem0-manifest.js";
 import {
   readLocalSttManifest,
@@ -40,6 +40,9 @@ export type LoadSupervisorConfigInput = {
 export type LoadPackagedSupervisorConfigInput = {
   resourceRoot: string;
   dataRoot: string;
+  /** Optional AppRoots overrides; defaults resolve via resolveAppRoots(env). */
+  configRoot?: string | undefined;
+  cacheRoot?: string | undefined;
   runtimeManifestPath?: string | undefined;
   mem0ManifestPath?: string | undefined;
   stateDirectory?: string | undefined;
@@ -117,14 +120,6 @@ export function loadPackagedSupervisorConfig(
   const mem0Manifest = readMem0Manifest(mem0ManifestPath);
   resolveMem0ManifestExecutable(mem0ManifestPath, mem0Manifest);
 
-  const instanceId = input.instanceId ?? randomUUID();
-  const ownershipToken = input.ownershipToken ?? randomUUID();
-  const controlToken = input.controlToken ?? generateControlToken();
-  const stateDirectory = canonicalPath(
-    input.stateDirectory ?? path.join(dataRoot, "instances", instanceId)
-  );
-  fs.mkdirSync(stateDirectory, { recursive: true });
-
   // Packaged: process env + optional non-secret seed only (never install-dir .env).
   const env: Record<string, string> = { ...(input.env ?? {}) };
   for (const [key, value] of Object.entries(process.env)) {
@@ -133,6 +128,18 @@ export function loadPackagedSupervisorConfig(
     }
   }
 
+  const appRoots = resolveAppRoots({ env });
+  const configRoot = canonicalPath(input.configRoot ?? appRoots.configRoot);
+  const cacheRoot = canonicalPath(input.cacheRoot ?? appRoots.cacheRoot);
+
+  const instanceId = input.instanceId ?? randomUUID();
+  const ownershipToken = input.ownershipToken ?? randomUUID();
+  const controlToken = input.controlToken ?? generateControlToken();
+  const stateDirectory = canonicalPath(
+    input.stateDirectory ?? path.join(dataRoot, "instances", instanceId)
+  );
+  fs.mkdirSync(stateDirectory, { recursive: true });
+
   const controlPort = input.controlPort ?? Number(envString(env, "YUVI_SUPERVISOR_PORT", "0"));
   const controlHost = input.controlHost ?? "127.0.0.1";
   assertLoopbackHost(controlHost);
@@ -140,7 +147,9 @@ export function loadPackagedSupervisorConfig(
   const layout: SupervisorLayout = {
     mode: "packaged",
     resourceRoot,
+    configRoot,
     dataRoot,
+    cacheRoot,
     runtimeManifestPath,
     mem0ManifestPath
   };

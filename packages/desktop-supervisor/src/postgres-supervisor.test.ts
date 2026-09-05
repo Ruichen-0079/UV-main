@@ -92,7 +92,9 @@ describe("supervisor postgres mode", () => {
         {
           mode: "packaged",
           resourceRoot: "/r",
+          configRoot: "/r/config",
           dataRoot: "/d",
+          cacheRoot: "/d/cache",
           runtimeManifestPath: "/m",
           mem0ManifestPath: "/n"
         },
@@ -107,7 +109,9 @@ describe("supervisor postgres mode", () => {
         {
           mode: "packaged",
           resourceRoot: "/r",
+          configRoot: "/r/config",
           dataRoot: "/d",
+          cacheRoot: "/d/cache",
           runtimeManifestPath: "/m",
           mem0ManifestPath: "/n"
         },
