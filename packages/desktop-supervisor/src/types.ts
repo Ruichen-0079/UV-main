@@ -269,6 +269,8 @@ export type SupervisorConfig = {
   databaseUrl: string | null;
   runtimeStart: StartCommandSpec | null;
   mem0Start: StartCommandSpec | null;
+  /** Development Mem0 env resolution error (missing/invalid venv); null when OK or N/A. */
+  mem0StartError?: string | null | undefined;
   ttsWrapperStart: StartCommandSpec | null;
   ttsUpstreamStart: StartCommandSpec | null;
   postgresMode?: PostgresMode | undefined;
