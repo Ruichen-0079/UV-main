@@ -39,6 +39,7 @@ import {
 } from "../provider-diagnostics.js";
 import { ProviderVerificationResult } from "../dashboard-provider-verification.js";
 import { Definition, Field, Notice, PageShell, Panel } from "../dashboard-ui.js";
+import { UserSettingsPanel } from "../user-settings-panel.js";
 
 function deepRestartErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
@@ -537,7 +538,11 @@ export function SettingsPage(): JSX.Element {
   }
 
   return (
-    <PageShell title="Settings" subtitle="Local development runtime configuration.">
+    <PageShell
+      title="Settings"
+      subtitle="Desktop preferences, provider credentials, and local Runtime configuration."
+    >
+      <UserSettingsPanel />
       {settings.loading && (
         <Notice tone="info" title="Loading" message="Fetching safe runtime settings." />
       )}
