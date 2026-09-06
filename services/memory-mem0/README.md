@@ -25,10 +25,27 @@ py -3.11 -m venv .venv
 # or:
 # C:\path\to\cpython-3.11.x\python.exe -m venv .venv
 .venv\Scripts\activate
+
+# Linux / macOS (explicit 3.11 interpreter — system python3 is not enough):
+# python3.11 -m venv .venv
+# or: /path/to/cpython-3.11.x/bin/python3.11 -m venv .venv
+# source .venv/bin/activate
+
 python --version   # must print 3.11.x
 pip install -U pip
 pip install -e ".[dev]"
 ```
+
+Desktop Supervisor resolves the repo-local interpreter only:
+
+| Platform | Interpreter |
+|----------|-------------|
+| Windows | `services/memory-mem0/.venv/Scripts/python.exe` |
+| Linux / macOS | `services/memory-mem0/.venv/bin/python` |
+
+It never falls back to bare `python` / `python3` on `PATH`. If the venv is missing
+or cannot import `uvicorn`/`fastapi`, Mem0 stays **unavailable** with a setup hint
+(no crash-loop spawn).
 
 ## Architecture
 

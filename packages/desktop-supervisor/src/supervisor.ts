@@ -433,9 +433,19 @@ export class DesktopSupervisor {
     }
 
     if (this.config.memoryBackend === "mem0" && this.config.autostartMem0) {
-      await this.ensureService("mem0");
+      if (this.config.mem0Start) {
+        await this.ensureService("mem0");
+      } else {
+        await this.refreshService("mem0");
+        const mem0 = this.services.get("mem0");
+        if (mem0) this.applyMem0DevelopmentEnvUnavailable(mem0);
+      }
     } else {
       await this.refreshService("mem0");
+      const mem0 = this.services.get("mem0");
+      if (mem0 && this.config.memoryBackend === "mem0") {
+        this.applyMem0DevelopmentEnvUnavailable(mem0);
+      }
     }
 
     if (this.config.autostartTts) {
@@ -479,13 +489,17 @@ export class DesktopSupervisor {
       runtime.autoRecovered = true;
       await this.ensureService("runtime");
     }
+    if (mem0 && this.config.memoryBackend === "mem0") {
+      this.applyMem0DevelopmentEnvUnavailable(mem0);
+    }
     if (
       mem0 &&
       !this.shuttingDown &&
       mem0.spec.managed &&
       mem0.spec.autostart &&
       mem0.ownership === "none" &&
-      mem0.status === "stopped"
+      mem0.status === "stopped" &&
+      !this.config.mem0StartError
     ) {
       await this.queue(mem0, async () => {
         await this.startManagedIfNeeded("mem0");
@@ -565,11 +579,18 @@ export class DesktopSupervisor {
     if (this.hasLiveManagedChild(svc)) {
       return;
     }
+    if (id === "mem0" && this.applyMem0DevelopmentEnvUnavailable(svc)) {
+      return;
+    }
     if (!svc.spec.managed || !svc.spec.startCommand) {
       svc.status = "unavailable";
       svc.summary = svc.spec.managed
         ? "No start command configured."
         : "External dependency — not managed by YUVI.";
+      if (id === "mem0" && this.config.mem0StartError) {
+        svc.detail = this.config.mem0StartError;
+        svc.lastError = this.config.mem0StartError;
+      }
       return;
     }
     if (svc.ownership === "external") {
@@ -820,6 +841,20 @@ export class DesktopSupervisor {
     svc.pid = null;
     svc.startedAt = null;
     svc.ownership = "none";
+  }
+
+
+  private applyMem0DevelopmentEnvUnavailable(svc: InternalService): boolean {
+    const error = this.config.mem0StartError?.trim();
+    if (!error) return false;
+    if (svc.status === "healthy" || svc.status === "degraded") return false;
+    svc.status = "unavailable";
+    svc.summary = "Mem0 development environment not installed/invalid.";
+    svc.detail = error;
+    svc.lastError = error;
+    svc.ownership = "none";
+    svc.pendingExternal = false;
+    return true;
   }
 
   private async refreshService(id: ServiceId): Promise<void> {

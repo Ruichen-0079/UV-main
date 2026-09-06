@@ -31,7 +31,12 @@ export {
   resolvePackagedLocalSttStart,
   resolvePackagedMem0Start,
   resolvePackagedRuntimeStart,
-  resolveRuntimeStartForLayout
+  resolveRuntimeStartForLayout,
+  resolveMem0Start,
+  resolveMem0StartDetailed,
+  resolveMem0VenvInterpreter,
+  defaultMem0InterpreterPreflight,
+  MEM0_DEV_ENV_SETUP_HINT
 } from "./config.js";
 export {
   readRuntimeManifest,

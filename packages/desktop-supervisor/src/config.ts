@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -194,6 +195,7 @@ export function deriveConfigFromEnv(
   | "databaseUrl"
   | "runtimeStart"
   | "mem0Start"
+  | "mem0StartError"
   | "ttsWrapperStart"
   | "ttsUpstreamStart"
   | "postgresMode"
@@ -252,12 +254,18 @@ export function deriveConfigFromEnv(
     autostartLocalStt: envFlag(env, "YUVI_AUTOSTART_LOCAL_STT", false),
     databaseUrl,
     runtimeStart: resolveRuntimeStartForLayout(layout, env, runtimePort),
-    mem0Start:
-      layout.mode === "packaged"
-        ? managedMem0
-          ? resolvePackagedMem0Start(layout, env, mem0Url)
-          : null
-        : resolveMem0Start(ownershipRoot, env, mem0Url),
+    ...(() => {
+      if (layout.mode === "packaged") {
+        return {
+          mem0Start: managedMem0 ? resolvePackagedMem0Start(layout, env, mem0Url) : null,
+          mem0StartError: null as string | null
+        };
+      }
+      const resolved = resolveMem0StartDetailed(ownershipRoot, env, mem0Url, {
+        runDefaultPreflight: env["YUVI_MEM0_SKIP_INTERPRETER_PREFLIGHT"] !== "1"
+      });
+      return { mem0Start: resolved.start, mem0StartError: resolved.error };
+    })(),
     ttsWrapperStart:
       layout.mode === "packaged"
         ? null
@@ -656,34 +664,177 @@ export function resolveRuntimeStart(
   };
 }
 
+export const MEM0_DEV_ENV_SETUP_HINT =
+  'Create services/memory-mem0/.venv with Python 3.11 and run: pip install -e ".[dev]"';
+
+export type ResolveMem0StartResult = {
+  start: StartCommandSpec | null;
+  /** Actionable development-env failure; null when start resolved or Mem0 sources absent. */
+  error: string | null;
+};
+
+export type ResolveMem0StartOptions = {
+  /** Override platform detection (tests). */
+  platform?: NodeJS.Platform;
+  /**
+   * Optional interpreter preflight. Return an error message to fail closed.
+   * When omitted, `runDefaultPreflight` (default true) validates uvicorn/fastapi imports.
+   */
+  preflightInterpreter?: ((interpreter: string, sidecarDir: string) => string | null) | undefined;
+  /** Set false in unit tests that use stub interpreter files. */
+  runDefaultPreflight?: boolean | undefined;
+};
+
+/**
+ * Resolve the development Mem0 sidecar start command.
+ * Prefer an explicit override, then the repo-local venv interpreter.
+ * Never fall back to bare `python`/`python3` on PATH.
+ */
 export function resolveMem0Start(
   repositoryRoot: string,
   env: Record<string, string>,
-  mem0Url: string
+  mem0Url: string,
+  options?: ResolveMem0StartOptions
 ): StartCommandSpec | null {
+  return resolveMem0StartDetailed(repositoryRoot, env, mem0Url, options).start;
+}
+
+export function resolveMem0StartDetailed(
+  repositoryRoot: string,
+  env: Record<string, string>,
+  mem0Url: string,
+  options: ResolveMem0StartOptions = {}
+): ResolveMem0StartResult {
   const explicit = resolveOptionalStartCommand(env, "YUVI_MEM0_START_COMMAND", repositoryRoot);
-  if (explicit) return explicit;
+  if (explicit) {
+    // Explicit override wins — do not rewrite or invent another locator.
+    return { start: explicit, error: null };
+  }
 
   const sidecarDir = path.join(repositoryRoot, "services", "memory-mem0");
   const srcDir = path.join(sidecarDir, "src");
-  if (!fs.existsSync(path.join(srcDir, "yuvi_mem0"))) return null;
+  if (!fs.existsSync(path.join(srcDir, "yuvi_mem0"))) {
+    return { start: null, error: null };
+  }
 
-  const venvPython = path.join(sidecarDir, ".venv", "Scripts", "python.exe");
-  const python = fs.existsSync(venvPython) ? venvPython : "python";
+  const platform = options.platform ?? process.platform;
+  const interpreter = resolveMem0VenvInterpreter(sidecarDir, platform);
+  if (!interpreter) {
+    const expected =
+      platform === "win32"
+        ? path.join("services", "memory-mem0", ".venv", "Scripts", "python.exe")
+        : path.join("services", "memory-mem0", ".venv", "bin", "python");
+    return {
+      start: null,
+      error:
+        `Mem0 development environment not installed/invalid (missing ${expected}). ` +
+        MEM0_DEV_ENV_SETUP_HINT
+    };
+  }
+
+  const preflight = options.preflightInterpreter;
+  if (preflight) {
+    const preflightError = preflight(interpreter, sidecarDir);
+    if (preflightError) {
+      return { start: null, error: preflightError };
+    }
+  } else if (options.runDefaultPreflight !== false) {
+    // Fail closed on broken/incomplete venvs that would otherwise crash-loop.
+    const preflightError = defaultMem0InterpreterPreflight(interpreter, sidecarDir);
+    if (preflightError) {
+      return { start: null, error: preflightError };
+    }
+  }
+
   const parsed = parseUrlOrigin(mem0Url);
   const port = parsed?.port ?? 6131;
 
   return {
-    file: python,
-    args: ["-m", "yuvi_mem0"],
-    cwd: sidecarDir,
-    env: {
-      PYTHONPATH: "src",
-      MEM0_SIDECAR_PORT: String(port),
-      MEM0_SIDECAR_HOST: "127.0.0.1"
+    start: {
+      file: interpreter,
+      args: ["-m", "yuvi_mem0"],
+      cwd: sidecarDir,
+      env: {
+        PYTHONPATH: "src",
+        MEM0_SIDECAR_PORT: String(port),
+        MEM0_SIDECAR_HOST: "127.0.0.1"
+      },
+      commandMarker: "yuvi_mem0"
     },
-    commandMarker: "yuvi_mem0"
+    error: null
   };
+}
+
+/** Platform-specific repo-local Mem0 venv interpreter; never PATH python. */
+export function resolveMem0VenvInterpreter(
+  sidecarDir: string,
+  platform: NodeJS.Platform = process.platform
+): string | null {
+  const candidates =
+    platform === "win32"
+      ? [path.join(sidecarDir, ".venv", "Scripts", "python.exe")]
+      : [
+          path.join(sidecarDir, ".venv", "bin", "python"),
+          path.join(sidecarDir, ".venv", "bin", "python3")
+        ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch {
+      // ignore unreadable candidates
+    }
+  }
+  return null;
+}
+
+export function defaultMem0InterpreterPreflight(
+  interpreter: string,
+  sidecarDir: string
+): string | null {
+  try {
+    if (!fs.existsSync(interpreter)) {
+      return (
+        `Mem0 development environment not installed/invalid (missing interpreter). ` +
+        MEM0_DEV_ENV_SETUP_HINT
+      );
+    }
+  } catch {
+    return (
+      `Mem0 development environment not installed/invalid (unreadable interpreter). ` +
+      MEM0_DEV_ENV_SETUP_HINT
+    );
+  }
+
+  const result = spawnSync(interpreter, ["-c", "import uvicorn, fastapi"], {
+    encoding: "utf8",
+    timeout: 8_000,
+    env: {
+      ...process.env,
+      PYTHONPATH: path.join(sidecarDir, "src")
+    }
+  });
+  if (result.error) {
+    return (
+      "Mem0 development environment not installed/invalid (failed to execute interpreter). " +
+      MEM0_DEV_ENV_SETUP_HINT
+    );
+  }
+  if (result.status !== 0) {
+    const err = `${result.stderr ?? ""}${result.stdout ?? ""}`;
+    if (/No module named ['"]?uvicorn['"]?/i.test(err)) {
+      return (
+        "Mem0 development environment not installed/invalid (No module named 'uvicorn'). " +
+        MEM0_DEV_ENV_SETUP_HINT
+      );
+    }
+    return (
+      "Mem0 development environment not installed/invalid (dependency import failed). " +
+      MEM0_DEV_ENV_SETUP_HINT
+    );
+  }
+  return null;
 }
 
 /**
