@@ -1,5 +1,5 @@
-//! Presentation seam for the desktop surfaces that exist today: Main (chat)
-//! and Companion. `DesktopSurfaceManager` is the only authority for
+//! Presentation seam for the desktop surfaces that exist today: Main (chat),
+//! Companion, and WebUI. `DesktopSurfaceManager` is the only authority for
 //! ensure/show/hide/toggle/focus on these surfaces and for their window
 //! construction inputs. Application Quit and Runtime/Supervisor lifecycle
 //! stay outside this seam.
@@ -14,6 +14,7 @@ use crate::config;
 pub(crate) enum SurfaceId {
   Main,
   Companion,
+  WebUI,
 }
 
 impl SurfaceId {
@@ -21,6 +22,7 @@ impl SurfaceId {
     match self {
       SurfaceId::Main => "main",
       SurfaceId::Companion => "companion",
+      SurfaceId::WebUI => "webui",
     }
   }
 
@@ -30,6 +32,7 @@ impl SurfaceId {
     match self {
       SurfaceId::Main => "YUVI Chat",
       SurfaceId::Companion => "YUVI Companion",
+      SurfaceId::WebUI => "YUVI WebUI",
     }
   }
 
@@ -39,6 +42,7 @@ impl SurfaceId {
     match self {
       SurfaceId::Main => "index.html#/main",
       SurfaceId::Companion => "index.html#/companion",
+      SurfaceId::WebUI => "index.html#/dashboard",
     }
   }
 }
@@ -110,6 +114,19 @@ fn build_companion_window(
   .build()
 }
 
+fn build_webui_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+  tauri::WebviewWindowBuilder::new(
+    app,
+    SurfaceId::WebUI.window_label(),
+    tauri::WebviewUrl::App(SurfaceId::WebUI.window_url().into()),
+  )
+  .title(SurfaceId::WebUI.window_title())
+  .inner_size(1280.0, 820.0)
+  .min_inner_size(800.0, 600.0)
+  .resizable(true)
+  .build()
+}
+
 /// Toggle semantics shared by every surface: hidden → show-and-focus,
 /// visible → hide.
 fn toggle_window_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -122,9 +139,9 @@ fn toggle_window_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
   }
 }
 
-/// Desktop presentation infrastructure: the single owner of Main/Companion
-/// window creation and show/hide/toggle/focus behavior. Zero state — window
-/// identity lives in the Tauri window registry; this type only routes
+/// Desktop presentation infrastructure: the single owner of Main, Companion,
+/// and WebUI window creation and show/hide/toggle/focus behavior. Zero state —
+/// window identity lives in the Tauri window registry; this type only routes
 /// presentation commands onto it.
 pub(crate) struct DesktopSurfaceManager;
 
@@ -145,6 +162,10 @@ impl DesktopSurfaceManager {
         app.get_webview_window(SurfaceId::Companion.window_label()),
         || build_companion_window(app, companion_always_on_top_from_state(app)),
       ),
+      SurfaceId::WebUI => existing_or_create(
+        app.get_webview_window(SurfaceId::WebUI.window_label()),
+        || build_webui_window(app),
+      ),
     }
   }
 
@@ -164,6 +185,11 @@ impl DesktopSurfaceManager {
         SurfaceCommand::Show => Self::show_companion(app),
         SurfaceCommand::Hide => Self::hide_companion(app),
         SurfaceCommand::Toggle => Self::toggle_companion(app),
+      },
+      SurfaceId::WebUI => match command {
+        SurfaceCommand::Show => Self::show_webui(app),
+        SurfaceCommand::Hide => Self::hide_webui(app),
+        SurfaceCommand::Toggle => Self::toggle_webui(app),
       },
     }
   }
@@ -211,6 +237,24 @@ impl DesktopSurfaceManager {
     let window = Self::ensure(app, SurfaceId::Companion).map_err(|error| error.to_string())?;
     toggle_window_visible(&window)
   }
+
+  fn show_webui(app: &AppHandle) -> Result<(), String> {
+    let window = Self::ensure(app, SurfaceId::WebUI).map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+  }
+
+  fn hide_webui(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(SurfaceId::WebUI.window_label()) {
+      window.hide().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+  }
+
+  fn toggle_webui(app: &AppHandle) -> Result<(), String> {
+    let window = Self::ensure(app, SurfaceId::WebUI).map_err(|error| error.to_string())?;
+    toggle_window_visible(&window)
+  }
 }
 
 #[cfg(test)]
@@ -248,15 +292,18 @@ mod tests {
     assert!(!companion_always_on_top_or_default(Some(false)));
   }
 
-  /// The validated Linux desktop contract: exactly Main and Companion exist,
-  /// with the labels and captions the KDE close/tray harness locates them by.
+  /// The validated Linux desktop contract: exactly Main, Companion, and WebUI
+  /// exist, with the labels/captions/routes the KDE harness locates them by.
   #[test]
-  fn surface_contracts_cover_exactly_the_existing_main_and_companion() {
+  fn surface_contracts_cover_main_companion_and_webui() {
     assert_eq!(SurfaceId::Main.window_label(), "main");
     assert_eq!(SurfaceId::Main.window_title(), "YUVI Chat");
     assert_eq!(SurfaceId::Main.window_url(), "index.html#/main");
     assert_eq!(SurfaceId::Companion.window_label(), "companion");
     assert_eq!(SurfaceId::Companion.window_title(), "YUVI Companion");
     assert_eq!(SurfaceId::Companion.window_url(), "index.html#/companion");
+    assert_eq!(SurfaceId::WebUI.window_label(), "webui");
+    assert_eq!(SurfaceId::WebUI.window_title(), "YUVI WebUI");
+    assert_eq!(SurfaceId::WebUI.window_url(), "index.html#/dashboard");
   }
 }

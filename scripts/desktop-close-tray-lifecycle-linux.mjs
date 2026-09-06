@@ -49,7 +49,8 @@ const KILL_WAIT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
 
 const MAIN_WINDOW_CAPTION = "YUVI Chat";
-const MENU_LABELS = ["Open YUVI", "Hide YUVI", "Show Companion", "Hide Companion", "Quit"];
+const WEBUI_WINDOW_CAPTION = "YUVI WebUI";
+const MENU_LABELS = ["Open YUVI", "Hide YUVI", "Open WebUI", "Hide WebUI", "Show Companion", "Hide Companion", "Quit"];
 
 let tempRoot;
 let appChild = null;
@@ -554,6 +555,23 @@ function kwinCloseWindow(appPid, caption, timeoutMs) {
   fail(`KWin close script did not report back within ${timeoutMs}ms`, readLogs(rootsRef));
 }
 
+function waitForWindowCaption(child, caption, expectedVisible, timeoutMs, description) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (appExited(child)) {
+      fail(`desktop app exited while waiting for ${description}`, readLogs(rootsRef));
+    }
+    const remainingMs = Math.max(POLL_INTERVAL_MS, deadline - Date.now());
+    const visible = kwinWindowCaptions(child.pid, remainingMs).includes(caption);
+    if (visible === expectedVisible) return;
+    sleep(POLL_INTERVAL_MS);
+  }
+  fail(
+    `${description} did not reach expected visibility=${expectedVisible} within ${timeoutMs}ms`,
+    readLogs(rootsRef)
+  );
+}
+
 /* ------------------------------------------------------ owned-tree sweeps */
 
 function pidAlive(pid) {
@@ -706,6 +724,36 @@ async function main() {
   }
   info(`tray present and usable: SNI at ${tray.itemPath}, menu items [${menu.items.map((i) => i.label).join(", ")}]`);
   const idByLabel = Object.fromEntries(menu.items.map((item) => [item.label, item.id]));
+
+  /* --------------------------------------------- WebUI surface: lazy + tray */
+  const captionsBeforeWebui = kwinWindowCaptions(child.pid, CLOSE_OBSERVE_TIMEOUT_MS);
+  if (captionsBeforeWebui.includes(WEBUI_WINDOW_CAPTION)) {
+    fail(`WebUI window "${WEBUI_WINDOW_CAPTION}" was created before its first tray request`, readLogs(roots));
+  }
+  info(`opening WebUI through the tray ("${WEBUI_WINDOW_CAPTION}")`);
+  const openedWebui = clickTrayMenuItem(tray, idByLabel["Open WebUI"]);
+  if (!openedWebui.ok) fail(`tray "Open WebUI" click failed: ${openedWebui.error}`, readLogs(roots));
+  waitForWindowCaption(child, WEBUI_WINDOW_CAPTION, true, CLOSE_OBSERVE_TIMEOUT_MS, "tray Open WebUI");
+
+  const hiddenWebui = clickTrayMenuItem(tray, idByLabel["Hide WebUI"]);
+  if (!hiddenWebui.ok) fail(`tray "Hide WebUI" click failed: ${hiddenWebui.error}`, readLogs(roots));
+  waitForWindowCaption(child, WEBUI_WINDOW_CAPTION, false, CLOSE_OBSERVE_TIMEOUT_MS, "tray Hide WebUI");
+  info("WebUI tray show/hide mapped and unmapped the existing dashboard route");
+
+  // Re-open it to prove the lazy window is reusable, then exercise the same
+  // compositor close contract as Main and Companion.
+  const reopenedWebui = clickTrayMenuItem(tray, idByLabel["Open WebUI"]);
+  if (!reopenedWebui.ok) fail(`tray second "Open WebUI" click failed: ${reopenedWebui.error}`, readLogs(roots));
+  waitForWindowCaption(child, WEBUI_WINDOW_CAPTION, true, CLOSE_OBSERVE_TIMEOUT_MS, "second tray Open WebUI");
+  const reusedCaptions = kwinWindowCaptions(child.pid, CLOSE_OBSERVE_TIMEOUT_MS);
+  if (reusedCaptions.filter((caption) => caption === WEBUI_WINDOW_CAPTION).length !== 1) {
+    fail(`repeated WebUI show created duplicate windows: ${reusedCaptions.join(", ")}`, readLogs(roots));
+  }
+  info(`closing WebUI through the compositor ("${WEBUI_WINDOW_CAPTION}")`);
+  kwinCloseWindow(child.pid, WEBUI_WINDOW_CAPTION, CLOSE_OBSERVE_TIMEOUT_MS);
+  waitForWindowCaption(child, WEBUI_WINDOW_CAPTION, false, CLOSE_OBSERVE_TIMEOUT_MS, "WebUI close-as-hide");
+  await assertSupervisorHealthy(roots, instanceId);
+  info("WebUI close handled as hide: app alive and Supervisor healthy");
 
   const captionsBefore = kwinWindowCaptions(child.pid, CLOSE_OBSERVE_TIMEOUT_MS);
   if (!captionsBefore.includes(MAIN_WINDOW_CAPTION)) {

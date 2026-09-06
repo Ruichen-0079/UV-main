@@ -11,6 +11,8 @@ use crate::desktop_surface::{DesktopSurfaceManager, SurfaceCommand, SurfaceId};
 const TRAY_ID: &str = "yuvi-tray";
 const TRAY_OPEN_MAIN: &str = "tray-open-main";
 const TRAY_HIDE_MAIN: &str = "tray-hide-main";
+const TRAY_OPEN_WEBUI: &str = "tray-open-webui";
+const TRAY_HIDE_WEBUI: &str = "tray-hide-webui";
 const TRAY_SHOW_COMPANION: &str = "tray-show-companion";
 const TRAY_HIDE_COMPANION: &str = "tray-hide-companion";
 const TRAY_QUIT: &str = "tray-quit";
@@ -21,6 +23,7 @@ const TRAY_QUIT: &str = "tray-quit";
 pub(crate) enum TrayCommand {
   Main(SurfaceCommand),
   Companion(SurfaceCommand),
+  WebUI(SurfaceCommand),
   Quit,
 }
 
@@ -30,6 +33,8 @@ pub(crate) fn tray_command(id: &str) -> Option<TrayCommand> {
   match id {
     TRAY_OPEN_MAIN => Some(TrayCommand::Main(SurfaceCommand::Show)),
     TRAY_HIDE_MAIN => Some(TrayCommand::Main(SurfaceCommand::Hide)),
+    TRAY_OPEN_WEBUI => Some(TrayCommand::WebUI(SurfaceCommand::Show)),
+    TRAY_HIDE_WEBUI => Some(TrayCommand::WebUI(SurfaceCommand::Hide)),
     TRAY_SHOW_COMPANION => Some(TrayCommand::Companion(SurfaceCommand::Show)),
     TRAY_HIDE_COMPANION => Some(TrayCommand::Companion(SurfaceCommand::Hide)),
     TRAY_QUIT => Some(TrayCommand::Quit),
@@ -50,12 +55,15 @@ where
     TrayCommand::Quit => on_quit(),
     TrayCommand::Main(command) => on_surface(SurfaceId::Main, command),
     TrayCommand::Companion(command) => on_surface(SurfaceId::Companion, command),
+    TrayCommand::WebUI(command) => on_surface(SurfaceId::WebUI, command),
   }
 }
 
 pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
   let open_main = MenuItem::with_id(app, TRAY_OPEN_MAIN, "Open YUVI", true, None::<&str>)?;
   let hide_main_item = MenuItem::with_id(app, TRAY_HIDE_MAIN, "Hide YUVI", true, None::<&str>)?;
+  let open_webui = MenuItem::with_id(app, TRAY_OPEN_WEBUI, "Open WebUI", true, None::<&str>)?;
+  let hide_webui_item = MenuItem::with_id(app, TRAY_HIDE_WEBUI, "Hide WebUI", true, None::<&str>)?;
   let show_companion_item =
     MenuItem::with_id(app, TRAY_SHOW_COMPANION, "Show Companion", true, None::<&str>)?;
   let hide_companion_item =
@@ -66,6 +74,8 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     &[
       &open_main,
       &hide_main_item,
+      &open_webui,
+      &hide_webui_item,
       &show_companion_item,
       &hide_companion_item,
       &quit,
@@ -98,7 +108,10 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg(test)]
 mod tests {
-  use super::{dispatch_tray_menu, tray_command, TRAY_HIDE_COMPANION, TRAY_HIDE_MAIN, TRAY_OPEN_MAIN, TRAY_QUIT, TRAY_SHOW_COMPANION, TrayCommand};
+  use super::{
+    dispatch_tray_menu, tray_command, TRAY_HIDE_COMPANION, TRAY_HIDE_MAIN, TRAY_HIDE_WEBUI,
+    TRAY_OPEN_MAIN, TRAY_OPEN_WEBUI, TRAY_QUIT, TRAY_SHOW_COMPANION, TrayCommand,
+  };
   use crate::desktop_surface::{SurfaceCommand, SurfaceId};
 
   #[test]
@@ -110,6 +123,14 @@ mod tests {
     assert_eq!(
       tray_command(TRAY_HIDE_MAIN),
       Some(TrayCommand::Main(SurfaceCommand::Hide))
+    );
+    assert_eq!(
+      tray_command(TRAY_OPEN_WEBUI),
+      Some(TrayCommand::WebUI(SurfaceCommand::Show))
+    );
+    assert_eq!(
+      tray_command(TRAY_HIDE_WEBUI),
+      Some(TrayCommand::WebUI(SurfaceCommand::Hide))
     );
     assert_eq!(
       tray_command(TRAY_SHOW_COMPANION),
@@ -145,6 +166,8 @@ mod tests {
     let cases = [
       (TRAY_OPEN_MAIN, (SurfaceId::Main, SurfaceCommand::Show)),
       (TRAY_HIDE_MAIN, (SurfaceId::Main, SurfaceCommand::Hide)),
+      (TRAY_OPEN_WEBUI, (SurfaceId::WebUI, SurfaceCommand::Show)),
+      (TRAY_HIDE_WEBUI, (SurfaceId::WebUI, SurfaceCommand::Hide)),
       (
         TRAY_SHOW_COMPANION,
         (SurfaceId::Companion, SurfaceCommand::Show),
