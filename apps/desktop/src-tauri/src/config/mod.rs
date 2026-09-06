@@ -18,6 +18,7 @@ pub use secrets::{
 };
 pub use service::ConfigService;
 
+use crate::desktop_surface::DesktopSurfaceManager;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -60,11 +61,13 @@ pub fn update_user_settings(
             .changed_event(&before, &result.settings, result.restart_services.clone());
     let _ = app.emit("settings.changed", &event);
 
-    // Apply companion always-on-top immediately when changed.
+    // Apply companion always-on-top immediately when changed. Presentation
+    // behavior belongs to the desktop surface seam.
     if before.companion.always_on_top != result.settings.companion.always_on_top {
-        if let Some(window) = app.get_webview_window("companion") {
-            let _ = window.set_always_on_top(result.settings.companion.always_on_top);
-        }
+        DesktopSurfaceManager::apply_companion_always_on_top(
+            &app,
+            result.settings.companion.always_on_top,
+        );
     }
 
     // Persistence already succeeded; supervisor sync is best-effort and reported.

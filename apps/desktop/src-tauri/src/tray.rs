@@ -1,0 +1,188 @@
+//! Tray menu authority. Menu ids resolve into semantic `TrayCommand`s and
+//! dispatch forks here: surface presentation goes to the
+//! `DesktopSurfaceManager` seam, while `Quit` goes straight to the app
+//! lifecycle (`request_app_exit`) and never touches the surface seam.
+
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::AppHandle;
+
+use crate::desktop_surface::{DesktopSurfaceManager, SurfaceCommand, SurfaceId};
+const TRAY_ID: &str = "yuvi-tray";
+const TRAY_OPEN_MAIN: &str = "tray-open-main";
+const TRAY_HIDE_MAIN: &str = "tray-hide-main";
+const TRAY_SHOW_COMPANION: &str = "tray-show-companion";
+const TRAY_HIDE_COMPANION: &str = "tray-hide-companion";
+const TRAY_QUIT: &str = "tray-quit";
+
+/// A resolved tray intent. Surface intents carry one presentation command for
+/// one existing surface; `Quit` is a lifecycle intent with no surface target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrayCommand {
+  Main(SurfaceCommand),
+  Companion(SurfaceCommand),
+  Quit,
+}
+
+/// Menu id → semantic command. Unknown ids resolve to `None` and dispatch
+/// ignores them.
+pub(crate) fn tray_command(id: &str) -> Option<TrayCommand> {
+  match id {
+    TRAY_OPEN_MAIN => Some(TrayCommand::Main(SurfaceCommand::Show)),
+    TRAY_HIDE_MAIN => Some(TrayCommand::Main(SurfaceCommand::Hide)),
+    TRAY_SHOW_COMPANION => Some(TrayCommand::Companion(SurfaceCommand::Show)),
+    TRAY_HIDE_COMPANION => Some(TrayCommand::Companion(SurfaceCommand::Hide)),
+    TRAY_QUIT => Some(TrayCommand::Quit),
+    _ => None,
+  }
+}
+
+/// Route one tray menu id. The `Quit` arm is the fork point: it calls the
+/// lifecycle hook and never constructs a surface dispatch, so the surface
+/// seam can never own exit.
+pub(crate) fn dispatch_tray_menu<S, Q>(id: &str, mut on_surface: S, mut on_quit: Q)
+where
+  S: FnMut(SurfaceId, SurfaceCommand),
+  Q: FnMut(),
+{
+  let Some(command) = tray_command(id) else { return };
+  match command {
+    TrayCommand::Quit => on_quit(),
+    TrayCommand::Main(command) => on_surface(SurfaceId::Main, command),
+    TrayCommand::Companion(command) => on_surface(SurfaceId::Companion, command),
+  }
+}
+
+pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+  let open_main = MenuItem::with_id(app, TRAY_OPEN_MAIN, "Open YUVI", true, None::<&str>)?;
+  let hide_main_item = MenuItem::with_id(app, TRAY_HIDE_MAIN, "Hide YUVI", true, None::<&str>)?;
+  let show_companion_item =
+    MenuItem::with_id(app, TRAY_SHOW_COMPANION, "Show Companion", true, None::<&str>)?;
+  let hide_companion_item =
+    MenuItem::with_id(app, TRAY_HIDE_COMPANION, "Hide Companion", true, None::<&str>)?;
+  let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit", true, None::<&str>)?;
+  let menu = Menu::with_items(
+    app,
+    &[
+      &open_main,
+      &hide_main_item,
+      &show_companion_item,
+      &hide_companion_item,
+      &quit,
+    ],
+  )?;
+  let icon = app
+    .default_window_icon()
+    .cloned()
+    .ok_or_else(|| tauri::Error::AssetNotFound("tray icon".into()))?;
+
+  TrayIconBuilder::with_id(TRAY_ID)
+    .icon(icon)
+    .tooltip("YUVI")
+    .menu(&menu)
+    .on_menu_event(|app, event| {
+      dispatch_tray_menu(
+        event.id.as_ref(),
+        |surface, command| {
+          if let Err(error) = DesktopSurfaceManager::execute(app, surface, command) {
+            eprintln!("[yuvi-desktop] failed to dispatch tray surface command {surface:?} {command:?}: {error}");
+          }
+        },
+        || crate::request_app_exit(app),
+      );
+    })
+    .build(app)?;
+
+  Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{dispatch_tray_menu, tray_command, TRAY_HIDE_COMPANION, TRAY_HIDE_MAIN, TRAY_OPEN_MAIN, TRAY_QUIT, TRAY_SHOW_COMPANION, TrayCommand};
+  use crate::desktop_surface::{SurfaceCommand, SurfaceId};
+
+  #[test]
+  fn menu_ids_resolve_to_semantic_tray_commands() {
+    assert_eq!(
+      tray_command(TRAY_OPEN_MAIN),
+      Some(TrayCommand::Main(SurfaceCommand::Show))
+    );
+    assert_eq!(
+      tray_command(TRAY_HIDE_MAIN),
+      Some(TrayCommand::Main(SurfaceCommand::Hide))
+    );
+    assert_eq!(
+      tray_command(TRAY_SHOW_COMPANION),
+      Some(TrayCommand::Companion(SurfaceCommand::Show))
+    );
+    assert_eq!(
+      tray_command(TRAY_HIDE_COMPANION),
+      Some(TrayCommand::Companion(SurfaceCommand::Hide))
+    );
+    assert_eq!(tray_command(TRAY_QUIT), Some(TrayCommand::Quit));
+  }
+
+  /// Structural Quit-bypass invariant: the lifecycle hook fires and no surface
+  /// dispatch is constructed. Quit must never reach `DesktopSurfaceManager`.
+  #[test]
+  fn quit_forks_to_lifecycle_and_never_enters_the_surface_seam() {
+    let mut surface_dispatches: Vec<(SurfaceId, SurfaceCommand)> = Vec::new();
+    let mut quit_calls = 0;
+    dispatch_tray_menu(
+      TRAY_QUIT,
+      |surface, command| surface_dispatches.push((surface, command)),
+      || quit_calls += 1,
+    );
+    assert!(
+      surface_dispatches.is_empty(),
+      "Quit must bypass DesktopSurfaceManager"
+    );
+    assert_eq!(quit_calls, 1);
+  }
+
+  #[test]
+  fn surface_menu_commands_reach_their_surface_and_not_the_exit_path() {
+    let cases = [
+      (TRAY_OPEN_MAIN, (SurfaceId::Main, SurfaceCommand::Show)),
+      (TRAY_HIDE_MAIN, (SurfaceId::Main, SurfaceCommand::Hide)),
+      (
+        TRAY_SHOW_COMPANION,
+        (SurfaceId::Companion, SurfaceCommand::Show),
+      ),
+      (
+        TRAY_HIDE_COMPANION,
+        (SurfaceId::Companion, SurfaceCommand::Hide),
+      ),
+    ];
+    for (id, expected) in cases {
+      let mut surface_dispatches: Vec<(SurfaceId, SurfaceCommand)> = Vec::new();
+      let mut quit_calls = 0;
+      dispatch_tray_menu(
+        id,
+        |surface, command| surface_dispatches.push((surface, command)),
+        || quit_calls += 1,
+      );
+      assert_eq!(quit_calls, 0, "{id} must not touch the lifecycle exit path");
+      assert_eq!(surface_dispatches, vec![expected]);
+    }
+  }
+
+  #[test]
+  fn unknown_menu_ids_are_ignored_safely() {
+    let mut surface_dispatches: Vec<(SurfaceId, SurfaceCommand)> = Vec::new();
+    let mut quit_calls = 0;
+    dispatch_tray_menu(
+      "tray-not-a-command",
+      |surface, command| surface_dispatches.push((surface, command)),
+      || quit_calls += 1,
+    );
+    assert!(surface_dispatches.is_empty());
+    assert_eq!(quit_calls, 0);
+  }
+
+  #[test]
+  fn tray_icon_asset_is_a_valid_png_resource() {
+    let icon = include_bytes!("../icons/icon.png");
+    assert_eq!(&icon[..8], b"\x89PNG\r\n\x1a\n");
+  }
+}
