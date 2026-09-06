@@ -16,6 +16,7 @@ import {
   preloadTauriWindowApi,
   startWindowResizeDragging,
   controlCompanionWindow,
+  controlWebUIWindow,
   type TauriResizeDirection
 } from "./tauri-window.js";
 
@@ -35,6 +36,19 @@ describe("controlCompanionWindow", () => {
     (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
     await controlCompanionWindow("reopen_companion");
     expect(invoke).toHaveBeenCalledWith("reopen_companion");
+  });
+});
+
+describe("controlWebUIWindow", () => {
+  it("does not touch Tauri IPC in a browser", async () => {
+    await expect(controlWebUIWindow()).resolves.toBeUndefined();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("shows the lazy WebUI surface inside Tauri", async () => {
+    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
+    await controlWebUIWindow();
+    expect(invoke).toHaveBeenCalledWith("show_webui");
   });
 });
 
