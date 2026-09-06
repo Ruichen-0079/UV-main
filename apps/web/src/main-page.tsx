@@ -50,9 +50,8 @@ import {
 import type { SpeechSegmentIdentity } from "./speech-identity.js";
 import { EmptyState, Field, Notice, Panel, Pill, Toggle } from "./surface-ui.js";
 import { readVoiceOutputPreference, writeVoiceOutputPreference } from "./voice-output.js";
-import { controlCompanionWindow, isTauriRuntime } from "./tauri-window.js";
+import { controlCompanionWindow, controlWebUIWindow, isTauriRuntime } from "./tauri-window.js";
 import { ServiceStatusPanel } from "./service-status-panel.js";
-import { UserSettingsPanel } from "./user-settings-panel.js";
 import { fetchUserSettings, subscribeUserSettingsChanged } from "./user-settings-client.js";
 import { initialServiceStatusState, type ServiceStatusState } from "./service-status-state.js";
 import {
@@ -73,7 +72,6 @@ import {
   type ActiveRequestOwnership,
   type ProactiveTurnEffect
 } from "./proactive-turn-execution.js";
-import type { TtsSettingsProjection } from "./user-settings-state.js";
 
 type RequestStatus = "idle" | "sending" | "success" | "error";
 type VoicePlaybackStatus = SpeechQueueState;
@@ -128,7 +126,7 @@ export function MainPage(): JSX.Element {
   const [companionReady, setCompanionReady] = useState(false);
   const [input, setInput] = useState("");
   const [companionActionError, setCompanionActionError] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
+  const [webUiActionError, setWebUiActionError] = useState<string | null>(null);
   const [voiceCaptureStatus, setVoiceCaptureStatus] = useState<VoiceCaptureStatus>("idle");
   const [recordedAudio, setRecordedAudio] = useState<RecordedAudio | null>(null);
   const [voiceTranscription, setVoiceTranscription] = useState<TranscriptionResponse | null>(null);
@@ -225,6 +223,20 @@ export function MainPage(): JSX.Element {
       requestRevision: number
     ): void => {
       if (cancelled) return;
+
+      // TTS is a live projection consumed by Main/Companion. Settings now live
+      // in WebUI, so Main must converge through the settings.changed event
+      // instead of relying on an inline settings-panel callback.
+      if (view.revision >= ttsConfigRevisionRef.current) {
+        const settings: CompanionTtsConfiguration = {
+          enabled: view.settings.tts.enabled,
+          mode: view.settings.tts.mode
+        };
+        ttsConfigRevisionRef.current = view.revision;
+        ttsConfigRef.current = settings;
+        setTtsConfig(settings);
+      }
+
       if (view.loadError !== null) {
         applyProactiveConsent({
           type: "settings-read-failed",
@@ -241,7 +253,7 @@ export function MainPage(): JSX.Element {
       }
     };
 
-    const refetchProactiveConsent = (requestRevision: number): void => {
+    const refetchSettingsProjection = (requestRevision: number): void => {
       void fetchUserSettings()
         .then((view) => applySettingsView(view, requestRevision))
         .catch(() => {
@@ -253,20 +265,7 @@ export function MainPage(): JSX.Element {
     };
 
     void fetchUserSettings()
-      .then((view) => {
-        if (cancelled) return;
-        // Preserve the existing TTS initial-load projection and its revision fence.
-        if (view.revision >= ttsConfigRevisionRef.current) {
-          const settings: CompanionTtsConfiguration = {
-            enabled: view.settings.tts.enabled,
-            mode: view.settings.tts.mode
-          };
-          ttsConfigRevisionRef.current = view.revision;
-          ttsConfigRef.current = settings;
-          setTtsConfig(settings);
-        }
-        applySettingsView(view, initialRequestRevision);
-      })
+      .then((view) => applySettingsView(view, initialRequestRevision))
       .catch(() => {
         if (!cancelled) {
           // Keep the existing TTS capability unknown and keep proactive consent denied.
@@ -287,7 +286,9 @@ export function MainPage(): JSX.Element {
       });
       if (invalidated) {
         void apiClient.setProactiveConsent(false).catch(() => undefined);
-        refetchProactiveConsent(event.revision);
+      }
+      if (invalidated || event.changedSections.includes("tts")) {
+        refetchSettingsProjection(event.revision);
       }
     });
 
@@ -296,18 +297,6 @@ export function MainPage(): JSX.Element {
       unsubscribe();
     };
   }, [applyProactiveConsent]);
-
-  const onTtsSettings = useCallback((settings: TtsSettingsProjection, revision: number): void => {
-    if (revision < ttsConfigRevisionRef.current) return;
-    ttsConfigRevisionRef.current = revision;
-    const config: CompanionTtsConfiguration = {
-      enabled: settings.enabled,
-      mode: settings.mode
-    };
-    ttsConfigRef.current = config;
-    setTtsConfig(config);
-    busRef.current?.post({ kind: "tts-config", config });
-  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1189,10 +1178,19 @@ export function MainPage(): JSX.Element {
     }
   }
 
+  async function openWebUI(): Promise<void> {
+    setWebUiActionError(null);
+    try {
+      await controlWebUIWindow();
+    } catch {
+      setWebUiActionError("无法打开 WebUI。");
+    }
+  }
+
   return (
     <div className="min-h-screen bg-ink-100">
       <ServiceStatusPanel />
-      <div className={`mx-auto space-y-4 p-6 ${showSettings ? "max-w-6xl" : "max-w-3xl"}`}>
+      <div className="mx-auto max-w-3xl space-y-4 p-6">
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold tracking-normal">YUVI Chat</h1>
@@ -1208,9 +1206,9 @@ export function MainPage(): JSX.Element {
                 <button
                   type="button"
                   className="button-secondary"
-                  onClick={() => setShowSettings((value) => !value)}
+                  onClick={() => void openWebUI()}
                 >
-                  {showSettings ? "关闭设置" : "设置"}
+                  WebUI
                 </button>
                 <button
                   type="button"
@@ -1237,8 +1235,6 @@ export function MainPage(): JSX.Element {
             )}
           </div>
         </div>
-
-        {showSettings && <UserSettingsPanel onTtsSettings={onTtsSettings} />}
 
         <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
           <div className="h-[420px] overflow-auto rounded-md border border-ink-100 bg-ink-50 p-3">
@@ -1276,6 +1272,11 @@ export function MainPage(): JSX.Element {
           {companionActionError && (
             <div className="mt-2">
               <Notice tone="error" title="Companion" message={companionActionError} />
+            </div>
+          )}
+          {webUiActionError && (
+            <div className="mt-2">
+              <Notice tone="error" title="WebUI" message={webUiActionError} />
             </div>
           )}
           <div className="mt-3 flex gap-2">
