@@ -279,7 +279,7 @@ export function recentEvidenceReference(messageReference: string): string {
   return `recent-conversation:${messageReference}`;
 }
 
-function memorySourceClass(
+export function memorySourceClass(
   event: MemoryEvent
 ):
   | "EXPLICIT_USER_ORIGINATED"
@@ -316,7 +316,7 @@ function memorySourceClass(
   }
 }
 
-function memorySupport(
+export function memorySupport(
   event: MemoryEvent,
   sourceClass:
     | "EXPLICIT_USER_ORIGINATED"

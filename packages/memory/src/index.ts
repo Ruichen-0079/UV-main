@@ -72,6 +72,12 @@ export {
   type MemoryClaimAdmission,
   type MemoryClaimCorrectionPlan
 } from "./claim.js";
+export {
+  IDENTITY_EVIDENCE_SEAM_VERSION,
+  selectIdentityEvidence,
+  type IdentityEvidenceSelection,
+  type IdentityEvidenceSelectionInput
+} from "./identity-evidence.js";
 export { detectCurrentAffect } from "./affect.js";
 export { computeRetentionPolicy, type RetentionPolicy } from "./retention.js";
 export {

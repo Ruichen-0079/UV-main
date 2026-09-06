@@ -82,6 +82,8 @@ export * from "./correction.js";
 export * from "./persistence.js";
 export * from "./reconstruction.js";
 export * from "./profile.js";
+export * from "./identity-evidence.js";
+export * from "./identity.js";
 
 export function createDefaultP8IdentityAddress(subjectScopeId?: string): P8IdentityAddress {
   return freezeAddress({
