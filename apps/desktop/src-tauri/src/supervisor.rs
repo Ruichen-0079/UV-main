@@ -206,6 +206,19 @@ pub fn bootstrap_supervisor(
       command.env(key, value);
     }
   }
+  // Keep the desktop process autostart flags on the Supervisor child. pnpm/tsx
+  // wrappers must not drop the isolated-smoke "do not autostart" contract.
+  for key in [
+    "YUVI_AUTOSTART_RUNTIME",
+    "YUVI_AUTOSTART_MEM0",
+    "YUVI_AUTOSTART_TTS",
+    "YUVI_AUTOSTART_LOCAL_STT",
+    "YUVI_SUPERVISOR_MODE",
+  ] {
+    if let Ok(value) = std::env::var(key) {
+      command.env(key, value);
+    }
+  }
   command
     .current_dir(&cwd)
     .stdin(Stdio::null())
@@ -214,13 +227,7 @@ pub fn bootstrap_supervisor(
 
   #[cfg(unix)]
   {
-    use std::os::unix::process::CommandExt;
-    // Own the whole descendant tree: the supervisor child becomes its own
-    // process-group leader (pgid == child pid), so shutdown can signal the
-    // exact group this instance spawned — never a name-, port-, or
-    // parent-group-based sweep. Descendants (pnpm/tsx/node/service children)
-    // inherit the group unless they deliberately leave it.
-    command.process_group(0);
+    bind_supervisor_child_lifetime(&mut command);
   }
 
   #[cfg(target_os = "windows")]
@@ -233,8 +240,20 @@ pub fn bootstrap_supervisor(
   let child = command
     .spawn()
     .map_err(|e| format!("failed to spawn supervisor: {e}"))?;
+  let spawned_child_pid = child.id();
 
-  let endpoint = wait_for_active_endpoint(&active_pointer, Duration::from_secs(25))?;
+  let endpoint = match wait_for_spawned_endpoint(
+    &root_state_dir,
+    &active_pointer,
+    spawned_child_pid,
+    Duration::from_secs(25),
+  ) {
+    Ok(endpoint) => endpoint,
+    Err(error) => {
+      let _ = stop_supervisor_child_bounded(child);
+      return Err(error);
+    }
+  };
   // Validate endpoint PID is alive and host is loopback.
   if endpoint.host != "127.0.0.1" && endpoint.host != "localhost" && endpoint.host != "::1" {
     return Err("supervisor endpoint host is not loopback".to_string());
@@ -331,6 +350,7 @@ fn is_secret_env_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
   use super::{is_secret_env_key, stop_supervisor_child_bounded};
+  use std::fs;
   use std::process::{Command, Stdio};
   use std::time::{Duration, Instant};
 
@@ -427,6 +447,272 @@ mod tests {
       .stderr(Stdio::null());
     let child = command.spawn().expect("grouped test child should spawn");
 
+    assert!(stop_supervisor_child_bounded(child));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn spawned_child_owns_its_group_members_only() {
+    use std::os::unix::process::CommandExt;
+
+    let mut ours = Command::new("sleep");
+    ours
+      .arg("30")
+      .process_group(0)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let ours_child = ours.spawn().expect("ours");
+    let mut foreign = Command::new("sleep");
+    foreign
+      .arg("30")
+      .process_group(0)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let foreign_child = foreign.spawn().expect("foreign");
+    assert!(super::spawned_child_owns_pid(ours_child.id(), ours_child.id()));
+    assert!(!super::spawned_child_owns_pid(
+      ours_child.id(),
+      foreign_child.id()
+    ));
+    let _ = stop_supervisor_child_bounded(ours_child);
+    let _ = stop_supervisor_child_bounded(foreign_child);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn spawned_child_owns_a_setsid_descendant() {
+    use std::os::unix::process::CommandExt;
+
+    let mut leader = Command::new("python3");
+    leader
+      .arg("-c")
+      .arg(
+        "import os, time\n\
+         child = os.fork()\n\
+         if child == 0:\n\
+         \tos.setsid()\n\
+         \tos.execlp('sleep', 'sleep', '30')\n\
+         time.sleep(30)\n",
+      )
+      .process_group(0)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let leader_child = leader.spawn().expect("leader");
+    std::thread::sleep(Duration::from_millis(200));
+    let descendants = unix_children(leader_child.id());
+    assert!(
+      descendants
+        .iter()
+        .copied()
+        .any(|pid| super::spawned_child_owns_pid(leader_child.id(), pid)),
+      "leader {} descendants {:?}",
+      leader_child.id(),
+      descendants
+    );
+    for pid in descendants {
+      let _ = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status();
+    }
+    let _ = stop_supervisor_child_bounded(leader_child);
+  }
+
+  #[cfg(unix)]
+  fn unix_children(parent: u32) -> Vec<u32> {
+    let mut pids = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+      return pids;
+    };
+    for entry in entries.flatten() {
+      let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+        continue;
+      };
+      if super::unix_ppid(pid) == Some(parent) {
+        pids.push(pid);
+      }
+    }
+    pids
+  }
+
+  fn serve_ok_json() -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let handle = std::thread::spawn(move || {
+      for stream in listener.incoming().take(64) {
+        if let Ok(mut stream) = stream {
+          let mut buf = [0u8; 1024];
+          let _ = stream.read(&mut buf);
+          let body = r#"{"ok":true}"#;
+          let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+          );
+          let _ = stream.write_all(resp.as_bytes());
+          let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+      }
+    });
+    (port, handle)
+  }
+
+  fn write_endpoint(dir: &std::path::Path, pid: u32, port: u16, instance: &str) -> std::path::PathBuf {
+    let path = dir.join("control-endpoint.json");
+    let payload = serde_json::json!({
+      "host": "127.0.0.1",
+      "port": port,
+      "baseUrl": format!("http://127.0.0.1:{port}"),
+      "instanceId": instance,
+      "pid": pid,
+      "startedAt": "2026-09-06T00:00:00.000Z",
+      "controlToken": "a".repeat(64),
+    });
+    fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+    path
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn wait_rejects_a_foreign_healthy_supervisor() {
+    use std::os::unix::process::CommandExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let (port, _server) = serve_ok_json();
+    let mut foreign = Command::new("sleep");
+    foreign
+      .arg("30")
+      .process_group(0)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let foreign_child = foreign.spawn().expect("foreign");
+    let endpoint = write_endpoint(root.path(), foreign_child.id(), port, "foreign-inst");
+    let pointer = root.path().join("active-instance.json");
+    fs::write(
+      &pointer,
+      serde_json::to_vec(&serde_json::json!({
+        "instanceId": "foreign-inst",
+        "pid": foreign_child.id(),
+        "endpointFile": endpoint,
+      }))
+      .unwrap(),
+    )
+    .unwrap();
+
+    let mut ours = Command::new("sleep");
+    ours
+      .arg("30")
+      .process_group(0)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let ours_child = ours.spawn().expect("ours");
+    let err = super::wait_for_spawned_endpoint(
+      root.path(),
+      &pointer,
+      ours_child.id(),
+      Duration::from_millis(600),
+    )
+    .expect_err("foreign healthy endpoint must not bind");
+    assert!(err.contains("did not publish a control endpoint"));
+
+    let _ = stop_supervisor_child_bounded(ours_child);
+    let _ = stop_supervisor_child_bounded(foreign_child);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn wait_binds_to_the_spawned_child_endpoint() {
+    use std::os::unix::process::CommandExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let (port, _server) = serve_ok_json();
+    let mut ours = Command::new("sleep");
+    ours
+      .arg("30")
+      .process_group(0)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let ours_child = ours.spawn().expect("ours");
+    let instance_dir = root.path().join("child-inst");
+    fs::create_dir_all(&instance_dir).unwrap();
+    write_endpoint(&instance_dir, ours_child.id(), port, "child-inst");
+    let pointer = root.path().join("active-instance.json");
+    fs::write(&pointer, "{}").unwrap();
+
+    let endpoint = super::wait_for_spawned_endpoint(
+      root.path(),
+      &pointer,
+      ours_child.id(),
+      Duration::from_secs(4),
+    )
+    .expect("spawned child endpoint");
+    assert_eq!(endpoint.pid, ours_child.id());
+    assert_eq!(endpoint.instance_id, "child-inst");
+
+    let _ = stop_supervisor_child_bounded(ours_child);
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn linux_parent_death_signal_does_not_leave_a_permanent_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_path = dir.path().join("child.pid");
+    let pid_path_str = pid_path.display().to_string();
+    let mut owner = Command::new("python3");
+    owner
+      .arg("-c")
+      .arg(format!(
+        r#"
+import ctypes, os, signal, time
+child = os.fork()
+if child == 0:
+    libc = ctypes.CDLL(None)
+    if libc.prctl(1, signal.SIGTERM) != 0:
+        os._exit(2)
+    if os.getppid() == 1:
+        os.kill(os.getpid(), signal.SIGTERM)
+    os.execlp("sleep", "sleep", "30")
+open({pid_path_str:?}, "w").write(str(child))
+time.sleep(0.4)
+"#
+      ))
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    let status = owner.status().expect("owner");
+    assert!(status.success());
+    let child_pid: u32 = fs::read_to_string(&pid_path)
+      .expect("pid file")
+      .trim()
+      .parse()
+      .expect("pid");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while super::process_alive(child_pid) && Instant::now() < deadline {
+      std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+      !super::process_alive(child_pid),
+      "child {child_pid} survived parent death"
+    );
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn bind_supervisor_child_lifetime_keeps_child_while_owner_lives() {
+    let mut command = Command::new("sleep");
+    command
+      .arg("30")
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    super::bind_supervisor_child_lifetime(&mut command);
+    let child = command.spawn().expect("bound child");
+    assert!(super::process_alive(child.id()));
     assert!(stop_supervisor_child_bounded(child));
   }
 }
@@ -775,40 +1061,168 @@ fn require_endpoint(state: &State<'_, SupervisorState>) -> Result<(String, Strin
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ActivePointer {
+  #[allow(dead_code)]
   instance_id: String,
+  #[allow(dead_code)]
   pid: u32,
   endpoint_file: String,
 }
 
-fn wait_for_active_endpoint(pointer_path: &Path, timeout: Duration) -> Result<EndpointFile, String> {
+/// Bind discovery to the Supervisor child this desktop just spawned.
+/// A healthy `/health` or last-writer `active-instance.json` is not enough —
+/// attaching to a foreign already-running Supervisor is the ownership break.
+fn wait_for_spawned_endpoint(
+  root_state_dir: &Path,
+  pointer_path: &Path,
+  spawned_child_pid: u32,
+  timeout: Duration,
+) -> Result<EndpointFile, String> {
   let started = std::time::Instant::now();
   while started.elapsed() < timeout {
-    if pointer_path.exists() {
-      if let Ok(text) = fs::read_to_string(pointer_path) {
-        if let Ok(pointer) = serde_json::from_str::<ActivePointer>(&text) {
-          if !process_alive(pointer.pid) {
-            thread::sleep(Duration::from_millis(200));
-            continue;
-          }
-          let endpoint_path = PathBuf::from(&pointer.endpoint_file);
-          if let Ok(endpoint_text) = fs::read_to_string(&endpoint_path) {
-            if let Ok(endpoint) = serde_json::from_str::<EndpointFile>(&endpoint_text) {
-              // PID + instance must match pointer; refuse mismatched stale files.
-              if endpoint.pid == pointer.pid
-                && endpoint.instance_id == pointer.instance_id
-                && process_alive(endpoint.pid)
-                && http_json("GET", &format!("{}/health", endpoint.base_url), None, None).is_ok()
-              {
-                return Ok(endpoint);
-              }
-            }
-          }
-        }
+    for endpoint_path in candidate_endpoint_files(root_state_dir, pointer_path) {
+      let Ok(endpoint_text) = fs::read_to_string(&endpoint_path) else {
+        continue;
+      };
+      let Ok(endpoint) = serde_json::from_str::<EndpointFile>(&endpoint_text) else {
+        continue;
+      };
+      if !endpoint_host_is_loopback(&endpoint.host) {
+        continue;
+      }
+      if !process_alive(endpoint.pid) {
+        continue;
+      }
+      if !spawned_child_owns_pid(spawned_child_pid, endpoint.pid) {
+        continue;
+      }
+      if endpoint.control_token.len() < 32 {
+        continue;
+      }
+      if http_json_with_timeout(
+        "GET",
+        &format!("{}/health", endpoint.base_url),
+        None,
+        None,
+        Duration::from_secs(1),
+      )
+      .is_ok()
+      {
+        return Ok(endpoint);
       }
     }
     thread::sleep(Duration::from_millis(200));
   }
   Err("desktop supervisor did not publish a control endpoint in time".to_string())
+}
+
+fn candidate_endpoint_files(root_state_dir: &Path, pointer_path: &Path) -> Vec<PathBuf> {
+  let mut paths = Vec::new();
+  if let Ok(text) = fs::read_to_string(pointer_path) {
+    if let Ok(pointer) = serde_json::from_str::<ActivePointer>(&text) {
+      if !pointer.endpoint_file.is_empty() {
+        paths.push(PathBuf::from(pointer.endpoint_file));
+      }
+    }
+  }
+  if let Ok(entries) = fs::read_dir(root_state_dir) {
+    for entry in entries.flatten() {
+      let path = entry.path().join("control-endpoint.json");
+      if path.is_file() && !paths.contains(&path) {
+        paths.push(path);
+      }
+    }
+  }
+  paths
+}
+
+fn endpoint_host_is_loopback(host: &str) -> bool {
+  host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+/// True when `pid` is the spawned child, a member of that child's owned
+/// process group, or a descendant in the spawn tree (pnpm/tsx may setpgid
+/// after exec; group membership alone is not sufficient).
+fn spawned_child_owns_pid(spawned_child_pid: u32, pid: u32) -> bool {
+  if spawned_child_pid == 0 || pid == 0 {
+    return false;
+  }
+  if spawned_child_pid == pid {
+    return true;
+  }
+  #[cfg(unix)]
+  {
+    if unix_pgid(pid) == Some(spawned_child_pid as i32)
+      && unix_pgid(spawned_child_pid) == Some(spawned_child_pid as i32)
+    {
+      return true;
+    }
+    return unix_is_descendant(spawned_child_pid, pid);
+  }
+  #[cfg(not(unix))]
+  {
+    false
+  }
+}
+
+#[cfg(unix)]
+fn unix_is_descendant(ancestor: u32, pid: u32) -> bool {
+  let mut current = pid;
+  for _ in 0..64 {
+    if current == ancestor {
+      return true;
+    }
+    let Some(ppid) = unix_ppid(current) else {
+      return false;
+    };
+    if ppid == 0 || ppid == 1 || ppid == current {
+      return false;
+    }
+    current = ppid;
+  }
+  false
+}
+
+#[cfg(unix)]
+fn unix_ppid(pid: u32) -> Option<u32> {
+  let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+  let close = text.rfind(')')?;
+  let rest = text.get(close + 2..)?;
+  let mut parts = rest.split_whitespace();
+  let _state = parts.next()?;
+  parts.next()?.parse().ok()
+}
+
+#[cfg(unix)]
+fn unix_pgid(pid: u32) -> Option<i32> {
+  let pid = libc::pid_t::try_from(pid).ok()?;
+  let pgid = unsafe { libc::getpgid(pid) };
+  if pgid > 0 {
+    Some(pgid)
+  } else {
+    None
+  }
+}
+
+/// Unix spawn bindings: own the descendant process group, and on Linux bind
+/// the Supervisor child's lifetime to this desktop via PR_SET_PDEATHSIG.
+#[cfg(unix)]
+fn bind_supervisor_child_lifetime(command: &mut Command) {
+  use std::os::unix::process::CommandExt;
+  command.process_group(0);
+  #[cfg(target_os = "linux")]
+  {
+    unsafe {
+      command.pre_exec(|| {
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0) != 0 {
+          return Err(std::io::Error::last_os_error());
+        }
+        if libc::getppid() == 1 {
+          libc::raise(libc::SIGTERM);
+        }
+        Ok(())
+      });
+    }
+  }
 }
 
 /// Loopback JSON over plain TCP — never shell out to PowerShell/curl.

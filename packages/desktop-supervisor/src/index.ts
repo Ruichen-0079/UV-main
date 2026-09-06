@@ -73,8 +73,15 @@ export {
   spawnManagedProcess,
   requestGracefulStop,
   forceKillProcessTree,
-  stopProcessTree
+  stopProcessTree,
+  ownedUnixProcessGroup
 } from "./process-windows.js";
+export {
+  SUPERVISOR_INSTANCE_LOCK_FILE,
+  SupervisorInstanceLockError,
+  acquireSupervisorInstanceLock
+} from "./instance-lock.js";
+export type { SupervisorInstanceLock } from "./instance-lock.js";
 export {
   YUVI_APP_IDENTIFIER,
   defaultYuviLocalDataRoot,

@@ -154,6 +154,41 @@ describe("process ownership", () => {
     expect(result.message).toMatch(/marker/i);
   });
 
+  it("keeps a spawned Runtime owned after the dev runner execs away the argv marker", () => {
+    const dir = tempDir();
+    const file = path.join(dir, "runtime.pid.json");
+    const started = new Date();
+    writeProcessMetadata(
+      file,
+      meta({
+        pid: 1001,
+        role: "runtime",
+        commandMarker: "dev-server-runner.sh",
+        processStartedAtUtc: started.toISOString(),
+        stateDirectory: dir,
+        repositoryRoot: "/home/ruichen/Projects/UV-main"
+      })
+    );
+    const result = testProcessOwnership({
+      metadataPath: file,
+      expectedRole: "runtime",
+      repositoryRoot: "/home/ruichen/Projects/UV-main",
+      stateDirectory: dir,
+      ownershipToken: "token-a",
+      instanceId: "instance-a",
+      processInfo: {
+        processId: 1001,
+        parentProcessId: 1,
+        commandLine: "node /usr/bin/pnpm exec tsx --conditions development apps/server/src/index.ts",
+        createdAtUtc: started
+      },
+      currentChild: { pid: 1001, killed: false, exitCode: null, signalCode: null }
+    });
+    expect(result.owned).toBe(true);
+    expect(result.currentChildMatch).toBe(true);
+    expect(result.status).toBe("running");
+  });
+
   it("accepts owned process when command line uses quoted Windows repo path", () => {
     const dir = tempDir();
     const file = path.join(dir, "runtime.pid.json");

@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   DesktopSupervisor,
+  acquireSupervisorInstanceLock,
   loadSupervisorConfig,
   loadPackagedSupervisorConfig,
   startSupervisorHttpServer
@@ -141,7 +142,7 @@ async function main() {
         // ignore
       }
       try {
-        releaseInstanceLock();
+        releaseInstanceLock.release();
       } catch {
         // ignore
       }
@@ -155,83 +156,6 @@ async function main() {
   process.on("SIGTERM", () => {
     void gracefulShutdown("SIGTERM");
   });
-}
-
-/**
- * Exclusive lock under LOCALAPPDATA/YUVI/DesktopSupervisor so only one packaged
- * Supervisor drives Runtime secrets and ownership.
- * @returns {() => void} release
- */
-function acquireSupervisorInstanceLock(pointerRoot) {
-  const lockPath = path.join(pointerRoot, "supervisor.instance.lock");
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      fs.writeFileSync(
-        lockPath,
-        `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`,
-        { encoding: "utf8", flag: "wx", mode: 0o600 }
-      );
-      restrictToCurrentUser(lockPath);
-      return () => {
-        try {
-          const raw = fs.readFileSync(lockPath, "utf8");
-          const data = JSON.parse(raw);
-          if (data?.pid === process.pid) fs.unlinkSync(lockPath);
-        } catch {
-          try {
-            fs.unlinkSync(lockPath);
-          } catch {
-            // ignore
-          }
-        }
-      };
-    } catch {
-      let stale = false;
-      try {
-        const raw = fs.readFileSync(lockPath, "utf8");
-        const data = JSON.parse(raw);
-        const holder = Number(data?.pid);
-        if (!Number.isFinite(holder) || holder <= 0 || !isPidAlive(holder)) {
-          stale = true;
-        } else if (holder === process.pid) {
-          return () => {
-            try {
-              fs.unlinkSync(lockPath);
-            } catch {
-              // ignore
-            }
-          };
-        } else {
-          throw new Error(
-            `Another YUVI Supervisor is already running (pid ${holder}). Close other YUVI windows/installs, then retry.`
-          );
-        }
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("already running")) {
-          throw error;
-        }
-        stale = true;
-      }
-      if (stale) {
-        try {
-          fs.unlinkSync(lockPath);
-        } catch {
-          // ignore
-        }
-        continue;
-      }
-    }
-  }
-  throw new Error("Unable to acquire Supervisor instance lock.");
-}
-
-function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function required(map, key) {

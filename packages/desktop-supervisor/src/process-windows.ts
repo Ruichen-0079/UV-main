@@ -208,7 +208,10 @@ export function spawnManagedProcess(
     env: options?.env ?? { ...process.env, ...command.env },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
-    detached: false
+    // Unix: child becomes its own process-group leader so stop can signal
+    // that exact tree after wrapper exec. Do not unref — the Supervisor
+    // keeps the handle as ownership evidence. Windows uses taskkill /T.
+    detached: process.platform !== "win32"
   });
 
   const outStream = fs.createWriteStream(log.out, { flags: "a" });
@@ -245,11 +248,7 @@ export function requestGracefulStop(processId: number): void {
     });
     return;
   }
-  try {
-    process.kill(processId, "SIGTERM");
-  } catch {
-    // ignore
-  }
+  signalUnixOwnedTree(processId, "SIGTERM");
 }
 
 /**
@@ -266,10 +265,38 @@ export function forceKillProcessTree(processId: number): void {
     });
     return;
   }
+  signalUnixOwnedTree(processId, "SIGKILL");
+}
+
+/**
+ * PgID of `pid` when `pid` itself leads that group. Never returns a foreign
+ * group id, so callers cannot `kill(-pgid)` a process they did not spawn.
+ */
+export function ownedUnixProcessGroup(processId: number): number | null {
+  if (process.platform === "win32") return null;
+  if (!Number.isInteger(processId) || processId <= 0) return null;
+  const pgid = readUnixPgid(processId);
+  return pgid === processId ? pgid : null;
+}
+
+function readUnixPgid(processId: number): number | null {
   try {
-    process.kill(processId, "SIGKILL");
+    const stat = fs.readFileSync(`/proc/${processId}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    const rest = close >= 0 ? stat.slice(close + 2).split(" ") : [];
+    const pgid = Number(rest[2] ?? 0);
+    return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
   } catch {
-    // ignore
+    return null;
+  }
+}
+
+function signalUnixOwnedTree(processId: number, signal: NodeJS.Signals): void {
+  const pgid = ownedUnixProcessGroup(processId);
+  try {
+    process.kill(pgid != null ? -pgid : processId, signal);
+  } catch {
+    // ignore ESRCH / EPERM
   }
 }
 

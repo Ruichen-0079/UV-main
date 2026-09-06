@@ -11,6 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DesktopSupervisor,
+  acquireSupervisorInstanceLock,
   defaultStateDirectory,
   loadSupervisorConfig,
   startSupervisorHttpServer,
@@ -31,8 +32,11 @@ fs.mkdirSync(config.stateDirectory, { recursive: true });
 // Restrict directory ACL to current user when possible (Windows).
 restrictToCurrentUser(config.stateDirectory);
 
+const pointerRoot = defaultDesktopSupervisorRoot();
+fs.mkdirSync(pointerRoot, { recursive: true });
+const releaseInstanceLock = acquireSupervisorInstanceLock(pointerRoot);
 // Active-instance pointer (no token): helps Rust discover the latest endpoint path.
-const activePointer = path.join(defaultDesktopSupervisorRoot(), "active-instance.json");
+const activePointer = path.join(pointerRoot, "active-instance.json");
 const endpointFile = path.join(config.stateDirectory, "control-endpoint.json");
 // Drop stale endpoint before publishing so we never attach to an old PID.
 try {
@@ -121,6 +125,11 @@ async function gracefulShutdown(reason: string): Promise<void> {
     server.close();
     try {
       fs.unlinkSync(endpointFile);
+    } catch {
+      // ignore
+    }
+    try {
+      releaseInstanceLock.release();
     } catch {
       // ignore
     }
