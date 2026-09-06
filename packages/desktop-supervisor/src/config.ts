@@ -748,6 +748,7 @@ export function resolveMem0StartDetailed(
 
   const parsed = parseUrlOrigin(mem0Url);
   const port = parsed?.port ?? 6131;
+  const pgConnection = env["MEM0_PG_CONNECTION_STRING"]?.trim() || env["DATABASE_URL"]?.trim();
 
   return {
     start: {
@@ -757,7 +758,8 @@ export function resolveMem0StartDetailed(
       env: {
         PYTHONPATH: "src",
         MEM0_SIDECAR_PORT: String(port),
-        MEM0_SIDECAR_HOST: "127.0.0.1"
+        MEM0_SIDECAR_HOST: "127.0.0.1",
+        ...(pgConnection ? { MEM0_PG_CONNECTION_STRING: pgConnection } : {})
       },
       commandMarker: "yuvi_mem0"
     },
