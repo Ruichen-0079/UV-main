@@ -338,6 +338,22 @@ export function testProcessOwnership(input: {
     });
   }
 
+  // The live ChildProcess handle is stronger than argv: `exec pnpm/tsx`
+  // replaces the runner script in /proc/pid/cmdline but keeps the same pid.
+  if (currentChildMatch) {
+    return makeResult({
+      status: "running",
+      owned: true,
+      processId,
+      message: "owned process is running",
+      metadata,
+      inspection,
+      metadataSnapshotMatch: true,
+      cleanupReason: "owned-running",
+      currentChildMatch
+    });
+  }
+
   const marker = metadata.commandMarker ?? "";
   if (!processInfo.commandLine) {
     return makeResult({

@@ -655,7 +655,13 @@ export class DesktopSupervisor {
       this.lifecycleEvent("memory.owned.published", svc, { ownership: svc.ownership });
 
       this.lifecycleEvent("memory.health.probe.begin", svc, { phase: "readiness" });
-      const ready = await this.waitReady(svc, svc.spec.startTimeoutMs);
+      // Mem0 may be broken in current Linux dev (missing uvicorn). Do not let
+      // its full startTimeout block the control-plane bootstrap/config ACK.
+      const readyTimeoutMs =
+        svc.spec.id === "mem0"
+          ? Math.min(svc.spec.startTimeoutMs, 2_000)
+          : svc.spec.startTimeoutMs;
+      const ready = await this.waitReady(svc, readyTimeoutMs);
       if (!ready) {
         svc.status = "unavailable";
         svc.summary = "Started but readiness timed out.";

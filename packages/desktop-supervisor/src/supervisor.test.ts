@@ -297,6 +297,87 @@ describe("DesktopSupervisor shutdown", () => {
     expect(log.match(/shutdown complete/g)).toHaveLength(1);
     expect(log).toContain("shutdown already in progress/complete");
   });
+
+  it("does not stop or adopt an external foreign Runtime pid", async () => {
+    const supervisor = createSupervisor(baseConfig());
+    const services = (
+      supervisor as unknown as {
+        services: Map<
+          string,
+          {
+            child: ReturnType<typeof fakeChild> | null;
+            ownership: "none" | "owned" | "external";
+            pid: number | null;
+          }
+        >;
+      }
+    ).services;
+    const runtime = services.get("runtime");
+    if (!runtime) throw new Error("expected runtime");
+    runtime.child = null;
+    runtime.pid = 41_099;
+    runtime.ownership = "external";
+
+    const gracefulStop = vi
+      .spyOn(processWindows, "requestGracefulStop")
+      .mockImplementation(() => undefined);
+    vi.spyOn(processWindows, "forceKillProcessTree").mockImplementation(() => undefined);
+    vi.spyOn(processWindows, "isProcessAlive").mockReturnValue(true);
+
+    await supervisor.shutdown();
+    expect(gracefulStop).not.toHaveBeenCalledWith(41_099);
+    expect(runtime.ownership).toBe("none");
+  });
+});
+
+describe("DesktopSupervisor exec-stable Runtime ownership", () => {
+  it("refresh keeps a spawned Runtime owned after the runner argv marker disappears", async () => {
+    const config = baseConfig({ autostartRuntime: true });
+    const child = fakeChild(52_001);
+    let spawned = false;
+    vi.mocked(processWindows.spawnManagedProcess).mockImplementation(() => {
+      spawned = true;
+      return child as never;
+    });
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((processId) => ({
+      status: "resolved",
+      processId,
+      info: {
+        processId,
+        parentProcessId: 1,
+        commandLine: "node pnpm exec tsx --conditions development apps/server/src/index.ts",
+        createdAtUtc: new Date()
+      }
+    }));
+    vi.spyOn(processWindows, "isProcessAlive").mockImplementation((pid) => pid === 52_001);
+    vi.spyOn(health, "probeHttpHealth").mockImplementation(async (url) => {
+      if (url.includes("6121") && spawned) {
+        return {
+          ok: true,
+          statusCode: 200,
+          protocolOk: true,
+          message: "healthy",
+          latencyMs: 1
+        };
+      }
+      return { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
+    });
+    vi.spyOn(health, "probeTcp").mockResolvedValue({
+      ok: false,
+      statusCode: null,
+      protocolOk: false,
+      message: "closed",
+      latencyMs: 1
+    });
+
+    const supervisor = createSupervisor(config);
+    await supervisor.bootstrap();
+    const snap = supervisor.snapshot();
+    const runtime = snap.services.find((service) => service.id === "runtime");
+    expect(spawned).toBe(true);
+    expect(runtime?.ownership).toBe("owned");
+    expect(runtime?.pid).toBe(52_001);
+  });
 });
 
 describe("DesktopSupervisor classification", () => {

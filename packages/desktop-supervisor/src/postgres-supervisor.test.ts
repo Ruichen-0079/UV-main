@@ -148,14 +148,20 @@ describe("supervisor postgres mode", () => {
     expect(text).not.toContain("postgres://yuvi");
   });
 
-  it("keeps the packaged Supervisor instance lock as the process-level mutex", () => {
-    const script = fs.readFileSync(
-      path.resolve(__dirname, "../../../scripts/yuvi-desktop-supervisor.packaged.mjs"),
-      "utf8"
-    );
-    expect(script).toContain("acquireSupervisorInstanceLock");
-    expect(script).toContain("supervisor.instance.lock");
-    expect(script).toContain("Another YUVI Supervisor is already running");
+  it("keeps the Supervisor instance lock as the process-level mutex in both entries", () => {
+    for (const entry of [
+      "yuvi-desktop-supervisor.mts",
+      "yuvi-desktop-supervisor.packaged.mjs"
+    ]) {
+      const script = fs.readFileSync(
+        path.resolve(__dirname, `../../../scripts/${entry}`),
+        "utf8"
+      );
+      expect(script).toContain("acquireSupervisorInstanceLock");
+    }
+    const lock = fs.readFileSync(path.resolve(__dirname, "instance-lock.ts"), "utf8");
+    expect(lock).toContain("supervisor.instance.lock");
+    expect(lock).toContain("Another YUVI Supervisor is already running");
   });
 
   it("routes control-plane shutdown into terminal process exit in both entries", () => {
