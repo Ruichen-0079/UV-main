@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+const SUPERVISOR_BOOTSTRAP_ACK_TIMEOUT: Duration = Duration::from_secs(420);
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -284,11 +286,17 @@ pub fn bootstrap_supervisor(
     )
     .map_err(|error| format!("supervisor config barrier failed: {error}"))?;
   }
-  http_json(
+  // Bootstrap is intentionally an ACK barrier over sequential, bounded
+  // managed-service readiness. Its legal worst-case envelope can exceed the
+  // generic 60s POST timeout (PostgreSQL 30s + Runtime 45s + Mem0 60s +
+  // TTS upstream/wrapper 90s each + local STT 60s). Keep the barrier bounded
+  // without timing out a healthy but cold local stack.
+  http_json_with_timeout(
     "POST",
     &format!("{base_url}/v1/bootstrap"),
     None,
     Some(&token),
+    SUPERVISOR_BOOTSTRAP_ACK_TIMEOUT,
   )
   .map_err(|error| format!("supervisor bootstrap barrier failed: {error}"))?;
 
@@ -330,13 +338,25 @@ fn is_secret_env_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-  use super::{is_secret_env_key, stop_supervisor_child_bounded};
+  use super::{
+    is_secret_env_key, stop_supervisor_child_bounded, SUPERVISOR_BOOTSTRAP_ACK_TIMEOUT,
+  };
   use std::process::{Command, Stdio};
   use std::time::{Duration, Instant};
 
   #[test]
   fn openai_compatible_api_key_stays_out_of_supervisor_base_environment() {
     assert!(is_secret_env_key("OPENAI_COMPATIBLE_API_KEY"));
+  }
+
+  #[test]
+  fn bootstrap_ack_timeout_covers_sequential_managed_readiness_envelope() {
+    // Mirrors the bounded readiness ceilings owned by desktop-supervisor:
+    // private PostgreSQL 30s + Runtime 45s + Mem0 60s + two TTS services
+    // at 90s each + local STT 60s = 375s, before small probe overhead.
+    let readiness_envelope = Duration::from_secs(30 + 45 + 60 + 90 + 90 + 60);
+    assert!(SUPERVISOR_BOOTSTRAP_ACK_TIMEOUT > readiness_envelope);
+    assert!(SUPERVISOR_BOOTSTRAP_ACK_TIMEOUT < Duration::from_secs(10 * 60));
   }
 
   #[test]
