@@ -2,9 +2,10 @@ import { useState } from "react";
 import { App as DeveloperDashboard } from "./App.js";
 import { apiClient, type HealthResponse } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
+import { ProductAIRouting } from "./product-ai-routing.js";
 import { ProductModelsProviders } from "./product-models-providers.js";
 
-type ProductView = "home" | "settings" | "developer";
+type ProductView = "home" | "models" | "routing" | "developer";
 
 function healthLabel(
   health: HealthResponse | null,
@@ -66,10 +67,17 @@ export function ProductWebUI(): JSX.Element {
           </button>
           <button
             type="button"
-            className={`yuvi-product-action ${view === "settings" ? "is-active" : ""}`}
-            onClick={() => setView("settings")}
+            className={`yuvi-product-action ${view === "models" ? "is-active" : ""}`}
+            onClick={() => setView("models")}
           >
-            Settings
+            Models &amp; Providers
+          </button>
+          <button
+            type="button"
+            className={`yuvi-product-action ${view === "routing" ? "is-active" : ""}`}
+            onClick={() => setView("routing")}
+          >
+            AI Routing
           </button>
           <button
             type="button"
@@ -97,9 +105,9 @@ export function ProductWebUI(): JSX.Element {
                 <button
                   type="button"
                   className="yuvi-product-action is-active"
-                  onClick={() => setView("settings")}
+                  onClick={() => setView("models")}
                 >
-                  Configure YUVI
+                  Models &amp; Providers
                 </button>
                 <button
                   type="button"
@@ -137,20 +145,22 @@ export function ProductWebUI(): JSX.Element {
               </section>
             ) : null}
           </div>
-        ) : (
+        ) : view === "models" ? (
           <div className="grid gap-4">
             <section className="yuvi-product-hero">
               <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">
-                Settings
+                Models &amp; Providers
               </div>
-              <h1 className="m-0 text-2xl font-semibold">YUVI configuration</h1>
+              <h1 className="m-0 text-2xl font-semibold">Model connections</h1>
               <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">
-                Desktop/user preferences and secure credentials use the Tauri settings authority;
-                Runtime configuration keeps the current saved/effective/active truth model.
+                Provider connections use current-main Runtime settings and secret authority. AI
+                Routing has its own product page.
               </p>
             </section>
             <ProductModelsProviders />
           </div>
+        ) : (
+          <ProductAIRouting />
         )}
       </main>
     </div>
