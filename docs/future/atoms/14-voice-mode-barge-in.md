@@ -1,6 +1,6 @@
 # Atom 14 — Voice Mode and Barge-In
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: IMPLEMENTED on main (Atom 14 closure)**
 >
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >
@@ -125,6 +125,37 @@ End-to-end tests prove one normal hands-free turn, barge-in of proactive and
 reactive speech, no self-echo loop under supported AEC test conditions, stale
 STT fencing, monotonic interrupted TTS lifecycle, and preservation of committed
 conversation text.
+
+## Closure (current main)
+
+Hands-free capture ownership lives in the Web microphone adapter
+(`live-speech-capture` + `hands-free-utterance`). Device states are
+`idle / listening / speech-active / finalizing` only.
+
+VAD ACTIVE is speech activity: it advances `activityRevision`, revokes an
+audible speech-playback effect, and never creates a UserMessage, Memory write,
+or Character turn.
+
+Explicit-turn boundary: a finalized utterance is transcribed with the live
+`captureEpoch`, then submitted through the existing Runtime message path.
+PTT remains the manual record/transcribe/draft path and is mutually exclusive
+with Voice Mode.
+
+Barge-in: VAD false→true → Runtime `INTERRUPTED` on the current speech effect →
+Main posts existing `stop-speech` → Companion `SpeechPlaybackQueue.cancel()`.
+Committed assistant text is unchanged. Capture continues.
+
+TTS is a single path: Companion `SpeechPlaybackQueue`. Runtime admits a speech
+playback effect (`speech.<id>`) and reuses the Phase 7 monotonic reducer so
+late `COMPLETED` cannot overwrite `INTERRUPTED`. One response/requestId is one
+effect; cancel stops all remaining segments.
+
+AEC: `getUserMedia` requests `echoCancellation`, `noiseSuppression`, and
+`autoGainControl`. Actual `MediaStreamTrack.getSettings()` are shown as
+diagnostics. Identity is not used as echo detection.
+
+PR #225 was not merged. Reused: AbortSignal on transcribe, capture cleanup,
+utterance duration bound. Obsolete: Web-owned turn state machine.
 
 ## Stop condition
 

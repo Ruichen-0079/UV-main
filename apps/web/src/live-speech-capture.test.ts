@@ -3,8 +3,17 @@ import { startLiveSpeechCapture, type LiveSpeechFrame } from "./live-speech-capt
 
 describe("live speech capture", () => {
   it("opens the microphone and posts PCM frames for one captureEpoch", async () => {
-    const tracks = [{ stop: vi.fn() }];
-    const stream = { getTracks: () => tracks };
+    const tracks = [
+      {
+        stop: vi.fn(),
+        getSettings: () => ({
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: false
+        })
+      }
+    ];
+    const stream = { getTracks: () => tracks, getAudioTracks: () => tracks };
     const getUserMedia = vi.fn(async () => stream as unknown as MediaStream);
     const processor = {
       onaudioprocess: null as null | ((event: unknown) => void),
@@ -38,7 +47,15 @@ describe("live speech capture", () => {
     });
 
     expect(capture.captureEpoch).toBe("epoch-live");
-    expect(getUserMedia).toHaveBeenCalledWith({ audio: true, video: false });
+    expect(capture.trackSettings).toEqual({
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: false
+    });
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false
+    });
     expect(source.connect).toHaveBeenCalled();
     expect(processor.connect).toHaveBeenCalledWith(gain);
     expect(gain.connect).toHaveBeenCalledWith(context.destination);

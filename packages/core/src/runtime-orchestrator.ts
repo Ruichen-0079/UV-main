@@ -128,6 +128,14 @@ import {
   type SpeechCaptureStore
 } from "./runtime-speech-capture.js";
 import {
+  admitSpeechPlaybackEffect,
+  createSpeechPlaybackStore,
+  reportSpeechPlaybackOutcome,
+  revokeAudibleSpeechPlayback,
+  type SpeechPlaybackEffect,
+  type SpeechPlaybackStore
+} from "./runtime-speech-playback.js";
+import {
   interpretSpeechObservationIdentity,
   type InterpretSpeechObservationIdentityInput,
   type SpeechObservationIdentityInterpretation
@@ -272,6 +280,7 @@ export class RuntimeOrchestrator {
   private proactiveConsentEnabled: boolean | undefined;
   private currentTurnControlAuthority: ProactiveControlAuthority = "LOCAL_EXPLICIT_CONTROLLER";
   private readonly speechCaptureStore: SpeechCaptureStore = createSpeechCaptureStore();
+  private readonly speechPlaybackStore: SpeechPlaybackStore = createSpeechPlaybackStore();
   private speechActive = false;
   private currentSpeechCaptureEpoch: string | null = null;
   private explicitTurnDepth = 0;
@@ -407,10 +416,14 @@ export class RuntimeOrchestrator {
   }
 
   getSpeechActivitySnapshot(): SpeechActivitySnapshot {
+    const playback = this.speechPlaybackStore.current;
     return {
       speechActive: this.speechActive,
       captureEpoch: this.currentSpeechCaptureEpoch,
-      activityRevision: this.getProactiveState().activityRevision
+      activityRevision: this.getProactiveState().activityRevision,
+      speechPlaybackEffectId: playback?.effectId ?? null,
+      speechPlaybackRequestId: playback?.requestId ?? null,
+      speechPlaybackState: playback?.state ?? null
     };
   }
 
@@ -432,18 +445,39 @@ export class RuntimeOrchestrator {
     const alreadyActiveSameEpoch =
       this.speechActive && this.currentSpeechCaptureEpoch === captureEpoch;
     if (input.active) {
+      let revoked: SpeechPlaybackEffect | null = null;
       if (!alreadyActiveSameEpoch) {
         this.noteSpeechCaptureActivity();
+        revoked = revokeAudibleSpeechPlayback(this.speechPlaybackStore);
       }
       this.speechActive = true;
       this.currentSpeechCaptureEpoch = captureEpoch;
       this.clearProactiveWake();
-      return this.getSpeechActivitySnapshot();
+      const snapshot = this.getSpeechActivitySnapshot();
+      if (revoked) {
+        return {
+          ...snapshot,
+          revokedSpeechEffectId: revoked.effectId,
+          revokedSpeechRequestId: revoked.requestId
+        };
+      }
+      return snapshot;
     }
     this.speechActive = false;
     this.currentSpeechCaptureEpoch = captureEpoch;
     this.armProactiveWake();
     return this.getSpeechActivitySnapshot();
+  }
+
+  admitSpeechPlayback(input: { sessionId: string; requestId: string }): SpeechPlaybackEffect {
+    return admitSpeechPlaybackEffect(this.speechPlaybackStore, input);
+  }
+
+  reportSpeechPlaybackOutcome(input: {
+    effectId: string;
+    outcome: "STARTED" | "COMPLETED" | "REJECTED" | "FAILED" | "INTERRUPTED";
+  }): SpeechPlaybackEffect | null {
+    return reportSpeechPlaybackOutcome(this.speechPlaybackStore, input);
   }
 
   /**

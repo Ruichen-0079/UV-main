@@ -455,6 +455,18 @@ export type SpeechActivityResponse = {
   speechActive: boolean;
   captureEpoch: string | null;
   activityRevision: number;
+  speechPlaybackEffectId?: string | null;
+  speechPlaybackRequestId?: string | null;
+  speechPlaybackState?: string | null;
+  revokedSpeechEffectId?: string;
+  revokedSpeechRequestId?: string;
+};
+
+export type SpeechPlaybackEffectResponse = {
+  effectId: string;
+  requestId?: string;
+  sessionId?: string;
+  state: string | null;
 };
 
 export type TranscriptionResponse = CapabilityRuntimeMetadata & {
@@ -1379,13 +1391,38 @@ export const apiClient = {
     mimeType?: string;
     language?: string;
     sessionId?: string;
+    captureEpoch?: string;
     speakerId?: string;
     voiceProfileId?: string;
     subjectUserId?: string;
     createdByUserId?: string;
     mockText?: string;
+    signal?: AbortSignal;
   }): Promise<TranscriptionResponse> {
-    return request<TranscriptionResponse>("/v1/audio/transcriptions", {
+    const { signal, ...payload } = input;
+    const init: RequestInit = {
+      method: "POST",
+      body: JSON.stringify(payload)
+    };
+    if (signal) init.signal = signal;
+    return request<TranscriptionResponse>("/v1/audio/transcriptions", init);
+  },
+
+  admitSpeechPlayback(input: {
+    sessionId: string;
+    requestId: string;
+  }): Promise<SpeechPlaybackEffectResponse> {
+    return request<SpeechPlaybackEffectResponse>("/v1/speech-playback", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
+  reportSpeechPlaybackOutcome(input: {
+    effectId: string;
+    outcome: "STARTED" | "COMPLETED" | "REJECTED" | "FAILED" | "INTERRUPTED";
+  }): Promise<SpeechPlaybackEffectResponse> {
+    return request<SpeechPlaybackEffectResponse>("/v1/speech-playback/outcome", {
       method: "POST",
       body: JSON.stringify(input)
     });

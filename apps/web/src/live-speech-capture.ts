@@ -8,14 +8,28 @@ export type LiveSpeechFrame = {
   sampleRate: number;
 };
 
+export const LIVE_SPEECH_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true
+};
+
+export type MicrophoneTrackSettings = {
+  echoCancellation: boolean | "unsupported";
+  noiseSuppression: boolean | "unsupported";
+  autoGainControl: boolean | "unsupported";
+};
+
 export type LiveSpeechCapture = {
   captureEpoch: string;
+  trackSettings: MicrophoneTrackSettings;
   stop(): Promise<void>;
 };
 
 export type LiveSpeechCaptureOptions = {
   sessionId: string;
   postFrame(frame: LiveSpeechFrame): Promise<unknown>;
+  onPcm?: (pcm: Int16Array, sampleRate: number) => void;
   createId?: () => string;
   getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
   createAudioContext?: () => AudioContext;
@@ -47,7 +61,8 @@ export async function startLiveSpeechCapture(
 
   const captureEpoch =
     options.createId?.() ?? globalThis.crypto?.randomUUID?.() ?? `epoch-${Date.now()}`;
-  const stream = await getUserMedia({ audio: true, video: false });
+  const stream = await getUserMedia({ audio: LIVE_SPEECH_AUDIO_CONSTRAINTS, video: false });
+  const trackSettings = readMicrophoneTrackSettings(stream);
   const context = options.createAudioContext?.() ?? new AudioContextCtor!();
   const source = context.createMediaStreamSource(stream);
   const processor = context.createScriptProcessor(PROCESSOR_BUFFER_SIZE, 1, 1);
@@ -61,6 +76,7 @@ export async function startLiveSpeechCapture(
     const input = event.inputBuffer.getChannelData(0);
     const pcm = resampleToInt16(input, event.inputBuffer.sampleRate, TARGET_SAMPLE_RATE);
     if (pcm.length === 0) return;
+    options.onPcm?.(pcm, TARGET_SAMPLE_RATE);
     const frame: LiveSpeechFrame = {
       sessionId: options.sessionId,
       captureEpoch,
@@ -85,6 +101,7 @@ export async function startLiveSpeechCapture(
 
   return {
     captureEpoch,
+    trackSettings,
     async stop() {
       stopped = true;
       processor.onaudioprocess = null;
@@ -108,6 +125,20 @@ export async function startLiveSpeechCapture(
       await context.close();
     }
   };
+}
+
+export function readMicrophoneTrackSettings(stream: MediaStream): MicrophoneTrackSettings {
+  const track = stream.getAudioTracks?.()[0];
+  const settings = track?.getSettings?.() ?? {};
+  return {
+    echoCancellation: booleanSetting(settings.echoCancellation),
+    noiseSuppression: booleanSetting(settings.noiseSuppression),
+    autoGainControl: booleanSetting(settings.autoGainControl)
+  };
+}
+
+function booleanSetting(value: unknown): boolean | "unsupported" {
+  return typeof value === "boolean" ? value : "unsupported";
 }
 
 function resampleToInt16(input: Float32Array, fromRate: number, toRate: number): Int16Array {

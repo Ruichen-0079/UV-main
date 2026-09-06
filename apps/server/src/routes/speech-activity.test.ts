@@ -80,6 +80,36 @@ describe("speech activity routes", () => {
     await app.close();
   });
 
+  it("admits and reports speech playback outcomes through Runtime", async () => {
+    const admitSpeechPlayback = vi.fn(() => ({
+      effectId: "speech.1",
+      requestId: "turn-1",
+      sessionId: "s",
+      state: "ADMITTED"
+    }));
+    const reportSpeechPlaybackOutcome = vi.fn(() => ({
+      effectId: "speech.1",
+      requestId: "turn-1",
+      sessionId: "s",
+      state: "INTERRUPTED"
+    }));
+    const app = await createApp({ admitSpeechPlayback, reportSpeechPlaybackOutcome });
+    const admitted = await app.inject({
+      method: "POST",
+      url: "/v1/speech-playback",
+      payload: { sessionId: "s", requestId: "turn-1" }
+    });
+    expect(admitted.statusCode).toBe(200);
+    expect(admitted.json()).toMatchObject({ effectId: "speech.1", state: "ADMITTED" });
+    const outcome = await app.inject({
+      method: "POST",
+      url: "/v1/speech-playback/outcome",
+      payload: { effectId: "speech.1", outcome: "INTERRUPTED" }
+    });
+    expect(outcome.json()).toMatchObject({ state: "INTERRUPTED" });
+    await app.close();
+  });
+
   it("does not admit a user turn when VAD is unavailable", async () => {
     const app = await createApp({ observeSpeechActivity: vi.fn() }, { getSTTProvider: () => ({}) });
     const response = await app.inject({

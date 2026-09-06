@@ -268,4 +268,37 @@ describe("Runtime live speech activity", () => {
       runtime.observeSpeechActivity({ sessionId: "s", captureEpoch: "epoch-old", active: true })
     ).toThrow(SpeechCaptureFenceError);
   });
+
+  it("revokes audible speech playback on VAD ACTIVE without admitting a user turn", () => {
+    const runtime = createRuntime();
+    const admitted = runtime.admitSpeechPlayback({ sessionId: "s", requestId: "turn-tts" });
+    runtime.reportSpeechPlaybackOutcome({ effectId: admitted.effectId, outcome: "STARTED" });
+    const snapshot = runtime.observeSpeechActivity({
+      sessionId: "s",
+      captureEpoch: "epoch-barge",
+      active: true
+    });
+    expect(snapshot.speechActive).toBe(true);
+    expect(snapshot.revokedSpeechEffectId).toBe(admitted.effectId);
+    expect(snapshot.revokedSpeechRequestId).toBe("turn-tts");
+    expect(snapshot.speechPlaybackState).toBe("INTERRUPTED");
+    expect(
+      runtime.reportSpeechPlaybackOutcome({ effectId: admitted.effectId, outcome: "COMPLETED" })
+        ?.state
+    ).toBe("INTERRUPTED");
+  });
+
+  it("does not revoke on duplicate ACTIVE for the same capture epoch", () => {
+    const runtime = createRuntime();
+    const admitted = runtime.admitSpeechPlayback({ sessionId: "s", requestId: "turn-tts" });
+    runtime.reportSpeechPlaybackOutcome({ effectId: admitted.effectId, outcome: "STARTED" });
+    runtime.observeSpeechActivity({ sessionId: "s", captureEpoch: "epoch-dup", active: true });
+    const duplicate = runtime.observeSpeechActivity({
+      sessionId: "s",
+      captureEpoch: "epoch-dup",
+      active: true
+    });
+    expect(duplicate.revokedSpeechEffectId).toBeUndefined();
+    expect(duplicate.speechPlaybackState).toBe("INTERRUPTED");
+  });
 });

@@ -70,6 +70,15 @@ export {
   type InterpretSpeechObservationIdentityInput,
   type SpeechObservationIdentityInterpretation
 } from "./runtime-speech-identity.js";
+export {
+  RUNTIME_SPEECH_PLAYBACK_VERSION,
+  admitSpeechPlaybackEffect,
+  createSpeechPlaybackStore,
+  reportSpeechPlaybackOutcome,
+  revokeAudibleSpeechPlayback,
+  type SpeechPlaybackEffect,
+  type SpeechPlaybackStore
+} from "./runtime-speech-playback.js";
 
 export {
   PROACTIVE_ADMISSION_REASONS,
