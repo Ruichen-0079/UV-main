@@ -25,6 +25,95 @@ reconstructing the whole architecture from old chats.
 
 These are **plans**, not claims that the described future state exists.
 
+## Master backlog retention rule
+
+This index is the durable backlog ledger. The three execution lines below are a
+scheduling view only; they must never replace or silently prune the atom ledger.
+
+An unfinished item may disappear from the active view only when this file records
+one of these outcomes:
+
+- **DONE** — implementation and acceptance are closed;
+- **DEFERRED** — intentionally postponed, with the reason retained;
+- **SUPERSEDED** — replaced by a named successor while the old ID remains as
+  historical continuity;
+- **REJECTED** — intentionally abandoned, with the architectural reason retained.
+
+Agents must fresh-read this index before replanning future work. If a new plan
+mentions only a subset of the backlog, omitted items remain pending unless one of
+the outcomes above is recorded here.
+
+### Anti-overengineering gate
+
+Every future atom must pass these checks before production code is added:
+
+1. **Reuse before invention.** Classify relevant current behavior as
+   `REUSE / ADAPT / GAP / REJECT` before proposing new infrastructure.
+2. **Existing authority first.** A UI, capability, or integration gap is not
+   permission to create a second Runtime, router, ledger, settings store,
+   Supervisor, service manager, Memory authority, or provider control plane.
+3. **One concrete consumer before a generic abstraction.** Do not add a
+   Manager/Engine/Orchestrator, generic event layer, plugin graph, or future-proof
+   schema for hypothetical consumers.
+4. **No speculative state.** Persist or cache only state with a proven current
+   consumer. Do not add timestamp soup, shadow truth, or convenience ledgers.
+5. **No background work without proven value.** A polling loop, monitor,
+   classifier, or continuous perception path requires a concrete user-facing
+   need that cannot be satisfied on demand.
+6. **Product parity does not authorize backend duplication.** Restore product UX
+   on top of current-main APIs and authorities; mark missing capabilities as
+   `GAP` instead of resurrecting stale backends.
+7. **Local-service integration starts with truth, not ownership.** Inventory,
+   status, configuration, and explicit tests come first. Lifecycle ownership
+   stays with the existing owner unless a separate atom proves an ownership gap.
+8. **Stop at the acceptance boundary.** Once the smallest atom satisfies its
+   tests and acceptance criteria, stop. Adjacent cleanup belongs in that atom
+   only when the replacement makes the old path obsolete.
+
+Special visual-grounding constraint: YUVI does **not** continuously interpret the
+desktop. No `VisualState`, periodic screenshot understanding, CPU scene
+classifier, automatic workload classifier, or ambient screen-monitor loop is
+authorized. Current-screen evidence is requested on demand.
+
+## Three-line execution view
+
+This view exists to schedule independent work without losing the master backlog.
+
+### Line 1 — Product / daily use
+
+- Product WebUI functional parity — **INTEGRATION WIP** in PR #257; main remains
+  authority until the integration PR is accepted.
+- [16 — Provider fallback UX](16-provider-fallback-ux.md) — PLANNED.
+- [17 — Output language semantic preference](17-output-language.md) — PLANNED.
+- IndexTTS/Rei zero-shot baseline → stable local TTS service → real KDE
+  acceptance of implemented [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md).
+- [15 — On-demand Visual Grounding](15-vision-character.md) — REBASELINED,
+  semantic request seam only in this line.
+
+### Line 2 — Desktop / embodiment
+
+- Recover required Live2D assets before renderer changes.
+- [20 — Live2D calibration](20-live2d-calibration.md) — PLANNED.
+- [19 — Companion advanced presentation](19-companion-advanced-presentation.md)
+  — PLANNED.
+- Add only the one-shot KDE/Wayland screenshot primitive required by Atom 15;
+  the desktop layer captures pixels but does not interpret them.
+
+### Line 3 — Integration / closure
+
+- Local-service inventory and lifecycle-ownership truth.
+- Wire proven local services into Product WebUI through existing authorities.
+- Visual Grounding E2E:
+  `semantic request → Runtime → one-shot capture → VLM evidence → resume answer`.
+- Full KDE daily-use acceptance across voice, Companion, Subtitle, and output
+  language.
+- [21 — Linux/CachyOS deployment](21-linux-cachyos-deployment.md) closure through
+  small operational atoms.
+- Clean-room daily-use acceptance.
+- Local repository/worktree/cache cleanup after a fresh safety audit; preserve
+  dirty/unmerged work and use normal `git worktree remove` semantics rather
+  than broad destructive cleanup.
+
 ## Platform policy
 
 ```text
@@ -193,7 +282,7 @@ retained as historical/reference material:
 - [12 — Memory multi-speaker attribution/provenance](12-memory-multispeaker-provenance.md) — DONE
 - [13 — Voice identity](13-voice-identity.md) — 13A Identity Mention Resolution ✅ / 13B Voice Profile → Person Resolution ✅
 - [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md) — DONE
-- [15 — Vision → Character](15-vision-character.md)
+- [15 — On-demand Visual Grounding](15-vision-character.md) — REBASELINED
 - [16 — Provider fallback UX](16-provider-fallback-ux.md)
 - [17 — Output language semantic preference](17-output-language.md)
 - [18 — Subtitle Surface](18-subtitle-surface.md) — DONE (Subtitle is fourth DesktopSurface; committed-text-only; Atom 17 not required; Atom 14 deferred; focus non-steal; 19/20 untouched)
