@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
 import { MainPage } from "./main-page.js";
 import { CompanionPage } from "./companion-page.js";
+import { SubtitlePage } from "./subtitle-page.js";
 import { resolveDesktopSurface, type DesktopSurface } from "./desktop-runtime.js";
 import "./styles.css";
 
@@ -16,6 +17,8 @@ function renderSurface(surface: DesktopSurface): JSX.Element {
       return <MainPage />;
     case "companion":
       return <CompanionPage />;
+    case "subtitle":
+      return <SubtitlePage />;
     case "webui":
     case "dashboard":
       return <App />;

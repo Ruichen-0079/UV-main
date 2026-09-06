@@ -12,7 +12,7 @@ pub(crate) fn window_close_action(label: &str, shutdown_started: bool) -> Window
   }
 
   match label {
-    "main" | "companion" | "webui" => WindowCloseAction::Hide,
+    "main" | "companion" | "webui" | "subtitle" => WindowCloseAction::Hide,
     _ => WindowCloseAction::AllowClose,
   }
 }
@@ -62,6 +62,14 @@ mod tests {
   }
 
   #[test]
+  fn ordinary_subtitle_close_is_a_hide() {
+    assert_eq!(
+      window_close_action("subtitle", false),
+      WindowCloseAction::Hide
+    );
+  }
+
+  #[test]
   fn shutdown_allows_window_close() {
     assert_eq!(
       window_close_action("main", true),
@@ -73,6 +81,10 @@ mod tests {
     );
     assert_eq!(
       window_close_action("webui", true),
+      WindowCloseAction::AllowClose
+    );
+    assert_eq!(
+      window_close_action("subtitle", true),
       WindowCloseAction::AllowClose
     );
   }

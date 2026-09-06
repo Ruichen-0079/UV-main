@@ -52,7 +52,7 @@ export function resolveRuntimeAssetUrl(pathOrUrl: string): string {
   return `${base}/${pathOrUrl}`;
 }
 
-export type DesktopSurface = "dashboard" | "main" | "companion" | "webui";
+export type DesktopSurface = "dashboard" | "main" | "companion" | "webui" | "subtitle";
 
 /**
  * Prefer Tauri window label (reliable in packaged builds) over hash routing.
@@ -66,6 +66,7 @@ export async function resolveDesktopSurface(): Promise<DesktopSurface> {
       if (label === "main") return "main";
       if (label === "companion") return "companion";
       if (label === "webui") return "webui";
+      if (label === "subtitle") return "subtitle";
     } catch {
       // fall through to hash
     }
@@ -75,6 +76,7 @@ export async function resolveDesktopSurface(): Promise<DesktopSurface> {
   const hash = window.location.hash;
   if (hash.startsWith("#/main")) return "main";
   if (hash.startsWith("#/companion")) return "companion";
+  if (hash.startsWith("#/subtitle")) return "subtitle";
   const path = window.location.pathname;
   if (path === "/main" || path.endsWith("/main")) return "main";
   if (path === "/companion" || path.endsWith("/companion")) return "companion";

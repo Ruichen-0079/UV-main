@@ -22,6 +22,8 @@ import {
 } from "./chat-state.js";
 import { ChatMessageContent } from "./markdown-message.js";
 import { detectSpeechLanguage, type SpeechQueueState } from "./speech-queue.js";
+import { projectCommittedAssistantText } from "./subtitle-projection.js";
+import { publishSubtitleProjection } from "./subtitle-bus.js";
 import { SpeechSegmenter } from "./speech-segmenter.js";
 import {
   CompanionBus,
@@ -82,6 +84,22 @@ function createSurfaceId(prefix: string): string {
  * Speech segments are forwarded to the companion window over CompanionBus;
  * this surface never owns audio playback, Lumi, or the analyser chain.
  */
+
+function publishCommittedSubtitle(
+  messageId: string,
+  content: string,
+  requestId?: string
+): void {
+  const text = projectCommittedAssistantText(content);
+  if (!text) return;
+  publishSubtitleProjection({
+    kind: "committed-assistant-text",
+    messageId,
+    text,
+    ...(requestId ? { requestId } : {})
+  });
+}
+
 export function MainPage(): JSX.Element {
   const [sessionId, setSessionId] = useState("default");
   const [readMemory, setReadMemory] = useState(true);
@@ -400,6 +418,7 @@ export function MainPage(): JSX.Element {
               traceId: event.traceId,
               provider: event.provider
             });
+            publishCommittedSubtitle(assistantId, event.content);
             assistantId = null;
           }
         }
@@ -543,6 +562,7 @@ export function MainPage(): JSX.Element {
               traceId: event.traceId,
               provider: event.provider
             });
+            publishCommittedSubtitle(assistantId, event.content, requestId);
             setRequestStatus("success");
             forwardSpeechEnd(requestId, "completed");
           }
@@ -560,6 +580,7 @@ export function MainPage(): JSX.Element {
         traceId: response.traceId,
         provider: response.provider
       });
+      publishCommittedSubtitle(assistantId, response.content, requestId);
       setRequestStatus("success");
       forwardSpeechEnd(requestId, "completed");
     } catch (caught) {
@@ -658,6 +679,7 @@ export function MainPage(): JSX.Element {
             traceId: event.traceId,
             provider: event.provider
           });
+          publishCommittedSubtitle(effect.assistantId, event.content, effect.requestId);
           setRequestStatus("success");
         }
       });
@@ -676,6 +698,7 @@ export function MainPage(): JSX.Element {
         traceId: response.traceId,
         provider: response.provider
       });
+      publishCommittedSubtitle(effect.assistantId, response.content, effect.requestId);
       setRequestStatus("success");
     } catch (caught) {
       if (!isCurrent()) return;

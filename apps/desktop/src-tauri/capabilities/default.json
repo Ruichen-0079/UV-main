@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the YUVI main and companion windows.",
-  "windows": ["main", "companion"],
+  "description": "Default capability for YUVI desktop surfaces (Main, Companion, WebUI, Subtitle).",
+  "windows": ["main", "companion", "webui", "subtitle"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

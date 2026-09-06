@@ -178,9 +178,10 @@ pub fn run() {
       }
 
       // Paint Main and Companion immediately — do not block on service
-      // startup. WebUI stays lazy and is ensured by its presentation command.
-      // Construction inputs (including Companion always-on-top) resolve inside
-      // the surface seam, as before.
+      // startup. WebUI and Subtitle stay lazy and are ensured by their
+      // presentation commands. Construction inputs (including Companion
+      // always-on-top and Subtitle overlay policy) resolve inside the surface
+      // seam, as before.
       let main_window = DesktopSurfaceManager::ensure(&app.handle(), SurfaceId::Main)?;
       DesktopSurfaceManager::ensure(&app.handle(), SurfaceId::Companion)?;
       main_window.set_focus()?;
