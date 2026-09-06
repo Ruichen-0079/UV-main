@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "YUVI Presentation / Lumi Execution Path \u2014 Fenced Observation (HEAD 2ca83ab)",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1050,
+      960
+    ],
+    "views": [
+      {
+        "id": "propose-and-identity",
+        "label": "Propose & Identity",
+        "focus": [
+          "harness",
+          "runtime"
+        ],
+        "note": "Harness proposes semantics only; Runtime owns opaque effectId (7G) distinct from cause/correlation."
+      },
+      {
+        "id": "admit-and-transport",
+        "label": "Admit & Transport",
+        "focus": [
+          "runtime",
+          "presentation",
+          "eventbus",
+          "companion"
+        ],
+        "note": "Runtime 7I admission + Behavior Policy P0-P3 + WS ActiveTrace + CompanionBus validation."
+      },
+      {
+        "id": "render-and-fence",
+        "label": "Render & Fenced Outcome",
+        "focus": [
+          "companion",
+          "lumi",
+          "presentation",
+          "runtime"
+        ],
+        "note": "Lumi renders via playback correlation + 7H fence; outcome returns observe-only with stale drop."
+      }
+    ],
+    "column_fit": "spread"
+  },
+  "participants": [
+    {
+      "id": "harness",
+      "type": "backend",
+      "label": "Harness",
+      "sublabel": "ABI 5B-D"
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "Runtime",
+      "sublabel": "7G/7I/7H"
+    },
+    {
+      "id": "presentation",
+      "type": "backend",
+      "label": "Behavior",
+      "sublabel": "P0-P3 TTL"
+    },
+    {
+      "id": "eventbus",
+      "type": "messagebus",
+      "label": "EventBus WS",
+      "sublabel": "ActiveTrace"
+    },
+    {
+      "id": "companion",
+      "type": "messagebus",
+      "label": "CompanionBus",
+      "sublabel": "Broadcast"
+    },
+    {
+      "id": "lumi",
+      "type": "frontend",
+      "label": "Lumi",
+      "sublabel": "Cubism"
+    }
+  ],
+  "segments": [
+    {
+      "from": 160,
+      "to": 300,
+      "label": "Propose & Identity"
+    },
+    {
+      "from": 320,
+      "to": 520,
+      "label": "Admit & Transport"
+    },
+    {
+      "from": 540,
+      "to": 780,
+      "label": "Render & Fenced Outcome"
+    }
+  ],
+  "messages": [
+    {
+      "id": "propose",
+      "from": "harness",
+      "to": "runtime",
+      "y": 190,
+      "label": "propose RESPOND + soft-smile (Harness validate)",
+      "variant": "emphasis",
+      "note": "MALFORMED \u2192 bounded diagnostic, no exec"
+    },
+    {
+      "id": "admit-7i",
+      "from": "runtime",
+      "to": "presentation",
+      "y": 270,
+      "label": "admit 7I: policyAllows? ADMITTED / POLICY_DENIED",
+      "variant": "security",
+      "note": "Pure veto; no device detail"
+    },
+    {
+      "id": "publish",
+      "from": "runtime",
+      "to": "eventbus",
+      "y": 330,
+      "label": "publish 7B+effectId via EventBus",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ws-forward",
+      "from": "eventbus",
+      "to": "companion",
+      "y": 380,
+      "label": "WS ActiveTrace forward (256, redact, unsupported\u2192error)",
+      "variant": "dashed",
+      "note": "Trace loopback blocked; dashboard vs non-dashboard filtering; payload redacted"
+    },
+    {
+      "id": "companion-validate",
+      "from": "companion",
+      "to": "lumi",
+      "y": 430,
+      "label": "CompanionBus validate + post speak",
+      "variant": "dashed"
+    },
+    {
+      "id": "lumi-gaze",
+      "from": "presentation",
+      "to": "lumi",
+      "y": 500,
+      "label": "setGazeTarget via Behavior (observe-only)",
+      "variant": "dashed"
+    },
+    {
+      "id": "playback-status",
+      "from": "lumi",
+      "to": "companion",
+      "y": 560,
+      "label": "playback-status correlated",
+      "variant": "return"
+    },
+    {
+      "id": "fence-7h",
+      "from": "companion",
+      "to": "runtime",
+      "y": 620,
+      "label": "fence 7H: CURRENT vs STALE \u2192 drop",
+      "variant": "security",
+      "note": "Stale callback dropped; identity fencing is Runtime authority, not Lumi/Presentation"
+    },
+    {
+      "id": "outcome-observe",
+      "from": "runtime",
+      "to": "presentation",
+      "y": 690,
+      "label": "fenced outcome observe-only (no authority)",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "harness",
+      "from": 185,
+      "to": 275,
+      "type": "backend"
+    },
+    {
+      "participant": "runtime",
+      "from": 265,
+      "to": 335,
+      "type": "backend"
+    },
+    {
+      "participant": "presentation",
+      "from": 325,
+      "to": 385,
+      "type": "backend"
+    },
+    {
+      "participant": "eventbus",
+      "from": 375,
+      "to": 435,
+      "type": "messagebus"
+    },
+    {
+      "participant": "companion",
+      "from": 425,
+      "to": 505,
+      "type": "messagebus"
+    },
+    {
+      "participant": "lumi",
+      "from": 500,
+      "to": 565,
+      "type": "frontend"
+    },
+    {
+      "participant": "runtime",
+      "from": 615,
+      "to": 695,
+      "type": "backend"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Identity & Lifecycle Ownership",
+      "items": [
+        "Runtime allocates opaque effectId (7G) after revalidating 7B semantics; effectId distinct from cause/correlation/sourceInstance",
+        "Runtime owns lifecycle: sealing/draining, cancellation and stale-result fencing, not Presentation or Lumi",
+        "Behavior Policy owns presentation lifecycle: TTL 650-1000ms, visibility, epoch correlation, not Runtime execution"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Admission & Fencing",
+      "items": [
+        "7I: pure policy veto (policyAllowsEmbodiedEffect) \u2192 POLICY_DENIED; no device detail in Runtime",
+        "Behavior Policy: derived P0>P1>P2>P3 + correlation turn/session epoch + capability live2d/connectivity + TTL \u2192 drop if stale",
+        "7H: pure stale-callback fence (currentEffectId vs callbackEffectId) \u2192 STALE dropped; CompanionBus dedup + correlation drops duplicates"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Rejection & No Authority Leak",
+      "items": [
+        "Malformed: Harness MALFORMED / generation supervision TRUNCATED/OVER_BUDGET/REPETITION \u2192 bounded diagnostic, no exec",
+        "Transport: WS ActiveTrace cap 256 + oldestTerminal eviction + unsupported type \u2192 runtime.error; CompanionBus knownKinds/exactKeys/role loopback \u2192 drop; Lumi 404 if asset missing",
+        "Timeout/Cancel: AbortSignal \u2192 CANCELLED \u2192 normalized failure; Presentation/Lumi outcome is observe-only, never admits Runtime"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,538 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "YUVI Runtime Architecture \u2014 Current Source Authority (HEAD 2ca83ab)",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/Ruichen-0079/UV-main.git",
+      "revision": "2ca83ab9d8e92e8ffa3ba92f6aa6d0bc128d7663"
+    },
+    "viewBox": [
+      1320,
+      820
+    ],
+    "views": [
+      {
+        "id": "primary-runtime-path",
+        "label": "Primary Runtime Path",
+        "focus": [
+          "client",
+          "transport",
+          "runtime",
+          "promptBuilder",
+          "memory",
+          "providers",
+          "eventBus"
+        ],
+        "note": "User input via thin transport into Runtime admission; Runtime owns retrieval, prompt, provider and durable publish."
+      },
+      {
+        "id": "semantic-contracts",
+        "label": "Semantic Contracts",
+        "focus": [
+          "characterAbi",
+          "harness",
+          "cognition",
+          "runtime"
+        ],
+        "note": "ABI + Harness propose semantics only; Cognition is one-shot normalized via Runtime. None own admission."
+      },
+      {
+        "id": "presentation-observation",
+        "label": "Presentation Observes",
+        "focus": [
+          "eventBus",
+          "companionBus",
+          "lumi"
+        ],
+        "note": "EventBus \u2192 CompanionBus \u2192 Lumi is side-effect observation with fencing; no Runtime authority."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client Surfaces",
+      "sublabel": "Dashboard / Tauri",
+      "pos": [
+        60,
+        140
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "sources": [
+        {
+          "path": "apps/web/src/companion-page.tsx",
+          "line": 1
+        }
+      ]
+    },
+    {
+      "id": "transport",
+      "type": "backend",
+      "label": "Server Transport",
+      "sublabel": "Fastify \u2013 thin handlers",
+      "tag": "no business logic",
+      "pos": [
+        260,
+        140
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "sources": [
+        {
+          "path": "apps/server/src/server.ts",
+          "line": 30
+        }
+      ]
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "RuntimeOrchestrator",
+      "sublabel": "Sole execution authority",
+      "tag": "seal / fence / publish",
+      "pos": [
+        470,
+        110
+      ],
+      "size": [
+        170,
+        90
+      ],
+      "sources": [
+        {
+          "path": "packages/core/src/runtime-orchestrator.ts",
+          "line": 179
+        }
+      ]
+    },
+    {
+      "id": "eventBus",
+      "type": "messagebus",
+      "label": "Event Bus",
+      "sublabel": "InMemory \u2013 canonical",
+      "pos": [
+        710,
+        140
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "sources": [
+        {
+          "path": "packages/event-bus/src/index.ts",
+          "line": 30
+        }
+      ]
+    },
+    {
+      "id": "companionBus",
+      "type": "messagebus",
+      "label": "CompanionBus",
+      "sublabel": "BroadcastChannel",
+      "tag": "validated",
+      "pos": [
+        930,
+        140
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "sources": [
+        {
+          "path": "apps/web/src/companion-bus.ts",
+          "line": 80
+        }
+      ]
+    },
+    {
+      "id": "lumi",
+      "type": "frontend",
+      "label": "Lumi / Live2D",
+      "sublabel": "Cubism render only",
+      "tag": "no authority",
+      "pos": [
+        1140,
+        140
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "sources": [
+        {
+          "path": "apps/web/src/lumi-cubism-model.ts",
+          "line": 191
+        }
+      ]
+    },
+    {
+      "id": "characterAbi",
+      "type": "backend",
+      "label": "Character ABI 2A",
+      "sublabel": "Stable contract",
+      "tag": "10 kinds",
+      "pos": [
+        60,
+        300
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "sources": [
+        {
+          "path": "packages/character-abi/src/index.ts",
+          "line": 1
+        }
+      ]
+    },
+    {
+      "id": "harness",
+      "type": "backend",
+      "label": "Character Harness 5A-D",
+      "sublabel": "Assembly + Supervision",
+      "tag": "stateless",
+      "pos": [
+        260,
+        300
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "sources": [
+        {
+          "path": "packages/character-harness/src/index.ts",
+          "line": 80
+        }
+      ]
+    },
+    {
+      "id": "promptBuilder",
+      "type": "backend",
+      "label": "Prompt Builder",
+      "sublabel": "Authorized context only",
+      "pos": [
+        500,
+        260
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "sources": [
+        {
+          "path": "packages/prompt-builder/src/index.ts",
+          "line": 1
+        }
+      ]
+    },
+    {
+      "id": "memory",
+      "type": "database",
+      "label": "Memory Evidence",
+      "sublabel": "PG+pgvector durable",
+      "tag": "evidence not persona",
+      "pos": [
+        680,
+        300
+      ],
+      "size": [
+        180,
+        68
+      ],
+      "sources": [
+        {
+          "path": "packages/memory/src/provider.ts",
+          "line": 1
+        }
+      ]
+    },
+    {
+      "id": "providers",
+      "type": "cloud",
+      "label": "Provider Registry",
+      "sublabel": "DeepSeek/xAI/DashScope",
+      "tag": "replaceable",
+      "pos": [
+        910,
+        300
+      ],
+      "size": [
+        170,
+        68
+      ],
+      "sources": [
+        {
+          "path": "packages/providers/src/registry.ts",
+          "line": 60
+        }
+      ]
+    },
+    {
+      "id": "cognition",
+      "type": "cloud",
+      "label": "Cognition Core 6A/H",
+      "sublabel": "One-shot",
+      "tag": "no admission",
+      "pos": [
+        80,
+        470
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "packages/cognition/src/index.ts",
+          "line": 15
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Runtime Authority \u2013 execution, lifecycle, admission, publication, persistence",
+      "wraps": [
+        "runtime",
+        "promptBuilder",
+        "memory",
+        "providers",
+        "eventBus",
+        "transport"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "Stable Semantic Contracts \u2013 no provider/MCP/device leak",
+      "wraps": [
+        "characterAbi",
+        "harness",
+        "cognition"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Presentation \u2013 observes canonical events, never owns Runtime",
+      "wraps": [
+        "companionBus",
+        "lumi"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "client-to-transport",
+      "from": "client",
+      "to": "transport",
+      "label": "POST /message + WS user.message",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [
+        230,
+        222
+      ]
+    },
+    {
+      "id": "transport-to-runtime",
+      "from": "transport",
+      "to": "runtime",
+      "label": "handleUserMessage() thin",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [
+        440,
+        222
+      ]
+    },
+    {
+      "id": "abi-to-harness",
+      "from": "characterAbi",
+      "to": "harness",
+      "label": "semantic sections",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [
+        230,
+        382
+      ]
+    },
+    {
+      "id": "harness-to-runtime",
+      "from": "harness",
+      "to": "runtime",
+      "label": "proposal RESPOND / SILENCE / NEED_COGNITION",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "via": [
+        [
+          335,
+          240
+        ],
+        [
+          555,
+          240
+        ]
+      ],
+      "labelAt": [
+        420,
+        222
+      ]
+    },
+    {
+      "id": "runtime-to-prompt",
+      "from": "runtime",
+      "to": "promptBuilder",
+      "label": "buildPrompt authorized",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        560,
+        400
+      ]
+    },
+    {
+      "id": "runtime-to-memory",
+      "from": "runtime",
+      "to": "memory",
+      "label": "retrieveEvidence + durable write",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          555,
+          235
+        ],
+        [
+          660,
+          235
+        ],
+        [
+          660,
+          334
+        ]
+      ],
+      "labelAt": [
+        590,
+        342
+      ]
+    },
+    {
+      "id": "runtime-to-providers",
+      "from": "runtime",
+      "to": "providers",
+      "label": "chat via registry",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [
+        [
+          700,
+          155
+        ],
+        [
+          700,
+          230
+        ],
+        [
+          995,
+          230
+        ]
+      ],
+      "labelAt": [
+        850,
+        222
+      ]
+    },
+    {
+      "id": "runtime-to-eventBus",
+      "from": "runtime",
+      "to": "eventBus",
+      "label": "publish agent.reply",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [
+        580,
+        360
+      ]
+    },
+    {
+      "id": "eventBus-to-companionBus",
+      "from": "eventBus",
+      "to": "companionBus",
+      "label": "WS observe + redact",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [
+        930,
+        222
+      ]
+    },
+    {
+      "id": "companionBus-to-lumi",
+      "from": "companionBus",
+      "to": "lumi",
+      "label": "speak (validated)",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [
+        1104,
+        222
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Runtime Is Sole Authority",
+      "items": [
+        "Runtime owns admission, lifecycle sealing/draining, cancellation and stale-result fencing, persistence coordination, finalized-turn states and canonical publish",
+        "Handlers, Dashboard, Presentation, Harness, Cognition, Lumi never bypass: transport calls handleUserMessage() only",
+        "No second Runtime; no generic ToolOrchestrator; final lifecycle sealing rejects new work"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Memory Is Evidence, Not Authority",
+      "items": [
+        "PostgreSQL + pgvector via repository ports and FinalizedIngestion ledger is durable baseline (Linux-first)",
+        "Memory retrieves, ranks, dedupes, and validates evidence; never owns persona/relationship truth",
+        "Conversation persistence and long-term Memory are separate; ingestion is idempotent, retry/reconcile aware"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Contracts Stay Stable",
+      "items": [
+        "Character ABI 2A + Harness 5A-D produce bounded semantic proposals; malformed collapses to MALFORMED diagnostic",
+        "Cognition 6A/6G/6H is description-only: capabilityRef opaque, no MCP schema or wire leak, one round via 6J admission",
+        "Providers are replaceable via registry; Prompt Builder is provider-neutral; Embodied 7A/7B remain semantic, 7G owns effectId"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Presentation Never Owns Runtime",
+      "items": [
+        "Behavior Policy P0>P1>P2>P3 admits only matching Derived Priority + correlation (turn/session epoch) + capability + TTL",
+        "7G allocates opaque effectId distinct from cause/correlation; 7I admits via policy veto; 7H fences stale callbacks",
+        "CompanionBus validates knownKinds/exactKeys/role loopback; WebSocket ActiveTrace caps 256, drops unsupported/malformed/timeout"
+      ]
+    }
+  ]
+}
