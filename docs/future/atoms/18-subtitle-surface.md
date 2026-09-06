@@ -2,7 +2,7 @@
 
 > **Status: DONE — IMPLEMENTED ON CURRENT MAIN**
 >
-> **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
+> **Audit baseline:** `ec6df9d`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
 > dependency state are authoritative. Before implementation, fresh-fetch main,
@@ -106,4 +106,5 @@ Chain: committed assistant output -> projectCommittedAssistantText -> yuvi-subti
 Committed path only; empty/code/table project to nothing; pagination reconstructs projected text; Memory writes NONE.
 Atom 14 STARTED/COMPLETED/INTERRUPTED sync deferred; Atom 17 reclassified not required.
 Lazy ensure; close-as-hide; Subtitle show without set_focus; overlay window policy (transparent, decorationless, always-on-top, fixed, skip_taskbar, click-through).
-Tray: Show Subtitle / Hide Subtitle. Visual: lower-center 1-3 line band. Atoms 19/20 untouched.
+Tray: Show Subtitle / Hide Subtitle. Visual: lower-center 1-3 line band. Atom 20
+calibration remains untouched; Atom 19 now has a separate Slice 1 closure.

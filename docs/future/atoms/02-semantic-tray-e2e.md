@@ -47,7 +47,7 @@ reliable.
 
 ## CURRENT at audit baseline
 
-- Open #228 proposes semantic menu discovery for tray Quit and explicitly avoids
+- Closed/deferred #228 proposed semantic menu discovery for tray Quit and explicitly avoids
   production-code changes.
 - Historical/native `WM_COMMAND 1004` style activation is not a stable product
   identity and must not become an application contract.

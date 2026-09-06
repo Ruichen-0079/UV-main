@@ -1,6 +1,8 @@
 # Atom 05 — App / Data / Cache Roots
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: DONE — IMPLEMENTED ON CURRENT MAIN**
+>
+> **Audit baseline:** `ec6df9d`
 >
 > **Rebaseline (Linux-first CI rebaseline):** this atom is ACTIVE on the
 > Linux-first lane and may proceed before final Linux packaging. No Windows
@@ -149,20 +151,20 @@ Propagation:
 
 ### Existing artifact inventory and classification
 
-| Artifact | Current path authority | Classification | Migration |
-| --- | --- | --- | --- |
-| Supervisor instance state (`instances/<id>`, ownership metadata, control endpoint, exit log) | `<dataRoot>/instances/<id>` (packaged); dev: `defaultStateDirectory()` (repo-local, intentional) | DATA | none |
-| Service diagnostics logs (`runtime.log`, `mem0.log`, `postgres.log`, `local-stt.log`, `tts-*.log`, `ollama.log`) | `<stateDirectory>/<service>.log` (per-instance) | rebuildable diagnostics; intentionally kept beside instance state inside DATA (never inside cache root) | none |
-| Runtime writable data + packaged Runtime env dir (`.env` / `.env.local`) | `<dataRoot>/runtime-data` via `YUVI_RUNTIME_DATA_DIR`/`YUVI_RUNTIME_ENV_DIR` | durable runtime state = DATA; the env file inside it is user-editable config (CONFIG semantics) kept in place — documented, no move | none |
-| Local STT durable speaker profiles (`speakers.json`, `speakers.npz`, future enrolled acoustic profiles) | `<dataRoot>/local-stt/speakers` via `YUVI_STT_SPEAKER_DIR` (Supervisor always sets it) | DATA (never model assets) | none |
-| Local STT model assets | `<resourceRoot>/local-stt/models` (bundled; immutable) | RESOURCE | none |
-| Mem0 durable data + logs | `dirname(dataRoot)/Mem0/{data,logs}` via `YUVI_MEM0_DATA_DIR`/`YUVI_MEM0_LOG_DIR` (`MEM0_DIR`) | DATA | none |
-| Private PostgreSQL cluster (`data/`, runtime metadata, `local.secret`, `pgpass`) | `defaultYuviLocalDataRoot()/Postgres` (packaged safety bound requires it inside the YUVI data home; explicit `YUVI_POSTGRES_DATA_ROOT` override) | DATA (secret material stays inside the cluster runtime dir; no plaintext migration) | none |
-| PostgreSQL secret authority | Windows Credential Manager (keyring) — unchanged | secret authority (out of scope, untouched) | none |
-| Tauri user settings (`settings.json`) | Tauri `app_config_dir` = `<configRoot>/settings.json` | CONFIG | none |
-| User Live2D model assets / Cubism Core fallback | `defaultYuviLocalDataRoot()/{Live2DModels,CubismCore}` (bundled copies live under resourceRoot) | user-created durable assets = DATA | none |
-| Model downloads / derived artifacts | none at runtime today (provisioning is a dev-time script into resources) | future consumers must use `cacheRoot` for rebuildable downloads | n/a |
-| Webview/desktop shell storage | Tauri/WebView platform defaults | desktop-shell owned (out of scope) | none |
+| Artifact                                                                                                         | Current path authority                                                                                                                           | Classification                                                                                                                      | Migration |
+| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| Supervisor instance state (`instances/<id>`, ownership metadata, control endpoint, exit log)                     | `<dataRoot>/instances/<id>` (packaged); dev: `defaultStateDirectory()` (repo-local, intentional)                                                 | DATA                                                                                                                                | none      |
+| Service diagnostics logs (`runtime.log`, `mem0.log`, `postgres.log`, `local-stt.log`, `tts-*.log`, `ollama.log`) | `<stateDirectory>/<service>.log` (per-instance)                                                                                                  | rebuildable diagnostics; intentionally kept beside instance state inside DATA (never inside cache root)                             | none      |
+| Runtime writable data + packaged Runtime env dir (`.env` / `.env.local`)                                         | `<dataRoot>/runtime-data` via `YUVI_RUNTIME_DATA_DIR`/`YUVI_RUNTIME_ENV_DIR`                                                                     | durable runtime state = DATA; the env file inside it is user-editable config (CONFIG semantics) kept in place — documented, no move | none      |
+| Local STT durable speaker profiles (`speakers.json`, `speakers.npz`, future enrolled acoustic profiles)          | `<dataRoot>/local-stt/speakers` via `YUVI_STT_SPEAKER_DIR` (Supervisor always sets it)                                                           | DATA (never model assets)                                                                                                           | none      |
+| Local STT model assets                                                                                           | `<resourceRoot>/local-stt/models` (bundled; immutable)                                                                                           | RESOURCE                                                                                                                            | none      |
+| Mem0 durable data + logs                                                                                         | `dirname(dataRoot)/Mem0/{data,logs}` via `YUVI_MEM0_DATA_DIR`/`YUVI_MEM0_LOG_DIR` (`MEM0_DIR`)                                                   | DATA                                                                                                                                | none      |
+| Private PostgreSQL cluster (`data/`, runtime metadata, `local.secret`, `pgpass`)                                 | `defaultYuviLocalDataRoot()/Postgres` (packaged safety bound requires it inside the YUVI data home; explicit `YUVI_POSTGRES_DATA_ROOT` override) | DATA (secret material stays inside the cluster runtime dir; no plaintext migration)                                                 | none      |
+| PostgreSQL secret authority                                                                                      | Windows Credential Manager (keyring) — unchanged                                                                                                 | secret authority (out of scope, untouched)                                                                                          | none      |
+| Tauri user settings (`settings.json`)                                                                            | Tauri `app_config_dir` = `<configRoot>/settings.json`                                                                                            | CONFIG                                                                                                                              | none      |
+| User Live2D model assets / Cubism Core fallback                                                                  | `defaultYuviLocalDataRoot()/{Live2DModels,CubismCore}` (bundled copies live under resourceRoot)                                                  | user-created durable assets = DATA                                                                                                  | none      |
+| Model downloads / derived artifacts                                                                              | none at runtime today (provisioning is a dev-time script into resources)                                                                         | future consumers must use `cacheRoot` for rebuildable downloads                                                                     | n/a       |
+| Webview/desktop shell storage                                                                                    | Tauri/WebView platform defaults                                                                                                                  | desktop-shell owned (out of scope)                                                                                                  | none      |
 
 ### Migration / compatibility decisions
 
