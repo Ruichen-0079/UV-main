@@ -85,6 +85,26 @@ describe("Character Harness 5K post-cognition reserved assembly", () => {
     }
   });
 
+  it("carries the output-language preference through Cognition re-entry", () => {
+    const result = assembleCharacterHarnessPostCognitionContext({
+      context: {
+        ...regularContext(),
+        outputLanguage: "EN"
+      },
+      cognitionProjection: cognitionProjection("verified"),
+      budget: {
+        maxSections: 4,
+        maxSemanticCharacters: 100
+      }
+    });
+
+    expect(result.status).toBe("ACCEPTED");
+    if (result.status === "ACCEPTED") {
+      expect(result.context.outputLanguage).toBe("EN");
+      expect(result.context.sections.at(-1)?.kind).toBe("COGNITION_RESULT");
+    }
+  });
+
   it("reserves one section slot even when cognition has zero semantic characters", () => {
     const result = assembleCharacterHarnessPostCognitionContext({
       context: {

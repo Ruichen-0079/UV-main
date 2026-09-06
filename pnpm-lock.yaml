@@ -168,6 +168,10 @@ importers:
         version: link:../providers
 
   packages/config:
+    dependencies:
+      '@companion/character-abi':
+        specifier: workspace:*
+        version: link:../character-abi
     devDependencies:
       '@types/node':
         specifier: ^22.10.7

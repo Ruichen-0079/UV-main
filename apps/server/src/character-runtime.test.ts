@@ -73,7 +73,35 @@ describe("production Character runtime adapter", () => {
     expect(result.providerMetadata.model).toBe("private-chat-model");
     expect(result.cognitionHandoff).toBeUndefined();
     expect(calls.generateChat).toHaveBeenCalledTimes(1);
+    const system = calls.generateChat.mock.calls[0]?.[0].messages[0]?.content ?? "";
+    expect(system).toContain("Output-language preference: AUTO");
+    expect(system).toContain("follow the current interaction context naturally");
   });
+
+  it.each([
+    ["EN", "English"],
+    ["ZH", "Chinese"],
+    ["JA", "Japanese"]
+  ] as const)(
+    "admits explicit %s as the final %s Character expression language",
+    async (language, name) => {
+      const calls = characterHarness({
+        responses: [output('{"disposition":"RESPOND","text":"Final expression."}')]
+      });
+
+      await createServerCharacterPort().generate({
+        prompt,
+        userMessage: "Use the selected language.",
+        outputLanguage: language,
+        generateChat: calls.generateChat
+      });
+
+      const system = calls.generateChat.mock.calls[0]?.[0].messages[0]?.content ?? "";
+      expect(system).toContain(`Output-language preference: ${language}`);
+      expect(system).toContain(`final Character expression must be in ${name}`);
+      expect(system).toContain(`"outputLanguage":"${language}"`);
+    }
+  );
 
   it.each(["SILENCE", "TERMINATE"] as const)(
     "represents %s as a first-class decision instead of empty text",
@@ -131,6 +159,7 @@ describe("production Character runtime adapter", () => {
     const result = await createServerCharacterPort().generateAfterCognition({
       prompt,
       userMessage: "Verify this claim carefully.",
+      outputLanguage: "EN",
       cognitionRoundTrip: roundTrip(),
       generateChat: calls.generateChat
     });
@@ -143,6 +172,8 @@ describe("production Character runtime adapter", () => {
     const system = calls.generateChat.mock.calls[0]?.[0].messages[0]?.content ?? "";
     expect(system).toContain("The normalized answer.");
     expect(system).toContain("COGNITION_RESULT");
+    expect(system).toContain("Output-language preference: EN");
+    expect(system).toContain('"outputLanguage":"EN"');
     expect(system).not.toContain("reasoning_content");
   });
 

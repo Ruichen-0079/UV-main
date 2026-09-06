@@ -15,6 +15,9 @@
     "check": "tsc -b tsconfig.json --pretty false",
     "test": "vitest run --passWithNoTests"
   },
+  "dependencies": {
+    "@companion/character-abi": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "^22.10.7",
     "typescript": "^5.7.3",

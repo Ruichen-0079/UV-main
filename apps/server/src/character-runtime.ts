@@ -2,9 +2,13 @@ import type { RuntimeCharacterPort } from "@companion/core";
 import type { PromptBuildOutput, PromptSectionName } from "@companion/prompt-builder";
 import type {
   CharacterAbiSectionKind,
-  CharacterAbiSemanticSection
+  CharacterAbiSemanticSection,
+  CharacterOutputLanguage
 } from "@companion/character-abi";
-import { createCharacterDecision } from "@companion/character-abi";
+import {
+  characterOutputLanguageInstruction,
+  createCharacterDecision
+} from "@companion/character-abi";
 import {
   CHARACTER_ABI_2D_VERSION,
   createCharacterAbi2DContext,
@@ -101,7 +105,7 @@ async function generateInitialCharacterTurn(
   input: CharacterTurnInput
 ): Promise<CharacterTurnResult> {
   assertNotCancelled(input.signal);
-  const baseContext = createServerCharacterContext(input.prompt);
+  const baseContext = createServerCharacterContext(input.prompt, input.outputLanguage ?? "AUTO");
   const initialRequest = createCharacterGenerationRequest(baseContext);
   const initial = await generateAcceptedCharacterProposal(input, initialRequest, false);
 
@@ -125,7 +129,7 @@ async function generatePostCognitionCharacterTurn(
   input: CharacterReentryInput
 ): Promise<CharacterTurnResult> {
   assertNotCancelled(input.signal);
-  const baseContext = createServerCharacterContext(input.prompt);
+  const baseContext = createServerCharacterContext(input.prompt, input.outputLanguage ?? "AUTO");
   const postRequest = createServerPostCognitionCharacterRequest({
     roundTrip: input.cognitionRoundTrip,
     context: baseContext,
@@ -192,7 +196,10 @@ async function generateAcceptedCharacterProposal(
   }
 }
 
-function createServerCharacterContext(prompt: PromptBuildOutput): CharacterAbi2DContext {
+function createServerCharacterContext(
+  prompt: PromptBuildOutput,
+  outputLanguage: CharacterOutputLanguage
+): CharacterAbi2DContext {
   const sections: CharacterAbiSemanticSection[] = [];
   const affect: string[] = [];
   const mapping: Partial<Record<PromptSectionName, CharacterAbiSectionKind>> = {
@@ -237,6 +244,7 @@ function createServerCharacterContext(prompt: PromptBuildOutput): CharacterAbi2D
 
   return createCharacterAbi2DContext({
     abiVersion: CHARACTER_ABI_2D_VERSION,
+    outputLanguage,
     sections
   });
 }
@@ -263,7 +271,7 @@ function createCharacterChatInput(
     messages: [
       {
         role: "system",
-        content: `${instruction}\n${retryInstruction}\n\nYUVI production persona:\n${YUVI_PRODUCTION_PERSONA}\n\nSemantic context:\n${JSON.stringify(request.context)}`
+        content: `${instruction}\n${retryInstruction}\n\n${characterOutputLanguageInstruction(request.context.outputLanguage ?? "AUTO")}\n\nYUVI production persona:\n${YUVI_PRODUCTION_PERSONA}\n\nSemantic context:\n${JSON.stringify(request.context)}`
       },
       {
         role: "user",

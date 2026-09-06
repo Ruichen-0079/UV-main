@@ -24,6 +24,7 @@ import {
   type RecentEpisodeStore
 } from "@companion/memory";
 import { parseRuntimeConfig } from "@companion/config";
+import { normalizeCharacterOutputLanguage } from "@companion/character-abi";
 import { PromptBuilder } from "@companion/prompt-builder";
 import {
   createProviderRegistryFromEnv,
@@ -216,9 +217,11 @@ export async function createAppContext(
   function createRuntime(
     providers: ProviderRegistry,
     memory: MemoryService,
-    directContext = config.directContext
+    directContext = config.directContext,
+    runtimeEnv: Record<string, string | undefined> = bootEnv
   ): RuntimeOrchestrator {
     const provider = memory.getMemoryProvider?.();
+    const outputLanguage = parseRuntimeConfig(runtimeEnv).outputLanguage;
     // Existing test doubles and explicit offline/mock runs intentionally
     // return ordinary Chat text rather than the production Character JSON
     // ABI. Real non-mock construction binds Character and its Cognition
@@ -240,6 +243,7 @@ export async function createAppContext(
       memoryIngestionCoordinator: coordinator,
       memoryRepository: activeMemoryRepository,
       directContext,
+      outputLanguage,
       recentEpisodeStore,
       dreamJobStore,
       ...(provider ? { dreamProvider: provider } : {}),
@@ -318,7 +322,7 @@ export async function createAppContext(
         multiplier: config.memoryIngestion.retryMultiplier
       }
     });
-    runtime = createRuntime(providers, memory);
+    runtime = createRuntime(providers, memory, config.directContext, bootEnv);
     runtime.startProactiveScheduler({ sessionId: "default", readMemory: true });
   } catch (error) {
     await conversationRepository.close?.();
@@ -359,17 +363,22 @@ export async function createAppContext(
         parseMemoryExtractorMode(reloadEnv["MEMORY_EXTRACTOR"]),
         reloadEnv
       );
-      const nextRuntime = createRuntime(nextProviders, nextMemory, {
-        enabled: parseBoolean(reloadEnv["DIRECT_CONTEXT_ENABLED"], config.directContext.enabled),
-        maxTurns: parsePositiveInteger(
-          reloadEnv["DIRECT_CONTEXT_MAX_TURNS"],
-          config.directContext.maxTurns
-        ),
-        maxChars: parsePositiveInteger(
-          reloadEnv["DIRECT_CONTEXT_MAX_CHARS"],
-          config.directContext.maxChars
-        )
-      });
+      const nextRuntime = createRuntime(
+        nextProviders,
+        nextMemory,
+        {
+          enabled: parseBoolean(reloadEnv["DIRECT_CONTEXT_ENABLED"], config.directContext.enabled),
+          maxTurns: parsePositiveInteger(
+            reloadEnv["DIRECT_CONTEXT_MAX_TURNS"],
+            config.directContext.maxTurns
+          ),
+          maxChars: parsePositiveInteger(
+            reloadEnv["DIRECT_CONTEXT_MAX_CHARS"],
+            config.directContext.maxChars
+          )
+        },
+        reloadEnv
+      );
 
       // Stage all replacements before sealing or mutating the current
       // Runtime. Construction failures therefore leave the live context
@@ -422,6 +431,9 @@ function sameRuntimeSettingValue(
   }
   if (key === "EVENT_BUS") {
     return normalizeEventBus(previous) === normalizeEventBus(next);
+  }
+  if (key === "OUTPUT_LANGUAGE") {
+    return normalizeCharacterOutputLanguage(previous) === normalizeCharacterOutputLanguage(next);
   }
   return (previous ?? "").trim() === (next ?? "").trim();
 }

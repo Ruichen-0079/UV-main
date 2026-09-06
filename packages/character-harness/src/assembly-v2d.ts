@@ -67,6 +67,7 @@ export function assembleCharacterHarness2DContext(input: unknown): CharacterHarn
     version: CHARACTER_HARNESS_5J_VERSION,
     context: createCharacterAbi2DContext({
       abiVersion: CHARACTER_ABI_2D_VERSION,
+      ...(context.outputLanguage === undefined ? {} : { outputLanguage: context.outputLanguage }),
       sections: included
     }),
     omittedSectionKinds: Object.freeze(omitted),

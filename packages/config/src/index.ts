@@ -1,6 +1,10 @@
 import { existsSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  normalizeCharacterOutputLanguage,
+  type CharacterOutputLanguage
+} from "@companion/character-abi";
 
 export type RuntimeEnvironment = "development" | "test" | "production";
 export type MemoryRepositoryDriver = "in-memory" | "postgres";
@@ -30,6 +34,8 @@ export type RuntimeProviderConfig = {
 };
 
 export type RuntimeConfig = {
+  /** Semantic final-expression preference consumed by Character. */
+  outputLanguage: CharacterOutputLanguage;
   environment: RuntimeEnvironment;
   server: {
     host: string;
@@ -148,6 +154,7 @@ export function parseRuntimeConfig(env: RuntimeConfigEnv = process.env): Runtime
         };
 
   return {
+    outputLanguage: normalizeCharacterOutputLanguage(env["OUTPUT_LANGUAGE"]),
     environment,
     server: {
       host: readString(env["SERVER_HOST"], "127.0.0.1"),

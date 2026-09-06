@@ -1,4 +1,4 @@
-import type { CharacterDecision } from "@companion/character-abi";
+import type { CharacterDecision, CharacterOutputLanguage } from "@companion/character-abi";
 import type {
   ProactiveControlAuthority,
   RuntimeProactiveStateStore
@@ -70,6 +70,8 @@ export type RuntimeOrchestratorOptions = {
   /** Runtime-owned Character generation and its bounded cognition callback. */
   character?: RuntimeCharacterPort | undefined;
   characterCognition?: RuntimeCharacterCognitionExecutor | undefined;
+  /** Explicit semantic preference transported to Character and final TTS. */
+  outputLanguage?: CharacterOutputLanguage | undefined;
   /** Optional production Character -> Runtime -> Presentation composition. */
   embodiedPresentation?: RuntimeEmbodiedPresentationPort | undefined;
   /** Wall-clock source for suppression expiry and eligible_after. Tests inject a fake. */
@@ -137,6 +139,7 @@ export type RuntimeCharacterFinalTurnResult = Readonly<{
 export type RuntimeCharacterTurnInput = Readonly<{
   prompt: PromptBuildOutput;
   userMessage: string;
+  outputLanguage?: CharacterOutputLanguage | undefined;
   signal?: AbortSignal | undefined;
   generateChat(input: ChatInput, options?: ProviderCallOptions | undefined): Promise<ChatOutput>;
 }>;

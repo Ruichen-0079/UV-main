@@ -74,4 +74,10 @@ describe("SubtitlePage", () => {
     expect(pages.length).toBeGreaterThan(1);
     expect(pages.join("")).toBe(source);
   });
+
+  it("renders admitted assistant text unchanged regardless of its language", () => {
+    const source = "中文 final text。これは日本語の文です。";
+
+    expect(projectCommittedAssistantText(source)).toBe(source);
+  });
 });

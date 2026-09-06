@@ -113,6 +113,7 @@ describe("RuntimeOrchestrator", () => {
       memory: createRecordingMemory([]),
       conversation,
       promptBuilder: new PromptBuilder(),
+      outputLanguage: "EN",
       providers: {
         ...createMockProviders(),
         getProactiveDecisionProvider: () => ({
@@ -178,6 +179,8 @@ describe("RuntimeOrchestrator", () => {
     expect(proactivePrompt).toContain("generic greeting or check-in");
     expect(proactivePrompt).toContain("When uncertain, choose NO_OP.");
     expect(proactivePrompt).toContain("REQUEST_TEXT");
+    expect(proactivePrompt).toContain("Output-language preference: EN");
+    expect(continuationInputs[0]?.prompt).toContain("final Character expression must be in English");
     expect(proactivePrompt).not.toContain("<UserMessage>");
     expect(continuationInputs[0]?.prompt).toContain("decision is already REQUEST_TEXT");
     expect(runtime.getLatestPromptPreview()).toMatchObject({

@@ -10,7 +10,8 @@ import {
   createMockReasoningProvider,
   createMockSTTProvider,
   createMockVisionProvider,
-  type ProviderResolver
+  type ProviderResolver,
+  type TTSInput
 } from "@companion/providers";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -113,7 +114,7 @@ function memoryStub() {
   return { memory, extractCandidates };
 }
 
-function providersStub(): ProviderResolver {
+function providersStub(ttsInputs?: TTSInput[]): ProviderResolver {
   const chat = createMockChatProvider("character-test-chat");
   return {
     getChatProvider: () => chat,
@@ -128,7 +129,16 @@ function providersStub(): ProviderResolver {
           checkedAt: new Date().toISOString()
         };
       },
-      async synthesizeSpeech() {
+      async synthesizeSpeech(input: TTSInput) {
+        if (ttsInputs) {
+          ttsInputs.push(input);
+          return {
+            audio: new Uint8Array([1, 2, 3]),
+            audioBase64: "AQID",
+            mimeType: "audio/wav",
+            model: "character-test-tts"
+          };
+        }
         throw new Error("TTS must not run for this turn");
       }
     }),
@@ -170,10 +180,12 @@ function characterHarness(input: {
   }) => void;
 }) {
   const order: SequenceStep[] = [];
-  const generate = vi.fn(async (turnInput: { signal?: AbortSignal | undefined }) => {
-    order.push("generate");
-    return input.initial;
-  });
+  const generate = vi.fn(
+    async (turnInput: Parameters<RuntimeCharacterPort["generate"]>[0]) => {
+      order.push("generate");
+      return input.initial;
+    }
+  );
   const executeCognition = vi.fn(
     async (
       _request: unknown,
@@ -214,6 +226,9 @@ async function runTurn(input: {
   character: RuntimeCharacterPort;
   cognition?: RuntimeCharacterCognitionExecutor;
   signal?: AbortSignal;
+  outputLanguage?: "AUTO" | "EN" | "ZH" | "JA";
+  voiceOutput?: boolean;
+  ttsInputs?: TTSInput[];
 }): Promise<{
   events: RuntimeReplyStreamEvent[];
   published: RuntimeEvent[];
@@ -232,8 +247,9 @@ async function runTurn(input: {
     eventBus,
     memory,
     promptBuilder: new PromptBuilder(),
-    providers: providersStub(),
+    providers: providersStub(input.ttsInputs),
     conversation,
+    ...(input.outputLanguage ? { outputLanguage: input.outputLanguage } : {}),
     ...(input.cognition ? { characterCognition: input.cognition } : {}),
     character: input.character
   });
@@ -245,6 +261,7 @@ async function runTurn(input: {
       { sessionId: "character-session", content: "Please verify this claim carefully." },
       {
         ...(input.signal ? { signal: input.signal } : {}),
+        ...(input.voiceOutput ? { voiceOutput: true } : {}),
         readMemory: true,
         writeMemory: true
       }
@@ -373,6 +390,50 @@ describe("Runtime Character outcome sequencing", () => {
     expect(assistantRow?.content).toBe("The verified answer.");
     const completed = turn.events.find((event) => event.type === "completed");
     expect(completed).toMatchObject({ content: "The verified answer." });
+  });
+
+  it("transports the explicit preference through Character re-entry without making Memory its authority", async () => {
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "NEED_COGNITION", focus: "verification" }),
+      reentry: decisionFixture({ disposition: "RESPOND", text: "The English answer." })
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      cognition: harness.executeCognition,
+      outputLanguage: "EN"
+    });
+
+    expect(turn.failure).toBeUndefined();
+    expect(harness.generate.mock.calls[0]?.[0].outputLanguage).toBe("EN");
+    expect(harness.generateAfterCognition.mock.calls[0]?.[0].outputLanguage).toBe("EN");
+    expect(turn.extractCandidates).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(turn.extractCandidates.mock.calls)).not.toContain("outputLanguage");
+  });
+
+  it("hands the admitted final text and its resolved language to the existing TTS seam", async () => {
+    const ttsInputs: TTSInput[] = [];
+    const harness = characterHarness({
+      initial: decisionFixture({ disposition: "RESPOND", text: "你好，世界。" })
+    });
+
+    const turn = await runTurn({
+      character: harness.character,
+      outputLanguage: "ZH",
+      voiceOutput: true,
+      ttsInputs
+    });
+
+    expect(turn.failure).toBeUndefined();
+    expect(ttsInputs).toEqual([
+      expect.objectContaining({
+        text: "你好，世界。",
+        metadata: { language: "zh" }
+      })
+    ]);
+    expect(ttsInputs[0]).not.toHaveProperty("provider");
+    expect(ttsInputs[0]).not.toHaveProperty("model");
+    expect(ttsInputs[0]).not.toHaveProperty("voice");
   });
 
   it.each(["SILENCE", "TERMINATE"] as const)(

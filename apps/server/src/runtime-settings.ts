@@ -1,4 +1,7 @@
+import { CHARACTER_OUTPUT_LANGUAGES } from "@companion/character-abi";
+
 export const editableKeys = [
+  "OUTPUT_LANGUAGE",
   "MEMORY_REPOSITORY",
   "DATABASE_URL",
   "MEMORY_EXTRACTOR",
@@ -205,6 +208,14 @@ export function validateRuntimeSettings(
   }
   if (memoryRepository === "postgres" && !value("DATABASE_URL")?.trim()) {
     add("MEMORY_REPOSITORY", "DATABASE_URL is required when MEMORY_REPOSITORY is postgres.");
+  }
+
+  const outputLanguage = value("OUTPUT_LANGUAGE")?.trim().toUpperCase();
+  if (
+    outputLanguage &&
+    !(CHARACTER_OUTPUT_LANGUAGES as readonly string[]).includes(outputLanguage)
+  ) {
+    add("OUTPUT_LANGUAGE", `Supported values are ${CHARACTER_OUTPUT_LANGUAGES.join(", ")}.`);
   }
 
   const extractor = value("MEMORY_EXTRACTOR")?.trim();
@@ -440,6 +451,9 @@ function normalizeForComparison(key: string, value: string | undefined): string 
     return !normalized || normalized.toLowerCase() === "memory"
       ? "in-memory"
       : normalized.toLowerCase();
+  }
+  if (key === "OUTPUT_LANGUAGE") {
+    return normalized ? normalized.toUpperCase() : "AUTO";
   }
   if (booleanKeys.has(key as EditableRuntimeSetting)) {
     const truthy = ["true", "1", "yes", "on"].includes(normalized.toLowerCase());

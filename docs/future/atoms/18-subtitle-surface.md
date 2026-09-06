@@ -29,10 +29,10 @@ synchronized with interruptible voice playback.
 **Rebaseline (implementation):**
 
 - Atom 03 — **hard dependency, already DONE** (DesktopSurfaceManager seam).
-- Atom 17 — **NOT a hard dependency**. Subtitle displays already-committed
-  assistant text as-is through `projectCommittedAssistantText` (plain-text
-  projection only). It does not choose, translate, or normalize output language.
-  Atom 17 remains FUTURE and was not implemented.
+- Atom 17 — **NOT a hard dependency**. It is now DONE separately. Subtitle
+  displays already-committed assistant text as-is through
+  `projectCommittedAssistantText` (plain-text projection only). It does not
+  choose, translate, or normalize output language.
 - Atom 14 — **deferred**. No safely productized barge-in
   STARTED/COMPLETED/INTERRUPTED subtitle sync is consumed. Timing uses
   deterministic length/punctuation heuristics only. INTERRUPTED is not faked.

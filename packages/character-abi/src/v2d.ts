@@ -2,8 +2,10 @@ import {
   CHARACTER_ABI_2A_VERSION,
   createCharacterAbiContext,
   createNormalizedCognitionResult,
+  isCharacterOutputLanguage,
   type CharacterAbiSectionKind,
   type CharacterAbiSemanticSection,
+  type CharacterOutputLanguage,
   type NormalizedCognitionResult
 } from "./index.js";
 
@@ -31,11 +33,13 @@ export type CharacterAbi2DSection =
 
 export type CharacterAbi2DContext = Readonly<{
   abiVersion: typeof CHARACTER_ABI_2D_VERSION;
+  outputLanguage?: CharacterOutputLanguage;
   sections: readonly CharacterAbi2DSection[];
 }>;
 
 type UnknownObject = Record<string, unknown> & {
   abiVersion?: unknown;
+  outputLanguage?: unknown;
   sections?: unknown;
   kind?: unknown;
   state?: unknown;
@@ -52,12 +56,19 @@ type UnknownObject = Record<string, unknown> & {
  */
 export function createCharacterAbi2DContext(input: unknown): CharacterAbi2DContext {
   const value = expectObject(input, "Character ABI 2D context");
-  assertAllowedKeys(value, ["abiVersion", "sections"], "Character ABI 2D context");
+  assertAllowedKeys(
+    value,
+    ["abiVersion", "outputLanguage", "sections"],
+    "Character ABI 2D context"
+  );
   if (value.abiVersion !== CHARACTER_ABI_2D_VERSION) {
     throw new Error(`Character ABI 2D version must be ${CHARACTER_ABI_2D_VERSION}.`);
   }
   if (!Array.isArray(value.sections)) {
     throw new Error("Character ABI 2D sections must be an array.");
+  }
+  if (value.outputLanguage !== undefined && !isCharacterOutputLanguage(value.outputLanguage)) {
+    throw new Error("Character ABI 2D outputLanguage is invalid.");
   }
 
   const seenKinds = new Set<CharacterAbiSectionKind>();
@@ -72,6 +83,7 @@ export function createCharacterAbi2DContext(input: unknown): CharacterAbi2DConte
 
   return Object.freeze({
     abiVersion: CHARACTER_ABI_2D_VERSION,
+    ...(value.outputLanguage === undefined ? {} : { outputLanguage: value.outputLanguage }),
     sections: Object.freeze(sections)
   });
 }
