@@ -115,7 +115,8 @@ export class AudioMouthEnvelope implements AudioEnvelopeHost {
     } catch {
       this.context = null;
     }
-    this.target.setMouthForm(0);
+    // Lip-sync owns ParamMouthOpenY only. ParamMouthForm is reserved for
+    // expression (e.g. soft-smile); do not neutralize it on construct.
     if (typeof document !== "undefined") {
       document.addEventListener?.("visibilitychange", this.visibilityHandler);
     }
@@ -235,7 +236,9 @@ export class AudioMouthEnvelope implements AudioEnvelopeHost {
     this.animationFrame = null;
     this.previousTime = null;
     this.value = 0;
-    this.target.resetMouth();
+    // Clear open only — resetMouth() would also zero ParamMouthForm and
+    // clobber an active soft-smile / expression.
+    this.target.setMouthOpen(0);
     this.publishDebug({ mouth: 0 });
   }
 
@@ -274,7 +277,6 @@ export class AudioMouthEnvelope implements AudioEnvelopeHost {
       const target = gatedEnvelope(rawRms, this.config);
       this.value = smoothMouthEnvelope(this.value, target, deltaSeconds, this.config);
       this.target.setMouthOpen(this.value);
-      this.target.setMouthForm(0);
       this.debugRawMin = Math.min(this.debugRawMin, rawRms);
       this.debugRawMax = Math.max(this.debugRawMax, rawRms);
       this.debugMouthMin = Math.min(this.debugMouthMin, this.value);

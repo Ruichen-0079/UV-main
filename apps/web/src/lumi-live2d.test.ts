@@ -610,3 +610,59 @@ describe("Lumi presence and audio envelope", () => {
     }
   });
 });
+
+it("reports expression execution only with a ready model and preserves the effect identity", async () => {
+  const adapter = {
+    load: vi.fn(async () => undefined),
+    setMouthOpen: vi.fn(),
+    setMouthForm: vi.fn(),
+    setParameter: vi.fn(),
+    setBreath: vi.fn(),
+    setFraming: vi.fn(),
+    resetMouth: vi.fn(),
+    resize: vi.fn(),
+    dispose: vi.fn()
+  };
+  const request = {
+    version: "embodied-presentation-request-7ad.v1" as const,
+    effectId: "runtime-effect:ready-smile:1",
+    behavior: {
+      version: "embodied-behavior-7b.v1" as const,
+      behavior: {
+        version: "embodied-behavior-7a.v1" as const,
+        kind: "EXPRESSION" as const,
+        cause: { kind: "character" as const, reference: "character:1" },
+        intent: "soft-smile"
+      },
+      sourceInstance: { reference: "source:1", createdAtMs: 1 },
+      correlation: { kind: "turn" as const, reference: "turn:1" }
+    }
+  };
+  const controller = new LumiController(() => adapter, "model3.json");
+  const report = (outcome: string) =>
+    expect(controller.executeEmbodiedPresentationRequest(request)).toMatchObject({
+      effectId: request.effectId,
+      outcome
+    });
+  report("REJECTED");
+  const loading = controller.load();
+  report("REJECTED");
+  expect(adapter.setMouthForm).not.toHaveBeenCalled();
+  await loading;
+  report("STARTED");
+  expect(adapter.setMouthForm).toHaveBeenCalledWith(1);
+  adapter.setMouthForm.mockClear();
+  controller.setPresenceAnimation(0.3, 0.2);
+  expect(adapter.setMouthForm).not.toHaveBeenCalled();
+  controller.dispose();
+  report("REJECTED");
+  expect(adapter.setMouthForm).not.toHaveBeenCalled();
+  adapter.load.mockRejectedValueOnce(new Error("missing model"));
+  const failed = new LumiController(() => adapter, "missing.json");
+  await failed.load();
+  expect(failed.executeEmbodiedPresentationRequest(request)).toMatchObject({
+    effectId: request.effectId,
+    outcome: "REJECTED"
+  });
+  failed.dispose();
+});

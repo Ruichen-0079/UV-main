@@ -42,7 +42,23 @@ vi.mock("./api/client.js", () => ({
     streamMessage: vi.fn(),
     streamProactiveTurn: mockState.streamProactiveTurn,
     subscribeProactiveLive: mockState.subscribeProactiveLive,
-    setProactiveConsent: vi.fn(async () => ({ ok: true, enabled: true }))
+    setProactiveConsent: vi.fn(async () => ({ ok: true, enabled: true })),
+    // Main product path now opens a dashboard event stream; keep proactive
+    // tests isolated by providing a no-op socket.
+    createDashboardWebSocket: () => {
+      const listeners = new Map<string, Set<(event: { data?: string }) => void>>();
+      return {
+        addEventListener(type: string, listener: (event: { data?: string }) => void) {
+          const set = listeners.get(type) ?? new Set();
+          set.add(listener);
+          listeners.set(type, set);
+        },
+        removeEventListener(type: string, listener: (event: { data?: string }) => void) {
+          listeners.get(type)?.delete(listener);
+        },
+        close() {}
+      };
+    }
   }
 }));
 
