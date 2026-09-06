@@ -776,3 +776,306 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
     text-align: left;
   }
 }
+
+.yuvi-product-routing {
+  display: grid;
+  gap: 16px;
+}
+.yuvi-product-routing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+.yuvi-product-routing-card {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 18px;
+  padding: 16px;
+  background: var(--yuvi-bg-elevated);
+}
+.yuvi-product-routing-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.yuvi-product-routing-card-header h2 {
+  margin: 6px 0 0;
+  font-size: 1.05rem;
+  line-height: 1.3;
+}
+.yuvi-product-routing-card-header p {
+  margin: 5px 0 0;
+  color: var(--yuvi-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.yuvi-product-routing-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.yuvi-product-routing-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  border-radius: 12px;
+  background: var(--yuvi-bg);
+  padding: 9px 10px;
+}
+.yuvi-product-routing-summary span,
+.yuvi-product-routing-summary small,
+.yuvi-product-routing-truth span,
+.yuvi-product-routing-editor small,
+.yuvi-product-routing-chain-heading span,
+.yuvi-product-routing-inspection span,
+.yuvi-product-routing-inspection p {
+  color: var(--yuvi-muted);
+}
+.yuvi-product-routing-summary span,
+.yuvi-product-routing-truth span,
+.yuvi-product-routing-chain-heading span {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.yuvi-product-routing-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+.yuvi-product-routing-summary small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+}
+.yuvi-product-routing-editor {
+  display: grid;
+  gap: 6px;
+  color: var(--yuvi-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.yuvi-product-routing-editor input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 10px;
+  background: var(--yuvi-bg);
+  padding: 7px 10px;
+  color: var(--yuvi-ink);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.yuvi-product-routing-editor small {
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+.yuvi-product-routing-truth {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--yuvi-line);
+  padding-top: 11px;
+}
+.yuvi-product-routing-truth > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.yuvi-product-routing-truth strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+}
+.yuvi-product-route-badge {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.yuvi-product-route-badge.is-ok {
+  background: color-mix(in srgb, var(--yuvi-ok) 16%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-ok);
+}
+.yuvi-product-route-badge.is-warn {
+  background: color-mix(in srgb, var(--yuvi-warn) 15%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-warn);
+}
+.yuvi-product-route-badge.is-bad {
+  background: color-mix(in srgb, var(--yuvi-bad) 14%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-bad);
+}
+.yuvi-product-route-badge.is-idle {
+  background: var(--yuvi-bg);
+  color: var(--yuvi-muted);
+}
+.yuvi-product-routing-pending {
+  border: 1px dashed color-mix(in srgb, var(--yuvi-warn) 50%, var(--yuvi-line));
+  border-radius: 12px;
+  padding: 9px 10px;
+  color: var(--yuvi-warn);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.yuvi-product-routing-chain-heading,
+.yuvi-product-routing-inspection-header,
+.yuvi-product-routing-inspection-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px 10px;
+}
+.yuvi-product-routing-chain-heading {
+  border-top: 1px solid var(--yuvi-line);
+  padding-top: 11px;
+}
+.yuvi-product-routing-chain-heading strong,
+.yuvi-product-routing-inspection-header strong,
+.yuvi-product-routing-inspection-mode strong {
+  font-size: 0.78rem;
+}
+.yuvi-product-route-list {
+  display: grid;
+  gap: 7px;
+}
+.yuvi-product-route-row {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 12px;
+  padding: 9px;
+  background: color-mix(in srgb, var(--yuvi-bg) 55%, var(--yuvi-bg-elevated));
+}
+.yuvi-product-route-row.is-ok {
+  border-color: color-mix(in srgb, var(--yuvi-ok) 26%, var(--yuvi-line));
+}
+.yuvi-product-route-row.is-bad {
+  border-color: color-mix(in srgb, var(--yuvi-bad) 28%, var(--yuvi-line));
+}
+.yuvi-product-route-row.is-warn {
+  border-color: color-mix(in srgb, var(--yuvi-warn) 25%, var(--yuvi-line));
+}
+.yuvi-product-route-priority {
+  color: var(--yuvi-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.yuvi-product-route-main {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.yuvi-product-route-title {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+.yuvi-product-route-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+.yuvi-product-route-title span {
+  color: var(--yuvi-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+.yuvi-product-route-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.yuvi-product-route-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.yuvi-product-route-unknown {
+  border: 1px dashed var(--yuvi-line);
+  border-radius: 12px;
+  padding: 10px;
+  color: var(--yuvi-muted);
+  font-size: 0.76rem;
+}
+.yuvi-product-routing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.yuvi-product-routing-inspection {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 14px;
+  padding: 11px;
+  background: color-mix(in srgb, var(--yuvi-accent-soft) 30%, var(--yuvi-bg-elevated));
+}
+.yuvi-product-routing-inspection p {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+.yuvi-product-routing-inspection-mode {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+.yuvi-product-routing-inspection-mode span {
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+@media (max-width: 1050px) {
+  .yuvi-product-routing-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .yuvi-product-routing-summary {
+    grid-template-columns: 1fr;
+  }
+  .yuvi-product-routing-truth {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+@media (max-width: 900px) {
+  .yuvi-topbar {
+    flex-wrap: wrap;
+  }
+  .yuvi-topbar-actions {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+  }
+}
