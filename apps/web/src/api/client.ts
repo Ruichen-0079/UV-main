@@ -739,6 +739,7 @@ export type RuntimeSettingsResponse = {
   localOverrideConfig: Record<string, unknown>;
   effectiveConfig: Record<string, unknown>;
   activeRuntimeConfig: {
+    outputLanguage?: "AUTO" | "EN" | "ZH" | "JA";
     serverHost: string;
     serverPort: number;
     eventBus: string;

@@ -104,3 +104,19 @@ Quit → AppLifecycle (unchanged; bypasses SurfaceManager)
 - Validation: focused Rust/TypeScript tests, `pnpm check`, `pnpm desktop:smoke:linux`,
   and `pnpm desktop:close-tray:linux` on the primary KDE Plasma Wayland
   platform.
+
+
+## Campaign A Product WebUI baseline (2026-09-06)
+
+The integration originally tracked in #257 is consolidated on the post-#265
+main baseline (`28df8c4`). The independent WebUI surface is reachable from Main
+through DesktopSurfaceManager. It contains Home with compact health, Models &
+Providers, AI Routing with observed fallback evidence, Settings, and Developer.
+Settings reuses UserSettingsPanel and SettingsPage; output language uses the
+existing Runtime setting. No historical #162 backend or secret writer is used.
+
+The baseline includes StrictMode save-completion fixes for both provider pages,
+with mounted React regression coverage. Local type checks, web tests, Vite build,
+and locked Cargo check validate the surface. Hosted Check and Linux Persistence
+remain merge gates. Decorative parity, model discovery, and new backend features
+are outside this baseline; #162 is historical design evidence.

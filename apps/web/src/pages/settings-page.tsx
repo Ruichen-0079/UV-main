@@ -235,6 +235,7 @@ export function SettingsPage(): JSX.Element {
         new Set(settingsSecretKeys)
       );
       const activeRuntimeMismatch =
+        refreshedForm.OUTPUT_LANGUAGE !== refreshedResponse.activeRuntimeConfig.outputLanguage ||
         refreshedResponse.runtime.serverHost !== refreshedResponse.activeRuntimeConfig.serverHost ||
         refreshedResponse.runtime.serverPort !== refreshedResponse.activeRuntimeConfig.serverPort ||
         normalizeRuntimeSettingForComparison("EVENT_BUS", refreshedResponse.runtime.eventBus) !==
@@ -473,7 +474,8 @@ export function SettingsPage(): JSX.Element {
     savedDeepSeekButRuntimeMock ||
     Boolean(
       settings.data &&
-        (settings.data.runtime.serverHost !== settings.data.activeRuntimeConfig.serverHost ||
+        ((runtimeSetting(settings.data, "OUTPUT_LANGUAGE") || "AUTO").trim().toUpperCase() !== settings.data.activeRuntimeConfig.outputLanguage ||
+          settings.data.runtime.serverHost !== settings.data.activeRuntimeConfig.serverHost ||
           settings.data.runtime.serverPort !== settings.data.activeRuntimeConfig.serverPort ||
           normalizeRuntimeSettingForComparison("EVENT_BUS", settings.data.runtime.eventBus) !==
             normalizeRuntimeSettingForComparison(
@@ -494,6 +496,7 @@ export function SettingsPage(): JSX.Element {
               settings.data.activeRuntimeConfig.memoryExtractor))
     );
   const configLayerKeys = [
+    "OUTPUT_LANGUAGE",
     "SERVER_HOST",
     "SERVER_PORT",
     "EVENT_BUS",
@@ -865,6 +868,19 @@ export function SettingsPage(): JSX.Element {
           </div>
         </Panel>
       </div>
+      <Panel title="Output language">
+        <Field label="Final reply language">
+          <select className="field" value={form.OUTPUT_LANGUAGE}
+            onChange={(event) => setFormValue(setForm, "OUTPUT_LANGUAGE", event.target.value)}>
+            <option value="AUTO">AUTO — follow the conversation</option>
+            <option value="EN">English</option>
+            <option value="ZH">中文</option>
+            <option value="JA">日本語</option>
+          </select>
+        </Field>
+        <p>Choose the language of final replies. Save and apply to activate your choice.</p>
+        <Definition label="Active reply language" value={settings.data?.activeRuntimeConfig.outputLanguage ?? "unknown"} />
+      </Panel>
       <Panel title="Active Runtime" badge="activeRuntimeConfig">
         <p className="mb-3 text-sm leading-6 text-ink-600">
           These values describe the running Runtime, not the editor draft or saved / effective
@@ -1261,6 +1277,7 @@ export function SettingsPage(): JSX.Element {
 type SettingsForm = Record<SettingsKey, string>;
 
 type SettingsKey =
+  | "OUTPUT_LANGUAGE"
   | "SERVER_HOST"
   | "SERVER_PORT"
   | "EVENT_BUS"
@@ -1325,6 +1342,7 @@ const settingsSecretKeys: SettingsKey[] = [
 
 function emptySettingsForm(): SettingsForm {
   return {
+    OUTPUT_LANGUAGE: "AUTO",
     SERVER_HOST: "127.0.0.1",
     SERVER_PORT: "6121",
     EVENT_BUS: "in-memory",
@@ -1381,6 +1399,7 @@ function emptySettingsForm(): SettingsForm {
 
 function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsForm {
   return {
+    OUTPUT_LANGUAGE: (runtimeSetting(settings, "OUTPUT_LANGUAGE") || "AUTO").trim().toUpperCase(),
     SERVER_HOST: settings.runtime.serverHost,
     SERVER_PORT: String(settings.runtime.serverPort),
     EVENT_BUS: settings.runtime.eventBus,

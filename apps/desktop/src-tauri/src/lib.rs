@@ -157,6 +157,11 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
   DesktopSurfaceManager::execute(&app, SurfaceId::Companion, SurfaceCommand::Show)
 }
 
+#[tauri::command]
+fn show_webui(app: tauri::AppHandle) -> Result<(), String> {
+  DesktopSurfaceManager::execute(&app, SurfaceId::WebUI, SurfaceCommand::Show)
+}
+
 pub fn run() {
   // Owner lifecycle: route termination signals into the graceful exit path
   // before any thread exists, so the Supervisor tree is always drained.
@@ -217,6 +222,7 @@ pub fn run() {
       hide_companion,
       toggle_companion,
       reopen_companion,
+      show_webui,
       supervisor::get_service_status,
       supervisor::refresh_services,
       supervisor::service_action,
