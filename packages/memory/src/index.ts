@@ -34,6 +34,12 @@ export type {
   Relation
 } from "./types.js";
 export type {
+  MemoryClaim,
+  MemoryClaimAttributionInput,
+  MemoryClaimIdentity,
+  MemoryClaimIdentityInput,
+  MemoryClaimIdentityResolution,
+  MemoryClaimProvenanceClass,
   MemoryEvent,
   MemoryEventAssertion,
   MemoryEventAssertionSource,
@@ -41,6 +47,7 @@ export type {
   MemoryEventKind,
   MemoryEventSource,
   MemoryEventVerification,
+  MemorySourceObservationRef,
   MemoryGetEventInput,
   MemoryProvider,
   MemoryRetrievalInput,
@@ -53,6 +60,18 @@ export type {
   MemoryConversationTurnWriteResult,
   MemoryConversationTurnWriteStatus
 } from "./provider.js";
+export { MEMORY_CLAIM_PROVENANCE_CLASSES } from "./provider.js";
+export {
+  admitDurableMemoryClaim,
+  claimAttributionFromUnknown,
+  currentEligibleMemoryEvents,
+  deserializeClaimMetadata,
+  MEMORY_CLAIM_METADATA,
+  planClaimAttributionCorrection,
+  serializeClaimMetadata,
+  type MemoryClaimAdmission,
+  type MemoryClaimCorrectionPlan
+} from "./claim.js";
 export { detectCurrentAffect } from "./affect.js";
 export { computeRetentionPolicy, type RetentionPolicy } from "./retention.js";
 export {

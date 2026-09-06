@@ -5,6 +5,7 @@ import {
   type MemoryRecord,
   type MemoryRecordMetadata
 } from "../backend.js";
+import { deserializeClaimMetadata, serializeClaimMetadata } from "../claim.js";
 import { buildMemoryScope } from "../scope.js";
 import type {
   MemoryEvent,
@@ -109,6 +110,8 @@ export function mapMem0RecordToMemoryEvent(
   if (conversationId !== undefined) event.conversationId = conversationId;
   if (participants.length > 0) event.participants = participants;
   if (assertion !== undefined) event.assertion = assertion;
+  const claim = deserializeClaimMetadata(metadata);
+  if (claim !== undefined) event.claim = claim;
   return event;
 }
 
@@ -415,6 +418,9 @@ export function buildWriteMetadata(input: MemoryWriteEventInput): MemoryRecordMe
   if (participants.length > 0) metadata["yuviParticipants"] = participants;
   if (input.conversationId?.trim()) metadata.conversationId = input.conversationId.trim();
   if (input.idempotencyKey?.trim()) metadata["yuviIngestionKey"] = input.idempotencyKey.trim();
+  if (input.claim) {
+    Object.assign(metadata, serializeClaimMetadata(input.claim));
+  }
   return metadata;
 }
 

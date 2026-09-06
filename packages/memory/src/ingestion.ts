@@ -1,4 +1,12 @@
-import type { MemoryEventKind, MemoryWriteEventInput } from "./provider.js";
+import {
+  admitDurableMemoryClaim,
+  serializeClaimMetadata
+} from "./claim.js";
+import type {
+  MemoryClaimAttributionInput,
+  MemoryEventKind,
+  MemoryWriteEventInput
+} from "./provider.js";
 import type { MemoryCandidate } from "./types.js";
 import { classifyMem0Turn, type Mem0TurnKind } from "./mem0-chat.js";
 import { stripExplicitRememberPrefix } from "./intent.js";
@@ -20,6 +28,7 @@ export type MemoryIngestionInput = {
   observedAt?: string | undefined;
   cancelledOrFailed?: boolean | undefined;
   turnKind?: Mem0TurnKind | undefined;
+  claim?: MemoryClaimAttributionInput | undefined;
 };
 
 export type MemoryIngestionResult = {
@@ -54,6 +63,9 @@ export class MemoryIngestionPolicy {
     if (turnKind === "cancelled_or_failed") {
       return { turnKind, events: [], skippedReason: "cancelled-or-failed" };
     }
+    if (input.claim) {
+      return this.buildAttributed(input, turnKind);
+    }
     if (turnKind === "explicit_forget") {
       return { turnKind, events: [], skippedReason: "explicit-forget-skips-add" };
     }
@@ -69,28 +81,28 @@ export class MemoryIngestionPolicy {
         };
       }
       const claim = stripExplicitRememberPrefix(userMessage) || userMessage;
+      const event = this.eventForClaim(claim, input, {
+        explicit: true,
+        sourceReason: "explicit-remember"
+      });
       return {
         turnKind,
-        events: [
-          this.eventForClaim(claim, input, {
-            explicit: true,
-            sourceReason: "explicit-remember"
-          })
-        ]
+        events: event ? [event] : [],
+        ...(event ? {} : { skippedReason: "unresolved-identity" })
       };
     }
 
     // Relationship-duration statements are evidence of what the user claims,
     // not authoritative relationship state.
     if (isUserClaimStatement(userMessage)) {
+      const event = this.eventForClaim(userMessage, input, {
+        explicit: false,
+        sourceReason: "user-claim"
+      });
       return {
         turnKind,
-        events: [
-          this.eventForClaim(userMessage, input, {
-            explicit: false,
-            sourceReason: "user-claim"
-          })
-        ]
+        events: event ? [event] : [],
+        ...(event ? {} : { skippedReason: "unresolved-identity" })
       };
     }
 
@@ -107,9 +119,11 @@ export class MemoryIngestionPolicy {
       candidates
         .filter(isFactualCandidate)
         .map((candidate) => this.eventForCandidate(candidate, input))
+        .filter((event): event is MemoryWriteEventInput => event !== null)
     );
     if (events.length === 0 && isSimpleFactualUserStatement(userMessage)) {
-      events.push(this.eventForFact(userMessage, input));
+      const fact = this.eventForFact(userMessage, input);
+      if (fact) events.push(fact);
     }
     return {
       turnKind,
@@ -118,13 +132,74 @@ export class MemoryIngestionPolicy {
     };
   }
 
+  private buildAttributed(
+    input: MemoryIngestionInput,
+    turnKind: Mem0TurnKind
+  ): MemoryIngestionResult {
+    const claimInput = input.claim!;
+    const admitted = admitDurableMemoryClaim({
+      ...claimInput,
+      ...(claimInput.content
+        ? { content: claimInput.content }
+        : claimInput.rawText
+          ? {}
+          : { content: normalize(input.userMessage) }),
+      rawText: claimInput.rawText ?? input.userMessage
+    });
+    if (admitted.decision === "reject") {
+      return { turnKind, events: [], skippedReason: admitted.reason };
+    }
+    const kind: MemoryEventKind =
+      admitted.claim.provenanceClass === "ASSISTANT_INFERENCE"
+        ? "fact"
+        : admitted.claim.provenanceClass === "DIRECT_OBSERVATION"
+          ? "interaction"
+          : "user_claim";
+    const participants = claimInput.participants?.filter(
+      (value): value is string => typeof value === "string" && value.trim().length > 0
+    );
+    const event = this.applyClaim(
+      {
+        kind,
+        content: admitted.content,
+        scope: input.scope,
+        ...(input.observedAt ? { observedAt: input.observedAt } : {}),
+        ...(input.userMessageId ? { sourceTurnIds: [input.userMessageId] } : {}),
+        ...(input.conversationId !== undefined
+          ? { conversationId: input.conversationId }
+          : input.sessionId !== undefined
+            ? { conversationId: input.sessionId }
+            : {}),
+        ...(participants && participants.length > 0
+          ? { participants }
+          : input.subjectUserId || input.personaId
+            ? {
+                participants: [
+                  ...(input.subjectUserId ? [input.subjectUserId] : []),
+                  ...(input.personaId ? [input.personaId] : [])
+                ]
+              }
+            : {}),
+        assertion: admitted.assertion,
+        metadata: buildEventMetadata(input, {
+          memoryType: kind,
+          explicit: false,
+          ingestionReason: `claim:${admitted.claim.provenanceClass}`
+        }),
+        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
+      },
+      admitted
+    );
+    return { turnKind, events: [event] };
+  }
+
   private eventForClaim(
     claim: string,
     input: MemoryIngestionInput,
     options: { explicit: boolean; sourceReason: string }
-  ): MemoryWriteEventInput {
+  ): MemoryWriteEventInput | null {
     const content = canonicalizeUserClaim(claim);
-    return {
+    const event: MemoryWriteEventInput = {
       kind: "user_claim",
       content,
       scope: input.scope,
@@ -151,16 +226,17 @@ export class MemoryIngestionPolicy {
       }),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
     };
+    return this.applyDefaultClaim(event, input);
   }
 
   private eventForCandidate(
     candidate: MemoryCandidate,
     input: MemoryIngestionInput
-  ): MemoryWriteEventInput {
+  ): MemoryWriteEventInput | null {
     const kind: MemoryEventKind = candidate.type === "episodic" ? "episodic" : "fact";
     const observedAt = toTimestamp(candidate.observedAt);
     const occurredAt = toTimestamp(candidate.eventTime);
-    return {
+    const event: MemoryWriteEventInput = {
       kind,
       content: normalize(candidate.content),
       scope: input.scope,
@@ -189,10 +265,11 @@ export class MemoryIngestionPolicy {
       }),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
     };
+    return this.applyDefaultClaim(event, input);
   }
 
-  private eventForFact(text: string, input: MemoryIngestionInput): MemoryWriteEventInput {
-    return {
+  private eventForFact(text: string, input: MemoryIngestionInput): MemoryWriteEventInput | null {
+    const event: MemoryWriteEventInput = {
       kind: "fact",
       content: normalize(text),
       scope: input.scope,
@@ -218,6 +295,39 @@ export class MemoryIngestionPolicy {
         ingestionReason: "stable-user-fact"
       }),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
+    };
+    return this.applyDefaultClaim(event, input);
+  }
+
+  private applyDefaultClaim(
+    event: MemoryWriteEventInput,
+    input: MemoryIngestionInput
+  ): MemoryWriteEventInput | null {
+    const subjectId = input.subjectUserId?.trim();
+    if (!subjectId) return event;
+    const admitted = admitDurableMemoryClaim({
+      provenanceClass: "SELF_REPORT",
+      content: event.content,
+      rawText: input.userMessage,
+      assertor: { entityId: subjectId, resolution: "resolved" },
+      subject: { entityId: subjectId, resolution: "resolved" }
+    });
+    if (admitted.decision === "reject") return null;
+    return this.applyClaim(event, admitted);
+  }
+
+  private applyClaim(
+    event: MemoryWriteEventInput,
+    admitted: Extract<ReturnType<typeof admitDurableMemoryClaim>, { decision: "admit" }>
+  ): MemoryWriteEventInput {
+    return {
+      ...event,
+      assertion: admitted.assertion,
+      claim: admitted.claim,
+      metadata: {
+        ...(event.metadata ?? {}),
+        ...serializeClaimMetadata(admitted.claim)
+      }
     };
   }
 }

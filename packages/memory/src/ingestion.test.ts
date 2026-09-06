@@ -31,6 +31,12 @@ describe("MemoryIngestionPolicy", () => {
     expect(result.events[0]?.metadata).not.toHaveProperty("closeness");
     expect(result.events[0]?.metadata).not.toHaveProperty("relationship");
     expect(result.events[0]?.metadata).toMatchObject({ yuviIngestionKey: "turn-1" });
+    expect(result.events[0]?.claim).toMatchObject({
+      provenanceClass: "SELF_REPORT",
+      assertor: { entityId: "user-a", resolution: "resolved" },
+      subject: { entityId: "user-a", resolution: "resolved" },
+      rawText: "我喜欢蓝色。"
+    });
   });
 
   it("blocks assistant interpretation and self-memory pollution", async () => {

@@ -10,6 +10,12 @@ import {
   stripExplicitForgetPrefix
 } from "./intent.js";
 import { enrichCandidateProvenance, isAssistantOnlyRestatement } from "./provenance.js";
+import {
+  admitDurableMemoryClaim,
+  claimAttributionFromUnknown,
+  deserializeClaimMetadata,
+  serializeClaimMetadata
+} from "./claim.js";
 import type { MemoryBackend } from "./backend.js";
 import type { MemoryConversationTurnWriteResult, MemoryProvider } from "./provider.js";
 import { Mem0MemoryProvider } from "./providers/mem0-memory-provider.js";
@@ -370,6 +376,12 @@ export class MemoryService {
       };
     }
 
+    const claimGate = admitCandidateClaim(candidate);
+    if (claimGate.decision === "rejected") {
+      return claimGate;
+    }
+    candidate = claimGate.candidate;
+
     const normalized = this.normalizeCandidateForStorage(candidate);
     const relationships = await this.detectCandidateRelationships(normalized);
     const correctionRelationships = await this.detectCorrectionRelationships(normalized);
@@ -425,7 +437,11 @@ export class MemoryService {
     };
 
     const supersedeIds = [
-      ...new Set([...mergedRelationships.autoSupersedes, ...correctionRelationships.supersedes])
+      ...new Set([
+        ...mergedRelationships.autoSupersedes,
+        ...correctionRelationships.supersedes,
+        ...(hasCorrectionRequest(normalized) ? normalized.possibleSupersedes ?? [] : [])
+      ])
     ];
     const storageCandidate: MemoryCandidate = {
       ...candidateWithRelationships,
@@ -2277,7 +2293,12 @@ function decideCandidateStorage(
         : undefined
   };
   if (isAssistantOnlyRestatement(candidate, extractionInput)) {
-    return { decision: "rejected", reason: "assistant-only-restatement" };
+    const claim =
+      claimAttributionFromUnknown(candidate.claim) ??
+      deserializeClaimMetadata(candidate.metadata);
+    if (claim?.provenanceClass !== "ASSISTANT_INFERENCE") {
+      return { decision: "rejected", reason: "assistant-only-restatement" };
+    }
   }
 
   const temporalConfidence = temporalResolutionConfidence(candidate.metadata);
@@ -2399,6 +2420,48 @@ function isDurableCandidate(candidate: MemoryCandidate, text: string): boolean {
     return true;
   }
   return isDurableTemporalText(text);
+}
+
+function admitCandidateClaim(
+  candidate: MemoryCandidate
+):
+  | { decision: "rejected"; candidate: MemoryCandidate; rejectedReason: string }
+  | { decision: "continue"; candidate: MemoryCandidate } {
+  const claimInput =
+    claimAttributionFromUnknown(candidate.claim) ??
+    claimAttributionFromUnknown(candidate.metadata?.["claim"]);
+  if (!claimInput) {
+    return { decision: "continue", candidate };
+  }
+  const rawText =
+    claimInput.rawText ??
+    (typeof candidate.metadata?.["rawText"] === "string"
+      ? candidate.metadata["rawText"]
+      : undefined);
+  const admitted = admitDurableMemoryClaim({
+    ...claimInput,
+    content: claimInput.content ?? candidate.content,
+    ...(rawText ? { rawText } : {})
+  });
+  if (admitted.decision === "reject") {
+    return {
+      decision: "rejected",
+      candidate,
+      rejectedReason: admitted.reason
+    };
+  }
+  return {
+    decision: "continue",
+    candidate: {
+      ...candidate,
+      content: admitted.content,
+      claim: admitted.claim,
+      metadata: {
+        ...(candidate.metadata ?? {}),
+        ...serializeClaimMetadata(admitted.claim)
+      }
+    }
+  };
 }
 
 function toValidDate(value: Date | string | null | undefined): Date | null {
