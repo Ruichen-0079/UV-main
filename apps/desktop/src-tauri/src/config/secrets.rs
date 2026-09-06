@@ -134,7 +134,7 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
-/// Windows Credential Manager via `keyring`. Other platforms return unsupported.
+/// Platform secret store via `keyring`: Windows Credential Manager or Linux Secret Service.
 pub struct PlatformSecretStore;
 
 impl PlatformSecretStore {
@@ -152,7 +152,7 @@ impl PlatformSecretStore {
 
 impl SecretStore for PlatformSecretStore {
     fn get(&self, key: &str) -> Result<Option<String>, String> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let target = Self::map_key(key)?;
             let entry = keyring::Entry::new("YUVI", target).map_err(|e| e.to_string())?;
@@ -163,10 +163,10 @@ impl SecretStore for PlatformSecretStore {
             }
         }
 
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = Self::map_key(key)?;
-            Err("Credential Manager secrets are only supported on Windows".to_string())
+            Err("Platform secret storage is not supported on this operating system".to_string())
         }
     }
 
@@ -175,21 +175,21 @@ impl SecretStore for PlatformSecretStore {
         if trimmed.is_empty() {
             return self.delete(key);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let target = Self::map_key(key)?;
             let entry = keyring::Entry::new("YUVI", target).map_err(|e| e.to_string())?;
             entry.set_password(trimmed).map_err(|e| e.to_string())
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = Self::map_key(key)?;
-            Err("Credential Manager secrets are only supported on Windows".to_string())
+            Err("Platform secret storage is not supported on this operating system".to_string())
         }
     }
 
     fn delete(&self, key: &str) -> Result<(), String> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let target = Self::map_key(key)?;
             let entry = keyring::Entry::new("YUVI", target).map_err(|e| e.to_string())?;
@@ -199,10 +199,10 @@ impl SecretStore for PlatformSecretStore {
                 Err(error) => Err(error.to_string()),
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = Self::map_key(key)?;
-            Err("Credential Manager secrets are only supported on Windows".to_string())
+            Err("Platform secret storage is not supported on this operating system".to_string())
         }
     }
 }

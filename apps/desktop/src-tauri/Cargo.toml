@@ -21,6 +21,9 @@ tempfile = "3"
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["sync-secret-service"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
