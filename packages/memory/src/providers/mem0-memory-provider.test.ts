@@ -351,6 +351,57 @@ describe("Mem0MemoryProvider canonical mapping", () => {
     });
   });
 
+  it("persists and restores claim attribution without rewriting the raw mention", async () => {
+    const writeRecord = record({
+      id: "claim-1",
+      content: "今天怎么了",
+      metadata: {
+        yuviEventKind: "user_claim",
+        yuviClaimProvenanceClass: "EXTERNAL_CLAIM",
+        yuviClaimAssertorEntityId: "person_ruichen",
+        yuviClaimAssertorResolution: "resolved",
+        yuviClaimSubjectEntityId: "entity_yuvi",
+        yuviClaimSubjectSurfaceMention: "UV",
+        yuviClaimSubjectResolution: "resolved",
+        yuviClaimRawText: "UV 今天怎么了",
+        yuviSourceObservationId: "obs-1"
+      }
+    });
+    const add = vi.fn(async () => ({
+      memoryId: "claim-1",
+      operation: "created" as const,
+      record: writeRecord
+    }));
+    const provider = new Mem0MemoryProvider(backend({ add }));
+    const outcome = await provider.writeEvent({
+      kind: "user_claim",
+      content: "今天怎么了",
+      scope,
+      assertion: { source: "user", verification: "unverified" },
+      claim: {
+        provenanceClass: "EXTERNAL_CLAIM",
+        rawText: "UV 今天怎么了",
+        assertor: { entityId: "person_ruichen", resolution: "resolved" },
+        subject: { entityId: "entity_yuvi", surfaceMention: "UV", resolution: "resolved" },
+        sourceObservation: { observationId: "obs-1" }
+      }
+    });
+    expect(outcome.event?.claim).toMatchObject({
+      provenanceClass: "EXTERNAL_CLAIM",
+      rawText: "UV 今天怎么了",
+      subject: { entityId: "entity_yuvi", surfaceMention: "UV", resolution: "resolved" },
+      sourceObservation: { observationId: "obs-1" }
+    });
+    expect(outcome.event?.content).toBe("今天怎么了");
+    const addInput = (add.mock.calls[0] as unknown[])[0] as { metadata?: Record<string, unknown> };
+    expect(addInput.metadata).toMatchObject({
+      yuviClaimRawText: "UV 今天怎么了",
+      yuviClaimSubjectSurfaceMention: "UV",
+      yuviClaimSubjectEntityId: "entity_yuvi"
+    });
+    expect(JSON.stringify(addInput.metadata)).not.toContain("YUVI 今天怎么了");
+  });
+
   it("rejects a semantic write without scope before touching the backend", async () => {
     const add = vi.fn();
     const provider = new Mem0MemoryProvider(backend({ add }));

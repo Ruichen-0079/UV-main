@@ -204,6 +204,56 @@ describe("P8-1C read-only evidence adapter", () => {
     });
   });
 
+  it("maps Atom 12 claim provenance without upgrading hearsay or inference", () => {
+    const result = adaptP8MemoryRetrievalOutcome({
+      outcome: retrieval("ok", [
+        memoryEvent({
+          id: "self-report",
+          assertion: { source: "user", verification: "verified" },
+          claim: {
+            provenanceClass: "SELF_REPORT",
+            assertor: { entityId: "person_ruichen", resolution: "resolved" },
+            subject: { entityId: "person_ruichen", resolution: "resolved" }
+          }
+        }),
+        memoryEvent({
+          id: "hearsay",
+          assertion: { source: "user", verification: "unverified" },
+          claim: {
+            provenanceClass: "EXTERNAL_CLAIM",
+            assertor: { entityId: "person_xiaoming", resolution: "resolved" },
+            subject: { entityId: "person_ruichen", resolution: "resolved" }
+          }
+        }),
+        memoryEvent({
+          id: "assistant-inference",
+          assertion: { source: "assistant", verification: "unverified" },
+          claim: {
+            provenanceClass: "ASSISTANT_INFERENCE",
+            assertor: { entityId: "assistant_yuvi", resolution: "resolved" },
+            subject: { entityId: "person_ruichen", resolution: "resolved" }
+          }
+        })
+      ]) as MemoryRetrievalOutcome,
+      expectedScopeReference: SCOPE
+    });
+    const byReference = new Map(
+      result.outcome.evidence.map((evidence) => [evidence.evidenceReference, evidence])
+    );
+    expect(byReference.get("self-report")).toMatchObject({
+      sourceClass: "EXPLICIT_USER_ORIGINATED",
+      support: "DIRECT"
+    });
+    expect(byReference.get("hearsay")).toMatchObject({
+      sourceClass: "WEAK_INFERRED",
+      support: "LIMITED"
+    });
+    expect(byReference.get("assistant-inference")).toMatchObject({
+      sourceClass: "ASSISTANT_MODEL_GENERATED",
+      support: "NON_AUTHORITATIVE"
+    });
+  });
+
   it("does not use confidence, rank, limit, or repetition as authority", () => {
     const event = memoryEvent({
       assertion: { source: "unknown", verification: "unknown" },

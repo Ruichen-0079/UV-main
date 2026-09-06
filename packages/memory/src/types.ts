@@ -1,3 +1,5 @@
+import type { MemoryClaim, MemoryClaimAttributionInput } from "./provider.js";
+
 export const MemoryTypes = [
   "working",
   "episodic",
@@ -192,6 +194,7 @@ export type MemoryCandidate = {
   speakerId?: string | null;
   voiceProfileId?: string | null;
   sessionId?: string | null;
+  claim?: MemoryClaim | MemoryClaimAttributionInput;
   observedAt?: Date | string | null;
   eventTime?: Date | string | null;
   validFrom?: Date | string | null;

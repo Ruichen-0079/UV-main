@@ -40,6 +40,68 @@ export type MemoryEventAssertion = {
 };
 
 /**
+ * Who asserted a durable claim, and about whom.
+ *
+ * `participants` is never a substitute for these roles. `speakerId` and
+ * `voiceProfileId` remain acoustic/legacy metadata and must not be copied
+ * here. Identity resolution is supplied by upstream; Memory does not guess.
+ */
+export const MEMORY_CLAIM_PROVENANCE_CLASSES = [
+  "SELF_REPORT",
+  "EXTERNAL_CLAIM",
+  "DIRECT_OBSERVATION",
+  "ASSISTANT_INFERENCE",
+  "UNKNOWN_AMBIENT"
+] as const;
+
+export type MemoryClaimProvenanceClass = (typeof MEMORY_CLAIM_PROVENANCE_CLASSES)[number];
+
+export type MemoryClaimIdentityResolution = "resolved" | "unresolved";
+
+export type MemoryClaimIdentity = {
+  entityId: string | null;
+  surfaceMention?: string | null | undefined;
+  resolution: MemoryClaimIdentityResolution;
+};
+
+/** Minimal speech provenance. Provider DTOs and embeddings stay out. */
+export type MemorySourceObservationRef = {
+  observationId?: string | null | undefined;
+  captureEpoch?: string | null | undefined;
+  segmentId?: string | null | undefined;
+};
+
+export type MemoryClaim = {
+  provenanceClass: MemoryClaimProvenanceClass;
+  assertor: MemoryClaimIdentity;
+  subject: MemoryClaimIdentity;
+  /** Unmodified source text when supplied. Never rewritten to a resolved name. */
+  rawText?: string | null | undefined;
+  sourceObservation?: MemorySourceObservationRef | undefined;
+};
+
+export type MemoryClaimIdentityInput = {
+  entityId?: string | null | undefined;
+  surfaceMention?: string | null | undefined;
+  resolution?: MemoryClaimIdentityResolution | null | undefined;
+};
+
+export type MemoryClaimAttributionInput = {
+  provenanceClass: MemoryClaimProvenanceClass;
+  /** Semantic claim text. When omitted, rawText is stored as content without rewriting. */
+  content?: string | null | undefined;
+  assertor?: MemoryClaimIdentityInput | null | undefined;
+  subject?: MemoryClaimIdentityInput | null | undefined;
+  rawText?: string | null | undefined;
+  sourceObservation?: MemorySourceObservationRef | null | undefined;
+  participants?: string[] | null | undefined;
+  speakerId?: string | null | undefined;
+  voiceProfileId?: string | null | undefined;
+  confidence?: number | null | undefined;
+  verification?: MemoryEventVerification | null | undefined;
+};
+
+/**
  * Canonical evidence object.
  *
  * Timestamps are optional because an absent source timestamp is unknown; it
@@ -65,6 +127,7 @@ export type MemoryEvent = {
   participants?: string[];
 
   assertion?: MemoryEventAssertion;
+  claim?: MemoryClaim;
   confidence?: number | null;
 
   /** Non-authoritative evidence metadata; never Runtime state. */
@@ -121,6 +184,7 @@ export type MemoryWriteEventInput = {
   payloadDigest?: string | null;
   participants?: string[];
   assertion?: MemoryEventAssertion;
+  claim?: MemoryClaim;
   confidence?: number | null;
   metadata?: Record<string, unknown>;
   signal?: AbortSignal;

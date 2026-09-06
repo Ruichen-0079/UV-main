@@ -287,6 +287,20 @@ function memorySourceClass(
   | "OBSERVED_INTERACTION"
   | "WEAK_INFERRED"
   | "ASSISTANT_MODEL_GENERATED" {
+  switch (event.claim?.provenanceClass) {
+    case "ASSISTANT_INFERENCE":
+      return "ASSISTANT_MODEL_GENERATED";
+    case "EXTERNAL_CLAIM":
+      return "WEAK_INFERRED";
+    case "DIRECT_OBSERVATION":
+      return "OBSERVED_INTERACTION";
+    case "SELF_REPORT":
+      return "EXPLICIT_USER_ORIGINATED";
+    case "UNKNOWN_AMBIENT":
+      return "WEAK_INFERRED";
+    default:
+      break;
+  }
   switch (event.assertion?.source) {
     case "assistant":
       return "ASSISTANT_MODEL_GENERATED";
