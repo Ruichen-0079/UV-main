@@ -252,8 +252,18 @@ Dependency direction (not numeric order):
   descendants, with a repeated-Quit probe absorbed by the ShutdownGate. No
   production code changed — the lifecycle audit found the behavior already
   correct; this atom only added the missing validation contract.)
-- [03 — Desktop Surface foundation](03-desktop-surface-foundation.md)
-  — rebaselined: no longer depends on Windows Atoms 01–02
+- [03 — Desktop Surface foundation](03-desktop-surface-foundation.md) — DONE
+  (closure record in that document: `MenuId → TrayCommand → tray::dispatch →
+  DesktopSurfaceManager` is now the single presentation seam for the existing
+  Main and Companion surfaces — ensure/show/hide/toggle/focus, window
+  construction inputs, and Companion always-on-top presentation. Tray Quit
+  forks to AppLifecycle before any surface dispatch, proven structurally by
+  `tray::tests::quit_forks_to_lifecycle_and_never_enters_the_surface_seam`;
+  ordinary close-as-hide, ensure-reuse, frontend companion command names, and
+  menu labels are unchanged. No new surface — Atom 04 (WebUI) and Atom 18
+  (Subtitle) are not started. Validated by `cargo test`, `pnpm check`,
+  `pnpm desktop:smoke:linux`, and `pnpm desktop:close-tray:linux` on real KDE
+  Plasma Wayland.)
 - [04 — WebUI Surface](04-webui-surface.md)
 - [21 — Linux/CachyOS deployment](21-linux-cachyos-deployment.md)
   — long-term target; to be implemented through smaller Linux operational
