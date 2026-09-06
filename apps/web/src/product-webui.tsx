@@ -2,6 +2,7 @@ import { useState } from "react";
 import { App as DeveloperDashboard } from "./App.js";
 import { apiClient, type HealthResponse } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
+import { ProductCompactHealth, productCompactHealthItems } from "./product-compact-health.js";
 import { ProductAIRouting } from "./product-ai-routing.js";
 import { ProductModelsProviders } from "./product-models-providers.js";
 
@@ -12,9 +13,7 @@ function healthLabel(
   loading: boolean,
   error: string | null
 ): string {
-  if (loading) return "Checking";
-  if (error) return "Unavailable";
-  return health?.ok ? "Healthy" : "Degraded";
+  return productCompactHealthItems({ health, loading, error })[0]?.summary ?? "Unknown";
 }
 
 /**
@@ -52,7 +51,7 @@ export function ProductWebUI(): JSX.Element {
           type="button"
           className="yuvi-health-chip"
           onClick={() => void health.refresh()}
-          title="Refresh Runtime health"
+          title="Refresh product status"
         >
           <span className="yuvi-health-chip-label">Runtime</span>
           <span>{status}</span>
@@ -119,29 +118,23 @@ export function ProductWebUI(): JSX.Element {
               </div>
             </section>
 
-            <div className="yuvi-product-grid">
-              <section className="yuvi-product-stat">
-                <div className="yuvi-product-stat-label">Runtime</div>
-                <div className="yuvi-product-stat-value">{status}</div>
-              </section>
-              <section className="yuvi-product-stat">
-                <div className="yuvi-product-stat-label">Chat route</div>
-                <div className="yuvi-product-stat-value">
-                  {health.data?.providers.chat.readiness ?? "unknown"}
-                </div>
-              </section>
-              <section className="yuvi-product-stat">
-                <div className="yuvi-product-stat-label">Memory</div>
-                <div className="yuvi-product-stat-value">
-                  {health.data?.database.status ?? "unknown"}
-                </div>
-              </section>
-            </div>
+            <ProductCompactHealth
+              health={health.data}
+              loading={health.loading}
+              error={health.error}
+              onRefresh={() => void health.refresh()}
+            />
 
             {health.error ? (
               <section className="yuvi-card yuvi-card-alert">
-                <div className="font-semibold">Runtime health unavailable</div>
-                <p className="mb-0 mt-1 text-sm text-[var(--yuvi-muted)]">{health.error}</p>
+                <div className="font-semibold">
+                  {health.data ? "Product status refresh incomplete" : "Runtime health unavailable"}
+                </div>
+                <p className="mb-0 mt-1 text-sm text-[var(--yuvi-muted)]">
+                  {health.data
+                    ? "Showing the last successful Runtime projection."
+                    : "Current status remains unknown until the Runtime health endpoint responds."}
+                </p>
               </section>
             ) : null}
           </div>

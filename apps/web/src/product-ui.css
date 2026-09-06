@@ -448,6 +448,100 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
   display: grid;
   gap: 16px;
 }
+.yuvi-product-health {
+  display: grid;
+  gap: 10px;
+}
+.yuvi-product-health-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.yuvi-product-health-header h2 {
+  margin: 5px 0 0;
+  font-size: 1rem;
+  line-height: 1.25;
+}
+.yuvi-product-health-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.yuvi-product-health-card {
+  display: grid;
+  min-width: 0;
+  min-height: 7.25rem;
+  gap: 9px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 16px;
+  padding: 13px 14px;
+  background: var(--yuvi-bg-elevated);
+}
+.yuvi-product-health-card.is-ok {
+  border-color: color-mix(in srgb, var(--yuvi-ok) 28%, var(--yuvi-line));
+}
+.yuvi-product-health-card.is-warn {
+  border-color: color-mix(in srgb, var(--yuvi-warn) 32%, var(--yuvi-line));
+}
+.yuvi-product-health-card.is-bad {
+  border-color: color-mix(in srgb, var(--yuvi-bad) 32%, var(--yuvi-line));
+}
+.yuvi-product-health-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.yuvi-product-health-card-label {
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+.yuvi-product-health-card p {
+  min-width: 0;
+  margin: 0;
+  color: var(--yuvi-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+.yuvi-product-health-card small {
+  align-self: end;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--yuvi-muted);
+  font-size: 0.62rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yuvi-product-health-badge {
+  flex-shrink: 0;
+  max-width: 60%;
+  overflow: hidden;
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yuvi-product-health-badge.is-ok {
+  background: color-mix(in srgb, var(--yuvi-ok) 15%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-ok);
+}
+.yuvi-product-health-badge.is-warn {
+  background: color-mix(in srgb, var(--yuvi-warn) 14%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-warn);
+}
+.yuvi-product-health-badge.is-bad {
+  background: color-mix(in srgb, var(--yuvi-bad) 14%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-bad);
+}
+.yuvi-product-health-badge.is-idle {
+  background: var(--yuvi-bg);
+  color: var(--yuvi-muted);
+}
 .yuvi-product-hero {
   display: grid;
   gap: 8px;
@@ -517,6 +611,10 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
 }
 @media (max-width: 800px) {
   .yuvi-product-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .yuvi-product-health-grid {
     grid-template-columns: 1fr;
   }
 }
