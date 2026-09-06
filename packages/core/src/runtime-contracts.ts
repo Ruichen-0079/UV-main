@@ -555,6 +555,11 @@ export type SpeechActivitySnapshot = {
   speechActive: boolean;
   captureEpoch: string | null;
   activityRevision: number;
+  speechPlaybackEffectId?: string | null;
+  speechPlaybackRequestId?: string | null;
+  speechPlaybackState?: string | null;
+  revokedSpeechEffectId?: string;
+  revokedSpeechRequestId?: string;
 };
 
 export type HandleImageInputInput = VisionInput & {

@@ -13,7 +13,16 @@ import {
   type ActiveAudioCapture,
   type RecordedAudio
 } from "./audio-capture.js";
-import { startLiveSpeechCapture, type LiveSpeechCapture } from "./live-speech-capture.js";
+import {
+  startLiveSpeechCapture,
+  type LiveSpeechCapture,
+  type MicrophoneTrackSettings
+} from "./live-speech-capture.js";
+import {
+  createHandsFreeUtteranceBuffer,
+  type HandsFreeUtteranceBuffer
+} from "./hands-free-utterance.js";
+import { encodePcm16Wav, wavBlobToBase64 } from "./pcm-wav.js";
 import {
   beginControlledDraftSubmit,
   reduceChatMessages,
@@ -85,11 +94,7 @@ function createSurfaceId(prefix: string): string {
  * this surface never owns audio playback, Lumi, or the analyser chain.
  */
 
-function publishCommittedSubtitle(
-  messageId: string,
-  content: string,
-  requestId?: string
-): void {
+function publishCommittedSubtitle(messageId: string, content: string, requestId?: string): void {
   const text = projectCommittedAssistantText(content);
   if (!text) return;
   publishSubtitleProjection({
@@ -162,6 +167,10 @@ export function MainPage(): JSX.Element {
   const activeRequestRef = useRef<ActiveRequestOwnership | null>(null);
   const audioCaptureRef = useRef<ActiveAudioCapture | null>(null);
   const liveSpeechCaptureRef = useRef<LiveSpeechCapture | null>(null);
+  const handsFreeBufferRef = useRef<HandsFreeUtteranceBuffer | null>(null);
+  const speechPlaybackByRequestRef = useRef(new Map<string, string>());
+  const transcribeAbortRef = useRef<AbortController | null>(null);
+  const [micTrackSettings, setMicTrackSettings] = useState<MicrophoneTrackSettings | null>(null);
 
   const capabilityProjection = useMemo(
     () =>
@@ -327,6 +336,10 @@ export function MainPage(): JSX.Element {
         setVoicePlaybackStatus(message.state);
         if (message.state === "idle" || message.state === "stopped") {
           speechEpochRef.current = null;
+          reportPlaybackTerminal(
+            message.requestId,
+            message.state === "stopped" ? "INTERRUPTED" : "COMPLETED"
+          );
         }
       } else if (message.kind === "playback-status") {
         if (speechEpochRef.current !== message.requestId) return;
@@ -342,6 +355,13 @@ export function MainPage(): JSX.Element {
         playbackCorrelationRef.current = result.state;
         if (!result.accepted) return;
         applyPlaybackStatus(message.state, setVoicePlaybackStatus, setActualPlaybackActive);
+        if (message.state === "started") {
+          reportPlaybackOutcome(message.requestId, "STARTED");
+        } else if (message.state === "stopped") {
+          reportPlaybackTerminal(message.requestId, "INTERRUPTED");
+        } else if (message.state === "error") {
+          reportPlaybackTerminal(message.requestId, "FAILED");
+        }
       } else if (message.kind === "proactive-text-request") {
         handleProactiveTextRequest(message);
       }
@@ -495,6 +515,12 @@ export function MainPage(): JSX.Element {
     const segmenter = new SpeechSegmenter();
     if (shouldRequestTts) {
       speechSessionRef.current = { generation: requestId, segmenter, sequence: 0, ended: false };
+      void apiClient
+        .admitSpeechPlayback({ sessionId, requestId })
+        .then((effect) => {
+          speechPlaybackByRequestRef.current.set(requestId, effect.effectId);
+        })
+        .catch(() => undefined);
     }
     dispatchMessages({
       type: "append-turn",
@@ -815,6 +841,24 @@ export function MainPage(): JSX.Element {
     setVoicePlaybackStatus("stopped");
     setActualPlaybackActive(false);
     playbackCorrelationRef.current = retireActiveSpeechPlayback(playbackCorrelationRef.current);
+    reportPlaybackTerminal(requestId, "INTERRUPTED");
+  }
+
+  function reportPlaybackOutcome(
+    requestId: string,
+    outcome: "STARTED" | "COMPLETED" | "FAILED" | "INTERRUPTED"
+  ): void {
+    const effectId = speechPlaybackByRequestRef.current.get(requestId);
+    if (!effectId) return;
+    void apiClient.reportSpeechPlaybackOutcome({ effectId, outcome }).catch(() => undefined);
+  }
+
+  function reportPlaybackTerminal(
+    requestId: string,
+    outcome: "COMPLETED" | "FAILED" | "INTERRUPTED"
+  ): void {
+    reportPlaybackOutcome(requestId, outcome);
+    if (outcome !== "COMPLETED") speechPlaybackByRequestRef.current.delete(requestId);
   }
 
   async function startLiveSpeech(): Promise<void> {
@@ -822,25 +866,228 @@ export function MainPage(): JSX.Element {
     setVoiceError(null);
     setLiveSpeechStatus("requesting");
     try {
+      const buffer = createHandsFreeUtteranceBuffer(
+        globalThis.crypto?.randomUUID?.() ?? `epoch-${Date.now()}`
+      );
       const capture = await startLiveSpeechCapture({
         sessionId,
+        createId: () => buffer.captureEpoch,
+        onPcm: (pcm) => {
+          const utterance = handsFreeBufferRef.current?.push(pcm);
+          if (utterance) void finalizeHandsFreeUtterance(utterance.pcm, utterance.captureEpoch);
+        },
         postFrame: async (frame) => {
           const snapshot = await apiClient.postSpeechActivityFrame(frame);
-          if (mountedRef.current) setLiveSpeechActive(snapshot.speechActive);
+          if (!mountedRef.current) return snapshot;
+          setLiveSpeechActive(snapshot.speechActive);
+          const utterance = handsFreeBufferRef.current?.observeVad(snapshot.speechActive);
+          if (snapshot.revokedSpeechRequestId) {
+            busRef.current?.post({
+              kind: "stop-speech",
+              requestId: snapshot.revokedSpeechRequestId
+            });
+          }
+          if (utterance) void finalizeHandsFreeUtterance(utterance.pcm, utterance.captureEpoch);
           return snapshot;
         }
       });
       if (!mountedRef.current) {
+        buffer.dispose();
         await capture.stop();
         return;
       }
+      handsFreeBufferRef.current = buffer;
       liveSpeechCaptureRef.current = capture;
+      setMicTrackSettings(capture.trackSettings);
       setLiveSpeechStatus("listening");
     } catch (caught) {
       liveSpeechCaptureRef.current = null;
+      handsFreeBufferRef.current?.dispose();
+      handsFreeBufferRef.current = null;
       setLiveSpeechStatus("idle");
       setLiveSpeechActive(false);
+      setMicTrackSettings(null);
       setVoiceError(friendlyAudioError(caught));
+    }
+  }
+
+  async function finalizeHandsFreeUtterance(pcm: Int16Array, captureEpoch: string): Promise<void> {
+    if (!mountedRef.current || liveSpeechCaptureRef.current === null) return;
+    transcribeAbortRef.current?.abort();
+    const controller = new AbortController();
+    transcribeAbortRef.current = controller;
+    try {
+      const audioBase64 = await wavBlobToBase64(encodePcm16Wav(pcm));
+      const result = await apiClient.transcribeAudio({
+        sessionId,
+        audioBase64,
+        mimeType: "audio/wav",
+        captureEpoch,
+        signal: controller.signal
+      });
+      if (!mountedRef.current || controller.signal.aborted) return;
+      const text = result.text.trim();
+      if (!text) return;
+      await sendHandsFreeTurn(text);
+    } catch (caught) {
+      if (controller.signal.aborted || !mountedRef.current) return;
+      setVoiceError(friendlyAudioError(caught));
+    }
+  }
+
+  async function sendHandsFreeTurn(content: string): Promise<void> {
+    const active = activeRequestRef.current;
+    if (active?.origin === "user") {
+      if (active.completedObserved) {
+        activeRequestRef.current = null;
+      } else {
+        stopGeneration();
+      }
+    }
+    if (activeRequestRef.current?.origin === "proactive") {
+      cancelActiveProactiveRequest(activeRequestRef.current);
+    }
+    if (activeRequestRef.current?.origin === "user") return;
+    setError(null);
+    const requestId = createSurfaceId("turn");
+    const assistantId = createSurfaceId("assistant");
+    const controller = new AbortController();
+    const ownership: ActiveRequestOwnership = {
+      id: requestId,
+      assistantId,
+      controller,
+      completedObserved: false,
+      origin: "user"
+    };
+    activeRequestRef.current = ownership;
+    const shouldRequestTts = effectiveVoiceOutputRef.current.requestTts;
+    speechEpochRef.current = shouldRequestTts ? requestId : null;
+    playbackCorrelationRef.current = createSpeechPlaybackCorrelation();
+    setActualPlaybackActive(false);
+    setRequestStatus("sending");
+    const bus = busRef.current;
+    bus?.post({ kind: "user-gesture" });
+    bus?.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
+    bus?.post({ kind: "start-generation", requestId, sessionId });
+    if (shouldRequestTts) {
+      speechSessionRef.current = {
+        generation: requestId,
+        segmenter: new SpeechSegmenter(),
+        sequence: 0,
+        ended: false
+      };
+      void apiClient
+        .admitSpeechPlayback({ sessionId, requestId })
+        .then((effect) => {
+          speechPlaybackByRequestRef.current.set(requestId, effect.effectId);
+        })
+        .catch(() => undefined);
+    }
+    dispatchMessages({
+      type: "append-turn",
+      user: {
+        id: createSurfaceId("user"),
+        requestId,
+        role: "user",
+        content,
+        useMemory: readMemory && writeMemory,
+        readMemory,
+        writeMemory,
+        voiceOutput: voiceOutputRef.current,
+        status: "completed"
+      },
+      assistant: {
+        id: assistantId,
+        requestId,
+        role: "assistant",
+        content: "",
+        status: "streaming"
+      }
+    });
+    try {
+      const response = await apiClient.streamMessage(
+        {
+          sessionId,
+          text: content,
+          options: {
+            readMemory,
+            writeMemory,
+            voiceOutput: false,
+            promptPreview
+          }
+        },
+        {
+          signal: controller.signal,
+          onEvent: (event: MessageStreamEvent) => {
+            if (!mountedRef.current || !isCurrentRequest(activeRequestRef.current, ownership)) {
+              return;
+            }
+            if (event.type === "text-delta") {
+              dispatchMessages({
+                type: "append-delta",
+                assistantId,
+                text: event.text,
+                traceId: event.traceId
+              });
+              forwardSpeechSegments(requestId, event.text);
+              return;
+            }
+            if (event.type === "error") {
+              dispatchMessages({ type: "fail", assistantId, error: event.message });
+              setError(event.message);
+              forwardSpeechEnd(requestId, "failed");
+              return;
+            }
+            ownership.completedObserved = true;
+            dispatchMessages({
+              type: "complete",
+              assistantId,
+              content: event.content,
+              traceId: event.traceId,
+              provider: event.provider
+            });
+            publishCommittedSubtitle(assistantId, event.content, requestId);
+            setRequestStatus("success");
+            forwardSpeechEnd(requestId, "completed");
+          }
+        }
+      );
+      if (!mountedRef.current || !isCurrentRequest(activeRequestRef.current, ownership)) return;
+      ownership.completedObserved = true;
+      dispatchMessages({
+        type: "complete",
+        assistantId,
+        content: response.content,
+        traceId: response.traceId,
+        provider: response.provider
+      });
+      publishCommittedSubtitle(assistantId, response.content, requestId);
+      setRequestStatus("success");
+      forwardSpeechEnd(requestId, "completed");
+    } catch (caught) {
+      if (!mountedRef.current || !isCurrentRequest(activeRequestRef.current, ownership)) return;
+      if (controller.signal.aborted) {
+        dispatchMessages({
+          type: "cancel",
+          assistantId,
+          error: "生成已取消，以上内容可能不完整。"
+        });
+        setRequestStatus("idle");
+        return;
+      }
+      const message = friendlyChatError(caught);
+      forwardSpeechEnd(requestId, "failed");
+      dispatchMessages({ type: "fail", assistantId, error: message });
+      setError(message);
+      setRequestStatus("error");
+    } finally {
+      if (isCurrentRequest(activeRequestRef.current, ownership)) {
+        activeRequestRef.current = null;
+        bus?.post({ kind: "generation-state", requestId, state: "idle" });
+      }
+      if (speechSessionRef.current?.generation === requestId) {
+        speechSessionRef.current = null;
+      }
     }
   }
 
@@ -848,6 +1095,10 @@ export function MainPage(): JSX.Element {
     const capture = liveSpeechCaptureRef.current;
     if (!capture) return;
     liveSpeechCaptureRef.current = null;
+    handsFreeBufferRef.current?.dispose();
+    handsFreeBufferRef.current = null;
+    transcribeAbortRef.current?.abort();
+    transcribeAbortRef.current = null;
     try {
       await capture.stop();
     } catch {
@@ -864,6 +1115,7 @@ export function MainPage(): JSX.Element {
     }
     setLiveSpeechStatus("idle");
     setLiveSpeechActive(false);
+    setMicTrackSettings(null);
   }
 
   async function startVoiceCapture(): Promise<void> {
@@ -1098,17 +1350,15 @@ export function MainPage(): JSX.Element {
               onClick={() =>
                 void (liveSpeechStatus === "listening" ? stopLiveSpeech() : startLiveSpeech())
               }
-              aria-label={
-                liveSpeechStatus === "listening" ? "Stop live speech" : "Start live speech"
-              }
+              aria-label={liveSpeechStatus === "listening" ? "Stop Voice Mode" : "Start Voice Mode"}
             >
               {liveSpeechStatus === "requesting"
                 ? "Requesting microphone…"
                 : liveSpeechStatus === "listening"
                   ? liveSpeechActive
                     ? "Speech active — stop"
-                    : "Listening — stop"
-                  : "Live speech"}
+                    : "Voice Mode listening — stop"
+                  : "Start Voice Mode"}
             </button>
             <button
               type="button"
@@ -1146,10 +1396,17 @@ export function MainPage(): JSX.Element {
             )}
           </div>
           <p className="mt-2 text-xs text-ink-500">
-            Live speech sends microphone frames through the local Silero VAD sidecar into Runtime
-            speech activity. Record voice still captures one clip for transcription. The transcript
-            is placed in the chat draft for review before sending.
+            Voice Mode listens continuously: VAD can barge-in on assistant speech immediately, then
+            a finalized utterance becomes one Runtime turn. Record voice remains push-to-talk and
+            cannot run at the same time. VAD alone never sends a message.
           </p>
+          {micTrackSettings && (
+            <p className="mt-2 text-xs text-ink-500" aria-live="polite">
+              AEC {String(micTrackSettings.echoCancellation)} · NS{" "}
+              {String(micTrackSettings.noiseSuppression)} · AGC{" "}
+              {String(micTrackSettings.autoGainControl)}
+            </p>
+          )}
           {voiceCaptureStatus === "recording" && (
             <p className="mt-2 text-xs text-ink-600" aria-live="polite">
               Microphone is active. Press Stop recording when you are finished.

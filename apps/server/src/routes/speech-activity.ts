@@ -22,6 +22,20 @@ const SpeechActivityFrameSchema = z
   })
   .strict();
 
+const SpeechPlaybackAdmitSchema = z
+  .object({
+    sessionId: z.string().trim().min(1).default("default"),
+    requestId: z.string().trim().min(1)
+  })
+  .strict();
+
+const SpeechPlaybackOutcomeSchema = z
+  .object({
+    effectId: z.string().trim().min(1),
+    outcome: z.enum(["STARTED", "COMPLETED", "REJECTED", "FAILED", "INTERRUPTED"])
+  })
+  .strict();
+
 export async function registerSpeechActivityRoutes(
   app: FastifyInstance,
   context: AppContext
@@ -78,6 +92,24 @@ export async function registerSpeechActivityRoutes(
       return sendSpeechActivityError(reply, error);
     }
   });
+
+  app.post("/v1/speech-playback", async (request, reply) => {
+    const parsed = SpeechPlaybackAdmitSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+    const effect = context.runtime.admitSpeechPlayback(parsed.data);
+    return reply.send(effect);
+  });
+
+  app.post("/v1/speech-playback/outcome", async (request, reply) => {
+    const parsed = SpeechPlaybackOutcomeSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+    const effect = context.runtime.reportSpeechPlaybackOutcome(parsed.data);
+    return reply.send(effect ?? { effectId: parsed.data.effectId, state: null });
+  });
 }
 
 function hasVoiceActivity(provider: STTProvider): provider is STTProvider & {
@@ -91,7 +123,16 @@ function toResponse(sessionId: string, snapshot: SpeechActivitySnapshot) {
     sessionId,
     speechActive: snapshot.speechActive,
     captureEpoch: snapshot.captureEpoch,
-    activityRevision: snapshot.activityRevision
+    activityRevision: snapshot.activityRevision,
+    speechPlaybackEffectId: snapshot.speechPlaybackEffectId ?? null,
+    speechPlaybackRequestId: snapshot.speechPlaybackRequestId ?? null,
+    speechPlaybackState: snapshot.speechPlaybackState ?? null,
+    ...(snapshot.revokedSpeechEffectId === undefined
+      ? {}
+      : { revokedSpeechEffectId: snapshot.revokedSpeechEffectId }),
+    ...(snapshot.revokedSpeechRequestId === undefined
+      ? {}
+      : { revokedSpeechRequestId: snapshot.revokedSpeechRequestId })
   };
 }
 
