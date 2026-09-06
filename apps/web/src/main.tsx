@@ -1,11 +1,13 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
+import { ProductWebUI } from "./product-webui.js";
 import { MainPage } from "./main-page.js";
 import { CompanionPage } from "./companion-page.js";
 import { SubtitlePage } from "./subtitle-page.js";
 import { resolveDesktopSurface, type DesktopSurface } from "./desktop-runtime.js";
 import "./styles.css";
+import "./product-ui.css";
 
 /**
  * Lightweight surface routing for the desktop split.
@@ -20,6 +22,7 @@ function renderSurface(surface: DesktopSurface): JSX.Element {
     case "subtitle":
       return <SubtitlePage />;
     case "webui":
+      return <ProductWebUI />;
     case "dashboard":
       return <App />;
   }

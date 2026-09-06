@@ -1,0 +1,1224 @@
+:root {
+  --yuvi-bg: #f6f1ea;
+  --yuvi-bg-elevated: #fffaf4;
+  --yuvi-ink: #2a221c;
+  --yuvi-muted: #6f6258;
+  --yuvi-line: #e6d9cc;
+  --yuvi-accent: #c45c26;
+  --yuvi-accent-soft: #f3d7c4;
+  --yuvi-ok: #2f6f4f;
+  --yuvi-warn: #9a6b16;
+  --yuvi-bad: #a33b32;
+  --yuvi-radius: 14px;
+  --yuvi-focus: 0 0 0 2px #fffaf4, 0 0 0 4px #c45c26;
+}
+
+html[data-yuvi-theme="dark"] {
+  --yuvi-bg: #161310;
+  --yuvi-bg-elevated: #221c18;
+  --yuvi-ink: #f4ece4;
+  --yuvi-muted: #b3a59a;
+  --yuvi-line: #3a312b;
+  --yuvi-accent: #e08a58;
+  --yuvi-accent-soft: #3a271c;
+  --yuvi-ok: #7dcea0;
+  --yuvi-warn: #e0b567;
+  --yuvi-bad: #e08a84;
+}
+
+html[data-yuvi-surface="webui"] body {
+  background: var(--yuvi-bg);
+  color: var(--yuvi-ink);
+}
+
+.yuvi-shell {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+  background:
+    radial-gradient(1200px 480px at 10% -10%, rgba(196, 92, 38, 0.08), transparent 55%),
+    var(--yuvi-bg);
+  color: var(--yuvi-ink);
+}
+
+.yuvi-shell button:focus-visible,
+.yuvi-shell input:focus-visible,
+.yuvi-shell textarea:focus-visible,
+.yuvi-shell select:focus-visible {
+  outline: none;
+  box-shadow: var(--yuvi-focus);
+}
+
+.yuvi-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--yuvi-line);
+  background: color-mix(in srgb, var(--yuvi-bg) 92%, white);
+  backdrop-filter: blur(10px);
+}
+
+.yuvi-topbar-actions {
+  margin-left: auto;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.yuvi-shell-main {
+  box-sizing: border-box;
+  flex: 1;
+  width: min(48rem, calc(100% - 1.5rem));
+  margin: 0 auto;
+  min-height: 0;
+  padding: 16px 12px 24px;
+}
+
+.yuvi-health-chip {
+  display: inline-flex;
+  max-width: min(28rem, 42vw);
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 999px;
+  background: var(--yuvi-bg-elevated);
+  padding: 4px 8px 4px 10px;
+  text-align: left;
+}
+
+.yuvi-health-chip-label {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--yuvi-muted);
+}
+
+.yuvi-health-chip span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yuvi-settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.yuvi-settings {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  width: min(72rem, 100%);
+  height: calc(100vh - 24px);
+  overflow: hidden;
+  border: 1px solid var(--yuvi-line);
+  border-radius: var(--yuvi-radius);
+  background: var(--yuvi-bg-elevated);
+}
+
+.yuvi-settings-nav {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 12px;
+  border-right: 1px solid var(--yuvi-line);
+  overflow: auto;
+}
+
+.yuvi-settings-nav-title {
+  margin: 4px 8px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--yuvi-muted);
+}
+
+.yuvi-settings-nav-item {
+  width: 100%;
+  margin-bottom: 2px;
+  border-radius: 12px;
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--yuvi-muted);
+}
+
+.yuvi-settings-nav-item.is-active {
+  background: var(--yuvi-accent-soft);
+  color: var(--yuvi-ink);
+  font-weight: 600;
+}
+
+.yuvi-settings-body {
+  min-width: 0;
+  overflow: auto;
+  padding: 20px 24px 28px;
+}
+
+.yuvi-card {
+  border: 1px solid var(--yuvi-line);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: color-mix(in srgb, var(--yuvi-bg) 70%, var(--yuvi-bg-elevated));
+}
+
+.yuvi-card-dashed {
+  border-style: dashed;
+}
+
+.yuvi-card-alert {
+  border-color: color-mix(in srgb, var(--yuvi-bad) 45%, var(--yuvi-line));
+}
+
+.yuvi-dialog {
+  width: min(28rem, 100%);
+  border: 1px solid var(--yuvi-line);
+  border-radius: 20px;
+  background: var(--yuvi-bg-elevated);
+  padding: 24px;
+}
+
+.yuvi-palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh 16px 16px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.yuvi-palette {
+  width: min(32rem, 100%);
+  height: fit-content;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 18px;
+  background: var(--yuvi-bg-elevated);
+  padding: 12px;
+  box-shadow: 0 18px 40px rgba(42, 34, 28, 0.16);
+}
+
+.yuvi-diagnostics {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  max-height: min(34vh, 280px);
+  overflow: hidden;
+  border-top: 1px solid var(--yuvi-line);
+  background: var(--yuvi-bg-elevated);
+  box-shadow: 0 -12px 32px rgba(42, 34, 28, 0.12);
+}
+
+.yuvi-diagnostics-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--yuvi-line);
+}
+
+.yuvi-diagnostics-body {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  gap: 12px;
+  height: calc(min(34vh, 280px) - 44px);
+  padding: 12px 16px 16px;
+}
+
+.yuvi-diagnostics-health {
+  overflow: auto;
+  font-size: 13px;
+}
+
+.yuvi-diagnostics-health-row {
+  margin-bottom: 10px;
+}
+
+.yuvi-diagnostics-events {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.yuvi-diagnostics-log {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  border-radius: 12px;
+  background: var(--yuvi-bg);
+  padding: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.yuvi-advanced {
+  border: 1px solid var(--yuvi-line);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.yuvi-advanced summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.yuvi-table {
+  overflow: hidden;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 16px;
+}
+
+.yuvi-table-head,
+.yuvi-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) 7.5rem minmax(0, 1.6fr);
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.yuvi-table-head {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--yuvi-muted);
+  background: var(--yuvi-bg);
+}
+
+.yuvi-table-row {
+  border-top: 1px solid var(--yuvi-line);
+  align-items: start;
+}
+
+.yuvi-chat-thread {
+  height: min(52vh, calc(100vh - 16.5rem));
+  min-height: 12rem;
+  overflow: auto;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--yuvi-bg) 80%, white);
+  padding: 12px;
+}
+
+.yuvi-composer {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.yuvi-composer textarea {
+  min-height: 5.5rem;
+  border-radius: 14px;
+  font-size: 0.95rem;
+}
+
+html[data-yuvi-surface="webui"] .yuvi-shell .panel {
+  border-color: var(--yuvi-line);
+  border-radius: 16px;
+  background: var(--yuvi-bg-elevated);
+  box-shadow: none;
+}
+
+@media (max-width: 1280px) {
+  .yuvi-settings {
+    grid-template-columns: 148px minmax(0, 1fr);
+  }
+
+  .yuvi-health-chip {
+    max-width: 34vw;
+  }
+
+  .yuvi-settings-body {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 900px) {
+  .yuvi-settings {
+    grid-template-columns: 1fr;
+    height: calc(100vh - 16px);
+  }
+
+  .yuvi-settings-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+    border-right: 0;
+    border-bottom: 1px solid var(--yuvi-line);
+  }
+
+  .yuvi-settings-nav-item {
+    width: auto;
+    margin: 0;
+  }
+
+  .yuvi-table-head,
+  .yuvi-table-row {
+    grid-template-columns: 1fr;
+  }
+
+  .yuvi-diagnostics-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-height: 720px) {
+  .yuvi-shell-main {
+    padding-top: 12px;
+    padding-bottom: 16px;
+  }
+
+  .yuvi-chat-thread {
+    height: min(46vh, calc(100vh - 14.5rem));
+  }
+
+  .yuvi-diagnostics {
+    max-height: 38vh;
+  }
+
+  .yuvi-diagnostics-body {
+    height: calc(38vh - 44px);
+  }
+
+  .yuvi-palette-overlay {
+    padding-top: 8vh;
+  }
+}
+
+html[data-yuvi-surface="webui"] .yuvi-product-webui .panel,
+html[data-yuvi-surface="webui"] .yuvi-product-webui .settings-card {
+  border-color: var(--yuvi-line);
+  border-radius: 16px;
+  background: var(--yuvi-bg-elevated);
+  box-shadow: none;
+}
+html[data-yuvi-surface="webui"] .yuvi-product-webui .setting-input,
+html[data-yuvi-surface="webui"] .yuvi-product-webui .field,
+html[data-yuvi-surface="webui"] .yuvi-product-webui .input {
+  border-color: var(--yuvi-line);
+  border-radius: 12px;
+  background: var(--yuvi-bg-elevated);
+  color: var(--yuvi-ink);
+}
+html[data-yuvi-surface="webui"] .yuvi-product-webui .setting-input:focus,
+html[data-yuvi-surface="webui"] .yuvi-product-webui .field:focus,
+html[data-yuvi-surface="webui"] .yuvi-product-webui .input:focus {
+  border-color: var(--yuvi-accent);
+  box-shadow: var(--yuvi-focus);
+}
+html[data-yuvi-surface="webui"] .yuvi-product-webui .button-primary {
+  border-radius: 12px;
+  background: var(--yuvi-accent);
+}
+html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary {
+  border-color: var(--yuvi-line);
+  border-radius: 12px;
+  background: var(--yuvi-bg-elevated);
+  color: var(--yuvi-ink);
+}
+html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
+  border-color: var(--yuvi-accent);
+  background: var(--yuvi-accent-soft);
+  color: var(--yuvi-ink);
+}
+.yuvi-product-home {
+  display: grid;
+  gap: 16px;
+}
+.yuvi-product-health {
+  display: grid;
+  gap: 10px;
+}
+.yuvi-product-health-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.yuvi-product-health-header h2 {
+  margin: 5px 0 0;
+  font-size: 1rem;
+  line-height: 1.25;
+}
+.yuvi-product-health-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.yuvi-product-health-card {
+  display: grid;
+  min-width: 0;
+  min-height: 7.25rem;
+  gap: 9px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 16px;
+  padding: 13px 14px;
+  background: var(--yuvi-bg-elevated);
+}
+.yuvi-product-health-card.is-ok {
+  border-color: color-mix(in srgb, var(--yuvi-ok) 28%, var(--yuvi-line));
+}
+.yuvi-product-health-card.is-warn {
+  border-color: color-mix(in srgb, var(--yuvi-warn) 32%, var(--yuvi-line));
+}
+.yuvi-product-health-card.is-bad {
+  border-color: color-mix(in srgb, var(--yuvi-bad) 32%, var(--yuvi-line));
+}
+.yuvi-product-health-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.yuvi-product-health-card-label {
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+.yuvi-product-health-card p {
+  min-width: 0;
+  margin: 0;
+  color: var(--yuvi-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+.yuvi-product-health-card small {
+  align-self: end;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--yuvi-muted);
+  font-size: 0.62rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yuvi-product-health-badge {
+  flex-shrink: 0;
+  max-width: 60%;
+  overflow: hidden;
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yuvi-product-health-badge.is-ok {
+  background: color-mix(in srgb, var(--yuvi-ok) 15%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-ok);
+}
+.yuvi-product-health-badge.is-warn {
+  background: color-mix(in srgb, var(--yuvi-warn) 14%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-warn);
+}
+.yuvi-product-health-badge.is-bad {
+  background: color-mix(in srgb, var(--yuvi-bad) 14%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-bad);
+}
+.yuvi-product-health-badge.is-idle {
+  background: var(--yuvi-bg);
+  color: var(--yuvi-muted);
+}
+.yuvi-product-hero {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 20px;
+  padding: 24px;
+  background:
+    radial-gradient(600px 240px at 0% 0%, rgba(196, 92, 38, 0.12), transparent 60%),
+    var(--yuvi-bg-elevated);
+}
+.yuvi-product-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.yuvi-product-stat {
+  border: 1px solid var(--yuvi-line);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: var(--yuvi-bg-elevated);
+}
+.yuvi-product-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--yuvi-muted);
+}
+.yuvi-product-stat-value {
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--yuvi-ink);
+}
+.yuvi-product-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.yuvi-product-action {
+  border: 1px solid var(--yuvi-line);
+  border-radius: 12px;
+  background: var(--yuvi-bg-elevated);
+  padding: 8px 12px;
+  color: var(--yuvi-ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.yuvi-product-action:hover,
+.yuvi-product-action.is-active {
+  border-color: var(--yuvi-accent);
+  background: var(--yuvi-accent-soft);
+}
+.yuvi-developer-return {
+  position: fixed;
+  z-index: 100;
+  top: 12px;
+  right: 16px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 12px;
+  background: var(--yuvi-bg-elevated);
+  padding: 8px 12px;
+  color: var(--yuvi-ink);
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 10px 24px rgba(42, 34, 28, 0.14);
+}
+@media (max-width: 800px) {
+  .yuvi-product-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .yuvi-product-health-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.yuvi-product-settings {
+  display: grid;
+  gap: 16px;
+}
+.yuvi-product-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 20px;
+  padding: 24px;
+  background:
+    radial-gradient(600px 240px at 0% 0%, rgba(196, 92, 38, 0.12), transparent 60%),
+    var(--yuvi-bg-elevated);
+}
+.yuvi-product-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--yuvi-muted);
+}
+.yuvi-product-page-header h1 {
+  margin: 6px 0 0;
+  font-size: 1.55rem;
+  line-height: 1.2;
+}
+.yuvi-product-page-header p {
+  max-width: 42rem;
+  margin: 8px 0 0;
+  color: var(--yuvi-muted);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+.yuvi-product-provider-count {
+  display: grid;
+  min-width: 7rem;
+  gap: 4px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--yuvi-bg) 72%, var(--yuvi-bg-elevated));
+  text-align: right;
+  color: var(--yuvi-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.yuvi-product-provider-count strong {
+  color: var(--yuvi-ink);
+  font-size: 1.1rem;
+  letter-spacing: 0;
+}
+.yuvi-product-authority-note,
+.yuvi-product-gap-note,
+.yuvi-product-inline-state,
+.yuvi-product-verification {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--yuvi-bg) 76%, var(--yuvi-bg-elevated));
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.yuvi-product-authority-note strong,
+.yuvi-product-verification strong {
+  color: var(--yuvi-ink);
+}
+.yuvi-product-authority-note span,
+.yuvi-product-verification span {
+  color: var(--yuvi-muted);
+}
+.yuvi-product-authority-note code {
+  border-radius: 5px;
+  background: var(--yuvi-bg);
+  padding: 1px 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+}
+.yuvi-product-gap-note {
+  border-style: dashed;
+  color: var(--yuvi-muted);
+}
+.yuvi-product-inline-state.is-warning {
+  border-color: color-mix(in srgb, var(--yuvi-warn) 45%, var(--yuvi-line));
+  color: var(--yuvi-warn);
+}
+.yuvi-product-inline-state.is-error,
+.yuvi-product-verification.is-error {
+  border-color: color-mix(in srgb, var(--yuvi-bad) 45%, var(--yuvi-line));
+  color: var(--yuvi-bad);
+}
+.yuvi-product-inline-state.is-info,
+.yuvi-product-verification.is-ok {
+  border-color: color-mix(in srgb, var(--yuvi-ok) 38%, var(--yuvi-line));
+}
+.yuvi-product-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.yuvi-product-provider-card {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 18px;
+  padding: 16px;
+  background: var(--yuvi-bg-elevated);
+}
+.yuvi-product-provider-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.yuvi-product-provider-card-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.3;
+}
+.yuvi-product-provider-card-header p {
+  margin: 5px 0 0;
+  color: var(--yuvi-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.yuvi-product-provider-id {
+  flex-shrink: 0;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: var(--yuvi-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+.yuvi-product-provider-fields {
+  display: grid;
+  gap: 10px;
+}
+.yuvi-product-provider-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--yuvi-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.yuvi-product-provider-field input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 10px;
+  background: var(--yuvi-bg);
+  padding: 7px 10px;
+  color: var(--yuvi-ink);
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.yuvi-product-provider-field input::placeholder {
+  color: color-mix(in srgb, var(--yuvi-muted) 72%, transparent);
+}
+.yuvi-product-provider-field small {
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.yuvi-product-provider-statuses {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid var(--yuvi-line);
+  padding-top: 10px;
+}
+.yuvi-product-provider-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--yuvi-muted);
+  font-size: 0.76rem;
+}
+.yuvi-provider-state {
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.yuvi-provider-state.is-ok {
+  background: color-mix(in srgb, var(--yuvi-ok) 16%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-ok);
+}
+.yuvi-provider-state.is-warn {
+  background: color-mix(in srgb, var(--yuvi-warn) 15%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-warn);
+}
+.yuvi-provider-state.is-bad {
+  background: color-mix(in srgb, var(--yuvi-bad) 14%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-bad);
+}
+.yuvi-provider-state.is-idle {
+  background: var(--yuvi-bg);
+  color: var(--yuvi-muted);
+}
+.yuvi-product-provider-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.yuvi-product-button {
+  border: 1px solid var(--yuvi-line);
+  border-radius: 10px;
+  background: var(--yuvi-bg-elevated);
+  padding: 7px 10px;
+  color: var(--yuvi-ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.yuvi-product-button:hover:not(:disabled) {
+  border-color: var(--yuvi-accent);
+  background: var(--yuvi-accent-soft);
+}
+.yuvi-product-button.is-primary {
+  border-color: var(--yuvi-accent);
+  background: var(--yuvi-accent);
+  color: #fffaf4;
+}
+.yuvi-product-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+@media (max-width: 900px) {
+  .yuvi-product-provider-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .yuvi-product-page-header {
+    flex-direction: column;
+  }
+  .yuvi-product-provider-count {
+    text-align: left;
+  }
+}
+
+.yuvi-product-routing {
+  display: grid;
+  gap: 16px;
+}
+.yuvi-product-routing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+.yuvi-product-routing-card {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 18px;
+  padding: 16px;
+  background: var(--yuvi-bg-elevated);
+}
+.yuvi-product-routing-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.yuvi-product-routing-card-header h2 {
+  margin: 6px 0 0;
+  font-size: 1.05rem;
+  line-height: 1.3;
+}
+.yuvi-product-routing-card-header p {
+  margin: 5px 0 0;
+  color: var(--yuvi-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.yuvi-product-routing-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.yuvi-product-routing-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  border-radius: 12px;
+  background: var(--yuvi-bg);
+  padding: 9px 10px;
+}
+.yuvi-product-routing-summary span,
+.yuvi-product-routing-summary small,
+.yuvi-product-routing-truth span,
+.yuvi-product-routing-editor small,
+.yuvi-product-routing-chain-heading span,
+.yuvi-product-routing-inspection span,
+.yuvi-product-routing-inspection p {
+  color: var(--yuvi-muted);
+}
+.yuvi-product-routing-summary span,
+.yuvi-product-routing-truth span,
+.yuvi-product-routing-chain-heading span {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.yuvi-product-routing-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+.yuvi-product-routing-summary small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+}
+.yuvi-product-routing-editor {
+  display: grid;
+  gap: 6px;
+  color: var(--yuvi-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.yuvi-product-routing-editor input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 10px;
+  background: var(--yuvi-bg);
+  padding: 7px 10px;
+  color: var(--yuvi-ink);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.yuvi-product-routing-editor small {
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+.yuvi-product-routing-truth {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--yuvi-line);
+  padding-top: 11px;
+}
+.yuvi-product-routing-truth > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.yuvi-product-routing-truth strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+}
+.yuvi-product-route-badge {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.yuvi-product-route-badge.is-ok {
+  background: color-mix(in srgb, var(--yuvi-ok) 16%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-ok);
+}
+.yuvi-product-route-badge.is-warn {
+  background: color-mix(in srgb, var(--yuvi-warn) 15%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-warn);
+}
+.yuvi-product-route-badge.is-bad {
+  background: color-mix(in srgb, var(--yuvi-bad) 14%, var(--yuvi-bg-elevated));
+  color: var(--yuvi-bad);
+}
+.yuvi-product-route-badge.is-idle {
+  background: var(--yuvi-bg);
+  color: var(--yuvi-muted);
+}
+.yuvi-product-routing-pending {
+  border: 1px dashed color-mix(in srgb, var(--yuvi-warn) 50%, var(--yuvi-line));
+  border-radius: 12px;
+  padding: 9px 10px;
+  color: var(--yuvi-warn);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.yuvi-product-routing-chain-heading,
+.yuvi-product-routing-inspection-header,
+.yuvi-product-routing-inspection-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px 10px;
+}
+.yuvi-product-routing-chain-heading {
+  border-top: 1px solid var(--yuvi-line);
+  padding-top: 11px;
+}
+.yuvi-product-routing-served {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 14px;
+  padding: 11px;
+  background: color-mix(in srgb, var(--yuvi-accent-soft) 18%, var(--yuvi-bg-elevated));
+}
+.yuvi-product-routing-served-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.yuvi-product-routing-served-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.yuvi-product-routing-served-heading span:first-child {
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.yuvi-product-routing-served-heading strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+.yuvi-product-routing-served-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.yuvi-product-routing-served > small {
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.yuvi-product-routing-chain-heading strong,
+.yuvi-product-routing-inspection-header strong,
+.yuvi-product-routing-inspection-mode strong {
+  font-size: 0.78rem;
+}
+.yuvi-product-route-list {
+  display: grid;
+  gap: 7px;
+}
+.yuvi-product-route-row {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 12px;
+  padding: 9px;
+  background: color-mix(in srgb, var(--yuvi-bg) 55%, var(--yuvi-bg-elevated));
+}
+.yuvi-product-route-row.is-ok {
+  border-color: color-mix(in srgb, var(--yuvi-ok) 26%, var(--yuvi-line));
+}
+.yuvi-product-route-row.is-bad {
+  border-color: color-mix(in srgb, var(--yuvi-bad) 28%, var(--yuvi-line));
+}
+.yuvi-product-route-row.is-warn {
+  border-color: color-mix(in srgb, var(--yuvi-warn) 25%, var(--yuvi-line));
+}
+.yuvi-product-route-priority {
+  color: var(--yuvi-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.yuvi-product-route-main {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.yuvi-product-route-title {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+.yuvi-product-route-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+.yuvi-product-route-title span {
+  color: var(--yuvi-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+.yuvi-product-route-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.yuvi-product-route-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.yuvi-product-route-unknown {
+  border: 1px dashed var(--yuvi-line);
+  border-radius: 12px;
+  padding: 10px;
+  color: var(--yuvi-muted);
+  font-size: 0.76rem;
+}
+.yuvi-product-routing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.yuvi-product-routing-inspection {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 14px;
+  padding: 11px;
+  background: color-mix(in srgb, var(--yuvi-accent-soft) 30%, var(--yuvi-bg-elevated));
+}
+.yuvi-product-routing-inspection p {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+.yuvi-product-routing-inspection-mode {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+.yuvi-product-routing-inspection-mode span {
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+@media (max-width: 1050px) {
+  .yuvi-product-routing-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .yuvi-product-routing-summary {
+    grid-template-columns: 1fr;
+  }
+  .yuvi-product-routing-truth {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+@media (max-width: 900px) {
+  .yuvi-topbar {
+    flex-wrap: wrap;
+  }
+  .yuvi-topbar-actions {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+  }
+}

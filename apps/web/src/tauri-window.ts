@@ -42,3 +42,11 @@ export async function controlCompanionWindow(action: CompanionWindowAction): Pro
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke(action);
 }
+
+
+/** Show the existing lazy WebUI desktop surface. Settings live there, not in Main Chat. */
+export async function controlWebUIWindow(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("show_webui");
+}
