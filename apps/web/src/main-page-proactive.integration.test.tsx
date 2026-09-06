@@ -48,6 +48,7 @@ vi.mock("./api/client.js", () => ({
 
 vi.mock("./tauri-window.js", () => ({
   controlCompanionWindow: vi.fn(),
+  controlWebUIWindow: vi.fn(),
   isTauriRuntime: () => true
 }));
 
