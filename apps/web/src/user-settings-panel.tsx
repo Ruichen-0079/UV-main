@@ -147,6 +147,81 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
 
   const form = state.form;
 
+  const renderProviderConnection = (provider: string): JSX.Element => {
+    if (provider === "openai-compatible") {
+      return (
+        <div className="mt-3 border-t border-ink-200 pt-3">
+          <Field label="OpenAI-compatible base URL">
+            <input
+              className="setting-input"
+              type="url"
+              placeholder="https://provider.example/v1"
+              value={form.openaiCompatibleBaseUrl}
+              onChange={(e) => setField("openaiCompatibleBaseUrl", e.target.value)}
+            />
+          </Field>
+          <Field label="OpenAI-compatible API key">
+            <input
+              className="setting-input"
+              type="password"
+              autoComplete="off"
+              placeholder={
+                state.secrets.openaiCompatibleApiKey ? "Enter to replace" : "Paste API key"
+              }
+              value={form.openaiCompatibleApiKeyInput}
+              onChange={(e) => setField("openaiCompatibleApiKeyInput", e.target.value)}
+            />
+          </Field>
+          <div className="setting-secret-status">
+            <span>{state.secrets.openaiCompatibleApiKey ? "Configured" : "Not configured"}</span>
+            {state.secrets.openaiCompatibleApiKey ? (
+              <button
+                type="button"
+                className="button-secondary text-xs"
+                onClick={() => void clearSecret("models.openaiCompatibleApiKey")}
+              >
+                Clear key
+              </button>
+            ) : null}
+          </div>
+          <p className="mt-2 text-xs text-ink-500">
+            This connection is shared by Chat and Cognition whenever either uses OpenAI-compatible.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-3 border-t border-ink-200 pt-3">
+        <Field label="DeepSeek API key">
+          <input
+            className="setting-input"
+            type="password"
+            autoComplete="off"
+            placeholder={state.secrets.deepseekApiKey ? "Enter to replace" : "Paste API key"}
+            value={form.deepseekApiKeyInput}
+            onChange={(e) => setField("deepseekApiKeyInput", e.target.value)}
+          />
+        </Field>
+        <div className="setting-secret-status">
+          <span>{state.secrets.deepseekApiKey ? "Configured" : "Not configured"}</span>
+          {state.secrets.deepseekApiKey ? (
+            <button
+              type="button"
+              className="button-secondary text-xs"
+              onClick={() => void clearSecret("chat.deepseekApiKey")}
+            >
+              Clear key
+            </button>
+          ) : null}
+        </div>
+        <p className="mt-2 text-xs text-ink-500">
+          This key is shared by Chat and Cognition whenever either uses DeepSeek.
+        </p>
+      </div>
+    );
+  };
+
   return (
     <Panel
       title="Settings"
@@ -203,34 +278,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               onChange={(e) => setField("chatModel", e.target.value)}
             />
           </Field>
-          <Field label="DeepSeek API key">
-            <input
-              className="setting-input"
-              type="password"
-              autoComplete="off"
-              placeholder={state.secrets.deepseekApiKey ? "Enter to replace" : "Paste API key"}
-              value={form.deepseekApiKeyInput}
-              onChange={(e) => setField("deepseekApiKeyInput", e.target.value)}
-            />
-          </Field>
-          <div className="setting-secret-status">
-            <span>{state.secrets.deepseekApiKey ? "Configured" : "Not configured"}</span>
-            {state.secrets.deepseekApiKey ? (
-              <button
-                type="button"
-                className="button-secondary text-xs"
-                onClick={() => void clearSecret("chat.deepseekApiKey")}
-              >
-                Clear key
-              </button>
-            ) : null}
-          </div>
-          {!state.secrets.deepseekApiKey ? (
-            <p className="mt-2 text-xs text-ink-500">
-              Paste the key and click Save. Provider stays unavailable until this shows Configured
-              and the local service is managed by YUVI.
-            </p>
-          ) : null}
+          {renderProviderConnection(form.chatProvider)}
         </section>
 
         <section className="settings-card">
@@ -252,42 +300,13 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               onChange={(e) => setField("cognitionModel", e.target.value)}
             />
           </Field>
-          <Field label="Shared OpenAI-compatible base URL">
-            <input
-              className="setting-input"
-              type="url"
-              placeholder="https://provider.example/v1"
-              value={form.openaiCompatibleBaseUrl}
-              onChange={(e) => setField("openaiCompatibleBaseUrl", e.target.value)}
-            />
-          </Field>
-          <Field label="Shared OpenAI-compatible API key">
-            <input
-              className="setting-input"
-              type="password"
-              autoComplete="off"
-              placeholder={
-                state.secrets.openaiCompatibleApiKey ? "Enter to replace" : "Paste API key"
-              }
-              value={form.openaiCompatibleApiKeyInput}
-              onChange={(e) => setField("openaiCompatibleApiKeyInput", e.target.value)}
-            />
-          </Field>
-          <div className="setting-secret-status">
-            <span>{state.secrets.openaiCompatibleApiKey ? "Configured" : "Not configured"}</span>
-            {state.secrets.openaiCompatibleApiKey ? (
-              <button
-                type="button"
-                className="button-secondary text-xs"
-                onClick={() => void clearSecret("models.openaiCompatibleApiKey")}
-              >
-                Clear key
-              </button>
-            ) : null}
-          </div>
-          <p className="mt-2 text-xs text-ink-500">
-            This connection is shared by Chat and Cognition whenever either uses OpenAI-compatible.
-          </p>
+          {form.cognitionProvider === form.chatProvider ? (
+            <p className="mt-3 border-t border-ink-200 pt-3 text-xs text-ink-500">
+              Uses the same {form.cognitionProvider === "openai-compatible" ? "OpenAI-compatible" : "DeepSeek"} connection configured in Chat.
+            </p>
+          ) : (
+            renderProviderConnection(form.cognitionProvider)
+          )}
         </section>
 
         <section className="settings-card">
