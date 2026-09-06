@@ -50,7 +50,8 @@ const POLL_INTERVAL_MS = 250;
 
 const MAIN_WINDOW_CAPTION = "YUVI Chat";
 const WEBUI_WINDOW_CAPTION = "YUVI WebUI";
-const MENU_LABELS = ["Open YUVI", "Hide YUVI", "Open WebUI", "Hide WebUI", "Show Companion", "Hide Companion", "Quit"];
+const SUBTITLE_WINDOW_CAPTION = "YUVI Subtitle";
+const MENU_LABELS = ["Open YUVI", "Hide YUVI", "Open WebUI", "Hide WebUI", "Show Companion", "Hide Companion", "Show Subtitle", "Hide Subtitle", "Quit"];
 
 let tempRoot;
 let appChild = null;
@@ -754,6 +755,34 @@ async function main() {
   waitForWindowCaption(child, WEBUI_WINDOW_CAPTION, false, CLOSE_OBSERVE_TIMEOUT_MS, "WebUI close-as-hide");
   await assertSupervisorHealthy(roots, instanceId);
   info("WebUI close handled as hide: app alive and Supervisor healthy");
+
+  /* ------------------------------------------ Subtitle surface: lazy + tray */
+  const captionsBeforeSubtitle = kwinWindowCaptions(child.pid, CLOSE_OBSERVE_TIMEOUT_MS);
+  if (captionsBeforeSubtitle.includes(SUBTITLE_WINDOW_CAPTION)) {
+    fail(`Subtitle window "${SUBTITLE_WINDOW_CAPTION}" was created before its first tray request`, readLogs(roots));
+  }
+  info(`opening Subtitle through the tray ("${SUBTITLE_WINDOW_CAPTION}")`);
+  const openedSubtitle = clickTrayMenuItem(tray, idByLabel["Show Subtitle"]);
+  if (!openedSubtitle.ok) fail(`tray "Show Subtitle" click failed: ${openedSubtitle.error}`, readLogs(roots));
+  waitForWindowCaption(child, SUBTITLE_WINDOW_CAPTION, true, CLOSE_OBSERVE_TIMEOUT_MS, "tray Show Subtitle");
+
+  const hiddenSubtitle = clickTrayMenuItem(tray, idByLabel["Hide Subtitle"]);
+  if (!hiddenSubtitle.ok) fail(`tray "Hide Subtitle" click failed: ${hiddenSubtitle.error}`, readLogs(roots));
+  waitForWindowCaption(child, SUBTITLE_WINDOW_CAPTION, false, CLOSE_OBSERVE_TIMEOUT_MS, "tray Hide Subtitle");
+  info("Subtitle tray show/hide mapped and unmapped without creating at startup");
+
+  const reopenedSubtitle = clickTrayMenuItem(tray, idByLabel["Show Subtitle"]);
+  if (!reopenedSubtitle.ok) fail(`tray second "Show Subtitle" click failed: ${reopenedSubtitle.error}`, readLogs(roots));
+  waitForWindowCaption(child, SUBTITLE_WINDOW_CAPTION, true, CLOSE_OBSERVE_TIMEOUT_MS, "second tray Show Subtitle");
+  const reusedSubtitleCaptions = kwinWindowCaptions(child.pid, CLOSE_OBSERVE_TIMEOUT_MS);
+  if (reusedSubtitleCaptions.filter((caption) => caption === SUBTITLE_WINDOW_CAPTION).length !== 1) {
+    fail(`repeated Subtitle show created duplicate windows: ${reusedSubtitleCaptions.join(", ")}`, readLogs(roots));
+  }
+  info(`closing Subtitle through the compositor ("${SUBTITLE_WINDOW_CAPTION}")`);
+  kwinCloseWindow(child.pid, SUBTITLE_WINDOW_CAPTION, CLOSE_OBSERVE_TIMEOUT_MS);
+  waitForWindowCaption(child, SUBTITLE_WINDOW_CAPTION, false, CLOSE_OBSERVE_TIMEOUT_MS, "Subtitle close-as-hide");
+  await assertSupervisorHealthy(roots, instanceId);
+  info("Subtitle close handled as hide: app alive and Supervisor healthy");
 
   const captionsBefore = kwinWindowCaptions(child.pid, CLOSE_OBSERVE_TIMEOUT_MS);
   if (!captionsBefore.includes(MAIN_WINDOW_CAPTION)) {

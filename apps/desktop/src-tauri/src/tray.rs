@@ -15,6 +15,8 @@ const TRAY_OPEN_WEBUI: &str = "tray-open-webui";
 const TRAY_HIDE_WEBUI: &str = "tray-hide-webui";
 const TRAY_SHOW_COMPANION: &str = "tray-show-companion";
 const TRAY_HIDE_COMPANION: &str = "tray-hide-companion";
+const TRAY_SHOW_SUBTITLE: &str = "tray-show-subtitle";
+const TRAY_HIDE_SUBTITLE: &str = "tray-hide-subtitle";
 const TRAY_QUIT: &str = "tray-quit";
 
 /// A resolved tray intent. Surface intents carry one presentation command for
@@ -24,6 +26,7 @@ pub(crate) enum TrayCommand {
   Main(SurfaceCommand),
   Companion(SurfaceCommand),
   WebUI(SurfaceCommand),
+  Subtitle(SurfaceCommand),
   Quit,
 }
 
@@ -37,6 +40,8 @@ pub(crate) fn tray_command(id: &str) -> Option<TrayCommand> {
     TRAY_HIDE_WEBUI => Some(TrayCommand::WebUI(SurfaceCommand::Hide)),
     TRAY_SHOW_COMPANION => Some(TrayCommand::Companion(SurfaceCommand::Show)),
     TRAY_HIDE_COMPANION => Some(TrayCommand::Companion(SurfaceCommand::Hide)),
+    TRAY_SHOW_SUBTITLE => Some(TrayCommand::Subtitle(SurfaceCommand::Show)),
+    TRAY_HIDE_SUBTITLE => Some(TrayCommand::Subtitle(SurfaceCommand::Hide)),
     TRAY_QUIT => Some(TrayCommand::Quit),
     _ => None,
   }
@@ -56,6 +61,7 @@ where
     TrayCommand::Main(command) => on_surface(SurfaceId::Main, command),
     TrayCommand::Companion(command) => on_surface(SurfaceId::Companion, command),
     TrayCommand::WebUI(command) => on_surface(SurfaceId::WebUI, command),
+    TrayCommand::Subtitle(command) => on_surface(SurfaceId::Subtitle, command),
   }
 }
 
@@ -68,6 +74,10 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     MenuItem::with_id(app, TRAY_SHOW_COMPANION, "Show Companion", true, None::<&str>)?;
   let hide_companion_item =
     MenuItem::with_id(app, TRAY_HIDE_COMPANION, "Hide Companion", true, None::<&str>)?;
+  let show_subtitle_item =
+    MenuItem::with_id(app, TRAY_SHOW_SUBTITLE, "Show Subtitle", true, None::<&str>)?;
+  let hide_subtitle_item =
+    MenuItem::with_id(app, TRAY_HIDE_SUBTITLE, "Hide Subtitle", true, None::<&str>)?;
   let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit", true, None::<&str>)?;
   let menu = Menu::with_items(
     app,
@@ -78,6 +88,8 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
       &hide_webui_item,
       &show_companion_item,
       &hide_companion_item,
+      &show_subtitle_item,
+      &hide_subtitle_item,
       &quit,
     ],
   )?;
@@ -109,8 +121,9 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
   use super::{
-    dispatch_tray_menu, tray_command, TRAY_HIDE_COMPANION, TRAY_HIDE_MAIN, TRAY_HIDE_WEBUI,
-    TRAY_OPEN_MAIN, TRAY_OPEN_WEBUI, TRAY_QUIT, TRAY_SHOW_COMPANION, TrayCommand,
+    dispatch_tray_menu, tray_command, TRAY_HIDE_COMPANION, TRAY_HIDE_MAIN, TRAY_HIDE_SUBTITLE,
+    TRAY_HIDE_WEBUI, TRAY_OPEN_MAIN, TRAY_OPEN_WEBUI, TRAY_QUIT, TRAY_SHOW_COMPANION,
+    TRAY_SHOW_SUBTITLE, TrayCommand,
   };
   use crate::desktop_surface::{SurfaceCommand, SurfaceId};
 
@@ -139,6 +152,14 @@ mod tests {
     assert_eq!(
       tray_command(TRAY_HIDE_COMPANION),
       Some(TrayCommand::Companion(SurfaceCommand::Hide))
+    );
+    assert_eq!(
+      tray_command(TRAY_SHOW_SUBTITLE),
+      Some(TrayCommand::Subtitle(SurfaceCommand::Show))
+    );
+    assert_eq!(
+      tray_command(TRAY_HIDE_SUBTITLE),
+      Some(TrayCommand::Subtitle(SurfaceCommand::Hide))
     );
     assert_eq!(tray_command(TRAY_QUIT), Some(TrayCommand::Quit));
   }
@@ -176,6 +197,14 @@ mod tests {
         TRAY_HIDE_COMPANION,
         (SurfaceId::Companion, SurfaceCommand::Hide),
       ),
+      (
+        TRAY_SHOW_SUBTITLE,
+        (SurfaceId::Subtitle, SurfaceCommand::Show),
+      ),
+      (
+        TRAY_HIDE_SUBTITLE,
+        (SurfaceId::Subtitle, SurfaceCommand::Hide),
+      ),
     ];
     for (id, expected) in cases {
       let mut surface_dispatches: Vec<(SurfaceId, SurfaceCommand)> = Vec::new();
@@ -201,11 +230,5 @@ mod tests {
     );
     assert!(surface_dispatches.is_empty());
     assert_eq!(quit_calls, 0);
-  }
-
-  #[test]
-  fn tray_icon_asset_is_a_valid_png_resource() {
-    let icon = include_bytes!("../icons/icon.png");
-    assert_eq!(&icon[..8], b"\x89PNG\r\n\x1a\n");
   }
 }

@@ -196,7 +196,7 @@ retained as historical/reference material:
 - [15 — Vision → Character](15-vision-character.md)
 - [16 — Provider fallback UX](16-provider-fallback-ux.md)
 - [17 — Output language semantic preference](17-output-language.md)
-- [18 — Subtitle Surface](18-subtitle-surface.md)
+- [18 — Subtitle Surface](18-subtitle-surface.md) — DONE (Subtitle is fourth DesktopSurface; committed-text-only; Atom 17 not required; Atom 14 deferred; focus non-steal; 19/20 untouched)
 - [19 — Companion advanced presentation](19-companion-advanced-presentation.md)
 - [20 — Live2D calibration](20-live2d-calibration.md)
 

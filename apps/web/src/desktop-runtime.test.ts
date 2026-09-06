@@ -73,4 +73,17 @@ describe("desktop surface routing", () => {
     });
     await expect(resolveDesktopSurface()).resolves.toBe("webui");
   });
+
+  it("maps the Tauri Subtitle window label and hash route", async () => {
+    getCurrentWindow.mockReturnValue({ label: "subtitle" });
+    vi.stubGlobal("window", {
+      __TAURI_INTERNALS__: {},
+      location: { hash: "#/main", pathname: "/main" }
+    });
+    await expect(resolveDesktopSurface()).resolves.toBe("subtitle");
+
+    getCurrentWindow.mockReset();
+    vi.stubGlobal("window", { location: { hash: "#/subtitle", pathname: "/" } });
+    await expect(resolveDesktopSurface()).resolves.toBe("subtitle");
+  });
 });

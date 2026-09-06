@@ -1,10 +1,10 @@
 //! Presentation seam for the desktop surfaces that exist today: Main (chat),
-//! Companion, and WebUI. `DesktopSurfaceManager` is the only authority for
-//! ensure/show/hide/toggle/focus on these surfaces and for their window
-//! construction inputs. Application Quit and Runtime/Supervisor lifecycle
-//! stay outside this seam.
+//! Companion, WebUI, and Subtitle. `DesktopSurfaceManager` is the only authority
+//! for ensure/show/hide/toggle/focus on these surfaces and for their window
+//! construction inputs. Application Quit and Runtime/Supervisor lifecycle stay
+//! outside this seam.
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, PhysicalPosition};
 
 use crate::config;
 
@@ -15,6 +15,7 @@ pub(crate) enum SurfaceId {
   Main,
   Companion,
   WebUI,
+  Subtitle,
 }
 
 impl SurfaceId {
@@ -23,6 +24,7 @@ impl SurfaceId {
       SurfaceId::Main => "main",
       SurfaceId::Companion => "companion",
       SurfaceId::WebUI => "webui",
+      SurfaceId::Subtitle => "subtitle",
     }
   }
 
@@ -33,6 +35,7 @@ impl SurfaceId {
       SurfaceId::Main => "YUVI Chat",
       SurfaceId::Companion => "YUVI Companion",
       SurfaceId::WebUI => "YUVI WebUI",
+      SurfaceId::Subtitle => "YUVI Subtitle",
     }
   }
 
@@ -43,7 +46,14 @@ impl SurfaceId {
       SurfaceId::Main => "index.html#/main",
       SurfaceId::Companion => "index.html#/companion",
       SurfaceId::WebUI => "index.html#/dashboard",
+      SurfaceId::Subtitle => "index.html#/subtitle",
     }
+  }
+
+  /// Main / Companion / WebUI show and focus; Subtitle shows without stealing
+  /// focus so chat/companion interaction stays uninterrupted.
+  fn show_steals_focus(self) -> bool {
+    !matches!(self, SurfaceId::Subtitle)
   }
 }
 
@@ -51,11 +61,11 @@ impl SurfaceId {
 /// Runtime/Supervisor state, and nothing here may exit the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SurfaceCommand {
-  /// Ensure the surface exists, show it, and focus it.
+  /// Ensure the surface exists and show it. Focus follows `SurfaceId` policy.
   Show,
   /// Hide the surface when it exists; absent surfaces stay absent.
   Hide,
-  /// Show-and-focus when hidden, hide when visible.
+  /// Show (with surface focus policy) when hidden, hide when visible.
   Toggle,
 }
 
@@ -127,28 +137,109 @@ fn build_webui_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
   .build()
 }
 
-/// Toggle semantics shared by every surface: hidden → show-and-focus,
-/// visible → hide.
-fn toggle_window_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
+/// Subtitle overlay construction inputs. Pure policy helpers below keep these
+/// values testable without a live Tauri runtime.
+fn subtitle_window_policy() -> SubtitleWindowPolicy {
+  SubtitleWindowPolicy {
+    width: 720.0,
+    height: 140.0,
+    decorations: false,
+    transparent: true,
+    always_on_top: true,
+    resizable: false,
+    skip_taskbar: true,
+    focused_on_create: false,
+    visible_on_create: false,
+    click_through: true,
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SubtitleWindowPolicy {
+  width: f64,
+  height: f64,
+  decorations: bool,
+  transparent: bool,
+  always_on_top: bool,
+  resizable: bool,
+  skip_taskbar: bool,
+  focused_on_create: bool,
+  visible_on_create: bool,
+  click_through: bool,
+}
+
+fn build_subtitle_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+  let policy = subtitle_window_policy();
+  let window = tauri::WebviewWindowBuilder::new(
+    app,
+    SurfaceId::Subtitle.window_label(),
+    tauri::WebviewUrl::App(SurfaceId::Subtitle.window_url().into()),
+  )
+  .title(SurfaceId::Subtitle.window_title())
+  .inner_size(policy.width, policy.height)
+  .min_inner_size(policy.width, policy.height)
+  .max_inner_size(policy.width, policy.height)
+  .decorations(policy.decorations)
+  .transparent(policy.transparent)
+  .always_on_top(policy.always_on_top)
+  .resizable(policy.resizable)
+  .skip_taskbar(policy.skip_taskbar)
+  .focused(policy.focused_on_create)
+  .visible(policy.visible_on_create)
+  .build()?;
+
+  // Best-effort lower-center placement. Failure must not block ensure/show.
+  if let Ok(Some(monitor)) = window.primary_monitor() {
+    let size = monitor.size();
+    let scale = monitor.scale_factor();
+    let width = (policy.width * scale) as i32;
+    let height = (policy.height * scale) as i32;
+    let margin = (48.0 * scale) as i32;
+    let x = (size.width as i32 - width) / 2;
+    let y = (size.height as i32 - height - margin).max(0);
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+  }
+
+  // Verified Tauri 2 API: click-through so the overlay never steals pointer
+  // input from Main/Companion.
+  if policy.click_through {
+    let _ = window.set_ignore_cursor_events(true);
+  }
+
+  Ok(window)
+}
+
+/// Toggle semantics: hidden → show (with surface focus policy), visible → hide.
+fn toggle_window_visible(
+  window: &tauri::WebviewWindow,
+  steal_focus: bool,
+) -> Result<(), String> {
   let visible = window.is_visible().map_err(|error| error.to_string())?;
   if visible {
     window.hide().map_err(|error| error.to_string())
   } else {
-    window.show().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())
+    show_window(window, steal_focus)
   }
 }
 
+fn show_window(window: &tauri::WebviewWindow, steal_focus: bool) -> Result<(), String> {
+  window.show().map_err(|error| error.to_string())?;
+  if steal_focus {
+    window.set_focus().map_err(|error| error.to_string())?;
+  }
+  Ok(())
+}
+
 /// Desktop presentation infrastructure: the single owner of Main, Companion,
-/// and WebUI window creation and show/hide/toggle/focus behavior. Zero state —
-/// window identity lives in the Tauri window registry; this type only routes
-/// presentation commands onto it.
+/// WebUI, and Subtitle window creation and show/hide/toggle/focus behavior.
+/// Zero state — window identity lives in the Tauri window registry; this type
+/// only routes presentation commands onto it.
 pub(crate) struct DesktopSurfaceManager;
 
 impl DesktopSurfaceManager {
   /// Ensure an existing surface exists, reusing the live window instead of
   /// rebuilding it. Window construction inputs (including Companion
-  /// always-on-top) resolve inside this seam, as before.
+  /// always-on-top and Subtitle overlay policy) resolve inside this seam.
   pub(crate) fn ensure(
     app: &AppHandle,
     surface: SurfaceId,
@@ -166,6 +257,10 @@ impl DesktopSurfaceManager {
         app.get_webview_window(SurfaceId::WebUI.window_label()),
         || build_webui_window(app),
       ),
+      SurfaceId::Subtitle => existing_or_create(
+        app.get_webview_window(SurfaceId::Subtitle.window_label()),
+        || build_subtitle_window(app),
+      ),
     }
   }
 
@@ -175,22 +270,10 @@ impl DesktopSurfaceManager {
     surface: SurfaceId,
     command: SurfaceCommand,
   ) -> Result<(), String> {
-    match surface {
-      SurfaceId::Main => match command {
-        SurfaceCommand::Show => Self::show_main(app),
-        SurfaceCommand::Hide => Self::hide_main(app),
-        SurfaceCommand::Toggle => Self::toggle_main(app),
-      },
-      SurfaceId::Companion => match command {
-        SurfaceCommand::Show => Self::show_companion(app),
-        SurfaceCommand::Hide => Self::hide_companion(app),
-        SurfaceCommand::Toggle => Self::toggle_companion(app),
-      },
-      SurfaceId::WebUI => match command {
-        SurfaceCommand::Show => Self::show_webui(app),
-        SurfaceCommand::Hide => Self::hide_webui(app),
-        SurfaceCommand::Toggle => Self::toggle_webui(app),
-      },
+    match command {
+      SurfaceCommand::Show => Self::show(app, surface),
+      SurfaceCommand::Hide => Self::hide(app, surface),
+      SurfaceCommand::Toggle => Self::toggle(app, surface),
     }
   }
 
@@ -202,64 +285,29 @@ impl DesktopSurfaceManager {
     }
   }
 
-  fn show_main(app: &AppHandle) -> Result<(), String> {
-    let window = Self::ensure(app, SurfaceId::Main).map_err(|error| error.to_string())?;
-    window.show().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())
+  fn show(app: &AppHandle, surface: SurfaceId) -> Result<(), String> {
+    let window = Self::ensure(app, surface).map_err(|error| error.to_string())?;
+    show_window(&window, surface.show_steals_focus())
   }
 
-  fn hide_main(app: &AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(SurfaceId::Main.window_label()) {
+  fn hide(app: &AppHandle, surface: SurfaceId) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(surface.window_label()) {
       window.hide().map_err(|error| error.to_string())?;
     }
     Ok(())
   }
 
-  fn toggle_main(app: &AppHandle) -> Result<(), String> {
-    let window = Self::ensure(app, SurfaceId::Main).map_err(|error| error.to_string())?;
-    toggle_window_visible(&window)
-  }
-
-  fn show_companion(app: &AppHandle) -> Result<(), String> {
-    let window = Self::ensure(app, SurfaceId::Companion).map_err(|error| error.to_string())?;
-    window.show().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())
-  }
-
-  fn hide_companion(app: &AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(SurfaceId::Companion.window_label()) {
-      window.hide().map_err(|error| error.to_string())?;
-    }
-    Ok(())
-  }
-
-  fn toggle_companion(app: &AppHandle) -> Result<(), String> {
-    let window = Self::ensure(app, SurfaceId::Companion).map_err(|error| error.to_string())?;
-    toggle_window_visible(&window)
-  }
-
-  fn show_webui(app: &AppHandle) -> Result<(), String> {
-    let window = Self::ensure(app, SurfaceId::WebUI).map_err(|error| error.to_string())?;
-    window.show().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())
-  }
-
-  fn hide_webui(app: &AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(SurfaceId::WebUI.window_label()) {
-      window.hide().map_err(|error| error.to_string())?;
-    }
-    Ok(())
-  }
-
-  fn toggle_webui(app: &AppHandle) -> Result<(), String> {
-    let window = Self::ensure(app, SurfaceId::WebUI).map_err(|error| error.to_string())?;
-    toggle_window_visible(&window)
+  fn toggle(app: &AppHandle, surface: SurfaceId) -> Result<(), String> {
+    let window = Self::ensure(app, surface).map_err(|error| error.to_string())?;
+    toggle_window_visible(&window, surface.show_steals_focus())
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use super::{companion_always_on_top_or_default, existing_or_create, SurfaceId};
+  use super::{
+    companion_always_on_top_or_default, existing_or_create, subtitle_window_policy, SurfaceId,
+  };
 
   #[test]
   fn existing_surface_is_reused_without_creation() {
@@ -292,10 +340,10 @@ mod tests {
     assert!(!companion_always_on_top_or_default(Some(false)));
   }
 
-  /// The validated Linux desktop contract: exactly Main, Companion, and WebUI
+  /// Validated Linux desktop contract: Main, Companion, WebUI, and Subtitle
   /// exist, with the labels/captions/routes the KDE harness locates them by.
   #[test]
-  fn surface_contracts_cover_main_companion_and_webui() {
+  fn surface_contracts_cover_main_companion_webui_and_subtitle() {
     assert_eq!(SurfaceId::Main.window_label(), "main");
     assert_eq!(SurfaceId::Main.window_title(), "YUVI Chat");
     assert_eq!(SurfaceId::Main.window_url(), "index.html#/main");
@@ -305,5 +353,41 @@ mod tests {
     assert_eq!(SurfaceId::WebUI.window_label(), "webui");
     assert_eq!(SurfaceId::WebUI.window_title(), "YUVI WebUI");
     assert_eq!(SurfaceId::WebUI.window_url(), "index.html#/dashboard");
+    assert_eq!(SurfaceId::Subtitle.window_label(), "subtitle");
+    assert_eq!(SurfaceId::Subtitle.window_title(), "YUVI Subtitle");
+    assert_eq!(SurfaceId::Subtitle.window_url(), "index.html#/subtitle");
+  }
+
+  #[test]
+  fn subtitle_show_does_not_steal_focus_while_others_do() {
+    assert!(SurfaceId::Main.show_steals_focus());
+    assert!(SurfaceId::Companion.show_steals_focus());
+    assert!(SurfaceId::WebUI.show_steals_focus());
+    assert!(!SurfaceId::Subtitle.show_steals_focus());
+  }
+
+  #[test]
+  fn subtitle_window_policy_is_overlay_bounded_and_non_chrome() {
+    let policy = subtitle_window_policy();
+    assert!(!policy.decorations);
+    assert!(policy.transparent);
+    assert!(policy.always_on_top);
+    assert!(!policy.resizable);
+    assert!(policy.skip_taskbar);
+    assert!(!policy.focused_on_create);
+    assert!(!policy.visible_on_create);
+    assert!(policy.click_through);
+    assert!(policy.width > 0.0 && policy.height > 0.0);
+    assert!(policy.height <= 200.0, "subtitle stays a short overlay band");
+  }
+
+  #[test]
+  fn main_companion_webui_contracts_unchanged_from_atom_04() {
+    assert_eq!(SurfaceId::Main.window_label(), "main");
+    assert_eq!(SurfaceId::Companion.window_label(), "companion");
+    assert_eq!(SurfaceId::WebUI.window_label(), "webui");
+    assert_eq!(SurfaceId::Main.window_title(), "YUVI Chat");
+    assert_eq!(SurfaceId::Companion.window_title(), "YUVI Companion");
+    assert_eq!(SurfaceId::WebUI.window_title(), "YUVI WebUI");
   }
 }

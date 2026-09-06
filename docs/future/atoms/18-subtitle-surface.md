@@ -1,6 +1,6 @@
 # Atom 18 — Subtitle Surface
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: DONE — IMPLEMENTED ON CURRENT MAIN**
 >
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >
@@ -23,8 +23,19 @@ output without gaining conversation, language, or TTS authority.
 
 ## Dependencies
 
-Atoms 03 and 17; Atom 14 if subtitle behavior is synchronized with interruptible
-voice playback.
+**Historical plan:** Atoms 03 and 17; Atom 14 if subtitle behavior is
+synchronized with interruptible voice playback.
+
+**Rebaseline (implementation):**
+
+- Atom 03 — **hard dependency, already DONE** (DesktopSurfaceManager seam).
+- Atom 17 — **NOT a hard dependency**. Subtitle displays already-committed
+  assistant text as-is through `projectCommittedAssistantText` (plain-text
+  projection only). It does not choose, translate, or normalize output language.
+  Atom 17 remains FUTURE and was not implemented.
+- Atom 14 — **deferred**. No safely productized barge-in
+  STARTED/COMPLETED/INTERRUPTED subtitle sync is consumed. Timing uses
+  deterministic length/punctuation heuristics only. INTERRUPTED is not faked.
 
 ## TARGET
 
@@ -66,9 +77,9 @@ committed text.
 
 ## Acceptance
 
-Tests cover show/hide/close behavior, committed text rendering, TTS started /
-completed / interrupted synchronization, and proof that subtitle closure does
-not affect Runtime or Supervisor lifecycle.
+Tests cover show/hide/close behavior, committed text rendering, and proof that
+subtitle closure does not affect Runtime or Supervisor lifecycle. Atom 14 TTS
+STARTED/COMPLETED/INTERRUPTED synchronization is deferred explicitly.
 
 ## Stop condition
 
@@ -85,3 +96,14 @@ Stop when Subtitle is a faithful output surface.
    semantics unless this atom explicitly owns that boundary.
 5. Implement one immutable atom, run focused tests plus required broader gates,
    inspect exact diff, then stop at this atom's stop condition.
+
+## Closure (implemented)
+
+**Status: DONE.** Implementation base: 13fa3d4e1784a919c776ff9d05270e81258df3b9.
+
+Topology: Main | Companion | WebUI | Subtitle via DesktopSurfaceManager; Quit unchanged.
+Chain: committed assistant output -> projectCommittedAssistantText -> yuvi-subtitle-projection-v1 -> SubtitlePage.
+Committed path only; empty/code/table project to nothing; pagination reconstructs projected text; Memory writes NONE.
+Atom 14 STARTED/COMPLETED/INTERRUPTED sync deferred; Atom 17 reclassified not required.
+Lazy ensure; close-as-hide; Subtitle show without set_focus; overlay window policy (transparent, decorationless, always-on-top, fixed, skip_taskbar, click-through).
+Tray: Show Subtitle / Hide Subtitle. Visual: lower-center 1-3 line band. Atoms 19/20 untouched.
