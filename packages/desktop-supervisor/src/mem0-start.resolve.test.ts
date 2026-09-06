@@ -84,6 +84,21 @@ describe("resolveMem0Start Linux/Windows venv resolution", () => {
     expect(start?.args).toEqual(["--flag"]);
   });
 
+  it("maps development DATABASE_URL to the Mem0 PG connection env", () => {
+    const root = makeRepo({ linuxVenv: true });
+    const detailed = resolveMem0StartDetailed(
+      root,
+      { DATABASE_URL: "postgres://dev:secret@127.0.0.1:5432/yuvi" },
+      "http://127.0.0.1:6131",
+      { platform: "linux", runDefaultPreflight: false }
+    );
+
+    expect(detailed.error).toBeNull();
+    expect(detailed.start?.env["MEM0_PG_CONNECTION_STRING"]).toBe(
+      "postgres://dev:secret@127.0.0.1:5432/yuvi"
+    );
+  });
+
   it("fails closed with actionable error when Linux venv is missing", () => {
     const root = makeRepo({});
     const detailed = resolveMem0StartDetailed(root, {}, "http://127.0.0.1:6131", {
