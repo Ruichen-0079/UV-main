@@ -100,6 +100,7 @@ export function assembleCharacterHarnessPostCognitionContext(
 
   const finalContext = createCharacterAbi2DContext({
     abiVersion: CHARACTER_ABI_2D_VERSION,
+    ...(context.outputLanguage === undefined ? {} : { outputLanguage: context.outputLanguage }),
     sections: [...regularAssembly.context.sections, cognitionSection]
   });
 

@@ -1,6 +1,17 @@
 export const CHARACTER_ABI_2A_VERSION = "character-abi-2a.v1" as const;
 export const NORMALIZED_COGNITION_RESULT_VERSION = "character-cognition-result.v1" as const;
 
+export {
+  CHARACTER_EXPRESSION_LANGUAGES,
+  CHARACTER_OUTPUT_LANGUAGES,
+  characterOutputLanguageInstruction,
+  isCharacterOutputLanguage,
+  normalizeCharacterOutputLanguage,
+  resolveCharacterExpressionLanguage,
+  type CharacterExpressionLanguage,
+  type CharacterOutputLanguage
+} from "./output-language.js";
+
 export const CHARACTER_ABI_EPISTEMIC_STATES = [
   "KNOWN",
   "UNKNOWN",

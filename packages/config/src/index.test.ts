@@ -41,6 +41,7 @@ describe("runtime config", () => {
     });
 
     expect(config.environment).toBe("production");
+    expect(config.outputLanguage).toBe("AUTO");
     expect(config.server).toMatchObject({
       host: "0.0.0.0",
       port: 4310,
@@ -70,6 +71,13 @@ describe("runtime config", () => {
     });
     expect(config.providers.allowMocks).toBe(false);
     expect(config.providers.endpoints.embedding.dimensions).toBe(1536);
+  });
+
+  it("owns and normalizes the explicit final output-language setting", () => {
+    expect(parseRuntimeConfig({}).outputLanguage).toBe("AUTO");
+    expect(parseRuntimeConfig({ OUTPUT_LANGUAGE: " zh " }).outputLanguage).toBe("ZH");
+    expect(parseRuntimeConfig({ OUTPUT_LANGUAGE: "JA" }).outputLanguage).toBe("JA");
+    expect(parseRuntimeConfig({ OUTPUT_LANGUAGE: "fr" }).outputLanguage).toBe("AUTO");
   });
 
   it("parses and validates the generic OpenAI-compatible Chat endpoint", () => {

@@ -147,6 +147,25 @@ describe("Character Harness 5J ABI 2D bounded assembly", () => {
     expect(result.usedSemanticCharacters).toBe(0);
   });
 
+  it("preserves output-language context while applying the existing section budget", () => {
+    const result = assembleCharacterHarness2DContext({
+      context: {
+        abiVersion: CHARACTER_ABI_2D_VERSION,
+        outputLanguage: "JA",
+        sections: [{ kind: "IDENTITY", state: "KNOWN", summary: "Yuvi" }]
+      },
+      budget: {
+        maxSections: 1,
+        maxSemanticCharacters: 4
+      }
+    });
+
+    expect(result.context.outputLanguage).toBe("JA");
+    expect(result.context.sections).toEqual([
+      { kind: "IDENTITY", state: "KNOWN", summary: "Yuvi" }
+    ]);
+  });
+
   it("rejects legacy 2A contexts rather than silently upgrading them", () => {
     expect(() =>
       assembleCharacterHarness2DContext({

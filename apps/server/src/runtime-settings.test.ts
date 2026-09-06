@@ -12,6 +12,7 @@ describe("runtime settings contract", () => {
     expect(editableKeys).toHaveLength(new Set(editableKeys).size);
     expect(editableKeys.every((key) => getRuntimeSettingApplyMode(key))).toBe(true);
     expect(getRuntimeSettingApplyMode("SERVER_PORT")).toBe("restart_required");
+    expect(getRuntimeSettingApplyMode("OUTPUT_LANGUAGE")).toBe("hot_reload");
     expect(getRuntimeSettingApplyMode("DEEPSEEK_CHAT_MODEL")).toBe("hot_reload");
     expect(getRuntimeSettingApplyMode("DEFAULT_CHAT_PROVIDER")).toBe("hot_reload");
     expect(getRuntimeSettingApplyMode("DEFAULT_REASONING_PROVIDER")).toBe("hot_reload");
@@ -97,6 +98,15 @@ describe("runtime settings contract", () => {
         OPENAI_COMPATIBLE_API_BASEURL: "https://user:password@gateway.example/v1"
       }).fieldErrors["OPENAI_COMPATIBLE_API_BASEURL"]
     ).toContain("credentials");
+    expect(validateRuntimeSettings({ OUTPUT_LANGUAGE: "EN" }).fieldErrors).not.toHaveProperty(
+      "OUTPUT_LANGUAGE"
+    );
+    expect(validateRuntimeSettings({ OUTPUT_LANGUAGE: "ja" }).fieldErrors).not.toHaveProperty(
+      "OUTPUT_LANGUAGE"
+    );
+    expect(validateRuntimeSettings({ OUTPUT_LANGUAGE: "FR" }).fieldErrors).toMatchObject({
+      OUTPUT_LANGUAGE: expect.any(String)
+    });
   });
 
   it("redacts URL userinfo without changing the URL path", () => {

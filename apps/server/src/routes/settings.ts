@@ -2,6 +2,7 @@ import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import type { MemoryExtractorStatus } from "@companion/memory";
+import { parseRuntimeConfig } from "@companion/config";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
@@ -190,6 +191,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
   const localEnv = localEnvFile.values;
   const env = runtimeEnvFiles.env;
   const providerStatus = context.providers.getStatus();
+  const activeOutputLanguage = parseRuntimeConfig(context.activeRuntimeEnv).outputLanguage;
   const memoryRepository = env["MEMORY_REPOSITORY"] ?? "in-memory";
   const memoryExtractor = normalizeMemoryExtractor(env["MEMORY_EXTRACTOR"]);
   const pendingRestartKeys = getPendingRestartKeys(env, context.activeRuntimeEnv);
@@ -215,6 +217,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       serverHost: config.host,
       serverPort: config.port,
       eventBus: config.eventBus,
+      outputLanguage: activeOutputLanguage,
       memoryRepository: context.activeMemoryRepository,
       memoryExtractor: context.memory.getExtractorStatus().mode,
       memoryExtractorActive: context.memory.getExtractorStatus().active,

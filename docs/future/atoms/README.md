@@ -84,7 +84,7 @@ This view exists to schedule independent work without losing the master backlog.
 - Product WebUI functional parity — **INTEGRATION WIP** in PR #257; main remains
   authority until the integration PR is accepted.
 - [16 — Provider fallback UX](16-provider-fallback-ux.md) — PLANNED.
-- [17 — Output language semantic preference](17-output-language.md) — PLANNED.
+- [17 — Output language semantic preference](17-output-language.md) — DONE.
 - IndexTTS/Rei zero-shot baseline → stable local TTS service → real KDE
   acceptance of implemented [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md).
 - [15 — On-demand Visual Grounding](15-vision-character.md) — REBASELINED,
@@ -284,7 +284,7 @@ retained as historical/reference material:
 - [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md) — DONE
 - [15 — On-demand Visual Grounding](15-vision-character.md) — REBASELINED
 - [16 — Provider fallback UX](16-provider-fallback-ux.md)
-- [17 — Output language semantic preference](17-output-language.md)
+- [17 — Output language semantic preference](17-output-language.md) — DONE
 - [18 — Subtitle Surface](18-subtitle-surface.md) — DONE (Subtitle is fourth DesktopSurface; committed-text-only; Atom 17 not required; Atom 14 deferred; focus non-steal; 19/20 untouched)
 - [19 — Companion advanced presentation](19-companion-advanced-presentation.md)
 - [20 — Live2D calibration](20-live2d-calibration.md)

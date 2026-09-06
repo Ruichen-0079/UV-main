@@ -129,6 +129,27 @@ describe("Character ABI 2D structured cognition result", () => {
     ).toThrow(/unknown field: result/);
   });
 
+  it("carries the explicit output-language preference as semantic context", () => {
+    const result = createCharacterAbi2DContext({
+      abiVersion: CHARACTER_ABI_2D_VERSION,
+      outputLanguage: "ZH",
+      sections: []
+    });
+
+    expect(result.outputLanguage).toBe("ZH");
+    expect(Object.isFrozen(result)).toBe(true);
+  });
+
+  it("rejects unsupported output-language values at the Character ABI boundary", () => {
+    expect(() =>
+      createCharacterAbi2DContext({
+        abiVersion: CHARACTER_ABI_2D_VERSION,
+        outputLanguage: "FR",
+        sections: []
+      })
+    ).toThrow(/outputLanguage is invalid/);
+  });
+
   it("keeps section kinds unique across regular and cognition sections", () => {
     expect(() =>
       createCharacterAbi2DContext({

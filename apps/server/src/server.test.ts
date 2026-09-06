@@ -2331,6 +2331,7 @@ describe("server", () => {
       expect(settings.statusCode).toBe(200);
       expect(settings.json().configFiles[".env"].exists).toBe(false);
       expect(settings.json().configFiles[".env.local"].exists).toBe(false);
+      expect(settings.json().activeRuntimeConfig.outputLanguage).toBe("AUTO");
       expect(settings.json().providers.deepseek.apiKeyConfigured).toBe(true);
       expect(settings.json().providers.deepseek.apiKeyPreview).toBe("••••••••••••cret");
       expect(settings.json().providers.deepseek.apiKeyPreview).not.toBe(
@@ -2359,6 +2360,38 @@ describe("server", () => {
       });
       expect(settings.body).not.toContain("configured_deepseek_secret");
       expect(settings.body).not.toContain("Authorization");
+
+      const outputLanguageUpdate = await app.inject({
+        method: "POST",
+        url: "/settings/runtime",
+        payload: { values: { OUTPUT_LANGUAGE: "zh" } }
+      });
+      expect(outputLanguageUpdate.statusCode).toBe(200);
+      expect(outputLanguageUpdate.json()).toMatchObject({
+        ok: true,
+        restartRequired: false,
+        changedKeys: ["OUTPUT_LANGUAGE"]
+      });
+      expect(outputLanguageUpdate.json().settings.settings.OUTPUT_LANGUAGE).toMatchObject({
+        effective: "zh",
+        source: ".env.local"
+      });
+      expect(outputLanguageUpdate.json().settings.activeRuntimeConfig.outputLanguage).toBe("AUTO");
+
+      const outputLanguageReload = await app.inject({
+        method: "POST",
+        url: "/settings/runtime/reload"
+      });
+      expect(outputLanguageReload.statusCode).toBe(200);
+      expect(outputLanguageReload.json()).toMatchObject({
+        ok: true,
+        applied: true,
+        appliedKeys: ["OUTPUT_LANGUAGE"],
+        restartRequired: false,
+        settings: {
+          activeRuntimeConfig: { outputLanguage: "ZH" }
+        }
+      });
 
       const unsafe = await app.inject({
         method: "POST",

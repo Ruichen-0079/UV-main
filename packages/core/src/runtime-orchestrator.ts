@@ -140,7 +140,12 @@ import {
   type InterpretSpeechObservationIdentityInput,
   type SpeechObservationIdentityInterpretation
 } from "./runtime-speech-identity.js";
-import type { CharacterProactiveProposal } from "@companion/character-abi";
+import {
+  characterOutputLanguageInstruction,
+  resolveCharacterExpressionLanguage,
+  type CharacterOutputLanguage,
+  type CharacterProactiveProposal
+} from "@companion/character-abi";
 import {
   advanceActivityRevision,
   applyAuthorizedEngagement,
@@ -2201,9 +2206,8 @@ export class RuntimeOrchestrator {
     }
     const prompt = this.options.promptBuilder.buildPrompt({
       systemIdentity:
-        "You are YUVI, a local-first AI companion runtime agent. Unless the user clearly asks for another language, reply in natural spoken English by default.",
-      characterStyle:
-        "Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail. Do not default to Japanese or Chinese, do not auto-translate English into Japanese for voice, and do not produce bilingual replies. If the user mainly writes Chinese or Japanese, or explicitly requests Chinese or Japanese, reply in that language.",
+        "You are YUVI, a local-first AI companion runtime agent.",
+      characterStyle: `Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail.\n\n${characterOutputLanguageInstruction(this.outputLanguage())}`,
       relationshipContext:
         "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
       retrievedMemories: promptMemories,
@@ -2349,10 +2353,8 @@ export class RuntimeOrchestrator {
           )
         : emptyMemoryContext();
     const promptInput = {
-      systemIdentity:
-        "You are YUVI, a local-first AI companion runtime agent. Unless the user clearly asks for another language, reply in natural spoken English by default.",
-      characterStyle:
-        "Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail. Do not default to Japanese or Chinese, do not auto-translate English into Japanese for voice, and do not produce bilingual replies. If the user mainly writes Chinese or Japanese, or explicitly requests Chinese or Japanese, reply in that language.",
+      systemIdentity: "You are YUVI, a local-first AI companion runtime agent.",
+      characterStyle: `Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail.\n\n${characterOutputLanguageInstruction(this.outputLanguage())}`,
       relationshipContext:
         "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
       retrievedMemories: promptMemoriesForBuilder(memoryContext),
@@ -2583,6 +2585,7 @@ export class RuntimeOrchestrator {
     const initial = await character.generate({
       prompt,
       userMessage: event.payload.content,
+      outputLanguage: this.outputLanguage(),
       ...(signal ? { signal } : {}),
       generateChat
     });
@@ -2630,6 +2633,7 @@ export class RuntimeOrchestrator {
     const final = await character.generateAfterCognition({
       prompt,
       userMessage: event.payload.content,
+      outputLanguage: this.outputLanguage(),
       cognitionRoundTrip: roundTrip,
       ...(signal ? { signal } : {}),
       generateChat
@@ -2666,13 +2670,18 @@ export class RuntimeOrchestrator {
 
     const ttsProvider = this.options.providers.getTTSProvider();
     try {
+      const outputLanguage = resolveCharacterExpressionLanguage(
+        this.outputLanguage(),
+        reply.payload.content
+      );
       const speech = await this.measureProvider(
         "tts",
         ttsProvider.name,
         () =>
           ttsProvider.synthesizeSpeech(
             {
-              text: reply.payload.content
+              text: reply.payload.content,
+              metadata: { language: outputLanguage.toLowerCase() }
             },
             { signal: options.signal }
           ),
@@ -2717,6 +2726,10 @@ export class RuntimeOrchestrator {
       );
       return null;
     }
+  }
+
+  private outputLanguage(): CharacterOutputLanguage {
+    return this.options.outputLanguage ?? "AUTO";
   }
 
   private async scheduleMem0TurnWrite(
