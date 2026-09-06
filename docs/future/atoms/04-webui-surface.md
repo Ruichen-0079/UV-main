@@ -2,7 +2,7 @@
 
 > **Status: DONE — IMPLEMENTED ON CURRENT MAIN**
 >
-> **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
+> **Audit baseline:** `ec6df9d`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
 > dependency state are authoritative. Before implementation, fresh-fetch main,
@@ -104,7 +104,6 @@ Quit → AppLifecycle (unchanged; bypasses SurfaceManager)
 - Validation: focused Rust/TypeScript tests, `pnpm check`, `pnpm desktop:smoke:linux`,
   and `pnpm desktop:close-tray:linux` on the primary KDE Plasma Wayland
   platform.
-
 
 ## Campaign A Product WebUI baseline (2026-09-06)
 

@@ -10,8 +10,6 @@
 > desktop lifecycle behavior on the active Linux target (CachyOS/KDE Wayland),
 > with Linux desktop operational validation when that foundation exists.
 >
-> **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
->
 > The current `origin/main` source, tests, merged closure documents, and live
 > dependency state are authoritative. Before implementation, fresh-fetch main,
 > relevant files, relevant open PRs, and exact dependency state. Reclassify every
