@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   apiClient,
-  type DashboardWebSocketMessage,
   type HealthResponse,
   type MemoryRecord,
   type ProviderCapability,
@@ -59,7 +58,11 @@ import {
   flushDashboardSpeechTail
 } from "./dashboard-chat-speech.js";
 import { CompanionBus } from "./companion-bus.js";
-import { createEmbodiedPresentationRequest } from "@companion/protocol";
+import { forwardEmbodiedPresentationRequest } from "./embodied-presentation-bus-forward.js";
+import {
+  useDashboardEventStream,
+  type DashboardEventStreamStatus
+} from "./hooks/useDashboardEventStream.js";
 
 export { dashboardVoicePlaybackStatusLabel, deriveDashboardTtsPolicy, flushDashboardSpeechTail };
 
@@ -74,13 +77,7 @@ type PageId =
   | "vision"
   | "settings";
 
-type WebSocketStatus =
-  | "connecting"
-  | "connected"
-  | "disconnected"
-  | "reconnecting"
-  | "paused"
-  | "error";
+type WebSocketStatus = DashboardEventStreamStatus;
 
 const pages: Array<{ id: PageId; label: string }> = [
   { id: "overview", label: "概览" },
@@ -116,14 +113,9 @@ export function App(): JSX.Element {
     paused: eventsPaused,
     onEvent: (event) => {
       setLiveEvents((current) => [event, ...current].slice(0, 100));
-      if (event.type === "runtime.embodied.presentation.request") {
-        try {
-          const request = createEmbodiedPresentationRequest(event.payload);
-          embodiedBusRef.current?.post({ kind: "embodied-presentation-request", request });
-        } catch {
-          // Dashboard transport must fail closed on malformed Runtime input.
-        }
-      }
+      forwardEmbodiedPresentationRequest(event, (message) => {
+        embodiedBusRef.current?.post(message);
+      });
     }
   });
 
@@ -614,118 +606,6 @@ function ProviderChainInspectionResult(props: {
         ))}
       </ul>
     </div>
-  );
-}
-
-function useDashboardEventStream({
-  paused,
-  onEvent
-}: {
-  paused: boolean;
-  onEvent(event: RuntimeEvent): void;
-}): WebSocketStatus {
-  const [status, setStatus] = useState<WebSocketStatus>("connecting");
-  const pausedRef = useRef(paused);
-  const onEventRef = useRef(onEvent);
-  const reconnectTimerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    pausedRef.current = paused;
-    if (paused) {
-      setStatus((current) => (current === "connected" ? "paused" : current));
-    } else {
-      setStatus((current) => (current === "paused" ? "connected" : current));
-    }
-  }, [paused]);
-
-  useEffect(() => {
-    onEventRef.current = onEvent;
-  }, [onEvent]);
-
-  useEffect(() => {
-    let closedByEffect = false;
-    let socket: WebSocket | null = null;
-
-    function connect(): void {
-      setStatus((current) =>
-        current === "disconnected" || current === "error" ? "reconnecting" : "connecting"
-      );
-      socket = apiClient.createDashboardWebSocket();
-
-      socket.addEventListener("open", () => {
-        setStatus(pausedRef.current ? "paused" : "connected");
-      });
-
-      socket.addEventListener("message", (message) => {
-        const parsed = parseDashboardMessage(message.data);
-        if (!parsed || isDashboardConnectedMessage(parsed) || pausedRef.current) {
-          return;
-        }
-        onEventRef.current(parsed);
-      });
-
-      socket.addEventListener("error", () => {
-        setStatus("error");
-      });
-
-      socket.addEventListener("close", () => {
-        if (closedByEffect) {
-          return;
-        }
-        setStatus("disconnected");
-        reconnectTimerRef.current = window.setTimeout(connect, 2000);
-      });
-    }
-
-    connect();
-
-    return () => {
-      closedByEffect = true;
-      if (reconnectTimerRef.current !== null) {
-        window.clearTimeout(reconnectTimerRef.current);
-      }
-      socket?.close();
-    };
-  }, []);
-
-  return status;
-}
-
-function parseDashboardMessage(raw: string): DashboardWebSocketMessage | null {
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object") {
-      return null;
-    }
-    if (isDashboardConnectedMessage(parsed)) {
-      return parsed;
-    }
-    if (isRuntimeEvent(parsed)) {
-      return parsed;
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function isDashboardConnectedMessage(
-  value: unknown
-): value is Extract<DashboardWebSocketMessage, { kind: "dashboard.connected" }> {
-  return Boolean(
-    value && typeof value === "object" && "kind" in value && value.kind === "dashboard.connected"
-  );
-}
-
-function isRuntimeEvent(value: unknown): value is RuntimeEvent {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    "id" in value &&
-    "type" in value &&
-    "traceId" in value &&
-    "payload" in value
   );
 }
 

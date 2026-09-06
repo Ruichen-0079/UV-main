@@ -8,9 +8,11 @@ import {
   executeEmbodiedPresentationRequest,
   type EmbodiedPresentationExecutorActions
 } from "./embodied-presentation-executor.js";
-import type {
-  EmbodiedPresentationRequest,
-  EmbodiedPresentationOutcomeReport
+import {
+  createEmbodiedPresentationRequest,
+  createEmbodiedPresentationOutcomeReport,
+  type EmbodiedPresentationRequest,
+  type EmbodiedPresentationOutcomeReport
 } from "@companion/protocol";
 import {
   composeCompanionPresenceAnimation,
@@ -543,8 +545,18 @@ export class LumiController {
   executeEmbodiedPresentationRequest(
     request: EmbodiedPresentationRequest
   ): EmbodiedPresentationOutcomeReport {
+    if (this.disposed || !this.adapter || this.modelLifecycle !== "ready") {
+      const validated = createEmbodiedPresentationRequest(request);
+      return createEmbodiedPresentationOutcomeReport({
+        version: "embodied-presentation-outcome-7k.v1",
+        effectId: validated.effectId,
+        outcome: "REJECTED"
+      });
+    }
+    const adapter = this.adapter;
     const actions: EmbodiedPresentationExecutorActions = {
-      setGazeTarget: (target) => this.setGazeTarget(target)
+      setGazeTarget: (target) => this.setGazeTarget(target),
+      setMouthForm: (value) => adapter.setMouthForm(value)
     };
     return executeEmbodiedPresentationRequest(request, actions);
   }
@@ -553,6 +565,8 @@ export class LumiController {
     if (!this.adapter || this.disposed) return;
     // Presence owns only eyes and breath. ParamMouthOpenY remains exclusively
     // driven by the active AudioMouthEnvelope while playback is speaking.
+    // ParamMouthForm is reserved for expression (soft-smile) and must not be
+    // written here or by lip-sync.
     if (animation.blink !== undefined) {
       const eyeOpen = 1 - clamp(animation.blink, 0, 1);
       this.adapter.setParameter(lumiMapping.eyeLeft, eyeOpen);

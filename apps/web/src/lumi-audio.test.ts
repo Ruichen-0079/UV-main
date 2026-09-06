@@ -93,6 +93,7 @@ describe("AudioMouthEnvelope playback binding", () => {
     const frame = callbacks.keys().next().value as number;
     callbacks.get(frame)?.(16);
     expect(target.mouthValues.at(-1)).toBeGreaterThan(0);
+    expect(target.setMouthForm).not.toHaveBeenCalled();
   });
 
   it("does not recreate a source for the same Audio and disconnects old sources", async () => {
@@ -143,7 +144,8 @@ describe("AudioMouthEnvelope playback binding", () => {
     expect(callbacks.size).toBe(1);
     envelope.stop();
     expect(callbacks.size).toBe(0);
-    expect(target.resetMouth).toHaveBeenCalled();
+    expect(target.resetMouth).not.toHaveBeenCalled();
+    expect(target.setMouthForm).not.toHaveBeenCalled();
     expect(target.mouthValues.at(-1)).toBe(0);
     envelope.dispose();
     expect(context.close).toHaveBeenCalledTimes(1);
@@ -172,5 +174,32 @@ describe("AudioMouthEnvelope playback binding", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(callbacks.size).toBe(1);
+  });
+
+  it("preserves ParamMouthForm across construct, lip-sync frames, and stop", async () => {
+    const callbacks = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = nextFrame++;
+      callbacks.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => callbacks.delete(id));
+    const { context } = createAudioContext();
+    const target = createTarget();
+    const envelope = new AudioMouthEnvelope(target, undefined, () => context);
+    expect(target.setMouthForm).not.toHaveBeenCalled();
+    const audio = {} as HTMLAudioElement;
+    envelope.attach(audio);
+    envelope.startPlayback?.(audio);
+    await Promise.resolve();
+    await Promise.resolve();
+    const frame = callbacks.keys().next().value as number;
+    callbacks.get(frame)?.(16);
+    envelope.stop();
+    expect(target.setMouthForm).not.toHaveBeenCalled();
+    expect(target.resetMouth).not.toHaveBeenCalled();
+    envelope.dispose();
   });
 });

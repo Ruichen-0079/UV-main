@@ -40,6 +40,8 @@ import {
   type CompanionPlaybackState,
   type CompanionTtsConfiguration
 } from "./companion-bus.js";
+import { forwardEmbodiedPresentationRequest } from "./embodied-presentation-bus-forward.js";
+import { useDashboardEventStream } from "./hooks/useDashboardEventStream.js";
 import { deriveCapabilityProjection, deriveEffectiveVoiceOutput } from "./capability-projection.js";
 import {
   correlateSpeechPlayback,
@@ -137,6 +139,16 @@ export function MainPage(): JSX.Element {
   const mountedRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const busRef = useRef<CompanionBus | null>(null);
+  // Product Main must subscribe to Runtime Presentation requests and forward them
+  // to Companion over CompanionBus (Debug App already does this). Fail-closed.
+  useDashboardEventStream({
+    paused: false,
+    onEvent: (event) => {
+      forwardEmbodiedPresentationRequest(event, (message) => {
+        busRef.current?.post(message);
+      });
+    }
+  });
   const voiceOutputRef = useRef(voiceOutput);
   const ttsConfigRef = useRef(ttsConfig);
   const ttsConfigRevisionRef = useRef(-1);
