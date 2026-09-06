@@ -181,6 +181,11 @@ export {
 export { parseMemoryRepositoryEnv, type MemoryRepositoryKind } from "./env.js";
 export { normalizePostgresConnectionString } from "./postgres-connection.js";
 export {
+  createYuviPostgresPool,
+  YUVI_POSTGRES_IDLE_TIMEOUT_MS,
+  YUVI_POSTGRES_POOL_MAX
+} from "./postgres-pool.js";
+export {
   InMemoryMemoryRepository,
   PostgresMemoryRepository,
   createMemoryRepositoryFromEnv,

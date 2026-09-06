@@ -1,7 +1,6 @@
-import { Pool } from "pg";
-import type { QueryResultRow } from "pg";
+import type { Pool, QueryResultRow } from "pg";
 import { MemoryIngestionPolicy } from "./ingestion.js";
-import { normalizePostgresConnectionString } from "./postgres-connection.js";
+import { createYuviPostgresPool } from "./postgres-pool.js";
 import {
   deliverDreamEventsIdempotent,
   isAmbiguousWriteOutcome,
@@ -617,10 +616,7 @@ export class PostgresDreamJobStore implements DreamJobStore {
     this.ownsPool = typeof connectionString === "string";
     this.pool =
       typeof connectionString === "string"
-        ? new Pool({
-            connectionString: normalizePostgresConnectionString(connectionString),
-            connectionTimeoutMillis: 10_000
-          })
+        ? createYuviPostgresPool(connectionString)
         : connectionString;
   }
 

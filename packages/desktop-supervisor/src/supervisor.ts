@@ -145,6 +145,12 @@ const MEM0_CONFIG_KEYS = new Set([
   "YUVI_MEM0_LOG_DIR"
 ]);
 
+/**
+ * Background status is a liveness aid, not a high-frequency control loop.
+ * Explicit refresh/bootstrap paths still perform the full service sweep.
+ */
+export const DEFAULT_BACKGROUND_REFRESH_INTERVAL_MS = 30_000;
+
 type Mem0ReconcileAction = "none" | "start" | "stop" | "restart" | "pending_external";
 type LocalSttReconcileAction = Mem0ReconcileAction;
 
@@ -173,7 +179,8 @@ export class DesktopSupervisor {
   private readonly services = new Map<ServiceId, InternalService>();
   private shuttingDown = false;
   private readonly listeners = new Set<SupervisorListener>();
-  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private backgroundRefreshEnabled = false;
   /**
    * Snapshot of process.env + initial config.env at construction.
    * Dynamic user overrides never permanently destroy these fallbacks.
@@ -401,18 +408,33 @@ export class DesktopSupervisor {
     };
   }
 
-  startBackgroundRefresh(intervalMs = 5_000): void {
-    if (this.refreshTimer) return;
-    this.refreshTimer = setInterval(() => {
-      void this.refreshAll().catch(() => {
-        // keep loop alive
-      });
-    }, intervalMs);
+  startBackgroundRefresh(intervalMs = DEFAULT_BACKGROUND_REFRESH_INTERVAL_MS): void {
+    if (this.refreshTimer || this.backgroundRefreshEnabled) return;
+    const delayMs = Number.isFinite(intervalMs)
+      ? Math.max(1_000, Math.trunc(intervalMs))
+      : DEFAULT_BACKGROUND_REFRESH_INTERVAL_MS;
+    this.backgroundRefreshEnabled = true;
+
+    const schedule = (): void => {
+      if (!this.backgroundRefreshEnabled || this.shuttingDown) return;
+      this.refreshTimer = setTimeout(() => {
+        this.refreshTimer = null;
+        void this.refreshBackground()
+          .catch(() => {
+            // Keep the loop alive after a transient probe failure.
+          })
+          .finally(schedule);
+      }, delayMs);
+      this.refreshTimer.unref?.();
+    };
+
+    schedule();
   }
 
   stopBackgroundRefresh(): void {
+    this.backgroundRefreshEnabled = false;
     if (this.refreshTimer) {
-      clearInterval(this.refreshTimer);
+      clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
   }
@@ -459,13 +481,48 @@ export class DesktopSupervisor {
   async refreshAll(): Promise<SupervisorSnapshot> {
     const mem0 = this.services.get("mem0");
     if (mem0) this.lifecycleEvent("memory.refresh.queued", mem0);
-    for (const id of this.services.keys()) {
+    await this.refreshServiceIds([...this.services.keys()]);
+    await this.recoverManagedServices();
+    this.emit();
+    return this.snapshot();
+  }
+
+  private backgroundRefreshIds(): ServiceId[] {
+    return [...this.services.values()]
+      .filter(
+        (svc) =>
+          // Runtime and services owned by this supervisor remain observable.
+          // External optional dependencies (Ollama, PostgreSQL, Alice TTS)
+          // are checked on demand or through explicit refresh instead of
+          // waking their servers every few seconds while the desktop is idle.
+          svc.spec.startCommand !== null &&
+          (svc.spec.id === "runtime" || svc.spec.managed || svc.ownership === "owned")
+      )
+      .map((svc) => svc.spec.id);
+  }
+
+  private async refreshBackground(): Promise<SupervisorSnapshot> {
+    if (this.shuttingDown) return this.snapshot();
+    const mem0 = this.services.get("mem0");
+    if (mem0) this.lifecycleEvent("memory.refresh.queued", mem0);
+    await this.refreshServiceIds(this.backgroundRefreshIds());
+    await this.recoverManagedServices();
+    this.emit();
+    return this.snapshot();
+  }
+
+  private async refreshServiceIds(ids: readonly ServiceId[]): Promise<void> {
+    for (const id of ids) {
       const svc = this.services.get(id);
       if (!svc) continue;
       await this.queue(svc, async () => {
         await this.refreshService(id);
       });
     }
+  }
+
+  private async recoverManagedServices(): Promise<void> {
+    const mem0 = this.services.get("mem0");
     // One controlled auto-recover for owned runtime crash only.
     const runtime = this.services.get("runtime");
     if (
@@ -491,8 +548,6 @@ export class DesktopSupervisor {
         await this.startManagedIfNeeded("mem0");
       });
     }
-    this.emit();
-    return this.snapshot();
   }
 
   async restartService(id: ServiceId): Promise<SupervisorSnapshot> {

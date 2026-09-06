@@ -298,14 +298,56 @@ class Mem0Service:
         return "healthy", None
 
     def health(self) -> HealthData:
+        llm_status, llm_msg = self.probe_memory_llm()
+
+        # Do not turn a cheap liveness/readiness request into a resource-load
+        # request. Initialization is demand-driven by add/search/update/delete
+        # operations, so an idle sidecar does not import Mem0 or wake Ollama.
+        if not self.ready:
+            if self._init_error:
+                status = "unhealthy"
+                mem0_status = "unhealthy"
+                embedder_status = "unknown"
+                vector_status = "unknown"
+                message = self._init_error
+            elif not self.settings.has_pg:
+                status = "degraded"
+                mem0_status = "deferred"
+                embedder_status = "deferred"
+                vector_status = "unhealthy"
+                message = "MEM0_PG_CONNECTION_STRING is not configured; Mem0 resources remain unloaded."
+            else:
+                status = "degraded"
+                mem0_status = "deferred"
+                embedder_status = "deferred"
+                vector_status = "deferred"
+                message = "Mem0 resources are loaded on first memory operation."
+
+            if llm_msg:
+                message = f"{message}; {llm_msg}"
+            return HealthData(
+                status=status,  # type: ignore[arg-type]
+                components=HealthComponents(
+                    mem0=mem0_status,
+                    embedder=embedder_status,
+                    vectorStore=vector_status,
+                    memoryLlm=llm_status,
+                ),
+                capabilities=HealthCapabilities(),
+                embedding=HealthEmbedding(
+                    provider=self.settings.mem0_embedder_provider,
+                    model=self.settings.mem0_embedder_model,
+                    dimensions=self.settings.mem0_embedder_dimensions,
+                ),
+                collection=self.settings.mem0_pg_collection,
+                message=message,
+            )
+
         # Health must not re-initialize Mem0 or run add/search.
         embedder_status, embedder_msg = self.probe_embedder()
         vector_status, vector_msg = self.probe_vector_store()
-        llm_status, llm_msg = self.probe_memory_llm()
 
-        mem0_status = "healthy" if self.ready else "unhealthy"
-        if self._init_error and not self.ready:
-            mem0_status = "unhealthy"
+        mem0_status = "healthy"
 
         crud_ok = self.ready and embedder_status == "healthy" and vector_status == "healthy"
         infer_ok = bool(self.settings.has_memory_llm and crud_ok)

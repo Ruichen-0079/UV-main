@@ -1,4 +1,4 @@
-"""FastAPI lifespan lifecycle: single init at start, shutdown release, no on_event."""
+"""FastAPI lifespan lifecycle: lazy init, shutdown release, no on_event."""
 
 from __future__ import annotations
 
@@ -68,13 +68,13 @@ def test_app_module_has_no_on_event_decorators() -> None:
     assert "lifespan" in source
 
 
-def test_lifespan_initializes_once_and_shuts_down(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lifespan_defers_initialization_and_shuts_down(monkeypatch: pytest.MonkeyPatch) -> None:
     import yuvi_mem0.app as app_module
 
     tracker = TrackingService()
     monkeypatch.setattr(app_module, "get_service", lambda: tracker)
     # Force has_pg path by ensuring settings.has_pg True via real settings if present;
-    # startup always calls get_service + initialize when has_pg.
+    # startup validates configuration but does not initialize Mem0.
     from yuvi_mem0.config import Settings
 
     settings = Settings(
@@ -86,19 +86,19 @@ def test_lifespan_initializes_once_and_shuts_down(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(app_module, "get_settings", lambda: settings)
 
     with TestClient(app_module.app) as client:
-        assert tracker.init_calls == 1
+        assert tracker.init_calls == 0
         r1 = client.get("/health")
         r2 = client.get("/health")
         assert r1.status_code == 200
         assert r2.status_code == 200
-        # Health does not re-initialize Mem0.
-        assert tracker.init_calls == 1
+        # Health does not initialize Mem0.
+        assert tracker.init_calls == 0
         assert tracker.health_calls == 2
         assert tracker.shutdown_calls == 0
 
     assert tracker.shutdown_calls == 1
-    # No second initialize after exit.
-    assert tracker.init_calls == 1
+    # No initialize was needed for an idle sidecar.
+    assert tracker.init_calls == 0
 
 
 def test_lifespan_startup_without_pg_skips_initialize(

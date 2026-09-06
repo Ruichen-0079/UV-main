@@ -587,6 +587,39 @@ describe("DesktopSupervisor classification", () => {
   });
 });
 
+describe("DesktopSupervisor background refresh", () => {
+  it("checks managed runtime only and leaves external optionals idle", async () => {
+    const httpProbe = vi.spyOn(health, "probeHttpHealth").mockResolvedValue({
+      ok: true,
+      statusCode: 200,
+      protocolOk: true,
+      message: "healthy",
+      latencyMs: 1
+    });
+    vi.spyOn(health, "probeTcp").mockResolvedValue({
+      ok: true,
+      statusCode: null,
+      protocolOk: true,
+      message: "tcp open",
+      latencyMs: 1
+    });
+
+    const supervisor = createSupervisor(baseConfig());
+    vi.useFakeTimers();
+    try {
+      supervisor.startBackgroundRefresh(1_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(httpProbe.mock.calls.map(([url]) => url)).toEqual([
+        "http://127.0.0.1:6121/health"
+      ]);
+    } finally {
+      supervisor.stopBackgroundRefresh();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("DesktopSupervisor runtime config push", () => {
   beforeEach(() => {
     // Secret changes schedule background Runtime reload — do not spawn children in unit tests.

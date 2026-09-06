@@ -137,10 +137,16 @@ export async function createAppContext(
     throw error;
   }
   const promptBuilder = new PromptBuilder();
-  const recentEpisodeStore: RecentEpisodeStore = createRecentEpisodeStoreFromEnv();
+  // All persistent Memory vNext facades share the primary pool. This keeps a
+  // single-user desktop from reserving one server-sized pool per repository.
+  const sharedPostgresPool = memoryRepository.getDatabaseClient?.();
+  const recentEpisodeStore: RecentEpisodeStore = createRecentEpisodeStoreFromEnv(
+    process.env,
+    sharedPostgresPool
+  );
   const dreamJobStore: DreamJobStore =
     parseMemoryRepositoryEnv().kind === "postgres" && process.env["DATABASE_URL"]
-      ? new PostgresDreamJobStore(process.env["DATABASE_URL"])
+      ? new PostgresDreamJobStore(sharedPostgresPool ?? process.env["DATABASE_URL"])
       : new InMemoryDreamJobStore();
   const finalizedIngestion = new FinalizedIngestionService(finalizedIngestionRepository!);
   const ruleBasedExtractor = new RuleBasedMemoryExtractor();

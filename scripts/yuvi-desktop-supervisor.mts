@@ -95,7 +95,7 @@ console.log(
   })
 );
 
-supervisor.startBackgroundRefresh(3_000);
+supervisor.startBackgroundRefresh();
 void supervisor.bootstrap().then((snap) => {
   console.log(
     JSON.stringify({

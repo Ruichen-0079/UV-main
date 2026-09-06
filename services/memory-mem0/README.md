@@ -46,8 +46,9 @@ YUVI Runtime :6121
 
 Sidecar process lifecycle uses FastAPI **lifespan** (not deprecated `on_event`):
 
-- **Startup**: validate fixed embedder config; initialize the process-global
-  `Mem0Service` singleton once when PG is configured.
+- **Startup**: validate fixed embedder config without loading optional resources.
+- **First memory operation**: initialize the process-global `Mem0Service`
+  singleton on demand when PG is configured.
 - **Shutdown**: `Mem0Service.shutdown()` releases Mem0 resources (best-effort).
 - Request handlers reuse the same singleton — never re-create Memory per request.
 
