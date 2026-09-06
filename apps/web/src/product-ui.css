@@ -1047,6 +1047,51 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
   border-top: 1px solid var(--yuvi-line);
   padding-top: 11px;
 }
+.yuvi-product-routing-served {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--yuvi-line);
+  border-radius: 14px;
+  padding: 11px;
+  background: color-mix(in srgb, var(--yuvi-accent-soft) 18%, var(--yuvi-bg-elevated));
+}
+.yuvi-product-routing-served-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.yuvi-product-routing-served-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.yuvi-product-routing-served-heading span:first-child {
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.yuvi-product-routing-served-heading strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+.yuvi-product-routing-served-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.yuvi-product-routing-served > small {
+  color: var(--yuvi-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
 .yuvi-product-routing-chain-heading strong,
 .yuvi-product-routing-inspection-header strong,
 .yuvi-product-routing-inspection-mode strong {

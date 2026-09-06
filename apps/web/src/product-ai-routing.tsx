@@ -6,6 +6,7 @@ import {
   type ProviderHealth,
   type ProviderRouteHealth,
   type ProvidersStatusResponse,
+  type RuntimeEvent,
   type RuntimeSettingsResponse,
   type RuntimeSettingsReloadResponse,
   type RuntimeSettingsUpdateResponse
@@ -135,6 +136,82 @@ export function productRoutingMatchLabel(truth: ProductRoutingTruth): string {
   if (!truth.activeChain) return "Active route order is unknown";
   if (!truth.savedChain.trim()) return "No explicit saved chain; active Runtime order is observed";
   return "Active route order could not be confirmed";
+}
+
+export type ProductRoutingServedRoute = {
+  capability: ProductRoutingCapability;
+  provider: string;
+  fallbackUsed: boolean | null;
+  attemptedProviders: Array<Pick<ProviderAttempt, "provider" | "status">>;
+  model?: string;
+  observedAt?: string;
+};
+
+const PROVIDER_ATTEMPT_STATUSES = new Set<ProviderAttempt["status"]>([
+  "skipped",
+  "success",
+  "failed",
+  "unavailable"
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
+}
+
+function safeProviderAttempt(value: unknown): Pick<ProviderAttempt, "provider" | "status"> | null {
+  if (!isRecord(value) || typeof value["provider"] !== "string") return null;
+  const provider = value["provider"].trim();
+  if (
+    !provider ||
+    typeof value["status"] !== "string" ||
+    !PROVIDER_ATTEMPT_STATUSES.has(value["status"] as ProviderAttempt["status"])
+  ) {
+    return null;
+  }
+  return { provider, status: value["status"] as ProviderAttempt["status"] };
+}
+
+/**
+ * Read only the safe provider fields already carried by a completed assistant
+ * event. This intentionally ignores message content and provider error text.
+ */
+export function productRoutingServedRoute(
+  events: RuntimeEvent[] | null | undefined,
+  capability: ProductRoutingCapability
+): ProductRoutingServedRoute | null {
+  for (const event of events ?? []) {
+    if (event.type !== "assistant.message" || !isRecord(event.payload)) continue;
+    const provider = event.payload["provider"];
+    if (!isRecord(provider) || provider["capability"] !== capability) continue;
+
+    const finalProvider =
+      typeof provider["finalProvider"] === "string" ? provider["finalProvider"].trim() : "";
+    const name = typeof provider["name"] === "string" ? provider["name"].trim() : "";
+    const servedProvider = finalProvider || name;
+    if (!servedProvider) continue;
+
+    const attemptedProviders = Array.isArray(provider["attemptedProviders"])
+      ? provider["attemptedProviders"]
+          .map(safeProviderAttempt)
+          .filter(
+            (attempt): attempt is Pick<ProviderAttempt, "provider" | "status"> => attempt !== null
+          )
+      : [];
+    const model = typeof provider["model"] === "string" ? provider["model"].trim() : "";
+
+    return {
+      capability,
+      provider: servedProvider,
+      fallbackUsed: typeof provider["fallbackUsed"] === "boolean" ? provider["fallbackUsed"] : null,
+      attemptedProviders,
+      ...(model ? { model } : {}),
+      ...(event.timestamp || event.createdAt
+        ? { observedAt: event.timestamp ?? event.createdAt }
+        : {})
+    };
+  }
+
+  return null;
 }
 
 export type ProductRoutingRouteSummary = {
@@ -303,6 +380,56 @@ function InspectionResult(props: { inspection: ProviderChainInspectionResponse }
   );
 }
 
+function servedRouteOutcome(route: ProductRoutingServedRoute | null): {
+  label: string;
+  tone: "ok" | "warn" | "idle";
+} {
+  if (!route || route.fallbackUsed === null) return { label: "Unknown", tone: "idle" };
+  return route.fallbackUsed
+    ? { label: "Fallback used", tone: "warn" }
+    : { label: "Primary served", tone: "ok" };
+}
+
+function ServedRouteSummary(props: {
+  route: ProductRoutingServedRoute | null;
+  loading: boolean;
+  error: string | null;
+}): JSX.Element {
+  const outcome = servedRouteOutcome(props.route);
+  const source = props.route
+    ? "Source: recent Runtime assistant event · no provider call"
+    : props.loading
+      ? "Recent Runtime route evidence is loading."
+      : props.error
+        ? "Recent Runtime route evidence is unavailable."
+        : "No completed-request provider metadata was observed.";
+
+  return (
+    <div className="yuvi-product-routing-served">
+      <div className="yuvi-product-routing-served-heading">
+        <div>
+          <span>Last completed request</span>
+          <strong>{props.route ? providerLabel(props.route.provider) : "Unknown"}</strong>
+        </div>
+        <span className={`yuvi-product-route-badge is-${outcome.tone}`}>{outcome.label}</span>
+      </div>
+      <div className="yuvi-product-routing-served-facts">
+        <span>
+          Served provider: {props.route ? providerLabel(props.route.provider) : "Unknown"}
+        </span>
+        {props.route?.model ? <span>Model: {props.route.model}</span> : null}
+        {props.route?.attemptedProviders.length ? (
+          <span>
+            Runtime attempts:{" "}
+            {props.route.attemptedProviders.map((attempt) => attempt.provider).join(" → ")}
+          </span>
+        ) : null}
+      </div>
+      <small>{source}</small>
+    </div>
+  );
+}
+
 export type ProductRoutingCardProps = {
   definition: ProductRoutingDefinition;
   settings: RuntimeSettingsResponse;
@@ -311,6 +438,9 @@ export type ProductRoutingCardProps = {
   saving: boolean;
   inspecting: boolean;
   inspection: ProviderChainInspectionResponse | undefined;
+  servedRoute?: ProductRoutingServedRoute | null;
+  servedRouteLoading?: boolean;
+  servedRouteError?: string | null;
   onChange(value: string): void;
   onSave(): void;
   onInspect(): void;
@@ -398,6 +528,12 @@ export function ProductRoutingCard(props: ProductRoutingCardProps): JSX.Element 
       </div>
       <RouteList routes={routeStatus} />
 
+      <ServedRouteSummary
+        route={props.servedRoute ?? null}
+        loading={props.servedRouteLoading ?? false}
+        error={props.servedRouteError ?? null}
+      />
+
       <div className="yuvi-product-routing-actions">
         <button
           type="button"
@@ -425,6 +561,7 @@ export function ProductRoutingCard(props: ProductRoutingCardProps): JSX.Element 
 export function ProductAIRouting(): JSX.Element {
   const settings = useAsyncData((signal) => apiClient.getRuntimeSettings(signal), []);
   const providerStatus = useAsyncData((signal) => apiClient.getProviderStatus(signal), []);
+  const recentEvents = useAsyncData((signal) => apiClient.listRecentEvents(50, signal), []);
   const [draft, setDraft] = useState<Record<ProductRoutingCapability, string>>({
     chat: "",
     reasoning: "",
@@ -572,7 +709,8 @@ export function ProductAIRouting(): JSX.Element {
         Provider observations on this page are local/cache-only reads. Use the explicit Models &amp;
         Providers verification action when a live Chat, Reasoning, or Embedding check is needed.
         Fallback eligibility is the Runtime route-readiness projection; call-error fallback policy
-        remains Runtime-owned.
+        remains Runtime-owned. Completed served-provider metadata is shown only when the existing
+        redacted Runtime event projection provides it; missing metadata remains unknown.
       </div>
 
       {settings.loading && !settings.data ? (
@@ -606,6 +744,12 @@ export function ProductAIRouting(): JSX.Element {
               saving={saving === definition.capability}
               inspecting={inspecting === definition.capability}
               inspection={inspections[definition.capability]}
+              servedRoute={productRoutingServedRoute(
+                recentEvents.data?.events,
+                definition.capability
+              )}
+              servedRouteLoading={recentEvents.loading && !recentEvents.data}
+              servedRouteError={recentEvents.error}
               onChange={(value) =>
                 setDraft((current) => ({ ...current, [definition.capability]: value }))
               }

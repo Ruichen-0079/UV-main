@@ -5,6 +5,7 @@ import {
   type ProviderChainInspectionResponse,
   type ProviderRouteHealth,
   type ProvidersStatusResponse,
+  type RuntimeEvent,
   type RuntimeSettingsResponse
 } from "./api/client.js";
 import {
@@ -14,6 +15,7 @@ import {
   inspectProductRouting,
   productRoutingMatchLabel,
   productRoutingRouteSummary,
+  productRoutingServedRoute,
   productRoutingTruth,
   updateProductRouting
 } from "./product-ai-routing.js";
@@ -164,6 +166,123 @@ describe("Product AI Routing", () => {
     );
     expect(JSON.stringify(summary)).not.toContain("secret");
     expect(JSON.stringify(summary)).not.toContain("Authorization");
+  });
+
+  it("projects explicit completed-request fallback metadata without leaking provider errors", () => {
+    const fallbackEvent: RuntimeEvent = {
+      id: "assistant-event-1",
+      traceId: "trace-1",
+      type: "assistant.message",
+      timestamp: "2026-09-06T00:01:00.000Z",
+      payload: {
+        content: "answer",
+        provider: {
+          name: "nvidia",
+          finalProvider: "nvidia",
+          capability: "chat",
+          model: "nvidia-chat",
+          mock: false,
+          fallbackUsed: true,
+          attemptedProviders: [
+            {
+              provider: "deepseek",
+              status: "failed",
+              error: "Authorization=sk-secret-value"
+            },
+            { provider: "nvidia", status: "success" }
+          ]
+        }
+      }
+    };
+
+    const served = productRoutingServedRoute([fallbackEvent], "chat");
+    expect(served).toMatchObject({
+      provider: "nvidia",
+      model: "nvidia-chat",
+      fallbackUsed: true,
+      attemptedProviders: [
+        { provider: "deepseek", status: "failed" },
+        { provider: "nvidia", status: "success" }
+      ],
+      observedAt: "2026-09-06T00:01:00.000Z"
+    });
+    expect(JSON.stringify(served)).not.toContain("sk-secret-value");
+    expect(JSON.stringify(served)).not.toContain("Authorization");
+
+    const markup = renderToStaticMarkup(
+      <ProductRoutingCard
+        definition={PRODUCT_ROUTING_DEFINITIONS[0]!}
+        settings={settingsFixture()}
+        providerStatus={providerStatusFixture()}
+        draft="deepseek,nvidia"
+        saving={false}
+        inspecting={false}
+        inspection={undefined}
+        servedRoute={served}
+        onChange={() => undefined}
+        onSave={() => undefined}
+        onInspect={() => undefined}
+      />
+    );
+    expect(markup).toContain("Fallback used");
+    expect(markup).toContain("Served provider: NVIDIA");
+    expect(markup).toContain("Runtime attempts: deepseek → nvidia");
+
+    const primaryEvent: RuntimeEvent = {
+      ...fallbackEvent,
+      id: "assistant-event-primary",
+      payload: {
+        provider: {
+          name: "deepseek",
+          capability: "chat",
+          mock: false,
+          fallbackUsed: false,
+          attemptedProviders: [{ provider: "deepseek", status: "success" }]
+        }
+      }
+    };
+    expect(productRoutingServedRoute([primaryEvent], "chat")).toMatchObject({
+      provider: "deepseek",
+      fallbackUsed: false
+    });
+  });
+
+  it("keeps missing fallback-used metadata explicitly unknown", () => {
+    const event: RuntimeEvent = {
+      id: "assistant-event-2",
+      traceId: "trace-2",
+      type: "assistant.message",
+      timestamp: "2026-09-06T00:02:00.000Z",
+      payload: {
+        provider: {
+          name: "deepseek",
+          capability: "chat",
+          mock: false
+        }
+      }
+    };
+
+    const served = productRoutingServedRoute([event], "chat");
+    expect(served).toMatchObject({ provider: "deepseek", fallbackUsed: null });
+    expect(productRoutingServedRoute([event], "reasoning")).toBeNull();
+
+    const markup = renderToStaticMarkup(
+      <ProductRoutingCard
+        definition={PRODUCT_ROUTING_DEFINITIONS[0]!}
+        settings={settingsFixture()}
+        providerStatus={providerStatusFixture()}
+        draft="deepseek,nvidia"
+        saving={false}
+        inspecting={false}
+        inspection={undefined}
+        servedRoute={served}
+        onChange={() => undefined}
+        onSave={() => undefined}
+        onInspect={() => undefined}
+      />
+    );
+    expect(markup).toContain("Unknown");
+    expect(markup).not.toContain("Fallback used");
   });
 
   it("calls chain inspection only through the explicit inspection action seam", async () => {
