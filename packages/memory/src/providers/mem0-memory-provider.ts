@@ -41,7 +41,8 @@ const LEGAL_ASSERTION_SOURCES: ReadonlySet<string> = new Set([
   "unknown"
 ]);
 const LEGAL_VERIFICATIONS: ReadonlySet<string> = new Set(["unverified", "verified", "unknown"]);
-const SENSITIVE_METADATA_KEY = /key|secret|password|authorization|token|connection/i;
+const SENSITIVE_METADATA_KEY =
+  /key|secret|password|authorization|token|connection|embedding|rawEmbedding|waveform|biometric|speakerEmbedding/i;
 const MAX_METADATA_KEY_LENGTH = 128;
 const MAX_METADATA_STRING_LENGTH = 512;
 const MAX_METADATA_ARRAY_LENGTH = 32;

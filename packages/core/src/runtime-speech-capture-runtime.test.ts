@@ -352,14 +352,34 @@ describe("Runtime finalized capture lifecycle", () => {
       {
         text: "two speakers",
         segments: [
-          { segmentId: "seg-0", text: "a", speakerClusterId: "0" },
-          { segmentId: "seg-1", text: "b", speakerClusterId: "1" }
+          { segmentId: "seg-0", speakerClusterId: "0" },
+          { segmentId: "seg-1", speakerClusterId: "1" }
         ]
       },
       { sessionId: "s", captureEpoch: "epoch-diar" }
     );
     expect(observation.segments?.map((segment) => segment.speakerClusterId)).toEqual(["0", "1"]);
-    expect(JSON.stringify(observation)).not.toMatch(/personId|voiceProfileId/);
+    expect(JSON.stringify(observation)).not.toMatch(/personId/);
+    const interpretation = runtime.interpretSpeechObservationIdentity({
+      observation,
+      address: {
+        characterInstanceId: "yuvi-default-character-instance",
+        personaProfileId: "yuvi-default-persona-profile"
+      },
+      scopeReference: "scope-voice-runtime"
+    });
+    expect(interpretation.remainsObservation).toBe(true);
+    expect(interpretation.resolutions).toHaveLength(2);
+    expect(interpretation.resolutions[0]?.speakerClusterId).toBe("0");
+    expect(interpretation.resolutions[1]?.speakerClusterId).toBe("1");
+    expect(interpretation.characterSpeakers).toEqual([
+      { speaker: "unknown" },
+      { speaker: "unknown" }
+    ]);
+    expect(interpretation.claimAssertor).toEqual({ resolution: "unresolved" });
+    expect(JSON.stringify(interpretation.characterSpeakers)).not.toMatch(
+      /voiceProfileId|embedding|threshold|score/
+    );
   });
 
   it("throws on a duplicate Runtime claim of the same epoch and segment", () => {

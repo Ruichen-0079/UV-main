@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""YUVI local CPU STT + speaker identity sidecar (sherpa-onnx).
+"""YUVI local CPU STT + acoustic voice-profile sidecar (sherpa-onnx).
 
 Process/service lifecycle only. Does not route Character or Cognition.
 Never logs or returns raw speaker embeddings.
+
+The persisted SpeakerStore `speakerId` is a legacy name for the acoustic
+template identity (`voiceProfileId`). Sidecar outputs never include personId,
+canonicalName, P8 identity, relationship, or trust.
 """
 
 from __future__ import annotations
@@ -26,6 +30,16 @@ os.environ.setdefault("OMP_NUM_THREADS", "4")
 
 import numpy as np
 import sherpa_onnx
+
+from speaker_store import (
+    SpeakerStore,
+    attach_cluster_voice_profile_matches,
+    cluster_audio_is_matchable,
+    collect_cluster_audio,
+    is_mixed_capture,
+    unique_cluster_ids,
+    voice_profile_match_from_identify,
+)
 
 
 class VadUnavailable(RuntimeError):
@@ -106,119 +120,6 @@ def _resample(samples: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
     x_old = np.linspace(0.0, 1.0, num=samples.shape[0], endpoint=False)
     x_new = np.linspace(0.0, 1.0, num=target, endpoint=False)
     return np.interp(x_new, x_old, samples).astype(np.float32)
-
-
-class SpeakerStore:
-    """Local speaker profiles: speakers.json metadata + speakers.npz vectors (0600)."""
-
-    def __init__(self, directory: Path, dim: int, threshold: float) -> None:
-        self.directory = directory
-        self.directory.mkdir(parents=True, exist_ok=True)
-        self.meta_path = self.directory / "speakers.json"
-        self.vec_path = self.directory / "speakers.npz"
-        self.dim = dim
-        self.threshold = threshold
-        self._lock = threading.Lock()
-        self.meta: dict[str, dict[str, str]] = {}
-        self.vectors: dict[str, np.ndarray] = {}
-        self._load()
-
-    def _load(self) -> None:
-        if self.meta_path.is_file():
-            raw = json.loads(self.meta_path.read_text(encoding="utf-8"))
-            speakers = raw.get("speakers") if isinstance(raw, dict) else []
-            if isinstance(speakers, list):
-                for item in speakers:
-                    if isinstance(item, dict) and isinstance(item.get("speakerId"), str):
-                        self.meta[item["speakerId"]] = {
-                            "speakerId": item["speakerId"],
-                            "label": str(item.get("label") or item["speakerId"]),
-                            "enrolledAt": str(item.get("enrolledAt") or ""),
-                        }
-        if self.vec_path.is_file():
-            with np.load(self.vec_path, allow_pickle=False) as data:
-                for key in data.files:
-                    self.vectors[key] = np.asarray(data[key], dtype=np.float32)
-
-    def _persist(self) -> None:
-        payload = {"speakers": [self.public(item) for item in self.meta.values()]}
-        tmp_meta = self.meta_path.with_suffix(".tmp")
-        tmp_meta.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp_meta, self.meta_path)
-        os.chmod(self.meta_path, 0o600)
-        tmp_vec = self.vec_path.with_suffix(".tmp.npz")
-        if self.vectors:
-            np.savez(tmp_vec, **{key: value for key, value in self.vectors.items()})
-        else:
-            np.savez(tmp_vec)
-        os.replace(tmp_vec, self.vec_path)
-        os.chmod(self.vec_path, 0o600)
-
-    def public(self, item: dict[str, str]) -> dict[str, str]:
-        return {
-            "speakerId": item["speakerId"],
-            "label": item["label"],
-            "enrolledAt": item["enrolledAt"],
-        }
-
-    def list_public(self) -> list[dict[str, str]]:
-        with self._lock:
-            return [self.public(item) for item in self.meta.values()]
-
-    def enroll(self, speaker_id: str, label: str, embedding: np.ndarray) -> dict[str, str]:
-        vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
-        if vector.size != self.dim:
-            raise ValueError("speaker embedding dimension mismatch")
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        record = {"speakerId": speaker_id, "label": label, "enrolledAt": now}
-        with self._lock:
-            self.meta[speaker_id] = record
-            self.vectors[speaker_id] = vector.copy()
-            self._persist()
-        return self.public(record)
-
-    def delete(self, speaker_id: str) -> bool:
-        with self._lock:
-            existed = speaker_id in self.meta
-            self.meta.pop(speaker_id, None)
-            self.vectors.pop(speaker_id, None)
-            self._persist()
-        return existed
-
-    def identify(self, embedding: np.ndarray) -> dict[str, Any]:
-        vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
-        norm = np.linalg.norm(vector)
-        if norm == 0:
-            return {"identity": "UNKNOWN", "speakerId": None, "label": None, "score": 0.0, "threshold": self.threshold}
-        vector = vector / norm
-        best_id = None
-        best_score = -1.0
-        with self._lock:
-            items = list(self.vectors.items())
-            meta = dict(self.meta)
-        for speaker_id, stored in items:
-            stored_norm = np.linalg.norm(stored)
-            if stored_norm == 0:
-                continue
-            score = float(np.dot(vector, stored / stored_norm))
-            if score > best_score:
-                best_score = score
-                best_id = speaker_id
-        if best_id is None or best_score < self.threshold:
-            return {
-                "identity": "UNKNOWN",
-                "speakerId": None,
-                "label": None,
-                "score": round(best_score, 4) if best_score >= 0 else None,
-                "threshold": self.threshold,
-            }
-        return {
-            "identity": "KNOWN",
-            "speakerId": best_id,
-            "label": meta.get(best_id, {}).get("label"),
-            "score": round(best_score, 4),
-            "threshold": self.threshold,
-        }
 
 
 class SttEngine:
@@ -406,28 +307,55 @@ class SttEngine:
             )
         return segments
 
+    def identify_clusters(
+        self, sample_rate: int, samples: np.ndarray, segments: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Cluster-scoped acoustic match. Never apply one mixed-audio match to all clusters."""
+
+        audio = _resample(samples, sample_rate, 16000)
+        clips = collect_cluster_audio(audio, 16000, segments)
+        matches: dict[str, dict[str, Any]] = {}
+        for cluster_id in unique_cluster_ids(segments):
+            clip = clips.get(cluster_id)
+            if clip is None or not cluster_audio_is_matchable(clip, 16000):
+                matches[cluster_id] = voice_profile_match_from_identify(None)
+                continue
+            matches[cluster_id] = voice_profile_match_from_identify(self.store.identify(self.embed(16000, clip)))
+        return matches
+
     def handle_transcribe(self, body: dict[str, Any]) -> dict[str, Any]:
         sample_rate, samples = _decode_audio(str(body.get("audioBase64") or ""), str(body.get("mimeType") or "audio/wav"))
         with self._lock:
             started = time.perf_counter()
             asr = self.transcribe(sample_rate, samples, body.get("language") if isinstance(body.get("language"), str) else None)
+            segments = self.diarize(sample_rate, samples) if body.get("diarize") else None
             identity = None
+            voice_profile_match = None
             if body.get("identify"):
-                identity = self.store.identify(self.embed(sample_rate, samples))
-            segments = None
-            if body.get("diarize"):
-                segments = self.diarize(sample_rate, samples)
+                if is_mixed_capture(segments):
+                    # Mixed capture: cluster-scoped match only. Whole-audio identify
+                    # would smear one template onto every speaker.
+                    cluster_matches = self.identify_clusters(sample_rate, samples, segments or [])
+                    segments = attach_cluster_voice_profile_matches(segments or [], cluster_matches)
+                else:
+                    identity = self.store.identify(self.embed(sample_rate, samples))
+                    voice_profile_match = voice_profile_match_from_identify(identity)
+                    if segments and unique_cluster_ids(segments):
+                        cluster_id = unique_cluster_ids(segments)[0]
+                        segments = attach_cluster_voice_profile_matches(segments, {cluster_id: voice_profile_match})
         return {
             "text": asr["text"],
             "language": asr["language"],
             "identity": identity,
+            "voiceProfileMatch": voice_profile_match,
             "segments": segments,
             "latencyMs": int((time.perf_counter() - started) * 1000),
             "device": "cpu",
         }
 
     def handle_enroll(self, body: dict[str, Any]) -> dict[str, Any]:
-        speaker_id = str(body.get("speakerId") or "").strip()
+        # Acoustic enrollment only. Semantic person assignment is owned by Memory/P8.
+        speaker_id = str(body.get("speakerId") or body.get("voiceProfileId") or "").strip()
         label = str(body.get("label") or speaker_id).strip()
         if not speaker_id:
             raise ValueError("speakerId is required")
@@ -435,14 +363,14 @@ class SttEngine:
         with self._lock:
             embedding = self.embed(sample_rate, samples)
             record = self.store.enroll(speaker_id, label, embedding)
-        return record
+        return {**record, "voiceProfileId": record["speakerId"]}
 
     def handle_identify(self, body: dict[str, Any]) -> dict[str, Any]:
         sample_rate, samples = _decode_audio(str(body.get("audioBase64") or ""), str(body.get("mimeType") or "audio/wav"))
         with self._lock:
             embedding = self.embed(sample_rate, samples)
             result = self.store.identify(embedding)
-        return result
+        return {**result, "voiceProfileMatch": voice_profile_match_from_identify(result)}
 
 
 def _public_json(value: Any) -> Any:
@@ -452,7 +380,7 @@ def _public_json(value: Any) -> Any:
         return {
             key: _public_json(item)
             for key, item in value.items()
-            if key not in {"embedding", "rawEmbedding", "embeddings"}
+            if key not in {"embedding", "rawEmbedding", "embeddings", "vector", "waveform"}
         }
     if isinstance(value, list):
         return [_public_json(item) for item in value]

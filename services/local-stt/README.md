@@ -39,6 +39,8 @@ Speaker profiles (`YUVI_STT_SPEAKER_DIR`, default `<model-dir>/speakers`):
 - `speakers.json` — metadata only, file mode `0600`
 - `speakers.npz` — raw embeddings, file mode `0600`
 
-The sidecar reloads both files on start. HTTP JSON never includes embedding
-vectors; delete removes the metadata row and the vector. Identify is
-fail-closed: cosine score below threshold returns `UNKNOWN`.
+Persisted `speakerId` is the acoustic template identity (`voiceProfileId`), not
+a person id. HTTP JSON never includes embedding vectors; delete removes the
+metadata row and the vector. Identify is fail-closed: cosine score below
+threshold returns `NO_MATCH` / `UNKNOWN`. Mixed diarized captures are matched
+per cluster; a whole-audio template match is never applied to every speaker.

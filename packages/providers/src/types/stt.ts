@@ -11,6 +11,23 @@ export type STTInput = {
   metadata?: Record<string, unknown> | undefined;
 };
 
+export const VOICE_PROFILE_MATCH_STATUSES = ["MATCHED", "NO_MATCH"] as const;
+
+export type VoiceProfileMatchStatus = (typeof VOICE_PROFILE_MATCH_STATUSES)[number];
+
+/**
+ * Provider-neutral acoustic template evidence.
+ *
+ * `voiceProfileId` is the durable acoustic template identity, mapped from the
+ * local sidecar's legacy `speakerId` at the adapter boundary. It is not a
+ * person id, not a capture-local cluster id, and not a display name.
+ * Similarity scores stay sidecar-internal diagnostics.
+ */
+export type VoiceProfileMatch = {
+  status: VoiceProfileMatchStatus;
+  voiceProfileId?: string | undefined;
+};
+
 export type STTSegment = {
   /** Stable identity of this finalized segment; never derived from transcript text. */
   segmentId?: string | undefined;
@@ -28,6 +45,12 @@ export type STTSegment = {
    * never be persisted as identity truth.
    */
   speakerClusterId?: string | undefined;
+  /**
+   * Cluster-scoped acoustic template match. Present only when this cluster's
+   * own audio spans were matched. Never copied from a mixed whole-audio
+   * identify() result.
+   */
+  voiceProfileMatch?: VoiceProfileMatch | undefined;
 };
 
 export type STTOutput = ProviderMetadata & {
@@ -46,6 +69,11 @@ export type STTOutput = ProviderMetadata & {
   language?: string | undefined;
   confidence?: number | undefined;
   segments?: STTSegment[] | undefined;
+  /**
+   * Whole-audio acoustic template match. Omitted for mixed-cluster captures
+   * so one mixed embedding cannot name every speaker.
+   */
+  voiceProfileMatch?: VoiceProfileMatch | undefined;
 };
 
 export type VoiceActivityInput = {

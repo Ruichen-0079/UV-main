@@ -127,6 +127,11 @@ import {
   createSpeechCaptureStore,
   type SpeechCaptureStore
 } from "./runtime-speech-capture.js";
+import {
+  interpretSpeechObservationIdentity,
+  type InterpretSpeechObservationIdentityInput,
+  type SpeechObservationIdentityInterpretation
+} from "./runtime-speech-identity.js";
 import type { CharacterProactiveProposal } from "@companion/character-abi";
 import {
   advanceActivityRevision,
@@ -2029,13 +2034,35 @@ export class RuntimeOrchestrator {
     const output = await this.measureProvider(
       "stt",
       sttProvider.name,
-      () => sttProvider.transcribeAudio(input, input.signal ? { signal: input.signal } : undefined),
+      () =>
+        sttProvider.transcribeAudio(
+          {
+            ...input,
+            metadata: {
+              identify: true,
+              diarize: true,
+              ...input.metadata
+            }
+          },
+          input.signal ? { signal: input.signal } : undefined
+        ),
       { traceId: input.traceId, parentId: input.parentId }
     );
     return this.admitFinalizedSpeechObservation(output, {
       sessionId: input.sessionId,
       captureEpoch: input.captureEpoch
     });
+  }
+
+  /**
+   * Interprets acoustic voice-profile evidence on an already-finalized
+   * observation. This does not admit an interaction, write Memory, or
+   * invoke Character.
+   */
+  interpretSpeechObservationIdentity(
+    input: InterpretSpeechObservationIdentityInput
+  ): SpeechObservationIdentityInterpretation {
+    return interpretSpeechObservationIdentity(input);
   }
 
   async handleImageInput(input: HandleImageInputInput): Promise<PerceptionVisionEvent> {

@@ -78,6 +78,18 @@ export {
   type IdentityEvidenceSelection,
   type IdentityEvidenceSelectionInput
 } from "./identity-evidence.js";
+export {
+  VOICE_PROFILE_BINDING_KIND,
+  VOICE_PROFILE_BINDING_METADATA,
+  admitVoiceProfilePersonBinding,
+  assertNoBiometricMetadata,
+  isVoiceProfileBindingEvent,
+  planVoiceProfilePersonBindingCorrection,
+  readVoiceProfileId,
+  voiceProfileBindingWriteFields,
+  type VoiceProfilePersonBindingAdmission,
+  type VoiceProfilePersonBindingInput
+} from "./voice-profile-binding.js";
 export { detectCurrentAffect } from "./affect.js";
 export { computeRetentionPolicy, type RetentionPolicy } from "./retention.js";
 export {

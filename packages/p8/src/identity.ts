@@ -16,7 +16,7 @@ import {
  * eligible evidence records and derives a small, disposable, rebuildable
  * projection. It never writes Memory, never mutates a raw transcript, and
  * never treats acoustic provenance (speakerId / voiceProfileId / speaker
- * clusters) as identity — that boundary belongs to 13B.
+ * clusters) as identity — Atom 13B owns voice-profile → person resolution.
  *
  * Resolution is deterministic-first. Candidate strength is a tier, not a
  * scalar:
