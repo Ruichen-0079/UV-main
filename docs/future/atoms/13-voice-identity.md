@@ -111,6 +111,54 @@ conflicting evidence, two unknown speakers, false self-identification claim,
 wrong binding correction, restart of durable voice-profile state, and no raw
 embedding leakage.
 
+## Implementation status
+
+- **13A Identity Mention Resolution** ✅
+  Name / nickname / title / mention → personId over eligible Memory evidence.
+  Latin STT hypotheses stay gated on addressing context. Acoustic provenance
+  cannot resolve a mention.
+- **13B Voice Profile → Person Resolution** ✅
+  Acoustic observation → voice profile evidence → P8 person resolution.
+
+### 13B frozen layers
+
+```text
+speakerClusterId  ≠  voiceProfileId  ≠  personId  ≠  displayName
+```
+
+Sidecar persisted `speakerId` is the acoustic template id (`voiceProfileId`).
+It is mapped at the provider boundary and is never a person id.
+
+### Durable binding authority
+
+Acoustic match only identifies a voice profile. Durable `voiceProfileId ↔
+personId` binding is Memory evidence created by a trusted local controller
+(explicit enrollment / assignment). SpeakerStore stays an acoustic template
+store. Raw embeddings never enter Memory.
+
+### Correction
+
+Wrong semantic bindings are superseded through the Atom 12 eligible-evidence
+path. Raw acoustic observations and voice profiles stay immutable.
+
+### Privacy
+
+Embeddings remain local (`speakers.npz` mode `0600`). They are stripped from
+HTTP JSON, providerMetadata, Memory metadata, Character views, and logs.
+Similarity scores are sidecar diagnostics only.
+
+### Unknown / conflicting
+
+No match, no binding, mixed-capture without per-span transcript, or
+self-identification in speech content → `UNRESOLVED`. Two eligible trusted
+bindings to different people → `CONFLICTING` (no automatic winner).
+`RESOLVED_SUPPORTED` is not emitted: current evidence has no legal
+supported-but-not-trusted voice-person binding.
+
+### Atom 14
+
+Voice Mode / barge-in is untouched.
+
 ## Stop condition
 
 Stop when a speech observation can safely project a person identity or explicit

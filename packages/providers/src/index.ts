@@ -58,8 +58,11 @@ export type {
   STTSegment,
   STTProvider,
   VoiceActivityInput,
-  VoiceActivityOutput
+  VoiceActivityOutput,
+  VoiceProfileMatch,
+  VoiceProfileMatchStatus
 } from "./types/stt.js";
+export { VOICE_PROFILE_MATCH_STATUSES } from "./types/stt.js";
 export type { VisionInput, VisionOutput, VisionProvider } from "./types/vision.js";
 export type {
   EmbeddingBatchOutput,

@@ -65,6 +65,11 @@ export {
   type SpeechCaptureClaimStatus,
   type SpeechCaptureStore
 } from "./runtime-speech-capture.js";
+export {
+  interpretSpeechObservationIdentity,
+  type InterpretSpeechObservationIdentityInput,
+  type SpeechObservationIdentityInterpretation
+} from "./runtime-speech-identity.js";
 
 export {
   PROACTIVE_ADMISSION_REASONS,

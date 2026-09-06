@@ -84,6 +84,7 @@ export * from "./reconstruction.js";
 export * from "./profile.js";
 export * from "./identity-evidence.js";
 export * from "./identity.js";
+export * from "./voice-identity.js";
 
 export function createDefaultP8IdentityAddress(subjectScopeId?: string): P8IdentityAddress {
   return freezeAddress({

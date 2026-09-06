@@ -8,7 +8,8 @@ import type {
   STTSegment,
   STTProvider,
   VoiceActivityInput,
-  VoiceActivityOutput
+  VoiceActivityOutput,
+  VoiceProfileMatch
 } from "../types/stt.js";
 
 export type LocalSTTProviderOptions = {
@@ -79,8 +80,8 @@ export class LocalSTTProvider implements STTProvider {
           audioBase64,
           mimeType: input.mimeType ?? "audio/wav",
           language: input.language,
-          identify: Boolean(input.metadata?.["identify"]),
-          diarize: Boolean(input.metadata?.["diarize"])
+          identify: input.metadata?.["identify"] !== false,
+          diarize: input.metadata?.["diarize"] !== false
         }),
         signal: transport.signal
       });
@@ -93,19 +94,8 @@ export class LocalSTTProvider implements STTProvider {
           retryable: response.status >= 500
         });
       }
-      const body = (await response.json()) as {
-        text?: string;
-        language?: string;
-        latencyMs?: number;
-        /**
-         * Acoustic template match evidence from the optional identify flag.
-         * Deliberately not surfaced: template matches are not person identity,
-         * and voice-evidence-to-person resolution belongs to a later atom.
-         */
-        identity?: { identity?: string; speakerId?: string | null };
-        /** Sidecar diarization spans: time + cluster label, no per-span transcript. */
-        segments?: Array<{ startMs?: number; endMs?: number; speaker?: string }> | null;
-      };
+      const body = (await response.json()) as SidecarTranscribeBody;
+      const acoustic = normalizeAcousticEvidence(body);
       return {
         observationId: randomUUID(),
         text: body.text ?? "",
@@ -113,9 +103,13 @@ export class LocalSTTProvider implements STTProvider {
         latencyMs: body.latencyMs,
         model: this.options.model,
         finalProvider: this.name,
-        ...(body.segments?.length ? { segments: normalizeDiarization(body.segments) } : {}),
-        // Provenance and diagnostics only; acoustic speaker evidence travels in
-        // typed STTSegment fields, never in this metadata bag.
+        ...(acoustic.segments === undefined ? {} : { segments: acoustic.segments }),
+        ...(acoustic.voiceProfileMatch === undefined
+          ? {}
+          : { voiceProfileMatch: acoustic.voiceProfileMatch }),
+        // Provenance and diagnostics only. Acoustic evidence is typed
+        // VoiceProfileMatch; person identity is not decided here. Raw
+        // embeddings, scores, and sidecar labels never enter this bag.
         providerMetadata: {
           device: "cpu"
         }
@@ -200,20 +194,143 @@ export class LocalSTTProvider implements STTProvider {
   }
 }
 
+type SidecarVoiceProfileMatch = {
+  status?: string;
+  voiceProfileId?: string | null;
+};
+
+type SidecarIdentity = {
+  identity?: string;
+  speakerId?: string | null;
+  label?: string | null;
+  score?: number | null;
+};
+
+type SidecarSegment = {
+  startMs?: number;
+  endMs?: number;
+  speaker?: string;
+  voiceProfileMatch?: SidecarVoiceProfileMatch | null;
+};
+
+type SidecarTranscribeBody = {
+  text?: string;
+  language?: string;
+  latencyMs?: number;
+  identity?: SidecarIdentity | null;
+  voiceProfileMatch?: SidecarVoiceProfileMatch | null;
+  segments?: SidecarSegment[] | null;
+};
+
 /**
- * Normalizes sidecar diarization spans into provider-neutral typed segments.
- * The sidecar cluster label is preserved verbatim as a capture-local
- * `speakerClusterId`; it is never mapped onto a person or voice profile.
+ * Normalizes sidecar diarization + acoustic template evidence.
+ *
+ * Legacy sidecar `speakerId` is mapped to `voiceProfileId` here. Cluster
+ * labels stay capture-local. Mixed captures never inherit a whole-audio
+ * template match. Scores, labels, embeddings, and person fields are dropped.
  */
-function normalizeDiarization(
-  segments: Array<{ startMs?: number; endMs?: number; speaker?: string }>
-): STTSegment[] {
-  return segments.map((segment) => ({
+function normalizeAcousticEvidence(body: SidecarTranscribeBody): {
+  segments?: STTSegment[];
+  voiceProfileMatch?: VoiceProfileMatch;
+} {
+  const sourceSegments = body.segments ?? [];
+  const segments = sourceSegments.length > 0 ? sourceSegments.map(normalizeSegment) : undefined;
+  const clusters = uniqueClusterIds(segments);
+  const mixed = clusters.length > 1;
+  const observationMatch =
+    readVoiceProfileMatch(body.voiceProfileMatch) ?? readLegacyIdentity(body.identity);
+
+  if (segments === undefined) {
+    return observationMatch === undefined ? {} : { voiceProfileMatch: observationMatch };
+  }
+
+  if (mixed) {
+    // Defense in depth: if the sidecar still returned one whole-audio match
+    // and no cluster-scoped matches, drop it rather than labeling everyone.
+    const hasClusterScopedMatch = segments.some(
+      (segment) => segment.voiceProfileMatch !== undefined
+    );
+    return {
+      segments: hasClusterScopedMatch
+        ? segments.map((segment) =>
+            segment.voiceProfileMatch === undefined
+              ? { ...segment, voiceProfileMatch: { status: "NO_MATCH" as const } }
+              : segment
+          )
+        : segments.map((segment) => ({
+            ...segment,
+            voiceProfileMatch: { status: "NO_MATCH" as const }
+          }))
+    };
+  }
+
+  if (observationMatch !== undefined && segments.length > 0) {
+    return {
+      voiceProfileMatch: observationMatch,
+      segments: segments.map((segment) =>
+        segment.voiceProfileMatch === undefined
+          ? { ...segment, voiceProfileMatch: observationMatch }
+          : segment
+      )
+    };
+  }
+
+  return {
+    segments,
+    ...(observationMatch === undefined ? {} : { voiceProfileMatch: observationMatch })
+  };
+}
+
+function normalizeSegment(segment: SidecarSegment): STTSegment {
+  const match = readVoiceProfileMatch(segment.voiceProfileMatch);
+  return {
     segmentId: randomUUID(),
     startMs: segment.startMs,
     endMs: segment.endMs,
-    ...(segment.speaker !== undefined ? { speakerClusterId: segment.speaker } : {})
-  }));
+    ...(segment.speaker !== undefined ? { speakerClusterId: String(segment.speaker) } : {}),
+    ...(match === undefined ? {} : { voiceProfileMatch: match })
+  };
+}
+
+function uniqueClusterIds(segments: STTSegment[] | undefined): string[] {
+  if (segments === undefined) return [];
+  const ids: string[] = [];
+  for (const segment of segments) {
+    const clusterId = segment.speakerClusterId;
+    if (clusterId === undefined || ids.includes(clusterId)) continue;
+    ids.push(clusterId);
+  }
+  return ids;
+}
+
+function readVoiceProfileMatch(
+  value: SidecarVoiceProfileMatch | null | undefined
+): VoiceProfileMatch | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  if (value.status === "MATCHED") {
+    const voiceProfileId =
+      typeof value.voiceProfileId === "string" && value.voiceProfileId.trim()
+        ? value.voiceProfileId.trim()
+        : undefined;
+    if (!voiceProfileId) return { status: "NO_MATCH" };
+    return { status: "MATCHED", voiceProfileId };
+  }
+  if (value.status === "NO_MATCH") return { status: "NO_MATCH" };
+  return undefined;
+}
+
+function readLegacyIdentity(
+  value: SidecarIdentity | null | undefined
+): VoiceProfileMatch | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  // Legacy speakerId is the acoustic template id, never a person id.
+  if (value.identity === "KNOWN" && typeof value.speakerId === "string" && value.speakerId.trim()) {
+    return { status: "MATCHED", voiceProfileId: value.speakerId.trim() };
+  }
+  if (value.identity === "UNKNOWN" || value.identity === "KNOWN") {
+    return { status: "NO_MATCH" };
+  }
+  return undefined;
 }
 
 function resolveAudioBase64(input: STTInput): string {

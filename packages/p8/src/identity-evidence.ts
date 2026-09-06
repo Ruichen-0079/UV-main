@@ -25,7 +25,8 @@ import {
  * caller that skipped the Memory read seam.
  *
  * Acoustic provenance (`speakerId`, `voiceProfileId`, speaker clusters) is
- * never read. It belongs to 13B and cannot resolve a person here.
+ * never read here. Atom 13B reads opaque voice-profile binding metadata on a
+ * separate resolution path.
  */
 
 export const P8_IDENTITY_EVIDENCE_VERSION = "p8-identity-evidence.v1" as const;

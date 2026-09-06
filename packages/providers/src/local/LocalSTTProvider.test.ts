@@ -83,41 +83,104 @@ describe("LocalSTTProvider", () => {
     const { output } = await transcribeWithSidecar({
       text: "hello",
       language: "en",
-      identity: { identity: "KNOWN", speakerId: "ruichen", score: 0.9 },
+      identity: { identity: "KNOWN", speakerId: "vp_7", score: 0.9, label: "desk" },
       segments: [{ startMs: 0, endMs: 900, speaker: "0" }],
       embedding: [0.1, 0.2]
     });
 
     expect(output.providerMetadata).toEqual({ device: "cpu" });
     const serialized = JSON.stringify(output);
-    // No raw sidecar DTO, no acoustic template match result, no raw embedding
-    // vector may leak as semantic metadata.
     expect(serialized).not.toContain("diarization");
     expect(serialized).not.toContain('"identity"');
     expect(serialized).not.toContain("speakerId");
-    expect(serialized).not.toContain("ruichen");
     expect(serialized).not.toContain("0.1");
+    expect(serialized).not.toContain("0.9");
+    expect(serialized).not.toContain("desk");
+    expect(output).not.toHaveProperty("personId");
   });
 
-  it("never presents a cluster label or template match as person identity", async () => {
+  it("maps legacy sidecar speakerId to opaque voiceProfileId, never personId", async () => {
     const { output } = await transcribeWithSidecar({
-      text: "two speakers",
+      text: "one speaker",
       language: "en",
-      identity: { identity: "KNOWN", speakerId: "ruichen", score: 0.93 },
+      identity: { identity: "KNOWN", speakerId: "vp_7", score: 0.93, label: "ruichen" },
       segments: [
         { startMs: 0, endMs: 1000, speaker: "0" },
         { startMs: 1100, endMs: 2600, speaker: "0" }
       ]
     });
 
-    // Cluster labels stay verbatim capture-local diarization evidence; nothing
-    // in the output names a person or a voice profile.
     for (const segment of output.segments ?? []) {
       expect(segment.speakerClusterId).toBe("0");
+      expect(segment.voiceProfileMatch).toEqual({ status: "MATCHED", voiceProfileId: "vp_7" });
     }
+    expect(output.voiceProfileMatch).toEqual({ status: "MATCHED", voiceProfileId: "vp_7" });
     expect(output).not.toHaveProperty("personId");
     expect(output).not.toHaveProperty("identity");
-    expect(output).not.toHaveProperty("voiceProfileId");
+    expect(JSON.stringify(output)).not.toContain("0.93");
+    expect(JSON.stringify(output)).not.toContain("ruichen");
+  });
+
+  it("does not apply a whole-audio identity to every mixed-capture cluster", async () => {
+    const { output } = await transcribeWithSidecar({
+      text: "two speakers",
+      language: "en",
+      identity: { identity: "KNOWN", speakerId: "vp_7", score: 0.99 },
+      segments: [
+        { startMs: 0, endMs: 1000, speaker: "0" },
+        { startMs: 1100, endMs: 2600, speaker: "1" }
+      ]
+    });
+
+    expect(output.voiceProfileMatch).toBeUndefined();
+    expect(output.segments).toHaveLength(2);
+    expect(output.segments?.map((segment) => segment.speakerClusterId)).toEqual(["0", "1"]);
+    expect(
+      output.segments?.every((segment) => segment.voiceProfileMatch?.status === "NO_MATCH")
+    ).toBe(true);
+    expect(JSON.stringify(output)).not.toContain("vp_7");
+    expect(output).not.toHaveProperty("personId");
+  });
+
+  it("keeps cluster-scoped matches distinct on mixed captures", async () => {
+    const { output } = await transcribeWithSidecar({
+      text: "two speakers",
+      language: "en",
+      segments: [
+        {
+          startMs: 0,
+          endMs: 1000,
+          speaker: "0",
+          voiceProfileMatch: { status: "MATCHED", voiceProfileId: "vp_7" }
+        },
+        {
+          startMs: 1100,
+          endMs: 2600,
+          speaker: "1",
+          voiceProfileMatch: { status: "NO_MATCH" }
+        }
+      ]
+    });
+
+    expect(output.voiceProfileMatch).toBeUndefined();
+    expect(output.segments?.[0]?.voiceProfileMatch).toEqual({
+      status: "MATCHED",
+      voiceProfileId: "vp_7"
+    });
+    expect(output.segments?.[1]?.voiceProfileMatch).toEqual({ status: "NO_MATCH" });
+  });
+
+  it("maps below-threshold sidecar identify to NO_MATCH without embeddings", async () => {
+    const { output } = await transcribeWithSidecar({
+      text: "unknown",
+      language: "en",
+      identity: { identity: "UNKNOWN", speakerId: null, score: 0.2, threshold: 0.55 },
+      embedding: [0.4, 0.5, 0.6]
+    });
+
+    expect(output.voiceProfileMatch).toEqual({ status: "NO_MATCH" });
+    expect(JSON.stringify(output)).not.toContain("0.4");
+    expect(JSON.stringify(output)).not.toContain("embedding");
   });
 
   it("gives two identical transcripts distinct observation identity", async () => {

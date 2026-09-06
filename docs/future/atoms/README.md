@@ -190,8 +190,8 @@ retained as historical/reference material:
 - [09 — Speaker-aware STT independent input](09-speaker-aware-stt-input.md) — 09A DONE / 09B-1 DONE / 09B-2 DONE
 - [10 — Proactive provider binding + single Runtime scheduler](10-proactive-provider-scheduler.md) — DONE
 - [11 — P8 main-profile projection](11-p8-main-profile.md) — DONE
-- [12 — Memory multi-speaker attribution/provenance](12-memory-multispeaker-provenance.md)
-- [13 — Voice identity](13-voice-identity.md)
+- [12 — Memory multi-speaker attribution/provenance](12-memory-multispeaker-provenance.md) — DONE
+- [13 — Voice identity](13-voice-identity.md) — 13A Identity Mention Resolution ✅ / 13B Voice Profile → Person Resolution ✅
 - [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md)
 - [15 — Vision → Character](15-vision-character.md)
 - [16 — Provider fallback UX](16-provider-fallback-ux.md)

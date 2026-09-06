@@ -17,6 +17,7 @@ sherpa_datas, sherpa_binaries, sherpa_hiddenimports = collect_all("sherpa_onnx")
 hiddenimports = [
     *sherpa_hiddenimports,
     "numpy",
+    "speaker_store",
     *collect_submodules("numpy._core"),
 ]
 

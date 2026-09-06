@@ -440,7 +440,10 @@ describe("Mem0MemoryProvider canonical mapping", () => {
         apiKey: "never propagate",
         authorization: "Bearer secret",
         nested: { unsafe: true },
-        sourceTraceId: "trace-1"
+        sourceTraceId: "trace-1",
+        embedding: "0.1,0.2",
+        rawEmbedding: "[0.1]",
+        waveform: "pcm"
       }
     });
     expect(metadata).toMatchObject({
@@ -451,6 +454,9 @@ describe("Mem0MemoryProvider canonical mapping", () => {
     expect(metadata).not.toHaveProperty("apiKey");
     expect(metadata).not.toHaveProperty("authorization");
     expect(metadata).not.toHaveProperty("nested");
+    expect(metadata).not.toHaveProperty("embedding");
+    expect(metadata).not.toHaveProperty("rawEmbedding");
+    expect(metadata).not.toHaveProperty("waveform");
   });
 
   it("fails closed for wrong canonical prefixes and does not call backend", async () => {
