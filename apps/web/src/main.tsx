@@ -16,6 +16,7 @@ function renderSurface(surface: DesktopSurface): JSX.Element {
       return <MainPage />;
     case "companion":
       return <CompanionPage />;
+    case "webui":
     case "dashboard":
       return <App />;
   }

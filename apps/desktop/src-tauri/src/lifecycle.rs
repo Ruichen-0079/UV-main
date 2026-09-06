@@ -12,7 +12,7 @@ pub(crate) fn window_close_action(label: &str, shutdown_started: bool) -> Window
   }
 
   match label {
-    "main" | "companion" => WindowCloseAction::Hide,
+    "main" | "companion" | "webui" => WindowCloseAction::Hide,
     _ => WindowCloseAction::AllowClose,
   }
 }
@@ -54,6 +54,14 @@ mod tests {
   }
 
   #[test]
+  fn ordinary_webui_close_is_a_hide() {
+    assert_eq!(
+      window_close_action("webui", false),
+      WindowCloseAction::Hide
+    );
+  }
+
+  #[test]
   fn shutdown_allows_window_close() {
     assert_eq!(
       window_close_action("main", true),
@@ -61,6 +69,10 @@ mod tests {
     );
     assert_eq!(
       window_close_action("companion", true),
+      WindowCloseAction::AllowClose
+    );
+    assert_eq!(
+      window_close_action("webui", true),
       WindowCloseAction::AllowClose
     );
   }

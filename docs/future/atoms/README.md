@@ -264,7 +264,12 @@ Dependency direction (not numeric order):
   (Subtitle) are not started. Validated by `cargo test`, `pnpm check`,
   `pnpm desktop:smoke:linux`, and `pnpm desktop:close-tray:linux` on real KDE
   Plasma Wayland.)
-- [04 — WebUI Surface](04-webui-surface.md)
+- [04 — WebUI Surface](04-webui-surface.md) — DONE
+  (closure record in that document: the existing Dashboard `App` is now a
+  lazy WebUI desktop surface at `index.html#/dashboard`, routed through the
+  Atom 03 `DesktopSurfaceManager`. Main and Companion behavior are unchanged;
+  WebUI close is hide-only; Tray Quit still bypasses the surface seam; no
+  Subtitle or visual redesign work started.)
 - [21 — Linux/CachyOS deployment](21-linux-cachyos-deployment.md)
   — long-term target; to be implemented through smaller Linux operational
   atoms rather than one giant deployment change

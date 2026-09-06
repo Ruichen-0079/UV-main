@@ -177,9 +177,10 @@ pub fn run() {
         signal_exit::spawn_exit_reader(app.handle().clone(), read_fd);
       }
 
-      // Paint both existing surfaces immediately — do not block on service
-      // startup. Construction inputs (including Companion always-on-top)
-      // resolve inside the surface seam, as before.
+      // Paint Main and Companion immediately — do not block on service
+      // startup. WebUI stays lazy and is ensured by its presentation command.
+      // Construction inputs (including Companion always-on-top) resolve inside
+      // the surface seam, as before.
       let main_window = DesktopSurfaceManager::ensure(&app.handle(), SurfaceId::Main)?;
       DesktopSurfaceManager::ensure(&app.handle(), SurfaceId::Companion)?;
       main_window.set_focus()?;

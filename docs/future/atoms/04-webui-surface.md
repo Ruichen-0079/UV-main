@@ -1,6 +1,6 @@
 # Atom 04 — WebUI Surface
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: DONE — IMPLEMENTED ON CURRENT MAIN**
 >
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >
@@ -75,3 +75,32 @@ inside it in this atom.
    semantics unless this atom explicitly owns that boundary.
 5. Implement one immutable atom, run focused tests plus required broader gates,
    inspect exact diff, then stop at this atom's stop condition.
+
+## Closure (implemented)
+
+**Status: DONE.** Implementation base: `24c8816b775c729936dcf36f5e91cd9697b63cad`.
+
+Current main has a real product WebUI in `apps/web/src/App.tsx`, reachable via
+the existing `index.html#/dashboard` route. Atom 04 adds it as the third
+desktop Presentation surface through the existing seam:
+
+```text
+MenuId → TrayCommand → tray::dispatch → DesktopSurfaceManager
+├ Main
+├ Companion
+└ WebUI → index.html#/dashboard
+
+Quit → AppLifecycle (unchanged; bypasses SurfaceManager)
+```
+
+- WebUI construction is lazy and reuses the existing Tauri window by label;
+  Show focuses it, Hide is a no-op when absent, Toggle uses the shared
+  visibility semantics, and ordinary close is hide-only like Main/Companion.
+- Tray adds only `Open WebUI` and `Hide WebUI`. Existing Main/Companion menu
+  labels and behavior remain unchanged.
+- WebUI remains Presentation-only and uses the existing Runtime-backed page;
+  no duplicate Runtime/chat/proactive/Memory authority was added.
+- Production visual changes: none. Subtitle (Atom 18) was not started.
+- Validation: focused Rust/TypeScript tests, `pnpm check`, `pnpm desktop:smoke:linux`,
+  and `pnpm desktop:close-tray:linux` on the primary KDE Plasma Wayland
+  platform.

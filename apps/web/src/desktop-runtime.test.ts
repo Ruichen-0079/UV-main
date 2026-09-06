@@ -1,13 +1,22 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { getCurrentWindow } = vi.hoisted(() => ({
+  getCurrentWindow: vi.fn()
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow }));
+
 import {
   DEFAULT_RUNTIME_HTTP,
   resolveApiBaseUrl,
-  resolveRuntimeAssetUrl
+  resolveRuntimeAssetUrl,
+  resolveDesktopSurface
 } from "./desktop-runtime.js";
 
 describe("desktop-runtime API base", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    getCurrentWindow.mockReset();
   });
 
   it("uses Vite /api proxy outside Tauri", () => {
@@ -42,5 +51,26 @@ describe("desktop-runtime API base", () => {
     expect(resolveRuntimeAssetUrl("/api/live2d/Lumi/Lumi.model3.json")).toBe(
       "/api/live2d/Lumi/Lumi.model3.json"
     );
+  });
+});
+
+describe("desktop surface routing", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    getCurrentWindow.mockReset();
+  });
+
+  it("keeps the existing dashboard hash route as the browser WebUI", async () => {
+    vi.stubGlobal("window", { location: { hash: "#/dashboard", pathname: "/" } });
+    await expect(resolveDesktopSurface()).resolves.toBe("dashboard");
+  });
+
+  it("maps the Tauri WebUI window label to the existing dashboard App", async () => {
+    getCurrentWindow.mockReturnValue({ label: "webui" });
+    vi.stubGlobal("window", {
+      __TAURI_INTERNALS__: {},
+      location: { hash: "#/main", pathname: "/main" }
+    });
+    await expect(resolveDesktopSurface()).resolves.toBe("webui");
   });
 });
