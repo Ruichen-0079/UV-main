@@ -224,7 +224,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
 
   return (
     <Panel
-      title="Settings"
+      title="Desktop & User Settings"
       actions={
         <div className="flex items-center gap-2">
           {state.saving ? <Pill status="saving" /> : null}
