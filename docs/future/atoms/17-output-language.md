@@ -2,7 +2,7 @@
 
 > **Status: DONE — IMPLEMENTED ON CURRENT MAIN**
 >
-> **Audit baseline:** `8c71cfe`
+> **Audit baseline:** `ec6df9d`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
 > dependency state are authoritative. Before implementation, fresh-fetch main,

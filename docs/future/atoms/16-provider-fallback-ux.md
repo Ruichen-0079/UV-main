@@ -1,8 +1,8 @@
 # Atom 16 — Provider Fallback UX
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: DONE — existing provider/fallback UX baseline implemented**
 >
-> **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
+> **Audit baseline:** `ec6df9d`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
 > dependency state are authoritative. Before implementation, fresh-fetch main,
@@ -87,3 +87,17 @@ new routing policy.
    semantics unless this atom explicitly owns that boundary.
 5. Implement one immutable atom, run focused tests plus required broader gates,
    inspect exact diff, then stop at this atom's stop condition.
+
+## Closure (Campaign A)
+
+#257 consolidated the former #259/#261/#262 integration work. Product AI Routing
+shows configured order, locally ready versus remotely observed status, fallback
+eligibility, pending restart, and the provider/fallback metadata from the latest
+completed request when available. Missing evidence stays unknown. Inspection is
+explicit and config-only; connection verification identifies live versus
+config-only calls. The UI neither chooses the served route nor writes a second
+provider policy. Models & Providers uses the existing settings/secret API.
+
+Focused routing, health, provider, and mounted-save tests plus full hosted Check
+and Linux Persistence passed before landing. This closes the existing observable
+UX gap; it does not add unavailable provider metadata or automatic discovery.

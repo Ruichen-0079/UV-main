@@ -2,7 +2,7 @@
 
 > **Status: IMPLEMENTED on main (Atom 14 closure)**
 >
-> **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
+> **Audit baseline:** `ec6df9d`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
 > dependency state are authoritative. Before implementation, fresh-fetch main,
@@ -28,7 +28,7 @@ Atoms 07–10 and 13.
 
 ## CURRENT at audit baseline
 
-Open #225 is a candidate hands-free Voice Mode implementation with a Web-side
+Historical #225 was a candidate hands-free Voice Mode implementation with a Web-side
 state machine and race fencing. It is not main authority and predates the full
 future Character/STT/proactive ownership sequence. Reuse proven pieces only
 after re-audit.
@@ -154,7 +154,7 @@ AEC: `getUserMedia` requests `echoCancellation`, `noiseSuppression`, and
 `autoGainControl`. Actual `MediaStreamTrack.getSettings()` are shown as
 diagnostics. Identity is not used as echo detection.
 
-PR #225 was not merged. Reused: AbortSignal on transcribe, capture cleanup,
+PR #225 is closed as superseded by #251, not merged. Reused: AbortSignal on transcribe, capture cleanup,
 utterance duration bound. Obsolete: Web-owned turn state machine.
 
 ## Stop condition

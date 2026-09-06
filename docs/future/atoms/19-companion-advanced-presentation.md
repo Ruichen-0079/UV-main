@@ -2,7 +2,7 @@
 
 > **Status: SLICE 1 IMPLEMENTED — broader presentation remains planned**
 >
-> **Audit baseline:** `575bfa2`
+> **Audit baseline:** `ec6df9d`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
 > dependency state are authoritative. Before implementation, fresh-fetch main,
@@ -84,7 +84,6 @@ specific Live2D model belongs to Atom 20.
    semantics unless this atom explicitly owns that boundary.
 5. Implement one immutable atom, run focused tests plus required broader gates,
    inspect exact diff, then stop at this atom's stop condition.
-
 
 ## Slice 1 closure (Campaign A, 2026-09-06)
 

@@ -1,6 +1,8 @@
 # Atom 03 — Desktop Surface Foundation
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: DONE — IMPLEMENTED ON CURRENT MAIN**
+>
+> **Audit baseline:** `ec6df9d`
 >
 > **Rebaseline (Linux-first CI rebaseline):** this atom no longer depends on
 > Windows Atoms 01–02; those are deferred under the Platform policy in
@@ -39,10 +41,9 @@ are NOT prerequisites. This atom depends on:
 
 ## CURRENT at audit baseline
 
-`apps/desktop/src-tauri/src/lib.rs` directly defines and manipulates Main and
-Companion windows. Open #227 is a candidate implementation and a reference
-only; it is stale/non-authoritative until revalidated against a fresh Linux
-rebaseline.
+The old #227 proposal is superseded by #246 and retained as closed history.
+Current main owns Main, Companion, WebUI, and Subtitle through the existing
+DesktopSurfaceManager; application Quit remains a separate lifecycle path.
 
 ## TARGET
 
@@ -150,7 +151,7 @@ MenuId → tray::tray_command → TrayCommand
 ```
 
 - `apps/desktop/src-tauri/src/desktop_surface.rs` — `SurfaceId { Main,
-  Companion }`, `SurfaceCommand { Show, Hide, Toggle }`, and the zero-state
+Companion }`, `SurfaceCommand { Show, Hide, Toggle }`, and the zero-state
   `DesktopSurfaceManager` owning ensure/create, show, hide, toggle, focus, the
   existing window construction inputs, and Companion always-on-top
   presentation (construction-time resolution plus the runtime

@@ -1,8 +1,8 @@
 # YUVI Future-State Implementation Atoms
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: CURRENT CLOSURE INDEX + FUTURE BACKLOG — source remains authority**
 >
-> **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
+> **Audit baseline:** `ec6df9d`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
 > dependency state are authoritative. Before implementation, fresh-fetch main,
@@ -23,7 +23,9 @@ small, independently readable implementation plans. It exists so a small agent
 can open one atom and understand the intended semantic outcome without
 reconstructing the whole architecture from old chats.
 
-These are **plans**, not claims that the described future state exists.
+Completed status entries summarize merged closure boundaries. Unfinished sections
+remain **plans**, not claims that future behavior exists. See the
+[Campaign A closure audit](../campaign-a-closure.md) for PR dispositions and limits.
 
 ## Master backlog retention rule
 
@@ -81,21 +83,28 @@ This view exists to schedule independent work without losing the master backlog.
 
 ### Line 1 — Product / daily use
 
-- Product WebUI functional parity — **INTEGRATION WIP** in PR #257; main remains
-  authority until the integration PR is accepted.
-- [16 — Provider fallback UX](16-provider-fallback-ux.md) — PLANNED.
+- Product WebUI daily-use baseline — **DONE** in #257: independent surface,
+  Models & Providers, AI Routing, compact health, Settings, and Developer.
+  Decorative parity and automatic model discovery remain **DEFERRED** until
+  a concrete daily-use need is demonstrated.
+- [16 — Provider fallback UX](16-provider-fallback-ux.md) — DONE in #257.
 - [17 — Output language semantic preference](17-output-language.md) — DONE.
-- IndexTTS/Rei zero-shot baseline → stable local TTS service → real KDE
-  acceptance of implemented [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md).
+- IndexTTS/Rei zero-shot direction — **REJECTED / ABANDONED** as an active
+  prerequisite. Current local TTS is the existing GPT-SoVITS/Alice integration;
+  no replacement provider or service owner is authorized by this backlog.
+- Validate that current local TTS path and the implemented
+  [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md) together on KDE.
 - [15 — On-demand Visual Grounding](15-vision-character.md) — REBASELINED,
   semantic request seam only in this line.
 
 ### Line 2 — Desktop / embodiment
 
-- Recover required Live2D assets before renderer changes.
+- Verify required Live2D asset provisioning with the existing loader before
+  model-specific calibration.
 - [20 — Live2D calibration](20-live2d-calibration.md) — PLANNED.
 - [19 — Companion advanced presentation](19-companion-advanced-presentation.md)
-  — PLANNED.
+  — **SLICE 1 DONE** in #263 (soft-smile, Main forwarding, lip-sync isolation).
+  Broader motion, interruption/fade, and visual calibration remain planned.
 - Add only the one-shot KDE/Wayland screenshot primitive required by Atom 15;
   the desktop layer captures pixels but does not interpret them.
 
@@ -139,15 +148,15 @@ may remain in the repository best-effort.
 
 ## Frozen ownership
 
-| Concern | Owner |
-| --- | --- |
-| execution, lifecycle, admission/fencing, provider execution, persistence coordination, event publication | Runtime |
-| durable evidence, provenance, retrieval, validity/status, retention/expiry | Memory |
-| stable identity/persona/relationship interpretation | P8 |
-| expression, attention, addressing interpretation, silence/response/termination, coarse cognition escalation | Character |
-| serious reasoning/coding/research/planning/verification | Cognition through the existing single ReasoningProvider seam |
-| rendering, TTS playback, gaze, expression, pose, motion, desktop surfaces | Presentation/Desktop infrastructure |
-| app quit/shutdown | AppLifecycle/Supervisor path, not SurfaceManager |
+| Concern                                                                                                     | Owner                                                        |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| execution, lifecycle, admission/fencing, provider execution, persistence coordination, event publication    | Runtime                                                      |
+| durable evidence, provenance, retrieval, validity/status, retention/expiry                                  | Memory                                                       |
+| stable identity/persona/relationship interpretation                                                         | P8                                                           |
+| expression, attention, addressing interpretation, silence/response/termination, coarse cognition escalation | Character                                                    |
+| serious reasoning/coding/research/planning/verification                                                     | Cognition through the existing single ReasoningProvider seam |
+| rendering, TTS playback, gaze, expression, pose, motion, desktop surfaces                                   | Presentation/Desktop infrastructure                          |
+| app quit/shutdown                                                                                           | AppLifecycle/Supervisor path, not SurfaceManager             |
 
 ## Frozen semantic invariants
 
@@ -283,10 +292,10 @@ retained as historical/reference material:
 - [13 — Voice identity](13-voice-identity.md) — 13A Identity Mention Resolution ✅ / 13B Voice Profile → Person Resolution ✅
 - [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md) — DONE
 - [15 — On-demand Visual Grounding](15-vision-character.md) — REBASELINED
-- [16 — Provider fallback UX](16-provider-fallback-ux.md)
+- [16 — Provider fallback UX](16-provider-fallback-ux.md) — DONE
 - [17 — Output language semantic preference](17-output-language.md) — DONE
-- [18 — Subtitle Surface](18-subtitle-surface.md) — DONE (Subtitle is fourth DesktopSurface; committed-text-only; Atom 17 not required; Atom 14 deferred; focus non-steal; 19/20 untouched)
-- [19 — Companion advanced presentation](19-companion-advanced-presentation.md)
+- [18 — Subtitle Surface](18-subtitle-surface.md) — DONE (Subtitle is fourth DesktopSurface; committed-text-only; Atom 17 not required; Atom 14 deferred; focus non-steal; Atom 20 remains untouched; Atom 19 Slice 1 is separately closed)
+- [19 — Companion advanced presentation](19-companion-advanced-presentation.md) — SLICE 1 DONE; broader work planned
 - [20 — Live2D calibration](20-live2d-calibration.md)
 
 ### Active Linux/platform lane
@@ -343,7 +352,7 @@ Dependency direction (not numeric order):
   correct; this atom only added the missing validation contract.)
 - [03 — Desktop Surface foundation](03-desktop-surface-foundation.md) — DONE
   (closure record in that document: `MenuId → TrayCommand → tray::dispatch →
-  DesktopSurfaceManager` is now the single presentation seam for the existing
+DesktopSurfaceManager` is now the single presentation seam for the existing
   Main and Companion surfaces — ensure/show/hide/toggle/focus, window
   construction inputs, and Companion always-on-top presentation. Tray Quit
   forks to AppLifecycle before any surface dispatch, proven structurally by
