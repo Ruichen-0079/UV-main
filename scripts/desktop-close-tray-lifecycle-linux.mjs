@@ -726,6 +726,27 @@ async function main() {
   info(`tray present and usable: SNI at ${tray.itemPath}, menu items [${menu.items.map((i) => i.label).join(", ")}]`);
   const idByLabel = Object.fromEntries(menu.items.map((item) => [item.label, item.id]));
 
+  /* -------------------------------------------- Companion: reuse + recovery */
+  const companionCaption = "YUVI Companion";
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    const shown = clickTrayMenuItem(tray, idByLabel["Show Companion"]);
+    if (!shown.ok) fail(`Companion show failed: ${shown.error}`, readLogs(roots));
+    waitForWindowCaption(child, companionCaption, true, CLOSE_OBSERVE_TIMEOUT_MS, "Companion show");
+    const captions = kwinWindowCaptions(child.pid, CLOSE_OBSERVE_TIMEOUT_MS);
+    if (captions.filter(caption => caption === companionCaption).length !== 1) {
+      fail("Companion show created duplicate windows", readLogs(roots));
+    }
+    const hidden = clickTrayMenuItem(tray, idByLabel["Hide Companion"]);
+    if (!hidden.ok) fail(`Companion hide failed: ${hidden.error}`, readLogs(roots));
+    waitForWindowCaption(child, companionCaption, false, CLOSE_OBSERVE_TIMEOUT_MS, "Companion hide");
+  }
+  clickTrayMenuItem(tray, idByLabel["Show Companion"]);
+  waitForWindowCaption(child, companionCaption, true, CLOSE_OBSERVE_TIMEOUT_MS, "Companion recovery");
+  kwinCloseWindow(child.pid, companionCaption, CLOSE_OBSERVE_TIMEOUT_MS);
+  waitForWindowCaption(child, companionCaption, false, CLOSE_OBSERVE_TIMEOUT_MS, "Companion close-as-hide");
+  await assertSupervisorHealthy(roots, instanceId);
+  info("Companion repeated show/hide and close-as-hide passed with one reusable window");
+
   /* --------------------------------------------- WebUI surface: lazy + tray */
   const captionsBeforeWebui = kwinWindowCaptions(child.pid, CLOSE_OBSERVE_TIMEOUT_MS);
   if (captionsBeforeWebui.includes(WEBUI_WINDOW_CAPTION)) {

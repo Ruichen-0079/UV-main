@@ -1,3 +1,4 @@
+import { installPresentationRehearsal } from "./lumi-presentation-rehearsal.js";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import {
   LumiController,
@@ -30,6 +31,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   props: {
     requestedProjection: CompanionPresenceProjection;
     className?: string;
+    onPresentationOutcome?: (report: EmbodiedPresentationOutcomeReport) => void;
     onModelLifecycle?: (state: LumiModelLifecycle) => void;
     /** The companion window draws its own framing toggle outside the resize corner. */
     showFramingToggle?: boolean;
@@ -41,6 +43,10 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   const controllerRef = useRef<LumiController | null>(null);
   const [state, setState] = useState<CompanionPresentationState>("idle");
   const [modelLifecycle, setModelLifecycle] = useState<LumiModelLifecycle>("loading");
+  const projectionRef = useRef(props.requestedProjection);
+  projectionRef.current = props.requestedProjection;
+  const onPresentationOutcomeRef = useRef(props.onPresentationOutcome);
+  onPresentationOutcomeRef.current = props.onPresentationOutcome;
   const onModelLifecycleRef = useRef(props.onModelLifecycle);
   onModelLifecycleRef.current = props.onModelLifecycle;
   // Default portrait (half). Full-body only after an explicit user toggle.
@@ -110,9 +116,16 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
           setModelLifecycle(next);
           onModelLifecycleRef.current?.(next);
         }
+      },
+      (report) => {
+        if (import.meta.env.DEV && report.effectId.startsWith("preview:")) return;
+        onPresentationOutcomeRef.current?.(report);
       }
     );
     controllerRef.current = controller;
+    const stopRehearsal = import.meta.env.DEV
+      ? installPresentationRehearsal(controller, () => projectionRef.current)
+      : () => {};
     const resize = () => controller.resize(container.clientWidth, container.clientHeight);
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
     observer?.observe(container);
@@ -140,6 +153,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       observer?.disconnect();
       window.removeEventListener("resize", resize);
       if (overlayFrame) cancelAnimationFrame(overlayFrame);
+      stopRehearsal();
       controller.dispose();
       controllerRef.current = null;
     };

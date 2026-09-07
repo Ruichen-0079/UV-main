@@ -229,6 +229,7 @@ async function runTurn(input: {
   outputLanguage?: "AUTO" | "EN" | "ZH" | "JA";
   voiceOutput?: boolean;
   ttsInputs?: TTSInput[];
+  embodiedPresentation?: import("./runtime-contracts.js").RuntimeEmbodiedPresentationPort;
 }): Promise<{
   events: RuntimeReplyStreamEvent[];
   published: RuntimeEvent[];
@@ -251,6 +252,7 @@ async function runTurn(input: {
     conversation,
     ...(input.outputLanguage ? { outputLanguage: input.outputLanguage } : {}),
     ...(input.cognition ? { characterCognition: input.cognition } : {}),
+    embodiedPresentation: input.embodiedPresentation,
     character: input.character
   });
 
@@ -630,4 +632,12 @@ describe("Runtime Character outcome sequencing", () => {
     expect(await turn.conversation.getMessageById(assistantRowId(turn.published))).toBeNull();
     expectNoAssistantCommit(turn);
   });
+});
+
+
+it.each(["excited", "amused", undefined])("passes accepted Character presentation %s to Runtime without replacing its meaning", async intent => {
+  const propose = vi.fn(() => null);
+  const character = characterHarness({ initial: decisionFixture({ disposition: "RESPOND", text: "A reply", ...(intent ? { presentation: { intent } } : {}) }) });
+  await runTurn({ character: character.character, embodiedPresentation: { propose, present: async request => ({ version: "embodied-presentation-outcome-7k.v1", effectId: request.effectId, outcome: "REJECTED" }) } });
+  expect(propose).toHaveBeenCalledWith(expect.objectContaining({ type: "agent.reply" }), intent ? { intent } : null);
 });

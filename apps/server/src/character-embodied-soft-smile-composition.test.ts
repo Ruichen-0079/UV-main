@@ -125,7 +125,7 @@ describe("server Character soft-smile embodied composition", () => {
     const policyAllowsEmbodiedEffect = vi.fn(() => true);
 
     const result = composeServerCharacterSoftSmileEmbodiedEffect(
-      acceptedGeneration("neutral"),
+      acceptedGeneration("unsupported-wave"),
       { kind: "turn", reference: "turn-3" },
       {
         allocateProposalInstance,
@@ -214,4 +214,12 @@ describe("server Character soft-smile embodied composition", () => {
     ).toThrow(/must return a boolean/);
     expect(allocateEffectId).not.toHaveBeenCalled();
   });
+});
+
+it.each(["neutral", "attentive", "thinking", "amused", "excited", "acknowledge-interrupt"])("projects Character %s unchanged through Runtime admission", intent => {
+  const result = composeServerCharacterSoftSmileEmbodiedEffect(acceptedGeneration(intent), { kind: "turn", reference: "turn-f" }, {
+    allocateProposalInstance: () => ({ reference: "proposal-f", createdAtMs: 1 }),
+    allocateEffectId: () => "effect-f", policyAllowsEmbodiedEffect: () => true
+  });
+  expect(result).toMatchObject({ status: "RECORD_INITIALIZED", record: { identity: { behavior: { behavior: { kind: "EXPRESSION", intent } } } } });
 });

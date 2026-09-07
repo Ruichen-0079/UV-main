@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  executeEmbodiedPresentationRequest,
-  SOFT_SMILE_MOUTH_FORM
-} from "./embodied-presentation-executor.js";
+import { executeEmbodiedPresentationRequest } from "./embodied-presentation-executor.js";
 
 const base = {
   version: "embodied-presentation-request-7ad.v1" as const,
@@ -62,48 +59,51 @@ const unknownExpression = {
 function actions(
   overrides: Partial<{
     setGazeTarget: ReturnType<typeof vi.fn>;
-    setMouthForm: ReturnType<typeof vi.fn>;
+    setExpression: ReturnType<typeof vi.fn>;
   }> = {}
 ) {
   return {
     setGazeTarget: overrides.setGazeTarget ?? vi.fn(),
-    setMouthForm: overrides.setMouthForm ?? vi.fn()
+    setExpression: overrides.setExpression ?? vi.fn()
   };
 }
 
 describe("production embodied Presentation executor", () => {
   it("maps an admitted gaze request through the existing gaze action", () => {
     const setGazeTarget = vi.fn();
-    const setMouthForm = vi.fn();
-    const report = executeEmbodiedPresentationRequest(base, { setGazeTarget, setMouthForm });
+    const setExpression = vi.fn();
+    const report = executeEmbodiedPresentationRequest(base, { setGazeTarget, setExpression });
     expect(report).toMatchObject({ effectId: base.effectId, outcome: "STARTED" });
     expect(setGazeTarget).toHaveBeenCalledWith({ x: -0.65, y: 0.05, strength: 2 });
-    expect(setMouthForm).not.toHaveBeenCalled();
+    expect(setExpression).not.toHaveBeenCalled();
   });
 
   it("preserves semantic silence without creating a visual action", () => {
     const setGazeTarget = vi.fn();
-    const setMouthForm = vi.fn();
-    const report = executeEmbodiedPresentationRequest(silence, { setGazeTarget, setMouthForm });
+    const setExpression = vi.fn();
+    const report = executeEmbodiedPresentationRequest(silence, { setGazeTarget, setExpression });
     expect(report.outcome).toBe("STARTED");
     expect(setGazeTarget).not.toHaveBeenCalled();
-    expect(setMouthForm).not.toHaveBeenCalled();
+    expect(setExpression).not.toHaveBeenCalled();
   });
 
-  it("maps admitted soft-smile through existing ParamMouthForm device action", () => {
+  it("maps admitted soft-smile into the composed presentation envelope", () => {
     const setGazeTarget = vi.fn();
-    const setMouthForm = vi.fn();
-    const report = executeEmbodiedPresentationRequest(softSmile, { setGazeTarget, setMouthForm });
+    const setExpression = vi.fn();
+    const report = executeEmbodiedPresentationRequest(softSmile, { setGazeTarget, setExpression });
     expect(report).toMatchObject({ effectId: softSmile.effectId, outcome: "STARTED" });
-    expect(setMouthForm).toHaveBeenCalledWith(SOFT_SMILE_MOUTH_FORM);
+    expect(setExpression).toHaveBeenCalledWith(softSmile, "soft-smile");
     expect(setGazeTarget).not.toHaveBeenCalled();
   });
 
   it("rejects unknown expression intents without faking completion", () => {
-    const setMouthForm = vi.fn();
-    const report = executeEmbodiedPresentationRequest(unknownExpression, actions({ setMouthForm }));
+    const setExpression = vi.fn();
+    const report = executeEmbodiedPresentationRequest(
+      unknownExpression,
+      actions({ setExpression })
+    );
     expect(report.outcome).toBe("REJECTED");
-    expect(setMouthForm).not.toHaveBeenCalled();
+    expect(setExpression).not.toHaveBeenCalled();
   });
 
   it("rejects malformed or identity-smuggling requests", () => {

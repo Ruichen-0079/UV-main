@@ -3,6 +3,7 @@ import {
   createEmbodiedPresentationOutcomeReport,
   createEvent,
   type EmbodiedPresentationRequest,
+  type EmbodiedPresentationOutcomeReport,
   type RuntimeEvent
 } from "@companion/protocol";
 import type { EventBus } from "@companion/event-bus";
@@ -81,4 +82,44 @@ describe("Runtime embodied Presentation execution", () => {
     });
     expect(present).not.toHaveBeenCalled();
   });
+});
+
+it("serializes start and completion through the same Runtime record and fences late observations", async () => {
+  const published: RuntimeEvent[] = [];
+  let late: ((report: EmbodiedPresentationOutcomeReport) => Promise<void>) | undefined;
+  let effectId = "";
+  const result = await executeRuntimeEmbodiedPresentation(
+    decision(true),
+    anchor(),
+    async (request, _anchor, observe) => {
+      late = observe;
+      effectId = request.effectId;
+      await observe!({
+        version: "embodied-presentation-outcome-7k.v1",
+        effectId,
+        outcome: "STARTED"
+      });
+      await observe!({
+        version: "embodied-presentation-outcome-7k.v1",
+        effectId,
+        outcome: "STARTED"
+      });
+      return { version: "embodied-presentation-outcome-7k.v1", effectId, outcome: "COMPLETED" };
+    },
+    {
+      publish: async (event) => {
+        published.push(event);
+      }
+    }
+  );
+  expect(result).toMatchObject({
+    status: "OUTCOME_APPLIED",
+    advancement: { record: { snapshot: { state: "COMPLETED" } } }
+  });
+  expect(published.map((event) => (event.payload as { state: string }).state)).toEqual([
+    "STARTED",
+    "COMPLETED"
+  ]);
+  await late!({ version: "embodied-presentation-outcome-7k.v1", effectId, outcome: "STARTED" });
+  expect(published).toHaveLength(2);
 });

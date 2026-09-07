@@ -58,6 +58,12 @@ import {
  * envelope. The main window only forwards speech segments and stop commands.
  */
 export function CompanionPage(): JSX.Element {
+  const presentationReportsRef = useRef(Promise.resolve());
+  const submitPresentationOutcome = (report: import("@companion/protocol").EmbodiedPresentationOutcomeReport) => {
+    companionBusRef.current?.post({ kind: "embodied-presentation-outcome", report });
+    presentationReportsRef.current = presentationReportsRef.current
+      .then(() => apiClient.postEmbodiedPresentationOutcome(report)).catch(() => undefined);
+  };
   const lumiRef = useRef<LumiControllerHandle>(null);
   const sessionRef = useRef<{
     requestId: string;
@@ -525,8 +531,7 @@ export function CompanionPage(): JSX.Element {
         case "embodied-presentation-request": {
           const report = lumiRef.current?.executeEmbodiedPresentationRequest(message.request);
           if (report) {
-            bus.post({ kind: "embodied-presentation-outcome", report });
-            void apiClient.postEmbodiedPresentationOutcome(report);
+            submitPresentationOutcome(report);
           }
           return;
         }
@@ -591,6 +596,7 @@ export function CompanionPage(): JSX.Element {
         ref={lumiRef}
         requestedProjection={presence}
         onModelLifecycle={setModelLifecycle}
+        onPresentationOutcome={submitPresentationOutcome}
         className="h-full w-full rounded-none"
         showFramingToggle={false}
       />

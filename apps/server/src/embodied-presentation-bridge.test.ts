@@ -67,3 +67,44 @@ describe("EmbodiedPresentationBridge", () => {
     vi.useRealTimers();
   });
 });
+
+it("keeps expression start observation ordered before terminal resolution and settles shutdown", async () => {
+  const bridge = new EmbodiedPresentationBridge({ publish: async () => {} });
+  const expression = {
+    ...request,
+    behavior: {
+      ...request.behavior,
+      behavior: {
+        version: "embodied-behavior-7a.v1" as const,
+        kind: "EXPRESSION" as const,
+        cause: request.behavior.behavior.cause,
+        intent: "excited"
+      }
+    }
+  };
+  const order: string[] = [];
+  let release = () => {};
+  const observation = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const pending = bridge.present(expression, traceAnchor, async (report) => {
+    await observation;
+    order.push(report.outcome);
+  });
+  const report = {
+    version: "embodied-presentation-outcome-7k.v1",
+    effectId: request.effectId,
+    outcome: "STARTED"
+  };
+  expect(bridge.resolve(report)).toBe(true);
+  expect(bridge.resolve({ ...report, outcome: "COMPLETED" })).toBe(true);
+  await Promise.resolve();
+  expect(order).toEqual([]);
+  release();
+  expect((await pending).outcome).toBe("COMPLETED");
+  expect(order).toEqual(["STARTED"]);
+  expect(bridge.resolve(report)).toBe(false);
+  const closing = bridge.present(expression, traceAnchor, async () => {});
+  bridge.close();
+  expect((await closing).outcome).toBe("INTERRUPTED");
+});

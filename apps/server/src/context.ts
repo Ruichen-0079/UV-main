@@ -267,13 +267,14 @@ export async function createAppContext(
           }
         : {}),
       embodiedPresentation: {
-        propose: (reply) => {
+        propose: (reply, presentation) => {
+          if (presentation === null) return null;
           const generation = superviseCharacterHarnessRepetition({
             generation: superviseCharacterHarnessGeneration({
               interpretation: interpretCharacterHarnessOutput({
                 disposition: "RESPOND",
                 text: reply.payload.content,
-                presentation: { intent: "soft-smile" }
+                presentation: presentation ?? { intent: "soft-smile" }
               }),
               finishReason: "stop",
               maxResponseCharacters: 4000
@@ -294,7 +295,7 @@ export async function createAppContext(
             }
           );
         },
-        present: (request, traceAnchor) => embodiedPresentationBridge.present(request, traceAnchor)
+        present: (request, traceAnchor, observe) => embodiedPresentationBridge.present(request, traceAnchor, observe)
       }
     });
   }

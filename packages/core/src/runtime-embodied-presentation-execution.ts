@@ -50,7 +50,8 @@ export async function executeRuntimeEmbodiedPresentation(
   traceAnchor: RuntimeEvent,
   present: (
     request: EmbodiedPresentationRequest,
-    traceAnchor: RuntimeEvent
+    traceAnchor: RuntimeEvent,
+    observe?: (report: EmbodiedPresentationOutcomeReport) => Promise<void>
   ) => EmbodiedPresentationOutcomeReport | Promise<EmbodiedPresentationOutcomeReport>,
   eventBus: Pick<EventBus, "publish">
 ): Promise<RuntimeEmbodiedPresentationExecutionResult> {
@@ -74,10 +75,39 @@ export async function executeRuntimeEmbodiedPresentation(
     );
   }
 
-  const report = await present(projection.request, traceAnchor);
+  let record = decision.record;
+  let accepting = true;
+  let observations = Promise.resolve();
+  const observe = (report: EmbodiedPresentationOutcomeReport): Promise<void> => {
+    if (!accepting) return Promise.resolve();
+    observations = observations.then(async () => {
+      const next = advanceRuntimeEmbodiedEffectRecord({
+        version: RUNTIME_EMBODIED_EFFECT_RECORD_ADVANCEMENT_7U_VERSION,
+        record,
+        report
+      });
+      record = next.record;
+      await publishRuntimeEmbodiedEffectEvent(
+        {
+          version: RUNTIME_EMBODIED_EFFECT_EVENT_PUBLICATION_7R_VERSION,
+          decision: next.decision,
+          traceAnchor
+        },
+        eventBus
+      );
+    });
+    return observations;
+  };
+  let report: EmbodiedPresentationOutcomeReport;
+  try {
+    report = await present(projection.request, traceAnchor, observe);
+  } finally {
+    accepting = false;
+    await observations;
+  }
   const advancement = advanceRuntimeEmbodiedEffectRecord({
     version: RUNTIME_EMBODIED_EFFECT_RECORD_ADVANCEMENT_7U_VERSION,
-    record: decision.record,
+    record,
     report
   });
   const publication = await publishRuntimeEmbodiedEffectEvent(

@@ -200,12 +200,6 @@ fn build_subtitle_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow>
     let _ = window.set_position(PhysicalPosition::new(x, y));
   }
 
-  // Verified Tauri 2 API: click-through so the overlay never steals pointer
-  // input from Main/Companion.
-  if policy.click_through {
-    let _ = window.set_ignore_cursor_events(true);
-  }
-
   Ok(window)
 }
 
@@ -224,6 +218,11 @@ fn toggle_window_visible(
 
 fn show_window(window: &tauri::WebviewWindow, steal_focus: bool) -> Result<(), String> {
   window.show().map_err(|error| error.to_string())?;
+  // Tao/GTK requires a realized native window before applying the input shape.
+  // A lazily constructed, hidden Subtitle has none until Show is processed.
+  if window.label() == SurfaceId::Subtitle.window_label() && subtitle_window_policy().click_through {
+    window.set_ignore_cursor_events(true).map_err(|error| error.to_string())?;
+  }
   if steal_focus {
     window.set_focus().map_err(|error| error.to_string())?;
   }

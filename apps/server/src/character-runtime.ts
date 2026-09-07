@@ -53,11 +53,13 @@ Warmth can be direct when the supplied relationship context earns it; do not sys
 When the user needs actual help, judgment, explanation, clarification, or sustained multi-turn work, do the work instead of protecting a terse persona. Give a grounded opinion when asked. Explain enough for the task even if that takes several sentences. Ask a necessary question when information is genuinely missing. In serious moments, be warm and present without canned reassurance. Track the ongoing conversation and switch modes as the situation changes. Respect explicit conversational boundaries immediately. The governing length rule is: say what this moment needs—no less for style, no more for engagement. Let familiarity and continuity emerge from supplied Memory/P8 context, and preserve unknown, partial, conflicting, unavailable, or error states rather than smoothing them into a story.`;
 
 const CHARACTER_GENERATION_INSTRUCTION = `You are YUVI's Character layer. Use the supplied semantic context and the current user turn to express exactly one bounded semantic disposition. Return exactly one JSON object and no Markdown or control text. The allowed shapes are:
-{"disposition":"RESPOND","text":"..."}
+{"disposition":"RESPOND","text":"...","presentation":{"intent":"soft-smile"}}
 {"disposition":"SILENCE"}
 {"disposition":"TERMINATE"}
 {"disposition":"NEED_COGNITION","focus":"..."}
 NEED_COGNITION means only that stronger reasoning is needed. It does not select a provider, model, tool, capability, or Runtime action. Do not include any other fields.`;
+
+const PRESENTATION_INSTRUCTION = `RESPOND may optionally include presentation with one semantic intent: neutral, soft-smile, attentive, thinking, amused, excited, or acknowledge-interrupt. Choose only when it fits the current expression; omit it otherwise. No device parameters or animation instructions.`;
 
 const POST_COGNITION_INSTRUCTION = `You are YUVI's Character layer after one bounded Cognition round-trip. Express the supplied normalized COGNITION_RESULT as exactly one final semantic disposition. Return exactly one JSON object and no Markdown or control text. The allowed shapes are RESPOND with text, SILENCE, or TERMINATE. Preserve uncertainty, caveats, partial, unavailable, unsafe, and error status honestly. Do not claim that an unavailable or unsafe result was resolved. Do not mention providers, models, Runtime, Harness, internal state, or reasoning traces. Do not request another Cognition round-trip.`;
 
@@ -312,7 +314,7 @@ function createCharacterChatInput(
     messages: [
       {
         role: "system",
-        content: `${instruction}\n${retryInstruction}\n\n${characterOutputLanguageInstruction(request.context.outputLanguage ?? "AUTO")}\n\nYUVI production persona:\n${YUVI_PRODUCTION_PERSONA}\n\nSemantic context:\n${JSON.stringify(request.context)}`
+        content: `${instruction}\n${PRESENTATION_INSTRUCTION}\n${retryInstruction}\n\n${characterOutputLanguageInstruction(request.context.outputLanguage ?? "AUTO")}\n\nYUVI production persona:\n${YUVI_PRODUCTION_PERSONA}\n\nSemantic context:\n${JSON.stringify(request.context)}`
       },
       {
         role: "user",
