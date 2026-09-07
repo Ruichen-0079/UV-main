@@ -393,4 +393,65 @@ describe("Runtime finalized capture lifecycle", () => {
       runtime.admitFinalizedSpeechObservation(first, { sessionId: "s", captureEpoch: "epoch-dup" })
     ).toThrow(SpeechCaptureFenceError);
   });
+  it("commits server-owned acoustic evidence once, retaining mixed per-span profiles", () => {
+    const runtime = createRuntime();
+    const observation = runtime.admitFinalizedSpeechObservation(
+      {
+        text: "hello there",
+        segments: [
+          {
+            segmentId: "s1",
+            text: "hello",
+            speakerClusterId: "0",
+            voiceProfileMatch: { status: "MATCHED", voiceProfileId: "profile-a" }
+          },
+          {
+            segmentId: "s2",
+            text: "there",
+            speakerClusterId: "1",
+            voiceProfileMatch: { status: "NO_MATCH" }
+          }
+        ]
+      },
+      { sessionId: "s", captureEpoch: "epoch-commit" }
+    );
+    expect(() =>
+      runtime.commitSpeechTurn(observation.observationId!, "other", observation.text)
+    ).toThrow();
+    const event = runtime.commitSpeechTurn(observation.observationId!, "s", observation.text);
+    expect(event.type).toBe("user.voice.transcript");
+    expect(event.payload.voiceProfileId).toBeUndefined();
+    expect(event.payload.segments?.[0]?.voiceProfileMatch?.voiceProfileId).toBe("profile-a");
+    expect(event.payload.segments?.[1]?.voiceProfileMatch).toEqual({ status: "NO_MATCH" });
+    expect(() =>
+      runtime.commitSpeechTurn(observation.observationId!, "s", observation.text)
+    ).toThrow();
+  });
+
+  it("preserves a single recognized acoustic profile without manufacturing a person", () => {
+    const runtime = createRuntime();
+    const observation = runtime.admitFinalizedSpeechObservation(
+      { text: "hello", voiceProfileMatch: { status: "MATCHED", voiceProfileId: "profile-a" } },
+      { sessionId: "s" }
+    );
+    const event = runtime.commitSpeechTurn(observation.observationId!, "s", "hello");
+    expect(event.payload.voiceProfileId).toBe("profile-a");
+    expect(event.payload).not.toHaveProperty("subjectUserId");
+    expect(event.payload).not.toHaveProperty("speakerId");
+  });
+
+  it("does not fill missing segment identities from a whole-capture match", () => {
+    const runtime = createRuntime();
+    const observation = runtime.admitFinalizedSpeechObservation(
+      {
+        text: "two spans",
+        voiceProfileMatch: { status: "MATCHED", voiceProfileId: "profile-a" },
+        segments: [{ text: "two" }, { text: "spans" }]
+      },
+      { sessionId: "s" }
+    );
+    const event = runtime.commitSpeechTurn(observation.observationId!, "s", observation.text);
+    expect(event.payload.voiceProfileId).toBeUndefined();
+    expect(event.payload.segments?.every((segment) => !segment.voiceProfileMatch)).toBe(true);
+  });
 });

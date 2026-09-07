@@ -214,7 +214,11 @@ export function deriveConfigFromEnv(
   const runtimePort = envString(env, "SERVER_PORT", "6121");
   const runtimeUrl = `http://${runtimeHost}:${runtimePort}`;
   const mem0Url = envString(env, "MEM0_BASE_URL", "http://127.0.0.1:6131");
-  const ttsWrapperUrl = envString(env, "GPT_SOVITS_TTS_BASE_URL", "http://127.0.0.1:9881");
+  const ttsWrapperUrl = envString(
+    env,
+    "LOCAL_TTS_BASE_URL",
+    envString(env, "GPT_SOVITS_TTS_BASE_URL", "http://127.0.0.1:9881")
+  );
   const ttsUpstreamUrl = envString(env, "GPT_SOVITS_TTS_UPSTREAM_URL", "http://127.0.0.1:9880");
   const ollamaUrl = envString(
     env,

@@ -5,10 +5,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { CompanionPage } from "./companion-page.js";
 
 const mockState = vi.hoisted(() => ({
+  subtitles: [] as any[],
   buses: [] as any[],
   queues: [] as any[],
   projections: [] as any[],
   controllers: [] as any[]
+}));
+
+vi.mock("./subtitle-bus.js", () => ({
+  publishSubtitleProjection: (message: any) => mockState.subtitles.push(message)
 }));
 
 vi.mock("./behavior-policy-controller.js", () => ({
@@ -399,6 +404,7 @@ async function emitPlayback(
 }
 
 afterEach(() => {
+  mockState.subtitles.length = 0;
   mockState.buses.length = 0;
   mockState.queues.length = 0;
   mockState.projections.length = 0;
@@ -544,6 +550,58 @@ describe("CompanionPage generation interruption admission", () => {
 
       await emitPlayback(queue, "playbackEnded", 1);
       expect(readText(mounted.container)).toContain("idle");
+    } finally {
+      await act(async () => mounted.root.unmount());
+      mounted.restore();
+    }
+  });
+});
+
+describe("spoken Subtitle lifecycle", () => {
+  it("publishes only on playback, clears on interruption, and fences replaced speech", async () => {
+    const mounted = await mountCompanionPage();
+    try {
+      const bus = mockState.buses.at(-1);
+      await emitBus(bus, { kind: "start-generation", requestId: "turn-a", sessionId: "session" });
+      const queue = mockState.queues.at(-1);
+      queue.callbacks.onSynthesisCompleted({
+        segment: { requestId: "turn-a", sequence: 0 },
+        item: { text: "同じ文字", language: "ja" }
+      });
+      expect(mockState.subtitles.every((message) => message.kind === "clear")).toBe(true);
+      await emitPlayback(queue, "playbackStarted");
+      expect(mockState.subtitles.at(-1)).toMatchObject({
+        text: "同じ文字",
+        language: "ja",
+        requestId: "turn-a"
+      });
+      await emitBus(bus, { kind: "stop-speech", requestId: "turn-a" });
+      expect(mockState.subtitles.at(-1)).toEqual({ kind: "clear" });
+      await emitBus(bus, { kind: "start-generation", requestId: "turn-b", sessionId: "session" });
+      const count = mockState.subtitles.length;
+      await emitPlayback(queue, "playbackStarted");
+      await emitPlayback(queue, "playbackEnded");
+      expect(mockState.subtitles).toHaveLength(count);
+    } finally {
+      await act(async () => mounted.root.unmount());
+      mounted.restore();
+    }
+  });
+
+  it("leaves failed synthesis blank", async () => {
+    const mounted = await mountCompanionPage();
+    try {
+      await emitBus(mockState.buses.at(-1), {
+        kind: "start-generation",
+        requestId: "turn-a",
+        sessionId: "session"
+      });
+      const queue = mockState.queues.at(-1);
+      await act(async () => {
+        queue.callbacks.onItemState({ requestId: "turn-a", sequence: 0 }, "failed");
+        queue.callbacks.onError(new Error("synthesis failed"));
+      });
+      expect(mockState.subtitles.every((message) => message.kind === "clear")).toBe(true);
     } finally {
       await act(async () => mounted.root.unmount());
       mounted.restore();

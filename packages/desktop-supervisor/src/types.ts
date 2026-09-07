@@ -139,6 +139,7 @@ export type ProcessInfo = {
 };
 
 export type HealthProbeResult = {
+  warming?: boolean;
   ok: boolean;
   degraded?: boolean;
   statusCode: number | null;

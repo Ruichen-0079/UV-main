@@ -130,9 +130,13 @@ export function ProductLocalServices(): JSX.Element {
           <p>
             TTS:{" "}
             {data.tts.configured
-              ? `${data.tts.provider} configured · ${data.tts.observed}`
+              ? `${data.tts.provider} configured · ${data.tts.message ?? data.tts.observed}`
               : "not configured · no voice model selected"}
-            . Speech recognition works independently of speech output.
+            . Voice conversation services:{" "}
+            {data.stt.available && data.stt.selected && data.stt.vad && data.tts.available
+              ? "ready; microphone permission is checked in Voice Mode"
+              : "not ready for full speech input/output"}
+            .
           </p>
           <small>Checked {new Date(data.checkedAt).toLocaleTimeString()}</small>
           <h3>Acoustic voice profiles</h3>

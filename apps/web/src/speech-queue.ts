@@ -219,7 +219,8 @@ export class SpeechPlaybackQueue {
           continue;
         }
         this.playingItem = null;
-        this.callbacks.onItemState?.(next.segment, "completed");
+        if (!this.controller.signal.aborted)
+          this.callbacks.onItemState?.(next.segment, "completed");
       }
     } finally {
       this.playbackRunning = false;
@@ -229,6 +230,7 @@ export class SpeechPlaybackQueue {
 
   private maybeIdle(): void {
     if (
+      !this.accepting &&
       !this.controller.signal.aborted &&
       this.pending.length === 0 &&
       this.ready.length === 0 &&
@@ -250,6 +252,10 @@ export function createBrowserSpeechPlayer(): SpeechPlayer {
   let current: HTMLAudioElement | null = null;
   return (output, signal, lifecycle) =>
     new Promise<void>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException("Speech playback cancelled.", "AbortError"));
+        return;
+      }
       const bytes = Uint8Array.from(atob(output.audioBase64), (char) => char.charCodeAt(0));
       const url = URL.createObjectURL(new Blob([bytes], { type: output.mimeType || "audio/wav" }));
       const audio = new Audio(url);

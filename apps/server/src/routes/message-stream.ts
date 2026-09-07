@@ -35,12 +35,23 @@ export async function registerMessageStreamRoutes(
     );
     const memoryOptions = normalizeMessageMemoryOptions(input.data.options);
     const identity = resolveMessageIdentity(input.data);
-    const userEvent = createEvent("user.message", {
-      sessionId: input.data.sessionId,
-      content,
-      ...(identity.subjectUserId ? { subjectUserId: identity.subjectUserId } : {}),
-      ...(identity.personaId ? { personaId: identity.personaId } : {})
-    });
+    let userEvent;
+    try {
+      userEvent = input.data.speechObservationId
+        ? context.runtime.commitSpeechTurn(
+            input.data.speechObservationId,
+            input.data.sessionId,
+            content
+          )
+        : createEvent("user.message", {
+            sessionId: input.data.sessionId,
+            content,
+            ...(identity.subjectUserId ? { subjectUserId: identity.subjectUserId } : {}),
+            ...(identity.personaId ? { personaId: identity.personaId } : {})
+          });
+    } catch {
+      return reply.status(409).send({ error: "invalid_speech_observation" });
+    }
     const abortController = new AbortController();
     const runtimeStream = context.runtime.streamUserMessage(userEvent, {
       signal: abortController.signal,

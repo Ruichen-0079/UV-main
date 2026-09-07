@@ -66,6 +66,25 @@ export const UserMessageEventSchema = RuntimeEventSchema.extend({
 export type UserMessageEvent = RuntimeEvent<"user.message", UserMessagePayload>;
 
 export const UserVoiceTranscriptPayloadSchema = z.object({
+  observationId: z.string().optional(),
+  captureEpoch: z.string().optional(),
+  segments: z
+    .array(
+      z.object({
+        segmentId: z.string().optional(),
+        text: z.string().optional(),
+        startMs: z.number().optional(),
+        endMs: z.number().optional(),
+        speakerClusterId: z.string().optional(),
+        voiceProfileMatch: z
+          .object({
+            status: z.enum(["MATCHED", "NO_MATCH"]),
+            voiceProfileId: z.string().optional()
+          })
+          .optional()
+      })
+    )
+    .optional(),
   sessionId: z.string().min(1),
   content: z.string().min(1),
   language: z.string().optional(),

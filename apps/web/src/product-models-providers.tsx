@@ -100,8 +100,8 @@ export const PRODUCT_PROVIDER_DEFINITIONS: ProductProviderDefinition[] = [
       { key: "LOCAL_REASONING_MODEL", label: "Reasoning model" },
       { key: "LOCAL_EMBEDDING_MODEL", label: "Embedding model" },
       { key: "LOCAL_EMBEDDING_DIMENSIONS", label: "Embedding dimensions" },
-      { key: "LOCAL_TTS_MODEL", label: "Compatibility TTS model (GPT-SoVITS adapter)" },
-      { key: "GPT_SOVITS_TTS_BASE_URL", label: "Compatibility TTS URL", type: "url" },
+      { key: "LOCAL_TTS_MODEL", label: "Local TTS model" },
+      { key: "LOCAL_TTS_BASE_URL", label: "Local TTS URL", type: "url" },
       { key: "LOCAL_STT_BASE_URL", label: "STT service URL", type: "url" },
       { key: "LOCAL_STT_MODEL", label: "STT model" },
       { key: "LOCAL_VISION_MODEL", label: "Vision model" }

@@ -310,8 +310,14 @@ describe("SpeechPlaybackQueue", () => {
       onended: null,
       onerror: null
     } as unknown as HTMLAudioElement;
-    vi.stubGlobal("Audio", vi.fn(() => audio));
-    vi.stubGlobal("atob", vi.fn(() => ""));
+    vi.stubGlobal(
+      "Audio",
+      vi.fn(() => audio)
+    );
+    vi.stubGlobal(
+      "atob",
+      vi.fn(() => "")
+    );
     vi.stubGlobal("URL", {
       createObjectURL: vi.fn(() => "blob:test"),
       revokeObjectURL: vi.fn()
@@ -366,4 +372,41 @@ describe("SpeechPlaybackQueue", () => {
       vi.unstubAllGlobals();
     }
   });
+});
+
+it("does not report completion after a cancelled player resolves late", async () => {
+  let release!: () => void;
+  const states: string[] = [];
+  const queue = new SpeechPlaybackQueue(
+    async () => ({ audioBase64: "", mimeType: "audio/wav" }) as never,
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    { onItemState: (_segment, state) => states.push(state) }
+  );
+  queue.enqueue({ text: "one", language: "en" }, segment(0));
+  await vi.waitFor(() => expect(release).toBeDefined());
+  queue.cancel();
+  release();
+  await Promise.resolve();
+  expect(states.at(-1)).toBe("cancelled");
+  expect(states).not.toContain("completed");
+});
+
+it("keeps an open stream alive between speech segments", async () => {
+  const onState = vi.fn();
+  const play = vi.fn(async () => undefined);
+  const queue = new SpeechPlaybackQueue(
+    async () => ({ audioBase64: "", mimeType: "audio/wav" }) as never,
+    play,
+    { onState }
+  );
+  queue.enqueue({ text: "first", language: "en" }, segment(0));
+  await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+  expect(onState).not.toHaveBeenCalledWith("idle");
+  queue.enqueue({ text: "next", language: "en" }, segment(1));
+  queue.finish();
+  await vi.waitFor(() => expect(onState).toHaveBeenCalledWith("idle"));
+  expect(play).toHaveBeenCalledTimes(2);
 });

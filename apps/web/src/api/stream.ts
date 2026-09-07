@@ -1,5 +1,6 @@
 export type MessageStreamTextDelta = {
   type: "text-delta";
+  language?: string;
   text: string;
   messageId: string;
   sessionId: string;
@@ -8,6 +9,7 @@ export type MessageStreamTextDelta = {
 
 export type MessageStreamCompleted = {
   type: "completed";
+  language?: string;
   content: string;
   messageId: string;
   sessionId: string;

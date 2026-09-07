@@ -1341,3 +1341,28 @@ describe("public TTS disconnect cancellation", () => {
     }
   });
 });
+
+it("keeps endpoint ASR previews outside finalized Runtime observations", async () => {
+  const app = Fastify();
+  const transcribeAudio = vi.fn<TestSTTTranscriber>(async () => recognizedOutput());
+  const admitFinalizedSpeechObservation = vi.fn();
+  await registerMediaRoutes(app, {
+    providers: { getSTTProvider: () => ({ name: "local", transcribeAudio }) },
+    runtime: { admitFinalizedSpeechObservation }
+  } as unknown as AppContext);
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/audio/transcriptions",
+      payload: { audioBase64: "AQID", preview: true }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ text: "recognized speech", language: "en" });
+    expect(transcribeAudio.mock.calls[0]?.[0]).toMatchObject({
+      metadata: { identify: false, diarize: false }
+    });
+    expect(admitFinalizedSpeechObservation).not.toHaveBeenCalled();
+  } finally {
+    await app.close();
+  }
+});

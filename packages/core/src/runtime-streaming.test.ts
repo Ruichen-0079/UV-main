@@ -392,6 +392,7 @@ describe("RuntimeOrchestrator", () => {
       {
         type: "text-delta",
         text: "done",
+        language: "en",
         messageId: expect.any(String),
         sessionId: "post-processing-cancel-session",
         traceId: expect.any(String)
@@ -402,6 +403,7 @@ describe("RuntimeOrchestrator", () => {
         sessionId: "post-processing-cancel-session",
         traceId: expect.any(String),
         content: "done",
+        language: "en",
         provider: "native"
       }
     ]);
@@ -1613,3 +1615,27 @@ function createMemory(candidate: MemoryCandidate): Memory {
     contradicts: []
   };
 }
+
+it.each(["EN", "ZH", "JA"] as const)(
+  "propagates configured %s despite ambiguous script",
+  async (language) => {
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      promptBuilder: new PromptBuilder(),
+      outputLanguage: language,
+      providers: {
+        ...createMockProviders(),
+        getChatProvider: () => createMockStreamingChatProvider("native", { chunks: ["同じ文字。"] })
+      }
+    });
+    const events = await collectRuntimeStream(
+      runtime.streamUserMessage({ sessionId: "language", content: "hello" })
+    );
+    const output = events.filter(
+      (event) => event.type === "text-delta" || event.type === "completed"
+    );
+    expect(output.length).toBeGreaterThan(1);
+    expect(output.every((event) => event.language === language.toLowerCase())).toBe(true);
+  }
+);

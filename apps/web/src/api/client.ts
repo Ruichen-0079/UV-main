@@ -161,6 +161,7 @@ export type DashboardWebSocketMessage =
     };
 
 export type SendMessageRequest = {
+  speechObservationId?: string;
   sessionId: string;
   text: string;
   options: {
@@ -1394,13 +1395,17 @@ export const apiClient = {
     });
   },
 
-  postSpeechActivityFrame(input: {
-    sessionId: string;
-    captureEpoch: string;
-    pcmBase64: string;
-    sampleRate: number;
-  }): Promise<SpeechActivityResponse> {
+  postSpeechActivityFrame(
+    input: {
+      sessionId: string;
+      captureEpoch: string;
+      pcmBase64: string;
+      sampleRate: number;
+    },
+    signal?: AbortSignal
+  ): Promise<SpeechActivityResponse> {
     return request<SpeechActivityResponse>("/v1/speech-activity/frames", {
+      ...signalRequestInit(signal),
       method: "POST",
       body: JSON.stringify(input)
     });
@@ -1414,6 +1419,7 @@ export const apiClient = {
   },
 
   transcribeAudio(input: {
+    preview?: boolean;
     audioBase64?: string;
     mimeType?: string;
     language?: string;
@@ -1824,7 +1830,13 @@ export type LocalServicesStatus = {
     embedder: boolean;
     vectorStore: boolean;
   };
-  tts: { configured: boolean; observed: string; provider: string };
+  tts: {
+    configured: boolean;
+    observed: string;
+    provider: string;
+    available?: boolean;
+    message?: string;
+  };
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

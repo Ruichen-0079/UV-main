@@ -27,6 +27,12 @@ export async function probeHttpHealth(
     }
     const protocolOk = options.validateBody ? options.validateBody(body) : response.ok;
     return {
+      warming: Boolean(
+        body &&
+        typeof body === "object" &&
+        (body as Record<string, unknown>)["state"] === "warming" &&
+        (body as Record<string, unknown>)["service"] === "yuvi-dots-tts"
+      ),
       ok: response.ok && protocolOk,
       degraded: Boolean(
         body &&
@@ -121,8 +127,14 @@ export function mem0HealthOk(body: unknown): boolean {
 
 export function ttsWrapperHealthOk(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
-  // Alice wrapper may report model_loaded; accept any JSON 200 with object body.
-  return true;
+  const record = body as Record<string, unknown>;
+  // A recognized warming/error response is the correct protocol; HTTP 503
+  // still keeps readiness false and avoids calling a failed model a port conflict.
+  return (
+    record["model_loaded"] === true ||
+    (record["service"] === "yuvi-dots-tts" &&
+      ["warming", "error"].includes(String(record["state"])))
+  );
 }
 
 export function ttsUpstreamHealthOk(body: unknown): boolean {

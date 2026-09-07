@@ -14,6 +14,7 @@ export const MessageRequestSchema = z
     /** Explicit Mem0/user identity — preferred over env defaults. */
     subjectUserId: z.string().min(1).optional(),
     personaId: z.string().min(1).optional(),
+    speechObservationId: z.string().min(1).optional(),
     voiceOutput: z.boolean().optional(),
     options: z
       .object({
@@ -55,12 +56,23 @@ export async function registerMessageRoutes(
     );
     const memoryOptions = normalizeMessageMemoryOptions(input.data.options);
     const identity = resolveMessageIdentity(input.data);
-    const event = createEvent("user.message", {
-      sessionId: input.data.sessionId,
-      content,
-      ...(identity.subjectUserId ? { subjectUserId: identity.subjectUserId } : {}),
-      ...(identity.personaId ? { personaId: identity.personaId } : {})
-    });
+    let event;
+    try {
+      event = input.data.speechObservationId
+        ? context.runtime.commitSpeechTurn(
+            input.data.speechObservationId,
+            input.data.sessionId,
+            content
+          )
+        : createEvent("user.message", {
+            sessionId: input.data.sessionId,
+            content,
+            ...(identity.subjectUserId ? { subjectUserId: identity.subjectUserId } : {}),
+            ...(identity.personaId ? { personaId: identity.personaId } : {})
+          });
+    } catch {
+      return reply.status(409).send({ error: "invalid_speech_observation" });
+    }
 
     request.log.info(
       {

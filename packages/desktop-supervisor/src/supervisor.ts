@@ -570,7 +570,11 @@ export class DesktopSupervisor {
     const svc = this.require(id);
     this.lifecycleEvent("memory.start.enter", svc);
     await this.refreshService(id);
-    if (svc.status === "healthy" || svc.status === "degraded") {
+    if (
+      svc.status === "healthy" ||
+      svc.status === "degraded" ||
+      (svc.status === "starting" && svc.ownership === "external")
+    ) {
       return;
     }
     // An identity query timeout is not evidence that a live child died. Keep
@@ -681,6 +685,7 @@ export class DesktopSupervisor {
       const readyTimeoutMs =
         svc.spec.id === "mem0" ? Math.min(svc.spec.startTimeoutMs, 2_000) : svc.spec.startTimeoutMs;
       const ready = await this.waitReady(svc, readyTimeoutMs);
+      if (this.shuttingDown) return;
       if (!ready) {
         svc.status = "unavailable";
         svc.summary = "Started but readiness timed out.";
@@ -1030,6 +1035,15 @@ export class DesktopSupervisor {
       return;
     }
 
+    if (health.warming) {
+      if (!ownership.owned) svc.ownership = "external";
+      svc.status = "starting";
+      svc.summary = "Warming local service…";
+      svc.detail = null;
+      svc.lastError = null;
+      return;
+    }
+
     if (health.statusCode !== null && !health.protocolOk) {
       svc.status = "unavailable";
       svc.summary = "Port busy with unexpected service";
@@ -1091,6 +1105,7 @@ export class DesktopSupervisor {
   private async waitReady(svc: InternalService, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (this.shuttingDown) return false;
       if (svc.spec.readinessCheck) {
         if (await svc.spec.readinessCheck()) return true;
       } else if (svc.spec.healthUrl) {
@@ -1444,7 +1459,7 @@ export class DesktopSupervisor {
       {
         id: "tts_wrapper",
         role: "tts_wrapper",
-        label: "TTS (Alice)",
+        label: "Local TTS",
         managed: Boolean(this.config.ttsWrapperStart),
         autostart: this.config.autostartTts && Boolean(this.config.ttsWrapperStart),
         healthUrl: `${this.config.ttsWrapperUrl.replace(/\/$/, "")}/health`,

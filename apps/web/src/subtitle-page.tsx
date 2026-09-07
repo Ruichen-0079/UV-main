@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { subscribeSubtitleProjection } from "./subtitle-bus.js";
-import {
-  paginateSubtitleText,
-  subtitlePageDurationMs
-} from "./subtitle-projection.js";
+import { paginateSubtitleText, subtitlePageDurationMs } from "./subtitle-projection.js";
 
 type VisiblePage = {
   messageId: string;
   pageIndex: number;
   text: string;
+  language?: string | undefined;
 };
 
 /**
@@ -21,6 +19,7 @@ export function SubtitlePage(): JSX.Element {
   const pagesRef = useRef<string[]>([]);
   const messageIdRef = useRef<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const languageRef = useRef<string | undefined>(undefined);
   const pageIndexRef = useRef(0);
 
   useEffect(() => {
@@ -53,6 +52,7 @@ export function SubtitlePage(): JSX.Element {
 
       clearTimer();
       pagesRef.current = pages;
+      languageRef.current = message.language;
       messageIdRef.current = message.messageId;
       pageIndexRef.current = 0;
       presentPage(0);
@@ -75,7 +75,7 @@ export function SubtitlePage(): JSX.Element {
         return;
       }
       pageIndexRef.current = index;
-      setPage({ messageId, pageIndex: index, text });
+      setPage({ messageId, pageIndex: index, text, language: languageRef.current });
       setVisible(true);
       clearTimer();
       timerRef.current = setTimeout(() => {
@@ -100,6 +100,7 @@ export function SubtitlePage(): JSX.Element {
       <div
         className={`yuvi-subtitle-band${visible && page ? " is-visible" : ""}`}
         aria-live="polite"
+        lang={page?.language}
         data-message-id={page?.messageId ?? undefined}
         data-page-index={page ? String(page.pageIndex) : undefined}
       >
