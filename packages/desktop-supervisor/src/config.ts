@@ -662,7 +662,7 @@ export function resolveRuntimeStart(
     cwd: repositoryRoot,
     env: {
       SERVER_PORT: runtimePort,
-      YUVI_RUNTIME_ENV_DIR: repositoryRoot
+      YUVI_RUNTIME_ENV_DIR: env["YUVI_RUNTIME_ENV_DIR"]?.trim() || repositoryRoot
     },
     commandMarker: runnerName
   };
@@ -722,7 +722,8 @@ export function resolveMem0StartDetailed(
   }
 
   const platform = options.platform ?? process.platform;
-  const interpreter = resolveMem0VenvInterpreter(sidecarDir, platform);
+  const interpreter =
+    env["YUVI_MEM0_PYTHON"]?.trim() || resolveMem0VenvInterpreter(sidecarDir, platform);
   if (!interpreter) {
     const expected =
       platform === "win32"

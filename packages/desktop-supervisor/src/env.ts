@@ -7,14 +7,16 @@ import path from "node:path";
  * development parity with scripts/dev.ps1 (shell preserved over base .env).
  */
 export function loadYuviEnvFiles(repositoryRoot: string): Record<string, string> {
+  const configured = process.env["YUVI_RUNTIME_ENV_DIR"]?.trim();
+  const envRoot = configured ? path.resolve(repositoryRoot, configured) : repositoryRoot;
   const result: Record<string, string> = {};
-  const base = readEnvFile(path.join(repositoryRoot, ".env"));
+  const base = readEnvFile(path.join(envRoot, ".env"));
   Object.assign(result, base);
   // Preserve process env over base .env
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === "string") result[key] = value;
   }
-  const local = readEnvFile(path.join(repositoryRoot, ".env.local"));
+  const local = readEnvFile(path.join(envRoot, ".env.local"));
   Object.assign(result, local);
   return result;
 }

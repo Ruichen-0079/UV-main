@@ -30,7 +30,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 cd "$repo_root"
-export YUVI_RUNTIME_ENV_DIR="$repo_root"
+export YUVI_RUNTIME_ENV_DIR="${YUVI_RUNTIME_ENV_DIR:-$repo_root}"
 export SERVER_PORT="$server_port"
 if [ "${MEMORY_REPOSITORY:-}" = "postgres" ] && [ "${YUVI_AUTO_MIGRATE:-1}" != "0" ]; then
   pnpm db:migrate

@@ -2,7 +2,14 @@ import { useEffect, useState } from "react";
 import { DAILY_STATUS_PATH, type DailyServiceStatus } from "./daily-service-status.js";
 
 export function DailyStatusDetails({ data }: { data: DailyServiceStatus }): JSX.Element {
-  const labels = { postgres: "PostgreSQL", ollama: "Ollama", mem0: "Mem0", runtime: "Runtime" };
+  const labels = {
+    postgres: "PostgreSQL",
+    ollama: "Ollama",
+    mem0: "Mem0",
+    runtime: "Runtime",
+    local_stt: "Local STT",
+    tts_wrapper: "Local TTS"
+  };
   return (
     <div aria-label="Startup prerequisites">
       <p>Supervisor observations (independent of Runtime):</p>
@@ -11,7 +18,9 @@ export function DailyStatusDetails({ data }: { data: DailyServiceStatus }): JSX.
           <li key={service.id}>
             {labels[service.id]}: {service.status}
             {!service.managed
-              ? " · external prerequisite; YUVI does not start or stop it"
+              ? service.id === "postgres" || service.id === "ollama"
+                ? " · external prerequisite; YUVI does not start or stop it"
+                : " · not configured as YUVI-owned"
               : " · YUVI-managed service"}
             {service.id === "postgres"
               ? " · TCP reachability only; pgvector readiness is reported by Mem0"

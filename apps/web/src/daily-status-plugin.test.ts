@@ -12,7 +12,7 @@ afterEach(() => {
 function snapshot() {
   return {
     instanceId: "current",
-    services: ["postgres", "ollama", "mem0", "runtime"].map((id) => ({
+    services: ["postgres", "ollama", "mem0", "runtime", "local_stt", "tts_wrapper"].map((id) => ({
       id,
       checkedAt: "2026-09-07T00:00:00.000Z",
       status:
@@ -82,7 +82,9 @@ it("reports prerequisite failure while Runtime is down without exposing credenti
     { id: "postgres", status: "unavailable", managed: false },
     { id: "ollama", status: "healthy", managed: false },
     { id: "mem0", status: "degraded", managed: true },
-    { id: "runtime", status: "unavailable", managed: true }
+    { id: "runtime", status: "unavailable", managed: true },
+    { id: "local_stt", status: "healthy", managed: false },
+    { id: "tts_wrapper", status: "healthy", managed: false }
   ]);
   expect(res.setHeader).toHaveBeenCalledWith("Cache-Control", "no-store");
 });

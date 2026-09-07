@@ -11,7 +11,7 @@
     "build": "pnpm prepare:cubism-framework && tsc -b",
     "check": "pnpm prepare:cubism-framework && pnpm check:host-environment && tsc -b --pretty false",
     "check:host-environment": "node scripts/check-host-environment-safety.mjs",
-    "test": "pnpm -r test && node --test scripts/check-host-environment-safety.node.mjs",
+    "test": "pnpm -r test && node --test scripts/check-host-environment-safety.node.mjs scripts/daily-use-linux.test.mjs",
     "smoke": "pnpm build && tsx scripts/smoke.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
@@ -34,7 +34,9 @@
     "desktop:installer:test": "node --test scripts/desktop-package/installer-smoke.test.mjs",
     "desktop:build:windows": "pnpm --filter @companion/desktop exec tauri build --bundles nsis",
     "desktop:smoke:linux": "node scripts/desktop-smoke-linux.mjs",
-    "desktop:close-tray:linux": "node scripts/desktop-close-tray-lifecycle-linux.mjs"
+    "desktop:close-tray:linux": "node scripts/desktop-close-tray-lifecycle-linux.mjs",
+    "daily:linux": "tsx scripts/install-daily-use-linux.mts",
+    "accept:linux": "tsx scripts/test-daily-use-linux.mts --run"
   },
   "packageManager": "pnpm@9.15.4",
   "dependencies": {
