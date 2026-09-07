@@ -17,5 +17,12 @@
     "tailwind.config.ts",
     "postcss.config.cjs"
   ],
-  "references": [{ "path": "../../packages/protocol" }]
+  "references": [
+    {
+      "path": "../../packages/protocol"
+    },
+    {
+      "path": "../../packages/desktop-supervisor"
+    }
+  ]
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { apiClient } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
+import { ProductDailyStatus } from "./product-daily-status.js";
 import {
   releaseMicrophoneCapture,
   startMicrophoneCapture,
@@ -88,6 +89,7 @@ export function ProductLocalServices(): JSX.Element {
   return (
     <section className="yuvi-card grid gap-3" aria-label="Local intelligence">
       <h2>Local intelligence</h2>
+      {import.meta.env["YUVI_DAILY_USE"] === true ? <ProductDailyStatus /> : null}
       <button
         className="yuvi-product-button"
         disabled={status.loading}
@@ -118,7 +120,8 @@ export function ProductLocalServices(): JSX.Element {
           <p>
             Mem0: {data.memory.status}. Embedding probe:{" "}
             {data.memory.embedder ? "passed" : "not passed"}. pgvector:{" "}
-            {data.memory.vectorStore ? "available" : "unavailable"}. Search:{" "}
+            {data.memory.vectorStore ? "available" : "unavailable"}. CRUD:{" "}
+            {data.memory.crud ? "available" : "unavailable"}. Search:{" "}
             {data.memory.search ? "available" : "unavailable"}. infer={String(data.memory.infer)}
             {!data.memory.infer
               ? " · automatic LLM extraction unavailable; explicit memory writes remain supported when CRUD is ready."

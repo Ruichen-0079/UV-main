@@ -1,5 +1,6 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { dailyStatusPlugin } from "./src/daily-status-plugin.js";
 
 const webHost = process.env["YUVI_WEB_HOST"] ?? process.env["WEB_HOST"] ?? "127.0.0.1";
 const webPort = Number.parseInt(
@@ -14,7 +15,10 @@ if (webHost === "0.0.0.0") {
 export default defineConfig({
   // Relative asset URLs work in both Vite dev and Tauri asset protocol.
   base: "./",
-  plugins: [react()],
+  define: {
+    "import.meta.env.YUVI_DAILY_USE": JSON.stringify(process.env["YUVI_DAILY_USE_SYSTEMD"] === "1")
+  },
+  plugins: [react(), dailyStatusPlugin()],
   server: {
     host: webHost,
     port: webPort,

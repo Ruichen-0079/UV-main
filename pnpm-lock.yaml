@@ -125,6 +125,9 @@ importers:
         specifier: ^5.4.21
         version: 5.4.21(@types/node@22.19.18)
     devDependencies:
+      '@companion/desktop-supervisor':
+        specifier: workspace:*
+        version: link:../../packages/desktop-supervisor
       '@types/node':
         specifier: ^22.10.7
         version: 22.19.18

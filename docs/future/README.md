@@ -15,6 +15,12 @@ authoritative for implemented behavior. In particular, [P4 Linux-first](../p4-li
 [Providers](../providers.md), [Prompt Pipeline](../prompt-pipeline.md), and the
 current Runtime contracts take precedence over older roadmap status text.
 
+Linux daily-use and local speech are closed by [Campaign B](campaign-b-closure.md).
+[Campaign C](campaign-c-closure.md) rebaselines Linux local services / Memory: the
+remaining follow-up exposes existing Supervisor diagnostics when Runtime is down.
+External PostgreSQL/Ollama ownership and the established embedding path remain
+authoritative; the old campaign sequence does not require rebuilding them.
+
 Structural Debt Paydown is complete. P8 identity/persona/relationship work is
 closed through P8-1F; Character ABI 2A–2D is implemented; the Character Harness
 semantic kernel is closed through 5L; the initial bounded Cognition/capability
