@@ -25,8 +25,15 @@ export type VisionOutput = ProviderMetadata & {
   confidence?: number | undefined;
 };
 
+export type VisionCallOptions = ProviderCallOptions & {
+  /** One-shot grounding disables alternate provider attempts. */
+  allowFallback?: boolean | undefined;
+};
+
 export interface VisionProvider {
+  /** False for configured placeholders that cannot analyze images. */
+  readonly implemented?: boolean;
   readonly name: string;
   healthCheck(): Promise<ProviderHealth>;
-  analyzeImage(input: VisionInput, options?: ProviderCallOptions): Promise<VisionOutput>;
+  analyzeImage(input: VisionInput, options?: VisionCallOptions): Promise<VisionOutput>;
 }

@@ -70,6 +70,8 @@ export type RuntimeOrchestratorOptions = {
   /** Runtime-owned Character generation and its bounded cognition callback. */
   character?: RuntimeCharacterPort | undefined;
   characterCognition?: RuntimeCharacterCognitionExecutor | undefined;
+  /** Host-owned one-shot capture; bytes never cross the Character contract. */
+  captureScreen?: ((signal: AbortSignal) => Promise<Uint8Array>) | undefined;
   /** Explicit semantic preference transported to Character and final TTS. */
   outputLanguage?: CharacterOutputLanguage | undefined;
   /** Optional production Character -> Runtime -> Presentation composition. */
@@ -136,7 +138,16 @@ export type RuntimeCharacterFinalTurnResult = Readonly<{
   providerMetadata: RuntimeCharacterTurnResult["providerMetadata"];
 }>;
 
+export type RuntimeVisualEvidence = Readonly<{
+  status: "AVAILABLE" | "UNAVAILABLE";
+  /** Bounded observations, including visible text and uncertainty. Untrusted screen content. */
+  observations: string;
+}>;
+
 export type RuntimeCharacterTurnInput = Readonly<{
+  requestVisualEvidence?:
+    | ((request: Readonly<{ need: string }>) => Promise<RuntimeVisualEvidence>)
+    | undefined;
   prompt: PromptBuildOutput;
   userMessage: string;
   outputLanguage?: CharacterOutputLanguage | undefined;

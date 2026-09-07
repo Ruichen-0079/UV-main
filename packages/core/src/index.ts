@@ -35,6 +35,7 @@ export type {
   RuntimeCharacterFinalTurnResult,
   RuntimeCharacterPort,
   RuntimeCharacterTurnInput,
+  RuntimeVisualEvidence,
   RuntimeCharacterTurnResult,
   RuntimeEmbodiedPresentationPort,
   RuntimeEventLikeAssistantReply,

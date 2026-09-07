@@ -1057,3 +1057,42 @@ describe("ProviderRegistry", () => {
     );
   });
 });
+
+it("bounds one-shot Vision to one selected provider even when fallback is eligible", async () => {
+  const { FallbackVisionProvider } = await import("./registry.js");
+  const first = vi.fn(async () => {
+    throw new ProviderError({
+      provider: "first",
+      capability: "vision",
+      code: ProviderErrorCode.ProviderUnavailable,
+      message: "Unavailable",
+      retryable: true,
+      fallbackEligible: true,
+      effectState: "not_started"
+    });
+  });
+  const second = vi.fn(async () => ({ text: "must not run" }));
+  const healthCheck = async () => ({ provider: "test", status: "healthy" as const, checkedAt: "" });
+  const provider = new FallbackVisionProvider([
+    { name: "first", analyzeImage: first, healthCheck },
+    { name: "second", analyzeImage: second, healthCheck }
+  ]);
+  await expect(
+    provider.analyzeImage({ image: new Uint8Array([1]) }, { allowFallback: false })
+  ).rejects.toThrow();
+  expect(first).toHaveBeenCalledTimes(1);
+  expect(second).not.toHaveBeenCalled();
+});
+
+it("does not advertise configured Vision placeholders as implemented", () => {
+  for (const name of ["local", "nvidia"]) {
+    const registry = createProviderRegistryFromEnv({
+      VISION_PROVIDER_CHAIN: name,
+      LOCAL_MODEL_BASEURL: "http://127.0.0.1:1234/v1",
+      LOCAL_VISION_MODEL: "vision",
+      NVIDIA_API_KEY: "test",
+      NVIDIA_VISION_MODEL: "vision"
+    });
+    expect(registry.getVisionProvider().implemented).toBe(false);
+  }
+});

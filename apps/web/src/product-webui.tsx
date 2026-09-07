@@ -1,3 +1,4 @@
+import { ProductVisionStatus } from "./product-vision-status.js";
 import { useState } from "react";
 import { App as DeveloperDashboard } from "./App.js";
 import { apiClient, type HealthResponse } from "./api/client.js";
@@ -162,6 +163,7 @@ export function ProductWebUI(): JSX.Element {
                 </p>
               </section>
             ) : null}
+            <ProductVisionStatus />
             <ProductLocalServices />
           </div>
         ) : view === "models" ? (

@@ -56,7 +56,8 @@ it("renders speech readiness and reduced Memory capability without pretending TT
     "reasoning",
     "embedding",
     "stt",
-    "tts"
+    "tts",
+    "vision"
   ]);
 });
 it("recognizes Product in a normal browser", async () => {
