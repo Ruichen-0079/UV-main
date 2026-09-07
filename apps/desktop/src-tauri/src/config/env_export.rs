@@ -93,11 +93,6 @@ pub fn public_env_overrides(settings: &UserSettings) -> BTreeMap<String, String>
                 && settings.stt.autostart,
         ),
     );
-    if settings.stt.provider == SttProvider::Local {
-        // The provider registry's existing local adapter uses this shared
-        // endpoint key; the Supervisor service keeps its dedicated health URL.
-        env.insert("LOCAL_MODEL_BASEURL".into(), settings.stt.base_url.clone());
-    }
 
     env.insert(
         "GPT_SOVITS_TTS_BASE_URL".into(),
@@ -108,12 +103,8 @@ pub fn public_env_overrides(settings: &UserSettings) -> BTreeMap<String, String>
         settings.tts.upstream_url.clone(),
     );
 
-    // Preserve the existing local Alice provider boundary for an explicitly
-    // configured external service. Fresh packaged installs keep TTS disabled;
-    // no packaged GPT-SoVITS runtime or voice asset is claimed here.
-    env.insert("DEFAULT_TTS_PROVIDER".into(), "local".into());
-    env.insert("TTS_PROVIDER_CHAIN".into(), "local".into());
-    env.insert("LOCAL_TTS_MODEL".into(), "alice-v4".into());
+    // TTS provider/model selection belongs to ProviderRegistry configuration.
+    // Desktop enable/lifecycle preferences must not select a concrete voice.
 
     if memory_llm_active(settings) {
         env.insert(
@@ -295,9 +286,6 @@ pub fn unset_env_for_supervisor(
         }
     }
 
-    if settings.stt.provider != SttProvider::Local {
-        push_unique(&mut unset, "LOCAL_MODEL_BASEURL");
-    }
 
     Ok(unset)
 }

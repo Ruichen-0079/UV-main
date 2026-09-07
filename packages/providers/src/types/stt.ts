@@ -90,10 +90,21 @@ export type VoiceActivityOutput = {
 
 export interface STTProvider {
   readonly name: string;
+  readonly voiceProfiles?: VoiceProfileProvider | undefined;
   healthCheck(): Promise<ProviderHealth>;
   transcribeAudio(input: STTInput, options?: ProviderCallOptions): Promise<STTOutput>;
   detectVoiceActivity?(
     input: VoiceActivityInput,
     options?: ProviderCallOptions
   ): Promise<VoiceActivityOutput>;
+}
+
+/** Acoustic profiles only; semantic person binding remains Memory/P8 authority. */
+export interface VoiceProfileProvider {
+  list(): Promise<Array<{ voiceProfileId: string; label: string }>>;
+  enroll(
+    input: STTInput & { voiceProfileId: string; label: string }
+  ): Promise<{ voiceProfileId: string; label: string }>;
+  identify(input: STTInput): Promise<VoiceProfileMatch>;
+  delete(voiceProfileId: string): Promise<void>;
 }

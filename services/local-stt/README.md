@@ -31,7 +31,7 @@ model tree. DesktopSupervisor derives its command from the packaged manifest;
 it never calls Python, uv, or a developer checkout.
 
 To select the sidecar for Runtime STT, also set
-`LOCAL_MODEL_BASEURL=http://127.0.0.1:9876` and
+`LOCAL_STT_BASE_URL=http://127.0.0.1:9876` and
 `LOCAL_STT_MODEL=sense-voice-zh-en-ja-ko-yue-2024-07-17-int8`.
 
 Speaker profiles (`YUVI_STT_SPEAKER_DIR`, default `<model-dir>/speakers`):
@@ -44,3 +44,5 @@ a person id. HTTP JSON never includes embedding vectors; delete removes the
 metadata row and the vector. Identify is fail-closed: cosine score below
 threshold returns `NO_MATCH` / `UNKNOWN`. Mixed diarized captures are matched
 per cluster; a whole-audio template match is never applied to every speaker.
+
+Local STT uses `LOCAL_STT_BASE_URL` exclusively. `LOCAL_MODEL_BASEURL` remains the independent OpenAI-compatible Chat/Reasoning endpoint; migrate old STT configuration to the dedicated key.

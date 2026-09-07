@@ -5,6 +5,9 @@ import { useAsyncData } from "./hooks/useAsyncData.js";
 import { ProductCompactHealth, productCompactHealthItems } from "./product-compact-health.js";
 import { ProductAIRouting } from "./product-ai-routing.js";
 import { ProductModelsProviders } from "./product-models-providers.js";
+import { ProductLocalServices } from "./product-local-services.js";
+import { ProductMemorySettings } from "./product-memory-settings.js";
+import { isTauriRuntime } from "./tauri-window.js";
 
 import { SettingsPage } from "./pages/settings-page.js";
 import { UserSettingsPanel } from "./user-settings-panel.js";
@@ -60,6 +63,19 @@ export function ProductWebUI(): JSX.Element {
           <span>{status}</span>
         </button>
         <div className="yuvi-topbar-actions">
+          {!isTauriRuntime() ? (
+            <>
+              <a className="yuvi-product-action" href="/#/main" target="yuvi-main">
+                Chat &amp; Voice Mode
+              </a>
+              <a className="yuvi-product-action" href="/#/companion" target="yuvi-companion">
+                Companion
+              </a>
+              <a className="yuvi-product-action" href="/#/subtitle" target="yuvi-subtitle">
+                Subtitle
+              </a>
+            </>
+          ) : null}
           <button
             type="button"
             className={`yuvi-product-action ${view === "home" ? "is-active" : ""}`}
@@ -146,6 +162,7 @@ export function ProductWebUI(): JSX.Element {
                 </p>
               </section>
             ) : null}
+            <ProductLocalServices />
           </div>
         ) : view === "models" ? (
           <div className="grid gap-4">
@@ -159,6 +176,7 @@ export function ProductWebUI(): JSX.Element {
               </p>
             </section>
             <ProductModelsProviders />
+            <ProductMemorySettings />
           </div>
         ) : view === "settings" ? (
           <div className="grid gap-4">

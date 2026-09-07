@@ -21,12 +21,17 @@ import {
 import { useAsyncData } from "./hooks/useAsyncData.js";
 import { productSettingValue } from "./product-models-providers.js";
 
-export type ProductRoutingCapability = "chat" | "reasoning" | "embedding";
+export type ProductRoutingCapability = "chat" | "reasoning" | "embedding" | "stt" | "tts";
 
 export type ProductRoutingDefinition = {
   capability: ProductRoutingCapability;
   label: string;
-  settingKey: "CHAT_PROVIDER_CHAIN" | "REASONING_PROVIDER_CHAIN" | "EMBEDDING_PROVIDER_CHAIN";
+  settingKey:
+    | "CHAT_PROVIDER_CHAIN"
+    | "REASONING_PROVIDER_CHAIN"
+    | "EMBEDDING_PROVIDER_CHAIN"
+    | "STT_PROVIDER_CHAIN"
+    | "TTS_PROVIDER_CHAIN";
   description: string;
 };
 
@@ -47,7 +52,20 @@ export const PRODUCT_ROUTING_DEFINITIONS: ProductRoutingDefinition[] = [
     capability: "embedding",
     label: "Embedding",
     settingKey: "EMBEDDING_PROVIDER_CHAIN",
-    description: "The Runtime chain used for memory embeddings; changes may require restart."
+    description: "The legacy Runtime embedding chain. Mem0 uses its own fixed Ollama embedder."
+  },
+  {
+    capability: "stt",
+    label: "Speech recognition",
+    settingKey: "STT_PROVIDER_CHAIN",
+    description: "Choose local for the installed speech and acoustic profile service."
+  },
+  {
+    capability: "tts",
+    label: "Speech output",
+    settingKey: "TTS_PROVIDER_CHAIN",
+    description:
+      "Optional speech output. Select a configured provider; this does not install or select a voice model."
   }
 ];
 
@@ -566,7 +584,9 @@ export function ProductAIRouting(): JSX.Element {
   const [draft, setDraft] = useState<Record<ProductRoutingCapability, string>>({
     chat: "",
     reasoning: "",
-    embedding: ""
+    embedding: "",
+    stt: "",
+    tts: ""
   });
   const [saving, setSaving] = useState<ProductRoutingCapability | null>(null);
   const [inspecting, setInspecting] = useState<ProductRoutingCapability | null>(null);
@@ -592,7 +612,9 @@ export function ProductAIRouting(): JSX.Element {
       setDraft({
         chat: productRoutingSetting(settings.data, "chat").value,
         reasoning: productRoutingSetting(settings.data, "reasoning").value,
-        embedding: productRoutingSetting(settings.data, "embedding").value
+        embedding: productRoutingSetting(settings.data, "embedding").value,
+        stt: productRoutingSetting(settings.data, "stt").value,
+        tts: productRoutingSetting(settings.data, "tts").value
       });
       seededRef.current = true;
     }

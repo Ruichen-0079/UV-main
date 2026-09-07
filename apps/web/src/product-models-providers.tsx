@@ -92,14 +92,17 @@ export const PRODUCT_PROVIDER_DEFINITIONS: ProductProviderDefinition[] = [
   {
     id: "local",
     label: "Local models",
-    description: "Local OpenAI-compatible and local capability routes. Runtime owns processes.",
+    description:
+      "Local service connections. TTS is optional; no voice model is selected automatically.",
     fields: [
       { key: "LOCAL_MODEL_BASEURL", label: "Base URL", type: "url" },
       { key: "LOCAL_CHAT_MODEL", label: "Chat model" },
       { key: "LOCAL_REASONING_MODEL", label: "Reasoning model" },
       { key: "LOCAL_EMBEDDING_MODEL", label: "Embedding model" },
       { key: "LOCAL_EMBEDDING_DIMENSIONS", label: "Embedding dimensions" },
-      { key: "LOCAL_TTS_MODEL", label: "TTS model" },
+      { key: "LOCAL_TTS_MODEL", label: "Compatibility TTS model (GPT-SoVITS adapter)" },
+      { key: "GPT_SOVITS_TTS_BASE_URL", label: "Compatibility TTS URL", type: "url" },
+      { key: "LOCAL_STT_BASE_URL", label: "STT service URL", type: "url" },
       { key: "LOCAL_STT_MODEL", label: "STT model" },
       { key: "LOCAL_VISION_MODEL", label: "Vision model" }
     ],
