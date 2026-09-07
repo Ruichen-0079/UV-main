@@ -37,7 +37,12 @@ import type {
   VoiceActivityOutput
 } from "./types/stt.js";
 import type { TTSInput, TTSOutput, TTSProvider } from "./types/tts.js";
-import type { VisionInput, VisionOutput, VisionProvider } from "./types/vision.js";
+import type {
+  VisionCallOptions,
+  VisionInput,
+  VisionOutput,
+  VisionProvider
+} from "./types/vision.js";
 import {
   ProviderError,
   ProviderErrorCode,
@@ -1652,9 +1657,13 @@ export class FallbackVisionProvider implements VisionProvider {
     );
   }
 
-  async analyzeImage(input: VisionInput, options?: ProviderCallOptions): Promise<VisionOutput> {
+  get implemented(): boolean {
+    return Boolean(this.providers[0] && this.providers[0].implemented !== false);
+  }
+
+  async analyzeImage(input: VisionInput, options?: VisionCallOptions): Promise<VisionOutput> {
     return runProviderChain(
-      this.providers,
+      options?.allowFallback === false ? this.providers.slice(0, 1) : this.providers,
       "vision",
       (provider) => provider.analyzeImage(input, options),
       options
@@ -2176,6 +2185,7 @@ class UnimplementedSTTProvider implements STTProvider {
 }
 
 class UnimplementedVisionProvider implements VisionProvider {
+  readonly implemented = false;
   constructor(
     readonly name: string,
     private readonly message: string

@@ -1,3 +1,4 @@
+import { captureKdeScreen, screenCaptureAvailable } from "./screen-capture.js";
 import type { RuntimeLogger } from "@companion/core";
 import { RuntimeOrchestrator, type RuntimeProactiveStateStore } from "@companion/core";
 import { createFileProactiveStateStore } from "./proactive-policy-store.js";
@@ -231,6 +232,7 @@ export async function createAppContext(
         ? undefined
         : createServerCharacterPort();
     return new RuntimeOrchestrator({
+      ...(screenCaptureAvailable() ? { captureScreen: captureKdeScreen } : {}),
       eventBus,
       memory,
       promptBuilder,

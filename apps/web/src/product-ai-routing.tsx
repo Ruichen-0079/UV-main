@@ -21,7 +21,13 @@ import {
 import { useAsyncData } from "./hooks/useAsyncData.js";
 import { productSettingValue } from "./product-models-providers.js";
 
-export type ProductRoutingCapability = "chat" | "reasoning" | "embedding" | "stt" | "tts";
+export type ProductRoutingCapability =
+  | "chat"
+  | "reasoning"
+  | "embedding"
+  | "stt"
+  | "tts"
+  | "vision";
 
 export type ProductRoutingDefinition = {
   capability: ProductRoutingCapability;
@@ -31,7 +37,8 @@ export type ProductRoutingDefinition = {
     | "REASONING_PROVIDER_CHAIN"
     | "EMBEDDING_PROVIDER_CHAIN"
     | "STT_PROVIDER_CHAIN"
-    | "TTS_PROVIDER_CHAIN";
+    | "TTS_PROVIDER_CHAIN"
+    | "VISION_PROVIDER_CHAIN";
   description: string;
 };
 
@@ -66,6 +73,13 @@ export const PRODUCT_ROUTING_DEFINITIONS: ProductRoutingDefinition[] = [
     settingKey: "TTS_PROVIDER_CHAIN",
     description:
       "Optional speech output. Select a configured provider; this does not install or select a voice model."
+  },
+  {
+    capability: "vision",
+    label: "Vision",
+    settingKey: "VISION_PROVIDER_CHAIN",
+    description:
+      "Current-screen evidence on demand. Grounding uses one provider attempt on the first route; configure it before use."
   }
 ];
 
@@ -586,6 +600,7 @@ export function ProductAIRouting(): JSX.Element {
     reasoning: "",
     embedding: "",
     stt: "",
+    vision: "",
     tts: ""
   });
   const [saving, setSaving] = useState<ProductRoutingCapability | null>(null);
@@ -614,6 +629,7 @@ export function ProductAIRouting(): JSX.Element {
         reasoning: productRoutingSetting(settings.data, "reasoning").value,
         embedding: productRoutingSetting(settings.data, "embedding").value,
         stt: productRoutingSetting(settings.data, "stt").value,
+        vision: productRoutingSetting(settings.data, "vision").value,
         tts: productRoutingSetting(settings.data, "tts").value
       });
       seededRef.current = true;

@@ -254,3 +254,87 @@ describe("production Character runtime adapter", () => {
     expect(calls.generateChat).not.toHaveBeenCalled();
   });
 });
+
+describe("semantic current-screen grounding", () => {
+  it("requests evidence by need and resumes the same original user turn", async () => {
+    const calls = characterHarness({
+      responses: [
+        output('{"visualNeed":"Read the visible error and relevant UI state"}'),
+        output('{"disposition":"RESPOND","text":"The dialog says permission denied."}')
+      ]
+    });
+    const requestVisualEvidence = vi.fn(async () => ({
+      status: "AVAILABLE" as const,
+      observations: "Permission denied"
+    }));
+    const result = await createServerCharacterPort().generate({
+      prompt,
+      userMessage: "What is the error on my screen?",
+      generateChat: calls.generateChat,
+      requestVisualEvidence
+    });
+    expect(requestVisualEvidence).toHaveBeenCalledTimes(1);
+    expect(requestVisualEvidence).toHaveBeenCalledWith({
+      need: "Read the visible error and relevant UI state"
+    });
+    expect(result.decision.reply).toMatchObject({
+      disposition: "RESPOND",
+      text: "The dialog says permission denied."
+    });
+    expect(calls.generateChat).toHaveBeenCalledTimes(2);
+    const resumed = calls.generateChat.mock.calls[1]![0];
+    expect(resumed.messages[1]?.content).toBe("What is the error on my screen?");
+    expect(JSON.stringify(resumed)).toContain("Permission denied");
+    expect(JSON.stringify(resumed)).toContain("untrusted evidence");
+  });
+  it("passes bounded evidence to the existing Cognition handoff", async () => {
+    const calls = characterHarness({
+      responses: [
+        output('{"visualNeed":"Read the formula"}'),
+        output('{"disposition":"NEED_COGNITION","focus":"Solve the visible formula"}')
+      ]
+    });
+    const result = await createServerCharacterPort().generate({
+      prompt,
+      userMessage: "Solve this",
+      generateChat: calls.generateChat,
+      requestVisualEvidence: async () => ({
+        status: "AVAILABLE",
+        observations: "x^2 = 4; the label is unreadable"
+      })
+    });
+    expect(result.cognitionHandoff?.problem).toContain("x^2 = 4");
+    expect(result.cognitionHandoff?.problem).toContain("unreadable");
+  });
+  it("does not ground ordinary chat and rejects recursive visual requests", async () => {
+    const requestVisualEvidence = vi.fn(async () => ({
+      status: "UNAVAILABLE" as const,
+      observations: "Screen contents are unknown"
+    }));
+    const ordinary = characterHarness({
+      responses: [output('{"disposition":"RESPOND","text":"Hello"}')]
+    });
+    await createServerCharacterPort().generate({
+      prompt,
+      userMessage: "Hi",
+      generateChat: ordinary.generateChat,
+      requestVisualEvidence
+    });
+    expect(requestVisualEvidence).not.toHaveBeenCalled();
+    const repeated = characterHarness({
+      responses: [output('{"visualNeed":"Read screen"}'), output('{"visualNeed":"Again"}')]
+    });
+    await expect(
+      createServerCharacterPort().generate({
+        prompt,
+        userMessage: "Look",
+        generateChat: repeated.generateChat,
+        requestVisualEvidence
+      })
+    ).rejects.toThrow("repeated");
+    expect(requestVisualEvidence).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(repeated.generateChat.mock.calls[1])).toContain(
+      "Screen contents are unknown"
+    );
+  });
+});

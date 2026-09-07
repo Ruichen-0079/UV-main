@@ -214,6 +214,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
     localOverrideConfig: buildSafeConfig(localEnv),
     effectiveConfig: buildSafeConfig(env),
     activeRuntimeConfig: {
+      visualGroundingAvailable: context.runtime.getVisualGroundingAvailability(),
       serverHost: config.host,
       serverPort: config.port,
       eventBus: config.eventBus,
@@ -227,7 +228,9 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
         embedding: sanitizeProviderStatus(providerStatus.providers.embedding),
         tts: sanitizeProviderStatus(providerStatus.providers.tts),
         stt: sanitizeProviderStatus(providerStatus.providers.stt),
-        vision: sanitizeProviderStatus(providerStatus.providers.vision)
+        vision: sanitizeProviderStatus(
+          providerStatus.routes?.vision?.[0] ?? providerStatus.providers.vision
+        )
       }
     },
     settings: buildLayeredSettings(baseEnv, localEnv, env),
