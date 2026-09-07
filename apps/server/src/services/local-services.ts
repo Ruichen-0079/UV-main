@@ -19,16 +19,22 @@ export async function localServicesStatus(context: AppContext) {
   const sttUrl = env["LOCAL_STT_BASE_URL"] || "http://127.0.0.1:9876";
   const ollamaUrl = env["MEM0_OLLAMA_BASE_URL"] || "http://127.0.0.1:11434";
   const mem0Url = env["MEM0_BASE_URL"] || "http://127.0.0.1:6131";
-  const [stt, tags, memory, database] = await Promise.all([
+  const providers = context.providers.getStatus().providers;
+  const [stt, tags, memory, database, ttsHealth] = await Promise.all([
     probe(`${sttUrl.replace(/\/$/, "")}/health`),
     probe(`${ollamaUrl.replace(/\/$/, "")}/api/tags`),
     probe(`${mem0Url.replace(/\/$/, "")}/health`),
-    context.memoryRepository.healthCheck()
+    context.memoryRepository.healthCheck(),
+    providers.tts.readiness === "ready"
+      ? context.providers
+          .getTTSProvider()
+          .healthCheck()
+          .catch(() => null)
+      : Promise.resolve(null)
   ]);
   const speechReady = stt?.["service"] === "yuvi-local-stt" && stt?.["ok"] === true;
   const data = memory?.["data"];
   const models = Array.isArray(tags?.["models"]) ? tags["models"] : [];
-  const providers = context.providers.getStatus().providers;
   return {
     checkedAt: new Date().toISOString(),
     stt: {
@@ -61,7 +67,14 @@ export async function localServicesStatus(context: AppContext) {
     },
     tts: {
       configured: providers.tts.readiness === "ready",
-      observed: providers.tts.observed ?? "unknown",
+      observed:
+        ttsHealth?.status === "healthy"
+          ? "available"
+          : ttsHealth
+            ? "unavailable"
+            : (providers.tts.observed ?? "unknown"),
+      available: ttsHealth?.status === "healthy",
+      message: ttsHealth?.message,
       provider: providers.tts.provider
     }
   };

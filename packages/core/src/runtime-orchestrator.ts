@@ -489,6 +489,69 @@ export class RuntimeOrchestrator {
    * Fence one already-finalized STT observation. This is speech activity, not
    * engagement: it advances activity_revision and never clears suppression.
    */
+  private readonly pendingSpeechTurns = new Map<
+    string,
+    { observation: STTOutput; sessionId: string; at: number }
+  >();
+
+  /** Consume server-owned acoustic evidence once when the capture controller commits a turn. */
+  commitSpeechTurn(
+    observationId: string,
+    sessionId: string,
+    content: string
+  ): UserVoiceTranscriptEvent {
+    const pending = this.pendingSpeechTurns.get(observationId);
+    if (
+      !pending ||
+      pending.sessionId !== sessionId ||
+      pending.observation.text.trim() !== content.trim() ||
+      Date.now() - pending.at > 120_000 ||
+      this.speechCaptureStore.obsoleteEpochs.has(pending.observation.captureEpoch ?? "")
+    ) {
+      throw new Error("Speech observation is missing, stale, or does not match this turn.");
+    }
+    this.pendingSpeechTurns.delete(observationId);
+    const observation = pending.observation;
+    const segments = observation.segments ?? [];
+    const clusters = new Set(segments.map((segment) => segment.speakerClusterId));
+    const matches = segments.map(
+      (segment) =>
+        segment.voiceProfileMatch ??
+        (segments.length === 1 ? observation.voiceProfileMatch : undefined)
+    );
+    const profiles = new Set(
+      matches.map((match) => (match?.status === "MATCHED" ? match.voiceProfileId : undefined))
+    );
+    const voiceProfileId = clusters.size <= 1 && profiles.size === 1 ? [...profiles][0] : undefined;
+    return createEvent("user.voice.transcript", {
+      sessionId,
+      content: observation.text,
+      observationId,
+      ...(observation.captureEpoch ? { captureEpoch: observation.captureEpoch } : {}),
+      ...(observation.language ? { language: observation.language } : {}),
+      ...(voiceProfileId ? { voiceProfileId } : {}),
+      segments: segments.map((segment) => ({
+        ...(segment.segmentId ? { segmentId: segment.segmentId } : {}),
+        ...(segment.text !== undefined ? { text: segment.text } : {}),
+        ...(segment.speakerClusterId !== undefined
+          ? { speakerClusterId: segment.speakerClusterId }
+          : {}),
+        ...(segment.startMs !== undefined ? { startMs: segment.startMs } : {}),
+        ...(segment.endMs !== undefined ? { endMs: segment.endMs } : {}),
+        ...(segment.voiceProfileMatch
+          ? {
+              voiceProfileMatch: {
+                status: segment.voiceProfileMatch.status,
+                ...(segment.voiceProfileMatch.voiceProfileId
+                  ? { voiceProfileId: segment.voiceProfileMatch.voiceProfileId }
+                  : {})
+              }
+            }
+          : {})
+      }))
+    });
+  }
+
   admitFinalizedSpeechObservation(
     observation: STTOutput,
     options: AdmitFinalizedSpeechObservationInput = {}
@@ -503,6 +566,13 @@ export class RuntimeOrchestrator {
     }
     this.noteSpeechCaptureActivity();
     this.armProactiveWake();
+    this.pendingSpeechTurns.set(result.observation.observationId!, {
+      observation: result.observation,
+      sessionId: options.sessionId ?? "default",
+      at: Date.now()
+    });
+    while (this.pendingSpeechTurns.size > 256)
+      this.pendingSpeechTurns.delete(this.pendingSpeechTurns.keys().next().value!);
     return result.observation;
   }
 
@@ -1111,7 +1181,7 @@ export class RuntimeOrchestrator {
   }
 
   async *streamUserMessage(
-    input: UserMessageEvent | HandleUserMessageInput,
+    input: RuntimeUserTurnEvent | HandleUserMessageInput,
     options: StreamUserMessageOptions = {}
   ): AsyncIterable<RuntimeReplyStreamEvent> {
     if (options.signal?.aborted) {
@@ -1121,7 +1191,7 @@ export class RuntimeOrchestrator {
     this.enterLifecycleOperation();
     this.explicitTurnDepth += 1;
     try {
-      const userEvent = isRuntimeUserMessageEvent(input)
+      const userEvent = isRuntimeUserTurnEvent(input)
         ? input
         : createEvent(
             "user.message",
@@ -1138,7 +1208,7 @@ export class RuntimeOrchestrator {
       const agentReplyId = canonicalAgentReplyId(userEvent);
       const assistantMessageId = canonicalAssistantMessageId(userEvent);
       let finalizedTurnId = await this.resolveFinalizedTurnId(userEvent, assistantMessageId);
-      const voiceOutput = isRuntimeUserMessageEvent(input)
+      const voiceOutput = isRuntimeUserTurnEvent(input)
         ? Boolean(options.voiceOutput)
         : Boolean(input.voiceOutput ?? options.voiceOutput);
 
@@ -1252,6 +1322,10 @@ export class RuntimeOrchestrator {
             yield {
               type: "text-delta",
               text: event.text,
+              language: resolveCharacterExpressionLanguage(
+                this.outputLanguage(),
+                accumulatedText
+              ).toLowerCase(),
               messageId: assistantMessageId,
               sessionId: userEvent.payload.sessionId,
               traceId: userEvent.traceId
@@ -1456,6 +1530,10 @@ export class RuntimeOrchestrator {
           sessionId: userEvent.payload.sessionId,
           traceId: userEvent.traceId,
           content: finalOutput.message.content,
+          language: resolveCharacterExpressionLanguage(
+            this.outputLanguage(),
+            finalOutput.message.content
+          ).toLowerCase(),
           provider: providerMetadata.finalProvider ?? providerMetadata.name
         };
       } catch (error) {
@@ -1677,6 +1755,10 @@ export class RuntimeOrchestrator {
         yield {
           type: "text-delta",
           text: finalReply.text,
+          language: resolveCharacterExpressionLanguage(
+            this.outputLanguage(),
+            finalReply.text
+          ).toLowerCase(),
           messageId: input.assistantMessageId,
           sessionId: input.userEvent.payload.sessionId,
           traceId: input.userEvent.traceId
@@ -1688,6 +1770,10 @@ export class RuntimeOrchestrator {
         sessionId: input.userEvent.payload.sessionId,
         traceId: input.userEvent.traceId,
         content: finalReply.text,
+        language: resolveCharacterExpressionLanguage(
+          this.outputLanguage(),
+          finalReply.text
+        ).toLowerCase(),
         provider: providerMetadata.finalProvider ?? providerMetadata.name
       };
     } catch (error) {
@@ -1987,6 +2073,10 @@ export class RuntimeOrchestrator {
         const deltaEvent = {
           type: "text-delta" as const,
           text: accumulatedText,
+          language: resolveCharacterExpressionLanguage(
+            this.outputLanguage(),
+            accumulatedText
+          ).toLowerCase(),
           messageId: assistantMessageId,
           sessionId: input.sessionId,
           traceId
@@ -1997,6 +2087,10 @@ export class RuntimeOrchestrator {
           sessionId: input.sessionId,
           traceId,
           content: accumulatedText,
+          language: resolveCharacterExpressionLanguage(
+            this.outputLanguage(),
+            accumulatedText
+          ).toLowerCase(),
           provider: providerMetadata.finalProvider ?? providerMetadata.name
         };
         this.emitProactiveStreamEvent(deltaEvent);
@@ -2205,8 +2299,7 @@ export class RuntimeOrchestrator {
       situationParts.push(forgetNote);
     }
     const prompt = this.options.promptBuilder.buildPrompt({
-      systemIdentity:
-        "You are YUVI, a local-first AI companion runtime agent.",
+      systemIdentity: "You are YUVI, a local-first AI companion runtime agent.",
       characterStyle: `Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail.\n\n${characterOutputLanguageInstruction(this.outputLanguage())}`,
       relationshipContext:
         "Use remembered context only when relevant. Do not pretend to remember details that were not retrieved.",
@@ -4856,7 +4949,14 @@ function conversationMessageFromEvent(
 
 function userEventMetadata(event: RuntimeUserTurnEvent): Record<string, unknown> {
   return {
-    ...(event.type === "user.voice.transcript" ? { modality: "voice" } : {}),
+    ...(event.type === "user.voice.transcript"
+      ? {
+          modality: "voice",
+          observationId: event.payload.observationId,
+          captureEpoch: event.payload.captureEpoch,
+          segments: event.payload.segments
+        }
+      : {}),
     ...(event.type === "user.voice.transcript" && event.payload.language
       ? { language: event.payload.language }
       : {}),
@@ -5120,12 +5220,6 @@ function redactUnsafeMetadata(value: unknown): Record<string, unknown> | undefin
     }
   }
   return output;
-}
-
-function isRuntimeUserMessageEvent(
-  input: RuntimeUserTurnEvent | HandleUserMessageInput
-): input is UserMessageEvent {
-  return "type" in input && input.type === "user.message";
 }
 
 function isRuntimeUserTurnEvent(

@@ -25,6 +25,7 @@ const IdentitySchema = {
 } as const;
 
 const TranscriptionRequestSchema = z.object({
+  preview: z.boolean().optional(),
   ...IdentitySchema,
   audioBase64: z.string().optional(),
   mimeType: z.string().optional(),
@@ -210,7 +211,9 @@ type RequestDisconnectBoundary = {
   cleanup(): void;
 };
 
-function createRequestDisconnectBoundary(request: FastifyRequest): RequestDisconnectBoundary {
+export function createRequestDisconnectBoundary(
+  request: FastifyRequest
+): RequestDisconnectBoundary {
   const controller = new AbortController();
   const socket = request.raw.socket;
   let aborted = false;
@@ -250,7 +253,9 @@ async function transcribeAudioWithDisconnectBoundary(
 ): Promise<STTOutput> {
   const boundary = createRequestDisconnectBoundary(request);
   try {
-    return await provider.transcribeAudio(input, { signal: boundary.signal });
+    const output = await provider.transcribeAudio(input, { signal: boundary.signal });
+    if (boundary.signal.aborted) throw createCancelledProviderError(provider.name, "unknown");
+    return output;
   } finally {
     boundary.cleanup();
   }
@@ -278,10 +283,13 @@ export async function registerMediaRoutes(
         mimeType: parsed.data.mimeType,
         language: parsed.data.language,
         metadata: {
+          identify: !parsed.data.preview,
+          diarize: !parsed.data.preview,
           ...identityMetadata(parsed.data),
           ...(parsed.data.mockText ? { mockTranscription: parsed.data.mockText } : {})
         }
       });
+      if (parsed.data.preview) return reply.send({ text: output.text, language: output.language });
       const observation = context.runtime.admitFinalizedSpeechObservation(output, {
         sessionId: parsed.data.sessionId,
         ...(parsed.data.captureEpoch ? { captureEpoch: parsed.data.captureEpoch } : {})

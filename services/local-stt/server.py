@@ -248,6 +248,11 @@ class SttEngine:
                     self._vad_sessions.pop(next(iter(self._vad_sessions)))
             vad.accept_waveform(samples)
             active = self._vad_is_active(vad)
+            # Activity-only path: completed audio spans are owned by browser capture.
+            # Drain Silero's segment queue across continuous conversations.
+            if hasattr(vad, "pop") and hasattr(vad, "empty"):
+                while not vad.empty():
+                    vad.pop()
         return {"active": active, "captureEpoch": capture_epoch}
 
     def _find_dir(self, names: list[str]) -> Path:

@@ -18,3 +18,7 @@ apps/desktop/src-tauri/generated/
 # Environment files
 .env.*
 !.env.example
+
+# Python service runtime artifacts
+__pycache__/
+*.py[cod]

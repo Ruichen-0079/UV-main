@@ -1,3 +1,4 @@
+import { endpointDecision } from "./speech-endpoint.js";
 /**
  * Device-local utterance buffer for hands-free Voice Mode.
  *
@@ -22,7 +23,7 @@ export const HANDS_FREE_SAMPLE_RATE = 16_000;
 
 const MAX_SAMPLES = (HANDS_FREE_MAX_UTTERANCE_MS / 1000) * HANDS_FREE_SAMPLE_RATE;
 const PRE_ROLL_SAMPLES = (HANDS_FREE_PRE_ROLL_MS / 1000) * HANDS_FREE_SAMPLE_RATE;
-const TRAILING_SAMPLES = (HANDS_FREE_TRAILING_SILENCE_MS / 1000) * HANDS_FREE_SAMPLE_RATE;
+
 const MIN_SAMPLES = (HANDS_FREE_MIN_UTTERANCE_MS / 1000) * HANDS_FREE_SAMPLE_RATE;
 
 export type HandsFreeUtterance = {
@@ -37,6 +38,8 @@ export type HandsFreeUtteranceBuffer = {
   captureEpoch: string;
   push(pcm: Int16Array): HandsFreeUtterance | null;
   observeVad(active: boolean, nowMs?: number): HandsFreeUtterance | null;
+  preview(): { pcm: Int16Array; revision: number } | null;
+  observeTranscript(text: string, revision: number): void;
   dispose(): void;
 };
 
@@ -48,6 +51,9 @@ export function createHandsFreeUtteranceBuffer(captureEpoch: string): HandsFreeU
   let speechActive = false;
   let awaitingTrailing = false;
   let trailingSamples = 0;
+  let revision = 0;
+  let transcript = "";
+  let changedAtSamples = 0;
   let disposed = false;
   let state: HandsFreeDeviceState = "listening";
 
@@ -63,6 +69,9 @@ export function createHandsFreeUtteranceBuffer(captureEpoch: string): HandsFreeU
 
   function takeUtterance(): HandsFreeUtterance | null {
     const pcm = concat(active, activeSamples);
+    revision++;
+    transcript = "";
+    changedAtSamples = 0;
     active.length = 0;
     activeSamples = 0;
     trailingSamples = 0;
@@ -76,6 +85,16 @@ export function createHandsFreeUtteranceBuffer(captureEpoch: string): HandsFreeU
       sampleRate: HANDS_FREE_SAMPLE_RATE,
       durationMs: Math.round((pcm.length / HANDS_FREE_SAMPLE_RATE) * 1000)
     };
+  }
+
+  function shouldCommit(): boolean {
+    return (
+      endpointDecision(
+        transcript,
+        trailingSamples / 16,
+        (activeSamples - changedAtSamples) / 16
+      ) === "COMMIT_UTTERANCE"
+    );
   }
 
   return {
@@ -97,10 +116,7 @@ export function createHandsFreeUtteranceBuffer(captureEpoch: string): HandsFreeU
       active.push(pcm);
       activeSamples += pcm.length;
       if (awaitingTrailing) trailingSamples += pcm.length;
-      if (
-        activeSamples >= MAX_SAMPLES ||
-        (awaitingTrailing && trailingSamples >= TRAILING_SAMPLES)
-      ) {
+      if (activeSamples >= MAX_SAMPLES || (awaitingTrailing && shouldCommit())) {
         state = "finalizing";
         return takeUtterance();
       }
@@ -109,6 +125,11 @@ export function createHandsFreeUtteranceBuffer(captureEpoch: string): HandsFreeU
     observeVad(activeFlag: boolean, _nowMs?: number): HandsFreeUtterance | null {
       if (disposed) return null;
       if (activeFlag) {
+        if (awaitingTrailing || !speechActive) {
+          revision++;
+          transcript = "";
+          changedAtSamples = activeSamples;
+        }
         if (!speechActive) {
           speechActive = true;
           awaitingTrailing = false;
@@ -130,9 +151,21 @@ export function createHandsFreeUtteranceBuffer(captureEpoch: string): HandsFreeU
       }
       if (!speechActive) return null;
       awaitingTrailing = true;
-      if (trailingSamples < TRAILING_SAMPLES) return null;
+      if (!shouldCommit()) return null;
       state = "finalizing";
       return takeUtterance();
+    },
+    preview() {
+      if (disposed || !awaitingTrailing || activeSamples < MIN_SAMPLES) return null;
+      return { pcm: concat(active, activeSamples), revision };
+    },
+    observeTranscript(text, observedRevision) {
+      if (disposed || revision !== observedRevision || !awaitingTrailing) return;
+      const normalized = text.trim().replace(/\s+/g, " ");
+      if (normalized !== transcript) {
+        transcript = normalized;
+        changedAtSamples = activeSamples;
+      }
     },
     dispose() {
       disposed = true;

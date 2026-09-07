@@ -28,7 +28,8 @@ export type LiveSpeechCapture = {
 
 export type LiveSpeechCaptureOptions = {
   sessionId: string;
-  postFrame(frame: LiveSpeechFrame): Promise<unknown>;
+  postFrame(frame: LiveSpeechFrame, signal?: AbortSignal): Promise<unknown>;
+  onError?: (error: Error) => void;
   onPcm?: (pcm: Int16Array, sampleRate: number) => void;
   createId?: () => string;
   getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
@@ -68,6 +69,8 @@ export async function startLiveSpeechCapture(
   const processor = context.createScriptProcessor(PROCESSOR_BUFFER_SIZE, 1, 1);
   const silentGain = context.createGain?.();
   if (silentGain) silentGain.gain.value = 0;
+  const controller = new AbortController();
+  let queuedSamples = 0;
   let stopped = false;
   let sending = Promise.resolve();
 
@@ -76,6 +79,15 @@ export async function startLiveSpeechCapture(
     const input = event.inputBuffer.getChannelData(0);
     const pcm = resampleToInt16(input, event.inputBuffer.sampleRate, TARGET_SAMPLE_RATE);
     if (pcm.length === 0) return;
+    if (queuedSamples + pcm.length > TARGET_SAMPLE_RATE * 2) {
+      // Never turn network lag into unbounded delayed speech/barge-in.
+      stopped = true;
+      controller.abort();
+      for (const track of stream.getTracks()) track.stop();
+      options.onError?.(new Error("Speech capture could not keep up. Restart Voice Mode."));
+      return;
+    }
+    queuedSamples += pcm.length;
     options.onPcm?.(pcm, TARGET_SAMPLE_RATE);
     const frame: LiveSpeechFrame = {
       sessionId: options.sessionId,
@@ -84,10 +96,14 @@ export async function startLiveSpeechCapture(
       sampleRate: TARGET_SAMPLE_RATE
     };
     sending = sending
-      .then(() => (stopped ? undefined : options.postFrame(frame)))
+      .then(() => (stopped ? undefined : options.postFrame(frame, controller.signal)))
       .then(
-        () => undefined,
-        () => undefined
+        () => {
+          queuedSamples -= pcm.length;
+        },
+        () => {
+          queuedSamples -= pcm.length;
+        }
       );
   };
 
@@ -104,6 +120,7 @@ export async function startLiveSpeechCapture(
     trackSettings,
     async stop() {
       stopped = true;
+      controller.abort();
       processor.onaudioprocess = null;
       try {
         processor.disconnect();

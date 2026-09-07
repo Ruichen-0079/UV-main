@@ -332,6 +332,7 @@ export type RuntimeReplyStreamEvent =
     }
   | {
       type: "text-delta";
+      language?: string;
       text: string;
       messageId: string;
       sessionId: string;
@@ -339,6 +340,7 @@ export type RuntimeReplyStreamEvent =
     }
   | {
       type: "completed";
+      language?: string;
       messageId: string;
       sessionId: string;
       traceId: string;

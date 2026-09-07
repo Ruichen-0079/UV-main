@@ -1,7 +1,7 @@
 /**
  * Presentation-only transport for Subtitle Surface.
  *
- * Chain: committed assistant text (Main) → projectCommittedAssistantText →
+ * Chain: confirmed audio playback (Companion) → plain speech segment →
  * this bus → SubtitlePage. Separated from CompanionBus so Subtitle never
  * gains TTS / language / speech-queue authority.
  */
@@ -13,6 +13,8 @@ export type SubtitleProjectionMessage =
       requestId?: string;
       /** Already-projected plain text. Empty/whitespace must not be published. */
       text: string;
+      /** Runtime-selected output language; presentation never re-detects it. */
+      language?: string;
     }
   | { kind: "clear" };
 
@@ -62,5 +64,6 @@ export function isSubtitleProjectionMessage(value: unknown): value is SubtitlePr
   if (typeof message["messageId"] !== "string" || message["messageId"].length === 0) return false;
   if (typeof message["text"] !== "string" || message["text"].trim().length === 0) return false;
   if (message["requestId"] !== undefined && typeof message["requestId"] !== "string") return false;
+  if (message["language"] !== undefined && typeof message["language"] !== "string") return false;
   return true;
 }

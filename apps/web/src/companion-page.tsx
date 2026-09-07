@@ -1,3 +1,4 @@
+import { publishSubtitleProjection } from "./subtitle-bus.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiClient } from "./api/client.js";
 import {
@@ -240,6 +241,7 @@ export function CompanionPage(): JSX.Element {
       // A new turn replaces the previous speech session: old audio stops,
       // stale presence is reset and synthesis restarts from a fresh queue.
       recordSpeechLedger(requestId, null, "turn-start");
+      publishSubtitleProjection({ kind: "clear" });
       activeEpochRef.current = requestId;
       speechStoppedEpochRef.current = null;
       const previous = sessionRef.current;
@@ -260,6 +262,7 @@ export function CompanionPage(): JSX.Element {
         speechBuffer.clear();
         return;
       }
+      const subtitleText = new Map<number, { text: string; language: string }>();
       const queue = new SpeechPlaybackQueue(
         (item, signal) =>
           apiClient.synthesizeSpeech({
@@ -284,7 +287,12 @@ export function CompanionPage(): JSX.Element {
             );
             bus.post({ kind: "speech-status", requestId: session.requestId, state });
           },
+          onSynthesisCompleted: (pending) => {
+            subtitleText.set(pending.segment.sequence, pending.item);
+          },
           onItemState: (segment, state) => {
+            if (state === "cancelled" || state === "failed" || state === "completed")
+              subtitleText.delete(segment.sequence);
             recordSpeechLedger(segment.requestId, segment.sequence, state);
             if (import.meta.env.DEV) {
               const states = ((
@@ -315,6 +323,14 @@ export function CompanionPage(): JSX.Element {
             const accepted = acceptPlaybackEvent(event);
             if (!accepted.accepted) return;
             if (event.type === "playbackStarted") {
+              const subtitle = subtitleText.get(event.segment.sequence);
+              if (subtitle)
+                publishSubtitleProjection({
+                  kind: "committed-assistant-text",
+                  requestId,
+                  messageId: `${requestId}:${event.segment.sequence}`,
+                  ...subtitle
+                });
               recordSpeechLedger(requestId, event.segment.sequence, "audio.play", {
                 queueSequence: event.sequence
               });
@@ -329,6 +345,8 @@ export function CompanionPage(): JSX.Element {
                     : event.type === "playbackError"
                       ? "error"
                       : null;
+            if (playbackState !== null && playbackState !== "started")
+              publishSubtitleProjection({ kind: "clear" });
             if (playbackState !== null) {
               updatePresence((current) =>
                 reduceCompanionPresence(current, {
@@ -419,6 +437,7 @@ export function CompanionPage(): JSX.Element {
           setVoiceEnabled(message.enabled);
           recordSpeechLedger("sync", null, "voice-enabled", { enabled: message.enabled });
           if (!message.enabled) {
+            publishSubtitleProjection({ kind: "clear" });
             const session = sessionRef.current;
             const epoch = activeEpochRef.current;
             if (epoch) {
@@ -457,6 +476,7 @@ export function CompanionPage(): JSX.Element {
         case "stop-speech": {
           if (activeEpochRef.current !== message.requestId) return;
           const session = sessionRef.current;
+          publishSubtitleProjection({ kind: "clear" });
           speechStoppedEpochRef.current = message.requestId;
           updatePresence((current) =>
             reduceCompanionPresence(current, {
@@ -489,6 +509,7 @@ export function CompanionPage(): JSX.Element {
             })
           );
           if (message.state === "interrupted") {
+            publishSubtitleProjection({ kind: "clear" });
             speechStoppedEpochRef.current = message.requestId;
             sessionRef.current?.queue.cancel();
             sessionRef.current = null;
@@ -517,6 +538,7 @@ export function CompanionPage(): JSX.Element {
     const unsubscribe = bus.subscribe(handleMessage);
     return () => {
       unsubscribe();
+      publishSubtitleProjection({ kind: "clear" });
       announcer.stop();
       announcerRef.current = null;
       sessionRef.current?.queue.cancel();

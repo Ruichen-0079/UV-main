@@ -53,6 +53,7 @@ import { XAITTSProvider } from "./xai/XAITTSProvider.js";
 import { XAIVisionProvider } from "./xai/XAIVisionProvider.js";
 import { DashScopeSTTProvider } from "./alibaba/DashScopeSTTProvider.js";
 import { streamOpenAICompatibleChatCompletion } from "./openai-compatible-stream.js";
+import { DotsTTSProvider } from "./local/DotsTTSProvider.js";
 import { GPTSoVITSTTSProvider } from "./local/GPTSoVITSTTSProvider.js";
 import { LocalSTTProvider } from "./local/LocalSTTProvider.js";
 import { createTransportAbort, type TransportAbort } from "./transport-abort.js";
@@ -115,6 +116,7 @@ export type ProviderRegistryConfig = {
   local: {
     baseUrl: string | undefined;
     sttBaseUrl?: string | undefined;
+    ttsBaseUrl?: string | undefined;
     chatModel: string | undefined;
     reasoningModel: string | undefined;
     embeddingModel: string | undefined;
@@ -611,7 +613,7 @@ export class ProviderRegistry implements ProviderResolver {
       return {
         baseUrl:
           capability === "tts"
-            ? this.config.gptSovits.wrapperBaseUrl
+            ? (this.config.local.ttsBaseUrl ?? this.config.gptSovits.wrapperBaseUrl)
             : capability === "stt"
               ? this.config.local.sttBaseUrl
               : this.config.local.baseUrl,
@@ -851,6 +853,7 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
       embeddingModel: emptyToUndefined(env["LOCAL_EMBEDDING_MODEL"]),
       embeddingDimensions: parsePositiveInteger(env["LOCAL_EMBEDDING_DIMENSIONS"], 1536),
       ttsModel: emptyToUndefined(env["LOCAL_TTS_MODEL"]),
+      ttsBaseUrl: emptyToUndefined(env["LOCAL_TTS_BASE_URL"]),
       sttModel: emptyToUndefined(env["LOCAL_STT_MODEL"]),
       visionModel: emptyToUndefined(env["LOCAL_VISION_MODEL"])
     },
@@ -1093,6 +1096,12 @@ const ttsProviderFactories: Record<string, ProviderFactory<TTSProvider>> = {
       return undefined;
     }
 
+    if (config.local.ttsModel === "dots-studio/dots.tts-soar") {
+      return new DotsTTSProvider({
+        baseUrl: config.local.ttsBaseUrl ?? "http://127.0.0.1:9881",
+        model: config.local.ttsModel
+      });
+    }
     return new GPTSoVITSTTSProvider({
       wrapperBaseUrl: config.gptSovits.wrapperBaseUrl,
       upstreamBaseUrl: config.gptSovits.upstreamBaseUrl,

@@ -15,7 +15,7 @@ describe("hands-free utterance buffer", () => {
     expect(buffer.state).toBe("speech-active");
     buffer.push(pcm(400));
     expect(buffer.observeVad(false)).toBeNull();
-    const utterance = buffer.push(pcm(500));
+    const utterance = buffer.push(pcm(3000));
     expect(utterance?.captureEpoch).toBe("epoch-1");
     expect(utterance?.durationMs).toBeGreaterThan(250);
     expect(buffer.state).toBe("listening");
@@ -37,4 +37,24 @@ describe("hands-free utterance buffer", () => {
     expect(buffer.observeVad(false)).toBeNull();
     expect(buffer.state).toBe("listening");
   });
+});
+
+it("keeps a thinking pause and continuation in one capture, fences stale ASR previews", () => {
+  const buffer = createHandsFreeUtteranceBuffer("epoch");
+  buffer.observeVad(true);
+  buffer.push(pcm(800));
+  buffer.observeVad(false);
+  const old = buffer.preview()!;
+  buffer.observeTranscript("因为……", old.revision);
+  expect(buffer.push(pcm(900))).toBeNull();
+  buffer.observeVad(true);
+  buffer.push(pcm(800));
+  buffer.observeVad(false);
+  buffer.observeTranscript("Done.", old.revision);
+  expect(buffer.push(pcm(800))).toBeNull();
+  const current = buffer.preview()!;
+  buffer.observeTranscript("可以再简化。", current.revision);
+  const turn = buffer.push(pcm(400));
+  expect(turn?.durationMs).toBe(3700);
+  expect(buffer.push(pcm(4000))).toBeNull();
 });

@@ -31,8 +31,6 @@ import {
 } from "./chat-state.js";
 import { ChatMessageContent } from "./markdown-message.js";
 import { detectSpeechLanguage, type SpeechQueueState } from "./speech-queue.js";
-import { projectCommittedAssistantText } from "./subtitle-projection.js";
-import { publishSubtitleProjection } from "./subtitle-bus.js";
 import { SpeechSegmenter } from "./speech-segmenter.js";
 import {
   CompanionBus,
@@ -94,17 +92,6 @@ function createSurfaceId(prefix: string): string {
  * this surface never owns audio playback, Lumi, or the analyser chain.
  */
 
-function publishCommittedSubtitle(messageId: string, content: string, requestId?: string): void {
-  const text = projectCommittedAssistantText(content);
-  if (!text) return;
-  publishSubtitleProjection({
-    kind: "committed-assistant-text",
-    messageId,
-    text,
-    ...(requestId ? { requestId } : {})
-  });
-}
-
 export function MainPage(): JSX.Element {
   const [sessionId, setSessionId] = useState("default");
   const [readMemory, setReadMemory] = useState(true);
@@ -165,6 +152,7 @@ export function MainPage(): JSX.Element {
     });
   }
   const speechSessionRef = useRef<{
+    language?: string;
     generation: string;
     segmenter: SpeechSegmenter;
     sequence: number;
@@ -439,7 +427,6 @@ export function MainPage(): JSX.Element {
               traceId: event.traceId,
               provider: event.provider
             });
-            publishCommittedSubtitle(assistantId, event.content);
             assistantId = null;
           }
         }
@@ -572,7 +559,7 @@ export function MainPage(): JSX.Element {
                 text: event.text,
                 traceId: event.traceId
               });
-              forwardSpeechSegments(requestId, event.text);
+              forwardSpeechSegments(requestId, event.text, event.language);
               return;
             }
             if (event.type === "error") {
@@ -589,7 +576,6 @@ export function MainPage(): JSX.Element {
               traceId: event.traceId,
               provider: event.provider
             });
-            publishCommittedSubtitle(assistantId, event.content, requestId);
             setRequestStatus("success");
             forwardSpeechEnd(requestId, "completed");
           }
@@ -607,7 +593,6 @@ export function MainPage(): JSX.Element {
         traceId: response.traceId,
         provider: response.provider
       });
-      publishCommittedSubtitle(assistantId, response.content, requestId);
       setRequestStatus("success");
       forwardSpeechEnd(requestId, "completed");
     } catch (caught) {
@@ -706,7 +691,6 @@ export function MainPage(): JSX.Element {
             traceId: event.traceId,
             provider: event.provider
           });
-          publishCommittedSubtitle(effect.assistantId, event.content, effect.requestId);
           setRequestStatus("success");
         }
       });
@@ -725,7 +709,6 @@ export function MainPage(): JSX.Element {
         traceId: response.traceId,
         provider: response.provider
       });
-      publishCommittedSubtitle(effect.assistantId, response.content, effect.requestId);
       setRequestStatus("success");
     } catch (caught) {
       if (!isCurrent()) return;
@@ -760,7 +743,7 @@ export function MainPage(): JSX.Element {
     }
   }
 
-  function forwardSpeechSegments(requestId: string, text: string): void {
+  function forwardSpeechSegments(requestId: string, text: string, language?: string): void {
     const speech = speechSessionRef.current;
     const bus = busRef.current;
     if (
@@ -771,13 +754,14 @@ export function MainPage(): JSX.Element {
     ) {
       return;
     }
+    if (language) speech.language = language;
     for (const segment of speech.segmenter.push(text)) {
       bus.post({
         kind: "speak",
         requestId,
         sequence: speech.sequence++,
         text: segment,
-        language: detectSpeechLanguage(segment)
+        language: speech.language ?? detectSpeechLanguage(segment)
       });
     }
   }
@@ -800,7 +784,7 @@ export function MainPage(): JSX.Element {
         requestId,
         sequence: speech.sequence++,
         text: segment,
-        language: detectSpeechLanguage(segment)
+        language: speech.language ?? detectSpeechLanguage(segment)
       });
     }
     bus.post({ kind: "speech-end", requestId });
@@ -870,18 +854,47 @@ export function MainPage(): JSX.Element {
       const buffer = createHandsFreeUtteranceBuffer(
         globalThis.crypto?.randomUUID?.() ?? `epoch-${Date.now()}`
       );
+      let wasSpeechActive = false;
+      let previewPending = false;
+      let previewAt = 0;
       const capture = await startLiveSpeechCapture({
         sessionId,
         createId: () => buffer.captureEpoch,
-        onPcm: (pcm) => {
-          const utterance = handsFreeBufferRef.current?.push(pcm);
-          if (utterance) void finalizeHandsFreeUtterance(utterance.pcm, utterance.captureEpoch);
+        onError: (error) => {
+          setVoiceError(error.message);
+          void stopLiveSpeech();
         },
-        postFrame: async (frame) => {
-          const snapshot = await apiClient.postSpeechActivityFrame(frame);
-          if (!mountedRef.current) return snapshot;
+        postFrame: async (frame, signal) => {
+          const snapshot = await apiClient.postSpeechActivityFrame(frame, signal);
+          if (!mountedRef.current || signal?.aborted || handsFreeBufferRef.current !== buffer)
+            return snapshot;
           setLiveSpeechActive(snapshot.speechActive);
-          const utterance = handsFreeBufferRef.current?.observeVad(snapshot.speechActive);
+          // Pair VAD with its own PCM frame, never with newer microphone samples.
+          const bytes = Uint8Array.from(atob(frame.pcmBase64), (char) => char.charCodeAt(0));
+          const pcm = new Int16Array(bytes.buffer);
+          const utterance = buffer.observeVad(snapshot.speechActive) ?? buffer.push(pcm);
+          if (snapshot.speechActive && !wasSpeechActive) {
+            transcribeAbortRef.current?.abort();
+            // Silero already confirms sustained speech (150 ms). Barge-in is
+            // independent of transcript completion, including synthesis-only turns.
+            stopGeneration();
+            stopSpeech();
+          }
+          wasSpeechActive = snapshot.speechActive;
+          const preview = buffer.preview();
+          if (preview && !previewPending && Date.now() - previewAt >= 500) {
+            previewPending = true;
+            previewAt = Date.now();
+            void wavBlobToBase64(encodePcm16Wav(preview.pcm))
+              .then((audioBase64) =>
+                apiClient.transcribeAudio({ audioBase64, mimeType: "audio/wav", preview: true })
+              )
+              .then((result) => buffer.observeTranscript(result.text, preview.revision))
+              .catch(() => undefined)
+              .finally(() => {
+                previewPending = false;
+              });
+          }
           if (snapshot.revokedSpeechRequestId) {
             busRef.current?.post({
               kind: "stop-speech",
@@ -929,14 +942,14 @@ export function MainPage(): JSX.Element {
       if (!mountedRef.current || controller.signal.aborted) return;
       const text = result.text.trim();
       if (!text) return;
-      await sendHandsFreeTurn(text);
+      await sendHandsFreeTurn(text, result.observationId);
     } catch (caught) {
       if (controller.signal.aborted || !mountedRef.current) return;
       setVoiceError(friendlyAudioError(caught));
     }
   }
 
-  async function sendHandsFreeTurn(content: string): Promise<void> {
+  async function sendHandsFreeTurn(content: string, observationId?: string): Promise<void> {
     const active = activeRequestRef.current;
     if (active?.origin === "user") {
       if (active.completedObserved) {
@@ -1010,6 +1023,7 @@ export function MainPage(): JSX.Element {
         {
           sessionId,
           text: content,
+          ...(observationId ? { speechObservationId: observationId } : {}),
           options: {
             readMemory,
             writeMemory,
@@ -1030,7 +1044,7 @@ export function MainPage(): JSX.Element {
                 text: event.text,
                 traceId: event.traceId
               });
-              forwardSpeechSegments(requestId, event.text);
+              forwardSpeechSegments(requestId, event.text, event.language);
               return;
             }
             if (event.type === "error") {
@@ -1047,7 +1061,6 @@ export function MainPage(): JSX.Element {
               traceId: event.traceId,
               provider: event.provider
             });
-            publishCommittedSubtitle(assistantId, event.content, requestId);
             setRequestStatus("success");
             forwardSpeechEnd(requestId, "completed");
           }
@@ -1062,7 +1075,6 @@ export function MainPage(): JSX.Element {
         traceId: response.traceId,
         provider: response.provider
       });
-      publishCommittedSubtitle(assistantId, response.content, requestId);
       setRequestStatus("success");
       forwardSpeechEnd(requestId, "completed");
     } catch (caught) {
@@ -1215,11 +1227,7 @@ export function MainPage(): JSX.Element {
             <Pill status={companionReady ? "companion connected" : "companion offline"} />
             {isTauriRuntime() && (
               <>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={() => void openWebUI()}
-                >
+                <button type="button" className="button-secondary" onClick={() => void openWebUI()}>
                   WebUI
                 </button>
                 <button

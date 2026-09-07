@@ -1,3 +1,4 @@
+import { createRequestDisconnectBoundary } from "./media.js";
 import type { SpeechActivitySnapshot } from "@companion/core";
 import { SpeechCaptureFenceError } from "@companion/core";
 import { ProviderError, ProviderErrorCode, type STTProvider } from "@companion/providers";
@@ -76,12 +77,17 @@ export async function registerSpeechActivityRoutes(
         message: "Live speech activity requires the local STT sidecar Silero VAD."
       });
     }
+    const boundary = createRequestDisconnectBoundary(request);
     try {
-      const classified = await stt.detectVoiceActivity({
-        captureEpoch: parsed.data.captureEpoch,
-        pcmBase64: parsed.data.pcmBase64,
-        sampleRate: parsed.data.sampleRate ?? 16_000
-      });
+      const classified = await stt.detectVoiceActivity(
+        {
+          captureEpoch: parsed.data.captureEpoch,
+          pcmBase64: parsed.data.pcmBase64,
+          sampleRate: parsed.data.sampleRate ?? 16_000
+        },
+        { signal: boundary.signal }
+      );
+      if (boundary.signal.aborted) return;
       const snapshot = context.runtime.observeSpeechActivity({
         sessionId: parsed.data.sessionId,
         captureEpoch: parsed.data.captureEpoch,
@@ -90,6 +96,8 @@ export async function registerSpeechActivityRoutes(
       return reply.send(toResponse(parsed.data.sessionId, snapshot));
     } catch (error) {
       return sendSpeechActivityError(reply, error);
+    } finally {
+      boundary.cleanup();
     }
   });
 
