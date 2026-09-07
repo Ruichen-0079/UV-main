@@ -215,3 +215,5 @@ P8 identity / persona / relationship
 ```
 
 Future documents are planning authority only; they do not imply those systems are implemented. See [`docs/future/README.md`](docs/future/README.md).
+
+Linux checkout daily installation, lifecycle and acceptance: [Linux daily use](docs/linux-daily-use.md).

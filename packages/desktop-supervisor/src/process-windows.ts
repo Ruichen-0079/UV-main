@@ -5,6 +5,7 @@
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import { boundedLog } from "./bounded-log.js";
 import path from "node:path";
 import type { ProcessInfo, ProcessInspectionResult, StartCommandSpec } from "./types.js";
 
@@ -214,8 +215,8 @@ export function spawnManagedProcess(
     detached: process.platform !== "win32"
   });
 
-  const outStream = fs.createWriteStream(log.out, { flags: "a" });
-  const errStream = fs.createWriteStream(log.err, { flags: "a" });
+  const outStream = boundedLog(log.out);
+  const errStream = boundedLog(log.err);
   child.stdout?.pipe(outStream);
   child.stderr?.pipe(errStream);
   // Prevent uncaughtException when the binary is missing (tests / misconfig).
@@ -227,7 +228,7 @@ export function spawnManagedProcess(
       // ignore
     }
   });
-  child.on("exit", () => {
+  child.on("close", () => {
     outStream.end();
     errStream.end();
   });

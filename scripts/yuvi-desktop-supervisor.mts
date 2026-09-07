@@ -18,6 +18,8 @@ import {
   type ControlEndpointFile
 } from "../packages/desktop-supervisor/src/index.ts";
 
+import { pruneInactiveLogs } from "../packages/desktop-supervisor/src/bounded-log.ts";
+
 const args = parseArgs(process.argv.slice(2));
 const repoRoot =
   args["repo-root"] ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -35,6 +37,7 @@ restrictToCurrentUser(config.stateDirectory);
 const pointerRoot = defaultDesktopSupervisorRoot();
 fs.mkdirSync(pointerRoot, { recursive: true });
 const releaseInstanceLock = acquireSupervisorInstanceLock(pointerRoot);
+pruneInactiveLogs(pointerRoot);
 // Active-instance pointer (no token): helps Rust discover the latest endpoint path.
 const activePointer = path.join(pointerRoot, "active-instance.json");
 const endpointFile = path.join(config.stateDirectory, "control-endpoint.json");

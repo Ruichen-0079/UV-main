@@ -1,5 +1,12 @@
 export const DAILY_STATUS_PATH = "/yuvi-daily/status";
-export const DAILY_SERVICE_IDS = ["postgres", "ollama", "mem0", "runtime"] as const;
+export const DAILY_SERVICE_IDS = [
+  "postgres",
+  "ollama",
+  "mem0",
+  "runtime",
+  "local_stt",
+  "tts_wrapper"
+] as const;
 export const DAILY_SERVICE_STATES = [
   "starting",
   "healthy",
