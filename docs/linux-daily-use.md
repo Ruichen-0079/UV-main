@@ -56,6 +56,10 @@ pnpm daily:linux restart
 Install enables `yuvi-daily.service` for the systemd user login target, with
 `yuvi-daily-web.service` tied to its lifecycle. It does not enable lingering.
 Repeated starts retain the existing service; restart replaces the owned tree.
+The Tauri launcher deliberately refuses to adopt another launcher's Supervisor.
+Use browser Companion with the daily units; stop the daily units before using
+the separate Tauri development launch workflow (including its WebUI server).
+Do not expect Tauri tray Quit to control a systemd-owned daily installation.
 The units retain stable executable locations and the configuration directory.
 Settings changes retain existing precedence; reinstall to change the directory.
 

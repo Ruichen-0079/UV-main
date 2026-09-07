@@ -52,7 +52,9 @@ while CRUD/search remain available.
 
 The existing real KDE/Wayland gate passed close-as-hide, WebUI/Subtitle tray control,
 windowless tray usability, repeated Quit absorption, graceful exit(0), and zero
-owned descendants. This gate uses an isolated desktop instance; it does not claim
+owned descendants. Tauri retains its existing refusal to adopt a foreign Supervisor; browser daily
+use and the separate Tauri development workflow are mutually exclusive owners.
+This gate uses an isolated desktop instance; it does not claim
 subjective motion/voice quality or a packaged binary distribution.
 
 Local validation includes installer fake-systemctl isolation/uninstall tests,
