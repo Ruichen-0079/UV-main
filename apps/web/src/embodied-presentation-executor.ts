@@ -1,3 +1,4 @@
+import { isLumiExpression, type LumiExpression } from "./lumi-presentation-calibration.js";
 import {
   createEmbodiedPresentationOutcomeReport,
   createEmbodiedPresentationRequest,
@@ -7,19 +8,16 @@ import {
 } from "@companion/protocol";
 import type { SuppliedGazeTarget } from "./companion-gaze.js";
 
-/** Provisional soft-smile ParamMouthForm value (full mapped range for KDE-visible deform). Atom 20 owns calibration curves. */
-export const SOFT_SMILE_MOUTH_FORM = 1;
-
 export type EmbodiedPresentationExecutorActions = Readonly<{
   setGazeTarget: (target: SuppliedGazeTarget | null) => void;
-  setMouthForm: (value: number) => void;
+  setExpression: (request: EmbodiedPresentationRequest, intent: LumiExpression) => void;
 }>;
 
 /**
  * Execute one already-admitted request at the existing Presentation boundary.
  *
  * This is intentionally a small device adapter: it validates transport input,
- * maps only the existing gaze vocabulary plus admitted soft-smile expression,
+ * maps the existing gaze vocabulary and bounded semantic expressions,
  * preserves SILENCE, and reports unsupported expression intents truthfully.
  * It owns no Runtime lifecycle, admission, identity allocation, publication,
  * or idle-animation semantics.
@@ -31,7 +29,7 @@ export function executeEmbodiedPresentationRequest(
   const request = createEmbodiedPresentationRequest(input);
   if (
     typeof actions?.setGazeTarget !== "function" ||
-    typeof actions?.setMouthForm !== "function"
+    typeof actions?.setExpression !== "function"
   ) {
     return outcome(request, "REJECTED");
   }
@@ -45,8 +43,8 @@ export function executeEmbodiedPresentationRequest(
       );
       return outcome(request, "STARTED");
     case "EXPRESSION":
-      if (request.behavior.behavior.intent === "soft-smile") {
-        actions.setMouthForm(SOFT_SMILE_MOUTH_FORM);
+      if (isLumiExpression(request.behavior.behavior.intent)) {
+        actions.setExpression(request, request.behavior.behavior.intent);
         return outcome(request, "STARTED");
       }
       return outcome(request, "REJECTED");

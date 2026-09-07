@@ -1,6 +1,8 @@
 # Atom 19 — Companion Advanced Presentation
 
-> **Status: SLICE 1 IMPLEMENTED — broader presentation remains planned**
+Campaign F supersedes this historical plan: [current implementation and acceptance](../campaign-f-presentation.md).
+
+> **Historical status: SLICE 1 IMPLEMENTED — broader presentation remains planned**
 >
 > **Audit baseline:** `ec6df9d`
 >

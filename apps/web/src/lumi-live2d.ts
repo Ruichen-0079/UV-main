@@ -1,3 +1,8 @@
+import { LumiPresentationMotion } from "./lumi-presentation-motion.js";
+import {
+  LUMI_PRESENTATION_CALIBRATION,
+  type LumiExpression
+} from "./lumi-presentation-calibration.js";
 import {
   AudioMouthEnvelope,
   type AudioEnvelopeHost,
@@ -62,6 +67,9 @@ export const LUMI_PRESENCE_PARAMETER_MAP = {
 } as const;
 
 export type LumiPresenceAnimation = {
+  mouthForm?: number;
+  translateX?: number;
+  translateY?: number;
   blink?: number;
   breath?: number;
   eyeBallX?: number;
@@ -84,6 +92,7 @@ export interface Live2DAdapter extends MouthParameterTarget {
   getCoreParameterValue?(id: string): number | undefined;
   getLastPreUpdateParameters?(): Readonly<Record<string, number>>;
   getOwnedParameterIds?(): ReadonlySet<string>;
+  setTranslation?(x: number, y: number): void;
   setBreath(value: number): void;
   setFraming(framing: LumiFraming): void;
   getFraming?(): LumiFraming;
@@ -116,6 +125,13 @@ export type LumiPresentationDebug = {
  * Lumi model adapter. It never owns product Presence or writes Cubism Core.
  */
 export class LumiPresentationController {
+  private readonly motion: LumiPresentationMotion;
+  private wasHidden = false;
+  private gazeEffect: {
+    request: EmbodiedPresentationRequest;
+    startedAt: number;
+    releasing: boolean;
+  } | null = null;
   private readonly random: () => number;
   private readonly now: () => number;
   private readonly requestFrame: ((callback: (now: number) => void) => number) | null;
@@ -144,8 +160,10 @@ export class LumiPresentationController {
 
   constructor(
     private readonly apply: (animation: LumiPresenceAnimation) => void,
-    options: LumiPresentationClockOptions = {}
+    options: LumiPresentationClockOptions = {},
+    private readonly report?: (report: EmbodiedPresentationOutcomeReport) => void
   ) {
+    this.motion = new LumiPresentationMotion(report);
     this.random = options.random ?? Math.random;
     this.now = options.now ?? (() => (typeof performance === "undefined" ? 0 : performance.now()));
     this.requestFrame =
@@ -166,13 +184,75 @@ export class LumiPresentationController {
 
   setProjection(projection: CompanionPresenceProjection): void {
     if (this.disposed) return;
+    if (
+      projection.epoch !== this.projection.epoch ||
+      projection.transition === "interrupted" ||
+      projection.speech === "cancelled" ||
+      projection.lifecycle === "cancelled" ||
+      projection.lifecycle === "invalidated"
+    ) {
+      this.motion.clear();
+      this.finishGaze("INTERRUPTED");
+    }
     this.projection = projection;
   }
 
   setGazeTarget(target: SuppliedGazeTarget | null): void {
     if (this.disposed) return;
+    this.finishGaze("INTERRUPTED");
     this.suppliedGazeTarget = target;
     this.gazeScheduler?.setSuppliedTarget(target);
+  }
+
+  setSemanticGaze(request: EmbodiedPresentationRequest, target: SuppliedGazeTarget | null): void {
+    if (this.disposed) return;
+    this.setGazeTarget(target);
+    this.gazeEffect = { request, startedAt: this.now(), releasing: false };
+  }
+
+  private finishGaze(outcome: "INTERRUPTED" | "COMPLETED"): void {
+    const effect = this.gazeEffect;
+    this.gazeEffect = null;
+    if (!effect) return;
+    this.suppliedGazeTarget = null;
+    this.gazeScheduler?.setSuppliedTarget(null);
+    this.report?.({
+      version: "embodied-presentation-outcome-7k.v1",
+      effectId: effect.request.effectId,
+      outcome
+    });
+  }
+
+  setExpression(request: EmbodiedPresentationRequest, intent: LumiExpression): void {
+    if (!this.disposed) this.motion.replace(request, intent, this.now());
+  }
+
+  recoverVisibility(): void {
+    if (this.disposed) return;
+    this.motion.clear();
+    this.finishGaze("INTERRUPTED");
+    this.suppliedGazeTarget = null;
+    this.gazeScheduler?.setSuppliedTarget(null);
+    this.gazeScheduler?.reset(this.now());
+    this.blinkScheduler?.dispose();
+    this.blinkScheduler = this.running
+      ? createCompanionBlinkScheduler(this.random, this.now())
+      : null;
+    this.previousNow = null;
+    this.apply({
+      blink: 0,
+      mouthForm: 0,
+      translateX: 0,
+      translateY: 0,
+      eyeBallX: 0,
+      eyeBallY: 0,
+      headAngleX: 0,
+      headAngleY: 0,
+      headAngleZ: 0,
+      bodyAngleX: 0,
+      bodyAngleY: 0,
+      bodyAngleZ: 0
+    });
   }
 
   start(): void {
@@ -189,15 +269,35 @@ export class LumiPresentationController {
     const animate = (now: number) => {
       if (this.disposed || !this.running || generation !== this.generation) return;
       if (this.isHidden()) {
+        if (!this.wasHidden) this.recoverVisibility();
+        this.wasHidden = true;
         this.previousNow = now;
         this.schedule(animate);
         return;
+      }
+      if (this.wasHidden || (this.previousNow !== null && now - this.previousNow > 1000)) {
+        this.recoverVisibility();
+        this.wasHidden = false;
       }
       const previous = this.previousNow;
       const delta = previous === null ? 0 : Math.max(0, now - previous);
       this.previousNow = now;
       this.frameDeltaMs = Math.min(100, delta);
 
+      const gazeEffect = this.gazeEffect;
+      if (gazeEffect) {
+        const age = now - gazeEffect.startedAt;
+        if (age >= LUMI_PRESENTATION_CALIBRATION.gazeHoldMs && !gazeEffect.releasing) {
+          gazeEffect.releasing = true;
+          this.suppliedGazeTarget = null;
+          this.gazeScheduler?.setSuppliedTarget(null);
+        }
+        if (
+          age >=
+          LUMI_PRESENTATION_CALIBRATION.gazeHoldMs + LUMI_PRESENTATION_CALIBRATION.gazeSettleMs
+        )
+          this.finishGaze("COMPLETED");
+      }
       const state = this.currentState();
       const behavior = this.behaviorTransition.sample(state, this.frameDeltaMs, now);
       const interrupted = state === "interrupted";
@@ -216,7 +316,14 @@ export class LumiPresentationController {
           import.meta.env.DEV &&
           typeof window !== "undefined" &&
           (window as typeof window & { __yuviForceGaze?: boolean }).__yuviForceGaze === true;
-        this.apply(composeCompanionPresenceAnimation(animation, gaze, forceGaze));
+        this.apply(
+          this.motion.sample(
+            composeCompanionPresenceAnimation(animation, gaze, forceGaze),
+            state,
+            now,
+            this.frameDeltaMs
+          )
+        );
       }
       this.debug = {
         running: true,
@@ -233,6 +340,8 @@ export class LumiPresentationController {
   }
 
   stop(): void {
+    this.motion.clear();
+    this.finishGaze("INTERRUPTED");
     if (!this.running && this.frame === null) return;
     this.running = false;
     this.generation += 1;
@@ -322,6 +431,10 @@ export class CubismLive2DAdapter implements Live2DAdapter {
 
   getOwnedParameterIds(): ReadonlySet<string> {
     return this.model?.parameterIds ?? new Set();
+  }
+
+  setTranslation(x: number, y: number): void {
+    this.model?.setTranslation?.(x, y);
   }
 
   setMouthOpen(value: number): void {
@@ -462,6 +575,12 @@ export class LumiController {
   private presentationProjection: CompanionPresenceProjection = createInitialCompanionPresence();
   private readonly presentationController: LumiPresentationController;
   private disposed = false;
+  private readonly seenEffects = new Map<string, EmbodiedPresentationOutcomeReport>();
+  private latestSourceAt = -Infinity;
+  private readonly visibilityHandler = () => {
+    this.presentationController.recoverVisibility();
+    this.adapter?.setMouthOpen(0);
+  };
 
   constructor(
     private readonly createAdapter: () => Live2DAdapter,
@@ -470,11 +589,21 @@ export class LumiController {
     private readonly createEnvelope: (target: MouthParameterTarget) => AudioEnvelopeHost = (
       target
     ) => new AudioMouthEnvelope(target),
-    private readonly onModelLifecycle?: (state: LumiModelLifecycle) => void
+    private readonly onModelLifecycle?: (state: LumiModelLifecycle) => void,
+    private readonly onPresentationOutcome?: (report: EmbodiedPresentationOutcomeReport) => void
   ) {
-    this.presentationController = new LumiPresentationController((animation) => {
-      this.applyPresenceAnimation(animation);
-    });
+    this.presentationController = new LumiPresentationController(
+      (animation) => {
+        this.applyPresenceAnimation(animation);
+      },
+      {},
+      (report) => {
+        if (this.seenEffects.has(report.effectId)) this.seenEffects.set(report.effectId, report);
+        this.onPresentationOutcome?.(report);
+      }
+    );
+    if (typeof document !== "undefined")
+      document.addEventListener?.("visibilitychange", this.visibilityHandler);
   }
 
   async load(): Promise<void> {
@@ -533,6 +662,18 @@ export class LumiController {
 
   setPresentationProjection(projection: CompanionPresenceProjection): void {
     if (this.disposed) return;
+    if (projection.epoch !== this.presentationProjection.epoch) {
+      this.seenEffects.clear();
+      this.latestSourceAt = -Infinity;
+    }
+    if (
+      projection.transition === "interrupted" ||
+      projection.speech === "cancelled" ||
+      projection.lifecycle === "cancelled" ||
+      projection.lifecycle === "invalidated"
+    ) {
+      this.envelope?.stop();
+    }
     this.presentationProjection = projection;
     this.presentationController.setProjection(projection);
     this.setPresentationState(getCompanionPresentationState(projection));
@@ -545,7 +686,27 @@ export class LumiController {
   executeEmbodiedPresentationRequest(
     request: EmbodiedPresentationRequest
   ): EmbodiedPresentationOutcomeReport {
-    if (this.disposed || !this.adapter || this.modelLifecycle !== "ready") {
+    request = createEmbodiedPresentationRequest(request);
+    const projection = this.presentationProjection;
+    const previous = this.seenEffects.get(request.effectId);
+    if (previous && !this.disposed && this.modelLifecycle === "ready") return previous;
+    const foreignTurn =
+      projection.epoch !== null &&
+      request.behavior.correlation.kind === "turn" &&
+      request.behavior.correlation.reference !== projection.epoch;
+    if (
+      this.disposed ||
+      !this.adapter ||
+      this.modelLifecycle !== "ready" ||
+      foreignTurn ||
+      this.seenEffects.size >= 256 ||
+      request.behavior.sourceInstance.createdAtMs < this.latestSourceAt ||
+      projection.transition === "interrupted" ||
+      projection.speech === "cancelled" ||
+      projection.lifecycle === "cancelled" ||
+      projection.lifecycle === "invalidated" ||
+      (typeof document !== "undefined" && document.visibilityState === "hidden")
+    ) {
       const validated = createEmbodiedPresentationRequest(request);
       return createEmbodiedPresentationOutcomeReport({
         version: "embodied-presentation-outcome-7k.v1",
@@ -553,20 +714,27 @@ export class LumiController {
         outcome: "REJECTED"
       });
     }
-    const adapter = this.adapter;
     const actions: EmbodiedPresentationExecutorActions = {
-      setGazeTarget: (target) => this.setGazeTarget(target),
-      setMouthForm: (value) => adapter.setMouthForm(value)
+      setGazeTarget: (target) => this.presentationController.setSemanticGaze(request, target),
+      setExpression: (effect, intent) => this.presentationController.setExpression(effect, intent)
     };
-    return executeEmbodiedPresentationRequest(request, actions);
+    const report = executeEmbodiedPresentationRequest(request, actions);
+    if (report.outcome === "STARTED") {
+      this.seenEffects.set(request.effectId, report);
+      this.latestSourceAt = request.behavior.sourceInstance.createdAtMs;
+    }
+    return report;
   }
 
   private applyPresenceAnimation(animation: LumiPresenceAnimation): void {
     if (!this.adapter || this.disposed) return;
-    // Presence owns only eyes and breath. ParamMouthOpenY remains exclusively
+    if (animation.mouthForm !== undefined)
+      this.adapter.setMouthForm(clamp(animation.mouthForm, -1, 1));
+    if (animation.translateX !== undefined || animation.translateY !== undefined)
+      this.adapter.setTranslation?.(animation.translateX ?? 0, animation.translateY ?? 0);
+    // The composed Presentation frame owns expression, pose, eyes and breath. ParamMouthOpenY remains exclusively
     // driven by the active AudioMouthEnvelope while playback is speaking.
-    // ParamMouthForm is reserved for expression (soft-smile) and must not be
-    // written here or by lip-sync.
+    // ParamMouthForm is composed here and is never written by lip-sync.
     if (animation.blink !== undefined) {
       const eyeOpen = 1 - clamp(animation.blink, 0, 1);
       this.adapter.setParameter(lumiMapping.eyeLeft, eyeOpen);
@@ -618,11 +786,15 @@ export class LumiController {
     const generation = this.generation;
     if (!adapter || this.presentationState === "speaking") return;
     for (const value of [0, 1, 2.1, 0]) {
-      if (generation !== this.generation || adapter !== this.adapter) return;
+      if (
+        generation !== this.generation ||
+        adapter !== this.adapter ||
+        this.getPresentationState() === "speaking"
+      )
+        return;
       adapter.setMouthOpen(value);
       await pause(700);
     }
-    if (generation === this.generation && adapter === this.adapter) adapter.resetMouth();
   }
 
   resize(width: number, height: number): void {
@@ -640,6 +812,8 @@ export class LumiController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (typeof document !== "undefined")
+      document.removeEventListener?.("visibilitychange", this.visibilityHandler);
     this.generation += 1;
     this.presentationController.dispose();
     this.playbackCorrelation = createSpeechPlaybackCorrelation();

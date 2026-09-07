@@ -101,10 +101,9 @@ This view exists to schedule independent work without losing the master backlog.
 
 - Verify required Live2D asset provisioning with the existing loader before
   model-specific calibration.
-- [20 — Live2D calibration](20-live2d-calibration.md) — PLANNED.
+- [20 — Live2D calibration](20-live2d-calibration.md) — implemented with Campaign F; one human visual pass remains.
 - [19 — Companion advanced presentation](19-companion-advanced-presentation.md)
-  — **SLICE 1 DONE** in #263 (soft-smile, Main forwarding, lip-sync isolation).
-  Broader motion, interruption/fade, and visual calibration remain planned.
+  — completed with [Campaign F](../campaign-f-presentation.md): expressions, X/Y motion, gaze/pose, lip-sync composition and lifecycle recovery.
 - Add only the one-shot KDE/Wayland screenshot primitive required by Atom 15;
   the desktop layer captures pixels but does not interpret them.
 

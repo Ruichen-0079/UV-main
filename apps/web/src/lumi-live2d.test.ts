@@ -650,7 +650,8 @@ it("reports expression execution only with a ready model and preserves the effec
   expect(adapter.setMouthForm).not.toHaveBeenCalled();
   await loading;
   report("STARTED");
-  expect(adapter.setMouthForm).toHaveBeenCalledWith(1);
+  // Expressions now enter the clock-owned envelope; no competing immediate write.
+  expect(adapter.setMouthForm).not.toHaveBeenCalled();
   adapter.setMouthForm.mockClear();
   controller.setPresenceAnimation(0.3, 0.2);
   expect(adapter.setMouthForm).not.toHaveBeenCalled();

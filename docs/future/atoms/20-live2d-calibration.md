@@ -1,6 +1,8 @@
 # Atom 20 — Live2D Calibration
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+Campaign F supersedes this historical plan: [current implementation and acceptance](../campaign-f-presentation.md).
+
+> **Historical status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
 >
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >

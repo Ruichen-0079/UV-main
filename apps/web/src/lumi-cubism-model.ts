@@ -1,3 +1,7 @@
+import {
+  bounded,
+  LUMI_PRESENTATION_CALIBRATION as MOTION
+} from "./lumi-presentation-calibration.js";
 import { type CubismFrameworkRuntime, loadCubismFramework } from "./cubism-framework.js";
 import {
   buildFramingDiagnostics,
@@ -105,6 +109,7 @@ export type LumiCubismModel = {
   getCoreParameterValue?(id: string): number | undefined;
   /** Snapshot of values applied immediately before the last coreModel.update(). */
   getLastPreUpdateParameters?(): Readonly<Record<string, number>>;
+  setTranslation?(x: number, y: number): void;
   setFraming(framing: LumiFraming): void;
   getFraming(): LumiFraming;
   resize(width: number, height: number): void;
@@ -208,18 +213,13 @@ export async function loadLumiCubismModel(
   const { gl, creationError } = createLumiWebgl2Context(canvas);
   contextCreationError = creationError;
   if (!gl) {
-    throw new Error(
-      `WebGL2 is unavailable${creationError ? ` (${creationError})` : ""}.`
-    );
+    throw new Error(`WebGL2 is unavailable${creationError ? ` (${creationError})` : ""}.`);
   }
 
   const contextInfo = readWebglContextAttributes(gl);
   const maxTextureSize = contextInfo.maxTextureSize ?? 4096;
   // Official Cubism mask path has no MSAA FBO API; main-canvas MSAA is browser-driven.
-  const maskMsaaSamples = resolveMsaaSamples(
-    quality.preferredMsaaSamples,
-    contextInfo.maxSamples
-  );
+  const maskMsaaSamples = resolveMsaaSamples(quality.preferredMsaaSamples, contextInfo.maxSamples);
   const maskMsaaActive = false;
 
   const modelUrl = new URL(source, window.location.href);
@@ -355,6 +355,7 @@ export async function loadLumiCubismModel(
   let framing: LumiFraming = "half";
   let disposed = false;
   let fitCacheKey: LumiFitCacheKey | null = null;
+  let translation = { x: 0, y: 0 };
   let cachedMatrix: unknown = null;
   let cachedTransform: LumiUniformTransform | null = null;
   let cachedDiagnostics: LumiFramingDiagnostics | null = null;
@@ -466,6 +467,9 @@ export async function loadLumiCubismModel(
     getLastPreUpdateParameters() {
       return lastPreUpdateParameters;
     },
+    setTranslation(x, y) {
+      if (!disposed) translation = { x: bounded(x, MOTION.maxX), y: bounded(y, MOTION.maxY) };
+    },
     setFraming(nextFraming) {
       if (disposed || framing === nextFraming) return;
       framing = nextFraming;
@@ -479,10 +483,23 @@ export async function loadLumiCubismModel(
     },
     resize,
     getFramingTransform() {
-      return cachedTransform;
+      return cachedTransform
+        ? composeLumiMotionTransform(cachedTransform, translation.x, translation.y)
+        : null;
     },
     getFramingDiagnostics() {
-      return cachedDiagnostics;
+      return cachedTransform
+        ? buildFramingDiagnostics(
+            composeLumiMotionTransform(cachedTransform, translation.x, translation.y),
+            {
+              backingWidth: pixelWidth,
+              backingHeight: pixelHeight,
+              devicePixelRatio,
+              headBounds: LUMI_PORTRAIT_HEAD_BOUNDS,
+              margins: LUMI_PORTRAIT_MARGINS
+            }
+          )
+        : null;
     },
     getRenderQualityDiagnostics() {
       return buildQualityDiagnostics();
@@ -505,11 +522,7 @@ export async function loadLumiCubismModel(
         model._physics?.evaluate(liveCore, delta);
         applyYuviParameters(liveCore, getId, pending);
         // Snapshot Core values immediately before update() bakes the mesh.
-        const diagnosticIds = [
-          ...parameterIds,
-          "ParamEyeBallPhysicsX",
-          "ParamEyeBallPhysicsY"
-        ];
+        const diagnosticIds = [...parameterIds, "ParamEyeBallPhysicsX", "ParamEyeBallPhysicsY"];
         lastPreUpdateParameters = {};
         for (const id of diagnosticIds) {
           const value = readCoreParameterValue(id);
@@ -578,7 +591,12 @@ export async function loadLumiCubismModel(
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
         renderer.setRenderState(null, [0, 0, pixelWidth, pixelHeight]);
-        renderer.setMvpMatrix(cachedMatrix);
+        renderer.setMvpMatrix(
+          createFitMatrixFromTransform(
+            runtime,
+            composeLumiMotionTransform(cachedTransform!, translation.x, translation.y)
+          )
+        );
         renderer.drawModel(shaderDirectory);
         if (firstGlError == null) {
           firstGlError = readFirstGlError(gl);
@@ -603,8 +621,7 @@ export async function loadLumiCubismModel(
       }
       if (frameStarted > 0 && typeof performance !== "undefined") {
         lastFrameMs = performance.now() - frameStarted;
-        avgFrameMs =
-          avgFrameMs == null ? lastFrameMs : avgFrameMs * 0.9 + lastFrameMs * 0.1;
+        avgFrameMs = avgFrameMs == null ? lastFrameMs : avgFrameMs * 0.9 + lastFrameMs * 0.1;
       }
       if (import.meta.env.DEV && typeof window !== "undefined") {
         const debugWindow = window as typeof window & {
@@ -736,4 +753,20 @@ function fallbackParameterRange(id: string): LumiParameterInfo {
 function clampParameter(value: number, min: number, max: number): number {
   const safe = Number.isFinite(value) ? value : min;
   return Math.min(max, Math.max(min, safe));
+}
+
+/** Reserve viewport margin, then apply absolute NDC offsets. No cached matrix mutation/drift. */
+export function composeLumiMotionTransform(
+  base: LumiUniformTransform,
+  x: number,
+  y: number
+): LumiUniformTransform {
+  return {
+    ...base,
+    uniformScale: base.uniformScale * MOTION.headroomScale,
+    ndcScaleX: base.ndcScaleX * MOTION.headroomScale,
+    ndcScaleY: base.ndcScaleY * MOTION.headroomScale,
+    translateX: base.translateX * MOTION.headroomScale + bounded(x, MOTION.maxX),
+    translateY: base.translateY * MOTION.headroomScale + bounded(y, MOTION.maxY)
+  };
 }

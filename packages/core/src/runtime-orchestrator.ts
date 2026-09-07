@@ -696,7 +696,8 @@ export class RuntimeOrchestrator {
     traceAnchor: RuntimeEvent,
     present: (
       request: EmbodiedPresentationRequest,
-      traceAnchor: RuntimeEvent
+      traceAnchor: RuntimeEvent,
+      observe?: (report: EmbodiedPresentationOutcomeReport) => Promise<void>
     ) => EmbodiedPresentationOutcomeReport | Promise<EmbodiedPresentationOutcomeReport>
   ): Promise<RuntimeEmbodiedPresentationExecutionResult> {
     return executeRuntimeEmbodiedPresentation(
@@ -707,13 +708,13 @@ export class RuntimeOrchestrator {
     );
   }
 
-  private scheduleEmbodiedPresentation(reply: AgentReplyEvent): void {
+  private scheduleEmbodiedPresentation(reply: AgentReplyEvent, presentation?: import("@companion/character-abi").CharacterPresentationIntent | null): void {
     const port = this.options.embodiedPresentation;
     if (!port) return;
 
     let decision: RuntimeEmbodiedEffectRecordInitializationDecision | null;
     try {
-      decision = port.propose(reply);
+      decision = port.propose(reply, presentation);
     } catch (error) {
       void this.publishRuntimeError("Character embodied proposal failed.", error, {
         traceId: reply.traceId,
@@ -1706,7 +1707,7 @@ export class RuntimeOrchestrator {
           ? "Visual grounding is ephemeral."
           : input.ingestionDecision.skipReason
       );
-      this.scheduleEmbodiedPresentation(reply);
+      this.scheduleEmbodiedPresentation(reply, finalReply.presentation ?? null);
       finalized = true;
 
       try {

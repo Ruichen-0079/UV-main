@@ -171,11 +171,13 @@ export type RuntimeCharacterPort = Readonly<{
 
 export type RuntimeEmbodiedPresentationPort = Readonly<{
   propose(
-    reply: RuntimeEventLikeAssistantReply
+    reply: RuntimeEventLikeAssistantReply,
+    presentation?: import("@companion/character-abi").CharacterPresentationIntent | null
   ): RuntimeEmbodiedEffectRecordInitializationDecision | null;
   present(
     request: EmbodiedPresentationRequest,
-    traceAnchor: RuntimeEvent
+    traceAnchor: RuntimeEvent,
+    observe?: (report: EmbodiedPresentationOutcomeReport) => Promise<void>
   ): EmbodiedPresentationOutcomeReport | Promise<EmbodiedPresentationOutcomeReport>;
 }>;
 

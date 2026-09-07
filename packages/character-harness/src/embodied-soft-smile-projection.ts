@@ -41,10 +41,10 @@ const OPAQUE_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]*$/;
  * Character proposal that caused this request, but remains distinct in meaning
  * from Runtime effect identity. Runtime later allocates its own effectId.
  *
- * Only a turn-correlated RESPOND proposal with presentation.intent="soft-smile"
+ * A turn-correlated RESPOND proposal with a supported semantic expression
  * is eligible. Session/decision correlation, arbitrary presentation strings,
  * provider/device metadata, Runtime trace identity, admission, execution, and
- * publication are intentionally outside this first Character-driven slice.
+ * publication are intentionally outside this projection.
  */
 export function projectCharacterHarnessSoftSmileToEmbodiedBehavior<TResult>(
   input: unknown,
@@ -90,7 +90,15 @@ export function projectCharacterHarnessSoftSmileToEmbodiedBehavior<TResult>(
 
     if (
       accepted.proposal.disposition !== "RESPOND" ||
-      accepted.proposal.presentation?.intent !== "soft-smile"
+      ![
+        "neutral",
+        "soft-smile",
+        "attentive",
+        "thinking",
+        "amused",
+        "excited",
+        "acknowledge-interrupt"
+      ].includes(accepted.proposal.presentation?.intent ?? "")
     ) {
       return null;
     }
@@ -112,7 +120,7 @@ export function projectCharacterHarnessSoftSmileToEmbodiedBehavior<TResult>(
           kind: "character",
           reference: accepted.proposalInstance.reference
         },
-        intent: "soft-smile"
+        intent: accepted.proposal.presentation!.intent
       },
       sourceInstance: {
         reference: accepted.proposalInstance.reference,
