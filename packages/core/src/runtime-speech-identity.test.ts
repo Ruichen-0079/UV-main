@@ -87,3 +87,80 @@ describe("Runtime speech identity interpretation", () => {
     ]);
   });
 });
+
+it("carries adapter span words and acoustic identity through the existing Memory binding authority", async () => {
+  const { LocalSTTProvider } = await import("@companion/providers");
+  const { vi } = await import("vitest");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            text: "first words second words",
+            segments: [
+              {
+                speaker: "cluster-a",
+                text: "first words",
+                voiceProfileMatch: { status: "MATCHED", voiceProfileId: PROFILE }
+              },
+              {
+                speaker: "cluster-b",
+                text: "second words",
+                voiceProfileMatch: { status: "MATCHED", voiceProfileId: "unbound-profile" }
+              }
+            ]
+          })
+        )
+    )
+  );
+  try {
+    const observation = await new LocalSTTProvider({
+      baseUrl: "http://localhost:9876",
+      model: "sensevoice"
+    }).transcribeAudio({ audioBase64: "AAAA" });
+    expect(observation.segments?.map((segment) => segment.text)).toEqual([
+      "first words",
+      "second words"
+    ]);
+    const input = {
+      observation,
+      address: ADDRESS,
+      scopeReference: SCOPE,
+      trustedAssertorEntityIds: [PRIMARY]
+    };
+    const unbound = interpretSpeechObservationIdentity(input);
+    expect(unbound.characterSpeakers).toEqual([{ speaker: "unknown" }, { speaker: "unknown" }]);
+    const admitted = admitVoiceProfilePersonBinding({
+      voiceProfileId: PROFILE,
+      personId: PRIMARY,
+      assertor: { entityId: PRIMARY, resolution: "resolved" },
+      provenanceClass: "SELF_REPORT",
+      trustedController: true,
+      content: "This is my voice."
+    });
+    expect(admitted.decision).toBe("admit");
+    if (admitted.decision !== "admit") return;
+    const event: MemoryEvent = {
+      id: "binding",
+      kind: "user_claim",
+      content: admitted.content,
+      source: "mem0",
+      sourceRecordId: "binding",
+      scope: SCOPE,
+      metadata: admitted.metadata,
+      assertion: admitted.assertion,
+      claim: admitted.claim
+    };
+    const bound = interpretSpeechObservationIdentity({ ...input, longTermEvents: [event] });
+    expect(bound.characterSpeakers).toEqual([
+      { speaker: "resolved", personId: PRIMARY },
+      { speaker: "unknown" }
+    ]);
+    expect(bound.remainsObservation).toBe(true);
+    expect(bound.claimAssertor).toEqual({ resolution: "unresolved" });
+    expect(JSON.stringify(bound.characterSpeakers)).not.toMatch(/vp_7|cluster-a|unbound-profile/);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

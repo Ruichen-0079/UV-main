@@ -74,6 +74,7 @@ export async function resolveDesktopSurface(): Promise<DesktopSurface> {
 
   if (typeof window === "undefined") return "dashboard";
   const hash = window.location.hash;
+  if (hash.startsWith("#/webui")) return "webui";
   if (hash.startsWith("#/main")) return "main";
   if (hash.startsWith("#/companion")) return "companion";
   if (hash.startsWith("#/subtitle")) return "subtitle";

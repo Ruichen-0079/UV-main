@@ -60,7 +60,8 @@ export type {
   VoiceActivityInput,
   VoiceActivityOutput,
   VoiceProfileMatch,
-  VoiceProfileMatchStatus
+  VoiceProfileMatchStatus,
+  VoiceProfileProvider
 } from "./types/stt.js";
 export { VOICE_PROFILE_MATCH_STATUSES } from "./types/stt.js";
 export type { VisionInput, VisionOutput, VisionProvider } from "./types/vision.js";

@@ -206,6 +206,15 @@ export function voicePersonClaimAssertor(input: {
     };
   }
 
+  // A whole-capture claim cannot inherit the one known person's authority
+  // while another speaking cluster remains unidentified.
+  if (
+    clusterIds.length > 1 &&
+    input.resolutions.some((resolution) => resolution.status !== "RESOLVED_TRUSTED")
+  ) {
+    return { assertor: { resolution: "unresolved" }, reason: "mixed-capture-unattributed" };
+  }
+
   const distinctPersons = unique(
     input.resolutions
       .filter((resolution) => resolution.status === "RESOLVED_TRUSTED" && resolution.personId)

@@ -140,6 +140,7 @@ export type ProcessInfo = {
 
 export type HealthProbeResult = {
   ok: boolean;
+  degraded?: boolean;
   statusCode: number | null;
   /** High-level protocol match (expected JSON shape / keyword). */
   protocolOk: boolean;

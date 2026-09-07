@@ -3,12 +3,34 @@ import { dirname, resolve } from "node:path";
 import type { FastifyInstance } from "fastify";
 import type { ServerConfig } from "../config.js";
 import { getRuntimeEnvDir } from "../env.js";
-import { isLocalAddress, requireDashboardDevToken } from "./security.js";
+import {
+  isLocalAddress,
+  requireDashboardDevToken,
+  requireLocalDashboardAccess
+} from "./security.js";
+import { desktopCorsHeaders } from "../cors.js";
+import { restartDailyUseServices } from "../services/daily-use.js";
 
 export async function registerSystemRoutes(
   app: FastifyInstance,
   config: ServerConfig
 ): Promise<void> {
+  app.post("/system/local-services/restart", async (request, reply) => {
+    if (!requireLocalDashboardAccess(config, request, reply)) return;
+    // A bodyless POST can otherwise be sent by an unrelated website without
+    // a CORS preflight when a local development token is not configured.
+    if (
+      request.headers.origin &&
+      !desktopCorsHeaders(request.headers.origin)["Access-Control-Allow-Origin"]
+    ) {
+      return reply.code(403).send({ error: "forbidden_origin" });
+    }
+    if (process.platform !== "linux" || process.env["YUVI_DAILY_USE_SYSTEMD"] !== "1") {
+      return reply.code(409).send({ error: "daily_launcher_unavailable" });
+    }
+    setTimeout(restartDailyUseServices, 300).unref();
+    return { ok: true, restartRequested: true };
+  });
   app.post("/system/restart/deep", async (request, reply) => {
     if (!requireDashboardDevToken(config, request, reply)) return;
     if (config.runtimeMode === "production") {

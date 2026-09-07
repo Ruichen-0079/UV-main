@@ -999,6 +999,32 @@ export const apiClient = {
     return request<HealthResponse>("/health", signalRequestInit(signal));
   },
 
+  getLocalServices(signal?: AbortSignal): Promise<LocalServicesStatus> {
+    return request("/local-services/status", signalRequestInit(signal));
+  },
+  restartLocalServices(): Promise<{ ok: boolean }> {
+    return request("/system/local-services/restart", { method: "POST" });
+  },
+  getVoiceProfiles(): Promise<{ profiles: Array<{ voiceProfileId: string; label: string }> }> {
+    return request("/voice-profiles");
+  },
+  enrollVoiceProfile(input: {
+    audioBase64: string;
+    mimeType: string;
+    label: string;
+  }): Promise<{ voiceProfileId: string; label: string }> {
+    return request("/voice-profiles", { method: "POST", body: JSON.stringify(input) });
+  },
+  identifyVoiceProfile(input: {
+    audioBase64: string;
+    mimeType: string;
+  }): Promise<{ status: string; voiceProfileId?: string }> {
+    return request("/voice-profiles/identify", { method: "POST", body: JSON.stringify(input) });
+  },
+  deleteVoiceProfile(id: string): Promise<{ ok: boolean }> {
+    return request(`/voice-profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+
   sendMessage(input: SendMessageRequest): Promise<MessageResponse> {
     return request<MessageResponse>("/message", {
       method: "POST",
@@ -1773,6 +1799,34 @@ function toProactiveTurnStreamRequestBody(
   };
 }
 
+export type LocalServicesStatus = {
+  checkedAt: string;
+  stt: {
+    available: boolean;
+    selected: boolean;
+    speakerProfiles: boolean;
+    diarization: boolean;
+    vad: boolean;
+    profileCount: number;
+  };
+  memory: {
+    backend: string;
+    repository: string;
+    database: string;
+    ollama: boolean;
+    embedderPresent: boolean;
+    model: string;
+    dimensions: number;
+    status: string;
+    crud: boolean;
+    search: boolean;
+    infer: boolean;
+    embedder: boolean;
+    vectorStore: boolean;
+  };
+  tts: { configured: boolean; observed: string; provider: string };
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined && !headers.has("content-type")) {
@@ -1800,7 +1854,10 @@ function shouldAttachDashboardDevToken(path: string, method: string | undefined)
     return true;
   }
   const normalized = method?.toUpperCase() ?? "GET";
-  if (normalized === "GET" && path === "/settings/runtime") {
+  if (
+    normalized === "GET" &&
+    ["/settings/runtime", "/local-services/status", "/voice-profiles"].includes(path)
+  ) {
     return true;
   }
   return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";

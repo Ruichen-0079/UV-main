@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import wave
+from urllib.parse import unquote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -279,6 +280,8 @@ class SttEngine:
         stream = self.extractor.create_stream()
         stream.accept_waveform(16000, audio)
         stream.input_finished()
+        if not self.extractor.is_ready(stream):
+            raise ValueError("recording is too short for a speaker embedding")
         embedding = np.asarray(self.extractor.compute(stream), dtype=np.float32)
         return embedding
 
@@ -290,6 +293,8 @@ class SttEngine:
         result = stream.result
         text = getattr(result, "text", "") or ""
         lang = language or getattr(result, "lang", None) or getattr(result, "language", None)
+        if isinstance(lang, str) and lang.startswith("<|") and lang.endswith("|>"):
+            lang = lang[2:-2]
         return {"text": text, "language": lang}
 
     def diarize(self, sample_rate: int, samples: np.ndarray) -> list[dict[str, Any]]:
@@ -329,6 +334,14 @@ class SttEngine:
             started = time.perf_counter()
             asr = self.transcribe(sample_rate, samples, body.get("language") if isinstance(body.get("language"), str) else None)
             segments = self.diarize(sample_rate, samples) if body.get("diarize") else None
+            if segments:
+                # Attribute words using each diarized span's audio, never the
+                # whole transcript. Overlapping spans remain explicitly timed.
+                for segment in segments or []:
+                    start = int(segment["startMs"] * sample_rate / 1000)
+                    end = int(segment["endMs"] * sample_rate / 1000)
+                    segment["text"] = (asr["text"] if len(segments) == 1 else
+                                       self.transcribe(sample_rate, samples[start:end], None)["text"])
             identity = None
             voice_profile_match = None
             if body.get("identify"):
@@ -361,6 +374,10 @@ class SttEngine:
             raise ValueError("speakerId is required")
         sample_rate, samples = _decode_audio(str(body.get("audioBase64") or ""), str(body.get("mimeType") or "audio/wav"))
         with self._lock:
+            if samples.size < sample_rate or float(np.max(np.abs(samples), initial=0)) < 0.005:
+                raise ValueError("enrollment requires at least one second of clear speech")
+            if is_mixed_capture(self.diarize(sample_rate, samples)):
+                raise ValueError("enrollment requires exactly one speaker")
             embedding = self.embed(sample_rate, samples)
             record = self.store.enroll(speaker_id, label, embedding)
         return {**record, "voiceProfileId": record["speakerId"]}
@@ -368,6 +385,10 @@ class SttEngine:
     def handle_identify(self, body: dict[str, Any]) -> dict[str, Any]:
         sample_rate, samples = _decode_audio(str(body.get("audioBase64") or ""), str(body.get("mimeType") or "audio/wav"))
         with self._lock:
+            if samples.size < sample_rate or float(np.max(np.abs(samples), initial=0)) < 0.005:
+                return {"voiceProfileMatch": {"status": "NO_MATCH"}}
+            if is_mixed_capture(self.diarize(sample_rate, samples)):
+                return {"voiceProfileMatch": {"status": "NO_MATCH"}}
             embedding = self.embed(sample_rate, samples)
             result = self.store.identify(embedding)
         return {**result, "voiceProfileMatch": voice_profile_match_from_identify(result)}
@@ -462,7 +483,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.path.startswith(prefix):
             self._json(404, {"error": "not_found"})
             return
-        speaker_id = self.path[len(prefix) :]
+        speaker_id = unquote(self.path[len(prefix) :])
         existed = engine.store.delete(speaker_id)
         self._json(200 if existed else 404, {"ok": existed, "speakerId": speaker_id})
 

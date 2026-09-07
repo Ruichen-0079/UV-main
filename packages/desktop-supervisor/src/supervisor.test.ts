@@ -290,10 +290,7 @@ describe("DesktopSupervisor shutdown", () => {
     const second = supervisor.shutdown();
     await Promise.all([first, second]);
 
-    const log = fs.readFileSync(
-      path.join(config.stateDirectory, "supervisor-exit.log"),
-      "utf8"
-    );
+    const log = fs.readFileSync(path.join(config.stateDirectory, "supervisor-exit.log"), "utf8");
     expect(log.match(/shutdown complete/g)).toHaveLength(1);
     expect(log).toContain("shutdown already in progress/complete");
   });
@@ -433,48 +430,53 @@ describe("DesktopSupervisor classification", () => {
     expect(mem0Env?.["DATABASE_URL"]).toBeUndefined();
   });
 
-  it("treats packaged Mem0 without a start command as external detect-only", async () => {
-    const resourceRoot = makeTempRepositoryRoot();
-    const config = baseConfig({
-      layout: {
-        mode: "packaged",
-        resourceRoot,
-        configRoot: path.join(resourceRoot, "data", "config"),
-        dataRoot: path.join(resourceRoot, "data"),
-        cacheRoot: path.join(resourceRoot, "data", "cache"),
-        runtimeManifestPath: path.join(resourceRoot, "runtime", "runtime-manifest.json"),
-        mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
-      },
-      repositoryRoot: resourceRoot,
-      mem0Start: null,
-      autostartMem0: false
-    });
-    vi.spyOn(health, "probeHttpHealth").mockImplementation(async (url) => {
-      if (url.includes("6131")) {
-        return {
-          ok: true,
-          statusCode: 200,
-          protocolOk: true,
-          message: "healthy external mem0",
-          latencyMs: 1
-        };
-      }
-      return { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
-    });
-    vi.spyOn(health, "probeTcp").mockResolvedValue({
-      ok: false,
-      statusCode: null,
-      protocolOk: false,
-      message: "closed",
-      latencyMs: 1
-    });
-    const supervisor = createSupervisor(config);
-    await supervisor.refreshAll();
-    const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
-    expect(mem0?.managed).toBe(false);
-    expect(mem0?.ownership).toBe("external");
-    expect(mem0?.canStop).toBe(false);
-  });
+  it.each([false, true])(
+    "treats external Mem0 as running without acquiring ownership (degraded=%s)",
+    async (degraded) => {
+      const resourceRoot = makeTempRepositoryRoot();
+      const config = baseConfig({
+        layout: {
+          mode: "packaged",
+          resourceRoot,
+          configRoot: path.join(resourceRoot, "data", "config"),
+          dataRoot: path.join(resourceRoot, "data"),
+          cacheRoot: path.join(resourceRoot, "data", "cache"),
+          runtimeManifestPath: path.join(resourceRoot, "runtime", "runtime-manifest.json"),
+          mem0ManifestPath: path.join(resourceRoot, "mem0", "mem0-manifest.json")
+        },
+        repositoryRoot: resourceRoot,
+        mem0Start: null,
+        autostartMem0: false
+      });
+      vi.spyOn(health, "probeHttpHealth").mockImplementation(async (url) => {
+        if (url.includes("6131")) {
+          return {
+            ok: true,
+            statusCode: 200,
+            protocolOk: true,
+            message: "running external mem0",
+            degraded,
+            latencyMs: 1
+          };
+        }
+        return { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
+      });
+      vi.spyOn(health, "probeTcp").mockResolvedValue({
+        ok: false,
+        statusCode: null,
+        protocolOk: false,
+        message: "closed",
+        latencyMs: 1
+      });
+      const supervisor = createSupervisor(config);
+      await supervisor.refreshAll();
+      const mem0 = supervisor.snapshot().services.find((service) => service.id === "mem0");
+      expect(mem0?.status).toBe(degraded ? "degraded" : "healthy");
+      expect(mem0?.managed).toBe(false);
+      expect(mem0?.ownership).toBe("external");
+      expect(mem0?.canStop).toBe(false);
+    }
+  );
 
   it("marks packaged Mem0 as managed only when a manifest command is present", () => {
     const resourceRoot = makeTempRepositoryRoot();

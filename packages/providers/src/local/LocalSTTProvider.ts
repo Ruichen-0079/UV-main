@@ -9,7 +9,8 @@ import type {
   STTProvider,
   VoiceActivityInput,
   VoiceActivityOutput,
-  VoiceProfileMatch
+  VoiceProfileMatch,
+  VoiceProfileProvider
 } from "../types/stt.js";
 
 export type LocalSTTProviderOptions = {
@@ -22,6 +23,48 @@ export type LocalSTTProviderOptions = {
 export class LocalSTTProvider implements STTProvider {
   readonly name = "local";
 
+  readonly voiceProfiles: VoiceProfileProvider = {
+    list: async () => {
+      const body = (await this.profileRequest("/speakers")) as {
+        speakers: Array<{ speakerId: string; label: string }>;
+      };
+      return body.speakers.map((record) => ({
+        voiceProfileId: record.speakerId,
+        label: record.label
+      }));
+    },
+    enroll: async (input) => {
+      const body = (await this.profileRequest("/speakers", "POST", {
+        voiceProfileId: input.voiceProfileId,
+        label: input.label,
+        audioBase64: resolveAudioBase64(input),
+        mimeType: input.mimeType ?? "audio/wav"
+      })) as { voiceProfileId: string; label: string };
+      return { voiceProfileId: body.voiceProfileId, label: body.label };
+    },
+    identify: async (input) => {
+      const body = (await this.profileRequest("/identify", "POST", {
+        audioBase64: resolveAudioBase64(input),
+        mimeType: input.mimeType ?? "audio/wav"
+      })) as { voiceProfileMatch?: SidecarVoiceProfileMatch };
+      return readVoiceProfileMatch(body.voiceProfileMatch) ?? { status: "NO_MATCH" };
+    },
+    delete: async (id) => {
+      await this.profileRequest(`/speakers/${encodeURIComponent(id)}`, "DELETE");
+    }
+  };
+
+  private async profileRequest(path: string, method = "GET", body?: unknown): Promise<unknown> {
+    const response = await fetch(`${trimSlash(this.options.baseUrl)}${path}`, {
+      method,
+      headers: { "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(this.options.timeoutMs ?? 120_000)
+    });
+    if (!response.ok) throw new Error(`Acoustic profile request failed (HTTP ${response.status}).`);
+    return response.json();
+  }
+
   constructor(private readonly options: LocalSTTProviderOptions) {}
 
   async healthCheck(): Promise<ProviderHealth> {
@@ -32,6 +75,10 @@ export class LocalSTTProvider implements STTProvider {
         signal: transport.signal
       });
       if (!response.ok) throw new Error(`local STT health returned ${response.status}`);
+      const body = (await response.json()) as { ok?: boolean; service?: string };
+      if (body.ok !== true || body.service !== "yuvi-local-stt") {
+        throw new Error("Local STT endpoint did not identify a ready yuvi-local-stt service.");
+      }
       return {
         provider: this.name,
         name: this.name,
@@ -207,6 +254,7 @@ type SidecarIdentity = {
 };
 
 type SidecarSegment = {
+  text?: string;
   startMs?: number;
   endMs?: number;
   speaker?: string;
@@ -285,6 +333,7 @@ function normalizeSegment(segment: SidecarSegment): STTSegment {
   const match = readVoiceProfileMatch(segment.voiceProfileMatch);
   return {
     segmentId: randomUUID(),
+    ...(typeof segment.text === "string" ? { text: segment.text } : {}),
     startMs: segment.startMs,
     endMs: segment.endMs,
     ...(segment.speaker !== undefined ? { speakerClusterId: String(segment.speaker) } : {}),

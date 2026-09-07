@@ -10,6 +10,93 @@ import {
 const DEEPINFRA_GLM_COGNITION_MODEL = "zai-org/GLM-5.3-Flash";
 
 describe("ProviderRegistry", () => {
+  it("keeps local speech and acoustic profiles separate from the local chat endpoint", async () => {
+    const fetchMock = vi.fn(
+      async (url: string) =>
+        new Response(
+          JSON.stringify(
+            url.endsWith("/health")
+              ? { ok: true, service: "yuvi-local-stt" }
+              : url.endsWith("/speakers")
+                ? { speakers: [{ speakerId: "acoustic-1", label: "Voice", embedding: [0.1] }] }
+                : {
+                    text: "hello",
+                    segments: [
+                      {
+                        speaker: "cluster-1",
+                        text: "hello",
+                        voiceProfileMatch: { status: "MATCHED", voiceProfileId: "acoustic-1" }
+                      }
+                    ]
+                  }
+          ),
+          { headers: { "content-type": "application/json" } }
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "test",
+      PROVIDER_ALLOW_MOCKS: "true",
+      STT_PROVIDER_CHAIN: "local",
+      DEFAULT_STT_PROVIDER: "local",
+      LOCAL_MODEL_BASEURL: "http://127.0.0.1:8088/v1",
+      LOCAL_CHAT_MODEL: "existing-chat",
+      LOCAL_STT_BASE_URL: "http://127.0.0.1:9876",
+      LOCAL_STT_MODEL: "sensevoice"
+    });
+    expect(registry.getStatus().providers.stt.baseUrl).toBe("http://127.0.0.1:9876");
+    const provider = registry.getSTTProvider();
+    expect(await provider.healthCheck()).toMatchObject({ status: "healthy" });
+    expect(await provider.voiceProfiles!.list()).toEqual([
+      { voiceProfileId: "acoustic-1", label: "Voice" }
+    ]);
+    expect(await provider.transcribeAudio({ audioBase64: "AAAA" })).toMatchObject({
+      segments: [
+        {
+          text: "hello",
+          speakerClusterId: "cluster-1",
+          voiceProfileMatch: { voiceProfileId: "acoustic-1" }
+        }
+      ]
+    });
+    expect(fetchMock.mock.calls.every(([url]) => url.startsWith("http://127.0.0.1:9876/"))).toBe(
+      true
+    );
+  });
+
+  it("rejects a successful HTTP response from an unrelated STT endpoint", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ ok: true })))
+    );
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "test",
+      PROVIDER_ALLOW_MOCKS: "true",
+      STT_PROVIDER_CHAIN: "local",
+      DEFAULT_STT_PROVIDER: "local",
+      LOCAL_STT_BASE_URL: "http://localhost:9876",
+      LOCAL_STT_MODEL: "sensevoice"
+    });
+    expect(await registry.getSTTProvider().healthCheck()).toMatchObject({ status: "unavailable" });
+    expect(registry.getStatus().providers.stt.readiness).toBe("ready");
+  });
+  it("does not infer a speech endpoint or TTS voice from other local capabilities", () => {
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "test",
+      PROVIDER_ALLOW_MOCKS: "false",
+      DEFAULT_STT_PROVIDER: "local",
+      STT_PROVIDER_CHAIN: "local",
+      DEFAULT_TTS_PROVIDER: "local",
+      TTS_PROVIDER_CHAIN: "local",
+      LOCAL_MODEL_BASEURL: "http://127.0.0.1:8088/v1",
+      LOCAL_CHAT_MODEL: "existing-chat",
+      LOCAL_STT_MODEL: "sensevoice"
+    });
+    expect(registry.getStatus().providers.stt.missingFields).toContain("LOCAL_STT_BASE_URL");
+    expect(registry.getStatus().providers.tts).toMatchObject({ readiness: "not_ready" });
+    expect(registry.getStatus().providers.tts.model).toBeUndefined();
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -955,7 +1042,7 @@ describe("ProviderRegistry", () => {
       PROVIDER_ALLOW_MOCKS: "true",
       DEFAULT_STT_PROVIDER: "local",
       STT_PROVIDER_CHAIN: "dashscope,local,mock",
-      LOCAL_MODEL_BASEURL: "http://127.0.0.1:9876",
+      LOCAL_STT_BASE_URL: "http://127.0.0.1:9876",
       LOCAL_STT_MODEL: "sense-voice"
     });
     const output = await registry.getSTTProvider().detectVoiceActivity!({

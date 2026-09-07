@@ -3,6 +3,9 @@ import { CHARACTER_OUTPUT_LANGUAGES } from "@companion/character-abi";
 export const editableKeys = [
   "OUTPUT_LANGUAGE",
   "MEMORY_REPOSITORY",
+  "MEMORY_BACKEND",
+  "MEM0_BASE_URL",
+  "MEM0_OLLAMA_BASE_URL",
   "DATABASE_URL",
   "MEMORY_EXTRACTOR",
   "MEMORY_MAINTENANCE_ENABLED",
@@ -78,6 +81,7 @@ export const editableKeys = [
   "GPT_SOVITS_TTS_SAMPLE_STEPS",
   "GPT_SOVITS_TTS_TIMEOUT_MS",
   "LOCAL_STT_MODEL",
+  "LOCAL_STT_BASE_URL",
   "LOCAL_VISION_MODEL",
   "EMBEDDING_PROVIDER",
   "EMBEDDING_API_BASEURL",
@@ -99,6 +103,9 @@ export const secretKeys = new Set<EditableRuntimeSetting>([
 ]);
 
 const restartRequiredKeys = new Set<EditableRuntimeSetting>([
+  "MEMORY_BACKEND",
+  "MEM0_BASE_URL",
+  "MEM0_OLLAMA_BASE_URL",
   "MEMORY_REPOSITORY",
   "DATABASE_URL",
   "MEMORY_MAINTENANCE_ENABLED",
@@ -182,6 +189,9 @@ const providerSelectionRules: Record<string, Set<string>> = {
 const embeddingProviderNames = new Set(["openai-compatible", "nvidia", "local", "mock"]);
 
 const urlKeys = new Set<EditableRuntimeSetting>([
+  "MEM0_BASE_URL",
+  "MEM0_OLLAMA_BASE_URL",
+  "LOCAL_STT_BASE_URL",
   "DEEPSEEK_API_BASEURL",
   "OPENAI_COMPATIBLE_API_BASEURL",
   "XAI_API_BASEURL",
@@ -203,6 +213,9 @@ export function validateRuntimeSettings(
   };
 
   const memoryRepository = value("MEMORY_REPOSITORY")?.trim().toLowerCase();
+  if (value("MEMORY_BACKEND") && !["legacy", "mem0"].includes(value("MEMORY_BACKEND")!)) {
+    add("MEMORY_BACKEND", "Supported values are legacy and mem0.");
+  }
   if (memoryRepository && !["in-memory", "memory", "postgres"].includes(memoryRepository)) {
     add("MEMORY_REPOSITORY", "Supported values are in-memory, memory, and postgres.");
   }

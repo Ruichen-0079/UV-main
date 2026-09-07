@@ -114,6 +114,7 @@ export type ProviderRegistryConfig = {
   };
   local: {
     baseUrl: string | undefined;
+    sttBaseUrl?: string | undefined;
     chatModel: string | undefined;
     reasoningModel: string | undefined;
     embeddingModel: string | undefined;
@@ -451,7 +452,7 @@ export class ProviderRegistry implements ProviderResolver {
         return Boolean(this.config.local.baseUrl && this.config.local.embeddingModel);
       if (capability === "tts") return Boolean(this.config.local.ttsModel);
       if (capability === "stt")
-        return Boolean(this.config.local.baseUrl && this.config.local.sttModel);
+        return Boolean(this.config.local.sttBaseUrl && this.config.local.sttModel);
       if (capability === "vision")
         return Boolean(this.config.local.baseUrl && this.config.local.visionModel);
     }
@@ -519,7 +520,13 @@ export class ProviderRegistry implements ProviderResolver {
     }
     if (name === "local") {
       return [
-        ...(!this.config.local.baseUrl ? ["LOCAL_MODEL_BASEURL"] : []),
+        ...(capability === "stt"
+          ? !this.config.local.sttBaseUrl
+            ? ["LOCAL_STT_BASE_URL"]
+            : []
+          : capability !== "tts" && !this.config.local.baseUrl
+            ? ["LOCAL_MODEL_BASEURL"]
+            : []),
         ...(capability === "chat" && !this.config.local.chatModel ? ["LOCAL_CHAT_MODEL"] : []),
         ...(capability === "reasoning" && !this.config.local.reasoningModel
           ? ["LOCAL_REASONING_MODEL"]
@@ -603,7 +610,11 @@ export class ProviderRegistry implements ProviderResolver {
     if (name === "local") {
       return {
         baseUrl:
-          capability === "tts" ? this.config.gptSovits.wrapperBaseUrl : this.config.local.baseUrl,
+          capability === "tts"
+            ? this.config.gptSovits.wrapperBaseUrl
+            : capability === "stt"
+              ? this.config.local.sttBaseUrl
+              : this.config.local.baseUrl,
         model:
           capability === "chat"
             ? this.config.local.chatModel
@@ -834,6 +845,7 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
     },
     local: {
       baseUrl: emptyToUndefined(env["LOCAL_MODEL_BASEURL"]),
+      sttBaseUrl: emptyToUndefined(env["LOCAL_STT_BASE_URL"]),
       chatModel: emptyToUndefined(env["LOCAL_CHAT_MODEL"]),
       reasoningModel: emptyToUndefined(env["LOCAL_REASONING_MODEL"]),
       embeddingModel: emptyToUndefined(env["LOCAL_EMBEDDING_MODEL"]),
@@ -1119,12 +1131,13 @@ const sttProviderFactories: Record<string, ProviderFactory<STTProvider>> = {
     });
   },
   local(config) {
-    if (!config.local.baseUrl || !config.local.sttModel) {
+    const baseUrl = config.local.sttBaseUrl;
+    if (!baseUrl || !config.local.sttModel) {
       return undefined;
     }
 
     return new LocalSTTProvider({
-      baseUrl: config.local.baseUrl,
+      baseUrl,
       model: config.local.sttModel
     });
   }
@@ -1381,7 +1394,13 @@ function missingFieldsForConfig(
   }
   if (name === "local") {
     return [
-      ...(capability !== "tts" && !config.local.baseUrl ? ["LOCAL_MODEL_BASEURL"] : []),
+      ...(capability === "stt"
+        ? !config.local.sttBaseUrl
+          ? ["LOCAL_STT_BASE_URL"]
+          : []
+        : capability !== "tts" && !config.local.baseUrl
+          ? ["LOCAL_MODEL_BASEURL"]
+          : []),
       ...(capability === "chat" && !config.local.chatModel ? ["LOCAL_CHAT_MODEL"] : []),
       ...(capability === "reasoning" && !config.local.reasoningModel
         ? ["LOCAL_REASONING_MODEL"]
@@ -1559,6 +1578,10 @@ export class FallbackTTSProvider implements TTSProvider {
 
 export class FallbackSTTProvider implements STTProvider {
   readonly name: string;
+
+  get voiceProfiles() {
+    return this.providers.find((provider) => provider.voiceProfiles)?.voiceProfiles;
+  }
 
   constructor(
     private readonly providers: STTProvider[],

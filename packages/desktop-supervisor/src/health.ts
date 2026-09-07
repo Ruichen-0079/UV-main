@@ -25,11 +25,14 @@ export async function probeHttpHealth(
     } catch {
       // keep text
     }
-    const protocolOk = options.validateBody
-      ? options.validateBody(body)
-      : response.ok;
+    const protocolOk = options.validateBody ? options.validateBody(body) : response.ok;
     return {
       ok: response.ok && protocolOk,
+      degraded: Boolean(
+        body &&
+        typeof body === "object" &&
+        (body as { data?: { status?: string } }).data?.status === "degraded"
+      ),
       statusCode: response.status,
       protocolOk,
       message: response.ok
@@ -52,7 +55,11 @@ export async function probeHttpHealth(
   }
 }
 
-export async function probeTcp(host: string, port: number, timeoutMs = 1_500): Promise<HealthProbeResult> {
+export async function probeTcp(
+  host: string,
+  port: number,
+  timeoutMs = 1_500
+): Promise<HealthProbeResult> {
   const started = performance.now();
   return new Promise((resolve) => {
     const socket = net.connect({ host, port });
@@ -104,13 +111,12 @@ export function runtimeHealthOk(body: unknown): boolean {
 export function mem0HealthOk(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
   const record = body as Record<string, unknown>;
-  if (record["ok"] === true) return true;
   const data = record["data"];
   if (data && typeof data === "object") {
     const status = (data as Record<string, unknown>)["status"];
     return status === "healthy" || status === "degraded";
   }
-  return false;
+  return record["ok"] === true;
 }
 
 export function ttsWrapperHealthOk(body: unknown): boolean {
@@ -132,6 +138,9 @@ export function ollamaTagsOk(body: unknown): boolean {
 
 export function localSttHealthOk(body: unknown): boolean {
   return Boolean(
-    body && typeof body === "object" && (body as Record<string, unknown>)["ok"] === true
+    body &&
+    typeof body === "object" &&
+    (body as Record<string, unknown>)["ok"] === true &&
+    (body as Record<string, unknown>)["service"] === "yuvi-local-stt"
   );
 }

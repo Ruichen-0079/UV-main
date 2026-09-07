@@ -679,9 +679,7 @@ export class DesktopSupervisor {
       // Mem0 may be broken in current Linux dev (missing uvicorn). Do not let
       // its full startTimeout block the control-plane bootstrap/config ACK.
       const readyTimeoutMs =
-        svc.spec.id === "mem0"
-          ? Math.min(svc.spec.startTimeoutMs, 2_000)
-          : svc.spec.startTimeoutMs;
+        svc.spec.id === "mem0" ? Math.min(svc.spec.startTimeoutMs, 2_000) : svc.spec.startTimeoutMs;
       const ready = await this.waitReady(svc, readyTimeoutMs);
       if (!ready) {
         svc.status = "unavailable";
@@ -842,7 +840,6 @@ export class DesktopSupervisor {
     svc.startedAt = null;
     svc.ownership = "none";
   }
-
 
   private applyMem0DevelopmentEnvUnavailable(svc: InternalService): boolean {
     const error = this.config.mem0StartError?.trim();
@@ -1012,12 +1009,14 @@ export class DesktopSupervisor {
     });
 
     if (health.ok) {
-      svc.status = "healthy";
-      svc.summary = ownership.owned
-        ? "Running (owned)"
-        : svc.pendingExternal
-          ? svc.summary
-          : "Running (external)";
+      svc.status = health.degraded ? "degraded" : "healthy";
+      svc.summary = health.degraded
+        ? "Running with reduced capabilities"
+        : ownership.owned
+          ? "Running (owned)"
+          : svc.pendingExternal
+            ? svc.summary
+            : "Running (external)";
       svc.detail = svc.pendingExternal ? svc.detail : `latency ${health.latencyMs}ms`;
       svc.lastError = null;
       if (!ownership.owned) {

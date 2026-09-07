@@ -356,15 +356,15 @@ fn managed_env_includes_secrets_external_runtime_skips_chat_key() {
     assert!(!public_json.contains("postgres://"));
     assert_eq!(
         public.get("DEFAULT_TTS_PROVIDER").map(String::as_str),
-        Some("local")
+        None
     );
     assert_eq!(
         public.get("TTS_PROVIDER_CHAIN").map(String::as_str),
-        Some("local")
+        None
     );
     assert_eq!(
         public.get("LOCAL_TTS_MODEL").map(String::as_str),
-        Some("alice-v4")
+        None
     );
 
     let mut local_stt = managed.clone();
@@ -386,7 +386,7 @@ fn managed_env_includes_secrets_external_runtime_skips_chat_key() {
     );
     assert_eq!(
         public.get("LOCAL_MODEL_BASEURL").map(String::as_str),
-        Some("http://127.0.0.1:9876")
+        None
     );
     assert_eq!(
         public.get("YUVI_AUTOSTART_LOCAL_STT").map(String::as_str),
@@ -403,7 +403,7 @@ fn managed_env_includes_secrets_external_runtime_skips_chat_key() {
         Some("false")
     );
     let unset = unset_env_for_supervisor(&managed, &secrets).unwrap();
-    assert!(unset.iter().any(|key| key == "LOCAL_MODEL_BASEURL"));
+    assert!(!unset.iter().any(|key| key == "LOCAL_MODEL_BASEURL"));
 }
 
 #[test]
@@ -1276,4 +1276,18 @@ fn postgres_password_unset_when_credential_missing() {
     assert!(push2.unset_env.iter().any(|key| key == "PGPASSWORD"));
     let json = serde_json::to_string(&push2).unwrap();
     assert!(!json.contains("pg-secret"));
+}
+
+#[test]
+fn capability_preferences_never_override_provider_registry_tts_selection() {
+    for enabled in [false, true] {
+        let mut settings = UserSettings::default();
+        settings.tts.enabled = enabled;
+        settings.stt.provider = SttProvider::Local;
+        settings.stt.autostart = true;
+        let public = public_env_overrides(&settings);
+        for key in ["DEFAULT_TTS_PROVIDER", "TTS_PROVIDER_CHAIN", "LOCAL_TTS_MODEL", "LOCAL_MODEL_BASEURL"] {
+            assert!(!public.contains_key(key), "desktop must not override {key}");
+        }
+    }
 }
