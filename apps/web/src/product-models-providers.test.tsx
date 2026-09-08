@@ -97,8 +97,8 @@ describe("Product Models & Providers", () => {
 
   it("renders a product page shell while current-main data is loading", () => {
     const markup = renderToStaticMarkup(<ProductModelsProviders />);
-    expect(markup).toContain("Models &amp; Providers");
-    expect(markup).toContain("Loading current settings");
-    expect(markup).toContain("Automatic model discovery is not available");
+    expect(markup).toContain("Provider → Model → Capability Route");
+    expect(markup).toContain("Loading configuration");
+    expect(markup).toContain("Add Provider");
   });
 });

@@ -817,7 +817,7 @@ function ProviderMetadataSummary(props: {
       {provider.healthStatus && <span>{t("health:")}{" "}{provider.healthStatus}</span>}
       {provider.tokenUsage && <span>{t("tokens:")}{" "}{formatTokenUsage(provider.tokenUsage)}</span>}
       {provider.mock && (
-        <span className="basis-full text-amber-700">{t("Use Settings → Apply Now after saving a DeepSeek API key, or restart the server.")}</span>
+        <span className="basis-full text-amber-700">{t("Configure Chat in Product configuration (Provider → Model → Capability Route), or restart the server.")}</span>
       )}
     </div>
   );

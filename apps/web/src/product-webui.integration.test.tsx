@@ -9,6 +9,8 @@ const state = vi.hoisted(() => ({
   settings: {} as any
 }));
 vi.mock("./api/client.js", () => ({
+  request: async () => { throw new Error("No connection"); },
+  productSample: vi.fn(),
   apiClient: {
     getLive2DModels: async () => ({ models: [], activeId: null, activeUrl: null }),
     getRuntimeSettings: async () => state.settings,
@@ -66,33 +68,12 @@ describe("Product WebUI integration", () => {
     await act(async () => click(button(node, "← Product WebUI")));
     expect(readText(node)).toContain("Daily control surface");
   });
-  it.each(["models", "routing"])(
-    "finishes %s save and re-enables controls after StrictMode effect replay",
-    async (view) => {
-      state.settings = {
-        settings: {},
-        runtime: {},
-        activeRuntimeConfig: {},
-        providers: { deepseek: {}, openaiCompatible: {}, xai: {}, dashscope: {}, embedding: {} }
-      };
-      state.update.mockResolvedValue({
-        settings: state.settings,
-        changedKeys: [],
-        restartRequired: false
-      });
-      state.reload.mockResolvedValue({ applied: true, notHotReloaded: [], restartRequired: false });
-      const { ProductModelsProviders } = await import("./product-models-providers.js");
-      const { ProductAIRouting } = await import("./product-ai-routing.js");
-      const node = await mount(
-        view === "models" ? <ProductModelsProviders /> : <ProductAIRouting />
-      );
-      await act(async () => click(button(node, "Save & apply")));
-      expect(state.update).toHaveBeenCalledTimes(1);
-      expect(state.reload).toHaveBeenCalledTimes(1);
-      expect(readText(node)).not.toContain("Saving…");
-      expect(readText(node)).toContain("Saved");
-      await act(async () => click(button(node, "Save & apply")));
-      expect(state.update).toHaveBeenCalledTimes(2);
-    }
-  );
+  it.each(["models", "routing"])("redirects %s to the shared configuration authority", async view => {
+    const { ProductModelsProviders } = await import("./product-models-providers.js");
+    const { ProductAIRouting } = await import("./product-ai-routing.js");
+    const node = await mount(view === "models" ? <ProductModelsProviders /> : <ProductAIRouting />);
+    expect(readText(node)).toContain("Provider → Model → Capability Route");
+    expect(state.update).not.toHaveBeenCalled();
+    expect(state.reload).not.toHaveBeenCalled();
+  });
 });

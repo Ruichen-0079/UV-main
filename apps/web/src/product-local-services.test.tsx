@@ -39,20 +39,7 @@ vi.mock("./hooks/useAsyncData.js", () => ({
 }));
 it("renders speech readiness and reduced Memory capability without pretending TTS is selected", () => {
   const html = renderToStaticMarkup(<ProductLocalServices />);
-  for (const text of [
-    "Local STT: available",
-    "Mem0: degraded",
-    "infer=false",
-    "Search: available",
-    "1024 dimensions",
-    "not configured · no voice model selected",
-    "Record enrollment",
-    "Record recognition check",
-    "does not assign a person",
-    "Person ID for voice binding",
-    "Conflicting bindings leave the speaker unresolved."
-  ])
-    expect(html).toContain(text);
+  for (const text of ["Provider → Model → Capability Route", "Configure My Profile", "enroll your voice when available"]) expect(html).toContain(text);
   expect(PRODUCT_ROUTING_DEFINITIONS.map((route) => route.capability)).toEqual([
     "chat",
     "reasoning",

@@ -1,3 +1,4 @@
+import { readProductSettings } from "../services/product-store.js";
 import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
@@ -79,6 +80,8 @@ export async function registerSettingsRoutes(
       });
     }
 
+    if (readProductSettings() && [...Object.keys(parsed.data.values), ...parsed.data.removeOverrides].some(key => /PROVIDER|MODEL|API_KEY|BASEURL|STT_BASE|TTS_BASE|YUVI_PRODUCT|MEMORY_SUBJECT|MEMORY_PERSONA|PROACTIVE_SCORE|PROACTIVE_EVALUATION/.test(key))) return reply.code(409).send({ error: "Use Product configuration for providers, models, identity, and routes." });
+
     const unsafeKeys = [...Object.keys(parsed.data.values), ...parsed.data.removeOverrides].filter(
       (key) => !editableKeys.includes(key as EditableRuntimeSetting)
     );
@@ -133,6 +136,7 @@ export async function registerSettingsRoutes(
       });
     }
 
+    if (readProductSettings()) return reply.code(409).send({ error: "Use Product configuration Save & apply." });
     return withSettingsOperationLock(async () => {
       const effectiveEnv = await readEffectiveRuntimeEnv(app);
       const validation = validateRuntimeSettings(effectiveEnv);

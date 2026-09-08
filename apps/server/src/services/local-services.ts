@@ -16,7 +16,7 @@ async function probe(url: string): Promise<Json | null> {
 /** Explicit public projection: sidecar diagnostics, credentials and vectors never escape. */
 export async function localServicesStatus(context: AppContext) {
   const env = context.activeRuntimeEnv;
-  const sttUrl = env["LOCAL_STT_BASE_URL"] || "http://127.0.0.1:9876";
+  const sttUrl = context.providers.getStatus().routes?.stt?.find(r => r.configured)?.baseUrl || env["LOCAL_STT_BASE_URL"] || "http://127.0.0.1:9876";
   const ollamaUrl = env["MEM0_OLLAMA_BASE_URL"] || "http://127.0.0.1:11434";
   const mem0Url = env["MEM0_BASE_URL"] || "http://127.0.0.1:6131";
   const providers = context.providers.getStatus().providers;
@@ -39,7 +39,7 @@ export async function localServicesStatus(context: AppContext) {
     checkedAt: new Date().toISOString(),
     stt: {
       available: speechReady,
-      selected: context.providers.getSTTProvider().name === "local",
+      selected: Boolean(context.providers.getSTTProvider().voiceProfiles),
       speakerProfiles: speechReady && typeof stt?.["speakerModel"] === "string",
       diarization: speechReady && typeof stt?.["diarizationModel"] === "string",
       vad: speechReady && stt?.["vad"] === true,

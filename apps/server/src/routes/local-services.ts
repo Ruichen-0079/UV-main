@@ -1,3 +1,4 @@
+import { retainVoiceSample, voiceReviews, updateVoiceReview } from "../services/voice-review.js";
 import { isAbsolute } from "node:path";
 import { correctionFromP8CorrectionRecord, parseP8CorrectionRecord } from "@companion/p8";
 import { randomUUID } from "node:crypto";
@@ -87,7 +88,9 @@ export async function registerLocalServiceRoutes(
     const profiles = context.providers.getSTTProvider().voiceProfiles;
     if (!profiles) return reply.code(409).send({ error: "voice_profiles_unavailable" });
     try {
-      return await profiles.enroll({ ...parsed.data, voiceProfileId: randomUUID() });
+      const profile = await profiles.enroll({ ...parsed.data, voiceProfileId: randomUUID() });
+      try { retainVoiceSample(parsed.data.audioBase64, profile.voiceProfileId); } catch { /* Old clients may supply unsupported sample formats. */ }
+      return profile;
     } catch {
       return reply
         .code(422)
@@ -111,7 +114,10 @@ export async function registerLocalServiceRoutes(
     const profiles = context.providers.getSTTProvider().voiceProfiles;
     if (!profiles) return reply.code(409).send({ error: "voice_profiles_unavailable" });
     try {
+      const removed = await context.runtime.removeVoiceProfileBinding(request.params.id);
+      if (removed.status !== "STORED") return reply.code(409).send({ error: "Remove the trusted binding before deleting this voice profile." });
       await profiles.delete(request.params.id);
+      for (const sample of voiceReviews().filter(r => r.voiceProfileId === request.params.id)) updateVoiceReview(sample.id, null);
       return { ok: true };
     } catch {
       return reply.code(503).send({ error: "profile_delete_failed" });

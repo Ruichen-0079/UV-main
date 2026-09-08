@@ -557,7 +557,7 @@ function ProviderPriorityPanel(props: {
           </div>
         ))}
       </div>
-      <p className="mt-3 text-xs leading-5 text-ink-500">{t("Priority is configured through *_PROVIDER_CHAIN values. Route readiness is local only; observation is cached only after live verification. Apply Now reloads supported runtime config; Deep Restart restarts the supervised local runtime and reloads env files.")}</p>
+      <p className="mt-3 text-xs leading-5 text-ink-500">{t("Priority is configured through Product configuration (Provider → Model → Capability Route). Legacy provider chains remain a compatibility fallback only. Route readiness is local only; observation is cached only after live verification. Save & apply reloads supported runtime config; Deep Restart restarts the supervised local runtime and reloads env files.")}</p>
     </Panel>
   );
 }

@@ -42,7 +42,7 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Map([
 ]);
 
 export class XAIVisionProvider implements VisionProvider {
-  readonly name = "xai";
+  get name(): string { return this.options.provider ?? "xai"; }
 
   constructor(private readonly options: XAIProviderOptions) {}
 

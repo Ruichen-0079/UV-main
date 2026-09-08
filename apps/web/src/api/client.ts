@@ -1858,7 +1858,7 @@ export type LocalServicesStatus = {
   };
 };
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
@@ -1881,6 +1881,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function shouldAttachDashboardDevToken(path: string, method: string | undefined): boolean {
+  if (path.startsWith("/product/")) return true;
   if (path.startsWith("/memory/candidates")) {
     return true;
   }
@@ -1981,4 +1982,10 @@ function getWebSocketUrl(path: string): string {
       ? "127.0.0.1"
       : window.location.hostname || "127.0.0.1";
   return `${protocol}//${host}:6121${path}`;
+}
+
+export async function productSample(id: string): Promise<Blob> {
+ const response = await fetch(`${apiBaseUrl}/product/voice-samples/${encodeURIComponent(id)}`, { headers: dashboardDevToken ? { authorization: `Bearer ${dashboardDevToken}` } : {} });
+ if (!response.ok) throw new Error("Sample unavailable.");
+ return response.blob();
 }

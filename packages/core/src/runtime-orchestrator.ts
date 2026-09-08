@@ -342,6 +342,12 @@ export class RuntimeOrchestrator {
     }
   }
 
+  resumeProactiveNow(): void {
+    this.proactiveState = applyCharacterProactiveProposal(this.proactiveState, { action: "CLEAR" }, this.nowMs(), "LOCAL_EXPLICIT_CONTROLLER");
+    this.persistProactivePolicy();
+    this.armProactiveWake();
+  }
+
   getProactiveState(): ProactiveState {
     return normalizeProactiveState(this.proactiveState, this.nowMs());
   }
@@ -538,6 +544,38 @@ export class RuntimeOrchestrator {
 
   private readonly voiceSpeakers = new WeakMap<RuntimeUserTurnEvent, P8CharacterSpeakerView>();
   private readonly committedVoiceObservations = new WeakMap<RuntimeUserTurnEvent, STTOutput>();
+
+  async getVoiceProfilePerson(voiceProfileId: string): Promise<string | null> {
+    const provider = this.options.memory.getMemoryProvider?.();
+    const references = this.options.voiceBindingReferences;
+    const persona = this.options.voicePersonaId;
+    if (!provider || !references || !persona) return null;
+    const scope = buildMemoryScope(`voice-profile:${voiceProfileId}`, persona);
+    const events = await Promise.all(references.load(scope).map(id => provider.getEvent({ id, scope })));
+    if (events.some(e => !e)) return null;
+    const interpretation = interpretSpeechObservationIdentity({
+      observation: { text: "", voiceProfileMatch: { status: "MATCHED", voiceProfileId } },
+      address: createDefaultP8IdentityAddress(), scopeReference: scope,
+      longTermEvents: events.filter((e): e is NonNullable<typeof e> => e !== null),
+      trustedAssertorEntityIds: ["local-explicit-controller"]
+    });
+    return interpretation.claimAssertor.resolution === "resolved" ? interpretation.claimAssertor.entityId ?? null : null;
+  }
+
+  async removeVoiceProfileBinding(voiceProfileId: string) {
+    const provider = this.options.memory.getMemoryProvider?.();
+    const references = this.options.voiceBindingReferences;
+    const persona = this.options.voicePersonaId;
+    if (!provider || !references || !persona) return { status: "UNAVAILABLE" as const };
+    const scope = buildMemoryScope(`voice-profile:${voiceProfileId}`, persona);
+    const ids = references.load(scope);
+    if (!ids.length) return { status: "STORED" as const };
+    const result = await provider.writeEvent({ kind: "correction", content: "Local controller removed this voice binding.", scope, metadata: { yuviClaimSupersedes: [...ids] } });
+    const id = result.eventId ?? result.event?.id;
+    if (result.status === "rejected" || !id) return { status: "ERROR" as const };
+    references.append(scope, id);
+    return { status: "STORED" as const };
+  }
 
   async bindVoiceProfileToPerson(voiceProfileId: string, personId: string) {
     const provider = this.options.memory.getMemoryProvider?.();

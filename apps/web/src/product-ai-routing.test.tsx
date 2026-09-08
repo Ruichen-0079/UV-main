@@ -359,8 +359,8 @@ describe("Product AI Routing", () => {
 
   it("renders the product routing loading state without provider calls", () => {
     const markup = renderToStaticMarkup(<ProductAIRouting />);
-    expect(markup).toContain("AI Routing");
-    expect(markup).toContain("Loading current routing settings");
-    expect(markup).toContain("/providers/verify-chain/:capability");
+    expect(markup).toContain("Provider → Model → Capability Route");
+    expect(markup).toContain("Loading configuration");
+    expect(markup).toContain("Connect Model to Chat");
   });
 });

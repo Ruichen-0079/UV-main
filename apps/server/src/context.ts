@@ -1,3 +1,4 @@
+import { productEnvironment, readProductSettings } from "./services/product-store.js";
 import { join } from "node:path";
 import { getRuntimeEnvDir } from "@companion/config";
 import { createFileP8CorrectionStore, createFileVoiceBindingReferences } from "@companion/core";
@@ -94,7 +95,8 @@ export async function createAppContext(
     throw new Error("EVENT_BUS=nats is reserved for future NATS support and is not implemented.");
   }
 
-  const bootEnv = (await readRuntimeEnvFiles()).env;
+  const bootEnv = productEnvironment((await readRuntimeEnvFiles()).env, readProductSettings());
+  for (const key of ["YUVI_PRODUCT_CONFIGURATION", "MEMORY_SUBJECT_USER_ID", "MEMORY_PERSONA_ID", "PROACTIVE_SCORE_THRESHOLD", "PROACTIVE_EVALUATION_INTERVAL_MS"]) { if (bootEnv[key] !== undefined) process.env[key] = bootEnv[key]; }
   const eventBus = new InMemoryEventBus();
   const proactiveListeners = new Set<(event: RuntimeReplyStreamEvent) => void>();
   const embodiedPresentationBridge = new EmbodiedPresentationBridge(eventBus);
@@ -334,7 +336,7 @@ export async function createAppContext(
   let coordinator: MemoryIngestionCoordinator;
   let runtime: RuntimeOrchestrator;
   try {
-    providers = createProviderRegistryFromEnv();
+    providers = createProviderRegistryFromEnv(bootEnv);
     memory = createMemoryService(providers);
     coordinator = new MemoryIngestionCoordinator({
       repository: finalizedIngestionRepository!,
