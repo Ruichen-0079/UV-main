@@ -192,6 +192,7 @@ type DirectContextEntry =
       userMessage: string;
       assistantReply: string;
       memoryEphemeral?: boolean;
+      memoryWriteDisabled?: boolean;
     }
   | {
       kind: "assistant-only";
@@ -307,6 +308,10 @@ export class RuntimeOrchestrator {
   private proactiveAttemptActive = false;
   private schedulerSessionId: string | null = null;
   private schedulerReadMemory = true;
+  private schedulerIdentity: {
+    personaId?: string | undefined;
+    subjectUserId?: string | undefined;
+  } = {};
   private schedulerWakeHandle: unknown = null;
   private schedulerGeneration = 0;
   private readonly proactiveStreamListeners = new Set<(event: RuntimeReplyStreamEvent) => void>();
@@ -344,13 +349,19 @@ export class RuntimeOrchestrator {
     this.armProactiveWake();
   }
 
-  startProactiveScheduler(input: { sessionId: string; readMemory?: boolean }): void {
+  startProactiveScheduler(input: {
+    sessionId: string;
+    readMemory?: boolean;
+    personaId?: string | undefined;
+    subjectUserId?: string | undefined;
+  }): void {
     const sessionId = input.sessionId.trim();
     if (!sessionId) {
       throw new Error("Proactive scheduler sessionId must not be empty.");
     }
     this.schedulerSessionId = sessionId;
     this.schedulerReadMemory = input.readMemory !== false;
+    this.schedulerIdentity = { personaId: input.personaId, subjectUserId: input.subjectUserId };
     this.armProactiveWake();
   }
 
@@ -871,7 +882,8 @@ export class RuntimeOrchestrator {
       for await (const event of this.streamAssistantInitiatedTurn({
         sessionId,
         idempotencyKey: `proactive:${sessionId}:${crypto.randomUUID()}`,
-        readMemory: this.schedulerReadMemory
+        readMemory: this.schedulerReadMemory,
+        ...this.schedulerIdentity
       })) {
         void event;
       }
@@ -1627,7 +1639,8 @@ export class RuntimeOrchestrator {
             {
               provider: providerMetadata,
               model: providerMetadata.model,
-              tokenUsage: providerMetadata.tokenUsage
+              tokenUsage: providerMetadata.tokenUsage,
+              ...(!memoryOptions.writeMemory ? { memoryWriteDisabled: true } : {})
             },
             {
               finalizedTurnId,
@@ -1680,10 +1693,11 @@ export class RuntimeOrchestrator {
         }
         await this.options.eventBus.publish(reply);
         this.recordDirectContextTurn(userEvent, reply);
-        this.scheduleRecentEpisodePersistence(userEvent.payload.sessionId, {
-          personaId: userEvent.payload.personaId,
-          subjectUserId: userEvent.payload.subjectUserId
-        });
+        if (memoryOptions.writeMemory)
+          this.scheduleRecentEpisodePersistence(userEvent.payload.sessionId, {
+            personaId: userEvent.payload.personaId,
+            subjectUserId: userEvent.payload.subjectUserId
+          });
         const assistantMessage = this.createAssistantMessageEvent(reply, assistantMessageId);
         await this.options.eventBus.publish(assistantMessage);
         this.scheduleEmbodiedPresentation(reply);
@@ -2470,6 +2484,7 @@ export class RuntimeOrchestrator {
         ? { ...options, readMemory: false, writeMemory: false }
         : options
     );
+    if (!memoryOptions.writeMemory) this.memoryWriteDisabledTurns.add(event);
     const currentAffect = detectCurrentAffect({
       text: event.payload.content,
       sourceTraceId: event.traceId
@@ -2949,6 +2964,7 @@ export class RuntimeOrchestrator {
     return status?.routes?.vision?.[0] ?? status?.providers.vision;
   }
 
+  private readonly memoryWriteDisabledTurns = new WeakSet<RuntimeUserTurnEvent>();
   private readonly visuallyGroundedTurns = new WeakSet<RuntimeUserTurnEvent>();
   private visualTurnRevision = 0;
   private visualCaptureController: AbortController | undefined;
@@ -3843,6 +3859,14 @@ export class RuntimeOrchestrator {
         ...(this.visuallyGroundedTurns.has(sourceEvent)
           ? { metadata: { memoryEphemeral: true } }
           : {}),
+        ...(this.memoryWriteDisabledTurns.has(sourceEvent)
+          ? {
+              metadata: {
+                memoryWriteDisabled: true,
+                ...(this.visuallyGroundedTurns.has(sourceEvent) ? { memoryEphemeral: true } : {})
+              }
+            }
+          : {}),
         finalizedTurnId: finalizedTurnId ?? null,
         sourceUserEventId: sourceEvent.id,
         personaId: sourceEvent.payload.personaId ?? null,
@@ -3903,10 +3927,11 @@ export class RuntimeOrchestrator {
     // Persist the final text before exposing the compatibility reply to transports.
     await this.options.eventBus.publish(reply);
     this.recordDirectContextTurn(sourceEvent, reply);
-    this.scheduleRecentEpisodePersistence(sourceEvent.payload.sessionId, {
-      personaId: sourceEvent.payload.personaId,
-      subjectUserId: sourceEvent.payload.subjectUserId
-    });
+    if (!this.memoryWriteDisabledTurns.has(sourceEvent))
+      this.scheduleRecentEpisodePersistence(sourceEvent.payload.sessionId, {
+        personaId: sourceEvent.payload.personaId,
+        subjectUserId: sourceEvent.payload.subjectUserId
+      });
     await this.options.eventBus.publish(assistantMessage);
     return assistantMessage;
   }
@@ -4470,6 +4495,9 @@ export class RuntimeOrchestrator {
         sessionId,
         personaId: input.personaId,
         subjectUserId: input.subjectUserId,
+        ...(input.subjectUserId && input.personaId
+          ? { memoryScope: buildMemoryScope(input.subjectUserId, input.personaId) }
+          : {}),
         directContextText: input.directContextText,
         messages: memoryEligibleMessages(messages),
         longTerm: input.longTerm ?? {
@@ -4481,7 +4509,7 @@ export class RuntimeOrchestrator {
         previouslyShownAssociativeIds: shown?.ids,
         lastTurnIntruded: shown?.lastTurnIntruded,
         episodeStore: this.recentEpisodeStore,
-        persistEpisodes: true
+        persistEpisodes: false
       });
     } catch (error) {
       this.options.logger?.warn?.(
@@ -4535,8 +4563,11 @@ export class RuntimeOrchestrator {
       sessionId,
       personaId: identity.personaId,
       subjectUserId: identity.subjectUserId,
+      ...(identity.subjectUserId && identity.personaId
+        ? { memoryScope: buildMemoryScope(identity.subjectUserId, identity.personaId) }
+        : {}),
       directContextText: "",
-      messages: memoryEligibleMessages(messages),
+      messages: memoryEligibleMessages(messages, true),
       episodeStore: this.recentEpisodeStore,
       persistEpisodes: true
     });
@@ -4621,6 +4652,7 @@ export class RuntimeOrchestrator {
       timestamp: new Date().toISOString(),
       userMessage: redactUnsafeText(userEvent.payload.content),
       assistantReply: redactUnsafeText(reply.payload.content),
+      ...(this.memoryWriteDisabledTurns.has(userEvent) ? { memoryWriteDisabled: true } : {}),
       ...(this.visuallyGroundedTurns.has(userEvent) ? { memoryEphemeral: true } : {})
     });
 
@@ -5463,6 +5495,9 @@ function buildDirectContextEntries(
         timestamp: assistant.message.completedAt ?? assistant.message.createdAt,
         userMessage: redactUnsafeText(user.message.content),
         assistantReply: redactUnsafeText(assistant.message.content),
+        ...(assistant.message.metadata["memoryWriteDisabled"] === true
+          ? { memoryWriteDisabled: true }
+          : {}),
         ...(assistant.message.metadata["memoryEphemeral"] === true ? { memoryEphemeral: true } : {})
       }
     });
@@ -5806,10 +5841,16 @@ function associativePromptMemories(assembly: MemoryVNextAssembly): RetrievedMemo
   }));
 }
 
-function memoryEligibleMessages(messages: ConversationMessage[]): ConversationMessage[] {
+function memoryEligibleMessages(
+  messages: ConversationMessage[],
+  forPersistence = false
+): ConversationMessage[] {
   const excluded = new Set<string>();
   for (const message of messages) {
-    if (message.metadata["memoryEphemeral"] === true) {
+    if (
+      message.metadata["memoryEphemeral"] === true ||
+      (forPersistence && message.metadata["memoryWriteDisabled"] === true)
+    ) {
       excluded.add(message.id);
       const source = message.sourceUserEventId ?? message.parentMessageId;
       if (source) excluded.add(source);
@@ -5851,7 +5892,10 @@ function sessionTurnsToMessages(
         status: "completed",
         createdAt: entry.timestamp,
         completedAt: entry.timestamp,
-        metadata: entry.memoryEphemeral ? { memoryEphemeral: true } : {},
+        metadata: {
+          ...(entry.memoryEphemeral ? { memoryEphemeral: true } : {}),
+          ...(entry.memoryWriteDisabled ? { memoryWriteDisabled: true } : {})
+        },
         sequence: sequence++
       });
     }

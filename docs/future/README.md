@@ -56,7 +56,7 @@ installation seam, Chinese UI and objective interaction acceptance.
 | Local speech | CURRENT | dots.tts / Rei, local STT; [Linux daily use](../linux-daily-use.md) |
 | On-demand Visual Grounding | CLOSED | [Campaign E](campaign-e-visual-grounding.md); remote capability still requires configured credentials |
 | Companion and Live2D calibration | CLOSED | [Campaign F](campaign-f-presentation.md) |
-| Linux checkout deployment | CLOSED | [Campaign G](campaign-g-linux.md); distributable packaging remains DEFERRED |
+| Linux packaged daily deployment | CLOSED | [Linux release gate](linux-release-gate-closure.md); private model/sidecar prerequisites remain external |
 | Behavior assets | CURRENT | specification, evaluation and preference schema in this directory |
 | Character training | DEFERRED | requires reviewed sustained usage evidence |
 | Dream | CURRENT | event-driven consolidation; real idle scheduling remains DEFERRED |

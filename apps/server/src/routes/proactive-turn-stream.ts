@@ -67,7 +67,7 @@ export async function registerProactiveTurnStreamRoutes(
       ...desktopCorsHeaders(request.headers.origin)
     });
     const abortController = new AbortController();
-    const unsubscribe = context.runtime.subscribeProactiveStream((event) => {
+    const unsubscribe = context.subscribeProactiveStream((event) => {
       if (event.sessionId !== sessionId) return;
       void writeSseFrame(reply.raw, event.type, event, abortController.signal).catch(() => {
         abortController.abort();

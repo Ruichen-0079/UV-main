@@ -76,7 +76,11 @@ describe("Memory vNext hierarchical context", () => {
       subjectUserId: "user-a",
       personaId: "lumi",
       directContextText: "- User: 今天天气不错。\n- Assistant: 是啊。",
-      messages,
+      messages: messages.map((message) => ({
+        ...message,
+        subjectUserId: "user-a",
+        personaId: "lumi"
+      })),
       episodeStore: store,
       persistEpisodes: true
     });

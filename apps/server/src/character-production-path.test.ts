@@ -2,6 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import Fastify from "fastify";
+import { createAppContext } from "./context.js";
 import { buildServer } from "./server.js";
 import { loadServerConfig } from "./config.js";
 
@@ -73,6 +75,52 @@ type RecordedRequest = {
 };
 
 describe("ordinary production Character path", () => {
+  it("keeps the live proactive subscription connected across runtime reload", async () => {
+    const env = {
+      ...productionTestEnv(),
+      OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL: "decision-model"
+    };
+    process.env = { ...env };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => completion("decision-model", "NO_OP"))
+    );
+    const app = Fastify({ logger: false });
+    const context = await createAppContext(app.log, loadServerConfig(env));
+    const events: unknown[] = [];
+    const unsubscribe = context.subscribeProactiveStream((event) => events.push(event));
+    try {
+      const previous = context.runtime;
+      await context.reloadRuntimeConfig(env);
+      expect(context.runtime).not.toBe(previous);
+      context.runtime.stopProactiveScheduler();
+      context.runtime.setProactiveConsent(true);
+      for await (const event of context.runtime.streamAssistantInitiatedTurn({
+        sessionId: "reload-live",
+        idempotencyKey: "after-reload",
+        readMemory: false
+      })) {
+        void event;
+      }
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "proactive-decision",
+          decision: "NO_OP",
+          sessionId: "reload-live"
+        })
+      );
+    } finally {
+      unsubscribe();
+      await context.runtime.sealAndDrainMemoryWrites();
+      context.embodiedPresentationBridge.close();
+      await context.memoryIngestionCoordinator.shutdown({ graceMs: 2000 });
+      await context.conversationRepository.close?.();
+      await context.finalizedIngestionRepository.close?.();
+      await context.memoryRepository.close?.();
+      await app.close();
+    }
+  });
+
   it("keeps a simple accepted RESPOND on the selected Chat model", async () => {
     const requests: RecordedRequest[] = [];
     const fetchSpy = vi.fn(async (_input: unknown, init?: RequestInit) => {

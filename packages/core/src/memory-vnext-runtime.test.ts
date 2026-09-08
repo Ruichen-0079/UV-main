@@ -1,5 +1,5 @@
 import { InMemoryEventBus } from "@companion/event-bus";
-import { InMemoryConversationRepository } from "@companion/memory";
+import { InMemoryConversationRepository, InMemoryRecentEpisodeStore } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
 import {
   createMockChatProvider,
@@ -9,7 +9,7 @@ import {
   createMockVisionProvider,
   MockEmbeddingProvider
 } from "@companion/providers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RuntimeOrchestrator, type RuntimeMemoryPort } from "./index.js";
 
 function createProviders() {
@@ -32,6 +32,92 @@ function createMemory(): RuntimeMemoryPort {
 }
 
 describe("Runtime Memory vNext vertical slice", () => {
+  it("keeps alternating people in one production session out of each other's durable episodes", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const recentEpisodeStore = new InMemoryRecentEpisodeStore();
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMemory(),
+      promptBuilder: new PromptBuilder(),
+      providers: createProviders(),
+      conversation,
+      recentEpisodeStore
+    });
+    for (const person of ["person-a", "person-b"]) {
+      await runtime.handleUserMessage(
+        {
+          sessionId: "shared",
+          content: `Only ${person} said this`,
+          subjectUserId: person,
+          personaId: "persona"
+        },
+        { readMemory: true, writeMemory: true }
+      );
+      await vi.waitFor(async () => {
+        const episodes = await recentEpisodeStore.listActive({
+          now: new Date(),
+          subjectUserId: person,
+          personaId: "persona"
+        });
+        expect(episodes).toHaveLength(1);
+        expect(episodes[0]?.userStatements.join(" ")).toContain(person);
+        expect(episodes[0]?.userStatements.join(" ")).not.toContain(
+          person === "person-a" ? "person-b" : "person-a"
+        );
+        expect(episodes[0]?.memoryScope).toBe(`yuvi:v1:user:${person}:character:persona`);
+      });
+    }
+    const first = await recentEpisodeStore.listActive({
+      now: new Date(),
+      subjectUserId: "person-a"
+    });
+    expect(first).toHaveLength(1);
+    await runtime.sealAndDrainMemoryWrites();
+  });
+
+  it("does not persist episodes for write-disabled turns, including after restart", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const recentEpisodeStore = new InMemoryRecentEpisodeStore();
+    const upsert = vi.spyOn(recentEpisodeStore, "upsert");
+    const rollover = vi.spyOn(recentEpisodeStore, "rollover");
+    const create = () =>
+      new RuntimeOrchestrator({
+        eventBus: new InMemoryEventBus({ development: false }),
+        memory: createMemory(),
+        promptBuilder: new PromptBuilder(),
+        providers: createProviders(),
+        conversation,
+        recentEpisodeStore
+      });
+    const runtime = create();
+    await runtime.handleUserMessage(
+      { sessionId: "disabled", content: "private read-only marker" },
+      { readMemory: true, writeMemory: false }
+    );
+    for await (const event of runtime.streamUserMessage(
+      { sessionId: "disabled", content: "private streamed marker" },
+      { readMemory: true, writeMemory: false }
+    )) {
+      void event;
+    }
+    expect(upsert).not.toHaveBeenCalled();
+    expect(rollover).not.toHaveBeenCalled();
+    await runtime.sealAndDrainMemoryWrites();
+    const restarted = create();
+    await restarted.handleUserMessage(
+      { sessionId: "disabled", content: "remember the public marker" },
+      { readMemory: true, writeMemory: true }
+    );
+    await vi.waitFor(() => expect(upsert).toHaveBeenCalled());
+    expect(
+      upsert.mock.calls
+        .flat()
+        .map((episode) => episode.userStatements.join(" "))
+        .join(" ")
+    ).not.toContain("private");
+    await restarted.sealAndDrainMemoryWrites();
+  });
+
   it("injects L1 recent episodes after DirectContext rolls off the training turn", async () => {
     const conversation = new InMemoryConversationRepository();
     const runtime = new RuntimeOrchestrator({

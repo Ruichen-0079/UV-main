@@ -86,6 +86,11 @@ export type MemoryVNextAssembly = {
 export async function assembleMemoryVNextContext(
   input: MemoryVNextAssembleInput
 ): Promise<MemoryVNextAssembly> {
+  // An explicitly selected person must not relabel another person's session history.
+  const inScope = (value: { personaId?: string | null; subjectUserId?: string | null }) =>
+    (input.personaId === undefined || (value.personaId ?? null) === input.personaId) &&
+    (input.subjectUserId === undefined || (value.subjectUserId ?? null) === input.subjectUserId);
+  input = { ...input, messages: input.messages.filter(inScope) };
   const budgets = normalizeMemoryHierarchyBudgets(input.budgets);
   const reconstructed = assembleRecentEpisodes({
     messages: excludeCurrentUserTurn(input.messages, input.currentTurnText),
@@ -121,7 +126,10 @@ export async function assembleMemoryVNextContext(
       })
     : reconstructed;
 
-  const episodes = mergeEpisodes(stored, reconstructed).slice(0, budgets.l1MaxEpisodes);
+  const episodes = mergeEpisodes(stored.filter(inScope), reconstructed).slice(
+    0,
+    budgets.l1MaxEpisodes
+  );
   const ranked = rankRecentEpisodesForQuery(input.queryText, episodes, input.now, input.timezone);
   const beyondDirectContext = episodes.filter(
     (episode) => !isCoveredByDirectContext(episode, input.directContextText)

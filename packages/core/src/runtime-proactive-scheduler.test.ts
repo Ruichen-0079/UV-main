@@ -11,7 +11,7 @@ import {
   type AssistantContinuationInput,
   type ProactiveDecisionInput
 } from "@companion/providers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   PROACTIVE_NO_OP_BACKOFF_MS,
   RuntimeOrchestrator,
@@ -140,6 +140,46 @@ async function collect(stream: AsyncIterable<RuntimeReplyStreamEvent>) {
 }
 
 describe("Runtime proactive scheduler", () => {
+  it("passes configured identity through an automatic scheduler wake into P8", async () => {
+    const wakes: Array<() => void> = [];
+    const loadCorrections = vi.fn(async () => ({ status: "UNAVAILABLE" as const }));
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: memoryStub(),
+      promptBuilder: new PromptBuilder(),
+      providers: providers(),
+      proactiveConsentEnabled: true,
+      p8CorrectionStore: {
+        loadCorrections,
+        appendCorrection: async () => ({ status: "UNAVAILABLE" as const })
+      },
+      setProactiveWake(callback) {
+        wakes.push(callback);
+        return wakes.length;
+      },
+      clearProactiveWake() {}
+    });
+    runtime.startProactiveScheduler({
+      sessionId: "s",
+      readMemory: false,
+      personaId: "persona-a",
+      subjectUserId: "person-a"
+    });
+    wakes[0]?.();
+    await vi.waitFor(() =>
+      expect(loadCorrections).toHaveBeenCalledWith(
+        expect.objectContaining({
+          address: expect.objectContaining({
+            personaProfileId: "persona-a",
+            subjectScopeId: "person-a"
+          }),
+          scopeReference: { reference: "yuvi:v1:user:person-a:character:persona-a" }
+        })
+      )
+    );
+    await runtime.sealAndDrainMemoryWrites();
+  });
+
   it("does not call the decision provider while speech is active", async () => {
     let decided = 0;
     const runtime = new RuntimeOrchestrator({
