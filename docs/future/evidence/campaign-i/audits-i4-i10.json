@@ -1,0 +1,147 @@
+{
+  "campaign": "I",
+  "atoms": "I-4..I-10",
+  "captured_at": "2026-09-08T13:29:29.283497+08:00",
+  "timezone": "Asia/Shanghai",
+  "starting_main_sha": "41ad83449353706675f2a72aaf494728e9735e47",
+  "measured_main_sha_at_audit": "531cb6d7748868daae374b0baf3cf0cb0d077c43",
+  "I-4_startup": {
+    "classification": "NO_CHANGE_NEEDED",
+    "problem": "Distinguish cold/warm and stage contributions without faking speed by shifting freeze.",
+    "before_measurement": {
+      "journal_listen_to_bootstrap_healthy_s": "≈18–31s on repeated morning yuvi-daily restarts (current instance ≈19s)",
+      "stages_observed": [
+        "Supervisor listen",
+        "Runtime",
+        "Mem0 (often degraded/not_configured LLM)",
+        "external Ollama/Postgres",
+        "local_stt",
+        "tts_wrapper model load",
+        "Product web via yuvi-daily-web"
+      ],
+      "cold_gpu_note": "TTS CUDA load dominates cold path (~5–6 GiB VRAM residency); Companion/STT are smaller."
+    },
+    "impl": "No parallelize/defer patch. Hibernation already trades idle VRAM for first-use resume (~17s) — measured separately in I-2; not counted as faster startup.",
+    "after": "Unchanged startup sequencing.",
+    "regression": "N/A",
+    "decision": "NO_CHANGE_NEEDED"
+  },
+  "I-5_process_residency": {
+    "classification": "NO_CHANGE_NEEDED",
+    "problem": "Audit duplicate sidecars/interpreters/CUDA contexts.",
+    "before_measurement": {
+      "daily_owned": [
+        "desktop-supervisor@campaign-g",
+        "runtime:6121",
+        "mem0:6131",
+        "local_stt:9876",
+        "tts_wrapper:9881",
+        "web:5173"
+      ],
+      "external_retained": [
+        "postgres",
+        "ollama:11434"
+      ],
+      "host_embedding": "yuvi-local-embedding.service llama-server :8128 (--threads 24) AND ollama embedding child — dual embedding stacks by design/history",
+      "leftover_campaign_h": {
+        "api": "campaign-h server :6122",
+        "web": "campaign-h vite :5174",
+        "rss_mib_approx": "≈266 combined",
+        "action": "recommend_cleanup_only"
+      },
+      "cuda_compute_apps_sanitized": [
+        "compositor/plasma",
+        "sunshine",
+        "dots-tts ~5298 MiB"
+      ],
+      "not_stopped": [
+        "Postgres",
+        "Ollama",
+        "campaign-h leftovers (not clearly orphaned YUVI-supervisor-owned)"
+      ]
+    },
+    "impl": "No process kills. Evidence recommends stopping leftover campaign-h :6122/:5174 when human confirms unused.",
+    "after": "Daily stack unchanged aside from TTS script promotion.",
+    "regression": "None",
+    "decision": "NO_CHANGE_NEEDED"
+  },
+  "I-6_ram": {
+    "classification": "NO_CHANGE_NEEDED",
+    "problem": "Separate model weights vs caches vs leaks; Memory not disposable.",
+    "before_measurement": {
+      "dots_tts_rss_mib_resident": "≈4509",
+      "dots_tts_vram_mib_resident": "≈5298",
+      "host_mem_sanitized": "46 GiB total; ~17 GiB used / ~28 GiB available at sample (host-contaminated)",
+      "mem0": "healthy components; memoryLlm not_configured; reduced capabilities — not treated as disposable"
+    },
+    "impl": "No aggressive GC. Hibernation (I-2) already addresses GPU weight residency when idle.",
+    "after": "No additional RAM code change.",
+    "regression": "N/A",
+    "decision": "NO_CHANGE_NEEDED"
+  },
+  "I-7_disk_io": {
+    "classification": "NO_CHANGE_NEEDED",
+    "problem": "Logs/temp audio/screenshots unbounded growth.",
+    "before_measurement": {
+      "DesktopSupervisor_state_total": "29M across many instance dirs (largest inactive ~9M)",
+      "campaign_g_bounded_log": "2 MiB + rotation; 30-day inactive known-log TTL (Campaign G) — retained, not replaced with CacheManager",
+      "tmp_yuvi_artifacts": "acceptance wavs and campaign-h browser scratch; largest ~19M; not live unbounded writers",
+      "hf_cache_bakeoff": "4.9G model cache (expected weights, not a leak)"
+    },
+    "impl": "No new TTL/CacheManager. No unbounded live growth found requiring code fix.",
+    "after": "Unchanged.",
+    "regression": "N/A",
+    "decision": "NO_CHANGE_NEEDED"
+  },
+  "I-8_e2e_latency": {
+    "classification": "NO_CHANGE_NEEDED",
+    "problem": "Find dominant contributors; avoid 10ms micro-opts in ~1.5s+ paths.",
+    "before_measurement": {
+      "health_probes_ms": {
+        "tts": 6.4,
+        "stt": 0.8,
+        "runtime": 1.9,
+        "mem0": 1.9
+      },
+      "tts_warm_short_zh_ms": 3777.6,
+      "tts_hibernate_resume_ms": "~16900 (I-2)",
+      "text_chat_dominant": "remote OpenAI-compatible provider RTT/tokens (not local micropath)",
+      "memory_path": "local embed + mem0; mem0 degraded without memory LLM"
+    },
+    "impl": "No micro-optimization. Dominant local voice cost is TTS synth (~3–4s warm) or hibernate resume (~17s); text path dominated by cloud LLM.",
+    "after": "Unchanged.",
+    "regression": "N/A",
+    "decision": "NO_CHANGE_NEEDED"
+  },
+  "I-9_prompt_cache": {
+    "classification": "NO_CHANGE_NEEDED",
+    "problem": "Confirm Campaign I did not regress TEMPORAL_CONTEXT-last / H evidence.",
+    "before_measurement": {
+      "h_evidence_present": "docs/future/evidence/campaign-h/prompt-cache.json (24 rows)",
+      "h_closure_ratios": "baseline 15.89% vs time-last 66.73% cache-hit",
+      "code_still_moves_TEMPORAL_CONTEXT_last": "apps/server/src/character-runtime.ts filter/append last",
+      "tests": "character-runtime.test.ts expects sections.at(-1).kind === TEMPORAL_CONTEXT",
+      "campaign_i_diff_touching_serializer": "none (41ad834..531cb6d only dots-tts + campaign-i evidence)"
+    },
+    "impl": "No reopen of #163. Verification only.",
+    "after": "Layout retained.",
+    "regression": "None observed",
+    "decision": "NO_CHANGE_NEEDED"
+  },
+  "I-10_dashboard": {
+    "classification": "NO_CHANGE_NEEDED",
+    "problem": "No performance dashboard; readiness only if needed.",
+    "before_measurement": {
+      "hibernation_readiness_already_on_health": [
+        "state",
+        "gpu_resident",
+        "ready_on_demand",
+        "idle_hibernate_seconds"
+      ]
+    },
+    "impl": "No dashboard added.",
+    "after": "Health fields sufficient.",
+    "regression": "N/A",
+    "decision": "NO_CHANGE_NEEDED"
+  }
+}
