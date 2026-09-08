@@ -52,6 +52,14 @@ issues cancellation; it retries only busy responses within its 120-second deadli
 Playback epochs independently suppress late audio. Supervisor shutdown terminates
 the owned process even during loading/synthesis, releasing CUDA memory.
 
+Idle GPU hibernation (Campaign I, Strategy A — full CUDA unload + lazy reload):
+after `DOTS_TTS_IDLE_HIBERNATE_SECONDS` of quiet time (default **180**), the service
+drops `DotsTtsRuntime`, runs `gc` + `torch.cuda.empty_cache()`, and reports
+`state=hibernated` with `ready_on_demand=true` / `gpu_resident=false` on HTTP 200.
+The next `POST /tts` reloads under the existing synthesis lock (one-at-a-time), then
+synthesizes. Set the env var to `0` to disable. Active use stays GPU-warm; hibernated
+≠ broken. Precision remains bfloat16; no second runtime authority.
+
 A reproduced leading-silence issue is corrected only here: a conservative 10ms RMS
 gate removes at most three seconds of leading silence, retaining 80ms before speech.
 Internal and trailing pauses, short leads, and all-quiet output remain untouched.

@@ -19,7 +19,7 @@ class OutputTests(unittest.TestCase):
         original = np.concatenate([np.zeros(100), np.ones(500)])
         np.testing.assert_array_equal(trim_leading_silence(original, 1000), original)
     def test_warmup_busy_and_cancel_before_admission(self):
-        service = Service()
+        service = Service(start_idle_watcher=False, idle_hibernate_seconds=0)
         body = dict(requestId="one", text="Hello", language="EN")
         self.assertEqual(service.synthesize(body)[0], 503)
         service.state = "ready"
@@ -30,5 +30,13 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(service.synthesize(body)[0], 409)
         for i in range(1000): service.cancel(str(i))
         self.assertEqual(len(service.cancelled), 256)
+
+
+    def test_hibernated_is_admissible(self):
+        service = Service(start_idle_watcher=False, idle_hibernate_seconds=0)
+        service.state = "hibernated"
+        service.lock.acquire()
+        self.assertEqual(service.synthesize(dict(requestId="h", text="Hi", language="EN"))[0], 429)
+        service.lock.release()
 
 if __name__ == "__main__": unittest.main()

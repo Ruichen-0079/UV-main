@@ -23,14 +23,18 @@ export class DotsTTSProvider implements TTSProvider {
         service?: string;
         state?: string;
         model_loaded?: boolean;
+        ready_on_demand?: boolean;
       };
+      const hibernated = body.state === "hibernated" || body.ready_on_demand === true;
       available =
         response.ok &&
         body.service === "yuvi-dots-tts" &&
-        body.state === "ready" &&
-        body.model_loaded === true;
+        ((body.state === "ready" && body.model_loaded === true) ||
+          (hibernated && body.state !== "error" && body.state !== "warming"));
       message = available
-        ? "Local TTS ready."
+        ? body.state === "hibernated" || (body.ready_on_demand === true && body.model_loaded !== true)
+          ? "Local TTS ready on demand."
+          : "Local TTS ready."
         : body.state === "warming"
           ? "Local TTS warming."
           : "Local TTS unavailable.";

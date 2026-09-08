@@ -130,10 +130,12 @@ export function ttsWrapperHealthOk(body: unknown): boolean {
   const record = body as Record<string, unknown>;
   // A recognized warming/error response is the correct protocol; HTTP 503
   // still keeps readiness false and avoids calling a failed model a port conflict.
+  // Hibernated (GPU unloaded, ready-on-demand) is a healthy owned service.
   return (
     record["model_loaded"] === true ||
+    (record["service"] === "yuvi-dots-tts" && record["ready_on_demand"] === true) ||
     (record["service"] === "yuvi-dots-tts" &&
-      ["warming", "error"].includes(String(record["state"])))
+      ["warming", "error", "hibernated"].includes(String(record["state"])))
   );
 }
 

@@ -51,3 +51,34 @@ it("recognizes a dots load failure as unavailable service, not a foreign port", 
     await probeHttpHealth("http://localhost/health", { validateBody: ttsWrapperHealthOk })
   ).toMatchObject({ ok: false, protocolOk: true, warming: false });
 });
+
+it("treats hibernated dots TTS as healthy ready-on-demand, not a foreign port", async () => {
+  const { ttsWrapperHealthOk } = await import("./health.js");
+  expect(
+    ttsWrapperHealthOk({
+      service: "yuvi-dots-tts",
+      state: "hibernated",
+      model_loaded: false,
+      ready_on_demand: true,
+      gpu_resident: false
+    })
+  ).toBe(true);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            service: "yuvi-dots-tts",
+            state: "hibernated",
+            model_loaded: false,
+            ready_on_demand: true
+          }),
+          { status: 200 }
+        )
+    )
+  );
+  expect(
+    await probeHttpHealth("http://localhost/health", { validateBody: ttsWrapperHealthOk })
+  ).toMatchObject({ ok: true, protocolOk: true, warming: false });
+});

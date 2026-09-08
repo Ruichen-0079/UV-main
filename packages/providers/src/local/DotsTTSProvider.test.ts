@@ -64,6 +64,25 @@ describe("dots local adapter", () => {
     fetch.mockResolvedValue(new Response("{}"));
     expect(await provider().healthCheck()).toMatchObject({ available: false });
   });
+  it("reports hibernated local TTS as available ready-on-demand", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          service: "yuvi-dots-tts",
+          state: "hibernated",
+          model_loaded: false,
+          ready_on_demand: true
+        }),
+        { status: 200 }
+      )
+    );
+    expect(await provider().healthCheck()).toMatchObject({
+      available: true,
+      status: "healthy",
+      message: "Local TTS ready on demand."
+    });
+  });
+
   it("rejects non-audio success bodies", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
     await expect(provider().synthesizeSpeech({ text: "hello" })).rejects.toThrow();
