@@ -76,7 +76,11 @@ describe("Memory vNext hierarchical context", () => {
       subjectUserId: "user-a",
       personaId: "lumi",
       directContextText: "- User: 今天天气不错。\n- Assistant: 是啊。",
-      messages,
+      messages: messages.map((message) => ({
+        ...message,
+        subjectUserId: "user-a",
+        personaId: "lumi"
+      })),
       episodeStore: store,
       persistEpisodes: true
     });
@@ -528,3 +532,46 @@ describe("Memory vNext postgres persistence", () => {
     expect(listed.some((item) => item.sourceDigest === episode!.sourceDigest)).toBe(true);
   });
 });
+
+it.each(["ok", "partial", "empty", "unavailable", "error"] as const)(
+  "projects the actual long-term producer state %s without requiring an associative hit",
+  async (status) => {
+    const events =
+      status === "ok" || status === "partial"
+        ? [
+            {
+              id: "evidence",
+              kind: "fact" as const,
+              content: "User grows mint.",
+              source: "mem0",
+              sourceRecordId: "evidence",
+              metadata: {}
+            }
+          ]
+        : [];
+    const assembly = await assembleMemoryVNextContext({
+      now: new Date("2026-09-08T10:00:00Z"),
+      queryText: "Hello",
+      directContextText: "",
+      messages: [],
+      longTerm: { status, events, source: "mem0", limited: status === "partial" }
+    });
+    expect(assembly.characterProjection.memoryEvidence.state).toBe(
+      {
+        ok: "KNOWN",
+        partial: "PARTIAL",
+        empty: "EMPTY",
+        unavailable: "UNAVAILABLE",
+        error: "ERROR"
+      }[status]
+    );
+    if (events.length) {
+      expect(assembly.characterProjection.memoryEvidence.summary).toContain("User grows mint.");
+      expect(assembly.characterProjection.memoryEvidence.provenanceReferences).toContain(
+        "evidence"
+      );
+    } else expect(assembly.characterProjection.memoryEvidence.summary).toBeUndefined();
+    expect(assembly.characterProjection.temporalContext.state).toBe("PARTIAL");
+    expect(assembly.characterProjection.temporalContext.summary).toContain("2026");
+  }
+);

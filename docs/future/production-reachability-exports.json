@@ -1,0 +1,306 @@
+{
+  "baselineMain": "a0a277068e466a2908f0c0b2191e3ecf921e257c",
+  "method": "Review of exported functions/classes without production references beyond declaration/barrel, followed by comparison with current composed callers. This is a classification inventory, not a test that proves reachability.",
+  "items": [
+    {
+      "symbol": "validateRequiredProviderConfig",
+      "file": "packages/providers/src/registry.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "createMockStreamingChatProvider",
+      "file": "packages/providers/src/registry.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Explicit offline/example/test adapter, not a production capability claim."
+    },
+    {
+      "symbol": "isSafeToReplay",
+      "file": "packages/providers/src/types/errors.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "isRetryableProviderError",
+      "file": "packages/providers/src/types/errors.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "buildP8CurrentIdentityProjection",
+      "file": "packages/p8/src/identity.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Explicit library API for semantic name/mention evidence. Production speech uses resolveP8VoicePerson over trusted binding evidence; no automatic transcript identity inference is claimed."
+    },
+    {
+      "symbol": "resolveP8IdentityMention",
+      "file": "packages/p8/src/identity.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Explicit library API for semantic name/mention evidence. Production speech uses resolveP8VoicePerson over trusted binding evidence; no automatic transcript identity inference is claimed."
+    },
+    {
+      "symbol": "estimateTokensFromCharacters",
+      "file": "packages/memory/src/context-compression.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "selectIdentityEvidence",
+      "file": "packages/memory/src/identity-evidence.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Explicit library API for semantic name/mention evidence. Production speech uses resolveP8VoicePerson over trusted binding evidence; no automatic transcript identity inference is claimed."
+    },
+    {
+      "symbol": "getMemoryHealth",
+      "file": "packages/memory/src/maintenance.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "normalizeMemoryCompareText",
+      "file": "packages/memory/src/memory-vnext-text.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "defaultMemoryVNextBudgets",
+      "file": "packages/memory/src/memory-vnext.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "resolveDatabaseUrl",
+      "file": "packages/memory/src/migrations.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "reconstructableRetentionMs",
+      "file": "packages/memory/src/recent-episode-store.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "hashMemoryScope",
+      "file": "packages/memory/src/scope.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "planVoiceProfilePersonBindingCorrection",
+      "file": "packages/memory/src/voice-profile-binding.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Reusable explicit supersession planner. The live binding controller appends evidence; conflicting assignments fail closed rather than silently reassigning a person."
+    },
+    {
+      "symbol": "assertNoBiometricMetadata",
+      "file": "packages/memory/src/voice-profile-binding.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "installToolchainIntegration",
+      "file": "packages/host-environment/src/index.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Explicit host setup utility; runtime safety checks call the live assertion helpers. Automatic shell modification is not product startup behavior."
+    },
+    {
+      "symbol": "removeToolchainIntegration",
+      "file": "packages/host-environment/src/index.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Explicit host setup utility; runtime safety checks call the live assertion helpers. Automatic shell modification is not product startup behavior."
+    },
+    {
+      "symbol": "pathExists",
+      "file": "packages/host-environment/src/index.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Explicit host setup utility; runtime safety checks call the live assertion helpers. Automatic shell modification is not product startup behavior."
+    },
+    {
+      "symbol": "runUserMessageToAgentReplyExample",
+      "file": "packages/event-bus/src/example.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Explicit offline/example/test adapter, not a production capability claim."
+    },
+    {
+      "symbol": "resolveMem0Start",
+      "file": "packages/desktop-supervisor/src/config.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "removeMetadataFile",
+      "file": "packages/desktop-supervisor/src/ownership.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "writeRestrictedFile",
+      "file": "packages/desktop-supervisor/src/postgres-acl.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "createYuviDatabase",
+      "file": "packages/desktop-supervisor/src/postgres-cluster.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "runSingleUserSql",
+      "file": "packages/desktop-supervisor/src/postgres-cluster.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "stopPostgresFast",
+      "file": "packages/desktop-supervisor/src/postgres-cluster.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "assertPgdataInsideLayout",
+      "file": "packages/desktop-supervisor/src/postgres-cluster.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "persistPostgresPassword",
+      "file": "packages/desktop-supervisor/src/postgres-secret.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "redactSecretText",
+      "file": "packages/desktop-supervisor/src/postgres-secret.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "containsSecret",
+      "file": "packages/desktop-supervisor/src/postgres-secret.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "getProcessInfo",
+      "file": "packages/desktop-supervisor/src/process-windows.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "stopProcessTree",
+      "file": "packages/desktop-supervisor/src/process-windows.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "PostgresP8CorrectionStore",
+      "file": "packages/core/src/p8-correction-store.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternative storage adapter of the P8 contract; production selects createFileP8CorrectionStore for the persistent Runtime environment directory."
+    },
+    {
+      "symbol": "decideRuntimeEmbodiedEffectCommitAuthorization",
+      "file": "packages/core/src/runtime-embodied-effect-commit.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Earlier standalone phase composition. Production context calls executeRuntimeEmbodiedPresentation with record initialization/admission, canonical projection, record advancement and event publication."
+    },
+    {
+      "symbol": "isProactiveSuppressionActive",
+      "file": "packages/core/src/runtime-proactive-policy.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "validateRuntimeConfig",
+      "file": "packages/config/src/index.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "redactConfig",
+      "file": "packages/config/src/index.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Public compatibility/diagnostic convenience utility. Current production owns this behavior through its active service, constructor, state machine or configuration parser; this extra wrapper is not an independent product capability."
+    },
+    {
+      "symbol": "assembleCharacterHarnessContext",
+      "file": "packages/character-harness/src/index.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Older 2A assembly or optional recovery-supervisor parser; production uses assembleCharacterHarness2DContext and bounded deterministic recovery."
+    },
+    {
+      "symbol": "interpretCharacterHarnessRecoverySupervisorOutput",
+      "file": "packages/character-harness/src/recovery-supervisor.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Older 2A assembly or optional recovery-supervisor parser; production uses assembleCharacterHarness2DContext and bounded deterministic recovery."
+    },
+    {
+      "symbol": "executeServerCognitionRoundTrip",
+      "file": "apps/server/src/cognition-roundtrip.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Simple reasoning-only composition retained for explicit library callers. Production now selects executeProductionCognition and the bounded capability-aware round-trip."
+    },
+    {
+      "symbol": "applyServerEmbodiedPresentationOutcome",
+      "file": "apps/server/src/embodied-effect-lifecycle-composition.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Earlier standalone phase composition. Production context calls executeRuntimeEmbodiedPresentation with record initialization/admission, canonical projection, record advancement and event publication."
+    },
+    {
+      "symbol": "dispatchServerEmbodiedPresentationRequest",
+      "file": "apps/server/src/embodied-presentation-dispatch.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Earlier standalone phase composition. Production context calls executeRuntimeEmbodiedPresentation with record initialization/admission, canonical projection, record advancement and event publication."
+    },
+    {
+      "symbol": "createServerMcpClient",
+      "file": "apps/server/src/mcp-client.ts",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Remote MCP transport adapter; production currently supplies the fixed local read_text_file adapter to the same admitted capability seam."
+    },
+    {
+      "symbol": "resolveNodeSha256",
+      "file": "scripts/desktop-package/constants.mjs",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "pathsEqualWindows",
+      "file": "scripts/desktop-package/installer-smoke.mjs",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "normalizeWindowsProcessPath",
+      "file": "scripts/desktop-package/installer-smoke.mjs",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "windowsProcessPathInside",
+      "file": "scripts/desktop-package/installer-smoke.mjs",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "symbol": "repoPath",
+      "file": "scripts/desktop-package/paths.mjs",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Alternate packaged/Windows provisioning or diagnostic helper; current packaged start path uses the active supervisor config/process/cluster composition. Platform expansion remains deferred."
+    },
+    {
+      "file": "apps/web/src/subtitle-projection.ts",
+      "symbol": "projectCommittedAssistantText",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Historical whole-message subtitle projector. Current Companion publishes the sanitized segment chosen for actual speech playback; SubtitlePage consumes that bus projection."
+    },
+    {
+      "file": "apps/web/src/proactive-text-candidate.ts",
+      "symbol": "createProactiveTextCandidate",
+      "result": "INTENTIONALLY_LIBRARY_ONLY",
+      "reason": "Earlier standalone candidate normalizer; the live proactive stream uses Runtime decision/continuation and its current request/effect fences."
+    }
+  ]
+}

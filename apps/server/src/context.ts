@@ -1,5 +1,8 @@
+import { join } from "node:path";
+import { getRuntimeEnvDir } from "@companion/config";
+import { createFileP8CorrectionStore, createFileVoiceBindingReferences } from "@companion/core";
 import { captureKdeScreen, screenCaptureAvailable } from "./screen-capture.js";
-import type { RuntimeLogger } from "@companion/core";
+import type { RuntimeReplyStreamEvent, RuntimeLogger } from "@companion/core";
 import { RuntimeOrchestrator, type RuntimeProactiveStateStore } from "@companion/core";
 import { createFileProactiveStateStore } from "./proactive-policy-store.js";
 import { InMemoryEventBus } from "@companion/event-bus";
@@ -53,7 +56,7 @@ import type { CharacterHarnessCognitionRequest } from "@companion/character-harn
 import { composeServerCharacterSoftSmileEmbodiedEffect } from "./character-embodied-soft-smile-composition.js";
 import { EmbodiedPresentationBridge } from "./embodied-presentation-bridge.js";
 import { createServerCharacterPort } from "./character-runtime.js";
-import { executeServerCognitionRoundTrip } from "./cognition-roundtrip.js";
+import { executeProductionCognition } from "./cognition-production.js";
 
 export type AppContext = {
   eventBus: InMemoryEventBus;
@@ -70,6 +73,7 @@ export type AppContext = {
   activeMemoryRepository: string;
   activeRuntimeEnv: Record<string, string | undefined>;
   memoryMaintenanceScheduler?: MemoryMaintenanceScheduler | undefined;
+  subscribeProactiveStream(listener: (event: RuntimeReplyStreamEvent) => void): () => void;
   reloadRuntimeConfig(env: Record<string, string | undefined>): Promise<RuntimeConfigReloadResult>;
 };
 
@@ -92,6 +96,7 @@ export async function createAppContext(
 
   const bootEnv = (await readRuntimeEnvFiles()).env;
   const eventBus = new InMemoryEventBus();
+  const proactiveListeners = new Set<(event: RuntimeReplyStreamEvent) => void>();
   const embodiedPresentationBridge = new EmbodiedPresentationBridge(eventBus);
   const dashboard = new DashboardStateService();
   eventBus.subscribe("*", (event) => {
@@ -231,9 +236,16 @@ export async function createAppContext(
       process.env["NODE_ENV"] === "test" || process.env["PROVIDER_ALLOW_MOCKS"] === "true"
         ? undefined
         : createServerCharacterPort();
-    return new RuntimeOrchestrator({
+    const nextRuntime = new RuntimeOrchestrator({
       ...(screenCaptureAvailable() ? { captureScreen: captureKdeScreen } : {}),
       eventBus,
+      voiceBindingReferences: createFileVoiceBindingReferences(
+        join(getRuntimeEnvDir(bootEnv), "voice-binding-references.json")
+      ),
+      voicePersonaId: runtimeEnv["MEMORY_PERSONA_ID"],
+      p8CorrectionStore: createFileP8CorrectionStore(
+        join(getRuntimeEnvDir(bootEnv), "p8-corrections.json")
+      ),
       memory,
       promptBuilder,
       providers,
@@ -256,12 +268,16 @@ export async function createAppContext(
             characterCognition: (
               request: unknown,
               problem: string,
-              options?: Readonly<{ signal?: AbortSignal | undefined }>
+              options?: Readonly<{
+                signal?: AbortSignal | undefined;
+                runtimeAuthorizedPath?: string | undefined;
+              }>
             ) =>
-              executeServerCognitionRoundTrip({
+              executeProductionCognition({
                 providers,
                 request: request as CharacterHarnessCognitionRequest,
                 problem,
+                runtimeAuthorizedPath: options?.runtimeAuthorizedPath,
                 ...(options?.signal ? { signal: options.signal } : {})
               })
           }
@@ -295,9 +311,14 @@ export async function createAppContext(
             }
           );
         },
-        present: (request, traceAnchor, observe) => embodiedPresentationBridge.present(request, traceAnchor, observe)
+        present: (request, traceAnchor, observe) =>
+          embodiedPresentationBridge.present(request, traceAnchor, observe)
       }
     });
+    nextRuntime.subscribeProactiveStream((event) => {
+      for (const listener of proactiveListeners) listener(event);
+    });
+    return nextRuntime;
   }
 
   let providers: ProviderRegistry;
@@ -326,7 +347,12 @@ export async function createAppContext(
       }
     });
     runtime = createRuntime(providers, memory, config.directContext, bootEnv);
-    runtime.startProactiveScheduler({ sessionId: "default", readMemory: true });
+    runtime.startProactiveScheduler({
+      sessionId: "default",
+      readMemory: true,
+      personaId: parseRuntimeConfig(bootEnv).memory.personaId,
+      subjectUserId: parseRuntimeConfig(bootEnv).memory.subjectUserId
+    });
   } catch (error) {
     await conversationRepository.close?.();
     await finalizedIngestionRepository?.close?.();
@@ -348,6 +374,12 @@ export async function createAppContext(
     embodiedPresentationBridge,
     activeMemoryRepository,
     activeRuntimeEnv,
+    subscribeProactiveStream(listener) {
+      proactiveListeners.add(listener);
+      return () => {
+        proactiveListeners.delete(listener);
+      };
+    },
     async reloadRuntimeConfig(env) {
       const previousActiveRuntimeEnv = { ...context.activeRuntimeEnv };
       const notHotReloaded = getPendingRestartKeys(env, previousActiveRuntimeEnv);
@@ -393,7 +425,12 @@ export async function createAppContext(
       context.providers = nextProviders;
       context.memory = nextMemory;
       context.runtime = nextRuntime;
-      context.runtime.startProactiveScheduler({ sessionId: "default", readMemory: true });
+      context.runtime.startProactiveScheduler({
+        sessionId: "default",
+        readMemory: true,
+        personaId: parseRuntimeConfig(reloadEnv).memory.personaId,
+        subjectUserId: parseRuntimeConfig(reloadEnv).memory.subjectUserId
+      });
 
       const appliedKeys: string[] = [];
       for (const key of editableKeys) {

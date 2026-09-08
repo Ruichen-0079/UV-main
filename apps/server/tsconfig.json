@@ -39,6 +39,9 @@
     },
     {
       "path": "../../packages/host-environment"
+    },
+    {
+      "path": "../../packages/p8"
     }
   ]
 }

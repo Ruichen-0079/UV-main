@@ -13,6 +13,7 @@ import {
 export function ProductLocalServices(): JSX.Element {
   const status = useAsyncData((signal) => apiClient.getLocalServices(signal), []);
   const [profiles, setProfiles] = useState<Array<{ voiceProfileId: string; label: string }>>([]);
+  const [personId, setPersonId] = useState("");
   const [label, setLabel] = useState("");
   const [mode, setMode] = useState<"enroll" | "identify" | null>(null);
   const [busy, setBusy] = useState(false);
@@ -70,14 +71,20 @@ export function ProductLocalServices(): JSX.Element {
         const result = await apiClient.identifyVoiceProfile(audio);
         setNotice(
           result.status === "MATCHED"
-            ? t("MATCH · {0}", profiles.find((p) => p.voiceProfileId === result.voiceProfileId)?.label ?? result.voiceProfileId)
+            ? t(
+                "MATCH · {0}",
+                profiles.find((p) => p.voiceProfileId === result.voiceProfileId)?.label ??
+                  result.voiceProfileId
+              )
             : t("NO_MATCH · no enrolled voice was recognized")
         );
       }
       await status.refresh();
     } catch {
       setNotice(
-        t("Recording could not be processed. Use clear speech from one speaker and check service status.")
+        t(
+          "Recording could not be processed. Use clear speech from one speaker and check service status."
+        )
       );
     } finally {
       if (mounted.current) {
@@ -95,45 +102,66 @@ export function ProductLocalServices(): JSX.Element {
         className="yuvi-product-button"
         disabled={status.loading}
         onClick={() => void status.refresh()}
-      >{t("Refresh local services")}</button>
+      >
+        {t("Refresh local services")}
+      </button>
       {status.error ? (
-        <p role="alert">{t("Live status unavailable. Any displayed results are from the last successful check.")}</p>
+        <p role="alert">
+          {t("Live status unavailable. Any displayed results are from the last successful check.")}
+        </p>
       ) : null}
       {data ? (
         <>
-          <p>{t("Local STT:")}{" "}{data.stt.available ? t("available") : t("unavailable")} ·{" "}
-            {data.stt.selected ? t("selected") : t("not selected")}{t(". Speaker profiles:")}{" "}
-            {data.stt.speakerProfiles ? t("available") : t("unavailable")}{t(". Diarization:")}{" "}
-            {data.stt.diarization ? t("available") : t("unavailable")}{t(". Live VAD:")}{" "}
-            {data.stt.vad ? t("available") : t("unavailable")}.
-          </p>
-          <p>{t("Memory:")}{" "}{data.memory.backend} · {data.memory.repository} ({data.memory.database}{t("). Ollama:")}{" "}{data.memory.ollama ? t("available") : t("unavailable")}. {data.memory.model}:{" "}
-            {data.memory.embedderPresent ? t("present") : t("missing or unobserved")} ·{" "}
-            {data.memory.dimensions}{" "}{t("dimensions.")}</p>
           <p>
-            Mem0: {t(data.memory.status)}{t(". Embedding probe:")}{" "}
-            {data.memory.embedder ? t("passed") : t("not passed")}{t(". pgvector:")}{" "}
-            {data.memory.vectorStore ? t("available") : t("unavailable")}{t(". CRUD:")}{" "}
-            {data.memory.crud ? t("available") : t("unavailable")}{t(". Search:")}{" "}
-            {data.memory.search ? t("available") : t("unavailable")}. infer={String(data.memory.infer)}
+            {t("Local STT:")} {data.stt.available ? t("available") : t("unavailable")} ·{" "}
+            {data.stt.selected ? t("selected") : t("not selected")}
+            {t(". Speaker profiles:")}{" "}
+            {data.stt.speakerProfiles ? t("available") : t("unavailable")}
+            {t(". Diarization:")} {data.stt.diarization ? t("available") : t("unavailable")}
+            {t(". Live VAD:")} {data.stt.vad ? t("available") : t("unavailable")}.
+          </p>
+          <p>
+            {t("Memory:")} {data.memory.backend} · {data.memory.repository} ({data.memory.database}
+            {t("). Ollama:")} {data.memory.ollama ? t("available") : t("unavailable")}.{" "}
+            {data.memory.model}:{" "}
+            {data.memory.embedderPresent ? t("present") : t("missing or unobserved")} ·{" "}
+            {data.memory.dimensions} {t("dimensions.")}
+          </p>
+          <p>
+            Mem0: {t(data.memory.status)}
+            {t(". Embedding probe:")} {data.memory.embedder ? t("passed") : t("not passed")}
+            {t(". pgvector:")} {data.memory.vectorStore ? t("available") : t("unavailable")}
+            {t(". CRUD:")} {data.memory.crud ? t("available") : t("unavailable")}
+            {t(". Search:")} {data.memory.search ? t("available") : t("unavailable")}. infer=
+            {String(data.memory.infer)}
             {!data.memory.infer
-              ? t(" · automatic LLM extraction unavailable; explicit memory writes remain supported when CRUD is ready.")
+              ? t(
+                  " · automatic LLM extraction unavailable; explicit memory writes remain supported when CRUD is ready."
+                )
               : ""}
           </p>
           <p>
             TTS:{" "}
             {data.tts.configured
               ? t("{0} configured · {1}", data.tts.provider, data.tts.message ?? data.tts.observed)
-              : t("not configured · no voice model selected")}{t(". Voice conversation services:")}{" "}
+              : t("not configured · no voice model selected")}
+            {t(". Voice conversation services:")}{" "}
             {data.stt.available && data.stt.selected && data.stt.vad && data.tts.available
               ? t("ready; microphone permission is checked in Voice Mode")
               : t("not ready for full speech input/output")}
             .
           </p>
-          <small>{t("Checked")}{" "}{new Date(data.checkedAt).toLocaleTimeString()}</small>
+          <small>
+            {t("Checked")} {new Date(data.checkedAt).toLocaleTimeString()}
+          </small>
           <h3>{t("Acoustic voice profiles")}</h3>
-          <p>{t("Record one speaker for at least a few seconds. The label names an acoustic profile; it does not assign a person or grant trust.")}</p>
-          <label className="yuvi-product-provider-field">{t("Profile label")}{" "}
+          <p>
+            {t(
+              "Record one speaker for at least a few seconds. The label names an acoustic profile; it does not assign a person or grant trust."
+            )}
+          </p>
+          <label className="yuvi-product-provider-field">
+            {t("Profile label")}{" "}
             <input
               value={label}
               maxLength={100}
@@ -142,7 +170,8 @@ export function ProductLocalServices(): JSX.Element {
             />
           </label>
           {mode ? (
-            <button className="yuvi-product-button" disabled={busy} onClick={() => void finish()}>{t("Stop recording &")}{" "}{t(mode === "enroll" ? "enroll" : "identify")}
+            <button className="yuvi-product-button" disabled={busy} onClick={() => void finish()}>
+              {t("Stop recording &")} {t(mode === "enroll" ? "enroll" : "identify")}
             </button>
           ) : (
             <>
@@ -150,19 +179,50 @@ export function ProductLocalServices(): JSX.Element {
                 className="yuvi-product-button"
                 disabled={busy || !label.trim() || !data.stt.selected || !data.stt.speakerProfiles}
                 onClick={() => void start("enroll")}
-              >{t("Record enrollment")}</button>
+              >
+                {t("Record enrollment")}
+              </button>
               <button
                 className="yuvi-product-button"
                 disabled={busy || !data.stt.selected || !data.stt.speakerProfiles}
                 onClick={() => void start("identify")}
-              >{t("Record recognition check")}</button>
+              >
+                {t("Record recognition check")}
+              </button>
             </>
           )}
           {notice ? <p role="status">{notice}</p> : null}
+          <label className="yuvi-product-provider-field">
+            {t("Person ID for voice binding")}
+            <input
+              value={personId}
+              maxLength={160}
+              onChange={(event) => setPersonId(event.target.value)}
+              disabled={busy || mode !== null}
+            />
+          </label>
+          <p>
+            {t(
+              "Use the same person ID as the chat memory scope. Conflicting bindings leave the speaker unresolved."
+            )}
+          </p>
           <ul>
             {profiles.map((profile) => (
               <li key={profile.voiceProfileId}>
                 {profile.label} · <code>{profile.voiceProfileId}</code>{" "}
+                <button
+                  disabled={busy || mode !== null || !personId.trim()}
+                  onClick={() => {
+                    setBusy(true);
+                    void apiClient
+                      .bindVoiceProfilePerson(profile.voiceProfileId, personId.trim())
+                      .then(() => setNotice(t("Voice binding saved.")))
+                      .catch(() => setNotice(t("Voice binding failed. Check Memory availability.")))
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  {t("Bind voice to person")}
+                </button>{" "}
                 <button
                   disabled={busy || mode !== null}
                   onClick={() => {
@@ -173,7 +233,9 @@ export function ProductLocalServices(): JSX.Element {
                       .catch(() => setNotice(t("Profile deletion failed.")))
                       .finally(() => setBusy(false));
                   }}
-                >{t("Delete acoustic profile")}</button>
+                >
+                  {t("Delete acoustic profile")}
+                </button>
               </li>
             ))}
           </ul>

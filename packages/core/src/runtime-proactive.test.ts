@@ -1,6 +1,7 @@
 import { InMemoryEventBus } from "@companion/event-bus";
 import {
   InMemoryConversationRepository,
+  InMemoryRecentEpisodeStore,
   type Memory,
   type MemoryCandidate
 } from "@companion/memory";
@@ -180,7 +181,9 @@ describe("RuntimeOrchestrator", () => {
     expect(proactivePrompt).toContain("When uncertain, choose NO_OP.");
     expect(proactivePrompt).toContain("REQUEST_TEXT");
     expect(proactivePrompt).toContain("Output-language preference: EN");
-    expect(continuationInputs[0]?.prompt).toContain("final Character expression must be in English");
+    expect(continuationInputs[0]?.prompt).toContain(
+      "final Character expression must be in English"
+    );
     expect(proactivePrompt).not.toContain("<UserMessage>");
     expect(continuationInputs[0]?.prompt).toContain("decision is already REQUEST_TEXT");
     expect(runtime.getLatestPromptPreview()).toMatchObject({
@@ -243,6 +246,46 @@ describe("RuntimeOrchestrator", () => {
     await expect(
       collectRuntimeStream(runtime.streamAssistantInitiatedTurn(input))
     ).rejects.toMatchObject({ name: "AssistantTurnConflictError" });
+  });
+
+  it("projects existing conversation memory without writing episodes during a proactive decision", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const sessionId = "proactive-read-only";
+    for (const role of ["user", "assistant"] as const) {
+      await appendCompletedConversationMessage(conversation, {
+        id: `${role}-recent`,
+        sessionId,
+        traceId: "recent-turn",
+        role,
+        content: role === "user" ? "Remember our walk today." : "We enjoyed the park.",
+        timestampMs: Date.now() - 1000
+      });
+    }
+    const episodeStore = new InMemoryRecentEpisodeStore();
+    const upsert = vi.spyOn(episodeStore, "upsert");
+    const rollover = vi.spyOn(episodeStore, "rollover");
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createRecordingMemory([]),
+      conversation,
+      recentEpisodeStore: episodeStore,
+      promptBuilder: new PromptBuilder(),
+      providers: {
+        ...createMockProviders(),
+        getProactiveDecisionProvider: () => createMockProactiveDecisionProvider("NO_OP")
+      }
+    });
+    const events = await collectRuntimeStream(
+      runtime.streamAssistantInitiatedTurn({
+        sessionId,
+        idempotencyKey: "read-only-decision",
+        readMemory: true
+      })
+    );
+    expect(events).toContainEqual(expect.objectContaining({ decision: "NO_OP" }));
+    expect(upsert).not.toHaveBeenCalled();
+    expect(rollover).not.toHaveBeenCalled();
+    expect(await conversation.listRecentMessages(sessionId)).toHaveLength(2);
   });
 
   it("buffers proactive text and emits one validated full delta", async () => {
@@ -970,7 +1013,7 @@ describe("RuntimeOrchestrator", () => {
       })
     );
 
-    const systemContent = providerInput?.prompt;
+    const systemContent = providerInput?.prompt.replace(/\\n/g, "\n");
     expect(systemContent).toContain("User: source-user-1\n  Assistant: source-answer-1");
     expect(systemContent).toContain("User: source-user-2\n  Assistant: source-answer-2");
     expect(systemContent).toContain("Assistant: proactive-history");
@@ -1049,7 +1092,7 @@ describe("RuntimeOrchestrator", () => {
       })
     );
 
-    const systemContent = providerInput?.prompt;
+    const systemContent = providerInput?.prompt.replace(/\\n/g, "\n");
     expect(systemContent).toContain("User: fallback-user-2\n  Assistant: fallback-answer-1");
     expect(systemContent).toContain("User: fallback-user-1\n  Assistant: fallback-answer-2");
   });

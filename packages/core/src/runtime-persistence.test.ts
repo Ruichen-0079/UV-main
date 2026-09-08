@@ -5,6 +5,7 @@ import {
   InMemoryFinalizedIngestionRepository,
   type ConversationMessageInput,
   type MemoryConversationTurnWriteResult,
+  type MemoryEvent,
   type MemoryWriteEventInput
 } from "@companion/memory";
 import { PromptBuilder } from "@companion/prompt-builder";
@@ -68,6 +69,44 @@ function deferred<T>(): {
 }
 
 describe("RuntimeOrchestrator", () => {
+  it("keeps unresolved committed speech out of non-streaming finalized ingestion even when writes are requested", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const ledger = new InMemoryFinalizedIngestionRepository();
+    const notifyAdmitted = vi.fn();
+    const store = vi.fn(async () => completeMemoryWrite());
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(store),
+      conversation,
+      finalizedIngestion: new FinalizedIngestionService(ledger),
+      memoryIngestionCoordinator: { notifyAdmitted, wake() {} },
+      voicePersonaId: "alice",
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const observation = runtime.admitFinalizedSpeechObservation(
+      {
+        text: "Remember my private preference.",
+        voiceProfileMatch: { status: "NO_MATCH" }
+      },
+      { sessionId: "unresolved-write" }
+    );
+    const event = runtime.commitSpeechTurn(
+      observation.observationId!,
+      "unresolved-write",
+      observation.text
+    );
+    await runtime.handleUserMessage(event, { readMemory: true, writeMemory: true });
+    await runtime.sealAndDrainMemoryWrites();
+    const assistant = await conversation.getMessageById(`assistant:${event.id}`);
+    expect(assistant).toMatchObject({ subjectUserId: null, ingestionRequested: false });
+    expect((await conversation.getMessageById(event.id))?.metadata).toMatchObject({
+      memoryWriteDisabled: true
+    });
+    expect(notifyAdmitted).not.toHaveBeenCalled();
+    expect(store).not.toHaveBeenCalled();
+  });
+
   it("admits an explicit voice interaction through the durable user-turn and finalized-ingestion flow", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const published: RuntimeEvent[] = [];
@@ -77,9 +116,39 @@ describe("RuntimeOrchestrator", () => {
     const conversation = new InMemoryConversationRepository();
     const ledger = new InMemoryFinalizedIngestionRepository();
     const admissions: string[] = [];
+    const memory = createMem0RecordingMemory(async () => completeMemoryWrite());
+    const bindingEvents = new Map<string, MemoryEvent>();
+    const bindingReferences = new Map<string, string[]>();
+    memory.getMemoryProvider = () => ({
+      async retrieveRelevant() {
+        return { status: "empty", events: [], source: "test", limited: false };
+      },
+      async getEvent({ id }) {
+        return bindingEvents.get(id) ?? null;
+      },
+      async writeEvent(input) {
+        const id = `binding:${bindingEvents.size}`;
+        const event: MemoryEvent = {
+          ...input,
+          id,
+          source: "test",
+          sourceRecordId: id,
+          metadata: input.metadata ?? {}
+        };
+        bindingEvents.set(id, event);
+        return { status: "written", eventId: id, event };
+      }
+    });
     const runtime = new RuntimeOrchestrator({
       eventBus,
-      memory: createMem0RecordingMemory(async () => completeMemoryWrite()),
+      memory,
+      voicePersonaId: "alice",
+      voiceBindingReferences: {
+        load: (scope) => bindingReferences.get(scope) ?? [],
+        append: (scope, id) => {
+          bindingReferences.set(scope, [...(bindingReferences.get(scope) ?? []), id]);
+        }
+      },
       conversation,
       finalizedIngestion: new FinalizedIngestionService(ledger),
       memoryIngestionCoordinator: {
@@ -92,23 +161,23 @@ describe("RuntimeOrchestrator", () => {
       providers: createMockProviders()
     });
 
-    // Explicit push-to-talk: the interaction source constructs and admits the
-    // transcript event itself, exactly like the /v1/voice/message route. A
-    // finalized STT observation alone must never reach this path.
-    const transcriptEvent = createEvent(
-      "user.voice.transcript",
+    // Production voice scope requires a trusted binding and committed server observation.
+    expect(await runtime.bindVoiceProfileToPerson("voice-a", "user-a")).toMatchObject({
+      status: "STORED"
+    });
+    const observation = runtime.admitFinalizedSpeechObservation(
       {
-        sessionId: "voice-durable-session",
-        content: "I prefer concise replies.",
+        text: "I prefer concise replies.",
         language: "en",
         confidence: 1,
-        personaId: "alice",
-        subjectUserId: "user-a",
-        createdByUserId: "user-a",
-        speakerId: "speaker-a",
-        voiceProfileId: "voice-a"
+        voiceProfileMatch: { status: "MATCHED", voiceProfileId: "voice-a" }
       },
-      { traceId: "trace-voice-durable" }
+      { sessionId: "voice-durable-session" }
+    );
+    const transcriptEvent = runtime.commitSpeechTurn(
+      observation.observationId!,
+      "voice-durable-session",
+      observation.text
     );
     const reply = await runtime.handleUserMessage(transcriptEvent);
     await runtime.drainMemoryWrites();
@@ -144,7 +213,7 @@ describe("RuntimeOrchestrator", () => {
         language: "en",
         confidence: 1,
         createdByUserId: "user-a",
-        speakerId: "speaker-a",
+        speakerId: "user-a",
         voiceProfileId: "voice-a"
       }
     });

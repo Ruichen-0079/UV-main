@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+import { correctionFromP8CorrectionRecord, parseP8CorrectionRecord } from "@companion/p8";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -16,6 +18,52 @@ export async function registerLocalServiceRoutes(
   context: AppContext,
   config: ServerConfig
 ) {
+  app.post("/p8/corrections", async (request, reply) => {
+    if (!requireLocalDashboardAccess(config, request, reply)) return;
+    try {
+      const correction = correctionFromP8CorrectionRecord(parseP8CorrectionRecord(request.body));
+      const result = await context.runtime.appendP8Correction(correction);
+      return reply
+        .code(result.status === "STORED" || result.status === "ALREADY_STORED" ? 200 : 409)
+        .send(result);
+    } catch {
+      return reply.code(400).send({ error: "invalid_p8_correction" });
+    }
+  });
+  app.post("/voice-profiles/:id/person", async (request, reply) => {
+    if (!requireLocalDashboardAccess(config, request, reply)) return;
+    const parsed = z
+      .object({ personId: z.string().trim().min(1).max(160) })
+      .strict()
+      .safeParse(request.body);
+    const params = z.object({ id: z.string().min(1).max(160) }).safeParse(request.params);
+    if (!parsed.success || !params.success)
+      return reply.code(400).send({ error: "invalid_person_binding" });
+    const profiles = context.providers.getSTTProvider().voiceProfiles;
+    if (!profiles) return reply.code(409).send({ error: "voice_profiles_unavailable" });
+    try {
+      if (!(await profiles.list()).some((profile) => profile.voiceProfileId === params.data.id))
+        return reply.code(404).send({ error: "voice_profile_not_found" });
+      const result = await context.runtime.bindVoiceProfileToPerson(
+        params.data.id,
+        parsed.data.personId
+      );
+      return reply.code("status" in result && result.status === "STORED" ? 200 : 409).send(result);
+    } catch {
+      return reply.code(503).send({ error: "person_binding_unavailable" });
+    }
+  });
+  app.post("/capabilities/read-text/authorize", async (request, reply) => {
+    if (!requireLocalDashboardAccess(config, request, reply)) return;
+    const parsed = z
+      .object({ sessionId: z.string().min(1), path: z.string().trim().min(1).max(4096) })
+      .strict()
+      .safeParse(request.body);
+    if (!parsed.success || !isAbsolute(parsed.data.path))
+      return reply.code(400).send({ error: "invalid_read_text_authorization" });
+    context.runtime.authorizeReadText(parsed.data.sessionId, parsed.data.path);
+    return { status: "AUTHORIZED" };
+  });
   app.get("/local-services/status", async (request, reply) => {
     if (!requireLocalDashboardAccess(config, request, reply)) return;
     return localServicesStatus(context);

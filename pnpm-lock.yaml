@@ -66,6 +66,9 @@ importers:
       '@companion/memory':
         specifier: workspace:*
         version: link:../../packages/memory
+      '@companion/p8':
+        specifier: workspace:*
+        version: link:../../packages/p8
       '@companion/prompt-builder':
         specifier: workspace:*
         version: link:../../packages/prompt-builder
