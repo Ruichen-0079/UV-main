@@ -3,7 +3,7 @@
  * Spawned by Tauri (dev mode). Loopback HTTP control only + control-token auth.
  *
  * Usage:
- *   pnpm exec tsx scripts/yuvi-desktop-supervisor.mts --repo-root C:\Dev\UV-main
+ *   pnpm exec tsx scripts/yuvi-desktop-supervisor.mts --repo-root C:\Dev\YUVI
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";

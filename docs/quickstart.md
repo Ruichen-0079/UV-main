@@ -18,7 +18,7 @@ docker --version
 docker compose version
 ```
 
-On Windows PowerShell, use `pnpm.cmd` if `pnpm` is blocked by execution policy. The recommended Windows checkout path is `C:\Dev\UV-main`.
+On Windows PowerShell, use `pnpm.cmd` if `pnpm` is blocked by execution policy. The recommended Windows checkout path is `C:\Dev\YUVI`.
 
 ## 2. Environment Setup
 
