@@ -15,7 +15,7 @@ Linux and Bash scripts remain supported for WSL/Linux developers.
 The recommended checkout path is:
 
 ```powershell
-C:\Dev\UV-main
+C:\Dev\YUVI
 ```
 
 ## Environment Files
