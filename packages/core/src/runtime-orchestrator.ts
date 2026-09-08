@@ -1347,6 +1347,8 @@ export class RuntimeOrchestrator {
     }
   ): Promise<AgentReplyEvent | null> {
     this.beginExplicitUserActivity(options.controlAuthority ?? "LOCAL_EXPLICIT_CONTROLLER");
+    const memoryOptions = resolveTurnMemoryOptions(userEvent, options);
+    if (!memoryOptions.writeMemory) this.memoryWriteDisabledTurns.add(userEvent);
     await this.persistUserMessage(userEvent);
     await this.options.eventBus.publish(userEvent);
     await this.restoreDirectContext(
@@ -1354,7 +1356,6 @@ export class RuntimeOrchestrator {
       userEvent.id,
       userEvent.payload.content.length
     );
-    const memoryOptions = resolveMemoryOptions(options);
     const reply = await this.generateReply(userEvent, {
       voiceOutput: Boolean(options.voiceOutput),
       readMemory: memoryOptions.readMemory,
@@ -1449,6 +1450,8 @@ export class RuntimeOrchestrator {
         : Boolean(input.voiceOutput ?? options.voiceOutput);
 
       this.beginExplicitUserActivity(options.controlAuthority ?? "LOCAL_EXPLICIT_CONTROLLER");
+      if (!resolveTurnMemoryOptions(userEvent, options).writeMemory)
+        this.memoryWriteDisabledTurns.add(userEvent);
       await this.persistUserMessage(userEvent);
       await this.options.eventBus.publish(userEvent);
       await this.restoreDirectContext(
@@ -2479,11 +2482,7 @@ export class RuntimeOrchestrator {
     memoryOptions: ResolvedMemoryOptions;
   }> {
     const voiceOutput = Boolean(options.voiceOutput);
-    const memoryOptions = resolveMemoryOptions(
-      event.type === "user.voice.transcript" && !event.payload.subjectUserId
-        ? { ...options, readMemory: false, writeMemory: false }
-        : options
-    );
+    const memoryOptions = resolveTurnMemoryOptions(event, options);
     if (!memoryOptions.writeMemory) this.memoryWriteDisabledTurns.add(event);
     const currentAffect = detectCurrentAffect({
       text: event.payload.content,
@@ -4144,9 +4143,14 @@ export class RuntimeOrchestrator {
     }
 
     try {
-      await this.options.conversation.appendMessage(
-        conversationMessageFromEvent(userEvent, "user", "completed")
-      );
+      const message = conversationMessageFromEvent(userEvent, "user", "completed");
+      await this.options.conversation.appendMessage({
+        ...message,
+        metadata: {
+          ...message.metadata,
+          ...(this.memoryWriteDisabledTurns.has(userEvent) ? { memoryWriteDisabled: true } : {})
+        }
+      });
     } catch (error) {
       await this.publishPersistenceError(
         "user_message_save",
@@ -5066,6 +5070,17 @@ type ResolvedMemoryOptions = {
   readMemory: boolean;
   writeMemory: boolean;
 };
+
+function resolveTurnMemoryOptions(
+  event: RuntimeUserTurnEvent,
+  options: Parameters<typeof resolveMemoryOptions>[0]
+): ResolvedMemoryOptions {
+  return resolveMemoryOptions(
+    event.type === "user.voice.transcript" && !event.payload.subjectUserId
+      ? { ...options, readMemory: false, writeMemory: false }
+      : options
+  );
+}
 
 function resolveMemoryOptions(options: {
   useMemory?: boolean | undefined;

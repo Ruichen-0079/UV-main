@@ -69,6 +69,44 @@ function deferred<T>(): {
 }
 
 describe("RuntimeOrchestrator", () => {
+  it("keeps unresolved committed speech out of non-streaming finalized ingestion even when writes are requested", async () => {
+    const conversation = new InMemoryConversationRepository();
+    const ledger = new InMemoryFinalizedIngestionRepository();
+    const notifyAdmitted = vi.fn();
+    const store = vi.fn(async () => completeMemoryWrite());
+    const runtime = new RuntimeOrchestrator({
+      eventBus: new InMemoryEventBus({ development: false }),
+      memory: createMem0RecordingMemory(store),
+      conversation,
+      finalizedIngestion: new FinalizedIngestionService(ledger),
+      memoryIngestionCoordinator: { notifyAdmitted, wake() {} },
+      voicePersonaId: "alice",
+      promptBuilder: new PromptBuilder(),
+      providers: createMockProviders()
+    });
+    const observation = runtime.admitFinalizedSpeechObservation(
+      {
+        text: "Remember my private preference.",
+        voiceProfileMatch: { status: "NO_MATCH" }
+      },
+      { sessionId: "unresolved-write" }
+    );
+    const event = runtime.commitSpeechTurn(
+      observation.observationId!,
+      "unresolved-write",
+      observation.text
+    );
+    await runtime.handleUserMessage(event, { readMemory: true, writeMemory: true });
+    await runtime.sealAndDrainMemoryWrites();
+    const assistant = await conversation.getMessageById(`assistant:${event.id}`);
+    expect(assistant).toMatchObject({ subjectUserId: null, ingestionRequested: false });
+    expect((await conversation.getMessageById(event.id))?.metadata).toMatchObject({
+      memoryWriteDisabled: true
+    });
+    expect(notifyAdmitted).not.toHaveBeenCalled();
+    expect(store).not.toHaveBeenCalled();
+  });
+
   it("admits an explicit voice interaction through the durable user-turn and finalized-ingestion flow", async () => {
     const eventBus = new InMemoryEventBus({ development: false });
     const published: RuntimeEvent[] = [];

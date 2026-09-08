@@ -67,7 +67,8 @@ Hardware/model quality is not inferred from HTTP stubs. Existing provider/device
 The previous matrix was challenged against alternate transports, automatic wakeups, reload/restart, read-only preparation, and scoped episode persistence. Counterexamples found and corrected:
 
 - Proactive `NO_OP` preparation wrote L1 episodes. All prompt assembly now reconstructs without persisting; only admitted completed-turn persistence writes episodes.
-- Ordinary and streaming `writeMemory=false` turns could still write L1 and trigger Dream. Completion gates now honor the write flag, and persisted conversation metadata excludes those turns from later durable episode reconstruction after restart. Read-only L0/L1 narrative reconstruction remains available.
+- Non-streaming unresolved voice finalization reused the requested write flag after prompt preparation had disabled it. Turn-level memory admission now applies the same resolved speaker restriction before persistence and finalization.
+- Ordinary and streaming `writeMemory=false` turns could still write L1 and trigger Dream. Completion gates now honor the write flag, and persisted user and assistant metadata excludes those turns (including failed or silent turns) from later durable episode reconstruction after restart. Read-only L0/L1 narrative reconstruction remains available.
 - A shared session's whole history could be relabeled with its latest person's scope. Memory vNext filters source messages and stored episodes against the explicitly selected identity. Runtime supplies the canonical Memory scope to durable episodes and Dream.
 - Live proactive SSE subscribed to the replaced Runtime after settings reload. The route now subscribes through the stable AppContext forwarding subscription.
 - Automatic proactive wakeups omitted the configured person/persona. Startup and reload now pass that identity into scheduler admission and P8/Memory preparation.

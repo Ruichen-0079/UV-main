@@ -80,12 +80,22 @@ describe("Runtime Memory vNext vertical slice", () => {
     const recentEpisodeStore = new InMemoryRecentEpisodeStore();
     const upsert = vi.spyOn(recentEpisodeStore, "upsert");
     const rollover = vi.spyOn(recentEpisodeStore, "rollover");
+    let fail = false;
     const create = () =>
       new RuntimeOrchestrator({
         eventBus: new InMemoryEventBus({ development: false }),
         memory: createMemory(),
         promptBuilder: new PromptBuilder(),
-        providers: createProviders(),
+        providers: {
+          ...createProviders(),
+          getChatProvider: () => ({
+            ...createMockChatProvider("vnext-chat"),
+            async generateReply(input, options) {
+              if (fail) throw new Error("deliberate provider failure");
+              return createMockChatProvider("vnext-chat").generateReply(input, options);
+            }
+          })
+        },
         conversation,
         recentEpisodeStore
       });
@@ -100,6 +110,14 @@ describe("Runtime Memory vNext vertical slice", () => {
     )) {
       void event;
     }
+    fail = true;
+    await expect(
+      runtime.handleUserMessage(
+        { sessionId: "disabled", content: "private failed marker" },
+        { readMemory: true, writeMemory: false }
+      )
+    ).rejects.toThrow("deliberate provider failure");
+    fail = false;
     expect(upsert).not.toHaveBeenCalled();
     expect(rollover).not.toHaveBeenCalled();
     await runtime.sealAndDrainMemoryWrites();
