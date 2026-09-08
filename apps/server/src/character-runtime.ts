@@ -1,3 +1,4 @@
+import { compressHierarchicalContext, modelContextBudget } from "@companion/memory";
 import type { RuntimeCharacterPort, RuntimeVisualEvidence } from "@companion/core";
 import type { PromptBuildOutput, PromptSectionName } from "@companion/prompt-builder";
 import type {
@@ -7,7 +8,9 @@ import type {
 } from "@companion/character-abi";
 import {
   characterOutputLanguageInstruction,
-  createCharacterDecision
+  createCharacterDecision,
+  createCharacterProactiveProposal,
+  type CharacterProactiveProposal
 } from "@companion/character-abi";
 import {
   CHARACTER_ABI_2D_VERSION,
@@ -37,10 +40,67 @@ import {
   type ProviderCallOptions
 } from "@companion/providers";
 
-const CHARACTER_CONTEXT_BUDGET = Object.freeze({
-  maxSections: 8,
-  maxSemanticCharacters: 12_000
-});
+function characterContextBudget(input: CharacterTurnInput) {
+  const budget = modelContextBudget(input.contextWindow);
+  return {
+    maxSections: 8,
+    maxSemanticCharacters: Math.max(0, budget.maxInputCharacters - input.userMessage.length)
+  };
+}
+
+function budgetCharacterContext(
+  context: CharacterAbi2DContext,
+  input: CharacterTurnInput
+): CharacterAbi2DContext {
+  const budget = characterContextBudget(input);
+  const protectedKinds = new Set(["IDENTITY", "PERSONA", "RELATIONSHIP_CONTEXT"]);
+  let target = Math.max(0, budget.maxSemanticCharacters - 512);
+  let sections = context.sections;
+  for (;;) {
+    const compressed = compressHierarchicalContext({
+      sections: sections.map((section) => ({
+        name: section.kind,
+        content: "summary" in section ? (section.summary ?? "") : "",
+        stable: protectedKinds.has(section.kind)
+      })),
+      maxCharacters: target
+    });
+    const next = sections.map((section, index) => ({
+      ...section,
+      ...(!("summary" in section) || section.summary === undefined
+        ? {}
+        : {
+            summary: compressed.sections[index]!.content,
+            ...(section.summary !== compressed.sections[index]!.content && section.state === "KNOWN"
+              ? { state: "PARTIAL" as const }
+              : {})
+          })
+    }));
+    const nextContext = createCharacterAbi2DContext({ ...context, sections: next });
+    const request = createCharacterGenerationRequest(nextContext, input);
+    const rendered = createCharacterChatInput(request, input.userMessage, false, true);
+    const modelBudget = modelContextBudget(input.contextWindow);
+    const excess = Math.max(
+      JSON.stringify(next).length - budget.maxSemanticCharacters,
+      JSON.stringify(rendered.messages).length -
+        (modelBudget.workingTokens - modelBudget.outputTokens - 512)
+    );
+    if (excess <= 0) {
+      sections = next;
+      break;
+    }
+    // Never silently drop P8 or the current turn; reject only after optional context is exhausted.
+    if (JSON.stringify(next) === JSON.stringify(sections) && target === 0) {
+      throw characterFailure(
+        "Current user message and protected Character context exceed the model working budget."
+      );
+    }
+    sections = next;
+    const nextTarget = Math.max(0, compressed.metrics.afterCharacters - excess - 128);
+    target = nextTarget >= target ? 0 : nextTarget;
+  }
+  return createCharacterAbi2DContext({ ...context, sections });
+}
 const CHARACTER_RESPONSE_MAX_CHARACTERS = 8_000;
 const CHARACTER_RETRY_LIMIT = 1;
 const CHARACTER_NGRAM_CHARACTERS = 64;
@@ -51,7 +111,9 @@ const CHARACTER_GENERATION_INSTRUCTION = `You are YUVI's Character layer. Use th
 {"disposition":"SILENCE"}
 {"disposition":"TERMINATE"}
 {"disposition":"NEED_COGNITION","focus":"..."}
-NEED_COGNITION means only that stronger reasoning is needed. It does not select a provider, model, tool, capability, or Runtime action. Do not include any other fields.`;
+NEED_COGNITION means only that stronger reasoning is needed. It does not select a provider, model, tool, capability, or Runtime action. Do not include any other fields except the optional proactive proposal described below.`;
+
+const PROACTIVE_INSTRUCTION = `Every disposition may optionally include proactive: {"action":"KEEP"}, {"action":"CLEAR"}, {"action":"DEFER","horizon":"SHORT|NORMAL|LONG"}, or {"action":"SUPPRESS","scope":{"kind":"UNTIL","duration":"PT30M"}}. UNTIL may use an absolute ISO-8601 time instead of duration. Other scopes are {"kind":"UNTIL_ENGAGEMENT"} and {"kind":"UNTIL_EXPLICIT_RESUME"}. Interpret the user's request for quiet or resume here. KEEP preserves existing policy; CLEAR requests resumption; DEFER requests a bounded delay; SUPPRESS requests quiet with the stated scope. These are proposals: Runtime validates, authorizes and persists them. Never infer quiet countdowns from a mere silent reply. Omission means KEEP.`;
 
 const PRESENTATION_INSTRUCTION = `RESPOND may optionally include presentation with one semantic intent: neutral, soft-smile, attentive, thinking, amused, excited, or acknowledge-interrupt. Choose only when it fits the current expression; omit it otherwise. No device parameters or animation instructions.`;
 
@@ -64,6 +126,7 @@ type GeneratedCharacterProposal = Readonly<{
   output: ChatOutput;
   generation: AcceptedGeneration;
   visualEvidence?: RuntimeVisualEvidence;
+  proactive: CharacterProactiveProposal;
 }>;
 
 type CharacterTurnInput = Parameters<RuntimeCharacterPort["generate"]>[0];
@@ -82,17 +145,18 @@ export function createServerCharacterPort(): RuntimeCharacterPort {
  * explicitly directed YUVI input, so the transport-proven
  * `DIRECTED_TO_YUVI` constraint is projected here instead of asking Character
  * to infer addressing (Atom 06 input boundary). Ordinary reactive turns carry
- * no proactive-policy meaning, expressed as the explicit `KEEP` proposal.
+ * a model-authored proactive proposal, validated by the existing ABI.
  */
 async function toCharacterDecision(
   proposal: GeneratedCharacterProposal["generation"]["proposal"],
-  output: ChatOutput
+  output: ChatOutput,
+  proactive: CharacterProactiveProposal
 ): Promise<CharacterTurnResult> {
   return Object.freeze({
     decision: createCharacterDecision({
       addressing: "DIRECTED_TO_YUVI",
       reply: proposal,
-      proactive: { action: "KEEP" }
+      proactive
     }),
     providerMetadata: safeProviderMetadata(output)
   });
@@ -102,19 +166,26 @@ async function generateInitialCharacterTurn(
   input: CharacterTurnInput
 ): Promise<CharacterTurnResult> {
   assertNotCancelled(input.signal);
-  const baseContext = createServerCharacterContext(
-    input.prompt,
-    input.outputLanguage ?? "AUTO",
-    input.semanticSections
+  const baseContext = budgetCharacterContext(
+    createServerCharacterContext(
+      input.prompt,
+      input.outputLanguage ?? "AUTO",
+      input.semanticSections
+    ),
+    input
   );
-  const initialRequest = createCharacterGenerationRequest(baseContext);
+  const initialRequest = createCharacterGenerationRequest(baseContext, input);
   const initial = await generateAcceptedCharacterProposal(input, initialRequest, false);
 
   if (initial.generation.proposal.disposition === "NEED_COGNITION") {
     // Runtime owns Cognition execution and the bounded sequencing; Character
     // only hands over its own escalation semantics and stops.
     return Object.freeze({
-      ...(await toCharacterDecision(initial.generation.proposal, initial.output)),
+      ...(await toCharacterDecision(
+        initial.generation.proposal,
+        initial.output,
+        initial.proactive
+      )),
       cognitionHandoff: Object.freeze({
         request: createCharacterHarnessCognitionRequest({
           generation: initial.generation
@@ -127,31 +198,46 @@ async function generateInitialCharacterTurn(
       })
     });
   }
-  return toCharacterDecision(initial.generation.proposal, initial.output);
+  return toCharacterDecision(initial.generation.proposal, initial.output, initial.proactive);
 }
 
 async function generatePostCognitionCharacterTurn(
   input: CharacterReentryInput
 ): Promise<CharacterTurnResult> {
   assertNotCancelled(input.signal);
-  const baseContext = createServerCharacterContext(
-    input.prompt,
-    input.outputLanguage ?? "AUTO",
-    input.semanticSections
+  const baseContext = budgetCharacterContext(
+    createServerCharacterContext(
+      input.prompt,
+      input.outputLanguage ?? "AUTO",
+      input.semanticSections
+    ),
+    input
   );
   const postRequest = createServerPostCognitionCharacterRequest({
     roundTrip: input.cognitionRoundTrip,
     context: baseContext,
-    budget: CHARACTER_CONTEXT_BUDGET
+    budget: characterContextBudget(input)
   });
   if ("status" in postRequest) {
     throw characterFailure("Character Cognition result exceeded the Character context budget.");
   }
 
+  for (const section of baseContext.sections.filter((section) =>
+    ["IDENTITY", "PERSONA", "RELATIONSHIP_CONTEXT"].includes(section.kind)
+  )) {
+    if (
+      !postRequest.context.sections.some(
+        (retained) => JSON.stringify(retained) === JSON.stringify(section)
+      )
+    ) {
+      throw characterFailure("Cognition context cannot displace protected Character semantics.");
+    }
+  }
+
   // A repeated NEED_COGNITION here is returned faithfully; Runtime owns the
   // explicit bounded failure outcome for it.
   const final = await generateAcceptedCharacterProposal(input, postRequest, true);
-  return toCharacterDecision(final.generation.proposal, final.output);
+  return toCharacterDecision(final.generation.proposal, final.output, final.proactive);
 }
 
 async function generateAcceptedCharacterProposal(
@@ -182,6 +268,14 @@ async function generateAcceptedCharacterProposal(
         content: `Current-screen evidence for the same original turn:\n${JSON.stringify(visualEvidence)}`
       });
     }
+    const modelBudget = modelContextBudget(input.contextWindow);
+    chatInput.maxTokens = modelBudget.outputTokens;
+    if (
+      JSON.stringify(chatInput.messages).length >
+      modelBudget.workingTokens - modelBudget.outputTokens
+    ) {
+      throw characterFailure("Character request exceeds the model working budget.");
+    }
     const output = await input.generateChat(chatInput, providerCallOptions(input.signal));
     assertNotCancelled(input.signal);
     const decoded = decodeCharacterOutput(output.message.content);
@@ -201,7 +295,20 @@ async function generateAcceptedCharacterProposal(
       assertNotCancelled(input.signal);
       continue;
     }
-    const interpretation = interpretCharacterHarnessOutput(decoded);
+    let proactive: CharacterProactiveProposal;
+    let reply = decoded;
+    try {
+      if (decoded && typeof decoded === "object" && "proactive" in decoded) {
+        const { proactive: proposed, ...rest } = decoded;
+        proactive = createCharacterProactiveProposal(proposed);
+        reply = rest;
+      } else {
+        proactive = createCharacterProactiveProposal({ action: "KEEP" });
+      }
+    } catch {
+      throw characterFailure("Character returned an invalid proactive proposal.");
+    }
+    const interpretation = interpretCharacterHarnessOutput(reply);
     const generation: CharacterHarnessGenerationSupervision = superviseCharacterHarnessGeneration({
       interpretation,
       finishReason: output.finishReason,
@@ -221,6 +328,7 @@ async function generateAcceptedCharacterProposal(
         return Object.freeze({
           output,
           generation: repetition,
+          proactive,
           ...(visualEvidence ? { visualEvidence } : {})
         });
       }
@@ -299,10 +407,13 @@ function createServerCharacterContext(
   });
 }
 
-function createCharacterGenerationRequest(context: CharacterAbi2DContext): CharacterAdapterRequest {
+function createCharacterGenerationRequest(
+  context: CharacterAbi2DContext,
+  input: CharacterTurnInput
+): CharacterAdapterRequest {
   const assembly = assembleCharacterHarness2DContext({
     context,
-    budget: CHARACTER_CONTEXT_BUDGET
+    budget: characterContextBudget(input)
   });
   return createCharacterHarnessAdapterRequest({ assembly });
 }
@@ -330,7 +441,7 @@ function createCharacterChatInput(
     messages: [
       {
         role: "system",
-        content: `${instruction}\n${PRESENTATION_INSTRUCTION}\n${retryInstruction}\n\n${characterOutputLanguageInstruction(request.context.outputLanguage ?? "AUTO")}\n\nSemantic context:\n${JSON.stringify(transportContext)}`
+        content: `${instruction}\n${PRESENTATION_INSTRUCTION}\n${PROACTIVE_INSTRUCTION}\n${retryInstruction}\n\n${characterOutputLanguageInstruction(request.context.outputLanguage ?? "AUTO")}\n\nSemantic context:\n${JSON.stringify(transportContext)}`
       },
       {
         role: "user",

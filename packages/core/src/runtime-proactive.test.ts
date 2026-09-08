@@ -173,19 +173,14 @@ describe("RuntimeOrchestrator", () => {
     expect(continuationInputs).toHaveLength(1);
     const proactivePrompt = decisionInputs[0]?.prompt ?? "";
     expect(proactivePrompt).toContain("ProactiveInstruction");
-    expect(proactivePrompt).toContain("specific open conversational reason");
-    expect(proactivePrompt).toContain("remains meaningfully open or unresolved");
-    expect(proactivePrompt).toContain("adequately answered or closed");
-    expect(proactivePrompt).toContain("merely elaborate on or repeat a completed answer");
-    expect(proactivePrompt).toContain("generic greeting or check-in");
-    expect(proactivePrompt).toContain("When uncertain, choose NO_OP.");
-    expect(proactivePrompt).toContain("REQUEST_TEXT");
+    expect(proactivePrompt).toContain("normalized speak score from 0 to 1");
+    expect(proactivePrompt).toContain('Return exactly {"score": number}');
     expect(proactivePrompt).toContain("Output-language preference: EN");
     expect(continuationInputs[0]?.prompt).toContain(
       "final Character expression must be in English"
     );
     expect(proactivePrompt).not.toContain("<UserMessage>");
-    expect(continuationInputs[0]?.prompt).toContain("decision is already REQUEST_TEXT");
+    expect(continuationInputs[0]?.prompt).toContain("speak score has passed the Runtime threshold");
     expect(runtime.getLatestPromptPreview()).toMatchObject({
       turnOrigin: "assistant-initiated",
       proactiveInstruction: expect.any(String),

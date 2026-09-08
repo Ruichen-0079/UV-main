@@ -90,6 +90,8 @@ export type RuntimeOrchestratorOptions = {
    * boolean and fail-closes until a control intent arrives.
    */
   proactiveConsentEnabled?: boolean | undefined;
+  proactiveScoreThreshold?: number | undefined;
+  proactiveEvaluationIntervalMs?: number | undefined;
   /** Smallest durable snapshot for suppression / eligible_after across Runtime reconstruction. */
   proactiveStateStore?: RuntimeProactiveStateStore | undefined;
   /** Injected wake timer for the Runtime-owned proactive scheduler. */
@@ -154,6 +156,7 @@ export type RuntimeVisualEvidence = Readonly<{
 }>;
 
 export type RuntimeCharacterTurnInput = Readonly<{
+  contextWindow?: number | undefined;
   requestVisualEvidence?:
     | ((request: Readonly<{ need: string }>) => Promise<RuntimeVisualEvidence>)
     | undefined;

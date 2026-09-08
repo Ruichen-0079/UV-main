@@ -182,19 +182,28 @@ export async function assembleMemoryVNextContext(
           sections: [
             {
               name: "DirectContext",
-              content: input.directContextText || "No recent direct context available."
+              content: input.directContextText
             },
             { name: "RecentEpisodicMemory", content: recentEpisodicText },
             {
               name: "RelevantMemory",
+              content:
+                longTerm.status === "ok" || longTerm.status === "partial"
+                  ? longTerm.events.map((event) => trimSummary(event.content, 400)).join("\n")
+                  : ""
+            },
+            {
+              name: "AssociativeRecall",
               content: associative.items
                 .map((item) => `- [associated][${item.ageBand}] ${item.content}`)
                 .join("\n")
             }
           ],
           maxCharacters: input.maxPromptCharacters
-        }).metrics
+        })
       : undefined;
+  const directContextText = compression?.sections[0]?.content ?? input.directContextText;
+  recentEpisodicText = compression?.sections[1]?.content ?? recentEpisodicText;
 
   return {
     version: MEMORY_VNEXT_VERSION,
@@ -204,14 +213,17 @@ export async function assembleMemoryVNextContext(
     recentEpisodicText,
     associative,
     temporal,
-    ...(compression ? { compression } : {}),
+    ...(compression ? { compression: compression.metrics } : {}),
     characterProjection: projectCharacterFacing({
-      directContextText: input.directContextText,
+      directContextText,
       recentEpisodicText,
       promptEpisodes,
       associative,
       temporal,
-      longTerm
+      longTerm,
+      longTermText: compression?.sections[2]?.content,
+      associativeText: compression?.sections[3]?.content,
+      compressed: compression?.metrics.dropped ?? false
     })
   };
 }
@@ -264,12 +276,20 @@ function projectCharacterFacing(input: {
   associative: AssociativeRecallResult;
   temporal: ThinTemporalProjection;
   longTerm: MemoryRetrievalOutcome;
+  longTermText?: string | undefined;
+  associativeText?: string | undefined;
+  compressed?: boolean;
 }): MemoryVNextCharacterProjection {
   const recentConversation = input.directContextText.trim()
     ? {
         state:
-          input.directContextText.trim().length > 4000 ? ("PARTIAL" as const) : ("KNOWN" as const),
-        summary: trimSummary(input.directContextText, 4000),
+          input.compressed || input.directContextText.trim().length > 4000
+            ? ("PARTIAL" as const)
+            : ("KNOWN" as const),
+        summary: compressHierarchicalContext({
+          sections: [{ name: "RECENT_CONVERSATION", content: input.directContextText.trim() }],
+          maxCharacters: 4000
+        }).sections[0]!.content,
         provenanceReferences: ["direct-context"]
       }
     : { state: "EMPTY" as const };
@@ -279,15 +299,20 @@ function projectCharacterFacing(input: {
     input.promptEpisodes.length,
     input.associative.status
   );
-  if (memoryState === "KNOWN" && input.longTerm.limited) memoryState = "PARTIAL";
+  if (memoryState === "KNOWN" && (input.longTerm.limited || input.compressed))
+    memoryState = "PARTIAL";
   const admittedLongTerm =
     input.longTerm.status === "ok" || input.longTerm.status === "partial"
       ? input.longTerm.events
       : [];
   const memoryParts = [
-    ...admittedLongTerm.map((event) => event.content),
     input.promptEpisodes.length > 0 ? input.recentEpisodicText : null,
-    ...input.associative.items.map((item) => `[associated ${item.ageBand}] ${item.content}`)
+    input.longTermText ??
+      admittedLongTerm.map((event) => trimSummary(event.content, 400)).join("\n"),
+    input.associativeText ??
+      input.associative.items
+        .map((item) => `[associated ${item.ageBand}] ${item.content}`)
+        .join("\n")
   ].filter(Boolean);
   if (memoryParts.join("\n").length > 4000 && memoryState === "KNOWN") memoryState = "PARTIAL";
   const memoryEvidence =
@@ -313,7 +338,7 @@ function projectCharacterFacing(input: {
         : ("PARTIAL" as const);
   const temporalContext = {
     state: temporalState,
-    summary: trimSummary(input.temporal.promptText, 4000),
+    summary: trimSummary(input.temporal.promptText, 480),
     provenanceReferences: input.temporal.episodes.map((episode) => episode.episodeId).slice(0, 32)
   };
 

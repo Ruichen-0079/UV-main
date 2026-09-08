@@ -48,7 +48,7 @@ describe("runtime config", () => {
       logLevel: "debug"
     });
     expect(config.memory.repository).toBe("postgres");
-    expect(config.memory.extractor).toBe("llm");
+    expect(config.memory.extractor).toBe("rule-based");
     expect(config.memory.backend).toBe("legacy");
     expect(config.memory.mem0BaseUrl).toBe("http://127.0.0.1:6131");
     expect(config.memory.databaseUrl).toBe("postgres://example");
@@ -59,7 +59,7 @@ describe("runtime config", () => {
     const config = parseRuntimeConfig({});
 
     expect(config.memory.repository).toBe("in-memory");
-    expect(config.memory.extractor).toBe("llm");
+    expect(config.memory.extractor).toBe("rule-based");
     expect(config.server.port).toBe(6121);
     expect(config.providers.defaults).toEqual({
       chat: "deepseek",
@@ -201,7 +201,7 @@ describe("runtime config", () => {
   });
 
   it("parses optional memory extractor mode", () => {
-    expect(parseRuntimeConfig({}).memory.extractor).toBe("llm");
+    expect(parseRuntimeConfig({}).memory.extractor).toBe("rule-based");
     expect(parseRuntimeConfig({ MEMORY_EXTRACTOR: "rule-based" }).memory.extractor).toBe(
       "rule-based"
     );

@@ -316,8 +316,8 @@ describe("Memory vNext adversarial hardening", () => {
     expect(assembly.temporal.gapAcknowledged).toBe(true);
   });
 
-  it("classifies structured compression as a primitive that is not runtime-active", () => {
-    expect(CONTEXT_COMPRESSION_RUNTIME_STATUS).toBe("IMPLEMENTED_PRIMITIVE_NOT_RUNTIME_ACTIVE");
+  it("marks deterministic compression as active in Runtime", () => {
+    expect(CONTEXT_COMPRESSION_RUNTIME_STATUS).toBe("RUNTIME_ACTIVE");
   });
 
   it("does not enqueue idle Dream unless idleMs is explicitly supplied", async () => {

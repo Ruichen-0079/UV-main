@@ -575,3 +575,42 @@ it.each(["ok", "partial", "empty", "unavailable", "error"] as const)(
     expect(assembly.characterProjection.temporalContext.summary).toContain("2026");
   }
 );
+
+it("uses compressed content in the live Character projection while folding older messages into L1", async () => {
+  const directContextText = "recent conversational context. ".repeat(120);
+  const input = {
+    now,
+    sessionId: "session-train",
+    queryText: "Orchid",
+    directContextText,
+    messages: [
+      message("older-user", "user", "The project is Orchid.", "2026-08-31T09:00:00.000Z"),
+      message("older-assistant", "assistant", "We will plan Orchid.", "2026-08-31T09:00:01.000Z")
+    ]
+  };
+  const full = await assembleMemoryVNextContext(input);
+  const compressed = await assembleMemoryVNextContext({ ...input, maxPromptCharacters: 800 });
+  expect(compressed.compression?.dropped).toBe(true);
+  expect(compressed.episodes.length).toBeGreaterThan(0);
+  expect(compressed.characterProjection.recentConversation.summary!.length).toBeLessThan(
+    full.characterProjection.recentConversation.summary!.length
+  );
+  expect(compressed.characterProjection.memoryEvidence.summary).toContain("Orchid");
+  expect(compressed.characterProjection.recentConversation.state).toBe("PARTIAL");
+});
+
+it("retains the newest L0 tail when long multiline history exceeds the ABI section cap", async () => {
+  const directContextText =
+    Array.from({ length: 8 }, (_, index) => `turn ${index}: ${"older detail ".repeat(300)}`).join(
+      "\n"
+    ) + "\nlatest-user-intent";
+  const result = await assembleMemoryVNextContext({
+    now,
+    queryText: "latest",
+    directContextText,
+    messages: [],
+    maxPromptCharacters: 10240
+  });
+  expect(result.characterProjection.recentConversation.summary!.length).toBeLessThanOrEqual(4000);
+  expect(result.characterProjection.recentConversation.summary).toContain("latest-user-intent");
+});

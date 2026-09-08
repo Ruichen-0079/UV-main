@@ -292,7 +292,10 @@ export class PromptBuilder {
 
     while (sectionsToText(result).length > maxCharacters) {
       const candidate = [...result]
-        .filter((section) => !section.stable && section.content.length > 120)
+        .filter(
+          (section) =>
+            !section.stable && section.name !== "UserMessage" && section.content.length > 120
+        )
         .sort((left, right) => left.priority - right.priority)[0];
 
       if (!candidate) {

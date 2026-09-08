@@ -38,6 +38,12 @@ export async function registerHealthRoutes(
 
     return {
       ok,
+      conversationalReadiness:
+        chatCapability.readiness !== "ready"
+          ? "NOT_CONFIGURED"
+          : chatCapability.operational
+            ? "READY"
+            : "UNAVAILABLE",
       service: "ai-companion-runtime",
       runtimeMode: config.runtimeMode,
       uptime: {

@@ -1,6 +1,5 @@
 export const CONTEXT_COMPRESSION_VERSION = "memory-vnext-compression.v1" as const;
-export const CONTEXT_COMPRESSION_RUNTIME_STATUS =
-  "IMPLEMENTED_PRIMITIVE_NOT_RUNTIME_ACTIVE" as const;
+export const CONTEXT_COMPRESSION_RUNTIME_STATUS = "RUNTIME_ACTIVE" as const;
 
 export const ProtectedPromptSectionNames = [
   "SystemIdentity",
@@ -62,13 +61,13 @@ export function compressHierarchicalContext(
   const compressedSectionNames: string[] = [];
 
   while (totalCharacters(working) > input.maxCharacters) {
-    const candidate = [...working]
+    const choices = [...working]
       .filter((section) => isCompressible(section, protectedNames))
-      .sort((left, right) => compressiblePriority(left) - compressiblePriority(right))[0];
-    if (!candidate) break;
-
-    const next = compressSection(candidate);
-    if (next === candidate.content) break;
+      .sort((left, right) => compressiblePriority(left) - compressiblePriority(right))
+      .map((candidate) => ({ candidate, next: compressSection(candidate) }));
+    const choice = choices.find(({ candidate, next }) => next.length < candidate.content.length);
+    if (!choice) break;
+    const { candidate, next } = choice;
     candidate.content = next;
     if (!compressedSectionNames.includes(candidate.name))
       compressedSectionNames.push(candidate.name);
@@ -113,23 +112,38 @@ function isCompressible(section: HierarchicalContextSection, protectedNames: Set
 }
 
 function compressiblePriority(section: HierarchicalContextSection): number {
-  if (section.name === "DirectContext") return 10;
+  if (section.name === "AssociativeRecall" || section.name === "TEMPORAL_CONTEXT") return 0;
+  if (section.name === "DirectContext" || section.name === "RECENT_CONVERSATION") return 40;
   if (section.name === "RecentEpisodicMemory") return 20;
-  if (section.name === "RelevantMemory") return 30;
+  if (section.name === "RelevantMemory" || section.name === "MEMORY_EVIDENCE") return 10;
   if (section.name === "CurrentSituation") return 40;
   return 50;
 }
 
 function compressSection(section: HierarchicalContextSection): string {
   const lines = section.content.split(/\r?\n/u).filter((line) => line.trim().length > 0);
-  if (lines.length > 3) {
-    const kept = [...lines.slice(0, 1), ...lines.slice(-2)];
-    const omitted = lines.length - kept.length;
-    return [...kept, `(${omitted} older ${section.name} lines compressed.)`].join("\n");
-  }
   const target = Math.max(160, Math.floor(section.content.length * 0.72));
-  if (section.content.length <= target) return section.content;
-  return `${section.content.slice(0, target - 3).trimEnd()}...`;
+  let next: string;
+  if (lines.length > 3) {
+    next = [
+      ...lines.slice(0, 1),
+      `(${lines.length - 3} older ${section.name} lines compressed.)`,
+      ...lines.slice(-2)
+    ].join("\n");
+  } else {
+    next = section.content;
+  }
+  if (next.length > target) {
+    const recent = section.name === "DirectContext" || section.name === "RECENT_CONVERSATION";
+    next = recent
+      ? `...${next.slice(-(target - 3)).trimStart()}`
+      : `${next.slice(0, target - 3).trimEnd()}...`;
+  }
+  const markers = [
+    ...new Set(section.content.match(new RegExp(EPISTEMIC_MARKER.source, "gi")) ?? [])
+  ];
+  const missing = markers.filter((marker) => !next.toLowerCase().includes(marker.toLowerCase()));
+  return missing.length ? `${next}\n[${missing.join("; ")}]` : next;
 }
 
 function preservesEpistemicMarkers(original: string, current: string): boolean {
@@ -145,4 +159,25 @@ function totalCharacters(sections: readonly HierarchicalContextSection[]): numbe
 
 function estimateTokens(characters: number): number {
   return Math.ceil(characters / 4);
+}
+
+/** Conservative Unicode character accounting (one character per token), not chars/4.
+ * Normal work uses at most three quarters of the window and caps at 24K; the rest stays free.
+ * Transport/instructions and output each have explicit reserves.
+ */
+export function modelContextBudget(contextWindow?: number) {
+  const windowTokens =
+    contextWindow !== undefined && Number.isSafeInteger(contextWindow) && contextWindow >= 1024
+      ? contextWindow
+      : 16_384;
+  const workingTokens = Math.min(24_576, Math.floor(windowTokens * 0.75));
+  const outputTokens = Math.min(2048, Math.floor(windowTokens / 8));
+  const safetyTokens = Math.min(2048, Math.floor(windowTokens / 8));
+  return {
+    windowTokens,
+    workingTokens,
+    outputTokens,
+    safetyTokens,
+    maxInputCharacters: Math.max(0, workingTokens - outputTokens - safetyTokens)
+  };
 }

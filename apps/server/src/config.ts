@@ -123,10 +123,10 @@ function parseEventBus(value: string | undefined): "in-memory" | "nats" {
 }
 
 function parseMemoryExtractor(value: string | undefined): "rule-based" | "llm" {
-  if (!value || value === "llm") {
+  if (value === "llm") {
     return "llm";
   }
-  if (value === "rule-based") {
+  if (!value || value === "rule-based") {
     return "rule-based";
   }
 
