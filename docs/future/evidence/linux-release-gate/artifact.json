@@ -1,0 +1,8 @@
+{
+  "artifact_name": "yuvi-linux-daily-checkout-7f997044d217.tar.zst",
+  "sha256": "ce59be28703bd9ff1030e0e1297394e13e51fc5c44f60d8fd1a8e21ceb9c9d9a",
+  "size_bytes": 4638709,
+  "source_sha": "7f997044d2178b93adf06929aeeaad64053bff71",
+  "tauri_linux_native_installer": "NOT_APPLICABLE",
+  "campaign_path_hits": 0
+}

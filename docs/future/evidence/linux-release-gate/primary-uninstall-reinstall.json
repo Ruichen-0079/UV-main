@@ -1,0 +1,7 @@
+{
+  "uninstall": "PASS",
+  "config_preserved": true,
+  "postgres_preserved": true,
+  "ollama_preserved": true,
+  "reinstall": "PASS"
+}

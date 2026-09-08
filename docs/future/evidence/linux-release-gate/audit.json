@@ -1,0 +1,10 @@
+{
+  "gate": "linux-release-gate",
+  "authority_main_sha": "7f997044d2178b93adf06929aeeaad64053bff71",
+  "stable_install_root": "/home/ruichen/.local/share/yuvi/release-checkout",
+  "runtime_env_dir": "/home/ruichen/.config/yuvi-daily",
+  "tauri_linux_native_installer": "NOT_APPLICABLE",
+  "phase2_units_rewritten_to_stable": true,
+  "phase3_campaign_h_cleaned": true,
+  "captured_at": "2026-09-08T14:33:59.613266+08:00"
+}

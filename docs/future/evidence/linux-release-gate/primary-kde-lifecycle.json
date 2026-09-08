@@ -1,0 +1,10 @@
+{
+  "lifecycle_stop_start": "PASS",
+  "tts_warm": {
+    "http": 200,
+    "bytes": 198764,
+    "latency_s": 3.045
+  },
+  "zero_campaign": true,
+  "hibernate_idle_seconds": 180
+}

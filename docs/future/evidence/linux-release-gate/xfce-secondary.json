@@ -1,0 +1,6 @@
+{
+  "environment": "SECONDARY_XFCE_CLOUD",
+  "artifact_install": "PASS",
+  "systemd_daily": "ENVIRONMENT_LIMITATION",
+  "TTS_GPU": "ENVIRONMENT_LIMITATION"
+}

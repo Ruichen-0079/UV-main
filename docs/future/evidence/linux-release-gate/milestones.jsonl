@@ -1,0 +1,7 @@
+{"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "phase1_audit_written_phase2_3_verified", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "stable root active; zero campaign in units/env"}
+{"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "phase4_artifact_built", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "tarball sha256 ce59be28… size 4638709"}
+{"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "primary_lifecycle_tts_warm_pass", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "stop/start PASS; TTS warm OK"}
+{"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "primary_accept_linux_pass", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "accept:linux exit 0"}
+{"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "primary_uninstall_reinstall_pass", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "uninstall/reinstall PASS"}
+{"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "xfce_secondary_artifact_gates", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "tarball extract; systemd/GPU env limitation"}
+{"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "closure_doc_written", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "linux-release-gate-closure.md ends LINUX_RELEASE_GATE_CLOSED"}
