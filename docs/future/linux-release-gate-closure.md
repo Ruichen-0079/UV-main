@@ -55,6 +55,23 @@ Active units and env contain zero campaign path refs.
 
 docs/future/evidence/linux-release-gate/ (audit, artifact, primary results, xfce-secondary, milestones.jsonl)
 
+## Local model / private adapter boundary
+
+| Capability | API/external alternative | Local payload bundled? | Required for release? | Missing behavior |
+| --- | --- | --- | --- | --- |
+| Chat / Reasoning | openai-compatible remotes | No | No | Use remote chain |
+| Runtime EmbeddingProvider | openai-compatible, nvidia | No | No | Use remote chain |
+| Mem0 Ollama embedding | None claimed as drop-in | No | No (EXTERNAL_PREREQUISITE) | Mem0 degrades / search fail-closed |
+| Local STT ASR + speaker/diarization/VAD | DashScope STT (ASR) | No (manifest IDs only) | No | Local unhealthy; remote STT if configured |
+| dots.tts-soar / Rei TTS | xAI TTS | No | No (PRIVATE_MACHINE_ADAPTER) | Local TTS absent; remote TTS if configured |
+| Local Vision | xAI, nvidia | No | No | Truthful unavailable |
+| Live2D Core + character assets | n/a | Framework yes; Core/assets no | No (EXTERNAL_PREREQUISITE) | Setup failure without Core/assets |
+| Generic provider interfaces | built-in remotes | Code only | Yes | N/A |
+
+Artifact scan: private machine model/assets bundled=0; private venvs=0; private speaker/voice data=0; licensed Cubism Core=0. Historical campaign evidence docs may mention absolute paths already on main (not weights).
+
+See `docs/future/evidence/linux-release-gate/local-model-boundary-audit.json`.
+
 ## Final statement
 
 LINUX_RELEASE_GATE_CLOSED

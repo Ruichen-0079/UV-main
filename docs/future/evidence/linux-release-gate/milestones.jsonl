@@ -5,3 +5,4 @@
 {"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "primary_uninstall_reinstall_pass", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "uninstall/reinstall PASS"}
 {"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "xfce_secondary_artifact_gates", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "tarball extract; systemd/GPU env limitation"}
 {"ts": "2026-09-08T14:33:59.613266+08:00", "milestone": "closure_doc_written", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "linux-release-gate-closure.md ends LINUX_RELEASE_GATE_CLOSED"}
+{"ts": "2026-09-08T14:43:13.058971+08:00", "milestone": "local_model_boundary_audit_pass", "sha": "7f997044d2178b93adf06929aeeaad64053bff71", "evidence": "artifact private weights/venvs/symlinks=0; dots PRIVATE_MACHINE_ADAPTER; STT weights external; Mem0 Ollama EXTERNAL_PREREQUISITE"}
