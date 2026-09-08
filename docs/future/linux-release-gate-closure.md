@@ -1,6 +1,6 @@
 # Linux Release Gate Closure
 
-Authority SHA (packaged closure): `5064c29fa85da959b6a5b29a1655bfdadb2a6a3d`.
+Authority SHA (packaged closure): `2bcee41ac731729a7ccd514016f979f81e9b3747`.
 
 Campaigns A-I: CLOSED. This gate does not reopen Campaign I and does not start Windows/macOS/perf work.
 
@@ -20,15 +20,16 @@ Supported Linux daily path is the **packaged** install (`yuvi-linux-daily-packag
 2. Source-checkout units using source-dev runners to packaged CJS/static (`2d8a8e4`, `5064c29`)
 3. Premature closure docs that claimed checkout tar was final rewritten here
 4. Packaged Node initially host-linked replaced with official nodejs.org v24.20.0 linux-x64 binary inside the install root / closure artifact
+5. Public Linux packaging no longer copies the private dots.tts-soar service implementation (`2bcee41`)
 
 ## Closure artifact
 
-- Name: `yuvi-linux-daily-packaged-5064c29fa85d.tar.zst`
-- SHA-256: `83ea6a480917024a6cd6858193a9b47dba4faa27682f31f7225f1219a5d7dc1f`
-- Size: `33556729` bytes
-- Kind: `yuvi-linux-daily-packaged` @ `5064c29`
+- Name: `yuvi-linux-daily-packaged-2bcee41.tar.zst`
+- SHA-256: `a1d645a7972545b95884c45d73644936f200e2eeb10655b3c81c635035653b27`
+- Size: `42850242` bytes
+- Kind: `yuvi-linux-daily-packaged` @ `2bcee41`
 - Root paths: `linux-install/supervisor/yuvi-desktop-supervisor.cjs`, `linux-install/runtime/yuvi-runtime-server.mjs`, `linux-install/runtime/node`, `linux-install/web/static-server.mjs`, `linux-install/web/dist`, `linux-install/install-linux-daily.mjs`
-- Audit: private home model paths=0, campaign paths=0, credentials=0, private weights/venvs=0, symlinks=0
+- Audit: private home model paths=0, campaign/private path refs=0, credentials=0, private weights/venvs/Rei assets=0, dots private service implementation bundled = 0, symlinks=0
 
 ## Source-checkout isolation
 
@@ -65,6 +66,7 @@ Still valid (see `docs/future/evidence/linux-release-gate/local-model-boundary-a
 - Mem0 Ollama embedding: EXTERNAL_PREREQUISITE
 - Local STT weights: external under XDG share; not in artifact
 - dots.tts-soar / Rei: PRIVATE_MACHINE_ADAPTER (external bakeoff venv); not bundled
+- Generic `TTSProvider` / `LOCAL_TTS_BASE_URL` support remains in the packaged Runtime; the private service implementation is external
 - Live2D Core/assets: EXTERNAL_PREREQUISITE
 
 ## Evidence
