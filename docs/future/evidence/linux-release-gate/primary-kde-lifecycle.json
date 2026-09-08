@@ -1,10 +1,12 @@
 {
-  "lifecycle_stop_start": "PASS",
-  "tts_warm": {
-    "http": 200,
-    "bytes": 198764,
-    "latency_s": 3.045
-  },
-  "zero_campaign": true,
-  "hibernate_idle_seconds": 180
+  "lifecycle_stop_start_repeated_restart": "PASS",
+  "source_isolation": "PASS",
+  "official_nodejs_binary": true,
+  "node_version": "24.20.0",
+  "tts_warm": {"http": 200, "bytes": 247724, "latency_s": 17.866},
+  "tts_hibernate": {"state": "hibernated", "idle_seconds": 180},
+  "tts_resume": {"http": 200, "bytes": 263084, "latency_s": 17.361},
+  "dots_bundled": false,
+  "web_http": 200,
+  "runtime": "healthy"
 }

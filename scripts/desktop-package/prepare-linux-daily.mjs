@@ -6,10 +6,12 @@ import { execFileSync } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { REPO_ROOT, NODE_VERSION, MEMORY_MIGRATIONS_DIR } from "./constants.mjs";
+import { REPO_ROOT, MEMORY_MIGRATIONS_DIR } from "./constants.mjs";
 import { bundleSupervisorCjs } from "./build-supervisor.mjs";
 import { bundleRuntimeServer } from "./build-runtime.mjs";
 import { assertFile, assertDir, ensureDir, writeJson } from "./paths.mjs";
+/** Linux packaged Node (official nodejs.org linux-x64). Independent of Windows pkg pin. */
+export const NODE_VERSION = "24.20.0";
 export const LINUX_TRIPLE = "linux-x64";
 export const LINUX_BUILD_ROOT = path.join(REPO_ROOT, "build", "desktop", LINUX_TRIPLE);
 const NODE_ARCHIVE = `node-v${NODE_VERSION}-linux-x64.tar.gz`;
