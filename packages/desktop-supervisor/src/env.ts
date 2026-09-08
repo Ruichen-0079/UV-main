@@ -43,6 +43,24 @@ function readEnvFile(filePath: string): Record<string, string> {
   return out;
 }
 
+/**
+ * Load user runtime env from an absolute config directory (Linux daily / packaged).
+ * Never pass the install resource root here — only YUVI_RUNTIME_ENV_DIR.
+ * Precedence: .env < process.env < .env.local (same as development).
+ */
+export function loadYuviRuntimeEnvDir(envDir: string): Record<string, string> {
+  if (!path.isAbsolute(envDir)) {
+    throw new Error("YUVI_RUNTIME_ENV_DIR must be an absolute path");
+  }
+  const result: Record<string, string> = {};
+  Object.assign(result, readEnvFile(path.join(envDir, ".env")));
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") result[key] = value;
+  }
+  Object.assign(result, readEnvFile(path.join(envDir, ".env.local")));
+  return result;
+}
+
 export function envFlag(env: Record<string, string>, key: string, defaultValue: boolean): boolean {
   const raw = env[key];
   if (raw === undefined || raw.trim() === "") return defaultValue;

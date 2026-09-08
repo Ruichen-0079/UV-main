@@ -1,0 +1,17 @@
+{
+  "environment": "SECONDARY_XFCE_CLOUD",
+  "captured_at": "2026-09-08T16:22:00+08:00",
+  "artifact": "yuvi-linux-daily-packaged-5064c29fa85d.tar.zst",
+  "sha256": "83ea6a480917024a6cd6858193a9b47dba4faa27682f31f7225f1219a5d7dc1f",
+  "artifact_extract_no_git": "PASS",
+  "bundled_node_exec": "PASS_v24.20.0_official",
+  "static_web_http_200": "PASS",
+  "xdg_unit_files_written": "PASS",
+  "desktop_entry_written": "PASS",
+  "supervisor_listen_external_sidecars": "PASS",
+  "systemd_daily_enable": "ENVIRONMENT_LIMITATION_no_systemctl",
+  "TTS_GPU": "ENVIRONMENT_LIMITATION_no_nvidia",
+  "full_runtime_sidecars": "ENVIRONMENT_LIMITATION",
+  "mic": "NOT_APPLICABLE",
+  "KDE_Spectacle": "NOT_APPLICABLE"
+}

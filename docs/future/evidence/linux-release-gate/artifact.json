@@ -1,0 +1,27 @@
+{
+  "artifact_name": "yuvi-linux-daily-packaged-5064c29fa85d.tar.zst",
+  "sha256": "83ea6a480917024a6cd6858193a9b47dba4faa27682f31f7225f1219a5d7dc1f",
+  "size_bytes": 33556729,
+  "checkout_sha": "5064c29fa85da959b6a5b29a1655bfdadb2a6a3d",
+  "kind": "yuvi-linux-daily-packaged",
+  "node_version": "24.20.0",
+  "node_source": "nodejs.org official linux-x64",
+  "root_paths": {
+    "install_root": "linux-install/",
+    "supervisor": "linux-install/supervisor/yuvi-desktop-supervisor.cjs",
+    "runtime": "linux-install/runtime/yuvi-runtime-server.mjs",
+    "bundled_node": "linux-install/runtime/node",
+    "web_static_server": "linux-install/web/static-server.mjs",
+    "web_dist": "linux-install/web/dist",
+    "installer": "linux-install/install-linux-daily.mjs",
+    "manifest": "linux-install/install-manifest.json"
+  },
+  "audit": {
+    "private_home_ruichen_model_paths": 0,
+    "yuvi_campaign_paths": 0,
+    "credentials_files": 0,
+    "private_weights_venvs_rei_dots": 0,
+    "symlinks": 0
+  },
+  "supersedes": "yuvi-linux-daily-checkout-7f997044d217.tar.zst is NOT the closure artifact"
+}

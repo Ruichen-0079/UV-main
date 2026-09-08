@@ -54,7 +54,7 @@ export {
   resolveLocalSttManifestExecutable,
   resolveLocalSttManifestPath
 } from "./local-stt-manifest.js";
-export { loadYuviEnvFiles, envFlag, envString } from "./env.js";
+export { loadYuviEnvFiles, loadYuviRuntimeEnvDir, envFlag, envString } from "./env.js";
 export {
   probeHttpHealth,
   probeTcp,
