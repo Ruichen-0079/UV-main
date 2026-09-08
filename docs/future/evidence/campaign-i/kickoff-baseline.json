@@ -1,0 +1,63 @@
+{
+  "campaign": "I",
+  "atom": "I-1",
+  "captured_at": "2026-09-08T12:58:11.403734+08:00",
+  "timezone": "Asia/Shanghai",
+  "git": {
+    "branch": "campaign-i-baseline-tts-hibernate",
+    "sha": "41ad83449353706675f2a72aaf494728e9735e47",
+    "repo": "Ruichen-0079/UV-main"
+  },
+  "dots_tts_process_attributed": [
+    {
+      "pid": 496971,
+      "process_name_sanitized": "python (dots-tts server)",
+      "cmdline_sanitized": "python services/dots-tts/server.py",
+      "vram_mib": 6138,
+      "rss_mib": 1972.5
+    }
+  ],
+  "health_127_0_0_1_9881": {
+    "service": "yuvi-dots-tts",
+    "state": "ready",
+    "model_loaded": true,
+    "voice": "rei",
+    "busy": false,
+    "cancellation": "discard-active-result"
+  },
+  "host_contamination_note": "System-wide idle is contaminated: desktop compositor, game (Arknights Endfield), and streaming processes hold additional VRAM. Prefer process-attributed TTS metrics. Kickoff TTS idle/ready observed ~6138 MiB VRAM (nvidia-smi compute-apps) and ~3.7 GiB RSS.",
+  "other_gpu_residents_sanitized": [
+    {
+      "class": "desktop-compositor",
+      "vram_mib": 12
+    },
+    {
+      "class": "desktop-compositor",
+      "vram_mib": 850
+    },
+    {
+      "class": "streaming",
+      "vram_mib": 196
+    },
+    {
+      "class": "other",
+      "vram_mib": 6138
+    },
+    {
+      "class": "game",
+      "vram_mib": 119
+    },
+    {
+      "class": "game",
+      "vram_mib": 7071
+    },
+    {
+      "class": "game",
+      "vram_mib": 58
+    }
+  ],
+  "notes": [
+    "Live process is from an adjacent bakeoff worktree path; this snapshot does not kill it.",
+    "Campaign I implementation lands hibernation in yuvi-campaign-i; live unload measurement deferred unless a temp-port acceptance is run."
+  ]
+}
