@@ -46,7 +46,6 @@ export async function prepareLinuxDailyPackage() {
   copyTreeFiltered(webDistSrc, path.join(webDir, "dist"), new Set());
   fs.copyFileSync(path.join(REPO_ROOT, "scripts", "desktop-package", "linux-static-web-server.mjs"), path.join(webDir, "static-server.mjs"));
   const skip = new Set([".venv", "node_modules", "__pycache__", ".pytest_cache", "hf-cache", "models", "packaging", "tmp"]);
-  copyTreeFiltered(path.join(REPO_ROOT, "services", "dots-tts"), path.join(out, "services", "dots-tts"), skip);
   copyTreeFiltered(path.join(REPO_ROOT, "services", "local-stt"), path.join(out, "services", "local-stt"), skip);
   copyTreeFiltered(path.join(REPO_ROOT, "services", "memory-mem0"), path.join(out, "services", "memory-mem0"), skip);
   stripWeightFiles(path.join(out, "services"));
