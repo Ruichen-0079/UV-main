@@ -44,7 +44,7 @@ describe("proactive OpenAI-compatible capabilities", () => {
     const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
       jsonResponse({
         model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        choices: [{ finish_reason: "stop", message: { content: "REQUEST_TEXT" } }],
+        choices: [{ finish_reason: "stop", message: { content: '{"score":0.9}' } }],
         usage: {
           prompt_tokens: 321,
           completion_tokens: 3,
@@ -57,7 +57,7 @@ describe("proactive OpenAI-compatible capabilities", () => {
     const provider = createProviderRegistryFromEnv(baseEnv).getProactiveDecisionProvider();
 
     await expect(provider.decide({ prompt: "frozen semantic prompt" })).resolves.toMatchObject({
-      decision: "REQUEST_TEXT",
+      score: 0.9,
       model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
       tokenUsage: { inputTokens: 321, outputTokens: 3, totalTokens: 324, cachedInputTokens: 280 }
     });
@@ -69,7 +69,7 @@ describe("proactive OpenAI-compatible capabilities", () => {
     expect(body).toMatchObject({
       model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
       temperature: 0,
-      max_tokens: 8,
+      max_tokens: 32,
       stop: ["\n"],
       stream: false,
       messages: [
@@ -77,18 +77,26 @@ describe("proactive OpenAI-compatible capabilities", () => {
         {
           role: "user",
           content:
-            "Return the proactive decision now. Output exactly one label and nothing else: NO_OP or REQUEST_TEXT."
+            'Return exactly one JSON object: {"score": number}. Score must be finite and normalized from 0 to 1. No prose.'
         }
       ]
     });
   });
 
-  it("fails closed for a non-exact proactive decision", async () => {
+  it.each([
+    "REQUEST_TEXT because open",
+    "NO_OP",
+    '{"score":-0.1}',
+    '{"score":1.1}',
+    '{"score":"0.8"}',
+    '{"score":null}',
+    '{"score":0.8,"text":"speak"}'
+  ])("fails closed for invalid speak score %s", async (content) => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
         jsonResponse({
-          choices: [{ finish_reason: "stop", message: { content: "REQUEST_TEXT because open" } }]
+          choices: [{ finish_reason: "stop", message: { content } }]
         })
       )
     );

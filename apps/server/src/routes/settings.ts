@@ -265,7 +265,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
       memoryExtractor,
       activeMemoryExtractor: context.memory.getExtractorStatus().mode,
       memoryExtractorActive: context.memory.getExtractorStatus().active,
-      memoryExtractorDefault: "llm",
+      memoryExtractorDefault: "rule-based",
       ...buildMemoryExtractorDiagnostics(context.memory.getExtractorStatus(), config.runtimeMode),
       maintenanceScheduler: context.memoryMaintenanceScheduler?.getStatus() ?? null,
       ingestionCoordinator: await readMemoryIngestionDiagnostics(
@@ -344,7 +344,7 @@ async function buildRuntimeSettings(context: AppContext, config: ServerConfig) {
 }
 
 function normalizeMemoryExtractor(value: string | undefined): "rule-based" | "llm" {
-  return value === "rule-based" ? "rule-based" : "llm";
+  return value === "llm" ? "llm" : "rule-based";
 }
 
 function parseBooleanString(value: string | undefined): boolean {

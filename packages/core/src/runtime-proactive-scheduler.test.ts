@@ -408,7 +408,7 @@ describe("Runtime proactive scheduler", () => {
     expect(reactive).not.toBeNull();
   });
 
-  it("applies deterministic NO_OP backoff and does not hot-loop tokens", async () => {
+  it("uses a fixed evaluation interval without mutating quiet policy on low scores", async () => {
     let now = 1_000;
     let decided = 0;
     const runtime = new RuntimeOrchestrator({
@@ -437,7 +437,7 @@ describe("Runtime proactive scheduler", () => {
       })
     );
     expect(decided).toBe(1);
-    expect(runtime.getProactiveState().eligibleAfterMs).toBe(now + PROACTIVE_NO_OP_BACKOFF_MS);
+    expect(runtime.getProactiveState().eligibleAfterMs).toBe(0);
     await expect(
       collect(
         runtime.streamAssistantInitiatedTurn({
@@ -448,7 +448,7 @@ describe("Runtime proactive scheduler", () => {
       )
     ).rejects.toMatchObject({ name: "ProactiveAdmissionError", reason: "not-eligible" });
     expect(decided).toBe(1);
-    now += PROACTIVE_NO_OP_BACKOFF_MS;
+    now += 60_000;
     await collect(
       runtime.streamAssistantInitiatedTurn({
         sessionId: "s",

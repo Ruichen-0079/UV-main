@@ -83,7 +83,7 @@ describe("ordinary production Character path", () => {
     process.env = { ...env };
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => completion("decision-model", "NO_OP"))
+      vi.fn(async () => completion("decision-model", '{"score":0.1}'))
     );
     const app = Fastify({ logger: false });
     const context = await createAppContext(app.log, loadServerConfig(env));

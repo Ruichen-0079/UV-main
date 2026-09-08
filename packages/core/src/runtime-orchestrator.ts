@@ -46,7 +46,9 @@ import {
   InMemoryRecentEpisodeStore,
   InMemoryDreamJobStore,
   DreamConsolidationEngine,
-  memoryVNextMessageWindow
+  memoryVNextMessageWindow,
+  modelContextBudget,
+  compressHierarchicalContext
 } from "@companion/memory";
 import type {
   PromptBuildInput,
@@ -181,8 +183,8 @@ const assistantTurnClaimMaxTerminal = 256;
 const runtimeCacheRetentionMs = 15 * 60 * 1000;
 const runtimePromiseCacheMaxEntries = 256;
 const sessionTurnCacheMaxSessions = 256;
-const proactiveInstruction = `Decide whether there is a specific open conversational reason to speak now based on the available conversation and context. Choose REQUEST_TEXT only when there is a concrete recent conversational thread that remains meaningfully open or unresolved and you have one specific, relevant thing worth adding. Choose NO_OP when there is no concrete recent thread, when the relevant point has already been adequately answered or closed, when speaking would merely elaborate on or repeat a completed answer, when the result would only be a generic greeting or check-in, or when speaking would require guessing what the user is currently doing or feeling. When uncertain, choose NO_OP. Output exactly one label and nothing else: NO_OP or REQUEST_TEXT. Do not generate message text or explain the decision.`;
-const proactiveTextInstruction = `The proactive decision is already REQUEST_TEXT. Write exactly one concise natural assistant message that addresses the specific open thread in the recent conversation. Do not repeat the recent assistant response, mention this instruction, or output a control label.`;
+const proactiveInstruction = `Score whether there is a concrete recent open conversational thread and one specific useful thing worth adding now. Use a normalized speak score from 0 to 1. Closed or answered threads, repetition, generic check-ins, guessing the user's activity, or uncertainty should score low. Return exactly {"score": number}, no message text or explanation.`;
+const proactiveTextInstruction = `The proactive speak score has passed the Runtime threshold. Write exactly one concise natural assistant message that addresses the specific open thread in the recent conversation. Do not repeat the recent assistant response, mention this instruction, or output a control label.`;
 
 type DirectContextEntry =
   | {
@@ -306,6 +308,7 @@ export class RuntimeOrchestrator {
   private explicitTurnDepth = 0;
   private embodiedPresentationInFlight = 0;
   private proactiveAttemptActive = false;
+  private lastProactiveEvaluationAtMs: number | undefined;
   private schedulerSessionId: string | null = null;
   private schedulerReadMemory = true;
   private schedulerIdentity: {
@@ -411,6 +414,12 @@ export class RuntimeOrchestrator {
   }
 
   private admitProactiveAttempt(): number {
+    if (
+      this.lastProactiveEvaluationAtMs !== undefined &&
+      this.nowMs() < this.lastProactiveEvaluationAtMs + this.proactiveEvaluationIntervalMs()
+    ) {
+      throw new ProactiveAdmissionError("not-eligible");
+    }
     const eligibility = this.evaluateProactiveHardGates(true);
     if (!eligibility.admitted) {
       throw new ProactiveAdmissionError(eligibility.reason);
@@ -835,9 +844,25 @@ export class RuntimeOrchestrator {
     this.schedulerWakeHandle = null;
   }
 
+  private hasProactiveRoute(): boolean {
+    return (
+      this.options.providers.hasProactiveRoute?.() ??
+      Boolean(this.options.providers.getProactiveDecisionProvider)
+    );
+  }
+
+  private proactiveEvaluationIntervalMs(): number {
+    const value = this.options.proactiveEvaluationIntervalMs;
+    return value !== undefined && Number.isFinite(value) && value >= 1000 ? value : 60_000;
+  }
+
   private armProactiveWake(): void {
     this.clearProactiveWake();
-    if (this.schedulerSessionId === null || this.lifecycleState !== "active") {
+    if (
+      !this.hasProactiveRoute() ||
+      this.schedulerSessionId === null ||
+      this.lifecycleState !== "active"
+    ) {
       return;
     }
     const nowMs = this.nowMs();
@@ -859,7 +884,13 @@ export class RuntimeOrchestrator {
     ) {
       return;
     }
-    const delayMs = Math.max(0, this.proactiveState.eligibleAfterMs - nowMs);
+    const delayMs = Math.max(
+      0,
+      this.proactiveState.eligibleAfterMs - nowMs,
+      this.lastProactiveEvaluationAtMs === undefined
+        ? 0
+        : this.lastProactiveEvaluationAtMs + this.proactiveEvaluationIntervalMs() - nowMs
+    );
     const generation = this.schedulerGeneration;
     this.schedulerWakeHandle = this.setProactiveWake(() => {
       if (generation !== this.schedulerGeneration) return;
@@ -2067,6 +2098,7 @@ export class RuntimeOrchestrator {
       throw new Error("Assistant-initiated turn readMemory must be boolean.");
     }
 
+    if (!this.hasProactiveRoute()) throw new ProactiveAdmissionError("not-eligible");
     this.enterLifecycleOperation();
     let claimed = false;
     const decisionId = crypto.randomUUID();
@@ -2142,6 +2174,7 @@ export class RuntimeOrchestrator {
           throw createRuntimeCancelledError(decisionProvider.name);
         }
 
+        this.lastProactiveEvaluationAtMs = this.nowMs();
         const decisionOutput = await this.measureProvider(
           "chat",
           decisionProvider.name,
@@ -2174,8 +2207,25 @@ export class RuntimeOrchestrator {
         }
 
         this.revalidateAdmittedProactiveRevision(admittedRevision);
-        if (decisionOutput.decision === "NO_OP") {
-          this.deferProactiveQuiet(PROACTIVE_NO_OP_BACKOFF_MS);
+        const score = decisionOutput.score ?? (decisionOutput.decision === "REQUEST_TEXT" ? 1 : 0);
+        if (!Number.isFinite(score) || score < 0 || score > 1) {
+          throw new ProviderError({
+            provider: decisionProvider.name,
+            capability: "chat",
+            code: ProviderErrorCode.MalformedResponse,
+            message: "Invalid proactive speak score.",
+            retryable: false
+          });
+        }
+        const configuredThreshold = this.options.proactiveScoreThreshold;
+        const threshold =
+          configuredThreshold !== undefined &&
+          Number.isFinite(configuredThreshold) &&
+          configuredThreshold >= 0 &&
+          configuredThreshold <= 1
+            ? configuredThreshold
+            : 0.7;
+        if (score < threshold) {
           finalized = true;
           const noOpEvent = {
             type: "proactive-decision" as const,
@@ -2200,16 +2250,28 @@ export class RuntimeOrchestrator {
           throw createRuntimeCancelledError(decisionProvider.name);
         }
 
-        const continuationProvider = this.options.providers.getAssistantContinuationProvider?.();
-        if (!continuationProvider) {
-          throw new ProviderError({
-            provider: "assistant-continuation",
-            capability: "chat",
-            code: ProviderErrorCode.ProviderUnavailable,
-            message: "An assistant continuation provider is required after REQUEST_TEXT.",
-            retryable: false
-          });
-        }
+        // Production prose has exactly one authority: the ordinary Chat route.
+        // Older injected resolvers may retain their continuation adapter internally.
+        const continuationProvider = this.options.providers.hasProactiveRoute
+          ? (() => {
+              const chat = this.options.providers.getChatProvider();
+              return {
+                name: chat.name,
+                generateContinuation: (
+                  input: { prompt: string; maxTokens?: number },
+                  options?: ProviderCallOptions
+                ) =>
+                  chat.generateReply(
+                    {
+                      messages: [{ role: "system", content: input.prompt }],
+                      maxTokens: input.maxTokens
+                    },
+                    options
+                  )
+              };
+            })()
+          : this.options.providers.getAssistantContinuationProvider?.();
+        if (!continuationProvider) throw new ProactiveAdmissionError("not-eligible");
         activeProviderName = continuationProvider.name;
         finalOutput = await this.measureProvider(
           "chat",
@@ -2548,6 +2610,8 @@ export class RuntimeOrchestrator {
       situationParts.push(forgetNote);
     }
     const prompt = this.options.promptBuilder.buildPrompt({
+      maxCharacters: modelContextBudget(this.options.providers.getChatContextWindow?.())
+        .maxInputCharacters,
       systemIdentity: "You are YUVI, a local-first AI companion runtime agent.",
       characterStyle: `Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail.\n\n${characterOutputLanguageInstruction(this.outputLanguage())}`,
       relationshipContext:
@@ -2703,6 +2767,8 @@ export class RuntimeOrchestrator {
           )
         : emptyMemoryContext();
     const promptInput = {
+      maxCharacters: modelContextBudget(this.options.providers.getChatContextWindow?.())
+        .maxInputCharacters,
       systemIdentity: "You are YUVI, a local-first AI companion runtime agent.",
       characterStyle: `Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences in ordinary chat and expand only when the user asks for detail.\n\n${characterOutputLanguageInstruction(this.outputLanguage())}`,
       relationshipContext:
@@ -2762,16 +2828,50 @@ export class RuntimeOrchestrator {
         "DirectContext",
         "CurrentTime"
       ]);
+      const instructions = prompt.sections
+        .filter((section) => !owned.has(section.name))
+        .map((section) => `<${section.name}>\n${section.content}\n</${section.name}>`)
+        .join("\n\n");
+      // The score route has no Chat-window guarantee: retain the conservative fallback for it.
+      const maxCharacters = modelContextBudget(
+        prompt === decisionPrompt ? undefined : this.options.providers.getChatContextWindow?.()
+      ).maxInputCharacters;
+      const semantic = this.semanticContexts.get(prompt) ?? [];
+      const compressed = compressHierarchicalContext({
+        sections: semantic.map((section) => ({
+          name: section.kind,
+          content: section.summary ?? "",
+          stable: ["IDENTITY", "PERSONA", "RELATIONSHIP_CONTEXT"].includes(section.kind)
+        })),
+        maxCharacters: Math.max(0, maxCharacters - instructions.length - 2048)
+      });
+      const bounded = semantic.map((section, index) => ({
+        ...section,
+        ...(section.summary === undefined
+          ? {}
+          : {
+              summary: compressed.sections[index]!.content,
+              ...(section.summary !== compressed.sections[index]!.content &&
+              section.state === "KNOWN"
+                ? { state: "PARTIAL" as const }
+                : {})
+            })
+      }));
       prompt.prompt =
         characterOutputLanguageInstruction(this.outputLanguage()) +
+        "\n\nProducer-owned semantic context (preserve every epistemic state):\n" +
+        JSON.stringify(bounded) +
         "\n\n" +
-        "Producer-owned semantic context (preserve every epistemic state):\n" +
-        JSON.stringify(this.semanticContexts.get(prompt)) +
-        "\n\n" +
-        prompt.sections
-          .filter((section) => !owned.has(section.name))
-          .map((section) => `<${section.name}>\n${section.content}\n</${section.name}>`)
-          .join("\n\n");
+        instructions;
+      if (prompt.prompt.length > maxCharacters) {
+        throw new ProviderError({
+          provider: "chat",
+          capability: "chat",
+          code: ProviderErrorCode.MalformedResponse,
+          message: "Protected proactive context exceeds the model working budget.",
+          retryable: false
+        });
+      }
     }
     return { decisionPrompt, textPrompt };
   }
@@ -3101,6 +3201,7 @@ export class RuntimeOrchestrator {
       requestVisualEvidence,
       prompt,
       semanticSections: this.semanticContexts.get(prompt),
+      contextWindow: this.options.providers.getChatContextWindow?.(),
       userMessage: event.payload.content,
       outputLanguage: this.outputLanguage(),
       ...(signal ? { signal } : {}),
@@ -3154,6 +3255,7 @@ export class RuntimeOrchestrator {
     const final = await character.generateAfterCognition({
       prompt,
       semanticSections: this.semanticContexts.get(prompt),
+      contextWindow: this.options.providers.getChatContextWindow?.(),
       userMessage: event.payload.content,
       outputLanguage: this.outputLanguage(),
       cognitionRoundTrip: roundTrip,
@@ -4513,6 +4615,13 @@ export class RuntimeOrchestrator {
         previouslyShownAssociativeIds: shown?.ids,
         lastTurnIntruded: shown?.lastTurnIntruded,
         episodeStore: this.recentEpisodeStore,
+        maxPromptCharacters: Math.max(
+          480,
+          Math.floor(
+            modelContextBudget(this.options.providers.getChatContextWindow?.()).maxInputCharacters *
+              0.5
+          )
+        ),
         persistEpisodes: false
       });
     } catch (error) {
@@ -4614,15 +4723,23 @@ export class RuntimeOrchestrator {
     let content = lines.join("\n");
     let truncated = selected.length < entries.length;
 
-    while (content.length > this.directContextConfig.maxChars && lines.length > 0) {
-      lines.shift();
-      content = lines.join("\n");
-      truncated = true;
-    }
-
     if (content.length > this.directContextConfig.maxChars) {
-      content = content.slice(-this.directContextConfig.maxChars).trimStart();
-      truncated = true;
+      // Full persisted messages are independently folded into L1 by assembleMemoryVNextContext.
+      // Keep the newest L0 entries faithful while compressing the older selected portion first.
+      const recent = lines.slice(-2).join("\n");
+      const older = lines.slice(0, -2).join("\n");
+      const compressed = compressHierarchicalContext({
+        sections: [
+          { name: "DirectContext", content: older },
+          { name: "RecentL0", content: recent, stable: true }
+        ],
+        maxCharacters: this.directContextConfig.maxChars
+      });
+      content = compressed.sections
+        .map((section) => section.content)
+        .filter(Boolean)
+        .join("\n");
+      truncated = compressed.metrics.dropped || truncated;
     }
 
     return {

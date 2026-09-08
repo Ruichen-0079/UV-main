@@ -471,10 +471,10 @@ function parseMemoryRepository(value: string | undefined): MemoryRepositoryDrive
 }
 
 function parseMemoryExtractor(value: string | undefined): MemoryExtractorDriver {
-  if (!value || value === "llm") {
+  if (value === "llm") {
     return "llm";
   }
-  if (value === "rule-based") {
+  if (!value || value === "rule-based") {
     return "rule-based";
   }
 

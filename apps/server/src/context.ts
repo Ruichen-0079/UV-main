@@ -207,7 +207,11 @@ export async function createAppContext(
       {
         provider: providers.getEmbeddingProvider(),
         // Mem0 owns embeddings for LTM; keep provider only for legacy path.
-        enabled: backendKind === "legacy",
+        enabled:
+          backendKind === "legacy" &&
+          (providers.getStatus().routes?.embedding ?? []).some(
+            (route) => route.enabled && (route.configured || route.mock)
+          ),
         logger: runtimeLogger
       },
       {
@@ -250,7 +254,11 @@ export async function createAppContext(
       promptBuilder,
       providers,
       now: () => Date.now(),
-      proactiveConsentEnabled: proactiveStateStore.load()?.consentEnabled ?? false,
+      proactiveConsentEnabled: proactiveStateStore.load()?.consentEnabled,
+      proactiveScoreThreshold: Number(runtimeEnv["PROACTIVE_SCORE_THRESHOLD"] ?? 0.7),
+      proactiveEvaluationIntervalMs: Number(
+        runtimeEnv["PROACTIVE_EVALUATION_INTERVAL_MS"] ?? 60_000
+      ),
       proactiveStateStore,
       conversation: conversationRepository,
       finalizedIngestion,
@@ -512,7 +520,7 @@ function parseStrictPositiveInteger(value: string | undefined, fallback: number)
 }
 
 function parseMemoryExtractorMode(value: string | undefined): "rule-based" | "llm" {
-  return value === "rule-based" ? "rule-based" : "llm";
+  return value === "llm" ? "llm" : "rule-based";
 }
 
 function unavailableMemoryProvider(): MemoryProvider {

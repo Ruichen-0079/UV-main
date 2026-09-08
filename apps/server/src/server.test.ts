@@ -810,7 +810,7 @@ describe("server", () => {
       expect(settings.statusCode).toBe(200);
       expect(settings.json().memory).toMatchObject({
         memoryExtractor: "llm",
-        memoryExtractorDefault: "llm",
+        memoryExtractorDefault: "rule-based",
         ingestionCoordinator: {
           diagnosticsAvailability: "error",
           diagnosticsErrorCode: "MEMORY_INGESTION_DIAGNOSTICS_UNAVAILABLE",
@@ -2294,7 +2294,7 @@ describe("server", () => {
       concurrency: 4,
       maxDeliveryAttempts: 8
     });
-    expect(loadServerConfig({}).memoryExtractor).toBe("llm");
+    expect(loadServerConfig({}).memoryExtractor).toBe("rule-based");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "rule-based" }).memoryExtractor).toBe("rule-based");
     expect(loadServerConfig({ MEMORY_EXTRACTOR: "llm" }).memoryExtractor).toBe("llm");
     expect(() => loadServerConfig({ MEMORY_EXTRACTOR: "external" })).toThrow(
@@ -2355,7 +2355,7 @@ describe("server", () => {
       expect(settings.json().memory).toMatchObject({
         memoryExtractor: "llm",
         activeMemoryExtractor: "llm",
-        memoryExtractorDefault: "llm",
+        memoryExtractorDefault: "rule-based",
         reasoningProviderConfigured: true
       });
       expect(settings.body).not.toContain("configured_deepseek_secret");

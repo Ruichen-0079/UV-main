@@ -7,9 +7,12 @@ export type ProactiveDecisionInput = {
   prompt: string;
 };
 
-export type ProactiveDecisionOutput = ProviderMetadata & {
-  decision: ProactiveDecision;
-};
+export type ProactiveDecisionOutput = ProviderMetadata &
+  (
+    | { score: number; decision?: never }
+    /** Legacy injected-provider compatibility; production emits only score. */
+    | { decision: ProactiveDecision; score?: never }
+  );
 
 /** Pure machine-control capability. Its output is never user-visible text. */
 export interface ProactiveDecisionProvider {

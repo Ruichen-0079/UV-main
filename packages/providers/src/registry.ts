@@ -64,6 +64,7 @@ import { LocalSTTProvider } from "./local/LocalSTTProvider.js";
 import { createTransportAbort, type TransportAbort } from "./transport-abort.js";
 
 export type ProviderRegistryConfig = {
+  chatContextWindows?: Partial<Record<string, number>>;
   environment: "development" | "test" | "production";
   allowMocks: boolean;
   includeRawProviderResponses: boolean;
@@ -157,6 +158,8 @@ type ProviderEnv = Record<string, string | undefined>;
 export interface ProviderResolver {
   getChatProvider(): ChatProvider;
   getChatStreamingMode?(): ChatStreamingMode;
+  hasProactiveRoute?(): boolean;
+  getChatContextWindow?(): number | undefined;
   getProactiveDecisionProvider?(): ProactiveDecisionProvider;
   getAssistantContinuationProvider?(): AssistantContinuationProvider;
   getReasoningProvider(): ReasoningProvider;
@@ -286,6 +289,26 @@ export class ProviderRegistry implements ProviderResolver {
       this.config.defaults.embedding,
       "embedding"
     );
+  }
+
+  hasProactiveRoute(): boolean {
+    return (
+      Boolean(
+        this.config.openaiCompatible.baseUrl &&
+        this.config.openaiCompatible.apiKey &&
+        this.config.openaiCompatible.proactiveDecisionModel
+      ) || this.config.allowMocks
+    );
+  }
+
+  getChatContextWindow(): number | undefined {
+    const windows = this.createRouteStatuses("chat")
+      .filter((route) => route.configured && !route.mock)
+      .map((route) => this.config.chatContextWindows?.[route.provider]);
+    // A fallback route with unknown metadata must retain the conservative budget.
+    return windows.length && windows.every((window): window is number => window !== undefined)
+      ? Math.min(...windows)
+      : undefined;
   }
 
   getStatus(): ProviderStatusMap {
@@ -756,6 +779,16 @@ export function createProviderRegistryConfigFromEnv(env: ProviderEnv): ProviderR
 
   return {
     environment,
+    chatContextWindows: Object.fromEntries(
+      [
+        ["deepseek", env["DEEPSEEK_CHAT_CONTEXT_WINDOW"]],
+        ["openai-compatible", env["OPENAI_COMPATIBLE_CHAT_CONTEXT_WINDOW"]],
+        ["nvidia", env["NVIDIA_CHAT_CONTEXT_WINDOW"]],
+        ["local", env["LOCAL_CHAT_CONTEXT_WINDOW"]]
+      ]
+        .filter((entry) => Number.isSafeInteger(Number(entry[1])) && Number(entry[1]) >= 1024)
+        .map(([provider, value]) => [provider, Number(value)])
+    ),
     allowMocks,
     includeRawProviderResponses: parseBoolean(env["PROVIDER_INCLUDE_RAW_RESPONSES"]),
     databaseUrl: emptyToUndefined(env["DATABASE_URL"]),
@@ -2296,17 +2329,30 @@ class OpenAICompatibleProactiveDecisionProvider implements ProactiveDecisionProv
           {
             role: "user",
             content:
-              "Return the proactive decision now. Output exactly one label and nothing else: NO_OP or REQUEST_TEXT."
+              'Return exactly one JSON object: {"score": number}. Score must be finite and normalized from 0 to 1. No prose.'
           }
         ],
         temperature: 0,
-        maxTokens: 8,
+        maxTokens: 32,
         stopSequences: ["\n"]
       },
       options
     );
-    const decision = completion.content.trim();
-    if (decision !== "NO_OP" && decision !== "REQUEST_TEXT") {
+    let score: unknown;
+    try {
+      const decoded: unknown = JSON.parse(completion.content.trim());
+      if (
+        decoded &&
+        typeof decoded === "object" &&
+        !Array.isArray(decoded) &&
+        Object.keys(decoded).length === 1 &&
+        "score" in decoded
+      )
+        score = decoded.score;
+    } catch {
+      /* fail closed below */
+    }
+    if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 1) {
       throw new ProviderError({
         provider: this.name,
         capability: "chat",
@@ -2316,7 +2362,7 @@ class OpenAICompatibleProactiveDecisionProvider implements ProactiveDecisionProv
       });
     }
     return {
-      decision,
+      score,
       model: completion.model,
       latencyMs: completion.latencyMs,
       tokenUsage: completion.tokenUsage,
