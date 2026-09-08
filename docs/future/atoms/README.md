@@ -2,7 +2,7 @@
 
 > **Status: CURRENT CLOSURE INDEX + FUTURE BACKLOG — source remains authority**
 >
-> **Audit baseline:** `ec6df9d`
+> **Audit baseline:** Campaign H starts at `b5135ba3d3e6a99de643bff40b8276b8822a28d9`
 >
 > The current `origin/main` source, tests, merged closure documents, and live
 > dependency state are authoritative. Before implementation, fresh-fetch main,
@@ -24,7 +24,7 @@ can open one atom and understand the intended semantic outcome without
 reconstructing the whole architecture from old chats.
 
 Completed status entries summarize merged closure boundaries. Unfinished sections
-remain **plans**, not claims that future behavior exists. See the
+are historical plans, not automatic work authorization. Current status is in the [roadmap](../README.md). See the
 [Campaign A closure audit](../campaign-a-closure.md) for PR dispositions and limits.
 
 ## Master backlog retention rule
@@ -77,7 +77,10 @@ desktop. No `VisualState`, periodic screenshot understanding, CPU scene
 classifier, automatic workload classifier, or ambient screen-monitor loop is
 authorized. Current-screen evidence is requested on demand.
 
-## Three-line execution view
+## Historical three-line execution view
+
+Campaigns A–G supersede this scheduling view: Voice D, Vision E, Companion and
+calibration F, Linux operations G are CLOSED. Use the current roadmap table.
 
 This view exists to schedule independent work without losing the master backlog.
 
@@ -90,7 +93,7 @@ This view exists to schedule independent work without losing the master backlog.
 - [16 — Provider fallback UX](16-provider-fallback-ux.md) — DONE in #257.
 - [17 — Output language semantic preference](17-output-language.md) — DONE.
 - IndexTTS/Rei zero-shot direction — **REJECTED / ABANDONED** as an active
-  prerequisite. Current local TTS is the existing GPT-SoVITS/Alice integration;
+  prerequisite. Current local TTS is dots.tts / Rei;
   no replacement provider or service owner is authorized by this backlog.
 - Validate that current local TTS path and the implemented
   [14 — Voice Mode + barge-in](14-voice-mode-barge-in.md) together on KDE.

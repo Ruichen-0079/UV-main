@@ -1,3 +1,5 @@
+import { t } from "./locale.js";
+import { apiClient } from "./api/client.js";
 import { installPresentationRehearsal } from "./lumi-presentation-rehearsal.js";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import {
@@ -19,7 +21,7 @@ import type {
 } from "@companion/protocol";
 import { resolveRuntimeAssetUrl } from "./desktop-runtime.js";
 
-const DEFAULT_MODEL_PATH = "/api/live2d/Lumi/Lumi.model3.json";
+
 
 function isHeadBoundsOverlayEnabled(): boolean {
   if (!import.meta.env.DEV || typeof window === "undefined") return false;
@@ -38,6 +40,26 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   },
   ref: Ref<LumiControllerHandle>
 ): JSX.Element {
+  const [modelSource, setModelSource] = useState<string | null>(null);
+  const [modelError, setModelError] = useState("");
+  useEffect(() => {
+    let disposed = false;
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        const result = await apiClient.getLive2DModels(abort.signal);
+        if (!disposed) {
+          setModelSource(result.activeUrl);
+          if (!result.activeUrl) { setModelLifecycle("failed"); onModelLifecycleRef.current?.("failed"); }
+          setModelError(result.activeUrl ? "" : "No active Live2D model. Open Settings to install Hiyori or select a model.");
+        }
+      } catch { if (!disposed) setModelError("Unable to read the selected Live2D model."); }
+      finally { if (!disposed) timer = setTimeout(() => void refresh(), 3000); }
+    };
+    void refresh();
+    return () => { disposed = true; abort.abort(); clearTimeout(timer); };
+  }, []);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<LumiController | null>(null);
@@ -59,7 +81,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       // before the mount effect installs the controller instance.
       load: () => controllerRef.current?.load() ?? Promise.resolve(),
       runMouthCalibration: () => controllerRef.current?.runMouthCalibration() ?? Promise.resolve(),
-      setFraming: (next) => controllerRef.current?.setFraming(next),
+      setFraming: (next) => { setFraming(next); controllerRef.current?.setFraming(next); },
       setPresentationProjection: (projection) =>
         controllerRef.current?.setPresentationProjection(projection),
       setGazeTarget: (target) => controllerRef.current?.setGazeTarget(target),
@@ -99,11 +121,9 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
-    if (!canvas || !container) return;
+    if (!canvas || !container || !modelSource) return;
     let disposed = false;
-    const source =
-      import.meta.env["VITE_LIVE2D_MODEL_URL"]?.trim() ||
-      resolveRuntimeAssetUrl(DEFAULT_MODEL_PATH);
+    const source = resolveRuntimeAssetUrl(modelSource);
     const controller = new LumiController(
       () => new CubismLive2DAdapter(canvas),
       source,
@@ -132,6 +152,8 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
     // DPR / zoom changes do not always fire ResizeObserver; listen as well.
     window.addEventListener("resize", resize);
     resize();
+    controller.setPresentationProjection(projectionRef.current);
+    controller.setFraming(framing);
     void controller.load();
 
     let overlayFrame = 0;
@@ -157,7 +179,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       controller.dispose();
       controllerRef.current = null;
     };
-  }, []);
+  }, [modelSource]);
 
   useEffect(() => {
     controllerRef.current?.setPresentationProjection(props.requestedProjection);
@@ -171,11 +193,15 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
     <div
       ref={containerRef}
       className={props.className ?? "relative min-h-[280px] overflow-hidden rounded-md bg-ink-900"}
-      aria-label="Lumi avatar"
+      aria-label={t("Lumi avatar")}
       data-presence={state}
       data-model-lifecycle={modelLifecycle}
       data-framing={framing}
     >
+      {(modelError || modelLifecycle !== "ready") && <div className="absolute left-2 top-10 z-10 rounded bg-black/70 p-2 text-sm text-white" role={modelError || modelLifecycle === "failed" ? "alert" : "status"}>
+        {t(modelError || (modelLifecycle === "failed" ? "Live2D model failed to load. Check model assets and Cubism Core in Settings." : "Loading Live2D model…"))}
+        {!modelError && modelLifecycle === "loading" && <progress aria-label={t("Live2D loading")} />}
+      </div>}
       {/*
         display:block avoids the inline-canvas baseline gap. No CSS transform /
         aspect-ratio so the WebGL buffer is never stretched by the browser.
@@ -225,7 +251,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
         className="pointer-events-none absolute bottom-2 left-2 rounded bg-ink-900/70 px-2 py-1 text-xs text-white"
         aria-live="polite"
       >
-        {presenceLabel(state)}
+        {t(presenceLabel(state))}
       </div>
       {import.meta.env.DEV && (
         <button

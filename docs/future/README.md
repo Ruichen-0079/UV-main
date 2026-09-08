@@ -34,20 +34,38 @@ path, evaluate real failures, and add only the smallest missing explicit
 semantic artifact when evidence proves one is required. P6 remains frozen
 current proactive-text behavior.
 
-Formal Phase 8 behavior assets may proceed now. Phases 9–13 — base-model
+Formal Phase 8 behavior assets are present and available for evaluation. Phases 9–13 — base-model
 bakeoff, QLoRA SFT, DPO, shadow/A-B, and the preference-data flywheel — are
 deferred until Yuvi is landed, has run for a sustained period, and has produced
 reviewed real-usage evaluation evidence. The current DeepSeek V4 Flash-class
 Chat path is replaceable operational infrastructure, not Character identity.
 
-## Current operational campaign status
+## Current operational status
 
-[Campaign A](campaign-a-closure.md) consolidated Output Language (#265), the
-Product WebUI daily-use baseline (#257), and Presentation soft-smile Slice 1
-(#263) on current main. The [atom index](atoms/README.md) records remaining work.
-The abandoned IndexTTS/Rei direction is not an active prerequisite; the current
-local TTS integration is GPT-SoVITS/Alice. The next campaign should validate
-Linux daily-use operations and clean-room deployment before unrelated features.
+[Campaign H](campaign-h-closure.md) records cache and proactive evidence, Memory
+console consistency, durable Live2D import with the official Hiyori default
+installation seam, Chinese UI and objective interaction acceptance.
+
+| Area | Classification | Current authority |
+| --- | --- | --- |
+| P8 identity/persona/relationship | CLOSED | P8-1F; current Memory/P8 projection |
+| Character ABI, Harness, Cognition | CLOSED | Production Character adapter and bounded Cognition re-entry |
+| Voice and interruption | CLOSED | [Campaign D](campaign-d-closure.md) |
+| Local speech | CURRENT | dots.tts / Rei, local STT; [Linux daily use](../linux-daily-use.md) |
+| On-demand Visual Grounding | CLOSED | [Campaign E](campaign-e-visual-grounding.md); remote capability still requires configured credentials |
+| Companion and Live2D calibration | CLOSED | [Campaign F](campaign-f-presentation.md) |
+| Linux checkout deployment | CLOSED | [Campaign G](campaign-g-linux.md); distributable packaging remains DEFERRED |
+| Behavior assets | CURRENT | specification, evaluation and preference schema in this directory |
+| Character training | DEFERRED | requires reviewed sustained usage evidence |
+| Dream | CURRENT | event-driven consolidation; real idle scheduling remains DEFERRED |
+| Memory maintenance | CURRENT | explicit opt-in, OFF by default; no automatic startup/periodic sweep |
+| Prompt caching | CURRENT | invariant prefix plus provider-bound time-last layout; H measurements distinguish budget protection from prefix stability |
+| Full Temporal/Continuity systems | GAP-DRIVEN | existing thin time and L0/L1 evidence remain the daily-use path |
+| Earlier operational audits and atom plans | HISTORICAL | retain reasoning; use this table and current code for status |
+
+The GPT-SoVITS/Alice and IndexTTS operational recommendations in earlier audit
+text are historical. The installed local TTS path is dots.tts / Rei. There is no
+next automatic campaign or architecture expansion implied by this roadmap.
 
 ## Product north star
 

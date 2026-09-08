@@ -1,7 +1,11 @@
+import { requireLocalDashboardAccess } from "./security.js";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
+import { resolveYuviHostPaths } from "@companion/host-environment";
+import { Live2DModels, LIVE2D_IMPORT_LIMIT, modelImportSchema } from "../services/live2d-models.js";
+import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 
 const contentTypes: Record<string, string> = {
@@ -46,6 +50,82 @@ export async function registerLive2DRoutes(
   app: FastifyInstance,
   config: ServerConfig
 ): Promise<void> {
+  const models = new Live2DModels(
+    config.live2dModelsRoot ??
+      path.join(
+        process.env["YUVI_RUNTIME_DATA_DIR"] || resolveYuviHostPaths().yuviDataDir,
+        "live2d-models"
+      ),
+    config.live2dAssetRoot
+  );
+  app.get("/live2d/models", async () => models.list());
+  app.post("/live2d/models/import", { bodyLimit: LIVE2D_IMPORT_LIMIT }, async (request, reply) => {
+    if (!requireLocalDashboardAccess(config, request, reply)) return;
+    const input = modelImportSchema.safeParse(request.body);
+    if (!input.success)
+      return reply
+        .code(400)
+        .send({ error: "invalid_model_package", message: "Invalid model package." });
+    try {
+      return await models.import(input.data);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return reply
+        .code(code ? 500 : 400)
+        .send({
+          error: "model_import_failed",
+          message: code
+            ? "Unable to install model in durable storage."
+            : "Invalid model package: check the manifest and all referenced assets."
+        });
+    }
+  });
+  app.post("/live2d/models/select", async (request, reply) => {
+    if (!requireLocalDashboardAccess(config, request, reply)) return;
+    const input = z.object({ id: z.string().max(80).nullable() }).safeParse(request.body);
+    if (!input.success)
+      return reply
+        .code(400)
+        .send({ error: "invalid_model", message: "Choose an installed model." });
+    try {
+      await models.select(input.data.id);
+      return await models.list();
+    } catch {
+      return reply
+        .code(409)
+        .send({
+          error: "model_selection_failed",
+          message: "Unable to select or persist this model."
+        });
+    }
+  });
+  app.delete<{ Params: { id: string } }>("/live2d/models/:id", async (request, reply) => {
+    if (!requireLocalDashboardAccess(config, request, reply)) return;
+    try {
+      await models.remove(request.params.id);
+      return await models.list();
+    } catch {
+      return reply
+        .code(409)
+        .send({
+          error: "model_removal_failed",
+          message: "Select another model first. Only inactive user-imported models can be removed."
+        });
+    }
+  });
+  app.get<{ Params: { id: string; "*": string } }>(
+    "/live2d/models/:id/*",
+    async (request, reply) => {
+      try {
+        const file = await models.asset(request.params.id, request.params["*"]);
+        if (!file) return reply.code(404).send({ error: "asset_not_found" });
+        reply.type(contentTypes[path.extname(file)] ?? "application/octet-stream");
+        return reply.send(createReadStream(file));
+      } catch {
+        return reply.code(404).send({ error: "asset_not_found" });
+      }
+    }
+  );
   app.get<{ Params: { "*": string } }>("/live2d/*", async (request, reply) => {
     const root = config.live2dAssetRoot;
     if (!root) {
@@ -77,7 +157,11 @@ export async function registerLive2DRoutes(
     }
 
     try {
-      const details = await stat(assetPath);
+      const canonicalRoot = await realpath(rootPath);
+      const canonicalAsset = await realpath(assetPath);
+      if (!isWithinRoot(canonicalRoot, canonicalAsset))
+        return reply.code(403).send({ error: "asset_forbidden" });
+      const details = await stat(canonicalAsset);
       if (!details.isFile()) {
         return reply
           .status(404)

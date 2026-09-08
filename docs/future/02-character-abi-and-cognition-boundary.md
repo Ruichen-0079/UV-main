@@ -1,6 +1,8 @@
 # Phase 2 — Character ABI and Cognition Boundary
 
-> **Status: PLANNED / NOT IMPLEMENTED**
+> **Status: CLOSED — Character ABI 2A–2D and the production Character/Cognition boundary are implemented.**
+
+Current implementation is indexed in [the roadmap](README.md). Detailed phase plans below preserve historical design reasoning; they are not a new work queue.
 
 ## 1. Purpose
 

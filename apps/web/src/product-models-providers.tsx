@@ -1,3 +1,5 @@
+import { AsyncProgress } from "./async-progress.js";
+import { t } from "./locale.js";
 import { useEffect, useRef, useState } from "react";
 import {
   apiClient,
@@ -35,131 +37,132 @@ export const PRODUCT_PROVIDER_DEFINITIONS: ProductProviderDefinition[] = [
   {
     id: "deepseek",
     label: "DeepSeek",
-    description: "Native DeepSeek chat and reasoning routes.",
+    description: t("Native DeepSeek chat and reasoning routes."),
     fields: [
-      { key: "DEEPSEEK_API_BASEURL", label: "Base URL", type: "url" },
+      { key: "DEEPSEEK_API_BASEURL", label: t("Base URL"), type: "url" },
       {
         key: "DEEPSEEK_API_KEY",
-        label: "API key",
+        label: t("API key"),
         type: "password",
         secret: true,
-        placeholder: "Leave blank to keep the saved key"
+        placeholder: t("Leave blank to keep the saved key")
       },
-      { key: "DEEPSEEK_CHAT_MODEL", label: "Chat model" },
-      { key: "DEEPSEEK_REASONING_MODEL", label: "Reasoning model" }
+      { key: "DEEPSEEK_CHAT_MODEL", label: t("Chat model") },
+      { key: "DEEPSEEK_REASONING_MODEL", label: t("Reasoning model") }
     ],
     capabilities: ["chat", "reasoning"]
   },
   {
     id: "openai-compatible",
     label: "OpenAI-compatible",
-    description: "OpenAI-compatible endpoint used by Chat and Cognition.",
+    description: t("OpenAI-compatible endpoint used by Chat and Cognition."),
     fields: [
-      { key: "OPENAI_COMPATIBLE_API_BASEURL", label: "Base URL", type: "url" },
+      { key: "OPENAI_COMPATIBLE_API_BASEURL", label: t("Base URL"), type: "url" },
       {
         key: "OPENAI_COMPATIBLE_API_KEY",
-        label: "API key",
+        label: t("API key"),
         type: "password",
         secret: true,
-        placeholder: "Leave blank to keep the saved key"
+        placeholder: t("Leave blank to keep the saved key")
       },
-      { key: "OPENAI_COMPATIBLE_CHAT_MODEL", label: "Chat model" },
-      { key: "OPENAI_COMPATIBLE_REASONING_MODEL", label: "Reasoning model" }
+      { key: "OPENAI_COMPATIBLE_CHAT_MODEL", label: t("Chat model") },
+      { key: "OPENAI_COMPATIBLE_REASONING_MODEL", label: t("Reasoning model") },
+      { key: "OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL", label: t("Proactive decision model") }
     ],
     capabilities: ["chat", "reasoning"]
   },
   {
     id: "nvidia",
     label: "NVIDIA API",
-    description: "OpenAI-compatible NVIDIA routes supported by Runtime.",
+    description: t("OpenAI-compatible NVIDIA routes supported by Runtime."),
     fields: [
-      { key: "NVIDIA_API_BASEURL", label: "Base URL", type: "url" },
+      { key: "NVIDIA_API_BASEURL", label: t("Base URL"), type: "url" },
       {
         key: "NVIDIA_API_KEY",
-        label: "API key",
+        label: t("API key"),
         type: "password",
         secret: true,
-        placeholder: "Leave blank to keep the saved key"
+        placeholder: t("Leave blank to keep the saved key")
       },
-      { key: "NVIDIA_CHAT_MODEL", label: "Chat model" },
-      { key: "NVIDIA_REASONING_MODEL", label: "Reasoning model" },
-      { key: "NVIDIA_EMBEDDING_MODEL", label: "Embedding model" },
-      { key: "NVIDIA_EMBEDDING_DIMENSIONS", label: "Embedding dimensions" },
-      { key: "NVIDIA_VISION_MODEL", label: "Vision model" }
+      { key: "NVIDIA_CHAT_MODEL", label: t("Chat model") },
+      { key: "NVIDIA_REASONING_MODEL", label: t("Reasoning model") },
+      { key: "NVIDIA_EMBEDDING_MODEL", label: t("Embedding model") },
+      { key: "NVIDIA_EMBEDDING_DIMENSIONS", label: t("Embedding dimensions") },
+      { key: "NVIDIA_VISION_MODEL", label: t("Vision model") }
     ],
     capabilities: ["chat", "reasoning", "embedding", "vision"]
   },
   {
     id: "local",
-    label: "Local models",
+    label: t("Local models"),
     description:
-      "Local service connections. TTS is optional; no voice model is selected automatically.",
+      t("Local service connections. TTS is optional; no voice model is selected automatically."),
     fields: [
-      { key: "LOCAL_MODEL_BASEURL", label: "Base URL", type: "url" },
-      { key: "LOCAL_CHAT_MODEL", label: "Chat model" },
-      { key: "LOCAL_REASONING_MODEL", label: "Reasoning model" },
-      { key: "LOCAL_EMBEDDING_MODEL", label: "Embedding model" },
-      { key: "LOCAL_EMBEDDING_DIMENSIONS", label: "Embedding dimensions" },
-      { key: "LOCAL_TTS_MODEL", label: "Local TTS model" },
-      { key: "LOCAL_TTS_BASE_URL", label: "Local TTS URL", type: "url" },
-      { key: "LOCAL_STT_BASE_URL", label: "STT service URL", type: "url" },
-      { key: "LOCAL_STT_MODEL", label: "STT model" },
-      { key: "LOCAL_VISION_MODEL", label: "Vision model" }
+      { key: "LOCAL_MODEL_BASEURL", label: t("Base URL"), type: "url" },
+      { key: "LOCAL_CHAT_MODEL", label: t("Chat model") },
+      { key: "LOCAL_REASONING_MODEL", label: t("Reasoning model") },
+      { key: "LOCAL_EMBEDDING_MODEL", label: t("Embedding model") },
+      { key: "LOCAL_EMBEDDING_DIMENSIONS", label: t("Embedding dimensions") },
+      { key: "LOCAL_TTS_MODEL", label: t("Local TTS model") },
+      { key: "LOCAL_TTS_BASE_URL", label: t("Local TTS URL"), type: "url" },
+      { key: "LOCAL_STT_BASE_URL", label: t("STT service URL"), type: "url" },
+      { key: "LOCAL_STT_MODEL", label: t("STT model") },
+      { key: "LOCAL_VISION_MODEL", label: t("Vision model") }
     ],
     capabilities: ["chat", "reasoning", "embedding", "tts", "stt", "vision"]
   },
   {
     id: "xai",
     label: "xAI",
-    description: "Optional xAI routes currently supported for TTS and Vision.",
+    description: t("Optional xAI routes currently supported for TTS and Vision."),
     fields: [
-      { key: "XAI_API_BASEURL", label: "Base URL", type: "url" },
+      { key: "XAI_API_BASEURL", label: t("Base URL"), type: "url" },
       {
         key: "XAI_API_KEY",
-        label: "API key",
+        label: t("API key"),
         type: "password",
         secret: true,
-        placeholder: "Leave blank to keep the saved key"
+        placeholder: t("Leave blank to keep the saved key")
       },
-      { key: "XAI_TTS_MODEL", label: "TTS model" },
-      { key: "XAI_TTS_VOICE", label: "TTS voice" },
-      { key: "XAI_VISION_MODEL", label: "Vision model" }
+      { key: "XAI_TTS_MODEL", label: t("TTS model") },
+      { key: "XAI_TTS_VOICE", label: t("TTS voice") },
+      { key: "XAI_VISION_MODEL", label: t("Vision model") }
     ],
     capabilities: ["tts", "vision"]
   },
   {
     id: "dashscope",
     label: "DashScope",
-    description: "Optional Alibaba Cloud STT route currently supported by Runtime.",
+    description: t("Optional Alibaba Cloud STT route currently supported by Runtime."),
     fields: [
-      { key: "DASHSCOPE_API_BASEURL", label: "Base URL", type: "url" },
+      { key: "DASHSCOPE_API_BASEURL", label: t("Base URL"), type: "url" },
       {
         key: "DASHSCOPE_API_KEY",
-        label: "API key",
+        label: t("API key"),
         type: "password",
         secret: true,
-        placeholder: "Leave blank to keep the saved key"
+        placeholder: t("Leave blank to keep the saved key")
       },
-      { key: "DASHSCOPE_STT_MODEL", label: "STT model" }
+      { key: "DASHSCOPE_STT_MODEL", label: t("STT model") }
     ],
     capabilities: ["stt"]
   },
   {
     id: "embedding",
-    label: "Embedding",
+    label: t("Embedding"),
     description:
-      "Current embedding connection. Provider chain selection stays with Runtime routing.",
+      t("Current embedding connection. Provider chain selection stays with Runtime routing."),
     fields: [
-      { key: "EMBEDDING_API_BASEURL", label: "Base URL", type: "url" },
+      { key: "EMBEDDING_API_BASEURL", label: t("Base URL"), type: "url" },
       {
         key: "EMBEDDING_API_KEY",
-        label: "API key",
+        label: t("API key"),
         type: "password",
         secret: true,
-        placeholder: "Leave blank to keep the saved key"
+        placeholder: t("Leave blank to keep the saved key")
       },
-      { key: "EMBEDDING_MODEL", label: "Model" },
-      { key: "EMBEDDING_DIMENSIONS", label: "Dimensions" }
+      { key: "EMBEDDING_MODEL", label: t("Model") },
+      { key: "EMBEDDING_DIMENSIONS", label: t("Dimensions") }
     ],
     capabilities: ["embedding"]
   }
@@ -205,9 +208,9 @@ export function productVerificationSummary(
       : "Configuration is not ready · no provider call was made";
   }
   return result.ok
-    ? `Connected · ${result.provider}`
+    ? t("Connected · {0}", result.provider)
     : result.error
-      ? `Connection failed · ${result.error}`
+      ? t("Connection failed · {0}", result.error)
       : "Connection failed";
 }
 
@@ -335,7 +338,7 @@ function ProviderCard(props: {
             : undefined;
           return (
             <label key={field.key} className="yuvi-product-provider-field">
-              <span>{field.label}</span>
+              <span>{t(field.label)}</span>
               <input
                 disabled={props.busy}
                 type={field.type ?? "text"}
@@ -350,7 +353,7 @@ function ProviderCard(props: {
               />
               {field.secret ? (
                 <small>
-                  {configured ? "Key configured · value is never returned" : "Key not configured"}
+                  {configured ? t("Key configured · value is never returned") : t("Key not configured")}
                 </small>
               ) : null}
             </label>
@@ -363,9 +366,9 @@ function ProviderCard(props: {
           const status = statusFor(capability);
           return (
             <div key={capability} className="yuvi-product-provider-status">
-              <span>{capabilityLabel(capability)}</span>
+              <span>{t(capabilityLabel(capability))}</span>
               <span className={`yuvi-provider-state is-${productProviderStatusTone(status)}`}>
-                {productProviderStatusLabel(status)}
+                {t(productProviderStatusLabel(status))}
               </span>
             </div>
           );
@@ -379,7 +382,7 @@ function ProviderCard(props: {
           disabled={props.busy}
           onClick={props.onSave}
         >
-          {props.busy ? "Saving…" : "Save & apply"}
+          {props.busy ? t("Saving…") : t("Save & apply")}
         </button>
         {props.definition.capabilities.map((capability) => (
           <button
@@ -392,8 +395,8 @@ function ProviderCard(props: {
             {props.verifying === capability
               ? "Checking…"
               : LIVE_VERIFICATION_CAPABILITIES.has(capability)
-                ? `Test connection · active ${capabilityLabel(capability)}`
-                : `Inspect ${capabilityLabel(capability)} config`}
+                ? t("Test connection · active {0}", capabilityLabel(capability))
+                : t("Inspect {0} config", capabilityLabel(capability))}
           </button>
         ))}
       </div>
@@ -473,7 +476,7 @@ export function ProductModelsProviders(): JSX.Element {
           )
         }));
         if (applyError) {
-          setNotice({ tone: "warning", text: `Saved, but Runtime apply failed: ${applyError}` });
+          setNotice({ tone: "warning", text: t("Saved, but Runtime apply failed: {0}", applyError) });
         } else if (saved.restartRequired || applied?.restartRequired) {
           setNotice({
             tone: "warning",
@@ -483,14 +486,14 @@ export function ProductModelsProviders(): JSX.Element {
           setNotice({
             tone: "info",
             text: saved.changedKeys.length
-              ? `Saved and applied: ${saved.changedKeys.join(", ")}`
+              ? t("Saved and applied: {0}", saved.changedKeys.join(", "))
               : "Saved and applied."
           });
         }
       }
     } catch (error) {
       if (mountedRef.current) {
-        setNotice({ tone: "error", text: `Save failed: ${safeErrorMessage(error)}` });
+        setNotice({ tone: "error", text: t("Save failed: {0}", safeErrorMessage(error)) });
       }
     } finally {
       if (mountedRef.current) setSavingProvider(null);
@@ -526,47 +529,38 @@ export function ProductModelsProviders(): JSX.Element {
     <section className="yuvi-product-settings">
       <header className="yuvi-product-page-header">
         <div>
-          <div className="yuvi-product-eyebrow">Settings</div>
-          <h1>Models &amp; Providers</h1>
-          <p>
-            Configure model connections. Saved secrets stay masked; readiness and live observations
-            remain separate.
-          </p>
+          <div className="yuvi-product-eyebrow">{t("Settings")}</div>
+          <h1>{t("Models & Providers")}</h1>
+          <p>{t("Configure model connections. Saved secrets stay masked; readiness and live observations remain separate.")}</p>
         </div>
         <div className="yuvi-product-provider-count">
-          <span>Current providers</span>
+          <span>{t("Current providers")}</span>
           <strong>{PRODUCT_PROVIDER_DEFINITIONS.length}</strong>
         </div>
       </header>
 
       <div className="yuvi-product-authority-note">
-        <strong>Connection settings</strong>
-        <span>
-          Save &amp; apply reloads supported settings. Changes that need a restart are reported
-          below.
-        </span>
+        <strong>{t("Connection settings")}</strong>
+        <span>{t("Save & apply reloads supported settings. Changes that need a restart are reported below.")}</span>
       </div>
 
-      <div className="yuvi-product-gap-note">
-        Enter the model ID supplied by your provider. Automatic model discovery is not available.
-      </div>
+      <div className="yuvi-product-gap-note">{t("Enter the model ID supplied by your provider. Automatic model discovery is not available.")}</div>
 
       {settings.loading && !settings.data ? (
-        <div className="yuvi-product-inline-state">Loading current settings…</div>
+        <div className="yuvi-product-inline-state">{t("Loading current settings…")}</div>
       ) : null}
       {settings.error ? (
-        <div className="yuvi-product-inline-state is-error" role="alert">
-          Settings unavailable: {settings.error}
+        <div className="yuvi-product-inline-state is-error" role="alert">{t("Settings unavailable:")}{" "}{settings.error}
         </div>
       ) : null}
       {providerStatus.error ? (
-        <div className="yuvi-product-inline-state is-warning" role="alert">
-          Provider observations unavailable: {providerStatus.error}
+        <div className="yuvi-product-inline-state is-warning" role="alert">{t("Provider observations unavailable:")}{" "}{providerStatus.error}
         </div>
       ) : null}
+      {(savingProvider !== null || verifying !== null) && <AsyncProgress label={t("Updating configuration…")} />}
       {notice ? (
         <div className={`yuvi-product-inline-state is-${notice.tone}`} role="status">
-          {notice.text}
+          {t(notice.text)}
         </div>
       ) : null}
       {verification ? (
@@ -574,11 +568,11 @@ export function ProductModelsProviders(): JSX.Element {
           className={`yuvi-product-verification ${verification.ok ? "is-ok" : "is-error"}`}
           role="status"
         >
-          <strong>{productVerificationSummary(verification)}</strong>
+          <strong>{t(productVerificationSummary(verification))}</strong>
           <span>
             {verification.verificationMode === "live"
-              ? "Live provider verification called the Runtime-selected route."
-              : "This is a config-only observation and does not prove remote reachability."}
+              ? t("Live provider verification called the Runtime-selected route.")
+              : t("This is a config-only observation and does not prove remote reachability.")}
           </span>
         </div>
       ) : null}

@@ -41,6 +41,7 @@ export type ServerConfig = {
     restartMarkerPath?: string | undefined;
   };
   dashboardDevToken?: string | undefined;
+  live2dModelsRoot?: string | undefined;
   live2dAssetRoot?: string | undefined;
   live2dCorePath?: string | undefined;
 };

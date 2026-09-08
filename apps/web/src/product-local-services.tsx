@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import { useEffect, useRef, useState } from "react";
 import { apiClient } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
@@ -33,7 +34,7 @@ export function ProductLocalServices(): JSX.Element {
           if (mounted.current) setProfiles(result.profiles);
         })
         .catch(() => {
-          if (mounted.current) setNotice("Could not read acoustic profiles.");
+          if (mounted.current) setNotice(t("Could not read acoustic profiles."));
         });
     }
   }, [status.data]);
@@ -50,7 +51,7 @@ export function ProductLocalServices(): JSX.Element {
       capture.current = recording;
       setMode(next);
     } catch {
-      setNotice("Microphone unavailable. Check the browser microphone permission.");
+      setNotice(t("Microphone unavailable. Check the browser microphone permission."));
     } finally {
       if (mounted.current) setBusy(false);
     }
@@ -64,19 +65,19 @@ export function ProductLocalServices(): JSX.Element {
       const audio = await stopMicrophoneCapture(active);
       if (mode === "enroll") {
         const result = await apiClient.enrollVoiceProfile({ ...audio, label });
-        setNotice(`Saved acoustic profile: ${result.label}`);
+        setNotice(t("Saved acoustic profile: {0}", result.label));
       } else {
         const result = await apiClient.identifyVoiceProfile(audio);
         setNotice(
           result.status === "MATCHED"
-            ? `MATCH · ${profiles.find((p) => p.voiceProfileId === result.voiceProfileId)?.label ?? result.voiceProfileId}`
-            : "NO_MATCH · no enrolled voice was recognized"
+            ? t("MATCH · {0}", profiles.find((p) => p.voiceProfileId === result.voiceProfileId)?.label ?? result.voiceProfileId)
+            : t("NO_MATCH · no enrolled voice was recognized")
         );
       }
       await status.refresh();
     } catch {
       setNotice(
-        "Recording could not be processed. Use clear speech from one speaker and check service status."
+        t("Recording could not be processed. Use clear speech from one speaker and check service status.")
       );
     } finally {
       if (mounted.current) {
@@ -87,65 +88,52 @@ export function ProductLocalServices(): JSX.Element {
   }
   const data = status.data;
   return (
-    <section className="yuvi-card grid gap-3" aria-label="Local intelligence">
-      <h2>Local intelligence</h2>
+    <section className="yuvi-card grid gap-3" aria-label={t("Local intelligence")}>
+      <h2>{t("Local intelligence")}</h2>
       {import.meta.env["YUVI_DAILY_USE"] === true ? <ProductDailyStatus /> : null}
       <button
         className="yuvi-product-button"
         disabled={status.loading}
         onClick={() => void status.refresh()}
-      >
-        Refresh local services
-      </button>
+      >{t("Refresh local services")}</button>
       {status.error ? (
-        <p role="alert">
-          Live status unavailable. Any displayed results are from the last successful check.
-        </p>
+        <p role="alert">{t("Live status unavailable. Any displayed results are from the last successful check.")}</p>
       ) : null}
       {data ? (
         <>
-          <p>
-            Local STT: {data.stt.available ? "available" : "unavailable"} ·{" "}
-            {data.stt.selected ? "selected" : "not selected"}. Speaker profiles:{" "}
-            {data.stt.speakerProfiles ? "available" : "unavailable"}. Diarization:{" "}
-            {data.stt.diarization ? "available" : "unavailable"}. Live VAD:{" "}
-            {data.stt.vad ? "available" : "unavailable"}.
+          <p>{t("Local STT:")}{" "}{data.stt.available ? t("available") : t("unavailable")} ·{" "}
+            {data.stt.selected ? t("selected") : t("not selected")}{t(". Speaker profiles:")}{" "}
+            {data.stt.speakerProfiles ? t("available") : t("unavailable")}{t(". Diarization:")}{" "}
+            {data.stt.diarization ? t("available") : t("unavailable")}{t(". Live VAD:")}{" "}
+            {data.stt.vad ? t("available") : t("unavailable")}.
           </p>
+          <p>{t("Memory:")}{" "}{data.memory.backend} · {data.memory.repository} ({data.memory.database}{t("). Ollama:")}{" "}{data.memory.ollama ? t("available") : t("unavailable")}. {data.memory.model}:{" "}
+            {data.memory.embedderPresent ? t("present") : t("missing or unobserved")} ·{" "}
+            {data.memory.dimensions}{" "}{t("dimensions.")}</p>
           <p>
-            Memory: {data.memory.backend} · {data.memory.repository} ({data.memory.database}).
-            Ollama: {data.memory.ollama ? "available" : "unavailable"}. {data.memory.model}:{" "}
-            {data.memory.embedderPresent ? "present" : "missing or unobserved"} ·{" "}
-            {data.memory.dimensions} dimensions.
-          </p>
-          <p>
-            Mem0: {data.memory.status}. Embedding probe:{" "}
-            {data.memory.embedder ? "passed" : "not passed"}. pgvector:{" "}
-            {data.memory.vectorStore ? "available" : "unavailable"}. CRUD:{" "}
-            {data.memory.crud ? "available" : "unavailable"}. Search:{" "}
-            {data.memory.search ? "available" : "unavailable"}. infer={String(data.memory.infer)}
+            Mem0: {t(data.memory.status)}{t(". Embedding probe:")}{" "}
+            {data.memory.embedder ? t("passed") : t("not passed")}{t(". pgvector:")}{" "}
+            {data.memory.vectorStore ? t("available") : t("unavailable")}{t(". CRUD:")}{" "}
+            {data.memory.crud ? t("available") : t("unavailable")}{t(". Search:")}{" "}
+            {data.memory.search ? t("available") : t("unavailable")}. infer={String(data.memory.infer)}
             {!data.memory.infer
-              ? " · automatic LLM extraction unavailable; explicit memory writes remain supported when CRUD is ready."
+              ? t(" · automatic LLM extraction unavailable; explicit memory writes remain supported when CRUD is ready.")
               : ""}
           </p>
           <p>
             TTS:{" "}
             {data.tts.configured
-              ? `${data.tts.provider} configured · ${data.tts.message ?? data.tts.observed}`
-              : "not configured · no voice model selected"}
-            . Voice conversation services:{" "}
+              ? t("{0} configured · {1}", data.tts.provider, data.tts.message ?? data.tts.observed)
+              : t("not configured · no voice model selected")}{t(". Voice conversation services:")}{" "}
             {data.stt.available && data.stt.selected && data.stt.vad && data.tts.available
-              ? "ready; microphone permission is checked in Voice Mode"
-              : "not ready for full speech input/output"}
+              ? t("ready; microphone permission is checked in Voice Mode")
+              : t("not ready for full speech input/output")}
             .
           </p>
-          <small>Checked {new Date(data.checkedAt).toLocaleTimeString()}</small>
-          <h3>Acoustic voice profiles</h3>
-          <p>
-            Record one speaker for at least a few seconds. The label names an acoustic profile; it
-            does not assign a person or grant trust.
-          </p>
-          <label className="yuvi-product-provider-field">
-            Profile label{" "}
+          <small>{t("Checked")}{" "}{new Date(data.checkedAt).toLocaleTimeString()}</small>
+          <h3>{t("Acoustic voice profiles")}</h3>
+          <p>{t("Record one speaker for at least a few seconds. The label names an acoustic profile; it does not assign a person or grant trust.")}</p>
+          <label className="yuvi-product-provider-field">{t("Profile label")}{" "}
             <input
               value={label}
               maxLength={100}
@@ -154,8 +142,7 @@ export function ProductLocalServices(): JSX.Element {
             />
           </label>
           {mode ? (
-            <button className="yuvi-product-button" disabled={busy} onClick={() => void finish()}>
-              Stop recording &amp; {mode === "enroll" ? "enroll" : "identify"}
+            <button className="yuvi-product-button" disabled={busy} onClick={() => void finish()}>{t("Stop recording &")}{" "}{t(mode === "enroll" ? "enroll" : "identify")}
             </button>
           ) : (
             <>
@@ -163,16 +150,12 @@ export function ProductLocalServices(): JSX.Element {
                 className="yuvi-product-button"
                 disabled={busy || !label.trim() || !data.stt.selected || !data.stt.speakerProfiles}
                 onClick={() => void start("enroll")}
-              >
-                Record enrollment
-              </button>
+              >{t("Record enrollment")}</button>
               <button
                 className="yuvi-product-button"
                 disabled={busy || !data.stt.selected || !data.stt.speakerProfiles}
                 onClick={() => void start("identify")}
-              >
-                Record recognition check
-              </button>
+              >{t("Record recognition check")}</button>
             </>
           )}
           {notice ? <p role="status">{notice}</p> : null}
@@ -187,18 +170,16 @@ export function ProductLocalServices(): JSX.Element {
                     void apiClient
                       .deleteVoiceProfile(profile.voiceProfileId)
                       .then(() => status.refresh())
-                      .catch(() => setNotice("Profile deletion failed."))
+                      .catch(() => setNotice(t("Profile deletion failed.")))
                       .finally(() => setBusy(false));
                   }}
-                >
-                  Delete acoustic profile
-                </button>
+                >{t("Delete acoustic profile")}</button>
               </li>
             ))}
           </ul>
         </>
       ) : (
-        <p>{status.loading ? "Checking local services…" : "No live status."}</p>
+        <p>{status.loading ? t("Checking local services…") : t("No live status.")}</p>
       )}
     </section>
   );

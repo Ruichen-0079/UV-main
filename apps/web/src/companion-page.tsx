@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import { publishSubtitleProjection } from "./subtitle-bus.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiClient } from "./api/client.js";
@@ -605,8 +606,8 @@ export function CompanionPage(): JSX.Element {
         <div
           data-tauri-drag-region
           className="absolute inset-x-0 top-0 z-30 h-7 cursor-grab touch-none select-none border-b border-white/5 bg-white/5"
-          aria-label="Drag window"
-          title="Drag window"
+          aria-label={t("Drag window")}
+          title={t("Drag window")}
         >
           <div className="pointer-events-none absolute left-1/2 top-1/2 h-1 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/25" />
         </div>
@@ -615,8 +616,8 @@ export function CompanionPage(): JSX.Element {
         className="pointer-events-none absolute left-2 top-9 z-20 rounded bg-black/40 px-2 py-1 text-xs"
         aria-live="polite"
       >
-        {presenceLabel(presence)} · {voiceStatusLabel(voiceStatus)} · voice{" "}
-        {voiceEnabled ? "on" : "off"}
+        {t(presenceLabel(presence))} · {t(voiceStatusLabel(voiceStatus))}{t("· voice")}{" "}
+        {voiceEnabled ? t("on") : t("off")}
       </div>
       <button
         type="button"
@@ -631,12 +632,12 @@ export function CompanionPage(): JSX.Element {
         }
       >
         {/* Label is the action target (not the current mode). Default is portrait/half. */}
-        {framing === "half" ? "Full body" : "Portrait"}
+        {framing === "half" ? t("Full body") : t("Portrait")}
       </button>
       {isTauriRuntime() && (
         <button
           type="button"
-          aria-label="Resize window"
+          aria-label={t("Resize window")}
           className="absolute bottom-0 right-0 z-20 flex h-5 w-5 cursor-se-resize items-end justify-end rounded-tl-md bg-white/10 p-0.5 text-white/70 hover:bg-white/20 hover:text-white"
           onPointerDown={(event) => {
             event.preventDefault();
@@ -656,9 +657,7 @@ export function CompanionPage(): JSX.Element {
         </button>
       )}
       {import.meta.env.DEV && (
-        <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/40 px-2 py-1 text-xs">
-          companion window · open the main window to chat
-        </div>
+        <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/40 px-2 py-1 text-xs">{t("companion window · open the main window to chat")}</div>
       )}
     </div>
   );

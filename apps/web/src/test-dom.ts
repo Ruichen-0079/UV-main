@@ -2,6 +2,7 @@ export type FakeNode = {
   nodeType: number;
   nodeName: string;
   tagName: string;
+  options: FakeNode[];
   ownerDocument: FakeDocument;
   parentNode: FakeNode | null;
   childNodes: FakeNode[];
@@ -50,6 +51,7 @@ export function installFakeDom(): { container: FakeNode; restore(): void } {
       nodeType,
       nodeName: nodeType === 3 ? "#text" : tag.toUpperCase(),
       tagName: tag.toUpperCase(),
+      get options() { return this.childNodes.flatMap((node: FakeNode) => node.tagName === "OPTION" ? [node] : node.childNodes.filter(child => child.tagName === "OPTION")); },
       ownerDocument: undefined as unknown as FakeDocument,
       parentNode: null,
       childNodes: [],

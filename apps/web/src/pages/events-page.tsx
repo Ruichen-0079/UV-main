@@ -1,3 +1,4 @@
+import { t } from "../locale.js";
 import { useState } from "react";
 import type { RuntimeEvent } from "../api/client.js";
 import { EventTable } from "../dashboard-events.js";
@@ -16,14 +17,14 @@ export function EventsPage(props: {
 
   return (
     <PageShell
-      title="Events"
+      title={t("Events")}
       subtitle="Recent runtime events from the server, with live WebSocket updates when connected."
     >
       <Panel
-        title="Event Stream"
+        title={t("Event Stream")}
         actions={
           <button className="button-secondary" onClick={props.onTogglePaused}>
-            {props.paused ? "Resume" : "Pause"}
+            {props.paused ? t("Resume") : t("Pause")}
           </button>
         }
       >
@@ -33,15 +34,14 @@ export function EventsPage(props: {
             value={filter}
             onChange={(event) => setFilter(event.target.value)}
           >
-            <option value="all">All event types</option>
+            <option value="all">{t("All event types")}</option>
             {types.map((type) => (
               <option key={type} value={type}>
                 {type}
               </option>
             ))}
           </select>
-          <div className="rounded-md border border-ink-200 px-3 py-2 text-sm text-ink-500">
-            WebSocket status: {props.wsStatus}
+          <div className="rounded-md border border-ink-200 px-3 py-2 text-sm text-ink-500">{t("WebSocket status:")}{" "}{props.wsStatus}
           </div>
         </div>
         <EventTable events={filtered} />

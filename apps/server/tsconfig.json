@@ -7,15 +7,38 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../../packages/character-abi" },
-    { "path": "../../packages/protocol" },
-    { "path": "../../packages/config" },
-    { "path": "../../packages/event-bus" },
-    { "path": "../../packages/memory" },
-    { "path": "../../packages/prompt-builder" },
-    { "path": "../../packages/providers" },
-    { "path": "../../packages/character-harness" },
-    { "path": "../../packages/cognition" },
-    { "path": "../../packages/core" }
+    {
+      "path": "../../packages/character-abi"
+    },
+    {
+      "path": "../../packages/protocol"
+    },
+    {
+      "path": "../../packages/config"
+    },
+    {
+      "path": "../../packages/event-bus"
+    },
+    {
+      "path": "../../packages/memory"
+    },
+    {
+      "path": "../../packages/prompt-builder"
+    },
+    {
+      "path": "../../packages/providers"
+    },
+    {
+      "path": "../../packages/character-harness"
+    },
+    {
+      "path": "../../packages/cognition"
+    },
+    {
+      "path": "../../packages/core"
+    },
+    {
+      "path": "../../packages/host-environment"
+    }
   ]
 }

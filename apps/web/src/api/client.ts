@@ -251,6 +251,8 @@ export type MemoryRecord = {
 };
 
 export type CreateMemoryRequest = {
+  emotionValence?: number;
+  emotionArousal?: number;
   type: string;
   subtype?: string | null;
   scope?: string;
@@ -988,7 +990,15 @@ export type ProactiveStreamOptions = {
 
 export type ProactiveTurnResult = CompletedMessage | ProactiveDecisionEvent;
 
+export type Live2DModel = { id: string; name: string; model: string; source: "user" | "configured"; url: string };
+export type Live2DModelState = { models: Live2DModel[]; activeId: string | null; activeUrl: string | null; intendedDefault: string };
 export const apiClient = {
+  getLive2DModels(signal?: AbortSignal): Promise<Live2DModelState> { return request("/live2d/models", signalRequestInit(signal)); },
+  importLive2DModel(input: { name: string; model: string; files: { path: string; base64: string }[] }): Promise<Live2DModel> {
+    return request("/live2d/models/import", { method: "POST", body: JSON.stringify(input) });
+  },
+  selectLive2DModel(id: string | null): Promise<Live2DModelState> { return request("/live2d/models/select", { method: "POST", body: JSON.stringify({ id }) }); },
+  removeLive2DModel(id: string): Promise<Live2DModelState> { return request(`/live2d/models/${encodeURIComponent(id)}`, { method: "DELETE" }); },
   setDashboardDevToken(token: string): void {
     dashboardDevToken = token;
   },
@@ -1073,6 +1083,7 @@ export const apiClient = {
   searchMemories(
     query: string,
     options: {
+      view?: "semantic" | "records";
       type?: string;
       subtype?: string;
       source?: string;
@@ -1122,6 +1133,7 @@ export const apiClient = {
   }> {
     const body: Record<string, string | number | boolean> = {
       q: query,
+      ...(options.view ? { view: options.view } : {}),
       limit: String(options.limit ?? 20)
     };
     if (options.type && options.type !== "all") {

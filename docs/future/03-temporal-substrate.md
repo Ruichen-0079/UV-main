@@ -1,6 +1,8 @@
 # Phase 3 — Temporal Substrate
 
-> **Status: THIN OPERATIONAL SUBSET IMPLEMENTED; FULL SHARED SUBSTRATE DEFERRED PENDING PROVEN NEED**
+> **Status: DEFERRED — thin operational time projection is CURRENT; a full shared substrate needs demonstrated gaps.**
+
+Current implementation is indexed in [the roadmap](README.md). Detailed phase plans below preserve historical design reasoning; they are not a new work queue.
 
 ## 1. Purpose
 

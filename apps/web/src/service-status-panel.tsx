@@ -1,3 +1,5 @@
+import { AsyncProgress } from "./async-progress.js";
+import { t } from "./locale.js";
 import {
   memo,
   useCallback,
@@ -91,7 +93,7 @@ export const ServiceStatusPanel = memo(function ServiceStatusPanel(): JSX.Elemen
   return (
     <section className="border-b border-ink-200 bg-white px-4 py-2">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold tracking-wide text-ink-500">Services</span>
+        <span className="text-xs font-semibold tracking-wide text-ink-500">{t("Services")}</span>
         {primary.map((service) => (
           <ServiceChip key={service.id} service={service} />
         ))}
@@ -102,7 +104,7 @@ export const ServiceStatusPanel = memo(function ServiceStatusPanel(): JSX.Elemen
             disabled={refreshBusy}
             onClick={onRefresh}
           >
-            {refreshBusy ? "Refreshing…" : "Refresh"}
+            {refreshBusy ? t("Refreshing…") : t("Refresh")}
           </button>
           <button
             type="button"
@@ -115,11 +117,8 @@ export const ServiceStatusPanel = memo(function ServiceStatusPanel(): JSX.Elemen
       </div>
 
       {!chat.available && (
-        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          Chat unavailable: {chat.reason ?? "Runtime is not healthy."}{" "}
-          <button type="button" className="underline" disabled={Boolean(busyId)} onClick={onRetryRuntime}>
-            Retry Runtime
-          </button>
+        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">{t("Chat unavailable:")}{" "}{chat.reason ?? "Runtime is not healthy."}{" "}
+          <button type="button" className="underline" disabled={Boolean(busyId)} onClick={onRetryRuntime}>{t("Retry Runtime")}</button>
         </div>
       )}
 
@@ -161,7 +160,7 @@ const ServiceChip = memo(function ServiceChip(props: {
       className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs ${tone}`}
       title={props.service.summary}
     >
-      <span className="font-medium">{shortLabel(props.service)}</span>
+      <span className="font-medium">{t(shortLabel(props.service))}</span>
       <span className="opacity-70">{props.service.status}</span>
       <span className="opacity-50">
         {props.service.ownership === "owned" ? "owned" : props.service.ownership}
@@ -195,12 +194,13 @@ const ServiceDetailCard = memo(function ServiceDetailCard(props: {
       {service.detail && <div className="mt-1 text-ink-500">{service.detail}</div>}
       {service.lastError && (
         <details className="mt-1">
-          <summary className="cursor-pointer text-ink-500">Error detail</summary>
+          <summary className="cursor-pointer text-ink-500">{t("Error detail")}</summary>
           <pre className="mt-1 whitespace-pre-wrap break-all text-[11px] text-rose-700">
             {service.lastError}
           </pre>
         </details>
       )}
+      {props.busy && <AsyncProgress label={t("Updating service…")} />}
       <div className="mt-2 flex flex-wrap gap-2">
         {service.canRestart && (
           <button
@@ -208,9 +208,7 @@ const ServiceDetailCard = memo(function ServiceDetailCard(props: {
             className="button-secondary text-xs"
             disabled={props.busy}
             onClick={props.onRestart}
-          >
-            Restart
-          </button>
+          >{t("Restart")}</button>
         )}
         {service.canStop && (
           <button
@@ -218,9 +216,7 @@ const ServiceDetailCard = memo(function ServiceDetailCard(props: {
             className="button-secondary text-xs"
             disabled={props.busy}
             onClick={props.onStop}
-          >
-            Stop
-          </button>
+          >{t("Stop")}</button>
         )}
         {service.managed && service.status !== "healthy" && service.canRestart && (
           <button
@@ -228,9 +224,7 @@ const ServiceDetailCard = memo(function ServiceDetailCard(props: {
             className="button-secondary text-xs"
             disabled={props.busy}
             onClick={props.onStart}
-          >
-            Start
-          </button>
+          >{t("Start")}</button>
         )}
       </div>
     </div>

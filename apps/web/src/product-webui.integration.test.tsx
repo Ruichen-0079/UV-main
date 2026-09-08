@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("./api/client.js", () => ({
   apiClient: {
+    getLive2DModels: async () => ({ models: [], activeId: null, activeUrl: null }),
     getRuntimeSettings: async () => state.settings,
     getProviderStatus: async () => ({ providers: {}, routes: {} }),
     getEvents: async () => [],

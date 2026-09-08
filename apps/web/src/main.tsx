@@ -1,3 +1,6 @@
+import { fetchUserSettings } from "./user-settings-client.js";
+import { isTauriRuntime } from "./tauri-window.js";
+import { initializeLocale, setLocale, LOCALE_STORAGE_KEY } from "./locale.js";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
@@ -28,10 +31,17 @@ function renderSurface(surface: DesktopSurface): JSX.Element {
   }
 }
 
+initializeLocale();
+window.addEventListener("storage", event => { if (event.key === LOCALE_STORAGE_KEY) window.location.reload(); });
+
 const rootElement = document.getElementById("root") as HTMLElement;
 const root = createRoot(rootElement);
 
-void resolveDesktopSurface().then((surface) => {
+void resolveDesktopSurface().then(async (surface) => {
+  if (isTauriRuntime()) {
+    try { const view = await fetchUserSettings(); setLocale(view.settings.app.language === "en" ? "en" : "zh-CN"); }
+    catch { /* Settings surfaces expose load errors; the local UI remains usable. */ }
+  }
   document.documentElement.dataset["yuviSurface"] = surface;
   root.render(<StrictMode>{renderSurface(surface)}</StrictMode>);
 });

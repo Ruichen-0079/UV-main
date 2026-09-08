@@ -1,3 +1,4 @@
+import { t } from "../locale.js";
 import { useEffect, useMemo, useReducer, useRef, useState, type MutableRefObject } from "react";
 import {
   ApiError,
@@ -601,12 +602,12 @@ export function ChatPage(): JSX.Element {
   }
 
   return (
-    <PageShell title="Chat" subtitle="Send text turns through the persistent Runtime stream.">
+    <PageShell title={t("Chat")} subtitle="Send text turns through the persistent Runtime stream.">
       <div className="grid grid-cols-[1fr_280px] gap-4">
-        <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
+        <Panel title={t("Chat History")} actions={<Pill status={requestStatus} />}>
           <div className="h-[420px] overflow-auto rounded-md border border-ink-100 bg-ink-50 p-3">
             {messages.length === 0 ? (
-              <EmptyState title="No chat yet" message="Send a message to exercise the runtime." />
+              <EmptyState title={t("No chat yet")} message={t("Send a message to exercise the runtime.")} />
             ) : (
               <div className="space-y-3">
                 {messages.map((message) => (
@@ -617,7 +618,7 @@ export function ChatPage(): JSX.Element {
                     <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase text-ink-500">
                       <span>{message.role}</span>
                       {message.role === "assistant" && message.status && (
-                        <span aria-live="polite">{chatStatusLabel(message.status)}</span>
+                        <span aria-live="polite">{t(chatStatusLabel(message.status))}</span>
                       )}
                     </div>
                     <ChatMessageContent role={message.role} content={message.content} />
@@ -633,9 +634,9 @@ export function ChatPage(): JSX.Element {
                     )}
                     {message.role === "user" && message.useMemory !== undefined && (
                       <div className="mt-2 flex flex-wrap gap-2 text-xs text-ink-500">
-                        <span>readMemory: {message.readMemory ? "true" : "false"}</span>
-                        <span>writeMemory: {message.writeMemory ? "true" : "false"}</span>
-                        <span>voice output: {message.voiceOutput ? "enabled" : "disabled"}</span>
+                        <span>{t("readMemory:")}{" "}{message.readMemory ? "true" : "false"}</span>
+                        <span>{t("writeMemory:")}{" "}{message.writeMemory ? "true" : "false"}</span>
+                        <span>{t("voice output:")}{" "}{message.voiceOutput ? t("enabled") : t("disabled")}</span>
                       </div>
                     )}
                     {message.role === "assistant" && (
@@ -646,18 +647,18 @@ export function ChatPage(): JSX.Element {
               </div>
             )}
           </div>
-          {error && <Notice tone="error" title="Send failed" message={error} />}
+          {error && <Notice tone="error" title={t("Send failed")} message={error} />}
           {lastTraceId && (
             <Notice
               tone="info"
-              title="Latest trace"
-              message={`${lastTraceId}. Open Prompt Preview to inspect the generated prompt for the latest turn.`}
+              title={t("Latest trace")}
+              message={t("{0}. Open Prompt Preview to inspect the generated prompt for the latest turn.", lastTraceId)}
             />
           )}
           <div className="mt-3 flex gap-2">
             <textarea
               className="field min-h-20"
-              placeholder="Type a runtime test message"
+              placeholder={t("Type a runtime test message")}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
@@ -666,42 +667,36 @@ export function ChatPage(): JSX.Element {
                   void send();
                 }
               }}
-              aria-label="Chat message"
+              aria-label={t("Chat message")}
             />
             {requestStatus === "sending" && activeRequestRef.current ? (
               <button
                 type="button"
                 className="button-secondary h-20 w-24"
                 onClick={stopGeneration}
-                aria-label="Stop generating"
-              >
-                Stop
-              </button>
+                aria-label={t("Stop generating")}
+              >{t("Stop")}</button>
             ) : (
               <button
                 type="button"
                 className="button-primary h-20 w-24"
                 disabled={Boolean(activeRequestRef.current) || !input.trim()}
                 onClick={() => void send()}
-                aria-label="Send message"
-              >
-                Send
-              </button>
+                aria-label={t("Send message")}
+              >{t("Send")}</button>
             )}
             {(voicePlaybackStatus === "synthesizing" || voicePlaybackStatus === "playing") && (
               <button
                 type="button"
                 className="button-secondary h-20 w-24"
                 onClick={stopSpeech}
-                aria-label="Stop speech"
-              >
-                Stop speech
-              </button>
+                aria-label={t("Stop speech")}
+              >{t("Stop speech")}</button>
             )}
           </div>
           {voiceOutput && voicePlaybackStatus !== "idle" && (
             <div className="mt-2 text-xs text-ink-500" aria-live="polite">
-              {dashboardVoicePlaybackStatusLabel(voicePlaybackStatus, actualPlaybackActive)}
+              {t(dashboardVoicePlaybackStatusLabel(voicePlaybackStatus, actualPlaybackActive))}
             </div>
           )}
         </Panel>
@@ -714,9 +709,9 @@ export function ChatPage(): JSX.Element {
               className="h-[420px] rounded-md bg-ink-900"
             />
           </Panel>
-          <Panel title="Turn Options">
+          <Panel title={t("Turn Options")}>
             <div className="space-y-4">
-              <Field label="Session ID">
+              <Field label={t("Session ID")}>
                 <input
                   className="field"
                   value={sessionId}
@@ -724,39 +719,36 @@ export function ChatPage(): JSX.Element {
                 />
               </Field>
               <Toggle
-                label="Read Memory"
+                label={t("Read Memory")}
                 checked={readMemory}
                 onChange={setReadMemory}
-                note="Controls retrieval and prompt injection."
+                note={t("Controls retrieval and prompt injection.")}
               />
               <Toggle
-                label="Write Memory"
+                label={t("Write Memory")}
                 checked={writeMemory}
                 onChange={setWriteMemory}
-                note="Controls whether this turn can create runtime memory."
+                note={t("Controls whether this turn can create runtime memory.")}
               />
               <Toggle
-                label="Prompt Preview"
+                label={t("Prompt Preview")}
                 checked={promptPreview}
                 onChange={setPromptPreview}
-                note="The latest prompt preview remains available in the Prompt page."
+                note={t("The latest prompt preview remains available in the Prompt page.")}
               />
               <Toggle
-                label="TTS output"
+                label={t("TTS output")}
                 checked={voiceOutput}
                 onChange={setVoiceOutput}
-                note="Synthesizes sentence segments locally while the text stream is arriving."
+                note={t("Synthesizes sentence segments locally while the text stream is arriving.")}
               />
               <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
-                <div className="label mb-2">Outgoing Payload</div>
+                <div className="label mb-2">{t("Outgoing Payload")}</div>
                 <pre className="max-h-52 overflow-auto whitespace-pre-wrap text-xs leading-5 text-ink-700">
                   {JSON.stringify(outgoingPayload, null, 2)}
                 </pre>
               </div>
-              <p className="text-xs leading-5 text-ink-500">
-                Chat uses the persistent SSE endpoint. Refreshing the page does not restore chat
-                history yet because no session-history API is available.
-              </p>
+              <p className="text-xs leading-5 text-ink-500">{t("Chat uses the persistent SSE endpoint. Refreshing the page does not restore chat history yet because no session-history API is available.")}</p>
             </div>
           </Panel>
         </div>
@@ -805,7 +797,7 @@ function ProviderMetadataSummary(props: {
   }
 
   if (typeof provider === "string") {
-    return <div className="mt-2 text-xs text-ink-500">provider: {provider}</div>;
+    return <div className="mt-2 text-xs text-ink-500">{t("provider:")}{" "}{provider}</div>;
   }
 
   return (
@@ -815,19 +807,17 @@ function ProviderMetadataSummary(props: {
           provider.mock ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"
         }`}
       >
-        {provider.mock ? "MOCK MODE" : `REAL PROVIDER / ${provider.name}`}
+        {provider.mock ? "MOCK MODE" : t("REAL PROVIDER / {0}", provider.name)}
       </span>
-      {provider.name && <span>provider: {provider.name}</span>}
-      {provider.model && <span>model: {provider.model}</span>}
+      {provider.name && <span>{t("provider:")}{" "}{provider.name}</span>}
+      {provider.model && <span>{t("model:")}{" "}{provider.model}</span>}
       {provider.latencyMs !== undefined && (
-        <span>latency: {formatLatency(provider.latencyMs)}</span>
+        <span>{t("latency:")}{" "}{formatLatency(provider.latencyMs)}</span>
       )}
-      {provider.healthStatus && <span>health: {provider.healthStatus}</span>}
-      {provider.tokenUsage && <span>tokens: {formatTokenUsage(provider.tokenUsage)}</span>}
+      {provider.healthStatus && <span>{t("health:")}{" "}{provider.healthStatus}</span>}
+      {provider.tokenUsage && <span>{t("tokens:")}{" "}{formatTokenUsage(provider.tokenUsage)}</span>}
       {provider.mock && (
-        <span className="basis-full text-amber-700">
-          Use Settings → Apply Now after saving a DeepSeek API key, or restart the server.
-        </span>
+        <span className="basis-full text-amber-700">{t("Use Settings → Apply Now after saving a DeepSeek API key, or restart the server.")}</span>
       )}
     </div>
   );

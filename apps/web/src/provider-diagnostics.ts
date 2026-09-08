@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import type {
   ProviderAttempt,
   ProviderHealth,
@@ -13,24 +14,24 @@ import type {
 export function providerReadinessLabel(readiness: ProviderHealth["readiness"]): string {
   switch (readiness) {
     case "ready":
-      return "ready (local configuration)";
+      return t("ready (local configuration)");
     case "not_ready":
-      return "not ready (local configuration)";
+      return t("not ready (local configuration)");
     default:
-      return "unknown (local configuration not loaded)";
+      return t("unknown (local configuration not loaded)");
   }
 }
 
 export function providerObservationLabel(observed: ProviderHealth["observed"]): string {
   switch (observed) {
     case "available":
-      return "available (cached live observation)";
+      return t("available (cached live observation)");
     case "degraded":
-      return "degraded (cached live observation)";
+      return t("degraded (cached live observation)");
     case "unavailable":
-      return "unavailable (cached live observation)";
+      return t("unavailable (cached live observation)");
     default:
-      return "unknown (no cached live observation)";
+      return t("unknown (no cached live observation)");
   }
 }
 
@@ -77,7 +78,7 @@ export function verificationModeExplanation(
 
 export function providerAttemptLabel(attempt: ProviderAttempt): string {
   if (attempt.status === "skipped") {
-    return "skipped — route was not called (config-only inspection)";
+    return t("skipped — route was not called (config-only inspection)");
   }
   return attempt.status;
 }

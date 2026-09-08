@@ -1,6 +1,6 @@
 # Atom 16 — Provider Fallback UX
 
-> **Status: DONE — existing provider/fallback UX baseline implemented**
+> **Status: HISTORICAL atom plan — consult the [current roadmap](../README.md) and campaign closures before treating any remaining item as work.**
 >
 > **Audit baseline:** `ec6df9d`
 >

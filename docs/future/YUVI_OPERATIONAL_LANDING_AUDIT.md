@@ -1,6 +1,8 @@
 # YUVI Operational Landing Audit
 
-**Status:** Phase 8 operational landing audit (Stage 2)
+> **Status: HISTORICAL — pre-campaign operational audit; A–G closure evidence supersedes its unimplemented claims.**
+
+**Historical audit stage:** Phase 8 operational landing audit (Stage 2)
 
 **Audit baseline:** `098204ba24b17383ccd249e1b12c2b10179378de` (`main`, 2026-09-02)
 

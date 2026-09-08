@@ -1,6 +1,8 @@
 # Phase 4 — Continuity and Attention
 
-> **Status: OPERATIONALLY PARTIALLY COVERED BY L0/L1 MEMORY CONTEXT; EXPLICIT CONTINUITY AUTHORITY DEFERRED PENDING PROVEN NEED**
+> **Status: DEFERRED — operational L0/L1 continuity is CURRENT; a separate continuity authority is not justified.**
+
+Current implementation is indexed in [the roadmap](README.md). Detailed phase plans below preserve historical design reasoning; they are not a new work queue.
 
 ## 1. Purpose
 

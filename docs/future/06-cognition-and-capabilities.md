@@ -1,6 +1,8 @@
 # Phase 6 — Cognition Core and Capability Semantics
 
-> **Status: PLANNED / NOT IMPLEMENTED**
+> **Status: CLOSED — bounded Runtime Cognition round-trip and admitted capabilities are implemented; expansion is GAP-DRIVEN.**
+
+Current implementation is indexed in [the roadmap](README.md). Detailed phase plans below preserve historical design reasoning; they are not a new work queue.
 
 ## 1. Purpose
 

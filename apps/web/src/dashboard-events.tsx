@@ -1,10 +1,11 @@
+import { t } from "./locale.js";
 import type { RuntimeEvent } from "./api/client.js";
 import { formatDate } from "./dashboard-format.js";
 import { EmptyState } from "./dashboard-ui.js";
 
 export function EventTable(props: { events: RuntimeEvent[] }): JSX.Element {
   if (props.events.length === 0) {
-    return <EmptyState title="No events" message="Runtime events will appear here." />;
+    return <EmptyState title={t("No events")} message={t("Runtime events will appear here.")} />;
   }
 
   return (
@@ -12,9 +13,9 @@ export function EventTable(props: { events: RuntimeEvent[] }): JSX.Element {
       <table className="w-full border-collapse">
         <thead className="sticky top-0 bg-ink-50">
           <tr>
-            <th className="table-cell">Type</th>
-            <th className="table-cell">Trace ID</th>
-            <th className="table-cell">Created</th>
+            <th className="table-cell">{t("Type")}</th>
+            <th className="table-cell">{t("Trace ID")}</th>
+            <th className="table-cell">{t("Created")}</th>
           </tr>
         </thead>
         <tbody>

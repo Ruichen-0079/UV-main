@@ -5,6 +5,8 @@ import { LumiCanvas } from "./lumi-canvas.js";
 import type { LumiControllerHandle } from "./lumi-live2d.js";
 import { createInitialCompanionPresence } from "./companion-presence.js";
 
+vi.mock("./api/client.js", () => ({ apiClient: { getLive2DModels: async () => ({ activeUrl: "/api/live2d/test/test.model3.json" }) } }));
+
 vi.mock("./lumi-live2d.js", async () => {
   const actual = await vi.importActual<typeof import("./lumi-live2d.js")>("./lumi-live2d.js");
 

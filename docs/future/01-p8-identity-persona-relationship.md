@@ -1,6 +1,8 @@
 # Phase 1 — P8 Identity, Persona, and Relationship
 
-> **Status: P8-1A, P8-1B, P8-1C, P8-1D, AND P8-1E IMPLEMENTED; P8-1F AND LATER P8 STAGES PLANNED**
+> **Status: CLOSED — P8 through P8-1F is implemented; later speculative extensions are GAP-DRIVEN.**
+
+Current implementation is indexed in [the roadmap](README.md). Detailed phase plans below preserve historical design reasoning; they are not a new work queue.
 
 ## 1. Purpose
 
