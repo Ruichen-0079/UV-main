@@ -735,6 +735,7 @@ export class RuntimeOrchestrator {
       observationId,
       ...(observation.captureEpoch ? { captureEpoch: observation.captureEpoch } : {}),
       ...(observation.language ? { language: observation.language } : {}),
+      ...(observation.confidence !== undefined ? { confidence: observation.confidence } : {}),
       ...(voiceProfileId ? { voiceProfileId } : {}),
       segments: segments.map((segment) => ({
         ...(segment.segmentId ? { segmentId: segment.segmentId } : {}),
