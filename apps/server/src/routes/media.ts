@@ -1,3 +1,4 @@
+import { retainSpeechReview } from "../services/voice-review.js";
 import { SpeechCaptureFenceError } from "@companion/core";
 import {
   ProviderError,
@@ -290,6 +291,7 @@ export async function registerMediaRoutes(
         }
       });
       if (parsed.data.preview) return reply.send({ text: output.text, language: output.language });
+      retainSpeechReview(parsed.data.audioBase64, output);
       const observation = context.runtime.admitFinalizedSpeechObservation(output, {
         sessionId: parsed.data.sessionId,
         ...(parsed.data.captureEpoch ? { captureEpoch: parsed.data.captureEpoch } : {})
@@ -338,6 +340,7 @@ export async function registerMediaRoutes(
           ...(parsed.data.mockText ? { mockTranscription: parsed.data.mockText } : {})
         }
       });
+      retainSpeechReview(parsed.data.audioBase64, transcription);
       const observation = context.runtime.admitFinalizedSpeechObservation(transcription, {
         sessionId: parsed.data.sessionId,
         ...(parsed.data.captureEpoch ? { captureEpoch: parsed.data.captureEpoch } : {})

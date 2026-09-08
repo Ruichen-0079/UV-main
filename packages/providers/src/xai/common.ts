@@ -7,6 +7,8 @@ import {
 import { createTransportAbort, type TransportAbort } from "../transport-abort.js";
 
 export type XAIProviderOptions = {
+  provider?: string;
+  allowAnonymous?: boolean;
   apiKey: string | undefined;
   baseUrl: string;
   model: string | undefined;
@@ -58,7 +60,7 @@ export function ensureXAIConfig(
   capability: ProviderCapability,
   options: XAIProviderOptions
 ): void {
-  if (!options.apiKey) {
+  if (!options.apiKey && !options.allowAnonymous) {
     throw new ProviderError({
       provider,
       capability,
@@ -88,7 +90,7 @@ export async function xaiFetch(
   return fetch(`${trimTrailingSlash(options.baseUrl)}${path}`, {
     ...init,
     headers: {
-      authorization: `Bearer ${options.apiKey}`,
+      ...(options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {}),
       ...init.headers
     },
     signal

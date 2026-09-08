@@ -201,7 +201,7 @@ export function sendMessageError(
       message: error.message,
       attemptedProviders: error.attemptedProviders,
       setup:
-        "Configure the selected provider in .env.local and use Settings > Apply Now, or set PROVIDER_ALLOW_MOCKS=true for explicit offline/mock development.",
+        "Configure Chat in Product configuration (Provider → Model → Capability Route) and use Save & apply, or set PROVIDER_ALLOW_MOCKS=true for explicit offline/mock development.",
       traceId
     });
   }

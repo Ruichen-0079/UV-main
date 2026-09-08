@@ -1,3 +1,4 @@
+import { parseProductConfiguration, modelEndpoint, type ProductConfiguration, type CapabilityRoute } from "./product-configuration.js";
 import type {
   ChatInput,
   ChatOutput,
@@ -64,6 +65,8 @@ import { LocalSTTProvider } from "./local/LocalSTTProvider.js";
 import { createTransportAbort, type TransportAbort } from "./transport-abort.js";
 
 export type ProviderRegistryConfig = {
+  product?: ProductConfiguration;
+  observeProductCall?: (cap: CapabilityRoute, id: string, available: boolean) => void;
   chatContextWindows?: Partial<Record<string, number>>;
   environment: "development" | "test" | "production";
   allowMocks: boolean;
@@ -196,6 +199,9 @@ export class ProviderRegistry implements ProviderResolver {
   private readonly sttProviders = new Map<string, STTProvider>();
   private readonly visionProviders = new Map<string, VisionProvider>();
   private readonly embeddingProviders = new Map<string, EmbeddingProvider>();
+  private readonly proactiveObservations = new Map<string, "available" | "unavailable">();
+  recordProactiveObservation(id: string, available: boolean) { this.proactiveObservations.set(id, available ? "available" : "unavailable"); }
+  getProactiveRouteObservations() { return Object.fromEntries(this.proactiveObservations); }
   private proactiveDecisionProvider: ProactiveDecisionProvider | undefined;
   private assistantContinuationProvider: AssistantContinuationProvider | undefined;
   /**
@@ -292,6 +298,7 @@ export class ProviderRegistry implements ProviderResolver {
   }
 
   hasProactiveRoute(): boolean {
+    if (this.config.product) return this.config.product.routes.proactive.length > 0;
     return (
       Boolean(
         this.config.openaiCompatible.baseUrl &&
@@ -442,6 +449,11 @@ export class ProviderRegistry implements ProviderResolver {
   }
 
   private isConfigured(capability: ProviderCapability, name: string): boolean {
+    if (this.config.product) {
+      const m = this.config.product.models.find(m => m.id === name);
+      const p = this.config.product.providers.find(p => p.id === m?.providerId);
+      return Boolean(m?.enabled && m.capabilities.includes(capability) && p && (!["dashscope", "xai-tts"].includes(p.adapter) || p.apiKey));
+    }
     if ((capability === "chat" || capability === "reasoning") && name === "deepseek") {
       return Boolean(
         this.config.deepseek.apiKey &&
@@ -600,6 +612,11 @@ export class ProviderRegistry implements ProviderResolver {
     capability: ProviderCapability,
     name: string
   ): Pick<ProviderHealth, "baseUrl" | "model" | "dimensions"> {
+    if (this.config.product) {
+      const m = this.config.product.models.find(m => m.id === name);
+      const p = this.config.product.providers.find(p => p.id === m?.providerId);
+      return { model: m?.modelId, baseUrl: p?.baseUrl, dimensions: m?.dimensions };
+    }
     if ((capability === "chat" || capability === "reasoning") && name === "deepseek") {
       return {
         baseUrl: this.config.deepseek.baseUrl,
@@ -754,9 +771,22 @@ function providerStatusMessage(input: {
 
 export function createProviderRegistryFromEnv(env: ProviderEnv = process.env): ProviderRegistry {
   const config = createProviderRegistryConfigFromEnv(env);
+  if (env["YUVI_PRODUCT_CONFIGURATION"]) {
+    config.product = parseProductConfiguration(JSON.parse(env["YUVI_PRODUCT_CONFIGURATION"]));
+    for (const cap of ["chat", "reasoning", "embedding", "vision", "stt", "tts"] as const) {
+      config.chains[cap] = config.product.routes[cap];
+      config.defaults[cap] = config.chains[cap][0] ?? "unavailable";
+    }
+    config.chatContextWindows = Object.fromEntries(config.product.models.filter(m => m.contextWindow !== null).map(m => [m.id, m.contextWindow!]));
+    config.allowMocks = false;
+  }
   validateQwen512DurableEmbeddingConfig(config);
 
   const registry = new ProviderRegistry(config);
+  config.observeProductCall = (cap, id, available) => {
+    if (cap === "proactive") registry.recordProactiveObservation(id, available);
+    else registry.recordLiveVerification({ capability: cap, provider: id, observed: available ? "available" : "unavailable" });
+  };
   registry.registerChatProvider(resolveChatProvider(config));
   registry.registerReasoningProvider(resolveReasoningProvider(config));
   registry.registerTTSProvider(resolveTTSProvider(config));
@@ -1273,6 +1303,10 @@ function resolveChatProvider(config: ProviderRegistryConfig): ChatProvider {
 function resolveProactiveDecisionProvider(
   config: ProviderRegistryConfig
 ): ProactiveDecisionProvider {
+  if (config.product) {
+    const providers = config.product.routes.proactive.map(id => productAdapter(config, "proactive", id) as ProactiveDecisionProvider);
+    return providers.length ? { name: providers[0]!.name, decide: (input, options) => runProviderChain(providers, "chat", p => p.decide(input, options), options) } : new UnavailableProactiveDecisionProvider("Proactive is not configured.");
+  }
   const { apiKey, baseUrl, proactiveDecisionModel } = config.openaiCompatible;
   if (!apiKey || !baseUrl || !proactiveDecisionModel) {
     if (config.allowMocks) {
@@ -1294,6 +1328,11 @@ function resolveProactiveDecisionProvider(
 function resolveAssistantContinuationProvider(
   config: ProviderRegistryConfig
 ): AssistantContinuationProvider {
+  if (config.product) {
+    const m = config.product.models.find(m => m.id === config.product!.routes.chat[0]);
+    const p = config.product.providers.find(p => p.id === m?.providerId);
+    return m?.continuationFormat && p ? new OpenAICompatibleAssistantContinuationProvider({ provider: m.id, baseUrl: modelEndpoint(p.baseUrl), model: m.modelId, apiKey: p.apiKey }, m.continuationFormat) : new UnavailableAssistantContinuationProvider("Assistant continuation format is not configured.");
+  }
   const { apiKey, baseUrl, chatModel, assistantContinuationFormat } = config.openaiCompatible;
   if (!apiKey || !baseUrl || !chatModel || !assistantContinuationFormat) {
     if (config.allowMocks) {
@@ -1397,7 +1436,7 @@ function unavailableProviderMessage(
 ): string {
   const fields = missingFieldsForConfig(capability, name, config);
   const missing = fields.length ? " Missing required credentials or model configuration." : "";
-  return `${name} ${capability} provider is unavailable.${missing} Configure the required environment variables or set PROVIDER_ALLOW_MOCKS=true for intentional offline/mock mode.`;
+  return `${name} ${capability} provider is unavailable.${missing} Configure Provider → Model → Capability Route in Product configuration and use Save & apply, or set PROVIDER_ALLOW_MOCKS=true for intentional offline/mock mode.`;
 }
 
 function missingFieldsForConfig(
@@ -1495,7 +1534,9 @@ function resolveConfiguredProvider<TProvider>(input: {
   createMock(name: string): TProvider;
   createUnavailable(name: string): TProvider;
 }): TProvider {
-  const provider = input.factories[input.name]?.(input.config);
+  const provider = input.config.product
+    ? productAdapter(input.config, input.capability, input.name) as TProvider | undefined
+    : input.factories[input.name]?.(input.config);
   if (provider) {
     return provider;
   }
@@ -2281,6 +2322,7 @@ class UnavailableAssistantContinuationProvider implements AssistantContinuationP
 }
 
 type OpenAICompatibleTextOptions = {
+  temperature?: number;
   provider: string;
   apiKey?: string | undefined;
   baseUrl: string;
@@ -2436,7 +2478,7 @@ class OpenAICompatibleChatProvider implements ChatProvider {
       "chat",
       {
         messages: input.messages,
-        temperature: input.temperature,
+        temperature: input.temperature ?? this.options.temperature,
         maxTokens: input.maxTokens ?? input.maxOutputTokens,
         stopSequences: input.stopSequences
       },
@@ -2453,7 +2495,7 @@ class OpenAICompatibleChatProvider implements ChatProvider {
   }
 
   streamReply(input: ChatInput, options: ChatStreamOptions = {}) {
-    return streamOpenAICompatibleChatCompletion(this.options, "chat", input, options);
+    return streamOpenAICompatibleChatCompletion(this.options, "chat", { ...input, temperature: input.temperature ?? this.options.temperature }, options);
   }
 }
 
@@ -2490,7 +2532,7 @@ class OpenAICompatibleReasoningProvider implements ReasoningProvider {
       "reasoning",
       {
         messages: input.messages,
-        temperature: input.temperature,
+        temperature: input.temperature ?? this.options.temperature,
         maxTokens: input.maxTokens ?? input.maxOutputTokens
       },
       options
@@ -2569,7 +2611,7 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
 
     try {
       throwIfOpenAICompatibleTransportAborted(this.name, "embedding", transport);
-      if (!this.apiKey) {
+      if (!this.apiKey && !this.config.product) {
         throw unavailableError(this.name, "embedding", "EMBEDDING_API_KEY is required.");
       }
       if (!this.model) {
@@ -2584,7 +2626,7 @@ class OpenAICompatibleEmbeddingProvider extends UnimplementedEmbeddingProvider {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${this.apiKey}`
+          ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
         },
         body: JSON.stringify({
           model: this.model,
@@ -3405,4 +3447,46 @@ function decodeMockText(value: string | undefined): string | undefined {
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
+}
+
+/** Instantiate only adapters with a real implementation for the declared route. */
+function createProductAdapter(config: ProviderRegistryConfig, cap: CapabilityRoute, id: string): ChatProvider | ReasoningProvider | ProactiveDecisionProvider | EmbeddingProvider | VisionProvider | STTProvider | TTSProvider | undefined {
+  const m = config.product!.models.find(m => m.id === id);
+  const p = config.product!.providers.find(p => p.id === m?.providerId);
+  if (!m?.enabled || !p || !m.capabilities.includes(cap)) return undefined;
+  const options = { provider: m.id, baseUrl: modelEndpoint(p.baseUrl), apiKey: p.apiKey, model: m.modelId, temperature: m.temperature };
+  if (p.adapter === "openai-compatible") {
+    if (cap === "chat") return new OpenAICompatibleChatProvider(options);
+    if (cap === "reasoning") return new OpenAICompatibleReasoningProvider(options);
+    if (cap === "proactive") return new OpenAICompatibleProactiveDecisionProvider(options);
+    if (cap === "embedding") return new OpenAICompatibleEmbeddingProvider(config, { ...options, dimensions: m.dimensions });
+    if (cap === "vision") return new XAIVisionProvider({ ...options, allowAnonymous: true });
+  }
+  // Preserve method receivers on specialized adapters while giving every model its own route identity.
+  let adapter: STTProvider | TTSProvider | undefined;
+  if (p.adapter === "local-stt") adapter = new LocalSTTProvider({ baseUrl: p.baseUrl, model: m.modelId });
+  if (p.adapter === "dashscope" && p.apiKey) adapter = new DashScopeSTTProvider({ ...options, baseUrl: p.baseUrl });
+  if (p.adapter === "xai-tts" && p.apiKey) adapter = new XAITTSProvider({ ...options, defaultVoice: m.voice });
+  if (p.adapter === "dots-tts") adapter = new DotsTTSProvider({ baseUrl: p.baseUrl, model: m.modelId });
+  if (p.adapter === "gpt-sovits") adapter = ttsProviderFactories["local"]!({ ...config, local: { ...config.local, ttsModel: m.modelId }, gptSovits: { ...config.gptSovits, wrapperBaseUrl: p.baseUrl } });
+  return adapter ? new Proxy(adapter, { get(target, key) { if (key === "name") return m.id; const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value; } }) : undefined;
+}
+
+function productAdapter(config: ProviderRegistryConfig, cap: CapabilityRoute, id: string) {
+  const adapter = createProductAdapter(config, cap, id);
+  if (!adapter) return undefined;
+  const methods = new Set(["generateReply", "generateReasoning", "decide", "embedText", "analyzeImage", "transcribeAudio", "synthesizeSpeech"]);
+  return new Proxy(adapter, { get(target, key) {
+    const value = Reflect.get(target, key);
+    if (typeof value !== "function") return value;
+    if (key === "streamReply") return async function* (...args: unknown[]) {
+      try { yield* value.apply(target, args); config.observeProductCall?.(cap, id, true); }
+      catch (error) { if (!(error instanceof ProviderError && error.code === ProviderErrorCode.Cancelled)) config.observeProductCall?.(cap, id, false); throw error; }
+    };
+    if (!methods.has(String(key))) return value.bind(target);
+    return async (...args: unknown[]) => {
+      try { const output = await value.apply(target, args); config.observeProductCall?.(cap, id, true); return output; }
+      catch (error) { if (!(error instanceof ProviderError && error.code === ProviderErrorCode.Cancelled)) config.observeProductCall?.(cap, id, false); throw error; }
+    };
+  } });
 }

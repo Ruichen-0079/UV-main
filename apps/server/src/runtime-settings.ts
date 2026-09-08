@@ -1,6 +1,11 @@
 import { CHARACTER_OUTPUT_LANGUAGES } from "@companion/character-abi";
 
 export const editableKeys = [
+  "YUVI_PRODUCT_CONFIGURATION",
+  "MEMORY_SUBJECT_USER_ID",
+  "MEMORY_PERSONA_ID",
+  "PROACTIVE_SCORE_THRESHOLD",
+  "PROACTIVE_EVALUATION_INTERVAL_MS",
   "OUTPUT_LANGUAGE",
   "MEMORY_REPOSITORY",
   "MEMORY_BACKEND",
@@ -94,6 +99,7 @@ export const editableKeys = [
 export type EditableRuntimeSetting = (typeof editableKeys)[number];
 
 export const secretKeys = new Set<EditableRuntimeSetting>([
+  "YUVI_PRODUCT_CONFIGURATION",
   "DATABASE_URL",
   "DEEPSEEK_API_KEY",
   "OPENAI_COMPATIBLE_API_KEY",

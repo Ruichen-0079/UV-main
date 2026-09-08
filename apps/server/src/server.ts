@@ -1,3 +1,5 @@
+import { registerPeopleVoiceRoutes } from "./routes/people-voices.js";
+import { registerProductRoutes } from "./routes/product.js";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 import type { ServerConfig } from "./config.js";
@@ -114,6 +116,8 @@ export async function buildServer(config: ServerConfig) {
   await registerLocalServiceRoutes(app, context, config);
   await registerProviderRoutes(app, context, config);
   await registerSettingsRoutes(app, context, config);
+  await registerProductRoutes(app, context, config);
+  await registerPeopleVoiceRoutes(app, context, config);
   await registerSystemRoutes(app, config);
   await registerMessageRoutes(app, context);
   await registerMessageStreamRoutes(app, context);

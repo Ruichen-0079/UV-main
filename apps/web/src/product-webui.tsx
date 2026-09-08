@@ -148,7 +148,7 @@ export function ProductWebUI(): JSX.Element {
             <section className="yuvi-product-hero">
               <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("Models & Providers")}</div>
               <h1 className="m-0 text-2xl font-semibold">{t("Model connections")}</h1>
-              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Configure model connections here. Choose provider order in AI Routing.")}</p>
+              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Providers, models, routing, and onboarding share one saved configuration.")}</p>
             </section>
             <ProductModelsProviders />
             <ProductMemorySettings />

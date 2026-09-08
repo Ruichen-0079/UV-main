@@ -1222,3 +1222,42 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
     overflow-x: auto;
   }
 }
+
+/* Shared configuration surface: every navigation entry renders this authority. */
+.yuvi-configuration { line-height: 1.55; }
+.yuvi-configuration h1 { font-size: 1.4rem; font-weight: 650; }
+.yuvi-configuration h2 { font-size: 1.18rem; font-weight: 650; }
+.yuvi-configuration h3 { font-size: 1rem; font-weight: 600; }
+.yuvi-configuration p { color: var(--yuvi-muted); }
+.yuvi-configuration button {
+  border: 1px solid var(--yuvi-border, #d9cec5);
+  border-radius: 10px;
+  padding: .5rem .85rem;
+  margin: .2rem;
+  background: var(--yuvi-panel, #fffaf5);
+  font-size: .9rem;
+  justify-self: start;
+}
+.yuvi-configuration button:hover:not(:disabled) { background: #f2ded0; color: #332923; }
+.yuvi-configuration button:disabled { opacity: .45; cursor: not-allowed; }
+.yuvi-configuration label { display: block; font-size: .92rem; }
+.yuvi-configuration input:not([type="checkbox"]):not([type="range"]),
+.yuvi-configuration select, .yuvi-configuration textarea {
+  border: 1px solid var(--yuvi-border, #d9cec5);
+  border-radius: 8px;
+  padding: .5rem .65rem;
+  margin-top: .3rem;
+  background: var(--yuvi-panel, #fffaf5);
+  color: inherit;
+  max-width: 100%;
+}
+.yuvi-configuration input[type="checkbox"] { margin-right: .45rem; }
+.yuvi-configuration input[type="range"] { display: block; width: min(100%, 440px); margin: .8rem 0; }
+.yuvi-configuration fieldset { padding: .7rem; border: 1px solid var(--yuvi-border, #d9cec5); border-radius: 8px; }
+.yuvi-configuration fieldset label { display: inline-flex; align-items: center; margin: .3rem .8rem .3rem 0; }
+.yuvi-configuration header ol { list-style: decimal inside; }
+.yuvi-configuration [role="alert"] { border-left: 3px solid #aa744f; padding: .6rem; }
+@media (min-width: 850px) {
+  .yuvi-configuration form { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  .yuvi-configuration form fieldset { grid-column: 1 / -1; }
+}
