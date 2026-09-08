@@ -102,6 +102,12 @@ export function loadSupervisorConfig(input: LoadSupervisorConfigInput): Supervis
 /**
  * Packaged install layout: no repo .env, no PowerShell dev runner, no pnpm/tsx.
  */
+
+function externalPackagedSidecarsEnabled(env: Record<string, string>): boolean {
+  const v = env["YUVI_PACKAGED_EXTERNAL_SIDECARS"]?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
 export function loadPackagedSupervisorConfig(
   input: LoadPackagedSupervisorConfigInput
 ): SupervisorConfig {
@@ -113,20 +119,22 @@ export function loadPackagedSupervisorConfig(
   const runtimeManifestPath = canonicalPath(
     input.runtimeManifestPath ?? path.join(resourceRoot, "runtime", "runtime-manifest.json")
   );
-  const mem0ManifestPath = canonicalPath(
-    input.mem0ManifestPath?.trim() || path.join(resourceRoot, "mem0", "mem0-manifest.json")
-  );
-  // Validate early so bootstrap fails with a clear packaging error.
-  readRuntimeManifest(runtimeManifestPath);
-  const mem0Manifest = readMem0Manifest(mem0ManifestPath);
-  resolveMem0ManifestExecutable(mem0ManifestPath, mem0Manifest);
-
   // Packaged: process env + optional non-secret seed only (never install-dir .env).
   const env: Record<string, string> = { ...(input.env ?? {}) };
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === "string" && env[key] === undefined) {
       env[key] = value;
     }
+  }
+  const externalSidecars = externalPackagedSidecarsEnabled(env);
+  const mem0ManifestPath = canonicalPath(
+    input.mem0ManifestPath?.trim() || path.join(resourceRoot, "mem0", "mem0-manifest.json")
+  );
+  // Validate early so bootstrap fails with a clear packaging error.
+  readRuntimeManifest(runtimeManifestPath);
+  if (!externalSidecars) {
+    const mem0Manifest = readMem0Manifest(mem0ManifestPath);
+    resolveMem0ManifestExecutable(mem0ManifestPath, mem0Manifest);
   }
 
   const appRoots = resolveAppRoots({ env });
@@ -230,8 +238,10 @@ export function deriveConfigFromEnv(
   const memoryBackend = envString(env, "MEMORY_BACKEND", "mem0") === "legacy" ? "legacy" : "mem0";
 
   const ownershipRoot = layout.mode === "development" ? layout.repositoryRoot : layout.resourceRoot;
+  const externalSidecars = externalPackagedSidecarsEnabled(env);
   const managedMem0 =
     layout.mode === "packaged" &&
+    !externalSidecars &&
     memoryBackend === "mem0" &&
     envFlag(env, "YUVI_AUTOSTART_MEM0", false);
 
@@ -241,7 +251,7 @@ export function deriveConfigFromEnv(
     memoryBackend,
     autostartRuntime: envFlag(env, "YUVI_AUTOSTART_RUNTIME", true),
     autostartMem0:
-      layout.mode === "packaged"
+      layout.mode === "packaged" && !externalSidecars
         ? managedMem0
         : envFlag(env, "YUVI_AUTOSTART_MEM0", memoryBackend === "mem0"),
     autostartTts: envFlag(env, "YUVI_AUTOSTART_TTS", false),
@@ -252,14 +262,14 @@ export function deriveConfigFromEnv(
     ollamaUrl,
     localSttUrl,
     localSttStart:
-      layout.mode === "packaged"
+      layout.mode === "packaged" && !externalPackagedSidecarsEnabled(env)
         ? resolvePackagedLocalSttStart(layout, env, localSttUrl)
         : resolveOptionalStartCommand(env, "YUVI_LOCAL_STT_START_COMMAND", ownershipRoot),
     autostartLocalStt: envFlag(env, "YUVI_AUTOSTART_LOCAL_STT", false),
     databaseUrl,
     runtimeStart: resolveRuntimeStartForLayout(layout, env, runtimePort),
     ...(() => {
-      if (layout.mode === "packaged") {
+      if (layout.mode === "packaged" && !externalPackagedSidecarsEnabled(env)) {
         return {
           mem0Start: managedMem0 ? resolvePackagedMem0Start(layout, env, mem0Url) : null,
           mem0StartError: null as string | null
@@ -271,11 +281,11 @@ export function deriveConfigFromEnv(
       return { mem0Start: resolved.start, mem0StartError: resolved.error };
     })(),
     ttsWrapperStart:
-      layout.mode === "packaged"
+      layout.mode === "packaged" && !externalPackagedSidecarsEnabled(env)
         ? null
         : resolveOptionalStartCommand(env, "YUVI_TTS_WRAPPER_START_COMMAND", ownershipRoot),
     ttsUpstreamStart:
-      layout.mode === "packaged"
+      layout.mode === "packaged" && !externalPackagedSidecarsEnabled(env)
         ? null
         : resolveOptionalStartCommand(env, "YUVI_TTS_UPSTREAM_START_COMMAND", ownershipRoot),
     ...postgres
@@ -289,6 +299,7 @@ export function resolvePostgresMode(
   const explicit = env["YUVI_POSTGRES_MODE"]?.trim().toLowerCase();
   if (explicit === "external") return "external";
   if (explicit === "private") return "private";
+  if (layout.mode === "packaged" && externalPackagedSidecarsEnabled(env)) return "external";
   return layout.mode === "packaged" ? "private" : "external";
 }
 
@@ -446,7 +457,7 @@ export function resolvePackagedRuntimeStart(
       SERVER_PORT: runtimePort,
       YUVI_RUNTIME_RESOURCE_DIR: layout.resourceRoot,
       YUVI_RUNTIME_DATA_DIR: dataDir,
-      YUVI_RUNTIME_ENV_DIR: dataDir,
+      YUVI_RUNTIME_ENV_DIR: env["YUVI_RUNTIME_ENV_DIR"]?.trim() || dataDir,
       YUVI_RUNTIME_MIGRATIONS_DIR: path.join(runtimeDir, "migrations"),
       YUVI_PACKAGED: "1",
       ...live2dEnv

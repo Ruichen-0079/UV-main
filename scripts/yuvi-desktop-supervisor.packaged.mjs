@@ -32,7 +32,7 @@ async function main() {
           resourceRoot: required(args, "resource-root"),
           dataRoot: required(args, "state-root"),
           runtimeManifestPath: required(args, "runtime-manifest"),
-          mem0ManifestPath: required(args, "mem0-manifest"),
+          mem0ManifestPath: args["mem0-manifest"],
           controlPort: args.port ? Number(args.port) : 0,
           controlHost: "127.0.0.1"
         })
