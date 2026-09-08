@@ -1,6 +1,6 @@
 {
   "gate": "linux-release-gate",
-  "authority_sha": "5064c29fa85da959b6a5b29a1655bfdadb2a6a3d",
+  "authority_sha": "2bcee41ac731729a7ccd514016f979f81e9b3747",
   "stable_install_root": "/home/ruichen/.local/share/yuvi/linux-install",
   "supported_release_contract": "yuvi-linux-daily-packaged",
   "source_isolation": "PASS",
