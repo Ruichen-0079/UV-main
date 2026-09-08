@@ -286,7 +286,10 @@ function projectCharacterFacing(input: {
           input.compressed || input.directContextText.trim().length > 4000
             ? ("PARTIAL" as const)
             : ("KNOWN" as const),
-        summary: trimSummary(input.directContextText, 4000),
+        summary: compressHierarchicalContext({
+          sections: [{ name: "RECENT_CONVERSATION", content: input.directContextText.trim() }],
+          maxCharacters: 4000
+        }).sections[0]!.content,
         provenanceReferences: ["direct-context"]
       }
     : { state: "EMPTY" as const };

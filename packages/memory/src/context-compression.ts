@@ -131,11 +131,13 @@ function compressSection(section: HierarchicalContextSection): string {
       ...lines.slice(-2)
     ].join("\n");
   } else {
-    if (section.content.length <= target) return section.content;
+    next = section.content;
+  }
+  if (next.length > target) {
     const recent = section.name === "DirectContext" || section.name === "RECENT_CONVERSATION";
     next = recent
-      ? `...${section.content.slice(-(target - 3)).trimStart()}`
-      : `${section.content.slice(0, target - 3).trimEnd()}...`;
+      ? `...${next.slice(-(target - 3)).trimStart()}`
+      : `${next.slice(0, target - 3).trimEnd()}...`;
   }
   const markers = [
     ...new Set(section.content.match(new RegExp(EPISTEMIC_MARKER.source, "gi")) ?? [])
