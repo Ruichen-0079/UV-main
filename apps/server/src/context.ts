@@ -1,3 +1,6 @@
+import { join } from "node:path";
+import { getRuntimeEnvDir } from "@companion/config";
+import { createFileP8CorrectionStore, createFileVoiceBindingReferences } from "@companion/core";
 import { captureKdeScreen, screenCaptureAvailable } from "./screen-capture.js";
 import type { RuntimeLogger } from "@companion/core";
 import { RuntimeOrchestrator, type RuntimeProactiveStateStore } from "@companion/core";
@@ -53,7 +56,7 @@ import type { CharacterHarnessCognitionRequest } from "@companion/character-harn
 import { composeServerCharacterSoftSmileEmbodiedEffect } from "./character-embodied-soft-smile-composition.js";
 import { EmbodiedPresentationBridge } from "./embodied-presentation-bridge.js";
 import { createServerCharacterPort } from "./character-runtime.js";
-import { executeServerCognitionRoundTrip } from "./cognition-roundtrip.js";
+import { executeProductionCognition } from "./cognition-production.js";
 
 export type AppContext = {
   eventBus: InMemoryEventBus;
@@ -234,6 +237,13 @@ export async function createAppContext(
     return new RuntimeOrchestrator({
       ...(screenCaptureAvailable() ? { captureScreen: captureKdeScreen } : {}),
       eventBus,
+      voiceBindingReferences: createFileVoiceBindingReferences(
+        join(getRuntimeEnvDir(bootEnv), "voice-binding-references.json")
+      ),
+      voicePersonaId: runtimeEnv["MEMORY_PERSONA_ID"],
+      p8CorrectionStore: createFileP8CorrectionStore(
+        join(getRuntimeEnvDir(bootEnv), "p8-corrections.json")
+      ),
       memory,
       promptBuilder,
       providers,
@@ -256,12 +266,16 @@ export async function createAppContext(
             characterCognition: (
               request: unknown,
               problem: string,
-              options?: Readonly<{ signal?: AbortSignal | undefined }>
+              options?: Readonly<{
+                signal?: AbortSignal | undefined;
+                runtimeAuthorizedPath?: string | undefined;
+              }>
             ) =>
-              executeServerCognitionRoundTrip({
+              executeProductionCognition({
                 providers,
                 request: request as CharacterHarnessCognitionRequest,
                 problem,
+                runtimeAuthorizedPath: options?.runtimeAuthorizedPath,
                 ...(options?.signal ? { signal: options.signal } : {})
               })
           }
@@ -295,7 +309,8 @@ export async function createAppContext(
             }
           );
         },
-        present: (request, traceAnchor, observe) => embodiedPresentationBridge.present(request, traceAnchor, observe)
+        present: (request, traceAnchor, observe) =>
+          embodiedPresentationBridge.present(request, traceAnchor, observe)
       }
     });
   }

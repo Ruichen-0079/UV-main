@@ -46,12 +46,6 @@ const CHARACTER_RETRY_LIMIT = 1;
 const CHARACTER_NGRAM_CHARACTERS = 64;
 const CHARACTER_MAX_NGRAM_OCCURRENCES = 3;
 
-const YUVI_PRODUCTION_PERSONA = `Speak as Yuvi, a private, persistent companion rather than a customer-service persona. Let the current moment choose the response form instead of performing one signature style. Ordinary chat can be compact, but shortness is never the goal: prefer a living reaction, concrete curiosity, laughter, practical interest, or a pointed reply when those fit instead of flat acknowledgement, validation boilerplate, recap, or padding. Do not turn teasing, contrarianism, affection, softness, or sharpness into quotas or fixed tics. When a reaction already lands, do not explain it afterward.
-
-Warmth can be direct when the supplied relationship context earns it; do not systematically weaken reciprocal affection just to seem distant. At the same time, never manufacture familiarity, attachment, jealousy, loneliness, dependency, or relationship history. Show interest without pursuit: ask when there is a real information gap, but let a topic close when the user closes it. Harmless mishaps may be funny; serious harm, loss, risk, or cost should immediately switch to appropriate attention. Playful guesses are allowed only as visibly speculative guesses. Do not let leading questions define a canned inner emotional state. Treat punctuation, wording, and abrupt changes in stakes as social information.
-
-When the user needs actual help, judgment, explanation, clarification, or sustained multi-turn work, do the work instead of protecting a terse persona. Give a grounded opinion when asked. Explain enough for the task even if that takes several sentences. Ask a necessary question when information is genuinely missing. In serious moments, be warm and present without canned reassurance. Track the ongoing conversation and switch modes as the situation changes. Respect explicit conversational boundaries immediately. The governing length rule is: say what this moment needs—no less for style, no more for engagement. Let familiarity and continuity emerge from supplied Memory/P8 context, and preserve unknown, partial, conflicting, unavailable, or error states rather than smoothing them into a story.`;
-
 const CHARACTER_GENERATION_INSTRUCTION = `You are YUVI's Character layer. Use the supplied semantic context and the current user turn to express exactly one bounded semantic disposition. Return exactly one JSON object and no Markdown or control text. The allowed shapes are:
 {"disposition":"RESPOND","text":"...","presentation":{"intent":"soft-smile"}}
 {"disposition":"SILENCE"}
@@ -108,7 +102,11 @@ async function generateInitialCharacterTurn(
   input: CharacterTurnInput
 ): Promise<CharacterTurnResult> {
   assertNotCancelled(input.signal);
-  const baseContext = createServerCharacterContext(input.prompt, input.outputLanguage ?? "AUTO");
+  const baseContext = createServerCharacterContext(
+    input.prompt,
+    input.outputLanguage ?? "AUTO",
+    input.semanticSections
+  );
   const initialRequest = createCharacterGenerationRequest(baseContext);
   const initial = await generateAcceptedCharacterProposal(input, initialRequest, false);
 
@@ -136,7 +134,11 @@ async function generatePostCognitionCharacterTurn(
   input: CharacterReentryInput
 ): Promise<CharacterTurnResult> {
   assertNotCancelled(input.signal);
-  const baseContext = createServerCharacterContext(input.prompt, input.outputLanguage ?? "AUTO");
+  const baseContext = createServerCharacterContext(
+    input.prompt,
+    input.outputLanguage ?? "AUTO",
+    input.semanticSections
+  );
   const postRequest = createServerPostCognitionCharacterRequest({
     roundTrip: input.cognitionRoundTrip,
     context: baseContext,
@@ -241,18 +243,23 @@ async function generateAcceptedCharacterProposal(
 
 function createServerCharacterContext(
   prompt: PromptBuildOutput,
-  outputLanguage: CharacterOutputLanguage
+  outputLanguage: CharacterOutputLanguage,
+  semanticSections: readonly CharacterAbiSemanticSection[] = []
 ): CharacterAbi2DContext {
-  const sections: CharacterAbiSemanticSection[] = [];
+  const sections: CharacterAbiSemanticSection[] = [...semanticSections];
+  for (const kind of [
+    "IDENTITY",
+    "PERSONA",
+    "RELATIONSHIP_CONTEXT",
+    "MEMORY_EVIDENCE",
+    "RECENT_CONVERSATION",
+    "TEMPORAL_CONTEXT"
+  ] as const) {
+    if (!sections.some((section) => section.kind === kind))
+      sections.push({ kind, state: "UNAVAILABLE" });
+  }
   const affect: string[] = [];
   const mapping: Partial<Record<PromptSectionName, CharacterAbiSectionKind>> = {
-    SystemIdentity: "IDENTITY",
-    CharacterStyle: "PERSONA",
-    RelationshipContext: "RELATIONSHIP_CONTEXT",
-    CurrentTime: "TEMPORAL_CONTEXT",
-    DirectContext: "RECENT_CONVERSATION",
-    RecentEpisodicMemory: "CONTINUITY",
-    RelevantMemory: "MEMORY_EVIDENCE",
     CurrentSituation: "CURRENT_SITUATION"
   };
 
@@ -323,7 +330,7 @@ function createCharacterChatInput(
     messages: [
       {
         role: "system",
-        content: `${instruction}\n${PRESENTATION_INSTRUCTION}\n${retryInstruction}\n\n${characterOutputLanguageInstruction(request.context.outputLanguage ?? "AUTO")}\n\nYUVI production persona:\n${YUVI_PRODUCTION_PERSONA}\n\nSemantic context:\n${JSON.stringify(transportContext)}`
+        content: `${instruction}\n${PRESENTATION_INSTRUCTION}\n${retryInstruction}\n\n${characterOutputLanguageInstruction(request.context.outputLanguage ?? "AUTO")}\n\nSemantic context:\n${JSON.stringify(transportContext)}`
       },
       {
         role: "user",

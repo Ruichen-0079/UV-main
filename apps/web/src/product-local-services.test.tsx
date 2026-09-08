@@ -48,7 +48,9 @@ it("renders speech readiness and reduced Memory capability without pretending TT
     "not configured · no voice model selected",
     "Record enrollment",
     "Record recognition check",
-    "does not assign a person"
+    "does not assign a person",
+    "Person ID for voice binding",
+    "Conflicting bindings leave the speaker unresolved."
   ])
     expect(html).toContain(text);
   expect(PRODUCT_ROUTING_DEFINITIONS.map((route) => route.capability)).toEqual([

@@ -42,6 +42,8 @@ Chat path is replaceable operational infrastructure, not Character identity.
 
 ## Current operational status
 
+[Production reachability audit](production-reachability.md) records actual callers, fixes, and explicit library-only boundaries for these closure claims.
+
 [Campaign H](campaign-h-closure.md) records cache and proactive evidence, Memory
 console consistency, durable Live2D import with the official Hiyori default
 installation seam, Chinese UI and objective interaction acceptance.

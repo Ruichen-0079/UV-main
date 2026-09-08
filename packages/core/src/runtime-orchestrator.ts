@@ -1,3 +1,15 @@
+import { admitVoiceProfilePersonBinding, voiceProfileBindingWriteFields } from "@companion/memory";
+import { projectP8ReconstructionToCharacterAbi } from "@companion/character-abi/p8-projection";
+import { projectMemoryVNextToCharacterAbi } from "@companion/character-abi/memory-vnext-projection";
+import type { CharacterAbiSemanticSection } from "@companion/character-abi";
+import {
+  createDefaultP8IdentityAddress,
+  reconstructP8MainProfile,
+  productionAuthoredInvariants,
+  type P8ExplicitCorrection,
+  type P8CharacterSpeakerView
+} from "@companion/p8";
+import { buildMemoryScope, type MemoryRetrievalOutcome } from "@companion/memory";
 import type { EventBus } from "@companion/event-bus";
 import type {
   ConversationMessage,
@@ -496,6 +508,198 @@ export class RuntimeOrchestrator {
     { observation: STTOutput; sessionId: string; at: number }
   >();
 
+  private readonly authorizedReadText = new Map<string, string>();
+
+  authorizeReadText(sessionId: string, path: string): void {
+    if (!sessionId.trim() || !path.trim() || path !== path.trim() || path.length > 4096)
+      throw new Error("Invalid read-text authorization");
+    this.authorizedReadText.set(sessionId, path);
+  }
+
+  private readonly voiceSpeakers = new WeakMap<RuntimeUserTurnEvent, P8CharacterSpeakerView>();
+  private readonly committedVoiceObservations = new WeakMap<RuntimeUserTurnEvent, STTOutput>();
+
+  async bindVoiceProfileToPerson(voiceProfileId: string, personId: string) {
+    const provider = this.options.memory.getMemoryProvider?.();
+    const references = this.options.voiceBindingReferences;
+    const persona = this.options.voicePersonaId;
+    if (!provider || !references || !persona) return { status: "UNAVAILABLE" as const };
+    const scope = buildMemoryScope(`voice-profile:${voiceProfileId}`, persona);
+    // Check the index before dispatch: a corrupt index cannot discard earlier conflicting evidence.
+    references.load(scope);
+    const admission = admitVoiceProfilePersonBinding({
+      voiceProfileId,
+      personId,
+      content: `voice profile ${voiceProfileId} assigned to person ${personId}`,
+      assertor: { entityId: "local-explicit-controller", resolution: "resolved" },
+      provenanceClass: "EXTERNAL_CLAIM",
+      trustedController: true
+    });
+    if (admission.decision !== "admit") return admission;
+    const result = await provider.writeEvent({
+      ...voiceProfileBindingWriteFields(admission),
+      scope
+    });
+    const eventId = result.eventId ?? result.event?.id;
+    if (result.status === "rejected" || !eventId) return { status: "ERROR" as const };
+    references.append(scope, eventId);
+    return { status: "STORED" as const, eventId };
+  }
+
+  private async scopeVoiceTurn(event: RuntimeUserTurnEvent): Promise<RuntimeUserTurnEvent> {
+    if (event.type !== "user.voice.transcript") return event;
+    const observation = this.committedVoiceObservations.get(event);
+    this.committedVoiceObservations.delete(event);
+    const personaId = this.options.voicePersonaId;
+    let personId: string | undefined;
+    let speaker: P8CharacterSpeakerView = { speaker: "unknown" };
+    try {
+      const provider = this.options.memory.getMemoryProvider?.();
+      const references = this.options.voiceBindingReferences;
+      if (observation && personaId && provider && references) {
+        const segments = observation.segments ?? [];
+        const clusters = new Set(segments.map((segment) => segment.speakerClusterId));
+        const matches = segments.length
+          ? segments.map(
+              (segment) =>
+                segment.voiceProfileMatch ??
+                (segments.length === 1 ? observation.voiceProfileMatch : undefined)
+            )
+          : [observation.voiceProfileMatch];
+        const profiles = new Set(
+          matches.map((match) => (match?.status === "MATCHED" ? match.voiceProfileId : undefined))
+        );
+        // Whole-capture identity is permitted only when every span agrees and at most one speaker exists.
+        if (clusters.size <= 1 && profiles.size === 1 && !profiles.has(undefined)) {
+          const voiceProfileId = [...profiles][0]!;
+          const scope = buildMemoryScope(`voice-profile:${voiceProfileId}`, personaId);
+          const ids = references.load(scope);
+          const events = await Promise.all(ids.map((id) => provider.getEvent({ id, scope })));
+          if (events.every((item) => item !== null)) {
+            const interpretation = interpretSpeechObservationIdentity({
+              observation: {
+                ...observation,
+                voiceProfileMatch: { status: "MATCHED", voiceProfileId }
+              },
+              address: createDefaultP8IdentityAddress(),
+              scopeReference: scope,
+              longTermEvents: events,
+              trustedAssertorEntityIds: ["local-explicit-controller"]
+            });
+            speaker = interpretation.characterSpeakers[0] ?? { speaker: "unknown" };
+            if (interpretation.claimAssertor.resolution === "resolved")
+              personId = interpretation.claimAssertor.entityId ?? undefined;
+          }
+        }
+      }
+    } catch {
+      /* Missing/corrupt evidence fails closed; the transcript may still be answered. */
+    }
+    const scoped = {
+      ...event,
+      payload: {
+        ...event.payload,
+        subjectUserId: personId ?? null,
+        personaId: personaId ?? null,
+        speakerId: personId ?? null,
+        createdByUserId: personId ?? null
+      }
+    };
+    this.voiceSpeakers.set(scoped, speaker);
+    return scoped;
+  }
+
+  private readonly semanticContexts = new WeakMap<
+    PromptBuildOutput,
+    readonly CharacterAbiSemanticSection[]
+  >();
+
+  async appendP8Correction(correction: P8ExplicitCorrection) {
+    if (!this.options.p8CorrectionStore) return { status: "UNAVAILABLE" as const };
+    // P8 validates target authority and correction lineage; no PromptBuilder interpretation.
+    const lookup = { address: correction.address, scopeReference: correction.scopeReference };
+    const loaded = await this.options.p8CorrectionStore.loadCorrections(lookup);
+    if (loaded.status === "ERROR" || loaded.status === "UNAVAILABLE") return loaded;
+    if (
+      loaded.corrections.some((item) => item.correctionReference === correction.correctionReference)
+    )
+      return this.options.p8CorrectionStore.appendCorrection(correction);
+    reconstructP8MainProfile({
+      ...lookup,
+      expectedScopeReference: lookup.scopeReference,
+      authoredInvariants: productionAuthoredInvariants(),
+      longTerm: { status: "empty", events: [], source: "runtime", limited: false },
+      referencedInterpretationCandidates: [
+        {
+          interpretationReference: "relationship.current",
+          candidate: { domain: "RELATIONSHIP_CONTEXT" }
+        }
+      ],
+      correctionStore: {
+        status: "SUCCESS_WITH_CORRECTIONS",
+        corrections: [...loaded.corrections, correction]
+      }
+    });
+    return this.options.p8CorrectionStore.appendCorrection(correction);
+  }
+
+  private async attachSemanticContext(
+    prompt: PromptBuildOutput,
+    identity: { subjectUserId?: string | null | undefined; personaId?: string | null | undefined },
+    memory: MemoryContext,
+    direct: { enabled: boolean; content?: string | undefined },
+    assembly: MemoryVNextAssembly,
+    speaker?: P8CharacterSpeakerView
+  ): Promise<void> {
+    const address = {
+      ...createDefaultP8IdentityAddress(identity.subjectUserId ?? undefined),
+      ...(identity.personaId ? { personaProfileId: identity.personaId } : {})
+    };
+    const scopeReference = {
+      reference:
+        identity.subjectUserId && identity.personaId
+          ? buildMemoryScope(identity.subjectUserId, identity.personaId)
+          : "runtime:unresolved"
+    };
+    const outcome = memory.semanticOutcome ?? {
+      status: "unavailable" as const,
+      events: [],
+      source: "runtime",
+      limited: false
+    };
+    const correctionStore = this.options.p8CorrectionStore
+      ? await this.options.p8CorrectionStore.loadCorrections({ address, scopeReference })
+      : { status: "UNAVAILABLE" as const };
+    const reconstruct = (failed = false) =>
+      reconstructP8MainProfile({
+        address,
+        expectedScopeReference: scopeReference,
+        authoredInvariants: productionAuthoredInvariants(),
+        longTerm: outcome,
+        correctionStore: failed ? { status: "ERROR" } : correctionStore,
+        referencedInterpretationCandidates: [
+          {
+            interpretationReference: "relationship.current",
+            candidate: { domain: "RELATIONSHIP_CONTEXT" }
+          }
+        ]
+      });
+    let p8;
+    try {
+      p8 = reconstruct();
+    } catch {
+      p8 = reconstruct(true);
+    }
+    const memoryProjection = projectMemoryVNextToCharacterAbi({
+      ...assembly.characterProjection,
+      ...(!direct.enabled ? { recentConversation: { state: "UNAVAILABLE" as const } } : {})
+    });
+    this.semanticContexts.set(prompt, [
+      ...projectP8ReconstructionToCharacterAbi(p8, speaker).sections,
+      ...memoryProjection.sections
+    ]);
+  }
+
   /** Consume server-owned acoustic evidence once when the capture controller commits a turn. */
   commitSpeechTurn(
     observationId: string,
@@ -525,7 +729,7 @@ export class RuntimeOrchestrator {
       matches.map((match) => (match?.status === "MATCHED" ? match.voiceProfileId : undefined))
     );
     const voiceProfileId = clusters.size <= 1 && profiles.size === 1 ? [...profiles][0] : undefined;
-    return createEvent("user.voice.transcript", {
+    const event = createEvent("user.voice.transcript", {
       sessionId,
       content: observation.text,
       observationId,
@@ -552,6 +756,8 @@ export class RuntimeOrchestrator {
           : {})
       }))
     });
+    this.committedVoiceObservations.set(event, observation);
+    return event;
   }
 
   admitFinalizedSpeechObservation(
@@ -708,7 +914,10 @@ export class RuntimeOrchestrator {
     );
   }
 
-  private scheduleEmbodiedPresentation(reply: AgentReplyEvent, presentation?: import("@companion/character-abi").CharacterPresentationIntent | null): void {
+  private scheduleEmbodiedPresentation(
+    reply: AgentReplyEvent,
+    presentation?: import("@companion/character-abi").CharacterPresentationIntent | null
+  ): void {
     const port = this.options.embodiedPresentation;
     if (!port) return;
 
@@ -1081,7 +1290,7 @@ export class RuntimeOrchestrator {
     this.visualTurnRevision += 1;
     this.visualCaptureController?.abort();
     try {
-      const userEvent = isRuntimeUserTurnEvent(input)
+      let userEvent = isRuntimeUserTurnEvent(input)
         ? input
         : createEvent(
             "user.message",
@@ -1095,6 +1304,7 @@ export class RuntimeOrchestrator {
               parentId: input.parentId
             }
           );
+      userEvent = await this.scopeVoiceTurn(userEvent);
       this.visualTurnOwners.set(userEvent, this.visualTurnRevision);
       const voiceOutput = isRuntimeUserTurnEvent(input)
         ? Boolean(options.voiceOutput)
@@ -1202,7 +1412,7 @@ export class RuntimeOrchestrator {
     this.visualTurnRevision += 1;
     this.visualCaptureController?.abort();
     try {
-      const userEvent = isRuntimeUserTurnEvent(input)
+      let userEvent = isRuntimeUserTurnEvent(input)
         ? input
         : createEvent(
             "user.message",
@@ -1218,6 +1428,7 @@ export class RuntimeOrchestrator {
           );
       const agentReplyId = canonicalAgentReplyId(userEvent);
       const assistantMessageId = canonicalAssistantMessageId(userEvent);
+      userEvent = await this.scopeVoiceTurn(userEvent);
       this.visualTurnOwners.set(userEvent, this.visualTurnRevision);
       let finalizedTurnId = await this.resolveFinalizedTurnId(userEvent, assistantMessageId);
       const voiceOutput = isRuntimeUserTurnEvent(input)
@@ -2253,7 +2464,11 @@ export class RuntimeOrchestrator {
     memoryOptions: ResolvedMemoryOptions;
   }> {
     const voiceOutput = Boolean(options.voiceOutput);
-    const memoryOptions = resolveMemoryOptions(options);
+    const memoryOptions = resolveMemoryOptions(
+      event.type === "user.voice.transcript" && !event.payload.subjectUserId
+        ? { ...options, readMemory: false, writeMemory: false }
+        : options
+    );
     const currentAffect = detectCurrentAffect({
       text: event.payload.content,
       sourceTraceId: event.traceId
@@ -2297,7 +2512,12 @@ export class RuntimeOrchestrator {
       directContextText: directContext.content,
       personaId: event.payload.personaId,
       subjectUserId: event.payload.subjectUserId,
-      longTermStatus: memoryContext.memoryFinalStatus,
+      longTerm: memoryContext.semanticOutcome ?? {
+        status: "unavailable",
+        events: [],
+        source: "runtime",
+        limited: false
+      },
       promptMemories: memoryContext.promptMemories
     });
     const promptMemories = [
@@ -2434,6 +2654,14 @@ export class RuntimeOrchestrator {
       )
     };
 
+    await this.attachSemanticContext(
+      prompt,
+      event.payload,
+      memoryContext,
+      directContext,
+      vnext,
+      this.voiceSpeakers.get(event)
+    );
     return { prompt, memoryOptions };
   }
 
@@ -2493,6 +2721,43 @@ export class RuntimeOrchestrator {
       directContext,
       prompt: decisionPrompt
     });
+    const vnext = await this.assembleHierarchicalMemory(input.sessionId, {
+      queryText,
+      currentTurnText: queryText,
+      directContextText: directContext.content,
+      personaId: input.personaId,
+      subjectUserId: input.subjectUserId,
+      longTerm: memoryContext.semanticOutcome ?? {
+        status: "unavailable",
+        events: [],
+        source: "runtime",
+        limited: false
+      },
+      promptMemories: memoryContext.promptMemories
+    });
+    for (const prompt of [decisionPrompt, textPrompt]) {
+      await this.attachSemanticContext(prompt, input, memoryContext, directContext, vnext);
+      // The proactive decision/continuation provider is an explicit separate semantic path.
+      // It consumes the same producer-owned context, never legacy profile prompt text.
+      const owned = new Set([
+        "SystemIdentity",
+        "CharacterStyle",
+        "RelationshipContext",
+        "RelevantMemory",
+        "DirectContext",
+        "CurrentTime"
+      ]);
+      prompt.prompt =
+        characterOutputLanguageInstruction(this.outputLanguage()) +
+        "\n\n" +
+        "Producer-owned semantic context (preserve every epistemic state):\n" +
+        JSON.stringify(this.semanticContexts.get(prompt)) +
+        "\n\n" +
+        prompt.sections
+          .filter((section) => !owned.has(section.name))
+          .map((section) => `<${section.name}>\n${section.content}\n</${section.name}>`)
+          .join("\n\n");
+    }
     return { decisionPrompt, textPrompt };
   }
 
@@ -2693,6 +2958,8 @@ export class RuntimeOrchestrator {
     prompt: PromptBuildOutput,
     signal?: AbortSignal
   ): Promise<RuntimeCharacterFinalTurnResult> {
+    const runtimeAuthorizedPath = this.authorizedReadText.get(event.payload.sessionId);
+    this.authorizedReadText.delete(event.payload.sessionId);
     const character = this.options.character;
     if (!character) {
       throw new Error("Runtime Character generation is not configured.");
@@ -2817,6 +3084,7 @@ export class RuntimeOrchestrator {
     const initial = await character.generate({
       requestVisualEvidence,
       prompt,
+      semanticSections: this.semanticContexts.get(prompt),
       userMessage: event.payload.content,
       outputLanguage: this.outputLanguage(),
       ...(signal ? { signal } : {}),
@@ -2863,9 +3131,13 @@ export class RuntimeOrchestrator {
       });
     }
 
-    const roundTrip = await cognition(handoff.request, handoff.problem, { signal });
+    const roundTrip = await cognition(handoff.request, handoff.problem, {
+      signal,
+      runtimeAuthorizedPath
+    });
     const final = await character.generateAfterCognition({
       prompt,
+      semanticSections: this.semanticContexts.get(prompt),
       userMessage: event.payload.content,
       outputLanguage: this.outputLanguage(),
       cognitionRoundTrip: roundTrip,
@@ -3985,6 +4257,8 @@ export class RuntimeOrchestrator {
       return memoryContext;
     }
 
+    if (providerOutcome && !memoryContext.semanticOutcome)
+      memoryContext.semanticOutcome = providerOutcome;
     memoryContext.memoryQueryLength = request.queryText.length;
 
     await this.options.eventBus.publish(
@@ -4052,6 +4326,11 @@ export class RuntimeOrchestrator {
   ): MemoryContext {
     const built = this.memoryContextBuilder.build(outcome, options);
     const context = emptyMemoryContext();
+    context.semanticOutcome = {
+      ...outcome,
+      events: built.events,
+      status: outcome.status === "ok" && built.events.length === 0 ? "empty" : outcome.status
+    };
     context.retrievedMemoryCountRaw = outcome.rawCount ?? outcome.events.length;
     context.retrievedMemoryCount = built.diagnostics.selectedCount;
     context.memoryProviderStatus = outcome.status;
@@ -4173,7 +4452,7 @@ export class RuntimeOrchestrator {
       directContextText: string;
       personaId?: string | null | undefined;
       subjectUserId?: string | null | undefined;
-      longTermStatus?: MemoryRetrievalStatus | undefined;
+      longTerm?: MemoryRetrievalOutcome | undefined;
       promptMemories: Array<RetrievedMemoryDebug | PromptMemoryCompatibility>;
     }
   ): Promise<MemoryVNextAssembly> {
@@ -4192,9 +4471,11 @@ export class RuntimeOrchestrator {
         subjectUserId: input.subjectUserId,
         directContextText: input.directContextText,
         messages: memoryEligibleMessages(messages),
-        longTerm: {
-          status: input.longTermStatus ?? "empty",
-          events: promptMemoriesToEvents(input.promptMemories)
+        longTerm: input.longTerm ?? {
+          status: "unavailable",
+          events: [],
+          source: "runtime",
+          limited: false
         },
         previouslyShownAssociativeIds: shown?.ids,
         lastTurnIntruded: shown?.lastTurnIntruded,
@@ -4213,9 +4494,11 @@ export class RuntimeOrchestrator {
         sessionId,
         directContextText: input.directContextText,
         messages: [],
-        longTerm: {
-          status: input.longTermStatus ?? "empty",
-          events: promptMemoriesToEvents(input.promptMemories)
+        longTerm: input.longTerm ?? {
+          status: "unavailable",
+          events: [],
+          source: "runtime",
+          limited: false
         }
       });
     }
@@ -4698,6 +4981,7 @@ type MemoryExtractionRuntimeDebug = MemoryExtractorStatus & {
 };
 
 type MemoryContext = {
+  semanticOutcome?: MemoryRetrievalOutcome;
   retrievedMemoryCountRaw: number;
   retrievedMemoryCount: number;
   memoryProviderStatus?: MemoryRetrievalStatus | undefined;
@@ -5521,36 +5805,6 @@ function associativePromptMemories(assembly: MemoryVNextAssembly): RetrievedMemo
   }));
 }
 
-function promptMemoriesToEvents(
-  memories: Array<RetrievedMemoryDebug | PromptMemoryCompatibility>
-): MemoryEvent[] {
-  return memories
-    .map((memory) => {
-      const content = "displayText" in memory ? memory.displayText : memory.content;
-      if (!content?.trim()) return null;
-      const id =
-        "provenanceId" in memory && typeof memory.provenanceId === "string"
-          ? memory.provenanceId
-          : "id" in memory && typeof memory.id === "string"
-            ? memory.id
-            : `prompt:${content.slice(0, 24)}`;
-      const event: MemoryEvent = {
-        id,
-        kind: "fact",
-        content,
-        source: "source" in memory && typeof memory.source === "string" ? memory.source : "legacy",
-        sourceRecordId:
-          "sourceRecordId" in memory && typeof memory.sourceRecordId === "string"
-            ? memory.sourceRecordId
-            : id,
-        metadata: {}
-      };
-      return event;
-    })
-    .filter((event): event is MemoryEvent => event !== null);
-}
-
-/** Conversation display remains intact; ephemeral turns never seed episodes or dreams. */
 function memoryEligibleMessages(messages: ConversationMessage[]): ConversationMessage[] {
   const excluded = new Set<string>();
   for (const message of messages) {

@@ -71,6 +71,10 @@ describe("production Character runtime adapter", () => {
       const before = JSON.stringify(input);
       await createServerCharacterPort().generate({
         prompt: input,
+        semanticSections: [
+          { kind: "MEMORY_EVIDENCE", state: "KNOWN", summary: "The garden includes mint." },
+          { kind: "TEMPORAL_CONTEXT", state: "KNOWN", summary: isoTimestamp }
+        ],
         userMessage: "Continue.",
         generateChat: async (chat) => {
           captures.push(chat.messages[0]!.content);

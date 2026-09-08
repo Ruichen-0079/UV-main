@@ -1,3 +1,4 @@
+import { createEvent } from "@companion/protocol";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -125,6 +126,9 @@ function createContext() {
   const context = {
     providers: { getSTTProvider: () => ({ transcribeAudio }) },
     runtime: {
+      commitSpeechTurn: vi.fn((observationId: string, sessionId: string, content: string) =>
+        createEvent("user.voice.transcript", { observationId, sessionId, content })
+      ),
       handleUserMessage: vi.fn(async () => ({
         payload: { content: "reply", provider: "mock" },
         traceId: "trace-1"
@@ -173,6 +177,15 @@ async function createLifecycleApp(
     providers: { getSTTProvider: () => ({ transcribeAudio }) },
     runtime: {
       handleUserMessage,
+      commitSpeechTurn: vi.fn((observationId: string, sessionId: string, content: string) =>
+        createEvent("user.voice.transcript", {
+          observationId,
+          sessionId,
+          content,
+          language: "en",
+          confidence: 0.9
+        })
+      ),
       admitFinalizedSpeechObservation,
       getLatestPromptPreview: vi.fn(() => undefined)
     }
@@ -660,14 +673,11 @@ describe("public batch STT disconnect cancellation", () => {
           sessionId: "voice-route-session",
           content: "recognized speech",
           language: "en",
-          confidence: 0.9,
-          personaId: "alice",
-          subjectUserId: "user-a",
-          createdByUserId: "user-a",
-          speakerId: "speaker-a",
-          voiceProfileId: "voice-a"
+          confidence: 0.9
         }
       });
+      expect(handleUserMessage.mock.calls[0]?.[0].payload).not.toHaveProperty("subjectUserId");
+      expect(handleUserMessage.mock.calls[0]?.[0].payload).not.toHaveProperty("voiceProfileId");
       expect(handleUserMessage.mock.calls[0]?.[1]).toMatchObject({
         readMemory: false,
         writeMemory: false
@@ -714,12 +724,11 @@ describe("public batch STT disconnect cancellation", () => {
       // ...while caller-supplied speaker fields stay verbatim assertions.
       expect(body.transcription.speakerId).toBe("speaker-a");
       expect(body.transcription.voiceProfileId).toBe("voice-a");
-      // The admitted interaction event carries caller assertions only; it
-      // never absorbs cluster ids or observation identity as user semantics.
+      // Runtime receives the server-owned observation; caller assertions cannot bind identity.
       const eventPayload = handleUserMessage.mock.calls[0]?.[0].payload;
-      expect(eventPayload.speakerId).toBe("speaker-a");
+      expect(eventPayload.speakerId).toBeUndefined();
       expect(JSON.stringify(eventPayload)).not.toContain("speakerClusterId");
-      expect(JSON.stringify(eventPayload)).not.toContain("obs-1");
+      expect(eventPayload.observationId).toBe("obs-1");
     } finally {
       await app.close();
     }

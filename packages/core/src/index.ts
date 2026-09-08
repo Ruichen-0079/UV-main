@@ -232,3 +232,10 @@ export {
   type P8PostgresClient,
   type P8PostgresRow
 } from "./p8-correction-store.js";
+
+export { createFileP8CorrectionStore } from "./p8-file-correction-store.js";
+
+export {
+  createFileVoiceBindingReferences,
+  type VoiceBindingReferences
+} from "./voice-binding-references.js";

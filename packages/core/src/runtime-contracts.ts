@@ -1,3 +1,6 @@
+import type { VoiceBindingReferences } from "./voice-binding-references.js";
+import type { CharacterAbiSemanticSection } from "@companion/character-abi";
+import type { P8CorrectionStore } from "@companion/p8";
 import type { CharacterDecision, CharacterOutputLanguage } from "@companion/character-abi";
 import type {
   ProactiveControlAuthority,
@@ -68,6 +71,9 @@ export type RuntimeOrchestratorOptions = {
   dreamProvider?: MemoryProvider | undefined;
   logger?: RuntimeLogger;
   /** Runtime-owned Character generation and its bounded cognition callback. */
+  voiceBindingReferences?: VoiceBindingReferences | undefined;
+  voicePersonaId?: string | undefined;
+  p8CorrectionStore?: P8CorrectionStore | undefined;
   character?: RuntimeCharacterPort | undefined;
   characterCognition?: RuntimeCharacterCognitionExecutor | undefined;
   /** Host-owned one-shot capture; bytes never cross the Character contract. */
@@ -94,7 +100,10 @@ export type RuntimeOrchestratorOptions = {
 export type RuntimeCharacterCognitionExecutor = (
   request: unknown,
   problem: string,
-  options?: Readonly<{ signal?: AbortSignal | undefined }>
+  options?: Readonly<{
+    signal?: AbortSignal | undefined;
+    runtimeAuthorizedPath?: string | undefined;
+  }>
 ) => Promise<unknown>;
 
 /**
@@ -149,6 +158,7 @@ export type RuntimeCharacterTurnInput = Readonly<{
     | ((request: Readonly<{ need: string }>) => Promise<RuntimeVisualEvidence>)
     | undefined;
   prompt: PromptBuildOutput;
+  semanticSections?: readonly CharacterAbiSemanticSection[] | undefined;
   userMessage: string;
   outputLanguage?: CharacterOutputLanguage | undefined;
   signal?: AbortSignal | undefined;

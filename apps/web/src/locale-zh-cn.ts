@@ -1,4 +1,9 @@
 export const zhCN: Readonly<Record<string, string>> = {
+  "Person ID for voice binding": "声纹绑定的人物 ID",
+  "Use the same person ID as the chat memory scope. Conflicting bindings leave the speaker unresolved.": "使用与聊天记忆范围相同的人物 ID。绑定冲突时，不会确认说话者身份。",
+  "Voice binding saved.": "声纹绑定已保存。",
+  "Voice binding failed. Check Memory availability.": "声纹绑定失败，请检查记忆服务。",
+  "Bind voice to person": "将声纹绑定到人物",
   "AI Routing": "AI 路由",
   "ANN Vector Index": "ANN 向量索引",
   "ANN fallback": "ANN 回退",

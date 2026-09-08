@@ -202,3 +202,5 @@ function validateBoundedText(value: string, field: string, maximum = 120): void 
     throw new Error(`P8 ${field} must be a non-empty string of at most ${maximum} characters.`);
   }
 }
+
+export { productionAuthoredInvariants } from "./production-invariants.js";

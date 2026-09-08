@@ -1,4 +1,5 @@
 import type {
+  P8CharacterSpeakerView,
   P8CorrectionApplicationResult,
   P8CorrectionAudit,
   P8EpistemicState,
@@ -25,7 +26,8 @@ export const P8_CHARACTER_ABI_PROJECTION_VERSION = "character-abi-2b-p8.v1" as c
  * Character ABI sections owned by Memory or conversation-context producers.
  */
 export function projectP8ReconstructionToCharacterAbi(
-  outcome: P8ReconstructionOutcome
+  outcome: P8ReconstructionOutcome,
+  speaker?: P8CharacterSpeakerView
 ): CharacterAbiContext {
   if (outcome.status !== "RECONSTRUCTED") {
     const state: CharacterAbiEpistemicState =
@@ -57,6 +59,25 @@ export function projectP8ReconstructionToCharacterAbi(
       projection
     )
   ];
+  if (speaker) {
+    const identity = sections[0]!;
+    sections[0] = {
+      ...identity,
+      state:
+        identity.state === "ERROR" ||
+        identity.state === "UNAVAILABLE" ||
+        identity.state === "CONFLICTING"
+          ? identity.state
+          : speaker.speaker === "conflicting"
+            ? "CONFLICTING"
+            : speaker.speaker === "resolved" && identity.state === "KNOWN"
+              ? "KNOWN"
+              : "PARTIAL",
+      summary: [identity.summary, `Current speaker: ${JSON.stringify(speaker)}`]
+        .filter(Boolean)
+        .join("\n")
+    };
+  }
   const relationship = projectRelationshipSection(projection);
   if (relationship !== undefined) {
     sections.push(relationship);

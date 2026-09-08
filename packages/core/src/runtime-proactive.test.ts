@@ -180,7 +180,9 @@ describe("RuntimeOrchestrator", () => {
     expect(proactivePrompt).toContain("When uncertain, choose NO_OP.");
     expect(proactivePrompt).toContain("REQUEST_TEXT");
     expect(proactivePrompt).toContain("Output-language preference: EN");
-    expect(continuationInputs[0]?.prompt).toContain("final Character expression must be in English");
+    expect(continuationInputs[0]?.prompt).toContain(
+      "final Character expression must be in English"
+    );
     expect(proactivePrompt).not.toContain("<UserMessage>");
     expect(continuationInputs[0]?.prompt).toContain("decision is already REQUEST_TEXT");
     expect(runtime.getLatestPromptPreview()).toMatchObject({
@@ -970,7 +972,7 @@ describe("RuntimeOrchestrator", () => {
       })
     );
 
-    const systemContent = providerInput?.prompt;
+    const systemContent = providerInput?.prompt.replace(/\\n/g, "\n");
     expect(systemContent).toContain("User: source-user-1\n  Assistant: source-answer-1");
     expect(systemContent).toContain("User: source-user-2\n  Assistant: source-answer-2");
     expect(systemContent).toContain("Assistant: proactive-history");
@@ -1049,7 +1051,7 @@ describe("RuntimeOrchestrator", () => {
       })
     );
 
-    const systemContent = providerInput?.prompt;
+    const systemContent = providerInput?.prompt.replace(/\\n/g, "\n");
     expect(systemContent).toContain("User: fallback-user-2\n  Assistant: fallback-answer-1");
     expect(systemContent).toContain("User: fallback-user-1\n  Assistant: fallback-answer-2");
   });

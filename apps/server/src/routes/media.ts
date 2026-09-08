@@ -342,13 +342,11 @@ export async function registerMediaRoutes(
         sessionId: parsed.data.sessionId,
         ...(parsed.data.captureEpoch ? { captureEpoch: parsed.data.captureEpoch } : {})
       });
-      const transcriptEvent = createEvent("user.voice.transcript", {
-        sessionId: parsed.data.sessionId,
-        content: observation.text,
-        language: observation.language,
-        confidence: observation.confidence,
-        ...identityMetadata(parsed.data)
-      });
+      const transcriptEvent = context.runtime.commitSpeechTurn(
+        observation.observationId!,
+        parsed.data.sessionId,
+        observation.text
+      );
       const response = await context.runtime.handleUserMessage(transcriptEvent, {
         readMemory: parsed.data.options?.readMemory,
         writeMemory: parsed.data.options?.writeMemory,

@@ -1033,6 +1033,12 @@ export const apiClient = {
   }): Promise<{ status: string; voiceProfileId?: string }> {
     return request("/voice-profiles/identify", { method: "POST", body: JSON.stringify(input) });
   },
+  bindVoiceProfilePerson(id: string, personId: string): Promise<{ status: string }> {
+    return request(`/voice-profiles/${encodeURIComponent(id)}/person`, {
+      method: "POST",
+      body: JSON.stringify({ personId })
+    });
+  },
   deleteVoiceProfile(id: string): Promise<{ ok: boolean }> {
     return request(`/voice-profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
   },

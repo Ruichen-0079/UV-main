@@ -55,7 +55,7 @@ export type MemoryVNextAssembleInput = {
 
 export type MemoryVNextCharacterProjection = {
   recentConversation: {
-    state: "KNOWN" | "EMPTY";
+    state: "KNOWN" | "PARTIAL" | "EMPTY";
     summary?: string;
     provenanceReferences?: string[];
   };
@@ -259,28 +259,39 @@ function projectCharacterFacing(input: {
 }): MemoryVNextCharacterProjection {
   const recentConversation = input.directContextText.trim()
     ? {
-        state: "KNOWN" as const,
+        state:
+          input.directContextText.trim().length > 4000 ? ("PARTIAL" as const) : ("KNOWN" as const),
         summary: trimSummary(input.directContextText, 4000),
         provenanceReferences: ["direct-context"]
       }
     : { state: "EMPTY" as const };
 
-  const memoryState = mapLongTermState(
+  let memoryState = mapLongTermState(
     input.longTerm.status,
     input.promptEpisodes.length,
     input.associative.status
   );
+  if (memoryState === "KNOWN" && input.longTerm.limited) memoryState = "PARTIAL";
+  const admittedLongTerm =
+    input.longTerm.status === "ok" || input.longTerm.status === "partial"
+      ? input.longTerm.events
+      : [];
   const memoryParts = [
+    ...admittedLongTerm.map((event) => event.content),
     input.promptEpisodes.length > 0 ? input.recentEpisodicText : null,
     ...input.associative.items.map((item) => `[associated ${item.ageBand}] ${item.content}`)
   ].filter(Boolean);
+  if (memoryParts.join("\n").length > 4000 && memoryState === "KNOWN") memoryState = "PARTIAL";
   const memoryEvidence =
     memoryState === "UNAVAILABLE" || memoryState === "ERROR" || memoryState === "EMPTY"
       ? { state: memoryState }
       : {
           state: memoryState,
-          summary: trimSummary(memoryParts.join("\n"), 4000),
+          ...(memoryParts.join("\n").trim()
+            ? { summary: trimSummary(memoryParts.join("\n"), 4000) }
+            : {}),
           provenanceReferences: [
+            ...admittedLongTerm.map((event) => event.id),
             ...input.promptEpisodes.map((episode) => episode.id),
             ...input.associative.items.map((item) => item.provenanceId)
           ].slice(0, 32)
@@ -288,20 +299,15 @@ function projectCharacterFacing(input: {
 
   const temporalState =
     input.temporal.temporalConfidence === "unknown" && input.temporal.episodes.length === 0
-      ? ("UNKNOWN" as const)
+      ? ("PARTIAL" as const)
       : input.temporal.episodes.length > 0
         ? ("KNOWN" as const)
         : ("PARTIAL" as const);
-  const temporalContext =
-    temporalState === "UNKNOWN"
-      ? { state: temporalState }
-      : {
-          state: temporalState,
-          summary: trimSummary(input.temporal.promptText, 4000),
-          provenanceReferences: input.temporal.episodes
-            .map((episode) => episode.episodeId)
-            .slice(0, 32)
-        };
+  const temporalContext = {
+    state: temporalState,
+    summary: trimSummary(input.temporal.promptText, 4000),
+    provenanceReferences: input.temporal.episodes.map((episode) => episode.episodeId).slice(0, 32)
+  };
 
   return {
     recentConversation,
@@ -315,17 +321,10 @@ function mapLongTermState(
   episodeCount: number,
   associativeStatus: MemoryRetrievalStatus
 ): MemoryVNextCharacterProjection["memoryEvidence"]["state"] {
+  if (longTermStatus === "partial") return "PARTIAL";
+  if (longTermStatus === "ok") return "KNOWN";
   if (longTermStatus === "unavailable" && episodeCount === 0) return "UNAVAILABLE";
   if (longTermStatus === "error" && episodeCount === 0) return "ERROR";
-  if (
-    episodeCount === 0 &&
-    associativeStatus === "empty" &&
-    (longTermStatus === "empty" || longTermStatus === "ok")
-  ) {
-    return episodeCount === 0 && associativeStatus === "empty" && longTermStatus !== "ok"
-      ? "EMPTY"
-      : "EMPTY";
-  }
   if (episodeCount > 0 && (longTermStatus === "unavailable" || longTermStatus === "error"))
     return "PARTIAL";
   if (episodeCount > 0 || associativeStatus === "ok") return "KNOWN";
