@@ -1,0 +1,62 @@
+{
+  "campaign": "I",
+  "atom": "live-tts-promotion",
+  "captured_at": "2026-09-08T13:29:29.283497+08:00",
+  "timezone": "Asia/Shanghai",
+  "classification": "RETAIN",
+  "problem": "DesktopSupervisor daily TTS still launched pre-hibernation services/dots-tts/server.py from yuvi-campaign-g cwd via relative path, despite hibernation merged to main (#277/#278).",
+  "before": {
+    "YUVI_TTS_WRAPPER_START_COMMAND": "bakeoff .venv python + relative services/dots-tts/server.py",
+    "cwd": "/home/ruichen/Projects/yuvi-campaign-g",
+    "live_server_tree": "yuvi-campaign-g @ b5135ba (pre-hibernation)",
+    "health_fields": [
+      "service",
+      "state",
+      "model_loaded",
+      "voice",
+      "busy",
+      "cancellation"
+    ],
+    "DOTS_TTS_IDLE_HIBERNATE_SECONDS": "unset in process (N/A without hibernation code)"
+  },
+  "implementation": {
+    "durable_env": "~/.config/yuvi-daily/.env.local",
+    "YUVI_TTS_WRAPPER_START_COMMAND": "/home/ruichen/Projects/dots-tts-soar-rei-bakeoff/.venv/bin/python /home/ruichen/Projects/yuvi-campaign-i/services/dots-tts/server.py",
+    "DOTS_TTS_IDLE_HIBERNATE_SECONDS": "180",
+    "assets_unchanged": [
+      "DOTS_TTS_MODEL_DIR",
+      "DOTS_TTS_REFERENCE_*",
+      "HF_HOME",
+      "bakeoff venv"
+    ],
+    "live_apply": "POST /v1/config on DesktopSupervisor control port then POST /v1/services/tts_wrapper/restart",
+    "no_second_supervisor": true,
+    "bakeoff_venv_preserved": true,
+    "supervisor_repo_root_unchanged": "/home/ruichen/Projects/yuvi-campaign-g"
+  },
+  "after": {
+    "tts_pid_example": 590223,
+    "cmdline": "bakeoff/.venv/bin/python /home/ruichen/Projects/yuvi-campaign-i/services/dots-tts/server.py",
+    "server_sha_tree": "yuvi-campaign-i @ 531cb6d (origin/main at promotion)",
+    "health": {
+      "service": "yuvi-dots-tts",
+      "state": "ready",
+      "model_loaded": true,
+      "gpu_resident": true,
+      "ready_on_demand": true,
+      "idle_hibernate_seconds": 180.0
+    },
+    "warm_synth_probe": {
+      "text_sanitized": "short ZH",
+      "http": 200,
+      "tts_warm_synth_ms": 3777.6,
+      "bytes": 48044
+    }
+  },
+  "regression_checks": [
+    "Same bakeoff venv and model/reference assets",
+    "Supervisor instance unchanged (campaign-g daily systemd)",
+    "Unit tests services/dots-tts: 13 OK"
+  ],
+  "live_path_now": "/home/ruichen/Projects/yuvi-campaign-i/services/dots-tts/server.py"
+}
