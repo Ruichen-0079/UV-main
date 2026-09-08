@@ -240,6 +240,42 @@ describe("packaged supervisor layout", () => {
     }
   });
 
+  it("packaged mode loads absolute YUVI_RUNTIME_ENV_DIR for Linux daily sidecars", () => {
+    const tree = makePackagedResourceTree();
+    const envDir = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-runtime-env-"));
+    tempDirs.push(envDir);
+    fs.writeFileSync(
+      path.join(envDir, ".env.local"),
+      [
+        "YUVI_AUTOSTART_TTS=true",
+        "YUVI_AUTOSTART_LOCAL_STT=true",
+        'YUVI_TTS_WRAPPER_START_COMMAND="/usr/bin/python3 services/dots-tts/server.py"',
+        'YUVI_LOCAL_STT_START_COMMAND="/usr/bin/python3 services/local-stt/server.py"',
+        "YUVI_PACKAGED_EXTERNAL_SIDECARS=1",
+        ""
+      ].join("\n")
+    );
+    const prev = process.env["YUVI_RUNTIME_ENV_DIR"];
+    try {
+      process.env["YUVI_RUNTIME_ENV_DIR"] = envDir;
+      const cfg = loadPackagedSupervisorConfig({
+        resourceRoot: tree.resourceRoot,
+        dataRoot: tree.dataRoot,
+        runtimeManifestPath: tree.manifestPath,
+        mem0ManifestPath: tree.mem0ManifestPath,
+        env: { YUVI_PACKAGED_EXTERNAL_SIDECARS: "1" }
+      });
+      expect(cfg.autostartTts).toBe(true);
+      expect(cfg.autostartLocalStt).toBe(true);
+      expect(cfg.ttsWrapperStart?.file).toBe("/usr/bin/python3");
+      expect(cfg.localSttStart?.file).toBe("/usr/bin/python3");
+      expect(cfg.ttsWrapperStart?.cwd).toBe(tree.resourceRoot);
+    } finally {
+      if (prev === undefined) delete process.env["YUVI_RUNTIME_ENV_DIR"];
+      else process.env["YUVI_RUNTIME_ENV_DIR"] = prev;
+    }
+  });
+
   it("paths with spaces work for packaged runtime start", () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi space "));
     tempDirs.push(base);

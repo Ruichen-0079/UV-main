@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
-import { envFlag, envString, loadYuviEnvFiles } from "./env.js";
+import { envFlag, envString, loadYuviEnvFiles, loadYuviRuntimeEnvDir } from "./env.js";
 import {
   canonicalPath,
   defaultStateDirectory,
@@ -119,11 +119,25 @@ export function loadPackagedSupervisorConfig(
   const runtimeManifestPath = canonicalPath(
     input.runtimeManifestPath ?? path.join(resourceRoot, "runtime", "runtime-manifest.json")
   );
-  // Packaged: process env + optional non-secret seed only (never install-dir .env).
-  const env: Record<string, string> = { ...(input.env ?? {}) };
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string" && env[key] === undefined) {
-      env[key] = value;
+  // Packaged: process env + optional seed. Never read install-dir / cwd .env.
+  // Linux daily may set YUVI_RUNTIME_ENV_DIR to an absolute user config dir
+  // (e.g. ~/.config/yuvi-daily); load .env/.env.local from there only.
+  const seed: Record<string, string> = { ...(input.env ?? {}) };
+  const runtimeEnvDir = (
+    seed["YUVI_RUNTIME_ENV_DIR"]?.trim() ||
+    process.env["YUVI_RUNTIME_ENV_DIR"]?.trim() ||
+    ""
+  );
+  let env: Record<string, string>;
+  if (runtimeEnvDir && path.isAbsolute(runtimeEnvDir)) {
+    env = loadYuviRuntimeEnvDir(runtimeEnvDir);
+    Object.assign(env, seed);
+  } else {
+    env = { ...seed };
+    for (const [key, value] of Object.entries(process.env)) {
+      if (typeof value === "string" && env[key] === undefined) {
+        env[key] = value;
+      }
     }
   }
   const externalSidecars = externalPackagedSidecarsEnabled(env);
