@@ -60,6 +60,9 @@ importers:
       '@companion/event-bus':
         specifier: workspace:*
         version: link:../../packages/event-bus
+      '@companion/host-environment':
+        specifier: workspace:*
+        version: link:../../packages/host-environment
       '@companion/memory':
         specifier: workspace:*
         version: link:../../packages/memory

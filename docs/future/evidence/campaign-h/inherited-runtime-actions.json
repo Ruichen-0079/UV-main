@@ -1,0 +1,66 @@
+[
+  {
+    "name": "Memory create all metadata fields and persistence",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Memory search filter and clear real request",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Memory View/Edit/Archive/Restore/Forget/Delete",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Run Maintenance Dry Run",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Run Maintenance",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Inspect chat chain",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Inspect reasoning chain",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Inspect embedding chain",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Inspect tts chain",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Inspect stt chain",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Inspect vision chain",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Events pause/resume/filter",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Voice real file transcription",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Voice real generated speech",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Voice message with memory disabled",
+    "status": "REAL_LOCAL_PASS"
+  },
+  {
+    "name": "Vision unavailable route returns truthful error",
+    "status": "REAL_LOCAL_PASS"
+  }
+]

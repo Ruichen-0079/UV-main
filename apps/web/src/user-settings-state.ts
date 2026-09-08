@@ -198,7 +198,7 @@ export const emptySecretStatus = (): SecretStatusDto => ({
 });
 
 export const defaultUserSettingsForm = (): UserSettingsForm => ({
-  language: "en",
+  language: "zh-CN",
   chatProvider: "openai-compatible",
   chatModel: "deepseek-ai/DeepSeek-V4-Flash-0731",
   cognitionProvider: "openai-compatible",

@@ -134,6 +134,7 @@ const BooleanishSchema = z.preprocess((value) => {
 }, z.boolean());
 
 const SearchMemoryQuerySchema = z.object({
+  view: z.enum(["semantic", "records"]).optional(),
   q: z.string().default(""),
   type: MemoryTypeSchema.optional(),
   subtype: MemorySubtypeSchema.optional(),
@@ -717,6 +718,29 @@ async function runMemorySearch(context: AppContext, input: SearchMemoryInput) {
   if (input.status) searchQuery.statuses = [input.status as MemoryStatus];
   if (input.tags?.length) searchQuery.tags = input.tags;
   if (input.minImportance !== undefined) searchQuery.minImportance = input.minImportance;
+
+  if (input.view === "records") {
+    // The development CRUD console browses the same repository it edits. It must
+    // not switch to Mem0 semantic retrieval merely because Runtime uses Mem0.
+    searchQuery.includeHistory = true;
+    searchQuery.statuses = input.status
+      ? [input.status as MemoryStatus]
+      : [
+          "active",
+          ...(input.includeArchived ? ["archived" as const] : []),
+          ...(input.includeSuperseded ? ["superseded" as const] : []),
+          ...(input.includeExpired ? ["expired" as const] : [])
+        ];
+    const records = await context.memoryRepository.searchMemoriesByTextFallback(searchQuery);
+    return {
+      mock: false,
+      repository: context.activeMemoryRepository,
+      retrievalMode: "repository-records",
+      query: input.q,
+      count: records.length,
+      memories: records.map(toSafeMemory)
+    };
+  }
 
   const result = await context.memory.retrieveRelevantMemoriesWithMetadata(searchQuery);
   const retrievalMode = normalizeRetrievalModeForRepository(

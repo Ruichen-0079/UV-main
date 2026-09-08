@@ -1,6 +1,6 @@
 # Atom 21 — Linux / CachyOS Deployment
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: CLOSED checkout deployment by Campaign G; distributable packaging DEFERRED; HISTORICAL atom plan — consult the [current roadmap](../README.md) and campaign closures before treating any remaining item as work.**
 >
 > **Rebaseline (Linux-first CI rebaseline):** Linux / CachyOS / KDE Wayland is
 > the current primary platform, so this atom's target is confirmed. However, it

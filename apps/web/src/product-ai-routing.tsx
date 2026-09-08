@@ -1,3 +1,5 @@
+import { AsyncProgress } from "./async-progress.js";
+import { t } from "./locale.js";
 import { useEffect, useRef, useState } from "react";
 import {
   apiClient,
@@ -45,41 +47,41 @@ export type ProductRoutingDefinition = {
 export const PRODUCT_ROUTING_DEFINITIONS: ProductRoutingDefinition[] = [
   {
     capability: "chat",
-    label: "Chat",
+    label: t("Chat"),
     settingKey: "CHAT_PROVIDER_CHAIN",
-    description: "The Runtime chain used for assistant replies, tried left to right."
+    description: t("The Runtime chain used for assistant replies, tried left to right.")
   },
   {
     capability: "reasoning",
-    label: "Reasoning",
+    label: t("Reasoning"),
     settingKey: "REASONING_PROVIDER_CHAIN",
-    description: "The Runtime chain used for reasoning and cognition, tried left to right."
+    description: t("The Runtime chain used for reasoning and cognition, tried left to right.")
   },
   {
     capability: "embedding",
-    label: "Embedding",
+    label: t("Embedding"),
     settingKey: "EMBEDDING_PROVIDER_CHAIN",
-    description: "The legacy Runtime embedding chain. Mem0 uses its own fixed Ollama embedder."
+    description: t("The legacy Runtime embedding chain. Mem0 uses its own fixed Ollama embedder.")
   },
   {
     capability: "stt",
-    label: "Speech recognition",
+    label: t("Speech recognition"),
     settingKey: "STT_PROVIDER_CHAIN",
-    description: "Choose local for the installed speech and acoustic profile service."
+    description: t("Choose local for the installed speech and acoustic profile service.")
   },
   {
     capability: "tts",
-    label: "Speech output",
+    label: t("Speech output"),
     settingKey: "TTS_PROVIDER_CHAIN",
     description:
-      "Optional speech output. Select a configured provider; this does not install or select a voice model."
+      t("Optional speech output. Select a configured provider; this does not install or select a voice model.")
   },
   {
     capability: "vision",
-    label: "Vision",
+    label: t("Vision"),
     settingKey: "VISION_PROVIDER_CHAIN",
     description:
-      "Current-screen evidence on demand. Grounding uses one provider attempt on the first route; configure it before use."
+      t("Current-screen evidence on demand. Grounding uses one provider attempt on the first route; configure it before use.")
   }
 ];
 
@@ -334,34 +336,33 @@ function RouteRow(props: {
       <div className="yuvi-product-route-priority">#{summary.priority}</div>
       <div className="yuvi-product-route-main">
         <div className="yuvi-product-route-title">
-          <strong>{providerLabel(summary.provider)}</strong>
+          <strong>{t(providerLabel(summary.provider))}</strong>
           <span>{summary.provider}</span>
         </div>
         <div className="yuvi-product-route-facts">
-          <span>{providerReadinessLabel(summary.readiness)}</span>
-          <span>{providerObservationLabel(summary.observed)}</span>
-          <span>{summary.fallbackEligible ? "Fallback eligible" : "Not fallback eligible"}</span>
-          {!summary.enabled ? <span>Disabled</span> : null}
+          <span>{t(providerReadinessLabel(summary.readiness))}</span>
+          <span>{t(providerObservationLabel(summary.observed))}</span>
+          <span>{summary.fallbackEligible ? t("Fallback eligible") : t("Not fallback eligible")}</span>
+          {!summary.enabled ? <span>{t("Disabled")}</span> : null}
         </div>
-        {summary.model ? <small>Model: {summary.model}</small> : null}
+        {summary.model ? <small>{t("Model:")}{" "}{summary.model}</small> : null}
         {summary.lastVerifiedAt ? (
-          <small>Last explicit check: {summary.lastVerifiedAt}</small>
+          <small>{t("Last explicit check:")}{" "}{summary.lastVerifiedAt}</small>
         ) : null}
         {props.inspectionAttempt ? (
-          <small>
-            Inspection: {providerAttemptLabel(props.inspectionAttempt)}
+          <small>{t("Inspection:")}{" "}{t(providerAttemptLabel(props.inspectionAttempt))}
             {props.inspectionAttempt.errorCode
-              ? ` · error code: ${props.inspectionAttempt.errorCode}`
+              ? t(" · error code: {0}", props.inspectionAttempt.errorCode)
               : ""}
           </small>
         ) : null}
       </div>
       <span className={`yuvi-product-route-badge is-${tone}`}>
         {summary.readiness === "ready"
-          ? "Ready"
+          ? t("Ready")
           : summary.readiness === "not_ready"
-            ? "Not ready"
-            : "Unknown"}
+            ? t("Not ready")
+            : t("Unknown")}
       </span>
     </div>
   );
@@ -373,9 +374,7 @@ function RouteList(props: {
 }): JSX.Element {
   if (!props.routes) {
     return (
-      <div className="yuvi-product-route-unknown">
-        unknown · current Runtime route list unavailable
-      </div>
+      <div className="yuvi-product-route-unknown">{t("unknown · current Runtime route list unavailable")}</div>
     );
   }
 
@@ -399,13 +398,13 @@ function InspectionResult(props: { inspection: ProviderChainInspectionResponse }
   return (
     <div className="yuvi-product-routing-inspection" role="status">
       <div className="yuvi-product-routing-inspection-header">
-        <strong>Route inspection · config-only</strong>
-        <span>{inspection.readyRouteCount} locally ready route(s)</span>
+        <strong>{t("Route inspection · config-only")}</strong>
+        <span>{inspection.readyRouteCount}{t("locally ready route(s)")}</span>
       </div>
       <p>{inspection.message}</p>
       <div className="yuvi-product-routing-inspection-mode">
-        <strong>{verificationModeLabel(inspection)}</strong>
-        <span>{verificationModeExplanation(inspection)}</span>
+        <strong>{t(verificationModeLabel(inspection))}</strong>
+        <span>{t(verificationModeExplanation(inspection))}</span>
       </div>
       <RouteList routes={inspection.routes} attemptedProviders={inspection.attemptedProviders} />
     </div>
@@ -416,9 +415,9 @@ function servedRouteOutcome(route: ProductRoutingServedRoute | null): {
   label: string;
   tone: "ok" | "warn" | "idle";
 } {
-  if (!route || route.fallbackUsed === null) return { label: "Unknown", tone: "idle" };
+  if (!route || route.fallbackUsed === null) return { label: t("Unknown"), tone: "idle" };
   return route.fallbackUsed
-    ? { label: "Fallback used", tone: "warn" }
+    ? { label: t("Fallback used"), tone: "warn" }
     : { label: "Primary served", tone: "ok" };
 }
 
@@ -440,19 +439,17 @@ function ServedRouteSummary(props: {
     <div className="yuvi-product-routing-served">
       <div className="yuvi-product-routing-served-heading">
         <div>
-          <span>Last completed request</span>
-          <strong>{props.route ? providerLabel(props.route.provider) : "Unknown"}</strong>
+          <span>{t("Last completed request")}</span>
+          <strong>{props.route ? providerLabel(props.route.provider) : t("Unknown")}</strong>
         </div>
         <span className={`yuvi-product-route-badge is-${outcome.tone}`}>{outcome.label}</span>
       </div>
       <div className="yuvi-product-routing-served-facts">
-        <span>
-          Served provider: {props.route ? providerLabel(props.route.provider) : "Unknown"}
+        <span>{t("Served provider:")}{" "}{props.route ? providerLabel(props.route.provider) : t("Unknown")}
         </span>
-        {props.route?.model ? <span>Model: {props.route.model}</span> : null}
+        {props.route?.model ? <span>{t("Model:")}{" "}{props.route.model}</span> : null}
         {props.route?.attemptedProviders.length ? (
-          <span>
-            Runtime attempts:{" "}
+          <span>{t("Runtime attempts:")}{" "}
             {props.route.attemptedProviders.map((attempt) => attempt.provider).join(" → ")}
           </span>
         ) : null}
@@ -494,70 +491,64 @@ export function ProductRoutingCard(props: ProductRoutingCardProps): JSX.Element 
     <section className="yuvi-product-routing-card">
       <header className="yuvi-product-routing-card-header">
         <div>
-          <div className="yuvi-product-eyebrow">Capability</div>
+          <div className="yuvi-product-eyebrow">{t("Capability")}</div>
           <h2>{props.definition.label}</h2>
           <p>{props.definition.description}</p>
         </div>
         <span className={`yuvi-product-route-badge is-${selectedTone}`}>
-          {providerLabel(truth.activeProvider)}
+          {t(providerLabel(truth.activeProvider))}
         </span>
       </header>
 
       <div className="yuvi-product-routing-summary">
         <div>
-          <span>Runtime default provider</span>
-          <strong>{providerLabel(truth.activeProvider)}</strong>
+          <span>{t("Runtime default provider")}</span>
+          <strong>{t(providerLabel(truth.activeProvider))}</strong>
           <small>
-            {truth.activeModel ? `Default model: ${truth.activeModel}` : "Default model: unknown"}
+            {truth.activeModel ? t("Default model: {0}", truth.activeModel) : "Default model: unknown"}
           </small>
         </div>
         <div>
-          <span>Readiness</span>
-          <strong>{providerReadinessLabel(selectedStatus?.readiness)}</strong>
+          <span>{t("Readiness")}</span>
+          <strong>{t(providerReadinessLabel(selectedStatus?.readiness))}</strong>
         </div>
         <div>
-          <span>Cached observation</span>
-          <strong>{providerObservationLabel(selectedStatus?.observed)}</strong>
+          <span>{t("Cached observation")}</span>
+          <strong>{t(providerObservationLabel(selectedStatus?.observed))}</strong>
         </div>
       </div>
 
       <label className="yuvi-product-routing-editor">
-        <span>Saved / effective provider chain</span>
+        <span>{t("Saved / effective provider chain")}</span>
         <input
-          aria-label={`${props.definition.label} provider chain`}
+          aria-label={t("{0} provider chain", props.definition.label)}
           value={props.draft}
           disabled={props.saving}
           onChange={(event) => props.onChange(event.target.value)}
           placeholder="provider-a,provider-b"
         />
-        <small>
-          Comma-separated priority order. Source: {truth.savedSource}. Runtime validates the
-          provider names.
-        </small>
+        <small>{t("Comma-separated priority order. Source:")}{" "}{truth.savedSource}{t(". Runtime validates the provider names.")}</small>
       </label>
 
       <div className="yuvi-product-routing-truth">
         <div>
-          <span>Active Runtime route order</span>
+          <span>{t("Active Runtime route order")}</span>
           <strong>
-            {truth.activeChain ? truth.activeChain.split(",").join(" → ") : "unknown"}
+            {truth.activeChain ? truth.activeChain.split(",").join(" → ") : t("unknown")}
           </strong>
         </div>
         <span className={`yuvi-product-route-badge is-${matchTone}`}>
-          {productRoutingMatchLabel(truth)}
+          {t(productRoutingMatchLabel(truth))}
         </span>
       </div>
 
       {truth.pendingRestart ? (
-        <div className="yuvi-product-routing-pending">
-          Runtime reports a pending restart. Saved/effective settings remain visible; active route
-          order remains the source of truth until Runtime applies the change.
-        </div>
+        <div className="yuvi-product-routing-pending">{t("Runtime reports a pending restart. Saved/effective settings remain visible; active route order remains the source of truth until Runtime applies the change.")}</div>
       ) : null}
 
       <div className="yuvi-product-routing-chain-heading">
-        <strong>Current route chain</strong>
-        <span>Read-only Runtime observation · no provider call on page load</span>
+        <strong>{t("Current route chain")}</strong>
+        <span>{t("Read-only Runtime observation · no provider call on page load")}</span>
       </div>
       <RouteList routes={routeStatus} />
 
@@ -574,7 +565,7 @@ export function ProductRoutingCard(props: ProductRoutingCardProps): JSX.Element 
           disabled={props.saving || props.inspecting}
           onClick={props.onSave}
         >
-          {props.saving ? "Saving…" : "Save & apply"}
+          {props.saving ? t("Saving…") : t("Save & apply")}
         </button>
         <button
           type="button"
@@ -582,7 +573,7 @@ export function ProductRoutingCard(props: ProductRoutingCardProps): JSX.Element 
           disabled={props.saving || props.inspecting}
           onClick={props.onInspect}
         >
-          {props.inspecting ? "Inspecting…" : "Inspect route"}
+          {props.inspecting ? t("Inspecting…") : t("Inspect route")}
         </button>
       </div>
 
@@ -666,7 +657,7 @@ export function ProductAIRouting(): JSX.Element {
         if (result.applyError) {
           setNotice({
             tone: "warning",
-            text: `Saved/effective, but Runtime apply failed: ${result.applyError}`
+            text: t("Saved/effective, but Runtime apply failed: {0}", result.applyError)
           });
         } else if (
           result.applied?.notHotReloaded.includes(definitionFor(capability).settingKey) ||
@@ -674,28 +665,28 @@ export function ProductAIRouting(): JSX.Element {
         ) {
           setNotice({
             tone: "warning",
-            text: `Saved/effective. Runtime reports restart required; active route remains ${truth.activeChain ?? "unknown"}.`
+            text: t("Saved/effective. Runtime reports restart required; active route remains {0}.", truth.activeChain ?? "unknown")
           });
         } else if (truth.activeMatchesSaved === true) {
           setNotice({
             tone: "info",
-            text: `Saved and applied. Active route matches ${truth.activeChain ?? "unknown"}.`
+            text: t("Saved and applied. Active route matches {0}.", truth.activeChain ?? "unknown")
           });
         } else if (truth.activeMatchesSaved === false) {
           setNotice({
             tone: "warning",
-            text: `Saved/effective, but active route remains ${truth.activeChain ?? "unknown"}.`
+            text: t("Saved/effective, but active route remains {0}.", truth.activeChain ?? "unknown")
           });
         } else {
           setNotice({
             tone: "info",
-            text: `Saved/effective. Runtime reload completed; active route is ${truth.activeChain ?? "unknown"}.`
+            text: t("Saved/effective. Runtime reload completed; active route is {0}.", truth.activeChain ?? "unknown")
           });
         }
       }
     } catch (error) {
       if (mountedRef.current) {
-        setNotice({ tone: "error", text: `Routing save failed: ${safeRoutingError(error)}` });
+        setNotice({ tone: "error", text: t("Routing save failed: {0}", safeRoutingError(error)) });
       }
     } finally {
       if (mountedRef.current) setSaving(null);
@@ -713,7 +704,7 @@ export function ProductAIRouting(): JSX.Element {
       }
     } catch (error) {
       if (mountedRef.current) {
-        setNotice({ tone: "error", text: `Route inspection failed: ${safeRoutingError(error)}` });
+        setNotice({ tone: "error", text: t("Route inspection failed: {0}", safeRoutingError(error)) });
       }
     } finally {
       if (mountedRef.current) setInspecting(null);
@@ -724,51 +715,38 @@ export function ProductAIRouting(): JSX.Element {
     <section className="yuvi-product-routing">
       <header className="yuvi-product-page-header">
         <div>
-          <div className="yuvi-product-eyebrow">Product settings</div>
-          <h1>AI Routing</h1>
-          <p>
-            See the provider order Runtime actually exposes for Chat, Reasoning, and Embedding.
-            Readiness is local configuration; observations are cached only after an explicit check.
-          </p>
+          <div className="yuvi-product-eyebrow">{t("Product settings")}</div>
+          <h1>{t("AI Routing")}</h1>
+          <p>{t("See the provider order Runtime actually exposes for Chat, Reasoning, and Embedding. Readiness is local configuration; observations are cached only after an explicit check.")}</p>
         </div>
         <div className="yuvi-product-provider-count">
-          <span>Runtime chains</span>
+          <span>{t("Runtime chains")}</span>
           <strong>{PRODUCT_ROUTING_DEFINITIONS.length}</strong>
         </div>
       </header>
 
       <div className="yuvi-product-authority-note">
-        <strong>Current Runtime authority</strong>
-        <span>
-          Save &amp; apply uses <code>/settings/runtime</code> and Runtime reload. Route inspection
-          uses <code>/providers/verify-chain/:capability</code> and performs no provider I/O.
-        </span>
+        <strong>{t("Current Runtime authority")}</strong>
+        <span>{t("Save & apply uses")}<code>/settings/runtime</code>{t("and Runtime reload. Route inspection uses")}<code>/providers/verify-chain/:capability</code>{t("and performs no provider I/O.")}</span>
       </div>
 
-      <div className="yuvi-product-gap-note">
-        Provider observations on this page are local/cache-only reads. Use the explicit Models &amp;
-        Providers verification action when a live Chat, Reasoning, or Embedding check is needed.
-        Fallback eligibility is the Runtime route-readiness projection; call-error fallback policy
-        remains Runtime-owned. Completed served-provider metadata is shown only when the existing
-        redacted Runtime event projection provides it; missing metadata remains unknown.
-      </div>
+      <div className="yuvi-product-gap-note">{t("Provider observations on this page are local/cache-only reads. Use the explicit Models & Providers verification action when a live Chat, Reasoning, or Embedding check is needed. Fallback eligibility is the Runtime route-readiness projection; call-error fallback policy remains Runtime-owned. Completed served-provider metadata is shown only when the existing redacted Runtime event projection provides it; missing metadata remains unknown.")}</div>
 
       {settings.loading && !settings.data ? (
-        <div className="yuvi-product-inline-state">Loading current routing settings…</div>
+        <div className="yuvi-product-inline-state">{t("Loading current routing settings…")}</div>
       ) : null}
       {settings.error ? (
-        <div className="yuvi-product-inline-state is-error" role="alert">
-          Routing settings unavailable: {safeRoutingError(settings.error)}
+        <div className="yuvi-product-inline-state is-error" role="alert">{t("Routing settings unavailable:")}{" "}{safeRoutingError(settings.error)}
         </div>
       ) : null}
       {providerStatus.error ? (
-        <div className="yuvi-product-inline-state is-warning" role="alert">
-          Runtime route observations unavailable: {safeRoutingError(providerStatus.error)}
+        <div className="yuvi-product-inline-state is-warning" role="alert">{t("Runtime route observations unavailable:")}{" "}{safeRoutingError(providerStatus.error)}
         </div>
       ) : null}
+      {(saving !== null || inspecting !== null) && <AsyncProgress label={t("Updating configuration…")} />}
       {notice ? (
         <div className={`yuvi-product-inline-state is-${notice.tone}`} role="status">
-          {notice.text}
+          {t(notice.text)}
         </div>
       ) : null}
 

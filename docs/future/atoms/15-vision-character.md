@@ -1,6 +1,6 @@
 # Atom 15 — On-Demand Visual Grounding
 
-> **Status: REBASELINED FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: HISTORICAL atom plan — consult the [current roadmap](../README.md) and campaign closures before treating any remaining item as work.**
 >
 > **Rebaseline:** 2026-09-06
 >

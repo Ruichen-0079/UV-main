@@ -1,6 +1,6 @@
 # Atom 06 — Character Interaction Contract vNext
 
-> **Status: FUTURE PLAN — NOT IMPLEMENTATION AUTHORITY**
+> **Status: HISTORICAL atom plan — consult the [current roadmap](../README.md) and campaign closures before treating any remaining item as work.**
 >
 > **Audit baseline:** `2a3d4814a4763fb2772d275540bf21a3e645e324`
 >

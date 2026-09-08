@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import type { MemoryRecord, RetrievedMemoryDebug } from "./api/client.js";
 import { formatDate } from "./dashboard-format.js";
 import {
@@ -23,26 +24,26 @@ export function MemoryTable(props: {
       <table className="w-full border-collapse">
         <thead className="sticky top-0 bg-ink-50">
           <tr>
-            <th className="table-cell">Type</th>
-            {!props.compact && <th className="table-cell">Subtype</th>}
-            {!props.compact && <th className="table-cell">Layer</th>}
-            {!props.compact && <th className="table-cell">Status</th>}
-            {!props.compact && <th className="table-cell">Scope</th>}
-            <th className="table-cell">Content</th>
-            {!props.compact && <th className="table-cell">Importance</th>}
-            {!props.compact && <th className="table-cell">Tags</th>}
-            {!props.compact && <th className="table-cell">Source</th>}
-            {!props.compact && <th className="table-cell">Embedding</th>}
-            {!props.compact && <th className="table-cell">Matched</th>}
-            {!props.compact && <th className="table-cell">Trace</th>}
-            <th className="table-cell">Created</th>
-            {!props.compact && <th className="table-cell">Updated</th>}
+            <th className="table-cell">{t("Type")}</th>
+            {!props.compact && <th className="table-cell">{t("Subtype")}</th>}
+            {!props.compact && <th className="table-cell">{t("Layer")}</th>}
+            {!props.compact && <th className="table-cell">{t("Status")}</th>}
+            {!props.compact && <th className="table-cell">{t("Scope")}</th>}
+            <th className="table-cell">{t("Content")}</th>
+            {!props.compact && <th className="table-cell">{t("Importance")}</th>}
+            {!props.compact && <th className="table-cell">{t("Tags")}</th>}
+            {!props.compact && <th className="table-cell">{t("Source")}</th>}
+            {!props.compact && <th className="table-cell">{t("Embedding")}</th>}
+            {!props.compact && <th className="table-cell">{t("Matched")}</th>}
+            {!props.compact && <th className="table-cell">{t("Trace")}</th>}
+            <th className="table-cell">{t("Created")}</th>
+            {!props.compact && <th className="table-cell">{t("Updated")}</th>}
             {(props.onView ||
               props.onEdit ||
               props.onArchive ||
               props.onRestore ||
               props.onForget ||
-              props.onDelete) && <th className="table-cell">Actions</th>}
+              props.onDelete) && <th className="table-cell">{t("Actions")}</th>}
           </tr>
         </thead>
         <tbody>
@@ -78,7 +79,7 @@ export function MemoryTable(props: {
                           : "bg-amber-50 text-amber-700"
                       }`}
                     >
-                      {(memory.hasEmbedding ?? memory.embeddedAt) ? "Embedded" : "Missing"}
+                      {(memory.hasEmbedding ?? memory.embeddedAt) ? t("Embedded") : "Missing"}
                     </span>
                     {memory.embeddingProvider ? (
                       <span className="block text-[10px] text-ink-400">
@@ -93,7 +94,7 @@ export function MemoryTable(props: {
                       </span>
                     ) : null}
                     {memory.semanticEmbedding === false ? (
-                      <span className="block text-[10px] text-amber-700">non-semantic mock</span>
+                      <span className="block text-[10px] text-amber-700">{t("non-semantic mock")}</span>
                     ) : null}
                     {memory.embeddingError ? (
                       <span className="block text-[10px] text-rose-700">
@@ -138,54 +139,42 @@ export function MemoryTable(props: {
                           className="button-secondary"
                           type="button"
                           onClick={() => props.onView?.(memory)}
-                        >
-                          View
-                        </button>
+                        >{t("View")}</button>
                       )}
                       {props.onEdit && (
                         <button
                           className="button-secondary"
                           type="button"
                           onClick={() => props.onEdit?.(memory)}
-                        >
-                          Edit
-                        </button>
+                        >{t("Edit")}</button>
                       )}
                       {props.onArchive && memory.status !== "archived" && (
                         <button
                           className="button-secondary"
                           type="button"
                           onClick={() => props.onArchive?.(memory)}
-                        >
-                          Archive
-                        </button>
+                        >{t("Archive")}</button>
                       )}
                       {props.onRestore && memory.status !== "active" && (
                         <button
                           className="button-secondary"
                           type="button"
                           onClick={() => props.onRestore?.(memory)}
-                        >
-                          Restore
-                        </button>
+                        >{t("Restore")}</button>
                       )}
                       {props.onForget && memory.status !== "forgotten" && (
                         <button
                           className="button-secondary"
                           type="button"
                           onClick={() => props.onForget?.(memory)}
-                        >
-                          Forget
-                        </button>
+                        >{t("Forget")}</button>
                       )}
                       {props.onDelete && (
                         <button
                           className="button-secondary"
                           type="button"
                           onClick={() => props.onDelete?.(memory)}
-                        >
-                          Delete
-                        </button>
+                        >{t("Delete")}</button>
                       )}
                     </div>
                   </td>

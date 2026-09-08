@@ -1,3 +1,6 @@
+import { AsyncProgress } from "./async-progress.js";
+import { setLocale } from "./locale.js";
+import { t } from "./locale.js";
 import { memo, useCallback, useEffect, useReducer, useRef } from "react";
 import { Field, Notice, Panel, Pill } from "./surface-ui.js";
 import { isTauriRuntime } from "./tauri-window.js";
@@ -111,6 +114,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
         : result.supervisorSync;
       const merged = { ...result, restartServices, supervisorSync };
       dispatch({ type: "save-success", result: merged, clearSecrets: true });
+      setLocale(result.settings.app.language === "en" ? "en" : "zh-CN");
       if (result.revision >= startingRevision) {
         props.onTtsSettings?.(result.settings.tts, result.revision);
       }
@@ -151,7 +155,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
     if (provider === "openai-compatible") {
       return (
         <div className="mt-3 border-t border-ink-200 pt-3">
-          <Field label="OpenAI-compatible base URL">
+          <Field label={t("OpenAI-compatible base URL")}>
             <input
               className="setting-input"
               type="url"
@@ -160,71 +164,63 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               onChange={(e) => setField("openaiCompatibleBaseUrl", e.target.value)}
             />
           </Field>
-          <Field label="OpenAI-compatible API key">
+          <Field label={t("OpenAI-compatible API key")}>
             <input
               className="setting-input"
               type="password"
               autoComplete="off"
               placeholder={
-                state.secrets.openaiCompatibleApiKey ? "Enter to replace" : "Paste API key"
+                state.secrets.openaiCompatibleApiKey ? "Enter to replace" : t("Paste API key")
               }
               value={form.openaiCompatibleApiKeyInput}
               onChange={(e) => setField("openaiCompatibleApiKeyInput", e.target.value)}
             />
           </Field>
           <div className="setting-secret-status">
-            <span>{state.secrets.openaiCompatibleApiKey ? "Configured" : "Not configured"}</span>
+            <span>{state.secrets.openaiCompatibleApiKey ? t("Configured") : t("Not configured")}</span>
             {state.secrets.openaiCompatibleApiKey ? (
               <button
                 type="button"
                 className="button-secondary text-xs"
                 onClick={() => void clearSecret("models.openaiCompatibleApiKey")}
-              >
-                Clear key
-              </button>
+              >{t("Clear key")}</button>
             ) : null}
           </div>
-          <p className="mt-2 text-xs text-ink-500">
-            This connection is shared by Chat and Cognition whenever either uses OpenAI-compatible.
-          </p>
+          <p className="mt-2 text-xs text-ink-500">{t("This connection is shared by Chat and Cognition whenever either uses OpenAI-compatible.")}</p>
         </div>
       );
     }
 
     return (
       <div className="mt-3 border-t border-ink-200 pt-3">
-        <Field label="DeepSeek API key">
+        <Field label={t("DeepSeek API key")}>
           <input
             className="setting-input"
             type="password"
             autoComplete="off"
-            placeholder={state.secrets.deepseekApiKey ? "Enter to replace" : "Paste API key"}
+            placeholder={state.secrets.deepseekApiKey ? "Enter to replace" : t("Paste API key")}
             value={form.deepseekApiKeyInput}
             onChange={(e) => setField("deepseekApiKeyInput", e.target.value)}
           />
         </Field>
         <div className="setting-secret-status">
-          <span>{state.secrets.deepseekApiKey ? "Configured" : "Not configured"}</span>
+          <span>{state.secrets.deepseekApiKey ? t("Configured") : t("Not configured")}</span>
           {state.secrets.deepseekApiKey ? (
             <button
               type="button"
               className="button-secondary text-xs"
               onClick={() => void clearSecret("chat.deepseekApiKey")}
-            >
-              Clear key
-            </button>
+            >{t("Clear key")}</button>
           ) : null}
         </div>
-        <p className="mt-2 text-xs text-ink-500">
-          This key is shared by Chat and Cognition whenever either uses DeepSeek.
-        </p>
+        <p className="mt-2 text-xs text-ink-500">{t("This key is shared by Chat and Cognition whenever either uses DeepSeek.")}</p>
       </div>
     );
   };
 
   return (
     <Panel
-      title="Desktop & User Settings"
+      title={t("Desktop & User Settings")}
       actions={
         <div className="flex items-center gap-2">
           {state.saving ? <Pill status="saving" /> : null}
@@ -233,25 +229,24 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
             className="button-primary text-xs"
             disabled={state.loading || state.saving}
             onClick={() => void onSave()}
-          >
-            Save
-          </button>
+          >{t("Save")}</button>
         </div>
       }
     >
+      {state.saving && <AsyncProgress label="Saving…" />}
       <div className="settings-banner space-y-2">
-        {state.loading && <Notice tone="info" title="Loading" message="Reading user settings…" />}
+        {state.loading && <Notice tone="info" title={t("Loading")} message={t("Reading user settings…")} />}
         {state.loadError && (
-          <Notice tone="error" title="Settings file issue" message={state.loadError} />
+          <Notice tone="error" title={t("Settings file issue")} message={state.loadError} />
         )}
-        {state.error && <Notice tone="error" title="Save failed" message={state.error} />}
+        {state.error && <Notice tone="error" title={t("Save failed")} message={state.error} />}
         {state.saveMessage && (
           <Notice
             tone={state.saveMessage.includes("Supervisor was unavailable") ? "warning" : "info"}
             title={
               state.saveMessage.includes("Supervisor was unavailable")
                 ? "Saved (sync pending)"
-                : "Saved"
+                : t("Saved")
             }
             message={state.saveMessage}
           />
@@ -260,8 +255,8 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
 
       <div className="settings-grid">
         <section className="settings-card">
-          <h3>Chat</h3>
-          <Field label="Provider">
+          <h3>{t("Chat")}</h3>
+          <Field label={t("Provider")}>
             <select
               className="setting-input"
               value={form.chatProvider}
@@ -271,7 +266,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               <option value="openai-compatible">OpenAI-compatible</option>
             </select>
           </Field>
-          <Field label="Model">
+          <Field label={t("Model")}>
             <input
               className="setting-input"
               value={form.chatModel}
@@ -282,8 +277,8 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
         </section>
 
         <section className="settings-card">
-          <h3>Cognition</h3>
-          <Field label="Provider">
+          <h3>{t("Cognition")}</h3>
+          <Field label={t("Provider")}>
             <select
               className="setting-input"
               value={form.cognitionProvider}
@@ -293,7 +288,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               <option value="deepseek">deepseek</option>
             </select>
           </Field>
-          <Field label="Model">
+          <Field label={t("Model")}>
             <input
               className="setting-input"
               value={form.cognitionModel}
@@ -301,42 +296,38 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
             />
           </Field>
           {form.cognitionProvider === form.chatProvider ? (
-            <p className="mt-3 border-t border-ink-200 pt-3 text-xs text-ink-500">
-              Uses the same {form.cognitionProvider === "openai-compatible" ? "OpenAI-compatible" : "DeepSeek"} connection configured in Chat.
-            </p>
+            <p className="mt-3 border-t border-ink-200 pt-3 text-xs text-ink-500">{t("Uses the same")}{" "}{form.cognitionProvider === "openai-compatible" ? "OpenAI-compatible" : "DeepSeek"}{" "}{t("connection configured in Chat.")}</p>
           ) : (
             renderProviderConnection(form.cognitionProvider)
           )}
         </section>
 
         <section className="settings-card">
-          <h3>Memory</h3>
+          <h3>{t("Memory")}</h3>
           <label className="setting-checkbox">
             <input
               type="checkbox"
               checked={form.memoryEnabled}
               onChange={(e) => setField("memoryEnabled", e.target.checked)}
-            />
-            Enabled
-          </label>
-          <Field label="Mode">
+            />{t("Enabled")}</label>
+          <Field label={t("Mode")}>
             <select
               className="setting-input"
               value={form.memoryMode}
               onChange={(e) => setField("memoryMode", e.target.value as "managed" | "external")}
             >
-              <option value="managed">managed</option>
-              <option value="external">external</option>
+              <option value="managed">{t("managed")}</option>
+              <option value="external">{t("external")}</option>
             </select>
           </Field>
-          <Field label="Backend">
+          <Field label={t("Backend")}>
             <select
               className="setting-input"
               value={form.memoryBackend}
               onChange={(e) => setField("memoryBackend", e.target.value as "mem0" | "legacy")}
             >
               <option value="mem0">mem0</option>
-              <option value="legacy">legacy</option>
+              <option value="legacy">{t("legacy")}</option>
             </select>
           </Field>
           <Field label="Mem0 URL">
@@ -353,14 +344,14 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               onChange={(e) => setField("ollamaUrl", e.target.value)}
             />
           </Field>
-          <Field label="Subject User ID">
+          <Field label={t("Subject User ID")}>
             <input
               className="setting-input"
               value={form.subjectUserId}
               onChange={(e) => setField("subjectUserId", e.target.value)}
             />
           </Field>
-          <Field label="Persona ID">
+          <Field label={t("Persona ID")}>
             <input
               className="setting-input"
               value={form.personaId}
@@ -373,32 +364,27 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               type="password"
               autoComplete="off"
               placeholder={
-                state.secrets.databaseUrl ? "Enter to replace" : "Paste connection string"
+                state.secrets.databaseUrl ? "Enter to replace" : t("Paste connection string")
               }
               value={form.databaseUrlInput}
               onChange={(e) => setField("databaseUrlInput", e.target.value)}
             />
           </Field>
           <div className="setting-secret-status">
-            <span>{state.secrets.databaseUrl ? "Configured" : "Not configured"}</span>
+            <span>{state.secrets.databaseUrl ? t("Configured") : t("Not configured")}</span>
             {state.secrets.databaseUrl ? (
               <button
                 type="button"
                 className="button-secondary text-xs"
                 onClick={() => void clearSecret("memory.databaseUrl")}
-              >
-                Clear URL
-              </button>
+              >{t("Clear URL")}</button>
             ) : null}
           </div>
           <div className="mt-4 border-t border-ink-200 pt-4">
-            <h4 className="text-sm font-semibold">Memory inference</h4>
-            <p className="mt-1 text-xs text-ink-500">
-              This LLM key is independent from the Chat DeepSeek key. It is only used for memory
-              inference when Memory is Enabled, Managed, and Mem0.
-            </p>
+            <h4 className="text-sm font-semibold">{t("Memory inference")}</h4>
+            <p className="mt-1 text-xs text-ink-500">{t("This LLM key is independent from the Chat DeepSeek key. It is only used for memory inference when Memory is Enabled, Managed, and Mem0.")}</p>
           </div>
-          <Field label="Memory LLM Provider">
+          <Field label={t("Memory LLM Provider")}>
             <select
               className="setting-input"
               value={form.memoryLlmProvider}
@@ -406,77 +392,66 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
                 setField("memoryLlmProvider", e.target.value as "none" | "deepseek" | "openai")
               }
             >
-              <option value="none">Disabled</option>
+              <option value="none">{t("Disabled")}</option>
               <option value="deepseek">DeepSeek</option>
               <option value="openai">OpenAI-compatible</option>
             </select>
           </Field>
-          <Field label="Memory LLM Model">
+          <Field label={t("Memory LLM Model")}>
             <input
               className="setting-input"
               value={form.memoryLlmModel}
               required={form.memoryLlmProvider !== "none"}
-              placeholder="Required model name"
+              placeholder={t("Required model name")}
               onChange={(e) => setField("memoryLlmModel", e.target.value)}
             />
           </Field>
-          <Field label="Memory LLM Base URL">
+          <Field label={t("Memory LLM Base URL")}>
             <input
               className="setting-input"
               type="url"
               value={form.memoryLlmBaseUrl}
-              placeholder="Optional custom API base URL"
+              placeholder={t("Optional custom API base URL")}
               onChange={(e) => setField("memoryLlmBaseUrl", e.target.value)}
             />
           </Field>
-          <Field label="Memory LLM API key">
+          <Field label={t("Memory LLM API key")}>
             <input
               className="setting-input"
               type="password"
               autoComplete="off"
               placeholder={
-                state.secrets.memoryLlmApiKey ? "Enter to replace" : "Paste Memory LLM API key"
+                state.secrets.memoryLlmApiKey ? "Enter to replace" : t("Paste Memory LLM API key")
               }
               value={form.memoryLlmApiKeyInput}
               onChange={(e) => setField("memoryLlmApiKeyInput", e.target.value)}
             />
           </Field>
           <div className="setting-secret-status">
-            <span>{state.secrets.memoryLlmApiKey ? "Configured" : "Not configured"}</span>
+            <span>{state.secrets.memoryLlmApiKey ? t("Configured") : t("Not configured")}</span>
             {state.secrets.memoryLlmApiKey ? (
               <button
                 type="button"
                 className="button-secondary text-xs"
                 onClick={() => void clearSecret("memory.llmApiKey")}
-              >
-                Clear key
-              </button>
+              >{t("Clear key")}</button>
             ) : null}
           </div>
           {form.memoryLlmProvider === "none" ? (
-            <p className="mt-2 text-xs text-ink-500">
-              Memory inference disabled. Model and base URL values can be retained without being
-              sent to Mem0.
-            </p>
+            <p className="mt-2 text-xs text-ink-500">{t("Memory inference disabled. Model and base URL values can be retained without being sent to Mem0.")}</p>
           ) : null}
           {form.memoryLlmProvider !== "none" && !form.memoryLlmModel.trim() ? (
-            <p className="mt-2 text-xs text-red-600">
-              Select a provider and enter a model name before saving.
-            </p>
+            <p className="mt-2 text-xs text-red-600">{t("Select a provider and enter a model name before saving.")}</p>
           ) : null}
           {form.memoryLlmProvider !== "none" &&
           !state.secrets.memoryLlmApiKey &&
           !form.memoryLlmApiKeyInput.trim() ? (
-            <p className="mt-2 text-xs text-ink-500">
-              API key not configured; infer=true will remain unavailable.
-            </p>
+            <p className="mt-2 text-xs text-ink-500">{t("API key not configured; infer=true will remain unavailable.")}</p>
           ) : null}
           {!form.memoryEnabled ||
           form.memoryMode === "external" ||
           form.memoryBackend === "legacy" ? (
-            <p className="mt-2 text-xs text-ink-500">
-              These Memory LLM settings take effect only when Memory is Enabled, Managed, and Mem0.
-            </p>
+            <p className="mt-2 text-xs text-ink-500">{t("These Memory LLM settings take effect only when Memory is Enabled, Managed, and Mem0.")}</p>
           ) : null}
         </section>
 
@@ -487,27 +462,25 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               type="checkbox"
               checked={form.ttsEnabled}
               onChange={(e) => setField("ttsEnabled", e.target.checked)}
-            />
-            Enabled
-          </label>
-          <Field label="Mode">
+            />{t("Enabled")}</label>
+          <Field label={t("Mode")}>
             <select
               className="setting-input"
               value={form.ttsMode}
               onChange={(e) => setField("ttsMode", e.target.value as "managed" | "external")}
             >
-              <option value="managed">managed</option>
-              <option value="external">external</option>
+              <option value="managed">{t("managed")}</option>
+              <option value="external">{t("external")}</option>
             </select>
           </Field>
-          <Field label="Wrapper URL">
+          <Field label={t("Wrapper URL")}>
             <input
               className="setting-input"
               value={form.ttsWrapperUrl}
               onChange={(e) => setField("ttsWrapperUrl", e.target.value)}
             />
           </Field>
-          <Field label="Upstream URL">
+          <Field label={t("Upstream URL")}>
             <input
               className="setting-input"
               value={form.ttsUpstreamUrl}
@@ -517,25 +490,25 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
         </section>
 
         <section className="settings-card">
-          <h3>Speech input</h3>
-          <Field label="Provider">
+          <h3>{t("Speech input")}</h3>
+          <Field label={t("Provider")}>
             <select
               className="setting-input"
               value={form.sttProvider}
               onChange={(e) => setField("sttProvider", e.target.value as "local" | "dashscope")}
             >
-              <option value="local">local CPU STT</option>
+              <option value="local">{t("local CPU STT")}</option>
               <option value="dashscope">dashscope</option>
             </select>
           </Field>
-          <Field label="Mode">
+          <Field label={t("Mode")}>
             <select
               className="setting-input"
               value={form.sttMode}
               onChange={(e) => setField("sttMode", e.target.value as "managed" | "external")}
             >
-              <option value="managed">managed</option>
-              <option value="external">external</option>
+              <option value="managed">{t("managed")}</option>
+              <option value="external">{t("external")}</option>
             </select>
           </Field>
           <label className="setting-checkbox">
@@ -543,10 +516,8 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               type="checkbox"
               checked={form.sttAutostart}
               onChange={(e) => setField("sttAutostart", e.target.checked)}
-            />
-            Start local sidecar automatically
-          </label>
-          <Field label="Local STT URL">
+            />{t("Start local sidecar automatically")}</label>
+          <Field label={t("Local STT URL")}>
             <input
               className="setting-input"
               type="url"
@@ -554,38 +525,32 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               onChange={(e) => setField("sttBaseUrl", e.target.value)}
             />
           </Field>
-          <Field label="Local STT model">
+          <Field label={t("Local STT model")}>
             <input
               className="setting-input"
               value={form.sttModel}
               onChange={(e) => setField("sttModel", e.target.value)}
             />
           </Field>
-          <p className="mt-2 text-xs text-ink-500">
-            Local mode uses the existing Supervisor-owned local_stt service. Managed autostart takes
-            effect only when an explicit sidecar start command is available; packaging the sidecar
-            and model is the next B3c atom.
-          </p>
+          <p className="mt-2 text-xs text-ink-500">{t("Local mode uses the existing Supervisor-owned local_stt service. Managed autostart takes effect only when an explicit sidecar start command is available; packaging the sidecar and model is the next B3c atom.")}</p>
         </section>
 
         <section className="settings-card">
-          <h3>Desktop</h3>
+          <h3>{t("Desktop")}</h3>
           <label className="setting-checkbox">
             <input
               type="checkbox"
               checked={form.companionAlwaysOnTop}
               onChange={(e) => setField("companionAlwaysOnTop", e.target.checked)}
-            />
-            Companion always on top
-          </label>
-          <Field label="Connection mode">
+            />{t("Companion always on top")}</label>
+          <Field label={t("Connection mode")}>
             <select
               className="setting-input"
               value={form.runtimeMode}
               onChange={(e) => setField("runtimeMode", e.target.value as "managed" | "external")}
             >
-              <option value="managed">managed</option>
-              <option value="external">external</option>
+              <option value="managed">{t("managed")}</option>
+              <option value="external">{t("external")}</option>
             </select>
           </Field>
           <label className="setting-checkbox">
@@ -593,39 +558,30 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               type="checkbox"
               checked={form.runtimeAutostart}
               onChange={(e) => setField("runtimeAutostart", e.target.checked)}
-            />
-            Start the local service automatically
-          </label>
-          <Field label="Service URL">
+            />{t("Start the local service automatically")}</label>
+          <Field label={t("Service URL")}>
             <input
               className="setting-input"
               value={form.runtimeUrl}
               onChange={(e) => setField("runtimeUrl", e.target.value)}
             />
           </Field>
-          <Field label="UI language">
-            <input
-              className="setting-input"
-              value={form.language}
-              onChange={(e) => setField("language", e.target.value)}
-            />
+          <Field label={t("UI language")}>
+            <select className="setting-input" value={form.language} onChange={e => setField("language", e.target.value)}>
+              <option value="zh-CN">简体中文</option><option value="en">{t("English")}</option>
+            </select>
           </Field>
         </section>
 
         <section className="settings-card">
-          <h3>Proactive messages</h3>
+          <h3>{t("Proactive messages")}</h3>
           <label className="setting-checkbox">
             <input
               type="checkbox"
               checked={form.proactiveEnabled}
               onChange={(e) => setField("proactiveEnabled", e.target.checked)}
-            />
-            Allow proactive messages
-          </label>
-          <p className="mt-2 text-xs text-ink-500">
-            Allow YUVI to start text conversations on its own when eligible. Off by default. Voice
-            remains disabled.
-          </p>
+            />{t("Allow proactive messages")}</label>
+          <p className="mt-2 text-xs text-ink-500">{t("Allow YUVI to start text conversations on its own when eligible. Off by default. Voice remains disabled.")}</p>
         </section>
       </div>
     </Panel>

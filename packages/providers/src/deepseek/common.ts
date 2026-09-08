@@ -45,6 +45,8 @@ export type DeepSeekChatCompletion = {
 
 type OpenAICompatibleUsage = {
   prompt_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+  prompt_cache_hit_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
 };
@@ -151,17 +153,22 @@ export async function createDeepSeekChatCompletion(
       throw new Error("DeepSeek transport could not start.");
     }
 
-    const response = await deepSeekFetch(options, "/chat/completions", {
-      method: "POST",
-      body: JSON.stringify({
-        model,
-        messages: request.messages,
-        temperature: request.temperature,
-        max_tokens: request.maxTokens,
-        stop: request.stopSequences,
-        stream: request.stream ?? false
-      })
-    }, transport.signal);
+    const response = await deepSeekFetch(
+      options,
+      "/chat/completions",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          model,
+          messages: request.messages,
+          temperature: request.temperature,
+          max_tokens: request.maxTokens,
+          stop: request.stopSequences,
+          stream: request.stream ?? false
+        })
+      },
+      transport.signal
+    );
     if (!response.ok) {
       throw await createStatusError(provider, capability, response);
     }
@@ -391,7 +398,8 @@ function normalizeUsage(usage: OpenAICompatibleUsage | undefined): TokenUsage | 
   return {
     inputTokens: usage.prompt_tokens,
     outputTokens: usage.completion_tokens,
-    totalTokens: usage.total_tokens
+    totalTokens: usage.total_tokens,
+    cachedInputTokens: usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens
   };
 }
 

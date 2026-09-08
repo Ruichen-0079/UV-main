@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import { useEffect, useState } from "react";
 import { DAILY_STATUS_PATH, type DailyServiceStatus } from "./daily-service-status.js";
 
@@ -11,30 +12,27 @@ export function DailyStatusDetails({ data }: { data: DailyServiceStatus }): JSX.
     tts_wrapper: "Local TTS"
   };
   return (
-    <div aria-label="Startup prerequisites">
-      <p>Supervisor observations (independent of Runtime):</p>
+    <div aria-label={t("Startup prerequisites")}>
+      <p>{t("Supervisor observations (independent of Runtime):")}</p>
       <ul>
         {data.services.map((service) => (
           <li key={service.id}>
-            {labels[service.id]}: {service.status}
+            {labels[service.id]}: {t(service.status)}
             {!service.managed
               ? service.id === "postgres" || service.id === "ollama"
-                ? " · external prerequisite; YUVI does not start or stop it"
-                : " · not configured as YUVI-owned"
-              : " · YUVI-managed service"}
+                ? t(" · external prerequisite; YUVI does not start or stop it")
+                : t(" · not configured as YUVI-owned")
+              : t(" · YUVI-managed service")}
             {service.id === "postgres"
-              ? " · TCP reachability only; pgvector readiness is reported by Mem0"
+              ? t(" · TCP reachability only; pgvector readiness is reported by Mem0")
               : ""}
           </li>
         ))}
       </ul>
       {data.services.some((s) => !s.managed && s.status !== "healthy") ? (
-        <p>
-          Restore the external prerequisite using its existing installation, then refresh. If
-          Runtime or Mem0 remains unavailable, restart YUVI after the prerequisite is ready.
-        </p>
+        <p>{t("Restore the external prerequisite using its existing installation, then refresh. If Runtime or Mem0 remains unavailable, restart YUVI after the prerequisite is ready.")}</p>
       ) : null}
-      <small>Checked {new Date(data.checkedAt).toLocaleTimeString()}</small>
+      <small>{t("Checked")}{" "}{new Date(data.checkedAt).toLocaleTimeString()}</small>
     </div>
   );
 }
@@ -68,9 +66,6 @@ export function ProductDailyStatus(): JSX.Element | null {
   }, []);
   if (data) return <DailyStatusDetails data={data} />;
   return unavailable ? (
-    <p>
-      Supervisor observations unavailable. PostgreSQL and Ollama remain external prerequisites;
-      check their existing installations. YUVI restart does not manage them.
-    </p>
+    <p>{t("Supervisor observations unavailable. PostgreSQL and Ollama remain external prerequisites; check their existing installations. YUVI restart does not manage them.")}</p>
   ) : null;
 }

@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import type { MemoryCandidateReview } from "./api/client.js";
 import { formatDate } from "./dashboard-format.js";
 import { shortTrace } from "./dashboard-memory-view.js";
@@ -53,18 +54,16 @@ export function MemoryCandidateList(props: {
               {candidate.memoryLayer ?? "unknown"} · {candidate.scope ?? "user"}
               {candidate.scopeId ? `/${candidate.scopeId}` : ""}
             </span>
-            <span className="text-ink-500">importance {candidate.importance.toFixed(2)}</span>
+            <span className="text-ink-500">{t("importance")}{" "}{candidate.importance.toFixed(2)}</span>
             {candidate.confidence !== undefined && (
-              <span className="text-ink-500">confidence {candidate.confidence.toFixed(2)}</span>
+              <span className="text-ink-500">{t("confidence")}{" "}{candidate.confidence.toFixed(2)}</span>
             )}
-            <span className="font-mono text-ink-500">
-              trace {shortTrace(candidate.sourceTraceId ?? candidate.traceId)}
+            <span className="font-mono text-ink-500">{t("trace")}{" "}{shortTrace(candidate.sourceTraceId ?? candidate.traceId)}
             </span>
             {!props.compact && (
               <>
-                <span className="text-ink-500">extractor {candidate.extractorMode ?? "n/a"}</span>
-                <span className="text-ink-500">
-                  fallback {String(candidate.fallbackUsed ?? false)}
+                <span className="text-ink-500">{t("extractor")}{" "}{candidate.extractorMode ?? "n/a"}</span>
+                <span className="text-ink-500">{t("fallback")}{" "}{String(candidate.fallbackUsed ?? false)}
                 </span>
               </>
             )}
@@ -73,58 +72,49 @@ export function MemoryCandidateList(props: {
             {props.compact ? candidate.contentPreview : candidate.content}
           </p>
           {!props.compact && candidate.temporalStatus === "unresolved" && (
-            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
-              Relative time detected. Consider resolving it to an absolute date before saving.
-              {candidate.temporalSuggestion ? ` Suggested: ${candidate.temporalSuggestion}` : ""}
+            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">{t("Relative time detected. Consider resolving it to an absolute date before saving.")}{" "}{candidate.temporalSuggestion ? t(" Suggested: {0}", candidate.temporalSuggestion) : ""}
             </div>
           )}
           {candidate.summary && (
-            <p className="mt-2 text-xs text-ink-500">Summary: {candidate.summary}</p>
+            <p className="mt-2 text-xs text-ink-500">{t("Summary:")}{" "}{candidate.summary}</p>
           )}
-          <div className="mt-2 text-xs text-ink-500">
-            Reason: {candidate.reason}
-            {candidate.storageReason ? ` · Stored: ${candidate.storageReason}` : ""}
-            {candidate.rejectedReason ? ` · Rejected: ${candidate.rejectedReason}` : ""}
+          <div className="mt-2 text-xs text-ink-500">{t("Reason:")}{" "}{candidate.reason}
+            {candidate.storageReason ? t(" · Stored: {0}", candidate.storageReason) : ""}
+            {candidate.rejectedReason ? t(" · Rejected: {0}", candidate.rejectedReason) : ""}
           </div>
           {!props.compact && (
-            <div className="mt-2 text-xs text-ink-500">
-              Origin: {candidate.originRole ?? "n/a"} · Explicit remember:{" "}
-              {String(candidate.explicitRememberRequested ?? false)} · Correction:{" "}
+            <div className="mt-2 text-xs text-ink-500">{t("Origin:")}{" "}{candidate.originRole ?? "n/a"}{t("· Explicit remember:")}{" "}
+              {String(candidate.explicitRememberRequested ?? false)}{t("· Correction:")}{" "}
               {String(candidate.correctionRequested ?? false)}
               {candidate.canonicalFingerprint
-                ? ` · Fingerprint: ${candidate.canonicalFingerprint}`
+                ? t(" · Fingerprint: {0}", candidate.canonicalFingerprint)
                 : ""}
             </div>
           )}
           {!props.compact && (
-            <div className="mt-2 text-xs text-ink-500">
-              Tags: {candidate.tags.join(", ") || "none"}
+            <div className="mt-2 text-xs text-ink-500">{t("Tags:")}{" "}{candidate.tags.join(", ") || "none"}
             </div>
           )}
           {!props.compact && candidate.createdAt && (
-            <div className="mt-2 text-xs text-ink-500">
-              Created: {formatDate(candidate.createdAt)} · Source: {candidate.source ?? "runtime"}
-              {candidate.extractorProvider ? ` · Provider: ${candidate.extractorProvider}` : ""}
+            <div className="mt-2 text-xs text-ink-500">{t("Created:")}{" "}{formatDate(candidate.createdAt)}{t("· Source:")}{" "}{candidate.source ?? "runtime"}
+              {candidate.extractorProvider ? t(" · Provider: {0}", candidate.extractorProvider) : ""}
             </div>
           )}
           {!props.compact && (
-            <div className="mt-2 text-xs text-ink-500">
-              Observed: {formatDate(candidate.observedAt ?? "")} · Valid:{" "}
+            <div className="mt-2 text-xs text-ink-500">{t("Observed:")}{" "}{formatDate(candidate.observedAt ?? "")}{t("· Valid:")}{" "}
               {formatDate(candidate.validFrom ?? "") || "now"} →{" "}
               {formatDate(candidate.validUntil ?? "") || "open"}
-              {candidate.expiresAt ? ` · Expires: ${formatDate(candidate.expiresAt)}` : ""}
+              {candidate.expiresAt ? t(" · Expires: {0}", formatDate(candidate.expiresAt)) : ""}
             </div>
           )}
           {!props.compact &&
             ((candidate.possibleSupersedes?.length ?? 0) > 0 ||
               (candidate.possibleContradictions?.length ?? 0) > 0) && (
-              <div className="mt-2 text-xs text-ink-500">
-                Possible supersedes: {candidate.possibleSupersedes?.join(", ") || "none"} ·
-                Contradictions: {candidate.possibleContradictions?.join(", ") || "none"}
+              <div className="mt-2 text-xs text-ink-500">{t("Possible supersedes:")}{" "}{candidate.possibleSupersedes?.join(", ") || "none"}{t("· Contradictions:")}{" "}{candidate.possibleContradictions?.join(", ") || "none"}
                 {candidate.relationshipConfidence !== undefined
-                  ? ` · Confidence: ${candidate.relationshipConfidence.toFixed(2)}`
+                  ? t(" · Confidence: {0}", candidate.relationshipConfidence.toFixed(2))
                   : ""}
-                {candidate.relationshipReason ? ` · Reason: ${candidate.relationshipReason}` : ""}
+                {candidate.relationshipReason ? t(" · Reason: {0}", candidate.relationshipReason) : ""}
               </div>
             )}
           {!props.compact && relationshipPreviews(candidate).length > 0 && (
@@ -147,7 +137,7 @@ export function MemoryCandidateList(props: {
                   }
                   onClick={() => props.onAccept?.(candidate)}
                 >
-                  {candidate.storedMemoryId ? "Stored" : "Accept"}
+                  {candidate.storedMemoryId ? t("Stored") : t("Accept")}
                 </button>
               )}
               {props.onEdit && (
@@ -155,9 +145,7 @@ export function MemoryCandidateList(props: {
                   className="button-secondary"
                   type="button"
                   onClick={() => props.onEdit?.(candidate)}
-                >
-                  Edit & Save
-                </button>
+                >{t("Edit & Save")}</button>
               )}
               {props.onReject && (
                 <button
@@ -165,9 +153,7 @@ export function MemoryCandidateList(props: {
                   type="button"
                   disabled={props.busyCandidateId === candidate.id}
                   onClick={() => props.onReject?.(candidate)}
-                >
-                  Reject
-                </button>
+                >{t("Reject")}</button>
               )}
             </div>
           )}

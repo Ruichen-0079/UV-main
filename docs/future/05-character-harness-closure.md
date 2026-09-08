@@ -1,5 +1,7 @@
 # Phase 5 — Character Harness Closure Checkpoint
 
+> **Status: HISTORICAL — original Phase 5 checkpoint; its deferred concrete adapter subsequently landed.**
+
 > **Closure baseline:** `1c3225f8d46b1211f76f88d67e5c021bc2c76eac`
 >
 > **Date:** 2026-08-31

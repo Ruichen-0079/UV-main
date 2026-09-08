@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   apiClient,
@@ -147,9 +148,7 @@ export function App(): JSX.Element {
             </button>
           ))}
         </nav>
-        <div className="border-t border-ink-200 p-3 text-xs text-ink-500">
-          Debug UI only. Live2D is intentionally not implemented here.
-        </div>
+        <div className="border-t border-ink-200 p-3 text-xs text-ink-500">{t("Debug UI only. Live2D is intentionally not implemented here.")}</div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -208,13 +207,11 @@ function TopStatusBar(props: {
       <div className="flex items-center gap-3">
         <StatusDot status={status} />
         <div>
-          <div className="text-sm font-semibold">Runtime status: {status}</div>
-          <div className="text-xs text-ink-500">Server target http://localhost:6121</div>
+          <div className="text-sm font-semibold">{t("Runtime status:")}{" "}{status}</div>
+          <div className="text-xs text-ink-500">{t("Server target http://localhost:6121")}</div>
         </div>
       </div>
-      <button className="button-secondary" onClick={() => void props.onRefresh()}>
-        Refresh
-      </button>
+      <button className="button-secondary" onClick={() => void props.onRefresh()}>{t("Refresh")}</button>
     </header>
   );
 }
@@ -226,42 +223,42 @@ function OverviewPage(props: {
   memories: MemoryRecord[];
 }): JSX.Element {
   return (
-    <PageShell title="Overview" subtitle="Operational snapshot for local runtime debugging.">
+    <PageShell title={t("Overview")} subtitle="Operational snapshot for local runtime debugging.">
       {props.health.loading && (
-        <Notice tone="info" title="Loading" message="Fetching runtime health from the backend." />
+        <Notice tone="info" title={t("Loading")} message={t("Fetching runtime health from the backend.")} />
       )}
       {props.health.error && (
-        <Notice tone="error" title="Backend error" message={props.health.error} />
+        <Notice tone="error" title={t("Backend error")} message={props.health.error} />
       )}
       <div className="grid grid-cols-4 gap-4">
         <StatusCard
-          title="Server"
+          title={t("Server")}
           status={props.health.data?.server.status ?? "unknown"}
-          detail={`Runtime mode: ${props.health.data?.runtimeMode ?? "unknown"}`}
+          detail={t("Runtime mode: {0}", props.health.data?.runtimeMode ?? "unknown")}
         />
         <StatusCard title="WebSocket" status={props.wsStatus} detail="控制台运行时事件流" />
         <StatusCard
-          title="Memory"
+          title={t("Memory")}
           status={memoryModeFromHealth(props.health.data)}
           detail={props.health.data?.database.message ?? "No memory health yet"}
         />
         <StatusCard
-          title="Providers"
-          status={`chat ${props.health.data?.providers.chat.readiness ?? "unknown"}`}
-          detail={`Cached chat observation: ${providerObservationLabel(
+          title={t("Providers")}
+          status={t("chat {0}", props.health.data?.providers.chat.readiness ?? "unknown")}
+          detail={t("Cached chat observation: {0}", providerObservationLabel(
             props.health.data?.providers.chat.observed
-          )}`}
+          ))}
         />
       </div>
       <div className="grid grid-cols-[1.1fr_0.9fr] gap-4">
-        <Panel title="Recent Events">
+        <Panel title={t("Recent Events")}>
           <EventTable events={props.recentEvents} />
         </Panel>
-        <Panel title="Recent Memories">
+        <Panel title={t("Recent Memories")}>
           {props.memories.length === 0 ? (
             <EmptyState
-              title="No memories loaded"
-              message="Create a memory or wait for runtime interactions."
+              title={t("No memories loaded")}
+              message={t("Create a memory or wait for runtime interactions.")}
             />
           ) : (
             <MemoryTable memories={props.memories.slice(0, 5)} compact />
@@ -352,40 +349,40 @@ function ProvidersPage(props: {
 
   return (
     <PageShell
-      title="Providers"
+      title={t("Providers")}
       subtitle="Local readiness and cached observations without exposing keys or raw secret configuration."
     >
       {props.state.loading && (
-        <Notice tone="info" title="Loading" message="Fetching provider status." />
+        <Notice tone="info" title={t("Loading")} message={t("Fetching provider status.")} />
       )}
       {props.state.error && (
-        <Notice tone="error" title="Provider health failed" message={props.state.error} />
+        <Notice tone="error" title={t("Provider health failed")} message={props.state.error} />
       )}
       <div className="grid grid-cols-3 gap-4">
         <StatusCard
-          title="Chat diagnostics"
+          title={t("Chat diagnostics")}
           status={props.state.data?.providers.chat.readiness ?? "unknown"}
           detail={cachedObservationDetail(props.state.data?.providers.chat ?? {})}
         />
         <StatusCard
-          title="Reasoning diagnostics"
+          title={t("Reasoning diagnostics")}
           status={props.state.data?.providers.reasoning.readiness ?? "unknown"}
           detail={cachedObservationDetail(props.state.data?.providers.reasoning ?? {})}
         />
         <StatusCard
-          title="Optional media diagnostics"
+          title={t("Optional media diagnostics")}
           status={optionalProviderReadinessSummary(props.state.data)}
           detail={optionalProviderObservationSummary(props.state.data)}
         />
       </div>
       <Notice
         tone="info"
-        title="Diagnostics meanings"
-        message="Local readiness only reports whether YUVI can construct a configured route; it never proves remote reachability. Cached observation is recorded only after an explicit live verification. Legacy available and generic health status are not remote-reachability evidence."
+        title={t("Diagnostics meanings")}
+        message={t("Local readiness only reports whether YUVI can construct a configured route; it never proves remote reachability. Cached observation is recorded only after an explicit live verification. Legacy available and generic health status are not remote-reachability evidence.")}
       />
       {props.state.data?.routes && <ProviderPriorityPanel routes={props.state.data.routes} />}
       <Panel
-        title="Live verification (explicit provider I/O)"
+        title={t("Live verification (explicit provider I/O)")}
         actions={
           <div className="flex gap-2">
             <button
@@ -393,38 +390,34 @@ function ProvidersPage(props: {
               disabled={verifying !== null}
               onClick={() => void verify("chat")}
             >
-              {verifying === "chat" ? "Live verifying Chat" : "Live verify Chat"}
+              {verifying === "chat" ? "Live verifying Chat" : t("Live verify Chat")}
             </button>
             <button
               className="button-secondary"
               disabled={verifying !== null}
               onClick={() => void verify("reasoning")}
             >
-              {verifying === "reasoning" ? "Live verifying Reasoning" : "Live verify Reasoning"}
+              {verifying === "reasoning" ? "Live verifying Reasoning" : t("Live verify Reasoning")}
             </button>
             <button
               className="button-secondary"
               disabled={verifying !== null}
               onClick={() => void verify("embedding")}
             >
-              {verifying === "embedding" ? "Live verifying Embedding" : "Live verify Embedding"}
+              {verifying === "embedding" ? "Live verifying Embedding" : t("Live verify Embedding")}
             </button>
           </div>
         }
       >
-        <p className="mb-3 text-sm leading-6 text-ink-600">
-          Chat, reasoning, and embedding verification explicitly call the selected provider and may
-          be billable. Results show only safe metadata; API keys and Authorization headers are never
-          displayed.
-        </p>
+        <p className="mb-3 text-sm leading-6 text-ink-600">{t("Chat, reasoning, and embedding verification explicitly call the selected provider and may be billable. Results show only safe metadata; API keys and Authorization headers are never displayed.")}</p>
         {verificationError && (
-          <Notice tone="error" title="Verification failed" message={verificationError} />
+          <Notice tone="error" title={t("Verification failed")} message={verificationError} />
         )}
         {verification && <ProviderVerificationResult result={verification} />}
       </Panel>
       <Panel
-        title="Provider-chain inspection"
-        badge="Config-only / no provider I/O"
+        title={t("Provider-chain inspection")}
+        badge={t("Config-only / no provider I/O")}
         actions={
           <div className="flex flex-wrap gap-2">
             {(["chat", "reasoning", "embedding", "tts", "stt", "vision"] as const).map(
@@ -436,39 +429,36 @@ function ProvidersPage(props: {
                   onClick={() => void inspectChain(capability)}
                 >
                   {inspectingChain === capability
-                    ? `Inspecting ${capability}`
-                    : `Inspect ${capability} chain`}
+                    ? t("Inspecting {0}", capability)
+                    : t("Inspect {0} chain", capability)}
                 </button>
               )
             )}
           </div>
         }
       >
-        <p className="mb-3 text-sm leading-6 text-ink-600">
-          Chain inspection only evaluates local route configuration and readiness. It makes no
-          provider call: ready routes and skipped attempts are not live provider successes.
-        </p>
+        <p className="mb-3 text-sm leading-6 text-ink-600">{t("Chain inspection only evaluates local route configuration and readiness. It makes no provider call: ready routes and skipped attempts are not live provider successes.")}</p>
         {chainInspectionError && (
-          <Notice tone="error" title="Chain inspection failed" message={chainInspectionError} />
+          <Notice tone="error" title={t("Chain inspection failed")} message={chainInspectionError} />
         )}
         {chainInspection && <ProviderChainInspectionResult result={chainInspection} />}
       </Panel>
-      <Panel title="Provider Status">
+      <Panel title={t("Provider Status")}>
         <div className="overflow-auto rounded-md border border-ink-100">
           <table className="w-full border-collapse">
             <thead className="bg-ink-50">
               <tr>
-                <th className="table-cell">Capability</th>
-                <th className="table-cell">Requirement</th>
-                <th className="table-cell">Provider</th>
-                <th className="table-cell">Local readiness</th>
-                <th className="table-cell">Cached observation</th>
-                <th className="table-cell">Last live observation</th>
-                <th className="table-cell">Configured</th>
-                <th className="table-cell">Mode</th>
-                <th className="table-cell">Base URL</th>
-                <th className="table-cell">Model</th>
-                <th className="table-cell">Message</th>
+                <th className="table-cell">{t("Capability")}</th>
+                <th className="table-cell">{t("Requirement")}</th>
+                <th className="table-cell">{t("Provider")}</th>
+                <th className="table-cell">{t("Local readiness")}</th>
+                <th className="table-cell">{t("Cached observation")}</th>
+                <th className="table-cell">{t("Last live observation")}</th>
+                <th className="table-cell">{t("Configured")}</th>
+                <th className="table-cell">{t("Mode")}</th>
+                <th className="table-cell">{t("Base URL")}</th>
+                <th className="table-cell">{t("Model")}</th>
+                <th className="table-cell">{t("Message")}</th>
               </tr>
             </thead>
             <tbody>
@@ -476,17 +466,17 @@ function ProvidersPage(props: {
                 <tr key={row.label}>
                   <td className="table-cell font-medium">{row.label}</td>
                   <td className="table-cell text-ink-500">
-                    {providerRequirementLabel(row.capability, row.health)}
+                    {t(providerRequirementLabel(row.capability, row.health))}
                   </td>
                   <td className="table-cell">{row.health?.provider ?? "unknown"}</td>
                   <td className="table-cell">
                     <Pill status={row.health?.readiness ?? "unknown"} />
-                    <div className="mt-1 text-xs text-ink-500">Local configuration only</div>
+                    <div className="mt-1 text-xs text-ink-500">{t("Local configuration only")}</div>
                   </td>
                   <td className="table-cell">
                     <Pill status={row.health?.observed ?? "unknown"} />
                     <div className="mt-1 text-xs text-ink-500">
-                      {providerObservationLabel(row.health?.observed)}
+                      {t(providerObservationLabel(row.health?.observed))}
                     </div>
                   </td>
                   <td className="table-cell text-ink-500">
@@ -535,7 +525,7 @@ function ProviderPriorityPanel(props: {
 }): JSX.Element {
   const capabilities = ["chat", "reasoning", "embedding", "tts", "stt", "vision"] as const;
   return (
-    <Panel title="Provider Priority" badge="Read-only v1">
+    <Panel title={t("Provider Priority")} badge={t("Read-only v1")}>
       <div className="grid grid-cols-2 gap-3">
         {capabilities.map((capability) => (
           <div key={capability} className="rounded-md border border-ink-100 bg-white p-3">
@@ -550,14 +540,12 @@ function ProviderPriorityPanel(props: {
                   <span>
                     <span className="font-medium text-ink-800">{route.provider}</span>
                     <span className="ml-2 text-ink-500">{route.model ?? "no model"}</span>
-                    <div className="mt-1 text-ink-500">
-                      Local readiness: {providerReadinessLabel(route.readiness)}
+                    <div className="mt-1 text-ink-500">{t("Local readiness:")}{" "}{t(providerReadinessLabel(route.readiness))}
                     </div>
-                    <div className="mt-1 text-ink-500">
-                      Cached observation: {providerObservationLabel(route.observed)}
+                    <div className="mt-1 text-ink-500">{t("Cached observation:")}{" "}{t(providerObservationLabel(route.observed))}
                     </div>
                     {route.missingFields?.length ? (
-                      <div className="text-rose-700">Missing: {route.missingFields.join(", ")}</div>
+                      <div className="text-rose-700">{t("Missing:")}{" "}{route.missingFields.join(", ")}</div>
                     ) : null}
                   </span>
                   <span className="flex items-center gap-1">
@@ -569,11 +557,7 @@ function ProviderPriorityPanel(props: {
           </div>
         ))}
       </div>
-      <p className="mt-3 text-xs leading-5 text-ink-500">
-        Priority is configured through *_PROVIDER_CHAIN values. Route readiness is local only;
-        observation is cached only after live verification. Apply Now reloads supported runtime
-        config; Deep Restart restarts the supervised local runtime and reloads env files.
-      </p>
+      <p className="mt-3 text-xs leading-5 text-ink-500">{t("Priority is configured through *_PROVIDER_CHAIN values. Route readiness is local only; observation is cached only after live verification. Apply Now reloads supported runtime config; Deep Restart restarts the supervised local runtime and reloads env files.")}</p>
     </Panel>
   );
 }
@@ -585,11 +569,11 @@ function ProviderChainInspectionResult(props: {
   return (
     <div className="rounded-md border border-ink-100 bg-ink-50 p-3 text-sm">
       <div className="grid grid-cols-4 gap-3">
-        <Definition label="Inspection mode" value="Config-only / no provider I/O" />
-        <Definition label="Capability" value={result.capability} />
-        <Definition label="Local ready routes" value={String(result.readyRouteCount)} />
+        <Definition label={t("Inspection mode")} value="Config-only / no provider I/O" />
+        <Definition label={t("Capability")} value={result.capability} />
+        <Definition label={t("Local ready routes")} value={String(result.readyRouteCount)} />
         <Definition
-          label="Result"
+          label={t("Result")}
           value={result.ok ? "Local route readiness found" : "No locally ready route"}
         />
       </div>
@@ -597,11 +581,11 @@ function ProviderChainInspectionResult(props: {
         {result.message ||
           "No provider route was called. This inspection does not prove remote reachability."}
       </p>
-      <div className="label mb-2">Route inspection attempts</div>
+      <div className="label mb-2">{t("Route inspection attempts")}</div>
       <ul className="space-y-1 text-xs text-ink-600">
         {result.attemptedProviders.map((attempt) => (
           <li key={`${attempt.provider}-${attempt.priority ?? "default"}`}>
-            <span className="font-medium">{attempt.provider}</span>: {providerAttemptLabel(attempt)}
+            <span className="font-medium">{attempt.provider}</span>: {t(providerAttemptLabel(attempt))}
           </li>
         ))}
       </ul>
@@ -636,111 +620,103 @@ function PromptPreviewPage(): JSX.Element {
 
   return (
     <PageShell
-      title="Prompt Preview"
+      title={t("Prompt Preview")}
       subtitle="Latest development prompt preview from the runtime."
     >
       {preview.loading && (
-        <Notice tone="info" title="Loading" message="Fetching latest prompt preview." />
+        <Notice tone="info" title={t("Loading")} message={t("Fetching latest prompt preview.")} />
       )}
       {preview.error && (
-        <Notice tone="error" title="Prompt preview failed" message={preview.error} />
+        <Notice tone="error" title={t("Prompt preview failed")} message={preview.error} />
       )}
       {preview.data?.mock && (
         <Notice
           tone="info"
-          title="No prompt yet"
+          title={t("No prompt yet")}
           message={preview.data.message ?? "Send a message first."}
         />
       )}
       {promptPreview && (
         <div className="grid grid-cols-6 gap-3">
           <StatusCard
-            title="Trace"
+            title={t("Trace")}
             status={shortTrace(promptPreview.traceId ?? preview.data?.traceId)}
             detail={formatDate(promptPreview.timestamp ?? preview.data?.timestamp ?? "")}
           />
           <StatusCard
-            title="Read / Write"
+            title={t("Read / Write")}
             status={`${String(promptPreview.readMemory ?? preview.data?.readMemory ?? false)} / ${String(promptPreview.writeMemory ?? preview.data?.writeMemory ?? false)}`}
-            detail={`Legacy aggregate: ${String(promptPreview.legacyUseMemory ?? preview.data?.legacyUseMemory ?? "not sent")} · repo: ${promptPreview.memoryRepository ?? preview.data?.memoryRepository ?? "unknown"}`}
+            detail={t("Legacy aggregate: {0} · repo: {1}", String(promptPreview.legacyUseMemory ?? preview.data?.legacyUseMemory ?? "not sent"), promptPreview.memoryRepository ?? preview.data?.memoryRepository ?? "unknown")}
           />
           <StatusCard
-            title="Retrieved"
+            title={t("Retrieved")}
             status={String(
               promptPreview.retrievedMemoryCount ?? preview.data?.retrievedMemoryCount ?? 0
             )}
-            detail={`raw: ${promptPreview.retrievedMemoryCountRaw ?? preview.data?.retrievedMemoryCountRaw ?? 0} · mode: ${promptPreview.retrievalMode ?? preview.data?.retrievalMode ?? "unknown"} · scope: ${promptPreview.retrievalScope ?? preview.data?.retrievalScope ?? "unknown"}`}
+            detail={t("raw: {0} · mode: {1} · scope: {2}", promptPreview.retrievedMemoryCountRaw ?? preview.data?.retrievedMemoryCountRaw ?? 0, promptPreview.retrievalMode ?? preview.data?.retrievalMode ?? "unknown", promptPreview.retrievalScope ?? preview.data?.retrievalScope ?? "unknown")}
           />
           <StatusCard
-            title="Vector"
+            title={t("Vector")}
             status={
               (promptPreview.vectorUsed ?? preview.data?.vectorUsed)
                 ? "used"
                 : (promptPreview.vectorEnabled ?? preview.data?.vectorEnabled)
-                  ? "enabled"
-                  : "off"
+                  ? t("enabled")
+                  : t("off")
             }
-            detail={`provider: ${promptPreview.embeddingProvider ?? preview.data?.embeddingProvider ?? "n/a"} · model: ${promptPreview.embeddingModel ?? preview.data?.embeddingModel ?? "n/a"} · dims: ${promptPreview.embeddingDimensions ?? preview.data?.embeddingDimensions ?? "n/a"} · semantic: ${String(promptPreview.semanticEmbedding ?? preview.data?.semanticEmbedding ?? false)} · query: ${String(promptPreview.queryEmbeddingGenerated ?? preview.data?.queryEmbeddingGenerated ?? false)} · vector/keyword/hybrid: ${promptPreview.vectorResultCount ?? preview.data?.vectorResultCount ?? 0}/${promptPreview.keywordResultCount ?? preview.data?.keywordResultCount ?? 0}/${promptPreview.hybridResultCount ?? preview.data?.hybridResultCount ?? 0}${(promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason) ? ` · fallback: ${promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason}` : ""}`}
+            detail={t("provider: {0} · model: {1} · dims: {2} · semantic: {3} · query: {4} · vector/keyword/hybrid: {5}/{6}/{7}{8}", promptPreview.embeddingProvider ?? preview.data?.embeddingProvider ?? "n/a", promptPreview.embeddingModel ?? preview.data?.embeddingModel ?? "n/a", promptPreview.embeddingDimensions ?? preview.data?.embeddingDimensions ?? "n/a", String(promptPreview.semanticEmbedding ?? preview.data?.semanticEmbedding ?? false), String(promptPreview.queryEmbeddingGenerated ?? preview.data?.queryEmbeddingGenerated ?? false), promptPreview.vectorResultCount ?? preview.data?.vectorResultCount ?? 0, promptPreview.keywordResultCount ?? preview.data?.keywordResultCount ?? 0, promptPreview.hybridResultCount ?? preview.data?.hybridResultCount ?? 0, (promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason) ? ` · fallback: ${promptPreview.retrievalFallbackReason ?? preview.data?.retrievalFallbackReason}` : "")}
           />
           <StatusCard
-            title="Extractor"
+            title={t("Extractor")}
             status={
               promptPreview.memoryExtractorActive ??
               preview.data?.memoryExtractorActive ??
               "unknown"
             }
-            detail={`mode: ${promptPreview.memoryExtractorMode ?? preview.data?.memoryExtractorMode ?? "unknown"} · provider: ${promptPreview.memoryExtractorProvider ?? preview.data?.memoryExtractorProvider ?? "n/a"} · candidates: ${promptPreview.memoryExtractionCandidateCount ?? preview.data?.memoryExtractionCandidateCount ?? 0} · stored: ${promptPreview.storedMemoryCount ?? preview.data?.storedMemoryCount ?? 0} · rejected: ${promptPreview.rejectedMemoryCount ?? preview.data?.rejectedMemoryCount ?? 0} · fallback: ${String(promptPreview.fallbackUsed ?? preview.data?.fallbackUsed ?? false)}${(promptPreview.llmExtractionError ?? preview.data?.llmExtractionError) ? ` · ${promptPreview.llmExtractionError ?? preview.data?.llmExtractionError}` : ""}${(promptPreview.validationIssues ?? preview.data?.validationIssues)?.length ? ` · validation: ${(promptPreview.validationIssues ?? preview.data?.validationIssues)?.join("; ")}` : ""}${(promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason) ? ` · ${promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason}` : ""}`}
+            detail={t("mode: {0} · provider: {1} · candidates: {2} · stored: {3} · rejected: {4} · fallback: {5}{6}{7}{8}", promptPreview.memoryExtractorMode ?? preview.data?.memoryExtractorMode ?? "unknown", promptPreview.memoryExtractorProvider ?? preview.data?.memoryExtractorProvider ?? "n/a", promptPreview.memoryExtractionCandidateCount ?? preview.data?.memoryExtractionCandidateCount ?? 0, promptPreview.storedMemoryCount ?? preview.data?.storedMemoryCount ?? 0, promptPreview.rejectedMemoryCount ?? preview.data?.rejectedMemoryCount ?? 0, String(promptPreview.fallbackUsed ?? preview.data?.fallbackUsed ?? false), (promptPreview.llmExtractionError ?? preview.data?.llmExtractionError) ? ` · ${promptPreview.llmExtractionError ?? preview.data?.llmExtractionError}` : "", (promptPreview.validationIssues ?? preview.data?.validationIssues)?.length ? ` · validation: ${(promptPreview.validationIssues ?? preview.data?.validationIssues)?.join("; ")}` : "", (promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason) ? ` · ${promptPreview.memoryExtractionSkippedReason ?? preview.data?.memoryExtractionSkippedReason}` : "")}
           />
           <StatusCard
-            title="Tokens"
+            title={t("Tokens")}
             status={String(promptPreview.estimatedTokens)}
             detail={promptPreview.truncated ? "Prompt truncated" : "Within budget"}
           />
           <StatusCard
-            title="Provider"
+            title={t("Provider")}
             status={promptPreview.providerName ?? preview.data?.providerName ?? "unknown"}
             detail={providerPreviewDetail(promptPreview, preview.data)}
           />
           <StatusCard
-            title="Direct Context"
+            title={t("Direct Context")}
             status={
               (promptPreview.directContextEnabled ?? preview.data?.directContextEnabled)
-                ? "enabled"
-                : "disabled"
+                ? t("enabled")
+                : t("disabled")
             }
-            detail={`turns: ${promptPreview.directContextTurnCount ?? preview.data?.directContextTurnCount ?? 0} · chars: ${
-              promptPreview.directContextCharCount ?? preview.data?.directContextCharCount ?? 0
-            } · truncated: ${String(
+            detail={t("turns: {0} · chars: {1} · truncated: {2} · source: {3}", promptPreview.directContextTurnCount ?? preview.data?.directContextTurnCount ?? 0, promptPreview.directContextCharCount ?? preview.data?.directContextCharCount ?? 0, String(
               promptPreview.directContextTruncated ?? preview.data?.directContextTruncated ?? false
-            )} · source: ${
-              promptPreview.directContextSource ?? preview.data?.directContextSource ?? "unknown"
-            }`}
+            ), promptPreview.directContextSource ?? preview.data?.directContextSource ?? "unknown")}
           />
         </div>
       )}
       {promptPreview && (
         <Notice
           tone="info"
-          title="Retrieval policy"
-          message={`included: ${formatIncludedScopes(
+          title={t("Retrieval policy")}
+          message={t("included: {0} · include archived/superseded/expired: {1}/{2}/{3} · excluded status/time/scope: {4}/{5}/{6} · currentTime: {7}", formatIncludedScopes(
             promptPreview.includedScopes ?? preview.data?.includedScopes ?? []
-          )} · include archived/superseded/expired: ${String(
+          ), String(
             promptPreview.includeArchived ?? preview.data?.includeArchived ?? false
-          )}/${String(
+          ), String(
             promptPreview.includeSuperseded ?? preview.data?.includeSuperseded ?? false
-          )}/${String(
+          ), String(
             promptPreview.includeExpired ?? preview.data?.includeExpired ?? false
-          )} · excluded status/time/scope: ${
-            promptPreview.excludedByStatus ?? preview.data?.excludedByStatus ?? 0
-          }/${promptPreview.excludedByTime ?? preview.data?.excludedByTime ?? 0}/${
-            promptPreview.excludedByScope ?? preview.data?.excludedByScope ?? 0
-          } · currentTime: ${promptPreview.currentTime ?? preview.data?.currentTime ?? "unknown"}`}
+          ), promptPreview.excludedByStatus ?? preview.data?.excludedByStatus ?? 0, promptPreview.excludedByTime ?? preview.data?.excludedByTime ?? 0, promptPreview.excludedByScope ?? preview.data?.excludedByScope ?? 0, promptPreview.currentTime ?? preview.data?.currentTime ?? "unknown")}
         />
       )}
       {(promptPreview?.llmExtractionRawPreview ?? preview.data?.llmExtractionRawPreview) && (
         <Notice
           tone="info"
-          title="LLM extractor raw preview"
+          title={t("LLM extractor raw preview")}
           message={
             promptPreview?.llmExtractionRawPreview ?? preview.data?.llmExtractionRawPreview ?? ""
           }
@@ -770,24 +746,24 @@ function PromptPreviewPage(): JSX.Element {
         ))}
       </div>
       {promptPreview?.retrievedMemories && promptPreview.retrievedMemories.length > 0 && (
-        <Panel title="Retrieved Memory Debug">
+        <Panel title={t("Retrieved Memory Debug")}>
           <div className="max-h-[280px] overflow-auto">
             <table className="w-full text-left text-xs">
               <thead className="text-ink-500">
                 <tr>
-                  <th className="px-2 py-2">Type</th>
-                  <th className="px-2 py-2">Subtype</th>
-                  <th className="px-2 py-2">Scope</th>
-                  <th className="px-2 py-2">Layer</th>
-                  <th className="px-2 py-2">Status</th>
-                  <th className="px-2 py-2">Source</th>
-                  <th className="px-2 py-2">Match</th>
-                  <th className="px-2 py-2">Embedding</th>
-                  <th className="px-2 py-2">Importance</th>
-                  <th className="px-2 py-2">Score</th>
-                  <th className="px-2 py-2">Trace</th>
-                  <th className="px-2 py-2">Display Text</th>
-                  <th className="px-2 py-2">Excluded</th>
+                  <th className="px-2 py-2">{t("Type")}</th>
+                  <th className="px-2 py-2">{t("Subtype")}</th>
+                  <th className="px-2 py-2">{t("Scope")}</th>
+                  <th className="px-2 py-2">{t("Layer")}</th>
+                  <th className="px-2 py-2">{t("Status")}</th>
+                  <th className="px-2 py-2">{t("Source")}</th>
+                  <th className="px-2 py-2">{t("Match")}</th>
+                  <th className="px-2 py-2">{t("Embedding")}</th>
+                  <th className="px-2 py-2">{t("Importance")}</th>
+                  <th className="px-2 py-2">{t("Score")}</th>
+                  <th className="px-2 py-2">{t("Trace")}</th>
+                  <th className="px-2 py-2">{t("Display Text")}</th>
+                  <th className="px-2 py-2">{t("Excluded")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -804,14 +780,14 @@ function PromptPreviewPage(): JSX.Element {
                     <td className="px-2 py-2">{memory.source}</td>
                     <td className="px-2 py-2">{memory.matchedBy ?? "unknown"}</td>
                     <td className="px-2 py-2">
-                      {memory.hasEmbedding ? "embedded" : "missing"}
+                      {memory.hasEmbedding ? "embedded" : t("missing")}
                       <span className="block text-[10px] text-ink-400">
                         {[memory.embeddingProvider, memory.embeddingModel, memory.embeddedAt]
                           .filter(Boolean)
                           .join(" · ")}
                       </span>
                       {memory.semanticEmbedding === false ? (
-                        <span className="block text-[10px] text-amber-700">non-semantic</span>
+                        <span className="block text-[10px] text-amber-700">{t("non-semantic")}</span>
                       ) : null}
                     </td>
                     <td className="px-2 py-2">{memory.importance.toFixed(2)}</td>
@@ -836,7 +812,7 @@ function PromptPreviewPage(): JSX.Element {
         </Panel>
       )}
       {promptPreview?.finalMessages && (
-        <Panel title="Final Messages">
+        <Panel title={t("Final Messages")}>
           <div className="max-h-[360px] space-y-3 overflow-auto">
             {promptPreview.finalMessages.map((message, index) => (
               <div
@@ -951,14 +927,14 @@ function VoicePage(props: { providerStatus: ProvidersStatusResponse | null }): J
   }
 
   return (
-    <PageShell title="Voice" subtitle="Developer controls for STT, voice message, and TTS routes.">
-      {error && <Notice tone="error" title="Voice request failed" message={error} />}
+    <PageShell title={t("Voice")} subtitle="Developer controls for STT, voice message, and TTS routes.">
+      {error && <Notice tone="error" title={t("Voice request failed")} message={error} />}
       <div className="grid grid-cols-2 gap-4">
-        <ProviderChainBlock title="STT chain" routes={props.providerStatus?.routes?.stt ?? []} />
-        <ProviderChainBlock title="TTS chain" routes={props.providerStatus?.routes?.tts ?? []} />
+        <ProviderChainBlock title={t("STT chain")} routes={props.providerStatus?.routes?.stt ?? []} />
+        <ProviderChainBlock title={t("TTS chain")} routes={props.providerStatus?.routes?.tts ?? []} />
       </div>
       <div className="grid grid-cols-[1fr_0.9fr] gap-4">
-        <Panel title="Speech Input">
+        <Panel title={t("Speech Input")}>
           <div className="grid grid-cols-2 gap-3">
             <Field label="sessionId">
               <input
@@ -967,7 +943,7 @@ function VoicePage(props: { providerStatus: ProvidersStatusResponse | null }): J
                 onChange={(event) => setSessionId(event.target.value)}
               />
             </Field>
-            <Field label="language">
+            <Field label={t("language")}>
               <input
                 className="field"
                 value={language}
@@ -996,7 +972,7 @@ function VoicePage(props: { providerStatus: ProvidersStatusResponse | null }): J
               />
             </Field>
           </div>
-          <Field label="audio file">
+          <Field label={t("audio file")}>
             <input
               className="field"
               type="file"
@@ -1011,7 +987,7 @@ function VoicePage(props: { providerStatus: ProvidersStatusResponse | null }): J
               className="field min-h-24"
               value={audioBase64}
               onChange={(event) => setAudioBase64(event.target.value)}
-              placeholder="Paste base64 audio, or use mockText when mock mode is enabled."
+              placeholder={t("Paste base64 audio, or use mockText when mock mode is enabled.")}
             />
           </Field>
           <Field label="mockText">
@@ -1027,17 +1003,13 @@ function VoicePage(props: { providerStatus: ProvidersStatusResponse | null }): J
                 type="checkbox"
                 checked={readMemory}
                 onChange={(event) => setReadMemory(event.target.checked)}
-              />
-              Read memory
-            </label>
+              />{t("Read memory")}</label>
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
                 checked={writeMemory}
                 onChange={(event) => setWriteMemory(event.target.checked)}
-              />
-              Write memory
-            </label>
+              />{t("Write memory")}</label>
           </div>
           <div className="mt-4 flex gap-2">
             <button
@@ -1045,32 +1017,32 @@ function VoicePage(props: { providerStatus: ProvidersStatusResponse | null }): J
               disabled={busy !== null}
               onClick={() => void transcribe()}
             >
-              {busy === "transcribe" ? "Transcribing" : "Transcribe"}
+              {busy === "transcribe" ? "Transcribing" : t("Transcribe")}
             </button>
             <button
               className="button-primary"
               disabled={busy !== null}
               onClick={() => void sendVoiceMessage()}
             >
-              {busy === "voice" ? "Sending" : "Send Voice Message"}
+              {busy === "voice" ? "Sending" : t("Send Voice Message")}
             </button>
           </div>
         </Panel>
-        <Panel title="Voice Results">
-          <ResultBlock title="Transcription" value={transcriptionResult} />
-          <ResultBlock title="Voice Message" value={voiceMessageResult} />
+        <Panel title={t("Voice Results")}>
+          <ResultBlock title={t("Transcription")} value={transcriptionResult} />
+          <ResultBlock title={t("Voice Message")} value={voiceMessageResult} />
         </Panel>
       </div>
       <div className="grid grid-cols-[1fr_0.9fr] gap-4">
-        <Panel title="Text to Speech">
-          <Field label="text">
+        <Panel title={t("Text to Speech")}>
+          <Field label={t("text")}>
             <textarea
               className="field min-h-28"
               value={ttsText}
               onChange={(event) => setTtsText(event.target.value)}
             />
           </Field>
-          <Field label="voice">
+          <Field label={t("voice")}>
             <input
               className="field"
               value={ttsVoice}
@@ -1082,11 +1054,11 @@ function VoicePage(props: { providerStatus: ProvidersStatusResponse | null }): J
             disabled={busy !== null || !ttsText.trim()}
             onClick={() => void synthesize()}
           >
-            {busy === "tts" ? "Generating" : "Generate Speech"}
+            {busy === "tts" ? "Generating" : t("Generate Speech")}
           </button>
         </Panel>
-        <Panel title="TTS Output">
-          <ResultBlock title="TTS Metadata" value={ttsResult} />
+        <Panel title={t("TTS Output")}>
+          <ResultBlock title={t("TTS Metadata")} value={ttsResult} />
           {isTTSResult(ttsResult) && ttsResult.audioBase64 ? (
             <audio
               className="mt-3 w-full"
@@ -1140,16 +1112,16 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
 
   return (
     <PageShell
-      title="Vision"
+      title={t("Vision")}
       subtitle="Developer image analysis controls using the vision provider chain."
     >
-      {error && <Notice tone="error" title="Vision request failed" message={error} />}
+      {error && <Notice tone="error" title={t("Vision request failed")} message={error} />}
       <ProviderChainBlock
-        title="Vision chain"
+        title={t("Vision chain")}
         routes={props.providerStatus?.routes?.vision ?? []}
       />
       <div className="grid grid-cols-[1fr_0.9fr] gap-4">
-        <Panel title="Image Input">
+        <Panel title={t("Image Input")}>
           <div className="grid grid-cols-3 gap-3">
             <Field label="sessionId">
               <input
@@ -1173,7 +1145,7 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
               />
             </Field>
           </div>
-          <Field label="image file">
+          <Field label={t("image file")}>
             <input
               className="field"
               type="file"
@@ -1203,7 +1175,7 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
               onChange={(event) => setImageBase64(event.target.value)}
             />
           </Field>
-          <Field label="image MIME">
+          <Field label={t("image MIME")}>
             <select
               className="field"
               value={imageMimeType}
@@ -1216,7 +1188,7 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
               <option value="image/jpeg">image/jpeg (JPEG)</option>
             </select>
           </Field>
-          <Field label="prompt">
+          <Field label={t("prompt")}>
             <textarea
               className="field min-h-24"
               value={prompt}
@@ -1224,11 +1196,11 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
             />
           </Field>
           <button className="button-primary" disabled={busy} onClick={() => void analyze()}>
-            {busy ? "Analyzing" : "Analyze"}
+            {busy ? "Analyzing" : t("Analyze")}
           </button>
         </Panel>
-        <Panel title="Vision Result">
-          <ResultBlock title="Analysis" value={result} />
+        <Panel title={t("Vision Result")}>
+          <ResultBlock title={t("Analysis")} value={result} />
         </Panel>
       </div>
     </PageShell>
@@ -1238,9 +1210,9 @@ function VisionPage(props: { providerStatus: ProvidersStatusResponse | null }): 
 function ProviderChainBlock(props: { title: string; routes: ProviderRouteHealth[] }): JSX.Element {
   const routes = props.routes;
   return (
-    <Panel title={props.title} badge="Fallback order">
+    <Panel title={props.title} badge={t("Fallback order")}>
       {routes.length === 0 ? (
-        <EmptyState title="No route data" message="Provider status has not loaded yet." />
+        <EmptyState title={t("No route data")} message={t("Provider status has not loaded yet.")} />
       ) : (
         <ol className="space-y-2">
           {routes.map((route) => (
@@ -1253,13 +1225,12 @@ function ProviderChainBlock(props: { title: string; routes: ProviderRouteHealth[
                 <span className="font-medium text-ink-800">{route.provider}</span>
                 <span className="ml-2 text-ink-500">{route.model ?? "no model"}</span>
                 {route.missingFields?.length ? (
-                  <div className="text-rose-700">Missing: {route.missingFields.join(", ")}</div>
+                  <div className="text-rose-700">{t("Missing:")}{" "}{route.missingFields.join(", ")}</div>
                 ) : null}
               </span>
               <span className="text-right text-ink-500">
-                <div>Local readiness: {providerReadinessLabel(route.readiness)}</div>
-                <div className="mt-1">
-                  Cached observation: {providerObservationLabel(route.observed)}
+                <div>{t("Local readiness:")}{" "}{t(providerReadinessLabel(route.readiness))}</div>
+                <div className="mt-1">{t("Cached observation:")}{" "}{t(providerObservationLabel(route.observed))}
                 </div>
                 <div className="mt-1">{route.mock ? "mock" : "real"}</div>
               </span>
@@ -1274,13 +1245,13 @@ function ProviderChainBlock(props: { title: string; routes: ProviderRouteHealth[
 function ResultBlock(props: { title: string; value: unknown }): JSX.Element {
   return (
     <div className="mb-3 rounded-md border border-ink-100 bg-ink-50 p-3">
-      <div className="mb-2 text-xs font-semibold uppercase text-ink-500">{props.title}</div>
+      <div className="mb-2 text-xs font-semibold uppercase text-ink-500">{t(props.title)}</div>
       {props.value ? (
         <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs leading-5 text-ink-700">
           {JSON.stringify(props.value, null, 2)}
         </pre>
       ) : (
-        <div className="text-sm text-ink-500">No result yet.</div>
+        <div className="text-sm text-ink-500">{t("No result yet.")}</div>
       )}
     </div>
   );
@@ -1338,7 +1309,7 @@ function optionalProviderReadinessSummary(status: ProvidersStatusResponse | null
   }
   const optional = [status.providers.tts, status.providers.stt, status.providers.vision];
   const ready = optional.filter((provider) => provider.readiness === "ready").length;
-  return `${ready}/${optional.length} locally ready`;
+  return t("{0}/{1} locally ready", ready, optional.length);
 }
 
 function optionalProviderObservationSummary(status: ProvidersStatusResponse | null): string {
@@ -1348,7 +1319,7 @@ function optionalProviderObservationSummary(status: ProvidersStatusResponse | nu
   return [
     `TTS: ${providerObservationLabel(status.providers.tts.observed)}`,
     `STT: ${providerObservationLabel(status.providers.stt.observed)}`,
-    `Vision: ${providerObservationLabel(status.providers.vision.observed)}`
+    t("Vision: {0}", providerObservationLabel(status.providers.vision.observed))
   ].join(" · ");
 }
 

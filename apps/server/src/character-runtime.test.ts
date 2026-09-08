@@ -54,6 +54,44 @@ function characterHarness(overrides: { responses: ChatOutput[] }) {
 }
 
 describe("production Character runtime adapter", () => {
+  it("keeps time after reusable semantic evidence without changing admitted sections", async () => {
+    const captures: string[] = [];
+    for (const isoTimestamp of ["2026-09-08T10:00:00Z", "2026-09-08T10:01:00Z"]) {
+      const input = new PromptBuilder().buildPrompt({
+        systemIdentity: "YUVI",
+        characterStyle: "Warm and precise.",
+        relationshipContext: "Familiarity is unknown.",
+        currentTime: { isoTimestamp },
+        directContext: "User: Check the garden plan.",
+        directContextEnabled: true,
+        retrievedMemories: ["The garden includes mint."],
+        memoryEnabled: true,
+        userMessage: "Continue."
+      });
+      const before = JSON.stringify(input);
+      await createServerCharacterPort().generate({
+        prompt: input,
+        userMessage: "Continue.",
+        generateChat: async (chat) => {
+          captures.push(chat.messages[0]!.content);
+          return output('{"disposition":"RESPOND","text":"The plan is ready."}');
+        }
+      });
+      expect(JSON.stringify(input)).toBe(before);
+    }
+    const contexts = captures.map((text) => JSON.parse(text.split("Semantic context:\n")[1]!));
+    expect(contexts[0].sections.at(-1).kind).toBe("TEMPORAL_CONTEXT");
+    expect(
+      contexts[0].sections.filter((s: { kind: string }) => s.kind === "TEMPORAL_CONTEXT")
+    ).toHaveLength(1);
+    expect(contexts[0].sections.slice(0, -1)).toEqual(contexts[1].sections.slice(0, -1));
+    expect(captures[0]!.split('"kind":"TEMPORAL_CONTEXT"')[0]).toBe(
+      captures[1]!.split('"kind":"TEMPORAL_CONTEXT"')[0]
+    );
+    expect(captures[0]).toContain("The garden includes mint.");
+    expect(captures[1]).toContain("2026-09-08T10:01:00Z");
+  });
+
   it("returns a full orthogonal CharacterDecision for an accepted RESPOND pass", async () => {
     const calls = characterHarness({
       responses: [output('{"disposition":"RESPOND","text":"A simple answer."}')]

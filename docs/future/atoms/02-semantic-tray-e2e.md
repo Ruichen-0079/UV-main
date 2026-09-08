@@ -1,6 +1,6 @@
 # Atom 02 — Semantic Tray E2E
 
-> **Status: DEFERRED — WINDOWS NOT CURRENT TARGET**
+> **Status: HISTORICAL atom plan — consult the [current roadmap](../README.md) and campaign closures before treating any remaining item as work.**
 >
 > This is a FUTURE PLAN and is NOT implementation authority.
 >

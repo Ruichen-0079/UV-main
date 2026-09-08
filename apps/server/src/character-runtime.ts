@@ -310,11 +310,20 @@ function createCharacterChatInput(
   const retryInstruction = retry
     ? "Retry this bounded Character generation. Output only the required JSON object."
     : "";
+  // Transport layout only: keep the clock from invalidating an otherwise reusable
+  // prefix. Harness admission, budgets, section contents and ABI order stay intact.
+  const transportContext = {
+    ...request.context,
+    sections: [
+      ...request.context.sections.filter((section) => section.kind !== "TEMPORAL_CONTEXT"),
+      ...request.context.sections.filter((section) => section.kind === "TEMPORAL_CONTEXT")
+    ]
+  };
   return {
     messages: [
       {
         role: "system",
-        content: `${instruction}\n${PRESENTATION_INSTRUCTION}\n${retryInstruction}\n\n${characterOutputLanguageInstruction(request.context.outputLanguage ?? "AUTO")}\n\nYUVI production persona:\n${YUVI_PRODUCTION_PERSONA}\n\nSemantic context:\n${JSON.stringify(request.context)}`
+        content: `${instruction}\n${PRESENTATION_INSTRUCTION}\n${retryInstruction}\n\n${characterOutputLanguageInstruction(request.context.outputLanguage ?? "AUTO")}\n\nYUVI production persona:\n${YUVI_PRODUCTION_PERSONA}\n\nSemantic context:\n${JSON.stringify(transportContext)}`
       },
       {
         role: "user",

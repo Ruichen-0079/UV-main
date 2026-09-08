@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import type { HealthResponse, ProviderHealth } from "./api/client.js";
 import { providerObservationLabel, providerReadinessLabel } from "./provider-diagnostics.js";
 
@@ -47,8 +48,8 @@ export function ProductCompactHealth(props: ProductCompactHealthProps): JSX.Elem
     <section className="yuvi-product-health" aria-labelledby="yuvi-product-health-title">
       <div className="yuvi-product-health-header">
         <div>
-          <div className="yuvi-product-eyebrow">At a glance</div>
-          <h2 id="yuvi-product-health-title">Daily health</h2>
+          <div className="yuvi-product-eyebrow">{t("At a glance")}</div>
+          <h2 id="yuvi-product-health-title">{t("Daily health")}</h2>
         </div>
         {props.onRefresh ? (
           <button
@@ -57,7 +58,7 @@ export function ProductCompactHealth(props: ProductCompactHealthProps): JSX.Elem
             disabled={props.loading}
             onClick={props.onRefresh}
           >
-            {props.loading ? "Refreshing…" : "Refresh status"}
+            {props.loading ? t("Refreshing…") : t("Refresh status")}
           </button>
         ) : null}
       </div>
@@ -66,13 +67,13 @@ export function ProductCompactHealth(props: ProductCompactHealthProps): JSX.Elem
         {items.map((item) => (
           <article key={item.id} className={`yuvi-product-health-card is-${item.tone}`}>
             <div className="yuvi-product-health-card-header">
-              <span className="yuvi-product-health-card-label">{item.label}</span>
+              <span className="yuvi-product-health-card-label">{t(item.label)}</span>
               <span className={`yuvi-product-health-badge is-${item.tone}`} role="status">
-                {item.summary}
+                {t(item.summary)}
               </span>
             </div>
-            <p>{item.detail}</p>
-            <small>{item.source}</small>
+            <p>{t(item.detail)}</p>
+            <small>{t(item.source)}</small>
           </article>
         ))}
       </div>
@@ -117,7 +118,7 @@ function runtimeHealthItem(
       label: "YUVI",
       tone: "ok",
       summary: "Available",
-      detail: `Runtime endpoint reports healthy; overall health gate ${gate}.`,
+      detail: t("Runtime endpoint reports healthy; overall health gate {0}.", gate),
       source
     };
   }
@@ -127,7 +128,7 @@ function runtimeHealthItem(
       label: "YUVI",
       tone: "bad",
       summary: "Unavailable",
-      detail: `Runtime endpoint reports unavailable; overall health gate ${gate}.`,
+      detail: t("Runtime endpoint reports unavailable; overall health gate {0}.", gate),
       source
     };
   }
@@ -137,7 +138,7 @@ function runtimeHealthItem(
       label: "YUVI",
       tone: "warn",
       summary: "Degraded",
-      detail: `Runtime endpoint reports ${serverStatus}; overall health gate ${gate}.`,
+      detail: t("Runtime endpoint reports {0}; overall health gate {1}.", serverStatus, gate),
       source
     };
   }
@@ -159,7 +160,7 @@ function memoryHealthItem(
   if (!status) {
     return {
       id: "memory",
-      label: "Memory",
+      label: t("Memory"),
       tone: input.loading ? "idle" : "warn",
       summary: input.loading ? "Checking" : "Unknown",
       detail: input.loading
@@ -173,7 +174,7 @@ function memoryHealthItem(
     case "healthy":
       return {
         id: "memory",
-        label: "Memory",
+        label: t("Memory"),
         tone: "ok",
         summary: "Healthy",
         detail: "The Runtime Memory repository health check passed.",
@@ -182,7 +183,7 @@ function memoryHealthItem(
     case "degraded":
       return {
         id: "memory",
-        label: "Memory",
+        label: t("Memory"),
         tone: "warn",
         summary: "Degraded",
         detail: "The Runtime Memory repository reported degraded health.",
@@ -191,7 +192,7 @@ function memoryHealthItem(
     case "unavailable":
       return {
         id: "memory",
-        label: "Memory",
+        label: t("Memory"),
         tone: "bad",
         summary: "Unavailable",
         detail: "The Runtime Memory repository reported unavailable health.",
@@ -209,7 +210,7 @@ function voiceHealthItem(
   if (!tts || !stt) {
     return {
       id: "voice",
-      label: "Voice",
+      label: t("Voice"),
       tone: input.loading ? "idle" : "warn",
       summary: input.loading ? "Checking" : "Unknown",
       detail: input.loading
@@ -231,15 +232,15 @@ function voiceHealthItem(
   const detail = [`TTS: ${providerAxes(tts)}`, `STT: ${providerAxes(stt)}`].join(" · ");
 
   if (allObservedUnavailable) {
-    return { id: "voice", label: "Voice", tone: "bad", summary: "Unavailable", detail, source };
+    return { id: "voice", label: t("Voice"), tone: "bad", summary: "Unavailable", detail, source };
   }
   if (anyObservedUnavailable || anyObservedDegraded) {
-    return { id: "voice", label: "Voice", tone: "warn", summary: "Degraded", detail, source };
+    return { id: "voice", label: t("Voice"), tone: "warn", summary: "Degraded", detail, source };
   }
   if (allReady && observations.every((value) => value === "available")) {
     return {
       id: "voice",
-      label: "Voice",
+      label: t("Voice"),
       tone: "ok",
       summary: "Observed available",
       detail,
@@ -247,12 +248,12 @@ function voiceHealthItem(
     };
   }
   if (allNotReady) {
-    return { id: "voice", label: "Voice", tone: "warn", summary: "Not configured", detail, source };
+    return { id: "voice", label: t("Voice"), tone: "warn", summary: "Not configured", detail, source };
   }
   if (allReady) {
     return {
       id: "voice",
-      label: "Voice",
+      label: t("Voice"),
       tone: "warn",
       summary: "Configured · unverified",
       detail,
@@ -262,14 +263,14 @@ function voiceHealthItem(
   if (anyReady) {
     return {
       id: "voice",
-      label: "Voice",
+      label: t("Voice"),
       tone: "warn",
       summary: "Partially configured",
       detail,
       source
     };
   }
-  return { id: "voice", label: "Voice", tone: "warn", summary: "Unknown", detail, source };
+  return { id: "voice", label: t("Voice"), tone: "warn", summary: "Unknown", detail, source };
 }
 
 function providerAxes(provider: ProviderHealth): string {

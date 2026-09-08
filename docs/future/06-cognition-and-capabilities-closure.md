@@ -1,5 +1,7 @@
 # Phase 6 — Cognition and Capabilities Closure Checkpoint
 
+> **Status: HISTORICAL — original Phase 6 checkpoint; production Character/Cognition integration subsequently landed.**
+
 > **Closure baseline:** `28ef8cf38f104926e61809178ac8ec62138382a1`
 >
 > **Date:** 2026-08-31

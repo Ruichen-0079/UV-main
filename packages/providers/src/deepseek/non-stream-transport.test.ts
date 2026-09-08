@@ -55,20 +55,18 @@ async function startPendingChatFetch(): Promise<{
   let receivedSignal: AbortSignal | null | undefined;
   vi.stubGlobal(
     "fetch",
-    vi.fn(
-      (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-        receivedSignal = init?.signal;
-        markFetchStarted?.();
-        return new Promise<Response>((_resolve, reject) => {
-          const abort = () => reject(new Error("mock fetch aborted"));
-          if (receivedSignal?.aborted) {
-            abort();
-          } else {
-            receivedSignal?.addEventListener("abort", abort, { once: true });
-          }
-        });
-      }
-    )
+    vi.fn((_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      receivedSignal = init?.signal;
+      markFetchStarted?.();
+      return new Promise<Response>((_resolve, reject) => {
+        const abort = () => reject(new Error("mock fetch aborted"));
+        if (receivedSignal?.aborted) {
+          abort();
+        } else {
+          receivedSignal?.addEventListener("abort", abort, { once: true });
+        }
+      });
+    })
   );
 
   const pending = createChatProvider().generateReply(chatInput, { signal: caller.signal });
@@ -81,6 +79,39 @@ async function startPendingChatFetch(): Promise<{
 }
 
 describe("DeepSeek non-stream transport", () => {
+  it.each([
+    [{ prompt_tokens_details: { cached_tokens: 80 } }, 80],
+    [{ prompt_cache_hit_tokens: 64 }, 64],
+    [{ prompt_tokens_details: { cached_tokens: 0 }, prompt_cache_hit_tokens: 64 }, 0],
+    [{}, undefined]
+  ])(
+    "preserves observed cache usage without inventing missing telemetry: %j",
+    async (usage, cached) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                choices: [
+                  { finish_reason: "stop", message: { role: "assistant", content: "reply" } }
+                ],
+                usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105, ...usage }
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            )
+        )
+      );
+      const result = await createChatProvider().generateReply(chatInput);
+      expect(result.tokenUsage).toEqual({
+        inputTokens: 100,
+        outputTokens: 5,
+        totalTokens: 105,
+        cachedInputTokens: cached
+      });
+    }
+  );
+
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
@@ -359,20 +390,18 @@ describe("DeepSeek non-stream transport", () => {
     let receivedSignal: AbortSignal | null | undefined;
     vi.stubGlobal(
       "fetch",
-      vi.fn(
-        (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-          receivedSignal = init?.signal;
-          markFetchStarted?.();
-          return new Promise<Response>((_resolve, reject) => {
-            const abort = () => reject(new Error("mock reasoning fetch aborted"));
-            if (receivedSignal?.aborted) {
-              abort();
-            } else {
-              receivedSignal?.addEventListener("abort", abort, { once: true });
-            }
-          });
-        }
-      )
+      vi.fn((_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        receivedSignal = init?.signal;
+        markFetchStarted?.();
+        return new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new Error("mock reasoning fetch aborted"));
+          if (receivedSignal?.aborted) {
+            abort();
+          } else {
+            receivedSignal?.addEventListener("abort", abort, { once: true });
+          }
+        });
+      })
     );
 
     const pending = createReasoningProvider().generateReasoning(reasoningInput, {
@@ -391,9 +420,8 @@ describe("DeepSeek non-stream transport", () => {
   });
 
   it("keeps reasoning non-streaming and hides provider reasoning_content", async () => {
-    const fetchMock = vi.fn(
-      async (_input: string | URL | Request, _init?: RequestInit) =>
-        completionResponse("answer", "private trace")
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+      completionResponse("answer", "private trace")
     );
     vi.stubGlobal("fetch", fetchMock);
 

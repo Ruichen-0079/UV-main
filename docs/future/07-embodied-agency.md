@@ -1,6 +1,8 @@
 # Phase 7 — Embodied Agency
 
-> **Status: IMPLEMENTED — PHASE 7 CLOSED**
+> **Status: CLOSED — embodied semantic execution is implemented; Companion completion is recorded in Campaign F.**
+
+Current implementation is indexed in [the roadmap](README.md). Detailed phase plans below preserve historical design reasoning; they are not a new work queue.
 
 ## 1. Purpose
 

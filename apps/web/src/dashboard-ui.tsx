@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import type * as React from "react";
 
 export function PageShell(props: {
@@ -8,8 +9,8 @@ export function PageShell(props: {
   return (
     <section className="space-y-4">
       <div>
-        <h2 className="text-2xl font-semibold tracking-normal">{props.title}</h2>
-        <p className="mt-1 text-sm text-ink-500">{props.subtitle}</p>
+        <h2 className="text-2xl font-semibold tracking-normal">{t(props.title)}</h2>
+        <p className="mt-1 text-sm text-ink-500">{t(props.subtitle)}</p>
       </div>
       {props.children}
     </section>
@@ -26,7 +27,7 @@ export function Panel(props: {
     <section className="panel">
       <div className="flex min-h-12 items-center justify-between border-b border-ink-100 px-4 py-3">
         <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold">{props.title}</h3>
+          <h3 className="text-sm font-semibold">{t(props.title)}</h3>
           {props.badge && (
             <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
               {props.badge}
@@ -48,13 +49,13 @@ export function StatusCard(props: {
 }): JSX.Element {
   return (
     <div className="panel p-4">
-      <div className="label">{props.title}</div>
+      <div className="label">{t(props.title)}</div>
       <div className="mt-3 flex items-center gap-2">
-        <StatusDot status={props.status} />
-        <div className="text-lg font-semibold">{props.status}</div>
+        <StatusDot status={t(props.status)} />
+        <div className="text-lg font-semibold">{t(props.status)}</div>
       </div>
-      <div className="mt-2 text-sm text-ink-500">{props.detail}</div>
-      {props.mock && <div className="mt-3 text-xs font-medium text-amber-700">Mock mode</div>}
+      <div className="mt-2 text-sm text-ink-500">{t(props.detail)}</div>
+      {props.mock && <div className="mt-3 text-xs font-medium text-amber-700">{t("Mock mode")}</div>}
     </div>
   );
 }
@@ -74,7 +75,7 @@ export function StatusDot(props: { status: string }): JSX.Element {
 export function Pill(props: { status: string }): JSX.Element {
   return (
     <span className="inline-flex rounded-full bg-ink-100 px-2 py-1 text-xs font-semibold text-ink-700">
-      {props.status}
+      {t(props.status)}
     </span>
   );
 }
@@ -90,7 +91,7 @@ export function Notice(props: {
       : "border-cyan-200 bg-cyan-50 text-cyan-800";
   return (
     <div className={`rounded-md border px-3 py-2 text-sm ${styles}`}>
-      <strong>{props.title}:</strong> {props.message}
+      <strong>{t(props.title)}:</strong> {t(props.message)}
     </div>
   );
 }
@@ -98,8 +99,8 @@ export function Notice(props: {
 export function EmptyState(props: { title: string; message: string }): JSX.Element {
   return (
     <div className="rounded-md border border-dashed border-ink-200 bg-ink-50 px-4 py-8 text-center">
-      <div className="font-semibold">{props.title}</div>
-      <div className="mt-1 text-sm text-ink-500">{props.message}</div>
+      <div className="font-semibold">{t(props.title)}</div>
+      <div className="mt-1 text-sm text-ink-500">{t(props.message)}</div>
     </div>
   );
 }
@@ -107,7 +108,7 @@ export function EmptyState(props: { title: string; message: string }): JSX.Eleme
 export function Field(props: { label: string; children: React.ReactNode }): JSX.Element {
   return (
     <label className="block space-y-1">
-      <span className="label">{props.label}</span>
+      <span className="label">{t(props.label)}</span>
       {props.children}
     </label>
   );
@@ -128,8 +129,8 @@ export function Toggle(props: {
         onChange={(event) => props.onChange(event.target.checked)}
       />
       <span>
-        <span className="block text-sm font-semibold">{props.label}</span>
-        <span className="block text-xs leading-5 text-ink-500">{props.note}</span>
+        <span className="block text-sm font-semibold">{t(props.label)}</span>
+        <span className="block text-xs leading-5 text-ink-500">{t(props.note)}</span>
       </span>
     </label>
   );
@@ -138,7 +139,7 @@ export function Toggle(props: {
 export function Definition(props: { label: string; value: string }): JSX.Element {
   return (
     <div className="mb-3">
-      <div className="label">{props.label}</div>
+      <div className="label">{t(props.label)}</div>
       <div className="mt-1 font-mono text-sm text-ink-700">{props.value}</div>
     </div>
   );

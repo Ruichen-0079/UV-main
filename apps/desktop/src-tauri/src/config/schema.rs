@@ -184,7 +184,7 @@ impl Default for UserSettings {
         Self {
             schema_version: SCHEMA_VERSION,
             app: AppSettings {
-                language: "en".into(),
+                language: "zh-CN".into(),
             },
             chat: ChatSettings {
                 provider: "openai-compatible".into(),

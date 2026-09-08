@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import type { ReactNode } from "react";
 
 /** Small UI primitives shared by the desktop surfaces. Kept local to avoid
@@ -11,7 +12,7 @@ export function Panel(props: {
   return (
     <section className="panel">
       <div className="flex min-h-12 items-center justify-between border-b border-ink-100 px-4 py-3">
-        <h3 className="text-sm font-semibold">{props.title}</h3>
+        <h3 className="text-sm font-semibold">{t(props.title)}</h3>
         {props.actions}
       </div>
       <div className="p-4">{props.children}</div>
@@ -22,7 +23,7 @@ export function Panel(props: {
 export function Field(props: { label: string; children: ReactNode }): JSX.Element {
   return (
     <label className="setting-field">
-      <span className="setting-label">{props.label}</span>
+      <span className="setting-label">{t(props.label)}</span>
       {props.children}
     </label>
   );
@@ -45,8 +46,8 @@ export function Toggle(props: {
         data-testid={props.testId}
       />
       <span>
-        <span className="block text-sm font-semibold">{props.label}</span>
-        <span className="block text-xs leading-5 text-ink-500">{props.note}</span>
+        <span className="block text-sm font-semibold">{t(props.label)}</span>
+        <span className="block text-xs leading-5 text-ink-500">{t(props.note)}</span>
       </span>
     </label>
   );
@@ -65,7 +66,7 @@ export function Notice(props: {
         : "border-cyan-200 bg-cyan-50 text-cyan-800";
   return (
     <div className={`rounded-md border px-3 py-2 text-sm ${styles}`}>
-      <strong>{props.title}:</strong> {props.message}
+      <strong>{t(props.title)}:</strong> {t(props.message)}
     </div>
   );
 }
@@ -73,7 +74,7 @@ export function Notice(props: {
 export function Pill(props: { status: string }): JSX.Element {
   return (
     <span className="inline-flex rounded-full bg-ink-100 px-2 py-1 text-xs font-semibold text-ink-700">
-      {props.status}
+      {t(props.status)}
     </span>
   );
 }
@@ -81,8 +82,8 @@ export function Pill(props: { status: string }): JSX.Element {
 export function EmptyState(props: { title: string; message: string }): JSX.Element {
   return (
     <div className="flex h-full min-h-24 flex-col items-center justify-center text-center">
-      <div className="text-sm font-semibold text-ink-700">{props.title}</div>
-      <div className="mt-1 text-xs text-ink-500">{props.message}</div>
+      <div className="text-sm font-semibold text-ink-700">{t(props.title)}</div>
+      <div className="mt-1 text-xs text-ink-500">{t(props.message)}</div>
     </div>
   );
 }

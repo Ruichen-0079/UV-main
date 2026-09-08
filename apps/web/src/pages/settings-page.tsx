@@ -1,10 +1,6 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type Dispatch,
-  type SetStateAction
-} from "react";
+import { AsyncProgress } from "../async-progress.js";
+import { t } from "../locale.js";
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   ApiError,
   apiClient,
@@ -55,7 +51,7 @@ function deepRestartErrorMessage(error: unknown): string {
       return "Deep restart is disabled in production.";
     }
   }
-  return error instanceof Error ? error.message : "Deep restart failed";
+  return error instanceof Error ? error.message : t("Deep restart failed");
 }
 
 export function SettingsPage(): JSX.Element {
@@ -474,26 +470,27 @@ export function SettingsPage(): JSX.Element {
     savedDeepSeekButRuntimeMock ||
     Boolean(
       settings.data &&
-        ((runtimeSetting(settings.data, "OUTPUT_LANGUAGE") || "AUTO").trim().toUpperCase() !== settings.data.activeRuntimeConfig.outputLanguage ||
-          settings.data.runtime.serverHost !== settings.data.activeRuntimeConfig.serverHost ||
-          settings.data.runtime.serverPort !== settings.data.activeRuntimeConfig.serverPort ||
-          normalizeRuntimeSettingForComparison("EVENT_BUS", settings.data.runtime.eventBus) !==
-            normalizeRuntimeSettingForComparison(
-              "EVENT_BUS",
-              settings.data.activeRuntimeConfig.eventBus
-            ) ||
+      ((runtimeSetting(settings.data, "OUTPUT_LANGUAGE") || "AUTO").trim().toUpperCase() !==
+        settings.data.activeRuntimeConfig.outputLanguage ||
+        settings.data.runtime.serverHost !== settings.data.activeRuntimeConfig.serverHost ||
+        settings.data.runtime.serverPort !== settings.data.activeRuntimeConfig.serverPort ||
+        normalizeRuntimeSettingForComparison("EVENT_BUS", settings.data.runtime.eventBus) !==
+          normalizeRuntimeSettingForComparison(
+            "EVENT_BUS",
+            settings.data.activeRuntimeConfig.eventBus
+          ) ||
+        normalizeRuntimeSettingForComparison(
+          "MEMORY_REPOSITORY",
+          settings.data.memory.memoryRepository
+        ) !==
           normalizeRuntimeSettingForComparison(
             "MEMORY_REPOSITORY",
-            settings.data.memory.memoryRepository
-          ) !==
-            normalizeRuntimeSettingForComparison(
-              "MEMORY_REPOSITORY",
-              settings.data.activeRuntimeConfig.memoryRepository
-            ) ||
-          (settings.data.memory.memoryExtractor !== undefined &&
-            settings.data.activeRuntimeConfig.memoryExtractor !== undefined &&
-            settings.data.memory.memoryExtractor !==
-              settings.data.activeRuntimeConfig.memoryExtractor))
+            settings.data.activeRuntimeConfig.memoryRepository
+          ) ||
+        (settings.data.memory.memoryExtractor !== undefined &&
+          settings.data.activeRuntimeConfig.memoryExtractor !== undefined &&
+          settings.data.memory.memoryExtractor !==
+            settings.data.activeRuntimeConfig.memoryExtractor))
     );
   const configLayerKeys = [
     "OUTPUT_LANGUAGE",
@@ -514,6 +511,7 @@ export function SettingsPage(): JSX.Element {
     "OPENAI_COMPATIBLE_API_KEY",
     "OPENAI_COMPATIBLE_CHAT_MODEL",
     "OPENAI_COMPATIBLE_REASONING_MODEL",
+    "OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL",
     "XAI_API_KEY",
     "DASHSCOPE_API_KEY",
     "EMBEDDING_PROVIDER",
@@ -526,10 +524,10 @@ export function SettingsPage(): JSX.Element {
     settings.data?.runtime.runtimeMode === "production" ||
     restartSupported === false;
   const savedEffectiveRuntimeSummary = settings.data
-    ? `${settings.data.runtime.serverHost}:${settings.data.runtime.serverPort} · event bus ${settings.data.runtime.eventBus} · memory ${settings.data.memory.memoryRepository}`
+    ? t("{0}:{1} · event bus {2} · memory {3}", settings.data.runtime.serverHost, settings.data.runtime.serverPort, settings.data.runtime.eventBus, settings.data.memory.memoryRepository)
     : "unknown";
   const activeRuntimeSummary = settings.data
-    ? `${settings.data.activeRuntimeConfig.serverHost}:${settings.data.activeRuntimeConfig.serverPort} · event bus ${settings.data.activeRuntimeConfig.eventBus} · memory ${settings.data.activeRuntimeConfig.memoryRepository}`
+    ? t("{0}:{1} · event bus {2} · memory {3}", settings.data.activeRuntimeConfig.serverHost, settings.data.activeRuntimeConfig.serverPort, settings.data.activeRuntimeConfig.eventBus, settings.data.activeRuntimeConfig.memoryRepository)
     : "unknown";
   const effectiveConfigKeyCount = Object.keys(settings.data?.effectiveConfig ?? {}).length;
   const pendingRestart = settings.data?.runtime.pendingRestart ?? false;
@@ -540,46 +538,41 @@ export function SettingsPage(): JSX.Element {
   }
 
   return (
-    <PageShell title="Settings" subtitle="Local development runtime configuration.">
+    <PageShell title={t("Settings")} subtitle="Local development runtime configuration.">
+      {(operationBusy || restartBusy || verifying !== null) && <AsyncProgress label={restartBusy ? t("Restarting…") : verifying !== null ? t("Verifying…") : t("Saving…")} />}
       {settings.loading && (
-        <Notice tone="info" title="Loading" message="Fetching safe runtime settings." />
+        <Notice tone="info" title={t("Loading")} message={t("Fetching safe runtime settings.")} />
       )}
       {settings.error && (
-        <Notice tone="error" title="Settings load failed" message={settings.error} />
+        <Notice tone="error" title={t("Settings load failed")} message={settings.error} />
       )}
-      <Panel title="Settings truth">
+      <Panel title={t("Settings truth")}>
         <div className="grid grid-cols-3 gap-3">
           <Definition
-            label="Draft (editor only)"
+            label={t("Draft (editor only)")}
             value={draftDirty ? "Unsaved changes" : "No unsaved changes"}
           />
           <Definition
-            label="Saved / effective configuration"
+            label={t("Saved / effective configuration")}
             value={
-              settings.data ? `effectiveConfig · ${effectiveConfigKeyCount} safe keys` : "unknown"
+              settings.data ? t("effectiveConfig · {0} safe keys", effectiveConfigKeyCount) : "unknown"
             }
           />
-          <Definition label="Active Runtime" value="activeRuntimeConfig" />
+          <Definition label={t("Active Runtime")} value="activeRuntimeConfig" />
         </div>
         <div className="mt-2 grid grid-cols-2 gap-3 text-sm leading-6 text-ink-600">
-          <p>
-            Saved / effective:{" "}
+          <p>{t("Saved / effective:")}{" "}
             <span className="font-mono text-ink-700">{savedEffectiveRuntimeSummary}</span>
           </p>
-          <p>
-            Active Runtime: <span className="font-mono text-ink-700">{activeRuntimeSummary}</span>
+          <p>{t("Active Runtime:")}<span className="font-mono text-ink-700">{activeRuntimeSummary}</span>
           </p>
         </div>
-        <p className="mt-2 text-xs leading-5 text-ink-500">
-          Draft values exist only in this editor. Saved / effective values come from the layered
-          .env and .env.local configuration; Active Runtime values come from the running Runtime
-          snapshot. They can differ until Save &amp; Apply or Deep Restart completes.
-        </p>
+        <p className="mt-2 text-xs leading-5 text-ink-500">{t("Draft values exist only in this editor. Saved / effective values come from the layered .env and .env.local configuration; Active Runtime values come from the running Runtime snapshot. They can differ until Save & Apply or Deep Restart completes.")}</p>
         {pendingRestart && (
           <Notice
             tone="info"
-            title="Restart evidence"
-            message="Saved / effective configuration contains a pending restart difference; Active Runtime has not converged for those settings."
+            title={t("Restart evidence")}
+            message={t("Saved / effective configuration contains a pending restart difference; Active Runtime has not converged for those settings.")}
           />
         )}
       </Panel>
@@ -636,9 +629,9 @@ export function SettingsPage(): JSX.Element {
           message={applyError}
         />
       )}
-      {restartError && <Notice tone="error" title="Deep restart failed" message={restartError} />}
+      {restartError && <Notice tone="error" title={t("Deep restart failed")} message={restartError} />}
       {restartResult && (
-        <Notice tone="info" title="Deep restart requested" message={restartResult} />
+        <Notice tone="info" title={t("Deep restart requested")} message={restartResult} />
       )}
       {saveResult && (
         <Notice
@@ -675,11 +668,11 @@ export function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="EVENT_BUS" setForm={setForm} />
           <SettingsInput form={form} name="PROVIDER_ALLOW_MOCKS" setForm={setForm} />
           <Definition
-            label="Runtime mode"
+            label={t("Runtime mode")}
             value={settings.data?.runtime.runtimeMode ?? "unknown"}
           />
           <Definition
-            label="Mock fallback allowed"
+            label={t("Mock fallback allowed")}
             value={settings.data?.runtime.providerAllowMocks ? "true" : "false"}
           />
           <Field label="X-YUVI-Dev-Token">
@@ -689,35 +682,31 @@ export function SettingsPage(): JSX.Element {
               value={dashboardDevToken}
               autoComplete="off"
               onChange={(event) => updateDashboardDevToken(event.target.value)}
-              placeholder="Local dashboard token"
+              placeholder={t("Local dashboard token")}
             />
           </Field>
-          <p className="text-xs leading-5 text-ink-500">
-            Stored only in this browser session and sent as a header for protected local POST,
-            PATCH, and DELETE requests.
-          </p>
-          <p className="text-xs leading-5 text-ink-500">
-            Active Runtime (activeRuntimeConfig):{" "}
+          <p className="text-xs leading-5 text-ink-500">{t("Stored only in this browser session and sent as a header for protected local POST, PATCH, and DELETE requests.")}</p>
+          <p className="text-xs leading-5 text-ink-500">{t("Active Runtime (activeRuntimeConfig):")}{" "}
             {settings.data?.runtime.activeServerHost ?? "unknown"}:
-            {settings.data?.runtime.activeServerPort ?? "unknown"} · event bus{" "}
+            {settings.data?.runtime.activeServerPort ?? "unknown"}{t("· event bus")}{" "}
             {settings.data?.runtime.activeEventBus ?? "unknown"}
           </p>
           <div className="mt-4 rounded-md border border-ink-100 bg-ink-50 p-3">
             <div className="grid grid-cols-2 gap-3">
               <Definition
-                label="Supervisor active"
+                label={t("Supervisor active")}
                 value={settings.data?.runtime.devSupervisor?.active ? "true" : "false"}
               />
               <Definition
-                label="Auto migrate"
+                label={t("Auto migrate")}
                 value={settings.data?.runtime.devSupervisor?.autoMigrate ? "true" : "false"}
               />
               <Definition
-                label="Restart supported"
+                label={t("Restart supported")}
                 value={settings.data?.runtime.devSupervisor?.restartSupported ? "true" : "false"}
               />
               <Definition
-                label="Env dir"
+                label={t("Env dir")}
                 value={settings.data?.runtime.devSupervisor?.runtimeEnvDir ?? "unknown"}
               />
             </div>
@@ -725,12 +714,12 @@ export function SettingsPage(): JSX.Element {
           {settings.data?.runtime.pendingRestart && (
             <Notice
               tone="info"
-              title="Restart required"
-              message=".env.local contains pending overrides. Restart the dev server for active runtime values to match."
+              title={t("Restart required")}
+              message={t(".env.local contains pending overrides. Restart the dev server for active runtime values to match.")}
             />
           )}
         </Panel>
-        <Panel title="Memory">
+        <Panel title={t("Memory")}>
           <Field label="MEMORY_REPOSITORY">
             <select
               className="field"
@@ -741,15 +730,12 @@ export function SettingsPage(): JSX.Element {
               <option value="postgres">postgres</option>
             </select>
           </Field>
-          <p className="mt-3 text-sm leading-6 text-ink-600">
-            Active mode: {settings.data?.memory.activeMemoryRepository ?? "unknown"}. in-memory
-            resets on server restart. postgres requires DATABASE_URL and pnpm db:migrate.
-          </p>
+          <p className="mt-3 text-sm leading-6 text-ink-600">{t("Active mode:")}{" "}{settings.data?.memory.activeMemoryRepository ?? "unknown"}{t(". in-memory resets on server restart. postgres requires DATABASE_URL and pnpm db:migrate.")}</p>
           {form.MEMORY_REPOSITORY === "postgres" && (
             <Notice
               tone="info"
-              title="Postgres reminder"
-              message="This change is config-only for now. Restart the server after ensuring DATABASE_URL is set and migrations have been applied."
+              title={t("Postgres reminder")}
+              message={t("This change is config-only for now. Restart the server after ensuring DATABASE_URL is set and migrations have been applied.")}
             />
           )}
           <SecretInput
@@ -767,30 +753,26 @@ export function SettingsPage(): JSX.Element {
                 value={form.MEMORY_EXTRACTOR}
                 onChange={(event) => setFormValue(setForm, "MEMORY_EXTRACTOR", event.target.value)}
               >
-                <option value="llm">llm - recommended/default</option>
-                <option value="rule-based">rule-based - no token usage</option>
+                <option value="llm">{t("llm - recommended/default")}</option>
+                <option value="rule-based">{t("rule-based - no token usage")}</option>
               </select>
             </Field>
-            <p className="mt-2 text-sm leading-6 text-ink-600">
-              llm uses DeepSeek Reasoning for higher-quality memory candidates and may consume
-              tokens only when Write Memory is ON. rule-based is simpler and never consumes model
-              tokens.
-            </p>
+            <p className="mt-2 text-sm leading-6 text-ink-600">{t("llm uses DeepSeek Reasoning for higher-quality memory candidates and may consume tokens only when Write Memory is ON. rule-based is simpler and never consumes model tokens.")}</p>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <Definition
-                label="Saved extractor"
+                label={t("Saved extractor")}
                 value={settings.data?.memory.memoryExtractor ?? "llm"}
               />
               <Definition
-                label="Active extractor"
+                label={t("Active extractor")}
                 value={`${settings.data?.memory.activeMemoryExtractor ?? "unknown"} / ${settings.data?.memory.memoryExtractorActive ?? "unknown"}`}
               />
               <Definition
-                label="Reasoning configured"
+                label={t("Reasoning configured")}
                 value={settings.data?.memory.reasoningProviderConfigured ? "yes" : "no"}
               />
               <Definition
-                label="Fallback used"
+                label={t("Fallback used")}
                 value={settings.data?.memory.memoryExtractorFallbackUsed ? "true" : "false"}
               />
             </div>
@@ -798,69 +780,67 @@ export function SettingsPage(): JSX.Element {
               settings.data?.memory.reasoningProviderConfigured === false && (
                 <Notice
                   tone="info"
-                  title="Reasoning provider not configured"
-                  message="LLM extractor is selected, but DeepSeek Reasoning is not configured. YUVI will fall back to rule-based extraction without crashing normal chat."
+                  title={t("Reasoning provider not configured")}
+                  message={t("LLM extractor is selected, but DeepSeek Reasoning is not configured. YUVI will fall back to rule-based extraction without crashing normal chat.")}
                 />
               )}
             {settings.data?.memory.memoryExtractorSkippedReason && (
               <Notice
                 tone="info"
-                title="Extractor note"
+                title={t("Extractor note")}
                 message={settings.data.memory.memoryExtractorSkippedReason}
               />
             )}
             {(settings.data?.memory.memoryExtractorFallbackUsed ||
               (settings.data?.memory.memoryExtractorValidationIssues?.length ?? 0) > 0) && (
               <div className="mt-3 rounded-md border border-ink-100 bg-ink-50 p-3">
-                <h4 className="text-sm font-semibold text-ink-800">Extractor diagnostics</h4>
+                <h4 className="text-sm font-semibold text-ink-800">{t("Extractor diagnostics")}</h4>
                 <div className="mt-2 grid grid-cols-2 gap-3">
                   {settings.data?.memory.memoryExtractorFailureStage && (
                     <Definition
-                      label="Failure stage"
+                      label={t("Failure stage")}
                       value={settings.data.memory.memoryExtractorFailureStage}
                     />
                   )}
                   {settings.data?.memory.memoryExtractorFinishReason && (
                     <Definition
-                      label="Finish reason"
+                      label={t("Finish reason")}
                       value={settings.data.memory.memoryExtractorFinishReason}
                     />
                   )}
                   {settings.data?.memory.memoryExtractorSelectedOutputSource && (
                     <Definition
-                      label="Selected output"
+                      label={t("Selected output")}
                       value={settings.data.memory.memoryExtractorSelectedOutputSource}
                     />
                   )}
                   {settings.data?.memory.memoryExtractorAnswerLength !== undefined && (
                     <Definition
-                      label="Answer length"
+                      label={t("Answer length")}
                       value={String(settings.data.memory.memoryExtractorAnswerLength)}
                     />
                   )}
                   {settings.data?.memory.memoryExtractorReasoningLength !== undefined && (
                     <Definition
-                      label="Reasoning length"
+                      label={t("Reasoning length")}
                       value={String(settings.data.memory.memoryExtractorReasoningLength)}
                     />
                   )}
                   {settings.data?.memory.memoryExtractorLastAttemptAt && (
                     <Definition
-                      label="Last attempt"
+                      label={t("Last attempt")}
                       value={settings.data.memory.memoryExtractorLastAttemptAt}
                     />
                   )}
                 </div>
                 {settings.data?.memory.memoryExtractorValidationIssues &&
                   settings.data.memory.memoryExtractorValidationIssues.length > 0 && (
-                    <p className="mt-2 text-sm leading-6 text-ink-600">
-                      Validation issues:{" "}
+                    <p className="mt-2 text-sm leading-6 text-ink-600">{t("Validation issues:")}{" "}
                       {settings.data.memory.memoryExtractorValidationIssues.join("; ")}
                     </p>
                   )}
                 {settings.data?.memory.memoryExtractorRawPreview && (
-                  <p className="mt-2 break-all text-sm leading-6 text-ink-600">
-                    Raw preview: {settings.data.memory.memoryExtractorRawPreview}
+                  <p className="mt-2 break-all text-sm leading-6 text-ink-600">{t("Raw preview:")}{" "}{settings.data.memory.memoryExtractorRawPreview}
                   </p>
                 )}
               </div>
@@ -868,33 +848,36 @@ export function SettingsPage(): JSX.Element {
           </div>
         </Panel>
       </div>
-      <Panel title="Output language">
-        <Field label="Final reply language">
-          <select className="field" value={form.OUTPUT_LANGUAGE}
-            onChange={(event) => setFormValue(setForm, "OUTPUT_LANGUAGE", event.target.value)}>
-            <option value="AUTO">AUTO — follow the conversation</option>
-            <option value="EN">English</option>
+      <Panel title={t("Output language")}>
+        <Field label={t("Final reply language")}>
+          <select
+            className="field"
+            value={form.OUTPUT_LANGUAGE}
+            onChange={(event) => setFormValue(setForm, "OUTPUT_LANGUAGE", event.target.value)}
+          >
+            <option value="AUTO">{t("AUTO — follow the conversation")}</option>
+            <option value="EN">{t("English")}</option>
             <option value="ZH">中文</option>
             <option value="JA">日本語</option>
           </select>
         </Field>
-        <p>Choose the language of final replies. Save and apply to activate your choice.</p>
-        <Definition label="Active reply language" value={settings.data?.activeRuntimeConfig.outputLanguage ?? "unknown"} />
+        <p>{t("Choose the language of final replies. Save and apply to activate your choice.")}</p>
+        <Definition
+          label={t("Active reply language")}
+          value={settings.data?.activeRuntimeConfig.outputLanguage ?? "unknown"}
+        />
       </Panel>
-      <Panel title="Active Runtime" badge="activeRuntimeConfig">
-        <p className="mb-3 text-sm leading-6 text-ink-600">
-          These values describe the running Runtime, not the editor draft or saved / effective
-          configuration.
-        </p>
+      <Panel title={t("Active Runtime")} badge="activeRuntimeConfig">
+        <p className="mb-3 text-sm leading-6 text-ink-600">{t("These values describe the running Runtime, not the editor draft or saved / effective configuration.")}</p>
         <div className="grid grid-cols-5 gap-3">
-          <Definition label="Chat Provider" value={activeChat?.provider ?? "unknown"} />
-          <Definition label="Chat Model" value={activeChat?.model ?? "unknown"} />
+          <Definition label={t("Chat Provider")} value={activeChat?.provider ?? "unknown"} />
+          <Definition label={t("Chat Model")} value={activeChat?.model ?? "unknown"} />
           <Definition
-            label="Chat Mode"
+            label={t("Chat Mode")}
             value={activeChat ? (activeChat.mock ? "mock" : "real") : "unknown"}
           />
           <Definition
-            label="Reasoning"
+            label={t("Reasoning")}
             value={
               activeReasoning
                 ? `${activeReasoning.provider} / ${activeReasoning.mock ? "mock" : "real"}`
@@ -902,57 +885,57 @@ export function SettingsPage(): JSX.Element {
             }
           />
           <Definition
-            label="Memory Repository"
+            label={t("Memory Repository")}
             value={settings.data?.activeRuntimeConfig.memoryRepository ?? "unknown"}
           />
           <Definition
-            label="Memory Extractor"
+            label={t("Memory Extractor")}
             value={`${settings.data?.activeRuntimeConfig.memoryExtractor ?? "unknown"} / ${settings.data?.activeRuntimeConfig.memoryExtractorActive ?? "unknown"}`}
           />
         </div>
       </Panel>
-      <Panel title="Developer Tools / Deep Restart" badge="Development only">
+      <Panel title={t("Developer Tools / Deep Restart")} badge={t("Development only")}>
         <div className="grid grid-cols-[1fr_1fr] gap-4">
           <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
-            <h3 className="mb-2 text-sm font-semibold text-ink-800">Save &amp; Apply / 保存并应用</h3>
+            <h3 className="mb-2 text-sm font-semibold text-ink-800">{t("Save & Apply / 保存并应用")}</h3>
             <ul className="space-y-1 text-sm leading-6 text-ink-600">
-              <li>Save Only / 仅保存 updates saved / effective configuration only.</li>
-              <li>Reloads supported runtime config in-process.</li>
-              <li>Does not restart the server.</li>
-              <li>Does not run migrations.</li>
+              <li>{t("Save Only / 仅保存 updates saved / effective configuration only.")}</li>
+              <li>{t("Reloads supported runtime config in-process.")}</li>
+              <li>{t("Does not restart the server.")}</li>
+              <li>{t("Does not run migrations.")}</li>
             </ul>
           </div>
           <div className="rounded-md border border-ink-100 bg-ink-50 p-3">
-            <h3 className="mb-2 text-sm font-semibold text-ink-800">Deep Restart</h3>
+            <h3 className="mb-2 text-sm font-semibold text-ink-800">{t("Deep Restart")}</h3>
             <ul className="space-y-1 text-sm leading-6 text-ink-600">
-              <li>Fully restarts the supervised local runtime.</li>
-              <li>Reloads .env and .env.local.</li>
-              <li>May run pnpm db:migrate when Postgres mode is active.</li>
-              <li>Requires YUVI_DEV_SUPERVISOR=1.</li>
+              <li>{t("Fully restarts the supervised local runtime.")}</li>
+              <li>{t("Reloads .env and .env.local.")}</li>
+              <li>{t("May run pnpm db:migrate when Postgres mode is active.")}</li>
+              <li>{t("Requires YUVI_DEV_SUPERVISOR=1.")}</li>
             </ul>
           </div>
         </div>
         <div className="mt-4 grid grid-cols-3 gap-3">
-          <Definition label="Supervisor active" value={restartStatus?.active ? "true" : "false"} />
-          <Definition label="Auto migrate" value={restartStatus?.autoMigrate ? "true" : "false"} />
+          <Definition label={t("Supervisor active")} value={restartStatus?.active ? "true" : "false"} />
+          <Definition label={t("Auto migrate")} value={restartStatus?.autoMigrate ? "true" : "false"} />
           <Definition
-            label="Restart supported"
+            label={t("Restart supported")}
             value={restartSupported === undefined ? "unknown" : restartSupported ? "true" : "false"}
           />
-          <Definition label="Runtime env dir" value={restartStatus?.runtimeEnvDir ?? "unknown"} />
+          <Definition label={t("Runtime env dir")} value={restartStatus?.runtimeEnvDir ?? "unknown"} />
           <Definition
-            label="Memory repository"
+            label={t("Memory repository")}
             value={settings.data?.memory.activeMemoryRepository ?? "unknown"}
           />
           <Definition
-            label="Database configured"
+            label={t("Database configured")}
             value={settings.data?.memory.databaseUrlConfigured ? "true" : "false"}
           />
         </div>
         <Notice
           tone="info"
-          title="Deep Restart Runtime"
-          message="Deep Restart reloads .env/.env.local, may run pnpm db:migrate, and restarts the local supervised runtime. Development only."
+          title={t("Deep Restart Runtime")}
+          message={t("Deep Restart reloads .env/.env.local, may run pnpm db:migrate, and restarts the local supervised runtime. Development only.")}
         />
         <div className="mt-3 flex items-center gap-3">
           <button
@@ -961,24 +944,22 @@ export function SettingsPage(): JSX.Element {
             disabled={deepRestartDisabled}
             onClick={() => void deepRestart()}
           >
-            {restartBusy ? "Requesting Restart" : "Deep Restart Runtime"}
+            {restartBusy ? "Requesting Restart" : t("Deep Restart Runtime")}
           </button>
           {restartSupported === false && (
-            <span className="text-sm text-ink-500">
-              Start with: YUVI_DEV_SUPERVISOR=1 ./scripts/dev.sh
-            </span>
+            <span className="text-sm text-ink-500">{t("Start with: YUVI_DEV_SUPERVISOR=1 ./scripts/dev.sh")}</span>
           )}
         </div>
       </Panel>
-      <Panel title="Saved / Effective Configuration" badge="layered settings">
+      <Panel title={t("Saved / Effective Configuration")} badge={t("layered settings")}>
         <Notice
           tone="info"
-          title="Saved / effective source"
-          message=".env.local overrides .env. Dashboard writes to .env.local for safety and does not modify .env automatically. The effective column is the saved configuration source; it is separate from Active Runtime."
+          title={t("Saved / effective source")}
+          message={t(".env.local overrides .env. Dashboard writes to .env.local for safety and does not modify .env automatically. The effective column is the saved configuration source; it is separate from Active Runtime.")}
         />
         <div className="mt-3 grid grid-cols-2 gap-3">
           <Definition
-            label="Base .env"
+            label={t("Base .env")}
             value={
               settings.data?.configFiles[".env"].exists
                 ? "exists / git ignored"
@@ -986,7 +967,7 @@ export function SettingsPage(): JSX.Element {
             }
           />
           <Definition
-            label="Local override .env.local"
+            label={t("Local override .env.local")}
             value={
               settings.data?.configFiles[".env.local"].exists
                 ? "exists / git ignored"
@@ -998,11 +979,11 @@ export function SettingsPage(): JSX.Element {
           <table className="w-full text-left text-xs">
             <thead className="text-ink-500">
               <tr>
-                <th className="px-2 py-2">Key</th>
-                <th className="px-2 py-2">Base .env</th>
-                <th className="px-2 py-2">Local override .env.local</th>
-                <th className="px-2 py-2">Effective value</th>
-                <th className="px-2 py-2">Source</th>
+                <th className="px-2 py-2">{t("Key")}</th>
+                <th className="px-2 py-2">{t("Base .env")}</th>
+                <th className="px-2 py-2">{t("Local override .env.local")}</th>
+                <th className="px-2 py-2">{t("Effective value")}</th>
+                <th className="px-2 py-2">{t("Source")}</th>
               </tr>
             </thead>
             <tbody>
@@ -1013,7 +994,7 @@ export function SettingsPage(): JSX.Element {
           </table>
         </div>
       </Panel>
-      <Panel title="Model Priority Chains" badge="Provider fallback">
+      <Panel title={t("Model Priority Chains")} badge={t("Provider fallback")}>
         <div className="grid grid-cols-3 gap-3">
           <SettingsInput form={form} name="DEFAULT_CHAT_PROVIDER" setForm={setForm} />
           <SettingsInput form={form} name="DEFAULT_REASONING_PROVIDER" setForm={setForm} />
@@ -1024,15 +1005,12 @@ export function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="STT_PROVIDER_CHAIN" setForm={setForm} />
           <SettingsInput form={form} name="VISION_PROVIDER_CHAIN" setForm={setForm} />
         </div>
-        <p className="mt-3 text-sm leading-6 text-ink-600">
-          Provider chains are tried left to right. Mock is ignored unless PROVIDER_ALLOW_MOCKS=true.
-          保存并应用会重新加载可热更新的 Runtime 配置；Deep Restart 会重启受监管的 Runtime。
-        </p>
+        <p className="mt-3 text-sm leading-6 text-ink-600">{t("Provider chains are tried left to right. Mock is ignored unless PROVIDER_ALLOW_MOCKS=true. 保存并应用会重新加载可热更新的 Runtime 配置；Deep Restart 会重启受监管的 Runtime。")}</p>
       </Panel>
       <Notice
         tone="info"
-        title="Provider diagnostics"
-        message="Local readiness is a configuration check, not proof that a provider is reachable. Cached observation comes only from an explicit live check. Chat, reasoning, and embedding controls below perform provider I/O and may be billable; TTS, STT, and Vision controls are config-only and make no provider call."
+        title={t("Provider diagnostics")}
+        message={t("Local readiness is a configuration check, not proof that a provider is reachable. Cached observation comes only from an explicit live check. Chat, reasoning, and embedding controls below perform provider I/O and may be billable; TTS, STT, and Vision controls are config-only and make no provider call.")}
       />
       <div className="grid grid-cols-3 gap-4">
         <Panel
@@ -1044,14 +1022,14 @@ export function SettingsPage(): JSX.Element {
                 disabled={verifying !== null}
                 onClick={() => void verify("chat")}
               >
-                {verifying === "chat" ? "Live verifying Chat" : "Live verify Chat"}
+                {verifying === "chat" ? "Live verifying Chat" : t("Live verify Chat")}
               </button>
               <button
                 className="button-secondary"
                 disabled={verifying !== null}
                 onClick={() => void verify("reasoning")}
               >
-                {verifying === "reasoning" ? "Live verifying Reasoning" : "Live verify Reasoning"}
+                {verifying === "reasoning" ? "Live verifying Reasoning" : t("Live verify Reasoning")}
               </button>
             </div>
           }
@@ -1068,15 +1046,15 @@ export function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="DEEPSEEK_CHAT_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="DEEPSEEK_REASONING_MODEL" setForm={setForm} />
           <ProviderDiagnosticsSummary
-            label="Chat"
+            label={t("Chat")}
             health={settings.data?.activeRuntimeConfig.providers.chat}
           />
           <ProviderDiagnosticsSummary
-            label="Reasoning"
+            label={t("Reasoning")}
             health={settings.data?.activeRuntimeConfig.providers.reasoning}
           />
         </Panel>
-        <Panel title="OpenAI-compatible" badge="Chat + Cognition">
+        <Panel title="OpenAI-compatible" badge={t("Chat + Cognition")}>
           <SettingsInput form={form} name="OPENAI_COMPATIBLE_API_BASEURL" setForm={setForm} />
           <SecretInput
             label="OPENAI_COMPATIBLE_API_KEY"
@@ -1088,16 +1066,21 @@ export function SettingsPage(): JSX.Element {
           />
           <SettingsInput form={form} name="OPENAI_COMPATIBLE_CHAT_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="OPENAI_COMPATIBLE_REASONING_MODEL" setForm={setForm} />
+          <SettingsInput
+            form={form}
+            name="OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL"
+            setForm={setForm}
+          />
           <ProviderDiagnosticsSummary
-            label="Chat"
+            label={t("Chat")}
             health={settings.data?.providers.openaiCompatible.status?.chat}
           />
           <ProviderDiagnosticsSummary
-            label="Cognition"
+            label={t("Cognition")}
             health={settings.data?.providers.openaiCompatible.status?.reasoning}
           />
         </Panel>
-        <Panel title="xAI" badge="Optional · TTS and Vision implemented">
+        <Panel title="xAI" badge={t("Optional · TTS and Vision implemented")}>
           <SettingsInput form={form} name="XAI_API_BASEURL" setForm={setForm} />
           <SecretInput
             label="XAI_API_KEY"
@@ -1111,11 +1094,11 @@ export function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="XAI_TTS_VOICE" setForm={setForm} />
           <SettingsInput form={form} name="XAI_VISION_MODEL" setForm={setForm} />
           <ProviderDiagnosticsSummary
-            label="TTS (optional)"
+            label={t("TTS (optional)")}
             health={settings.data?.activeRuntimeConfig.providers.tts}
           />
           <ProviderDiagnosticsSummary
-            label="Vision (optional)"
+            label={t("Vision (optional)")}
             health={settings.data?.activeRuntimeConfig.providers.vision}
           />
         </Panel>
@@ -1135,7 +1118,7 @@ export function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="NVIDIA_EMBEDDING_DIMENSIONS" setForm={setForm} />
           <SettingsInput form={form} name="NVIDIA_VISION_MODEL" setForm={setForm} />
         </Panel>
-        <Panel title="Local Models" badge="OpenAI-compatible">
+        <Panel title={t("Local Models")} badge="OpenAI-compatible">
           <SettingsInput form={form} name="LOCAL_MODEL_BASEURL" setForm={setForm} />
           <SettingsInput form={form} name="LOCAL_CHAT_MODEL" setForm={setForm} />
           <SettingsInput form={form} name="LOCAL_REASONING_MODEL" setForm={setForm} />
@@ -1146,8 +1129,8 @@ export function SettingsPage(): JSX.Element {
           <SettingsInput form={form} name="LOCAL_VISION_MODEL" setForm={setForm} />
         </Panel>
         <Panel
-          title="DashScope / Embedding"
-          badge="DashScope STT optional · implemented"
+          title={t("DashScope / Embedding")}
+          badge={t("DashScope STT optional · implemented")}
           actions={
             <div className="flex flex-wrap gap-2">
               <button
@@ -1155,28 +1138,28 @@ export function SettingsPage(): JSX.Element {
                 disabled={verifying !== null}
                 onClick={() => void verify("embedding")}
               >
-                {verifying === "embedding" ? "Live verifying Embedding" : "Live verify Embedding"}
+                {verifying === "embedding" ? "Live verifying Embedding" : t("Live verify Embedding")}
               </button>
               <button
                 className="button-secondary"
                 disabled={verifying !== null}
                 onClick={() => void verify("stt")}
               >
-                {verifying === "stt" ? "Inspecting STT config" : "Inspect STT config"}
+                {verifying === "stt" ? "Inspecting STT config" : t("Inspect STT config")}
               </button>
               <button
                 className="button-secondary"
                 disabled={verifying !== null}
                 onClick={() => void verify("tts")}
               >
-                {verifying === "tts" ? "Inspecting TTS config" : "Inspect TTS config"}
+                {verifying === "tts" ? "Inspecting TTS config" : t("Inspect TTS config")}
               </button>
               <button
                 className="button-secondary"
                 disabled={verifying !== null}
                 onClick={() => void verify("vision")}
               >
-                {verifying === "vision" ? "Inspecting Vision config" : "Inspect Vision config"}
+                {verifying === "vision" ? "Inspecting Vision config" : t("Inspect Vision config")}
               </button>
             </div>
           }
@@ -1192,17 +1175,15 @@ export function SettingsPage(): JSX.Element {
           />
           <SettingsInput form={form} name="DASHSCOPE_STT_MODEL" setForm={setForm} />
           <ProviderDiagnosticsSummary
-            label="STT (optional)"
+            label={t("STT (optional)")}
             health={settings.data?.activeRuntimeConfig.providers.stt}
           />
           <SettingsInput form={form} name="EMBEDDING_PROVIDER" setForm={setForm} />
-          <div className="rounded-md border border-ink-100 bg-ink-50 p-2 text-xs text-ink-600">
-            Local readiness:{" "}
-            {providerReadinessLabel(settings.data?.providers.embedding.status?.readiness)} · Cached
-            observation:{" "}
-            {providerObservationLabel(settings.data?.providers.embedding.status?.observed)} · mode:{" "}
-            {settings.data?.providers.embedding.status?.mode ?? "unknown"} · mock:{" "}
-            {String(settings.data?.providers.embedding.status?.mock ?? false)} · dimensions:{" "}
+          <div className="rounded-md border border-ink-100 bg-ink-50 p-2 text-xs text-ink-600">{t("Local readiness:")}{" "}
+            {t(providerReadinessLabel(settings.data?.providers.embedding.status?.readiness))}{t("· Cached observation:")}{" "}
+            {t(providerObservationLabel(settings.data?.providers.embedding.status?.observed))}{t("· mode:")}{" "}
+            {settings.data?.providers.embedding.status?.mode ?? "unknown"}{t("· mock:")}{" "}
+            {String(settings.data?.providers.embedding.status?.mock ?? false)}{t("· dimensions:")}{" "}
             {settings.data?.providers.embedding.status?.dimensions ??
               (settings.data?.providers.embedding.dimensions || "unknown")}
             {" · semantic: "}
@@ -1214,8 +1195,7 @@ export function SettingsPage(): JSX.Element {
               </div>
             )}
             {settings.data?.providers.embedding.status?.missingFields?.length ? (
-              <div className="mt-1 text-rose-700">
-                Missing: {settings.data.providers.embedding.status.missingFields.join(", ")}
+              <div className="mt-1 text-rose-700">{t("Missing:")}{" "}{settings.data.providers.embedding.status.missingFields.join(", ")}
               </div>
             ) : null}
             {embeddingSettingsHint(settings.data?.providers.embedding.status)}
@@ -1301,6 +1281,7 @@ type SettingsKey =
   | "OPENAI_COMPATIBLE_API_KEY"
   | "OPENAI_COMPATIBLE_CHAT_MODEL"
   | "OPENAI_COMPATIBLE_REASONING_MODEL"
+  | "OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL"
   | "NVIDIA_API_BASEURL"
   | "NVIDIA_API_KEY"
   | "NVIDIA_CHAT_MODEL"
@@ -1366,6 +1347,7 @@ function emptySettingsForm(): SettingsForm {
     OPENAI_COMPATIBLE_API_KEY: "",
     OPENAI_COMPATIBLE_CHAT_MODEL: "deepseek-ai/DeepSeek-V4-Flash-0731",
     OPENAI_COMPATIBLE_REASONING_MODEL: "zai-org/GLM-5.3-Flash",
+    OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL: "",
     NVIDIA_API_BASEURL: "https://integrate.api.nvidia.com/v1",
     NVIDIA_API_KEY: "",
     NVIDIA_CHAT_MODEL: "",
@@ -1423,6 +1405,10 @@ function settingsFormFromResponse(settings: RuntimeSettingsResponse): SettingsFo
     OPENAI_COMPATIBLE_API_KEY: "",
     OPENAI_COMPATIBLE_CHAT_MODEL: settings.providers.openaiCompatible.chatModel,
     OPENAI_COMPATIBLE_REASONING_MODEL: settings.providers.openaiCompatible.reasoningModel,
+    OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL: runtimeSetting(
+      settings,
+      "OPENAI_COMPATIBLE_PROACTIVE_DECISION_MODEL"
+    ),
     NVIDIA_API_BASEURL: runtimeSetting(settings, "NVIDIA_API_BASEURL"),
     NVIDIA_API_KEY: "",
     NVIDIA_CHAT_MODEL: runtimeSetting(settings, "NVIDIA_CHAT_MODEL"),
@@ -1548,8 +1534,7 @@ function SecretInput(props: {
       <div className="space-y-2">
         <div className="rounded-md border border-ink-100 bg-ink-50 px-3 py-2 text-xs text-ink-600">
           {props.configured ? (
-            <span>
-              Configured:{" "}
+            <span>{t("Configured:")}{" "}
               <span className="font-mono text-ink-800">{props.preview ?? "••••••••••••"}</span>
             </span>
           ) : (
@@ -1564,9 +1549,7 @@ function SecretInput(props: {
           onChange={(event) => props.onChange(event.target.value)}
         />
         {props.configured && (
-          <button className="button-secondary w-full" type="button" onClick={props.onClear}>
-            Clear saved key on next save
-          </button>
+          <button className="button-secondary w-full" type="button" onClick={props.onClear}>{t("Clear saved key on next save")}</button>
         )}
       </div>
     </Field>
@@ -1580,12 +1563,12 @@ function ConfigLayerRow(props: { name: string; setting: LayeredSetting | undefin
   return (
     <tr className="border-t border-ink-100">
       <td className="px-2 py-2 font-mono text-ink-700">{props.name}</td>
-      <td className="px-2 py-2">{setting ? formatLayerValue(setting, "base") : "unknown"}</td>
+      <td className="px-2 py-2">{setting ? formatLayerValue(setting, "base") : t("unknown")}</td>
       <td className="px-2 py-2">
-        {setting ? formatLayerValue(setting, "localOverride") : "unknown"}
+        {setting ? formatLayerValue(setting, "localOverride") : t("unknown")}
       </td>
       <td className="px-2 py-2 font-medium text-ink-700">
-        {setting ? formatLayerValue(setting, "effective") : "unknown"}
+        {setting ? formatLayerValue(setting, "effective") : t("unknown")}
       </td>
       <td className="px-2 py-2">
         <span
@@ -1596,7 +1579,7 @@ function ConfigLayerRow(props: { name: string; setting: LayeredSetting | undefin
           }`}
         >
           {isSecret
-            ? `${setting?.source ?? "unknown"} / secret masked`
+            ? t("{0} / secret masked", setting?.source ?? "unknown")
             : (setting?.source ?? "unknown")}
         </span>
       </td>
@@ -1618,7 +1601,7 @@ function formatLayerValue(
     if (!configured) {
       return "Not configured";
     }
-    return layer === "effective" ? (setting.maskedValue ?? "Configured") : "Configured";
+    return layer === "effective" ? (setting.maskedValue ?? "Configured") : t("Configured");
   }
 
   const value =
@@ -1636,9 +1619,9 @@ function ProviderDiagnosticsSummary(props: {
 }): JSX.Element {
   return (
     <div className="mt-3 rounded-md border border-ink-100 bg-ink-50 p-2 text-xs text-ink-600">
-      <div className="font-semibold text-ink-800">{props.label}</div>
-      <div className="mt-1">Local readiness: {providerReadinessLabel(props.health?.readiness)}</div>
-      <div className="mt-1">Cached observation: {cachedObservationDetail(props.health ?? {})}</div>
+      <div className="font-semibold text-ink-800">{t(props.label)}</div>
+      <div className="mt-1">{t("Local readiness:")}{" "}{t(providerReadinessLabel(props.health?.readiness))}</div>
+      <div className="mt-1">{t("Cached observation:")}{" "}{t(cachedObservationDetail(props.health ?? {}))}</div>
     </div>
   );
 }
@@ -1651,26 +1634,17 @@ function embeddingSettingsHint(
   }
   if (health.mock) {
     return (
-      <div className="mt-1 text-amber-700">
-        Mock embeddings validate the retrieval pipeline but do not provide real semantic similarity.
-      </div>
+      <div className="mt-1 text-amber-700">{t("Mock embeddings validate the retrieval pipeline but do not provide real semantic similarity.")}</div>
     );
   }
   if (health.readiness === "not_ready") {
     return (
-      <div className="mt-1 text-rose-700">
-        OpenAI-compatible embedding provider is selected but not configured or unavailable. Fill
-        EMBEDDING_API_BASEURL, EMBEDDING_API_KEY, EMBEDDING_MODEL, and EMBEDDING_DIMENSIONS, then
-        Save and Apply Now.
-      </div>
+      <div className="mt-1 text-rose-700">{t("OpenAI-compatible embedding provider is selected but not configured or unavailable. Fill EMBEDDING_API_BASEURL, EMBEDDING_API_KEY, EMBEDDING_MODEL, and EMBEDDING_DIMENSIONS, then Save and Apply Now.")}</div>
     );
   }
   if (health.configured && health.semanticEmbedding) {
     return (
-      <div className="mt-1 text-emerald-700">
-        Real embedding provider is locally configured. Run Live verify Embedding to record remote
-        reachability, then run pnpm memory:embed:backfill for existing memories.
-      </div>
+      <div className="mt-1 text-emerald-700">{t("Real embedding provider is locally configured. Run Live verify Embedding to record remote reachability, then run pnpm memory:embed:backfill for existing memories.")}</div>
     );
   }
   return null;

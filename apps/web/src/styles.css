@@ -180,3 +180,16 @@
   overflow: hidden;
   word-break: break-word;
 }
+
+/* Shared action feedback: no percentage is implied by an indeterminate progress element. */
+button, a, select { transition: background-color 140ms ease, box-shadow 140ms ease, opacity 140ms ease, transform 100ms ease; }
+button:not(:disabled):hover { filter: brightness(0.96); }
+button:not(:disabled):active { transform: translateY(1px); }
+button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opacity: 0.55; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--yuvi-accent, #c45c26); outline-offset: 3px; }
+progress { display: block; width: 100%; height: 6px; margin-block: 8px; accent-color: var(--yuvi-accent, #c45c26); }
+[aria-busy="true"] { cursor: progress; }
+[role="alert"] { overflow-wrap: anywhere; }
+.yuvi-panel { padding: 1.25rem; border: 1px solid var(--yuvi-line); border-radius: 14px; background: var(--yuvi-bg-elevated); }
+.yuvi-panel input:not([type="checkbox"]), .yuvi-panel select { display: block; width: 100%; padding: 8px; border: 1px solid var(--yuvi-line); border-radius: 6px; background: var(--yuvi-bg-elevated); }
+@media (prefers-reduced-motion: reduce) { button, a, select { transition: none; } button:not(:disabled):active { transform: none; } }

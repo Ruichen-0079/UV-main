@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   ApiError,
@@ -1217,14 +1218,11 @@ export function MainPage(): JSX.Element {
       <div className="mx-auto max-w-3xl space-y-4 p-6">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold tracking-normal">YUVI Chat</h1>
-            <p className="mt-1 text-sm text-ink-500">
-              Main window: chat input and streaming text. Speech and Lumi live in the companion
-              window.
-            </p>
+            <h1 className="text-2xl font-semibold tracking-normal">{t("YUVI Chat")}</h1>
+            <p className="mt-1 text-sm text-ink-500">{t("Main window: chat input and streaming text. Speech and Lumi live in the companion window.")}</p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
-            <Pill status={companionReady ? "companion connected" : "companion offline"} />
+            <Pill status={companionReady ? t("companion connected") : t("companion offline")} />
             {isTauriRuntime() && (
               <>
                 <button type="button" className="button-secondary" onClick={() => void openWebUI()}>
@@ -1256,10 +1254,10 @@ export function MainPage(): JSX.Element {
           </div>
         </div>
 
-        <Panel title="Chat History" actions={<Pill status={requestStatus} />}>
+        <Panel title={t("Chat History")} actions={<Pill status={requestStatus} />}>
           <div className="h-[420px] overflow-auto rounded-md border border-ink-100 bg-ink-50 p-3">
             {messages.length === 0 ? (
-              <EmptyState title="No chat yet" message="Send a message to exercise the runtime." />
+              <EmptyState title={t("No chat yet")} message={t("Send a message to exercise the runtime.")} />
             ) : (
               <div className="space-y-3">
                 {messages.map((message) => (
@@ -1270,7 +1268,7 @@ export function MainPage(): JSX.Element {
                     <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase text-ink-500">
                       <span>{message.role}</span>
                       {message.role === "assistant" && message.status && (
-                        <span aria-live="polite">{chatStatusLabel(message.status)}</span>
+                        <span aria-live="polite">{t(chatStatusLabel(message.status))}</span>
                       )}
                     </div>
                     <ChatMessageContent role={message.role} content={message.content} />
@@ -1286,12 +1284,12 @@ export function MainPage(): JSX.Element {
           </div>
           {error && (
             <div className="mt-2">
-              <Notice tone="error" title="Send failed" message={error} />
+              <Notice tone="error" title={t("Send failed")} message={error} />
             </div>
           )}
           {companionActionError && (
             <div className="mt-2">
-              <Notice tone="error" title="Companion" message={companionActionError} />
+              <Notice tone="error" title={t("Companion")} message={companionActionError} />
             </div>
           )}
           {webUiActionError && (
@@ -1303,7 +1301,7 @@ export function MainPage(): JSX.Element {
             <textarea
               ref={inputRef}
               className="field min-h-20"
-              placeholder="Type a runtime test message"
+              placeholder={t("Type a runtime test message")}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
@@ -1312,27 +1310,23 @@ export function MainPage(): JSX.Element {
                   void send();
                 }
               }}
-              aria-label="Chat message"
+              aria-label={t("Chat message")}
             />
             {requestStatus === "sending" ? (
               <button
                 type="button"
                 className="button-secondary h-20 w-24"
                 onClick={stopGeneration}
-                aria-label="Stop generating"
-              >
-                Stop
-              </button>
+                aria-label={t("Stop generating")}
+              >{t("Stop")}</button>
             ) : (
               <button
                 type="button"
                 className="button-primary h-20 w-24"
                 disabled={!input.trim()}
                 onClick={() => void send()}
-                aria-label="Send message"
-              >
-                Send
-              </button>
+                aria-label={t("Send message")}
+              >{t("Send")}</button>
             )}
             {(actualPlaybackActive ||
               voicePlaybackStatus === "synthesizing" ||
@@ -1341,23 +1335,21 @@ export function MainPage(): JSX.Element {
                 type="button"
                 className="button-secondary h-20 w-24"
                 onClick={stopSpeech}
-                aria-label="Stop speech"
-              >
-                Stop speech
-              </button>
+                aria-label={t("Stop speech")}
+              >{t("Stop speech")}</button>
             )}
           </div>
           {voiceOutput && voicePlaybackStatus !== "idle" && (
             <div className="mt-2 text-xs text-ink-500" aria-live="polite">
-              {voicePlaybackStatusLabel(voicePlaybackStatus, actualPlaybackActive)}
+              {t(voicePlaybackStatusLabel(voicePlaybackStatus, actualPlaybackActive))}
             </div>
           )}
         </Panel>
 
         <Panel
-          title="Voice input"
+          title={t("Voice input")}
           actions={
-            <Pill status={liveSpeechStatus === "listening" ? "listening" : voiceCaptureStatus} />
+            <Pill status={liveSpeechStatus === "listening" ? t("listening") : voiceCaptureStatus} />
           }
         >
           <div className="flex flex-wrap items-center gap-2">
@@ -1371,7 +1363,7 @@ export function MainPage(): JSX.Element {
               onClick={() =>
                 void (liveSpeechStatus === "listening" ? stopLiveSpeech() : startLiveSpeech())
               }
-              aria-label={liveSpeechStatus === "listening" ? "Stop Voice Mode" : "Start Voice Mode"}
+              aria-label={liveSpeechStatus === "listening" ? t("Stop Voice Mode") : t("Start Voice Mode")}
             >
               {liveSpeechStatus === "requesting"
                 ? "Requesting microphone…"
@@ -1379,7 +1371,7 @@ export function MainPage(): JSX.Element {
                   ? liveSpeechActive
                     ? "Speech active — stop"
                     : "Voice Mode listening — stop"
-                  : "Start Voice Mode"}
+                  : t("Start Voice Mode")}
             </button>
             <button
               type="button"
@@ -1391,36 +1383,31 @@ export function MainPage(): JSX.Element {
               onClick={() =>
                 void (voiceCaptureStatus === "recording" ? stopVoiceCapture() : startVoiceCapture())
               }
-              aria-label={voiceCaptureStatus === "recording" ? "Stop recording" : "Record voice"}
+              aria-label={voiceCaptureStatus === "recording" ? t("Stop recording") : t("Record voice")}
             >
               {voiceCaptureStatus === "requesting"
                 ? "Requesting microphone…"
                 : voiceCaptureStatus === "recording"
-                  ? "Stop recording"
+                  ? t("Stop recording")
                   : voiceCaptureStatus === "stopping"
                     ? "Finishing recording…"
-                    : "Record voice"}
+                    : t("Record voice")}
             </button>
             <button
               type="button"
               className="button-secondary"
               disabled={!recordedAudio || voiceCaptureStatus !== "idle"}
               onClick={() => void transcribeVoiceCapture()}
-              aria-label="Transcribe recording"
+              aria-label={t("Transcribe recording")}
             >
-              {voiceCaptureStatus === "transcribing" ? "Transcribing…" : "Transcribe recording"}
+              {voiceCaptureStatus === "transcribing" ? t("Transcribing…") : t("Transcribe recording")}
             </button>
             {recordedAudio && voiceCaptureStatus === "idle" && (
-              <span className="text-xs text-ink-500" aria-live="polite">
-                Recording ready · {Math.max(1, Math.round(recordedAudio.durationMs / 1000))}s
+              <span className="text-xs text-ink-500" aria-live="polite">{t("Recording ready ·")}{" "}{Math.max(1, Math.round(recordedAudio.durationMs / 1000))}s
               </span>
             )}
           </div>
-          <p className="mt-2 text-xs text-ink-500">
-            Voice Mode listens continuously: VAD can barge-in on assistant speech immediately, then
-            a finalized utterance becomes one Runtime turn. Record voice remains push-to-talk and
-            cannot run at the same time. VAD alone never sends a message.
-          </p>
+          <p className="mt-2 text-xs text-ink-500">{t("Voice Mode listens continuously: VAD can barge-in on assistant speech immediately, then a finalized utterance becomes one Runtime turn. Record voice remains push-to-talk and cannot run at the same time. VAD alone never sends a message.")}</p>
           {micTrackSettings && (
             <p className="mt-2 text-xs text-ink-500" aria-live="polite">
               AEC {String(micTrackSettings.echoCancellation)} · NS{" "}
@@ -1429,31 +1416,27 @@ export function MainPage(): JSX.Element {
             </p>
           )}
           {voiceCaptureStatus === "recording" && (
-            <p className="mt-2 text-xs text-ink-600" aria-live="polite">
-              Microphone is active. Press Stop recording when you are finished.
-            </p>
+            <p className="mt-2 text-xs text-ink-600" aria-live="polite">{t("Microphone is active. Press Stop recording when you are finished.")}</p>
           )}
           {voiceError && (
             <div className="mt-2">
-              <Notice tone="error" title="Voice input" message={voiceError} />
+              <Notice tone="error" title={t("Voice input")} message={voiceError} />
             </div>
           )}
           {voiceTranscription && (
             <div className="mt-3 rounded-md border border-cyan-100 bg-cyan-50 p-3">
-              <div className="text-xs font-semibold uppercase text-ink-500">Transcript</div>
+              <div className="text-xs font-semibold uppercase text-ink-500">{t("Transcript")}</div>
               <div className="mt-1 text-sm text-ink-800">
                 {voiceTranscription.text || "(empty)"}
               </div>
-              <div className="mt-1 text-xs text-ink-500">
-                Loaded into the chat draft for review.
-              </div>
+              <div className="mt-1 text-xs text-ink-500">{t("Loaded into the chat draft for review.")}</div>
             </div>
           )}
         </Panel>
 
-        <Panel title="Turn Options">
+        <Panel title={t("Turn Options")}>
           <div className="grid gap-3">
-            <Field label="Session ID">
+            <Field label={t("Session ID")}>
               <input
                 className="field"
                 value={sessionId}
@@ -1461,23 +1444,23 @@ export function MainPage(): JSX.Element {
               />
             </Field>
             <Toggle
-              label="Read Memory"
+              label={t("Read Memory")}
               checked={readMemory}
               onChange={setReadMemory}
-              note="Controls retrieval and prompt injection."
+              note={t("Controls retrieval and prompt injection.")}
             />
             <Toggle
-              label="Write Memory"
+              label={t("Write Memory")}
               checked={writeMemory}
               onChange={setWriteMemory}
-              note="Controls whether this turn can create runtime memory."
+              note={t("Controls whether this turn can create runtime memory.")}
             />
             <Toggle
-              label="TTS output"
+              label={t("TTS output")}
               checked={voiceOutput}
               onChange={updateVoiceOutput}
               testId="tts-output-toggle"
-              note="Streams sentence segments to the companion window for synthesis and lip sync."
+              note={t("Streams sentence segments to the companion window for synthesis and lip sync.")}
             />
           </div>
         </Panel>

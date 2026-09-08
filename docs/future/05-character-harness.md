@@ -1,12 +1,14 @@
 # Phase 5 — Thin Character Harness
 
-> **Status: PARTIALLY IMPLEMENTED — SEMANTIC KERNEL COMPLETE THROUGH 5L; CONCRETE CHARACTER ADAPTER DEFERRED**
+> **Status: CLOSED — semantic Harness through 5L and concrete production Character integration are implemented.**
 >
 > **Current implementation checkpoint:** Character ABI 2A/2D and Character Harness
 > 5A–5L are implemented in `packages/character-abi` and
 > `packages/character-harness`. The concrete model-specific Character adapter,
 > prompt/control-token serialization, provider binding, semantic-loop detector,
 > and Runtime execution integration are not implemented by this checkpoint.
+
+Current implementation is indexed in [the roadmap](README.md). Detailed phase plans below preserve historical design reasoning; they are not a new work queue.
 
 ## 1. Purpose
 

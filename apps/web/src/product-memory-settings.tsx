@@ -1,3 +1,4 @@
+import { t } from "./locale.js";
 import { useEffect, useState } from "react";
 import { apiClient } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
@@ -20,11 +21,8 @@ export function ProductMemorySettings(): JSX.Element {
   }, [settings.data]);
   return (
     <section className="yuvi-card">
-      <h2>Local memory connection</h2>
-      <p>
-        Mem0 uses yuvi-embedding:0.6b at 1024 dimensions. Database credentials remain private.
-        Connection changes require a service restart.
-      </p>
+      <h2>{t("Local memory connection")}</h2>
+      <p>{t("Mem0 uses yuvi-embedding:0.6b at 1024 dimensions. Database credentials remain private. Connection changes require a service restart.")}</p>
       {[
         ["MEMORY_BACKEND", "Memory backend"],
         ["MEMORY_REPOSITORY", "Persistence repository"],
@@ -60,9 +58,7 @@ export function ProductMemorySettings(): JSX.Element {
             .catch(() => setNotice("Could not save. Check the connection values."))
             .finally(() => setBusy(false));
         }}
-      >
-        Save memory configuration
-      </button>
+      >{t("Save memory configuration")}</button>
       <button
         className="yuvi-product-button"
         disabled={busy}
@@ -76,9 +72,7 @@ export function ProductMemorySettings(): JSX.Element {
             .catch(() => setNotice("Restart requires the installed Linux daily-use launcher."))
             .finally(() => setBusy(false));
         }}
-      >
-        Restart local services
-      </button>
+      >{t("Restart local services")}</button>
       {notice ? <p role="status">{notice}</p> : null}
     </section>
   );

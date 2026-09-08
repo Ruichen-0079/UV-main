@@ -1,6 +1,8 @@
 # Phase 8 — Character Behavior Assets and Deferred Post-Training
 
-> **Status: PHASE 8 BEHAVIOR ASSETS PLANNED; PHASES 9–13 DEFERRED UNTIL YUVI IS LANDED AND HAS SUSTAINED REAL-USAGE EVIDENCE**
+> **Status: CURRENT — behavior specification/eval/preference assets exist; model training phases 9–13 remain DEFERRED.**
+
+Current implementation is indexed in [the roadmap](README.md). Detailed phase plans below preserve historical design reasoning; they are not a new work queue.
 
 ## 1. Purpose
 

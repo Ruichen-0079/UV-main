@@ -1,0 +1,242 @@
+[
+  {
+    "layout": "baseline",
+    "cycle": 0,
+    "scenario": "cold",
+    "latencyMs": 2489,
+    "inputTokens": 1341,
+    "outputTokens": 47,
+    "cachedInputTokens": 0,
+    "cost": 8.892000000000001e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 0,
+    "scenario": "consecutive",
+    "latencyMs": 4376,
+    "inputTokens": 1341,
+    "outputTokens": 75,
+    "cachedInputTokens": 512,
+    "cost": 7.091999999999999e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 0,
+    "scenario": "unchanged-persona-p8",
+    "latencyMs": 3216,
+    "inputTokens": 1341,
+    "outputTokens": 67,
+    "cachedInputTokens": 0,
+    "cost": 9.252000000000002e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 0,
+    "scenario": "changed-memory",
+    "latencyMs": 2525,
+    "inputTokens": 1341,
+    "outputTokens": 60,
+    "cachedInputTokens": 512,
+    "cost": 6.822e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 0,
+    "scenario": "changed-time",
+    "latencyMs": 4189,
+    "inputTokens": 1341,
+    "outputTokens": 82,
+    "cachedInputTokens": 512,
+    "cost": 7.218e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 0,
+    "scenario": "changed-context",
+    "latencyMs": 2879,
+    "inputTokens": 1351,
+    "outputTokens": 28,
+    "cachedInputTokens": 512,
+    "cost": 6.306000000000001e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 1,
+    "scenario": "cold",
+    "latencyMs": 2824,
+    "inputTokens": 1341,
+    "outputTokens": 75,
+    "cachedInputTokens": 0,
+    "cost": 9.396000000000002e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 1,
+    "scenario": "consecutive",
+    "latencyMs": 8142,
+    "inputTokens": 1341,
+    "outputTokens": 51,
+    "cachedInputTokens": 0,
+    "cost": 8.964000000000002e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 1,
+    "scenario": "unchanged-persona-p8",
+    "latencyMs": 1766,
+    "inputTokens": 1341,
+    "outputTokens": 69,
+    "cachedInputTokens": 0,
+    "cost": 9.288e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 1,
+    "scenario": "changed-memory",
+    "latencyMs": 4521,
+    "inputTokens": 1341,
+    "outputTokens": 42,
+    "cachedInputTokens": 0,
+    "cost": 8.802000000000001e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 1,
+    "scenario": "changed-time",
+    "latencyMs": 2053,
+    "inputTokens": 1341,
+    "outputTokens": 63,
+    "cachedInputTokens": 512,
+    "cost": 6.876e-05
+  },
+  {
+    "layout": "baseline",
+    "cycle": 1,
+    "scenario": "changed-context",
+    "latencyMs": 1484,
+    "inputTokens": 1351,
+    "outputTokens": 65,
+    "cachedInputTokens": 0,
+    "cost": 9.276e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 0,
+    "scenario": "cold",
+    "latencyMs": 3436,
+    "inputTokens": 1341,
+    "outputTokens": 63,
+    "cachedInputTokens": 512,
+    "cost": 6.876e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 0,
+    "scenario": "consecutive",
+    "latencyMs": 3161,
+    "inputTokens": 1341,
+    "outputTokens": 64,
+    "cachedInputTokens": 1024,
+    "cost": 4.5900000000000004e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 0,
+    "scenario": "unchanged-persona-p8",
+    "latencyMs": 3766,
+    "inputTokens": 1341,
+    "outputTokens": 63,
+    "cachedInputTokens": 1024,
+    "cost": 4.5719999999999996e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 0,
+    "scenario": "changed-memory",
+    "latencyMs": 1534,
+    "inputTokens": 1341,
+    "outputTokens": 53,
+    "cachedInputTokens": 0,
+    "cost": 9e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 0,
+    "scenario": "changed-time",
+    "latencyMs": 1960,
+    "inputTokens": 1341,
+    "outputTokens": 58,
+    "cachedInputTokens": 1024,
+    "cost": 4.482e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 0,
+    "scenario": "changed-context",
+    "latencyMs": 2058,
+    "inputTokens": 1351,
+    "outputTokens": 54,
+    "cachedInputTokens": 1024,
+    "cost": 4.47e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 1,
+    "scenario": "cold",
+    "latencyMs": 2261,
+    "inputTokens": 1341,
+    "outputTokens": 62,
+    "cachedInputTokens": 1024,
+    "cost": 4.554e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 1,
+    "scenario": "consecutive",
+    "latencyMs": 4518,
+    "inputTokens": 1341,
+    "outputTokens": 63,
+    "cachedInputTokens": 1024,
+    "cost": 4.5719999999999996e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 1,
+    "scenario": "unchanged-persona-p8",
+    "latencyMs": 1980,
+    "inputTokens": 1341,
+    "outputTokens": 53,
+    "cachedInputTokens": 1024,
+    "cost": 4.392e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 1,
+    "scenario": "changed-memory",
+    "latencyMs": 9362,
+    "inputTokens": 1341,
+    "outputTokens": 68,
+    "cachedInputTokens": 1024,
+    "cost": 4.6620000000000004e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 1,
+    "scenario": "changed-time",
+    "latencyMs": 1745,
+    "inputTokens": 1341,
+    "outputTokens": 51,
+    "cachedInputTokens": 1024,
+    "cost": 4.356e-05
+  },
+  {
+    "layout": "time-last",
+    "cycle": 1,
+    "scenario": "changed-context",
+    "latencyMs": 3085,
+    "inputTokens": 1351,
+    "outputTokens": 67,
+    "cachedInputTokens": 1024,
+    "cost": 4.704e-05
+  }
+]
