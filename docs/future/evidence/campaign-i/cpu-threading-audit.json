@@ -1,0 +1,71 @@
+{
+  "campaign": "I",
+  "atom": "I-3",
+  "classification": "RETAIN",
+  "affinity_classification": "REJECT",
+  "captured_at": "2026-09-08T13:14:47.064202+08:00",
+  "timezone": "Asia/Shanghai",
+  "host_cpu_sanitized": {
+    "model": "Intel(R) Core(TM) Ultra 9 275HX",
+    "logical_cpus": 24,
+    "threads_per_core": 1,
+    "note": "Hybrid laptop SoC; do not maximize all-library thread pools concurrently."
+  },
+  "observed_nlwp_sanitized": [
+    {
+      "role": "local-embedding-llama-server",
+      "nlwp": 51,
+      "cmdline_note": "--threads 24 --threads-batch 24 (host systemd unit)"
+    },
+    {
+      "role": "mem0",
+      "nlwp": 36,
+      "thread_env": "unset"
+    },
+    {
+      "role": "local-stt",
+      "nlwp": 17,
+      "thread_env": "OMP_NUM_THREADS defaulted in code to 4; --threads default 4 capped"
+    },
+    {
+      "role": "dots-tts",
+      "nlwp": 50,
+      "thread_env": "unset in process; upstream dots_tts.runtime sets torch.set_num_threads(1)"
+    },
+    {
+      "role": "runtime-node",
+      "nlwp": 12
+    },
+    {
+      "role": "desktop-supervisor",
+      "nlwp": 12
+    }
+  ],
+  "in_tree_findings": [
+    "services/local-stt already setdefault OMP_NUM_THREADS=4 and caps worker threads via _cpu_threads (max 4, also cpu//4).",
+    "services/dots-tts has no OMP defaults; GPU path; upstream runtime already torch.set_num_threads(1).",
+    "No in-tree CPU affinity / taskset usage for inference sidecars (p8 'affinity' hits are relationship semantics only).",
+    "No YUVI CPU scheduler present or proposed.",
+    "Embedding llama-server thread=24 lives in ~/.config/systemd/user/yuvi-local-embedding.service (host), not shipped as repo code change this atom."
+  ],
+  "code_change": {
+    "dots_tts_omp_setdefault": "small portable setdefault OMP/MKL/OPENBLAS/TOKENIZERS knobs in services/dots-tts/server.py mirroring local-stt; not topology hardcoding",
+    "affinity": "not added",
+    "embedding_host_unit": "not modified live (would disrupt campaign-g memory path); operator note only"
+  },
+  "operator_notes": [
+    "Consider lowering host embedding --threads/--threads-batch from 24 toward ~6–8 (or ~nproc/4) on hybrid laptops when co-resident with STT/TTS/mem0.",
+    "Do not add CPU affinity masks unless a future atom shows repeatable benefit without lifecycle fragility."
+  ],
+  "before_after": {
+    "before": "STT already capped; TTS torch threads=1 upstream; embedding host unit uses all 24 logical CPUs; no affinity.",
+    "after_in_tree": "Documented audit + optional TTS BLAS/OMP setdefaults; affinity REJECT; no scheduler."
+  },
+  "classification_detail": {
+    "portable_omp_defaults_in_dots_tts": "RETAIN",
+    "cpu_affinity": "REJECT",
+    "yuvi_cpu_scheduler": "REJECT_NOT_PROPOSED",
+    "broad_thread_overhaul": "NO_CHANGE_NEEDED",
+    "host_embedding_threads_24": "OPERATOR_NOTE_ONLY"
+  }
+}

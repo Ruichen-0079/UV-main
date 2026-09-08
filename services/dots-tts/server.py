@@ -22,6 +22,12 @@ from pathlib import Path
 # Must precede importing the model libraries. Ordinary startup never downloads.
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# Portable CPU pool caps for hybrid laptops (Campaign I-3). Do not maximize all cores;
+# upstream dots_tts also sets torch.set_num_threads(1). Operators may override via env.
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 # Few-minute default: reload cost is acceptable after meaningful idle; 0 disables.
 _DEFAULT_IDLE_HIBERNATE_SECONDS = 180.0
