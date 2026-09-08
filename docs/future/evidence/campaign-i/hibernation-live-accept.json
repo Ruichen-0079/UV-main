@@ -1,0 +1,74 @@
+{
+  "campaign": "I",
+  "atom": "I-2",
+  "classification": "RETAIN",
+  "captured_at": "2026-09-08T13:14:47.064202+08:00",
+  "timezone": "Asia/Shanghai",
+  "git": {
+    "branch": "campaign-i-cpu-threading",
+    "base_main_sha": "d6bf4a50c31c7e9f41bbf7df07f397935df67084",
+    "repo": "Ruichen-0079/UV-main"
+  },
+  "procedure_sanitized": {
+    "stopped_prior_bakeoff_tts": true,
+    "started": "campaign-i services/dots-tts/server.py via bakeoff venv + same asset env",
+    "port": 9881,
+    "idle_hibernate_seconds": 45.0,
+    "assets": "DOTS_TTS_MODEL_DIR / REFERENCE_AUDIO / REFERENCE_TEXT / HF_HOME from prior process environ (values redacted)",
+    "restored_bakeoff_via_supervisor_start": true,
+    "audio_artifacts": "none retained (response sizes only)"
+  },
+  "measurements": {
+    "after_load": {
+      "health_state": "ready",
+      "gpu_resident": true,
+      "tts_vram_mib": 5298,
+      "idle_hibernate_seconds": 45.0
+    },
+    "warm_synthesis": {
+      "http_status": 200,
+      "wav_bytes": 68204,
+      "latency_s": 4.101
+    },
+    "after_hibernate": {
+      "wait_s": 46.207,
+      "health_state": "hibernated",
+      "model_loaded": false,
+      "gpu_resident": false,
+      "ready_on_demand": true,
+      "tts_vram_mib": 276,
+      "process_alive": true
+    },
+    "resume_synthesis": {
+      "http_status": 200,
+      "wav_bytes": 83564,
+      "latency_s": 16.902,
+      "note": "includes model reload + synth"
+    },
+    "after_resume": {
+      "health_state": "ready",
+      "tts_vram_mib": 6144
+    },
+    "hibernated_shutdown": {
+      "ok": true,
+      "exit_wait_s": 0.0,
+      "sig": "TERM"
+    },
+    "after_shutdown_tts_apps": []
+  },
+  "deltas": {
+    "vram_unload_mib": 5022,
+    "vram_after_load_mib": 5298,
+    "vram_hibernated_mib": 276,
+    "resume_latency_s": 16.902
+  },
+  "notes": [
+    "Strategy A full CUDA unload released multi-GiB process-attributed VRAM (ready ~5.3\u20136.1 GiB range observed; hibernated residual ~276 MiB).",
+    "Auto-restore synthesize succeeded (HTTP 200); resume latency includes model reload + synthesis (~16.9s on this host).",
+    "SIGTERM while hibernated exited cleanly; VRAM apps empty for TTS afterward.",
+    "Host GPU still has compositor/streaming residents \u2014 prefer process-attributed metrics.",
+    "Default production idle remains DOTS_TTS_IDLE_HIBERNATE_SECONDS=180; 45s used only for acceptance.",
+    "Prior bakeoff TTS restored via DesktopSupervisor POST /v1/services/tts_wrapper/start after acceptance."
+  ],
+  "retain_rationale": "Unload saves multi-GiB VRAM with successful auto-resume and clean hibernated shutdown; resume cost acceptable vs idle residency."
+}
