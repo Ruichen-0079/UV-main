@@ -66,6 +66,11 @@ try {
     const node = path.join(root, 'runtime', 'node');
     const supervisor = spawn(node, [path.join(root, 'supervisor', 'yuvi-desktop-supervisor.cjs'), '--mode', 'packaged', '--resource-root', root, '--state-root', dirs.data, '--runtime-manifest', path.join(root, 'runtime', 'runtime-manifest.json')], { cwd: state, env, stdio: 'inherit' });
     const desktopEnv = { ...env, YUVI_DESKTOP_SUPERVISOR_BINDING: 'attach' };
+    if (!process.env.GDK_BACKEND && guiSessionEnv.WAYLAND_DISPLAY && guiSessionEnv.DISPLAY) {
+      desktopEnv.GDK_BACKEND = 'x11';
+    } else if (process.env.GDK_BACKEND) {
+      desktopEnv.GDK_BACKEND = process.env.GDK_BACKEND;
+    }
     let web, desktop, closing = false;
     const stop = () => {
       if (closing) return;
