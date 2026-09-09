@@ -39,8 +39,8 @@ it("sectioned presentation hides unrelated controls and loads voice state only w
   expect(text).toContain("Models");
   expect(text).not.toContain("Providers");
   expect(text).not.toContain("Capability routes");
-  expect(text).not.toContain("My Profile");
-  expect(text).not.toContain("Voice Profiles");
+  expect(text).not.toContain("My profile");
+  expect(text).not.toContain("Voice enrollment");
   expect(mock.request.mock.calls.some(c => c[0] === "/product/voices")).toBe(false);
 
   await act(async () => {
