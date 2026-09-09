@@ -184,7 +184,7 @@ export function ProductConfigurationPanel(props: {
               <span>{t("Voice enrolled")}</span>
               {v.sampleId ? <button type="button" onClick={() => void play(v.sampleId!)}>{t("Play sample")}</button> : null}
               <button type="button" onClick={() => startEnrollment(primaryPerson.id, v.id)}>{t("Re-enroll")}</button>
-              <button type="button" onClick={() => void act(() => send(`/product/voices/${v.id}/binding`, undefined, "DELETE"), t("Voice binding removed."))}>{t("Remove voice binding")}</button>
+              <button type="button" onClick={() => void act(() => send(`/voice-profiles/${v.id}`, undefined, "DELETE"), t("Voice deleted."))}>{t("Delete voice")}</button>
             </div>)}
           </> : null}
         </form>
@@ -212,7 +212,7 @@ export function ProductConfigurationPanel(props: {
               <span>{t("Voice enrolled")}</span>
               {v.sampleId ? <button type="button" onClick={() => void play(v.sampleId!)}>{t("Play sample")}</button> : null}
               <button type="button" onClick={() => startEnrollment(p.id, v.id)}>{t("Re-enroll")}</button>
-              <button type="button" onClick={() => void act(() => send(`/product/voices/${v.id}/binding`, undefined, "DELETE"), t("Voice binding removed."))}>{t("Remove voice binding")}</button>
+              <button type="button" onClick={() => void act(() => send(`/voice-profiles/${v.id}`, undefined, "DELETE"), t("Voice deleted."))}>{t("Delete voice")}</button>
             </div>)}
           </article>;
         })}
