@@ -22,6 +22,9 @@ export function setDesktopRuntimeBinding(
   runtimeUrl: string | null
 ): void {
   desktopRuntimeBindingMode = mode;
+  // Never retain a previously verified origin if the replacement binding is
+  // absent or invalid.
+  desktopRuntimeHttpOverride = null;
   setDesktopRuntimeHttpOverride(runtimeUrl);
 }
 
