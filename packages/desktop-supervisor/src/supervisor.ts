@@ -556,67 +556,81 @@ export class DesktopSupervisor {
    * and the last lease release performs the deferred owned stop.
    */
   async suspendLocalStt(): Promise<LocalSttSuspendResult> {
+    // Publish first: an in-flight Local STT readiness loop observes this even
+    // if another operation currently owns its service queue.
     this.localSttManualSuspend = true;
-    return this.withConfigLock(async () => {
-      const svc = this.require("local_stt");
-      const activeVoiceLeases = this.voiceLeases.size + this.localSttLeaseAcquisitions;
-      if (activeVoiceLeases > 0) {
-        svc.summary = "Suspend pending — active voice lease.";
-        svc.detail = `${activeVoiceLeases} explicit voice operation(s) still require Local STT.`;
-        svc.lastError = null;
-        this.emit();
-        return {
-          outcome: "BUSY",
-          reason: "LEASE_ACTIVE",
-          activeVoiceLeases,
-          snapshot: this.snapshot()
-        };
+    const svc = this.require("local_stt");
+    const activeVoiceLeases = this.voiceLeases.size + this.localSttLeaseAcquisitions;
+    if (activeVoiceLeases > 0) {
+      svc.summary = "Suspend pending — active voice lease.";
+      svc.detail = `${activeVoiceLeases} explicit voice operation(s) still require Local STT.`;
+      svc.lastError = null;
+      this.emit();
+      return {
+        outcome: "BUSY",
+        reason: "LEASE_ACTIVE",
+        activeVoiceLeases,
+        snapshot: this.snapshot()
+      };
+    }
+
+    const configGeneration = this.configGeneration;
+    await this.queue(svc, async () => {
+      await this.refreshService("local_stt");
+      if (svc.ownership === "owned" || svc.pid || svc.child) {
+        await this.stopOwned(svc);
       }
+      // Re-probe after the bounded owned-stop pass. A surviving/foreign
+      // listener must become explicit RECONCILE_REQUIRED rather than a fake
+      // STOPPED result.
+      await this.refreshService("local_stt");
+    });
 
-      await this.queue(svc, async () => {
-        await this.refreshService("local_stt");
-        if (svc.ownership === "owned" || svc.pid || svc.child) {
-          await this.stopOwned(svc);
-        }
-        // Re-probe after the bounded owned-stop pass. A surviving/foreign
-        // listener must become explicit RECONCILE_REQUIRED rather than a fake
-        // STOPPED result.
-        await this.refreshService("local_stt");
-      });
-
-      if (svc.status === "stopped" && svc.ownership === "none") {
-        svc.summary = "Local STT suspended by user.";
-        svc.detail = null;
-        svc.lastError = null;
-        this.emit();
-        return {
-          outcome: "STOPPED",
-          reason: "STOPPED",
-          activeVoiceLeases: 0,
-          snapshot: this.snapshot()
-        };
-      }
-
-      const external =
-        svc.ownership === "external" ||
-        svc.status === "healthy" ||
-        svc.status === "degraded" ||
-        svc.status === "starting";
-      svc.summary = external
-        ? "Local STT suspend needs reconciliation — endpoint is still occupied."
-        : "Local STT suspend needs reconciliation — ownership could not be proven stopped.";
-      svc.detail = external
-        ? "A process still answers on the configured Local STT endpoint; Supervisor will not kill an unowned process."
-        : svc.detail;
+    if (configGeneration !== this.configGeneration) {
+      svc.summary = "Local STT suspend needs reconciliation — configuration changed concurrently.";
+      svc.detail = "Re-read Supervisor status before retrying the operation.";
       svc.lastError = null;
       this.emit();
       return {
         outcome: "RECONCILE_REQUIRED",
-        reason: external ? "EXTERNAL_PROCESS" : "OWNERSHIP_UNCERTAIN",
+        reason: "CONFIG_CHANGED",
         activeVoiceLeases: 0,
         snapshot: this.snapshot()
       };
-    });
+    }
+
+    if (svc.status === "stopped" && svc.ownership === "none") {
+      svc.summary = "Local STT suspended by user.";
+      svc.detail = null;
+      svc.lastError = null;
+      this.emit();
+      return {
+        outcome: "STOPPED",
+        reason: "STOPPED",
+        activeVoiceLeases: 0,
+        snapshot: this.snapshot()
+      };
+    }
+
+    const external =
+      svc.ownership === "external" ||
+      svc.status === "healthy" ||
+      svc.status === "degraded" ||
+      svc.status === "starting";
+    svc.summary = external
+      ? "Local STT suspend needs reconciliation — endpoint is still occupied."
+      : "Local STT suspend needs reconciliation — ownership could not be proven stopped.";
+    svc.detail = external
+      ? "A process still answers on the configured Local STT endpoint; Supervisor will not kill an unowned process."
+      : svc.detail;
+    svc.lastError = null;
+    this.emit();
+    return {
+      outcome: "RECONCILE_REQUIRED",
+      reason: external ? "EXTERNAL_PROCESS" : "OWNERSHIP_UNCERTAIN",
+      activeVoiceLeases: 0,
+      snapshot: this.snapshot()
+    };
   }
 
   private async stopServiceImmediate(id: ServiceId): Promise<SupervisorSnapshot> {
