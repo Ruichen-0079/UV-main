@@ -86,37 +86,28 @@ describe("Product WebUI integration", () => {
     expect(readText(node)).not.toContain("Configuration sections:");
 
     await act(async () => click(button(node, "Configure Chat")));
-    expect(readText(node)).toContain("Configuration sections: status,providers,routes,proactive");
-    expect(readText(node)).toContain("Desktop settings");
-
-    await act(async () => click(button(node, "Home")));
+    expect(readText(node)).toContain("Configuration sections: providers,models,routes");
+    expect(readText(node)).not.toContain("Desktop settings");
+    await act(async () => click(button(node, "Overview")));
     await act(async () => click(button(node, "Choose Companion model")));
     expect(readText(node)).toContain("Live2D controls");
     expect(readText(node)).toContain("Companion window controls");
-
-    await act(async () => click(button(node, "Home")));
-    await act(async () => click(button(node, "Models")));
-    expect(readText(node)).toContain("Configuration sections: models");
-    expect(readText(node)).not.toContain("Configuration sections: people,voices");
-
-    await act(async () => click(button(node, "People & Memory")));
+    expect(readText(node)).not.toContain("Subtitle window controls");
+    await act(async () => click(button(node, "People & voices")));
     expect(readText(node)).toContain("Configuration sections: people,voices");
-    expect(readText(node)).not.toContain("Configuration sections: models");
-
-    await act(async () => click(button(node, "Appearance")));
-    expect(readText(node)).toContain("Locale controls");
-    expect(readText(node)).toContain("Companion window controls");
-    expect(readText(node)).toContain("Subtitle window controls");
-    expect(readText(node)).toContain("Live2D controls");
-
-    await act(async () => click(button(node, "Advanced settings")));
-    expect(readText(node)).toContain("Configuration sections: status,providers,routes,proactive");
+    await act(async () => click(button(node, "Memory")));
     expect(readText(node)).toContain("Desktop settings");
-
-    await act(async () => click(button(node, "Developer")));
+    await act(async () => click(button(node, "Conversation")));
+    expect(readText(node)).toContain("Configuration sections: proactive");
+    await act(async () => click(button(node, "Subtitle")));
+    expect(readText(node)).toContain("Subtitle window controls");
+    await act(async () => click(button(node, "System")));
+    expect(readText(node)).toContain("Locale controls");
+    expect(readText(node)).toContain("Configuration sections: status");
+    await act(async () => click(button(node, "Open developer console")));
     expect(readText(node)).toContain("Developer dashboard");
     await act(async () => click(button(node, "← Product WebUI")));
-    expect(readText(node)).toContain("Daily control surface");
+    expect(readText(node)).toContain("Connection troubleshooting");
   });
 
   it.each([

@@ -22,7 +22,19 @@ export function ProductMemorySettings(): JSX.Element {
   return (
     <section className="yuvi-card">
       <h2>{t("Local memory connection")}</h2>
-      <p>{t("Mem0 uses yuvi-embedding:0.6b at 1024 dimensions. Database credentials remain private. Connection changes require a service restart.")}</p>
+      <p>
+        {t(
+          "Mem0 uses yuvi-embedding:0.6b at 1024 dimensions. Database credentials remain private. Connection changes require a service restart."
+        )}
+      </p>
+      {settings.error && (
+        <p role="alert">
+          {t("Could not load settings. Check the connection and try again.")}{" "}
+          <button className="yuvi-product-button" onClick={() => void settings.refresh()}>
+            {t("Retry")}
+          </button>
+        </p>
+      )}
       {[
         ["MEMORY_BACKEND", "Memory backend"],
         ["MEMORY_REPOSITORY", "Persistence repository"],
@@ -31,7 +43,7 @@ export function ProductMemorySettings(): JSX.Element {
         ["DATABASE_URL", "PostgreSQL connection (blank keeps saved value)"]
       ].map(([key, label]) => (
         <label className="yuvi-product-provider-field" key={key}>
-          <span>{label}</span>
+          <span>{t(label!)}</span>
           <input
             disabled={busy || !settings.data}
             type={key === "DATABASE_URL" ? "password" : "text"}
@@ -58,7 +70,9 @@ export function ProductMemorySettings(): JSX.Element {
             .catch(() => setNotice("Could not save. Check the connection values."))
             .finally(() => setBusy(false));
         }}
-      >{t("Save memory configuration")}</button>
+      >
+        {t("Save memory configuration")}
+      </button>
       <button
         className="yuvi-product-button"
         disabled={busy}
@@ -72,8 +86,10 @@ export function ProductMemorySettings(): JSX.Element {
             .catch(() => setNotice("Restart requires the installed Linux daily-use launcher."))
             .finally(() => setBusy(false));
         }}
-      >{t("Restart local services")}</button>
-      {notice ? <p role="status">{notice}</p> : null}
+      >
+        {t("Restart local services")}
+      </button>
+      {notice ? <p role="status">{t(notice)}</p> : null}
     </section>
   );
 }

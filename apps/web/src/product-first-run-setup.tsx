@@ -63,7 +63,7 @@ export function ProductFirstRunSetup(props: {
           <p className="m-0 text-sm text-[var(--yuvi-muted)]">
             {state.data.chatConfigured
               ? t("A Chat route is configured. Current availability is shown by normal product health.")
-              : t("Add a provider, model, and Chat route using the existing Advanced settings.")}
+              : t("Connect a provider and choose a chat model in AI & connections.")}
           </p>
           {!state.data.chatConfigured ? (
             <div>
@@ -85,8 +85,8 @@ export function ProductFirstRunSetup(props: {
           </div>
           <p className="m-0 text-sm text-[var(--yuvi-muted)]">
             {state.data.companionInstalled
-              ? t("A Live2D model is installed. You can select or disable it later from Appearance.")
-              : t("Import a Live2D / VTube Studio ZIP or choose an existing model in Appearance.")}
+              ? t("A Live2D model is installed. You can select or disable it in Companion.")
+              : t("Import a Live2D / VTube Studio ZIP or choose an existing model in Companion.")}
           </p>
           {!state.data.companionInstalled ? (
             <div>

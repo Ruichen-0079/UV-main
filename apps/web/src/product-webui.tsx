@@ -1,13 +1,13 @@
+import { productDestinations as destinations, type ProductView } from "./product-navigation.js";
 import { LocaleSelector } from "./locale-selector.js";
 import { t } from "./locale.js";
 import { ProductLive2DModels } from "./product-live2d-models.js";
 import { ProductVisionStatus } from "./product-vision-status.js";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { App as DeveloperDashboard } from "./App.js";
-import { apiClient, type HealthResponse } from "./api/client.js";
+import { apiClient } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
 import { ProductCompactHealth, productCompactHealthItems } from "./product-compact-health.js";
-import { ProductModelsProviders } from "./product-models-providers.js";
 import { ProductMemorySettings } from "./product-memory-settings.js";
 import { ProductConfigurationPanel } from "./product-configuration.js";
 import { isTauriRuntime } from "./tauri-window.js";
@@ -16,181 +16,193 @@ import { CompanionAppearanceSettings } from "./companion-appearance-settings.js"
 import { SubtitleAppearanceSettings } from "./subtitle-appearance-settings.js";
 import { ProductFirstRunSetup } from "./product-first-run-setup.js";
 
-type ProductView = "home" | "models" | "people" | "appearance" | "advanced" | "developer";
-
-function healthLabel(
-  health: HealthResponse | null,
-  loading: boolean,
-  error: string | null
-): string {
-  return t(productCompactHealthItems({ health, loading, error })[0]?.summary ?? "Unknown");
-}
-
-/**
- * Daily-use WebUI.
- * Presentation baseline: Grok Product UI v1 (PR #162).
- * Authority baseline: current main. No stale PR #162 product backend or secret writer is restored.
- */
+/** Navigation is presentation state; settings remain with their existing owners. */
 export function ProductWebUI(): JSX.Element {
+  const contentRef = useRef<HTMLElement>(null);
   const [view, setView] = useState<ProductView>("home");
   const health = useAsyncData((signal) => apiClient.getHealth(signal), []);
-
-  if (view === "developer") {
+  const tauri = isTauriRuntime();
+  const destination = destinations.find((item) => item.id === view) ?? destinations[0]!;
+  const status = t(
+    productCompactHealthItems({
+      health: health.data,
+      loading: health.loading,
+      error: health.error
+    })[0]?.summary ?? "Unknown"
+  );
+  useEffect(() => {
+    window.scrollTo?.(0, 0);
+  }, [view]);
+  const navigate = (next: ProductView) => setView(next);
+  if (view === "developer")
     return (
       <>
-        <button type="button" className="yuvi-developer-return" onClick={() => setView("home")}>{t("← Product WebUI")}</button>
+        <button
+          type="button"
+          className="yuvi-developer-return"
+          onClick={() => navigate("advanced")}
+        >
+          {t("← Product WebUI")}
+        </button>
         <DeveloperDashboard />
       </>
     );
-  }
-
-  const status = healthLabel(health.data, health.loading, health.error);
-  const tauri = isTauriRuntime();
 
   return (
     <div className="yuvi-shell yuvi-product-webui">
-      <header className="yuvi-topbar">
-        <div className="min-w-0">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--yuvi-muted)]">
-            YUVI
+      <a
+        className="yuvi-skip-link"
+        href="#product-content"
+        onClick={(event) => {
+          event.preventDefault();
+          contentRef.current?.focus();
+        }}
+      >
+        {t("Skip to settings")}
+      </a>
+      <aside className="yuvi-product-sidebar">
+        <div className="yuvi-product-brand">
+          <span aria-hidden="true" className="yuvi-brand-mark">
+            y
+          </span>
+          <div>
+            <strong>YUVI</strong>
+            <span>{t("Companion Control")}</span>
           </div>
-          <div className="truncate text-base font-semibold leading-tight">{t("Companion Control")}</div>
         </div>
+        <nav aria-label={t("Settings navigation")}>
+          {destinations.map((item, index) => (
+            <div key={item.id}>
+              {item.group !== destinations[index - 1]?.group && (
+                <div className="yuvi-nav-group">{t(item.group)}</div>
+              )}
+              <button
+                type="button"
+                aria-current={view === item.id ? "page" : undefined}
+                className="yuvi-nav-item"
+                onClick={() => navigate(item.id)}
+              >
+                {t(item.label)}
+              </button>
+            </div>
+          ))}
+        </nav>
         <button
           type="button"
-          className="yuvi-health-chip"
+          className="yuvi-sidebar-status"
           onClick={() => void health.refresh()}
+          disabled={health.loading}
           title={t("Refresh product status")}
         >
-          <span className="yuvi-health-chip-label">{t("Runtime")}</span>
-          <span>{status}</span>
+          <span>{t("Runtime")}</span>
+          <strong>{status}</strong>
         </button>
-        <div className="yuvi-topbar-actions">
-          {!tauri ? (
+      </aside>
+      <main ref={contentRef} id="product-content" className="yuvi-product-content" tabIndex={-1}>
+        <header className="yuvi-page-heading">
+          <div className="yuvi-product-eyebrow">{t(destination.group)}</div>
+          <h1>{t(destination.label)}</h1>
+          <p>{t(destination.description)}</p>
+        </header>
+        <div key={view} className="yuvi-page-body">
+          {view === "home" && (
             <>
-              <a className="yuvi-product-action" href="/#/main" target="yuvi-main">{t("Chat & Voice Mode")}</a>
-              <a className="yuvi-product-action" href="/#/companion" target="yuvi-companion">{t("Companion")}</a>
-              <a className="yuvi-product-action" href="/#/subtitle" target="yuvi-subtitle">{t("Subtitle")}</a>
-            </>
-          ) : null}
-          <button
-            type="button"
-            className={`yuvi-product-action ${view === "home" ? "is-active" : ""}`}
-            onClick={() => setView("home")}
-          >{t("Home")}</button>
-          <button
-            type="button"
-            className={`yuvi-product-action ${view === "models" ? "is-active" : ""}`}
-            onClick={() => setView("models")}
-          >{t("Models")}</button>
-          <button
-            type="button"
-            className={`yuvi-product-action ${view === "people" ? "is-active" : ""}`}
-            onClick={() => setView("people")}
-          >{t("People & Memory")}</button>
-          <button
-            type="button"
-            className={`yuvi-product-action ${view === "appearance" ? "is-active" : ""}`}
-            onClick={() => setView("appearance")}
-          >{t("Appearance")}</button>
-          <button
-            type="button"
-            className={`yuvi-product-action ${view === "advanced" ? "is-active" : ""}`}
-            onClick={() => setView("advanced")}
-          >{t("Advanced settings")}</button>
-          <button
-            type="button"
-            className="yuvi-product-action"
-            onClick={() => setView("developer")}
-          >{t("Developer")}</button>
-        </div>
-      </header>
-
-      <main className="yuvi-shell-main" style={{ width: "min(72rem, calc(100% - 1.5rem))" }}>
-        {view === "home" ? (
-          <div className="yuvi-product-home">
-            <section className="yuvi-product-hero">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("Product WebUI")}</div>
-              <h1 className="m-0 text-2xl font-semibold">{t("Daily control surface for YUVI")}</h1>
-              <p className="m-0 max-w-2xl text-sm leading-6 text-[var(--yuvi-muted)]">{t("Check connection health, choose your models, and manage companion settings.")}</p>
-              <div className="yuvi-product-actions mt-2">
-                <button
-                  type="button"
-                  className="yuvi-product-action is-active"
-                  onClick={() => setView("models")}
-                >{t("Models")}</button>
-                <button
-                  type="button"
-                  className="yuvi-product-action"
-                  onClick={() => setView("developer")}
-                >{t("Open developer console")}</button>
-              </div>
-            </section>
-
-            <ProductFirstRunSetup onNavigate={(nextView) => setView(nextView)} />
-
-            <ProductCompactHealth
-              health={health.data}
-              loading={health.loading}
-              error={health.error}
-              onRefresh={() => void health.refresh()}
-            />
-
-            {health.error ? (
-              <section className="yuvi-card yuvi-card-alert">
-                <div className="font-semibold">
-                  {health.data ? t("Product status refresh incomplete") : t("Runtime health unavailable")}
+              <ProductFirstRunSetup
+                onNavigate={(next) => navigate(next === "advanced" ? "models" : "appearance")}
+              />
+              <ProductCompactHealth
+                health={health.data}
+                loading={health.loading}
+                error={health.error}
+                onRefresh={() => void health.refresh()}
+              />
+              {health.error && (
+                <div className="yuvi-product-inline-state is-warning" role="status">
+                  {t(
+                    health.data
+                      ? "Showing the last successful Runtime projection."
+                      : "Runtime health unavailable"
+                  )}
                 </div>
-                <p className="mb-0 mt-1 text-sm text-[var(--yuvi-muted)]">
-                  {health.data
-                    ? t("Showing the last successful Runtime projection.")
-                    : t("Current status remains unknown until the Runtime health endpoint responds.")}
-                </p>
+              )}
+              <section className="yuvi-overview-links" aria-label={t("Personalize")}>
+                {destinations
+                  .filter((item) => ["models", "appearance", "people"].includes(item.id))
+                  .map((item) => (
+                    <button type="button" key={item.id} onClick={() => navigate(item.id)}>
+                      <strong>
+                        {t(item.label)} <span aria-hidden="true">↗</span>
+                      </strong>
+                      <span>{t(item.description)}</span>
+                    </button>
+                  ))}
               </section>
-            ) : null}
-            <ProductVisionStatus />
-          </div>
-        ) : view === "models" ? (
-          <div className="grid gap-4">
-            <section className="yuvi-product-hero">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("Models")}</div>
-              <h1 className="m-0 text-2xl font-semibold">{t("AI models")}</h1>
-              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Choose configured models here. Provider connections and route ordering are in Advanced settings.")}</p>
-            </section>
-            <ProductModelsProviders />
-          </div>
-        ) : view === "people" ? (
-          <div className="grid gap-4">
-            <section className="yuvi-product-hero">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("People & Memory")}</div>
-              <h1 className="m-0 text-2xl font-semibold">{t("People, voices, and memory identity")}</h1>
-              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Manage who YUVI knows and the trusted voice bindings attached to those people.")}</p>
-            </section>
-            <ProductConfigurationPanel sections={["people", "voices"]} />
-          </div>
-        ) : view === "appearance" ? (
-          <div className="grid gap-4">
-            <section className="yuvi-product-hero">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("Appearance")}</div>
-              <h1 className="m-0 text-2xl font-semibold">{t("Appearance & desktop surfaces")}</h1>
-              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Choose the companion model and product language. Window behavior stays with the desktop surface.")}</p>
-            </section>
-            <LocaleSelector />
-            <CompanionAppearanceSettings />
-            <SubtitleAppearanceSettings />
-            <ProductLive2DModels />
-          </div>
-        ) : (
-          <div className="grid gap-4">
-            <section className="yuvi-product-hero">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("Advanced settings")}</div>
-              <h1 className="m-0 text-2xl font-semibold">{t("Advanced configuration")}</h1>
-              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Providers, capability routes, local services, and operational settings live here.")}</p>
-            </section>
-            <ProductConfigurationPanel sections={["status", "providers", "routes", "proactive"]} />
-            {tauri ? <UserSettingsPanel /> : <ProductMemorySettings />}
-          </div>
-        )}
+              {!tauri && (
+                <div className="yuvi-product-actions">
+                  <a className="yuvi-product-action" href="/#/main" target="yuvi-main">
+                    {t("Chat & Voice Mode")}
+                  </a>
+                  <a className="yuvi-product-action" href="/#/companion" target="yuvi-companion">
+                    {t("Companion")}
+                  </a>
+                  <a className="yuvi-product-action" href="/#/subtitle" target="yuvi-subtitle">
+                    {t("Subtitle")}
+                  </a>
+                </div>
+              )}
+            </>
+          )}
+          {view === "models" && (
+            <ProductConfigurationPanel sections={["providers", "models", "routes"]} />
+          )}
+          {view === "people" && <ProductConfigurationPanel sections={["people", "voices"]} />}
+          {view === "behavior" && (
+            <>
+              {tauri && <UserSettingsPanel sections={["proactive"]} />}
+              <ProductConfigurationPanel sections={["proactive"]} />
+            </>
+          )}
+          {view === "memory" &&
+            (tauri ? <UserSettingsPanel sections={["memory"]} /> : <ProductMemorySettings />)}
+          {view === "appearance" && (
+            <>
+              <CompanionAppearanceSettings />
+              <ProductLive2DModels />
+            </>
+          )}
+          {view === "subtitle" &&
+            (tauri ? (
+              <SubtitleAppearanceSettings />
+            ) : (
+              <p className="yuvi-product-inline-state">
+                {t(
+                  "Window controls are available in the YUVI desktop app. Use the tray to show or hide this window."
+                )}
+              </p>
+            ))}
+          {view === "vision" && <ProductVisionStatus />}
+          {view === "advanced" && (
+            <>
+              <LocaleSelector />
+              {tauri && <UserSettingsPanel sections={["desktop"]} />}
+              <details className="yuvi-advanced">
+                <summary>{t("Connection troubleshooting")}</summary>
+                <ProductConfigurationPanel sections={["status"]} />
+              </details>
+              <section className="yuvi-system-tools">
+                <h2>{t("Developer tools")}</h2>
+                <p>{t("Inspect events, prompts, and detailed runtime diagnostics.")}</p>
+                <button
+                  className="yuvi-product-button"
+                  type="button"
+                  onClick={() => navigate("developer")}
+                >
+                  {t("Open developer console")}
+                </button>
+              </section>
+            </>
+          )}
+        </div>
       </main>
     </div>
   );

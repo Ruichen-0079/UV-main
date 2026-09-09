@@ -39,7 +39,7 @@ vi.mock("./hooks/useAsyncData.js", () => ({
 }));
 it("keeps the legacy full configuration alias compatible without restoring onboarding clutter", () => {
   const html = renderToStaticMarkup(<ProductLocalServices />);
-  expect(html).toContain("Provider → Model → Capability Route");
+  expect(html).toContain("Connection troubleshooting");
   expect(html).toContain("Loading configuration");
   expect(html).not.toContain("Configure My Profile");
   expect(html).not.toContain("enroll your voice when available");
