@@ -25,6 +25,18 @@ const emptyModel = (providerId: string): Model => ({ id: crypto.randomUUID(), pr
 export function reorderRoute(route: string[], index: number, direction: -1 | 1): string[] { const next = [...route]; const target = index + direction; if (target >= 0 && target < next.length) [next[index], next[target]] = [next[target]!, next[index]!]; return next; }
 const send = <T,>(path: string, body?: unknown, method = "POST") => request<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 
+export function localizeProductNotice(message: string): string {
+  const http = /^HTTP (\d+)\. You can add a model ID manually\.$/u.exec(message);
+  if (http) return t("HTTP {0}. You can add a model ID manually.", http[1]);
+  const evidence = /^Person saved\. Identity evidence: (STORED|UNAVAILABLE|APPLY_FAILED)\. Configure Memory and save the profile again to retry\.$/u.exec(message);
+  if (evidence)
+    return t(
+      "Person saved. Identity evidence: {0}. Configure Memory and save the profile again to retry.",
+      t(evidence[1]!)
+    );
+  return t(message);
+}
+
 export type ProductConfigurationSection =
   | "status"
   | "providers"
@@ -76,7 +88,7 @@ export function ProductConfigurationPanel(props: {
     }
   }
   useEffect(() => { void refresh().catch(e => setNotice(String(e))); return () => { clearTimeout(timer.current); releaseMicrophoneCapture(capture.current); player.current?.pause(); if (sampleUrl.current) URL.revokeObjectURL(sampleUrl.current); }; }, [showVoices]);
-  async function act(work: () => Promise<unknown>, message = t("Saved. Effective state refreshed.")) { setBusy(true); setNotice(""); try { const result = await work(); await refresh(); setNotice(result && typeof result === "object" && "message" in result ? String(result.message) : message); return true; } catch (e) { setNotice(e instanceof Error ? e.message : t("Action failed.")); return false; } finally { setBusy(false); } }
+  async function act(work: () => Promise<unknown>, message = t("Saved. Effective state refreshed.")) { setBusy(true); setNotice(""); try { const result = await work(); await refresh(); setNotice(result && typeof result === "object" && "message" in result ? localizeProductNotice(String(result.message)) : message); return true; } catch (e) { setNotice(e instanceof Error ? e.message : t("Action failed.")); return false; } finally { setBusy(false); } }
   async function save(configuration = draft) { if (!state || !configuration) return; return act(() => send("/product/configuration", { configuration, revision: state.revision, proactive }, "PUT")); }
   function changeRoute(cap: Capability, ids: string[]) { if (draft) setDraft({ ...draft, routes: { ...draft.routes, [cap]: ids } }); }
   async function finishRecording() {
