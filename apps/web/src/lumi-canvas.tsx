@@ -167,7 +167,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       }
       overlayFrame = requestAnimationFrame(tickOverlay);
     };
-    if (import.meta.env.DEV) {
+    if (import.meta.env.DEV && !props.presentationOnly) {
       overlayFrame = requestAnimationFrame(tickOverlay);
     }
 
@@ -213,7 +213,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
         style={{ display: "block", width: "100%", height: "100%" }}
         aria-hidden="true"
       />
-      {overlay && (
+      {!props.presentationOnly && overlay && (
         <div className="pointer-events-none absolute inset-0 z-10" aria-hidden="true">
           {/* Viewport safe margins */}
           <div
