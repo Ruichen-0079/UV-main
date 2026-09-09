@@ -65,6 +65,14 @@ export async function registerPeopleVoiceRoutes(app: FastifyInstance, context: A
         if (await context.runtime.getVoiceProfilePerson(parsed.data.replaceVoiceId) !== person.id) return reply.code(409).send({ error: "New voice saved; original binding changed, so it was retained." });
         const removed = await context.runtime.removeVoiceProfileBinding(parsed.data.replaceVoiceId);
         if (removed.status !== "STORED") return reply.code(409).send({ error: "New voice saved; old binding removal failed." });
+        try {
+          await profiles.delete(parsed.data.replaceVoiceId);
+          for (const sample of voiceReviews().filter(r => r.voiceProfileId === parsed.data.replaceVoiceId)) {
+            updateVoiceReview(sample.id, null);
+          }
+        } catch {
+          return reply.code(409).send({ error: "New voice saved; old voice profile cleanup failed." });
+        }
       }
       return { ok: true };
     } catch { return reply.code(422).send({ error: "Enrollment failed. Use clear mono speech recordings." }); }
