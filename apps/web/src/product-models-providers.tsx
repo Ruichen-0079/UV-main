@@ -205,14 +205,14 @@ export function productVerificationSummary(
 ): string {
   if (result.verificationMode === "config_only") {
     return result.ok
-      ? "Configuration ready · no provider call was made"
-      : "Configuration is not ready · no provider call was made";
+      ? t("Configuration ready · no provider call was made")
+      : t("Configuration is not ready · no provider call was made");
   }
   return result.ok
     ? t("Connected · {0}", result.provider)
     : result.error
       ? t("Connection failed · {0}", result.error)
-      : "Connection failed";
+      : t("Connection failed");
 }
 
 function productProviderStatusTone(
@@ -346,7 +346,7 @@ function ProviderCard(props: {
                 value={props.draft[field.key] ?? ""}
                 placeholder={
                   field.secret && configured
-                    ? (field.placeholder ?? "Leave blank to keep the saved key")
+                    ? (field.placeholder ?? t("Leave blank to keep the saved key"))
                     : field.placeholder
                 }
                 autoComplete={field.secret ? "new-password" : undefined}
@@ -394,7 +394,7 @@ function ProviderCard(props: {
             onClick={() => props.onVerify(capability)}
           >
             {props.verifying === capability
-              ? "Checking…"
+              ? t("Checking…")
               : LIVE_VERIFICATION_CAPABILITIES.has(capability)
                 ? t("Test connection · active {0}", capabilityLabel(capability))
                 : t("Inspect {0} config", capabilityLabel(capability))}
