@@ -1,4 +1,11 @@
 export const zhCN: Readonly<Record<string, string>> = {
+  "Endpoint responded. Model calls are verified separately.": "端点已响应。模型调用需要单独验证。",
+  "Connection unavailable. Check the endpoint or add a model ID manually.": "连接不可用。请检查端点，或手动添加模型 ID。",
+  "HTTP {0}. You can add a model ID manually.": "HTTP {0}。你仍可以手动添加模型 ID。",
+  "Person saved and identity evidence stored in Memory.": "人物已保存，身份信息已写入 Memory。",
+  "Person saved. Identity evidence: {0}. Configure Memory and save the profile again to retry.": "人物已保存。身份信息状态：{0}。请配置 Memory 后再次保存资料以重试。",
+  "STORED": "已存储",
+  "UNAVAILABLE": "不可用",
   "Product status refresh incomplete": "产品状态刷新不完整",
   "Runtime health unavailable": "Runtime 健康状态不可用",
   "Showing the last successful Runtime projection.": "正在显示最近一次成功的 Runtime 状态。",
