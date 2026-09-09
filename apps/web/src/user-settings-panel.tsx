@@ -178,7 +178,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
             tone={state.saveMessage.includes("Supervisor was unavailable") ? "warning" : "info"}
             title={
               state.saveMessage.includes("Supervisor was unavailable")
-                ? "Saved (sync pending)"
+                ? t("Saved (sync pending)")
                 : t("Saved")
             }
             message={state.saveMessage}
@@ -187,7 +187,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
       </div>
 
       <div className="settings-grid">
-        <p>Providers, models, and voice routes are configured in Product configuration.</p>
+        <p>{t("Providers, models, and voice routes are configured in Product configuration.")}</p>
 
         <section className="settings-card">
           <h3>{t("Memory")}</h3>
@@ -217,14 +217,14 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               <option value="legacy">{t("legacy")}</option>
             </select>
           </Field>
-          <Field label="Mem0 URL">
+          <Field label={t("Mem0 URL")}>
             <input
               className="setting-input"
               value={form.memoryBaseUrl}
               onChange={(e) => setField("memoryBaseUrl", e.target.value)}
             />
           </Field>
-          <Field label="Ollama URL">
+          <Field label={t("Ollama URL")}>
             <input
               className="setting-input"
               value={form.ollamaUrl}
@@ -240,7 +240,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               type="password"
               autoComplete="off"
               placeholder={
-                state.secrets.databaseUrl ? "Enter to replace" : t("Paste connection string")
+                state.secrets.databaseUrl ? t("Enter to replace") : t("Paste connection string")
               }
               value={form.databaseUrlInput}
               onChange={(e) => setField("databaseUrlInput", e.target.value)}
@@ -297,7 +297,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               type="password"
               autoComplete="off"
               placeholder={
-                state.secrets.memoryLlmApiKey ? "Enter to replace" : t("Paste Memory LLM API key")
+                state.secrets.memoryLlmApiKey ? t("Enter to replace") : t("Paste Memory LLM API key")
               }
               value={form.memoryLlmApiKeyInput}
               onChange={(e) => setField("memoryLlmApiKeyInput", e.target.value)}
