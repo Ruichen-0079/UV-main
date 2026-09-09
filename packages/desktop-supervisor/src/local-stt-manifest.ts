@@ -39,9 +39,16 @@ export function validateLocalSttManifest(raw: unknown): LocalSttManifest {
   if (extra) throw manifestError("contains unsupported field");
   if (obj["schemaVersion"] !== 1) throw manifestError("schemaVersion must be 1");
   if (obj["protocolVersion"] !== 1) throw manifestError("protocolVersion must be 1");
-  if (obj["platform"] !== "win32") throw manifestError("platform must be win32");
+  const platform = obj["platform"];
+  if (platform !== "win32" && platform !== "linux") {
+    throw manifestError("platform must be win32 or linux");
+  }
   if (obj["arch"] !== "x64") throw manifestError("arch must be x64");
   const executable = requireBasename(obj["executable"], "executable");
+  const expectedExecutable = platform === "linux" ? "yuvi-local-stt" : "yuvi-local-stt.exe";
+  if (executable !== expectedExecutable) {
+    throw manifestError(`executable must be ${expectedExecutable}`);
+  }
   const modelDirectory = requireRelative(obj["modelDirectory"], "modelDirectory");
   const modelManifest = requireRelative(obj["modelManifest"], "modelManifest");
   if (obj["healthPath"] !== "/health") throw manifestError("healthPath must be /health");
@@ -58,7 +65,7 @@ export function validateLocalSttManifest(raw: unknown): LocalSttManifest {
   return {
     schemaVersion: 1,
     protocolVersion: 1,
-    platform: "win32",
+    platform,
     arch: "x64",
     executable,
     modelDirectory,

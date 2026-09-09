@@ -108,6 +108,22 @@ function externalPackagedSidecarsEnabled(env: Record<string, string>): boolean {
   return v === "1" || v === "true" || v === "yes";
 }
 
+function packagedLocalSttManifestPath(layout: SupervisorLayout): string | null {
+  if (layout.mode !== "packaged") return null;
+  return path.join(layout.resourceRoot, "local-stt", "local-stt-manifest.json");
+}
+
+function packagedLocalSttPresent(layout: SupervisorLayout): boolean {
+  const manifestPath = packagedLocalSttManifestPath(layout);
+  return Boolean(manifestPath && fs.existsSync(manifestPath));
+}
+
+function shouldUsePackagedLocalStt(layout: SupervisorLayout, env: Record<string, string>): boolean {
+  if (layout.mode !== "packaged") return false;
+  if (!externalPackagedSidecarsEnabled(env)) return true;
+  return packagedLocalSttPresent(layout);
+}
+
 export function loadPackagedSupervisorConfig(
   input: LoadPackagedSupervisorConfigInput
 ): SupervisorConfig {
@@ -123,11 +139,8 @@ export function loadPackagedSupervisorConfig(
   // Linux daily may set YUVI_RUNTIME_ENV_DIR to an absolute user config dir
   // (e.g. ~/.config/yuvi-daily); load .env/.env.local from there only.
   const seed: Record<string, string> = { ...(input.env ?? {}) };
-  const runtimeEnvDir = (
-    seed["YUVI_RUNTIME_ENV_DIR"]?.trim() ||
-    process.env["YUVI_RUNTIME_ENV_DIR"]?.trim() ||
-    ""
-  );
+  const runtimeEnvDir =
+    seed["YUVI_RUNTIME_ENV_DIR"]?.trim() || process.env["YUVI_RUNTIME_ENV_DIR"]?.trim() || "";
   let env: Record<string, string>;
   if (runtimeEnvDir && path.isAbsolute(runtimeEnvDir)) {
     env = loadYuviRuntimeEnvDir(runtimeEnvDir);
@@ -275,10 +288,13 @@ export function deriveConfigFromEnv(
     ttsUpstreamUrl,
     ollamaUrl,
     localSttUrl,
-    localSttStart:
-      layout.mode === "packaged" && !externalPackagedSidecarsEnabled(env)
-        ? resolvePackagedLocalSttStart(layout, env, localSttUrl)
-        : resolveOptionalStartCommand(env, "YUVI_LOCAL_STT_START_COMMAND", ownershipRoot),
+    localSttStart: shouldUsePackagedLocalStt(layout, env)
+      ? resolvePackagedLocalSttStart(
+          layout as Extract<SupervisorLayout, { mode: "packaged" }>,
+          env,
+          localSttUrl
+        )
+      : resolveOptionalStartCommand(env, "YUVI_LOCAL_STT_START_COMMAND", ownershipRoot),
     autostartLocalStt: envFlag(env, "YUVI_AUTOSTART_LOCAL_STT", false),
     databaseUrl,
     runtimeStart: resolveRuntimeStartForLayout(layout, env, runtimePort),
