@@ -24,11 +24,11 @@ export function ProductMemorySettings(): JSX.Element {
       <h2>{t("Local memory connection")}</h2>
       <p>{t("Mem0 uses yuvi-embedding:0.6b at 1024 dimensions. Database credentials remain private. Connection changes require a service restart.")}</p>
       {[
-        ["MEMORY_BACKEND", "Memory backend"],
-        ["MEMORY_REPOSITORY", "Persistence repository"],
-        ["MEM0_BASE_URL", "Mem0 URL"],
-        ["MEM0_OLLAMA_BASE_URL", "Ollama URL"],
-        ["DATABASE_URL", "PostgreSQL connection (blank keeps saved value)"]
+        ["MEMORY_BACKEND", t("Memory backend")],
+        ["MEMORY_REPOSITORY", t("Persistence repository")],
+        ["MEM0_BASE_URL", t("Mem0 URL")],
+        ["MEM0_OLLAMA_BASE_URL", t("Ollama URL")],
+        ["DATABASE_URL", t("PostgreSQL connection (blank keeps saved value)")]
       ].map(([key, label]) => (
         <label className="yuvi-product-provider-field" key={key}>
           <span>{label}</span>
@@ -53,9 +53,9 @@ export function ProductMemorySettings(): JSX.Element {
             .updateRuntimeSettings({ values: saved })
             .then(() => {
               setValues((v) => ({ ...v, DATABASE_URL: "" }));
-              setNotice("Saved. Restart local services to apply the connection changes.");
+              setNotice(t("Saved. Restart local services to apply the connection changes."));
             })
-            .catch(() => setNotice("Could not save. Check the connection values."))
+            .catch(() => setNotice(t("Could not save. Check the connection values.")))
             .finally(() => setBusy(false));
         }}
       >{t("Save memory configuration")}</button>
@@ -67,9 +67,9 @@ export function ProductMemorySettings(): JSX.Element {
           void apiClient
             .restartLocalServices()
             .then(() =>
-              setNotice("Restart requested. Wait a few seconds, then refresh local service status.")
+              setNotice(t("Restart requested. Wait a few seconds, then refresh local service status."))
             )
-            .catch(() => setNotice("Restart requires the installed Linux daily-use launcher."))
+            .catch(() => setNotice(t("Restart requires the installed Linux daily-use launcher.")))
             .finally(() => setBusy(false));
         }}
       >{t("Restart local services")}</button>
