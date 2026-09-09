@@ -1898,25 +1898,6 @@ export class DesktopSupervisor {
     if (!svc || this.shuttingDown) return;
     await this.queue(svc, async () => {
       try {
-        if (this.localSttManualSuspend) {
-          const activeVoiceLeases = this.voiceLeases.size + this.localSttLeaseAcquisitions;
-          if (activeVoiceLeases > 0) {
-            svc.summary = "Suspend pending — active voice lease.";
-            svc.detail = `${activeVoiceLeases} explicit voice operation(s) still require Local STT.`;
-            svc.lastError = null;
-            this.emit();
-            return;
-          }
-          if (svc.ownership === "owned" || svc.pid || svc.child) await this.stopOwned(svc);
-          svc.pendingExternal = false;
-          svc.status = "stopped";
-          svc.summary = "Local STT suspended by user.";
-          svc.detail = null;
-          svc.lastError = null;
-          this.emit();
-          return;
-        }
-
         if (action === "stop") {
           if (svc.ownership === "owned" || svc.pid || svc.child) await this.stopOwned(svc);
           svc.pendingExternal = false;
@@ -1959,6 +1940,25 @@ export class DesktopSupervisor {
     if (!svc || this.shuttingDown) return;
     await this.queue(svc, async () => {
       try {
+        if (this.localSttManualSuspend) {
+          const activeVoiceLeases = this.voiceLeases.size + this.localSttLeaseAcquisitions;
+          if (activeVoiceLeases > 0) {
+            svc.summary = "Suspend pending — active voice lease.";
+            svc.detail = `${activeVoiceLeases} explicit voice operation(s) still require Local STT.`;
+            svc.lastError = null;
+            this.emit();
+            return;
+          }
+          if (svc.ownership === "owned" || svc.pid || svc.child) await this.stopOwned(svc);
+          svc.pendingExternal = false;
+          svc.status = "stopped";
+          svc.summary = "Local STT suspended by user.";
+          svc.detail = null;
+          svc.lastError = null;
+          this.emit();
+          return;
+        }
+
         if (action === "stop") {
           if (svc.ownership === "owned" || svc.pid || svc.child) await this.stopOwned(svc);
           svc.pendingExternal = false;
