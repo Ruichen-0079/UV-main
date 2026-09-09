@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ProviderCallOptions, ProviderHealth } from "../types/common.js";
 import { ProviderError, ProviderErrorCode } from "../types/errors.js";
@@ -15,6 +17,8 @@ import type {
 
 export type LocalSTTProviderOptions = {
   baseUrl: string;
+  /** Packaged, read-only metadata path supplied by Supervisor; never reads vectors. */
+  speakerMetadataPath?: string;
   model: string;
   timeoutMs?: number | undefined;
 };
@@ -25,6 +29,14 @@ export class LocalSTTProvider implements STTProvider {
 
   readonly voiceProfiles: VoiceProfileProvider = {
     list: async () => {
+      if (this.options.speakerMetadataPath) {
+        if (!isAbsolute(this.options.speakerMetadataPath)) throw new Error("Speaker metadata path must be absolute.");
+        try {
+          const body = JSON.parse(await readFile(this.options.speakerMetadataPath, "utf8")) as { speakers: Array<{ speakerId: string; label: string }> };
+          if (!Array.isArray(body.speakers) || body.speakers.some(p => typeof p.speakerId !== "string" || typeof p.label !== "string")) throw new Error("Invalid speaker metadata.");
+          return body.speakers.map(p => ({ voiceProfileId: p.speakerId, label: p.label }));
+        } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+      }
       const body = (await this.profileRequest("/speakers")) as {
         speakers: Array<{ speakerId: string; label: string }>;
       };

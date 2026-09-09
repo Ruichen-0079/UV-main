@@ -1,3 +1,4 @@
+import { productVoiceProfiles } from "../services/packaged-voice.js";
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -10,7 +11,7 @@ import { boundedWav, retainVoiceSample, updateVoiceReview, voiceReviews } from "
 export async function registerPeopleVoiceRoutes(app: FastifyInstance, context: AppContext, config: ServerConfig) {
   app.get("/product/voices", async (req, reply) => {
     if (!requireLocalDashboardAccess(config, req, reply)) return;
-    const profiles = context.providers.getSTTProvider().voiceProfiles;
+    const profiles = productVoiceProfiles(context);
     try {
       const records = profiles ? await profiles.list() : [];
       const rows = voiceReviews();
@@ -32,7 +33,7 @@ export async function registerPeopleVoiceRoutes(app: FastifyInstance, context: A
     if (!row || !parsed.success) return reply.code(400).send({ error: "Invalid review." });
     if (parsed.data.leaveUnknown) { updateVoiceReview(row.id, { leftUnknown: true }); return { ok: true }; }
     const person = readProductSettings()?.people.find(p => p.id === parsed.data.personId);
-    const profiles = context.providers.getSTTProvider().voiceProfiles;
+    const profiles = productVoiceProfiles(context);
     if (!person || !profiles) return reply.code(409).send({ error: "Select a saved Person and configure local speaker recognition." });
     try {
       let id = row.voiceProfileId;
@@ -49,7 +50,7 @@ export async function registerPeopleVoiceRoutes(app: FastifyInstance, context: A
     if (!requireLocalDashboardAccess(config, req, reply)) return;
     const parsed = z.object({ personId: z.string(), recordings: z.array(z.string().max(1_100_000)).min(3).max(5), replaceVoiceId: z.string().optional() }).strict().safeParse(req.body);
     const person = parsed.success ? readProductSettings()?.people.find(p => p.id === parsed.data.personId) : undefined;
-    const profiles = context.providers.getSTTProvider().voiceProfiles;
+    const profiles = productVoiceProfiles(context);
     if (!parsed.success || !person || !profiles) return reply.code(400).send({ error: "Select a Person and record three short utterances." });
     try {
       const clips = parsed.data.recordings.map(boundedWav);

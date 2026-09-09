@@ -34,6 +34,11 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Never redistribute build-host GCC/zlib binaries (rolling distros may require
+# newer glibc or CPU ISA). Use the supported distro's standard runtime libraries.
+if os.name != "nt":
+    system_runtime = {"libstdc++.so.6", "libgcc_s.so.1", "libz.so.1"}
+    a.binaries = [entry for entry in a.binaries if Path(entry[0]).name not in system_runtime]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

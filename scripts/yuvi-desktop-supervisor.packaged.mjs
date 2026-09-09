@@ -4,6 +4,7 @@
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -31,6 +32,7 @@ async function main() {
       ? loadPackagedSupervisorConfig({
           resourceRoot: required(args, "resource-root"),
           dataRoot: required(args, "state-root"),
+          ...(process.env["YUVI_SUPERVISOR_STATE_ROOT"] ? { stateDirectory: path.join(defaultDesktopSupervisorRoot(), "instances", randomUUID()) } : {}),
           runtimeManifestPath: required(args, "runtime-manifest"),
           mem0ManifestPath: args["mem0-manifest"],
           controlPort: args.port ? Number(args.port) : 0,
@@ -59,6 +61,9 @@ async function main() {
     // ignore
   }
 
+  // The child reads only this instance's authenticated endpoint, never a shared discovery pointer.
+  config.env["YUVI_SUPERVISOR_ENDPOINT_FILE"] = endpointFile;
+  if (config.runtimeStart) config.runtimeStart.env["YUVI_SUPERVISOR_ENDPOINT_FILE"] = endpointFile;
   const supervisor = new DesktopSupervisor(config);
   const { server, port, host } = await startSupervisorHttpServer(supervisor, {
     host: config.controlHost,
@@ -215,6 +220,11 @@ function restrictToCurrentUser(targetPath) {
 }
 
 function defaultDesktopSupervisorRoot() {
+  const explicit = process.env["YUVI_SUPERVISOR_STATE_ROOT"]?.trim();
+  if (explicit) {
+    if (!path.isAbsolute(explicit)) throw new Error("YUVI_SUPERVISOR_STATE_ROOT must be absolute");
+    return path.resolve(explicit);
+  }
   const local = process.env["LOCALAPPDATA"];
   if (local && local.trim()) {
     const root = path.join(local, "YUVI", "DesktopSupervisor");

@@ -184,6 +184,9 @@ export async function prepareLinuxDailyPackage() {
     path.join(REPO_ROOT, "scripts", "desktop-package", "install-linux-daily.mjs"),
     path.join(out, "install-linux-daily.mjs")
   );
+  fs.copyFileSync(path.join(REPO_ROOT, "scripts/desktop-package/yuvi-linux"), path.join(out, "yuvi"));
+  fs.chmodSync(path.join(out, "yuvi"), 0o755);
+  fs.copyFileSync(path.join(REPO_ROOT, "scripts/desktop-package/linux-launcher.mjs"), path.join(out, "launcher.mjs"));
   console.info("[linux-daily] prepared", out);
   return { outRoot: out, checkoutSha: sha };
 }

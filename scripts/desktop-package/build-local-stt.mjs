@@ -210,6 +210,7 @@ function stageNotices(artifactDir) {
   fs.copyFileSync(notices, path.join(artifactDir, LOCAL_STT_NOTICES_NAME));
   const destLicenses = path.join(artifactDir, "licenses");
   ensureDir(destLicenses);
+  fs.cpSync(licenses, destLicenses, { recursive: true });
   for (const name of fs.readdirSync(licenses)) {
     const source = path.join(licenses, name);
     if (!regularFile(source)) continue;
@@ -359,7 +360,7 @@ export function ensureLinuxLocalSttPython(options = {}) {
     options.venvDir ?? path.join(REPO_ROOT, "build", "desktop", "linux-x64", ".local-stt-venv");
   const venvPython = path.join(venvDir, "bin", "python");
   if (!regularFile(venvPython)) {
-    const uv = spawnSyncImpl("uv", ["venv", "--python", "3.11", venvDir], {
+    const uv = spawnSyncImpl("uv", ["venv", "--python", "3.11.16", venvDir], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       shell: false,

@@ -1,3 +1,4 @@
+import { hasPackagedVoice, applyPackagedSpeechRoute } from "../services/packaged-voice.js";
 import { persistProfileEvidence } from "../services/profile-evidence.js";
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
@@ -26,7 +27,7 @@ export async function registerProductRoutes(app: FastifyInstance, context: AppCo
       const state = pending ? (applyFailure ? "APPLY_FAILED" : "RESTART_REQUIRED") : !ids.length ? "NOT_CONFIGURED" : available < 0 ? "UNAVAILABLE" : available > 0 ? "FALLBACK_ACTIVE" : "ACTIVE";
       return [cap, { state, modelIds: ids, observed: entries.map(e => ({ modelId: e.provider, observed: e.observed })) }];
     }));
-    return { ...saved, configuration: { ...saved.configuration, providers: saved.configuration.providers.map(({ apiKey, ...p }) => ({ ...p, hasApiKey: Boolean(apiKey) })) }, routes, conversationalReady: Boolean(status.routes?.chat?.some(e => e.configured && e.observed !== "unavailable")), adopted: Boolean(active), proactiveState: context.runtime.getProactiveState(), voiceAvailable: Boolean(context.providers.getSTTProvider().voiceProfiles), applyState: applyFailure ? "APPLY_FAILED" : pending ? "RESTART_REQUIRED" : "ACTIVE" };
+    return { ...saved, configuration: { ...saved.configuration, providers: saved.configuration.providers.map(({ apiKey, ...p }) => ({ ...p, hasApiKey: Boolean(apiKey) })) }, routes, conversationalReady: Boolean(status.routes?.chat?.some(e => e.configured && e.observed !== "unavailable")), adopted: Boolean(active), proactiveState: context.runtime.getProactiveState(), voiceAvailable: hasPackagedVoice() || Boolean(context.providers.getSTTProvider().voiceProfiles), applyState: applyFailure ? "APPLY_FAILED" : pending ? "RESTART_REQUIRED" : "ACTIVE" };
   }
   async function persistApply(saved: ProductSettings) {
     const previous = context.activeRuntimeEnv["YUVI_PRODUCT_CONFIGURATION"];
@@ -38,6 +39,7 @@ export async function registerProductRoutes(app: FastifyInstance, context: AppCo
     try {
       const env = productEnvironment(context.activeRuntimeEnv, saved);
       await context.reloadRuntimeConfig(env);
+      await applyPackagedSpeechRoute(context);
       for (const key of ["YUVI_PRODUCT_CONFIGURATION", "MEMORY_SUBJECT_USER_ID", "MEMORY_PERSONA_ID", "PROACTIVE_SCORE_THRESHOLD", "PROACTIVE_EVALUATION_INTERVAL_MS"]) {
         if (env[key] === undefined) delete process.env[key]; else process.env[key] = env[key];
       }

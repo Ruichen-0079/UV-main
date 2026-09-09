@@ -32,16 +32,15 @@ const xdg = (k, fb) => {
 const unitDir = path.join(xdg("XDG_CONFIG_HOME", ".config"), "systemd/user");
 const applications = path.join(xdg("XDG_DATA_HOME", ".local/share"), "applications");
 const envDir = path.resolve(
-  process.env.YUVI_RUNTIME_ENV_DIR || path.join(os.homedir(), ".config/yuvi-daily")
+  process.env.YUVI_RUNTIME_ENV_DIR || path.join(xdg("XDG_CONFIG_HOME", ".config"), "YUVI")
 );
-if (!fs.existsSync(path.join(envDir, ".env.local")))
-  throw new Error("Configure .env.local in YUVI_RUNTIME_ENV_DIR first");
+fs.mkdirSync(envDir, { recursive: true, mode: 0o700 });
 const stateRoot = path.join(xdg("XDG_DATA_HOME", ".local/share"), "YUVI/DesktopSupervisor");
 const quote = (v) =>
   '"' + v.replace(/\\\\/g, "\\\\\\\\").replace(/"/g, '\\\\"').replace(/%/g, "%%") + '"';
 const pathEnv = ["/usr/local/bin", "/usr/bin", "/bin"].filter((p) => fs.existsSync(p)).join(":");
 const common = (wd) =>
-  `WorkingDirectory=${wd.replace(/%/g, "%%")}\nEnvironment=${quote("PATH=" + pathEnv)}\nEnvironment=${quote("YUVI_RUNTIME_ENV_DIR=" + envDir)}\nEnvironment=YUVI_DAILY_USE_SYSTEMD=1\nEnvironment=YUVI_PACKAGED_EXTERNAL_SIDECARS=1\nEnvironment=YUVI_POSTGRES_MODE=external\nEnvironment=YUVI_AUTOSTART_LOCAL_STT=1\nTimeoutStopSec=90\nKillMode=mixed\n`;
+  `WorkingDirectory=${wd.replace(/%/g, "%%")}\nEnvironment=${quote("PATH=" + pathEnv)}\nEnvironment=${quote("YUVI_RUNTIME_ENV_DIR=" + envDir)}\nEnvironment=YUVI_DAILY_USE_SYSTEMD=1\nEnvironment=YUVI_PACKAGED_EXTERNAL_SIDECARS=1\nEnvironment=YUVI_POSTGRES_MODE=external\nEnvironment=YUVI_AUTOSTART_LOCAL_STT=0\nTimeoutStopSec=90\nKillMode=mixed\n`;
 fs.mkdirSync(unitDir, { recursive: true });
 fs.mkdirSync(applications, { recursive: true });
 const execDaily = `${quote(nodeBin)} ${quote(supervisor)} --mode packaged --resource-root ${quote(resourceRoot)} --state-root ${quote(stateRoot)} --runtime-manifest ${quote(runtimeManifest)}`;

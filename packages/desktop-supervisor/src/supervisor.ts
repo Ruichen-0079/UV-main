@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { buildChildProcessEnv, deriveConfigFromEnv } from "./config.js";
 import { buildPostgresStartCommand, pingPostgres } from "./postgres-cluster.js";
@@ -551,6 +551,36 @@ export class DesktopSupervisor {
     return this.snapshot();
   }
 
+  private readonly voiceLeases = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** Bounded explicit product operation; no process ownership lives in Runtime. */
+  async acquireVoiceLease(): Promise<{ leaseId: string; baseUrl: string }> {
+    return this.withConfigLock(async () => {
+      if (this.shuttingDown) throw new Error("Supervisor is shutting down.");
+      const svc = this.require("local_stt");
+      await this.queue(svc, () => this.startManagedIfNeeded("local_stt"));
+      if (svc.ownership !== "owned" || svc.status !== "healthy") {
+        if (svc.ownership === "owned" && !this.config.autostartLocalStt && !this.voiceLeases.size) await this.stopService("local_stt");
+        throw new Error("Packaged speaker recognition is unavailable or its port is occupied.");
+      }
+      const leaseId = randomUUID();
+      const timer = setTimeout(() => { void this.releaseVoiceLease(leaseId).catch(() => {}); }, 180_000);
+      timer.unref();
+      this.voiceLeases.set(leaseId, timer);
+      return { leaseId, baseUrl: this.config.localSttUrl ?? "http://127.0.0.1:9876" };
+    });
+  }
+
+  async releaseVoiceLease(leaseId: string): Promise<void> {
+    await this.withConfigLock(async () => {
+      const timer = this.voiceLeases.get(leaseId);
+      if (!timer) return;
+      clearTimeout(timer);
+      this.voiceLeases.delete(leaseId);
+      if (!this.voiceLeases.size && !this.config.autostartLocalStt) await this.stopService("local_stt");
+    });
+  }
+
   async ensureService(id: ServiceId): Promise<void> {
     if (this.shuttingDown) return;
     await this.withConfigLock(async () => {
@@ -716,6 +746,8 @@ export class DesktopSupervisor {
       return;
     }
     this.shuttingDown = true;
+    for (const timer of this.voiceLeases.values()) clearTimeout(timer);
+    this.voiceLeases.clear();
     this.stopBackgroundRefresh();
     // Wait briefly for the tracked config reconcile and service ops (do not
     // block exit forever). New config updates are rejected once shutting down
@@ -1644,16 +1676,17 @@ export class DesktopSupervisor {
     const previousOwned = previous.ownership === "owned";
 
     if (!previousManaged && !nextManaged) return "none";
-    if (previousManaged && !nextManaged) return previousOwned ? "stop" : "none";
+    if (previousManaged && !nextManaged) return previousOwned && !this.voiceLeases.size ? "stop" : "none";
     if (!previousManaged && nextManaged) {
       return next.spec.autostart ? "start" : "none";
     }
 
     if (previous.spec.autostart && !next.spec.autostart) {
-      return previousOwned ? "stop" : "none";
+      return previousOwned && !this.voiceLeases.size ? "stop" : "none";
     }
     if (!next.spec.autostart) return "none";
 
+    if (!previous.spec.autostart && next.spec.autostart) return "start";
     const effectiveChanged =
       previous.spec.healthUrl !== next.spec.healthUrl ||
       !startCommandEqual(previous.spec.startCommand, next.spec.startCommand) ||
@@ -1823,7 +1856,7 @@ export class DesktopSupervisor {
     this.emit();
   }
 
-  private async withConfigLock(work: () => Promise<void>): Promise<void> {
+  private async withConfigLock<T>(work: () => Promise<T>): Promise<T> {
     const previous = this.configOp ?? Promise.resolve();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -1832,7 +1865,7 @@ export class DesktopSupervisor {
     this.configOp = previous.catch(() => undefined).then(() => gate);
     await previous.catch(() => undefined);
     try {
-      await work();
+      return await work();
     } finally {
       release();
     }

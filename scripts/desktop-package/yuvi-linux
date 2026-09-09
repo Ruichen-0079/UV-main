@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+# Resolve the public launcher, including symlinks, independently of the caller's cwd.
+launcher=$(readlink -f -- "$0")
+root=$(dirname -- "$launcher")
+exec "$root/runtime/node" "$root/launcher.mjs" "$@"

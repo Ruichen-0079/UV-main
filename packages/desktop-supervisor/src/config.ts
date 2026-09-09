@@ -153,6 +153,19 @@ export function loadPackagedSupervisorConfig(
       }
     }
   }
+  // Product routes are the activation authority; bundling alone never activates STT.
+  const productFile = path.join(runtimeEnvDir || input.configRoot || resolveAppRoots({ env }).configRoot, "product-settings.json");
+  if (fs.existsSync(productFile)) {
+    const product = JSON.parse(fs.readFileSync(productFile, "utf8"));
+    const catalog = product.configuration;
+    const localUrl = env["LOCAL_STT_BASE_URL"] || "http://127.0.0.1:9876";
+    const assigned = catalog.routes.stt.some((id: string) => {
+      const model = catalog.models.find((m: { id: string }) => m.id === id);
+      const provider = catalog.providers.find((p: { id: string }) => p.id === model?.providerId);
+      return model?.enabled && provider?.adapter === "local-stt" && provider.baseUrl.replace(/\/$/, "") === localUrl;
+    });
+    env["YUVI_AUTOSTART_LOCAL_STT"] = assigned ? "1" : "0";
+  }
   const externalSidecars = externalPackagedSidecarsEnabled(env);
   const mem0ManifestPath = canonicalPath(
     input.mem0ManifestPath?.trim() || path.join(resourceRoot, "mem0", "mem0-manifest.json")
@@ -487,7 +500,8 @@ export function resolvePackagedRuntimeStart(
       SERVER_PORT: runtimePort,
       YUVI_RUNTIME_RESOURCE_DIR: layout.resourceRoot,
       YUVI_RUNTIME_DATA_DIR: dataDir,
-      YUVI_RUNTIME_ENV_DIR: env["YUVI_RUNTIME_ENV_DIR"]?.trim() || dataDir,
+      YUVI_STT_SPEAKER_DIR: path.join(layout.dataRoot, "local-stt", "speakers"),
+      YUVI_RUNTIME_ENV_DIR: env["YUVI_RUNTIME_ENV_DIR"]?.trim() || layout.configRoot,
       YUVI_RUNTIME_MIGRATIONS_DIR: path.join(runtimeDir, "migrations"),
       YUVI_PACKAGED: "1",
       ...live2dEnv

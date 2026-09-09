@@ -1,11 +1,25 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { getRuntimeEnvDir } from "../env.js";
 import { writePrivateJson } from "./product-store.js";
 import type { STTOutput } from "@companion/providers";
 export type VoiceReview = { id: string; voiceProfileId?: string; createdAt: string; sample: string; leftUnknown?: boolean };
-const path = () => join(getRuntimeEnvDir(), "voice-review.json");
+const path = () => {
+  const target = join(resolve(process.env["YUVI_RUNTIME_DATA_DIR"] || getRuntimeEnvDir()), "voice-review.json");
+  const legacy = join(getRuntimeEnvDir(), "voice-review.json");
+  if (legacy !== target && existsSync(legacy)) {
+    const old = JSON.parse(readFileSync(legacy, "utf8")) as VoiceReview[];
+    const current = existsSync(target) ? JSON.parse(readFileSync(target, "utf8")) as VoiceReview[] : [];
+    if (!Array.isArray(old) || !Array.isArray(current)) throw new Error("Invalid voice review migration source.");
+    const merged = new Map(old.map(row => [row.id, row]));
+    for (const row of current) merged.set(row.id, row);
+    // Commit DATA before removing CONFIG; retry after interruption is idempotent.
+    writePrivateJson(target, [...merged.values()]);
+    unlinkSync(legacy);
+  }
+  return target;
+};
 export function voiceReviews(): VoiceReview[] {
   try { return JSON.parse(readFileSync(path(), "utf8")) as VoiceReview[]; } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return []; throw new Error("Voice review samples unavailable."); }
 }
