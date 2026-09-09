@@ -18,14 +18,18 @@ const LOCAL_SIGNATURE = 0x04034b50;
 const UTF8_FLAG = 0x0800;
 const ENCRYPTED_FLAG = 0x0001;
 
+const CRC32_TABLE = new Uint32Array(256);
+for (let index = 0; index < CRC32_TABLE.length; index += 1) {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1)
+    value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
+  CRC32_TABLE[index] = value >>> 0;
+}
+
 function crc32(data: Buffer): number {
   let crc = 0xffffffff;
-  for (const byte of data) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-    }
-  }
+  for (const byte of data)
+    crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ byte) & 0xff]!;
   return (crc ^ 0xffffffff) >>> 0;
 }
 
@@ -139,9 +143,17 @@ function extractEntry(data: Buffer, entry: ZipEntry): Buffer {
   const offset = entry.localHeaderOffset;
   if (offset + 30 > data.length || data.readUInt32LE(offset) !== LOCAL_SIGNATURE)
     throw new Error("Invalid ZIP local entry.");
+  const flags = data.readUInt16LE(offset + 6);
+  const compression = data.readUInt16LE(offset + 8);
   const fileNameLength = data.readUInt16LE(offset + 26);
   const extraLength = data.readUInt16LE(offset + 28);
-  const payloadStart = offset + 30 + fileNameLength + extraLength;
+  const nameStart = offset + 30;
+  const nameEnd = nameStart + fileNameLength;
+  if (nameEnd > data.length) throw new Error("Invalid ZIP local filename bounds.");
+  const localName = data.subarray(nameStart, nameEnd).toString("utf8");
+  if (localName !== entry.path || compression !== entry.compression || (flags & ENCRYPTED_FLAG))
+    throw new Error("ZIP local entry does not match its central directory.");
+  const payloadStart = nameEnd + extraLength;
   const payloadEnd = payloadStart + entry.compressedSize;
   if (payloadStart < 0 || payloadEnd > data.length)
     throw new Error("Invalid ZIP payload bounds.");
