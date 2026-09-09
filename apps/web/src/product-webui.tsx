@@ -139,12 +139,12 @@ export function ProductWebUI(): JSX.Element {
             {health.error ? (
               <section className="yuvi-card yuvi-card-alert">
                 <div className="font-semibold">
-                  {health.data ? "Product status refresh incomplete" : "Runtime health unavailable"}
+                  {health.data ? t("Product status refresh incomplete") : t("Runtime health unavailable")}
                 </div>
                 <p className="mb-0 mt-1 text-sm text-[var(--yuvi-muted)]">
                   {health.data
-                    ? "Showing the last successful Runtime projection."
-                    : "Current status remains unknown until the Runtime health endpoint responds."}
+                    ? t("Showing the last successful Runtime projection.")
+                    : t("Current status remains unknown until the Runtime health endpoint responds.")}
                 </p>
               </section>
             ) : null}
