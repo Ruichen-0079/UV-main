@@ -4,4 +4,12 @@ self=$(readlink -f -- "$0")
 root=$(dirname -- "$self")
 systemctl --user start yuvi-daily.service
 export YUVI_DESKTOP_SUPERVISOR_BINDING=attach
+
+# Native Wayland does not currently provide reliable always-on-top/window-order
+# semantics to Tauri/GTK. Prefer the available XWayland backend for the desktop
+# shell only; Runtime/Supervisor remain unchanged. Respect an explicit override.
+if [ -z "${GDK_BACKEND:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ]; then
+  export GDK_BACKEND=x11
+fi
+
 exec "$root/yuvi-desktop"
