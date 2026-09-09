@@ -1,4 +1,12 @@
 export const zhCN: Readonly<Record<string, string>> = {
+  "Live2D ZIP": "Live2D ZIP",
+  "Import a Live2D / VTube Studio ZIP directly, or choose an extracted runtime model directory. Imported files are copied into YUVI durable storage.": "可直接导入 Live2D / VTube Studio ZIP，也可以选择已解压的运行时模型目录。导入文件会复制到 YUVI 的持久存储中。",
+  "ZIP selected: {0}. The model manifest will be detected automatically.": "已选择 ZIP：{0}。将自动检测模型清单。",
+  "Or import an extracted directory:": "或者导入已解压目录：",
+  "Choose a Live2D ZIP under 64 MiB.": "请选择小于 64 MiB 的 Live2D ZIP。",
+  "Unable to read model ZIP.": "无法读取模型 ZIP。",
+  "Reading model ZIP…": "正在读取模型 ZIP…",
+  "Model ZIP installed and selected. Companion will reload it automatically.": "模型 ZIP 已安装并选中，陪伴窗口会自动重新加载。",
   "Subtitle window": "字幕窗口",
   "Transparent text stays above other windows. Unlock to drag it, then lock for click-through.": "透明字幕会保持在其他窗口上方。解锁后可拖动，锁定后点击会穿透。",
   "Show subtitle": "显示字幕",
