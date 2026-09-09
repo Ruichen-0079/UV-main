@@ -178,7 +178,15 @@ export function ProductConfigurationPanel(props: {
             {primaryPerson && showVoices ? <button type="button" disabled={!voices.available || busy} onClick={() => startEnrollment(primaryPerson.id)}>{voiceProfilesFor(primaryPerson.id).length ? t("Add another voice") : t("Add my voice")}</button> : null}
           </div>
           {primaryPerson && evidenceLabel(primaryPerson.id) ? <p role="status">{evidenceLabel(primaryPerson.id)}</p> : null}
-          {primaryPerson && showVoices ? <p>{t("Voice: {0}", voiceProfilesFor(primaryPerson.id).length ? t("{0} enrolled", voiceProfilesFor(primaryPerson.id).length) : t("not enrolled"))}</p> : null}
+          {primaryPerson && showVoices ? <>
+            <p>{t("Voice: {0}", voiceProfilesFor(primaryPerson.id).length ? t("{0} enrolled", voiceProfilesFor(primaryPerson.id).length) : t("not enrolled"))}</p>
+            {voiceProfilesFor(primaryPerson.id).map(v => <div className="flex gap-2 flex-wrap items-center" key={v.id}>
+              <span>{t("Voice enrolled")}</span>
+              {v.sampleId ? <button type="button" onClick={() => void play(v.sampleId!)}>{t("Play sample")}</button> : null}
+              <button type="button" onClick={() => startEnrollment(primaryPerson.id, v.id)}>{t("Re-enroll")}</button>
+              <button type="button" onClick={() => void act(() => send(`/product/voices/${v.id}/binding`, undefined, "DELETE"), t("Voice binding removed."))}>{t("Remove voice binding")}</button>
+            </div>)}
+          </> : null}
         </form>
       </section>}
       {show("people") && <section className="yuvi-card grid gap-4">
