@@ -343,9 +343,11 @@ describe("Product AI Routing", () => {
 
   it("keeps the Product IA split and Developer Dashboard entry available", () => {
     const markup = renderToStaticMarkup(<ProductWebUI />);
-    expect(markup).toContain("Models &amp; Providers");
-    expect(markup).toContain("AI Routing");
-    expect(markup).toContain("Developer");
+    for (const label of ["Models", "People &amp; Memory", "Appearance", "Advanced settings", "Developer"]) {
+      expect(markup).toContain(label);
+    }
+    expect(markup).not.toContain("Models &amp; Providers");
+    expect(markup).not.toContain(">AI Routing<");
     expect(PRODUCT_PROVIDER_DEFINITIONS.map((provider) => provider.id)).toEqual([
       "deepseek",
       "openai-compatible",
@@ -357,10 +359,11 @@ describe("Product AI Routing", () => {
     ]);
   });
 
-  it("renders the product routing loading state without provider calls", () => {
+  it("keeps the legacy routing wrapper scoped to routes while data is loading", () => {
     const markup = renderToStaticMarkup(<ProductAIRouting />);
-    expect(markup).toContain("Provider → Model → Capability Route");
-    expect(markup).toContain("Loading configuration");
-    expect(markup).toContain("Connect Model to Chat");
+    expect(markup).toContain('aria-label="Product configuration"');
+    expect(markup).not.toContain("Provider → Model → Capability Route");
+    expect(markup).not.toContain("Add Provider");
+    expect(markup).not.toContain("My Profile");
   });
 });
