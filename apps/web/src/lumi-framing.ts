@@ -109,7 +109,11 @@ export const LUMI_PORTRAIT_MARGINS: LumiFramingMargins = {
  * visible character does not look narrower than the transparent window.
  */
 export const LUMI_PORTRAIT_HORIZONTAL_SCALE_BOOST = 1.1;
-export const LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX = 8;
+/**
+ * Portrait is a transparent desktop overlay: small calibrated side overscan is
+ * preferable to visible gutters between the character and the window edges.
+ */
+export const LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX = 20;
 
 /** Soft inset for full-body contain (still uniform). */
 export const LUMI_FULL_BODY_FIT = 0.92;
@@ -252,9 +256,11 @@ export function computePortraitHeadFit(input: LumiPortraitFitInput): LumiUniform
   const availableHeight = Math.max(1, viewportHeight - margins.top - margins.bottom);
 
   // Pixels per model unit — single uniform value.
-  // The calibrated head box is conservative relative to the visible portrait.
-  // Give width a bounded cover bias while height remains strictly head-safe.
-  const widthTarget = Math.min(
+  // A transparent desktop Companion should visually cover the full window
+  // width rather than preserve UI-style horizontal padding. The calibrated
+  // head box therefore targets the viewport plus a small fixed overscan.
+  // Vertical crown/chin safety remains the hard upper bound.
+  const widthTarget = Math.max(
     availableWidth * LUMI_PORTRAIT_HORIZONTAL_SCALE_BOOST,
     viewportWidth + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX * 2
   );
