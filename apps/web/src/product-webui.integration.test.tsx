@@ -94,7 +94,7 @@ describe("Product WebUI integration", () => {
     expect(readText(node)).toContain("Live2D controls");
     expect(readText(node)).toContain("Companion window controls");
 
-    await act(async () => click(button(node, "Home"));
+    await act(async () => click(button(node, "Home")));
     await act(async () => click(button(node, "Models")));
     expect(readText(node)).toContain("Configuration sections: models");
     expect(readText(node)).not.toContain("Configuration sections: people,voices");
