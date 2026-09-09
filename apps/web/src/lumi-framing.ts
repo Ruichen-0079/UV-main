@@ -103,6 +103,14 @@ export const LUMI_PORTRAIT_MARGINS: LumiFramingMargins = {
   bottom: 18
 };
 
+/**
+ * Portrait is a desktop presentation, not a strict contain preview.
+ * Keep vertical head safety, but allow a small horizontal cover bias so the
+ * visible character does not look narrower than the transparent window.
+ */
+export const LUMI_PORTRAIT_HORIZONTAL_SCALE_BOOST = 1.1;
+export const LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX = 8;
+
 /** Soft inset for full-body contain (still uniform). */
 export const LUMI_FULL_BODY_FIT = 0.92;
 
@@ -221,10 +229,11 @@ export type LumiPortraitFitInput = {
  * Portrait head-safe fit.
  *
  * Priority:
- * 1. Full configured head box stays inside the safe viewport.
+ * 1. Crown/chin stay inside the vertical safe viewport.
  * 2. Uniform scale only (no stretch).
- * 3. Maximize scale (fill width when height allows).
- * 4. Body may be cropped at the bottom.
+ * 3. Prefer slight horizontal cover over visible side gutters.
+ * 4. Cap side bleed so resizing cannot over-crop the calibrated head box.
+ * 5. Body may be cropped at the bottom.
  */
 export function computePortraitHeadFit(input: LumiPortraitFitInput): LumiUniformTransform {
   const viewportWidth = Math.max(1, input.viewportWidth);
@@ -243,7 +252,13 @@ export function computePortraitHeadFit(input: LumiPortraitFitInput): LumiUniform
   const availableHeight = Math.max(1, viewportHeight - margins.top - margins.bottom);
 
   // Pixels per model unit — single uniform value.
-  const scaleByWidth = availableWidth / headWidth;
+  // The calibrated head box is conservative relative to the visible portrait.
+  // Give width a bounded cover bias while height remains strictly head-safe.
+  const widthTarget = Math.min(
+    availableWidth * LUMI_PORTRAIT_HORIZONTAL_SCALE_BOOST,
+    viewportWidth + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX * 2
+  );
+  const scaleByWidth = widthTarget / headWidth;
   const scaleByHeight = availableHeight / headHeight;
   const uniformScale = Math.min(scaleByWidth, scaleByHeight);
 
