@@ -1,39 +1,122 @@
-# YUVI Runtime
+# YUVI
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-YUVI Runtime 是一个本地优先、事件驱动的 AI 伴侣运行时。项目受到 Project AIRI 的架构愿景启发，但本仓库为原创实现，不复制 AIRI 代码。中文术语以[统一术语表](docs/terminology.zh-CN.md)为准。
+**面向长期交互的本地优先个人 AI 伴侣。**
 
-YUVI 的目标不是做一个聊天页面，而是构建一个长期可演进的伴侣运行时：在稳定的 Runtime 边界后承载对话、记忆、主动行为、提供方认知、语音/视觉、虚拟形象呈现，以及后续的身份、关系与连续性系统。
+YUVI 将对话、语音、长期记忆、身份相关上下文、Live2D 表现与桌面存在整合为一个持续运行的 Companion 系统。
 
-## 当前状态
+YUVI 不追求成为功能最多的 AI 角色平台，也不把自己定位成通用电脑 Agent。它更关注一个更窄、也更长期的问题：**一个 AI 伴侣如何在长期个人使用中保持有用、可辨认，并且可靠地持续存在？**
 
-**结构债务收口已完成**。P4 的可靠性资产与第一版可用 P6 主动文本行为已经建立，结构拆分在严格保持行为不变的前提下完成。
+<!-- 在这里加入当前产品截图或短 Demo。 -->
 
-目前已经确定并保留的能力包括：
+## 当前版本
 
-- RuntimeOrchestrator 已从包入口中抽离，Runtime contract 与 canonical error 也有独立边界。
-- 会话持久化与 finalized-turn ingestion 已具备 durable lifecycle、幂等、retry/reconcile、崩溃恢复和 fail-closed 语义。
-- P6 主动文本支持严格的 `NO_OP` / `REQUEST_TEXT` 控制、assistant-only turn、取消竞态隔离、one-shot 幂等、fresh effect identity，并且不会伪造用户消息，也不会获得主动记忆写入权限。
-- Dashboard、Settings、Chat 与 Core 大型职责已经按小步结构重构拆分，没有借重构改变产品行为。
-- Core Runtime 测试已按语义岛完成机械拆分。R5A1–R5A4 全部完成，Runtime 测试拆分已完成；当前产品工作已解除阻塞，可以开始 P8。
+**YUVI v0.1.1** 是当前公开版本。
 
-下一项产品工作是 **P8：Who is Yuvi / identity / persona / relationship**。P8 必须基于可追溯证据解释身份与关系，而不是把隐式推断直接当作权威角色状态。后续伴侣架构见 [`docs/future/`](docs/future/)。
+- Linux x86-64 安装包：`yuvi-v0.1.1-linux-x64-installer.run`
+- Linux x86-64 Portable：`yuvi-v0.1.1-linux-x64-portable.tar.zst`
+- Release notes 与校验文件：https://github.com/Ruichen-0079/YUVI/releases/tag/v0.1.1
 
-## 开发基线
+Linux 是当前主要发布和验证目标。Windows 仍然是支持的开发与后续打包目标，但目前还没有与 Linux 对等的公开 release 路径。
 
-YUVI 当前采用 **Linux-first** 开发与生产验证策略。
+## YUVI 现在能做什么
 
-主要开发环境假设：
+### 对话与认知
 
-- Linux host
-- Node.js + pnpm
-- Docker Engine / Docker Compose
-- PostgreSQL + pgvector 作为当前已经验证的 durable persistence 主路径
+- 通过 YUVI Runtime 提供持久化文本对话。
+- 可配置 Chat、Reasoning、Embedding、STT、TTS 与 Vision 能力路由。
+- 支持 Provider fallback，同时避免 Runtime 行为绑定到某一家模型厂商。
+- 视觉能力采用显式调用，而不是持续监控桌面截图。
 
-Windows 仍然是支持目标和后续打包/翻译目标，但不再继续扩张复杂的 Windows 专用 PostgreSQL ownership/packaging 机制。产品行为稳定之前，平台特殊工程不能反过来主导 Runtime 架构。
+### 语音
 
-Linux 快速启动：
+- 支持语音识别与语音合成接入。
+- Linux release 内包含已打包的 Local STT 支持。
+- 提供面向个人使用的声音与说话人 profile 管理。
+- 声音匹配与 speaker diarization 仍属于实验能力，不能作为身份认证手段。
+
+### 记忆与人物
+
+- 持久化会话与长期记忆。
+- PostgreSQL + pgvector 是当前已经验证的 durable storage 主路径。
+- 人物与 profile 上下文以可追溯证据为基础，而不是把隐式推断直接当作人格事实。
+- 支持长期记忆检索、维护、过期与 supersession。
+
+### 桌面伴侣体验
+
+- Live2D 桌面呈现。
+- 直接导入用户提供的 VTube Studio ZIP 模型包。
+- 透明 Companion 与 Subtitle 桌面窗口。
+- 窗口位置、可见性、Always-on-Top、锁定与解锁控制。
+- 系统托盘控制。
+- 首次启动引导。
+- 英文与简体中文产品界面。
+
+### 可靠性
+
+YUVI 把长期运行可靠性当作产品能力，而不仅是内部实现细节。Runtime 已建立明确的生命周期所有权、持久化回合处理、幂等、retry/reconcile、崩溃恢复、取消隔离，以及面对不确定外部副作用时的 fail-closed 边界。
+
+## 产品方向
+
+YUVI 长期围绕五类问题组织：
+
+- **Character** —— 稳定、可辨认的身份，而不是一次性的 Prompt。
+- **Conversation** —— 自然的文本与语音交流。
+- **Memory** —— 由明确证据和归属支撑的长期个人上下文。
+- **Perception** —— 在真正需要时才获取环境信息。
+- **Runtime** —— 长期可靠地判断、执行并恢复。
+
+Live2D、字幕、语音与 WebUI 都是核心系统外部的表现面，不是新的行为权威来源。
+
+## 系统如何组合
+
+```text
+                       +------------------+
+                       |  Memory / People |
+                       +---------+--------+
+                                 |
+文本 / 语音 / 图像 ------>   YUVI Runtime   <------ Provider / Model
+                                 |
+                    +------------+------------+
+                    |            |            |
+                    v            v            v
+                Character    Perception    Actions
+                    |
+                    v
+                 桌面存在
+          Live2D · Voice · Subtitle
+```
+
+Runtime 拥有执行生命周期与 canonical state transition。Presentation 层不能绕过 Runtime 建立第二套执行权威。
+
+## Local-first 与隐私
+
+YUVI 是 **local-first**，但这并不等于所有能力都必须离线。
+
+Runtime 状态、本地配置与受支持的个人数据路径以用户可控为原则。用户仍可以为 Chat、Reasoning、STT、TTS、Vision 或 Embedding 配置云端 Provider；使用这些 Provider 时，相应请求数据会按照该 Provider 的策略发送到外部服务。
+
+当前 Vision 是显式、一次性的能力，不要求持续截图监控桌面。
+
+密钥只能存在于本地配置中，不应提交到仓库，也不应出现在日志、事件或错误负载中。
+
+## 开始使用
+
+### 使用 Linux 发布版
+
+下载 **v0.1.1**：
+
+https://github.com/Ruichen-0079/YUVI/releases/tag/v0.1.1
+
+当前 Linux x86-64 版本以 Debian 12 / glibc 2.36 为目标环境，并依赖系统 GTK/WebKitGTK 4.1 与 AppIndicator runtime。部分 Provider 密钥、模型与本地服务仍需要用户自行配置。
+
+Live2D Cubism Core 与专有角色资产不会随 YUVI 一起分发。
+
+### 从源码开发
+
+YUVI 当前采用 Linux-first 开发与接近生产环境的验证策略。
+
+主要依赖包括 Node.js、pnpm、用于开发基础设施的 Docker/Compose，以及作为 durable persistence 路径的 PostgreSQL + pgvector。
 
 ```bash
 pnpm install
@@ -43,173 +126,79 @@ cp .env.example .env
 
 开发地址：
 
-- Server: `http://localhost:6121`
-- Web UI: `http://localhost:5173`
-- WebSocket: `ws://localhost:6121/ws`
+- Server：`http://localhost:6121`
+- Web UI：`http://localhost:5173`
+- WebSocket：`ws://localhost:6121/ws`
 
-健康检查与停止：
-
-```bash
-./scripts/health.sh
-./scripts/stop.sh
-```
-
-Windows 脚本仍保留，用于需要时的兼容开发：
-
-```powershell
-.\scripts\dev.ps1
-.\scripts\health.ps1
-.\scripts\stop.ps1
-```
-
-平台细节见 [`docs/quickstart.zh-CN.md`](docs/quickstart.zh-CN.md) 与 [`docs/windows-development.md`](docs/windows-development.md)。
-
-## 仓库结构
-
-- `apps/server`：Fastify HTTP/WebSocket Runtime server 与 composition root。
-- `apps/web`：开发期 Dashboard，用于观察、调试和控制 Runtime。
-- `packages/protocol`：运行时事件类型和 Schema。
-- `packages/event-bus`：事件总线抽象与内存实现。
-- `packages/memory`：会话持久化、长期记忆、finalized-ingestion ledger、检索与维护边界。
-- `packages/prompt-builder`：提供方中立的提示词构建。
-- `packages/providers`：提供方接口、注册表、标准化错误与厂商适配。
-- `packages/core`：Runtime contract、canonical error、编排与行为集成。
-- `packages/config`：类型化运行时配置与敏感信息脱敏边界。
-- `docs/future`：结构收口后的伴侣架构规划，以 P8 为起点。
-
-## Runtime 核心原则
-
-### Runtime 拥有执行权
-
-Runtime 负责 effect lifecycle、执行准入、取消、持久化协调、provider 执行与 canonical publication。UI、Presentation 以及未来 Character 系统都不能绕过 Runtime 直接获得这些权限。
-
-### Memory 是证据，不是隐藏的人格真相
-
-原始会话持久化与长期记忆是两个不同层级。Memory 负责证据记录的存储、可用性、检索/排序、validity/status、retention 与 expiry。未来 P8 可以解释被授权的 Memory evidence，但 Memory 本身不是 relationship/persona 的权威状态。
-
-### Provider 可替换
-
-`packages/core` 依赖 provider contract，而不是厂商 SDK。DeepSeek、xAI、DashScope 等请求/响应适配属于 `packages/providers`。
-
-### 可靠性语义是资产
-
-结构重构不得削弱已经证明的 finalized-turn lifecycle、durable ingestion、semantic idempotency、retry/reconcile、崩溃恢复、cancellation fencing，以及 ambiguous external side effect protection。
-
-### 小语义 diff 优先
-
-如果“更漂亮的架构”和“更小的行为保持改动”发生冲突，优先选择更小的 semantic diff。结构清理不能偷偷变成产品重设计。
-
-## 主要 Runtime 流程
-
-普通用户回合：
-
-```text
-User input
-  -> Runtime admission / persistence
-  -> context + Memory retrieval
-  -> prompt construction
-  -> provider execution
-  -> assistant persistence / finalized-turn handling
-  -> runtime publication
-  -> optional presentation side effects
-```
-
-当前 P6 assistant-initiated 主动文本：
-
-```text
-ProactiveDecisionProvider
-  -> NO_OP
-     或
-  -> REQUEST_TEXT
-  -> assistant continuation
-  -> Runtime execution commit
-  -> assistant-only proactive stream
-```
-
-这条主动路径不会创建 synthetic user message，不会获得 Memory 写入权限，也不会获得独立的 TTS/voice 权限。
-
-## Provider Mapping
-
-当前默认方向：
-
-- Chat：DeepSeek
-- Reasoning：DeepSeek
-- TTS：xAI
-- STT：Alibaba Cloud DashScope
-- Vision：xAI
-- Embedding：可配置 OpenAI-compatible / provider chain
-
-Provider routing 支持优先级与 fallback。`packages/core` 不应直接 import DeepSeek、xAI 或 Alibaba concrete client。
-
-示例：
-
-```env
-CHAT_PROVIDER_CHAIN=deepseek,nvidia,local,mock
-REASONING_PROVIDER_CHAIN=deepseek,nvidia,local,mock
-EMBEDDING_PROVIDER_CHAIN=openai-compatible,nvidia,local,mock
-TTS_PROVIDER_CHAIN=xai,local,mock
-STT_PROVIDER_CHAIN=dashscope,local,mock
-VISION_PROVIDER_CHAIN=xai,nvidia,local,mock
-```
-
-密钥只允许存在于本地环境或安全配置来源中，不得提交到仓库，也不得泄漏到日志、事件或错误负载。
-
-## 持久化
-
-开发时可以使用 in-memory persistence，但 durable validation 使用 PostgreSQL：
-
-```env
-MEMORY_REPOSITORY=postgres
-DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
-```
-
-启动开发基础设施并执行 migration：
+常用命令：
 
 ```bash
-docker compose -f infra/docker-compose.yml up -d
-pnpm db:migrate
-pnpm smoke:postgres
-```
-
-PostgreSQL 目前承载已经证明的 durable Runtime 路径。Redis 与 NATS 仍是支持性/未来基础设施，不是把 Runtime 提前拆成重型微服务的理由。
-
-## 常用命令
-
-```bash
-pnpm install
 pnpm check
 pnpm test
 pnpm build
-pnpm db:migrate
 pnpm smoke
+pnpm db:migrate
 pnpm smoke:postgres
-pnpm memory:index:status
-pnpm memory:maintenance
 ```
 
-常用脚本：
+当前安装、开发与生命周期细节见 [快速开始](docs/quickstart.zh-CN.md) 与 [Linux daily use](docs/linux-daily-use.md)。
 
-- `./scripts/dev.sh`：主要 Linux 开发入口。
-- `./scripts/health.sh`：开发环境状态/健康检查。
-- `./scripts/stop.sh`：停止本地开发服务。
-- `pnpm db:migrate`：执行 PostgreSQL memory migration。
-- `pnpm db:reset:dev`：带确认保护的开发数据库重置。
-- `pnpm memory:embed:backfill`：为已有 PostgreSQL memories 补 embedding。
-- `pnpm memory:index:status`：检查 pgvector/ANN index 状态。
-- `pnpm memory:maintenance`：审计 expiry、staleness 与 supersession 维护状态。
+## 仓库结构
 
-## 路线图边界
+- `apps/server` —— Fastify HTTP/WebSocket Runtime server 与 composition root。
+- `apps/web` —— Product WebUI。
+- `apps/desktop` —— 适用场景下的桌面 presentation shell。
+- `packages/core` —— Runtime 编排与行为集成。
+- `packages/memory` —— 持久化会话与长期记忆边界。
+- `packages/providers` —— Provider contract、registry 与厂商适配。
+- `packages/prompt-builder` —— Provider-neutral prompt assembly。
+- `packages/protocol` —— Runtime event 与 schema。
+- `packages/config` —— 类型化配置与脱敏边界。
+- `docs/future` —— 未来架构与产品规划；不代表已经实现。
 
-下一阶段产品顺序：
+## 工程原则
+
+- **Runtime 拥有执行权。**
+- **Memory 是证据，不是隐藏的人格真相。**
+- **Provider 可替换。**
+- **可靠性语义属于产品资产。**
+- **优先选择小而保持行为的改动，而不是推测性的架构扩张。**
+
+这些原则的目的，是避免一个长期 Companion 演变成多套相互竞争的 lifecycle 与 state authority。
+
+## 研究方向
+
+YUVI 也希望成为长期人机交互研究的实验平台。
+
+目前感兴趣的方向包括：
+
+- **拟人化对话大模型** —— 让 Companion 的语言更自然、更有社会表达能力和人格一致性，而不只是更像通用 Assistant。
+- **个性化 Attention Policy** —— 学习一个长期存在的 Companion 什么时候应该观察、保持沉默或主动发起互动。
+- **长期身份与关系连续性** —— 在长期使用中保持一致、可解释的个人上下文。
+
+这些是未来研究方向，不代表 YUVI 已经解决了这些问题。
+
+## Roadmap
+
+近期仍然刻意以产品收口为主：
 
 ```text
-P8 identity / persona / relationship
-  -> temporal substrate
-  -> continuity and attention
-  -> Character ABI / Character Harness
-  -> Cognition and capabilities
-  -> embodied presentation / agency
-  -> Character post-training
+reliability
+  -> desktop closure
+  -> UX simplification
+  -> documentation
+  -> stable releases
+  -> deeper companion intelligence
 ```
 
-`docs/future/` 是未来规划权威，不代表其中系统已经实现。入口见 [`docs/future/README.md`](docs/future/README.md)。
+未来架构文档位于 [docs/future](docs/future/)。它们只代表规划，不代表当前实现状态。
+
+## Inspirations
+
+YUVI 最初部分受到 [Project AIRI](https://github.com/moeru-ai/airi) 以及更广泛的开源 AI VTuber / Companion 生态启发。
+
+YUVI 是独立实现，并逐渐形成了不同的侧重点：长期个人陪伴、连续性、本地优先运行，以及 Runtime 可靠性。
+
+## License
+
+YUVI 源代码与仓库内资产的许可条件以仓库 License 为准。第三方模型、Live2D Cubism 组件与角色资产可能受各自独立许可约束。
