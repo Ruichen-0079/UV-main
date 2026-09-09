@@ -7,16 +7,14 @@ import { App as DeveloperDashboard } from "./App.js";
 import { apiClient, type HealthResponse } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
 import { ProductCompactHealth, productCompactHealthItems } from "./product-compact-health.js";
-import { ProductAIRouting } from "./product-ai-routing.js";
 import { ProductModelsProviders } from "./product-models-providers.js";
 import { ProductLocalServices } from "./product-local-services.js";
 import { ProductMemorySettings } from "./product-memory-settings.js";
+import { ProductConfigurationPanel } from "./product-configuration.js";
 import { isTauriRuntime } from "./tauri-window.js";
-
-import { SettingsPage } from "./pages/settings-page.js";
 import { UserSettingsPanel } from "./user-settings-panel.js";
 
-type ProductView = "home" | "models" | "routing" | "settings" | "developer";
+type ProductView = "home" | "models" | "people" | "appearance" | "advanced" | "developer";
 
 function healthLabel(
   health: HealthResponse | null,
@@ -45,6 +43,7 @@ export function ProductWebUI(): JSX.Element {
   }
 
   const status = healthLabel(health.data, health.loading, health.error);
+  const tauri = isTauriRuntime();
 
   return (
     <div className="yuvi-shell yuvi-product-webui">
@@ -65,7 +64,7 @@ export function ProductWebUI(): JSX.Element {
           <span>{status}</span>
         </button>
         <div className="yuvi-topbar-actions">
-          {!isTauriRuntime() ? (
+          {!tauri ? (
             <>
               <a className="yuvi-product-action" href="/#/main" target="yuvi-main">{t("Chat & Voice Mode")}</a>
               <a className="yuvi-product-action" href="/#/companion" target="yuvi-companion">{t("Companion")}</a>
@@ -81,17 +80,22 @@ export function ProductWebUI(): JSX.Element {
             type="button"
             className={`yuvi-product-action ${view === "models" ? "is-active" : ""}`}
             onClick={() => setView("models")}
-          >{t("Models & Providers")}</button>
+          >{t("Models")}</button>
           <button
             type="button"
-            className={`yuvi-product-action ${view === "routing" ? "is-active" : ""}`}
-            onClick={() => setView("routing")}
-          >{t("AI Routing")}</button>
+            className={`yuvi-product-action ${view === "people" ? "is-active" : ""}`}
+            onClick={() => setView("people")}
+          >{t("People & Memory")}</button>
           <button
             type="button"
-            className={`yuvi-product-action ${view === "settings" ? "is-active" : ""}`}
-            onClick={() => setView("settings")}
-          >{t("Settings")}</button>
+            className={`yuvi-product-action ${view === "appearance" ? "is-active" : ""}`}
+            onClick={() => setView("appearance")}
+          >{t("Appearance")}</button>
+          <button
+            type="button"
+            className={`yuvi-product-action ${view === "advanced" ? "is-active" : ""}`}
+            onClick={() => setView("advanced")}
+          >{t("Advanced settings")}</button>
           <button
             type="button"
             className="yuvi-product-action"
@@ -112,7 +116,7 @@ export function ProductWebUI(): JSX.Element {
                   type="button"
                   className="yuvi-product-action is-active"
                   onClick={() => setView("models")}
-                >{t("Models & Providers")}</button>
+                >{t("Models")}</button>
                 <button
                   type="button"
                   className="yuvi-product-action"
@@ -146,22 +150,41 @@ export function ProductWebUI(): JSX.Element {
         ) : view === "models" ? (
           <div className="grid gap-4">
             <section className="yuvi-product-hero">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("Models & Providers")}</div>
-              <h1 className="m-0 text-2xl font-semibold">{t("Model connections")}</h1>
-              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Providers, models, routing, and onboarding share one saved configuration.")}</p>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("Models")}</div>
+              <h1 className="m-0 text-2xl font-semibold">{t("AI models")}</h1>
+              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Choose configured models here. Provider connections and route ordering are in Advanced settings.")}</p>
             </section>
             <ProductModelsProviders />
-            <ProductMemorySettings />
           </div>
-        ) : view === "settings" ? (
+        ) : view === "people" ? (
           <div className="grid gap-4">
+            <section className="yuvi-product-hero">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("People & Memory")}</div>
+              <h1 className="m-0 text-2xl font-semibold">{t("People, voices, and memory identity")}</h1>
+              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Manage who YUVI knows and the trusted voice bindings attached to those people.")}</p>
+            </section>
+            <ProductConfigurationPanel sections={["people", "voices"]} />
+          </div>
+        ) : view === "appearance" ? (
+          <div className="grid gap-4">
+            <section className="yuvi-product-hero">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("Appearance")}</div>
+              <h1 className="m-0 text-2xl font-semibold">{t("Appearance & desktop surfaces")}</h1>
+              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Choose the companion model and product language. Window behavior stays with the desktop surface.")}</p>
+            </section>
             <LocaleSelector />
-            <UserSettingsPanel />
             <ProductLive2DModels />
-            <SettingsPage />
           </div>
         ) : (
-          <ProductAIRouting />
+          <div className="grid gap-4">
+            <section className="yuvi-product-hero">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--yuvi-muted)]">{t("Advanced settings")}</div>
+              <h1 className="m-0 text-2xl font-semibold">{t("Advanced configuration")}</h1>
+              <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Providers, capability routes, local services, and operational settings live here.")}</p>
+            </section>
+            <ProductConfigurationPanel sections={["status", "providers", "routes", "proactive"]} />
+            {tauri ? <UserSettingsPanel /> : <ProductMemorySettings />}
+          </div>
         )}
       </main>
     </div>
