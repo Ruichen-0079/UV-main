@@ -36,7 +36,7 @@ export function ProductLive2DModels(): JSX.Element {
         throw new Error(t("Action completed, but refreshing installed models failed."));
       setMessage(t(success));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Model action failed.");
+      setError(modelActionError(e));
     } finally {
       busy.current = false;
       setPending(false);
@@ -188,8 +188,8 @@ export function ProductLive2DModels(): JSX.Element {
           void act(
             importModel,
             archive
-              ? "Model ZIP installed and selected. Companion will reload it automatically."
-              : "Model installed. Select it to load Companion."
+              ? t("Model ZIP installed and selected. Companion will reload it automatically.")
+              : t("Model installed. Select it to load Companion.")
           )
         }
       >
@@ -224,7 +224,7 @@ export function ProductLive2DModels(): JSX.Element {
         onClick={() =>
           void act(
             () => apiClient.selectLive2DModel(null),
-            "Companion model disabled. Installed models are retained."
+            t("Companion model disabled. Installed models are retained.")
           )
         }
       >
@@ -244,7 +244,7 @@ export function ProductLive2DModels(): JSX.Element {
                 onClick={() =>
                   void act(
                     () => apiClient.selectLive2DModel(m.id),
-                    "Selection saved. Companion will load the model; its status shows whether rendering succeeds."
+                    t("Selection saved. Companion will load the model; its status shows whether rendering succeeds.")
                   )
                 }
               >
