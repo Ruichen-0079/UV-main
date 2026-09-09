@@ -18,7 +18,10 @@ import {
   startWindowDragging,
   startWindowResizeDragging,
   controlCompanionWindow,
+  controlSubtitleWindow,
   controlWebUIWindow,
+  getSubtitlePresentationState,
+  setSubtitleLocked,
   type TauriResizeDirection
 } from "./tauri-window.js";
 
@@ -39,6 +42,32 @@ describe("controlCompanionWindow", () => {
     (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
     await controlCompanionWindow("reopen_companion");
     expect(invoke).toHaveBeenCalledWith("reopen_companion");
+  });
+});
+
+describe("subtitle presentation helpers", () => {
+  it("no-op/read defaults outside Tauri", async () => {
+    await expect(controlSubtitleWindow("show")).resolves.toBeUndefined();
+    await expect(getSubtitlePresentationState()).resolves.toEqual({ visible: false, locked: false });
+    await expect(setSubtitleLocked(true)).resolves.toEqual({ visible: false, locked: true });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("routes visibility and lock state through the desktop surface commands", async () => {
+    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
+    invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "get_subtitle_presentation_state") return { visible: true, locked: false };
+      if (command === "set_subtitle_locked") return { visible: true, locked: Boolean((args as { locked?: boolean })?.locked) };
+      return undefined;
+    });
+
+    await controlSubtitleWindow("show");
+    expect(invoke).toHaveBeenCalledWith("show_subtitle");
+    await controlSubtitleWindow("hide");
+    expect(invoke).toHaveBeenCalledWith("hide_subtitle");
+    await expect(getSubtitlePresentationState()).resolves.toEqual({ visible: true, locked: false });
+    await expect(setSubtitleLocked(true)).resolves.toEqual({ visible: true, locked: true });
+    expect(invoke).toHaveBeenCalledWith("set_subtitle_locked", { locked: true });
   });
 });
 
