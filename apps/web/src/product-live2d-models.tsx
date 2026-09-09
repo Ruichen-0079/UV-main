@@ -45,8 +45,7 @@ export function ProductLive2DModels(): JSX.Element {
   }
   async function importModel(): Promise<void> {
     if (archive) {
-      if (archive.size > 64 * 1024 * 1024)
-        throw new Error(t("Choose a Live2D ZIP under 64 MiB."));
+      if (archive.size > 64 * 1024 * 1024) throw new Error(t("Choose a Live2D ZIP under 64 MiB."));
       setProgress(0);
       const archiveBase64 = await readFileBase64(archive, t("Unable to read model ZIP."));
       setProgress(1);
@@ -77,139 +76,11 @@ export function ProductLive2DModels(): JSX.Element {
   }
   return (
     <section
-      className="yuvi-panel grid gap-3"
+      className="yuvi-card yuvi-model-library grid gap-3"
       aria-label={t("Live2D models")}
       aria-busy={pending || state.loading}
     >
       <h2>{t("Companion · Live2D")}</h2>
-      <p>{t("Intended default: 桃瀬ひより / Hiyori Momose · © Live2D Inc.")}</p>
-      <p>
-        {t(
-          "Import a Live2D / VTube Studio ZIP directly, or choose an extracted runtime model directory. Imported files are copied into YUVI durable storage."
-        )}
-      </p>
-      <div className="flex flex-wrap gap-3">
-        <a href="https://www.live2d.com/en/learn/sample/" target="_blank" rel="noreferrer">
-          {t("Official Live2D samples")}
-        </a>
-        <a
-          href="https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html"
-          target="_blank"
-          rel="noreferrer"
-        >
-          {t("Sample license")}
-        </a>
-        <a
-          href="https://www.live2d.com/eula/live2d-sample-model-terms_en.html"
-          target="_blank"
-          rel="noreferrer"
-        >
-          {t("Character terms and notices")}
-        </a>
-      </div>
-      <p>
-        {t(
-          "Hiyori binaries are not bundled. Review the official terms before downloading; Hiyori's character design must remain unchanged."
-        )}
-      </p>
-      <label>
-        {t("Live2D ZIP")}
-        <input
-          type="file"
-          accept=".zip,application/zip"
-          aria-label={t("Live2D ZIP")}
-          disabled={pending}
-          onChange={(e) => {
-            const next = e.target.files?.[0] ?? null;
-            setArchive(next);
-            setFiles([]);
-            setModel("");
-            setName(next?.name.replace(/\.zip$/iu, "") ?? "");
-            setError("");
-            setMessage("");
-          }}
-        />
-      </label>
-      {archive ? (
-        <p>{t("ZIP selected: {0}. The model manifest will be detected automatically.", archive.name)}</p>
-      ) : null}
-      <p className="text-xs text-[var(--yuvi-muted)]">{t("Or import an extracted directory:")}</p>
-      <label>
-        {t("Model directory")}
-        <input
-          type="file"
-          aria-label={t("Model directory")}
-          multiple
-          {...{ webkitdirectory: "" }}
-          disabled={pending}
-          onChange={(e) => {
-            const next = Array.from(e.target.files ?? []);
-            setArchive(null);
-            setFiles(next);
-            const first = next.find((f) => f.name.endsWith(".model3.json"));
-            setModel(first?.webkitRelativePath || first?.name || "");
-            setName(first?.name.replace(/\.model3\.json$/u, "") ?? "");
-            setError("");
-            setMessage("");
-          }}
-        />
-      </label>
-      {files.length > 0 && !manifests.length && (
-        <p role="alert">{t("No .model3.json found in this directory.")}</p>
-      )}
-      <label>
-        {t("Model manifest")}
-        <select
-          value={model}
-          disabled={pending || Boolean(archive) || !manifests.length}
-          onChange={(e) => setModel(e.target.value)}
-        >
-          <option value="">{t("Choose a model")}</option>
-          {manifests.map((f) => (
-            <option key={f.webkitRelativePath || f.name} value={f.webkitRelativePath || f.name}>
-              {f.webkitRelativePath || f.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        {t("Model name")}
-        <input
-          value={name}
-          maxLength={80}
-          disabled={pending}
-          onChange={(e) => setName(e.target.value)}
-        />
-      </label>
-      <button
-        type="button"
-        disabled={pending || (!archive && !model) || !name.trim()}
-        onClick={() =>
-          void act(
-            importModel,
-            archive
-              ? "Model ZIP installed and selected. Companion will reload it automatically."
-              : "Model installed. Select it to load Companion."
-          )
-        }
-      >
-        {t("Import model")}
-      </button>
-      {pending && (
-        <div role="status">
-          <span>
-            {progress === null
-              ? t("Installing or updating model…")
-              : archive
-                ? t("Reading model ZIP…")
-                : t("Reading model files…")}
-          </span>
-          <progress
-            aria-label={t("Model operation progress")}
-            {...(progress === null ? {} : { value: progress, max: 1 })}
-          />
-        </div>
-      )}
       {state.loading && <progress aria-label={t("Loading installed models")} />}
       {(error || state.error) && <p role="alert">{error || state.error}</p>}
       {message && <p role="status">{message}</p>}
@@ -280,6 +151,142 @@ export function ProductLive2DModels(): JSX.Element {
       >
         {t("Refresh models")}
       </button>
+      <details className="yuvi-advanced">
+        <summary>{t("Official sample and license")}</summary>
+        <p>{t("Intended default: 桃瀬ひより / Hiyori Momose · © Live2D Inc.")}</p>
+        <p>
+          {t(
+            "Import a Live2D / VTube Studio ZIP directly, or choose an extracted runtime model directory. Imported files are copied into YUVI durable storage."
+          )}
+        </p>
+        <div className="flex flex-wrap gap-3">
+          <a href="https://www.live2d.com/en/learn/sample/" target="_blank" rel="noreferrer">
+            {t("Official Live2D samples")}
+          </a>
+          <a
+            href="https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html"
+            target="_blank"
+            rel="noreferrer"
+          >
+            {t("Sample license")}
+          </a>
+          <a
+            href="https://www.live2d.com/eula/live2d-sample-model-terms_en.html"
+            target="_blank"
+            rel="noreferrer"
+          >
+            {t("Character terms and notices")}
+          </a>
+        </div>
+        <p>
+          {t(
+            "Hiyori binaries are not bundled. Review the official terms before downloading; Hiyori's character design must remain unchanged."
+          )}
+        </p>
+      </details>
+      <h3>{t("Import a character")}</h3>
+      <label>
+        {t("Live2D ZIP")}
+        <input
+          type="file"
+          accept=".zip,application/zip"
+          aria-label={t("Live2D ZIP")}
+          disabled={pending}
+          onChange={(e) => {
+            const next = e.target.files?.[0] ?? null;
+            setArchive(next);
+            setFiles([]);
+            setModel("");
+            setName(next?.name.replace(/\.zip$/iu, "") ?? "");
+            setError("");
+            setMessage("");
+          }}
+        />
+      </label>
+      {archive ? (
+        <p>
+          {t("ZIP selected: {0}. The model manifest will be detected automatically.", archive.name)}
+        </p>
+      ) : null}
+      <details className="yuvi-advanced">
+        <summary>{t("Or import an extracted directory:")}</summary>
+        <label>
+          {t("Model directory")}
+          <input
+            type="file"
+            aria-label={t("Model directory")}
+            multiple
+            {...{ webkitdirectory: "" }}
+            disabled={pending}
+            onChange={(e) => {
+              const next = Array.from(e.target.files ?? []);
+              setArchive(null);
+              setFiles(next);
+              const first = next.find((f) => f.name.endsWith(".model3.json"));
+              setModel(first?.webkitRelativePath || first?.name || "");
+              setName(first?.name.replace(/\.model3\.json$/u, "") ?? "");
+              setError("");
+              setMessage("");
+            }}
+          />
+        </label>
+        {files.length > 0 && !manifests.length && (
+          <p role="alert">{t("No .model3.json found in this directory.")}</p>
+        )}
+        <label>
+          {t("Model manifest")}
+          <select
+            value={model}
+            disabled={pending || Boolean(archive) || !manifests.length}
+            onChange={(e) => setModel(e.target.value)}
+          >
+            <option value="">{t("Choose a model")}</option>
+            {manifests.map((f) => (
+              <option key={f.webkitRelativePath || f.name} value={f.webkitRelativePath || f.name}>
+                {f.webkitRelativePath || f.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </details>
+      <label>
+        {t("Model name")}
+        <input
+          value={name}
+          maxLength={80}
+          disabled={pending}
+          onChange={(e) => setName(e.target.value)}
+        />
+      </label>
+      <button
+        type="button"
+        disabled={pending || (!archive && !model) || !name.trim()}
+        onClick={() =>
+          void act(
+            importModel,
+            archive
+              ? "Model ZIP installed and selected. Companion will reload it automatically."
+              : "Model installed. Select it to load Companion."
+          )
+        }
+      >
+        {t("Import model")}
+      </button>
+      {pending && (
+        <div role="status">
+          <span>
+            {progress === null
+              ? t("Installing or updating model…")
+              : archive
+                ? t("Reading model ZIP…")
+                : t("Reading model files…")}
+          </span>
+          <progress
+            aria-label={t("Model operation progress")}
+            {...(progress === null ? {} : { value: progress, max: 1 })}
+          />
+        </div>
+      )}
     </section>
   );
 }

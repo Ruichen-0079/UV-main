@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { productDestinations } from "./product-navigation.js";
 import { zhCN } from "./locale-zh-cn.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -33,6 +34,14 @@ function literalTranslationKeys(source: string): string[] {
 }
 
 describe("zh-CN normal product coverage", () => {
+  it("translates every navigation label and page description", () => {
+    for (const destination of productDestinations) {
+      for (const text of [destination.label, destination.description, destination.group]) {
+        if (text !== "YUVI") expect(zhCN[text], text).toBeTruthy();
+      }
+    }
+  });
+
   it("covers every literal t() key used by daily-use product surfaces", () => {
     const missing: string[] = [];
     for (const file of PRODUCT_SURFACES) {

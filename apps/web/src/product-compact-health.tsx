@@ -72,8 +72,11 @@ export function ProductCompactHealth(props: ProductCompactHealthProps): JSX.Elem
                 {t(item.summary)}
               </span>
             </div>
-            <p>{t(item.detail)}</p>
-            <small>{t(item.source)}</small>
+            <details>
+              <summary>{t("Status details")}</summary>
+              <p>{t(item.detail)}</p>
+              <small>{t(item.source)}</small>
+            </details>
           </article>
         ))}
       </div>
@@ -111,7 +114,7 @@ function runtimeHealthItem(
   }
 
   const serverStatus = input.health.server.status.trim().toLowerCase();
-  const gate = input.health.ok ? "passed" : "not passed";
+  const gate = input.health.ok ? t("passed") : t("not passed");
   if (serverStatus === "healthy") {
     return {
       id: "yuvi",
@@ -248,7 +251,14 @@ function voiceHealthItem(
     };
   }
   if (allNotReady) {
-    return { id: "voice", label: t("Voice"), tone: "warn", summary: "Not configured", detail, source };
+    return {
+      id: "voice",
+      label: t("Voice"),
+      tone: "warn",
+      summary: "Not configured",
+      detail,
+      source
+    };
   }
   if (allReady) {
     return {

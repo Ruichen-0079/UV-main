@@ -343,7 +343,7 @@ describe("Product AI Routing", () => {
 
   it("keeps the Product IA split and Developer Dashboard entry available", () => {
     const markup = renderToStaticMarkup(<ProductWebUI />);
-    for (const label of ["Models", "People &amp; Memory", "Appearance", "Advanced settings", "Developer"]) {
+    for (const label of ["AI &amp; connections", "People &amp; voices", "Companion", "System", "Memory"]) {
       expect(markup).toContain(label);
     }
     expect(markup).not.toContain("Models &amp; Providers");

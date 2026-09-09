@@ -190,6 +190,7 @@ function smokeEnv(roots) {
     DBUS_SESSION_BUS_ADDRESS: BUS.DBUS_SESSION_BUS_ADDRESS,
     XDG_RUNTIME_DIR: BUS.XDG_RUNTIME_DIR,
     YUVI_SUPERVISOR_MODE: "development",
+    YUVI_RUNTIME_ENV_DIR: roots.home,
     HOME: roots.home,
     XDG_DATA_HOME: roots.xdgData,
     XDG_CONFIG_HOME: roots.xdgConfig,
@@ -401,6 +402,41 @@ async function waitForTrayMenu(appPid, timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
   fail(`no StatusNotifierItem owned by the app pid ${appPid} appeared within ${timeoutMs}ms (${lastError})`, readLogs(rootsRef));
+}
+
+function registeredTrayItems() {
+  const result = busCallJson(
+    "org.kde.StatusNotifierWatcher",
+    "/StatusNotifierWatcher",
+    "org.freedesktop.DBus.Properties",
+    "Get",
+    ["ss", "org.kde.StatusNotifierWatcher", "RegisteredStatusNotifierItems"]
+  );
+  if (!result.ok) fail(`cannot inspect tray registration: ${result.error}`);
+  return unwrapDBusValue(result.value);
+}
+
+function assertTrayIcon(tray) {
+  const property = (name) => {
+    const result = busCallJson(
+      tray.busName,
+      tray.itemPath,
+      "org.freedesktop.DBus.Properties",
+      "Get",
+      ["ss", "org.kde.StatusNotifierItem", name]
+    );
+    if (!result.ok) fail(`tray ${name} unavailable: ${result.error}`);
+    return unwrapDBusValue(result.value);
+  };
+  if (property("Status") !== "Active") fail("tray item is not active");
+  const icon = property("IconName");
+  const pixmaps = icon ? [] : property("IconPixmap");
+  if (!icon && (!Array.isArray(pixmaps) || pixmaps.length === 0)) fail("tray has no icon");
+  if (typeof icon === "string" && icon.startsWith("/") && !fs.existsSync(icon))
+    fail("tray icon file is missing");
+  const own = registeredTrayItems().filter((entry) => entry.startsWith(`${tray.busName}/`));
+  if (own.length !== 1) fail(`expected one tray registration, got ${own.length}`);
+  info("tray is Active with an icon and exactly one registration");
 }
 
 /** Flatten a com.canonical.dbusmenu GetLayout JSON reply into label→id pairs. */
@@ -717,6 +753,7 @@ async function main() {
   info(`bootstrap barrier reached: supervisor pid ${marker.supervisorPid}, instance ${instanceId}`);
 
   const tray = await waitForTrayMenu(child.pid, SNI_FIND_TIMEOUT_MS);
+  assertTrayIcon(tray);
   const menu = getTrayMenuItems(tray);
   if (!menu.ok) fail(`tray menu unreadable: ${menu.error}`, readLogs(roots));
   const labels = menu.items.map((item) => item.label).sort();
@@ -782,10 +819,32 @@ async function main() {
   if (captionsBeforeSubtitle.includes(SUBTITLE_WINDOW_CAPTION)) {
     fail(`Subtitle window "${SUBTITLE_WINDOW_CAPTION}" was created before its first tray request`, readLogs(roots));
   }
+  // Seed only the isolated presentation file to exercise recovery from click-through.
+  const subtitleStatePath = path.join(
+    roots.xdgConfig,
+    "com.yuvi.companion",
+    "subtitle-window.json"
+  );
+  fs.mkdirSync(path.dirname(subtitleStatePath), { recursive: true });
+  fs.writeFileSync(subtitleStatePath, JSON.stringify({ x: null, y: null, locked: true }));
   info(`opening Subtitle through the tray ("${SUBTITLE_WINDOW_CAPTION}")`);
   const openedSubtitle = clickTrayMenuItem(tray, idByLabel["Show Subtitle"]);
   if (!openedSubtitle.ok) fail(`tray "Show Subtitle" click failed: ${openedSubtitle.error}`, readLogs(roots));
   waitForWindowCaption(child, SUBTITLE_WINDOW_CAPTION, true, CLOSE_OBSERVE_TIMEOUT_MS, "tray Show Subtitle");
+
+  const unlocked = clickTrayMenuItem(tray, idByLabel["Unlock Subtitle"]);
+  if (!unlocked.ok) fail(`Unlock Subtitle failed: ${unlocked.error}`, readLogs(roots));
+  const unlockDeadline = Date.now() + CLOSE_OBSERVE_TIMEOUT_MS;
+  while (
+    JSON.parse(fs.readFileSync(subtitleStatePath, "utf8")).locked &&
+    Date.now() < unlockDeadline
+  )
+    sleep(POLL_INTERVAL_MS);
+  if (JSON.parse(fs.readFileSync(subtitleStatePath, "utf8")).locked !== false)
+    fail("Unlock Subtitle did not clear the presentation lock");
+  if (readLogs(roots).includes("failed to unlock Subtitle"))
+    fail("Unlock Subtitle failed to apply to the live window", readLogs(roots));
+  info("Unlock Subtitle cleared the locked presentation state on the live window");
 
   const hiddenSubtitle = clickTrayMenuItem(tray, idByLabel["Hide Subtitle"]);
   if (!hiddenSubtitle.ok) fail(`tray "Hide Subtitle" click failed: ${hiddenSubtitle.error}`, readLogs(roots));
@@ -919,6 +978,15 @@ async function main() {
     );
   }
 
+  const trayGoneDeadline = Date.now() + OWNED_TREE_SETTLE_MS;
+  while (
+    registeredTrayItems().includes(`${tray.busName}${tray.itemPath}`) &&
+    Date.now() < trayGoneDeadline
+  )
+    sleep(POLL_INTERVAL_MS);
+  if (registeredTrayItems().includes(`${tray.busName}${tray.itemPath}`))
+    fail("stale tray registration survived Quit");
+  info("tray registration removed after Quit; no stale item");
   info("owner lifecycle verified: graceful exit(0), state cleaned, zero owned descendants");
   removeArtifacts();
   info("PASS: KDE Wayland close≠quit + tray Quit graceful shutdown validation");

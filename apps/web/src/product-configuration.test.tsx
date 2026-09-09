@@ -28,7 +28,7 @@ it("first-run controls work with no Chat; compatible route assignment saves then
   const update = mock.request.mock.calls.find(c => c[1]?.method === "PUT"); expect(JSON.parse(update![1].body).configuration.routes.chat).toEqual(["a"]);
   expect(mock.request.mock.calls.filter(c => c[0] === "/product/configuration" && !c[1]).length).toBeGreaterThan(1);
   expect(readText(node)).toContain("RESTART_REQUIRED"); expect(readText(node)).toContain("Effective: None"); expect(props(button).disabled).toBe(false);
-  const stt = nodes(node).find(n => n.attributes["aria-label"] === "STT route")!; expect(nodes(stt).filter(n => n.tagName === "OPTION").map(readText)).toEqual(["Select model"]);
+  const stt = nodes(node).find(n => n.attributes["aria-label"] === "Speech recognition route")!; expect(nodes(stt).filter(n => n.tagName === "OPTION").map(readText)).toEqual(["Select model"]);
 });
 it("sectioned presentation hides unrelated controls and loads voice state only when it becomes visible", async () => {
   mock.request.mockImplementation(async url => url === "/product/voices"
@@ -100,4 +100,37 @@ it("unrecognized voice review stays explicit and local without exposing acoustic
   await act(async () => props(nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Keep unrecognized")!).onClick());
   expect(mock.request).toHaveBeenCalledWith("/product/voice-samples/review/review", expect.objectContaining({ body: JSON.stringify({ leaveUnknown: true }) }));
   expect(readText(node)).not.toMatch(/similarity|cluster ID|embedding vector|voiceProfileId/);
+});
+
+it("keeps unsaved route choices while navigating the AI setup steps", async () => {
+  mock.request.mockResolvedValue(snapshot());
+  const node = await mount(["providers", "models", "routes"]);
+  const clickNamed = async (label: string) =>
+    act(async () =>
+      props(nodes(node).find((n) => n.tagName === "BUTTON" && readText(n) === label)!).onClick()
+    );
+  expect(readText(node)).not.toContain("Add compatible model");
+  await clickNamed("3. Model assignments");
+  const route = nodes(node).find((n) => n.attributes["aria-label"] === "Chat route")!;
+  await act(async () =>
+    props(nodes(route).find((n) => n.tagName === "SELECT")!).onChange({ target: { value: "a" } })
+  );
+  await clickNamed("1. Providers");
+  await clickNamed("3. Model assignments");
+  await clickNamed("Save routes & apply");
+  const update = mock.request.mock.calls.find((c) => c[1]?.method === "PUT");
+  expect(JSON.parse(update![1].body).configuration.routes.chat).toEqual(["a"]);
+});
+
+it("finishes failed loading and allows retry without leaving a blank settings page", async () => {
+  mock.request.mockRejectedValue(new Error("offline"));
+  const node = await mount(["models"]);
+  expect(readText(node)).toContain("Could not load settings");
+  expect(readText(node)).not.toContain("Loading configuration…");
+  mock.request.mockResolvedValue(snapshot());
+  await act(async () =>
+    props(nodes(node).find((n) => n.tagName === "BUTTON" && readText(n) === "Retry")!).onClick()
+  );
+  expect(readText(node)).toContain("Save model & apply");
+  expect(readText(node)).not.toContain("Could not load settings");
 });
