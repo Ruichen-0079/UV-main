@@ -26,7 +26,7 @@ try{
   await page.getByRole('button',{name:'Start Voice Mode',exact:true}).click();await page.getByRole('button',{name:'Stop Voice Mode',exact:true}).waitFor();assert.ok(await page.getByRole('button',{name:'Record voice',exact:true}).isDisabled());await page.getByRole('button',{name:'Stop Voice Mode',exact:true}).click();await page.getByRole('button',{name:'Start Voice Mode',exact:true}).waitFor();assert.ok(!await page.getByRole('button',{name:'Record voice',exact:true}).isDisabled());
  });
  const companion=await context.newPage();
- await step('Companion framing toggle changes renderer framing',async()=>{await companion.goto(base+'/#/companion');await companion.locator('[data-model-lifecycle="ready"]').waitFor({timeout:45000});await companion.getByRole('button',{name:'Full body',exact:true}).click();await companion.locator('[data-framing="full"]').waitFor();await companion.getByRole('button',{name:'Portrait',exact:true}).click();await companion.locator('[data-framing="half"]').waitFor();});
+ await step('Companion product surface stays avatar-only and resize-adaptive',async()=>{await companion.goto(base+'/#/companion');await companion.locator('[data-model-lifecycle="ready"]').waitFor({timeout:45000});assert.equal(await companion.getByRole('button',{name:'Full body',exact:true}).count(),0);assert.equal(await companion.getByRole('button',{name:'Portrait',exact:true}).count(),0);await companion.setViewportSize({width:360,height:540});await companion.locator('[data-framing="half"]').waitFor();});
  await companion.close();
 }finally{await browser.close();}
 if(rows.some(r=>r.status==='BROKEN'))process.exitCode=1;
