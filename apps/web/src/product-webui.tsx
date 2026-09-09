@@ -12,6 +12,7 @@ import { ProductMemorySettings } from "./product-memory-settings.js";
 import { ProductConfigurationPanel } from "./product-configuration.js";
 import { isTauriRuntime } from "./tauri-window.js";
 import { UserSettingsPanel } from "./user-settings-panel.js";
+import { CompanionAppearanceSettings } from "./companion-appearance-settings.js";
 
 type ProductView = "home" | "models" | "people" | "appearance" | "advanced" | "developer";
 
@@ -171,6 +172,7 @@ export function ProductWebUI(): JSX.Element {
               <p className="m-0 text-sm leading-6 text-[var(--yuvi-muted)]">{t("Choose the companion model and product language. Window behavior stays with the desktop surface.")}</p>
             </section>
             <LocaleSelector />
+            <CompanionAppearanceSettings />
             <ProductLive2DModels />
           </div>
         ) : (
