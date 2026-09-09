@@ -59,6 +59,14 @@ describe("desktop-runtime API base", () => {
     expect(() => setDesktopRuntimeHttpOverride("http://192.0.2.10:16121")).toThrow(/loopback/);
   });
 
+  it("clears a stale attach origin when rebinding fails validation", () => {
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    setDesktopRuntimeBinding("attach", "http://127.0.0.1:16121");
+    expect(resolveApiBaseUrl({})).toBe("http://127.0.0.1:16121");
+    expect(() => setDesktopRuntimeBinding("attach", "https://example.com:6121")).toThrow(/loopback/);
+    expect(() => resolveApiBaseUrl({})).toThrow(DesktopRuntimeBindingUnavailableError);
+  });
+
   it("prefers explicit VITE_API_BASE_URL", () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     expect(resolveApiBaseUrl({ VITE_API_BASE_URL: "http://127.0.0.1:6999/" })).toBe(
