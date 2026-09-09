@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { releaseVersion, releaseSource } from "./release-identity.mjs";
 import { REPO_ROOT, MEMORY_MIGRATIONS_DIR } from "./constants.mjs";
 import { buildLinuxWeb } from "./build-linux-web.mjs";
 import { bundleSupervisorCjs } from "./build-supervisor.mjs";
@@ -28,13 +29,6 @@ const CACHE = process.env.YUVI_NODE_CACHE?.trim()
   : path.join(REPO_ROOT, ".cache", "desktop-package");
 function sha256File(p) {
   return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
-}
-function checkoutSha() {
-  const envSha = process.env.GITHUB_SHA?.trim();
-  if (envSha && /^[0-9a-f]{40}$/i.test(envSha)) return envSha.toLowerCase();
-  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" })
-    .trim()
-    .toLowerCase();
 }
 async function fetchSha(archiveName) {
   const res = await fetch(`https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt`);
@@ -72,7 +66,10 @@ async function prepareLinuxNode(runtimeDir) {
   ensureDir(runtimeDir);
   const nodeDest = path.join(runtimeDir, "node");
   fs.copyFileSync(nodeSrc, nodeDest);
-  fs.copyFileSync(path.join(extractRoot, `node-v${NODE_VERSION}-linux-x64`, "LICENSE"), path.join(runtimeDir, "Node.LICENSE.txt"));
+  fs.copyFileSync(
+    path.join(extractRoot, `node-v${NODE_VERSION}-linux-x64`, "LICENSE"),
+    path.join(runtimeDir, "Node.LICENSE.txt")
+  );
   fs.chmodSync(nodeDest, 0o755);
   return nodeDest;
 }
@@ -87,6 +84,8 @@ function copyTreeFiltered(src, dest, skipNames) {
   }
 }
 export async function prepareLinuxDailyPackage() {
+  const sha = releaseSource();
+  const version = releaseVersion();
   console.info("[linux-daily] prepare start");
   const out = LINUX_BUILD_ROOT;
   fs.rmSync(out, { recursive: true, force: true });
@@ -130,8 +129,20 @@ export async function prepareLinuxDailyPackage() {
   const configuredDesktopBinary = process.env.YUVI_LINUX_DESKTOP_BINARY?.trim();
   const desktopBinarySource = configuredDesktopBinary
     ? path.resolve(configuredDesktopBinary)
-    : path.join(REPO_ROOT, "apps", "desktop", "src-tauri", "target", "release", "yuvi-desktop");
+    : path.join(REPO_ROOT, "build/desktop/debian-target/release/yuvi-desktop");
   assertFile(desktopBinarySource, "Linux Tauri desktop shell");
+  const provenance = JSON.parse(fs.readFileSync(desktopBinarySource + ".provenance.json", "utf8"));
+  if (
+    provenance.checkoutSha !== sha ||
+    provenance.version !== version ||
+    provenance.baseline !== "Debian 12 / glibc 2.36" ||
+    provenance.sha256 !== sha256File(desktopBinarySource)
+  )
+    throw new Error("Desktop build provenance does not match the release source/binary.");
+  fs.copyFileSync(
+    desktopBinarySource + ".provenance.json",
+    path.join(desktopDir, "build-provenance.json")
+  );
   const desktopMagic = fs.readFileSync(desktopBinarySource).subarray(0, 4);
   if (!desktopMagic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])))
     throw new Error("Linux Tauri desktop shell must be an ELF executable");
@@ -142,6 +153,11 @@ export async function prepareLinuxDailyPackage() {
     path.join(desktopDir, "yuvi-desktop-launcher")
   );
   fs.chmodSync(path.join(desktopDir, "yuvi-desktop-launcher"), 0o755);
+
+  fs.copyFileSync(
+    path.join(REPO_ROOT, "apps/desktop/src-tauri/icons/128x128@2x.png"),
+    path.join(desktopDir, "yuvi.png")
+  );
 
   const localSttDir = path.join(out, "local-stt");
   buildPackagedLocalStt({
@@ -155,12 +171,12 @@ export async function prepareLinuxDailyPackage() {
     path.join(localSttDir, "THIRD_PARTY_NOTICES.md"),
     path.join(out, "THIRD_PARTY_NOTICES.local-stt.md")
   );
-  const sha = checkoutSha();
   writeJson(path.join(out, "install-manifest.json"), {
     schemaVersion: 1,
     kind: "yuvi-linux-daily-packaged",
     platform: LINUX_TRIPLE,
     checkoutSha: sha,
+    version,
     nodeVersion: NODE_VERSION,
     components: [
       "supervisor.cjs",
@@ -180,9 +196,15 @@ export async function prepareLinuxDailyPackage() {
     path.join(REPO_ROOT, "scripts", "desktop-package", "install-linux-daily.mjs"),
     path.join(out, "install-linux-daily.mjs")
   );
-  fs.copyFileSync(path.join(REPO_ROOT, "scripts/desktop-package/yuvi-linux"), path.join(out, "yuvi"));
+  fs.copyFileSync(
+    path.join(REPO_ROOT, "scripts/desktop-package/yuvi-linux"),
+    path.join(out, "yuvi")
+  );
   fs.chmodSync(path.join(out, "yuvi"), 0o755);
-  fs.copyFileSync(path.join(REPO_ROOT, "scripts/desktop-package/linux-launcher.mjs"), path.join(out, "launcher.mjs"));
+  fs.copyFileSync(
+    path.join(REPO_ROOT, "scripts/desktop-package/linux-launcher.mjs"),
+    path.join(out, "launcher.mjs")
+  );
   console.info("[linux-daily] prepared", out);
   return { outRoot: out, checkoutSha: sha };
 }

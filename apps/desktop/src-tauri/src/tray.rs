@@ -106,10 +106,7 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
       &quit,
     ],
   )?;
-  let icon = app
-    .default_window_icon()
-    .cloned()
-    .ok_or_else(|| tauri::Error::AssetNotFound("tray icon".into()))?;
+  let icon = tauri::include_image!("icons/tray-32.png");
 
   TrayIconBuilder::with_id(TRAY_ID)
     .icon(icon)

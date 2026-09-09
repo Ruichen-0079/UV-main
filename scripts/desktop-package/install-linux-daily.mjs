@@ -25,7 +25,8 @@ for (const f of [
   localStt,
   localSttManifest,
   desktopShell,
-  desktopLauncher
+  desktopLauncher,
+  path.join(resourceRoot, "desktop", "yuvi.png")
 ]) {
   if (!fs.existsSync(f)) throw new Error("Missing packaged resource: " + f);
 }
@@ -108,7 +109,7 @@ fs.writeFileSync(
 );
 fs.writeFileSync(
   path.join(applications, "yuvi-daily.desktop"),
-  `[Desktop Entry]\nType=Application\nName=YUVI\nComment=Open the YUVI desktop shell\nExec=${desktopExecArg(desktopLauncher)}\nTerminal=false\nCategories=Utility;\n`,
+  `[Desktop Entry]\nType=Application\nName=YUVI\nComment=Open the YUVI desktop shell\nExec=${desktopExecArg(desktopLauncher)}\nIcon=${path.join(resourceRoot, "desktop", "yuvi.png")}\nStartupWMClass=yuvi-desktop\nTerminal=false\nCategories=Utility;\n`,
   { mode: 0o644 }
 );
 for (const args of [
