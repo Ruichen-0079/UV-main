@@ -1,4 +1,10 @@
 export const zhCN: Readonly<Record<string, string>> = {
+  "Companion window": "陪伴窗口",
+  "Always on top": "始终置顶",
+  "The transparent Live2D window remembers its position and size automatically.": "透明 Live2D 窗口会自动记住位置和大小。",
+  "Save window setting": "保存窗口设置",
+  "Companion window setting saved.": "陪伴窗口设置已保存。",
+  "Unable to save Companion window setting.": "无法保存陪伴窗口设置。",
   "Delete voice": "删除声纹",
   "Voice deleted.": "声纹已删除。",
   "Identity scope is managed from People & Memory. Legacy subject and persona values are retained for compatibility and are not edited here.": "身份范围由“人物与记忆”管理。旧版用户与角色标识仅为兼容保留，不在此编辑。",
