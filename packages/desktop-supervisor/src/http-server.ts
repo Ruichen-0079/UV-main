@@ -124,7 +124,8 @@ async function handle(
           instanceId: snap.instanceId,
           shuttingDown: snap.shuttingDown,
           services: snap.services,
-          updatedAt: snap.updatedAt
+          updatedAt: snap.updatedAt,
+          localSttControl: snap.localSttControl
         });
       }
       return sendJson(res, 200, snap);
