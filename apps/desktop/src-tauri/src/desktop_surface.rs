@@ -101,18 +101,24 @@ const COMPANION_GEOMETRY_FILE: &str = "companion-window.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct CompanionWindowGeometry {
-  x: i32,
-  y: i32,
+  x: Option<i32>,
+  y: Option<i32>,
   width: u32,
   height: u32,
 }
 
 impl CompanionWindowGeometry {
   fn is_valid(self) -> bool {
+    let position_valid = match (self.x, self.y) {
+      (Some(x), Some(y)) => {
+        (-100_000..=100_000).contains(&x) && (-100_000..=100_000).contains(&y)
+      }
+      (None, None) => true,
+      _ => false,
+    };
     (320..=16_384).contains(&self.width)
       && (480..=16_384).contains(&self.height)
-      && (-100_000..=100_000).contains(&self.x)
-      && (-100_000..=100_000).contains(&self.y)
+      && position_valid
   }
 }
 
@@ -152,7 +158,9 @@ fn restore_companion_window_geometry(app: &AppHandle, window: &tauri::WebviewWin
     return;
   };
   let _ = window.set_size(PhysicalSize::new(geometry.width, geometry.height));
-  let _ = window.set_position(PhysicalPosition::new(geometry.x, geometry.y));
+  if let (Some(x), Some(y)) = (geometry.x, geometry.y) {
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+  }
 }
 
 fn build_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
@@ -349,17 +357,16 @@ impl DesktopSurfaceManager {
     let Ok(size) = window.inner_size() else {
       return;
     };
-    let Ok(position) = window.outer_position() else {
-      return;
-    };
-    let geometry = CompanionWindowGeometry {
-      x: position.x,
-      y: position.y,
-      width: size.width,
-      height: size.height,
-    };
     let Ok(path) = companion_geometry_path(window.app_handle()) else {
       return;
+    };
+    let previous = read_companion_window_geometry(&path);
+    let position = window.outer_position().ok();
+    let geometry = CompanionWindowGeometry {
+      x: position.map(|value| value.x).or_else(|| previous.and_then(|value| value.x)),
+      y: position.map(|value| value.y).or_else(|| previous.and_then(|value| value.y)),
+      width: size.width,
+      height: size.height,
     };
     if let Err(error) = write_companion_window_geometry(&path, geometry) {
       eprintln!("[yuvi-desktop] companion geometry persistence skipped: {error}");
@@ -437,15 +444,21 @@ mod tests {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("companion-window.json");
     let geometry = CompanionWindowGeometry {
-      x: 120,
-      y: 80,
+      x: Some(120),
+      y: Some(80),
       width: 640,
       height: 900,
     };
     write_companion_window_geometry(&path, geometry).expect("write geometry");
     assert_eq!(read_companion_window_geometry(&path), Some(geometry));
 
-    fs::write(&path, r#"{"x":0,"y":0,"width":10,"height":10}"#).expect("write invalid");
+    fs::write(&path, r#"{"x":null,"y":null,"width":640,"height":900}"#).expect("write size-only");
+    assert_eq!(
+      read_companion_window_geometry(&path),
+      Some(CompanionWindowGeometry { x: None, y: None, width: 640, height: 900 })
+    );
+
+    fs::write(&path, r#"{"x":0,"y":null,"width":640,"height":900}"#).expect("write partial position");
     assert_eq!(read_companion_window_geometry(&path), None);
   }
 
