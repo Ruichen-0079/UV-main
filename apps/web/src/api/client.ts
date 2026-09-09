@@ -1594,7 +1594,7 @@ export const apiClient = {
   },
 
   createDashboardWebSocket(): WebSocket {
-    return new WebSocket(getWebSocketUrl("/ws?dashboard=true"));
+    return new WebSocket(resolveWebSocketUrl("/ws?dashboard=true"));
   },
 
   async postEmbodiedPresentationOutcome(report: EmbodiedPresentationOutcomeReport): Promise<void> {
@@ -1969,7 +1969,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function getWebSocketUrl(path: string): string {
+export function resolveWebSocketUrl(path: string): string {
   if (explicitWebSocketBaseUrl) {
     return `${explicitWebSocketBaseUrl.replace(/\/$/, "")}${path}`;
   }
@@ -1979,13 +1979,14 @@ function getWebSocketUrl(path: string): string {
     return `${base.replace(/^http/, "ws").replace(/\/$/, "")}${path}`;
   }
 
-  // Browser/dev behind Vite proxy: prefer same-host WS via Runtime port.
+  // Browser product surfaces use the WebUI's own origin. Development Vite and
+  // packaged static WebUI each proxy /ws to the Runtime selected for that
+  // product instance, so there is no well-known-port escape hatch here.
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const host =
-    window.location.hostname === "tauri.localhost" || window.location.hostname === "localhost"
-      ? "127.0.0.1"
-      : window.location.hostname || "127.0.0.1";
-  return `${protocol}//${host}:6121${path}`;
+  if (!window.location.host) {
+    throw new Error("Browser WebSocket origin is unavailable.");
+  }
+  return `${protocol}//${window.location.host}${path}`;
 }
 
 export async function productSample(id: string): Promise<Blob> {
