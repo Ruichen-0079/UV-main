@@ -1,4 +1,4 @@
-"""Build the Windows x64 local STT sidecar as a PyInstaller onedir artifact."""
+"""Build the local STT sidecar as a PyInstaller onedir artifact (Windows or Linux x64)."""
 
 from __future__ import annotations
 
@@ -16,18 +16,22 @@ from typing import Any
 PYINSTALLER_VERSION = "6.13.0"
 SHERPA_ONNX_VERSION = "1.13.6"
 NUMPY_VERSION = "2.3.2"
-MANIFEST = {
-    "schemaVersion": 1,
-    "protocolVersion": 1,
-    "platform": "win32",
-    "arch": "x64",
-    "executable": "yuvi-local-stt.exe",
-    "modelDirectory": "models",
-    "modelManifest": "models.manifest.json",
-    "healthPath": "/health",
-    "defaultHost": "127.0.0.1",
-    "defaultPort": 9876,
-}
+
+
+def packaged_manifest() -> dict[str, Any]:
+    linux = sys.platform.startswith("linux")
+    return {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "platform": "linux" if linux else "win32",
+        "arch": "x64",
+        "executable": "yuvi-local-stt" if linux else "yuvi-local-stt.exe",
+        "modelDirectory": "models",
+        "modelManifest": "models.manifest.json",
+        "healthPath": "/health",
+        "defaultHost": "127.0.0.1",
+        "defaultPort": 9876,
+    }
 
 
 class BuildError(RuntimeError):
@@ -49,7 +53,8 @@ def resolve_layout(script_path: Path | None = None) -> BuildLayout:
     service_root = packaging_dir.parent
     repo_root = service_root.parent.parent
     build_root = repo_root / "build"
-    dist_root = build_root / "desktop" / "win32-x64"
+    triple = "linux-x64" if sys.platform.startswith("linux") else "win32-x64"
+    dist_root = build_root / "desktop" / triple
     return BuildLayout(
         repo_root=repo_root,
         service_root=service_root,
@@ -96,12 +101,17 @@ def _distribution_version(name: str) -> str:
 
 
 def validate_build_environment() -> dict[str, str]:
-    if sys.platform != "win32":
-        raise BuildError("Local STT packaged build requires Windows.")
+    linux = sys.platform.startswith("linux")
+    if sys.platform != "win32" and not linux:
+        raise BuildError("Local STT packaged build requires Windows or Linux.")
     if platform.architecture()[0] != "64bit" or struct.calcsize("P") != 8:
         raise BuildError("Local STT packaged build requires a 64-bit Python process.")
-    if platform.machine().upper() not in {"AMD64", "X86_64"}:
-        raise BuildError("Local STT packaged build requires Windows x64 (AMD64).")
+    if platform.machine().upper() not in {"AMD64", "X86_64", "X64"}:
+        raise BuildError(
+            "Local STT packaged build requires Linux x64."
+            if linux
+            else "Local STT packaged build requires Windows x64 (AMD64)."
+        )
     if sys.version_info[:2] != (3, 11):
         raise BuildError("Local STT packaged build requires Python 3.11.x.")
 
@@ -131,7 +141,9 @@ def validate_build_environment() -> dict[str, str]:
 
 def _write_manifest(output_dir: Path) -> Path:
     manifest_path = output_dir / "local-stt-manifest.json"
-    manifest_path.write_text(json.dumps(MANIFEST, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(packaged_manifest(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     return manifest_path
 
 
@@ -140,17 +152,18 @@ def _validate_manifest(manifest_path: Path) -> None:
         actual = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BuildError("Generated local STT manifest is unreadable.") from exc
-    if actual != MANIFEST:
+    if actual != packaged_manifest():
         raise BuildError("Generated local STT manifest does not match the fixed schema.")
 
 
 def _validate_artifact(layout: BuildLayout) -> dict[str, int]:
     output_dir = layout.output_dir
-    executable = output_dir / "yuvi-local-stt.exe"
+    executable_name = packaged_manifest()["executable"]
+    executable = output_dir / executable_name
     internal = output_dir / "_internal"
     manifest = output_dir / "local-stt-manifest.json"
     if not executable.is_file() or executable.stat().st_size <= 0:
-        raise BuildError("yuvi-local-stt.exe is missing or empty.")
+        raise BuildError(f"{executable_name} is missing or empty.")
     if not internal.is_dir() or not any(internal.iterdir()):
         raise BuildError("PyInstaller _internal directory is missing or empty.")
     if not manifest.is_file():
@@ -216,11 +229,14 @@ def build() -> dict[str, Any]:
         else:
             os.environ["YUVI_LOCAL_STT_SPEC_DIR"] = previous_spec_dir
     manifest_path = _write_manifest(layout.output_dir)
+    executable_path = layout.output_dir / packaged_manifest()["executable"]
+    if executable_path.is_file() and sys.platform.startswith("linux"):
+        executable_path.chmod(0o755)
     artifact = _validate_artifact(layout)
     return {
         "environment": environment,
         "output_dir": str(layout.output_dir),
-        "executable": str(layout.output_dir / "yuvi-local-stt.exe"),
+        "executable": str(layout.output_dir / packaged_manifest()["executable"]),
         "manifest": str(manifest_path),
         **artifact,
     }

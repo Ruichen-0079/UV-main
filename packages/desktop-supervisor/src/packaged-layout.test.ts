@@ -268,12 +268,76 @@ describe("packaged supervisor layout", () => {
       expect(cfg.autostartTts).toBe(true);
       expect(cfg.autostartLocalStt).toBe(true);
       expect(cfg.ttsWrapperStart?.file).toBe("/usr/bin/python3");
-      expect(cfg.localSttStart?.file).toBe("/usr/bin/python3");
+      expect(cfg.localSttStart?.file).toBe(
+        path.join(tree.resourceRoot, "local-stt", "yuvi-local-stt.exe")
+      );
+      expect(cfg.localSttStart?.env["YUVI_LOCAL_STT_PACKAGED"]).toBe("1");
       expect(cfg.ttsWrapperStart?.cwd).toBe(tree.resourceRoot);
     } finally {
       if (prev === undefined) delete process.env["YUVI_RUNTIME_ENV_DIR"];
       else process.env["YUVI_RUNTIME_ENV_DIR"] = prev;
     }
+  });
+
+  it("external sidecars without a packaged Local STT artifact keep the start command", () => {
+    const tree = makePackagedResourceTree();
+    fs.rmSync(path.join(tree.resourceRoot, "local-stt"), { recursive: true, force: true });
+    const cfg = loadPackagedSupervisorConfig({
+      resourceRoot: tree.resourceRoot,
+      dataRoot: tree.dataRoot,
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: tree.mem0ManifestPath,
+      env: {
+        YUVI_PACKAGED_EXTERNAL_SIDECARS: "1",
+        YUVI_LOCAL_STT_START_COMMAND: "/usr/bin/python3 services/local-stt/server.py"
+      }
+    });
+    expect(cfg.localSttStart?.file).toBe("/usr/bin/python3");
+    expect(cfg.autostartLocalStt).toBe(false);
+  });
+
+  it("Linux packaged Local STT derives the sidecar without YUVI_LOCAL_STT_START_COMMAND", () => {
+    const tree = makePackagedResourceTree();
+    const localSttDir = path.join(tree.resourceRoot, "local-stt");
+    fs.rmSync(path.join(localSttDir, "yuvi-local-stt.exe"));
+    fs.writeFileSync(path.join(localSttDir, "yuvi-local-stt"), "ELF");
+    fs.writeFileSync(
+      path.join(localSttDir, "local-stt-manifest.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        protocolVersion: 1,
+        platform: "linux",
+        arch: "x64",
+        executable: "yuvi-local-stt",
+        modelDirectory: "models",
+        modelManifest: "models.manifest.json",
+        healthPath: "/health",
+        defaultHost: "127.0.0.1",
+        defaultPort: 9876
+      })
+    );
+    const cfg = loadPackagedSupervisorConfig({
+      resourceRoot: tree.resourceRoot,
+      dataRoot: tree.dataRoot,
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: tree.mem0ManifestPath,
+      env: { YUVI_PACKAGED_EXTERNAL_SIDECARS: "1" }
+    });
+    expect(cfg.localSttStart?.file).toBe(path.join(localSttDir, "yuvi-local-stt"));
+    expect(cfg.localSttStart?.args).toContain("--yuvi-local-stt");
+    expect(cfg.localSttStart?.env["YUVI_STT_SPEAKER_DIR"]).toBe(
+      path.join(tree.dataRoot, "local-stt", "speakers")
+    );
+    expect(cfg.autostartLocalStt).toBe(false);
+    const autostart = loadPackagedSupervisorConfig({
+      resourceRoot: tree.resourceRoot,
+      dataRoot: tree.dataRoot,
+      runtimeManifestPath: tree.manifestPath,
+      mem0ManifestPath: tree.mem0ManifestPath,
+      env: { YUVI_PACKAGED_EXTERNAL_SIDECARS: "1", YUVI_AUTOSTART_LOCAL_STT: "1" }
+    });
+    expect(autostart.autostartLocalStt).toBe(true);
+    expect(autostart.localSttStart?.file).toBe(path.join(localSttDir, "yuvi-local-stt"));
   });
 
   it("paths with spaces work for packaged runtime start", () => {
@@ -587,7 +651,9 @@ describe("packaged supervisor layout", () => {
       expect(cfg.localSttStart?.env["YUVI_STT_SPEAKER_DIR"]).toBe(
         path.join(tree.dataRoot, "local-stt", "speakers")
       );
-      expect(cfg.localSttStart?.args).toContain(path.join(tree.resourceRoot, "local-stt", "models"));
+      expect(cfg.localSttStart?.args).toContain(
+        path.join(tree.resourceRoot, "local-stt", "models")
+      );
       // Speaker profiles (durable data) are never under the model resource tree.
       expect(cfg.localSttStart?.env["YUVI_STT_SPEAKER_DIR"]?.startsWith(tree.resourceRoot)).toBe(
         false

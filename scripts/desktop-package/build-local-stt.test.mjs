@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  LINUX_LOCAL_STT_MANIFEST,
   LOCAL_STT_MANIFEST,
   LOCAL_STT_NUMPY_VERSION,
   LOCAL_STT_PYINSTALLER_VERSION,
   LOCAL_STT_VERSION,
+  localSttManifestFor,
   validateLocalSttPython
 } from "./build-local-stt.mjs";
+import fs from "node:fs";
 
 const probe = (overrides = {}) => ({
   status: 0,
@@ -46,6 +49,43 @@ test("local STT package validates the pinned Windows Python environment", () => 
     { spawnSyncImpl: () => probe() }
   );
   assert.equal(result.platform, "win32");
+});
+
+test("linux local STT package manifest is relative and has no .exe suffix", () => {
+  assert.deepEqual(localSttManifestFor("linux"), LINUX_LOCAL_STT_MANIFEST);
+  assert.equal(LINUX_LOCAL_STT_MANIFEST.executable, "yuvi-local-stt");
+  assert.equal(LINUX_LOCAL_STT_MANIFEST.executable.includes("."), false);
+  assert.equal(LINUX_LOCAL_STT_MANIFEST.modelDirectory.includes(".."), false);
+});
+
+test("local STT package validates the pinned Linux Python environment", () => {
+  const result = validateLocalSttPython(
+    { file: "python3", prefixArgs: [] },
+    {
+      spawnSyncImpl: () => probe({ platform: "linux", machine: "x86_64" }),
+      targetPlatform: "linux"
+    }
+  );
+  assert.equal(result.platform, "linux");
+});
+
+test("SenseVoice packaged license is not Apache-2.0", () => {
+  const manifest = JSON.parse(
+    fs.readFileSync(
+      new URL("../../services/local-stt/models.manifest.json", import.meta.url),
+      "utf8"
+    )
+  );
+  const sense = manifest.models.find((model) => model.role === "asr");
+  assert.equal(sense.license, "FunASR-Model-License-v1.1");
+  assert.notEqual(sense.license, "Apache-2.0");
+  assert.match(sense.licenseUrl, /FunASR/);
+  const notices = fs.readFileSync(
+    new URL("../../services/local-stt/THIRD_PARTY_NOTICES.md", import.meta.url),
+    "utf8"
+  );
+  assert.match(notices, /FunASR Model Open Source License Agreement v1\.1/);
+  assert.match(notices, /This is \*\*not\*\* Apache-2\.0/);
 });
 
 for (const [name, overrides, message] of [

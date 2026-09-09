@@ -27,15 +27,24 @@ export const LOCAL_STT_ASSETS = [
   },
   {
     url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
-    archive: true
+    archive: true,
+    keep: [
+      "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
+      "sherpa-onnx-pyannote-segmentation-3-0/LICENSE"
+    ]
   },
   {
-    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/0-four-speakers-zh.wav",
+    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
     archive: false
   }
 ];
 
-/** Optional Silero VAD weights used by live speech activity. Not required for transcription. */
+/** Optional mixed-speaker fixture for live tests. Never packaged. */
+export const LOCAL_STT_TEST_WAV_ASSET = {
+  url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/0-four-speakers-zh.wav",
+  archive: false
+};
+
 export const LOCAL_STT_VAD_ASSET = {
   url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
   archive: false
@@ -67,6 +76,14 @@ export function downloadLocalSttModels(options = {}) {
 
   for (const asset of LOCAL_STT_ASSETS) {
     const name = path.basename(new URL(asset.url).pathname);
+    if (asset.archive) {
+      const entries = asset.keep ?? [];
+      if (entries.length > 0 && entries.every((rel) => fs.existsSync(path.join(dest, rel)))) {
+        continue;
+      }
+    } else if (fs.existsSync(path.join(dest, name))) {
+      continue;
+    }
     const packed = path.join(tmp, name);
     console.log(`fetch ${asset.url}`);
     download(asset.url, packed, execFileSyncImpl);
@@ -100,13 +117,17 @@ export function downloadLocalSttModels(options = {}) {
       throw new Error(`missing required local STT runtime file ${filePath}`);
     }
   }
-  const vadName = path.basename(new URL(LOCAL_STT_VAD_ASSET.url).pathname);
-  const vadPacked = path.join(tmp, vadName);
-  const vadDest = path.join(dest, vadName);
-  if (!fs.existsSync(vadDest)) {
-    console.log(`fetch ${LOCAL_STT_VAD_ASSET.url}`);
-    download(LOCAL_STT_VAD_ASSET.url, vadPacked, execFileSyncImpl);
-    fs.copyFileSync(vadPacked, vadDest);
+  if (!options.includeTestWav) {
+    console.log(`models ready in ${dest}`);
+    return { dest, manifest };
+  }
+  const testName = path.basename(new URL(LOCAL_STT_TEST_WAV_ASSET.url).pathname);
+  const testPacked = path.join(tmp, testName);
+  const testDest = path.join(dest, testName);
+  if (!fs.existsSync(testDest)) {
+    console.log(`fetch ${LOCAL_STT_TEST_WAV_ASSET.url}`);
+    download(LOCAL_STT_TEST_WAV_ASSET.url, testPacked, execFileSyncImpl);
+    fs.copyFileSync(testPacked, testDest);
   }
   console.log(`models ready in ${dest}`);
   return { dest, manifest };

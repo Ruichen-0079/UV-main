@@ -47,7 +47,7 @@ run(venvPython, [
   "-r",
   path.join(repoRoot, "services", "local-stt", "requirements.txt")
 ]);
-downloadLocalSttModels({ dest: modelDir });
+downloadLocalSttModels({ dest: modelDir, includeTestWav: true });
 
 console.log(`local STT runtime ready: ${venvPython}`);
 console.log(`local STT models ready: ${modelDir}`);

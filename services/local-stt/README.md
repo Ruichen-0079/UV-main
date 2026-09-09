@@ -26,9 +26,13 @@ YUVI_LOCAL_STT_START_COMMAND=/path/to/local-stt/.venv/bin/python services/local-
 YUVI_AUTOSTART_LOCAL_STT=false
 ```
 
-Packaged Windows mode carries a self-contained CPU sidecar and the verified
-model tree. DesktopSupervisor derives its command from the packaged manifest;
-it never calls Python, uv, or a developer checkout.
+Packaged Windows and Linux public installs carry a self-contained CPU sidecar
+and the verified model tree. DesktopSupervisor derives its command from the
+packaged `local-stt/local-stt-manifest.json`; it never calls Python, uv, or a
+developer checkout, and `YUVI_LOCAL_STT_START_COMMAND` is not required.
+
+SenseVoice **weights** are redistributed under the FunASR Model License v1.1,
+not Apache-2.0. See `THIRD_PARTY_NOTICES.md`.
 
 To select the sidecar for Runtime STT, also set
 `LOCAL_STT_BASE_URL=http://127.0.0.1:9876` and

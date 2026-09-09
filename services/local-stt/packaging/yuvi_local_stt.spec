@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""YUVI local STT Windows x64 onedir spec."""
+"""YUVI local STT Windows/Linux x64 onedir spec."""
 
 import os
 from pathlib import Path
