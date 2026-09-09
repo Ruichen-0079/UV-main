@@ -4,7 +4,13 @@ import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { resolveYuviHostPaths } from "@companion/host-environment";
-import { Live2DModels, LIVE2D_IMPORT_LIMIT, modelImportSchema } from "../services/live2d-models.js";
+import {
+  Live2DModels,
+  LIVE2D_IMPORT_LIMIT,
+  modelImportSchema,
+  modelPackageFromZip,
+  modelZipImportSchema
+} from "../services/live2d-models.js";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 
@@ -80,6 +86,30 @@ export async function registerLive2DRoutes(
         });
     }
   });
+  app.post("/live2d/models/import-zip", { bodyLimit: LIVE2D_IMPORT_LIMIT }, async (request, reply) => {
+    if (!requireLocalDashboardAccess(config, request, reply)) return;
+    const input = modelZipImportSchema.safeParse(request.body);
+    if (!input.success)
+      return reply
+        .code(400)
+        .send({ error: "invalid_model_archive", message: "Choose a valid Live2D ZIP archive." });
+    try {
+      const entry = await models.import(modelPackageFromZip(input.data));
+      await models.select(entry.id);
+      return await models.list();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return reply
+        .code(code ? 500 : 400)
+        .send({
+          error: "model_archive_import_failed",
+          message: code
+            ? "Unable to install model archive in durable storage."
+            : "Invalid Live2D ZIP: check the archive, model manifest, and referenced assets."
+        });
+    }
+  });
+
   app.post("/live2d/models/select", async (request, reply) => {
     if (!requireLocalDashboardAccess(config, request, reply)) return;
     const input = z.object({ id: z.string().max(80).nullable() }).safeParse(request.body);

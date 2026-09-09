@@ -3,9 +3,19 @@ import { useRef, useState } from "react";
 import { apiClient } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
 
+async function readFileBase64(file: File, errorMessage: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(errorMessage));
+    reader.onload = () => resolve(String(reader.result).split(",")[1]!);
+    reader.readAsDataURL(file);
+  });
+}
+
 export function ProductLive2DModels(): JSX.Element {
   const state = useAsyncData((signal) => apiClient.getLive2DModels(signal), []);
   const [files, setFiles] = useState<File[]>([]);
+  const [archive, setArchive] = useState<File | null>(null);
   const [model, setModel] = useState("");
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
@@ -34,18 +44,27 @@ export function ProductLive2DModels(): JSX.Element {
     }
   }
   async function importModel(): Promise<void> {
+    if (archive) {
+      if (archive.size > 64 * 1024 * 1024)
+        throw new Error(t("Choose a Live2D ZIP under 64 MiB."));
+      setProgress(0);
+      const archiveBase64 = await readFileBase64(archive, t("Unable to read model ZIP."));
+      setProgress(1);
+      await apiClient.importLive2DZip({ name, archiveBase64 });
+      setArchive(null);
+      setFiles([]);
+      setModel("");
+      setName("");
+      return;
+    }
+
     if (files.length > 512 || files.reduce((n, f) => n + f.size, 0) > 64 * 1024 * 1024)
       throw new Error(t("Choose a model directory under 64 MiB and 512 files."));
     const encoded: { path: string; base64: string }[] = [];
     let read = 0;
     const size = files.reduce((n, f) => n + f.size, 0);
     for (const file of files) {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onerror = () => reject(new Error(t("Unable to read model file.")));
-        reader.onload = () => resolve(String(reader.result).split(",")[1]!);
-        reader.readAsDataURL(file);
-      });
+      const base64 = await readFileBase64(file, t("Unable to read model file."));
       encoded.push({ path: file.webkitRelativePath || file.name, base64 });
       read += file.size;
       setProgress(size ? read / size : 1);
@@ -66,7 +85,7 @@ export function ProductLive2DModels(): JSX.Element {
       <p>{t("Intended default: 桃瀬ひより / Hiyori Momose · © Live2D Inc.")}</p>
       <p>
         {t(
-          "Download the official sample, extract it, then choose its runtime model directory. Imported files are copied into YUVI durable storage."
+          "Import a Live2D / VTube Studio ZIP directly, or choose an extracted runtime model directory. Imported files are copied into YUVI durable storage."
         )}
       </p>
       <div className="flex flex-wrap gap-3">
@@ -94,6 +113,28 @@ export function ProductLive2DModels(): JSX.Element {
         )}
       </p>
       <label>
+        {t("Live2D ZIP")}
+        <input
+          type="file"
+          accept=".zip,application/zip"
+          aria-label={t("Live2D ZIP")}
+          disabled={pending}
+          onChange={(e) => {
+            const next = e.target.files?.[0] ?? null;
+            setArchive(next);
+            setFiles([]);
+            setModel("");
+            setName(next?.name.replace(/\.zip$/iu, "") ?? "");
+            setError("");
+            setMessage("");
+          }}
+        />
+      </label>
+      {archive ? (
+        <p>{t("ZIP selected: {0}. The model manifest will be detected automatically.", archive.name)}</p>
+      ) : null}
+      <p className="text-xs text-[var(--yuvi-muted)]">{t("Or import an extracted directory:")}</p>
+      <label>
         {t("Model directory")}
         <input
           type="file"
@@ -103,6 +144,7 @@ export function ProductLive2DModels(): JSX.Element {
           disabled={pending}
           onChange={(e) => {
             const next = Array.from(e.target.files ?? []);
+            setArchive(null);
             setFiles(next);
             const first = next.find((f) => f.name.endsWith(".model3.json"));
             setModel(first?.webkitRelativePath || first?.name || "");
@@ -119,7 +161,7 @@ export function ProductLive2DModels(): JSX.Element {
         {t("Model manifest")}
         <select
           value={model}
-          disabled={pending || !manifests.length}
+          disabled={pending || Boolean(archive) || !manifests.length}
           onChange={(e) => setModel(e.target.value)}
         >
           <option value="">{t("Choose a model")}</option>
@@ -141,15 +183,26 @@ export function ProductLive2DModels(): JSX.Element {
       </label>
       <button
         type="button"
-        disabled={pending || !model || !name.trim()}
-        onClick={() => void act(importModel, "Model installed. Select it to load Companion.")}
+        disabled={pending || (!archive && !model) || !name.trim()}
+        onClick={() =>
+          void act(
+            importModel,
+            archive
+              ? "Model ZIP installed and selected. Companion will reload it automatically."
+              : "Model installed. Select it to load Companion."
+          )
+        }
       >
         {t("Import model")}
       </button>
       {pending && (
         <div role="status">
           <span>
-            {progress === null ? t("Installing or updating model…") : t("Reading model files…")}
+            {progress === null
+              ? t("Installing or updating model…")
+              : archive
+                ? t("Reading model ZIP…")
+                : t("Reading model files…")}
           </span>
           <progress
             aria-label={t("Model operation progress")}

@@ -997,6 +997,9 @@ export const apiClient = {
   importLive2DModel(input: { name: string; model: string; files: { path: string; base64: string }[] }): Promise<Live2DModel> {
     return request("/live2d/models/import", { method: "POST", body: JSON.stringify(input) });
   },
+  importLive2DZip(input: { name: string; archiveBase64: string }): Promise<Live2DModelState> {
+    return request("/live2d/models/import-zip", { method: "POST", body: JSON.stringify(input) });
+  },
   selectLive2DModel(id: string | null): Promise<Live2DModelState> { return request("/live2d/models/select", { method: "POST", body: JSON.stringify({ id }) }); },
   removeLive2DModel(id: string): Promise<Live2DModelState> { return request(`/live2d/models/${encodeURIComponent(id)}`, { method: "DELETE" }); },
   setDashboardDevToken(token: string): void {
