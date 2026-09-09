@@ -81,18 +81,48 @@ export async function registerProductRoutes(app: FastifyInstance, context: AppCo
   });
   app.post("/product/people", async (req, reply) => {
     if (!requireLocalDashboardAccess(config, req, reply)) return;
-    const body = z.object({ displayName: z.string().trim().min(1).max(100), personaId: z.string().trim().min(1).max(100), notes: z.string().max(4000).default(""), primary: z.boolean().default(false), id: z.string().optional() }).strict().safeParse(req.body);
-    if (!body.success) return reply.code(400).send({ error: "Enter a name and current Yuvi persona." });
+    const body = z.object({
+      displayName: z.string().trim().min(1).max(100),
+      personaId: z.string().trim().min(1).max(100).optional(),
+      notes: z.string().max(4000).default(""),
+      primary: z.boolean().default(false),
+      id: z.string().optional()
+    }).strict().safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "Enter a name." });
     return locked(async () => {
       const saved = desired();
       const old = saved.people.find(p => p.id === body.data.id);
       if (body.data.id && !old) return reply.code(404).send({ error: "Person not found." });
-      const person = { id: old?.id ?? randomUUID(), displayName: body.data.displayName, personaId: body.data.personaId, notes: body.data.notes };
+      const primary = saved.people.find(p => p.id === saved.primaryPersonId);
+      const personaId =
+        body.data.personaId?.trim() ||
+        old?.personaId ||
+        primary?.personaId ||
+        context.activeRuntimeEnv["MEMORY_PERSONA_ID"]?.trim();
+      if (!personaId) {
+        return reply.code(409).send({
+          error: "Current YUVI persona is not configured. Configure it in Advanced settings first."
+        });
+      }
+      const person = {
+        id: old?.id ?? randomUUID(),
+        displayName: body.data.displayName,
+        personaId,
+        notes: body.data.notes
+      };
       saved.people = [...saved.people.filter(p => p.id !== person.id), person];
       if (body.data.primary) saved.primaryPersonId = person.id;
       const result = await persistApply(saved);
       const memoryState = await persistProfileEvidence(context, person);
-      return { ...result, message: memoryState === "STORED" ? "Person saved and identity evidence stored in Memory." : `Person saved. Identity evidence: ${memoryState}. Configure Memory and save the profile again to retry.` };
+      return {
+        ...result,
+        personId: person.id,
+        profileEvidence: memoryState,
+        message:
+          memoryState === "STORED"
+            ? "Person saved and identity evidence stored in Memory."
+            : `Person saved. Identity evidence: ${memoryState}. Configure Memory and save the profile again to retry.`
+      };
     });
   });
   app.post("/product/proactive/resume", async (req, reply) => { if (!requireLocalDashboardAccess(config, req, reply)) return; context.runtime.resumeProactiveNow(); return snapshot(); });
