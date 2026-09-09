@@ -1,9 +1,15 @@
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { deflateRawSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import Fastify from "fastify";
-import { Live2DModels, validateModelPackage } from "./live2d-models.js";
+import {
+  Live2DModels,
+  modelPackageFromZip,
+  safeModelPath,
+  validateModelPackage
+} from "./live2d-models.js";
 import { registerLive2DRoutes } from "../routes/live2d.js";
 const roots: string[] = [];
 afterEach(async () => {
@@ -14,6 +20,80 @@ async function root() {
   roots.push(value);
   return value;
 }
+function crc32(data: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1)
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zipFixture(entries: Record<string, string | Buffer>): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (const [name, value] of Object.entries(entries)) {
+    const nameBytes = Buffer.from(name, "utf8");
+    const data = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    const compressed = deflateRawSync(data);
+    const crc = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    locals.push(local, nameBytes, compressed);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centrals.push(central, nameBytes);
+    offset += local.length + nameBytes.length + compressed.length;
+  }
+  const central = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(Object.keys(entries).length, 8);
+  eocd.writeUInt16LE(Object.keys(entries).length, 10);
+  eocd.writeUInt32LE(central.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, central, eocd]);
+}
+
+function vtsZipFixture(): Buffer {
+  const expression = "expressions/#U4e09%smile.exp3.json";
+  const manifest = {
+    Version: 3,
+    FileReferences: {
+      Moc: "Lumi.moc3",
+      Textures: ["textures/texture_00.png"],
+      Expressions: [{ Name: "smile", File: expression }]
+    }
+  };
+  return zipFixture({
+    "Lumi/Lumi.model3.json": JSON.stringify(manifest),
+    "Lumi/Lumi.moc3": "MOC3synthetic",
+    "Lumi/textures/texture_00.png": Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    [`Lumi/${expression}`]: "{}",
+    "Lumi/vtube.json": JSON.stringify({ hotkeys: true }),
+    "__MACOSX/ignored": "metadata"
+  });
+}
+
 function fixture() {
   const manifest = {
     Version: 3,
@@ -41,6 +121,65 @@ function fixture() {
   };
 }
 describe("durable Live2D models", () => {
+  it("normalizes VTube Studio URL-special filenames and rewrites model references", () => {
+    expect(safeModelPath("Lumi/expressions/#U4e09%smile.exp3.json")).toBe(false);
+    const input = modelPackageFromZip({
+      name: "Lumi VTS",
+      archiveBase64: vtsZipFixture().toString("base64")
+    });
+    expect(input.model).toBe("Lumi/Lumi.model3.json");
+    const expression = input.files.find((file) => file.path.includes("exp3.json"));
+    expect(expression?.path).toBe("Lumi/expressions/~23~U4e09~25~smile.exp3.json");
+    const manifest = JSON.parse(
+      Buffer.from(input.files.find((file) => file.path === input.model)!.base64, "base64").toString()
+    );
+    expect(manifest.FileReferences.Expressions[0].File).toBe(
+      "expressions/~23~U4e09~25~smile.exp3.json"
+    );
+    expect(() => validateModelPackage(input)).not.toThrow();
+  });
+
+  it("rejects ambiguous or traversal ZIP packages before durable installation", () => {
+    const multiple = zipFixture({
+      "a/a.model3.json": "{}",
+      "b/b.model3.json": "{}"
+    });
+    expect(() =>
+      modelPackageFromZip({ name: "ambiguous", archiveBase64: multiple.toString("base64") })
+    ).toThrow("exactly one");
+
+    const traversal = zipFixture({ "../escape.model3.json": "{}" });
+    expect(() =>
+      modelPackageFromZip({ name: "escape", archiveBase64: traversal.toString("base64") })
+    ).toThrow("Unsafe ZIP entry path");
+  });
+
+  it("imports a VTS ZIP, selects it immediately, and serves normalized assets", async () => {
+    const dir = await root();
+    const app = Fastify();
+    await registerLive2DRoutes(app, { live2dModelsRoot: dir } as never);
+    const response = await app.inject({
+      method: "POST",
+      url: "/live2d/models/import-zip",
+      payload: { name: "Lumi VTS", archiveBase64: vtsZipFixture().toString("base64") }
+    });
+    expect(response.statusCode).toBe(200);
+    const state = response.json();
+    expect(state.activeId).toBeTruthy();
+    const installed = state.models.find((model: any) => model.id === state.activeId);
+    expect(installed?.name).toBe("Lumi VTS");
+    expect(installed?.model).toBe("Lumi/Lumi.model3.json");
+    expect((await app.inject(installed.url)).statusCode).toBe(200);
+    expect(
+      (
+        await app.inject(
+          `/live2d/models/${installed.id}/Lumi/expressions/~23~U4e09~25~smile.exp3.json`
+        )
+      ).statusCode
+    ).toBe(200);
+    await app.close();
+  });
+
   it("imports independent copies, selects, survives service recreation, and safely removes inactive models", async () => {
     const dir = await root();
     const service = new Live2DModels(dir);
