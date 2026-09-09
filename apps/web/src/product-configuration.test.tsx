@@ -11,7 +11,7 @@ function nodes(node: FakeNode): FakeNode[] { return [node, ...node.childNodes.fl
 function props(node: FakeNode): any { return (node as any)[Object.keys(node).find(k => k.startsWith("__reactProps$"))!]; }
 let root: Root | undefined, dom: ReturnType<typeof installFakeDom> | undefined;
 afterEach(async () => { await act(async () => root?.unmount()); dom?.restore(); vi.clearAllMocks(); });
-async function mount() { dom = installFakeDom(); await act(async () => { root = createRoot(dom!.container as unknown as Element); root.render(<StrictMode><ProductConfigurationPanel /></StrictMode>); }); return dom.container; }
+async function mount(sections?: readonly ("status" | "providers" | "models" | "routes" | "proactive" | "people" | "voices")[]) { dom = installFakeDom(); await act(async () => { root = createRoot(dom!.container as unknown as Element); root.render(<StrictMode><ProductConfigurationPanel {...(sections ? { sections } : {})} /></StrictMode>); }); return dom.container; }
 it("first-run controls work with no Chat; compatible route assignment saves then re-fetches effective state", async () => {
   let saved = snapshot();
   mock.request.mockImplementation(async (url, init) => {
@@ -29,6 +29,17 @@ it("first-run controls work with no Chat; compatible route assignment saves then
   expect(mock.request.mock.calls.filter(c => c[0] === "/product/configuration" && !c[1]).length).toBeGreaterThan(1);
   expect(readText(node)).toContain("RESTART_REQUIRED"); expect(readText(node)).toContain("Effective: None"); expect(props(button).disabled).toBe(false);
   const stt = nodes(node).find(n => n.attributes["aria-label"] === "STT route")!; expect(nodes(stt).filter(n => n.tagName === "OPTION").map(readText)).toEqual(["Select model"]);
+});
+it("sectioned presentation hides unrelated controls and avoids irrelevant voice work", async () => {
+  mock.request.mockImplementation(async () => snapshot());
+  const node = await mount(["models"]);
+  const text = readText(node);
+  expect(text).toContain("Models");
+  expect(text).not.toContain("Providers");
+  expect(text).not.toContain("Capability routes");
+  expect(text).not.toContain("My Profile");
+  expect(text).not.toContain("Voice Profiles");
+  expect(mock.request.mock.calls.some(c => c[0] === "/product/voices")).toBe(false);
 });
 it("fallback order edits are stable and bounded", () => { expect(reorderRoute(["a", "b", "c"], 1, -1)).toEqual(["b", "a", "c"]); expect(reorderRoute(["a"], 0, -1)).toEqual(["a"]); });
 it("unknown voice offers local playback, explicit link, creation, leave unresolved and deletion", async () => {
