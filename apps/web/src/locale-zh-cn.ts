@@ -1,4 +1,11 @@
 export const zhCN: Readonly<Record<string, string>> = {
+  "Secret updated": "密钥已更新",
+  "Settings saved": "设置已保存",
+  "Secret saved": "密钥已保存",
+  "{0}, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.": "{0}，但 Supervisor 不可用。请重新打开 YUVI 或再次保存，以将更改应用到受管服务。",
+  "{0}. Applying changes to: {1}.": "{0}。正在将更改应用到：{1}。",
+  "{0}. Services may reload: {1}.": "{0}。以下服务可能重新加载：{1}。",
+  "{0}.": "{0}。",
   "Endpoint responded. Model calls are verified separately.": "端点已响应。模型调用需要单独验证。",
   "Connection unavailable. Check the endpoint or add a model ID manually.": "连接不可用。请检查端点，或手动添加模型 ID。",
   "HTTP {0}. You can add a model ID manually.": "HTTP {0}。你仍可以手动添加模型 ID。",
