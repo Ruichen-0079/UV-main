@@ -19,7 +19,7 @@ it("first-run controls work with no Chat; compatible route assignment saves then
     if (init?.method === "PUT") { const body = JSON.parse(init.body); saved = { ...saved, configuration: body.configuration, revision: saved.revision + 1, applyState: "RESTART_REQUIRED" }; }
     return structuredClone(saved);
   });
-  const node = await mount(); expect(readText(node)).toContain("set up Chat"); expect(readText(node)).toContain("My Profile");
+  const node = await mount(); expect(readText(node)).toContain("set up Chat"); expect(readText(node)).toContain("My profile");
   const route = nodes(node).find(n => n.attributes["aria-label"] === "Chat route")!;
   const select = nodes(route).find(n => n.tagName === "SELECT")!;
   await act(async () => props(select).onChange({ target: { value: "a" } }));
@@ -39,22 +39,65 @@ it("sectioned presentation hides unrelated controls and loads voice state only w
   expect(text).toContain("Models");
   expect(text).not.toContain("Providers");
   expect(text).not.toContain("Capability routes");
-  expect(text).not.toContain("My Profile");
-  expect(text).not.toContain("Voice Profiles");
+  expect(text).not.toContain("My profile");
+  expect(text).not.toContain("Voice enrollment");
   expect(mock.request.mock.calls.some(c => c[0] === "/product/voices")).toBe(false);
 
   await act(async () => {
     root!.render(<StrictMode><ProductConfigurationPanel sections={["people", "voices"]} /></StrictMode>);
   });
   expect(mock.request.mock.calls.some(c => c[0] === "/product/voices")).toBe(true);
-  expect(readText(node)).toContain("Voice Profiles");
+  expect(readText(node)).toContain("Voice enrollment");
 });
 it("fallback order edits are stable and bounded", () => { expect(reorderRoute(["a", "b", "c"], 1, -1)).toEqual(["b", "a", "c"]); expect(reorderRoute(["a"], 0, -1)).toEqual(["a"]); });
-it("unknown voice offers local playback, explicit link, creation, leave unresolved and deletion", async () => {
-  mock.request.mockImplementation(async url => url === "/product/voices" ? { available: true, voices: [], unknown: [{ id: "review" }] } : snapshot());
-  const node = await mount();
-  for (const text of ["Unknown Voices", "▶ Play sample", "Who is this?", "Link to existing person", "Create new person", "Leave unknown", "Delete sample"]) expect(readText(node)).toContain(text);
-  await act(async () => props(nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Leave unknown")!).onClick());
+it("people surface hides raw identity fields and saves the primary profile without a persona writer", async () => {
+  const saved = {
+    ...snapshot(),
+    people: [
+      { id: "me", displayName: "Rui", personaId: "alice", notes: "My profile" },
+      { id: "friend", displayName: "Ming", personaId: "alice", notes: "Roommate" }
+    ],
+    primaryPersonId: "me"
+  };
+  mock.request.mockImplementation(async (url, init) => {
+    if (url === "/product/voices") {
+      return {
+        available: true,
+        voices: [{ id: "voice-me", label: "Rui", personId: "me", sampleId: "sample-me" }],
+        unknown: []
+      };
+    }
+    if (url === "/product/people" && init?.method === "POST") {
+      return { ...saved, personId: "me", profileEvidence: "STORED", message: "saved" };
+    }
+    return structuredClone(saved);
+  });
+  const node = await mount(["people", "voices"]);
+  const text = readText(node);
+  for (const visible of ["My profile", "People I know", "Ming", "Voice enrollment", "Re-enroll"]) expect(text).toContain(visible);
+  expect(nodes(node).filter(n => n.tagName === "INPUT").map(n => props(n).value)).toContain("Rui");
+  for (const hidden of ["Current Yuvi persona", "Stable user ID", "This is my primary profile", "personaId"]) expect(text).not.toContain(hidden);
+  const profileForm = nodes(node).find(n => n.tagName === "FORM" && readText(n).includes("Save my profile"))!;
+  await act(async () => {
+    props(profileForm).onSubmit({ preventDefault: vi.fn() });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  const call = mock.request.mock.calls.find(c => c[0] === "/product/people" && c[1]?.method === "POST");
+  const body = JSON.parse(call![1].body);
+  expect(body).toMatchObject({ id: "me", displayName: "Rui", notes: "My profile", primary: true });
+  expect(body).not.toHaveProperty("personaId");
+  expect(readText(node)).toContain("Memory: profile saved");
+});
+
+it("unrecognized voice review stays explicit and local without exposing acoustic internals", async () => {
+  const saved = { ...snapshot(), people: [{ id: "me", displayName: "Rui", personaId: "alice", notes: "" }], primaryPersonId: "me" };
+  mock.request.mockImplementation(async url => url === "/product/voices"
+    ? { available: true, voices: [], unknown: [{ id: "review" }] }
+    : saved);
+  const node = await mount(["people", "voices"]);
+  for (const text of ["Unrecognized voices", "Play sample", "Assign to person", "Add person", "Keep unrecognized", "Delete sample"]) expect(readText(node)).toContain(text);
+  await act(async () => props(nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Keep unrecognized")!).onClick());
   expect(mock.request).toHaveBeenCalledWith("/product/voice-samples/review/review", expect.objectContaining({ body: JSON.stringify({ leaveUnknown: true }) }));
-  expect(readText(node)).not.toMatch(/similarity|cluster ID|embedding vector/);
+  expect(readText(node)).not.toMatch(/similarity|cluster ID|embedding vector|voiceProfileId/);
 });

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { request, productSample, apiClient } from "./api/client.js";
 import { releaseMicrophoneCapture, startMicrophoneCapture, stopMicrophoneCapture, type ActiveAudioCapture } from "./audio-capture.js";
+import { t } from "./locale.js";
 const capabilities = ["chat", "reasoning", "proactive", "embedding", "vision", "stt", "tts"] as const;
 type Capability = typeof capabilities[number];
 const labels: Record<Capability, string> = { chat: "Chat", reasoning: "Reasoning", proactive: "Proactive", embedding: "Embedding", vision: "Vision", stt: "STT", tts: "TTS" };
@@ -11,6 +12,14 @@ type Configuration = { version: 1; providers: Provider[]; models: Model[]; route
 type Person = { id: string; displayName: string; personaId: string; notes: string };
 type Snapshot = { configuration: Configuration; people: Person[]; primaryPersonId: string | null; proactive: { threshold: number; intervalMs: number }; revision: number; routes: Record<Capability, { state: string; modelIds: string[] }>; conversationalReady: boolean; applyState: string; voiceAvailable: boolean; proactiveState: { suppression: { kind: string }; eligibleAfterMs: number } };
 type Voices = { available: boolean; voices: { id: string; label: string; personId: string | null; sampleId?: string }[]; unknown: { id: string; leftUnknown?: boolean }[] };
+type PersonDraft = { id: string; displayName: string; notes: string };
+type ProfileEvidenceState = "STORED" | "UNAVAILABLE" | "APPLY_FAILED";
+type PersonSaveResponse = Snapshot & {
+  personId: string;
+  profileEvidence: ProfileEvidenceState;
+  message: string;
+};
+const emptyPersonDraft = (): PersonDraft => ({ id: "", displayName: "", notes: "" });
 const emptyProvider = (): Provider => ({ id: crypto.randomUUID(), displayName: "", baseUrl: "", adapter: "openai-compatible" });
 const emptyModel = (providerId: string): Model => ({ id: crypto.randomUUID(), providerId, displayName: "", modelId: "", temperature: .7, contextWindow: null, capabilities: [], enabled: true });
 export function reorderRoute(route: string[], index: number, direction: -1 | 1): string[] { const next = [...route]; const target = index + direction; if (target >= 0 && target < next.length) [next[index], next[target]] = [next[target]!, next[index]!]; return next; }
@@ -48,7 +57,10 @@ export function ProductConfigurationPanel(props: {
   const [provider, setProvider] = useState<Provider>(emptyProvider);
   const [model, setModel] = useState<Model>(() => emptyModel(""));
   const [discovered, setDiscovered] = useState<{ modelId: string; contextWindow: number | null }[]>([]);
-  const [person, setPerson] = useState({ id: "", displayName: "", personaId: "", notes: "", primary: true });
+  const [selfProfile, setSelfProfile] = useState<PersonDraft>(emptyPersonDraft);
+  const [otherPerson, setOtherPerson] = useState<PersonDraft>(emptyPersonDraft);
+  const [editingOther, setEditingOther] = useState(false);
+  const [profileEvidence, setProfileEvidence] = useState<{ personId: string; state: ProfileEvidenceState } | null>(null);
   const [voices, setVoices] = useState<Voices>({ available: false, voices: [], unknown: [] });
   const [enrollPerson, setEnrollPerson] = useState(""); const [replaceVoiceId, setReplaceVoiceId] = useState<string | undefined>();
   const [recordings, setRecordings] = useState<string[]>([]); const [recording, setRecording] = useState(false);
@@ -56,9 +68,9 @@ export function ProductConfigurationPanel(props: {
   const player = useRef<HTMLAudioElement | null>(null); const sampleUrl = useRef<string>();
   async function refresh() {
     const next = await request<Snapshot>("/product/configuration"); setState(next); setDraft(next.configuration); setProactive(next.proactive);
-    setEnrollPerson(v => v || next.primaryPersonId || "");
+    setEnrollPerson(v => next.people.some(p => p.id === v) ? v : "");
     const primary = next.people.find(p => p.id === next.primaryPersonId);
-    if (primary) setPerson({ ...primary, primary: true });
+    setSelfProfile(primary ? { id: primary.id, displayName: primary.displayName, notes: primary.notes } : emptyPersonDraft());
     if (showVoices) {
       try { setVoices(await request<Voices>("/product/voices")); } catch { setNotice("Voice profiles are unavailable. Check local speaker recognition and Memory."); }
     }
@@ -73,7 +85,52 @@ export function ProductConfigurationPanel(props: {
   }
   async function beginRecording() { try { capture.current = await startMicrophoneCapture(); setRecording(true); timer.current = setTimeout(() => void finishRecording(), 8000); } catch { setNotice("Microphone unavailable."); } }
   async function play(id: string) { try { player.current?.pause(); if (sampleUrl.current) URL.revokeObjectURL(sampleUrl.current); sampleUrl.current = URL.createObjectURL(await productSample(id)); player.current = new Audio(sampleUrl.current); await player.current.play(); } catch { setNotice("Sample unavailable or deleted."); } }
+  async function savePersonProfile(draft: PersonDraft, primary: boolean) {
+    let savedResult: PersonSaveResponse | undefined;
+    const ok = await act(async () => {
+      savedResult = await send<PersonSaveResponse>("/product/people", {
+        displayName: draft.displayName,
+        notes: draft.notes,
+        primary,
+        ...(draft.id ? { id: draft.id } : {})
+      });
+      return savedResult;
+    });
+    if (ok && savedResult) {
+      setProfileEvidence({ personId: savedResult.personId, state: savedResult.profileEvidence });
+      if (!primary) {
+        setEditingOther(false);
+        setOtherPerson(emptyPersonDraft());
+      }
+    }
+  }
+  function startEnrollment(personId: string, replaceVoiceId?: string) {
+    setEnrollPerson(personId);
+    setReplaceVoiceId(replaceVoiceId);
+    setRecordings([]);
+  }
+  async function finishEnrollment() {
+    if (!enrollPerson) return;
+    const ok = await act(
+      () => send("/product/voices/enroll", { personId: enrollPerson, recordings, replaceVoiceId }),
+      "Voice enrolled and linked to this person."
+    );
+    if (ok) {
+      setEnrollPerson("");
+      setReplaceVoiceId(undefined);
+      setRecordings([]);
+    }
+  }
   const inputStyle = "rounded border p-2 bg-transparent w-full";
+  const primaryPerson = state?.people.find(p => p.id === state.primaryPersonId);
+  const knownPeople = state?.people.filter(p => p.id !== state.primaryPersonId) ?? [];
+  const voiceProfilesFor = (personId: string) => voices.voices.filter(v => v.personId === personId);
+  const evidenceLabel = (personId: string) => {
+    if (profileEvidence?.personId !== personId) return null;
+    if (profileEvidence.state === "STORED") return t("Memory: profile saved");
+    if (profileEvidence.state === "UNAVAILABLE") return t("Memory: unavailable; profile is still saved locally");
+    return t("Memory: profile evidence write failed");
+  };
   return <section className="yuvi-configuration grid gap-5" aria-label="Product configuration">
     {show("status") && <header className="yuvi-card grid gap-2"><h1>Provider → Model → Capability Route</h1><p>Chat is the only conversation requirement. Optional capabilities can stay NOT_CONFIGURED.</p>
       <p role="status">{state ? `Conversation: ${state.conversationalReady ? "ready" : "set up Chat"} · Apply: ${state.applyState}` : "Loading configuration…"}</p>
@@ -108,14 +165,100 @@ export function ProductConfigurationPanel(props: {
       </section>}
       {show("routes") && <section className="yuvi-card grid gap-3"><h2>Capability routes</h2><p>Order is fallback order. Removing every model leaves that capability NOT_CONFIGURED.</p><div className="grid gap-3 md:grid-cols-2">{capabilities.map(c => <article className="rounded border p-3" key={c} aria-label={`${labels[c]} route`}><h3>{labels[c]} · {state.routes[c].state}</h3><p>Effective: {state.routes[c].modelIds.map(id => state.configuration.models.find(m => m.id === id)?.displayName ?? id).join(" → ") || "None"}</p><ol>{draft.routes[c].map((id, i) => <li key={id}>{draft.models.find(m => m.id === id)?.displayName}<button aria-label={`Move ${c} model up`} disabled={i === 0} onClick={() => changeRoute(c, reorderRoute(draft.routes[c], i, -1))}>↑</button><button aria-label={`Move ${c} model down`} disabled={i === draft.routes[c].length - 1} onClick={() => changeRoute(c, reorderRoute(draft.routes[c], i, 1))}>↓</button><button onClick={() => changeRoute(c, draft.routes[c].filter(m => m !== id))}>Remove from route</button></li>)}</ol><label>Add compatible model<select value="" onChange={e => changeRoute(c, [...draft.routes[c], e.target.value])}><option value="">Select model</option>{draft.models.filter(m => m.enabled && m.capabilities.includes(c) && !draft.routes[c].includes(m.id)).map(m => <option key={m.id} value={m.id}>{m.displayName}</option>)}</select></label></article>)}</div><button disabled={busy} onClick={() => void save()}>Save routes & apply</button></section>}
       {show("proactive") && <section className="yuvi-card grid gap-3"><h2>Proactive</h2><label>主动程度 / Eagerness<input type="range" min="0" max="1" step=".05" value={1 - proactive.threshold} onChange={e => setProactive({ ...proactive, threshold: 1 - Number(e.target.value) })} /></label><p>Speak-score threshold: {proactive.threshold.toFixed(2)}. A low score skips only the current evaluation.</p><label>Evaluation interval (seconds)<input type="number" min="1" max="86400" value={proactive.intervalMs / 1000} onChange={e => setProactive({ ...proactive, intervalMs: Number(e.target.value) * 1000 })} /></label><p>Suppression: {state.proactiveState.suppression.kind} · Quiet until: {state.proactiveState.eligibleAfterMs > Date.now() ? new Date(state.proactiveState.eligibleAfterMs).toLocaleString() : "No timed quiet period"}</p><button disabled={busy} onClick={() => void act(() => send("/product/proactive/resume"))}>Resume now</button><button disabled={busy} onClick={() => void save()}>Save proactive controls & apply</button></section>}
-      {show("people") && <section className="yuvi-card grid gap-3"><h2>My Profile</h2><p>Your identity is set explicitly here. Speaking first never makes someone the owner.</p>{state.primaryPersonId && <p>Stable user ID: {state.primaryPersonId}</p>}<form className="grid gap-2" onSubmit={e => { e.preventDefault(); void act(() => send("/product/people", { ...person, id: person.id || undefined })); }}><label>Display name<input required className={inputStyle} value={person.displayName} onChange={e => setPerson({ ...person, displayName: e.target.value })} /></label><label>Current Yuvi persona<input required className={inputStyle} placeholder="e.g. alice" value={person.personaId} onChange={e => setPerson({ ...person, personaId: e.target.value })} /></label><label>Profile notes (optional)<textarea className={inputStyle} value={person.notes} onChange={e => setPerson({ ...person, notes: e.target.value })} /></label><label><input type="checkbox" checked={person.primary} onChange={e => setPerson({ ...person, primary: e.target.checked })} />This is my primary profile</label><button disabled={busy}>Save person</button><button type="button" onClick={() => setPerson({ id: "", displayName: "", personaId: person.personaId, notes: "", primary: false })}>Create new person</button></form></section>}
-      {show("people") && <section className="yuvi-card grid gap-3"><h2>Known People</h2>{state.people.map(p => <div key={p.id}><strong>{p.displayName}</strong> · {p.personaId}<button onClick={() => setPerson({ ...p, primary: state.primaryPersonId === p.id })}>Edit person</button><button onClick={() => { setEnrollPerson(p.id); setReplaceVoiceId(undefined); setRecordings([]); }}>Add another voice</button></div>)}</section>}
-      {show("voices") && <section className="yuvi-card grid gap-3"><h2>Voice Profiles</h2><p>Person = relationship and memory identity. Voice Profile = acoustic identity. Binding = your explicit trusted mapping.</p><p>Review samples stay local: up to 8 seconds per sample, up to 30 samples. Older samples expire. You can delete each sample. They are never silently uploaded.</p>{!voices.available && <p>Own voice onboarding is available after local STT / speaker recognition is configured.</p>}
-        <label>This is me / enroll for<select value={enrollPerson} onChange={e => { setEnrollPerson(e.target.value); setRecordings([]); setReplaceVoiceId(undefined); }}><option value="">Select person</option>{state.people.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}</select></label><p>Record three short utterances from this person. Each recording stops after eight seconds. {recordings.length}/3 recorded.</p>
-        <button disabled={!voices.available || !enrollPerson || busy || recordings.length >= 5} onClick={() => void (recording ? finishRecording() : beginRecording())}>{recording ? "Stop recording" : "Record utterance"}</button><button disabled={busy || recording || recordings.length < 3} onClick={() => void act(() => send("/product/voices/enroll", { personId: enrollPerson, recordings, replaceVoiceId }), "Enrollment and explicit Person binding saved.").then(ok => { if (ok) setRecordings([]); })}>Enroll VoiceProfile & explicitly bind</button>
-        {voices.voices.map(v => <div className="rounded border p-3" key={v.id}><strong>{v.label}</strong><p>Binding: {state.people.find(p => p.id === v.personId)?.displayName ?? (v.personId ? "Known person" : "Unknown voice")}</p>{v.sampleId && <><button onClick={() => void play(v.sampleId!)}>▶ Play sample</button><button onClick={() => void act(() => send(`/product/voice-samples/${v.sampleId}`, undefined, "DELETE"))}>Delete sample</button></>}{v.personId && <><button onClick={() => { setEnrollPerson(v.personId!); setReplaceVoiceId(v.id); setRecordings([]); }}>Re-enroll</button><button onClick={() => void act(() => send(`/product/voices/${v.id}/binding`, undefined, "DELETE"))}>Remove binding</button></>}<button onClick={() => void act(() => send(`/voice-profiles/${v.id}`, undefined, "DELETE"))}>Delete voice profile</button></div>)}
+      {show("people") && <section className="yuvi-card grid gap-4">
+        <div>
+          <h2>{t("My profile")}</h2>
+          <p>{t("This is the person YUVI treats as you. Your name and notes become explicit long-term identity evidence when Memory is available.")}</p>
+        </div>
+        <form className="grid gap-3" onSubmit={e => { e.preventDefault(); void savePersonProfile(selfProfile, true); }}>
+          <label>{t("Name")}<input required className={inputStyle} value={selfProfile.displayName} onChange={e => setSelfProfile({ ...selfProfile, displayName: e.target.value })} /></label>
+          <label>{t("About me (optional)")}<textarea className={inputStyle} value={selfProfile.notes} onChange={e => setSelfProfile({ ...selfProfile, notes: e.target.value })} /></label>
+          <div className="flex gap-2 flex-wrap">
+            <button disabled={busy}>{t("Save my profile")}</button>
+            {primaryPerson && showVoices ? <button type="button" disabled={!voices.available || busy} onClick={() => startEnrollment(primaryPerson.id)}>{voiceProfilesFor(primaryPerson.id).length ? t("Add another voice") : t("Add my voice")}</button> : null}
+          </div>
+          {primaryPerson && evidenceLabel(primaryPerson.id) ? <p role="status">{evidenceLabel(primaryPerson.id)}</p> : null}
+          {primaryPerson && showVoices ? <>
+            <p>{t("Voice: {0}", voiceProfilesFor(primaryPerson.id).length ? t("{0} enrolled", voiceProfilesFor(primaryPerson.id).length) : t("not enrolled"))}</p>
+            {voiceProfilesFor(primaryPerson.id).map(v => <div className="flex gap-2 flex-wrap items-center" key={v.id}>
+              <span>{t("Voice enrolled")}</span>
+              {v.sampleId ? <button type="button" onClick={() => void play(v.sampleId!)}>{t("Play sample")}</button> : null}
+              <button type="button" onClick={() => startEnrollment(primaryPerson.id, v.id)}>{t("Re-enroll")}</button>
+              <button type="button" onClick={() => void act(() => send(`/voice-profiles/${v.id}`, undefined, "DELETE"), t("Voice deleted."))}>{t("Delete voice")}</button>
+            </div>)}
+          </> : null}
+        </form>
       </section>}
-      {show("voices") && <section className="yuvi-card grid gap-3"><h2>Unknown Voices</h2>{!voices.unknown.length && <p>No unknown samples to review.</p>}{voices.unknown.map(v => <div className="rounded border p-3" key={v.id}><strong>Unknown voice</strong><button onClick={() => void play(v.id)}>▶ Play sample</button><p>Who is this? {v.leftUnknown ? "Left unknown." : ""}</p><label>Link to existing person<select value="" onChange={e => void act(() => send(`/product/voice-samples/${v.id}/review`, { personId: e.target.value }))}><option value="">Select person</option>{state.people.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}</select></label><button onClick={() => { setPerson({ id: "", displayName: "", personaId: person.personaId, notes: "", primary: false }); setNotice("Create a new Person in My Profile above, then return here to confirm the binding."); }}>Create new person</button><button onClick={() => void act(() => send(`/product/voice-samples/${v.id}/review`, { leaveUnknown: true }))}>Leave unknown</button><button onClick={() => void act(() => send(`/product/voice-samples/${v.id}`, undefined, "DELETE"))}>Delete sample</button></div>)}</section>}
+      {show("people") && <section className="yuvi-card grid gap-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2>{t("People I know")}</h2>
+            <p>{t("Save a name and optional notes. YUVI keeps the same current persona scope automatically.")}</p>
+          </div>
+          <button type="button" onClick={() => { setOtherPerson(emptyPersonDraft()); setEditingOther(true); }}>{t("Add person")}</button>
+        </div>
+        {!knownPeople.length ? <p>{t("No other people saved yet.")}</p> : null}
+        {knownPeople.map(p => {
+          const personVoices = voiceProfilesFor(p.id);
+          return <article className="rounded border p-3 grid gap-2" key={p.id}>
+            <div><strong>{p.displayName}</strong>{p.notes ? <p className="m-0">{p.notes}</p> : null}</div>
+            {showVoices ? <p className="m-0">{t("Voice: {0}", personVoices.length ? t("{0} enrolled", personVoices.length) : t("not enrolled"))}</p> : null}
+            {evidenceLabel(p.id) ? <p role="status">{evidenceLabel(p.id)}</p> : null}
+            <div className="flex gap-2 flex-wrap">
+              <button type="button" onClick={() => { setOtherPerson({ id: p.id, displayName: p.displayName, notes: p.notes }); setEditingOther(true); }}>{t("Edit")}</button>
+              {showVoices ? <button type="button" disabled={!voices.available || busy} onClick={() => startEnrollment(p.id)}>{personVoices.length ? t("Add another voice") : t("Add voice")}</button> : null}
+            </div>
+            {showVoices && personVoices.map(v => <div className="flex gap-2 flex-wrap items-center" key={v.id}>
+              <span>{t("Voice enrolled")}</span>
+              {v.sampleId ? <button type="button" onClick={() => void play(v.sampleId!)}>{t("Play sample")}</button> : null}
+              <button type="button" onClick={() => startEnrollment(p.id, v.id)}>{t("Re-enroll")}</button>
+              <button type="button" onClick={() => void act(() => send(`/voice-profiles/${v.id}`, undefined, "DELETE"), t("Voice deleted."))}>{t("Delete voice")}</button>
+            </div>)}
+          </article>;
+        })}
+        {editingOther ? <form className="rounded border p-3 grid gap-3" onSubmit={e => { e.preventDefault(); void savePersonProfile(otherPerson, false); }}>
+          <h3>{otherPerson.id ? t("Edit person") : t("Add person")}</h3>
+          <label>{t("Name")}<input required className={inputStyle} value={otherPerson.displayName} onChange={e => setOtherPerson({ ...otherPerson, displayName: e.target.value })} /></label>
+          <label>{t("Notes (optional)")}<textarea className={inputStyle} value={otherPerson.notes} onChange={e => setOtherPerson({ ...otherPerson, notes: e.target.value })} /></label>
+          <div className="flex gap-2">
+            <button disabled={busy}>{t("Save person")}</button>
+            <button type="button" onClick={() => { setEditingOther(false); setOtherPerson(emptyPersonDraft()); }}>{t("Cancel")}</button>
+          </div>
+        </form> : null}
+      </section>}
+      {show("voices") && <section className="yuvi-card grid gap-3">
+        <div>
+          <h2>{t("Voice enrollment")}</h2>
+          <p>{t("Voice profiles identify acoustic identity only. YUVI links them to a saved person through the existing trusted Memory binding.")}</p>
+        </div>
+        {!voices.available ? <p>{t("Local speaker recognition is not available. Person profiles can still be saved.")}</p> : null}
+        {enrollPerson ? <>
+          <p><strong>{state.people.find(p => p.id === enrollPerson)?.displayName ?? t("Selected person")}</strong> · {t("{0}/3 recordings ready", recordings.length)}</p>
+          <p>{t("Record three short clear utterances. Each recording stops after eight seconds.")}</p>
+          <div className="flex gap-2 flex-wrap">
+            <button type="button" disabled={!voices.available || busy || recordings.length >= 5} onClick={() => void (recording ? finishRecording() : beginRecording())}>{recording ? t("Stop recording") : t("Record voice")}</button>
+            <button type="button" disabled={busy || recording || recordings.length < 3} onClick={() => void finishEnrollment()}>{replaceVoiceId ? t("Replace voice") : t("Save voice")}</button>
+            <button type="button" disabled={recording} onClick={() => { setEnrollPerson(""); setReplaceVoiceId(undefined); setRecordings([]); }}>{t("Cancel")}</button>
+          </div>
+        </> : <p>{t("Choose Add voice on a saved person to begin.")}</p>}
+      </section>}
+      {show("voices") && <section className="yuvi-card grid gap-3">
+        <div>
+          <h2>{t("Unrecognized voices")}</h2>
+          <p>{t("Only locally retained review samples appear here. Nothing is silently assigned to a person.")}</p>
+        </div>
+        {!voices.unknown.length ? <p>{t("No unrecognized voices to review.")}</p> : null}
+        {voices.unknown.map(v => <article className="rounded border p-3 grid gap-2" key={v.id}>
+          <strong>{t("Unrecognized voice")}</strong>
+          <div className="flex gap-2 flex-wrap">
+            <button type="button" onClick={() => void play(v.id)}>{t("Play sample")}</button>
+            <label>{t("Assign to person")}<select value="" onChange={e => { if (e.target.value) void act(() => send(`/product/voice-samples/${v.id}/review`, { personId: e.target.value }), t("Voice assigned.")); }}><option value="">{t("Select person")}</option>{state.people.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}</select></label>
+            <button type="button" onClick={() => { setOtherPerson(emptyPersonDraft()); setEditingOther(true); }}>{t("Add person")}</button>
+            <button type="button" onClick={() => void act(() => send(`/product/voice-samples/${v.id}/review`, { leaveUnknown: true }), t("Left unrecognized."))}>{t("Keep unrecognized")}</button>
+            <button type="button" onClick={() => void act(() => send(`/product/voice-samples/${v.id}`, undefined, "DELETE"), t("Sample deleted."))}>{t("Delete sample")}</button>
+          </div>
+        </article>)}
+      </section>}
     </>}
   </section>;
 }

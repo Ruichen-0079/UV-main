@@ -231,20 +231,9 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               onChange={(e) => setField("ollamaUrl", e.target.value)}
             />
           </Field>
-          <Field label={t("Subject User ID")}>
-            <input
-              className="setting-input"
-              value={form.subjectUserId}
-              onChange={(e) => setField("subjectUserId", e.target.value)}
-            />
-          </Field>
-          <Field label={t("Persona ID")}>
-            <input
-              className="setting-input"
-              value={form.personaId}
-              onChange={(e) => setField("personaId", e.target.value)}
-            />
-          </Field>
+          <p className="mt-2 text-xs text-ink-500">
+            {t("Identity scope is managed from People & Memory. Legacy subject and persona values are retained for compatibility and are not edited here.")}
+          </p>
           <Field label="DATABASE_URL">
             <input
               className="setting-input"
