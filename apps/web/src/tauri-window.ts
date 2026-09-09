@@ -56,3 +56,27 @@ export async function controlWebUIWindow(): Promise<void> {
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("show_webui");
 }
+
+
+export type SubtitlePresentationState = {
+  visible: boolean;
+  locked: boolean;
+};
+
+export async function controlSubtitleWindow(action: "show" | "hide"): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke(action === "show" ? "show_subtitle" : "hide_subtitle");
+}
+
+export async function getSubtitlePresentationState(): Promise<SubtitlePresentationState> {
+  if (!isTauriRuntime()) return { visible: false, locked: false };
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<SubtitlePresentationState>("get_subtitle_presentation_state");
+}
+
+export async function setSubtitleLocked(locked: boolean): Promise<SubtitlePresentationState> {
+  if (!isTauriRuntime()) return { visible: false, locked };
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<SubtitlePresentationState>("set_subtitle_locked", { locked });
+}

@@ -13,6 +13,7 @@ import { ProductConfigurationPanel } from "./product-configuration.js";
 import { isTauriRuntime } from "./tauri-window.js";
 import { UserSettingsPanel } from "./user-settings-panel.js";
 import { CompanionAppearanceSettings } from "./companion-appearance-settings.js";
+import { SubtitleAppearanceSettings } from "./subtitle-appearance-settings.js";
 
 type ProductView = "home" | "models" | "people" | "appearance" | "advanced" | "developer";
 
@@ -173,6 +174,7 @@ export function ProductWebUI(): JSX.Element {
             </section>
             <LocaleSelector />
             <CompanionAppearanceSettings />
+            <SubtitleAppearanceSettings />
             <ProductLive2DModels />
           </div>
         ) : (

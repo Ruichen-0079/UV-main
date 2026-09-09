@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { subscribeSubtitleProjection } from "./subtitle-bus.js";
 import { paginateSubtitleText, subtitlePageDurationMs } from "./subtitle-projection.js";
+import { isTauriRuntime, preloadTauriWindowApi, startWindowDragging } from "./tauri-window.js";
 
 type VisiblePage = {
   messageId: string;
@@ -26,6 +27,11 @@ export function SubtitlePage(): JSX.Element {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
+  }, []);
+
+
+  useEffect(() => {
+    void preloadTauriWindowApi();
   }, []);
 
   useEffect(() => {
@@ -96,7 +102,15 @@ export function SubtitlePage(): JSX.Element {
   }, []);
 
   return (
-    <div className="yuvi-subtitle-root" data-testid="subtitle-surface">
+    <div
+      className="yuvi-subtitle-root"
+      data-testid="subtitle-surface"
+      onPointerDown={(event) => {
+        if (!isTauriRuntime() || event.button !== 0) return;
+        event.preventDefault();
+        void startWindowDragging();
+      }}
+    >
       <div
         className={`yuvi-subtitle-band${visible && page ? " is-visible" : ""}`}
         aria-live="polite"

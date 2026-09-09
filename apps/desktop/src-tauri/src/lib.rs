@@ -162,6 +162,32 @@ fn show_webui(app: tauri::AppHandle) -> Result<(), String> {
   DesktopSurfaceManager::execute(&app, SurfaceId::WebUI, SurfaceCommand::Show)
 }
 
+
+#[tauri::command]
+fn show_subtitle(app: tauri::AppHandle) -> Result<(), String> {
+  DesktopSurfaceManager::execute(&app, SurfaceId::Subtitle, SurfaceCommand::Show)
+}
+
+#[tauri::command]
+fn hide_subtitle(app: tauri::AppHandle) -> Result<(), String> {
+  DesktopSurfaceManager::execute(&app, SurfaceId::Subtitle, SurfaceCommand::Hide)
+}
+
+#[tauri::command]
+fn get_subtitle_presentation_state(
+  app: tauri::AppHandle,
+) -> Result<desktop_surface::SubtitlePresentationState, String> {
+  DesktopSurfaceManager::subtitle_presentation_state(&app)
+}
+
+#[tauri::command]
+fn set_subtitle_locked(
+  app: tauri::AppHandle,
+  locked: bool,
+) -> Result<desktop_surface::SubtitlePresentationState, String> {
+  DesktopSurfaceManager::set_subtitle_locked(&app, locked)
+}
+
 pub fn run() {
   // Owner lifecycle: route termination signals into the graceful exit path
   // before any thread exists, so the Supervisor tree is always drained.
@@ -215,6 +241,7 @@ pub fn run() {
     .on_window_event(|window, event| {
       if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
         DesktopSurfaceManager::persist_companion_geometry(window);
+        DesktopSurfaceManager::persist_subtitle_position(window);
       }
       if let tauri::WindowEvent::CloseRequested { api, .. } = event {
         match lifecycle::window_close_action(window.label(), app_shutdown_started()) {
@@ -239,6 +266,10 @@ pub fn run() {
       toggle_companion,
       reopen_companion,
       show_webui,
+      show_subtitle,
+      hide_subtitle,
+      get_subtitle_presentation_state,
+      set_subtitle_locked,
       supervisor::get_service_status,
       supervisor::refresh_services,
       supervisor::service_action,

@@ -163,6 +163,98 @@ fn restore_companion_window_geometry(app: &AppHandle, window: &tauri::WebviewWin
   }
 }
 
+
+const SUBTITLE_WINDOW_STATE_FILE: &str = "subtitle-window.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubtitleWindowState {
+  x: Option<i32>,
+  y: Option<i32>,
+  locked: bool,
+}
+
+impl Default for SubtitleWindowState {
+  fn default() -> Self {
+    Self {
+      x: None,
+      y: None,
+      locked: false,
+    }
+  }
+}
+
+impl SubtitleWindowState {
+  fn is_valid(self) -> bool {
+    match (self.x, self.y) {
+      (Some(x), Some(y)) => {
+        (-100_000..=100_000).contains(&x) && (-100_000..=100_000).contains(&y)
+      }
+      (None, None) => true,
+      _ => false,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SubtitlePresentationState {
+  pub(crate) visible: bool,
+  pub(crate) locked: bool,
+}
+
+fn subtitle_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+  app
+    .path()
+    .app_config_dir()
+    .map(|dir| dir.join(SUBTITLE_WINDOW_STATE_FILE))
+    .map_err(|error| format!("app_config_dir unavailable: {error}"))
+}
+
+fn read_subtitle_window_state(path: &Path) -> Option<SubtitleWindowState> {
+  let text = fs::read_to_string(path).ok()?;
+  let state = serde_json::from_str::<SubtitleWindowState>(&text).ok()?;
+  state.is_valid().then_some(state)
+}
+
+fn write_subtitle_window_state(path: &Path, state: SubtitleWindowState) -> Result<(), String> {
+  if !state.is_valid() {
+    return Err("subtitle window state is out of bounds".into());
+  }
+  if let Some(parent) = path.parent() {
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+  }
+  let bytes = serde_json::to_vec(&state).map_err(|error| error.to_string())?;
+  fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn subtitle_window_state(app: &AppHandle) -> SubtitleWindowState {
+  subtitle_state_path(app)
+    .ok()
+    .and_then(|path| read_subtitle_window_state(&path))
+    .unwrap_or_default()
+}
+
+fn place_subtitle_window(app: &AppHandle, window: &tauri::WebviewWindow, policy: SubtitleWindowPolicy) {
+  let state = subtitle_window_state(app);
+  if let (Some(x), Some(y)) = (state.x, state.y) {
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+    return;
+  }
+
+  // First-run default: lower-center, matching the historical presentation.
+  if let Ok(Some(monitor)) = window.primary_monitor() {
+    let size = monitor.size();
+    let scale = monitor.scale_factor();
+    let width = (policy.width * scale) as i32;
+    let height = (policy.height * scale) as i32;
+    let margin = (48.0 * scale) as i32;
+    let x = (size.width as i32 - width) / 2;
+    let y = (size.height as i32 - height - margin).max(0);
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+  }
+}
+
 fn build_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
   tauri::WebviewWindowBuilder::new(
     app,
@@ -225,7 +317,6 @@ fn subtitle_window_policy() -> SubtitleWindowPolicy {
     skip_taskbar: true,
     focused_on_create: false,
     visible_on_create: false,
-    click_through: true,
   }
 }
 
@@ -240,7 +331,6 @@ struct SubtitleWindowPolicy {
   skip_taskbar: bool,
   focused_on_create: bool,
   visible_on_create: bool,
-  click_through: bool,
 }
 
 fn build_subtitle_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
@@ -263,28 +353,13 @@ fn build_subtitle_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow>
   .visible(policy.visible_on_create)
   .build()?;
 
-  // Best-effort lower-center placement. Failure must not block ensure/show.
-  if let Ok(Some(monitor)) = window.primary_monitor() {
-    let size = monitor.size();
-    let scale = monitor.scale_factor();
-    let width = (policy.width * scale) as i32;
-    let height = (policy.height * scale) as i32;
-    let margin = (48.0 * scale) as i32;
-    let x = (size.width as i32 - width) / 2;
-    let y = (size.height as i32 - height - margin).max(0);
-    let _ = window.set_position(PhysicalPosition::new(x, y));
-  }
+  place_subtitle_window(app, &window, policy);
 
   Ok(window)
 }
 
 fn show_window(window: &tauri::WebviewWindow, steal_focus: bool) -> Result<(), String> {
   window.show().map_err(|error| error.to_string())?;
-  // Tao/GTK requires a realized native window before applying the input shape.
-  // A lazily constructed, hidden Subtitle has none until Show is processed.
-  if window.label() == SurfaceId::Subtitle.window_label() && subtitle_window_policy().click_through {
-    window.set_ignore_cursor_events(true).map_err(|error| error.to_string())?;
-  }
   if steal_focus {
     window.set_focus().map_err(|error| error.to_string())?;
   }
@@ -368,6 +443,61 @@ impl DesktopSurfaceManager {
     }
   }
 
+  /// Persist Subtitle position only. Lock state remains in the same
+  /// presentation-only file; Runtime/User settings are untouched.
+  pub(crate) fn persist_subtitle_position(window: &Window) {
+    if window.label() != SurfaceId::Subtitle.window_label() {
+      return;
+    }
+    let Ok(position) = window.outer_position() else {
+      return;
+    };
+    let Ok(path) = subtitle_state_path(window.app_handle()) else {
+      return;
+    };
+    let mut state = read_subtitle_window_state(&path).unwrap_or_default();
+    state.x = Some(position.x);
+    state.y = Some(position.y);
+    if let Err(error) = write_subtitle_window_state(&path, state) {
+      eprintln!("[yuvi-desktop] subtitle position persistence skipped: {error}");
+    }
+  }
+
+  pub(crate) fn subtitle_presentation_state(
+    app: &AppHandle,
+  ) -> Result<SubtitlePresentationState, String> {
+    let state = subtitle_window_state(app);
+    let visible = match app.get_webview_window(SurfaceId::Subtitle.window_label()) {
+      Some(window) => window.is_visible().map_err(|error| error.to_string())?,
+      None => false,
+    };
+    Ok(SubtitlePresentationState {
+      visible,
+      locked: state.locked,
+    })
+  }
+
+  pub(crate) fn set_subtitle_locked(
+    app: &AppHandle,
+    locked: bool,
+  ) -> Result<SubtitlePresentationState, String> {
+    let path = subtitle_state_path(app)?;
+    let mut state = read_subtitle_window_state(&path).unwrap_or_default();
+    state.locked = locked;
+    write_subtitle_window_state(&path, state)?;
+
+    if let Some(window) = app.get_webview_window(SurfaceId::Subtitle.window_label()) {
+      // Hidden/unrealized GTK windows do not have a dependable input shape.
+      // Persist now; apply immediately only when live, and always re-apply on Show.
+      if window.is_visible().map_err(|error| error.to_string())? {
+        window
+          .set_ignore_cursor_events(locked)
+          .map_err(|error| error.to_string())?;
+      }
+    }
+    Self::subtitle_presentation_state(app)
+  }
+
   /// Apply the configured Companion always-on-top presentation to the live
   /// window when settings change. Best-effort, as before.
   pub(crate) fn apply_companion_always_on_top(app: &AppHandle, always_on_top: bool) {
@@ -390,6 +520,21 @@ impl DesktopSurfaceManager {
       show_window(&window, surface.show_steals_focus())?;
       window
         .set_always_on_top(policy)
+        .map_err(|error| error.to_string())
+    } else if surface == SurfaceId::Subtitle {
+      let locked = subtitle_window_state(app).locked;
+      window
+        .set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+      show_window(&window, false)?;
+      window
+        .set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+      // Tao/GTK needs a realized native window before click-through is
+      // dependable. Locked means true input pass-through; unlocked receives
+      // pointer-down only so the frontend can start native window dragging.
+      window
+        .set_ignore_cursor_events(locked)
         .map_err(|error| error.to_string())
     } else {
       show_window(&window, surface.show_steals_focus())
@@ -418,7 +563,8 @@ impl DesktopSurfaceManager {
 mod tests {
   use super::{
     companion_always_on_top_or_default, existing_or_create, read_companion_window_geometry,
-    subtitle_window_policy, write_companion_window_geometry, CompanionWindowGeometry, SurfaceId,
+    read_subtitle_window_state, subtitle_window_policy, write_companion_window_geometry,
+    write_subtitle_window_state, CompanionWindowGeometry, SubtitleWindowState, SurfaceId,
   };
   use std::fs;
 
@@ -513,9 +659,27 @@ mod tests {
     assert!(policy.skip_taskbar);
     assert!(!policy.focused_on_create);
     assert!(!policy.visible_on_create);
-    assert!(policy.click_through);
     assert!(policy.width > 0.0 && policy.height > 0.0);
     assert!(policy.height <= 200.0, "subtitle stays a short overlay band");
+  }
+
+  #[test]
+  fn subtitle_state_roundtrips_position_and_lock_with_unlocked_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("subtitle-window.json");
+    assert_eq!(read_subtitle_window_state(&path), None);
+    assert_eq!(SubtitleWindowState::default().locked, false);
+
+    let state = SubtitleWindowState {
+      x: Some(320),
+      y: Some(840),
+      locked: true,
+    };
+    write_subtitle_window_state(&path, state).expect("write subtitle state");
+    assert_eq!(read_subtitle_window_state(&path), Some(state));
+
+    fs::write(&path, r#"{"x":320,"y":null,"locked":false}"#).expect("write invalid");
+    assert_eq!(read_subtitle_window_state(&path), None);
   }
 
   #[test]
