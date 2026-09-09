@@ -17,7 +17,7 @@ test("linux daily prepare packages the Local STT sidecar instead of adapter sour
     source.includes('copyTreeFiltered(path.join(REPO_ROOT, "services", "local-stt")'),
     false
   );
-  assert.match(source, /services", "memory-mem0"/);
+  assert.doesNotMatch(source, /services", "memory-mem0"/);
   assert.doesNotMatch(source, /YUVI_LOCAL_STT_START_COMMAND/);
 });
 

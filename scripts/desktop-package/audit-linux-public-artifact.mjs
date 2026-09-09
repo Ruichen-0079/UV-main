@@ -8,7 +8,7 @@ import { REPO_ROOT } from "./constants.mjs";
 
 const FORBIDDEN_NAME = [
   /(^|\/)\.env(?:\..*)?$/i,
-  /\.wav$/i,
+  /\.(?:wav|py|pyi|h|hpp|spec|ts|tsx)$/i,
   /(^|\/)(?:state|controller-evidence)(\/|$)/i,
   /(^|\/)(?:product-settings|voice-review|voice-binding-references|p8-corrections)\.json$/i,
   /(^|\/)speakers\.(json|npz)$/i,
@@ -17,7 +17,9 @@ const FORBIDDEN_NAME = [
   /(^|\/)dots-tts(\/|$)/i,
   /(^|\/)rei(\/|$)/i,
   /(^|\/)hf-cache(\/|$)/i,
-  /(^|\/)\.venv(\/|$)/i
+  /(^|\/)\.venv(\/|$)/i,
+  /(^|\/)(?:services|node_modules|tests?)(\/|$)/i,
+  /(?:live2dcubismcore|hiyori|esbuild-metafile|\.moc3$|\.map$)/i
 ];
 
 function listFiles(dir, out = []) {
@@ -54,6 +56,9 @@ export function auditLinuxPublicArtifact(root = LINUX_BUILD_ROOT, options = {}) 
   }
   const localStt = path.join(resolved, "local-stt");
   const stt = validateLocalSttArtifact(localStt, { repoRoot: options.repoRoot ?? REPO_ROOT });
+  for (const required of ["runtime/Node.LICENSE.txt", "runtime/THIRD_PARTY_NOTICES.runtime.json", "supervisor/THIRD_PARTY_NOTICES.supervisor.json", "web/dist/THIRD_PARTY_NOTICES.web.json", "web/dist/licenses/cubism-framework/LICENSE.md", "local-stt/runtime-inventory.json"]) {
+    if (!fs.existsSync(path.join(resolved, required))) throw new Error(`Missing release notice inventory: ${required}`);
+  }
   const notices = path.join(resolved, "THIRD_PARTY_NOTICES.local-stt.md");
   if (!fs.existsSync(notices)) throw new Error("Public Local STT notices file is missing.");
   if (rels.some((rel) => rel.startsWith("services/local-stt/")))

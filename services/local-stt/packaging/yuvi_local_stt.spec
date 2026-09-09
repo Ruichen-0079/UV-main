@@ -14,6 +14,9 @@ SERVICE_ROOT = PACKAGING_DIR.parent
 ENTRY = SERVICE_ROOT / "server.py"
 
 sherpa_datas, sherpa_binaries, sherpa_hiddenimports = collect_all("sherpa_onnx")
+# Python modules are already in the executable archive; SDK headers are build-only.
+sherpa_datas = [(source, dest) for source, dest in sherpa_datas
+                if Path(source).suffix not in {".py", ".pyi", ".h", ".hpp"}]
 hiddenimports = [
     *sherpa_hiddenimports,
     "numpy",

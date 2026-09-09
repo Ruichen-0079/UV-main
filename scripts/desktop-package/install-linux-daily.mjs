@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 if (process.platform !== "linux") throw new Error("Linux only");
-const resourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)));
+const resourceRoot = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));
 const nodeBin = path.join(resourceRoot, "runtime", "node");
 const supervisor = path.join(resourceRoot, "supervisor", "yuvi-desktop-supervisor.cjs");
 const runtimeManifest = path.join(resourceRoot, "runtime", "runtime-manifest.json");
@@ -35,14 +35,37 @@ const envDir = path.resolve(
   process.env.YUVI_RUNTIME_ENV_DIR || path.join(xdg("XDG_CONFIG_HOME", ".config"), "YUVI")
 );
 if (process.argv.includes("--uninstall")) {
-  for (const args of [["--user", "disable", "--now", "yuvi-daily.service"], ["--user", "stop", "yuvi-daily-web.service"]]) {
+  for (const args of [
+    ["--user", "disable", "--now", "yuvi-daily.service"],
+    ["--user", "stop", "yuvi-daily-web.service"]
+  ]) {
     const r = spawnSync("systemctl", args, { stdio: "inherit" });
     if (r.status !== 0) throw new Error("Unable to stop YUVI integration; resources retained.");
   }
-  for (const file of [path.join(unitDir, "yuvi-daily.service"), path.join(unitDir, "yuvi-daily-web.service"), path.join(applications, "yuvi-daily.desktop")]) fs.rmSync(file, { force: true });
+  for (const file of [
+    path.join(unitDir, "yuvi-daily.service"),
+    path.join(unitDir, "yuvi-daily-web.service"),
+    path.join(applications, "yuvi-daily.desktop")
+  ])
+    fs.rmSync(file, { force: true });
   const r = spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
   if (r.status !== 0) throw new Error("Unable to reload user integration.");
-  console.log("YUVI integration removed. Durable DATA and CONFIG are preserved. Resource directory:", resourceRoot);
+  const marker = path.join(resourceRoot, "managed-install.json");
+  if (fs.existsSync(marker)) {
+    const { checkoutSha } = JSON.parse(fs.readFileSync(marker, "utf8"));
+    if (
+      path.basename(resourceRoot) !== checkoutSha ||
+      path.basename(path.dirname(resourceRoot)) !== "releases"
+    )
+      throw new Error("Invalid managed resource identity; resources retained.");
+    const base = path.dirname(path.dirname(resourceRoot));
+    const current = path.join(base, "current");
+    if (fs.existsSync(current) && fs.realpathSync(current) === resourceRoot) fs.unlinkSync(current);
+    fs.rmSync(resourceRoot, { recursive: true });
+  }
+  console.log(
+    "YUVI integration and managed resources removed. Durable DATA and CONFIG are preserved."
+  );
   process.exit(0);
 }
 fs.mkdirSync(envDir, { recursive: true, mode: 0o700 });
@@ -78,3 +101,19 @@ for (const args of [
   if (r.status !== 0) throw new Error("systemctl failed: " + args.join(" "));
 }
 console.log("Installed packaged YUVI daily from", resourceRoot);
+
+if (process.argv.includes("--managed-install")) {
+  const { checkoutSha } = JSON.parse(
+    fs.readFileSync(path.join(resourceRoot, "install-manifest.json"), "utf8")
+  );
+  if (
+    path.basename(resourceRoot) !== checkoutSha ||
+    path.basename(path.dirname(resourceRoot)) !== "releases"
+  )
+    throw new Error("Invalid managed install path");
+  fs.writeFileSync(
+    path.join(resourceRoot, "managed-install.json"),
+    JSON.stringify({ checkoutSha }),
+    { mode: 0o600 }
+  );
+}

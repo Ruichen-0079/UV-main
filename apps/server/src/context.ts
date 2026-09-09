@@ -97,7 +97,15 @@ export async function createAppContext(
   }
 
   const bootEnv = productEnvironment((await readRuntimeEnvFiles()).env, readProductSettings());
-  for (const key of ["YUVI_PRODUCT_CONFIGURATION", "MEMORY_SUBJECT_USER_ID", "MEMORY_PERSONA_ID", "PROACTIVE_SCORE_THRESHOLD", "PROACTIVE_EVALUATION_INTERVAL_MS"]) { if (bootEnv[key] !== undefined) process.env[key] = bootEnv[key]; }
+  for (const key of [
+    "YUVI_PRODUCT_CONFIGURATION",
+    "MEMORY_SUBJECT_USER_ID",
+    "MEMORY_PERSONA_ID",
+    "PROACTIVE_SCORE_THRESHOLD",
+    "PROACTIVE_EVALUATION_INTERVAL_MS"
+  ]) {
+    if (bootEnv[key] !== undefined) process.env[key] = bootEnv[key];
+  }
   const eventBus = new InMemoryEventBus();
   const proactiveListeners = new Set<(event: RuntimeReplyStreamEvent) => void>();
   const embodiedPresentationBridge = new EmbodiedPresentationBridge(eventBus);
@@ -220,8 +228,9 @@ export async function createAppContext(
       {
         kind: backendKind,
         mem0: mem0Backend,
-        controllerEvidence: backendKind === "legacy" && !env["MEM0_BASE_URL"] && env["YUVI_RUNTIME_DATA_DIR"]
-          ? new LocalControllerEvidenceProvider(env["YUVI_RUNTIME_DATA_DIR"]!) : undefined,
+        controllerEvidence: new LocalControllerEvidenceProvider(
+          env["YUVI_RUNTIME_DATA_DIR"] || join(getRuntimeEnvDir(env), "data")
+        ),
         searchTimeoutMs: runtimeConfig.memory.mem0TimeoutMs,
         writeTimeoutMs: 180_000,
         logger: runtimeLogger
