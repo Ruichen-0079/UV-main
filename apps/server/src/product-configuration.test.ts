@@ -129,6 +129,48 @@ it("explicit three-utterance enrollment, Person binding restart, unknown sample 
   await run.app.inject({ method: "DELETE", url: `/product/voice-samples/${sample.id}` }); expect((await run.app.inject({ method: "GET", url: `/product/voice-samples/${sample.id}` })).statusCode).toBe(404);
   expect(readProductSettings()?.people[0]?.notes).toBe("My profile");
 });
+it("re-enrollment replaces the old acoustic profile instead of leaving an unbound residual", async () => {
+  const run = await setup();
+  const c = catalog();
+  c.providers.push({ id: "local-stt", displayName: "Local speech", baseUrl: "http://127.0.0.1:9876", adapter: "local-stt" });
+  c.models.push({ id: "speech", displayName: "Speech", modelId: "sensevoice", providerId: "local-stt", capabilities: ["stt"], contextWindow: null, temperature: 0, enabled: true });
+  c.routes.stt = ["speech"];
+  await run.save(c);
+  const person = await run.app.inject({ method: "POST", url: "/product/people", payload: { displayName: "Rui", personaId: "alice", notes: "", primary: true } });
+  expect(person.statusCode).toBe(200);
+  const personId = (await run.get()).primaryPersonId;
+  memoryOnDisk(run.context, run.dir);
+
+  const profiles: Array<{ speakerId: string; label: string }> = [];
+  vi.stubGlobal("fetch", vi.fn(async (url, init) => {
+    const target = String(url);
+    if (init?.method === "POST") {
+      const body = JSON.parse(String(init.body));
+      profiles.push({ speakerId: body.voiceProfileId, label: body.label });
+      return new Response(JSON.stringify({ voiceProfileId: body.voiceProfileId, label: body.label }));
+    }
+    if (init?.method === "DELETE") {
+      const id = decodeURIComponent(target.split("/").pop()!);
+      const index = profiles.findIndex(p => p.speakerId === id);
+      if (index >= 0) profiles.splice(index, 1);
+      return new Response(JSON.stringify({ ok: true }));
+    }
+    return new Response(JSON.stringify({ speakers: profiles }));
+  }));
+
+  const first = await run.app.inject({ method: "POST", url: "/product/voices/enroll", payload: { personId, recordings: [wav(), wav(), wav()] } });
+  expect(first.statusCode).toBe(200);
+  const originalId = profiles[0]!.speakerId;
+  expect(voiceReviews().some(r => r.voiceProfileId === originalId)).toBe(true);
+
+  const replacement = await run.app.inject({ method: "POST", url: "/product/voices/enroll", payload: { personId, recordings: [wav(), wav(), wav()], replaceVoiceId: originalId } });
+  expect(replacement.statusCode).toBe(200);
+  expect(profiles).toHaveLength(1);
+  expect(profiles[0]!.speakerId).not.toBe(originalId);
+  expect(await run.context.runtime.getVoiceProfilePerson(originalId)).toBeNull();
+  expect(await run.context.runtime.getVoiceProfilePerson(profiles[0]!.speakerId)).toBe(personId);
+  expect(voiceReviews().some(r => r.voiceProfileId === originalId)).toBe(false);
+});
 it("samples are local, bounded, single-speaker excerpts and never continuous", async () => {
   await setup(); const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
   expect(boundedWav(wav(12)).length).toBe(44 + 8 * 32000);
