@@ -8,7 +8,6 @@ import { apiClient, type HealthResponse } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
 import { ProductCompactHealth, productCompactHealthItems } from "./product-compact-health.js";
 import { ProductModelsProviders } from "./product-models-providers.js";
-import { ProductLocalServices } from "./product-local-services.js";
 import { ProductMemorySettings } from "./product-memory-settings.js";
 import { ProductConfigurationPanel } from "./product-configuration.js";
 import { isTauriRuntime } from "./tauri-window.js";
@@ -145,7 +144,6 @@ export function ProductWebUI(): JSX.Element {
               </section>
             ) : null}
             <ProductVisionStatus />
-            <ProductLocalServices />
           </div>
         ) : view === "models" ? (
           <div className="grid gap-4">
