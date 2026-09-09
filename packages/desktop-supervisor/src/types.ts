@@ -41,12 +41,27 @@ export type ServiceSnapshot = {
   checkedAt: string;
 };
 
+export type LocalSttControlSnapshot = {
+  manuallySuspended: boolean;
+  activeVoiceLeases: number;
+};
+
 export type SupervisorSnapshot = {
   instanceId: string;
   shuttingDown: boolean;
   services: ServiceSnapshot[];
   updatedAt: string;
   postgres?: PostgresDiagnostics | undefined;
+  localSttControl?: LocalSttControlSnapshot | undefined;
+};
+
+export type LocalSttSuspendOutcome = "STOPPED" | "BUSY" | "RECONCILE_REQUIRED";
+
+export type LocalSttSuspendResult = {
+  outcome: LocalSttSuspendOutcome;
+  reason: "STOPPED" | "LEASE_ACTIVE" | "EXTERNAL_PROCESS" | "OWNERSHIP_UNCERTAIN";
+  activeVoiceLeases: number;
+  snapshot: SupervisorSnapshot;
 };
 
 export type PostgresMode = "private" | "external";
